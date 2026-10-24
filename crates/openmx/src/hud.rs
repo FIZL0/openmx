@@ -30,7 +30,7 @@
 use game_render::raster::Frame;
 use game_sim::bindings::Table;
 use game_sim::input::{AXIS_FULL, Axis, AxisRange, Control, Pad, PlaneCommand, PlaneInput};
-use game_sim::markers::{Pick, SLOTS};
+use game_sim::markers::{MAX_SLOTS, Pick};
 use game_sim::ride::Controls;
 use game_sim::rider::Rider;
 use game_sim::state::Phase;
@@ -537,7 +537,7 @@ fn outline(frame: &mut Frame, x: i32, y: i32, w: i32, h: i32, color: [u8; 3]) {
     fill(frame, x + w - 1, y, 1, h, color);
 }
 
-/// **The markers' slot display** (P88): the five slots and the other players, shown for a while
+/// **The markers' slot display** (P88): the slots and the other players, shown for a while
 /// whenever the selection or a slot changes, and for as long as a d-pad direction is held for the
 /// markers. Drawn whether or not the debug overlay above is on, under the original's HUD too: it is
 /// the markers' only feedback. Not under the `none` overlay, which asked for a bare picture (P117).
@@ -545,7 +545,7 @@ fn outline(frame: &mut Frame, x: i32, y: i32, w: i32, h: i32, color: [u8; 3]) {
 #[derive(Clone, Debug, Default)]
 pub struct MarkerBanner {
     /// What was shown last: the selection and which slots hold a marker.
-    seen: Option<(Pick, [bool; SLOTS])>,
+    seen: Option<(Pick, Vec<bool>)>,
     /// Until when it stays up.
     until: Option<Instant>,
     /// The seat's clears seen so far ([`MarkerBanner::cleared`]), and whether the spawn's Down has
@@ -562,12 +562,12 @@ impl MarkerBanner {
     /// selection or a slot changes (not on the first frame, which has nothing to change from) and
     /// while `held`, a d-pad direction down for the markers ([`game_sim::markers::held`]) — so a
     /// press that changes nothing (Up on an empty slot) still shows what it was on.
-    pub fn update(&mut self, now: Instant, pick: Pick, filled: [bool; SLOTS], held: bool) -> bool {
-        let seen = Some((pick, filled));
+    pub fn update(&mut self, now: Instant, pick: Pick, filled: &[bool], held: bool) -> bool {
+        let seen = Some((pick, filled.to_vec()));
         if (self.seen.is_some() && self.seen != seen) || held {
             self.until = Some(now + MarkerBanner::SHOWN);
         }
-        if self.seen.is_some_and(|(was, _)| was != pick) {
+        if self.seen.as_ref().is_some_and(|(was, _)| *was != pick) {
             self.said_cleared = false;
         }
         self.seen = seen;
@@ -591,11 +591,12 @@ impl MarkerBanner {
 }
 
 /// What the slot display says about the selection: the slot and whether it holds a marker, or the
-/// player by their name — `P1`, `P2`… for a seat with none.
-pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>]) -> String {
+/// player by their name — `P1`, `P2`… for a seat with none; on the + (P139) the slot it would add.
+pub fn marker_label(pick: Pick, filled: &[bool], names: &[Option<String>]) -> String {
     match pick {
         Pick::Spawn => "spawn".into(),
-        Pick::Slot(s) => format!("marker {} {}", s + 1, if filled[s] { "set" } else { "empty" }),
+        Pick::Slot(s) => format!("marker {} {}", s + 1, if filled.get(s).copied().unwrap_or(false) { "set" } else { "empty" }),
+        Pick::More => format!("marker {} new", filled.len() + 1),
         Pick::Player(p) => match names.get(p).and_then(|n| n.as_deref()).filter(|n| !n.trim().is_empty()) {
             Some(name) => format!("to {name}"),
             None => format!("to P{}", p + 1),
@@ -609,10 +610,11 @@ pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>])
 /// whether a direction is held for the markers and how far a Down or Up hold is. With the plane's set
 /// up the d-pad is read as the plane's markers read it (`markers::fly`): the shipped bindings. A trick
 /// button held with it changes nothing (P129).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkerBar {
     pub pick: Pick,
-    pub filled: [bool; SLOTS],
+    /// Each slot of the set up, whether it holds a marker: five, or more off the + (P139).
+    pub filled: Vec<bool>,
     pub held: bool,
     /// How far a Down or Up hold is, `0..=HOLD_MS` ([`game_sim::markers::holding_on`]): on the
     /// spawn Down's counts towards the clear's longer hold (P135).
@@ -636,7 +638,7 @@ impl MarkerBar {
         let table = if flying { &Table::SHIPPED } else { table };
         MarkerBar {
             pick: markers.pick_among(me, riding),
-            filled: std::array::from_fn(|s| markers.holds(s)),
+            filled: (0..markers.slots.len()).map(|s| markers.holds(s)).collect(),
             held: active && game_sim::markers::held(pad, table),
             holding: if active { game_sim::markers::holding_on(pad, table, markers.pick_among(me, riding)) } else { 0 },
             home: false,
@@ -660,7 +662,7 @@ impl MarkerBar {
     pub fn label(&self, names: &[Option<String>]) -> String {
         match self.pick {
             Pick::Spawn if self.cleared => "cleared".into(),
-            pick => marker_label(pick, self.filled, names),
+            pick => marker_label(pick, &self.filled, names),
         }
     }
 }
@@ -672,21 +674,21 @@ pub fn markers_shown_in(v: usize, online: bool) -> bool {
     !online || v == 0
 }
 
-/// The slot display, top centre of `frame`: the spawn's box (P135), set apart, then five boxes — solid in the slot's colour where a marker
+/// The slot display, top centre of `frame`: the spawn's box (P135), set apart, then a box a slot — solid in the slot's colour where a marker
 /// is (P94: the colour of its post and its radar mark), the selected one ringed — then a box for each
 /// other player in the ride, `P2`… by seat (`others`, P94: a seat nobody rides is not listed), and
 /// the label under them, and under that how far a Down or Up hold is towards firing (`holding`,
 /// [`game_sim::markers::holding`]: P88's bar, back with the hold in P106; Left and Right fire on the
 /// press and leave it empty).
 #[allow(dead_code)] // the tests', the shell draws at the settings' scale
-pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, others: &[usize], holding: u32) {
+pub fn draw_markers(frame: &mut Frame, pick: Pick, filled: &[bool], label: &str, others: &[usize], holding: u32) {
     draw_markers_scaled(frame, pick, filled, label, others, holding, 1.0);
 }
 
 /// [`draw_markers`] at the settings' HUD scale (V52), `hud_scale` times its own size, still top centre:
 /// its whole pixels a font pixel are the view's 224-line steps times the scale, rounded down, and
 /// never fewer than one.
-pub fn draw_markers_scaled(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS], label: &str, others: &[usize], holding: u32, hud_scale: f32) {
+pub fn draw_markers_scaled(frame: &mut Frame, pick: Pick, filled: &[bool], label: &str, others: &[usize], holding: u32, hud_scale: f32) {
     draw_markers_homed(frame, pick, filled, false, label, others, holding, hud_scale);
 }
 
@@ -694,11 +696,15 @@ pub fn draw_markers_scaled(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS],
 /// apart) showing whether it has a start to ride to (`home`, [`MarkerBar::home`]): a small square in
 /// the middle where it has, set apart from a placed marker's solid fill and from an empty slot's bare
 /// outline; a bare box where it has not.
+///
+/// With every slot set and fewer than [`MAX_SLOTS`] a box with a `+` follows the last (P139). A row
+/// of slots too wide for the frame shows a window of them that holds the selection, with an arrow
+/// on a side that has more off it; the spawn stays before it and the players after it.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_markers_homed(
     frame: &mut Frame,
     pick: Pick,
-    filled: [bool; SLOTS],
+    filled: &[bool],
     home: bool,
     label: &str,
     others: &[usize],
@@ -712,7 +718,26 @@ pub fn draw_markers_homed(
     let players: i32 = tags.iter().map(|t| gap + tag_w(t)).sum();
     // The spawn's box and the space after it, twice a slot's gap and a font pixel: set apart.
     let spawn_w = boxw + 2 * gap + scale;
-    let row = spawn_w + SLOTS as i32 * boxw + (SLOTS as i32 - 1) * gap + players;
+    // The slots and the + (P139), as many of them as fit across the frame.
+    let more = filled.len() < MAX_SLOTS && filled.iter().all(|&f| f);
+    let entries = filled.len() + more as usize;
+    let step = boxw + gap;
+    let room = frame.width as i32 - 2 * PAD * scale - 4 * scale;
+    let arrow = 3 * scale + gap;
+    let (first, shown) = if spawn_w + entries as i32 * step - gap + players <= room {
+        (0, entries)
+    } else {
+        let shown = (((room - spawn_w - players - 2 * arrow + gap) / step).max(1) as usize).min(entries);
+        let on = match pick {
+            Pick::Slot(s) => s,
+            Pick::Spawn => 0,
+            Pick::More | Pick::Player(_) => entries - 1,
+        };
+        (on.saturating_sub(shown / 2).min(entries - shown), shown)
+    };
+    let (before, after) = (first > 0, first + shown < entries);
+    let arrows = (before as i32 + after as i32) * arrow;
+    let row = spawn_w + shown as i32 * boxw + (shown as i32 - 1) * gap + arrows + players;
     let label_w = label.chars().count() as i32 * 4 * scale;
     let w = row.max(label_w) + 2 * PAD * scale;
     let h = boxw + 5 * scale + 2 * scale + 6 * scale + 2 * PAD * scale;
@@ -728,18 +753,40 @@ pub fn draw_markers_homed(
         outline(frame, sx - scale, by - scale, boxw + 2 * scale, boxw + 2 * scale, ink);
     }
     let bx = sx + spawn_w;
-    for (i, &set) in filled.iter().enumerate() {
-        let at = bx + i as i32 * (boxw + gap);
-        let ink = if pick == Pick::Slot(i) { PRESSED } else { DIM };
-        if set {
+    // A small triangle pointing `left` or right, its point at `tip`.
+    let triangle = |frame: &mut Frame, tip: i32, left: bool| {
+        let half = 3 * scale;
+        for i in 0..half {
+            let cx = if left { tip + i } else { tip - i };
+            fill(frame, cx, by + boxw / 2 - i, 1, 2 * i + 1, DIM);
+        }
+    };
+    let mut at = bx;
+    if before {
+        triangle(frame, at, true);
+        at += arrow;
+    }
+    for i in first..first + shown {
+        let ink = if pick == Pick::Slot(i) || (i == filled.len() && pick == Pick::More) { PRESSED } else { DIM };
+        if i == filled.len() {
+            // The +.
+            let (arm, t) = (boxw - 4 * scale, scale.max(1));
+            fill(frame, at + 2 * scale, by + (boxw - t) / 2, arm, t, ink);
+            fill(frame, at + (boxw - t) / 2, by + 2 * scale, t, arm, ink);
+        } else if filled[i] {
             fill(frame, at + scale, by + scale, boxw - 2 * scale, boxw - 2 * scale, slot_colour(i));
         }
         outline(frame, at, by, boxw, boxw, ink);
-        if pick == Pick::Slot(i) {
+        if ink == PRESSED {
             outline(frame, at - scale, by - scale, boxw + 2 * scale, boxw + 2 * scale, ink);
         }
+        at += step;
     }
-    let mut at = bx + SLOTS as i32 * (boxw + gap) - gap;
+    at -= gap;
+    if after {
+        triangle(frame, at + arrow - 1, false);
+        at += arrow;
+    }
     for (&p, tag) in others.iter().zip(&tags) {
         at += gap;
         let (tw, on) = (tag_w(tag), pick == Pick::Player(p));
@@ -1000,7 +1047,7 @@ mod tests {
         // The markers' display: whole pixels a font pixel, 3 for 2 at 150 % of a 448-line view.
         let banner = |scale: f32| {
             let mut frame = Frame::new(1280, 448, [20, 60, 120]);
-            draw_markers_scaled(&mut frame, Pick::Slot(1), [true, false, true, false, false], "marker 2 empty", &[1], 0, scale);
+            draw_markers_scaled(&mut frame, Pick::Slot(1), &[true, false, true, false, false], "marker 2 empty", &[1], 0, scale);
             changed(&frame)
         };
         let (a, b) = (banner(1.0), banner(1.5));
@@ -1008,7 +1055,7 @@ mod tests {
         assert_eq!((b.3 - b.1) * 2, (a.3 - a.1) * 3);
         assert_eq!(a.0 + a.2, b.0 + b.2, "both centred");
         let mut plain = Frame::new(1280, 448, [20, 60, 120]);
-        draw_markers(&mut plain, Pick::Slot(1), [true, false, true, false, false], "marker 2 empty", &[1], 0);
+        draw_markers(&mut plain, Pick::Slot(1), &[true, false, true, false, false], "marker 2 empty", &[1], 0);
         assert_eq!(changed(&plain), a, "100 % is the display as it was");
     }
 

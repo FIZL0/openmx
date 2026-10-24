@@ -23,7 +23,7 @@ use crate::overlay::{self, Activity, Blip, Gauges, Icon};
 use crate::vehicle::Machine;
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Frame, Texture};
-use game_sim::markers::{HOLD_MS, Pick, SLOTS};
+use game_sim::markers::{HOLD_MS, MAX_SLOTS, Pick};
 use game_sim::score::Score;
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, Instant};
@@ -112,7 +112,8 @@ pub struct Dot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Panel {
     pub pick: Pick,
-    pub filled: [bool; SLOTS],
+    /// Each slot, whether it holds a marker: five, or more off the + (P139).
+    pub filled: Vec<bool>,
     /// The spawn has a start to ride to for the machine up (P132, `hud::MarkerBar::home`). The spawn
     /// is its own entry before the slots (P135), drawn an `S` in a pale ring set apart from them; with
     /// no start it is drawn faint.
@@ -125,6 +126,13 @@ pub struct Panel {
     pub holding: u32,
     /// The machine whose set is up.
     pub machine: String,
+}
+
+impl Panel {
+    /// Whether the + follows the last slot (P139): every slot set and fewer than [`MAX_SLOTS`].
+    pub fn more(&self) -> bool {
+        self.filled.len() < MAX_SLOTS && self.filled.iter().all(|&f| f)
+    }
 }
 
 /// A challenge's start prompt: the activity, its name, what it asks, and how far a hold to start
@@ -345,7 +353,9 @@ pub fn panel_label(p: &Panel) -> (String, String) {
     match p.pick {
         Pick::Spawn if p.cleared => ("Cleared".into(), "every marker".into()),
         Pick::Spawn => ("Spawn".into(), String::new()),
-        Pick::Slot(s) => (format!("Marker {}", s + 1), if p.filled[s] { "set" } else { "empty" }.into()),
+        Pick::Slot(s) => (format!("Marker {}", s + 1), if p.filled.get(s).copied().unwrap_or(false) { "set" } else { "empty" }.into()),
+        // The + (P139): the slot a Down on it adds.
+        Pick::More => (format!("Marker {}", p.filled.len() + 1), "new".into()),
         Pick::Player(seat) => {
             let name = p.others.iter().find(|(o, _)| *o == seat).and_then(|(_, n)| n.clone()).filter(|n| !n.trim().is_empty());
             match name {
@@ -372,8 +382,17 @@ pub struct PanelDrawn {
     pub rect: [f32; 4],
     /// The spawn's middle, radius and whether it is selected (P135).
     pub spawn: ([f32; 2], f32, bool),
-    /// Each slot's middle, radius, whether it is selected and whether it holds a marker.
+    /// Each slot drawn — from [`PanelDrawn::first`] on — its middle, radius, whether it is selected
+    /// and whether it holds a marker.
     pub slots: Vec<([f32; 2], f32, bool, bool)>,
+    /// The first of the row's entries drawn (the slots, the +, the players, in order): past 0 when
+    /// the row has scrolled (P139), and while it is a slot, the first slot drawn.
+    pub first: usize,
+    /// The + after the last slot while it is there and in view: its middle, radius and whether it is
+    /// selected.
+    pub more: Option<([f32; 2], f32, bool)>,
+    /// Whether an arrow says there is more off the row's left, and off its right.
+    pub arrows: [bool; 2],
     /// Each other player's pill: their seat, whether it is selected, its box.
     pub players: Vec<(usize, bool, [f32; 4])>,
     pub label: String,
@@ -988,7 +1007,9 @@ fn top_right(pen: &mut Pen, shown: &Shown, tracker: &Tracker, now: Instant, draw
     pen.corner = Corner::TopRight;
     let (right, mut top) = TOP_RIGHT;
     if let Some(p) = &shown.markers {
-        let d = panel(pen, p, right, top);
+        // Never nearer than an EM to the score bar's right (P139), in this corner's layout x.
+        let least = overlay::LAYOUT.0 - pen.view[2] / pen.s + SCORE_BAR[0] + SCORE_BAR[2] + EM;
+        let d = panel(pen, p, right, top, least);
         top = d.rect_layout_bottom + 0.7 * EM;
         drawn.markers = Some(d.drawn);
     }
@@ -1027,7 +1048,13 @@ fn dpad(pen: &mut Pen, at: (f32, f32), d: f32, lit: [bool; 4]) {
 /// machine whose set it is, the five slots in their colours — filled where a marker is, the
 /// selected one grown and ringed — the other players' pills, the selection's label, the Down/Up
 /// hold's bar filling over [`HOLD_MS`] and the d-pad's legend.
-fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
+///
+/// P139: the + after the last slot while [`Panel::more`], and a row that grows leftward a slot at a
+/// time until its left edge would come past `least` (layout x, the pen's corner); past that it keeps
+/// its width and scrolls, a window of the row — the slots, the + and the players' pills after them —
+/// that always holds the selection, an arrow on a side with more off it; the spawn (P135) stays
+/// before it.
+fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32, least: f32) -> PanelOut {
     let (pad_x, pad_top, pad_bottom, gap) = (0.8 * EM, 0.55 * EM, 0.5 * EM, 0.45 * EM);
     let head = 0.72 * EM;
     let slot_d = 1.75 * 0.95 * EM;
@@ -1048,12 +1075,8 @@ fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
         }
         w
     };
-    // The spawn (P135), then a rule like the players', then the slots.
+    // The spawn (P135) and a rule like the players' after it, before the row and never scrolled.
     let spawn_w = slot_d + slot_gap + 0.5 * EM;
-    let mut line_w = spawn_w + SLOTS as f32 * slot_d + (SLOTS - 1) as f32 * slot_gap;
-    if !p.others.is_empty() {
-        line_w += slot_gap + 0.5 * EM + p.others.iter().map(|(s, n)| slot_gap + pill_w(*s, n)).sum::<f32>();
-    }
     let legend = if p.pick == Pick::Spawn {
         [("pick", [true, true, false, false]), ("long hold: clear all", [false, false, true, false]), ("hold: ride to", [false, false, false, true])]
     } else {
@@ -1062,7 +1085,48 @@ fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
     let legend_w: f32 = legend.iter().map(|(w, _)| dp + 0.3 * keys + Pen::measure(Face::Words, Weight::Bold, w, keys)).sum::<f32>() + 2.0 * 0.9 * keys;
     let label_w = Pen::measure(Face::Words, Weight::Heavy, &label, label_size) + 0.4 * label_size + Pen::measure(Face::Words, Weight::Bold, &note, small);
     let head_w = Pen::spaced_width(Weight::Bold, "MARKERS", head, 0.16 * head) + EM + Pen::spaced_width(Weight::Heavy, &p.machine.to_uppercase(), head, 0.16 * head);
-    let inner = line_w.max(legend_w).max(label_w).max(head_w);
+    // The row (P139): the slots, the +, then the players' pills, each its lead (the gap before it)
+    // and its width. All of it while the panel fits right of `least`; past that a window of it that
+    // holds the selection, grown from the selection outward as far as fits.
+    let n = p.filled.len();
+    let mut items: Vec<(Pick, f32, f32)> = (0..n).map(|s| (Pick::Slot(s), slot_gap, slot_d)).collect();
+    if p.more() {
+        items.push((Pick::More, slot_gap, slot_d));
+    }
+    // The first pill's lead holds the bar that sets the players apart.
+    let parted = 0.2 * EM + 0.1 * EM + 0.3 * EM;
+    for (i, (seat, name)) in p.others.iter().enumerate() {
+        items.push((Pick::Player(*seat), if i == 0 { parted + slot_gap } else { slot_gap }, pill_w(*seat, name)));
+    }
+    let arrow_w = 0.9 * EM;
+    let span = |a: usize, b: usize| items[a..b].iter().map(|i| i.1 + i.2).sum::<f32>() - items[a].1;
+    let rest = legend_w.max(label_w).max(head_w);
+    let room = ((right - least) - 2.0 * pad_x - spawn_w).max(rest - spawn_w);
+    let on = items.iter().position(|i| i.0 == p.pick).unwrap_or(0);
+    let (first, last) = if span(0, items.len()) <= room {
+        (0, items.len())
+    } else {
+        let fits = |a: usize, b: usize| span(a, b) + ((a > 0) as u8 + (b < items.len()) as u8) as f32 * arrow_w <= room;
+        let (mut a, mut b) = (on, on + 1);
+        loop {
+            let right_ok = b < items.len() && fits(a, b + 1);
+            if right_ok {
+                b += 1;
+            }
+            let left_ok = a > 0 && fits(a - 1, b);
+            if left_ok {
+                a -= 1;
+            }
+            if !right_ok && !left_ok {
+                break;
+            }
+        }
+        (a, b)
+    };
+    let arrows = [first > 0, last < items.len()];
+    let arrows_w = arrows.iter().filter(|&&a| a).count() as f32 * arrow_w;
+    let line_w = spawn_w + span(first, last) + arrows_w;
+    let inner = line_w.max(rest);
     let w = inner + 2.0 * pad_x;
     let rows = [head * 1.2, slot_d * 1.18, label_size * 1.3, 0.3 * EM, dp];
     let h = pad_top + rows.iter().sum::<f32>() + gap * (rows.len() - 1) as f32 + pad_bottom;
@@ -1077,8 +1141,16 @@ fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
     let mw = Pen::spaced_width(Weight::Heavy, &machine, head, 0.16 * head);
     pen.spaced(Weight::Heavy, &machine, (right - pad_x - mw, base), head, 0.16 * head, ink::SLANT, BONE);
     y += rows[0] + gap;
-    // The slots and the players.
+    // The slots, the + and the players.
     let mid = y + rows[1] / 2.0;
+    drawn.first = first;
+    drawn.arrows = arrows;
+    let chevron = |pen: &mut Pen, at: f32, left: bool| {
+        let (w, h) = (0.3 * EM, 0.55 * EM);
+        let (tip, back) = if left { (at + 0.25 * EM, at + 0.25 * EM + w) } else { (at + arrow_w - 0.25 * EM, at + arrow_w - 0.25 * EM - w) };
+        pen.bar((back, mid - h), (tip, mid), 0.07 * EM, 0.07 * EM, BONE);
+        pen.bar((tip, mid), (back, mid + h), 0.07 * EM, 0.07 * EM, BONE);
+    };
     let mut at = left;
     {
         let on = p.pick == Pick::Spawn;
@@ -1099,52 +1171,73 @@ fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
         pen.round([at, mid - 0.7 * EM, 0.1 * EM, 1.4 * EM], 0.05 * EM, [245, 240, 232, 64], [245, 240, 232, 64]);
         at += 0.5 * EM;
     }
-    for s in 0..SLOTS {
-        let colour = overlay::marker_colour(s);
-        let (on, set) = (p.pick == Pick::Slot(s), p.filled[s]);
-        let c = (at + slot_d / 2.0, mid);
-        let r = slot_d / 2.0 * if on { 1.18 } else { 1.0 };
-        if on {
-            pen.disc(c, r + 0.3 * EM, CHALK);
-            pen.disc(c, r + 0.14 * EM, INK);
-        }
-        if set {
-            pen.disc(c, r, colour);
-        } else {
-            pen.disc(c, r, shade(77));
-            pen.circle(c, r, 0.13 * EM, colour);
-        }
-        let n = (s + 1).to_string();
-        let size = 0.95 * EM * if on { 1.18 } else { 1.0 };
-        let nw = Pen::measure(Face::Words, Weight::Heavy, &n, size);
-        pen.text(Face::Words, Weight::Heavy, &n, (c.0 - nw / 2.0, mid + Pen::cap(Face::Words, size) / 2.0), size, 0.0, if set { INK } else { CHALK });
-        drawn.slots.push((pen.px(c), r * pen.s, on, set));
-        at += slot_d + slot_gap;
+    if arrows[0] {
+        chevron(pen, at, true);
+        at += arrow_w;
     }
-    if !p.others.is_empty() {
-        at += 0.2 * EM - slot_gap;
-        pen.round([at, mid - 0.7 * EM, 0.1 * EM, 1.4 * EM], 0.05 * EM, [245, 240, 232, 64], [245, 240, 232, 64]);
-        at += 0.3 * EM;
-        for (seat, name) in &p.others {
-            at += slot_gap;
-            let pw = pill_w(*seat, name);
-            let on = p.pick == Pick::Player(*seat);
-            let b = [at, mid - pill_h / 2.0, pw, pill_h];
-            if on {
-                pen.round(b, pill_h / 2.0, MAROON.0, MAROON.1);
+    for (k, &(item, lead, width)) in items.iter().enumerate().take(last).skip(first) {
+        if k > first {
+            at += lead;
+            if matches!(item, Pick::Player(_)) && lead > slot_gap {
+                let bar = at - lead + 0.2 * EM;
+                pen.round([bar, mid - 0.7 * EM, 0.1 * EM, 1.4 * EM], 0.05 * EM, [245, 240, 232, 64], [245, 240, 232, 64]);
             }
-            pen.ring(b, pill_h / 2.0, 0.1 * pill_size, if on { CHALK } else { [245, 240, 232, 89] });
-            let tag = format!("P{}", seat + 1);
-            let base = mid + Pen::cap(Face::Words, pill_size) / 2.0;
-            let mut tx = at + 0.6 * pill_size;
-            pen.text(Face::Words, Weight::Bold, &tag, (tx, base), pill_size, ink::SLANT, if on { BONE } else { DUST });
-            tx += Pen::measure(Face::Words, Weight::Bold, &tag, pill_size) + 0.3 * pill_size;
-            if let Some(n) = name.as_ref().filter(|n| !n.trim().is_empty()) {
-                pen.text(Face::Words, Weight::Bold, n, (tx, base), pill_size, ink::SLANT, if on { CHALK } else { BONE });
-            }
-            drawn.players.push((*seat, on, pen.rect(b)));
-            at += pw;
         }
+        let on = p.pick == item;
+        match item {
+            Pick::Slot(_) | Pick::More => {
+                let plus = item == Pick::More;
+                let s = if let Pick::Slot(s) = item { s } else { n };
+                let colour = if plus { CHALK } else { overlay::marker_colour(s) };
+                let set = !plus && p.filled[s];
+                let c = (at + slot_d / 2.0, mid);
+                let r = slot_d / 2.0 * if on { 1.18 } else { 1.0 };
+                if on {
+                    pen.disc(c, r + 0.3 * EM, CHALK);
+                    pen.disc(c, r + 0.14 * EM, INK);
+                }
+                if set {
+                    pen.disc(c, r, colour);
+                } else {
+                    pen.disc(c, r, shade(77));
+                    pen.circle(c, r, 0.13 * EM, if plus { [CHALK[0], CHALK[1], CHALK[2], 140] } else { colour });
+                }
+                if plus {
+                    let arm = 0.45 * r;
+                    pen.bar((c.0 - arm, mid), (c.0 + arm, mid), 0.09 * EM, 0.09 * EM, CHALK);
+                    pen.bar((c.0, mid - arm), (c.0, mid + arm), 0.09 * EM, 0.09 * EM, CHALK);
+                    drawn.more = Some((pen.px(c), r * pen.s, on));
+                } else {
+                    let label = (s + 1).to_string();
+                    let size = 0.95 * EM * if on { 1.18 } else { 1.0 };
+                    let nw = Pen::measure(Face::Words, Weight::Heavy, &label, size);
+                    pen.text(Face::Words, Weight::Heavy, &label, (c.0 - nw / 2.0, mid + Pen::cap(Face::Words, size) / 2.0), size, 0.0, if set { INK } else { CHALK });
+                    drawn.slots.push((pen.px(c), r * pen.s, on, set));
+                }
+            }
+            Pick::Player(seat) => {
+                let name = p.others.iter().find(|(o, _)| *o == seat).and_then(|(_, n)| n.as_ref());
+                let b = [at, mid - pill_h / 2.0, width, pill_h];
+                if on {
+                    pen.round(b, pill_h / 2.0, MAROON.0, MAROON.1);
+                }
+                pen.ring(b, pill_h / 2.0, 0.1 * pill_size, if on { CHALK } else { [245, 240, 232, 89] });
+                let tag = format!("P{}", seat + 1);
+                let base = mid + Pen::cap(Face::Words, pill_size) / 2.0;
+                let mut tx = at + 0.6 * pill_size;
+                pen.text(Face::Words, Weight::Bold, &tag, (tx, base), pill_size, ink::SLANT, if on { BONE } else { DUST });
+                tx += Pen::measure(Face::Words, Weight::Bold, &tag, pill_size) + 0.3 * pill_size;
+                if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+                    pen.text(Face::Words, Weight::Bold, n, (tx, base), pill_size, ink::SLANT, if on { CHALK } else { BONE });
+                }
+                drawn.players.push((seat, on, pen.rect(b)));
+            }
+            Pick::Spawn => unreachable!("the spawn is drawn before the row"),
+        }
+        at += width;
+    }
+    if arrows[1] {
+        chevron(pen, at, false);
     }
     y += rows[1] + gap;
     // The label.

@@ -25,6 +25,12 @@
 //! empties every slot on every machine ([`Markers::clear`], the pause's Clear Markers). A ride starts
 //! on slot 1, not on the spawn, so a first Down still puts a marker down.
 //!
+//! **More slots** (P139): a player starts with [`SLOTS`], and once every one of them is set the
+//! selection reaches a **+** past the last ([`Pick::More`]) while there are fewer than
+//! [`MAX_SLOTS`]. Down held on it appends a slot holding the marker put there and leaves the
+//! selection on it (the + moves one on); Up on it does nothing. A slot added is kept until the
+//! pause's Clear Markers ([`Markers::clear`]), which goes back to five.
+//!
 //! The d-pad is the original's in a ride (P73's table, commands 0–3): a digital stick (lean, steer,
 //! the rider fore and aft) and the direction half of a trick's gesture. In the shell the markers have
 //! it instead of the stick: the shell rides on [`Controls::stick_alone`], so the left stick alone
@@ -61,8 +67,11 @@ use crate::ride::{Controls, Ride};
 use crate::rider::Rider;
 use crate::Sim;
 
-/// How many markers each player has.
+/// How many markers each player starts with, on each machine.
 pub const SLOTS: usize = 5;
+
+/// How many a machine's set grows to at most, a slot at a time off the + (P139).
+pub const MAX_SLOTS: usize = 64;
 
 /// How long Down or Up is held before it fires, in the input layer's milliseconds (P106).
 pub const HOLD_MS: u32 = 200;
@@ -77,19 +86,25 @@ pub const SPAWN: u8 = u8::MAX;
 
 /// One player's markers: the slots and what is selected, of the machine that is up, and every other
 /// machine's set beside them (P107).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Markers {
-    /// The five slots of the machine that is up ([`Markers::on`]), each the machine as it was when
-    /// the marker was put down, or empty.
-    pub slots: [Option<Box<Mark>>; SLOTS],
-    /// The selection: `0..SLOTS` a slot, past it the other players in seat order ([`Markers::pick`]),
-    /// [`SPAWN`] the spawn.
+    /// The slots of the machine that is up ([`Markers::on`]), each the machine as it was when the
+    /// marker was put down, or empty: [`SLOTS`] of them, more once the + has added some (P139).
+    pub slots: Vec<Option<Box<Mark>>>,
+    /// The selection: below the slots' count a slot, then the + while it is there, past it the other
+    /// players in seat order ([`Markers::pick`]), [`SPAWN`] the spawn.
     pub at: u8,
     /// The machine [`Markers::slots`] and [`Markers::at`] are the set of.
     pub on: Vehicle,
     /// The other machines' sets, in [`Vehicle`] order: only ones that hold a marker or a selection
     /// off the first slot, so a session that never touched another machine's markers has none here.
     pub away: Vec<Set>,
+}
+
+impl Default for Markers {
+    fn default() -> Markers {
+        Markers { slots: vec![None; SLOTS], at: 0, on: Vehicle::default(), away: Vec::new() }
+    }
 }
 
 /// The machines a player keeps markers on (P107), each its own set. The bike is the first: a
@@ -180,18 +195,49 @@ impl Mark {
 }
 
 /// One machine's markers while another is up ([`Markers::away`]).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Set {
     pub on: Vehicle,
-    pub slots: [Option<Box<Mark>>; SLOTS],
+    pub slots: Vec<Option<Box<Mark>>>,
     pub at: u8,
+}
+
+impl Default for Set {
+    fn default() -> Set {
+        Set { on: Vehicle::default(), slots: vec![None; SLOTS], at: 0 }
+    }
 }
 
 impl Set {
     /// Nothing placed and the first slot selected.
     pub fn fresh(&self) -> bool {
-        self.at == 0 && self.slots.iter().all(Option::is_none)
+        self.at == 0 && unplaced(&self.slots)
     }
+}
+
+/// Five slots and none of them set: a set as it starts.
+fn unplaced(slots: &[Option<Box<Mark>>]) -> bool {
+    slots.len() <= SLOTS && slots.iter().all(Option::is_none)
+}
+
+/// Whether a set of `slots` shows the + (P139): every slot set and fewer than [`MAX_SLOTS`].
+pub fn has_more(slots: &[Option<Box<Mark>>]) -> bool {
+    slots.len() < MAX_SLOTS && slots.iter().all(Option::is_some)
+}
+
+/// Every slot of a set emptied and the five it started with left (P99's Clear Markers, P139's
+/// added slots gone), and its selection `at` kept on what it was on where that is still there:
+/// the spawn and a player stay, a slot past the five or the + goes to the first slot.
+fn clear_set(slots: &mut Vec<Option<Box<Mark>>>, at: &mut u8) {
+    let past = slots.len() + has_more(slots) as usize;
+    let a = *at as usize;
+    *at = match a {
+        a if a == SPAWN as usize => a,
+        a if a < SLOTS => a,
+        a if a < past => 0,
+        a => a - past + SLOTS,
+    } as u8;
+    *slots = vec![None; SLOTS];
 }
 
 /// What the selection is on.
@@ -201,6 +247,9 @@ pub enum Pick {
     Spawn,
     /// One of the player's own slots.
     Slot(usize),
+    /// The + past the last slot, while every slot is set and there are fewer than [`MAX_SLOTS`]
+    /// (P139): Down on it adds a slot.
+    More,
     /// Another player, by their seat (0 is the first).
     Player(usize),
 }
@@ -210,12 +259,12 @@ pub enum Pick {
 pub enum Did {
     /// Left or Right moved the selection.
     Stepped(Pick),
-    /// Down put a marker in this slot.
+    /// Down put a marker in this slot — on the + (P139), the slot it added.
     Placed(usize),
     /// Up rode back to this.
     Teleported(Pick),
-    /// Down or Up fired and did nothing: Up on an empty slot, Down on a player, or Down with the rider
-    /// off the bike.
+    /// Down or Up fired and did nothing: Up on an empty slot or on the +, Down on a player, or Down
+    /// with the rider off the bike.
     Refused(Pick),
     /// Down held [`CLEAR_MS`] on the spawn emptied every slot on every machine (P135).
     Cleared,
@@ -364,7 +413,12 @@ impl Markers {
     /// Nothing placed and the first slot selected, on every machine: a session that has not touched
     /// the markers.
     pub fn fresh(&self) -> bool {
-        self.at == 0 && self.slots.iter().all(Option::is_none) && self.away.is_empty()
+        self.at == 0 && unplaced(&self.slots) && self.away.is_empty()
+    }
+
+    /// Whether the + shows past the slots of the machine up (P139, [`has_more`]).
+    pub fn more(&self) -> bool {
+        has_more(&self.slots)
     }
 
     /// **The machine up changes** (P107): its own set out of [`Markers::away`] into
@@ -388,11 +442,11 @@ impl Markers {
     }
 
     /// `on`'s slots, whether it is up or away; `None` for a machine with no set.
-    pub fn slots_of(&self, on: Vehicle) -> Option<&[Option<Box<Mark>>; SLOTS]> {
+    pub fn slots_of(&self, on: Vehicle) -> Option<&[Option<Box<Mark>>]> {
         if on == self.on {
             return Some(&self.slots);
         }
-        self.away.iter().find(|s| s.on == on).map(|s| &s.slots)
+        self.away.iter().find(|s| s.on == on).map(|s| s.slots.as_slice())
     }
 
     /// Whether `on`'s set holds any marker.
@@ -424,8 +478,8 @@ impl Markers {
         }
     }
 
-    /// How many places the selection has with `players` in the session, every one of them riding:
-    /// the spawn, the slots, then everybody else.
+    /// How many places a fresh set's selection has with `players` in the session, every one of them
+    /// riding: the spawn, the five slots, then everybody else.
     pub fn places(players: usize) -> usize {
         1 + SLOTS + players.saturating_sub(1)
     }
@@ -446,16 +500,21 @@ impl Markers {
 
     /// What the selection is on, for the player in seat `me` with `riding` saying who is in the ride
     /// (its length the seat count): past the slots, the other riders in seat order
-    /// ([`Markers::others`]). A selection past the end (somebody left) is the first slot.
+    /// ([`Markers::others`]), after the + while it is there (P139). A selection past the end
+    /// (somebody left) is the first slot.
     pub fn pick_among(&self, me: usize, riding: &[bool]) -> Pick {
         if self.at == SPAWN {
             return Pick::Spawn;
         }
-        let at = self.at as usize;
-        if at < SLOTS {
+        let (at, n) = (self.at as usize, self.slots.len());
+        if at < n {
             return Pick::Slot(at);
         }
-        match Markers::others(me, riding.len(), riding).get(at - SLOTS) {
+        let more = self.more() as usize;
+        if at < n + more {
+            return Pick::More;
+        }
+        match Markers::others(me, riding.len(), riding).get(at - n - more) {
             Some(&p) => Pick::Player(p),
             None => Pick::Slot(0),
         }
@@ -577,6 +636,11 @@ pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], _h
                 m.slots[s] = Some(Box::new(Mark::Bike(sim.rider.ride.clone())));
                 Did::Placed(s)
             }
+            // The + (P139): a slot more, holding the bike, and the selection on it where the + was.
+            Pick::More if sim.rider.state.wreck.is_none() && sim.rider.crash.is_none() => {
+                m.slots.push(Some(Box::new(Mark::Bike(sim.rider.ride.clone()))));
+                Did::Placed(m.slots.len() - 1)
+            }
             _ => Did::Refused(pick),
         });
     }
@@ -596,6 +660,7 @@ pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], _h
                 }
                 None => Did::Refused(pick),
             },
+            Pick::More => Did::Refused(pick),
             Pick::Spawn => unreachable!("the spawn answered above"),
         });
     }
@@ -621,7 +686,7 @@ fn spawn(m: &mut Markers, did: Option<Did>, up: bool, clear: bool, home: impl Fn
 fn select(m: &mut Markers, [left, right, ..]: [bool; 4], me: usize, seats: usize, riding: &[bool]) -> (Option<Did>, Pick) {
     let seats = seats.max(1);
     let riding: Vec<bool> = (0..seats).map(|s| riding.get(s).copied().unwrap_or(true)).collect();
-    let places = 1 + SLOTS + Markers::others(me, seats, &riding).len();
+    let places = 1 + m.slots.len() + m.more() as usize + Markers::others(me, seats, &riding).len();
     let mut did = None;
     if left != right {
         m.step(if left { -1 } else { 1 }, places);
@@ -682,6 +747,10 @@ pub fn fly(
                 markers.slots[s] = Some(Box::new(Mark::Plane(flight.clone())));
                 Did::Placed(s)
             }
+            Pick::More if flight.crash.reason == 0 => {
+                markers.slots.push(Some(Box::new(Mark::Plane(flight.clone()))));
+                Did::Placed(markers.slots.len() - 1)
+            }
             _ => Did::Refused(pick),
         });
     }
@@ -695,7 +764,7 @@ pub fn fly(
                 _ => Did::Refused(pick),
             },
             Pick::Player(p) if p < spots.len() => Did::Teleported(pick),
-            Pick::Player(_) => Did::Refused(pick),
+            Pick::Player(_) | Pick::More => Did::Refused(pick),
             Pick::Spawn => unreachable!("the spawn answered above"),
         });
     }
@@ -730,16 +799,29 @@ impl State for Markers {
     }
 }
 
-fn walk_slots(w: &mut Walk<'_>, slots: &[Option<Box<Mark>>; SLOTS]) {
-    for (i, slot) in slots.iter().enumerate() {
-        w.group(SLOT_NAMES[i], |w| {
-            w.bool("set", slot.is_some());
-            match slot.as_deref() {
-                Some(Mark::Bike(ride)) => w.field("ride", ride),
-                Some(Mark::Plane(f)) => w.field("plane", f),
-                None => {}
-            }
-        });
+/// The first five slots under P88's names, so a set of five walks as it did before there could be
+/// more; the slots the + added (P139) after them as a list, its length first.
+fn walk_slots(w: &mut Walk<'_>, slots: &[Option<Box<Mark>>]) {
+    for (i, slot) in slots.iter().take(SLOTS).enumerate() {
+        w.group(SLOT_NAMES[i], |w| SlotWalk(slot).walk(w));
+    }
+    if slots.len() > SLOTS {
+        let more: Vec<SlotWalk<'_>> = slots[SLOTS..].iter().map(SlotWalk).collect();
+        w.list("more", &more);
+    }
+}
+
+/// One slot as the hash walks it: whether it is set, then its machine.
+struct SlotWalk<'a>(&'a Option<Box<Mark>>);
+
+impl State for SlotWalk<'_> {
+    fn walk(&self, w: &mut Walk<'_>) {
+        w.bool("set", self.0.is_some());
+        match self.0.as_deref() {
+            Some(Mark::Bike(ride)) => w.field("ride", ride),
+            Some(Mark::Plane(f)) => w.field("plane", f),
+            None => {}
+        }
     }
 }
 
@@ -759,19 +841,20 @@ const FILE_MAGIC: [u8; 8] = *b"OMXmarks";
 /// codec is caught too: the slots are [`crate::snapshot::encode_slots`]'s (a plane's
 /// [`crate::snapshot::encode_flights`]'s), which carry the snapshot's format and must read back to
 /// the last byte. Version 2 (P107) names the machine after the name; P99's version 1, which has no
-/// machine, is still read, as the bike's.
-pub const FILE_VERSION: u32 = 2;
+/// machine, is still read, as the bike's. Version 3 (P139) counts the slots, five or more; the
+/// five-slot files of 1 and 2 are still read.
+pub const FILE_VERSION: u32 = 3;
 
 /// What a bundle of saved-markers files begins with ([`Markers::to_files`]).
 const BUNDLE_MAGIC: [u8; 8] = *b"OMXmarkS";
 
 impl Markers {
-    /// Every slot emptied (P99, the pause's Clear Markers) on every machine, the selections left
-    /// where they are.
+    /// Every slot emptied (P99, the pause's Clear Markers) on every machine and back to five (P139),
+    /// the selections left on what they were on where it is still there ([`clear_set`]).
     pub fn clear(&mut self) {
-        self.slots = Default::default();
+        clear_set(&mut self.slots, &mut self.at);
         for set in &mut self.away {
-            set.slots = Default::default();
+            clear_set(&mut set.slots, &mut set.at);
         }
         self.away.retain(|s| !s.fresh());
     }
@@ -792,15 +875,15 @@ impl Markers {
         out.extend_from_slice(&(name.len() as u32).to_le_bytes());
         out.extend_from_slice(name.as_bytes());
         out.push(on.byte());
-        let empty = Default::default();
+        let empty = vec![None; SLOTS];
         let slots = self.slots_of(on).unwrap_or(&empty);
         match on {
             Vehicle::Bike => {
-                let rides = slots.each_ref().map(|m| m.as_deref().and_then(Mark::ride).map(|r| Box::new(r.clone())));
+                let rides: Vec<_> = slots.iter().map(|m| m.as_deref().and_then(Mark::ride).map(|r| Box::new(r.clone()))).collect();
                 out.extend_from_slice(&crate::snapshot::encode_slots(&rides));
             }
             Vehicle::Plane => {
-                let flights = slots.each_ref().map(|m| m.as_deref().and_then(Mark::flight).map(|f| Box::new(f.clone())));
+                let flights: Vec<_> = slots.iter().map(|m| m.as_deref().and_then(Mark::flight).map(|f| Box::new(f.clone()))).collect();
                 out.extend_from_slice(&crate::snapshot::encode_flights(&flights));
             }
         }
@@ -838,7 +921,7 @@ impl Markers {
         }
         let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
         let version = word(FILE_MAGIC.len());
-        if version != FILE_VERSION && version != 1 {
+        if !(1..=FILE_VERSION).contains(&version) {
             return Err(format!("markers format {version}, this build reads {FILE_VERSION}"));
         }
         let n = word(FILE_MAGIC.len() + 4) as usize;
@@ -851,10 +934,13 @@ impl Markers {
             end += 1;
             Vehicle::of_byte(b).ok_or_else(|| format!("markers of a machine {b} this build has not"))?
         };
-        let slots = match on {
-            Vehicle::Bike => crate::snapshot::decode_slots(&bytes[end..])?.map(|r| r.map(|r| Box::new(Mark::Bike(*r)))),
-            Vehicle::Plane => crate::snapshot::decode_flights(&bytes[end..])?.map(|f| f.map(|f| Box::new(Mark::Plane(*f)))),
+        // Before version 3 a file is five slots, uncounted.
+        let five = version < 3;
+        let slots: Vec<Option<Box<Mark>>> = match on {
+            Vehicle::Bike => crate::snapshot::decode_slots_of(&bytes[end..], five)?.into_iter().map(|r| r.map(|r| Box::new(Mark::Bike(*r)))).collect(),
+            Vehicle::Plane => crate::snapshot::decode_flights_of(&bytes[end..], five)?.into_iter().map(|f| f.map(|f| Box::new(Mark::Plane(*f)))).collect(),
         };
+        check_count(slots.len())?;
         let mut markers = Markers::default();
         markers.put(Set { on, slots, at: 0 });
         Ok((named, markers))
@@ -909,6 +995,11 @@ impl Markers {
             }
         }
     }
+}
+
+/// Whether a set of `n` slots is one a session can make: [`SLOTS`] to [`MAX_SLOTS`].
+pub fn check_count(n: usize) -> Result<(), String> {
+    if (SLOTS..=MAX_SLOTS).contains(&n) { Ok(()) } else { Err(format!("a marker set of {n} slots")) }
 }
 
 /// A bundle's files, all of them or an error.

@@ -112,8 +112,7 @@ pub fn signature(markers: &Markers) -> u64 {
 /// a slot of that machine placed or cleared.
 pub fn signatures(markers: &Markers) -> [u64; Vehicle::ALL.len()] {
     Vehicle::ALL.map(|on| {
-        let empty = Default::default();
-        markers.slots_of(on).unwrap_or(&empty).iter().fold(0xcbf2_9ce4_8422_2325, |h, slot| {
+        markers.slots_of(on).unwrap_or(&[]).iter().fold(0xcbf2_9ce4_8422_2325, |h, slot| {
             let one = slot.as_ref().map_or(0, |mark| hash::of(&**mark));
             (h ^ one).wrapping_mul(PRIME)
         })

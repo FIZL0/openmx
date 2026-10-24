@@ -103,8 +103,10 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
     out
 }
 
-/// What begins [`encode`]'s markers section: a word no length of the players' list can be.
-const MARKERS: u64 = u64::from_le_bytes(*b"P88marks");
+/// What begins [`encode`]'s markers section: a word no length of the players' list can be. P139's
+/// word since its slots are counted (five, or more off the +): a state of P88's five-slot layout,
+/// tagged `P88marks`, is no tag here and is refused as a corrupt players' list, never misread.
+const MARKERS: u64 = u64::from_le_bytes(*b"P139mrks");
 
 /// [`encode`]'s bytes into this machine's state. The constants stay this machine's own: the session
 /// agreed them before the ride began (the bike, the stunt set, the track), and a peer's are not this
@@ -129,6 +131,8 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         markers.slots = Wire::take(&mut r)?;
         markers.on = Wire::take(&mut r)?;
         markers.away = Wire::take(&mut r)?;
+        let sets = std::iter::once(&markers.slots).chain(markers.away.iter().map(|s| &s.slots));
+        sets.map(Vec::len).try_for_each(crate::markers::check_count)?;
     }
     // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
     let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone()));
@@ -843,47 +847,55 @@ wire!(crate::markers::Set { on, slots, at });
 // The session markers' slots on their own (P99).
 // ---------------------------------------------------------------------------------------------------
 
-/// A player's five marker slots as bytes, for the saved-markers file ([`crate::markers::Markers::to_file`]):
-/// [`MAGIC`] first, then each slot's [`crate::ride::Ride`] in [`encode`]'s codec, so a slot reads back
-/// as the bike it was, bit for bit.
-pub fn encode_slots(slots: &[Option<Box<crate::ride::Ride>>; crate::markers::SLOTS]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 * 1024);
-    out.extend_from_slice(&MAGIC);
-    slots.put(&mut out);
-    out
+/// A player's marker slots as bytes, for the saved-markers file ([`crate::markers::Markers::to_file`]):
+/// [`MAGIC`] first, then how many (P139: five, or more off the +) and each slot's
+/// [`crate::ride::Ride`] in [`encode`]'s codec, so a slot reads back as the bike it was, bit for bit.
+pub fn encode_slots(slots: &[Option<Box<crate::ride::Ride>>]) -> Vec<u8> {
+    encode_list(slots)
 }
 
 /// [`encode_slots`]'s bytes back, all of them or an error: another build's codec ([`MAGIC`]), a
 /// file cut short, or bytes left over — which is what a field added to the ride makes of an old file.
-pub fn decode_slots(bytes: &[u8]) -> Result<[Option<Box<crate::ride::Ride>>; crate::markers::SLOTS], String> {
-    let mut r = Reader { bytes, at: 0 };
-    if r.bytes(4)? != MAGIC {
-        return Err("not a ride state (or another build's)".into());
-    }
-    let slots = Wire::take(&mut r)?;
-    if r.at != bytes.len() {
-        return Err(format!("{} bytes left over after the slots", bytes.len() - r.at));
-    }
-    Ok(slots)
+pub fn decode_slots(bytes: &[u8]) -> Result<Vec<Option<Box<crate::ride::Ride>>>, String> {
+    decode_slots_of(bytes, false)
 }
 
-/// A plane's five marker slots as bytes (P107), as [`encode_slots`] has a bike's: [`MAGIC`] first,
-/// then each slot's flight in [`encode`]'s codec — the ray probe and bike mesh left out, as a
+/// [`decode_slots`], or with `five` the uncounted five slots a saved file wrote before P139.
+pub fn decode_slots_of(bytes: &[u8], five: bool) -> Result<Vec<Option<Box<crate::ride::Ride>>>, String> {
+    decode_list(bytes, five)
+}
+
+/// A plane's marker slots as bytes (P107), as [`encode_slots`] has a bike's: [`MAGIC`] first, then
+/// how many and each slot's flight in [`encode`]'s codec — the ray probe and bike mesh left out, as a
 /// snapshot leaves them, for the reader to put the plane's own back.
-pub fn encode_flights(slots: &[Option<Box<crate::flight::Flight>>; crate::markers::SLOTS]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 * 1024);
-    out.extend_from_slice(&MAGIC);
-    slots.put(&mut out);
-    out
+pub fn encode_flights(slots: &[Option<Box<crate::flight::Flight>>]) -> Vec<u8> {
+    encode_list(slots)
 }
 
 /// [`encode_flights`]'s bytes back, all of them or an error, as [`decode_slots`].
-pub fn decode_flights(bytes: &[u8]) -> Result<[Option<Box<crate::flight::Flight>>; crate::markers::SLOTS], String> {
+pub fn decode_flights(bytes: &[u8]) -> Result<Vec<Option<Box<crate::flight::Flight>>>, String> {
+    decode_flights_of(bytes, false)
+}
+
+/// [`decode_flights`], or with `five` the uncounted five slots of a file before P139.
+pub fn decode_flights_of(bytes: &[u8], five: bool) -> Result<Vec<Option<Box<crate::flight::Flight>>>, String> {
+    decode_list(bytes, five)
+}
+
+fn encode_list<T: Wire>(slots: &[T]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 * 1024);
+    out.extend_from_slice(&MAGIC);
+    slots.len().put(&mut out);
+    slots.iter().for_each(|s| s.put(&mut out));
+    out
+}
+
+fn decode_list<T: Wire>(bytes: &[u8], five: bool) -> Result<Vec<T>, String> {
     let mut r = Reader { bytes, at: 0 };
     if r.bytes(4)? != MAGIC {
         return Err("not a ride state (or another build's)".into());
     }
-    let slots = Wire::take(&mut r)?;
+    let slots: Vec<T> = if five { <[T; crate::markers::SLOTS]>::take(&mut r)?.into() } else { Wire::take(&mut r)? };
     if r.at != bytes.len() {
         return Err(format!("{} bytes left over after the slots", bytes.len() - r.at));
     }

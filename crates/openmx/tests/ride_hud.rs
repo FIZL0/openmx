@@ -50,7 +50,7 @@ fn gauges(speedometer: Speedometer) -> Gauges {
 }
 
 fn panel(pick: Pick, others: Vec<(usize, Option<String>)>, holding: u32) -> Panel {
-    Panel { pick, filled: [true, false, true, false, false], home: false, cleared: false, others, holding, machine: "Bike".into() }
+    Panel { pick, filled: vec![true, false, true, false, false], home: false, cleared: false, others, holding, machine: "Bike".into() }
 }
 
 fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Option<Panel>) -> Shown<'a> {
@@ -357,6 +357,7 @@ fn the_marker_menu_follows_every_slot_and_player_and_its_hold_fills() {
             Pick::Slot(s) => format!("Marker {} {}", s + 1, if [0, 2].contains(&s) { "set" } else { "empty" }),
             Pick::Player(1) => "to Ann P2".into(),
             Pick::Player(s) => format!("to P{}", s + 1),
+            Pick::More => unreachable!("no + with two slots empty"),
         };
         assert_eq!(p.label, want);
         // The selected slot is grown.
@@ -640,4 +641,69 @@ fn a_repeated_trick_reads_with_its_count() {
     let end = at + Duration::from_millis(300);
     t.update(end, &card(&[], false, 0.0), name);
     assert_eq!(t.popup(end).unwrap().names, ["Backflip x2"]);
+}
+
+/// More markers (P139): with every slot set the row ends in a +; at 64 slots, at 1080p, 720p and
+/// in split views, the panel stops an EM short of the score bar and scrolls, the selected slot, +
+/// or player always drawn inside it and an arrow on each side with more off it.
+#[test]
+fn sixty_four_markers_scroll_short_of_the_score_bar_with_the_selection_in_view() {
+    use game_sim::markers::MAX_SLOTS;
+    let g = gauges(Speedometer::Digital);
+    let t = Tracker::default();
+    let now = Instant::now();
+    let others: Vec<(usize, Option<String>)> = vec![(1, Some("Ann".into())), (2, None), (3, None)];
+    let views = [[0.0, 0.0, 1920.0, 1080.0], [0.0, 0.0, 1280.0, 720.0], [960.0, 0.0, 960.0, 1080.0], [0.0, 540.0, 960.0, 540.0], [480.0, 0.0, 480.0, 540.0]];
+    for view in views {
+        for n in [SLOTS, 6, 40, MAX_SLOTS - 1, MAX_SLOTS] {
+            let more = n < MAX_SLOTS;
+            let mut picks: Vec<Pick> = [0, 1, n / 2, n - 2, n - 1].into_iter().map(Pick::Slot).collect();
+            picks.extend(more.then_some(Pick::More));
+            picks.extend([Pick::Player(1), Pick::Player(3)]);
+            for pick in picks {
+                let p = Panel { pick, filled: vec![true; n], home: false, cleared: false, others: others.clone(), holding: 0, machine: "Bike".into() };
+                let mut out = Vec::new();
+                let d = ride_hud::sprites(&mut out, 0, view, &shown(&g, &[], &[], Some(p)), &t, now);
+                let m = d.markers.unwrap();
+                let at = format!("{view:?} {n} slots, {pick:?}");
+                let gap = m.rect[0] - (d.score_bar[0] + d.score_bar[2]);
+                assert!(gap >= 448.0 / 45.0 * d.scale - 0.01, "{at}: the panel {:?} is {gap} px from the score bar", m.rect);
+                assert!(m.rect[0] + m.rect[2] <= view[0] + view[2] + 0.5, "{at}: past the view {:?}", m.rect);
+                let inside = |l: f32, r: f32| l >= m.rect[0] - 0.5 && r <= m.rect[0] + m.rect[2] + 0.5;
+                match pick {
+                    Pick::Slot(s) => {
+                        let i = s.checked_sub(m.first).filter(|&i| i < m.slots.len()).unwrap_or_else(|| panic!("{at}: slot not drawn, first {}", m.first));
+                        let (c, r, sel, set) = m.slots[i];
+                        assert!(sel && set, "{at}");
+                        assert!(inside(c[0] - r, c[0] + r), "{at}: slot at {c:?} r {r} outside {:?}", m.rect);
+                        assert_eq!(m.slots.iter().filter(|q| q.2).count(), 1, "{at}");
+                    }
+                    Pick::More => {
+                        let (c, r, sel) = m.more.unwrap_or_else(|| panic!("{at}: no + drawn"));
+                        assert!(sel && inside(c[0] - r, c[0] + r), "{at}: + at {c:?} outside {:?}", m.rect);
+                        assert_eq!(m.label, format!("Marker {} new", n + 1), "{at}");
+                    }
+                    Pick::Player(s) => {
+                        let q = m.players.iter().find(|q| q.0 == s).unwrap_or_else(|| panic!("{at}: pill not drawn"));
+                        assert!(q.1 && inside(q.2[0], q.2[0] + q.2[2]), "{at}: pill {:?} outside {:?}", q.2, m.rect);
+                    }
+                    Pick::Spawn => unreachable!("no spawn among the picks"),
+                }
+                if !more {
+                    assert!(m.more.is_none(), "{at}: a + at 64");
+                }
+                if n == SLOTS {
+                    assert!(m.first == 0 && m.slots.len() == SLOTS && m.arrows == [false; 2], "{at}: five slots scrolled");
+                }
+                assert_eq!(m.arrows[0], m.first > 0, "{at}: left arrow");
+                let shown_all = m.first + m.slots.len() == n && (!more || m.more.is_some()) && m.players.len() == others.len();
+                if n == MAX_SLOTS {
+                    assert!(m.arrows[0] || m.arrows[1], "{at}: 64 slots and no arrow");
+                }
+                if m.first == 0 && shown_all {
+                    assert_eq!(m.arrows, [false; 2], "{at}");
+                }
+            }
+        }
+    }
 }

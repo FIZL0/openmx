@@ -510,7 +510,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // derived from the map on every machine, left out of the walk like the bike's numbers.
     // 11360 since P137: the plane's g limit and its roll's floor (Biplane max G), walked under
     // `plane` only when the limit is on.
+    // 11344 since P139: the five marker slots became a growing list (a 24-byte Vec for five boxed
+    // slots' 40), its slots past five walked as `more` only when there are any.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11360, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11344, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
