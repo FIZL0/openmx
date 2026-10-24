@@ -1,6 +1,7 @@
 //! P124: the session markers' bar on the plane, drawn by the shell itself. The shell starts free06 in
-//! the biplane (`--vehicle biplane`), headless, on a hand-written tape — the plane parked, Left
-//! pressed once (the plane's slot 5), then Down held to place it — and is shot from a fixed pose
+//! the biplane (`--vehicle biplane`), headless, on a hand-written tape — the plane parked, Right
+//! pressed once (the plane's slot 2; since P135 Left from slot 1 is the spawn), then Down held to
+//! place it — and is shot from a fixed pose
 //! over the start line looking up into the sky, so nothing the plane does reaches the picture but
 //! the overlay. The shot is taken while Down is still held, after the placement has fired. Under the
 //! original's HUD the bar is drawn over the plane's view; with the overlay off (P117) not a pixel of
@@ -47,26 +48,26 @@ fn scratch(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// Ticks parked before the Left press, and between it and the placing hold.
+/// Ticks parked before the Right press, and between it and the placing hold.
 const WAIT: usize = 20;
 /// Ticks the Down hold lasts: past `markers::HOLD_MS`'s 200 ms, six 30 Hz ticks.
 const HOLD: usize = 12;
 /// The tick shot: the Down hold's tenth, after the placement and with Down still down.
 const SHOT: usize = 2 * WAIT + 1 + 9;
 
-/// The plane parked, nothing but the d-pad: Left for one tick and then Down held for [`HOLD`] ticks
+/// The plane parked, nothing but the d-pad: Right for one tick and then Down held for [`HOLD`] ticks
 /// when `markers`, or nothing at all.
 fn tape(markers: bool) -> String {
     let frames = SHOT + 4;
     let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape p124\n");
-    // Byte 2 holds the d-pad (Left 0x80, Down 0x40, active low), bytes 9 and 11 their pressures.
-    let report = |dpad: u8, left: u8, down: u8| {
-        format!("0079{:02x}ff7f7f7f7f00{left:02x}00{down:02x}0000{}", 0xff ^ dpad, "00".repeat(18))
+    // Byte 2 holds the d-pad (Right 0x20, Down 0x40, active low), bytes 8 and 11 their pressures.
+    let report = |dpad: u8, right: u8, down: u8| {
+        format!("0079{:02x}ff7f7f7f7f{right:02x}0000{down:02x}0000{}", 0xff ^ dpad, "00".repeat(18))
     };
     for t in 0..frames {
         let r = match t {
             _ if !markers => report(0, 0, 0),
-            t if t == WAIT => report(0x80, 0xff, 0),
+            t if t == WAIT => report(0x20, 0xff, 0),
             t if (2 * WAIT + 1..2 * WAIT + 1 + HOLD).contains(&t) => report(0x40, 0, 0xff),
             _ => report(0, 0, 0),
         };
@@ -147,9 +148,9 @@ fn flying_the_plane_the_shell_draws_its_bar() {
             assert_eq!((w, h), (640, 448), "{renderer}, {overlay}");
             (said, rgb)
         };
-        // The plane's markers: Left onto its slot 5, Down puts the plane's marker in it.
+        // The plane's markers: Right onto its slot 2, Down puts the plane's marker in it.
         let (said, original_marked) = shot(&with, "original");
-        assert_eq!(marker_lines(&said), ["marker: slot 5", "marker: placed in slot 5"], "{renderer}:\n{said}");
+        assert_eq!(marker_lines(&said), ["marker: slot 2", "marker: placed in slot 2"], "{renderer}:\n{said}");
         let (said, original_plain) = shot(&without, "original");
         assert!(marker_lines(&said).is_empty(), "{renderer}:\n{said}");
         // Under the original's HUD the bar is there over the plane's view, top and centre.
@@ -158,7 +159,7 @@ fn flying_the_plane_the_shell_draws_its_bar() {
 
         // With the overlay off (P117) the plane's markers draw no bar either, and still work.
         let (said, none_marked) = shot(&with, "none");
-        assert_eq!(marker_lines(&said), ["marker: slot 5", "marker: placed in slot 5"], "{renderer}:\n{said}");
+        assert_eq!(marker_lines(&said), ["marker: slot 2", "marker: placed in slot 2"], "{renderer}:\n{said}");
         let (_, none_plain) = shot(&without, "none");
         let n = apart(&none_marked, &none_plain, WHOLE);
         assert_eq!(n, 0, "{renderer}: with the overlay off the plane's markers drew over {n} pixels");

@@ -15,9 +15,15 @@
 //! - **Up** rides back to the selected slot's marker, or to the selected player where they are —
 //!   at their speed and spin while they ride (P111, [`Spot::motion`]), [`CLEARANCE`] under their
 //!   plane at its velocity while they fly it (P141, [`Spot::flight`]), stopped where they will be
-//!   put back while they are down; slot 1 with nothing put there rides to where the machine started
-//!   this map (P132, [`Home`]), at rest;
-//! - **Left** and **Right** step the selection, through the slots and then the other players, round.
+//!   put back while they are down;
+//! - **Left** and **Right** step the selection, through the spawn, the slots and then the other
+//!   players, round.
+//!
+//! **The spawn** (P135, [`Pick::Spawn`]) is an entry of its own before the five slots, always there:
+//! Up on it rides back to where the machine started this map ([`Home`], P132's), at rest; Down on it
+//! places nothing, and held [`CLEAR_MS`] — longer than a slot's hold, against a brushed clear — it
+//! empties every slot on every machine ([`Markers::clear`], the pause's Clear Markers). A ride starts
+//! on slot 1, not on the spawn, so a first Down still puts a marker down.
 //!
 //! The d-pad is the original's in a ride (P73's table, commands 0–3): a digital stick (lean, steer,
 //! the rider fore and aft) and the direction half of a trick's gesture. In the shell the markers have
@@ -61,6 +67,14 @@ pub const SLOTS: usize = 5;
 /// How long Down or Up is held before it fires, in the input layer's milliseconds (P106).
 pub const HOLD_MS: u32 = 200;
 
+/// How long Down is held on the spawn before it clears the player's markers (P135): its own hold,
+/// longer than [`HOLD_MS`], so a clear is never a brushed d-pad.
+pub const CLEAR_MS: u32 = 500;
+
+/// [`Markers::at`] while the selection is on the spawn (P135): past any slot or player, so every
+/// selection a session had before the spawn was an entry reads as it did.
+pub const SPAWN: u8 = u8::MAX;
+
 /// One player's markers: the slots and what is selected, of the machine that is up, and every other
 /// machine's set beside them (P107).
 #[derive(Clone, Debug, Default)]
@@ -68,7 +82,8 @@ pub struct Markers {
     /// The five slots of the machine that is up ([`Markers::on`]), each the machine as it was when
     /// the marker was put down, or empty.
     pub slots: [Option<Box<Mark>>; SLOTS],
-    /// The selection: `0..SLOTS` a slot, past it the other players in seat order ([`Markers::pick`]).
+    /// The selection: `0..SLOTS` a slot, past it the other players in seat order ([`Markers::pick`]),
+    /// [`SPAWN`] the spawn.
     pub at: u8,
     /// The machine [`Markers::slots`] and [`Markers::at`] are the set of.
     pub on: Vehicle,
@@ -182,6 +197,8 @@ impl Set {
 /// What the selection is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pick {
+    /// The machine's spawn (P135): the first entry, before the slots.
+    Spawn,
     /// One of the player's own slots.
     Slot(usize),
     /// Another player, by their seat (0 is the first).
@@ -200,6 +217,8 @@ pub enum Did {
     /// Down or Up fired and did nothing: Up on an empty slot, Down on a player, or Down with the rider
     /// off the bike.
     Refused(Pick),
+    /// Down held [`CLEAR_MS`] on the spawn emptied every slot on every machine (P135).
+    Cleared,
 }
 
 /// Where a teleport onto a player puts the bike: their bike's origin, its forward and its up, and
@@ -238,13 +257,13 @@ pub const BESIDE: f32 = 40.0;
 /// teleported to them lands beside them, as it did before P141, rather than appearing over them.
 pub const REST_SPEED: f32 = 2.0;
 
-/// **Where each seat's machines start on this map** (P132): marker slot 1's spot while the player
-/// has put nothing there, so an Up on it rides back to the start at rest. The bike's is the map's
+/// **Where each seat's machines start on this map** (P132): the spawn's spot ([`Pick::Spawn`], P135;
+/// P132's slot 1 while nothing was put there), so an Up on it rides back to the start at rest. The bike's is the map's
 /// start line (a world's spawn, a mod map's: whatever the place's reader gave) or the seat's place
 /// beside it; the plane's the seat's own bay off `machine.txt` ([`Flight::reset`]'s origin and
 /// facing). A constant of the ride like the bike's `.phy` ([`Sim::home`]): every machine derives
 /// the same from the same map, so it is never hashed, encoded or sent, and a resync keeps this
-/// machine's. Empty — a fixture's, a tape's harness — slot 1 is empty as it always was.
+/// machine's. Empty — a fixture's, a tape's harness — an Up on the spawn does nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Home {
     /// Each seat's bike start, in seat order, still. A seat past the end starts where the first
@@ -265,7 +284,7 @@ impl Home {
         self.planes.get(seat).copied()
     }
 
-    /// Whether seat `seat` has a start for machine `on`: slot 1 is its spawn while nothing is there.
+    /// Whether seat `seat` has a start for machine `on`, for the spawn to ride to.
     pub fn has(&self, on: Vehicle, seat: usize) -> bool {
         match on {
             Vehicle::Bike => self.bike(seat).is_some(),
@@ -279,9 +298,6 @@ impl Home {
         Home { bikes: self.bikes.first().cloned().into_iter().collect(), planes }
     }
 }
-
-/// The slot an empty selection rides to the start from (P132): the first.
-pub const HOME_SLOT: usize = 0;
 
 /// A riding player's bike, for [`Spot::motion`]: shared, as every peer's spot of them is the same.
 #[derive(Clone, Debug)]
@@ -409,9 +425,9 @@ impl Markers {
     }
 
     /// How many places the selection has with `players` in the session, every one of them riding:
-    /// the slots, then everybody else.
+    /// the spawn, the slots, then everybody else.
     pub fn places(players: usize) -> usize {
-        SLOTS + players.saturating_sub(1)
+        1 + SLOTS + players.saturating_sub(1)
     }
 
     /// What the selection is on, for the player in seat `me` of `players`, every one of them riding:
@@ -432,6 +448,9 @@ impl Markers {
     /// (its length the seat count): past the slots, the other riders in seat order
     /// ([`Markers::others`]). A selection past the end (somebody left) is the first slot.
     pub fn pick_among(&self, me: usize, riding: &[bool]) -> Pick {
+        if self.at == SPAWN {
+            return Pick::Spawn;
+        }
         let at = self.at as usize;
         if at < SLOTS {
             return Pick::Slot(at);
@@ -447,12 +466,20 @@ impl Markers {
         self.slots.get(slot).is_some_and(Option::is_some)
     }
 
-    /// Left or Right through `places` places, round; a selection already past them starts from the
-    /// first slot.
+    /// Left or Right through `places` places — the spawn first, then the slots and the players —
+    /// round; a selection already past them starts from the first slot.
     fn step(&mut self, by: isize, places: usize) {
         let n = places as isize;
-        let at = if (self.at as isize) < n { self.at as isize } else { 0 };
-        self.at = (at + by).rem_euclid(n) as u8;
+        // The places in the bar's order: the spawn is 0, slot `s` is `s + 1`.
+        let order = match self.at {
+            SPAWN => 0,
+            at if (at as isize) < n - 1 => at as isize + 1,
+            _ => 1,
+        };
+        self.at = match (order + by).rem_euclid(n) {
+            0 => SPAWN,
+            o => (o - 1) as u8,
+        };
     }
 }
 
@@ -461,13 +488,21 @@ impl Markers {
 /// timer crosses [`HOLD_MS`]. A trick button held with it changes nothing (P129): the d-pad is no
 /// part of a trick's gesture in the shell ([`Controls::stick_alone`]).
 pub fn fired(pad: &crate::input::Pad, table: &crate::bindings::Table) -> [bool; 4] {
-    let crossed = |c| {
-        table.control(pad.index as usize, c).is_some_and(|control| {
-            let s = pad.control(control);
-            s.is_held() && s.prev_held_ms < HOLD_MS && s.held_ms >= HOLD_MS
-        })
-    };
+    let crossed = |c| crossed(pad, table, c, HOLD_MS);
     [table.pressed(pad, Command::LEFT), table.pressed(pad, Command::RIGHT), crossed(Command::UP), crossed(Command::DOWN)]
+}
+
+/// Whether `command`'s held timer crosses `ms` this tick.
+fn crossed(pad: &crate::input::Pad, table: &crate::bindings::Table, command: Command, ms: u32) -> bool {
+    table.control(pad.index as usize, command).is_some_and(|control| {
+        let s = pad.control(control);
+        s.is_held() && s.prev_held_ms < ms && s.held_ms >= ms
+    })
+}
+
+/// Whether Down's held timer crosses [`CLEAR_MS`] this tick: the spawn's clear (P135).
+pub fn clear_fired(pad: &crate::input::Pad, table: &crate::bindings::Table) -> bool {
+    crossed(pad, table, Command::DOWN, CLEAR_MS)
 }
 
 /// Whether a d-pad direction is down for the markers, for a display that stays up while it is.
@@ -489,6 +524,21 @@ pub fn holding(pad: &crate::input::Pad, table: &crate::bindings::Table) -> u32 {
         .unwrap_or(0)
 }
 
+/// [`holding`] for the bar with the selection on `pick`, still `0..=HOLD_MS`: on the spawn Down's
+/// hold is the clear's (P135), so it counts towards [`CLEAR_MS`] and fills the bar only when it
+/// clears — scaled down to the bar's [`HOLD_MS`] — while Up there fills as on a slot.
+pub fn holding_on(pad: &crate::input::Pad, table: &crate::bindings::Table, pick: Pick) -> u32 {
+    if pick != Pick::Spawn {
+        return holding(pad, table);
+    }
+    let held = |c| {
+        table.control(pad.index as usize, c).map(|control| pad.control(control)).filter(|s| s.is_held()).map_or(0, |s| s.held_ms)
+    };
+    let up = held(Command::UP).min(HOLD_MS);
+    let down = held(Command::DOWN).min(CLEAR_MS) * HOLD_MS / CLEAR_MS;
+    up.max(down)
+}
+
 const DIRECTIONS: [Command; 4] = [Command::LEFT, Command::RIGHT, Command::UP, Command::DOWN];
 
 /// **One tick of a player's markers**, after the tick's step: the player in seat `me` of
@@ -508,9 +558,19 @@ pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], _h
     }
     sim.markers.up(Vehicle::Bike);
     let fired = fired(sim.input.pad(0), sim.table());
+    let clear = clear_fired(sim.input.pad(0), sim.table());
     let m = &mut sim.markers;
     let (mut did, pick) = select(m, fired, me, spots.len(), riding);
     let [_, _, up, down] = fired;
+    if pick == Pick::Spawn {
+        return spawn(m, did, up, clear, || match sim.home.bike(me) {
+            Some(start) => {
+                sim.rider.teleport_to(Spot::still(start.at, start.forward, start.up));
+                true
+            }
+            None => false,
+        });
+    }
     if down {
         did = Some(match pick {
             Pick::Slot(s) if sim.rider.state.wreck.is_none() && sim.rider.crash.is_none() => {
@@ -527,14 +587,6 @@ pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], _h
                     sim.rider.teleport(ride.clone());
                     Did::Teleported(pick)
                 }
-                // Slot 1 with nothing put there is the start (P132): there at rest, as the ride began.
-                None if s == HOME_SLOT => match sim.home.bike(me) {
-                    Some(start) => {
-                        sim.rider.teleport_to(Spot::still(start.at, start.forward, start.up));
-                        Did::Teleported(pick)
-                    }
-                    None => Did::Refused(pick),
-                },
                 _ => Did::Refused(pick),
             },
             Pick::Player(p) => match spots.get(p) {
@@ -544,7 +596,22 @@ pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], _h
                 }
                 None => Did::Refused(pick),
             },
+            Pick::Spawn => unreachable!("the spawn answered above"),
         });
+    }
+    did
+}
+
+/// The d-pad on the spawn (P135), either machine's: Up rides home (`home`, which says whether the
+/// seat has a start to ride to), Down's [`HOLD_MS`] does nothing, and `clear`, Down crossing
+/// [`CLEAR_MS`], empties every slot on every machine. `did` is Left and Right's step onto it.
+fn spawn(m: &mut Markers, did: Option<Did>, up: bool, clear: bool, home: impl FnOnce() -> bool) -> Option<Did> {
+    if clear {
+        m.clear();
+        return Some(Did::Cleared);
+    }
+    if up {
+        return Some(if home() { Did::Teleported(Pick::Spawn) } else { Did::Refused(Pick::Spawn) });
     }
     did
 }
@@ -554,7 +621,7 @@ pub fn frame_among(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], _h
 fn select(m: &mut Markers, [left, right, ..]: [bool; 4], me: usize, seats: usize, riding: &[bool]) -> (Option<Did>, Pick) {
     let seats = seats.max(1);
     let riding: Vec<bool> = (0..seats).map(|s| riding.get(s).copied().unwrap_or(true)).collect();
-    let places = SLOTS + Markers::others(me, seats, &riding).len();
+    let places = 1 + SLOTS + Markers::others(me, seats, &riding).len();
     let mut did = None;
     if left != right {
         m.step(if left { -1 } else { 1 }, places);
@@ -580,9 +647,10 @@ fn select(m: &mut Markers, [left, right, ..]: [bool; 4], me: usize, seats: usize
 ///   over a moving rider at their velocity ([`Flight::launch`]), and landed on the ground by a
 ///   rider at rest ([`Spot::at_rest`]) as the switch onto the plane is.
 ///
-/// Slot 1 with nothing put there is the plane's bay (P132, [`Home::plane`] of `home`): Up stands the
-/// plane there at rest, unwrecked and its throttle shut ([`Flight::reset`], on `acos`), as an
-/// online seat starts in it.
+/// The spawn ([`Pick::Spawn`], P135) is the plane's bay ([`Home::plane`] of `home`, P132's): Up stands
+/// the plane there at rest, unwrecked and its throttle shut ([`Flight::reset`], on `acos`), as an
+/// online seat starts in it; Down held [`CLEAR_MS`] there clears every machine's markers, as on the
+/// bike.
 #[allow(clippy::too_many_arguments)]
 pub fn fly(
     markers: &mut Markers,
@@ -596,8 +664,18 @@ pub fn fly(
 ) -> Option<Did> {
     markers.up(Vehicle::Plane);
     let fired = fired(pad, &crate::bindings::Table::SHIPPED);
+    let clear = clear_fired(pad, &crate::bindings::Table::SHIPPED);
     let (mut did, pick) = select(markers, fired, me, spots.len(), riding);
     let [_, _, up, down] = fired;
+    if pick == Pick::Spawn {
+        return spawn(markers, did, up, clear, || match home.plane(me) {
+            Some((at, facing)) => {
+                flight.reset(at, facing, acos);
+                true
+            }
+            None => false,
+        });
+    }
     if down {
         did = Some(match pick {
             Pick::Slot(s) if flight.crash.reason == 0 => {
@@ -614,17 +692,11 @@ pub fn fly(
                     flight.put_back(kept);
                     Did::Teleported(pick)
                 }
-                None if s == HOME_SLOT => match home.plane(me) {
-                    Some((at, facing)) => {
-                        flight.reset(at, facing, acos);
-                        Did::Teleported(pick)
-                    }
-                    None => Did::Refused(pick),
-                },
                 _ => Did::Refused(pick),
             },
             Pick::Player(p) if p < spots.len() => Did::Teleported(pick),
             Pick::Player(_) => Did::Refused(pick),
+            Pick::Spawn => unreachable!("the spawn answered above"),
         });
     }
     did
