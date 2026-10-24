@@ -1,0 +1,10 @@
+# S68 flat: from the state's standstill, gas and brake held together (the original's reverse below
+# speed 5), and once it is rolling backwards the stick hard right with both still held. Wall-clock, at
+# a quarter speed (4 ms here is 1 ms ridden).
+sleep 4000
+down square
+down cross
+sleep 12000
+stick l 1 0
+sleep 28000
+release

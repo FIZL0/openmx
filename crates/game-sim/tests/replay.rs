@@ -6417,6 +6417,9 @@ impl SaveState {
             wh.frame[r] = self.vf(a + 0x8d0 + 16 * r as u32)?;
         }
         wh.side_per_load = self.float(a + 0x234)?;
+        // The fork's axis, raked on the front (S58: left straight up, the turn's front parted
+        // sideways at the first tick it steered).
+        wh.steer_axis = self.vf(a + 0x8c0)?;
         wh.slip = game_sim::tire::Slip {
             spinning: self.flag(a + 0xe0)?,
             locked: self.flag(a + 0xe4)?,
@@ -6524,6 +6527,140 @@ impl SaveState {
     }
 }
 
+/// S68's captures (`watch/s68-backwards.toml`, the journal's `capture/`): the recording's save state
+/// at a quarter of the speed, the rider backing up (gas and brake held at a stop) and turning at full
+/// lock — on free09's flat, and over the edge of the steep slope after a turn at its top.
+const S68_BACKWARDS: [&str; 2] = ["flat", "slope"];
+
+/// How long each backwards ride agrees with the original's chassis (roll and pitch within
+/// [`S68_ANGLE`], speed within [`S68_SPEED`]): the flat one on every tick, the slope one until its
+/// forward turn at the top parts (the pitch of the turn, before it ever backs up).
+const S68_AGREES_THROUGH: [usize; 2] = [330, 89];
+const S68_ANGLE: f32 = 0.03;
+const S68_SPEED: f32 = 1.0;
+
+/// The most either game's bike rolls while it backs up in these captures (the original's 0.21 rad on
+/// the slope, after its jump off the edge), with the room the slope's parted path needs.
+const S68_UPRIGHT: f32 = 0.35;
+
+/// The original never wrecks a bike backing up and turning hard into the ground: nothing in its wreck
+/// test reads the direction, its ground roll command is nought below speed 0, so the reversing bike
+/// stays upright, and both captures run out with no wreck reason. The port rides the same pads from
+/// the same save state to the same end. The port has no reverse from the pad yet (P72/P77), so the
+/// levers and the reverse are the captured ones; the stick is the pad's.
+#[test]
+fn the_captured_backwards_turns_never_wreck() {
+    let Some((_, acc)) = acceptance_capture() else {
+        println!("skipped: no acceptance capture");
+        return;
+    };
+    let Some(st) = SaveState::open().filter(|s| s.leads(&acc)) else {
+        println!("skipped: no save state for the acceptance run");
+        return;
+    };
+    let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+    let seed = acceptance_fixture(&acc).map(|f| f.seed).unwrap_or(0);
+    let dir = private_dir("capture").join("s68-backwards");
+    let mut ran = 0;
+    for (case, through) in S68_BACKWARDS.into_iter().zip(S68_AGREES_THROUGH) {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{case}.csv"))) else {
+            println!("skipped: no s68-backwards/{case}.csv");
+            continue;
+        };
+        let cap = Capture::parse(&text).unwrap();
+        let ticks = quarter_ticks(&cap, saved).unwrap();
+        let tape = PadTape::from_capture(&cap).unwrap();
+        let f = |r: usize, c: &str| -> f32 { cell(&cap, r, column(&cap, c).unwrap()).parse().unwrap() };
+        for r in 0..cap.rows.len() {
+            assert_eq!(f(r, "wreck_reason"), 0.0, "{case}: the original wrecks on row {r}");
+        }
+        // A row at tick t carries the pad and the levers the port reads on tick t + 1 (S58's PAD_LEADS),
+        // and the chassis the port leaves on tick t.
+        let last = *ticks.last().unwrap() as usize;
+        let mut inputs = vec![None; last + 2];
+        let mut levers = vec![None; last + 2];
+        let mut states = vec![None; last + 2];
+        for (r, &t) in ticks.iter().enumerate() {
+            if r > 0 {
+                inputs[t as usize + 1] = Some(tape.frames[r - 1].input());
+            }
+            levers[t as usize + 1] = Some(r);
+            states[t as usize] = Some(r);
+        }
+        let mut now = inputs.iter().flatten().next().copied().unwrap();
+        let inputs: Vec<Input> = inputs.into_iter().map(|i| { now = i.unwrap_or(now); now }).collect();
+        let Some(agreed) = in_the_world_of(&acc, |world, _named, bike| {
+            let mut sim = acceptance_start(&acc, seed, bike).unwrap();
+            let ride = &mut sim.rider.ride;
+            st.seed_chassis(ride).expect("the chassis");
+            st.seed_wheels(ride).expect("both wheels");
+            st.seed_balance(ride).expect("the balance");
+            st.seed_engine_outputs(ride).expect("the engine");
+            st.seed_air(ride).expect("the air state");
+            let dt = F(game_sim::tick::DeltaTime::CAP_30);
+            let mut lever = levers.iter().flatten().next().copied().unwrap();
+            let mut agreed = None;
+            let mut rolled = (0.0f32, 0.0f32);
+            for k in 0..last {
+                let tick = k + 1;
+                lever = levers[tick].unwrap_or(lever);
+                let mut c = sim.poll(dt, &Sim::reports(inputs[k]));
+                c.gas = F(f(lever, "gas_lever"));
+                c.brake = F(f(lever, "brake_lever"));
+                c.reverse = F(f(lever, "reverse"));
+                c.clutch = F(f(lever, "clutch_lever"));
+                let frame = sim.step(dt, &c, world);
+                assert!(frame.wreck.is_none(), "{case}: the port wrecks on tick {tick} ({:?})", frame.wreck);
+                // A tick the recorder missed has nothing to compare. A row is read after its tick or
+                // before the next one's frame, so the tick's chassis is its own row's or the next's.
+                let Some(row) = states[tick] else { continue };
+                let r = &sim.rider.ride;
+                let e = r.chassis.euler;
+                let v = r.chassis.vel;
+                let speed = (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+                let port = [e.z(), e.x(), speed.copysign(r.chassis.local_vel.z())];
+                // Speeds are the chassis' lengths (`ch_speed`), signed by the way the bike goes:
+                // `bike_speed` is read part way through the tick and is only its sign here.
+                let orig = |row: usize| {
+                    [f(row, "ch_roll"), f(row, "ch_pitch"), f(row, "ch_speed").copysign(f(row, "bike_speed"))]
+                };
+                let off = |o: [f32; 3]| {
+                    [(port[0] - o[0]).abs() / S68_ANGLE, (port[1] - o[1]).abs() / S68_ANGLE, (port[2] - o[2]).abs() / S68_SPEED]
+                        .into_iter()
+                        .fold(0.0, f32::max)
+                };
+                let near = [Some(row), states.get(tick + 1).copied().flatten()]
+                    .into_iter()
+                    .flatten()
+                    .map(|r| off(orig(r)))
+                    .fold(f32::INFINITY, f32::min);
+                if f(lever, "reverse") != 0.0 {
+                    rolled = (rolled.0.max(port[0].abs()), rolled.1.max(f(row, "ch_roll").abs()));
+                }
+                if agreed.is_none() && near > 1.0 {
+                    let o = orig(row);
+                    println!(
+                        "{case}: parts on tick {tick}: roll {:.4} vs {:.4}, pitch {:.4} vs {:.4}, speed {:.3} vs {:.3}",
+                        port[0], o[0], port[1], o[1], port[2], o[2]
+                    );
+                    agreed = Some(k);
+                }
+            }
+            println!("{case}: backing up, the port rolls at most {:.3}, the original {:.3}", rolled.0, rolled.1);
+            assert!(rolled.0 < S68_UPRIGHT, "{case}: the reversing bike rolls {} in the port", rolled.0);
+            assert!(rolled.1 < S68_UPRIGHT, "{case}: the reversing bike rolls {} in the original", rolled.1);
+            agreed.unwrap_or(last)
+        }) else {
+            println!("skipped: no disc for free09");
+            continue;
+        };
+        println!("{case}: no wreck in {last} ticks, agrees through tick {agreed}");
+        assert!(agreed >= through, "{case} agrees through tick {agreed}, S68_AGREES_THROUGH says {through}");
+        ran += 1;
+    }
+    println!("{ran} of {} backwards captures ridden", S68_BACKWARDS.len());
+}
+
 /// `watch/s8-start.toml`'s capture: the recording's own save state run on with an idle pad, which is
 /// the acceptance run's first 28 ticks (the human first touches the pad at frame 2803), with the
 /// chassis and the wheels beside the drawn bike.
@@ -6626,7 +6763,13 @@ fn quarter_ticks(cap: &Capture, saved: u64) -> Result<Vec<u64>, String> {
     let counter = column(cap, "frame_counter")?;
     let vsync = column(cap, "frame").ok();
     let n = cap.rows.len();
-    let same = |r: usize| (0..cap.columns.len()).filter(|&c| c != counter && Some(c) != vsync).all(|c| cell(cap, r, c) == cell(cap, r + 1, c));
+    // The pad's stamps are the IOP's, which counts its video fields whatever the game's tick did.
+    let stamp = |c: usize| cap.columns[c].starts_with("stamp_");
+    let same = |r: usize| {
+        (0..cap.columns.len())
+            .filter(|&c| c != counter && Some(c) != vsync && !stamp(c))
+            .all(|c| cell(cap, r, c) == cell(cap, r + 1, c))
+    };
     (0..n.saturating_sub(1))
         .map(|r| {
             let c: u64 = cell(cap, r, counter).parse().map_err(|_| "frame_counter is not a number".to_string())?;
