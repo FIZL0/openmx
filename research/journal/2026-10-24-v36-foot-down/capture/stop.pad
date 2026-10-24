@@ -1,0 +1,11 @@
+# stop.pad: V36. Throttle away from first_recording's start, brake to a stand, stand, throttle again.
+down cross
+sleep 4000
+release
+down square
+sleep 5000
+release
+sleep 4000
+down cross
+sleep 4000
+release
