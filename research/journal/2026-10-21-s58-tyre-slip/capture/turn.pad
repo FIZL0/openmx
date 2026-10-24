@@ -1,0 +1,8 @@
+# S58 turn: gas, and a moment later the stick hard right with the gas held, so the bike turns off the
+# start's line before the jump ahead of it. Wall-clock, at a quarter speed (4 ms here is 1 ms ridden).
+sleep 4000
+down cross
+sleep 2000
+stick l 1 0
+sleep 16000
+release

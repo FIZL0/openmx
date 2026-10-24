@@ -220,8 +220,9 @@ impl Controls {
 ///
 /// The original's input layer walks a table of bindings and moves each command towards what the pad
 /// says at a rate the `.phy` gives (`[Joystick]`'s eight `…RateLimit` keys), so a stab at the throttle
-/// is not a step. **The levers' walk is this module's** — the binding table is the front end's and is
-/// not ported — but the rates are the disc's, and for the levers a rate of zero is read as "no limit"
+/// is not a step. **The levers' walk is the original's limiter's** (S58): the gas and the brake rise
+/// at their rates and drop to the lever at once, the clutch is held back both ways. The binding table
+/// is the front end's and is not ported, and for the levers a rate of zero is read as "no limit"
 /// rather than as "never move", because that is what a `.phy` with the key missing has to mean.
 ///
 /// **The stick's is the original's** (P30), and it is three things, not one:
@@ -260,14 +261,17 @@ pub struct Held {
 impl Held {
     /// One frame of the rate limit.
     pub fn step(&mut self, c: &Controls, j: &phy::Joystick, dt: F) {
-        self.gas = toward(self.gas, c.gas, j.gas_rate_limit, dt);
-        self.brake = toward(self.brake, c.brake, j.brake_rate_limit, dt);
+        // The gas and the brake only *rise* at their rates: let go, either is the lever at once
+        // (S58). That is the original's limiter, and why a released throttle hands the engine its
+        // own braking on the same tick rather than two ticks later.
+        self.gas = rise(self.gas, c.gas, j.gas_rate_limit, dt);
+        self.brake = rise(self.brake, c.brake, j.brake_rate_limit, dt);
         // One lever or two. S17 proved that `bike+0x650` is the front wheel's brake and `+0x654` the
-        // rear's, and left open who writes them; a shell with one brake button writes both, so the
-        // general brake is folded into each and a wheel's own lever can only ask for more.
-        self.front_brake =
-            toward(self.front_brake, c.front_brake.max(c.brake), j.brake_rate_limit, dt);
-        self.rear_brake = toward(self.rear_brake, c.rear_brake.max(c.brake), j.brake_rate_limit, dt);
+        // rear's, and left open who writes them; the original's limiter walks `+0x650` and copies it
+        // to `+0x654`. A shell with one brake button writes both, so the general brake is folded into
+        // each and a wheel's own lever can only ask for more.
+        self.front_brake = rise(self.front_brake, c.front_brake.max(c.brake), j.brake_rate_limit, dt);
+        self.rear_brake = rise(self.rear_brake, c.rear_brake.max(c.brake), j.brake_rate_limit, dt);
         // The clutch has a rate each way: in fast, out slow, which is how a launch is held.
         let clutch_rate =
             if self.clutch < c.clutch { j.clutch_in_rate_limit } else { j.clutch_out_rate_limit };
@@ -390,17 +394,21 @@ impl State for Slot {
     }
 }
 
-/// One command towards another at a rate. A rate of zero is no limit at all.
+/// One command towards another at a rate, both ways: the original's [`limit`] step, `rate · dt` at
+/// most. A rate of zero is no limit at all.
 fn toward(now: F, want: F, rate: F, dt: F) -> F {
     if rate <= F::ZERO {
         return want;
     }
-    let step = rate * dt;
-    let gap = want - now;
-    if gap > step {
-        now + step
-    } else if gap < -step {
-        now - step
+    limit(now, want, rate * dt)
+}
+
+/// A lever the original's limiter only holds back on the way up (`bike_input_limiter`, the gas and
+/// the brake): below the rider's lever it walks up at `rate` ([`limit`]), and at or above it, it *is*
+/// the lever. A rate of zero is no limit at all, as in [`toward`].
+fn rise(now: F, want: F, rate: F, dt: F) -> F {
+    if now < want {
+        toward(now, want, rate, dt)
     } else {
         want
     }
@@ -1477,9 +1485,24 @@ fn answer(m: &Mat4, call: wheel::Call, hinge: &mut Option<(Vf, Vf)>, synced: &mu
 /// The two run before the ported call rather than from inside it, because the steering hinge the
 /// ported half integrates reads the torque the spin step puts on it; the only difference is where
 /// the `Call` list is built.
-fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, other_contact: bool,
-                   mvc: &mut mv::Chassis, m: &Mat4, curve: &CurveTable, dt: F) -> Vec<wheel::Call> {
+///
+/// `other_load` is the other wheel's spring force, which a wheel the ground step marked
+/// [`mv::Wheel::other_tire_down`] (the rear, in the air with the front down) borrows: its load point
+/// becomes the end of its own probe in the world, its load the other's times
+/// [`phy::Tire::other_tire_normal_load_scale`], and its contact velocity is measured again there —
+/// so a braked front landing alone still has the rear's tire law pushing on the chassis (S58, read
+/// off `wheel_spin_integrate`'s `+0xc4` branch and seen in the original's brake capture). The
+/// branch's two contact-distributor words (`+0x1f0`/`+0x1f4`) are not carried: nothing here moves
+/// the ground.
+fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, other_contact: bool, other_load: F,
+                   cofg_world: Vf, mvc: &mut mv::Chassis, m: &Mat4, curve: &CurveTable, dt: F)
+                   -> Vec<wheel::Call> {
     wh.to_wheel();
+    if wh.mv.other_tire_down && !wh.w.contact {
+        wh.w.load_point = wh.w.probe_end_world;
+        wh.w.spring_force = tire.other_tire_normal_load_scale * other_load;
+        wh.w.contact_velocity = contact_velocity(mvc.vel, mvc.world_ang_vel, wh.w.load_point, cofg_world);
+    }
     let surf = surface(tire, wh.surface);
     let mut wc = wheel::Chassis {
         force: mvc.force,
@@ -1562,7 +1585,10 @@ impl Ride {
         // is **not** one of them: the original re-reads the accumulator and re-rotates it every
         // substep, so the substep loop below fills it in rather than this.
         let rot = out.mat3(Frame::Chassis);
-        let forward_speed = F(chassis.local_vel.z());
+        // The bike's speed is `+0x438`: the last air state's velocity, the touching wheel's view of the
+        // chassis — a substep behind the chassis' own measure while a wheel is down, which is what
+        // S58's turn showed in the steering's speed fade (S58).
+        let forward_speed = F(air.contact_vel.z());
         let reverse_force = chassis::rotate(&rot, mv::reverse_push(&p.mv, forward_speed));
         // The donut's angle and deflection are the pad read's, off the stick before the squaring.
         let raw = trick::stick(c.stick.0, c.stick.1, c.dpad);
@@ -1799,11 +1825,13 @@ impl Ride {
             rear.mv.other_tire_down = front.mv.contact && !rear.mv.contact;
 
             calls.push(mv::Call::WheelIntegrate(Side::Front, h));
-            let (brake, other) = (held.front_brake, rear.w.contact);
-            wheel_integrate(front, &p.front, brake, other, &mut mvc, &out.chassis, &tables.curve, h);
+            let (brake, other, load) = (held.front_brake, rear.w.contact, rear.w.spring_force);
+            wheel_integrate(front, &p.front, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
+                            &tables.curve, h);
             calls.push(mv::Call::WheelIntegrate(Side::Rear, h));
-            let (brake, other) = (held.rear_brake, front.w.contact);
-            wheel_integrate(rear, &p.rear, brake, other, &mut mvc, &out.chassis, &tables.curve, h);
+            let (brake, other, load) = (held.rear_brake, front.w.contact, front.w.spring_force);
+            wheel_integrate(rear, &p.rear, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
+                            &tables.curve, h);
 
             mv::engine_post(engine, &mut rear.mv);
 
@@ -1888,8 +1916,11 @@ impl Ride {
         astep.dt = dt;
         astep.front_contact = front.mv.contact;
         astep.rear_contact = rear.mv.contact;
-        astep.front_vel = chassis::unrotate(&out.mat3(Frame::Chassis), front.w.contact_velocity);
-        astep.rear_vel = chassis::unrotate(&out.mat3(Frame::Chassis), rear.w.contact_velocity);
+        // The wheel's `+0x190`, the chassis' velocity in its own frame as the wheel's last tire step
+        // saw it, and not its contact point's: first_recording's save state has the bike's `+0x430`
+        // equal to the front's `+0x190` word for word (S58).
+        astep.front_vel = front.chassis_local_velocity;
+        astep.rear_vel = rear.chassis_local_velocity;
         astep.touching = *touching;
         let ac = air_chassis!();
         air::contact(&p.air, air, &ac, &astep, &tables.acos);
