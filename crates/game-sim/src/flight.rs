@@ -34,7 +34,7 @@
 
 use crate::air::AcosTable;
 use crate::biplane::{
-    self, Aero, Air, Area, Attitude, Autopilot, Body, Crash, CrashContact, Dynamics, Engine, Joystick, List,
+    self, Aero, Air, Area, Hold, Attitude, Autopilot, Body, Crash, CrashContact, Dynamics, Engine, Joystick, List,
     Measure, Mount, Pad, Surfaces, THROWN, Tire, autopilot, collision_force, controls, gravity_force,
 };
 use crate::camera::CurveTable;
@@ -114,6 +114,13 @@ pub struct Flight {
     /// Each wheel's braking pushed again through the centre of gravity, so many times over (the
     /// gear's [`phy::Gear::cg_braking`]): zero but for the Biplane acceleration modifier (P116).
     pub cg_braking: [F; 3],
+    /// The Biplane max G modifier's limit, in g (P137, the autopilot's [`phy::Autopilot::max_g`]):
+    /// each substep the elevator command is held to what pulls no more and the ailerons eased above
+    /// the corner speed ([`Aero::g_limit`]). Zero, off, as the file builds the plane.
+    pub max_g: F,
+    /// The least share of the aileron that hold eases a roll to (the autopilot's
+    /// [`phy::Autopilot::max_g_roll`]): one, no easing, but for a plane faster than the file's.
+    pub max_g_roll: F,
     /// The pad as the plane's input step left it.
     pub pad: Pad,
     pub surfaces: Surfaces,
@@ -275,6 +282,8 @@ impl Flight {
         // gear keeps to the plane's brake and steer words.
         f.tires = [0, 1, 2].map(|k| tire(&plane.gear[k], k < 2, k == 2));
         f.cg_braking = plane.gear.map(|g| g.cg_braking);
+        f.max_g = plane.autopilot.max_g;
+        f.max_g_roll = plane.autopilot.max_g_roll;
         f.collider = Collider {
             collidable: Some(COLLIDABLE),
             actors: ACTORS,
@@ -317,6 +326,9 @@ impl Flight {
         // The ceiling's (P136): where the engine's altitude fade starts and ends.
         self.engine.fade_altitude = fresh.engine.fade_altitude;
         self.engine.max_altitude = fresh.engine.max_altitude;
+        // The g limit (P137).
+        self.max_g = fresh.max_g;
+        self.max_g_roll = fresh.max_g_roll;
         self.gravity_scale = fresh.gravity_scale;
         if self.crash.reason == 0 {
             self.gravity = gravity_force(self.gravity_scale, self.mass);
@@ -345,6 +357,8 @@ impl Flight {
         // The ceiling's (P136).
         back.engine.fade_altitude = self.engine.fade_altitude;
         back.engine.max_altitude = self.engine.max_altitude;
+        back.max_g = self.max_g;
+        back.max_g_roll = self.max_g_roll;
         back.gravity_scale = self.gravity_scale;
         if back.crash.reason == 0 {
             back.gravity = gravity_force(back.gravity_scale, back.mass);
@@ -540,7 +554,7 @@ impl Flight {
     }
 
     /// The force listener, one substep of `h`.
-    fn forces(&mut self, h: F, ground: &mut Ground<'_>, curve: &CurveTable) {
+    fn forces(&mut self, h: F, ground: &mut Ground<'_>, curve: &CurveTable, acos: &AcosTable) {
         let (collider, contacts, mass) = (&mut self.collider, &mut self.record.contacts, self.mass);
         collision_force(&mut self.body, self.gravity, |body| {
             contact::resolve(collider, &mut Weighed { body, mass }, contacts, &mut [], &[], true);
@@ -554,6 +568,9 @@ impl Flight {
             let thrust = self.engine.step(self.surfaces.throttle, b.velocity, F(b.position.y()), F(self.measure.forward.y()), h, &mut sample);
             self.body.add_force_local(thrust);
             self.air = self.measure.air(&self.surfaces, &self.body);
+            if self.max_g != F::ZERO {
+                self.hold_g(F(thrust.z()), h, acos);
+            }
             let (force, moment) = self.aero.forces(&self.air);
             self.body.add_force_local(force);
             self.body.add_moment_local(moment);
@@ -576,6 +593,49 @@ impl Flight {
             if c != F::ZERO {
                 self.body.add_force(t.braking(c));
             }
+        }
+    }
+
+    /// The Biplane max G modifier's hold (P137), between the autopilot and the aerodynamics: the
+    /// elevator command (the open-loop stick's and the pitch-rate loop's alike, and the loop's
+    /// integral with it, so it does not wind up against the hold) kept to what pulls no more than
+    /// [`Flight::max_g`], and the ailerons the aerodynamics fly eased above the corner speed.
+    fn hold_g(&mut self, thrust: F, h: F, acos: &AcosTable) {
+        let weight = self.gravity_scale * F(self.measure.up.y());
+        // How fast the speed is picking up: the thrust less the last substep's drag, and the weight
+        // along the nose.
+        let pressure = self.aero.area * (F(0.5) * self.aero.density * self.air.speed * self.air.speed);
+        let speeding = (thrust - self.aero.drag * pressure + F(self.gravity.y()) * F(self.measure.forward.y())) / self.mass;
+        // The angle of attack this substep's, not the frame's measure (in a pull the wing's angle
+        // runs on a good way between two frames), but found as the measure finds it: off the arc
+        // cosine table, whose first entry is coarse beside the small angles a fast wing pulls at.
+        let along = biplane::unturn(self.body.quat, self.body.velocity);
+        let alpha = biplane::flow_angle(F(along.z()), F(along.y()), acos);
+        let limit = self.aero.g_limit(
+            &Air { alpha, ..self.air },
+            &Hold {
+                max_g: self.max_g,
+                mass: self.mass,
+                weight,
+                speeding,
+                max_elevator: self.joystick.max_elevator,
+                pitch_inertia: F(self.body.inv_inertia.x()),
+                h,
+            },
+        );
+        let s = &mut self.surfaces;
+        for v in [&mut s.elevator_command, &mut s.pitch_integral] {
+            if let Some(lo) = limit.elevator.0 {
+                *v = v.max(lo);
+            }
+            if let Some(hi) = limit.elevator.1 {
+                *v = v.min(hi);
+            }
+        }
+        self.air.elevator = s.elevator_command;
+        let ease = limit.aileron.max(self.max_g_roll);
+        if ease < F::ONE {
+            self.air.aileron = self.air.aileron * ease;
         }
     }
 
@@ -708,7 +768,7 @@ impl Dynamics for Listeners<'_> {
         self.plane.preforce(dt);
     }
     fn force(&mut self, _: i32, h: F) {
-        self.plane.forces(h, &mut self.ground, &self.tables.curve);
+        self.plane.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos);
     }
     fn enabled(&self, _: i32) -> bool {
         self.plane.body.enabled
@@ -960,6 +1020,11 @@ impl State for Flight {
                     w.f(name, c);
                 }
             });
+        }
+        // And only a plane the max G modifier holds has this (P137).
+        if self.max_g != F::ZERO {
+            w.f("max_g", self.max_g);
+            w.f("max_g_roll", self.max_g_roll);
         }
         let pad = &self.pad;
         w.group("pad", |w| {

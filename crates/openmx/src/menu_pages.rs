@@ -713,16 +713,21 @@ impl Menu {
         for knob in Knob::MENU {
             let v = self.knob_value(knob);
             let shown = v.unwrap_or_else(|| self.settings.modifiers.get(0, knob));
-            let meter = f32::from(shown.saturating_sub(knob.least())) / f32::from(knob.most() - knob.least());
-            // The biplane's max height has a step past the percentages: no ceiling (P136).
-            let value = v.map_or_else(|| "Mixed".into(), |v| if v > game_sim::modifiers::MOST { "Uncapped".into() } else { format!("{v}%") });
+            let meter = match knob {
+                // Off sits past the highest limit (P137): a full meter.
+                Knob::PlaneMaxG if shown == game_sim::modifiers::ORIGINAL => 1.0,
+                _ => f32::from(shown.saturating_sub(knob.least())) / f32::from(knob.most() - knob.least()),
+            };
+            let value = v.map_or_else(|| "Mixed".into(), |v| knob.shown(v));
             let mut r = Row::slider(Key::Knob(knob), knob.label(), value, meter, knob.blurb());
             r.world = !knob.per_seat();
             r.note = Some(
-                match (r.world, v) {
-                    (true, _) => "The world's: one value for every player.",
-                    (false, None) => "Players differ. A step sets every player's from 1P's; Cross puts them all back.",
-                    (false, Some(_)) if self.mods_seat().is_none() => "Every player's. 100% is the original game.",
+                match (r.world, v, knob) {
+                    (true, _, _) => "The world's: one value for every player.",
+                    (false, None, _) => "Players differ. A step sets every player's from 1P's; Cross puts them all back.",
+                    (false, Some(_), Knob::PlaneMaxG) if self.mods_seat().is_none() => "Every player's. Off is the original game.",
+                    (false, Some(_), Knob::PlaneMaxG) => "This player's. Off is the original game.",
+                    (false, Some(_), _) if self.mods_seat().is_none() => "Every player's. 100% is the original game.",
                     _ => "This player's. 100% is the original game.",
                 }
                 .into(),
@@ -1000,10 +1005,9 @@ impl Menu {
             Key::Knob(knob) => {
                 // From Mixed a step goes from 1P's.
                 let now = self.knob_value(knob).unwrap_or_else(|| self.settings.modifiers.get(0, knob));
-                let step = game_sim::modifiers::STEP;
                 let to = match (p.left, p.right) {
-                    (true, _) => now.saturating_sub(step).max(knob.least()),
-                    (_, true) => (now + step).min(knob.most()),
+                    (true, _) => knob.step(now, false),
+                    (_, true) => knob.step(now, true),
                     // Cross puts the one modifier back.
                     _ => game_sim::modifiers::ORIGINAL,
                 };

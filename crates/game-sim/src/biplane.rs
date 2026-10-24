@@ -334,6 +334,175 @@ pub fn autopilot(pad: &Pad, s: &mut Surfaces, j: &Joystick, ap: &Autopilot, at: 
     s.elevator_command = (s.pitch_integral + ap.gain * error).max(-max).min(max);
 }
 
+// --- the g limit (P137) ------------------------------------------------------------------------------
+//
+// Not the original's: the Biplane max G modifier's limiter, which only a plane with a limit set runs
+// ([`crate::flight::Flight::max_g`]). Lift and the surfaces' moments go with the airspeed squared, so
+// a plane sped up past the file's top speed pulls ever more g off the same stick and rolls ever
+// faster; this holds the pull to the limit and the roll to what the corner speed's is.
+
+/// How much more angle the g limit lets a wing have, as a share of how far short of the limit's angle
+/// it is headed ([`Aero::g_limit`]).
+const LEAD: f32 = 10.0;
+/// How far ahead the g limit looks at the angle of attack, seconds.
+const AHEAD: f32 = 0.08;
+/// The share of the limit the g limit aims at. The hold settles a little either side of its aim as
+/// the speed moves the limit's angle and the look ahead swings it, by up to about 2% of the load;
+/// aimed this much under, the pull never passes the limit.
+const AIM: f32 = 0.98;
+
+/// The most damping the g limit's look ahead may add, as a share of a substep: the lead on the angle's
+/// rate is so much pitching moment ([`LEAD`] times `CMalpha` on the dynamic pressure, the chord and
+/// the inverse pitch inertia, a second squared) times the look ahead, and past about two of it a
+/// substep the hold overshoots its own correction and swings ever wider. A fast plane looks ahead
+/// less.
+const DAMPEST: f32 = 1.4;
+
+/// What the g limit reads besides the air, one substep.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hold {
+    /// The limit, in g.
+    pub max_g: F,
+    pub mass: F,
+    /// The share of the weight along the lift: the gravity scale times the up axis' height.
+    pub weight: F,
+    /// How fast the speed is picking up, feet a second squared.
+    pub speeding: F,
+    /// How far the elevator throws each way.
+    pub max_elevator: F,
+    /// The body's inverse pitch inertia.
+    pub pitch_inertia: F,
+    /// The substep.
+    pub h: F,
+}
+
+/// What the limiter allows one substep: the elevator commands the command is held between (`None`
+/// on a side the wing cannot pull the limit at all), and the factor on the aileron the
+/// aerodynamics fly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GLimit {
+    pub elevator: (Option<F>, Option<F>),
+    pub aileron: F,
+}
+
+impl Aero {
+    /// The lift coefficient's angle-of-attack terms at `alpha` (the default angle already in), as
+    /// [`Aero::forces`] works them out: the linear slope and the rounded curve.
+    fn static_lift(&self, alpha: F) -> F {
+        let round = F(libm::powf((alpha * (self.lift_round_off * self.lift_angle_scale)).abs().to_f32(),
+                                 self.lift_drop_off.to_f32()));
+        self.lift_alpha * alpha + alpha * (self.lift_scale * self.lift_angle_scale) / (F::ONE + round)
+    }
+
+    /// Where the lift curve tops out, and its lift coefficient there: the curve's
+    /// `x / (1 + |r x|^d)` peaks at `|r x|^d = 1 / (d - 1)`. A curve that never turns over (`d <= 1`,
+    /// or no round-off) is taken up to a right angle.
+    pub fn lift_peak(&self) -> (F, F) {
+        let r = (self.lift_round_off * self.lift_angle_scale).abs();
+        let d = self.lift_drop_off;
+        let alpha = if d > 1.0 && r > 0.0 {
+            F(libm::powf((F::ONE / (d - F::ONE)).to_f32(), (F::ONE / d).to_f32())) / r
+        } else {
+            F(FRAC_PI_2)
+        };
+        (alpha, self.static_lift(alpha))
+    }
+
+    /// The pitch moment coefficient with the elevator out, at `alpha` and the rate term `rate`
+    /// (`c/2V CMq q`), the stall's break in: what the elevator's `CMde` has to cancel to hold the wing
+    /// there.
+    fn unelevated_pitch(&self, alpha: F, rate: F) -> F {
+        let mut pitch = self.cm0 + self.cm_alpha * alpha + rate;
+        if !(alpha.abs() <= self.cm_break_alpha) && alpha.abs() < F(2.0) * self.cm_break_alpha {
+            pitch = pitch + alpha * (self.cm_stall * (alpha.abs() - self.cm_break_alpha));
+        }
+        pitch
+    }
+
+    /// The angle on `[lo, hi]` where `f` (rising across it) crosses zero, by halves.
+    fn halve(mut lo: F, mut hi: F, f: impl Fn(F) -> F) -> F {
+        for _ in 0..24 {
+            let mid = F(0.5) * (lo + hi);
+            if f(mid) < 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// **The g limit, one substep** (P137): what `air` (its speed, angle of attack and pitch rate)
+    /// allows a plane of `mass` slugs held to `max_g` whose elevator throws `max_elevator` each way;
+    /// `weight` is the share of the plane's weight along its lift (the gravity scale times the up
+    /// axis' height), for how fast the flight path turns.
+    ///
+    /// The elevator: the angle of attack each way whose lift is `max_g` times the weight at this
+    /// dynamic pressure (with the pitch rate's lift), and the command that trims the wing there — the
+    /// pitch moment's angle, rate and stall terms against `CMde`. A side whose trim is past the
+    /// elevator's throw (or whose angle is past the lift curve's top) is free: the plane cannot hold
+    /// the limit there, so a plane that never could, as the file's at its own top speed, flies as it
+    /// always did. A wing still short of the angle is let have more ([`LEAD`]), on where it is headed:
+    /// its angle [`AHEAD`] seconds on (less for a plane fast enough that the lead's damping would
+    /// swing it, [`DAMPEST`]) at the rate it is rising now — the nose's pitch rate less the flight
+    /// path's, which the last substep's lift less the weight turns — and on where the limit's angle
+    /// is headed, which goes with `1 / speed^2` as the plane is `speeding`. So a stick that only
+    /// swings past the trim on its way is not held, and one that would carry the wing past the angle
+    /// is backed off before it does. Held at the limit (not rising, at the angle) the bound is the
+    /// trim itself.
+    ///
+    /// The ailerons: above the corner speed by `corner / speed`. The corner is where the wing held
+    /// steady at full elevator (or the lift curve's top, if that comes first) pulls the limit. The
+    /// roll's damping (`Clp`, on `b/2V` of the rate) goes with the speed once over the moment's, so
+    /// the steady roll rate full aileron gives goes with the speed: eased by `corner / speed`, it is
+    /// the corner speed's at any speed above it.
+    pub fn g_limit(&self, air: &Air, hold: &Hold) -> GLimit {
+        let Hold { max_g, mass, weight, speeding, max_elevator, pitch_inertia, h } = *hold;
+        let v = air.speed;
+        if !(v > 1.0) || self.cm_de == F::ZERO {
+            return GLimit { elevator: (None, None), aileron: F::ONE };
+        }
+        let pressure = self.area * (F(0.5) * self.density * v * v);
+        let most = F(AIM) * max_g * mass * F(G) / pressure;
+        let c2v = self.chord * (F(0.5) / v);
+        let q = F(air.rates[0]);
+        let lift_rate = c2v * (self.lift_q * q);
+        let pitch_rate = c2v * (self.cm_q * q);
+        let (top, peak) = self.lift_peak();
+        // Which way the elevator takes the trimmed angle up, and the most lift full elevator holds.
+        let rises = -(self.cm_alpha / self.cm_de) > 0.0;
+        let pull = if rises { max_elevator } else { -max_elevator };
+        let held = |a: F| -((self.unelevated_pitch(a, F::ZERO)) / self.cm_de);
+        let full = Self::halve(F::ZERO, top, |a| if rises { held(a) - pull } else { pull - held(a) });
+        let reach = self.static_lift(full).min(peak);
+        // The angle's rate: the nose up (the body's `x` rate is nose-down) less the flight path's.
+        let path = (self.lift * pressure / mass - weight * F(G)) / v;
+        let lead = F(LEAD);
+        let pitching = (self.cm_alpha * (pressure * self.chord) * pitch_inertia).abs();
+        let look = F(AHEAD).min(F(DAMPEST) / (lead * pitching * h));
+        let ahead = air.alpha + self.default_alpha + look * (-q - path);
+        let moving = F(2.0) * speeding / v;
+        let bound = |want: F| -> Option<F> {
+            let want = want - lift_rate;
+            if !(want.abs() < peak) {
+                return None;
+            }
+            let a = Self::halve(-top, top, |a| self.static_lift(a) - want);
+            if !(held(a).abs() < max_elevator) {
+                return None;
+            }
+            // The limit's angle moves too, as the speed does: the lift it asks goes with 1 / speed^2.
+            let lead = lead * (a - ahead - look * (a * moving));
+            Some(-((self.unelevated_pitch(a, pitch_rate) + self.cm_alpha * lead) / self.cm_de))
+        };
+        let (up, down) = (bound(most), bound(-most));
+        let elevator = if rises { (down, up) } else { (up, down) };
+        let corner_sq = most * pressure / (self.area * (F(0.5) * self.density * reach));
+        let aileron = if v * v > corner_sq { corner_sq.sqrt() / v } else { F::ONE };
+        GLimit { elevator, aileron }
+    }
+}
+
 // --- the engine --------------------------------------------------------------------------------------
 
 /// The engine object: the `[Engine]` keys and what it keeps between substeps.
@@ -1392,7 +1561,7 @@ fn clamp_unit(c: F) -> F {
 /// The angle between the nose and the velocity in one plane: `acos(along / |(along, across)|)` off
 /// the arc cosine table, the length through the approximate reciprocal square root and the cosine
 /// clamped twice, negative when `across` is positive.
-fn flow_angle(along: F, across: F, table: &AcosTable) -> F {
+pub(crate) fn flow_angle(along: F, across: F, table: &AcosTable) -> F {
     let s = -across;
     let sum = Acc::mula(s, s).madd(along, along);
     let c = along * F::ONE.rsqrt(sum);
