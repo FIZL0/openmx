@@ -485,6 +485,26 @@ impl Chassis {
         }
     }
 
+    /// **V64:** the state to run beside a rider whose body's machine asked for `body` this frame —
+    /// [`game_sim::vehicle_anim::Driver::want`], after [`crate::rider::Body::ride`] — so the bike and
+    /// the rider are never in two different tricks.
+    ///
+    /// A pack state on the body (an extra or a 360 its clip plays) is the bike's state too, whether
+    /// or not this chassis has a clip for it. With none the bike is drawn the way a gesture slot with
+    /// no bike clip is ([`Chassis::drive`]): the shape it was modelled in, faded to from the air pose.
+    /// [`Chassis::want_with_pack`] fell back to [`game_sim::vehicle_anim::AIR`] instead, and the
+    /// airborne row is played at the phase axis, which the motion driver stops easing while a trick
+    /// runs — so a trick started whipped held the bike crossed up under a rider whose clip is square,
+    /// and the pelvis came off the seat by the whip. And a body with no clip for a state does not
+    /// play it, so neither does the bike, even with a clip of its own: the two stay on the airborne
+    /// row together. Any other state is [`Chassis::want`]'s.
+    pub fn want_beside(ride: &Ride, tricks: &Tricks, body: i32) -> i32 {
+        match body {
+            s if s >= va::PACK_EXTRA => s,
+            _ => Chassis::want(ride, tricks),
+        }
+    }
+
     /// One frame: the machine's selection, the clock, the clip's pose, the five drives, the tree.
     ///
     /// `want` is the animation state to run — [`Chassis::want`] is the port's reading of it — and
@@ -503,9 +523,17 @@ impl Chassis {
         }
         let frame = self.stance.frame(dt, want, r);
         self.posing = crate::chassis::poses_the_chassis(frame.blend, &self.stance.player);
-        self.fading = match self.posing {
-            true => 0.0,
-            false => ramp_of(frame.blend),
+        self.fading = match (self.posing, frame.blend) {
+            (true, _) => 0.0,
+            // A pack state this chassis has no clip for is out of the table, so the selection
+            // answers no blend and no ramp with it — but the machine restarted into it and runs its
+            // ramp all the same, and the rider is fading into the trick's clip over that ramp. Fading
+            // the rest shape by it keeps the bike under the rider instead of snapping it square on
+            // the trick's first frame (V64).
+            (false, va::Blend::Free) if self.stance.driver.state >= va::PACK_EXTRA => {
+                self.stance.driver.ramp.0.max(0.0)
+            }
+            (false, blend) => ramp_of(blend),
         };
         self.drive(dt.0, drive);
         frame
