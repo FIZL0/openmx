@@ -305,7 +305,8 @@ pub struct Settings {
     pub bays: bool,
     /// The game modifiers the next ride loads with (P55): the original game's unless changed.
     pub modifiers: Mods,
-    /// Modifier presets saved by name, in the order they were saved.
+    /// Modifier presets saved by name, in the order they were saved. Each is one player's set
+    /// (P143), [`preset_of`]'s: that player's own modifiers alike on every row, and the world's.
     pub presets: Vec<(String, Mods)>,
     /// The seats a lobby or an opened ride this machine hosts has (N12), the lobby's Seats row's:
     /// 2 to [`openmx_net::SEATS`], everyone's together.
@@ -1045,7 +1046,8 @@ impl Settings {
                         let name = clean_name(name);
                         if !name.is_empty() {
                             s.presets.retain(|(n, _)| *n != name);
-                            s.presets.push((name, mods));
+                            // A whole table from before P143 is its first player's set.
+                            s.presets.push((name, preset_of(&mods, 0)));
                         }
                     }
                 }
@@ -1542,6 +1544,28 @@ impl Layout {
             Layout::New => "Normal",
             Layout::Original => "Like the Original",
         }
+    }
+}
+
+/// A modifier preset as it is kept (P143): player `seat`'s own modifiers, alike on every row, and the
+/// world's — one player's set, which any seat can load, and which writes as plain `word=pct`s.
+pub fn preset_of(mods: &Mods, seat: usize) -> Mods {
+    let mut set = Mods::original();
+    for knob in Knob::ALL {
+        let pct = mods.get(seat, knob);
+        match knob.per_seat() {
+            true => (0..game_sim::MAX_PLAYERS).for_each(|s| set.set(s, knob, pct)),
+            false => set.set(0, knob, pct),
+        }
+    }
+    set
+}
+
+/// Load `preset` onto player `seat` (P143): its own modifiers into that seat's, its world's into the
+/// world's, every other seat left as it is.
+pub fn load_preset_onto(mods: &mut Mods, preset: &Mods, seat: usize) {
+    for knob in Knob::ALL {
+        mods.set(if knob.per_seat() { seat } else { 0 }, knob, preset.get(0, knob));
     }
 }
 
@@ -2670,7 +2694,7 @@ impl Menu {
 
     /// Keep the modifiers now set as preset `name`, over one already called that.
     fn save_preset(&mut self, name: &str) {
-        let mods = self.settings.modifiers;
+        let mods = preset_of(&self.settings.modifiers, self.player.min(SEATS_MAX - 1));
         match self.settings.presets.iter().position(|(n, _)| n == name) {
             Some(i) => {
                 self.settings.presets[i].1 = mods;
