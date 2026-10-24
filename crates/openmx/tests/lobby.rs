@@ -291,16 +291,13 @@ fn a_host_s_menu_and_a_joiner_s_find_each_other_by_room_code_on_the_lan_and_ride
     assert_ne!(hs.0.seed, 0);
     assert_eq!((hs.1.as_str(), hs.0.seats.len()), (HOST, LOBBY_SEATS));
     assert!(h.riding() && g.riding());
-    // The guest leaves the ride (its pause's Main Menu, `Online::leave`): the host is back in its lobby.
+    // The guest leaves the ride (its pause's Main Menu, `Online::leave`): the host's room rides on
+    // without its seat (N11), and the host is told who went.
     gn.send(Cmd::Leave);
-    let mut dropped = false;
     until((&mut h, &hn), (&mut g, &gn), "the drop", |h, _, _, _| {
-        dropped |= h.note.is_some();
-        dropped && h.lobby.room.as_ref().is_some_and(|r| !r.riding && r.taken() == 1)
+        h.lobby.status == "Guesty left the ride." && h.lobby.room.as_ref().is_some_and(|r| r.riding && r.taken() == 1)
     });
-    h.back_from_online();
-    assert_eq!(h.screen(), Some(Screen::Lobby));
-    println!("host's note: {:?}", h.note);
+    assert!(h.riding(), "the host rides on");
 }
 
 #[test]
@@ -390,7 +387,7 @@ fn started(net: &Net, who: &str) -> (Room, String) {
 }
 
 #[test]
-fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_ends_it() {
+fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_lets_the_host_ride_on() {
     use game_sim::world::Flat;
     let (hn, gn) = (Arc::new(lan("Hosty", 1)), Arc::new(lan("Guesty", 1)));
     let (mut h, mut hr) = fresh("Hosty", "thq1");
@@ -431,23 +428,30 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_ends_i
     assert!(both >= 60, "only {both} ticks settled on both in 4 s");
     assert_eq!(ha[..both], ga[..both], "the two machines' rides parted");
     assert_eq!((hd, gd), (0, 0), "desyncs");
-    // The guest leaves from the pause: the host's ride ends, and what ended it is kept for its menu.
-    assert!(!go.leave(), "a guest is out of the lobby once it leaves");
+    // The guest leaves from the pause's Leave Session (N11): its seat goes at a tick both agree on,
+    // its ride ends once the host has that, and the host rides on alone, its room still riding.
+    go.leave_session(0).unwrap();
+    assert!(go.leaving());
     let end = Instant::now() + Duration::from_secs(15);
     let why = loop {
-        assert!(Instant::now() < end, "the host rode on after the guest left");
-        if let Err(why) = ho.frame(gas, &mut hw, None) {
+        assert!(Instant::now() < end, "the guest never got out of the ride");
+        ho.frame(gas, &mut hw, None).expect("the host's ride ended when the guest left");
+        if let Err(why) = go.frame(lean, &mut gw, None) {
             break why;
         }
         std::thread::sleep(Duration::from_millis(33));
     };
-    println!("host's ride ended: {why}");
+    println!("guest's ride ended: {why}");
+    assert!(why.contains("you left the ride"), "{why}");
+    for _ in 0..90 {
+        ho.frame(gas, &mut hw, None).expect("the host's ride ended after the guest left");
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    assert_eq!(ho.riders(), 1, "the guest's seat is out of the host's ride");
     for e in ho.kept() {
         h.heard(e);
     }
-    until((&mut h, &hn), (&mut g, &gn), "the host's lobby back", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| !r.riding && r.taken() == 1));
-    h.back_from_online();
-    assert_eq!(h.screen(), Some(Screen::Lobby));
+    until((&mut h, &hn), (&mut g, &gn), "the host's room with one seat", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.riding && r.taken() == 1));
 }
 
 /// N10, the menu's side: a local freeride's pause offers "Open to Online" above Quit, which asks the
@@ -538,6 +542,53 @@ fn an_opened_rides_pause_has_a_seats_row() {
     assert_eq!(m.pause_rows()[seats], "Seats: 6");
     assert_eq!(m.settings.lobby_seats, 6);
     assert_eq!(m.screen(), Some(Screen::Pause));
+}
+
+/// N11, the menu's side: an online ride's pause has "Leave Session" just above Quit (under an opened
+/// ride's online rows), which asks first and then hands the shell the pausing player's seat to let
+/// go, the ride back on under it. A guest the room is handed to hosts the lobby from there.
+#[test]
+fn an_online_rides_pause_leaves_the_session() {
+    use menu::Opening;
+    let (mut m, mut r) = fresh("Guesty", "thq2");
+    m.pause();
+    assert!(!m.pause_rows().iter().any(|row| row == "Leave Session"), "a local ride has none");
+    m.session = true;
+    m.pause();
+    let rows = m.pause_rows();
+    assert_eq!(rows[rows.len() - 2..], ["Leave Session", "Quit"]);
+    let leave = rows.len() - 2;
+    taps(&mut m, &mut r, &vec![Control::Down; leave]);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.iter().all(|a| *a == Act::Stay), "{acts:?}");
+    assert_eq!(m.confirming().map(|c| (c.1, c.2)), Some((["Leave Session", "Stay"], 1)), "asks first, on Stay");
+    let acts = taps_acts(&mut m, &mut r, &[Control::Up, Control::Cross]);
+    assert!(acts.contains(&Act::LeaveSession(0)), "{acts:?}");
+    assert!(m.riding(), "back to the ride while it lets go");
+    // a second local player's pause lets their seat alone go
+    m.pause_for(1);
+    taps(&mut m, &mut r, &vec![Control::Down; leave]);
+    let acts = taps_acts(&mut m, &mut r, &[Control::Cross, Control::Up, Control::Cross]);
+    assert!(acts.contains(&Act::LeaveSession(1)), "{acts:?}");
+    // Stay keeps the ride
+    m.pause();
+    taps(&mut m, &mut r, &vec![Control::Down; leave]);
+    let acts = taps_acts(&mut m, &mut r, &[Control::Cross, Control::Cross]);
+    assert!(!acts.iter().any(|a| matches!(a, Act::LeaveSession(_))) && m.screen() == Some(Screen::Pause), "{acts:?}");
+    // an opened ride: under its online rows
+    m.opening = Opening::Open;
+    let rows = m.pause_rows();
+    assert_eq!(rows[rows.len() - 4..], ["Online: opening...", &format!("Seats: {LOBBY_SEATS}"), "Leave Session", "Quit"]);
+
+    // the host gone, the room handed to this machine: it hosts the lobby
+    m.heard(Event::Me("guest-id".into()));
+    m.heard(Event::Room(guest_room()));
+    assert!(!m.lobby.hosting());
+    m.heard(Event::HandedOver("someone-else".into()));
+    assert!(!m.lobby.hosting());
+    m.heard(Event::HandedOver("guest-id".into()));
+    assert!(m.lobby.hosting());
+    assert_eq!(m.lobby.status, "The host left: you host the game now.");
 }
 
 fn taps_acts(menu: &mut Menu, reader: &mut Reader, controls: &[Control]) -> Vec<Act> {

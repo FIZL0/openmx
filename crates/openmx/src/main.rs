@@ -4171,6 +4171,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         front.menu.opening = if can { menu::Opening::Can } else { menu::Opening::No };
         front.menu.mods_lock = mods_lock(head.is_some(), online.as_ref().map(online::Online::host));
         front.menu.leave_to = online.as_ref().map_or(menu::LeaveTo::Main, online::Online::leaves_to);
+        front.menu.session = online.is_some();
     }
     // The modifiers the Settings screen last said, so that the pause closing on a set the player
     // changed puts it on the ride (P98) and a `--modifiers` ride the player did not touch keeps its own.
@@ -4524,6 +4525,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     break;
                 }
                 Act::Quit => break,
+                // Leave Session (N11): this machine's seats go at a tick every machine takes them out
+                // at, and the ride carries on for the others; the session ends here once it has
+                // passed on what it owes them.
+                Act::LeaveSession(seat) => {
+                    if let Some(on) = &mut online
+                        && let Err(why) = on.leave_session(seat)
+                    {
+                        println!("online: cannot leave: {why}");
+                        front.menu.note = Some(format!("Cannot leave the session: {why}"));
+                    }
+                }
                 // A played tape switches where it says and nowhere else. Online the pick goes into
                 // this machine's pad (N17), and every machine switches the seat at the tick it lands
                 // on; the garage follows below, once the session has stepped it.
@@ -4684,6 +4696,12 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     leave = Leave::Menu;
                 }
                 break;
+            }
+            // The pause's leave rows as this machine stands in the ride now (N11): a guest the room
+            // was handed to hosts it, and one on its way out has nothing more to leave.
+            if let Some(front) = front.as_deref_mut() {
+                front.menu.leave_to = on.leaves_to();
+                front.menu.session = !on.leaving();
             }
             // Every seat back into the shell's, this machine's first: the others are drawn beside it.
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
@@ -5950,8 +5968,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for e in on.kept() {
                 front.menu.heard(e);
             }
-            // an opened freeride's room closed with it (`Online::leave`): no lobby to go back to
-            if opened {
+            // an opened freeride's room closed with it (`Online::leave`), and Leave Session (N11) left
+            // the lobby with the ride: no lobby to go back to
+            if opened || on.leaving() {
                 on.leave();
                 front.menu.lobby.room = None;
                 front.menu.lobby.code.clear();

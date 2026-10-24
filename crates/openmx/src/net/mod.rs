@@ -43,6 +43,7 @@
 
 pub mod admit;
 pub mod desync;
+pub mod leave;
 pub mod link;
 pub mod recover;
 pub mod resync;
@@ -245,6 +246,8 @@ pub struct Netplay<S: Clone + 'static> {
     pub mods: String,
     /// Every change of the modifiers this machine took: (the tick it took them at, the new set).
     pub remods: Vec<(u32, String)>,
+    /// Players leaving the ride under way (N11): this machine's own leave, and the host's list.
+    pub leave: leave::Leave,
 }
 
 impl<S: Clone + 'static> Netplay<S> {
@@ -274,6 +277,7 @@ impl<S: Clone + 'static> Netplay<S> {
             admit: admit::Admit::default(),
             mods: String::new(),
             remods: Vec::new(),
+            leave: leave::Leave::default(),
         })
     }
 
@@ -312,6 +316,19 @@ impl<S: Clone + 'static> Netplay<S> {
         }
         self.admit.mods = (to != self.mods).then_some(to);
         Ok(())
+    }
+
+    /// This machine's seats `seats` leave the ride (N11, the pause's Leave Session; every seat it
+    /// has when empty): they go at one tick on every machine, and the others ride on ([`leave`]).
+    /// The host leaving hands the ride to the peer in the first seat left. Once every seat of this
+    /// machine is out, [`Netplay::end`] says so; keep passing datagrams until [`Netplay::flushed`].
+    pub fn leave(&mut self, seats: &[usize]) -> Result<(), String> {
+        leave::ask(self, seats)
+    }
+
+    /// After this machine left: everything it owed the others is through (or it waited long enough).
+    pub fn flushed(&self) -> bool {
+        leave::flushed(self)
     }
 
     /// The host: a join asked for and not taken on yet is off (the peer left first).
@@ -368,6 +385,7 @@ impl<S: Clone + 'static> Netplay<S> {
             Msg::State { .. } | Msg::Resynced(_) => resync::heard(self, from, m),
             Msg::Away { .. } | Msg::Restart { .. } | Msg::Mods { .. } => recover::heard(self, from, m),
             Msg::End(why) => self.finish(why),
+            Msg::Leave { seats } => leave::heard(self, from, seats),
         }
     }
 
@@ -395,6 +413,7 @@ impl<S: Clone + 'static> Netplay<S> {
     pub fn frame<G: Game<State = S>>(&mut self, game: &mut G, local: &[Report], dt: f32) {
         self.poll();
         recover::tick(self, dt);
+        leave::tick(self, dt);
         recover::restarted(self, game);
         resync::take_state(self, game);
         if self.end.is_some() || self.waiting() || self.rb.sess.current_state() != ggrs::SessionState::Running {

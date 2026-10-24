@@ -1,7 +1,9 @@
 //! N3: a host and a joiner find each other by room code over the LAN (mDNS, no relay, no internet) and over a
 //! local relay (an in-process `iroh-relay`, every packet through it, the code through a local pkarr relay), and a
 //! joiner whose disc holds a different bike set is refused at the host's Start. Also: a ride starts on both with the
-//! host's seed, chat goes through the host, and a peer dropping mid-ride sends the rest back to the lobby.
+//! host's seed, chat goes through the host, and a peer dropping mid-ride leaves the rest riding (N11). N11: the host
+//! hands its room to a guest, or a guest takes it over when the host's connection goes, and the ride's traffic goes
+//! through the new host.
 //!
 //! Nothing here reaches the internet: the DHT board is off, the code servers are the test's own.
 
@@ -88,11 +90,11 @@ fn a_host_and_a_joiner_find_each_other_by_room_code_on_the_lan() {
     // the ride's traffic both ways through the lobby's connection
     g.send(Cmd::Send(b"inputs".to_vec()));
     assert_eq!(wait(&h, "host", 10, |e| if let Event::Ride(f, d) = e { Some((f.clone(), d.clone())) } else { None }), (gr.1.clone(), b"inputs".to_vec()));
-    // the guest drops mid-ride: the host is back in the lobby
+    // the guest drops mid-ride: the ride goes on without it (N11), its seat open
     g.send(Cmd::Leave);
-    wait(&h, "host", 20, |e| matches!(e, Event::Dropped(_)).then_some(()));
-    let back = room_with(&h, "host", |r| !r.riding);
-    assert_eq!((back.taken(), back.seed), (1, 0));
+    wait(&h, "host", 20, |e| if let Event::Status(s) = e { (s == "Guesty left the ride.").then_some(()) } else { None });
+    let on = room_with(&h, "host", |r| r.taken() == 1);
+    assert!(on.riding && on.seed == hr.0.seed, "still the ride: {on:?}");
 }
 
 /// A pkarr relay's GET and PUT of signed records by z-base-32 key, as `tools/pkarr-relay` runs it (the signature
@@ -245,4 +247,82 @@ fn an_opened_ride_resizes_its_room_and_a_closed_one_does_not() {
         }
         h.send(Cmd::Leave);
     }
+}
+
+/// N11: a ride of three through the local relay — the host, `g`, `k` — started; the guests' peer names, and the
+/// room code.
+fn three_riding(relay: &str, pkarr: &str) -> (Net, Net, Net, String, String, String) {
+    let h = Net::start(through_relay("Hosty", relay, pkarr), disc(1));
+    let g = Net::start(through_relay("Guesty", relay, pkarr), disc(1));
+    let k = Net::start(through_relay("Kay", relay, pkarr), disc(1));
+    let mut r = Room::new("", "free06", 3);
+    r.take(HOST, &[Pick::new("thq1", "race125p")]);
+    h.send(Cmd::Host(r));
+    let code = room_with(&h, "host", |r| !r.short.is_empty()).short;
+    g.send(Cmd::Join(code.clone(), vec![Pick::new("thq2", "race125p")]));
+    room_with(&h, "host", |r| r.taken() == 2);
+    k.send(Cmd::Join(code.clone(), vec![Pick::new("thq3", "race125p")]));
+    let full = room_with(&h, "host", |r| r.taken() == 3);
+    assert_eq!(full.tickets.len(), 2, "each guest's ticket in the room: {:?}", full.tickets);
+    g.send(Cmd::Prepared(true));
+    k.send(Cmd::Prepared(true));
+    room_with(&h, "host", |r| r.all_ready());
+    h.send(Cmd::Start);
+    let started = |n: &Net, who: &str| wait(n, who, 20, |e| if let Event::Start(_, me) = e { Some(me.clone()) } else { None });
+    let (gid, kid) = (started(&g, "g"), started(&k, "k"));
+    wait(&h, "host", 20, |e| matches!(e, Event::Start(..)).then_some(()));
+    (h, g, k, gid, kid, code)
+}
+
+/// After the room went to `g`: both guests hear it, the ride's messages and datagrams go between them through `g`,
+/// and the room is `g`'s, riding, the old host's seat open.
+fn handed_to_g(g: &Net, k: &Net, gid: &str, kid: &str) {
+    let handed = |n: &Net, who: &str| wait(n, who, 40, |e| if let Event::HandedOver(to) = e { Some(to.clone()) } else { None });
+    assert_eq!(handed(g, "g"), gid, "g hosts it");
+    assert_eq!(handed(k, "k"), gid, "k dialled g");
+    let room = room_with(g, "g", |r| r.taken() == 2 && r.seats_of(kid).len() == 1);
+    assert!(room.riding && room.seats[0].is_none() && room.seats_of(gid) == [1], "{room:?}");
+    k.send(Cmd::Send(b"inputs".to_vec()));
+    assert_eq!(wait(g, "g", 20, |e| if let Event::Ride(f, d) = e { Some((f.clone(), d.clone())) } else { None }), (kid.to_string(), b"inputs".to_vec()));
+    g.send(Cmd::Send(b"state".to_vec()));
+    assert_eq!(wait(k, "k", 20, |e| if let Event::Ride(f, d) = e { Some((f.clone(), d.clone())) } else { None }), (gid.to_string(), b"state".to_vec()));
+    // datagrams are unreliable: a few until one is through
+    let got = (0..20).find_map(|_| {
+        g.send(Cmd::Datagram(kid.into(), b"pads".to_vec()));
+        let until = Instant::now() + Duration::from_millis(500);
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            if let Some(Event::Datagram(f, d)) = k.next(left) {
+                return Some((f, d));
+            }
+        }
+        None
+    });
+    assert_eq!(got, Some((gid.to_string(), b"pads".to_vec())));
+}
+
+/// N11: the host leaves its ride, handing the room to the guest in the next seat: the other guest dials it, the
+/// ride goes on through it, and the room code leads there now.
+#[test]
+fn the_host_hands_its_room_to_the_next_seat() {
+    let (relay, _rt) = local_relay();
+    let pkarr = pkarr_relay();
+    let (h, g, k, gid, kid, code) = three_riding(&relay, &pkarr);
+    h.send(Cmd::HandOver(gid.clone()));
+    handed_to_g(&g, &k, &gid, &kid);
+    // the code is g's: a joiner is answered by it (a ride that takes nobody on turns it away)
+    let j = Net::start(through_relay("Jay", &relay, &pkarr), disc(1));
+    j.send(Cmd::Join(code, vec![Pick::new("thq4", "race125p")]));
+    let why = wait(&j, "j", 60, |e| if let Event::Failed(w) = e { Some(w.clone()) } else { None });
+    assert!(why.contains("The ride has started"), "{why}");
+}
+
+/// N11: the host's network goes without a word (its app gone): the guest in the next seat takes the room over and
+/// the other dials it.
+#[test]
+fn a_host_that_goes_without_a_word_leaves_its_room_to_the_next_seat() {
+    let (relay, _rt) = local_relay();
+    let pkarr = pkarr_relay();
+    let (h, g, k, gid, kid, _) = three_riding(&relay, &pkarr);
+    drop(h);
+    handed_to_g(&g, &k, &gid, &kid);
 }

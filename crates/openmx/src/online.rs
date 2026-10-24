@@ -99,6 +99,11 @@ pub struct Online {
     bays: Vec<Spawn>,
     /// `--peer`s (P105): every machine's saved markers, which the session waits on.
     marks: Option<Marks>,
+    /// The host left and the lobby handed its room to this machine (N11): it hosts it from here. A
+    /// peer that dropped in keeps a seat where the ride started (its first seat as it came in) for the
+    /// joiners it takes on if that happens.
+    handed: bool,
+    spare: Option<Vec<u8>>,
 }
 
 /// `--peer`s' saved markers (P105): the track and bike they are read back for, whether every
@@ -162,6 +167,8 @@ impl Online {
             stock_plane: None,
             bays: Vec::new(),
             marks: Some(Marks { track: String::new(), bike: String::new(), owed: true, offered: None }),
+            handed: false,
+            spare: None,
         })
     }
 
@@ -220,6 +227,8 @@ impl Online {
             stock_plane: None,
             bays: Vec::new(),
             marks: None,
+            handed: false,
+            spare: None,
         })
     }
 
@@ -251,6 +260,8 @@ impl Online {
             stock_plane: None,
             bays: Vec::new(),
             marks: None,
+            handed: false,
+            spare: None,
         })
     }
 
@@ -260,6 +271,7 @@ impl Online {
     pub fn drop_in(net: Arc<openmx_net::Net>, room: &openmx_net::Room, me: &str, first: Sim) -> Result<Online, String> {
         let session = Netplay::joining(openmx_net::HOST, me, Timing::default(), crate::net::desync::dumps())?;
         println!("online: dropping in on {}'s ride, waiting for the host", room.name);
+        let spare = Some(rides::seat_bytes(&first));
         Ok(Online {
             net: session,
             wire: Wire::Lobby { net, kept: Vec::new() },
@@ -281,6 +293,8 @@ impl Online {
             stock_plane: None,
             bays: Vec::new(),
             marks: None,
+            handed: false,
+            spare,
         })
     }
 
@@ -444,7 +458,7 @@ impl Online {
         use crate::menu::LeaveTo;
         match &self.wire {
             Wire::Lobby { .. } if self.spawn.is_some() => LeaveTo::Main,
-            Wire::Lobby { .. } if self.net.me == openmx_net::HOST => LeaveTo::Lobby,
+            Wire::Lobby { .. } if self.net.me == openmx_net::HOST || self.handed => LeaveTo::Lobby,
             Wire::Lobby { .. } => LeaveTo::Online,
             _ => LeaveTo::Main,
         }
@@ -459,12 +473,40 @@ impl Online {
             net.send(openmx_net::Cmd::Leave);
             return false;
         }
-        if self.net.me == openmx_net::HOST {
+        if self.net.me == openmx_net::HOST || self.handed {
             net.send(openmx_net::Cmd::Lobby);
             true
         } else {
             net.send(openmx_net::Cmd::Leave);
             false
+        }
+    }
+
+    /// Leave Session from the pause (N11): this machine's seats go and the ride goes on for the others
+    /// — every seat of its for its first player (`local` 0), else that local player's seat only. The
+    /// session takes them out at a tick every machine agrees on; [`Online::frame`] then passes the
+    /// others what this machine owes them, and lets the lobby go ([`Online::gone`]).
+    pub fn leave_session(&mut self, local: usize) -> Result<(), String> {
+        let mine = self.net.lineup.mine(&self.net.me);
+        let seats = match local {
+            0 => Vec::new(),
+            k => vec![*mine.get(k).ok_or(format!("this machine has no player {}", k + 1))?],
+        };
+        self.net.leave(&seats)
+    }
+
+    /// Whether this machine is on its way out of the ride (Leave Session), for the pause.
+    pub fn leaving(&self) -> bool {
+        self.net.leave.leaving()
+    }
+
+    /// Out of the ride after Leave Session (N11): out of the lobby too, a host handing its room to
+    /// the peer the session made host.
+    fn gone(&self) {
+        let Wire::Lobby { net, .. } = &self.wire else { return };
+        match &self.net.leave.heir {
+            Some(heir) => net.send(openmx_net::Cmd::HandOver(heir.clone())),
+            None => net.send(openmx_net::Cmd::Leave),
         }
     }
 
@@ -482,6 +524,7 @@ impl Online {
             Wire::Lobby { net, kept } => {
                 let mut got = Vec::new();
                 let mut end = None;
+                let mut handed = false;
                 for e in net.poll() {
                     match e {
                         Event::Datagram(from, d) => got.push((from, d)),
@@ -578,7 +621,19 @@ impl Online {
                             }
                             kept.push(e);
                         }
+                        // the host went and the lobby handed this machine its room (N11)
+                        Event::HandedOver(ref h) if *h == me => {
+                            handed = true;
+                            kept.push(e);
+                        }
                         e => kept.push(e),
+                    }
+                }
+                if handed {
+                    println!("online: the host left: this machine hosts the room now");
+                    self.handed = true;
+                    if self.spawn.is_none() {
+                        self.spawn = self.spare.take();
                     }
                 }
                 match end {
@@ -710,6 +765,14 @@ impl Online {
             }
         }
         if let Some(end) = &self.net.end {
+            // a leaver (N11) first passes on what it owes the others: a host, the restart that hands
+            // the ride on
+            if self.net.leave.leaving() {
+                if !self.net.flushed() {
+                    return Ok(());
+                }
+                self.gone();
+            }
             return Err(format!("online: {end}"));
         }
         // the seat may have moved in a restart

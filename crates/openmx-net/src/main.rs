@@ -129,6 +129,7 @@ fn main() {
             Event::DropIn(r, me) => println!("Into the ride under way on {} (you are {me}).", r.track),
             Event::Arrived { peer, seats } => println!("{peer} is in, on seat {seats:?}: a ride takes it on."),
             Event::Dropped(why) => println!("{why}"),
+            Event::HandedOver(host) => println!("The host left: {host} hosts the room now."),
             Event::Failed(why) => {
                 println!("{why}");
                 return;

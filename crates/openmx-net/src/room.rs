@@ -103,6 +103,10 @@ pub struct Room {
     /// the ride as it is, rather than turned away until the lobby is back.
     #[serde(default)]
     pub drop_in: bool,
+    /// Each guest's ticket (its whole address, from its Hello): where the others dial the guest
+    /// the room is handed to when the host goes (N11).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tickets: BTreeMap<String, String>,
 }
 
 impl Room {
@@ -172,6 +176,7 @@ impl Room {
             }
         }
         self.names.remove(peer);
+        self.tickets.remove(peer);
         self.ping.remove(peer);
         self.ready.remove(peer);
         self.changed();
@@ -202,6 +207,12 @@ impl Room {
             }
         }
         v
+    }
+
+    /// Who the room goes to when `host` goes (N11), in turn: the other seated peers in seat order,
+    /// as the ride's session hands itself to the peer in the first taken seat.
+    pub fn successors(&self, host: &str) -> Vec<String> {
+        self.peers().into_iter().filter(|p| p != host).collect()
     }
 
     /// Every seated guest has said it's ready.
