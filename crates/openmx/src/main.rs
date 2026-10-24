@@ -2368,7 +2368,9 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         grove.lod = args.plants.unwrap_or_default();
         println!("plants: {}", grove.lod.word());
     }
-    let has_bike = assets.load(&archives, CHASSIS);
+    // Kept as `CHASSIS` whichever file the bike's set draws it from: `bike50` under a fast50 (V37).
+    let chassis_file = game_render::vehicle::chassis_model(&archives[1..2], &vehicle);
+    let has_bike = assets.load_as(&archives, &chassis_file, CHASSIS);
     for part in &vehicle.parts {
         assets.load(&archives, &part.model);
     }
@@ -3516,7 +3518,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let (bike_model, parts) = match &own_bike {
             Some((_, v, res)) => {
                 let own = format!("{CHASSIS}@{}", i + 1);
-                let drawn = assets.load_repainted(res, CHASSIS, &own, &v.materials);
+                let file = game_render::vehicle::chassis_model(res, v);
+                let drawn = assets.load_repainted(res, &file, &own, &v.materials);
                 let parts = v
                     .parts
                     .iter()

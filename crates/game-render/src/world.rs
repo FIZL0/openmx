@@ -266,6 +266,26 @@ impl Assets {
         true
     }
 
+    /// Load the model file `name` and keep it as `key`: a bike's chassis, which the shell knows by
+    /// one name whichever file the bike's set draws it from (V37).
+    pub fn load_as(&mut self, archives: &[Res], name: &str, key: &str) -> bool {
+        if name == key {
+            return self.load(archives, name);
+        }
+        if self.models.contains_key(key) {
+            return true;
+        }
+        let first = self.models.remove(name);
+        let loaded = self.load(archives, name);
+        if let Some(m) = self.models.remove(name) {
+            self.models.insert(key.to_string(), m);
+        }
+        if let Some(f) = first {
+            self.models.insert(name.to_string(), f);
+        }
+        loaded
+    }
+
     /// Load `name` a second time as `own`, painted with `pairs` over the renames already set: another
     /// rider on the one shared body in gear of their own (P37). The materials' earlier answers are not
     /// reused for it, and the renames and answers the first load left are back afterwards.
@@ -301,12 +321,19 @@ impl Assets {
         material: &str,
     ) -> (Option<usize>, Surface) {
         let asked = material;
-        let material = match self.renames.get(&material.to_ascii_lowercase()) {
-            Some(to) => to.clone(),
-            None => material.to_string(),
+        // A repaint whose material no archive has keeps the mesh's own (V37): 500_03.sub paints its
+        // pipe `CR-250_Exhaust`, which its archive does not ship, and ships the pipe's own
+        // `rm-250_rs_02_exhaust` material and texture that nothing else on the bike uses.
+        let renamed = self
+            .renames
+            .get(&material.to_ascii_lowercase())
+            .and_then(|to| read(&format!("{to}.psm")).map(|psm| (to.clone(), psm)));
+        let (material, psm) = match renamed {
+            Some(found) => (found.0, Some(found.1)),
+            None => (material.to_string(), read(&format!("{material}.psm"))),
         };
         let material = material.as_str();
-        let Some(psm) = read(&format!("{material}.psm")) else {
+        let Some(psm) = psm else {
             return (self.by_name.get(asked).copied(), Surface::default());
         };
         let m = Material::parse(&crate::ini::text(&psm));
