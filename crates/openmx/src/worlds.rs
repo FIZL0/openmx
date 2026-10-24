@@ -14,7 +14,7 @@
 use crate::track_mods::{self, Json, ModTrack};
 use game_render::disc::Res;
 use game_sim::tiles::{Piece, Reach, Source, Tile, Tiled};
-use game_sim::track::{self, Placement, Terrain, TerrainLayout};
+use game_sim::track::{self, Placement, Terrain, TerrainHead, TerrainLayout, TerrainNode};
 use game_render::gpu::GroundChunk;
 use ps2_float::F;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,9 @@ pub struct WorldPiece {
     pub stem: String,
     /// The scene's sections the world's `drop` takes out, for what draws it too (MD15).
     pub dropped: Vec<String>,
+    /// A tile's scene file as [`find`] read it, before the `drop`: what the ride dresses and lights
+    /// the tile from, so the file is not read again (MD18). `None` for a join.
+    pub scene_bytes: Option<Arc<[u8]>>,
 }
 
 /// A world mod that reads.
@@ -121,7 +124,44 @@ pub(crate) fn scene_of(res: &Res) -> Result<(String, String, Vec<u8>), String> {
     Ok((scn.to_string(), stem, res.read(scn)?))
 }
 
-/// A terrain's spacing, tree levels and the root cells its tree has, across and along.
+/// A terrain's spacing, tree levels and the root cells its tree has, across and along, read from
+/// the file's header and its tree's root alone (MD18): [`TerrainHead::MOST`] bytes at most, the root
+/// node and its children's table — a few kilobytes of a file of megabytes. What [`shape`] makes of
+/// the whole file, without the check that its blocks fill the space in front of the tree, which the
+/// ride's own read of the file makes.
+fn shape_of_file(path: &Path) -> Result<(F, u32, u32, u32), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let name = || path.display().to_string();
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", name()))?;
+    let len = file.metadata().map_err(|e| format!("{}: {e}", name()))?.len();
+    let mut read_at = |at: u64, n: usize| -> Result<Vec<u8>, String> {
+        let n = len.saturating_sub(at).min(n as u64) as usize;
+        let mut out = vec![0; n];
+        file.seek(SeekFrom::Start(at)).and_then(|_| file.read_exact(&mut out)).map_err(|e| format!("{}: {e}", name()))?;
+        Ok(out)
+    };
+    let head = TerrainHead::parse(&read_at(0, TerrainHead::MOST)?)?;
+    head.fits(len)?;
+    let root = TerrainNode::read(&read_at(u64::from(head.root_at), TerrainNode::BYTES)?).ok_or("no tree")?;
+    let (mut w, mut b) = (0, 0);
+    if root.children_at != 0 {
+        let table = read_at(u64::from(root.children_at), TerrainNode::TABLE_BYTES)?;
+        for cz in 0..track::TREE_ARITY {
+            for cx in 0..track::TREE_ARITY {
+                let at = (cx + cz * track::TREE_ARITY) as usize * 4;
+                if table.get(at..at + 4).is_some_and(|w| w != [0; 4]) {
+                    w = w.max(cx + 1);
+                    b = b.max(cz + 1);
+                }
+            }
+        }
+    }
+    Ok((head.scale, head.levels, w.max(1), b.max(1)))
+}
+
+/// A terrain's spacing, tree levels and the root cells its tree has, across and along, out of the
+/// whole file: what [`shape_of_file`] reads from its header and root alone.
+#[cfg(test)]
 fn shape(bytes: &[u8]) -> Result<(F, u32, u32, u32), String> {
     let t = Terrain::parse(bytes)?;
     let root = t.root().ok_or("no tree")?;
@@ -137,8 +177,10 @@ fn shape(bytes: &[u8]) -> Result<(F, u32, u32, u32), String> {
     Ok((t.scale, t.levels, w.max(1), b.max(1)))
 }
 
-/// One world mod by its id: its `mod.json`, every tile's scene and every terrain's header read and
-/// checked, nothing else loaded.
+/// One world mod by its id: its `mod.json`, every tile's scene, and every terrain's header and its
+/// tree's root (MD18: [`shape_of_file`]) read and checked, nothing else loaded. The scenes are kept
+/// for the ride ([`WorldPiece::scene_bytes`]); a terrain whose blocks do not read is the ride's to
+/// find, a tile's as `has no ground` and the home tile's as the ride's own error.
 pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
     let dir = mods.join("tracks").join(id);
     if !track_mods::valid_id(id) || !dir.is_dir() {
@@ -174,16 +216,16 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
         };
         let folder = dir.join("tiles").join(&tile);
         let res = Res::folder(&folder).map_err(|e| format!("{id}: {tile}: {e}"))?;
-        let (_, stem, bytes) = scene_of(&res).map_err(|e| format!("{id}: {tile}: {e}"))?;
+        let (scn, stem, bytes) = scene_of(&res).map_err(|e| format!("{id}: {tile}: {e}"))?;
         let sections: Vec<String> = drop
             .iter()
             .filter(|d| d.get("tile").and_then(Json::str) == Some(tile.as_str()))
             .filter_map(|d| d.get("section").and_then(Json::str).map(str::to_string))
             .collect();
         let text = String::from_utf8_lossy(&bytes);
-        let scene = track::Scene::parse(without_sections(&text, &sections).as_bytes()).map_err(|e| format!("{id}: {tile}: {e}"))?;
-        let terrain = track_mods::terrain_bytes(&res, &scene.terrain_file).map_err(|e| format!("{id}: {tile}: {e}"))?;
-        let (spacing, levels, _, _) = shape(&terrain).map_err(|e| format!("{id}: {tile}: {e}"))?;
+        let scene = track::Scene::parse(without_sections(&text, &sections).as_bytes()).map_err(|e| format!("{id}: {tile}: {scn}: {e}"))?;
+        let terrain = track_mods::terrain_path(&res, &folder, &scene.terrain_file).map_err(|e| format!("{id}: {tile}: {e}"))?;
+        let (spacing, levels, _, _) = shape_of_file(&terrain).map_err(|e| format!("{id}: {tile}: {e}"))?;
         let t = Tile {
             name: tile.clone(),
             at: at.map(|a| F(a as f32)),
@@ -194,7 +236,7 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
             first_owner,
         };
         first_owner = first_owner.saturating_add(scene.collision.len() as i32);
-        pieces.push(WorldPiece { tile: t, dir: folder, scene: Some(scene), stem, dropped: sections });
+        pieces.push(WorldPiece { tile: t, dir: folder, scene: Some(scene), stem, dropped: sections, scene_bytes: Some(bytes.into()) });
     }
     let tile_count = pieces.len();
     if tile_count == 0 {
@@ -204,12 +246,11 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
         let join = j.get("join").and_then(Json::str).ok_or_else(|| format!("{id}: a join with no name"))?.to_string();
         let at = pair(j.get("at"), &format!("{id}: {join}'s at"))?;
         let folder = dir.join("joins").join(&join);
-        let terrain = join_terrain(&folder, &join).map_err(|e| format!("{id}: {join}: {e}"))?;
-        let (spacing, levels, width, breadth) = shape(&terrain).map_err(|e| format!("{id}: {join}: {e}"))?;
+        let (spacing, levels, width, breadth) = shape_of_file(&join_terrain_path(&folder, &join)).map_err(|e| format!("{id}: {join}: {e}"))?;
         let layout = TerrainLayout { width, breadth, width_scale: spacing, breadth_scale: spacing, ..TerrainLayout::default() };
         let mut t = Tile { name: join.clone(), at: at.map(|a| F(a as f32)), layout, spacing, levels, keep: [0; 4], first_owner };
         t.keep = t.every_cell();
-        pieces.push(WorldPiece { tile: t, dir: folder, scene: None, stem: join, dropped: Vec::new() });
+        pieces.push(WorldPiece { tile: t, dir: folder, scene: None, stem: join, dropped: Vec::new(), scene_bytes: None });
     }
     let named = |tile: &str| pieces[..tile_count].iter().position(|p| p.tile.name == tile);
     let home = match json.get("sky").and_then(Json::str) {
@@ -237,6 +278,12 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
         },
     };
     Ok(WorldMod { id: id.to_string(), name, dir, pieces, tile_count, home, spawn })
+}
+
+/// Where a join's terrain file is: `<join>.ps2.trn`, or `<join>.trn` where that is not there.
+fn join_terrain_path(folder: &Path, join: &str) -> PathBuf {
+    let tagged = folder.join(format!("{join}.ps2.trn"));
+    if tagged.is_file() { tagged } else { folder.join(format!("{join}.trn")) }
 }
 
 /// A join's terrain file: `<join>.ps2.trn`, or `<join>.trn`.
@@ -742,5 +789,118 @@ impl WorldMod {
             skies,
             names,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use game_sim::tiles::generate;
+
+    fn write(root: &Path, rel: &str, bytes: impl AsRef<[u8]>) -> u64 {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes.as_ref()).unwrap();
+        bytes.as_ref().len() as u64
+    }
+
+    /// Bytes this thread has read from files so far, as Linux counts them: every `read`, whoever
+    /// makes it.
+    fn read_so_far() -> u64 {
+        let io = std::fs::read_to_string("/proc/thread-self/io").expect("Linux counts a thread's reads");
+        io.lines().find_map(|l| l.strip_prefix("rchar: ")).unwrap().trim().parse().unwrap()
+    }
+
+    /// MD18: a world's find reads its `mod.json`, its tiles' scenes, and of each terrain the header
+    /// and the tree's root alone — and lays out the same tiles reading that as reading every terrain
+    /// whole. Two tiles (one with a palette and a texture page, as MX vs. ATV writes them) and a join.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_worlds_find_reads_each_terrains_header_and_root_alone() {
+        let mods = std::env::temp_dir().join(format!("openmx-md18-{}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        let world = mods.join("tracks").join("md18_world");
+        let height = |x: u32, z: u32| 40.0 + f64::from((x * 7 + z * 3) % 11);
+        let page = |x: u32, y: u32| [(x % 8 * 30) as u8, (y % 8 * 30) as u8, 9];
+        // (name, root cells, spacing, painted)
+        let tiles = [("t0", (4u32, 3u32), 9.0f32, true), ("t1", (2, 2), 4.5, false)];
+        let mut small = 0;
+        let mut terrains = Vec::new();
+        let mut listed = Vec::new();
+        for (i, &(name, cells, spacing, painted)) in tiles.iter().enumerate() {
+            let stem = name.to_uppercase();
+            let dir = world.join("tiles").join(name);
+            small += write(&dir, "mod.json", format!(r#"{{"standard": 1, "kind": "track", "id": "md18_{name}", "name": "MD18 {name}", "source": {{"game": "Real elevation"}}, "version": "1.0.0", "author": "test", "permission": "public-domain", "todo": []}}"#));
+            let scene = [
+                "[SceneInfo]".to_string(),
+                format!("SceneName=MD18 {name}"),
+                "DefaultStartPosition=100.00,40.00,100.00".into(),
+                "DefaultStartDirection=1.00,0.00,0.00".into(),
+                "[Environment]".into(),
+                format!("TerrainFile={stem}.trn"),
+                format!("TerrainWidth={}", cells.0),
+                format!("TerrainBreadth={}", cells.1),
+                format!("TerrainWidthScale={spacing:.2}"),
+                format!("TerrainBreadthScale={spacing:.2}"),
+                String::new(),
+            ]
+            .join("\r\n");
+            small += write(&dir, &format!("Env/{stem}/{stem}.scn"), scene);
+            let pages: Option<&dyn Fn(u32, u32) -> [u8; 3]> = if painted { Some(&page) } else { None };
+            let trn = generate::terrain_painted(name, cells, spacing, height, |_, _| 1, pages);
+            let path = dir.join(format!("Env/{stem}/{stem}.ps2.trn"));
+            write(&dir, &format!("Env/{stem}/{stem}.ps2.trn"), &trn);
+            terrains.push(path);
+            let at = 1000 * i;
+            listed.push(format!(r#"{{"tile": "{name}", "at": [{at}.0, 0.0], "keep": [0, 0, {}, {}]}}"#, cells.0 * 16 - 1, cells.1 * 16 - 1));
+        }
+        let join = generate::terrain("j0", (3, 1), 6.0, height, |_, _| 1);
+        write(&world, "joins/j0/j0.ps2.trn", &join);
+        terrains.push(world.join("joins/j0/j0.ps2.trn"));
+        small += write(
+            &world,
+            "mod.json",
+            format!(
+                r#"{{"standard": 1, "kind": "world", "id": "md18_world", "name": "MD18", "source": {{"game": "Combined"}}, "version": "1.0.0", "author": "test", "permission": "public-domain", "tiles": [{}], "joins": [{{"join": "j0", "at": [600.0, 0.0]}}], "drop": [], "todo": []}}"#,
+                listed.join(", ")
+            ),
+        );
+
+        let before = read_so_far();
+        let w = find(&mods, "md18_world").expect("the world reads");
+        let read = read_so_far() - before;
+        // The mod.json and scenes whole, and of each terrain its header, root node and root table.
+        let most = small + terrains.len() as u64 * (TerrainHead::MOST + TerrainNode::BYTES + TerrainNode::TABLE_BYTES) as u64;
+        let whole: u64 = terrains.iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
+        println!("find read {read} bytes; at most {most} allowed; the terrains are {whole} bytes");
+        assert!(read <= most + 512, "find read {read} bytes, more than the {most} its files' headers are");
+        assert!(whole > 10 * most, "the terrains ({whole} bytes) are too small to tell a whole read from a header's");
+
+        // The same world as a whole read of each terrain makes it.
+        assert_eq!((w.pieces.len(), w.tile_count), (3, 2));
+        for (p, path) in w.pieces.iter().zip(&terrains) {
+            let (spacing, levels, width, breadth) = shape(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!((p.tile.spacing, p.tile.levels), (spacing, levels), "{}", p.tile.name);
+            assert_eq!(shape_of_file(path), Ok((spacing, levels, width, breadth)), "{}", p.tile.name);
+            if p.scene.is_none() {
+                assert_eq!((p.tile.layout.width, p.tile.layout.breadth), (width, breadth), "{}", p.tile.name);
+            }
+        }
+        assert_eq!((w.pieces[0].tile.spacing, w.pieces[1].tile.spacing, w.pieces[2].tile.spacing), (F(9.0), F(4.5), F(6.0)));
+        assert_eq!((w.pieces[2].tile.layout.width, w.pieces[2].tile.layout.breadth), (3, 1));
+        // The scenes are kept for the ride, as the files have them.
+        for (p, (name, ..)) in w.pieces.iter().zip(&tiles) {
+            let stem = name.to_uppercase();
+            let on_disk = std::fs::read(p.dir.join(format!("Env/{stem}/{stem}.scn"))).unwrap();
+            assert_eq!(p.scene_bytes.as_deref(), Some(&on_disk[..]));
+        }
+        assert!(w.pieces[2].scene_bytes.is_none());
+
+        // A terrain cut short of its tree is refused by find; one cut inside its blocks only by the ride.
+        let cut = &terrains[1];
+        let bytes = std::fs::read(cut).unwrap();
+        std::fs::write(cut, &bytes[..TerrainHead::MOST.min(bytes.len())]).unwrap();
+        assert!(find(&mods, "md18_world").unwrap_err().contains("does not fit"));
+        let _ = std::fs::remove_dir_all(mods.parent().unwrap());
     }
 }

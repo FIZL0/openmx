@@ -2194,10 +2194,15 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         .ok_or("the track archive has no .scn")?
         .name
         .clone();
-    let scn_bytes = archives[0].read(&scn)?;
+    // A world's home scene is the one its find read (MD18), not read again.
+    let scn_bytes = match world_mod.as_ref().and_then(|w| w.pieces[w.home].scene_bytes.clone()) {
+        Some(kept) => kept.to_vec(),
+        None => archives[0].read(&scn)?,
+    };
     // The same file read twice, by two readers that want different things out of it: the simulation's
     // reader for the spawn and the terrain's layout, the renderer's for the props, lights and fog.
-    let mut place = track::Scene::parse(&scn_bytes)?;
+    // A mod's scene is first read here (MD18), so what is wrong with it is said here.
+    let mut place = track::Scene::parse(&scn_bytes).map_err(|e| format!("{scn}: {e}"))?;
     if let Some(t) = &modded {
         t.place_spawn(&mut place)?;
     }
@@ -2214,7 +2219,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let terrain_bytes: &Vec<u8> = keep_bytes.get_or_init(|| read);
     // The same file parsed twice, because the two sides of it are owned by different crates: the
     // shell's `Ground` draws it in host floats, the port's answers the ride's ray in the game's.
-    let ground = Ground::new(track::Terrain::parse(&terrain_bytes)?, &place.terrain);
+    let ground = Ground::new(track::Terrain::parse(&terrain_bytes).map_err(|e| format!("{}: {e}", place.terrain_file))?, &place.terrain);
     let ground = {
         let extent = ground.extent();
         ground.painted(game_render::splat::Splat::load(&archives, &stem, extent))

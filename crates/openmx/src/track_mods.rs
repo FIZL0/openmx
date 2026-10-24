@@ -7,9 +7,11 @@
 //! that reads a disc track's archive reads a mod's folder the same way.
 //!
 //! What this module does is find them and refuse the broken ones: [`scan`] lists every track mod
-//! that reads (its `mod.json` has every required field right, its folder has exactly one `.scn`, the
-//! scene parses, and the terrain it names is there and parses), and says in one log line why each
-//! other one is left out. Nothing in here can panic on a mod's bytes.
+//! whose `mod.json` has every required field right, reading that file and nothing else (MD18: it runs
+//! at every start, over every mod installed), and says in one log line why each other one is left
+//! out. [`find`], as a ride asks for one, checks its folder has exactly one `.scn` too; the scene and
+//! the terrain it names are the ride's own load to read, and one that does not read is the ride's
+//! error ("Could not ride" in the front end). Nothing in here can panic on a mod's bytes.
 //!
 //! A mod is not the disc's track: it has no second archive, so its bike, physics and follow camera
 //! are a disc freeride's ([`FREERIDE`]), and it rides as a freeride. With no `mods/` folder, or with
@@ -67,11 +69,23 @@ impl ModTrack {
     }
 }
 
-/// What [`scan`] found: the mods that read, in folder-name order, and a line for each one left out.
+/// What [`scan`] found: the mods whose `mod.json` reads, in folder-name order, and a line for each
+/// one left out.
 #[derive(Debug, Default)]
 pub struct Scan {
-    pub tracks: Vec<ModTrack>,
+    pub tracks: Vec<Listed>,
     pub log: Vec<String>,
+}
+
+/// One track mod as the pick lists it, out of its `mod.json` alone (MD18).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed {
+    /// [`ModTrack::id`].
+    pub id: String,
+    /// [`ModTrack::name`].
+    pub name: String,
+    /// [`ModTrack::dir`].
+    pub dir: PathBuf,
 }
 
 /// Every track mod under `mods` (the `mods/` folder itself). No folder is no mods and no lines.
@@ -83,8 +97,8 @@ pub fn scan(mods: &Path) -> Scan {
     folders.sort();
     for folder in folders {
         let label = folder.file_name().map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into_owned());
-        match check(&folder) {
-            Ok(Some(t)) => out.tracks.push(t),
+        match listing(&folder) {
+            Ok(Some(t)) => out.tracks.push(Listed { id: t.id, name: t.name, dir: t.dir }),
             Ok(None) => {}
             Err(why) => out.log.push(format!("mods: tracks/{label} left out: {why}")),
         }
@@ -92,7 +106,7 @@ pub fn scan(mods: &Path) -> Scan {
     out
 }
 
-/// One track mod by its id, checked as [`scan`] checks it.
+/// One track mod by its id, checked as [`scan`] checks it, and its folder for its one scene.
 pub fn find(mods: &Path, id: &str) -> Result<ModTrack, String> {
     let folder = mods.join("tracks").join(id);
     if !valid_id(id) || !folder.is_dir() {
@@ -124,8 +138,30 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 /// `Ok(None)` for a mod that is not a track (a world or a music pack, or a kind this build does not
-/// know), which the standard says to skip quietly; `Err` for a broken one.
+/// know), which the standard says to skip quietly; `Err` for a broken one. [`listing`]'s `mod.json`,
+/// and the folder's listing for its one `.scn` (no file in it is read).
 fn check(folder: &Path) -> Result<Option<ModTrack>, String> {
+    let Some(mut t) = listing(folder)? else { return Ok(None) };
+    let res = Res::folder(folder)?;
+    let scenes: Vec<&str> = res
+        .entries()
+        .iter()
+        .map(|e| e.name.as_str())
+        .filter(|n| n.to_ascii_lowercase().ends_with(".scn"))
+        .collect();
+    let scn = match scenes.as_slice() {
+        [one] => one.to_string(),
+        [] => return Err("no .scn".into()),
+        more => return Err(format!("{} .scn files, and a track has one", more.len())),
+    };
+    let stem = scn.rsplit('\\').next().unwrap_or(&scn);
+    t.stem = stem[..stem.len() - 4].to_string();
+    Ok(Some(t))
+}
+
+/// A track mod out of its `mod.json` alone (MD18), every field the standard requires checked; its
+/// `stem` is left empty, since only the folder's listing says it.
+fn listing(folder: &Path) -> Result<Option<ModTrack>, String> {
     let name = folder.file_name().and_then(|n| n.to_str()).ok_or("the folder's name is not UTF-8")?;
     let path = folder.join("mod.json");
     let text = std::fs::read(&path).map_err(|e| format!("mod.json: {e}"))?;
@@ -180,28 +216,24 @@ fn check(folder: &Path) -> Result<Option<ModTrack>, String> {
         }
     };
 
-    // The files: one scene, and the terrain it names.
-    let res = Res::folder(folder)?;
-    let scenes: Vec<&str> = res
-        .entries()
-        .iter()
-        .map(|e| e.name.as_str())
-        .filter(|n| n.to_ascii_lowercase().ends_with(".scn"))
-        .collect();
-    let scn = match scenes.as_slice() {
-        [one] => one.to_string(),
-        [] => return Err("no .scn".into()),
-        more => return Err(format!("{} .scn files, and a track has one", more.len())),
-    };
-    let stem = scn.rsplit('\\').next().unwrap_or(&scn);
-    let stem = stem[..stem.len() - 4].to_string();
-    let scene_bytes = res.read(&scn)?;
-    let mut scene = track::Scene::parse(&scene_bytes).map_err(|e| format!("{scn}: {e}"))?;
-    let terrain = terrain_bytes(&res, &scene.terrain_file)?;
-    track::Terrain::parse(&terrain).map_err(|e| format!("{}: {e}", scene.terrain_file))?;
-    let t = ModTrack { id: id.to_string(), name: title.to_string(), dir: folder.to_path_buf(), stem, spawn };
-    t.place_spawn(&mut scene)?;
+    let t = ModTrack { id: id.to_string(), name: title.to_string(), dir: folder.to_path_buf(), stem: String::new(), spawn };
+    // The spawn's numbers, through the scene's own conversion.
+    t.place_spawn(&mut track::Scene::default())?;
     Ok(Some(t))
+}
+
+/// Where on the disk the terrain a scene names is, in a folder `res` was opened from
+/// ([`Res::folder`]), looked up as [`terrain_bytes`] looks it up: for reading part of it (MD18).
+pub fn terrain_path(res: &Res, folder: &Path, named: &str) -> Result<PathBuf, String> {
+    let tagged = match named.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}.ps2.{ext}"),
+        None => named.to_string(),
+    };
+    let e = res
+        .find_suffix(named)
+        .or_else(|| res.find_suffix(&tagged))
+        .ok_or_else(|| format!("no file ending in {named} or {tagged}"))?;
+    Ok(folder.join(e.path()))
 }
 
 /// The terrain a scene names, looked up as the shell looks up a disc track's: the name as written,

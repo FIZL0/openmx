@@ -78,7 +78,11 @@ pub fn build(piece: &WorldPiece, index: usize, lod: Lod) -> Result<Built, String
     let Some(scene) = &piece.scene else { return Err("a join has nothing on it".into()) };
     let res = Res::folder(&piece.dir)?;
     let archives = [res];
-    let (_, _, bytes) = worlds::scene_of(&archives[0])?;
+    // The scene as the world's find read it (MD18), else off the folder.
+    let bytes = match &piece.scene_bytes {
+        Some(kept) => kept.to_vec(),
+        None => worlds::scene_of(&archives[0])?.2,
+    };
     let text = worlds::without_sections(&ini::text(&bytes), &piece.dropped);
     let mut look = view::Scene::parse(&text);
     let mut assets = Assets::default();
