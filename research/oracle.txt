@@ -4865,3 +4865,25 @@ asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle
 # (80,30,30), +0x670 damper base (3.2,2,2). Request: +0xf0/+0xf4 point at the bike box (centre
 # (0,4.3,-1.5), half (0.45,0.6,1.75)); +0x170 pitch (~ the body machine's mix lag), +0x178 speed
 # (not the velocity's length; writer not found, S111).
+
+# S111 — the riding request's writer, every field (proved in crates/game-sim/tests/ragdoll_riding.rs:
+# the_riding_request_is_the_originals_from_each_row, 1203 of S109's run1 rows, and
+# the_riding_requests_sources_are_the_riders_at_the_state). The fill 0x0027c2d0 (gated on (rider+8) &
+# (rider+0xb84)) copies the state pack's snapshot (0x00258d50), which runs after this tick's physics
+# and before the animation header. Request offset = rider offset - 0xb80:
+#   +0x10 rows: node *(rider+0x18) world matrix via 0x001b2a50 (4 quads, the 4th its position)
+#   +0x50 frame: node *(rider+0x964) world matrix, the bike model's "Bike" root (child of +0x18's)
+#   +0x90 velocity = +0x840 = chassis +0x260; +0x150 = +0x560 when the reason is 7, else the same
+#   +0xa0 rates = transform_unrotate(node +0x964, +0x850), +0x850 = chassis +0x280 (world rates)
+#   +0xf8 = !(+0x93c) = !(+0x574); +0xfc = +0x940 = +0x4f4 (the backflip torque flag: the actor
+#     latches Posed on it); +0x100 = +0x944 = +0xa44 (no-hander); +0x104 = +0x868 = +0x748
+#   +0x16c = +0x648 (the reverse command, P73: no pad sets it)
+#   +0x170 pitch = +0x898 = +0x9e8 (pose axis) and +0x174 = +0x89c = +0x9ec (fore-aft), both packed
+#     before the header: last tick's, except on a held tick (+0x3a0), where stunt_idle's tail has
+#     written 0.5/0.5 first (0x00258cc0)
+#   +0x178 speed = +0x8c8 = +0x438, the contact velocity's z (bike_air_state), not |velocity|
+#   +0x180 centre = +0x820 = node +0x18's position, w 1; +0x190 quat = +0x830 = mat4_to_quat of it
+#   +0x1a0 gesture = +0x864 when 0..23 else 24; +0x1a4 = +0xa2c; +0x1a8 = byte +0x8a0;
+#   +0x1ac = *(rider+0x7a8)+0x128 (the bike collider); +0x1b0 = +0x7c0; +0x144 = *(rider+4000)+0xc4;
+#   +0x160/+0x164/+0x168 = +0x888 (throttle)/+0x894/+0x88c; +0x238 = +0xb7c (cleared after);
+#   +0x23c/+0x240 = +0x7dc/+0x7e0

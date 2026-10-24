@@ -800,7 +800,10 @@ fn ride_ragdoll(seat: &Seat, rig: &mut Rig, dt: F, place: &mut dyn sim_world::Wo
         return;
     }
     let veh = &rider.body.veh;
-    let request = game_sim::ragdoll_riding::request(&rider.ride, veh.mix.value, [world(hand_l), world(hand_r)], [world(foot_l), world(foot_r)], kit.bike);
+    // The drawn bike's root node in the world: the chassis' "Bike" node, below the chassis node.
+    let root = rig.chassis.as_ref().and_then(|c| c.nodes.root.and_then(|i| c.world.get(i)));
+    let frame = root.map_or(m, |r| game_sim::math::mul(&game_sim::math::Mat4(r.0.map(Vf)), &m));
+    let request = game_sim::ragdoll_riding::request(&rider.ride, rider.packed_pose, frame, [world(hand_l), world(hand_r)], [world(foot_l), world(foot_r)], kit.bike);
     let riding = rig.riding.get_or_insert_with(|| game_sim::ragdoll_riding::Riding::new(kit));
     riding.posed_off_the_table(rider.body.machine.mode == game_sim::rider_anim::Mode::Posed);
     riding.step(kit, rider.skeleton.as_deref(), &request, veh.state, dt, place);
@@ -809,12 +812,12 @@ fn ride_ragdoll(seat: &Seat, rig: &mut Rig, dt: F, place: &mut dyn sim_world::Wo
 /// How far the riding ragdoll's main bone may be from the bike before it is started again, in feet.
 const RIDING_STRAY: f32 = 10.0;
 
-/// Whether the riding rider is drawn from the riding ragdoll (`OPENMX_RIDING_RAGDOLL=1`) rather than the
-/// clip pose. Off by default (user, 2026-10-23: "our guy is super floppy"): the request S109 builds is
-/// a guess, the hands and feet held to the grips and pegs whatever the trick, so a trick's pose never
-/// shows and a backflip folds the body off the bike. S111 proves the request; turn it on after that.
+/// Whether the riding rider is drawn from the riding ragdoll rather than the clip pose, as the
+/// original draws it. On since S111 proved the request it is handed (`OPENMX_RIDING_RAGDOLL=0` turns
+/// it off): a gesture or a no-hander lets go through the body's posed mode (V61) and a backflip
+/// through the request's flip flag, so each is drawn as its clip wrote it.
 fn riding_ragdoll_on() -> bool {
-    std::env::var_os("OPENMX_RIDING_RAGDOLL").is_some_and(|v| v == "1")
+    std::env::var_os("OPENMX_RIDING_RAGDOLL").is_none_or(|v| v != "0")
 }
 
 /// The riding ragdoll's nodes to draw the body from, once it has been placed (S109).
@@ -4835,8 +4838,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                 }
             }
-            // The rider's ragdoll on the bike (S109), off the pose and the grips just drawn: only when
-            // asked for, until its request is the original's (S111).
+            // The rider's ragdoll on the bike (S109), off the pose and the grips just drawn.
             if moving && bike_up && online.is_none() && riding_ragdoll_on() {
                 perf.time(Stage::Animation, || ride_ragdoll(seat, rig, dt, &mut world.place));
             }

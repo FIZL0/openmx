@@ -206,6 +206,9 @@ pub struct Rider {
     /// The animation header (S6). The rider does not draw here, but the header writes the crossup
     /// pose the landing test reads, so it has to run.
     pub motion: motion::Driver,
+    /// The pose the header showed last tick ([`motion::Driver::pose`]), as the state pack latches it
+    /// in front of this tick's header (S111): what the riding body's request carries.
+    pub packed_pose: F,
     /// The 24 stunts this rider can do, off the stunt table.
     pub set: Set,
     /// Which stunt clips the rider's animation set actually holds. Everything is present until a
@@ -322,6 +325,7 @@ impl Rider {
             tricks: Tricks::default(),
             state: state::Ride::default(),
             motion: motion::Driver::default(),
+            packed_pose: motion::Driver::default().pose,
             set,
             clips: motion::Clips::default(),
             // A local human with a screen of their own, freestyle, wrecks on. `settles` starts false
@@ -491,7 +495,7 @@ impl Rider {
                         rivals: &[ride::Rival], bump: Option<&mut crate::rider_contact::Bump>) -> Frame {
         let mut out = Frame::default();
         let Rider {
-            ride, tricks, state, motion, set, clips, sense, racing, wreckage, crash, animation,
+            ride, tricks, state, motion, packed_pose, set, clips, sense, racing, wreckage, crash, animation,
             flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, wreck_sounds, idles, ghost, edge_armed, page,
             put_back, ragdoll_shown, score, ..
         } = self;
@@ -627,6 +631,11 @@ impl Rider {
         if bike.wrecked || !tricks.request(set, bike, params) {
             tricks.idle(&mut bike);
         }
+        // The idle's own tail, whatever was asked for: a held rider shows the pose straight on
+        // (S111). The fill above copied the same word the original's idle reads.
+        if put_back.held {
+            motion.freeze();
+        }
         state.fresh = bike.fresh;
         if tricks.restart && !before {
             out.started = Some(tricks.requested);
@@ -675,6 +684,7 @@ impl Rider {
             crossup: ride.air.crossup,
         };
         let asked = motion::Request { progress: tricks.progress, ..request };
+        *packed_pose = motion.pose;
         *animation = motion.frame(dt, p.motion(), asked, pose, *clips);
 
         // The word next frame's airborne control reads. The clocks run after the ground step, so what
