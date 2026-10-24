@@ -4882,3 +4882,14 @@ asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle
 #   the rear does, else chassis+0x270; +0x438 (its z) is the "speed" the steering fade, the lean and
 #   the other mv readers take. The save state's +0x430 equals front+0x190 bit for bit; +0x190 is the
 #   chassis' velocity less the ground's, in the chassis' frame (not +0x170, the contact's).
+# S106 — the brake held on a steep face (journal 2026-10-24-s106-brake-slope-slide). The original's
+#   bike does not slide on a 46-53 degree free09 face with the brake held: from standing (nose down,
+#   side on) and after braking onto it at 25 ft/s, both wheels lock, it stops within ~20-50 ticks and
+#   then creeps at 0.02-0.04 ft/s for as long as the brake is held; let go, it rolls away. The brake's
+#   torque fades to 0 below 3.3 ft/s (surface_drag's clamp(0.3 * +0x190.z)), so what holds the bike
+#   is the tyres' grip (MaxDriveForce 2.0/2.2 x the load, more than tan 53), not the brake.
+#   The engine's words a save state carries, off rider+0x7b8: gear +0x68, ratio +0x80, inverse ratio
+#   +0x84, the clutch's launch scale +0x88, its lock +0x64, rpm +0xa8, the curve cursor +0x90/+0x94.
+#   A state saved with the clutch slipping in another gear drove a braked rear into a spin at tick 1
+#   until these were seeded. The levers a state carries: rider +0x650 brake (+0x654 its rear copy),
+#   +0x658 gas, +0x65c clutch, +0x628/+0x62c the squared stick, +0x670/+0x674 the lean.
