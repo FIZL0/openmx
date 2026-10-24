@@ -3077,6 +3077,19 @@ impl Menu {
                     self.up[k] = self.up.get(k + 1).copied().unwrap_or_default();
                     self.switchable[k] = self.switchable.get(k + 1).copied().unwrap_or(false);
                 }
+                // each later rider's own pause (P84) moves up a seat with them
+                let gone = i.max(1);
+                if gone < self.sides.len() {
+                    if i == 0 {
+                        self.swap_side(1);
+                        self.player = self.player.saturating_sub(1);
+                    }
+                    self.sides.remove(gone);
+                    for s in &mut self.sides[gone..] {
+                        s.pauser -= 1;
+                        s.player = s.player.saturating_sub(1);
+                    }
+                }
                 self.note = Some(format!("Player {} left the ride.", i + 1));
             }
         }

@@ -2523,24 +2523,26 @@ fn a_guests_page_changes_only_its_own_seat_and_not_the_world() {
     ride_frame(&mut m, &mut readers, &[Report::idle(), Report::idle()], &mut garages);
     // 2P's Start, down 2P's pad to Game Modifiers.
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
-    assert_eq!(m.driver(), 1);
+    assert_eq!(m.view(1).screen(), Some(Screen::Pause), "2P's own pause (P84)");
     for _ in 0..12 {
-        if m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers" {
+        let v = m.view(1);
+        if v.pause_rows()[v.cursor(Screen::Pause)] == "Game Modifiers" {
             break;
         }
         tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     }
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    assert_eq!(m.view(1).screen(), Some(Screen::Modifiers));
     let row = |m: &Menu, key: Key| m.page().into_iter().find(|r| r.key == key).unwrap_or_else(|| panic!("{key:?} not in {:?}", m.page().iter().map(|r| (r.key, r.value.clone())).collect::<Vec<_>>()));
-    assert_eq!(row(&m, Key::Player).value, "2P");
-    assert!(row(&m, Key::Player).off.is_some(), "only the host picks another player");
-    assert!(!row(&m, Key::Player).choices.iter().any(|c| c == "All Players"));
-    assert!(row(&m, Key::Knob(Knob::Gravity)).off.is_some(), "the world's is the host's");
-    assert!(row(&m, Key::Knob(Knob::BikeSpeed)).off.is_none());
+    assert_eq!(row(&m.view(1), Key::Player).value, "2P");
+    assert!(row(&m.view(1), Key::Player).off.is_some(), "only the host picks another player");
+    assert!(!row(&m.view(1), Key::Player).choices.iter().any(|c| c == "All Players"));
+    assert!(row(&m.view(1), Key::Knob(Knob::Gravity)).off.is_some(), "the world's is the host's");
+    assert!(row(&m.view(1), Key::Knob(Knob::BikeSpeed)).off.is_none());
     let to = |m: &mut Menu, readers: &mut [Reader], garages: &mut [Garage], key: Key| {
         for _ in 0..40 {
-            if m.page()[m.cursor(Screen::Modifiers)].key == key {
+            let v = m.view(1);
+            if v.page()[v.cursor(Screen::Modifiers)].key == key {
                 return;
             }
             tap_seat(m, readers, garages, 1, Control::Down);
@@ -2556,7 +2558,7 @@ fn a_guests_page_changes_only_its_own_seat_and_not_the_world() {
     assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 100, "2P moved the world");
     to(&mut m, &mut readers, &mut garages, Key::Player);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Left);
-    assert_eq!(row(&m, Key::Player).value, "2P");
+    assert_eq!(row(&m.view(1), Key::Player).value, "2P");
     // Reset to Original puts back 2P's alone.
     m.settings.modifiers.set(0, Knob::Gravity, 50);
     to(&mut m, &mut readers, &mut garages, Key::ResetMods);
@@ -3183,10 +3185,11 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     assert_eq!(m.settings.graphics, Graphics::Full);
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
-    assert_eq!(m.settings.graphics, Graphics::Original);
+    // main's Far Fog (a1a33f84) is next after the Whole Map
+    assert_eq!(m.settings.graphics, Graphics::Far);
     let dir = scratch("graphics-tab");
     menu::save(&dir, &m.settings, &Controls::default()).unwrap();
-    assert_eq!(menu::load(&dir).0.graphics, Graphics::Original);
+    assert_eq!(menu::load(&dir).0.graphics, Graphics::Far);
     std::fs::remove_dir_all(&dir).ok();
     // `--screen graphics` opens the same tab.
     assert_eq!(Screen::from_word("graphics"), Some(Screen::Graphics));
@@ -4598,8 +4601,8 @@ fn players_drop_into_a_running_freeride_and_leave_it_and_the_others_ride_on() {
     // The second leaves from their own pause: their bike goes, the third moves up, the others
     // ride on, two views again.
     r.tap(1, Control::Start);
-    assert_eq!(r.m.driver(), 1);
-    let leave = r.m.pause_rows().iter().position(|row| row == "Leave Session").unwrap();
+    assert_eq!(r.m.view(1).screen(), Some(Screen::Pause), "their own pause (P84)");
+    let leave = r.m.view(1).pause_rows().iter().position(|row| row == "Leave Session").unwrap();
     for _ in 0..leave {
         r.tap(1, Control::Down);
     }
@@ -4643,7 +4646,7 @@ fn players_drop_into_a_running_freeride_and_leave_it_and_the_others_ride_on() {
     // The last two leave; the last one out is asked, and goes back to the main menu.
     let acts = r.tap(2, Control::Start);
     assert!(acts.iter().all(|a| *a == Act::Stay));
-    let leave = r.m.pause_rows().iter().position(|row| row == "Leave Session").unwrap();
+    let leave = r.m.view(1).pause_rows().iter().position(|row| row == "Leave Session").unwrap();
     for _ in 0..leave {
         r.tap(2, Control::Down);
     }

@@ -565,10 +565,12 @@ fn an_online_rides_pause_leaves_the_session() {
     let acts = taps_acts(&mut m, &mut r, &[Control::Up, Control::Cross]);
     assert!(acts.contains(&Act::LeaveSession(0)), "{acts:?}");
     assert!(m.riding(), "back to the ride while it lets go");
-    // a second local player's pause lets their seat alone go
+    // a second local player's pause, their own (P84), lets their seat alone go
     m.pause_for(1);
-    taps(&mut m, &mut r, &vec![Control::Down; leave]);
-    let acts = taps_acts(&mut m, &mut r, &[Control::Cross, Control::Up, Control::Cross]);
+    let acts = m.with_seat(1, |m| {
+        taps(m, &mut r, &vec![Control::Down; leave]);
+        taps_acts(m, &mut r, &[Control::Cross, Control::Up, Control::Cross])
+    });
     assert!(acts.contains(&Act::LeaveSession(1)), "{acts:?}");
     // Stay keeps the ride
     m.pause();

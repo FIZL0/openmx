@@ -5958,7 +5958,8 @@ fn md20_one_short_of_either_wrecks() {
 /// it twice over, as MX vs. ATV's air control does both: once the backflip is over and the 360 turns
 /// on alone, the stick has its say again, and once the 360 has ended in the air the bike is damped
 /// until the wheels are down ([`game_sim::air::Step::spin_ramp`]) where the port had levelled. Re-pinned
-/// by S67, whose bottom-out shove and stunt-clock copy-back are the original's and move every landing.
+/// by S67, whose bottom-out shove and stunt-clock copy-back are the original's and move every landing,
+/// and again with S106's braking speed source on top of it.
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -5970,13 +5971,14 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0x3ccc375c1617c3b6;
-const MD25_DIAGONAL_FOLD: u64 = 0xf7b5115bac219822;
+const MD25_GESTURE_FOLD: u64 = 0x61748edc528a206c;
+const MD25_DIAGONAL_FOLD: u64 = 0x87a8d9135e8f7989;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
 /// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope. 0.31 until S67's
-/// bottom-out shove changed the take-off; at 0.305 `spin` lands 37° off and `spinpull` paths 366°.
-const M21_LIP: (f32, f32, f32) = (108.0, 0.305, 25.0);
+/// bottom-out shove changed the take-off, 0.305 until S106's braking speed source landed on top of it
+/// (34° off); at 0.30 `spin` lands 40° off and `spinpull` paths 360°.
+const M21_LIP: (f32, f32, f32) = (108.0, 0.30, 25.0);
 
 /// What one 360 off [`M21_LIP`] did in the air, take-off to touchdown, as openmx-mods' `both_sum.py`
 /// sums M21's captures: the body-frame rotation per axis, the path (every step's angle summed), the

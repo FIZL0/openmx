@@ -164,8 +164,9 @@ fn switch_from_the_pause(
     offered: Machine,
 ) {
     tap_seat(m, readers, garages, sims, world, seat, Control::Start);
-    assert_eq!((m.screen(), m.driver()), (Some(Screen::Pause), seat));
-    assert_eq!(m.pause_rows()[2], format!("Switch To Machine: {}", offered.label()));
+    // the seat's own pause (P84), in its own view
+    assert_eq!(m.view(seat).screen(), Some(Screen::Pause));
+    assert_eq!(m.view(seat).pause_rows()[2], format!("Switch To Machine: {}", offered.label()));
     tap_seat(m, readers, garages, sims, world, seat, Control::Down);
     tap_seat(m, readers, garages, sims, world, seat, Control::Down);
     let acts = tap_seat(m, readers, garages, sims, world, seat, Control::Cross);

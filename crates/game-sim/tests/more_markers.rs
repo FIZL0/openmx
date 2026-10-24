@@ -81,10 +81,11 @@ fn five_set() -> Sim {
 #[test]
 fn there_is_no_plus_until_all_five_are_set() {
     let mut sim = Sim::new(SEED);
-    // Fresh: Right goes round the five and back to the first, Left from the first to the fifth.
-    let seen: Vec<Pick> = (0..SLOTS).map(|_| step(&mut sim, Control::Right)).collect();
-    assert_eq!(seen, (1..SLOTS).map(Pick::Slot).chain([Pick::Slot(0)]).collect::<Vec<_>>());
-    assert_eq!(step(&mut sim, Control::Left), Pick::Slot(SLOTS - 1));
+    // Fresh: Right goes round the five and the spawn (P135) back to the first, Left from the first
+    // to the spawn.
+    let seen: Vec<Pick> = (0..=SLOTS).map(|_| step(&mut sim, Control::Right)).collect();
+    assert_eq!(seen, (1..SLOTS).map(Pick::Slot).chain([Pick::Spawn, Pick::Slot(0)]).collect::<Vec<_>>());
+    assert_eq!(step(&mut sim, Control::Left), Pick::Spawn);
     assert_eq!(step(&mut sim, Control::Right), Pick::Slot(0));
     // Four set: still no +.
     for s in 0..SLOTS - 1 {
@@ -95,13 +96,13 @@ fn there_is_no_plus_until_all_five_are_set() {
     }
     assert!(!sim.markers.more());
     assert_eq!(step(&mut sim, Control::Right), Pick::Slot(SLOTS - 1));
-    assert_eq!(step(&mut sim, Control::Right), Pick::Slot(0), "no + with slot 5 empty");
-    // The fifth set: the + is past it, and Left from the first wraps onto it.
+    assert_eq!(step(&mut sim, Control::Right), Pick::Spawn, "no + with slot 5 empty");
+    // The fifth set: the + is past it, and Left from the spawn wraps onto it.
     assert_eq!(step(&mut sim, Control::Left), Pick::Slot(SLOTS - 1));
     assert_eq!(hold(&mut sim, Control::Down), Did::Placed(SLOTS - 1));
     assert!(sim.markers.more());
     assert_eq!(step(&mut sim, Control::Right), Pick::More);
-    assert_eq!(step(&mut sim, Control::Right), Pick::Slot(0));
+    assert_eq!(step(&mut sim, Control::Right), Pick::Spawn);
     assert_eq!(step(&mut sim, Control::Left), Pick::More);
     assert_eq!(sim.markers.slots.len(), SLOTS, "stepping onto the + adds nothing");
 }
@@ -167,7 +168,7 @@ fn sixty_four_set_shows_no_plus() {
     assert_eq!(sim.markers.slots.len(), MAX_SLOTS);
     assert!(sim.markers.slots.iter().all(Option::is_some) && !sim.markers.more());
     assert_eq!(sim.markers.pick(0, 1), Pick::Slot(MAX_SLOTS - 1));
-    assert_eq!(step(&mut sim, Control::Right), Pick::Slot(0), "no + past 64");
+    assert_eq!(step(&mut sim, Control::Right), Pick::Spawn, "no + past 64");
     assert_eq!(step(&mut sim, Control::Left), Pick::Slot(MAX_SLOTS - 1));
     // A Down on the last slot places over it, adding nothing.
     assert_eq!(hold(&mut sim, Control::Down), Did::Placed(MAX_SLOTS - 1));
