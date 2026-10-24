@@ -3980,7 +3980,9 @@ fn a_full_lock_turn_keeps_its_speed() {
         };
         let kept = turn[29][0] / entry;
         let rates: Vec<f32> = turn.windows(2).map(|w| wrap(w[1][1] - w[0][1]) / DISC_DT.0 * side).collect();
-        let fastest = rates.iter().copied().fold(f32::MIN, f32::max);
+        // The fastest over two ticks: since S67 a bottom-out's shove jolts the heading on one tick
+        // (2.84 rad/s between 1.92 and 1.85, full lock left), which is not the turn's own rate.
+        let fastest = rates.windows(2).map(|w| (w[0] + w[1]) / 2.0).fold(f32::MIN, f32::max);
         let mean = rates.iter().sum::<f32>() / rates.len() as f32;
         assert!(kept >= 0.8, "stick {side:+}: a second of full lock from {entry} ft/s kept {kept} of it");
         assert!(
@@ -5972,8 +5974,9 @@ const MD25_GESTURE_FOLD: u64 = 0x3ccc375c1617c3b6;
 const MD25_DIAGONAL_FOLD: u64 = 0xf7b5115bac219822;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
-/// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope.
-const M21_LIP: (f32, f32, f32) = (108.0, 0.31, 25.0);
+/// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope. 0.31 until S67's
+/// bottom-out shove changed the take-off; at 0.305 `spin` lands 37° off and `spinpull` paths 366°.
+const M21_LIP: (f32, f32, f32) = (108.0, 0.305, 25.0);
 
 /// What one 360 off [`M21_LIP`] did in the air, take-off to touchdown, as openmx-mods' `both_sum.py`
 /// sums M21's captures: the body-frame rotation per axis, the path (every step's angle summed), the
