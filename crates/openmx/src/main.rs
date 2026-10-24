@@ -3487,6 +3487,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 false => copy(&mut assets, name),
             })
         });
+        // The drawn fork stops short of what hangs off the bars (V62).
+        let mut chassis = chassis;
+        if let Some(c) = &mut chassis {
+            c.stop_fork_in(&assets.models, &bike_model, &parts);
+        }
         rigs.push(Rig {
             body,
             chassis,
@@ -3506,6 +3511,11 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             modified: !mods.seat_is_original(i),
             riding: None,
         });
+    }
+    // The drawn fork stops short of what hangs off the bars (V62).
+    let mut chassis = chassis;
+    if let Some(c) = &mut chassis {
+        println!("chassis: the fork is drawn to a compression of {:.3}", c.stop_fork_in(&assets.models, CHASSIS, &vehicle.parts));
     }
     rigs.insert(
         0,

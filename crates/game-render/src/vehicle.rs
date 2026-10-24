@@ -64,6 +64,7 @@
 use crate::anim::{Set, Stance};
 use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
+use crate::psg::Model;
 use crate::skin::{Skeleton, skin};
 use crate::world::Loaded;
 use game_sim::ride::Ride;
@@ -89,6 +90,14 @@ pub const REAR: &str = "TireRear";
 /// frame. It is a constant quad in the drive itself, `(-0.03, 0.0, 0.02, 1.0)`, and not a key of
 /// any file on the disc.
 const SHOCKS_NUDGE: V3 = v3(-0.03, 0.0, 0.02);
+
+/// How far the drawn front tyre is kept from anything that hangs off the bars (V62), in feet. The
+/// fender is placed at `Handlebars` and does not travel with the fork, so at a bottom-out the
+/// ported slide would put the tyre up into it; [`Chassis::stop_fork_under`] stops the drawn fork
+/// this far short. A little over the nudge's sideways reach, which a steered fork swings round.
+const FORK_STOP_CLEAR: f32 = 0.04;
+/// The most compression [`Chassis::stop_fork_under`] looks at: past any fork's travel.
+const FORK_STOP_SEARCH: f32 = 2.0;
 
 /// Two pi and one over it, as the original's angle wrap spells them.
 const TAU: f32 = 6.2831855;
@@ -346,6 +355,9 @@ pub struct Chassis {
     /// Draw the wheels the original's way (V59): at [`Roll`]'s own angle, however fast, and never
     /// blurred.
     pub original_wheels: bool,
+    /// The most front compression the fork is drawn at (V62, [`Chassis::stop_fork_under`]);
+    /// infinite until the shell has measured the parts on the bars.
+    pub fork_stop: f32,
     /// Every node's transform as the last [`Chassis::frame`] left it — the pose, the drives and the
     /// tree, composed. Empty until the first frame.
     pub world: Vec<M4>,
@@ -435,6 +447,7 @@ impl Chassis {
             rear_spin: Spin::default(),
             wheels,
             original_wheels: false,
+            fork_stop: f32::INFINITY,
             world: Vec::new(),
             posing: false,
             fading: 0.0,
@@ -552,20 +565,9 @@ impl Chassis {
         // position, plus the compression up the fork, plus a fixed nudge — and the node's parent is
         // the steering head, so it has to come back out of the frame the turn above just put the
         // bars in.
-        if let Some(j) = self.nodes.shocks {
-            let target = shape
-                .shocks_rest
-                .add(shape.fork.scale(shape.inv_sin * d.front_compression))
-                .add(SHOCKS_NUDGE);
-            let bars = self.nodes.bars.and_then(|b| local.get(b).copied());
-            let local_pos = match bars {
-                Some(bars) => unplace(bars, target),
-                None => target,
-            };
-            if let Some(m) = local.get_mut(j) {
-                set_translation(m, local_pos);
-            }
-        }
+        //
+        // Drawn, the slide stops at the fork stop, so the tyre never comes up into the fender (V62).
+        self.slide_fork(&mut local, d.front_compression.min(self.fork_stop));
         // 3 and 5 — the wheels, each about its own `x`.
         for (node, angle) in [(self.nodes.front, front), (self.nodes.rear, rear)] {
             if let Some(m) = node.and_then(|j| local.get_mut(j)) {
@@ -590,6 +592,110 @@ impl Chassis {
             }
         }
         self.world = self.stance.set.skeleton.compose(&local);
+    }
+
+    /// The fork's slide, as the original works it out, at a front compression of `c` (drive 2).
+    fn slide_fork(&self, local: &mut [M4], c: f32) {
+        let Some(j) = self.nodes.shocks else { return };
+        let shape = self.shape;
+        let target = shape.shocks_rest.add(shape.fork.scale(shape.inv_sin * c)).add(SHOCKS_NUDGE);
+        let bars = self.nodes.bars.and_then(|b| local.get(b).copied());
+        let local_pos = match bars {
+            Some(bars) => unplace(bars, target),
+            None => target,
+        };
+        if let Some(m) = local.get_mut(j) {
+            set_translation(m, local_pos);
+        }
+    }
+
+    /// **V62.** Stop the drawn fork short of the parts hung off the bars, and answer where.
+    ///
+    /// `geometry` is the chassis model ([`Chassis::geometry`]) and `parts` the `.sub` parts placed at
+    /// `Handlebars`, each in its own model space. The original draws the fork at the simulation's
+    /// compression whatever is above it, and the 250's `Front_Fender` hangs off the bars, so a hard
+    /// landing (a compression of 1.0) put the tyre 0.1 ft up into it. This finds the most
+    /// compression at which the front tyre — its outer radius about the `TireFront` axle, over its
+    /// width — is still [`FORK_STOP_CLEAR`] clear of every vertex of every part, in the rest pose
+    /// with the bars turned straight, and [`Chassis::drive`] draws the slide no farther. A part the tyre
+    /// does not clear even fully extended is not one it can come up into, and is left out; with
+    /// nothing to stop under, or no front wheel, the stop stays infinite. Presentation only: the
+    /// simulation's compression is untouched.
+    pub fn stop_fork_under(&mut self, geometry: &Model, parts: &[&Model]) -> f32 {
+        let (Some(front), Some(bars)) = (self.nodes.front, self.nodes.bars) else {
+            return self.fork_stop;
+        };
+        let skeleton = &self.stance.set.skeleton;
+        let rest = skeleton.locals(&crate::skin::Pose::new(skeleton.len()));
+        let mut stop = f32::INFINITY;
+        for part in parts {
+            let pose: Vec<M4> = (0..part.nodes.len()).map(|i| part.world(i)).collect();
+            let points: Vec<V3> = skin(part, &pose, 0).iter().flat_map(|t| t.v.iter().map(|v| v.pos)).collect();
+            let clear = |c: f32| -> f32 {
+                // Grounded, as a landing is: the bars turned straight about the fork, then the slide.
+                let mut local = rest.clone();
+                set_rotation(&mut local[bars], about(self.shape.fork, 0.0));
+                self.slide_fork(&mut local, c);
+                let world = skeleton.compose(&local);
+                let axle = world[front];
+                let centre = v3(axle.0[3][0], axle.0[3][1], axle.0[3][2]);
+                let axis = axle.dir(v3(1.0, 0.0, 0.0));
+                let axis = axis.scale(1.0 / axis.len());
+                let (mut outer, mut width) = (0.0f32, 0.0f32);
+                for t in skin(geometry, &world, 0).iter().filter(|t| t.v.iter().all(|v| self.wheels.get(v.node) == Some(&1))) {
+                    for v in &t.v {
+                        let r = v.pos.sub(centre);
+                        let h = r.dot(axis);
+                        outer = outer.max(r.sub(axis.scale(h)).len());
+                        width = width.max(h.abs());
+                    }
+                }
+                let mut least = f32::MAX;
+                for &p in &points {
+                    let r = world[bars].point(p).sub(centre);
+                    let h = r.dot(axis);
+                    if h.abs() < width {
+                        least = least.min(r.sub(axis.scale(h)).len() - outer);
+                    }
+                }
+                least - FORK_STOP_CLEAR
+            };
+            if clear(0.0) <= 0.0 {
+                continue;
+            }
+            // March up to the first compression that touches, then halve the step onto it.
+            let step = 0.05;
+            let mut lo = 0.0f32;
+            while lo < FORK_STOP_SEARCH && clear(lo + step) > 0.0 {
+                lo += step;
+            }
+            if lo >= FORK_STOP_SEARCH {
+                continue;
+            }
+            let mut hi = lo + step;
+            for _ in 0..16 {
+                let mid = 0.5 * (lo + hi);
+                match clear(mid) > 0.0 {
+                    true => lo = mid,
+                    false => hi = mid,
+                }
+            }
+            stop = stop.min(lo);
+        }
+        self.fork_stop = stop;
+        stop
+    }
+
+    /// [`Chassis::stop_fork_under`] with what the shell has loaded: the chassis model by its name and
+    /// every part of the `.sub` placed at `Handlebars`. A model that did not load is left out.
+    pub fn stop_fork_in(&mut self, models: &std::collections::HashMap<String, Loaded>, chassis: &str, parts: &[crate::scene::Part]) -> f32 {
+        let Some(geometry) = models.get(chassis) else { return self.fork_stop };
+        let on_bars: Vec<&Model> = parts
+            .iter()
+            .filter(|p| p.placement.eq_ignore_ascii_case(BARS))
+            .filter_map(|p| models.get(&p.model).map(|l| &l.model))
+            .collect();
+        self.stop_fork_under(&geometry.model, &on_bars)
     }
 
     /// The spin blur's see-through copies of a drawn pose of this chassis (V59): for each wheel
