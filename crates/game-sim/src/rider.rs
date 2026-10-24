@@ -960,13 +960,15 @@ impl Rider {
     /// The original's publisher of the request block was not found, here or in S25, so which of the
     /// rider's fields each of the body's inputs comes off is this module's choice. All of it reads
     /// the same frame's latched trick id (`Tricks::requested`) rather than the running one, because
-    /// that is the id the frame's own animation header plays. The two that are not off the trick
-    /// machine are the bike's own words:
+    /// that is the id the frame's own animation header plays. The ones that are not off the trick
+    /// machine are the bike's own words. One row is not a choice: V35 captured the original's request
+    /// through recording2's backflips, and its backflip word is the bike's turning flag on all 1100
+    /// ticks.
     ///
     /// | the body asks | this answers with |
     /// |---|---|
     /// | the gesture slot, or 24 for none | the latched id's own slot ([`Trick::slot`]) |
-    /// | a backflip | the latched id is [`Trick::BACKFLIP`] |
+    /// | a backflip | the bike is turning one over, [`crate::air::Air::flipping`] (V35: the original's, from a capture) |
     /// | airborne | the bike's own verdict, [`crate::air::Air::airborne`] |
     /// | the no-hander | [`crate::trick::Tricks::no_hander`] |
     /// | a wreck | the ride state machine has a reason |
@@ -1021,8 +1023,12 @@ impl Rider {
             // and the body's airborne pose is what a stoppie in the air should show too. For a
             // gesture the choice makes no difference: the gesture arm runs in front of this one.
             airborne: ride.air.airborne,
-            // MD16's front flip has no clip in either game: it shows the backflip's until one exists.
-            backflip: tricks.requested == Trick::BACKFLIP || tricks.requested == Trick::FRONTFLIP,
+            // The bike's own turning flag (V35): recording2's request carries it on every captured
+            // tick, raised the tick the flip torque first goes in and dropped the tick the rotation is
+            // over. The trick id never says so — it is the airborne idle's through the whole flip.
+            // MD16's front flip turns through the same flag, and has no clip in either game: it shows
+            // the backflip's until one exists.
+            backflip: ride.air.flipping || tricks.requested == Trick::FRONTFLIP,
             no_hander: tricks.no_hander,
             // Down, or down as the request last saw it: on the tick the wreck clock puts the rider
             // back the body is still in the wreck (S74). The wreck's own entry is not held back the

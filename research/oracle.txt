@@ -2299,6 +2299,13 @@ vehicle_add_anim boot 0x00248150 (vehicle in a0, key in a1, the first clip's nam
 #   +0x104 the body is off the bike              +0x144 the gate's own clock, in seconds
 #   +0x160 the throttle                         +0x16c  going backwards
 #   +0x1a0 the gesture slot asked for, or 24 for none
+# V35 — what fills three of these, from a capture (research/journal/2026-10-24-v35-backflip-animation,
+#   context/capture/v35/flips.csv, recording2 2374..3473, 1100 rows): +0xfc == the bike's flipping
+#   (bike_backflip's +0x4f8, set with +0x4f4 the substep the torque goes in) on 1100 of 1100 rows, the
+#   same tick; +0xf8 == the bike's +0x57c on every riding row; +0x1a0 == the trick id +0xa78 when below
+#   24, else 24. The trick id is 25 (the airborne idle) all through a flip, never 24. State 38 runs
+#   2513..2543 (flip 1, until a Taunt asked mid-flip outranks it); flip 2's trick is asked a tick before
+#   it turns, so 38 never shows. The writer itself was still not located.
 #
 # The selection is a chain of else-ifs and the first arm that matches is the only one that runs: the
 # gate (+0x140 set), the wreck (+0x104 set), a gesture (+0x1a0 != 24), and then the backflip, the
