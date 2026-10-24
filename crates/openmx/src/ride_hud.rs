@@ -113,9 +113,12 @@ pub struct Dot {
 pub struct Panel {
     pub pick: Pick,
     pub filled: [bool; SLOTS],
-    /// Slot 1 is the machine's spawn (P132, `hud::MarkerBar::home`): drawn with a ring of its colour
-    /// round a dark middle and an `S` for its number, and labelled the spawn.
+    /// The spawn has a start to ride to for the machine up (P132, `hud::MarkerBar::home`). The spawn
+    /// is its own entry before the slots (P135), drawn an `S` in a pale ring set apart from them; with
+    /// no start it is drawn faint.
     pub home: bool,
+    /// The spawn's Down has just cleared the markers (P135, `hud::MarkerBar::cleared`).
+    pub cleared: bool,
     /// The other players in the ride, by seat, and their names where the lineup has them.
     pub others: Vec<(usize, Option<String>)>,
     /// How long a Down or Up hold has been down, in ms ([`game_sim::markers::holding`]).
@@ -323,7 +326,8 @@ pub fn grouped(points: f32) -> String {
 /// What the marker menu's label says: the slot and whether it holds a marker, or the player.
 pub fn panel_label(p: &Panel) -> (String, String) {
     match p.pick {
-        Pick::Slot(s) if p.home && s == game_sim::markers::HOME_SLOT && !p.filled[s] => (format!("Marker {}", s + 1), "spawn".into()),
+        Pick::Spawn if p.cleared => ("Cleared".into(), "every marker".into()),
+        Pick::Spawn => ("Spawn".into(), String::new()),
         Pick::Slot(s) => (format!("Marker {}", s + 1), if p.filled[s] { "set" } else { "empty" }.into()),
         Pick::Player(seat) => {
             let name = p.others.iter().find(|(o, _)| *o == seat).and_then(|(_, n)| n.clone()).filter(|n| !n.trim().is_empty());
@@ -349,6 +353,8 @@ pub struct Line {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PanelDrawn {
     pub rect: [f32; 4],
+    /// The spawn's middle, radius and whether it is selected (P135).
+    pub spawn: ([f32; 2], f32, bool),
     /// Each slot's middle, radius, whether it is selected and whether it holds a marker.
     pub slots: Vec<([f32; 2], f32, bool, bool)>,
     /// Each other player's pill: their seat, whether it is selected, its box.
@@ -1024,11 +1030,17 @@ fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
         }
         w
     };
-    let mut line_w = SLOTS as f32 * slot_d + (SLOTS - 1) as f32 * slot_gap;
+    // The spawn (P135), then a rule like the players', then the slots.
+    let spawn_w = slot_d + slot_gap + 0.5 * EM;
+    let mut line_w = spawn_w + SLOTS as f32 * slot_d + (SLOTS - 1) as f32 * slot_gap;
     if !p.others.is_empty() {
         line_w += slot_gap + 0.5 * EM + p.others.iter().map(|(s, n)| slot_gap + pill_w(*s, n)).sum::<f32>();
     }
-    let legend = [("pick", [true, true, false, false]), ("hold: place", [false, false, true, false]), ("hold: ride to", [false, false, false, true])];
+    let legend = if p.pick == Pick::Spawn {
+        [("pick", [true, true, false, false]), ("long hold: clear all", [false, false, true, false]), ("hold: ride to", [false, false, false, true])]
+    } else {
+        [("pick", [true, true, false, false]), ("hold: place", [false, false, true, false]), ("hold: ride to", [false, false, false, true])]
+    };
     let legend_w: f32 = legend.iter().map(|(w, _)| dp + 0.3 * keys + Pen::measure(Face::Words, Weight::Bold, w, keys)).sum::<f32>() + 2.0 * 0.9 * keys;
     let label_w = Pen::measure(Face::Words, Weight::Heavy, &label, label_size) + 0.4 * label_size + Pen::measure(Face::Words, Weight::Bold, &note, small);
     let head_w = Pen::spaced_width(Weight::Bold, "MARKERS", head, 0.16 * head) + EM + Pen::spaced_width(Weight::Heavy, &p.machine.to_uppercase(), head, 0.16 * head);
@@ -1050,6 +1062,25 @@ fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
     // The slots and the players.
     let mid = y + rows[1] / 2.0;
     let mut at = left;
+    {
+        let on = p.pick == Pick::Spawn;
+        let c = (at + slot_d / 2.0, mid);
+        let r = slot_d / 2.0 * if on { 1.18 } else { 1.0 };
+        if on {
+            pen.disc(c, r + 0.3 * EM, CHALK);
+            pen.disc(c, r + 0.14 * EM, INK);
+        }
+        let ring = if p.home { BONE } else { [245, 240, 232, 89] };
+        pen.disc(c, r, shade(77));
+        pen.circle(c, r, 0.13 * EM, ring);
+        let size = 0.95 * EM * if on { 1.18 } else { 1.0 };
+        let nw = Pen::measure(Face::Words, Weight::Heavy, "S", size);
+        pen.text(Face::Words, Weight::Heavy, "S", (c.0 - nw / 2.0, mid + Pen::cap(Face::Words, size) / 2.0), size, 0.0, if p.home { CHALK } else { DUST });
+        drawn.spawn = (pen.px(c), r * pen.s, on);
+        at += slot_d + slot_gap;
+        pen.round([at, mid - 0.7 * EM, 0.1 * EM, 1.4 * EM], 0.05 * EM, [245, 240, 232, 64], [245, 240, 232, 64]);
+        at += 0.5 * EM;
+    }
     for s in 0..SLOTS {
         let colour = overlay::marker_colour(s);
         let (on, set) = (p.pick == Pick::Slot(s), p.filled[s]);
@@ -1065,8 +1096,7 @@ fn panel(pen: &mut Pen, p: &Panel, right: f32, top: f32) -> PanelOut {
             pen.disc(c, r, shade(77));
             pen.circle(c, r, 0.13 * EM, colour);
         }
-        let home = p.home && !set && s == game_sim::markers::HOME_SLOT;
-        let n = if home { "S".to_string() } else { (s + 1).to_string() };
+        let n = (s + 1).to_string();
         let size = 0.95 * EM * if on { 1.18 } else { 1.0 };
         let nw = Pen::measure(Face::Words, Weight::Heavy, &n, size);
         pen.text(Face::Words, Weight::Heavy, &n, (c.0 - nw / 2.0, mid + Pen::cap(Face::Words, size) / 2.0), size, 0.0, if set { INK } else { CHALK });

@@ -548,6 +548,10 @@ pub struct MarkerBanner {
     seen: Option<(Pick, [bool; SLOTS])>,
     /// Until when it stays up.
     until: Option<Instant>,
+    /// The seat's clears seen so far ([`MarkerBanner::cleared`]), and whether the spawn's Down has
+    /// cleared since the selection last moved onto it (P135): the bar says so.
+    clears: u32,
+    said_cleared: bool,
 }
 
 impl MarkerBanner {
@@ -563,8 +567,26 @@ impl MarkerBanner {
         if (self.seen.is_some() && self.seen != seen) || held {
             self.until = Some(now + MarkerBanner::SHOWN);
         }
+        if self.seen.is_some_and(|(was, _)| was != pick) {
+            self.said_cleared = false;
+        }
         self.seen = seen;
         self.until.is_some_and(|until| now < until)
+    }
+
+    /// `clears`, how many times the seat's spawn has cleared its markers (P135, `Did::Cleared`): a
+    /// new one puts the bar up saying Cleared, until the selection moves off the spawn.
+    pub fn cleared(&mut self, now: Instant, clears: u32) {
+        if clears != self.clears {
+            self.clears = clears;
+            self.said_cleared = true;
+            self.until = Some(now + MarkerBanner::SHOWN);
+        }
+    }
+
+    /// Whether the bar says Cleared ([`MarkerBanner::cleared`]).
+    pub fn says_cleared(&self) -> bool {
+        self.said_cleared
     }
 }
 
@@ -572,6 +594,7 @@ impl MarkerBanner {
 /// player by their name — `P1`, `P2`… for a seat with none.
 pub fn marker_label(pick: Pick, filled: [bool; SLOTS], names: &[Option<String>]) -> String {
     match pick {
+        Pick::Spawn => "spawn".into(),
         Pick::Slot(s) => format!("marker {} {}", s + 1, if filled[s] { "set" } else { "empty" }),
         Pick::Player(p) => match names.get(p).and_then(|n| n.as_deref()).filter(|n| !n.trim().is_empty()) {
             Some(name) => format!("to {name}"),
@@ -591,10 +614,13 @@ pub struct MarkerBar {
     pub pick: Pick,
     pub filled: [bool; SLOTS],
     pub held: bool,
+    /// How far a Down or Up hold is, `0..=HOLD_MS` ([`game_sim::markers::holding_on`]): on the
+    /// spawn Down's counts towards the clear's longer hold (P135).
     pub holding: u32,
-    /// Slot 1 is the machine's spawn (P132): nothing is put there and the map has a start for it, so
-    /// an Up on it rides back to the start ([`MarkerBar::homed`]).
+    /// The spawn has a start to ride to on this map for the machine up (P132, [`MarkerBar::homed`]).
     pub home: bool,
+    /// The spawn's Down has just cleared the markers (P135): the label says Cleared.
+    pub cleared: bool,
 }
 
 impl MarkerBar {
@@ -612,22 +638,28 @@ impl MarkerBar {
             pick: markers.pick_among(me, riding),
             filled: std::array::from_fn(|s| markers.holds(s)),
             held: active && game_sim::markers::held(pad, table),
-            holding: if active { game_sim::markers::holding(pad, table) } else { 0 },
+            holding: if active { game_sim::markers::holding_on(pad, table, markers.pick_among(me, riding)) } else { 0 },
             home: false,
+            cleared: false,
         }
     }
 
-    /// The bar with slot 1 shown as the spawn where `home` says the seat has a start for the machine
-    /// up ([`game_sim::markers::Home::has`]) and nothing is put in it (P132).
+    /// The bar with the spawn shown as one to ride to where `home` says the seat has a start for the
+    /// machine up ([`game_sim::markers::Home::has`], P132).
     pub fn homed(self, home: bool) -> MarkerBar {
-        MarkerBar { home: home && !self.filled[game_sim::markers::HOME_SLOT], ..self }
+        MarkerBar { home, ..self }
     }
 
-    /// What the slot display says about the selection ([`marker_label`]), slot 1 named the spawn
-    /// while it is one.
+    /// The bar saying Cleared on the spawn while `cleared` ([`MarkerBanner::says_cleared`], P135).
+    pub fn cleared(self, cleared: bool) -> MarkerBar {
+        MarkerBar { cleared: cleared && self.pick == Pick::Spawn, ..self }
+    }
+
+    /// What the slot display says about the selection ([`marker_label`]): on the spawn, Cleared once
+    /// its Down has cleared.
     pub fn label(&self, names: &[Option<String>]) -> String {
         match self.pick {
-            Pick::Slot(s) if self.home && s == game_sim::markers::HOME_SLOT => format!("marker {} spawn", s + 1),
+            Pick::Spawn if self.cleared => "cleared".into(),
             pick => marker_label(pick, self.filled, names),
         }
     }
@@ -640,7 +672,7 @@ pub fn markers_shown_in(v: usize, online: bool) -> bool {
     !online || v == 0
 }
 
-/// The slot display, top centre of `frame`: five boxes — solid in the slot's colour where a marker
+/// The slot display, top centre of `frame`: the spawn's box (P135), set apart, then five boxes — solid in the slot's colour where a marker
 /// is (P94: the colour of its post and its radar mark), the selected one ringed — then a box for each
 /// other player in the ride, `P2`… by seat (`others`, P94: a seat nobody rides is not listed), and
 /// the label under them, and under that how far a Down or Up hold is towards firing (`holding`,
@@ -658,9 +690,10 @@ pub fn draw_markers_scaled(frame: &mut Frame, pick: Pick, filled: [bool; SLOTS],
     draw_markers_homed(frame, pick, filled, false, label, others, holding, hud_scale);
 }
 
-/// [`draw_markers_scaled`] with slot 1 drawn as the spawn while `home` (P132, [`MarkerBar::home`]):
-/// an empty box with a small square of its colour in the middle, set apart from a placed marker's
-/// solid fill and from an empty slot's bare outline.
+/// [`draw_markers_scaled`] with the spawn's box (P135, before the slots and a gap wider than theirs
+/// apart) showing whether it has a start to ride to (`home`, [`MarkerBar::home`]): a small square in
+/// the middle where it has, set apart from a placed marker's solid fill and from an empty slot's bare
+/// outline; a bare box where it has not.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_markers_homed(
     frame: &mut Frame,
@@ -677,20 +710,29 @@ pub fn draw_markers_homed(
     let tags: Vec<String> = others.iter().map(|p| format!("P{}", p + 1)).collect();
     let tag_w = |t: &str| t.chars().count() as i32 * 4 * scale + 2 * scale;
     let players: i32 = tags.iter().map(|t| gap + tag_w(t)).sum();
-    let row = SLOTS as i32 * boxw + (SLOTS as i32 - 1) * gap + players;
+    // The spawn's box and the space after it, twice a slot's gap and a font pixel: set apart.
+    let spawn_w = boxw + 2 * gap + scale;
+    let row = spawn_w + SLOTS as i32 * boxw + (SLOTS as i32 - 1) * gap + players;
     let label_w = label.chars().count() as i32 * 4 * scale;
     let w = row.max(label_w) + 2 * PAD * scale;
     let h = boxw + 5 * scale + 2 * scale + 6 * scale + 2 * PAD * scale;
     let (x, y) = ((frame.width as i32 - w) / 2, 8 * scale);
     panel(frame, x, y, w, h);
-    let (bx, by) = (x + (w - row) / 2, y + PAD * scale);
+    let (sx, by) = (x + (w - row) / 2, y + PAD * scale);
+    let ink = if pick == Pick::Spawn { PRESSED } else { DIM };
+    if home {
+        fill(frame, sx + 3 * scale, by + 3 * scale, boxw - 6 * scale, boxw - 6 * scale, INK);
+    }
+    outline(frame, sx, by, boxw, boxw, ink);
+    if pick == Pick::Spawn {
+        outline(frame, sx - scale, by - scale, boxw + 2 * scale, boxw + 2 * scale, ink);
+    }
+    let bx = sx + spawn_w;
     for (i, &set) in filled.iter().enumerate() {
         let at = bx + i as i32 * (boxw + gap);
         let ink = if pick == Pick::Slot(i) { PRESSED } else { DIM };
         if set {
             fill(frame, at + scale, by + scale, boxw - 2 * scale, boxw - 2 * scale, slot_colour(i));
-        } else if home && i == game_sim::markers::HOME_SLOT {
-            fill(frame, at + 3 * scale, by + 3 * scale, boxw - 6 * scale, boxw - 6 * scale, slot_colour(i));
         }
         outline(frame, at, by, boxw, boxw, ink);
         if pick == Pick::Slot(i) {
@@ -714,9 +756,9 @@ pub fn draw_markers_homed(
     text(frame, x + (w - label_w) / 2, ty, label, ink, scale);
     let bar_y = ty + 7 * scale;
     let hold = game_sim::markers::HOLD_MS;
-    fill(frame, bx, bar_y, row, scale, EMPTY);
+    fill(frame, sx, bar_y, row, scale, EMPTY);
     let done = row * holding.min(hold) as i32 / hold as i32;
-    fill(frame, bx, bar_y, done, scale, if holding >= hold { PRESSED } else { HELD });
+    fill(frame, sx, bar_y, done, scale, if holding >= hold { PRESSED } else { HELD });
 }
 
 /// A marker slot's colour (P94), [`crate::overlay::MARKER_COLOURS`], in this overlay's bytes.

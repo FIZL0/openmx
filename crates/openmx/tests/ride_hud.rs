@@ -50,7 +50,7 @@ fn gauges(speedometer: Speedometer) -> Gauges {
 }
 
 fn panel(pick: Pick, others: Vec<(usize, Option<String>)>, holding: u32) -> Panel {
-    Panel { pick, filled: [true, false, true, false, false], home: false, others, holding, machine: "Bike".into() }
+    Panel { pick, filled: [true, false, true, false, false], home: false, cleared: false, others, holding, machine: "Bike".into() }
 }
 
 fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Option<Panel>) -> Shown<'a> {
@@ -336,8 +336,9 @@ fn the_marker_menu_follows_every_slot_and_player_and_its_hold_fills() {
     let t = Tracker::default();
     let now = Instant::now();
     let mut seen = Vec::new();
-    for at in 0..SLOTS + others.len() {
-        let m = Markers { at: at as u8, ..Markers::default() };
+    // The spawn first (P135), then the slots and the players.
+    for at in std::iter::once(game_sim::markers::SPAWN).chain(0..(SLOTS + others.len()) as u8) {
+        let m = Markers { at, ..Markers::default() };
         let pick = m.pick_among(0, &riding);
         seen.push(pick);
         let mut out = Vec::new();
@@ -345,12 +346,14 @@ fn the_marker_menu_follows_every_slot_and_player_and_its_hold_fills() {
         let p = d.markers.unwrap();
         assert_eq!(p.slots.len(), SLOTS);
         assert_eq!(p.players.iter().map(|q| q.0).collect::<Vec<_>>(), others);
-        let lit: Vec<Pick> =
-            p.slots.iter().enumerate().filter(|s| s.1.2).map(|s| Pick::Slot(s.0)).chain(p.players.iter().filter(|q| q.1).map(|q| Pick::Player(q.0))).collect();
+        let spawn = p.spawn.2.then_some(Pick::Spawn);
+        let slots = p.slots.iter().enumerate().filter(|s| s.1.2).map(|s| Pick::Slot(s.0));
+        let lit: Vec<Pick> = spawn.into_iter().chain(slots).chain(p.players.iter().filter(|q| q.1).map(|q| Pick::Player(q.0))).collect();
         assert_eq!(lit, vec![pick], "at {at}");
         let filled: Vec<bool> = p.slots.iter().map(|s| s.3).collect();
         assert_eq!(filled, [true, false, true, false, false]);
         let want = match pick {
+            Pick::Spawn => "Spawn".into(),
             Pick::Slot(s) => format!("Marker {} {}", s + 1, if [0, 2].contains(&s) { "set" } else { "empty" }),
             Pick::Player(1) => "to Ann P2".into(),
             Pick::Player(s) => format!("to P{}", s + 1),
@@ -360,9 +363,13 @@ fn the_marker_menu_follows_every_slot_and_player_and_its_hold_fills() {
         if let Pick::Slot(s) = pick {
             let r = p.slots[s].1;
             assert!(p.slots.iter().enumerate().all(|(i, o)| i == s || o.1 < r));
+            assert!(p.spawn.1 < r);
         }
+        // The spawn is drawn apart, left of the slots by more than they are apart.
+        let step = p.slots[1].0[0] - p.slots[0].0[0];
+        assert!(p.slots[0].0[0] - p.spawn.0[0] > step, "the spawn set apart");
     }
-    let want: Vec<Pick> = (0..SLOTS).map(Pick::Slot).chain(others.iter().map(|&s| Pick::Player(s))).collect();
+    let want: Vec<Pick> = std::iter::once(Pick::Spawn).chain((0..SLOTS).map(Pick::Slot)).chain(others.iter().map(|&s| Pick::Player(s))).collect();
     assert_eq!(seen, want, "every slot and player, in order");
     for (holding, k, fired) in [(0, 0.0, false), (HOLD_MS / 4, 0.25, false), (HOLD_MS / 2, 0.5, false), (HOLD_MS, 1.0, true), (HOLD_MS * 3, 1.0, true)] {
         let mut out = Vec::new();
