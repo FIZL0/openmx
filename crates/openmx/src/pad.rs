@@ -343,6 +343,13 @@ pub enum Scheme {
     /// and are kept free for what comes later (more tricks, other functions). The original's two
     /// camera commands on L2 and R2 (look back, the other camera) have no button here; the shell
     /// does not follow them under either scheme yet.
+    ///
+    /// L1 is the original's clutch (P67), on its button as the original's: no trigger travel, because
+    /// the original's bike reads its clutch as a switch (P73; P77 has the port's levers). Held at a
+    /// standstill with the gas on it lets the engine rev with the rear wheel free, and let go it
+    /// launches on the clutch's ramp. L1+R1 is still the put-back, but pressed together
+    /// (`game_sim::ride::Controls::chord_together`): a clutch already held when R1 goes down for a
+    /// trick is the clutch and the trick, where the original puts the bike back.
     #[default]
     New,
     /// The original's: the pad as the simulation reads it, the shipped table's bindings exactly.

@@ -214,7 +214,35 @@ impl Controls {
     pub fn stick_alone(self) -> Controls {
         Controls { dpad_y: false, dpad_dir: 0, dpad: [false; trick::DPAD], ..self }
     }
+
+    /// These controls with the reset chord pressed *together* (P67): the shell's new layout, where L1
+    /// is the clutch a rider holds through a launch and R1 is still the third trick button. The
+    /// original's chord is the press of either half while the other is held, however long it has
+    /// been, so a clutch held for a second and then a trick on R1 puts the bike back. Here the half
+    /// that was already down counts only if it went down at most [`CHORD_TOGETHER_MS`] before the
+    /// press; a clutch held longer is the clutch, and R1 on it is the trick alone. Both halves still
+    /// go to the ride as the clutch and the trick. Read off the pad's own held timers, so a replay of
+    /// the same reports puts the bike back on the same ticks. [`Controls::through`] stays the
+    /// original's chord, which every replay of it rides on.
+    pub fn chord_together(self, pad: &crate::input::Pad, table: &crate::bindings::Table) -> Controls {
+        use crate::bindings::Command;
+        let fresh = |c: Command| {
+            table.control(pad.index as usize, c).is_some_and(|k| pad.controls[k.index()].held_ms <= CHORD_TOGETHER_MS)
+        };
+        let half = |pressed: Command, other: Command| {
+            table.pressed(pad, pressed) && table.held(pad, other) && fresh(other)
+        };
+        let respawn = self.respawn
+            && (half(Command::RESET_LEFT, Command::RESET_RIGHT) || half(Command::RESET_RIGHT, Command::RESET_LEFT));
+        Controls { respawn, ..self }
+    }
 }
+
+/// How long before the second half of the reset chord the first may have gone down under the new
+/// layout ([`Controls::chord_together`], P67), in the input layer's milliseconds. The human's own
+/// chord in recording2 is one 30 Hz tick apart; a quarter of a second is a deliberate two-button press
+/// with room to spare, and well short of a clutch held to rev the engine up for a launch.
+pub const CHORD_TOGETHER_MS: u32 = 250;
 
 /// The controls after the input layer's rate limit: what the bike is actually holding.
 ///

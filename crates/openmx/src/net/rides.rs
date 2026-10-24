@@ -88,7 +88,11 @@ impl Game for Rides<'_> {
             }
             // The shell's hands, the d-pad the markers' and not the ride's (P93) — unless the seat's
             // Markers switch is off (P129, in its byte), and then the d-pad is the original's.
-            let hands = vehicle::hands(sim.poll(dt, &reports), !wanted.dpad_rides);
+            let mut hands = vehicle::hands(sim.poll(dt, &reports), !wanted.dpad_rides);
+            // And the new layout's reset chord, pressed together (P67), if the seat rides it.
+            if wanted.together {
+                hands = hands.chord_together(sim.input.pad(0), sim.table());
+            }
             // On the plane the bike is not stepped, its markers do not run and its rider's body
             // does not move, as offline (`Seat::pass`); the plane's own markers do (P107).
             if sim.plane.is_some() {
