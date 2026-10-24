@@ -1099,6 +1099,12 @@ fn a_spinning_wheel_blurs_alone_about_its_axle() {
 /// way the shell places it, has no vertex inside the tyre — within the tyre's width, every one is
 /// farther from the axle than the tyre's outer edge. Over the whole minute the least clearance is
 /// printed, with the compression it came at.
+///
+/// **V62.** And over the whole minute, landings too: unstopped, the drop's bottom-out (a front
+/// compression of 1.0) put the tyre 0.1 ft up into the fender. With the fork stopped under the
+/// fender ([`Chassis::stop_fork_under`]) the tyre clears it on every frame, the stop is under the
+/// compression the drop reaches, so the stop is what kept it out, and below the stop the fork is
+/// drawn where the ported slide puts it.
 #[test]
 fn at_full_droop_the_tyres_stay_on_their_axles_and_clear_of_the_fender() {
     let Some(mut disc) = disc() else { return };
@@ -1121,11 +1127,14 @@ fn at_full_droop_the_tyres_stay_on_their_axles_and_clear_of_the_fender() {
     let fender_pose: Vec<M4> = (0..fender.nodes.len()).map(|i| fender.world(i)).collect();
     let fender_tris = skin(&fender, &fender_pose, 0);
     assert!(!fender_tris.is_empty(), "the fender skinned to nothing");
+    let stop = c.stop_fork_under(&geometry, &[&fender]);
+    assert!(stop > 0.5 && stop < 1.0, "the fork stops at a compression of {stop}");
 
     let sk = &c.stance.set.skeleton;
     let (front, rear) = (sk.find(FRONT).expect("TireFront"), sk.find(REAR).expect("TireRear"));
     let (shocks, swingarm) = (sk.find(SHOCKS).expect("Shocks"), sk.find(SWINGARM).expect("SwingArm"));
     let bars = sk.find(BARS).expect("Handlebars");
+    let root = sk.find(ROOT).expect("Bike");
     let rest = |name: &str| c.node_rest(name).expect("a bind place");
     let fork_drop = rest(FRONT).sub(rest(SHOCKS)).len();
     let arm = rest(REAR).sub(rest(SWINGARM)).len();
@@ -1136,6 +1145,8 @@ fn at_full_droop_the_tyres_stay_on_their_axles_and_clear_of_the_fender() {
     let mut droop = 0;
     let mut least = (f32::MAX, 0.0f32);
     let mut least_droop = f32::MAX;
+    let mut deepest = 0.0f32;
+    let mut slid = 0;
     for k in 0..A_MINUTE {
         r.frame(&p, &tables, &hands, FRAME, &mut world);
         let compression = [r.ride.front.w.compression.0, r.ride.rear.w.compression.0];
@@ -1167,6 +1178,23 @@ fn at_full_droop_the_tyres_stay_on_their_axles_and_clear_of_the_fender() {
         if clearance < least.0 {
             least = (clearance, compression[0]);
         }
+        deepest = deepest.max(compression[0]);
+        assert!(clearance > 0.0, "frame {k}: the fender is {clearance} into the front tyre at a compression of {}", compression[0]);
+        // Below the stop the fork is the original's: the axle hangs from Shocks, which is at the
+        // ported slide's target. The bars' frame puts that target back in the Bike frame.
+        if on_ground && compression[0] < stop {
+            let shape = c.shape;
+            let want = shape.shocks_rest.add(shape.fork.scale(shape.inv_sin * compression[0])).add(v3(-0.03, 0.0, 0.02));
+            let root = c.world[root];
+            let got = at(shocks).sub(v3(root.0[3][0], root.0[3][1], root.0[3][2]));
+            let got = v3(
+                got.x * root.0[0][0] + got.y * root.0[0][1] + got.z * root.0[0][2],
+                got.x * root.0[1][0] + got.y * root.0[1][1] + got.z * root.0[1][2],
+                got.x * root.0[2][0] + got.y * root.0[2][1] + got.z * root.0[2][2],
+            );
+            assert!(got.sub(want).len() < 1e-3, "frame {k}: Shocks at {got:?}, the slide puts it at {want:?}");
+            slid += 1;
+        }
 
         if on_ground || compression[0] > 1e-4 || compression[1] > 1e-4 {
             continue;
@@ -1192,9 +1220,12 @@ fn at_full_droop_the_tyres_stay_on_their_axles_and_clear_of_the_fender() {
         assert!(clearance > 0.0, "frame {k}: the fender is {clearance} into the front tyre at full droop");
     }
     assert!(droop > 0, "the drop never hung both wheels at full droop");
+    assert!(deepest > stop, "the drop never compressed the fork past its stop ({deepest} against {stop})");
+    assert!(slid > 0, "no grounded frame under the stop");
     println!(
         "V59 droop: {droop} frames hanging, the fender at least {least_droop:.3} clear of the front tyre \
-         there; over the minute at least {:.3}, at a front compression of {:.3}",
+         there; over the minute at least {:.3}, at a front compression of {:.3} (V62: the fork stops at \
+         {stop:.3}, the drop reaches {deepest:.3}; {slid} grounded frames under the stop on the ported slide)",
         least.0, least.1
     );
 }
