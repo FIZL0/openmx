@@ -749,7 +749,8 @@ fn ground_under(world: &mut dyn World, at: Vf) -> Option<f32> {
     (on.y() > NO_GROUND).then_some(on.y())
 }
 
-/// The plane put down landed at `spot` (P102's switch onto it, P107's marker onto a player): nose
+/// The plane put down landed at `spot` (P102's switch onto it, P107's marker onto a player at rest
+/// since P141, [`arrive`]): nose
 /// along `spot`'s heading, level — its bay's heading where that points straight up or down — on its
 /// wheels on the ground and at rest ([`Plane::rest_height`]), unwrecked and its throttle shut, as a
 /// parked plane stands. Its flight is put there by its next step ([`Plane::reset`]). `None`, and
@@ -761,6 +762,39 @@ fn land(plane: &mut Plane, spot: Spot, world: &mut dyn World) -> Option<()> {
     let y = ground + plane.rest_height(bay_ground);
     plane.spawn = Spawn { at: Vf::new(spot.at.x(), y, spot.at.z(), 1.0), facing };
     plane.reset();
+    Some(())
+}
+
+/// **The plane sent to another player** (P141, a marker's Up onto them, `spot` being
+/// [`Garage::spot`]'s): where they are as their machine is that tick. Beside a flying plane
+/// ([`Spot::flight`]), [`markers::BESIDE`] feet off its right wing, flying on as it flies
+/// ([`Flight::fly_as`]: its speed, attitude and spin, this plane's own livery and throttle, out of
+/// any wreck); over a rider who is moving or in the air, [`markers::CLEARANCE`] feet over their
+/// bike, level along their heading and at their velocity, which stalls it ([`Flight::launch`]); and
+/// by a rider at rest or down ([`Spot::at_rest`]) landed on the ground there at rest, as before
+/// ([`land`]). The flight is placed at once, its spawn the plane's, and the drawn transform off it.
+/// `None`, and nothing moves, where the landing finds no ground.
+fn arrive(plane: &mut Plane, spot: Spot, world: &mut dyn World, acos: &game_sim::air::AcosTable) -> Option<()> {
+    let at_rest = spot.at_rest();
+    match (plane.flight.as_mut(), &spot.flight, &spot.motion) {
+        (Some(f), Some(theirs), _) => f.fly_as(theirs, F(markers::BESIDE), acos),
+        (Some(f), None, Some(m)) if !at_rest => {
+            let facing = level(spot.forward).or_else(|| level(f.spawn.1)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+            let at = spot.at.add(Vf::new(0.0, markers::CLEARANCE, 0.0, 0.0));
+            f.launch(at, facing, m.0.chassis.vel, acos);
+        }
+        _ => {
+            land(plane, spot, world)?;
+            if let Some(f) = plane.flight.as_mut() {
+                f.reset(plane.spawn.at, plane.spawn.facing, acos);
+            }
+        }
+    }
+    if let Some(f) = &plane.flight {
+        plane.spawn = Spawn { at: f.spawn.0, facing: f.spawn.1 };
+    }
+    plane.placed = true;
+    plane.pose();
     Some(())
 }
 
@@ -792,7 +826,8 @@ pub fn markers_of(kind: Kind) -> markers::Vehicle {
     }
 }
 
-/// Where the bike stands when it is put under `plane` (P102's switch, P104's marker): on the ground
+/// Where the bike stands when it is put under `plane` (P102's switch, P104's marker onto a plane on
+/// or near the ground since P141, [`Garage::spot`]): on the ground
 /// under it, upright, along its heading flattened — the bike's own while the plane points straight
 /// up or down — or `None` with no ground there.
 fn under(plane: &Plane, sim: &Sim, world: &mut dyn World) -> Option<Spot> {
@@ -864,9 +899,10 @@ impl Garage {
     }
 
     /// **One tick of the plane's markers** (P107), after the pass that flew it: [`markers::fly`] on
-    /// the plane's own set, the pad the seat polled, and an Up onto another player landed where they
-    /// are (`spots[p]`, [`Garage::spot`]'s), as the switch onto the plane lands it by the bike —
-    /// refused with no ground there. A put-back's flight stands as it is: the plane's spawn is the
+    /// the plane's own set, the pad the seat polled, and an Up onto another player put where they
+    /// are (`spots[p]`, [`Garage::spot`]'s) by [`arrive`] — in the air beside a flying plane or over a
+    /// moving rider (P141), landed by a rider at rest as the switch onto the plane lands it by the
+    /// bike, refused with no ground there. A put-back's flight stands as it is: the plane's spawn is the
     /// flight's own again, and its drawn transform off it. Nothing with the bike up.
     pub fn markers(&mut self, sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], world: &mut dyn World) -> Option<Did> {
         let (Kind::Biplane, Some(plane)) = (self.up, &mut self.plane) else { return None };
@@ -882,15 +918,8 @@ impl Garage {
             // Placed on the tick it lands (P125), as `lane_markers` places it online: left to the
             // next step's reset, the plane was drawn and filmed at the flight it left for a tick, and
             // its camera snapped onto that rather than onto the plane standing by the player.
-            Did::Teleported(Pick::Player(p)) => match land(plane, spots[p].clone(), world) {
-                Some(()) => {
-                    if let Some(f) = plane.flight.as_mut() {
-                        f.reset(plane.spawn.at, plane.spawn.facing, &sim.tables.ride.acos);
-                    }
-                    plane.placed = true;
-                    plane.pose();
-                    did?
-                }
+            Did::Teleported(Pick::Player(p)) => match arrive(plane, spots[p].clone(), world, &sim.tables.ride.acos) {
+                Some(()) => did?,
                 None => Did::Refused(Pick::Player(p)),
             },
             other => other,
@@ -932,14 +961,25 @@ impl Garage {
     }
 
     /// **Where the player is**, for a marker's Up onto them (P104): with the bike up, the bike's
-    /// spot ([`Spot::of`], its put-back spot while they are down); with the plane up, where the
+    /// spot ([`Spot::of`], with its motion while they ride, their put-back spot while they are down).
+    /// With the plane up and flying — unwrecked, off its wheels and more than [`markers::CLEARANCE`]
+    /// over the ground — the plane as it is that tick (P141, [`Spot::of_flight`]): a bike sent there
+    /// appears that far under it, upright along its flattened heading, and falls on at its velocity;
+    /// a plane sent there flies on beside it. A plane on or near the ground, or wrecked, is where the
     /// switch back to the bike would stand it — on the ground under the plane, upright, along its
-    /// flattened heading — so a rider ridden to a flying player lands under them rather than at the
-    /// bike they left. With no ground under the plane, the plane's own spot, which the bike falls
-    /// from.
+    /// flattened heading, stopped — and with no ground under it, the plane's own spot.
     pub fn spot(&self, sim: &Sim, world: &mut dyn World) -> Spot {
         match (self.up, &self.plane) {
             (Kind::Biplane, Some(plane)) => {
+                if let Some(f) = plane.flight.as_ref().filter(|f| f.crash.reason == 0 && !f.measure.grounded) {
+                    let high = ground_under(world, plane.at).is_none_or(|g| plane.at.y() - g > markers::CLEARANCE);
+                    if high {
+                        let (forward, _) = sim.rider.ride.axes();
+                        let forward =
+                            level(plane.facing).or_else(|| level(forward)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+                        return Spot::of_flight(f, forward);
+                    }
+                }
                 under(plane, sim, world).unwrap_or(Spot::still(plane.at, plane.facing, plane.up))
             }
             _ => Spot::of(&sim.rider),
@@ -1125,8 +1165,8 @@ pub fn fly_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> 
 }
 
 /// **Where an online seat is**, for another player's marker Up onto them (P107): [`Garage::spot`]
-/// for a seat whose plane is its [`Sim::plane`] — under the plane while it flies, the bike's spot on
-/// the bike.
+/// for a seat whose plane is its [`Sim::plane`] — the plane as it flies (P141), or the ground under
+/// it while it is on or near the ground, the bike's spot on the bike.
 pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
     match &sim.plane {
         Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true }.spot(sim, world),
@@ -1135,24 +1175,18 @@ pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
 }
 
 /// One tick of an online seat's plane markers (P107): [`Garage::markers`] on the flight in its
-/// [`Sim::plane`]. An Up onto another player lands the plane where they are and places its flight
-/// there at once, as [`switch_lane`] does. Nothing on the bike.
+/// [`Sim::plane`]. An Up onto another player puts the plane where they are ([`arrive`]: beside their
+/// plane, over a moving rider, landed by one at rest) and places its flight there at once, as
+/// [`switch_lane`] does. Nothing on the bike.
 pub fn lane_markers(sim: &mut Sim, me: usize, spots: &[Spot], riding: &[bool], world: &mut dyn World) -> Option<Did> {
     let mut f = sim.plane.take()?;
     let mut did = markers::fly(&mut sim.markers, &mut f, sim.input.pad(0), me, spots, riding, &sim.home, &sim.tables.ride.acos);
     if let Some(Did::Teleported(Pick::Player(p))) = did {
         let mut plane = Plane::around(f);
-        f = match land(&mut plane, spots[p].clone(), world) {
-            Some(()) => {
-                let mut f = plane.flight.take().expect("the landing keeps the flight");
-                f.reset(plane.spawn.at, plane.spawn.facing, &sim.tables.ride.acos);
-                f
-            }
-            None => {
-                did = Some(Did::Refused(Pick::Player(p)));
-                plane.flight.take().expect("the landing keeps the flight")
-            }
-        };
+        if arrive(&mut plane, spots[p].clone(), world, &sim.tables.ride.acos).is_none() {
+            did = Some(Did::Refused(Pick::Player(p)));
+        }
+        f = plane.flight.take().expect("the teleport keeps the flight");
     }
     sim.plane = Some(f);
     did
@@ -1265,7 +1299,8 @@ mod tests {
         assert_ne!(spot.at.x(), bike.x(), "not where the bike was left");
 
         // A rider ridden there by a marker's Up lands where the switch back would stand the bike, at
-        // rest: a flying player has no bike motion to take (P111).
+        // rest: a plane with no flight in it carries no motion to take (P111). A flown one in the air
+        // is the plane as it flies (P141, `tests/teleport_air.rs`).
         assert_eq!(spot.motion, None, "a flying player's spot carries no bike motion");
         let mut other = Sim::new(0);
         other.rider.ride.chassis.vel = Vf::new(0.0, 0.0, 9.0, 0.0);
