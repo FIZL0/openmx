@@ -3383,7 +3383,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         && seats.name(0).is_none()
     {
         match schemes[0] {
-            Scheme::New => println!("pad: none found — riding on the keyboard (Space gas, Shift brake, WASD and YUIO the sticks, HJKL the face buttons)"),
+            Scheme::New => println!("pad: none found — riding on the keyboard (J or Space gas, K or Shift brake, WASD and YUIO the sticks, H L G ; the face buttons)"),
             Scheme::Original => println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)"),
         }
     }
@@ -7045,9 +7045,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --preset 1..3 (or the Controls screen, under Original) rides the original\n\
                      layout on one of the original's other controller presets; 0 is the shipped one.\n\
                      On the keyboard, under the new layout: WASD the left stick (A/D steer, W/S\n\
-                     lean), YUIO the right stick, Space gas, Shift brake, Q/E L1/R1, Tab or C\n\
-                     the camera, arrows the d-pad, HJKL the face buttons (H Square, J Cross,\n\
-                     K Triangle, L Circle), Enter Start, Escape the pause. Under the original's (--controls original): X throttle, Z brake,\n\
+                     lean), YUIO the right stick, J (or Space) gas, K (or Shift) brake, Q/E L1/R1,\n\
+                     Tab or C the camera, arrows the d-pad, H Square, L Circle, G Cross,\n\
+                     ; Triangle, Enter Start, Escape the pause. Under the original's (--controls original): X throttle, Z brake,\n\
                      arrows steer, IJKL the right stick, C/V/D trick, A+D reset.\n\
                      The throttle is a pressure and not a switch (the game reads Cross from its\n\
                      pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\
