@@ -361,6 +361,18 @@ pub const OFFER_TOP_SPEED: f32 = 58.667;
 /// these are markers of the port's, see-through and colliding with nothing.
 pub const BAY_ALPHA: f32 = Ghost::START.0;
 
+/// The alpha a paused rider's machine and body are drawn at (P84): the put-back ghost's starting
+/// alpha, held while their pause is open. A port's own state with nothing of the original's in it —
+/// the original's pause stops the whole game — so the rider's own [`Ghost`] is left alone and the
+/// fade a put-back runs is not started.
+pub const PAUSED_ALPHA: f32 = Ghost::START.0;
+
+/// What a seat's machine and rider are drawn at: the put-back ghost's alpha (1 when it is off), no
+/// more than [`PAUSED_ALPHA`] while the seat is paused (P84).
+pub fn shown_alpha(ghost: f32, paused: bool) -> f32 {
+    if paused { ghost.min(PAUSED_ALPHA) } else { ghost }
+}
+
 /// The machine the original's switch pop-up offers a rider at `at` going `speed` (feet a second,
 /// either way), `wrecked` or not, who is on `up` (P103): `freeride_near_machine`'s scan in
 /// `research/oracle.txt`. Kind by kind in the original's order ([`Machine::ALL`]), the nearest bay
@@ -1038,18 +1050,22 @@ pub struct Wanted {
     /// on the bike and in the plane. A seat's own choice that every step must read the same, so it
     /// rides in the byte too; 0, an idle pad's, is markers on, as offline's default.
     pub dpad_rides: bool,
+    /// The seat's player has their pause open (P84): on every machine, from the tick the byte lands
+    /// on, the seat is frozen where it is — not polled, not stepped, in no other bike's contacts —
+    /// and drawn see-through, until a tick whose byte has it off. 0 rides, as an idle pad does.
+    pub paused: bool,
 }
 
 impl Wanted {
     /// The byte: the machine in the low two bits (0 none, 1 the bike, 2 the biplane), then the
-    /// two scheme bits, then the markers-off bit.
+    /// two scheme bits, then the markers-off bit, then the paused bit.
     pub fn byte(self) -> u8 {
         let to = match self.to {
             None => 0,
             Some(Kind::Bike) => 1,
             Some(Kind::Biplane) => 2,
         };
-        to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4
+        to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.paused as u8) << 5
     }
 
     /// [`Wanted::byte`] read back; a machine number this build does not know is no pick.
@@ -1059,7 +1075,7 @@ impl Wanted {
             2 => Some(Kind::Biplane),
             _ => None,
         };
-        Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0, dpad_rides: byte & 16 != 0 }
+        Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0, dpad_rides: byte & 16 != 0, paused: byte & 32 != 0 }
     }
 }
 
