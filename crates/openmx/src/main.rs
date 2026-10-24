@@ -293,6 +293,10 @@ const PLANE_CAMERA: &str = "Flight Cam 1";
 /// in each freeride track's second archive (`free06_2.res`'s `appstart\biplanecpresets.ini`), not in
 /// `appstart.res`.
 const PLANE_PRESETS: &str = "biplanecpresets.ini";
+
+/// The archive a ride on a track without the plane's own camera presets and particle list reads them
+/// from (P113): a freeride track's second archive carries both. The particle sheet stays the track's.
+const PLANE_KIT_ARCHIVE: &str = "free06_2.res";
 /// The archive the vehicle loader reads the machines' own files out of, `biplane.phy` among them.
 const MACHINE_ARCHIVE: &str = "machine.res";
 
@@ -2630,8 +2634,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Where the track parks it: its own `machine.txt`, `[Biplane1]` for the first player, which is
     // what the original's machine placement reads when that player's machine is the plane (R8). The
     // file is the machines' archive's, `tracks\<track>\machine.txt`, beside the plane's own model
-    // and physics. A track with no such section has no plane, and `--vehicle biplane` on it is an
-    // error.
+    // and physics. A track with no such section parks no plane, but still has one (P113): it spawns
+    // on the player, and starts by the start line.
     let machine_res = match member_ending(&disc, MACHINE_ARCHIVE) {
         Ok(name) => Some(disc.res(&name)?),
         Err(_) => None,
@@ -2697,11 +2701,17 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             })
         }
     };
-    let plane = lot.plane(0, flight_for(0));
+    // Every map has the plane (P113): a track whose machine.txt parks none for a player only means
+    // no parked copy, and theirs starts on the start line, measured once the ride's ground is up.
+    let line_start = {
+        let (s, f) = (point(place.start), point(place.start_direction).norm());
+        vehicle::Spawn { at: Vf::new(s.x, s.y, s.z, 1.0), facing: Vf::new(f.x, f.y, f.z, 0.0) }
+    };
+    let plane = lot.plane_anywhere(0, flight_for(0), line_start);
     // Every online seat's own biplane bay (N18), which a seat that starts the ride in the plane
     // stands in: the lot parked for the most seats a ride has, a copy's place being its own whatever
     // the count, so every machine has the same off the same disc.
-    let online_bays: Vec<vehicle::Spawn> = match &machines {
+    let mut online_bays: Vec<vehicle::Spawn> = match &machines {
         Some((_, b)) => {
             let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
             let mut ground = |at: Vf| sim_world::World::ground(&mut probe, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y();
@@ -2724,7 +2734,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if machines.is_some() {
         println!("biplane: {}", if plane_phy.is_some() { "flies on its biplane.phy" } else { "no biplane.phy, parked" });
     }
-    match (&machines, &plane) {
+    match (&machines, plane.as_ref().filter(|_| lot.bay(Machine::Biplane, 0).is_some())) {
         (Some((name, _)), Some(p)) => println!(
             "biplane: parked by {name} at {:.0}, {:.0}, {:.0} facing {:.0} degrees",
             p.at.x(),
@@ -2735,13 +2745,25 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         (Some((name, _)), None) => println!("biplane: {name} parks none"),
         (None, _) => println!("biplane: the track has no machine.txt"),
     }
-    let garage = Garage::new(args.vehicle, plane)?;
+    if plane.is_some() && lot.bay(Machine::Biplane, 0).is_none() {
+        println!("biplane: no parked copy here; it spawns on the player, and starts on the start line");
+    }
+    let mut garage = Garage::new(args.vehicle, plane)?;
     // The plane's own camera, which the swap hands the player with it: one camera-preset object per
     // machine kind, and the plane's reads `AppStart\BiplaneCPresets.ini` rather than the track's
     // bike presets (R8). The same derived camera and the same two constants the bike's has, because
     // the plane's camera is built by the same constructor; that the original holds the same speed
     // reference for it was not read.
-    let plane_presets = garage.plane.as_ref().and_then(|_| archives.iter().find_map(|a| a.read_suffix(PLANE_PRESETS).ok()));
+    // The plane's camera presets and its particle list sit in the freeride tracks' second archives;
+    // a track without them that has the plane all the same (P113: a race track, a mod map) reads
+    // free06's.
+    let plane_kit: Option<Res> = match garage.plane.is_some() && !archives.iter().any(|a| a.find_suffix(PLANE_PRESETS).is_some()) {
+        true => member_ending(&disc, PLANE_KIT_ARCHIVE).ok().and_then(|name| disc.res(&name).ok()),
+        false => None,
+    };
+    let plane_presets = garage.plane.as_ref().and_then(|_| {
+        archives.iter().chain(&plane_kit).find_map(|a| a.read_suffix(PLANE_PRESETS).ok())
+    });
     let plane_camera = match &garage.plane {
         None => None,
         Some(_) => {
@@ -2774,8 +2796,8 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         _ => Vec::new(),
     };
     // Its particles (P58): the emitter list and its `.emt`s, and the track's particle sheet.
-    let (plane_fx, fx_sheet) = match plane_drawn.first() {
-        Some(drawn) => match load_plane_fx(&archives, &stem, drawn, &assets) {
+    let (mut plane_fx, mut fx_sheet) = match plane_drawn.first() {
+        Some(drawn) => match load_plane_fx(&archives, plane_kit.as_ref(), &stem, drawn, &assets) {
             Ok((fx, binds, sheet)) => (Some((fx, binds)), Some(sheet)),
             Err(why) => {
                 println!("biplane: no particles: {why}");
@@ -2903,6 +2925,25 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     for (i, r) in others.iter().enumerate() {
         let p = r.ride.position();
         println!("player {}: starts at {:.0}, {:.0}, {:.0}", i + 2, p.x(), p.y(), p.z());
+    }
+    // Where a plane with no parked copy starts (P113): beside the start line on this ride's own
+    // ground — a mod map's or a world's too — on its wheels, one a seat, a local seat's or an online
+    // one's. Empty without the plane.
+    let plane_starts: Vec<vehicle::Spawn> = match garage.plane.as_ref().filter(|p| p.flight.is_some()) {
+        Some(p) => {
+            let rest = p.rest_height(0.0);
+            let mut ground = |at: Vf| sim_world::World::ground(&mut sim, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y();
+            vehicle::start_spots(line_start, Machine::Biplane, riders.max(net::SEATS), rest, &mut ground)
+        }
+        None => Vec::new(),
+    };
+    if lot.bay(Machine::Biplane, 0).is_none()
+        && let (Some(p), Some(&start)) = (garage.plane.as_mut(), plane_starts.first())
+    {
+        p.stand_at(start);
+    }
+    if online_bays.is_empty() {
+        online_bays = plane_starts.clone();
     }
     println!(
         "start: {:.0}, {:.0}, {:.0} facing {:.0} degrees, {} camera presets",
@@ -3189,7 +3230,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -3198,7 +3239,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -3853,15 +3894,19 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         markers: args.markers_of(0, front.as_deref()),
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
-        // Every player has a plane of their own, parked in their bay of the lot (P87), and starts in
-        // it if the setup picked it (P41). A track that parks none rides the bike, and says so.
+        // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
+        // that parks none for them, starting beside the start line (P113), and starts in it if the
+        // setup picked it (P41). Only a disc without the plane rides the bike, and says so.
         let pick = front.as_ref().map_or(menu::Machine::Bike, |f| f.menu.settings.machines[i + 1]);
-        let plane = lot.plane(i + 1, flight_for(i + 1));
+        let plane = match plane_starts.get(i + 1) {
+            Some(&start) => lot.plane_anywhere(i + 1, flight_for(i + 1), start),
+            None => lot.plane(i + 1, flight_for(i + 1)),
+        };
         let up = match (pick, &plane) {
             (menu::Machine::Biplane, Some(_)) => Kind::Biplane,
             (menu::Machine::Bike, _) => Kind::Bike,
             (pick, None) => {
-                println!("vehicle: player {} picked the {}, but the track parks none; the bike", i + 2, pick.word());
+                println!("vehicle: player {} picked the {}, but this ride has none; the bike", i + 2, pick.word());
                 Kind::Bike
             }
         };
@@ -3925,7 +3970,7 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         front.menu.switchable = [false; menu::SEATS_MAX];
         for (i, seat) in world.seats.iter().enumerate().take(menu::SEATS_MAX) {
             front.menu.up[i] = menu::Machine::from_word(seat.garage.up.name()).unwrap_or_default();
-            front.menu.switchable[i] = seat.garage.plane.is_some();
+            front.menu.switchable[i] = seat.garage.machines().len() > 1;
         }
     }
     let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::at(RIDE_HZ)).collect();
@@ -4720,12 +4765,13 @@ fn ride(args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 rig.preload_meter.step(preload_sense(seat));
             }
         }
-        // A world loads the tiles ahead of the riders and lets the far ones go (MD8).
+        // A world loads the tiles ahead of the riders and lets the far ones go (MD8): a plane only
+        // while it is flown, since every seat has one standing by the start since P113.
         if simulated && matches!(world.place, Land::Tiles(_)) {
             let near: Vec<Vf> = world
                 .seats
                 .iter()
-                .flat_map(|s| [Some(game_sim::markers::Spot::of(&s.sim.rider).at), s.garage.plane.as_ref().map(|p| p.at)])
+                .flat_map(|s| [Some(game_sim::markers::Spot::of(&s.sim.rider).at), s.garage.plane_flown().map(|p| p.at)])
                 .flatten()
                 .collect();
             if let Some(t) = world.place.tiled() {
@@ -6322,11 +6368,13 @@ fn load_biplane(
 /// each entry's node is on the plane. Says what it found, and what it skips.
 fn load_plane_fx(
     archives: &[Res],
+    kit: Option<&Res>,
     track: &str,
     drawn: &Biplane,
     assets: &Assets,
 ) -> Result<(particles::PlaneFx, Vec<(String, M4)>, game_render::pst::Texture), String> {
-    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    // The track's own archives first, then the plane's kit's where the track has none of its files (P113).
+    let read = |name: &str| archives.iter().chain(kit).find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
     let list = read(biplane::PARTICLES).ok_or(format!("no {}", biplane::PARTICLES))?;
     let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
     let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
@@ -6899,8 +6947,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      in the order found, - nobody). A pad pulled out pauses its player until it\n\
                      is plugged back in; Start on the keyboard rides on without it. The buttons\n\
                      are rebindable in --bindings (context/controls.txt, written on first run).\n\
-                     --vehicle biplane starts in the track's biplane, where its machine.txt\n\
-                     parks one, and M switches between the bike and the plane, spawning the\n\
+                     --vehicle biplane starts in the biplane, on any map: in the track's parked\n\
+                     one where its machine.txt parks one, by the start line otherwise; M switches between the bike and the plane, spawning the\n\
                      one taken where you are and putting the other away. The plane flies over the terrain\n\
                      alone: Cross opens the throttle and Square closes it.\n\
                      --players N splits the screen between N local players (up to 8), each on\n\
