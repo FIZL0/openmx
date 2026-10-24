@@ -1,0 +1,18 @@
+# S68 slope: S58's turn round at the start's flat top (gas, the stick hard right), then off the gas and
+# braked to a stop facing back up the start's line, then gas with the brake still held — the reverse —
+# so the bike backs over the edge and down the steep slope ahead of the start, and the stick hard right
+# once it is going. Wall-clock, at a quarter speed (4 ms here is 1 ms ridden).
+sleep 4000
+down cross
+sleep 2000
+stick l 1 0
+sleep 7300
+up cross
+stick l 0 0
+down square
+sleep 8000
+down cross
+sleep 10000
+stick l 1 0
+sleep 16000
+release
