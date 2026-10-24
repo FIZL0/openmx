@@ -327,7 +327,7 @@ impl Menu {
 
     fn display_rows(&self) -> Vec<Row> {
         let s = &self.settings;
-        let hud = Overlay::ALL.map(Overlay::label);
+        let hud = Overlay::CHOICES.map(Overlay::label);
         let speed = Speedometer::ALL.map(Speedometer::label);
         let scales = RenderScale::ALL.map(RenderScale::label);
         let limits: Vec<String> = FrameLimit::ALL.iter().map(|f| f.label()).collect();
@@ -338,8 +338,8 @@ impl Menu {
             Overlay::None => Some("The HUD is off"),
         };
         vec![
-            Row::choice(Key::Hud, "HUD", &hud, at(&Overlay::ALL, s.overlay), "What a ride draws over the picture. HUD is openmx's own, sharp at any size; Original is the game's; Debug adds the port's numbers; None leaves the picture clean.")
-                .tips(&["Sharp at any size", "The game's own", "Speeds, inputs, timings", "Nothing over the ride"]),
+            Row::choice(Key::Hud, "HUD", &hud, at(&Overlay::CHOICES, s.overlay), "What a ride draws over the picture. HUD is openmx's own, sharp at any size; Original is the game's; None leaves the picture clean.")
+                .tips(&["Sharp at any size", "The game's own", "Nothing over the ride"]),
             Row::choice(Key::Speedometer, "Speedometer", &speed, at(&Speedometer::ALL, s.speedometer), "How the HUD shows your speed: the readout or the dial.")
                 .off_if(speed_off.is_some(), speed_off.unwrap_or("")),
             // V52: the radar alone, and the whole HUD's size about its corners.
@@ -756,7 +756,7 @@ impl Menu {
                 self.cursor[Screen::Modifiers.index()] = 0;
                 return;
             }
-            Key::Hud => s.overlay = Overlay::ALL[next(row)],
+            Key::Hud => s.overlay = Overlay::CHOICES[next(row)],
             Key::Speedometer => s.speedometer = Speedometer::ALL[next(row)],
             Key::Minimap => s.minimap = !s.minimap,
             // Cross steps it up and round from the top, as a slider does.

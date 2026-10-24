@@ -398,13 +398,14 @@ fn the_ride_hud_is_the_default_and_old_files_move_to_it_once() {
     assert_eq!(Overlay::Hud.word(), "hud");
     assert_eq!(Settings::default().overlay, Overlay::Hud);
     assert_eq!(Settings::parse("name = Rider\noverlay = original\n").overlay, Overlay::Hud);
-    for o in Overlay::ALL {
+    // The debug HUD is never the settings' (P83): tests/menu.rs holds that it reads as the default.
+    for o in Overlay::CHOICES {
         let s = Settings { overlay: o, ..Settings::default() };
         assert_eq!(Settings::parse(&s.text()).overlay, o, "{o:?} written since");
         // Saved again, it stays.
         assert_eq!(Settings::parse(&Settings::parse(&s.text()).text()).overlay, o);
     }
-    for (word, o) in [("debug", Overlay::Debug), ("none", Overlay::None), ("hud", Overlay::Hud)] {
+    for (word, o) in [("debug", Overlay::Hud), ("none", Overlay::None), ("hud", Overlay::Hud)] {
         assert_eq!(Settings::parse(&format!("overlay = {word}\n")).overlay, o);
     }
 }

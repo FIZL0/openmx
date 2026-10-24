@@ -118,3 +118,16 @@ fn the_pause_menu_keeps_the_hud_under_it() {
         }
     }
 }
+
+/// P83: a launch with no word starts on the ride HUD, frame for frame what `--overlay hud` draws,
+/// and the debug HUD comes up only when the launch asks for it with `--hud`.
+#[test]
+fn only_a_hud_launch_starts_on_the_debug_hud() {
+    let whole = (0, 0, 640, 448);
+    let Some(plain) = first_frame("p83-plain", &["--renderer", "software"]) else { return };
+    let hud = first_frame("p83-hud-word", &["--renderer", "software", "--overlay", "hud"]).unwrap();
+    let debug = first_frame("p83-debug", &["--renderer", "software", "--hud"]).unwrap();
+    let (same, apart_debug) = (apart(&plain, &hud, whole), apart(&plain, &debug, whole));
+    assert!(apart_debug > 1000, "--hud drew only {apart_debug} pixels apart from a plain launch");
+    assert!(same * 20 < apart_debug, "a plain launch is {same} pixels off --overlay hud's frame");
+}

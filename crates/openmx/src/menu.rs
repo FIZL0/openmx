@@ -254,7 +254,8 @@ pub const TRACKS: [(&str, &str); 5] = [
 pub struct Settings {
     /// The rider's name, typed on the on-screen keyboard.
     pub name: String,
-    /// Which overlay a ride draws (V26), `--overlay`'s word; H toggles the debug one in a ride.
+    /// Which overlay a ride draws (V26), `--overlay`'s word, never the debug one (P83): that is
+    /// `--hud`'s, and only a ride launched with it toggles it on F3/H.
     pub overlay: Overlay,
     /// How the original's HUD shows the speed (V42): the digital readout, or the dial.
     pub speedometer: Speedometer,
@@ -990,7 +991,7 @@ impl Settings {
                         s.name = name;
                     }
                 }
-                "overlay" => s.overlay = Overlay::from_word(v).unwrap_or(s.overlay),
+                "overlay" => s.overlay = Overlay::from_word(v).filter(|o| Overlay::CHOICES.contains(o)).unwrap_or(s.overlay),
                 "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
                 "minimap" => s.minimap = v != "off",
                 "hud_scale" => s.hud_scale = hud_scale_word(v).unwrap_or(s.hud_scale),
@@ -1318,6 +1319,9 @@ pub enum Overlay {
 
 impl Overlay {
     pub const ALL: [Overlay; 4] = [Overlay::Hud, Overlay::Original, Overlay::Debug, Overlay::None];
+    /// The ones Settings and `settings.txt` offer (P83): the debug HUD is a launch option only,
+    /// `--hud` or `--overlay debug`, so a file that says `debug` rides the default HUD instead.
+    pub const CHOICES: [Overlay; 3] = [Overlay::Hud, Overlay::Original, Overlay::None];
 
     /// The file's word, which is also `--overlay`'s.
     pub fn word(self) -> &'static str {
