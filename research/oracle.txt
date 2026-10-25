@@ -4917,6 +4917,22 @@ asz_show                    boot 0x00325580 flag byte: bit 1 shown, bit 4 circle
 #   0x436bc0) with the banked total. ELF vaddr = file offset - 0x80 + 0x100000 for these.
 #   Filmed since (P121 journal entry 2, recording2 under Video Capture): a land, a two-trick land and a
 #   bail all stay orange; the end shrinks and fades in ~0.25 s, and the combo total stands ~1 s.
+# P68 — the original HUD's trick text and camera text (journal 2026-10-25-p68-trick-hud).
+#   Camera button handler (boot 0x00200330) calls 0x002421c0 with 3.0, -1.0, the UI manager, the new
+#   preset's name (preset +0x30, or "Helmet Cam" at 0x42d828), the viewport, 1, -1: the info text
+#   (InfoTextOverlay1/2 at 0x430f40/0x430f60, queued by 0x002a49b0, up to 3 messages) for 3.0 s.
+#   No sound call on the camera path or in the stunt listener (0x2a54f0 0x2a5660 0x2a5ba0 0x2a6840
+#   0x2a6940 0x2a69e0).
+#   Text setter 0x002a5660: n = card +0xcc, head card +200. n == 1: "%s" or "BackFlip + %s" (0x436b20,
+#   flag listener +0xa0) over "%d". n >= 2: the two Stunt movies alternate by parity; the newest says
+#   "%d  X %d" of (int)points / n and n (disassembly 0x2a5ad0..0x2a5b04). A landed n >= 2 (0x2a6940
+#   sets +0xa8): "%d %s" (n, "Stunt Combo Total") over "%d" of the banked +0x98; event 2 holds while
+#   +0x8c < 1.0.
+#   fstyleui.res: infotextoverlay1.lyt 320,399 (2: 381; horizontal 320,50; vertical 160,224), font
+#   yearlingdashbold_20; stuntscoreoverlays.lyt Stunt/Stunt Combo 320,373 (horizontal 320,182;
+#   vertical 160,360), movies overlay_stunt1_1.fsh/overlay_stunt2_1.fsh in yearlingdashboldoblique_18s.
+#   recording2 (s79 recording2-score.csv): "BackFlip + Taunt" is up at flip_stage 3 (frames
+#   2581..2591), so the +0xa0 flag outlives stage 2.
 # S109 — the riding ragdoll is what a riding rider is drawn from; ported beside the ride as
 # crates/game-sim/src/ragdoll_riding.rs (draw-only), tick proved 1203/1203 against animandpump's run1.
 # In animandpump's state the human's body actor is 0x015b96f0 and its riding request 0x151c990

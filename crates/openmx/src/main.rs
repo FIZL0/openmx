@@ -535,14 +535,13 @@ fn took(rig: &mut Rig, up: Kind) {
 }
 
 /// What the original's HUD shows of a player's own ride (V26, V28): their odometer, which machine is
-/// up, how hard a preload is shoving the bike, and the score. The port keeps no stunt score yet, so
-/// the score reads 0 — what the original's shows until a trick lands.
+/// up, how hard a preload is shoving the bike, and the score — the rider's banked total (S79, P68).
 fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Gauges {
     overlay::Gauges {
         feet: rig.odometer.feet,
         bike: seat.garage.up == Kind::Bike,
         preload: rig.preload_meter.shown(),
-        score: 0,
+        score: seat.sim.rider.score.total.0.max(0.0) as u32,
         modified: rig.modified,
         speedometer,
     }
@@ -571,19 +570,10 @@ impl RideHud<'_> {
         if seat.riding && self.simulated {
             rig.odometer.step([b.x(), b.y(), b.z()]);
         }
-        let score = &seat.sim.rider.score;
-        // A trick pack's extras (MD16) are named by the rider's set, as the ride log names them.
-        let set = &seat.sim.rider.set;
-        rig.ride_hud.update(now, score, |id| {
-            let t = game_sim::trick::Trick(id);
-            match t.extra().and_then(|_| set.stunt(t)) {
-                Some(stunt) => stunt.display_name.clone(),
-                None => self.table.display_name(0, t).to_string(),
-            }
-        });
+        track_score(seat, rig, self.table, now);
         // A split is digital, as the original's code forces it with two riders or more.
         let speedometer = if self.ridden.len() > 1 { menu::Speedometer::Digital } else { self.speedometer };
-        let gauges = overlay::Gauges { score: score.total.0.max(0.0) as u32, ..gauges(seat, rig, speedometer) };
+        let gauges = gauges(seat, rig, speedometer);
         let riders: Vec<ride_hud::Dot> = self
             .ridden
             .iter()
@@ -617,6 +607,20 @@ impl RideHud<'_> {
         };
         draw(&shown, &rig.ride_hud, now);
     }
+}
+
+/// The view's HUD tracker a frame on from its seat's score card (P121, P68): each view follows its
+/// own rider's, so a split or an online ride shows every player their own tricks.
+fn track_score(seat: &Seat, rig: &mut Rig, table: &Stunts, now: Instant) {
+    // A trick pack's extras (MD16) are named by the rider's set, as the ride log names them.
+    let set = &seat.sim.rider.set;
+    rig.ride_hud.update(now, &seat.sim.rider.score, |id| {
+        let t = game_sim::trick::Trick(id);
+        match t.extra().and_then(|_| set.stunt(t)) {
+            Some(stunt) => stunt.display_name.clone(),
+            None => table.display_name(0, t).to_string(),
+        }
+    });
 }
 
 /// What the speedometer reads off a seat's rider for the preload meter (V53): nothing on the
@@ -5817,6 +5821,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                     let (window, gauges) = ((frame.width, frame.height), gauges(seat, rig, speedometer));
                     art.sprites(&mut gpu_sprites, (at.x, at.y, at.w, at.h), window, &ridden, v, radar_span, &gauges);
+                    // Its trick pop-up and info text (P68), over it.
+                    let now = Instant::now();
+                    track_score(seat, rig, &table, now);
+                    art.sprites_pops(&mut gpu_sprites, (at.x, at.y, at.w, at.h), window, v, &rig.ride_hud.pops(now));
                 }
                 if ride {
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
@@ -6216,6 +6224,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     rig.odometer.step([b.x(), b.y(), b.z()]);
                 }
                 art.draw(target, (width, height), &ridden, v, radar_span, &gauges(seat, rig, speedometer));
+                let now = Instant::now();
+                track_score(seat, rig, &table, now);
+                art.draw_pops(target, (width, height), v, &rig.ride_hud.pops(now));
             }
             // Or the ride HUD (P121), the default.
             if ride {
