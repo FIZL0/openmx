@@ -50,20 +50,57 @@ pub struct Dressed {
     pub shift: [f32; 2],
     /// What the ride's assets took in for it.
     pub taken: Taken,
+    /// Each car's last pose, in world feet, for [`Dressed::cars_near`].
+    pub posed: Vec<Option<game_render::mat::M4>>,
 }
+
+/// How near a camera a world's car is posed every picture (MD28). A car is posed by replaying
+/// [`toy::WARM`] scene steps, a ground query each, so 29 cars on a world were 1,400 queries and 3 to
+/// 13 ms a picture; past it, a car posed every [`CARS_FAR_EVERY`]th picture moves under two pixels
+/// between poses at 1080p.
+pub const CARS_NEAR: f32 = 1500.0;
+
+/// How often a car past [`CARS_NEAR`] is posed: every this many pictures, the cars staggered — 15 a
+/// second at 60, beside the original's 30 scene steps a second.
+pub const CARS_FAR_EVERY: u64 = 4;
 
 impl Dressed {
     /// Every car's model, by its name in the ride's assets, and where it is in the world, `elapsed`
-    /// seconds of the scene's clock in, on `ground` asked in world feet.
-    pub fn cars(&self, elapsed: f64, ground: &mut dyn FnMut(game_render::mat::V3, [f32; 2]) -> (game_render::mat::V3, game_render::mat::V3)) -> Vec<(String, game_render::mat::M4)> {
+    /// seconds of the scene's clock in, on `ground` asked in world feet, as [`toy::Traffic::placed`]
+    /// poses them; but each car past [`CARS_NEAR`] of every `eyes` (world `x`, `z`) keeps its last
+    /// pose but on every [`CARS_FAR_EVERY`]th `picture`. A pose is a function of the clock alone,
+    /// so a car posed late is where it would have been: nothing here is the simulation's.
+    pub fn cars_near(
+        &mut self,
+        elapsed: f64,
+        eyes: &[[f32; 2]],
+        picture: u64,
+        ground: &mut dyn FnMut(game_render::mat::V3, [f32; 2]) -> (game_render::mat::V3, game_render::mat::V3),
+    ) -> Vec<(String, game_render::mat::M4)> {
         let shift = self.shift;
-        let mut placed = self.traffic.placed(elapsed, &mut |p| ground(p, shift));
-        for (name, at) in &mut placed {
-            *name = format!("{}{name}", self.prefix);
-            at.0[3][0] += shift[0];
-            at.0[3][2] += shift[1];
+        self.posed.resize(self.traffic.cars.len(), None);
+        let mut out = Vec::with_capacity(self.traffic.cars.len());
+        for (i, ((car, path), posed)) in self.traffic.cars.iter().zip(&mut self.posed).enumerate() {
+            let near = |m: &game_render::mat::M4| {
+                let at = [m.0[3][0], m.0[3][2]];
+                eyes.iter().any(|e| (at[0] - e[0]).hypot(at[1] - e[1]) < CARS_NEAR)
+            };
+            let due = match posed {
+                Some(m) => near(m) || (picture + i as u64) % CARS_FAR_EVERY == 0,
+                None => true,
+            };
+            if due {
+                let at = toy::clock(elapsed, car.time_scale, path.last());
+                let mut m = path.pose(car, at, toy::SCENE_STEP * car.time_scale, &mut |p| ground(p, shift)).transform;
+                m.0[3][0] += shift[0];
+                m.0[3][2] += shift[1];
+                *posed = Some(m);
+            }
+            if let Some(m) = posed {
+                out.push((format!("{}{}", self.prefix, car.stem()), *m));
+            }
         }
-        placed
+        out
     }
 }
 
@@ -298,7 +335,7 @@ pub fn take(
         Ok(archives) => Traffic::load(&archives, &piece.stem, &mut |p| ground(p, shift)),
         Err(_) => Traffic::default(),
     };
-    Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken }
+    Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken, posed: Vec::new() }
 }
 
 /// A world's ground as the software renderer draws it (MD15): every piece within [`ground::REACH`]
@@ -514,13 +551,13 @@ mod tests {
         // The ground: t0 is built before the ride, let go out at the far end, and built again, the
         // same chunks, back at the start.
         let (mut ground, first) = worlds::GroundStream::start(&w, 16, reach, &home, false);
-        let t0: Vec<_> = first.iter().filter(|(i, _)| *i == 0).map(|(_, c)| c.iter().map(|c| (c.at, c.vertices.len())).collect::<Vec<_>>()).collect();
+        let t0: Vec<_> = first.iter().filter(|(i, _)| *i == 0).map(|(_, made)| made.chunks.iter().map(|c| (c.at, c.vertices.len())).collect::<Vec<_>>()).collect();
         assert_eq!(first.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0], "only t0 is in reach of its start");
         let away = until(|| ground.update(&far), |c| c.iter().any(|c| matches!(c, worlds::Change::Drop(0))));
         assert!(away.iter().any(|c| matches!(c, worlds::Change::Drop(0))), "t0 was not dropped at the far end");
         let back = until(|| ground.update(&home), |c| c.iter().any(|c| matches!(c, worlds::Change::Add(0, _))));
         let again: Vec<_> = back.iter().filter_map(|c| match c {
-            worlds::Change::Add(0, chunks) => Some(chunks.iter().map(|c| (c.at, c.vertices.len())).collect::<Vec<_>>()),
+            worlds::Change::Add(0, made) => Some(made.chunks.iter().map(|c| (c.at, c.vertices.len())).collect::<Vec<_>>()),
             _ => None,
         }).collect();
         assert_eq!(again, t0, "t0's ground built again, as it was built first");

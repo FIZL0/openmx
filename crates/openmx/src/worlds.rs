@@ -15,8 +15,9 @@ use crate::track_mods::{self, Json, ModTrack};
 use game_render::disc::Res;
 use game_sim::tiles::{Piece, Reach, Source, Tile, Tiled};
 use game_sim::track::{self, Placement, Terrain, TerrainHead, TerrainLayout, TerrainNode};
-use game_render::gpu::GroundChunk;
+use game_render::gpu::{GroundChunk, GroundPiece};
 use ps2_float::F;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -412,7 +413,7 @@ impl WorldMod {
 
     /// The simulation's world, reading each piece from its folder when it is first needed.
     pub fn tiled(&self, reach: Reach) -> Result<Tiled, String> {
-        let files = Files { pieces: self.pieces.clone() };
+        let files = Ahead::new(Files { pieces: self.pieces.clone() });
         Tiled::new(self.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(files), reach)
     }
 
@@ -487,6 +488,78 @@ impl Source for Files {
                 Some((mesh, at.clone()))
             })
             .collect())
+    }
+}
+
+/// [`Files`] that read the pieces the ride will want on a thread of their own (MD28), so that the
+/// ride's thread only takes them. A piece the ride asks for before it is read is waited for, or read
+/// there and then if it was not wanted; either way it is the same piece, so the ride is the same.
+struct Ahead {
+    files: Files,
+    /// The pieces wanted and not taken yet.
+    asked: HashSet<usize>,
+    /// To the reader: the pieces to read. It stops when this is dropped.
+    read: std::sync::mpsc::Sender<usize>,
+    /// From the reader: the pieces read. One forgotten while it was being read stays until it is
+    /// wanted again (a piece at most for each the ride has been near).
+    done: Arc<(Mutex<HashMap<usize, Result<Piece, String>>>, Condvar)>,
+}
+
+impl Ahead {
+    fn new(files: Files) -> Ahead {
+        let (read, asks) = channel::<usize>();
+        let done: Arc<(Mutex<HashMap<usize, Result<Piece, String>>>, Condvar)> = Arc::default();
+        let (pieces, out) = (files.pieces.clone(), done.clone());
+        std::thread::spawn(move || {
+            let mut files = Files { pieces };
+            while let Ok(i) = asks.recv() {
+                let piece = files.load(i);
+                out.0.lock().expect("the pieces read").insert(i, piece);
+                out.1.notify_all();
+            }
+        });
+        Ahead { files, asked: HashSet::new(), read, done }
+    }
+}
+
+impl Source for Ahead {
+    fn load(&mut self, index: usize) -> Result<Piece, String> {
+        let mut done = self.done.0.lock().expect("the pieces read");
+        if self.asked.remove(&index) {
+            loop {
+                if let Some(piece) = done.remove(&index) {
+                    return piece;
+                }
+                done = self.done.1.wait(done).expect("the pieces read");
+            }
+        }
+        match done.remove(&index) {
+            Some(piece) => piece,
+            None => {
+                drop(done);
+                self.files.load(index)
+            }
+        }
+    }
+
+    fn shapes(&mut self, index: usize) -> Result<Vec<(track::Mesh, Placement)>, String> {
+        self.files.shapes(index)
+    }
+
+    fn want(&mut self, index: usize) {
+        if self.asked.insert(index) {
+            let _ = self.read.send(index);
+        }
+    }
+
+    fn ready(&mut self, index: usize) -> bool {
+        self.done.0.lock().expect("the pieces read").contains_key(&index)
+    }
+
+    fn forget(&mut self, index: usize) {
+        if self.asked.remove(&index) {
+            self.done.0.lock().expect("the pieces read").remove(&index);
+        }
     }
 }
 
@@ -604,7 +677,13 @@ pub struct GroundStream {
     held: Vec<Held>,
     /// What the builder has to do, nearest last, and whether it should stop.
     work: Arc<(Mutex<(Vec<usize>, bool)>, Condvar)>,
-    built: Receiver<(usize, Result<Vec<GroundChunk>, String>)>,
+    built: Receiver<(usize, Result<GroundPiece, String>)>,
+    /// Built pieces' parts not handed over yet, each piece's first part marked: a frame hands over
+    /// `chunks_a_frame` at most.
+    pending: VecDeque<(usize, GroundPiece, bool)>,
+    /// The most chunks a frame hands over, [`CHUNKS_A_FRAME`] unless the shell says
+    /// (`--world-chunks`).
+    pub chunks_a_frame: usize,
     /// What building and dropping did since the shell last took the lines.
     log: Vec<String>,
 }
@@ -617,9 +696,20 @@ enum Held {
     In,
 }
 
-/// What a [`GroundStream`] asks of the renderer: a piece's chunks to add, or a piece to drop.
+/// The most ground chunks a [`GroundStream::update`] hands over, but for a piece a rider is on
+/// (MD28: a national's 1444 chunks took 5-10 ms to write in one frame).
+pub const CHUNKS_A_FRAME: usize = 256;
+
+/// How long a frame spends uploading a tile dressed mid-ride's models and textures (MD28): the
+/// rest wait for the next frame, and the tile is drawn once they are all up.
+pub const UPLOADS_A_FRAME: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// What a [`GroundStream`] asks of the renderer: a piece's chunks to add, more of its chunks, or a
+/// piece to drop.
 pub enum Change {
-    Add(usize, Vec<GroundChunk>),
+    Add(usize, GroundPiece),
+    /// More of a piece added already ([`game_render::gpu::Renderer::more_ground_piece`]).
+    More(usize, GroundPiece),
     Drop(usize),
 }
 
@@ -627,11 +717,11 @@ impl GroundStream {
     /// The stream, and the pieces it built before the ride: those within `reach.load` of `near`,
     /// or with `all` every one (the whole world before the first frame, as before MD17). The
     /// pieces are built on every core.
-    pub fn start(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool) -> (GroundStream, Vec<(usize, Vec<GroundChunk>)>) {
+    pub fn start(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool) -> (GroundStream, Vec<(usize, GroundPiece)>) {
         let tiles: Vec<Tile> = w.pieces.iter().map(|p| p.tile.clone()).collect();
         let first: Vec<usize> = (0..tiles.len()).filter(|&i| all || nearest(&tiles[i], near) <= reach.load.0).collect();
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
-        let mut ready: Vec<(usize, Result<Vec<GroundChunk>, String>)> = std::thread::scope(|scope| {
+        let mut ready: Vec<(usize, Result<GroundPiece, String>)> = std::thread::scope(|scope| {
             let jobs: Vec<_> = (0..threads)
                 .map(|t| {
                     let (first, pieces) = (&first, &w.pieces);
@@ -666,7 +756,7 @@ impl GroundStream {
                 }
             }
         });
-        let mut stream = GroundStream { held: vec![Held::Out; tiles.len()], tiles, reach, work, built, log: Vec::new() };
+        let mut stream = GroundStream { held: vec![Held::Out; tiles.len()], tiles, reach, work, built, pending: VecDeque::new(), chunks_a_frame: CHUNKS_A_FRAME, log: Vec::new() };
         let mut out = Vec::new();
         for (i, r) in ready {
             if let Some(chunks) = stream.arrived(i, r) {
@@ -677,13 +767,13 @@ impl GroundStream {
     }
 
     /// A piece the builder finished: held, with its line, or `None` with the line why not.
-    fn arrived(&mut self, i: usize, built: Result<Vec<GroundChunk>, String>) -> Option<Vec<GroundChunk>> {
+    fn arrived(&mut self, i: usize, built: Result<GroundPiece, String>) -> Option<GroundPiece> {
         let name = &self.tiles[i].name;
         match built {
-            Ok(chunks) => {
-                self.log.push(format!("world ground: {name} built, {} chunks", chunks.len()));
+            Ok(piece) => {
+                self.log.push(format!("world ground: {name} built, {} chunks", piece.chunks.len()));
                 self.held[i] = Held::In;
-                Some(chunks)
+                Some(piece)
             }
             Err(e) => {
                 // Not asked again: its files do not change under a ride.
@@ -714,11 +804,11 @@ impl GroundStream {
             todo.0 = want;
             wake.notify_one();
         }
-        let mut take = |s: &mut GroundStream, (i, r): (usize, Result<Vec<GroundChunk>, String>)| {
+        let take = |s: &mut GroundStream, (i, r): (usize, Result<GroundPiece, String>)| {
             if gaps[i] > s.reach.drop.0 {
                 s.held[i] = Held::Out;
-            } else if let Some(chunks) = s.arrived(i, r) {
-                out.push(Change::Add(i, chunks));
+            } else if let Some(piece) = s.arrived(i, r) {
+                s.pending.extend(piece.split(s.chunks_a_frame).into_iter().enumerate().map(|(n, part)| (i, part, n == 0)));
             }
         };
         while let Ok(done) = self.built.try_recv() {
@@ -730,8 +820,21 @@ impl GroundStream {
             self.log.push(format!("world ground: waited {:.0} ms for {}", at.elapsed().as_secs_f32() * 1000.0, self.tiles[i].name));
             take(self, done);
         }
+        // A frame's worth of parts, nearest piece first, and all of any piece a rider is on.
+        let mut pending: Vec<_> = std::mem::take(&mut self.pending).into();
+        pending.sort_by(|a, b| gaps[a.0].total_cmp(&gaps[b.0]));
+        let mut budget = self.chunks_a_frame;
+        for (i, part, first) in pending {
+            if part.chunks.len() > budget && gaps[i] > 0.0 {
+                self.pending.push_back((i, part, first));
+                continue;
+            }
+            budget = budget.saturating_sub(part.chunks.len());
+            out.push(if first { Change::Add(i, part) } else { Change::More(i, part) });
+        }
         for i in 0..self.tiles.len() {
             if self.held[i] == Held::In && gaps[i] > self.reach.drop.0 {
+                self.pending.retain(|p| p.0 != i);
                 self.held[i] = Held::Out;
                 self.log.push(format!("world ground: {} dropped", self.tiles[i].name));
                 out.push(Change::Drop(i));
@@ -780,10 +883,11 @@ impl Builder {
         Builder { files: Files { pieces }, tiled, cells }
     }
 
-    fn build(&mut self, i: usize) -> Result<Vec<GroundChunk>, String> {
+    fn build(&mut self, i: usize) -> Result<GroundPiece, String> {
         let bytes = self.files.load_terrain(i)?;
         let tiled = self.tiled.as_ref().ok_or("the world does not read")?;
-        piece_chunks(&self.files.pieces[i].tile, i, &bytes, tiled, self.cells)
+        // Its errors and hash here, off the drawing thread (MD28).
+        piece_chunks(&self.files.pieces[i].tile, i, &bytes, tiled, self.cells).map(GroundPiece::of)
     }
 }
 

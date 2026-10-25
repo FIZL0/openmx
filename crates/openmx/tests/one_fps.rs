@@ -36,7 +36,7 @@ fn session_ms(said: &str, stage: &str) -> f64 {
         .lines()
         .find(|l| l.starts_with("session ms a frame:"))
         .unwrap_or_else(|| panic!("no session line:\n{said}"));
-    let words: Vec<&str> = line.split(|c: char| c == ' ' || c == ',').filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> = line.split(|c: char| c == ' ' || c == ',' || c == ';').filter(|w| !w.is_empty()).collect();
     let at = words.iter().position(|w| *w == stage).unwrap_or_else(|| panic!("no {stage} in {line}"));
     words[at + 1].parse().unwrap_or_else(|_| panic!("{stage} is not a number in {line}"))
 }

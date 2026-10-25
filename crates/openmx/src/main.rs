@@ -1109,6 +1109,9 @@ struct Args {
     /// `--world-reach LOAD,DROP`: how near a world's pieces are loaded and how far they are let go,
     /// in feet, instead of the desktop's ([`game_sim::tiles::Reach::DESKTOP`]).
     world_reach: Option<game_sim::tiles::Reach>,
+    /// `--world-chunks N`: the most ground chunks a frame of a world ride hands the GPU instead of
+    /// [`worlds::CHUNKS_A_FRAME`] (MD28).
+    world_chunks: Option<usize>,
     /// `--trace-switch N`: under `--trace-feel`, ride the first N frames on the throttle alone and only
     /// then take the controls the other flags ask for — a full brake from top speed, or a turn at speed.
     trace_switch: Option<u32>,
@@ -3734,12 +3737,19 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The near pieces' terrains, for the software renderer's world ground (MD15).
     let mut soft_terrains: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
     let mut dressed: Vec<world_dress::Dressed> = Vec::new();
+    // Pictures drawn, which staggers the far cars' poses (MD28).
+    let mut car_pictures = 0u64;
+    // Tiles dressed mid-ride whose models are still going up, a few a frame, and not drawn till
+    // they all are: by dressing index, the models left, and their slow textures' levels being made
+    // on a thread of their own (MD28: a tile's at once was a 57 ms frame).
+    type Levels = std::sync::mpsc::Receiver<Vec<(usize, u8, game_render::gpu::Mips)>>;
+    let mut unshown: Vec<(usize, Vec<String>, Option<Levels>)> = Vec::new();
     let world_reach = match &sim {
         Land::Tiles(t) => Some(t.reach),
         _ => None,
     };
     if let (Some(w), Some(reach)) = (&world_mod, world_reach) {
-        let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane.as_ref().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
+        let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane_flown().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
         let dress_at = Instant::now();
         let (mut stream, first) = world_dress::DressStream::start(w, reach, &starts, args.plants.unwrap_or_default());
         for b in first {
@@ -3759,6 +3769,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     // A world's ground on the GPU (MD17): the pieces near the start now, the rest as the riders come.
     let mut ground_stream: Option<worlds::GroundStream> = None;
+    // The most ground chunks a frame of the ride handed the GPU, how many in all, and in how many
+    // frames (MD28).
+    let mut ground_written = (0usize, 0usize, 0usize);
     // A world's look by map (MD9): every tile's ground paint, light and sky, read from its folder.
     let world_look = world_mod.as_ref().map(|w| {
         let l = w.look(&archives[1..], ground::DIRT, Lighting::of(&look));
@@ -3772,9 +3785,20 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
         return Ok(leave);
     }
+    // A world's tiles within reach of the start read while loading, not on the ride's first frame
+    // (MD28: 27 ms on world_mxu's), and every tile's shapes, which the first wreck's search would
+    // read (63-132 ms).
+    if let Land::Tiles(t) = &mut sim {
+        t.load_near(&std::iter::once(at).chain(garage.plane_flown().map(|p| p.at)).collect::<Vec<_>>());
+        t.every_shape();
+        for line in t.take_log() {
+            println!("{line}");
+        }
+    }
     if gpu_on && renderer_of(&mut offscreen, window).is_some() {
-        // Where the ride's streaming will look from on its first tick: the rider, and the parked plane.
-        let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane.as_ref().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
+        // Where the ride's streaming will look from on its first tick: the rider, and the plane if it
+        // is the one up (MD28: a parked plane's pieces were built here and dropped on the first frame).
+        let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane_flown().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
         let at = Instant::now();
         let mut pre_chunks = pre_chunks;
         // A world's ground is its pieces', streamed (MD17), each tile painted from its own pages and
@@ -3823,21 +3847,25 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     detail.layers
                 );
             }
-            for (i, c) in &first {
-                r.add_ground_piece(*i as u32, c)?;
+            let built = first.len();
+            for (i, made) in first {
+                r.add_ground_piece_of(i as u32, made)?;
             }
             for line in stream.take_log() {
                 println!("{line}");
             }
             println!(
                 "world ground: {} of {} pieces built before the ride in {:.2} s ({}; load {:.0} ft, drop {:.0} ft)",
-                first.len(),
+                built,
                 w.pieces.len(),
                 ground_at.elapsed().as_secs_f32(),
                 if args.world_ground_all { "all" } else { "near the start" },
                 reach.load.0,
                 reach.drop.0
             );
+            if let Some(n) = args.world_chunks {
+                stream.chunks_a_frame = n;
+            }
             ground_stream = Some(stream);
         }
         // `upload_all`'s order, a slice at a time.
@@ -5269,10 +5297,21 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let Some(stream) = &mut ground_stream {
                 let near: Vec<[f32; 2]> = near.iter().map(|p| [p.x(), p.z()]).collect();
                 let changes = stream.update(&near);
+                let written: usize = changes
+                    .iter()
+                    .map(|c| match c {
+                        worlds::Change::Add(_, made) | worlds::Change::More(_, made) => made.chunks.len(),
+                        worlds::Change::Drop(_) => 0,
+                    })
+                    .sum();
+                if written > 0 {
+                    ground_written = (ground_written.0.max(written), ground_written.1 + written, ground_written.2 + 1);
+                }
                 if let Some(r) = renderer_of(&mut offscreen, window) {
                     for change in changes {
                         match change {
-                            worlds::Change::Add(i, chunks) => r.add_ground_piece(i as u32, &chunks)?,
+                            worlds::Change::Add(i, made) => r.add_ground_piece_of(i as u32, made)?,
+                            worlds::Change::More(i, made) => r.more_ground_piece(i as u32, made)?,
                             worlds::Change::Drop(i) => r.drop_ground_piece(i as u32),
                         }
                     }
@@ -5290,11 +5329,18 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             let place = &mut world.place;
                             let d = world_dress::take(b, w, &mut assets, &mut |p, by| car_ground(place, p, by));
                             if let Some(r) = renderer_of(&mut offscreen, window) {
-                                r.add_props(d.index as u32, &d.props, d.grove.clone());
+                                let work: Vec<_> =
+                                    r.mips_wanted(&assets, &d.taken.models).into_iter().map(|(t, keep)| (t, keep, assets.textures[t].clone())).collect();
+                                let (send, levels) = std::sync::mpsc::channel();
+                                std::thread::spawn(move || {
+                                    let _ = send.send(work.into_iter().map(|(t, keep, tex)| (t, keep, game_render::gpu::Mips::of(&tex, keep))).collect());
+                                });
+                                unshown.push((d.index, d.taken.models.iter().rev().cloned().collect(), Some(levels)));
                             }
                             dressed.push(d);
                         }
                         world_dress::Change::Drop(i) => {
+                            unshown.retain(|u| u.0 != i);
                             let Some(at) = dressed.iter().position(|d| d.index == i) else { continue };
                             let d = dressed.remove(at);
                             if let Some(r) = renderer_of(&mut offscreen, window) {
@@ -5308,7 +5354,39 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     println!("{line} at tick {}", pacer.ticks());
                 }
             }
+            if let Some(r) = renderer_of(&mut offscreen, window) {
+                let at = Instant::now();
+                while let Some((index, left, levels)) = unshown.first_mut() {
+                    if let Some(made) = levels {
+                        match made.try_recv() {
+                            Ok(made) => {
+                                for (t, keep, mips) in &made {
+                                    r.put_mips(*t, *keep, mips);
+                                }
+                                *levels = None;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            // Made here as the models go up, then.
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => *levels = None,
+                        }
+                    }
+                    while at.elapsed() < worlds::UPLOADS_A_FRAME
+                        && let Some(name) = left.pop()
+                    {
+                        r.upload_models(&assets, &[&name]);
+                    }
+                    if !left.is_empty() {
+                        break;
+                    }
+                    let index = *index;
+                    unshown.remove(0);
+                    if let Some(d) = dressed.iter().find(|d| d.index == index) {
+                        r.add_props(index as u32, &d.props, d.grove.clone());
+                    }
+                }
+            }
         }
+        stages.mark(stages::Stage::Stream);
         let (scene_at, spent) = (Instant::now(), perf.spent());
 
         cameras.clear();
@@ -5632,8 +5710,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let place = &mut world.place;
             let shown = game_render::toy::between(traffic_before, traffic_time, blend.0);
             traffic_at.clear();
-            for d in dressed.iter().filter(|d| !d.traffic.cars.is_empty()) {
-                traffic_at.extend(d.cars(shown, &mut |p, by| car_ground(place, p, by)));
+            // The far ones less often (MD28).
+            let eyes: Vec<[f32; 2]> = cameras.iter().map(|c| [c.eye.x, c.eye.z]).collect();
+            car_pictures += 1;
+            for d in dressed.iter_mut().filter(|d| !d.traffic.cars.is_empty() && !unshown.iter().any(|u| u.0 == d.index)) {
+                traffic_at.extend(d.cars_near(shown, &eyes, car_pictures, &mut |p, by| car_ground(place, p, by)));
             }
         }
         // The markers' slot display (P88), each view its own player's: the selection, the slots, the
@@ -5876,6 +5957,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
             perf.add(Stage::Draw, draw_at.elapsed());
+            stages.mark(stages::Stage::Hud);
 
             // What stands in the world besides the props, once for every view: each bike, its parts
             // and its rider, posed by node matrices the vertex shader skins with.
@@ -6007,6 +6089,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 })
                 .collect();
             perf.lap(Stage::Scene, scene_at, spent);
+            stages.mark(stages::Stage::Scene);
 
             let draw_at = Instant::now();
             let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, sprites: &gpu_sprites, light: &light };
@@ -6060,7 +6143,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             };
             perf.add(Stage::Draw, draw_at.elapsed().saturating_sub(waited));
             perf.add(Stage::Present, waited);
+            // The GPU's whole frame, its ground's choosing and drawing among it, is its present.
+            stages.mark(stages::Stage::Present);
             if let Some(d) = out {
+                stages.shift(stages::Stage::Present, stages::Stage::Ground, d.ground_time);
                 for (v, tris) in d.triangles.iter().enumerate() {
                     view_triangles[v] += tris;
                     drawn += tris;
@@ -6372,8 +6458,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         stages.mark(stages::Stage::Pace);
         stages.frame();
         loaded.get_or_insert_with(|| (game_render::tally::Tally::now(), stages::bytes_read_mark()));
+        if let Some(slow) = stages.take_slow().filter(|_| args.timings) {
+            println!("     {slow} at tick {}", pacer.ticks());
+        }
         if args.timings && stages_since.elapsed() >= Duration::from_secs(1) {
-            println!("     {}", stages.line());
+            println!("     {}; {}", stages.line(), stages.worst_line());
             stages_since = Instant::now();
         }
         top = Instant::now();
@@ -6441,6 +6530,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let hash = r.ground_piece_hash(i as u32).map_or("not held".to_string(), |h| format!("{h:#018x}"));
             println!("world ground under the rider: {} {hash}", w.pieces[i].tile.name);
         }
+        // And how much of it a frame of the ride wrote at most (MD28).
+        if let Some(stream) = &ground_stream {
+            let (most, all, frames) = ground_written;
+            println!(
+                "world ground: at most {most} chunks written in a frame of the ride ({all} in {frames} frames, budget {})",
+                stream.chunks_a_frame
+            );
+        }
         // And where each dressed tile's props stand as the GPU draws them, so a tile's props can be
         // seen moved by its offset (MD15).
         if let Some(w) = &world_mod
@@ -6485,7 +6582,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         sound.quiet();
     }
     if args.timings {
-        println!("session {}", stages.session());
+        println!("session {}; {}", stages.session(), stages.session_worst());
         // Bytes read count the window's socket and every pad's events too, so only a ride with
         // neither, a headless one, should say none.
         let (tally, bytes) = loaded.unwrap_or_else(|| (game_render::tally::Tally::now(), None));
@@ -7064,6 +7161,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_at: None,
         world_ground_all: false,
         world_reach: None,
+        world_chunks: None,
         trace_switch: None,
         trace_stick_y: Vec::new(),
         record: None,
@@ -7357,6 +7455,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                     w => return Err(format!("--world-ground: all or near, not {w}")),
                 }
             }
+            "--world-chunks" => {
+                args.world_chunks = Some(next("chunks")?.parse().ok().filter(|&n| n > 0).ok_or("--world-chunks: a count over 0")?);
+            }
             "--world-reach" => {
                 let v: Vec<f32> =
                     next("load,drop")?.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>().map_err(|_| "--world-reach: load,drop in feet")?;
@@ -7459,7 +7560,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
-                            [--world-ground all|near] [--world-reach LOAD,DROP]\n\
+                            [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
