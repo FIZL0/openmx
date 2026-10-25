@@ -161,6 +161,19 @@ pub trait Source: Send {
     fn shapes(&mut self, index: usize) -> Result<Vec<(Mesh, Placement)>, String> {
         self.load(index).map(|piece| piece.shapes)
     }
+
+    /// Start reading tile `index` where [`Source::load`] will not have to wait for it, if the source
+    /// can (MD28: a tile read on the ride's thread was 4 to 8 ms, and several came at once).
+    fn want(&mut self, _index: usize) {}
+
+    /// Whether [`Source::load`] of tile `index` answers without reading: always, for a source that
+    /// cannot read ahead.
+    fn ready(&mut self, _index: usize) -> bool {
+        true
+    }
+
+    /// Tile `index` is not wanted any more ([`Source::want`]).
+    fn forget(&mut self, _index: usize) {}
 }
 
 /// A tile in memory: its terrain's bytes and its shapes, stood in the world.
@@ -205,6 +218,10 @@ pub struct Tiled {
     pub reach: Reach,
     source: RefCell<Box<dyn Source>>,
     slots: RefCell<Vec<Slot>>,
+    /// Which tiles anything asked about since the last [`Tiled::stream`] (MD28): those stay, however
+    /// far from the riders, so a query that goes on asking about a far tile every tick — a parked
+    /// plane's dust — does not read it again every tick.
+    asked: RefCell<Vec<bool>>,
     /// Each 1024-ft square's tiles, in owner order.
     index: HashMap<(i32, i32), Vec<usize>>,
     /// What loading and dropping did since the shell last took the lines ([`Tiled::take_log`]).
@@ -263,6 +280,7 @@ impl Tiled {
             }
         }
         let slots = tiles.iter().map(|_| Slot::Out).collect();
+        let asked = vec![false; tiles.len()];
         Ok(Tiled {
             tiles,
             area: Area { width, depth },
@@ -270,6 +288,7 @@ impl Tiled {
             reach,
             source: RefCell::new(source),
             slots: RefCell::new(slots),
+            asked: RefCell::new(asked),
             index,
             log: RefCell::new(Vec::new()),
             every: None,
@@ -287,6 +306,7 @@ impl Tiled {
 
     /// Make sure tile `i` is in memory, loading it if it is not. `false` if it cannot be.
     fn ensure(&self, i: usize) -> bool {
+        self.asked.borrow_mut()[i] = true;
         let mut slots = self.slots.borrow_mut();
         match slots[i] {
             Slot::In(_) => return true,
@@ -350,16 +370,45 @@ impl Tiled {
     }
 
     /// Load the tiles within [`Reach::load`] of any of `near` and drop those past [`Reach::drop`] of
-    /// all of them. Changes nothing the simulation is answered (see the module note).
+    /// all of them, but for those asked about since the last call. Changes nothing the simulation is
+    /// answered (see the module note).
+    ///
+    /// A tile the source reads ahead ([`Source::want`]) is loaded once it is read; one the
+    /// simulation asks for first is loaded then, as a tile past reach is.
     pub fn stream(&mut self, near: &[Vf]) {
+        let asked = std::mem::replace(&mut *self.asked.borrow_mut(), vec![false; self.tiles.len()]);
         for i in 0..self.tiles.len() {
             let gap = near.iter().map(|p| self.tiles[i].gap(F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min);
-            let held = matches!(self.slots.borrow()[i], Slot::In(_));
-            if !held && gap <= self.reach.load {
-                self.ensure(i);
-            } else if held && gap > self.reach.drop {
+            let (held, out) = match self.slots.borrow()[i] {
+                Slot::In(_) => (true, false),
+                Slot::Out => (false, true),
+                Slot::Failed => (false, false),
+            };
+            if out && gap <= self.reach.load {
+                let ready = {
+                    let mut source = self.source.borrow_mut();
+                    source.want(i);
+                    source.ready(i)
+                };
+                if ready {
+                    self.ensure(i);
+                }
+            } else if held && gap > self.reach.drop && !asked[i] {
                 self.slots.borrow_mut()[i] = Slot::Out;
                 self.log.borrow_mut().push(format!("world: {} dropped", self.tiles[i].name));
+            } else if out && gap > self.reach.drop {
+                self.source.borrow_mut().forget(i);
+            }
+        }
+    }
+
+    /// Load every tile within [`Reach::load`] of any of `near` now, read ahead or not: before a ride
+    /// (MD28), where waiting costs no frame.
+    pub fn load_near(&mut self, near: &[Vf]) {
+        for i in 0..self.tiles.len() {
+            let gap = near.iter().map(|p| self.tiles[i].gap(F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min);
+            if gap <= self.reach.load {
+                self.ensure(i);
             }
         }
     }

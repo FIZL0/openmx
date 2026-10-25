@@ -18,6 +18,9 @@ pub enum Stage {
     Menu,
     /// The fixed update: every seat's simulation (or online play's session).
     Sim,
+    /// A world's streaming on the ride's thread (MD28): its tiles for the simulation, and its pieces'
+    /// ground and props for the renderer as the riders come and go.
+    Stream,
     /// The body's and the chassis' animation, and the chassis' skin.
     Animation,
     /// The follow cameras.
@@ -40,10 +43,11 @@ pub enum Stage {
 }
 
 /// Every stage, for naming them in order.
-pub const STAGES: [Stage; 12] = [
+pub const STAGES: [Stage; 13] = [
     Stage::Input,
     Stage::Menu,
     Stage::Sim,
+    Stage::Stream,
     Stage::Animation,
     Stage::Camera,
     Stage::Sky,
@@ -61,6 +65,7 @@ impl Stage {
             Stage::Input => "input",
             Stage::Menu => "menu",
             Stage::Sim => "sim",
+            Stage::Stream => "stream",
             Stage::Animation => "anim",
             Stage::Camera => "camera",
             Stage::Sky => "sky",
@@ -82,7 +87,63 @@ pub struct Stages {
     frames: u32,
     total_frames: u32,
     last: Instant,
+    /// This frame's stages so far, and the worst frame since the last report and over the session
+    /// (MD28): an average a second hides the one frame a join costs.
+    this: [Duration; STAGES.len()],
+    worst: Worst,
+    total_worst: Worst,
+    /// The last frame, as a line, when its work went past [`OVER`] (MD28): which stages one slow
+    /// frame spent it on, to say when it happened.
+    slow: Option<String>,
 }
+
+/// The slowest frame's work — every stage but [`Stage::Pace`] — and what it spent it on, and how many
+/// frames' work went past a 60 Hz display's picture.
+#[derive(Clone, Copy, Default)]
+struct Worst {
+    spent: [Duration; STAGES.len()],
+    over: u32,
+    /// Each stage's dearest frame, whichever frame that was.
+    peak: [Duration; STAGES.len()],
+}
+
+impl Worst {
+    fn work(spent: &[Duration; STAGES.len()]) -> Duration {
+        STAGES.iter().zip(spent).filter(|(s, _)| **s != Stage::Pace).map(|(_, d)| *d).sum()
+    }
+
+    fn take(&mut self, frame: &[Duration; STAGES.len()]) {
+        for (p, d) in self.peak.iter_mut().zip(frame) {
+            *p = (*p).max(*d);
+        }
+        let work = Worst::work(frame);
+        if work > OVER {
+            self.over += 1;
+        }
+        if work > Worst::work(&self.spent) {
+            self.spent = *frame;
+        }
+    }
+
+    /// `worst 3.20 ms (ground 2.10, hud 0.80), 0 over 16.7`: the slowest frame, its two dearest stages.
+    fn format(&self) -> String {
+        let mut dear: Vec<(Stage, Duration)> = STAGES.iter().copied().zip(self.spent).filter(|(s, _)| *s != Stage::Pace).collect();
+        dear.sort_by_key(|(_, d)| std::cmp::Reverse(*d));
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let parts: Vec<String> = dear.iter().take(2).map(|(s, d)| format!("{} {:.2}", s.name(), ms(*d))).collect();
+        format!("worst {:.2} ms ({}), {} over {:.1}", ms(Worst::work(&self.spent)), parts.join(", "), self.over, ms(OVER))
+    }
+
+    /// `peaks: sim 2.10 ground 0.40 ...`: every stage's dearest frame but the pace's.
+    fn peaks(&self) -> String {
+        let parts: Vec<String> =
+            STAGES.iter().zip(self.peak).filter(|(s, _)| **s != Stage::Pace).map(|(s, d)| format!("{} {:.2}", s.name(), d.as_secs_f64() * 1000.0)).collect();
+        format!("peaks: {}", parts.join(" "))
+    }
+}
+
+/// A 60 Hz display's picture: a frame whose work takes longer misses one.
+pub const OVER: Duration = Duration::from_micros(16_667);
 
 impl Default for Stages {
     fn default() -> Self {
@@ -98,6 +159,10 @@ impl Stages {
             frames: 0,
             total_frames: 0,
             last: Instant::now(),
+            this: [Duration::ZERO; STAGES.len()],
+            worst: Worst::default(),
+            total_worst: Worst::default(),
+            slow: None,
         }
     }
 
@@ -108,13 +173,44 @@ impl Stages {
         let d = now - self.last;
         self.spent[i] += d;
         self.total[i] += d;
+        self.this[i] += d;
         self.last = now;
+    }
+
+    /// Charge `d` of what `from` was charged to `to` instead: a stage measured inside another.
+    pub fn shift(&mut self, from: Stage, to: Stage, d: Duration) {
+        let [f, t] = [from, to].map(|s| STAGES.iter().position(|&x| x == s).expect("every stage is listed"));
+        let d = d.min(self.this[f]);
+        for spent in [&mut self.spent, &mut self.total, &mut self.this] {
+            spent[f] -= d;
+            spent[t] += d;
+        }
     }
 
     /// One frame has ended.
     pub fn frame(&mut self) {
         self.frames += 1;
         self.total_frames += 1;
+        self.worst.take(&self.this);
+        self.total_worst.take(&self.this);
+        self.slow = (Worst::work(&self.this) > OVER).then(|| Stages::format(&self.this, 1).replacen("ms a frame:", "slow frame, ms:", 1));
+        self.this = [Duration::ZERO; STAGES.len()];
+    }
+
+    /// The frame just ended, as a line, if its work went past [`OVER`].
+    pub fn take_slow(&mut self) -> Option<String> {
+        self.slow.take()
+    }
+
+    /// The slowest frame since the last [`Stages::worst_line`], and how many went over [`OVER`],
+    /// and start again.
+    pub fn worst_line(&mut self) -> String {
+        std::mem::take(&mut self.worst).format()
+    }
+
+    /// The same over the whole session.
+    pub fn session_worst(&self) -> String {
+        format!("{}; {}", self.total_worst.format(), self.total_worst.peaks())
     }
 
     /// The milliseconds a frame each stage has cost since the last call, as one line, and start
@@ -167,7 +263,7 @@ mod tests {
     fn a_line_names_every_stage_in_order_and_adds_them_up() {
         let mut s = Stages::new();
         s.spent[2] = Duration::from_millis(4);
-        s.spent[6] = Duration::from_millis(6);
+        s.spent[7] = Duration::from_millis(6);
         s.frames = 2;
         let line = s.line();
         assert!(line.starts_with("ms a frame: input 0.00 menu 0.00 sim 2.00"), "{line}");

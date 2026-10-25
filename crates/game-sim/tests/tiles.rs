@@ -250,7 +250,10 @@ fn streaming_never_changes_an_answer() {
     let before: Vec<Option<Hit>> = points.iter().map(|&(x, z)| tiled.at(F(x), F(z))).collect();
     assert_eq!(tiled.loaded().len(), 5);
 
-    // A rider at c's far end: a and its join go.
+    // A rider at c's far end: a and its join go — at the second call, since what was asked about
+    // before the first is kept through it (MD28).
+    tiled.stream(&[Vf::new(1700.0, 0.0, 100.0, 1.0)]);
+    assert_eq!(tiled.loaded().len(), 5, "asked about since the last call: kept");
     tiled.stream(&[Vf::new(1700.0, 0.0, 100.0, 1.0)]);
     let held = tiled.loaded();
     assert!(!held.contains(&0) && !held.contains(&3), "{held:?}");
@@ -266,6 +269,27 @@ fn streaming_never_changes_an_answer() {
     assert!(tiled.loaded().contains(&0));
     assert!(loads.load(Ordering::Relaxed) > 5, "a was loaded again");
     println!("terrains held near c: {bytes_far} bytes; all five: {}", tiled.loaded_bytes());
+}
+
+/// A far tile something asks about every tick — a parked plane's dust, a car on its path — stays
+/// loaded, rather than being dropped by every stream and read again by the next ask (MD28: on the
+/// whole of MX Unleashed this was a terrain read, 3 ms, every tick).
+#[test]
+fn a_far_tile_asked_every_tick_is_read_once() {
+    let (mut tiled, loads) = world([0, 0], Reach { load: F(300.0), drop: F(500.0) });
+    let rider = [Vf::new(1700.0, 0.0, 100.0, 1.0)];
+    tiled.stream(&rider);
+    let first = loads.load(Ordering::Relaxed);
+    for _ in 0..30 {
+        assert!(tiled.at(F(10.0), F(10.0)).is_some(), "a's ground");
+        tiled.stream(&rider);
+    }
+    assert!(tiled.loaded().contains(&0), "a, asked about every tick, is held");
+    assert_eq!(loads.load(Ordering::Relaxed), first + 1, "a was read once");
+    // Left alone, it goes at the next stream but one.
+    tiled.stream(&rider);
+    tiled.stream(&rider);
+    assert!(!tiled.loaded().contains(&0));
 }
 
 /// A world refuses an offset the move into its coordinates could round.

@@ -293,3 +293,30 @@ fn the_streamed_ground_under_the_rider_is_the_whole_builds() {
     assert_eq!(every, specs().len(), "--world-ground all builds every piece first");
     assert_eq!(end_x(&near), end_x(&all), "the ground the GPU holds does not change the ride");
 }
+
+/// MD28: the most ground chunks one frame of the ride hands the GPU. A world's piece is written to
+/// the GPU on the main thread, and a big one in one frame was a frame of 5-10 ms; so a piece built
+/// mid-ride goes over a few frames, this many chunks a frame (`--world-chunks`, small here so the
+/// test's small pieces are split as a national's are under the shell's own budget).
+const CHUNKS_A_FRAME: usize = 8;
+
+#[test]
+fn a_streamed_ride_writes_its_ground_a_few_chunks_a_frame() {
+    let n = CHUNKS_A_FRAME.to_string();
+    let Some(said) = ride("chunks", &["--world-chunks", &n]) else { return };
+    let line = said.lines().find(|l| l.starts_with("world ground: at most ")).unwrap_or_else(|| panic!("no chunks line:\n{said}"));
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let (most, all, frames): (usize, usize, usize) = (words[4].parse().unwrap(), words[13].trim_start_matches('(').parse().unwrap(), words[15].parse().unwrap());
+    assert!(line.ends_with(&format!("budget {CHUNKS_A_FRAME})")), "{line}");
+    assert!(most <= CHUNKS_A_FRAME, "a frame wrote {most} chunks, over the budget of {CHUNKS_A_FRAME}: {line}");
+    // The budget did bite: the pieces built mid-ride took more frames than there were pieces, the
+    // joins (thirteen chunks) two each.
+    let events = during(&said);
+    let built = events.iter().filter(|(_, w, t)| w == "built" && *t > 0).count();
+    assert!(built >= 2 && frames > built && frames * CHUNKS_A_FRAME >= all, "{built} pieces built mid-ride: {line}\n{said}");
+    let waited: Vec<_> = events.into_iter().filter(|(_, w, _)| w == "waited").collect();
+    assert!(waited.is_empty(), "the rider got onto a piece before its ground was built: {waited:?}");
+    // And the ride is the same ride, however its ground went up.
+    let Some(whole) = ride("chunks_whole", &[]) else { return };
+    assert_eq!(end_x(&said), end_x(&whole), "the chunks a frame do not change the ride");
+}
