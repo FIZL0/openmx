@@ -754,33 +754,68 @@ impl WorldPaint {
         c
     }
 
-    /// Where each map's pages go on the GPU, inside a device's limits: all the maps' pages in one
-    /// array of `max_layers`, their leaf images stacked in one picture no taller than `max_rows`, and
-    /// one detail layer each. A map that does not fit is drawn in dirt.
+    /// Where each map's pages go on the GPU, inside a device's limits: each map's pages in the array
+    /// of their own size (MD31: a disc map's baked pages are smaller than a mod map's own, and one
+    /// array the size of the first map's drew every map after it at that size), up to
+    /// [`PAGE_ARRAYS`] sizes of `max_layers` layers each; their leaf images stacked in one picture no
+    /// taller than `max_rows`; and one detail layer each. A map that does not fit is drawn in dirt.
     pub fn pack(&self, max_layers: u32, max_rows: u32) -> Vec<Option<Packed>> {
-        let (mut layers, mut rows, mut details) = (0u32, 0u32, 0u32);
+        let (mut sizes, mut layers): (Vec<(u32, u32)>, Vec<u32>) = (Vec::new(), Vec::new());
+        let (mut rows, mut details) = (0u32, 0u32);
         self.tiles
             .iter()
             .map(|t| {
                 let p = t.pages.as_ref()?;
                 let n = p.pages.len() as u32;
-                if n == 0 || layers + n > max_layers || rows + p.along > max_rows || p.across > max_rows {
+                let size = page_size(p);
+                let array = sizes.iter().position(|&s| s == size).unwrap_or(sizes.len());
+                let used = layers.get(array).copied().unwrap_or(0);
+                if n == 0 || array >= PAGE_ARRAYS || used + n > max_layers || rows + p.along > max_rows || p.across > max_rows {
                     return None;
                 }
-                let slot = Packed { first_page: layers, row: rows, detail: p.detail.as_ref().map(|_| details) };
-                layers += n;
+                if array == sizes.len() {
+                    sizes.push(size);
+                    layers.push(0);
+                }
+                let slot = Packed { array: array as u32, first_page: used, row: rows, detail: p.detail.as_ref().map(|_| details) };
+                layers[array] += n;
                 rows += p.along.max(1);
                 details += u32::from(p.detail.is_some());
                 Some(slot)
             })
             .collect()
     }
+
+    /// The page size of each array [`WorldPaint::pack`] made, by the array's number.
+    pub fn array_sizes(&self, packed: &[Option<Packed>]) -> Vec<(u32, u32)> {
+        let mut sizes = Vec::new();
+        for (t, at) in self.tiles.iter().zip(packed) {
+            if let (Some(p), Some(at)) = (&t.pages, at) {
+                if at.array as usize == sizes.len() {
+                    sizes.push(page_size(p));
+                }
+            }
+        }
+        sizes
+    }
+}
+
+/// How many page sizes a world's paint holds at once ([`WorldPaint::pack`]): a disc map's baked
+/// pages, a mod map's own, and room for two more.
+pub const PAGE_ARRAYS: usize = 4;
+
+/// A map's page size, its first page's: every page of a terrain is one size, and one that is not is
+/// resampled to the first's.
+pub fn page_size(p: &Pages) -> (u32, u32) {
+    p.pages.first().map_or((1, 1), |t| (t.width.max(1) as u32, t.height.max(1) as u32))
 }
 
 /// Where one map's pages sit in a world's GPU paint ([`WorldPaint::pack`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Packed {
-    /// Its first page's layer in the world's page array.
+    /// The page array its pages are in: one array a page size.
+    pub array: u32,
+    /// Its first page's layer in that array.
     pub first_page: u32,
     /// The row its leaf image starts on.
     pub row: u32,
