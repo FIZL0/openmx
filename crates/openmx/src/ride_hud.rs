@@ -95,8 +95,9 @@ const POP_FROM: f32 = 0.5;
 const OUT_TO: f32 = 0.2;
 /// How long the score flashes on a bank.
 const FLASH: f32 = 0.7;
-/// How long the camera toast stays, and the fade at its end.
-const TOAST: f32 = 1.5;
+/// How long the camera toast stays, and the fade at its end: the original's info text's three
+/// seconds (P68, [`overlay::INFO_SECONDS`]).
+const TOAST: f32 = overlay::INFO_SECONDS;
 const TOAST_FADE: f32 = 0.25;
 
 // ---- what a view shows --------------------------------------------------------------------------
@@ -207,6 +208,10 @@ pub struct Tracker {
     camera: Option<(String, Instant)>,
     /// A camera has been noted: the first, the ride's start, is not a change to show.
     camera_seen: bool,
+    /// The newest node's points as the card last held them, and whether a backflip was coming round
+    /// under it: what the original's Stunt movie writes (P68).
+    newest_points: f32,
+    flipping: bool,
 }
 
 /// The pop-up as it stands.
@@ -269,6 +274,9 @@ impl Tracker {
             self.names = ids.iter().map(|&i| name(i)).collect();
             self.ids = ids;
             self.points = score.nodes.iter().map(|n| n.points.0).sum();
+            let head = &score.nodes[0];
+            self.newest_points = head.points.0;
+            self.flipping = score.flip != 0 && head.id != game_sim::score::BACKFLIP;
         } else if !self.ids.is_empty() && self.out.is_none() {
             self.out = Some(Out { landed: banked > 0.0, at: now, banked, tricks: self.ids.len() });
         }
@@ -320,6 +328,28 @@ impl Tracker {
             }
         };
         Some(Popup { names, points, mult, outcome, colour, scale: 1.0 - (1.0 - OUT_TO) * out, alpha: 1.0 - out, newest })
+    }
+
+    /// What the original's HUD pops up at `now` (P68): its Stunt movie and its info text.
+    ///
+    /// The movie says what the original's text setter writes — the newest trick's name (after
+    /// `BackFlip + ` while a flip comes round under it) over [`overlay::stunt_points`], or a landed
+    /// chain's [`overlay::combo_total`] over the banked points — and moves as [`Tracker::popup`]
+    /// does: the newest name pops in, an ended combo plays out. The info text is the camera toast.
+    pub fn pops(&self, now: Instant) -> overlay::Pops {
+        let stunt = self.popup(now).map(|p| {
+            let n = self.ids.len();
+            let (name, points) = match self.out {
+                Some(o) if o.totals() => (overlay::combo_total(o.tricks), (o.banked.max(0.0) as i32).to_string()),
+                _ => {
+                    let newest = self.names.last().map_or("", String::as_str);
+                    (overlay::stunt_name(newest, self.flipping), overlay::stunt_points(self.newest_points, n))
+                }
+            };
+            overlay::Stunt { name, points, scale: p.scale, alpha: p.alpha, newest: p.newest }
+        });
+        let info = self.toast(now).map(|(text, alpha)| overlay::Info { text: text.to_string(), alpha });
+        overlay::Pops { stunt, info }
     }
 
     /// How far the score's flash is through, 0 at the bank to 1 when it is gone.

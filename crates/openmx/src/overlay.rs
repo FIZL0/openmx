@@ -36,7 +36,15 @@
 //!   shove's strength, tick for tick ([`PreloadMeter`], V53). The plane has neither it nor the
 //!   odometer: the original's biplane shows the speed alone.
 //!
-//! What the numbers are, and where they come from, is in `research/oracle.txt` (V26, V28). The pure
+//! - **The trick pop-up** (`stuntscoreoverlays.lyt`'s `Stunt` and `Stunt Combo`, centred on 320,373,
+//!   the movies `overlay_stunt1_1.fsh` / `overlay_stunt2_1.fsh`): the newest trick's name over its
+//!   points in `yearlingdashboldoblique_18s`, whose dark rim is in the font's own picture, tinted
+//!   255,153,0 (P68, [`Stunt`]). Two movies take turns, the new name popping in as the old plays
+//!   out; a landed chain of two or more holds `N Stunt Combo Total` over the banked points first.
+//! - **The info text** (`infotextoverlay1.lyt`, `yearlingdashbold_20` centred at 320,399): the camera
+//!   preset's name for three seconds when the camera button changes it (P68, [`Info`]).
+//!
+//! What the numbers are, and where they come from, is in `research/oracle.txt` (V26, V28, P68). The pure
 //! parts — [`mph`], [`speed_text`], [`needle_degrees`], [`odometer_text`] and [`radar_mark`] — take
 //! plain numbers, so `tests/overlay.rs` can hold them to the riders without a disc.
 //!
@@ -165,6 +173,31 @@ impl Place {
     }
 }
 
+impl Place {
+    /// The middle of the Stunt movies (P68), across from the view's middle and up from its bottom,
+    /// in layout pixels: each layout's `Stunt` in its own view's pixels (`stuntscoreoverlays.lyt`
+    /// 320,373 of 640x448; the horizontal ones 320,182 of a 640x224 view; the vertical ones 160,360
+    /// of a 320x448 one), every one centred across its view.
+    pub fn stunt(self) -> f32 {
+        match self {
+            Place::Full => LAYOUT.1 - 373.0,
+            Place::Top | Place::Bottom => LAYOUT.1 / 2.0 - 182.0,
+            Place::Side => LAYOUT.1 - 360.0,
+        }
+    }
+
+    /// The info text's top (P68), up from the view's bottom, centred across it:
+    /// `infotextoverlay1.lyt` 320,399 of 640x448, the horizontal ones 320,50 of 640x224, the
+    /// vertical ones 160,224 of 320x448.
+    pub fn info(self) -> f32 {
+        match self {
+            Place::Full => LAYOUT.1 - 399.0,
+            Place::Top | Place::Bottom => LAYOUT.1 / 2.0 - 50.0,
+            Place::Side => LAYOUT.1 - 224.0,
+        }
+    }
+}
+
 /// The score bar (left, top, width, height), from the view's top-left, where its darker label end
 /// stops, and the label's and the number's left edges and tops — measured off the original's frame.
 const SCORE_BAR: (f32, f32, f32, f32) = (14.0, 25.0, 168.0, 20.5);
@@ -213,6 +246,78 @@ pub fn needle_degrees(speed: f32) -> f32 {
 pub fn odometer_text(feet: f32) -> String {
     let miles = feet * MILES_PER_FOOT;
     if miles >= 0.1 { format!("{miles:07.1}") } else { "00000.0".into() }
+}
+
+/// The Stunt movies' ink (P68): the trick text's 255,153,0 over the font's own grey, its rim dark.
+pub const STUNT_COLOUR: [u8; 4] = [255, 153, 0, 255];
+/// The info text's (P68): the font's own white.
+pub const INFO_COLOUR: [u8; 4] = [255, 255, 255, 255];
+/// How long the info text stays (P68): the camera button's call asks it for 3.0 seconds.
+pub const INFO_SECONDS: f32 = 3.0;
+/// The Stunt movie's two lines over the font's size, across and down, off PCSX2's frame of
+/// "BackFlip + Taunt" / "3160" (P68; its 448 lines shown as 480): the name inks x 242–399 and 11
+/// lines from 355, the points 282–361 and 20.5 lines from 375. The movie draws the face flatter than
+/// the font's own, about three quarters as tall for its width. Their glyph boxes' tops sit this far
+/// above and below the movie's middle.
+const STUNT_NAME_SIZE: (f32, f32) = (0.91, 0.70);
+const STUNT_POINTS_SIZE: (f32, f32) = (1.82, 1.75);
+const STUNT_NAME_TOP: f32 = -21.1;
+const STUNT_POINTS_TOP: f32 = -7.6;
+
+/// The Stunt movie's name line (P68), as the original's text setter writes it: the newest trick's
+/// name, after `BackFlip + ` while a backflip is coming round under it.
+pub fn stunt_name(name: &str, flipping: bool) -> String {
+    if flipping { format!("BackFlip + {name}") } else { name.to_string() }
+}
+
+/// Its points line (P68): one trick's points whole; from two on, the newest trick's points over
+/// the chain's length — the integer part of the node's points, divided as integers — then two spaces,
+/// `X` and the length (the setter's `%d  X %d`).
+pub fn stunt_points(points: f32, tricks: usize) -> String {
+    let whole = points.max(0.0) as i32;
+    match tricks {
+        0 | 1 => whole.to_string(),
+        n => format!("{}  X {n}", whole / n as i32),
+    }
+}
+
+/// The line a landed chain of two or more holds over its banked points (P68): `%d %s` of the
+/// chain's length and "Stunt Combo Total".
+pub fn combo_total(tricks: usize) -> String {
+    format!("{tricks} Stunt Combo Total")
+}
+
+/// The Stunt movie as it stands (P68): its two lines, the whole movie's scale and alpha (its play
+/// out), and the newest name's own (its pop in).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stunt {
+    pub name: String,
+    pub points: String,
+    pub scale: f32,
+    pub alpha: f32,
+    pub newest: (f32, f32),
+}
+
+/// The info text's line and its alpha (P68).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Info {
+    pub text: String,
+    pub alpha: f32,
+}
+
+/// What pops up over a view's HUD (P68): the trick pop-up and the info text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pops {
+    pub stunt: Option<Stunt>,
+    pub info: Option<Info>,
+}
+
+/// Where [`Art::draw_pops`] put its lines, in the view's pixels: each line's text and its inked
+/// box's left, top, right and bottom.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PopsDrawn {
+    pub stunt: Vec<(String, [f32; 4])>,
+    pub info: Option<(String, [f32; 4])>,
 }
 
 /// The score's text: the number, unpadded.
@@ -732,6 +837,8 @@ pub struct Art {
     question: Font,
     /// `yearlingdashextrabold_18`, its button's word.
     answer: Font,
+    /// `yearlingdashboldoblique_18s`, the Stunt movies' (P68).
+    stunt: Font,
     /// Whether the radar is drawn (V52, the settings' Minimap): off, the rose, the rider's arrow,
     /// the other riders' marks and every icon on it go, and the rest stays where it was.
     pub minimap: bool,
@@ -799,6 +906,7 @@ const SMALL: usize = TEXTURES.len() + 1;
 const LABEL: usize = TEXTURES.len() + 2;
 const QUESTION: usize = TEXTURES.len() + 3;
 const ANSWER: usize = TEXTURES.len() + 4;
+const STUNT: usize = TEXTURES.len() + 5;
 
 const TEXTURES: [&str; 17] = [
     "speedometer_analog",
@@ -848,6 +956,7 @@ impl Art {
             offers: Vec::new(),
             question,
             answer,
+            stunt: font("yearlingdashboldoblique_18s")?,
             minimap: true,
             scale: 1.0,
         })
@@ -870,14 +979,14 @@ impl Art {
         self.paint(&mut Pen::new(Ink::Frame(frame), (w, h), window, self.scale), place, riders, v, span, gauges)
     }
 
-    /// Every picture [`Art::sprites`] counts into, in its order: the textures, then the five fonts'
+    /// Every picture [`Art::sprites`] counts into, in its order: the textures, then the six fonts'
     /// atlases. The GPU takes them once ([`game_render::gpu::Renderer::set_images`]).
     pub fn images(&self) -> Vec<&Texture> {
         let mut all: Vec<&Texture> = TEXTURES.iter().filter_map(|n| self.textures.get(n)).collect();
         if all.len() != TEXTURES.len() {
             return Vec::new();
         }
-        all.extend([&self.digits.atlas, &self.small.atlas, &self.label.atlas, &self.question.atlas, &self.answer.atlas]);
+        all.extend([&self.digits.atlas, &self.small.atlas, &self.label.atlas, &self.question.atlas, &self.answer.atlas, &self.stunt.atlas]);
         all
     }
 
@@ -901,6 +1010,44 @@ impl Art {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// View `v`'s pop-ups (P68) — the trick pop-up and the info text — into `frame`, that view's
+    /// picture, in a window of `window`'s size; drawn after [`Art::draw`], over the rest.
+    pub fn draw_pops(&self, frame: &mut Frame, window: (usize, usize), v: usize, pops: &Pops) -> PopsDrawn {
+        let (w, h) = (frame.width, frame.height);
+        let place = Place::of((w, h), window, v);
+        self.paint_pops(&mut Pen::new(Ink::Frame(frame), (w, h), window, self.scale), place, pops)
+    }
+
+    /// [`Art::draw_pops`] as the GPU draws it, for a view whose rectangle in the frame is `view`.
+    pub fn sprites_pops(&self, out: &mut Vec<Sprite>, view: (usize, usize, usize, usize), window: (usize, usize), v: usize, pops: &Pops) -> PopsDrawn {
+        let ink = Ink::Sprites { out, at: (view.0 as f32, view.1 as f32) };
+        let place = Place::of((view.2, view.3), window, v);
+        self.paint_pops(&mut Pen::new(ink, (view.2, view.3), window, self.scale), place, pops)
+    }
+
+    fn paint_pops(&self, pen: &mut Pen, place: Place, pops: &Pops) -> PopsDrawn {
+        let mut drawn = PopsDrawn::default();
+        pen.corner = Corner::Bottom;
+        let middle = LAYOUT.0 / 2.0;
+        let ink = |c: [u8; 4], a: f32| [c[0], c[1], c[2], (255.0 * a.clamp(0.0, 1.0)).round() as u8];
+        if let Some(st) = &pops.stunt {
+            // The movie grows and shrinks about its middle: its lines' places with it.
+            let centre = LAYOUT.1 - place.stunt();
+            let k = st.scale * st.newest.0;
+            let colour = ink(STUNT_COLOUR, st.alpha * st.newest.1);
+            for (text, size, top) in [(&st.name, STUNT_NAME_SIZE, STUNT_NAME_TOP), (&st.points, STUNT_POINTS_SIZE, STUNT_POINTS_TOP)] {
+                let r = pen.centred((&self.stunt, STUNT), text, middle, centre + top * k, (size.0 * k, size.1 * k), colour);
+                drawn.stunt.push((text.clone(), r));
+            }
+        }
+        if let Some(info) = &pops.info {
+            let top = LAYOUT.1 - place.info();
+            let r = pen.centred((&self.question, QUESTION), &info.text, middle, top, (1.0, 1.0), ink(INFO_COLOUR, info.alpha));
+            drawn.info = Some((info.text.clone(), r));
+        }
+        drawn
+    }
+
     fn paint(&self, pen: &mut Pen, place: Place, riders: &[Ridden], v: usize, span: f32, gauges: &Gauges) -> Drawn {
         let speed = riders[v].speed.0;
         let mut drawn = Drawn::default();
@@ -1483,6 +1630,29 @@ impl<'a> Pen<'a> {
                 pen += g.kern.iter().find(|k| k.0 == n as u32).map_or(0.0, |k| k.1) * squeeze;
             }
         }
+    }
+
+    /// `text` at `(kx, ky)` times the font's size across and down, centred across on `x` with its
+    /// top at `y` (P68's pop-ups); the glyph boxes' left, top, right and bottom in the view's pixels.
+    fn centred(&mut self, (font, image): (&Font, usize), text: &str, x: f32, y: f32, (k, ky): (f32, f32), colour: [u8; 4]) -> [f32; 4] {
+        let mut pen = x - font.measure(text) * k / 2.0;
+        let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            let g = font.glyph(c);
+            pen += g.before * k;
+            if c != ' ' && k > 0.0 && colour[3] > 0 {
+                let h = g.uv[3] - g.uv[1];
+                self.blit_src((&font.atlas, image), g.uv, (pen, y, g.width * k, h * ky), colour);
+                let (a, b) = (self.px((pen, y)), self.px((pen + g.width * k, y + h * ky)));
+                (lo, hi) = ((lo.0.min(a.0), lo.1.min(a.1)), (hi.0.max(b.0), hi.1.max(b.1)));
+            }
+            pen += (g.width + g.after) * k;
+            if let Some(&n) = chars.peek() {
+                pen += g.kern.iter().find(|k| k.0 == n as u32).map_or(0.0, |k| k.1) * k;
+            }
+        }
+        if lo.0 > hi.0 { [0.0; 4] } else { [lo.0, lo.1, hi.0, hi.1] }
     }
 
     /// `text` with its top at `y` and its left edge at `x`; or, when `right`, its last character
