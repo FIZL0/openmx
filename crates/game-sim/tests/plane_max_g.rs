@@ -8,14 +8,16 @@
 //! - at stock speed and settings a 9 g limit never acts: a cruise, a full pull and a full roll fly
 //!   bit for bit as with it off;
 //! - off is the original's plane: the file untouched, and no field of the flight's walk added;
-//! - a session marker's put-back and a retune in flight keep the limit, and take it away again.
+//! - a session marker's put-back and a retune in flight keep the limit, and take it away again;
+//! - P148: on the fastest plane the knobs make (500% top speed and acceleration) every limit from
+//!   10 g to the knob's top, 15 g, holds a pull under it, where off the plane pulls far past 15 g.
 //!
 //! Skipped without a disc (`./kit extract MX.PSR`).
 
 use game_sim::archive::{Psr, Res};
 use game_sim::biplane::Pad;
 use game_sim::flight::Flight;
-use game_sim::modifiers::{Knob, Mods, ORIGINAL};
+use game_sim::modifiers::{Knob, MAX_G, MOST, Mods, ORIGINAL};
 use game_sim::world::Flat;
 use ps2_float::{F, Vf};
 use ps2_oracle::{Kit, skip};
@@ -329,20 +331,25 @@ fn a_marker_and_a_retune_keep_the_limit() {
     assert!(!game_sim::hash::Dump::of(&flight).fields.iter().any(|f| f.path.contains("max_g")));
 }
 
-/// The knob's settings: off and 3 g to 9 g, a g a step, off past 9 and back; the text keeps it per
-/// seat, and a value off its range is refused.
+/// The knob's settings: off and 3 g to 15 g (P148; 9 g before it), a g a step, off past 15 and back;
+/// the text keeps it per seat, and a value off its range is refused.
 #[test]
 fn the_knob_steps_and_keeps() {
     let k = Knob::PlaneMaxG;
     assert_eq!(Mods::original().get(0, k), ORIGINAL);
-    assert_eq!((k.least(), k.most()), (3, 9));
-    assert_eq!(k.step(ORIGINAL, false), 9);
-    assert_eq!(k.step(9, true), ORIGINAL);
-    assert_eq!(k.step(9, false), 8);
+    assert_eq!((k.least(), k.most()), (3, 15));
+    assert_eq!(k.step(ORIGINAL, false), 15);
+    assert_eq!(k.step(15, true), ORIGINAL);
+    assert_eq!(k.step(15, false), 14);
+    assert_eq!(k.step(9, true), 10);
+    assert_eq!(k.step(10, false), 9);
     assert_eq!(k.step(3, false), ORIGINAL);
     assert_eq!(k.step(ORIGINAL, true), 3);
     assert_eq!(k.step(3, true), 4);
-    assert_eq!((k.shown(ORIGINAL).as_str(), k.shown(6).as_str()), ("Off", "6 g"));
+    // Round the whole ring: off, then every g from 3 to 15, then off again.
+    let ring: Vec<u16> = std::iter::successors(Some(ORIGINAL), |&v| Some(k.step(v, true))).take(15).collect();
+    assert_eq!(ring, [ORIGINAL].into_iter().chain(3..=15).chain([ORIGINAL]).collect::<Vec<_>>());
+    assert_eq!((k.shown(ORIGINAL).as_str(), k.shown(6).as_str(), k.shown(15).as_str()), ("Off", "6 g", "15 g"));
     let mut m = Mods::original();
     m.set(1, k, 7);
     assert_eq!(m.max_g(1), Some(F(7.0)));
@@ -350,8 +357,50 @@ fn the_knob_steps_and_keeps() {
     let text = m.text();
     assert!(text.contains("plane_max_g"), "{text}");
     assert_eq!(Mods::parse(&text).expect("its own text"), m);
-    assert!(Mods::parse("plane_max_g=12").is_err());
+    m.set(1, k, 15);
+    assert_eq!(Mods::parse(&m.text()).expect("its own text").max_g(1), Some(F(15.0)));
+    assert_eq!(Mods::parse("plane_max_g=12").expect("12 g is on the knob").max_g(0), Some(F(12.0)));
+    assert!(Mods::parse("plane_max_g=16").is_err());
     assert!(Mods::parse("plane_max_g=2").is_err());
     m.set(1, k, 20);
-    assert_eq!(m.get(1, k), 9);
+    assert_eq!(m.get(1, k), 15);
+}
+
+/// P148: the fastest plane the knobs make — 500% Biplane top speed and acceleration, at its own top
+/// speed — pulls far past the knob's top with the limit off, and every step above P137's 9 g, the
+/// top 15 g among them, holds a full pull, push and knife-edge pull under the limit and under the
+/// off pull, a steady pull coming up to within a few percent of it; and so at 300% and 400% top speed
+/// (where the plane may not reach the higher limits at all, so only "under" is asked).
+#[test]
+fn the_top_limit_holds_the_fastest_plane() {
+    let Some(stock) = the_plane() else { return };
+    let (mut all, mut bad) = (String::new(), String::new());
+    for top in [MOST, 400, 300] {
+        let mods = with(with(Mods::original(), Knob::PlaneTopSpeed, top), Knob::PlaneAccel, MOST);
+        let mut p = stock;
+        mods.plane(0, &mut p);
+        let speed = top_speed(&p);
+        for scheme in [Scheme::File, Scheme::New] {
+            let (lo, hi) = most_g(&fly(&stock, &mods, scheme, speed, PULL, HZ * 6));
+            let off = hi.max(-lo);
+            all += &format!("{scheme:?} at {speed:.0} ft/s ({top}%), off: a pull reaches {off:.1} g\n");
+            if top == MOST {
+                assert!(off > 1.5 * MAX_G.1 as f32, "{scheme:?}: off, the fastest plane pulls only {hi:.1} g / pushes {lo:.1} g");
+            }
+            for g in 10..=MAX_G.1 {
+                let m = with(mods, Knob::PlaneMaxG, g);
+                for (name, script) in [("pull", PULL), ("push", PUSH), ("knife-edge pull", KNIFE)] {
+                    let (lo, hi) = most_g(&fly(&stock, &m, scheme, speed, script, HZ * 6));
+                    let most = hi.max(-lo);
+                    let line = format!("{scheme:?} at {speed:.0} ft/s ({top}%), {g} g: a {name} reaches {most:.3} g\n");
+                    all += &line;
+                    if most > g as f32 || (top == MOST && (most >= off || (name == "pull" && hi < 0.92 * g as f32))) {
+                        bad += &line;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("{all}");
+    assert!(bad.is_empty(), "past the limit, past off, or well short of it:\n{bad}\nall:\n{all}");
 }

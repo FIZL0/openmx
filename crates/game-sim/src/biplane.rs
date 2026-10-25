@@ -350,6 +350,13 @@ const AHEAD: f32 = 0.08;
 /// the speed moves the limit's angle and the look ahead swings it, by up to about 2% of the load;
 /// aimed this much under, the pull never passes the limit.
 const AIM: f32 = 0.98;
+/// Above this many g the hold aims lower still (P148): the fastest plane's pull from level at a high
+/// limit starts so far short of the limit's angle that the elevator stays full over the first frames,
+/// and the swing past the aim that follows grows with the limit — 1.6% over 15 g at 500% top speed
+/// and acceleration with the aim at [`AIM`]. Up to here it is [`AIM`] as P137 tuned it.
+const SWING_FROM: f32 = 9.0;
+/// How much lower the aim goes for each g of the limit over [`SWING_FROM`].
+const SWING: f32 = 0.004;
 
 /// The most damping the g limit's look ahead may add, as a share of a substep: the lead on the angle's
 /// rate is so much pitching moment ([`LEAD`] times `CMalpha` on the dynamic pressure, the chord and
@@ -463,7 +470,8 @@ impl Aero {
             return GLimit { elevator: (None, None), aileron: F::ONE };
         }
         let pressure = self.area * (F(0.5) * self.density * v * v);
-        let most = F(AIM) * max_g * mass * F(G) / pressure;
+        let aim = F(AIM) - F(SWING) * (max_g - F(SWING_FROM)).max(F::ZERO);
+        let most = aim * max_g * mass * F(G) / pressure;
         let c2v = self.chord * (F(0.5) / v);
         let q = F(air.rates[0]);
         let lift_rate = c2v * (self.lift_q * q);

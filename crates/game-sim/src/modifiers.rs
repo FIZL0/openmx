@@ -88,8 +88,9 @@ pub const MOST: u16 = 500;
 pub const UNCAPPED: u16 = MOST + STEP;
 
 /// [`Knob::PlaneMaxG`]'s limits, in whole g (P137): its value is the limit itself, and its default,
-/// [`ORIGINAL`], is no limit at all.
-pub const MAX_G: (u16, u16) = (3, 9);
+/// [`ORIGINAL`], is no limit at all. P148 raised the top from 9 g to 15 g, which still bites on the
+/// fastest plane the speed knobs make (a full pull at 500% top speed and acceleration goes well past it).
+pub const MAX_G: (u16, u16) = (3, 15);
 
 impl Knob {
     pub const ALL: [Knob; KNOBS] = [
