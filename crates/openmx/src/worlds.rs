@@ -38,6 +38,52 @@ pub struct WorldPiece {
     /// A tile's scene file as [`find`] read it, before the `drop`: what the ride dresses and lights
     /// the tile from, so the file is not read again (MD18). `None` for a join.
     pub scene_bytes: Option<Arc<[u8]>>,
+    /// Where its files are read from: its folder, or the disc's own archives (P71).
+    pub origin: Origin,
+}
+
+/// Where a piece's files come from.
+#[derive(Clone, Debug)]
+pub enum Origin {
+    /// A world mod's: the piece's folder, [`WorldPiece::dir`].
+    Folder,
+    /// A disc track's (P71): its archive (`tracks\free06.res`) and the second one the track is
+    /// ridden with (`tracks\free06_2.res`), read off the configured disc when they are needed.
+    Disc { track: String, second: Option<String> },
+    /// A join's terrain made in memory (P71), not read from anywhere.
+    Made(Arc<[u8]>),
+}
+
+impl WorldPiece {
+    /// The archives its files are read out of, the first its own: its folder, or its disc track's two.
+    pub fn archives(&self) -> Result<Vec<Res>, String> {
+        match &self.origin {
+            Origin::Folder => Ok(vec![Res::folder(&self.dir)?]),
+            Origin::Disc { track, second } => {
+                let mut disc = game_render::disc::Disc::open_configured()?;
+                let mut out = vec![disc.res(track)?];
+                if let Some(second) = second {
+                    out.push(disc.res(second)?);
+                }
+                Ok(out)
+            }
+            Origin::Made(_) => Err(format!("{} is a made join, with no archive", self.stem)),
+        }
+    }
+
+    /// Its own archive, [`WorldPiece::archives`]' first.
+    pub fn res(&self) -> Result<Res, String> {
+        Ok(self.archives()?.swap_remove(0))
+    }
+
+    /// Its terrain file's bytes.
+    pub fn terrain(&self) -> Result<Vec<u8>, String> {
+        match (&self.origin, &self.scene) {
+            (Origin::Made(bytes), _) => Ok(bytes.to_vec()),
+            (_, None) => join_terrain(&self.dir, &self.stem),
+            (_, Some(scene)) => track_mods::terrain_bytes(&self.res()?, &scene.terrain_file),
+        }
+    }
 }
 
 /// A world mod that reads.
@@ -241,7 +287,7 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
             first_owner,
         };
         first_owner = first_owner.saturating_add(scene.collision.len() as i32);
-        pieces.push(WorldPiece { tile: t, dir: folder, scene: Some(scene), stem, dropped: sections, scene_bytes: Some(bytes.into()) });
+        pieces.push(WorldPiece { tile: t, dir: folder, scene: Some(scene), stem, dropped: sections, scene_bytes: Some(bytes.into()), origin: Origin::Folder });
     }
     let tile_count = pieces.len();
     if tile_count == 0 {
@@ -255,7 +301,7 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
         let layout = TerrainLayout { width, breadth, width_scale: spacing, breadth_scale: spacing, ..TerrainLayout::default() };
         let mut t = Tile { name: join.clone(), at: at.map(|a| F(a as f32)), layout, spacing, levels, keep: [0; 4], first_owner };
         t.keep = t.every_cell();
-        pieces.push(WorldPiece { tile: t, dir: folder, scene: None, stem: join, dropped: Vec::new(), scene_bytes: None });
+        pieces.push(WorldPiece { tile: t, dir: folder, scene: None, stem: join, dropped: Vec::new(), scene_bytes: None, origin: Origin::Folder });
     }
     let named = |tile: &str| pieces[..tile_count].iter().position(|p| p.tile.name == tile);
     let home = match json.get("sky").and_then(Json::str) {
@@ -292,12 +338,12 @@ fn join_terrain_path(folder: &Path, join: &str) -> PathBuf {
 }
 
 /// A tile's `keep` in its own feet, `[x0, z0, x1, z1]`, by the scene's sample spacing.
-fn keep_feet(keep: [u32; 4], spacing: F) -> [f32; 4] {
+pub(crate) fn keep_feet(keep: [u32; 4], spacing: F) -> [f32; 4] {
     keep.map(|k| k as f32 * spacing.0)
 }
 
 /// Whether a point in a tile's own feet stands inside its kept rectangle.
-fn inside(kept: [f32; 4], x: f32, z: f32) -> bool {
+pub(crate) fn inside(kept: [f32; 4], x: f32, z: f32) -> bool {
     x >= kept[0] && z >= kept[1] && x < kept[2] && z < kept[3]
 }
 
@@ -348,6 +394,22 @@ impl WorldMod {
         Ok(())
     }
 
+    /// Each disc track tile's sound emitters as [`crate::audio::Sound::set_map_emitters`] reads them
+    /// (P71): none for a world mod's, whose `.aud`s name another game's sounds (MD2).
+    pub fn map_sounds(&self) -> Vec<crate::audio::MapSounds> {
+        let regions = self.regions();
+        self.pieces[..self.tile_count]
+            .iter()
+            .zip(regions.owned)
+            .filter_map(|(p, owned)| match &p.origin {
+                Origin::Disc { track, .. } => {
+                    Some(crate::audio::MapSounds { res: track.clone(), track: p.stem.clone(), at: p.tile.at.map(|a| a.0), owned })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The simulation's world, reading each piece from its folder when it is first needed.
     pub fn tiled(&self, reach: Reach) -> Result<Tiled, String> {
         let files = Files { pieces: self.pieces.clone() };
@@ -395,9 +457,9 @@ impl Source for Files {
     fn load(&mut self, index: usize) -> Result<Piece, String> {
         let p = self.pieces.get(index).ok_or("no such piece")?;
         let Some(scene) = &p.scene else {
-            return Ok(Piece { terrain: join_terrain(&p.dir, &p.stem)?, shapes: Vec::new() });
+            return Ok(Piece { terrain: p.terrain()?, shapes: Vec::new() });
         };
-        let res = Res::folder(&p.dir)?;
+        let res = p.res()?;
         let terrain = track_mods::terrain_bytes(&res, &scene.terrain_file)?;
         // Every shape the scene places, in the tile's own coordinates; one that does not read is left
         // out, as the tile ridden alone leaves it out (`Props::load`), so the numbers are its.
@@ -416,7 +478,7 @@ impl Source for Files {
     fn shapes(&mut self, index: usize) -> Result<Vec<(track::Mesh, Placement)>, String> {
         let p = self.pieces.get(index).ok_or("no such piece")?;
         let Some(scene) = &p.scene else { return Ok(Vec::new()) };
-        let res = Res::folder(&p.dir)?;
+        let res = p.res()?;
         Ok(scene
             .collision
             .iter()
@@ -727,11 +789,7 @@ impl Builder {
 
 impl Files {
     fn load_terrain(&mut self, index: usize) -> Result<Vec<u8>, String> {
-        let p = &self.pieces[index];
-        match &p.scene {
-            None => join_terrain(&p.dir, &p.stem),
-            Some(scene) => track_mods::terrain_bytes(&Res::folder(&p.dir)?, &scene.terrain_file),
-        }
+        self.pieces[index].terrain()
     }
 }
 
@@ -771,7 +829,7 @@ impl WorldMod {
         // Each map read on a core of its own (MD15: a disc map's paint is baked, which takes a while).
         let read_one = |p: &WorldPiece| {
             let read = || -> Result<_, String> {
-                let res = Res::folder(&p.dir)?;
+                let res = p.res()?;
                 let (_, stem, scn) = scene_of(&res)?;
                 let text = game_render::ini::text(&scn);
                 let scene = p.scene.as_ref().ok_or("a join has no scene")?;

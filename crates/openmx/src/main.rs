@@ -196,6 +196,7 @@ mod saved_markers;
 // MD10: `--shot-pose`, the first view's camera held where the accuracy harness asks.
 mod shot_pose;
 mod split;
+mod spliced;
 mod stages;
 mod track_mods;
 mod track_previews;
@@ -2188,11 +2189,18 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut disc = Disc::open_configured()?;
     // A track the disc does not have is a track mod's (MD2), looked for in the mods folder only
     // then, so a disc track's ride reads nothing from it.
-    let track_member = member_ending(&disc, &format!("{}.res", args.track));
+    // Every free-ride map spliced into one (P71) is a world of the disc's own tracks: the ride is
+    // the first map's, dressed and lit from its archives, and the simulation asks every map.
+    let spliced = args.track == spliced::ID;
+    let track_member = member_ending(&disc, &format!("{}.res", if spliced { spliced::MAPS[0] } else { args.track.as_str() }));
     // A world mod (MD8) is several track mods as one ground: the ride is dressed and lit from its
     // home tile's folder, as a track mod's is, and the simulation asks every tile.
     let mut world_mod: Option<worlds::WorldMod> = None;
     let modded = match &track_member {
+        Ok(_) if spliced => {
+            world_mod = Some(spliced::world(&mut disc)?);
+            None
+        }
         Ok(_) => None,
         Err(e) => match mods_dir(&args) {
             Some(dir) if worlds::is_world(&dir, &args.track) => {
@@ -2206,12 +2214,16 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         },
     };
     // The name the track's other files are built from: a disc track's own, a mod's scene's stem.
-    let stem = modded.as_ref().map_or_else(|| args.track.clone(), |t| t.stem.clone());
+    let stem = match &modded {
+        Some(t) => t.stem.clone(),
+        None if spliced => spliced::MAPS[0].to_string(),
+        None => args.track.clone(),
+    };
     let bike_member = member_ending(&disc, &format!("{}.res", args.bike))?;
     // A track is two archives: the props and the terrain in one, the bike's animation set, its
     // physics and the follow camera in the other, which the game loads alongside it. A mod has no
     // second archive and rides with a disc freeride's.
-    let second_of = if modded.is_some() { track_mods::FREERIDE } else { args.track.as_str() };
+    let second_of = if modded.is_some() { track_mods::FREERIDE } else { stem.as_str() };
     let second = member_ending(&disc, &format!("{second_of}_2.res")).ok();
     // The rider is a fourth archive, named after the rider rather than the track or the bike: the
     // body, its gear and its motions are all in there.
@@ -2335,6 +2347,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Some(w) => {
             let t = w.tiled(args.world_reach.unwrap_or(game_sim::tiles::Reach::DESKTOP))?;
             println!("{}", w.line(&t));
+            if spliced {
+                for line in spliced::layout(w) {
+                    println!("{line}");
+                }
+            }
             println!("{}", worlds::WorldMod::holes_line(&t));
             Some(Box::new(t))
         }
@@ -3411,6 +3428,16 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     &stem,
                 )
             });
+            // A world of the disc's own tracks (P71) sounds every map's emitters where each map is.
+            let read = read.and_then(|mut s| {
+                if let Some(w) = &world_mod {
+                    let maps = w.map_sounds();
+                    if !maps.is_empty() {
+                        s.set_map_emitters(Disc::open_configured()?, &maps)?;
+                    }
+                }
+                Ok(s)
+            });
             match read {
                 Ok(s) => Some(s),
                 Err(e) => {
@@ -3975,7 +4002,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // archive lacks the numbers (the MX tracks'), a free-ride track's, which has them all.
     let zone_spots = archives
         .iter()
-        .find_map(|a| a.read_suffix(&format!("{}\\hit.dat", args.track)).ok())
+        .find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok())
         .map(|b| portal::spots(&String::from_utf8_lossy(&b)))
         .unwrap_or_default();
     let portal_art = {

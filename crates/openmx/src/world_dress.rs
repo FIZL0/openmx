@@ -13,7 +13,6 @@
 
 use crate::ground;
 use crate::worlds::{self, WorldMod, WorldPiece};
-use game_render::disc::Res;
 use game_render::eco::{Grove, Lod};
 use game_render::scene::{self as view, Placement};
 use game_render::toy::{self, Traffic};
@@ -76,8 +75,7 @@ pub fn prefix(tile: &Tile) -> String {
 /// Build tile `index`'s dressing from its folder.
 pub fn build(piece: &WorldPiece, index: usize, lod: Lod) -> Result<Built, String> {
     let Some(scene) = &piece.scene else { return Err("a join has nothing on it".into()) };
-    let res = Res::folder(&piece.dir)?;
-    let archives = [res];
+    let archives = piece.archives()?;
     // The scene as the world's find read it (MD18), else off the folder.
     let bytes = match &piece.scene_bytes {
         Some(kept) => kept.to_vec(),
@@ -296,8 +294,8 @@ pub fn take(
     let prefix = prefix(&piece.tile);
     let shift = piece.tile.at.map(|a| a.0);
     let taken = assets.take_in(b.assets, &prefix);
-    let traffic = match Res::folder(&piece.dir) {
-        Ok(res) => Traffic::load(&[res], &piece.stem, &mut |p| ground(p, shift)),
+    let traffic = match piece.archives() {
+        Ok(archives) => Traffic::load(&archives, &piece.stem, &mut |p| ground(p, shift)),
         Err(_) => Traffic::default(),
     };
     Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken }

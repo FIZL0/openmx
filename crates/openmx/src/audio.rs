@@ -2468,6 +2468,13 @@ impl Reading<'_> {
         WorldSounds::read(&t, &e, &mut |n| lib.clip(n))
     }
 
+    /// A track's own `.aud` alone, its emitters without the race events' (P71's other maps).
+    pub fn track_only(&mut self, track_res: &str, track: &str) -> WorldSounds {
+        let t = self.text(track_res, &format!("tracks\\{track}\\{track}.aud"));
+        let lib = &mut *self.lib;
+        WorldSounds::read(&t, "", &mut |n| lib.clip(n))
+    }
+
     /// The shootoff's boom and rumble, out of the race events' `aud\event.aud`.
     pub fn shootoff(&mut self, events_res: &str) -> Shootoff {
         let e = self.text(events_res, "aud\\event.aud");
@@ -2740,6 +2747,41 @@ impl Sound {
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));
         Ok(sound)
+    }
+}
+
+/// One map of a world of disc tracks (P71), as its sound emitters are read: its archive
+/// (`tracks\\free07.res`), its name (`free07`), its offset in the world, and the world rectangle it
+/// owns, `[x0, z0, x1, z1]`.
+pub struct MapSounds {
+    pub res: String,
+    pub track: String,
+    pub at: [f32; 2],
+    pub owned: [f32; 4],
+}
+
+impl Sound {
+    /// A world of disc tracks' fixed emitters (P71): every map's own `.aud` ones, each moved by its
+    /// map's offset, and those standing on ground the map no longer owns left out. They take the
+    /// place of the home map's, which is among `maps`. The random ones and the crowd stay the home
+    /// map's: they are not placed, and every map's at once would sound each one five times as often.
+    pub fn set_map_emitters(&mut self, disc: Disc, maps: &[MapSounds]) -> Result<(), String> {
+        let mut lib = Library::open(disc)?;
+        let mut read = Reading { lib: &mut lib };
+        let mut fixed = Vec::new();
+        let mut each = Vec::new();
+        for m in maps {
+            let w = read.track_only(&m.res, &m.track);
+            let had = fixed.len();
+            let [x0, z0, x1, z1] = m.owned;
+            fixed.extend(w.fixed.into_iter().map(|(clip, p, looping, near, far)| (clip, [p[0] + m.at[0], p[1], p[2] + m.at[1]], looping, near, far)).filter(
+                |(_, p, ..)| p[0] >= x0 && p[0] < x1 && p[2] >= z0 && p[2] < z1,
+            ));
+            each.push(format!("{} {}", m.track, fixed.len() - had));
+        }
+        println!("sound: {} fixed emitters on {} maps ({})", fixed.len(), maps.len(), each.join(", "));
+        self.world.fixed = fixed;
+        Ok(())
     }
 }
 
