@@ -2296,6 +2296,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     let mut look = view::Scene::parse(&ini::text(&scn_bytes));
     if let Some(w) = &world_mod {
+        let cut = worlds::cut_look(&mut look, &w.pieces[w.home].tile);
+        if cut > 0 {
+            println!("world: {cut} of {}'s models stand outside its keep, not drawn", w.pieces[w.home].tile.name);
+        }
         worlds::move_look(&mut look, w.home_at());
     }
 
@@ -2331,6 +2335,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Some(w) => {
             let t = w.tiled(args.world_reach.unwrap_or(game_sim::tiles::Reach::DESKTOP))?;
             println!("{}", w.line(&t));
+            println!("{}", worlds::WorldMod::holes_line(&t));
             Some(Box::new(t))
         }
         None => None,
@@ -3188,6 +3193,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     if r.air.on_ground { 1 } else { 0 },
                     if f.wreck.is_some() { 1 } else { 0 },
                 );
+                // The map edge's throw apart from every other wreck (MD27), so a ride can say where
+                // in a world it was shot off and a crash on the way is not mistaken for one.
+                if f.wreck == Some(game_sim::trick::Wreck::CANNONBALL) {
+                    println!("thrown: tick {i} at {:.1}, {:.1}", p.x(), p.z());
+                }
             }
             return Ok(Err(Leave::Quit));
         }

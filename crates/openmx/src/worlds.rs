@@ -223,9 +223,14 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
             .filter_map(|d| d.get("section").and_then(Json::str).map(str::to_string))
             .collect();
         let text = String::from_utf8_lossy(&bytes);
-        let scene = track::Scene::parse(without_sections(&text, &sections).as_bytes()).map_err(|e| format!("{id}: {tile}: {scn}: {e}"))?;
+        let mut scene = track::Scene::parse(without_sections(&text, &sections).as_bytes()).map_err(|e| format!("{id}: {tile}: {scn}: {e}"))?;
         let terrain = track_mods::terrain_path(&res, &folder, &scene.terrain_file).map_err(|e| format!("{id}: {tile}: {e}"))?;
         let (spacing, levels, _, _) = shape_of_file(&terrain).map_err(|e| format!("{id}: {tile}: {e}"))?;
+        // What stands outside the keep stands on ground the tile no longer owns (MD27): a shape
+        // there is an invisible wall on a join or a neighbour, so neither it nor a model is kept.
+        let kept = keep_feet(keep, spacing);
+        scene.collision.retain(|p| inside(kept, p.position[0].0, p.position[2].0));
+        scene.models.retain(|p| inside(kept, p.position[0].0, p.position[2].0));
         let t = Tile {
             name: tile.clone(),
             at: at.map(|a| F(a as f32)),
@@ -284,6 +289,26 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
 fn join_terrain_path(folder: &Path, join: &str) -> PathBuf {
     let tagged = folder.join(format!("{join}.ps2.trn"));
     if tagged.is_file() { tagged } else { folder.join(format!("{join}.trn")) }
+}
+
+/// A tile's `keep` in its own feet, `[x0, z0, x1, z1]`, by the scene's sample spacing.
+fn keep_feet(keep: [u32; 4], spacing: F) -> [f32; 4] {
+    keep.map(|k| k as f32 * spacing.0)
+}
+
+/// Whether a point in a tile's own feet stands inside its kept rectangle.
+fn inside(kept: [f32; 4], x: f32, z: f32) -> bool {
+    x >= kept[0] && z >= kept[1] && x < kept[2] && z < kept[3]
+}
+
+/// Leave out of the home tile's drawn scene what stands outside its keep, as [`find`] leaves it
+/// out of the tile's own scene (MD27): the cut band is a neighbour's ground, or the join's. Before
+/// [`move_look`], in the tile's own feet; how many went.
+pub fn cut_look(look: &mut game_render::scene::Scene, tile: &Tile) -> usize {
+    let kept = keep_feet(tile.keep, tile.spacing);
+    let before = look.models.len();
+    look.models.retain(|m| inside(kept, m.pos.x, m.pos.z));
+    before - look.models.len()
 }
 
 /// A join's terrain file: `<join>.ps2.trn`, or `<join>.trn`.
@@ -346,6 +371,18 @@ impl WorldMod {
             tiled.area.depth.0,
             self.pieces[self.home].tile.name
         )
+    }
+
+    /// The line saying where inside the world the edge test would throw (MD27): `none`, or how many
+    /// holes and the first few. Only the world's outer edge should throw.
+    pub fn holes_line(tiled: &Tiled) -> String {
+        let holes = tiled.holes();
+        if holes.is_empty() {
+            return "world holes: none, so only the outer edge throws".to_string();
+        }
+        let first: Vec<String> =
+            holes.iter().take(4).map(|[x0, z0, x1, z1]| format!("x {:.1}..{:.1} z {:.1}..{:.1}", x0.0, x1.0, z0.0, z1.0)).collect();
+        format!("world holes: {} inside, thrown within 150 feet of each: {}", holes.len(), first.join("; "))
     }
 }
 
