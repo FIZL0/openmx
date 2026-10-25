@@ -454,6 +454,42 @@ impl Tiled {
         let margin = crate::off_map::MARGIN;
         self.at(F(at.x()), F(at.z())).is_some() && !self.area.outside(at, margin) && !self.off_world(at, margin)
     }
+
+    /// **Every hole inside the world** (MD27): the rectangles of [`Tiled::area`] that no tile or join
+    /// owns, `[x0, z0, x1, z1]` in world feet. The edge test throws a rider within
+    /// [`crate::off_map::MARGIN`] of any of them ([`World::off_world`]), so a world with none throws
+    /// only at its outer edge — never at a join, whatever its tiles' own edges were.
+    ///
+    /// Exact rather than sampled: the rectangle is cut on every piece's owned edges as
+    /// [`Tile::local`] draws them (its `keep`, less the terrain's last cell, which no cell of the
+    /// field starts), and the owner of each cut's middle is asked the way a ride asks it. A strip a
+    /// few feet wide between two pieces is a cut of its own, which a grid of points can step over.
+    pub fn holes(&self) -> Vec<[F; 4]> {
+        let edges = |axis: usize| {
+            let mut e: Vec<F> = vec![F::ZERO, if axis == 0 { self.area.width } else { self.area.depth }];
+            for t in &self.tiles {
+                let n = t.samples()[axis].saturating_sub(1);
+                for k in [t.keep[axis], t.keep[axis + 2].min(n)] {
+                    e.push(t.at[axis] + F::from(k as i32) * t.spacing);
+                }
+            }
+            e.retain(|v| *v >= F::ZERO && *v <= if axis == 0 { self.area.width } else { self.area.depth });
+            e.sort_by(|a, b| a.0.total_cmp(&b.0));
+            e.dedup();
+            e
+        };
+        let (xs, zs) = (edges(0), edges(1));
+        let mut out = Vec::new();
+        for z in zs.windows(2) {
+            for x in xs.windows(2) {
+                let (mx, mz) = ((x[0] + x[1]) / F(2.0), (z[0] + z[1]) / F(2.0));
+                if self.hole(mx, mz) {
+                    out.push([x[0], z[0], x[1], z[1]]);
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Tile {
