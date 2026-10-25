@@ -3776,6 +3776,22 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let ground_at = Instant::now();
             let (mut stream, first) = worlds::GroundStream::start(w, cells, reach, &starts, args.world_ground_all);
             r.set_ground_streamed(cells, paint, ground::DIRT, t.area.width.0.hypot(t.area.depth.0))?;
+            // Which maps' pages went up, and at what size (MD31): a map past the device's layers is dirt.
+            if let Some(l) = &world_look {
+                let limits = r.device.limits();
+                let packed = l.paint.pack(limits.max_texture_array_layers, limits.max_texture_dimension_2d);
+                let (arrays, detail) = game_render::gpu::world_paint_arrays(&l.paint, &packed);
+                let arrays: Vec<String> = arrays.iter().map(|a| format!("{}x{} x {}", a.width, a.height, a.layers)).collect();
+                println!(
+                    "world paint: {} of {} paged maps on the GPU, pages {}, detail {}x{} x {}",
+                    packed.iter().flatten().count(),
+                    l.paint.tiles.iter().filter(|t| t.pages.is_some()).count(),
+                    arrays.join(", "),
+                    detail.width,
+                    detail.height,
+                    detail.layers
+                );
+            }
             for (i, c) in &first {
                 r.add_ground_piece(*i as u32, c)?;
             }

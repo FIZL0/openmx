@@ -71,6 +71,9 @@ mod glows;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The format an offscreen frame is drawn in: plain bytes, as the rasteriser's are.
 pub const OFFSCREEN: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// How far the ground's pages are filtered anisotropically (MD31): wgpu's most.
+const GROUND_ANISOTROPY: u16 = 16;
+
 /// How many pixels a chunk of ground's height may be out by, at the level of detail it is drawn at.
 const GROUND_PIXELS: f32 = 0.75;
 /// How few pixels across a prop may be before it is not drawn at all: less than one can show.
@@ -572,6 +575,10 @@ pub struct Renderer {
     blit_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     clamp_sampler: wgpu::Sampler,
+    /// [`Renderer::sampler`] filtering anisotropically, for a ground painted from terrain pages
+    /// (MD31): seen at a rider's height the ground is nearly edge-on, and an isotropic mip is chosen
+    /// by the steep direction's footprint, blurring the pages across as well as along.
+    ground_sampler: wgpu::Sampler,
     white: wgpu::TextureView,
     /// Each texture as uploaded, by its number and the cutoff its mips keep the coverage of (0 for
     /// plain box mips, [`Surface::keep_coverage`]'s cut-outs for theirs).
@@ -1153,17 +1160,18 @@ fn upload_pages(device: &wgpu::Device, queue: &wgpu::Queue, p: &Pages) -> [wgpu:
     [pages, leaves, detail]
 }
 
-/// Textures as one mip-mapped array the size of the first, each other one resampled to it, nearest;
-/// at least two layers, so no backend takes it for a plain 2D texture.
+/// Textures as one mip-mapped array the size of the largest, each smaller one resampled up to it,
+/// bilinearly and wrapping, so none loses a texel of its own (MD31: the first's size, nearest, drew
+/// a world's mod maps at its disc map's baked size); at least two layers, so no backend takes it for
+/// a plain 2D texture.
 fn upload_array(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, layers: &[&Texture]) -> wgpu::TextureView {
     let blank = Texture { width: 1, height: 1, rgba: vec![0; 4] };
     let first = layers.first().copied().unwrap_or(&blank);
-    let (w, h) = (first.width.max(1) as u32, first.height.max(1) as u32);
-    let count = layers.len().max(2) as u32;
+    let ArrayShape { width: w, height: h, layers: count, mips: levels } = array_shape(layers);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: count },
-        mip_level_count: mips(&Texture { width: w as usize, height: h as usize, rgba: vec![0; (w * h * 4) as usize] }).len() as u32,
+        mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
@@ -1177,7 +1185,7 @@ fn upload_array(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, layers:
             false => Texture {
                 width: w as usize,
                 height: h as usize,
-                rgba: (0..(w * h) as usize).flat_map(|i| t.sample(((i % w as usize) as f32 + 0.5) / w as f32, ((i / w as usize) as f32 + 0.5) / h as f32)).collect(),
+                rgba: (0..(w * h) as usize).flat_map(|i| t.sample_smooth(((i % w as usize) as f32 + 0.5) / w as f32, ((i / w as usize) as f32 + 0.5) / h as f32)).collect(),
             },
         };
         for (level, (lw, lh, px)) in mips(&t).iter().enumerate() {
@@ -1187,13 +1195,53 @@ fn upload_array(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, layers:
     texture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() })
 }
 
-/// A world's paint (MD9) for its shader: every packed map's pages in one array, their leaf images
-/// stacked in one picture (a leaf's red and green are its page's layer + 1, low byte first; 0 for
-/// none), and their detail maps in a second array.
-fn upload_world_pages(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint, packed: &[Option<Packed>]) -> [wgpu::TextureView; 3] {
+/// One texture array as it is uploaded: each layer's size, how many layers, and how many mip levels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArrayShape {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub mips: u32,
+}
+
+/// The array [`upload_array`] makes of these layers: the widest's width and the tallest's height (1 x
+/// 1 for none), at least two layers, and every mip level down to 1 x 1, as [`mips`] makes them.
+fn array_shape(layers: &[&Texture]) -> ArrayShape {
+    let width = layers.iter().map(|t| t.width).max().unwrap_or(1).max(1) as u32;
+    let height = layers.iter().map(|t| t.height).max().unwrap_or(1).max(1) as u32;
+    ArrayShape { width, height, layers: layers.len().max(2) as u32, mips: 32 - width.max(height).leading_zeros() }
+}
+
+/// A world's paint as [`Renderer::set_ground_streamed`] uploads it (MD31): each page array, by its
+/// number ([`Packed::array`]), and the detail array.
+pub fn world_paint_arrays(w: &WorldPaint, packed: &[Option<Packed>]) -> (Vec<ArrayShape>, ArrayShape) {
+    let pages = world_page_layers(w, packed).iter().map(|l| array_shape(l)).collect();
+    let details: Vec<&Texture> = w.tiles.iter().zip(packed).filter(|(_, at)| at.is_some()).filter_map(|(t, _)| t.pages.as_ref()?.detail.as_ref()).collect();
+    (pages, array_shape(&details))
+}
+
+/// The pages of a world's maps (MD31) as [`upload_world_pages`] lays them out: the layers of each
+/// page array ([`Packed::array`]), in order, a map's pages from its [`Packed::first_page`] on.
+fn world_page_layers<'a>(w: &'a WorldPaint, packed: &[Option<Packed>]) -> Vec<Vec<&'a Texture>> {
+    let mut arrays: Vec<Vec<&Texture>> = vec![Vec::new(); w.array_sizes(packed).len().max(1)];
+    for (t, at) in w.tiles.iter().zip(packed) {
+        if let (Some(p), Some(at)) = (&t.pages, at) {
+            let array = &mut arrays[at.array as usize];
+            debug_assert_eq!(array.len() as u32, at.first_page);
+            array.extend(p.pages.iter());
+        }
+    }
+    arrays
+}
+
+/// A world's paint (MD9) for its shader: the packed maps' pages in one array a page size (MD31),
+/// their leaf images stacked in one picture (a leaf's red and green are its page's layer + 1 in its
+/// map's array, low byte first; 0 for none), and their detail maps in a second array. The views in
+/// binding order: the first page array, the leaves, the details, and then the other page arrays.
+fn upload_world_pages(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint, packed: &[Option<Packed>]) -> Vec<wgpu::TextureView> {
     let placed: Vec<(&Pages, Packed)> = w.tiles.iter().zip(packed).filter_map(|(t, p)| Some((t.pages.as_ref()?, (*p)?))).collect();
-    let pages: Vec<&Texture> = placed.iter().flat_map(|(p, _)| p.pages.iter()).collect();
-    let pages = upload_array(device, queue, "world ground pages", &pages);
+    let mut arrays: Vec<wgpu::TextureView> = world_page_layers(w, packed).iter().map(|layers| upload_array(device, queue, "world ground pages", layers)).collect();
+    let pages = arrays.remove(0);
     let width = placed.iter().map(|(p, _)| p.across).max().unwrap_or(1).max(1) as usize;
     let height = placed.iter().map(|(p, at)| at.row + p.along).max().unwrap_or(1).max(1) as usize;
     let mut rgba = vec![0u8; width * height * 4];
@@ -1219,7 +1267,7 @@ fn upload_world_pages(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint
     write_layer(queue, &leaves, 0, 0, (width as u32, height as u32), 4, &rgba);
     let details: Vec<&Texture> = placed.iter().filter_map(|(p, _)| p.detail.as_ref()).collect();
     let details = upload_array(device, queue, "world ground detail", &details);
-    [pages, leaves.create_view(&Default::default()), details]
+    [pages, leaves.create_view(&Default::default()), details].into_iter().chain(arrays).collect()
 }
 
 /// The baked light map's tiles as one grey image, for the ground's shader.
@@ -1487,6 +1535,18 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
+        let ground_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ground pages"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            // A device without anisotropic filtering takes 1 (wgpu clamps it).
+            anisotropy_clamp: GROUND_ANISOTROPY,
+            ..Default::default()
+        });
         let clamp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("clamp"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1665,6 +1725,7 @@ impl Renderer {
             blit_pipeline,
             sampler,
             clamp_sampler,
+            ground_sampler,
             white,
             textures: HashMap::new(),
             materials: Vec::new(),
@@ -2001,10 +2062,14 @@ impl Renderer {
             entries.push(texture_entry(4, true, wgpu::TextureViewDimension::D2));
             entries.push(texture_entry(5, true, wgpu::TextureViewDimension::D2));
         }
-        if world.is_some() {
+        if let Some((w, packed)) = &world {
             entries.push(texture_entry(3, true, wgpu::TextureViewDimension::D2Array));
             entries.push(texture_entry(4, true, wgpu::TextureViewDimension::D2));
             entries.push(texture_entry(5, true, wgpu::TextureViewDimension::D2Array));
+            // A page array a page size past the first (MD31).
+            for k in 1..w.array_sizes(packed).len() as u32 {
+                entries.push(texture_entry(5 + k, true, wgpu::TextureViewDimension::D2Array));
+            }
         }
         if meshes.is_some() {
             entries.extend(ground_mesh::layout_entries(3 + layers.len() as u32));
@@ -2027,7 +2092,8 @@ impl Renderer {
         let mut bind_entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::Sampler(&self.sampler),
+                // Terrain pages are filtered anisotropically (MD31); a splat as it always was.
+                resource: wgpu::BindingResource::Sampler(if pages.is_some() || world.is_some() { &self.ground_sampler } else { &self.sampler }),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -3540,6 +3606,10 @@ fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
          @group(1) @binding(4) var page_of: texture_2d<f32>;\n\
          @group(1) @binding(5) var detail: texture_2d_array<f32>;\n",
     );
+    // A page array a page size past the first (MD31), each map reading its own.
+    for k in 1..w.array_sizes(packed).len() {
+        s.push_str(&format!("@group(1) @binding({}) var pages{k}: texture_2d_array<f32>;\n", 5 + k));
+    }
     s.push_str(GROUND_VS_WGSL);
     s.push_str(&format!(
         "fn inside(p: vec2f, r: vec4f) -> bool {{ return all(p >= r.xy) && all(p < r.zw); }}
@@ -3584,9 +3654,10 @@ fn mirror(p: vec2f, r: vec4f) -> vec2f {{ return vec2f(mirror1(p.x, r.x, r.z), m
   let page = select(0, entry - 1, on && entry > 0);
   let local = (vec2f(leaf & vec2i(3)) * 16.0 + samples - vec2f(leaf) * 16.0) / 64.0;
   let k = {inner} / (64.0 * {spacing});
-  let t = textureSampleGrad(pages, tiled, {border} + {inner} * local, page, gx * k, gy * k).rgb * 255.0;
+  let t = textureSampleGrad({array}, tiled, {border} + {inner} * local, page, gx * k, gy * k).rgb * 255.0;
   {detail}
   return select({dirt}, painted, on && entry > 0);",
+                    array = if at.array == 0 { "pages".to_string() } else { format!("pages{}", at.array) },
                     rect = rect(i),
                     ax = f(t.at[0]),
                     az = f(t.at[1]),
@@ -4692,6 +4763,21 @@ mod tests {
                     dirt: [200.0, 180.0, 150.0],
                 };
                 ground_world_wgsl(&world, &world.pack(256, 2048))
+            }),
+            // Two page sizes, so two page arrays (MD31): a disc map's baked pages and a mod map's.
+            ("ground, world of two page sizes", {
+                let small = Pages { pages: vec![Texture { width: 128, height: 128, rgba: vec![255; 128 * 128 * 4] }], ..pages.clone() };
+                let world = WorldPaint {
+                    regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]] },
+                    tiles: vec![
+                        crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(small) },
+                        crate::terrain::PaintTile { at: [40.0, 0.0], pages: Some(pages.clone()) },
+                    ],
+                    dirt: [200.0, 180.0, 150.0],
+                };
+                let packed = world.pack(256, 2048);
+                assert_eq!(world.array_sizes(&packed).len(), 2, "{packed:?}");
+                ground_world_wgsl(&world, &packed)
             }),
         ];
         let mut written = 0;
