@@ -4732,6 +4732,12 @@ screen_page_off boot 0x00200ab0 the screen's vt +0xa0, to 0x00200ac0: only the H
 #   (+0x30 pos, +0x40 vel, +0x160 quat, +0x140 rates) survive the entry tick in RAM.
 #   tests/ragdoll_entry.rs: the port's pose from what the original's read == its starts bit for bit
 #   (side); from the captured bodies within NEAR on side/back/tip (front's 2599 row is torn).
+# S110 — the wreck entry from the riding bodies (ragdoll_riding::Riding::hand_over, rider.rs).
+#   rider_ragdoll_pose's a1: nonzero = still (velocity and spin zero, as for dt <= 0); the repose
+#   passes 1, the wreck entry 0. In rider_body_wreck_enter the five throw draws are rand_raw from
+#   0x0024bc5c, 0x0024bca0, 0x0024bce4, 0x0024bd74, 0x0024bda0; the sixth is wreck_sound's pick
+#   (sound_pick, return 0x001b5858). run2 (S109): 3716 the verdict (reason 11) and no step at all,
+#   3717 a riding tick, 3718 a hidden riding tick then the entry and its first wreck step.
 # V41 — the path cars and the scene's props, as the original draws them.
 #   car class (the .toy's [CarN] on a .mot clip): init 0x001147c0, mot load 0x00114fc0, arc length
 #   0x00115330, update 0x00115540 (the 1/30 s scene step), lag walk 0x00116150, curve 0x00116410;

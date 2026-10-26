@@ -12,7 +12,12 @@
 //! ride from each captured row (1203 of 1203 riding ticks). This module is what runs it beside a
 //! ride: [`Riding::new`] gives the actor the constructor's numbers, [`request`] is what the bike
 //! hands it, and [`Riding::step`] is one tick with the skeleton's points and rests off the
-//! animated pose. It draws only: nothing of the ride reads it back, and its generator is its own.
+//! animated pose. Its generator is its own.
+//!
+//! Since S110 it is the rider's ([`crate::rider::Rider::riding`]), stepped at the top of each frame for
+//! the tick the shell last drew, and a wreck enters from its bodies rather than from the animated
+//! skeleton ([`Riding::hand_over`]). The bike's ride reads nothing else of it, and the shell draws it
+//! only when asked to (`OPENMX_RIDING_RAGDOLL=1`).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -55,13 +60,33 @@ const TERRAIN_MIN: Vf = Vf([-1.0e30, -1.0e30, -1.0e30, 1.0]);
 const TERRAIN_MAX: Vf = Vf([1.0e30, 1.0e30, 1.0e30, 1.0]);
 
 /// **The riding ragdoll**: the body actor, and the skeleton's drawn matrices from its last pose,
-/// which a carried repose measures the bones' velocity from.
-#[derive(Clone, Debug)]
+/// which a moving pose measures the bones' velocity from.
+///
+/// Since S110 it is the [`crate::rider::Rider`]'s, stepped by the rider's own frame and sent and
+/// hashed with it: a wreck enters from its bodies ([`Riding::hand_over`]), as the original's does.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Riding {
     pub actor: Actor,
-    drawn: Option<Vec<Mat4>>,
-    rng: Rng,
+    pub(crate) drawn: Option<Vec<Mat4>>,
+    /// The bodies' nodes' drawn matrices before the last step (S110): what the wreck entry measures
+    /// the bones' move and turn from. `None` until a placed body has been stepped.
+    pub(crate) was: Option<Vec<Mat4>>,
+    pub(crate) rng: Rng,
 }
+
+/// **What the drawn bike hands the riding body** (S110): the chassis' root node ("Bike") and the four
+/// holds' points (the grips, then the pegs: left before right) in the chassis' model frame, as the
+/// shell last drew the bike. An input like [`crate::rider::Rider::skeleton`]: written by a shell that
+/// draws the chassis, never sent, and with none the rider has no riding body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Holds {
+    pub root: Mat4,
+    pub hands: [Vf; 2],
+    pub feet: [Vf; 2],
+}
+
+/// How far the riding ragdoll's main bone may be from the bike before it is started again, in feet.
+pub const STRAY: F = F(10.0);
 
 impl Riding {
     /// The actor over the kit's ragdoll, with the numbers the original's rider body is built with.
@@ -76,7 +101,7 @@ impl Riding {
         actor.slow_speed = SLOW_SPEED;
         actor.foot_points = FOOT_POINTS;
         actor.bike_box = BIKE_BOX;
-        Riding { actor, drawn: None, rng: Rng::new() }
+        Riding { actor, drawn: None, was: None, rng: Rng::new() }
     }
 
     /// **One tick**: the skeleton's points and rests off `posed` (or the rig's fixed riding pose)
@@ -96,6 +121,7 @@ impl Riding {
         }
         let skeleton = Skeleton { points, rests, main_rest: rests[MAIN] };
         self.actor.clip = clip;
+        let was = self.history(kit);
         let mut pose = Pose { kit, now: &now, before: self.drawn.as_deref() };
         let tail = self.actor.tick(
             dt,
@@ -108,7 +134,57 @@ impl Riding {
             &mut pose,
         );
         self.drawn = Some(ragdoll_ride::drawn(&now));
+        self.was = was;
         tail
+    }
+
+    /// **One tick on a rider** (S110): the request off the ride and `holds` (carried by the ride's
+    /// transform, as the shell carried the drawn chassis' grips), the clip-table switch and the clip
+    /// off the body's machine, then [`Riding::step`] with the skeleton the shell last posed.
+    pub fn ride(&mut self, kit: &Kit, rider: &crate::rider::Rider, holds: &Holds, dt: F, world: &mut dyn World) -> Tail {
+        let m = rider.ride.transform();
+        let world_of = |p: Vf| math::transform_point(&m, p);
+        let frame = math::mul(&holds.root, &m);
+        let r = request(&rider.ride, rider.packed_pose, frame, holds.hands.map(world_of), holds.feet.map(world_of), kit.bike);
+        self.posed_off_the_table(rider.body.machine.mode == crate::rider_anim::Mode::Posed);
+        self.step(kit, rider.skeleton.as_deref(), &r, rider.body.veh.state, dt, world)
+    }
+
+    /// **One tick of the actor by another hand** (S110): `tick` runs it, and the bodies' nodes as they
+    /// were drawn before it are kept for the wreck entry, as [`Riding::step`] keeps them. What a test
+    /// steps the actor with the original's own skeleton and scene through.
+    pub fn stepped<T>(&mut self, kit: &Kit, tick: impl FnOnce(&mut Actor) -> T) -> T {
+        let was = self.history(kit);
+        let out = tick(&mut self.actor);
+        self.was = was;
+        out
+    }
+
+    /// The bodies' nodes' drawn matrices before a step, while the body is placed.
+    fn history(&self, kit: &Kit) -> Option<Vec<Mat4>> {
+        self.placed().then(|| ragdoll_ride::drawn(&self.bones(kit)))
+    }
+
+    /// The main bone has been placed more than [`STRAY`] from `at`: the bike went where the bones
+    /// did not (a respawn), and the body is started again.
+    pub fn strayed(&self, at: Vf) -> bool {
+        let d = self.main().sub(at);
+        let (x, y, z) = (F(d.x()), F(d.y()), F(d.z()));
+        self.placed() && x * x + y * y + z * z > STRAY * STRAY
+    }
+
+    /// **Each part's node as the skeleton's bone** (S70's hand-over): [`Riding::nodes`]' position and
+    /// the normalised orientation's forward and up rows, which is what the original's wreck entry
+    /// reads off the riding skeleton after a step wrote it back.
+    pub fn bones(&self, kit: &Kit) -> Vec<Bone> {
+        bones(&self.actor.ragdoll, kit)
+    }
+
+    /// **What a wreck enters from** (S110): the bodies' nodes now, and their drawn matrices before
+    /// the last step, which the entry's pose measures each bone's velocity and spin from. `None`
+    /// while the body is not placed, and the history `None` until it has been stepped placed.
+    pub fn hand_over(&self, kit: &Kit) -> Option<(Vec<Bone>, Option<&[Mat4]>)> {
+        self.placed().then(|| (self.bones(kit), self.was.as_deref()))
     }
 
     /// **A pose off the clip table is in charge** (V61): the two words the actor's mode reads for
@@ -145,6 +221,38 @@ impl Riding {
     /// The main bone's position.
     pub fn main(&self) -> Vf {
         self.actor.ragdoll.bones[MAIN].body.position
+    }
+}
+
+/// **The riding bodies' nodes as skeleton bones** (S110): each body's node ([`ragdoll_ride::node_of`])
+/// with the forward and up rows of its normalised orientation, the form the wreck entry's pose reads.
+pub fn bones(ragdoll: &Ragdoll, kit: &Kit) -> Vec<Bone> {
+    ragdoll
+        .bones
+        .iter()
+        .zip(&kit.rig.parts)
+        .map(|(b, p)| {
+            let (at, q) = ragdoll_ride::node_of(b.body.position, b.body.quat, p.cofg);
+            let m = math::quat_to_mat4(q, at);
+            Bone { at, forward: m.0[2], up: m.0[1] }
+        })
+        .collect()
+}
+
+impl crate::hash::State for Riding {
+    fn walk(&self, w: &mut crate::hash::Walk<'_>) {
+        w.bool("placed", self.actor.placed);
+        w.bool("repose", self.actor.repose);
+        w.bool("touching", self.actor.touching);
+        for (i, h) in self.actor.ragdoll.holds.iter().enumerate() {
+            w.bool(["hold0", "hold1", "hold2", "hold3"][i], *h);
+        }
+        for b in &self.actor.ragdoll.bones {
+            w.vf("position", b.body.position);
+            w.vf("velocity", b.body.velocity);
+            w.vf("quat", b.body.quat);
+            w.vf("rates", b.body.rates);
+        }
     }
 }
 
@@ -220,7 +328,8 @@ impl Sources {
 }
 
 /// The actor's outside for the riding body: a pose puts every bone where the animated skeleton has
-/// it, still on the entry, carried from last frame's drawn matrices on a repose.
+/// it, moving from last frame's drawn matrices on an entry, still on a repose (`carried` is the
+/// original's `a1`, which stills the pose: S110), and still with no last frame.
 struct Pose<'a> {
     kit: &'a Kit,
     now: &'a [Bone],
@@ -232,7 +341,7 @@ impl Outside for Pose<'_> {
         let t = &self.kit.tables;
         let mut starts = [Start::default(); PARTS];
         let mut drawn = [Mat4([Vf::ZERO; 4]); PARTS];
-        let before = self.before.filter(|_| carried);
+        let before = self.before.filter(|_| !carried);
         if let Some(before) = before {
             for (d, b) in drawn.iter_mut().zip(before) {
                 *d = *b;
