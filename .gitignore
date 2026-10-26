@@ -26,6 +26,10 @@ context/
 /settings.txt
 /controls.txt
 /garage.txt
+/online.txt
+/markers/
+# A personal launcher, if you keep one.
+/play.sh
 /riders.txt
 # And its mods folder (MD2): track mods are other games' files, never the repo's.
 /mods/
