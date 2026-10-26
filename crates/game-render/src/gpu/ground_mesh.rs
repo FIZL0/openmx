@@ -7,9 +7,17 @@
 //! over` ([`GroundMeshes::affine`]) — and the ground's shader applies them to the splat's colour:
 //!
 //! * **far**: the whole of the meshes' rectangle, drawn once when the ground is set;
-//! * **near**: [`NEAR_FEET`] round the first view's eye at [`NEAR_PER_FOOT`] texels a foot, drawn
-//!   again whenever the eye has moved to another [`STEP`]-foot square, so the meshes under the rider
-//!   are as sharp as their own textures.
+//! * **near**: [`NEAR_FEET`] round a view's eye at [`NEAR_PER_FOOT`] texels a foot, drawn again
+//!   whenever the eye has moved to another [`STEP`]-foot square, so the meshes under the rider are as
+//!   sharp as their own textures.
+//!
+//! Every view has a near target of its own (V89: split screen's second player saw only the far
+//! target's whole-map paint), and views standing in the same square share one. Each near target has
+//! its own bind group — group 2 of the ground's pipeline: the near and far targets and where they lie
+//! — and a view's ground is drawn with its target's group. A near target is 2048² texels with its
+//! mips, about 21 MiB, made only when a view stands in a square no other view's target holds, so one
+//! view costs what it always did and eight views apart cost about 171 MiB; a target no view needs any
+//! more is drawn over for the next square that does, and the pool shrinks back when views go.
 //!
 //! Each target is drawn into every mip level, the meshes' own textures sampled at that level's size,
 //! so the far ground does not shimmer. Only the modulate blend is drawn, which is every blend the
@@ -50,32 +58,37 @@ struct Target {
     bind: wgpu::BindGroup,
 }
 
+/// A near target, the square its eye stood in when it was drawn, and the ground's bind group that
+/// samples it: the ground shader's uniform `at` (this near square and the far one, each
+/// `x0, z0, 1 / side, 0`), this target and the far one.
+struct Near {
+    target: Target,
+    square: Option<[i32; 2]>,
+    at: wgpu::Buffer,
+    ground: wgpu::BindGroup,
+}
+
 pub(super) struct GpuMeshes {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     /// Runs of triangles with one texture, in drawing order: texture, first vertex, vertex count.
     runs: Vec<(usize, u32, u32)>,
     textures: Vec<wgpu::BindGroup>,
-    near: Target,
+    rect_layout: wgpu::BindGroupLayout,
+    /// The ground pipeline's group 2: [`layout_entries`].
+    pub(super) layout: wgpu::BindGroupLayout,
+    nears: Vec<Near>,
+    /// Which of `nears` each view's ground samples, as of the last [`GpuMeshes::follow`].
+    view_near: Vec<usize>,
     far: Target,
-    near_at: Option<[i32; 2]>,
-    /// The ground shader's uniform: the near and far squares, each `x0, z0, 1 / side, 0`.
-    pub(super) at: wgpu::Buffer,
     far_rect: [f32; 4],
 }
 
-/// The ground shader's declarations, from binding `first` of its group 1.
-pub(super) fn wgsl_bindings(first: u32) -> String {
-    format!(
-        "struct MeshAt {{ near: vec4f, far: vec4f }}\n\
-         @group(1) @binding({}) var mesh_near: texture_2d<f32>;\n\
-         @group(1) @binding({}) var mesh_far: texture_2d<f32>;\n\
-         @group(1) @binding({}) var<uniform> mesh_at: MeshAt;\n",
-        first,
-        first + 1,
-        first + 2
-    )
-}
+/// The ground shader's declarations: its group 2, one per near target.
+pub(super) const WGSL_BINDINGS: &str = "struct MeshAt { near: vec4f, far: vec4f }\n\
+  @group(2) @binding(0) var mesh_near: texture_2d<f32>;\n\
+  @group(2) @binding(1) var mesh_far: texture_2d<f32>;\n\
+  @group(2) @binding(2) var<uniform> mesh_at: MeshAt;\n";
 
 /// The ground shader's code that lays the meshes over `frame`, the splat's colour in 0..255, at the
 /// world's `x` and `z`. Both targets are sampled everywhere, as the derivatives need, and the near
@@ -89,12 +102,12 @@ pub(super) const APPLY_WGSL: &str = "  let mesh_un = (vec2f(x, z) - mesh_at.near
   let mesh = select(select(vec4f(0.0, 0.0, 0.0, 1.0), mesh_f, mesh_in_far), mesh_n, mesh_in_near);\n\
   frame = vec4f(frame.rgb * mesh.a + mesh.rgb * 255.0, frame.a);\n";
 
-/// The bind group layout entries the ground's shader needs for [`wgsl_bindings`].
-pub(super) fn layout_entries(first: u32) -> [wgpu::BindGroupLayoutEntry; 3] {
+/// The bind group layout entries of the ground's group 2, [`WGSL_BINDINGS`].
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
     [
-        texture_entry(first, true, wgpu::TextureViewDimension::D2),
-        texture_entry(first + 1, true, wgpu::TextureViewDimension::D2),
-        uniform_entry(first + 2, wgpu::ShaderStages::FRAGMENT),
+        texture_entry(0, true, wgpu::TextureViewDimension::D2),
+        texture_entry(1, true, wgpu::TextureViewDimension::D2),
+        uniform_entry(2, wgpu::ShaderStages::FRAGMENT),
     ]
 }
 
@@ -228,53 +241,28 @@ impl GpuMeshes {
             multiview_mask: None,
             cache: None,
         });
-        let target = |size: u32, label: &str| {
-            let levels = 32 - size.leading_zeros();
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
-                mip_level_count: levels,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let level_views = (0..levels)
-                .map(|l| {
-                    texture.create_view(&wgpu::TextureViewDescriptor {
-                        base_mip_level: l,
-                        mip_level_count: Some(1),
-                        ..Default::default()
-                    })
-                })
-                .collect();
-            let rect = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: 16,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &rect_layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: rect.as_entire_binding() }],
-            });
-            Target { levels: level_views, view: texture.create_view(&Default::default()), rect, bind }
-        };
-        let (near, far) = (target(NEAR_SIZE, "ground meshes near"), target(FAR_SIZE, "ground meshes far"));
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ground meshes"),
+            entries: &layout_entries(),
+        });
+        let far = target(device, &rect_layout, FAR_SIZE, "ground meshes far");
         let (lo, hi) = m.bounds();
         let side = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0);
         let far_rect = [lo[0], lo[1], 1.0 / side, 0.0];
-        let at = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ground meshes at"),
-            size: 32,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let meshes = GpuMeshes { pipeline, vertices: vertex_buffer, runs, textures, near, far, near_at: None, at, far_rect };
-        // Until the first frame, the near square is nowhere.
-        queue.write_buffer(&meshes.at, 0, bytemuck::cast_slice(&[[f32::MAX, f32::MAX, 0.0, 0.0], far_rect]));
+        let mut meshes = GpuMeshes {
+            pipeline,
+            vertices: vertex_buffer,
+            runs,
+            textures,
+            rect_layout,
+            layout,
+            nears: Vec::new(),
+            view_near: Vec::new(),
+            far,
+            far_rect,
+        };
+        // One near target to begin with, whose square is nowhere until the first frame.
+        meshes.add_near(device, queue);
         queue.write_buffer(&meshes.far.rect, 0, bytemuck::cast_slice(&far_rect));
         let mut encoder = device.create_command_encoder(&Default::default());
         meshes.draw(&mut encoder, &meshes.far);
@@ -282,23 +270,69 @@ impl GpuMeshes {
         meshes
     }
 
-    /// The near target, drawn again round `eye` if it has moved to another square.
-    pub(super) fn follow(&mut self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, eye: V3) {
-        let square = [(eye.x / STEP).floor() as i32, (eye.z / STEP).floor() as i32];
-        if self.near_at == Some(square) {
-            return;
-        }
-        self.near_at = Some(square);
-        let centre = [(square[0] as f32 + 0.5) * STEP, (square[1] as f32 + 0.5) * STEP];
-        let rect = [centre[0] - NEAR_FEET / 2.0, centre[1] - NEAR_FEET / 2.0, 1.0 / NEAR_FEET, 0.0];
-        queue.write_buffer(&self.near.rect, 0, bytemuck::cast_slice(&rect));
-        queue.write_buffer(&self.at, 0, bytemuck::cast_slice(&[rect, self.far_rect]));
-        self.draw(encoder, &self.near);
+    /// Another near target, and its ground bind group.
+    fn add_near(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let target = target(device, &self.rect_layout, NEAR_SIZE, "ground meshes near");
+        let at = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ground meshes at"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&at, 0, bytemuck::cast_slice(&[[f32::MAX, f32::MAX, 0.0, 0.0], self.far_rect]));
+        let ground = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ground meshes"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&target.view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.far.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: at.as_entire_binding() },
+            ],
+        });
+        self.nears.push(Near { target, square: None, at, ground });
     }
 
-    /// The near and far targets, for the ground's bind group.
-    pub(super) fn views(&self) -> [&wgpu::TextureView; 2] {
-        [&self.near.view, &self.far.view]
+    /// Give each of `eyes` (a view's each) the near target round its square: one already there, or
+    /// one no view needs any more drawn again there, or a new one.
+    pub(super) fn follow(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, eyes: &[V3]) {
+        let squares: Vec<[i32; 2]> = eyes.iter().map(|e| [(e.x / STEP).floor() as i32, (e.z / STEP).floor() as i32]).collect();
+        // No more targets than views: a seat that has gone gives its memory back.
+        self.nears.truncate(squares.len().max(1));
+        let wanted = |sq: Option<[i32; 2]>| sq.is_some_and(|sq| squares.contains(&sq));
+        self.view_near.clear();
+        for &square in &squares {
+            let n = match self.nears.iter().position(|n| n.square == Some(square)) {
+                Some(n) => n,
+                None => {
+                    let n = match self.nears.iter().position(|n| !wanted(n.square)) {
+                        Some(n) => n,
+                        None => {
+                            self.add_near(device, queue);
+                            self.nears.len() - 1
+                        }
+                    };
+                    self.nears[n].square = Some(square);
+                    let centre = [(square[0] as f32 + 0.5) * STEP, (square[1] as f32 + 0.5) * STEP];
+                    let rect = [centre[0] - NEAR_FEET / 2.0, centre[1] - NEAR_FEET / 2.0, 1.0 / NEAR_FEET, 0.0];
+                    queue.write_buffer(&self.nears[n].target.rect, 0, bytemuck::cast_slice(&rect));
+                    queue.write_buffer(&self.nears[n].at, 0, bytemuck::cast_slice(&[rect, self.far_rect]));
+                    self.draw(encoder, &self.nears[n].target);
+                    n
+                }
+            };
+            self.view_near.push(n);
+        }
+    }
+
+    /// The ground's group 2 for view `v`: its near target, the far one, and where they lie.
+    pub(super) fn bind(&self, v: usize) -> &wgpu::BindGroup {
+        &self.nears[self.view_near.get(v).copied().unwrap_or(0).min(self.nears.len() - 1)].ground
+    }
+
+    /// How many near targets there are, for the tests.
+    #[cfg(test)]
+    pub(super) fn near_targets(&self) -> usize {
+        self.nears.len()
     }
 
     fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &Target) {
@@ -329,5 +363,96 @@ impl GpuMeshes {
                 pass.draw(first..first + count, 0..1);
             }
         }
+    }
+}
+
+/// A target `size` texels square with all its mips, and its square's uniform for drawing into it.
+fn target(device: &wgpu::Device, rect_layout: &wgpu::BindGroupLayout, size: u32, label: &str) -> Target {
+    let levels = 32 - size.leading_zeros();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        mip_level_count: levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let level_views = (0..levels)
+        .map(|l| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: l,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let rect = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: rect_layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: rect.as_entire_binding() }],
+    });
+    Target { levels: level_views, view: texture.create_view(&Default::default()), rect, bind }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ground_mesh::Flat;
+    use crate::mat::v3;
+    use crate::pst::Texture;
+    use crate::splat::Pass;
+
+    #[test]
+    fn each_view_gets_a_near_target_and_views_in_one_square_share_it() {
+        let gpu = match super::super::Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let pass = Pass {
+            texture: 0,
+            scale: [1.0, 1.0],
+            angle: 0.0,
+            turn: (0.0, 1.0),
+            rgba: [128.0; 4],
+            blend: Some([0, 1, 0, 1]),
+            fixed: 128.0,
+            reads: (true, true),
+        };
+        let tri = Flat::new([[0.0, 0.0], [4000.0, 0.0], [0.0, 4000.0]], [[0.0; 2]; 3], [[128.0; 4]; 3], pass);
+        let m = GroundMeshes::of(vec![Texture { width: 2, height: 2, rgba: vec![128; 16] }], vec![tri]).unwrap();
+        let mut meshes = GpuMeshes::new(&gpu.device, &gpu.queue, &gpu.sampler, &m);
+        let mut follow = |eyes: &[V3]| {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            meshes.follow(&gpu.device, &gpu.queue, &mut encoder, eyes);
+            gpu.queue.submit([encoder.finish()]);
+            (meshes.near_targets(), meshes.view_near.clone())
+        };
+        let (a, b, c) = (v3(100.0, 0.0, 100.0), v3(110.0, 5.0, 120.0), v3(3000.0, 0.0, 3000.0));
+        // One view, one target, as before V89.
+        assert_eq!(follow(&[a]), (1, vec![0]));
+        // Two views in one square share it; apart, the second gets its own.
+        assert_eq!(follow(&[a, b]), (1, vec![0, 0]));
+        assert_eq!(follow(&[a, c]), (2, vec![0, 1]));
+        // Swapping seats swaps targets without drawing either again.
+        assert_eq!(follow(&[c, a]), (2, vec![1, 0]));
+        // Eight seats apart: eight targets; four of them gone, four.
+        let eight: Vec<V3> = (0..8).map(|k| v3(k as f32 * 500.0, 0.0, 0.0)).collect();
+        assert_eq!(follow(&eight).0, 8);
+        assert_eq!(follow(&eight[..4]).0, 4);
+        // A view that moves to a square no one else holds takes over a target no view needs.
+        let (n, at) = follow(&[eight[0], eight[1], eight[2], v3(-900.0, 0.0, 0.0)]);
+        assert_eq!((n, &at[..3]), (4, &[0, 1, 2][..]));
+        assert_eq!(at[3], 3);
     }
 }
