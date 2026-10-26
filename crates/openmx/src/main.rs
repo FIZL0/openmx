@@ -3422,6 +3422,22 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(since) = load_screen.since {
         println!("loading: built, {} frames drawn over {:.2} s", load_screen.frames, since.elapsed().as_secs_f32());
     }
+    // The bikes' particles (P74): the track's list, one manager a seat stepped off it, and the
+    // track's sheet — the plane's, which is the same sheet, where the plane has loaded it already.
+    let (bike_fx_list, soft_sheet) = match load_bike_fx(&archives, &stem) {
+        Ok((fx, sheet)) => {
+            let soft_sheet = soft_sheet.or_else(|| Some(sheet.clone()));
+            if plane_fx.is_none() && fx_sheet.is_none() {
+                fx_sheet = Some(sheet);
+            }
+            (Some(fx), soft_sheet)
+        }
+        Err(why) => {
+            println!("bike: no particles: {why}");
+            (None, soft_sheet)
+        }
+    };
+    let mut bike_fx: Vec<particles::PlaneFx> = Vec::new();
 
     // ---- the window and the pad ---------------------------------------------------------------
     // `--headless` opens neither: no window to show the frame in and no host pad to read, so every
@@ -5317,6 +5333,20 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let place = &mut world.place;
             fx.step_over(&plane_fx_frame(plane, binds), dt.0, &mut |at| plane_fx_ground(place, at));
         }
+        // The bikes' (P74): a frame for each seat, off its rider as the simulation left them. A seat
+        // with the plane up has no bike in the world: its emitters are off and what is in the air
+        // runs out.
+        if simulated && let Some(list) = &bike_fx_list {
+            bike_fx.resize_with(world.seats.len(), || list.clone());
+            let place = &mut world.place;
+            for ((seat, rig), fx) in world.seats.iter().zip(&rigs).zip(&mut bike_fx) {
+                let frame = match seat.garage.up {
+                    Kind::Bike => bike_fx_frame(fx, &seat.sim.rider, rig, &assets, place),
+                    _ => particles::PlaneFrame::default(),
+                };
+                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
+            }
+        }
         if simulated {
             traffic_time += f64::from(dt.0);
         }
@@ -6152,7 +6182,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
             let draw_at = Instant::now();
             let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, sprites: &gpu_sprites, light: &light };
-            let sprites = plane_fx.as_ref().map_or_else(Vec::new, |(fx, _)| plane_sprites(fx));
+            let mut sprites = plane_fx.as_ref().map_or_else(Vec::new, |(fx, _)| plane_sprites(fx));
+            sprites.extend(bike_fx.iter().flat_map(plane_sprites));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -6378,6 +6409,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let (Some((fx, _)), Some(sheet)) = (&plane_fx, &soft_sheet) {
                 tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
             }
+            // And the bikes' (P74), the same way.
+            if let Some(sheet) = &soft_sheet {
+                for fx in &bike_fx {
+                    tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
+                }
+            }
             // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
             if let (Some(art), Some(glows)) = (&portal_art, glows.get(v)) {
                 tris += game_render::glow::draw(target, camera, &art.textures, glows);
@@ -6503,6 +6540,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let (false, Some((fx, _))) = (bike_up, &plane_fx) {
                 let counts: Vec<String> = fx.counts().iter().map(|(name, n)| format!("{name} {n}")).collect();
                 println!("     particles: {}", counts.join(", "));
+            }
+            // The first rider's bike's (P74), the emitters with any in the air.
+            if let (true, Some(fx)) = (bike_up, bike_fx.first()) {
+                let counts: Vec<String> = fx.counts().iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect();
+                println!("     bike particles: {}", if counts.is_empty() { "none".to_string() } else { counts.join(", ") });
             }
             window_of_frames = (Instant::now(), 0, 0);
         }
@@ -7147,9 +7189,10 @@ fn plane_fx_frame(plane: &Plane, binds: &[(String, M4)]) -> particles::PlaneFram
         tires: plane.flight.as_ref().map_or_else(Vec::new, |f| {
             f.tires
                 .iter()
-                .map(|t| particles::TireFrame { ground: t.below, object: t.held, compression: t.compression.0, zone: t.surface })
+                .map(|t| particles::TireFrame { ground: t.below, object: t.held, compression: t.compression.0, zone: t.surface, ..Default::default() })
                 .collect()
         }),
+        ..Default::default()
     }
 }
 
@@ -7159,6 +7202,118 @@ fn plane_fx_ground(place: &mut impl sim_world::World, at: V3) -> Option<(f32, u8
     let p = Vf::new(at.x, at.y, at.z, 1.0);
     let (on, _) = place.ground(p);
     (on.y() > -1.0e5).then(|| (on.y(), place.surface(on)))
+}
+
+/// The bike's particles (P74): the track's emitter list (`tracks\<track>\mxparticles.dat`) and each
+/// `.emt` it names, out of the track's archives, and the track's particle sheet. Every seat is a
+/// player's, so every seat rides the player's list and not `mxaiparticles.dat`. Says what it found.
+fn load_bike_fx(archives: &[Res], track: &str) -> Result<(particles::PlaneFx, game_render::pst::Texture), String> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let list = read(particles::BIKE_PARTICLES).ok_or(format!("no {}", particles::BIKE_PARTICLES))?;
+    let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
+    let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
+    let texture = game_render::pst::Texture::parse(&texture)?;
+    let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
+    let fx = particles::PlaneFx::new(&biplane::emitters(&ini::text(&list)), atlas, read);
+    for e in &fx.entries {
+        println!("bike: particles: {} ({:?}) from {:?}", e.name, e.kind, e.emt.group);
+    }
+    for (name, why) in &fx.skipped {
+        println!("bike: particles: {name} ({why}) not ported");
+    }
+    Ok((fx, texture))
+}
+
+/// What the bike's particles read off one rider this frame (P74), as the original's manager reads
+/// the bike's snapshot: each entry's node where it is — the chassis' (the tires' particle nodes) or
+/// a part's (the exhaust pipe's), on the bike's place — the throttle, the clutch and the chassis'
+/// speed, the wreck, the two tires (front, rear: `AttachedToTire`'s 0 and 1) with their ground and
+/// object contacts, surface, spin and side force; while down, the wreck body's contacts and the
+/// ragdoll's collision spheres, each with the surface the ride's terrain query has under it.
+fn bike_fx_frame(
+    fx: &particles::PlaneFx,
+    rider: &Rider,
+    rig: &Rig,
+    assets: &Assets,
+    place: &mut impl sim_world::World,
+) -> particles::PlaneFrame {
+    let ride = &rider.ride;
+    let bike_at = match &rider.crash {
+        Some(crash) => chassis_wrecked(crash),
+        None => chassis_at(ride),
+    };
+    let chassis_node = |name: &str| -> Option<M4> {
+        rig.chassis.as_ref().and_then(|c| c.node(name)).or_else(|| {
+            let model = &assets.models.get(CHASSIS)?.model;
+            let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
+            Some(model.world(i))
+        })
+    };
+    let mut nodes: Vec<(String, M4)> = Vec::new();
+    for name in fx.entries.iter().filter_map(|e| e.node.as_deref()) {
+        if nodes.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        let part_node = || {
+            rig.parts.iter().find_map(|part| {
+                let model = &assets.models.get(part.model.as_str())?.model;
+                let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
+                Some(model.world(i).mul(chassis_node(&part.placement).unwrap_or(M4::IDENTITY)))
+            })
+        };
+        if let Some(m) = chassis_node(name).or_else(part_node) {
+            nodes.push((name.to_string(), m.mul(bike_at)));
+        }
+    }
+    let tire = |w: &game_sim::ride::Wheel| particles::TireFrame {
+        ground: w.w.ray_hit != 0,
+        object: w.w.swept_contact != 0,
+        zone: w.surface,
+        spinning: w.slip.spinning,
+        side: w.side_per_load.0,
+        ..Default::default()
+    };
+    let mut frame = particles::PlaneFrame {
+        nodes,
+        throttle: ride.held.gas.0,
+        airspeed: ride.chassis.speed.0,
+        clutch: ride.mv.clutch_in.0,
+        wrecked: rider.crash.is_some(),
+        vel: vector(ride.chassis.vel),
+        tires: vec![tire(&ride.front), tire(&ride.rear)],
+        ..Default::default()
+    };
+    if let Some(crash) = &rider.crash {
+        let record = &crash.bike.record;
+        frame.vel = vector(crash.bike.body.velocity);
+        let points: Vec<V3> = record.contacts.iter().map(|c| vector(c.point)).collect();
+        if record.on_ground {
+            frame.ground_contacts = points.clone();
+            frame.ground_zones = record.contacts.iter().map(|c| c.surface.clamp(0, 255) as u8).collect();
+        }
+        if record.on_object {
+            frame.object_contacts = points;
+        }
+    }
+    if let (Some(down), Some(kit)) = (&rider.ragdoll, &rider.ragdoll_kit) {
+        frame.constraints = down
+            .contacts
+            .iter()
+            .zip(&kit.spheres)
+            .map(|(c, sphere)| {
+                let at = vector(c.point);
+                let touching = c.ground || c.scene;
+                particles::ConstraintFrame {
+                    ground: c.ground,
+                    object: c.scene && !c.ground,
+                    at,
+                    vel: down.ragdoll.bones.get(sphere.bone).map_or(V3::default(), |b| vector(b.body.velocity)),
+                    zone: if touching { plane_fx_ground(place, at).map_or(0, |(_, z)| z) } else { 0 },
+                }
+            })
+            .collect();
+    }
+    frame
 }
 
 /// The plane's particles as the GPU draws them.

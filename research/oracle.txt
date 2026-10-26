@@ -5046,3 +5046,27 @@ stream_pause boot 0x001686b0 (stream, on, a2) +0x40 = on, IOP command 0x17 when 
 #   A state saved with the clutch slipping in another gear drove a braked rear into a spin at tick 1
 #   until these were seeded. The levers a state carries: rider +0x650 brake (+0x654 its rear copy),
 #   +0x658 gas, +0x65c clutch, +0x628/+0x62c the squared stick, +0x670/+0x674 the lean.
+# P74 — the bike's particles (journal 2026-10-25-p74-bike-particles). The list is the track's
+# mxparticles.dat (free09: 15 entries; mxaiparticles.dat is the same bytes), run by the manager
+# vehicle_fx_update above; its tire records point into the stunt-state snapshot (stunt_state_pack).
+bike_fx_wire          boot 0x0027adf0 points the bike manager's (+0xf64) tire records at the snapshot:
+#                                    per tire ground +0x914/+0x928, object +0x918/+0x92c, spinning
+#                                    +0x91c/+0x930, side load +0x870/+0x880, zone byte +0x910/+0x911;
+#                                    throttle +0x888, clutch +0x88c, speed +0x860, wreck +0x868
+vehicle_fx_spray_ctor boot 0x003d6710 a Spray entry (vtable 0x0045e7b0): SideForceScale 10, threshold 3,
+#                                    MinY 1, MaxY 2, ramp 0
+vehicle_fx_spray_init boot 0x003d67d0 reads SideForceScale, SideForceThreshold, Min/MaxYVelocity and the
+#                                    speed ramp, the emitter and its Zone1..16
+vehicle_fx_spray_zone boot 0x003d6a50 zone 0xff -> vt +0x1c (zone off), else the zone's group (as 0x003d7000)
+vehicle_fx_spray_update boot 0x003d6b50 (throttle 0 or clutch or not spinning) and |side| <= threshold:
+#                                    clock -= dt, rate = file x clock / 0.25, off at 0; else vx = -scale x
+#                                    side, noise x widened by |vx|/2, f = clamp(1 - (speed+1) ramp),
+#                                    y noise += f x MinY/MaxY, rate = file x (1 + f/2), clock = 0.25, on
+vehicle_fx_generic_zone boot 0x003d7000 the Generic/Exhaust entries' zone change, as the spray's
+vehicle_fx_pcc_init   boot 0x003d7830 ParticleCollisionConstraint: the hex sphere mask, the emitter
+vehicle_fx_pcc_update boot 0x003d7a30 each masked ragdoll sphere touching: emit from contact - velocity dt,
+#                                    skipped in a zone-off zone; Rider Dust/Chunks 0x1fc, Foot Dust 0x3
+vehicle_fx_entry_on   boot 0x003d86d0 flag |= 1 (live); the emitter on (vt +0x98) unless zone-off (flag 2)
+# The Generic/Exhaust/Spray vtables sit at 0x0045e630..0x0045e780. An emitter switched on emits
+# nothing that tick: the manager runs before the emitter, which only takes its position (S109's
+# animandpump capture: exhaust on at 2001, rear sprays at 2006, each emitting from the row after).
