@@ -31,7 +31,9 @@
 //!
 //! After the passes the original draws the scene's `Type=TerrainScreenSpace` models into the same
 //! target — the roads, ruts, runways and dirt loops, each flat mesh with its own `.psm` — and those
-//! are [`Splat::meshes`] ([`crate::ground_mesh`]).
+//! are [`Splat::meshes`] ([`crate::ground_mesh`]) — all but free06's erosion bands, which lay the
+//! program's own erosion layer again and which the original shows no trace of (V77,
+//! [`crate::ground_mesh::repeats_a_layer`]).
 //!
 //! None of this is 1:1: textures are sampled nearest, without the original's mip chain; the
 //! direction the `Angle` turns is chosen by eye; the screen-space target's own resolution and the
@@ -100,7 +102,9 @@ impl Splat {
     pub fn load(archives: &[Res], track: &str, extent: (f32, f32)) -> Option<Splat> {
         let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
         let psm = read("terrainscreenspacemesh.psm")?;
+        let mut layers: Vec<String> = Vec::new();
         let mut splat = Splat::parse(&ini::text(&psm), |name| {
+            layers.push(name.to_string());
             Texture::parse(&read(&format!("{name}.pst"))?).ok()
         });
         let tiles: Option<Vec<Texture>> = (1..=16)
@@ -108,7 +112,7 @@ impl Splat {
             .collect();
         splat.shadow = tiles.map(|t| Shadow::assemble(t, 4, extent));
         let scene = read(&format!("{track}.scn")).map(|t| crate::scene::Scene::parse(&ini::text(&t)));
-        splat.meshes = scene.and_then(|s| GroundMeshes::load(archives, &s.ground_meshes));
+        splat.meshes = scene.and_then(|s| GroundMeshes::load(archives, &drawn_meshes(archives, s.ground_meshes, &layers)));
         (!splat.passes.is_empty()).then_some(splat)
     }
 
@@ -249,6 +253,27 @@ pub fn blend(src: [f32; 4], dst: [f32; 4], inputs: Option<[u8; 4]>, fixed: f32) 
     }
     out[3] = src[3];
     out
+}
+
+/// The scene's screen-space meshes the ground is painted with: all of them but those that lay one of
+/// the program's `layers` again ([`crate::ground_mesh::repeats_a_layer`]), each model asked once.
+fn drawn_meshes(archives: &[Res], placements: Vec<crate::scene::Placement>, layers: &[String]) -> Vec<crate::scene::Placement> {
+    let mut asked: Vec<(String, bool)> = Vec::new();
+    placements
+        .into_iter()
+        .filter(|p| {
+            let key = p.model.to_ascii_lowercase();
+            let repeats = match asked.iter().find(|(m, _)| *m == key) {
+                Some(&(_, r)) => r,
+                None => {
+                    let r = crate::ground_mesh::repeats_a_layer(archives, &key, layers);
+                    asked.push((key, r));
+                    r
+                }
+            };
+            !repeats
+        })
+        .collect()
 }
 
 impl Shadow {

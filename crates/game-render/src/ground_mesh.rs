@@ -73,6 +73,31 @@ pub fn is_light_map(model: &str) -> bool {
         .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Whether a scene model's mesh lays one of the paint program's own layers again: a material of it
+/// textured with one of `layers`, the textures `terrainscreenspacemesh.psm` names (V77).
+///
+/// Only `Free06_Erode` does, on every freeride track of the disc: dirt-cliff bands over free06's
+/// slopes and some fifteen feet onto the flat at each foot, textured with `free06_erode`, which the
+/// program's fifth pass already lays through its own mask. The original shows no trace of the mesh:
+/// next to it the flat at a band's foot is as light as the flat beyond, where the port drew a slab
+/// at the erosion texture's own dark brown, and up a cliff the streaks run down the slope the way
+/// the program's world-turned layer runs, not along the band the way the mesh's texture would. So
+/// it is left out.
+pub fn repeats_a_layer(archives: &[Res], model: &str, layers: &[String]) -> bool {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+    let Some(m) = read(&format!("{}.psg", model.to_ascii_lowercase())).and_then(|d| Model::parse(&d).ok()) else {
+        return false;
+    };
+    m.materials.iter().any(|name| {
+        read(&format!("{}.psm", name.to_ascii_lowercase())).is_some_and(|psm| {
+            crate::ini::parse(&crate::ini::text(&psm))
+                .iter()
+                .filter_map(|s| s.get("TextureMap_1"))
+                .any(|t| layers.iter().any(|l| l.eq_ignore_ascii_case(t.trim())))
+        })
+    })
+}
+
 impl GroundMeshes {
     /// The screen-space meshes `placements` name, read from `archives`: each model's `.psg`, its
     /// materials' `.psm` and their textures. A model, material or texture that is not there is left
