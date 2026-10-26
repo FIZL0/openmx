@@ -1337,3 +1337,180 @@ fn the_shootoff_sounds_are_the_discs() {
     assert!((cannon.seconds() - 8.0).abs() < 0.05, "{}", cannon.seconds());
     assert!((rumble.seconds() - 1.5).abs() < 0.05, "{}", rumble.seconds());
 }
+
+/// The disc's `[biplaneWreck]` clips' lengths, `Vehicle\mchn_wreck1` to `5`, in seconds.
+const WRECK_SECONDS: [f32; 5] = [1.0006, 0.8927, 0.8902, 1.1784, 1.1162];
+
+/// `[biplaneWreck]` with tones as long as the disc's: heard from 30 ft, gone at 150, from impulse 5,
+/// full at 20.
+fn plane_wreck() -> audio::MachineWreck {
+    audio::MachineWreck {
+        list: List { sounds: WRECK_SECONDS.iter().map(|&s| (tone(8000.0, s), false)).collect() },
+        near: 30.0,
+        far: 150.0,
+        min_impulse: 5.0,
+        max_impulse: 20.0,
+    }
+}
+
+/// The original's biplane, ridden off `biplane.p2m2` (P164's capture): the ticks the plane was wrecked,
+/// from the crash to the put-back. Twice: a nose-in, and a cartwheel.
+const PLANE_WRECKED: [(u32, u32); 2] = [(11664, 11746), (12498, 12648)];
+
+/// Every captured tick, wrecked, whose collision record touched with a shock peak (x, y, z); the rest
+/// of the wrecked and touching ticks had none.
+const PLANE_HITS: [(u32, [f32; 3]); 15] = [
+    (11664, [2.715177059173584, 13.51820182800293, -8.048867225646973]),
+    (11665, [5.882635593414307, 17.36620330810547, -8.01076889038086]),
+    (11670, [4.043940544128418, 13.015371322631836, -7.335544586181641]),
+    (11740, [0.0, 14.497215270996094, -0.011274831369519234]),
+    (12498, [0.2400200515985489, 9.219368934631348, -0.2956899404525757]),
+    (12499, [0.2400200515985489, 9.219368934631348, -0.2956899404525757]),
+    (12500, [-8.65113353729248, 0.0, 8.745697975158691]),
+    (12508, [-6.099507808685303, 0.0, 5.394533634185791]),
+    (12509, [-3.86954927444458, 0.0, 3.3627052307128906]),
+    (12511, [-4.465231418609619, -7.362081728750844e-14, 3.7496721744537354]),
+    (12521, [-1.9541597366333008, 9.98044204711914, 1.3886011838912964]),
+    (12526, [-3.065109968185425, 0.0, 2.0929362773895264]),
+    (12535, [-0.013712122105062008, 6.7844929695129395, 0.007083669770509005]),
+    (12548, [0.9610393643379211, 22.42465591430664, -0.33531492948532104]),
+    (12555, [0.13668060302734375, 5.186065673828125, -0.03312097117304802]),
+];
+
+/// The clanks the original started (the tick its sound's level was set) and their levels. The rest of
+/// the hits came while one still played, or under `MinImpulse`.
+const PLANE_CLANKS: [(u32, i32); 4] = [(11664, 79), (11740, 72), (12498, 46), (12548, 100)];
+
+/// The plane's landing in the same capture: not wrecked, and its peak a hard touchdown's.
+const PLANE_LANDING: (u32, [f32; 3]) = (12465, [0.8841849565505981, 10.293110847473145, -7.551541805267334]);
+
+/// What one captured tick hands the sound, in the plane at `at`.
+fn plane_tick(frame: u32, at: [f32; 3]) -> audio::SeatFrame {
+    let wrecked = PLANE_WRECKED.iter().any(|&(a, b)| (a..=b).contains(&frame));
+    let hit = PLANE_HITS.iter().find(|h| h.0 == frame).map(|h| h.1);
+    audio::SeatFrame {
+        plane: Some((0.0, at)),
+        crash: audio::PlaneCrash { wrecked, touching: hit.is_some(), impulse: hit.map_or(0.0, audio::length) },
+        ..audio::SeatFrame::default()
+    }
+}
+
+/// Replays the capture's ticks through the sound, the mixer run a tick's worth after each, and
+/// returns each clank started: its tick, its level and which of the list it was.
+fn replay_plane(s: &mut audio::Sound, frames: impl Fn(u32) -> Vec<audio::SeatFrame>) -> Vec<(u32, usize, i32, usize)> {
+    let mut started = Vec::new();
+    let mut last = vec![None; s.seats.len()];
+    let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+    for frame in 11600..12700 {
+        s.frame(&frames(frame), 1.0 / 30.0);
+        let mut m = s.mixer.lock().unwrap();
+        for (seat, ss) in s.seats.iter().enumerate() {
+            let id = ss.clank.voice();
+            if id.is_some() && id != last[seat] {
+                let id = id.unwrap();
+                let clip = m.clip_of(id).unwrap();
+                let which = s.plane_wreck.list.sounds.iter().position(|c| Arc::ptr_eq(&c.0, &clip)).unwrap();
+                let level = m.gain_of(id).unwrap();
+                assert_eq!(level.to_bits(), ((level * 100.0).round() / 100.0).to_bits(), "a whole percent at {frame}");
+                started.push((seat, frame, (level * 100.0).round() as i32, which));
+            }
+            last[seat] = id;
+        }
+        m.render(&mut out);
+    }
+    started.into_iter().map(|(seat, frame, level, which)| (frame, which, level, seat)).collect()
+}
+
+fn plane_sound(seats: u64) -> audio::Sound {
+    let mut s = audio::Sound::new(Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1)))));
+    s.plane_wreck = plane_wreck();
+    for i in 0..seats {
+        s.seats.push(audio::SeatSound::new(Arc::new(tone_bike()), i));
+    }
+    s
+}
+
+/// **A replayed biplane crash clanks as the original's**: the capture's two wrecks, every tick, start
+/// a clank on each wreck tick and on the two later hits the original clanked on, at the original's
+/// level, and on no other — the hits while one plays (and its tail) and the ones under `MinImpulse`
+/// are quiet. No clip twice in a row.
+#[test]
+fn a_replayed_biplane_crash_clanks_as_the_original() {
+    for seed in 0..32 {
+        let mut s = plane_sound(1);
+        s.seats[0] = audio::SeatSound::new(Arc::new(tone_bike()), seed);
+        let started = replay_plane(&mut s, |f| vec![plane_tick(f, [100.0, 0.0, 100.0])]);
+        let got: Vec<(u32, i32)> = started.iter().map(|c| (c.0, c.2)).collect();
+        assert_eq!(got, PLANE_CLANKS, "seed {seed}");
+        assert!(started.windows(2).all(|w| w[0].1 != w[1].1), "seed {seed}: the same clip twice {started:?}");
+    }
+    // The original's levels by its own rule, to the percent.
+    for (frame, level) in PLANE_CLANKS {
+        let hit = PLANE_HITS.iter().find(|h| h.0 == frame).unwrap().1;
+        assert_eq!(audio::wreck_level(audio::length(hit), 20.0), level, "at {frame}");
+    }
+}
+
+/// **A plain landing plays none**: the capture's landing, a hard touchdown never wrecked, is quiet
+/// even touching; and so is a wreck with nothing touched, or touched under `MinImpulse`.
+#[test]
+fn a_plain_landing_plays_no_clank() {
+    let mut s = plane_sound(1);
+    let landing = |touching: bool, impulse: f32, wrecked: bool| audio::SeatFrame {
+        plane: Some((0.0, [0.0; 3])),
+        crash: audio::PlaneCrash { wrecked, touching, impulse },
+        ..audio::SeatFrame::default()
+    };
+    let hard = audio::length(PLANE_LANDING.1);
+    assert!(hard > 5.0, "{} at {}", hard, PLANE_LANDING.0);
+    for f in [landing(true, hard, false), landing(true, 40.0, false), landing(false, 40.0, true), landing(true, 4.9, true)] {
+        s.frame(&[f], 1.0 / 30.0);
+        assert_eq!(s.seats[0].clank.voice(), None, "{:?}", f.crash);
+    }
+    assert_eq!(s.mixer.lock().unwrap().voices(), 0);
+    // Out of the plane, a bike's wreck word is no plane crash.
+    let bike = audio::SeatFrame { crash: audio::PlaneCrash { wrecked: true, touching: true, impulse: 40.0 }, ..Default::default() };
+    s.frame(&[bike], 1.0 / 30.0);
+    assert_eq!(s.seats[0].clank.voice(), None);
+}
+
+/// **In a split (and online, where every seat is one of these), each plane has its own**: the crashing
+/// seat clanks on its ticks, the other, flying on, never; a pause hushes it.
+#[test]
+fn a_split_clanks_for_the_plane_crashed() {
+    let mut s = plane_sound(2);
+    let started = replay_plane(&mut s, |f| {
+        let other = audio::SeatFrame { plane: Some((0.0, [3000.0, 0.0, 0.0])), crash: audio::PlaneCrash::default(), ..Default::default() };
+        vec![plane_tick(f, [100.0, 0.0, 100.0]), other]
+    });
+    assert!(started.iter().all(|c| c.3 == 0), "{started:?}");
+    assert_eq!(started.iter().map(|c| (c.0, c.2)).collect::<Vec<_>>(), PLANE_CLANKS);
+    // Swapped: the second seat's crash, the first one's peace.
+    let mut s = plane_sound(2);
+    let started = replay_plane(&mut s, |f| vec![audio::SeatFrame { plane: Some((0.0, [0.0; 3])), ..Default::default() }, plane_tick(f, [0.0; 3])]);
+    assert!(started.iter().all(|c| c.3 == 1) && started.len() == PLANE_CLANKS.len(), "{started:?}");
+    // A clank going, then the pause: stopped, and the next hit after it clanks again.
+    let mut s = plane_sound(1);
+    s.frame(&[plane_tick(11664, [0.0; 3])], 1.0 / 30.0);
+    let first = s.seats[0].clank.voice().expect("the crash's clank");
+    s.quiet();
+    assert!(!s.mixer.lock().unwrap().playing(first));
+    s.frame(&[plane_tick(11665, [0.0; 3])], 1.0 / 30.0);
+    assert!(s.seats[0].clank.voice().is_some_and(|id| id != first));
+}
+
+/// The disc's `[biplaneWreck]`: five mono clips, once each, heard from 30 ft to 150, from impulse 5,
+/// full at 20; their lengths the tones' above.
+#[test]
+fn the_plane_crash_sounds_are_the_discs() {
+    let Some(d) = disc() else { return };
+    let mut lib = audio::Library::open(d).unwrap();
+    let w = audio::Reading { lib: &mut lib }.plane_wreck("machine.res");
+    assert_eq!((w.near, w.far, w.min_impulse, w.max_impulse), (30.0, 150.0, 5.0, 20.0));
+    assert_eq!(w.list.sounds.len(), 5);
+    for ((clip, looping), seconds) in w.list.sounds.iter().zip(WRECK_SECONDS) {
+        assert!(!looping);
+        assert_eq!((clip.rate, clip.channels), (22050, 1));
+        assert!((clip.seconds() - seconds).abs() < 0.001, "{} against {seconds}", clip.seconds());
+    }
+}

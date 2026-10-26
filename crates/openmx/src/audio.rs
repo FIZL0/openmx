@@ -2225,6 +2225,118 @@ impl EdgeSound {
     }
 }
 
+// --- the plane's crash (P164) -----------------------------------------------------------------------
+
+/// A machine's `[<prefix>Wreck]` in `machine.aud` (the plane's is `[biplaneWreck]`, `Vehicle\mchn_wreck1`
+/// to `5`): the list, the distances it fades over, and the impulses its level runs between.
+#[derive(Clone, Debug, Default)]
+pub struct MachineWreck {
+    pub list: List,
+    pub near: f32,
+    pub far: f32,
+    pub min_impulse: f32,
+    pub max_impulse: f32,
+}
+
+impl MachineWreck {
+    /// The loader's defaults where a key is missing: distances 1 and 10⁹, impulses 0 and 1.
+    pub fn read(machine: &str, prefix: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> MachineWreck {
+        let s = ini::parse(machine);
+        let Some(w) = section(&s, &format!("{prefix}Wreck")) else { return MachineWreck::default() };
+        let n = |k: &str, d: f32| w.number(k).unwrap_or(d);
+        MachineWreck {
+            list: List::read(Some(w), lib),
+            near: n("MinDistance", 1.0),
+            far: n("MaxDistance", 1.0e9),
+            min_impulse: n("MinImpulse", 0.0),
+            max_impulse: n("MaxImpulse", 1.0),
+        }
+    }
+}
+
+/// What the plane's wreck emitter reads in a tick, after the tick.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlaneCrash {
+    /// The wreck word is set (crashed, or thrown back off the map's edge).
+    pub wrecked: bool,
+    /// The collision object's record touched something this tick.
+    pub touching: bool,
+    /// The length of the body's shock peak: the largest velocity change the contacts gave it this
+    /// tick, per axis.
+    pub impulse: f32,
+}
+
+/// A vector's length as the emitter takes it: `sqrt(z² + y² + x²)`, in that order.
+pub fn length(v: [f32; 3]) -> f32 {
+    (v[2] * v[2] + v[1] * v[1] + v[0] * v[0]).sqrt()
+}
+
+/// The clank's level, `0..=100`, at `impulse`: its share of `MaxImpulse`, cut to a whole percent.
+pub fn wreck_level(impulse: f32, max_impulse: f32) -> i32 {
+    ((impulse / max_impulse * 100.0) as i32).clamp(0, 100)
+}
+
+/// **One plane's wreck clank**, the original's wreck emitter (the bike's `[Wreck]` one, P144) on the
+/// plane's wreck word, its collision record and its body's shock peak. Each tick, after the
+/// simulation: wrecked, touching, nothing of its own still playing, and the impulse at least
+/// `MinImpulse` — a no-repeat pick of the list at [`wreck_level`], placed on the plane and following it.
+/// So the crash's own contact starts one on the wreck tick, the tumble's later hits more once each
+/// has ended, and a landing, never wrecked, none.
+///
+/// "Ended" is the streamed voice's state on the sound chip, which trails the clip: a 0.89 s clank still
+/// read as playing 1.23 s after it started and was over by 1.67 s, so the emitter stays busy
+/// [`WRECK_TAIL`] past the clip's end.
+#[derive(Debug, Default)]
+pub struct WreckClank {
+    voice: Option<VoiceId>,
+    last: Option<i32>,
+    /// Seconds of the tail left.
+    tail: f32,
+}
+
+/// How long the emitter still reads busy after its clank ended. The capture bounds it to more than
+/// 0.34 s and at most 0.78 s after its 0.89 s clip; the pick here is not the original's, and a tail
+/// that fits the longest clip (1.18 s) in that window too is at most 0.43 s.
+pub const WRECK_TAIL: f32 = 0.4;
+
+impl WreckClank {
+    /// One tick, `dt` long. The voice started, if one was.
+    pub fn tick(&mut self, m: &mut Mixer, w: &MachineWreck, f: &PlaneCrash, at: [f32; 3], dt: f32, dice: &mut Dice) -> Option<VoiceId> {
+        let playing = self.voice.filter(|&id| m.playing(id));
+        if let Some(id) = playing {
+            let gain = m.gain_of(id).unwrap_or(0.0);
+            m.set(id, gain, 1.0, Some(at));
+        } else if self.voice.is_some() {
+            self.tail = WRECK_TAIL;
+        } else {
+            self.tail = (self.tail - dt).max(0.0);
+        }
+        self.voice = playing;
+        let busy = playing.is_some() || self.tail > 0.0;
+        if !(f.wrecked && f.touching) || busy || f.impulse < w.min_impulse {
+            return None;
+        }
+        let mut last = self.last.unwrap_or(-1);
+        let (clip, looping) = w.list.pick(dice, &mut last)?;
+        self.last = Some(last);
+        let gain = wreck_level(f.impulse, w.max_impulse) as f32 / 100.0;
+        let id = m.play(clip, Play { gain, looping, at: Some(at), near: w.near, far: w.far, ..Play::default() });
+        self.voice = Some(id);
+        Some(id)
+    }
+
+    /// The clank's voice while it plays.
+    pub fn voice(&self) -> Option<VoiceId> {
+        self.voice
+    }
+
+    /// Every voice was stopped.
+    pub fn hushed(&mut self) {
+        self.voice = None;
+        self.tail = 0.0;
+    }
+}
+
 // --- the shell's sound ------------------------------------------------------------------------------
 
 /// What one seat hands the sound each frame.
@@ -2237,6 +2349,8 @@ pub struct SeatFrame {
     pub landed_trick: bool,
     /// In the plane, and its engine note `0..1`, where it is.
     pub plane: Option<(f32, [f32; 3])>,
+    /// What the plane's wreck clank reads (P164), while in the plane.
+    pub crash: PlaneCrash,
     /// What the shootoff's sound reads (P85).
     pub edge: EdgeFrame,
 }
@@ -2246,6 +2360,7 @@ pub struct SeatSound {
     pub bike: Arc<BikeSounds>,
     pub engine: Engine,
     plane: PlaneNote,
+    pub clank: WreckClank,
     last: [i32; 4],
     was_grounded: bool,
     dice: Dice,
@@ -2258,6 +2373,7 @@ impl SeatSound {
             bike,
             engine: Engine::new(seed),
             plane: PlaneNote::default(),
+            clank: WreckClank::default(),
             last: [-1; 4],
             was_grounded: true,
             dice: Dice::new(seed.wrapping_mul(31).wrapping_add(7)),
@@ -2274,6 +2390,8 @@ pub struct Sound {
     pub rider: RiderSounds,
     pub world: WorldSounds,
     pub plane: LoopEngine,
+    /// `machine.aud`'s `[biplaneWreck]` (P164).
+    pub plane_wreck: MachineWreck,
     pub shootoff: Shootoff,
     started: bool,
     world_voices: Vec<VoiceId>,
@@ -2289,6 +2407,7 @@ impl Sound {
             rider: RiderSounds::default(),
             world: WorldSounds::default(),
             plane: LoopEngine::default(),
+            plane_wreck: MachineWreck::default(),
             shootoff: Shootoff::default(),
             started: false,
             world_voices: Vec::new(),
@@ -2330,6 +2449,7 @@ impl Sound {
                 s.engine.silence(m);
                 s.edge.stop_rumble(m);
                 s.plane.update(m, &self.plane, note, at);
+                s.clank.tick(m, &self.plane_wreck, &f.crash, at, dt, &mut s.dice);
                 continue;
             }
             s.edge.tick(m, &self.shootoff, &f.edge);
@@ -2384,6 +2504,9 @@ impl Sound {
         if let Ok(mut m) = self.mixer.lock() {
             s.engine.silence(&mut m);
             s.plane.silence(&mut m);
+            if let Some(id) = s.clank.voice() {
+                m.stop(id);
+            }
         }
     }
 
@@ -2397,6 +2520,7 @@ impl Sound {
         for s in &mut self.seats {
             s.engine = Engine::new(s.dice.below(u32::MAX) as u64);
             s.plane = PlaneNote::default();
+            s.clank.hushed();
             // A pause in a cannonball must not boom again on the way out: the rider's reasons stay.
             s.edge.hushed();
         }
@@ -2457,6 +2581,13 @@ impl Reading<'_> {
         let cars = self.text(res, "aud\\carengine.aud");
         let lib = &mut *self.lib;
         LoopEngine::read(&cars, "biplane", &mut |n| lib.clip(n))
+    }
+
+    /// The plane's wreck clank (P164): `machine.aud`'s `[biplaneWreck]` in the machines' archive.
+    pub fn plane_wreck(&mut self, res: &str) -> MachineWreck {
+        let text = self.text(res, "aud\\machine.aud");
+        let lib = &mut *self.lib;
+        MachineWreck::read(&text, "biplane", &mut |n| lib.clip(n))
     }
 
     /// `track` is the track's name (`free10`): its `.aud` is in `tracks\free10.res`, the race's events
@@ -2744,6 +2875,7 @@ impl Sound {
             sound.rider = read.rider(rider);
         }
         sound.plane = read.machines(machines);
+        sound.plane_wreck = read.plane_wreck(machines);
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));
         Ok(sound)

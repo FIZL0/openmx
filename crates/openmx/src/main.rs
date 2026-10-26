@@ -7423,6 +7423,15 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::Seat
         }
         _ => None,
     };
+    // The plane's wreck clank (P164): its wreck word, its collision record and its body's shock peak.
+    let crash = match (seat.garage.up, seat.garage.plane.as_ref().and_then(|p| p.flight.as_ref())) {
+        (Kind::Biplane, Some(f)) => audio::PlaneCrash {
+            wrecked: f.crash.reason != 0,
+            touching: f.record.touching,
+            impulse: audio::length([f.body.shock_peak.x(), f.body.shock_peak.y(), f.body.shock_peak.z()]),
+        },
+        _ => audio::PlaneCrash::default(),
+    };
     audio::SeatFrame {
         hands: audio::Hands {
             grounded: r.air.on_ground,
@@ -7437,6 +7446,7 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::Seat
         wreck: seat.said.wreck.map(|w| w.0 as i32),
         landed_trick: seat.said.landed.is_some(),
         plane,
+        crash,
         edge,
     }
 }

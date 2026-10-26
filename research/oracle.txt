@@ -5527,3 +5527,28 @@ node_count             boot 0x001b3420 1 + a node's descendants: what a hierarch
 #   nprobe3/4/6/7 (research/s138_nose.py, idle pad): thrown up and pitched forward at (4642.5, 3650):
 #          62 deg at 30/s and 66 at 44/s down ride out (g.y 26.6 / 42.7), 70.06 -> 69.86 rides out,
 #          74.95 -> 75.03 reason 1 on touchdown. States 2791, 2819, 2790, 2787.
+# ---------------------------------------------------------------------------------------------------
+# P164 — the plane's crash sound. Journal: research/journal/2026-10-26-p164-plane-crash-sound.
+# biplane_audio's +0x678 is the wreck emitter, not biplaneTireParams (the line above has it wrong): ctor
+# 0x003dc490 (vtable 0x0045eb40), machine_wreck_load with "biplane" -> machine.aud [biplaneWreck]
+# (format 0x448118 "%sWreck"; Streaming, mono, Sound1..5 = Vehicle\mchn_wreck1..5, MinDistance 30 ->
+# +0x88, MaxDistance 150 -> +0x8c, MinImpulse 5 +0x228, MaxImpulse 20 +0x22c; defaults 1, 1e9, 0, 1).
+# Registered on the sound manager (0x001043f0), not among the plane's children. Its gates: +0x200 =
+# &plane+0x3b0 (the wreck word), +0x204 = &(*(plane+0x170))+0x40 (the collision record touched);
+# 0x003dcb80 sets +0x224 = &body(+0x160)+0xb0, the body's shock peak (cleared in preforce). The frame
+# is bike_wreck_clank's: |peak| = sqrt(z^2+y^2+x^2), pick int(n*rand()*4.656613e-10) with +1 mod n
+# against +0x220 (init -1), level clamp(int(|peak|/20*100), 0, 100) set at sound +0x3c, then
+# 0x003dcaa0 starts it placed on the body (position and velocity pointers). "Idle" is vt +0x90
+# (0x001b6440): the max of the attached sounds' vt +0x20 (0x001666e0: handle +0x34, -1 = none, else
+# the SPU voice state 0x0019d770 from the stream manager *(0x00468220)+0xc0). The handle stays set
+# after the clip ends (the capture's +0x34 never went back to -1).
+# Capture (context/capture/p164, git-ignored; journal capture/crash-sound.toml, play_with_video.sh):
+# biplane.p2m2 played in copy 3, frames 10971..12688. Wrecks (reason 1) at 11664 and 12498, put back
+# 11747 and 12649. Clanks (sound +0x3c set) 11664 level 79 (peak 15.97, Sound1), 11740 72 (14.50,
+# Sound5), 12498 46 (9.23, Sound3), 12548 100 (22.45, Sound2). Gated hits at or over 5 that stayed
+# quiet, a clank still busy: 11665 11670 12499 12500 12508 12509 12511 12521 12535 12555. 12535 is 1.233
+# s after 12498's 0.89 s Sound3 began: the voice state trails the clip by more than 0.34 s, and by
+# 12548 (1.667 s) it was idle. The landing at 12465 (reason 0, record untouched, peak 12.8) is quiet.
+# The video's audio, matched against the five clips: Sound1 22.008 s, Sound5 24.542, Sound3 49.836,
+# Sound2 51.502 — the ticks' spacing (76, 834, 50) to a few ms, and no other clank.
+# Clip lengths (22050 Hz): 1.0006, 0.8927, 0.8902, 1.1784, 1.1162 s.

@@ -335,6 +335,45 @@ fn a_plane_flown_into_the_ground_crashes() {
     assert_eq!(f.crash.reason, CRASHED, "the plane did not crash");
 }
 
+/// **The plane's crash is heard** (P164): what the shell's wreck clank reads — the wreck word, the
+/// collision record touching and the body's shock peak — passes its gate (the peak at least
+/// `[biplaneWreck]`'s `MinImpulse` of 5) within a second of the crash test wrecking a plane flown
+/// into the ground, and never before it. Not on the wreck tick itself, as the original's nose-in
+/// was: dived in at 45°, the tires take the hit the tick before (a peak of 91) and the collision
+/// object, touching the next tick, adds no impulse until the tumble's first bounce.
+#[test]
+fn a_plane_crash_is_heard() {
+    let Some((_, f, _, _)) = the_plane() else { return };
+    let tables = game_sim::ride::Tables::build();
+    let mut f = f;
+    let mut ground = Flat::default();
+    f.attitude.flown = true;
+    f.place(Vf::new(0.0, 30.0, 0.0, 1.0), Vf::new(0.0, -1.0, 1.0, 0.0), &tables.acos);
+    f.body.velocity = Vf::new(0.0, -80.0, 80.0, 1.0);
+    let dt = F(1.0 / 30.0);
+    let pad = game_sim::biplane::Pad::default();
+    let peak = |f: &Flight| {
+        let p = f.body.shock_peak;
+        (p.z() * p.z() + p.y() * p.y() + p.x() * p.x()).sqrt()
+    };
+    let mut wrecked = None;
+    for tick in 0..90 {
+        f.frame(dt, pad, &mut ground, &tables);
+        if f.crash.reason == 0 {
+            assert!(wrecked.is_none(), "tick {tick}: put back before it was heard");
+            continue;
+        }
+        assert_eq!(f.crash.reason, CRASHED, "tick {tick}");
+        let at = *wrecked.get_or_insert(tick);
+        if f.record.touching && peak(&f) >= 5.0 {
+            println!("wrecked at tick {at}, heard at {tick}: a shock peak of {}", peak(&f));
+            assert!(tick - at < 30, "first heard {} ticks after the wreck", tick - at);
+            return;
+        }
+    }
+    panic!("the plane's crash was never heard (wrecked at {wrecked:?})");
+}
+
 /// **On its wheels, the collision object is clear of the ground**: a plane at rest and then taking
 /// off at full throttle over flat ground rides its tires, and its rays touch nothing — so the
 /// take-off of `tests/flight.rs` still leaves the ground, with the collision object on.
