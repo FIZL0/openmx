@@ -5311,6 +5311,23 @@ path_car_turn         boot 0x001dd8c0 (a0 out, a1 car) vt+0xc0: vadd.xyz(cross(c
 #   (0x00426d70). Then +0x170 = own point velocity - +0x1c0, +0x180 = chassis+0x260 - +0x1b0, +0x190
 #   = unrotate(chassis node, +0x180) (0x001b30e0), +0x1a0 = 1. Nothing between the distributor and it
 #   clears +0x1f4 (only wheel_clear does): a wheel whose terrain ray wins still subtracts the car.
+# V82 — the path cars' wheels: crates/game-render/src/toy.rs (Wheels), proved in
+# crates/game-render/tests/path_car_wheels.rs on s89-along (journal *-v82-path-car-wheels).
+#   the init (vt+0xc4, 0x001147c0) looks up "TireFrontL" "TireFrontR" "TireBackL" "TireBackR" "TireMidL"
+#   "TireMidR" (strings 0x426190..0x4261e0) in the model's tree (0x001b37b0, depth first, strcasecmp
+#   0x00410c50) and stops at the first missing: count at car+0x4f0, node pointers at *(car+0x570).
+#   car+0x548 = 1 / the first wheel node's box half height (0x001b3f50), else 1.0; +0x550 spin = 0;
+#   +0x554 steer; +0x564 its filter (HeadingFilter's copy); +0x4d8 SteerFrontTires (key 0x434270,
+#   default 1, the .toy reader 0x00289710); +0x4e4 the first update's flag.
+#   path_car_update, when dt > 0 and the count > 0: step = +0x460 point - +0x450 last; spin -= +0x548 *
+#   sqrt.s(z*z + x*x); wrap: a - 2pi * (int)(a * 0.15915494), then one more 2pi either side of +-pi.
+#   With the steer flag: target = clamp(20 * (cross(+0x490 last heading, +0x480 heading)).y,
+#   +-0.52359873); steer = fresh ? target : (1 - f) target + f steer; +0x490 = +0x480. Wheel k < 2 of a
+#   steering car: 0x00149aa0(steer, spin) -> forward (sin s cos a, sin a, cos s cos a), up (-sin s sin a,
+#   cos a, -cos s sin a); the rest a sine table (0x0046a7f0, scale at 0x0046a698): forward (0, sin a,
+#   cos a), up (0, cos a, -sin a); basis 0x001b1d70 writes the node's local rows, its position kept.
+#   s89-along: dump trucks 4 wheels, +0x548 0.15878, filter 0.9; scraper fronts 2, steering;
+#   scraper backs 2, SteerFrontTires 0; the train's cars 0 (nothing on them turns).
 # V45 — the track's own particle emitters, the .toy's [ParticleEmitterN] (journal *-v45-track-particles).
 #   emitter list reader 0x00331530: [ParticleEmitters] NumberOfParticleEmitters, then ParticleEmitter1..n
 #   only — free07's 27 sections sit under a count of 0 and are never read. Each is an emitter toy

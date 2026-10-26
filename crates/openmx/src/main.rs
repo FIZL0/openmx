@@ -4392,6 +4392,15 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The software path's own copy of each animated toy's model (V43), which its pose is skinned into:
     // one model can be on many toys at many moments (nat06's nineteen windmills).
     let toy_copies: Vec<String> = animated.models.iter().enumerate().map(|(k, m)| format!("{m}@toy{k}")).collect();
+    // The path cars' wheels (V82), each car's or `None` where its model has no `TireFrontL`: turned
+    // render-side by the distance the car has run, so the simulation's cars carry nothing for them.
+    let traffic_wheels: Vec<Option<game_render::toy::Wheels>> = traffic
+        .cars
+        .iter()
+        .map(|(car, path)| game_render::toy::Wheels::new(&assets.models.get(car.stem())?.model, car, path))
+        .collect();
+    // Each drawn car's palette with its wheels turned, and its wheels, beside `traffic_at`.
+    let mut traffic_pose: Vec<Option<(Vec<M4>, game_render::toy::Wheels)>> = Vec::new();
     // The renderer's CPU-drawn patches (P44): none since the debug HUD went (P170).
     let gpu_patches: Vec<game_render::gpu::Patch> = Vec::new();
     let mut gpu_sprites = Vec::new();
@@ -5996,6 +6005,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                                 r.drop_owner(i as u32, &d.taken.models, d.taken.textures.clone());
                             }
                             assets.let_go(&d.taken);
+                            // And the software path's wheel-turned copies of its cars (V82), which name its textures.
+                            assets.models.retain(|name, _| !(name.starts_with(&d.prefix) && name.contains("#car")));
                         }
                     }
                 }
@@ -6381,6 +6392,17 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 at.0[3][0] += car_shift[0];
                 at.0[3][2] += car_shift[1];
             }
+            let shown = game_render::toy::between(traffic_before, traffic_time, blend.0);
+            traffic_pose = traffic
+                .cars
+                .iter()
+                .zip(&traffic_wheels)
+                .map(|((car, path), wheels)| {
+                    let model = &assets.models.get(car.stem())?.model;
+                    let wheels = wheels.as_ref()?;
+                    Some((wheels.palette_at(model, car, path, shown), wheels.clone()))
+                })
+                .collect();
         }
         if !creature_copies.is_empty() {
             creatures_at = creatures.placed(blend.0);
@@ -6405,8 +6427,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The far ones less often (MD28).
             let eyes: Vec<[f32; 2]> = cameras.iter().map(|c| [c.eye.x, c.eye.z]).collect();
             car_pictures += 1;
+            traffic_pose.clear();
             for d in dressed.iter_mut().filter(|d| !d.traffic.cars.is_empty() && !unshown.iter().any(|u| u.0 == d.index)) {
                 traffic_at.extend(d.cars_near(shown, &eyes, car_pictures, &mut |p, by| car_ground(place, p, by)));
+                traffic_pose.extend(d.wheel_poses(shown, &eyes, &assets));
             }
         }
         // The markers' slot display (P88), each view its own player's: the selection, the slots, the
@@ -6724,8 +6748,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 actors.extend(plane_draw::actors(drawn, &assets, &plane, plane_at(&plane), vehicle::BAY_ALPHA, &mut gpu_poses));
             }
-            for (model, at) in &traffic_at {
-                actors.push(Actor { model: model.as_str(), at: *at, pose: None, lod_from: None, alpha: 1.0 });
+            for (k, (model, at)) in traffic_at.iter().enumerate() {
+                let pose = traffic_pose.get(k).and_then(|p| p.as_ref()).map(|(p, _)| {
+                    gpu_poses.push(p.clone());
+                    gpu_poses.len() - 1
+                });
+                actors.push(Actor { model: model.as_str(), at: *at, pose, lod_from: None, alpha: 1.0 });
             }
             for c in &creatures_at {
                 gpu_poses.push(c.palette.clone());
@@ -6883,6 +6911,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let p = plane_copies.len();
                 plane_copies.push(plane_drawn.iter().map(|d| format!("{}@seat{p}", d.model)).collect());
             }
+            let traffic_copies: Vec<String> = traffic_at.iter().enumerate().map(|(k, (m, _))| format!("{m}#car{k}")).collect();
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
@@ -6990,7 +7019,25 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     actor.push((model.as_str(), pilot.at));
                 }
             }
-            actor.extend(traffic_at.iter().map(|(model, at)| (model.as_str(), *at)));
+            for (k, (model, at)) in traffic_at.iter().enumerate() {
+                let Some(Some((pose, wheels))) = traffic_pose.get(k) else {
+                    actor.push((model.as_str(), *at));
+                    continue;
+                };
+                // The software path's own copy of the car's model, by the model and its place in
+                // `traffic_at`: skinned whole once, then only its wheels moved (`Wheels::reskin`).
+                let copy = &traffic_copies[k];
+                if !assets.models.contains_key(copy.as_str())
+                    && let Some(mut own) = assets.models.get(model).cloned()
+                {
+                    own.tris.clear();
+                    assets.models.insert(copy.clone(), own);
+                }
+                if let Some(loaded) = assets.models.get_mut(copy.as_str()) {
+                    wheels.reskin(&loaded.model, pose, &mut loaded.tris);
+                    actor.push((copy.as_str(), *at));
+                }
+            }
             for (c, copy) in creatures_at.iter().zip(&creature_copies) {
                 if !assets.models.contains_key(copy.as_str())
                     && let Some(own) = assets.models.get(&c.model).cloned()
