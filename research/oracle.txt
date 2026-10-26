@@ -2645,6 +2645,16 @@ wreck_part_stop boot 0x0015b670 (part, a1) clears +0x28 bit 1; for +0x124/+0x12c
 broad_phase_leave boot 0x001ab1d0 (collidable) a placed one (+4) out of every tree node its
 #                 placement lists (0x001ae2f0: the tree's vt +0x2c remove at its key), the record
 #                 freed, +4 = 0
+# S113 — front's 2628 was the replay's tree, not the game. The tree's vtable (at tree +8): +0x20 the
+#   key of a box (tree, centre*, half*, 0), +0x24 insert (tree, collidable, key, centre*, half*), +0x2c
+#   remove (tree, collidable, key); the world's add 0x001adb70 calls +0x20 then +0x24. The s62 replays
+#   lay the bike in each row but not its placement record (0x00b5bb50 in front, key left 0x9e088016),
+#   and the laid-in pools empty its old node from 2619 on without the game's new one (0x9e08a016).
+#   The bones' search rebuilds at 2628 round sphere 0 (stood past the bound) and, the tree holding the
+#   bike nowhere, does not list it: no pair, 0.45-0.95 ft off on bones 0/15/16/17. Re-placed each row
+#   (mesh_collidable_bounds, vt +0x20, +0x24 if not held, the record's +0xc/+0x10 in place) the
+#   original's update pairs 36, hits 11 (bones 0/16/17 on the face whose normal is the bike frame's
+#   first row) and holds front's capture through 2888; 2889 parts with the bike out (since 2681).
 bike_box_solve boot 0x001f5b40 (this) the type-4 constraint's solve (vtable 0x00451dd0 +0x18), the
 #                             rider body actor's +0x5f8 on main bone 0 (+0x9c, the body). +0x4 on;
 #                             +0x14 another actor's transform (0 live; not ported). With +0x60 frame
