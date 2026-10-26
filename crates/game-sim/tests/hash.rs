@@ -518,7 +518,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // a track with any, so the leaves do not move.
     // 11496 since S83: each ride's put-back search list (`Ride::back_search`, boxed), walked only
     // once a world with props or plants has been asked.
+    // 11512 since S110: the rider's riding ragdoll (`Rider::riding`, boxed), walked as `riding` only
+    // while there is one, and the shell's holds (`Rider::holds`), not state and not walked.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11496, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11512,"Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

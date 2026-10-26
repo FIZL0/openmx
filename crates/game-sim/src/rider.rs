@@ -64,6 +64,7 @@ use crate::off_map;
 use crate::phy::{self, Phy};
 use crate::ride::{self, Controls, Crash, Ride};
 use crate::ragdoll_ride::{self, Down, Kit, Posed};
+use crate::ragdoll_riding::{Holds, Riding};
 use crate::rider_anim;
 use crate::state;
 use crate::wreck_sound;
@@ -245,6 +246,17 @@ pub struct Rider {
     /// measures them from the node's last drawn frame. Empty with no kit, while down, and on the
     /// tick of a put-back, when the next wreck starts its bones as [`Down::enter_posed`] does.
     pub drawn: Vec<crate::math::Mat4>,
+    /// **The riding ragdoll** (S109; the rider's since S110): the body actor stepping the eighteen
+    /// bones while the rider is on the bike, at the top of each frame for the tick the shell last
+    /// drew. A wreck enters from its bodies ([`Riding::hand_over`]) as the original's does, and falls
+    /// back on the animated skeleton ([`Rider::skeleton`], [`Rider::drawn`]) without it. `None` with no
+    /// kit or no [`Rider::holds`], while down, and after a put-back until the next frame starts a
+    /// fresh one.
+    pub riding: Option<Box<Riding>>,
+    /// The drawn bike's root node and the four holds (S110), which the riding ragdoll is held to. An
+    /// input like [`Rider::skeleton`]: a shell that draws the chassis writes it every frame, it is
+    /// never sent, and `None` runs no riding ragdoll.
+    pub holds: Option<Arc<Holds>>,
     /// The rider's wreck sounds, as far as the pick goes: which was played last, so that the next
     /// wreck draws as the original does ([`wreck_sound`]).
     pub wreck_sounds: wreck_sound::Emitter,
@@ -347,6 +359,8 @@ impl Rider {
             ragdoll: None,
             skeleton: None,
             drawn: Vec::new(),
+            riding: None,
+            holds: None,
             wreck_sounds: wreck_sound::Emitter::retail(),
             animation: motion::Frame { blend: motion::Blend::Free, restart: false },
             body: rider_anim::Body::default(),
@@ -440,6 +454,22 @@ impl Rider {
         self.ragdoll_kit = Some(kit);
     }
 
+    /// **The riding ragdoll's tick** (S110), for the tick the shell last drew: its request off the ride
+    /// and [`Rider::holds`], its skeleton [`Rider::skeleton`]. Only while the rider is up and has a
+    /// kit and holds; started afresh when there is none yet or the bike has gone where the bones did
+    /// not ([`Riding::strayed`]).
+    fn riding_tick(&mut self, dt: F, world: &mut dyn World) {
+        let up = self.state.wreck.is_none() && self.crash.is_none() && self.ragdoll.is_none();
+        let (Some(kit), Some(holds), true) = (self.ragdoll_kit.clone(), self.holds.clone(), up) else {
+            self.riding = None;
+            return;
+        };
+        let at = self.ride.position();
+        let mut riding = self.riding.take().filter(|r| !r.strayed(at)).unwrap_or_else(|| Box::new(Riding::new(&kit)));
+        riding.ride(&kit, self, &holds, dt, world);
+        self.riding = Some(riding);
+    }
+
     /// **Hand the bike its collision files** (S78): from then on, in a session with other riders, its
     /// body rays strike theirs and theirs strike it ([`crate::rider_contact`]).
     pub fn carries_bike_col(&mut self, col: Arc<crate::bike_col::BikeCol>) {
@@ -498,9 +528,13 @@ impl Rider {
     pub fn frame_bumped(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World,
                         rivals: &[ride::Rival], bump: Option<&mut crate::rider_contact::Bump>) -> Frame {
         let mut out = Frame::default();
+        // 0a — the riding ragdoll's tick for the frame the shell last drew (S110): the body actor runs
+        // after the rider in the original's tick, so a wreck entered this tick starts from the bodies
+        // it left.
+        self.riding_tick(dt, world);
         let Rider {
             ride, tricks, state, motion, packed_pose, set, clips, sense, racing, wreckage, crash, animation,
-            flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, wreck_sounds, idles, ghost, edge_armed, page,
+            flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, riding, wreck_sounds, idles, ghost, edge_armed, page,
             put_back, ragdoll_shown, score, ..
         } = self;
         *ragdoll_shown = None;
@@ -814,8 +848,17 @@ impl Rider {
             *ragdoll = match (ragdoll_kit.as_ref(), wreckage.as_ref(), crash.as_ref()) {
                 (Some(kit), Some(w), Some(down)) => {
                     let rng = ragdoll_ride::generator(idles);
-                    let now = nodes.clone().unwrap_or_else(|| ragdoll_ride::nodes(kit, skeleton.as_deref(), &ride.transform()));
-                    let before = (drawn_before.len() == now.len()).then_some(&drawn_before[..]);
+                    // From the riding bodies when there are some (S110), else from the animated
+                    // skeleton's nodes and their last drawn frame (S70).
+                    let handed = riding.as_deref().filter(|_| !out.respawned).and_then(|r| r.hand_over(kit));
+                    let (now, before) = match handed {
+                        Some((now, before)) => (now, before),
+                        None => {
+                            let now = nodes.clone().unwrap_or_else(|| ragdoll_ride::nodes(kit, skeleton.as_deref(), &ride.transform()));
+                            let before = (drawn_before.len() == now.len()).then_some(&drawn_before[..]);
+                            (now, before)
+                        }
+                    };
                     let doll = Down::enter_from(
                         kit,
                         &now,
@@ -904,6 +947,9 @@ impl Rider {
             if let Some(nodes) = nodes {
                 *drawn = ragdoll_ride::drawn(&nodes);
             }
+        } else {
+            // The riding body too (S110): the next one is placed afresh off the pose.
+            *riding = None;
         }
         // 8 — the points (S79): the rider's tick, on the frame's wheels and wreck, and then the
         // manager's, which in the original runs after every rider's and touches only this one's card.
@@ -1123,6 +1169,11 @@ impl State for Rider {
         // The bones, when the ride runs them (S53). A rider without a kit hashes as before.
         if let Some(doll) = &self.ragdoll {
             w.group("ragdoll", |w| hash::State::walk(doll, w));
+        }
+        // The riding ragdoll (S110), while a shell hands the rider its holds: a rider with none (every
+        // online one, and every fixture) hashes as before.
+        if let Some(r) = &self.riding {
+            w.group("riding", |w| hash::State::walk(&**r, w));
         }
         // The page, while one is up (S72): a rider with none hashes as before.
         if self.page.up() {

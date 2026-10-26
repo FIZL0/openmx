@@ -1730,6 +1730,112 @@ fn the_riders_bones_lose_the_wreck_bike_on_the_put_back_tick() {
         assert!(!last, "screen {screen}: the put-back's tick gathers without it");
     }}
 
+/// **The wreck enters from the riding bodies** (S110): a rider handed its holds steps the riding
+/// ragdoll each tick it is up, and its wreck's bones start where those bodies are on the verdict's
+/// tick; a rider with no holds (a fixture, a session online) has no riding ragdoll and enters from the
+/// skeleton as before. Thrown upside down at the top of a jump, it wrecks in the air.
+#[test]
+fn the_wreck_enters_from_the_riding_bodies() {
+    use game_sim::ragdoll_riding::Holds;
+    use game_sim::rider::{Rider, Wreckage};
+    let Some((kit, part, wrecks)) = ride_kit() else { return };
+    let kit = std::sync::Arc::new(kit);
+    let tables = game_sim::rider::Tables::build();
+    let p = game_sim::phy::Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.ride.curve);
+    let mut world = game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let idle = game_sim::ride::Controls::default();
+    let holds = Holds {
+        root: game_sim::math::Mat4::IDENTITY,
+        hands: [Vf::new(-0.9, 3.6, 1.4, 1.0), Vf::new(0.9, 3.6, 1.4, 1.0)],
+        feet: [Vf::new(-0.6, 1.3, -0.2, 1.0), Vf::new(0.6, 1.3, -0.2, 1.0)],
+    };
+    let rider = |held: bool| {
+        let mut r =
+            Rider::new(&p, game_sim::stock::MOUNTS, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), game_sim::trick::Set::default());
+        r.wreckage = Some(Wreckage { part: part.clone(), wrecks: wrecks.clone(), inertia: game_sim::ride::WRECK_INERTIA });
+        r.ragdoll_kit = Some(kit.clone());
+        r.sense.wrecks_enabled = true;
+        r.sense.air_wrecks = true;
+        r.holds = held.then(|| std::sync::Arc::new(holds));
+        r.ride.place_on(Vf::new(0.0, 40.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(0.0, -1.0, 0.0, 0.0));
+        r.ride.chassis.vel = Vf::new(0.0, 10.0, 30.0, 0.0);
+        r
+    };
+    let (mut held, mut bare) = (rider(true), rider(false));
+    for tick in 1..60 {
+        // The verdict's riding tick, off a twin that cannot wreck: the riding step is the frame's first.
+        let mut up = held.clone();
+        up.sense.wrecks_enabled = false;
+        up.frame(&p, &tables, &idle, dt, &mut world);
+        let out = held.frame(&p, &tables, &idle, dt, &mut world);
+        let bare_out = bare.frame(&p, &tables, &idle, dt, &mut world);
+        assert!(bare.riding.is_none(), "tick {tick}: a rider with no holds has no riding ragdoll");
+        assert_eq!(out.wreck, bare_out.wreck, "tick {tick}: the riding ragdoll does not ride the bike");
+        let riding = up.riding.as_deref().expect("a rider up with holds rides its ragdoll");
+        assert!(riding.placed(), "tick {tick}: the riding bodies are placed");
+        if out.wreck.is_none() {
+            assert!(held.riding.is_some(), "tick {tick}: riding on");
+            continue;
+        }
+        assert!(held.riding.is_none(), "the wreck ends the riding ragdoll");
+        let doll = held.ragdoll.as_ref().expect("the wreck's bones");
+        let skeleton = bare.ragdoll.as_ref().expect("the bare rider's wreck bones");
+        let (now, _) = riding.hand_over(&kit).expect("the riding bodies handed over");
+        let off = |a: &[Bone], b: &[Vf]| a.iter().zip(b).flat_map(|(x, y)| (0..3).map(move |l| (x.body.position[l] - y[l]).abs())).fold(0f32, f32::max);
+        let bodies: Vec<Vf> = riding.actor.ragdoll.bones.iter().map(|b| b.body.position).collect();
+        let (from_riding, from_skeleton) = (off(&doll.ragdoll.bones, &bodies), off(&skeleton.ragdoll.bones, &bodies));
+        eprintln!("wrecked on tick {tick}: the entry is {from_riding} off the riding bodies, the skeleton's {from_skeleton}");
+        assert_eq!(now.len(), doll.ragdoll.bones.len());
+        assert!(from_riding < 1e-3, "the entry starts at the riding bodies ({from_riding} off)");
+        assert!(from_skeleton > 0.01, "the bare rider's entry is the skeleton's, not the riding bodies' ({from_skeleton} off)");
+        return;
+    }
+    panic!("never wrecked");
+}
+
+/// **The riding ragdoll is ride state** (S110): ridden a second with its holds, the rider keeps one
+/// riding body near the bike; a snapshot carries it (the holds stay the shell's, kept from the sim it
+/// is decoded into), and the checksum reads it.
+#[test]
+fn the_riding_ragdoll_is_ride_state() {
+    use game_sim::ragdoll_riding::Holds;
+    let Some((kit, _, _)) = ride_kit() else { return };
+    let tables = std::sync::Arc::new(game_sim::rider::Tables::build());
+    let p = game_sim::phy::Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.ride.curve);
+    let mut sim = game_sim::Sim::ride(0x110, tables, p, game_sim::stock::SPAWN, game_sim::stock::FACING, game_sim::trick::Set::default());
+    sim.rider.ragdoll_kit = Some(std::sync::Arc::new(kit));
+    sim.rider.sense.wrecks_enabled = false;
+    sim.rider.holds = Some(std::sync::Arc::new(Holds {
+        root: game_sim::math::Mat4::IDENTITY,
+        hands: [Vf::new(-0.9, 3.6, 1.4, 1.0), Vf::new(0.9, 3.6, 1.4, 1.0)],
+        feet: [Vf::new(-0.6, 1.3, -0.2, 1.0), Vf::new(0.6, 1.3, -0.2, 1.0)],
+    }));
+    let fresh = sim.clone();
+    let mut world = game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let gas = game_sim::ride::Controls { gas: F(0.5), ..Default::default() };
+    for tick in 1..=30 {
+        sim.step(dt, &gas, &mut world);
+        let r = &sim.rider;
+        let why = format!("tick {tick}: no riding body (wreck {:?}, crash {}, ragdoll {})", r.state.wreck, r.crash.is_some(), r.ragdoll.is_some());
+        let riding = sim.rider.riding.as_deref().expect(&why);
+        let main = riding.actor.ragdoll.bones[0].body.position;
+        let off = main.sub(sim.rider.ride.position());
+        let far = (0..3).map(|l| off[l].abs()).fold(0f32, f32::max);
+        assert!(riding.placed() && far < 6.0, "tick {tick}: the main body {far} ft off the bike");
+    }
+    let bytes = game_sim::snapshot::encode(&sim);
+    let mut back = fresh.clone();
+    game_sim::snapshot::decode(&mut back, &bytes).expect("the state decodes");
+    assert_eq!(back.rider.riding, sim.rider.riding, "the riding body round-trips");
+    assert_eq!(back.rider.holds, sim.rider.holds, "the holds are the local sim's");
+    assert_eq!(back.hash(), sim.hash(), "the same state, the same checksum");
+    let mut moved = back.clone();
+    moved.rider.riding.as_mut().expect("riding").actor.ragdoll.bones[3].body.velocity.0[1] += 0.25;
+    assert_ne!(moved.hash(), back.hash(), "the checksum reads the riding bodies");
+}
+
 /// **A wreck thrown from the shell's skeleton** (S65): handed the kit's own riding pose as the live
 /// one, the posed entry and step are the fixed pose's to the bit; handed another pose, the bones
 /// start where it has them and pull towards its rests.

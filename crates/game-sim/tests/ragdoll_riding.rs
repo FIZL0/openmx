@@ -1508,3 +1508,218 @@ fn the_riding_requests_sources_are_the_riders_at_the_state() {
     assert_ne!(length.to_bits(), port.speed.0.to_bits(), "speed {} against |v| {length}", port.speed.0);
     assert_ne!(game.velocity.z().to_bits(), port.speed.0.to_bits(), "nor the velocity's own z");
 }
+
+// --- S110: the wreck entered from the riding bodies ------------------------------------------------
+
+/// run2's wreck: the rider's verdict, reason 11 (off the back), is on this row. Its frame ran no body
+/// update (the bones repeat the row before), the next frame's row is one riding tick, and the frame
+/// after ran two: one more riding tick, which no row holds, then the body actor's wreck entry and its
+/// first wreck step, which this row holds.
+const VERDICT: u32 = 3716;
+const ENTRY: u32 = 3718;
+
+/// The bones as the original's wreck entry leaves them, before the step: its pose off the riding
+/// skeleton, the reset and the throw; and the generator as it went in and came out.
+#[derive(Default)]
+struct Entered {
+    rng: Option<(u64, u64)>,
+    bones: Vec<Bone>,
+    /// The throw the entry set.
+    launch: Option<ragdoll::Launch>,
+    /// The drawn matrices (part `+0x60`) the pose measured each bone's move from.
+    drawn: Vec<Mat4>,
+}
+
+fn part_drawn(ee: &Ee, i: usize) -> Mat4 {
+    let idx = ee.u32_at(bone_body(ee, i) + 8);
+    mat_at(ee, ee.u32_at(ACTOR + at::PARTS) + 0xb0 * idx + 0x60)
+}
+
+fn on_entry(ee: &mut Ee) -> Rc<RefCell<Entered>> {
+    let seen = Rc::new(RefCell::new(Entered::default()));
+    let s = Rc::clone(&seen);
+    ee.hooks.insert(
+        addr("rider_body_wreck_enter").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            let rng = rng_at(ee);
+            let drawn = (0..ragdoll::PARTS).map(|i| part_drawn(ee, i)).collect();
+            through(ee);
+            let mut s = s.borrow_mut();
+            s.rng = Some((rng, rng_at(ee)));
+            s.bones = bones_of(ee);
+            s.launch = Some(actor_of(ee).ragdoll.launch);
+            s.drawn = drawn;
+        }),
+    );
+    seen
+}
+
+/// The original's actor carried from the state's frame up to `to` through run2's rows, each tick's
+/// bones laid in from the row before, so what the rows do not hold (the drawn history, the pose and
+/// look state) is the original's own; rows that repeat the one before ran no update and are skipped.
+/// Returns the ticks run and how many came out their row.
+fn catch_up(ee: &mut Ee, cap: &Capture, to: u32) -> (usize, usize) {
+    let update = addr("rider_body_update").unwrap();
+    let (mut ticks, mut exact) = (0, 0);
+    for frame in START + 1..to {
+        if !cap.has(frame - 1) || !cap.has(frame) {
+            continue;
+        }
+        let same = (0..18).all(|i| {
+            let k = format!("bone{i}.pos");
+            bits(cap.quad(frame, &k)) == bits(cap.quad(frame - 1, &k))
+        });
+        if same {
+            continue;
+        }
+        // A row whose last positions are not the row before's positions held two updates; the
+        // first, which no row holds, is run on the same request.
+        let twice = (0..18).any(|i| bits(cap.quad(frame, &format!("bone{i}.last_pos"))) != bits(cap.quad(frame - 1, &format!("bone{i}.pos"))));
+        seed_bones(ee, cap, frame - 1);
+        lay_in(ee, cap, frame);
+        set_rng(ee, cap.int(frame - 1, "rng_state"));
+        for _ in 0..1 + usize::from(twice) {
+            ee.call(update, &[u64::from(ACTOR)], &[cap.get(frame, "dt")], 2_000_000_000);
+        }
+        ticks += 1;
+        exact += usize::from(differ(cap, frame, &ee_bones(ee)).is_empty());
+    }
+    (ticks, exact)
+}
+
+/// The farthest a bone's `name` quad (x, y, z) in `bones` is from the row's.
+fn off_row(cap: &Capture, frame: u32, name: &str, bones: &[[Vf; 6]]) -> f32 {
+    let k = BODY.iter().position(|(n, _)| *n == "pos").expect("pos is a body column");
+    let mut worst = 0f32;
+    for (i, b) in bones.iter().enumerate() {
+        let want = cap.quad(frame, &format!("bone{i}.{name}"));
+        for l in 0..3 {
+            worst = worst.max((b[k][l] - want[l]).abs());
+        }
+    }
+    worst
+}
+
+/// `Wreckbike.phy`'s part off the disc, which the wreck body (and so the crash the entry is handed)
+/// is built from.
+fn wreck_part() -> Option<game_sim::phy::Part> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let names: Vec<String> =
+        disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let bytes = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok()))?;
+    Some(game_sim::phy::Part::read_bytes(&bytes, "PhysicsPart1"))
+}
+
+/// **The wreck enters from the riding bodies** (S110): run2's two riding ticks before the entry are
+/// stepped by the port's riding body ([`Riding::stepped`], each bit for bit the original's against
+/// its skeleton and scene), and the wreck it hands over ([`Riding::hand_over`] into
+/// [`Down::enter_from`], as the rider's frame does) leaves every bone where the original's entry
+/// leaves it — position, velocity, orientation and spin — and the generator where it does.
+#[test]
+fn the_wreck_enters_from_the_riding_bodies() {
+    use game_sim::ragdoll_ride::Down;
+    use game_sim::ragdoll_riding::Riding;
+    let Some(cap) = Capture::load("run2") else { return };
+    let Some(mut ee) = state() else { return };
+    let Some(kit) = ride_kit() else { return };
+    let Some(part) = wreck_part() else { return };
+    assert_eq!((cap.int(VERDICT - 1, "wreck_reason"), cap.int(VERDICT, "wreck_reason")), (0, 11), "the verdict's row");
+    assert_eq!((cap.int(ENTRY - 1, "a_mode"), cap.int(ENTRY, "a_mode")), (1, 2), "the body's entry row");
+    let still = (0..18).all(|i| bits(cap.quad(VERDICT, &format!("bone{i}.pos"))) == bits(cap.quad(VERDICT - 1, &format!("bone{i}.pos"))));
+    assert!(still, "the verdict's frame ran no body update");
+    for i in 0..ragdoll::PARTS {
+        assert_eq!(bits(kit.rig.parts[i].cofg), bits(quad(&ee, bone_body(&ee, i) + body_at::COFG)), "part {i}'s centre of mass");
+    }
+    assert_eq!(kit.wrecks.fall_off_back, wrecks_of(&ee).fall_off_back, "reason 11's throw");
+
+    // The original carried up to the verdict, then the two riding ticks: the original's and the
+    // port's side by side, the port's body carried.
+    let (ticks, caught) = catch_up(&mut ee, &cap, VERDICT);
+    note(&format!("S110 catch-up: {caught} of {ticks} ticks their row"));
+    seed_bones(&mut ee, &cap, VERDICT);
+    set_rng(&mut ee, cap.int(VERDICT, "rng_state"));
+    let mut riding = Riding::new(&kit);
+    riding.actor = actor_of(&ee);
+    let (mut odd, mut offs) = (Vec::new(), Vec::new());
+    for tick in 1..=2 {
+        // The second tick rode on the request between this row's and the entry row's (the bike
+        // stepped twice in the entry's frame), which no row holds: it is laid in from this row.
+        lay_in(&mut ee, &cap, ENTRY - 1);
+        let (d, _) = riding.stepped(&kit, |a| {
+            let mut slot = Some(a.clone());
+            let out = port_tick(&mut ee, &cap, ENTRY - 1, 0, None, Some(&mut slot));
+            *a = slot.expect("the port's actor back");
+            out
+        });
+        odd.extend(d.into_iter().map(|x| format!("riding tick {tick}: {x}")));
+        // Where the original's bones are against the rows: the first tick's against its own row,
+        // the second's (which no row holds) against the entry row's last positions.
+        let col = if tick == 1 { (ENTRY - 1, "pos") } else { (ENTRY, "last_pos") };
+        offs.push(off_row(&cap, col.0, col.1, &ee_bones(&ee)));
+    }
+    assert!(odd.is_empty(), "the riding ticks: {}", odd[..odd.len().min(6)].join("; "));
+
+    // The original's entry tick, its entry hooked.
+    lay_in(&mut ee, &cap, ENTRY);
+    set_rng(&mut ee, cap.int(ENTRY - 1, "rng_state"));
+    let seen = on_entry(&mut ee);
+    let dt = cap.get(ENTRY, "dt");
+    ee.call(addr("rider_body_update").unwrap(), &[u64::from(ACTOR)], &[dt], 2_000_000_000);
+    ee.hooks.clear();
+    offs.push(off_row(&cap, ENTRY, "pos", &ee_bones(&ee)));
+    let replayed = differ(&cap, ENTRY, &ee_bones(&ee));
+    let seen = seen.borrow();
+    let (rng_in, rng_out) = seen.rng.expect("the original entered the wreck");
+
+    // The port's: the hand-over from the riding bodies.
+    let (now, before) = riding.hand_over(&kit).expect("the riding body is placed");
+    let drawn_off: f32 = before
+        .expect("a history")
+        .iter()
+        .zip(&seen.drawn)
+        .flat_map(|(p, g)| (0..4).flat_map(move |r| (0..4).map(move |c| (p.0[r][c] - g.0[r][c]).abs())))
+        .fold(0.0, f32::max);
+    let tables = game_sim::rider::Tables::build();
+    let p = game_sim::phy::Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.ride.curve);
+    let r = game_sim::rider::Rider::new(&p, game_sim::stock::MOUNTS, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), game_sim::trick::Set::default());
+    let crash = game_sim::ride::Crash::begin(&r.ride, game_sim::trick::Wreck(11), &part, game_sim::ride::WRECK_INERTIA, &kit.wrecks, None);
+    let mut flat = game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let mut rng = Rng::from_state(rng_in);
+    let doll = Down::enter_from(&kit, &now, before, F(dt), &crash, crash.throw, 11, &kit.wrecks, &mut rng, &mut flat);
+
+    const NEAR: [f32; 4] = [0.002, 0.1, 1e-4, 0.15];
+    let (mut exact, mut lanes, mut worst, mut far) = (0, 0, [0f32; 4], Vec::new());
+    for (i, (p, g)) in doll.ragdoll.bones.iter().zip(&seen.bones).enumerate() {
+        let (p, g) = (&p.body, &g.body);
+        for (k, (name, a, b)) in
+            [("position", p.position, g.position), ("velocity", p.velocity, g.velocity), ("quat", p.quat, g.quat), ("rates", p.rates, g.rates)]
+                .into_iter()
+                .enumerate()
+        {
+            for l in 0..3 {
+                lanes += 1;
+                exact += usize::from(a[l].to_bits() == b[l].to_bits());
+                let off = (a[l] - b[l]).abs();
+                worst[k] = worst[k].max(off);
+                if off > NEAR[k] && far.len() < 8 {
+                    far.push(format!("bone {i} {name}[{l}] {} want {}", a[l], b[l]));
+                }
+            }
+        }
+    }
+    note(&format!(
+        "S110 entry at {ENTRY}: {exact} of {lanes} lanes exact, worst {worst:?}, drawn history off by {drawn_off}; the original's bones off run2's rows by {offs:?}, the entry row {} lanes not bit-equal",
+        replayed.len(),
+    ));
+    // The replay is run2's wreck: the state image is 1778 ticks earlier and the rows do not hold
+    // the actor's own state, so the original's ticks here are near the rows, not on them; the
+    // second riding tick and so the entry also miss the request between the rows (a body moves
+    // about 0.4 a tick here).
+    assert!(offs[0] < 0.01 && offs[1..].iter().all(|&o| o < 1.0), "the original's replay is not run2's wreck: its bones off the rows by {offs:?}");
+    assert!(far.is_empty(), "{exact} of {lanes} lanes exact, worst {worst:?}:\n{}", far.join("\n"));
+    assert_eq!(doll.ragdoll.launch, seen.launch.expect("the original's throw"), "the throw");
+    // The entry's last call picks the wreck's sound, which draws too (as the rider's frame does it).
+    game_sim::wreck_sound::Emitter::retail().wreck(11, false, &mut rng);
+    assert_eq!(rng.state(), rng_out, "the generator after the entry: the port drew {:?}, the original {:?}", draws(rng_in, rng.state(), 1000), draws(rng_in, rng_out, 1000));
+}

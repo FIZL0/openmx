@@ -157,7 +157,8 @@ impl Default for Skeleton {
 /// **What the actor asks of the rest of the game** that this crate does not have.
 pub trait Outside {
     /// Every bone posed where the animated skeleton has it, then reset there. `carried` is the
-    /// repose's: the bones keep the velocity the skeleton's last frame gives them.
+    /// original's `a1`, which the repose sets: the bones are posed still. Clear (the entries), each
+    /// takes the velocity and spin of its node's move since the node was last drawn (S110).
     fn pose(&mut self, ragdoll: &mut Ragdoll, dt: F, carried: bool) {
         let _ = (ragdoll, dt, carried);
     }

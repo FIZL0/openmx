@@ -200,6 +200,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     rider.ragdoll_kit = here.ragdoll_kit.clone();
     rider.bike_col = here.bike_col.clone();
     rider.skeleton = here.skeleton.clone();
+    rider.holds = here.holds.clone();
     rider.body_numbers = here.body_numbers;
     rider.edge_armed = here.edge_armed;
     if others_riders.len() != sim.others.len() {
@@ -213,6 +214,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.ragdoll_kit = p.rider.ragdoll_kit.clone();
         r.bike_col = p.rider.bike_col.clone();
         r.skeleton = p.rider.skeleton.clone();
+        r.holds = p.rider.holds.clone();
         r.body_numbers = p.rider.body_numbers;
         r.edge_armed = p.rider.edge_armed;
         p.rider = r;
@@ -483,6 +485,8 @@ impl Wire for Rider {
             ragdoll,
             skeleton: _,
             drawn,
+            riding,
+            holds: _,
             wreck_sounds,
             animation,
             body,
@@ -510,6 +514,7 @@ impl Wire for Rider {
         crash.put(out);
         ragdoll.put(out);
         drawn.put(out);
+        riding.put(out);
         wreck_sounds.put(out);
         animation.put(out);
         body.put(out);
@@ -542,6 +547,8 @@ impl Wire for Rider {
             ragdoll: Wire::take(r)?,
             skeleton: None,
             drawn: Wire::take(r)?,
+            riding: Wire::take(r)?,
+            holds: None,
             wreck_sounds: Wire::take(r)?,
             animation: Wire::take(r)?,
             body: Wire::take(r)?,
@@ -573,6 +580,11 @@ wire!(crate::score::Node { flags, id, points, base, rate, mult, extra, held, gra
 wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching, search });
 wire!(crate::ragdoll_scene::BikeSearch { stood, centre, bound, built, listed, distance });
 wire!(crate::ragdoll_body::Fade { length, left });
+wire!(crate::ragdoll_riding::Riding { actor, drawn, was, rng });
+wire!(crate::ragdoll_body::Actor { ragdoll, contacts, mode, prev, posed, latched, idle, look_pose, clip, touching, fade, foot_fade, foot_weight, look, pose_spring, pose_damping, pose_damping_base, stand_speed, slow_speed, gate_step, gate_clock, foot_points, hold_targets, hold_velocity, bike_box, bike_frame, placed, active, repose, cut, impact, model, gravity_scale, torques });
+wire!(crate::ragdoll_body::Look { on, fast, slow, target, at });
+wire!(crate::ragdoll_body::Model { glow, glow_level, alpha });
+wire!(crate::ragdoll_body::Cut { now, was });
 wire!(crate::ragdoll::Ragdoll { records, bones, joints, collisions, world, holds, bike_box, throwing, launch, ignores_bike, entered, stiff, riding, off_bike, flung, settled, roll, pins, pull });
 wire!(crate::ragdoll::Records { parts, joints, collisions });
 wire!(crate::ragdoll::PartRecord { ride_mass, wreck_mass, ride_inertia, wreck_inertia, ride_angular_damping, settled_angular_damping, limp_angular_damping });
