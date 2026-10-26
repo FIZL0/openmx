@@ -555,3 +555,55 @@ fn every_disc_scene_parses_with_no_activity_prop() {
     }
     assert!(scenes >= 57, "{scenes} scenes in {} track archives", tracks.len());
 }
+
+/// S82: a scene's `COL=` names reach the archive the way the game's ini reader leaves them, with the
+/// spaces squeezed out — free09's `Large Egg.col` is the archive's `LargeEgg.col`, nat20's ice fences
+/// and Indian ruins the same — so every shape a disc scene spells with a space is a member of its
+/// track's two archives.
+#[test]
+fn every_disc_scenes_shapes_are_in_its_archives() {
+    let Some(mut f) = container() else { return };
+    let psr = directory(&mut f);
+    let tracks: Vec<String> = psr
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("tracks\\") && n.ends_with(".res") && !n.ends_with("_2.res")
+        })
+        .collect();
+    let (mut shapes, mut spaced, mut missing, mut by_track) = (0, 0, Vec::new(), Vec::<String>::new());
+    for track in &tracks {
+        let part = Part::open(&mut f, &psr, track);
+        let second = track[..track.len() - 4].to_owned() + "_2.res";
+        let parts: Vec<Part> = std::iter::once(part)
+            .chain(psr.find(&second).map(|_| Part::open(&mut f, &psr, &second)))
+            .collect();
+        for e in parts[0].res.entries.iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".scn")) {
+            let bytes = parts[0].read(e);
+            let Ok(scene) = Scene::parse(&bytes) else { continue };
+            let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+            for at in &scene.collision {
+                shapes += 1;
+                assert!(!at.file.contains(char::is_whitespace), "{track}: {}", at.file);
+                // Other tracks place shapes their archives do not have at all; those are not this.
+                if text.contains(&format!("={}", at.file.to_ascii_lowercase())) {
+                    continue;
+                }
+                spaced += 1;
+                by_track.push(track.clone());
+                match parts.iter().find_map(|p| p.by_leaf(&at.file).map(|e| p.read(e))) {
+                    Some(bytes) => {
+                        Mesh::parse(&bytes).unwrap_or_else(|why| panic!("{track}: {}: {why}", at.file));
+                    }
+                    None => missing.push(format!("{track}: {}", at.file)),
+                }
+            }
+        }
+    }
+    by_track.dedup();
+    eprintln!("{shapes} shapes, {spaced} spelled with a space, in {by_track:?}");
+    assert!(missing.is_empty(), "{} squeezed shapes not in their archives: {missing:?}", missing.len());
+    assert!(spaced >= 62, "{spaced} names had a space in the scene");
+}

@@ -167,7 +167,7 @@ impl Ini {
 /// Whitespace out, quotes out — except between `[` and `]`, where the reader keeps spaces so that a
 /// section may be called `Front Tire`, and inside quotes, where it keeps them so that a path may
 /// have one.
-fn squeeze(line: &str) -> String {
+pub(crate) fn squeeze(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut depth = 0i32;
     let mut quoted = false;
