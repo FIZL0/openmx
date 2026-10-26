@@ -4734,6 +4734,33 @@ rider_score_trick_abort     boot 0x00280d70 (rider) rider vt+0x114: the trick an
 #   unbanked, +0x13f0/+0x13f4/+0x1400 zeroed. Called by player_wreck_entry and ride_reset_request.
 # The scoring section of the player update 0x0027c890 is ported as Score::frame (one-wheel nodes,
 # the bank, the backflip watch); the manager's mode handler for mode 3 (0x00268d00) scores nothing.
+# S92 — the freestyle event: crates/game-sim/src/event.rs, proved in crates/game-sim/tests/event.rs
+# and the gate in crates/game-sim/tests/score.rs. How each was found is in
+# research/journal/2026-10-26-s92-freestyle-event.
+# Correction to S79's card flags: 0x1 is "out" (the card's event time ran out), not networked; the
+#   join's flags are 0x80804; 0x40000 holds the card's clock; card +0xb4 seconds taking part, +0xc4
+#   seconds left, +0x1c4 the card's listener chain, +0x4 its owner (vt at +0x20).
+# Manager, beyond S79: +0x30 its listener (vt at +0x1c, next at +0x4 through +0x18), +0x5c flags
+#   (0x80 counting down, 0x2 all done, 0x10 a card timed out, 0x2000 the end called, 0x4000 rank
+#   by total, 0x200 zones), +0xa0 the time limit (0 = none), +0xa4 the leading card,
+#   +0xbc the countdown's length, +0xc0 its listener interval, +0xc4 its elapsed, +0xc8 the interval's
+#   accumulator. The modes written to +0x64 are 1, 2 and 3 only (no store of 4, 5 or 6 anywhere).
+score_manager_tick          boot 0x0025fcd0 (dt f12, mgr) countdown while not running (flag 0x80), or
+#                                           the mode's handler, the leading card, score_grow, the clock
+score_countdown_start       boot 0x002603d0 (mgr) length > 0: flag 0x80, elapsed and accumulator 0;
+#                                           else running at once, every card takes part
+score_mode3                 boot 0x00268d00 (dt f12, mgr) all done judged first; each card taking part
+#                                           and not out: distance, jump records (0x80000), +0xb4, its
+#                                           time down by dt unless held, out at 0 or under
+# The stunt competition activity (the freestyle event): constructor 0x003dd340, its manager at +0x50,
+#   its listener at +0x160. Activity words: +0x19c riders, +0x1a0 the target (hit.dat [HitData]
+#   StuntCompetitionScore, read 0x003ddea0), +0x1a4 the leading rider, +0x1b4 tie; player +0xc0 the
+#   target-reached latch.
+stunt_competition_start     boot 0x003de450 (activity) cards' time 0, countdown 3.33 s at 0.01 s
+stunt_competition_join      boot 0x003dd520 (activity, player) the card re-registered, total set aside
+stunt_competition_frame     boot 0x003ddf70 (dt, activity) leader, tie, warning, target; then the tick
+stunt_competition_end       boot 0x003dd870 (activity, player) the verdict; the total put back
+stunt_countdown_listener    boot 0x003dec80 (listener) thunk to 0x003de8c0: past 3.33 s the limit 120
 # --- V42: the speedometer's digital readout, the default in crates/openmx/src/overlay.rs ---
 # speedo_mode's setting is *(*(*(*0x0041f770 + 0x3d4) + 8) + 0x1c), 1 = digital; speedo_update
 #   forces digital when the byte at *(opts + 0xc) + 0x114 (players) is 2 or more. speedo_mode runs

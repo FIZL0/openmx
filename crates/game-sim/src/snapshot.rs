@@ -545,7 +545,7 @@ wire!(crate::Input { buttons, stick });
 wire!(crate::traffic::Car { clock, seg, point, head, normal, first, pose });
 wire!(crate::ghost::Ghost { clock, alpha, on });
 wire!(crate::rider::PutBack { placed, filled, held, wreck });
-wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip });
+wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out });
 wire!(crate::score::Node { flags, id, points, base, rate, mult, extra, held, granularity });
 wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching, search });
 wire!(crate::ragdoll_scene::BikeSearch { stood, centre, bound, built, listed, distance });

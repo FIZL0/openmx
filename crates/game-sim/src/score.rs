@@ -113,6 +113,14 @@ pub struct Score {
     /// The backflip watch: 0 nothing, 1 the bike's up axis tipped past level, 2 upside down, 3 the
     /// flip is round and waiting to be scored.
     pub flip: u8,
+    /// **The event's gate (S92):** no combo opens — the event's manager is not running yet (the
+    /// freestyle event's countdown) or the card has not joined it. An open combo still scores and
+    /// banks, but it does not grow. Never set outside an event ([`crate::event`]).
+    pub shut: bool,
+    /// **Out of time (S92):** the event's clock ran out on this card. No combo opens — but a trick
+    /// started while the backflip watch stands at 3 (round, not yet scored) still opens one, and a
+    /// combo already open scores and banks as before.
+    pub out: bool,
 }
 
 /// What the rider's tick reads to score: the bike's words as the frame left them.
@@ -237,7 +245,7 @@ impl Score {
         if !(((!s.front || !s.rear) && !s.wrecked) || id == BACKFLIP) {
             return;
         }
-        if !self.combo {
+        if !self.combo && (self.may_open() || (self.out && self.flip == 3)) {
             self.open();
         }
         let (base, rate) = if id == BACKFLIP { (BACKFLIP_POINTS, F::ZERO) } else { (F::ZERO, F::ZERO + TRICK_RATE) };
@@ -257,7 +265,7 @@ impl Score {
     /// ground or not, worth `points` at once, times the combo's length. MX vs. ATV's front flip and
     /// 360 are scored this way, each under its own id.
     pub fn start_flat(&mut self, id: u8, points: F) {
-        if !self.combo {
+        if !self.combo && self.may_open() {
             self.open();
         }
         self.push(points, F::ZERO, F::ZERO, F::ONE, GRANULARITY, id, flag::FLOOR | flag::TIMED);
@@ -412,7 +420,7 @@ impl Score {
     /// A second on one wheel: the combo opened if it is not, and the wheel's node if nothing is
     /// being scored.
     pub fn one_wheel(&mut self, id: u8) {
-        if !self.combo {
+        if !self.combo && self.may_open() {
             self.open();
         }
         if !self.scoring {
@@ -424,7 +432,9 @@ impl Score {
     /// **The manager's tick**, after every rider's: the combo's clock, the newest node grown, and the
     /// combo's points summed over the nodes that count.
     pub fn grow(&mut self, dt: F) {
-        if !self.combo {
+        // An event's card that does not take part is passed over, and a manager not running does
+        // not tick its cards at all (S92).
+        if !self.combo || self.shut {
             return;
         }
         self.combo_time = self.combo_time + dt;
@@ -441,6 +451,12 @@ impl Score {
             sum = sum + n.points;
         }
         self.combo_points = F(fpu::from_i32((sum / TOTAL_GRANULARITY).to_i32())) * TOTAL_GRANULARITY;
+    }
+
+    /// The manager lets a combo open on the card: its event is running, the card takes part and its
+    /// time has not run out (S92). Always, outside an event.
+    fn may_open(&self) -> bool {
+        !self.shut && !self.out
     }
 
     /// How many nodes the combo holds, as the float the multipliers are.
@@ -486,5 +502,12 @@ impl State for Score {
         w.f("wheelie", self.wheelie);
         w.f("stoppie", self.stoppie);
         w.u8("flip", self.flip);
+        // Only an event's card ever sets them, so a freeride's hash is what it was before S92.
+        if self.shut {
+            w.bool("shut", self.shut);
+        }
+        if self.out {
+            w.bool("out", self.out);
+        }
     }
 }

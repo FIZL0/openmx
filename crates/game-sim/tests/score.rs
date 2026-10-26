@@ -89,6 +89,11 @@ fn card_of(ee: &Ee, rider: u32) -> Score {
         wheelie: F(ee.f32_at(rider + at::WHEELIE)),
         stoppie: F(ee.f32_at(rider + at::STOPPIE)),
         flip: ee.u32_at(rider + at::FLIP) as u8,
+        shut: {
+            let mgr = ee.u32_at(ee.u32_at(rider + at::MANAGER) + 0x5c);
+            mgr & 1 == 0 || mgr & 8 != 0 || flags & 2 == 0
+        },
+        out: flags & 1 != 0,
     }
 }
 
@@ -338,6 +343,123 @@ fn the_card_scores_like_the_original() {
     }
     assert!(seen.iter().all(|&n| n > 0), "an operation never ran: {seen:?}");
     println!("score card: {} operations in {runs} runs bit-exact, up to {most} nodes in a combo", runs * ops);
+}
+
+/// **The event's gate (S92).** The card's operations as above, with the gate's words thrown about
+/// between them: the manager running or not, the card taking part or not, its time out or not, and
+/// the backflip watch at 3 (round) or not — the original's combo start refuses a card that is not
+/// in a running event or whose time is out, and its trick-start hook opens a combo anyway on a card
+/// out of time with a round flip. 20 runs of 500, the card and its gates the port's after each.
+#[test]
+fn the_event_gate_opens_like_the_original() {
+    let Some((fresh, rider, f)) = card_machine() else { return };
+    let [start, stop, _, wreck, grow, open, push, finish, hold, close] = f;
+    let card = fresh.u32_at(rider + at::CARD);
+    let mgr = fresh.u32_at(rider + at::MANAGER);
+    let (front, rear) = (fresh.u32_at(rider + at::FRONT), fresh.u32_at(rider + at::REAR));
+    let mut pick = Pick(0x51ed_270b_9a3c_e461);
+    let (runs, ops) = (20, 500);
+    let mut seen = [0usize; 9];
+    let (mut opened_out, mut refused) = (0, 0);
+    for run in 0..runs {
+        let (mut ee, _, _) = card_machine().expect("the state went away");
+        let mut port = Score::default();
+        assert_eq!(card_of(&ee, rider), port, "the state's card is not an open freeride card");
+        for op in 0..ops {
+            let s = Sense { front: pick.below(3) == 0, rear: pick.below(3) == 0, ..Sense::default() };
+            ee.set_u32(front + at::CONTACT, u32::from(s.front));
+            ee.set_u32(rear + at::CONTACT, u32::from(s.rear));
+            ee.set_u32(rider + at::WRECK, 0);
+            let kind = pick.below(9) as usize;
+            seen[kind] += 1;
+            let before = port.combo;
+            let what = match kind {
+                0 | 1 => {
+                    // The gate: manager running, card taking part, card out, the flip watch.
+                    let (on, part, out, round) =
+                        (pick.below(4) != 0, pick.below(4) != 0, pick.below(3) == 0, pick.below(2) == 0);
+                    let m = ee.u32_at(mgr + 0x5c) & !1;
+                    ee.set_u32(mgr + 0x5c, m | u32::from(on));
+                    let c = ee.u32_at(card + 8) & !3;
+                    ee.set_u32(card + 8, c | u32::from(out) | (u32::from(part) << 1));
+                    let watch = if round { 3 } else { pick.below(3) as u8 };
+                    ee.set_u32(rider + at::FLIP, u32::from(watch));
+                    (port.shut, port.out, port.flip) = (!on || !part, out, watch);
+                    format!("gate running {on} taking part {part} out {out} watch {watch}")
+                }
+                2 | 3 => {
+                    let id = if pick.below(4) == 0 { score::BACKFLIP } else { pick.below(24) as u8 };
+                    ee.call(start, &[u64::from(rider), u64::from(id)], &[], BUDGET);
+                    port.start(id, &s);
+                    if !before && port.combo && port.out {
+                        opened_out += 1;
+                    }
+                    if !before && !port.combo && (port.shut || port.out) {
+                        refused += 1;
+                    }
+                    format!("start {id} {s:?}")
+                }
+                4 => {
+                    ee.call(stop, &[u64::from(rider)], &[], BUDGET);
+                    port.finished();
+                    "stop".into()
+                }
+                5 => {
+                    // The manager's tick calls its grow only while it runs.
+                    if ee.u32_at(mgr + 0x5c) & 1 != 0 {
+                        ee.call(grow, &[u64::from(mgr)], &[0.033_33], BUDGET);
+                    }
+                    port.grow(F(0.033_33));
+                    "grow".into()
+                }
+                6 => {
+                    let id = if pick.below(2) == 0 { score::WHEELIE } else { score::STOPPIE };
+                    if ee.u32_at(card + 8) & 0x20 == 0 {
+                        ee.call(open, &[u64::from(mgr), u64::from(card)], &[], BUDGET);
+                    }
+                    if ee.u32_at(card + 8) & 0x40 == 0 {
+                        let args = [u64::from(mgr), u64::from(card), u64::from(id), 0xc];
+                        ee.call(push, &args, &[0.0, 0.0, 1000.0, 1.0, 10.0], BUDGET);
+                        ee.call(hold, &[u64::from(mgr), u64::from(card), 1], &[], BUDGET);
+                    }
+                    port.one_wheel(id);
+                    format!("one wheel {id}")
+                }
+                7 => {
+                    if ee.u32_at(card + 8) & 0x40 != 0 {
+                        ee.call(finish, &[u64::from(mgr), u64::from(card), 1], &[1.0], BUDGET);
+                        ee.call(hold, &[u64::from(mgr), u64::from(card), 0], &[], BUDGET);
+                    }
+                    if ee.u32_at(card + 8) & 0x20 != 0 {
+                        ee.call(close, &[u64::from(mgr), u64::from(card), 1], &[1.0], BUDGET);
+                    }
+                    if port.scoring {
+                        port.finish(F::ONE, true);
+                        port.hold(false);
+                    }
+                    if port.combo {
+                        port.close(F::ONE, true);
+                    }
+                    "bank".into()
+                }
+                _ => {
+                    // The wreck hook zeroes the flip watch; the gate's watch goes with it.
+                    ee.call(wreck, &[u64::from(rider)], &[], BUDGET);
+                    port.wrecked();
+                    "wreck".into()
+                }
+            };
+            let want = card_of(&ee, rider);
+            assert_eq!(bits(&port), bits(&want), "run {run}, operation {op} ({what}): the port's card is not the game's");
+            assert_eq!((port.shut, port.out), (want.shut, want.out), "run {run}, operation {op} ({what}): the gates");
+        }
+    }
+    assert!(seen.iter().all(|&n| n > 0), "an operation never ran: {seen:?}");
+    assert!(opened_out > 20 && refused > 100, "the gate's two cases ran too rarely: {opened_out} opened out of time, {refused} refused");
+    println!(
+        "event gate: {} operations in {runs} runs bit-exact; {refused} trick starts refused a combo, {opened_out} opened one out of time on a round flip",
+        runs * ops
+    );
 }
 
 /// **recording2's points.** The capture's own bike words drive the port's [`Score`], in the rider
