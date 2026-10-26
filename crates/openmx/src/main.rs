@@ -183,6 +183,7 @@ mod menu;
 mod moment;
 mod net;
 mod online;
+mod peer_looks;
 mod overlay;
 mod pace;
 mod pad;
@@ -536,6 +537,186 @@ fn took(rig: &mut Rig, up: Kind) {
     }
     rig.hud.note_vehicle(up.name());
     println!("vehicle: {}", up.name());
+}
+
+/// What an online peer's rig is dressed from mid-ride (N16): the ride's disc, models and wardrobe,
+/// and what the first player's rig was built on — a seat the session takes on after the ride
+/// loaded, or one a player of another look sits in now.
+struct PeerDress<'a> {
+    disc: &'a mut Disc,
+    assets: &'a mut Assets,
+    /// Opened here the first time a peer wears a look, if no rider of the ride's load did.
+    kit: &'a mut Option<dress::Kit>,
+    /// The first player's rider archive: without one the ride draws no bodies.
+    rider_member: Option<&'a str>,
+    /// The first player's rider and bike model, and the bike's archive, `.sub` and archives.
+    own: &'a roster::Pick,
+    bike_member: &'a str,
+    vehicle: &'a Vehicle,
+    archives: &'a [Res],
+    stunts: &'a [game_sim::trick::Stunt],
+    pack: Option<(&'a game_render::anim::PackClips, &'a [game_sim::trick::Stunt])>,
+    motion: game_sim::motion::Params,
+    /// The first player's body model, which a peer's own gear is a repaint of.
+    body_model: Option<&'a str>,
+    gpu_on: bool,
+    cameras: &'a (game_sim::camera::Follow, Option<game_sim::camera::Follow>),
+    hud: bool,
+}
+
+/// An online peer's rig in `pick`'s look (N16), as the ride's load dresses a split screen's other
+/// players: its rider's archive and its gear repainted in its look, its name and number on the
+/// jersey and the plates, its bike model's `.sub` — every model under names of its own (`@peer<n>`),
+/// which the GPU is handed after. Posed and drawn, with no view: its cameras are never looked through.
+fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, Vec<String>), String> {
+    let tag = format!("@peer{n}");
+    let mut made = Vec::new();
+    let theirs = member_ending(p.disc, &format!("{}.res", pick.rider)).ok();
+    let body = match (p.rider_member, &theirs) {
+        (None, _) => None,
+        (Some(_), Some(member)) => Body::load(vec![p.disc.res(member)?], &pick.rider, Sex::Male, "", p.stunts, p.motion).ok(),
+        (Some(member), None) => Body::load(vec![p.disc.res(member)?], &p.own.rider, Sex::Male, "", p.stunts, p.motion).ok(),
+    };
+    let body = body.map(|mut b| {
+        if let Some((clips, stunts)) = p.pack {
+            b.add_pack(clips, stunts);
+        }
+        b
+    });
+    if p.kit.is_none() && pick.look != roster::Look::default() {
+        *p.kit = Some(dress::Kit::open(p.disc));
+    }
+    // Its own name and number, on whatever of its bike and body is loaded below.
+    if let Some(k) = p.kit.as_mut() {
+        p.assets.make_texture(dress::NAME_TEXTURE, k.texture(&pick.rider, &pick.look, &pick.bike));
+    }
+    // Its own bike model's `.sub` when it is not the first player's.
+    let own_bike = match pick.bike != p.own.bike {
+        true => match member_ending(p.disc, &format!("{}.res", pick.bike)) {
+            Ok(member) => {
+                let res = [p.disc.res(&member)?];
+                match res[0].read_suffix(&format!("{}.sub", pick.bike)) {
+                    Ok(bytes) => Some((member, Vehicle::parse(&ini::text(&bytes)), res)),
+                    Err(e) => {
+                        println!("online: peer bike: {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                println!("online: peer bike: {e}; the first player's");
+                None
+            }
+        },
+        false => None,
+    };
+    let (member, vehicle) = match &own_bike {
+        Some((member, v, _)) => (member.as_str(), v),
+        None => (p.bike_member, p.vehicle),
+    };
+    let chassis = match vehicle.mcf.is_empty() {
+        true => None,
+        false => Chassis::load(vec![p.disc.res(member)?], &vehicle.mcf, BIKE_PREFIX, p.stunts, vehicle_params()).ok(),
+    };
+    let mut chassis = chassis.map(|mut c| {
+        if let Some((clips, stunts)) = p.pack {
+            c.add_pack(clips, stunts);
+        }
+        c
+    });
+    let (bike_model, parts) = match &own_bike {
+        Some((_, v, res)) => {
+            let own = format!("{CHASSIS}{tag}");
+            let file = game_render::vehicle::chassis_model(res, v);
+            let drawn = p.assets.load_repainted(res, &file, &own, &v.materials);
+            let parts = v
+                .parts
+                .iter()
+                .map(|part| {
+                    let name = format!("{}{tag}", part.model);
+                    p.assets.load_repainted(res, &part.model, &name, &v.materials);
+                    made.push(name.clone());
+                    game_render::scene::Part { model: name, placement: part.placement.clone() }
+                })
+                .collect();
+            (if drawn { own } else { CHASSIS.to_string() }, parts)
+        }
+        None => {
+            // On the GPU a pose is node matrices, so the shared chassis draws for every bike; in
+            // software a pose is the model's triangles, so the peer's is a copy.
+            let model = match (p.gpu_on, p.assets.models.get(CHASSIS).cloned()) {
+                (false, Some(loaded)) => {
+                    let own = format!("{CHASSIS}{tag}");
+                    p.assets.models.insert(own.clone(), loaded);
+                    own
+                }
+                _ => CHASSIS.to_string(),
+            };
+            // Its own plates when the wardrobe is open: the parts again under its own names.
+            let parts = match p.kit.is_some() {
+                true => p
+                    .vehicle
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        let name = format!("{}{tag}", part.model);
+                        p.assets.load_repainted(p.archives, &part.model, &name, &p.vehicle.materials);
+                        made.push(name.clone());
+                        game_render::scene::Part { model: name, placement: part.placement.clone() }
+                    })
+                    .collect(),
+                false => p.vehicle.parts.clone(),
+            };
+            (model, parts)
+        }
+    };
+    made.push(bike_model.clone());
+    // Its body again under its own name, in its own gear's renames and its look's paint.
+    let body_model = match (p.body_model, &body) {
+        (Some(name), Some(b)) => {
+            let own = format!("{name}{tag}");
+            let mut res = vec![p.disc.res(theirs.as_deref().or(p.rider_member).expect("a body was loaded"))?];
+            let pairs = match p.kit.as_ref() {
+                Some(k) => {
+                    if let Some(custom) = &k.custom {
+                        res.push(p.disc.res(custom)?);
+                    }
+                    k.repaint(&b.rider.suit, &pick.look)
+                }
+                None => b.rider.suit.materials.clone(),
+            };
+            match p.assets.load_repainted(&res, name, &own, &pairs) {
+                true => {
+                    made.push(own.clone());
+                    Some(own)
+                }
+                false => Some(name.to_string()),
+            }
+        }
+        (name, _) => name.map(str::to_string),
+    };
+    if let Some(c) = &mut chassis {
+        c.stop_fork_in(&p.assets.models, &bike_model, &parts);
+    }
+    let rig = Rig {
+        body,
+        chassis,
+        camera: Race { cam: p.cameras.0.clone() },
+        plane_camera: p.cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
+        wreck_camera: chase::WreckCamera::new(false),
+        framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
+        fov_ease: Default::default(),
+        hud: Hud::new(p.hud),
+        odometer: overlay::Odometer::default(),
+        preload_meter: overlay::PreloadMeter::default(),
+        ride_hud: ride_hud::Tracker::default(),
+        bike_model,
+        body_model,
+        parts,
+        modified: false,
+        riding: None,
+    };
+    Ok((rig, made))
 }
 
 /// What the original's HUD shows of a player's own ride (V26, V28): their odometer, which machine is
@@ -1351,6 +1532,18 @@ fn apply_picks(args: &mut Args, picks: &[roster::Pick]) {
     args.others = rest.to_vec();
 }
 
+/// The first player's pick as the ride draws it (N16): what an online peer whose pick does not say
+/// is drawn as.
+fn own_pick(args: &Args) -> roster::Pick {
+    roster::Pick {
+        bike: args.bike.clone(),
+        set: args.set.unwrap_or(roster::Set::FREERIDE),
+        rider: args.rider.clone(),
+        look: args.look.clone(),
+        preset: String::new(),
+    }
+}
+
 fn run() -> Result<(), String> {
     let Some(args) = parse_args()? else {
         return Ok(());
@@ -1613,6 +1806,8 @@ fn front_end(args: Args) -> Result<(), String> {
     front.menu.lobby.pick = openmx_net::Pick::new(&args.rider, &roster::Set::FREERIDE.word());
     // In the first seat's look from the garage (P86), which the seat list shows the others.
     front.menu.lobby.pick.look = front.menu.picks.0[0].look.text();
+    // And on the bike model this machine draws its own as, which every other machine draws (N16).
+    front.menu.lobby.pick.model = args.bike.clone();
     front.menu.lobby.lan = front.network.online().relay == openmx_net::Relay::Off;
     let window = Screen::open(args.renderer, &args.display, args.size, args.scale, "openmx")?;
     let seats = open_seats(&args, pad.as_deref(), front.wiring());
@@ -2225,6 +2420,22 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
     // is touched at all.
     let lobby_room = shell.as_deref().and_then(|s| s.front.menu.lobby.start.as_ref()).map(|(room, _)| room.clone());
+    // A ride from the lobby draws every seat's rider in their own look (N16): the room's picks are
+    // the shell's other seats, this machine's first, each loaded as a split screen's other players
+    // are, with no view of their own. A drop-in's seats come as the host takes it on, and are
+    // dressed then.
+    let mut lobby_riders: Option<usize> = None;
+    let mut peer_dress = peer_looks::Dressed::default();
+    if let Some(((room, me), false)) = shell.as_deref().and_then(|s| s.front.menu.lobby.start.as_ref().map(|start| (start, s.front.menu.lobby.drop_in)))
+        && let Some(others) = peer_looks::lobby_others(room, me, &own_pick(&args))
+    {
+        for (d, pick) in others.iter().enumerate() {
+            println!("online: seat {} rides {} on the {} as {:?}", d + 2, pick.rider, pick.bike, pick.look.text());
+        }
+        lobby_riders = Some(others.len() + 1);
+        args.others = others;
+        peer_dress = peer_looks::Dressed::lobby(room, me);
+    }
     // Everything up to the window is built in `build` (P127): under the front end on a thread of its
     // own while the window draws the loading screen and keeps answering, here without one. The
     // drawn ground's chunks are built in it too when the window's GPU will want them.
@@ -2579,7 +2790,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // (N5): seat `s` starts where local player `s + 1` would, on the first's bike.
     let riders = match &args.online {
         Some(_) => online::Online::seats(args.seats.as_deref())?.max(args.players),
-        None => args.players,
+        None => lobby_riders.unwrap_or(args.players).max(args.players),
     };
     for i in 1..riders {
         match args.others.get(i - 1) {
@@ -4264,7 +4475,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
         // that parks none for them, starting beside the start line (P113), and starts in it if the
         // setup picked it (P41). Only a disc without the plane rides the bike, and says so.
-        let pick = front.as_ref().map_or(menu::Machine::Bike, |f| f.menu.settings.machines[i + 1]);
+        // An online peer's seat (N16) starts as its own machine says, at tick 0 or as it is taken on.
+        let pick = match i + 1 < args.players {
+            true => front.as_ref().map_or(menu::Machine::Bike, |f| f.menu.settings.machines[i + 1]),
+            false => menu::Machine::Bike,
+        };
         let plane = match plane_starts.get(i + 1) {
             Some(&start) => lot.plane_anywhere(i + 1, flight_for(i + 1), start),
             None => lot.plane(i + 1, flight_for(i + 1)),
@@ -4344,7 +4559,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // (P41), and any player's Start opens the pause for them: 1P's through the front end's reader,
     // the others' through one each here, which only ever look for Start while the ride runs.
     if let Some(front) = front.as_deref_mut() {
-        front.menu.riders = world.seats.len();
+        // The local players: online the other machines' seats are drawn beside them (N16).
+        front.menu.riders = args.players.min(world.seats.len());
         front.menu.modified = !mods.is_original();
         front.menu.up = [menu::Machine::Bike; menu::SEATS_MAX];
         front.menu.switchable = [false; menu::SEATS_MAX];
@@ -4410,7 +4626,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if head.is_some() || world.tape.is_some() {
                 return Err("an online ride rides no tape: drop --play and --record".into());
             }
-            if world.seats.len() != 1 {
+            if args.players != 1 {
                 return Err("an online ride from the lobby has one local player: drop --players".into());
             }
             let disc = &front.as_deref().expect("from the lobby").network.disc;
@@ -4491,6 +4707,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     let mut online_want: Option<Kind> = None;
     let mut online_frames = 0u32;
+    // The online peers' rigs dressed mid-ride (N16), each under model names of its own, and the
+    // first player's pick, which a peer whose pick does not say is drawn as.
+    let mut peers_dressed = 0usize;
+    let own = own_pick(&args);
     // The session markers kept between rides (P99), in `markers/` beside `settings.txt`. A played
     // tape starts its first player on the markers it was made with and keeps nothing — its ride is
     // the tape's, not the player's; online the seats' came with the lobby's picks, a drop-in's handshake
@@ -4861,7 +5081,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             let first = front.reader.read_joint(&seat0);
             let mut presses = vec![first];
-            for (i, r) in (1..world.seats.len()).zip(&mut start_readers) {
+            for (i, r) in (1..world.seats.len().min(args.players)).zip(&mut start_readers) {
                 let (report, taps) = menu_report(i);
                 presses.push(r.read_taps(&report, taps));
             }
@@ -4988,6 +5208,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         // the preset this seat rides on now (N13), which the room tells a joiner's machine
                         pick.preset = net::rides::preset(&world.seats[0].sim).unwrap_or(0) as u8;
                         pick.look = front.menu.lobby.pick.look.clone();
+                        pick.model = args.bike.clone();
                         room.take(openmx_net::HOST, &[pick]);
                         (room.riding, room.drop_in) = (true, true);
                         let net = front.network.open(&mut front.menu, room);
@@ -5341,6 +5562,99 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let Some(front) = front.as_deref_mut() {
                 front.menu.leave_to = on.leaves_to();
                 front.menu.session = !on.leaving();
+            }
+            // Every peer's rider in their own look (N16): a seat the session took on since the ride
+            // loaded (a freeride opened online, a drop-in) gets a shell seat of its own, posed and
+            // drawn with no view, and a seat sat in by a player it is not dressed for is dressed
+            // again, in their pick's rider, look and bike model.
+            while world.seats.len() < on.seat_of().0 {
+                let i = world.seats.len();
+                let garage = Garage::new(Kind::Bike, lot.plane(i, flight_for(i)))?;
+                let mut seat = Seat {
+                    reports: [Report::missing(); PADS],
+                    sim: spawn.clone(),
+                    garage,
+                    riding: true,
+                    start_freezes: false,
+                    waiting: false,
+                    paused: false,
+                    said: rider::Frame::default(),
+                    inverted: false,
+                    hands: Controls::default(),
+                    teleported: false,
+                    clears: 0,
+                    markers: true,
+                    together: false,
+                };
+                seat.sim.markers.up(vehicle::markers_of(Kind::Bike));
+                world.seats.push(seat);
+                // Its rig as the first player's until the room says who sits in it, just below.
+                peers_dressed += 1;
+                let mut dress = PeerDress {
+                    disc: &mut disc,
+                    assets: &mut assets,
+                    kit: &mut kit,
+                    rider_member: rider_member.as_deref(),
+                    own: &own,
+                    bike_member: &bike_member,
+                    vehicle: &vehicle,
+                    archives: &archives,
+                    stunts: &table.stunts,
+                    pack: pack_clips.as_ref().map(|c| (c, stunts.stunts.as_slice())),
+                    motion: phy.motion(),
+                    body_model: join_body_model.as_deref(),
+                    gpu_on,
+                    cameras: &join_cameras,
+                    hud: args.hud,
+                };
+                let (rig, made) = dress_peer(&mut dress, peers_dressed, &own)?;
+                if let (true, Some(r)) = (gpu_on, renderer_of(&mut offscreen, window)) {
+                    r.upload_models(&assets, &made.iter().collect::<Vec<_>>());
+                }
+                rigs.push(rig);
+                kept_markers.push(None);
+                marked_portals.push(Vec::new());
+                seated.push(false);
+                bike_words.push(bike_words[0].clone());
+                stock_phys.push(stock_phys[0].clone());
+            }
+            let sat: Vec<Option<openmx_net::room::Seat>> = (0..world.seats.len()).map(|d| on.seat_pick(d).cloned()).collect();
+            for d in peer_dress.changed(&sat.iter().map(Option::as_ref).collect::<Vec<_>>()) {
+                let Some(taken) = &sat[d] else { continue };
+                let pick = peer_looks::garage_pick(&taken.pick, &own);
+                peers_dressed += 1;
+                let mut dress = PeerDress {
+                    disc: &mut disc,
+                    assets: &mut assets,
+                    kit: &mut kit,
+                    rider_member: rider_member.as_deref(),
+                    own: &own,
+                    bike_member: &bike_member,
+                    vehicle: &vehicle,
+                    archives: &archives,
+                    stunts: &table.stunts,
+                    pack: pack_clips.as_ref().map(|c| (c, stunts.stunts.as_slice())),
+                    motion: phy.motion(),
+                    body_model: join_body_model.as_deref(),
+                    gpu_on,
+                    cameras: &join_cameras,
+                    hud: args.hud,
+                };
+                match dress_peer(&mut dress, peers_dressed, &pick) {
+                    Ok((rig, made)) => {
+                        if let (true, Some(r)) = (gpu_on, renderer_of(&mut offscreen, window)) {
+                            r.upload_models(&assets, &made.iter().collect::<Vec<_>>());
+                        }
+                        rigs[d] = rig;
+                        if hud_art.tags.len() <= d {
+                            hud_art.tags.resize(d + 1, Default::default());
+                        }
+                        hud_art.tags[d] = overlay::Tag { name: pick.look.name.clone(), number: pick.look.number.clone() };
+                        println!("online: seat {} ({}) rides {} on the {} as {:?}", d + 1, taken.peer, pick.rider, pick.bike, pick.look.text());
+                    }
+                    Err(e) => println!("online: seat {} ({}): not dressed: {e}", d + 1, taken.peer),
+                }
+                peer_dress.dress(d, taken);
             }
             // Every seat back into the shell's, this machine's first: the others are drawn beside it.
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
