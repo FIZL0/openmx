@@ -6894,18 +6894,19 @@ fn save_state_watches(cap: &Capture, ticks: &[u64]) -> Vec<Watch> {
     watches
 }
 
-/// The tick [`the_save_state_run_starts_from_the_originals_wheels`] agrees through on every lane: tick
-/// 0 is the save state word for word, and tick 1 parts by ulps on the lateral terms (`vel[0]`, the tire
-/// forces' `x`) and by more on two — the roll quaternion's `z` (1.3e-3 of it) and the pitch's angular
-/// acceleration (1.3%) — which seeding the balance and the pitch integral did not move. S64's journal
-/// entry has the numbers. A ratchet: parting at or before it fails, agreeing further asks to raise it.
-const SAVE_STATE_AGREES_THROUGH: u64 = 0;
+/// The tick [`the_save_state_run_starts_from_the_originals_wheels`] agrees through on every lane
+/// (`u64::MAX`: every tick of the capture). Tick 1 parted at S64 and, by the time S107 Ee-stepped it, on
+/// one lane only: the angular history's `y`, by an ulp, off an angular acceleration one ulp out — the
+/// torque agreed word for word at every contributor of both substeps, and the inverse inertia did not
+/// (its `1/18.4` is the original's general inverse, [`game_sim::math::inverse`], not a reciprocal).
+/// A ratchet: parting anywhere fails.
+const SAVE_STATE_AGREES_THROUGH: u64 = u64::MAX;
 
 /// The tick the same run's bike agrees through on its position (`rider.ride.origin`, the chassis
 /// transform's translation): `x` and `z` hold on every tick of the capture, `y` parts by an ulp of
-/// 208 at tick 22 at S64 (agreeing through 41 once main's later commits came in). Before S64 it parted at
-/// tick 1, by 0.00086.
-const SAVE_STATE_POSITION_AGREES_THROUGH: u64 = 41;
+/// 208 at tick 22 at S64 (agreeing through 41 once main's later commits came in), and on every tick
+/// (`u64::MAX`) since S107's inverse inertia. Before S64 it parted at tick 1, by 0.00086.
+const SAVE_STATE_POSITION_AGREES_THROUGH: u64 = u64::MAX;
 
 /// **The acceptance run's first ticks, started from the save state's whole bike** — the chassis'
 /// integrator, both wheels ([`SaveState::seed_wheel`]), the air state, the drivetrain and the
@@ -6974,7 +6975,7 @@ fn the_save_state_run_starts_from_the_originals_wheels() {
                 "{what} parts from the original at tick {t}, at or before {name} = {through}: a regression"
             ),
             Some(t) if t > through + 1 => println!("{what} now agrees through tick {}: raise {name}", t - 1),
-            None => println!("{what} agrees on every tick: raise {name}"),
+            None if through != u64::MAX => println!("{what} agrees on every tick: raise {name} to u64::MAX"),
             _ => {}
         };
         // The ratchets are S64's capture's: s8-start's has no tick 1 and fewer lanes.
@@ -6995,7 +6996,29 @@ fn the_save_state_run_starts_from_the_originals_wheels() {
 // out of the human's biplane state on free06 (the pause menu's "Switch To Machine: Bike", then a
 // teleport onto the bed): along its x≈4591 straight from standing (gas, the brake, gas, a turn), and
 // straight across its z≈4607 straight at speed. Each replays here from the state's whole bike, S64's
-// way, on the same bike (`race250a.phy` on `250_motoxxx`'s wheel mounts) and the same pads.
+// way, on the same bike (`race250p.phy` on `250_motoxxx`'s wheel mounts) and the same pads.
+
+/// **The chassis' inverse inertia is the original's, word for word** (S107): the rows a ride builds
+/// off its `.phy` against the three the human's save state holds at the chassis' `+0xf0` (the tensor
+/// is at `+0xb0`, and nothing in a frame writes either). The old per-axis reciprocal was an ulp low on
+/// `race125p`'s `1/18.4` and `+0` where these are `−0`, which was all of tick 1's parting.
+#[test]
+fn the_chassis_inverse_inertia_is_the_save_states() {
+    let Some((_, acc)) = acceptance_capture() else { return };
+    let Some(st) = SaveState::open().filter(|s| s.leads(&acc)) else { return };
+    let c = st.rider_at(0x7a4).expect("the chassis");
+    let ran = in_the_world_of(&acc, |_, _, bike| {
+        let sim = acceptance_start(&acc, 0, bike).unwrap();
+        let ours = sim.rider.ride.chassis.inv_inertia.rows.map(|r| r.0.map(f32::to_bits));
+        for (r, row) in ours.iter().enumerate() {
+            let theirs: [u32; 4] = core::array::from_fn(|k| st.word(c + 0xf0 + 16 * r as u32 + 4 * k as u32).unwrap());
+            assert_eq!(*row, theirs, "inverse inertia row {r}: ours {row:08x?}, the state's {theirs:08x?}");
+        }
+        let tensor: [u32; 3] = core::array::from_fn(|k| st.word(c + 0xb0 + 20 * k as u32).unwrap());
+        println!("the tensor's diagonal {tensor:08x?}; the inverse agrees word for word");
+    });
+    assert!(ran.is_some() || Disc::open().is_none(), "the disc is here but the world was not built");
+}
 
 /// S89's rides: `context/capture/s89/<name>.csv` and the RAM image of the state it was recorded from,
 /// `context/states/s89-<name>.eeMemory.bin` (`./kit state ram` of the slot it was saved to).
@@ -7007,16 +7030,21 @@ const S89_RIDER: [u32; 6] = [0x34, 0x34, 0x8, 0x8, 0x8, 0x0];
 
 /// The tick each of [`S89_RIDES`] agrees through on every lane, in that order. A ratchet like
 /// [`SAVE_STATE_AGREES_THROUGH`]: parting at or before it fails, agreeing further asks to raise it.
-const S89_AGREES_THROUGH: [u64; 2] = [0, 1];
+/// Both now part at their first compared tick (2), in the second substep of tick 1: the front wheel's
+/// swept contact on the bed lands 0.009 ft further along z than the original's, and the compression and
+/// spring force follow it (S107; every force before it agrees word for word with the Ee-stepped image).
+const S89_AGREES_THROUGH: [u64; 2] = [1, 1];
 
 /// The tick each wheel's slip and contact lanes agree through on each of [`S89_RIDES`] (`u64::MAX`:
-/// every tick), though the chassis parts at tick 1. A ratchet: parting earlier fails.
+/// every tick), though the chassis parts at tick 1. A ratchet: parting earlier fails. The two locked
+/// lanes were re-pinned by S107, which put the rides on the states' own bike and levers: front 280
+/// (from 279), rear 276 (from 277).
 const S89_LANES_AGREE_THROUGH: [(&str, [u64; 2]); 12] = [
     ("rider.ride.front.slip.spinning", [u64::MAX, u64::MAX]),
-    ("rider.ride.front.slip.locked", [279, u64::MAX]),
+    ("rider.ride.front.slip.locked", [280, u64::MAX]),
     ("rider.ride.front.slip.sliding", [u64::MAX, u64::MAX]),
     ("rider.ride.rear.slip.spinning", [31, 16]),
-    ("rider.ride.rear.slip.locked", [277, u64::MAX]),
+    ("rider.ride.rear.slip.locked", [276, u64::MAX]),
     ("rider.ride.rear.slip.sliding", [u64::MAX, u64::MAX]),
     // Along, the bed is rows 0-107: the contact agrees until the wheels drop off it.
     ("rider.ride.front.w.ray_hit", [105, 49]),
@@ -7123,11 +7151,30 @@ fn the_dallas_rail_rides_replay_from_their_save_states() {
 
         let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
         let inputs = inputs_from_capture(&cap).unwrap_or_else(|e| panic!("{name}: {e}"));
-        in_the_world_on(&cap, "race250a.phy", "250_motoxxx", |world, named, bike| {
+        in_the_world_on(&cap, "race250p.phy", "250_motoxxx", |world, named, bike| {
             if let Some(b) = &bike {
                 for (w, mount) in [b.mounts.0, b.mounts.1].into_iter().enumerate() {
                     let at = st.wheel_at(w).and_then(|a| st.vf(a + 0xa0));
                     println!("{name}: wheel {w} hangs at {mount:?}, the original's at {at:?}");
+                }
+                // The states ride `race250p`, not `race250a` (S107): the two differ only in their tires'
+                // SideForce and SlippingSideForce curves, and the front wheel's surface-0 table in the
+                // image is `race250p`'s, word for word.
+                let a = st.wheel_at(0).expect("the front wheel");
+                let s = &b.phy.front.surfaces[0];
+                for (k, want) in [s.side_force, s.slipping_side_force, s.max_drive_force, s.max_side_force,
+                                  s.max_slipping_side_force, s.skid_drive_force, s.skid_side_force,
+                                  s.skid_slipping_side_force, s.slipping_side_force_round_off,
+                                  s.slipping_side_force_drop_off, s.slipping_side_force_scale,
+                                  s.slipping_side_force_speed_scale, s.braking_side_force_round_off,
+                                  s.braking_side_force_drop_off, s.braking_side_force_scale,
+                                  s.braking_side_force_speed_scale, s.side_force_round_off,
+                                  s.side_force_drop_off, s.side_force_scale, s.side_force_speed_scale]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let got = st.word(a + 0x238 + 0x40 * k as u32).expect("the grip table");
+                    assert_eq!(got, want.0.to_bits(), "{name}: the front's surface-0 grip word {k}");
                 }
             }
             let mut sim = acceptance_start(&cap, 0, bike).unwrap();
@@ -7140,6 +7187,8 @@ fn the_dallas_rail_rides_replay_from_their_save_states() {
             if let Some(d) = st.drivetrain() {
                 d.seed(ride);
             }
+            st.seed_levers(ride).expect("the levers");
+            st.seed_engine_state(ride).expect("the engine's state");
             let mut watches = Vec::new();
             for (col, path) in chassis_lanes() {
                 let Ok(w) = cap.float(&col, &path) else { continue };

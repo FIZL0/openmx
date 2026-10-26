@@ -733,11 +733,11 @@ impl Ride {
                 awake: 1,
                 cofg: p.mv.cofg,
                 inv_mass: if mass == F::ZERO { F::ZERO } else { F::ONE / mass },
-                inv_inertia: Mat3::new(
+                inv_inertia: inverse_inertia(inertia).unwrap_or_else(|| Mat3::new(
                     Vf::new(inv(inertia.x()).0, 0.0, 0.0, 0.0),
                     Vf::new(0.0, inv(inertia.y()).0, 0.0, 0.0),
                     Vf::new(0.0, 0.0, inv(inertia.z()).0, 0.0),
-                ),
+                )),
                 quat: chassis::CLEAR,
                 free: [1; 3],
                 ang_free: [1; 3],
@@ -1268,6 +1268,22 @@ fn integrate(ch: &mut chassis::Chassis, dt: F, entry: &Mat4, origin: &mut Vf) ->
         }
     }
     calls
+}
+
+/// The chassis' inverse inertia, as the original hands a rigid body its tensor (the chassis' vtable
+/// `+0x7c`): the `.phy`'s `Inertia` laid on a diagonal, `w` one, stored, and put through the general
+/// [`math::inverse`] — not one reciprocal per axis, which parts from it by an ulp on the vertical axis of
+/// `race125p` (1/18.4) and makes its off-diagonal zeros `+0` where the original's are `−0` (S107).
+/// `None` on a singular tensor, where the original leaves the rows as they were.
+fn inverse_inertia(inertia: Vf) -> Option<Mat3> {
+    let tensor = Mat4([
+        Vf::new(inertia.x(), 0.0, 0.0, 0.0),
+        Vf::new(0.0, inertia.y(), 0.0, 0.0),
+        Vf::new(0.0, 0.0, inertia.z(), 0.0),
+        Vf::new(0.0, 0.0, 0.0, 1.0),
+    ]);
+    let m = math::inverse(&tensor)?;
+    Some(Mat3::new(m.0[0], m.0[1], m.0[2]))
 }
 
 /// The seven answers, read off one pass' questions.
