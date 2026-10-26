@@ -828,6 +828,52 @@ impl Plane {
     }
 }
 
+/// **The pilot's lean** (V78): what the original's plane asks its pilot's body for every tick and
+/// how the body eases it, kept per seat by the drawing side, which has no body step of its own for
+/// the pilot ([`biplane_anim::Lean`]).
+///
+/// The plane's measure step runs before its controls, so the pilot leans to the pad the *previous*
+/// tick's controls left, a tick behind the surfaces; a plane reset — the chord, a wreck's recovery,
+/// and the swap onto the plane — raises the plane's reset flag, which snaps both axes onto the stick
+/// for the two measures that see it ([`biplane_anim::Reset`]). Presentation only: it reads the flight
+/// and writes nothing back.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PilotLean {
+    pub lean: biplane_anim::Lean,
+    pub reset: biplane_anim::Reset,
+    /// The flight's pad as the last tick's controls left it, elevator and aileron; `None` while no
+    /// plane is flown.
+    pub stick: Option<(F, F)>,
+}
+
+impl PilotLean {
+    /// One tick, after the plane's step: `plane` the seat's flown plane ([`Garage::plane_flown`]), or
+    /// `None` on the bike, which lets go of the lean so the next swap onto the plane snaps it again;
+    /// `put_back` whether this tick's step reset the plane.
+    pub fn step(&mut self, dt: F, plane: Option<&Plane>, put_back: bool) {
+        let Some(plane) = plane else {
+            *self = PilotLean::default();
+            return;
+        };
+        if self.stick.is_none() || put_back {
+            self.reset.reset();
+        }
+        // The controls zero the pad while the plane is not flown, which is the pad a swap's first
+        // measure reads.
+        let (elevator, aileron) = self.stick.unwrap_or((F::ZERO, F::ZERO));
+        let pilot = biplane_anim::Pilot { elevator, aileron, held: self.reset.just, ..Default::default() };
+        self.lean.step(dt, &pilot);
+        self.reset.frame();
+        self.stick = Some(plane.flight.as_ref().map_or((F::ZERO, F::ZERO), |f| (f.pad.elevator, f.pad.aileron)));
+    }
+
+    /// The two weights the pilot's clips are drawn at, `(phase, mix)` ([`game_render::biplane::seat`]).
+    pub fn weights(&self) -> (f32, f32) {
+        let (phase, mix) = self.lean.weights();
+        (phase.0, mix.0)
+    }
+}
+
 /// Which machine has the player's controller, and the plane beside the bike.
 ///
 /// The bike is the [`Sim`] the shell already runs — its ride, its rider, its pad — and stays there;

@@ -793,6 +793,7 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
         hud: Hud::new(p.hud),
         odometer: overlay::Odometer::default(),
         preload_meter: overlay::PreloadMeter::default(),
+        pilot_lean: vehicle::PilotLean::default(),
         ride_hud: ride_hud::Tracker::default(),
         bike_model,
         body_model,
@@ -968,6 +969,8 @@ struct Rig {
     odometer: overlay::Odometer,
     /// This player's preload meter, a tick at a time (V53).
     preload_meter: overlay::PreloadMeter,
+    /// This player's pilot's lean in the plane, a tick at a time (V78).
+    pilot_lean: vehicle::PilotLean,
     /// This player's ride HUD over time (P121): the trick pop-up, the score's flash, the camera toast.
     ride_hud: ride_hud::Tracker,
     bike_model: String,
@@ -1224,7 +1227,7 @@ fn pilots(seats: &[Seat], rigs: &mut [Rig], plane_drawn: &[Biplane], before: &[O
             let body = rig.body.as_mut()?;
             let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
             let at = was.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
-            let palette = biplane::pilot_palette(body, &drawn.anchors)?;
+            let palette = biplane::pilot_palette(body, &drawn.anchors, rig.pilot_lean.weights())?;
             Some(Pilot { plane: at, at: drawn.pilot(at), palette })
         })
         .collect()
@@ -3506,7 +3509,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         };
         let mut pilot = None;
         if let (Some(plane), Some(body)) = (&plane, &mut body) {
-            if !biplane::seat(&mut body.rig.set, 0.5, 0.0) {
+            if !biplane::seat(&mut body.rig.set, 0.5, 0.5) {
                 println!("biplane: the rider's archive has no {:?}, no pilot", biplane::PILOT_CLIPS);
             } else if let Some(loaded) = assets.models.get_mut(body.geometry()) {
                 let held = body.skin_into_at(loaded, 0, Some(&plane.anchors));
@@ -4148,6 +4151,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
+            pilot_lean: vehicle::PilotLean::default(),
             ride_hud: ride_hud::Tracker::default(),
             bike_model,
             body_model: own_body,
@@ -4181,6 +4185,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
+            pilot_lean: vehicle::PilotLean::default(),
             ride_hud: ride_hud::Tracker::default(),
             bike_model: CHASSIS.to_string(),
             body_model,
@@ -5487,6 +5492,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             hud: Hud::new(args.hud),
                             odometer: overlay::Odometer::default(),
                             preload_meter: overlay::PreloadMeter::default(),
+                            pilot_lean: vehicle::PilotLean::default(),
                             ride_hud: ride_hud::Tracker::default(),
                             bike_model,
                             body_model,
@@ -5915,6 +5921,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if simulated {
             for (seat, rig) in world.seats.iter().zip(&mut rigs) {
                 rig.preload_meter.step(preload_sense(seat));
+                rig.pilot_lean.step(dt, seat.garage.plane_flown(), seat.said.respawned);
             }
         }
         // A world loads the tiles ahead of the riders and lets the far ones go (MD8): a plane only
