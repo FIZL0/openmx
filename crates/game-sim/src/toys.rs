@@ -349,7 +349,8 @@ impl Rig {
 /// One collision part, riding a joint.
 #[derive(Clone, Debug)]
 pub struct Part {
-    pub joint: usize,
+    /// The joint, or `None` for the toy's root node itself (the hierarchy's bone 0): the placement.
+    pub joint: Option<usize>,
     pub mesh: Mesh,
 }
 
@@ -367,6 +368,16 @@ pub struct Spec {
     pub mesh: Option<Mesh>,
     /// A `.col` hierarchy's parts (kind 1): each follows its joint.
     pub parts: Vec<Part>,
+}
+
+impl Spec {
+    /// Where a collision part stands: its joint's world matrix, or the placement for the root's.
+    fn at(&self, part: &Part, worlds: &[Mat4]) -> Mat4 {
+        match part.joint {
+            Some(j) if j < worlds.len() => worlds[j],
+            _ => self.place,
+        }
+    }
 }
 
 /// A toy's clock: its motion object's.
@@ -477,7 +488,7 @@ impl Toys {
                 let locals = pose(&self.motions[spec.motion], &spec.rig, self.clocks[k].time, &mut self.hints.clone());
                 let worlds = self.worlds(k, &locals);
                 for part in &spec.parts {
-                    props.props.push(Prop::on(part.mesh.clone(), &worlds[part.joint.min(worlds.len() - 1)]));
+                    props.props.push(Prop::on(part.mesh.clone(), &spec.at(part, &worlds)));
                 }
             }
         }
@@ -504,7 +515,7 @@ impl Toys {
                 let worlds = self.worlds(k, &locals);
                 for (p, part) in spec.parts.iter().enumerate() {
                     if let Some(prop) = props.props.get_mut(a + p) {
-                        prop.stand(&worlds[part.joint.min(worlds.len() - 1)]);
+                        prop.stand(&spec.at(part, &worlds));
                     }
                 }
             }

@@ -530,6 +530,12 @@ impl Set {
     pub fn world(&self) -> Vec<M4> {
         self.skeleton.world(&self.pose)
     }
+
+    /// The archives back, for a loader that builds one set after another out of the same list (V43's
+    /// animated toys, one set per `.mcf`).
+    pub fn into_archives(self) -> Vec<Res> {
+        self.archives
+    }
 }
 
 /// The loader the simulation's clip table is filled through.
@@ -547,6 +553,13 @@ impl Animations for Set {
             .member(name)
             .into_iter()
             .find_map(|want| exact(&self.archives, &want))
+            // A track's `.mcf` writes no content directory and keeps its clips beside it, so a name
+            // whose `VUE=` is another's file is that file in whatever folder (V43: free09's
+            // `SETI_windmill_02` is `SETI_windmill.vue`).
+            .or_else(|| {
+                let none = self.set.directory.is_empty();
+                none.then(|| self.member(name).into_iter().find_map(|want| suffix(&self.archives, &format!("\\{want}")))).flatten()
+            })
             .or_else(|| suffix(&self.archives, &format!("{name}.mot")));
         let Some((member_name, read)) = found else {
             self.missing.push(Missing::NoMember(name.to_string()));

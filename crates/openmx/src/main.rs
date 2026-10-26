@@ -3045,7 +3045,24 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     // A world's tiles' cars stay the picture's alone (MD15): a tiled world has no props list to put
     // their meshes in.
+    // The track's animated toys (V43): the windmills, the shovel, the gondolas, the gates and blimps,
+    // each a model on a clip of its own. Their clips are the simulation's, stepped with the cars and
+    // their collision moved with them; a world's tiles have none (no props list, as for the cars).
+    let mut archives = archives;
+    let animated = match &world_mod {
+        Some(_) => game_render::animated_toy::Animated::default(),
+        None => game_render::animated_toy::Animated::load(&mut archives, &stem),
+    };
+    let archives = archives;
+    for model in &animated.models {
+        assets.load(&archives, model);
+    }
+    if !animated.models.is_empty() || !animated.skipped.is_empty() {
+        println!("animated toys: {} on clips, {} left out", animated.models.len(), animated.skipped.len());
+        animated.skipped.iter().for_each(|why| println!("  {why}"));
+    }
     let mut cars = traffic.sim(&archives);
+    cars.toys = animated.sim.clone();
     if let Some(props) = sim_world::World::moving(&mut sim) {
         cars.attach(props);
     }
@@ -3453,7 +3470,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -3462,7 +3479,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -4031,6 +4048,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The software path's own copy of each livery's plane for each seat, by name: what its moving
     // parts are skinned into (V38). Grows as seats join.
     let mut plane_copies: Vec<Vec<String>> = Vec::new();
+    // The software path's own copy of each animated toy's model (V43), which its pose is skinned into:
+    // one model can be on many toys at many moments (nat06's nineteen windmills).
+    let toy_copies: Vec<String> = animated.models.iter().enumerate().map(|(k, m)| format!("{m}@toy{k}")).collect();
     let mut gpu_patches = Vec::new();
     let mut gpu_sprites = Vec::new();
     // The render scale (V30): as asked, or picked from the frames' time against the display's refresh.
@@ -5862,6 +5882,18 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 at.0[3][2] += car_shift[1];
             }
         }
+        // The animated toys (V43) where the first seat's simulation has them: at their places, posed
+        // at their clips' clocks blended between the tick before the last and the last.
+        let shown_toys = &world.seats[0].sim.traffic.toys;
+        let toys_at: Vec<(&str, M4, Vec<M4>)> = match shown_toys.specs.len() == animated.models.len() {
+            true => (0..animated.models.len())
+                .map(|k| {
+                    use game_render::animated_toy::{palette, place};
+                    (animated.models[k].as_str(), place(shown_toys, k), palette(shown_toys, k, blend.0))
+                })
+                .collect(),
+            false => Vec::new(),
+        };
         // A world's are each tile's own (MD15), on the same clock, each moved by its tile's offset.
         if !dressed.is_empty() {
             let place = &mut world.place;
@@ -6219,6 +6251,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for (model, at) in &traffic_at {
                 actors.push(Actor { model: model.as_str(), at: *at, pose: None, lod_from: None, alpha: 1.0 });
             }
+            for (model, at, pose) in &toys_at {
+                gpu_poses.push(pose.clone());
+                actors.push(Actor { model, at: *at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha: 1.0 });
+            }
             // A view's own player's markers (P88), faint bikes where each was put down: in that
             // player's view and nobody else's, so a view with any has the shared list and them.
             let marked: Vec<Vec<Actor>> = world
@@ -6471,6 +6507,17 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
             actor.extend(traffic_at.iter().map(|(model, at)| (model.as_str(), *at)));
+            for ((model, at, pose), copy) in toys_at.iter().zip(&toy_copies) {
+                if !assets.models.contains_key(copy)
+                    && let Some(own) = assets.models.get(*model).cloned()
+                {
+                    assets.models.insert(copy.clone(), own);
+                }
+                if let Some(loaded) = assets.models.get_mut(copy) {
+                    loaded.tris = game_render::skin::skin(&loaded.model, pose, 0);
+                    actor.push((copy.as_str(), *at));
+                }
+            }
             // A world's tiles' props and plants (MD15), culled at the fog as `draw_scene` culls the
             // scene's; a plant only once it is solid, as there.
             let mut plants = Vec::new();

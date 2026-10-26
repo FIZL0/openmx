@@ -35,6 +35,7 @@
 //! where a field is still unexplained the doc says so rather than inventing a name for it.
 
 pub mod anim;
+pub mod animated_toy;
 pub mod biplane;
 pub mod chassis;
 pub mod disc;
