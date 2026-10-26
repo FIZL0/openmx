@@ -732,3 +732,133 @@ fn the_wind_is_added_to_the_start_velocity() {
     assert_eq!(first(V3::default()), v3(0.0, 10.0, 0.0));
     assert_eq!(first(v3(3.0, 0.0, -1.0)), v3(3.0, 10.0, -1.0));
 }
+
+/// P63: **the collision object's contacts feed the wreck's dust**. [`PlaneFrame::touch`] puts the
+/// record's contacts in as the ground's when the search found the ground and as an object's when it
+/// found an object, and the dust's points come from the object's relative velocity at its last
+/// contact, not the body's — the original's entry reads `+0x1e0` of the collision object.
+#[test]
+fn the_collision_objects_contacts_feed_the_wreck_dust() {
+    use game_sim::contact::Contact;
+    use game_sim::contact_search::Record;
+    use ps2_float::Vf;
+    let point = |x: f32, s: i32| Contact { point: Vf::new(x, 0.0, 0.0, 1.0), surface: s, ..Contact::default() };
+    let record = |ground: bool, object: bool| Record {
+        on_ground: ground,
+        on_object: object,
+        touching: ground || object,
+        contacts: vec![point(1.0, 2), point(-1.0, -1)],
+        ..Record::default()
+    };
+    let relative = Vf::new(0.0, -10.0, 30.0, 0.0);
+    let fed = |ground: bool, object: bool| {
+        // A stale list from a frame before: the record's replaces it.
+        let mut f = PlaneFrame { wrecked: true, vel: v3(1.0, 0.0, 0.0), ground_contacts: vec![v3(9.0, 9.0, 9.0)], ..PlaneFrame::default() };
+        f.touch(&record(ground, object), relative);
+        f
+    };
+    let g = fed(true, false);
+    assert_eq!(g.ground_contacts, [v3(1.0, 0.0, 0.0), v3(-1.0, 0.0, 0.0)]);
+    assert_eq!(g.ground_zones, [2, 0], "a contact on no surface is the first zone's");
+    assert!(g.object_contacts.is_empty());
+    assert_eq!(g.contact_vel, Some(v3(0.0, -10.0, 30.0)));
+    let o = fed(false, true);
+    assert!(o.ground_contacts.is_empty() && o.object_contacts.len() == 2);
+    let both = fed(true, true);
+    assert_eq!(both.ground_contacts.len(), 2);
+    assert!(!both.object_contacts.is_empty(), "the object's flag is raised");
+    let none = fed(false, false);
+    assert!(none.ground_contacts.is_empty() && none.object_contacts.is_empty());
+
+    // Emitted: one puff a contact on the ground (30 a second for a 30th), none against an object or
+    // with nothing touched.
+    let count = |frame: &PlaneFrame| {
+        let mut fx = only(fx(), "Wreck Dust");
+        fx.step(frame, DT);
+        fx.particles
+    };
+    let puffs = count(&g);
+    assert_eq!(puffs.len(), 2);
+    // The contact's velocity on top of the file's 6 up, ±1 of noise: not the body's 1 ft/s, which is
+    // under the 2 ft/s gate and would have emitted nothing.
+    for p in &puffs {
+        assert!((p.vel.z - 30.0).abs() <= 1.0 && (p.vel.y - (6.0 - 10.0)).abs() <= 1.0, "{:?}", p.vel);
+    }
+    assert!(count(&PlaneFrame { contact_vel: None, ..g.clone() }).is_empty(), "the body's 1 ft/s is under the gate");
+    assert!(count(&o).is_empty() && count(&both).is_empty() && count(&none).is_empty());
+}
+
+/// P63, on the disc: **the plane flown into the ground puffs where it hits**. The disc's plane, with
+/// its collision object's rays out of `biplanem.col` (S48), dived nose-first into flat ground as
+/// `game-sim`'s `flight_collision.rs` flies it, the shell's frame fed off it every tick into the
+/// disc's `Vehicle Dust` and `Vehicle Chunks`: nothing before the hull first touches, puffs on the
+/// ground at the contacts from that tick, and a crash among them.
+#[test]
+fn a_plane_flown_into_the_ground_puffs_where_it_hits() {
+    use game_sim::biplane::{CRASHED, Pad};
+    use game_sim::flight::Flight;
+    use game_sim::flight_search::{BIPLANE_RAYS, Rays};
+    use ps2_float::{F, Vf};
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    let machines = disc.res("machine.res").expect("the machines' archive");
+    let plane = game_sim::phy::Plane::read_bytes(&machines.read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy"));
+    let rays = game_sim::track::Rays::parse(&machines.read_suffix(BIPLANE_RAYS).expect("biplanem.col")).expect("its rays");
+    let names = disc.entries().iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+    let member = |end: &str| names.iter().find(|n| n.to_ascii_lowercase().ends_with(end)).cloned().unwrap();
+    let archives = [disc.res(&member("free06.res")).unwrap(), disc.res(&member("free06_2.res")).unwrap()];
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let texture = game_render::pst::Texture::parse(&read(&particles::sheet_texture("free06")).unwrap()).unwrap();
+    let atlas = Atlas::parse(&ini::text(&read(&particles::sheet("free06")).unwrap()), texture.width, texture.height);
+    let list = biplane::emitters(&ini::text(&read(biplane::PARTICLES).unwrap()));
+    let mut fx = PlaneFx::new(&list, atlas, read);
+    fx.entries.retain(|e| e.kind == Kind::CollisionModel);
+    assert_eq!(fx.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Vehicle Dust", "Vehicle Chunks"]);
+
+    let tables = game_sim::ride::Tables::build();
+    let mut f = Flight::new(&plane).with_rays(Rays::of(&rays));
+    let mut ground = game_sim::world::Flat::default();
+    f.attitude.flown = true;
+    f.place(Vf::new(0.0, 30.0, 0.0, 1.0), Vf::new(0.0, -1.0, 1.0, 0.0), &tables.acos);
+    f.body.velocity = Vf::new(0.0, -80.0, 80.0, 1.0);
+    let (mut touched, mut crashed, mut puffed) = (None, None, None);
+    for tick in 0..90 {
+        f.frame(F(DT), Pad::default(), &mut ground, &tables);
+        let mut frame = PlaneFrame { wrecked: f.crash.reason != 0, vel: v3(f.body.velocity.x(), f.body.velocity.y(), f.body.velocity.z()), ..PlaneFrame::default() };
+        frame.touch(&f.record, f.collider.relative);
+        // What outlives this frame stays first in the list; the frame's new ones come after it.
+        let before = fx.particles.iter().filter(|p| p.age + DT * 1000.0 <= p.life).count();
+        fx.step(&frame, DT);
+        if f.record.on_ground && touched.is_none() {
+            touched = Some(tick);
+        }
+        if f.crash.reason == CRASHED && crashed.is_none() {
+            crashed = Some(tick);
+        }
+        if fx.particles.len() > before {
+            puffed.get_or_insert(tick);
+            // Each new particle starts near a contact of this frame: within the emitter's extent and
+            // a frame's path back along the contact's velocity.
+            let reach = frame.contact_vel.unwrap().len() * DT + 2.0;
+            for p in &fx.particles[before..] {
+                let near = frame.ground_contacts.iter().map(|c| c.sub(p.at).len()).fold(f32::MAX, f32::min);
+                assert!(near <= reach, "tick {tick}: a puff {near} ft from every contact (reach {reach})");
+            }
+        }
+        if touched.is_none() {
+            assert!(fx.particles.is_empty(), "tick {tick}: dust before the hull touched");
+        }
+    }
+    eprintln!("touched {touched:?}, crashed {crashed:?}, first puff {puffed:?}, {} in the air", fx.particles.len());
+    let touched = touched.expect("the collision object never found the ground");
+    assert_eq!(crashed.map(|c| c >= touched), Some(true), "the plane did not crash on touching");
+    assert_eq!(puffed, Some(touched), "the dust is the contact's tick's");
+    let dust = fx.particles.iter().filter(|p| p.emitter == 0).count();
+    let chunks = fx.particles.iter().filter(|p| p.emitter == 1).count();
+    assert!(dust > 0 && chunks > 0, "dust {dust}, chunks {chunks}");
+}

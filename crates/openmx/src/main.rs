@@ -7774,21 +7774,19 @@ fn load_plane_fx(
 }
 
 /// What the plane's particles read off it this frame (P58): its emitters' nodes where the plane is,
-/// its throttle, airspeed and wreck, and its body's contacts — none: the port's plane has no
-/// collision model to touch the ground with until S48, so the wreck's dust is never fed. Its three
+/// its throttle, airspeed and wreck, and its collision object's contacts (P63, S48's search: the
+/// wreck's dust and chunks). Its three
 /// tires as the tire dust reads them (P60): the ground under the bottom of the tire, the held
 /// contact (only ever cleared, so never an object), the strut's compression and the surface under it.
 fn plane_fx_frame(plane: &Plane, binds: &[(String, M4)]) -> particles::PlaneFrame {
     let at = plane_at(plane);
     let (throttle, airspeed) = plane.gauges().map_or((0.0, 0.0), |(t, a)| (t.0, a.0));
-    particles::PlaneFrame {
+    let mut frame = particles::PlaneFrame {
         nodes: binds.iter().map(|(n, m)| (n.clone(), m.mul(at))).collect(),
         throttle,
         airspeed,
         wrecked: plane.prop_angle().is_none(),
         vel: vector(plane.vel),
-        ground_contacts: Vec::new(),
-        object_contacts: Vec::new(),
         tires: plane.flight.as_ref().map_or_else(Vec::new, |f| {
             f.tires
                 .iter()
@@ -7796,7 +7794,12 @@ fn plane_fx_frame(plane: &Plane, binds: &[(String, M4)]) -> particles::PlaneFram
                 .collect()
         }),
         ..Default::default()
+    };
+    // Its collision object's contacts (P63), which the wreck's dust and chunks come off.
+    if let Some(f) = &plane.flight {
+        frame.touch(&f.record, f.collider.relative);
     }
+    frame
 }
 
 /// The ground under a point for the plane's particles (P60): its height and its surface, from the
