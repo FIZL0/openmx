@@ -70,6 +70,8 @@ pub struct Car {
     pub drive_on_soultree: bool,
     /// `HasPhysics`: another class altogether, a vehicle with a body. Not drawn by this module.
     pub has_physics: bool,
+    /// `SteerFrontTires` (on where it is missing): the first two wheels turn into the bends ([`Wheels`]).
+    pub steer_front: bool,
 }
 
 impl Car {
@@ -109,6 +111,7 @@ fn car(s: &Section) -> Car {
         presample: flag("PresampleTerrain"),
         drive_on_soultree: flag("DriveOnSoultree"),
         has_physics: flag("HasPhysics"),
+        steer_front: s.get("SteerFrontTires").is_none_or(ini::switch),
     }
 }
 
@@ -424,6 +427,259 @@ impl Traffic {
 /// they move by a filter's worth of updates, agree with the original's at this step and not at half
 /// of it.
 pub const SCENE_STEP: f32 = 1.0 / 30.0;
+
+/// A path car's wheels (V82): the nodes of its model the original turns as the car drives, and what
+/// it turns them by.
+///
+/// **Which nodes.** The car's init looks its model's tree up (depth first, names compared without
+/// case) for `TireFrontL`, `TireFrontR`, `TireBackL`, `TireBackR`, `TireMidL` and `TireMidR`, in that
+/// order, and stops at the first it does not find ([`TIRES`]). free06's dump trucks have the first
+/// four, its scrapers' fronts and backs the first two; the train's cars have none, and nothing on
+/// them turns.
+///
+/// **The spin.** One angle for every wheel of the car. Each update takes off it the flat length of
+/// the step the car's path point made, `sqrt(z² + x²)`, times one over the radius, and wraps it into
+/// ±π. The radius is the first wheel node's box: its half height. So a wheel rolls: over a second its
+/// angle moves by the feet the car went over the wheel's radius, backwards about its `x` axis for a
+/// car going forwards along its `+z`.
+///
+/// **The steer.** With `SteerFrontTires` (on unless the `.toy` turns it off), the first two wheels
+/// also turn about their `y`: the update crosses last update's heading with this one's, takes twenty
+/// times the cross's `y` clamped to ±30°, and blends that in by the car's `HeadingFilter`. The rest
+/// only spin.
+///
+/// **The pose.** A wheel's local matrix keeps its file position and gets the basis of a forward
+/// `(sin s·cos a, sin a, cos s·cos a)` and an up `(−sin s·sin a, cos a, −cos s·sin a)` (spin `a`,
+/// steer `s`, zero for the wheels that only spin), which the original writes over the node's own
+/// rotation each update.
+///
+/// **What is the port's own.** The original keeps the spin and the steer from update to update. Here
+/// both come from the car's clock alone, as [`Path::pose`]'s heading does: the spin from the flat
+/// length of path the car's point has run since the track loaded ([`Wheels::travelled`], every
+/// segment's flat length measured once at load, the laps counted), the steer by replaying
+/// [`STEER_WARM`] updates of heading. Neither feeds the simulation; both are drawn only.
+#[derive(Clone, Debug)]
+pub struct Wheels {
+    /// The wheel nodes, in [`TIRES`]' order.
+    pub nodes: Vec<usize>,
+    /// One over the first wheel's radius (1 where its box has no height, as the original's init).
+    pub inv_radius: f32,
+    /// `SteerFrontTires`: the first two turn into the bends.
+    pub steer: bool,
+    /// The flat length of path from the clip's start to each key, and (last) once round the clip and
+    /// back to its start: what [`Wheels::travelled`] counts in.
+    run: std::sync::Arc<[f64]>,
+    /// Every corner of [`skin::skin`]'s triangles a wheel node places — the triangle, the corner and
+    /// the vertex as the file has it — and how many triangles there are: what
+    /// [`Wheels::reskin`] moves.
+    corners: std::sync::Arc<[(usize, usize, crate::psg::Vertex)]>,
+    tris: usize,
+}
+
+/// The wheel nodes' names, in the order the car's init looks for them.
+pub const TIRES: [&str; 6] = ["TireFrontL", "TireFrontR", "TireBackL", "TireBackR", "TireMidL", "TireMidR"];
+
+/// How many updates [`Wheels::steer_at`] replays: the dump trucks' `HeadingFilter` is 0.9, which
+/// keeps 0.9⁹⁶ ≈ 4·10⁻⁵ of where it started.
+pub const STEER_WARM: usize = 96;
+
+/// The steer's stop: 30°, as the original's float.
+pub const STEER_STOP: f32 = 0.523_598_73;
+
+/// How many chords a segment's flat length is measured in.
+const RUN_CHORDS: usize = 10;
+
+impl Wheels {
+    /// The wheels of `car`'s `model` on `path`, or `None` for a model with no `TireFrontL`.
+    pub fn new(model: &crate::psg::Model, car: &Car, path: &Path) -> Option<Wheels> {
+        let mut nodes = Vec::new();
+        for name in TIRES {
+            match model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name)) {
+                Some(i) => nodes.push(i),
+                None => break,
+            }
+        }
+        let first = *nodes.first()?;
+        let half = model.nodes[first].half_extents.y;
+        let inv_radius = if half > 0.0 { 1.0 / half } else { 1.0 };
+        let mut run = Vec::with_capacity(path.keys.len() + 1);
+        let mut total = 0.0f64;
+        run.push(0.0);
+        for i in 0..path.keys.len() - 1 {
+            total += path.flat_run(path.keys[i].t, path.keys[i + 1].t);
+            run.push(total);
+        }
+        // Round the end of the clip: the step from its last point back to its first.
+        total += f64::from(flat(path.at(path.last()).sub(path.at(path.keys[0].t))).len());
+        run.push(total);
+        // The corners, in the order `skin::skin` expands the model's first LOD.
+        let mut corners = Vec::new();
+        let mut tris = 0;
+        for mesh in model.meshes.iter().filter(|m| m.group == 0) {
+            for strip in &mesh.strips {
+                for i in 2..strip.verts.len() {
+                    if strip.verts[i].adc {
+                        continue;
+                    }
+                    for (c, v) in strip.verts[i - 2..=i].iter().enumerate() {
+                        if nodes.contains(&v.node) {
+                            corners.push((tris, c, *v));
+                        }
+                    }
+                    tris += 1;
+                }
+            }
+        }
+        Some(Wheels { nodes, inv_radius, steer: car.steer_front, run: run.into(), corners: corners.into(), tris })
+    }
+
+    /// The flat feet `car`'s point on the path has run, `elapsed` seconds of the scene's clock after
+    /// the track loaded.
+    pub fn travelled(&self, car: &Car, path: &Path, elapsed: f64) -> f64 {
+        let last = path.last();
+        if last <= 0.0 {
+            return 0.0;
+        }
+        let scaled = elapsed * f64::from(car.time_scale);
+        let mut laps = (scaled / f64::from(last)).floor();
+        let at = clock(elapsed, car.time_scale, last);
+        let s = if car.lag > 0.0 { path.lagged(at, car.lag) } else { at };
+        // A wagon whose lag reaches back past the clip's start is a lap behind its clock.
+        if s > at {
+            laps -= 1.0;
+        }
+        let i = path.segment(s);
+        let into = self.run[i] + path.flat_run(path.keys[i].t, s);
+        laps * self.run[path.keys.len()] + into
+    }
+
+    /// The spin `elapsed` seconds in: minus the flat feet run over the radius, in ±π.
+    pub fn spin_at(&self, car: &Car, path: &Path, elapsed: f64) -> f32 {
+        let a = -self.travelled(car, path, elapsed) * f64::from(self.inv_radius);
+        let a = a.rem_euclid(std::f64::consts::TAU);
+        (if a > std::f64::consts::PI { a - std::f64::consts::TAU } else { a }) as f32
+    }
+
+    /// The front wheels' steer at the car's clock `clock`, replaying [`STEER_WARM`] updates of `step`
+    /// clip seconds: zero for a car that does not steer.
+    pub fn steer_at(&self, car: &Car, path: &Path, clock: f32, step: f32) -> f32 {
+        if !self.steer {
+            return 0.0;
+        }
+        let period = path.last();
+        let wrap = |s: f32| if period > 0.0 { s.rem_euclid(period) } else { 0.0 };
+        let hf = car.heading_filter;
+        let (mut head, mut was) = (v3(0.0, 0.0, 0.0), v3(0.0, 0.0, 0.0));
+        let mut before: Option<V3> = None;
+        let mut steer = 0.0f32;
+        for back in (0..=STEER_WARM).rev() {
+            let s = wrap(clock - back as f32 * step);
+            let s = if car.lag > 0.0 { path.lagged(s, car.lag) } else { s };
+            let point = path.at(s);
+            if let Some(before) = before {
+                head = head.scale(hf).add(flat(point.sub(before)).norm().scale(1.0 - hf));
+            }
+            before = Some(point);
+            let target = (20.0 * was.cross(head).y).clamp(-STEER_STOP, STEER_STOP);
+            steer = (1.0 - hf) * target + hf * steer;
+            was = head;
+        }
+        steer
+    }
+
+    /// A wheel's local matrix at spin `spin` and steer `steer`, standing at `at` in its parent.
+    pub fn local(at: V3, spin: f32, steer: f32) -> M4 {
+        let (sa, ca) = spin.sin_cos();
+        let (ss, cs) = steer.sin_cos();
+        let forward = v3(ss * ca, sa, cs * ca);
+        let up = v3(-ss * sa, ca, -cs * sa);
+        upright(at, forward, up)
+    }
+
+    /// Every node of `model` placed in the model's space with the wheels at `spin` and the front pair
+    /// at `steer`: the palette both renderers skin the car with.
+    pub fn palette(&self, model: &crate::psg::Model, spin: f32, steer: f32) -> Vec<M4> {
+        let locals: Vec<M4> = model
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| match self.nodes.iter().position(|&w| w == i) {
+                Some(k) => {
+                    let t = n.local.0[3];
+                    Wheels::local(v3(t[0], t[1], t[2]), spin, if self.steer && k < 2 { steer } else { 0.0 })
+                }
+                None => n.local,
+            })
+            .collect();
+        let mut out: Vec<Option<M4>> = vec![None; locals.len()];
+        for i in 0..locals.len() {
+            place_node(model, &locals, &mut out, i, 0);
+        }
+        out.into_iter().map(|m| m.unwrap_or(M4::IDENTITY)).collect()
+    }
+
+    /// `skin::skin(model, palette, 0)` where `tris` already holds it for another palette that differs
+    /// only at the wheels: the wheels' corners placed again, the rest left. Skins the whole model when
+    /// `tris` is not this model's.
+    pub fn reskin(&self, model: &crate::psg::Model, palette: &[M4], tris: &mut Vec<crate::psg::Tri>) {
+        if tris.len() != self.tris {
+            *tris = skin::skin(model, palette, 0);
+            return;
+        }
+        for &(t, c, v) in self.corners.iter() {
+            if let Some(m) = palette.get(v.node) {
+                let out = &mut tris[t].v[c];
+                out.pos = m.point(v.pos);
+                out.normal = m.dir(v.normal);
+            }
+        }
+    }
+
+    /// The palette `elapsed` seconds in, the car's steer settled at the scene's [`SCENE_STEP`].
+    pub fn palette_at(&self, model: &crate::psg::Model, car: &Car, path: &Path, elapsed: f64) -> Vec<M4> {
+        let at = clock(elapsed, car.time_scale, path.last());
+        let steer = self.steer_at(car, path, at, SCENE_STEP * car.time_scale);
+        self.palette(model, self.spin_at(car, path, elapsed), steer)
+    }
+}
+
+/// A node's place in its model: its local under its parent's place, parents first.
+fn place_node(model: &crate::psg::Model, locals: &[M4], out: &mut [Option<M4>], i: usize, depth: usize) -> M4 {
+    if let Some(m) = out[i] {
+        return m;
+    }
+    let m = match model.nodes[i].parent {
+        Some(p) if p < locals.len() && p != i && depth <= locals.len() => {
+            locals[i].mul(place_node(model, locals, out, p, depth + 1))
+        }
+        _ => locals[i],
+    };
+    out[i] = Some(m);
+    m
+}
+
+/// `v` with its height dropped.
+fn flat(v: V3) -> V3 {
+    v3(v.x, 0.0, v.z)
+}
+
+impl Path {
+    /// The flat length of the path between clip times `from` and `to` in one segment, in
+    /// [`RUN_CHORDS`] chords.
+    fn flat_run(&self, from: f32, to: f32) -> f64 {
+        if to <= from {
+            return 0.0;
+        }
+        let mut before = self.at(from);
+        let mut run = 0.0f64;
+        for k in 1..=RUN_CHORDS {
+            let now = self.at(from + (to - from) * k as f32 / RUN_CHORDS as f32);
+            run += f64::from(flat(now.sub(before)).len());
+            before = now;
+        }
+        run
+    }
+}
 
 /// One `[ParticleEmitterN]` of a `.toy` (V45): a smoke, a fire or a mist the track makes on its own,
 /// as the original's particle emitter toy reads it.

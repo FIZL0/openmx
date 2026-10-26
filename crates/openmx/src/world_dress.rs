@@ -52,6 +52,8 @@ pub struct Dressed {
     pub taken: Taken,
     /// Each car's last pose, in world feet, for [`Dressed::cars_near`].
     pub posed: Vec<Option<game_render::mat::M4>>,
+    /// Each car's wheels (V82), `None` for a car with none, for [`Dressed::wheel_poses`].
+    pub wheels: Vec<Option<toy::Wheels>>,
 }
 
 /// How near a camera a world's car is posed every picture (MD28). A car is posed by replaying
@@ -101,6 +103,26 @@ impl Dressed {
             }
         }
         out
+    }
+
+    /// Every car's palette with its wheels turned `elapsed` seconds in (V82), one for each of
+    /// [`Dressed::cars_near`]'s cars and in its order: `None` for a car with no wheels, and for one
+    /// past [`CARS_NEAR`] of every `eyes`, which is drawn as its file has it. Each with its wheels, for
+    /// the software path's [`toy::Wheels::reskin`].
+    pub fn wheel_poses(&self, elapsed: f64, eyes: &[[f32; 2]], assets: &Assets) -> Vec<Option<(Vec<game_render::mat::M4>, toy::Wheels)>> {
+        self.traffic
+            .cars
+            .iter()
+            .zip(&self.posed)
+            .enumerate()
+            .map(|(i, ((car, path), posed))| {
+                let m = (*posed)?;
+                let wheels = self.wheels.get(i)?.as_ref()?;
+                let near = eyes.iter().any(|e| (m.0[3][0] - e[0]).hypot(m.0[3][2] - e[1]) < CARS_NEAR);
+                let model = &assets.models.get(&format!("{}{}", self.prefix, car.stem()))?.model;
+                near.then(|| (wheels.palette_at(model, car, path, elapsed), wheels.clone()))
+            })
+            .collect()
     }
 }
 
@@ -335,7 +357,12 @@ pub fn take(
         Ok(archives) => Traffic::load(&archives, &piece.stem, &mut |p| ground(p, shift)),
         Err(_) => Traffic::default(),
     };
-    Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken, posed: Vec::new() }
+    let wheels = traffic
+        .cars
+        .iter()
+        .map(|(car, path)| toy::Wheels::new(&assets.models.get(&format!("{prefix}{}", car.stem()))?.model, car, path))
+        .collect();
+    Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken, posed: Vec::new(), wheels }
 }
 
 /// A world's ground as the software renderer draws it (MD15): every piece within [`ground::REACH`]
