@@ -55,9 +55,26 @@ pub fn swap(t: Texture) -> Texture {
     let source = SOURCE.read().unwrap_or_else(|e| e.into_inner()).clone();
     let Some(source) = source else { return t };
     match source(&key(&t)) {
-        Some(r) if r.width > 0 && r.height > 0 && r.rgba.len() == r.width * r.height * 4 => r,
+        Some(r) if whole(&r) => r,
         _ => t,
     }
+}
+
+/// [`swap`], and the disc texture's key when a source is set (V86): what a loaded texture keeps, so a
+/// file changed while a ride runs (`OPENMX_TEXTURE_RELOAD`) can find every texture it replaces.
+pub fn swap_keyed(t: Texture) -> (Texture, Option<String>) {
+    let source = SOURCE.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some(source) = source else { return (t, None) };
+    let k = key(&t);
+    match source(&k) {
+        Some(r) if whole(&r) => (r, Some(k)),
+        _ => (t, Some(k)),
+    }
+}
+
+/// Whether `t` is a whole picture: a size, and four bytes a texel for it.
+pub fn whole(t: &Texture) -> bool {
+    t.width > 0 && t.height > 0 && t.rgba.len() == t.width * t.height * 4
 }
 
 /// [`swap`] for a set that must stay one size (a terrain's pages, which share one texture array):

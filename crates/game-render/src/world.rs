@@ -152,6 +152,12 @@ pub fn decode_texture(file: &str, bytes: &[u8]) -> Option<Texture> {
     decode_disc_texture(file, bytes).map(crate::replace::swap)
 }
 
+/// [`decode_texture`], and the disc texture's key while replacements are on
+/// ([`crate::replace::swap_keyed`]).
+pub fn decode_texture_keyed(file: &str, bytes: &[u8]) -> Option<(Texture, Option<String>)> {
+    decode_disc_texture(file, bytes).map(crate::replace::swap_keyed)
+}
+
 /// [`decode_texture`] as the disc has it, never replaced: what `--dump-textures` writes and keys.
 pub fn decode_disc_texture(file: &str, bytes: &[u8]) -> Option<Texture> {
     if file.to_ascii_lowercase().ends_with(".atm") {
@@ -193,6 +199,9 @@ pub struct Assets {
     /// Textures made rather than read, by file name lower-cased: a rider's own name and number
     /// painted over `NameDefault.pst` (P86). Answers before the archives do.
     made: HashMap<String, Texture>,
+    /// Each texture's disc key, by its index, where it was decoded with replacements on (V86): what
+    /// [`Assets::replace_keyed`] swaps when a replacement changes mid-ride.
+    keys: HashMap<usize, String>,
 }
 
 impl Assets {
@@ -360,11 +369,14 @@ impl Assets {
                 return (Some(i), surface);
             }
             let made = self.made.get(&file.to_ascii_lowercase()).cloned();
-            let Some(texture) = made.or_else(|| read(&file).and_then(|b| decode_texture(&file, &b))) else {
+            let Some((texture, key)) = made.map(|t| (t, None)).or_else(|| read(&file).and_then(|b| decode_texture_keyed(&file, &b))) else {
                 continue;
             };
             let i = self.textures.len();
             self.textures.push(texture);
+            if let Some(key) = key {
+                self.keys.insert(i, key);
+            }
             self.by_name.insert(file, i);
             self.by_name.insert(asked.to_string(), i);
             return (Some(i), surface);
@@ -383,6 +395,7 @@ impl Assets {
     pub fn take_in(&mut self, other: Assets, prefix: &str) -> Taken {
         let first = self.textures.len();
         self.textures.extend(other.textures);
+        self.keys.extend(other.keys.into_iter().map(|(i, k)| (i + first, k)));
         let mut names = Vec::with_capacity(other.models.len());
         for (name, mut loaded) in other.models {
             for t in loaded.textures.iter_mut().flatten() {
@@ -403,10 +416,32 @@ impl Assets {
             self.models.remove(name);
         }
         for t in taken.textures.clone() {
+            self.keys.remove(&t);
             if let Some(t) = self.textures.get_mut(t) {
                 *t = Texture { width: 0, height: 0, rgba: Vec::new() };
             }
         }
+    }
+
+    /// The disc key texture `i` was decoded under, if replacements were on when it was.
+    pub fn key_of(&self, i: usize) -> Option<&str> {
+        self.keys.get(&i).map(String::as_str)
+    }
+
+    /// Put `texture` in the place of every texture decoded under `key` (V86: a replacement changed
+    /// while the ride runs); which ones, in order, for the GPU renderer to upload again
+    /// ([`crate::gpu::Renderer::reload_textures`]). The software renderer reads them from here, so it
+    /// draws the new one from the next frame. A picture that is not whole changes nothing.
+    pub fn replace_keyed(&mut self, key: &str, texture: &Texture) -> Vec<usize> {
+        if !crate::replace::whole(texture) {
+            return Vec::new();
+        }
+        let mut at: Vec<usize> = self.keys.iter().filter(|(_, k)| *k == key).map(|(&i, _)| i).collect();
+        at.sort_unstable();
+        for &i in &at {
+            self.textures[i] = texture.clone();
+        }
+        at
     }
 }
 

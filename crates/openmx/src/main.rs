@@ -2510,7 +2510,7 @@ fn loading_frame(
 fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The world's replaced textures (V84), set before anything of the ride is decoded and kept while
     // it rides: a world's tiles stream in later and are replaced as they load.
-    install_textures(&args);
+    let mut texture_reload = install_textures(&args);
     // ---- the game modifiers (P55) ----------------------------------------------------------------
     // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
     // is touched at all.
@@ -4974,6 +4974,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     };
     perf.begin();
     loop {
+        // A replacement changed while riding (V86): its textures' pixels swapped where the software
+        // renderer reads them, and uploaded again for the GPU's.
+        for (key, texture) in texture_reload.as_mut().map(textures::Reload::poll).unwrap_or_default() {
+            let at = assets.replace_keyed(&key, &texture);
+            if let Some(r) = renderer_of(&mut offscreen, window) {
+                r.reload_textures(&assets, &at);
+            }
+        }
         if pacer.owed(moment) {
         if let Some(window) = &mut *window {
             window.poll();
@@ -7603,13 +7611,18 @@ fn mods_dir(args: &Args) -> Option<std::path::PathBuf> {
 /// The world's replaced textures for the next ride (V84, `textures.rs`): `--textures`, else the
 /// front end's or settings.txt's Upscaled Textures; over the mods folder beside the settings, or
 /// `--mods DIR` (`--mods off` reads none), in settings.txt's texture pack order. The line says what
-/// was found.
-fn install_textures(args: &Args) {
+/// was found. With `OPENMX_TEXTURE_RELOAD=1` (V86) the folders are kept watched while the ride runs.
+fn install_textures(args: &Args) -> Option<textures::Reload> {
     let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
     let settings = menu::load(&dir).0;
     let on = args.textures.unwrap_or(settings.textures);
     let mods = if args.mods_asked { args.mods.clone() } else { Some(dir.join(track_mods::MODS_DIR)) };
-    println!("{}", textures::install(mods.as_deref(), on, &settings.texture_packs, &settings.texture_packs_off));
+    let (line, reload) = textures::install_live(mods.as_deref(), on, &settings.texture_packs, &settings.texture_packs_off, textures::reload_asked());
+    println!("{line}");
+    if reload.is_some() {
+        println!("textures: OPENMX_TEXTURE_RELOAD: changed files are drawn while riding");
+    }
+    reload
 }
 
 /// `openmx --dump-textures [OUT] [--from DIR]` (V84): every disc texture, or with `--from` every one a
