@@ -1,0 +1,7 @@
+# S153 rise: from the state's standstill on free09's start, the gas for one ridden second, then nothing
+# on the pad: the bike runs down the slope ahead, up the rise beyond it, stops and rolls back down it.
+# Wall-clock, at a quarter speed (4 ms here is 1 ms ridden).
+sleep 4000
+down cross
+sleep 4000
+release
