@@ -1056,6 +1056,10 @@ impl Garage {
                 sim.rider.teleport_to(spot);
             }
         }
+        // A trick or combo in progress fails as a bail fails it (P161): the trick stopped, the
+        // chain's points lost and not banked, so the HUD plays the pop-up out as a bail's and the
+        // bike taken back finds no trick going.
+        sim.rider.trick_lost();
         self.up = to;
         // Each machine its own markers (P107): the set shown is the one of the machine up.
         sim.markers.up(markers_of(to));

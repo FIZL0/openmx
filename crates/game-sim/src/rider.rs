@@ -433,6 +433,22 @@ impl Rider {
         self.teleported();
     }
 
+    /// **The rider leaves the bike mid-trick** (P161, a machine switch): the wreck entry's half for
+    /// the tricks and the points, and nothing for the bike — the running trick stopped and its queue
+    /// emptied, the trick pack's spin and front flip watch cleared, and the combo lost as a bail
+    /// loses it ([`Score::wrecked`]): nothing banked, the one-wheel clocks and the backflip watch back
+    /// to nothing. **The port's own**: what the original's swap does to a trick in progress was not
+    /// identified.
+    pub fn trick_lost(&mut self) {
+        self.tricks.reset();
+        self.flight = Trick::NONE;
+        self.score.wrecked();
+        if let Some(t) = self.ride.tricks.as_deref_mut() {
+            t.spin = air::Spin::default();
+            t.front_watch = 0;
+        }
+    }
+
     /// **No start line** (V88): lowers the cut flag [`Rider::new`] raises, so the body rides from its
     /// first frame. A free ride has no gate, and left up the flag has the body play the start line's
     /// get-ready sequence — a breathe, a get-ready idle and a start pose, hands off the bars — until
