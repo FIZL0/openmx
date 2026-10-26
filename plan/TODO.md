@@ -171,6 +171,7 @@ Freeride lets you swap the bike for a biplane (`STR_SWITCH_BIPLANE`), and the us
 the controls, the flight, the animations, the model and its textures, behind a switch. The same two rules as the
 bike: what reaches the simulation is proved against the original, what only reaches the picture matches by eye. With
 the switch off the port rides exactly as it does now.
+- [ ] **S148** MX Unleashed's helicopter, the Kiowa (P87's machine 2; user, 2026-10-26: add the other machines): port its update (helicopter\ kiowa.phy, wreckblade.phy, MXHelicopter.cpp's step) bit-exact against SLUS-20767, using MX vs. ATV's PC exe (R10: HelicopterAeroModel/EngineModel, MXVehicleHelicopter) to find every branch first; its model, blades and blur, HeloCPresets camera, sound and particles; parked and switchable like the biplane (menu::Machine) → crates/game-sim/src/ · crates/openmx/src/vehicle.rs · crates/openmx/src/menu.rs | t: crates/game-sim tests — a captured Kiowa take-off, hover and landing replays bit-exact | j: kiowa (after R10)
 
 ### Phase 12 — riding together: split screen, menus, online
 
