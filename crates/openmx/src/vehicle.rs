@@ -273,6 +273,7 @@ pub fn spots(machine_txt: &[u8], machine: Machine) -> Vec<Spawn> {
 ///
 /// The original has no copies past two and the nearby rule is the port's; a track whose file parks
 /// none of the machine gets none.
+#[allow(dead_code)] // the rule the docs name; the lot parks through `Lot::around` since MD24
 pub fn park(machine_txt: &[u8], machine: Machine, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Vec<Bay> {
     park_around(&spots(machine_txt, machine), machine, players, ground)
 }
@@ -325,18 +326,58 @@ pub fn start_spots(start: Spawn, machine: Machine, players: usize, rest: f32, gr
     park_around(&[base], machine, players, ground).into_iter().map(|b| b.spawn).collect()
 }
 
+/// A home tile's `machine.txt` spots in a world (MD24), one list a machine in [`Machine::ALL`]'s
+/// order. The file's coordinates are its own track's, and a world neither starts where that track
+/// does nor puts the tile at the origin, so its spots are moved as one: by the step that stands
+/// `[Biplane1]` one [`Machine::spacing`] to the right of the world's spawn `start` (across its
+/// heading flattened, as [`park`] steps a copy), every other spot keeping its place beside it. Each
+/// keeps the clearance it had over its own ground, which in the world is the home tile's ground at
+/// the spot moved by the tile's offset `home` (`x`, `z`); `ground` is the world's. A file with no
+/// plane is moved by the first spot it does have. The port's own placement: the original has no
+/// worlds.
+pub fn world_spots(machine_txt: &[u8], home: [f32; 2], start: Spawn, ground: &mut dyn FnMut(Vf) -> f32) -> Vec<Vec<Spawn>> {
+    let file: Vec<Vec<Spawn>> = Machine::ALL.iter().map(|&m| spots(machine_txt, m)).collect();
+    let Some(anchor) = file.iter().find_map(|s| s.first().copied()) else {
+        return file;
+    };
+    let facing = level(start.facing).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+    let gap = Machine::Biplane.spacing();
+    let (x, z) = (start.at.x() - facing.z() * gap, start.at.z() + facing.x() * gap);
+    let (dx, dz) = (x - anchor.at.x(), z - anchor.at.z());
+    file.into_iter()
+        .map(|s| {
+            s.into_iter()
+                .map(|spot| {
+                    let clear = spot.at.y() - ground(Vf::new(spot.at.x() + home[0], spot.at.y(), spot.at.z() + home[1], 1.0));
+                    let (x, z) = (spot.at.x() + dx, spot.at.z() + dz);
+                    let y = ground(Vf::new(x, spot.at.y(), z, 1.0)) + clear;
+                    Spawn { at: Vf::new(x, y, z, 1.0), facing: spot.facing }
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Every machine a ride parks, one of each per player, sized to the player count as players join and
 /// leave.
 #[derive(Clone, Debug, Default)]
 pub struct Lot {
-    machine_txt: Vec<u8>,
+    /// The spots each machine of [`Machine::ALL`] is parked around, in that order: the file's own
+    /// ([`spots`]), or the same moved into a world ([`world_spots`]).
+    file: Vec<Vec<Spawn>>,
     pub bays: Vec<Bay>,
 }
 
 impl Lot {
     /// A track's lot for `players`: [`park`] for every machine in [`Machine::ALL`].
     pub fn new(machine_txt: &[u8], players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { machine_txt: machine_txt.to_vec(), bays: Vec::new() };
+        Lot::around(Machine::ALL.iter().map(|&m| spots(machine_txt, m)).collect(), players, ground)
+    }
+
+    /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
+    /// world's ([`world_spots`]).
+    pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
+        let mut lot = Lot { file, bays: Vec::new() };
         lot.resize(players, ground);
         lot
     }
@@ -344,7 +385,12 @@ impl Lot {
     /// Re-park for a new player count: a player joining adds one of each machine, beside the rest,
     /// and the last one leaving takes theirs away. Every copy that stays keeps its place.
     pub fn resize(&mut self, players: usize, ground: &mut dyn FnMut(Vf) -> f32) {
-        self.bays = Machine::ALL.iter().flat_map(|&m| park(&self.machine_txt, m, players, ground)).collect();
+        let file = &self.file;
+        self.bays = Machine::ALL
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &m)| park_around(file.get(i).map_or(&[][..], |s| &s[..]), m, players, ground))
+            .collect();
     }
 
     /// The copies of `machine`, in copy order.
@@ -1445,6 +1491,37 @@ mod tests {
         assert!(lot.bays.is_empty());
         lot.resize(0, &mut ground);
         assert!(lot.plane(0, None).is_none());
+    }
+
+    #[test]
+    fn a_world_parks_the_plane_beside_its_spawn() {
+        // The home tile sits 5000, 3000 feet into the world, whose ground slopes up along z there.
+        let home = [5000.0, 3000.0];
+        let mut ground = |at: Vf| at.z() * 0.05;
+        // The world's spawn faces +x, so its right (as park steps a copy) is +z.
+        let start = Spawn { at: Vf::new(7000.0, 0.0, 9000.0, 1.0), facing: Vf::new(2.0, 0.5, 0.0, 0.0) };
+        let moved = world_spots(TWO_OF_EACH.as_bytes(), home, start, &mut ground);
+        let gap = Machine::Biplane.spacing();
+        for (i, m) in Machine::ALL.iter().enumerate() {
+            let file = spots(TWO_OF_EACH.as_bytes(), *m);
+            assert_eq!(moved[i].len(), file.len(), "{m:?}");
+            for (a, b) in file.iter().zip(&moved[i]) {
+                // One step for every spot: the file's layout is kept.
+                assert_eq!((b.at.x() - a.at.x(), b.at.z() - a.at.z()), (7000.0 - 100.0, 9000.0 + gap + 50.0), "{m:?}");
+                assert_eq!(b.facing, a.facing);
+                // Its clearance over the home tile's ground, moved by the tile's offset.
+                let clear = a.at.y() - (a.at.z() + home[1]) * 0.05;
+                assert!((b.at.y() - (b.at.z() * 0.05 + clear)).abs() < 1e-2, "{m:?} keeps its clearance");
+            }
+        }
+        // The first plane stands one spacing to the right of the spawn, out of the offer's reach.
+        let lot = Lot::around(moved, 2, &mut ground);
+        let first = lot.bay(Machine::Biplane, 0).unwrap().spawn.at;
+        assert_eq!((first.x(), first.z()), (7000.0, 9000.0 + gap));
+        assert!(gap > OFFER_RANGE);
+        assert_eq!(lot.of(Machine::Helicopter).count(), 2);
+        // A file with no spots stays empty.
+        assert!(world_spots(b"[Machines]\n", home, start, &mut ground).iter().all(Vec::is_empty));
     }
 
     #[test]
