@@ -83,7 +83,9 @@ pub struct Online {
     spawn: Option<Vec<u8>>,
     arrived: Vec<String>,
     /// The room as the network last said it, for the controller preset of a peer that arrives
-    /// (N13): its seat's pick says it, and the network seats a joiner before it arrives.
+    /// (N13): its seat's pick says it, and the network seats a joiner before it arrives. And every
+    /// seat's look (N16, [`Online::seat_pick`]): a lobby ride's and a drop-in's start on the room
+    /// they were started from.
     room: Option<openmx_net::Room>,
     /// `--peer`s (N15): every seat's controller preset is not known yet, and the first tick waits on it.
     presets_owed: bool,
@@ -225,7 +227,7 @@ impl Online {
             time_scale: None,
             spawn: None,
             arrived: Vec::new(),
-            room: None,
+            room: Some(room.clone()),
             presets_owed: false,
             mods: Default::default(),
             stock: Vec::new(),
@@ -293,7 +295,7 @@ impl Online {
             time_scale: None,
             spawn: None,
             arrived: Vec::new(),
-            room: None,
+            room: Some(room.clone()),
             presets_owed: false,
             mods: Default::default(),
             stock: Vec::new(),
@@ -726,6 +728,22 @@ impl Online {
     /// the other players (P88).
     pub fn names(&self) -> Vec<Option<String>> {
         (0..self.sims.len()).map(|s| self.net.lineup.seats.get(s).cloned().flatten()).collect()
+    }
+
+    /// Shell seat `d`'s room seat as the network last said it (N16): who sits in it and their pick,
+    /// whose look the shell dresses the seat's rider and bike in. `None` for an empty seat, and for a
+    /// seat the room has nobody in under the session's name for it (a `--peer` ride has no room).
+    pub fn seat_pick(&self, d: usize) -> Option<&openmx_net::room::Seat> {
+        let &seat = self.drawn().get(d)?;
+        let peer = self.net.lineup.seats.get(seat)?.as_ref()?;
+        let seats = &self.room.as_ref()?.seats;
+        // The room's seat of the same number if the peer sits in it, else the peer's own seats in
+        // order: the session's numbers are the room's, but a restart may have moved them.
+        let theirs = || {
+            let n = self.net.lineup.seats[..seat].iter().filter(|s| s.as_ref() == Some(peer)).count();
+            seats.iter().flatten().filter(|s| s.peer == *peer).nth(n)
+        };
+        seats.get(seat).and_then(Option::as_ref).filter(|s| s.peer == *peer).or_else(theirs)
     }
 
     /// Whether shell seat `d`'s player had their pause open on the last tick ridden (P84): the

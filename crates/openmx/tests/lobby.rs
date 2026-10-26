@@ -372,6 +372,10 @@ mod vehicle;
 #[allow(dead_code)]
 mod saved_markers;
 
+#[path = "../src/peer_looks.rs"]
+#[allow(dead_code)]
+mod peer_looks;
+
 /// The `Event::Start` a network says, waiting up to 30 s.
 fn started(net: &Net, who: &str) -> (Room, String) {
     let end = Instant::now() + Duration::from_secs(30);
@@ -873,4 +877,134 @@ fn the_lobby_gathers_every_seats_own_modifiers() {
     let gravity = g.page().into_iter().find(|r| r.key == menu::Key::Knob(Knob::Gravity)).unwrap();
     assert!(gravity.off.is_some(), "{gravity:?}");
     assert!(g.page()[0].off.is_some(), "the guest has no All Players");
+}
+
+/// N16: an online ride draws every peer's rider in their own look. Two real lobbies on the LAN, each
+/// player in a look of their own (P86's pick line) on a bike model of their own; the host's Start
+/// gives each machine's ride a shell seat for the other's rider, dressed from the room's pick as the
+/// shell's load dresses it ([`peer_looks::lobby_others`]), and that seat is the other's in the
+/// session, sat in and drawn, with nothing left to dress again once it rides.
+#[test]
+fn a_lobby_ride_draws_each_peer_in_their_own_look() {
+    use game_sim::world::Flat;
+    let (hn, gn) = (Arc::new(lan("Hosty", 1)), Arc::new(lan("Guesty", 1)));
+    let (mut h, mut hr) = fresh("Hosty", "thq1");
+    let (mut g, mut gr) = fresh("Guesty", "thq2");
+    let (host_look, guest_look) = ("thq3, , , , , 72, Kaito", ", , , , , 9, Rina");
+    (h.lobby.pick.look, h.lobby.pick.model) = (host_look.into(), "125sx".into());
+    (g.lobby.pick.look, g.lobby.pick.model) = (guest_look.into(), "250sx".into());
+    host_and_join(&mut h, &mut hr, &hn, &mut g, &mut gr, &gn);
+    gn.send(Cmd::Prepared(true));
+    until((&mut h, &hn), (&mut g, &gn), "ready", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.all_ready()));
+    hn.send(Cmd::Start);
+    let ((hroom, hme), (groom, gme)) = (started(&hn, "host"), started(&gn, "guest"));
+    let sims = |room: &Room| -> Vec<game_sim::Sim> { (0..room.seats.len()).map(|_| game_sim::Sim::new(1)).collect() };
+    let own = roster::Pick::default();
+    // What each machine's shell loads its other seats in: one seat for the other player, then the
+    // room's open seats, which draw as this machine's own and are not drawn while open.
+    let (ho_picks, go_picks) = (peer_looks::lobby_others(&hroom, &hme, &own).unwrap(), peer_looks::lobby_others(&groom, &gme, &own).unwrap());
+    assert_eq!((ho_picks.len(), go_picks.len()), (hroom.seats.len() - 1, groom.seats.len() - 1), "a shell seat for every room seat");
+    let (on_host, on_guest) = (&ho_picks[0], &go_picks[0]);
+    assert_eq!((on_host.rider.as_str(), on_host.bike.as_str()), ("thq2", "250sx"), "the host draws the guest's rider and bike");
+    assert_eq!(on_host.look, roster::Look::parse(guest_look), "the host draws the guest's look");
+    assert_eq!((on_host.look.name.as_str(), on_host.look.number.as_str()), ("Rina", "9"));
+    assert_eq!((on_guest.rider.as_str(), on_guest.bike.as_str()), ("thq1", "125sx"), "the guest draws the host's rider and bike");
+    assert_eq!(on_guest.look, roster::Look::parse(host_look), "the guest draws the host's look");
+    assert_eq!((on_guest.look.outfit.as_str(), on_guest.look.name.as_str(), on_guest.look.number.as_str()), ("thq3", "Kaito", "72"));
+    let mut ho = online::Online::lobby(hn.clone(), &hroom, &hme, sims(&hroom)).unwrap();
+    let mut go = online::Online::lobby(gn.clone(), &groom, &gme, sims(&groom)).unwrap();
+    let (mut hw, mut gw) = (Flat::default(), Flat::default());
+    let gas = Report::from_buttons(Control::Cross.mask());
+    for _ in 0..60 {
+        ho.frame(gas, &mut hw, None).unwrap();
+        go.frame(gas, &mut gw, None).unwrap();
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    for (who, on, room, me, other) in [("host", &ho, &hroom, &hme, &gme), ("guest", &go, &groom, &gme, &hme)] {
+        let mut sim = game_sim::Sim::new(1);
+        assert!(on.show(1, &mut sim, None), "{who}: shell seat 1 is sat in and drawn");
+        assert!(!on.show(2, &mut sim, None), "{who}: an open seat is not drawn");
+        assert_eq!(on.seat_pick(0).map(|s| &s.peer), Some(me), "{who}: shell seat 0 is its own");
+        assert_eq!(on.seat_pick(1).map(|s| &s.peer), Some(other), "{who}: shell seat 1 is the other's");
+        let sat: Vec<_> = (0..room.seats.len()).map(|d| on.seat_pick(d)).collect();
+        assert_eq!(peer_looks::Dressed::lobby(room, me).changed(&sat), Vec::<usize>::new(), "{who}: the load dressed every seat");
+    }
+    assert_eq!(ho.seat_pick(1).unwrap().pick.look, guest_look);
+    assert_eq!(go.seat_pick(1).unwrap().pick.look, host_look);
+    let _ = go.leave();
+}
+
+/// N16, mid-ride: a freeride opened online (N10) takes a peer on, and each machine's session grows a
+/// seat the shell's ride did not load with. That seat says who sits in it and in what look, so the
+/// shell dresses it as it comes ([`peer_looks::Dressed::changed`]) — the host the joiner in the
+/// joiner's look, the joiner the host in the host's — and once dressed it stays dressed.
+#[test]
+fn a_peer_who_drops_in_is_drawn_in_their_own_look() {
+    use game_sim::world::Flat;
+    let (hn, gn) = (Arc::new(lan("Openy", 1)), Arc::new(lan("Dropper", 1)));
+    let (host_look, guest_look) = (", , , , , 5, Openy", "thq2, , , , , 31, Drop");
+    let mut room = Room::new("Openy", "free06", 4);
+    room.take(HOST, &[Pick { look: host_look.into(), model: "125sx".into(), ..Pick::new("thq1", "race125p") }]);
+    (room.riding, room.drop_in) = (true, true);
+    hn.send(Cmd::Host(room));
+    let spawn = game_sim::Sim::new(1);
+    let mut ho = online::Online::open(hn.clone(), spawn.clone(), &spawn).unwrap();
+    let (mut hw, mut gw) = (Flat::default(), Flat::default());
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let end = Instant::now() + Duration::from_secs(30);
+    let code = loop {
+        assert!(Instant::now() < end, "no room code in 30 s");
+        ho.frame(gas, &mut hw, None).unwrap();
+        if let Some(code) = ho.kept().into_iter().find_map(|e| match e {
+            Event::Room(r) if !r.short.is_empty() => Some(r.short),
+            _ => None,
+        }) {
+            break code;
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    };
+    // the ride as the host's shell loaded it: its own seat alone, nothing to dress
+    let mut host_dress = peer_looks::Dressed::default();
+    assert_eq!(ho.seat_of().0, 1);
+    gn.send(Cmd::Name("Dropper".into()));
+    gn.send(Cmd::Join(code, vec![Pick { look: guest_look.into(), model: "250sx".into(), ..Pick::new("thq2", "race125p") }]));
+    let mut go = loop {
+        assert!(Instant::now() < end, "the guest never dropped in");
+        ho.frame(gas, &mut hw, None).unwrap();
+        if let Some((room, me)) = gn.poll().into_iter().find_map(|e| match e {
+            Event::DropIn(room, me) => Some((room, me)),
+            _ => None,
+        }) {
+            break online::Online::drop_in(gn.clone(), &room, &me, game_sim::Sim::new(1)).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    };
+    let mut guest_dress = peer_looks::Dressed::default();
+    let end = Instant::now() + Duration::from_secs(30);
+    while !(go.seated() && ho.riders() == 2 && go.seat_of().0 == 2) {
+        assert!(Instant::now() < end, "the guest was not taken on in 30 s");
+        ho.frame(gas, &mut hw, None).unwrap();
+        go.frame(gas, &mut gw, None).unwrap();
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    for _ in 0..30 {
+        ho.frame(gas, &mut hw, None).unwrap();
+        go.frame(gas, &mut gw, None).unwrap();
+        std::thread::sleep(Duration::from_millis(33));
+    }
+    for (who, on, dress, look, rider, model) in [("host", &ho, &mut host_dress, guest_look, "thq2", "250sx"), ("guest", &go, &mut guest_dress, host_look, "thq1", "125sx")] {
+        assert_eq!(on.seat_of().0, 2, "{who}: the session grew a seat");
+        let mut sim = game_sim::Sim::new(1);
+        assert!(on.show(1, &mut sim, None), "{who}: the other's seat is sat in and drawn");
+        let sat: Vec<_> = (0..2).map(|d| on.seat_pick(d)).collect();
+        assert_eq!(dress.changed(&sat), vec![1], "{who}: the other's seat is the one to dress");
+        let seat = sat[1].expect("sat in");
+        let pick = peer_looks::garage_pick(&seat.pick, &roster::Pick::default());
+        assert_eq!((pick.rider.as_str(), pick.bike.as_str(), &pick.look), (rider, model, &roster::Look::parse(look)), "{who}: dressed in the other's look");
+        dress.dress(1, seat);
+        assert_eq!(dress.changed(&sat), Vec::<usize>::new(), "{who}: dressed once");
+    }
+    assert_eq!(ho.seat_pick(1).unwrap().pick.look, guest_look);
+    assert_eq!(go.seat_pick(1).unwrap().pick.look, host_look);
+    let _ = go.leave();
 }

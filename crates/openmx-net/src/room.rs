@@ -52,6 +52,11 @@ pub struct Pick {
     /// in the handshake, as the markers are not.
     #[serde(default)]
     pub modifiers: String,
+    /// The bike model the player's machine draws their bike as (N16), the bike archive's name
+    /// (`125sx`), so every other machine draws it the same: looks only, as the look is. Empty is
+    /// the drawing machine's own model, and what an older build sends.
+    #[serde(default)]
+    pub model: String,
 }
 
 impl Pick {
@@ -64,6 +69,7 @@ impl Pick {
             markers: String::new(),
             machine: String::new(),
             modifiers: String::new(),
+            model: String::new(),
         }
     }
 }
