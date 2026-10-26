@@ -1533,8 +1533,12 @@ struct Args {
     /// Whether `--mods DIR|off` was given, or the front end set [`Args::mods`] from its settings.
     mods_asked: bool,
     /// `--tricks original|mxvatv` (MD16): whose tricks the ride has. Unset, the front end's Tricks
-    /// row says, and a ride outside it has the original's. Online is always the original's.
+    /// row says, and a ride outside it has the original's. `--online` is always the original's; a
+    /// ride from the lobby is its room's ([`Args::room_tricks`]).
     tricks: Option<menu::Tricks>,
+    /// The trick pack a lobby's ride rides (MD19): this machine's mods folder and the pack's id, as
+    /// the room names it and the handshake held every seat to. `None` outside the lobby.
+    room_tricks: Option<(std::path::PathBuf, String)>,
     /// `--markers on|off` (P129), one word a seat (`on,off`), the last for every seat past it: each
     /// player's Markers switch. Unset, the front end's Markers rows say, and a ride outside it has
     /// them on.
@@ -2040,8 +2044,10 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.track = room.track.clone();
                 // Online rides the disc's tracks only, until MD6 says how peers agree on a mod.
                 (a.mods_asked, a.mods) = (true, None);
-                // And the original's tricks, until MD6's check that every seat has the same pack.
-                a.tricks = Some(menu::Tricks::Original);
+                // And the room's tricks (MD19): the host's trick pack, which the handshake held every
+                // seat to the same files of, read from this machine's mods folder.
+                a.tricks = Some(if room.tricks.is_empty() { menu::Tricks::Original } else { menu::Tricks::MxVsAtv });
+                a.room_tricks = (!room.tricks.is_empty()).then(|| (shell.front.dir.join(track_mods::MODS_DIR), room.tricks.clone()));
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.hud = overlay == menu::Overlay::Debug;
@@ -2618,7 +2624,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     );
     // MX vs. ATV's tricks (MD16), from the first trick pack in the mods folder: its extra stunts after
     // the 24, and below its moves laid over every bike. Without a pack the ride has the original's.
-    let trick_pack = ride_trick_pack(&args);
+    let trick_pack = ride_trick_pack(&args)?;
     let stunts = match &trick_pack {
         Some(pack) => pack.stunts(stunts),
         None => stunts,
@@ -4708,7 +4714,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
             let bytes = disc.phy(&first.pick.bike).ok_or(format!("the disc has no {} bike set", first.pick.bike))?;
-            let stock = Phy::read_bytes(&bytes, &tables.ride.curve);
+            let mut stock = Phy::read_bytes(&bytes, &tables.ride.curve);
+            // the room's trick pack over it (MD19), as the host's machine has
+            let pack = args.room_tricks.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
+            lay_room_tricks(pack.as_ref(), &mut stock, &first.pick.bike);
             let mut phy = stock.clone();
             mods.bike(0, &mut phy);
             let mut sim = world.seats[0].sim.clone();
@@ -4731,6 +4740,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 return Err("an online ride from the lobby has one local player: drop --players".into());
             }
             let disc = &front.as_deref().expect("from the lobby").network.disc;
+            // the room's trick pack (MD19), laid over every seat's bike as on every machine
+            let pack = args.room_tricks.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
             let mut sims = Vec::with_capacity(room.seats.len());
             // each seat's bike file before the modifiers, which a change of them mid-ride is built
             // on again (P100); an open seat rides this machine's first's
@@ -4743,6 +4754,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     // The room's modifiers, a row a seat (P134): each seat's player's own, which
                     // the host gathered from the picks, the world's the host's.
                     let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+                    lay_room_tricks(pack.as_ref(), &mut phy, &seat.pick.bike);
                     *stock.last_mut().expect("pushed") = phy.clone();
                     mods.bike(i, &mut phy);
                     sim.phy = Arc::new(phy);
@@ -5305,6 +5317,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         room.wrecks = args.wrecks && settings.wrecks;
                         room.air_wrecks = args.air_wrecks && settings.air_wrecks;
                         room.modifiers = mods.text();
+                        // the trick pack this ride rides (MD19), which every joiner's machine lays
+                        // (`ride_trick_pack`'s pick, which this ride was built on)
+                        room.tricks = lobby::room_tricks(args.tricks.unwrap_or_default(), mods_dir(&args).as_deref());
                         let mut pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
                         // the preset this seat rides on now (N13), which the room tells a joiner's machine
                         pick.preset = net::rides::preset(&world.seats[0].sim).unwrap_or(0) as u8;
@@ -7511,28 +7526,43 @@ fn mods_dir(args: &Args) -> Option<std::path::PathBuf> {
 }
 
 /// The trick pack a ride lays over the original's tricks (MD16): only with `--tricks mxvatv` or the
-/// Tricks row's MX vs. ATV, never online, and only when the mods folder has one; the line says why not.
-fn ride_trick_pack(args: &Args) -> Option<trick_packs::Pack> {
+/// Tricks row's MX vs. ATV, never on `--online`, and only when the mods folder has one; the line says
+/// why not. A lobby's ride rides its room's pack (MD19) or none at all: without it this machine would
+/// ride other tricks than every other seat, which the handshake should have refused.
+fn ride_trick_pack(args: &Args) -> Result<Option<trick_packs::Pack>, String> {
+    if let Some((dir, id)) = &args.room_tricks {
+        let pack = trick_packs::by_id(dir, id).map_err(|e| format!("the room's tricks: {e}"))?;
+        println!("tricks: MX vs. ATV's, from the room's {}", pack.id);
+        return Ok(Some(pack));
+    }
     if args.tricks != Some(menu::Tricks::MxVsAtv) {
-        return None;
+        return Ok(None);
     }
     if args.online.is_some() {
-        println!("tricks: the original's online, until every seat can be checked for the same pack (MD6)");
-        return None;
+        println!("tricks: the original's on --online, which has no handshake to check every seat's pack");
+        return Ok(None);
     }
     let Some(dir) = mods_dir(args) else {
         println!("tricks: the mods folder is off, so the original's");
-        return None;
+        return Ok(None);
     };
     match trick_packs::find(&dir) {
         Ok(pack) => {
             println!("tricks: MX vs. ATV's, from {}", pack.id);
-            Some(pack)
+            Ok(Some(pack))
         }
         Err(e) => {
             println!("tricks: {e}; the original's");
-            None
+            Ok(None)
         }
+    }
+}
+
+/// Lay a lobby ride's trick pack (MD19) over a seat's bike file, read for the bike set `set`
+/// (`race125p`) as the handshake hashed it: what every machine lays over that seat.
+fn lay_room_tricks(pack: Option<&trick_packs::Pack>, phy: &mut Phy, set: &str) {
+    if let (Some(pack), Some(set)) = (pack, roster::Set::from_word(set)) {
+        println!("{set}: {}", pack.lay(phy, &set.file()), set = set.word());
     }
 }
 
@@ -8131,6 +8161,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         mods: None,
         mods_asked: false,
         tricks: None,
+        room_tricks: None,
         markers: None,
     };
     let mut argv = std::env::args().skip(1);

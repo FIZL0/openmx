@@ -32,6 +32,9 @@ pub struct DiscFiles {
     /// Whose saved markers a ride this machine drops in on brings (P105): the settings' folder and
     /// 1P's profile (`saved_markers::profile`), as the front end last said them.
     markers: Mutex<Option<(PathBuf, String)>>,
+    /// The mods folder this machine's trick packs are read from (MD19), `None` while the Mods row is
+    /// off, as the front end last said it.
+    mods: Mutex<Option<PathBuf>>,
 }
 
 /// The disc's member ending in `suffix`, the shortest (the shell's own rule: the menus keep deeper
@@ -110,15 +113,48 @@ impl openmx_net::Disc for DiscFiles {
         let Some((dir, profile)) = self.markers.lock().unwrap().clone() else { return String::new() };
         crate::saved_markers::to_pick(&crate::saved_markers::load(&dir, track, &profile, bike), bike, track)
     }
+
+    fn tricks(&self, id: &str) -> Option<u64> {
+        let mods = self.mods.lock().unwrap().clone()?;
+        crate::trick_packs::by_id(&mods, id).ok()?.hash().ok()
+    }
 }
 
 impl DiscFiles {
+    /// The mods folder this machine's trick packs are hashed from (MD19), `None` while the Mods row
+    /// is off. The front end's, every frame.
+    pub fn tricks_from(&self, mods: Option<PathBuf>) {
+        *self.mods.lock().unwrap() = mods;
+    }
+
     /// The player whose saved markers a ride this machine drops in on brings (P105): `profile`'s in
     /// the settings' folder `dir`. The front end's, every frame.
     pub fn bring_markers(&self, dir: &Path, profile: &str) {
         let mut m = self.markers.lock().unwrap();
         if m.as_ref().is_none_or(|(d, p)| d != dir || p != profile) {
             *m = Some((dir.to_path_buf(), profile.to_string()));
+        }
+    }
+}
+
+/// The trick pack a ride on `tricks` rides (MD19), as a room names it: the id of the first pack in
+/// `mods` (the one `ride_trick_pack` would lay) for MX vs. ATV's, else empty, the original's.
+pub fn room_tricks(tricks: crate::menu::Tricks, mods: Option<&Path>) -> String {
+    match (tricks, mods) {
+        (crate::menu::Tricks::MxVsAtv, Some(mods)) => crate::trick_packs::find(mods).map(|p| p.id).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// A lobby this machine hosts rides its Tricks row (MD19): MX vs. ATV's names, in the room the
+/// commands `out` host, the trick pack a ride of its own would lay over the original's, and the
+/// handshake holds every seat to it. A ride opened online under way (N10) already says its own.
+pub fn name_tricks(out: &mut [openmx_net::Cmd], tricks: crate::menu::Tricks, mods: Option<&Path>) {
+    for c in out {
+        if let openmx_net::Cmd::Host(room) | openmx_net::Cmd::Quick(room) = c
+            && !room.riding
+        {
+            room.tricks = room_tricks(tricks, mods);
         }
     }
 }
@@ -201,7 +237,12 @@ impl Network {
             // Started again with the new network the next time it is asked for.
             self.net = None;
         }
-        let out = std::mem::take(&mut menu.lobby.out);
+        // The mods folder a trick pack is read from (MD19), as the Mods row says now.
+        let dir = self.file.parent().unwrap_or(Path::new("."));
+        let mods = menu.settings.mods.then(|| dir.join(crate::track_mods::MODS_DIR));
+        self.disc.tricks_from(mods.clone());
+        let mut out = std::mem::take(&mut menu.lobby.out);
+        name_tricks(&mut out, menu.settings.tricks, mods.as_deref());
         if !out.is_empty() {
             let name = menu.settings.name.clone();
             let lan = menu.lobby.lan;

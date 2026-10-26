@@ -19,6 +19,14 @@ mod roster;
 #[allow(dead_code)]
 mod lobby;
 
+#[path = "../src/track_mods.rs"]
+#[allow(dead_code)]
+mod track_mods;
+
+#[path = "../src/trick_packs.rs"]
+#[allow(dead_code)]
+mod trick_packs;
+
 #[path = "../src/join.rs"]
 #[allow(dead_code)]
 mod join;
@@ -317,6 +325,87 @@ fn a_joiner_s_menu_whose_bike_set_differs_is_refused_and_told_why() {
     assert!(why.contains("race125p"), "{why}");
     assert!(g.lobby.room.is_none());
     println!("guest told: {why}");
+}
+
+/// A `mods/` folder in the temp dir holding one MX vs. ATV trick pack, `mxvatv`, whose race125p file
+/// says `phy`.
+fn trick_mods(name: &str, phy: &str) -> std::path::PathBuf {
+    let mods = std::env::temp_dir().join(format!("openmx-md19-{}-{name}", std::process::id())).join("mods");
+    let pack = mods.join(trick_packs::TRICKS_DIR).join("mxvatv");
+    let _ = std::fs::remove_dir_all(&mods);
+    std::fs::create_dir_all(pack.join("Bike")).unwrap();
+    let json = r#"{"kind": "tricks", "id": "mxvatv", "riders": [{"rider": "MX", "table": "stunts.ini"}], "phy": ["Bike/mx_race125p.phy"]}"#;
+    std::fs::write(pack.join("mod.json"), json).unwrap();
+    std::fs::write(pack.join("stunts.ini"), "[Stunt01]\nName=threesixtyL\n").unwrap();
+    std::fs::write(pack.join("Bike/mx_race125p.phy"), phy).unwrap();
+    mods
+}
+
+/// The LAN only, on the shell's own [`lobby::DiscFiles`] reading trick packs from `mods`.
+fn lan_with_tricks(name: &str, mods: &std::path::Path) -> Net {
+    let cfg = Online { name: name.into(), relay: Relay::Off, board: Board::Off, lan: true, code_servers: Some(vec![]), ..Online::default() };
+    let files = lobby::DiscFiles::default();
+    files.tricks_from(Some(mods.to_path_buf()));
+    Net::start(cfg, Arc::new(files))
+}
+
+/// [`pump`], naming the trick pack in the host's room as `lobby::Network::pump` does (MD19).
+fn pump_tricks(m: &mut Menu, net: &Net, mods: &std::path::Path) -> Vec<Act> {
+    lobby::name_tricks(&mut m.lobby.out, m.settings.tricks, Some(mods));
+    pump(m, net)
+}
+
+/// MD19: a host on MX vs. ATV's tricks names its pack in the room; a guest with the same pack's
+/// files rides, and one whose race125p file in it differs is refused with the pack named.
+#[test]
+fn every_seat_of_an_online_ride_has_the_hosts_trick_pack() {
+    for (guest_phy, rides) in [("[Three Sixty]\n", true), ("[Three Sixty]\nchanged = 1\n", false)] {
+        let (hm, gm) = (trick_mods(&format!("host-{rides}"), "[Three Sixty]\n"), trick_mods(&format!("guest-{rides}"), guest_phy));
+        let (hn, gn) = (lan_with_tricks("Hosty", &hm), lan_with_tricks("Guesty", &gm));
+        let (mut h, mut hr) = fresh("Hosty", "thq1");
+        let (mut g, mut gr) = fresh("Guesty", "thq2");
+        h.settings.tricks = menu::Tricks::MxVsAtv;
+        to_online(&mut h, &mut hr);
+        taps(&mut h, &mut hr, &[Control::Down, Control::Cross]);
+        let both = |h: &mut Menu, g: &mut Menu, what: &str, done: &mut dyn FnMut(&Menu, &Menu, &[Act], &[Act]) -> bool| {
+            let end = Instant::now() + Duration::from_secs(30);
+            let (mut ha, mut ga) = (Vec::new(), Vec::new());
+            while Instant::now() < end {
+                ha.extend(pump_tricks(h, &hn, &hm));
+                ga.extend(pump_tricks(g, &gn, &gm));
+                if done(h, g, &ha, &ga) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("{what}: not in 30 s; host {:?} / guest {:?}", h.lobby, g.lobby);
+        };
+        both(&mut h, &mut g, "the host's room code", &mut |h, _, _, _| !h.lobby.code.is_empty() && h.lobby.room.is_some());
+        assert_eq!(h.lobby.room.as_ref().unwrap().tricks, "mxvatv", "the host's room names its pack");
+        let code = h.lobby.code.clone();
+        to_online(&mut g, &mut gr);
+        taps(&mut g, &mut gr, &[Control::Down, Control::Down, Control::Down, Control::Cross]);
+        type_text(&mut g, &mut gr, &code);
+        both(&mut h, &mut g, "both seated", &mut |h, g, _, _| [h, g].iter().all(|m| m.lobby.room.as_ref().is_some_and(|r| r.taken() == 2)));
+        taps(&mut g, &mut gr, &[Control::Down, Control::Down, Control::Cross]);
+        both(&mut h, &mut g, "ready", &mut |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.all_ready()));
+        h.lobby.out.push(Cmd::Start);
+        if rides {
+            both(&mut h, &mut g, "the ride", &mut |_, _, ha, ga| ha.contains(&Act::Online) && ga.contains(&Act::Online));
+            assert_eq!(g.lobby.start.as_ref().unwrap().0.tricks, "mxvatv", "the guest rides the room's pack");
+        } else {
+            both(&mut h, &mut g, "the refusal", &mut |h, g, ha, ga| {
+                assert!(!ha.contains(&Act::Online) && !ga.contains(&Act::Online), "nobody rides");
+                g.screen() == Some(Screen::Online) && h.lobby.room.as_ref().is_some_and(|r| r.taken() == 1)
+            });
+            let why = g.note.clone().unwrap_or_default();
+            assert!(why.contains("trick pack mxvatv"), "{why}");
+            println!("guest told: {why}");
+        }
+        for m in [hm, gm] {
+            let _ = std::fs::remove_dir_all(m.parent().unwrap());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------

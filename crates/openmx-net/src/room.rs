@@ -131,6 +131,11 @@ pub struct Room {
     /// the room is handed to when the host goes (N11).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tickets: BTreeMap<String, String>,
+    /// The trick pack every seat rides (MD19): the id of the host's MX vs. ATV pack
+    /// (`mods/tricks/<id>/`'s `mod.json`), empty for the original's tricks alone, and what an older
+    /// build sends. The handshake holds every machine to the same files under it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tricks: String,
 }
 
 impl Room {
