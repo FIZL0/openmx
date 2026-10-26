@@ -74,6 +74,8 @@ fn the_original_switch_rides_the_originals_fog_layout_plants_and_picture() {
     assert_eq!(line(&said, "plants:"), "plants: original");
     // V56's leaves are a switch of their own since V57.
     assert_eq!(line(&said, "foliage:"), "foliage: original");
+    // V83: no anisotropic filtering.
+    assert!(line(&said, "texture filtering:").starts_with("texture filtering: Off (anisotropy 1,"), "{said}");
     assert_eq!(line(&said, "picture shape:"), "picture shape: 4:3");
     assert_eq!(line(&said, "controls:"), "controls: original");
     assert_eq!(line(&said, "biplane controls:"), "biplane controls: original");
@@ -84,6 +86,8 @@ fn the_original_switch_rides_the_originals_fog_layout_plants_and_picture() {
     assert!(line(&said, "graphics:").starts_with("graphics: full (fog"), "{said}");
     assert_eq!(line(&said, "plants:"), "plants: smooth");
     assert_eq!(line(&said, "foliage:"), "foliage: cutout");
+    // 16x, or whatever less this device does.
+    assert!(line(&said, "texture filtering:").starts_with("texture filtering: 16x (anisotropy "), "{said}");
     assert_eq!(line(&said, "picture shape:"), "picture shape: fill");
     assert_eq!(line(&said, "controls:"), "controls: new");
     assert_eq!(line(&said, "biplane controls:"), "biplane controls: new");

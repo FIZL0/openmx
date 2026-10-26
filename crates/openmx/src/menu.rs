@@ -341,6 +341,9 @@ pub struct Settings {
     pub foliage: Foliage,
     /// The ride's picture's shape (P126): the window's own, or the original's 4:3 with bars.
     pub picture: Picture,
+    /// How far the GPU filters every texture anisotropically (V83): 16x unless turned down, or Off
+    /// under the Original switch's Texture Filtering.
+    pub filtering: Filtering,
     /// Each seat's session markers (P129), the Controls tab's Markers row, 1P's first: on, the d-pad
     /// is the markers' and the left stick alone rides; off, the d-pad fires no marker, the marker
     /// bar hides, and the d-pad rides as the original's — steering, leaning and the trick gestures.
@@ -372,6 +375,65 @@ impl Picture {
 
     pub fn from_word(w: &str) -> Option<Picture> {
         Picture::ALL.into_iter().find(|p| p.word() == w)
+    }
+}
+
+/// Texture Filtering's row's help, on the Graphics tab and in the Original switch's reach (V83).
+pub const FILTERING_HELP: &str = "How sharp textures stay when seen at a glance, like the ground down a straight. 16x keeps them sharp into the distance; Off blurs them as the original did. The software renderer draws without it either way.";
+
+/// The Texture Filtering setting (V83): how far the GPU filters textures anisotropically, so a
+/// texture seen edge-on (the ground down a straight) stays sharp along it. Off is the original's
+/// look: one plain trilinear mip, chosen by the steep direction's footprint, which blurs the ground.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Filtering {
+    Off,
+    X2,
+    X4,
+    X8,
+    #[default]
+    X16,
+}
+
+impl Filtering {
+    /// Ours first and the original's last, as Draw Distance's: a step on from Off is 16x again.
+    pub const ALL: [Filtering; 5] = [Filtering::X16, Filtering::X8, Filtering::X4, Filtering::X2, Filtering::Off];
+
+    /// The sampler's anisotropy clamp: 1 for Off.
+    pub fn anisotropy(self) -> u16 {
+        match self {
+            Filtering::Off => 1,
+            Filtering::X2 => 2,
+            Filtering::X4 => 4,
+            Filtering::X8 => 8,
+            Filtering::X16 => 16,
+        }
+    }
+
+    /// Its row's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Filtering::Off => "Off",
+            Filtering::X2 => "2x",
+            Filtering::X4 => "4x",
+            Filtering::X8 => "8x",
+            Filtering::X16 => "16x",
+        }
+    }
+
+    /// The file's word, which is also `--texture-filtering`'s: `off`, `2` to `16`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Filtering::Off => "off",
+            Filtering::X2 => "2",
+            Filtering::X4 => "4",
+            Filtering::X8 => "8",
+            Filtering::X16 => "16",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Filtering> {
+        let w = w.trim_end_matches('x');
+        Filtering::ALL.into_iter().find(|f| f.word() == w || (w == "1" && *f == Filtering::Off))
     }
 }
 
@@ -413,18 +475,21 @@ pub enum Departure {
     Foliage,
     /// The ride's picture (V24): the window's shape, or the original's 4:3.
     Picture,
+    /// The textures' anisotropic filtering (V83): 16x, or the original's plain trilinear blur, Off.
+    Filtering,
     /// Every seat's session markers (P129): on, the d-pad the markers'; or off, the original's d-pad.
     Markers,
 }
 
 impl Departure {
-    pub const ALL: [Departure; 7] = [
+    pub const ALL: [Departure; 8] = [
         Departure::Controls,
         Departure::Cameras,
         Departure::Fog,
         Departure::Plants,
         Departure::Foliage,
         Departure::Picture,
+        Departure::Filtering,
         Departure::Markers,
     ];
 
@@ -437,6 +502,7 @@ impl Departure {
             Departure::Plants => "Plant Detail",
             Departure::Foliage => "Leaves",
             Departure::Picture => "Picture Shape",
+            Departure::Filtering => "Texture Filtering",
             Departure::Markers => "Markers",
         }
     }
@@ -450,6 +516,7 @@ impl Departure {
             Departure::Plants => ["Smooth", "Original"],
             Departure::Foliage => ["Crisp", "Original"],
             Departure::Picture => ["Fill the Window", "4:3"],
+            Departure::Filtering => ["16x", "Off"],
             Departure::Markers => ["On", "Off"],
         }
     }
@@ -463,6 +530,7 @@ impl Departure {
             Departure::Plants => "How bushes and trees turn into flat pictures far off. Smooth dissolves them over a wide band; Original swaps them as the game did.",
             Departure::Foliage => "How leaves lie over what is behind them. Crisp cuts each leaf out, so trees show through each other's gaps; Original blends them as the game did, and a near tree's soft edges can hide the trees behind it.",
             Departure::Picture => "The ride's shape on screen. Original is the television's 4:3, with bars at the sides.",
+            Departure::Filtering => FILTERING_HELP,
             Departure::Markers => "Every player's session markers on the d-pad. Off, the d-pad steers, leans and does tricks as in the original.",
         }
     }
@@ -479,6 +547,7 @@ impl Menu {
             Departure::Plants => s.plants == Lod::Original,
             Departure::Foliage => s.foliage == Foliage::Original,
             Departure::Picture => s.picture == Picture::Television,
+            Departure::Filtering => s.filtering == Filtering::Off,
             Departure::Markers => s.markers.iter().all(|m| !*m),
         }
     }
@@ -514,6 +583,7 @@ impl Menu {
             Departure::Plants => s.plants = if original { Lod::Original } else { Lod::Smooth },
             Departure::Foliage => s.foliage = if original { Foliage::Original } else { Foliage::Cutout },
             Departure::Picture => s.picture = if original { Picture::Television } else { Picture::Fill },
+            Departure::Filtering => s.filtering = if original { Filtering::Off } else { Filtering::X16 },
             Departure::Markers => s.markers = [!original; SEATS_MAX],
         }
     }
@@ -937,6 +1007,7 @@ impl Default for Settings {
             plants: Lod::default(),
             foliage: Foliage::default(),
             picture: Picture::default(),
+            filtering: Filtering::default(),
             markers: [true; SEATS_MAX],
         }
     }
@@ -1046,6 +1117,7 @@ impl Settings {
                 "plants" => s.plants = Lod::from_word(v).unwrap_or(s.plants),
                 "foliage" => s.foliage = Foliage::from_word(v).unwrap_or(s.foliage),
                 "picture" => s.picture = Picture::from_word(v).unwrap_or(s.picture),
+                "texture_filtering" => s.filtering = Filtering::from_word(v).unwrap_or(s.filtering),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
@@ -1136,6 +1208,7 @@ impl Settings {
             + &self.air_wrecks_text()
             + &self.hud_text()
             + &self.original_text()
+            + &self.filtering_text()
             + &self.world_sky_text()
             + &self.mods_text()
             + &self.tricks_text()
@@ -1188,6 +1261,12 @@ impl Settings {
         let foliage = if self.foliage == Foliage::default() { String::new() } else { format!("foliage = {}\n", self.foliage.word()) };
         let picture = if self.picture == Picture::default() { String::new() } else { format!("picture = {}\n", self.picture.word()) };
         plants + &foliage + &picture
+    }
+
+    /// Texture Filtering (V83), only when it is not 16x, so a file from before it is written as it
+    /// was.
+    fn filtering_text(&self) -> String {
+        if self.filtering == Filtering::default() { String::new() } else { format!("texture_filtering = {}\n", self.filtering.word()) }
     }
 
     /// A world's sky (MD9), only when it is not the default, so a file from before it is written as
