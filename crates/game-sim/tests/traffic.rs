@@ -7,12 +7,21 @@
 //!    own update in the interpreter for [`TICKS`] ticks, is the original's on every tick: the clock,
 //!    the curve's cursor, the point, the heading, the up and the model's world matrix, bit for bit;
 //! 3. **the mesh** — the car's collision mesh, stood on the port's pose, has the original's sphere
-//!    (the collidable's centre and radius) and its world matrix, bit for bit.
+//!    (the collidable's centre and radius) and its world matrix, bit for bit;
+//! 4. **the motion** (S136) — on the same drive, the car's velocity and spin as the mesh carries them
+//!    ([`Moving`]) are what the original's car answers its two vehicle virtuals, bit for bit, and
+//!    the frame's `1/dt` is the port's divide;
+//! 5. **the wheel on a car** (S136) — the wheel's contact-velocity step, on a wheel whose contact is
+//!    on one of the state's cars and on one whose contact is on the world, is
+//!    [`ride::wheel_contact_velocity`] on [`Moving::at`], bit for bit;
+//! 6. **the ride** (S136) — a bike parked on the moving train's roof moves with it and stays on it.
 
 use game_sim::archive::{Psr, Res};
 use game_sim::math::Mat4;
 use game_sim::track::{Mesh, Scene, Terrain};
-use game_sim::traffic::{Car, Spec, Traffic};
+use game_sim::chassis::{self, Mat3};
+use game_sim::ride;
+use game_sim::traffic::{Car, Moving, ORIGIN, Spec, Traffic};
 use game_sim::world::{Ground, Place, Props};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
@@ -59,6 +68,31 @@ mod at {
     pub const CENTRE: u32 = 0x40;
     pub const RADIUS: u32 = 0x60;
     pub const PLACED: u32 = 0x120;
+    /// S136: the vtable, the car's previous world matrix (copied at the update's top), its origin and
+    /// its vehicle kind; the vehicle virtuals' slots; the application's `dt` and `1/dt`.
+    pub const VTABLE: u32 = 0x8;
+    pub const BEFORE: u32 = 0x2e0;
+    pub const ORIGIN: u32 = 0x190;
+    pub const KIND: u32 = 0x1b0;
+    pub const VELOCITY_SLOT: u32 = 0xb8;
+    pub const SPIN_SLOT: u32 = 0xbc;
+    pub const VELOCITY: u32 = 0x260;
+    pub const SPIN: u32 = 0x290;
+    pub const DT: u32 = 0x344;
+    pub const INV_DT: u32 = 0x348;
+}
+
+/// The application object, which keeps the frame's `dt` and `1/dt`.
+fn app(ee: &Ee) -> u32 {
+    ee.u32_at(addr("app_pointer").unwrap())
+}
+
+/// The car's answer to one of its vehicle virtuals (`a0` out, `a1` the car), written over the
+/// field the virtual keeps its own copy in.
+fn virtual_of(ee: &mut Ee, car: u32, slot: u32, out: u32) -> Vf {
+    let f = ee.u32_at(ee.u32_at(car + at::VTABLE) + slot);
+    ee.call(f, &[u64::from(car + out), u64::from(car)], &[], BUDGET);
+    vf(ee, car + out)
 }
 
 fn state() -> Option<Ee> {
@@ -192,6 +226,12 @@ fn the_cars_drive_as_the_originals_do() {
     traffic.cars = CARS.iter().map(|&car| car_of(&ee, car)).collect();
     traffic.attach(&mut world.props);
     let first = traffic.first.expect("attached");
+    // The original's `1/dt` is the application's, made from the frame's own step (see
+    // `the_frames_one_over_dt_is_the_ports_divide`): this drive's step is not the state's, so the
+    // state's `1/dt` is put to this one's.
+    let inv = app(&ee) + at::INV_DT;
+    ee.set_f32(inv, (F::ONE / DT).0);
+    let (mut moved, mut turned) = (0, 0);
 
     for tick in 0..TICKS {
         for &car in &CARS {
@@ -218,5 +258,261 @@ fn the_cars_drive_as_the_originals_do() {
             assert_eq!(bits(prop.centre), bits(vf(&ee, mesh + at::CENTRE)), "{}", what("mesh centre"));
             assert_eq!(prop.radius.to_bits(), ee.u32_at(mesh + at::RADIUS), "{}", what("mesh radius"));
         }
+        // S136: what the mesh says its car is doing, against what the car answers.
+        for (k, &car) in CARS.iter().enumerate() {
+            let what = format!("tick {tick}: {} ({car:#x})", name(&ee, car));
+            let moving = world.props.props[first + k].moving.unwrap_or_else(|| panic!("{what}: no motion on the mesh"));
+            assert_eq!(mat_bits(&moving.pose), mat_bits(&traffic.cars[k].pose), "{what}: the motion's pose");
+            let velocity = virtual_of(&mut ee, car, at::VELOCITY_SLOT, at::VELOCITY);
+            assert_eq!(bits(moving.velocity), bits(velocity), "{what}: velocity");
+            let spin = virtual_of(&mut ee, car, at::SPIN_SLOT, at::SPIN);
+            assert_eq!(bits(moving.spin), bits(spin), "{what}: spin");
+            moved += usize::from(moving.velocity.x() != 0.0 || moving.velocity.z() != 0.0);
+            turned += usize::from(moving.spin.y() != 0.0);
+        }
     }
+    // Not a drive of cars standing still: most move every tick, and the curves turn them.
+    assert!(moved > TICKS * CARS.len() / 2 && turned > TICKS, "{moved} moving and {turned} turning");
+}
+
+/// The state's own `1/dt` is one PS2 divide of its own `dt`, which is what [`Traffic::frame`] makes;
+/// and every car in it is a vehicle of kind 2, the one kind a wheel's contact keeps, about the
+/// origin [`ORIGIN`] — which nothing in the port reads off a car, so here is where it is checked.
+#[test]
+fn the_frames_one_over_dt_is_the_ports_divide() {
+    let Some(ee) = state() else { return };
+    let app = app(&ee);
+    let dt = F(ee.f32_at(app + at::DT));
+    assert!(dt > F::ZERO, "the state's dt is {}", dt.0);
+    assert_eq!((F::ONE / dt).to_bits(), ee.u32_at(app + at::INV_DT), "1/{} against {}", dt.0, ee.f32_at(app + at::INV_DT));
+    for &car in &CARS {
+        assert_eq!(ee.u32_at(car + at::KIND), 2, "{} ({car:#x}) kind", name(&ee, car));
+        assert_eq!(bits(vf(&ee, car + at::ORIGIN)), bits(ORIGIN), "{} ({car:#x}) origin", name(&ee, car));
+    }
+}
+
+/// A small generator, for the cases below.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u32 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 32) as u32
+    }
+    /// A float in `[-r, r)`.
+    fn f(&mut self, r: f32) -> f32 {
+        (self.next() as f32 / 4_294_967_296.0 * 2.0 - 1.0) * r
+    }
+    /// A vector `r` around `c`, with `w` given.
+    fn around(&mut self, c: Vf, r: f32, w: f32) -> Vf {
+        Vf::new(c.x() + self.f(r), c.y() + self.f(r), c.z() + self.f(r), w)
+    }
+}
+
+/// How many wheels [`the_wheel_on_a_car_moves_as_the_originals_does`] tries.
+const WHEELS: usize = 20_000;
+
+/// The wheel's contact-velocity step against the port's (S136), on a wheel and a chassis laid out in
+/// RAM s89-along leaves empty: the wheel's contact on one of the state's 21 cars, moving as the
+/// state left it (its matrix before and after its last update, at the state's `1/dt`), or on the
+/// world. The chassis hangs on another car's node, which only its velocity's turn into the chassis'
+/// own frame reads. Everything the step writes is compared: `+0x170`, `+0x180`, `+0x190`, and what
+/// it measured the car at, `+0x1b0` and `+0x1c0`.
+#[test]
+fn the_wheel_on_a_car_moves_as_the_originals_does() {
+    const WHEEL: u32 = 0x01f8_0000;
+    const CHASSIS: u32 = 0x01f9_0000;
+    let Some(mut ee) = state() else { return };
+    let step = addr("wheel_contact_velocity").unwrap();
+    let inv_dt = F(ee.f32_at(app(&ee) + at::INV_DT));
+    let put = |ee: &mut Ee, a: u32, v: Vf| {
+        for (k, x) in v.0.into_iter().enumerate() {
+            ee.set_f32(a + 4 * k as u32, x);
+        }
+    };
+    let mut rng = Rng(0x5136_5136_5136_5136);
+    let mut on_cars = 0;
+    for case in 0..WHEELS {
+        let car = CARS[rng.next() as usize % CARS.len()];
+        let hung = CARS[rng.next() as usize % CARS.len()];
+        let on = rng.next() % 4 != 0;
+        let node = ee.u32_at(car + at::NODE);
+        let now = mat(&ee, node + at::WORLD);
+        let centre = now.0[3];
+        let (vel, spin) = (rng.around(Vf::ZERO, 60.0, 0.0), rng.around(Vf::ZERO, 6.0, 0.0));
+        let (cofg, load, contact) = (rng.around(centre, 8.0, 1.0), rng.around(centre, 8.0, 1.0), rng.around(centre, 8.0, 1.0));
+        for o in (0..0x220).step_by(4) {
+            ee.set_u32(WHEEL + o, 0);
+        }
+        for o in (0..0x2a0).step_by(4) {
+            ee.set_u32(CHASSIS + o, 0);
+        }
+        ee.set_u32(WHEEL + 0x1e4, CHASSIS);
+        ee.set_u32(WHEEL + 0x1f4, if on { car } else { 0 });
+        put(&mut ee, WHEEL + 0x120, contact);
+        put(&mut ee, WHEEL + 0x140, load);
+        ee.set_u32(CHASSIS + at::NODE, ee.u32_at(hung + at::NODE));
+        put(&mut ee, CHASSIS + 0x60, cofg);
+        put(&mut ee, CHASSIS + 0x260, vel);
+        put(&mut ee, CHASSIS + 0x280, spin);
+        ee.call(step, &[u64::from(WHEEL)], &[], BUDGET);
+
+        let moving = Moving::of(&mat(&ee, car + at::BEFORE), &mat(&ee, node + at::WORLD), inv_dt);
+        let under = on.then(|| moving.at(contact));
+        let own = ride::contact_velocity(vel, spin, load, cofg);
+        let (contact_vel, chassis_vel) = ride::wheel_contact_velocity(own, vel, under);
+        let hung_m = mat(&ee, ee.u32_at(hung + at::NODE) + at::WORLD);
+        let local = chassis::unrotate(&Mat3::new(hung_m.0[0], hung_m.0[1], hung_m.0[2]), chassis_vel);
+        let still = Vf::new(0.0, 0.0, 0.0, 1.0);
+        let (theirs_v, theirs_p) = under.unwrap_or((still, still));
+        let what = |field: &str| format!("case {case}: {} ({car:#x}) {}: {field}", name(&ee, car), if on { "on it" } else { "on the world" });
+        assert_eq!(bits(vf(&ee, WHEEL + 0x1b0)), bits(theirs_v), "{}", what("+0x1b0 the car's velocity"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x1c0)), bits(theirs_p), "{}", what("+0x1c0 the car's velocity at the contact"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x170)), bits(contact_vel), "{}", what("+0x170 the contact's velocity"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x180)), bits(chassis_vel), "{}", what("+0x180 the chassis' velocity"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x190)), bits(local), "{}", what("+0x190 the chassis' velocity, its own way"));
+        assert_eq!(ee.u32_at(WHEEL + 0x1a0), 1, "{}", what("+0x1a0"));
+        on_cars += usize::from(on);
+    }
+    assert!(on_cars > WHEELS / 2, "only {on_cars} wheels on a car");
+}
+
+/// The state's cars, stepped by the port, their meshes in `props`: what the shell hands every seat.
+fn traffic_of(ee: &Ee, parts: &[(Vec<u8>, Res)], props: &mut Props) -> Traffic {
+    let specs: Vec<Spec> = CARS
+        .iter()
+        .map(|&car| {
+            let col = name(ee, car).to_ascii_lowercase().replace(".psg", ".col");
+            spec_of(ee, car, member(parts, &col).map(|b| Mesh::parse(&b).unwrap_or_else(|e| panic!("{col}: {e}"))))
+        })
+        .collect();
+    let mut traffic = Traffic::new(specs);
+    traffic.cars = CARS.iter().map(|&car| car_of(ee, car)).collect();
+    traffic.attach(props);
+    traffic
+}
+
+/// The wagon the bike is parked on: the train's sixth car, a boxcar whose roof is flat at `y` 151.6
+/// for 24 feet either way of its middle, running `+x` at 55 ft/s and turning a little. (The fourth,
+/// whose deck the first probe found, is a hopper: a bowl a bike rolls to the bottom of.)
+const WAGON: usize = 5;
+const ROOF: f32 = 151.6;
+/// How long the bike rides it: five seconds, 275 feet of track.
+const PARKED: usize = 150;
+/// The ticks the bike's suspension takes to settle from the spawn's height (it sinks 1.2 ft) before
+/// its place on the deck is taken.
+const SETTLE: usize = 30;
+/// Off the deck: further from the wagon's middle along it than the roof is long, or below it.
+const DECK: f32 = 24.0;
+
+/// What [`parked`] measured.
+#[derive(Debug)]
+struct Parked {
+    /// The most the bike moved along and across the deck, in the wagon's own frame, after
+    /// [`SETTLE`].
+    along: f32,
+    /// And up or down off it.
+    up: f32,
+    /// The ticks before it left the deck — [`PARKED`] if it never did.
+    on: usize,
+    /// Its speed at the end, and the wagon's.
+    speed: f32,
+    car: f32,
+}
+
+/// A stock bike parked on [`WAGON`]'s deck, both brakes held, for [`PARKED`] ticks. `still` takes
+/// the wagon's motion away from the wheels — the port before S136, where a braked tire held on to
+/// the world. `drag` keeps the bike's air drag, which reads the bike's speed over the world, wagon
+/// or no wagon.
+fn parked(still: bool, drag: bool) -> Option<Parked> {
+    let ee = state()?;
+    let parts = archives()?;
+    let scn = member(&parts, "free06.scn").expect("free06.scn");
+    let scene = Scene::parse(&scn).expect("free06's scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_bytes = member(&parts, &leaf).expect("free06's terrain");
+    let terrain = Terrain::parse(&terrain_bytes).expect("free06's terrain");
+    let mut world = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let mut traffic = traffic_of(&ee, &parts, &mut world.props);
+    let first = traffic.first.expect("attached");
+    traffic.frame(DT, &mut world);
+    let moving = world.props.props[first + WAGON].moving.expect("the wagon moves");
+
+    // On the roof's middle, facing the way the wagon goes, at its speed: the bike's origin is the
+    // stock spawn's height over the ground it stands on.
+    let mut sim = game_sim::Sim::new(0x5136);
+    if !drag {
+        std::sync::Arc::make_mut(&mut sim.phy).mv.drag = F::ZERO;
+    }
+    let deck = Vf::new(moving.pose.0[3].x(), ROOF + game_sim::stock::SPAWN.y(), moving.pose.0[3].z(), 1.0);
+    sim.rider.ride.place(deck, moving.pose.0[2]);
+    sim.rider.ride.chassis.vel = Vf::new(moving.velocity.x(), moving.velocity.y(), moving.velocity.z(), 0.0);
+    // Where the bike is in the wagon's own frame.
+    let off = |sim: &game_sim::Sim, car: &Mat4| {
+        let at = sim.rider.ride.position();
+        let d = Vf::new(at.x() - car.0[3].x(), at.y() - car.0[3].y(), at.z() - car.0[3].z(), 0.0);
+        chassis::unrotate(&Mat3::new(car.0[0], car.0[1], car.0[2]), d)
+    };
+    let held = ride::Controls { brake: F::ONE, front_brake: F::ONE, rear_brake: F::ONE, ..Default::default() };
+    let (mut start, mut along, mut up, mut on) = (None, 0.0f32, 0.0f32, PARKED);
+    for tick in 0..PARKED {
+        // The production order: the cars first, then the rider (`Sim::step`). Here the test steps the
+        // cars itself, so that the control can take their motion away in between.
+        traffic.frame(DT, &mut world);
+        if still {
+            world.props.props.iter_mut().for_each(|p| p.moving = None);
+        }
+        sim.step(DT, &held, &mut world);
+        let now = off(&sim, &traffic.cars[WAGON].pose);
+        if on == PARKED && (now.x().abs().max(now.z().abs()) > DECK || now.y() < 0.0) {
+            on = tick;
+        }
+        if tick == SETTLE {
+            start = Some(now);
+        }
+        if let Some(start) = start {
+            along = along.max((now.x() - start.x()).abs()).max((now.z() - start.z()).abs());
+            up = up.max((now.y() - start.y()).abs());
+        }
+    }
+    let v = sim.rider.ride.chassis.vel;
+    let car = moving.velocity;
+    Some(Parked {
+        along,
+        up,
+        on,
+        speed: (v.x() * v.x() + v.z() * v.z()).sqrt(),
+        car: (car.x() * car.x() + car.z() * car.z()).sqrt(),
+    })
+}
+
+/// S136's test: a bike parked on the moving train's deck moves with it and stays on it — its tires
+/// hold on to the wagon, not to the world under it. The brief's comparison is against a capture of
+/// the original doing it (S129's), which does not exist yet: this proves the port's bike rides the
+/// wagon, and the controls prove it is the wagon's motion in the wheels' contact that does it.
+///
+/// With no air drag the bike is carried exactly: 0.08 ft along the deck in five seconds. With the
+/// stock bike's drag — the original's too, against the bike's speed over the *world* — 55 ft/s of
+/// head wind out-pulls both braked tires, the bike slips back at 8 ft/s and goes off the wagon's back
+/// in three seconds rather than one.
+#[test]
+fn a_bike_parked_on_the_train_rides_it() {
+    let Some(carried) = parked(false, false) else { return };
+    assert!(carried.along < 0.5, "the bike moved {} ft along the wagon's deck", carried.along);
+    assert!(carried.up < 0.1, "the bike rose or sank {} ft off the deck", carried.up);
+    assert_eq!(carried.on, PARKED, "the bike left the deck: {carried:?}");
+    assert!((carried.speed - carried.car).abs() < 0.5, "the bike is at {} ft/s on a wagon at {}", carried.speed, carried.car);
+
+    // The control: the same, with the wagon's motion kept from the wheels. The braked tires hold on
+    // to the world and the wagon runs out from under the bike.
+    let left = parked(true, false).expect("the same state");
+    assert!(left.on < 45, "without the wagon's motion the bike still stayed on for {} ticks", left.on);
+    assert!(left.speed < carried.car - 10.0, "without the wagon's motion the bike still ran at {} ft/s", left.speed);
+
+    // The stock bike, drag and all: it slips, but it is the wagon its tires brake against.
+    let dragged = parked(false, true).expect("the same state");
+    let control = parked(true, true).expect("the same state");
+    assert!(dragged.on > 75 && dragged.on > 2 * control.on, "with its drag the bike stayed on {} ticks, {} without the wagon", dragged.on, control.on);
 }

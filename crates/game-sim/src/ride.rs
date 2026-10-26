@@ -1427,8 +1427,35 @@ fn unpoint(m: &Mat4, v: Vf) -> Vf {
 /// gravity in the world (`+0x60`), and adds `ω × arm` to the body's velocity — read off the
 /// decompilation for S58, and not proved against the original on its own: the other-body half of
 /// that function (a contact on something that moves) is not ported.
-fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> Vf {
+pub fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> Vf {
     add_xyz(vel, cross(world_ang_vel, sub_xyz(at, cofg_world)))
+}
+
+/// The rest of the contact-velocity step (S136): the load point's velocity `own` and the chassis'
+/// `vel`, each less what the wheel stands on — `+0x170` and `+0x180`. `under` is the thing's velocity
+/// and its velocity at the wheel's contact point (`+0x1b0`, `+0x1c0`, [`crate::traffic::Moving::at`]),
+/// `None` on the world, where the original takes off its `(0, 0, 0, 1)`, which changes nothing.
+///
+/// Each is a `vsub.xyz`, so `w` is the first operand's. The owner-body branch (a contact on another
+/// body, `+0x1f0`) is not here: nothing the port's bike can stand on is one.
+pub fn wheel_contact_velocity(own: Vf, vel: Vf, under: Option<(Vf, Vf)>) -> (Vf, Vf) {
+    match under {
+        Some((velocity, at)) => (sub_xyz(own, at), sub_xyz(vel, velocity)),
+        None => (own, vel),
+    }
+}
+
+/// What a wheel stands on this substep, when it is a moving thing: the vehicle its contact names
+/// (`+0x1f4`, which only the contact distributor writes and the substep's clear empties) looked up in
+/// the substep's movers, and measured where the wheel's contact point (`+0x120`) is now — the
+/// original measures it at the first ask and keeps it for the substep (`+0x1a0`).
+fn under(wh: &Wheel, movers: &[(u32, crate::traffic::Moving)]) -> Option<(Vf, Vf)> {
+    let vehicle = wh.mv.fresh.scalars[3];
+    if vehicle == 0 {
+        return None;
+    }
+    let (_, moving) = movers.iter().find(|(k, _)| *k == vehicle)?;
+    Some(moving.at(wh.w.contact_point))
 }
 
 /// The chassis transform's three questions, answered with its own arithmetic.
@@ -1549,7 +1576,11 @@ fn velocity_bundle(ch: &chassis::Chassis, dt: F) -> Bundle {
 /// [`World::solid`] (the port's, for the worlds tests build). The search is gathered fresh each
 /// substep around the probe itself: the original gathers once a frame, after the substeps, around the
 /// body rays, which hands out the same candidates within reach in its walk's order then.
-fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (Vec<(Vf, Vf, Vf)>, F) {
+///
+/// A hit on a prop that moves ([`crate::world::Prop::moving`], a path car's mesh) carries the car:
+/// the collidable's vehicle (`+0x7c`) in the original, a vehicle of kind 2 (S136). The handle is the
+/// struck object's own number, which is never zero.
+fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (Vec<WheelHit>, F) {
     let node = rider_contact::node(m);
     {
         let (field, props, trees) = world.wooded();
@@ -1562,7 +1593,11 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (V
             let mut scene = flight_search::Scene::wooded(props, trees, None, bounds, rays, &node, &mut search);
             let hits = crate::contact_search::Search::rays(&mut scene, true);
             let near = if hits.is_empty() { F::ONE } else { scene.ray_record().nearest };
-            return (hits.iter().map(|h| (h.from, h.point, h.normal)).collect(), near);
+            let on = |object: usize| {
+                let prop = props?.props.get(object.checked_sub(flight_search::FIRST)?)?;
+                Some((object as u32, prop.moving?))
+            };
+            return (hits.iter().map(|h| (h.from, h.point, h.normal, on(h.struck.object))).collect(), near);
         }
     }
     let mut b = Bundle::default();
@@ -1579,10 +1614,14 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (V
     world.groups(&b, &mut record);
     let hits = (0..b.count)
         .filter(|&i| record.hit[i])
-        .map(|i| (rays.segments[i].from, record.point[i], record.normal[i]))
+        .map(|i| (rays.segments[i].from, record.point[i], record.normal[i], None))
         .collect();
     (hits, if record.hits > 0 { record.nearest } else { F::ONE })
 }
+
+/// One of [`wheel_hits`]' contacts: the segment's from, the point, the normal, and the moving thing
+/// it is on, with its handle, when it is on one.
+type WheelHit = (Vf, Vf, Vf, Option<(u32, crate::traffic::Moving)>);
 
 /// One surface out of a tire's table, by the index the ground query answered with. A tire with no
 /// table at all — or an index past its end — gets a surface of all zeroes, which is a tire with no
@@ -1615,8 +1654,8 @@ fn stick(s: (F, F)) -> (F, F) {
 /// measured again off the copy's shoved body, and the real run gets it. Both runs see the same
 /// `chassis_velocity`, which is the one the shove itself reads, so the two answers land exactly where
 /// the original's two do.
-fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &mut Mat4, dt: F)
-               -> Vec<wheel::Call> {
+fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &mut Mat4, dt: F,
+               under: Option<(Vf, Vf)>) -> Vec<wheel::Call> {
     wh.to_wheel();
     let view = |mvc: &mv::Chassis| wheel::Chassis {
         force: mvc.force,
@@ -1625,7 +1664,7 @@ fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &mut Ma
         cofg: mvc.cofg,
         vel: mvc.vel,
     };
-    wh.w.chassis_velocity = mvc.vel;
+    wh.w.chassis_velocity = wheel_contact_velocity(mvc.vel, mvc.vel, under).1;
 
     // The arm is the load point's, and the step works the load point out before it asks for the
     // velocity, so the copy's answer is the one the real run's ask would have had (S58).
@@ -1638,11 +1677,12 @@ fn tire_forces(wh: &mut Wheel, mvc: &mut mv::Chassis, cofg_world: Vf, m: &mut Ma
         wheel::tire_forces(&mut probe_w, &mut probe_c, &rows, dt, &mut ask);
         drop(ask);
         let vel = if synced { probe_c.vel } else { mvc.vel };
-        wh.w.contact_velocity =
-            contact_velocity(vel, mvc.world_ang_vel, probe_w.load_point, cofg_world);
+        let own = contact_velocity(vel, mvc.world_ang_vel, probe_w.load_point, cofg_world);
+        let (contact, chassis_vel) = wheel_contact_velocity(own, vel, under);
+        wh.w.contact_velocity = contact;
         if probe_w.contact {
             // `+0x190`: the chassis' velocity in its own frame, which the surface drag reads.
-            wh.chassis_local_velocity = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), vel);
+            wh.chassis_local_velocity = chassis::unrotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), chassis_vel);
         }
     }
 
@@ -1710,12 +1750,17 @@ const SHARE_SCALE: f32 = 1.0;
 /// This is what catches a nose-first landing: the front's load, copied onto the hanging rear, puts a
 /// second tire force behind the centre of mass and takes the pitch kick and the sideways twist out of
 /// the touchdown (`research/journal/2026-10-24-s67-landing-snap-2`).
-fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf) {
+///
+/// The contact velocity is relative to what *this* wheel's first ask found under it (`under`): the
+/// step measures what it stands on once a substep (`+0x1a0`), so the other wheel's hit objects copied
+/// in here are not looked at again.
+fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf, under: Option<(Vf, Vf)>) {
     wh.w.load_point = wh.w.probe_end_world;
     wh.w.spring_force = F(SHARE_SCALE) * other.w.spring_force;
     wh.mv.fresh.scalars[2] = other.mv.fresh.scalars[2];
     wh.mv.fresh.scalars[3] = other.mv.fresh.scalars[3];
-    wh.w.contact_velocity = contact_velocity(mvc.vel, mvc.world_ang_vel, wh.w.load_point, cofg_world);
+    let own = contact_velocity(mvc.vel, mvc.world_ang_vel, wh.w.load_point, cofg_world);
+    wh.w.contact_velocity = wheel_contact_velocity(own, mvc.vel, under).0;
 }
 
 /// One wheel's own integration: [`tire::surface_drag`], [`tire::spin_integrate`] and then
@@ -1734,13 +1779,14 @@ fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf) 
 /// branch's two contact-distributor words (`+0x1f0`/`+0x1f4`) are not carried: nothing here moves
 /// the ground.
 fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, other_contact: bool, other_load: F,
-                   cofg_world: Vf, mvc: &mut mv::Chassis, m: &Mat4, curve: &CurveTable, dt: F)
-                   -> Vec<wheel::Call> {
+                   cofg_world: Vf, mvc: &mut mv::Chassis, m: &Mat4, curve: &CurveTable, dt: F,
+                   under: Option<(Vf, Vf)>) -> Vec<wheel::Call> {
     wh.to_wheel();
     if wh.mv.other_tire_down && !wh.w.contact {
         wh.w.load_point = wh.w.probe_end_world;
         wh.w.spring_force = tire.other_tire_normal_load_scale * other_load;
-        wh.w.contact_velocity = contact_velocity(mvc.vel, mvc.world_ang_vel, wh.w.load_point, cofg_world);
+        let own = contact_velocity(mvc.vel, mvc.world_ang_vel, wh.w.load_point, cofg_world);
+        wh.w.contact_velocity = wheel_contact_velocity(own, mvc.vel, under).0;
     }
     let surf = surface(tire, wh.surface);
     let mut wc = wheel::Chassis {
@@ -2058,7 +2104,7 @@ impl Ride {
             rear.w.swept_contact = 0;
 
             calls.push(mv::Call::Contacts(s.dt));
-            contacts(chassis, &mut mvc, &out.chassis, front, rear, near, touching, scenery, s.dt, world);
+            let movers = contacts(chassis, &mut mvc, &out.chassis, front, rear, near, touching, scenery, s.dt, world);
 
             for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
                 calls.push(mv::Call::Suspension(side, h));
@@ -2074,23 +2120,26 @@ impl Ride {
                 wh.from_wheel();
             }
 
-            for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
+            // What each wheel stands on, measured once a substep where the wheel's contact is when the
+            // tire forces first ask for its velocity ([`under`], S136).
+            let under = [under(front, &movers), under(rear, &movers)];
+            for ((side, wh), under) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)].into_iter().zip(under) {
                 calls.push(mv::Call::TireForces(side, h));
-                tire_forces(wh, &mut mvc, chassis.cofg_world, &mut out.chassis, h);
+                tire_forces(wh, &mut mvc, chassis.cofg_world, &mut out.chassis, h, under);
             }
             rear.mv.other_tire_down = front.mv.contact && !rear.mv.contact;
 
             calls.push(mv::Call::WheelIntegrate(Side::Front, h));
             let (brake, other, load) = (held.front_brake, rear.w.contact, rear.w.spring_force);
             wheel_integrate(front, &p.front, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
-                            &tables.curve, h);
+                            &tables.curve, h, under[0]);
             calls.push(mv::Call::WheelIntegrate(Side::Rear, h));
             let (brake, other, load) = (held.rear_brake, front.w.contact, front.w.spring_force);
             if rear.mv.other_tire_down && !rear.w.contact {
-                share_load(rear, front, &mvc, chassis.cofg_world);
+                share_load(rear, front, &mvc, chassis.cofg_world, under[1]);
             }
             wheel_integrate(rear, &p.rear, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
-                            &tables.curve, h);
+                            &tables.curve, h, under[1]);
 
             mv::engine_post(engine, &mut rear.mv);
 
@@ -2216,26 +2265,29 @@ impl Ride {
 /// ported: a trunk between the rays would be ridden through without it.
 #[allow(clippy::too_many_arguments)] // one frame's worth of the bike, and all of it needed
 fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &mut Wheel,
-            rear: &mut Wheel, near: &mut F, touching: &mut bool, scenery: Option<bool>, dt: F, world: &mut dyn World) {
+            rear: &mut Wheel, near: &mut F, touching: &mut bool, scenery: Option<bool>, dt: F, world: &mut dyn World)
+            -> Vec<(u32, crate::traffic::Moving)> {
     let rays = wheel_rays(&front.w, &rear.w);
     let (hits, wheel_near) = wheel_hits(&rays, m, world);
     let look = !hits.is_empty();
     let cs: Vec<chassis::Contact> = hits
         .iter()
-        .map(|&(from, point, normal)| chassis::Contact {
+        .map(|&(from, point, normal, on)| chassis::Contact {
             // `select` is the segment's own start, along the bike: the front wheel's is forward.
             select: F(from.z()),
             normal,
             point,
-            // The collision node, the owner and the vehicle are the scene's, and the port has no
-            // handle to put here: a prop is the world, which is what a zero owner means.
+            // The collision node and the owner are the scene's, and the port has no handle to put
+            // here: a prop is the world, which is what a zero owner means. A path car's mesh is a
+            // vehicle of kind 2, as every one of the original's path cars is (S136).
             node: 0,
             owner: 0,
-            vehicle: 0,
-            vehicle_kind: 0,
+            vehicle: on.map_or(0, |(k, _)| k),
+            vehicle_kind: if on.is_some() { 2 } else { 0 },
             listeners: 0,
         })
         .collect();
+    let movers = hits.iter().filter_map(|h| h.3).collect();
 
     let b = velocity_bundle(ch, dt);
     let mut record = Record::new();
@@ -2279,6 +2331,7 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
     // came, as a fraction of the probe that found it.
     let body_near = if record.hits > 0 { record.nearest } else { F::ONE };
     *near = wheel_near.min(body_near);
+    movers
 }
 
 /// The contact list [`air::hit_wreck`] reads: the bike's head ray ([`air::HEAD`]) swept against

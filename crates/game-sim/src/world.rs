@@ -433,6 +433,10 @@ pub struct Prop {
     /// The root node's box, as a sphere in world space.
     pub centre: Vf,
     pub radius: F,
+    /// How the thing the mesh is on moved this tick, when it moves: a path car's
+    /// ([`crate::traffic::Moving`], S136), which a wheel standing on it rides with. `None` for
+    /// everything that stands still.
+    pub moving: Option<crate::traffic::Moving>,
 }
 
 impl Prop {
@@ -451,7 +455,7 @@ impl Prop {
             true,
         );
         let (to_world, centre, radius) = stood(&mesh, &place);
-        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius }
+        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None }
     }
 
     /// A parsed mesh stood at a world matrix: a moving car's (S81, [`crate::traffic`]). The mesh's
@@ -459,7 +463,7 @@ impl Prop {
     pub fn on(mesh: Mesh, place: &Mat4) -> Prop {
         let (to_world, _, _) = stood(&mesh, place);
         let (centre, radius) = moved(&mesh, place);
-        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius }
+        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None }
     }
 
     /// Move the mesh to a new world matrix, where its car now stands.
