@@ -72,6 +72,8 @@ fn the_original_switch_rides_the_originals_fog_layout_plants_and_picture() {
     let said = ride(&dir);
     assert!(line(&said, "graphics:").starts_with("graphics: original (fog"), "{said}");
     assert_eq!(line(&said, "plants:"), "plants: original");
+    // V56's leaves are a switch of their own since V57.
+    assert_eq!(line(&said, "foliage:"), "foliage: original");
     assert_eq!(line(&said, "picture shape:"), "picture shape: 4:3");
     assert_eq!(line(&said, "controls:"), "controls: original");
     assert_eq!(line(&said, "biplane controls:"), "biplane controls: original");
@@ -81,6 +83,7 @@ fn the_original_switch_rides_the_originals_fog_layout_plants_and_picture() {
     let said = ride(&dir_off);
     assert!(line(&said, "graphics:").starts_with("graphics: full (fog"), "{said}");
     assert_eq!(line(&said, "plants:"), "plants: smooth");
+    assert_eq!(line(&said, "foliage:"), "foliage: cutout");
     assert_eq!(line(&said, "picture shape:"), "picture shape: fill");
     assert_eq!(line(&said, "controls:"), "controls: new");
     assert_eq!(line(&said, "biplane controls:"), "biplane controls: new");

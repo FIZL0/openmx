@@ -425,6 +425,22 @@ impl Lod {
     }
 }
 
+impl Foliage {
+    pub const ALL: [Foliage; 2] = [Foliage::Cutout, Foliage::Original];
+
+    /// The settings file's word for it (V57).
+    pub fn word(self) -> &'static str {
+        match self {
+            Foliage::Original => "original",
+            Foliage::Cutout => "cutout",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Foliage> {
+        Foliage::ALL.into_iter().find(|f| f.word() == w)
+    }
+}
+
 /// The smooth band's width, as a share of the middle of the scene's two distances, when the scene's
 /// own band is narrower. It ends where the scene's does, so no model is kept further out than the
 /// original keeps it: free09's 300..350 becomes 252.5..350.

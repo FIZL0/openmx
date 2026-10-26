@@ -1841,11 +1841,11 @@ impl Renderer {
     /// More props drawn in every frame from now on, and a grove, as `owner`'s (MD15: a world tile's,
     /// already moved to where the tile is), until [`Renderer::drop_owner`] lets them go.
     pub fn add_props(&mut self, owner: u32, props: &[crate::scene::Placement], grove: Option<crate::eco::Grove>) {
-        let lod = self.grove.as_ref().or(self.groves.first().map(|(_, g)| g)).map(|g| g.lod);
+        let lod = self.grove.as_ref().or(self.groves.first().map(|(_, g)| g)).map(|g| (g.lod, g.foliage));
         self.props.extend(props.iter().map(|p| Prop { name: p.model.clone(), model: None, at: p.transform(), owner }));
         if let Some(mut g) = grove {
-            if let Some(lod) = lod {
-                g.lod = lod;
+            if let Some((lod, foliage)) = lod {
+                (g.lod, g.foliage) = (lod, foliage);
             }
             self.groves.push((owner, g));
         }
@@ -1923,6 +1923,16 @@ impl Renderer {
         }
         for (_, g) in &mut self.groves {
             g.lod = lod;
+        }
+    }
+
+    /// How every grove's leaves are laid over what is behind them (V57), as [`Renderer::set_plant_lod`].
+    pub fn set_plant_foliage(&mut self, foliage: crate::eco::Foliage) {
+        if let Some(g) = &mut self.grove {
+            g.foliage = foliage;
+        }
+        for (_, g) in &mut self.groves {
+            g.foliage = foliage;
         }
     }
 

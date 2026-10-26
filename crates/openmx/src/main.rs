@@ -1480,6 +1480,9 @@ struct Args {
     /// `--plants smooth|original` (P126): how the plants change from model to picture, V55's smooth
     /// way or the original's; the front end's setting when not given.
     plants: Option<game_render::eco::Lod>,
+    /// `--foliage cutout|original` (V57): the plants' leaves cut out (V56) or the original's
+    /// blended ones; the front end's setting when not given.
+    foliage: Option<game_render::eco::Foliage>,
     /// `--wheels original` (V59): the bike's wheels drawn turning at the original's own angle and
     /// never blurred, rather than held under the wagon-wheel alias and blurred when they spin fast.
     original_wheels: bool,
@@ -1966,6 +1969,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
+                a.foliage = Some(args.foliage.unwrap_or(shell.front.menu.settings.foliage));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -2058,6 +2062,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
+                a.foliage = Some(args.foliage.unwrap_or(shell.front.menu.settings.foliage));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -2809,6 +2814,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(grove) = &mut look.ecosystem {
         grove.lod = args.plants.unwrap_or_default();
         println!("plants: {}", grove.lod.word());
+        grove.foliage = args.foliage.unwrap_or_default();
+        println!("foliage: {}", grove.foliage.word());
     }
     // Kept as `CHASSIS` whichever file the bike's set draws it from: `bike50` under a fast50 (V37).
     let chassis_file = game_render::vehicle::chassis_model(&archives[1..2], &vehicle);
@@ -4212,7 +4219,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let dress_at = Instant::now();
         let (mut stream, first) = world_dress::DressStream::start(w, reach, &starts, args.plants.unwrap_or_default());
         for b in first {
-            dressed.push(world_dress::take(b, w, &mut assets, &mut |p, by| car_ground(&mut sim, p, by)));
+            let mut d = world_dress::take(b, w, &mut assets, &mut |p, by| car_ground(&mut sim, p, by));
+            if let Some(g) = &mut d.grove {
+                g.foliage = args.foliage.unwrap_or_default();
+            }
+            dressed.push(d);
         }
         for line in stream.take_log() {
             println!("{line}");
@@ -4531,6 +4542,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut hud_scale = args.hud_scale.unwrap_or(menu::HUD_SCALE_DEFAULT);
     let mut graphics = args.graphics.unwrap_or_default();
     let mut plants = args.plants.unwrap_or_default();
+    let mut foliage = args.foliage.unwrap_or_default();
     // Set when the pause's settings change the picture's shape: the frame is re-made as for a resize.
     let mut reshaped = false;
     let mut frame = Frame::new(width, height, look.fog_color);
@@ -5226,6 +5238,16 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                     if let Some(r) = renderer_of(&mut offscreen, window) {
                         r.set_plant_lod(plants);
+                    }
+                }
+                // The leaves (V57), on the ride's grove, every world tile's and the renderer's.
+                if foliage != front.menu.settings.foliage {
+                    foliage = front.menu.settings.foliage;
+                    for g in look.ecosystem.iter_mut().chain(dressed.iter_mut().filter_map(|d| d.grove.as_mut())) {
+                        g.foliage = foliage;
+                    }
+                    if let Some(r) = renderer_of(&mut offscreen, window) {
+                        r.set_plant_foliage(foliage);
                     }
                 }
                 if !args.aspect_asked && aspect != aspect_of(front.menu.settings.picture) {
@@ -5942,7 +5964,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     match change {
                         world_dress::Change::Add(b) => {
                             let place = &mut world.place;
-                            let d = world_dress::take(b, w, &mut assets, &mut |p, by| car_ground(place, p, by));
+                            let mut d = world_dress::take(b, w, &mut assets, &mut |p, by| car_ground(place, p, by));
+                            if let Some(g) = &mut d.grove {
+                                g.foliage = foliage;
+                            }
                             if let Some(r) = renderer_of(&mut offscreen, window) {
                                 let work: Vec<_> =
                                     r.mips_wanted(&assets, &d.taken.models).into_iter().map(|(t, keep)| (t, keep, assets.textures[t].clone())).collect();
@@ -8116,6 +8141,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         aspect: Aspect::default(),
         aspect_asked: false,
         plants: None,
+        foliage: None,
         original_wheels: false,
         headless: false,
         frames: None,
@@ -8381,6 +8407,10 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--plants" => {
                 let word = next("smooth or original")?;
                 args.plants = Some(game_render::eco::Lod::from_word(&word).ok_or_else(|| format!("--plants: {word:?} is not smooth or original"))?);
+            }
+            "--foliage" => {
+                let word = next("cutout or original")?;
+                args.foliage = Some(game_render::eco::Foliage::from_word(&word).ok_or_else(|| format!("--foliage: {word:?} is not cutout or original"))?);
             }
             "--headless" => args.headless = true,
             "--no-sound" => args.sound = false,

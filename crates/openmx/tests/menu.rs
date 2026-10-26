@@ -400,6 +400,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         // The Original tab's own two at the original's (P126).
         plants: game_render::eco::Lod::Original,
         picture: menu::Picture::Television,
+        // The original's blended leaves (V57).
+        foliage: game_render::eco::Foliage::Original,
         // A world's sky taken from the map below (MD9).
         world_sky: menu::WorldSky::PerMap,
         // 2P with their markers off (P129).
@@ -3185,7 +3187,7 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
 fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     use menu::{Departure, Key};
     let groups = [
-        ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::WorldSky]),
+        ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::Departure(Departure::Foliage), Key::WorldSky]),
         ("Picture", vec![Key::Departure(Departure::Picture)]),
         ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit]),
     ];
@@ -3232,11 +3234,11 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     // The cursor opens on Draw Distance, past the heading, and the d-pad steps over the next one.
     tab_to(&mut m, &mut r, "Graphics");
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
-    for _ in 0..3 {
+    for _ in 0..4 {
         tap(&mut m, &mut r, Control::Down);
     }
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::Departure(Departure::Picture));
-    for _ in 0..3 {
+    for _ in 0..4 {
         tap(&mut m, &mut r, Control::Up);
     }
     // Draw Distance changed by the pad is the setting, and is saved.
@@ -4117,6 +4119,40 @@ fn the_original_switches_round_trip_through_the_files() {
     assert_eq!(Settings::parse("plants = original\n").plants, game_render::eco::Lod::Original);
     assert_eq!(Settings::parse("plants = fancy\npicture = 16:10\n"), Settings::default());
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// V57: V56's cut-out leaves are a departure of their own, Leaves on the Graphics tab beside Plant
+/// Detail: ours by default and not in a fresh settings.txt; the Original switch on sets the
+/// original's blended leaves, and Leaves turned back by pad leaves every other departure at the
+/// original's; only the original's is written to settings.txt, and it reads back.
+#[test]
+fn original_on_sets_the_leaves_and_turning_them_back_leaves_the_others() {
+    use game_render::eco::Foliage;
+    use menu::{Departure, Key, Original};
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.foliage, Foliage::Cutout);
+    assert!(!m.settings.text().contains("foliage"), "ours writes no line");
+    settings_at(&mut m, &mut r, "Original");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.original(), Original::On);
+    assert_eq!(m.settings.foliage, Foliage::Original);
+    assert!(m.settings.text().contains("foliage = original\n"), "{}", m.settings.text());
+    let value = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap().value;
+    tab_to(&mut m, &mut r, "Graphics");
+    assert_eq!(value(&m, Key::Departure(Departure::Foliage)), "Original");
+    down_to(&mut m, &mut r, Key::Departure(Departure::Foliage));
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.foliage, Foliage::Cutout);
+    assert_eq!(value(&m, Key::Departure(Departure::Foliage)), "Crisp");
+    for o in Departure::ALL.into_iter().filter(|o| *o != Departure::Foliage) {
+        assert!(m.is_original(o), "Leaves turned back moved {o:?}");
+    }
+    assert_eq!(m.original(), Original::Mixed);
+    assert!(!m.settings.text().contains("foliage"), "{}", m.settings.text());
+    // The file's word, and one it cannot read keeps ours.
+    assert_eq!(Settings::parse("foliage = original\n").foliage, Foliage::Original);
+    assert_eq!(Settings::parse("foliage = fuzzy\n"), Settings::default());
 }
 
 /// P129: each seat has a Markers row on the Controls tab, On by default, saved in settings.txt; the
