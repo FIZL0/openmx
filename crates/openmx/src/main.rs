@@ -1462,6 +1462,9 @@ struct Args {
     /// `mods/texture-replacements/` and mods' own upscales, or the disc's alone; the front end's
     /// Upscaled Textures setting when not given.
     textures: Option<bool>,
+    /// `--texture-filtering off|2|4|8|16` (V83): how far the GPU filters textures anisotropically;
+    /// the front end's setting when not given, 16x without one.
+    filtering: Option<menu::Filtering>,
     /// `--wheels original` (V59): the bike's wheels drawn turning at the original's own angle and
     /// never blurred, rather than held under the wagon-wheel alias and blurred when they spin fast.
     original_wheels: bool,
@@ -1963,6 +1966,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
                 a.foliage = Some(args.foliage.unwrap_or(shell.front.menu.settings.foliage));
                 a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
+                a.filtering = Some(args.filtering.unwrap_or(shell.front.menu.settings.filtering));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -2058,6 +2062,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
                 a.foliage = Some(args.foliage.unwrap_or(shell.front.menu.settings.foliage));
                 a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
+                a.filtering = Some(args.filtering.unwrap_or(shell.front.menu.settings.filtering));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -4393,6 +4398,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // never hides it.
         let shown = args.graphics.unwrap_or_default();
         r.set_graphics(shown);
+        // Texture Filtering (V83), before the first frame: the assets are uploaded already, and
+        // every sampler and bind group is made again under it.
+        let filtering = args.filtering.unwrap_or_default();
+        r.set_anisotropy(filtering.anisotropy());
+        let (aniso, most) = r.anisotropy();
+        println!("texture filtering: {} (anisotropy {aniso}, this device {most} at most)", filtering.label());
         let lit = Lighting::of(&look);
         let (fog, far) = r.fog(&lit);
         println!(
@@ -4585,6 +4596,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut graphics = args.graphics.unwrap_or_default();
     let mut plants = args.plants.unwrap_or_default();
     let mut foliage = args.foliage.unwrap_or_default();
+    let mut filtering = args.filtering.unwrap_or_default();
     // Set when the pause's settings change the picture's shape: the frame is re-made as for a resize.
     let mut reshaped = false;
     let mut frame = Frame::new(width, height, look.fog_color);
@@ -5342,6 +5354,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                     if let Some(r) = renderer_of(&mut offscreen, window) {
                         r.set_plant_foliage(foliage);
+                    }
+                }
+                // Texture Filtering (V83): every sampler made again, from the next frame.
+                if filtering != front.menu.settings.filtering {
+                    filtering = front.menu.settings.filtering;
+                    if let Some(r) = renderer_of(&mut offscreen, window) {
+                        r.set_anisotropy(filtering.anisotropy());
                     }
                 }
                 if !args.aspect_asked && aspect != aspect_of(front.menu.settings.picture) {
@@ -8319,6 +8338,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         plants: None,
         foliage: None,
         textures: None,
+        filtering: None,
         original_wheels: false,
         headless: false,
         frames: None,
@@ -8601,6 +8621,10 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--foliage" => {
                 let word = next("cutout or original")?;
                 args.foliage = Some(game_render::eco::Foliage::from_word(&word).ok_or_else(|| format!("--foliage: {word:?} is not cutout or original"))?);
+            }
+            "--texture-filtering" => {
+                let word = next("off, 2, 4, 8 or 16")?;
+                args.filtering = Some(menu::Filtering::from_word(&word).ok_or_else(|| format!("--texture-filtering: {word:?} is not off, 2, 4, 8 or 16"))?);
             }
             "--headless" => args.headless = true,
             "--no-sound" => args.sound = false,

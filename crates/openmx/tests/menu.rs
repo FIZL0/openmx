@@ -402,6 +402,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         picture: menu::Picture::Television,
         // The original's blended leaves (V57).
         foliage: game_render::eco::Foliage::Original,
+        // Textures filtered 4x (V83).
+        filtering: menu::Filtering::X4,
         // A world's sky taken from the map below (MD9).
         world_sky: menu::WorldSky::PerMap,
         // The disc's textures, and two texture packs ordered and one off (V84).
@@ -3266,7 +3268,7 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     use menu::{Departure, Key};
     let groups = [
         ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::Departure(Departure::Foliage), Key::Departure(Departure::Textures), Key::WorldSky]),
-        ("Picture", vec![Key::Departure(Departure::Picture)]),
+        ("Picture", vec![Key::Departure(Departure::Picture), Key::TextureFiltering]),
         ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit]),
     ];
     let graphics: Vec<Key> = groups.iter().flat_map(|(_, keys)| keys.clone()).collect();
@@ -4277,6 +4279,116 @@ fn upscaled_textures_is_a_graphics_departure_and_the_pack_lines_round_trip() {
     assert!(s.textures);
     assert_eq!(Settings::parse(&s.text()), s);
     assert!(s.text().contains("texture_packs = hd_ground, packs/hd_bikes\ntexture_packs_off = old\n"), "{}", s.text());
+}
+
+/// V83: Texture Filtering is a departure with five choices, on the Graphics tab: 16x by default and
+/// not in a fresh settings.txt; the Original switch on sets it Off, and stepping it on by pad leaves
+/// every other departure at the original's; every choice but 16x is written and reads back.
+#[test]
+fn texture_filtering_defaults_to_16x_and_the_original_switch_turns_it_off() {
+    use menu::{Departure, Filtering, Key, Original};
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.filtering, Filtering::X16);
+    assert_eq!(m.settings.filtering.anisotropy(), game_render::gpu::ANISOTROPY_MAX);
+    assert!(!m.settings.text().contains("texture_filtering"), "16x writes no line");
+    settings_at(&mut m, &mut r, "Original");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.original(), Original::On);
+    assert_eq!(m.settings.filtering, Filtering::Off);
+    assert_eq!(m.settings.filtering.anisotropy(), 1);
+    assert!(m.settings.text().contains("texture_filtering = off\n"), "{}", m.settings.text());
+    let value = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap().value;
+    tab_to(&mut m, &mut r, "Graphics");
+    assert_eq!(value(&m, Key::TextureFiltering), "Off");
+    down_to(&mut m, &mut r, Key::TextureFiltering);
+    // Left steps up from Off, through every choice.
+    tap(&mut m, &mut r, Control::Left);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.filtering, Filtering::X2);
+    assert_eq!(value(&m, Key::TextureFiltering), "2x");
+    for o in Departure::ALL.into_iter().filter(|o| *o != Departure::Filtering) {
+        assert!(m.is_original(o), "Texture Filtering stepped moved {o:?}");
+    }
+    assert_eq!(m.original(), Original::Mixed);
+    // Every choice round-trips the file; 16x is the missing line.
+    for f in Filtering::ALL {
+        let mut s = Settings::default();
+        s.filtering = f;
+        assert_eq!(Settings::parse(&s.text()).filtering, f, "{}", s.text());
+        assert_eq!(s.text().contains("texture_filtering"), f != Filtering::X16);
+    }
+    // One it cannot read keeps 16x.
+    assert_eq!(Settings::parse("texture_filtering = fuzzy\n"), Settings::default());
+    // The Original tab's switch back to ours is 16x again.
+    m.set_departure(Departure::Filtering, false);
+    assert_eq!(m.settings.filtering, Filtering::X16);
+}
+
+/// V83: the renderer's samplers are made again under each Texture Filtering choice, and every
+/// material's bind group and the ground's with them, clamped to what the device does. A cut-out
+/// that reads one mip level (V58) stays at 1: wgpu filters anisotropically only with every filter
+/// linear.
+#[test]
+fn texture_filtering_rebuilds_every_sampler_with_its_clamp() {
+    use game_render::gpu::{ANISOTROPY_MAX, GroundChunk, GroundPaint, GroundVertex, Renderer};
+    use game_render::mat::{M4, v3};
+    use game_render::psg::{Mesh, Model, Node, Strip, Vertex};
+    use game_render::world::{Assets, Loaded, Surface};
+    use menu::Filtering;
+    let mut gpu = match Renderer::headless() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let (now, most) = gpu.anisotropy();
+    assert!(most == ANISOTROPY_MAX || most == 1, "{most}");
+    assert_eq!(now, most, "a new renderer filters as far as it can");
+    // A flat ground, and a model of three materials: repeating, clamped, and a kept-coverage cut-out.
+    let cells = 4;
+    let vertices = (0..=cells)
+        .flat_map(|j| (0..=cells).map(move |i| (i, j)))
+        .map(|(i, j)| GroundVertex { pos: [i as f32 * 10.0, 0.0, j as f32 * 10.0], normal: [0.0, 1.0, 0.0] })
+        .collect();
+    let chunk = GroundChunk { vertices, cells, at: (0, 0), missing: Vec::new(), centre: v3(20.0, 0.0, 20.0), radius: 30.0 };
+    gpu.set_ground_painted(&[chunk], GroundPaint::Bare, [0.5; 3]).expect("a bare ground");
+    let strip = |x: f32| Strip {
+        verts: [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+            .iter()
+            .map(|&(u, v)| Vertex { pos: v3(x + u, v, 0.0), normal: v3(0.0, 0.0, -1.0), uv: [u, v], color: [128; 4], node: 0, adc: false })
+            .collect(),
+    };
+    let model = Model {
+        nodes: vec![Node { name: "root".into(), local: M4::IDENTITY, parent: None, center: v3(0.0, 0.0, 0.0), half_extents: v3(2.0, 1.0, 0.1), radius: 3.0 }],
+        materials: vec!["plain".into(), "clamped".into(), "leaves".into()],
+        meshes: (0..3).map(|m| Mesh { material: m, group: 0, strips: vec![strip(m as f32)] }).collect(),
+        groups: 1,
+        group_distance: vec![f32::MAX],
+    };
+    let surfaces = vec![
+        Surface::default(),
+        Surface { clamp: [true, false], ..Surface::default() },
+        Surface { keep_coverage: true, cutoff: 64, ..Surface::default() },
+    ];
+    let mut assets = Assets::default();
+    assets.textures.push(game_render::Texture { width: 4, height: 4, rgba: vec![200; 64] });
+    let tris = model.triangles(0);
+    assets.models.insert("three".into(), Loaded { model, tris, textures: vec![Some(0); 3], surfaces, radius: 3.0 });
+    gpu.upload_all(&assets);
+    assert_eq!(gpu.uploaded().1, 3, "three materials");
+    for f in Filtering::ALL.into_iter().rev().chain(Filtering::ALL) {
+        gpu.set_anisotropy(f.anisotropy());
+        let want = f.anisotropy().min(most);
+        assert_eq!(gpu.anisotropy().0, want, "{f:?}");
+        // Plain, clamped, the cut-out at 1, then the ground.
+        assert_eq!(gpu.bound_anisotropy(), vec![want, want, 1, want], "{f:?}: every bind group made again");
+    }
+    // A material uploaded under a setting is made with it.
+    gpu.set_anisotropy(Filtering::X4.anisotropy());
+    gpu.forget_assets();
+    gpu.upload_all(&assets);
+    assert_eq!(gpu.bound_anisotropy()[0], 4u16.min(most));
 }
 
 /// P129: each seat has a Markers row on the Controls tab, On by default, saved in settings.txt; the

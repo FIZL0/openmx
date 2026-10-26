@@ -84,6 +84,7 @@ pub enum Key {
     HudScale,
     DrawDistance,
     WorldSky,
+    TextureFiltering,
     RenderScale,
     VSync,
     FrameLimit,
@@ -409,6 +410,14 @@ impl Menu {
             .tips(&["One sky for the whole world", "Each map its own"]),
             Row::heading("Picture"),
             self.departure_row(Departure::Picture),
+            // V83: the Original switch's too, but five choices to its two, as Draw Distance's three.
+            Row::choice(
+                Key::TextureFiltering,
+                "Texture Filtering",
+                &Filtering::ALL.map(Filtering::label),
+                at(&Filtering::ALL, s.filtering),
+                FILTERING_HELP,
+            ),
             Row::heading("Performance"),
             Row::choice(Key::RenderScale, "Render Scale", &scales, at(&RenderScale::ALL, s.render_scale), "How much of the window's resolution the 3D is drawn at. Auto drops it when frames run long and climbs back when there's room."),
             Row::on_off(Key::VSync, "VSync", s.vsync, "Waits for the display before showing a frame. No tearing. Off draws as fast as it can."),
@@ -423,7 +432,7 @@ impl Menu {
             "Original Game",
             &["Off", "On"],
             0,
-            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves and picture shape; the HUD stays openmx's. Each switch below can be set on its own, and the fog, plants, leaves and picture shape on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
+            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves, picture shape and texture filtering; the HUD stays openmx's. Each switch below can be set on its own, and the fog, plants, leaves, picture shape and texture filtering on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
         )
         .tips(&["Every enhancement on", "The game as it shipped"]);
         match self.original() {
@@ -1011,6 +1020,7 @@ impl Menu {
             Key::HudScale => s.hud_scale = hud_scale_step(s.hud_scale, p.left, p.right),
             Key::DrawDistance => s.graphics = Graphics::ALL[next(row)],
             Key::WorldSky => s.world_sky = WorldSky::ALL[next(row)],
+            Key::TextureFiltering => s.filtering = Filtering::ALL[next(row)],
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
             Key::FrameLimit => s.frame_limit = s.frame_limit.step(p.left),
@@ -1206,7 +1216,7 @@ impl Departure {
     /// the Original tab's master switch.
     pub fn tab(self) -> usize {
         match self {
-            Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Picture | Departure::Textures => TAB_GRAPHICS,
+            Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Picture | Departure::Textures | Departure::Filtering => TAB_GRAPHICS,
             Departure::Controls | Departure::Cameras | Departure::Markers => TAB_ORIGINAL,
         }
     }
@@ -1215,6 +1225,7 @@ impl Departure {
     pub fn key(self) -> Key {
         match self {
             Departure::Fog => Key::DrawDistance,
+            Departure::Filtering => Key::TextureFiltering,
             d => Key::Departure(d),
         }
     }

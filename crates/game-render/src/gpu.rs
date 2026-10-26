@@ -71,8 +71,9 @@ mod glows;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The format an offscreen frame is drawn in: plain bytes, as the rasteriser's are.
 pub const OFFSCREEN: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// How far the ground's pages are filtered anisotropically (MD31): wgpu's most.
-const GROUND_ANISOTROPY: u16 = 16;
+/// The most a texture is filtered anisotropically (MD31, V83): wgpu's most, and the Texture
+/// Filtering setting's top choice.
+pub const ANISOTROPY_MAX: u16 = 16;
 
 /// How many pixels a chunk of ground's height may be out by, at the level of detail it is drawn at.
 const GROUND_PIXELS: f32 = 0.75;
@@ -221,6 +222,42 @@ struct GpuMaterial {
     /// (V54): those texels, drawn again after the rest with depth writes off. The draw before only
     /// draws the texels that pass.
     rest: Option<(wgpu::BindGroup, PipelineKey)>,
+    /// What its bind groups were made of, to make them again under another anisotropy (V83); `None`
+    /// for a dropped material's blank.
+    source: Option<MaterialSource>,
+}
+
+/// A material's texture, its sampler and its uniforms ([`GpuMaterial::rest`]'s second, if any), and
+/// the anisotropy its bind groups were made with.
+struct MaterialSource {
+    view: wgpu::TextureView,
+    sampler: SamplerKey,
+    solid: wgpu::Buffer,
+    rest: Option<wgpu::Buffer>,
+    anisotropy: u16,
+}
+
+/// A textured sampler (V83): clamped at the texture's edges along u and v rather than repeated, and
+/// reading one mip level rather than a mix of two.
+type SamplerKey = ([bool; 2], bool);
+/// The plain repeating, trilinear one: most materials' and the ground's.
+const REPEAT: SamplerKey = ([false; 2], false);
+
+/// A textured sampler under `anisotropy` (V83). One reading a single mip level is never anisotropic:
+/// wgpu filters anisotropically only with every filter linear.
+fn texture_sampler(device: &wgpu::Device, (clamp, nearest): SamplerKey, anisotropy: u16) -> wgpu::Sampler {
+    let mode = |on: bool| if on { wgpu::AddressMode::ClampToEdge } else { wgpu::AddressMode::Repeat };
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("textured"),
+        address_mode_u: mode(clamp[0]),
+        address_mode_v: mode(clamp[1]),
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: if nearest { wgpu::MipmapFilterMode::Nearest } else { wgpu::MipmapFilterMode::Linear },
+        anisotropy_clamp: if nearest { 1 } else { anisotropy },
+        ..Default::default()
+    })
 }
 
 /// A run of one model's vertices in one material.
@@ -361,6 +398,12 @@ struct GpuGround {
     patterns: Vec<Vec<u32>>,
     /// Each view's triangles, as last built, and what they were built from.
     views: Vec<GroundView>,
+    /// What its bind group is made of, to make it again under another anisotropy (V83), and the
+    /// anisotropy it was made with.
+    layout: wgpu::BindGroupLayout,
+    shadow: wgpu::TextureView,
+    textures: Vec<wgpu::TextureView>,
+    anisotropy: u16,
     levels: Vec<u32>,
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
@@ -616,12 +659,18 @@ pub struct Renderer {
     overlay_mul: wgpu::RenderPipeline,
     overlay_add: wgpu::RenderPipeline,
     blit_pipeline: wgpu::RenderPipeline,
+    /// Repeating and trilinear, never anisotropic: what is drawn face on or from above (glows, the
+    /// ground's meshes' top-down targets, a dropped material's white).
     sampler: wgpu::Sampler,
     clamp_sampler: wgpu::Sampler,
-    /// [`Renderer::sampler`] filtering anisotropically, for a ground painted from terrain pages
-    /// (MD31): seen at a rider's height the ground is nearly edge-on, and an isotropic mip is chosen
-    /// by the steep direction's footprint, blurring the pages across as well as along.
-    ground_sampler: wgpu::Sampler,
+    /// Every model's and the ground's samplers (V83), filtering anisotropically up to
+    /// [`Renderer::anisotropy`]: seen at a rider's height the ground is nearly edge-on, and an
+    /// isotropic mip is chosen by the steep direction's footprint, blurring a texture across as well
+    /// as along (MD31 did it for the ground's pages alone). [`REPEAT`] is always here.
+    samplers: HashMap<SamplerKey, wgpu::Sampler>,
+    /// The anisotropy the samplers filter with, and the most this device filters (1 for none).
+    anisotropy: u16,
+    anisotropy_most: u16,
     white: wgpu::TextureView,
     /// Each texture as uploaded, by its number and the cutoff its mips keep the coverage of (0 for
     /// plain box mips, [`Surface::keep_coverage`]'s cut-outs for theirs).
@@ -1643,18 +1692,10 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let ground_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("ground pages"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            // A device without anisotropic filtering takes 1 (wgpu clamps it).
-            anisotropy_clamp: GROUND_ANISOTROPY,
-            ..Default::default()
-        });
+        // A device without anisotropic filtering takes 1 (wgpu would clamp it there anyway).
+        let anisotropy_most =
+            if adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING) { ANISOTROPY_MAX } else { 1 };
+        let samplers = HashMap::from([(REPEAT, texture_sampler(&device, REPEAT, anisotropy_most))]);
         let clamp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("clamp"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1833,7 +1874,9 @@ impl Renderer {
             blit_pipeline,
             sampler,
             clamp_sampler,
-            ground_sampler,
+            samplers,
+            anisotropy: anisotropy_most,
+            anisotropy_most,
             white,
             textures: HashMap::new(),
             materials: Vec::new(),
@@ -1936,6 +1979,7 @@ impl Renderer {
                 self.material_ids.remove(&key);
                 self.materials[id].bind = blank.clone();
                 self.materials[id].rest = None;
+                self.materials[id].source = None;
             }
         }
         self.textures.retain(|&(t, _), _| !textures.contains(&t));
@@ -1958,6 +2002,76 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         })
+    }
+
+    /// The ground's bind group: its textures under the textured sampler (V83: a splat's layers, a
+    /// map's terrain pages, MD31 the first filtered anisotropically) and the shadow; the roads' and
+    /// ruts' targets are group 2's (V89).
+    fn ground_bind(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        shadow: &wgpu::TextureView,
+        views: &[wgpu::TextureView],
+    ) -> wgpu::BindGroup {
+        let mut entries = vec![
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&self.samplers[&REPEAT]) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.clamp_sampler) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(shadow) },
+        ];
+        for (i, v) in views.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry { binding: 3 + i as u32, resource: wgpu::BindingResource::TextureView(v) });
+        }
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("ground"), layout, entries: &entries })
+    }
+
+    /// How far every model's and the ground's textures are filtered anisotropically from now on
+    /// (V83's Texture Filtering): 1 is off, up to [`ANISOTROPY_MAX`], and no more than this device
+    /// does. Every sampler is made again and every bind group holding one with it, so it takes the
+    /// next frame; the same value again does nothing.
+    pub fn set_anisotropy(&mut self, anisotropy: u16) {
+        let anisotropy = anisotropy.clamp(1, self.anisotropy_most);
+        if anisotropy == self.anisotropy {
+            return;
+        }
+        self.anisotropy = anisotropy;
+        let keys: Vec<SamplerKey> = self.samplers.keys().copied().collect();
+        for key in keys {
+            let sampler = texture_sampler(&self.device, key, anisotropy);
+            self.samplers.insert(key, sampler);
+        }
+        for i in 0..self.materials.len() {
+            let Some(source) = &self.materials[i].source else { continue };
+            let bind = self.material_bind(source, &source.solid);
+            let rest = source.rest.as_ref().map(|b| self.material_bind(source, b));
+            let m = &mut self.materials[i];
+            m.bind = bind;
+            if let (Some(r), Some(b)) = (&mut m.rest, rest) {
+                r.0 = b;
+            }
+            if let Some(s) = &mut m.source {
+                s.anisotropy = anisotropy;
+            }
+        }
+        if let Some(g) = &self.ground {
+            let bind = self.ground_bind(&g.layout, &g.shadow, &g.textures);
+            let g = self.ground.as_mut().expect("just read");
+            g.bind = bind;
+            g.anisotropy = anisotropy;
+        }
+    }
+
+    /// The anisotropy the textured samplers filter with now ([`Renderer::set_anisotropy`]), and the
+    /// most this device does.
+    pub fn anisotropy(&self) -> (u16, u16) {
+        (self.anisotropy, self.anisotropy_most)
+    }
+
+    /// The anisotropy each live material's bind groups and the ground's were last made with, the
+    /// ground's last if there is one: what a test reads to see a change reach every one of them. A
+    /// material reading one mip level is listed as 1, since its sampler can filter no other way.
+    pub fn bound_anisotropy(&self) -> Vec<u16> {
+        let materials = self.materials.iter().filter_map(|m| m.source.as_ref()).map(|s| if s.sampler.1 { 1 } else { s.anisotropy });
+        materials.chain(self.ground.as_ref().map(|g| g.anisotropy)).collect()
     }
 
     /// Where `owner`'s props are drawn now, in world feet: what a test reads to see a world tile's
@@ -2208,32 +2322,7 @@ impl Renderer {
         if let Some((w, packed)) = &world {
             views.extend(upload_world_pages(&self.device, &self.queue, w, packed));
         }
-        let mut bind_entries = vec![
-            wgpu::BindGroupEntry {
-                binding: 0,
-                // Terrain pages are filtered anisotropically (MD31); a splat as it always was.
-                resource: wgpu::BindingResource::Sampler(if pages.is_some() || world.is_some() { &self.ground_sampler } else { &self.sampler }),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&self.clamp_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(&shadow),
-            },
-        ];
-        for (i, v) in views.iter().enumerate() {
-            bind_entries.push(wgpu::BindGroupEntry {
-                binding: 3 + i as u32,
-                resource: wgpu::BindingResource::TextureView(v),
-            });
-        }
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ground"),
-            layout: &layout,
-            entries: &bind_entries,
-        });
+        let bind = self.ground_bind(&layout, &shadow, &views);
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ground"),
             // The roads and ruts' targets are group 2, one bind group per view's near target (V89).
@@ -2282,6 +2371,10 @@ impl Renderer {
             views: Vec::new(),
             pipeline,
             bind,
+            layout,
+            shadow,
+            textures: views,
+            anisotropy: self.anisotropy,
             meshes,
         });
         Ok(())
@@ -2547,19 +2640,30 @@ impl Renderer {
         // each level covers what the full size does, but two mixed (a fine level's thin twigs with
         // a coarse level's broad, fainter ones) fall under the cutoff between them. The shader picks
         // the level itself, dithered between the two about the pixel's own (V85).
-        let clamped = (key.clamp != [false; 2] || key.keep_coverage).then(|| {
-            let mode = |on: bool| if on { wgpu::AddressMode::ClampToEdge } else { wgpu::AddressMode::Repeat };
-            self.device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("material clamp"),
-                address_mode_u: mode(key.clamp[0]),
-                address_mode_v: mode(key.clamp[1]),
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: if key.keep_coverage { wgpu::MipmapFilterMode::Nearest } else { wgpu::MipmapFilterMode::Linear },
-                ..Default::default()
-            })
+        let sampler = (key.clamp, key.keep_coverage);
+        let anisotropy = self.anisotropy;
+        self.samplers.entry(sampler).or_insert_with(|| texture_sampler(&self.device, sampler, anisotropy));
+        let source = MaterialSource { view, sampler, solid, rest, anisotropy };
+        let rest = source.rest.as_ref().map(|b| (self.material_bind(&source, b), PipelineKey { depth_write: false, ..key.pipeline }));
+        let bind = self.material_bind(&source, &source.solid);
+        for pipeline in std::iter::once(key.pipeline).chain(rest.as_ref().map(|r| r.1)) {
+            self.pipeline(pipeline);
+            self.pipeline(PipelineKey { ghost: true, ..pipeline });
+        }
+        self.materials.push(GpuMaterial {
+            bind,
+            pipeline: key.pipeline,
+            rest,
+            source: Some(source),
         });
-        let bind = |buffer: &wgpu::Buffer| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let id = self.materials.len() - 1;
+        self.material_ids.insert(key, id);
+        id
+    }
+
+    /// A material's bind group: its texture and sampler, and `buffer`'s uniforms.
+    fn material_bind(&self, source: &MaterialSource, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material"),
             layout: &self.material_layout,
             entries: &[
@@ -2569,28 +2673,14 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
+                    resource: wgpu::BindingResource::TextureView(&source.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(clamped.as_ref().unwrap_or(&self.sampler)),
+                    resource: wgpu::BindingResource::Sampler(&self.samplers[&source.sampler]),
                 },
             ],
-        });
-        let rest = rest.map(|b| (bind(&b), PipelineKey { depth_write: false, ..key.pipeline }));
-        let bind = bind(&solid);
-        for pipeline in std::iter::once(key.pipeline).chain(rest.as_ref().map(|r| r.1)) {
-            self.pipeline(pipeline);
-            self.pipeline(PipelineKey { ghost: true, ..pipeline });
-        }
-        self.materials.push(GpuMaterial {
-            bind,
-            pipeline: key.pipeline,
-            rest,
-        });
-        let id = self.materials.len() - 1;
-        self.material_ids.insert(key, id);
-        id
+        })
     }
 
     fn pipeline(&mut self, key: PipelineKey) {
