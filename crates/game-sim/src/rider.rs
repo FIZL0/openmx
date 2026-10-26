@@ -972,7 +972,7 @@ impl Rider {
     /// | a backflip | the bike is turning one over, [`crate::air::Air::flipping`] (V35: the original's, from a capture) |
     /// | airborne | the bike's own verdict, [`crate::air::Air::airborne`] |
     /// | the no-hander | [`crate::trick::Tricks::no_hander`] |
-    /// | a wreck | the ride state machine has a reason |
+    /// | a wreck | the ride state machine had a reason as of the request's fill, a tick behind its verdict ([`PutBack::wreck`], S91) |
     /// | the throttle, reverse | the controls, unfiltered |
     /// | the phase axis | [`motion::Driver::pose`] — lean on the ground, crossup in the air, 0..1 |
     /// | the mix axis | [`motion::Driver::fore_aft`], the same 0..1 the airborne pair is mixed with |
@@ -1004,7 +1004,6 @@ impl Rider {
         let Rider {
             ride,
             tricks,
-            state,
             motion,
             body,
             body_numbers,
@@ -1031,10 +1030,11 @@ impl Rider {
             // the backflip's until one exists.
             backflip: ride.air.flipping || tricks.requested == Trick::FRONTFLIP,
             no_hander: tricks.no_hander,
-            // Down, or down as the request last saw it: on the tick the wreck clock puts the rider
-            // back the body is still in the wreck (S74). The wreck's own entry is not held back the
-            // same tick, though the original's request lags it too (S74's journal).
-            wreck: state.wreck.is_some() || put_back.wreck,
+            // Down as the request last saw it, and only that: the fill sits before the machine's
+            // verdict, so on a wreck's entry tick the body is still riding and enters its wreck mode
+            // the tick after (S91), and on the tick the wreck clock puts the rider back it is still
+            // in the wreck (S74).
+            wreck: put_back.wreck,
             countdown: gate.countdown,
             throttle: c.gas,
             reversing: ride.held.reverse,

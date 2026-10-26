@@ -809,6 +809,10 @@ fn the_rider_publishes_the_body_its_own_request() {
     // The one thing `Rider::new` cannot fill, and says so: the step's fade rates and the pose grid's
     // thresholds, which no loader in the image has been found for. A shell would set these.
     rider.body_rates = numbers().1;
+    // Standing at the gate, not down: the bike settling onto the floor from its spawn height is a
+    // wreck otherwise (reason 8 on the first tick), which until S91 put the body straight into its
+    // wreck mode and past the gate mode's entry.
+    rider.sense.wrecks_enabled = false;
 
     let (lib, clips) = table();
     let mut floor = Flat::default();
@@ -824,16 +828,20 @@ fn the_rider_publishes_the_body_its_own_request() {
         rider.frame(&p, &tables, &hands, dt, &mut floor);
         assert_eq!(rider.body.veh.want, before, "frame {frame}: the player update wrote the body");
         rider.body_frame(dt, &hands, gate, &lib, &clips);
+        assert_eq!(rider.body.machine.mode, game_sim::rider_anim::Mode::Gate, "frame {frame}: the body is at the gate");
         if asked.last() != Some(&rider.body.veh.want) {
             asked.push(rider.body.veh.want);
         }
     }
-    // The same four states as (2), reached off a real rider's fields instead of a hand-made request.
-    assert_eq!(asked.len(), 4, "the gate asked for {asked:?}");
+    // The same states as (2), reached off a real rider's fields instead of a hand-made request, behind
+    // the breathe the mode machine's gate entry starts (up to half a second), which (2) has no mode
+    // machine to run.
+    assert_eq!(asked.len(), 5, "the gate asked for {asked:?}");
     assert_eq!(asked[0], TURN_RIDING);
-    assert!((IDLE..IDLE + IDLES).contains(&asked[1]), "a get-ready idle, not {}", asked[1]);
-    assert_eq!(asked[2], GET_READY);
-    assert!((START_POS..STATES as i32).contains(&asked[3]), "a start pose, not {}", asked[3]);
+    assert_eq!(asked[1], GET_READY, "the gate entry's breathe");
+    assert!((IDLE..IDLE + IDLES).contains(&asked[2]), "a get-ready idle, not {}", asked[2]);
+    assert_eq!(asked[3], GET_READY);
+    assert!((START_POS..STATES as i32).contains(&asked[4]), "a start pose, not {}", asked[4]);
     // The published half of the request, off the rider: the bars and the rider's weight as the
     // animation header has them, the chassis's speed, and the trick clocks' progress and count.
     let r = rider.body_request;
@@ -955,6 +963,7 @@ const ROLL_TICKS: usize = 23;
 /// on that one, and when the rider is put back the settle is cleared again.
 #[test]
 fn a_wrecked_body_settles_and_then_holds_still() {
+    use game_sim::rider_anim::Mode;
     let tables = rider::Tables::build();
     let p = Phy::read_bytes(format!("{BIKE}{WRECK_LIMITS}").as_bytes(), &tables.ride.curve);
     let hubs = game_sim::stock::MOUNTS;
@@ -1003,6 +1012,15 @@ fn a_wrecked_body_settles_and_then_holds_still() {
         }
         if wrecked_at.is_none() {
             continue;
+        }
+        // The body sees the wreck a tick late, as the original's does (S91): its request is filled
+        // before the machine's verdict, so on the entry tick it is still riding.
+        if wrecked_at == Some(k) {
+            assert_ne!(rider.body.machine.mode, Mode::Wrecked, "tick {k}: the body saw the wreck's entry");
+            continue;
+        }
+        if wrecked_at == Some(k - 1) {
+            assert_eq!(rider.body.machine.mode, Mode::Wrecked, "tick {k}: the body entered its wreck late");
         }
         if f.respawned {
             back_at = Some(k);
@@ -1065,7 +1083,6 @@ fn a_wrecked_body_settles_and_then_holds_still() {
     // seen the put-back, so the body is still in the wreck; the next two it is held on the bike; then
     // it rides. Leaving the wreck for `Held` is the arm that cleans nothing up, so the settle is kept,
     // as the original's is — the next wreck's entry is what clears it.
-    use game_sim::rider_anim::Mode;
     assert_eq!(rider.body.machine.mode, Mode::Wrecked, "the clock's tick: the body still down");
     assert!(rider.drawn_jumps(), "the clock's tick: the bike is set down, a cut");
     let mut modes = Vec::new();
@@ -1560,7 +1577,7 @@ fn the_put_back_holds_the_body_as_the_original_does() {
             return;
         }
     };
-    let (mut ticks, mut chords, mut clocks, mut entries) = (0, 0, 0, 0);
+    let (mut ticks, mut chords, mut clocks, mut entries, mut entered) = (0, 0, 0, 0, 0);
     for name in ["free06-ride", "free06-down", "free06-downchord", "free09-ride", "free09-down"] {
         let Ok(text) = std::fs::read_to_string(kit.ctx("s74").join(format!("{name}.txt"))) else {
             println!("no context/s74/{name}.txt: no put-back hold verdict for it");
@@ -1570,6 +1587,8 @@ fn the_put_back_holds_the_body_as_the_original_does() {
         let mut back = PutBack::default();
         // The ticks since the last put-back, and what kind it was.
         let mut since: Option<(usize, bool)> = None;
+        // The frame of the last wreck's entry, until the tick after it has been checked.
+        let mut entry: Option<u32> = None;
         for pair in rows.windows(2) {
             let (before, now) = (&pair[0], &pair[1]);
             assert_eq!(now.frame, before.frame + 1, "{name}: a gap at frame {}", now.frame);
@@ -1600,9 +1619,17 @@ fn the_put_back_holds_the_body_as_the_original_does() {
                 since = Some((k + 1, kind));
             }
             if before.reason == 0 && now.reason != 0 {
-                // The wreck's entry: the request has not seen it, and nor has the body.
+                // The wreck's entry: the request has not seen it, and nor has the body — the port's
+                // (`Rider::body_frame` asks with `PutBack::wreck` alone, S91) or the original's.
                 assert!(!now.asked_wreck && now.mode != 2, "{name} frame {f}: the body saw the wreck's entry");
+                assert!(!back.wreck, "{name} frame {f}: the port's body saw the wreck's entry");
+                entry = Some(f);
                 entries += 1;
+            } else if entry.take().is_some_and(|e| e + 1 == f) {
+                // And the tick after, both bodies are in the wreck.
+                assert!(now.asked_wreck && now.mode == 2, "{name} frame {f}: the body missed the wreck's entry");
+                assert!(back.wreck, "{name} frame {f}: the port's body missed the wreck's entry");
+                entered += 1;
             }
             let Some((k, clock)) = since else { continue };
             let first_held = if clock { 1 } else { 0 };
@@ -1628,5 +1655,7 @@ fn the_put_back_holds_the_body_as_the_original_does() {
     println!("the put-back's hold: {ticks} ticks, {chords} chords, {clocks} clocks, {entries} wreck entries");
     if ticks > 0 {
         assert!(chords + clocks >= 9, "only {} put-backs compared", chords + clocks);
+        // context/s74 holds three wreck entries, each proved on its own tick and the one after.
+        assert!(entries >= 3 && entered == entries, "only {entered} of {entries} wreck entries proved, not three");
     }
 }
