@@ -873,16 +873,12 @@ impl Rider {
             page.raise();
         }
         if page.update() {
-            if state.wreck.is_some() {
-                // Onto the put-back record (S66), as the machine's own put-back above.
-                state.respawn();
-                ride.place_back();
-            } else {
-                // Put back already, by the chord in the fade's first ticks: the page's listener
-                // is still on the fader and respawns a riding bike again. **Not measured**: the
-                // port leaves it where the chord put it (journal 2026-10-21-s72).
-                state.respawn();
-            }
+            // Onto the put-back record (S66), as the machine's own put-back above. A bike the chord
+            // put back in the fade's first ticks is set down again (S84): the page's listener is
+            // still on the fader, and its respawn places the riding bike on the record as this
+            // tick's physics kept it, ghost started over — measured live, chords on both ticks.
+            state.respawn();
+            ride.place_back();
             ride.unwreck();
             ride.drag_halved = false;
             *crash = None;

@@ -4636,6 +4636,14 @@ screen_page_off boot 0x00200ab0 the screen's vt +0xa0, to 0x00200ac0: only the H
 #   third update (end of tick R+2); the bike rides from R+3, and the clock left on it is clock_R + 2 dt.
 #   The fade in is three more updates (elapsed 0.1 or 0.101), then held and the listeners clear.
 #   Rows may read between the bike's update and the fader's, and once inside the black draw (west).
+# S84 — the chord inside the fade out. player_hand_reset's request (page 0) respawns at once and calls
+#   the screen's vt +0xa0, which leaves the fader alone, so bike+0x1340 stays a listener and the black
+#   draw runs bike_page_listener -> player_respawn on the riding bike: bike_unwreck -> vt +0x138
+#   0x0027b650 -> ghost_start, which places the node on +0x3b0 as it stands then (after the tick's
+#   put_back_keep) and starts the ghost at 3.0. Live (research/s84_chord.py, watch/s84-chord.toml, copy 2
+#   slot 9 = copy 5's slot 9 above; context/capture/s84/d0a, d0b inside the window: chord on R+1 and on
+#   R+2; d1a, d1b: chord on R+3, after the page's own put-back): +0x5e0 equals +0x3b0 of the draw's row,
+#   bit for bit, on both. Port: rider.rs step 7 calls place_back for a riding bike too.
 
 # S74 — the put-back's two-tick hold on the rider's body, ported as rider::PutBack
 #   (crates/game-sim/src/rider.rs) and held in crates/game-sim/tests/rider_anim.rs
