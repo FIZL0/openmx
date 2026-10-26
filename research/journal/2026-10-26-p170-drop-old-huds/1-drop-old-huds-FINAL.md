@@ -1,4 +1,4 @@
-# 1 — drop old huds (PART)
+# 1 — drop old huds (FINAL)
 
 Task P170. 2026-10-26.
 
