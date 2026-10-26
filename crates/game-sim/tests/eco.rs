@@ -509,3 +509,97 @@ fn a_sphere_is_a_part_with_no_trunk_and_other_kinds_are_reported() {
     assert!(g.solid);
     assert!(trees.crowded(Vf::new(3000.0, 0.0, 3019.0, 1.0), F(30.0)), "a plant with solids still turns a put-back away");
 }
+
+/// S101 — the per-plant bend blocks. The ecosystem has a pool of 0x50-byte blocks (a bend
+/// quaternion at +0x10, an angle at +0x30, a state byte at +0x40) that a plant points at through
+/// +0x13 when its +0x12 bit 1 is set, and its frame and draw passes read one; but the pool is only
+/// made when the scene's `[Environment]` has `UseEcoPhysics` (the reader's default is 0), sized by
+/// `EcoMaxPhysicsEco`, and nothing in the game ever writes a block but the pool's constructor or sets
+/// a plant's bit 1. So the original's trees never bend, hit or not, and the port's do not either.
+mod bend {
+    pub const POOL: u32 = 0x80;
+    pub const POOL_COUNT: u32 = 0xe8;
+    pub const PHYSICS_ON: u32 = 0x1d88;
+    pub const PROBE: u32 = 0x1d8c;
+    pub const GATHER: u32 = 0x1d90;
+    pub const FLAGS: u32 = 0x12;
+    pub const BENT: u8 = 2;
+    pub const BLOCK: u32 = 0x13;
+    /// The four keys of the reader's ecosystem-physics part, in the order it reads them.
+    pub const KEYS: [&str; 4] = ["ecosystemwindstrength", "ecosystemwindgustrate", "useecophysics", "ecomaxphysicseco"];
+}
+
+#[test]
+fn no_scene_on_the_disc_turns_the_ecosystems_physics_on() {
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    let members: Vec<String> =
+        disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with(".res")).collect();
+    let mut wooded = Vec::new();
+    for member in &members {
+        let Ok(res) = disc.res(member) else { continue };
+        for scene in res.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".scn")) {
+            let bytes = res.read(&scene.name).expect("the scene");
+            let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+            let mut section = "";
+            for line in text.lines().map(str::trim) {
+                if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                    section = name;
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else { continue };
+                let key = key.trim();
+                assert!(!bend::KEYS.contains(&key), "{member} {}: [{section}] {key}={value}", scene.name);
+                if section == "environment" && key == "ecosystemfile" && !value.trim().is_empty() && value.trim() != "none" {
+                    wooded.push(format!("{member} {}", scene.name));
+                }
+            }
+        }
+    }
+    println!("{} scenes with an ecosystem, none with its physics on", wooded.len());
+    assert!(wooded.len() >= 30, "the disc's free and national scenes name their ecosystems: {wooded:?}");
+    assert!(wooded.iter().any(|s| s.to_ascii_lowercase().contains("free09")), "{wooded:?}");
+}
+
+#[test]
+fn the_originals_ecosystems_hold_no_bend_state() {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    // free09 ridden (recording2), free06 flown (the biplane) and free06 ridden (S89's bike state).
+    let states = ["recording2.p2m2_SaveState.eeMemory.bin", "biplane.p2m2_SaveState.eeMemory.bin", "s89-along.eeMemory.bin"];
+    let mut read = 0;
+    for name in states {
+        let path = kit.ctx("states").join(name);
+        if !path.exists() {
+            skip(&format!("{} is not there", path.display()));
+            continue;
+        }
+        let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+        let world = ee.u32_at(addr("world_manager").unwrap());
+        assert_ne!(world, 0, "{name}: an ecosystem");
+        for (what, at) in [("pool", bend::POOL), ("pool size", bend::POOL_COUNT), ("physics switch", bend::PHYSICS_ON), ("probe", bend::PROBE), ("gatherer", bend::GATHER)] {
+            assert_eq!(ee.u32_at(world + at), 0, "{name}: the ecosystem's {what}");
+        }
+        let (plants, n) = (ee.u32_at(world + at::PLANTS), ee.u32_at(world + at::PLANT_COUNT));
+        assert!(n > 700, "{name}: {n} plants");
+        for i in 0..n {
+            let p = plants + at::PLANT_SIZE * i;
+            assert_eq!((ee.u8_at(p + bend::FLAGS) & bend::BENT, ee.u8_at(p + bend::BLOCK)), (0, 0), "{name}: plant {i}");
+        }
+        println!("{name}: {n} plants, no pool, none bent");
+        read += 1;
+    }
+    if read == 0 {
+        skip("no state to read");
+    }
+}

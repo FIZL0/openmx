@@ -20,6 +20,12 @@
 //! * **The plants.** One mesh per species, shared: the original moves it under each plant as it is
 //!   asked about, to the plant's cell times the ecosystem's cell size. [`Trees`] keeps one
 //!   [`world::Prop`] per plant instead, at the same place.
+//! * **No sway** (S101). The ecosystem has room for a pool of per-plant bend blocks (a bend
+//!   quaternion, an angle, a state byte: below 2 bending, 4 fading) that a plant points at with a
+//!   flag bit and an index, and its frame and draw passes read one when the bit is set. The pool is
+//!   only made when the scene's `[Environment]` has `UseEcoPhysics` (default off), no scene on the
+//!   disc has it, and nothing in the game ever writes a block or sets the bit. A hit tree stands
+//!   exactly as the file put it, so [`Trees`] never moves: there is nothing to port.
 //!
 //! Which searches see the trunks is the part that is the original's own and not this module's: the
 //! bike's eleven body rays search placed groups, its swept-sphere probe does not, and the put-back
