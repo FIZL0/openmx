@@ -5527,3 +5527,18 @@ node_count             boot 0x001b3420 1 + a node's descendants: what a hierarch
 #   nprobe3/4/6/7 (research/s138_nose.py, idle pad): thrown up and pitched forward at (4642.5, 3650):
 #          62 deg at 30/s and 66 at 44/s down ride out (g.y 26.6 / 42.7), 70.06 -> 69.86 rides out,
 #          74.95 -> 75.03 reason 1 on touchdown. States 2791, 2819, 2790, 2787.
+# ---------------------------------------------------------------------------------------------------
+# S150 — crooked landings. Journal: research/journal/2026-10-26-s150-trick-landing-spin.
+# No new function. bike_wreck_test (0x002522c0)'s landing crossup clause decides a crooked landing, and
+# its crossup is the asin of |heading x velocity| (flattened), so a landing theta crossed up reads
+# 180 - theta past 90: with MaxCrossupAngle 45 deg, anything past ~135 deg rides out, and the tyres then
+# turn the bike toward its velocity at up to YawRateLimit (3 rad/s).
+# Captures (context/capture/s138, git-ignored; research/s150/spin.sh NAME UP 0 40 True right.pad):
+# recording2 (slot 3) teleported to (4642.5, 135.6, 3650), thrown up UP ft/s and 40 forward at 36/s,
+# stick held right (yaw 1.11 rad/s in the air).
+#   s150-r50  UP 50: down at 2823, h 164.5 vs vel 46 (~118), crossup -1.05 rad, g_peak 0 -> reason 3
+#             on that row. States 2745..2747.
+#   s150-r60  UP 60: down at 2801, ~148, crossup -0.54 rad; rides out, heading swings 134.5 by 2904
+#             (wy to -2.2), ends rolling backwards. States 2707..2709.
+#   s150-r70  UP 70: down at 2855, ~169, crossup -0.14 rad; rides out, heading swings -166.8 by 2945
+#             (wy to -2.99). States 2748..2750.
