@@ -522,6 +522,12 @@ impl Down {
         let mut open = Open;
         let paired = BikeSearch { listed: bike_in && self.search.listed, ..self.search };
         let mut bike_scene = kit.bike_mesh.as_deref().map(|mesh| WreckBikeScene::new(mesh, &frame, &crash.bike, paired));
+        // And the path cars (S142): the search lists every moving collidable, measured from where
+        // the first sphere last stood, and the cars have moved this tick before the bones do.
+        if let (Some(b), Some(probe), true) = (&mut bike_scene, self.search.stood, self.search.built) {
+            let reach = kit.spheres.iter().fold(F::ZERO, |r, s| r.max(s.radius));
+            b.cars = world.moving().map_or_else(Vec::new, |p| crate::ragdoll_scene::PathCar::near(&p.props, probe, reach));
+        }
         let scene: &mut dyn crate::ragdoll_contact::Scene = match &mut bike_scene {
             Some(b) => b,
             None => &mut open,
