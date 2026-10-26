@@ -3180,10 +3180,20 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // One of each machine per player (P87): the file's two spots for the first two, beside them for
     // the rest, every second copy in the alternate livery. Only the plane is ported, so the lot's
     // other machines are counted and not stood up.
+    // In a world (MD24) the file is the home tile's, in that track's own feet: its spots are moved
+    // as one to stand the first plane beside the world's spawn.
+    let line_start = {
+        let (s, f) = (point(place.start), point(place.start_direction).norm());
+        vehicle::Spawn { at: Vf::new(s.x, s.y, s.z, 1.0), facing: Vf::new(f.x, f.y, f.z, 0.0) }
+    };
+    let lot_spots = |b: &[u8], ground: &mut dyn FnMut(Vf) -> f32| match &world_mod {
+        Some(w) => vehicle::world_spots(b, w.home_at().map(|a| a.0), line_start, ground),
+        None => Machine::ALL.iter().map(|&m| vehicle::spots(b, m)).collect(),
+    };
     let lot = {
         let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
-        let mut ground = |at: Vf| sim_world::World::ground(&mut probe, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y();
-        machines.as_ref().map_or_else(Lot::default, |(_, b)| Lot::new(b, args.players.max(1), &mut ground))
+        let mut ground = |at: Vf| lot_ground(tiled.as_deref_mut(), &mut probe, at);
+        machines.as_ref().map_or_else(Lot::default, |(_, b)| Lot::around(lot_spots(b, &mut ground), args.players.max(1), &mut ground))
     };
     // What it reads its own (P127): it outlives the load's thread.
     let flight_for = {
@@ -3209,10 +3219,6 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     };
     // Every map has the plane (P113): a track whose machine.txt parks none for a player only means
     // no parked copy, and theirs starts on the start line, measured once the ride's ground is up.
-    let line_start = {
-        let (s, f) = (point(place.start), point(place.start_direction).norm());
-        vehicle::Spawn { at: Vf::new(s.x, s.y, s.z, 1.0), facing: Vf::new(f.x, f.y, f.z, 0.0) }
-    };
     let plane = lot.plane_anywhere(0, flight_for(0), line_start);
     // Every online seat's own biplane bay (N18), which a seat that starts the ride in the plane
     // stands in: the lot parked for the most seats a ride has, a copy's place being its own whatever
@@ -3220,8 +3226,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut online_bays: Vec<vehicle::Spawn> = match &machines {
         Some((_, b)) => {
             let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
-            let mut ground = |at: Vf| sim_world::World::ground(&mut probe, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y();
-            vehicle::park(b, Machine::Biplane, net::SEATS, &mut ground).into_iter().map(|bay| bay.spawn).collect()
+            let mut ground = |at: Vf| lot_ground(tiled.as_deref_mut(), &mut probe, at);
+            Lot::around(lot_spots(b, &mut ground), net::SEATS, &mut ground).of(Machine::Biplane).map(|bay| bay.spawn).collect()
         }
         None => Vec::new(),
     };
@@ -7500,6 +7506,16 @@ fn frame_rig(rig: &mut Rig, bike: &[Preset], plane: &[Preset], framing: (chase::
 fn framings(v: menu::CameraView) -> (chase::Framing, chase::Framing) {
     let f = |(fov, distance, height): (f32, f32, f32)| chase::Framing { fov, distance, height };
     (f(v.bike()), f(v.plane()))
+}
+
+/// The ground's height under `at` for parking the lot: a world's tiles' ([`game_sim::tiles::Tiled`],
+/// MD24), whose home tile is not in its own feet, or else the one track's.
+fn lot_ground(tiled: Option<&mut game_sim::tiles::Tiled>, track: &mut sim_world::Ground, at: Vf) -> f32 {
+    let from = Vf::new(at.x(), 1.0e4, at.z(), 1.0);
+    match tiled {
+        Some(t) => sim_world::World::ground(t, from).0.y(),
+        None => sim_world::World::ground(track, from).0.y(),
+    }
 }
 
 /// The terrain file a scene asks for. Most scenes name it `SX02.trn`, but what the archive holds is

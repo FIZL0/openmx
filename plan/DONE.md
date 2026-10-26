@@ -232,6 +232,7 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 - [x] **P123** Shell --screen words for each Settings/Garage tab (display, ride, rider, bike, gear) so every tab gets a --shot; P118's Display tab has none (filed by P118 as a doubled id, lost when the user's P119/P120 were ticked; re-filed)
 - [x] **MD19** MD16 follow-up: online rides with MX vs. ATV tricks — every seat must have the same trick pack (MD6's check), then lift main.rs's forced Original
 - [x] **P122** Mods page: list music packs beside the track packs, each on/off like a track pack (P118 lists track packs only, by id prefix) (filed by P118 as a doubled id, lost when the user's P119/P120 were ticked; re-filed)
+- [x] **MD24** In a world mod the parked biplane sits at free06's machine.txt coordinates, not shifted by the home tile's offset; park it beside the world's spawn
 
 ### Phase 2 — a decompilation you can read
 - [x] **R1** (after D4) Ghidra: `./kit ghidra` on the boot ELF and each overlay, with the EmotionEngine extension, producing `context/decomp/<program>.c`. Check the dumps are at the right addresses (a function in the overlay dump should sit inside the overlay's load range) and note how long a full analysis takes on this machine → kit.toml `[ghidra]` · ghidra_scripts/ | t: `./kit fn <addr>` prints one function from each program | j: r1-decompile

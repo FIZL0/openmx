@@ -146,3 +146,25 @@ fn riding_off_the_outer_edge_shoots_you_off() {
         println!("from ({x}, {z}) at {degrees}: thrown on tick {tick} at ({tx:.1}, {tz:.1})");
     }
 }
+
+/// The parked biplane in a world (MD24): free06's `machine.txt` is in free06's own feet, so the world
+/// stands its first plane one spacing (40 ft) to the right of the world's spawn, on the ground there,
+/// rather than at the file's coordinates.
+#[test]
+fn the_parked_plane_stands_beside_the_worlds_spawn() {
+    if !disc() {
+        return;
+    }
+    let said = shell(&["--frames", "1"]);
+    let numbers = |prefix: &str, after: &str| -> Vec<f32> {
+        let l = said.lines().find(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("no `{prefix}` line:\n{said}"));
+        let tail = &l[l.find(after).unwrap() + after.len()..];
+        tail.split(|c: char| c == ',' || c.is_whitespace()).filter_map(|w| w.parse().ok()).take(4).collect()
+    };
+    let start = numbers("start:", "start:");
+    let plane = numbers("biplane: parked by", " at ");
+    // The spawn faces 0 degrees (+z), so its right is -x.
+    assert_eq!(start[3], 0.0, "the spawn's heading moved: {start:?}");
+    assert!((plane[0] - (start[0] - 40.0)).abs() <= 1.0 && (plane[2] - start[2]).abs() <= 1.0, "plane {plane:?}, start {start:?}");
+    assert!((plane[1] - start[1]).abs() < 30.0, "the plane is not on the ground by the spawn: {plane:?}, start {start:?}");
+}
