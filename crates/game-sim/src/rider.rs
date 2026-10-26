@@ -608,6 +608,8 @@ impl Rider {
             let mut alone = None;
             let bump = match (bump, found) {
                 (Some(b), Some(found)) => {
+                    // The cars are props too: a ray the car search (S137) already listed keeps that entry.
+                    let found: Vec<_> = found.into_iter().filter(|f| !b.contacts.iter().any(|c| c.other.is_none() && c.from == f.from && c.on_body == f.on_body)).collect();
                     b.contacts.extend(found);
                     Some(b)
                 }

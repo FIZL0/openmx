@@ -84,7 +84,8 @@ fn full_gas_into_the_trains_side_never_comes_out_the_far_side() {
     let Some(said) = ride("2527,3714,280", &tape("gas", 240, true), 240) else { return };
     let at = end(&said);
     assert!(east_of_line(at) > -6.0, "the bike ended {:.1} ft past the line, at {at:?}:\n{said}", -east_of_line(at));
-    assert!(wrecks(&said).contains(&SCENERY), "the train never threw the rider: {:?}\n{said}", wrecks(&said));
+    // Since S138 the body rays meet every prop and a head-on side is a g wreck (reason 1), as a wall is.
+    assert!(wrecks(&said).iter().any(|r| [1, SCENERY].contains(r)), "the train never threw the rider: {:?}\n{said}", wrecks(&said));
 }
 
 #[test]
