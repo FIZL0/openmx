@@ -518,7 +518,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // a track with any, so the leaves do not move.
     // 11496 since S83: each ride's put-back search list (`Ride::back_search`, boxed), walked only
     // once a world with props or plants has been asked.
+    // 11504 since S112: each rider's packed fore-aft (`Rider::packed_fore_aft`), beside S111's packed
+    // pose, which is not walked either: both are last tick's header output, latched for the body's
+    // request, and the body's machine is not in the walk.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11496, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11504, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

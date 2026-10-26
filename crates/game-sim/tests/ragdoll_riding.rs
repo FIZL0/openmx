@@ -1471,6 +1471,71 @@ fn the_riding_request_is_the_originals_from_each_row() {
     assert_eq!(exact, ticks, "{exact} of {ticks} requests exact\n{}", worst.join("\n"));
 }
 
+/// **The body's vehicle-animation request from each of run1's rows** (S112). The body actor's
+/// vehicle animation reads its phase target, mix target and band at its request block's +0x170,
+/// +0x174 and +0x178, and the block is the riding request (the state test below: the actor's +0x488
+/// is the rider's +0xb80). So on each row the phase and mix targets are the pose and the fore-aft the
+/// header showed on the row *before* (straight on, 0.5, on a held row: the idle's tail runs in front
+/// of the pack), which is what [`Rider::packed_pose`] and [`Rider::packed_fore_aft`] latch, and not
+/// this row's. The band is not the velocity's length nor its forward lane in the chassis frame,
+/// which is what the port read before (`chassis.speed` in the rider's body request, `local_vel.z` in
+/// game-render's `Chassis::request`): the state test proves it is the contact velocity's z.
+///
+/// [`Rider::packed_pose`]: game_sim::rider::Rider::packed_pose
+/// [`Rider::packed_fore_aft`]: game_sim::rider::Rider::packed_fore_aft
+#[test]
+fn the_bodys_vehicle_request_is_the_packed_axes_and_the_contact_speed() {
+    let Some(cap) = Capture::load("run1") else { return };
+    let (mut ticks, mut held, mut bad) = (0, 0, Vec::new());
+    let (mut now_pose, mut now_fore_aft, mut length) = (0, 0, 0);
+    // [grounded, airborne]: rows, and rows whose band is the chassis-frame velocity's z.
+    let (mut rows, mut local_z) = ([0; 2], [0; 2]);
+    for frame in START + 2.. {
+        if !cap.has(frame) {
+            break;
+        }
+        let axes = req_quad(&cap, frame, req_at::PITCH);
+        let (phase, mix, band) = (axes.x(), axes.y(), axes.z());
+        let mut motion = game_sim::motion::Driver {
+            pose: F(cap.get(frame - 1, "shown_pose")),
+            fore_aft: F(cap.get(frame - 1, "shown_fore_aft")),
+            ..Default::default()
+        };
+        if req_quad(&cap, frame, req_at::HELD).x().to_bits() != 0 {
+            motion.freeze();
+            held += 1;
+        }
+        ticks += 1;
+        if (phase.to_bits(), mix.to_bits()) != (motion.pose.0.to_bits(), motion.fore_aft.0.to_bits()) && bad.len() < 4 {
+            bad.push(format!("{frame}: phase {phase} mix {mix}, packed {} {}", motion.pose.0, motion.fore_aft.0));
+        }
+        // The same row's (lag 0) and the old sources, counted to show they are not it.
+        now_pose += usize::from(phase.to_bits() == cap.get(frame, "shown_pose").to_bits());
+        now_fore_aft += usize::from(mix.to_bits() == cap.get(frame, "shown_fore_aft").to_bits());
+        let v = req_quad(&cap, frame, req_at::VELOCITY);
+        let ahead = req_quad(&cap, frame, req_at::ROWS + 0x20);
+        // Host floats, so "near" rather than the bit: a source that were it would land within 1e-4.
+        let near = |x: f32| (band - x).abs() <= 1e-4 * x.abs().max(1.0);
+        length += usize::from(near((v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt()));
+        let air = usize::from(cap.int(frame, "on_ground") == 0);
+        rows[air] += 1;
+        local_z[air] += usize::from(near(v.x() * ahead.x() + v.y() * ahead.y() + v.z() * ahead.z()));
+    }
+    note(&format!(
+        "S112 body request: {ticks} rows, {held} held; lag 0 pose {now_pose} fore-aft {now_fore_aft}; band = |v| {length}, = local z grounded {}/{} airborne {}/{}",
+        local_z[0], rows[0], local_z[1], rows[1]
+    ));
+    assert!(ticks >= 1200, "only {ticks} rows in run1");
+    assert!(held >= 4, "only {held} held rows");
+    assert!(bad.is_empty(), "the axes are not the packed pose and fore-aft:\n{}", bad.join("\n"));
+    assert!(now_pose < ticks / 2 && now_fore_aft < ticks * 9 / 10, "this row's axes would do as well: {now_pose} {now_fore_aft}");
+    assert!(length < ticks / 10, "the band is the velocity's length on {length} rows");
+    // With a wheel down it is that wheel's contact velocity, not the chassis'; with neither, the
+    // contact velocity *is* the chassis-frame velocity (`air::step`'s fallback), and so is the band.
+    assert!(rows[0] >= 600 && local_z[0] < rows[0] / 10, "grounded, the band is the chassis' z on {} of {}", local_z[0], rows[0]);
+    assert!(rows[1] >= 100 && local_z[1] == rows[1], "airborne, the band is the chassis' z on {} of {}", local_z[1], rows[1]);
+}
+
 /// **Where each field of the request comes from, at the state** (S111): S109's save state, read as
 /// the original's writer reads it. The chassis node's and the drawn bike node's world matrices, the
 /// chassis' velocity and world rates, the contact velocity's forward lane (not the speed's length),

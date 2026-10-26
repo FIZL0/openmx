@@ -209,6 +209,9 @@ pub struct Rider {
     /// The pose the header showed last tick ([`motion::Driver::pose`]), as the state pack latches it
     /// in front of this tick's header (S111): what the riding body's request carries.
     pub packed_pose: F,
+    /// The fore-aft the header showed last tick ([`motion::Driver::fore_aft`]), latched by the same
+    /// pack (S112): the body's vehicle-animation request reads it as its mix axis.
+    pub packed_fore_aft: F,
     /// The 24 stunts this rider can do, off the stunt table.
     pub set: Set,
     /// Which stunt clips the rider's animation set actually holds. Everything is present until a
@@ -326,6 +329,7 @@ impl Rider {
             state: state::Ride::default(),
             motion: motion::Driver::default(),
             packed_pose: motion::Driver::default().pose,
+            packed_fore_aft: motion::Driver::default().fore_aft,
             set,
             clips: motion::Clips::default(),
             // A local human with a screen of their own, freestyle, wrecks on. `settles` starts false
@@ -499,7 +503,7 @@ impl Rider {
                         rivals: &[ride::Rival], bump: Option<&mut crate::rider_contact::Bump>) -> Frame {
         let mut out = Frame::default();
         let Rider {
-            ride, tricks, state, motion, packed_pose, set, clips, sense, racing, wreckage, crash, animation,
+            ride, tricks, state, motion, packed_pose, packed_fore_aft, set, clips, sense, racing, wreckage, crash, animation,
             flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, wreck_sounds, idles, ghost, edge_armed, page,
             put_back, ragdoll_shown, score, ..
         } = self;
@@ -690,6 +694,7 @@ impl Rider {
         };
         let asked = motion::Request { progress: tricks.progress, ..request };
         *packed_pose = motion.pose;
+        *packed_fore_aft = motion.fore_aft;
         *animation = motion.frame(dt, p.motion(), asked, pose, *clips);
 
         // The word next frame's airborne control reads. The clocks run after the ground step, so what
@@ -971,9 +976,9 @@ impl Rider {
     /// | the no-hander | [`crate::trick::Tricks::no_hander`] |
     /// | a wreck | the ride state machine had a reason as of the request's fill, a tick behind its verdict ([`PutBack::wreck`], S91) |
     /// | the throttle, reverse | the controls, unfiltered |
-    /// | the phase axis | [`motion::Driver::pose`] — lean on the ground, crossup in the air, 0..1 |
-    /// | the mix axis | [`motion::Driver::fore_aft`], the same 0..1 the airborne pair is mixed with |
-    /// | the band the grid's rows are cut out of | the chassis's speed |
+    /// | the phase axis | [`Rider::packed_pose`]: [`motion::Driver::pose`] as the state pack latched it, in front of this tick's header (S112) |
+    /// | the mix axis | [`Rider::packed_fore_aft`], [`motion::Driver::fore_aft`] latched the same way |
+    /// | the band the grid's rows are cut out of | the contact velocity's forward lane, [`crate::air::Air::contact_vel`]'s z (S112) |
     /// | the progress and the request count | the trick clocks' |
     ///
     /// # The body's other machine
@@ -1001,12 +1006,13 @@ impl Rider {
         let Rider {
             ride,
             tricks,
-            motion,
             body,
             body_numbers,
             body_rates,
             body_request,
             body_clocked,
+            packed_pose,
+            packed_fore_aft,
             idles,
             crash,
             wreckage,
@@ -1059,9 +1065,12 @@ impl Rider {
         body_request.at_base = false;
         body_request.base = ride.position();
         body_request.rotation = ride.chassis.quat;
-        body_request.phase_axis = motion.pose;
-        body_request.mix_axis = motion.fore_aft;
-        body_request.band = ride.chassis.speed;
+        // The block the body reads is the riding request (S111/S112): its axes are the pose and the
+        // fore-aft the state pack latched before this tick's header, and its band is the contact
+        // velocity's forward lane, all three copied by the request's fill.
+        body_request.phase_axis = *packed_pose;
+        body_request.mix_axis = *packed_fore_aft;
+        body_request.band = F(ride.air.contact_vel.z());
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
         body.mode(dt, body_request, &ask, &wrecks, thrown, idles, gate.clock);
