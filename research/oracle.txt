@@ -5141,3 +5141,17 @@ vehicle_fx_entry_on   boot 0x003d86d0 flag |= 1 (live); the emitter on (vt +0x98
 # The Generic/Exhaust/Spray vtables sit at 0x0045e630..0x0045e780. An emitter switched on emits
 # nothing that tick: the manager runs before the emitter, which only takes its position (S109's
 # animandpump capture: exhaust on at 2001, rear sprays at 2006, each emitting from the row after).
+# S81 — the path cars in the simulation: crates/game-sim/src/traffic.rs, proved in
+# crates/game-sim/tests/traffic.rs against s89-along (free06, the train and the earth movers).
+#   The car (V41's class, ctor 0x00114560): +0x430 path {n, keys (0x30 each: t, len, pos at +0x10,
+#   normal at +0x20), clock +0xc}; +0x450 last point, +0x460 point, +0x470 position, +0x480 heading,
+#   +0x4a0 up, +0x4e4 "take the next heading and up unfiltered", +0x4f4 the curve's cursor, +0x534
+#   TimeScale, +0x558 LagDistance, +0x55c HeadingFilter, +0x560 NormalFilter, +0x254 the model node
+#   (world matrix at node +0x80), +0x428 the mesh collidable (category 0x48, its sphere at +0x40/+0x60,
+#   world matrix at +0x120, the previous tick's at +0x1e0).
+path_car_update       boot 0x00115540 (a0 car, f12 dt) clock = fmodf(clock + dt TimeScale, last t) (twice
+#                                    if still past); point = curve(clock or lag walk); heading = filtered
+#                                    flat step; ground_query under it; up blended if cos > 0.707; basis
+path_car_measure      boot 0x00115330 each segment's arc: ten chords of the curve, sqrt.s summed
+path_car_lag          boot 0x00116150 the clip time LagDistance of arc behind s (walks keys back, wraps)
+path_car_curve        boot 0x00116410 Hermite on the cursor's segment, Catmull-Rom tangents (chord at ends)

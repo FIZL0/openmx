@@ -40,7 +40,7 @@ use crate::collide::{self, Bundle, MeshRef, Probe, Record};
 use crate::contact_search::{Cell, Heightfield, TerrainField};
 use crate::math::{self, Mat4};
 use crate::track::{self, Mesh, Placement, Terrain, TerrainLayout};
-use ps2_float::{Dest, F, Vf, vu};
+use ps2_float::{Acc, Dest, F, Field, Vf, vu};
 
 /// How many terrain samples one unit of the scene's `TerrainWidth` (or `TerrainBreadth`) is: the game's
 /// map edge is width × 256 × scale whatever the tree's depth. On a two-level tree that is one root cell;
@@ -143,6 +143,12 @@ pub trait World {
     fn wooded(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&crate::eco::Trees>) {
         let (field, props) = self.collision();
         (field, props, None)
+    }
+
+    /// The props a moving thing's mesh is among, for it to be moved ([`crate::traffic::Traffic`]). A
+    /// world without props has none.
+    fn moving(&mut self) -> Option<&mut Props> {
+        None
     }
 }
 
@@ -427,23 +433,61 @@ impl Prop {
             false,
             true,
         );
-        let own = Mat4([
-            row(mesh.transform[0], 0.0),
-            row(mesh.transform[1], 0.0),
-            row(mesh.transform[2], 0.0),
-            row(mesh.transform[3], 1.0),
-        ]);
-        let to_world = math::mul(&own, &place);
-        let (centre, radius) = match mesh.nodes.first() {
-            Some(node) => {
-                let c = row(node.centre, 1.0);
-                let h = row(node.half_extent, 0.0);
-                (math::transform_point(&to_world, c), length(h))
-            }
-            None => (Vf::new(0.0, 0.0, 0.0, 1.0), F::ZERO),
-        };
+        Prop::on(mesh, &place)
+    }
+
+    /// A parsed mesh stood at a world matrix: a moving car's (S81, [`crate::traffic`]). The mesh's
+    /// own transform goes first, as in [`Prop::place`]; the sphere is a moved mesh's ([`moved`]).
+    pub fn on(mesh: Mesh, place: &Mat4) -> Prop {
+        let (to_world, _, _) = stood(&mesh, place);
+        let (centre, radius) = moved(&mesh, place);
         Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius }
     }
+
+    /// Move the mesh to a new world matrix, where its car now stands.
+    pub fn stand(&mut self, place: &Mat4) {
+        let (to_world, _, _) = stood(&self.mesh, place);
+        self.from_world = invert_rigid(&to_world);
+        self.to_world = to_world;
+        (self.centre, self.radius) = moved(&self.mesh, place);
+    }
+}
+
+/// A moving mesh's sphere, as the original's collidable takes a new matrix: the root box's centre
+/// through the matrix it was handed, without the mesh's own transform, the translation row first
+/// (`vaddax` of row 3, then `vmadda` rows 0 and 1 and `vmadd` row 2); the radius the half extent's
+/// length on the FPU (`mula`/`madda`/`madd`, `sqrt.s`).
+fn moved(mesh: &Mesh, place: &Mat4) -> (Vf, F) {
+    let Some(node) = mesh.nodes.first() else {
+        return (Vf::new(0.0, 0.0, 0.0, 1.0), F::ZERO);
+    };
+    let (c, h) = (row(node.centre, 1.0), node.half_extent);
+    let [r0, r1, r2, r3] = place.0;
+    let acc = r3.add(Vf::ZERO);
+    let acc = Vf::madd(acc, r0, c.bc(Field::X));
+    let acc = Vf::madd(acc, r1, c.bc(Field::Y));
+    let centre = c.merge(Dest::XYZ, Vf::madd(acc, r2, c.bc(Field::Z)));
+    (centre, Acc::mula(h[0], h[0]).madda(h[1], h[1]).madd(h[2], h[2]).sqrt())
+}
+
+/// A mesh's own transform followed by a world matrix, and its root box as a sphere there.
+fn stood(mesh: &Mesh, place: &Mat4) -> (Mat4, Vf, F) {
+    let own = Mat4([
+        row(mesh.transform[0], 0.0),
+        row(mesh.transform[1], 0.0),
+        row(mesh.transform[2], 0.0),
+        row(mesh.transform[3], 1.0),
+    ]);
+    let to_world = math::mul(&own, place);
+    let (centre, radius) = match mesh.nodes.first() {
+        Some(node) => {
+            let c = row(node.centre, 1.0);
+            let h = row(node.half_extent, 0.0);
+            (math::transform_point(&to_world, c), length(h))
+        }
+        None => (Vf::new(0.0, 0.0, 0.0, 1.0), F::ZERO),
+    };
+    (to_world, centre, radius)
 }
 
 /// Everything solid on a track, and the sweep against the lot.
@@ -588,6 +632,10 @@ impl World for Place<'_> {
 
     fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>) {
         (self.ground.heightfield(), Some(&self.props))
+    }
+
+    fn moving(&mut self) -> Option<&mut Props> {
+        Some(&mut self.props)
     }
 }
 

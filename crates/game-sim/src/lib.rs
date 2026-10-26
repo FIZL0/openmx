@@ -132,6 +132,10 @@ pub struct Sim {
     /// nothing there. A constant of the map like [`Sim::phy`], shared by every clone, never hashed
     /// or sent: every machine derives the same, and a resync keeps this one's ([`snapshot`]).
     pub home: Arc<markers::Home>,
+    /// The track's path cars (S81): the train and the trucks that drive a clip's path, stepped at the
+    /// top of every tick, before the riders, which is where the original's scene walk moves them.
+    /// Empty on a track without them, and then not walked or sent ([`traffic`]).
+    pub traffic: traffic::Traffic,
 }
 
 /// The most riders a session holds: the original's start fills a field of up to eight.
@@ -209,6 +213,7 @@ impl Sim {
             others: Vec::new(),
             markers: markers::Markers::default(),
             home: Arc::default(),
+            traffic: traffic::Traffic::default(),
         }
     }
 
@@ -277,6 +282,7 @@ impl Sim {
             all[0] = *controls;
             return self.step_all(dt, &all, world).swap_remove(0);
         }
+        self.traffic.frame(dt, world);
         if self.plane.is_some() {
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
@@ -360,6 +366,7 @@ impl Sim {
         if self.others.is_empty() || self.plane.is_some() {
             return vec![self.step(dt, &controls[0], world)];
         }
+        self.traffic.frame(dt, world);
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         let mut lists = self.bike_contacts(dt);
@@ -484,6 +491,7 @@ impl Clone for Sim {
             others: self.others.clone(),
             markers: self.markers.clone(),
             home: Arc::clone(&self.home),
+            traffic: self.traffic.clone(),
         }
     }
 }
@@ -825,6 +833,8 @@ pub mod wreck_bike;
 /// through it until it has.
 pub mod ghost;
 
+/// The track's path cars (S81): the `.toy`'s cars on a clip's path, moved bit-exact each tick.
+pub mod traffic;
 /// Session markers (P88): five spots a player saves on the d-pad and rides back to, and the other
 /// players to ride to.
 pub mod markers;

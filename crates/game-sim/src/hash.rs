@@ -502,6 +502,10 @@ impl State for Sim {
         if !self.markers.fresh() {
             w.field("markers", &self.markers);
         }
+        // The track's path cars (S81), on a track with any: a walk without them is what it was.
+        if !self.traffic.cars.is_empty() {
+            w.list("cars", &self.traffic.cars);
+        }
     }
 }
 
