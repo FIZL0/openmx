@@ -49,7 +49,8 @@
 //!   off the stacks while the plane runs up slowly, none once it is past `MaxSpeed` or off the
 //!   throttle. (P58 scaled y; the bike's capture, P74, shows z scaled and y the file's.)
 //! * **CollisionModel** (`Vehicle Dust`, `Vehicle Chunks`): one emission per contact of the plane's
-//!   collision model, at the contact, as if it had come from the body's velocity a frame back — the
+//!   collision model, at the contact, as if it had come from the collision object's relative velocity
+//!   at its last resolved contact a frame back (P63; the body's where the caller has none) — the
 //!   wreck's dust where the hull hits the ground. Its flags are its own: no contact at all is
 //!   `NoContact`, which both entries disable.
 //!
@@ -848,6 +849,10 @@ pub struct PlaneFrame {
     /// Where the collision model touches the ground and where it touches anything else.
     pub ground_contacts: Vec<V3>,
     pub object_contacts: Vec<V3>,
+    /// The velocity a `CollisionModel` entry's points come from (P63): the collision object's
+    /// relative velocity at the last contact it resolved, which is what the original's entry reads.
+    /// `None` uses [`PlaneFrame::vel`].
+    pub contact_vel: Option<V3>,
     /// The surface under each ground contact, where it is known (P74): a contact on a surface the
     /// entry's zones say `none` to emits nothing. Empty for the plane: every contact draws.
     pub ground_zones: Vec<u8>,
@@ -855,6 +860,30 @@ pub struct PlaneFrame {
     pub constraints: Vec<ConstraintFrame>,
     /// The three tires, front left, front right and tail, by `AttachedToTire`'s index.
     pub tires: Vec<TireFrame>,
+}
+
+impl PlaneFrame {
+    /// A vehicle's collision object as its `CollisionModel` entries read it (P63): every contact of
+    /// the frame's list, as the ground's when the search found the ground and as an object's when it
+    /// found an object (the manager's two flags; the original emits once per contact of the one list),
+    /// each contact's surface, and `relative`, the object's relative velocity at the last contact it
+    /// resolved, which the entries' points come from.
+    pub fn touch(&mut self, record: &game_sim::contact_search::Record, relative: ps2_float::Vf) {
+        let points: Vec<V3> = record.contacts.iter().map(|c| v3(c.point.x(), c.point.y(), c.point.z())).collect();
+        self.ground_contacts.clear();
+        self.ground_zones.clear();
+        self.object_contacts.clear();
+        if record.on_ground {
+            self.ground_zones = record.contacts.iter().map(|c| c.surface.clamp(0, 255) as u8).collect();
+            self.ground_contacts = points.clone();
+        }
+        if record.on_object {
+            // Both at once: the list is already the ground's, and one point raises the object's flag
+            // (every list on the disc is off on an object contact, so it never emits).
+            self.object_contacts = if record.on_ground { points.into_iter().take(1).collect() } else { points };
+        }
+        self.contact_vel = Some(v3(relative.x(), relative.y(), relative.z()));
+    }
 }
 
 /// One particle as it is drawn: a square facing the camera.
@@ -1163,10 +1192,11 @@ impl PlaneFx {
                             Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
                             None => {}
                         }
-                        // As if the point had come from the body's velocity a frame back: its speed is
-                        // the body's, and its particles spread along that path.
-                        let from = at.sub(plane.vel.scale(dt));
-                        source.emit(index, &entry.emt, entry.frames, at, Some(from), None, entry.emt.velocity, plane.vel, wind, dt, &mut self.rng, &mut self.particles);
+                        // As if the point had come from the contact's velocity a frame back: its speed
+                        // is the contact's, and its particles spread along that path.
+                        let vel = plane.contact_vel.unwrap_or(plane.vel);
+                        let from = at.sub(vel.scale(dt));
+                        source.emit(index, &entry.emt, entry.frames, at, Some(from), None, entry.emt.velocity, vel, wind, dt, &mut self.rng, &mut self.particles);
                     }
                 }
                 Kind::Dust(_) | Kind::HelicopterDust { .. } => {}
