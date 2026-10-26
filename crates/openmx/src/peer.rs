@@ -60,7 +60,9 @@ pub fn lineup(room: &Room) -> Lineup {
 
 /// Every seat's bike at the start, from the host's seed: the same on every machine.
 pub fn sims(room: &Room) -> Vec<Sim> {
-    let first = Sim::new(room.seed);
+    let mut first = Sim::new(room.seed);
+    // A free ride: no start line for the body, as the shell builds its riders (V88).
+    first.rider.no_start_line();
     (0..room.seats.len())
         .map(|s| {
             let mut sim = first.clone();

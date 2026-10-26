@@ -304,7 +304,8 @@ pub struct Rider {
     /// The request block the body's selection and step read, as this module publishes it.
     /// [`Rider::body_frame`] rewrites every field it derives from the rider each frame and leaves the
     /// other two (`cut`, `offset`) alone, because the body itself is the only thing here that writes
-    /// them. [`Rider::new`] raises `cut`: a rider is put on the bike at the gate.
+    /// them. [`Rider::new`] raises `cut`: a rider is put on the bike at the gate; a free ride lowers
+    /// it again ([`Rider::no_start_line`]).
     pub body_request: vehicle_anim::Request,
 
     /// The last trick asked for since the wheels left the ground, for [`Frame::landed`].
@@ -430,6 +431,20 @@ impl Rider {
         self.ride.unwreck();
         self.ride.drag_halved = false;
         self.teleported();
+    }
+
+    /// **No start line** (V88): lowers the cut flag [`Rider::new`] raises, so the body rides from its
+    /// first frame. A free ride has no gate, and left up the flag has the body play the start line's
+    /// get-ready sequence — a breathe, a get-ready idle and a start pose, hands off the bars — until
+    /// the throttle opens during an idle or a start pose, while the bike rolls away under it. A ride
+    /// started in the plane hands the bike over with the flag still up, which is what the user saw
+    /// as the body not animating for the first seconds after the switch back.
+    ///
+    /// **The port's own**, as the flag's raising is: who publishes the cut flag in the original was
+    /// not identified, so whether its free ride clears it or never raises it is not known; the body
+    /// it leaves is the riding one either way.
+    pub fn no_start_line(&mut self) {
+        self.body_request.cut = false;
     }
 
     /// What both teleports leave the rider as, which is what the put-backs in [`Rider::frame_among`]

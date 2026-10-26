@@ -3453,6 +3453,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // them at zero every fade is a hard cut and the grid's rows all meet at zero, so a grounded body
         // takes the top row at walking pace (V18).
         rider.body_rates = vehicle_params();
+        // No start line (V88): `Rider::new` puts the body at a race's gate, and a free ride has none.
+        // Left up, a ride started in the plane hands the bike back playing the get-ready idles.
+        rider.no_start_line();
         // The wreck's own parameters, if the disc had them: the part the bike becomes, the rider's
         // throw-and-roll set, and the tumbling body's inertia tensor, which is neither file's — it comes
         // off the wreck model's own box ([`ride::WRECK_INERTIA`]).

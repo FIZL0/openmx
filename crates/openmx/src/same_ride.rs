@@ -55,6 +55,7 @@ fn clips() -> (Library, impl Fn(ClipId) -> Clip) {
 fn start() -> Sim {
     let mut sim = Sim::new(7);
     sim.rider.body_rates = vehicle_params();
+    sim.rider.no_start_line();
     sim
 }
 
