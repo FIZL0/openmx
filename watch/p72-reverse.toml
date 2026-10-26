@@ -1,0 +1,75 @@
+# p72-reverse.toml — P72: the original backing up (gas and brake held at a stop) and what the rider's
+# body plays while it does: the reverse command, the speed it is gated on, and the body's animation
+# machine (the state asked for and running, and the reverse pair's own clock).
+#
+# The rider is R6's type-2 actor two hops down free09's list (s68-backwards.toml's chain); the body's
+# animation object sits 0x400 in front of the type-4 actor eight hops down (rider-joints.toml's).
+# Recorded from first_recording's save state in slot 8 at a quarter speed, as S68 did; the recipe is
+# in research/journal/2026-10-25-p72-reverse-l3/capture/.
+[watch]
+name        = "p72-reverse"
+description = "the original backing up: +0x648, +0x438 and the body's animation state"
+every       = 1
+frames      = 240
+
+[setup]
+state   = 8              # the human recording's own save state (free09, cr125_faisst)
+warmup  = 0
+settle_ms = 240
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"      # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "actor_type"      # +0x00: must read 4
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "wreck_reason"    # +0x748: 0 while riding
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "gas_lever"       # +0x63c: the gas switch after the reverse rule
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x63c"
+type = "f32"
+
+[[field]]
+name = "brake_lever"     # +0x640: the brake switch after the reverse rule
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x640"
+type = "f32"
+
+[[field]]
+name = "reverse"         # +0x648: 1.0 while gas and brake held below speed 5
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x648"
+type = "f32"
+
+[[field]]
+name = "bike_speed"      # +0x438: the speed the reverse gate reads, signed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x438"
+type = "f32"
+
+[[field]]
+name = "d_state"         # +0x8f0: the state running (33/34 the reverse pair)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8f0 - 0x400"
+type = "s32"
+
+[[field]]
+name = "d_want"          # +0x8f4: the state asked for
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8f4 - 0x400"
+type = "s32"
+
+[[field]]
+name = "d_reverse"       # +0xa3c: the reverse pair's own phase clock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa3c - 0x400"
+type = "f32"

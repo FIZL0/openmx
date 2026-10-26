@@ -120,7 +120,8 @@ pub struct Controls {
     /// The clutch lever.
     pub clutch: F,
     /// Reverse, which is a command and not a gear: held, it pushes the bike backwards. No button of
-    /// the original's is it (P73); a pad leaves it at 0.
+    /// the original's is it (P73); a pad leaves it at 0, and the ride's own pad read sets it from the
+    /// gas and the brake held together, slow ([`Controls::reverse_rule`], P72).
     pub reverse: F,
     /// The left stick: `x` leans and steers, `y` moves the rider fore and aft.
     pub stick: (F, F),
@@ -236,7 +237,30 @@ impl Controls {
             && (half(Command::RESET_LEFT, Command::RESET_RIGHT) || half(Command::RESET_RIGHT, Command::RESET_LEFT));
         Controls { respawn, ..self }
     }
+
+    /// The original's only reverse (P72): the tail of its pad read, run on the bike's levers once
+    /// they are read. With the gas and the brake both held, below [`REVERSE_BELOW`] of forward speed
+    /// the bike reverses and lets go of both levers; at or above it the brake stays on and the gas
+    /// is cut — unless the bike is in the air, where the gas stays on. Either lever let go is no
+    /// reverse. `speed` is the bike's forward speed (`+0x438`, the air state's contact velocity's
+    /// z, negative going backwards) and `airborne` its air state's flag, both as the last frame
+    /// left them. Every layout goes through it, because it is the bike's and not a binding's.
+    pub fn reverse_rule(self, speed: F, airborne: bool) -> Controls {
+        if self.brake <= F::ZERO || self.gas <= F::ZERO {
+            Controls { reverse: F::ZERO, ..self }
+        } else if speed >= F(REVERSE_BELOW) {
+            // In the air the original's gas is 1.0 again, its switch; the port's lever is still
+            // its strength until P77 makes it a switch, so it is left as it was read.
+            Controls { reverse: F::ZERO, gas: if airborne { self.gas } else { F::ZERO }, ..self }
+        } else {
+            Controls { reverse: F::ONE, gas: F::ZERO, brake: F::ZERO, ..self }
+        }
+    }
 }
+
+/// The forward speed below which gas and brake held together reverse the bike
+/// ([`Controls::reverse_rule`]), in the bike's feet a second.
+pub const REVERSE_BELOW: f32 = 5.0;
 
 /// How long before the second half of the reset chord the first may have gone down under the new
 /// layout ([`Controls::chord_together`], P67), in the input layer's milliseconds. The human's own
@@ -284,6 +308,11 @@ pub struct Held {
     pub flick: F,
     /// The samples [`Held::flick`] is measured over.
     pub ring: Flick,
+    /// The reverse command this frame's pad read left (`+0x648`, [`Controls::reverse_rule`]): what
+    /// the rider's animation request copies after the physics. Not in the hash walk: it is the pad
+    /// read's own output, written before anything reads it every frame, so it carries nothing from
+    /// one tick to the next.
+    pub reverse: F,
 }
 
 impl Held {
@@ -1628,6 +1657,10 @@ impl Ride {
         if p.tricks.is_some() && tricks.is_none() {
             *tricks = Some(Box::default());
         }
+
+        // 0 — the tail of the pad read: gas and brake held together, slow, are the reverse.
+        let c = &c.reverse_rule(F(air.contact_vel.z()), air.airborne);
+        held.reverse = c.reverse;
 
         // 1 — the input layer's rate limit.
         held.step(c, &p.joystick, dt);

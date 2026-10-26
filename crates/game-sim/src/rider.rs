@@ -1037,7 +1037,7 @@ impl Rider {
             wreck: state.wreck.is_some() || put_back.wreck,
             countdown: gate.countdown,
             throttle: c.gas,
-            reversing: c.reverse,
+            reversing: ride.held.reverse,
             gesture: tricks.requested.slot().map_or_else(|| pack_state(lib, tricks.requested), |s| s as i32),
             spin: spin_state(lib, ride),
         };

@@ -1,0 +1,8 @@
+# P72: from the state's standstill, gas and brake held together (the original's reverse below speed
+# 5), straight back with the bars centred, then let go. Wall-clock, at a quarter speed (4 ms here is
+# 1 ms ridden).
+sleep 4000
+down square
+down cross
+sleep 24000
+release
