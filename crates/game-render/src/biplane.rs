@@ -27,7 +27,9 @@
 //! `Dummy_Foot_R_pos`, `Dummy_Hand_L_pos`, `Dummy_Hand_R_pos` — and caches them when it loads, the
 //! same way a bike caches the four anchors on its grips and pegs. The body is the rider's own, posed by
 //! the two clips every rider archive ships for the plane, `biplane_roll_fwd` and `biplane_roll_bck`,
-//! with its limbs aimed at those four nodes ([`Biplane::anchors`], [`seat`]).
+//! with its limbs aimed at those four nodes ([`Biplane::anchors`], [`seat`]). Which of the two and
+//! how far in is the stick's: the aileron picks how far into both clips, the elevator mixes them, each
+//! eased by the body's own lag (`game_sim::biplane_anim::Lean`, S35 and V78).
 //!
 //! Unlike a bike's, the plane's clips do not carry the body into the seat: they are made about the
 //! rider's own root, and the root is put [`PILOT_SEAT`] up and back from the plane's origin, turned
@@ -279,14 +281,13 @@ fn node(model: &Model, name: &str) -> Option<M4> {
     Some(model.world(i))
 }
 
-/// Pose a rider's body as the pilot: the two plane clips, mixed `lean` of the way from
-/// `biplane_roll_bck` (0) to `biplane_roll_fwd` (1), both at `time` seconds. Loads the clips into
-/// the body's own set on first use. False if either clip is not in the rider's archive, and the pose
-/// is then left alone.
-///
-/// Which of the two the original plays, and how far into it, is the plane's animation — S35's — and
-/// is not read here: a level plane draws the even mix at the clips' first frame.
-pub fn seat(set: &mut Set, lean: f32, time: f32) -> bool {
+/// Pose a rider's body as the pilot, as the original's two-clip selection plays the plane's record
+/// (`game_sim::biplane_anim::Lean`, V78): `biplane_roll_bck` sampled at `phase` of its own length,
+/// `biplane_roll_fwd` at the same second, and the two mixed by `mix` — 1 all of the back roll, 0 all
+/// of the forward one, the way the bike's two-clip blends are drawn ([`Set::apply`]). A centred stick
+/// is `(0.5, 0.5)`. Loads the clips into the body's own set on first use. False if either clip is not
+/// in the rider's archive, and the pose is then left alone.
+pub fn seat(set: &mut Set, phase: f32, mix: f32) -> bool {
     for name in PILOT_CLIPS {
         set.load(name);
     }
@@ -294,22 +295,22 @@ pub fn seat(set: &mut Set, lean: f32, time: f32) -> bool {
         return false;
     };
     let (fwd, bck) = (fwd.0 as usize, bck.0 as usize);
-    let (a, b) = (&set.clips[fwd], &set.clips[bck]);
-    a.clip.pose_mixed(&b.clip, time, lean, &a.joints, &mut set.pose);
+    let (a, b) = (&set.clips[bck], &set.clips[fwd]);
+    a.clip.pose_mixed(&b.clip, phase * a.clip.duration(), mix, &a.joints, &mut set.pose);
     true
 }
 
-/// The pilot's node matrices for a body that also rides a bike (V39): [`seat`]ed at the even mix,
-/// held on to the plane's `anchors` at full strength with both feet on, and the body's own pose,
-/// hold and feet put back afterwards, so the bike's rider takes up where they left off when the
-/// player switches back. In the body's own space, which [`Biplane::pilot`] places in the world;
-/// the GPU draws them as they are, the software path skins them ([`crate::skin::skin`]).
+/// The pilot's node matrices for a body that also rides a bike (V39): [`seat`]ed at the lean's
+/// `(phase, mix)` (V78), held on to the plane's `anchors` at full strength with both feet on, and the
+/// body's own pose, hold and feet put back afterwards, so the bike's rider takes up where they left
+/// off when the player switches back. In the body's own space, which [`Biplane::pilot`] places in the
+/// world; the GPU draws them as they are, the software path skins them ([`crate::skin::skin`]).
 /// `None` if the rider's archive has no [`PILOT_CLIPS`].
-pub fn pilot_palette(body: &mut crate::rider::Body, anchors: &Anchors) -> Option<Vec<M4>> {
+pub fn pilot_palette(body: &mut crate::rider::Body, anchors: &Anchors, (phase, mix): (f32, f32)) -> Option<Vec<M4>> {
     let (pose, hold, feet) = (body.rig.set.pose.clone(), body.hold, body.feet);
     body.hold = 1.0;
     body.feet = Default::default();
-    let palette = seat(&mut body.rig.set, 0.5, 0.0).then(|| body.palette(Some(anchors)).0);
+    let palette = seat(&mut body.rig.set, phase, mix).then(|| body.palette(Some(anchors)).0);
     body.rig.set.pose = pose;
     body.hold = hold;
     body.feet = feet;

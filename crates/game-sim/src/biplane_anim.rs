@@ -13,7 +13,9 @@
 //!    two mixed by the mix axis ([`Blend::Two`](crate::vehicle_anim::Blend::Two)).
 //! 3. The plane's measure step writes that request block every frame ([`Pilot::ask`]): the aileron
 //!    stick into the phase axis, the elevator stick into the mix axis, both centred on a half. The
-//!    body's own two lags ease them in, which is the whole of the pilot's lean.
+//!    body's own two lags ease them in, which is the whole of the pilot's lean. The drawing side keeps
+//!    a copy of just those two lags per seat ([`Lean`], V78): the rudder, the throttle and the
+//!    plane's state never reach the clips.
 //!
 //! The state machine still runs underneath — the chooser still asks for the airborne row in the air
 //! and the riding grid on the ground, and still draws its fidget timer off the shared generator — but
@@ -30,7 +32,7 @@
 #![deny(clippy::float_arithmetic)]
 
 use crate::motion::Animations;
-use crate::vehicle_anim::{Asked, Driver, Library, NO_GESTURE, Request};
+use crate::vehicle_anim::{AXIS_START, Asked, Driver, Lag, Library, MIX_TAU, NO_GESTURE, PHASE_TAU, Request};
 use ps2_float::{F, Vf};
 
 // ---------------------------------------------------------------------------------------------------
@@ -151,6 +153,65 @@ impl Pilot {
         a.request.held = self.held;
         a.request.phase_axis = phase;
         a.request.mix_axis = mix;
+    }
+}
+
+/// The pilot's lean on its own: the body's two lags as its step eases them from the plane's request,
+/// and the two weights its two-clip selection plays the mounted record at.
+///
+/// This is the part of the body's step ([`Driver::frame`](crate::vehicle_anim::Driver::frame)'s
+/// axes and its clamps) that reaches the pilot's picture once an added record is mounted: the back
+/// roll sampled at `phase` of its length, the forward roll at the same second, the two mixed by
+/// `mix` ([`Blend::Two`](crate::vehicle_anim::Blend::Two), `a` the back roll). Nothing else the
+/// plane hands its pilot — not the rudder, the throttle, the speed or whether it is in the air —
+/// gets to the clips. The drawing side, which has no body step for a pilot, keeps one of these per
+/// seat instead; it answers bit for bit what the body's own lags do (`tests/biplane_anim.rs`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lean {
+    /// The mix axis, [`MIX_TAU`](crate::vehicle_anim::MIX_TAU).
+    pub mix: Lag,
+    /// The phase axis, [`PHASE_TAU`](crate::vehicle_anim::PHASE_TAU).
+    pub phase: Lag,
+}
+
+impl Default for Lean {
+    fn default() -> Lean {
+        Lean {
+            mix: Lag { value: AXIS_START, tau: MIX_TAU, ratio: F::ZERO },
+            phase: Lag { value: AXIS_START, tau: PHASE_TAU, ratio: F::ZERO },
+        }
+    }
+}
+
+impl Lean {
+    /// One step of the two axes towards a request's targets, `held` the request's holding flag: a
+    /// held request snaps each axis whose target is not the "leave it" value, and both are eased
+    /// anyway, mix first. Answers the selection's `(phase, mix)`, each clamped to `0..1`.
+    pub fn ease(&mut self, dt: F, phase: F, mix: F, held: bool) -> (F, F) {
+        if held {
+            if mix != F(f32::MAX) {
+                self.mix.value = mix;
+            }
+            if phase != F(f32::MAX) {
+                self.phase.value = phase;
+            }
+        }
+        let mix = self.mix.step(dt, mix);
+        let phase = self.phase.step(dt, phase);
+        let unit = |x: F| x.max(F::ZERO).min(F::ONE);
+        (unit(phase), unit(mix))
+    }
+
+    /// [`Lean::ease`] towards what the plane's measure step asks for ([`Pilot::axes`]).
+    pub fn step(&mut self, dt: F, pilot: &Pilot) -> (F, F) {
+        let (phase, mix) = pilot.axes();
+        self.ease(dt, phase, mix, pilot.held)
+    }
+
+    /// Where the selection would play the record now, without stepping: the two axes, clamped.
+    pub fn weights(&self) -> (F, F) {
+        let unit = |x: F| x.max(F::ZERO).min(F::ONE);
+        (unit(self.phase.value), unit(self.mix.value))
     }
 }
 

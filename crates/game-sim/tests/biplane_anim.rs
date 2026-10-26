@@ -5,7 +5,7 @@
 //! The test is named in the plan as living in `tests/biplane.rs`; S34 is writing that file at the
 //! same time, so this one is its own file and the name is the plan's.
 
-use game_sim::biplane_anim::{self, CONE_BENT, CONE_BLUR, PLANE, Pilot, ROLL_BCK, ROLL_FWD, Reset};
+use game_sim::biplane_anim::{self, CONE_BENT, CONE_BLUR, Lean, PLANE, Pilot, ROLL_BCK, ROLL_FWD, Reset};
 use game_sim::motion::{Animations, ClipId};
 use game_sim::replay::Capture;
 use game_sim::rider_anim::Body;
@@ -155,6 +155,8 @@ fn the_biplane_asks_for_the_originals_clips() {
 
     let mut latch = Reset { just: c.b(0, "just_reset"), seen: c.b(0, "reset_seen") };
     let mut block = Pilot::block();
+    // The drawing side's copy of the pilot's lean (V78), fed the same request as the body.
+    let mut lean = Lean { mix: body.veh.mix, phase: body.veh.phase };
     let (mut resets, mut air, mut torn, mut early) = (0, 0, 0, 0);
     for i in 1..n {
         let fc = c.fc(i);
@@ -204,6 +206,10 @@ fn the_biplane_asks_for_the_originals_clips() {
         air += usize::from(block.airborne);
         let frame = body.veh.frame(c.f(i, "dt"), &vp, &block.request, &lib, false, |_| F::ONE);
         let d = &body.veh;
+        let r = &block.request;
+        let weights = lean.ease(c.f(i, "dt"), r.phase_axis, r.mix_axis, r.held);
+        assert_eq!((lean.mix, lean.phase), (d.mix, d.phase), "{fc}: the drawn lean's lags");
+        assert_eq!(weights, lean.weights(), "{fc}: the drawn lean's weights");
         assert_eq!((d.state, d.prev), (c.i(i, "body_state"), c.i(i, "body_prev")), "{fc}: the states");
         if EARLY.contains(&fc) {
             assert_eq!((c.lag(i, "mix_lag"), c.lag(i, "phase_lag")), (c.lag(i - 1, "mix_lag"), c.lag(i - 1, "phase_lag")));
@@ -218,6 +224,7 @@ fn the_biplane_asks_for_the_originals_clips() {
             Blend::Two { phase: unit(d.phase.value), mix: unit(d.mix.value), ramp: d.ramp, a: bck, b: fwd },
             "{fc}: the clips"
         );
+        assert_eq!(weights, (unit(d.phase.value), unit(d.mix.value)), "{fc}: the drawn lean's weights");
     }
     assert_eq!((resets, torn, early), (2, TORN.len(), EARLY.len()), "the flight is the one measured");
     assert!(air > 1000 && n - 1 - air > 200, "both states are played: {air} ticks in the air");
