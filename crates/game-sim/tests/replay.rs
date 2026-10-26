@@ -6461,6 +6461,45 @@ impl SaveState {
         Some(())
     }
 
+    /// The bike's wheel ray probe (`+0x7c8`) as the image holds it (S114): its root (`+0x160`), its
+    /// nodes (`+0x16c`, `0x24` each: volume, radius, two child shorts, centre, half extent) and its
+    /// segments (`+0x170`, `+0x168` of them, two quadwords each). The radius is the reach, which the
+    /// port takes off the half extent ([`game_sim::flight_search::reach`]), so it is not kept.
+    fn wheel_probe(&self) -> Option<game_sim::flight_search::Rays> {
+        let p = self.rider_at(0x7c8)?;
+        let count = self.word(p + 0x168)?;
+        let (nodes, segs) = (self.word(p + 0x16c)?, self.word(p + 0x170)?);
+        let three = |a: u32| -> Option<[F; 3]> { Some([self.float(a)?, self.float(a + 4)?, self.float(a + 8)?]) };
+        let mut rays = game_sim::flight_search::Rays { root: self.word(p + 0x160)? as u16, ..Default::default() };
+        for i in 0..count.saturating_sub(1).max(1) {
+            let n = nodes + 0x24 * i;
+            let ch = self.word(n + 8)?;
+            rays.nodes.push(game_sim::track::Node {
+                volume: self.float(n)?,
+                centre: three(n + 0xc)?,
+                half_extent: three(n + 0x18)?,
+                children: [ch as u16, (ch >> 16) as u16],
+            });
+        }
+        for i in 0..count {
+            let s = segs + 0x20 * i;
+            rays.segments.push(game_sim::ray_probe::Segment { from: self.vf(s)?, to: self.vf(s + 0x10)? });
+        }
+        Some(rays)
+    }
+
+    /// The wheel probe's record (its `+0x6c`) as the last search left it, each contact's point,
+    /// normal and fraction (`+0x8c` of them, off the arrays at `+0x98`, `+0x94` and `+0xa8`); none
+    /// when the image has no probe.
+    fn wheel_record(&self) -> Vec<(Vf, Vf, F)> {
+        let Some(r) = self.rider_at(0x7c8).and_then(|p| self.word(p + 0x6c)) else { return Vec::new() };
+        let n = self.word(r + 0x8c).unwrap_or(0);
+        let at = |o: u32| self.word(r + o).unwrap_or(0);
+        (0..n)
+            .filter_map(|i| Some((self.vf(at(0x98) + 16 * i)?, self.vf(at(0x94) + 16 * i)?, self.float(at(0xa8) + 4 * i)?)))
+            .collect()
+    }
+
     /// Both wheels, front then rear.
     fn seed_wheels(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
         self.seed_wheel(0, &mut ride.front)?;
@@ -7013,10 +7052,12 @@ const S89_AGREES_THROUGH: [u64; 2] = [0, 1];
 /// every tick), though the chassis parts at tick 1. A ratchet: parting earlier fails.
 const S89_LANES_AGREE_THROUGH: [(&str, [u64; 2]); 12] = [
     ("rider.ride.front.slip.spinning", [u64::MAX, u64::MAX]),
-    ("rider.ride.front.slip.locked", [279, u64::MAX]),
+    // Along's two locked lanes read 278 and 276 on bare main too (bf7ed904, before S114 and after it
+    // alike): S120's, which looks for the change that moved them off 279 and 277.
+    ("rider.ride.front.slip.locked", [278, u64::MAX]),
     ("rider.ride.front.slip.sliding", [u64::MAX, u64::MAX]),
     ("rider.ride.rear.slip.spinning", [31, 16]),
-    ("rider.ride.rear.slip.locked", [277, u64::MAX]),
+    ("rider.ride.rear.slip.locked", [276, u64::MAX]),
     ("rider.ride.rear.slip.sliding", [u64::MAX, u64::MAX]),
     // Along, the bed is rows 0-107: the contact agrees until the wheels drop off it.
     ("rider.ride.front.w.ray_hit", [105, 49]),
@@ -7075,6 +7116,17 @@ fn rail_tick_of(sim: &Sim) -> RailTick {
         swept: [ride.front.w.swept_contact != 0, ride.rear.w.swept_contact != 0],
         surface: [ride.front.surface, ride.rear.surface],
     }
+}
+
+/// A ray probe's every word, so that two compare bit for bit (a `-0.0` is not a `0.0`).
+fn bits_of_rays(r: &game_sim::flight_search::Rays) -> (u16, Vec<(u32, [u32; 3], [u32; 3], [u16; 2])>, Vec<[[u32; 4]; 2]>) {
+    let b3 = |v: [F; 3]| v.map(|x| x.0.to_bits());
+    let b4 = |v: Vf| [v.x(), v.y(), v.z(), v.w()].map(f32::to_bits);
+    (
+        r.root,
+        r.nodes.iter().map(|n| (n.volume.0.to_bits(), b3(n.centre), b3(n.half_extent), n.children)).collect(),
+        r.segments.iter().map(|s| [b4(s.from), b4(s.to)]).collect(),
+    )
 }
 
 /// **S89's rides on the Dallas railway bed, in the original and replayed.** What the original does on
@@ -7139,6 +7191,32 @@ fn the_dallas_rail_rides_replay_from_their_save_states() {
             st.seed_air(ride).expect("the air state");
             if let Some(d) = st.drivetrain() {
                 d.seed(ride);
+            }
+            // The wheel probe the ride searches with is the image's, bit for bit (S114).
+            let probe = st.wheel_probe().expect("the wheel probe");
+            let built = game_sim::ride::wheel_rays(&ride.front.w, &ride.rear.w);
+            assert_eq!(bits_of_rays(&built), bits_of_rays(&probe), "{name}: the wheel probe");
+            // And what it finds where the image left the bike is what the original's last search found:
+            // the same faces, the normals to the bit. The record is a substep older than the pose
+            // (the search runs before the substep's integrate), so the points and fractions are near.
+            let ram = st.wheel_record();
+            let found = {
+                let node = game_sim::rider_contact::node(&ride.transform());
+                let (field, props, trees) = world.wooded();
+                let bounds = field.as_ref().map(|f| {
+                    let (lo, hi) = (f.min(), f.max());
+                    ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+                });
+                let mut search = game_sim::broad_phase::Search { least: F(30.0), extra: F(50.0), capacity: 256, ..Default::default() };
+                let mut scene = game_sim::flight_search::Scene::wooded(props, trees, None, bounds, &built, &node, &mut search);
+                let _ = game_sim::contact_search::Search::rays(&mut scene, true);
+                scene.ray_record().contacts.clone()
+            };
+            assert_eq!(found.len(), ram.len(), "{name}: the wheel probe's contacts");
+            for (c, (point, normal, fraction)) in found.iter().zip(&ram) {
+                println!("{name}: wheel contact {:#06x} at {:?} ({:?}), the original's at {point:?} ({fraction:?})", c.segment, c.point, c.fraction);
+                assert_eq!(c.normal.0.map(f32::to_bits), normal.0.map(f32::to_bits), "{name}: a wheel contact's normal");
+                assert!((c.point.0[1] - point.0[1]).abs() < 0.01 && (c.fraction.0 - fraction.0).abs() < 0.001, "{name}: a wheel contact");
             }
             let mut watches = Vec::new();
             for (col, path) in chassis_lanes() {
