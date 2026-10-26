@@ -946,21 +946,25 @@ impl WorldMod {
                 let pages = game_render::terrain::Pages::of(&terrain, p.tile.spacing.0, leaves)
                     .map(|pg| pg.with_detail(detail, game_render::terrain::detail_multiplier(&text)));
                 let mut look = game_render::scene::Scene::parse(&text);
-                // A disc map has no pages: its splat and baked light, baked into some (MD15).
+                // A disc map has no pages: its splat and baked light, baked into some (MD15), and
+                // the splat kept to be drawn per pixel over them on the GPU (MD35).
+                let mut sharp = None;
                 let pages = pages.or_else(|| {
                     let [sx, sz] = p.tile.samples();
                     let extent = ((sx - 1) as f32 * p.tile.spacing.0, (sz - 1) as f32 * p.tile.spacing.0);
                     let splat = game_render::splat::Splat::load(std::slice::from_ref(&res), &stem, extent)?;
                     let light = game_render::world::Lighting::of(&look);
-                    crate::world_dress::bake_splat(&splat, &terrain, p.tile.spacing.0, leaves, &light)
+                    let (pages, modulate) = crate::world_dress::bake_splat_sharp(&splat, &terrain, p.tile.spacing.0, leaves, &light)?;
+                    sharp = Some(game_render::terrain::SharpSplat { splat: std::sync::Arc::new(splat), modulate });
+                    Some(pages)
                 });
                 move_look(&mut look, p.tile.at);
                 let sky = game_render::sky::Sky::load(std::slice::from_ref(&res), &text).or_else(|| game_render::sky::Sky::load(fallback, &text));
-                Ok((pages, game_render::world::Lighting::of(&look), sky))
+                Ok((pages, sharp, game_render::world::Lighting::of(&look), sky))
             };
             read().unwrap_or_else(|e| {
                 println!("world: {} looks like dirt: {e}", p.tile.name);
-                (None, home, None)
+                (None, None, home, None)
             })
         };
         let maps = &self.pieces[..self.tile_count];
@@ -975,9 +979,9 @@ impl WorldMod {
             jobs.into_iter().flat_map(|j| j.join().expect("a map's look")).collect()
         });
         read.sort_by_key(|(i, _)| *i);
-        for (p, (_, (pages, light, sky))) in maps.iter().zip(read) {
+        for (p, (_, (pages, sharp, light, sky))) in maps.iter().zip(read) {
             let at = p.tile.at.map(|a| a.0);
-            tiles.push(game_render::terrain::PaintTile { at, pages });
+            tiles.push(game_render::terrain::PaintTile { at, pages, sharp });
             lights.push(light);
             skies.push(sky);
             names.push(p.tile.name.clone());

@@ -4306,14 +4306,18 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let packed = l.paint.pack(limits.max_texture_array_layers, limits.max_texture_dimension_2d);
                 let (arrays, detail) = game_render::gpu::world_paint_arrays(&l.paint, &packed);
                 let arrays: Vec<String> = arrays.iter().map(|a| format!("{}x{} x {}", a.width, a.height, a.layers)).collect();
+                // And the disc maps' splats drawn per pixel (MD35).
+                let splats = game_render::gpu::world_splat_array(&l.paint, &packed)
+                    .map_or("none".to_string(), |a| format!("{}x{} x {}", a.width, a.height, a.layers));
                 println!(
-                    "world paint: {} of {} paged maps on the GPU, pages {}, detail {}x{} x {}",
+                    "world paint: {} of {} paged maps on the GPU, pages {}, detail {}x{} x {}, {} sharp splats, layers {splats}",
                     packed.iter().flatten().count(),
                     l.paint.tiles.iter().filter(|t| t.pages.is_some()).count(),
                     arrays.join(", "),
                     detail.width,
                     detail.height,
-                    detail.layers
+                    detail.layers,
+                    l.paint.tiles.iter().zip(&packed).filter(|(t, at)| at.is_some() && t.sharp().is_some()).count(),
                 );
             }
             let built = first.len();

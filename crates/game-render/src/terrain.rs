@@ -713,6 +713,47 @@ pub struct PaintTile {
     pub at: [f32; 2],
     /// Its own pages, or `None` for a map painted otherwise (a splat) or not at all: dirt.
     pub pages: Option<Pages>,
+    /// A disc map's splat, for the GPU to paint per pixel over its baked `pages` (MD35), or `None`.
+    pub sharp: Option<SharpSplat>,
+}
+
+/// A disc map's paint in a world, as sharp as the map ridden alone (MD35). Its `pages` are baked
+/// from the splat at a few pixels a page (MD15), four and a half feet a pixel, which cannot hold
+/// layers that repeat every 25 feet; so the GPU runs the splat's passes per pixel, as alone, and
+/// multiplies them by `modulate`: what the baked pages do to the passes — the roads drawn over them
+/// and the baked light — per channel, one page for each baked page, [`modulation_byte`]s.
+#[derive(Clone)]
+pub struct SharpSplat {
+    pub splat: std::sync::Arc<crate::splat::Splat>,
+    /// The baked colour over the passes' own ([`crate::splat::Splat::paint_passes`]), unclipped: a
+    /// baked page holds bytes, and a bright sand lit past 255 in one channel and not the others
+    /// came out tinted (MD35).
+    pub modulate: Vec<Texture>,
+}
+
+/// A factor as a [`SharpSplat::modulate`] byte: its base-2 log, [`MODULATE_STEPS`] steps a
+/// doubling, about [`MODULATE_ONE`] — one is exactly that byte, from 1/16 to just under 16.
+pub fn modulation_byte(m: f32) -> u8 {
+    (f32::from(MODULATE_ONE) + m.max(1e-6).log2() * MODULATE_STEPS).round().clamp(0.0, 255.0) as u8
+}
+
+/// [`modulation_byte`]'s byte for one.
+pub const MODULATE_ONE: u8 = 128;
+/// [`modulation_byte`]'s steps a doubling.
+pub const MODULATE_STEPS: f32 = 32.0;
+
+impl std::fmt::Debug for SharpSplat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SharpSplat {{ {} passes, {} layers, {} modulate pages }}", self.splat.passes.len(), self.splat.textures.len(), self.modulate.len())
+    }
+}
+
+impl PaintTile {
+    /// Its splat, when it has one whose modulate pages match its baked pages one for one.
+    pub fn sharp(&self) -> Option<&SharpSplat> {
+        let (p, s) = (self.pages.as_ref()?, self.sharp.as_ref()?);
+        (s.modulate.len() == p.pages.len() && !s.splat.passes.is_empty()).then_some(s)
+    }
 }
 
 /// A world's ground paint: each map's pages over the cells it owns, blended across the joins.
@@ -766,7 +807,8 @@ impl WorldPaint {
             .iter()
             .map(|t| {
                 let p = t.pages.as_ref()?;
-                let n = p.pages.len() as u32;
+                // A sharp splat's modulate pages go in after its baked ones (MD35).
+                let n = p.pages.len() as u32 * if t.sharp().is_some() { 2 } else { 1 };
                 let size = page_size(p);
                 let array = sizes.iter().position(|&s| s == size).unwrap_or(sizes.len());
                 let used = layers.get(array).copied().unwrap_or(0);
