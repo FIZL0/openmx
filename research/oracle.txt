@@ -5338,3 +5338,19 @@ uniform_lookup        boot 0x003712c0 the first entry whose jersey and pants bot
 #                                    renames of THQ_JerseySleeves_01 / THQ_Pants_01
 uniform_lookup_name   boot 0x003712b0
 career_profile_reset  boot 0x0036e1f0 name +0x89, number +0x9a ("001")
+# --- V43: the animated toys, for crates/game-sim/src/toys.rs and crates/game-render/src/animated_toy.rs.
+#     Proved over first_recording's free09 state (crates/game-sim/tests/toys.rs and
+#     crates/game-render/tests/animated_toy.rs) ---
+animated_toy_vtable    boot 0x004528d0 the animated toy's vtable, at +8 of the toy (scan a RAM image for it)
+#                      +0xb0 the toy's motion object: +0x30 root node, +0x3c finished, +0x48 handle
+#                      (+0 joint map, +4 clip), +0x54 previous clock, +0x80 fading, +0x84 clock,
+#                      +0x230 joint count, +0x234 joints (0x60 each, node at +0x34), +0x238 mirror map
+animated_toy_update    boot 0x002150f0 the scene's per-tick call: motion_advance of the toy's motion by
+#                      the scene step, unless AnimateWhenNotVisible is off and the toy was not drawn
+animated_toy_base_read boot 0x00212270 Box, Position (0,0,0,1); Yaw/Pitch/Roll if there is a Yaw, else
+#                      LookVector (0,0,1,1) and UpVector (0,1,0,1); then mat4_basis(toy+0x50, pos, look,
+#                      up, 1, 1), which the toy's root node takes as its local matrix
+motion_turn_table_build boot 0x0044bf50 start-up: fills motion_turn_table and motion_turn_table_narrow
+node_flatten           boot 0x001b35b0 (node, out) a node's descendants: its children (first child +0x104,
+#                      next sibling +0x108) in order, then each child's own flattening in turn
+node_count             boot 0x001b3420 1 + a node's descendants: what a hierarchy part's bone is clamped by

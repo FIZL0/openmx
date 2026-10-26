@@ -156,7 +156,7 @@ pub struct Motion {
     pub name: String,
     /// `VUE=turn_stop_Fwd.MOT` — the archive member. Several names can share one clip.
     pub clip: String,
-    /// `Looping=yes`.
+    /// `Looping=yes` (or `1`, `TRUE`: [`ini::switch`]).
     pub looping: bool,
 }
 
@@ -198,9 +198,9 @@ impl MotionSet {
                 set.motions.push(Motion {
                     name: name.to_string(),
                     clip: section.get("VUE").unwrap_or("").to_string(),
-                    looping: section
-                        .get("Looping")
-                        .is_some_and(|v| v.eq_ignore_ascii_case("yes")),
+                    // The riders and bikes say `yes`/`no`; the tracks' toys say `1`, `TRUE`, `False`
+                    // and the rest, so it is read as every other ini switch is (V43).
+                    looping: section.get("Looping").is_some_and(ini::switch),
                 });
             }
         }

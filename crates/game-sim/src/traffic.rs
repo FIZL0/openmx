@@ -293,13 +293,15 @@ pub struct Traffic {
     /// Where the cars' meshes begin in the world's props ([`Traffic::attach`]), the cars with a mesh
     /// one after another in order. A constant like the specs.
     pub first: Option<usize>,
+    /// The track's animated toys (V43), stepped with the cars.
+    pub toys: crate::toys::Toys,
 }
 
 impl Traffic {
     /// The cars of a track, as its load leaves them.
     pub fn new(specs: Vec<Spec>) -> Traffic {
         let cars = specs.iter().map(Car::new).collect();
-        Traffic { specs: Arc::new(specs), cars, first: None }
+        Traffic { specs: Arc::new(specs), cars, first: None, toys: Default::default() }
     }
 
     /// Put the cars' meshes at the end of the world's props, each where its car stands now, and
@@ -311,10 +313,12 @@ impl Traffic {
                 props.props.push(Prop::on(mesh.clone(), &car.pose));
             }
         }
+        self.toys.attach(props);
     }
 
     /// One tick of every car, in order, and their meshes moved to where they now stand.
     pub fn frame(&mut self, dt: F, world: &mut dyn World) {
+        self.toys.frame(dt, world);
         if self.cars.is_empty() {
             return;
         }

@@ -106,11 +106,20 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         CARS.put(&mut out);
         traffic.cars.put(&mut out);
     }
+    // The animated toys (V43) the same way, behind theirs.
+    if !traffic.toys.is_empty() {
+        TOYS.put(&mut out);
+        traffic.toys.clocks.put(&mut out);
+        traffic.toys.hints.put(&mut out);
+    }
     out
 }
 
 /// What begins [`encode`]'s cars section.
 const CARS: u64 = u64::from_le_bytes(*b"S81cars\0");
+
+/// What begins [`encode`]'s animated toys section.
+const TOYS: u64 = u64::from_le_bytes(*b"V43toys\0");
 
 /// What begins [`encode`]'s markers section: a word no length of the players' list can be. P139's
 /// word since its slots are counted (five, or more off the +): a state of P88's five-slot layout,
@@ -153,6 +162,18 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         traffic.cars = cars;
     } else if !traffic.cars.is_empty() {
         return Err(format!("no path cars in the state, {} here", traffic.cars.len()));
+    }
+    if r.bytes.get(r.at..r.at + 8) == Some(&TOYS.to_le_bytes()[..]) {
+        r.at += 8;
+        let clocks: Vec<crate::toys::Clock> = Wire::take(&mut r)?;
+        let hints: Vec<crate::toys::Hint> = Wire::take(&mut r)?;
+        let toys = &mut traffic.toys;
+        if clocks.len() != toys.clocks.len() || hints.len() != toys.hints.len() {
+            return Err(format!("{} animated toys in the state, {} here", clocks.len(), toys.clocks.len()));
+        }
+        (toys.clocks, toys.hints) = (clocks, hints);
+    } else if !traffic.toys.is_empty() {
+        return Err(format!("no animated toys in the state, {} here", traffic.toys.clocks.len()));
     }
     // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
     let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone()));
@@ -543,6 +564,8 @@ impl Wire for Rider {
 
 wire!(crate::Input { buttons, stick });
 wire!(crate::traffic::Car { clock, seg, point, head, normal, first, pose });
+wire!(crate::toys::Clock { time, prev, finished });
+wire!(crate::toys::Hint; at);
 wire!(crate::ghost::Ghost { clock, alpha, on });
 wire!(crate::rider::PutBack { placed, filled, held, wreck });
 wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out });

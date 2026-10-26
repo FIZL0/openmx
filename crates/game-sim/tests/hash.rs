@@ -514,7 +514,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // slots' 40), its slots past five walked as `more` only when there are any.
     // 11392 since S81: the path cars (`Sim::traffic`), walked as `cars` only on a track with any.
     // 11400 since S92: each rider's score card's event gates (`shut`, `out`), walked only when set.
+    // 11488 since V43: the animated toys (`Traffic::toys`), walked as `toys` and `toy_hints` only on
+    // a track with any, so the leaves do not move.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11400, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11488, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
