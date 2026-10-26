@@ -47,7 +47,9 @@ use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
 use crate::psg::Model;
 use crate::rider::Anchors;
+use crate::vehicle::about;
 use crate::world::Assets;
+use game_sim::biplane_anim::{self, Surfaces};
 use game_sim::motion::Animations;
 
 /// The plane's model for each livery the spawner can be asked for, in the spawner's own order.
@@ -88,6 +90,8 @@ pub struct Biplane {
     /// Where the plane wants a pilot's feet and hands, in the pilot's own space — the plane's four
     /// seat nodes, less [`PILOT_SEAT`] — which is the space the body is skinned in.
     pub anchors: Anchors,
+    /// `PropDummy`'s index among the model's nodes: where a [`Biplane::pose`] has the turned prop.
+    pub prop_node: Option<usize>,
 }
 
 impl Biplane {
@@ -106,6 +110,7 @@ impl Biplane {
             model: model.to_string(),
             prop: node(loaded, PROP_NODE),
             anchors: SEAT.map(|name| node(loaded, name).map(|m| m.point(v3(0.0, 0.0, 0.0)).sub(PILOT_SEAT))),
+            prop_node: loaded.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(PROP_NODE)),
         })
     }
 
@@ -154,11 +159,85 @@ impl Biplane {
 }
 
 impl Biplane {
+    /// The plane's nodes posed by one frame's moving parts (V38), in the plane's own space and in
+    /// the model's node order: the matrices the GPU skins the plane with and the software path skins
+    /// its copy into ([`crate::skin::skin`]). Empty if the model is not in `assets`.
+    pub fn pose(&self, assets: &Assets, surfaces: &Surfaces) -> Vec<M4> {
+        assets.models.get(&self.model).map_or(Vec::new(), |l| pose(&l.model, surfaces))
+    }
+
+    /// [`Biplane::parts`] off a [`Biplane::pose`]: the plane, and the cone [`Surfaces::cone`] names
+    /// stood at the posed `PropDummy` — turned by the prop while the plane flies, at its rest once
+    /// it is wrecked, as the surface step leaves it.
+    pub fn posed_parts(&self, at: M4, pose: &[M4], surfaces: &Surfaces) -> Vec<(&str, M4)> {
+        let mut out = vec![(self.model.as_str(), at)];
+        let prop = self.prop_node.and_then(|i| pose.get(i).copied()).or(self.prop);
+        if let Some(prop) = prop {
+            let cone = if surfaces.cone == biplane_anim::CONE_BENT { PROP_BROKEN } else { PROP };
+            out.push((cone, prop.mul(at)));
+        }
+        out
+    }
+
     /// A node of the plane's model in the plane's own space, by name: where an emitter of
     /// [`PARTICLES`] rides (P58). `None` if the model is not in `assets` or has no such node.
     pub fn node(&self, assets: &Assets, name: &str) -> Option<M4> {
         node(&assets.models.get(&self.model)?.model, name)
     }
+}
+
+/// The plane's model posed by the surface step (`game_sim::biplane_anim::surfaces`, S35): each node's
+/// transform in the model's own space, the moving parts' local transforms changed the way the
+/// original's step changes its bones, and everything else at the model's own.
+///
+/// - The four wing flaps ([`biplane_anim::FLAPS`]): the rest transform turned about its hinge,
+///   `R(hinge, a) · rest` in the row-vector order, the position the rest's. The hinge is the rest's
+///   first row, normalised — what S35's test stands in for the hinge the plane keeps beside it. A
+///   zero angle is not turned.
+/// - The rear flaps, the rudder and the prop ([`biplane_anim::REAR`], [`biplane_anim::RUDDER`],
+///   [`biplane_anim::PROP`]): the rotation replaced by one about x, y and z, the position kept. A
+///   wrecked prop is left at its rest.
+///
+/// The original changes the bones' own matrices, which on this model are their model-space ones too:
+/// every moving part hangs straight off the root, unturned. The pose is composed through the parents
+/// all the same, so a model built otherwise is still drawn the way its bones were changed.
+pub fn pose(model: &Model, s: &Surfaces) -> Vec<M4> {
+    let find = |name: &str| model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name));
+    let mut local: Vec<M4> = model.nodes.iter().map(|n| n.local).collect();
+    for (name, a) in biplane_anim::FLAPS.iter().zip(s.flaps) {
+        if let (Some(i), true) = (find(name), a.0 != 0.0) {
+            let rest = local[i];
+            let hinge = v3(rest.0[0][0], rest.0[0][1], rest.0[0][2]).norm();
+            local[i] = about(hinge, a.0).mul(rest);
+        }
+    }
+    let x = v3(1.0, 0.0, 0.0);
+    let y = v3(0.0, 1.0, 0.0);
+    let z = v3(0.0, 0.0, 1.0);
+    let mut turned: Vec<(&str, V3, f32)> = biplane_anim::REAR.iter().map(|&n| (n, x, s.rear.0)).collect();
+    turned.push((biplane_anim::RUDDER, y, s.rudder.0));
+    if let Some(prop) = s.prop {
+        turned.push((biplane_anim::PROP, z, prop.0));
+    }
+    for (name, axis, a) in turned {
+        if let Some(i) = find(name) {
+            let r = about(axis, a);
+            for row in 0..3 {
+                local[i].0[row][..3].copy_from_slice(&r.0[row][..3]);
+            }
+        }
+    }
+    (0..model.nodes.len())
+        .map(|node| {
+            let (mut m, mut at, mut guard) = (M4::IDENTITY, Some(node), 0);
+            while let Some(i) = at.filter(|&i| i < local.len() && guard <= local.len()) {
+                m = m.mul(local[i]);
+                at = model.nodes[i].parent;
+                guard += 1;
+            }
+            m
+        })
+        .collect()
 }
 
 /// A node's transform in its model's own space, by name, ignoring case as the engine's lookup does.
