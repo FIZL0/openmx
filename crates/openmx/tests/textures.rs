@@ -88,7 +88,7 @@ fn a_key_named_file_is_drawn_with_the_setting_on_and_keeps_its_tiling() {
     png(&mods, "texture-replacements/rock-0123456789abcdef.png", &solid(2, 2, [1, 1, 1, 255]));
 
     let line = textures::install(Some(&mods), true, &[], &[]);
-    assert_eq!(line, "textures: 0 from 0 texture packs, 2 key-named in mods/texture-replacements, 0 mods' own upscales");
+    assert_eq!(line, "textures: 0 from 0 texture packs, 2 key-named in mods/texture-replacements, 0 PCSX2-named, 0 mods' own upscales");
     let drawn = decode_texture("rock.pst", &disc).unwrap();
     assert_eq!((drawn.width, drawn.height), (16, 16));
     assert_eq!(drawn.rgba, big.rgba);
@@ -136,7 +136,7 @@ fn a_texture_pack_beats_the_key_named_files_in_settings_order() {
     };
     let (shade, line) = drawn(&[], &[]);
     assert_eq!(shade, 1);
-    assert_eq!(line, "textures: 1 from 2 texture packs, 1 key-named in mods/texture-replacements, 0 mods' own upscales");
+    assert_eq!(line, "textures: 1 from 2 texture packs, 1 key-named in mods/texture-replacements, 0 PCSX2-named, 0 mods' own upscales");
     assert_eq!(drawn(&["packs/hd_b", "hd_a"], &[]).0, 2);
     assert_eq!(drawn(&["hd_a", "packs/hd_b"], &[]).0, 1);
     assert_eq!(drawn(&["hd_a"], &[]).0, 2, "an unordered pack is on top");

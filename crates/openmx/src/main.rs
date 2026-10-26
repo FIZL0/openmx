@@ -8050,7 +8050,7 @@ fn load_tire_tracks(archives: &[Res]) -> Option<(Vec<tire_tracks::Params>, game_
     let material = list.first()?.material.clone();
     // The tread sits at the archive's root (`bike\tex\`), so its name is its whole path.
     let name = format!("bike\\tex\\{material}.pst");
-    let texture = match archives.iter().find_map(|a| a.read_suffix(&name).ok()).map(|b| game_render::pst::Texture::parse(&b).map(game_render::replace::swap)) {
+    let texture = match archives.iter().find_map(|a| a.read_suffix(&name).ok()).map(|b| game_render::pst::Texture::parse(&b).map(|t| game_render::replace::swap_file(t, &b))) {
         Some(Ok(t)) => t,
         _ => {
             println!("tire tracks: no {name}");

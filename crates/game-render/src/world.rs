@@ -149,7 +149,7 @@ pub fn texture_files(material: &str, m: &Material) -> Vec<String> {
 /// A texture file decoded by its kind: a `.pst` whole, an `.atm` by its first frame; replaced if the
 /// shell has a replacement for it (V84, [`crate::replace`]).
 pub fn decode_texture(file: &str, bytes: &[u8]) -> Option<Texture> {
-    decode_disc_texture(file, bytes).map(crate::replace::swap)
+    decode_disc_texture(file, bytes).map(|t| crate::replace::swap_file(t, bytes))
 }
 
 /// [`decode_texture`] as the disc has it, never replaced: what `--dump-textures` writes and keys.

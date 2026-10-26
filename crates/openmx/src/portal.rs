@@ -178,7 +178,7 @@ impl Art {
     /// The portals' art, read through `read` (a member's bytes by its name's ending), or `None` when
     /// the disc's texture or the column is not there — a track with no start zones.
     pub fn load(read: impl Fn(&str) -> Option<Vec<u8>>) -> Option<Art> {
-        let texture = |name: &str| read(&format!("tex\\{name}.pst")).and_then(|b| Texture::parse(&b).ok()).map(game_render::replace::swap);
+        let texture = |name: &str| read(&format!("tex\\{name}.pst")).and_then(|b| game_render::replace::parse(&b));
         let mesh = |name: &str| -> Option<Mesh> {
             let model = game_render::psg::Model::parse(&read(&format!("geom\\{name}.psg"))?).ok()?;
             let colour = |c: [u8; 4]| c.map(|k| k as f32 / 128.0);
