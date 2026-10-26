@@ -227,3 +227,12 @@ Two things that bite:
       New's R2 analogue on the bike after all, say so: it goes in as an addition (the bike's pad read
       keeping the strength under the New layout only, recorded on the tape), with nothing in the original
       to prove it against, and the Original layout stays the switch (research/journal/2026-10-26-p77-lever-switches).
+
+## A tail landing the port rides out and the original does not (S145)
+
+S144 put twelve tail-first landings to the original (slams, a hard drop, crossed up, leaned, on the gas)
+and the port judged every one as the original does, so the generous landing you saw is not among them.
+To find it: ride the shell with `--record context/tapes/tail.tape` (from the repo root, the track you
+were on), land the way that rode out, quit, and add the tape's path, the track and roughly where on it
+to S145 (`./kit plan S145`). Five minutes. If the shell will not record, say which track and jump; an
+agent can then try to make the same landing in the original by teleport.

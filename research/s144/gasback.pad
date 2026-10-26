@@ -1,0 +1,7 @@
+# S144: hands off for the first ticks, then the gas held and the stick pulled back (down) through the
+# flight and the landing
+sleep 150
+down cross
+stick l 0 1
+sleep 4000
+release

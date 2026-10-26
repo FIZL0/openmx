@@ -1,0 +1,6 @@
+# S144: hands off for the first ticks (the replay reads the pad two frames back), then the gas held
+# through the flight and the landing, as a rider does
+sleep 150
+down cross
+sleep 4000
+release
