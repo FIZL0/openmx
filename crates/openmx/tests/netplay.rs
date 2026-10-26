@@ -2238,3 +2238,114 @@ fn a_paused_seat_is_passed_through_online() {
     assert_ne!(pushed, alone, "side by side with the files, the riders push apart");
     assert_eq!(ride(true, true), ride(false, true), "nobody pushes past a paused seat");
 }
+
+/// What a seat's foot switch was after a tick it ran (V68), and the speed and yaw it read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Foot {
+    feet: game_sim::foot_down::Feet,
+    speed: f32,
+    yaw: f32,
+    mode: game_sim::rider_anim::Mode,
+}
+
+/// The guest's pad on its tick `t`: two seconds of gas, a second and a half of brakes, then nothing.
+fn gas_then_stop(t: usize) -> Report {
+    let mut r = match t {
+        0..60 => Report::from_buttons(Control::Cross.mask()),
+        60..105 => Report::from_buttons(Control::Square.mask()),
+        _ => Report::idle(),
+    };
+    if t < 60 {
+        r.0[14] = 0xff; // Cross's pressure
+    }
+    r
+}
+
+/// The ride with each seat's body run in the tick, as `online.rs`'s hook runs it, and every seat's
+/// foot switch after each tick it ran — written again when a rollback runs the tick again, so what
+/// is left for a settled tick is what that machine drew from it ([`Ghosted`]'s way).
+struct Footed {
+    ride: Ride,
+    seen: Vec<Vec<Option<Foot>>>,
+}
+
+impl Footed {
+    fn new(seats: usize) -> Footed {
+        let mut ride = Ride::new(seats);
+        for sim in &mut ride.sims {
+            sim.rider.body_rates = game_render::vehicle::params();
+        }
+        Footed { ride, seen: vec![Vec::new(); seats] }
+    }
+}
+
+impl Machine for Footed {
+    type S = rides::State;
+    fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
+        let mine = np.lineup.mine(&np.me);
+        let local: Vec<Report> = mine.iter().map(|&s| if s == 1 { gas_then_stop(np.tick()) } else { Report::idle() }).collect();
+        // A clip table with every state bound, each to a one-second clip (`same_ride.rs`'s).
+        let mut lib = game_sim::vehicle_anim::Library::default();
+        for (s, slot) in lib.clip.iter_mut().enumerate() {
+            *slot = Some(game_sim::motion::ClipId(0x100 + s as u32));
+        }
+        let clip = |id: game_sim::motion::ClipId| game_sim::motion::Clip::new(F(1.0), id.0 % 3 != 0);
+        let seen = &mut self.seen;
+        let mut after = |seat: usize, dt: F, sim: &mut Sim, c: &game_sim::ride::Controls| {
+            sim.rider.body_frame(dt, c, game_sim::rider::Gate::default(), &lib, &clip);
+            let t = sim.ticks as usize - 1;
+            let seen = &mut seen[seat];
+            if seen.len() <= t {
+                seen.resize(t + 1, None);
+            }
+            let ch = &sim.rider.ride.chassis;
+            seen[t] = Some(Foot { feet: sim.rider.feet, speed: ch.local_vel.z(), yaw: ch.ang_vel.y(), mode: sim.rider.body.machine.mode });
+        };
+        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: Some(&mut after), time_scale: None, plane: None };
+        np.frame(&mut game, &local, ROUND.as_secs_f32());
+    }
+    fn hash(&self) -> u64 {
+        self.ride.hash()
+    }
+}
+
+/// V68: **a stopped remote rider's feet come off the pegs on the tick the local one's do.** The
+/// guest rides off and brakes to a stop over a link that loses and delays datagrams (so the host
+/// guesses the guest's pads, rolls back and runs ticks again). The foot switch is the rider's
+/// ([`game_sim::rider::Rider::feet`]), stepped by the body's frame in the tick, so a rollback takes
+/// it back with the rest of the seat: on every settled tick the host's copy of the guest's seat has
+/// the guest's own feet, the feet come down on the same tick on both, and that is the tick the
+/// guest's speed first drops under the stand speed (V36's rule). The shell draws them through
+/// `Online::show`, whose `Body::held_by` is the same copy `Body::ride` ends in
+/// (`tests/foot_down.rs`).
+#[test]
+fn a_stopped_remote_riders_feet_come_down_on_the_local_ones_tick() {
+    let link = Link { loss: 0.2, lag: 3, outage: 0..0, oneway: false };
+    let r = run("host,g", Timing::default(), Footed::new, &link, 0..300, |_, _, _| {});
+    for np in &r.nets {
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+    }
+    // the host guessed the guest's pads and ran ticks again (the guest's guesses of the host's idle
+    // pad are never wrong)
+    assert!(r.nets[0].rb.reruns > 0, "the host never ran a tick again");
+    let n = r.agree(&[0, 1], 0);
+    assert!(n > 200, "only {n} ticks settled");
+    let (host, guest) = (&r.games[0].seen, &r.games[1].seen);
+    for t in 0..n {
+        for seat in 0..2 {
+            let (a, b) = (host[seat][t].unwrap(), guest[seat][t].unwrap());
+            assert_eq!(a, b, "tick {t}, seat {seat}: the host had {a:?}, the guest {b:?}");
+        }
+    }
+    let seat: Vec<Foot> = (0..n).map(|t| guest[1][t].unwrap()).collect();
+    let riding = |f: &Foot| f.mode == game_sim::rider_anim::Mode::Riding;
+    let slow = |f: &Foot| f.speed < game_sim::ragdoll_riding::STAND_SPEED.0 && f.yaw.abs() < 1.5;
+    let fast = seat.iter().position(|f| riding(f) && !slow(f)).expect("the guest never got going");
+    assert!(seat[fast].feet.held == [true; 2], "tick {fast}: going, and a foot is down");
+    let crossed = (fast..n).find(|&t| riding(&seat[t]) && slow(&seat[t])).expect("the guest never stopped");
+    let down = (fast..n).find(|&t| seat[t].feet.down()).expect("no foot ever came down");
+    assert_eq!(down, crossed, "the feet came down on tick {down}, the speed crossed on {crossed}");
+    let host_down = (fast..n).find(|&t| host[1][t].unwrap().feet.down());
+    assert_eq!(host_down, Some(down), "the host had the guest's feet down on {host_down:?}, the guest on {down}");
+    eprintln!("the guest got going on tick {fast} and its feet came down on {down}, on both machines, of {n} settled");
+}

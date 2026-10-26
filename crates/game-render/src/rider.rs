@@ -684,7 +684,8 @@ pub struct Body {
     /// machine is riding, 0 while anything else poses it ([`holds_in`]). [`Body::ride`] writes it;
     /// a body nothing rides (the biplane's pilot) holds on.
     pub hold: f32,
-    /// The riding body's two foot holds (V36), which [`Body::ride`] steps: a stopped bike's rider
+    /// The riding body's two foot holds (V36), which [`Body::held_by`] copies off the rider's own
+    /// ([`game_sim::rider::Rider::feet`]; V68): a stopped bike's rider
     /// lets both feet off the pegs, so the stopped row's clip draws them on the ground, and a slow,
     /// tipped one puts the inside foot out. [`Body::holds`] is what the draw holds each limb with.
     pub feet: game_sim::foot_down::Feet,
@@ -794,14 +795,18 @@ impl Body {
             rider.body_frame(dt, c, gate, lib, &|id| set.timing(Some(id)))
         };
         self.posed_by(frame, &rider.body.player, rider.body_clocked);
-        self.hold = if holds_in(rider.body.machine.mode) { 1.0 } else { 0.0 };
-        // The foot switch runs where the body actor runs it: on every tick that is neither a wreck
-        // nor a pose off the clip table, off what the shell's riding request hands the ragdoll.
-        let mode = rider.body.machine.mode;
-        if mode != game_sim::rider_anim::Mode::Wrecked && mode != game_sim::rider_anim::Mode::Posed {
-            self.feet.step(dt, &game_sim::foot_down::Input::of(&rider.ride, &rider.body.veh));
-        }
+        self.held_by(rider);
         frame
+    }
+
+    /// Take how the rider holds on from its sim (V68): [`Body::hold`] off the body's mode, and
+    /// [`Body::feet`] as the rider's own foot switch left them ([`game_sim::rider::Rider::feet`],
+    /// which [`game_sim::rider::Rider::body_frame`] steps). [`Body::ride`] ends in it, and a body
+    /// posed by [`Body::posed_by`] alone — an online ride's seats, whose body machine ran in the
+    /// session's tick — calls it after, or its feet never leave the pegs.
+    pub fn held_by(&mut self, rider: &game_sim::rider::Rider) {
+        self.hold = if holds_in(rider.body.machine.mode) { 1.0 } else { 0.0 };
+        self.feet = rider.feet;
     }
 
     /// How hard the draw holds each of [`LIMBS`] on: [`Body::hold`], and each foot at its hold's

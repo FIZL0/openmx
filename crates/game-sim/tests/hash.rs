@@ -523,7 +523,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // request, and the body's machine is not in the walk.
     // 11520 since S110: the rider's riding ragdoll (`Rider::riding`, boxed), walked as `riding` only
     // while there is one, and the shell's holds (`Rider::holds`), not state and not walked.
+    // 11536 since V68: each rider's foot switch (`Rider::feet`), the body's frame's output for the
+    // draw, not walked: the body's machine is not in the walk.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11520, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11536, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

@@ -11,6 +11,9 @@
 //! body actor's switch in `game-sim/tests/foot_down.rs`, and that against the original's update in
 //! S109's `ragdoll_riding.rs`), and takes them back on the tick it is over it again.
 //!
+//! V68: a body posed as an online seat's is (`posed_by`, then `held_by`, which is `Online::show`)
+//! holds on and is drawn the same, tick for tick.
+//!
 //! Needs the user's own disc; skips with the reason when it is not there.
 
 use game_render::disc::{Disc, Res};
@@ -89,6 +92,10 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
     let grips = anchors_of(&chassis, &[]);
     let mut body = Body::load(vec![res(&mut disc, "thq1.res")], "thq1", Sex::Male, "", &set.stunts, p.motion())
         .unwrap_or_else(|why| panic!("the body did not load: {why}"));
+    // A second body posed the way an online seat is (V68, `Online::show`): the frame the rider's
+    // body machine already chose, sampled by `posed_by`, and the hold and feet off the rider.
+    let mut shown = Body::load(vec![res(&mut disc, "thq1.res")], "thq1", Sex::Male, "", &set.stunts, p.motion())
+        .unwrap_or_else(|why| panic!("the body did not load: {why}"));
     let skel = body.rig.set.skeleton.clone();
     let joint = |name: &str| skel.find(name).unwrap_or_else(|| panic!("the rider has no {name}"));
     let (feet, hands) = (FOOT_ANCHORS.map(joint), HAND_ANCHORS.map(joint));
@@ -105,7 +112,9 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
     // launches the 250 off the landing and loops it over backwards.
     for _ in 0..60 {
         r.frame(&p, &tables, &Controls::default(), FRAME, &mut floor);
-        body.ride(FRAME, &mut r, &Controls::default(), rider::Gate::default());
+        let frame = body.ride(FRAME, &mut r, &Controls::default(), rider::Gate::default());
+        shown.posed_by(frame, &r.body.player, r.body_clocked);
+        shown.held_by(&r);
     }
     let legs: [(&str, Controls, usize); 4] = [("ride", gas, 120), ("brake", brake, 180), ("stand", Controls::default(), 180), ("off", gas, 120)];
     let mut ticks: Vec<(&str, Tick)> = Vec::new();
@@ -114,8 +123,12 @@ fn a_stopped_bike_puts_a_foot_down_and_moving_off_lifts_it() {
             // The brakes only until the bike all but stands: held on a standing bike they back it up.
             let c = if leg == "brake" && r.ride.chassis.local_vel.z() < 0.5 { Controls::default() } else { c };
             r.frame(&p, &tables, &c, FRAME, &mut floor);
-            body.ride(FRAME, &mut r, &c, rider::Gate::default());
+            let frame = body.ride(FRAME, &mut r, &c, rider::Gate::default());
+            shown.posed_by(frame, &r.body.player, r.body_clocked);
+            shown.held_by(&r);
             let (world, _) = body.palette(Some(&grips));
+            assert_eq!((shown.feet, shown.holds()), (body.feet, body.holds()), "{leg}: an online seat holds on otherwise");
+            assert_eq!(shown.palette(Some(&grips)).0, world, "{leg}: an online seat is drawn otherwise");
             let at = |j: usize| world[j].0[3];
             let under = [0, 1].map(|k| grips[k].expect("a peg").y - at(feet[k])[1]);
             let hands = [0, 1].map(|k| {
