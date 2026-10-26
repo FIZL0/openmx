@@ -7,7 +7,7 @@ use game_sim::ride::Controls;
 use game_sim::rider::{self, Rider};
 use game_sim::state::{self, Owner};
 use game_sim::trick::{Set, Wreck};
-use game_sim::wreck_page::{Fade, Page};
+use game_sim::wreck_page::{Fade, Page, Shade};
 use ps2_float::{F, Vf};
 
 /// One capture's cells by column name.
@@ -271,6 +271,116 @@ fn three_updates_out_and_three_in() {
     }
     assert!(!page.up());
     assert_eq!(page, Page::default());
+}
+
+/// **The fade's picture against the original's fader, live** (S85; S72's captures,
+/// context/capture/s72/{north,east,west}.csv). Every row the fader is fading out, held or fading in,
+/// the port's [`Shade::update`] — fed the whole milliseconds between that row's elapsed and the row
+/// before's, or from nothing where a half begins — leaves the elapsed and the t bit-equal to the
+/// original's. Every millisecond step is 33 or 34. And the two draws' alphas off those t: the fade out
+/// is under 255 until its third update, which draws 255 (the black draw, the put-back), and the fade
+/// in is over 0 until its third, which draws 0.
+///
+/// Each capture missing is skipped.
+#[test]
+fn the_originals_fade_steps_by_whole_milliseconds() {
+    let dir = match std::env::var_os("GAME_SIM_FIXTURES") {
+        Some(dir) => std::path::PathBuf::from(dir).join("capture"),
+        None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/capture"),
+    }
+    .join("s72");
+    let (mut updates, mut blacks, mut clears, mut read) = (0, 0, 0, 0);
+    for name in ["north", "east", "west"] {
+        let path = dir.join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("skipped {name}: no {} — research/s72_page.py makes it", path.display());
+            continue;
+        };
+        let cap = game_sim::replay::Capture::parse(&text).expect("the recorder's format");
+        let at = cap.columns.iter().enumerate().map(|(i, c)| (c.clone(), i)).collect();
+        let c = Cells { cap, at };
+        read += 1;
+        let live = |r: usize| c.u(r, "f0_out") != 0 || c.u(r, "f0_held") != 0;
+        let (mut elapsed, mut t) = (F::ZERO, F::ZERO);
+        for r in 1..c.cap.rows.len() {
+            if !live(r) {
+                continue;
+            }
+            let (e, te) = (c.f(r, "f0_elapsed"), c.f(r, "f0_t"));
+            assert_eq!(c.f(r, "f0_dur").0.to_bits(), Shade::DURATION.0.to_bits(), "{name} row {r}: 100 ms a half");
+            let before = if live(r - 1) { c.f(r - 1, "f0_elapsed") } else { F::ZERO };
+            if e.0.to_bits() == before.0.to_bits() && live(r - 1) {
+                continue; // no update between the two reads
+            }
+            // A half begins where the elapsed falls back: from nothing, then the row's own update.
+            let from = if !live(r - 1) || e.0 < before.0 { F::ZERO } else { before };
+            if from == F::ZERO {
+                (elapsed, t) = (F::ZERO, F::ZERO);
+            }
+            if e == F::ZERO {
+                continue; // the black draw restarted the half, and nothing has updated it yet
+            }
+            // One update between the reads, or two where the row before was read ahead of its
+            // tick's: each 33 or 34 ms, in whichever order the original's bits say.
+            let ms = (f64::from((e - from).0) * 1000.0).round() as i32;
+            let splits: Vec<Vec<i32>> = match ms {
+                33 | 34 => vec![vec![ms]],
+                66..=68 => [[33, ms - 33], [ms - 34, 34]].iter().filter(|s| s.iter().all(|m| *m == 33 || *m == 34)).map(|s| s.to_vec()).collect(),
+                _ => panic!("{name} row {r}: a frame of {ms} ms"),
+            };
+            let stepped = |split: &Vec<i32>| {
+                split.iter().fold((elapsed, t), |(e, t), &m| {
+                    assert!(t < F::ONE, "{name} row {r}: an update past t = 1");
+                    Shade::update(e, m)
+                })
+            };
+            let found = splits.iter().map(stepped).find(|(pe, pt)| (pe.0.to_bits(), pt.0.to_bits()) == (e.0.to_bits(), te.0.to_bits()));
+            let Some(port) = found else {
+                panic!("{name} row {r}: elapsed {e:?} t {te:?}, port {:?} over {splits:?}", splits.iter().map(stepped).collect::<Vec<_>>());
+            };
+            (elapsed, t) = port;
+            updates += splits[0].len();
+            let third = ((e.0 * 30.0).round() as u32) >= 3;
+            match c.u(r, "f0_in") != 0 {
+                false => {
+                    assert_eq!(Shade::out_alpha(t) == 255, third, "{name} row {r}: black on the third update out, t {t:?}");
+                    blacks += usize::from(third);
+                }
+                true => {
+                    assert_eq!(Shade::in_alpha(t) == 0, third, "{name} row {r}: clear on the third update in, t {t:?}");
+                    clears += usize::from(third);
+                }
+            }
+        }
+    }
+    println!("{updates} updates, {blacks} black, {clears} clear");
+    if read == 3 {
+        assert!(updates >= 37 && blacks >= 3 && clears >= 6, "all three captures: {updates} updates, {blacks} black, {clears} clear");
+    }
+}
+
+/// The shade over a whole page, the way the shell steps it: the page's tick with the front end's
+/// milliseconds, 34/33/33 then 34/33/33 (S72's east, second page), and 33/33/34 twice (the first
+/// page of every capture). The fade out draws 87 or 84, then 171 or 168, then the black; the fade in
+/// the mirror; and the last draw is clear. A tick with no page update draws as the one before.
+#[test]
+fn the_shade_follows_the_page() {
+    for (ms, want) in [([34, 33, 33, 34, 33, 33], [87, 171, 255, 168, 84, 0]), ([33, 33, 34, 33, 33, 34], [84, 168, 255, 171, 87, 0])] {
+        let (mut page, mut shade) = (Page::default(), Shade::default());
+        shade.step(&page, 33);
+        assert_eq!(shade.alpha(), 0, "no page, no shade");
+        page.raise();
+        let mut drawn = Vec::new();
+        for &ms in &ms {
+            page.update();
+            shade.step(&page, ms);
+            drawn.push(shade.alpha());
+            shade.step(&page, 33);
+            assert_eq!(shade.alpha(), *drawn.last().unwrap(), "no update, the same draw");
+        }
+        assert_eq!(drawn, want, "{ms:?}");
+        assert_eq!(page, Page::default());
+    }
 }
 
 /// The fader told ahead of time (S108): before each update of a whole page, out and in,

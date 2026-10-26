@@ -4644,6 +4644,9 @@ screen_page_off boot 0x00200ab0 the screen's vt +0xa0, to 0x00200ac0: only the H
 #   slot 9 = copy 5's slot 9 above; context/capture/s84/d0a, d0b inside the window: chord on R+1 and on
 #   R+2; d1a, d1b: chord on R+3, after the page's own put-back): +0x5e0 equals +0x3b0 of the draw's row,
 #   bit for bit, on both. Port: rider.rs step 7 calls place_back for a riding bike too.
+#   S85: the update's dt ($f12) is whole ms times 0.001 (mul, not div: the live elapsed bits say so,
+#   0.066 + 0.034 = 0.099999994); the draw's alpha is cvt.w.s(0.5 + 255 t) out, cvt.w.s(0.5 + (255 - 255 t))
+#   in, black. Port: game_sim::wreck_page::Shade, proved on the s72 captures in tests/wreck_page.rs.
 
 # S74 — the put-back's two-tick hold on the rider's body, ported as rider::PutBack
 #   (crates/game-sim/src/rider.rs) and held in crates/game-sim/tests/rider_anim.rs
