@@ -1,4 +1,4 @@
-# 1 — upscaled textures (PART)
+# 1 — upscaled textures (FINAL)
 
 Task V84. 2026-10-26.
 
@@ -112,7 +112,3 @@ Nothing to port: presentation only, a departure from the disc's textures behind 
   loaded.
 - **A combined world (MD8)** draws each tile's mod upscales through the same lookup. No world test
   covers it.
-
-## Next
-
-Gate, then land.
