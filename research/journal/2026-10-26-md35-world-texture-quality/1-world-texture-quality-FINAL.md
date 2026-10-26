@@ -1,4 +1,4 @@
-# 1 — world texture quality (PART)
+# 1 — world texture quality (FINAL)
 
 Task MD35. 2026-10-26. Follows MD31 (`2026-10-24-md31-world-texture-quality`), which fixed the mod
 maps' page array and was never ticked.
