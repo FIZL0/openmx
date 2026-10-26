@@ -12,6 +12,10 @@
 //! where the bike stands ([`Cells`]), and only once the bones are off the bike (until then every
 //! sphere ignores it). A sphere is tested against the mesh only when the search reaches it.
 //!
+//! The same search lists the path cars (S142), every one of them every frame, each re-measured; a
+//! sphere is tested against a car's mesh too when the car is within its reach, on the same record,
+//! and the push-out measures the bone against the car's motion ([`PathCar`]).
+//!
 //! What is not here: the hierarchy class of collision file, which the wreck bike is not; the swept
 //! test, which S62's wrecks never needed against the bike; and the bike leaving the broad phase,
 //! which the put-back does (S108) and the caller says ([`crate::ragdoll_ride::Down::step_posed_with`]).
@@ -63,52 +67,90 @@ impl Bike {
     /// sphere-on-mesh pair with a fresh record (one contact at most). The squared radius is the
     /// collider's own, `radius * radius` through the FPU.
     pub fn touch(&self, frame: &Node, centre: Vf, radius: F) -> Option<Touch> {
-        let r2 = F(fpu::mul(radius.0, radius.0));
-        let mut best = None;
-        self.descend(0, frame, centre, radius, r2, &mut best);
-        let (distance, normal, point) = best?;
-        Some(Touch { distance, local: (point, normal), world: (frame.place(point), frame.rotate(normal)) })
+        touch_mesh(&self.mesh, Normals::Packed(&self.normals), frame, centre, radius, None)
     }
+}
 
-    /// The tree walk from `word`: a node's box is tested, then its first child, and its second only
-    /// when the first answers no. A leaf answers yes when the sphere touches its triangle and the
-    /// record took it, or was full; no when the hit was no nearer than the one the record holds.
-    fn descend(&self, word: u16, frame: &Node, centre: Vf, r: F, r2: F, best: &mut Option<(F, Vf, Vf)>) -> bool {
-        let mesh = MeshRef::of(&self.mesh);
-        match child(word) {
-            Child::Node(i) => {
-                let Some(node) = self.mesh.nodes.get(usize::from(i)) else { return false };
-                if !box_reached(node, frame, centre, r, r2) {
-                    return false;
-                }
-                self.descend(node.children[0], frame, centre, r, r2, best)
-                    || self.descend(node.children[1], frame, centre, r, r2, best)
+/// A mesh's triangle normals as the sphere test reads them: packed once with the mesh ([`Bike`]),
+/// or packed as each leaf is reached ([`PathCar`], whose mesh is the world's). Both are
+/// [`crate::flight_search::pack_normal`] of the triangle's normal.
+#[derive(Clone, Copy)]
+enum Normals<'a> {
+    Packed(&'a [[i16; 3]]),
+    Unpacked,
+}
+
+/// **A sphere against a mesh in `frame`, on a record that may already hold a hit** at `held` (the
+/// distance of the hit an earlier candidate of the same search left in it, S142). The record keeps
+/// one contact: a leaf takes it only when the record is empty or its hit is strictly nearer than the
+/// one held. `Some` when this mesh took it, with this mesh's hit; `None` when it missed, or touched
+/// no nearer than what was held, which then stands.
+fn touch_mesh(mesh: &track::Mesh, normals: Normals<'_>, frame: &Node, centre: Vf, radius: F, held: Option<F>) -> Option<Touch> {
+    let r2 = F(fpu::mul(radius.0, radius.0));
+    let none = Vf::splat(0.0);
+    let mut best = held.map(|d| (d, none, none));
+    let mut took = false;
+    descend(mesh, normals, 0, frame, centre, radius, r2, &mut best, &mut took);
+    let (distance, normal, point) = best.filter(|_| took)?;
+    Some(Touch { distance, local: (point, normal), world: (frame.place(point), frame.rotate(normal)) })
+}
+
+/// The tree walk from `word`: a node's box is tested, then its first child, and its second only
+/// when the first answers no. A leaf answers yes when the sphere touches its triangle and the
+/// record took it, or was full; no when the hit was no nearer than the one the record holds.
+#[allow(clippy::too_many_arguments)]
+fn descend(
+    mesh: &track::Mesh,
+    normals: Normals<'_>,
+    word: u16,
+    frame: &Node,
+    centre: Vf,
+    r: F,
+    r2: F,
+    best: &mut Option<(F, Vf, Vf)>,
+    took: &mut bool,
+) -> bool {
+    let tris = MeshRef::of(mesh);
+    match child(word) {
+        Child::Node(i) => {
+            let Some(node) = mesh.nodes.get(usize::from(i)) else { return false };
+            if !box_reached(node, frame, centre, r, r2) {
+                return false;
             }
-            Child::Leaf(i) => {
-                let (Some(t), Some(&packed)) = (mesh.triangles.get(usize::from(i)), self.normals.get(usize::from(i))) else {
-                    return false;
-                };
-                let c = frame.unplace(centre);
-                let n = unpack(packed);
-                let [a, b, d] = t.vertices.map(|v| mesh.vertex(v));
-                let dist = dot(n, minus(c, a));
-                if dist.0 < 0.0 || !(dist.0 <= r.0) {
-                    return false;
-                }
-                let p = minus(c, n.merge(Dest::XYZ, n.mul(Vf::splat(dist.0))));
-                let hit = inside(p, n, [a, b, d])
-                    || edge(c, a, b).abs().0 < r.0
-                    || edge(c, b, d).abs().0 < r.0
-                    || edge(c, d, a).abs().0 < r.0;
-                if !hit {
-                    return false;
-                }
-                match best {
-                    Some((held, ..)) if !(dist.0 < held.0) => false,
-                    _ => {
-                        *best = Some((dist, unit(n), p));
-                        true
-                    }
+            descend(mesh, normals, node.children[0], frame, centre, r, r2, best, took)
+                || descend(mesh, normals, node.children[1], frame, centre, r, r2, best, took)
+        }
+        Child::Leaf(i) => {
+            let i = usize::from(i);
+            let Some(t) = tris.triangles.get(i) else { return false };
+            let packed = match normals {
+                Normals::Packed(n) => match n.get(i) {
+                    Some(&p) => p,
+                    None => return false,
+                },
+                Normals::Unpacked => crate::flight_search::pack_normal(mesh.triangles[i].normal),
+            };
+            let c = frame.unplace(centre);
+            let n = unpack(packed);
+            let [a, b, d] = t.vertices.map(|v| tris.vertex(v));
+            let dist = dot(n, minus(c, a));
+            if dist.0 < 0.0 || !(dist.0 <= r.0) {
+                return false;
+            }
+            let p = minus(c, n.merge(Dest::XYZ, n.mul(Vf::splat(dist.0))));
+            let hit = inside(p, n, [a, b, d])
+                || edge(c, a, b).abs().0 < r.0
+                || edge(c, b, d).abs().0 < r.0
+                || edge(c, d, a).abs().0 < r.0;
+            if !hit {
+                return false;
+            }
+            match best {
+                Some((held, ..)) if !(dist.0 < held.0) => false,
+                _ => {
+                    *best = Some((dist, unit(n), p));
+                    *took = true;
+                    true
                 }
             }
         }
@@ -331,6 +373,51 @@ fn length(d: Vf) -> F {
     Acc::mula(d.x(), d.x()).madda(d.y(), d.y()).madd(d.z(), d.z()).sqrt()
 }
 
+/// **A path car as the bones' search lists it** (S142). The original's search hands out every
+/// moving collidable of the space whatever its position, a car's mesh among them, and re-measures
+/// each one's distance every frame; a sphere is paired with the car when that distance is within
+/// its radius. The test walks the car's mesh in the collidable's frame ([`crate::world::Prop`]'s
+/// `to_world`), and the push-out takes the car as a mover ([`crate::traffic::Moving::mover`]).
+#[derive(Clone, Debug)]
+pub struct PathCar {
+    pub mesh: track::Mesh,
+    pub frame: Node,
+    pub mover: crate::contact::Mover,
+    /// How far the car's sphere's reach is from where the first collision's sphere last stood.
+    pub distance: F,
+}
+
+impl PathCar {
+    /// The car under `prop`, measured from `probe`; `None` for a prop that does not move.
+    pub fn of(prop: &crate::world::Prop, probe: Vf) -> Option<PathCar> {
+        let moving = prop.moving.as_ref()?;
+        let [x, y, z, at] = prop.to_world.0;
+        Some(PathCar {
+            mesh: prop.mesh.clone(),
+            frame: Node { rows: [x, y, z], origin: at },
+            mover: moving.mover(),
+            distance: reach_distance((prop.centre, prop.radius), probe),
+        })
+    }
+
+    /// **The cars a frame's spheres can be paired with**: every moving prop whose distance from
+    /// `probe` is within `reach` (the largest sphere's radius), in the props' order. The rest no
+    /// sphere reaches, so their meshes are not copied.
+    pub fn near(props: &[crate::world::Prop], probe: Vf, reach: F) -> Vec<PathCar> {
+        props
+            .iter()
+            .filter(|p| p.moving.is_some() && reach_distance((p.centre, p.radius), probe) <= reach)
+            .filter_map(|p| PathCar::of(p, probe))
+            .collect()
+    }
+
+    /// The sphere test against the car's mesh on a record holding a hit at `held` (the record's
+    /// hit from the candidates before it); `Some` when this car took the record.
+    pub fn touch(&self, centre: Vf, radius: F, held: Option<F>) -> Option<Touch> {
+        touch_mesh(&self.mesh, Normals::Unpacked, &self.frame, centre, radius, held)
+    }
+}
+
 /// **A ride's ragdoll scene: the wreck bike**, standing in its frame. A bone that touches the mesh
 /// is with the bike's own body object, and the push-out measures the bone against the bike's body
 /// there.
@@ -346,6 +433,11 @@ pub struct WreckBikeScene<'a> {
     pub search: BikeSearch,
     /// Every centre a sphere was stood at this frame, in the order the step stood them.
     pub stood: Vec<Vf>,
+    /// The path cars the search lists near the bones this frame (S142), after the bike; empty
+    /// before the search is built.
+    pub cars: Vec<PathCar>,
+    /// What the last sphere's contact is with: 0 the bike, `k + 1` the car `k`.
+    pub with: Option<usize>,
 }
 
 impl<'a> WreckBikeScene<'a> {
@@ -360,24 +452,47 @@ impl<'a> WreckBikeScene<'a> {
             mass: bike.mass,
             search,
             stood: Vec::new(),
+            cars: Vec::new(),
+            with: None,
         }
     }
 }
 
 impl Scene for WreckBikeScene<'_> {
+    /// The sphere's one record, offered the bike and then each listed car it reaches: a later
+    /// candidate's hit replaces the held one only when strictly nearer (the record's single slot).
     fn touching(&mut self, centre: Vf, radius: F) -> Option<Vec<(Vf, Vf)>> {
         self.stood.push(centre);
-        if !self.search.reaches(radius) {
-            return None;
+        self.with = None;
+        let mut best: Option<Touch> = None;
+        if self.search.reaches(radius) {
+            if let Some(t) = self.mesh.touch(&self.frame, centre, radius) {
+                best = Some(t);
+                self.with = Some(0);
+            }
         }
-        self.mesh.touch(&self.frame, centre, radius).map(|t| vec![t.world])
+        if self.search.built {
+            for (k, car) in self.cars.iter().enumerate() {
+                if !(car.distance <= radius) {
+                    continue;
+                }
+                if let Some(t) = car.touch(centre, radius, best.map(|b| b.distance)) {
+                    best = Some(t);
+                    self.with = Some(k + 1);
+                }
+            }
+        }
+        best.map(|t| vec![t.world])
     }
 
     fn other(&mut self, i: usize) -> Option<usize> {
-        (i == 0).then_some(0)
+        if i == 0 { self.with } else { None }
     }
 
-    fn velocity(&mut self, _other: usize, at: Vf) -> Vf {
+    fn velocity(&mut self, other: usize, at: Vf) -> Vf {
+        if let Some(car) = other.checked_sub(1).and_then(|k| self.cars.get(k)) {
+            return moving(at, Against::Mover(&car.mover));
+        }
         let mut w = Weighed { body: &mut self.body, mass: self.mass };
         moving(at, Against::Other(&mut Other { collider: &mut self.collider, side: Side::Body(&mut w) }))
     }

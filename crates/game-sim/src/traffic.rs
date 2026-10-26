@@ -417,6 +417,16 @@ impl Moving {
         let turning = rotate(&self.pose, cross(self.spin, arm));
         (self.velocity, add3(turning, self.velocity))
     }
+
+    /// **The car as a bone's push-out sees it** (S142): a mover. The car's mesh collidable has no
+    /// collision object (`+0x80` is 0) and its owner (`+0x7c`) is the car, a vehicle of kind 2, so
+    /// the push-out takes the car's two virtuals for the spin and the velocity, its model node's
+    /// world matrix for the frame and [`ORIGIN`] for the point it spins about
+    /// ([`crate::ragdoll_contact::moving`]).
+    pub fn mover(&self) -> crate::contact::Mover {
+        let [x, y, z, at] = self.pose.0;
+        crate::contact::Mover { spin: self.spin, velocity: self.velocity, node: crate::contact::Node { rows: [x, y, z], origin: at }, origin: ORIGIN }
+    }
 }
 
 /// `a × b`, the `vopmula`/`vopmsub` pair: `w` is `a`'s.

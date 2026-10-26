@@ -5672,3 +5672,26 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # The video's audio, matched against the five clips: Sound1 22.008 s, Sound5 24.542, Sound3 49.836,
 # Sound2 51.502 — the ticks' spacing (76, 834, 50) to a few ms, and no other clank.
 # Clip lengths (22050 Hz): 1.0006, 0.8927, 0.8902, 1.1784, 1.1162 s.
+# ---------------------------------------------------------------------------------------------------
+# S142 — the ragdoll's bones against the path cars. Journal: research/journal/2026-10-26-s142-ragdoll-moving-platforms.
+# Port: ragdoll_scene.rs PathCar / WreckBikeScene.cars, ragdoll_ride.rs step_posed_with, traffic.rs Moving::mover.
+# The bones' search (body actor +0x628, collision_search_gather kind 3) queries the sphere's space's
+# table: its static structure (+0x34, s89-along 0x00d99b10) and then its moving one (+0x38,
+# 0x00d9a660), a block list that hands out every moving collidable whatever its position and reports
+# no bounds (the bound is unchanged). Every car's mesh collidable (car+0x428) is placed there
+# (placement +4 -> +8 tree = 0x00d9a660): class vtable +0x38 0x00451b50 (mesh, +0x68 0), category
+# +0x84 0x48, gate +0x31 bit 0 set, +0x116 0x15 (no WITHIN_BOUND bit, so listed wherever it is),
+# owner +0x7c = the car, object +0x80 = 0. collision_pair_filter(bone sphere, car collidable, 0|1)
+# answered 1 for every bone sphere tried. A sphere is paired when its list distance (the car's
+# sphere +0x40/+0x60, measured each gather from where sphere 0 last stood) is <= its radius.
+# The record (sphere +0x6c: [0] capacity 3, [1] count, [2] held distance, +0x30 normal, +0x60 point,
+# +0x90 with, +0x9c claimed): sphere_mesh_descend's leaf writes slot 0 when count is 0 or the hit is
+# strictly nearer than [2], then count 1; else answers no. So over the list's candidates one contact
+# stands, the strictly nearest; sphere_collider_pair's mesh branch (0x00109ed0 with frame +0x120 and
+# inverse +0x220, no bound test of its own) puts each unclaimed slot through that candidate's frame
+# and sets +0x90. bone_collision_push_out with a car takes the owner branch (class +0x1b0 == 2):
+# spin vt+0xbc, velocity vt+0xb8, node car+0x254 world, origin car+0x190 (S136's Moving).
+# Proved on s89-along (tests/ragdoll_cars.rs): 20,000 spheres paired with one car, a car and its
+# neighbour, or one car twice, bit for bit (12,848 hits; the second car took 67); 10,000 push-outs
+# against a real car collidable bit for bit. Bone sphere colliders: vtable +0x38 0x00451cd0, e.g.
+# 0x0085c9d0 (r 0.75); a bone collision is found by +0x88 = a sphere and +0x7c a body of its radius.
