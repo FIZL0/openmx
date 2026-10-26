@@ -473,8 +473,8 @@ fn a_one_level_terrain_is_256_samples_a_side() {
 }
 
 /// P70: a custom track's card picture. A mod's own `previews/track.png` is its picture; one without
-/// gets a still from its spawn, which the shell's own binary takes headless — the ride's first frame
-/// from the scene's start — and keeps beside `tracks/` for the next time, taken again once the mod
+/// gets a still of its map, which the shell's own binary takes headless — from over the scene's
+/// start since P166 — and keeps beside `tracks/` for the next time, taken again once the mod
 /// changes; a picture that does not read is one line and no picture.
 #[test]
 fn a_custom_track_shows_its_own_picture_or_a_still_from_its_spawn() {
@@ -530,6 +530,72 @@ fn a_custom_track_shows_its_own_picture_or_a_still_from_its_spawn() {
     let hear = track_previews::still_job(env!("CARGO_BIN_EXE_openmx").into(), mods.clone(), take);
     let (_, got) = hear.recv_timeout(std::time::Duration::from_secs(120)).expect("the still job answers");
     assert!(got.is_err());
+}
+
+/// P166: the still of a mod map is of the map. A still from the P70 days (`<id>.png`, newer than
+/// its `mod.json`) is of another framing and is taken again, under the new version's name, and the
+/// old one goes. The shell's `--overview` looks from [`track_previews::overview`]'s framing of the
+/// map's spawn and ground, and draws no bike and no rider: from one pose, the picture over the
+/// spawn with `--overview` is the picture of the same ground with the bike started far behind the
+/// camera, pixel for pixel, and the picture without `--overview` is not.
+#[test]
+fn a_mod_maps_still_is_of_the_map_with_no_rider() {
+    if let Err(e) = game_render::disc::Disc::open_configured() {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("p166").join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    let tracks = mods.join("tracks");
+    good(&tracks, "p166_flat");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let old = track_previews::still_of(&mods, "p166_flat", 1);
+    write(&mods, "previews/p166_flat.png", game_render::png::encode_rgb(16, 9, &[7; 16 * 9 * 3]));
+    assert_eq!(old, mods.join("previews/p166_flat.png"));
+    assert_ne!(track_previews::still(&mods, "p166_flat"), old, "the new framing's still has a name of its own");
+    let ids = vec!["p166_flat".to_string()];
+    let (have, take) = track_previews::gather(&mods, &ids, &mut Vec::new());
+    assert!(have.is_empty() && take == ids, "an old framing's still is taken again, fresh as it is");
+    let hear = track_previews::still_job(env!("CARGO_BIN_EXE_openmx").into(), mods.clone(), take);
+    let (_, got) = hear.recv_timeout(std::time::Duration::from_secs(120)).expect("the still job answers");
+    let still = got.expect("a still over the map");
+    assert_eq!((still.width, still.height), track_previews::STILL_SIZE);
+    assert!(track_previews::still(&mods, "p166_flat").is_file());
+    assert!(!old.exists(), "the old framing's still is gone");
+    let (have, take) = track_previews::gather(&mods, &ids, &mut Vec::new());
+    assert!(take.is_empty() && have.len() == 1);
+
+    // Its camera: the framing of the scene's start (512, 5, 300 facing +z) over the flat ground at
+    // 0, 1020 feet a side.
+    let mods_arg = mods.to_str().unwrap();
+    let size = format!("{}x{}", track_previews::STILL_SIZE.0, track_previews::STILL_SIZE.1);
+    let shot = |name: &str, more: &[&str]| -> (String, game_render::pst::Texture) {
+        let out = mods.join(format!("{name}.png"));
+        let mut args = vec!["--track", "p166_flat", "--mods", mods_arg, "--frames", "31", "--shot-frame", "30", "--size", &size];
+        args.extend(["--overlay", "none", "--markers", "off", "--minimap", "off", "--no-sound"]);
+        args.extend(more);
+        args.extend(["--shot", out.to_str().unwrap()]);
+        let (ok, said) = shell(&args).expect("the disc is there");
+        assert!(ok, "{name}:
+{said}");
+        (said, track_previews::load(&out).unwrap_or_else(|e| panic!("{name}: {e}")))
+    };
+    let (said, _) = shot("overview", &["--overview"]);
+    let printed: Vec<f32> = line(&said, "overview: ")[10..].split(", ").map(|v| v.trim().parse().unwrap()).collect();
+    let want = track_previews::overview([512.0, 5.0, 300.0], [0.0, 1.0], (1020.0, 1020.0), |_, _| Some(0.0));
+    let want = [want.eye[0], want.eye[1], want.eye[2], want.yaw, want.pitch, want.fov];
+    assert!(printed.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-3), "{printed:?} is not {want:?}");
+    // Over the start, toward the middle of the map: up, behind it, looking on along +z and down.
+    assert!(want[1] > 50.0 && want[2] < 300.0 && want[3].abs() < 1.0 && want[4] < -10.0, "{want:?}");
+
+    // No rider: a pose 30 feet behind the start, looking at it.
+    let pose = ["--shot-pose", "512,12,270,0,-10,60"];
+    let (_, bare) = shot("pose-overview", &[&pose[..], &["--overview"]].concat());
+    let (_, ridden) = shot("pose-ridden", &pose);
+    let (_, away) = shot("pose-away", &[&pose[..], &["--trace-at", "100,100,180"]].concat());
+    let differs = |a: &game_render::pst::Texture, b: &game_render::pst::Texture| a.rgba.iter().zip(&b.rgba).filter(|(x, y)| x != y).count();
+    assert!(differs(&bare, &ridden) > 200, "the bike at the start is not in the ridden picture");
+    assert_eq!(differs(&bare, &away), 0, "--overview drew something at the start");
 }
 
 /// A tape of `gas` frames on the throttle, then — with `up` — a Left press onto the spawn (P135) and

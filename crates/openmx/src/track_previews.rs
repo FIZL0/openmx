@@ -2,10 +2,15 @@
 //!
 //! A disc track's card shows its stills out of `UI\trackpreview.res` ([`crate::menu::Art`]). A mod
 //! brings its own picture as openmx-mods' standard allows (T1 §2: `previews/track.png` in the mod's
-//! folder, optional), and where it has none the shell takes one: a still from the mod's spawn, the
-//! ride's first frame with no HUD, shot by the shell's own binary run headless in the background
-//! ([`still_job`]) and kept in the mods folder's `previews/<id>.png`, beside `tracks/`, which the
-//! scan never reads. A still older than the mod's `mod.json` is taken again.
+//! folder, optional), and where it has none the shell takes one: a still of the mod's map with no
+//! HUD, shot by the shell's own binary run headless in the background
+//! ([`still_job`]) and kept in the mods folder's `previews/<id>.v<N>.png`, beside `tracks/`, which the
+//! scan never reads. A still older than the mod's `mod.json` is taken again, and so is one of another
+//! [`STILL_VERSION`].
+//!
+//! Since P166 the still is of the map, not of the rider: the shell's `--overview` draws no bike, rider
+//! or plane, and looks from [`overview`]'s framing, raised and pulled back from the spawn over the
+//! ground's middle, after the world has had [`STILL_FRAME`] frames to load.
 //!
 //! The picture's size is the standard's to leave open and this loader's to decide: any 8-bit PNG
 //! up to [`MAX_SIDE`] a side, shown cropped to the card's 16:9 about its middle, so a 16:9 picture
@@ -26,15 +31,81 @@ pub const STILLS_DIR: &str = "previews";
 pub const STILL_SIZE: (usize, usize) = (512, 288);
 /// The largest side a mod's picture may have.
 pub const MAX_SIDE: usize = 2048;
+/// How the stills are taken, in their names: 1 was P70's first frame from the spawn (named
+/// `<id>.png`), 2 is P166's [`overview`]. A still of any other version is taken again.
+pub const STILL_VERSION: u32 = 2;
+/// The frame a still is shot on, the ride's ground, props and sky up by then.
+pub const STILL_FRAME: u32 = 30;
+/// The overview's horizontal fov, in degrees, as `--shot-pose` reads it.
+pub const OVERVIEW_FOV: f32 = 80.0;
+/// How far under the line to the target the overview looks, in degrees.
+const OVERVIEW_DIP: f32 = 8.0;
 
 /// A mod's own picture, `mods/tracks/<id>/previews/track.png`.
 pub fn own(mods: &Path, id: &str) -> PathBuf {
     mods.join("tracks").join(id).join(OWN)
 }
 
-/// The still the shell took of a mod, `mods/previews/<id>.png`.
+/// The still the shell took of a mod, `mods/previews/<id>.v<STILL_VERSION>.png`.
 pub fn still(mods: &Path, id: &str) -> PathBuf {
-    mods.join(STILLS_DIR).join(format!("{id}.png"))
+    still_of(mods, id, STILL_VERSION)
+}
+
+/// The still of `version`'s framing; version 1 has no stamp in its name.
+pub fn still_of(mods: &Path, id: &str, version: u32) -> PathBuf {
+    match version {
+        1 => mods.join(STILLS_DIR).join(format!("{id}.png")),
+        v => mods.join(STILLS_DIR).join(format!("{id}.v{v}.png")),
+    }
+}
+
+/// Where a still looks from: the eye in world feet, yaw and pitch in degrees and the horizontal fov,
+/// the shell's `--shot-pose` numbers (yaw 0 along +z, 90 along +x; pitch up positive).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Framing {
+    pub eye: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub fov: f32,
+}
+
+/// The framing a mod map's still is taken from (P166): over the map rather than at the rider. The
+/// ground runs from 0 to `extent` on x and z; `height` is the ground under a point, `None` off it.
+///
+/// It looks from the spawn toward the ground's middle (along the spawn's `facing` when the spawn is
+/// near the middle already), from an eye pulled back behind the spawn and raised over the higher of
+/// its ground and the spawn's, both by a share of the map's diagonal, kept on the map; and it pitches
+/// down a little past the ground at the middle, or at a third of the diagonal ahead, between 10 and
+/// 50 degrees.
+pub fn overview(spawn: [f32; 3], facing: [f32; 2], extent: (f32, f32), mut height: impl FnMut(f32, f32) -> Option<f32>) -> Framing {
+    let (w, d) = (extent.0.max(1.0), extent.1.max(1.0));
+    let span = w.hypot(d);
+    let middle = [w / 2.0, d / 2.0];
+    let to_middle = [middle[0] - spawn[0], middle[1] - spawn[2]];
+    let far = to_middle[0].hypot(to_middle[1]);
+    let unit = |v: [f32; 2]| {
+        let l = v[0].hypot(v[1]);
+        if l > 1.0e-3 && l.is_finite() { [v[0] / l, v[1] / l] } else { [0.0, 1.0] }
+    };
+    let (dir, reach) = if far > 0.1 * span { (unit(to_middle), far) } else { (unit(facing), span / 3.0) };
+    let back = (0.1 * span).clamp(60.0, 350.0);
+    let rise = (0.1 * span).clamp(50.0, 350.0);
+    let margin = (0.02 * span).min(w / 4.0).min(d / 4.0);
+    let x = (spawn[0] - dir[0] * back).clamp(margin, w - margin);
+    let z = (spawn[2] - dir[1] * back).clamp(margin, d - margin);
+    let under = height(x, z).filter(|h| h.is_finite()).unwrap_or(spawn[1]);
+    let y = under.max(spawn[1]) + rise;
+    let (tx, tz) = (spawn[0] + dir[0] * reach, spawn[2] + dir[1] * reach);
+    let ty = height(tx, tz).filter(|h| h.is_finite()).unwrap_or(spawn[1]);
+    let run = (tx - x).hypot(tz - z).max(1.0);
+    // A little under the line to the target, so the ground fills more of the picture than the sky.
+    let pitch = -((y - ty).atan2(run).to_degrees() + OVERVIEW_DIP).clamp(10.0, 50.0);
+    Framing { eye: [x, y, z], yaw: dir[0].atan2(dir[1]).to_degrees(), pitch, fov: OVERVIEW_FOV }
+}
+
+/// The overview's numbers as the shell prints them, one `overview: ` line.
+pub fn overview_line(f: &Framing) -> String {
+    format!("overview: {}, {}, {}, {}, {}, {}", f.eye[0], f.eye[1], f.eye[2], f.yaw, f.pitch, f.fov)
 }
 
 /// Whether the still of `id` is there and no older than its `mod.json`.
@@ -69,12 +140,16 @@ pub fn gather(mods: &Path, ids: &[String], log: &mut Vec<String>) -> (Vec<(Strin
     (have, take)
 }
 
-/// The shell run headless for one frame of `id` from its spawn, shot into `out`.
+/// The shell run headless over `id` with no machine or rider drawn, from [`overview`]'s framing,
+/// shot into `out` on [`STILL_FRAME`]: no HUD, markers, minimap or sound, one player, the world's
+/// ground all built.
 pub fn still_command(exe: &Path, mods: &Path, id: &str, out: &Path) -> Command {
     let mut c = Command::new(exe);
     let size = format!("{}x{}", STILL_SIZE.0, STILL_SIZE.1);
-    c.args(["--headless", "--track", id, "--mods"]).arg(mods);
-    c.args(["--frames", "1", "--size", &size, "--overlay", "none", "--shot"]).arg(out);
+    let (frames, shot) = ((STILL_FRAME + 1).to_string(), STILL_FRAME.to_string());
+    c.args(["--headless", "--overview", "--track", id, "--mods"]).arg(mods);
+    c.args(["--players", "1", "--markers", "off", "--minimap", "off", "--no-sound", "--world-ground", "all"]);
+    c.args(["--frames", &frames, "--shot-frame", &shot, "--size", &size, "--overlay", "none", "--shot"]).arg(out);
     c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     c
 }
@@ -103,9 +178,13 @@ fn take_still(exe: &Path, mods: &Path, id: &str) -> Result<Texture, String> {
     let status = still_command(exe, mods, id, &part).status().map_err(|e| format!("the shell: {e}"))?;
     if !status.success() || !part.is_file() {
         let _ = std::fs::remove_file(&part);
-        return Err(format!("the ride from its spawn did not start ({status})"));
+        return Err(format!("the ride over the map did not start ({status})"));
     }
     std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+    // The stills of the framings before this one are not read again.
+    for v in 1..STILL_VERSION {
+        let _ = std::fs::remove_file(still_of(mods, id, v));
+    }
     load(&out)
 }
 
@@ -215,6 +294,45 @@ pub fn decode_png(d: &[u8]) -> Result<Texture, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P166: the overview looks from behind and above the spawn toward the map's middle, down onto
+    /// it, from an eye on the map; from a spawn at the middle along the spawn's own facing; and a
+    /// bigger map is looked at from further back and higher up.
+    #[test]
+    fn the_overview_looks_over_the_map_from_behind_the_spawn() {
+        let flat = |_: f32, _: f32| Some(10.0);
+        let f = overview([200.0, 12.0, 200.0], [1.0, 0.0], (1000.0, 1000.0), flat);
+        assert!((f.yaw - 45.0).abs() < 1e-3, "toward the middle, not along the facing: {f:?}");
+        assert!(f.eye[0] < 200.0 && f.eye[2] < 200.0 && f.eye[1] > 12.0 + 40.0, "{f:?}");
+        assert!((-50.0..=-10.0).contains(&f.pitch) && f.fov == OVERVIEW_FOV, "{f:?}");
+        // At the middle the spawn's facing says where to look.
+        let f = overview([500.0, 12.0, 501.0], [-1.0, 0.0], (1000.0, 1000.0), flat);
+        assert!((f.yaw + 90.0).abs() < 1e-3 && f.eye[0] > 500.0, "{f:?}");
+        // A spawn at the edge, looking out: the eye stays on the map.
+        let f = overview([2.0, 12.0, 2.0], [0.0, 0.0], (1000.0, 1000.0), flat);
+        assert!(f.eye[0] > 0.0 && f.eye[2] > 0.0, "{f:?}");
+        // Over a hill behind the spawn the eye rises over the hill, not through it.
+        let hill = |x: f32, _: f32| Some(if x < 150.0 { 300.0 } else { 0.0 });
+        let f = overview([200.0, 0.0, 500.0], [1.0, 0.0], (1000.0, 1000.0), hill);
+        assert!(f.eye[0] < 150.0 && f.eye[1] > 300.0 + 40.0, "{f:?}");
+        // Off the ground's edge or with no ground, the spawn's height stands in.
+        let f = overview([200.0, 12.0, 500.0], [1.0, 0.0], (1000.0, 1000.0), |_, _| None);
+        assert!(f.eye[1] > 12.0 && f.pitch.is_finite() && f.yaw.is_finite(), "{f:?}");
+        let (small, big) = (overview([250.0, 0.0, 250.0], [0.0, 1.0], (500.0, 500.0), flat), overview([2000.0, 0.0, 2000.0], [0.0, 1.0], (4000.0, 4000.0), flat));
+        assert!(big.eye[1] > small.eye[1] && 2000.0 - big.eye[2] > 250.0 - small.eye[2], "{small:?} {big:?}");
+        // A map of no size, a spawn far off it and a ground of no height are still a pose.
+        let f = overview([1e30, -1e30, 0.0], [0.0, 0.0], (0.0, -5.0), |_, _| Some(f32::INFINITY));
+        assert!(f.pitch < 0.0 && f.pitch > -90.0 && f.yaw.is_finite() && f.eye.iter().all(|v| v.is_finite()), "{f:?}");
+    }
+
+    /// The still's name says its framing, and the first framing's was the bare id.
+    #[test]
+    fn a_still_is_named_for_its_framing() {
+        let mods = Path::new("mods");
+        assert_eq!(still_of(mods, "a", 1), mods.join("previews/a.png"));
+        assert_eq!(still(mods, "a"), mods.join(format!("previews/a.v{STILL_VERSION}.png")));
+        assert!(STILL_VERSION > 1);
+    }
 
     #[test]
     fn the_shells_own_shots_read_back() {

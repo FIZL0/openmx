@@ -1306,6 +1306,9 @@ struct Args {
     shot_pose: Option<shot_pose::Pose>,
     /// `--shot-pose` given again (P142): the second view's pose, then the third's, and so on.
     more_poses: Vec<shot_pose::Pose>,
+    /// `--overview` (P166): a still of the map for the track pick — no machine or rider drawn, and
+    /// the first view from [`track_previews::overview`]'s framing unless `--shot-pose` says one.
+    overview: bool,
     /// Draw the riding overlay (P6): the pad as the simulation reads it and the numbers beside it.
     /// Off by default and off is free, because it is debugging furniture and not part of the game.
     hud: bool,
@@ -2230,7 +2233,7 @@ fn front_end(args: Args) -> Result<(), String> {
         while let Some((id, got)) = stills.as_ref().and_then(|h| h.try_recv().ok()) {
             match got {
                 Ok(picture) => {
-                    println!("mods: took a still of {id} from its spawn");
+                    println!("mods: took a still of {id} over the map");
                     shell.front.art.set_mod_picture(&id, picture);
                     (shown_look, menu_images) = (None, false);
                 }
@@ -4643,6 +4646,19 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             Vf::new(h.sin(), 0.0, h.cos(), 0.0)
         }
     };
+    // `--overview` (P166): the track pick's still looks over the map from above and behind the spawn.
+    if args.overview && args.shot_pose.is_none() {
+        let extent = match &sim {
+            Land::Tiles(t) => (t.area.width.0, t.area.depth.0),
+            _ => ground.extent(),
+        };
+        let framing = track_previews::overview([at.x(), at.y(), at.z()], [heading.x(), heading.z()], extent, |x, z| {
+            let (on, _) = sim_world::World::ground(&mut sim, Vf::new(x, 1.0e4, z, 1.0));
+            Some(on.y()).filter(|y| *y > -1.0e5)
+        });
+        println!("{}", track_previews::overview_line(&framing));
+        args.shot_pose = Some(shot_pose::Pose { eye: framing.eye, yaw: framing.yaw, pitch: framing.pitch, fov: framing.fov });
+    }
     let starts: Vec<Vf> = seats.iter().map(|s| s.sim.rider.ride.position()).collect();
     let bays: Vec<vehicle::Spawn> = (0..seats.len()).map_while(|p| lot.bay(Machine::Biplane, p).map(|b| b.spawn)).collect();
     let home = Arc::new(vehicle::home(&starts, heading, &bays));
@@ -4907,7 +4923,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // And the Air Wrecks switch it last said (P138), taken the same way at the pause's close.
     let mut menu_air = front.as_deref().map(|f| f.menu.settings.air_wrecks);
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
-    let mut seated = vec![true; world.seats.len()];
+    // `--overview` (P166) draws nobody's.
+    let mut seated = vec![!args.overview; world.seats.len()];
 
     let mut shot = args.shot.clone();
     let started = Instant::now();
@@ -5893,8 +5910,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         // The bikes' (P74): a frame for each seat, off its rider as the simulation left them. A seat
         // with the plane up has no bike in the world: its emitters are off and what is in the air
-        // runs out.
-        if simulated && let Some(list) = &bike_fx_list {
+        // runs out. Nobody's under `--overview` (P166), which draws no bike.
+        if simulated && !args.overview && let Some(list) = &bike_fx_list {
             bike_fx.resize_with(world.seats.len(), || list.clone());
             let place = &mut world.place;
             for ((seat, rig), fx) in world.seats.iter().zip(&rigs).zip(&mut bike_fx) {
@@ -5911,8 +5928,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             fx.step_over(dt.0, &mut |at| plane_fx_ground(place, at));
         }
         // The bike's tire tracks (V40): a tick of each seat's that rode its bike this frame. They read
-        // the ride and write nothing back.
-        if simulated && let Some((list, _)) = &tread {
+        // the ride and write nothing back. None under `--overview` (P166).
+        if simulated && !args.overview && let Some((list, _)) = &tread {
             step_tire_marks(&mut tire_marks, list, &world.seats);
         }
         if simulated {
@@ -6729,7 +6746,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             // Every player's plane, in its own livery (P87), while it is flown.
             for (p, seat) in world.seats.iter().enumerate() {
-                let Some(plane) = seat.garage.plane_flown() else { continue };
+                let Some(plane) = seat.garage.plane_flown().filter(|_| !args.overview) else { continue };
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
                 let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
@@ -6748,7 +6765,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
             // And every bay's, see-through where it is parked (P103), the put-back ghost's path.
-            for bay in &bays {
+            for bay in bays.iter().filter(|_| !args.overview) {
                 let plane = vehicle::bay_plane(bay);
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 actors.extend(plane_draw::actors(drawn, &assets, &plane, plane_at(&plane), vehicle::BAY_ALPHA, &mut gpu_poses));
@@ -6995,7 +7012,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // unturned, once it is wrecked. The bays' see-through planes (P103) are the GPU's alone:
             // this path draws solid or nothing, and a solid one would be a machine that is not there.
             for (p, seat) in world.seats.iter().enumerate() {
-                let Some(plane) = seat.garage.plane_flown() else { continue };
+                let Some(plane) = seat.garage.plane_flown().filter(|_| !args.overview) else { continue };
                 let livery = if plane.livery < plane_drawn.len() { plane.livery } else { 0 };
                 let Some(drawn) = plane_drawn.get(livery) else { continue };
                 let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
@@ -8159,6 +8176,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         shot_frame: 0,
         shot_pose: None,
         more_poses: Vec::new(),
+        overview: false,
         hud: false,
         debug_hud: false,
         overlay: None,
@@ -8315,6 +8333,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .parse()
                     .map_err(|_| "--shot-frame: not a frame number")?;
             }
+            "--overview" => args.overview = true,
             "--shot-pose" => {
                 let pose = shot_pose::Pose::parse(&next("x,y,z,yaw,pitch,fov")?)?;
                 match args.shot_pose {
@@ -8605,7 +8624,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
-                            [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--vehicle bike|biplane]\n\
+                            [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--overview] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
                             [--world-sweep X0,Z0,X1,Z1]\n\
