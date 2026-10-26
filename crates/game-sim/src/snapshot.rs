@@ -641,7 +641,7 @@ wire!(crate::vehicle_anim::Request { held, at_base, cut, offset, base, rotation,
 wire!(crate::biplane::Area { width, depth });
 wire!(crate::biplane::Attitude { flown, grounded, nose_y, roll, speed, pitch_rate });
 wire!(crate::input::EventQueue { count, events });
-wire!(crate::ride::Held { gas, brake, front_brake, rear_brake, clutch, stick, digital, lean, flick, ring });
+wire!(crate::ride::Held { gas, brake, front_brake, rear_brake, clutch, stick, digital, lean, flick, ring, reverse });
 wire!(crate::rider_anim::Machine { mode, prev, places_itself, thrown, loose, spin, roll, touching, flung, stiff });
 wire!(crate::biplane::Measure { grounded, was_grounded, airspeed, alpha, beta, world_rates, velocity, forward, up, euler, matrix });
 wire!(crate::state::Owner { human, screen });

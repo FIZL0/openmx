@@ -1371,6 +1371,92 @@ fn under_the_new_layout_l1_is_the_clutch() {
     }
 }
 
+/// P72: the original's only reverse is the gas and the brake held together below speed 5 (its pad
+/// read's tail, `Controls::reverse_rule`), and both layouts reach it on their own gas and brake: R2
+/// and L2 under the new one, Cross and Square under the original's. Held at a standstill the bike
+/// backs up; held at speed the brake stays on and the gas is cut, so the bike slows, and only under
+/// speed 5 does it reverse. Neither layout has a reverse button, and the two ride the same frames bit
+/// for bit, because the remap is the report's and the rule is the bike's.
+#[test]
+fn gas_and_brake_held_slow_back_the_bike_up() {
+    // The stock file's ReverseSpeed is the port's 4 mph, which pushes forwards; every bike on the
+    // disc has -10 (P55's table), so the push backs the bike up to 10 mph.
+    let bike = ridden_bike().replace("ReverseSpeed = 4\n", "ReverseSpeed = -10\n");
+    assert!(bike.contains("ReverseSpeed = -10\n"), "game_sim::stock::BIKE no longer has `ReverseSpeed = 4`");
+    let build = || {
+        let tables = Arc::new(Tables::build());
+        let phy = Phy::read_bytes(bike.as_bytes(), &tables.ride.curve);
+        let geom = Phy::read_bytes(stock::BIKE.as_bytes(), &tables.ride.curve);
+        let rider =
+            game_sim::rider::Rider::new(&phy, stock::mounts(&geom), stock::SPAWN, stock::FACING, Set::default());
+        Sim::with_rider(0, tables, phy, rider)
+    };
+    // One frame as the shell's seat rides it. What it reads back: the forward speed the pad read saw
+    // (`+0x438`, as the last frame left it), the reverse command it left, and the speed after.
+    let frame = |sim: &mut Sim, world: &mut Jump, scheme: pad::Scheme, held: &[Control]| {
+        let hands = Hands { buttons: game_sim::input::mask_of(held), ..Hands::default() };
+        let reports: [Report; PADS] = [scheme.ride(hands.report()), Report::missing()];
+        let seen = sim.rider.ride.air.contact_vel.z();
+        let controls = sim.poll(DT, &reports);
+        let f = sim.step(DT, &controls, world);
+        assert!(f.wreck.is_none(), "{scheme:?}: the bike wrecked");
+        let r = &sim.rider.ride;
+        (seen, r.held.reverse.0, r.air.contact_vel.z())
+    };
+    let second = (1.0 / DT.0).round() as usize;
+    let ride = |scheme: pad::Scheme, from_speed: bool| {
+        let (gas, brake) = match scheme {
+            pad::Scheme::New => (Control::R2, Control::L2),
+            pad::Scheme::Original => (Control::Cross, Control::Square),
+        };
+        let mut sim = build();
+        let mut world = Jump::nothing();
+        for _ in 0..second {
+            frame(&mut sim, &mut world, scheme, &[]);
+        }
+        if from_speed {
+            for _ in 0..3 * second {
+                frame(&mut sim, &mut world, scheme, &[gas]);
+            }
+        }
+        let mut out = Vec::new();
+        for _ in 0..4 * second {
+            out.push(frame(&mut sim, &mut world, scheme, &[gas, brake]));
+        }
+        // Let go of the gas: the brake alone is no reverse.
+        for _ in 0..second {
+            out.push(frame(&mut sim, &mut world, scheme, &[brake]));
+        }
+        out
+    };
+    let bits = |v: &[(f32, f32, f32)]| v.iter().map(|s| (s.0.to_bits(), s.1.to_bits(), s.2.to_bits())).collect::<Vec<_>>();
+    for from_speed in [false, true] {
+        let new = ride(pad::Scheme::New, from_speed);
+        assert_eq!(bits(&new), bits(&ride(pad::Scheme::Original, from_speed)), "the layouts' reverse differs");
+        let (held, after) = new.split_at(4 * second);
+        // The rule, frame by frame: reverse exactly while the speed the pad read saw is under 5.
+        for (i, (seen, reverse, _)) in held.iter().enumerate() {
+            let want = if *seen < game_sim::ride::REVERSE_BELOW { 1.0 } else { 0.0 };
+            assert_eq!(*reverse, want, "from speed {from_speed}, frame {i}: {seen} ft/s");
+        }
+        assert!(after.iter().all(|s| s.1 == 0.0), "the brake alone reversed");
+        let top = held[0].0;
+        let backing = held.iter().map(|s| s.2).fold(f32::MAX, f32::min);
+        let first = held.iter().position(|s| s.1 != 0.0).expect("gas and brake never reversed");
+        println!("from {top:.2} ft/s: reverse from frame {first}, backing up to {backing:.2} ft/s");
+        assert!(backing < -1.0, "gas and brake held, the bike only reached {backing} ft/s backwards");
+        if from_speed {
+            assert!(top > 20.0, "three seconds on the gas reached only {top} ft/s");
+            // At speed the gas is cut and the brake on: it slows to under 5 before it reverses, over
+            // a second or so and not at once (the frame-to-frame speed wobbles on the suspension).
+            assert!(first > second / 2, "at speed gas and brake reversed after only {first} frames");
+            assert!(held[first / 2].2 < 0.75 * top, "at speed gas and brake did not slow the bike");
+        } else {
+            assert_eq!(first, 0, "at a standstill gas and brake did not reverse at once");
+        }
+    }
+}
+
 #[test]
 fn none_of_the_minute_wrecks() {
     let m = ride_the_minute();

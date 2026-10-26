@@ -6602,9 +6602,12 @@ impl SaveState {
 const S68_BACKWARDS: [&str; 2] = ["flat", "slope"];
 
 /// How long each backwards ride agrees with the original's chassis (roll and pitch within
-/// [`S68_ANGLE`], speed within [`S68_SPEED`]): the flat one on every tick, the slope one until its
-/// forward turn at the top parts (the pitch of the turn, before it ever backs up).
-const S68_AGREES_THROUGH: [usize; 2] = [330, 89];
+/// [`S68_ANGLE`], speed within [`S68_SPEED`]): the flat one until a pitch gap of 0.03 rad at tick 214,
+/// backing up (S68 had it on every tick; main parted there before P72 too, with the captured levers,
+/// and P72's levers off the pad are the captured ones on every tick), the slope one until a pitch gap
+/// of 0.033 rad at tick 259, backing up towards the edge (S68 parted at 90, in the forward turn at the
+/// top; with the levers off the pad it rides that turn within the gaps).
+const S68_AGREES_THROUGH: [usize; 2] = [213, 258];
 const S68_ANGLE: f32 = 0.03;
 const S68_SPEED: f32 = 1.0;
 
@@ -6615,8 +6618,8 @@ const S68_UPRIGHT: f32 = 0.35;
 /// The original never wrecks a bike backing up and turning hard into the ground: nothing in its wreck
 /// test reads the direction, its ground roll command is nought below speed 0, so the reversing bike
 /// stays upright, and both captures run out with no wreck reason. The port rides the same pads from
-/// the same save state to the same end. The port has no reverse from the pad yet (P72/P77), so the
-/// levers and the reverse are the captured ones; the stick is the pad's.
+/// the same save state to the same end, the levers and the reverse off the pad too (P72): the port's
+/// reverse command is the captured `+0x648` on every row.
 #[test]
 fn the_captured_backwards_turns_never_wreck() {
     let Some((_, acc)) = acceptance_capture() else {
@@ -6670,16 +6673,24 @@ fn the_captured_backwards_turns_never_wreck() {
             let mut lever = levers.iter().flatten().next().copied().unwrap();
             let mut agreed = None;
             let mut rolled = (0.0f32, 0.0f32);
+            let (mut reverse_off, mut reverse_rows, mut reversing) = (Vec::new(), 0, 0);
             for k in 0..last {
                 let tick = k + 1;
                 lever = levers[tick].unwrap_or(lever);
-                let mut c = sim.poll(dt, &Sim::reports(inputs[k]));
-                c.gas = F(f(lever, "gas_lever"));
-                c.brake = F(f(lever, "brake_lever"));
-                c.reverse = F(f(lever, "reverse"));
-                c.clutch = F(f(lever, "clutch_lever"));
+                // The levers and the reverse are the pad's (P72): the gas and the brake held below
+                // speed 5 are the reverse, in the ride's own pad read. The kit's pad presses at full
+                // pressure, so the strengths the port reads are the original's switches.
+                let c = sim.poll(dt, &Sim::reports(inputs[k]));
                 let frame = sim.step(dt, &c, world);
                 assert!(frame.wreck.is_none(), "{case}: the port wrecks on tick {tick} ({:?})", frame.wreck);
+                if levers[tick] == Some(lever) {
+                    let (port, orig) = (sim.rider.ride.held.reverse.0, f(lever, "reverse"));
+                    if port.to_bits() != orig.to_bits() {
+                        reverse_off.push((tick, port, orig));
+                    }
+                    reverse_rows += 1;
+                    reversing += usize::from(orig != 0.0);
+                }
                 // A tick the recorder missed has nothing to compare. A row is read after its tick or
                 // before the next one's frame, so the tick's chassis is its own row's or the next's.
                 let Some(row) = states[tick] else { continue };
@@ -6715,6 +6726,10 @@ fn the_captured_backwards_turns_never_wreck() {
                     agreed = Some(k);
                 }
             }
+            println!("{case}: the port's reverse is the original's on {} of {reverse_rows} rows ({reversing} reversing): off {reverse_off:?}",
+                     reverse_rows - reverse_off.len());
+            assert!(reverse_off.is_empty(), "{case}: the port's reverse is not the original's on (tick, port, original) {reverse_off:?}");
+            assert!(reversing > 30, "{case}: the original reverses on only {reversing} rows");
             println!("{case}: backing up, the port rolls at most {:.3}, the original {:.3}", rolled.0, rolled.1);
             assert!(rolled.0 < S68_UPRIGHT, "{case}: the reversing bike rolls {} in the port", rolled.0);
             assert!(rolled.1 < S68_UPRIGHT, "{case}: the reversing bike rolls {} in the original", rolled.1);

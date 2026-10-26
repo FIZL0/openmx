@@ -76,8 +76,9 @@
 //! clutch and R2 the front brake on its own, and the left stick steers and leans. The right stick
 //! turns the camera round the rider, the original's look-around, and with L3 held moves it in and out
 //! (P114); clicking it (R3) puts the camera back where its preset has it, which is the port's own —
-//! the original binds R3 to nothing it reads. Reverse is the original's: gas and brake together at a
-//! standstill.
+//! the original binds R3 to nothing it reads. Reverse is the original's: gas and brake together below
+//! 5 ft/s, under either layout (`game_sim::ride::Controls::reverse_rule`, P72); at speed the two
+//! together are the brake, and the rider backing up plays the reverse pair.
 //!
 //! A **trick** is a gesture: hold one, two or three of Circle, Triangle and R1 — which is what names
 //! one of the six groups — and push the d-pad in one of four directions, which names one of the 24
@@ -7656,7 +7657,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Square brake, R2 front brake, L2 clutch, L1 changes camera. Either way the\n\
                      left stick steers\n\
                      and leans, the d-pad preloads, the right stick turns the camera (L3 held\n\
-                     zooms), R3 puts it back, Start freezes, Escape quits. --camera starts on a camera preset by its\n\
+                     zooms), R3 puts it back, the gas and the brake held together under 5 ft/s\n\
+                     back the bike up, Start freezes, Escape quits. --camera starts on a camera preset by its\n\
                      name in the track's cpresets.ini (\"Race Cam 1\" unless asked).\n\
                      --camera-view frames every player's cameras (the Camera page's, P82):\n\
                      original is the disc's numbers exactly; five numbers are degrees added to\n\

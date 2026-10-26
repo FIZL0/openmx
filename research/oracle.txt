@@ -4980,7 +4980,7 @@ ui_sounds_free      boot 0x002424c0
 #   +0xa0 rates = transform_unrotate(node +0x964, +0x850), +0x850 = chassis +0x280 (world rates)
 #   +0xf8 = !(+0x93c) = !(+0x574); +0xfc = +0x940 = +0x4f4 (the backflip torque flag: the actor
 #     latches Posed on it); +0x100 = +0x944 = +0xa44 (no-hander); +0x104 = +0x868 = +0x748
-#   +0x16c = +0x648 (the reverse command, P73: no pad sets it)
+#   +0x16c = +0x648 (the reverse command: the pad read sets it, gas and brake held below speed 5 — P72)
 #   +0x170 pitch = +0x898 = +0x9e8 (pose axis) and +0x174 = +0x89c = +0x9ec (fore-aft), both packed
 #     before the header: last tick's, except on a held tick (+0x3a0), where stunt_idle's tail has
 #     written 0.5/0.5 first (0x00258cc0)
@@ -5046,3 +5046,16 @@ stream_pause boot 0x001686b0 (stream, on, a2) +0x40 = on, IOP command 0x17 when 
 #   A state saved with the clutch slipping in another gear drove a braked rear into a spin at tick 1
 #   until these were seeded. The levers a state carries: rider +0x650 brake (+0x654 its rear copy),
 #   +0x658 gas, +0x65c clutch, +0x628/+0x62c the squared stick, +0x670/+0x674 the lean.
+
+# P72 — the original's reverse, seen whole (crates/game-sim/src/ride.rs Controls::reverse_rule;
+# tests ride.rs gas_and_brake_held_slow_back_the_bike_up, reverse_clips.rs, replay.rs S68)
+#   The tail of pad_to_gesture (boot 0x00250fb0), not wrecked (+0x748 == 0): brake +0x640 <= 0 or
+#   gas +0x63c <= 0 -> +0x648 = 0; else speed +0x438 >= 5 -> +0x648 = 0, gas = (+0x57c != 0), brake
+#   kept; else +0x648 = 1, gas = brake = 0. The wreck branch zeroes the levers and leaves +0x648.
+#   The push (bike_ground_step 0x00257a00): +0x548 x (+0x544 - +0x438), rear wheel down and +0x648
+#   != 0; +0x544 is the .phy's ReverseSpeed x 1.46666, and every disc bike says -10.
+#   Captured (watch/p72-reverse.toml, free09 cr125 from first_recording, quarter speed, Cross+Square
+#   from a standstill): +0x648 rises on the row the levers do and gas/brake read 0 while it is up;
+#   the body anim (type-4 actor - 0x400) wants and runs +0x8f0 = +0x8f4 = 34 (REVERSE_R, bars
+#   centred) from the next row, the clock +0xa3c winds at about 0.03 x |speed| a second and wraps;
+#   the bike settles at -13.85 ft/s; on release +0x648 = 0 and the state is back to 30 a tick later.
