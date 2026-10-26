@@ -2158,9 +2158,6 @@ impl Renderer {
                 entries.push(texture_entry(5 + k, true, wgpu::TextureViewDimension::D2Array));
             }
         }
-        if meshes.is_some() {
-            entries.extend(ground_mesh::layout_entries(3 + layers.len() as u32));
-        }
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ground"),
             entries: &entries,
@@ -2197,13 +2194,6 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(v),
             });
         }
-        if let Some(m) = &meshes {
-            let first = 3 + layers.len() as u32;
-            let [near, far] = m.views();
-            bind_entries.push(wgpu::BindGroupEntry { binding: first, resource: wgpu::BindingResource::TextureView(near) });
-            bind_entries.push(wgpu::BindGroupEntry { binding: first + 1, resource: wgpu::BindingResource::TextureView(far) });
-            bind_entries.push(wgpu::BindGroupEntry { binding: first + 2, resource: m.at.as_entire_binding() });
-        }
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ground"),
             layout: &layout,
@@ -2211,7 +2201,8 @@ impl Renderer {
         });
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ground"),
-            bind_group_layouts: &[Some(&self.view_layout), Some(&layout)],
+            // The roads and ruts' targets are group 2, one bind group per view's near target (V89).
+            bind_group_layouts: &[Some(&self.view_layout), Some(&layout), meshes.as_ref().map(|m| &m.layout)],
             immediate_size: 0,
         });
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -3013,9 +3004,10 @@ impl Renderer {
         };
         let sprites = self.sprites.prepare(&self.device, &self.queue, place, target.size, frame.sprites);
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        // The roads and ruts under the first view, drawn sharp again if it has moved (V67).
-        if let (Some(m), Some(v)) = (self.ground.as_mut().and_then(|g| g.meshes.as_mut()), views.first()) {
-            m.follow(&self.queue, &mut encoder, v.camera.eye);
+        // The roads and ruts under each view, drawn sharp again round any that has moved (V67, V89).
+        if let Some(m) = self.ground.as_mut().and_then(|g| g.meshes.as_mut()) {
+            let eyes: Vec<V3> = views.iter().map(|v| v.camera.eye).collect();
+            m.follow(&self.device, &self.queue, &mut encoder, &eyes);
         }
         let scale = scale::quantise(self.render_scale);
         let [fx, fy, fw, fh] = target.frame;
@@ -3213,6 +3205,9 @@ impl Renderer {
                 pass.set_pipeline(&ground.pipeline);
                 pass.set_bind_group(0, &self.view_bind, &offset);
                 pass.set_bind_group(1, &ground.bind, &[]);
+                if let Some(m) = &ground.meshes {
+                    pass.set_bind_group(2, m.bind(v), &[]);
+                }
                 for part in gv.parts.values().filter(|p| p.count > 0) {
                     pass.set_index_buffer(part.buffer.slice(..), wgpu::IndexFormat::Uint32);
                     for &(page, first, count) in &part.runs {
@@ -3592,7 +3587,7 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
     // The roads and ruts drawn into the paint after its passes (V67).
     let meshed = paint.is_some_and(|p| p.meshes.is_some());
     if meshed {
-        s.push_str(&ground_mesh::wgsl_bindings(3 + layers as u32));
+        s.push_str(ground_mesh::WGSL_BINDINGS);
     }
     s.push_str(GROUND_VS_WGSL);
     s.push_str(
