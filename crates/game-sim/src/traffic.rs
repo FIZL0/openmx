@@ -323,10 +323,34 @@ impl Traffic {
             return;
         }
         let specs = Arc::clone(&self.specs);
+        let before: Vec<Mat4> = self.cars.iter().map(|car| car.pose).collect();
         for (spec, car) in specs.iter().zip(&mut self.cars) {
             spec.step(car, dt, world);
         }
         self.place(world);
+        self.mark(&before, dt, world);
+    }
+
+    /// Tell each car's mesh how its car moved this tick ([`Moving`]), for a wheel on it to ride with
+    /// it (S136). `before` is every car's pose before the step.
+    ///
+    /// The original's `1/dt` is the frame's own (`app+0x348`, made by one `div.s` from the frame's
+    /// step at `app+0x344` and left alone by a step that is not positive). A step that is not
+    /// positive moves no car here, so its velocity is zero whatever the divider: zero is used.
+    fn mark(&self, before: &[Mat4], dt: F, world: &mut dyn World) {
+        let (Some(first), Some(props)) = (self.first, world.moving()) else {
+            return;
+        };
+        let inv_dt = if dt > F::ZERO { F::ONE / dt } else { F::ZERO };
+        let mut k = first;
+        for ((spec, car), was) in self.specs.iter().zip(&self.cars).zip(before) {
+            if spec.mesh.is_some() {
+                if let Some(prop) = props.props.get_mut(k) {
+                    prop.moving = Some(Moving::of(was, &car.pose, inv_dt));
+                }
+                k += 1;
+            }
+        }
     }
 
     /// Stand the cars' meshes where the cars are: after a step, and after a state is put back.
@@ -344,6 +368,70 @@ impl Traffic {
             }
         }
     }
+}
+
+/// What a car's motion is to a wheel standing on it (S136): the car's own velocity and spin, as the
+/// original's path car answers its two vehicle virtuals (`research/oracle.txt` S136), and the pose
+/// they are about.
+///
+/// The original keeps the car's world matrix from before its update (copied at the update's top,
+/// before the `dt` test) and makes both out of it on demand:
+///
+/// - **velocity**: `(position − last position) · (1/dt)`, `vsub.xyz` then `vmulx.xyz`, with the
+///   position row's `w`;
+/// - **spin**: `(last z × z + last y × y) · (1/dt)` — each cross a `vopmula`/`vopmsub` pair, the sum a
+///   `vadd.xyz` with the first cross's `w` — and then put through the car's *current* rotation, as a
+///   local vector would be.
+///
+/// Neither is state: both come from the poses either side of [`Traffic::frame`]'s step, which runs
+/// before the rider on every tick, so a rollback that puts the cars back has them made again from the
+/// cars it put back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Moving {
+    /// The car's world matrix now.
+    pub pose: Mat4,
+    pub velocity: Vf,
+    pub spin: Vf,
+}
+
+/// `car+0x190`, the point the car spins about in its own frame: `(0, 0, 0, 1)` on every one of
+/// s89-along's 21 cars, and nothing in the path car's class writes it.
+pub const ORIGIN: Vf = Vf([0.0, 0.0, 0.0, 1.0]);
+
+impl Moving {
+    /// The car's motion from its pose `before` its step to its pose `after`, at the frame's `1/dt`.
+    pub fn of(before: &Mat4, after: &Mat4, inv_dt: F) -> Moving {
+        let velocity = scale3(sub3(after.0[3], before.0[3]), inv_dt);
+        let turned = add3(cross(before.0[2], after.0[2]), cross(before.0[1], after.0[1]));
+        let spin = rotate(after, scale3(turned, inv_dt));
+        Moving { pose: *after, velocity, spin }
+    }
+
+    /// The car's velocity and its velocity at the world `point`, which is what the wheel's
+    /// contact-velocity step stores at `+0x1b0` and `+0x1c0` when the wheel's contact is on a car:
+    /// the point taken into the car's frame (the transform's "unpoint"), its arm from [`ORIGIN`], the
+    /// spin crossed with the arm and put through the car's rotation, and the car's velocity added.
+    pub fn at(&self, point: Vf) -> (Vf, Vf) {
+        let local = unrotate(&self.pose, sub3(point, self.pose.0[3]));
+        let arm = sub3(local, ORIGIN);
+        let turning = rotate(&self.pose, cross(self.spin, arm));
+        (self.velocity, add3(turning, self.velocity))
+    }
+}
+
+/// `a × b`, the `vopmula`/`vopmsub` pair: `w` is `a`'s.
+fn cross(a: Vf, b: Vf) -> Vf {
+    Vf::opmsub(Vf::opmula(a, b), b, a)
+}
+
+/// The transform's "rotate": the rotation's rows scaled by `v`'s lanes, `w` from `v`.
+fn rotate(m: &Mat4, v: Vf) -> Vf {
+    crate::chassis::rotate(&crate::chassis::Mat3::new(m.0[0], m.0[1], m.0[2]), v)
+}
+
+/// And back, through the rotation's transpose.
+fn unrotate(m: &Mat4, v: Vf) -> Vf {
+    crate::chassis::unrotate(&crate::chassis::Mat3::new(m.0[0], m.0[1], m.0[2]), v)
 }
 
 impl State for Car {
