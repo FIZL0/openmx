@@ -209,7 +209,10 @@ impl Scene {
                 ("environment", "terrainborderwidth") => scene.terrain.border_width = single(value)?,
                 ("environment", "mindivisionsize") => scene.terrain.min_division_size = single(value)?,
                 _ if collecting.is_some() => match key.as_str() {
-                    "col" | "slt" => current.file = value.to_owned(),
+                    // The game reads the scene through its ini reader, which squeezes the spaces
+                    // out of a line: free09's `COL=Large Egg.col` opens `LargeEgg.col`.
+                    "col" => current.file = crate::phy::squeeze(value),
+                    "slt" => current.file = value.to_owned(),
                     "position" => current.position = vector(value)?,
                     "lookvector" => current.look = vector(value)?,
                     "upvector" => current.up = vector(value)?,
