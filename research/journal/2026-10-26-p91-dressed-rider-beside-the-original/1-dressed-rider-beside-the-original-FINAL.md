@@ -1,4 +1,4 @@
-# 1 — dressed rider beside the original (PART)
+# 1 — dressed rider beside the original (FINAL)
 
 Task P91. 2026-10-26.
 
