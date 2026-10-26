@@ -821,6 +821,10 @@ pub mod wreck_sound;
 /// moves them.
 pub mod wreck_bike;
 
+/// Knockable props (S80): the `.toy`'s physics collections, the `.pco` each reads, the scene models
+/// they claim, and each prop's body at rest where its model stands.
+pub mod props;
+
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.
 pub mod ghost;

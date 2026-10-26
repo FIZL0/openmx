@@ -5159,3 +5159,67 @@ vehicle_fx_entry_on   boot 0x003d86d0 flag |= 1 (live); the emitter on (vt +0x98
 # The Generic/Exhaust/Spray vtables sit at 0x0045e630..0x0045e780. An emitter switched on emits
 # nothing that tick: the manager runs before the emitter, which only takes its position (S109's
 # animandpump capture: exhaust on at 2001, rear sprays at 2006, each emitting from the row after).
+# S80 — knockable props, the loader (journal 2026-10-26-s80-knockable-props-load). The .toy's
+# [PhysicsCollections] make loose rigid bodies of scene models; tests/props.rs proves free09's 62
+# against the first_recording state.
+toy_physics_collections boot 0x00289480 reads [PhysicsCollections] NumberOfPhysicsCollections and each
+#                                    [CollectionN] Name/Type: no '*' -> Type default "single", pco
+#                                    "%s%s.pco" (track dir, name); a '*' cuts the name there (pco
+#                                    prefix.pco, Type default "group") and runs the create on every
+#                                    unclaimed scene model whose name strnicmp-matches the prefix,
+#                                    with the model's full name. Every retail starred entry says single.
+toy_collection_create boot 0x00289050 single: per unclaimed model whose instance name stricmp-equals,
+#                                    a new collection; attach, claimed only on nonzero, else destroyed;
+#                                    no match -> the part-name search below. group: one collection,
+#                                    attach every match, kept if any attached.
+physics_collection_ctor boot 0x003b0fb0 0x340 bytes. Fields (state, free09): +0x38 one-body flag, +0x3c
+#                                    PinToBody seen, +0x40 pco path, +0x144 name, +0x250 iterations,
+#                                    +0x254 SimulationHz, +0x320 body count (+0x328 the wrappers),
+#                                    +0x33c ResetTime (default -1)
+physics_collection_load boot 0x003b1200 vt +0x94
+physics_collection_attach boot 0x003b1f40 (coll, instance): with bodies already, only a one-body collection
+#                                    and an instance of the collection's name; reads [PhysicsParts]
+#                                    NumberOfPhysicsParts, NumberOfConstraints, NumberOfIterations (1),
+#                                    SimulationHz (55), ResetTime (-1); one-body = no bodies yet,
+#                                    instance, 1 part, 0 constraints; each part's node is the instance's
+#                                    child named Name, else the instance; then the constraints.
+physics_collection_part boot 0x003b1270 a part: only Type "RigidBody" loads (a body wrapper); Create
+#                                    FALSE -> placed from the node, TRUE -> Position/Look/Up keys off it
+#                                    (no retail .pco says TRUE)
+physics_collection_constraint boot 0x003b15b0 PinToBody (Name1/2, BodyPinPosition1/2,
+#                                    DisablePartCollision, ConstrainAngles, Min/MaxAngles in degrees x
+#                                    0.017453292, limits via curve_sine at half angles; sets +0x3c and
+#                                    each body's +0x5c = 0), Pin (Name, PinPosition, BodyPinPosition,
+#                                    angles), BodyTorsionSpring (Name, its own reader). Vector default
+#                                    (0,0,0,1). Retail: sign_.pco Pin, sx banner.pco Pin + torsion.
+physics_collection_part_search boot 0x003b1c60 the fallback when no model has the entry's name: part 0's
+#                                    model by its Name plus the RefName suffix ("_1") off the scene's
+#                                    RefName table (scene +0x3dc, 0x24 stride {obj, name[32]}) — nat07
+#                                    snowmen, nat15 Nat02_up_bale_hay. Not ported.
+physics_collection_find_part boot 0x003b1150
+physics_collection_activate boot 0x003b27a0
+physics_collection_deactivate boot 0x003b2700
+physics_collection_update boot 0x003b28a0
+physics_object_ctor   boot 0x001590e0 the body wrapper. Fields: +0x90 place, +0xa0 look, +0xb0 up, +0xf0
+#                                    gravity, +0x110 body, +0x13c node
+physics_object_from_node boot 0x001595d0 node_world_position and orientation_axes (world rows) into
+#                                    +0x90/+0xa0/+0xb0, then the generic init
+physics_object_explicit boot 0x00159430 the Create TRUE placement
+physics_object_init   boot 0x001597b0 builds the body: quat = axes_to_quat(look, up), start pos/turn,
+#                                    reset; collision files = the node name, extension replaced or
+#                                    appended, "m.col" (rays, +0x124) and "f.col" (mesh, +0x128)
+node_bounds           boot 0x001b3f50 (node, out centre, out half): corners centre -/+ half (+0xc0, +0xd0,
+#                                    only if node byte +0x110 bit 2, else vf0), children merged (+0x104
+#                                    first, +0x108 next), answers (min+max)/2 and (max-min)/2
+scene_model_read      boot 0x001a8cd0 SLT, Position, LookVector (0,0,1,1), UpVector (0,1,0,1), RefName;
+#                                    node frame via node_set_axes(look, up, orth 1, keep 0)
+node_set_axes         boot 0x001b1d70 mat4_basis into node +0x40..+0x70, then the world rebuild
+scene_refname_find    boot 0x001a6230
+scene_refname_by_name boot 0x001a6180
+node_name             boot 0x001b4fa0 node +0x120 is a pointer to the name
+# The state's .toy actor sits at 0x011b43e0, its collection list {count 62, head} at 0x011b43f4;
+# cells {data, +4, +8 next made}. Node: +0x40 local rows, +0x80 world rows. Body: +0xc mass, +0x10
+# 1/m, +0x20 damping, +0x50 position, +0x120 inverse inertia, +0x130 angular damping, +0x150 turn,
+# +0x160 start turn. Every prop node in this state carries negative zeros (posed by its world at
+# rest), and twelve rotated ones drift an ulp or two off the scene's frame: the bodies were made off
+# already-posed nodes (a second load?). SH_CrateC model 529's start turn is an ulp off the port's.
