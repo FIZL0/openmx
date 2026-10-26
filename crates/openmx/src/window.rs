@@ -52,6 +52,7 @@ const NOTIFY_POINTER: u8 = 5;
 const DESTROY_NOTIFY: u8 = 17;
 const UNMAP_NOTIFY: u8 = 18;
 const CONFIGURE_NOTIFY: u8 = 22;
+const PROPERTY_NOTIFY: u8 = 28;
 
 /// `CreateWindow`'s value mask: the background pixel, then the event mask. Values go in the request in
 /// increasing bit order, which is the order they are listed here.
@@ -59,13 +60,61 @@ const CW_BACK_PIXEL: u32 = 0x0000_0002;
 const CW_EVENT_MASK: u32 = 0x0000_0800;
 /// What the window asks to hear about: keys down, keys up, its structure — which is being taken
 /// away, and being given a new size (`ConfigureNotify`) — and its focus coming and going (P167).
-const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0002_0000 | 0x0020_0000;
+/// And its properties changing (P165), which says nothing the shell wants but the server's time:
+/// the title the window sets as it opens is the first, so the keys' timestamps are on the shell's
+/// clock from the first key on ([`Stamps`]).
+const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0002_0000 | 0x0020_0000 | 0x0040_0000;
 /// `ChangeWindowAttributes`' value mask for the cursor, and `CreateGC`'s for the foreground.
 const CW_CURSOR: u32 = 0x0000_4000;
 const GC_FOREGROUND: u32 = 0x0000_0004;
 
 /// `PutImage`'s format: one byte per pixel channel in the server's own layout.
 const ZPIXMAP: u8 = 2;
+
+/// The shell's clock (P165), in microseconds since it was first read: what the menus time a press,
+/// a bounce and a hold by, whatever the frame rate. The pads' and the keyboard's own timestamps are
+/// put on it by [`Stamps`].
+pub fn shell_us() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64
+}
+
+/// A key going down (`true`) or up, by X keycode, and when on [`shell_us`]'s clock (P165).
+pub type KeyMoment = (u64, u8, bool);
+
+/// Another clock's milliseconds put on the shell's ([`shell_us`], P165): the joystick interface's
+/// and the X server's stamps, whose zero is their own. A stamp is read at or after the moment it
+/// stands for, so the smallest gap yet between a stamp and the shell's clock when it was read is the
+/// two clocks' difference, give or take the quickest read: a device's greeting, read as it opens, or
+/// the server's answer to the window's own title, gets it to the millisecond at once.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stamps {
+    /// The last stamp, and it unwrapped, in microseconds: the stamps are 32 bits of milliseconds,
+    /// which wrap every seven weeks.
+    last: Option<(u32, i64)>,
+    /// The shell's clock less the other one, in microseconds.
+    offset: Option<i64>,
+}
+
+impl Stamps {
+    /// A stamp `ms`, read at `now` on the shell's clock: it unwrapped, for [`Stamps::shell`].
+    pub fn note(&mut self, ms: u32, now: u64) -> i64 {
+        let at = match self.last {
+            // A stamp a little before the last one is earlier, not seven weeks on.
+            Some((was, at)) => at + i64::from(ms.wrapping_sub(was) as i32) * 1000,
+            None => i64::from(ms) * 1000,
+        };
+        self.last = Some((ms, at));
+        let gap = now as i64 - at;
+        self.offset = Some(self.offset.map_or(gap, |o| o.min(gap)));
+        at
+    }
+
+    /// An unwrapped stamp ([`Stamps::note`]) on the shell's clock, never after `now`.
+    pub fn shell(&self, at: i64, now: u64) -> u64 {
+        (at + self.offset.unwrap_or(0)).clamp(0, now as i64) as u64
+    }
+}
 
 /// How many X11 keycodes there are. An event's `detail` is one byte, so the held-key table is one byte
 /// wide and complete.
@@ -136,6 +185,10 @@ pub struct Window {
     max_request: usize,
     /// Which keys are down, by keycode, with auto-repeat filtered out of the stream.
     keys: Keyboard,
+    /// The server's time on the shell's clock (P165), and the keys that went down and up in the
+    /// last poll on it.
+    stamps: Stamps,
+    key_moments: Vec<KeyMoment>,
     /// The server took the window away, or the connection went.
     closed: bool,
     /// Whether the window has the keyboard's focus, as the last focus event said (P167).
@@ -175,6 +228,8 @@ impl Window {
             depth: 24,
             max_request: 0,
             keys: Keyboard::new(),
+            stamps: Stamps::default(),
+            key_moments: Vec::new(),
             closed: false,
             focused: true,
             blank: None,
@@ -394,25 +449,34 @@ impl Window {
     /// is only believed once the event after it has been seen ([`Keyboard`]).
     pub fn poll(&mut self) {
         self.keys.tapped = [false; KEYCODES];
+        self.keys.events.clear();
+        let now = shell_us();
         let mut event = [0u8; 32];
         loop {
             match read_exact_nb(&mut self.stream, &mut event) {
-                Ok(true) => self.handle(&event),
-                Ok(false) => {
-                    self.keys.settle();
-                    return;
-                }
+                Ok(true) => self.handle(&event, now),
+                Ok(false) => break,
                 Err(_) => {
-                    self.keys.settle();
                     self.closed = true;
-                    return;
+                    break;
                 }
             }
         }
+        self.keys.settle();
+        // The keys' own times, on the shell's clock (P165): the ones read now are all in the
+        // smallest gap before their own are put on it.
+        let unwrapped: Vec<(i64, u8, bool)> = self.keys.events.iter().map(|&(ms, code, down)| (self.stamps.note(ms, now), code, down)).collect();
+        self.key_moments = unwrapped.into_iter().map(|(at, code, down)| (self.stamps.shell(at, now), code, down)).collect();
+    }
+
+    /// The keys that went down and up in the last poll, when they did on the shell's clock (P165),
+    /// auto-repeat filtered out as [`Window::held`] has it.
+    pub fn key_moments(&self) -> &[KeyMoment] {
+        &self.key_moments
     }
 
     /// One 32-byte event or error.
-    fn handle(&mut self, event: &[u8; 32]) {
+    fn handle(&mut self, event: &[u8; 32], now: u64) {
         match event[0] & 0x7f {
             0 => {
                 // An error. Nothing the shell sends should produce one, so it is worth a line on
@@ -423,6 +487,10 @@ impl Window {
                 );
             }
             KEY_PRESS | KEY_RELEASE => self.keys.saw(event),
+            // Only for its time, which is the server's clock now (P165).
+            PROPERTY_NOTIFY => {
+                self.stamps.note(le32(event, 12), now);
+            }
             DESTROY_NOTIFY | UNMAP_NOTIFY => self.closed = true,
             FOCUS_IN | FOCUS_OUT if event[1] != NOTIFY_POINTER => self.focused = event[0] & 0x7f == FOCUS_IN,
             // The structure mask also brings the window's moves and restacks, which carry the same
@@ -556,6 +624,9 @@ struct Keyboard {
     pending: Option<(u8, u32)>,
     /// Keys that went down since the last poll — not a repeat's second half — down now or not.
     tapped: [bool; KEYCODES],
+    /// What went down and up since the last poll, by the server's stamps (P165): the keycode and
+    /// whether it went down, a repeat's halves not among them.
+    events: Vec<(u32, u8, bool)>,
 }
 
 impl Keyboard {
@@ -564,6 +635,7 @@ impl Keyboard {
             down: [false; KEYCODES],
             pending: None,
             tapped: [false; KEYCODES],
+            events: Vec::new(),
         }
     }
 
@@ -587,10 +659,16 @@ impl Keyboard {
             }
             // Something else followed the release, so the release was real. Apply it first: the
             // event in hand is later than it, even when it is a press of the same key.
-            Some((held, _)) => self.down[held as usize] = false,
+            Some((held, at)) => {
+                self.down[held as usize] = false;
+                self.events.push((at, held, false));
+            }
             None => {}
         }
         if press {
+            if !self.down[code as usize] {
+                self.events.push((time, code, true));
+            }
             self.down[code as usize] = true;
             self.tapped[code as usize] = true;
         } else {
@@ -602,8 +680,9 @@ impl Keyboard {
     /// one. The two halves of a repeat are written to the socket together, so the stream does not run
     /// dry between them.
     fn settle(&mut self) {
-        if let Some((code, _)) = self.pending.take() {
+        if let Some((code, at)) = self.pending.take() {
             self.down[code as usize] = false;
+            self.events.push((at, code, false));
         }
     }
 }
@@ -793,6 +872,8 @@ mod tests {
             depth: 24,
             max_request: 0xffff * 4,
             keys: Keyboard::new(),
+            stamps: Stamps::default(),
+            key_moments: Vec::new(),
             closed: false,
             focused: true,
             blank: None,
@@ -819,17 +900,17 @@ mod tests {
         let (mut w, _server) = window_on_a_pair(1920, 1080, 1);
         assert!(!w.resized());
         // The window manager tiles it to half the screen.
-        w.handle(&configure(958, 1046));
+        w.handle(&configure(958, 1046), 0);
         assert_eq!((w.width, w.height), (958, 1046));
         assert!(w.resized());
         assert!(!w.resized(), "a resize is said once, not every frame after it");
         // A move carries the same size again, and is not a resize.
-        w.handle(&configure(958, 1046));
+        w.handle(&configure(958, 1046), 0);
         assert!(!w.resized());
         // A sent event (the top bit of the code) is read the same.
         let mut sent = configure(1280, 720);
         sent[0] |= 0x80;
-        w.handle(&sent);
+        w.handle(&sent, 0);
         assert_eq!((w.width, w.height), (1280, 720));
         assert!(w.resized());
         // The frame drawn for it is `--aspect`'s (`crate::aspect`, tests/aspect.rs).
@@ -1012,12 +1093,12 @@ mod tests {
             (e[0], e[1]) = (code, detail);
             e
         };
-        w.handle(&focus(FOCUS_OUT, 3));
+        w.handle(&focus(FOCUS_OUT, 3), 0);
         assert!(!w.focused());
         // The focus passing through the pointer's window says nothing about this one.
-        w.handle(&focus(FOCUS_IN, NOTIFY_POINTER));
+        w.handle(&focus(FOCUS_IN, NOTIFY_POINTER), 0);
         assert!(!w.focused());
-        w.handle(&focus(FOCUS_IN | 0x80, 0));
+        w.handle(&focus(FOCUS_IN | 0x80, 0), 0);
         assert!(w.focused());
     }
 }

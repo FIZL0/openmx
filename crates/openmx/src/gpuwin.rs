@@ -29,6 +29,9 @@ struct State {
     keys: [bool; KEYCODES],
     /// Keys pressed since the last poll, down now or not (P53): a tap inside one slow frame.
     tapped: [bool; KEYCODES],
+    /// The keys that went down and up since the last poll (P165). winit gives no event times, so
+    /// each is stamped when the pump hands it over: the frame's time, not the key's.
+    moments: Vec<crate::window::KeyMoment>,
     size: (u32, u32),
     resized: bool,
     closed: bool,
@@ -75,13 +78,23 @@ impl ApplicationHandler for State {
                 if let Some(code) = event.physical_key.to_scancode()
                     && let Some(held) = self.keys.get_mut(code as usize + 8)
                 {
-                    *held = event.state == ElementState::Pressed;
+                    let down = event.state == ElementState::Pressed;
+                    if down != *held {
+                        self.moments.push((crate::window::shell_us(), code as u8 + 8, down));
+                    }
+                    *held = down;
                     if *held && !event.repeat {
                         self.tapped[code as usize + 8] = true;
                     }
                 }
             }
             WindowEvent::Focused(false) => {
+                let now = crate::window::shell_us();
+                for (code, held) in self.keys.iter().enumerate() {
+                    if *held {
+                        self.moments.push((now, code as u8, false));
+                    }
+                }
                 self.keys = [false; KEYCODES];
                 self.focused = false;
             }
@@ -137,6 +150,7 @@ impl GpuWindow {
             failed: None,
             keys: [false; KEYCODES],
             tapped: [false; KEYCODES],
+            moments: Vec::new(),
             size: (1, 1),
             resized: false,
             closed: false,
@@ -235,6 +249,7 @@ impl GpuWindow {
     /// Take in whatever the window has said, without waiting.
     pub fn poll(&mut self) {
         self.state.tapped = [false; KEYCODES];
+        self.state.moments.clear();
         if let PumpStatus::Exit(_) = self.events.pump_app_events(Some(Duration::ZERO), &mut self.state) {
             self.state.closed = true;
         }
@@ -257,6 +272,11 @@ impl GpuWindow {
 
     pub fn held(&self, code: u8) -> bool {
         self.state.keys[code as usize]
+    }
+
+    /// The keys that went down and up in the last poll, stamped when the pump saw them (P165).
+    pub fn key_moments(&self) -> &[crate::window::KeyMoment] {
+        &self.state.moments
     }
 
     /// Whether a key went down during the last poll, whether or not it is still down.

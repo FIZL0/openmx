@@ -119,20 +119,56 @@ const REPEAT_EVERY_US: u64 = 5 * 16_666;
 const BOUNCE_US: u64 = 35_000;
 /// The rate a [`Reader`] is read at unless it says otherwise: the front end's frames.
 const MENU_HZ: u64 = 60;
+/// The d-pad's four, which a hold repeats.
+const DIRS: u16 = Control::Up.mask() | Control::Down.mask() | Control::Left.mask() | Control::Right.mask();
+
+/// A device's menu controls at one moment between two reads (P165): when, in microseconds on the
+/// shell's clock (`window.rs`'s `shell_us`), and its report then — the buttons, the d-pad and the
+/// left stick as they stood after one of its events. The pad layer keeps them by the events' own
+/// times, so a press, a bounce and a hold are timed by when the hand did them and not by the frame
+/// that happened to see it: the same at 5 fps as at 165.
+pub type Moment = (u64, Report);
+
+/// One device for [`Reader::read_timed`]: its report now, its presses since the last read
+/// ([`Reader::read_taps`]), and its moments since then — `None` for a device that keeps none, whose
+/// changes are taken at the read.
+pub type Timed<'a> = (Report, u16, Option<&'a [Moment]>);
+
+/// How many repeats a direction held `us` has made, the push itself not counted.
+fn repeats(us: u64) -> u64 {
+    if us < REPEAT_AFTER_US { 0 } else { 1 + (us - REPEAT_AFTER_US) / REPEAT_EVERY_US }
+}
+
+/// When a hold's `k`th repeat (from 1) is due, from the push.
+fn repeat_due(k: u64) -> u64 {
+    REPEAT_AFTER_US + (k - 1) * REPEAT_EVERY_US
+}
 
 /// Turns a report a frame into [`Press`]es.
 ///
 /// The first report it sees is taken as already held, so the Cross that chose a track, or the Start
 /// that paused, does not press again on the screen it opened.
+///
+/// Everything it counts is counted in time, never in reads (P165): a push is a press however many
+/// frames it spans, a hold repeats by how long it was held, and a read that a slow frame makes long
+/// hands out every press that fell inside it — the first as its own [`Press`], the rest through
+/// [`Reader::more`] — so the menu steps as often at 5 fps as at 165.
 #[derive(Clone, Debug)]
 pub struct Reader {
     last: Option<u16>,
-    /// How long the directions held now have been held, in microseconds.
-    held_us: u64,
-    /// How long each control ([`Control`]'s bit order) has been up, in microseconds.
-    up_us: [u64; 16],
-    /// The time one read stands for: the rate it is read at.
+    /// Each device's controls after the last read, in the order the read gave them (P165): where
+    /// its moments start from.
+    devices: Vec<u16>,
+    /// The directions held now, together: since when, and how many repeats that hold has made.
+    hold: Option<(u64, u64)>,
+    /// When each control ([`Control`]'s bit order) last went up, on the reader's clock.
+    up_at: [Option<u64>; 16],
+    /// The reader's clock, in microseconds: the last read's moment.
+    clock: u64,
+    /// The time an untimed read ([`Reader::read`]) stands for: the rate it is read at.
     frame_us: u64,
+    /// The presses the last read made past its first, oldest first ([`Reader::more`]).
+    owed: std::collections::VecDeque<Press>,
 }
 
 impl Default for Reader {
@@ -153,20 +189,52 @@ fn stick(r: &Report, held: u16) -> u16 {
     past(Control::Left, -x) | past(Control::Right, x) | past(Control::Up, -y) | past(Control::Down, y)
 }
 
+/// What a report holds of the menu's controls, its stick's directions among them. A pad that is
+/// not there holds nothing.
+fn holds(r: &Report, held: u16) -> u16 {
+    if r.status() != 0xff { r.buttons() | stick(r, held) } else { 0 }
+}
+
+/// The press of the controls in `edge`.
+fn press_of(edge: u16) -> Press {
+    let on = |c: Control| edge & c.mask() != 0;
+    Press {
+        up: on(Control::Up),
+        down: on(Control::Down),
+        left: on(Control::Left),
+        right: on(Control::Right),
+        ok: on(Control::Cross),
+        back: on(Control::Circle) || on(Control::Triangle),
+        delete: on(Control::Square),
+        start: on(Control::Start),
+        l1: on(Control::L1),
+        r1: on(Control::R1),
+        triangle: on(Control::Triangle),
+    }
+}
+
 impl Reader {
     pub fn new() -> Reader {
         Reader::default()
     }
 
-    /// A reader read `hz` times a second: the pause's, at the ride's ticks, holds a direction as
-    /// long in time before it repeats as the front end's does.
+    /// A reader read `hz` times a second by [`Reader::read`]: the pause's, at the ride's ticks,
+    /// holds a direction as long in time before it repeats as the front end's does.
     pub fn at(hz: u32) -> Reader {
-        Reader { last: None, held_us: 0, up_us: [u64::MAX; 16], frame_us: 1_000_000 / u64::from(hz.max(1)) }
+        Reader {
+            last: None,
+            devices: Vec::new(),
+            hold: None,
+            up_at: [None; 16],
+            clock: 0,
+            frame_us: 1_000_000 / u64::from(hz.max(1)),
+            owed: std::collections::VecDeque::new(),
+        }
     }
 
     /// Forget what was held, so the next report is the first again.
     pub fn reset(&mut self) {
-        *self = Reader { frame_us: self.frame_us, ..Reader::default() };
+        *self = Reader { frame_us: self.frame_us, clock: self.clock, ..Reader::default() };
     }
 
     pub fn read(&mut self, r: &Report) -> Press {
@@ -183,59 +251,121 @@ impl Reader {
 
     /// Several devices' reports as one driver's (P109): what any of them holds is held, so the
     /// same push seen by two — a pad and the keyboard a desktop maps its d-pad to — one frame
-    /// apart is one press, not one each.
+    /// apart is one press, not one each. Read [`Reader::at`]'s rate apart.
     pub fn read_joint(&mut self, reports: &[(Report, u16)]) -> Press {
-        let held = self.last.unwrap_or(0);
-        let mut now = 0;
-        let mut taps = 0;
-        for (r, t) in reports {
-            // A pad that is not there holds nothing.
-            if r.status() != 0xff {
-                now |= r.buttons() | stick(r, held);
+        let devices: Vec<Timed> = reports.iter().map(|&(r, taps)| (r, taps, None)).collect();
+        let now = self.clock + self.frame_us;
+        self.read_timed(&devices, now)
+    }
+
+    /// [`Reader::read_joint`] at `now`, microseconds on the shell's clock, with each device's
+    /// moments since the last read (P165): its changes are taken when they happened, a device
+    /// without them changing at `now`. The first press it made comes back; any more — a slow
+    /// frame's double tap, or a hold's repeats that fell inside it — wait in [`Reader::more`].
+    pub fn read_timed(&mut self, devices: &[Timed], now: u64) -> Press {
+        self.owed.clear();
+        let since = self.clock;
+        let now = now.max(since);
+        self.clock = now;
+        self.devices.resize(devices.len(), 0);
+        let Some(mut held) = self.last else {
+            for (i, (r, _, _)) in devices.iter().enumerate() {
+                self.devices[i] = holds(r, 0);
             }
-            taps |= t;
-        }
-        let Some(last) = self.last.replace(now) else {
+            let held = self.devices.iter().fold(0, |a, b| a | b);
+            self.last = Some(held);
+            self.hold = (held & DIRS != 0).then_some((now, 0));
             return Press::default();
         };
-        // Down again after too short a time up is the press it was.
+        // Each press, by when it was made.
+        let mut presses: Vec<(u64, u16)> = Vec::new();
+        let mut moments: Vec<(u64, usize, Report)> = Vec::new();
+        for (i, (_, _, m)) in devices.iter().enumerate() {
+            moments.extend(m.unwrap_or_default().iter().map(|&(t, r)| (t.clamp(since, now), i, r)));
+        }
+        moments.sort_by_key(|&(t, _, _)| t);
+        let mut seen = vec![0u16; devices.len()];
+        for (t, i, r) in moments {
+            self.devices[i] = holds(&r, held);
+            seen[i] |= self.devices[i];
+            let after = self.devices.iter().fold(0, |a, b| a | b);
+            self.change(t, held, after, &mut presses);
+            held = after;
+        }
+        // Then each device as its report has it now. A timed device's report holds its taps down
+        // ([`Reader::read_taps`]), and a key the keyboard tapped inside the frame, which its moments
+        // already pressed and let go: those are not held. An untimed device's taps are presses.
+        let mut taps = 0;
+        for (i, (r, t, m)) in devices.iter().enumerate() {
+            let mut now_holds = holds(r, held);
+            match m {
+                Some(_) => now_holds &= !((seen[i] | t) & !self.devices[i]),
+                None => taps |= t,
+            }
+            self.devices[i] = now_holds;
+        }
+        let after = self.devices.iter().fold(0, |a, b| a | b);
+        let before = presses.len();
+        self.change(now, held, after, &mut presses);
+        let fresh = presses[before..].iter().filter(|p| p.0 == now).fold(0, |a, p| a | p.1);
+        if taps & !fresh != 0 {
+            presses.push((now, taps & !fresh));
+        }
+        held = after;
+        self.last = Some(held);
+        // And the repeats the hold has made by now.
+        if let Some((start, made)) = &mut self.hold {
+            let due = repeats(now - *start);
+            presses.extend((*made + 1..=due).map(|k| (*start + repeat_due(k), held & DIRS)));
+            *made = (*made).max(due);
+        }
+        presses.sort_by_key(|p| p.0);
+        // One press a step: a control pressed twice waits for the next.
+        let mut steps: Vec<u16> = Vec::new();
+        for (_, m) in presses {
+            match steps.last_mut() {
+                Some(s) if *s & m == 0 => *s |= m,
+                _ => steps.push(m),
+            }
+        }
+        self.owed = steps.iter().skip(1).map(|&s| press_of(s)).collect();
+        steps.first().map_or_else(Press::default, |&s| press_of(s))
+    }
+
+    /// The next of the last read's presses past its first (P165), until there are none: the menu
+    /// steps once for each, in the same frame, so a slow frame moves it as far as the time it took.
+    pub fn more(&mut self) -> Option<Press> {
+        self.owed.pop_front()
+    }
+
+    /// The controls going from `before` to `after` at `t`: the ones down again after a bounce's
+    /// time up are presses, and a change of the directions held ends the hold, with the repeats it
+    /// made before it ended, and starts the next.
+    fn change(&mut self, t: u64, before: u16, after: u16, presses: &mut Vec<(u64, u16)>) {
+        if before == after {
+            return;
+        }
         let mut fresh = 0;
-        for (bit, up) in self.up_us.iter_mut().enumerate() {
+        for (bit, up) in self.up_at.iter_mut().enumerate() {
             let m = 1u16 << bit;
-            if now & m != 0 {
-                if last & m == 0 && *up >= BOUNCE_US {
-                    fresh |= m;
-                }
-                *up = 0;
-            } else {
-                *up = up.saturating_add(self.frame_us);
+            if before & m != 0 && after & m == 0 {
+                *up = Some(t);
+            } else if before & m == 0 && after & m != 0 && up.is_none_or(|u| t.saturating_sub(u) >= BOUNCE_US) {
+                fresh |= m;
             }
         }
-        let dirs = Control::Up.mask() | Control::Down.mask() | Control::Left.mask() | Control::Right.mask();
-        let mut edge = fresh | taps;
-        if now & dirs != 0 && now & dirs == last & dirs {
-            let repeats = |t: u64| if t < REPEAT_AFTER_US { 0 } else { 1 + (t - REPEAT_AFTER_US) / REPEAT_EVERY_US };
-            let before = self.held_us;
-            self.held_us += self.frame_us;
-            if repeats(self.held_us) != repeats(before) {
-                edge |= now & dirs;
-            }
-        } else {
-            self.held_us = 0;
+        if fresh != 0 {
+            presses.push((t, fresh));
         }
-        let on = |c: Control| edge & c.mask() != 0;
-        Press {
-            up: on(Control::Up),
-            down: on(Control::Down),
-            left: on(Control::Left),
-            right: on(Control::Right),
-            ok: on(Control::Cross),
-            back: on(Control::Circle) || on(Control::Triangle),
-            delete: on(Control::Square),
-            start: on(Control::Start),
-            l1: on(Control::L1),
-            r1: on(Control::R1),
-            triangle: on(Control::Triangle),
+        if before & DIRS != after & DIRS {
+            if let Some((start, made)) = self.hold.take() {
+                // Only the repeats due while it was still down.
+                let due = repeats(t.saturating_sub(start).saturating_sub(1));
+                presses.extend((made + 1..=due).map(|k| (start + repeat_due(k), before & DIRS)));
+            }
+            if after & DIRS != 0 {
+                self.hold = Some((t, 0));
+            }
         }
     }
 }
@@ -1962,7 +2092,7 @@ pub enum Dev {
 /// A [`Reader`] per device, so each one's presses are its own edges: a second pad's held stick is
 /// not the first one's press, and a pad plugged in holding a button does not press it.
 #[derive(Clone, Debug, Default)]
-pub struct Readers(Vec<(Dev, Reader)>, Reader);
+pub struct Readers(Vec<(Dev, Reader)>, Reader, Vec<(Dev, bool)>);
 
 impl Readers {
     pub fn new() -> Readers {
@@ -1973,6 +2103,7 @@ impl Readers {
     pub fn reset(&mut self) {
         self.0.clear();
         self.1.reset();
+        self.2.clear();
     }
 
     /// This frame's reports, a device each, as presses. A device missing from them is forgotten.
@@ -1983,20 +2114,8 @@ impl Readers {
 
     /// [`Readers::read`] with each device's presses since the last frame ([`Reader::read_taps`]).
     pub fn read_taps(&mut self, reports: &[(Dev, Report, u16)]) -> Vec<(Dev, Press)> {
-        self.0.retain(|(d, _)| reports.iter().any(|(r, _, _)| r == d));
-        reports
-            .iter()
-            .map(|(dev, report, taps)| {
-                let at = match self.0.iter().position(|(d, _)| d == dev) {
-                    Some(at) => at,
-                    None => {
-                        self.0.push((dev.clone(), Reader::new()));
-                        self.0.len() - 1
-                    }
-                };
-                (dev.clone(), self.0[at].1.read_taps(report, *taps))
-            })
-            .collect()
+        let with: Vec<(Dev, Report, u16, Option<Vec<Moment>>)> = reports.iter().map(|(d, r, t)| (d.clone(), *r, *t, None)).collect();
+        self.read_with(&with, None, None)
     }
 
     /// [`Readers::read_taps`], with the devices that drive the menu together — `hosted`, 1P's and
@@ -2005,13 +2124,61 @@ impl Readers {
     /// apart or in the same one, is one press under [`Menu::step_devices`]. Every device is still
     /// read on its own as well, for the splash, which asks who pressed.
     pub fn read_hosted(&mut self, reports: &[(Dev, Report, u16)], hosted: &dyn Fn(&Dev) -> bool) -> Vec<(Dev, Press)> {
-        let mut presses = self.read_taps(reports);
-        let together: Vec<(Report, u16)> = reports.iter().filter(|(d, _, _)| hosted(d)).map(|(_, r, t)| (*r, *t)).collect();
+        let with: Vec<(Dev, Report, u16, Option<Vec<Moment>>)> = reports.iter().map(|(d, r, t)| (d.clone(), *r, *t, None)).collect();
+        self.read_with(&with, Some(hosted), None)
+    }
+
+    /// [`Readers::read_hosted`] at `now` on the shell's clock, each device with its moments since
+    /// the last frame ([`Reader::read_timed`], P165). The presses the frame made past each device's
+    /// first come after, a step's worth at a time, from [`Readers::more`].
+    pub fn read_at(&mut self, reports: &[(Dev, Report, u16, Option<Vec<Moment>>)], hosted: &dyn Fn(&Dev) -> bool, now: u64) -> Vec<(Dev, Press)> {
+        self.read_with(reports, Some(hosted), Some(now))
+    }
+
+    /// Every device on its own, and with `hosted` the ones it names as one as well.
+    fn read_with(
+        &mut self,
+        reports: &[(Dev, Report, u16, Option<Vec<Moment>>)],
+        hosted: Option<&dyn Fn(&Dev) -> bool>,
+        now: Option<u64>,
+    ) -> Vec<(Dev, Press)> {
+        self.0.retain(|(d, _)| reports.iter().any(|(r, _, _, _)| r == d));
+        let joint = hosted.is_some();
+        let hosted = |d: &Dev| hosted.is_some_and(|h| h(d));
+        self.2 = reports.iter().map(|(d, _, _, _)| (d.clone(), hosted(d))).collect();
+        let mut presses: Vec<(Dev, Press)> = reports
+            .iter()
+            .map(|(dev, report, taps, moments)| {
+                let at = match self.0.iter().position(|(d, _)| d == dev) {
+                    Some(at) => at,
+                    None => {
+                        self.0.push((dev.clone(), Reader::new()));
+                        self.0.len() - 1
+                    }
+                };
+                let reader = &mut self.0[at].1;
+                let p = match now {
+                    Some(now) => reader.read_timed(&[(*report, *taps, moments.as_deref())], now),
+                    None => reader.read_taps(report, *taps),
+                };
+                (dev.clone(), p)
+            })
+            .collect();
+        if !joint {
+            return presses;
+        }
+        let together: Vec<Timed> = reports.iter().filter(|(d, _, _, _)| hosted(d)).map(|(_, r, t, m)| (*r, *t, m.as_deref())).collect();
         if together.is_empty() {
             self.1.reset();
             return presses;
         }
-        let joint = self.1.read_joint(&together);
+        let joint = match now {
+            Some(now) => self.1.read_timed(&together, now),
+            None => {
+                let untimed: Vec<(Report, u16)> = together.iter().map(|&(r, t, _)| (r, t)).collect();
+                self.1.read_joint(&untimed)
+            }
+        };
         let mut first = true;
         for (d, p) in &mut presses {
             if hosted(d) {
@@ -2020,6 +2187,25 @@ impl Readers {
             }
         }
         presses
+    }
+
+    /// The last frame's next presses past the first (P165, [`Reader::more`]), every device's in the
+    /// order [`Readers::read_at`] gave them, the hosted ones' together on the first of them; `None`
+    /// once there are none left.
+    pub fn more(&mut self) -> Option<Vec<(Dev, Press)>> {
+        let mut any = false;
+        let mut first = true;
+        let mut out = Vec::with_capacity(self.2.len());
+        for (dev, hosted) in &self.2 {
+            let p = if *hosted {
+                if std::mem::take(&mut first) { self.1.more() } else { None }
+            } else {
+                self.0.iter_mut().find(|(d, _)| d == dev).and_then(|(_, r)| r.more())
+            };
+            any |= p.is_some();
+            out.push((dev.clone(), p.unwrap_or_default()));
+        }
+        any.then_some(out)
     }
 }
 
@@ -2290,6 +2476,8 @@ pub struct Menu {
     tunes: Vec<Tune>,
     /// The sounds the presses made since [`Menu::take_cues`] last took them (P65).
     cues: Cues,
+    /// The time the shell says has passed (P165), as the ticks the menu's own timers count.
+    pace: Pace,
     /// Every other rider's own pause (P84), by seat, 1P's being the menu's own fields: each a stack
     /// and cursors of its own, driven by that rider's pad and drawn in their view
     /// ([`Menu::with_seat`]). Empty until a seat after the first pauses.
@@ -2321,6 +2509,41 @@ impl PartialEq for Cues {
 impl std::fmt::Debug for Cues {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Cues")
+    }
+}
+
+/// The rate of the menu's own timers' ticks: the Player 1 card, the splash's breath, the track
+/// stills and a refused press's quiet are counted in sixtieths of a second (P165).
+const TICK_HZ: u64 = 60;
+/// The most time one [`Menu::elapse_to`] moves the menu's timers by.
+const ELAPSE_MAX_US: u64 = 250_000;
+
+/// The menu's clock (P165): what the shell says has passed ([`Menu::elapse`]), as [`TICK_HZ`] ticks.
+/// A menu nobody times steps a tick a step, as every menu did before. Not the menu's state, like
+/// [`Cues`]: two menus that show and do the same are equal whenever they were stepped.
+#[derive(Clone, Default)]
+struct Pace {
+    /// Whether the shell keeps time for this menu.
+    timed: bool,
+    /// The time passed short of a whole tick, in millionths of a tick.
+    carry: u64,
+    /// The whole ticks passed that the next step takes.
+    due: u32,
+    /// The ticks the step being taken stands for.
+    step: u32,
+    /// The shell's clock at the last [`Menu::elapse_to`].
+    at: Option<u64>,
+}
+
+impl PartialEq for Pace {
+    fn eq(&self, _: &Pace) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Pace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Pace")
     }
 }
 
@@ -2467,6 +2690,7 @@ impl Menu {
             music_at: 0,
             tunes: Vec::new(),
             cues: Cues::default(),
+            pace: Pace::default(),
             sides: Vec::new(),
             focus: 0,
             later: Vec::new(),
@@ -2482,7 +2706,8 @@ impl Menu {
     /// menu looks like after it against before. A ride running is silent; so is the press that
     /// pauses it.
     fn cued(&mut self, p: Press, walk: impl FnOnce(&mut Menu) -> Act) -> Act {
-        self.cues.frames += 1;
+        self.pace.step = self.take_ticks();
+        self.cues.frames += u64::from(self.pace.step);
         if p == Press::default() || self.riding() {
             return walk(self);
         }
@@ -2681,10 +2906,13 @@ impl Menu {
     /// whose rider it dresses.
     pub fn step_seat(&mut self, seat: usize, p: Press) {
         if seat > 0 && self.screen() == Some(Screen::Join) {
+            // Its step takes none of the frame's time (P165): 1P's, after it, does.
+            let due = std::mem::take(&mut self.pace.due);
             self.cued(p, |m| {
                 m.walk_join(seat, p);
                 Act::Stay
             });
+            self.pace.due += due;
         }
     }
 
@@ -2748,9 +2976,9 @@ impl Menu {
 
     /// The splash's frame.
     fn splash_step(&mut self, presses: &[(Dev, Press)]) -> Act {
-        self.tick = self.tick.wrapping_add(1);
+        self.tick = self.tick.wrapping_add(self.pace.step);
         if let Some(n) = &mut self.claimed {
-            *n += 1;
+            *n += self.pace.step;
             if *n >= CLAIMED_FRAMES {
                 self.claimed = None;
                 self.stack = vec![Screen::Main];
@@ -3337,12 +3565,37 @@ impl Menu {
         self.cued(p, |m| m.walk(p))
     }
 
+    /// `us` microseconds have passed on the shell's clock since the last call (P165): the menu's
+    /// timers ([`TICK_HZ`]) move by them at the next step, and the steps after it in the same frame
+    /// — a slow frame's further presses ([`Readers::more`]) — move them no further. From the first
+    /// call on the menu keeps this time and no longer a tick a step.
+    pub fn elapse(&mut self, us: u64) {
+        let p = &mut self.pace;
+        p.timed = true;
+        p.carry += us * TICK_HZ;
+        p.due = p.due.saturating_add((p.carry / 1_000_000) as u32);
+        p.carry %= 1_000_000;
+    }
+
+    /// [`Menu::elapse`] up to `now` on the shell's clock: the time since the last call, a quarter of
+    /// a second at most — a ride or a load in between is not time the menu's timers missed.
+    pub fn elapse_to(&mut self, now: u64) {
+        let since = self.pace.at.replace(now).map_or(0, |at| now.saturating_sub(at));
+        self.elapse(since.min(ELAPSE_MAX_US));
+    }
+
+    /// The ticks passed since the last step took them: what [`Menu::elapse`] has said, or one for a
+    /// menu nobody times. The loading screen, which steps nothing, moves its tick by these too.
+    pub fn take_ticks(&mut self) -> u32 {
+        if self.pace.timed { std::mem::take(&mut self.pace.due) } else { 1 }
+    }
+
     /// [`Menu::step`]'s frame.
     fn walk(&mut self, p: Press) -> Act {
         if self.screen() == Some(Screen::Splash) {
             return self.splash_step(&[(Dev::Keys, p)]);
         }
-        self.tick = self.tick.wrapping_add(1);
+        self.tick = self.tick.wrapping_add(self.pace.step);
         let Some(screen) = self.screen() else {
             // In a ride the only thing the menu hears is Start, which opens this rider's pause.
             if p.start {
