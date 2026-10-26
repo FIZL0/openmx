@@ -1306,9 +1306,38 @@ fn world_page_layers<'a>(w: &'a WorldPaint, packed: &[Option<Packed>]) -> Vec<Ve
             let array = &mut arrays[at.array as usize];
             debug_assert_eq!(array.len() as u32, at.first_page);
             array.extend(p.pages.iter());
+            // A disc map's modulate pages right after its baked ones (MD35).
+            if let Some(sharp) = t.sharp() {
+                array.extend(sharp.modulate.iter());
+            }
         }
     }
     arrays
+}
+
+/// The layers of every packed disc map's splat (MD35) in one array, and each map's first layer in
+/// it: a splat pass reads layer `first + Pass::texture`.
+fn world_splat_layers<'a>(w: &'a WorldPaint, packed: &[Option<Packed>]) -> (Vec<&'a Texture>, Vec<Option<u32>>) {
+    let mut layers = Vec::new();
+    let firsts = w
+        .tiles
+        .iter()
+        .zip(packed)
+        .map(|(t, at)| {
+            let sharp = t.sharp().filter(|_| at.is_some())?;
+            let first = layers.len() as u32;
+            layers.extend(sharp.splat.textures.iter());
+            Some(first)
+        })
+        .collect();
+    (layers, firsts)
+}
+
+/// The array of a world's disc maps' splat layers as [`Renderer::set_ground_streamed`] uploads it
+/// (MD35), or `None` for a world with no disc map on the GPU.
+pub fn world_splat_array(w: &WorldPaint, packed: &[Option<Packed>]) -> Option<ArrayShape> {
+    let (layers, _) = world_splat_layers(w, packed);
+    (!layers.is_empty()).then(|| array_shape(&layers))
 }
 
 /// A world's paint (MD9) for its shader: the packed maps' pages in one array a page size (MD31),
@@ -1344,7 +1373,9 @@ fn upload_world_pages(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint
     write_layer(queue, &leaves, 0, 0, (width as u32, height as u32), 4, &rgba);
     let details: Vec<&Texture> = placed.iter().filter_map(|(p, _)| p.detail.as_ref()).collect();
     let details = upload_array(device, queue, "world ground detail", &details);
-    [pages, leaves.create_view(&Default::default()), details].into_iter().chain(arrays).collect()
+    let (splats, _) = world_splat_layers(w, packed);
+    let splats = (!splats.is_empty()).then(|| upload_array(device, queue, "world splat layers", &splats));
+    [pages, leaves.create_view(&Default::default()), details].into_iter().chain(arrays).chain(splats).collect()
 }
 
 /// The baked light map's tiles as one grey image, for the ground's shader.
@@ -2156,6 +2187,10 @@ impl Renderer {
             // A page array a page size past the first (MD31).
             for k in 1..w.array_sizes(packed).len() as u32 {
                 entries.push(texture_entry(5 + k, true, wgpu::TextureViewDimension::D2Array));
+            }
+            // The disc maps' splat layers (MD35), after the last page array.
+            if world_splat_array(w, packed).is_some() {
+                entries.push(texture_entry(splat_binding(w, packed), true, wgpu::TextureViewDimension::D2Array));
             }
         }
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -3742,6 +3777,67 @@ fn ground_pages_wgsl(p: &Pages, dirt: [f32; 3]) -> String {
     s
 }
 
+/// The binding of a world's splat layers (MD35): the one after its last page array.
+fn splat_binding(w: &WorldPaint, packed: &[Option<Packed>]) -> u32 {
+    5 + w.array_sizes(packed).len().max(1) as u32
+}
+
+/// A disc map's splat passes for a world's shader (MD35): [`ground_wgsl`]'s, read at `q`, the map's
+/// own feet, from `splat_layers` from layer `first` on, with the mip gradients `gx` and `gy` turned
+/// and scaled as the coordinates are, since a map's block runs in non-uniform control flow.
+fn splat_passes_wgsl(paint: &Splat, first: u32) -> String {
+    let f = |v: f32| format!("{v:?}");
+    let mut s = String::new();
+    for pass in &paint.passes {
+        let (sin, cos) = pass.angle.sin_cos();
+        let uv = |p: &str| {
+            format!(
+                "vec2f(({p}.x * {c} + {p}.y * {sn}) * {su}, ({p}.y * {c} - {p}.x * {sn}) * {sv})",
+                c = f(cos),
+                sn = f(sin),
+                su = f(pass.scale[0]),
+                sv = f(pass.scale[1]),
+            )
+        };
+        s.push_str(&format!(
+            "  s = textureSampleGrad(splat_layers, tiled, {}, {}, {}, {}) * 255.0;\n",
+            uv("q"),
+            first + pass.texture as u32,
+            uv("gx"),
+            uv("gy")
+        ));
+        s.push_str(&format!(
+            "  src = vec4f(s.rgb * vec3f({}, {}, {}) / 128.0, min(s.a * 0.5 * {} / 128.0, 255.0));\n",
+            f(pass.rgba[0]),
+            f(pass.rgba[1]),
+            f(pass.rgba[2]),
+            f(pass.rgba[3])
+        ));
+        match pass.blend {
+            None => s.push_str("  frame = src;\n"),
+            Some([a, b, c, d]) => {
+                let pick = |w: u8| match w {
+                    0 => "src.rgb",
+                    1 => "frame.rgb",
+                    _ => "vec3f(0.0)",
+                };
+                let alpha = match c {
+                    0 => "src.a".to_string(),
+                    1 => "frame.a".to_string(),
+                    _ => f(pass.fixed),
+                };
+                s.push_str(&format!(
+                    "  frame = vec4f(clamp(({} - {}) * {alpha} / 128.0 + {}, vec3f(0.0), vec3f(255.0)), src.a);\n",
+                    pick(a),
+                    pick(b),
+                    pick(d)
+                ));
+            }
+        }
+    }
+    s
+}
+
 /// The ground's shader for a world (MD9, [`WorldPaint`]): each map's pages over the cells it owns,
 /// as [`ground_pages_wgsl`] draws one map's, and on a join every near map's read mirrored back
 /// inside it and blended by [`crate::terrain::Regions::weights`], with the dirt's trace. Each map's
@@ -3760,6 +3856,10 @@ fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
     // A page array a page size past the first (MD31), each map reading its own.
     for k in 1..w.array_sizes(packed).len() {
         s.push_str(&format!("@group(1) @binding({}) var pages{k}: texture_2d_array<f32>;\n", 5 + k));
+    }
+    let (_, splat_first) = world_splat_layers(w, packed);
+    if splat_first.iter().any(Option::is_some) {
+        s.push_str(&format!("@group(1) @binding({}) var splat_layers: texture_2d_array<f32>;\n", splat_binding(w, packed)));
     }
     s.push_str(GROUND_VS_WGSL);
     s.push_str(&format!(
@@ -3793,6 +3893,25 @@ fn mirror(p: vec2f, r: vec4f) -> vec2f {{ return vec2f(mirror1(p.x, r.x, r.z), m
                         repeat = f(p.detail_repeat),
                     ),
                     _ => "let painted = t;".to_string(),
+                };
+                // A disc map's splat per pixel (MD35), times what its baked page does to the passes.
+                let detail = match (t.sharp(), splat_first.get(i).copied().flatten()) {
+                    (Some(sharp), Some(first)) => format!(
+                        "let modulate = exp2((textureSampleGrad({array}, tiled, {border} + {inner} * local, page + {n}, gx * k, gy * k).rgb * 255.0 - {one}) / {steps});
+  var frame = vec4f(0.0);
+  var src = vec4f(0.0);
+  var s = vec4f(0.0);
+{passes}  let sharp = floor(clamp(frame.rgb, vec3f(0.0), vec3f(255.0)));
+  let painted = sharp * modulate;",
+                        one = f(f32::from(crate::terrain::MODULATE_ONE)),
+                        steps = f(crate::terrain::MODULATE_STEPS),
+                        array = if at.array == 0 { "pages".to_string() } else { format!("pages{}", at.array) },
+                        border = f(1.0 / 32.0),
+                        inner = f(15.0 / 16.0),
+                        n = p.pages.len(),
+                        passes = splat_passes_wgsl(&sharp.splat, first),
+                    ),
+                    _ => detail,
                 };
                 format!(
                     "let q = mirror(xz, {rect}) - vec2f({ax}, {az});
@@ -4930,8 +5049,8 @@ mod tests {
                 let world = WorldPaint {
                     regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]] },
                     tiles: vec![
-                        crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(pages.clone()) },
-                        crate::terrain::PaintTile { at: [40.0, 0.0], pages: None },
+                        crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(pages.clone()), sharp: None },
+                        crate::terrain::PaintTile { at: [40.0, 0.0], pages: None, sharp: None },
                     ],
                     dirt: [200.0, 180.0, 150.0],
                 };
@@ -4943,8 +5062,8 @@ mod tests {
                 let world = WorldPaint {
                     regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]] },
                     tiles: vec![
-                        crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(small) },
-                        crate::terrain::PaintTile { at: [40.0, 0.0], pages: Some(pages.clone()) },
+                        crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(small), sharp: None },
+                        crate::terrain::PaintTile { at: [40.0, 0.0], pages: Some(pages.clone()), sharp: None },
                     ],
                     dirt: [200.0, 180.0, 150.0],
                 };

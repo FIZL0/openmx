@@ -423,9 +423,23 @@ pub fn bake_splat(
     splat: &game_render::splat::Splat,
     terrain: &track::Terrain,
     spacing: f32,
-    (across, along): (u32, u32),
+    leaves: (u32, u32),
     light: &game_render::world::Lighting,
 ) -> Option<game_render::terrain::Pages> {
+    bake_splat_sharp(splat, terrain, spacing, leaves, light).map(|(pages, _)| pages)
+}
+
+/// [`bake_splat`], and for each page what it does to the splat's passes alone
+/// ([`game_render::splat::Splat::paint_passes`]) — the roads and the light, per channel and not
+/// clipped at 255 — as [`game_render::terrain::modulation_byte`]s, for the GPU to draw the passes
+/// per pixel and multiply them by it ([`game_render::terrain::SharpSplat`], MD35).
+pub fn bake_splat_sharp(
+    splat: &game_render::splat::Splat,
+    terrain: &track::Terrain,
+    spacing: f32,
+    (across, along): (u32, u32),
+    light: &game_render::world::Lighting,
+) -> Option<(game_render::terrain::Pages, Vec<game_render::pst::Texture>)> {
     use game_render::pst::Texture;
     const LEAF: u32 = 16;
     const PAGE_LEAVES: u32 = 4;
@@ -456,7 +470,7 @@ pub fn bake_splat(
     if blocks.is_empty() {
         return None;
     }
-    let bake = |&(bx, bz): &(u32, u32)| -> Texture {
+    let bake = |&(bx, bz): &(u32, u32)| -> (Texture, Texture) {
         let n = BAKED_PAGE;
         let (sx0, sz0) = (bx * PAGE_SAMPLES, bz * PAGE_SAMPLES);
         // The sun on each sample's stored normal, a row of the page's samples and one more.
@@ -474,26 +488,34 @@ pub fn bake_splat(
             })
             .collect();
         let mut rgba = Vec::with_capacity(n * n * 4);
+        let mut modulate = Vec::with_capacity(n * n * 4);
         for py in 0..n {
             for px in 0..n {
                 let on = |p: usize| ((((p as f32 + 0.5) / n as f32) - BORDER) / INNER * PAGE_SAMPLES as f32).clamp(0.0, PAGE_SAMPLES as f32);
                 let (lx, lz) = (on(px), on(py));
                 let (x, z) = ((sx0 as f32 + lx) * spacing, (sz0 as f32 + lz) * spacing);
                 let c = splat.paint(x, z);
-                let c = match splat.light(x, z) {
+                let lit: [f32; 3] = match splat.light(x, z) {
                     Some(l) => {
                         let s = sunlit[(lz as usize).min(side - 1) * side + (lx as usize).min(side - 1)];
-                        [0, 1, 2].map(|k| (c[k] as f32 * l / s[k]).clamp(0.0, 255.0) as u8)
+                        [0, 1, 2].map(|k| c[k] as f32 * l / s[k])
                     }
-                    None => c,
+                    None => c.map(f32::from),
                 };
+                let p = splat.paint_passes(x, z);
+                let m = [0, 1, 2].map(|k| game_render::terrain::modulation_byte(match p[k] {
+                    0 if lit[k] < 0.5 => 1.0,
+                    p => lit[k] / f32::from(p.max(1)),
+                }));
+                modulate.extend_from_slice(&[m[0], m[1], m[2], 255]);
+                let c = lit.map(|v| v.clamp(0.0, 255.0) as u8);
                 rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
             }
         }
-        Texture { width: n, height: n, rgba }
+        (Texture { width: n, height: n, rgba }, Texture { width: n, height: n, rgba: modulate })
     };
-    let pages = blocks.iter().map(bake).collect();
-    Some(game_render::terrain::Pages { pages, across, along, page_of, spacing, detail: None, detail_repeat: spacing * 8.0 })
+    let (pages, modulate) = blocks.iter().map(bake).unzip();
+    Some((game_render::terrain::Pages { pages, across, along, page_of, spacing, detail: None, detail_repeat: spacing * 8.0 }, modulate))
 }
 
 #[cfg(test)]
@@ -510,6 +532,38 @@ mod tests {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    /// MD35: a disc map's sharp bake. With no roads and no light map the baked page is the passes,
+    /// so every modulate byte is one exactly; with a light map lifting a bright layer past 255 the
+    /// baked page clips (a tint, where one channel is past and another is not) and the modulation
+    /// keeps the whole factor.
+    #[test]
+    fn a_sharp_bake_modulates_by_one_without_roads_or_light_and_does_not_clip_the_light() {
+        use game_render::splat::{Pass, Shadow, Splat};
+        use game_render::pst::Texture;
+        let bytes = generate::terrain_painted("md35", (4, 4), SPACING, |_, _| 40.0, |_, _| 1, None);
+        let terrain = track::Terrain::parse(&bytes).expect("the generated terrain reads");
+        let layer = Texture { width: 2, height: 2, rgba: [250, 200, 60, 255].repeat(4) };
+        let pass = Pass { texture: 0, scale: [0.125; 2], angle: 0.0, rgba: [128.0; 4], blend: None, fixed: 0.0, turn: (0.0, 1.0), reads: (true, false) };
+        let mut splat = Splat { textures: vec![layer], passes: vec![pass], shadow: None, meshes: None };
+        let light = game_render::world::Lighting::of(&game_render::scene::Scene::parse(""));
+        let (pages, modulate) = bake_splat_sharp(&splat, &terrain, SPACING, (4, 4), &light).expect("it bakes");
+        assert_eq!(modulate.len(), pages.pages.len());
+        let one = game_render::terrain::MODULATE_ONE;
+        assert!(modulate.iter().all(|m| m.rgba.chunks_exact(4).all(|p| p == [one, one, one, 255])), "unlit and roadless, the modulation is one");
+        // A light map of 255 is twice as bright as painted (128 is one).
+        let lit = Texture { width: 2, height: 2, rgba: [255, 255, 255, 255].repeat(4) };
+        splat.shadow = Some(Shadow { tiles: vec![lit], across: 1, x0: -1.0, x1: 1000.0, z0: -1.0, z1: 1000.0 });
+        let (pages, modulate) = bake_splat_sharp(&splat, &terrain, SPACING, (4, 4), &light).expect("it bakes");
+        let (p, m) = (&pages.pages[0].rgba[..4], &modulate[0].rgba[..4]);
+        let sun = [0, 1, 2].map(|c| (light.ambient[c] + light.sun_color[c] * (-game_render::mat::v3(0.0, 1.0, 0.0).dot(light.sun)).max(0.0)).max(0.2));
+        for k in 0..3 {
+            let want = [250.0, 200.0, 60.0][k] * (255.0 / 128.0) / sun[k];
+            let got = [250.0, 200.0, 60.0][k] * 2f32.powf((f32::from(m[k]) - f32::from(one)) / game_render::terrain::MODULATE_STEPS);
+            assert!((got - want).abs() / want < 0.02, "channel {k}: the modulation gives {got}, the light {want}");
+            assert_eq!(p[k], want.min(255.0) as u8, "channel {k}: the baked page, clipped");
+        }
     }
 
     /// A world of three tiles in a row along `x`, 720 feet apart, 64 samples (567 feet) a side,

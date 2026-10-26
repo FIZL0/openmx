@@ -8,11 +8,18 @@
 //! pixel detail map at 512 with every level, repeating every `DetailMapTilingMultiplier` samples in
 //! the world as alone; and on the GPU, the mod map's ground drawn in the world matches the same map
 //! drawn alone, pixel for pixel but for rounding. The GPU half skips where there is no adapter.
+//!
+//! MD35: the same for a disc map. Its ground is a splat, layers that repeat every few feet, and a
+//! world baked it into 128-pixel pages, four and a half feet a pixel: a disc map in a world was a
+//! smear. Now the GPU runs the splat's passes per pixel in a world as alone, and takes from the bake
+//! only what it does to them ([`SharpSplat::modulate`]). Proved: a generated disc map's ground drawn
+//! in a world matches it drawn alone at three distances, where the bake alone does not.
 
 use game_render::gpu::{self, ArrayShape, GroundChunk, GroundPaint, GroundVertex, Renderer, Scene3, Target, View};
 use game_render::mat::v3;
 use game_render::pst::Texture;
-use game_render::terrain::{PaintTile, Pages, Regions, WorldPaint};
+use game_render::splat::{Pass, Splat};
+use game_render::terrain::{PaintTile, Pages, Regions, SharpSplat, WorldPaint};
 use game_render::world::{Assets, Camera, Lighting};
 use game_sim::tiles::generate;
 use game_sim::track::Terrain;
@@ -56,7 +63,7 @@ fn baked_pages() -> Pages {
 fn world(pages: Pages) -> WorldPaint {
     WorldPaint {
         regions: Regions { owned: vec![[0.0, 0.0, SIDE, SIDE], [AT[0], AT[1], AT[0] + SIDE, AT[1] + SIDE]] },
-        tiles: vec![PaintTile { at: [0.0, 0.0], pages: Some(baked_pages()) }, PaintTile { at: AT, pages: Some(pages) }],
+        tiles: vec![PaintTile { at: [0.0, 0.0], pages: Some(baked_pages()), sharp: None }, PaintTile { at: AT, pages: Some(pages), sharp: None }],
         dirt: DIRT,
     }
 }
@@ -106,11 +113,16 @@ fn chunk(at: [f32; 2]) -> GroundChunk {
 
 /// One frame of a ground from a rider's height, looking along it, `at` added to the camera.
 fn frame(gpu: &mut Renderer, at: [f32; 2]) -> Vec<u8> {
+    frame_from(gpu, v3(at[0] + 288.0, 46.0, at[1] + 120.0), v3(at[0] + 300.0, 40.0, at[1] + 160.0))
+}
+
+/// One frame of the ground from `eye`, looking at `look`.
+fn frame_from(gpu: &mut Renderer, eye: game_render::mat::V3, look: game_render::mat::V3) -> Vec<u8> {
     let scene = game_render::scene::Scene::parse("[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=5000.00\nMaximumFogDistance=9000.00\n");
     let light = Lighting::of(&scene);
     gpu.set_scene(&scene);
     gpu.set_sky(None);
-    let camera = Camera { eye: v3(at[0] + 288.0, 46.0, at[1] + 120.0), at: v3(at[0] + 300.0, 40.0, at[1] + 160.0), fov: 1.0, near: 0.5, far: 2000.0 };
+    let camera = Camera { eye, at: look, fov: 1.0, near: 0.5, far: 2000.0 };
     let (w, h) = (320u32, 180u32);
     let texture = gpu.offscreen(w, h);
     let view = texture.create_view(&Default::default());
@@ -158,4 +170,110 @@ fn a_mod_map_in_a_world_is_drawn_as_sharp_as_alone() {
     let share = off as f32 / (alone.len() / 3) as f32;
     eprintln!("{off} pixels differ by more than 8, worst {worst}");
     assert!(share < 0.01, "{off} pixels ({:.1}%) of the world's frame differ from alone's by more than 8, worst {worst}", share * 100.0);
+}
+
+/// A disc map's splat: one layer, a checker of two-pixel squares on 64 pixels, laid every 8 feet and
+/// turned 30 degrees — 1/8 foot a pixel, which a baked page at 4.5 feet a pixel cannot begin to hold.
+fn splat() -> Splat {
+    let n = 64;
+    let layer = Texture {
+        width: n,
+        height: n,
+        rgba: (0..n * n)
+            .flat_map(|i| {
+                let c = checker((i % n) as u32, (i / n) as u32);
+                [c[0], c[1], c[2], 255]
+            })
+            .collect(),
+    };
+    let angle = 30f32.to_radians();
+    let pass = Pass {
+        texture: 0,
+        scale: [1.0 / 8.0, 1.0 / 8.0],
+        angle,
+        rgba: [128.0; 4],
+        blend: None,
+        fixed: 0.0,
+        turn: angle.sin_cos(),
+        reads: (true, false),
+    };
+    Splat { textures: vec![layer], passes: vec![pass], shadow: None, meshes: None }
+}
+
+/// The disc map in a world, as `worlds::look` makes it: a page baked from the splat (here its
+/// average, which is all 4.5 feet a pixel keeps of it), and with `sharp` the splat itself and a
+/// modulate page of ones — no roads, no light map — to draw it per pixel.
+fn disc_world(sharp: bool) -> WorldPaint {
+    let page = Texture { width: 128, height: 128, rgba: [130, 130, 110, 255].repeat(128 * 128) };
+    let one = game_render::terrain::MODULATE_ONE;
+    let modulate = Texture { width: 128, height: 128, rgba: [one, one, one, 255].repeat(128 * 128) };
+    let pages = Pages { pages: vec![page], across: 4, along: 4, page_of: vec![Some(0); 16], spacing: SPACING, detail: None, detail_repeat: SPACING * 8.0 };
+    let sharp = sharp.then(|| SharpSplat { splat: std::sync::Arc::new(splat()), modulate: vec![modulate] });
+    WorldPaint {
+        regions: Regions { owned: vec![[0.0, 0.0, SIDE, SIDE], [AT[0], AT[1], AT[0] + SIDE, AT[1] + SIDE]] },
+        tiles: vec![PaintTile { at: [0.0, 0.0], pages: Some(baked_pages()), sharp: None }, PaintTile { at: AT, pages: Some(pages), sharp }],
+        dirt: DIRT,
+    }
+}
+
+/// How many of `a`'s pixels `b` has off by more than [`SPLAT_TOLERANCE`], and the worst.
+fn differ(a: &[u8], b: &[u8]) -> (usize, i32) {
+    let (mut off, mut worst) = (0, 0);
+    for (a, b) in a.chunks_exact(3).zip(b.chunks_exact(3)) {
+        let d = a.iter().zip(b).map(|(&a, &b)| (a as i32 - b as i32).abs()).max().unwrap_or(0);
+        off += usize::from(d > SPLAT_TOLERANCE);
+        worst = worst.max(d);
+    }
+    (off, worst)
+}
+
+/// How far a pixel of a disc map in a world may be from alone's. A world samples the splat through
+/// the ground's anisotropic sampler and with gradients it works out itself (a map's block runs in
+/// non-uniform control flow), alone through the plain one and the hardware's: 22 feet over a two-
+/// texel checker the two parted by up to 12 on 1.7% of the pixels, the frame's oblique edges; the
+/// bake they replace was off by more than 16 on eight pixels in ten.
+const SPLAT_TOLERANCE: i32 = 16;
+
+#[test]
+fn a_disc_map_in_a_world_is_drawn_as_sharp_as_alone_near_and_far() {
+    let mut gpu = match Renderer::headless() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    // Near (the ground under the bike), a rider's look along it, and far, top-down so the
+    // anisotropic filter a world's ground has and alone's splat does not cannot part them.
+    let views = [("near", v3(300.0, 52.0, 300.0), v3(300.5, 40.0, 300.0)), ("mid", v3(300.0, 62.0, 300.0), v3(300.5, 40.0, 300.0)), ("far", v3(300.0, 300.0, 300.0), v3(300.5, 40.0, 300.0))];
+    let moved = |p: game_render::mat::V3| v3(p.x + AT[0], p.y, p.z + AT[1]);
+    let mut shots = Vec::new();
+    for sharp in [true, false] {
+        let w = disc_world(sharp);
+        gpu.set_ground_streamed(64, GroundPaint::World(&w), DIRT, 4.0 * SIDE).expect("the world");
+        gpu.add_ground_piece(1, &[chunk(AT)]).expect("the disc map's piece");
+        shots.push(views.map(|(_, eye, look)| frame_from(&mut gpu, moved(eye), moved(look))));
+    }
+    let s = splat();
+    gpu.set_ground(&[chunk([0.0, 0.0])], Some(&s), DIRT).expect("the map alone");
+    let alone = views.map(|(_, eye, look)| frame_from(&mut gpu, eye, look));
+    let pixels = (alone[0].len() / 3) as f32;
+    for (k, (name, _, _)) in views.iter().enumerate() {
+        let near = |p: &[u8], c: [u8; 3]| (0..3).all(|j| (p[j] as i32 - c[j] as i32).abs() < 40);
+        let checker = alone[k].chunks_exact(3).filter(|p| near(p, [220, 200, 60]) || near(p, [40, 60, 160])).count();
+        let (off, worst) = differ(&alone[k], &shots[0][k]);
+        let (baked, _) = differ(&alone[k], &shots[1][k]);
+        eprintln!("{name}: {checker} checker pixels alone; the world {off} off by more than {SPLAT_TOLERANCE} (worst {worst}), the bake alone {baked}");
+        if let Ok(dir) = std::env::var("GPU_TEST_PNG") {
+            let dir = std::path::Path::new(&dir);
+            let _ = game_render::png::write_rgb(&dir.join(format!("md35_{name}_alone.png")), 320, 180, &alone[k]);
+            let _ = game_render::png::write_rgb(&dir.join(format!("md35_{name}_world.png")), 320, 180, &shots[0][k]);
+        }
+        assert!(off as f32 / pixels < 0.01, "{name}: {off} pixels of the world's frame differ from alone's by more than {SPLAT_TOLERANCE}, worst {worst}");
+        // Near and mid the checker is there to lose; far it has averaged out, alone too.
+        if *name != "far" {
+            assert!(checker as f32 / pixels > 0.3, "{name}: only {checker} pixels of the checker alone");
+            assert!(baked as f32 / pixels > 0.3, "{name}: the baked page alone ({baked} pixels off) is as sharp as the splat; the test proves nothing");
+        }
+    }
 }

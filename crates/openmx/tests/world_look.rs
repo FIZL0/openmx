@@ -204,7 +204,7 @@ fn paint() -> WorldPaint {
             let bytes = terrain(s);
             let t = Terrain::parse(&bytes).expect("the generated terrain reads");
             let pages = Pages::of(&t, SPACING, (s.cells.0, s.cells.1)).expect("it has a page");
-            PaintTile { at: [s.at[0] as f32, s.at[1] as f32], pages: Some(pages) }
+            PaintTile { at: [s.at[0] as f32, s.at[1] as f32], pages: Some(pages), sharp: None }
         })
         .collect();
     WorldPaint { regions: Regions { owned }, tiles, dirt: [150.0, 118.0, 86.0] }

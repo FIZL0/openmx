@@ -203,6 +203,21 @@ impl Splat {
     /// the GS's way in its own units (alpha 128 = one), then the scene's screen-space meshes over
     /// them ([`GroundMeshes::paint`]).
     pub fn paint(&self, x: f32, z: f32) -> [u8; 3] {
+        let mut frame = self.passes_frame(x, z);
+        if let Some(m) = &self.meshes {
+            frame = m.paint(x, z, frame);
+        }
+        frame.map(|c| c.clamp(0.0, 255.0) as u8)[..3].try_into().unwrap()
+    }
+
+    /// [`Splat::paint`] without the screen-space meshes: the passes alone (MD35, what a world draws
+    /// per pixel, its baked pages giving back the roads and the light).
+    pub fn paint_passes(&self, x: f32, z: f32) -> [u8; 3] {
+        self.passes_frame(x, z).map(|c| c.clamp(0.0, 255.0) as u8)[..3].try_into().unwrap()
+    }
+
+    /// The frame every pass leaves, in the GS's units.
+    fn passes_frame(&self, x: f32, z: f32) -> [f32; 4] {
         let mut frame = [0.0f32; 4];
         for p in &self.passes {
             let (s, c) = p.turn;
@@ -218,10 +233,7 @@ impl Splat {
             ];
             frame = blend(src, frame, p.blend, p.fixed);
         }
-        if let Some(m) = &self.meshes {
-            frame = m.paint(x, z, frame);
-        }
-        frame.map(|c| c.clamp(0.0, 255.0) as u8)[..3].try_into().unwrap()
+        frame
     }
 
     /// The baked light at a point, 1 being "as painted"; `None` outside the light map.
