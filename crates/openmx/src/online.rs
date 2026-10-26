@@ -767,6 +767,8 @@ impl Online {
         sim.clone_from(&self.sims[seat]);
         if let (Some(frame), Some(body)) = (self.poses[seat], body) {
             body.posed_by(frame, &sim.rider.body.player, sim.rider.body_clocked);
+            // its hold and its feet off the pegs (V68), which the seat's body machine stepped with it
+            body.held_by(&sim.rider);
         }
         self.net.lineup.seats[seat].is_some()
     }

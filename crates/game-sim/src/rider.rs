@@ -295,6 +295,12 @@ pub struct Rider {
     /// ([`rider_anim::Clocked`], and V17 on why neither can be read back off the motion object once
     /// the step has returned). Written by `body_frame` and by nothing else.
     pub body_clocked: rider_anim::Clocked,
+    /// The riding body's two foot holds (V36, V68): [`crate::foot_down::Feet`], stepped by
+    /// [`Rider::body_frame`] on every tick that is neither a wreck nor a pose off the clip table.
+    /// Here rather than with the drawn body so that every rider whose body is run steps it, a ride's
+    /// online seats too, and a rollback or a resync takes it back with the rest of the rider. Read
+    /// by whoever draws the body; nothing in the simulation reads it, and it is not hashed.
+    pub feet: crate::foot_down::Feet,
     /// The request block the body's selection and step read, as this module publishes it.
     /// [`Rider::body_frame`] rewrites every field it derives from the rider each frame and leaves the
     /// other two (`cut`, `offset`) alone, because the body itself is the only thing here that writes
@@ -372,6 +378,7 @@ impl Rider {
             body_rates: vehicle_anim::Params::default(),
             idles: rider_anim::Pool::default(),
             body_clocked: rider_anim::Clocked::default(),
+            feet: crate::foot_down::Feet::default(),
             // At the gate: the cut flag is what the body's selection takes its get-ready sequence
             // off, and the body is the only thing in the port that ever clears it (the throttle
             // opening). **The port's own** — in the original the flag is published by whatever owns
@@ -1105,6 +1112,7 @@ impl Rider {
             wreckage,
             ragdoll,
             put_back,
+            feet,
             ..
         } = self;
         // A front flip (MD16, P159) leans the rider forward rather than playing the backflip's clip.
@@ -1180,6 +1188,11 @@ impl Rider {
             clip,
         );
         *body_clocked = clocked;
+        // The foot switch runs where the body actor runs it (V36): on every tick that is neither a
+        // wreck nor a pose off the clip table, off what the shell's riding request hands the ragdoll.
+        if body.machine.mode != rider_anim::Mode::Wrecked && body.machine.mode != rider_anim::Mode::Posed {
+            feet.step(dt, &crate::foot_down::Input::of(ride, &body.veh));
+        }
         frame
     }
 }

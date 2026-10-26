@@ -495,6 +495,7 @@ impl Wire for Rider {
             body_rates,
             idles,
             body_clocked,
+            feet,
             body_request,
             flight,
             airborne,
@@ -523,6 +524,7 @@ impl Wire for Rider {
         body_rates.put(out);
         idles.put(out);
         body_clocked.put(out);
+        feet.put(out);
         body_request.put(out);
         flight.put(out);
         airborne.put(out);
@@ -559,6 +561,7 @@ impl Wire for Rider {
             body_rates: Wire::take(r)?,
             idles: Wire::take(r)?,
             body_clocked: Wire::take(r)?,
+            feet: Wire::take(r)?,
             body_request: Wire::take(r)?,
             flight: Wire::take(r)?,
             airborne: Wire::take(r)?,
@@ -577,6 +580,7 @@ wire!(crate::traffic::Car { clock, seg, point, head, normal, first, pose });
 wire!(crate::toys::Clock { time, prev, finished });
 wire!(crate::toys::Hint; at);
 wire!(crate::ghost::Ghost { clock, alpha, on });
+wire!(crate::foot_down::Feet { held, fade, weight });
 wire!(crate::rider::PutBack { placed, filled, held, wreck });
 wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out });
 wire!(crate::score::Node { flags, id, points, base, rate, mult, extra, held, granularity });
