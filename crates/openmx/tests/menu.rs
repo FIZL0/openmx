@@ -1402,7 +1402,7 @@ fn a_seat_dresses_its_rider_saves_the_look_and_a_second_seat_rides_it_after_a_re
         .map(|p| {
             let rider = catalogue.rider(&p.rider).unwrap();
             let suit = game_render::rider::Suit { materials: rider.suit.clone(), ..Default::default() };
-            let tex = kit.texture(&p.rider, &p.look, &p.bike).expect("a name to paint");
+            let tex = kit.texture(&mut disc, &p.rider, &p.look, &p.bike).expect("a name to paint");
             (kit.repaint(&suit, &p.look), tex.rgba)
         })
         .collect();
@@ -1421,6 +1421,64 @@ fn a_seat_dresses_its_rider_saves_the_look_and_a_second_seat_rides_it_after_a_re
     let mut third = roster::Garage::new(&catalogue, &roster::Pick::default());
     assert!(third.load_preset(&catalogue, &again.looks, "kaito 72"));
     assert_eq!(third.pick, picks[1]);
+}
+
+// ---- the dressed rider beside the original (P91) -----------------------------------------------
+
+#[test]
+fn a_long_name_and_a_three_digit_number_are_painted_as_the_original_paints_them() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let mut kit = dress::Kit::open(&mut disc);
+    // A pro rider's gear set wears a sponsor's `[JerseyPants]` entry, as the original's uniform
+    // table in RAM has it; a stock set its own.
+    let worn = |kit: &mut dress::Kit, disc: &mut game_render::Disc, set: &str| kit.uniform(disc, set).map(|o| (o.id.clone(), o.name_font.clone()));
+    for (set, entry, font) in [
+        ("thq1", "thq1", "name3"),
+        ("thor1", "thor1", "name3_black"),
+        ("parsons1", "skin1", "name3_black"),
+        ("parsons2", "skin2", "name3"),
+        ("faisst1", "generic1", "name3"),
+        ("renner1", "tld1", "name3"),
+        ("langston1", "thor1", "name3_black"),
+        ("lusk1", "generic2", "name3"),
+        ("preston2", "shift2", "name3"),
+    ] {
+        assert_eq!(worn(&mut kit, &mut disc, set), Some((entry.to_string(), font.to_string())), "{set}");
+    }
+
+    // A custom THQ1 rider called Maximilianus, 888, on a white-digit and a black-digit bike: the
+    // original's own NameDefault0 for each, read out of PCSX2's RAM, has this many texels painted on
+    // each row. The name is too wide for the texture and the original does not fit it: its first
+    // letters come round at the end of the row above (row 10) and its last at the start of the row
+    // below (row 21).
+    const ROWS: [usize; 128] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 55, 56, 56, 57, 56, 57, 59, 60, 60, 59, 10, 0, 0, 0, 24, 30, 36, 36, 42, 42, 42, 39, 39, 39, 39, 42,
+        42, 36, 33, 42, 48, 48, 42, 45, 45, 42, 45, 48, 48, 48, 42, 39, 33, 27, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 27, 33, 33, 33, 24, 24,
+        24, 24, 24, 27, 27, 33, 39, 30, 30, 30, 30, 39, 39, 39, 33, 27, 0, 0, 0, 0, 0, 0, 0, 21, 27, 33, 33, 33, 24, 24, 24, 24, 24, 27, 27,
+        33, 39, 30, 30, 30, 30, 39, 39, 39, 33, 27, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let look = roster::Look { name: "Maximilianus".into(), number: "888".into(), ..Default::default() };
+    for (bike, plate, digit) in [("cr125_thq_01", "plate3", 255), ("cr250_thq_01", "plate3_black", 0)] {
+        let worn = kit.uniform(&mut disc, "thq1").cloned();
+        let faces = dress::Faces::of(&kit.wardrobe, "thq1", worn.as_ref(), &look, bike);
+        assert_eq!(faces, dress::Faces { name: "name3".into(), number: "number3".into(), plate: plate.into() });
+        let t = kit.texture(&mut disc, "thq1", &look, bike).unwrap();
+        let px = |x: usize, y: usize| &t.rgba[(y * 64 + x) * 4..][..4];
+        let rows: Vec<usize> = (0..128).map(|y| (0..64).filter(|&x| px(x, y)[3] > 0).count()).collect();
+        assert_eq!(rows, ROWS, "{bike}");
+        // Colours as the original's palette has them, within its quantizer's 5: the name's dark
+        // edge, the number's white fill, and the plate digit white on one bike and black on the other.
+        let near = |p: &[u8], want: [u8; 4]| p.iter().zip(want).all(|(&a, b)| a.abs_diff(b) <= 5);
+        assert!(near(px(0, 21), [0, 0, 8, 255]), "{:?}", px(0, 21));
+        assert!(near(px(14, 30), [248, 248, 248, 255]), "{:?}", px(14, 30));
+        assert!(near(px(20, 100), [digit, digit, digit, 255]), "{bike} {:?}", px(20, 100));
+    }
 }
 
 // ---- the splash (P46) ----------------------------------------------------------------------------
