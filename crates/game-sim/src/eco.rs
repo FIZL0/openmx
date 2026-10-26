@@ -622,6 +622,18 @@ impl Trees {
         (trees, missed)
     }
 
+    /// A track's trees as its ride loads them (V50): `esb` read, every plant that asks stood on
+    /// `ground` by the terrain object's own point query, and the trunks built on a cell of the map's
+    /// larger side over 65536 — the field's samples times their spacing, as the renderer's grove
+    /// measures it (V48). The second half is [`Trees::new`]'s.
+    pub fn on_ground(esb: &[u8], ground: &world::Ground, curve: &CurveTable) -> Result<(Trees, Vec<String>), String> {
+        let mut eco = Ecosystem::parse(esb)?;
+        let extent = F::from(ground.samples_x.max(ground.samples_z) as i32) * ground.spacing;
+        let field = ground.field();
+        eco.stand(extent, |p| F(crate::contact_search::ground(&field, p).point.y()));
+        Ok(Trees::new(&eco, cell_size(extent), curve))
+    }
+
     /// The plants as placed groups, in the file's order.
     pub fn groups(&self) -> &[Group] {
         &self.groups

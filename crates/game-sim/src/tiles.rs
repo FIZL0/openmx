@@ -671,6 +671,10 @@ impl Heightfield for TiledField<'_> {
 pub enum Land<'a> {
     Track(Place<'a>),
     Tiles(Box<Tiled>),
+    /// A track with its ecosystem's trunks standing in it (V50): the shell's ride of a scene that
+    /// names an `.esb`. The trunks answer only what [`crate::eco::Wooded`] gives them; the camera's
+    /// questions go to the track, as the original's camera asks only the terrain.
+    Woods(Box<crate::eco::Wooded<Place<'a>>>),
 }
 
 impl Land<'_> {
@@ -678,13 +682,14 @@ impl Land<'_> {
         match self {
             Land::Track(p) => p,
             Land::Tiles(t) => &mut **t,
+            Land::Woods(w) => &mut **w,
         }
     }
 
     /// The world of tiles, when this is one.
     pub fn tiled(&mut self) -> Option<&mut Tiled> {
         match self {
-            Land::Track(_) => None,
+            Land::Track(_) | Land::Woods(_) => None,
             Land::Tiles(t) => Some(&mut **t),
         }
     }
@@ -713,12 +718,14 @@ impl World for Land<'_> {
         match self {
             Land::Track(p) => p.area(),
             Land::Tiles(t) => t.area(),
+            Land::Woods(w) => w.area(),
         }
     }
     fn off_world(&self, at: Vf, margin: F) -> bool {
         match self {
             Land::Track(p) => p.off_world(at, margin),
             Land::Tiles(t) => t.off_world(at, margin),
+            Land::Woods(w) => w.off_world(at, margin),
         }
     }
     fn keeps(&mut self, at: Vf) -> bool {
@@ -728,12 +735,21 @@ impl World for Land<'_> {
         match self {
             Land::Track(p) => p.heightfield(),
             Land::Tiles(t) => t.heightfield(),
+            Land::Woods(w) => w.heightfield(),
         }
     }
     fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>) {
         match self {
             Land::Track(p) => p.collision(),
             Land::Tiles(t) => t.collision(),
+            Land::Woods(w) => w.collision(),
+        }
+    }
+    fn wooded(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&crate::eco::Trees>) {
+        match self {
+            Land::Track(p) => p.wooded(),
+            Land::Tiles(t) => t.wooded(),
+            Land::Woods(w) => w.wooded(),
         }
     }
 }
@@ -743,6 +759,7 @@ impl Surface for Land<'_> {
         match self {
             Land::Track(p) => p.on_surface(point),
             Land::Tiles(t) => t.on_surface(point),
+            Land::Woods(w) => w.world.on_surface(point),
         }
     }
 }
@@ -752,6 +769,7 @@ impl Obstacles for Land<'_> {
         match self {
             Land::Track(p) => p.nearest(start, end),
             Land::Tiles(t) => t.nearest(start, end),
+            Land::Woods(w) => w.world.nearest(start, end),
         }
     }
 }

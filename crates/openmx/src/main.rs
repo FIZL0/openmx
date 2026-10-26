@@ -2445,6 +2445,34 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     for line in missed.iter().take(3) {
         println!("  {line}");
     }
+    // The trees the scene's ecosystem stands, each trunk a solid under its plant (S97, V50): what
+    // stops the rider at a free09 tree. A world's tiles bring theirs to the picture only (MD15).
+    let trees = match look.ecosystem_file.as_deref() {
+        Some(file) if world_mod.is_none() => {
+            let ground = sim_world::Ground::new(sim_terrain, &place.terrain);
+            let curve = game_sim::camera::CurveTable::build();
+            match archives.iter().find_map(|a| a.read_suffix(file).ok()) {
+                Some(esb) => match game_sim::eco::Trees::on_ground(&esb, &ground, &curve) {
+                    Ok((trees, missed)) => {
+                        println!("trees: {} trunks under {} plants", trees.props.props.len(), trees.groups().len());
+                        for line in missed.iter().take(3) {
+                            println!("  {line}");
+                        }
+                        Some(trees)
+                    }
+                    Err(e) => {
+                        println!("trees: {file}: {e}");
+                        None
+                    }
+                },
+                None => {
+                    println!("trees: no {file} in the track's archives");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
 
     // ---- what to draw -------------------------------------------------------------------------
     progress.reach(loading::Stage::Models)?;
@@ -2987,7 +3015,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The world's ground and its pieces' shapes in place of the one track's (MD8).
     let mut sim = match tiled.take() {
         Some(t) => Land::Tiles(t),
-        None => Land::Track(Place { ground: sim_world::Ground::new(&sim_terrain, &place.terrain), props }),
+        None => {
+            let track = Place { ground: sim_world::Ground::new(&sim_terrain, &place.terrain), props };
+            match trees {
+                Some(trees) => Land::Woods(Box::new(game_sim::eco::Wooded { world: track, trees })),
+                None => Land::Track(track),
+            }
+        }
     };
     // The cars the track's `.toy` drives along their clips (V41): free06's train, its trucks and
     // scrapers, the other freeride tracks' trailers. Drawn, not ridden into: they reach nothing in the
