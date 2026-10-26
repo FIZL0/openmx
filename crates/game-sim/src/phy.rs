@@ -1533,6 +1533,10 @@ pub struct Autopilot {
     /// Not a key of the file: the Biplane max G modifier's limit, in g (P137), which the flight's
     /// hold keeps the pull under. Zero, off, as read.
     pub max_g: F,
+    /// Not a key either: the least share of the aileron the hold eases a roll to above the corner
+    /// speed, 1 / how many times the file's top speed the modifiers make the plane's (P137). One as
+    /// read.
+    pub max_g_roll: F,
 }
 
 /// `[Joystick]`: how fast the throttle and the three surfaces follow the pad.
@@ -1652,6 +1656,7 @@ impl Plane {
             pitch_rate_gain: s.float_or("PitchRateGain", F::ZERO),
             pitch_rate_integrator_gain: s.float_or("PitchRateIntegratorGain", F::ZERO),
             max_g: F::ZERO,
+            max_g_roll: F::ONE,
         };
 
         let s = ini.section("Joystick");
