@@ -55,6 +55,8 @@ const FIRED: [u8; 4] = [0x5e, 0xe0, 0x5e, 255];
 const MAROON: ([u8; 4], [u8; 4]) = ([0xb3, 0x1a, 0x23, 255], [0x5a, 0x07, 0x0c, 255]);
 /// The Circle's ring.
 const CIRCLE: [u8; 4] = [0xe0, 0x47, 0x3f, 255];
+/// The Cross button's blue, for the join cue (P171).
+const CROSS: [u8; 4] = [0x7c, 0xb2, 0xe8, 255];
 
 const fn shade(a: u8) -> [u8; 4] {
     [0, 0, 0, a]
@@ -170,6 +172,8 @@ pub struct Shown<'a> {
     /// The HUD scale (1 is the disc's size) and whether the radar is drawn.
     pub scale: f32,
     pub minimap: bool,
+    /// Whether this view says how to join the ride (P171): a seat is free and a controller idle.
+    pub join: bool,
 }
 
 // ---- what moves with time -------------------------------------------------------------------------
@@ -456,6 +460,8 @@ pub struct Drawn {
     pub prompts: Vec<Line>,
     pub markers: Option<PanelDrawn>,
     pub camera: Option<Line>,
+    /// The join cue (P171).
+    pub join: Option<Line>,
 }
 
 // ---- the pen --------------------------------------------------------------------------------------
@@ -1052,7 +1058,60 @@ fn top_right(pen: &mut Pen, shown: &Shown, tracker: &Tracker, now: Instant, draw
         let r = pen.text(Face::Words, Weight::Heavy, name, (right - w + 0.9 * EM, top + h / 2.0 + Pen::cap(Face::Words, size) / 2.0), size, ink::SLANT, GREY);
         pen.alpha = 1.0;
         drawn.camera = Some(Line { text: name.to_string(), rect: r, colour: GREY });
+        top += h + 0.5 * EM;
     }
+    if shown.join {
+        drawn.join = Some(join_cue(pen, right, top));
+    }
+}
+
+/// What the join cue says after its Cross (P171).
+pub const JOIN_WORDS: &str = "to join";
+
+/// The join cue (P171), its right edge at `right` and its top at `top`: a dark pill holding
+/// "Press", the Cross button and [`JOIN_WORDS`] — the join screen's open seat's words.
+fn join_cue(pen: &mut Pen, right: f32, top: f32) -> Line {
+    let size = 0.95 * EM;
+    let btn = 1.45 * size;
+    let gap = 0.35 * size;
+    let (pw, jw) = (Pen::measure(Face::Words, Weight::Heavy, "Press", size), Pen::measure(Face::Words, Weight::Heavy, JOIN_WORDS, size));
+    let w = 0.9 * EM + pw + gap + btn + gap + jw + 0.9 * EM;
+    let h = btn + 0.5 * EM;
+    let left = right - w;
+    pen.round([left, top, w, h], h / 2.0, shade(128), shade(128));
+    let (mid, base) = (top + h / 2.0, top + h / 2.0 + Pen::cap(Face::Words, size) / 2.0);
+    let first = pen.text(Face::Words, Weight::Heavy, "Press", (left + 0.9 * EM, base), size, ink::SLANT, WHITE);
+    cross_button(pen, (left + 0.9 * EM + pw + gap + btn / 2.0, mid), btn);
+    let last = pen.text(Face::Words, Weight::Heavy, JOIN_WORDS, (left + 0.9 * EM + pw + gap + btn + gap, base), size, ink::SLANT, WHITE);
+    Line { text: format!("Press \u{2715} {JOIN_WORDS}"), rect: [first[0], first[1].min(last[1]), last[2], first[3].max(last[3])], colour: WHITE }
+}
+
+/// The Cross button, `d` across, as the Circle's is drawn: a black disc, its rim and the blue X.
+fn cross_button(pen: &mut Pen, at: (f32, f32), d: f32) {
+    pen.disc(at, d / 2.0, [0x1b, 0x14, 0x10, 255]);
+    pen.circle(at, d / 2.0, 0.1 * d / 1.6, [255, 255, 255, 153]);
+    let k = d * 0.2;
+    pen.bar((at.0 - k, at.1 - k), (at.0 + k, at.1 + k), d * 0.06, d * 0.06, CROSS);
+    pen.bar((at.0 - k, at.1 + k), (at.0 + k, at.1 - k), d * 0.06, d * 0.06, CROSS);
+}
+
+/// The join cue alone (P171) in view `view`'s top right, for a ride drawn under the original's HUD,
+/// which has none of the ride HUD's pieces to stand among: as sprites into `out`, [`images`] counted
+/// from `base`, at the HUD scale `scale`.
+pub fn join_sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], scale: f32) -> Line {
+    let s = scale_of(view[2], view[3], scale);
+    let mut pen = Pen { out, view, s, base, corner: Corner::TopRight, alpha: 1.0 };
+    let (right, top) = TOP_RIGHT;
+    join_cue(&mut pen, right, top)
+}
+
+/// [`join_sprites`] drawn into `frame`, which is the view's picture, on the CPU.
+pub fn join_draw(frame: &mut Frame, scale: f32) -> Line {
+    let mut out = Vec::new();
+    let view = [0.0, 0.0, frame.width as f32, frame.height as f32];
+    let line = join_sprites(&mut out, 0, view, scale);
+    ink::raster(frame, &out, &images());
+    line
 }
 
 struct PanelOut {

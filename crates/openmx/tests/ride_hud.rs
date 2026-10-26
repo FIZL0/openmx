@@ -68,6 +68,7 @@ fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Optio
         markers,
         scale: 1.0,
         minimap: true,
+        join: false,
     }
 }
 

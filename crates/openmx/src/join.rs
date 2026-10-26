@@ -11,8 +11,8 @@
 //! * a seated one presses **Circle** to leave, and its seat is open again;
 //! * **Square** from any seated controller lets go of the seats whose controllers are gone (below);
 //! * **Start** from a seated controller is done — from the menu once at least [`FEWEST`] seats are in
-//!   play, the host and one more (P51): a local game of one is a Free Ride — and **Circle** from one
-//!   with no seat is back.
+//!   play, which is one (P171): a local game may start alone, since the others can drop in on the
+//!   ride as it runs (P76) — and **Circle** from one with no seat is back.
 //!
 //! The seats are the riders, in order, and the split screen has one view per seat in play
 //! ([`Join::views`]): open seats are skipped, so two players on seats 1 and 3 are a two-way split.
@@ -38,9 +38,9 @@ pub const ON_SCREEN: usize = 4;
 /// The most seats the screen can be made with ([`Join::new`]): P35's eight.
 pub const MOST: usize = 8;
 
-/// The fewest seats in play a local game starts with from the menu (P51): the host and one more. A
-/// player alone rides a Free Ride.
-pub const FEWEST: usize = 2;
+/// The fewest seats in play a local game starts with from the menu: the host alone (P171; P51 had
+/// asked for one more), since whoever comes later joins the running ride with Cross (P76).
+pub const FEWEST: usize = 1;
 
 /// What one seat holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

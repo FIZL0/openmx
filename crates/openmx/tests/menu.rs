@@ -1850,27 +1850,47 @@ fn two_or_three_pads_start_a_local_game_with_a_view_each() {
 }
 
 #[test]
-fn one_pad_cannot_start_a_local_game_but_can_free_ride() {
-    // Alone on the join screen, Start stays there, with other pads plugged in that have not joined.
+fn one_pad_starts_a_local_game_alone_and_can_free_ride() {
+    // Alone on the join screen (P171), Start goes on — with other pads plugged in that have not
+    // joined too — straight to the track pick, there being no layout to pick for one view, and the
+    // ride is a local game of one on the host's pad seat, open to the others as it runs (P76).
     for pads in [1, 2] {
-        let (m, acts) = local_game(pads, &[]);
-        assert_eq!(m.screen(), Some(Screen::Join), "{pads} pads plugged in, one joined");
-        assert!(acts.iter().all(|a| *a == Act::Stay), "{acts:?}");
-        assert!(!m.join.can_start());
-        assert!(m.party().is_none());
+        let all: Vec<usize> = (0..pads).collect();
+        let (mut m, mut rd) = fresh_with(pads);
+        tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+        tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+        assert!(m.join.can_start(), "{pads} pads plugged in, one joined");
+        tap_device(&mut m, &mut rd, &all, 0, Control::Start);
+        assert_eq!(m.screen(), Some(Screen::Tracks), "{pads} pads: no split screen for one");
+        let party = m.party().expect("a local game of one").clone();
+        assert_eq!((party.players(), party.devices.clone(), m.riders), (1, vec![0], 1));
+        assert_eq!(party.layout(), split::Layout::Full);
+        // Back is the join screen again, the host still on it.
+        tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
+        assert_eq!(m.screen(), Some(Screen::Join));
+        assert_eq!(m.join.views().len(), 1);
+        tap_device(&mut m, &mut rd, &all, 0, Control::Start);
+        let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+        assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+        assert_eq!(m.ride_devices(), [0]);
     }
-    // A pad that joins and leaves again leaves the host alone.
+    // A pad that joins and leaves again leaves the host alone, who still starts.
     let all = [0, 1];
     let (mut m, mut rd) = fresh_with(2);
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
     tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
-    tap_device(&mut m, &mut rd, &all, 0, Control::Start);
-    assert_eq!(m.screen(), Some(Screen::Join));
+    // and a joiner who is not the host may be the one alone: the host leaves, pad seat 1 starts
+    tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
+    tap_device(&mut m, &mut rd, &all, 1, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    assert_eq!(m.party().map(|p| p.devices.clone()), Some(vec![1]));
     // Back on the main menu, the same pad rides a Free Ride on its own.
     tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
     tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
     tap_device(&mut m, &mut rd, &all, 0, Control::Up);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
@@ -4857,6 +4877,92 @@ fn players_drop_into_a_running_freeride_and_leave_it_and_the_others_ride_on() {
     let acts = r.tap(0, Control::Cross);
     assert!(acts.contains(&Act::MainMenu), "{acts:?}");
     assert_eq!(r.m.screen(), Some(Screen::Main));
+}
+
+/// A ride of one under way on `menu` (P171), its rider on pad seat `device`, as the shell's loop
+/// keeps it: [`DropIn`] over four pad seats, `first` the front end's own reader.
+fn alone_on(mut m: Menu, first: Reader, device: usize) -> DropIn {
+    assert!(m.riding() && m.riders == 1);
+    assert_eq!(m.ride_devices(), [device], "the ride reads its rider's own pad seat");
+    m.seats_open = true;
+    let mut lot = vehicle::Lot::new(MACHINES.as_bytes(), 1, &mut |_| 0.0);
+    let garage = Garage::new(Kind::Bike, lot.plane(0, None)).unwrap();
+    DropIn {
+        m,
+        readers: vec![first],
+        idle: (0..4).map(|_| Reader::new()).collect(),
+        rides: vec![(device, game_sim::Sim::new(0x88))],
+        garages: vec![garage],
+        lot,
+        ticks: Default::default(),
+        frames: Vec::new(),
+        joined: [(device, 0)].into(),
+    }
+}
+
+#[test]
+fn a_lone_rider_on_any_pad_seat_is_joined_by_another_and_the_cue_says_how() {
+    // A Free Ride from the main menu by pad input alone. The shell puts 1P — a pad, or the keyboard
+    // when the splash was taken on it — on pad seat 0, and every other pad behind it in join order
+    // (pad.rs's PadSlots, tested there): so a lone rider on the keyboard, on the first pad or on the
+    // second is the rider on pad seat 0 here, and the second pad is pad seat 1.
+    let all = [0, 1, 2, 3];
+    let (mut m, mut rd) = fresh_with(4);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    let mut r = alone_on(m, rd.remove(0), 0);
+    for _ in 0..10 {
+        r.frame(&[]);
+    }
+    // The cue while a pad seat no player reads has a controller in it, not for the rider's own.
+    assert!(r.m.join_cue(&[1]), "a second pad in, a seat free: the cue");
+    assert!(!r.m.join_cue(&[]), "no other controller: no cue");
+    assert!(!r.m.join_cue(&[0]), "the rider's own pad is not idle");
+    let acts = r.tap(1, Control::Cross);
+    assert!(acts.contains(&Act::Join(1)), "{acts:?}");
+    assert_eq!(r.ids(), vec![0, 1]);
+    assert_eq!(r.views(), (split::Layout::Stacked, 2), "the split lays out again for two");
+    assert!(!r.m.join_cue(&[]), "seated, the cue is gone");
+    assert!(r.m.join_cue(&[2]), "a third pad in: the cue again");
+    r.tap(2, Control::Cross);
+    r.tap(3, Control::Cross);
+    assert_eq!(r.ids(), vec![0, 1, 2, 3]);
+    assert!(!r.m.join_cue(&[4]), "full: no cue, whoever else is plugged in");
+    // The seats stay open over the pause too, and closed (online, a tape) there is no cue at all.
+    r.m.seats_open = false;
+    r.tap(3, Control::Circle);
+    assert!(!r.m.join_cue(&[4]));
+
+    // A local game of one on pad seat 1 (P171): the host's pad 0 left the join screen, pad 1
+    // started alone. Its ride reads pad seat 1, so pad seat 0 is the idle one and joins as 2P, and
+    // the rider's own Cross is their throttle, not a join.
+    let (mut m, mut rd) = fresh_with(4);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
+    tap_device(&mut m, &mut rd, &all, 1, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    let mut r = alone_on(m, rd.remove(0), 1);
+    for _ in 0..10 {
+        r.frame(&[]);
+    }
+    assert!(r.m.join_cue(&[0]) && !r.m.join_cue(&[1]));
+    let acts = r.tap(1, Control::Cross);
+    assert!(!acts.iter().any(|a| matches!(a, Act::Join(_))), "the rider's own pad joined: {acts:?}");
+    let acts = r.tap(0, Control::Cross);
+    assert!(acts.contains(&Act::Join(0)), "{acts:?}");
+    assert_eq!(r.ids(), vec![1, 0], "1P stays on pad seat 1, the joiner rides pad seat 0");
+    assert_eq!(r.m.ride_devices(), [1, 0]);
+    assert_eq!(r.views(), (split::Layout::Stacked, 2));
+    for _ in 0..10 {
+        r.frame(&[]);
+    }
+    // each player's ride stepped on their own pad all along (DropIn::frame asserts it per tick)
+    assert!(r.ticks[&0].len() >= 10 && r.ticks[&1].len() >= 20);
 }
 
 /// `tests/ride.rs`'s wreck limits, appended to the stand-in bike as `tests/right_stick_camera.rs`

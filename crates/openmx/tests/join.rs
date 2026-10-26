@@ -109,23 +109,28 @@ fn join_move_and_leave() {
 }
 
 #[test]
-fn start_needs_the_host_and_one_more() {
-    // From the menu, one seat in play is not a local game (P51); two is.
+fn start_needs_only_the_host() {
+    // From the menu one seat in play is a local game (P171): the others drop in on the ride. With
+    // nobody in, Start is nobody's — an unseated controller's Start does nothing.
     let mut screen = Join::new(ON_SCREEN, Opened::Menu);
     let (mut a, mut b) = (Pad::new("a"), Pad::new("b"));
-    a.tap(&mut screen, &[Control::Cross]);
     assert!(!screen.can_start());
     assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Stay]);
+    a.tap(&mut screen, &[Control::Cross]);
+    assert!(screen.can_start());
+    assert_eq!(b.tap(&mut screen, &[Control::Start]), [Outcome::Stay], "not seated");
+    assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Done]);
     b.tap(&mut screen, &[Control::Cross]);
     assert!(screen.can_start());
     assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Done]);
     // a gone seat is still a rider, and counts
     screen.update(&["a"]);
     assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Done]);
-    // left again: alone
+    // left again: alone, which still starts
     screen.update(&["a", "b"]);
     b.tap(&mut screen, &[Control::Circle]);
-    assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Stay]);
+    assert_eq!(screen.views().len(), 1);
+    assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Done]);
     // From the pause the ride goes on with whoever is left.
     let mut screen = Join::with(&[Some("a")], ON_SCREEN, Opened::Pause);
     assert_eq!(a.tap(&mut screen, &[Control::Start]), [Outcome::Done]);
