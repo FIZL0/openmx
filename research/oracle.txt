@@ -5265,3 +5265,28 @@ node_name             boot 0x001b4fa0 node +0x120 is a pointer to the name
 # +0x160 start turn. Every prop node in this state carries negative zeros (posed by its world at
 # rest), and twelve rotated ones drift an ulp or two off the scene's frame: the bodies were made off
 # already-posed nodes (a second load?). SH_CrateC model 529's start turn is an ulp off the port's.
+
+# V44 — the birds and the SequenceAnimatedToys (crates/game-render/src/creature.rs; journal
+#   2026-10-26-v44-creatures). Strings: ToyBirds.cpp 0x00444b00, the bird keys 0x00444b10..0x00444e98
+#   (StartPosition 0x00444d00, IsFlying 0x00444d10, StartingSplineName 0x00444d20, StartingSplineNode
+#   0x00444d40), the sequence toy's 0x004452c0..0x004453b0.
+#   bird manager load 0x003ab040: splines, perches, [Birds], then each flock's birds marked unplaced;
+#   per flock N = 0.333 x NumFlyingBirds, groups = int(N + 1), group size int(rand() x 2^-31 x 2) + 3,
+#   node int(g x nodes / N), target the next node; then the offsets (BirdFlockOffset) over the whole
+#   list in a pattern of eight. rand is the game's one generator, srand'd from the clock first use.
+#   .vue parser 0x003ac6b0 (transform f9,f11,f10 position, f6,f8,f7 up); spline reader 0x003ad2b0
+#   (VUE +0x48, To name +0x4c, From name +0x50, FPS +0x54 default 60, nodes count +0x58 / list +0x6c,
+#   from idx +0x5c, from node-1 +0x60, to idx +0x64, to node-1 +0x68, PerchLookVector +0x70; flags bit0
+#   looping default on, bit1 occupied, bit2 WaitToBeTriggered — no bird code reads it —, bit3 perch).
+#   bird init 0x003ad5e0, update 0x003ada40 (reach < 2 ft), LOD pick 0x003ad920 (FarDistanceToAnimate,
+#   MaxAnimatingBirdsPerTick), next node 0x003adbe0, node wrap 0x003ae7b0, transitions 0x003adea0,
+#   move 0x003ae510 (mode 1: (min((n-node)/n, 0.65) + 0.35) x FPS; Land at node n-3), switch spline
+#   0x003ae820, set motion 0x003ae740, look-at 0x001b1d70. ScareBirds reader 0x003ae960, run 0x003aea00
+#   -> 0x003ac9a0. Clip step 0x00144800 (loop bit +0x28 bit0), play from start 0x001463d0, blend 0x00146490.
+#   The frustum test 0x003af210 / 0x003aeaa0 / 0x003af890 is the camera's, not a trigger's.
+#   toy trigger reader 0x001c69b0 (from 0x00213550): Radius > 0 a sphere, else Box via 0x001e7b10
+#   placed by 0x0013e330; contact 0x001c6190 (OneTimeOnly, RandomTriggerPercent), actions 0x001c7560 /
+#   0x001c6f60. Keys IgnoreTrigger 0x0042c658, RandomTriggerPercent 0x0042c6e0, OneTimeOnly 0x0042c750.
+#   sequence toys: list 0x003b50c0 (0x170 bytes, ctor 0x003b51c0, vtable 0x0045dcf0), section 0x003b52c0
+#   (base 0x002144d0, motion by name 0x001426a0), next motion 0x003b5630 (int(rand x 2^-31 x 100) <=
+#   chance - 1, or past count tries), update 0x003b5480 (only while 0x00215050 says visible).

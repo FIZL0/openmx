@@ -37,6 +37,7 @@
 pub mod anim;
 pub mod biplane;
 pub mod chassis;
+pub mod creature;
 pub mod disc;
 pub mod eco;
 pub mod glow;
