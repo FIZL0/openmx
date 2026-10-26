@@ -240,6 +240,39 @@ pub fn pose(model: &Model, s: &Surfaces) -> Vec<M4> {
         .collect()
 }
 
+/// One drawn frame's moving parts between two ticks' (V79): `was` the tick before, `now` the last,
+/// `t` how far the frame is from one to the other, as the plane's placement is slid.
+///
+/// The original eases its surfaces with the rate limits of the plane's control law
+/// (`game_sim::biplane::controls`: the ailerons at 9 rad/s, the elevator at 9 a second, the rudder at
+/// 1 rad/s, `biplane.phy`), a straight ramp a tick at a time, and draws each 30 Hz tick as it is —
+/// the ailerons step 0.3 rad a tick. The picture here runs above the tick rate, so the ramp is drawn
+/// between its ticks too: each angle straight from `was` to `now`, which is the ramp the control law
+/// makes, cut finer. The prop goes the short way round, since the engine wraps its angle and turns it
+/// under half a turn a tick (0.76 rad in the human's flight). A wrecked prop (`None` either side) and
+/// the cone are `now`'s: a crash is a switch, not a move.
+pub fn between(was: &Surfaces, now: &Surfaces, t: f32) -> Surfaces {
+    use ps2_float::F;
+    let t = t.clamp(0.0, 1.0);
+    let f = |a: F, b: F| F(a.0 + (b.0 - a.0) * t);
+    let prop = match (was.prop, now.prop) {
+        (Some(a), Some(b)) => {
+            let turn = std::f32::consts::TAU;
+            let d = (b.0 - a.0).rem_euclid(turn);
+            let d = if d > turn / 2.0 { d - turn } else { d };
+            Some(F(b.0 - d * (1.0 - t)))
+        }
+        _ => now.prop,
+    };
+    Surfaces {
+        flaps: std::array::from_fn(|i| f(was.flaps[i], now.flaps[i])),
+        rear: f(was.rear, now.rear),
+        rudder: f(was.rudder, now.rudder),
+        prop,
+        cone: now.cone,
+    }
+}
+
 /// A node's transform in its model's own space, by name, ignoring case as the engine's lookup does.
 fn node(model: &Model, name: &str) -> Option<M4> {
     let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
@@ -361,6 +394,40 @@ Disable = Wrecking
 Emitter = BiplaneExhaust.emt
 MaxSpeed = 35.0
 ";
+
+    /// A ramp the control law makes over two ticks, drawn four frames a tick (V79): every frame moves
+    /// each surface a quarter of the tick's step, the same way, so nothing jumps between frames; the
+    /// frame on a tick is that tick; the prop goes the short way across its wrap; a crash switches.
+    #[test]
+    fn frames_between_ticks_glide_along_the_ramp() {
+        use ps2_float::F;
+        let tick = |aileron: f32, elevator: f32, rudder: f32, prop: f32| {
+            biplane_anim::surfaces(F(elevator), F(0.5236), F(aileron), F(rudder), F(prop), false)
+        };
+        let ticks = [tick(0.0, 0.0, 0.0, 5.9), tick(0.3, 0.3, 0.0333, 0.375), tick(0.6, 0.6, 0.0667, 1.133)];
+        let mut frames = Vec::new();
+        for pair in ticks.windows(2) {
+            for k in 0..4 {
+                frames.push(between(&pair[0], &pair[1], k as f32 / 4.0));
+            }
+        }
+        frames.push(ticks[2]);
+        let wrap = |d: f32| (d + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        for (k, f) in frames.windows(2).enumerate() {
+            let (a, b) = (&f[0], &f[1]);
+            assert!((b.flaps[0].0 - a.flaps[0].0 - 0.075).abs() < 1e-5, "frame {k}: flap {:?} -> {:?}", a.flaps, b.flaps);
+            assert!((b.flaps[2].0 - a.flaps[2].0 + 0.075).abs() < 1e-5, "frame {k}: right flap");
+            assert!((b.rear.0 - a.rear.0 + 0.075 * 0.5236).abs() < 1e-5, "frame {k}: rear flap");
+            assert!((b.rudder.0 - a.rudder.0 + 0.0333 / 4.0).abs() < 1e-3, "frame {k}: rudder");
+            let turned = wrap(b.prop.unwrap().0 - a.prop.unwrap().0);
+            assert!(turned > 0.15 && turned < 0.2, "frame {k}: the prop turns on, {turned}");
+        }
+        assert_eq!(between(&ticks[0], &ticks[1], 1.0), ticks[1]);
+        assert_eq!(between(&ticks[0], &ticks[1], 0.0).flaps, ticks[0].flaps);
+        let wrecked = biplane_anim::surfaces(F(0.6), F(0.5236), F(0.6), F(0.0), F(1.0), true);
+        let shown = between(&ticks[1], &wrecked, 0.5);
+        assert_eq!((shown.prop, shown.cone), (None, biplane_anim::CONE_BENT));
+    }
 
     #[test]
     fn the_emitter_list_reads_one_entry_a_section() {

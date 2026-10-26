@@ -314,3 +314,55 @@ fn holding_the_stick_moves_the_drawn_planes_surfaces() {
     assert!(l1.2.abs() > MOVED && r1.2.abs() > MOVED, "L1/R1 leave the rudder still: {} {}", l1.2, r1.2);
     assert!(l1.2.signum() != r1.2.signum(), "the rudder turns the same way for L1 and R1");
 }
+
+/// A stick step on the disc's plane in flight, drawn four frames a tick the way the shell draws
+/// between ticks (V79, [`plane_draw::shown`]): the ailerons, the elevator and the rudder thrown full
+/// at once, and every drawn frame moves each surface at most a quarter of what the control law lets
+/// it move in a tick — no frame steps a whole tick's turn — while the frames on a tick are that tick's
+/// own pose and the surfaces get all the way over.
+#[test]
+fn a_stick_step_glides_between_the_drawn_frames() {
+    let Some((_, _, phy)) = the_discs_plane() else { return };
+    let flight = game_sim::flight::Flight::new(&phy);
+    let j = flight.joystick;
+    let lowest = flight.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min);
+    let spawn = Spawn { at: Vf::new(400.0, -lowest, -300.0, 1.0), facing: Vf::new(0.0, 0.0, -1.0, 0.0) };
+    let mut sim = Sim::new(0);
+    let mut garage = Garage::new(Kind::Biplane, Some(Plane::flying(spawn, flight))).unwrap();
+    let gas = Report::from_buttons(Control::Cross.mask());
+    for _ in 0..30 * 60 {
+        pass(&mut sim, &mut garage, gas);
+    }
+    let mut thrown = Report::from_buttons(Control::Cross.mask() | Control::R1.mask());
+    thrown.set_axis(2, 0x00);
+    thrown.set_axis(3, 0x00);
+    let tick = [(j.aileron_rate * DT).0, (j.elevator_rate * DT * j.max_elevator).0, (j.rudder_rate * DT).0];
+    let angles = |s: &biplane_anim::Surfaces| [s.flaps[0].0, s.rear.0, s.rudder.0];
+    let mut was = garage.plane.as_ref().unwrap().surfaces();
+    let start = angles(&was);
+    let mut drawn_before = angles(&was);
+    let mut frames = 0;
+    for _ in 0..20 {
+        pass(&mut sim, &mut garage, thrown);
+        let plane = garage.plane.as_ref().unwrap();
+        for k in 1..=4 {
+            let shown = plane_draw::shown(Some(&was), plane, k as f32 / 4.0);
+            let now = angles(&shown);
+            for (s, ((a, b), step)) in ["aileron", "elevator", "rudder"].iter().zip(drawn_before.iter().zip(now).zip(tick)) {
+                assert!((b - a).abs() <= step / 4.0 * 1.001 + 1e-6, "frame {frames}: the {s} jumps {a} -> {b}, a tick is {step}");
+            }
+            if k == 4 {
+                assert_eq!(shown, plane.surfaces(), "the frame on the tick is the tick's pose");
+            }
+            drawn_before = now;
+            frames += 1;
+        }
+        was = plane.surfaces();
+    }
+    let end = angles(&was);
+    assert!((end[0] - start[0]).abs() > 0.5, "the ailerons go over: {start:?} -> {end:?}");
+    assert!((end[1] - start[1]).abs() > 0.2, "the elevator goes over: {start:?} -> {end:?}");
+    assert!((end[2] - start[2]).abs() > 0.3, "the rudder goes over: {start:?} -> {end:?}");
+    // And with no tick before it (the frame cut, the plane just out) the frame is the tick's.
+    assert_eq!(plane_draw::shown(None, garage.plane.as_ref().unwrap(), 0.25), was);
+}

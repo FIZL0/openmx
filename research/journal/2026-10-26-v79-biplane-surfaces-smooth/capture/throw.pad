@@ -1,0 +1,14 @@
+# V79: the stick thrown full left, held, full right, held, centred; then R1 held and let go.
+# Gas (cross) is held throughout, as film.sh left it.
+sleep 1500
+stick l -1 0
+sleep 1200
+stick l 1 0
+sleep 1200
+stick l 0 0
+sleep 1200
+down r1
+sleep 1500
+up r1
+sleep 1500
+release
