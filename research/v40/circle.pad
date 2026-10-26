@@ -1,0 +1,9 @@
+# pull away hard with the bars full right, then brake to a stop so the marks behind show
+down cross
+stick l 1 0
+sleep 2200
+release
+down square
+sleep 1500
+release
+sleep 1000
