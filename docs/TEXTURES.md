@@ -11,8 +11,12 @@ machine. Each world texture is taken from the first match:
    such as `hd_ground` or `packs/hd_bikes`) set the order and turn packs off.
 1. **Key-named files** (`<name>-<key>.png`, in any subfolder or flat): your own textures, edited or upscaled,
    at any size and with straight (0–255) alpha. A file is matched by the part of its name after the last `-`.
-2. *A PCSX2 texture pack*: not read yet. PCSX2's hash is of the GS upload, which has not been checked against
-   this game's textures (V84's journal entry).
+2. **A PCSX2 texture pack**: the hash-named PNGs PCSX2 dumps and loads (`<tex>-<clut>-<bits>.png`), put
+   straight in `mods/texture-replacements/` (not a subfolder), so a pack made for MX Unleashed in PCSX2 works
+   as it is. Their alpha is the GS's (128 is opaque), as PCSX2 writes them. A far-off model can draw from a
+   smaller mip as its base, and PCSX2 names that upload separately; the largest one the pack has is drawn.
+   The `-mipN` files are not read (mips are rebuilt from the picture), and neither are the loading screens,
+   the HUD or the riders' number plates, which the game paints at run time.
 3. **A mod's own upscales**: key-named files under `textures/upscaled/` in a track, trick or other mod's
    folder, for the textures the mod itself carries (`tools/upscale_mods.py` makes them, below).
 4. The disc's, or the mod's own.
@@ -22,6 +26,7 @@ MX Unleashed (USA).iso
 settings.txt
 mods/textures-src/...                        (written by --dump-textures)
 mods/texture-replacements/...                (yours: upscaled/edited key-named files)
+mods/texture-replacements/<hash>-<hash>-<bits>.png   (a PCSX2 pack, at the top level)
 mods/<pack>/mod.json + textures/             (a texture pack: the same key-named files, shareable)
 mods/tracks/<id>/textures/upscaled/...       (a track mod's own upscales)
 ```
@@ -70,5 +75,5 @@ skips textures already done (`textures/upscaled/sources.json`), so rerun it afte
 `--check` lists what is missing or stale and `--prune` deletes upscales nothing names any more.
 `"upscale": false` in a mod's `mod.json` skips it.
 
-The ride's log line `textures: N from P texture packs, M key-named in mods/texture-replacements, U mods' own
-upscales` shows what was found. A changed file is drawn from the next ride.
+The ride's log line `textures: N from P texture packs, M key-named in mods/texture-replacements, C PCSX2-named,
+U mods' own upscales` shows what was found. A changed file is drawn from the next ride.

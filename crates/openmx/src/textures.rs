@@ -9,7 +9,11 @@
 //!    `texture_packs_off = c` turns one off. Named by their folder under `mods/`.
 //! 1. **Key-named files** in `mods/texture-replacements/` (any subfolder, or flat), matched by the part
 //!    of the name after the last `-`: your own, edited or upscaled, at any size, straight alpha.
-//! 2. A PCSX2 texture pack: not read yet (V84's journal says why).
+//! 2. **A PCSX2 texture pack** (V87): hash-named PNGs (`<tex>-<clut>-<bits>.png`, PCSX2's Dump
+//!    Textures names) at `mods/texture-replacements/`'s top level, as a pack made for the original MX
+//!    Unleashed in PCSX2 has them, matched by [`game_render::texhash`]'s names for the `.pst` the
+//!    texture was read from; their alpha is the GS's (0x80 opaque) and is doubled. The `-mipN` files
+//!    beside them are not read: each texture is drawn from its largest level.
 //! 3. **A mod's own upscales**: key-named files under `textures/upscaled/` in any other mod's folder
 //!    (`tools/upscale_mods.py` writes them for the textures the mod carries).
 //! 4. The disc's, or the mod's own.
@@ -118,13 +122,18 @@ pub fn packs(mods: &Path, order: &[String], off: &[String]) -> Vec<Pack> {
     all
 }
 
-/// What a ride's lookup found: each key's file, by the order above, and how many came from where.
+/// What a ride's lookup found: each key's file from the packs and your own files (`files`), the PCSX2
+/// pack's files by name (`pcsx2_files`) and the mods' own upscales by key (`upscaled_files`), and how
+/// many came from where.
 #[derive(Debug, Default)]
 pub struct Found {
     pub files: HashMap<String, PathBuf>,
+    pub pcsx2_files: HashMap<String, PathBuf>,
+    pub upscaled_files: HashMap<String, PathBuf>,
     pub packs: usize,
     pub from_packs: usize,
     pub replacements: usize,
+    pub pcsx2: usize,
     pub upscaled: usize,
 }
 
@@ -132,9 +141,34 @@ impl Found {
     /// The startup line, opentennis's.
     pub fn line(&self) -> String {
         format!(
-            "textures: {} from {} texture packs, {} key-named in mods/{REPLACEMENTS}, {} mods' own upscales",
-            self.from_packs, self.packs, self.replacements, self.upscaled
+            "textures: {} from {} texture packs, {} key-named in mods/{REPLACEMENTS}, {} PCSX2-named, {} mods' own upscales",
+            self.from_packs, self.packs, self.replacements, self.pcsx2, self.upscaled
         )
+    }
+
+    /// Whether nothing was found.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.pcsx2_files.is_empty() && self.upscaled_files.is_empty()
+    }
+
+    /// The file for the texture keyed `key` whose PCSX2 names `names` gives, by the order above.
+    pub fn file(&self, key: &str, names: impl FnOnce() -> Vec<String>) -> Option<(&PathBuf, bool)> {
+        if let Some(f) = self.files.get(key) {
+            return Some((f, false));
+        }
+        if !self.pcsx2_files.is_empty()
+            && let Some(f) = names().iter().find_map(|n| self.pcsx2_files.get(n))
+        {
+            return Some((f, true));
+        }
+        self.upscaled_files.get(key).map(|f| (f, false))
+    }
+
+    /// The PCSX2 pack's picture for a texture of these names, its alpha doubled to straight.
+    pub fn pcsx2_texture(&self, names: &[String]) -> Option<Texture> {
+        let mut t = read_png(names.iter().find_map(|n| self.pcsx2_files.get(n))?)?;
+        game_render::texhash::expand_alpha(&mut t.rgba);
+        Some(t)
     }
 }
 
@@ -155,14 +189,12 @@ pub fn scan(mods: &Path, order: &[String], off: &[String]) -> Found {
     for (k, file) in own {
         f.files.entry(k).or_insert(file);
     }
-    let mut upscaled = HashMap::new();
+    f.pcsx2_files = game_render::texhash::pack(&mods.join(REPLACEMENTS));
+    f.pcsx2 = f.pcsx2_files.len();
     for (_, d) in mod_dirs(mods).into_iter().filter(|(_, d)| !is_pack(d)) {
-        walk(&d.join(UPSCALED), &mut upscaled);
+        walk(&d.join(UPSCALED), &mut f.upscaled_files);
     }
-    f.upscaled = upscaled.len();
-    for (k, file) in upscaled {
-        f.files.entry(k).or_insert(file);
-    }
+    f.upscaled = f.upscaled_files.len();
     f
 }
 
@@ -175,13 +207,15 @@ pub fn install(mods: Option<&Path>, on: bool, order: &[String], off: &[String]) 
     };
     let found = scan(mods, order, off);
     let line = found.line();
-    if found.files.is_empty() {
+    if found.is_empty() {
         game_render::replace::set(None);
     } else {
-        let files = found.files;
-        game_render::replace::set(Some(Arc::new(move |key: &str| {
-            let p = files.get(key)?;
-            let t = read_png(p);
+        game_render::replace::set(Some(Arc::new(move |key: &str, names: &dyn Fn() -> Vec<String>| {
+            let (p, pcsx2) = found.file(key, names)?;
+            let mut t = read_png(p);
+            if pcsx2 && let Some(t) = &mut t {
+                game_render::texhash::expand_alpha(&mut t.rgba);
+            }
             if t.is_none() {
                 println!("textures: {}: not a PNG this reads; the disc's is drawn", p.display());
             }

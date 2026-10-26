@@ -19,8 +19,10 @@
 use crate::pst::Texture;
 use std::sync::{Arc, RwLock};
 
-/// Where the replacements come from: a texture's key to its replacement, `None` for the disc's.
-pub type Source = dyn Fn(&str) -> Option<Texture> + Send + Sync;
+/// Where the replacements come from: a texture's key, and its PCSX2 names when the source asks for them
+/// (V87, [`crate::texhash`]; none for a texture not read from a `.pst`), to its replacement, `None` for
+/// the disc's.
+pub type Source = dyn Fn(&str, &dyn Fn() -> Vec<String>) -> Option<Texture> + Send + Sync;
 
 static SOURCE: RwLock<Option<Arc<Source>>> = RwLock::new(None);
 
@@ -52,9 +54,26 @@ pub fn on() -> bool {
 /// `t`, or its replacement if the source has one. A replacement that is not a whole picture is left
 /// out (the disc's is kept).
 pub fn swap(t: Texture) -> Texture {
+    swap_named(t, &Vec::new)
+}
+
+/// [`swap`] of the texture decoded from `file`, a `.pst` or an `.atm`: a PCSX2 pack's picture for it
+/// is found too.
+pub fn swap_file(t: Texture, file: &[u8]) -> Texture {
+    swap_named(t, &|| crate::texhash::pcsx2_names(file))
+}
+
+/// A `.pst` or `.atm` decoded as [`crate::world::decode_disc_texture`] does by its contents, and
+/// [`swap_file`]d.
+pub fn parse(file: &[u8]) -> Option<Texture> {
+    let t = if file.len() >= 4 && file[..4] == [1, 0, 0, 0] { Texture::parse_animation(file) } else { Texture::parse(file) };
+    t.ok().map(|t| swap_file(t, file))
+}
+
+fn swap_named(t: Texture, names: &dyn Fn() -> Vec<String>) -> Texture {
     let source = SOURCE.read().unwrap_or_else(|e| e.into_inner()).clone();
     let Some(source) = source else { return t };
-    match source(&key(&t)) {
+    match source(&key(&t), names) {
         Some(r) if r.width > 0 && r.height > 0 && r.rgba.len() == r.width * r.height * 4 => r,
         _ => t,
     }
@@ -109,14 +128,14 @@ mod tests {
         assert!(!on());
         assert_eq!(swap(disc.clone()).rgba, disc.rgba);
         let k = key(&disc);
-        set(Some(Arc::new(move |asked: &str| (asked == k).then(|| solid(8, 8, 200)))));
+        set(Some(Arc::new(move |asked: &str, _: &dyn Fn() -> Vec<String>| (asked == k).then(|| solid(8, 8, 200)))));
         let r = swap(disc.clone());
         assert_eq!((r.width, r.height, r.rgba[0]), (8, 8, 200));
         assert_eq!(swap(other.clone()).rgba, other.rgba);
         let pages = swap_all(vec![disc.clone(), other.clone()]);
         assert_eq!(pages.iter().map(|t| (t.width, t.height)).collect::<Vec<_>>(), [(8, 8), (8, 8)]);
         assert_eq!(pages[1].rgba[0], 9, "resampled, not replaced");
-        set(Some(Arc::new(|_: &str| Some(Texture { width: 4, height: 4, rgba: vec![1; 3] }))));
+        set(Some(Arc::new(|_: &str, _: &dyn Fn() -> Vec<String>| Some(Texture { width: 4, height: 4, rgba: vec![1; 3] }))));
         assert_eq!(swap(disc.clone()).rgba, disc.rgba);
         set(None);
         assert!(!on());

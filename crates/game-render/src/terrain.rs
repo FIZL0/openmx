@@ -579,7 +579,7 @@ impl Pages {
             sections.iter().find_map(|s| s.get("TextureMap_2").map(|n| n.trim().to_string())).filter(|n| !n.is_empty())
         });
         let name = named.unwrap_or_else(|| format!("{stem}_d"));
-        Texture::parse(&read(&format!("{name}.pst"))?).ok().map(crate::replace::swap)
+        crate::replace::parse(&read(&format!("{name}.pst"))?)
     }
 }
 

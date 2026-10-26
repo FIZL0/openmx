@@ -11,6 +11,8 @@ game-sim = { path = "../game-sim" }
 # Not for arithmetic — this crate draws in host `f32`. A clip's timing record is the simulation's
 # own (`game_sim::motion::Clip`), and its fields are `F`, so the type has to be nameable here.
 ps2-float = { path = "../ps2-float" }
+# PCSX2's texture-replacement names are XXH3-64 (V87, `src/texhash.rs`), opentennis's crate and features.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64", "alloc"] }
 
 # The GPU renderer (P44, `src/gpu.rs`): wgpu, which is Vulkan, Metal, DX12, GL and — in a browser —
 # WebGPU or WebGL2 behind one API, with `bytemuck` to hand it plain-old-data and `pollster` to wait

@@ -28,6 +28,7 @@
 //!   raster.rs    a depth-buffered, perspective-correct, textured triangle rasteriser
 //!   png.rs       a PNG writer, so a frame can be looked at
 //!   replace.rs   replaced textures (V84): a decoded texture swapped for the shell's upscale of it
+//!   texhash.rs   PCSX2's texture-replacement names for a `.pst` (V87), so a PCSX2 pack is drawn
 //!   mat.rs       vectors and 4x4 transforms in the files' own convention
 //!   bin/first-draw.rs   the whole chain: disc in, one frame of a track out
 //! ```
@@ -61,6 +62,7 @@ pub mod sky;
 pub mod splat;
 pub mod tally;
 pub mod terrain;
+pub mod texhash;
 pub mod toy;
 pub mod vehicle;
 pub mod world;
