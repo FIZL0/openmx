@@ -134,7 +134,7 @@ impl GroundMeshes {
                                 // A stand-in: the pass keeps its texture's index, set below.
                                 return Some(Texture { width: 1, height: 1, rgba: vec![0; 4] });
                             }
-                            let tex = Texture::parse(&read(&format!("{t}.pst"))?).ok()?;
+                            let tex = crate::replace::swap(Texture::parse(&read(&format!("{t}.pst"))?).ok()?);
                             textures.push(tex);
                             names.push(t);
                             loaded = Some(textures.len() - 1);

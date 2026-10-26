@@ -27,6 +27,7 @@
 //!   gpu.rs       the same world through wgpu: uploaded once, skinned and batched on the GPU
 //!   raster.rs    a depth-buffered, perspective-correct, textured triangle rasteriser
 //!   png.rs       a PNG writer, so a frame can be looked at
+//!   replace.rs   replaced textures (V84): a decoded texture swapped for the shell's upscale of it
 //!   mat.rs       vectors and 4x4 transforms in the files' own convention
 //!   bin/first-draw.rs   the whole chain: disc in, one frame of a track out
 //! ```
@@ -52,6 +53,7 @@ pub mod png;
 pub mod psg;
 pub mod pst;
 pub mod raster;
+pub mod replace;
 pub mod rider;
 pub mod scene;
 pub mod skin;

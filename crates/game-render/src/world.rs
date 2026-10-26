@@ -146,8 +146,14 @@ pub fn texture_files(material: &str, m: &Material) -> Vec<String> {
     files
 }
 
-/// A texture file decoded by its kind: a `.pst` whole, an `.atm` by its first frame.
+/// A texture file decoded by its kind: a `.pst` whole, an `.atm` by its first frame; replaced if the
+/// shell has a replacement for it (V84, [`crate::replace`]).
 pub fn decode_texture(file: &str, bytes: &[u8]) -> Option<Texture> {
+    decode_disc_texture(file, bytes).map(crate::replace::swap)
+}
+
+/// [`decode_texture`] as the disc has it, never replaced: what `--dump-textures` writes and keys.
+pub fn decode_disc_texture(file: &str, bytes: &[u8]) -> Option<Texture> {
     if file.to_ascii_lowercase().ends_with(".atm") {
         Texture::parse_animation(bytes).ok()
     } else {

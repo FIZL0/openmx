@@ -341,6 +341,15 @@ pub struct Settings {
     pub foliage: Foliage,
     /// The ride's picture's shape (P126): the window's own, or the original's 4:3 with bars.
     pub picture: Picture,
+    /// Whether the world's textures are taken from texture packs, `mods/texture-replacements/` and
+    /// mods' own `textures/upscaled/` (V84) over the disc's. On unless turned off; Original is the
+    /// disc's alone.
+    pub textures: bool,
+    /// The texture packs' order, top (wins) first, and the ones switched off (V84), by their folder
+    /// under `mods/`: opentennis's `texture_packs` / `texture_packs_off`. A pack in neither is on, on
+    /// top.
+    pub texture_packs: Vec<String>,
+    pub texture_packs_off: Vec<String>,
     /// Each seat's session markers (P129), the Controls tab's Markers row, 1P's first: on, the d-pad
     /// is the markers' and the left stick alone rides; off, the d-pad fires no marker, the marker
     /// bar hides, and the d-pad rides as the original's — steering, leaning and the trick gestures.
@@ -415,10 +424,12 @@ pub enum Departure {
     Picture,
     /// Every seat's session markers (P129): on, the d-pad the markers'; or off, the original's d-pad.
     Markers,
+    /// The world's textures (V84): texture packs' and upscales over the disc's, or the disc's alone.
+    Textures,
 }
 
 impl Departure {
-    pub const ALL: [Departure; 7] = [
+    pub const ALL: [Departure; 8] = [
         Departure::Controls,
         Departure::Cameras,
         Departure::Fog,
@@ -426,6 +437,7 @@ impl Departure {
         Departure::Foliage,
         Departure::Picture,
         Departure::Markers,
+        Departure::Textures,
     ];
 
     /// Its row's name.
@@ -438,6 +450,7 @@ impl Departure {
             Departure::Foliage => "Leaves",
             Departure::Picture => "Picture Shape",
             Departure::Markers => "Markers",
+            Departure::Textures => "Upscaled Textures",
         }
     }
 
@@ -451,6 +464,7 @@ impl Departure {
             Departure::Foliage => ["Crisp", "Original"],
             Departure::Picture => ["Fill the Window", "4:3"],
             Departure::Markers => ["On", "Off"],
+            Departure::Textures => ["Upscaled", "Original"],
         }
     }
 
@@ -464,6 +478,7 @@ impl Departure {
             Departure::Foliage => "How leaves lie over what is behind them. Crisp cuts each leaf out, so trees show through each other's gaps; Original blends them as the game did, and a near tree's soft edges can hide the trees behind it.",
             Departure::Picture => "The ride's shape on screen. Original is the television's 4:3, with bars at the sides.",
             Departure::Markers => "Every player's session markers on the d-pad. Off, the d-pad steers, leans and does tricks as in the original.",
+            Departure::Textures => "The world's textures from texture packs, mods/texture-replacements and mods' own upscales, where there are any. Original is the disc's alone. From the next ride; the software renderer draws them too, slower.",
         }
     }
 }
@@ -480,6 +495,7 @@ impl Menu {
             Departure::Foliage => s.foliage == Foliage::Original,
             Departure::Picture => s.picture == Picture::Television,
             Departure::Markers => s.markers.iter().all(|m| !*m),
+            Departure::Textures => !s.textures,
         }
     }
 
@@ -515,6 +531,7 @@ impl Menu {
             Departure::Foliage => s.foliage = if original { Foliage::Original } else { Foliage::Cutout },
             Departure::Picture => s.picture = if original { Picture::Television } else { Picture::Fill },
             Departure::Markers => s.markers = [!original; SEATS_MAX],
+            Departure::Textures => s.textures = !original,
         }
     }
 
@@ -937,9 +954,19 @@ impl Default for Settings {
             plants: Lod::default(),
             foliage: Foliage::default(),
             picture: Picture::default(),
+            textures: true,
+            texture_packs: Vec::new(),
+            texture_packs_off: Vec::new(),
             markers: [true; SEATS_MAX],
         }
     }
+}
+
+/// A `texture_packs` line's folder names (V84): comma-separated, each part of a path under `mods/`
+/// that climbs nowhere.
+fn pack_names(v: &str) -> Vec<String> {
+    let plain = |p: &str| !p.is_empty() && p != "." && p != ".." && !p.contains('\\');
+    v.split(',').map(str::trim).filter(|n| !n.is_empty() && n.split('/').all(plain)).map(str::to_string).collect()
 }
 
 /// `markers`' line (P129): `on` or `off` a seat, 1P's first, the last for every seat past it; `None`
@@ -1046,6 +1073,9 @@ impl Settings {
                 "plants" => s.plants = Lod::from_word(v).unwrap_or(s.plants),
                 "foliage" => s.foliage = Foliage::from_word(v).unwrap_or(s.foliage),
                 "picture" => s.picture = Picture::from_word(v).unwrap_or(s.picture),
+                "textures" => s.textures = v != "original",
+                "texture_packs" => s.texture_packs = pack_names(v),
+                "texture_packs_off" => s.texture_packs_off = pack_names(v),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
@@ -1187,7 +1217,14 @@ impl Settings {
         let plants = if self.plants == Lod::default() { String::new() } else { format!("plants = {}\n", self.plants.word()) };
         let foliage = if self.foliage == Foliage::default() { String::new() } else { format!("foliage = {}\n", self.foliage.word()) };
         let picture = if self.picture == Picture::default() { String::new() } else { format!("picture = {}\n", self.picture.word()) };
-        plants + &foliage + &picture
+        let textures = if self.textures { String::new() } else { "textures = original\n".into() };
+        plants + &foliage + &picture + &textures + &self.texture_packs_text()
+    }
+
+    /// The texture packs' order (V84), opentennis's two lines, none while nothing is ordered or off.
+    fn texture_packs_text(&self) -> String {
+        let line = |k: &str, v: &[String]| if v.is_empty() { String::new() } else { format!("{k} = {}\n", v.join(", ")) };
+        line("texture_packs", &self.texture_packs) + &line("texture_packs_off", &self.texture_packs_off)
     }
 
     /// A world's sky (MD9), only when it is not the default, so a file from before it is written as

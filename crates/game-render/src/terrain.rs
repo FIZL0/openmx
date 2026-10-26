@@ -522,6 +522,8 @@ impl Pages {
             }
             pages.push(Texture { width: w, height: h, rgba: level.pixels.iter().flat_map(|&p| colours[p as usize]).collect() });
         }
+        // V84: replaced as one set, so the pages stay the one size their array is.
+        let pages = crate::replace::swap_all(pages);
         let mut page_of = vec![None; (across * along) as usize];
         for lz in 0..along {
             for lx in 0..across {
@@ -577,7 +579,7 @@ impl Pages {
             sections.iter().find_map(|s| s.get("TextureMap_2").map(|n| n.trim().to_string())).filter(|n| !n.is_empty())
         });
         let name = named.unwrap_or_else(|| format!("{stem}_d"));
-        Texture::parse(&read(&format!("{name}.pst"))?).ok()
+        Texture::parse(&read(&format!("{name}.pst"))?).ok().map(crate::replace::swap)
     }
 }
 

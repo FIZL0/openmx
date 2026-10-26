@@ -401,6 +401,7 @@ impl Menu {
             ),
             self.departure_row(Departure::Plants),
             self.departure_row(Departure::Foliage),
+            self.departure_row(Departure::Textures),
             // MD9: a combined world's sky and light, one for all of it or each map its own.
             Row::choice(
                 Key::WorldSky,
@@ -1209,7 +1210,7 @@ impl Departure {
     /// the Original tab's master switch.
     pub fn tab(self) -> usize {
         match self {
-            Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Picture => TAB_GRAPHICS,
+            Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Picture | Departure::Textures => TAB_GRAPHICS,
             Departure::Controls | Departure::Cameras | Departure::Markers => TAB_ORIGINAL,
         }
     }

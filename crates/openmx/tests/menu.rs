@@ -404,6 +404,10 @@ fn the_settings_file_reads_back_as_it_was_written() {
         foliage: game_render::eco::Foliage::Original,
         // A world's sky taken from the map below (MD9).
         world_sky: menu::WorldSky::PerMap,
+        // The disc's textures, and two texture packs ordered and one off (V84).
+        textures: false,
+        texture_packs: vec!["hd_ground".into(), "packs/hd_bikes".into()],
+        texture_packs_off: vec!["old".into()],
         // 2P with their markers off (P129).
         markers: [true, false, true, true, true, true, true, true],
     };
@@ -3245,7 +3249,7 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
 fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     use menu::{Departure, Key};
     let groups = [
-        ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::Departure(Departure::Foliage), Key::WorldSky]),
+        ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::Departure(Departure::Foliage), Key::Departure(Departure::Textures), Key::WorldSky]),
         ("Picture", vec![Key::Departure(Departure::Picture)]),
         ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit]),
     ];
@@ -3292,11 +3296,11 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     // The cursor opens on Draw Distance, past the heading, and the d-pad steps over the next one.
     tab_to(&mut m, &mut r, "Graphics");
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
-    for _ in 0..4 {
+    for _ in 0..5 {
         tap(&mut m, &mut r, Control::Down);
     }
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::Departure(Departure::Picture));
-    for _ in 0..4 {
+    for _ in 0..5 {
         tap(&mut m, &mut r, Control::Up);
     }
     // Draw Distance changed by the pad is the setting, and is saved.
@@ -4212,6 +4216,36 @@ fn original_on_sets_the_leaves_and_turning_them_back_leaves_the_others() {
     // The file's word, and one it cannot read keeps ours.
     assert_eq!(Settings::parse("foliage = original\n").foliage, Foliage::Original);
     assert_eq!(Settings::parse("foliage = fuzzy\n"), Settings::default());
+}
+
+/// V84: Upscaled Textures is a departure on the Graphics tab, on by default and not in a fresh
+/// settings.txt; the Original switch turns it off and writes `textures = original`. The texture
+/// packs' order and off list are settings.txt lines alone (opentennis's), read back as written, and a
+/// name that would climb out of `mods/` is dropped.
+#[test]
+fn upscaled_textures_is_a_graphics_departure_and_the_pack_lines_round_trip() {
+    use menu::{Departure, Key, Original};
+    let (mut m, mut r) = fresh();
+    assert!(m.settings.textures);
+    assert!(!m.settings.text().contains("texture"), "{}", m.settings.text());
+    let value = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).map(|row| row.value);
+    settings_at(&mut m, &mut r, "Original");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.original(), Original::On);
+    assert!(!m.settings.textures);
+    assert!(m.settings.text().contains("textures = original\n"), "{}", m.settings.text());
+    tab_to(&mut m, &mut r, "Graphics");
+    assert_eq!(value(&m, Key::Departure(Departure::Textures)).as_deref(), Some("Original"));
+    m.set_departure(Departure::Textures, false);
+    assert!(m.settings.textures);
+    assert_eq!(value(&m, Key::Departure(Departure::Textures)).as_deref(), Some("Upscaled"));
+
+    let s = Settings::parse("texture_packs = hd_ground, packs/hd_bikes\ntexture_packs_off = old, ../up, a\\b, /abs\n");
+    assert_eq!(s.texture_packs, ["hd_ground", "packs/hd_bikes"]);
+    assert_eq!(s.texture_packs_off, ["old"]);
+    assert!(s.textures);
+    assert_eq!(Settings::parse(&s.text()), s);
+    assert!(s.text().contains("texture_packs = hd_ground, packs/hd_bikes\ntexture_packs_off = old\n"), "{}", s.text());
 }
 
 /// P129: each seat has a Markers row on the Controls tab, On by default, saved in settings.txt; the
