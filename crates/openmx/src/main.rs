@@ -6614,9 +6614,6 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                         ride_hud::sprites(&mut gpu_sprites, hud_base, view, shown, tracker, now);
                     });
-                } else if join_view == Some(v) && !rig.hud.on && overlay_mode == menu::Overlay::Original {
-                    let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
-                    ride_hud::join_sprites(&mut gpu_sprites, hud_base, view, hud_art.scale);
                 }
             }
             if let Some(front) = front.as_deref_mut() {
@@ -7064,8 +7061,6 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                     ride_hud::draw(target, shown, tracker, now);
                 });
-            } else if join_view == Some(v) && !rig.hud.on && overlay_mode == menu::Overlay::Original {
-                ride_hud::join_draw(target, hud_art.scale);
             }
             // The player's own pause over their view (P84), when the frame is split.
             if let Some(front) = front.as_deref_mut().filter(|_| split_views)
