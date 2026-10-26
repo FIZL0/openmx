@@ -1,0 +1,4 @@
+# S150: the stick held full right from the throw (a lean and a yaw in the air), then let go
+stick l 1 0
+sleep 6000
+release

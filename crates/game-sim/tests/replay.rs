@@ -8250,3 +8250,137 @@ fn walls_and_nose_landings_wreck_as_the_original_does() {
     println!("{compared} hits compared");
     assert!(parted.is_empty(), "{}", parted.join("\n"));
 }
+
+// --- S150: crooked landings, each from a save state taken in the air ------------------------------
+
+/// One tick of a crooked landing, both sides: the frame, the original's heading and whether its row
+/// reads the wheels down (where the capture has a row), and the port's heading and wheels.
+#[derive(Clone, Copy, Debug)]
+struct Turned {
+    counter: u64,
+    original: Option<(f32, bool)>,
+    port: (f32, bool),
+}
+
+/// Ride `name`'s capture (`research/s150/spin.sh`) in the port from its state at `asked` for `ticks`
+/// ticks, as [`walls_and_nose_landings_wreck_as_the_original_does`] rides S138's: free09, the props,
+/// the bike's body rays, the original's pad. Answers each tick's [`Turned`], the original's first
+/// wreck and the port's, or `None` and a line where a capture, state or disc file is missing.
+#[allow(clippy::type_complexity)]
+fn ride_a_crooked_landing(name: &str, asked: u64, ticks: u64)
+    -> Option<(Vec<Turned>, Option<(u64, u8)>, Option<(u64, u8)>)> {
+    let dir = private_dir("capture");
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
+        println!("no {name}.csv — S150's journal says how it is recorded");
+        return None;
+    };
+    let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+    let at = dir.join(format!("{name}-{asked}.ee.bin"));
+    let Some(st) = SaveState::open_either(&at) else {
+        println!("no {} with the human's rider in it", at.display());
+        return None;
+    };
+    let (_, acc) = acceptance_capture()?;
+    let mut out = None;
+    in_the_world_of(&acc, |world, _, bike| {
+        let Some(Ridden { tables, phy, mounts }) = bike else {
+            println!("no Race 125 on this disc");
+            return;
+        };
+        let Some(col) = Disc::open().and_then(|mut disc| the_bike_col(&mut disc)) else {
+            println!("no bike collision files on this disc");
+            return;
+        };
+        let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+        let cap = dense_run(&whole, saved);
+        let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+        let rows = rows_by_counter(&cap);
+        let pad_of = |counter: u64| rows.get(&counter).filter(|&&r| r >= 2).map(|&r| tape.frames[r - 2]);
+        let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+        rider.carries_bike_col(Arc::new(col));
+        let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+        st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+        let want = first_wreck(&cap, saved).filter(|&(c, _)| c <= saved + ticks);
+        let num = |r: usize, n: &str| cell(&cap, r, column(&cap, n).unwrap()).parse::<f32>().unwrap();
+        let (mut seen, mut got) = (Vec::new(), None);
+        for counter in saved + 1..=saved + ticks {
+            let Some(pad) = pad_of(counter) else { break };
+            sim.frame(pad.dt(), &pad.reports, world);
+            let ride = &sim.rider.ride;
+            let original = rows.get(&counter).map(|&r| {
+                let q = Vf::new(num(r, "ch_quat.x"), num(r, "ch_quat.y"), num(r, "ch_quat.z"), num(r, "ch_quat.w"));
+                (attitude(q).2, num(r, "on_ground") != 0.0)
+            });
+            seen.push(Turned { counter, original, port: (attitude(ride.chassis.quat).2, ride.air.on_ground) });
+            if got.is_none() && let Some(w) = sim.rider.state.wreck {
+                got = Some((counter, w.0));
+            }
+        }
+        out = Some((seen, want, got));
+    });
+    out
+}
+
+/// S150's landings, each a capture of recording2's rider thrown up off free09's farmyard with the
+/// stick held right through the air (`research/s150/spin.sh NAME UP 0 40 True research/s150/right.pad`,
+/// 200 frames), and the frame of the save state it is ridden from: the third, as the recorder's first
+/// two rows have no pad. The crossup at the touchdown is the bike's heading against its velocity's.
+const S150_LANDINGS: [(&str, u64, u64, &str); 3] = [
+    ("s138/s150-r50", 2747, 100, "thrown up 50 ft/s, lands about 118 degrees crossed up"),
+    ("s138/s150-r60", 2709, 195, "thrown up 60 ft/s, lands about 148 degrees crossed up"),
+    ("s138/s150-r70", 2750, 195, "thrown up 70 ft/s, lands about 169 degrees crossed up, backwards"),
+];
+
+/// How far the port's heading may stray from the original's on any tick of a landing both ride out,
+/// from the touchdown to the end of the capture, in degrees: the worst seen is 5.06, six ticks after
+/// r60's touchdown, where the capture rows' phase moves the most (memory: three phases).
+const HEADING_FROM_THE_ORIGINAL: f32 = 6.0;
+
+/// The angle from `b` to `a` in degrees, wrapped into -180..180.
+fn turned_by(a: f32, b: f32) -> f32 {
+    (a - b + 540.0).rem_euclid(360.0) - 180.0
+}
+
+/// **S150.** A trick landed crooked: the original wrecks a landing crossed up 118 degrees (the
+/// landing crossup clause, reason 3), and rides out ones crossed up 148 and 169 degrees, the ground
+/// then swinging the bike round by 135 and 167 degrees over the next three seconds. The port must do the
+/// same from the same states with the same pad: wreck where the original does (reason, tick ±1), and
+/// where it rides out, ride out too, touching down within a tick of it and keeping its heading
+/// within [`HEADING_FROM_THE_ORIGINAL`] of the original's on every tick of the swing. A landing mid
+/// trick is the trick clause's, proved in `tests/trick.rs` (`a_scripted_pad_lands_one_trick_and_wrecks_another`)
+/// and `tests/air.rs`.
+#[test]
+fn crooked_landings_wreck_or_swing_round_as_the_original_does() {
+    let (mut compared, mut parted) = (0, Vec::new());
+    for (name, asked, ticks, what) in S150_LANDINGS {
+        let Some((seen, want, got)) = ride_a_crooked_landing(name, asked, ticks) else { continue };
+        compared += 1;
+        println!("{name} ({what}): the original {want:?}, the port {got:?}");
+        match (want, got) {
+            (Some((c, r)), Some((gc, gr))) if r == gr && gc.abs_diff(c) <= 1 => {}
+            (None, None) => {
+                let down = |side: fn(&Turned) -> bool| seen.iter().position(side);
+                let Some(o) = down(|t| t.original.is_some_and(|(_, g)| g)) else {
+                    parted.push(format!("{name}: the original never touches down in the capture"));
+                    continue;
+                };
+                match down(|t| t.port.1) {
+                    Some(p) if p.abs_diff(o) <= 1 => {}
+                    p => parted.push(format!("{name}: the port touches down at {:?}, the original at {}",
+                                             p.map(|p| seen[p].counter), seen[o].counter)),
+                }
+                let rows: Vec<_> = seen[o..].iter().filter_map(|t| t.original.map(|(h, _)| (t.counter, h, t.port.0))).collect();
+                let swing = turned_by(rows.last().unwrap().1, rows[0].1);
+                let worst = rows.iter().map(|&(c, h, p)| (c, turned_by(p, h).abs())).max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+                println!("  touchdown at {}: the original swings {swing:.1} degrees by {}, the port strays {:.2} at most (at {})",
+                         seen[o].counter, rows.last().unwrap().0, worst.1, worst.0);
+                if worst.1 > HEADING_FROM_THE_ORIGINAL {
+                    parted.push(format!("{name}: the port's heading strays {:.2} degrees from the original's at {}", worst.1, worst.0));
+                }
+            }
+            _ => parted.push(format!("{name}: the original {want:?}, the port {got:?}")),
+        }
+    }
+    println!("{compared} landings compared");
+    assert!(parted.is_empty(), "{}", parted.join("\n"));
+}
