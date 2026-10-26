@@ -1879,6 +1879,7 @@ fn front_end(args: Args) -> Result<(), String> {
     let mut stills = mod_pictures(&mut front.art, mods_folder(&args, &front.dir, mods_on).as_deref(), &listed);
     front.menu.set_mod_games(mod_games(&args, &front.dir, mods_on, &listed));
     front.menu.set_mod_tracks(listed);
+    front.menu.set_music_packs(music_packs(&args, &front.dir, mods_on));
     // Online, this machine's player rides the freeride's bike set unless the lobby changes it, as
     // the rider the command line names.
     front.menu.lobby.bikes = lobby::bikes();
@@ -2222,6 +2223,7 @@ fn front_end(args: Args) -> Result<(), String> {
             stills = mod_pictures(&mut shell.front.art, mods_folder(&args, &shell.front.dir, mods_on).as_deref(), &listed);
             shell.front.menu.set_mod_games(mod_games(&args, &shell.front.dir, mods_on, &listed));
             shell.front.menu.set_mod_tracks(listed);
+            shell.front.menu.set_music_packs(music_packs(&args, &shell.front.dir, mods_on));
             (shown_look, menu_images) = (None, false);
         }
         // A still the job took is the card's picture from the next frame on.
@@ -7550,6 +7552,16 @@ fn mod_tracks(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, Stri
         println!("mods: {} tracks, {} worlds", scan.tracks.len(), worlds.len());
     }
     scan.tracks.into_iter().map(|t| (t.id, t.name)).chain(worlds).collect()
+}
+
+/// The music packs in the same folder as [`mod_tracks`]' (P122), for the Mods page.
+fn music_packs(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, String, usize)> {
+    let Some(folder) = mods_folder(args, dir, on) else { return Vec::new() };
+    let packs = track_mods::music_packs(&folder);
+    if !packs.is_empty() {
+        println!("mods: {} music packs", packs.len());
+    }
+    packs
 }
 
 /// The listed mod tracks' source games (MD11), which the pick's filters are by.

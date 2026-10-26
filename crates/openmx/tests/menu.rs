@@ -3136,6 +3136,64 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     assert!(m.settings.mods);
 }
 
+/// P122: the Mods page lists the music packs after the track packs, each On or Off by its whole id
+/// (so `mxvatv_music` is not the `mxvatv` track pack), saved in `mods_off` beside them and read back,
+/// dimmed with the folder; the main menu's count has them; a pack the folder lost stays listed.
+#[test]
+fn the_mods_page_lists_music_packs_beside_the_track_packs() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    m.set_mod_tracks(vec![("mxvatv_nat13".into(), "Nat 13".into())]);
+    m.set_music_packs(vec![("mxvatv_music".into(), "Unleashed music".into(), 30), ("untamed_music".into(), "Untamed music".into(), 1)]);
+    main_to(&mut m, &mut r, "Mods");
+    let rows = m.page();
+    let keys: Vec<&Key> = rows.iter().filter(|r| r.selectable()).map(|r| &r.key).collect();
+    assert_eq!(keys, [&Key::ModsFolder, &Key::Pack(0), &Key::MusicPack(0), &Key::MusicPack(1)]);
+    let music = rows.iter().find(|r| r.key == Key::MusicPack(1)).unwrap();
+    assert_eq!((music.label.as_str(), music.value.as_str()), ("Untamed music", "On"));
+    assert!(music.about.contains("1 song,"), "{}", music.about);
+    assert!(rows.iter().find(|r| r.key == Key::MusicPack(0)).unwrap().about.contains("30 songs"));
+
+    // Off by its id, the track pack of the same prefix left on, and the file says so.
+    down_to(&mut m, &mut r, Key::MusicPack(0));
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.mods_off, ["mxvatv_music"]);
+    assert_eq!(m.page().iter().find(|r| r.key == Key::MusicPack(0)).unwrap().value, "Off");
+    assert_eq!(m.page().iter().find(|r| r.key == Key::Pack(0)).unwrap().value, "On");
+    assert_eq!(m.track_count(), menu::TRACKS.len() + 1, "a music pack off leaves the tracks alone");
+    let text = m.settings.text();
+    assert!(text.contains("mods_off = mxvatv_music\n"), "{text}");
+    assert_eq!(Settings::parse(&text).mods_off, ["mxvatv_music"]);
+    // The track pack off too: both kept, each by its own word.
+    down_to(&mut m, &mut r, Key::Pack(0));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(Settings::parse(&m.settings.text()).mods_off, ["mxvatv_music", "mxvatv"]);
+    // A 40-letter id is kept too.
+    let long = "a_".to_string() + &"b".repeat(38);
+    assert_eq!(Settings::parse(&format!("mods_off = {long}\n")).mods_off, [long]);
+    // And back on.
+    down_to(&mut m, &mut r, Key::MusicPack(0));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.mods_off, ["mxvatv"]);
+    assert_eq!(m.packs_on(), (2, 3), "the main menu counts the music packs");
+
+    // The folder off: the music packs dim and say why, and stay listed though the shell reads none.
+    down_to(&mut m, &mut r, Key::ModsFolder);
+    tap(&mut m, &mut r, Control::Cross);
+    m.set_mod_tracks(Vec::new());
+    m.set_music_packs(Vec::new());
+    let music: Vec<_> = m.page().into_iter().filter(|r| matches!(r.key, Key::MusicPack(_))).collect();
+    assert_eq!(music.len(), 2);
+    assert!(music.iter().all(|r| r.off.as_deref() == Some("The mods folder is off")));
+
+    // Music packs alone are not "nothing in the folder".
+    let (mut m, mut r) = fresh();
+    m.set_music_packs(vec![("untamed_music".into(), "Untamed music".into(), 22)]);
+    main_to(&mut m, &mut r, "Mods");
+    assert!(m.page().iter().all(|r| r.label != "Nothing in the mods folder"));
+}
+
 /// P118: L1 and R1 walk Settings' seven tabs (P128's Graphics third, P126's Original last) and the Garage's three round from either end, each tab
 /// opening on its first row.
 #[test]
@@ -3273,6 +3331,7 @@ fn every_row_of_every_settings_tab_and_page_changes_by_pad() {
         m.settings.music = "disc:a".into();
         m.settings.presets = vec![("Moon".into(), Mods::parse("gravity=20").unwrap()), ("Fast".into(), Mods::parse("bike_speed=150").unwrap())];
         m.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into()), ("mxvatv_nat13".into(), "Nat 13".into())]);
+        m.set_music_packs(vec![("mxvatv_music".into(), "Unleashed music".into(), 30)]);
         (m, r)
     };
     for tab in menu::SETTINGS_TABS {

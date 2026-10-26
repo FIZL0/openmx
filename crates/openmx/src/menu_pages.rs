@@ -114,6 +114,8 @@ pub enum Key {
     ModsFolder,
     /// A mod pack by its place in [`Menu::packs`].
     Pack(usize),
+    /// A music pack by its place in [`Menu::music_packs`] (P122).
+    MusicPack(usize),
     Tricks,
     /// The Original switch (P126), and each departure's under it.
     Original,
@@ -841,11 +843,25 @@ impl Menu {
         out
     }
 
+    /// The music packs the Mods page lists (P122), `(id, name, songs)`: every one the folder has had
+    /// while it was read this session, in id order.
+    pub fn music_packs(&self) -> &[(String, String, usize)] {
+        &self.music_seen
+    }
+
+    /// How many of the Mods page's packs are on, of how many: the track packs and the music packs.
+    pub fn packs_on(&self) -> (usize, usize) {
+        let (packs, music) = (self.packs(), self.music_packs());
+        let off = &self.settings.mods_off;
+        let on = packs.iter().filter(|p| !off.contains(&p.prefix)).count() + music.iter().filter(|m| !off.contains(&m.0)).count();
+        (on, packs.len() + music.len())
+    }
+
     fn mods_rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::on_off(Key::ModsFolder, "Read the Mods Folder", self.settings.mods, "Off, nothing is read from mods/ beside the disc and every pick is the disc's alone.")];
         rows.push(Row::heading("Installed"));
         let packs = self.packs();
-        if packs.is_empty() {
+        if packs.is_empty() && self.music_seen.is_empty() {
             rows.push(Row::heading("Nothing in the mods folder"));
         }
         for (i, p) in packs.iter().enumerate() {
@@ -853,6 +869,14 @@ impl Menu {
             let tracks = if p.tracks == 1 { "1 track".to_string() } else { format!("{} tracks", p.tracks) };
             let mut r = Row::on_off(Key::Pack(i), &p.name, on, &format!("{tracks}, listed under Mods on Free Ride."));
             r.note = Some(format!("{} in the folder", p.prefix));
+            rows.push(r.off_if(!self.settings.mods, "The mods folder is off"));
+        }
+        // The music packs beside them (P122), each switched by its whole id.
+        for (i, (id, name, songs)) in self.music_packs().iter().enumerate() {
+            let on = !self.settings.mods_off.contains(id);
+            let songs = if *songs == 1 { "1 song".to_string() } else { format!("{songs} songs") };
+            let mut r = Row::on_off(Key::MusicPack(i), name, on, &format!("Music pack, {songs}, for the User Soundtracks slider."));
+            r.note = Some(format!("music/{id} in the folder"));
             rows.push(r.off_if(!self.settings.mods, "The mods folder is off"));
         }
         rows
@@ -1058,6 +1082,15 @@ impl Menu {
                     None => self.settings.mods_off.push(pack),
                 }
                 self.cursor[Screen::Tracks.index()] = self.track_index();
+            }
+            Key::MusicPack(i) => {
+                let Some(id) = self.music_packs().get(i).map(|p| p.0.clone()) else { return };
+                match self.settings.mods_off.iter().position(|p| *p == id) {
+                    Some(at) => {
+                        self.settings.mods_off.remove(at);
+                    }
+                    None => self.settings.mods_off.push(id),
+                }
             }
             _ => return,
         }

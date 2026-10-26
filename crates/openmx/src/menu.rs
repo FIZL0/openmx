@@ -324,7 +324,8 @@ pub struct Settings {
     /// and the pick is the disc's alone. On unless turned off.
     pub mods: bool,
     /// The mod packs switched off on the Mods page (P118), by the prefix their tracks' ids share
-    /// (`mxvatv` for `mxvatv_nat13`): their tracks are left off the Free Ride list.
+    /// (`mxvatv` for `mxvatv_nat13`): their tracks are left off the Free Ride list. A music pack
+    /// (P122) is by its whole id (`untamed_music`), which has the underscore no prefix has.
     pub mods_off: Vec<String>,
     /// The track pick's filter (MD11), the source game whose tracks it lists: a [`Menu::track_groups`]
     /// name, empty for All Games. A game the pick does not list now shows All and is kept.
@@ -1020,7 +1021,7 @@ impl Settings {
                 "mods" => s.mods = v != "off",
                 "tricks" => s.tricks = Tricks::from_word(v).unwrap_or(s.tricks),
                 "mods_off" => {
-                    s.mods_off = v.split_whitespace().filter(|w| mod_id(&format!("{w}_x"))).map(str::to_string).collect();
+                    s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
                 "track_filter" => s.track_filter = clean_filter(v),
                 "plants" => s.plants = Lod::from_word(v).unwrap_or(s.plants),
@@ -2239,6 +2240,9 @@ pub struct Menu {
     /// Every mod track the folder listed this session, for the Mods page's packs, which stay listed
     /// while the folder is off.
     mods_seen: Vec<(String, String)>,
+    /// Every music pack the folder listed this session (P122), `(id, name, songs)`, for the Mods
+    /// page, which keeps them listed while the folder is off. Set with [`Menu::set_music_packs`].
+    music_seen: Vec<(String, String, usize)>,
     /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
     /// pause says so.
     pub modified: bool,
@@ -2427,6 +2431,7 @@ impl Menu {
             pad_kept: None,
             pressure_kept: None,
             mods_seen: Vec::new(),
+            music_seen: Vec::new(),
             modified: false,
             mods_lock: None,
             air_lock: None,
@@ -4390,6 +4395,14 @@ impl Menu {
         }
         self.mod_tracks = tracks;
         self.arrange_mods();
+    }
+
+    /// The music packs in the mods folder (P122), `(id, name, songs)`, for the Mods page. An empty
+    /// list (the folder off) keeps the last one listed, as the track packs are.
+    pub fn set_music_packs(&mut self, packs: Vec<(String, String, usize)>) {
+        if !packs.is_empty() {
+            self.music_seen = packs;
+        }
     }
 
     /// Each mod track's source game (MD11), `(id, game)`, as its `mod.json` says.
