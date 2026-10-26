@@ -597,6 +597,8 @@ impl Rider {
         // A cannonball's record update, when this tick's has one: the wreck part's point, and the
         // wreck bike's translation and forward row (S77).
         let mut thrown_keep = None;
+        // What of the record's list the body rays found on the cars (S137), for the wreck test.
+        let cars = bump.as_deref().map_or_else(Vec::new, |b| crate::mover_contact::wreck_contacts(&b.contacts));
         if state.wreck.is_none() {
             // The body rays against the world's props (S138), from where the last tick left the bike,
             // as its collision object searches them before the bikes are updated: what they touch goes
@@ -802,7 +804,10 @@ impl Rider {
         // port's world has none.
         // A ghost's head ray sweeps the world alone: its body ignores the vehicle class (S63).
         let rivals = if ghost.on { &[][..] } else { rivals };
-        let hits = if state.wreck.is_none() { ride::hits_among(ride, world, rivals) } else { Vec::new() };
+        let mut hits = if state.wreck.is_none() { ride::hits_among(ride, world, rivals) } else { Vec::new() };
+        if state.wreck.is_none() {
+            hits.extend(cars);
+        }
         let touched = ride.touching || !hits.is_empty();
         let (mass, height) = (F::ONE / ride.chassis.inv_mass, F(ride.chassis.cofg_world.y()));
         // The map edge (S59): armed on the bike by its builder (S73), on a map with an edge, and not

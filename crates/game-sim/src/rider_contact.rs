@@ -469,6 +469,11 @@ impl crate::Sim {
             return self.step(dt, controls, world);
         }
         self.traffic.frame(dt, world);
+        let mut bump = bump;
+        let cars = self.car_contacts(0, world, dt);
+        if let Some(b) = bump.as_deref_mut() {
+            b.contacts = crate::mover_contact::merged(std::mem::take(&mut b.contacts), cars);
+        }
         let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], bump);
         self.ticks += 1;
         said
