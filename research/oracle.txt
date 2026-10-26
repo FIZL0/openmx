@@ -5632,3 +5632,18 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 #             (wy to -2.2), ends rolling backwards. States 2707..2709.
 #   s150-r70  UP 70: down at 2855, ~169, crossup -0.14 rad; rides out, heading swings -166.8 by 2945
 #             (wy to -2.99). States 2748..2750.
+# P147 (2026-10-26): the riding rider's head against the ground.
+# * bike_ground_step 0x00257a00 ends with: if (0.25 < *(float*)(*(bike+0x18) + 0x94)) rec+0x30 = 0
+#   else rec+0x30 = 1, rec = *(bike+0x7d0). +0x94 is the bike transform's up.y; +0x30 is the record's
+#   terrain search. So a bike tipped or upside down (up.y <= 0.25) searches the terrain with its body
+#   rays on the next collide (0x002708a0's terrain branch: rays pointing down against the transform's
+#   up, end inside the terrain bounds and under the point query 0x001dce80 -> +0x40 = 1, +0x48 = 1, a
+#   kind-0 entry with other 0, ahead of the actor query's). bike_wreck_test 0x002522c0's hit loop then
+#   reads the head ray's entry (+0x24 6.674 > 6) as scenery: reason 6. Upright, +0x30 = 0 (RAM images
+#   first_recording and front-2600: +0x30 0, +0x34 1).
+# * Captured (research/p147, context/capture/p147, git-ignored): recording2's flip 1 with the stick
+#   pushed against it over fields 298..320. Torque gone at 2536, up.y -0.927 held to 2592 with +0x4f8
+#   (flipping) still 1, so the airborne clause never runs; touchdown 2593 on the roof, +0x574 0, reason
+#   6, entry +0x10 (-1.74e-05, 4.0637, -0.0968) +0x20 (2.98e-08, 6.6743, 0.1712): the head ray. rec+0x30
+#   reads 1 from the first row with up.y under 0.25 (2518). Held forward to field 420 instead, the bike
+#   turned back past vertical and came down on a wheel at 2594, reason 0xb. States roof/nose-2530, -2580.

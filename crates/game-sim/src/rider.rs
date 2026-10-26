@@ -599,22 +599,35 @@ impl Rider {
         let mut thrown_keep = None;
         // What of the record's list the body rays found on the cars (S137), for the wreck test.
         let cars = bump.as_deref().map_or_else(Vec::new, |b| crate::mover_contact::wreck_contacts(&b.contacts));
+        // What the body rays found in the ground (P147), which the wreck test reads too.
+        let mut in_ground = Vec::new();
         if state.wreck.is_none() {
             // The body rays against the world's props (S138), from where the last tick left the bike,
             // as its collision object searches them before the bikes are updated: what they touch goes
             // on the bump's list beside the other riders' frames, or on a list of its own.
+            // Tipped past its up limit, the same rays look for the terrain first (P147): those
+            // contacts head the list.
+            let ground = bike_col.as_deref().map_or_else(Vec::new, |col| crate::rider_contact::ground(col, &ride.transform(), world, dt));
+            in_ground = crate::rider_contact::ground_hits(&ground);
             let found = bike_col.as_deref().and_then(|col| crate::rider_contact::scenery(col, &ride.transform(), world, dt));
-            let scenery = found.as_ref().map(|f| !f.is_empty());
+            let scenery = match &found {
+                Some(f) => Some(!f.is_empty() || !ground.is_empty()),
+                None => (!ground.is_empty()).then_some(true),
+            };
             let mut alone = None;
             let bump = match (bump, found) {
-                (Some(b), Some(found)) => {
+                (Some(b), found) => {
                     // The cars are props too: a ray the car search (S137) already listed keeps that entry.
-                    let found: Vec<_> = found.into_iter().filter(|f| !b.contacts.iter().any(|c| c.other.is_none() && c.from == f.from && c.on_body == f.on_body)).collect();
+                    let found: Vec<_> = found.unwrap_or_default().into_iter().filter(|f| !b.contacts.iter().any(|c| c.other.is_none() && c.from == f.from && c.on_body == f.on_body)).collect();
+                    b.contacts.splice(0..0, ground);
                     b.contacts.extend(found);
                     Some(b)
                 }
-                (None, Some(found)) if !found.is_empty() => Some(alone.insert(crate::rider_contact::alone(ride, p, found))),
-                (bump, _) => bump,
+                (None, found) => {
+                    let mut list = ground;
+                    list.extend(found.unwrap_or_default());
+                    if list.is_empty() { None } else { Some(alone.insert(crate::rider_contact::alone(ride, p, list))) }
+                }
             };
             // The bike's limiter reads the no-hander as the rider's last tick left it (`+0xa44`).
             let c = Controls { respawn: false, hands_off: tricks.no_hander, ..*c };
@@ -806,8 +819,10 @@ impl Rider {
         // port's world has none.
         // A ghost's head ray sweeps the world alone: its body ignores the vehicle class (S63).
         let rivals = if ghost.on { &[][..] } else { rivals };
-        let mut hits = if state.wreck.is_none() { ride::hits_among(ride, world, rivals) } else { Vec::new() };
+        // The ground's entries are the list's first (P147), the rider's head among them.
+        let mut hits = in_ground;
         if state.wreck.is_none() {
+            hits.extend(ride::hits_among(ride, world, rivals));
             hits.extend(cars);
         }
         let touched = ride.touching || !hits.is_empty();

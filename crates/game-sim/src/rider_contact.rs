@@ -400,6 +400,57 @@ pub fn scenery(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Option
     Some(record.contacts)
 }
 
+/// The up the ground step's end turns the record's ground search on at or under (P147): the bike's
+/// transform's up `y`. Past it — on its side, upside down — its body rays look for the terrain.
+pub const GROUND_SEARCH_UP: F = F(0.25);
+
+/// Whether the riding bike's collision object searches the terrain this tick: its `+0x30`, which the
+/// ground step's end sets from the transform it leaves, and the next tick's search reads. Off while
+/// `0.25 < up.y`, so a NaN up searches.
+pub fn searches_ground(at: &Mat4) -> bool {
+    !(GROUND_SEARCH_UP < F(at.0[1].y()))
+}
+
+/// **The body rays in the ground** (P147): the riding bike's eleven rays, from where the last tick
+/// left it (`at`), against the terrain, when [`searches_ground`] says the object looks. Each ray that
+/// points down (against the transform's up) and ends inside the terrain's rectangle with its end below
+/// the ground is a contact with no other side — the scenery, its surface the ground's
+/// ([`contact_search::collide`]'s heightfield pass, S43). These are the first entries of the object's
+/// list, ahead of what the actor search finds; the head ray among them is the rider's head in the
+/// ground, which the wreck test's last clause wrecks at reason 6, whatever the airborne clause says.
+/// Empty upright, and on a world with no terrain.
+pub fn ground(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Vec<Contact> {
+    if !searches_ground(at) {
+        return Vec::new();
+    }
+    let (field, _, _) = world.wooded();
+    let Some(field) = field else { return Vec::new() };
+    let rays = col.rays.segments.iter().map(|s| [s.from, s.to]).collect();
+    let mut records = [Record {
+        search_ground: true,
+        search: true,
+        sweep_back: true,
+        rest_linear: F::ONE,
+        rest_angular: F::ONE,
+        node: node(at),
+        capacity: CAPACITY,
+        nearby: true,
+        rays: Some(rays),
+        ..Record::default()
+    }];
+    contact_search::collide(&mut records, 0, None, Some(&*field), &mut crate::wreck_bike::NoObjects, dt);
+    let [record] = records;
+    record.contacts
+}
+
+/// The wreck test's view of [`ground`]'s contacts: own entries, each by its ray's reach, on scenery.
+pub fn ground_hits(contacts: &[Contact]) -> Vec<crate::air::Contact> {
+    contacts
+        .iter()
+        .map(|c| crate::air::Contact { mirrored: false, reach: F(c.on_body.y()), other: crate::air::Other::Scenery })
+        .collect()
+}
+
 /// A bike alone in its list: `contacts` against its own object and chassis, the one seat there is.
 pub fn alone(ride: &crate::ride::Ride, p: &Phy, contacts: Vec<Contact>) -> Bump {
     Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)] }
