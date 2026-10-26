@@ -5527,3 +5527,76 @@ node_count             boot 0x001b3420 1 + a node's descendants: what a hierarch
 #   nprobe3/4/6/7 (research/s138_nose.py, idle pad): thrown up and pitched forward at (4642.5, 3650):
 #          62 deg at 30/s and 66 at 44/s down ride out (g.y 26.6 / 42.7), 70.06 -> 69.86 rides out,
 #          74.95 -> 75.03 reason 1 on touchdown. States 2791, 2819, 2790, 2787.
+
+# ---------------------------------------------------------------------------------------------------
+# R10 — MX vs. ATV Unleashed, PC (program `pc`, [other.pc] in kit.toml; research/mxvatv-pc.md). A
+# reference, not an oracle: nothing here is called, and a proof stays against the PS2. Each row names
+# the boot function it matches and how: `str` = rare strings both read, `off` = the struct offsets
+# both touch (Jaccard), `const` = the float constants, `seq` = the same place in the same setter run.
+# `./kit ghidra name -o pc` writes these names into the PC project; `./kit fn pc_engine_update -o pc`.
+#
+# The engine (MotocrossEngineModel; its fields sit 0xC below the PS2 engine's).
+pc_engine_ctor              pc 0x004664e0 = engine_ctor: the same 1.0 stores, fields -0xC
+pc_engine_set_driven_wheel  pc 0x00466610 = engine_set_driven_wheel (two wheels, +0x90/+0x94)
+pc_engine_set_power_curve   pc 0x00466630 = engine_set_power_curve (hp x 5252 / rpm)
+pc_engine_set_inertia       pc 0x00466730 = engine_set_inertia (seq)
+pc_bike_set_gear            pc 0x00466760 = bike_set_gear (seq)
+pc_engine_rev_limit         pc 0x00466790 = engine_rev_limit (seq)
+pc_engine_set_gearbox       pc 0x004668a0 = engine_set_gearbox (seq)
+pc_engine_update            pc 0x00466920 = engine_update (817 bytes, after the setters; by place and size)
+# The tire (MotocrossTireModel, vftable stored by its ctor 0x004710f0; most fields = the PS2 wheel's).
+pc_wheel_set_tire           pc 0x0046f860 = wheel_set_tire; the inertia formula differs (r^2/12/2 vs 2pi r^2)
+pc_wheel_set_surface_drive  pc 0x0046f910 = wheel_set_surface_drive (per-surface arrays at +0x238)
+pc_wheel_set_surface_side   pc 0x0046f980 = wheel_set_surface_side (+0x438)
+pc_wheel_set_surface_drag   pc 0x0046fbb0 = wheel_set_surface_drag (+0x778)
+pc_wheel_set_steering       pc 0x0046fbf0 = wheel_set_steering (seq)
+pc_wheel_add_drive_torque   pc 0x0046fe40 = wheel_add_drive_torque (seq)
+pc_wheel_set_tire_derived   pc 0x00470180 = wheel_set_tire_derived (off 0.43)
+pc_wheel_clear              pc 0x00470230 = wheel_clear (off 1.00)
+pc_wheel_set_contact        pc 0x00470300 = wheel_set_contact (off 1.00)
+pc_wheel_suspension         pc 0x00470420 = wheel_suspension (off 0.79)
+pc_wheel_surface_drag       pc 0x00470920 = wheel_surface_drag (off 0.50, const 1.0)
+pc_wheel_contact_frame      pc 0x00470ab0 = wheel_contact_frame (off 0.33, weak)
+pc_wheel_tire_drive_force   pc 0x00470b90 = wheel_tire_drive_force (off 0.34, const 0.33)
+pc_wheel_gyro_torque        pc 0x00471090 = wheel_gyro_torque (off 0.67)
+pc_wheel_contact_velocity   pc 0x004715e0 = wheel_contact_velocity (off 0.38, weak)
+pc_wheel_hinge_force        pc 0x00471cc0 = wheel_hinge_force (weak: best of the rest)
+pc_wheel_tire_forces        pc 0x00471d00 = wheel_tire_forces (off 0.53, const 0.50)
+pc_wheel_spin_integrate     pc 0x00472350 = wheel_spin_integrate (off 0.63, const 0.67)
+# The rider (MotocrossRider: PhysicsCharacter + Actor; MX Unleashed keeps this on the vehicle).
+pc_rider_body_wreck_enter   pc 0x00469f40 = rider_body_wreck_enter (const 0.66, 1.01, 1.02, 5.0)
+pc_rider_body_mode          pc 0x0046b380 = rider_body_mode (const 0.3, 0.7, 0.9, 1.5)
+pc_ragdoll_force_listener   pc 0x0046c5b0 = ragdoll_force_listener (MotocrossRider's ForceListener vtable)
+# The vehicles: virtual slots, by the strings they read.
+pc_bike_phy_load            pc 0x005fcc60 = bike_phy_load (MXVehicleMotoShared::vf12; str: 112 .phy keys)
+pc_bike_attach_nodes        pc 0x005f6cd0 = bike_attach_nodes (MXVehicleMotocross::vf85; str)
+pc_stunt_specials           pc 0x005f63a0 = stunt_specials (MXVehicleMotocross::vf87; str; Atv::vf87 copies it)
+pc_bike_fx_wire             pc 0x005d10b0 = bike_fx_wire (MXVehicle::vf37; str)
+pc_biplane_read_phy         pc 0x005dd690 = biplane_read_phy (MXVehicleBiplane::vf12; str)
+pc_biplane_init             pc 0x005dec20 = biplane_init (MXVehicleBiplane::vf33; str)
+pc_biplane_find_bones       pc 0x005e1210 = biplane_find_bones (MXVehicleBiplane::vf86; str)
+pc_vehicle_factory          pc 0x006075d0 = vehicle_factory (str: the machine kinds)
+pc_vehicle_fx_read          pc 0x004ffc50 = vehicle_fx_read (str)
+pc_machine_wreck_load       pc 0x005001b0 = machine_wreck_load (str)
+pc_machine_suspension_load  pc 0x00500610 = machine_suspension_load (str)
+# The biplane's models (BiplaneAero/Engine/Tire: GameObject, only the destructor virtual).
+pc_biplane_aero_step        pc 0x0040a750 = biplane_aero_step (off 0.85)
+pc_biplane_engine_step      pc 0x0040ac50 = biplane_engine_step (off 0.69, const 0.67)
+pc_biplane_gear_tire        pc 0x0040af60 = biplane_gear_tire (off 1.00, 6 offsets)
+pc_biplane_tire_preforce    pc 0x0040afd0 = biplane_tire_preforce (off 1.00 but 2 offsets: weak)
+pc_biplane_gear_springs     pc 0x0040b2e0 = biplane_gear_springs (off 0.25, const 1.00; weak)
+pc_biplane_gear_contact     pc 0x0040b3a0 = biplane_gear_contact (off 1.00, 9 offsets)
+pc_biplane_tire_probe       pc 0x0040b450 = biplane_tire_probe (off 0.80)
+# Engine-wide code, by strings.
+pc_physics_object_init      pc 0x004877b0 = physics_object_init (PhysicsObject::vf6)
+pc_physics_loader_pins      pc 0x00483450 = physics_loader_pins (PhysicsCharacter::vf42)
+pc_physics_collection_attach pc 0x00483f30 = physics_collection_attach (PhysicsCharacter::vf45)
+pc_physics_collection_part  pc 0x00484bb0 = physics_collection_part (PhysicsCollection.cpp)
+pc_physics_collection_constraint pc 0x00484e90 = physics_collection_constraint (ConstrainedParticlePhysics.h)
+pc_camera_load_presets      pc 0x004af270 = camera_load_presets (SimpleFollowCamera::vf52)
+pc_anim_mcf_motion          pc 0x004603d0 = anim_mcf_motion (str: TransitionTime)
+pc_material_table_load      pc 0x0041f260 = material_table_load (str)
+pc_engine_sound_load        pc 0x00472710 = engine_sound_load (str)
+pc_engine_sound_list        pc 0x00472b40 = engine_sound_list (str)
+pc_actor_manager_add        pc 0x00447650 = actor_manager_add (ActorManager::vf31)
+pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)

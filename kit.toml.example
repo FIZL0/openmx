@@ -38,6 +38,11 @@ project = "context/ghidra"    # project dir (inside the git-ignored context/)
 name    = "ps2"               # project name
 timeout = 7200                # seconds one headless analysis may take
 
+# Programs read for reference only, never run: another build of the game (a PC port, a sequel). Each gets
+# its own Ghidra project beside the PS2 one; `./kit ghidra analyse -o pc`, then `./kit fn <addr> -o pc`.
+[other.pc]
+file = "context/mxvatv-pc/MXvsATV.exe"   # MX vs. ATV Unleashed, PC (research/mxvatv-pc.md)
+
 [build]
 # How `./kit check` runs the port's tests, and `./kit done` gates a commit on them.
 # Any build system: cargo, meson, make, pytest… Leave empty to skip the test gate.

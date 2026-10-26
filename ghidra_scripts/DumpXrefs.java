@@ -44,7 +44,7 @@ public class DumpXrefs extends GhidraScript {
                 Function f = getFunctionContaining(r.getFromAddress());
                 w.println(String.format("%08x\t%08x\t%s\t%s",
                         r.getToAddress().getOffset(), r.getFromAddress().getOffset(),
-                        f == null ? "-" : f.getName(), r.getReferenceType()));
+                        f == null ? "-" : f.getName(true).replace(' ', '_'), r.getReferenceType()));
                 if ((++n % 100000) == 0) monitor.setMessage("DumpXrefs " + n + " references");
             }
         }

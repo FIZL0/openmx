@@ -156,6 +156,41 @@ def analyse(program: str, elf: str | os.PathLike, processor: str = EE, force: bo
                 f'this takes tens of minutes', timeout or c.ghidra_timeout)
 
 
+def analyse_other(o, force: bool = False, timeout: int | None = None) -> int:
+    """Import an `[other.<name>]` program into a project of its own, `<project dir>/<name>.gpr`, and
+    analyse it. Its own project because the PS2 one is shared by every worktree: an hour's analysis of a
+    reference exe must not hold the lock everyone's `dump` needs. The loader picks the language from the
+    file's header unless `processor` says otherwise; a Windows exe gets MSVC RTTI recovered here (class
+    names, vtables, base classes), which is most of what such a program is read for."""
+    c = cfg()
+    f = ROOT / o.file
+    if not f.exists():
+        raise GhidraError(f'no file for [other.{o.name}] at {_rel(f)}')
+    c.ghidra_project.mkdir(parents=True, exist_ok=True)
+    args = [str(headless()), str(c.ghidra_project), o.name, '-import', str(f),
+            '-scriptPath', str(SCRIPTS), '-analysisTimeoutPerFile', str(timeout or c.ghidra_timeout),
+            '-postScript', 'NameOther.java', *_name_args()]
+    if o.processor:
+        args += ['-processor', o.processor]
+    if force:
+        args.append('-overwrite')
+    return _run(args, c.ctx('logs', f'ghidra-analyse-{o.name}.log'),
+                f'analysing {o.name} ({f.stat().st_size // 1024} KB) — this takes tens of minutes',
+                timeout or c.ghidra_timeout)
+
+
+def postscript_other(name: str, args: list[str], o, quiet: bool = False, write: bool = False) -> int:
+    """`postscript` over an `[other.<name>]` program, in its own project. `write` drops `-readOnly`, for
+    the one script that names things (NameOther), which is re-runnable without re-analysing."""
+    c = cfg()
+    script = SCRIPTS / (name if name.endswith('.java') else f'{name}.java')
+    cmd = [str(headless()), str(c.ghidra_project), o.name, '-process', Path(o.file).name, '-noanalysis',
+           *([] if write else ['-readOnly']), '-scriptPath', str(SCRIPTS), '-postScript', script.name,
+           *[str(a) for a in args]]
+    return _run(cmd, c.ctx('logs', f'ghidra-{script.stem.lower()}-{o.name}.log'),
+                f'{script.stem} on {o.name}', c.ghidra_timeout, quiet=quiet)
+
+
 def postscript(name: str, args: list[str], programs: list[str] | None = None, quiet: bool = False) -> int:
     """Run `ghidra_scripts/<name>.java` over already-analysed programs. Seconds, not tens of minutes.
 
@@ -214,6 +249,9 @@ DOC = """Headless Ghidra: analyse once, then dump as often as you like.
   ./kit ghidra asm 2001a0 200240    the instructions of those functions
   ./kit ghidra data 1004c0 0x200    a memory range with Ghidra's own data types applied
   ./kit ghidra status               what is in the project, and how stale each dump is
+  ./kit ghidra analyse -o pc        an [other.pc] program (another build, for reference): own project
+  ./kit ghidra dump -o pc           its dumps, read with ./kit fn -o pc / ./kit xref -o pc
+  ./kit ghidra name -o pc           re-run its naming pass (RTTI vtable slots, assert source files)
 
 Run `analyse` once per program and never again; everything after that is `dump`, which re-uses the
 analysis (`-noanalysis -readOnly`). If a dump looks wrong *after you renamed or retyped things in the
@@ -223,16 +261,21 @@ Ghidra GUI*, that is expected — re-run `dump`, not `analyse`."""
 def cmd_ghidra(argv: list[str]) -> int:
     from ps2kit.cli import parser
     ap = parser('ghidra', DOC)
-    sub = ap.add_subparsers(dest='action', metavar='analyse|dump|asm|data|status')
+    sub = ap.add_subparsers(dest='action', metavar='analyse|dump|name|asm|data|status')
 
     a = sub.add_parser('analyse', aliases=['analyze'], help='import and fully analyse (slow, once)')
     a.add_argument('--program', '-p', default='all', metavar='NAME', help='a program name, or "all"')
     a.add_argument('--force', action='store_true', help='re-import a program that is already there')
     a.add_argument('--iop', action='store_true', help=f'it is an IOP module: use {IOP}')
+    a.add_argument('--other', '-o', metavar='NAME', help='an [other.NAME] program instead')
 
     d = sub.add_parser('dump', help='decompilation, function table and xrefs')
     d.add_argument('--program', '-p', default='all', metavar='NAME')
     d.add_argument('--only', choices=('decomp', 'xrefs'), help='just one of the two dumps')
+    d.add_argument('--other', '-o', metavar='NAME', help='an [other.NAME] program instead')
+
+    m = sub.add_parser('name', help='an [other] program\'s naming pass, again (no re-analysis)')
+    m.add_argument('--other', '-o', metavar='NAME', required=True)
 
     s = sub.add_parser('asm', help='disassemble whole functions by address')
     s.add_argument('addr', nargs='+', help='addresses (hex, 0x…, or @symbol)')
@@ -253,6 +296,8 @@ def cmd_ghidra(argv: list[str]) -> int:
         return 2
 
     try:
+        if getattr(args, 'other', None):
+            return _other(args)
         if args.action in ('analyse', 'analyze'):
             return _analyse(args)
         if args.action == 'dump':
@@ -274,6 +319,40 @@ def _programs(which: str | None) -> list[str]:
     if which not in c.programs:
         raise GhidraError(f'no program named {which!r} (have: {", ".join(c.programs)})')
     return [which]
+
+
+def _name_args() -> list[str]:
+    """NameOther's arguments: where the tsvs go, and the oracle file, whose rows for the program become
+    its function names (`pc_engine_update pc 0x…` names that function `pc_engine_update`)."""
+    return [str(cfg().ctx('decomp', '.keep').parent), str(cfg().oracle_file)]
+
+
+def _other(args) -> int:
+    c = cfg()
+    o = c.others.get(args.other)
+    if not o:
+        raise GhidraError(f'no [other.{args.other}] in kit.toml (have: {", ".join(c.others) or "none"})\n'
+                          f'    [other.{args.other}]\n    file = "context/…/the.exe"')
+    if args.action in ('analyse', 'analyze'):
+        if (c.ghidra_project / f'{o.name}.gpr').exists() and not args.force:
+            print(f'already analysed: {o.name}  (--force to redo)\nnext: ./kit ghidra dump -o {o.name}')
+            return 0
+        return analyse_other(o, force=args.force)
+    if args.action == 'name':
+        return postscript_other('NameOther', _name_args(), o, write=True)
+    outdir = c.ctx('decomp', '.keep').parent
+    rc = 0
+    if args.only != 'xrefs':
+        rc |= postscript_other('DumpDecomp', [str(outdir / f'{o.name}.c')], o)
+    if args.only != 'decomp':
+        rc |= postscript_other('DumpXrefs', [str(outdir / f'{o.name}.xrefs.tsv')], o)
+    for ext in ('.c', '.funcs.tsv', '.xrefs.tsv'):
+        p = outdir / f'{o.name}{ext}'
+        if p.exists():
+            print(f'  {_rel(p):<40} {p.stat().st_size / 1048576:6.1f} MB')
+    if rc == 0:
+        print(f'Never read these whole. Use: ./kit fn <addr|Class::name> -o {o.name} · ./kit xref … -o {o.name}')
+    return rc
 
 
 def _analyse(args) -> int:
