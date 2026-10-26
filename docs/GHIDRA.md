@@ -144,3 +144,22 @@ loses nothing if the names live in the repo.
 Names in the *port* are a separate matter: they describe behaviour, never provenance. No `FUN_…`, no
 `DAT_…`, no addresses — see `AGENT.md`. The mapping between the two worlds is `research/oracle.txt`, and
 that is the only place it belongs.
+
+---
+
+## Other programs: a PC port, a sequel
+
+A build of the game for another machine reads far better than the PS2's: an x86 exe decompiles cleanly,
+and MSVC leaves class names behind. Name it in kit.toml and it gets a project of its own (the PS2 one is
+shared by every worktree and must not be locked for an hour):
+
+    [other.pc]
+    file = "context/mxvatv-pc/MXvsATV.exe"
+
+    ./kit ghidra analyse -o pc    # import + analyse; NameOther.java names vtable slots and asserting functions
+    ./kit ghidra name -o pc       # NameOther again, after adding `name pc 0xaddr` rows to research/oracle.txt
+    ./kit ghidra dump -o pc       # decomp/pc.c, pc.funcs.tsv, pc.xrefs.tsv
+    ./kit fn MotocrossRider::vf44 -o pc
+
+It is a reference, not an oracle: the port matches the PS2, and a proof runs against the PS2. What the
+names mean is in `research/mxvatv-pc.md`.

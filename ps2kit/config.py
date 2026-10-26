@@ -90,6 +90,16 @@ class Overlay:
 
 
 @dataclass
+class Other:
+    """A program that is not on the disc: another build of the game, read for reference only
+    (`[other.<name>]` in kit.toml). It gets its own Ghidra project, so analysing it never locks the PS2
+    one, and its dumps sit beside the PS2 programs' as `decomp/<name>.*` for `./kit fn -o <name>`."""
+    name: str
+    file: str
+    processor: str = ''               # '' = Ghidra's loader picks (a PE or ELF header says its own)
+
+
+@dataclass
 class Config:
     raw: dict = field(default_factory=dict)
     path: Path = CONFIG
@@ -194,6 +204,16 @@ class Config:
     def programs(self) -> list[str]:
         """Every program the kit decompiles: the boot ELF plus each overlay, by dump name."""
         return ['boot'] + [o.name for o in self.overlays]
+
+    @property
+    def others(self) -> dict[str, Other]:
+        """`[other.<name>]` blocks: programs read for reference, never run (see `Other`)."""
+        out = {}
+        for name, o in (self.raw.get('other', {}) or {}).items():
+            if not isinstance(o, dict) or not o.get('file'):
+                raise SystemExit(f'kit.toml: [other.{name}] needs file = "<path to the program>"')
+            out[name] = Other(name, o['file'], o.get('processor', '') or '')
+        return out
 
     # --- [ghidra] -------------------------------------------------------------
     @property

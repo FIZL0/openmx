@@ -59,13 +59,17 @@ def default_program() -> str:
 def dump(program: str | None, ext: str = '.c') -> Path:
     c = cfg()
     program = program or default_program()
-    if program not in c.programs:
-        raise DumpError(f'no program named {program!r} in kit.toml (have: {", ".join(c.programs)})')
     p = c.ctx('decomp', f'{program}{ext}')
+    # An [other.<name>] program answers from its dumps alone: kit.toml is not committed, so a worktree
+    # that shares the dumps but not the block can still read them.
+    other = program in c.others or (program not in c.programs and p.exists())
+    if program not in c.programs and not other:
+        raise DumpError(f'no program named {program!r} in kit.toml (have: {", ".join(c.programs)}'
+                        + (f'; -o {", ".join(c.others)}' if c.others else '') + ')')
     if not p.exists():
         what = {'.c': 'decompilation', '.funcs.tsv': 'function table', '.xrefs.tsv': 'cross-references'}[ext]
         raise DumpError(f'no {what} for {program!r} yet ({p}).\n'
-                        f'    ./kit ghidra dump --program {program}\n'
+                        f'    ./kit ghidra dump {"-o" if other else "--program"} {program}\n'
                         '(and if the project has never been analysed: ./kit ghidra analyse first — that is '
                         'the slow one)')
     return p
@@ -719,6 +723,7 @@ FN_DOC = """Print one decompiled function.
   ./kit fn update_player          by name, from the Ghidra project's own names
   ./kit fn @serve_entry           by a [symbols] name in kit.toml
   ./kit fn 1000a0 -p boot         a different program (default: the last overlay)
+  ./kit fn MotocrossRider::vf12 -o pc   an [other.pc] program (another build, read for reference)
   ./kit fn 1000a0 --context 3     plus the call sites in its first 3 callers
 
 The dump itself is tens of megabytes: this streams it and stops at the next function, so the cost of
@@ -731,12 +736,13 @@ def cmd_fn(argv: list[str]) -> int:
     ap = parser('fn', FN_DOC)
     ap.add_argument('addr', help='address (hex / 0x…), @symbol, or a function name')
     ap.add_argument('--program', '-p', metavar='NAME', help='program to read (default: the last overlay)')
+    ap.add_argument('--other', '-o', metavar='NAME', help='an [other.NAME] program instead of the disc\'s')
     ap.add_argument('--context', type=int, default=0, metavar='N',
                     help='also show the call sites in N of its callers')
     ap.add_argument('--limit', type=int, default=300, metavar='N', help='lines to print (default 300)')
     args = ap.parse_args(argv)
     try:
-        prog = args.program or default_program()
+        prog = args.other or args.program or default_program()
         a = resolve(args.addr, prog)
         table = funcs(prog)
         fn = table.get(a)
@@ -801,11 +807,12 @@ def cmd_xref(argv: list[str]) -> int:
     ap = parser('xref', XREF_DOC)
     ap.add_argument('addr', help='address (hex / 0x…), @symbol, or a function name')
     ap.add_argument('--program', '-p', metavar='NAME')
+    ap.add_argument('--other', '-o', metavar='NAME', help='an [other.NAME] program instead of the disc\'s')
     ap.add_argument('--similar', action='store_true', help='look-alike functions instead of references')
     ap.add_argument('--limit', type=int, default=40, metavar='N', help='rows per section (default 40)')
     args = ap.parse_args(argv)
     try:
-        prog = args.program or default_program()
+        prog = args.other or args.program or default_program()
         a = resolve(args.addr, prog)
         table = funcs(prog)
         if args.similar:

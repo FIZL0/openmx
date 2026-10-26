@@ -61,9 +61,9 @@ public class DumpDecomp extends GhidraScript {
                     code = "/* decompile failed: " + r.getErrorMessage() + " */\n";
                     failed++;
                 }
-                c.println(String.format("// %08x %s size=%d", ep, f.getName(), size));
+                c.println(String.format("// %08x %s size=%d", ep, name(f), size));
                 c.println(code);
-                t.println(String.format("%08x\t%s\t%d\t%s", ep, f.getName(), size, flat(signature(f))));
+                t.println(String.format("%08x\t%s\t%d\t%s", ep, name(f), size, flat(signature(f))));
                 n++;
                 if ((n % 500) == 0) monitor.setMessage("DumpDecomp " + n + " functions");
             }
@@ -71,6 +71,12 @@ public class DumpDecomp extends GhidraScript {
             d.dispose();
         }
         println("DumpDecomp: " + n + " functions (" + failed + " failed) -> " + cFile + ", " + tFile);
+    }
+
+    /** The name with its namespace (`MotocrossRider::vf12` in a program with classes; a PS2 program's
+     *  functions are all global, so theirs is unchanged), and no spaces: the header is space-separated. */
+    static String name(Function f) {
+        return f.getName(true).replace(' ', '_');
     }
 
     private String signature(Function f) {
