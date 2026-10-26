@@ -4843,6 +4843,24 @@ collision_tree_build boot 0x00111ee0 (nodes out, facets out, matrix out, quadwor
 #   0x00218b80's callers (0x0015b210 plane, 0x0024d128 rider body, 0x00257a00 bike ground, 0x0027df50
 #   put back, 0x0021e4d0 camera; 0x002f8820, 0x0034ad70, 0x003a10b0, 0x003a45c0, 0x003e2480, 0x003e3990
 #   not read).
+# S101 — the per-plant bend blocks: dead in MX Unleashed (proof: crates/game-sim/tests/eco.rs, the
+#   two tests after `mod bend`). Pool: 0x0012b990(eco, world, gatherer, count), from the scene loader
+#   0x001a5210 only when env +0x528 != 0; it sets eco +0x1d88 = 1, allocates count × 0x50 at eco +0x80
+#   (count at +0xe8; block ctor 0x0012bb70, not a Ghidra function: +0 0, +0x10 quad from 0x0041f740,
+#   +0x20 quad from 0x00426da0, +0x30..+0x3c 0, +0x40 byte 0, +0x44 0), keeps the gatherer
+#   (0x002188d0 + 0x00218980(25.0, 200.0, g, 128), g +0x38 = *(*0x0048a568 + 0x42c)) at +0x1d90, and
+#   makes a radius-10 collision object at +0x1d8c (categories [0x468f88], [0x468f60]; owner eco +8).
+#   Environment keys (the reader 0x001a7b30, only when EcosystemFile is not "none"): env +0x520
+#   EcosystemWindStrength (default 0), +0x524 EcosystemWindGustRate (0.15, read only if the strength
+#   is), +0x528 UseEcoPhysics (int/bool via 0x0014b6f0, default 0), +0x52c EcoMaxPhysicsEco (50.0,
+#   read only if Use is). Wind non-zero → 0x0012b8f0 (eco +0x1d60.., a normalised direction at +0x1d70).
+#   Readers: the frame pass 0x0012bbd0 (plant +0x12 bit 1 → block [+0x13]: state +0x40 < 2 scales the
+#   fade byte by the angle +0x30 over 5° (near) or (angle - [0x0041f640]) over 2° (far); state 4 takes
+#   the fade byte from +0x30 & 0xff; +0x10 rotates the culling half-extent) and the near-model draw
+#   0x0012d030. Writers: none. Every sb at +0x40, every sb at a plant's +0x12/+0x13 in the ELF
+#   (llvm-objdump scan) is the block ctor, the plant ctor 0x001293e0, read_plants (bit 0) or the frame
+#   pass (bit 0), or another struct's. No .scn on the disc names any of the four keys; recording2,
+#   biplane and s89-along hold eco +0x80/+0xe8/+0x1d88/+0x1d8c/+0x1d90 = 0 and no plant with bit 1.
 # S86 — the riding bike's collidables (crates/game-sim/src/bike_col.rs; tests crates/game-sim/tests/bike_col.rs).
 #   Loader 0x00252ff0: dir "%sCol" of "Bike\" -> "Bike\Col\"; "%sm.col"/"%sf.col" of bike +0x28c, an
 #   inline string, "bike" for both split-screen players (S93's P2 rides another rider and .phy, not
