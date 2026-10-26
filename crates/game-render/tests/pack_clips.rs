@@ -224,7 +224,14 @@ fn the_body_and_the_chassis_take_the_packs_clips() {
     let mut bike = chassis(&mut disc, &set);
     let before = bike.stance.lib.clip;
     let missing = bike.add_pack(&clips, &set.stunts);
-    assert_eq!(bike.stance.lib.clip, before);
+    // The disc's own clips stay; only its holes take the pack's (MD41) — on this bike only the
+    // backflip, as the disc already has every gesture clip the pack ships.
+    for (state, (now, was)) in bike.stance.lib.clip.iter().zip(before).enumerate() {
+        match state as i32 {
+            va::BACKFLIP => assert!(was.is_none() && now.is_some(), "the pack did not fill the bike's backflip"),
+            _ => assert_eq!(*now, was, "adding the pack moved the bike's state {state}"),
+        }
+    }
     println!("the bike has no clip for {missing:?}");
     for state in [SPIN_LEFT, SPIN_RIGHT, PACK_EXTRA] {
         assert!(bike.stance.lib.clip(state).is_some(), "the bike has no clip in state {state}");

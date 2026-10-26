@@ -3087,6 +3087,15 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             game_sim::vehicle_anim::POSE_CLIPS.len(),
             chassis.nodes,
         );
+        // Which tricks the bike stays still under (MD41): the drawn rider holds the bars instead.
+        let bare = chassis.bare_slots(&stunts.stunts);
+        if !bare.is_empty() {
+            println!(
+                "chassis: no bike clip on the disc{} for {}; the rider's hands hold the bars through them",
+                if pack_clips.is_some() { " or in the pack" } else { "" },
+                bare.join(", ")
+            );
+        }
     }
 
     // The follow cameras the track carries, in the file's own order, read by S7's own reader. L1
@@ -6108,9 +6117,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 if moving && bike_up {
                     let ride = &seat.sim.rider.ride;
                     // In the trick the body's machine chose, so a trick started whipped does not
-                    // leave the bike crossed up under it (V64); without a body, the pack's own.
+                    // leave the bike crossed up under it (V64), and in its backflip when the bike
+                    // has a clip for it (MD41); without a body, the pack's own.
                     let want = match rig.body {
-                        Some(_) => Chassis::want_beside(ride, &seat.sim.rider.tricks, seat.sim.rider.body.veh.want),
+                        Some(_) => chassis.want_under(ride, &seat.sim.rider.tricks, seat.sim.rider.body.veh.want),
                         None => chassis.want_with_pack(ride, &seat.sim.rider.tricks),
                     };
                     // The rider's two axes and not zeros: in the air they are the crossup sweep the
@@ -6118,6 +6128,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let request = Chassis::riding(&seat.sim.rider);
                     chassis.original_wheels = args.original_wheels;
                     perf.time(Stage::Animation, || chassis.frame(dt, want, &request, Drive::of(ride)));
+                    // A trick the bike has no clip for: the drawn hands stay on the bars (MD41).
+                    if let Some(body) = &mut rig.body {
+                        body.bare = chassis.bare_under(&seat.sim.rider.body.veh);
+                    }
                     if let Some(loaded) = assets.models.get_mut(&rig.bike_model).filter(|_| !gpu_on) {
                         perf.time(Stage::Skinning, || chassis.skin_into(loaded));
                     }
