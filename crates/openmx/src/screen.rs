@@ -111,6 +111,15 @@ impl Screen {
         }
     }
 
+    /// The keys that went down and up in the last poll and when, on [`crate::window::shell_us`]'s
+    /// clock (P165): the server's stamps on X, the pump's on the GPU window.
+    pub fn key_moments(&self) -> &[crate::window::KeyMoment] {
+        match &self.inner {
+            Inner::X(w) => w.key_moments(),
+            Inner::Gpu(w) => w.key_moments(),
+        }
+    }
+
     /// Down now, or pressed since the last poll though let go again (P53): a key's state for a
     /// frame, so a tap inside one slow frame is still a press.
     pub fn pressed(&self, code: u8) -> bool {

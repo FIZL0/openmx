@@ -4987,3 +4987,389 @@ fn every_settings_and_garage_tab_has_a_screen_word() {
     assert_eq!(Screen::tab_from_word("Display"), None);
     assert_eq!(Screen::tab_from_word("splash"), None);
 }
+
+// ---- P165: the same counts at every frame rate ------------------------------------------------------
+
+/// How a run's frames fall (P165): every `1/hz` s, the frame limit Off's uneven ones as fast as they
+/// go, or the display's refresh with now and then one missed.
+#[derive(Clone, Copy, Debug)]
+enum Rate {
+    Hz(u64),
+    Off,
+    Refresh,
+}
+
+/// The rates every count is taken at, the front end's 60 first: the one the others must equal.
+const RATES: [Rate; 7] = [Rate::Hz(60), Rate::Hz(5), Rate::Hz(30), Rate::Hz(120), Rate::Hz(165), Rate::Off, Rate::Refresh];
+
+impl Rate {
+    /// The time after frame `k`, in microseconds.
+    fn gap(self, k: u64) -> u64 {
+        match self {
+            Rate::Hz(hz) => 1_000_000 / hz,
+            Rate::Off => 1_000 + k * 7_919 % 11 * 1_000 + k * 31 % 997,
+            Rate::Refresh if k % 7 == 6 => 33_333,
+            Rate::Refresh => 16_667,
+        }
+    }
+}
+
+/// What a hand pushes with: the Pro Controller's d-pad (its hat) or its left stick, or the
+/// keyboard's arrows. L1 and R1 are the pad's shoulders under both of the pad's, A and D on the keys.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Hand {
+    Dpad,
+    Stick,
+    Keys,
+}
+
+/// The pushes a hand makes: when each goes down and comes up, in milliseconds from the start — a
+/// tap, a short hold, a second's and three seconds' holds, and two taps inside one slow frame.
+const GESTURES: [(&str, &[(u64, u64)]); 5] = [
+    ("tap", &[(0, 50)]),
+    ("short hold", &[(0, 250)]),
+    ("1 s hold", &[(0, 1_000)]),
+    ("3 s hold", &[(0, 3_000)]),
+    ("two taps in 120 ms", &[(0, 40), (80, 120)]),
+];
+
+/// The shell's input over a test's pad and keyboard, by a test's clock (P165): what main.rs's
+/// front end and ride read each frame, with the events the hand made between frames stamped when
+/// it made them.
+struct Hands {
+    seats: pad::Seats,
+    pro: pad::tests::FakePad,
+    root: std::path::PathBuf,
+    /// The keys down, and pressed since the last frame.
+    keys: HashSet<u8>,
+    tapped: HashSet<u8>,
+    /// The hand's events not yet made: when, in microseconds, what, and whether down.
+    events: VecDeque<(u64, Hand, Control, bool)>,
+    /// The test's clock, in microseconds.
+    now: u64,
+}
+
+impl Hands {
+    fn new(name: &str) -> Hands {
+        let root = pad::tests::scratch(name);
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        pad::tests::sys_device(&sys, "js0", "Nintendo Switch Pro Controller", (0x057e, 0x2009), &pad::tests::PRO_KEYS, &pad::tests::PRO_ABS, &[]);
+        let mut pro = pad::tests::FakePad::plug(&dev, "js0");
+        let mut seats = pad::tests::seats_in(&dev, &sys, pad::Wiring::default());
+        // The pad's greeting at the test clock's zero, read then: its clock against the shell's.
+        seats.at(0);
+        pro.gap(0);
+        pro.at(0);
+        pro.init(14, &[0; 6]);
+        pro.gap(50);
+        let got = pad::tests::devices_now(&mut seats, &|_| false);
+        let id = match &got[1].0 {
+            pad::Device::Pad(id) => id.clone(),
+            other => panic!("{other:?}"),
+        };
+        seats.set_first(Some(pad::Device::Pad(id)));
+        Hands { seats, pro, root, keys: HashSet::new(), tapped: HashSet::new(), events: VecDeque::new(), now: 0 }
+    }
+
+    /// Make every event up to `now`: the pad's into its device with their own stamps, the keys'
+    /// as the window's key moments. Then the frame's key moments.
+    fn reach(&mut self, now: u64) -> Vec<window::KeyMoment> {
+        self.now = now;
+        self.seats.at(now);
+        self.tapped.clear();
+        let mut moments = Vec::new();
+        while self.events.front().is_some_and(|e| e.0 <= now) {
+            let (t, hand, control, down) = self.events.pop_front().unwrap();
+            match hand {
+                Hand::Keys => {
+                    let code = match control {
+                        Control::Down => window::key::DOWN,
+                        Control::Right => window::key::RIGHT,
+                        Control::L1 => window::key::A,
+                        Control::R1 => window::key::D,
+                        Control::Start => window::key::RETURN,
+                        other => panic!("no key for {other:?}"),
+                    };
+                    if down {
+                        self.keys.insert(code);
+                        self.tapped.insert(code);
+                    } else {
+                        self.keys.remove(&code);
+                    }
+                    moments.push((t, code, down));
+                }
+                Hand::Dpad | Hand::Stick => {
+                    self.pro.at((t / 1_000) as u32);
+                    let full = if down { i16::MAX } else { 0 };
+                    match (hand, control) {
+                        (_, Control::L1) => self.pro.button(5, down),
+                        (_, Control::R1) => self.pro.button(6, down),
+                        (_, Control::Cross) => self.pro.button(0, down),
+                        (_, Control::Start) => self.pro.button(10, down),
+                        (Hand::Dpad, Control::Down) => self.pro.axis(5, full),
+                        (Hand::Dpad, Control::Right) => self.pro.axis(4, full),
+                        (Hand::Stick, Control::Down) => self.pro.axis(1, full),
+                        (Hand::Stick, Control::Right) => self.pro.axis(0, full),
+                        other => panic!("no pad input for {other:?}"),
+                    }
+                }
+            }
+        }
+        moments
+    }
+
+    fn held(&self) -> impl Fn(u8) -> bool + '_ {
+        |c| self.keys.contains(&c) || self.tapped.contains(&c)
+    }
+
+    /// A front-end frame at `now`, as main.rs reads and steps it: the steps that changed the menu.
+    fn front_frame(&mut self, m: &mut Menu, readers: &mut Readers, now: u64) -> usize {
+        let moments = self.reach(now);
+        self.seats.keys_at(&moments);
+        let held = |c: u8| self.keys.contains(&c) || self.tapped.contains(&c);
+        let devices = pad::tests::devices_now(&mut self.seats, &held);
+        let reports: Vec<(Dev, Report, u16, Option<Vec<menu::Moment>>)> = devices
+            .into_iter()
+            .map(|(d, r, taps)| {
+                let moments = self.seats.moments(&d);
+                match d {
+                    pad::Device::Keys => (Dev::Keys, r, taps, moments),
+                    pad::Device::Pad(id) => (Dev::Pad(id), r, taps, moments),
+                }
+            })
+            .collect();
+        let hosting: Vec<bool> = reports.iter().map(|(d, _, _, _)| m.screen() != Some(Screen::Splash) && m.hosts(d)).collect();
+        let hosted = |d: &Dev| reports.iter().position(|(r, _, _, _)| r == d).is_some_and(|i| hosting[i]);
+        let presses = readers.read_at(&reports, &hosted, now);
+        m.elapse_to(now);
+        let mut changed = 0;
+        let (act, c) = counted(m, |m| m.step_devices(&presses), presses.iter().any(|(_, p)| *p != Press::default()));
+        changed += c;
+        let mut act = act;
+        while act == Act::Stay
+            && let Some(more) = readers.more()
+        {
+            let (a, c) = counted(m, |m| m.step_devices(&more), true);
+            (act, changed) = (a, changed + c);
+        }
+        changed
+    }
+
+    /// A ride's tick at `now`, as main.rs reads and steps the pause: 1P's pad and the keyboard as
+    /// one. The steps that changed the menu.
+    fn ride_tick(&mut self, m: &mut Menu, reader: &mut Reader, now: u64) -> usize {
+        let moments = self.reach(now);
+        self.seats.keys_at(&moments);
+        let held = |c: u8| self.keys.contains(&c) || self.tapped.contains(&c);
+        let seats = pad::tests::frame(&mut self.seats, &held);
+        let mut devices: Vec<(Report, u16, Option<Vec<menu::Moment>>)> =
+            vec![(seats[0].report(), self.seats.taps(0), self.seats.seat_moments(0))];
+        if let Some(keys) = self.seats.keyboard_alone() {
+            devices.push((keys, 0, self.seats.keyboard_alone_moments()));
+        }
+        let timed: Vec<menu::Timed> = devices.iter().map(|(r, t, m)| (*r, *t, m.as_deref())).collect();
+        let p = reader.read_timed(&timed, now);
+        m.elapse_to(now);
+        let (mut act, mut changed) = counted(m, |m| m.step_seats(&[p]), p != Press::default());
+        while act == Act::Stay
+            && let Some(p) = reader.more()
+        {
+            let (a, c) = counted(m, |m| m.step_seats(&[p]), true);
+            (act, changed) = (a, changed + c);
+        }
+        changed
+    }
+}
+
+impl Drop for Hands {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Step `m` with `step`, and whether it changed it: only a press can.
+fn counted(m: &mut Menu, step: impl FnOnce(&mut Menu) -> Act, pressed: bool) -> (Act, usize) {
+    if !pressed {
+        return (step(m), 0);
+    }
+    let before = key(m);
+    let act = step(m);
+    (act, usize::from(key(m) != before))
+}
+
+/// One gesture of `control` by `hand` on `m`, its frames at `rate`: how many steps changed the
+/// menu, and the menu after. Over a ride (the pause) the menu is read at the ride's 30 Hz ticks
+/// inside the frames, as main.rs's pacer runs them.
+fn gesture_at(hands: &mut Hands, m: &Menu, rate: Rate, hand: Hand, control: Control, pushes: &[(u64, u64)]) -> (usize, String) {
+    let mut m = m.clone();
+    let riding = m.screen() == Some(Screen::Pause) || m.riding();
+    let start = hands.now + 1_000_000;
+    // The hand starts off any frame's grid, on a whole millisecond: what a pad stamps its events in.
+    let at = (start + 37_000).div_ceil(1_000) * 1_000;
+    for &(down, up) in pushes {
+        hands.events.push_back((at + down * 1_000, hand, control, true));
+        hands.events.push_back((at + up * 1_000, hand, control, false));
+    }
+    let end = at + pushes.last().unwrap().1 * 1_000 + 600_000;
+    let (mut readers, mut reader) = (Readers::new(), Reader::at(30));
+    let (mut now, mut k, mut ticks, mut changed) = (start, 0, 0, 0);
+    while now <= end {
+        if riding {
+            let owed = (now - start) * 30 / 1_000_000 + 1;
+            while ticks < owed {
+                changed += hands.ride_tick(&mut m, &mut reader, now);
+                ticks += 1;
+            }
+            // A frame with no tick reads nothing: the events wait for the next.
+        } else {
+            changed += hands.front_frame(&mut m, &mut readers, now);
+        }
+        now += rate.gap(k);
+        k += 1;
+    }
+    assert!(hands.events.is_empty());
+    (changed, key(&m))
+}
+
+/// The user's case (P165): every menu moves as far for the same hand at every frame rate. Each
+/// screen and tab (P109's walk) takes a tap, a short hold, a one- and a three-second hold and two
+/// quick taps, of Down and of Right, on the d-pad, the stick and the keyboard — and L1 and R1 on the
+/// tabbed screens — at 5, 30, 60, 120 and 165 fps, the frame limit Off and the display's refresh;
+/// the rows moved, the values stepped and the tabs switched, counted as the steps that changed the
+/// menu, and the menu it ends on, are the 60 fps run's at every one.
+#[test]
+fn every_menu_moves_the_same_for_the_same_hand_at_every_frame_rate() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut hands = Hands::new("menu-rates");
+    let mut tabbed_done = HashSet::new();
+    let (mut runs, mut moved) = (0, 0);
+    for (name, m, _) in every_walked_screen() {
+        let mut controls = vec![Control::Down, Control::Right];
+        // L1 and R1 on one tab of each tabbed screen: every tab steps them alike.
+        if let Some(screen) = m.screen().filter(|s| !m.tabs(*s).is_empty())
+            && tabbed_done.insert(format!("{screen:?}"))
+        {
+            controls.extend([Control::L1, Control::R1]);
+        }
+        for control in controls {
+            for hand in [Hand::Dpad, Hand::Stick, Hand::Keys] {
+                for (gesture, pushes) in GESTURES {
+                    let mut reference = None;
+                    for rate in RATES {
+                        let got = gesture_at(&mut hands, &m, rate, hand, control, pushes);
+                        runs += 1;
+                        moved += got.0;
+                        let Some((count, state)) = &reference else {
+                            if gesture == "tap" && control == Control::Down && name != "Mods" {
+                                assert_eq!(got.0, 1, "{name}: a tap of {} on the {hand:?} at 60 fps", control.name());
+                            }
+                            reference = Some(got);
+                            continue;
+                        };
+                        assert_eq!(got.0, *count, "{name}: {gesture} of {} on the {hand:?} at {rate:?}", control.name());
+                        assert!(got.1 == *state, "{name}: {gesture} of {} on the {hand:?} at {rate:?} ends elsewhere", control.name());
+                    }
+                }
+            }
+        }
+    }
+    // Every screen, hand, gesture and rate ran, and they moved the menus.
+    assert_eq!(runs, 3990);
+    assert!(moved > 20_000, "{moved}");
+}
+
+/// The "Player 1" card stays up its 1.2 s at every frame rate (P165): it counted frames, so at
+/// 165 fps it went in under half a second and at 5 fps it stayed fourteen.
+#[test]
+fn the_player_1_card_lasts_as_long_at_every_frame_rate() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut hands = Hands::new("menu-card");
+    for rate in RATES {
+        let (mut m, mut readers) = on_the_splash();
+        let start = hands.now + 1_000_000;
+        let at = (start + 37_000).div_ceil(1_000) * 1_000;
+        hands.events.push_back((at, Hand::Dpad, Control::Cross, true));
+        hands.events.push_back((at + 50_000, Hand::Dpad, Control::Cross, false));
+        let (mut now, mut k, mut claimed, mut main) = (start, 0, None, None);
+        while main.is_none() && now < start + 5_000_000 {
+            hands.front_frame(&mut m, &mut readers, now);
+            if claimed.is_none() && m.p1().is_some() {
+                claimed = Some((now, rate.gap(k)));
+            }
+            if m.screen() == Some(Screen::Main) {
+                main = Some(now);
+            }
+            now += rate.gap(k);
+            k += 1;
+        }
+        let (seen, gap) = claimed.unwrap_or_else(|| panic!("{rate:?}: nobody took 1P"));
+        let up = main.unwrap_or_else(|| panic!("{rate:?}: the card never went")) - seen;
+        let card = u64::from(CLAIMED_FRAMES) * 1_000_000 / 60;
+        assert!(up + 16_667 >= card && up <= card + gap.max(16_667), "{rate:?}: the card was up {up} µs");
+    }
+}
+
+/// A second rider's pause over a split (P165): their pad's pushes, read at the ride's ticks inside
+/// frames of every rate, move their own pause as far as at 60 fps.
+#[test]
+fn a_second_seat_s_pause_moves_the_same_at_every_frame_rate() {
+    let start_tap = [(Control::Start, 0, 50)];
+    for (gesture, pushes) in GESTURES {
+        let mut reference = None;
+        for rate in RATES {
+            let (mut m, _) = riding_at_30();
+            let (mut r0, mut r1) = (Reader::at(30), Reader::at(30));
+            // Start, then the gesture of Down a second later, by seat 1's hand.
+            let mut events: Vec<(u64, u16)> = Vec::new();
+            let at = 1_037_000;
+            for &(c, down, up) in &start_tap {
+                events.push((at + down * 1_000, c.mask()));
+                events.push((at + up * 1_000, 0));
+            }
+            for &(down, up) in pushes {
+                events.push((at + 1_000_000 + down * 1_000, Control::Down.mask()));
+                events.push((at + 1_000_000 + up * 1_000, 0));
+            }
+            let end = events.last().unwrap().0 + 600_000;
+            let (mut now, mut k, mut ticks, mut since, mut changed) = (0u64, 0, 0, 0u64, 0);
+            while now <= end {
+                let owed = now * 30 / 1_000_000 + 1;
+                while ticks < owed {
+                    let moments: Vec<menu::Moment> =
+                        events.iter().filter(|e| e.0 > since && e.0 <= now).map(|&(t, b)| (t, Report::from_buttons(b))).collect();
+                    let held = events.iter().rev().find(|e| e.0 <= now).map_or(0, |e| e.1);
+                    since = now;
+                    let p0 = r0.read_timed(&[(Report::idle(), 0, Some(&[]))], now);
+                    let p1 = r1.read_timed(&[(Report::from_buttons(held), 0, Some(&moments))], now);
+                    m.elapse_to(now);
+                    let (mut act, c) = counted(&mut m, |m| m.step_seats(&[p0, p1]), p1 != Press::default());
+                    changed += c;
+                    while act == Act::Stay {
+                        let round = [r0.more(), r1.more()];
+                        if round.iter().all(Option::is_none) {
+                            break;
+                        }
+                        let (a, c) = counted(&mut m, |m| m.step_seats(&round.map(Option::unwrap_or_default)), true);
+                        (act, changed) = (a, changed + c);
+                    }
+                    ticks += 1;
+                }
+                now += rate.gap(k);
+                k += 1;
+            }
+            assert_eq!(m.view(1).screen(), Some(Screen::Pause), "{gesture} at {rate:?}: seat 2's pause is not open");
+            let got = (changed, key(&m.view(1)));
+            match &reference {
+                None => {
+                    assert!(got.0 > 0, "{gesture} at {rate:?}: seat 2's pause never moved");
+                    reference = Some(got);
+                }
+                Some((count, state)) => {
+                    assert_eq!(got.0, *count, "{gesture} at {rate:?}");
+                    assert!(got.1 == *state, "{gesture} at {rate:?} ends elsewhere");
+                }
+            }
+        }
+    }
+}

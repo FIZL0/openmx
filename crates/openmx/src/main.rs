@@ -2103,8 +2103,11 @@ fn front_end(args: Args) -> Result<(), String> {
         let seats = shell.seats.as_mut().expect("the front end has seats");
         // A key's state for the frame is down or tapped since the last one, and a pad's report holds
         // its presses since the last frame too, which come back beside it (P53): a press and release
-        // inside one slow frame — 5 fps at 4K — is still a press.
+        // inside one slow frame — 5 fps at 4K — is still a press. Each comes with its moments, which
+        // time its presses and holds by when they were made rather than by this frame (P165).
+        seats.keys_at(window.key_moments());
         let devices = seats.devices(&|code| window.pressed(code));
+        let now = crate::window::shell_us();
         for line in seats.said() {
             println!("{line}");
         }
@@ -2129,18 +2132,12 @@ fn front_end(args: Args) -> Result<(), String> {
             })
             .collect();
         shell.front.menu.skipped = seats.skipped().to_vec();
-        let reports: Vec<(Dev, Report, u16)> = devices
-            .into_iter()
-            .map(|(d, r, taps)| match d {
-                Device::Keys => (Dev::Keys, r, taps),
-                Device::Pad(id) => (Dev::Pad(id), r, taps),
-            })
-            .collect();
+        let reports = timed_reports(seats, devices);
         // Past the splash 1P's pad and the keyboard drive the menu as one (P109): a push both see
         // is one press.
         let menu = &shell.front.menu;
         let hosted = |d: &Dev| menu.screen() != Some(menu::Screen::Splash) && menu.hosts(d);
-        let mut presses = shell.front.readers.read_hosted(&reports, &hosted);
+        let mut presses = shell.front.readers.read_at(&reports, &hosted, now);
         // Escape is the keyboard's Back, on its edge: on the main menu the splash, on the splash
         // the Quit popup.
         let esc = window.pressed(key::ESCAPE);
@@ -2171,17 +2168,29 @@ fn front_end(args: Args) -> Result<(), String> {
                 None => format!("Pad {}", i + 1),
             })
             .collect();
+        shell.front.menu.elapse_to(now);
         for (i, reader) in shell.front.seat_readers.iter_mut().enumerate().skip(1) {
-            let (report, taps) = seat_dev(i)
-                .and_then(|d| reports.iter().find(|(r, _, _)| *r == d))
-                .map_or((Report::idle(), 0), |(_, r, taps)| (*r, *taps));
-            let p = reader.read_taps(&report, taps);
+            let (report, taps, moments) = seat_dev(i)
+                .and_then(|d| reports.iter().find(|(r, _, _, _)| *r == d))
+                .map_or((Report::idle(), 0, None), |(_, r, taps, m)| (*r, *taps, m.as_deref()));
+            let p = reader.read_timed(&[(report, taps, moments)], now);
             shell.front.menu.step_seat(i, p);
+            while let Some(p) = reader.more() {
+                shell.front.menu.step_seat(i, p);
+            }
         }
         let before = shell.front.menu.p1().cloned();
         shell.front.menu.music_now = shell.front.sound.now();
         act = shell.front.menu.step_devices(&presses);
         shell.front.cue(true);
+        // Every press the frame held, a step each (P165): a slow frame's second tap, or the repeats
+        // a hold made inside it.
+        while act == Act::Stay
+            && let Some(more) = shell.front.readers.more()
+        {
+            act = shell.front.menu.step_devices(&more);
+            shell.front.cue(true);
+        }
         let after = shell.front.menu.p1().cloned();
         if after != before {
             match &after {
@@ -2422,6 +2431,21 @@ fn load_tick(
     }
 }
 
+/// The menus' devices as [`Readers::read_at`] reads them (P165): each by its name for the menus,
+/// with its moments since the last frame.
+fn timed_reports(seats: &Seats, devices: Vec<(Device<String>, Report, u16)>) -> Vec<(Dev, Report, u16, Option<Vec<menu::Moment>>)> {
+    devices
+        .into_iter()
+        .map(|(d, r, taps)| {
+            let moments = seats.moments(&d);
+            match d {
+                Device::Keys => (Dev::Keys, r, taps, moments),
+                Device::Pad(id) => (Dev::Pad(id), r, taps, moments),
+            }
+        })
+        .collect()
+}
+
 /// The loading screen, drawn once, and the window's events and the menus' devices read: the
 /// front end's frame (`front_end`'s loop) with the load's bar for its menu.
 fn loading_frame(
@@ -2451,24 +2475,25 @@ fn loading_frame(
     let mut back = esc && !screen.escape;
     screen.escape = esc;
     if let Some(seats) = seats.as_mut() {
+        seats.keys_at(window.key_moments());
         let devices = seats.devices(&|code| window.pressed(code));
-        let reports: Vec<(Dev, Report, u16)> = devices
-            .into_iter()
-            .map(|(d, r, taps)| match d {
-                Device::Keys => (Dev::Keys, r, taps),
-                Device::Pad(id) => (Dev::Pad(id), r, taps),
-            })
-            .collect();
+        let now = crate::window::shell_us();
+        let reports = timed_reports(seats, devices);
         let menu = &front.menu;
-        let presses = front.readers.read_hosted(&reports, &|d: &Dev| menu.hosts(d));
+        let presses = front.readers.read_at(&reports, &|d: &Dev| menu.hosts(d), now);
         back |= presses.iter().any(|(_, p)| p.back);
+        while let Some(more) = front.readers.more() {
+            back |= more.iter().any(|(_, p)| p.back);
+        }
     }
     back |= std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n);
     if let Some(l) = &mut front.menu.loading {
         l.done = progress.done();
         l.stage = progress.line();
     }
-    front.menu.tick = front.menu.tick.wrapping_add(1);
+    front.menu.elapse_to(crate::window::shell_us());
+    let ticks = front.menu.take_ticks();
+    front.menu.tick = front.menu.tick.wrapping_add(ticks);
     let frame = screen.frame.as_mut().expect("made above");
     if let Some(w) = window.gpu() {
         if !screen.images {
@@ -4994,6 +5019,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // since the last frame: what the pause reads (P53). Under the new scheme the ride's report
         // has R2 where Cross was, so a pause read from it took R2 for OK and Cross did nothing.
         let mut menu_reports: Vec<(Report, u16)> = Vec::new();
+        // And each one's moments, with the shell's clock when the seats were read (P165): the pause
+        // times its presses and holds by them, not by the ride's ticks. A tape has none, and its
+        // pause steps a tick's time a tick.
+        let mut menu_moments: Vec<Option<Vec<menu::Moment>>> = Vec::new();
+        let mut menu_us: Option<u64> = None;
         // The recording changed the modifiers before the frame it hands out next (P98): the ride
         // takes them there, as it did when it was made.
         if let Some(to) = head.as_ref().and_then(Head::change) {
@@ -5048,7 +5078,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // hands on the bars (`Seat::waiting`); the other players ride on.
             None => match &mut *pad_seats {
                 Some(seats) => {
+                    if let Some(w) = window.as_ref() {
+                        seats.keys_at(w.key_moments());
+                    }
                     let now = seats.frame(&|code| held(&window, code));
+                    let read_us = crate::window::shell_us();
+                    menu_us = Some(read_us);
                     for line in seats.said() {
                         println!("{line}");
                     }
@@ -5062,6 +5097,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             None => idle.report(&pad::no_keys),
                         };
                         menu_reports.push((report, seats.taps(from)));
+                        menu_moments.push(seats.seat_moments(from));
                         // And the plane's stick turned round upside down under the screen's scheme
                         // (P50), off the attitude the last step left, so the plane's simulation
                         // reads the original's pad; under the plane's (P69) the elevator answers at
@@ -5090,9 +5126,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     for (d, (reader, input)) in idle_readers.iter_mut().zip(&now).enumerate() {
                         let playing = matches!(input, SeatInput::Playing(_));
                         let report = if playing { input.report() } else { Report::idle() };
-                        let press = reader.read_taps(&report, seats.taps(d));
+                        let moments = if playing { seats.seat_moments(d) } else { None };
+                        let press = reader.read_timed(&[(report, seats.taps(d), moments.as_deref())], read_us);
                         if playing && !ride.contains(&d) {
                             idle_presses.push((d, press));
+                            while let Some(p) = reader.more() {
+                                idle_presses.push((d, p));
+                            }
                         }
                     }
                 }
@@ -5201,17 +5241,29 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // (P41) in their own view while the others ride on (P84). Escape is the keyboard's, 1P's.
             // Each player's pad as it is, not as the ride's scheme moved it (P53).
             let menu_report = |i: usize| menu_reports.get(i).copied().unwrap_or((world.seats[i].reports[0], 0));
-            let mut seat0 = vec![menu_report(0)];
+            let menu_moment = |i: usize| menu_moments.get(i).cloned().flatten();
+            let mut seat0 = vec![(menu_report(0), menu_moment(0))];
             // The keyboard pauses and works 1P's pause whoever has 1P (P46), from no seat of its own:
             // read as one with 1P's pad (P109), so a push both see is one press.
             if let Some(keys) = pad_seats.as_ref().and_then(|s| s.keyboard_alone()) {
-                seat0.push((keys, 0));
+                seat0.push(((keys, 0), pad_seats.as_ref().and_then(|s| s.keyboard_alone_moments())));
             }
-            let first = front.reader.read_joint(&seat0);
+            // By the time they were pushed when the seats were read, by the ride's ticks off a tape.
+            let read = |r: &mut Reader, devices: &[((Report, u16), Option<Vec<menu::Moment>>)]| match menu_us {
+                Some(now) => {
+                    let timed: Vec<menu::Timed> = devices.iter().map(|((r, t), m)| (*r, *t, m.as_deref())).collect();
+                    r.read_timed(&timed, now)
+                }
+                None => r.read_joint(&devices.iter().map(|(rt, _)| *rt).collect::<Vec<_>>()),
+            };
+            let first = read(&mut front.reader, &seat0);
             let mut presses = vec![first];
             for (i, r) in (1..world.seats.len().min(args.players)).zip(&mut start_readers) {
-                let (report, taps) = menu_report(i);
-                presses.push(r.read_taps(&report, taps));
+                presses.push(read(r, &[(menu_report(i), menu_moment(i))]));
+            }
+            match menu_us {
+                Some(now) => front.menu.elapse_to(now),
+                None => front.menu.elapse(1_000_000 / u64::from(RIDE_HZ)),
             }
             let esc = held(window, key::ESCAPE);
             if esc && !escape {
@@ -5225,6 +5277,15 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             front.menu.music_now = front.sound.now();
             let paused: Vec<bool> = (0..world.seats.len()).map(|i| front.menu.paused(i)).collect();
             let mut act = front.menu.step_seats(&presses);
+            // The presses the tick held past each seat's first, a step a round (P165).
+            while act == Act::Stay {
+                let mut round = vec![front.reader.more()];
+                round.extend(start_readers.iter_mut().take(presses.len() - 1).map(Reader::more));
+                if round.iter().all(Option::is_none) {
+                    break;
+                }
+                act = front.menu.step_seats(&round.into_iter().map(Option::unwrap_or_default).collect::<Vec<_>>());
+            }
             for &(d, p) in &idle_presses {
                 if act == Act::Stay {
                     act = front.menu.step_idle(d, p);

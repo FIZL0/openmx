@@ -865,6 +865,15 @@ pub struct Pads {
     /// frame: the shell paces itself to 60 Hz but a heavy frame overruns, and a keyboard that leans
     /// further when the picture is cheap would be its own bug.
     clock: Option<std::time::Instant>,
+    /// The device's event clock on the shell's (P165, [`crate::window::Stamps`]).
+    stamps: crate::window::Stamps,
+    /// The menu controls after each change since the last report, by the events' clock unwrapped
+    /// ([`Pads::moments`]).
+    stamped: Vec<(i64, Report)>,
+    /// [`Pads::stamped`] on the shell's clock, as the last report took them.
+    moments: Vec<(u64, Report)>,
+    /// A test's clock for the shell's, in microseconds: `None` reads [`crate::window::shell_us`].
+    fake_now: Option<u64>,
 }
 
 impl Pads {
@@ -915,7 +924,33 @@ impl Pads {
             wiring,
             bindings,
             clock: None,
+            stamps: crate::window::Stamps::default(),
+            stamped: Vec::new(),
+            moments: Vec::new(),
+            fake_now: None,
         }
+    }
+
+    /// The shell's clock now, or the test's.
+    fn now_us(&self) -> u64 {
+        self.fake_now.unwrap_or_else(crate::window::shell_us)
+    }
+
+    /// What the menus read of the pad ([`Pads::moments`]): the controls a press can come from, and
+    /// the left stick.
+    fn menu_state(&self) -> Report {
+        let mut r = Report::from_buttons(self.pressable());
+        r.set_axis(REPORT_LEFT_X, stick_byte(self.axis[AXIS_LEFT_X]));
+        r.set_axis(REPORT_LEFT_Y, stick_byte(self.axis[AXIS_LEFT_Y]));
+        r
+    }
+
+    /// The pad's menu controls after each of its events since the report before the last one
+    /// (P165), on the shell's clock and by the events' own times: when a button went down, a hat
+    /// came back or the stick leant, however late the frame that read it. The last report holds
+    /// what they ended on, and its taps as well.
+    pub fn moments(&self) -> &[(u64, Report)] {
+        &self.moments
     }
 
     /// Rewire the pad, which the front end's Controls screen does between frames (P36).
@@ -942,6 +977,9 @@ impl Pads {
     /// flip among them.
     pub(crate) fn build(&mut self, seconds: f32, held: &dyn Fn(u8) -> bool) -> Report {
         self.drain();
+        let now = self.now_us();
+        let stamps = self.stamps;
+        self.moments = self.stamped.drain(..).map(|(at, r)| (stamps.shell(at, now), r)).collect();
         let mut report = Report::idle();
         let mut buttons = self.take_taps();
 
@@ -1139,6 +1177,8 @@ impl Pads {
     fn clear_queue(&mut self) {
         self.queue = [0; 16];
         self.taps = 0;
+        self.stamped.clear();
+        self.moments.clear();
     }
 
     /// Read every joystick event waiting, updating the axis and button state.
@@ -1149,13 +1189,22 @@ impl Pads {
             return;
         };
         let mut event = [0u8; EVENT_BYTES];
+        let now = self.now_us();
         loop {
             match device.read(&mut event) {
                 Ok(EVENT_BYTES) => {
                     let value = i16::from_le_bytes([event[4], event[5]]);
                     let init = event[6] & EVENT_INIT != 0;
                     let time = u32::from_le_bytes([event[0], event[1], event[2], event[3]]);
+                    // Every event sets the clocks' difference; a change the menus can see is kept
+                    // with its time (P165).
+                    let at = self.stamps.note(time, now);
+                    let before = self.menu_state();
                     self.event(event[6] & !EVENT_INIT, event[7] as usize, value, init, time);
+                    let after = self.menu_state();
+                    if after != before && self.stamped.len() < MOMENTS_MAX {
+                        self.stamped.push((at, after));
+                    }
                 }
                 // A short read cannot happen on this device. End of file, or any error but "nothing
                 // waiting", is a device that went away — the kernel answers ENODEV once a pad is
@@ -1180,6 +1229,10 @@ impl Pads {
         self.gone = true;
     }
 }
+
+/// The most menu moments a pad keeps between two reports ([`Pads::moments`]): a second's worth of a
+/// stick's jitter at the slowest frame; past it the report's own state still counts.
+const MOMENTS_MAX: usize = 512;
 
 /// A seat that reads no keys: every pad seat but the one the keyboard shares.
 pub fn no_keys(_: u8) -> bool {
@@ -2023,6 +2076,12 @@ pub struct Seats {
     skipped: Vec<String>,
     /// Each seat's presses this frame ([`Pads::taps`]), beside its report.
     taps: [u16; SEATS],
+    /// The keys down by the window's key moments ([`Seats::keys_at`], P165), and the keyboard's
+    /// menu controls after each since the last frame; `None` until the shell gives any.
+    keys_down: [bool; crate::window::KEYCODES],
+    key_moments: Option<Vec<(u64, Report)>>,
+    /// A test's clock for the shell's ([`Seats::at`]).
+    fake_now: Option<u64>,
 }
 
 /// [`SeatInput`] without its report, to say when a seat changes.
@@ -2070,6 +2129,9 @@ impl Seats {
             said: Vec::new(),
             skipped: Vec::new(),
             taps: [0; SEATS],
+            keys_down: [false; crate::window::KEYCODES],
+            key_moments: None,
+            fake_now: None,
         };
         seats.scan();
         seats
@@ -2126,6 +2188,10 @@ impl Seats {
             pads.device = Some(file);
             pads.map = info.map();
             pads.nintendo = info.nintendo();
+            pads.fake_now = self.fake_now;
+            // Its greeting now, as it opens: the stamps read soonest after they were made, which
+            // sets its clock against the shell's (P165).
+            pads.drain();
             self.joined.push(Joined { path, id, pads });
         }
     }
@@ -2185,12 +2251,86 @@ impl Seats {
         self.keyboard_alone = None;
         self.keys.scheme = self.keys_scheme();
         let keys = self.keys.report(held);
+        self.keys_settle(held);
         let mut out = vec![(Device::Keys, keys, self.keys.taps())];
         for j in &mut self.joined {
             let report = j.pads.report(&no_keys);
             out.push((Device::Pad(j.id.clone()), report, j.pads.taps()));
         }
         out
+    }
+
+    /// The keyboard's keys that went down and up since the last frame, and when ([`crate::window::KeyMoment`],
+    /// P165), as the window gives them, before [`Seats::devices`] or [`Seats::frame`]: the
+    /// keyboard's menu controls after each, for [`Seats::moments`].
+    pub fn keys_at(&mut self, moments: &[crate::window::KeyMoment]) {
+        let scheme = self.keys_scheme();
+        let mut out = Vec::with_capacity(moments.len());
+        for &(t, code, down) in moments {
+            let before = self.key_menu_state(scheme);
+            self.keys_down[code as usize] = down;
+            let after = self.key_menu_state(scheme);
+            if after != before {
+                out.push((t, after));
+            }
+        }
+        self.key_moments = Some(out);
+    }
+
+    /// The keyboard's menu controls by [`Seats::keys_down`]: its buttons as `scheme` binds them, and
+    /// Cross on the throttle's keys, which [`Pads::build`] presses as the menus' OK.
+    fn key_menu_state(&self, scheme: Scheme) -> Report {
+        let down = |c: u8| self.keys_down[c as usize];
+        let mut buttons = self.bindings.buttons(scheme, &[false; BUTTONS], &down);
+        if self.bindings.throttle_key(scheme, &down) {
+            buttons |= Control::Cross.mask();
+        }
+        Report::from_buttons(buttons)
+    }
+
+    /// The keys down as `held` has them, past the moments (P165): a key the window let go of while
+    /// it lost the focus.
+    fn keys_settle(&mut self, held: &dyn Fn(u8) -> bool) {
+        if self.key_moments.is_some() {
+            for (c, down) in self.keys_down.iter_mut().enumerate() {
+                *down = held(c as u8);
+            }
+        }
+    }
+
+    /// A device's menu moments since the last frame (P165, [`Pads::moments`]), on the shell's clock:
+    /// a pad's always, the keyboard's once the shell gives its key moments ([`Seats::keys_at`]).
+    pub fn moments(&self, device: &Device<String>) -> Option<Vec<(u64, Report)>> {
+        match device {
+            Device::Keys => self.key_moments.clone(),
+            Device::Pad(id) => self.joined.iter().find(|j| &j.id == id).map(|j| j.pads.moments().to_vec()),
+        }
+    }
+
+    /// Seat `seat`'s menu moments in the last [`Seats::frame`] (P165): its pad's, or the keyboard's
+    /// in a seat it drives alone. A pad with the keyboard beside it gives the pad's, and the keys
+    /// change at the frame.
+    pub fn seat_moments(&self, seat: usize) -> Option<Vec<(u64, Report)>> {
+        match &self.slots.held[seat] {
+            Some(id) => self.moments(&Device::Pad(id.clone())),
+            None if self.slots.keys() == Some(seat) => self.key_moments.clone(),
+            None => None,
+        }
+    }
+
+    /// The keyboard's menu moments when it drives no seat ([`Seats::keyboard_alone`], P165).
+    pub fn keyboard_alone_moments(&self) -> Option<Vec<(u64, Report)>> {
+        self.keyboard_alone.and(self.key_moments.clone())
+    }
+
+    /// Read every pad by a test's clock from now on, `now` microseconds (P165).
+    #[allow(dead_code)]
+    pub(crate) fn at(&mut self, now: u64) {
+        self.fake_now = Some(now);
+        self.keys.fake_now = Some(now);
+        for j in &mut self.joined {
+            j.pads.fake_now = Some(now);
+        }
     }
 
     /// The js devices plugged in that the shell does not read, by name (P53): a wrong 1P on the
@@ -2286,6 +2426,7 @@ impl Seats {
     }
 
     fn frame_reports(&mut self, keyboard: Option<usize>, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
+        self.keys_settle(held);
         if keyboard.is_none() {
             self.keys.scheme = self.keys_scheme();
         }
@@ -3618,6 +3759,11 @@ pub(crate) mod tests {
         /// The milliseconds between the events sent from now on (P109): a bounce is a few.
         pub(crate) fn gap(&mut self, ms: u32) {
             self.step = ms;
+        }
+
+        /// Stamp the next event `ms` on its clock (P165); the ones after it go on by the gap.
+        pub(crate) fn at(&mut self, ms: u32) {
+            self.time = ms.wrapping_sub(self.step);
         }
 
         fn send(&mut self, kind: u8, number: u8, value: i16) {
