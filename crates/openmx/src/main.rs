@@ -3459,6 +3459,22 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(since) = load_screen.since {
         println!("loading: built, {} frames drawn over {:.2} s", load_screen.frames, since.elapsed().as_secs_f32());
     }
+    // The track's birds and sequence-animated toys (V44): stepped by the ticks below, as their
+    // triggers answer the riders, and drawn between them. A world has none, as it has no home
+    // tile's cars.
+    let mut creatures = match &world_mod {
+        Some(_) => game_render::creature::Creatures::default(),
+        None => game_render::creature::Creatures::load(&archives, &stem),
+    };
+    for model in creatures.models() {
+        assets.load(&archives, model);
+    }
+    if !creatures.birds.is_empty() || !creatures.toys.is_empty() || !creatures.skipped.is_empty() {
+        println!("creatures: {} birds, {} toys, {} left out", creatures.birds.len(), creatures.toys.len(), creatures.skipped.len());
+    }
+    let mut creatures_at: Vec<game_render::creature::Placed> = Vec::new();
+    // The software renderer skins each one into a copy of its model of its own.
+    let creature_copies: Vec<String> = (0..creatures.birds.len() + creatures.toys.len()).map(|i| format!("creature#{i}")).collect();
     // The bikes' particles (P74): the track's list, one manager a seat stepped off it, and the
     // track's sheet — the plane's, which is the same sheet, where the plane has loaded it already.
     let (bike_fx_list, soft_sheet) = match load_bike_fx(&archives, &stem) {
@@ -5406,6 +5422,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         if simulated {
             traffic_time += f64::from(dt.0);
+            let riders: Vec<V3> = world.seats.iter().map(|s| s.sim.rider.ride.position()).map(|p| V3 { x: p.x(), y: p.y(), z: p.z() }).collect();
+            creatures.step(dt.0, &riders);
         }
         // The preload meter's movie runs a frame a tick, as the original's HUD does (V53).
         if simulated {
@@ -5840,6 +5858,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 at.0[3][2] += car_shift[1];
             }
         }
+        if !creature_copies.is_empty() {
+            creatures_at = creatures.placed(blend.0);
+        }
         // A world's are each tile's own (MD15), on the same clock, each moved by its tile's offset.
         if !dressed.is_empty() {
             let place = &mut world.place;
@@ -6197,6 +6218,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for (model, at) in &traffic_at {
                 actors.push(Actor { model: model.as_str(), at: *at, pose: None, lod_from: None, alpha: 1.0 });
             }
+            for c in &creatures_at {
+                gpu_poses.push(c.palette.clone());
+                actors.push(Actor { model: c.model.as_str(), at: c.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha: 1.0 });
+            }
             // A view's own player's markers (P88), faint bikes where each was put down: in that
             // player's view and nobody else's, so a view with any has the shared list and them.
             let marked: Vec<Vec<Actor>> = world
@@ -6449,6 +6474,17 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
             actor.extend(traffic_at.iter().map(|(model, at)| (model.as_str(), *at)));
+            for (c, copy) in creatures_at.iter().zip(&creature_copies) {
+                if !assets.models.contains_key(copy.as_str())
+                    && let Some(own) = assets.models.get(&c.model).cloned()
+                {
+                    assets.models.insert(copy.clone(), own);
+                }
+                if let Some(loaded) = assets.models.get_mut(copy.as_str()) {
+                    loaded.tris = game_render::skin::skin(&loaded.model, &c.palette, 0);
+                    actor.push((copy.as_str(), c.at));
+                }
+            }
             // A world's tiles' props and plants (MD15), culled at the fog as `draw_scene` culls the
             // scene's; a plant only once it is solid, as there.
             let mut plants = Vec::new();
