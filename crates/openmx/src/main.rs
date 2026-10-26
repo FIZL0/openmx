@@ -186,6 +186,7 @@ mod overlay;
 mod pace;
 mod pad;
 mod particles;
+mod plane_draw;
 mod perf;
 mod portal;
 mod ride_hud;
@@ -3963,6 +3964,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     // The GPU's per-frame lists, kept to reuse their room: the poses, the overlay and its layers.
     let mut gpu_poses: Vec<Vec<M4>> = Vec::new();
+    // The software path's own copy of each livery's plane for each seat, by name: what its moving
+    // parts are skinned into (V38). Grows as seats join.
+    let mut plane_copies: Vec<Vec<String>> = Vec::new();
     let mut gpu_patches = Vec::new();
     let mut gpu_sprites = Vec::new();
     // The render scale (V30): as asked, or picked from the frames' time against the display's refresh.
@@ -6082,9 +6086,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
                 let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
                 let alpha = vehicle::shown_alpha(1.0, seat.paused);
-                for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
-                    actors.push(Actor { model, at, pose: None, lod_from: None, alpha });
-                }
+                actors.extend(plane_draw::actors(drawn, &assets, plane, at, alpha, &mut gpu_poses));
                 // And its pilot in the seat (V39), the rider's own body posed by the plane's clips.
                 if let (Some(Some(pilot)), Some(model)) = (pilots.get(p), &rigs[p].body_model) {
                     gpu_poses.push(pilot.palette.clone());
@@ -6099,9 +6101,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for bay in &bays {
                 let plane = vehicle::bay_plane(bay);
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
-                for (model, at) in drawn.turned_parts(plane_at(&plane), plane.prop_angle().map(|a| a.0)) {
-                    actors.push(Actor { model, at, pose: None, lod_from: None, alpha: vehicle::BAY_ALPHA });
-                }
+                actors.extend(plane_draw::actors(drawn, &assets, &plane, plane_at(&plane), vehicle::BAY_ALPHA, &mut gpu_poses));
             }
             for (model, at) in &traffic_at {
                 actors.push(Actor { model: model.as_str(), at: *at, pose: None, lod_from: None, alpha: 1.0 });
@@ -6127,9 +6127,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     for f in marks.filter_map(|m| m.flight()).filter(|_| seat.garage.up == Kind::Biplane) {
                         let plane = vehicle::marked_plane(f, livery);
                         let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
-                        for (model, at) in drawn.turned_parts(plane_at(&plane), plane.prop_angle().map(|a| a.0)) {
-                            ghosts.push(Actor { model, at, pose: None, lod_from: None, alpha: MARKER_ALPHA });
-                        }
+                        ghosts.extend(plane_draw::actors(drawn, &assets, &plane, plane_at(&plane), MARKER_ALPHA, &mut gpu_poses));
                     }
                     if ghosts.is_empty() { Vec::new() } else { actors.iter().cloned().chain(ghosts).collect() }
                 })
@@ -6249,6 +6247,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             perf.add(Stage::Draw, draw_at.elapsed());
             stages.mark(stages::Stage::Sky);
             let (scene_at, spent) = (Instant::now(), perf.spent());
+            while plane_copies.len() < world.seats.len() {
+                let p = plane_copies.len();
+                plane_copies.push(plane_drawn.iter().map(|d| format!("{}@seat{p}", d.model)).collect());
+            }
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
@@ -6334,10 +6336,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // this path draws solid or nothing, and a solid one would be a machine that is not there.
             for (p, seat) in world.seats.iter().enumerate() {
                 let Some(plane) = seat.garage.plane_flown() else { continue };
-                let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
+                let livery = if plane.livery < plane_drawn.len() { plane.livery } else { 0 };
+                let Some(drawn) = plane_drawn.get(livery) else { continue };
                 let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
                 let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
-                actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
+                actor.extend(plane_draw::skinned(drawn, &plane_copies[p][livery], &mut assets, plane, at));
                 // Its pilot (V39), skinned here from the same pose the GPU draws, at the body's
                 // finest level of detail; the bike's rider is not drawn while the plane is up, so
                 // the body's mesh is the pilot's for this seat.

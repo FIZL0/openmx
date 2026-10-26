@@ -54,6 +54,7 @@
 //! in by path, because a binary crate has nothing a test can `use`.
 
 use game_sim::Sim;
+use game_sim::biplane_anim;
 use game_sim::flight::{self, Flight};
 use game_sim::phy::Ini;
 use game_sim::ride::Controls;
@@ -758,6 +759,25 @@ impl Plane {
         match &self.flight {
             None => Some(F::ZERO),
             Some(f) => (f.crash.reason == 0).then_some(f.engine.prop_angle),
+        }
+    }
+
+    /// Its moving parts as the original's surface step poses them (S35, V38): the ailerons on the
+    /// wing flaps, the elevator on the rear flaps, the rudder, and the prop — off the plane's own
+    /// control state and engine, which the stick and L1/R1 reach through the flight's controls. A
+    /// parked plane's are all at rest, its prop at zero; a wrecked one's prop is not turned and wears
+    /// the bent cone, the same test [`Plane::prop_angle`] makes.
+    pub fn surfaces(&self) -> biplane_anim::Surfaces {
+        match &self.flight {
+            None => biplane_anim::surfaces(F::ZERO, F::ZERO, F::ZERO, F::ZERO, F::ZERO, false),
+            Some(f) => biplane_anim::surfaces(
+                f.surfaces.elevator,
+                f.joystick.max_elevator,
+                f.surfaces.aileron,
+                f.surfaces.rudder,
+                f.engine.prop_angle,
+                f.crash.reason != 0,
+            ),
         }
     }
 }
