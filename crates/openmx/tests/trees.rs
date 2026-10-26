@@ -68,11 +68,12 @@ fn shell(args: &[&str]) -> String {
     said
 }
 
-/// One `--trace-feel` row: the speed and where the bike is on the ground plane.
+/// One `--trace-feel` row: the speed, where the bike is on the ground plane, and whether it wrecked.
 struct Tick {
     speed: f32,
     x: f32,
     z: f32,
+    wreck: bool,
 }
 
 /// Ride on the gas from `from` straight at `to`, `frames` ticks; the shell's words and its rows.
@@ -88,7 +89,7 @@ fn ride(from: (f32, f32), to: (f32, f32), frames: usize) -> (String, Vec<Tick>) 
             if w.len() != 12 {
                 return None;
             }
-            Some(Tick { speed: w[1].parse().ok()?, x: w[5].parse().ok()?, z: w[7].parse().ok()? })
+            Some(Tick { speed: w[1].parse().ok()?, x: w[5].parse().ok()?, z: w[7].parse().ok()?, wreck: w[11] == "1" })
         })
         .collect();
     assert!(!rows.is_empty(), "no trace rows:\n{said}");
@@ -123,7 +124,14 @@ fn the_shell_rides_into_a_free09_tree_and_stops_at_its_trunk() {
         .expect("a tree on its own");
     let from = (tree.0, tree.1 - RUN_UP);
     println!("riding at the tree at {tree:?} from {from:?}");
-    let (_, hit) = ride(from, tree, 150);
+    let (_, mut hit) = ride(from, tree, 150);
+    // S138: the trunk is struck by the bike's body rays as the original's are, and head on at this
+    // speed that wrecks it (the front g limit, as a wall does); the ride ends there, and the respawn
+    // that follows is not the bike going on past the tree.
+    let wrecked = hit.iter().position(|t| t.wreck);
+    if let Some(w) = wrecked {
+        hit.truncate(w + 1);
+    }
     // Past it by ten feet to one side, nothing in the way.
     let (by, beside) = ((tree.0 + 10.0, tree.1), (tree.0 + 10.0, tree.1 - RUN_UP));
     let (_, missed) = ride(beside, by, 150);
@@ -137,7 +145,7 @@ fn the_shell_rides_into_a_free09_tree_and_stops_at_its_trunk() {
     );
     assert!(missed_reach > RUN_UP + 20.0, "ten feet to the side the bike rides on past the tree: {missed_reach} ft");
     assert!(fastest > 30.0, "the bike gets going before the tree: {fastest} ft/s");
-    let stop = hit.windows(2).position(|w| w[0].speed > 30.0 && w[1].speed < 10.0);
-    assert!(stop.is_some(), "the trunk stops the bike in one tick, from over 30 ft/s to under 10");
+    let stop = hit.windows(2).position(|w| w[0].speed > 30.0 && (w[1].speed < 10.0 || w[1].wreck));
+    assert!(stop.is_some(), "the trunk stops or wrecks the bike in one tick, from over 30 ft/s");
     assert!(hit_reach < RUN_UP && hit_reach > RUN_UP - 10.0, "the bike stops at the trunk, {hit_reach} ft of {RUN_UP}");
 }

@@ -1,0 +1,8 @@
+# S138: gas north past the garage's east wall (x 4673), a touch of left stick to rub it at a shallow angle
+down cross
+sleep 1800
+stick l -0.25 0
+sleep 500
+stick l 0 0
+sleep 6000
+release

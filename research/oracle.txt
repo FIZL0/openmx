@@ -5463,3 +5463,34 @@ node_count             boot 0x001b3420 1 + a node's descendants: what a hierarch
 #   scenery-category mesh at 0x0139dc60 (centre 2583.5,178.4,3083.4, radius 13.26) is none of the
 #   port's props (beside the five-high stack at 2598,3087). Bike 0x00dad810, its race object
 #   0x01c833c0 (+0x40 = 0: kind 3), mode object 0x01839880 (mode 3, flags 0x14001, no checkpoints).
+
+# ---------------------------------------------------------------------------------------------------
+# S138 — a wall and a nose landing. Journal: research/journal/2026-10-26-s138-wall-and-nose-wrecks.
+# No new function. Two findings, both port-side:
+# * The riding bike's collision object (bike +0x7d0; search_ground 0, search 1, sweep back 1, chassis
+#   +0xf4 = 0, capacity 11, nearby) searches the world's props with its eleven body rays (bikem.col)
+#   as it searches other riders' frames, and collision_record_resolve (impulses on the first substep
+#   only, a spring past HARD) adds the impulse into the chassis' shock +0x170: the g peak the wreck
+#   test reads. A head-on wall at 92/s: the original's row after the hit holds g (0.97, 18.24,
+#   -32.88), vel (3.88, 5.98, 59.04), pitch 51.01 deg and reason 1 (FrontWreckSpeedLimit, 18.33 on
+#   recording2's rider: +0x7a0.. reads 0, 18.33, 22.0, 19.07, 58.67, 66.0, 1.2217, 1.2217, 1.396,
+#   1.4835, 1.4835, 29.33); the port, its rays on free09's props, the same to print. Its sweep back
+#   (collision_record_sweep_back on the chassis) is still not ported.
+# * bike_vehicle_update's riding branch calls 0x00133500 (obj+0x50, dt) after bike_air_state and
+#   before the stunt clocks: it walks obj+0x50's children (+0x18, next +0x14; enabled: +0x29 bit 0
+#   set, bits 2 and 3 clear, +0x20 & 2) and calls each one's vt+0x38 — the chassis' is
+#   chassis_measure 0x0015c4c0, so +0x90 (euler) and +0x34 (speed) are taken again after the physics.
+#   bike_wreck_test reads +0x90 (pitch) and +0x98 (roll) from there: a nose 70.058 deg down in the air
+#   and 69.863 on its touchdown tick rides out (GroundPitchDownWreckAngle 1.2217); 74.95 in the air,
+#   75.03 on touchdown wrecks reason 1 on that tick.
+# Captures (context/capture/s138, git-ignored; research/s138_hits.py, research/s138/*.sh): recording2
+# (slot 3) teleported (research/s76_tele.py) about free09's farmyard. Garage shed (props 205ff): walls
+# x 4612..4673, z 3817..3877, open south side with corner posts at (4670.5, 3818) and (4613.5, 3818).
+#   wall   (4642.5, 3650), gas: back wall head-on at 92/s, reason 1 row 2856; states 2849..2851
+#   slow   z 3858, gas: back wall at 29/s, reason 1 row 2772; states 2764..2766
+#   gprobe (4628.5, 3790), scrape.pad: drifts to the back wall's west end at 50/s, reason 1 row 2816
+#   rub2   (4674.2, 3780), gas: clips the south-east post 2 ft in at 46/s (x accel 79.6, yaw 0.26),
+#          rides on; states 2785..2787
+#   nprobe3/4/6/7 (research/s138_nose.py, idle pad): thrown up and pitched forward at (4642.5, 3650):
+#          62 deg at 30/s and 66 at 44/s down ride out (g.y 26.6 / 42.7), 70.06 -> 69.86 rides out,
+#          74.95 -> 75.03 reason 1 on touchdown. States 2791, 2819, 2790, 2787.

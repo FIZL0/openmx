@@ -1,0 +1,6 @@
+# S138: full gas north, then a little left stick: along the garage's east side and into it at a shallow angle
+down cross
+sleep 2900
+stick l -0.2 0
+sleep 17000
+release
