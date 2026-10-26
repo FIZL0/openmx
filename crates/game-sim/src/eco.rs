@@ -620,7 +620,7 @@ impl Trees {
                 let to_world = Mat4([ROWS[0], ROWS[1], ROWS[2], Vf::new(x.0, y.0, z.0, 1.0)]);
                 let from_world = Mat4([ROWS[0], ROWS[1], ROWS[2], Vf::new(fpu::neg(x.0), fpu::neg(y.0), fpu::neg(z.0), 1.0)]);
                 let centre = Vf::new((root.centre[0] + x).0, (root.centre[1] + y).0, (root.centre[2] + z).0, 1.0);
-                trees.props.props.push(Prop { mesh: mesh.clone(), to_world, from_world, centre, radius: root.radius });
+                trees.props.props.push(Prop { mesh: mesh.clone(), to_world, from_world, centre, radius: root.radius, moving: None });
             }
             let solid = !parts.is_empty();
             trees.groups.push(Group { cell: p.cell, model: p.species, blend: p.width, height: p.height, reach, half_height, solid, parts });

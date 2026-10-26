@@ -5278,6 +5278,29 @@ path_car_measure      boot 0x00115330 each segment's arc: ten chords of the curv
 path_car_lag          boot 0x00116150 the clip time LagDistance of arc behind s (walks keys back, wraps)
 path_car_curve        boot 0x00116410 Hermite on the cursor's segment, Catmull-Rom tangents (chord at ends)
 path_car_vtable       boot 0x0044d370 the path car's vtable, at +8 of the car (scan a RAM image for it to find the cars)
+# S136 — a wheel standing on a path car rides with it: crates/game-sim/src/traffic.rs (Moving) and
+# ride.rs (wheel_contact_velocity, under), proved in crates/game-sim/tests/traffic.rs on s89-along.
+#   path_car_update copies the node's world matrix (node+0x80..0xbc) to car+0x2e0..0x31c (rows x, y, z,
+#   position) at its top, before the dt test, unless app+0x325 bit 3; and the new one to +0x2a0 at its
+#   end. Every path car is a vehicle of kind 2 (car+0x1b0), origin car+0x190 = (0,0,0,1); its mesh
+#   collidable's +0x7c is the car, +0x80 (owner) 0. app+0x348 = 1/app+0x344 (one div.s, 0x00131324,
+#   only when the frame's dt is positive): 30.003 at s89-along's 0.03333.
+#   The collidable's own previous matrix (+0x1e0, written by the mesh class's move virtual vt+0xac
+#   0x001edb60 and set at once with +0x1a0 by 0x001ed9f0) has no reader in the contact code that was
+#   found: the wheel uses the car's virtuals below, off the car's own +0x2e0 copy.
+path_car_local_velocity boot 0x001dd740 (a0 out, a1 car) vt+0xb4: path_car_velocity unrotated by the node, at +0x270
+path_car_velocity     boot 0x001dd7b0 (a0 out, a1 car) vt+0xb8: vsub.xyz(node pos row, car+0x310) vmulx.xyz
+#                                    app+0x348; also stored at car+0x260
+path_car_spin         boot 0x001dd850 (a0 out, a1 car) vt+0xbc: path_car_turn put through the node's
+#                                    rotation (0x001b2ff0); also at car+0x290
+path_car_turn         boot 0x001dd8c0 (a0 out, a1 car) vt+0xc0: vadd.xyz(cross(car+0x300, node z row),
+#                                    cross(car+0x2f0, node y row)) vmulx.xyz app+0x348; also at +0x280
+#   wheel_contact_velocity's vehicle branch (+0x1a0 == 0, +0x1f0 == 0, +0x1f4 != 0): +0x1b0 =
+#   vt+0xb8; local = unpoint(car node, +0x120 the contact point) (0x001b3180); +0x1c0 = rotate(node,
+#   cross(vt+0xbc, vsub.xyz(local, car+0x190))) + +0x1b0. With no vehicle both are (0,0,0,1)
+#   (0x00426d70). Then +0x170 = own point velocity - +0x1c0, +0x180 = chassis+0x260 - +0x1b0, +0x190
+#   = unrotate(chassis node, +0x180) (0x001b30e0), +0x1a0 = 1. Nothing between the distributor and it
+#   clears +0x1f4 (only wheel_clear does): a wheel whose terrain ray wins still subtracts the car.
 # V45 — the track's own particle emitters, the .toy's [ParticleEmitterN] (journal *-v45-track-particles).
 #   emitter list reader 0x00331530: [ParticleEmitters] NumberOfParticleEmitters, then ParticleEmitter1..n
 #   only — free07's 27 sections sit under a count of 0 and are never read. Each is an emitter toy
