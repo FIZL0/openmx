@@ -1636,6 +1636,18 @@ wheel_set_tire_derived boot 0x0025b160 (wheel) -> the numbers the wheel works ou
 #                                      tire and surfaces are in
 bike_physics_lines boot 0x00253900 (bike) -> called between the tires and the engine; does nothing
 #                                  unless bike+0x7c8 is set
+# S114: what it builds is the wheel ray probe at bike+0x7c8, through 0x001eab40 (probe, 2, points,
+#   0, the bike's node at bike+0x18): per wheel, front (+0x7b0) then rear (+0x7b4), the segment from
+#   mount (+0xa0) + (0, wheel+0x48) to mount - (0, wheel+0x214), chassis frame. Its tree is built by
+#   0x001115b0 -> 0x00111160 (recursive; split 0x001104c0, partition 0x0010f780, flatten 0x001117f0);
+#   a node's box is 0x0010f990: min/max per axis (c.ole/c.olt), centre (min+max)*0.5 and half
+#   (max-min)*0.5 on the VU, radius sqrt(hx^2+hy^2+hz^2) through the FPU accumulator, volume
+#   max(|2hz|,0.01) * (max(|2hx|,0.01) * max(|2hy|,0.01)). Probe +0x160 root, +0x168 count, +0x16c
+#   nodes (0x24 each), +0x170 segments (0x20 each), +0x6c the record (capacity +0x88 6, count +0x8c,
+#   one per ray +0xb8, rays +0x90, normals +0x94, points +0x98, objects +0x9c, fractions +0xa8).
+#   bike_wheel_contacts' select is the contact's segment's from.z > 0 -> front. The bike's nearby
+#   search bike+0x7bc: least 30.0, extra 50.0, capacity 0x100, gathered after the substep loop of
+#   0x00257a00 (at 0x00258374: 0x00119be0 on the body rays +0x7c4, then 0x00218b80(search, +0x7c4, 3)).
 # The seven the collision record is set through, the record being bike+0x7d0:
 collision_set_mass boot 0x0026fd80 (CollisionWeight * 0.0310559 in f12, record, CofG offset)
 collision_set_springs boot 0x0026ff10 (MaxCompression, Spring, Damping, Restitution, Body* of the

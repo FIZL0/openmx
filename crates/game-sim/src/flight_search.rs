@@ -577,6 +577,11 @@ impl<'a> Scene<'a> {
         }
     }
 
+    /// The ray probe's record as the last [`Search::rays`] left it.
+    pub fn ray_record(&self) -> &ray_probe::Record {
+        &self.ray
+    }
+
     /// The world's trunk `j`, when `other` is one of [`world_wooded`]'s trunks.
     fn trunk(&self, other: usize) -> Option<usize> {
         let j = other.checked_sub(self.trunks)?;

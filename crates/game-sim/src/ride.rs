@@ -48,6 +48,11 @@
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::{self, AcosTable};
+use crate::broad_phase;
+use crate::flight_search;
+use crate::ray_probe;
+use crate::rider_contact;
+use crate::track;
 use crate::camera::CurveTable;
 use crate::chassis::{self, Mat3};
 use crate::collide::{Bundle, Probe, Record};
@@ -66,9 +71,6 @@ use ps2_float::{Acc, Dest, F, Field, Vf, fpu, libm, vu};
 const UP: Vf = Vf::new(0.0, 1.0, 0.0, 1.0);
 /// The quadword the game's rodata holds for "nothing": a point at the origin.
 const NOTHING: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
-
-/// How many probes the collision bundle carries, and what each one is for — see [`Ride::bundle`].
-const PROBES: usize = 4;
 
 
 /// **The bike's own speed limit**, squared: 135 ft/s. The rigid body's constructor writes it, as this
@@ -1355,11 +1357,6 @@ fn length(v: Vf) -> F {
     dot3(v, v).sqrt()
 }
 
-/// A *direction* through a matrix: its three rows, with the translation left out.
-fn direction(m: &Mat4, v: Vf) -> Vf {
-    chassis::rotate(&Mat3::new(m.0[0], m.0[1], m.0[2]), v)
-}
-
 /// A world *point* back into the frame `m` describes, which is what `transform_unpoint` does: the
 /// translation taken off and then the rotation's transpose.
 fn unpoint(m: &Mat4, v: Vf) -> Vf {
@@ -1398,67 +1395,139 @@ fn hinge_force(wh: &mut Wheel, c: &mut wheel::Chassis, m: &Mat4, force: Vf, at: 
 
 // --- the collision bundle ---------------------------------------------------------------------------
 
-/// The probes one frame sweeps against everything solid.
-///
-/// **This composition is the port's.** The original builds its bundle out of the vehicle's own
-/// attachment points through the collision search object, which is not ported; what it does with the
-/// answers — the contact distributor, the record's three leaf rules — is. Four probes, chosen to
-/// cover what the ride reads back out of the record:
-///
-/// - each wheel's suspension line, so that a contact on a prop reaches
-///   [`wheel::tire_forces`] as a [`wheel::Wheel::swept_contact`] and the rider can ride up it;
-/// - the centre of mass along its own velocity for the frame, which is what stops the bike dead
-///   against a wall rather than letting it tunnel through at speed;
-/// - the centre of mass straight down the chassis' own axis, as far as the suspension plus a wheel
-///   reaches, which catches a prop the bike has come to rest on top of.
-fn bundle(ch: &chassis::Chassis, m: &Mat4, front: &Wheel, rear: &Wheel, dt: F) -> Bundle {
-    let mut b = Bundle::default();
-    for w in [front, rear] {
-        let from = math::transform_point(m, w.w.mount);
-        let to = math::transform_point(m, add_xyz(w.w.mount, w.w.probe));
-        b.probes[b.count] = Probe::between(from, to);
-        b.count += 1;
-    }
-    let cofg = ch.cofg_world;
-    b.probes[b.count] = Probe::between(cofg, add_xyz(cofg, scale(ch.vel, dt)));
-    b.count += 1;
-    let reach = belly_reach(m, cofg, front, rear);
-    let down = scale(direction(m, UP), -reach);
-    b.probes[b.count] = Probe::between(cofg, add_xyz(cofg, down));
-    b.count += 1;
+/// The bike's wheel ray probe (`+0x7c8`), as `bike_physics_lines` builds it once at setup: one segment
+/// per wheel, front then rear, in the chassis' own frame, straight down its `y` from the suspension's
+/// fully compressed top ([`wheel::Wheel::mount`] plus [`wheel::Wheel::max_compression`]) to the probe's
+/// reach below the mount ([`wheel::Wheel::probe_length`]), with the probe's tree over them
+/// ([`ray_node`]). A contact either segment finds is a wheel's swept contact ([`contacts`]).
+pub fn wheel_rays(front: &wheel::Wheel, rear: &wheel::Wheel) -> flight_search::Rays {
+    let segments: Vec<ray_probe::Segment> = [front, rear]
+        .iter()
+        .map(|w| {
+            let m = w.mount;
+            let top = F(m.y()) + w.max_compression;
+            let bottom = F(m.y()) - w.probe_length;
+            ray_probe::Segment {
+                from: Vf::new(m.x(), top.0, m.z(), m.w()),
+                to: Vf::new(m.x(), bottom.0, m.z(), m.w()),
+            }
+        })
+        .collect();
+    let points: Vec<Vf> = segments.iter().flat_map(|s| [s.from, s.to]).collect();
+    // Two segments make one node, whose two children are the leaves, in the order the image holds
+    // them. The split that orders a longer list is not ported: no bike has more than these two.
+    let mut node = ray_node(&points);
+    node.children = [0x8000, 0x8001];
+    flight_search::Rays { root: 0, nodes: vec![node], segments }
+}
 
-    // The sphere every tree node is tested against first: it has to cover every probe's whole length,
-    // or the sweep quietly stops colliding.
-    b.centre = cofg;
-    let mut radius = F::ZERO;
-    for probe in &b.probes[..b.count] {
-        let end = add_xyz(probe.origin, scale(probe.dir, probe.length));
-        radius = radius.max(length(sub_xyz(probe.origin, cofg))).max(length(sub_xyz(end, cofg)));
+/// A ray tree node's box round `points`: the least and greatest of each axis (a point not above the
+/// greatest raises it, one below the least lowers it), the centre their mean and the half extent half
+/// their difference on the vector unit, and the volume the product of the three full extents, each at
+/// least a hundredth, on the FPU (`z` by `x` times `y`). The radius the original also writes is the
+/// probe's reach, which [`flight_search::reach`] takes off the half extent itself.
+fn ray_node(points: &[Vf]) -> track::Node {
+    let (mut lo, mut hi) = ([F(points[0].x()), F(points[0].y()), F(points[0].z())], [F(points[0].x()), F(points[0].y()), F(points[0].z())]);
+    for p in points {
+        let p = [F(p.x()), F(p.y()), F(p.z())];
+        for k in 0..3 {
+            if !(p[k] <= hi[k]) {
+                hi[k] = p[k];
+            }
+            if p[k] < lo[k] {
+                lo[k] = p[k];
+            }
+        }
     }
-    b.radius = radius;
-    debug_assert!(b.count == PROBES);
+    let (l, h) = (Vf::new(lo[0].0, lo[1].0, lo[2].0, 0.0), Vf::new(hi[0].0, hi[1].0, hi[2].0, 0.0));
+    let half = F(0.5);
+    let centre = l.add(h).mul(Vf([half.0; 4]));
+    let extent = h.sub(l).mul(Vf([half.0; 4]));
+    let full = |v: f32| (F(2.0) * F(v)).abs().max(F(RAY_NODE_LEAST));
+    let volume = full(extent.z()) * (full(extent.x()) * full(extent.y()));
+    track::Node {
+        volume,
+        centre: [F(centre.x()), F(centre.y()), F(centre.z())],
+        half_extent: [F(extent.x()), F(extent.y()), F(extent.z())],
+        children: [0, 0],
+    }
+}
+
+/// The least full extent a ray tree node's volume counts per axis.
+const RAY_NODE_LEAST: f32 = 0.01;
+
+/// The bike's nearby search, as its collision object is built with it: the bike's own numbers, read
+/// off the save states' bike (`+0x7bc`), where the plane's are [`flight_search::search`]'s.
+fn bike_search() -> broad_phase::Search {
+    broad_phase::Search {
+        least: F(BIKE_SEARCH_LEAST),
+        extra: F(BIKE_SEARCH_EXTRA),
+        capacity: BIKE_SEARCH_CAPACITY,
+        ..broad_phase::Search::default()
+    }
+}
+
+const BIKE_SEARCH_LEAST: f32 = 30.0;
+const BIKE_SEARCH_EXTRA: f32 = 50.0;
+const BIKE_SEARCH_CAPACITY: i32 = 256;
+
+/// The one body probe the frame sweeps: the centre of mass along its own velocity for the frame,
+/// which is what stops the bike dead against a wall rather than letting it tunnel through at speed.
+///
+/// **This probe is the port's.** The original stops the bike with its eleven body rays (`+0x7c4`)
+/// and the chassis' sweep back, neither of which the ride runs against the world's props yet.
+fn velocity_bundle(ch: &chassis::Chassis, dt: F) -> Bundle {
+    let mut b = Bundle::default();
+    let cofg = ch.cofg_world;
+    let to = add_xyz(cofg, scale(ch.vel, dt));
+    b.probes[0] = Probe::between(cofg, to);
+    b.count = 1;
+    b.centre = cofg;
+    b.radius = length(sub_xyz(to, cofg));
     b
 }
 
-/// How far [`bundle`]'s straight-down probe reaches below the centre of mass: as far as the
-/// suspension plus a wheel, but never deeper, along the chassis' own down, than a wheel's radius
-/// short of the shallower of the two suspension lines' ends (S89), so that on anything flat it only
-/// catches once the suspension is a radius into its travel. A longer one finds a flat prop first —
-/// free06's railway bed — and holds the bike up on its belly where neither wheel's line reaches it:
-/// no contact, no tire force, and the bike slides. The port's own, like the rest of the bundle, until the original's
-/// body rays replace it (S86/S87).
-fn belly_reach(m: &Mat4, cofg: Vf, front: &Wheel, rear: &Wheel) -> F {
-    let up = direction(m, UP);
-    let mut reach = front.w.probe_length + front.mv.radius;
-    for w in [front, rear] {
-        let end = math::transform_point(m, add_xyz(w.w.mount, w.w.probe));
-        reach = reach.min(dot3(sub_xyz(cofg, end), up) - w.mv.radius);
+/// The wheel probe's contacts where the chassis stands at `m`, as `(segment's from, point, normal)`,
+/// and the nearest one's fraction (`1` with none): searched the original's way, through the bike's
+/// nearby search ([`flight_search::Scene::wooded`]), in a world that hands its props over
+/// ([`World::wooded`]); swept as a bundle of the two segments in one that only answers
+/// [`World::solid`] (the port's, for the worlds tests build). The search is gathered fresh each
+/// substep around the probe itself: the original gathers once a frame, after the substeps, around the
+/// body rays, which hands out the same candidates within reach in its walk's order then.
+fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (Vec<(Vf, Vf, Vf)>, F) {
+    let node = rider_contact::node(m);
+    {
+        let (field, props, trees) = world.wooded();
+        if props.is_some() || trees.is_some() {
+            let bounds = field.as_ref().map(|f| {
+                let (lo, hi) = (f.min(), f.max());
+                ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+            });
+            let mut search = bike_search();
+            let mut scene = flight_search::Scene::wooded(props, trees, None, bounds, rays, &node, &mut search);
+            let hits = crate::contact_search::Search::rays(&mut scene, true);
+            let near = if hits.is_empty() { F::ONE } else { scene.ray_record().nearest };
+            return (hits.iter().map(|h| (h.from, h.point, h.normal)).collect(), near);
+        }
     }
-    reach.max(F(BELLY_MIN_REACH))
+    let mut b = Bundle::default();
+    for s in &rays.segments {
+        b.probes[b.count] = Probe::between(math::transform_point(m, s.from), math::transform_point(m, s.to));
+        b.count += 1;
+    }
+    let (centre, radius) = flight_search::reach(rays, &[m.0[0], m.0[1], m.0[2], m.0[3]]);
+    b.centre = centre;
+    // The node's half diagonal reaches its corners, and so every end.
+    b.radius = radius;
+    let mut record = Record::new();
+    world.solid(&b, &mut record);
+    world.groups(&b, &mut record);
+    let hits = (0..b.count)
+        .filter(|&i| record.hit[i])
+        .map(|i| (rays.segments[i].from, record.point[i], record.normal[i]))
+        .collect();
+    (hits, if record.hits > 0 { record.nearest } else { F::ONE })
 }
-
-/// The shortest [`belly_reach`]: a probe of no length sweeps nothing.
-const BELLY_MIN_REACH: f32 = 0.05;
 
 /// One surface out of a tire's table, by the index the ground query answered with. A tire with no
 /// table at all — or an index past its end — gets a surface of all zeroes, which is a tire with no
@@ -2057,54 +2126,53 @@ impl Ride {
     }
 }
 
-/// The frame's one sweep, and what comes out of it.
+/// The substep's collision search, and what comes out of it.
 ///
-/// The two wheel probes become contacts and go through [`chassis::wheel_contacts`], which is the
-/// original's own distributor — including its rule that a contact forward of the centre of mass is
-/// the front wheel's and anything else the rear's. The two body probes are resolved here: the travel
-/// the prop took away comes out of the position and the part of the velocity that was going into the
-/// surface is killed, which is what stops a rider against a prop instead of through it.
+/// The wheel probe ([`wheel_rays`], [`wheel_hits`]) is the original's, and so is what its contacts go
+/// through: [`chassis::wheel_contacts`], the distributor, with its rule that a contact whose segment
+/// starts forward of the chassis' origin is the front wheel's and anything else the rear's. The body
+/// probe ([`velocity_bundle`]) is resolved here: the travel the prop took away comes out of the
+/// position and the part of the velocity that was going into the surface is killed, which is what
+/// stops a rider against a prop instead of through it.
 #[allow(clippy::too_many_arguments)] // one frame's worth of the bike, and all of it needed
 fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &mut Wheel,
             rear: &mut Wheel, near: &mut F, touching: &mut bool, dt: F, world: &mut dyn World) {
-    let b = bundle(ch, m, front, rear, dt);
-    let mut record = Record::new();
-    let look = world.solid(&b, &mut record) | world.groups(&b, &mut record);
+    let rays = wheel_rays(&front.w, &rear.w);
+    let (hits, wheel_near) = wheel_hits(&rays, m, world);
+    let look = !hits.is_empty();
+    let cs: Vec<chassis::Contact> = hits
+        .iter()
+        .map(|&(from, point, normal)| chassis::Contact {
+            // `select` is the segment's own start, along the bike: the front wheel's is forward.
+            select: F(from.z()),
+            normal,
+            point,
+            // The collision node, the owner and the vehicle are the scene's, and the port has no
+            // handle to put here: a prop is the world, which is what a zero owner means.
+            node: 0,
+            owner: 0,
+            vehicle: 0,
+            vehicle_kind: 0,
+            listeners: 0,
+        })
+        .collect();
 
-    let mut cs: Vec<chassis::Contact> = Vec::new();
-    for i in 0..b.count {
-        if !record.hit[i] {
-            continue;
-        }
-        if i < 2 {
-            // A wheel's line. `select` is a distance along the bike and not a flag, so it is the
-            // contact's own position in the chassis' frame, forward of the centre of mass.
-            let local = unpoint(m, record.point[i]);
-            cs.push(chassis::Contact {
-                select: F(local.z()) - F(mvc.cofg.z()),
-                normal: record.normal[i],
-                point: record.point[i],
-                // The collision node, the owner and the vehicle are the scene's, and the port has no
-                // handle to put here: a prop is the world, which is what a zero owner means.
-                node: 0,
-                owner: 0,
-                vehicle: 0,
-                vehicle_kind: 0,
-                listeners: 0,
-            });
-        } else {
-            // A body probe. `Record::push`'s own arithmetic, per probe: the travel the triangle took
-            // away, along the normal — times the probe's length, because the record's version is a
-            // fraction of one unit of travel and not of the probe.
-            let probe = b.probes[i];
-            let normal = record.normal[i];
-            let left = scale(probe.dir, F::ONE - record.fraction[i]);
-            let blocked = scale(normal, dot3(left, normal));
-            ch.impulse = sub_xyz(ch.impulse, scale(blocked, probe.length));
-            let into = dot3(mvc.vel, normal).min(F::ZERO);
-            mvc.vel = sub_xyz(mvc.vel, scale(normal, into));
-            *touching = true;
-        }
+    let b = velocity_bundle(ch, dt);
+    let mut record = Record::new();
+    world.solid(&b, &mut record);
+    world.groups(&b, &mut record);
+    if record.hit[0] {
+        // `Record::push`'s own arithmetic: the travel the triangle took away, along the normal —
+        // times the probe's length, because the record's version is a fraction of one unit of travel
+        // and not of the probe.
+        let probe = b.probes[0];
+        let normal = record.normal[0];
+        let left = scale(probe.dir, F::ONE - record.fraction[0]);
+        let blocked = scale(normal, dot3(left, normal));
+        ch.impulse = sub_xyz(ch.impulse, scale(blocked, probe.length));
+        let into = dot3(mvc.vel, normal).min(F::ZERO);
+        mvc.vel = sub_xyz(mvc.vel, scale(normal, into));
+        *touching = true;
     }
 
     let mut fc = chassis::WheelContact::default();
@@ -2123,15 +2191,16 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
         }
     }
 
-    // What the ground step reads as `node_distance`: how close the nearest thing the sweep looked at
+    // What the ground step reads as `node_distance`: how close the nearest thing either search found
     // came, as a fraction of the probe that found it.
-    *near = if record.hits > 0 { record.nearest } else { F::ONE };
+    let body_near = if record.hits > 0 { record.nearest } else { F::ONE };
+    *near = wheel_near.min(body_near);
 }
 
 /// The contact list [`air::hit_wreck`] reads: the bike's head ray ([`air::HEAD`]) swept against
 /// everything solid at the transform the frame ended on.
 ///
-/// **This composition is the port's**, like [`bundle`]'s. The original sweeps eleven body rays out of
+/// **This composition is the port's**, like [`velocity_bundle`]'s. The original sweeps eleven body rays out of
 /// the bike's model every substep and resolves what they hit; the port has no model, so it sweeps the
 /// one ray that can wreck a rider who is not on a 50cc bike, once, after the frame, and resolves
 /// nothing — the frame's own probes have already done the pushing. A prop is the world, so what it
