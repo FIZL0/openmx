@@ -4220,6 +4220,40 @@ vehicle_fx_heli_update boot 0x003d7210 ground_query under the emitter's point fo
 # plane tire's +0x80), +0xc object contact (+0x84), +0x10 compression (+0x8c), +0x24 zone (+0xb0's byte).
 # MatchTerrainContour (emitter +0x238): emit (0x00150540) puts each particle on ground_query's height
 # plus its turned emit-point extent's y.
+# V40 — the bike's tire tracks, the manager's TireTrack entries (journal 2026-10-25-v40-bike-tracks,
+# ported as crates/openmx/src/tire_tracks.rs). vehicle_fx_read takes Type TireTrack too, but skips the
+# entries when the event has more than one human player (event +0x114): no tracks in a split.
+vehicle_fx_track_ctor boot 0x003d7c40 defaults: MinimumSpeedThreshold 10, MinimumCompression 250,
+#                                     MaximumCompression 1, BasePercentAlpha 0.7, FadeIn 1, FadeOut 5;
+#                                     fade-out left (+0x44) 5, fade-in left (+0x4c) 0. NumberOfStrips
+#                                     and HeightAboveGround are not set (every file gives them)
+vehicle_fx_track_init boot 0x003d7d00 AttachedToTire, Material, NumberOfStrips, HeightAboveGround,
+#                                     Width, BreakAngle (degrees), the thresholds, the fades, and the
+#                                     ZoneDescriptor's Zone1..16 (None = 0xff, entry +0x18 + zone)
+vehicle_fx_track_zone boot 0x003d7f60 a zone change: 0xff -> vt +0x1c (0x003d7fc0: flag 2, then off),
+#                                     else vt +0x20 (0x003d7fd0: flag 2 cleared)
+vehicle_fx_track_update boot 0x003d7ff0 last = tire while the strip is ended; d = |tire - last|; off
+#                                     when (!spinning && comp <= MinC) || speed <= MinSpeed: f = out/FadeOut,
+#                                     out -= d (x speed/MinSpeed below MinSpeed when MinSpeed > 1),
+#                                     in = f FadeIn; else f = (FadeIn - in)/FadeIn, in -= d, out = f FadeOut.
+#                                     a = f (Base + clamp01((comp-MinC)/(MaxC-MinC)) (1-Base)): above 0.005
+#                                     strip vt +0x78 (add), else vt +0x7c (end)
+vehicle_fx_track_off  boot 0x003d82c0 strip end, out = 0, in = FadeIn (vt +0x18 0x003d8310 the same and
+#                                     the enable bit cleared; vt +0x24 0x003d8270 resets flags and the ring)
+track_strip_init      boot 0x003d8cb0 the strip and its ring: NumberOfStrips batches of 16 vertex slots
+track_strip_emit      boot 0x003d8d80 a row into the ring: 2 slots, 4 at a batch begun mid-strip (the
+#                                     last row again, ADC set); the first row of a batch ADC; the two
+#                                     slots after the write ADC. The whole ring draws; nothing ages
+track_strip_add       boot 0x003d8f10 (Ghidra folds it into 0x003d8d80; read 0x3d8ffc..0x3d9600) u +=
+#                                     d/2 a call; a row at d >= 2 or u+1 >= 8, edges pos + n h -+ (dir x n) W,
+#                                     h = Height + rand() 2^-31 0.005 (0x0040fd40, the C rand); a new
+#                                     segment past BreakAngle or u+1 > 8: count += 2, u = -8, alpha byte
+#                                     (strip +0x1d4) = a 128 only then and at a strip's start
+track_strip_end       boot 0x003d9600 ended = 1; count and u to 0 if it had rows
+# bike_tire_record      0x0027adf0 builds each wheel's record the manager reads: position, ground and
+#   object contact, compression, spinning (+0xe0), zone byte (rider +0x910/+0x911 live on free09 = 13).
+# mxparticlezones.dat [TireTrack] differs a track: free06 and free10 none off, free07/free09 Zone1,
+# free11 Zone1 and Zone10. bike\tex\ttrack.pst 32x64, black, the tread in alpha (<= 95 doubled).
 # S58 — the spin step whole (wheel_spin_integrate, wheel_surface_drag, wheel_set_tire's 1/I), ported as
 # tire::spin_integrate / surface_drag / spin_inertia and proved in tests/spin.rs (10 000 cases each,
 # every word of the wheel and its chassis).

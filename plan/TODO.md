@@ -100,6 +100,7 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **P151** P74 follow-up: the bike's TireTrack entries (mxparticles.dat's two TireTrack lines) as a decal trail behind each tire
 - [ ] **P152** P74 follow-up: Foot Dust while riding — feed the riding rider's foot contacts to the ParticleCollisionConstraint entry (mask 0x3)
 - [ ] **P153** P74 follow-up: capture the wreck's crash-body and ragdoll contacts and compare Vehicle/Rider Dust and Chunks emission (carry, per-contact sources, zones) row by row
+- [ ] **V70** Tire tracks beside the original (V40 follow-up): shoot free09's marks from one pose in both games after a hard launch and a braked stop, check the software renderer's marks by eye, and compare wheel.surface with the original's per-wheel zone byte (rider +0x910/+0x911) in a PINE or disc test
 ### Phase 2 — a decompilation you can read
 
 

@@ -200,6 +200,7 @@ mod shot_pose;
 mod split;
 mod spliced;
 mod stages;
+mod tire_tracks;
 mod track_mods;
 mod track_previews;
 mod trick_packs;
@@ -4114,8 +4115,20 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             portal::Art::load(|name| read(&free, name))
         })
     };
+    // The bike's tire tracks (V40): the track's `TireTrack` entries and their tread, drawn as glows
+    // after the portals' pictures, one set of strips a seat.
+    let tread = load_tire_tracks(&archives);
+    let glow_list: Vec<game_render::pst::Texture> = portal_art
+        .as_ref()
+        .map(|a| a.textures.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(tread.as_ref().map(|(_, t)| t.clone()))
+        .collect();
+    let tread_texture = tread.as_ref().map(|_| glow_list.len() - 1);
+    let mut tire_marks: Vec<tire_tracks::Tracks> = Vec::new();
     // The GPU's copy of its pictures, uploaded with the first frame's glows.
-    let mut glow_textures = portal_art.as_ref().map(|a| a.textures.clone());
+    let mut glow_textures = (!glow_list.is_empty()).then(|| glow_list.clone());
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut speedometer = args.speedometer.unwrap_or_default();
     let mut minimap = args.minimap.unwrap_or(true);
@@ -5352,6 +5365,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
             }
         }
+        // The bike's tire tracks (V40): a tick of each seat's that rode its bike this frame. They read
+        // the ride and write nothing back.
+        if simulated && let Some((list, _)) = &tread {
+            step_tire_marks(&mut tire_marks, list, &world.seats);
+        }
         if simulated {
             traffic_time += f64::from(dt.0);
         }
@@ -5957,7 +5975,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         for (v, seat) in world.seats.iter().enumerate() {
             portal::markers(&mut marked_portals[v], &seat.sim.markers, picks[v], |x, y, z| portal_ground(&mut world.place, x, y, z));
         }
-        let glows: Vec<Vec<game_render::glow::Glow>> = match &portal_art {
+        let mut glows: Vec<Vec<game_render::glow::Glow>> = match &portal_art {
             Some(art) => (0..world.seats.len())
                 .map(|v| {
                     let in_machine = world.seats[v].garage.up != Kind::Bike;
@@ -5967,6 +5985,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .collect(),
             None => Vec::new(),
         };
+        // The tire tracks (V40), every seat's in every view, laid under the portals.
+        if let Some(texture) = tread_texture {
+            let marks = tire_mark_glow(&tire_marks, texture);
+            glows.resize_with(world.seats.len(), Vec::new);
+            for view in &mut glows {
+                view.insert(0, marks.clone());
+            }
+        }
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
@@ -6420,8 +6446,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
             // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
-            if let (Some(art), Some(glows)) = (&portal_art, glows.get(v)) {
-                tris += game_render::glow::draw(target, camera, &art.textures, glows);
+            if let Some(glows) = glows.get(v) {
+                tris += game_render::glow::draw(target, camera, &glow_list, glows);
             }
             stages.mark(stages::Stage::Scene);
             // And the overlay over the top of it, after everything with a depth test and before anything
@@ -7318,6 +7344,71 @@ fn bike_fx_frame(
             .collect();
     }
     frame
+}
+
+/// The bike's tire tracks off the archives (V40): the `TireTrack` entries of the track's
+/// `mxparticles.dat`, their zones, and their material's texture. Says what it found.
+fn load_tire_tracks(archives: &[Res]) -> Option<(Vec<tire_tracks::Params>, game_render::pst::Texture)> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let Some(list) = read(tire_tracks::LIST) else {
+        println!("tire tracks: no {}", tire_tracks::LIST);
+        return None;
+    };
+    let zones = read(tire_tracks::ZONES).map(|z| ini::text(&z));
+    let list = tire_tracks::list(&ini::text(&list), zones.as_deref());
+    let material = list.first()?.material.clone();
+    // The tread sits at the archive's root (`bike\tex\`), so its name is its whole path.
+    let name = format!("bike\\tex\\{material}.pst");
+    let texture = match archives.iter().find_map(|a| a.read_suffix(&name).ok()).map(|b| game_render::pst::Texture::parse(&b)) {
+        Some(Ok(t)) => t,
+        _ => {
+            println!("tire tracks: no {name}");
+            return None;
+        }
+    };
+    for p in &list {
+        println!("tire tracks: {} on tire {}, {} strips, {}", p.name, p.tire, p.strips, p.material);
+    }
+    Some((list, texture))
+}
+
+/// A seat's bike as its tracks read it after the tick (V40): each wheel where its suspension meets
+/// the ground, that ground's normal, its two contacts, its compression, its spin and its surface; the
+/// chassis' speed and the wreck.
+fn tire_bike(seat: &Seat) -> tire_tracks::Bike {
+    let r = &seat.sim.rider;
+    let tire = |w: &ride::Wheel| tire_tracks::Tire {
+        at: vector(w.w.load_point),
+        normal: vector(w.w.contact_normal),
+        ground: w.w.ray_hit != 0,
+        object: w.w.swept_contact != 0,
+        compression: w.w.compression.0,
+        spinning: w.slip.spinning,
+        zone: w.surface,
+    };
+    tire_tracks::Bike { tires: vec![tire(&r.ride.front), tire(&r.ride.rear)], speed: r.ride.chassis.speed.0, wrecking: r.crash.is_some() }
+}
+
+/// A tick of every seat's tracks whose bike rode it: on its bike, not frozen, paused or waiting. A seat
+/// that joined gets its own strips; one in a machine keeps the marks it left.
+fn step_tire_marks(marks: &mut Vec<tire_tracks::Tracks>, list: &[tire_tracks::Params], seats: &[Seat]) {
+    while marks.len() < seats.len() {
+        marks.push(tire_tracks::Tracks::new(list, marks.len() as u32 + 1));
+    }
+    for (seat, m) in seats.iter().zip(marks.iter_mut()) {
+        if seat.riding && !seat.paused && !seat.waiting && seat.garage.up == Kind::Bike {
+            m.step(&tire_bike(seat));
+        }
+    }
+}
+
+/// Every seat's tracks as one glow, cut from glow texture `texture`.
+fn tire_mark_glow(marks: &[tire_tracks::Tracks], texture: usize) -> game_render::glow::Glow {
+    let mut all = game_render::glow::Glow { texture, additive: false, tris: Vec::new() };
+    for m in marks {
+        all.tris.extend(m.glows(texture).tris);
+    }
+    all
 }
 
 /// The plane's particles as the GPU draws them.

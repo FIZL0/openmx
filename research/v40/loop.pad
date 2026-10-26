@@ -1,0 +1,5 @@
+# a full tight circle on gas so the camera swings over the marks laid at the start
+down cross
+stick l 1 0
+sleep 5500
+release
