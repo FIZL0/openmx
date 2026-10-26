@@ -506,6 +506,11 @@ impl State for Sim {
         if !self.traffic.cars.is_empty() {
             w.list("cars", &self.traffic.cars);
         }
+        // The track's animated toys (V43), on a track with any: their clocks and the clips' hints.
+        if !self.traffic.toys.is_empty() {
+            w.list("toys", &self.traffic.toys.clocks);
+            w.list("toy_hints", &self.traffic.toys.hints);
+        }
     }
 }
 
