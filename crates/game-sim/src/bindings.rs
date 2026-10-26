@@ -71,10 +71,10 @@ impl Command {
     pub const RESET_LEFT: Command = Command(0x4c);
     pub const RESET_RIGHT: Command = Command(0x4d);
 
-    /// The commands a rider on the bike has. Every one is read in a ride by the bike or the shell; the camera commands the shell does not follow
-    /// yet (look back, the other camera) are not here, and nor are the right stick's two modifiers,
+    /// The commands a rider on the bike has. Every one is read in a ride by the bike or the shell (the
+    /// camera's three buttons are the shell's, P78); the right stick's two modifiers are not here,
     /// which the shell's camera reads beside the stick (P114) rather than the ride.
-    pub const RIDE: [Command; 14] = [
+    pub const RIDE: [Command; 16] = [
         Command::GAS,
         Command::BRAKE,
         Command::CLUTCH,
@@ -86,6 +86,8 @@ impl Command {
         Command::DOWN,
         Command::RIGHT,
         Command::NEXT_CAMERA,
+        Command::LOOK_BACK,
+        Command::OTHER_CAMERA,
         Command::RESET_LEFT,
         Command::RESET_RIGHT,
         Command::PAUSE,
@@ -290,6 +292,16 @@ impl Table {
             .into_iter()
             .flatten()
             .any(|c| pad.pressed(c))
+    }
+
+    /// A command was let go this frame, on either binding: the release the camera manager's two
+    /// holds end on (P78).
+    pub fn released(&self, pad: &Pad, command: Command) -> bool {
+        let row = Table::row(pad);
+        [self.first[row][command.index()], self.second[row][command.index()]]
+            .into_iter()
+            .flatten()
+            .any(|c| pad.released(c))
     }
 
     /// The commands a control is a binding of for a pad, first or second, in command order.

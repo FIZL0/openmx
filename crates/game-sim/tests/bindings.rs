@@ -242,7 +242,7 @@ fn the_ride_reads_each_command_off_the_control_the_table_names() {
     ] {
         assert_eq!(t.control(0, command), Some(control), "{command:?}");
     }
-    assert_eq!(Command::RIDE.len(), 14);
+    assert_eq!(Command::RIDE.len(), 16);
     // A table that binds nothing leaves the ride at rest whatever is held.
     let all = pad_with(&Control::ALL);
     assert_eq!(format!("{:?}", Controls::through(all.pad(0), &Table::UNBOUND)), rest);
