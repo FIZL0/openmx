@@ -1,0 +1,119 @@
+# P164 — the biplane's wreck clank, read over biplane.p2m2's playback (two crashes, S36: entries 11664
+# and 12498). The plane is the first list entry (watch/biplane.toml); its wreck emitter is +0x678
+# (machine.aud [biplaneWreck]): +0x200 -> the wreck word (+0x3b0), +0x204 -> the collision record's
+# touched word, +0x224 -> the body's shock peak (+0xb0), +0x220 the last pick. The five sounds' first
+# 0x80 bytes, to find where the pick's level lands.
+[watch]
+name        = "p164-plane-crash-sound"
+description = "the biplane's wreck clank emitter beside its gates"
+every       = 1
+start       = "frame_counter >= 10971 and frame_counter <= 11000 and plane_type == 1"
+frames      = 1718
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "plane_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x3b0"
+type = "u32"
+
+[[field]]
+name = "touched"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x40"
+type = "u32"
+
+[[field]]
+name = "shock_peak"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "body_pos"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "body_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "on_ground"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x590"
+type = "u32"
+
+[[field]]
+name = "speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x598"
+type = "f32"
+
+[[field]]
+name = "em_gate_a"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x200 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "em_gate_b"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x204 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "em_impulse"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x224 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "em_count"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x208"
+type = "u32"
+
+[[field]]
+name = "em_last"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x220"
+type = "u32"
+
+[[field]]
+name = "em_min_max"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x228"
+type = "f32x3"
+
+[[field]]
+name = "em_dist"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x88"
+type = "f32x3"
+
+[[field]]
+name = "snd0"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x210 -> 0x0 -> 0x0"
+type = "bytes:128"
+
+[[field]]
+name = "snd1"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x210 -> 0x4 -> 0x0"
+type = "bytes:128"
+
+[[field]]
+name = "snd2"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x210 -> 0x8 -> 0x0"
+type = "bytes:128"
+
+[[field]]
+name = "snd3"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x210 -> 0xc -> 0x0"
+type = "bytes:128"
+
+[[field]]
+name = "snd4"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x678 -> 0x210 -> 0x10 -> 0x0"
+type = "bytes:128"
