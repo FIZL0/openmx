@@ -3296,11 +3296,11 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     // The cursor opens on Draw Distance, past the heading, and the d-pad steps over the next one.
     tab_to(&mut m, &mut r, "Graphics");
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
-    for _ in 0..4 {
+    for _ in 0..5 {
         tap(&mut m, &mut r, Control::Down);
     }
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::Departure(Departure::Picture));
-    for _ in 0..4 {
+    for _ in 0..5 {
         tap(&mut m, &mut r, Control::Up);
     }
     // Draw Distance changed by the pad is the setting, and is saved.
