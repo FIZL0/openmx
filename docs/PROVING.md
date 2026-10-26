@@ -149,6 +149,51 @@ Two properties worth paying for:
 
 ---
 
+## Reading the PC exe first: aim the proof, don't widen it
+
+MX vs. ATV Unleashed's PC exe (`context/mxvatv-pc/MXvsATV.exe`, a Ghidra program of its own since R10;
+`research/mxvatv-pc.md` has the class map) is the same engine compiled for a CPU Ghidra decompiles
+well, with MSVC RTTI class names, vtables and `.cpp` assert strings left in. The PS2 decompilation of the
+same function is anonymous MIPS with the branches folded into delay slots. So the exe is the best map
+there is of *what a function does*. Use it to make the proof smaller and sharper, not larger
+(user, 2026-10-26: "more accurate with less specific tests since the EXE is so helpful").
+
+**The exe is never the oracle.** Its float is x87 (80-bit intermediates, ≈1,900 `fmul` against 115
+`mulss`), much of it is Xbox-derived (`XboxParticleSimulation`, `XboxVertexBuffer`), and it is a later
+game: struct offsets moved (the engine model's fields sit 0xC lower), constants were retuned, and the
+vehicle grew a rider object of its own. Its numbers prove nothing about MX Unleashed. Bit-exact proofs
+stay against the PS2 ELF (SLUS-20767, or SLUS-21104 for MX vs. ATV's PS2 build) through the oracle, and
+against PCSX2 through captures. Never put the exe's output in an `assert_eq!`.
+
+How a task uses it:
+
+1. **Find the function in the exe first.** A `pc_<name>` row in `research/oracle.txt` pairs it with the
+   PS2 function already; otherwise look it up by class and slot (`./kit fn MotocrossRider::vf44 -o pc`),
+   by source file (`context/decomp/pc.sources.tsv`), or by a rare string both builds read. Pairing a new
+   one is worth an oracle row (`pc_<ps2 name>   pc <addr>   = <ps2 name>: how you know`).
+2. **List every branch, clause and constant there,** in the journal: each `if`, each clamp, each early
+   return, each special case (zero speed, airborne, wrecked, a surface index), each float constant and
+   the order of the calls. Then find each one in the PS2 function (`./kit fn <name>`), which is where its
+   numbers come from. A clause you cannot find on the PS2 side is either a PC addition (say so) or a
+   branch you misread there.
+3. **Aim the proof at the list.** For the oracle: shape the generated inputs so every branch on the list
+   is taken thousands of times — the ranges either side of each threshold, exact zero and negative zero
+   at each comparison, each surface or state index — rather than one broad uniform range that visits the
+   rare branch twice. Count the hits per branch in the test if it is cheap, so a branch that the
+   generator never reaches fails loudly instead of passing quietly. For stateful code: one short capture
+   per branch the list says needs one (a state load, a `--trace-at` teleport, a hand-written `.p2m2`
+   that does exactly that one thing), not many long rides in the hope that one of them hits it.
+4. **A clause the exe has and the port lacks is a finding.** If the PS2 function has it too, it is a bug
+   in the port: file it (`./kit plan add <PREFIX> "..."`) unless it is the task's own work. If only the
+   exe has it, write it under the journal's `Not verified / not 1:1` as a PC-only difference, so nobody
+   ports it later by mistake.
+
+The list from step 2 goes in the journal entry, with each item marked *proved by* (the test or capture
+that covers it) or *not covered* (and why). That is what makes a few aimed tests worth more than many
+broad ones: the coverage is written down rather than hoped for.
+
+---
+
 ## Choosing, in practice
 
 - Is it a pure function of numbers? → **oracle**, 10k inputs, done in an hour.
