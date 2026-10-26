@@ -966,15 +966,16 @@ impl Ride {
     /// forward row as the frame left it. The spot is the ground straight under the probe. It is kept
     /// only when nothing solid stands over it between the probe and the ground, nothing stands in the
     /// way of [`clear`]'s ring of probes around it, and the ground there is no steeper than
-    /// [`BACK_LEVEL`]; otherwise the record keeps the last spot that was. In a world of several
-    /// terrains the world must also keep the spot ([`World::keeps`], MD14). `true` when it moved.
+    /// [`BACK_LEVEL`]; otherwise the record keeps the last spot that was. The world must also
+    /// keep the spot ([`World::keeps`], MD14, MD22). `true` when it moved.
     pub fn keep_back(&mut self, at: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> bool {
         let Some(ground) = open_sky(at, world, &mut self.back_search) else {
             return false;
         };
 
         let spot = Vf::new(at.x(), ground.0, at.z(), at.w());
-        // A world of several terrains keeps no spot over a hole or by its edge (MD14).
+        // No world keeps a spot with no ground under it (MD22), nor a world of several one over a
+        // hole or by its edge (MD14).
         if !world.keeps(spot) {
             return false;
         }
