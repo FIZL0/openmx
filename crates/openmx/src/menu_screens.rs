@@ -1040,9 +1040,9 @@ impl Pen<'_> {
         if row.starts_with("Online") || row.starts_with("Seats") {
             chips.push(format!("Seats *{}*", menu.pause_seats()));
         }
-        // Another controller can ride in from here (P76).
+        // Another controller can ride in from here (P76). Spelt out (P171): the menu's type has no ✕.
         if menu.seats_open && menu.riders < crate::join::IN_RIDE {
-            chips.push("*\u{2715}* on a free controller joins".into());
+            chips.push("*Cross* on a free controller joins".into());
         }
         self.chips(&chips, x, y + 1.0, w);
         let title = if menu.riders > 1 { format!("{}P Paused", menu.pauser + 1) } else { "Paused".into() };

@@ -2041,6 +2041,12 @@ impl Seats {
         wiring: Wiring,
         bindings: Bindings,
     ) -> Seats {
+        // `OPENMX_PAD_ROOT` (P171): a folder of stand-in nodes, its `dev/js*` fifos and `sys/js*`
+        // entries laid out as the tests' fakes are, so the whole shell can be driven by pads a
+        // script plays.
+        if let Some(root) = std::env::var_os("OPENMX_PAD_ROOT").map(std::path::PathBuf::from) {
+            return Seats::in_dir(&root.join("dev"), &root.join("sys"), only, seats, wiring, bindings);
+        }
         Seats::in_dir(PAD_DIR.as_ref(), PAD_SYS.as_ref(), only, seats, wiring, bindings)
     }
 

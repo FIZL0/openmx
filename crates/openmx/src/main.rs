@@ -819,6 +819,8 @@ struct RideHud<'a> {
     names: &'a [Option<String>],
     table: &'a Stunts,
     simulated: bool,
+    /// Whether this view carries the join cue (P171).
+    join: bool,
 }
 
 impl RideHud<'_> {
@@ -865,9 +867,16 @@ impl RideHud<'_> {
             markers,
             scale: self.art.scale,
             minimap: self.art.minimap,
+            join: self.join,
         };
         draw(&shown, &rig.ride_hud, now);
     }
+}
+
+/// The view the join cue (P171) is drawn in: the one in the frame's top right corner, which is the
+/// whole frame alone, the top view stacked and the right one side by side.
+fn cue_view(rects: &[split::Rect], width: usize) -> usize {
+    rects.iter().position(|r| r.y == 0 && r.x + r.w == width).unwrap_or(0)
 }
 
 /// The view's HUD tracker a frame on from its seat's score card (P121, P68): each view follows its
@@ -4898,6 +4907,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut menu_air = front.as_deref().map(|f| f.menu.settings.air_wrecks);
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
     let mut seated = vec![true; world.seats.len()];
+    // Whether the ride says how to join it (P171): a seat free and a controller idle.
+    let mut join_cue = false;
 
     let mut shot = args.shot.clone();
     let started = Instant::now();
@@ -5573,6 +5584,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     rects[0].h
                 );
             }
+            // The join cue (P171) while a seat is free and a controller on a pad seat no player reads
+            // is in; gone once it is seated, or the ride is full.
+            let idle: Vec<usize> = idle_presses.iter().map(|(d, _)| *d).collect();
+            join_cue = front.menu.join_cue(&idle);
             // The pause closing on modifiers the player changed in it: the ride takes them now, from
             // where it is (P98), and a tape being written takes the change at the tick it is on.
             let closed = paused.iter().enumerate().any(|(i, &was)| was && !front.menu.paused(i));
@@ -6560,6 +6575,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The overlay first: each view's HUD, and the pause over the whole frame.
             let draw_at = Instant::now();
             gpu_sprites.clear();
+            let join_view = join_cue.then(|| cue_view(&rects, frame.width));
             for (v, at) in rects.iter().enumerate().take(world.seats.len()) {
                 let (seat, rig) = (&world.seats[v], &mut rigs[v]);
                 // The page's black over the view (S85), first, so the HUD is drawn over it.
@@ -6571,10 +6587,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 if overlay_mode == menu::Overlay::Hud {
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
-                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, speedometer, names: &names, table: &table, simulated };
+                    let join = join_view == Some(v);
+                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, speedometer, names: &names, table: &table, simulated, join };
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                         ride_hud::sprites(&mut gpu_sprites, hud_base, view, shown, tracker, now);
                     });
+                } else if join_view == Some(v) && !rig.hud.on && overlay_mode == menu::Overlay::Original {
+                    let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
+                    ride_hud::join_sprites(&mut gpu_sprites, hud_base, view, hud_art.scale);
                 }
             }
             if let Some(front) = front.as_deref_mut() {
@@ -6803,6 +6823,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
         let split_views = !view_frames.is_empty();
+        let join_view = join_cue.then(|| cue_view(&rects, frame.width));
         for (v, at) in rects.iter().enumerate().filter(|_| !gpu_on) {
             if v >= world.seats.len() {
                 // A layout with room for more players than there are: the spare views are black.
@@ -7016,10 +7037,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The ride HUD (P121), unless `none` was asked for.
             if overlay_mode == menu::Overlay::Hud {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
-                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, speedometer, names: &names, table: &table, simulated };
+                let join = join_view == Some(v);
+                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, speedometer, names: &names, table: &table, simulated, join };
                 ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                     ride_hud::draw(target, shown, tracker, now);
                 });
+            } else if join_view == Some(v) && !rig.hud.on && overlay_mode == menu::Overlay::Original {
+                ride_hud::join_draw(target, hud_art.scale);
             }
             // The player's own pause over their view (P84), when the frame is split.
             if let Some(front) = front.as_deref_mut().filter(|_| split_views)

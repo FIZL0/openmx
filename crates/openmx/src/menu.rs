@@ -31,8 +31,9 @@
 //! A local game (P43) is opentennis's Local (`main_menu/home.rs`, `assign.rs`): Local Game on the main
 //! menu opens the join screen ([`join::Join`], P38's rules), where every controller presses its own
 //! way into a seat; Start from a seated one goes on to the split layout the views are drawn in, then
-//! the track pick, and the ride starts with one view a seat in play ([`Menu::party`]). Online (above) sits
-//! beside it on the main menu.
+//! the track pick, and the ride starts with one view a seat in play ([`Menu::party`]). One seat is
+//! enough (P171): alone there is no layout to pick, the track pick is next, and the others drop in on
+//! the ride with Cross as it runs. Online (above) sits beside it on the main menu.
 
 use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
@@ -2602,7 +2603,14 @@ impl Menu {
                     });
                     self.cursor[Screen::Split.index()] = at.unwrap_or(0);
                     self.party = Some(Party { devices, split: self.settings.split });
-                    self.push(Screen::Split);
+                    if self.riders == 1 {
+                        // Alone (P171) there is no layout to pick: straight on to the track.
+                        self.cursor[Screen::Tracks.index()] = self.track_index();
+                        self.tick = 0;
+                        self.push(Screen::Tracks);
+                    } else {
+                        self.push(Screen::Split);
+                    }
                     return;
                 }
             }
@@ -3090,6 +3098,14 @@ impl Menu {
         Act::Join(device)
     }
 
+    /// Whether the ride says how to join it (P171): its seats are open, one is free, and a controller
+    /// is plugged into a pad seat no player reads — `idle`, the pad seats whose controllers are in
+    /// and playing. The cue is gone once that controller is seated, or the ride is full.
+    pub fn join_cue(&self, idle: &[usize]) -> bool {
+        let riding = self.ride_devices();
+        self.seats_open && self.riders < join::IN_RIDE && idle.iter().any(|d| !riding.contains(d))
+    }
+
     /// The shell's answer to [`Act::Join`] and [`Act::Leave`] (P76): the ride has its players so
     /// changed, each staying one's machine where it was, and the next ride of it (a Restart) starts
     /// with them, in the split screen's layout for the new count.
@@ -3201,8 +3217,8 @@ impl Menu {
             Screen::Split => {
                 self.main();
                 self.open_join();
-                // A local game is two at least (P51): pad seat 1 joins beside the host.
-                if !self.join.can_start() {
+                // The split screen is two at least: pad seat 1 joins beside the host.
+                if self.join.views().len() < 2 {
                     self.join.press(&1, join::Press::Join);
                 }
                 self.walk_join(0, Press { start: true, ..Press::default() });
