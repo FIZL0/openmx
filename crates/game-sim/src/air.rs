@@ -1160,6 +1160,14 @@ pub const FRONT_FLIP_TORQUE_SCALE: f32 = 1.0;
 /// exactly [`backflip`] (the front flip only arms or fires under [`Step::modifier`]), then the front flip.
 pub const UNLEASHED_ROTATIONS: &[Rotation] = &[BACKFLIP, FRONT_FLIP];
 
+/// **The port's own (P159):** the bike is turning a front flip over — [`Air::flipping`], on the row
+/// of [`UNLEASHED_ROTATIONS`] that is [`FRONT_FLIP`]. `row` is the ride's
+/// [`crate::trick_pack::State::flip_row`]. The rider's body reads it to lean forward instead of
+/// playing the backflip's clip.
+pub fn front_flipping(air: &Air, row: usize) -> bool {
+    air.flipping && UNLEASHED_ROTATIONS.get(row).is_some_and(|r| r.name == FRONT_FLIP.name)
+}
+
 /// One substep of [`UNLEASHED_ROTATIONS`]. `active` is which row the flip state belongs to, kept by
 /// the ride between substeps.
 pub fn unleashed_rotate(p: &Params, active: &mut usize, air: &mut Air, chassis: &mut Chassis, step: &Step) {
