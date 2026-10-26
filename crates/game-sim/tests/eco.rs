@@ -9,6 +9,8 @@
 //!   `free09.esb` gives ([`eco::Ecosystem::parse`]), plants and all.
 //! - **The ride** stops at a trunk: the disc's 125 ridden flat out at a free09 tree on a flat floor
 //!   comes to rest against it instead of riding through.
+//! - **The original's ride** into one (S100): two PCSX2 captures of the 125 flat out at a free09
+//!   trunk — where its rays find it, on which facet, and the wreck — beside the port's same ride.
 //!
 //! Skipped with a line where the disc, the kit or the state is not there.
 
@@ -391,8 +393,10 @@ fn riding_into_a_free09_tree_stops_the_bike_at_its_trunk() {
         let gas = Controls { gas: F::ONE, ..Controls::default() };
         (0..30 * 6)
             .map(|_| {
-                let f = rider.frame(&phy, &tables, &gas, F(game_sim::tick::DeltaTime::CAP_30), world);
-                assert!(f.wreck.is_none(), "no wreck: the head ray never reaches a trunk the bike is stopped against");
+                // The original wrecks here, over the bars on the impact load (S100,
+                // `a_free09_tree_against_the_original`); the port measures no load off a trunk yet, so
+                // nothing about a wreck is asserted.
+                rider.frame(&phy, &tables, &gas, F(game_sim::tick::DeltaTime::CAP_30), world);
                 (rider.ride.position().z(), rider.ride.chassis.vel.z())
             })
             .collect::<Vec<(f32, f32)>>()
@@ -411,6 +415,181 @@ fn riding_into_a_free09_tree_stops_the_bike_at_its_trunk() {
     assert!(open.last().unwrap().0 > tree_z + 100.0, "and takes it past where the tree stands");
     let at = stop(&blocked).expect("the tree stops the bike");
     assert!(at < trunk_z - 1.5 && at > tree_z - 10.0, "at its trunk: the centre of mass {at} ft up the floor");
+}
+
+/// S100's captures: recording2's 125 moved 60 ft short of free09's plant 347 (a TreeB at
+/// 4968.84, 180.35, 3087.89) on the flat by it, pointed at its trunk, and ridden on full gas — once as
+/// the state is, and once with the original's wrecks switched off (`wrecks_enabled` cleared in the
+/// state) to see the contact and what the bike does after it
+/// (`research/journal/2026-10-26-s100-eco-tree-ride/`).
+const TREE_RIDE: &str = "s100/tree.csv";
+const TREE_RIDE_NO_WRECKS: &str = "s100/nowreck.csv";
+const TREE_PLANT: usize = 347;
+
+/// A capture's rows, by column name.
+struct Rows {
+    names: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+impl Rows {
+    fn read(path: &std::path::Path) -> Option<Rows> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut lines = text.lines();
+        let names = lines.next()?.split(',').map(str::to_owned).collect();
+        let rows = lines.map(|l| l.split(',').map(str::to_owned).collect()).collect();
+        Some(Rows { names, rows })
+    }
+
+    fn f(&self, row: usize, name: &str) -> f32 {
+        let i = self.names.iter().position(|n| n == name).unwrap_or_else(|| panic!("no column {name}"));
+        self.rows[row][i].parse().unwrap_or_else(|_| panic!("row {row} {name}: {:?}", self.rows[row][i]))
+    }
+
+    fn v(&self, row: usize, name: &str) -> [f32; 3] {
+        [self.f(row, &format!("{name}.x")), self.f(row, &format!("{name}.y")), self.f(row, &format!("{name}.z"))]
+    }
+}
+
+/// **The original against a free09 trunk, and the port beside it** (S100).
+///
+/// What the original does, from the two captures:
+/// - its front body rays find the trunk on the tick the bike reaches it, at 58 ft/s with the centre of
+///   mass 3.1 ft short of the axis: two scenery contacts on the facet facing the bike, the point on
+///   the facet's plane of the trunk this port builds for the plant;
+/// - that one tick takes the bike from 58 to 35 ft/s, and the impact load it leaves (g_peak
+///   (-9.2, 14.2, -28.9)) is past the 125's front limit: wreck 1, over the bars, on that tick;
+/// - with wrecks off the bike rears up against the trunk, comes round, and under the same gas rides
+///   away the way it came.
+///
+/// The port reaches the trunk too and stops on it in one tick, but measures no impact load, does not
+/// wreck, and creeps on round the trunk; the run-up is quicker than the original's. Those gaps are
+/// printed, not asserted (S100's journal and its follow-ups).
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn a_free09_tree_against_the_original() {
+    use game_sim::ride::Controls;
+    use game_sim::rider::{Rider, Tables};
+    use game_sim::trick::Set;
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(why) => return skip(&why),
+    };
+    let read = |name: &str| {
+        let path = kit.ctx("capture").join(name);
+        let rows = Rows::read(&path);
+        if rows.is_none() {
+            skip(&format!("no {} — S100's capture/capture.sh records it", path.display()));
+        }
+        rows
+    };
+    let (Some(wrecks), Some(free)) = (read(TREE_RIDE), read(TREE_RIDE_NO_WRECKS)) else { return };
+    let Some(esb) = free09_esb() else { return };
+    let Some((phy, wheels)) = the_125() else { return };
+    let plant = esb.plants[TREE_PLANT];
+    let cell = eco::cell_size(F(6912.0)).0;
+    let tree = [f32::from(plant.cell[0]) * cell, f32::from(plant.cell[1]) * cell, f32::from(plant.cell[2]) * cell];
+    let off = |p: [f32; 3]| ((p[0] - tree[0]).powi(2) + (p[2] - tree[2]).powi(2)).sqrt();
+
+    // The original. Both runs are one ride until the trunk: the same state, the same tape.
+    let first = free.f(0, "frame_counter");
+    let tick = |r: usize| (free.f(r, "frame_counter") - first) as usize;
+    let touch = (0..free.rows.len()).find(|&r| free.f(r, "col_count") > 0.0).expect("the original's rays find the trunk");
+    let before = touch - 1;
+    let (speed, short) = (free.f(before, "ch_vel.z"), off(free.v(before, "ch_cofg")));
+    println!(
+        "original: the rays find the trunk on tick {} at {speed:.2} ft/s, the centre of mass {short:.2} ft off \
+         its axis; {} contacts; after the tick {:?}",
+        tick(touch),
+        free.f(touch, "col_count"),
+        free.v(touch, "ch_vel"),
+    );
+    assert!(speed > 55.0 && (2.5..4.0).contains(&short), "flat out into the trunk, nose first");
+    // The contacts are the trunk's: scenery, found by the bike's own rays, on the facet facing the
+    // bike, at a point on that facet's plane.
+    let solid = esb.species[usize::from(plant.species)].as_ref().expect("the plant's species").solids[0];
+    let (corners, tris) = eco::cylinder(&solid, &CurveTable::build());
+    let corner = |i: i32| {
+        let c = corners[i as usize];
+        [c.x() + tree[0], c.y() + tree[1], c.z() + tree[2]]
+    };
+    for c in 0..free.f(touch, "col_count") as usize {
+        let n = free.v(touch, &format!("c{c}_normal"));
+        let p = free.v(touch, &format!("c{c}_point"));
+        assert_eq!((free.f(touch, &format!("c{c}_kind")), free.f(touch, &format!("c{c}_other"))), (0.0, 0.0), "own, scenery");
+        let facing = tris
+            .iter()
+            .map(|t| {
+                let (a, b, d) = (corner(t[0]), corner(t[1]), corner(t[2]));
+                let (u, w) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [d[0] - a[0], d[1] - a[1], d[2] - a[2]]);
+                let x = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+                let l = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
+                let x = [x[0] / l, x[1] / l, x[2] / l];
+                // Outwards, whichever way the winding has it.
+                let s = if x[0] * (a[0] - tree[0]) + x[2] * (a[2] - tree[2]) < 0.0 { -1.0 } else { 1.0 };
+                ([s * x[0], s * x[1], s * x[2]], a)
+            })
+            .map(|(x, a)| (x[0] * n[0] + x[1] * n[1] + x[2] * n[2], x, a))
+            .fold((f32::MIN, [0.0; 3], [0.0; 3]), |best, t| if t.0 > best.0 { t } else { best });
+        let (dot, x, a) = facing;
+        let plane = (p[0] - a[0]) * x[0] + (p[1] - a[1]) * x[1] + (p[2] - a[2]) * x[2];
+        println!("  contact {c}: normal {n:?}, the port's facet {x:?} (cos {dot:.6}), the point {plane:+.4} ft off its plane");
+        assert!(dot > 0.99999, "contact {c}: the original's normal is a facet of the port's trunk");
+        assert!(plane.abs() < 0.01, "contact {c}: and its point is on that facet");
+        assert!(n[2] < -0.9, "contact {c}: the facet facing the bike");
+    }
+    // With wrecks on, that tick is the wreck's: over the bars, on the impact load.
+    let hit = (0..wrecks.rows.len()).find(|&r| wrecks.f(r, "wreck_reason") != 0.0).expect("the original wrecks");
+    let g = wrecks.v(hit, "g_peak");
+    println!("original: wreck {} at frame {}, g_peak {g:?}", wrecks.f(hit, "wreck_reason"), wrecks.f(hit, "frame_counter"));
+    assert_eq!(wrecks.f(hit, "wreck_reason"), 1.0, "wreck 1, over the bars");
+    assert!((wrecks.f(hit, "frame_counter") - free.f(touch, "frame_counter")).abs() <= 1.0, "on the tick the trunk is found");
+    assert!(g[2] < -25.0, "on the fore-aft impact load");
+    // And with them off the bike comes round and rides away the way it came, gas still held.
+    let last = free.rows.len() - 1;
+    let fwd = [free.f(last, "bike_xform.m20"), free.f(last, "bike_xform.m22")];
+    println!("original, wrecks off: {:.1} ft off the trunk at the end, going {:?}, facing {fwd:?}", off(free.v(last, "ch_cofg")), free.v(last, "ch_vel"));
+    assert!(free.f(last, "ch_vel.z") < -40.0 && fwd[1] < -0.8, "back the way it came");
+
+    // The port: the same bike from the capture's first place and heading, on a flat floor at the
+    // plant's foot, with that one plant standing.
+    let mut eco = esb.clone();
+    eco.plants = vec![plant];
+    let (trees, missed) = Trees::new(&eco, eco::cell_size(F(6912.0)), &CurveTable::build());
+    assert!(missed.is_empty(), "{missed:?}");
+    let floor = Flat { y: F(tree[1]), normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let mut world = Wooded { world: floor, trees };
+    let (fx, fz) = (free.f(0, "bike_xform.m20"), free.f(0, "bike_xform.m22"));
+    let n = (fx * fx + fz * fz).sqrt();
+    let start = free.v(0, "ch_cofg");
+    let tables = Tables::build();
+    let mut rider =
+        Rider::new(&phy, wheels, Vf::new(start[0], tree[1] + 1.0, start[2], 1.0), Vf::new(fx / n, 0.0, fz / n, 0.0), Set::default());
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let idle = Controls::default();
+    let mut ours = Vec::new();
+    for t in 0..free.rows.len() {
+        let f = rider.frame(&phy, &tables, if t == 0 { &idle } else { &gas }, F(game_sim::tick::DeltaTime::CAP_30), &mut world);
+        let c = rider.ride.chassis;
+        ours.push(([c.cofg_world.x(), c.cofg_world.y(), c.cofg_world.z()], c.vel.z(), f.wreck, rider.ride.mv.g_peak));
+    }
+    let stop = (1..ours.len()).find(|&t| ours[t - 1].1 - ours[t].1 > 15.0).expect("the port stops on the trunk");
+    let (p, v, _, _) = ours[stop - 1];
+    println!(
+        "port: stops on tick {stop} from {v:.2} to {:.2} ft/s, the centre of mass {:.2} ft off the axis; g_peak {:?}; \
+         wreck {:?}",
+        ours[stop].1,
+        off(p),
+        ours[stop].3,
+        ours.iter().find_map(|o| o.2),
+    );
+    let end = ours.last().unwrap();
+    println!("port at the end: {:.1} ft off the trunk, {:.1} ft past it, going {:.2} ft/s", off(end.0), end.0[2] - tree[2], end.1);
+    for t in [10, 20, 30, 40, 50] {
+        println!("  run-up tick {t}: original {:.2} ft/s, port {:.2}", free.f((0..free.rows.len()).find(|&r| tick(r) >= t).unwrap(), "ch_vel.z"), ours[t].1);
+    }
+    assert!((2.5..4.5).contains(&off(p)), "the port's bike stops at the trunk, nose first, as the original's does");
+    assert!(ours[stop].1 < speed * 0.75, "in one tick");
 }
 
 /// The disc's `race125p.phy` and the `125_faisst` wheels, as tests/modifiers.rs loads them.

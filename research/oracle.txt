@@ -5129,3 +5129,13 @@ vehicle_fx_entry_on   boot 0x003d86d0 flag |= 1 (live); the emitter on (vt +0x98
 # The Generic/Exhaust/Spray vtables sit at 0x0045e630..0x0045e780. An emitter switched on emits
 # nothing that tick: the manager runs before the emitter, which only takes its position (S109's
 # animandpump capture: exhaust on at 2001, rear sprays at 2006, each emitting from the row after).
+
+# S100 — the 125 into a free09 trunk, live (tests crates/game-sim/tests/eco.rs
+#   a_free09_tree_against_the_original; captures context/capture/s100/{tree,nowreck}.csv in s2).
+#   The bike's collision record (bike +0x7d0) list is a pointer at +0x108 (record +0x210 on the live
+#   bike), read between ticks it still holds the last substep's contacts: on the hit tick two kind-0,
+#   other-0 entries from the front rays ending (0, 3.1, 3.0) and (0, 1.9, 3.6), normal = the 16-gon facet
+#   facing the bike, point on its plane. With wrecks on, the same tick is wreck 1 (Front) on g_peak
+#   (-9.19, 14.22, -28.94) at 58.2 ft/s. Clearing wrecks_enabled (0x00420bc0) in a paused state and
+#   saving it keeps wrecks off through a .p2m2 playback of that state. A generated .p2m2 here plays two
+#   fields per 30 Hz tick (300 fields held Cross for 150 ticks).
