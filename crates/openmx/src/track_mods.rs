@@ -115,6 +115,30 @@ pub fn find(mods: &Path, id: &str) -> Result<ModTrack, String> {
     check(&folder)?.ok_or_else(|| format!("{}: not a track mod", folder.display()))
 }
 
+/// Every music pack under `mods` (P122), `(id, name, songs)`, in id order: `music/<id>/mod.json` of
+/// kind `music`, its id the folder's and its name not empty, and how many entries its `songs` list
+/// has. Only listed for the Mods page to switch on and off; the songs are MD7's to play.
+pub fn music_packs(mods: &Path) -> Vec<(String, String, usize)> {
+    let Ok(list) = std::fs::read_dir(mods.join("music")) else { return Vec::new() };
+    let mut out: Vec<(String, String, usize)> = list
+        .flatten()
+        .filter_map(|e| {
+            let id = e.file_name().into_string().ok()?;
+            let text = std::fs::read_to_string(e.path().join("mod.json")).ok()?;
+            let json = Json::parse(&text).ok()?;
+            let string = |key: &str| json.get(key).and_then(Json::str);
+            let name = string("name")?.trim();
+            let songs = match json.get("songs") {
+                Some(Json::Arr(songs)) => songs.len(),
+                _ => 0,
+            };
+            (string("kind")? == "music" && string("id")? == id && valid_id(&id) && !name.is_empty()).then(|| (id.clone(), name.to_string(), songs))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// Each listed mod's source game (MD11), `(id, game)`: its `mod.json`'s `source.game`, for the
 /// pick's filters. A mod whose file does not say is left out, and the pick files it by its pack.
 pub fn source_games(mods: &Path, ids: &[String]) -> Vec<(String, String)> {

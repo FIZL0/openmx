@@ -614,3 +614,29 @@ fn a_mod_map_has_the_biplane_with_no_machine_txt() {
     let switched: Vec<&str> = said.lines().filter(|l| l.starts_with("vehicle: ")).collect();
     assert_eq!(switched, ["vehicle: bike", "vehicle: biplane", "vehicle: bike"], "\n{said}");
 }
+
+/// P122: the Mods page's music packs are `music/<id>/mod.json` of kind `music`, by id, with how many
+/// songs each lists; a track in music/, a wrong id, a broken file and a nameless pack are not one.
+#[test]
+fn music_packs_list_from_the_music_folder() {
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("p122").join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    let music = mods.join("music");
+    let pack = |id: &str, songs: &str| mod_json(id).replace("\"track\"", "\"music\"").replace("\"todo\": []", &format!("\"todo\": [], \"songs\": [{songs}]"));
+    write(&music, "untamed_music/mod.json", &pack("untamed_music", r#"{"file": "a.vig"}, {"file": "b.vig"}"#));
+    write(&music, "mxvatv_music/mod.json", &pack("mxvatv_music", r#"{"file": "a.vig"}"#));
+    write(&music, "md2_track/mod.json", &mod_json("md2_track"));
+    write(&music, "md2_wrongid/mod.json", &pack("md2_other", ""));
+    write(&music, "md2_broken/mod.json", "{\"kind\": \"music\",");
+    write(&music, "md2_noname/mod.json", &pack("md2_noname", "").replace("\"MD2 Flat\"", "\" \""));
+    write(&music, "md2_nosongs/mod.json", &mod_json("md2_nosongs").replace("\"track\"", "\"music\""));
+    let got = track_mods::music_packs(&mods);
+    let want: Vec<(String, String, usize)> = [("md2_nosongs", 0), ("mxvatv_music", 1), ("untamed_music", 2)]
+        .into_iter()
+        .map(|(id, n)| (id.to_string(), "MD2 Flat".to_string(), n))
+        .collect();
+    assert_eq!(got, want);
+    // A music pack is not a track, and no music folder is no packs.
+    assert!(track_mods::scan(&mods).tracks.is_empty());
+    assert!(track_mods::music_packs(&mods.join("nothing")).is_empty());
+}

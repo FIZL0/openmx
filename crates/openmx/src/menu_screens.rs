@@ -837,9 +837,9 @@ fn main_panel(menu: &Menu, at: usize) -> (&'static str, String, Vec<String>) {
         ),
         MAIN_GARAGE => ("Garage", "Name, number, bike and gear, per player.".into(), Vec::new()),
         MAIN_MODS => {
-            let on = packs.iter().filter(|p| !menu.settings.mods_off.contains(&p.prefix)).count();
+            let (on, all) = menu.packs_on();
             let tracks: usize = packs.iter().map(|p| p.tracks).sum();
-            let mut chips = vec![format!("*{on}* of {} packs on", packs.len())];
+            let mut chips = vec![format!("*{on}* of {all} packs on")];
             if !menu.settings.mods {
                 chips = vec!["The mods folder is *Off*".into()];
             } else if tracks > 0 {
