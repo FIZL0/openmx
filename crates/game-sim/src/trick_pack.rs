@@ -182,6 +182,8 @@ impl crate::hash::State for State {
         w.bool("spin.came_round", s.came_round);
         w.bool("spin.wrecked", s.wrecked);
         w.bool("spin.forward", s.forward);
+        // `spin.cut` (S154) is not walked: the rider takes it each frame with `spin.wrecked`, so it
+        // is false between frames, and the pack rides' hashes stay what they were.
         w.u8("flip_row", self.flip_row as u8);
         w.f("side.now", self.side.now);
         w.u8("side.head", self.side.head as u8);

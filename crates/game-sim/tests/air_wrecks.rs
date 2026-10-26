@@ -184,3 +184,27 @@ fn the_switch_rides_on_a_tape() {
     assert!(run.sim.rider.state.wreck.is_some(), "the same frame with the switch on rode on");
 }
 
+
+/// S154: a no-hander rolled past `NoHanderMaxRollAngle` (45) is a wreck in the air with the switch on
+/// (the original's trick ending), and none with it off until a wheel or the body touches — where it
+/// is the wreck it always was.
+#[test]
+fn off_leaves_a_rolled_no_hander_to_the_touch() {
+    let tables = Arc::new(Tables::build());
+    let phy = Phy::read_bytes(format!("{}{LIMITS}", stock::BIKE).as_bytes(), &tables.ride.curve);
+    let p = &phy.air;
+    let chassis = air::Chassis::default();
+    // Rolled 60 degrees: the up axis' height is cos 60.
+    let step = air::Step { up: Vf::new(0.866, 0.5, 0.0, 0.0), stunt: true, ..air::Step::default() };
+    let loads = air::Loads { no_hander: true, pose: 1, pose_wanted: 2, ..air::Loads::default() };
+    let aloft = air::Air { airborne: true, on_ground: false, ..air::Air::default() };
+    let ask = |a: air::Air, s: &air::Step, on: bool| air::wreck_test_in(p, &mut a.clone(), &chassis, s, &loads, on);
+    assert_eq!(ask(aloft, &step, true), Some(air::Wreck::NoHander), "on: the rolled no-hander wrecks in the air");
+    assert_eq!(ask(aloft, &step, false), None, "off: not in the air");
+    let touching = air::Step { touching: true, ..step };
+    assert_eq!(ask(aloft, &touching, false), Some(air::Wreck::NoHander), "off: on a touch");
+    let down = air::Air { on_ground: true, ..air::Air::default() };
+    assert_eq!(ask(down, &step, false), Some(air::Wreck::NoHander), "off: on the ground");
+    let level = air::Step { up: Vf::new(0.0, 1.0, 0.0, 0.0), ..step };
+    assert_eq!(ask(aloft, &level, true), None, "level, on: no wreck");
+}

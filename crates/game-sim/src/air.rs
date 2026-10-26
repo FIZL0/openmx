@@ -1232,6 +1232,11 @@ pub struct Spin {
     /// wreck).
     pub came_round: bool,
     pub wrecked: bool,
+    /// **The port's own (S154):** the last [`Spin::wrecked`] was latched off the ground — the yaw
+    /// torque decayed under its minimum with the clip still playing, a 360 cut short in the air —
+    /// rather than on a touch. Air Wrecks Off ([`crate::state::Sense::air_wrecks`]) drops that wreck
+    /// and leaves the landing to [`wreck_test_in`]; on, it is the wreck it always was.
+    pub cut: bool,
     /// **The port's own (MD20):** a front flip left the ground with this 360, so its pitch share
     /// turns the bike nose-down ([`SPIN_PITCH_FOLLOWS_THE_FLIP`]). Latched on the substep the wheels
     /// leave; false on every 360 alone.
@@ -1344,6 +1349,7 @@ pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, c
             if spin.clip != 0 {
                 spin.clip = 0;
                 spin.wrecked = true;
+                spin.cut = !air.on_ground && !step.touching;
             }
         } else {
             if step.dpad_dir == 0 && !step.modifier && sign(x) != spin.dir {
@@ -1504,6 +1510,10 @@ pub fn wreck_test(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loa
 /// everything else — the g loads, the ground pitch, a flip still torquing on a touch, the landing's
 /// crossup and the trick endings — as ever, so a landing on the roof still wrecks. True is the
 /// original, and [`wreck_test`] itself.
+///
+/// One trick ending is an attitude too (S154): a no-hander rolled past
+/// [`Params::no_hander_max_roll_angle`] wrecks in the air as well as on the ground. `in_air` false
+/// skips it while neither on the ground nor touching anything, and judges it on the touch as ever.
 pub fn wreck_test_in(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loads: &Loads, in_air: bool) -> Option<Wreck> {
     if loads.fore_aft > p.back_wreck_speed_limit {
         return Some(Wreck::Back);
@@ -1554,7 +1564,8 @@ pub fn wreck_test_in(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, 
     // and the rider still has their hands on the bars.
     if (!air.on_ground && !step.touching) || !step.stunt || loads.no_hander || loads.trick_wrecked {
         if loads.pose != loads.pose_wanted || loads.pose_blend <= 0.95 {
-            if loads.no_hander && F(step.up.y()) < p.no_hander_max_roll_angle {
+            let aloft = !air.on_ground && !step.touching;
+            if loads.no_hander && F(step.up.y()) < p.no_hander_max_roll_angle && (in_air || !aloft) {
                 return Some(Wreck::NoHander);
             }
             return None;
