@@ -68,6 +68,12 @@ Pick the cheapest method that actually proves the thing (`docs/PROVING.md` has t
   running capture the way a second PINE connection does.
 - the whole thing → **the replay harness**: same input and seed in, same per-tick state hash out.
 
+Before writing the proof, read the same function in MX vs. ATV's PC exe (`./kit fn … -o pc`,
+`research/mxvatv-pc.md`) and list its branches, clauses and constants; aim the oracle's inputs and a few
+short captures at each one rather than recording many rides, and file any clause the port lacks. The exe
+is a guide, never the oracle: x87, Xbox-derived, a later game. Bit-exact proofs stay against the PS2 ELF
+and PCSX2 (`docs/PROVING.md`, "Reading the PC exe first").
+
 A port with no proof is not done. A port whose proof is "I read the decompilation carefully" is not done
 either — that is how you get something that works for two hundred frames.
 
