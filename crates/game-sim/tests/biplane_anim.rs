@@ -305,3 +305,127 @@ fn the_biplanes_parts_move_with_its_controls() {
     assert!(wrecked > 100, "the flight ends in a wreck: {wrecked} ticks");
     assert!(swung > 0.1, "the ailerons move: {swung} rad at most");
 }
+
+/// `Biplane\biplane.phy` out of the disc's `machine.res`, or `None` with a line where the disc is not
+/// extracted.
+fn plane_file() -> Option<Vec<u8>> {
+    use game_sim::archive::{Psr, Res};
+    use std::io::{Read, Seek, SeekFrom};
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/iso/MX.PSR");
+    let path = if path.exists() {
+        path
+    } else {
+        ps2_oracle::Kit::load().ok()?.ctx("iso").join("MX.PSR")
+    };
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        println!("skipped: no {} — `./kit extract MX.PSR` writes it", path.display());
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("machine.res").expect("machine.res is in MX.PSR");
+    f.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    f.read_exact(&mut bytes).expect("read");
+    let res = Res::parse(&bytes).expect("machine.res");
+    let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(game_sim::phy::BIPLANE_PHY)).expect("the plane's file");
+    Some(res.read(&bytes, e).expect("its bytes"))
+}
+
+/// The plane's `[Joystick]` limits off the disc.
+fn joystick() -> Option<game_sim::biplane::Joystick> {
+    let file = plane_file()?;
+    Some(game_sim::flight::Flight::new(&game_sim::phy::Plane::read_bytes(&file)).joystick)
+}
+
+/// How the original eases its moving parts (V79): the control law's rate limits and nothing else.
+/// Every tick of the human's flight, the ailerons are the tick before's stepped toward the stick the
+/// tick before left, at most `AileronControlRateLimit * dt` — bit for bit through the port's own
+/// [`game_sim::biplane::controls`], on all but the [`TORN`] rows. The elevator and the rudder never
+/// step further than their own limits either (the elevator's fade with roll and the rudder's buttons
+/// are not in the rows, so those two are bounds, not bits). A full aileron throw is two ticks and a
+/// bit, a full elevator four, a full rudder eleven: the original draws a stepped ramp, one step a tick.
+#[test]
+fn the_originals_surfaces_ramp_at_the_control_laws_rates() {
+    use game_sim::biplane::{Attitude, Pad, Surfaces, controls};
+    let Some(c) = capture() else { return };
+    let Some(j) = joystick() else { return };
+    let (mut checked, mut ramped) = (0, 0);
+    for i in 1..c.cap.rows.len() {
+        let (fc, dt) = (c.fc(i), c.f(i, "dt"));
+        let mut s = Surfaces {
+            elevator: c.f(i - 1, "pitch_cmd"),
+            aileron: c.f(i - 1, "aileron"),
+            rudder: c.f(i - 1, "rudder"),
+            ..Surfaces::default()
+        };
+        let mut pad = Pad { aileron: c.f(i - 1, "ail_cmd"), ..Pad::default() };
+        controls(&mut pad, &mut s, &j, &Attitude { flown: true, ..Attitude::default() }, dt);
+        if !TORN.contains(&fc) {
+            assert_eq!(s.aileron.0.to_bits(), c.f(i, "aileron").0.to_bits(), "{fc}: the ailerons' step");
+            checked += 1;
+        }
+        let step = |col: &str| (c.f(i, col).0 - c.f(i - 1, col).0).abs();
+        assert!(step("aileron") <= (j.aileron_rate * dt).0 * 1.0001 || TORN.contains(&fc), "{fc}: aileron jumps");
+        assert!(step("pitch_cmd") <= (j.elevator_rate * dt).0 * 1.0001, "{fc}: elevator jumps");
+        assert!(step("rudder") <= (j.rudder_rate * dt).0 * 1.0001, "{fc}: rudder jumps");
+        if step("aileron") == (j.aileron_rate * dt).0 {
+            ramped += 1;
+        }
+    }
+    assert!(checked > 1700, "{checked} rows");
+    assert!(ramped > 50, "the flight throws the stick: {ramped} rate-limited aileron ticks");
+}
+
+/// A stick step moves each surface along the original's curve (V79): from rest, the stick and the
+/// rudder thrown full one way, then the other, then let go — every surface a straight ramp at its rate
+/// to the new end and held there, never further than the rate in one tick, through the surface step
+/// that poses the bones. What a drawn frame between two ticks shows is this ramp cut finer
+/// (`game_render::biplane::between`).
+#[test]
+fn a_stick_step_moves_each_surface_along_the_originals_curve() {
+    use game_sim::biplane::{Attitude, Pad, Surfaces, controls};
+    let Some(j) = joystick() else { return };
+    let dt = F(0.033_33);
+    let at = Attitude { flown: true, ..Attitude::default() };
+    let mut s = Surfaces::default();
+    let pose = |s: &Surfaces| biplane_anim::surfaces(s.elevator, j.max_elevator, s.aileron, s.rudder, F::ZERO, false);
+    let mut was = pose(&s);
+    let mut ticks = 0;
+    for (stick, hold) in [(1.0f32, 30), (-1.0, 30), (0.0, 30)] {
+        let (mut reached, mut moved) = (None, 0);
+        for k in 0..hold {
+            let mut pad = Pad { elevator: F(stick), aileron: F(stick), rudder: F(stick), ..Pad::default() };
+            let before = s;
+            controls(&mut pad, &mut s, &j, &at, dt);
+            ticks += 1;
+            for (what, a, b, rate, end) in [
+                ("aileron", before.aileron, s.aileron, j.aileron_rate, F(stick) * j.max_aileron),
+                ("elevator", before.elevator, s.elevator, j.elevator_rate, F(stick)),
+                ("rudder", before.rudder, s.rudder, j.rudder_rate, F(stick) * j.max_rudder),
+            ] {
+                let (left, step) = ((end.0 - a.0).abs(), (rate * dt).0);
+                let want = if left > step { step } else { left };
+                assert!(((b.0 - a.0).abs() - want).abs() < 1e-6, "tick {ticks}: {what} steps at its rate, {a:?} -> {b:?} toward {end:?}");
+                assert!((end.0 - b.0).abs() <= left, "tick {ticks}: {what} moves toward the stick");
+            }
+            if (s.rudder.0 - (F(stick) * j.max_rudder).0).abs() < 1e-6 && reached.is_none() {
+                reached = Some(k + 1);
+            }
+            let now = pose(&s);
+            let d = |a: F, b: F| (a.0 - b.0).abs();
+            assert!(d(now.flaps[0], was.flaps[0]) <= (j.aileron_rate * dt).0 * 1.0001, "tick {ticks}: flap jumps");
+            assert!(d(now.rear, was.rear) <= (j.elevator_rate * dt * j.max_elevator).0 * 1.0001, "tick {ticks}: rear flap jumps");
+            assert!(d(now.rudder, was.rudder) <= (j.rudder_rate * dt).0 * 1.0001, "tick {ticks}: rudder jumps");
+            if now != was {
+                moved += 1;
+            }
+            was = now;
+        }
+        // The slowest, the rudder, gets there inside the hold and then stays.
+        let reached = reached.unwrap_or_else(|| panic!("the rudder reaches {stick} inside {hold} ticks"));
+        assert!(moved >= reached && moved < hold, "stick {stick}: moved {moved} ticks, the rudder there on {reached}");
+        assert!(reached > 3, "stick {stick}: the rudder ramps over several ticks, not one: {reached}");
+    }
+}

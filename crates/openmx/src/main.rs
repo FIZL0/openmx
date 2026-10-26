@@ -4933,6 +4933,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Each view's markers' slot display (P88).
     let mut banners: Vec<hud::MarkerBanner> = Vec::new();
     let mut before_planes: Vec<Option<M4>> = Vec::new();
+    // Each plane's moving parts before the tick, which the picture blends them from (V79).
+    let mut before_surfaces: Vec<Option<game_sim::biplane_anim::Surfaces>> = Vec::new();
     // Each seat's cut test (P120): whether the last tick's picture is a jump from the one before.
     let mut cuts: Vec<pace::Cut> = Vec::new();
     // The moment the picture is of (P120): read once a pass of the loop, after the last picture was
@@ -5653,6 +5655,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         before = world.seats.iter().zip(&rigs).map(|(seat, rig)| Shown::of(seat, rig, &assets, ragdolled.as_ref(), gpu_on)).collect();
         before_cameras.clone_from(&cameras);
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
+        before_surfaces = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(Plane::surfaces)).collect();
         cuts.resize_with(world.seats.len(), pace::Cut::default);
         for (i, (seat, cut)) in world.seats.iter().zip(&mut cuts).enumerate() {
             cut.before(cut_spots(seat, before[i].bike, cameras.get(i)));
@@ -6724,7 +6727,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
                 let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
                 let alpha = vehicle::shown_alpha(1.0, seat.paused);
-                actors.extend(plane_draw::actors(drawn, &assets, plane, at, alpha, &mut gpu_poses));
+                let was = before_surfaces.get(p).and_then(Option::as_ref).filter(|_| !cut[p]);
+                let surfaces = plane_draw::shown(was, plane, blend.0);
+                actors.extend(plane_draw::actors_with(drawn, &assets, surfaces, at, alpha, &mut gpu_poses));
                 // And its pilot in the seat (V39), the rider's own body posed by the plane's clips.
                 if let (Some(Some(pilot)), Some(model)) = (pilots.get(p), &rigs[p].body_model) {
                     gpu_poses.push(pilot.palette.clone());
@@ -6988,7 +6993,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let Some(drawn) = plane_drawn.get(livery) else { continue };
                 let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
                 let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
-                actor.extend(plane_draw::skinned(drawn, &plane_copies[p][livery], &mut assets, plane, at));
+                let was = before_surfaces.get(p).and_then(Option::as_ref).filter(|_| !cut[p]);
+                let surfaces = plane_draw::shown(was, plane, blend.0);
+                actor.extend(plane_draw::skinned_with(drawn, &plane_copies[p][livery], &mut assets, surfaces, at));
                 // Its pilot (V39), skinned here from the same pose the GPU draws, at the body's
                 // finest level of detail; the bike's rider is not drawn while the plane is up, so
                 // the body's mesh is the pilot's for this seat.

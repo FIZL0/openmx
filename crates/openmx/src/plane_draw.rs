@@ -9,12 +9,27 @@ use game_render::biplane::Biplane;
 use game_render::gpu::Actor;
 use game_render::mat::M4;
 use game_render::world::Assets;
+use game_sim::biplane_anim::Surfaces;
+
+/// The moving parts a frame draws (V79): the plane's surfaces `was` the tick before and as they are
+/// now, blended by how far the frame is between the two ticks, so a surface glides along the control
+/// law's ramp instead of stepping once a tick under a picture drawn faster than the ticks. No `was`
+/// (the plane just taken out, or the frame cut) draws them as they are.
+pub fn shown(was: Option<&Surfaces>, plane: &Plane, t: f32) -> Surfaces {
+    let now = plane.surfaces();
+    was.map_or(now, |was| game_render::biplane::between(was, &now, t))
+}
 
 /// A plane as the GPU draws it (V38): the plane posed by its moving parts — the flaps, the rudder and
 /// the prop as [`Plane::surfaces`] has them — and the prop cone at the posed `PropDummy`. The pose goes
 /// on the end of `poses`, the plane's actor names it, and the cone, a model of its own, is unposed.
 pub fn actors<'a>(drawn: &'a Biplane, assets: &Assets, plane: &Plane, at: M4, alpha: f32, poses: &mut Vec<Vec<M4>>) -> Vec<Actor<'a>> {
-    let surfaces = plane.surfaces();
+    actors_with(drawn, assets, plane.surfaces(), at, alpha, poses)
+}
+
+/// [`actors`] posed by `surfaces` rather than the plane's last tick's: what a frame drawn between two
+/// ticks hands it, the two ticks' surfaces blended ([`shown`], V79).
+pub fn actors_with<'a>(drawn: &'a Biplane, assets: &Assets, surfaces: Surfaces, at: M4, alpha: f32, poses: &mut Vec<Vec<M4>>) -> Vec<Actor<'a>> {
     let pose = drawn.pose(assets, &surfaces);
     let parts = drawn.posed_parts(at, &pose, &surfaces);
     let posed = (!pose.is_empty()).then(|| {
@@ -31,8 +46,15 @@ pub fn actors<'a>(drawn: &'a Biplane, assets: &Assets, plane: &Plane, at: M4, al
 /// A plane as the software path draws it (V38): its model skinned by the moving parts' pose into a
 /// copy of its own — `copy`, made off the livery's model the first time — since a skinned model's
 /// triangles are its pose and two players can fly one livery. The cone is the livery's own.
+///
+/// The shell draws through [`skinned_with`] (V79); this one, at the last tick's pose, is the tests'.
+#[allow(dead_code)]
 pub fn skinned<'a>(drawn: &'a Biplane, copy: &'a str, assets: &mut Assets, plane: &Plane, at: M4) -> Vec<(&'a str, M4)> {
-    let surfaces = plane.surfaces();
+    skinned_with(drawn, copy, assets, plane.surfaces(), at)
+}
+
+/// [`skinned`] posed by `surfaces` rather than the plane's last tick's ([`actors_with`]).
+pub fn skinned_with<'a>(drawn: &'a Biplane, copy: &'a str, assets: &mut Assets, surfaces: Surfaces, at: M4) -> Vec<(&'a str, M4)> {
     let pose = drawn.pose(assets, &surfaces);
     let mut parts = drawn.posed_parts(at, &pose, &surfaces);
     if !assets.models.contains_key(copy)
