@@ -966,13 +966,13 @@ impl Rider {
     /// | the body asks | this answers with |
     /// |---|---|
     /// | the gesture slot, or 24 for none | the latched id's own slot ([`Trick::slot`]) |
-    /// | a backflip | the bike is turning one over, [`crate::air::Air::flipping`] (V35: the original's, from a capture) |
+    /// | a backflip | the bike is turning one over, [`crate::air::Air::flipping`] (V35: the original's, from a capture) — but not a front flip (P159) |
     /// | airborne | the bike's own verdict, [`crate::air::Air::airborne`] |
     /// | the no-hander | [`crate::trick::Tricks::no_hander`] |
     /// | a wreck | the ride state machine had a reason as of the request's fill, a tick behind its verdict ([`PutBack::wreck`], S91) |
     /// | the throttle, reverse | the controls, unfiltered |
     /// | the phase axis | [`motion::Driver::pose`] — lean on the ground, crossup in the air, 0..1 |
-    /// | the mix axis | [`motion::Driver::fore_aft`], the same 0..1 the airborne pair is mixed with |
+    /// | the mix axis | [`motion::Driver::fore_aft`], the same 0..1 the airborne pair is mixed with; [`rider_anim::FULL_FORWARD`] through a front flip (P159) |
     /// | the band the grid's rows are cut out of | the chassis's speed |
     /// | the progress and the request count | the trick clocks' |
     ///
@@ -1014,18 +1014,20 @@ impl Rider {
             put_back,
             ..
         } = self;
+        // A front flip (MD16, P159) leans the rider forward rather than playing the backflip's clip.
+        let front = ride.tricks.as_ref().is_some_and(|t| air::front_flipping(&ride.air, t.flip_row));
         let ask = rider_anim::Ask {
             // The wheels are off the ground. The id would nearly do instead — `Trick::WHEELIE` *is*
             // `motion.rs`'s airborne idle — but it is only set on a flight with no trick asked for,
             // and the body's airborne pose is what a stoppie in the air should show too. For a
             // gesture the choice makes no difference: the gesture arm runs in front of this one.
-            airborne: ride.air.airborne,
+            airborne: ride.air.airborne || front,
             // The bike's own turning flag (V35): recording2's request carries it on every captured
             // tick, raised the tick the flip torque first goes in and dropped the tick the rotation is
             // over. The trick id never says so — it is the airborne idle's through the whole flip.
-            // MD16's front flip turns through the same flag, and has no clip in either game: it shows
-            // the backflip's until one exists.
-            backflip: ride.air.flipping || tricks.requested == Trick::FRONTFLIP,
+            // MD16's front flip turns through the same flag and has no clip in either game: it is not
+            // a backflip here, and holds the airborne lean full forward instead (P159).
+            backflip: ride.air.flipping && !front,
             no_hander: tricks.no_hander,
             // Down as the request last saw it, and only that: the fill sits before the machine's
             // verdict, so on a wreck's entry tick the body is still riding and enters its wreck mode
@@ -1064,6 +1066,9 @@ impl Rider {
         body_request.band = ride.chassis.speed;
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
+        if front {
+            body.hold_forward(body_request);
+        }
         body.mode(dt, body_request, &ask, &wrecks, thrown, idles, gate.clock);
         // A ragdoll throws its own damping switch, in its settle test (S61, `Down::step`).
         let (frame, clocked) = body.frame_clocked(

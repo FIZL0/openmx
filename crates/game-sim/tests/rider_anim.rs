@@ -864,6 +864,54 @@ fn the_rider_publishes_the_body_its_own_request() {
     );
 }
 
+/// P159: a front flip's rider is the airborne lean held full forward, not the backflip's clip; a
+/// backflip — on MX vs. ATV's rows or the original's — keeps it. The bike is put in the air and
+/// turning by hand: what is under test is what the body asks for off the ride's flags, and the frame
+/// asks for it from the flip's first tick, whatever the stick's lean was.
+#[test]
+fn a_front_flip_leans_forward_and_a_backflip_keeps_its_clip() {
+    use game_sim::vehicle_anim::Blend;
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(BIKE.as_bytes(), &tables.ride.curve);
+    let mounts = (
+        Vf::new(0.0, p.front.tire_radius.0, 2.1, 1.0),
+        Vf::new(0.0, p.rear.tire_radius.0, -2.1, 1.0),
+    );
+    let (lib, clips) = table();
+    let gate = rider::Gate { countdown: F::ZERO, clock: Clock::default() };
+    let dt = F(1.0) / F(60.0);
+    // `row`: which of MX vs. ATV's rotations is turning, or `None` for a ride on the original's.
+    let flip = |row: Option<usize>| {
+        let mut rider = Rider::new(&p, mounts, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::new(Vec::new()));
+        rider.body_rates = numbers().1;
+        rider.body_request.cut = false;
+        rider.ride.tricks = row.map(|r| Box::new(game_sim::trick_pack::State { flip_row: r, ..Default::default() }));
+        rider.ride.air.airborne = true;
+        rider.ride.air.flipping = true;
+        // Leaning back off the lip, as a flip is fired: the lean the front flip must not show.
+        rider.motion.fore_aft = F(0.9);
+        let hands = Controls::default();
+        (0..40).map(|_| (rider.body_frame(dt, &hands, gate, &lib, &clips), rider.body.veh.want, rider.body.veh.mix.value)).collect::<Vec<_>>()
+    };
+    let front = flip(Some(1));
+    for (k, (frame, want, mix)) in front.iter().enumerate() {
+        assert_eq!(*want, AIR, "tick {k}: the front flip asks for the airborne lean, not BACKFLIP");
+        assert_eq!(*mix, game_sim::rider_anim::FULL_FORWARD, "tick {k}: held full forward");
+        match frame.blend {
+            Blend::Two { mix, a, b, .. } => {
+                assert_eq!((a, b, mix), (Some(handle(AIR + 1)), Some(handle(AIR)), F::ZERO), "tick {k}: air_Fwd alone");
+            }
+            other => panic!("tick {k}: the airborne pair, not {other:?}"),
+        }
+    }
+    for (name, row) in [("MX vs. ATV's backflip", Some(0)), ("the original's backflip", None)] {
+        for (k, (frame, want, _)) in flip(row).iter().enumerate() {
+            assert_eq!(*want, BACKFLIP, "{name}, tick {k}");
+            assert!(matches!(frame.blend, Blend::One { clip, phase, .. } if clip == Some(handle(BACKFLIP)) && phase == F(0.1)), "{name}, tick {k}: {:?}", frame.blend);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // 5. a wreck that settles
 // ---------------------------------------------------------------------------------------------------

@@ -99,6 +99,9 @@ const BREATHE: F = F(3.5);
 /// The middle of each axis: the bars centred and the body not leaning, which is one of the four things
 /// the look-around timer needs to be true.
 const CENTRED: F = F(0.5);
+/// The mix axis with the rider leaning as far forward as the stick takes them: the airborne row's
+/// `air_Fwd` alone (P159). The stick's full forward lean is −1, which the header maps to 0.
+pub const FULL_FORWARD: F = F::ZERO;
 
 // ---------------------------------------------------------------------------------------------------
 // chance
@@ -446,6 +449,18 @@ impl Body {
             self.look = F::ZERO;
             self.looking = false;
         }
+    }
+
+    /// **The port's own (P159): a front flip's rider.** Neither game has a front-flip clip, and the
+    /// backflip's leans the rider back through a rotation that goes nose over, so for the whole of a
+    /// front flip the body is asked for the airborne lean instead, held at its full forward pose: the
+    /// mix axis at [`FULL_FORWARD`], which is where the stick pushed all the way forward leans it.
+    /// The axis is snapped as well as asked for, so the pose is the full lean from the flip's first
+    /// frame to its last rather than easing there. Call it on the request before [`Body::frame`],
+    /// with the ask's backflip down and airborne up; a gesture or a 360's clip still outranks it.
+    pub fn hold_forward(&mut self, r: &mut vehicle_anim::Request) {
+        r.mix_axis = FULL_FORWARD;
+        self.veh.mix.value = FULL_FORWARD;
     }
 
     /// The two fields the step reads and never writes, taken off the request once the step has run.
