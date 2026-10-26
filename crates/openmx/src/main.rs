@@ -413,6 +413,79 @@ struct Seat {
     /// new layout's, where L1 is a clutch held through a launch and R1 on it is a trick, not the
     /// put-back. Under the original's, the original's chord.
     together: bool,
+    /// The black over this player's view while their wreck's page is up (S85).
+    shade: PageShade,
+}
+
+/// The viewport's fade to black and back over a wreck's page (S85, [`game_sim::wreck_page::Shade`]):
+/// the original's fader as the picture sees it, stepped after each pass with the front end's
+/// millisecond clock — the passes' own `dt`s summed, each pass the whole milliseconds the clock moved,
+/// 33, 33 and 34 at 30 Hz.
+#[derive(Clone, Copy, Default)]
+struct PageShade {
+    shade: game_sim::wreck_page::Shade,
+    seconds: f64,
+}
+
+impl PageShade {
+    fn step(&mut self, page: &game_sim::wreck_page::Page, dt: F) {
+        let before = (self.seconds * 1000.0).floor();
+        self.seconds += f64::from(dt.0);
+        self.shade.step(page, ((self.seconds * 1000.0).floor() - before) as i32);
+    }
+
+    /// The black's alpha over the view: 0 with no page.
+    fn alpha(&self) -> u8 {
+        self.shade.alpha()
+    }
+}
+
+/// The page's black over a software view (S85): every pixel toward black by `alpha`.
+fn shade_view(frame: &mut Frame, alpha: u8) {
+    if alpha == 0 {
+        return;
+    }
+    let keep = 255 - u32::from(alpha);
+    for c in frame.color.iter_mut() {
+        *c = ((u32::from(*c) * keep + 127) / 255) as u8;
+    }
+}
+
+#[cfg(test)]
+mod page_shade {
+    use super::{Frame, PageShade, shade_view};
+    use game_sim::wreck_page::Page;
+    use ps2_float::F;
+
+    /// The shell's millisecond clock at the 30 Hz pass (S85): 33, 33 and 34, the original's whole
+    /// milliseconds, so a page fades 84, 168, black, then 171, 87 and clear.
+    #[test]
+    fn a_page_fades_by_the_passes_milliseconds() {
+        let (mut page, mut shade) = (Page::default(), PageShade::default());
+        let dt = F(1.0 / 30.0);
+        page.raise();
+        let drawn: Vec<u8> = (0..7)
+            .map(|_| {
+                page.update();
+                shade.step(&page, dt);
+                shade.alpha()
+            })
+            .collect();
+        assert_eq!(drawn, [84, 168, 255, 171, 87, 0, 0]);
+    }
+
+    /// The black over a software view: none at 0, all at 255, and halfway between.
+    #[test]
+    fn the_black_darkens_the_view() {
+        let mut frame = Frame::new(2, 1, [0; 3]);
+        frame.color.copy_from_slice(&[200, 100, 0, 255, 255, 255]);
+        shade_view(&mut frame, 0);
+        assert_eq!(frame.color, [200, 100, 0, 255, 255, 255]);
+        shade_view(&mut frame, 128);
+        assert_eq!(frame.color, [100, 50, 0, 127, 127, 127]);
+        shade_view(&mut frame, 255);
+        assert_eq!(frame.color, [0; 6]);
+    }
 }
 
 impl Seat {
@@ -452,6 +525,12 @@ impl Seat {
                 self.clears += u32::from(did == markers::Did::Cleared);
                 println!("marker: {}", marker_line(did));
             }
+        }
+        // The page's fader, after the bike's update as the original's (S85).
+        let was = self.shade.alpha();
+        self.shade.step(&self.sim.rider.page, dt);
+        if self.shade.alpha() != was {
+            println!("page: seat {me} alpha {}", self.shade.alpha());
         }
         self.hands = controls;
     }
@@ -4490,6 +4569,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         clears: 0,
         markers: args.markers_of(0, front.as_deref()),
         together: false,
+        shade: PageShade::default(),
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
@@ -4527,6 +4607,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             clears: 0,
             markers: args.markers_of(i + 1, front.as_deref()),
             together: false,
+            shade: PageShade::default(),
         });
     }
     // Where each seat's machines start (P132), marker slot 1 while nothing is put there: every seat
@@ -5395,6 +5476,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             clears: 0,
                             markers: args.markers_of(i, Some(&*front)),
                             together: false,
+                            shade: PageShade::default(),
                         };
                         Some((seat, rig, kept))
                     }
@@ -5605,6 +5687,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     clears: 0,
                     markers: true,
                     together: false,
+                    shade: PageShade::default(),
                 };
                 seat.sim.markers.up(vehicle::markers_of(Kind::Bike));
                 world.seats.push(seat);
@@ -6452,6 +6535,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             gpu_sprites.clear();
             for (v, at) in rects.iter().enumerate().take(world.seats.len()) {
                 let (seat, rig) = (&world.seats[v], &mut rigs[v]);
+                // The page's black over the view (S85), first, so the HUD is drawn over it.
+                if seat.shade.alpha() != 0 {
+                    menu::ink::fill(&mut gpu_sprites, [at.x as f32, at.y as f32, at.w as f32, at.h as f32], [0, 0, 0, seat.shade.alpha()]);
+                }
                 let bike_up = seat.garage.up == Kind::Bike;
                 rig.hud.plane = !bike_up;
                 rig.hud.scale = hud_art.scale;
@@ -6927,6 +7014,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // And the overlay over the top of it, after everything with a depth test and before anything
             // that reads the frame: what the window shows and what `--shot` writes are the same picture.
             let (seat, rig) = (&world.seats[v], &mut rigs[v]);
+            // The page's black (S85), over the world and under the HUD, as the GPU lays it.
+            shade_view(target, seat.shade.alpha());
             let bike_up = seat.garage.up == Kind::Bike;
             rig.hud.plane = !bike_up;
             rig.hud.scale = hud_art.scale;

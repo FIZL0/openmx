@@ -33,7 +33,7 @@ use game_sim::world::Flat;
 use game_sim::Sim;
 use ps2_float::F;
 
-use super::{Seat, World, engine_input, pace};
+use super::{PageShade, Seat, World, engine_input, pace};
 use crate::net::rides::{self, Rides};
 use crate::net::{self, Game, Lineup, Netplay, Timing};
 use crate::vehicle::{Garage, Kind};
@@ -182,6 +182,7 @@ fn offline_marked(pads: &[Report], markers: bool) -> (Vec<F>, Vec<Vec<u8>>) {
         markers,
         // The online side's byte leaves the together chord off (P67), so this does too.
         together: false,
+        shade: PageShade::default(),
         paused: false,
     };
     let mut world = World { place: Flat::default(), seats: vec![seat], tape: None, played_dt: None };

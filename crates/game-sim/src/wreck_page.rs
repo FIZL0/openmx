@@ -20,9 +20,14 @@
 //! in — so the machine asks no second time. The port counts the fader's updates rather than its
 //! milliseconds: the simulation's tick is a fixed 30 Hz, and three updates reach black whichever way
 //! the 34/33 rounding falls.
+//!
+//! **The fade itself** (S85) is [`Shade`]: the picture's side of the fader, which the simulation never
+//! reads. It follows a [`Page`] a tick at a time with the front end's whole-millisecond frame time and
+//! gives the alpha of the black the original draws over the viewport that tick.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::hash::{State, Walk};
+use ps2_float::F;
 
 /// Where the fade is.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -87,6 +92,94 @@ impl Page {
                 false
             }
         }
+    }
+}
+
+/// **The fader's picture** (S85): the viewport's black over a page, as the original's fader updates
+/// and draws it, kept beside the [`Page`] and never read by the simulation, so no hash or snapshot has
+/// it.
+///
+/// The original's fader (S72's journal; the update and the draw in `research/oracle.txt`) holds its
+/// elapsed seconds, its duration and t. Each update while t < 1 adds the frame's time, whole
+/// milliseconds as a float of seconds, to the elapsed, and t = min(elapsed / duration, 1). The draw
+/// after it is black at alpha `(int)(255 t + 0.5)` fading out, and `(int)(255 - 255 t + 0.5)` fading
+/// in. The fade out's draw at 255 puts the bike back and starts the fade in from elapsed 0. The fade
+/// in's draw at 0 lets go of the screen.
+///
+/// The port's [`Page`] decides when the bike is put back: its third update, which three ticks of the
+/// front end's 33 and 34 ms always reach. So the shade follows it, and does not lead it. The draw of
+/// [`Fade::In`] with no updates is the black one, 255, whatever the milliseconds summed to.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Shade {
+    /// The page as the last step saw it. A step that finds it unchanged had no fader update.
+    seen: Page,
+    /// The elapsed seconds of the fade's current half.
+    elapsed: F,
+    /// t of the current half, `0..=1`.
+    t: F,
+    /// The last draw's alpha.
+    alpha: u8,
+}
+
+impl Shade {
+    /// Each half's duration: the original's `(float)100 / 1000.0`.
+    pub const DURATION: F = F(0.1);
+
+    /// One tick, after the page's update: `ms` is the tick's frame time in whole milliseconds. A
+    /// tick where the page did not move (no page, or the rider not stepped) changes nothing.
+    pub fn step(&mut self, page: &Page, ms: i32) {
+        if *page == self.seen {
+            return;
+        }
+        let half_began = page.fade != self.seen.fade || page.updates < self.seen.updates;
+        self.seen = *page;
+        if half_began {
+            (self.elapsed, self.t) = (F::ZERO, F::ZERO);
+        }
+        match (page.fade, page.updates) {
+            // The fade in's last update reached t = 1, and its draw at 0 let go.
+            (Fade::Off, _) => {
+                (self.elapsed, self.t, self.alpha) = (F::ZERO, F::ZERO, 0);
+            }
+            // The black draw, which started the fade in from nothing.
+            (Fade::In, 0) => self.alpha = 255,
+            (Fade::Out, 0) => self.alpha = 0,
+            (fade, _) => {
+                if self.t < F::ONE {
+                    (self.elapsed, self.t) = Self::update(self.elapsed, ms);
+                }
+                self.alpha = match fade {
+                    Fade::Out => Self::out_alpha(self.t),
+                    _ => Self::in_alpha(self.t),
+                };
+            }
+        }
+    }
+
+    /// The fader's update: `ms` added as seconds, and t off the new elapsed.
+    pub fn update(elapsed: F, ms: i32) -> (F, F) {
+        let elapsed = elapsed + F::from(ms) * F(0.001);
+        (elapsed, (elapsed / Self::DURATION).min(F::ONE))
+    }
+
+    /// The fade out's draw at `t`.
+    pub fn out_alpha(t: F) -> u8 {
+        (F(0.5) + F(255.0) * t).to_i32() as u8
+    }
+
+    /// The fade in's draw at `t`.
+    pub fn in_alpha(t: F) -> u8 {
+        (F(0.5) + (F(255.0) - F(255.0) * t)).to_i32() as u8
+    }
+
+    /// The black's alpha over the viewport now: 0 with no page.
+    pub fn alpha(&self) -> u8 {
+        self.alpha
+    }
+
+    /// The elapsed seconds of the fade's current half, and its t.
+    pub fn at(&self) -> (F, F) {
+        (self.elapsed, self.t)
     }
 }
 
