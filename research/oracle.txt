@@ -5265,3 +5265,24 @@ node_name             boot 0x001b4fa0 node +0x120 is a pointer to the name
 # +0x160 start turn. Every prop node in this state carries negative zeros (posed by its world at
 # rest), and twelve rotated ones drift an ulp or two off the scene's frame: the bodies were made off
 # already-posed nodes (a second load?). SH_CrateC model 529's start turn is an ulp off the port's.
+# ---------------------------------------------------------------------------------------------------
+# P91: the dressed rider's NameDefault painter (crates/openmx/src/dress.rs, draw/Face/uniform)
+nameplate_paint       boot 0x0020baa0 the player: profile = rider +0x6b4; name strcpy'd (13 bytes) from
+#                                    profile +0x38, number "%s" from profile +0x45; name/number fonts
+#                                    *(profile +0xc) +0x18/+0x1c, plate font the bike record's +0x1c;
+#                                    AI riders take rider +0x6b8. Name at (0x20,0xf), number (0x20,0x27),
+#                                    plates (0x1f,0x4f) and (0x1f,0x6d), all scale 1, no fitting.
+nameplate_paint_caller boot 0x0020b860
+nameplate_font_load   boot 0x0020b240
+font_text_onto_texture boot 0x001af2b0 (font, tex, text, x, y, 1, 1): left = x - (int)(measure/2+.5),
+#                                    top = y - (int)(glyph0 rows/2+.5); each texel at y*64+x, no x clip
+#                                    (overflow wraps a row); blend rgb=(d*da+s*sa)/(da+sa), alpha = s
+font_text_measure     boot 0x001aead0 widths + inner before/after + spacing + first kerning match
+texture_put_pixel     boot 0x0018a5c0 by the texture's format at +0xac; mips 0x3c apart from +0xcc
+#                                    (pixels) / +0xd0 (stride). The paletted result is CSM1-swizzled.
+uniform_list_read     boot 0x00371a10 rider\gear.dat [JerseyPants]
+jerseypants_read      boot 0x003716c0
+uniform_lookup        boot 0x003712c0 the first entry whose jersey and pants both match the .sub's
+#                                    renames of THQ_JerseySleeves_01 / THQ_Pants_01
+uniform_lookup_name   boot 0x003712b0
+career_profile_reset  boot 0x0036e1f0 name +0x89, number +0x9a ("001")

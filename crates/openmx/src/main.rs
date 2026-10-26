@@ -2501,7 +2501,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     // The first rider's name and number on their bike's plates and, below, their jersey (P86).
     if let Some(k) = &mut kit {
-        assets.make_texture(dress::NAME_TEXTURE, k.texture(&args.rider, &args.look, &args.bike));
+        assets.make_texture(dress::NAME_TEXTURE, k.texture(&mut disc, &args.rider, &args.look, &args.bike));
     }
     // The trees and bushes the scene's ecosystem scatters over the ground (V48).
     match game_render::eco::Grove::load(&archives, &look, &place.terrain, &sim_terrain, &mut assets) {
@@ -3692,7 +3692,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if let Some(k) = &mut kit {
             let pick = args.others.get(i - 1);
             let (rider, bike) = pick.map_or((&args.rider, &args.bike), |p| (&p.rider, &p.bike));
-            assets.make_texture(dress::NAME_TEXTURE, k.texture(rider, &own_look, bike));
+            assets.make_texture(dress::NAME_TEXTURE, k.texture(&mut disc, rider, &own_look, bike));
         }
         // Its own bike when the garage picked one (P37): that archive's `.sub`, its chassis and parts
         // loaded again under names of their own in that bike's paint.

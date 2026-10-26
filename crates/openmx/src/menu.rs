@@ -4271,11 +4271,6 @@ impl Font {
             .unwrap_or_else(|| self.glyphs.values().next().unwrap())
     }
 
-    /// Whether the font has a glyph of its own for `c`, rather than the missing box (P86).
-    pub(crate) fn has(&self, c: char) -> bool {
-        self.glyphs.contains_key(&(c as u32))
-    }
-
     /// How wide `text` is, in layout pixels.
     pub(crate) fn measure(&self, text: &str) -> f32 {
         let mut w = 0.0;
