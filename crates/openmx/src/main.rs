@@ -4943,6 +4943,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut before_surfaces: Vec<Option<game_sim::biplane_anim::Surfaces>> = Vec::new();
     // Each seat's cut test (P120): whether the last tick's picture is a jump from the one before.
     let mut cuts: Vec<pace::Cut> = Vec::new();
+    // Each seat's camera over its own pause (P172).
+    let mut pause_holds: Vec<chase::PauseHold> = Vec::new();
     // The moment the picture is of (P120): read once a pass of the loop, after the last picture was
     // shown, and both the ticks owed and the blend are taken at it. Read again after the ticks, the
     // blend came a tick's cost later on the frames that ran one than on those that did not, though
@@ -5651,6 +5653,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
         before_surfaces = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(Plane::surfaces)).collect();
         cuts.resize_with(world.seats.len(), pace::Cut::default);
+        pause_holds.resize_with(world.seats.len(), chase::PauseHold::default);
         for (i, (seat, cut)) in world.seats.iter().zip(&mut cuts).enumerate() {
             cut.before(cut_spots(seat, before[i].bike, cameras.get(i)));
         }
@@ -6143,6 +6146,24 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             rig.wreck_camera.frame(rig.framing.0);
 
+            // The seat's own pause (P172): its camera stays exactly where the pause's tick left it,
+            // the view the last tick drew, while the others ride on; Resume carries on from there.
+            // Only a Camera page change under the pause moves it (P82), on the frozen bike.
+            let paused = pause_holds[i].frame(!seat.riding, rig.framing);
+            if paused == chase::Paused::Held
+                && let Some(held) = before_cameras.get(i)
+            {
+                cameras.push(held.clone());
+                ridden.push(match (&seat.garage.up, &seat.sim.rider.crash) {
+                    (Kind::Bike, Some(crash)) => chase::wrecked(crash),
+                    _ => chase::ridden(&seat.garage, &seat.sim.rider.ride),
+                });
+                stages.mark(stages::Stage::Camera);
+                continue;
+            }
+            // The pad drives the pause's menu, not the camera.
+            let steered = paused == chase::Paused::Riding;
+
             // The camera, after the frame, which is where the original's viewport updates it: the shell
             // picks the preset, the ported camera does everything else.
             // Whichever machine has the controller has the camera: the bike's, on the track's presets, or
@@ -6177,11 +6198,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The look-back command (P78), held: the follow camera on its look-back preset until it
             // is let go — L2 under the original's layout, Square under the new one. A ride with MX
             // vs. ATV's tricks has those buttons as its two extra tricks, so it has no look-back.
-            if seat.sim.phy.tricks.is_none() && look_back.frame(&mut follow.cam, seat.sim.input.pad(0), seat.sim.table(), !rig.wreck_camera.on) {
+            if steered && seat.sim.phy.tricks.is_none() && look_back.frame(&mut follow.cam, seat.sim.input.pad(0), seat.sim.table(), !rig.wreck_camera.on) {
                 println!("{who}camera: {}", follow.cam.preset().name);
             }
             let presets = follow.cam.presets.len();
-            if presets > 1 {
+            if steered && presets > 1 {
                 let pad = seat.sim.input.pad(0);
                 // The shipped table's next-camera command, Select under either layout (P73). The walk
                 // is the original's next-camera routine: on to the next preset the file lets the player
@@ -6227,7 +6248,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // back (P114) — while the follow camera has the screen, so a wreck's camera is not
             // nudged from under the player. The preset changes above keep or throw the nudges away
             // as the original's do.
-            if presets != 0 && !wreck.on {
+            if steered && presets != 0 && !wreck.on {
                 let pad = seat.sim.input.pad(0);
                 let scheme = pad_seats.as_ref().map_or(args.wiring.schemes[i], |s| s.scheme(args.pad_seat(i)));
                 chase::look_around(follow, pad, seat.sim.table(), scheme.resets_camera(pad));
@@ -6321,6 +6342,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
         // The frame's sound (P42), off what the ride just did, heard from every view's camera. A
         // ride nobody is riding (the pause, a frozen ride) is quiet, and starts again from idle.
+        // A seat paused while others ride holds its own sounds where they are (P172).
         if let Some(sound) = &mut sound {
             if world.seats.iter().any(|seat| seat.riding) {
                 let ears: Vec<audio::Listener> = cameras.iter().map(listener).collect();
@@ -7352,6 +7374,9 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::Seat
         landed_trick: seat.said.landed.is_some(),
         plane,
         edge,
+        // Not riding — their own pause, a pad pulled out, Start's freeze — their sounds hold where
+        // they are while the others ride on (P172).
+        paused: !seat.riding,
     }
 }
 

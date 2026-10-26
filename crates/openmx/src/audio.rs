@@ -413,6 +413,9 @@ struct Voice {
     stopping: bool,
     /// Held where it is and silent (the engine's free rev under the limiter's loop).
     paused: bool,
+    /// Held where it is and silent because its seat's pause is open (P172): a second hold over
+    /// [`Voice::paused`], so a seat paused at the limiter comes back with its free rev still held.
+    held: bool,
 }
 
 /// One ear: a camera's position and its right-hand direction.
@@ -496,6 +499,7 @@ impl Mixer {
             applied: [-1.0; 2],
             stopping: false,
             paused: false,
+            held: false,
         });
         id
     }
@@ -545,6 +549,19 @@ impl Mixer {
         if let Some(v) = self.voices.iter_mut().find(|v| v.id == id) {
             v.paused = on;
         }
+    }
+
+    /// Hold a voice where it is, silent, for its seat's pause (P172), or let it go on from there.
+    /// Apart from [`Mixer::pause`], which the engine note keeps for itself.
+    pub fn hold(&mut self, id: VoiceId, on: bool) {
+        if let Some(v) = self.voices.iter_mut().find(|v| v.id == id) {
+            v.held = on;
+        }
+    }
+
+    /// Whether a voice is held for its seat's pause.
+    pub fn held(&self, id: VoiceId) -> bool {
+        self.voices.iter().any(|v| v.id == id && v.held)
     }
 
     /// The listener nearest a place.
@@ -698,7 +715,7 @@ impl Mixer {
             .map(|v| if v.stopping { [0.0; 2] } else { self.gains(&v.play) })
             .collect();
         for (v, target) in self.voices.iter_mut().zip(targets) {
-            if v.paused && !v.stopping {
+            if (v.paused || v.held) && !v.stopping {
                 continue;
             }
             if v.applied[0] < 0.0 {
@@ -1899,6 +1916,11 @@ impl Engine {
         self.brain = Brain::new();
     }
 
+    /// Every voice the engine has going: its samples and the limiter's loop.
+    pub fn voices(&self) -> impl Iterator<Item = VoiceId> + '_ {
+        self.voices.iter().map(|v| v.voice).chain(self.limiter)
+    }
+
     /// The voice of the note's own sample, while it sounds.
     pub fn voice(&self) -> Option<VoiceId> {
         self.voices.iter().rev().find(|v| v.s == self.brain.current).map(|v| v.voice)
@@ -2218,6 +2240,10 @@ impl EdgeSound {
         self.cannon
     }
 
+    fn voices(&self) -> impl Iterator<Item = VoiceId> {
+        self.rumble.into_iter().chain(self.cannon)
+    }
+
     /// Every voice was stopped: nothing of this rider's plays, and the reasons seen are kept.
     pub fn hushed(&mut self) {
         self.rumble = None;
@@ -2239,6 +2265,9 @@ pub struct SeatFrame {
     pub plane: Option<(f32, [f32; 3])>,
     /// What the shootoff's sound reads (P85).
     pub edge: EdgeFrame,
+    /// This seat's own pause is open (P172): everything of its own holds where it is, silent, and
+    /// goes on from there when it closes, while the other seats play on.
+    pub paused: bool,
 }
 
 /// One rider's sounds: the bike they ride, and what plays for them.
@@ -2250,6 +2279,11 @@ pub struct SeatSound {
     was_grounded: bool,
     dice: Dice,
     pub edge: EdgeSound,
+    /// The one-shots this rider started (their wreck's voice and clank), held with the rest by a
+    /// pause.
+    shots: Vec<VoiceId>,
+    /// Whether this seat's voices are held for its pause.
+    held: bool,
 }
 
 impl SeatSound {
@@ -2262,7 +2296,28 @@ impl SeatSound {
             was_grounded: true,
             dice: Dice::new(seed.wrapping_mul(31).wrapping_add(7)),
             edge: EdgeSound::default(),
+            shots: Vec::new(),
+            held: false,
         }
+    }
+
+    /// Every voice of this rider's sounding now: the engine note's, the plane's, the shootoff's and
+    /// the one-shots'.
+    pub fn voices(&self) -> Vec<VoiceId> {
+        let mut out: Vec<VoiceId> = self.engine.voices().collect();
+        out.extend(&self.plane.voices);
+        out.extend(self.edge.voices());
+        out.extend(&self.shots);
+        out
+    }
+
+    /// Hold them all where they are for the seat's pause (P172), or let them go on from there.
+    fn hold(&mut self, m: &mut Mixer, on: bool) {
+        self.shots.retain(|&v| m.playing(v));
+        for v in self.voices() {
+            m.hold(v, on);
+        }
+        self.held = on;
     }
 }
 
@@ -2326,6 +2381,15 @@ impl Sound {
         }
         for (s, f) in self.seats.iter_mut().zip(frames) {
             let h = &f.hands;
+            // A seat's own pause (P172): its sounds hold where they are, and nothing of it moves on —
+            // not the note's machine, not the shootoff's reasons, not the landing — until it closes.
+            if f.paused {
+                s.hold(m, true);
+                continue;
+            }
+            if s.held {
+                s.hold(m, false);
+            }
             if let Some((note, at)) = f.plane {
                 s.engine.silence(m);
                 s.edge.stop_rumble(m);
@@ -2346,13 +2410,14 @@ impl Sound {
                 };
                 if let Some((list, k)) = list {
                     if let Some((clip, _)) = list.pick(&mut s.dice, &mut s.last[k]) {
-                        m.play(clip, near);
+                        s.shots.push(m.play(clip, near));
                     }
                 }
                 let bike = Play { near: s.bike.wreck_near, far: s.bike.wreck_far, ..near };
                 if let Some((clip, _)) = s.bike.wreck.pick(&mut s.dice, &mut s.last[2]) {
-                    m.play(clip, bike);
+                    s.shots.push(m.play(clip, bike));
                 }
+                s.shots.retain(|&v| m.playing(v));
                 if let Some((clip, _)) = self.world.oh.pick(&mut self.dice, &mut self.last[1]) {
                     m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
                 }
@@ -2397,6 +2462,8 @@ impl Sound {
         for s in &mut self.seats {
             s.engine = Engine::new(s.dice.below(u32::MAX) as u64);
             s.plane = PlaneNote::default();
+            s.shots.clear();
+            s.held = false;
             // A pause in a cannonball must not boom again on the way out: the rider's reasons stay.
             s.edge.hushed();
         }

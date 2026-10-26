@@ -404,19 +404,31 @@ impl<'a> Pen<'a> {
     }
 
     /// The angled hint tab over the band's right end, its hints right to left from the frame's
-    /// edge.
+    /// edge. The tab ends square at the frame's edge, and the hints shrink to fit a narrow one, so a
+    /// split's pause keeps them in its own view (P172).
     fn hints(&mut self, hints: &[(Btn, &str)]) {
-        let size = 1.55;
+        let spacing = 1.6 * hints.len().saturating_sub(1) as f32;
+        let widths_at = |pen: &Self, size: f32| -> Vec<f32> {
+            let (d, gap) = (1.15 * size, 0.45 * size);
+            hints.iter().map(|(b, s)| pen.button_wide(*b, d) + gap + pen.wide(Weight::Bold, s, size)).collect()
+        };
+        let right = STAGE.0.min(self.right());
+        // The tab's slanted end leans 3 ems over its foot, and the hints sit 4 in from it.
+        let room = right - 2.0 - 4.0 - 3.0 - self.left().max(0.0) - spacing;
+        let mut size = 1.55;
+        let full: f32 = widths_at(self, size).iter().sum();
+        if full > room && room > 0.0 {
+            size *= room / full;
+        }
         let d = 1.15 * size;
         let gap = 0.45 * size;
-        let widths: Vec<f32> = hints.iter().map(|(b, s)| self.button_wide(*b, d) + gap + self.wide(Weight::Bold, s, size)).collect();
-        let content: f32 = widths.iter().sum::<f32>() + 1.6 * hints.len().saturating_sub(1) as f32;
-        let right = STAGE.0.min(self.right());
+        let widths = widths_at(self, size);
+        let content: f32 = widths.iter().sum::<f32>() + spacing;
         let x0 = right - 2.0 - content - 4.0;
         let (top, h) = (STAGE.1 - BAND - 3.4, 3.4);
-        let pb = self.b([x0, top, self.right() - x0 + 4.0, h]);
+        let pb = self.b([x0, top, self.right() - x0, h]);
         let c = self.c(INK);
-        ink::round_slanted(self.out, pb, 0.0, 3.0 / 3.4, c, c);
+        ink::tab(self.out, pb, 3.0 / 3.4, c);
         let mid = top + h / 2.0;
         let mut x = x0 + 4.0;
         for ((b, s), w) in hints.iter().zip(widths) {
