@@ -363,9 +363,11 @@ fn the_walk_names_every_field_once() {
     // before it): the riding speed limit a put-back gives the chassis back, a constant of the ride
     // its builder decides, which the walk leaves out — the chassis' own limit it lands in is walked.
     // MD16 moved the size alone (2424 before it): MX vs. ATV's moves' state, boxed and walked only
-    // when a trick pack is on — `None`, as here, is no leaf.
+    // when a trick pack is on — `None`, as here, is no leaf. S83 moved the size alone (2432 before
+    // it): the put-back query's gathered list, boxed and walked only once a world with props or
+    // plants has been asked — `None` here too.
     assert_eq!(dump.fields.len(), 631, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2432, "the ride's own size");
+    assert_eq!(std::mem::size_of::<Ride>(), 2440, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");

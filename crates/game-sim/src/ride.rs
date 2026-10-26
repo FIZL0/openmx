@@ -716,6 +716,11 @@ pub struct Ride {
     /// carries a trick pack's numbers ([`Phy::tricks`]). `None` on every ride on the original's tricks,
     /// and the hash walk leaves it out then, so their hashes do not move.
     pub tricks: Option<Box<crate::trick_pack::State>>,
+    /// The put-back's mesh query's own state on the bike (S83, [`crate::back_search::Cache`]): made
+    /// the first time the record's update asks a world that hands over its props or plants. `None`
+    /// until then, and the hash walk leaves it out then, so a ride with nothing solid about it
+    /// hashes as before.
+    pub back_search: Option<Box<crate::back_search::Cache>>,
 }
 
 impl Ride {
@@ -778,6 +783,7 @@ impl Ride {
             drag_halved: false,
             riding_speed_sq: F(BIKE_MAX_SPEED_SQ),
             tricks: None,
+            back_search: None,
         };
         ride.place(at, facing);
         ride
@@ -939,7 +945,7 @@ impl Ride {
     /// [`BACK_LEVEL`]; otherwise the record keeps the last spot that was. In a world of several
     /// terrains the world must also keep the spot ([`World::keeps`], MD14). `true` when it moved.
     pub fn keep_back(&mut self, at: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> bool {
-        let Some(ground) = open_sky(at, world) else {
+        let Some(ground) = open_sky(at, world, &mut self.back_search) else {
             return false;
         };
 
@@ -948,7 +954,7 @@ impl Ride {
         if !world.keeps(spot) {
             return false;
         }
-        let Some((spot, normal)) = clear(spot, heading, world, curve) else {
+        let Some((spot, normal)) = clear(spot, heading, world, curve, &mut self.back_search) else {
             return false;
         };
         if !(F(normal.y()) > F(BACK_LEVEL)) {
@@ -976,7 +982,7 @@ impl Ride {
     /// again for its ring. The ground's normal goes straight into the record whether or not the spot
     /// is clear, and a clear spot is kept with no slope test and no raise. `true` when it moved.
     pub fn keep_back_thrown(&mut self, over: Vf, at: Vf, forward: Vf, world: &mut dyn World, curve: &CurveTable) -> bool {
-        if open_sky(over, world).is_none() {
+        if open_sky(over, world, &mut self.back_search).is_none() {
             return false;
         }
         // Nor while the wreck is over a world's hole or by its edge (MD14): the record, its up too,
@@ -986,7 +992,7 @@ impl Ride {
         }
         let facing = flat_unit(forward);
         let spot = Vf::new(at.x(), at.y(), at.z(), 0.0);
-        let (spot, normal, clear) = clearance(spot, facing, world, curve);
+        let (spot, normal, clear) = clearance(spot, facing, world, curve, &mut self.back_search);
         self.back.up = normal;
         if clear {
             self.back.at = spot;
@@ -1108,15 +1114,15 @@ fn flat_unit(v: Vf) -> Vf {
 /// straight down only lifts the spot — onto anything solid it meets above the ground, with that
 /// thing's normal; any of the other thirteen meeting something refuses the spot, and so does the world
 /// saying the ring is [`World::crowded`] (S75), which the original's query answers in the same pass.
-fn clear(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> Option<(Vf, Vf)> {
-    let (spot, normal, clear) = clearance(spot, heading, world, curve);
+fn clear(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable, cache: &mut BackCache) -> Option<(Vf, Vf)> {
+    let (spot, normal, clear) = clearance(spot, heading, world, curve, cache);
     clear.then_some((spot, normal))
 }
 
 /// The ground under a probe, when nothing solid stands between it and the ground: the record
 /// update's overhead test (S66), one probe from ten feet over the point straight down to the ground,
 /// in a query a thousand feet wide. `None` is a roof — something met above the ground.
-fn open_sky(at: Vf, world: &mut dyn World) -> Option<F> {
+fn open_sky(at: Vf, world: &mut dyn World, cache: &mut BackCache) -> Option<F> {
     let (under, _) = world.ground(at);
     let ground = F(under.y());
     let mut over = Bundle { count: 1, centre: at, radius: F(BACK_OVER_REACH), ..Bundle::default() };
@@ -1126,14 +1132,39 @@ fn open_sky(at: Vf, world: &mut dyn World) -> Option<F> {
         length: (F(at.y()) - ground) + F(BACK_OVER),
     };
     let mut found = Record::new();
-    world.solid(&over, &mut found);
+    back_solid(&over, world, cache, &mut found);
     (!(found.hit[0] && ground < F(found.point[0].y()))).then_some(ground)
+}
+
+/// The put-back query's state on the bike ([`Ride::back_search`]).
+type BackCache = Option<Box<crate::back_search::Cache>>;
+
+/// The record update's mesh query on `bundle` into `found`, and whether it refuses: in a world that
+/// hands over its props or plants ([`World::wooded`]), the original's own query over the bike's
+/// gathered list ([`crate::back_search`], S83); in any other, [`World::solid`] and
+/// [`World::crowded`], whose answer is the world's (S75).
+fn back_solid(bundle: &Bundle, world: &mut dyn World, cache: &mut BackCache, found: &mut Record) -> bool {
+    {
+        let (field, props, trees) = world.wooded();
+        if props.is_some() || trees.is_some() {
+            let field = field.as_ref().map(|f| {
+                let (lo, hi) = (f.min(), f.max());
+                ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+            });
+            let scene = crate::back_search::Scene { props: props.map_or(&[][..], |p| &p.props[..]), trees, field };
+            let cache = cache.get_or_insert_with(Box::default);
+            return crate::back_search::query(scene, bundle, cache, crate::back_search::Race::default(), found);
+        }
+    }
+    world.solid(bundle, found);
+    // The overhead test reads no refusal, so it asks the world for none.
+    found.hit[1..bundle.count].iter().any(|&hit| hit) || 1 < bundle.count && world.crowded(bundle.centre, bundle.radius)
 }
 
 /// [`clear`]'s whole answer: the spot on the ground (or lifted), its normal, and whether the spot is
 /// clear. The spot and normal are what the original's test leaves in its outputs either way, which
 /// the cannonball's branch reads (S77): its normal is the record's own word.
-fn clearance(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -> (Vf, Vf, bool) {
+fn clearance(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable, cache: &mut BackCache) -> (Vf, Vf, bool) {
     let flat = flat_unit(heading);
     let (fx, fz) = (F(flat.x()), F(flat.z()));
     let y = F(spot.y());
@@ -1160,12 +1191,11 @@ fn clearance(spot: Vf, heading: Vf, world: &mut dyn World, curve: &CurveTable) -
     let (on, mut normal) = world.ground(spot);
     let mut spot = Vf::new(spot.x(), on.y(), spot.z(), spot.w());
     let mut found = Record::new();
-    world.solid(&ring, &mut found);
+    let refused = back_solid(&ring, world, cache, &mut found);
     if found.hit[0] && F(spot.y()) < F(found.point[0].y()) {
         spot = Vf::new(spot.x(), found.point[0].y(), spot.z(), spot.w());
         normal = found.normal[0];
     }
-    let refused = found.hit[1..BACK_PROBES].iter().any(|&hit| hit) || world.crowded(ring.centre, ring.radius);
     (spot, normal, !refused)
 }
 
@@ -2369,6 +2399,20 @@ impl State for Ride {
         w.bool("stunt", self.stunt);
         if let Some(t) = &self.tricks {
             w.field("tricks", &**t);
+        }
+        if let Some(b) = &self.back_search {
+            w.group("back_search", |w| {
+                for (k, name) in ["at_x", "at_y", "at_z", "at_w"].into_iter().enumerate() {
+                    w.f(name, F(b.at[k]));
+                }
+                w.f("moved", b.moved);
+                w.bool("built", b.list.built);
+                for (k, name) in ["centre_x", "centre_y", "centre_z", "centre_w"].into_iter().enumerate() {
+                    w.f(name, b.list.centre[k]);
+                }
+                w.f("bound", b.list.bound);
+                w.u32("found", b.list.nearby.found.len() as u32);
+            });
         }
     }
 }

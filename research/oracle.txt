@@ -5338,3 +5338,29 @@ uniform_lookup        boot 0x003712c0 the first entry whose jersey and pants bot
 #                                    renames of THQ_JerseySleeves_01 / THQ_Pants_01
 uniform_lookup_name   boot 0x003712b0
 career_profile_reset  boot 0x0036e1f0 name +0x89, number +0x9a ("001")
+# ---------------------------------------------------------------------------------------------------
+# S83: the put-back's mesh query on the bike's own gathered list (crates/game-sim/src/back_search.rs,
+#   tests/back_search.rs). put_back_solid's float orders, read from its listing: the move is
+#   vsub.xyz(bundle +0x40, bike +0x1390) then FPU mula x*x, madda y*y, madd z*z into bike +0x13a8; the
+#   reach bike +0x13a4 is 100.0 (ten feet), set by the bike's constructor at 0x0027a6fc and never
+#   written again; the list is regathered unless move <= reach (c.ole.s), so a NaN move regathers.
+#   Gather kind: 1 when *(bike +0xf9c) is set and its +0x40 is 1, else 3. Every entry with distance <
+#   the bundle's radius (c.olt.s) is asked, no early exit on a refusal; y is lifted only when not
+#   (point0.y <= y), so the first of two equal heights keeps its normal. A group part's dx, dz are
+#   cvt.s.w(u16 +8 / +0xc) mul.s the world's cell size (*(0x0046a5f8) +0xd4) sub.s the centre, then
+#   mula dx*dx, madd dz*dz, c.ole.s 400. Checkpoints: the mode object *(bike +0xfa0): +0x64 == 1 and
+#   +0x5c & 1, list at +0x70, next at +0x8c; each node's dx = +0x40 - centre.x, dz = +0x48 - centre.z,
+#   mula/madd as above, limit = 100 + (0.25 * r) * r with r at +0x70 (add.s after the two mul.s), and
+#   the first within (c.ole.s) refuses and stops the walk.
+#   bundle_sweep_object's class 0 (mesh) path: the object's matrix +0x120..+0x15c inverted as
+#   transpose (each row keeping its own w) with translation 0 - c0*t.x - c1*t.y - c2*t.z (vmsub chain);
+#   the bundle's centre and probe origins to the object's frame translation first (vaddax row 3,
+#   vmaddax row 0, vmadday row 1, vmaddz row 2), directions vmulax/vmadday/vmaddz; the mesh sweep
+#   0x0010f460 (bundle, 0, &(+0x234, +0x238), +0x220, record, 1); flagged probes' points back to the
+#   world translation first and normals rotated. Its sphere test: d^2 (mula/madda/madd of vsub.xyz) <
+#   (radius +0x60 add.s bundle +0x160)^2.
+#   S66's context/s66/free06.eeMemory.bin is free09's world, not free06's: every free09 prop is in its
+#   tree on the port's matrix (bits), every one of its 726 plants on the port's cell; one extra
+#   scenery-category mesh at 0x0139dc60 (centre 2583.5,178.4,3083.4, radius 13.26) is none of the
+#   port's props (beside the five-high stack at 2598,3087). Bike 0x00dad810, its race object
+#   0x01c833c0 (+0x40 = 0: kind 3), mode object 0x01839880 (mode 3, flags 0x14001, no checkpoints).
