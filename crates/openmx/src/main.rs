@@ -22,7 +22,8 @@
 //! track pick, the Garage (P37: every seat's bike, set and rider), Settings with the rider's name on an on-screen keyboard, the overlay, wrecks and each
 //! seat's controls (P81), and Quit. Start or Escape in a ride opens the pause — Resume, Restart, Settings,
 //! Main Menu, Quit — in place of the plain freeze Start is without the front end. `--menu` asks for
-//! the front end whatever else is given, and `--screen NAME` opens it on one screen, which is how a
+//! the front end whatever else is given, and `--screen NAME` opens it on one screen, or on one of
+//! Settings' or the Garage's tabs by its name (`display`, `gear`; P123), which is how a
 //! `--shot` of each is taken. The settings are kept in `settings.txt` and `controls.txt` beside the
 //! disc; a flag given on the command line wins over the file for the session.
 //!
@@ -1496,6 +1497,8 @@ struct Args {
     ride_flag: bool,
     /// `--screen`: the front end's screen to open on.
     screen: Option<menu::Screen>,
+    /// `--screen`'s tab of Settings or the Garage, when its word names one (P123).
+    screen_tab: Option<usize>,
     /// Which wiring flags were given, so the front end's `controls.txt` fills in only the others.
     wiring_flags: (bool, bool),
     /// `--online NAME@HOST:PORT`, `--peer NAME@HOST:PORT` (each other machine) and `--seats
@@ -1906,7 +1909,10 @@ fn front_end(args: Args) -> Result<(), String> {
     front.menu.free_riders = args.players;
     // The splash first (P46), unless `--screen` asks for a screen.
     match args.screen {
-        Some(screen) => front.menu.open(screen),
+        Some(screen) => match args.screen_tab {
+            Some(tab) => front.menu.open_tab(screen, tab),
+            None => front.menu.open(screen),
+        },
         None => front.menu.splash(),
     }
     let mut shell = Shell { window: Some(window), seats: Some(seats), front };
@@ -8119,6 +8125,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         menu: false,
         ride_flag: false,
         screen: None,
+        screen_tab: None,
         wiring_flags: (false, false),
         fps: false,
         renderer: Backend::default(),
@@ -8146,10 +8153,17 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--ride" => {}
             "--menu" => args.menu = true,
             "--screen" => {
-                let w = next("a screen: main, tracks, garage, settings, controls, keyboard or pause")?;
-                args.screen = Some(menu::Screen::from_word(&w).ok_or(format!(
-                    "--screen: main, tracks, garage, settings, controls, keyboard or pause, not {w}"
-                ))?);
+                let w = next("a screen: main, tracks, garage, settings, controls, keyboard or pause, or a tab")?;
+                match (menu::Screen::from_word(&w), menu::Screen::tab_from_word(&w)) {
+                    (Some(screen), _) => args.screen = Some(screen),
+                    (None, Some((screen, tab))) => (args.screen, args.screen_tab) = (Some(screen), Some(tab)),
+                    (None, None) => {
+                        return Err(format!(
+                            "--screen: main, tracks, garage, settings, controls, keyboard or pause, or a tab \
+                             (ride, display, graphics, audio, camera, original, rider, bike, gear), not {w}"
+                        ));
+                    }
+                }
                 args.menu = true;
             }
             "--track" => args.track = next("a track name, like free06")?,
@@ -8469,7 +8483,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause]]\n\
+                    "openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause|TAB]]\n\
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\

@@ -248,6 +248,17 @@ pub fn pack_name(prefix: &str) -> String {
     }
 }
 
+impl Screen {
+    /// `--screen`'s word for a tab (P123): Settings' and the Garage's tabs by their names in lower
+    /// case, `display` or `gear`, so every tab gets a `--shot`. The tabs that were screens of their
+    /// own (graphics, audio, controls, camera) keep [`Screen::from_word`]'s words, which win.
+    pub fn tab_from_word(w: &str) -> Option<(Screen, usize)> {
+        [(Screen::Settings, &SETTINGS_TABS[..]), (Screen::Garage, &GARAGE_TABS[..])]
+            .into_iter()
+            .find_map(|(s, tabs)| tabs.iter().position(|t| t.to_lowercase() == w).map(|i| (s, i)))
+    }
+}
+
 /// The prefix a mod track's id is in the pack of.
 pub fn pack_of(id: &str) -> &str {
     id.split('_').next().unwrap_or(id)
@@ -874,6 +885,20 @@ impl Menu {
         }
         self.push(Screen::Settings);
         self.cursor[Screen::Settings.index()] = Menu::first_row(&self.page_of(Screen::Settings));
+    }
+
+    /// Open `screen` (Settings or the Garage) on tab `tab` over the main menu, its cursor on the
+    /// first row, for `--screen`'s tab words (P123).
+    pub fn open_tab(&mut self, screen: Screen, tab: usize) {
+        self.main();
+        match screen {
+            Screen::Garage => {
+                self.open_garage();
+                self.tab[Screen::Garage.index()] = tab.min(GARAGE_TABS.len() - 1);
+                self.cursor[Screen::Garage.index()] = Menu::first_row(&self.page_of(Screen::Garage));
+            }
+            _ => self.open_settings(tab),
+        }
     }
 
     /// A press on an option page: Circle leaves, L1 and R1 step the tabs round, up and down walk the

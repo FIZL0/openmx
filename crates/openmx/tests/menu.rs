@@ -4854,3 +4854,41 @@ fn in_a_split_2p_pauses_alone_and_1p_rides_on_tick_for_tick() {
     let gone = sims[1].rider.ride.position() - stop;
     assert!(gone.x().abs() + gone.z().abs() > 1.0, "2P rides on after the pause");
 }
+
+/// P123: every tab of Settings and the Garage has a `--screen` word, so each gets a `--shot`: the
+/// tab's name in lower case opens its screen on it, cursor on the first row and Back to the main
+/// menu, as the pad reaches it; the tabs that were screens keep their screen's word.
+#[test]
+fn every_settings_and_garage_tab_has_a_screen_word() {
+    for (screen, tabs) in [(Screen::Settings, &menu::SETTINGS_TABS[..]), (Screen::Garage, &menu::GARAGE_TABS[..])] {
+        for (i, name) in tabs.iter().enumerate() {
+            let w = name.to_lowercase();
+            let (mut m, mut r) = fresh();
+            match Screen::from_word(&w) {
+                // Graphics, Audio, Controls and Camera: their screens' words open the same tab.
+                Some(s) => {
+                    assert!(matches!(s, Screen::Graphics | Screen::Audio | Screen::Controls | Screen::Camera), "{w}");
+                    m.open(s);
+                }
+                None => {
+                    assert_eq!(Screen::tab_from_word(&w), Some((screen, i)), "{w}");
+                    m.open_tab(screen, i);
+                }
+            }
+            assert_eq!(m.screen(), Some(screen), "{w}");
+            assert_eq!(m.tabs(screen)[m.tab(screen)], *name, "{w}");
+            let rows = m.page();
+            assert!(rows[m.cursor(screen)].selectable(), "{w}: the cursor is on a row");
+            // Audio's word opens it over the pause, as the pause's Audio row does.
+            if w == "audio" {
+                continue;
+            }
+            tap(&mut m, &mut r, Control::Circle);
+            assert_eq!(m.screen(), Some(Screen::Main), "{w}: Back is the main menu");
+        }
+    }
+    assert_eq!(Screen::tab_from_word("display"), Some((Screen::Settings, 1)));
+    assert_eq!(Screen::tab_from_word("gear"), Some((Screen::Garage, 2)));
+    assert_eq!(Screen::tab_from_word("Display"), None);
+    assert_eq!(Screen::tab_from_word("splash"), None);
+}
