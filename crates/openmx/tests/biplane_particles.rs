@@ -186,24 +186,27 @@ fn the_exhaust_runs_on_the_throttle_below_max_speed() {
         fx
     };
     assert_eq!(count(1.0, 0.0).particles.len(), 0, "the stack must move 20 ft/s for this file's gate");
-    // A file with no gate: the exhaust's own.
+    // A file with no gate, blowing back along the stack: the exhaust's own.
     let open = |throttle: f32, airspeed: f32, wrecked: bool| {
         let mut fx = only(fx(), "Exhaust");
         fx.entries[0].emt.min_speed = 0.0;
+        fx.entries[0].file.velocity = v3(0.0, -4.0, -4.0);
+        fx.entries[0].emt.velocity = v3(0.0, -4.0, -4.0);
         for _ in 0..30 {
             fx.step(&frame(v3(0.0, 0.0, 0.0), throttle, airspeed, wrecked), DT);
         }
         fx
     };
     let full = open(1.0, 0.0, false);
-    assert_eq!(full.particles.len(), 40, "30 frames at 40 a second: with no gate the first frame counts");
-    // f = 1 × ½ × 30/30 = ½: the file's y times f + ½, so 4 ft/s down once the first frame's drag
-    // and gravity are taken off: the newest particle has not been stepped yet.
+    // The frame it is switched on emits nothing (P74): 29 frames at 40 a second.
+    assert_eq!(full.particles.len(), 38, "29 frames at 40 a second, the frame it went on not counted");
+    // f = 1 × ½ × 30/30 = ½: the file's z times f + ½ (P74: z, not y), so 4 ft/s back; its y is
+    // the file's. The newest particle has not been stepped yet.
     let newest = full.particles.last().unwrap();
-    assert!((newest.vel.y + 4.0).abs() < 1e-4, "{:?}", newest.vel);
+    assert!((newest.vel.z + 4.0).abs() < 1e-4 && (newest.vel.y + 4.0).abs() < 1e-4, "{:?}", newest.vel);
     let slow = open(0.5, 15.0, false);
-    // f = 0.5 × ½ × 15/30 = 0.125: y × 0.625.
-    assert!((slow.particles.last().unwrap().vel.y + 2.5).abs() < 1e-4);
+    // f = 0.5 × ½ × 15/30 = 0.125: z × 0.625.
+    assert!((slow.particles.last().unwrap().vel.z + 2.5).abs() < 1e-4);
     assert_eq!(open(1.0, 30.0, false).particles.len(), 0, "at MaxSpeed f is 0");
     assert_eq!(open(1.0, 45.0, false).particles.len(), 0, "past it, negative");
     assert_eq!(open(0.0, 0.0, false).particles.len(), 0, "off the throttle");
@@ -441,7 +444,7 @@ fn the_discs_biplane_particles() {
 
 /// A tire for the tire dust.
 fn tire(ground: bool, object: bool, compression: f32, zone: u8) -> TireFrame {
-    TireFrame { ground, object, compression, zone }
+    TireFrame { ground, object, compression, zone, ..TireFrame::default() }
 }
 
 /// The wheel node rolling along x at 30 ft/s, frame `f` of it, on `t`.

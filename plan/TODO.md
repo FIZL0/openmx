@@ -97,6 +97,9 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **MD32** (from MD28) a parked biplane in a world stands at the start tile's local spot, not where the world puts that tile: since MD28 only a flown plane drives the tile and ground streaming (garage.plane_flown), so it no longer costs frames, but its position is not offset into world feet. Place a world seat's parked plane by its tile's offset as the rider's start is → crates/openmx/src/main.rs · crates/openmx/src/worlds.rs | t: crates/openmx tests: a world ride's parked plane stands within its tile's rectangle | j: world-parked-plane
 - [ ] **S121** S68's flat backwards capture (context/capture/s68-backwards/flat.csv, s1) parts from the port at tick 214 (pitch 0.200 vs 0.170 backing up) on main before P72, where S68 had it agreeing on all 330 ticks: find the merge that moved it (S106's brake on a slope, P67, S67 are candidates) and put S68_AGREES_THROUGH's flat entry back to 330, or say why the port's new pitch is the original's
 - [ ] **S122** stock::BIKE (crates/game-sim/src/stock.rs) says ReverseSpeed +4, which pushes forwards when reversing; every disc .phy says -10 (P72's journal). Set it to -10 and re-baseline whatever stock-bike numbers move, or say why +4
+- [ ] **P151** P74 follow-up: the bike's TireTrack entries (mxparticles.dat's two TireTrack lines) as a decal trail behind each tire
+- [ ] **P152** P74 follow-up: Foot Dust while riding — feed the riding rider's foot contacts to the ParticleCollisionConstraint entry (mask 0x3)
+- [ ] **P153** P74 follow-up: capture the wreck's crash-body and ragdoll contacts and compare Vehicle/Rider Dust and Chunks emission (carry, per-contact sources, zones) row by row
 ### Phase 2 — a decompilation you can read
 
 

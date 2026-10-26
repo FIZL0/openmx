@@ -1,5 +1,6 @@
 //! The biplane's particles (P58): the engine smoke, the exhaust and the wreck's dust, as the original
-//! emits them off the disc's own files.
+//! emits them off the disc's own files — and the bike's (P74), which the same manager runs off the
+//! track's `mxparticles.dat`.
 //!
 //! **The files.** A freeride track's second archive (`free06_2.res`) carries the plane's emitter list,
 //! `tracks\biplaneparticles.dat` ([`game_render::biplane::emitters`]), and the `.emt` each entry names
@@ -19,7 +20,9 @@
 //! to this one. Each takes a random size, life and growth from its ranges, the emitter's velocity
 //! turned by the node, a noise point in a ball between the noise bounds turned the same way, and the
 //! emitter's own velocity when `ApplyEmitterVelocity` says so. The first frame after an emitter is
-//! switched on its last point is its point: it has not moved.
+//! switched on its last point is its point: it has not moved. A node's emitter switched on by the
+//! manager emits nothing on that frame — the manager runs after the emitters (P74: the capture's
+//! carry stays put the tick the switch byte goes on, and the tick it goes off).
 //!
 //! **A particle, a frame:** its age grows by the frame in milliseconds and it dies past its life; a
 //! growing one grows by its rate and rises by the same; one with a velocity moves by it; drag takes
@@ -42,8 +45,9 @@
 //!   it smokes whenever the exhaust moves that fast and the plane is not wrecked — the white trail the
 //!   capture shows in the dive.
 //! * **Exhaust** (`Left`/`Right Exhaust`): `f = throttle × ½ × (MaxSpeed − airspeed) / MaxSpeed`. At
-//!   `f ≤ 0` the emitter is off, and otherwise its velocity's y is the file's times `f + ½`: puffs off
-//!   the stacks while the plane runs up slowly, none once it is past `MaxSpeed` or off the throttle.
+//!   `f ≤ 0` the emitter is off, and otherwise its velocity's *z* is the file's times `f + ½`: puffs
+//!   off the stacks while the plane runs up slowly, none once it is past `MaxSpeed` or off the
+//!   throttle. (P58 scaled y; the bike's capture, P74, shows z scaled and y the file's.)
 //! * **CollisionModel** (`Vehicle Dust`, `Vehicle Chunks`): one emission per contact of the plane's
 //!   collision model, at the contact, as if it had come from the body's velocity a frame back — the
 //!   wreck's dust where the hull hits the ground. Its flags are its own: no contact at all is
@@ -63,6 +67,22 @@
 //! * **HelicopterDust** (the prop wash under `PropDummy`): the ground under its point, and the height
 //!   `h` above it. Under `BeginFadeHeight` it emits at the file's rate, from there to `EndFadeHeight`
 //!   at the rate times `1 − (h − Begin) / (End − Begin)`, and above that nothing.
+//!
+//! * **Spray** (the bike's `Tire Dirt Spray`s and `Tire Chunks`, P74): on its node and its tire. While
+//!   the throttle is open, the clutch out and the tire spinning — or its side force is past
+//!   `SideForceThreshold` either way — it throws: its velocity's x is `−SideForceScale × side`, the
+//!   noise's x bounds widen by half of that each way, the noise's y bounds rise by
+//!   `f × Min/MaxVelocityNoiseYScale` and its rate is the file's times `1 + ½f`, with
+//!   `f = 1 − (speed + 1) × VelocityNoiseYRamp` held to `0..1`; and a quarter-second clock is wound.
+//!   Otherwise the clock runs down, and while it has time left the emitter runs on at the file's rate
+//!   times the time left over the quarter second ([`SprayKeys`]).
+//! * **ParticleCollisionConstraint** (`Rider Dust`, `Rider Chunks`, `Foot Dust`, P74): one emitter,
+//!   switched by the bike's flags alone, emitted by hand at each of the rider's collision spheres whose
+//!   bit `AttachToParticleCollisionConstraints` has and whose own contact flags the entry allows, as if
+//!   the point had come from its bone's velocity a frame back ([`ConstraintFrame`]).
+//!
+//! The manager runs an entry only while its flag byte is exactly *live* ([`Entry::flag`]): none of its
+//! `Disable` bits in the flags, and — for an entry on a tire — the tire's surface not a `none` zone.
 //!
 //! **Zones.** `ZoneDescriptor` names a section of `mxparticlezones.dat` ([`ZONES`]): `Zone1` to
 //! `Zone16` a group of the sheet for each surface under the tire (or the prop), `none` for nothing,
@@ -87,6 +107,10 @@ use game_render::mat::{M4, V3, v3};
 /// The original looks in the track's own folder first and then in `Tracks\`; the archives' suffix
 /// search finds whichever the track carries.
 pub const ZONES: &str = "mxparticlezones.dat";
+
+/// The bike's emitter list in a track's second archive, `tracks\<track>\mxparticles.dat` (P74). The
+/// computer's riders read `mxaiparticles.dat` beside it, which on free09 is the same file.
+pub const BIKE_PARTICLES: &str = "mxparticles.dat";
 
 /// How many surface zones a zone descriptor names.
 pub const ZONE_COUNT: usize = 16;
@@ -551,6 +575,82 @@ pub enum Kind {
     Dust(DustKeys),
     /// On its node, by its height over the ground.
     HelicopterDust { begin: f32, end: f32 },
+    /// On its node, by its tire's spin and side force and the throttle, faded out over a quarter
+    /// second when they stop (P74: the bike's roost and chunks).
+    Spray(SprayKeys),
+    /// At each of the rider's collision spheres whose bit `mask` has (P74: the wreck's and the
+    /// feet's dust).
+    Constraint { mask: u32 },
+}
+
+/// A spray's own keys, over the original's constructor defaults (P74).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SprayKeys {
+    /// `SideForceScale`: the tire's side force times this, negated, is the particles' sideways
+    /// velocity.
+    pub side_scale: f32,
+    /// `SideForceThreshold`: a side force past this sprays with the throttle shut.
+    pub side_threshold: f32,
+    /// `MinVelocityNoiseYScale`, `MaxVelocityNoiseYScale`: added to the noise's low and high y.
+    pub min_y: f32,
+    pub max_y: f32,
+    /// `VelocityNoiseYRamp`: how fast the speed takes the y noise and the extra rate away.
+    pub ramp: f32,
+}
+
+impl Default for SprayKeys {
+    fn default() -> SprayKeys {
+        SprayKeys { side_scale: 10.0, side_threshold: 3.0, min_y: 1.0, max_y: 2.0, ramp: 0.0 }
+    }
+}
+
+impl SprayKeys {
+    /// The keys off a list entry.
+    pub fn read(e: &Emitter) -> SprayKeys {
+        let d = SprayKeys::default();
+        let number = |key: &str, or: f32| e.key(key).and_then(|v| v.trim().parse().ok()).unwrap_or(or);
+        SprayKeys {
+            side_scale: number("SideForceScale", d.side_scale),
+            side_threshold: number("SideForceThreshold", d.side_threshold),
+            min_y: number("MinVelocityNoiseYScale", d.min_y),
+            max_y: number("MaxVelocityNoiseYScale", d.max_y),
+            ramp: number("VelocityNoiseYRamp", d.ramp),
+        }
+    }
+
+    /// The `.emt` a frame sprays with, off the file's `base`: sideways at `side`'s force, the speed
+    /// `speed` taking the extra off as `ramp` says.
+    pub fn apply(&self, base: &Emt, side: f32, speed: f32, emt: &mut Emt) {
+        let vx = -self.side_scale * side;
+        emt.velocity.x = vx;
+        let f = (1.0 - (speed + 1.0) * self.ramp).clamp(0.0, 1.0);
+        let (lo, hi) = base.noise;
+        emt.noise = (v3(lo.x - vx.abs() * 0.5, lo.y + f * self.min_y, lo.z), v3(hi.x + vx.abs() * 0.5, hi.y + f * self.max_y, hi.z));
+        emt.rate = (base.rate.0 + base.rate.0 * f * 0.5, base.rate.1 + base.rate.1 * f * 0.5);
+    }
+}
+
+/// How long a spray runs on once its tire stops throwing, seconds.
+pub const SPRAY_FADE: f32 = 0.25;
+
+/// One of the rider's collision spheres as the manager reads it (P74).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ConstraintFrame {
+    /// It touches the ground, and something else.
+    pub ground: bool,
+    pub object: bool,
+    /// Where it touches, and its bone's velocity.
+    pub at: V3,
+    pub vel: V3,
+    /// The surface it touches.
+    pub zone: u8,
+}
+
+impl ConstraintFrame {
+    /// The manager's flags for it.
+    pub fn flags(&self) -> u32 {
+        TireFrame { ground: self.ground, object: self.object, ..TireFrame::default() }.flags()
+    }
 }
 
 /// A tire dust's own keys, over the original's constructor defaults.
@@ -683,6 +783,19 @@ pub struct Entry {
     pub file: Emt,
     /// A tire dust's latch: on from a ground contact until an object contact or switched off.
     pub latched: bool,
+    /// The manager's flag byte for it (P74): [`Entry::LIVE`] while none of its `Disable` bits are
+    /// set, [`Entry::ZONE_OFF`] while its tire is on a surface its zones say `none` to. It is run
+    /// only while it is exactly `LIVE`.
+    pub flag: u8,
+    /// Its emitter was on after the last frame: an emitter switched on emits from the frame after.
+    pub lit: bool,
+    /// A spray's fade: a quarter second when its tire throws, run down while it does not.
+    pub clock: f32,
+}
+
+impl Entry {
+    pub const LIVE: u8 = 1;
+    pub const ZONE_OFF: u8 = 2;
 }
 
 /// A tire as the manager reads it.
@@ -695,6 +808,9 @@ pub struct TireFrame {
     pub compression: f32,
     /// The surface under it.
     pub zone: u8,
+    /// It spins against the ground (P74: the slip's `spinning`), and its side force.
+    pub spinning: bool,
+    pub side: f32,
 }
 
 impl TireFrame {
@@ -720,9 +836,11 @@ pub struct PlaneFrame {
     /// Each entry's node, in the world, by the node's name: the plane's placement times the node's
     /// bind transform. An entry whose node is missing is off.
     pub nodes: Vec<(String, M4)>,
-    /// The throttle `0..1` and the airspeed in feet a second.
+    /// The throttle `0..1` and the airspeed in feet a second (a bike's: its chassis' speed).
     pub throttle: f32,
     pub airspeed: f32,
+    /// A bike's clutch `0..1` (P74): pulled in, its sprays stop throwing.
+    pub clutch: f32,
     /// The plane is wrecked (its crash reason is not 0).
     pub wrecked: bool,
     /// The body's velocity, feet a second.
@@ -730,6 +848,11 @@ pub struct PlaneFrame {
     /// Where the collision model touches the ground and where it touches anything else.
     pub ground_contacts: Vec<V3>,
     pub object_contacts: Vec<V3>,
+    /// The surface under each ground contact, where it is known (P74): a contact on a surface the
+    /// entry's zones say `none` to emits nothing. Empty for the plane: every contact draws.
+    pub ground_zones: Vec<u8>,
+    /// The rider's collision spheres, by the bit of a `Constraint` entry's mask (P74).
+    pub constraints: Vec<ConstraintFrame>,
     /// The three tires, front left, front right and tail, by `AttachedToTire`'s index.
     pub tires: Vec<TireFrame>,
 }
@@ -780,6 +903,17 @@ impl PlaneFx {
                 "dust" => Kind::Dust(DustKeys::read(e)),
                 // The constructor's 0 and 50 where the entry does not say.
                 "helicopterdust" => Kind::HelicopterDust { begin: number("BeginFadeHeight", 0.0), end: number("EndFadeHeight", 50.0) },
+                "spray" => Kind::Spray(SprayKeys::read(e)),
+                "particlecollisionconstraint" => Kind::Constraint {
+                    mask: e
+                        .key("AttachToParticleCollisionConstraints")
+                        .map(str::trim)
+                        .and_then(|v| match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                            None => v.parse().ok(),
+                        })
+                        .unwrap_or(0),
+                },
                 _ => {
                     skipped.push((e.name.clone(), e.kind.clone()));
                     continue;
@@ -795,6 +929,9 @@ impl PlaneFx {
             };
             // The collision model's entry turns the ground on for its emitter after reading the `.emt`.
             emt.collides |= kind == Kind::CollisionModel && e.has_collision;
+            // So do a spray's and a sphere's that say `HasCollision` (P74: the tire's collision
+            // chunks, the rider's wreck chunks).
+            emt.collides |= matches!(kind, Kind::Spray(_) | Kind::Constraint { .. }) && e.has_collision;
             let descriptor = e.key("ZoneDescriptor").unwrap_or("Default");
             entries.push(Entry {
                 name: e.name.clone(),
@@ -808,6 +945,9 @@ impl PlaneFx {
                 tire: e.key("AttachedToTire").and_then(|v| v.trim().parse().ok()),
                 zones: zones(zone_text.as_deref(), descriptor, &atlas, frames),
                 latched: false,
+                flag: 0,
+                lit: false,
+                clock: 0.0,
             });
         }
         PlaneFx { entries, atlas, particles: Vec::new(), skipped, rng: Rng::new(0x5eed_0058), wind: V3::default(), tick: 0 }
@@ -846,6 +986,16 @@ impl PlaneFx {
             // An entry on a tire answers to the tire's flags as well as the plane's.
             let tire = entry.tire.and_then(|t| plane.tires.get(t)).copied();
             let tire_off = tire.is_some_and(|t| entry.disable & t.flags() != 0);
+            // The manager's flag byte (P74): live on the flags alone, and zone-off on a tire whose
+            // surface its zones say `none` to — which also picks the tire's group.
+            let zone = tire.and_then(|t| entry.zones.get(usize::from(t.zone))).copied();
+            if let Some(Zone::Group(a, b)) = zone {
+                entry.frames = (a, b);
+            }
+            entry.flag = if entry.disable & global == 0 && !tire_off { Entry::LIVE } else { 0 };
+            if zone == Some(Zone::Off) {
+                entry.flag |= Entry::ZONE_OFF;
+            }
             match &entry.kind {
                 Kind::Dust(keys) => {
                     let node = entry.node.as_ref().and_then(|n| plane.nodes.iter().find(|(name, _)| name.eq_ignore_ascii_case(n)));
@@ -910,23 +1060,80 @@ impl PlaneFx {
                 _ => {}
             }
             match entry.kind {
-                Kind::Generic | Kind::Exhaust { .. } => {
+                Kind::Generic | Kind::Exhaust { .. } | Kind::Spray(_) => {
                     let node = entry.node.as_ref().and_then(|n| plane.nodes.iter().find(|(name, _)| name.eq_ignore_ascii_case(n)));
-                    let mut velocity = entry.emt.velocity;
-                    let mut on = entry.disable & global == 0 && !tire_off;
-                    if let Kind::Exhaust { max_speed } = entry.kind {
-                        let f = plane.throttle * 0.5 * (max_speed - plane.airspeed) / max_speed.max(1e-6);
-                        on &= f > 0.0;
-                        velocity.y *= f + 0.5;
+                    // Only an entry that is exactly live is run; the rest are switched off, and a
+                    // spray's fade is dropped.
+                    let mut on = entry.flag == Entry::LIVE;
+                    match &entry.kind {
+                        Kind::Exhaust { max_speed } if on => {
+                            let f = plane.throttle * 0.5 * (max_speed - plane.airspeed) / max_speed.max(1e-6);
+                            on = f > 0.0;
+                            // The puffs blow back along the pipe faster with the throttle (P74: the
+                            // capture's velocity z; y stays the file's).
+                            entry.emt.velocity.z = entry.file.velocity.z * (f + 0.5);
+                        }
+                        Kind::Spray(keys) if on => match tire {
+                            Some(t) if (plane.throttle == 0.0 || plane.clutch != 0.0 || !t.spinning) && t.side.abs() <= keys.side_threshold => {
+                                // Not throwing: it runs on for what is left of its fade, thinning.
+                                on = false;
+                                if entry.clock > 0.0 {
+                                    entry.clock -= dt;
+                                    if entry.clock > 0.0 {
+                                        let k = entry.clock / SPRAY_FADE;
+                                        entry.emt.rate = (entry.file.rate.0 * k, entry.file.rate.1 * k);
+                                        on = true;
+                                    }
+                                }
+                                if !on {
+                                    entry.clock = 0.0;
+                                }
+                            }
+                            Some(t) => {
+                                keys.apply(&entry.file, t.side, plane.airspeed, &mut entry.emt);
+                                entry.clock = SPRAY_FADE;
+                            }
+                            None => on = false,
+                        },
+                        Kind::Spray(_) => entry.clock = 0.0,
+                        _ => {}
                     }
                     entry.sources.resize_with(1, Source::default);
                     let source = &mut entry.sources[0];
+                    let lit = entry.lit;
+                    entry.lit = on && node.is_some();
                     match node {
+                        // Switched on this frame, it starts from here and emits from the next.
+                        Some((_, m)) if on && !lit => source.last = Some(m.point(v3(0.0, 0.0, 0.0))),
                         Some((_, m)) if on => {
                             let at = m.point(v3(0.0, 0.0, 0.0));
-                            source.emit(index, &entry.emt, entry.frames, at, None, Some(*m), velocity, plane.vel, wind, dt, &mut self.rng, &mut self.particles);
+                            let velocity = entry.emt.velocity;
+                            source.emit_over(index, &entry.emt, entry.frames, at, None, Some(*m), velocity, plane.vel, wind, dt, &mut self.rng, &mut self.particles, &mut |p| ground(p).map(|(y, _)| y));
                         }
                         _ => source.off(),
+                    }
+                }
+                Kind::Constraint { mask } => {
+                    // One emitter for every sphere: on by the plane's flags alone, then emitted by hand
+                    // at each sphere of the mask that touches as the entry allows, on a surface its
+                    // zones draw, as if it had come from its bone's velocity a frame back.
+                    entry.sources.resize_with(1, Source::default);
+                    entry.lit = entry.disable & global == 0;
+                    if !entry.lit {
+                        entry.sources[0].off();
+                        continue;
+                    }
+                    for (i, c) in plane.constraints.iter().enumerate().take(32) {
+                        if mask & (1 << i) == 0 || entry.disable & c.flags() != 0 {
+                            continue;
+                        }
+                        match entry.zones.get(usize::from(c.zone)) {
+                            Some(Zone::Off) => continue,
+                            Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
+                            None => {}
+                        }
+                        let from = c.at.sub(c.vel.scale(dt));
+                        entry.sources[0].emit_over(index, &entry.emt, entry.frames, c.at, Some(from), None, entry.emt.velocity, c.vel, wind, dt, &mut self.rng, &mut self.particles, &mut |p| ground(p).map(|(y, _)| y));
                     }
                 }
                 Kind::CollisionModel => {
@@ -946,7 +1153,16 @@ impl PlaneFx {
                     }
                     let contacts: Vec<V3> = plane.ground_contacts.iter().chain(&plane.object_contacts).copied().collect();
                     entry.sources.resize_with(contacts.len(), Source::default);
-                    for (source, &at) in entry.sources.iter_mut().zip(&contacts) {
+                    for (n, (source, &at)) in entry.sources.iter_mut().zip(&contacts).enumerate() {
+                        // A ground contact on a surface the zones say `none` to emits nothing (P74).
+                        match plane.ground_zones.get(n).and_then(|&z| entry.zones.get(usize::from(z))) {
+                            Some(Zone::Off) => {
+                                source.off();
+                                continue;
+                            }
+                            Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
+                            None => {}
+                        }
                         // As if the point had come from the body's velocity a frame back: its speed is
                         // the body's, and its particles spread along that path.
                         let from = at.sub(plane.vel.scale(dt));
