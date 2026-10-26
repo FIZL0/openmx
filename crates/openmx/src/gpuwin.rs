@@ -32,6 +32,8 @@ struct State {
     size: (u32, u32),
     resized: bool,
     closed: bool,
+    /// Whether the window has the keyboard (P167): until it says otherwise, it has.
+    focused: bool,
 }
 
 impl ApplicationHandler for State {
@@ -79,7 +81,11 @@ impl ApplicationHandler for State {
                     }
                 }
             }
-            WindowEvent::Focused(false) => self.keys = [false; KEYCODES],
+            WindowEvent::Focused(false) => {
+                self.keys = [false; KEYCODES];
+                self.focused = false;
+            }
+            WindowEvent::Focused(true) => self.focused = true,
             _ => {}
         }
     }
@@ -134,6 +140,7 @@ impl GpuWindow {
             size: (1, 1),
             resized: false,
             closed: false,
+            focused: true,
         };
         // The window is made when the loop first resumes.
         for _ in 0..100 {
@@ -236,6 +243,16 @@ impl GpuWindow {
 
     pub fn closed(&self) -> bool {
         self.state.closed
+    }
+
+    pub fn focused(&self) -> bool {
+        self.state.focused
+    }
+
+    /// Draw the mouse cursor over the window or hide it (P167): winit's own switch, on X11 and
+    /// Wayland alike, windowed or the whole screen.
+    pub fn show_cursor(&self, shown: bool) {
+        self.window.set_cursor_visible(shown);
     }
 
     pub fn held(&self, code: u8) -> bool {

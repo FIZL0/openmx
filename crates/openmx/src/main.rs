@@ -172,6 +172,8 @@
 mod audio;
 mod aspect;
 mod chase;
+// Whether the mouse cursor is drawn over the window (P167).
+mod cursor;
 // The riders' names and numbers on their jerseys and plates (P86).
 mod dress;
 mod gpuwin;
@@ -2092,6 +2094,7 @@ fn front_end(args: Args) -> Result<(), String> {
         if window.closed() {
             break;
         }
+        window.show_cursor(cursor::shown(cursor::Showing::Front, window.focused()));
         if window.resized() {
             let (width, height) = frame_size(window);
             if (width, height) != (frame.width, frame.height) {
@@ -2438,6 +2441,7 @@ fn loading_frame(
     if window.closed() {
         return Ok(Wait::Quit);
     }
+    window.show_cursor(cursor::shown(cursor::Showing::Front, window.focused()));
     let (width, height) = match args.size {
         Some(size) => size,
         None => args.aspect.frame((window.width, window.height), window.scale),
@@ -4966,6 +4970,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if window.closed() || (front.is_none() && window.held(key::ESCAPE)) {
                 break;
             }
+            // Hidden while every seat rides with no menu up, and back for any pause (P167).
+            let showing = cursor::Showing::Ride(front.as_deref().map(|f| &f.menu));
+            window.show_cursor(cursor::shown(showing, window.focused()));
         }
         // A window that changed size gets a frame of its new size rather than the old one stretched
         // over it — and with it the aspect the camera's field of view and its viewport test read,

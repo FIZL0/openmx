@@ -19,9 +19,15 @@ use std::os::unix::net::UnixStream;
 
 /// Request opcodes, by the names the protocol gives them.
 const CREATE_WINDOW: u8 = 1;
+const CHANGE_WINDOW_ATTRIBUTES: u8 = 2;
 const MAP_WINDOW: u8 = 8;
 const CHANGE_PROPERTY: u8 = 18;
+const CREATE_PIXMAP: u8 = 53;
+const FREE_PIXMAP: u8 = 54;
 const CREATE_GC: u8 = 55;
+const FREE_GC: u8 = 60;
+const POLY_FILL_RECTANGLE: u8 = 70;
+const CREATE_CURSOR: u8 = 93;
 const PUT_IMAGE: u8 = 72;
 
 /// The two predefined atoms the shell needs, so that it never has to ask for one (an `InternAtom` is a
@@ -36,9 +42,13 @@ const ATOM_STRING: u32 = 31;
 /// correctly rather than falling back to the flicker.
 const REPEAT_MS: u32 = 2;
 
-/// Event codes. The window selects three masks' worth of these.
+/// Event codes. The window selects four masks' worth of these.
 const KEY_PRESS: u8 = 2;
 const KEY_RELEASE: u8 = 3;
+const FOCUS_IN: u8 = 9;
+const FOCUS_OUT: u8 = 10;
+/// A focus event's detail when it is only the pointer's window that the focus passes through.
+const NOTIFY_POINTER: u8 = 5;
 const DESTROY_NOTIFY: u8 = 17;
 const UNMAP_NOTIFY: u8 = 18;
 const CONFIGURE_NOTIFY: u8 = 22;
@@ -47,9 +57,12 @@ const CONFIGURE_NOTIFY: u8 = 22;
 /// increasing bit order, which is the order they are listed here.
 const CW_BACK_PIXEL: u32 = 0x0000_0002;
 const CW_EVENT_MASK: u32 = 0x0000_0800;
-/// What the window asks to hear about: keys down, keys up, and its structure — which is being taken
-/// away, and being given a new size (`ConfigureNotify`).
-const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0002_0000;
+/// What the window asks to hear about: keys down, keys up, its structure — which is being taken
+/// away, and being given a new size (`ConfigureNotify`) — and its focus coming and going (P167).
+const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0002_0000 | 0x0020_0000;
+/// `ChangeWindowAttributes`' value mask for the cursor, and `CreateGC`'s for the foreground.
+const CW_CURSOR: u32 = 0x0000_4000;
+const GC_FOREGROUND: u32 = 0x0000_0004;
 
 /// `PutImage`'s format: one byte per pixel channel in the server's own layout.
 const ZPIXMAP: u8 = 2;
@@ -125,6 +138,10 @@ pub struct Window {
     keys: Keyboard,
     /// The server took the window away, or the connection went.
     closed: bool,
+    /// Whether the window has the keyboard's focus, as the last focus event said (P167).
+    focused: bool,
+    /// The blank cursor the window wears while the cursor is hidden, once made.
+    blank: Option<u32>,
     /// Requests being assembled, likewise.
     out: Vec<u8>,
 }
@@ -159,6 +176,8 @@ impl Window {
             max_request: 0,
             keys: Keyboard::new(),
             closed: false,
+            focused: true,
+            blank: None,
             out: Vec::new(),
         };
         let setup = w.handshake()?;
@@ -282,6 +301,81 @@ impl Window {
         self.closed
     }
 
+    /// Whether the window has the keyboard's focus.
+    pub fn focused(&self) -> bool {
+        self.focused
+    }
+
+    /// Draw the mouse cursor over the window or hide it (P167). The core protocol has no hidden
+    /// cursor, so a hidden one is a cursor made of a one-pixel pixmap cleared to nothing, used as its
+    /// own mask: every pixel of it is see-through. Shown is the window's own cursor taken away, which
+    /// is its parent's — the desktop's. Neither has a reply, as nothing here does.
+    pub fn show_cursor(&mut self, shown: bool) {
+        // The window is `id_base | 1` and the graphics context `| 2`; these take the next three.
+        let base = self.window & !0xff;
+        let (pixmap, gc, cursor) = (base | 3, base | 4, base | 5);
+        let mut r = Vec::new();
+        if !shown && self.blank.is_none() {
+            r.push(CREATE_PIXMAP);
+            r.push(1); // depth: a bitmap
+            r.extend_from_slice(&4u16.to_le_bytes());
+            r.extend_from_slice(&pixmap.to_le_bytes());
+            r.extend_from_slice(&self.window.to_le_bytes());
+            r.extend_from_slice(&1u16.to_le_bytes());
+            r.extend_from_slice(&1u16.to_le_bytes());
+
+            // A new pixmap's contents are undefined: clear its pixel to 0 with a bitmap's own context.
+            r.push(CREATE_GC);
+            r.push(0);
+            r.extend_from_slice(&5u16.to_le_bytes());
+            r.extend_from_slice(&gc.to_le_bytes());
+            r.extend_from_slice(&pixmap.to_le_bytes());
+            r.extend_from_slice(&GC_FOREGROUND.to_le_bytes());
+            r.extend_from_slice(&0u32.to_le_bytes());
+
+            r.push(POLY_FILL_RECTANGLE);
+            r.push(0);
+            r.extend_from_slice(&5u16.to_le_bytes());
+            r.extend_from_slice(&pixmap.to_le_bytes());
+            r.extend_from_slice(&gc.to_le_bytes());
+            r.extend_from_slice(&0i16.to_le_bytes());
+            r.extend_from_slice(&0i16.to_le_bytes());
+            r.extend_from_slice(&1u16.to_le_bytes());
+            r.extend_from_slice(&1u16.to_le_bytes());
+
+            // Source and mask both the cleared bitmap, black on black, its hot spot the one pixel.
+            r.push(CREATE_CURSOR);
+            r.push(0);
+            r.extend_from_slice(&8u16.to_le_bytes());
+            r.extend_from_slice(&cursor.to_le_bytes());
+            r.extend_from_slice(&pixmap.to_le_bytes());
+            r.extend_from_slice(&pixmap.to_le_bytes());
+            r.extend_from_slice(&[0u8; 12]);
+            r.extend_from_slice(&0u16.to_le_bytes());
+            r.extend_from_slice(&0u16.to_le_bytes());
+
+            // The cursor keeps what it needs of them.
+            r.push(FREE_GC);
+            r.push(0);
+            r.extend_from_slice(&2u16.to_le_bytes());
+            r.extend_from_slice(&gc.to_le_bytes());
+            r.push(FREE_PIXMAP);
+            r.push(0);
+            r.extend_from_slice(&2u16.to_le_bytes());
+            r.extend_from_slice(&pixmap.to_le_bytes());
+            self.blank = Some(cursor);
+        }
+        r.push(CHANGE_WINDOW_ATTRIBUTES);
+        r.push(0);
+        r.extend_from_slice(&4u16.to_le_bytes());
+        r.extend_from_slice(&self.window.to_le_bytes());
+        r.extend_from_slice(&CW_CURSOR.to_le_bytes());
+        r.extend_from_slice(&if shown { 0 } else { cursor }.to_le_bytes());
+        if let Err(e) = self.write_all_nb(&r) {
+            eprintln!("openmx: the cursor: {e}");
+        }
+    }
+
     /// Whether a key is down now.
     pub fn held(&self, code: u8) -> bool {
         self.keys.held(code)
@@ -330,6 +424,7 @@ impl Window {
             }
             KEY_PRESS | KEY_RELEASE => self.keys.saw(event),
             DESTROY_NOTIFY | UNMAP_NOTIFY => self.closed = true,
+            FOCUS_IN | FOCUS_OUT if event[1] != NOTIFY_POINTER => self.focused = event[0] & 0x7f == FOCUS_IN,
             // The structure mask also brings the window's moves and restacks, which carry the same
             // size again, so only a size that differs counts as a resize. Width and height are the
             // event's fifth and sixth fields, after the two windows, the sibling and the position.
@@ -699,6 +794,8 @@ mod tests {
             max_request: 0xffff * 4,
             keys: Keyboard::new(),
             closed: false,
+            focused: true,
+            blank: None,
             out: Vec::new(),
         };
         (w, theirs)
@@ -850,5 +947,77 @@ mod tests {
         assert!(!keys.held(key::Z));
         stream(&mut keys, &[event(KEY_PRESS, key::Z, 150)]);
         assert!(keys.held(key::Z));
+    }
+
+    /// Every request in `bytes`, by opcode, each its length's worth of words long.
+    fn requests(bytes: &[u8]) -> Vec<(u8, &[u8])> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let len = le16(bytes, at + 2) as usize * 4;
+            out.push((bytes[at], &bytes[at..at + len]));
+            at += len;
+        }
+        assert_eq!(at, bytes.len(), "the last request runs past what was sent");
+        out
+    }
+
+    #[test]
+    fn a_hidden_cursor_is_a_cleared_bitmap_and_shown_is_the_parents() {
+        // P167: hiding makes the blank cursor once and puts it on the window; showing takes the
+        // window's cursor away (None, the desktop's); hiding again reuses the one made.
+        let (mut w, mut server) = window_on_a_pair(64, 48, 1);
+        server.set_nonblocking(true).unwrap();
+        let mut read = || {
+            let mut bytes = vec![0u8; 1024];
+            let n = server.read(&mut bytes).unwrap();
+            bytes.truncate(n);
+            bytes
+        };
+        w.show_cursor(false);
+        let sent = read();
+        let r = requests(&sent);
+        let codes: Vec<u8> = r.iter().map(|(c, _)| *c).collect();
+        assert_eq!(
+            codes,
+            [CREATE_PIXMAP, CREATE_GC, POLY_FILL_RECTANGLE, CREATE_CURSOR, FREE_GC, FREE_PIXMAP, CHANGE_WINDOW_ATTRIBUTES]
+        );
+        let word = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let (pixmap, cursor) = (word(r[0].1, 4), word(r[3].1, 4));
+        assert_eq!(r[0].1[1], 1, "a depth-1 pixmap");
+        assert_eq!((word(r[1].1, 8), word(r[1].1, 12), word(r[1].1, 16)), (pixmap, GC_FOREGROUND, 0));
+        assert_eq!((word(r[3].1, 8), word(r[3].1, 12)), (pixmap, pixmap), "its own mask");
+        for id in [pixmap, word(r[1].1, 4), cursor] {
+            assert!(![w.window, w.gc].contains(&id) && id & !0xff == w.window & !0xff, "{id:#x}");
+        }
+        let attributes = |b: &[u8]| (word(b, 4), word(b, 8), word(b, 12));
+        assert_eq!(attributes(r[6].1), (w.window, CW_CURSOR, cursor));
+
+        w.show_cursor(true);
+        let sent = read();
+        assert_eq!(requests(&sent).len(), 1);
+        assert_eq!(attributes(&sent), (w.window, CW_CURSOR, 0));
+        w.show_cursor(false);
+        let sent = read();
+        assert_eq!(requests(&sent).len(), 1, "the blank cursor is made once");
+        assert_eq!(attributes(&sent), (w.window, CW_CURSOR, cursor));
+    }
+
+    #[test]
+    fn focus_events_say_whether_the_window_has_the_keyboard() {
+        let (mut w, _server) = window_on_a_pair(64, 48, 1);
+        assert!(w.focused(), "a window is taken to have the focus until told otherwise");
+        let focus = |code: u8, detail: u8| {
+            let mut e = [0u8; 32];
+            (e[0], e[1]) = (code, detail);
+            e
+        };
+        w.handle(&focus(FOCUS_OUT, 3));
+        assert!(!w.focused());
+        // The focus passing through the pointer's window says nothing about this one.
+        w.handle(&focus(FOCUS_IN, NOTIFY_POINTER));
+        assert!(!w.focused());
+        w.handle(&focus(FOCUS_IN | 0x80, 0));
+        assert!(w.focused());
     }
 }
