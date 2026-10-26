@@ -851,9 +851,24 @@ fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, t: &Texture) -> wg
 /// twigs side by side). A cut-out's box-filtered levels average its leaves with the holes between
 /// them, and most of a far tree's or bush's averaged texels fell under the cutoff: it thinned to a
 /// quarter of its near self past 500 feet. A `cutoff` of 0 leaves the levels as they are.
+///
+/// The full size is first made all or nothing by `cutoff` (V80), and the coverage kept is at
+/// [`KEEP_EDGE`], where the shader then tests these: the original's tests sit high (alpha over 120
+/// of 128 on free06's bushes), and read bilinearly at such a cutoff a magnified texel's edge closes
+/// in to its middle, so up close a leaf one or two texels wide drew as a sliver and a bush showed
+/// only its broad branches. All or nothing and cut at half, the edge falls halfway between a
+/// passing texel and a failing one at any size, where the software renderer's nearest texel puts it.
 fn mips_keeping(t: &Texture, cutoff: u8) -> Vec<(u32, u32, Vec<u8>)> {
-    let mut levels = mips(t);
-    if cutoff == 0 || levels.len() < 2 {
+    if cutoff == 0 {
+        return mips(t);
+    }
+    let mut whole = t.clone();
+    for a in whole.rgba.iter_mut().skip(3).step_by(4) {
+        *a = if *a >= cutoff { 255 } else { 0 };
+    }
+    let mut levels = mips(&whole);
+    let cutoff = KEEP_EDGE;
+    if levels.len() < 2 {
         return levels;
     }
     let (bw, bh) = (levels[0].0 as usize, levels[0].1 as usize);
@@ -956,6 +971,10 @@ fn filtered_share(px: &[u8], w: usize, h: usize, tile: (usize, usize, usize, usi
 
 /// The side, in texels of its own level, of the tiles [`mips_keeping`] keeps the coverage of.
 const KEEP_TILE: usize = 4;
+
+/// The alpha a material that keeps its coverage is tested at, on texels [`mips_keeping`] made all
+/// or nothing by the material's own test: half (V80).
+const KEEP_EDGE: u8 = 128;
 
 /// A texture uploaded with [`mips_keeping`]'s levels.
 fn upload_texture_keeping(device: &wgpu::Device, queue: &wgpu::Queue, t: &Texture, cutoff: u8) -> wgpu::TextureView {
@@ -2473,9 +2492,11 @@ impl Renderer {
             _ => [128.0; 4],
         };
         let split = surface.depth_write && surface.depth_cutoff > surface.cutoff;
+        // A kept coverage's texels pass or fail by the material's test as they are uploaded, and are
+        // drawn from half of the filtered alpha (V80).
         let uniform = |cutoff: u8, below: f32| MaterialUniform {
             constant,
-            cutoff: cutoff as f32,
+            cutoff: if keep > 0 { KEEP_EDGE as f32 } else { cutoff as f32 },
             shading: key.shading.0 as u32,
             coverage: key.keep_coverage as u32,
             below,

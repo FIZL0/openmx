@@ -387,7 +387,10 @@ pub const FOLIAGE_CUTOFF: u8 = 128;
 
 /// A plant material's surface under [`Foliage::Cutout`]: one mixed over the frame by alpha that
 /// writes depth is instead solid where its alpha reaches [`FOLIAGE_CUTOFF`] and absent elsewhere.
-/// Any other surface is left as it is.
+/// Any other surface is left as it is. A texel's own alpha decides, at the material's test where
+/// that is higher (242 on free06's bushes): the software renderer reads the nearest texel, and the
+/// GPU makes the texels all or nothing at that test and reads its filtered alpha at half, so a
+/// magnified leaf keeps its width up close (V80, `Surface::keep_coverage`).
 pub fn cut_out(s: Surface) -> Surface {
     if s.blend && !s.additive && s.depth_write {
         Surface { blend: false, cutoff: s.cutoff.max(FOLIAGE_CUTOFF), depth_cutoff: 0, keep_coverage: true, ..s }

@@ -448,8 +448,13 @@ fn nat19s_terrain_reads_and_its_plants_stand_on_it() {
 /// picture), its props gone, and a grove of the one plant `which` of free09's ecosystem; with its
 /// archives and assets.
 fn lone_plant(disc: &mut Disc, which: usize, lod: Lod) -> (Scene, Assets, eco::Plant) {
-    let archives = archives(disc, "free09");
-    let bytes = scn(&archives[0]).expect("free09's scene");
+    lone_plant_of(disc, "free09", which, lod)
+}
+
+/// [`lone_plant`], of the plant `which` of the track `name`'s ecosystem.
+fn lone_plant_of(disc: &mut Disc, name: &str, which: usize, lod: Lod) -> (Scene, Assets, eco::Plant) {
+    let archives = archives(disc, name);
+    let bytes = scn(&archives[0]).expect("the track's scene");
     let mut look = Scene::parse(&game_render::ini::text(&bytes));
     let place = track::Scene::parse(&bytes).expect("the sim's scene");
     let terrain_file = terrain_bytes(&archives[0], &place.terrain_file);
@@ -858,7 +863,13 @@ impl Shots {
     }
 
     /// The plant's pixels at each of `distances`: software's, then the GPU's.
-    fn covered(&mut self, (scene, assets, plant): &mut (Scene, Assets, eco::Plant), distances: &[f32]) -> [Vec<Vec<bool>>; 2] {
+    fn covered(&mut self, plant: &mut (Scene, Assets, eco::Plant), distances: &[f32]) -> [Vec<Vec<bool>>; 2] {
+        let cameras: Vec<Camera> = distances.iter().map(|&d| riding_at(&plant.2, d)).collect();
+        self.covered_from(plant, &cameras)
+    }
+
+    /// [`Shots::covered`] from each of `cameras`.
+    fn covered_from(&mut self, (scene, assets, plant): &mut (Scene, Assets, eco::Plant), cameras: &[Camera]) -> [Vec<Vec<bool>>; 2] {
         use game_render::gpu::{Scene3, Target, View};
         let (w, h) = self.size;
         let view = self.target.create_view(&Default::default());
@@ -875,12 +886,11 @@ impl Shots {
         scene.ecosystem = grove;
         self.gpu.set_scene(scene);
         let mut out = [vec![], vec![]];
-        for &d in distances {
-            let camera = riding_at(plant, d);
+        for camera in cameras {
             let mut f = game_render::Frame::new(w as usize, h as usize, [0, 0, 0]);
-            game_render::draw_scene(&mut f, scene, assets, &[], &camera);
+            game_render::draw_scene(&mut f, scene, assets, &[], camera);
             out[0].push(f.depth.iter().map(|&z| z > 0.0).collect());
-            let rgb = frame(&mut self.gpu, &camera);
+            let rgb = frame(&mut self.gpu, camera);
             out[1].push(rgb.chunks_exact(3).zip(empty.chunks_exact(3)).map(|(a, b)| a.iter().zip(b).map(|(&a, &b)| (a as i32 - b as i32).abs()).sum::<i32>() > 6).collect());
         }
         out
@@ -977,5 +987,96 @@ fn a_tree_walked_from_far_to_near_keeps_its_trunk() {
         }
         println!("{renderer}: the trunk's fifth drawn at least {:.0}% of the thinner half's, at {} ft", least.0 * 100.0, least.1);
         assert!(least.0 >= 0.5, "{renderer}: the trunk thins to {:.0}% at {} ft", least.0 * 100.0, least.1);
+    }
+}
+
+// V80: a bush's leaves are as solid near as far. Presentation only.
+
+/// The bushes judged: free06's four (the user's, a field of them by the start) and free09's two,
+/// by their species.
+const BUSHES: [(&str, usize); 6] = [("free06", 0), ("free06", 1), ("free06", 2), ("free06", 3), ("free09", 1), ("free09", 4)];
+/// How near and how far a bush is judged from, in feet.
+const BUSH_NEAR: f32 = 3.0;
+const BUSH_FAR: f32 = 100.0;
+
+/// A camera `d` feet from a plant's middle, level with it, wide enough to see the whole plant
+/// (at the near distance) and no narrower than the ride camera's (at the far one).
+fn level_at(plant: &eco::Plant, d: f32) -> Camera {
+    let mid = plant.pos.add(v3(0.0, plant.height / 2.0, 0.0));
+    let fov = (2.0 * (0.6 * plant.height.max(plant.width * 2.0) / d).atan()).max(0.9);
+    Camera { eye: mid.add(v3(-0.6 * d, 0.0, -0.8 * d)), at: mid, fov, near: 0.25, far: 20000.0 }
+}
+
+/// Of the pixels a bush's leaf cards cover (its model with no alpha test), the share it draws,
+/// at [`BUSH_NEAR`] and [`BUSH_FAR`]: software's, then the GPU's.
+fn bush_shares(disc: &mut Disc, track: &str, which: usize) -> Option<[[f32; 2]; 2]> {
+    let mut covered = Vec::new();
+    for cards in [false, true] {
+        let mut plant = ride_plant_of(disc, track, which);
+        if cards {
+            let grove = plant.0.ecosystem.as_ref().unwrap();
+            let names = [grove.models[grove.ecosystem.plants[0].species].clone(), grove.cut[grove.ecosystem.plants[0].species].clone()];
+            for name in names {
+                for s in &mut plant.1.models.get_mut(&name).unwrap().surfaces {
+                    (s.cutoff, s.blend, s.keep_coverage) = (0, false, false);
+                }
+            }
+        }
+        let cameras = [BUSH_NEAR, BUSH_FAR].map(|d| level_at(&plant.2, d));
+        // A renderer of its own each time: the GPU keeps a model's materials by its name.
+        covered.push(Shots::new((1280, 960))?.covered_from(&mut plant, &cameras));
+    }
+    let count = |f: &Vec<bool>| f.iter().filter(|&&c| c).count() as f32;
+    Some(std::array::from_fn(|r| std::array::from_fn(|k| count(&covered[0][r][k]) / count(&covered[1][r][k]).max(1.0))))
+}
+
+/// The model alone (the smooth rule with both distances out of reach) of the first plant of
+/// `track`'s species `species`.
+fn ride_plant_of(disc: &mut Disc, track: &str, species: usize) -> (Scene, Assets, eco::Plant) {
+    let archives = archives(disc, track);
+    let bytes = scn(&archives[0]).unwrap();
+    let look = Scene::parse(&game_render::ini::text(&bytes));
+    let place = track::Scene::parse(&bytes).unwrap();
+    let terrain_file = terrain_bytes(&archives[0], &place.terrain_file);
+    let terrain = track::Terrain::parse(&terrain_file).unwrap();
+    let extent = eco::extent(&place.terrain, &terrain);
+    let e = Ecosystem::parse(&archives.iter().find_map(|a| a.read_suffix(look.ecosystem_file.as_deref().unwrap()).ok()).unwrap(), extent).unwrap();
+    let which = e.plants.iter().position(|p| p.species == species).unwrap();
+    let (mut scene, assets, plant) = lone_plant_of(disc, track, which, Lod::Smooth);
+    let grove = scene.ecosystem.as_mut().unwrap();
+    (grove.near, grove.far) = (1.0e5, 1.0e5);
+    (scene, assets, plant)
+}
+
+/// A bush drawn 3 feet off covers about the same share of its leaf cards on the GPU as on the
+/// software renderer, which reads the nearest texel and so draws the texture's own leaves at any
+/// size, and so it does 100 feet off: the GPU's leaves are as solid near as far. (The share itself
+/// is not the same near and far on either: up close the nearest cards fill the frame, from afar
+/// the cards behind fill each other's holes. Near, the GPU's half cut joins the corners of a
+/// diagonal twig's texels that the nearest texel draws as a staircase: DeadBushA's 116%.) At HEAD
+/// the GPU drew free06's bushes with a third of software's leaves at 3 feet and an eighth at 100:
+/// its bilinear read of the alpha was cut at the original's test, 242 of 255, which closes a
+/// magnified texel's edge in to its middle, and the levels kept that thin coverage.
+#[test]
+fn a_bush_up_close_keeps_its_leaves_on_both_renderers() {
+    let _quiet = alone();
+    let Some(mut disc) = disc() else { return };
+    let mut worst = Vec::new();
+    for (track, species) in BUSHES {
+        let Some(shares) = bush_shares(&mut disc, track, species) else { return };
+        let [[sn, sf], [gn, gf]] = shares;
+        println!(
+            "{track} species {species}: of its cards, software {:.0}% at {BUSH_NEAR} ft and {:.0}% at {BUSH_FAR} ft, gpu {:.0}% and {:.0}%",
+            sn * 100.0,
+            sf * 100.0,
+            gn * 100.0,
+            gf * 100.0
+        );
+        assert!(sn > 0.0 && sf > 0.0, "{track} species {species}: drawn");
+        worst.push((track, species, gn / sn, gf / sf));
+    }
+    for (track, species, near, far) in worst {
+        assert!((0.85..=1.2).contains(&near), "{track} species {species}: the GPU draws {:.0}% of software's leaves at {BUSH_NEAR} ft", near * 100.0);
+        assert!((0.8..=1.25).contains(&far), "{track} species {species}: the GPU draws {:.0}% of software's leaves at {BUSH_FAR} ft", far * 100.0);
     }
 }
