@@ -1201,3 +1201,63 @@ impl PlaneFx {
             .collect()
     }
 }
+
+/// The track's own emitters (V45): the `.toy`'s `[ParticleEmitterN]` that stand at a `Position`
+/// and start on — nat08's camp fires and chimney, nat09's smoke and bonfire, nat11's and nat17's
+/// water mist, nat12's puddle fog and mist, the torches and smokes of nat14, nat15, nat17 and nat18.
+///
+/// Each is the plain emitter the plane's `Generic` entries build ([`game_render::toy::Emitter`]),
+/// fixed where the toy stands, turned by nothing, never moving, and so never gated by its speed. The
+/// toy switches it on as it is read, so the frame after the track loads is its first, and it emits
+/// from the one after, as any emitter switched on does. They run as [`PlaneFx`] entries on a node
+/// each — the entry's position — with no plane: no `Disable`, no tire, no wreck.
+///
+/// Left out, by name in [`TrackFx::skipped`]: the ones that start off, which a trigger switches on
+/// (nat12's geysers) or the race's finish (every sx track's fireworks, which also ride the finish
+/// gate's animated toy); the ones on an object; and any class but the plain one.
+#[derive(Clone, Debug)]
+pub struct TrackFx {
+    pub fx: PlaneFx,
+    /// Each entry's node, its emitter's position.
+    pub frame: PlaneFrame,
+    /// The `.toy`'s emitters the port does not run, and why.
+    pub skipped: Vec<(String, String)>,
+}
+
+impl TrackFx {
+    /// The emitters of a `.toy`'s `list` that the port runs, with their `.emt`s out of `read` and
+    /// their frames out of the track's `atlas`.
+    pub fn new(list: &[game_render::toy::Emitter], atlas: Atlas, read: impl Fn(&str) -> Option<Vec<u8>>) -> TrackFx {
+        let mut skipped = Vec::new();
+        let mut entries = Vec::new();
+        let mut nodes = Vec::new();
+        for (i, e) in list.iter().enumerate() {
+            let why = if !e.is_plain() {
+                format!("class {}", e.kind)
+            } else if e.attached {
+                "on an object".to_string()
+            } else if !e.start_on {
+                "starts off".to_string()
+            } else {
+                // Its node is named by its place in the list: two emitters may share a name.
+                let node = format!("ParticleEmitter{}", i + 1);
+                let mut at = M4::IDENTITY;
+                at.0[3] = [e.position.x, e.position.y, e.position.z, 1.0];
+                nodes.push((node.clone(), at));
+                entries.push(Emitter { name: e.name.clone(), kind: "Generic".into(), emitter: e.file.clone(), node: Some(node), ..Emitter::default() });
+                continue;
+            };
+            skipped.push((e.name.clone(), why));
+        }
+        let mut fx = PlaneFx::new(&entries, atlas, read);
+        fx.rng = Rng::new(0x5eed_0045);
+        skipped.append(&mut fx.skipped);
+        TrackFx { fx, frame: PlaneFrame { nodes, ..PlaneFrame::default() }, skipped }
+    }
+
+    /// One frame of `dt` seconds: the particles in the air, then what each emitter makes. `ground` as
+    /// [`PlaneFx::step_over`]'s.
+    pub fn step_over(&mut self, dt: f32, ground: &mut dyn FnMut(V3) -> Option<(f32, u8)>) {
+        self.fx.step_over(&self.frame, dt, ground);
+    }
+}

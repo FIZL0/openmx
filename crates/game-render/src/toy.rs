@@ -391,3 +391,76 @@ impl Traffic {
 /// they move by a filter's worth of updates, agree with the original's at this step and not at half
 /// of it.
 pub const SCENE_STEP: f32 = 1.0 / 30.0;
+
+/// One `[ParticleEmitterN]` of a `.toy` (V45): a smoke, a fire or a mist the track makes on its own,
+/// as the original's particle emitter toy reads it.
+///
+/// **The list.** `[ParticleEmitters] NumberOfParticleEmitters = n`, then `ParticleEmitter1` to `n`.
+/// The count is all the reader goes by: free07 lists 27 emitters, its fires and smokes, under a count
+/// of 0, and so has none.
+///
+/// **The section.** `ParticleType` names the emitter's class, ignoring case: `SMOKE` 0 (and the
+/// default), then `DUST`, `SPARKS`, `STEAM`, `DIRTSPRAY`, `DIRTCHUNKS`, `WATERSPRAY`, `WATERROOST`,
+/// `FIRE`, `EXPLOSION`, `BLOOD`, `FIREWORKS`, `FOG`, `SNOW` and `RING` 1 to 14. A name that is none of
+/// them is 0 as well — which is what the disc's `Generic` is. Types 0, 1, 2, 8 and 9 build the plain
+/// emitter the plane's and the bike's `Generic` entries build; 11, 12 and 14 classes of their own; the
+/// rest none. Every emitter on the disc is `Generic` or `Smoke`. `StartOn` (on where it is missing)
+/// switches it on as it is read. Where it is: on the object `AttachToSceneRef` names, else on the
+/// toy `AttachToToy` names (its `AttachToObject`, its `AttachToSubObject`), else on the scene object
+/// `AttachToObject` names, else at its own `Position` — the toy's, read by every toy's base. The
+/// `.emt` is `EmitterFilename`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Emitter {
+    /// `Name`, which a trigger switches it by.
+    pub name: String,
+    /// `ParticleType` as the original's class number.
+    pub kind: u8,
+    /// `StartOn`.
+    pub start_on: bool,
+    /// `Position`, in the track's feet.
+    pub position: V3,
+    /// Any of the `AttachTo` keys: it rides an object, not its `Position`.
+    pub attached: bool,
+    /// `EmitterFilename`.
+    pub file: String,
+}
+
+impl Emitter {
+    /// The class numbers that build the plain emitter.
+    pub const PLAIN: [u8; 5] = [0, 1, 2, 8, 9];
+
+    /// It builds the plain emitter ([`Emitter::PLAIN`]).
+    pub fn is_plain(&self) -> bool {
+        Emitter::PLAIN.contains(&self.kind)
+    }
+}
+
+/// `ParticleType`'s class number, in the original's order of tests ([`Emitter`]).
+pub fn particle_type(name: &str) -> u8 {
+    const NAMES: [&str; 15] = [
+        "SMOKE", "DUST", "SPARKS", "STEAM", "DIRTSPRAY", "DIRTCHUNKS", "WATERSPRAY", "WATERROOST", "FIRE", "EXPLOSION", "BLOOD",
+        "FIREWORKS", "FOG", "SNOW", "RING",
+    ];
+    NAMES.iter().position(|n| n.eq_ignore_ascii_case(name.trim())).unwrap_or(0) as u8
+}
+
+/// The emitters a `.toy` lists, `ParticleEmitter1` to the count its `[ParticleEmitters]` says.
+pub fn emitters(text: &str) -> Vec<Emitter> {
+    let sections = ini::parse(text);
+    let find = |name: &str| sections.iter().find(|s| s.name.eq_ignore_ascii_case(name));
+    let count = find("ParticleEmitters").and_then(|s| s.number("NumberOfParticleEmitters")).unwrap_or(0.0).max(0.0) as usize;
+    (1..=count).filter_map(|i| find(&format!("ParticleEmitter{i}")).map(emitter)).collect()
+}
+
+fn emitter(s: &Section) -> Emitter {
+    let text = |key: &str| s.get(key).unwrap_or("").trim().to_string();
+    let position = s.numbers("Position").filter(|n| n.len() >= 3).map_or(v3(0.0, 0.0, 0.0), |n| v3(n[0], n[1], n[2]));
+    Emitter {
+        name: text("Name"),
+        kind: s.get("ParticleType").map_or(0, particle_type),
+        start_on: s.get("StartOn").is_none_or(ini::switch),
+        position,
+        attached: ["AttachToSceneRef", "AttachToToy", "AttachToObject"].iter().any(|k| s.get(k).is_some()),
+        file: text("EmitterFilename"),
+    }
+}
