@@ -960,6 +960,54 @@ fn plane_at(plane: &Plane) -> M4 {
     M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up))
 }
 
+/// A flying seat's pilot as a frame draws them (V39): the rider's own body, its root in the plane's
+/// seat ([`Biplane::pilot`]) and its nodes posed by the plane's clips ([`biplane::pilot_palette`]).
+struct Pilot {
+    /// The plane where this frame draws it, between the last two ticks as the plane is.
+    plane: M4,
+    /// The body's root in the world.
+    at: M4,
+    /// The body's node matrices in its own space, held on to the plane's seat.
+    palette: Vec<M4>,
+}
+
+/// Every seat's [`Pilot`], `None` for a seat that is not flying, has no body, or whose rider's
+/// archive has no plane clips. Both renderers draw from it, so the GPU's pilot and the software
+/// path's are the same body in the same seat.
+fn pilots(seats: &[Seat], rigs: &mut [Rig], plane_drawn: &[Biplane], before: &[Option<M4>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
+    seats
+        .iter()
+        .zip(rigs.iter_mut())
+        .enumerate()
+        .map(|(p, (seat, rig))| {
+            let plane = seat.garage.plane_flown()?;
+            let drawn = plane_drawn.get(plane.livery).or(plane_drawn.first())?;
+            let body = rig.body.as_mut()?;
+            let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
+            let at = was.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
+            let palette = biplane::pilot_palette(body, &drawn.anchors)?;
+            Some(Pilot { plane: at, at: drawn.pilot(at), palette })
+        })
+        .collect()
+}
+
+/// `--trace-picture`'s line for a pilot drawn this frame (V39): the renderer, the model, and where
+/// the body's root and the middle of what was drawn of it sit in the plane's own space — the
+/// software path's skinned triangles, the GPU's posed nodes, which its vertex shader skins with.
+fn trace_pilot(p: usize, renderer: &str, model: &str, pilot: &Pilot, drawn: &[V3]) {
+    let o = V3 { x: pilot.plane.0[3][0], y: pilot.plane.0[3][1], z: pilot.plane.0[3][2] };
+    let axis = |i: usize| V3 { x: pilot.plane.0[i][0], y: pilot.plane.0[i][1], z: pilot.plane.0[i][2] };
+    // The plane's placement has no scale, so its rows are its own axes and the inverse is a dot each.
+    let local = |w: V3| {
+        let d = w.sub(o);
+        format!("{:.3} {:.3} {:.3}", d.dot(axis(0)), d.dot(axis(1)), d.dot(axis(2)))
+    };
+    let root = V3 { x: pilot.at.0[3][0], y: pilot.at.0[3][1], z: pilot.at.0[3][2] };
+    let n = drawn.len().max(1) as f32;
+    let middle = drawn.iter().fold(V3 { x: 0.0, y: 0.0, z: 0.0 }, |a, &v| a.add(v)).scale(1.0 / n);
+    println!("pilot: seat {p} {renderer} {model} root {} middle {} of {}", local(root), local(middle), drawn.len());
+}
+
 impl<P: sim_world::World> Game for World<P> {
     /// One simulation pass: each player's pad, then their bike, in player order.
     ///
@@ -5891,6 +5939,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // a rider is re-skinned for a view only where that differs from the view before.
         let mut skinned: Vec<Option<usize>> = vec![None; rigs.len()];
         let mut drawn = 0;
+        // Each flying player's pilot (V39), posed once for every view and both renderers.
+        let pilots = pilots(&world.seats, &mut rigs, &plane_drawn, &before_planes, &cut, &blend);
         if gpu_on {
             // The overlay first: each view's HUD, and the pause over the whole frame.
             let draw_at = Instant::now();
@@ -6034,6 +6084,15 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let alpha = vehicle::shown_alpha(1.0, seat.paused);
                 for (model, at) in drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)) {
                     actors.push(Actor { model, at, pose: None, lod_from: None, alpha });
+                }
+                // And its pilot in the seat (V39), the rider's own body posed by the plane's clips.
+                if let (Some(Some(pilot)), Some(model)) = (pilots.get(p), &rigs[p].body_model) {
+                    gpu_poses.push(pilot.palette.clone());
+                    actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha });
+                    if args.trace_picture {
+                        let nodes: Vec<V3> = pilot.palette.iter().map(|m| m.mul(pilot.at)).map(|m| V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] }).collect();
+                        trace_pilot(p, "gpu", model, pilot, &nodes);
+                    }
                 }
             }
             // And every bay's, see-through where it is parked (P103), the put-back ghost's path.
@@ -6193,7 +6252,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
-                // whom V21 seats.
+                // drawn with the plane below (V39).
                 if seat.garage.up != Kind::Bike || !seated[p] {
                     continue;
                 }
@@ -6279,6 +6338,20 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 let before = before_planes.get(p).copied().flatten().filter(|_| !cut[p]);
                 let at = before.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
                 actor.extend(drawn.turned_parts(at, plane.prop_angle().map(|a| a.0)));
+                // Its pilot (V39), skinned here from the same pose the GPU draws, at the body's
+                // finest level of detail; the bike's rider is not drawn while the plane is up, so
+                // the body's mesh is the pilot's for this seat.
+                if let (Some(Some(pilot)), Some(model)) = (pilots.get(p), &rigs[p].body_model) {
+                    if let Some(loaded) = assets.models.get_mut(model.as_str()) {
+                        loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
+                        skinned[p] = None;
+                        if args.trace_picture {
+                            let corners: Vec<V3> = loaded.tris.iter().flat_map(|t| t.v.iter().map(|v| pilot.at.point(v.pos))).collect();
+                            trace_pilot(p, "software", model, pilot, &corners);
+                        }
+                    }
+                    actor.push((model.as_str(), pilot.at));
+                }
             }
             actor.extend(traffic_at.iter().map(|(model, at)| (model.as_str(), *at)));
             // A world's tiles' props and plants (MD15), culled at the fog as `draw_scene` culls the
