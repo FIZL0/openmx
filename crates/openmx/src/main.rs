@@ -206,6 +206,7 @@ mod split;
 mod spliced;
 mod stages;
 mod tire_tracks;
+mod textures;
 mod track_mods;
 mod track_previews;
 mod trick_packs;
@@ -1461,6 +1462,10 @@ struct Args {
     /// `--foliage cutout|original` (V57): the plants' leaves cut out (V56) or the original's
     /// blended ones; the front end's setting when not given.
     foliage: Option<game_render::eco::Foliage>,
+    /// `--textures upscaled|original` (V84): the world's textures from texture packs,
+    /// `mods/texture-replacements/` and mods' own upscales, or the disc's alone; the front end's
+    /// Upscaled Textures setting when not given.
+    textures: Option<bool>,
     /// `--wheels original` (V59): the bike's wheels drawn turning at the original's own angle and
     /// never blurred, rather than held under the wagon-wheel alias and blurred when they spin fast.
     original_wheels: bool,
@@ -1617,6 +1622,10 @@ fn own_pick(args: &Args) -> roster::Pick {
 }
 
 fn run() -> Result<(), String> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|a| a == "--dump-textures") {
+        return dump_textures(&argv[1..]);
+    }
     let Some(args) = parse_args()? else {
         return Ok(());
     };
@@ -1958,6 +1967,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
                 a.foliage = Some(args.foliage.unwrap_or(shell.front.menu.settings.foliage));
+                a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -2053,6 +2063,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
                 a.foliage = Some(args.foliage.unwrap_or(shell.front.menu.settings.foliage));
+                a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -2497,6 +2508,9 @@ fn loading_frame(
 }
 
 fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
+    // The world's replaced textures (V84), set before anything of the ride is decoded and kept while
+    // it rides: a world's tiles stream in later and are replaced as they load.
+    install_textures(&args);
     // ---- the game modifiers (P55) ----------------------------------------------------------------
     // Applied to what the ride loads, never as a branch in the simulation: at their defaults nothing
     // is touched at all.
@@ -7586,6 +7600,44 @@ fn mods_dir(args: &Args) -> Option<std::path::PathBuf> {
     menu::load(&dir).0.mods.then(|| dir.join(track_mods::MODS_DIR))
 }
 
+/// The world's replaced textures for the next ride (V84, `textures.rs`): `--textures`, else the
+/// front end's or settings.txt's Upscaled Textures; over the mods folder beside the settings, or
+/// `--mods DIR` (`--mods off` reads none), in settings.txt's texture pack order. The line says what
+/// was found.
+fn install_textures(args: &Args) {
+    let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
+    let settings = menu::load(&dir).0;
+    let on = args.textures.unwrap_or(settings.textures);
+    let mods = if args.mods_asked { args.mods.clone() } else { Some(dir.join(track_mods::MODS_DIR)) };
+    println!("{}", textures::install(mods.as_deref(), on, &settings.texture_packs, &settings.texture_packs_off));
+}
+
+/// `openmx --dump-textures [OUT] [--from DIR]` (V84): every disc texture, or with `--from` every one a
+/// mod's folder carries, written at its native size as `<path>-<key>.png` under OUT
+/// (`mods/textures-src/` beside the settings by default): the sources to edit or upscale into
+/// `mods/texture-replacements/`, a texture pack, or a mod's `textures/upscaled/`.
+fn dump_textures(rest: &[String]) -> Result<(), String> {
+    let (mut out, mut from) = (None, None);
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--from" => from = Some(std::path::PathBuf::from(it.next().ok_or("--from wants a mod's folder")?)),
+            a if !a.starts_with("--") && out.is_none() => out = Some(std::path::PathBuf::from(a)),
+            other => return Err(format!("--dump-textures: unknown argument {other}")),
+        }
+    }
+    let out = match out {
+        Some(o) => o,
+        None => menu::store_dir(Disc::configured_path().ok().as_deref()).join(track_mods::MODS_DIR).join(textures::SOURCES),
+    };
+    let n = match &from {
+        Some(dir) => textures::dump_folder(dir, &out)?,
+        None => textures::dump_disc(&mut Disc::open_configured()?, &out)?,
+    };
+    println!("textures: {n} written to {}", out.display());
+    Ok(())
+}
+
 /// The trick pack a ride lays over the original's tricks (MD16): only with `--tricks mxvatv` or the
 /// Tricks row's MX vs. ATV, never on `--online`, and only when the mods folder has one; the line says
 /// why not. A lobby's ride rides its room's pack (MD19) or none at all: without it this machine would
@@ -8059,7 +8111,7 @@ fn load_tire_tracks(archives: &[Res]) -> Option<(Vec<tire_tracks::Params>, game_
     let material = list.first()?.material.clone();
     // The tread sits at the archive's root (`bike\tex\`), so its name is its whole path.
     let name = format!("bike\\tex\\{material}.pst");
-    let texture = match archives.iter().find_map(|a| a.read_suffix(&name).ok()).map(|b| game_render::pst::Texture::parse(&b)) {
+    let texture = match archives.iter().find_map(|a| a.read_suffix(&name).ok()).map(|b| game_render::pst::Texture::parse(&b).map(game_render::replace::swap)) {
         Some(Ok(t)) => t,
         _ => {
             println!("tire tracks: no {name}");
@@ -8204,6 +8256,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         aspect_asked: false,
         plants: None,
         foliage: None,
+        textures: None,
         original_wheels: false,
         headless: false,
         frames: None,
@@ -8479,6 +8532,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let word = next("smooth or original")?;
                 args.plants = Some(game_render::eco::Lod::from_word(&word).ok_or_else(|| format!("--plants: {word:?} is not smooth or original"))?);
             }
+            "--textures" => {
+                args.textures = match next("upscaled or original")?.as_str() {
+                    "upscaled" => Some(true),
+                    "original" => Some(false),
+                    word => return Err(format!("--textures: {word:?} is not upscaled or original")),
+                };
+            }
             "--foliage" => {
                 let word = next("cutout or original")?;
                 args.foliage = Some(game_render::eco::Foliage::from_word(&word).ok_or_else(|| format!("--foliage: {word:?} is not cutout or original"))?);
@@ -8724,6 +8784,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Track mods: a --track not on the disc is looked for in mods/tracks/<id>/\n\
                      beside the settings (openmx-mods' standard), or in --mods DIR; --mods off,\n\
                      or Settings' Mods Off, reads nothing there. A mod rides as a freeride.\n\
+                     \n\
+                     Textures (V84): --dump-textures [OUT] [--from DIR] writes every disc\n\
+                     texture (or a mod folder's) as <name>-<key>.png to mods/textures-src/;\n\
+                     key-named PNGs in mods/texture-replacements/, texture packs and mods'\n\
+                     textures/upscaled/ are drawn in their place. --textures original draws\n\
+                     the disc's alone (Settings' Upscaled Textures).\n\
                      \n\
                      Online: --online NAME@HOST:PORT --peer NAME@HOST:PORT ... --seats NAME,NAME,-\n\
                      rides with the other machines over UDP, one bike a seat (up to eight; the\n\

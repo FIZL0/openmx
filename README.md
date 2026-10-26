@@ -114,6 +114,7 @@ against the original.
 | [docs/PCSX2.md](docs/PCSX2.md) | driving the emulator, save states, recordings |
 | [docs/CONTEXT.md](docs/CONTEXT.md) | keeping a long agent-run project affordable |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | the failures that actually happen |
+| [docs/TEXTURES.md](docs/TEXTURES.md) | upscaled and edited textures: packs, replacements, chaiNNer |
 | [crates/README.md](crates/README.md) | the Rust side's rules: floats, the oracle, dependencies |
 | [plan/HUMAN.md](plan/HUMAN.md) | the things only a person can do (dump the disc, make the states) |
 

@@ -105,7 +105,7 @@ impl Splat {
         let mut layers: Vec<String> = Vec::new();
         let mut splat = Splat::parse(&ini::text(&psm), |name| {
             layers.push(name.to_string());
-            Texture::parse(&read(&format!("{name}.pst"))?).ok()
+            Texture::parse(&read(&format!("{name}.pst"))?).ok().map(crate::replace::swap)
         });
         let tiles: Option<Vec<Texture>> = (1..=16)
             .map(|i| Texture::parse(&read(&format!("{track}_shadow_{i:02}.pst"))?).ok())
