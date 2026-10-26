@@ -268,7 +268,7 @@ added beside them:
     materials, `.sub` bike builds and the `cpresets.ini` follow cameras · `world.rs` a track in
     memory: models, materials and textures matched by name, and drawn (a scene prop by its placement
     alone, not its file's root turn) · `toy.rs` the `.toy`'s path cars — free06's train, its trucks
-    and scrapers, the trailers — on their `.mot` clips at the original's 1/30 s scene step
+    and scrapers, the trailers — on their `.mot` clips at the original's 1/30 s scene step, and its `[ParticleEmitterN]` list, which `openmx`'s `particles::TrackFx` runs (V45)
   - `raster.rs` a depth-buffered, perspective-correct, textured triangle rasteriser · `png.rs` a PNG
     writer · `mat.rs` vectors and 4x4 transforms in the files' own convention ·
     `bin/first-draw.rs` the whole chain: disc in, one frame of a track out

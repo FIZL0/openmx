@@ -3487,6 +3487,21 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
     };
     let mut bike_fx: Vec<particles::PlaneFx> = Vec::new();
+    // The track's own smokes, fires and mists (V45): the `.toy`'s emitters, on the same sheet. A
+    // world's tiles carry theirs in their own feet, which nothing here shifts, so a world has none.
+    let (mut track_fx, soft_sheet) = match (&world_mod, load_track_fx(&archives, &stem)) {
+        (None, Ok((fx, sheet))) => {
+            if fx_sheet.is_none() {
+                fx_sheet = Some(sheet.clone());
+            }
+            (Some(fx), soft_sheet.or(Some(sheet)))
+        }
+        (None, Err(why)) => {
+            println!("track: no particles: {why}");
+            (None, soft_sheet)
+        }
+        (Some(_), _) => (None, soft_sheet),
+    };
 
     // ---- the window and the pad ---------------------------------------------------------------
     // `--headless` opens neither: no window to show the frame in and no host pad to read, so every
@@ -5415,6 +5430,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
             }
         }
+        // The track's (V45): a frame for each frame simulated, as the bikes' are.
+        if simulated && let Some(fx) = &mut track_fx {
+            let place = &mut world.place;
+            fx.step_over(dt.0, &mut |at| plane_fx_ground(place, at));
+        }
         // The bike's tire tracks (V40): a tick of each seat's that rode its bike this frame. They read
         // the ride and write nothing back.
         if simulated && let Some((list, _)) = &tread {
@@ -6265,6 +6285,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, sprites: &gpu_sprites, light: &light };
             let mut sprites = plane_fx.as_ref().map_or_else(Vec::new, |(fx, _)| plane_sprites(fx));
             sprites.extend(bike_fx.iter().flat_map(plane_sprites));
+            sprites.extend(track_fx.iter().flat_map(|t| plane_sprites(&t.fx)));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -6497,7 +6518,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             // And the bikes' (P74), the same way.
             if let Some(sheet) = &soft_sheet {
-                for fx in &bike_fx {
+                for fx in bike_fx.iter().chain(track_fx.iter().map(|t| &t.fx)) {
                     tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
                 }
             }
@@ -7316,6 +7337,29 @@ fn load_bike_fx(archives: &[Res], track: &str) -> Result<(particles::PlaneFx, ga
     }
     for (name, why) in &fx.skipped {
         println!("bike: particles: {name} ({why}) not ported");
+    }
+    Ok((fx, texture))
+}
+
+/// The track's own emitters (V45): the `.toy`'s list, each `.emt` it names, and the track's sheet,
+/// out of the track's archives. Says what it runs and what it leaves out.
+fn load_track_fx(archives: &[Res], track: &str) -> Result<(particles::TrackFx, game_render::pst::Texture), String> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let toy = read(&format!("{track}.toy")).ok_or(format!("no {track}.toy"))?;
+    let list = game_render::toy::emitters(&ini::text(&toy));
+    if list.is_empty() {
+        return Err(format!("{track}.toy has none"));
+    }
+    let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
+    let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
+    let texture = game_render::pst::Texture::parse(&texture)?;
+    let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
+    let fx = particles::TrackFx::new(&list, atlas, read);
+    for e in &fx.fx.entries {
+        println!("track: particles: {} ({}) from {:?}", e.name, e.node.as_deref().unwrap_or(""), e.emt.group);
+    }
+    for (name, why) in &fx.skipped {
+        println!("track: particles: {name} ({why}) not run");
     }
     Ok((fx, texture))
 }

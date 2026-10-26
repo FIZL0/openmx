@@ -5184,3 +5184,20 @@ path_car_measure      boot 0x00115330 each segment's arc: ten chords of the curv
 path_car_lag          boot 0x00116150 the clip time LagDistance of arc behind s (walks keys back, wraps)
 path_car_curve        boot 0x00116410 Hermite on the cursor's segment, Catmull-Rom tangents (chord at ends)
 path_car_vtable       boot 0x0044d370 the path car's vtable, at +8 of the car (scan a RAM image for it to find the cars)
+# V45 — the track's own particle emitters, the .toy's [ParticleEmitterN] (journal *-v45-track-particles).
+#   emitter list reader 0x00331530: [ParticleEmitters] NumberOfParticleEmitters, then ParticleEmitter1..n
+#   only — free07's 27 sections sit under a count of 0 and are never read. Each is an emitter toy
+#   (ctor 0x00331860, vtable 0x00459f20) registered with the actor manager.
+#   its read virtual (vt +0x74) 0x003319b0: ParticleType -> class by 0x00331690 (case-insensitive
+#   compare 0x00410c50 against SMOKE DUST SPARKS STEAM DIRTSPRAY DIRTCHUNKS WATERSPRAY WATERROOST FIRE
+#   EXPLOSION BLOOD FIREWORKS FOG SNOW RING = 0..14, no match 0, so "Generic" is 0); StartOn (1) toy
+#   +0x144 bit 0; OrientWithToy (0) +0xe0; Zone (-1); OffsetFromObject +0xc0; RotateWithObject (1) +0xdc;
+#   VisibilityToyName ("none"); AttachToSceneRef / AttachToToy+AttachToObject(+AttachToSubObject) /
+#   AttachToObject, else +0xc0 = the toy's own Position (base read 0x00212270, getter 0x002124d0).
+#   Classes 0,1,2,8,9 build the plain emitter 0x001503e0 (the plane's Generic's, P58); 11 0x00152330,
+#   12 0x00153650, 14 0x001542f0. Then emitter vt +0x80 init(system, EmitterFilename, node, &pos,
+#   rotate, zone), position set twice with no node (0x0014e470), and vt +0x98 on / +0x9c off by StartOn.
+#   vt +0x80 of the toy 0x003321b0 is the on/off message a trigger sends; vt +0x7c 0x003320f0 resets.
+#   The emit gate 0x0014daa0: emitter +0x240 bit 1 (just switched on) only sets the previous point;
+#   +0x274 DelayTime counts down first; +0x270 EmitMode (1 = one-shot, 2 = random, ...). .emt
+#   UseViewDependentCull +0x244, FarCullDistance +0x24c, DirectionalCullDistance +0x250 (emt_read).
