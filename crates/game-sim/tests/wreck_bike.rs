@@ -9,6 +9,10 @@
 //! * each wreck's bike body, started from its first state and ticked by [`WreckBike::tick`] over the
 //!   disc's free09 ground, is the captured body to the bit, every tick until the wreck ends.
 //!
+//! S76 adds the scene's props: the wreck bike's probes are the plane's and leave the scenery in, and
+//! every wreck — the s62 ones and two into free09's garage (`research/s76_tele.py`) — replays bit-exact
+//! through [`WreckBike::tick_among`] over free09's ground and all its collision meshes.
+//!
 //! The captures, states and disc are game data, git-ignored: absent, the tests skip.
 
 use game_sim::archive::{Psr, Res};
@@ -18,7 +22,7 @@ use game_sim::contact_search::Heightfield;
 use game_sim::phy::Part;
 use game_sim::ride::WRECK_INERTIA;
 use game_sim::track::{Rays, Scene, Terrain};
-use game_sim::world::Ground;
+use game_sim::world::{Ground, Props};
 use game_sim::wreck_bike::{self, NoObjects, WreckBike};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
@@ -498,6 +502,58 @@ fn the_loader_builds_the_original_collision_object() {
     assert_eq!(field.split_one_way(), ee.u32_at(t + ter::SPLIT) == 1, "split one way");
 }
 
+/// free09's scene props, read as the shell reads them, out of its two track archives.
+fn free09_props(disc: &mut Disc) -> Props {
+    let by_suffix = |res: &Res, want: &str| {
+        let want = want.to_ascii_lowercase();
+        res.entries.iter().position(|e| {
+            let name = e.name.to_ascii_lowercase();
+            name == want || name.ends_with(&format!("\\{want}"))
+        })
+    };
+    let (_, scene) = free09(disc);
+    let parts: Vec<(Vec<u8>, Res)> = ["Tracks\\free09.res", "Tracks\\free09_2.res"]
+        .into_iter()
+        .filter(|n| disc.psr.find(n).is_some())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|n| {
+            let bytes = disc.member(n);
+            let res = Res::parse(&bytes).expect("a track archive");
+            (bytes, res)
+        })
+        .collect();
+    let (props, missing) = Props::load(&scene, |want| {
+        parts
+            .iter()
+            .find_map(|(bytes, res)| by_suffix(res, want).and_then(|e| res.read(bytes, &res.entries[e]).ok()))
+            .ok_or_else(|| "no archive of this track has it".to_string())
+    });
+    // The shell skips it too: its one hierarchy file is not a mesh the port reads.
+    assert_eq!(missing, ["UTILITYSHACK1.col: this is a Hierarchy collision file, read as Mesh"], "free09's props the port lacks");
+    props
+}
+
+/// One wreck's bike, from its first state, ticked by `tick` against the captured body every tick
+/// until the wreck ends: the ticks that agree, or the first that does not.
+fn replay(part: &Part, (name, frame, last): (&str, u32, u32), mut tick: impl FnMut(&mut WreckBike, F)) -> Option<Result<u32, String>> {
+    let cap = Capture::load(name)?;
+    let ee = state(name, frame)?;
+    let mut bike = bike_from(&ee, part);
+    assert!(
+        bodies_differ(&bike.body, &captured_body(&cap.bytes(frame, "bike_a")[0x200..0x400])).is_empty(),
+        "{name}: the state's body is not its row's"
+    );
+    for f in frame + 1..=last {
+        tick(&mut bike, F(cap.get(f, "dt")));
+        let differ = bodies_differ(&bike.body, &captured_body(&cap.bytes(f, "bike_a")[0x200..0x400]));
+        if !differ.is_empty() {
+            return Some(Err(format!("{name}: tick {f} differs in {differ:?}")));
+        }
+    }
+    Some(Ok(last - frame))
+}
+
 /// Each wreck's bike, from its first state, ticked by the port over free09 against the captured
 /// body, every tick until the wreck ends.
 #[test]
@@ -510,27 +566,64 @@ fn the_wreck_bikes_replay_bit_exact() {
     let field = ground.field();
     let mut ticks = 0;
     let mut failures = Vec::new();
-    for (name, frame, last) in WRECKS {
-        let Some(cap) = Capture::load(name) else { return };
-        let Some(ee) = state(name, frame) else { return };
-        let mut bike = bike_from(&ee, &part);
-        assert!(
-            bodies_differ(&bike.body, &captured_body(&cap.bytes(frame, "bike_a")[0x200..0x400])).is_empty(),
-            "{name}: the state's body is not its row's"
-        );
-        for f in frame + 1..=last {
-            bike.tick(F(cap.get(f, "dt")), Some(&field), &mut NoObjects);
-            let want = captured_body(&cap.bytes(f, "bike_a")[0x200..0x400]);
-            let differ = bodies_differ(&bike.body, &want);
-            if !differ.is_empty() {
-                failures.push(format!("{name}: tick {f} differs in {differ:?}"));
-                break;
-            }
-            ticks += 1;
+    for wreck in WRECKS {
+        let Some(run) = replay(&part, wreck, |bike, dt| bike.tick(dt, Some(&field), &mut NoObjects)) else { return };
+        match run {
+            Ok(n) => ticks += n,
+            Err(e) => failures.push(e),
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
     assert_eq!(ticks, 78 + 78 + 78 + 78 + 50, "ticks compared");
+}
+
+/// S76's wrecks into free09's garage (`research/s76_tele.py` puts recording2's bike in the farmyard,
+/// `research/s62_wreck.py` with `research/s76/gas.pad` rides it into the back wall): the capture, its
+/// first state's frame, the last frame of the wreck. The first is the bike that struck the back wall
+/// at 75 ft/s and bounces off it; the second is the respawned bike driven into the garage's side.
+const GARAGE: [(&str, u32, u32); 2] = [("garage", 2882, 2960), ("garage", 3002, 3079)];
+
+/// S76: the wreck bike among the scene's props. Every wreck — the five s62 ones out in the open and
+/// the two into free09's garage — ticked by [`WreckBike::tick_among`] over free09's ground and all its
+/// collision meshes is the captured body to the bit until the wreck ends; and the garage's first,
+/// ticked against the terrain alone, parts from the capture, so the wall is what the replay met.
+#[test]
+fn the_wreck_bikes_replay_among_free09s_props() {
+    let Some(mut disc) = Disc::open() else { return };
+    let (part, _) = wreck_files(&mut disc);
+    let props = free09_props(&mut disc);
+    let (bytes, scene) = free09(&mut disc);
+    let terrain = Terrain::parse(&bytes).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let field = ground.field();
+    let mut ticks = 0;
+    let mut failures = Vec::new();
+    // The ticks on which the search left the bike touching an object, wreck by wreck.
+    let mut touched = Vec::new();
+    for wreck in WRECKS.into_iter().chain(GARAGE) {
+        let mut on_object = 0;
+        let run = replay(&part, wreck, |bike, dt| {
+            bike.tick_among(dt, Some(&field), Some(&props), None);
+            on_object += u32::from(bike.record.on_object);
+        });
+        let Some(run) = run else { return };
+        match run {
+            Ok(n) => ticks += n,
+            Err(e) => failures.push(e),
+        }
+        touched.push(on_object);
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert_eq!(ticks, 78 + 78 + 78 + 78 + 50 + 78 + 77, "ticks compared");
+    eprintln!("ticks touching a prop, wreck by wreck: {touched:?}");
+    assert_eq!(touched[..WRECKS.len()], [0; WRECKS.len()], "an s62 wreck met a prop");
+    assert!(touched[WRECKS.len()..].iter().all(|&n| n > 0), "a garage wreck never touched the garage: {touched:?}");
+
+    for wreck in GARAGE {
+        let bare = replay(&part, wreck, |bike, dt| bike.tick(dt, Some(&field), &mut NoObjects)).expect("the garage capture");
+        let parted = bare.expect_err("a garage wreck replays without the garage");
+        eprintln!("against the terrain alone: {parted}");
+    }
 }
 
 /// The ray probe's tree the trees are searched with (S102): [`wreck_bike::ray_tree`]'s nodes are
@@ -635,4 +728,52 @@ fn a_wreck_bike_strikes_a_free09_trunk() {
     assert!(reaches <= parted && parted <= reaches + 2, "the trunk struck at tick {parted}, the bike reached it at {reaches}");
     let (end_bare, end) = (off(&bare[ticks - 1]), off(&ride[ticks - 1]));
     assert!(end < end_bare - 3.0, "the struck bike is thrown back: it ends {end} ft off the trunk, the bare one {end_bare}");
+}
+
+/// S76: the wreck bike's two probes, as every s62 state and the garage's hold them, are the plane's
+/// ([`flight_search::PROBE`], every category, the ray probe's flags, no category left out on the ray
+/// probe), and what they leave out — four collidables on the ray probe and two on the sweep, by
+/// pointer, and on the sweep the categories 0x8 and 0x800 — is never a scenery mesh, so the
+/// world's props are searched as the plane searches them.
+#[test]
+fn the_wreck_bikes_probes_search_the_scenery() {
+    use game_sim::flight_search::{PROBE, PROBE_COLLIDES_WITH, SCENERY};
+    const CATEGORY: u32 = 0x84;
+    const COLLIDES_WITH: u32 = 0xcc;
+    const OBJECTS: u32 = 0xd0;
+    const CATEGORIES: u32 = 0xe8;
+    const FLAGS: u32 = 0x116;
+    let mut seen = 0;
+    let mut hits = Vec::new();
+    for (name, frame, _) in WRECKS.into_iter().chain(GARAGE) {
+        let Some(ee) = state(name, frame) else { return };
+        let (_, c) = bike_in(&ee);
+        let (ray, sweep) = (ee.u32_at(c + rec::RAY_PROBE), ee.u32_at(c + rec::SWEEP_PROBE));
+        let list = |o: u32, at: u32| -> (u32, Vec<u32>) {
+            let (mode, arr, n) = (ee.u32_at(o + at), ee.u32_at(o + at + 4), ee.u32_at(o + at + 8));
+            (mode, (0..n).map(|k| ee.u32_at(arr + 4 * k)).collect())
+        };
+        for (what, o) in [("ray", ray), ("sweep", sweep)] {
+            assert_eq!((ee.u32_at(o + CATEGORY), ee.u32_at(o + COLLIDES_WITH)), (PROBE, PROBE_COLLIDES_WITH), "{name}: the {what} probe's masks");
+            // Without the per-search and the hit bits, which the state may have caught raised.
+            assert_eq!(ee.u8_at(o + FLAGS) & !0x30, if what == "ray" { 0x02 } else { 0x03 }, "{name}: the {what} probe's flags");
+            let (mode, left_out) = list(o, OBJECTS);
+            assert_eq!(mode, 1, "{name}: the {what} probe's object list leaves out");
+            for x in &left_out {
+                assert_ne!(ee.u32_at(x + CATEGORY), SCENERY, "{name}: the {what} probe leaves out a scenery mesh");
+            }
+            assert_eq!(left_out.len(), if what == "ray" { 4 } else { 2 }, "{name}: what the {what} probe leaves out");
+        }
+        assert_eq!(list(ray, CATEGORIES), (1, vec![]), "{name}: the ray probe's category list");
+        let (mode, cats) = list(sweep, CATEGORIES);
+        assert_eq!((mode, &cats[..]), (1, &[0x8, 0x800][..]), "{name}: the sweep probe's category list");
+        assert!(cats.iter().all(|&k| k & SCENERY == 0), "{name}: the sweep leaves the scenery out");
+        hits.push(ee.u8_at(ray + FLAGS) & 0x20 != 0);
+        seen += 1;
+    }
+    assert_eq!(seen, WRECKS.len() + GARAGE.len(), "states read");
+    // The ray probe's hit bit, which only a struck object raises (the terrain is the heightfield
+    // rays'), is down in every s62 state and in the garage's first, and up where its second starts:
+    // the respawned bike already against the garage's side.
+    assert_eq!(hits, [false, false, false, false, false, false, true], "the ray probe's hit bits");
 }

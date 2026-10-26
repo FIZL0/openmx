@@ -5354,3 +5354,18 @@ motion_turn_table_build boot 0x0044bf50 start-up: fills motion_turn_table and mo
 node_flatten           boot 0x001b35b0 (node, out) a node's descendants: its children (first child +0x104,
 #                      next sibling +0x108) in order, then each child's own flattening in turn
 node_count             boot 0x001b3420 1 + a node's descendants: what a hierarchy part's bone is clamped by
+
+# S76 — the wreck bike's world objects (wreck_bike::WreckBike::tick_among, wired in ride::Crash::step;
+#   proved in tests/wreck_bike.rs). Read off the s62 states and S76's garage states (context/capture/s62
+#   in s3): the wreck bike's record +0x1f0 is its ray probe, +0x1f4 its sweep probe, +0x10c its nearby
+#   search. Both probes: category (+0x84) 0x8, collides-with (+0xcc) 0xffffffff, flags (+0x116) ray 0x02,
+#   sweep 0x03, plus the transient 0x10 (searched) and 0x20 (hit: up only in garage-3002, against the
+#   garage's side). Leave-out lists (+0xd0 mode, +0xd4 array, +0xd8 count), mode 1: the ray probe's the
+#   bike's own collidable (0x9a058), the sweep probe, the riding bike (0x9a048) and the rider (0x18000);
+#   the sweep's the bike's own and the ray probe. Category lists (+0xe8/+0xec/+0xf0) mode 1: ray empty,
+#   sweep [0x8, 0x800]. So scenery (0x220) is searched, as the plane's probes search it. The nearby list
+#   at the s62 states held only moving collidables (0x48 toys, 0x9a048 bikes, 0x200020): no scenery
+#   within the ~10-15 ft bound there.
+#   Garage capture: recording2's state teleported to (4642.5, 135.6, 3650) (research/s76_tele.py), full
+#   gas north (research/s76/gas.pad) into free09's farmyard garage's back wall (z 3876.3, x 4625..4660):
+#   reason 1 at frame 2882, wreck to 2960; the respawned wreck 3002..3079 against its side.

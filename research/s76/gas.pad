@@ -1,0 +1,4 @@
+# S76: full gas, straight on, into the garage's back wall
+down cross
+sleep 20000
+release
