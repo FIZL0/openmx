@@ -17,6 +17,8 @@ pub const TRICKS_DIR: &str = "tricks";
 pub struct Pack {
     pub id: String,
     folder: PathBuf,
+    /// Its stunt table's file (`riders[0].table`).
+    table: PathBuf,
     /// The first rider's stunt table (`riders[0]`, MX vs. ATV's male motocross rider).
     rows: Vec<Row>,
     /// That rider's clip prefix (`riders[0].rider`, `MX`), which names its clips (MD21).
@@ -46,6 +48,28 @@ pub fn find(mods: &Path) -> Result<Pack, String> {
     Err(why.join("; "))
 }
 
+/// The trick pack in `mods/tricks/` whose `mod.json` says `id` (MD19: the one an online room rides),
+/// or why there is none.
+pub fn by_id(mods: &Path, id: &str) -> Result<Pack, String> {
+    let dir = mods.join(TRICKS_DIR);
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("mod.json").is_file())
+        .collect();
+    folders.sort();
+    let mut why = Vec::new();
+    for folder in folders {
+        match read(&folder) {
+            Ok(Some(pack)) if pack.id == id => return Ok(pack),
+            Ok(_) => {}
+            Err(e) => why.push(format!("{}: {e}", folder.display())),
+        }
+    }
+    why.push(format!("no trick pack {id} in {}", dir.display()));
+    Err(why.join("; "))
+}
+
 /// `Ok(None)` for a mod that is not a trick pack.
 fn read(folder: &Path) -> Result<Option<Pack>, String> {
     let text = std::fs::read_to_string(folder.join("mod.json")).map_err(|e| format!("mod.json: {e}"))?;
@@ -61,8 +85,9 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
     let table = first.and_then(|r| r.get("table")).and_then(Json::str).ok_or("mod.json has no riders[0].table")?;
     // The motocross rider's when the pack does not say: every pack import-tricks writes says `MX`.
     let rider = first.and_then(|r| r.get("rider")).and_then(Json::str).unwrap_or("MX").to_owned();
-    let bytes = std::fs::read(file(folder, table)).map_err(|e| format!("{table}: {e}"))?;
-    let rows = trick_pack::table(&bytes).map_err(|e| format!("{table}: {e}"))?;
+    let table = file(folder, table);
+    let bytes = std::fs::read(&table).map_err(|e| format!("{}: {e}", table.display()))?;
+    let rows = trick_pack::table(&bytes).map_err(|e| format!("{}: {e}", table.display()))?;
     let mut phys = Vec::new();
     if let Some(Json::Arr(list)) = json.get("phy") {
         for name in list.iter().filter_map(Json::str) {
@@ -72,7 +97,7 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
             }
         }
     }
-    Ok(Some(Pack { id, folder: folder.to_owned(), rows, rider, phys }))
+    Ok(Some(Pack { id, folder: folder.to_owned(), table, rows, rider, phys }))
 }
 
 /// A pack's file by its `/`-separated name, kept inside the pack's folder.
@@ -108,6 +133,22 @@ impl Pack {
         }
     }
 
+    /// What an online ride's handshake compares (MD19): 64-bit FNV-1a over every file of the pack the
+    /// simulation reads — its `mod.json`, its stunt table and its `.phy` files, each after its name —
+    /// so two machines with the same id but another file are told apart. The clips are drawn, not
+    /// simulated, and are not in it.
+    pub fn hash(&self) -> Result<u64, String> {
+        let mut all = Vec::new();
+        let mut files = vec![("mod.json".to_string(), self.folder.join("mod.json")), ("table".to_string(), self.table.clone())];
+        files.extend(self.phys.iter().cloned());
+        for (name, path) in files {
+            all.extend(name.as_bytes());
+            all.push(0);
+            all.extend(std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
+        }
+        Ok(openmx_net::handshake::fnv(&all))
+    }
+
     /// The pack's clips, for the rider and the bike to bind (MD21).
     pub fn clips(&self) -> Result<game_render::anim::PackClips, String> {
         game_render::anim::PackClips::open(&self.folder, &self.rider)
@@ -130,5 +171,40 @@ impl Pack {
             side("rider", rider),
             side("bike", bike)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pack of `id` in a fresh `mods/` in the temp dir, its table `table`.
+    fn pack(name: &str, id: &str, table: &str) -> PathBuf {
+        let mods = std::env::temp_dir().join(format!("openmx-trick-packs-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mods);
+        let folder = mods.join(TRICKS_DIR).join(id);
+        std::fs::create_dir_all(folder.join("Bike")).unwrap();
+        let json = format!(r#"{{"kind": "tricks", "id": "{id}", "riders": [{{"rider": "MX", "table": "stunts.ini"}}], "phy": ["Bike/mx_race125p.phy"]}}"#);
+        std::fs::write(folder.join("mod.json"), json).unwrap();
+        std::fs::write(folder.join("stunts.ini"), table).unwrap();
+        std::fs::write(folder.join("Bike/mx_race125p.phy"), "[Three Sixty]\n").unwrap();
+        mods
+    }
+
+    #[test]
+    fn a_pack_is_found_by_its_id_and_a_changed_file_hashes_otherwise() {
+        let a = pack("a", "mxvatv", "[Stunt01]\nName=threesixtyL\n");
+        let b = pack("b", "mxvatv", "[Stunt01]\nName=threesixtyL\n");
+        let same = by_id(&a, "mxvatv").unwrap().hash().unwrap();
+        assert_eq!(by_id(&b, "mxvatv").unwrap().hash().unwrap(), same, "the same files on another machine");
+        assert!(by_id(&a, "untamed").err().unwrap_or_default().contains("no trick pack untamed"));
+        std::fs::write(b.join(TRICKS_DIR).join("mxvatv").join("stunts.ini"), "[Stunt01]\nName=threesixtyR\n").unwrap();
+        assert_ne!(by_id(&b, "mxvatv").unwrap().hash().unwrap(), same, "a changed table");
+        let c = pack("c", "mxvatv", "[Stunt01]\nName=threesixtyL\n");
+        std::fs::write(c.join(TRICKS_DIR).join("mxvatv").join("Bike/mx_race125p.phy"), "[Three Sixty]\nx=1\n").unwrap();
+        assert_ne!(by_id(&c, "mxvatv").unwrap().hash().unwrap(), same, "a changed .phy");
+        for m in [a, b, c] {
+            let _ = std::fs::remove_dir_all(m);
+        }
     }
 }

@@ -22,6 +22,11 @@ pub trait Disc: Send + Sync {
     fn bike(&self, _set: &str) -> Option<u64> {
         None
     }
+    /// The trick pack `id` (MD19) as this machine's mods folder holds it, hashed: `None` when it has
+    /// no such pack.
+    fn tricks(&self, _id: &str) -> Option<u64> {
+        None
+    }
     /// This machine's player's saved markers on `track` for the bike set `bike`, as a pick carries
     /// them ([`crate::room::Pick::markers`]), for a ride it drops in on (P105): empty for none, and
     /// where nothing is saved (the terminal lobby).
@@ -64,6 +69,12 @@ pub struct Handshake {
     /// they are the peer's own, and every machine is sent them in the ride's state.
     #[serde(default)]
     pub markers: String,
+    /// The room's trick pack (MD19, [`Room::tricks`]), empty for the original's tricks, and this
+    /// peer's hash of its own pack of that id ([`Disc::tricks`]).
+    #[serde(default)]
+    pub tricks: String,
+    #[serde(default)]
+    pub tricks_hash: Option<u64>,
 }
 
 /// The build: two builds can't be trusted to simulate alike. The crate's version and "dev" unless the shell stamps
@@ -94,6 +105,8 @@ impl Handshake {
             presets: room.seats.iter().flatten().map(|s| s.pick.preset).collect(),
             seed: room.seed,
             markers: String::new(),
+            tricks: room.tricks.clone(),
+            tricks_hash: if room.tricks.is_empty() { None } else { disc.tricks(&room.tricks) },
         }
     }
 
@@ -131,6 +144,14 @@ impl Handshake {
         if self.biplane != host.biplane {
             return differ("the biplane", on(self.biplane), on(host.biplane));
         }
+        let tricks = |id: &str| if id.is_empty() { "none, the original's tricks".to_string() } else { id.to_string() };
+        if self.tricks != host.tricks {
+            return differ("the trick pack", tricks(&self.tricks), tricks(&host.tricks));
+        }
+        if self.tricks_hash != host.tricks_hash {
+            let why = if self.tricks_hash.is_none() { "isn't in your mods folder" } else { "isn't the same in your mods folder as in the host's" };
+            return Err(format!("Can't ride: the host's trick pack {} {why}.", host.tricks));
+        }
         if self.presets != host.presets {
             let n = (0..self.presets.len().max(host.presets.len())).find(|&n| self.presets.get(n) != host.presets.get(n)).unwrap_or(0);
             let said = |p: Option<&u8>| p.map_or("none".to_string(), |p| p.to_string());
@@ -157,6 +178,8 @@ mod tests {
             presets: vec![0, 2],
             seed: 99,
             markers: String::new(),
+            tricks: String::new(),
+            tricks_hash: None,
         }
     }
 
@@ -180,6 +203,36 @@ mod tests {
         refused(Handshake { biplane: true, ..h.clone() }, "the biplane differs");
         refused(Handshake { presets: vec![0, 3], ..h.clone() }, "rider 2's controller preset differs (host: 2, you: 3)");
         refused(Handshake { presets: vec![0], ..h.clone() }, "rider 2's controller preset differs (host: 2, you: none)");
+        refused(Handshake { tricks: "mxvatv".into(), tricks_hash: Some(5), ..h.clone() }, "the trick pack differs (host: none, the original's tricks, you: mxvatv)");
+    }
+
+    /// A disc whose mods folder holds one trick pack.
+    struct Pack(&'static str, u64);
+
+    impl Disc for Pack {
+        fn tricks(&self, id: &str) -> Option<u64> {
+            (id == self.0).then_some(self.1)
+        }
+    }
+
+    #[test]
+    fn every_seat_rides_the_hosts_trick_pack() {
+        let mut room = Room::new("h", "free06", 2);
+        room.take(crate::room::HOST, &[Pick::new("thq1", "race125p")]);
+        assert_eq!(Handshake::of(&room, &Pack("mxvatv", 1)).tricks_hash, None, "the original's tricks hash nothing");
+        assert_eq!(Handshake::of(&room, &Names).check(&Handshake::of(&room, &Pack("mxvatv", 1))), Ok(()));
+        room.tricks = "mxvatv".into();
+        let host = Handshake::of(&room, &Pack("mxvatv", 1));
+        assert_eq!(host.tricks_hash, Some(1));
+        assert_eq!(Handshake::of(&room, &Pack("mxvatv", 1)).check(&host), Ok(()), "the same pack rides");
+        let e = Handshake::of(&room, &Pack("mxvatv", 2)).check(&host).unwrap_err();
+        assert_eq!(e, "Can't ride: the host's trick pack mxvatv isn't the same in your mods folder as in the host's.");
+        let e = Handshake::of(&room, &Names).check(&host).unwrap_err();
+        assert_eq!(e, "Can't ride: the host's trick pack mxvatv isn't in your mods folder.");
+        let e = Handshake::of(&room, &Pack("untamed", 1)).check(&host).unwrap_err();
+        assert!(e.contains("trick pack mxvatv isn't in your mods folder"), "{e}");
+        let old: Room = serde_json::from_str(&serde_json::to_string(&Room::new("h", "free06", 2)).unwrap()).unwrap();
+        assert_eq!(old.tricks, "", "a room from a build before MD19 rides the original's tricks");
     }
 
     #[test]
