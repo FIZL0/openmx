@@ -360,6 +360,19 @@ pub fn round_slanted(out: &mut Vec<Sprite>, b: Box4, radius: f32, slant: f32, to
     out.push(quad(b, slant, b[1] + b[3], top, Shape::Round { size: [b[2], b[3]], radius, ring: 0.0, bottom }));
 }
 
+/// [`round_slanted`] with no corners and its right end square at the box's right edge (P172): the
+/// hint tab, which ends at its view's edge rather than running off it into the next view.
+pub fn tab(out: &mut Vec<Sprite>, b: Box4, slant: f32, colour: [u8; 4]) {
+    let [x, y, w, h] = b;
+    let (x0, y0, x1, y1) = (x - 1.0, y - 1.0, x + w, y + h + 1.0);
+    let lean = |yy: f32| (y + h - yy) * slant;
+    let corners = [[x0 + lean(y0), y0], [x1, y0], [x1, y1], [x0 + lean(y1), y1]];
+    // The shape runs on past the square end, so nothing fades at the view's edge.
+    let local = [[-1.0, -1.0], [w, -1.0], [w, h + 1.0], [-1.0, h + 1.0]];
+    let shape = Shape::Round { size: [w + 2.0, h], radius: 0.0, ring: 0.0, bottom: colour };
+    out.push(Sprite { corners, uv: [[0.0; 2]; 4], local, clamp: [0.0; 4], image: None, tint: colour, shape });
+}
+
 /// The band `width` wide inside a rounded box's edge.
 pub fn ring(out: &mut Vec<Sprite>, b: Box4, radius: f32, width: f32, colour: [u8; 4]) {
     out.push(quad(b, 0.0, 0.0, colour, Shape::Round { size: [b[2], b[3]], radius, ring: width, bottom: colour }));

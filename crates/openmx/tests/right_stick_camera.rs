@@ -354,3 +354,55 @@ fn the_look_back_command_holds_the_look_back_preset() {
     assert_eq!(two.cam.cam.preset, 0);
     assert_eq!(two.cam.cam.look_back_preset(), None);
 }
+
+/// P172: 1P's own pause holds 1P's camera exactly where the pause's tick left it while 2P rides on.
+/// The shell's paused pass polls the pad (which drives the pause's menu, here with the right stick
+/// pushed full right, an orbit if the camera read it) and steps nothing, and [`chase::PauseHold`]
+/// says the camera is held: the view drawn is the last one, the same every paused frame. On
+/// Resume it carries on from there, bit for bit the frame a seat that never paused takes next.
+#[test]
+fn a_seats_pause_holds_its_camera_and_resume_carries_on() {
+    let (mut one, mut two, mut never, mut unheld) = (Seat::new(), Seat::new(), Seat::new(), Seat::new());
+    let framing = (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL);
+    let mut hold = chase::PauseHold::default();
+    let gas = report(&[], CENTRE);
+    let mut shown = None;
+    for _ in 0..30 {
+        assert_eq!(hold.frame(false, framing), chase::Paused::Riding);
+        shown = Some(one.tick(gas, true).0);
+        two.tick(gas, true);
+        never.tick(gas, true);
+        unheld.tick(gas, true);
+    }
+    let paused_on = bits(shown.as_ref().unwrap());
+    // What the camera would do were it framed on the frozen bike: it is still settling, so a hold
+    // that is not a hold shows.
+    let rider = chase::bike(&unheld.sim.rider.ride);
+    let unheld_view = unheld.cam.update(DT, &rider, F(NEAR_CLIP), &unheld.sim.tables.ride.curve, Switches::default(), &mut Nothing);
+    assert_ne!(bits(&unheld_view), paused_on, "the camera had settled: the test proves nothing");
+    let menu_pad = report(&[], FULL_RIGHT);
+    let two_before = bits(&two.tick(gas, true).0);
+    for k in 0..60 {
+        let _ = one.sim.poll(DT, &[menu_pad, Report::missing()]);
+        assert_eq!(hold.frame(true, framing), chase::Paused::Held, "paused frame {k}");
+        // Held: the shell draws the last view and frames nothing.
+        assert_eq!(bits(shown.as_ref().unwrap()), paused_on, "paused frame {k}");
+        let two_now = bits(&two.tick(gas, true).0);
+        if k == 59 {
+            assert_ne!(two_now, two_before, "2P's camera rode on");
+        }
+    }
+    assert_eq!(hold.frame(false, framing), chase::Paused::Riding);
+    for t in 0..20 {
+        let (a, b) = (one.tick(gas, true).0, never.tick(gas, true).0);
+        assert_eq!(bits(&a), bits(&b), "{t} ticks after Resume");
+    }
+    // A Camera page change under the pause (P82) frames the frozen bike so it shows; the pad still
+    // turns nothing.
+    let mut hold = chase::PauseHold::default();
+    assert_eq!(hold.frame(true, framing), chase::Paused::Held);
+    let wider = (chase::Framing { fov: 10.0, ..chase::Framing::ORIGINAL }, chase::Framing::ORIGINAL);
+    assert_eq!(hold.frame(true, wider), chase::Paused::Reframing);
+    assert_eq!(hold.frame(false, wider), chase::Paused::Riding);
+    assert_eq!(hold.frame(true, wider), chase::Paused::Held);
+}

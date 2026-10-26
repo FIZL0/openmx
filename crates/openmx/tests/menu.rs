@@ -5021,3 +5021,75 @@ fn every_settings_and_garage_tab_has_a_screen_word() {
     assert_eq!(Screen::tab_from_word("Display"), None);
     assert_eq!(Screen::tab_from_word("splash"), None);
 }
+
+/// P172: a seat's pause, drawn into its own view the way the shell's GPU path does (the view's own
+/// size, then moved to its place), lies wholly inside that view — its hint tab included, which ran
+/// off its view's right edge into the next one — in every split, for every seat, at a 16:9 window
+/// and the original's 4:3, both with the pause's own hints and its confirm's.
+#[test]
+fn a_seats_pause_stays_in_its_own_view() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    let mut checked = 0;
+    for (w, h) in [(1920usize, 1080usize), (640, 448)] {
+        for players in 2..=split::MOST {
+            for s in [split::Split::Stacked, split::Split::SideBySide] {
+                let layout = split::Layout::for_players(players, s).unwrap();
+                let rects = layout.rects(w, h);
+                for seat in 0..players {
+                    for confirm in [false, true] {
+                        // Into a ride, as 3985's test goes in, and that seat's Start.
+                        let (mut m, mut r) = fresh();
+                        m.riders = players;
+                        tap(&mut m, &mut r, Control::Cross);
+                        tap(&mut m, &mut r, Control::Cross);
+                        assert!(m.riding());
+                        m.tick = 40;
+                        m.pause_for(seat);
+                        if confirm {
+                            // Down to Quit and in: its confirm, whose hints are Stay and Select.
+                            let rows = m.view(seat).pause_rows();
+                            let quit = rows.iter().position(|r| r.starts_with("Quit")).expect("a Quit row");
+                            m.with_seat(seat, |m| {
+                                for _ in 0..quit {
+                                    m.step(menu::Press { down: true, ..Default::default() });
+                                    m.step(menu::Press::default());
+                                }
+                                m.step(menu::Press { ok: true, ..Default::default() });
+                            });
+                            assert!(m.view(seat).confirming().is_some(), "{players}P seat {seat}: no confirm");
+                        }
+                        let views = m.pause_views(&rects, players);
+                        assert_eq!(views.iter().map(|v| v.0).collect::<Vec<_>>(), vec![seat]);
+                        let at = views[0].1;
+                        let mut sprites = Vec::new();
+                        m.with_seat(seat, |m| art.sprites(m, (at.w, at.h), 0, &mut sprites));
+                        for (k, sprite) in sprites.iter().enumerate() {
+                            for c in sprite.corners {
+                                let (x, y) = (c[0] + at.x as f32, c[1] + at.y as f32);
+                                let inside = x >= at.x as f32 - 0.01
+                                    && x <= (at.x + at.w) as f32 + 0.01
+                                    && y >= at.y as f32 - 0.01
+                                    && y <= (at.y + at.h) as f32 + 0.01;
+                                assert!(
+                                    inside,
+                                    "{w}x{h} {layout:?} {players}P, seat {seat}'s pause{}: sprite {k} of {} has a corner at {x:.1},{y:.1}, outside its view {at:?}",
+                                    if confirm { " confirm" } else { "" },
+                                    sprites.len()
+                                );
+                            }
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 100, "{checked} pauses checked");
+}

@@ -796,3 +796,42 @@ pub fn ride_out(cam: &mut game_sim::camera::Race, view: &mut game_sim::camera::V
         view.position[i] -= behind(&mut c.pos_filter[i], d);
     }
 }
+
+// --- a seat's own pause (P172) ----------------------------------------------------------------------
+
+/// What a seat's camera does this frame over its own pause (P172).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Paused {
+    /// Not paused: the camera's frame as ever.
+    Riding,
+    /// Paused: the camera is left exactly as the pause's tick left it — no frame, so no chase
+    /// settling, no look-around on the pad driving the menu, no look-back, no preset change — and
+    /// the view drawn is the last one. Resume carries on from it.
+    Held,
+    /// Paused, and the player has changed their framing on the Camera page since the pause opened
+    /// (P82 shows a change as it is made): the camera frames on the frozen bike so the change shows,
+    /// and the pad, which is driving the menu, still turns nothing.
+    Reframing,
+}
+
+/// A seat's camera over its own pause (P172): the framing it had when the pause opened, to tell a
+/// player's Camera page change from nothing at all.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PauseHold {
+    opened_on: Option<(Framing, Framing)>,
+}
+
+impl PauseHold {
+    /// This frame's: `paused` whether the seat's own pause is open (or the seat is otherwise not
+    /// riding), `framing` the seat's framing now.
+    pub fn frame(&mut self, paused: bool, framing: (Framing, Framing)) -> Paused {
+        if !paused {
+            self.opened_on = None;
+            return Paused::Riding;
+        }
+        match *self.opened_on.get_or_insert(framing) == framing {
+            true => Paused::Held,
+            false => Paused::Reframing,
+        }
+    }
+}

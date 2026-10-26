@@ -1337,3 +1337,79 @@ fn the_shootoff_sounds_are_the_discs() {
     assert!((cannon.seconds() - 8.0).abs() < 0.05, "{}", cannon.seconds());
     assert!((rumble.seconds() - 1.5).abs() < 0.05, "{}", rumble.seconds());
 }
+
+/// **P172: a seat's pause holds its own sounds, and the other seat's play on.** 1P at the idle, 2P
+/// on the throttle; 1P pauses. Every voice of 1P's (the engine note's samples, the limiter's loop if it is
+/// up) is held where it was — still there, not moving on, its note's machine where it was — while
+/// 2P's go on being mixed. On Resume they go on from where they were, the note not started over.
+#[test]
+fn a_seats_pause_holds_its_engine_and_the_others_play_on() {
+    let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+    let mut s = audio::Sound::new(mixer.clone());
+    for i in 0..2 {
+        s.seats.push(audio::SeatSound::new(Arc::new(tone_bike()), i));
+    }
+    // 1P sits at the idle, whose loop always sounds; 2P is on the throttle.
+    let riding = |x: f32, paused: bool| audio::SeatFrame {
+        hands: match x == 0.0 {
+            true => Hands { grounded: true, gas: 0.0, clutch: 0.0, speed: 0.0, at: [x, 0.0, 0.0], vel: [0.0; 3] },
+            false => Hands { grounded: true, gas: 1.0, clutch: 0.0, speed: 30.0, at: [x, 0.0, 0.0], vel: [0.0, 0.0, 30.0] },
+        },
+        paused,
+        ..audio::SeatFrame::default()
+    };
+    let tick = |s: &mut audio::Sound, one_paused: bool| {
+        s.frame(&[riding(0.0, one_paused), riding(10.0, false)], 1.0 / 30.0);
+        let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+        mixer.lock().unwrap().render(&mut out);
+    };
+    for _ in 0..12 {
+        tick(&mut s, false);
+    }
+    let where_ = |s: &audio::Sound, seat: usize| -> Vec<(u32, f32, bool)> {
+        let m = mixer.lock().unwrap();
+        s.seats[seat].voices().iter().filter_map(|&v| m.progress(v)).collect::<Vec<_>>()
+    };
+    let note = s.seats[0].engine.note();
+    // The voices sounding: one that ran out in the last tick's mix is the engine's to let go.
+    let sounding = |s: &audio::Sound, seat: usize| -> Vec<u64> {
+        let m = mixer.lock().unwrap();
+        s.seats[seat].voices().into_iter().filter(|&v| m.playing(v)).collect()
+    };
+    let ones = sounding(&s, 0);
+    assert!(!ones.is_empty(), "1P's engine sounds before the pause");
+    tick(&mut s, true);
+    let held = where_(&s, 0);
+    assert_eq!(held.len(), ones.len(), "the pause stopped a voice of 1P's");
+    let mut twos_moved = false;
+    for k in 0..45 {
+        let twos = where_(&s, 1);
+        tick(&mut s, true);
+        let m = mixer.lock().unwrap();
+        for &v in &s.seats[0].voices() {
+            assert!(m.held(v), "paused tick {k}: 1P's voice {v} is not held");
+        }
+        for &v in &s.seats[1].voices() {
+            assert!(!m.held(v), "paused tick {k}: 2P's voice {v} is held");
+        }
+        drop(m);
+        assert_eq!(sounding(&s, 0), ones, "paused tick {k}: 1P's voices changed");
+        assert_eq!(where_(&s, 0), held, "paused tick {k}: 1P's voices moved on");
+        assert_eq!(s.seats[0].engine.note(), note, "paused tick {k}: 1P's note moved on");
+        twos_moved |= where_(&s, 1) != twos;
+    }
+    assert!(twos_moved, "2P's engine stood still through 1P's pause");
+    // Resume: the same voices, let go, and on from where they were held.
+    tick(&mut s, false);
+    let m = mixer.lock().unwrap();
+    let held_at: Vec<(u64, (u32, f32, bool))> = ones.iter().copied().zip(held.iter().copied()).collect();
+    let mut moved = false;
+    for &(v, a) in &held_at {
+        assert!(!m.held(v), "1P's voice {v} still held after Resume");
+        // On from the held place (or into the next clip of its chain, or run out), not started over.
+        let Some(b) = m.progress(v) else { continue };
+        assert!(b.0 > a.0 || (b.0 == a.0 && b.1 >= a.1 && b.1 - a.1 < 0.05), "voice {v} held at {a:?}, after Resume {b:?}");
+        moved |= b != a;
+    }
+    assert!(moved, "1P's voices did not go on after Resume: {held:?}");
+}
