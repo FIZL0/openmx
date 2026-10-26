@@ -693,7 +693,7 @@ wire!(crate::contact_search::Record { search_ground, search, sweep_back, touchin
 wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved, riding_speed_sq, tricks, back_search });
 wire!(crate::back_search::Cache { at, moved, list, world });
 wire!(crate::trick_pack::State { spin, flip_row, side, side_flick, front_watch });
-wire!(crate::air::Spin { applied, ramp, active, armed, grace, dir, start, torque, clip, came_round, wrecked, forward });
+wire!(crate::air::Spin { applied, ramp, active, armed, grace, dir, start, torque, clip, came_round, wrecked, forward, cut });
 wire!(crate::ride::Back { at, facing, up });
 wire!(crate::rider_anim::Body { veh, player, ready, picked, look, looking, settled, machine });
 wire!(crate::state::Ride { wreck, counting, elapsed, kind, pending, fresh, wrecking, wrecks, entries });

@@ -819,7 +819,11 @@ impl Rider {
         // A world of several terrains has holes inside its rectangle as well (MD8), asked the same.
         let holed = edge.is_some() && off_map::off_world(&*world, bone, ride.chassis.cofg_world);
         // MX vs. ATV's 360 landed part way round (MD16): a wreck off the back, the original's 0xb.
-        let spun = ride.tricks.as_deref_mut().and_then(|t| std::mem::take(&mut t.spin.wrecked).then_some(air::Wreck::Tail));
+        // Cut short in the air instead (S154), it is the airborne attitude's wreck, which Air Wrecks
+        // Off does not ask: the landing is left to the wreck test.
+        let (spun, spun_aloft) = ride.tricks.as_deref_mut().map_or((None, false), |t| {
+            (std::mem::take(&mut t.spin.wrecked).then_some(air::Wreck::Tail), std::mem::take(&mut t.spin.cut))
+        });
         let thrown = &mut ride.chassis;
         let origin = &mut ride.origin;
         let air = &mut ride.air;
@@ -852,6 +856,7 @@ impl Rider {
                 // "Race50" or "Pro50" (`track::physics_file`'s), and the rider is not told which file
                 // it was built from — nor does `ride::hits` sweep the two shoulder rays it would add.
                 let hit = air::hit_wreck(&p.air, air, touched, false, mass, height, &hits);
+                let spun = spun.filter(|_| allowed.air || !spun_aloft);
                 hit.or(landed).or(spun).map(Wreck::from)
             },
             // The screen's page is up from the request until its fade back in is over.

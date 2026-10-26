@@ -6079,3 +6079,152 @@ fn md30_m21_spinpull_comes_round_and_lands() {
     assert_eq!(wrecks(&md16_seats(&ride)), 0, "it lands");
     assert!(ride.iter().any(|t| t.nodes.contains(&game_sim::score::THREE_SIXTY_RIGHT)), "and scores");
 }
+
+/// One tick of an S154 ride: whether a wheel was down, the wreck entered, the heading and the pitch
+/// (as [`Seat`] reads them), and the 360's state.
+#[derive(Clone, Debug, PartialEq)]
+struct S154 {
+    on_ground: bool,
+    wreck: Option<game_sim::trick::Wreck>,
+    heading: f32,
+    pitch: f32,
+    spin: game_sim::air::Spin,
+    flipping: bool,
+}
+
+/// [`ride_md16`] on the pack's bike with the Air Wrecks switch as `air_wrecks` (S154), wrecks on.
+fn ride_s154(air_wrecks: bool, p: &Phy, wheels: (Vf, Vf), tables: &rider::Tables, set: Set,
+             script: &[(usize, Controls)], ticks: usize) -> Vec<S154> {
+    let (start, slope, length) = FLIP_RAMP;
+    let mut r = Rider::new(p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), set);
+    r.sense.air_wrecks = air_wrecks;
+    let mut world = Jump { origin: Vf::new(0.0, 0.0, 0.0, 1.0), dir: Vf::new(0.0, 0.0, 1.0, 0.0), start, slope, length };
+    let mut now = Controls { gas: F::ONE, ..Controls::default() };
+    let mut seen = Vec::with_capacity(ticks);
+    for tick in 0..ticks {
+        if let Some((_, c)) = script.iter().find(|(at, _)| *at == tick) {
+            now = Controls { gas: F::ONE, ..c.clone() };
+        }
+        let frame = r.frame(p, tables, &now, DT, &mut world);
+        let f = r.ride.transform().0[2];
+        seen.push(S154 {
+            on_ground: r.ride.air.on_ground,
+            wreck: frame.wreck,
+            heading: f32::atan2(f.x(), f.z()),
+            pitch: f32::atan2(f.y(), f.z()),
+            spin: r.ride.tricks.as_ref().map(|t| t.spin).unwrap_or_default(),
+            flipping: r.ride.air.flipping,
+        });
+        if frame.wreck.is_some() {
+            break;
+        }
+    }
+    seen
+}
+
+/// The tick the bike left the ground after `from`, and the tick it first came back down (or the
+/// ride's length).
+fn s154_flight(ride: &[S154], from: usize) -> (usize, usize) {
+    let off = from + ride[from..].iter().position(|t| !t.on_ground).expect("it takes off");
+    let down = off + ride[off..].iter().position(|t| t.on_ground).unwrap_or(ride.len() - off);
+    (off, down)
+}
+
+/// The cuts of one move: `held` is its hands held through, `against` the stick pushing against the
+/// turn, and `turned(ride, off)` the tick the held move is once round. Each cut pushes against the
+/// turn at a quarter, a half and three quarters of the way from take-off to there, and lets go 40
+/// ticks later. Returns, per cut, the ride with the switch on and with it off.
+fn s154_cuts(q: &Phy, wheels: (Vf, Vf), tables: &rider::Tables, set: &Set, name: &str,
+             held: &[(usize, Controls)], against: Controls, turned: fn(&[S154], usize) -> usize)
+             -> Vec<(usize, Vec<S154>, Vec<S154>)> {
+    let ride = ride_s154(true, q, wheels, tables, set.clone(), held, 400);
+    let fired = ride.iter().position(|t| t.spin.active || t.flipping).expect("the move fires");
+    let (off, _) = s154_flight(&ride, fired);
+    let round = turned(&ride, off);
+    assert!(round > off + 20, "{name}: once round {} ticks after take-off", round - off);
+    [1, 2, 3]
+        .map(|quarters| {
+            let at = off + (round - off) * quarters / 4;
+            let mut hands = held.to_vec();
+            hands.retain(|(t, _)| *t < at);
+            hands.push((at, against.clone()));
+            hands.push((at + 40, Controls::default()));
+            let on = ride_s154(true, q, wheels, tables, set.clone(), &hands, 400);
+            let off = ride_s154(false, q, wheels, tables, set.clone(), &hands, 400);
+            (at, on, off)
+        })
+        .into()
+}
+
+/// S154: under Air Wrecks Off, a move let go — a 360, a backflip, a front flip, cut short at a
+/// quarter, a half and three quarters of its turn — rides to touchdown without a wreck; and with the
+/// switch on the ride is the same tick for tick but for the wrecks it always had. Before S154 the 360
+/// cut short in the air wrecked whatever the switch said: its torque decays under its minimum with
+/// the clip still part way round, and MX vs. ATV's "landed part way round" wreck fired off the ground.
+///
+/// Held to the end instead, the 360 lands part way round and wrecks on the touch with the switch
+/// either way: the landing is judged as P138 says.
+#[test]
+fn s154_cut_short_moves_ride_down_with_air_wrecks_off() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else { return };
+    let (q, set) = md16_pack(&p, true);
+    let spin_held = md16_script(&[
+        (130, 0.0, 0.0, true, [false; 2]),
+        (150, -1.0, 0.0, true, [false; 2]),
+        (158, 1.0, 0.0, true, [false; 2]),
+        (166, 0.0, 0.0, true, [false; 2]),
+    ]);
+    // The flips are held to the end with the stick centred: nothing decays their torque.
+    let back_held = md16_script(&[(140, 0.0, 1.0, false, [false; 2]), (158, 0.0, -1.0, false, [false; 2]),
+                                  (166, 0.0, 1.0, false, [false; 2]), (176, 0.0, 0.0, false, [false; 2])]);
+    let front_held = md16_script(&[(130, 0.0, 0.0, true, [false; 2]), (140, 0.0, 1.0, true, [false; 2]),
+                                   (158, 0.0, -1.0, true, [false; 2]), (176, 0.0, 0.0, true, [false; 2])]);
+    // Once round: the 360's clip back inside 35° after playing; a flip's nose through a whole turn.
+    fn spun(ride: &[S154], off: usize) -> usize {
+        let past = off + ride[off..].iter().position(|t| t.spin.clip == 2).expect("the 360 turns past 35°");
+        past + ride[past..].iter().position(|t| t.spin.clip == 0).expect("and comes round")
+    }
+    fn flipped(ride: &[S154], off: usize) -> usize {
+        let mut turned = 0.0f32;
+        for k in off + 1..ride.len() {
+            let d = ride[k].pitch - ride[k - 1].pitch;
+            turned += d - std::f32::consts::TAU * (d / std::f32::consts::TAU).round();
+            if turned.abs() >= std::f32::consts::TAU {
+                return k;
+            }
+        }
+        panic!("the flip never came round: {turned}");
+    }
+    let moves: [(&str, &[(usize, Controls)], Controls, fn(&[S154], usize) -> usize); 3] = [
+        ("360", &spin_held, md16_hands(-1.0, 0.0, false, [false; 2]), spun),
+        ("backflip", &back_held, md16_hands(0.0, -1.0, false, [false; 2]), flipped),
+        ("front flip", &front_held, md16_hands(0.0, 1.0, false, [false; 2]), flipped),
+    ];
+    let mut spin_wrecks = 0;
+    for (name, held, against, turned) in moves {
+        for (at, on, off) in s154_cuts(&q, wheels, &tables, &set, name, held, against, turned) {
+            let fired = off.iter().position(|t| t.spin.active || t.flipping).expect("the move fires");
+            let (lift, down) = s154_flight(&off, fired);
+            assert!(down < off.len(), "{name} let go at {at}: never came down");
+            assert!(off[..down].iter().all(|t| t.wreck.is_none()),
+                    "{name} let go at {at}, Air Wrecks off: wrecked in the air at {:?}",
+                    off.iter().position(|t| t.wreck.is_some()).map(|k| (k, off[k].wreck)));
+            // On: tick for tick the same ride until on's wreck, which is the only thing the switch moves.
+            let w = on.iter().position(|t| t.wreck.is_some()).unwrap_or(on.len());
+            assert_eq!(on[..w], off[..w], "{name} let go at {at}: the switch moved the ride itself");
+            if w < down {
+                assert!(w > lift, "{name} let go at {at}: wrecked before take-off");
+                spin_wrecks += usize::from(name == "360" && on[w].wreck == Some(game_sim::trick::Wreck::from(game_sim::air::Wreck::Tail)));
+            }
+        }
+    }
+    assert_eq!(spin_wrecks, 3, "the switch on, a 360 cut short in the air is MX vs. ATV's wreck");
+
+    // Held: the landing part way round is judged with the switch either way.
+    let on = ride_s154(true, &q, wheels, &tables, set.clone(), &spin_held, 400);
+    let off = ride_s154(false, &q, wheels, &tables, set, &spin_held, 400);
+    assert_eq!(on, off, "a held 360 is the same ride with the switch either way");
+    let w = off.iter().position(|t| t.wreck.is_some()).expect("landing part way round wrecks");
+    assert!(off[w].on_ground && off[w - 1].spin.clip == 2, "on the touch, part way round");
+}
