@@ -338,8 +338,9 @@ pub fn autopilot(pad: &Pad, s: &mut Surfaces, j: &Joystick, ap: &Autopilot, at: 
 //
 // Not the original's: the Biplane max G modifier's limiter, which only a plane with a limit set runs
 // ([`crate::flight::Flight::max_g`]). Lift and the surfaces' moments go with the airspeed squared, so
-// a plane sped up past the file's top speed pulls ever more g off the same stick and rolls ever
-// faster; this holds the pull to the limit and the roll to what the corner speed's is.
+// a plane sped up past the file's top speed pulls ever more g off the same stick; this holds the pull
+// to the limit. The roll and the yaw it leaves as they are (P160): a fast plane rolls fast, limit or
+// not.
 
 /// How much more angle the g limit lets a wing have, as a share of how far short of the limit's angle
 /// it is headed ([`Aero::g_limit`]).
@@ -384,12 +385,11 @@ pub struct Hold {
 }
 
 /// What the limiter allows one substep: the elevator commands the command is held between (`None`
-/// on a side the wing cannot pull the limit at all), and the factor on the aileron the
-/// aerodynamics fly.
+/// on a side the wing cannot pull the limit at all). The ailerons and the rudder are not its
+/// (P160): a held plane rolls and yaws as it would with the limit off.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GLimit {
     pub elevator: (Option<F>, Option<F>),
-    pub aileron: F,
 }
 
 impl Aero {
@@ -457,17 +457,11 @@ impl Aero {
     /// swings past the trim on its way is not held, and one that would carry the wing past the angle
     /// is backed off before it does. Held at the limit (not rising, at the angle) the bound is the
     /// trim itself.
-    ///
-    /// The ailerons: above the corner speed by `corner / speed`. The corner is where the wing held
-    /// steady at full elevator (or the lift curve's top, if that comes first) pulls the limit. The
-    /// roll's damping (`Clp`, on `b/2V` of the rate) goes with the speed once over the moment's, so
-    /// the steady roll rate full aileron gives goes with the speed: eased by `corner / speed`, it is
-    /// the corner speed's at any speed above it.
     pub fn g_limit(&self, air: &Air, hold: &Hold) -> GLimit {
         let Hold { max_g, mass, weight, speeding, max_elevator, pitch_inertia, h } = *hold;
         let v = air.speed;
         if !(v > 1.0) || self.cm_de == F::ZERO {
-            return GLimit { elevator: (None, None), aileron: F::ONE };
+            return GLimit { elevator: (None, None) };
         }
         let pressure = self.area * (F(0.5) * self.density * v * v);
         let aim = F(AIM) - F(SWING) * (max_g - F(SWING_FROM)).max(F::ZERO);
@@ -477,12 +471,9 @@ impl Aero {
         let lift_rate = c2v * (self.lift_q * q);
         let pitch_rate = c2v * (self.cm_q * q);
         let (top, peak) = self.lift_peak();
-        // Which way the elevator takes the trimmed angle up, and the most lift full elevator holds.
+        // Which way the elevator takes the trimmed angle up.
         let rises = -(self.cm_alpha / self.cm_de) > 0.0;
-        let pull = if rises { max_elevator } else { -max_elevator };
         let held = |a: F| -((self.unelevated_pitch(a, F::ZERO)) / self.cm_de);
-        let full = Self::halve(F::ZERO, top, |a| if rises { held(a) - pull } else { pull - held(a) });
-        let reach = self.static_lift(full).min(peak);
         // The angle's rate: the nose up (the body's `x` rate is nose-down) less the flight path's.
         let path = (self.lift * pressure / mass - weight * F(G)) / v;
         let lead = F(LEAD);
@@ -505,9 +496,7 @@ impl Aero {
         };
         let (up, down) = (bound(most), bound(-most));
         let elevator = if rises { (down, up) } else { (up, down) };
-        let corner_sq = most * pressure / (self.area * (F(0.5) * self.density * reach));
-        let aileron = if v * v > corner_sq { corner_sq.sqrt() / v } else { F::ONE };
-        GLimit { elevator, aileron }
+        GLimit { elevator }
     }
 }
 

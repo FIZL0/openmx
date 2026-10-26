@@ -29,8 +29,8 @@
 //!
 //! P137's [`Knob::PlaneMaxG`] is the one exception to both: its value is a limit in g ([`MAX_G`])
 //! or off, and on, the flight runs a step of its own ([`crate::flight::Flight::max_g`]) that holds
-//! the elevator to the pull the limit allows and eases the ailerons above the corner speed. Off, the
-//! default, the flight never enters it.
+//! the elevator to the pull the limit allows, and nothing else: the roll and yaw rates are the
+//! limit-off plane's at every speed (P160). Off, the default, the flight never enters it.
 //!
 //! P136's [`Knob::PlaneCeiling`] moves the biplane's ceiling, which is its engine's altitude fade, and
 //! has one step past [`MOST`], [`UNCAPPED`] ([`Knob::most`]): no fade at all, and the plane camera's
@@ -268,7 +268,7 @@ impl Knob {
             Knob::PlaneTopSpeed => "the biplane's top speed",
             Knob::PlaneTurn => "how hard the biplane pulls round a turn",
             Knob::PlaneCeiling => "how high the biplane's engine still pulls; at the top, no ceiling",
-            Knob::PlaneMaxG => "the most g a pull takes a fast biplane to, and its roll eased with it",
+            Knob::PlaneMaxG => "the most g a pull takes a fast biplane to; its roll and spin are left as they are",
             Knob::Gravity => "gravity, bike and biplane",
             Knob::AirDrag => "air drag, bike and biplane",
             Knob::TimeScale => "how fast the game runs",
@@ -297,7 +297,7 @@ impl Knob {
             Knob::PlaneTopSpeed => "biplane [Aerodynamics] CD0 / k^3",
             Knob::PlaneTurn => "biplane [Aerodynamics] CLScale, CMq x k; CMalpha, CMde, CMStall x k^2; CD1 / k^2; [Autopilot] MaxPitchRate x k",
             Knob::PlaneCeiling => "biplane [Engine] MaxAltitude (and the fade's start, which is 0) x k; Uncapped: no fade, and no 200 ft cap on the plane camera's eye",
-            Knob::PlaneMaxG => "not a key: each step the elevator command held to the angle of attack whose lift is k times the weight, and the ailerons x corner speed / speed above the corner speed",
+            Knob::PlaneMaxG => "not a key: each step the elevator command held to the angle of attack whose lift is k times the weight; ailerons and rudder untouched",
             Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane GravityScale x k",
             Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0 x k",
             Knob::TimeScale => "the engine's time-scale object: dt + (k - 1) dt",
@@ -712,21 +712,9 @@ impl Mods {
         if let Some(g) = self.max_g(seat) {
             // Not a number of the file's: the limit the flight's hold keeps every step's pull under
             // (P137, [`crate::flight::Flight::max_g`]). The file's lift and moments are left alone,
-            // so below the corner speed the limit implies the plane flies the file's numbers. Above
-            // it the roll is eased, but never past where the sped-up plane rolls as the file's does
-            // at the file's top speed: so many times the top speed (the speed knobs' k, and the air
-            // drag's k^-1/3, as their notes have it) is 1 / that of the aileron at most.
+            // so below the corner speed the limit implies the plane flies the file's numbers. Only
+            // the elevator is held: the ailerons and the rudder fly as with the limit off (P160).
             plane.autopilot.max_g = g;
-            let mut faster = F::ONE;
-            for knob in [Knob::PlaneSpeed, Knob::PlaneTopSpeed] {
-                if let Some(k) = self.factor(seat, knob) {
-                    faster = faster * k;
-                }
-            }
-            if let Some(k) = self.factor(seat, Knob::AirDrag) {
-                faster = faster / F(ps2_float::libm::powf(k.to_f32(), (F::ONE / F(3.0)).to_f32()));
-            }
-            plane.autopilot.max_g_roll = (F::ONE / faster).min(F::ONE);
         }
         if let Some(k) = self.factor(seat, Knob::Gravity) {
             plane.mass_properties.gravity_scale = plane.mass_properties.gravity_scale * k;

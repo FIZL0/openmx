@@ -3,8 +3,9 @@
 //!
 //! What it holds:
 //! - at 300% top speed a full pull from level cruise never passes the set limit on any frame, where
-//!   off it pulls several times over, and a full aileron's roll rate stays near the stock plane's
-//!   at its own top speed;
+//!   off it pulls several times over;
+//! - P160: the limit holds only the pull: a full aileron rolls (and yaws) the plane as with the limit
+//!   off at the same speed, on the stock plane and the sped-up ones alike;
 //! - at stock speed and settings a 9 g limit never acts: a cruise, a full pull and a full roll fly
 //!   bit for bit as with it off;
 //! - off is the original's plane: the file untouched, and no field of the flight's walk added;
@@ -191,12 +192,20 @@ const PULL: &dyn Fn(usize, &Flight) -> (f32, f32) = &|_, _| (-1.0, 0.0);
 const PUSH: &dyn Fn(usize, &Flight) -> (f32, f32) = &|_, _| (1.0, 0.0);
 const ROLL: &dyn Fn(usize, &Flight) -> (f32, f32) = &|_, _| (0.0, 1.0);
 
+/// About the stock plane's top speed, ft/s: the speed [`KNIFE`]'s hand is set for.
+const HAND_SPEED: f32 = 157.0;
+
 /// Rolled to the knife edge by a hand on the aileron that then holds it there, the stick full back
 /// from the second second: the aileron off its dead zone, so the elevator is the stick's, open loop.
+/// The hand is gentler on a faster plane, by `(HAND_SPEED / speed)^2`, as the aileron's moment goes
+/// with the speed squared (P160: the limit no longer eases the roll, so a hand set for the stock
+/// plane swings a 500% one past the knife edge and back four times a second, pulling ±18 g with the
+/// stick centred, limit or not).
 const KNIFE: &dyn Fn(usize, &Flight) -> (f32, f32) = &|i, f| {
     let roll = f.attitude.roll.to_f32();
     let rate = -f.body.rates.z();
-    let aileron = (-(1.5 * (-90f32.to_radians() - roll) - 0.4 * rate)).clamp(-1.0, 1.0);
+    let hand = (HAND_SPEED / f.air.speed.to_f32()).powi(2).min(1.0);
+    let aileron = (-hand * (1.5 * (-90f32.to_radians() - roll) - 0.4 * rate)).clamp(-1.0, 1.0);
     (if i >= HZ { -1.0 } else { 0.0 }, aileron)
 };
 
@@ -243,23 +252,36 @@ fn a_fast_pull_never_passes_the_limit() {
     assert!(bad.is_empty(), "past the limit or well short of it:\n{bad}\nall:\n{all}");
 }
 
-/// A full aileron's roll rate at 300% top speed is near the stock plane's at its own top speed,
-/// whatever the limit, where off it is more than three times as fast.
+/// P160: a full aileron's roll rate with each limit is the limit-off roll rate at the same speed,
+/// on the stock plane at its top speed and on the 200% and 300% top-speed planes at theirs, within
+/// half a percent: what is left is the elevator hold's, which at speed still trims the pitch in the
+/// roll, and the pitch couples into it (P137's easing took up to two thirds off it at 300%). The sped-up plane does roll faster
+/// than the stock one: the limit does not take that away.
 #[test]
-fn a_fast_roll_is_the_stock_planes() {
+fn a_fast_roll_is_the_limit_off_roll() {
     let Some((stock, top, fast, fast_top)) = planes() else { return };
+    let mut p = stock;
+    let faster = with(Mods::original(), Knob::PlaneTopSpeed, 200);
+    faster.plane(0, &mut p);
+    let faster_top = top_speed(&p);
+    let mut bad = String::new();
     for scheme in [Scheme::File, Scheme::New] {
         let slow = roll_rate(&fly(&stock, &Mods::original(), scheme, top, ROLL, HZ * 2));
-        let off = roll_rate(&fly(&stock, &fast, scheme, fast_top, ROLL, HZ * 2));
-        assert!(off > 3.0 * slow, "{scheme:?}: off, the 300% plane rolls {off:.0} deg/s against {slow:.0}");
-        for g in [3u16, 6, 9] {
-            let held = roll_rate(&fly(&stock, &with(fast, Knob::PlaneMaxG, g), scheme, fast_top, ROLL, HZ * 2));
-            assert!(
-                held > 0.8 * slow && held < 1.25 * slow,
-                "{scheme:?}, {g} g: the 300% plane rolls {held:.0} deg/s, the stock one {slow:.0}"
-            );
+        let quick = roll_rate(&fly(&stock, &fast, scheme, fast_top, ROLL, HZ * 2));
+        assert!(quick > 3.0 * slow, "{scheme:?}: off, the 300% plane rolls {quick:.0} deg/s against {slow:.0}");
+        for (mods, speed) in [(Mods::original(), top), (faster, faster_top), (fast, fast_top)] {
+            let off = fly(&stock, &mods, scheme, speed, ROLL, HZ * 2);
+            let off_rate = roll_rate(&off);
+            for g in MAX_G.0..=MAX_G.1 {
+                let on = fly(&stock, &with(mods, Knob::PlaneMaxG, g), scheme, speed, ROLL, HZ * 2);
+                let rate = roll_rate(&on);
+                if (rate - off_rate).abs() > 0.005 * off_rate {
+                    bad += &format!("{scheme:?} at {speed:.0} ft/s, {g} g: rolls {rate:.3} deg/s against off's {off_rate:.3}\n");
+                }
+            }
         }
     }
+    assert!(bad.is_empty(), "the limit moves the roll:\n{bad}");
 }
 
 /// At stock speed and settings a 9 g limit never acts: a cruise, a full pull and push, a full roll
@@ -288,7 +310,6 @@ fn off_flies_the_original() {
     Mods::original().plane(0, &mut p);
     let off = Flight::new(&p);
     assert_eq!(off.max_g, F::ZERO);
-    assert_eq!(off.max_g_roll, F::ONE);
     let names = |f: &Flight| -> Vec<String> { game_sim::hash::Dump::of(f).fields.into_iter().map(|f| f.path).collect() };
     let file = Flight::new(&stock);
     assert_eq!(names(&off), names(&file));
@@ -304,7 +325,7 @@ fn off_flies_the_original() {
 }
 
 /// A session marker's put-back keeps the flight's limit, and a retune in flight (P98's
-/// [`Mods::replane`]) sets it and takes it away again, its roll floor with it.
+/// [`Mods::replane`]) sets it and takes it away again.
 #[test]
 fn a_marker_and_a_retune_keep_the_limit() {
     let Some((stock, _, fast, _)) = planes() else { return };
@@ -313,17 +334,15 @@ fn a_marker_and_a_retune_keep_the_limit() {
     let mark = flight.clone();
     six.replane(0, &stock, &mut flight);
     assert_eq!(flight.max_g, F(6.0));
-    assert!((flight.max_g_roll.to_f32() - 1.0 / 3.0).abs() < 1e-3, "{:?}", flight.max_g_roll);
     // Back to a marker set before the knob moved: the state is the marker's, the limit the knob's.
     flight.put_back(&mark);
     assert_eq!(flight.max_g, F(6.0));
-    assert!(flight.max_g_roll < F::ONE);
     // And the other way: a marker set while it was on, put back after it went off.
     let held = flight.clone();
     Mods::original().replane(0, &stock, &mut flight);
-    assert_eq!((flight.max_g, flight.max_g_roll), (F::ZERO, F::ONE));
+    assert_eq!(flight.max_g, F::ZERO);
     flight.put_back(&held);
-    assert_eq!((flight.max_g, flight.max_g_roll), (F::ZERO, F::ONE));
+    assert_eq!(flight.max_g, F::ZERO);
     // Retuned on and back off, the flight is the stock one's again.
     six.replane(0, &stock, &mut flight);
     Mods::original().replane(0, &stock, &mut flight);
@@ -404,3 +423,4 @@ fn the_top_limit_holds_the_fastest_plane() {
     eprintln!("{all}");
     assert!(bad.is_empty(), "past the limit, past off, or well short of it:\n{bad}\nall:\n{all}");
 }
+
