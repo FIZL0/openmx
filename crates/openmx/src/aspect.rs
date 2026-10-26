@@ -140,8 +140,7 @@ pub fn fov(horizontal_degrees: f32, width: usize, height: usize) -> f32 {
     game_render::world::view_fov(horizontal_degrees, width as f32 / height.max(1) as f32)
 }
 
-/// A corner of a view, for what is pinned to one. The riding overlay pins itself to the bottom left;
-/// the other three are there for whatever else the shell pins to a view.
+/// A corner of a view, for what is pinned to one.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Corner {
@@ -154,7 +153,9 @@ pub enum Corner {
 /// Where something `size` pixels across and down goes to sit `margin` pixels in from `corner` of a
 /// view of `view` pixels: its top-left pixel, in the view. Pinned to the corner whatever the view's
 /// shape, so it neither stretches with the view nor sits in a 4:3 box inside it; a view too small to
-/// hold it clips it at the far side rather than moving it off its corner.
+/// hold it clips it at the far side rather than moving it off its corner. (Its one caller, the debug
+/// HUD, went in P170.)
+#[allow(dead_code)]
 pub fn corner(view: (usize, usize), size: (i32, i32), corner: Corner, margin: i32) -> (i32, i32) {
     let (w, h) = (view.0 as i32, view.1 as i32);
     let left = margin;

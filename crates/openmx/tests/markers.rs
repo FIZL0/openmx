@@ -271,18 +271,6 @@ fn the_bar_fills_with_an_up_or_down_hold() {
         }
         assert_eq!(holding(&sim), 0, "{c:?} has no hold");
     }
-    // The bar drawn: the pixels the hold changes, against the same display with none.
-    let draw = |h: u32| {
-        let mut f = game_render::raster::Frame::new(640, 448, [20, 60, 120]);
-        hud::draw_markers(&mut f, Pick::Slot(0), &[false; SLOTS], "marker 1 empty", &[], h);
-        f
-    };
-    let empty = draw(0);
-    let lit = |h: u32| draw(h).color.chunks_exact(3).zip(empty.color.chunks_exact(3)).filter(|(a, b)| a != b).count();
-    let (half, full, over) = (lit(HOLD_MS / 2), lit(HOLD_MS), lit(5 * HOLD_MS));
-    assert!(half > 0, "half a hold lit nothing");
-    assert!(full > half && full <= 2 * half + 2, "half {half}, full {full}");
-    assert_eq!(over, full, "past the hold the bar stays full");
 }
 
 /// A held d-pad moves no bike (P93): the stick alone steers. Each direction held for two seconds on
@@ -2065,30 +2053,12 @@ fn the_bar_shows_the_spawn_and_the_clear() {
     assert!(shown && b.label(&[]) == "cleared", "the bar does not say Cleared after");
     let (_, _, b) = frame(&mut sim, GAS | Control::Right.mask(), &mut banner);
     assert_eq!(b.label(&[]), "marker 1 empty", "Cleared stayed past the spawn");
-
-    // Drawn: the spawn selected is not slot 1 selected, and a spawn with a start not one without.
-    let draw = |pick: Pick, home: bool| {
-        let mut f = game_render::raster::Frame::new(320, 224, [0, 0, 0]);
-        hud::draw_markers_homed(&mut f, pick, &[false; SLOTS], home, "marker", &[], 0, 1.0);
-        f.color
-    };
-    assert_ne!(draw(Pick::Spawn, true), draw(Pick::Slot(0), true));
-    assert_ne!(draw(Pick::Slot(0), true), draw(Pick::Slot(0), false));
 }
 
-/// The software HUD's bar with 63 slots set (P139): it scrolls so whichever slot or the + is
-/// selected is drawn, and the + reads "marker 64 new".
+/// The bar's label with 63 slots set (P139): the + reads "marker 64 new". (The software bar that
+/// drew it scrolled went with the debug HUD in P170; the ride HUD's marker menu draws it now.)
 #[test]
-fn the_software_bar_scrolls_to_the_selection_among_sixty_three() {
+fn the_plus_reads_the_slot_it_adds_among_sixty_three() {
     let filled = vec![true; game_sim::markers::MAX_SLOTS - 1];
     assert_eq!(hud::marker_label(Pick::More, &filled, &[]), "marker 64 new");
-    let draw = |pick: Pick| {
-        let mut f = game_render::raster::Frame::new(640, 448, [20, 60, 120]);
-        hud::draw_markers(&mut f, pick, &filled, "", &[], 0);
-        f.color
-    };
-    let frames: Vec<Vec<u8>> = [Pick::Slot(0), Pick::Slot(31), Pick::Slot(62), Pick::More].into_iter().map(draw).collect();
-    for (i, f) in frames.iter().enumerate() {
-        assert!(frames[..i].iter().all(|o| o != f), "selection {i} draws as another");
-    }
 }

@@ -309,11 +309,8 @@ added beside them:
   - `ground.rs` — the freeride area's ground: the ported terrain query asked about a world point rather
     than a sample, and the samples around the rider turned into triangles, because the renderer's `.trn`
     reader does not read an off-road layout.
-  - `hud.rs` — `--hud` (F3 toggles it, and H where H is not a stick key): the riding overlay, drawn with no triangles — a 2-D blit into
-    `Frame::color` after `draw_scene` and a 3x5 font — showing the sixteen controls as `input::Manager`
-    holds them, both sticks where the dead zone put them against their raw report bytes, and the
-    numbers the ride is running on. It matches nothing on the disc and draws nothing with the flag
-    off (P6).
+  - `hud.rs` — the session markers' slot display a view at a time (`MarkerBar`, `MarkerBanner`), which
+    the ride HUD's marker menu draws. It was the debug HUD (`--hud`, P6) until P170 took that out.
   - `moment.rs` — `--moment FILE OUT.png`: one frame posed from a moment file (a bike's transform and
     the frame's camera, read out of a save state by `research/shots/moment.py`) instead of from the
     simulation, so the port's picture can be put beside the original's (V2).
