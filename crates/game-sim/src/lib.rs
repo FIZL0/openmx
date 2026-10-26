@@ -953,3 +953,7 @@ mod tests {
         assert_eq!(d.tick, 5, "the fifth tick is the one that differs");
     }
 }
+
+/// The freestyle event (S92): the stunt competition's countdown, its 120-second clock, the track's
+/// target and the verdict, around the freeride card's points.
+pub mod event;
