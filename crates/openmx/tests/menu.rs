@@ -445,45 +445,45 @@ fn the_settings_file_reads_back_as_it_was_written() {
     std::fs::remove_dir_all(empty).ok();
 }
 
-/// P83: every launch starts on a HUD a rider is meant to see. A fresh file and an old one never
-/// read as the debug HUD — `on` (P36's word for it), `off`, and `debug` itself all ride the default
-/// HUD — and Settings' row offers HUD, Original and None, round either way, never Debug: the debug
-/// HUD is `--hud`'s alone (main.rs's `debug_hud`).
+/// P83, P170: every launch starts on a HUD a rider is meant to see. A fresh file and an old one
+/// never read as a HUD there is no more of — `on` (P36's word for the debug HUD), `off`, `debug` and
+/// `original` all ride the HUD, with or without P121's `hud = 1` beside them — and Settings' row
+/// offers HUD and None, round either way.
 #[test]
-fn the_settings_never_start_or_offer_the_debug_hud() {
+fn the_settings_offer_the_hud_and_none_alone() {
     assert_eq!(Settings::default().overlay, Overlay::Hud);
     assert_eq!(Settings::parse("").overlay, Overlay::Hud);
-    for (word, marked) in [("on", Overlay::Original), ("off", Overlay::Original), ("debug", Overlay::Hud)] {
+    for word in ["on", "off", "debug", "original"] {
         let text = format!("name = Rider\noverlay = {word}\n");
         assert_eq!(Settings::parse(&text).overlay, Overlay::Hud, "{text:?}");
-        // Marked as written since P121 (which never writes on or off), V28's reading stands.
         let text = format!("{text}hud = 1\n");
-        assert_eq!(Settings::parse(&text).overlay, marked, "{text:?}");
+        assert_eq!(Settings::parse(&text).overlay, Overlay::Hud, "{text:?}");
     }
-    // The other words still mean what they say.
-    assert_eq!(Settings::parse("overlay = original\nhud = 1\n").overlay, Overlay::Original);
     assert_eq!(Settings::parse("overlay = none\n").overlay, Overlay::None);
     // Saved from a fresh menu, the file says hud and reads back so.
     let dir = scratch("p83");
     menu::save(&dir, &Settings::default(), &Controls::default()).unwrap();
     assert_eq!(menu::load(&dir).0.overlay, Overlay::Hud);
-    std::fs::write(dir.join(menu::SETTINGS_FILE), "name = Rider\noverlay = debug\nhud = 1\n").unwrap();
-    assert_eq!(menu::load(&dir).0.overlay, Overlay::Hud, "a saved debug falls back");
+    for word in ["debug", "original"] {
+        std::fs::write(dir.join(menu::SETTINGS_FILE), format!("name = Rider\noverlay = {word}\nhud = 1\n")).unwrap();
+        assert_eq!(menu::load(&dir).0.overlay, Overlay::Hud, "a saved {word} falls back");
+    }
     std::fs::remove_dir_all(dir).ok();
 
     let (mut m, mut r) = fresh();
     settings_at(&mut m, &mut r, "Display");
     down_to(&mut m, &mut r, menu::Key::Hud);
     let row = m.page()[m.cursor(Screen::Settings)].clone();
-    assert_eq!(row.choices, ["HUD", "Original", "None"]);
+    assert_eq!(row.choices, ["HUD", "None"]);
     let mut seen = vec![m.settings.overlay];
-    for press in [Control::Right, Control::Right, Control::Right, Control::Left, Control::Left, Control::Left, Control::Cross, Control::Cross, Control::Cross] {
+    for press in [Control::Right, Control::Right, Control::Left, Control::Left, Control::Cross, Control::Cross] {
         tap(&mut m, &mut r, press);
         seen.push(m.settings.overlay);
     }
-    use Overlay::{Hud, None as Off, Original};
-    assert_eq!(seen, [Hud, Original, Off, Hud, Off, Original, Hud, Original, Off, Hud]);
-    assert!(!m.settings.text().contains("debug"));
+    use Overlay::{Hud, None as Off};
+    assert_eq!(seen, [Hud, Off, Hud, Off, Hud, Off, Hud]);
+    let text = m.settings.text();
+    assert!(!text.contains("debug") && !text.contains("original") && !text.contains("hud = "), "{text}");
 }
 
 /// The draw distance row on the Graphics tab (P118's name for V-era's graphics row; P128's tab), whose words in
@@ -541,11 +541,8 @@ fn the_speedometer_row_switches_the_dial_and_is_saved() {
     assert_eq!(m.settings.speedometer, Speedometer::Digital);
     assert!(m.settings.text().contains("speedometer = digital\n"));
     tap(&mut m, &mut r, Control::Left);
-    // With no HUD (past the original's, the debug one being a launch option since P83) it dims,
-    // says why, and keeps its word.
+    // With no HUD (the row's other choice since P170) it dims, says why, and keeps its word.
     tap(&mut m, &mut r, Control::Up);
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.settings.overlay, Overlay::Original);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.overlay, Overlay::None);
     tap(&mut m, &mut r, Control::Down);
@@ -845,10 +842,9 @@ fn what_the_pad_sets_is_what_the_file_says() {
     assert_eq!(m.page()[m.cursor(Screen::Garage)].value, "Mx");
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
-    // The HUD off (Display: past the original's, no debug one since P83), wrecks off (Ride).
+    // The HUD off (Display: the row's other choice since P170), wrecks off (Ride).
     settings_at(&mut m, &mut r, "Display");
     down_to(&mut m, &mut r, menu::Key::Hud);
-    tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::L1);
     down_to(&mut m, &mut r, menu::Key::Wrecks);
@@ -4065,7 +4061,6 @@ fn a_fresh_settings_file_has_every_enhancement_on_and_original_off() {
             assert!(!m.some_original(d), "{d:?} starts at the original's");
         }
         // Since P121 the ride HUD is the port's own.
-        assert!(!m.hud_is_original(), "the HUD starts as the port's");
         assert_eq!(m.settings.overlay, Overlay::Hud);
     }
     assert_eq!(m.settings.plants, game_render::eco::Lod::Smooth);
@@ -4076,13 +4071,14 @@ fn a_fresh_settings_file_has_every_enhancement_on_and_original_off() {
 }
 
 /// P126: the Original tab's switch, by pad, puts every sub-switch at the original's — the controls
-/// and cameras of every seat, the fog, the plants, the picture and the HUD — and back; one sub-switch
-/// turned back leaves the others and the switch reads Mixed.
+/// and cameras of every seat, the fog, the plants and the picture — and back; one sub-switch turned
+/// back leaves the others and the switch reads Mixed. Since P170 it leaves the HUD as it is: on still
+/// rides openmx's.
 #[test]
 fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     use menu::{Departure, Key, Original};
     let (mut m, mut r) = fresh();
-    // A HUD of the user's own, which the switch puts back.
+    // A HUD of the user's own, which the switch leaves.
     (m.settings.minimap, m.settings.hud_scale, m.settings.overlay) = (false, 120, Overlay::None);
     settings_at(&mut m, &mut r, "Original");
     let value = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap().value;
@@ -4099,7 +4095,7 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     assert_eq!(s.graphics, Graphics::Original);
     assert_eq!(s.plants, game_render::eco::Lod::Original);
     assert_eq!(s.picture, menu::Picture::Television);
-    assert_eq!((s.minimap, s.hud_scale, s.overlay), (true, menu::HUD_SCALE_DEFAULT, Overlay::Original));
+    assert_eq!((s.minimap, s.hud_scale, s.overlay), (false, 120, Overlay::None), "the HUD is left as it was");
     // The sim is none of them (P55).
     assert!(s.modifiers.is_original());
     // Each sub-switch on its tab: the graphics ones on Graphics since P128.
@@ -4124,12 +4120,12 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
         }
         assert_eq!(m.original(), Original::Mixed, "{d:?}");
         assert_eq!(value(&m, Key::Original), "Mixed");
-        // The HUD alone off the original's reads Mixed too.
+        // The HUD is not read (P170): any HUD settings at all read On.
         let mut h = m.clone();
         h.set_departure(d, true);
         assert_eq!(h.original(), Original::On);
-        h.settings.minimap = false;
-        assert_eq!(h.original(), Original::Mixed);
+        (h.settings.minimap, h.settings.hud_scale, h.settings.overlay) = (true, 70, Overlay::Hud);
+        assert_eq!(h.original(), Original::On);
         // From Mixed the switch's press is On; a second is Off, every enhancement back.
         down_to(&mut m, &mut r, Key::Original);
         tap(&mut m, &mut r, Control::Cross);
@@ -4139,10 +4135,8 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
         assert_eq!(m.settings.graphics, Graphics::Full);
         assert_eq!(m.controls.layouts, [Layout::New; menu::SEATS]);
         assert_eq!(m.settings.cameras, [menu::CameraView::DEFAULT; menu::SEATS_MAX]);
-        // Off puts the port's ride HUD back (P121) and leaves the radar and the scale as they are.
-        assert_eq!(m.settings.overlay, Overlay::Hud);
-        assert!(m.settings.minimap && m.settings.hud_scale == menu::HUD_SCALE_DEFAULT);
-        assert!(!m.hud_is_original());
+        // Off leaves the HUD as it was too: the user's own, still.
+        assert_eq!((m.settings.minimap, m.settings.hud_scale, m.settings.overlay), (false, 120, Overlay::None));
     }
     // One player on the original's layout is Mixed on the Controls row and on the switch.
     let (mut m, mut r) = fresh();
@@ -4154,6 +4148,23 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     let mut n = m.clone();
     n.set_departure(Departure::Controls, false);
     assert_eq!(n.original(), Original::Off);
+}
+
+/// P170: Original Game on from a fresh menu rides openmx's HUD — the switch reads On with the HUD
+/// untouched, the file it saves says no other HUD, and its row says the HUD stays.
+#[test]
+fn original_game_on_still_rides_openmxs_hud() {
+    use menu::{Key, Original};
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Original");
+    let row = m.page().into_iter().find(|row| row.key == Key::Original).unwrap();
+    assert!(row.about.contains("the HUD stays openmx's"), "{}", row.about);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.original(), Original::On);
+    let s = &m.settings;
+    assert_eq!((s.overlay, s.minimap, s.hud_scale), (Overlay::Hud, true, menu::HUD_SCALE_DEFAULT));
+    let back = Menu::new(Settings::parse(&s.text()), m.controls.clone());
+    assert_eq!((back.settings.overlay, back.original()), (Overlay::Hud, Original::On));
 }
 
 /// P126: settings.txt (and controls.txt for the layouts) round-trips each sub-switch on its own and

@@ -1,4 +1,4 @@
-//! V28: the original's HUD shows. V26 drew it, yet a launch showed none: a settings file saved before
+//! V28: the HUD shows (the original's then, the ride HUD's since P121 and alone since P170). V26 drew it, yet a launch showed none: a settings file saved before
 //! V26 said `overlay = on`, which V26 read as its debug HUD, and on the GPU a pause menu's patch
 //! wrote over the HUD's. These ride the shell itself, as a user would, and look at its first frame:
 //! the speedometer's and the radar's boxes are drawn over — the frame differs there from the same
@@ -89,10 +89,10 @@ fn assert_hud(name: &str, with: &[u8], without: &[u8], speedo: (usize, usize, us
     }
 }
 
-/// A default launch's first ride frame has the original's HUD over it, on either renderer: the
-/// readout and the preload meter, or the dial when asked for (V42).
+/// A default launch's first ride frame has the HUD over it, on either renderer: the readout and the
+/// preload meter, or the dial when asked for (V42), at the original's places.
 #[test]
-fn a_default_launch_shows_the_originals_hud() {
+fn a_default_launch_shows_the_hud() {
     for renderer in ["gpu", "software"] {
         let Some(with) = first_frame(renderer, &["--renderer", renderer]) else { return };
         let without = first_frame(&format!("{renderer}-none"), &["--renderer", renderer, "--overlay", "none"]).unwrap();
@@ -110,7 +110,7 @@ fn a_default_launch_shows_the_originals_hud() {
 fn the_pause_menu_keeps_the_hud_under_it() {
     for renderer in ["gpu", "software"] {
         let pause = |overlay| ["--renderer", renderer, "--menu", "--screen", "pause", "--overlay", overlay];
-        let Some(with) = first_frame(&format!("{renderer}-pause"), &pause("original")) else { return };
+        let Some(with) = first_frame(&format!("{renderer}-pause"), &pause("hud")) else { return };
         let without = first_frame(&format!("{renderer}-pause-none"), &pause("none")).unwrap();
         for (part, b) in [("speedometer", (READOUT.0, READOUT.1, READOUT.2, 338)), ("radar", (RADAR.0, RADAR.1, RADAR.2, 338))] {
             let (n, area) = (apart(&with, &without, b), (b.2 - b.0) * (b.3 - b.1));
@@ -119,15 +119,26 @@ fn the_pause_menu_keeps_the_hud_under_it() {
     }
 }
 
-/// P83: a launch with no word starts on the ride HUD, frame for frame what `--overlay hud` draws,
-/// and the debug HUD comes up only when the launch asks for it with `--hud`.
+/// P83: a launch with no word starts on the ride HUD, frame for frame what `--overlay hud` draws.
 #[test]
-fn only_a_hud_launch_starts_on_the_debug_hud() {
+fn a_plain_launch_starts_on_the_ride_hud() {
     let whole = (0, 0, 640, 448);
     let Some(plain) = first_frame("p83-plain", &["--renderer", "software"]) else { return };
     let hud = first_frame("p83-hud-word", &["--renderer", "software", "--overlay", "hud"]).unwrap();
-    let debug = first_frame("p83-debug", &["--renderer", "software", "--hud"]).unwrap();
-    let (same, apart_debug) = (apart(&plain, &hud, whole), apart(&plain, &debug, whole));
-    assert!(apart_debug > 1000, "--hud drew only {apart_debug} pixels apart from a plain launch");
-    assert!(same * 20 < apart_debug, "a plain launch is {same} pixels off --overlay hud's frame");
+    let none = first_frame("p83-none", &["--renderer", "software", "--overlay", "none"]).unwrap();
+    let (same, apart_none) = (apart(&plain, &hud, whole), apart(&plain, &none, whole));
+    assert!(apart_none > 1000, "the HUD drew only {apart_none} pixels apart from none");
+    assert!(same * 20 < apart_none, "a plain launch is {same} pixels off --overlay hud's frame");
+}
+
+/// P170: the debug HUD and the original's are gone, and a launch asking for either is refused with
+/// a message saying so, before it opens a disc or a window.
+#[test]
+fn a_launch_asking_for_a_gone_hud_is_refused() {
+    for args in [&["--hud"][..], &["--overlay", "debug"], &["--overlay", "original"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_openmx")).args(["--headless", "--frames", "1"]).args(args).output().expect("the shell runs");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} was taken");
+        assert!(err.contains("gone (P170)"), "{args:?}: {err}");
+    }
 }

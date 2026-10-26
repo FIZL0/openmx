@@ -698,9 +698,8 @@ impl Wiring {
     ///
     /// A spec rather than a built-in table per pad because no device the project has ever had in
     /// front of it reports per-button pressure: the project cannot say which axis a given driver
-    /// puts Cross's pressure on, and a wrong default would read a stick as a throttle. With the
-    /// overlay on (`--hud`) the right number is a minute's work — press the button, watch which
-    /// control's strength follows it.
+    /// puts Cross's pressure on, and a wrong default would read a stick as a throttle. (The debug
+    /// HUD, `--hud`, showed each control's strength to find it by; P170 took it out.)
     pub fn parse_pressures(spec: &str) -> Result<[Option<Control>; AXES], String> {
         let mut map = [None; AXES];
         let spec = spec.trim();

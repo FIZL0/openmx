@@ -397,23 +397,25 @@ fn a_camera_change_toasts() {
     assert!(ride_hud::sprites(&mut out, 0, [0.0, 0.0, 1920.0, 1080.0], &shown(&g, &[], &[], None), &t, t0 + ride_hud::TIMES[4]).camera.is_none());
 }
 
-/// The overlay's default is the ride HUD, first of four; a file from before P121 that says
-/// `original` takes the ride HUD once, and one written since keeps the original's.
+/// The overlay's default is the ride HUD, first of the two left since P170 (HUD and None); a file
+/// that says `original` or `debug`, or P36's `on` or `off`, takes the ride HUD.
 #[test]
 fn the_ride_hud_is_the_default_and_old_files_move_to_it_once() {
     assert_eq!(Overlay::default(), Overlay::Hud);
-    assert_eq!(Overlay::ALL, [Overlay::Hud, Overlay::Original, Overlay::Debug, Overlay::None]);
+    assert_eq!(Overlay::ALL, [Overlay::Hud, Overlay::None]);
+    assert_eq!(Overlay::CHOICES, Overlay::ALL);
     assert_eq!(Overlay::Hud.word(), "hud");
     assert_eq!(Settings::default().overlay, Overlay::Hud);
     assert_eq!(Settings::parse("name = Rider\noverlay = original\n").overlay, Overlay::Hud);
-    // The debug HUD is never the settings' (P83): tests/menu.rs holds that it reads as the default.
+    // And a file P121 wrote with its `hud = 1` beside the original's, which kept it then.
+    assert_eq!(Settings::parse("overlay = original\nhud = 1\n").overlay, Overlay::Hud);
     for o in Overlay::CHOICES {
         let s = Settings { overlay: o, ..Settings::default() };
         assert_eq!(Settings::parse(&s.text()).overlay, o, "{o:?} written since");
         // Saved again, it stays.
         assert_eq!(Settings::parse(&Settings::parse(&s.text()).text()).overlay, o);
     }
-    for (word, o) in [("debug", Overlay::Hud), ("none", Overlay::None), ("hud", Overlay::Hud)] {
+    for (word, o) in [("debug", Overlay::Hud), ("on", Overlay::Hud), ("off", Overlay::Hud), ("none", Overlay::None), ("hud", Overlay::Hud)] {
         assert_eq!(Settings::parse(&format!("overlay = {word}\n")).overlay, o);
     }
 }
@@ -528,8 +530,9 @@ fn apart(a: &[u8], b: &[u8], (x0, y0, x1, y1): (usize, usize, usize, usize)) -> 
         .count()
 }
 
-/// The shell draws each `--overlay` as its own on either renderer: the ride HUD's score bar, the
-/// original's, the debug HUD's text, and nothing for `none` — the frame the others are told from.
+/// The shell draws each `--overlay` as its own on either renderer: the ride HUD's score bar, and
+/// nothing for `none` — the frame the HUD is told from. (`original` and `debug` are refused since
+/// P170, tests/hud.rs.)
 #[test]
 fn each_overlay_draws_its_own() {
     const SCORE: (usize, usize, usize, usize) = (14, 25, 182, 46);
@@ -538,14 +541,8 @@ fn each_overlay_draws_its_own() {
         let run = |o: &str| first_frame(&format!("{renderer}-{o}"), &["--renderer", renderer, "--overlay", o]);
         let Some(none) = run("none") else { return };
         let hud = run("hud").unwrap();
-        let original = run("original").unwrap();
-        let debug = run("debug").unwrap();
         let whole = (0, 0, 640, 448);
-        for (name, f) in [("hud", &hud), ("original", &original), ("debug", &debug)] {
-            assert!(apart(f, &none, whole) > 500, "{renderer}: --overlay {name} drew nothing");
-        }
-        assert!(apart(&hud, &original, whole) > 500, "{renderer}: the ride HUD is the original's");
-        assert!(apart(&hud, &debug, whole) > 500, "{renderer}: the ride HUD is the debug HUD");
+        assert!(apart(&hud, &none, whole) > 500, "{renderer}: --overlay hud drew nothing");
         // The ride HUD's score bar and meter where the layout puts them.
         let area = |b: (usize, usize, usize, usize)| (b.2 - b.0) * (b.3 - b.1);
         for (part, b) in [("score bar", SCORE), ("meter", METER)] {

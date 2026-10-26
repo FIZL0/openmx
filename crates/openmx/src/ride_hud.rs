@@ -336,6 +336,8 @@ impl Tracker {
     /// `BackFlip + ` while a flip comes round under it) over [`overlay::stunt_points`], or a landed
     /// chain's [`overlay::combo_total`] over the banked points — and moves as [`Tracker::popup`]
     /// does: the newest name pops in, an ended combo plays out. The info text is the camera toast.
+    /// The original's HUD left the shell in P170; this stays for its drawing in `overlay.rs`.
+    #[allow(dead_code)]
     pub fn pops(&self, now: Instant) -> overlay::Pops {
         let stunt = self.popup(now).map(|p| {
             let n = self.ids.len();

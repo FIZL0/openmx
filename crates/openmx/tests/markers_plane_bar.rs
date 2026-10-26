@@ -4,7 +4,7 @@
 //! place it — and is shot from a fixed pose
 //! over the start line looking up into the sky, so nothing the plane does reaches the picture but
 //! the overlay. The shot is taken while Down is still held, after the placement has fired. Under the
-//! original's HUD the bar is drawn over the plane's view; with the overlay off (P117) not a pixel of
+//! HUD (the ride HUD since P170) its marker menu is drawn over the plane's view; with the overlay off (P117) not a pixel of
 //! it. The same tape with the d-pad left alone is the frame with no markers to show. The PNG reader,
 //! the shell's runner and the pose are P117's (`markers_hud_off.rs`).
 
@@ -107,8 +107,9 @@ fn apart(a: &[u8], b: &[u8], (x0, y0, x1, y1): (usize, usize, usize, usize)) -> 
     (y0..y1).flat_map(|y| (x0..x1).map(move |x| 3 * (y * 640 + x))).filter(|&i| a[i..i + 3] != b[i..i + 3]).count()
 }
 
-/// The bar's panel, top and centre of a 640x448 frame, with room to spare.
-const BAR: (usize, usize, usize, usize) = (200, 0, 440, 90);
+/// The ride HUD's marker menu, top right of a 640x448 frame (`ride_hud::top_right`), with room to
+/// spare; the original's top-centre bar left with its HUD (P170).
+const BAR: (usize, usize, usize, usize) = (320, 0, 640, 160);
 const WHOLE: (usize, usize, usize, usize) = (0, 0, 640, 448);
 
 #[test]
@@ -149,12 +150,12 @@ fn flying_the_plane_the_shell_draws_its_bar() {
             (said, rgb)
         };
         // The plane's markers: Right onto its slot 2, Down puts the plane's marker in it.
-        let (said, original_marked) = shot(&with, "original");
+        let (said, hud_marked) = shot(&with, "hud");
         assert_eq!(marker_lines(&said), ["marker: slot 2", "marker: placed in slot 2"], "{renderer}:\n{said}");
-        let (said, original_plain) = shot(&without, "original");
+        let (said, hud_plain) = shot(&without, "hud");
         assert!(marker_lines(&said).is_empty(), "{renderer}:\n{said}");
-        // Under the original's HUD the bar is there over the plane's view, top and centre.
-        let n = apart(&original_marked, &original_plain, BAR);
+        // Under the HUD its marker menu is there over the plane's view, top right (since P170).
+        let n = apart(&hud_marked, &hud_plain, BAR);
         assert!(n > 500, "{renderer}: flying, the bar drew over only {n} pixels");
 
         // With the overlay off (P117) the plane's markers draw no bar either, and still work.

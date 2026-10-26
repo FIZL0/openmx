@@ -358,18 +358,14 @@ impl Menu {
         let s = &self.settings;
         let hud = Overlay::CHOICES.map(Overlay::label);
         let speed = Speedometer::ALL.map(Speedometer::label);
-        let speed_off = match s.overlay {
-            Overlay::Hud | Overlay::Original => None,
-            Overlay::Debug => Some("Only the HUD and the Original have one"),
-            Overlay::None => Some("The HUD is off"),
-        };
+        let speed_off = (s.overlay == Overlay::None).then_some("The HUD is off");
         vec![
-            Row::choice(Key::Hud, "HUD", &hud, at(&Overlay::CHOICES, s.overlay), "What a ride draws over the picture. HUD is openmx's own, sharp at any size; Original is the game's; None leaves the picture clean.")
-                .tips(&["Sharp at any size", "The game's own", "Nothing over the ride"]),
+            Row::choice(Key::Hud, "HUD", &hud, at(&Overlay::CHOICES, s.overlay), "What a ride draws over the picture. HUD is openmx's own, sharp at any size; None leaves the picture clean.")
+                .tips(&["Sharp at any size", "Nothing over the ride"]),
             Row::choice(Key::Speedometer, "Speedometer", &speed, at(&Speedometer::ALL, s.speedometer), "How the HUD shows your speed: the readout or the dial.")
                 .off_if(speed_off.is_some(), speed_off.unwrap_or("")),
             // V52: the radar alone, and the whole HUD's size about its corners.
-            Row::on_off(Key::Minimap, "Minimap", s.minimap, "The original HUD's radar in the corner. Off, it goes from every view and the speedometer stays.")
+            Row::on_off(Key::Minimap, "Minimap", s.minimap, "The HUD's radar in the corner. Off, it goes from every view and the speedometer stays.")
                 .off_if(speed_off.is_some(), speed_off.unwrap_or("")),
             Row::slider(
                 Key::HudScale,
@@ -427,7 +423,7 @@ impl Menu {
             "Original Game",
             &["Off", "On"],
             0,
-            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves, picture shape and HUD. Each switch below can be set on its own, and the fog, plants, leaves and picture shape on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
+            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves and picture shape; the HUD stays openmx's. Each switch below can be set on its own, and the fog, plants, leaves and picture shape on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
         )
         .tips(&["Every enhancement on", "The game as it shipped"]);
         match self.original() {

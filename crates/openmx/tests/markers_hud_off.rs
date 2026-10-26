@@ -1,6 +1,6 @@
 //! P117: with the HUD off (`--overlay none`, Settings' Overlay None) the session markers' bar is not
 //! drawn either, on the GPU or on the software renderer, while the markers still work; under the
-//! original's HUD it is drawn as before. The shell rides free06 headless on a hand-written tape — full
+//! HUD (the ride HUD since P170) its marker menu is drawn as before. The shell rides free06 headless on a hand-written tape — full
 //! throttle, Down held to place slot 1, then Up held to ride back to it — and is shot from a fixed
 //! pose behind the start line, looking away from the ride, so nothing the ride does reaches the
 //! picture but the overlay. The shot is taken while Up is still held, after the teleport has fired:
@@ -106,8 +106,9 @@ fn apart(a: &[u8], b: &[u8], (x0, y0, x1, y1): (usize, usize, usize, usize)) -> 
     (y0..y1).flat_map(|y| (x0..x1).map(move |x| 3 * (y * 640 + x))).filter(|&i| a[i..i + 3] != b[i..i + 3]).count()
 }
 
-/// The bar's panel, top and centre of a 640x448 frame, with room to spare.
-const BAR: (usize, usize, usize, usize) = (200, 0, 440, 90);
+/// The ride HUD's marker menu, top right of a 640x448 frame (`ride_hud::top_right`), with room to
+/// spare; the original's top-centre bar left with its HUD (P170).
+const BAR: (usize, usize, usize, usize) = (320, 0, 640, 160);
 const WHOLE: (usize, usize, usize, usize) = (0, 0, 640, 448);
 
 #[test]
@@ -158,11 +159,11 @@ fn with_the_hud_off_markers_draw_no_bar_and_still_teleport() {
         let n = apart(&none_marked, &none_plain, WHOLE);
         assert_eq!(n, 0, "{renderer}: with the overlay off the markers drew over {n} pixels");
 
-        // Under the original's HUD the bar is there, top and centre.
-        let (said, original_marked) = shot(&with, "original");
+        // Under the HUD its marker menu is there, top right (since P170; it was the original's bar).
+        let (said, hud_marked) = shot(&with, "hud");
         assert_eq!(marker_lines(&said), ["marker: placed in slot 1", "marker: to slot 1"], "{renderer}:\n{said}");
-        let (_, original_plain) = shot(&without, "original");
-        let n = apart(&original_marked, &original_plain, BAR);
-        assert!(n > 500, "{renderer}: under the original's HUD the bar drew over only {n} pixels");
+        let (_, hud_plain) = shot(&without, "hud");
+        let n = apart(&hud_marked, &hud_plain, BAR);
+        assert!(n > 500, "{renderer}: under the HUD the marker menu drew over only {n} pixels");
     }
 }
