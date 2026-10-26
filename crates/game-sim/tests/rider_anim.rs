@@ -843,11 +843,12 @@ fn the_rider_publishes_the_body_its_own_request() {
     assert_eq!(asked[3], GET_READY);
     assert!((START_POS..STATES as i32).contains(&asked[4]), "a start pose, not {}", asked[4]);
     // The published half of the request, off the rider: the bars and the rider's weight as the
-    // animation header has them, the chassis's speed, and the trick clocks' progress and count.
+    // state pack latched them in front of the header, the contact velocity's forward lane (S112), and
+    // the trick clocks' progress and count.
     let r = rider.body_request;
-    assert_eq!(r.phase_axis, rider.motion.pose, "the phase axis is the header's pose");
-    assert_eq!(r.mix_axis, rider.motion.fore_aft, "the mix axis is the header's fore-aft");
-    assert_eq!(r.band, rider.ride.chassis.speed, "the band is the chassis's speed");
+    assert_eq!(r.phase_axis, rider.packed_pose, "the phase axis is the packed pose");
+    assert_eq!(r.mix_axis, rider.packed_fore_aft, "the mix axis is the packed fore-aft");
+    assert_eq!(r.band.0.to_bits(), rider.ride.air.contact_vel.z().to_bits(), "the band is the contact velocity's z");
     assert_eq!(r.progress, rider.tricks.progress, "the progress is the trick clocks'");
     assert_eq!(r.seq, rider.tricks.seq, "and so is the count");
     assert_eq!(rider.body_rates.start_phase, r.progress, "which the tail latches back");
@@ -860,7 +861,7 @@ fn the_rider_publishes_the_body_its_own_request() {
     assert_eq!(rider.body.veh.want, TURN_RIDING, "and the rider rides");
     println!(
         "the wiring: {asked:?} then riding, through a whole rider on the flat, band {:?}",
-        rider.ride.chassis.speed
+        rider.body_request.band
     );
 }
 

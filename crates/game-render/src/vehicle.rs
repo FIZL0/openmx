@@ -826,8 +826,11 @@ impl Chassis {
     ///
     /// `at` is where the shell has put the bike and which way it is facing, for the record's sake —
     /// the placement is skipped (see [`Chassis::frame`]), so nothing downstream reads them.
+    ///
+    /// The band is the contact velocity's forward lane (S112): in the original the bike and its rider
+    /// read one block, the riding request, whose band the fill copies from it.
     pub fn request(ride: &Ride, tricks: &Tricks) -> Request {
-        let speed = F(ride.chassis.local_vel.z());
+        let speed = F(ride.air.contact_vel.z());
         Request {
             base: ride.origin,
             rotation: ride.chassis.quat,
@@ -852,11 +855,13 @@ impl Chassis {
     /// rider's body (its `body_request`): the motion driver's pose, which in the air is its shown
     /// crossup, and its fore-and-aft. In the original the rider's body is mounted on the *bike's*
     /// request block — the block's owner word is the bike, on every ridden body of the V21 save
-    /// states — so the bike and its rider read one pair of axes, which is this.
+    /// states — so the bike and its rider read one pair of axes, which is this. That block is the
+    /// riding request (S112), which carries the pose and the fore-aft as the state pack latched them
+    /// in front of this tick's header: [`Rider::packed_pose`] and [`Rider::packed_fore_aft`].
     pub fn riding(rider: &Rider) -> Request {
         Request {
-            phase_axis: rider.motion.pose,
-            mix_axis: rider.motion.fore_aft,
+            phase_axis: rider.packed_pose,
+            mix_axis: rider.packed_fore_aft,
             ..Chassis::request(&rider.ride, &rider.tricks)
         }
     }

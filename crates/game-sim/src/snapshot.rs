@@ -472,6 +472,7 @@ impl Wire for Rider {
             state,
             motion,
             packed_pose,
+            packed_fore_aft,
             set: _,
             clips: _,
             sense,
@@ -505,6 +506,7 @@ impl Wire for Rider {
         state.put(out);
         motion.put(out);
         packed_pose.put(out);
+        packed_fore_aft.put(out);
         sense.put(out);
         racing.put(out);
         crash.put(out);
@@ -531,6 +533,7 @@ impl Wire for Rider {
             state: Wire::take(r)?,
             motion: Wire::take(r)?,
             packed_pose: Wire::take(r)?,
+            packed_fore_aft: Wire::take(r)?,
             set: Default::default(),
             clips: Default::default(),
             sense: Wire::take(r)?,

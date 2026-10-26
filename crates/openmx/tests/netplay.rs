@@ -868,9 +868,12 @@ fn of_three_peers_one_leaves_from_the_menu_and_one_is_killed_and_the_ride_goes_o
     let (h, g, m) = (&r.nets[0], &r.nets[1], &r.nets[3]);
     assert_eq!(g.end.as_deref(), Some("you left the ride"));
     assert!(g.flushed());
-    // g was out within a second: the restart's round trip, no away wait
+    // g was out within two seconds (a round is 33 ms): the restart's round trip, nowhere near the
+    // 5 s away wait (round 350). The restart's state goes in pieces over the 10% loss, so how many
+    // are lost and sent again moves this by a few rounds as the snapshot grows: 225 until S112's 16
+    // more bytes on the wire made it 231.
     let out = left_at.unwrap();
-    assert!(out < 230, "g out at round {out}");
+    assert!(out < 260, "g out at round {out}");
     let left = &h.leave.left;
     assert_eq!(left.len(), 1, "{left:?}");
     assert_eq!((left[0].0.as_str(), left[0].1.as_slice()), ("g", &[1usize][..]));
