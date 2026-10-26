@@ -219,3 +219,11 @@ Two things that bite:
       the ghost there (research/journal/2026-10-21-p57-bike-reset-ghost-fade). P57 left it so. Say if
       you want the ghost on a switch back to the bike anyway — an addition with nothing in the original
       to prove it against.
+- [ ] **The New layout's gas: switch or analogue (P77).** P77 decided, unattended, to match the original:
+      the original's bike reads its gas, brake and clutch as switches (any press is 1.0, and its limiter
+      walks the lever up at the bike's GasRateLimit), and since P40's New layout is a remap onto the
+      original's Cross and Square before the simulation reads them, New's R2 and L2 are now switches too.
+      Part pressure still reaches the biplane's throttle, which is analogue in the original. If you want
+      New's R2 analogue on the bike after all, say so: it goes in as an addition (the bike's pad read
+      keeping the strength under the New layout only, recorded on the tape), with nothing in the original
+      to prove it against, and the Original layout stays the switch (research/journal/2026-10-26-p77-lever-switches).

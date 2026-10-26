@@ -72,7 +72,8 @@
 //!
 //! # The controls
 //!
-//! Cross is the throttle and Square the brake (both analogue, as the pad reports them), L2 is the
+//! Cross is the throttle and Square the brake (switches on the bike, as the original's are: any press
+//! is the whole lever, P77), L2 is the
 //! clutch and R2 the front brake on its own, and the left stick steers and leans. The right stick
 //! turns the camera round the rider, the original's look-around, and with L3 held moves it in and out
 //! (P114); clicking it (R3) puts the camera back where its preset has it, which is the port's own —
@@ -104,9 +105,11 @@
 //! ([`pad::Scheme::ride`]) before the engine's pad port sees it, so the simulation still reads the
 //! original's controls, a tape holds what it read, and under the original's every replay is as it was.
 //!
-//! **The throttle is a pressure and not a switch**, because the game reads Cross from its pressure
-//! byte: part throttle out of a corner is a fraction of that byte and the port has always read it as
-//! one. What has to be arranged is a host that can *ask* for a fraction (P9, [`pad`]) — almost no pad
+//! **The bike's throttle is a switch** (P77): the original's bike takes any strength of its gas, brake
+//! and clutch commands as 1.0, and its limiter walks the lever up at the bike's rate, so under either
+//! layout a part-pressed Cross or R2 is the whole throttle. **The biplane's throttle is a pressure**,
+//! because the game reads Cross from its pressure byte there: part throttle is a fraction of that
+//! byte. What has to be arranged is a host that can *ask* for a fraction (P9, [`pad`]) — almost no pad
 //! sold since the DualShock 2 reports a face button as anything but a bit. So: `--pad-pressure` says
 //! which joystick axes a device publishes its buttons' own pressures on, where it publishes them;
 //! `--throttle r2` rides gas on a trigger instead, which is travel every pad has, giving up that
@@ -3868,7 +3871,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     match args.wiring.throttle {
         Throttle::Cross => {}
         Throttle::Trigger(control) => println!(
-            "throttle: the {0} trigger's travel — part throttle, and no {0} control this session",
+            "throttle: the {0} trigger's travel — the plane's part throttle, the bike's switch, and no {0} control this session",
             control.name(),
         ),
     }

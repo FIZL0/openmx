@@ -592,7 +592,7 @@ fn every_seat_rides_its_own_preset_and_says_it_in_bytes() {
 }
 
 /// [`mash`]'s pads are a ride as the game reads them (N9): every seat's bike is on the gas nearly
-/// every tick at more than one pressure, brakes now and then, holds a stunt on the chord, and the
+/// every tick — at the one value a held lever is, 1.0, whatever the pressure (P77) — brakes now and then, holds a stunt on the chord, and the
 /// d-pad the chord touches (up) never reaches the hands: since P129 it is the markers' with a trick
 /// button down too. And the bikes get going.
 #[test]
@@ -630,7 +630,8 @@ fn the_mashed_pads_are_a_ride() {
         }
     }
     for (seat, s) in seen.iter().enumerate() {
-        assert!(s.gas > ticks * 8 / 11 && s.gases.len() > 5, "seat {seat}: {s:?}");
+        assert!(s.gas > ticks * 8 / 11, "seat {seat}: {s:?}");
+        assert_eq!(s.gases.iter().copied().collect::<Vec<_>>(), [1.0f32.to_bits()], "seat {seat}: the gas is a switch");
         assert!(s.brake > 0 && s.stunt > 0, "seat {seat}: {s:?}");
         assert_eq!((s.up, s.down), (0, 0), "seat {seat}: the d-pad reached the hands");
         assert!(s.speed > 10.0, "seat {seat} never got going: {s:?}");

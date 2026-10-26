@@ -4515,7 +4515,25 @@ binding_table_build  boot 0x00200f00 (app, pad, preset) the only writer of the t
 #   05-0d, 23, 25, 26: no constant-command reader found (the pad vtable's query slots take the
 #     command in a register).
 #   The bike's own vt+0xec, bike_input_limiter, then walks +0x650/+0x654 brake (front = rear),
-#     +0x658 gas, +0x65c clutch toward those switches; not ported by P73.
+#     +0x658 gas, +0x65c clutch toward those switches; ported by P77 (below).
+# P77 — the levers are switches, and the limiter's walk (crates/game-sim/src/ride.rs: switch,
+#   Controls::pad_read_tail, Held::step; crates/game-sim/tests/levers.rs runs pad_to_gesture then
+#   bike_input_limiter in the interpreter on 20000 generated cases, bit for bit on +0x63c..+0x65c).
+#   pad_to_gesture's lever half, not wrecked: +0x63c = (value 0x0e != 0), +0x640 = value 0x0f == 0 ? 0 :
+#     (+0x728 stoppie latch ? +0x72c StoppieBrake : 1.0), then the reverse tail (P72), then +0x644 =
+#     (value 0x10 != 0). Wrecked (+0x748): stick, gas, brake, clutch, +0x9fc, +0xa18 zeroed, +0x648 kept.
+#   bike_input_limiter's lever half: +0x61c latch set when +0x610 is clear and +0x618 (last tick's
+#     +0x610) set; cleared when +0x610 is set again, or +0x614 set with gas > 0 and clutch lever 0;
+#     while set the brake lever +0x640 = 1.0 and +0x648 = 0. +0x618 = +0x610. Brake +0x650 rises at
+#     +0x68c (BrakeRateLimit), drops at once; +0x654 = +0x650. Gas +0x658 = 0 when +0x614 is clear or
+#     +0xa44 (the no-hander) is set, or when reversing (+0x648 != 0) on the ground (+0x57c == 0); else
+#     rises at +0x688, drops at once. Clutch +0x65c toward +0x644 at +0x690 rising, +0x694 falling.
+#   +0x610 / +0x614: the bike's steer and throttle enables, 1 at the bike's set-up (0x0024f5d4), 1 on
+#     a put-back (0x0027f61c), set by a message handler (0x0024a120/0x0024a138), and copied each bike
+#     tick (0x0027ca2c) from the words at +0x1068 / +0x106c, which in first_recording point at the
+#     bike's own +0x610 / +0x614 (a no-op). Every riding save state: +0x610 = +0x614 = +0x618 = 1,
+#     +0x61c = 0. The same tick, before the copy, gas +0x63c = 0 while *(+0xf9c)+0x1c0 > 0 (0x0027ca18).
+#     The port has no lock that clears them, so it leaves the latch, the enables and the +0x1c0 cut out.
 # Strings: the preset screen's labels are STR_BUTTON_1..6_TEXT / STR_BUTTON_DES_* in AppStart's
 #   loc\ui.loc, whose values are encoded (not plain or UTF-16); not decoded.
 # S66 — the bike's put-back record and where L1+R1 / the wreck clock put the bike, ported as
