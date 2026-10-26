@@ -422,6 +422,7 @@ impl crate::Sim {
         if bump.is_none() || !self.others.is_empty() || self.plane.is_some() {
             return self.step(dt, controls, world);
         }
+        self.traffic.frame(dt, world);
         let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], bump);
         self.ticks += 1;
         said

@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others, markers, home: _ } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others, markers, home: _, traffic } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -100,8 +100,17 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         markers.on.put(&mut out);
         markers.away.put(&mut out);
     }
+    // The track's path cars (S81), on a track that has any, behind their own tag: a state on a track
+    // without them is the bytes it was before.
+    if !traffic.cars.is_empty() {
+        CARS.put(&mut out);
+        traffic.cars.put(&mut out);
+    }
     out
 }
+
+/// What begins [`encode`]'s cars section.
+const CARS: u64 = u64::from_le_bytes(*b"S81cars\0");
 
 /// What begins [`encode`]'s markers section: a word no length of the players' list can be. P139's
 /// word since its slots are counted (five, or more off the +): a state of P88's five-slot layout,
@@ -133,6 +142,17 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         markers.away = Wire::take(&mut r)?;
         let sets = std::iter::once(&markers.slots).chain(markers.away.iter().map(|s| &s.slots));
         sets.map(Vec::len).try_for_each(crate::markers::check_count)?;
+    }
+    let mut traffic = sim.traffic.clone();
+    if r.bytes.get(r.at..r.at + 8) == Some(&CARS.to_le_bytes()[..]) {
+        r.at += 8;
+        let cars: Vec<crate::traffic::Car> = Wire::take(&mut r)?;
+        if cars.len() != traffic.cars.len() {
+            return Err(format!("{} path cars in the state, {} here", cars.len(), traffic.cars.len()));
+        }
+        traffic.cars = cars;
+    } else if !traffic.cars.is_empty() {
+        return Err(format!("no path cars in the state, {} here", traffic.cars.len()));
     }
     // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
     let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone()));
@@ -188,6 +208,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         others,
         markers,
         home: Arc::clone(&sim.home),
+        traffic,
     };
     Ok(())
 }
@@ -521,6 +542,7 @@ impl Wire for Rider {
 }
 
 wire!(crate::Input { buttons, stick });
+wire!(crate::traffic::Car { clock, seg, point, head, normal, first, pose });
 wire!(crate::ghost::Ghost { clock, alpha, on });
 wire!(crate::rider::PutBack { placed, filled, held, wreck });
 wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip });

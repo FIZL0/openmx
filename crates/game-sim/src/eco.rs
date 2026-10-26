@@ -734,6 +734,10 @@ impl<W: World> World for Wooded<W> {
         let (field, props) = self.world.collision();
         (field, props, Some(&self.trees))
     }
+
+    fn moving(&mut self) -> Option<&mut world::Props> {
+        self.world.moving()
+    }
 }
 
 #[cfg(test)]

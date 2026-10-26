@@ -752,6 +752,13 @@ impl World for Land<'_> {
             Land::Woods(w) => w.wooded(),
         }
     }
+    fn moving(&mut self) -> Option<&mut Props> {
+        match self {
+            Land::Track(p) => p.moving(),
+            Land::Tiles(t) => t.moving(),
+            Land::Woods(w) => w.moving(),
+        }
+    }
 }
 
 impl Surface for Land<'_> {

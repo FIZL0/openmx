@@ -1115,6 +1115,8 @@ impl Garage {
     pub fn step(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World) -> rider::Frame {
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
+                // The track's path cars run on whichever machine is up (S81).
+                sim.traffic.frame(dt, world);
                 let respawned = plane.step(sim, dt, world);
                 rider::Frame { respawned, ..rider::Frame::default() }
             }
@@ -1238,6 +1240,7 @@ pub fn start_lane(template: &Flight, bay: Spawn, sim: &mut Sim) {
 /// recovery put the plane back this tick. A seat on the bike does nothing.
 pub fn fly_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> bool {
     let Some(f) = sim.plane.take() else { return false };
+    sim.traffic.frame(dt, world);
     let mut plane =
         Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
     let respawned = plane.step(sim, dt, world);
