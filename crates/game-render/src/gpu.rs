@@ -139,8 +139,8 @@ struct MaterialUniform {
     constant: [f32; 4],
     cutoff: f32,
     shading: u32,
-    /// 1 for [`Surface::keep_coverage`]; the shader no longer reads it, the texture's levels keep
-    /// the coverage (V58).
+    /// 1 for [`Surface::keep_coverage`]: the texture's levels keep the coverage (V58), and the
+    /// shader reads two of them dithered (V85).
     coverage: u32,
     /// Texels at or over this alpha are not drawn: the half of a material whose failing texels are
     /// drawn apart from its passing ones ([`GpuMaterial::rest`]).
@@ -2517,9 +2517,10 @@ impl Renderer {
         };
         // The few materials that clamp (palm fronds, bark, cut-outs) get a sampler of their own;
         // everything else shares the repeating one.
-        // A cut-out that keeps its coverage (leaves, V58) reads one level, not a mix of two: each
-        // level covers what the full size does, but two mixed (a fine level's thin twigs with a
-        // coarse level's broad, fainter ones) fall under the cutoff between them.
+        // A cut-out that keeps its coverage (leaves, V58) reads one level a pixel, not a mix of two:
+        // each level covers what the full size does, but two mixed (a fine level's thin twigs with
+        // a coarse level's broad, fainter ones) fall under the cutoff between them. The shader picks
+        // the level itself, dithered between the two about the pixel's own (V85).
         let clamped = (key.clamp != [false; 2] || key.keep_coverage).then(|| {
             let mode = |on: bool| if on { wgpu::AddressMode::ClampToEdge } else { wgpu::AddressMode::Repeat };
             self.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -3985,8 +3986,30 @@ fn node_matrix(i: u32) -> mat4x4f {
 }
 
 @fragment fn fs(i: Out) -> @location(0) vec4f {
-  let t = textureSample(tex, samp, i.uv) * 255.0;
-  // A cut-out that keeps its coverage (leaves) has it kept by its texture's mips (V58).
+  var t: vec4f;
+  if (material.coverage == 1u) {
+    // A cut-out that keeps its coverage (leaves) has it kept by its texture's mips (V58), and reads
+    // one level a pixel, not a mix of two, which would fall under the cutoff between them. Which
+    // of the two levels about the pixel's own it reads is dithered by how far it is between them
+    // (V85), so a nearing bush's sharper level comes in over the octave, not on one frame. The
+    // colour is the two levels' mixed where both are leaf.
+    let size = vec2f(textureDimensions(tex, 0));
+    let gx = dpdx(i.uv * size);
+    let gy = dpdy(i.uv * size);
+    let lod = max(0.5 * log2(max(max(dot(gx, gx), dot(gy, gy)), 1e-8)), 0.0);
+    let lo = floor(lod);
+    let f = lod - lo;
+    let fine = textureSampleLevel(tex, samp, i.uv, lo) * 255.0;
+    let coarse = textureSampleLevel(tex, samp, i.uv, lo + 1.0) * 255.0;
+    let up = covers(i.clip.xy + vec2f(2.0, 1.0), f);
+    let other = select(coarse, fine, up);
+    t = select(fine, coarse, up);
+    if (other.a >= material.cutoff) {
+      t = vec4f(mix(fine.rgb, coarse.rgb, f), t.a);
+    }
+  } else {
+    t = textureSample(tex, samp, i.uv) * 255.0;
+  }
   let a = t.a;
   if (a < material.cutoff || a >= material.below || (i.cover < 1.0 && !covers(i.clip.xy, i.cover))) {
     discard;

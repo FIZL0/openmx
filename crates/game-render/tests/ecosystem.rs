@@ -1080,3 +1080,58 @@ fn a_bush_up_close_keeps_its_leaves_on_both_renderers() {
         assert!((0.8..=1.25).contains(&far), "{track} species {species}: the GPU draws {:.0}% of software's leaves at {BUSH_FAR} ft", far * 100.0);
     }
 }
+
+// V85: a nearing bush's sharper level fades in. Presentation only.
+
+mod lod_walk;
+
+/// The most a patch of a bush's leaves may change from a frame of the walk to the next: its share
+/// of pixels drawn, its mean colour and its detail (the spread of its brightness), each 0..255 a
+/// channel. Looser than `texture_lod.rs`'s made-up leaves: half a disc atlas is a patch, bark and
+/// sparse twigs side by side, and it shimmers by 2 a frame at any distance, level change or not.
+const BUSH_COVERAGE: f32 = 0.03;
+const BUSH_COLOUR: f32 = 2.5;
+const BUSH_DETAIL: f32 = 3.5;
+
+/// Each of [`BUSHES`]' leaf textures, on a card facing the camera and walked up to from where it
+/// is a sixth of its texels across to where it is half again as many (through every distance its
+/// level changes at), sharpens with no patch of it stepping past [`BUSH_COVERAGE`],
+/// [`BUSH_COLOUR`] or [`BUSH_DETAIL`] from one frame to the next. The disc's own 512 x 256 atlas
+/// steps under its shimmer either way (2.7 at most reading one level at a time, 2.9 dithered);
+/// the made-up 1024-texel leaves of `texture_lod.rs` are the ones that show the step.
+#[test]
+fn a_bushs_leaves_walked_from_far_to_near_sharpen_without_a_step() {
+    let _quiet = alone();
+    let Some(mut disc) = disc() else { return };
+    let Some(mut shooter) = lod_walk::Shooter::new() else { return };
+    let mut seen = Vec::new();
+    for (track, species) in BUSHES {
+        let (scene, mut assets, _) = ride_plant_of(&mut disc, track, species);
+        let grove = scene.ecosystem.as_ref().unwrap();
+        let loaded = &assets.models[&grove.cut[grove.ecosystem.plants[0].species]];
+        let leaves: Vec<(Option<usize>, game_render::world::Surface)> = loaded.textures.iter().copied().zip(loaded.surfaces.iter().copied()).collect();
+        for (texture, surface) in leaves {
+            let Some(t) = texture else { continue };
+            if !surface.keep_coverage || seen.contains(&(track, t)) {
+                continue;
+            }
+            seen.push((track, t));
+            let tex = &assets.textures[t];
+            let across = tex.width.max(tex.height) as f32;
+            let (width, height) = (tex.width, tex.height);
+            let frames = lod_walk::walk_card(&mut shooter, &mut assets, t, surface, 4.0, ((across / 6.0).max(100.0), (across * 1.5).min(1400.0)), 2);
+            let s = lod_walk::worst(&frames);
+            let what = format!("{track} species {species}'s {width}x{height} leaves");
+            println!(
+                "{what}: worst step a frame: coverage {:.3} at {:.1} ft, colour {:.2} at {:.1} ft, detail {:.2} at {:.1} ft",
+                s.coverage.0, s.coverage.1, s.colour.0, s.colour.1, s.detail.0, s.detail.1
+            );
+            assert!(frames.iter().any(|(_, p)| p.iter().any(|p| p.area >= lod_walk::MIN_AREA && !p.cut && p.covered * 4 >= p.area)), "{what}: judged at all");
+            assert!(s.coverage.0 <= BUSH_COVERAGE, "{what}: coverage steps {:.3} at {:.1} ft", s.coverage.0, s.coverage.1);
+            assert!(s.colour.0 <= BUSH_COLOUR, "{what}: colour steps {:.2} at {:.1} ft", s.colour.0, s.colour.1);
+            assert!(s.detail.0 <= BUSH_DETAIL, "{what}: detail steps {:.2} at {:.1} ft", s.detail.0, s.detail.1);
+        }
+    }
+    assert!(!seen.is_empty(), "a bush has leaves that keep their coverage");
+}
+
