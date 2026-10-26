@@ -8250,3 +8250,118 @@ fn walls_and_nose_landings_wreck_as_the_original_does() {
     println!("{compared} hits compared");
     assert!(parted.is_empty(), "{}", parted.join("\n"));
 }
+
+// --- P147: a backflip cut short onto the roof, under Air Wrecks on and off ---------------------------
+
+/// P147's captures (`research/p147`: `make_tape.py` on recording2, `play.sh`, `roof.toml`, which is
+/// S138's whole-bike spec plus the flip flags and the riding collision record): flip 1 with the stick
+/// pushed against it from field 298, which bleeds the torque off near upside down. The capture, the
+/// state the port starts from, the ticks ridden past it, and what the case is.
+const P147_LANDINGS: [(&str, u64, u64, &str); 2] = [
+    ("p147/roof", 2580, 20, "the stick centred at field 320: still flipping, onto the roof at up.y -0.93"),
+    ("p147/nose", 2580, 20, "the stick held forward to field 420: turned back past vertical, onto the nose"),
+];
+
+impl SaveState {
+    /// The backflip off the rider, which [`SaveState::seed_ride`] leaves at its defaults: the four
+    /// flags (`+0x4f4` the torque applied this substep, `+0x4f8` flipping, `+0x4fc` triggered, `+0x500`
+    /// armed), the torque (`+0x520`) and the control-authority ramp a finished flip starts (`+0x4e8`). A flip still turning keeps the airborne attitude clause from running, so a state
+    /// taken mid-flip and seeded without them is judged as a bike that is not flipping.
+    fn seed_flip(&self, ride: &mut game_sim::ride::Ride) -> Option<()> {
+        let r = self.rider;
+        let air = &mut ride.air;
+        air.flip_torque_applied = self.flag(r + 0x4f4)?;
+        air.flipping = self.flag(r + 0x4f8)?;
+        air.flip_active = self.flag(r + 0x4fc)?;
+        air.flip_armed = self.flag(r + 0x500)?;
+        air.flip_torque = self.vf(r + 0x520)?;
+        air.authority = self.float(r + 0x4e8)?;
+        Some(())
+    }
+}
+
+/// **A bike landed on its roof wrecks on the original's tick and reason, Air Wrecks on and off**
+/// (P147): each of [`P147_LANDINGS`] ridden by the port from the original's save state with the
+/// original's pad, the bike's body rays and free09's ground, once with [`game_sim::state::Sense::air_wrecks`] on and
+/// once off, and the wreck verdict held to the capture's (the tick ±1, as in S138, and the reason).
+/// The roof landing is the original's reason 6: the body rays search the ground once the bike's up
+/// is under a quarter, and the head ray finds it. The airborne clause never runs on it (the flip is
+/// still on), so the switch cannot change it; the nose landing is a landing clause's, which the
+/// switch leaves alone too. Skipped with a line where a capture or state is missing.
+#[test]
+fn roof_landings_wreck_as_the_original_does_air_wrecks_on_and_off() {
+    let dir = private_dir("capture");
+    let (mut compared, mut parted) = (0, Vec::new());
+    for (name, asked, ticks, what) in P147_LANDINGS {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
+            println!("no {name}.csv — P147's journal says how it is recorded");
+            continue;
+        };
+        let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+        let at = dir.join(format!("{name}-{asked}.ee.bin"));
+        let Some(st) = SaveState::open_either(&at) else {
+            println!("no {} with the human's rider in it", at.display());
+            continue;
+        };
+        let Some((_, acc)) = acceptance_capture() else { return };
+        in_the_world_of(&acc, |world, _, bike| {
+            let Some(Ridden { tables, phy, mounts }) = bike else {
+                println!("no Race 125 on this disc");
+                return;
+            };
+            let Some(col) = Disc::open().and_then(|mut disc| the_bike_col(&mut disc)) else {
+                println!("no bike collision files on this disc");
+                return;
+            };
+            let col = Arc::new(col);
+            let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+            let cap = dense_run(&whole, saved);
+            let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+            let rows = rows_by_counter(&cap);
+            let pad_of = |counter: u64| rows.get(&counter).filter(|&&r| r >= 2).map(|&r| tape.frames[r - 2]);
+            let want = first_wreck(&cap, saved).filter(|&(c, _)| c <= saved + ticks);
+            println!("{name} ({what}), from the state at frame {saved}: the original {}",
+                     want.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
+            assert!(want.is_some(), "{name}: the capture's original wrecks within {ticks} ticks");
+            for air_wrecks in [true, false] {
+                let mut rider = Rider::new(&phy, mounts.clone(), Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+                rider.carries_bike_col(Arc::clone(&col));
+                let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+                st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+                st.seed_flip(&mut sim.rider.ride).expect("the state's flip flags");
+                sim.rider.sense.air_wrecks = air_wrecks;
+                let mut got = None;
+                for counter in saved + 1..=saved + ticks {
+                    let Some(pad) = pad_of(counter) else {
+                        println!("  {counter}: no row in the capture");
+                        break;
+                    };
+                    sim.frame(pad.dt(), &pad.reports, world);
+                    let ride = &sim.rider.ride;
+                    if let Some(&r) = rows.get(&counter) {
+                        let up = cell(&cap, r, column(&cap, "up_y").unwrap());
+                        let ow = cell(&cap, r, column(&cap, "wreck_reason").unwrap());
+                        println!("  {counter} air wrecks {air_wrecks}: orig up.y {up:>10} wreck {ow}  port up.y {:10.6} flipping {} ground {}{}",
+                                 ride.transform().0[1].y(), ride.air.flipping, ride.air.on_ground,
+                                 sim.rider.state.wreck.map_or(String::new(), |w| format!("  wreck {}", w.0)));
+                    }
+                    if got.is_none() && let Some(w) = sim.rider.state.wreck {
+                        got = Some((counter, w.0));
+                        break;
+                    }
+                }
+                println!("  the port, air wrecks {air_wrecks}: {}", got.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
+                let agrees = match (want, got) {
+                    (Some((wc, wr)), Some((gc, gr))) => gr == wr && gc.abs_diff(wc) <= 1,
+                    _ => false,
+                };
+                if !agrees {
+                    parted.push(format!("{name} ({what}), air wrecks {air_wrecks}: the original {want:?}, the port {got:?} (tick, reason)"));
+                }
+                compared += 1;
+            }
+        });
+    }
+    println!("{compared} landings compared");
+    assert!(parted.is_empty(), "{}", parted.join("\n"));
+}
