@@ -5959,7 +5959,8 @@ fn md20_one_short_of_either_wrecks() {
 /// on alone, the stick has its say again, and once the 360 has ended in the air the bike is damped
 /// until the wheels are down ([`game_sim::air::Step::spin_ramp`]) where the port had levelled. Re-pinned
 /// by S67, whose bottom-out shove and stunt-clock copy-back are the original's and move every landing,
-/// and again with S106's braking speed source on top of it.
+/// and again with S106's braking speed source on top of it, and with S107's inverse inertia (the
+/// original's general inverse, an ulp off the old reciprocal on one axis).
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -5971,8 +5972,8 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0x61748edc528a206c;
-const MD25_DIAGONAL_FOLD: u64 = 0x87a8d9135e8f7989;
+const MD25_GESTURE_FOLD: u64 = 0x5c1ca35846261fea;
+const MD25_DIAGONAL_FOLD: u64 = 0x2fb8f7802614e9d6;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
 /// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope. 0.31 until S67's

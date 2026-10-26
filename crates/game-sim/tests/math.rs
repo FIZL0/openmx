@@ -1,6 +1,6 @@
 //! F5 — the matrix and quaternion helpers, proved against the original.
 //!
-//! Nine proofs, one per exported function, each over 10,000 generated inputs run through the real
+//! Ten proofs, one per exported function, each over 10,000 generated inputs run through the real
 //! instructions in `ps2-oracle`'s interpreter and compared bit for bit with the port. No emulator and
 //! no capture: every one of these is a pure function of the quadwords it is handed, which is the
 //! cheapest thing in the project to prove and the thing it is least forgivable to leave unproved —
@@ -447,4 +447,61 @@ fn the_spherical_interpolation() {
     println!("{guarded} of {N} inputs came back as `a` (the nearly-parallel guard, or t = 0)");
     assert!(guarded > 100, "the |cos| >= 1 guard was barely reached: {guarded}");
     assert_eq!(wrong, 0, "{wrong} of {N} interpolations differ");
+}
+
+// --- the inverse ------------------------------------------------------------------------------------
+
+/// The general affine inverse a rigid body takes of its inertia tensor (S107). A third of the inputs
+/// are diagonal tensors with `w` one, the shape a chassis hands it; a third are affine matrices of
+/// ordinary numbers, a rotation-and-scale over a translation; the rest are arbitrary quadwords, and a
+/// few of each are made singular by repeating a row, which the original answers by leaving `out` as it
+/// was and returning 0 — the port's `None`.
+#[test]
+fn the_affine_inverse() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let at = addr("mat4_affine_inverse").unwrap();
+    let (out, m) = (SCRATCH, SCRATCH + 0x40);
+    let mut g = Gen(0x1e57_1070);
+    let untouched = [[0x5a5a_5a5a; 4]; 4];
+    let (mut wrong, mut singular) = (0, 0);
+    for i in 0..N {
+        let mut mm = match i % 3 {
+            0 => {
+                let d: [f32; 3] = core::array::from_fn(|_| g.range(0.5, 60.0));
+                let mut t = [[0u32; 4]; 4];
+                for k in 0..3 {
+                    t[k][k] = d[k].to_bits();
+                }
+                t[3][3] = 0x3f80_0000;
+                t
+            }
+            1 => {
+                let mut t: [[u32; 4]; 4] = core::array::from_fn(|_| core::array::from_fn(|_| g.range(-10.0, 10.0).to_bits()));
+                for r in 0..3 {
+                    t[r][3] = 0;
+                }
+                t[3][3] = 0x3f80_0000;
+                t
+            }
+            _ => g.mat(),
+        };
+        if g.one_in(20) {
+            mm[1] = mm[0];
+        }
+        put_mat(&mut ee, out, untouched);
+        put_mat(&mut ee, m, mm);
+        ee.call(at, &[out as u64, m as u64], &[], 10_000);
+        let ok = ee.r(2) != 0;
+        let ours = math::inverse(&mat(mm));
+        assert_eq!(ok, ours.is_some(), "#{i}: the original says {ok} for {mm:08x?}");
+        let ours = ours.map_or(untouched, |o| o.0.map(|r| r.to_bits()));
+        singular += usize::from(!ok);
+        if !same_mat("inverse", i, get_mat(&ee, out), ours) {
+            wrong += 1;
+            assert!(wrong < 6, "stopping after six");
+        }
+    }
+    println!("{singular} of {N} were singular");
+    assert!(singular > 100, "the zero determinant was barely reached: {singular}");
+    assert_eq!(wrong, 0, "{wrong} of {N} inverses differ");
 }

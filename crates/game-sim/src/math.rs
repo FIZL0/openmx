@@ -432,3 +432,64 @@ fn clamp_unit(c: F) -> F {
         F::ONE
     }
 }
+
+// --- the inverse ------------------------------------------------------------------------------------
+
+/// The inverse of an affine matrix, as the original's general inverse computes it: the adjugate of
+/// the 3×3 rotation part and of the translation (column 3 is taken to be `(0, 0, 0, 1)` and never
+/// read), transposed, then every lane of every row times one reciprocal of the determinant. `None`
+/// where the determinant is zero, and then the original writes nothing.
+///
+/// FPU for the cofactors and the determinant, each one an accumulator pair (`mula` then `msub`, or a
+/// `suba` then a `madd`) in the order below, and `div.s` for the reciprocal; VU0 for the scale, a
+/// `vmulx.xyzw` per row. So a diagonal matrix does not come back as each lane's own reciprocal: the
+/// middle one is `(a·c)·(1/(a·(b·c)))`, an ulp off `1/b` as often as not, and every zero cofactor that
+/// is a negated `0 − 0` comes out `−0`. This is how a rigid body is handed its inertia tensor, and the
+/// inverse is what its torque goes through (S107).
+pub fn inverse(m: &Mat4) -> Option<Mat4> {
+    let e = |r: usize, c: usize| F(m.0[r].0[c]);
+    let (m0, m1, m2) = (e(0, 0), e(0, 1), e(0, 2));
+    let (m4, m5, m6) = (e(1, 0), e(1, 1), e(1, 2));
+    let (m8, m9, m10) = (e(2, 0), e(2, 1), e(2, 2));
+    let (m12, m13, m14) = (e(3, 0), e(3, 1), e(3, 2));
+
+    // The determinant, the inverse's own arithmetic — not the adjugate's, which works it out again
+    // in another order for its corner lane.
+    let minor = Acc::mula(m5, m10).msub(m6, m9);
+    let a = m0 * minor;
+    let b = m4 * Acc::mula(m1, m10).msub(m2, m9);
+    let c = m1 * m6 - m2 * m5;
+    let det = Acc::suba(a, b).madd(m8, c);
+    if det == F::ZERO {
+        return None;
+    }
+    let s = F::ONE / det;
+
+    // The adjugate, row by row as it lands on the stack before the transpose.
+    let c00 = Acc::mula(m5, m10).msub(m6, m9);
+    let c01 = -Acc::mula(m4, m10).msub(m6, m8);
+    let c02 = Acc::mula(m4, m9).msub(m5, m8);
+    let t0 = Acc::mula(m9, m14).msub(m10, m13);
+    let t1 = Acc::mula(m5, m14).msub(m6, m13);
+    let c03 = -Acc::suba(m4 * t0, m8 * t1).madd(m12, c00);
+    let u0 = Acc::mula(m1, m10).msub(m2, m9);
+    let c10 = -u0;
+    let c11 = Acc::mula(m0, m10).msub(m2, m8);
+    let c12 = -Acc::mula(m0, m9).msub(m1, m8);
+    let u1 = Acc::mula(m1, m14).msub(m2, m13);
+    let c13 = Acc::suba(m0 * t0, m8 * u1).madd(m12, u0);
+    let u2 = Acc::mula(m1, m6).msub(m2, m5);
+    let c21 = -Acc::mula(m0, m6).msub(m2, m4);
+    let c22 = Acc::mula(m0, m5).msub(m1, m4);
+    let c23 = -Acc::suba(m0 * t1, m4 * u1).madd(m12, u2);
+    let c33 = Acc::suba(m0 * c00, m4 * u0).madd(m8, u2);
+    let adj = [
+        [c00, c01, c02, c03],
+        [c10, c11, c12, c13],
+        [u2, c21, c22, c23],
+        [F::ZERO, F::ZERO, F::ZERO, c33],
+    ];
+    Some(Mat4(core::array::from_fn(|r| {
+        Vf(core::array::from_fn(|c| vu::mul(adj[c][r].0, s.0)))
+    })))
+}

@@ -827,6 +827,18 @@ quat_slerp             boot 0x0013ee10 (out, a, b, t in f12, shortest): spherica
 mat4_to_quat           boot 0x0013f7b0 (out, mat): the rotation back to a quaternion by largest of the
 #                                      four 0.25*(1 +- m00 +- m11 +- m22) candidates, each compared
 #                                      with <= so a tie loses. Scalar FPU: sqrt.s then 0.25/it
+mat4_affine_inverse    boot 0x001e7180 (out, m) -> det != 0: the general affine inverse. The 3x3
+#                                      determinant on the FPU (mula/msub for the minors, suba/madd for
+#                                      the sum), out left untouched when it is 0; else the adjugate below
+#                                      into out, then div.s 1/det and vmulx.xyzw on each of the four
+#                                      rows. Ported as math::inverse, proved in tests/math.rs (S107)
+mat4_affine_adjugate   boot 0x001e6fd0 (out, m, transpose): the cofactors, FPU only, with column 3
+#                                      read as (0, 0, 0, 1); flag 1 stores them transposed. Its zeros are
+#                                      negated products, so a diagonal tensor's off-diagonals come out -0
+chassis_set_inertia    boot 0x00158e10 the chassis vtable's +0x7c (vtable 0x0044e8f0): copies the tensor
+#                                      to ch+0xb0 and tail-calls mat4_affine_inverse(ch+0xf0, ch+0xb0).
+#                                      Run at load only (no frame writes +0xf0). race125p's 1/18.4 is
+#                                      0x3d5e9bd3 here where a reciprocal gives 0x3d5e9bd4 (S107)
 
 # ---------------------------------------------------------------------------------------------------
 # S4 — collision against the world. The sweep and the shape test, as the sphere/probe-bundle class
