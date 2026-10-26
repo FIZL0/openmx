@@ -94,14 +94,17 @@ pub fn cars(text: &str) -> Vec<Car> {
 fn car(s: &Section) -> Car {
     let text = |key: &str| s.get(key).unwrap_or("").trim().to_string();
     let flag = |key: &str| s.get(key).is_some_and(ini::switch);
+    // The numbers as the original reads them (S81): its `strtod` and then its truncating
+    // double-to-float, so `TimeScale=0.95` is the float just below 0.95.
+    let number = |key: &str| s.get(key).map(|v| game_sim::phy::number(v).0);
     Car {
         model: text("FileName"),
         collision: text("CollisionFileName"),
         mot: text("MOTFileName"),
-        time_scale: s.number("TimeScale").unwrap_or(1.0),
-        heading_filter: s.number("HeadingFilter").unwrap_or(0.5),
-        normal_filter: s.number("NormalFilter").unwrap_or(0.2),
-        lag: s.number("LagDistance").unwrap_or(0.0),
+        time_scale: number("TimeScale").unwrap_or(1.0),
+        heading_filter: number("HeadingFilter").unwrap_or(0.5),
+        normal_filter: number("NormalFilter").unwrap_or(0.2),
+        lag: number("LagDistance").unwrap_or(0.0),
         path_is_level: flag("PathIsLevel"),
         presample: flag("PresampleTerrain"),
         drive_on_soultree: flag("DriveOnSoultree"),
@@ -371,6 +374,36 @@ impl Traffic {
             }
         }
         traffic
+    }
+
+    /// The same cars for the simulation (S81), in the same order: each one's path as its clip's keys
+    /// are, its numbers, and its `CollisionFileName`'s mesh out of these archives (`None`, and a car
+    /// nothing hits, when the file is missing or does not parse; said once). A car whose path the
+    /// simulation cannot walk is a car with one key, which the original does not drive either.
+    pub fn sim(&self, archives: &[crate::disc::Res]) -> game_sim::traffic::Traffic {
+        use ps2_float::{F, Vf};
+        let specs = self
+            .cars
+            .iter()
+            .filter_map(|(car, path)| {
+                let mesh = archives
+                    .iter()
+                    .find_map(|a| a.read_suffix(&car.collision).ok())
+                    .ok_or_else(|| "no such member".to_string())
+                    .and_then(|b| game_sim::track::Mesh::parse(&b));
+                let mesh = match mesh {
+                    Ok(m) => Some(m),
+                    Err(why) => {
+                        println!("traffic: {} drives without its {}: {why}", car.model, car.collision);
+                        None
+                    }
+                };
+                let points: Vec<(F, Vf)> = path.keys.iter().map(|k| (F(k.t), Vf::new(k.pos.x, k.pos.y, k.pos.z, 1.0))).collect();
+                let f = F;
+                game_sim::traffic::Spec::new(&points, f(car.time_scale), f(car.heading_filter), f(car.normal_filter), f(car.lag), mesh)
+            })
+            .collect();
+        game_sim::traffic::Traffic::new(specs)
     }
 
     /// Every car's model and where it is, `elapsed` seconds of the scene's own clock after the track

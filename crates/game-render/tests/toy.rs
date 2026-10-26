@@ -411,3 +411,53 @@ fn the_train_moves_every_frame_drawn_and_stays_coupled() {
         assert!(repeats > 0, "{hz} Hz: drawn at the tick's clock the train repeats frames");
     }
 }
+
+/// The simulation's cars (S81) off the disc, against the original's in S89's s89-along save state on
+/// free06: every one of the state's 21 path cars has a car of the port's with its path's keys (time,
+/// arc length and point) and its four numbers bit for bit, and a collision mesh.
+#[test]
+fn the_simulations_cars_are_the_originals_paths() {
+    use ps2_oracle::{Ee, Kit, addr, skip};
+    let Some(mut disc) = disc() else { return };
+    let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+    let state = kit.ctx("states").join("s89-along.eeMemory.bin");
+    if !state.exists() {
+        skip(&format!("{} is not there: `./kit state ram` of S89's s89-along save state", state.display()));
+        return;
+    }
+    let ee = Ee::from_ram(&state).unwrap_or_else(|e| panic!("{e}"));
+    let mut archives = vec![track(&mut disc, "free06")];
+    if disc.entries().iter().any(|e| e.name.to_ascii_lowercase().ends_with("\\free06_2.res")) {
+        archives.push(track(&mut disc, "free06_2"));
+    }
+    let (scene, terrain) = ground_of(&archives[0]);
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let mut on_ground = |p: V3| match ground.at(F(p.x), F(p.z)) {
+        Some(hit) => (v3(p.x, hit.y.0, p.z), v3(hit.normal.x(), hit.normal.y(), hit.normal.z())),
+        None => (p, v3(0.0, 1.0, 0.0)),
+    };
+    let sim = toy::Traffic::load(&archives, "free06", &mut on_ground).sim(&archives);
+    // The state's cars: the path car's vtable, eight bytes in.
+    let vtable = addr("path_car_vtable").unwrap();
+    let cars: Vec<u32> = (0..32u32 << 20).step_by(4).filter(|&a| ee.u32_at(a) == vtable).map(|a| a - 8).collect();
+    assert_eq!(cars.len(), 21, "the state's path cars");
+    for car in cars {
+        let path = ee.u32_at(car + 0x430);
+        let (n, keys) = (ee.u32_at(path), ee.u32_at(path + 0x8));
+        let f = |a: u32| ee.u32_at(a);
+        let theirs: Vec<[u32; 6]> = (0..n)
+            .map(|k| keys + k * 0x30)
+            .map(|k| [f(k), f(k + 4), f(k + 0x10), f(k + 0x14), f(k + 0x18), f(k + 0x1c)])
+            .collect();
+        let numbers = [0x534, 0x55c, 0x560, 0x558].map(|o| f(car + o));
+        let found = sim.specs.iter().find(|s| {
+            let ours: Vec<[u32; 6]> = s.keys.iter().map(|k| {
+                let p = k.pos.to_bits();
+                [k.t.to_bits(), k.len.to_bits(), p[0], p[1], p[2], p[3]]
+            }).collect();
+            ours == theirs && [s.time_scale, s.heading_filter, s.normal_filter, s.lag].map(|x| x.to_bits()) == numbers
+        });
+        let spec = found.unwrap_or_else(|| panic!("the state's car {car:#x} ({n} keys, lag {}) has no car of the port's", f32::from_bits(numbers[3])));
+        assert!(spec.mesh.is_some(), "car {car:#x} has no collision mesh");
+    }
+}

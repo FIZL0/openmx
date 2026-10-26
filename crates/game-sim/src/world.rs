@@ -433,7 +433,8 @@ impl Prop {
             false,
             true,
         );
-        Prop::on(mesh, &place)
+        let (to_world, centre, radius) = stood(&mesh, &place);
+        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius }
     }
 
     /// A parsed mesh stood at a world matrix: a moving car's (S81, [`crate::traffic`]). The mesh's

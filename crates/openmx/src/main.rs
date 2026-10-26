@@ -3024,8 +3024,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
     };
     // The cars the track's `.toy` drives along their clips (V41): free06's train, its trucks and
-    // scrapers, the other freeride tracks' trailers. Drawn, not ridden into: they reach nothing in the
-    // simulation, and their clock is the scene's own, summed from the ticks' `dt` below.
+    // scrapers, the other freeride tracks' trailers. Driven by the simulation (S81): every seat's
+    // `Sim::traffic` steps them at the top of its tick and stands their collision meshes, appended to
+    // the track's props here, where they are; the picture draws them where the first seat's are.
     // In a world the home tile's `.toy` is still in the tile's own feet: its cars find their ground at
     // the tile's offset and are drawn there (MD8).
     let car_shift = world_mod.as_ref().map_or([0.0; 2], |w| w.home_at().map(|a| a.0));
@@ -3041,6 +3042,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     if !traffic.cars.is_empty() || !traffic.skipped.is_empty() {
         println!("traffic: {} cars on clips, {} left out", traffic.cars.len(), traffic.skipped.len());
+    }
+    // A world's tiles' cars stay the picture's alone (MD15): a tiled world has no props list to put
+    // their meshes in.
+    let mut cars = traffic.sim(&archives);
+    if let Some(props) = sim_world::World::moving(&mut sim) {
+        cars.attach(props);
     }
     let traffic_time = 0.0f64;
     // The scene's clock at the tick before the last, which the picture blends from (V47).
@@ -3248,6 +3255,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 if let Some(&(_, y)) = args.trace_stick_y.iter().rev().find(|(at, _)| *at <= i) {
                     now.stick.1 = F(y);
                 }
+                // The path cars first, as a tick of the ride steps them (S81).
+                cars.frame(dt, &mut sim);
                 let f = rider.frame(&phy, &tables, &now, dt, &mut sim);
                 let r = &rider.ride;
                 let (v, p, m) = (r.chassis.vel, r.position(), r.transform());
@@ -3356,6 +3365,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         );
         let mut peak = (F::ZERO, F::ZERO, F::ZERO);
         for i in 0..frames {
+            cars.frame(dt, &mut sim);
             let f = rider.frame(&phy, &tables, &controls, dt, &mut sim);
             if let Some(w) = f.wreck {
                 println!("frame {i}: WRECK {w:?}");
@@ -3443,7 +3453,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -3452,10 +3462,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
+    // Where the first seat's path cars stood before the last tick (S81), which the picture blends from.
+    let mut cars_before: Vec<game_sim::math::Mat4> = Vec::new();
     if let Some(since) = load_screen.since {
         println!("loading: built, {} frames drawn over {:.2} s", load_screen.frames, since.elapsed().as_secs_f32());
     }
@@ -4271,6 +4283,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Each player's start, which a player joining the ride (P76) adds theirs to and a leaver takes theirs out of.
     let mut join_starts = starts.clone();
     seats.iter_mut().for_each(|s| s.sim.home = Arc::clone(&home));
+    // The path cars (S81) on every seat's state, from the track's load: each seat steps them before
+    // its rider, so each rider meets them where its own state has them.
+    seats.iter_mut().for_each(|s| s.sim.traffic = cars.clone());
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
     // A played tape rides Air Wrecks as it was made (P138): on, the original's, until the tape says
     // otherwise, whatever the Settings screen or the command line say.
@@ -5256,6 +5271,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             cut.before(cut_spots(seat, before[i].bike, cameras.get(i)));
         }
         traffic_before = traffic_time;
+        cars_before = world.seats[0].sim.traffic.cars.iter().map(|c| c.pose).collect();
         let sim_at = Instant::now();
         let dt: F;
         (dt, simulated) = if let Some(on) = &mut online {
@@ -5829,12 +5845,18 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // tick before the last to the last by how far the wall clock is past it. Render-side only:
         // nothing below writes the simulation.
         let blend = pace::Blend(pacer.blend(moment));
-        // The path cars at the picture's own moment (V47): their clips read at the clock between the
-        // last two ticks, as far along as the bike's blend, so they move every frame drawn.
-        if !traffic.cars.is_empty() {
-            let place = &mut world.place;
-            let shown = game_render::toy::between(traffic_before, traffic_time, blend.0);
-            traffic_at = traffic.placed(shown, &mut |p| car_ground(place, p, car_shift));
+        // The path cars at the picture's own moment (V47): where the first seat's simulation stood
+        // them on the tick before the last and on the last (S81), blended by the bike's blend, so they
+        // move every frame drawn and are drawn where the bike meets them.
+        let driven = &world.seats[0].sim.traffic.cars;
+        if !traffic.cars.is_empty() && driven.len() == traffic.cars.len() {
+            traffic_at = traffic
+                .cars
+                .iter()
+                .zip(driven)
+                .enumerate()
+                .map(|(k, ((car, _), now))| (car.stem().to_string(), car_between(cars_before.get(k).unwrap_or(&now.pose), &now.pose, blend.0)))
+                .collect();
             for (_, at) in &mut traffic_at {
                 at.0[3][0] += car_shift[0];
                 at.0[3][2] += car_shift[1];
@@ -6941,6 +6963,16 @@ fn framings(v: menu::CameraView) -> (chase::Framing, chase::Framing) {
 /// The ground under a path car (V41), as the ride's own query answers it: the point on the surface
 /// and the surface's normal. Off the terrain the point stays where it is, standing straight up. `p`
 /// is in the track's own feet, which sit `by` from the world's (a world's home tile, MD8).
+/// A path car's picture between two ticks' poses (S81): each row slid `by` of the way, which on a
+/// tick's few feet and fraction of a degree is the turn's own blend to the eye.
+fn car_between(before: &game_sim::math::Mat4, now: &game_sim::math::Mat4, by: f32) -> M4 {
+    let by = by.clamp(0.0, 1.0);
+    M4(std::array::from_fn(|r| std::array::from_fn(|c| {
+        let (a, b) = (before.0[r].0[c], now.0[r].0[c]);
+        a + (b - a) * by
+    })))
+}
+
 fn car_ground(world: &mut dyn sim_world::World, p: V3, by: [f32; 2]) -> (V3, V3) {
     let (on, normal) = world.ground(Vf::new(p.x + by[0], p.y, p.z + by[1], 1.0));
     if on.y() < -1.0e5 {

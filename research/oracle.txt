@@ -5155,3 +5155,4 @@ path_car_update       boot 0x00115540 (a0 car, f12 dt) clock = fmodf(clock + dt 
 path_car_measure      boot 0x00115330 each segment's arc: ten chords of the curve, sqrt.s summed
 path_car_lag          boot 0x00116150 the clip time LagDistance of arc behind s (walks keys back, wraps)
 path_car_curve        boot 0x00116410 Hermite on the cursor's segment, Catmull-Rom tangents (chord at ends)
+path_car_vtable       boot 0x0044d370 the path car's vtable, at +8 of the car (scan a RAM image for it to find the cars)
