@@ -5317,3 +5317,18 @@ node_name             boot 0x001b4fa0 node +0x120 is a pointer to the name
 #   sequence toys: list 0x003b50c0 (0x170 bytes, ctor 0x003b51c0, vtable 0x0045dcf0), section 0x003b52c0
 #   (base 0x002144d0, motion by name 0x001426a0), next motion 0x003b5630 (int(rand x 2^-31 x 100) <=
 #   chance - 1, or past count tries), update 0x003b5480 (only while 0x00215050 says visible).
+
+# S76 — the wreck bike's world objects (wreck_bike::WreckBike::tick_among, wired in ride::Crash::step;
+#   proved in tests/wreck_bike.rs). Read off the s62 states and S76's garage states (context/capture/s62
+#   in s3): the wreck bike's record +0x1f0 is its ray probe, +0x1f4 its sweep probe, +0x10c its nearby
+#   search. Both probes: category (+0x84) 0x8, collides-with (+0xcc) 0xffffffff, flags (+0x116) ray 0x02,
+#   sweep 0x03, plus the transient 0x10 (searched) and 0x20 (hit: up only in garage-3002, against the
+#   garage's side). Leave-out lists (+0xd0 mode, +0xd4 array, +0xd8 count), mode 1: the ray probe's the
+#   bike's own collidable (0x9a058), the sweep probe, the riding bike (0x9a048) and the rider (0x18000);
+#   the sweep's the bike's own and the ray probe. Category lists (+0xe8/+0xec/+0xf0) mode 1: ray empty,
+#   sweep [0x8, 0x800]. So scenery (0x220) is searched, as the plane's probes search it. The nearby list
+#   at the s62 states held only moving collidables (0x48 toys, 0x9a048 bikes, 0x200020): no scenery
+#   within the ~10-15 ft bound there.
+#   Garage capture: recording2's state teleported to (4642.5, 135.6, 3650) (research/s76_tele.py), full
+#   gas north (research/s76/gas.pad) into free09's farmyard garage's back wall (z 3876.3, x 4625..4660):
+#   reason 1 at frame 2882, wreck to 2960; the respawned wreck 3002..3079 against its side.

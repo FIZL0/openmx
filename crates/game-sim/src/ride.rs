@@ -2779,16 +2779,15 @@ impl Crash {
             self.rider_vel = self.bike.body.velocity;
         }
 
-        // The body: the world node's tick, against the terrain and the ecosystem's trees; the world's
-        // other objects are not searched (see `wreck_bike`), and a part with its collision off
-        // searches nothing.
+        // The body: the world node's tick, against the terrain, the scene's collision meshes and the
+        // ecosystem's trees (see `wreck_bike`); a part with its collision off searches nothing.
         if !part.collision_enabled {
             self.bike.tick(dt, None, &mut NoObjects);
-        } else if let (field, _, Some(trees)) = world.wooded() {
-            self.bike.tick_wooded(dt, field.as_deref(), trees);
         } else {
-            let field = world.heightfield();
-            self.bike.tick(dt, field.as_deref(), &mut NoObjects);
+            match world.wooded() {
+                (field, None, None) => self.bike.tick(dt, field.as_deref(), &mut NoObjects),
+                (field, props, trees) => self.bike.tick_among(dt, field.as_deref(), props, trees),
+            }
         }
         self.origin = self.bike.origin();
         self.resting = length(self.bike.body.velocity) <= part.speed_threshold

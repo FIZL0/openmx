@@ -24,10 +24,13 @@
 //! off the body's mass, the high-speed sweep, the moment masks and the frictions.
 //!
 //! What the search meets in the world is handed in: the terrain as a
-//! [`contact_search::Heightfield`], the world's objects as a [`contact_search::Search`]. Of the
-//! world's objects the ride has only the ecosystem's plants (S102): in a world with them the wreck
-//! bike's ray probe searches them as the biplane's does ([`WreckBike::tick_wooded`]); elsewhere the
-//! ride hands in [`NoObjects`].
+//! [`contact_search::Heightfield`], the world's objects as a [`contact_search::Search`]. The world's
+//! objects the ride has are the scene's collision meshes — its rocks, fences and buildings (S76) — and
+//! the ecosystem's plants (S102), and the wreck bike's two probes search them as the biplane's do
+//! ([`WreckBike::tick_among`]): its probes are the plane's (category, mask, flags, an empty category
+//! list on the ray probe), and what they leave out — the bike's own collidable, each other, the riding
+//! bike and the rider, and on the sweep the categories 0x8 and 0x800 — is none of the scenery's. A
+//! world with neither gets [`NoObjects`].
 
 #![deny(clippy::float_arithmetic)]
 
@@ -36,6 +39,7 @@ use crate::contact::{self, Collider, Node, Response, Weighed};
 use crate::contact_search::{self, Heightfield, Hit, Record, Search, Struck, Swept};
 use crate::eco::Trees;
 use crate::flight_search::{self, Scene};
+use crate::world::Props;
 use crate::{ray_probe, track};
 use crate::hash::{State, Walk};
 use crate::math::quat_to_mat4;
@@ -342,20 +346,27 @@ impl WreckBike {
         WORLD.step(dt, &mut Lists(self));
     }
 
-    /// [`WreckBike::tick`] in a world with the ecosystem's plants in it: the world's objects are the
-    /// trees, searched by the ray probe ([`ray_tree`]) through a nearby list as the plane's is
-    /// ([`flight_search::Scene::wooded`]; the wreck bike's search has the plane's numbers, and its
-    /// sweep probe's flags keep it off placed groups too). The list is gathered fresh each frame
-    /// where the probe stands: the original keeps it between gathers, which hands out the same
-    /// candidates within reach, in its walk's order then rather than now.
+    /// [`WreckBike::tick`] in a world with the ecosystem's plants in it: [`WreckBike::tick_among`]
+    /// with the trees and no props.
     pub fn tick_wooded(&mut self, dt: F, ground: Option<&dyn Heightfield>, trees: &Trees) {
+        self.tick_among(dt, ground, None, Some(trees));
+    }
+
+    /// [`WreckBike::tick`] in a world with objects in it: the scene's collision meshes (`props`) and
+    /// the ecosystem's plants (`trees`), searched by the ray probe ([`ray_tree`]) and the sweep probe
+    /// through a nearby list as the plane's are ([`flight_search::Scene::wooded`]; the wreck bike's
+    /// search has the plane's numbers, and its sweep probe's flags keep it off placed groups, so a
+    /// trunk is met by the rays alone). The list is gathered fresh each frame where the probe stands:
+    /// the original keeps it between gathers, which hands out the same candidates within reach, in
+    /// its walk's order then rather than now.
+    pub fn tick_among(&mut self, dt: F, ground: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
         let rays = ray_tree();
         let bounds = ground.map(|f| {
             let (lo, hi) = (f.min(), f.max());
             ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
         });
         let mut nearby = flight_search::search();
-        let mut scene = Scene::wooded(None, Some(trees), None, bounds, &rays, &self.record.node, &mut nearby);
+        let mut scene = Scene::wooded(props, trees, None, bounds, &rays, &self.record.node, &mut nearby);
         self.tick(dt, ground, &mut scene);
     }
 
