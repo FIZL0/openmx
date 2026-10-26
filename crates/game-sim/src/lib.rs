@@ -305,7 +305,15 @@ impl Sim {
             self.ticks += 1;
             return crate::rider::Frame::default();
         }
-        let said = self.rider.frame(&self.phy, &self.tables, controls, dt, world);
+        // The bike's body rays against the cars (S137), gathered as the rider-against-rider contacts
+        // are, before the bike is stepped.
+        let cars = self.car_contacts(0, world, dt);
+        let said = if cars.is_empty() {
+            self.rider.frame(&self.phy, &self.tables, controls, dt, world)
+        } else {
+            let mut bump = self.bump(0, cars);
+            self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], Some(&mut bump))
+        };
         self.ticks += 1;
         said
     }
@@ -370,10 +378,11 @@ impl Sim {
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         let mut lists = self.bike_contacts(dt);
+        // And every bike's body rays against the cars (S137), from the same tick's places.
+        let mut cars: Vec<Vec<contact::Contact>> = (0..self.players()).map(|i| self.car_contacts(i, world, dt)).collect();
         for (i, c) in controls.iter().enumerate().rev() {
-            let mut bump = lists
-                .as_mut()
-                .map(|l| std::mem::take(&mut l[i]))
+            let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
+                .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
                 .filter(|l| !l.is_empty())
                 .map(|l| self.bump(i, l));
             let rivals: Vec<ride::Rival> = (0..self.players())
@@ -840,6 +849,7 @@ pub mod ghost;
 /// The track's path cars (S81): the `.toy`'s cars on a clip's path, moved bit-exact each tick.
 pub mod toys;
 pub mod traffic;
+pub mod mover_contact;
 /// Session markers (P88): five spots a player saves on the d-pad and rides back to, and the other
 /// players to ride to.
 pub mod markers;
