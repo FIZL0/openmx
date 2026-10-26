@@ -588,7 +588,7 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
     }
     // Its own name and number, on whatever of its bike and body is loaded below.
     if let Some(k) = p.kit.as_mut() {
-        p.assets.make_texture(dress::NAME_TEXTURE, k.texture(&pick.rider, &pick.look, &pick.bike));
+        p.assets.make_texture(dress::NAME_TEXTURE, k.texture(p.disc, &pick.rider, &pick.look, &pick.bike));
     }
     // Its own bike model's `.sub` when it is not the first player's.
     let own_bike = match pick.bike != p.own.bike {
