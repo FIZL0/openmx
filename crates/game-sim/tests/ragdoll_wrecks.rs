@@ -172,6 +172,12 @@ fn set_bytes(ee: &mut Ee, a: u32, bytes: &[u8]) {
 /// points at. An s62 capture carries the wreck bike's whole object round that pointer too (S62:
 /// `bike_a` from 0x980 before it, `bike_b` from 0x680 after it), and the broad phase's pools.
 fn lay_in(ee: &mut Ee, cap: &Capture, frame: u32) {
+    lay_in_as(ee, cap, frame, true);
+}
+
+/// [`lay_in`], with the wreck bike put back in the tree ([`place_bike`]) or, `placed` false, left
+/// where the first state had it (S62's replay before S113).
+fn lay_in_as(ee: &mut Ee, cap: &Capture, frame: u32, placed: bool) {
     let req = ee.u32_at(ACTOR + 0x488);
     set_bytes(ee, req - 0x200, &cap.bytes(frame, "req_area"));
     let far = ee.u32_at(req + 0x1ac);
@@ -187,6 +193,99 @@ fn lay_in(ee: &mut Ee, cap: &Capture, frame: u32) {
         }
         set_bytes(ee, at, &cap.bytes(frame, col));
     }
+    if placed && cap.cols.contains_key("bike_a") {
+        place_bike(ee);
+    }
+}
+
+/// The wreck bike put in the track's tree where the game's own frame keeps it (S113). Laying the
+/// capture in moves the bike but not its place in the tree: its placement record (`B+4`, not laid
+/// in) keeps the first state's key, and the pools laid in take it out of its old node once the game
+/// has moved it (front, from 2619) without the node the game moved it into. The bones' search is
+/// then built off a tree that does not hold the bike, and from the first rebuild after that (front's
+/// 2628) the Ee pairs no bone with it while the game's bones hit it. So, every row with the bike
+/// placed: its box by its own bounds (`mesh_collidable_bounds`), its key by the tree's (vt `+0x20`,
+/// as the world's add asks it), the record's key and centre set to them, and the bike inserted
+/// under that key (vt `+0x24`) unless the tree holds it there already. Once the put-back has taken
+/// it out of the broad phase (`B+4` 0, S108), out of every node of the track's tree too, as the
+/// game's unwreck, which the replay does not run, leaves it.
+fn place_bike(ee: &mut Ee) {
+    let b = ee.u32_at(ee.u32_at(ACTOR + 0x488) + 0x1ac);
+    let place = ee.u32_at(b + 4);
+    if place == 0 {
+        let sphere = ee.u32_at(collision(ee, 0) + coll_at::SPHERE);
+        let tree = ee.u32_at(ee.u32_at(ee.u32_at(sphere + 4) + 4) + 0x34);
+        unplace(ee, ee.u32_at(tree + 0x94), b);
+        return;
+    }
+    let tree = ee.u32_at(place + 8);
+    let (centre, half) = (ee.scratch(0), ee.scratch(1));
+    ee.call(addr("mesh_collidable_bounds").unwrap(), &[u64::from(b), u64::from(centre), u64::from(half)], &[], 1_000_000);
+    let vt = ee.u32_at(tree + 8);
+    ee.call(ee.u32_at(vt + 0x20), &[u64::from(tree), u64::from(centre), u64::from(half), 0], &[], 1_000_000);
+    let key = ee.r(2) as u32;
+    if !tree_holds_at(ee, tree, b, key) {
+        ee.call(ee.u32_at(vt + 0x24), &[u64::from(tree), u64::from(b), u64::from(key), u64::from(centre), u64::from(half)], &[], 1_000_000);
+    }
+    ee.set_u32(place + 0xc, key);
+    for k in 0..4 {
+        let w = ee.u32_at(centre + 4 * k);
+        ee.set_u32(place + 0x10 + 4 * k, w);
+    }
+}
+
+/// Every slot holding `o` in the chunks of the tree under `node` emptied.
+fn unplace(ee: &mut Ee, node: u32, o: u32) {
+    let ram = |a: u32| (0x10_0000..0x200_0000).contains(&a) && a % 4 == 0;
+    if !ram(node) {
+        return;
+    }
+    let mut c = ee.u32_at(node + 4);
+    while c != 0 && ram(c) {
+        for k in 1..5 {
+            if ee.u32_at(c + 4 * k) == o {
+                ee.set_u32(c + 4 * k, 0);
+            }
+        }
+        c = ee.u32_at(c);
+    }
+    let children = ee.u32_at(node);
+    if ram(children) {
+        for i in 0..4 {
+            unplace(ee, ee.u32_at(children + 4 * i), o);
+        }
+    }
+}
+
+/// Whether every node `key` names (a corner bit each, `broad_tree_insert`'s walk from bit `0x4000`
+/// down `level + 1` steps) is in the tree and holds `o` in its chunks.
+fn tree_holds_at(ee: &Ee, tree: u32, o: u32, key: u32) -> bool {
+    let level = key & 0xf;
+    let (x, z) = ((key >> 17) & 0x7ff8, (key >> 5) & 0x7ff8);
+    let size = 0x4000 >> level;
+    (0..4).filter(|c| key & 0x10 << c != 0).all(|c| {
+        let (cx, cz) = (x + size * (c >> 1), z + size * (c & 1));
+        let mut node = ee.u32_at(tree + 0x94);
+        for l in 0..=level {
+            let bit = 0x4000 >> l;
+            let children = ee.u32_at(node);
+            if node == 0 || children == 0 {
+                return false;
+            }
+            node = ee.u32_at(children + 4 * (2 * u32::from(cx & bit != 0) + u32::from(cz & bit != 0)));
+            if node == 0 {
+                return false;
+            }
+        }
+        let mut chunk = ee.u32_at(node + 4);
+        while chunk != 0 {
+            if (1..5).any(|k| ee.u32_at(chunk + 4 * k) == o) {
+                return true;
+            }
+            chunk = ee.u32_at(chunk);
+        }
+        false
+    })
 }
 
 /// Whether the recorder saw tick `frame - 1` again under the next frame counter (a save state's pause
@@ -253,8 +352,13 @@ impl Snapshot {
 /// before the body and after it; where the body draws, the draws before it are found by trying each
 /// count in turn from the previous row's state. `Ok` holds that count and the body's own draws.
 fn originals_tick(ee: &mut Ee, cap: &Capture, frame: u32) -> Result<(u32, u32), Vec<String>> {
+    originals_tick_as(ee, cap, frame, true)
+}
+
+/// [`originals_tick`] with the capture laid in by [`lay_in_as`].
+fn originals_tick_as(ee: &mut Ee, cap: &Capture, frame: u32, placed: bool) -> Result<(u32, u32), Vec<String>> {
     let update = addr("rider_body_update").unwrap();
-    lay_in(ee, cap, frame);
+    lay_in_as(ee, cap, frame, placed);
     let before = cap.int(frame - 1, "rng_state");
     let snap = Snapshot::of(ee);
     let mut first = None;
@@ -1487,16 +1591,17 @@ fn the_ports_tick_is_the_originals_to_rest() {
 
 /// S62's captures (`research/s62_wreck.py`, context/capture/s62): each wreck's first state, and the
 /// last tick the original's own update holds every captured bone through with the wreck bike's
-/// object and the broad phase's pools laid in (tests/ragdoll_bike.rs).
+/// object and the broad phase's pools laid in (tests/ragdoll_bike.rs) and the bike kept in the
+/// track's tree where the game keeps it (S113: front stopped at 2627 without it).
 const S62: [(&str, u32, u32); 5] =
-    [("front", 2602, 2627), ("side", 2607, 3146), ("back", 2477, 3179), ("tip", 2472, 3179), ("front3", 2630, 2687)];
+    [("front", 2602, 2888), ("side", 2607, 3146), ("back", 2477, 3179), ("tip", 2472, 3179), ("front3", 2630, 2687)];
 
 /// **The port replays each s62 wreck through the bike to the rider at rest** (S62): from each
 /// wreck's first state the port's actor runs on its own state, tick after tick, handed only the
 /// world's answers the original heard (the ground, the scene's hits and what each is with, the
 /// sweeps, the skeleton), and every number the update writes is compared with the original's tick,
 /// bit for bit. Up to the last tick the original holds the capture through, that is the game's own
-/// wreck; past it (front's last 553 ticks) the original runs on in the oracle from its own state.
+/// wreck; past it (front's last 292 ticks) the original runs on in the oracle from its own state.
 #[test]
 fn the_port_replays_the_wrecks_through_the_bike() {
     let mut went = Went::default();
@@ -1973,15 +2078,23 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
             }
             // The port's gather where the original's runs: once a frame in the wreck mode only (a
             // body put back on the bike stops), round the first sphere where it stands, the bike
-            // offered once the bones are off it, and the bike where the Ee's tree holds it. That
-            // is not where the game would: the replay never runs the bike's own update, which puts
-            // it in the tree where it stands every frame, and laying in the capture's bike takes
-            // it out of its node once the game has moved it to another (front, from 2619).
-            let (m, k, cells, s0) = (Rc::clone(&model), Rc::clone(&count), cells.clone(), spheres[0]);
+            // offered once the bones are off it, and the bike where the Ee's tree holds it: where
+            // the game's own frame puts it (place_bike, S113), under the key the port's cells give
+            // its laid-in box. Before S113 the tree lost the bike from front's 2619 on, and the
+            // rebuild at 2628 left it out.
+            let (m, k, cells, s0, bk) = (Rc::clone(&model), Rc::clone(&count), cells.clone(), spheres[0], Rc::clone(&bike));
             ee.hooks.insert(
                 addr("collision_search_gather").unwrap(),
                 Box::new(move |ee: &mut Ee| {
-                    let key = bike_key_in_tree(ee, b, tree);
+                    let place = ee.u32_at(b + 4);
+                    if place != 0 {
+                        let (_, at) = bike_collidable(ee);
+                        let frame = Mat4([at.rows[0], at.rows[1], at.rows[2], at.origin]);
+                        if cells.key(&bk, &frame) != ee.u32_at(place + 0xc) {
+                            k.borrow_mut().wrong.push(format!("the bike placed under another key than the port's"));
+                        }
+                    }
+                    let key = (place != 0).then(|| ee.u32_at(place + 0xc)).filter(|&k| tree_holds_at(ee, tree, b, k));
                     let mut m = m.borrow_mut();
                     let before = *m;
                     m.stood = Some(raw_quad(ee, s0 + 0x40));
@@ -1993,7 +2106,7 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
                     let gone = ee.u32_at(b + 4) == 0;
                     if gone {
                         k.borrow_mut().gone.push(format!("{name} {frame}"));
-                        if key.is_some() || ee.u8_at(b + 0x31) & 1 != 0 {
+                        if tree_holds(ee, ee.u32_at(tree + 0x94), b) || ee.u8_at(b + 0x31) & 1 != 0 {
                             k.borrow_mut().wrong.push(format!("a bike out of the broad phase still in the tree or gated in"));
                         }
                     }
@@ -2027,7 +2140,7 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
         k.tests, k.paired, k.hits, k.gathers, k.rebuilt, k.listed
     );
     let counts = (k.tests, k.paired, k.hits, k.gathers, k.rebuilt, k.listed);
-    assert_eq!(counts, (24822, 600, 64, 367, 12, 176), "tests, paired, hits, gathers, rebuilt, listed");
+    assert_eq!(counts, (24822, 852, 84, 367, 12, 230), "tests, paired, hits, gathers, rebuilt, listed");
     // One gather each wreck after the bike has left the broad phase: the put-back's tick (S108).
     assert_eq!(k.gone, ["front 2681", "side 2686", "back 2556", "tip 2551", "front3 2681"], "the gathers with the bike gone");
 }
@@ -2077,4 +2190,119 @@ fn the_port_replays_the_slow_roll_out() {
     // The state is from the entry's own tick (the reason is first read there), so no entry is compared;
     // off the bike once, settled 22 ticks in and still through the put-back to the capture's end.
     assert!(went.ticks == 699 && exact == 699 && went.off_bike == 1 && went.settles == 1 && went.settled == 677, "{went:?}, {exact} exact");
+}
+
+
+// --- S113: front's 2628, the bike the tree lost ---------------------------------------------------
+
+/// What the original's update did with the wreck bike in one tick: its pairs with a bone's sphere,
+/// and each sphere test answered with a hit on it (the sphere, the record's world normal).
+#[derive(Default)]
+struct BikeTick {
+    pairs: usize,
+    hits: Vec<(u32, Vf)>,
+    rebuilt: bool,
+}
+
+/// One tick of the original's update with the draws before it `n`, the bike's pairs and hits heard.
+fn bike_tick(ee: &mut Ee, cap: &Capture, frame: u32, n: u32, placed: bool) -> BikeTick {
+    lay_in_as(ee, cap, frame, placed);
+    let mut r = Rng::from_state(cap.int(frame - 1, "rng_state"));
+    (0..n).for_each(|_| {
+        r.rand();
+    });
+    set_rng(ee, r.state());
+    let (b, _) = bike_collidable(ee);
+    let spheres: Vec<u32> = (0..9).map(|i| ee.u32_at(collision(ee, i) + coll_at::SPHERE)).collect();
+    let search = ee.u32_at(ACTOR + 0x628);
+    let centre = raw_quad(ee, search + 0x10);
+    let heard = Rc::new(RefCell::new(BikeTick::default()));
+    let h = Rc::clone(&heard);
+    ee.hooks.insert(
+        addr("sphere_collider_pair").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            h.borrow_mut().pairs += usize::from(ee.r(5) as u32 == b);
+            through(ee);
+        }),
+    );
+    let h = Rc::clone(&heard);
+    ee.hooks.insert(
+        addr("collide_against_search").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            let s = ee.r(4) as u32;
+            through(ee);
+            let rec = ee.u32_at(s + coll_at::RECORD);
+            if spheres.contains(&s) && ee.u8_at(s + coll_at::FLAGS) & 0x20 != 0 && ee.u32_at(rec + 0x90) == b {
+                h.borrow_mut().hits.push((s, raw_quad(ee, rec + 0x30)));
+            }
+        }),
+    );
+    ee.call(addr("rider_body_update").unwrap(), &[u64::from(ACTOR)], &[cap.get(frame, "dt")], 2_000_000_000);
+    ee.hooks.clear();
+    let mut t = std::mem::take(&mut *heard.borrow_mut());
+    t.rebuilt = bits(raw_quad(ee, search + 0x10)) != bits(centre);
+    t
+}
+
+/// **Front parts at 2628 because the replay's tree lost the wreck bike** (S113): two replays of
+/// front from its first state through the original's update, one laying the capture in as S62 did
+/// (the bike's place in the track's tree left as the first state had it), one with the bike put
+/// where the game's frame puts it ([`place_bike`]). Both hold the capture to 2627. At 2628 the
+/// bones' search is rebuilt round the first sphere; without the bike in the tree it is not listed,
+/// no bone's sphere is paired with it and every bone lands 0.4-0.7 off the capture; with it, the
+/// bones' spheres are paired with the bike, hit it, and the tick is the capture's bit for bit.
+#[test]
+fn front_parts_at_2628_without_the_bike_in_the_tree() {
+    let Some(cap) = Capture::load_in("s62", "front") else { return };
+    let Some(mut lost) = state_in("s62", &Wreck { name: "front", frame: 2602 }) else { return };
+    let mut placed = state_in("s62", &Wreck { name: "front", frame: 2602 }).unwrap();
+    let mut draws_before = 0;
+    for frame in 2603..=2628 {
+        if repeated(&cap, frame) {
+            continue;
+        }
+        let snap = Snapshot::of(&placed);
+        let (n, _) = originals_tick(&mut placed, &cap, frame).unwrap_or_else(|d| panic!("placed: {frame}: {:?}", &d[..d.len().min(4)]));
+        draws_before = n;
+        if frame == 2628 {
+            snap.back(&mut placed);
+            break;
+        }
+        originals_tick_as(&mut lost, &cap, frame, false).unwrap_or_else(|d| panic!("lost: {frame}: {:?}", &d[..d.len().min(4)]));
+    }
+    let lost_tick = bike_tick(&mut lost, &cap, 2628, draws_before, false);
+    let placed_tick = bike_tick(&mut placed, &cap, 2628, draws_before, true);
+    let (lost_d, placed_d) = (differ(&cap, 2628, &ee_bones(&lost)), differ(&cap, 2628, &ee_bones(&placed)));
+    eprintln!("lost: {} pairs, {} hits, {} lanes off; placed: {} pairs, {} hits", lost_tick.pairs, lost_tick.hits.len(), lost_d.len(), placed_tick.pairs, placed_tick.hits.len());
+    // The search is rebuilt that tick either way; only the placed tree lists the bike.
+    assert!(lost_tick.rebuilt && placed_tick.rebuilt, "the search rebuilt at 2628");
+    assert_eq!((lost_tick.pairs, lost_tick.hits.len()), (0, 0), "the lost tree pairs no sphere with the bike");
+    assert_eq!(lost_d.len(), 360, "every bone off the capture: {:?}", &lost_d[..lost_d.len().min(4)]);
+    assert!(placed_d.is_empty(), "the placed tree's tick is the capture's: {:?}", &placed_d[..placed_d.len().min(4)]);
+    assert_eq!((placed_tick.pairs, placed_tick.hits.len()), (36, 11), "pairs and hits with the bike");
+    // The bike's laid-in frame against the bones' displacement: the hits on bones 0, 16 and 17's
+    // spheres are on a face whose world normal is the frame's first row, word for word, and those
+    // bones and 15 (pulled by its joints) moved 0.45-0.95 ft along it, bone 0 back against its own
+    // velocity (y -0.57 with vy +5.6).
+    let (_, at) = bike_collidable(&placed);
+    let row = at.rows[0];
+    let sphere_of_bone = |ee: &Ee, bone: usize| {
+        (0..9).map(|i| collision(ee, i)).find(|&c| bone_of(ee, ee.u32_at(c + coll_at::BODY)) == bone).map(|c| ee.u32_at(c + coll_at::SPHERE))
+    };
+    for bone in [0, 16, 17] {
+        let s = sphere_of_bone(&placed, bone).expect("a sphere on the bone");
+        let normals: Vec<[u32; 4]> = placed_tick.hits.iter().filter(|h| h.0 == s).map(|h| bits(h.1)).collect();
+        assert!(!normals.is_empty(), "bone {bone}'s sphere hits the bike");
+        assert!(normals.iter().all(|n| n[..3] == bits(row)[..3]), "bone {bone}: hit normals {normals:x?}, the bike's first row {:?}", row);
+    }
+    let (lb, pb) = (ee_bones(&lost), ee_bones(&placed));
+    for bone in [0, 15, 16, 17] {
+        let d: [f32; 3] = [0, 1, 2].map(|l| pb[bone][1][l] - lb[bone][1][l]);
+        let len = d.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let along = (0..3).map(|l| d[l] * row[l]).sum::<f32>() / len;
+        eprintln!("bone {bone}: moved {len:.3} ft, {along:.4} along the bike's first row");
+        assert!((0.45..0.95).contains(&len) && along > 0.95, "bone {bone}: moved {d:?}");
+    }
+    let (d0, v0) = ([0, 1, 2].map(|l| pb[0][1][l] - lb[0][1][l]), lb[0][2]);
+    assert!(d0[1] < -0.5 && v0[1] > 5.0 && (0..3).map(|l| d0[l] * v0[l]).sum::<f32>() < 0.0, "bone 0 pushed back: {d0:?}, velocity {v0:?}");
 }
