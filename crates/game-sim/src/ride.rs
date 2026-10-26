@@ -1513,7 +1513,7 @@ const RAY_NODE_LEAST: f32 = 0.01;
 
 /// The bike's nearby search, as its collision object is built with it: the bike's own numbers, read
 /// off the save states' bike (`+0x7bc`), where the plane's are [`flight_search::search`]'s.
-fn bike_search() -> broad_phase::Search {
+pub(crate) fn bike_search() -> broad_phase::Search {
     broad_phase::Search {
         least: F(BIKE_SEARCH_LEAST),
         extra: F(BIKE_SEARCH_EXTRA),
@@ -1784,7 +1784,19 @@ impl Ride {
     /// chassis where the substep opens its collision record, which is the original's ground step's
     /// call. With none it is `frame`.
     pub fn frame_bumped(&mut self, p: &Phy, tables: &Tables, c: &Controls, dt: F,
-                        world: &mut dyn World, mut bump: Option<&mut crate::rider_contact::Bump>) -> Vec<mv::Call> {
+                        world: &mut dyn World, bump: Option<&mut crate::rider_contact::Bump>) -> Vec<mv::Call> {
+        self.frame_searched(p, tables, c, dt, world, bump, None)
+    }
+
+    /// [`Ride::frame_bumped`] for a bike whose body rays searched the world's props as well as the
+    /// other riders this tick (S138, [`crate::rider_contact::scenery`]): `scenery` is whether any of
+    /// them touched one. Those contacts are in `bump`'s list, so when one did the port's own body probe
+    /// ([`velocity_bundle`]) is not swept: the props stop the bike through the list's resolve, which is
+    /// what loads the chassis' shock and so the wreck test's g peak, as the original's do. With `None`
+    /// it is `frame_bumped`.
+    #[allow(clippy::too_many_arguments)] // frame_bumped's, and what the search found
+    pub fn frame_searched(&mut self, p: &Phy, tables: &Tables, c: &Controls, dt: F, world: &mut dyn World,
+                          mut bump: Option<&mut crate::rider_contact::Bump>, scenery: Option<bool>) -> Vec<mv::Call> {
         if c.respawn {
             self.place_back();
         }
@@ -2046,7 +2058,7 @@ impl Ride {
             rear.w.swept_contact = 0;
 
             calls.push(mv::Call::Contacts(s.dt));
-            contacts(chassis, &mut mvc, &out.chassis, front, rear, near, touching, s.dt, world);
+            contacts(chassis, &mut mvc, &out.chassis, front, rear, near, touching, scenery, s.dt, world);
 
             for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
                 calls.push(mv::Call::Suspension(side, h));
@@ -2166,6 +2178,15 @@ impl Ride {
         let ac = air_chassis!();
         air::contact(&p.air, air, &ac, &astep, &tables.acos);
 
+        // 4b — the vehicle update's walk of the bike's attachments, between the air state and the
+        // stunt clocks, which runs each enabled one's frame update: the chassis' is its measure, so
+        // the Euler angles are taken again off the orientation the substeps left (S138). The wreck
+        // test reads them, and so judges a landing's pitch as it lands rather than as it fell: a nose
+        // down 70.06° in the air and 69.86° on its touchdown tick rides out in the original. The next
+        // frame's measure takes them again before the ground step reads them. The walk also writes
+        // the speed, which is not taken here: what reads it before then is the trick request.
+        chassis.euler = math::quat_to_euler(chassis.quat, &tables.acos);
+
         // 5 — the stunt clocks' copy-back (S67). The state pack snapshots the node's orientation, as
         // a quaternion of its matrix, and the clocks write it straight back into the chassis; so a
         // frame ends with the body turned by the no-hander's roll, and the next frame's measure reads
@@ -2189,10 +2210,13 @@ impl Ride {
 /// starts forward of the chassis' origin is the front wheel's and anything else the rear's. The body
 /// probe ([`velocity_bundle`]) is resolved here: the travel the prop took away comes out of the
 /// position and the part of the velocity that was going into the surface is killed, which is what
-/// stops a rider against a prop instead of through it.
+/// stops a rider against a prop instead of through it. When the body rays searched the props
+/// ([`Ride::frame_searched`]) and touched one, the probe is not swept: the list's resolve stops the
+/// bike. When they touched none it still is, as the stand-in for the chassis' sweep back, which is not
+/// ported: a trunk between the rays would be ridden through without it.
 #[allow(clippy::too_many_arguments)] // one frame's worth of the bike, and all of it needed
 fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &mut Wheel,
-            rear: &mut Wheel, near: &mut F, touching: &mut bool, dt: F, world: &mut dyn World) {
+            rear: &mut Wheel, near: &mut F, touching: &mut bool, scenery: Option<bool>, dt: F, world: &mut dyn World) {
     let rays = wheel_rays(&front.w, &rear.w);
     let (hits, wheel_near) = wheel_hits(&rays, m, world);
     let look = !hits.is_empty();
@@ -2215,8 +2239,12 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
 
     let b = velocity_bundle(ch, dt);
     let mut record = Record::new();
-    world.solid(&b, &mut record);
-    world.groups(&b, &mut record);
+    if let Some(touched) = scenery {
+        *touching |= touched;
+    } else {
+        world.solid(&b, &mut record);
+        world.groups(&b, &mut record);
+    }
     if record.hit[0] {
         // `Record::push`'s own arithmetic: the travel the triangle took away, along the normal —
         // times the probe's length, because the record's version is a fraction of one unit of travel

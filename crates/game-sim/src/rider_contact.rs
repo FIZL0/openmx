@@ -22,9 +22,10 @@
 //! in this list.
 //!
 //! What is not here: the objects' sweep back (the riding bike's is on its chassis, which
-//! [`contact_search::sweep_back`] does not port), the riding bike's rays against the world's props
-//! (the ride's own bundle stands in for them), and the broad phase's gather, which is replaced by
-//! every other rider's frame in player order with its distance from the rays' centre.
+//! [`contact_search::sweep_back`] does not port), and the broad phase's gather, which is replaced by
+//! every other rider's frame in player order with its distance from the rays' centre. The riding
+//! bike's rays against the world's props are searched by the rider's own update, after this list
+//! ([`scenery`], S138).
 
 #![deny(clippy::float_arithmetic)]
 
@@ -344,10 +345,14 @@ fn seat_of(r: &Rider, seated: bool) -> Seat<'_> {
 
 /// A player's chassis as the other side of a contact.
 fn vehicle_of(r: &Rider, p: &Phy) -> Vehicle {
-    let c = &r.ride.chassis;
+    vehicle_on(&r.ride, p)
+}
+
+fn vehicle_on(ride: &crate::ride::Ride, p: &Phy) -> Vehicle {
+    let c = &ride.chassis;
     let rows = &c.inv_inertia.rows;
     Vehicle {
-        node: node(&r.ride.transform()),
+        node: node(&ride.transform()),
         cofg: c.cofg,
         mass: p.mass.mass,
         inv_mass: c.inv_mass,
@@ -357,6 +362,47 @@ fn vehicle_of(r: &Rider, p: &Phy) -> Vehicle {
         shock: Vf::ZERO,
         twist: Vf::ZERO,
     }
+}
+
+/// **The body rays against the world** (S138): the riding bike's eleven rays, from where the last tick
+/// left it (`at`), searched through the world's props and trees as its collision object searches them
+/// once a tick, and the contacts the search puts on its list. The original's object makes no
+/// difference between a prop and another rider's frame: one search, one list, and the ground step
+/// resolves it, a prop being a contact with no other side (the world does not move). Resolving it is
+/// what loads the chassis' shock (`+0x170`) on a wall, and so the g peak the wreck test reads.
+/// `None` when the world hands over no props or trees, where the ride's own probe stands in.
+pub fn scenery(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Option<Vec<Contact>> {
+    let at = node(at);
+    let (field, props, trees) = world.wooded();
+    if props.is_none() && trees.is_none() {
+        return None;
+    }
+    let bounds = field.as_ref().map(|f| {
+        let (lo, hi) = (f.min(), f.max());
+        ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+    });
+    let mut search = crate::ride::bike_search();
+    let mut scene = crate::flight_search::Scene::wooded(props, trees, None, bounds, &col.rays, &at, &mut search);
+    let mut records = [Record {
+        search_ground: false,
+        search: true,
+        sweep_back: true,
+        rest_linear: F::ONE,
+        rest_angular: F::ONE,
+        node: at,
+        capacity: CAPACITY,
+        nearby: true,
+        rays: Some(Vec::new()),
+        ..Record::default()
+    }];
+    contact_search::collide(&mut records, 0, None, None, &mut scene, dt);
+    let [record] = records;
+    Some(record.contacts)
+}
+
+/// A bike alone in its list: `contacts` against its own object and chassis, the one seat there is.
+pub fn alone(ride: &crate::ride::Ride, p: &Phy, contacts: Vec<Contact>) -> Bump {
+    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)] }
 }
 
 /// `riders`' contacts, or `None` when none of them carries its collision files.

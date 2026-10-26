@@ -8107,3 +8107,146 @@ fn the_braked_slopes_replay_from_their_save_states() {
         assert!(first(".slip.") > slip_through, "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
     }
 }
+
+// --- S138: a wall and a front wheel, each from a save state taken just before it ---------------------
+
+/// S138's captures (`research/s138_hits.py`, `research/s138/hits.toml`: S67's whole-bike spec on
+/// recording2's rider, the wreck reason included): recording2's bike teleported about free09's farmyard
+/// and ridden into the garage, or thrown up and pitched forward by hand onto its front wheel, each with
+/// save states a few ticks before the hit (`<name>-<frame>.p2s`, the RAM image beside it as
+/// `<name>-<frame>.ee.bin`). The capture, the state the port starts from, the ticks it is ridden past
+/// the state, and what the case is; whether the original wrecks, and on which tick, is the capture's
+/// own `wreck_reason` lane.
+const S138_HITS: [(&str, u64, u64, &str); 8] = [
+    ("s138/wall", 2849, 12, "head-on into the garage's back wall at 92 a second"),
+    ("s138/slow", 2764, 14, "head-on into the back wall at 29 a second"),
+    ("s138/gprobe", 2797, 24, "drifting left into the back wall's west corner at 50 a second"),
+    ("s138/rub2", 2785, 30, "clipping the shed's south-east corner post at 46 a second, 2 ft in"),
+    ("s138/nprobe3", 2791, 24, "a 62 degree nose landing at 30 a second down"),
+    ("s138/nprobe4", 2819, 24, "a 66 degree nose landing at 44 a second down"),
+    ("s138/nprobe6", 2790, 24, "a 69.9 degree nose landing, a tenth of a degree inside the limit"),
+    ("s138/nprobe7", 2787, 24, "a 75 degree nose landing"),
+];
+
+/// The bike class recording2 is ridden on, and the files its body rays and frame load from (S86): out
+/// of whichever of free09's archives carries them.
+const S138_TRACKS: [&str; 3] = ["Tracks\\free09.res", "Tracks\\free09_2.res", "Tracks\\free09_ss_2.res"];
+
+/// The riding bike's two collision files, off the disc.
+fn the_bike_col(disc: &mut Disc) -> Option<game_sim::bike_col::BikeCol> {
+    use game_sim::bike_col;
+    let (rays, shape) = (bike_col::rays_file(bike_col::MODEL), bike_col::shape_file(bike_col::MODEL));
+    for track in S138_TRACKS {
+        let Some(bytes) = disc.member(track) else { continue };
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        let read = |name: &str| by_suffix(&res, name).and_then(|e| res.read(&bytes, e).ok());
+        if let (Some(r), Some(s)) = (read(&rays), read(&shape)) {
+            return Some(bike_col::BikeCol::load(&r, &s).expect("the bike's collision files"));
+        }
+    }
+    None
+}
+
+/// The tick a capture's wreck reason first reads set from `from` on, and the reason.
+fn first_wreck(cap: &Capture, from: u64) -> Option<(u64, u8)> {
+    let (fc, wr) = (column(cap, "frame_counter").ok()?, column(cap, "wreck_reason").ok()?);
+    (0..cap.rows.len()).find_map(|r| {
+        let counter: u64 = cell(cap, r, fc).parse().ok()?;
+        let reason: f64 = cell(cap, r, wr).parse().ok()?;
+        (counter > from && reason != 0.0).then_some((counter, reason as u8))
+    })
+}
+
+/// **A bike into a wall, or onto its front wheel, wrecks or rides it out as the original's does**
+/// (S138): each of [`S138_HITS`] ridden by the port from the original's own save state with the
+/// original's own pad, on free09 with its props and the bike's body rays, and the wreck verdict — the
+/// tick and the reason, or none — held to the capture's. Rows are read at one of three phases of a
+/// frame, so the port's tick may be the row's or the one either side of it. Prints both sides' centre
+/// of mass, velocity and g peak every tick. Skipped with a line where a capture or state is missing.
+#[test]
+fn walls_and_nose_landings_wreck_as_the_original_does() {
+    let dir = private_dir("capture");
+    let (mut compared, mut parted) = (0, Vec::new());
+    for (name, asked, ticks, what) in S138_HITS {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
+            println!("no {name}.csv — S138's journal says how it is recorded");
+            continue;
+        };
+        let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+        let at = dir.join(format!("{name}-{asked}.ee.bin"));
+        let Some(st) = SaveState::open_either(&at) else {
+            println!("no {} with the human's rider in it", at.display());
+            continue;
+        };
+        // Free09, by recording2's own capture: a few hundred rows in one yard fit more than one area.
+        let Some((_, acc)) = acceptance_capture() else { return };
+        in_the_world_of(&acc, |world, _, bike| {
+            let Some(Ridden { tables, phy, mounts }) = bike else {
+                println!("no Race 125 on this disc");
+                return;
+            };
+            let Some(col) = Disc::open().and_then(|mut disc| the_bike_col(&mut disc)) else {
+                println!("no bike collision files on this disc");
+                return;
+            };
+            let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+            let cap = dense_run(&whole, saved);
+            let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+            let rows = rows_by_counter(&cap);
+            // The recorder polls the pad buffer stamped two frames back, as S67's does.
+            let pad_of = |counter: u64| rows.get(&counter).filter(|&&r| r >= 2).map(|&r| tape.frames[r - 2]);
+            let curve = st.power_curve().unwrap();
+            let ours = phy.engine.curve_rpm.iter().zip(&phy.engine.curve_torque).map(|(r, t)| (r.to_bits(), t.to_bits()));
+            assert_eq!(curve, ours.take(curve.len()).collect::<Vec<_>>(), "{name}: the state's bike makes {FREERIDE_PHY}'s power");
+            let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+            rider.carries_bike_col(Arc::new(col));
+            let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+            st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+            let want = first_wreck(&cap, saved).filter(|&(c, _)| c <= saved + ticks);
+            println!("{name} ({what}), from the state at frame {saved}: the original {}",
+                     want.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
+            let g = |r: usize, l: &str| cell(&cap, r, column(&cap, &format!("g_peak.{l}")).unwrap()).parse::<f32>().unwrap();
+            let lane = |r: usize, n: &str| -> [f32; 3] {
+                ["x", "y", "z"].map(|l| cell(&cap, r, column(&cap, &format!("{n}.{l}")).unwrap()).parse::<f32>().unwrap())
+            };
+            let mut got = None;
+            for counter in saved + 1..=saved + ticks {
+                let Some(pad) = pad_of(counter) else {
+                    println!("  {counter}: no row in the capture");
+                    break;
+                };
+                sim.frame(pad.dt(), &pad.reports, world);
+                let ride = &sim.rider.ride;
+                let (c, v, gp) = (ride.chassis.cofg_world, ride.chassis.vel, ride.mv.g_peak);
+                if let Some(&r) = rows.get(&counter) {
+                    let (oc, ov) = (lane(r, "ch_cofg"), lane(r, "ch_vel"));
+                    let q = lane(r, "ch_quat");
+                    let w = cell(&cap, r, column(&cap, "ch_quat.w").unwrap()).parse::<f32>().unwrap();
+                    let (pitch, ..) = attitude(Vf::new(q[0], q[1], q[2], w));
+                    println!("  {counter} orig cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2} pitch {pitch:7.3}",
+                             oc[0], oc[1], oc[2], ov[0], ov[1], ov[2], g(r, "x"), g(r, "y"), g(r, "z"));
+                }
+                let (pitch, ..) = attitude(ride.chassis.quat);
+                println!("  {counter} port cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2} pitch {pitch:7.3} \
+                          ground {}{}",
+                         c.x(), c.y(), c.z(), v.x(), v.y(), v.z(), gp.x(), gp.y(), gp.z(), ride.air.on_ground,
+                         sim.rider.state.wreck.map_or(String::new(), |w| format!("  wreck {}", w.0)));
+                if got.is_none() && let Some(w) = sim.rider.state.wreck {
+                    got = Some((counter, w.0));
+                }
+            }
+            println!("  the port {}", got.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
+            let agrees = match (want, got) {
+                (None, None) => true,
+                (Some((wc, wr)), Some((gc, gr))) => gr == wr && gc.abs_diff(wc) <= 1,
+                _ => false,
+            };
+            if !agrees {
+                parted.push(format!("{name} ({what}): the original {want:?}, the port {got:?} (tick, reason)"));
+            }
+            compared += 1;
+        });
+    }
+    println!("{compared} hits compared");
+    assert!(parted.is_empty(), "{}", parted.join("\n"));
+}

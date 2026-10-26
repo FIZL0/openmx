@@ -1,0 +1,6 @@
+# S138: gas north into the garage, then a little left stick: drifts into its west wall at a shallow angle
+down cross
+sleep 1200
+stick l -0.35 0
+sleep 2500
+release

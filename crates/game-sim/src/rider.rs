@@ -539,7 +539,7 @@ impl Rider {
         let Rider {
             ride, tricks, state, motion, packed_pose, packed_fore_aft, set, clips, sense, racing, wreckage, crash, animation,
             flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, riding, wreck_sounds, idles, ghost, edge_armed, page,
-            put_back, ragdoll_shown, score, ..
+            put_back, ragdoll_shown, score, bike_col, ..
         } = self;
         *ragdoll_shown = None;
         let mut sense = *sense;
@@ -598,8 +598,23 @@ impl Rider {
         // wreck bike's translation and forward row (S77).
         let mut thrown_keep = None;
         if state.wreck.is_none() {
+            // The body rays against the world's props (S138), from where the last tick left the bike,
+            // as its collision object searches them before the bikes are updated: what they touch goes
+            // on the bump's list beside the other riders' frames, or on a list of its own.
+            let found = bike_col.as_deref().and_then(|col| crate::rider_contact::scenery(col, &ride.transform(), world, dt));
+            let scenery = found.as_ref().map(|f| !f.is_empty());
+            let mut alone = None;
+            let bump = match (bump, found) {
+                (Some(b), Some(found)) => {
+                    b.contacts.extend(found);
+                    Some(b)
+                }
+                (None, Some(found)) if !found.is_empty() => Some(alone.insert(crate::rider_contact::alone(ride, p, found))),
+                (bump, _) => bump,
+            };
             // The bike's limiter reads the no-hander as the rider's last tick left it (`+0xa44`).
-            ride.frame_bumped(p, &t.ride, &Controls { respawn: false, hands_off: tricks.no_hander, ..*c }, dt, world, bump);
+            let c = Controls { respawn: false, hands_off: tricks.no_hander, ..*c };
+            ride.frame_searched(p, &t.ride, &c, dt, world, bump, scenery);
         } else if let (Some(w), Some(down)) = (wreckage.as_ref(), crash.as_mut()) {
             // The physics of a rider who is down: the wreck body tumbling and the rider coming off
             // it. The original's is the same swap — the bike's own step is skipped while the reason
@@ -741,9 +756,8 @@ impl Rider {
 
         // 6 — the machine, carrying the wreck test.
         let (_, up) = ride.axes();
-        // The pitch and roll the attitude limits are measured on are the Euler pair the frame's own
-        // measure left behind, read off the chassis the same way `Ride::frame` reads them for the
-        // airborne control.
+        // The pitch and roll the attitude limits are measured on are the Euler pair the frame's
+        // attachment walk left behind, after the physics (`Ride::frame`'s step 4b, S138).
         let euler = ride.chassis.euler;
         let chassis = air::Chassis {
             speed: ride.chassis.speed,
