@@ -116,8 +116,9 @@ pub trait World {
     }
 
     /// Whether the put-back record may keep a spot here (MD14, [`crate::ride::Ride::keep_back`]).
-    /// One terrain keeps every spot, as the original does; a world of several refuses one with no
-    /// ground under it and one its edge test would throw from ([`crate::tiles::Tiled::keeps`]).
+    /// A world with no edge keeps every spot, as the original does; one terrain refuses only a spot
+    /// with no ground under it (MD22, [`Ground`]); a world of several refuses that and one its edge
+    /// test would throw from ([`crate::tiles::Tiled::keeps`]).
     fn keeps(&mut self, at: Vf) -> bool {
         let _ = at;
         true
@@ -318,6 +319,13 @@ impl<'a> Ground<'a> {
         }
     }
 
+    /// Whether [`World::ground`] answers this point from the field rather than with [`NO_GROUND`]:
+    /// a cell holds it, with a point short of either axis's zero read as on it (the query clamps
+    /// there, and the field's own arithmetic answers it).
+    fn owns(&self, at: Vf) -> bool {
+        self.at(F(at.x()).max(F::ZERO), F(at.z()).max(F::ZERO)).is_some()
+    }
+
     /// The ground under a world point: the cell's four corners, blended.
     ///
     /// The blend is **this module's own**, not the game's — see the module note. Off the edge of the
@@ -373,7 +381,7 @@ impl World for Ground<'_> {
     /// finds ground at its own probe's end); this keeps [`Ground::at`]'s answer there instead, no
     /// ground at all, which is what keeps a rider on the map. See S64's journal entry.
     fn ground(&mut self, at: Vf) -> (Vf, Vf) {
-        if self.at(F(at.x()).max(F::ZERO), F(at.z()).max(F::ZERO)).is_none() {
+        if !self.owns(at) {
             return (Vf::new(at.x(), NO_GROUND, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0));
         }
         let g = crate::contact_search::ground(&self.field(), at);
@@ -390,6 +398,15 @@ impl World for Ground<'_> {
 
     fn area(&self) -> Option<crate::biplane::Area> {
         Some(self.area)
+    }
+
+    /// One terrain refuses a spot its ground query answers [`NO_GROUND`] for (MD22) — off the field
+    /// past its far edges, where only a map smaller than a throw's arc ever puts a wreck down — and
+    /// keeps every other, by an edge too, as the original keeps all of them. The original's query has
+    /// no such answer (it leaves the point where it was, S64), so a spot refused here is one this
+    /// port alone would have put the bike back on at `y` −10⁶.
+    fn keeps(&mut self, at: Vf) -> bool {
+        self.owns(at)
     }
 
     fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
@@ -621,6 +638,10 @@ impl World for Place<'_> {
 
     fn area(&self) -> Option<crate::biplane::Area> {
         self.ground.area()
+    }
+
+    fn keeps(&mut self, at: Vf) -> bool {
+        self.ground.keeps(at)
     }
 
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
