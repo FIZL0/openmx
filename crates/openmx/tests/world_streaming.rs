@@ -320,3 +320,42 @@ fn a_streamed_ride_writes_its_ground_a_few_chunks_a_frame() {
     let Some(whole) = ride("chunks_whole", &[]) else { return };
     assert_eq!(end_x(&said), end_x(&whole), "the chunks a frame do not change the ride");
 }
+
+/// MD23: `--world-sweep` streams the ground about a point going across the world over the ride
+/// instead of about the rider, which is how the ultra world's 116,000 feet were crossed in a few
+/// minutes. Here it goes corner to corner: every piece the line comes within reach of is built, the
+/// first corner's are let go, the GPU never holds the whole world, and the ride is the same ride.
+#[test]
+fn a_sweep_streams_the_ground_along_its_line_and_leaves_the_ride_alone() {
+    const TO: [f32; 2] = [1800.0, 1800.0];
+    let sweep = format!("{},{},{},{}", START[0], START[1], TO[0], TO[1]);
+    let Some(said) = ride("sweep", &["--world-sweep", &sweep]) else { return };
+    let at = |tick: usize| {
+        let t = tick as f32 / TICKS as f32;
+        [START[0] + (TO[0] - START[0]) * t, START[1] + (TO[1] - START[1]) * t]
+    };
+    let (before, _) = built_before(&said);
+    let events = during(&said);
+    for s in specs() {
+        let reached = (0..=TICKS).any(|k| {
+            let [x, z] = at(k);
+            s.gap(x, z) <= LOAD
+        });
+        let built = before.contains(&s.name) || events.iter().any(|(p, w, t)| p == &s.name && w == "built" && *t > 0);
+        assert_eq!(built, reached, "{}: built, and in reach of the sweep's line:\n{said}", s.name);
+    }
+    for gone in ["t00", "v0", "h0"] {
+        assert!(events.iter().any(|(p, w, _)| p == gone && w == "dropped"), "{gone} was left behind and not dropped:\n{said}");
+    }
+    let line = said.lines().find(|l| l.starts_with("world ground: held at most ")).unwrap_or_else(|| panic!("no held line:\n{said}"));
+    let held: usize = line.split_whitespace().nth(5).unwrap().parse().unwrap();
+    let Some(all) = ride("sweep_all", &["--world-ground", "all", "--frames", "1"]) else { return };
+    let whole: usize = all
+        .lines()
+        .filter_map(|l| l.strip_prefix("world ground: ")?.split_once(" built, ")?.1.strip_suffix(" chunks")?.parse::<usize>().ok())
+        .sum();
+    assert!(held > 0 && held < whole, "held {held} chunks at once of the world's {whole}: {line}");
+    let Some(rider) = ride("sweep_rider", &[]) else { return };
+    let hash = |s: &str| s.lines().find(|l| l.starts_with("ride hash ")).map(str::to_string);
+    assert_eq!(hash(&said), hash(&rider), "the sweep does not change the ride");
+}

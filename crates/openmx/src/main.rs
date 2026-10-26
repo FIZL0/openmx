@@ -1430,6 +1430,11 @@ struct Args {
     /// `--world-chunks N`: the most ground chunks a frame of a world ride hands the GPU instead of
     /// [`worlds::CHUNKS_A_FRAME`] (MD28).
     world_chunks: Option<usize>,
+    /// `--world-sweep X0,Z0,X1,Z1`: a world's ground streams about a point that goes from `x0, z0` to
+    /// `x1, z1` in world feet over the ride's `--frames` instead of about the riders (MD23), so a
+    /// short ride can be seen to load and let go a whole map's ground; the riders and the
+    /// simulation's tiles are as they would be without it.
+    world_sweep: Option<[f32; 4]>,
     /// `--trace-switch N`: under `--trace-feel`, ride the first N frames on the throttle alone and only
     /// then take the controls the other flags ask for — a full brake from top speed, or a turn at speed.
     trace_switch: Option<u32>,
@@ -4243,6 +4248,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The most ground chunks a frame of the ride handed the GPU, how many in all, and in how many
     // frames (MD28).
     let mut ground_written = (0usize, 0usize, 0usize);
+    // The most chunks the GPU's ground held at once in the ride, and the most it had room for (MD23).
+    let mut ground_most = (0usize, 0usize);
     // A world's look by map (MD9): every tile's ground paint, light and sky, read from its folder.
     let world_look = world_mod.as_ref().map(|w| {
         let l = w.look(&archives[1..], ground::DIRT, Lighting::of(&look));
@@ -5931,7 +5938,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             // Its ground on the GPU, the same way (MD17).
             if let Some(stream) = &mut ground_stream {
-                let near: Vec<[f32; 2]> = near.iter().map(|p| [p.x(), p.z()]).collect();
+                let near: Vec<[f32; 2]> = match (args.world_sweep, args.frames) {
+                    (Some([x0, z0, x1, z1]), Some(n)) => {
+                        let t = (pacer.ticks() as f32 / n.max(1) as f32).min(1.0);
+                        vec![[x0 + (x1 - x0) * t, z0 + (z1 - z0) * t]]
+                    }
+                    _ => near.iter().map(|p| [p.x(), p.z()]).collect(),
+                };
                 let changes = stream.update(&near);
                 let written: usize = changes
                     .iter()
@@ -5951,6 +5964,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             worlds::Change::Drop(i) => r.drop_ground_piece(i as u32),
                         }
                     }
+                    let (held, room) = r.ground_chunks();
+                    ground_most = (ground_most.0.max(held), ground_most.1.max(room));
                 }
                 for line in stream.take_log() {
                     println!("{line} at tick {}", pacer.ticks());
@@ -7281,6 +7296,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 "world ground: at most {most} chunks written in a frame of the ride ({all} in {frames} frames, budget {})",
                 stream.chunks_a_frame
             );
+            println!("world ground: held at most {} chunks at once in the ride, room for {}", ground_most.0, ground_most.1);
         }
         // And where each dressed tile's props stand as the GPU draws them, so a tile's props can be
         // seen moved by its offset (MD15).
@@ -8135,6 +8151,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         world_ground_all: false,
         world_reach: None,
         world_chunks: None,
+        world_sweep: None,
         trace_switch: None,
         trace_stick_y: Vec::new(),
         record: None,
@@ -8440,6 +8457,15 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--world-chunks" => {
                 args.world_chunks = Some(next("chunks")?.parse().ok().filter(|&n| n > 0).ok_or("--world-chunks: a count over 0")?);
             }
+            "--world-sweep" => {
+                let v: Vec<f32> = next("x0,z0,x1,z1")?
+                    .split(',')
+                    .map(|w| w.trim().parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| "--world-sweep: x0,z0,x1,z1 in world feet")?;
+                let [x0, z0, x1, z1] = v[..] else { return Err("--world-sweep: x0,z0,x1,z1 in world feet".into()) };
+                args.world_sweep = Some([x0, z0, x1, z1]);
+            }
             "--world-reach" => {
                 let v: Vec<f32> =
                     next("load,drop")?.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>().map_err(|_| "--world-reach: load,drop in feet")?;
@@ -8543,6 +8569,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
+                            [--world-sweep X0,Z0,X1,Z1]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
@@ -8669,6 +8696,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    if args.world_sweep.is_some() && args.frames.is_none() {
+        return Err("--world-sweep goes over the ride's --frames: give --frames too".into());
     }
     Ok(Some(args))
 }
