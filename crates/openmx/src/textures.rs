@@ -21,13 +21,16 @@
 //! The key is [`game_render::replace::key`], a hash of the decoded picture; `openmx --dump-textures`
 //! writes every disc texture under it to `mods/textures-src/`. The folders are walked when a ride loads
 //! and a picture is decoded when the ride's loaders first ask for it, so a changed file is drawn from the
-//! next ride on. The Upscaled Textures setting is the switch for all of it.
+//! next ride on — or, with `OPENMX_TEXTURE_RELOAD=1` (opentennis's `HST_TEXTURE_RELOAD`, V86), walked
+//! again once a second while it rides, and a changed file drawn from the next frame ([`Reload`]). The
+//! Upscaled Textures setting is the switch for all of it.
 
 use crate::track_mods::Json;
 use game_render::pst::Texture;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Your own key-named files, under the mods folder.
 pub const REPLACEMENTS: &str = "texture-replacements";
@@ -104,6 +107,11 @@ fn is_pack(dir: &Path) -> bool {
 /// their folders' order, then its named ones in its order; those in `off` left out. A pack with no
 /// key-named file is one log line and left out.
 pub fn packs(mods: &Path, order: &[String], off: &[String]) -> Vec<Pack> {
+    packs_saying(mods, order, off, true)
+}
+
+/// [`packs`], with its log line for an empty pack or without it (a reload's walk, once a second).
+fn packs_saying(mods: &Path, order: &[String], off: &[String], say: bool) -> Vec<Pack> {
     let mut all: Vec<Pack> = mod_dirs(mods)
         .into_iter()
         .filter(|(_, d)| is_pack(d))
@@ -112,6 +120,9 @@ pub fn packs(mods: &Path, order: &[String], off: &[String]) -> Vec<Pack> {
             let mut textures = HashMap::new();
             walk(&dir.join("textures"), &mut textures);
             if textures.is_empty() {
+                if !say {
+                    return None;
+                }
                 println!("textures: {folder}: no textures: a pack holds textures/**/<name>-<key>.png files (--dump-textures names)");
                 return None;
             }
@@ -174,8 +185,12 @@ impl Found {
 
 /// The lookup over the mods folder `mods`, with settings.txt's pack order.
 pub fn scan(mods: &Path, order: &[String], off: &[String]) -> Found {
+    scan_saying(mods, order, off, true)
+}
+
+fn scan_saying(mods: &Path, order: &[String], off: &[String], say: bool) -> Found {
     let mut f = Found::default();
-    let active = packs(mods, order, off);
+    let active = packs_saying(mods, order, off, say);
     f.packs = active.len();
     for p in active {
         for (k, file) in p.textures {
@@ -201,28 +216,138 @@ pub fn scan(mods: &Path, order: &[String], off: &[String]) -> Found {
 /// Set the renderer's replacements for the next ride: `on` with a mods folder, the lookup over it;
 /// otherwise (or with nothing found) none, and every texture is the disc's. The line says which.
 pub fn install(mods: Option<&Path>, on: bool, order: &[String], off: &[String]) -> String {
+    install_live(mods, on, order, off, false).0
+}
+
+/// Whether `OPENMX_TEXTURE_RELOAD` asks for [`Reload`]: set, and not empty or `0`.
+pub fn reload_asked() -> bool {
+    std::env::var_os("OPENMX_TEXTURE_RELOAD").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// [`install`], and with `live` (and the setting on) a [`Reload`] that keeps the ride's textures up
+/// to date with the folders. A live source is set even over empty folders, so every texture the ride
+/// decodes remembers its key, and a file put in later still finds it.
+pub fn install_live(mods: Option<&Path>, on: bool, order: &[String], off: &[String], live: bool) -> (String, Option<Reload>) {
     let Some(mods) = mods.filter(|_| on) else {
         game_render::replace::set(None);
-        return "textures: the disc's (Upscaled Textures off)".into();
+        return ("textures: the disc's (Upscaled Textures off)".into(), None);
     };
     let found = scan(mods, order, off);
     let line = found.line();
-    if found.is_empty() {
+    if found.is_empty() && !live {
         game_render::replace::set(None);
-    } else {
-        game_render::replace::set(Some(Arc::new(move |key: &str, names: &dyn Fn() -> Vec<String>| {
-            let (p, pcsx2) = found.file(key, names)?;
-            let mut t = read_png(p);
-            if pcsx2 && let Some(t) = &mut t {
-                game_render::texhash::expand_alpha(&mut t.rgba);
-            }
-            if t.is_none() {
-                println!("textures: {}: not a PNG this reads; the disc's is drawn", p.display());
-            }
-            t
-        })));
+        return (line, None);
     }
-    line
+    let seen = if live { stamp(&found) } else { HashMap::new() };
+    let files = Arc::new(RwLock::new(found));
+    let shared = files.clone();
+    game_render::replace::set(Some(Arc::new(move |key: &str, names: &dyn Fn() -> Vec<String>| {
+        let (p, pcsx2) = {
+            let found = shared.read().unwrap_or_else(|e| e.into_inner());
+            let (p, pcsx2) = found.file(key, names)?;
+            (p.clone(), pcsx2)
+        };
+        let mut t = read_png(&p);
+        if pcsx2 && let Some(t) = &mut t {
+            game_render::texhash::expand_alpha(&mut t.rgba);
+        }
+        if t.is_none() {
+            println!("textures: {}: not a PNG this reads; the disc's is drawn", p.display());
+        }
+        t
+    })));
+    let reload = live.then(|| Reload {
+        mods: mods.to_path_buf(),
+        order: order.to_vec(),
+        off: off.to_vec(),
+        seen,
+        files,
+        walk: None,
+        next: Instant::now() + RELOAD_EVERY,
+    });
+    (line, reload)
+}
+
+/// How often [`Reload`] walks the folders again.
+pub const RELOAD_EVERY: Duration = Duration::from_secs(1);
+
+/// What a file was when it was last looked at: its path, its time and its length.
+type Stamp = (PathBuf, Option<SystemTime>, u64);
+
+/// Each key's winning file in `found` (the packs' and your own, then the mods' upscales), stamped.
+fn stamp(found: &Found) -> HashMap<String, Stamp> {
+    let upscaled = found.upscaled_files.iter().filter(|(k, _)| !found.files.contains_key(*k));
+    found
+        .files
+        .iter()
+        .chain(upscaled)
+        .map(|(k, p)| {
+            let meta = std::fs::metadata(p).ok();
+            (k.clone(), (p.clone(), meta.as_ref().and_then(|m| m.modified().ok()), meta.map_or(0, |m| m.len())))
+        })
+        .collect()
+}
+
+/// `OPENMX_TEXTURE_RELOAD=1` (V86, opentennis B83's `reload`): the lookup walked again once a second
+/// on a thread of its own, and each key whose winning file is new or changed read again, for the ride
+/// to put in its textures' place ([`game_render::world::Assets::replace_keyed`], then the GPU
+/// renderer's `reload_textures`). Off by default: a walk a second is for texture authors.
+pub struct Reload {
+    mods: PathBuf,
+    order: Vec<String>,
+    off: Vec<String>,
+    /// The lookup as the installed source answers it, kept up to date.
+    files: Arc<RwLock<Found>>,
+    seen: HashMap<String, Stamp>,
+    walk: Option<std::thread::JoinHandle<Found>>,
+    next: Instant,
+}
+
+impl Reload {
+    /// Start a walk if one is due, and take a finished one's changes: each changed key and its new
+    /// picture. A file that does not decode (written as it was read) is tried again on the next walk.
+    /// A file taken away leaves its texture as it was until the next ride (the disc's pixels are not
+    /// kept), as opentennis's does.
+    pub fn poll(&mut self) -> Vec<(String, Texture)> {
+        if self.walk.as_ref().is_some_and(|w| w.is_finished()) {
+            let now = self.walk.take().map(|w| w.join().unwrap_or_default()).unwrap_or_default();
+            return self.take(now);
+        }
+        if self.walk.is_none() && Instant::now() >= self.next {
+            self.next = Instant::now() + RELOAD_EVERY;
+            let (mods, order, off) = (self.mods.clone(), self.order.clone(), self.off.clone());
+            self.walk = Some(std::thread::spawn(move || scan_saying(&mods, &order, &off, false)));
+        }
+        Vec::new()
+    }
+
+    /// Walk now and wait for it: [`Reload::poll`]'s changes, at once (tests, and a caller that knows a
+    /// file changed).
+    pub fn now(&mut self) -> Vec<(String, Texture)> {
+        if let Some(w) = self.walk.take() {
+            let _ = w.join();
+        }
+        self.next = Instant::now() + RELOAD_EVERY;
+        let now = scan_saying(&self.mods, &self.order, &self.off, false);
+        self.take(now)
+    }
+
+    fn take(&mut self, found: Found) -> Vec<(String, Texture)> {
+        let now = stamp(&found);
+        let mut out = Vec::new();
+        let mut keys: Vec<&String> = now.keys().filter(|k| self.seen.get(*k) != now.get(*k)).collect();
+        keys.sort();
+        for k in keys {
+            let p = &now[k].0;
+            let Some(t) = read_png(p).filter(game_render::replace::whole) else { continue };
+            println!("textures: reloaded {}", p.display());
+            self.seen.insert(k.clone(), now[k].clone());
+            out.push((k.clone(), t));
+        }
+        self.seen.retain(|k, _| now.contains_key(k));
+        *self.files.write().unwrap_or_else(|e| e.into_inner()) = found;
+        out
+    }
 }
 
 /// A PNG as straight RGBA8; `None` for one that does not decode (or is indexed, as opentennis's).

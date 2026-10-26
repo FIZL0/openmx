@@ -77,3 +77,12 @@ skips textures already done (`textures/upscaled/sources.json`), so rerun it afte
 
 The ride's log line `textures: N from P texture packs, M key-named in mods/texture-replacements, C PCSX2-named,
 U mods' own upscales` shows what was found. A changed file is drawn from the next ride.
+
+**Live reload, for texture authors:** with `OPENMX_TEXTURE_RELOAD=1` in the environment (opentennis's
+`HST_TEXTURE_RELOAD`), the folders are walked again once a second while a ride runs, on a thread of their own,
+and a key-named file that is new or changed is drawn from the next frame, in both renderers
+(`textures: reloaded <file>` in the log). It is off by default because of that walk. It covers the textures of
+the models a ride draws: props, bikes, riders, the biplane and the other machines, and a world's tiles. The
+ground's layers, detail map, painted road and a mod map's ground pages, the start zones and the tire tread are
+read when the ride loads, and a change to one of those is drawn from the next ride. A file taken away leaves its
+texture as it was until the next ride.

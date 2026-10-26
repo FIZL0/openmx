@@ -225,6 +225,8 @@ struct GpuMaterial {
     /// What its bind groups were made of, to make them again under another anisotropy (V83); `None`
     /// for a dropped material's blank.
     source: Option<MaterialSource>,
+    /// What it was made of, to make it again over a reloaded texture (V86).
+    surface: Surface,
 }
 
 /// A material's texture, its sampler and its uniforms ([`GpuMaterial::rest`]'s second, if any), and
@@ -2597,6 +2599,33 @@ impl Renderer {
         if let Some(&id) = self.material_ids.get(&key) {
             return id;
         }
+        let made = self.make_material(assets, texture, surface);
+        self.materials.push(made);
+        let id = self.materials.len() - 1;
+        self.material_ids.insert(key, id);
+        id
+    }
+
+    /// Upload textures `at` of the assets again, and their levels, and repaint every material that
+    /// draws one (V86: [`Assets::replace_keyed`] put a changed replacement in their place mid-ride).
+    /// A texture not uploaded yet is left to its first use, which reads the new one.
+    pub fn reload_textures(&mut self, assets: &Assets, at: &[usize]) {
+        if at.is_empty() {
+            return;
+        }
+        self.textures.retain(|&(t, _), _| !at.contains(&t));
+        let mut redo: Vec<(usize, usize)> =
+            self.material_ids.iter().filter_map(|(k, &id)| k.texture.filter(|t| at.contains(t)).map(|t| (id, t))).collect();
+        redo.sort_unstable();
+        for (id, t) in redo {
+            let surface = self.materials[id].surface;
+            self.materials[id] = self.make_material(assets, Some(t), &surface);
+        }
+    }
+
+    /// A material's bind groups and pipelines, its texture uploaded if it is not yet.
+    fn make_material(&mut self, assets: &Assets, texture: Option<usize>, surface: &Surface) -> GpuMaterial {
+        let key = MaterialKey::of(texture, surface);
         let keep = if surface.keep_coverage { surface.cutoff } else { 0 };
         let view = match texture {
             Some(t) => self
@@ -2650,15 +2679,13 @@ impl Renderer {
             self.pipeline(pipeline);
             self.pipeline(PipelineKey { ghost: true, ..pipeline });
         }
-        self.materials.push(GpuMaterial {
+        GpuMaterial {
             bind,
             pipeline: key.pipeline,
             rest,
             source: Some(source),
-        });
-        let id = self.materials.len() - 1;
-        self.material_ids.insert(key, id);
-        id
+            surface: *surface,
+        }
     }
 
     /// A material's bind group: its texture and sampler, and `buffer`'s uniforms.
