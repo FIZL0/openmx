@@ -48,6 +48,8 @@ pub struct Screen {
     pub scale: usize,
     pub screen: (usize, usize),
     inner: Inner,
+    /// Whether the cursor is drawn over the window, as last asked (P167).
+    cursor: bool,
 }
 
 impl Screen {
@@ -77,6 +79,7 @@ impl Screen {
             scale,
             screen: (0, 0),
             inner,
+            cursor: true,
         };
         s.sync();
         Ok(s)
@@ -175,11 +178,39 @@ impl Screen {
         }
     }
 
+    /// Whether the window has the keyboard's focus.
+    pub fn focused(&self) -> bool {
+        match &self.inner {
+            Inner::X(w) => w.focused(),
+            Inner::Gpu(w) => w.focused(),
+        }
+    }
+
+    /// Draw the mouse cursor over the window or hide it (P167, [`crate::cursor::shown`]). Asked every
+    /// frame; the window is told only when it changes.
+    pub fn show_cursor(&mut self, shown: bool) {
+        if shown == self.cursor {
+            return;
+        }
+        self.cursor = shown;
+        match &mut self.inner {
+            Inner::X(w) => w.show_cursor(shown),
+            Inner::Gpu(w) => w.show_cursor(shown),
+        }
+    }
+
     /// The GPU window, where the GPU draws.
     pub fn gpu(&mut self) -> Option<&mut GpuWindow> {
         match &mut self.inner {
             Inner::X(_) => None,
             Inner::Gpu(w) => Some(w),
         }
+    }
+}
+
+/// The cursor is the desktop's again when the shell lets the window go (P167).
+impl Drop for Screen {
+    fn drop(&mut self) {
+        self.show_cursor(true);
     }
 }
