@@ -142,6 +142,7 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **S161** a landing crossed up past about 135 degrees rides out and swings round in the original as well (S150: the crossup is an arcsine, so 148 reads 31 and 169 reads 8 against the 45-degree limit); if the user wants such a landing to bail, add it as an option (off by default, so the original stays 1:1), not as a change to the wreck test
 - [ ] **P173** the keyboard joins a running ride whose 1P is a pad: today it has no pad seat then, so only pads can drop in (P171)
 - [ ] **R11** Pair MX vs. ATV PC's per-frame vehicle virtuals (bike update, input limiter, wreck test/entry, unwreck, stunt/ghost slots, wheel_integrate/steer) with the PS2 boot by walking the call graph out from R10's sure pc_ rows in research/oracle.txt; then lay SLUS-21104 (MX vs. ATV PS2) beside both. research/mxvatv-pc.md 'Not paired'.
+- [ ] **S162** free06 backward impacts vs the original: an idle bike rolling back into the bump at 4000,4000 (heading 180) bails Back(4) at -40 ft/s in the port, and one crawling back at 0.5 ft/s off a prop at 2500,3100 (heading 90) bails Scenery off the head ray; capture the original at both spots (free06 teleport recipe) and match its reason/tick or its no-wreck (S153 journal, sweep/wrecks.txt)
 ### Phase 2 — a decompilation you can read
 
 
