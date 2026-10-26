@@ -22,8 +22,9 @@
 //!
 //! The throttle is the third source, and the reason this module has a [`Wiring`]. The original reads
 //! Cross from its *pressure byte* and not from its bit (the game's own control map, read out of its
-//! RAM — [`CONTROL_MAP`]), so on the disc the throttle was never a switch: a DualShock 2's face
-//! buttons travel, and part throttle out of a corner is a fraction of that travel. Hardly any pad
+//! RAM — [`CONTROL_MAP`]), so on the disc the plane's throttle was never a switch: a DualShock 2's
+//! face buttons travel, and part throttle is a fraction of that travel. The bike drops the fraction
+//! and takes any press as the whole lever (P77, [`game_sim::ride::switch`]). Hardly any pad
 //! sold since reports a face button as anything but one bit, so this module gives the rider three
 //! ways to it, in the order of how much of it is the device's own: a per-button pressure where the
 //! driver publishes one ([`Wiring::pressure`]), gas on a trigger axis where it does not
@@ -2835,11 +2836,16 @@ pub(crate) mod tests {
         false
     }
 
-    /// What the gas is after one frame of `report`, through the port's own poll and binding.
+    /// How hard the gas command is held after one frame of `report`, through the port's own poll and
+    /// binding: the strength the biplane's throttle reads as it is. The bike reads it as a switch
+    /// (P77), and this checks that too: its gas is 1.0 for any strength but 0.
     fn gas_of(report: Report) -> F {
         let mut manager = Manager::connected();
         manager.tick(F(FRAME), &[report; PADS]);
-        Controls::from_pad(manager.pad(0)).gas
+        let strength = Table::SHIPPED.value(manager.pad(0), Command::GAS);
+        let bike = Controls::from_pad(manager.pad(0)).gas;
+        assert_eq!(bike, if strength == F::ZERO { F::ZERO } else { F::ONE }, "the bike's gas is a switch");
+        strength
     }
 
     /// The task's own case, at the narrowest point it can be asked: a pressure byte between the two
@@ -2913,11 +2919,14 @@ pub(crate) mod tests {
         let c = controls(&mut pads);
         assert_eq!((c.gas, c.front_brake), (F::ZERO, F::ZERO));
 
-        // Half way: part throttle, and the front brake it would otherwise have been is not applied.
+        // Half way: part throttle on the gas command, which the bike takes as all of it (P77), and
+        // the front brake it would otherwise have been is not applied.
         pads.axis[AXIS_R2] = 0;
         let c = controls(&mut pads);
-        assert_eq!(c.gas, F((trigger_pressure(0) as f32 + 1.0) / 256.0));
-        assert!(c.gas > F(0.3) && c.gas < F(0.7), "half a trigger reads {:?}", c.gas);
+        let half = gas_of(pads.build(FRAME, &nothing));
+        assert_eq!(half, F((trigger_pressure(0) as f32 + 1.0) / 256.0));
+        assert!(half > F(0.3) && half < F(0.7), "half a trigger reads {half:?}");
+        assert_eq!(c.gas, F::ONE, "the bike's gas is a switch");
         assert_eq!(c.front_brake, F::ZERO, "the throttle's trigger is not the brake as well");
 
         // Pulled: full throttle. The same trigger on a pad wired the ordinary way is no throttle at
@@ -3270,7 +3279,7 @@ pub(crate) mod tests {
             let mut pads = Pads::unplugged(Wiring::default());
             pads.scheme = Scheme::New;
             pads.build(FRAME, &|c| c == gas);
-            let stab = ride_of(Scheme::New.ride(pads.build(FRAME, &|c| c == gas))).gas;
+            let stab = gas_of(Scheme::New.ride(pads.build(FRAME, &|c| c == gas)));
             assert!(stab > F::ZERO && stab < F::ONE, "a stab of key {gas} is part throttle: {stab:?}");
         }
         assert_eq!(held_for(Scheme::New, key::X), Report::idle());
@@ -3823,11 +3832,14 @@ pub(crate) mod tests {
             assert_eq!(c.brake, original(Control::Square, pressure).brake, "L2 at {travel}");
             assert_eq!((c.gas, c.front_brake, c.clutch), (F::ZERO, F::ZERO, F::ZERO), "L2 at {travel}");
         }
-        // Half way is part throttle, not a switch.
+        // Half way is part of the gas command's travel, and the bike takes that as the whole lever,
+        // as the original's does a part-pressed Cross (P77: New's gas is the original's switch).
         pads.axis[AXIS_L2] = TRIGGER_REST;
         pads.axis[AXIS_R2] = 0;
-        let c = ride_of(Scheme::New.ride(pads.build(FRAME, &nothing)));
-        assert!(c.gas > F(0.3) && c.gas < F(0.7), "half a trigger reads {:?}", c.gas);
+        let report = Scheme::New.ride(pads.build(FRAME, &nothing));
+        let half = gas_of(report);
+        assert!(half > F(0.3) && half < F(0.7), "half a trigger reads {half:?}");
+        assert_eq!(ride_of(report).gas, F::ONE, "half a trigger is the whole switch");
 
         // The face buttons the original rides on are free: Cross and Square held, nothing.
         pads.axis[AXIS_R2] = TRIGGER_REST;

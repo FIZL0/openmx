@@ -560,7 +560,8 @@ impl Rider {
         // wreck bike's translation and forward row (S77).
         let mut thrown_keep = None;
         if state.wreck.is_none() {
-            ride.frame_bumped(p, &t.ride, &Controls { respawn: false, ..*c }, dt, world, bump);
+            // The bike's limiter reads the no-hander as the rider's last tick left it (`+0xa44`).
+            ride.frame_bumped(p, &t.ride, &Controls { respawn: false, hands_off: tricks.no_hander, ..*c }, dt, world, bump);
         } else if let (Some(w), Some(down)) = (wreckage.as_ref(), crash.as_mut()) {
             // The physics of a rider who is down: the wreck body tumbling and the rider coming off
             // it. The original's is the same swap — the bike's own step is skipped while the reason

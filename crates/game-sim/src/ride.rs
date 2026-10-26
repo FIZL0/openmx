@@ -108,7 +108,7 @@ pub(crate) fn bike_ang_limits(p: &Phy) -> (F, [F; 3], [F; 3]) {
 /// What the pad says this frame, before the input layer's rate limit.
 ///
 /// One struct for the whole bike: the ground step, the air state and the wreck test between them read
-/// every field of it. The two sticks are `[-1, 1]`, the four analogue commands `[0, 1]`.
+/// every field of it. The two sticks are `[-1, 1]`, the four levers `[0, 1]` (a pad's are 0 or 1, P77).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Controls {
     /// The throttle.
@@ -147,6 +147,10 @@ pub struct Controls {
     /// gives ([`trick::group_with`]). No binding of the original's is either; the shell sets them on
     /// the new scheme with MX vs. ATV's tricks on, and a rider whose set has no extras ignores them.
     pub extra: [bool; trick::EXTRA_BUTTONS],
+    /// **The rider's, not the pad's:** both hands are off the bars, the no-hander held on the ground
+    /// (`+0xa44`, [`crate::trick::Tricks::no_hander`] as the rider's last tick left it). The limiter
+    /// holds the gas at 0 while it is set (P77). A pad leaves it false; the rider fills it in.
+    pub hands_off: bool,
 }
 
 impl Controls {
@@ -162,8 +166,8 @@ impl Controls {
     ///
     /// What the original does not have is not read: it has no front brake of its own (the brake is
     /// both wheels), no reverse button (it reverses on gas and brake held together, slow) and no
-    /// balance button, so those three stay at rest. The levers are still read as their strength and
-    /// rate-limited by [`Held`]; the original's bike makes each a switch first (see the journal).
+    /// balance button, so those three stay at rest. The gas, the brake and the clutch are switches,
+    /// as the original's bike reads them (P77), and [`Held`] walks them at their rates.
     /// The strengths and press timers come from [`crate::input::Pad`]'s ported poll. It lives here
     /// rather than in the shell so that a replay fixture and the shell derive the rider's hands from
     /// a pad the same way.
@@ -177,11 +181,14 @@ impl Controls {
         // because which of two held directions wins is the front end's business.
         let round = [Command::UP, Command::RIGHT, Command::DOWN, Command::LEFT];
         Controls {
-            gas: table.value(pad, Command::GAS),
-            brake: table.value(pad, Command::BRAKE),
+            // The bike's three levers are switches (P77): 1.0 for any strength past the input
+            // layer's threshold, the pressure itself dropped. The brake's stoppie worth is the
+            // frame's ([`Controls::pad_read_tail`]), which knows the latch.
+            gas: switch(table.value(pad, Command::GAS)),
+            brake: switch(table.value(pad, Command::BRAKE)),
             front_brake: F::ZERO,
             rear_brake: F::ZERO,
-            clutch: table.value(pad, Command::CLUTCH),
+            clutch: switch(table.value(pad, Command::CLUTCH)),
             reverse: F::ZERO,
             // Through the player's own range, ±0.3, which is what the ride's stick consumers carry
             // in the original (I7, proved on a playback of the human's recording) — not the main
@@ -203,8 +210,14 @@ impl Controls {
             respawn: (pressed(Command::RESET_LEFT) && held(Command::RESET_RIGHT))
                 || (pressed(Command::RESET_RIGHT) && held(Command::RESET_LEFT)),
             extra: [false; trick::EXTRA_BUTTONS],
+            hands_off: false,
         }
     }
+}
+
+/// One of the bike's levers as its pad read leaves it: 1.0 held, 0 let go, whatever the strength.
+pub fn switch(value: F) -> F {
+    if value == F::ZERO { F::ZERO } else { F::ONE }
 }
 
 impl Controls {
@@ -251,12 +264,22 @@ impl Controls {
         if self.brake <= F::ZERO || self.gas <= F::ZERO {
             Controls { reverse: F::ZERO, ..self }
         } else if speed >= F(REVERSE_BELOW) {
-            // In the air the original's gas is 1.0 again, its switch; the port's lever is still
-            // its strength until P77 makes it a switch, so it is left as it was read.
-            Controls { reverse: F::ZERO, gas: if airborne { self.gas } else { F::ZERO }, ..self }
+            // In the air the original's gas is 1.0 again, its switch.
+            Controls { reverse: F::ZERO, gas: if airborne { F::ONE } else { F::ZERO }, ..self }
         } else {
             Controls { reverse: F::ONE, gas: F::ZERO, brake: F::ZERO, ..self }
         }
+    }
+}
+
+impl Controls {
+    /// The tail of the original's pad read, on levers [`Controls::through`] has already made switches
+    /// (P77): a held brake is worth `stoppie_brake` (`[Pitch]`'s `StoppieBrake`) while the stoppie
+    /// latch is set, and then [`Controls::reverse_rule`]. The latch, the speed and the air flag are
+    /// the bike's as the last frame left them.
+    pub fn pad_read_tail(self, stoppie: bool, stoppie_brake: F, speed: F, airborne: bool) -> Controls {
+        let brake = if stoppie && self.brake != F::ZERO { stoppie_brake } else { self.brake };
+        Controls { brake, ..self }.reverse_rule(speed, airborne)
     }
 }
 
@@ -323,7 +346,8 @@ impl Held {
         // The gas and the brake only *rise* at their rates: let go, either is the lever at once
         // (S58). That is the original's limiter, and why a released throttle hands the engine its
         // own braking on the same tick rather than two ticks later.
-        self.gas = rise(self.gas, c.gas, j.gas_rate_limit, dt);
+        // Both hands off the bars, no gas at all (`+0xa44`).
+        self.gas = if c.hands_off { F::ZERO } else { rise(self.gas, c.gas, j.gas_rate_limit, dt) };
         self.brake = rise(self.brake, c.brake, j.brake_rate_limit, dt);
         // One lever or two. S17 proved that `bike+0x650` is the front wheel's brake and `+0x654` the
         // rear's, and left open who writes them; the original's limiter walks `+0x650` and copies it
@@ -1773,8 +1797,9 @@ impl Ride {
             *tricks = Some(Box::default());
         }
 
-        // 0 — the tail of the pad read: gas and brake held together, slow, are the reverse.
-        let c = &c.reverse_rule(F(air.contact_vel.z()), air.airborne);
+        // 0 — the tail of the pad read: the stoppie's brake, and gas and brake held together, slow,
+        // are the reverse.
+        let c = &c.pad_read_tail(ride.stoppie, p.pitch.stoppie_brake, F(air.contact_vel.z()), air.airborne);
         held.reverse = c.reverse;
 
         // 1 — the input layer's rate limit.
