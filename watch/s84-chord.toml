@@ -1,0 +1,210 @@
+# s84-chord.toml — the L1+R1 chord inside the wreck page's fade out (S84), driven by
+# research/s84_chord.py. watch/s72-page.toml's fields (the rider's machine, the ghost, the chassis, the
+# two viewport faders) plus the rider's chord latch (+0x14d0), the put-back kind (+0x14d4), the put-back
+# record (+0x3b0 spot, +0x3c0 heading, +0x3d0 normal: S66) and pad 0's buffer, to see where the press landed.
+#
+#   ./kit record --dry-run watch/s84-chord.toml
+
+[watch]
+name        = "s84-chord"
+description = "the chord inside the wreck page's fade out: the faders, the latch, the put-back record"
+every       = 1
+frames      = 3000
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "latch"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x74c"
+type = "u32"
+
+[[field]]
+name = "clock"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x794"
+type = "f32"
+
+[[field]]
+name = "max_wreck_time"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x798"
+type = "f32"
+
+[[field]]
+name = "cannonball_wreck_time"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x79c"
+type = "f32"
+
+[[field]]
+name = "settles"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xd3c"
+type = "u32"
+
+[[field]]
+name = "screen"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "screen_current"
+addr = "@app_pointer -> 0x3cc -> 0x64"
+type = "u32"
+
+[[field]]
+name = "ghost"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7dc"
+type = "f32"
+
+[[field]]
+name = "max_speed_sq"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x220"
+type = "f32"
+
+[[field]]
+name = "cofg"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "f0_elapsed"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "f0_dur"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "f0_t"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "f0_out"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "f0_in"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "f0_in_after"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "f0_held"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "f0_in_ms"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x58"
+type = "u32"
+
+[[field]]
+name = "f0_listeners"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x40 -> 0x5c"
+type = "u32"
+
+[[field]]
+name = "f1_elapsed"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "f1_dur"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x38"
+type = "f32"
+
+[[field]]
+name = "f1_t"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x3c"
+type = "f32"
+
+[[field]]
+name = "f1_out"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x48"
+type = "u32"
+
+[[field]]
+name = "f1_in"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x4c"
+type = "u32"
+
+[[field]]
+name = "f1_in_after"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "f1_held"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "f1_in_ms"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x58"
+type = "u32"
+
+[[field]]
+name = "f1_listeners"
+addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x5c"
+type = "u32"
+
+[[field]]
+name = "chord"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x14d0"
+type = "u32"
+
+[[field]]
+name = "kind"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x14d4"
+type = "u32"
+
+[[field]]
+name = "back"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x3b0"
+type = "f32x4"
+
+[[field]]
+name = "back_facing"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x3c0"
+type = "f32x4"
+
+[[field]]
+name = "back_up"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x3d0"
+type = "f32x4"
+
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "applied"                  # the point the model setup last applied: a put-back sets it to the record's
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x5e0"
+type = "f32x4"

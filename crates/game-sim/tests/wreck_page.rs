@@ -79,6 +79,82 @@ fn the_originals_page_puts_back_on_its_third_update() {
     println!("{pages} pages");
 }
 
+/// **The chord inside the fade out, live** (S84: `research/s84_chord.py`, `watch/s84-chord.toml`;
+/// context/capture/s84/*.csv). Free09's state starts with the rider down for reason 6. L1 is held,
+/// and R1 goes down as soon as a fader reads fading out. That is wall-clock, so each capture shows for
+/// itself where the chord landed. On every capture whose chord came inside the fade out (the bike
+/// riding on a row that is still fading out, not yet held):
+///
+/// - The chord's put-back came first, onto the record as it stood (`Ride::place_back`'s S66
+///   proof).
+/// - The bike is set down a second time, and by the black draw: the first row after the chord whose
+///   applied point moves is held, with the fade in begun.
+/// - It is set down on the put-back record as it stood at the draw, bit for bit: this row's record,
+///   or the row before's for a row read past the next tick's keep. The port's `place_back` on it gives
+///   the same point.
+/// - The ghost started over: higher than the row before, or 3.0.
+///
+/// A chord that came after the page's own put-back (in the fade in) is counted but not checked here:
+/// it is the ordinary chord. Each capture missing is skipped.
+#[test]
+fn the_originals_draw_sets_a_chorded_bike_down_again() {
+    let dir = match std::env::var_os("GAME_SIM_FIXTURES") {
+        Some(dir) => std::path::PathBuf::from(dir).join("capture"),
+        None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/capture"),
+    }
+    .join("s84");
+    let (mut inside, mut after) = (0, 0);
+    for name in ["d0a", "d0b", "d1a", "d1b"] {
+        let path = dir.join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("skipped {name}: no {} — research/s84_chord.py makes it", path.display());
+            continue;
+        };
+        let cap = game_sim::replay::Capture::parse(&text).expect("the recorder's format");
+        let at = cap.columns.iter().enumerate().map(|(i, c)| (c.clone(), i)).collect();
+        let c = Cells { cap, at };
+        let v = |r: usize, col: &str| {
+            Vf::new(c.f(r, &format!("{col}.x")).0, c.f(r, &format!("{col}.y")).0, c.f(r, &format!("{col}.z")).0, c.f(r, &format!("{col}.w")).0)
+        };
+        let bits = |a: Vf, b: Vf| (0..4).all(|k| a[k].to_bits() == b[k].to_bits());
+        let n = c.cap.rows.len();
+        let held = |r: usize| c.u(r, "f0_held") != 0;
+        let out = |r: usize| c.u(r, "f0_out") != 0;
+        let r0 = (1..n).find(|&r| out(r) && !out(r - 1)).unwrap_or_else(|| panic!("{name}: no page"));
+        let up = (r0..n).find(|&r| c.u(r, "reason") == 0).unwrap_or_else(|| panic!("{name}: not put back"));
+        if held(up) {
+            // Back on the bike only with the black drawn: the page's own put-back, the chord after it.
+            after += 1;
+            continue;
+        }
+        assert!(out(up), "{name} row {up}: the chord's put-back while fading out");
+        assert!(
+            bits(v(up, "applied"), v(up, "back")) || bits(v(up, "applied"), v(up - 1, "back")),
+            "{name} row {up}: the chord set the bike on its record"
+        );
+        let r = (up + 1..n)
+            .find(|&r| !bits(v(r, "applied"), v(r - 1, "applied")))
+            .unwrap_or_else(|| panic!("{name}: set down once only"));
+        assert!(held(r) && c.u(r - 1, "reason") == 0, "{name} row {r}: the riding bike set down again by the black draw");
+        let rec = [r, r - 1]
+            .into_iter()
+            .find(|&k| bits(v(r, "applied"), v(k, "back")))
+            .unwrap_or_else(|| panic!("{name} row {r}: set down at {:?}, off the record {:?}", v(r, "applied"), v(r, "back")));
+        let (_, _, mut rider) = rider_down(Wreck::ATTITUDE, true);
+        rider.ride.back = game_sim::ride::Back { at: v(rec, "back"), facing: v(rec, "back_facing"), up: v(rec, "back_up") };
+        rider.ride.place_back();
+        assert!(bits(rider.ride.position(), v(r, "applied")), "{name} row {r}: the port's place_back");
+        let ghost = |r: usize| c.f(r, "ghost").0;
+        assert!(ghost(r) > ghost(r - 1) || ghost(r).to_bits() == 3.0f32.to_bits(), "{name} row {r}: the ghost started over");
+        println!("{name}: chord on row {up}, set down again on row {r} (record of row {rec})");
+        inside += 1;
+    }
+    println!("{inside} chords inside the fade out, {after} after the put-back");
+    if inside + after > 0 {
+        assert!(inside >= 2, "only {inside} chords inside the fade out");
+    }
+}
+
 /// One page of a capture, from the row its fade to black starts on.
 fn page_against(c: &Cells, name: &str, r0: usize) {
     let n = c.cap.rows.len();
@@ -251,12 +327,19 @@ fn the_rider_is_put_back_by_the_page() {
     }
 
     // The chord in the fade's first ticks puts the bike back at once; the page's listener is still
-    // on the fader and its draw puts the riding bike back again, ghost and all.
+    // on the fader and its draw sets the riding bike down again, on the record as the tick's physics
+    // kept it, ghost and all (S84). The record is moved off the bike and the bike given a speed
+    // before the draw's tick, so where it rides to and the record differ.
     let (p, t, mut r) = rider_down(Wreck::ATTITUDE, true);
     assert!(!r.frame(&p, &t, &idle, dt, &mut world).respawned);
     let chord = Controls { respawn: true, ..Controls::default() };
     assert!(r.frame(&p, &t, &chord, dt, &mut world).respawned, "the chord");
     r.ghost.clock = F(1.0);
+    r.ride.chassis.vel = Vf::new(0.0, 0.0, 30.0, 0.0);
+    r.ride.back.at = Vf::new(500.0, 0.0, 500.0, 1.0);
     assert!(r.frame(&p, &t, &idle, dt, &mut world).respawned, "the page's own put-back");
     assert_eq!(r.ghost.clock.0.to_bits(), 3.0f32.to_bits(), "the ghost started again");
+    let (at, now) = (r.ride.back.at, r.ride.position());
+    assert!((0..4).all(|k| at[k].to_bits() == now[k].to_bits()), "set down on the record {at:?}, not left at {now:?}");
+    assert!((0..3).all(|k| r.ride.chassis.vel[k] == F::ZERO), "from rest");
 }
