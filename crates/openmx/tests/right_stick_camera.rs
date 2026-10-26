@@ -7,6 +7,10 @@
 //! the original's (`Race::nudge` over `Follow::nudge`, oracle.txt's `camera_nudge`): 0.05 rad of yaw
 //! a tick at full stick, 0.3 ft of zoom a tick with the zoom command held. The reset is the port's.
 //!
+//! P78: the look-back command held puts the camera on its look-back preset until it is let go, as
+//! the original's camera manager does on L2 (the new layout's Square, which reaches the ride as L2:
+//! `src/pad.rs`'s own tests).
+//!
 //! No disc: the bike is the simulation crate's stand-in and the camera `Race Cam 1`'s numbers.
 
 #[allow(dead_code)]
@@ -138,6 +142,10 @@ struct Seat {
     cam: Race,
     plain: Race,
     world: Floor,
+    /// The look-back command on `cam` (P78), as `main.rs` keeps one beside each follow camera.
+    back: chase::LookBack,
+    /// Whether the follow camera has the screen (a wreck's camera does not take the press).
+    on_screen: bool,
 }
 
 impl Seat {
@@ -147,7 +155,7 @@ impl Seat {
         for _ in 0..60 {
             sim.frame(DT, &[Report::idle(), Report::missing()], &mut world);
         }
-        Seat { sim, cam: camera(), plain: camera(), world }
+        Seat { sim, cam: camera(), plain: camera(), world, back: chase::LookBack::default(), on_screen: true }
     }
 
     /// One tick, the shell's way. R3's press is the shell's reset (`pad::Scheme::resets_camera`,
@@ -156,6 +164,7 @@ impl Seat {
         let controls = self.sim.poll(DT, &[r, Report::missing()]);
         self.sim.step(DT, &controls, &mut self.world);
         let pad = self.sim.input.pad(0);
+        self.back.frame(&mut self.cam.cam, pad, self.sim.table(), self.on_screen);
         if look {
             chase::look_around(&mut self.cam, pad, self.sim.table(), pad.pressed(Control::R3));
         }
@@ -294,4 +303,54 @@ fn the_rides_ticks_are_identical_with_and_without_the_stick() {
     }
     let speed = stick.sim.rider.ride.chassis.speed;
     assert!(speed > 10.0, "the bike never got going: {speed:?}");
+}
+
+/// P78: L2 held is the look-back preset, and letting go goes back to the player's own preset, the
+/// nudges kept through both as the original's preset switch keeps them; a press while a wreck's
+/// camera has the screen, or on a camera whose file has no look-back preset, does nothing.
+#[test]
+fn the_look_back_command_holds_the_look_back_preset() {
+    let mut one = Seat::new();
+    // The player's own preset is the second one, walked to, and the stick has turned it.
+    one.cam.cam.next_preset();
+    for _ in 0..10 {
+        one.tick(report(&[], FULL_RIGHT), true);
+    }
+    let turned = one.cam.cam.user_yaw;
+    assert_ne!(turned, F::ZERO);
+    assert_eq!(one.cam.cam.look_back_preset(), Some(2));
+    for k in 0..20 {
+        one.tick(report(&[Control::L2], CENTRE), true);
+        assert_eq!(one.cam.cam.preset, 2, "tick {k}: the look-back is up while L2 is held");
+        assert!(one.cam.cam.preset().is_look_back_cam);
+    }
+    // The nudges were parked, not thrown away: let go, the player's preset with its turn.
+    one.tick(report(&[], CENTRE), true);
+    assert_eq!(one.cam.cam.preset, 1, "letting go goes back to the player's preset");
+    assert_eq!(one.cam.cam.user_yaw.0.to_bits(), turned.0.to_bits(), "the turn came back with it");
+    // Held again from the first preset, it comes back to the first.
+    one.cam.cam.next_preset();
+    assert_eq!(one.cam.cam.preset, 0);
+    one.tick(report(&[Control::L2], CENTRE), true);
+    assert_eq!(one.cam.cam.preset, 2);
+    one.tick(report(&[], CENTRE), true);
+    assert_eq!(one.cam.cam.preset, 0);
+    // A wreck's camera on the screen takes no press.
+    one.on_screen = false;
+    one.tick(report(&[Control::L2], CENTRE), true);
+    assert_eq!(one.cam.cam.preset, 0, "a press under the wreck camera");
+    one.tick(report(&[], CENTRE), true);
+    one.on_screen = true;
+    // Nothing but L2 is the look-back under the shipped table.
+    for c in [Control::R2, Control::Square, Control::Select, Control::L1] {
+        one.tick(report(&[c], CENTRE), true);
+        assert_ne!(one.cam.cam.preset, 2, "{c:?}");
+        one.tick(report(&[], CENTRE), true);
+    }
+    // A file with no look-back preset has nothing to look back on.
+    let mut two = Seat::new();
+    two.cam = Race::new(vec![preset("Race Cam 1", false), preset("Race Cam 2", false)], F(REVERSE_SPEED));
+    two.tick(report(&[Control::L2], CENTRE), true);
+    assert_eq!(two.cam.cam.preset, 0);
+    assert_eq!(two.cam.cam.look_back_preset(), None);
 }

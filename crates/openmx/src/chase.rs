@@ -127,6 +127,48 @@ pub fn look_around(cam: &mut game_sim::camera::Race, pad: &game_sim::input::Pad,
     }
 }
 
+// --- the look-back button (P78) --------------------------------------------------------------------
+
+/// The camera manager's look-back command, held: the follow camera turns to its look-back preset
+/// while the command is down and goes back to the player's own preset when it is let go.
+///
+/// The original's camera manager does it in its press and release handlers. A press, with the race
+/// camera on the screen and a look-back preset in its file, switches the race camera to that preset;
+/// a release, if the race camera is still on it, switches back to the preset the manager keeps as
+/// the player's, the one the next-camera walk last chose. Nothing else changes a preset while the
+/// command is held — the walk itself is refused under it ([`crate::pad::Scheme::changes_camera_on`])
+/// — so the player's preset is the one up when the command went down, and that is what this keeps.
+/// The nudges ride through it as [`game_sim::camera::Follow::set_preset`] keeps them.
+///
+/// The camera is presentation: this reads the seat's pad and writes only the camera.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LookBack {
+    /// The player's preset, to go back to; `None` while the look-back is not up.
+    pub chosen: Option<usize>,
+}
+
+impl LookBack {
+    /// One tick of the command on `cam`; `on_screen` is whether the follow camera has the screen (a
+    /// wreck's camera does not take the press). True when the preset changed.
+    pub fn frame(&mut self, cam: &mut game_sim::camera::Follow, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, on_screen: bool) -> bool {
+        use game_sim::bindings::Command;
+        let Some(back) = cam.look_back_preset() else { return false };
+        if on_screen && table.pressed(pad, Command::LOOK_BACK) && cam.preset != back {
+            self.chosen = Some(cam.preset);
+            cam.set_preset(back);
+            return true;
+        }
+        if table.released(pad, Command::LOOK_BACK)
+            && let Some(chosen) = self.chosen.take()
+            && cam.preset == back
+        {
+            cam.set_preset(chosen);
+            return true;
+        }
+        false
+    }
+}
+
 // --- the wreck camera (V31) ------------------------------------------------------------------------
 
 /// What the wreck camera follows while the rider is down: the rider's body first, and the wrecked bike.

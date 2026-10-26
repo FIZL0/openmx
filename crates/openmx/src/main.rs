@@ -785,6 +785,7 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
         wreck_camera: chase::WreckCamera::new(false),
         framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
         fov_ease: Default::default(),
+        look_back: Default::default(),
         hud: Hud::new(p.hud),
         odometer: overlay::Odometer::default(),
         preload_meter: overlay::PreloadMeter::default(),
@@ -957,6 +958,8 @@ struct Rig {
     /// The two follow cameras' fields of view easing over a framing change (P119), the bike's and the
     /// plane's.
     fov_ease: (chase::FovEase, chase::FovEase),
+    /// The look-back button on the two follow cameras (P78), the bike's and the plane's.
+    look_back: (chase::LookBack, chase::LookBack),
     hud: Hud,
     /// The distance this player's odometer shows, under the original's overlay (V26).
     odometer: overlay::Odometer,
@@ -4137,6 +4140,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             fov_ease: Default::default(),
+            look_back: Default::default(),
             hud: Hud::new(args.hud),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
@@ -4167,6 +4171,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             fov_ease: Default::default(),
+            look_back: Default::default(),
             // The riding overlay (P6). It is the shell's own furniture, so it is created here beside
             // the window rather than inside the simulation's `World`, and it reads the port's own
             // values at draw time instead of being fed them.
@@ -5450,6 +5455,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             wreck_camera: chase::WreckCamera::new(false),
                             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
                             fov_ease: Default::default(),
+                            look_back: Default::default(),
                             hud: Hud::new(args.hud),
                             odometer: overlay::Odometer::default(),
                             preload_meter: overlay::PreloadMeter::default(),
@@ -6110,9 +6116,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // Whichever machine has the controller has the camera: the bike's, on the track's presets, or
             // the plane's, on its own file's.
             // With the field of view's ease over a framing change (P119), which is the camera's own.
-            let (follow, fov_ease) = match (seat.garage.up, &mut rig.plane_camera) {
-                (Kind::Biplane, Some(cam)) => (cam, &mut rig.fov_ease.1),
-                _ => (&mut rig.camera, &mut rig.fov_ease.0),
+            let (follow, fov_ease, look_back) = match (seat.garage.up, &mut rig.plane_camera) {
+                (Kind::Biplane, Some(cam)) => (cam, &mut rig.fov_ease.1, &mut rig.look_back.1),
+                _ => (&mut rig.camera, &mut rig.fov_ease.0, &mut rig.look_back.0),
             };
             // The original's plane reset (the chord, a wreck's recovery) snaps the plane's camera onto
             // the spawn rather than letting it fly the whole way back (V29).
@@ -6135,6 +6141,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let ride_out = std::mem::take(&mut seat.teleported) && seat.garage.up == Kind::Bike;
             if ride_out {
                 follow.cam.snap = true;
+            }
+            // The look-back command (P78), held: the follow camera on its look-back preset until it
+            // is let go — L2 under the original's layout, Square under the new one. A ride with MX
+            // vs. ATV's tricks has those buttons as its two extra tricks, so it has no look-back.
+            if seat.sim.phy.tricks.is_none() && look_back.frame(&mut follow.cam, seat.sim.input.pad(0), seat.sim.table(), !rig.wreck_camera.on) {
+                println!("{who}camera: {}", follow.cam.preset().name);
             }
             let presets = follow.cam.presets.len();
             if presets > 1 {

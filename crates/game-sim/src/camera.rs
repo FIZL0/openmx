@@ -547,6 +547,13 @@ impl Follow {
         }
     }
 
+    /// The look-back preset: the first in the file with [`Preset::is_look_back_cam`] set, `None` for
+    /// a file with none. The race camera finds it so once, when its presets are read, and the
+    /// camera manager's look-back button switches to it (P78).
+    pub fn look_back_preset(&self) -> Option<usize> {
+        self.presets.iter().position(|p| p.is_look_back_cam)
+    }
+
     /// Throw the player's four nudges away without touching anything else — the third of the small
     /// routines the class keeps beside the two in [`Follow::set_preset`], and the only one of the
     /// three that nothing in the camera itself calls. The front end does, when it puts a camera back

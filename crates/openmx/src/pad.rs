@@ -439,7 +439,9 @@ impl Scheme {
 
     /// The commands this scheme carries, each with the pad's control that reaches it (P73): under
     /// the original's, [`Command::RIDE`] on the shipped table's bindings; under the new one the same
-    /// commands, the gas and the brake moved to R2 and L2. In [`Command::RIDE`]'s order.
+    /// commands, the gas and the brake moved to R2 and L2 and the two camera holds the triggers had,
+    /// look back and the other camera, to the faces they left, Square and Cross (P78). In
+    /// [`Command::RIDE`]'s order.
     pub fn commands(self) -> Vec<(Command, Control)> {
         self.commands_on(&Table::SHIPPED)
     }
@@ -453,7 +455,8 @@ impl Scheme {
                 let on = match (self, bound) {
                     (Scheme::New, Control::Cross) => Control::R2,
                     (Scheme::New, Control::Square) => Control::L2,
-                    (Scheme::New, Control::R2 | Control::L2) => return None,
+                    (Scheme::New, Control::R2) => Control::Cross,
+                    (Scheme::New, Control::L2) => Control::Square,
                     _ => bound,
                 };
                 Some((c, on))
@@ -463,7 +466,7 @@ impl Scheme {
 
     /// Whether this frame of the port's own poll asks for the next camera, as the original's camera
     /// handler decides it: the command's press, with neither look-back nor the other camera held.
-    /// Under the new scheme those two have no button, so it is Select's press alone.
+    /// Under the new scheme those two are on Square and Cross (P78), which reach the ride as L2 and R2.
     pub fn changes_camera(self, pad: &game_sim::input::Pad) -> bool {
         self.changes_camera_on(pad, &Table::SHIPPED)
     }
@@ -487,38 +490,39 @@ impl Scheme {
 
     /// The report the simulation is handed for a pad that reported `report`.
     ///
-    /// Under the new scheme R2 is moved onto Cross and L2 onto Square, bit and pressure byte
-    /// together — the game reads both from the pressure, so a trigger's travel is the original's
-    /// part throttle and part brake — and the pad's own Cross, Square, L2 and R2 are let go. Everything
-    /// else, Select among it, reaches the ride as the pad said it. A pad that is not there is left
-    /// as it is.
+    /// Under the new scheme R2 and Cross trade places, and so do L2 and Square, bit and pressure byte
+    /// together — the game reads the gas and the brake from the pressure, so a trigger's travel is
+    /// the original's part throttle and part brake. So the pad's R2 and L2 are the original's gas
+    /// and brake, and its Cross and Square the original's L2 and R2 commands, look back and the
+    /// other camera (P78: the faces the gas and the brake left; nothing in the ride reads L2 or R2).
+    /// Everything else, Select among it, reaches the ride as the pad said it. A pad that is not there
+    /// is left as it is.
     pub fn ride(self, report: Report) -> Report {
         if self == Scheme::Original || report.status() == 0xff {
             return report;
         }
         let mut out = report;
         let was = report.buttons();
+        let swaps = [(Control::Cross, Control::R2), (Control::Square, Control::L2), (Control::R2, Control::Cross), (Control::L2, Control::Square)];
         let mut held = was & !game_sim::input::mask_of(&[Control::Cross, Control::Square, Control::L2, Control::R2]);
-        for (to, from) in [(Control::Cross, Control::R2), (Control::Square, Control::L2)] {
+        let pressure = |c: Control| c.binding().pressure as usize;
+        for (to, from) in swaps {
             if was & from.mask() != 0 {
                 held |= to.mask();
             }
+            out.0[pressure(to)] = report.0[pressure(from)];
         }
         let low = !held;
         out.0[2] = (low >> 8) as u8;
         out.0[3] = low as u8;
-        let pressure = |c: Control| c.binding().pressure as usize;
-        out.0[pressure(Control::Cross)] = report.0[pressure(Control::R2)];
-        out.0[pressure(Control::Square)] = report.0[pressure(Control::L2)];
-        out.0[pressure(Control::R2)] = 0;
-        out.0[pressure(Control::L2)] = 0;
         out
     }
 
     /// [`Scheme::ride`] on a ride with MX vs. ATV's tricks (MD16), which reads its two extra trick
     /// buttons off the report's R2 and L2 (`game_sim::trick_pack::EXTRA_CONTROLS`). Under the new
-    /// scheme the pad's Cross and Square, which [`Scheme::ride`] lets go, become them, bit and pressure
-    /// byte together. The extras are the new layout's only: under the original's the pad's R2 and L2
+    /// scheme the pad's Cross and Square, which [`Scheme::ride`] puts there as the two camera holds
+    /// (P78), are them, and the holds go with them: the shell follows neither while a ride has the
+    /// extras. The extras are the new layout's only: under the original's the pad's R2 and L2
     /// are let go instead, so they never start one. With `tricks` off this is [`Scheme::ride`] exactly.
     pub fn ride_tricks(self, report: Report, tricks: bool) -> Report {
         let mut out = self.ride(report);
@@ -1919,8 +1923,12 @@ impl Bindings {
         out.push(row("Left stick", stick(16 + 4)));
         out.push(row("Right stick", stick(16)));
         out.push(row("D-pad", dpad));
-        if let Some(control) = on(Command::NEXT_CAMERA) {
-            out.push(row(&named(Command::NEXT_CAMERA), of(&[control])));
+        // The look-back hold beside the camera (P78); the other camera has no row while the shell
+        // has no camera for it.
+        for c in [Command::NEXT_CAMERA, Command::LOOK_BACK] {
+            if let Some(control) = on(c) {
+                out.push(row(&named(c), of(&[control])));
+            }
         }
         if let (Some(l), Some(r)) = (on(Command::RESET_LEFT), on(Command::RESET_RIGHT)) {
             out.push(row("Reset", format!("{} + {}", of(&[l]), of(&[r]))));
@@ -3295,11 +3303,12 @@ pub(crate) mod tests {
         // Tab or C changes the camera under the new scheme.
         assert_eq!(Scheme::New.camera(), Control::Select);
         // G and H are Cross and Square on the pad's report — the menus' OK and delete — and the new
-        // scheme keeps both out of a ride, as it does the pad's own.
-        for (code, control) in [(key::G, Control::Cross), (key::H, Control::Square)] {
+        // scheme hands them to a ride as the pad's own, on R2 and L2: the other camera and look
+        // back (P78), neither of which moves the bike.
+        for (code, control, ridden) in [(key::G, Control::Cross, Control::R2), (key::H, Control::Square, Control::L2)] {
             let report = held_for(Scheme::New, code);
             assert_eq!(report.buttons(), control.mask(), "key {code}");
-            assert_eq!(Scheme::New.ride(report).buttons(), 0, "key {code} in a ride");
+            assert_eq!(Scheme::New.ride(report).buttons(), ridden.mask(), "key {code} in a ride");
         }
         // And H is a face button now, so the shell's overlay stays off it; M is still the swap's.
         let b = Bindings::default();
@@ -3358,7 +3367,7 @@ pub(crate) mod tests {
         let new = Scheme::New.ride_tricks(report, true);
         let ridden = Scheme::New.ride(report);
         let extras = game_sim::input::mask_of(&game_sim::trick_pack::EXTRA_CONTROLS);
-        assert_eq!(new.buttons() & !extras, ridden.buttons(), "the gas, the brake and R1 as they were");
+        assert_eq!(new.buttons() & !extras, ridden.buttons() & !extras, "the gas, the brake and R1 as they were");
         assert_eq!(new.buttons() & extras, extras);
         for c in game_sim::trick_pack::EXTRA_CONTROLS {
             assert_eq!(new.pressure(c.binding().pressure), 0xc0);
@@ -3434,20 +3443,20 @@ pub(crate) mod tests {
         for (what, keys) in [
             ("Gas", "J Space"), ("Brake", "K Shift"), ("Clutch", "Q"), ("Trick 1", "L"), ("Trick 2", ";"),
             ("Trick 3", "E"), ("Left stick", "W A S D"), ("Right stick", "I Y U O"), ("D-pad", "Arrows"),
-            ("Camera", "Tab C"), ("Reset", "Q + E"), ("Pause", "Enter Escape"),
+            ("Camera", "Tab C"), ("Look back", "H"), ("Reset", "Q + E"), ("Pause", "Enter Escape"),
         ] {
             assert_eq!(new.get(what).map(String::as_str), Some(keys), "{what}");
         }
-        assert_eq!(new.len(), 12, "{new:?}");
+        assert_eq!(new.len(), 13, "{new:?}");
         let original = rows(&Bindings::default(), Scheme::Original);
         for (what, keys) in [
             ("Gas", "X Space"), ("Brake", "Z"), ("Clutch", "A"), ("Trick 1", "C"), ("Trick 2", "V"),
             ("Trick 3", "D"), ("Right stick", "I J K L"), ("D-pad", "Arrows"), ("Camera", "Tab"),
-            ("Reset", "A + D"), ("Pause", "Enter Escape"),
+            ("Look back", "S"), ("Reset", "A + D"), ("Pause", "Enter Escape"),
         ] {
             assert_eq!(original.get(what).map(String::as_str), Some(keys), "{what}");
         }
-        assert_eq!(original.len(), 11, "{original:?}");
+        assert_eq!(original.len(), 12, "{original:?}");
         assert!(!original.contains_key("Left stick"), "the original's left stick has no keys");
         let (b, _) = Bindings::parse("r2 = G PadR1\n");
         assert_eq!(rows(&b, Scheme::New)["Gas"], "G");
@@ -3861,10 +3870,56 @@ pub(crate) mod tests {
         let (r2, r2_select) = (&[Control::R2][..], &[Control::R2, Control::Select][..]);
         assert_eq!(presses(Scheme::Original, &[none, l2, l2_select, none, r2, r2_select]), [false; 6]);
         assert_eq!(presses(Scheme::New, &[none, l2, l2_select, none, r2, r2_select]), [false, false, true, false, false, true]);
+        // P78: under the new layout look-back and the other camera are on Square and Cross, which
+        // hold the camera back as the original's L2 and R2 do.
+        let (square, square_select) = (&[Control::Square][..], &[Control::Square, Control::Select][..]);
+        let (cross, cross_select) = (&[Control::Cross][..], &[Control::Cross, Control::Select][..]);
+        assert_eq!(presses(Scheme::New, &[none, square, square_select, none, cross, cross_select]), [false; 6]);
+        assert_eq!(presses(Scheme::Original, &[none, square, square_select, none, cross, cross_select]), [false, false, true, false, false, true]);
         // Select through a pad's own button 6, which a pad with a Select has there.
         let mut pads = Pads::unplugged(Wiring::default());
         pads.button[6] = true;
         assert!(down(Scheme::New.ride(pads.build(FRAME, &nothing)), Control::Select));
+    }
+
+    /// P78: the two camera holds the original has on L2 and R2 — look back and the other camera — are
+    /// on Square and Cross under the new layout, the faces the gas and the brake left for the
+    /// triggers: the pad's Square reaches the ride as L2 and its Cross as R2, bit and pressure, so the
+    /// shipped table's commands read them there, and the triggers are the gas and the brake and no
+    /// camera. Under the original's they are L2 and R2, as the table says.
+    #[test]
+    fn the_new_layout_puts_the_camera_holds_on_square_and_cross() {
+        let held = |scheme: Scheme, buttons: &[Control]| {
+            let mut manager = Manager::connected();
+            let mut report = Report::idle();
+            for c in buttons {
+                press(&mut report, *c, 0x9c);
+            }
+            manager.tick(F(FRAME), &[scheme.ride(report); PADS]);
+            let pad = manager.pad(0);
+            let t = &Table::SHIPPED;
+            [t.held(pad, Command::LOOK_BACK), t.held(pad, Command::OTHER_CAMERA), t.held(pad, Command::GAS), t.held(pad, Command::BRAKE)]
+        };
+        assert_eq!(held(Scheme::New, &[Control::Square]), [true, false, false, false]);
+        assert_eq!(held(Scheme::New, &[Control::Cross]), [false, true, false, false]);
+        assert_eq!(held(Scheme::New, &[Control::R2]), [false, false, true, false]);
+        assert_eq!(held(Scheme::New, &[Control::L2]), [false, false, false, true]);
+        assert_eq!(held(Scheme::Original, &[Control::L2]), [true, false, false, false]);
+        assert_eq!(held(Scheme::Original, &[Control::R2]), [false, true, false, false]);
+        assert_eq!(held(Scheme::Original, &[Control::Cross]), [false, false, true, false]);
+        // The pressure goes with the bit, both ways round.
+        let mut report = Report::idle();
+        press(&mut report, Control::Square, 0x40);
+        press(&mut report, Control::R2, 0xc0);
+        let out = Scheme::New.ride(report);
+        let pressure = |r: Report, c: Control| r.pressure(c.binding().pressure);
+        assert_eq!([pressure(out, Control::L2), pressure(out, Control::Cross)], [0x40, 0xc0]);
+        assert_eq!([pressure(out, Control::Square), pressure(out, Control::R2)], [0, 0]);
+        assert!(down(out, Control::L2) && down(out, Control::Cross) && !down(out, Control::Square) && !down(out, Control::R2));
+        // And the commands the layout lists say so.
+        let on = |scheme: Scheme, c: Command| scheme.commands().into_iter().find(|(x, _)| *x == c).map(|(_, b)| b);
+        assert_eq!([on(Scheme::New, Command::LOOK_BACK), on(Scheme::New, Command::OTHER_CAMERA)], [Some(Control::Square), Some(Control::Cross)]);
+        assert_eq!([on(Scheme::Original, Command::LOOK_BACK), on(Scheme::Original, Command::OTHER_CAMERA)], [Some(Control::L2), Some(Control::R2)]);
     }
 
     /// P114: R3's click resets the camera under either layout, once a press — the layouts leave it
@@ -3904,10 +3959,10 @@ pub(crate) mod tests {
         for scheme in Scheme::ALL {
             let rest = ride(scheme, &[]);
             let moves: Vec<Control> = Control::ALL.into_iter().filter(|c| ride(scheme, &[*c]) != rest).collect();
-            let want: Vec<Control> = scheme.commands().into_iter().map(|(_, c)| c).filter(|c| {
-                // The camera and the pause are the shell's to follow; the ride reads neither.
-                *c != Control::Select && *c != Control::Start
-            }).collect();
+            // The camera's three buttons and the pause are the shell's to follow; the ride reads none.
+            let shells = [Command::NEXT_CAMERA, Command::LOOK_BACK, Command::OTHER_CAMERA, Command::PAUSE];
+            let want: Vec<Control> =
+                scheme.commands().into_iter().filter(|(c, _)| !shells.contains(c)).map(|(_, c)| c).collect();
             for c in &moves {
                 assert!(want.contains(c), "{scheme:?}: {c:?} moves the ride and carries no original command");
             }

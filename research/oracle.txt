@@ -4516,6 +4516,37 @@ binding_table_build  boot 0x00200f00 (app, pad, preset) the only writer of the t
 #     command in a register).
 #   The bike's own vt+0xec, bike_input_limiter, then walks +0x650/+0x654 brake (front = rear),
 #     +0x658 gas, +0x65c clutch toward those switches; not ported by P73.
+# P78 — the camera manager's two holds, look back (0x20) and the other camera (0x22). Port: the look-back
+#   as chase::LookBack (crates/openmx/src/chase.rs), proof crates/openmx/tests/right_stick_camera.rs;
+#   the new layout's buttons in pad::Scheme::ride (Square and Cross reach the ride as L2 and R2).
+#   The manager (MXCameraController.cpp, vtable 0x00452314; ctor 0x001feea0): +0x40 the active camera,
+#   +0x54 the race camera (SimpleFollowCam, built at 0x001ff270), +0x58 (0x001ff450), +0x5c
+#   (0x001ff550), +0x60 (0x001ff640), +0x64 the thrill camera (MXCameraThrill.cpp, ctor 0x00320b50,
+#   set up at 0x001ff7f0 through 0x00320d00 with 75, 18, 200, 20, 5 and 200 or FLT_MAX by the
+#   track's +0x3b8 +0x1c over 1500), +0x144 / +0x148 look back / other camera let go (0 while held),
+#   +0x150 the camera to go back to, +0x154 the player's race-camera preset (the next-camera walk
+#   0x00200330 writes it after every change; the ctor's is 0, or +0x13c - 1 in mode 5 with more than 7
+#   presets), +0x138 preset count, +0x13c the look-back preset less one.
+race_camera_setup    boot 0x0021e270 (..., cam, ...) the race camera's +0x1a8 = the first preset whose
+#                                   +0x7c IsLookBackCam is set (the ctor 0x0021e1d0 leaves -1)
+# the press handler, boot 0x00200000 (manager, event), not named: a test uses 0x200000; it does: 0x20 clears +0x144, 0x22
+#                                   +0x148; with the race camera or +0x5c active, 0x20 with +0x1a8 >= 0
+#                                   -> camera_look_back, else 0x22 -> camera_thrill, else 0x21 with
+#                                   both let go -> the next-camera walk
+camera_look_back     boot 0x002006e0 (manager) +0x5c active -> the race camera made active; the race
+#                                   camera's set preset (vt +0xfc) to +0x1a8
+camera_thrill        boot 0x00200740 (manager) unless the thrill camera is up already: the race camera
+#                                   active and its target's +0x50 velocity longer than 3, or +0x5c
+#                                   active and its +0xbc target's +0x40 longer than 3 -> the thrill
+#                                   camera made active (vt +0x80)
+camera_release       boot 0x002005e0 (manager, event) 0x20 -> camera_look_back_off, 0x22 ->
+#                                   camera_thrill_off
+camera_look_back_off boot 0x00200820 (manager) +0x144 = 1; the race camera active and on preset +0x1a8
+#                                   -> preset +0x154, and +0x5c made active if +0x150 is it
+camera_thrill_off    boot 0x002008b0 (manager) +0x148 = 1; the thrill camera active and +0x14c 0 ->
+#                                   camera_restore (0x001ff140) and, look back let go, the race camera
+#                                   active on preset +0x1a8 (the look-back, as if 0x20 were still
+#                                   pressed: not ported, no thrill camera yet)
 # Strings: the preset screen's labels are STR_BUTTON_1..6_TEXT / STR_BUTTON_DES_* in AppStart's
 #   loc\ui.loc, whose values are encoded (not plain or UTF-16); not decoded.
 # S66 — the bike's put-back record and where L1+R1 / the wreck clock put the bike, ported as
