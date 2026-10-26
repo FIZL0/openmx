@@ -124,5 +124,18 @@ Task P74. 2026-10-25.
 
 ## Next
 
-Nothing for this task. Follow-ups are in the plan: TireTrack, foot dust while riding, and comparing the
-wreck's CollisionModel/PCC emission against a capture with contact data.
+The work is done and committed, but **P74 is not ticked**:
+- **Why.** `./kit done P74` ran the full gate (2026-10-25). It went red only on
+  `crates/game-sim/tests/replay.rs` `the_slip_cases_replay_from_the_save_state` ("turn: the path parts
+  at 75, not after 82"), and that is red when run alone too.
+- **It is not P74's red.** P74 does not touch game-sim: `git diff 5daefb79 -- crates/game-sim` is empty,
+  and game-sim last changed in MD28. This is main's known red since the batch merge 1cdaee5a, filed as
+  **S119**.
+- **The other red passed on a lone rerun.** The LAN lobby test is in gate.toml's load flakes.
+- **Pushed.** I pushed `task/P74` myself; the runner merges it.
+- **What the next session does.** Once S119 lands, run
+  `DISPLAY=:0 WAYLAND_DISPLAY=wayland-1 ./kit done P74 "<msg>" --skip-audit`. The audit leaks are other
+  tasks' names in plan/DONE.md:121 and :357. That ticks it; nothing else is left.
+
+Follow-ups filed: P151 (TireTrack), P152 (foot dust while riding), P153 (the wreck's emission against a
+capture with contact data).
