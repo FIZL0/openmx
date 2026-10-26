@@ -400,6 +400,7 @@ impl Menu {
                 "Original Fog is the game's haze and far clip. Far Fog is the same haze four times as far out. Whole Map draws everything, with only a light haze far off.",
             ),
             self.departure_row(Departure::Plants),
+            self.departure_row(Departure::Foliage),
             // MD9: a combined world's sky and light, one for all of it or each map its own.
             Row::choice(
                 Key::WorldSky,
@@ -425,7 +426,7 @@ impl Menu {
             "Original Game",
             &["Off", "On"],
             0,
-            "On puts everything back to the original game: its controls, cameras, fog, plants, picture shape and HUD. Each switch below can be set on its own, and the fog, plants and picture shape on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
+            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves, picture shape and HUD. Each switch below can be set on its own, and the fog, plants, leaves and picture shape on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
         )
         .tips(&["Every enhancement on", "The game as it shipped"]);
         match self.original() {
@@ -1208,7 +1209,7 @@ impl Departure {
     /// the Original tab's master switch.
     pub fn tab(self) -> usize {
         match self {
-            Departure::Fog | Departure::Plants | Departure::Picture => TAB_GRAPHICS,
+            Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Picture => TAB_GRAPHICS,
             Departure::Controls | Departure::Cameras | Departure::Markers => TAB_ORIGINAL,
         }
     }

@@ -37,7 +37,7 @@
 use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
 use crate::split::{self, Split};
-use game_render::eco::Lod;
+use game_render::eco::{Foliage, Lod};
 use game_render::world::Graphics;
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Disc, Frame, Texture};
@@ -336,6 +336,9 @@ pub struct Settings {
     /// How the plants change from model to picture (V55): ours, smoothed, unless the Original
     /// switch's Plants (P126) is on.
     pub plants: Lod,
+    /// How the plants' leaves lie over what is behind them (V56): ours, cut out, unless the
+    /// Original switch's Leaves (V57) is on.
+    pub foliage: Foliage,
     /// The ride's picture's shape (P126): the window's own, or the original's 4:3 with bars.
     pub picture: Picture,
     /// Each seat's session markers (P129), the Controls tab's Markers row, 1P's first: on, the d-pad
@@ -405,6 +408,9 @@ pub enum Departure {
     Fog,
     /// The plants' model-to-picture change (V55): the smooth one, or the original's.
     Plants,
+    /// The plants' leaves (V56): cut out, so a tree shows through another's gaps, or the original's
+    /// blended ones.
+    Foliage,
     /// The ride's picture (V24): the window's shape, or the original's 4:3.
     Picture,
     /// Every seat's session markers (P129): on, the d-pad the markers'; or off, the original's d-pad.
@@ -412,8 +418,15 @@ pub enum Departure {
 }
 
 impl Departure {
-    pub const ALL: [Departure; 6] =
-        [Departure::Controls, Departure::Cameras, Departure::Fog, Departure::Plants, Departure::Picture, Departure::Markers];
+    pub const ALL: [Departure; 7] = [
+        Departure::Controls,
+        Departure::Cameras,
+        Departure::Fog,
+        Departure::Plants,
+        Departure::Foliage,
+        Departure::Picture,
+        Departure::Markers,
+    ];
 
     /// Its row's name.
     pub fn label(self) -> &'static str {
@@ -422,6 +435,7 @@ impl Departure {
             Departure::Cameras => "Cameras",
             Departure::Fog => "Fog and Draw Distance",
             Departure::Plants => "Plant Detail",
+            Departure::Foliage => "Leaves",
             Departure::Picture => "Picture Shape",
             Departure::Markers => "Markers",
         }
@@ -434,6 +448,7 @@ impl Departure {
             Departure::Cameras => ["Further Out", "Original"],
             Departure::Fog => ["Whole Map", "Original Fog"],
             Departure::Plants => ["Smooth", "Original"],
+            Departure::Foliage => ["Crisp", "Original"],
             Departure::Picture => ["Fill the Window", "4:3"],
             Departure::Markers => ["On", "Off"],
         }
@@ -446,6 +461,7 @@ impl Departure {
             Departure::Cameras => "Every player's follow cameras. Further Out sits a little back and higher; Original is the disc's.",
             Departure::Fog => "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
             Departure::Plants => "How bushes and trees turn into flat pictures far off. Smooth dissolves them over a wide band; Original swaps them as the game did.",
+            Departure::Foliage => "How leaves lie over what is behind them. Crisp cuts each leaf out, so trees show through each other's gaps; Original blends them as the game did, and a near tree's soft edges can hide the trees behind it.",
             Departure::Picture => "The ride's shape on screen. Original is the television's 4:3, with bars at the sides.",
             Departure::Markers => "Every player's session markers on the d-pad. Off, the d-pad steers, leans and does tricks as in the original.",
         }
@@ -461,6 +477,7 @@ impl Menu {
             Departure::Cameras => s.cameras.iter().all(|v| *v == CameraView::ORIGINAL),
             Departure::Fog => s.graphics == Graphics::Original,
             Departure::Plants => s.plants == Lod::Original,
+            Departure::Foliage => s.foliage == Foliage::Original,
             Departure::Picture => s.picture == Picture::Television,
             Departure::Markers => s.markers.iter().all(|m| !*m),
         }
@@ -495,6 +512,7 @@ impl Menu {
             Departure::Cameras => s.cameras = [if original { CameraView::ORIGINAL } else { CameraView::DEFAULT }; SEATS_MAX],
             Departure::Fog => s.graphics = if original { Graphics::Original } else { Graphics::Full },
             Departure::Plants => s.plants = if original { Lod::Original } else { Lod::Smooth },
+            Departure::Foliage => s.foliage = if original { Foliage::Original } else { Foliage::Cutout },
             Departure::Picture => s.picture = if original { Picture::Television } else { Picture::Fill },
             Departure::Markers => s.markers = [!original; SEATS_MAX],
         }
@@ -917,6 +935,7 @@ impl Default for Settings {
             track_filter: String::new(),
             tricks: Tricks::default(),
             plants: Lod::default(),
+            foliage: Foliage::default(),
             picture: Picture::default(),
             markers: [true; SEATS_MAX],
         }
@@ -1025,6 +1044,7 @@ impl Settings {
                 }
                 "track_filter" => s.track_filter = clean_filter(v),
                 "plants" => s.plants = Lod::from_word(v).unwrap_or(s.plants),
+                "foliage" => s.foliage = Foliage::from_word(v).unwrap_or(s.foliage),
                 "picture" => s.picture = Picture::from_word(v).unwrap_or(s.picture),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
@@ -1165,8 +1185,9 @@ impl Settings {
     /// before them is written as it was.
     fn original_text(&self) -> String {
         let plants = if self.plants == Lod::default() { String::new() } else { format!("plants = {}\n", self.plants.word()) };
+        let foliage = if self.foliage == Foliage::default() { String::new() } else { format!("foliage = {}\n", self.foliage.word()) };
         let picture = if self.picture == Picture::default() { String::new() } else { format!("picture = {}\n", self.picture.word()) };
-        plants + &picture
+        plants + &foliage + &picture
     }
 
     /// A world's sky (MD9), only when it is not the default, so a file from before it is written as
