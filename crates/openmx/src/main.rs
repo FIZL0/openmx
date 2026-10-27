@@ -7711,6 +7711,14 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::Seat
         },
         _ => audio::PlaneCrash::default(),
     };
+    // The plane's wheels (P146): the measure's grounded flag rising, and the body's speed then.
+    let touchdown = match (seat.garage.up, seat.garage.plane.as_ref().and_then(|p| p.flight.as_ref())) {
+        (Kind::Biplane, Some(f)) if f.measure.grounded && !f.measure.was_grounded => {
+            let v = f.body.velocity;
+            Some(audio::length([v.x(), v.y(), v.z()]))
+        }
+        _ => None,
+    };
     audio::SeatFrame {
         hands: audio::Hands {
             grounded: r.air.on_ground,
@@ -7726,6 +7734,7 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::Seat
         landed_trick: seat.said.landed.is_some(),
         plane,
         crash,
+        touchdown,
         edge,
         body: audio::RiderBody::of(&seat.sim.rider),
         // Not riding — their own pause, a pad pulled out, Start's freeze — their sounds hold where

@@ -1864,3 +1864,128 @@ fn the_rider_cries_only_down_touching_and_fast() {
         assert_eq!(tick(&mut sound, None, b), None);
     }
 }
+
+// --- the plane's wheels (P146) ----------------------------------------------------------------------
+
+/// The disc's `Impact\plane_tire`, in seconds.
+const TIRE_SECONDS: f32 = 0.3238;
+
+/// `[biplaneTireTouchdown]` with a tone as long as the disc's: heard from 30 ft, gone at 150, level
+/// 40 at 60 mph and under, 100 at 150 mph and over.
+fn plane_touchdown() -> audio::MachineTouchdown {
+    audio::MachineTouchdown {
+        list: List { sounds: vec![(tone(8000.0, TIRE_SECONDS), false)] },
+        near: 30.0,
+        far: 150.0,
+        slow: (F(60.0) * F(audio::MPH)).to_f32(),
+        fast: (F(150.0) * F(audio::MPH)).to_f32(),
+        level: 40,
+        range: 60,
+    }
+}
+
+/// The original's touchdowns over `biplane.p2m2`'s playback (P146's capture, frames 10971..12688): the
+/// tick the plane's grounded flag rose, the body's velocity then, and the level its touchdown sound
+/// was given that tick. The crash's own tick (a wheel in it), a bounce while wrecked, the put-back,
+/// a landing, and the second put-back.
+const PLANE_TOUCHDOWNS: [(u32, [f32; 3], i32); 5] = [
+    (11665, [-30.123226165771484, -47.68083190917969, -75.50785827636719], 42),
+    (11739, [-10.333086013793945, 2.5029561519622803, -52.51327133178711], 40),
+    (11748, [0.002124964026734233, -0.8269296884536743, -0.05980555713176727], 40),
+    (12465, [134.13319396972656, -10.561775207519531, 22.994077682495117], 62),
+    (12650, [0.0, -0.2926926910877228, 0.0], 40),
+];
+
+/// The emitter's speeds as the capture read them: `60 × 1.46666` and `150 × 1.46666` in single
+/// precision.
+const TIRE_SPEEDS: (f32, f32) = (87.99959564208984, 219.99899291992188);
+
+fn touchdown_tick(frame: u32, at: [f32; 3]) -> audio::SeatFrame {
+    let v = PLANE_TOUCHDOWNS.iter().find(|t| t.0 == frame).map(|t| t.1);
+    audio::SeatFrame { plane: Some((0.0, at)), touchdown: v.map(audio::length), ..audio::SeatFrame::default() }
+}
+
+/// Replays 11600..12700 through the sound, a tick's worth of the mixer after each, and returns each
+/// touchdown voice started: its tick, its level, and its seat.
+fn replay_touchdowns(s: &mut audio::Sound, frames: impl Fn(u32) -> Vec<audio::SeatFrame>) -> Vec<(u32, i32, usize)> {
+    let mut started = Vec::new();
+    let mut last = vec![None; s.seats.len()];
+    let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+    for frame in 11600..12700 {
+        s.frame(&frames(frame), 1.0 / 30.0);
+        let m = &mut *s.mixer.lock().unwrap();
+        for (seat, ss) in s.seats.iter().enumerate() {
+            let id = ss.tires.voice();
+            if id.is_some() && id != last[seat] {
+                let level = m.gain_of(id.unwrap()).unwrap();
+                started.push((frame, (level * 100.0).round() as i32, seat));
+            }
+            last[seat] = id;
+        }
+        m.render(&mut out);
+    }
+    started
+}
+
+fn touchdown_sound(seats: u64) -> audio::Sound {
+    let mut s = audio::Sound::new(Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1)))));
+    s.plane_touchdown = plane_touchdown();
+    for i in 0..seats {
+        s.seats.push(audio::SeatSound::new(Arc::new(tone_bike()), i));
+    }
+    s
+}
+
+/// **A replayed biplane's wheels sound as the original's**: the capture's five touchdowns, fed tick
+/// by tick, start the touchdown on exactly those ticks at exactly the original's levels — the second
+/// put-back 9 ticks after a bounce, its sound started over — and nothing on any other tick.
+#[test]
+fn a_replayed_biplane_touchdown_sounds_as_the_original() {
+    let t = plane_touchdown();
+    assert_eq!((t.slow.to_bits(), t.fast.to_bits()), (TIRE_SPEEDS.0.to_bits(), TIRE_SPEEDS.1.to_bits()));
+    for (frame, v, level) in PLANE_TOUCHDOWNS {
+        assert_eq!(t.level_at(audio::length(v)), level, "at {frame}");
+    }
+    // The ends: held at 40 under 60 mph and at 100 over 150.
+    assert_eq!([0.0, 88.0, 154.0, 219.99, 220.0, 900.0].map(|s| t.level_at(s)), [40, 40, 70, 99, 100, 100]);
+    let mut s = touchdown_sound(1);
+    let started = replay_touchdowns(&mut s, |f| vec![touchdown_tick(f, [100.0, 0.0, 100.0])]);
+    let want: Vec<(u32, i32, usize)> = PLANE_TOUCHDOWNS.iter().map(|t| (t.0, t.2, 0)).collect();
+    assert_eq!(started, want);
+    // The bounce's clip outlasts the 9 ticks to the put-back: that one was started over.
+    assert!(9.0 / 30.0 < TIRE_SECONDS);
+    assert_eq!(s.mixer.lock().unwrap().voices(), 0, "a voice left over");
+}
+
+/// **In a split, each plane's own**: the touching-down seat sounds on its ticks, the one flying on
+/// never; a bike's frame has no plane wheels; and a pause hushes it.
+#[test]
+fn a_split_touches_down_for_its_own_plane() {
+    let mut s = touchdown_sound(2);
+    let started = replay_touchdowns(&mut s, |f| vec![audio::SeatFrame { plane: Some((0.0, [3000.0, 0.0, 0.0])), ..Default::default() }, touchdown_tick(f, [0.0; 3])]);
+    assert_eq!(started.iter().map(|t| (t.0, t.2)).collect::<Vec<_>>(), PLANE_TOUCHDOWNS.map(|t| (t.0, 1)));
+    let mut s = touchdown_sound(1);
+    s.frame(&[audio::SeatFrame { touchdown: Some(200.0), ..Default::default() }], 1.0 / 30.0);
+    assert_eq!(s.seats[0].tires.voice(), None, "a bike's frame");
+    s.frame(&[touchdown_tick(12465, [0.0; 3])], 1.0 / 30.0);
+    let first = s.seats[0].tires.voice().expect("the landing");
+    s.quiet();
+    assert!(!s.mixer.lock().unwrap().playing(first));
+    assert_eq!(s.seats[0].tires.voice(), None);
+}
+
+/// The disc's `[biplaneTireParams]` and `[biplaneTireTouchdown]`: 30 ft to 150, 60 mph to 150 at
+/// levels 40 to 100, and one clip played once, `Impact\plane_tire`.
+#[test]
+fn the_plane_touchdown_is_the_discs() {
+    let Some(d) = disc() else { return };
+    let mut lib = audio::Library::open(d).unwrap();
+    let t = audio::Reading { lib: &mut lib }.plane_touchdown("machine.res");
+    assert_eq!((t.near, t.far, t.level, t.range), (30.0, 150.0, 40, 60));
+    assert_eq!((t.slow.to_bits(), t.fast.to_bits()), (TIRE_SPEEDS.0.to_bits(), TIRE_SPEEDS.1.to_bits()));
+    assert_eq!(t.list.sounds.len(), 1);
+    let (clip, looping) = &t.list.sounds[0];
+    assert!(!looping);
+    assert_eq!((clip.rate, clip.channels), (22050, 1));
+    assert!((clip.seconds() - TIRE_SECONDS).abs() < 0.001, "{} against {TIRE_SECONDS}", clip.seconds());
+}
