@@ -1445,6 +1445,9 @@ struct Args {
     /// position, heading, how upright, on the ground, wrecked — in the columns P15 measured the
     /// original's captures by, so both rides go through one script.
     trace_feel: bool,
+    /// `--seams`: on a world, walk every seam between its pieces (and the wrap's) a foot a step and
+    /// say what the ride's ground has on either side of each (MD47).
+    seams: bool,
     /// `--trace-air`: `--trace-feel`'s rides, but the line is the chassis' attitude — yaw, pitch and
     /// roll off the transform in degrees, the body's own angular velocity, which wheels touch, the
     /// crossup and the stick the bike is holding. P29's measuring stick for a bike that twists in the
@@ -2817,6 +2820,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
             }
             println!("{}", worlds::WorldMod::holes_line(&t));
+            let mut t = t;
+            if args.seams {
+                println!("{}", worlds::WorldMod::seams_line(&mut t));
+            }
             Some(Box::new(t))
         }
         None => None,
@@ -8699,6 +8706,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_gas: false,
         trace_stick: None,
         trace_feel: false,
+        seams: false,
         trace_air: false,
         phy: None,
         trace_at: None,
@@ -8958,6 +8966,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--trace-brake" => args.trace_brake = true,
             "--trace-gas" => args.trace_gas = true,
             "--trace-feel" => args.trace_feel = true,
+            "--seams" => args.seams = true,
             "--trace-camera" => args.trace_camera = true,
             "--trace-air" => args.trace_air = true,
             "--trace-switch" => {

@@ -531,6 +531,19 @@ impl WorldMod {
             holes.iter().take(4).map(|[x0, z0, x1, z1]| format!("x {:.1}..{:.1} z {:.1}..{:.1}", x0.0, x1.0, z0.0, z1.0)).collect();
         format!("world holes: {} inside, thrown within 150 feet of each: {}", holes.len(), first.join("; "))
     }
+
+    /// `--seams` (MD47): every seam walked a foot a step, a ray down an eighth of a foot to either
+    /// side ([`Tiled::seam_walk`]): how many rays found no ground and the first few, and the largest
+    /// step in height across a seam and where.
+    pub fn seams_line(tiled: &mut Tiled) -> String {
+        let w = tiled.seam_walk(F(1.0), F(0.125));
+        let first: Vec<String> = w.first_gaps.iter().take(4).map(|[x, z]| format!("{:.1},{:.1}", x.0, z.0)).collect();
+        let gaps = if w.gaps == 0 { "no gaps".to_string() } else { format!("{} gaps ({})", w.gaps, first.join("; ")) };
+        format!(
+            "world seams: {} edges, {} rays, {gaps}, {} places two pieces meet, {} of them a step over 3 inches, steepest step {:.3} ft at {:.1},{:.1} ({} | {}), {:.3} ft across the wrap",
+            w.seams, w.points, w.met, w.rough, w.steepest.0, w.steepest_at[0].0, w.steepest_at[1].0, w.steepest_between[0], w.steepest_between[1], w.wrap_steepest.0
+        )
+    }
 }
 
 /// The world's pieces on disk, as the simulation's [`Source`].

@@ -763,6 +763,100 @@ impl Tiled {
         }
         out
     }
+
+    /// **Walk every seam** (MD47): each piece's owned edges as [`Tile::local`] draws them, and on a
+    /// wrapped axis the world's own edge, a ray down every `step` feet along, `across` feet to either
+    /// side, through the ride's own query ([`World::ground`]) at the folded point. A side with no
+    /// ground is a gap a rider drops into; the difference between the two sides' heights is the step
+    /// a wheel is thrown by, measured where two different pieces answer the two sides (a piece
+    /// hidden under an earlier one leaves its edge on that one's own ground). An outer edge that does not wrap is walked on its inner side alone.
+    pub fn seam_walk(&mut self, step: F, across: F) -> SeamWalk {
+        let extent = self.extent();
+        let mut lines: Vec<(usize, F, F, F, bool)> = Vec::new();
+        for t in &self.tiles {
+            let [sx, sz] = t.samples();
+            let keep = [t.keep[0], t.keep[1], t.keep[2].min(sx.saturating_sub(1)), t.keep[3].min(sz.saturating_sub(1))];
+            let [x0, z0, x1, z1] = keep.map(|k| F::from(k as i32) * t.spacing);
+            let (x0, z0, x1, z1) = (t.at[0] + x0, t.at[1] + z0, t.at[0] + x1, t.at[1] + z1);
+            lines.extend([(0, x0, z0, z1, false), (0, x1, z0, z1, false), (1, z0, x0, x1, false), (1, z1, x0, x1, false)]);
+        }
+        for axis in 0..2 {
+            if self.wrap[axis] {
+                lines.push((axis, F::ZERO, F::ZERO, extent[1 - axis], true));
+            }
+        }
+        lines.sort_by(|a, b| (a.0, a.1.0, a.2.0, a.3.0, a.4).partial_cmp(&(b.0, b.1.0, b.2.0, b.3.0, b.4)).unwrap());
+        lines.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3 && a.4 == b.4);
+        let mut walk = SeamWalk { seams: lines.len(), ..SeamWalk::default() };
+        for (axis, at, from, to, round) in lines {
+            let (from, to) = (from.max(F::ZERO), to.min(extent[1 - axis]));
+            let mut along = from + step / F(2.0);
+            while along < to {
+                let mut ys = [None; 2];
+                let mut by = [None; 2];
+                for (side, d) in [(0, F::ZERO - across), (1, across)] {
+                    let across_at = at + d;
+                    if !self.wrap[axis] && !(across_at >= F::ZERO && across_at < extent[axis]) {
+                        continue;
+                    }
+                    let (x, z) = if axis == 0 { (across_at, along) } else { (along, across_at) };
+                    let (x, z) = self.fold(x, z);
+                    by[side] = self.owner(x, z).map(|(i, _, _)| i);
+                    let (p, _) = self.ground(Vf::new(x.0, NO_GROUND, z.0, 1.0));
+                    walk.points += 1;
+                    if p.y() == NO_GROUND {
+                        walk.gaps += 1;
+                        if walk.first_gaps.len() < 8 {
+                            walk.first_gaps.push([x, z]);
+                        }
+                    } else {
+                        ys[side] = Some(F(p.y()));
+                    }
+                }
+                // One piece on both sides is that piece's own ground, whatever its slope: no seam.
+                if let ([Some(a), Some(b)], true) = (ys, by[0] != by[1]) {
+                    walk.met += 1;
+                    let d = (b - a).abs();
+                    if d > F(0.25) {
+                        walk.rough += 1;
+                    }
+                    if round {
+                        walk.wrap_steepest = walk.wrap_steepest.max(d);
+                    }
+                    if d > walk.steepest {
+                        walk.steepest = d;
+                        walk.steepest_at = if axis == 0 { [at, along] } else { [along, at] };
+                        walk.steepest_between = by.map(|i| i.map(|i| self.tiles[i].name.clone()).unwrap_or_default());
+                    }
+                }
+                along = along + step;
+            }
+        }
+        walk
+    }
+}
+
+/// What [`Tiled::seam_walk`] found.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SeamWalk {
+    /// The edges walked, after those two pieces share are counted once.
+    pub seams: usize,
+    /// Rays down, and those that found no ground.
+    pub points: usize,
+    pub gaps: usize,
+    /// The places along a seam where two different pieces answered either side.
+    pub met: usize,
+    /// Of those, the ones whose two sides' heights are more than a quarter of a foot apart.
+    pub rough: usize,
+    /// The first few rays with no ground, `[x, z]` in world feet.
+    pub first_gaps: Vec<[F; 2]>,
+    /// The largest difference in height between the two sides of a seam, in feet, and where.
+    pub steepest: F,
+    pub steepest_at: [F; 2],
+    /// The pieces on its two sides, by name: the one short of the seam first.
+    pub steepest_between: [String; 2],
+    /// The largest step across the wrap itself, where the world's far edge meets its near one.
+    pub wrap_steepest: F,
 }
 
 impl Tile {
