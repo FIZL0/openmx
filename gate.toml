@@ -23,6 +23,8 @@ tests = [
     "--test lobby::",
     "::(.*::)?two_builds_since_the_id_both_say_why$",
     "::(.*::)?a_60_fps_limit_sleeps_the_frame_and_leaves_the_ticks_alone$",
+    # binds 127.0.0.1:47613/47614 outright, so another slot running it at the same moment takes the port (S122, 10-27)
+    "::(.*::)?two_online_machines_start_their_seats_in_the_plane_on_a_race_track$",
 ]
 
 [alone]

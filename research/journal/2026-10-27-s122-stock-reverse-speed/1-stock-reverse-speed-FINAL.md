@@ -18,6 +18,10 @@ Task S122. 2026-10-27.
   `RIDERS_DIGEST`, `RIDERS_WIRE_DIGEST`. Unchanged: `FINAL_DUMP_LEAVES`, `EVERY_LEAF_HASH`,
   `RIDERS_WIRE_LEN`, `HUNDRED_TICKS` (lib.rs / hash.rs). So only values changed; the state type did
   not. No other test moved (`./kit check -- -p game-sim --no-fail-fast`: only `--test platforms` was red).
+- `gate.toml` `[flaky]`: added `two_online_machines_start_their_seats_in_the_plane_on_a_race_track`
+  (machines_everywhere). It binds 127.0.0.1:47613 outright, and four `./kit done` runs here went red only
+  on "Address already in use" while other slots' gates ran it. It passed alone (91/91). It now gets
+  the list's single lone rerun, like lobby's and udp's port tests.
 - Nothing was taken from opentennis: it has no bike `.phy`.
 
 ## What the original does
