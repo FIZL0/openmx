@@ -1739,6 +1739,8 @@ impl Front {
             match tune {
                 menu::Tune::Play(id) => self.sound.play_now(&id),
                 menu::Tune::Skip => self.sound.skip(),
+                menu::Tune::Back => self.sound.back(),
+                menu::Tune::Hold(on) => self.sound.hold(on),
             }
         }
     }
@@ -5325,6 +5327,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             escape = esc;
             front.menu.music_now = front.sound.now();
+            front.menu.music_held = front.sound.held();
             // In a ride the menu's players are the ride's seats, each on its own pad seat.
             front.menu.keys_seat = pad_seats.as_ref().and_then(|s| (0..world.seats.len()).find(|&i| s.on_keys(args.pad_seat(i))));
             let paused: Vec<bool> = (0..world.seats.len()).map(|i| front.menu.paused(i)).collect();
@@ -5341,6 +5344,16 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             for &(d, p) in &idle_presses {
                 if act == Act::Stay {
                     act = front.menu.step_idle(d, p);
+                }
+            }
+            // A click on a pause's music player (P174), in the view that pause is drawn in.
+            if let Some(w) = window.as_ref() {
+                for &at in w.clicks() {
+                    let Some([x, y]) = cursor::to_frame(at, (w.width, w.height), (frame.width, frame.height), w.scale) else { continue };
+                    let views = front.menu.pause_views(&rects, world.seats.len());
+                    if let Some((v, r)) = views.into_iter().find(|(_, r)| x >= r.x as f32 && y >= r.y as f32 && x < (r.x + r.w) as f32 && y < (r.y + r.h) as f32) {
+                        front.menu.with_seat(v, |m| m.click([x - r.x as f32, y - r.y as f32], (r.w, r.h)));
+                    }
                 }
             }
             front.cue(false);

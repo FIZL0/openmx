@@ -45,6 +45,9 @@ const REPEAT_MS: u32 = 2;
 /// Event codes. The window selects four masks' worth of these.
 const KEY_PRESS: u8 = 2;
 const KEY_RELEASE: u8 = 3;
+const BUTTON_PRESS: u8 = 4;
+/// A button event's detail for the mouse's left button.
+const LEFT_BUTTON: u8 = 1;
 const FOCUS_IN: u8 = 9;
 const FOCUS_OUT: u8 = 10;
 /// A focus event's detail when it is only the pointer's window that the focus passes through.
@@ -62,8 +65,9 @@ const CW_EVENT_MASK: u32 = 0x0000_0800;
 /// away, and being given a new size (`ConfigureNotify`) — and its focus coming and going (P167).
 /// And its properties changing (P165), which says nothing the shell wants but the server's time:
 /// the title the window sets as it opens is the first, so the keys' timestamps are on the shell's
-/// clock from the first key on ([`Stamps`]).
-const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0002_0000 | 0x0020_0000 | 0x0040_0000;
+/// clock from the first key on ([`Stamps`]). And the mouse's buttons going down (P174), for the
+/// pause's music player.
+const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0002_0000 | 0x0020_0000 | 0x0040_0000;
 /// `ChangeWindowAttributes`' value mask for the cursor, and `CreateGC`'s for the foreground.
 const CW_CURSOR: u32 = 0x0000_4000;
 const GC_FOREGROUND: u32 = 0x0000_0004;
@@ -193,6 +197,8 @@ pub struct Window {
     closed: bool,
     /// Whether the window has the keyboard's focus, as the last focus event said (P167).
     focused: bool,
+    /// Where the mouse's left button went down in the last poll, in window pixels (P174).
+    clicks: Vec<(i32, i32)>,
     /// The blank cursor the window wears while the cursor is hidden, once made.
     blank: Option<u32>,
     /// Requests being assembled, likewise.
@@ -232,6 +238,7 @@ impl Window {
             key_moments: Vec::new(),
             closed: false,
             focused: true,
+            clicks: Vec::new(),
             blank: None,
             out: Vec::new(),
         };
@@ -450,6 +457,7 @@ impl Window {
     pub fn poll(&mut self) {
         self.keys.tapped = [false; KEYCODES];
         self.keys.events.clear();
+        self.clicks.clear();
         let now = shell_us();
         let mut event = [0u8; 32];
         loop {
@@ -467,6 +475,11 @@ impl Window {
         // smallest gap before their own are put on it.
         let unwrapped: Vec<(i64, u8, bool)> = self.keys.events.iter().map(|&(ms, code, down)| (self.stamps.note(ms, now), code, down)).collect();
         self.key_moments = unwrapped.into_iter().map(|(at, code, down)| (self.stamps.shell(at, now), code, down)).collect();
+    }
+
+    /// Where the mouse's left button went down in the last poll, in window pixels (P174).
+    pub fn clicks(&self) -> &[(i32, i32)] {
+        &self.clicks
     }
 
     /// The keys that went down and up in the last poll, when they did on the shell's clock (P165),
@@ -487,6 +500,8 @@ impl Window {
                 );
             }
             KEY_PRESS | KEY_RELEASE => self.keys.saw(event),
+            // The event's x and y in the window, after the root's (P174).
+            BUTTON_PRESS if event[1] == LEFT_BUTTON => self.clicks.push((le16(event, 24) as i16 as i32, le16(event, 26) as i16 as i32)),
             // Only for its time, which is the server's clock now (P165).
             PROPERTY_NOTIFY => {
                 self.stamps.note(le32(event, 12), now);
@@ -876,6 +891,7 @@ mod tests {
             key_moments: Vec::new(),
             closed: false,
             focused: true,
+            clicks: Vec::new(),
             blank: None,
             out: Vec::new(),
         };
@@ -1100,5 +1116,23 @@ mod tests {
         assert!(!w.focused());
         w.handle(&focus(FOCUS_IN | 0x80, 0), 0);
         assert!(w.focused());
+    }
+
+    #[test]
+    fn a_left_button_press_is_a_click_where_it_went_down() {
+        let (mut w, _server) = window_on_a_pair(64, 48, 1);
+        let button = |detail: u8, x: i16, y: i16| {
+            let mut e = [0u8; 32];
+            (e[0], e[1]) = (BUTTON_PRESS, detail);
+            // the root's x and y first, which are not the window's
+            e[20..22].copy_from_slice(&900i16.to_le_bytes());
+            e[24..26].copy_from_slice(&x.to_le_bytes());
+            e[26..28].copy_from_slice(&y.to_le_bytes());
+            e
+        };
+        w.handle(&button(LEFT_BUTTON, 30, 12), 0);
+        w.handle(&button(3, 5, 5), 0);
+        w.handle(&button(LEFT_BUTTON, -2, 40), 0);
+        assert_eq!(w.clicks(), [(30, 12), (-2, 40)], "the left button only, at the window's x and y");
     }
 }

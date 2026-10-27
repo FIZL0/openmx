@@ -37,6 +37,10 @@ struct State {
     closed: bool,
     /// Whether the window has the keyboard (P167): until it says otherwise, it has.
     focused: bool,
+    /// Where the mouse is over the window, and where its left button went down since the last poll
+    /// (P174), in window pixels.
+    pointer: (f64, f64),
+    clicks: Vec<(i32, i32)>,
 }
 
 impl ApplicationHandler for State {
@@ -99,6 +103,10 @@ impl ApplicationHandler for State {
                 self.focused = false;
             }
             WindowEvent::Focused(true) => self.focused = true,
+            WindowEvent::CursorMoved { position, .. } => self.pointer = (position.x, position.y),
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
+                self.clicks.push((self.pointer.0.floor() as i32, self.pointer.1.floor() as i32));
+            }
             _ => {}
         }
     }
@@ -155,6 +163,8 @@ impl GpuWindow {
             resized: false,
             closed: false,
             focused: true,
+            pointer: (-1.0, -1.0),
+            clicks: Vec::new(),
         };
         // The window is made when the loop first resumes.
         for _ in 0..100 {
@@ -250,6 +260,7 @@ impl GpuWindow {
     pub fn poll(&mut self) {
         self.state.tapped = [false; KEYCODES];
         self.state.moments.clear();
+        self.state.clicks.clear();
         if let PumpStatus::Exit(_) = self.events.pump_app_events(Some(Duration::ZERO), &mut self.state) {
             self.state.closed = true;
         }
@@ -262,6 +273,11 @@ impl GpuWindow {
 
     pub fn focused(&self) -> bool {
         self.state.focused
+    }
+
+    /// Where the mouse's left button went down in the last poll, in window pixels (P174).
+    pub fn clicks(&self) -> &[(i32, i32)] {
+        &self.state.clicks
     }
 
     /// Draw the mouse cursor over the window or hide it (P167): winit's own switch, on X11 and

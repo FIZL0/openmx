@@ -1068,6 +1068,9 @@ impl Pick {
     }
 }
 
+/// How many songs back the pause's back control can go (P174).
+pub const HISTORY: usize = 20;
+
 /// **The music player**: every source's songs, the pick, and the song playing, resampled to the mix.
 pub struct Music {
     sources: Vec<Arc<dyn MusicSource>>,
@@ -1076,6 +1079,13 @@ pub struct Music {
     last: Option<String>,
     /// A song asked for by name (P56's pause), which plays next whatever the pick would choose.
     asked: Option<String>,
+    /// The songs started, the newest (the one playing) last, at most [`HISTORY`] (P174): what the
+    /// pause's back control goes back through.
+    played: Vec<String>,
+    /// The song [`Music::asked`] holds is one gone back to, which is not played again on top.
+    going_back: bool,
+    /// The pause's player has the music held (P174): the song stays where it is, silent.
+    held: bool,
     playing: Option<(String, Box<dyn Stream>)>,
     opening: Option<(String, Receiver<Result<Box<dyn Stream>, String>>)>,
     /// Open songs on the mixer's own thread (tests) rather than a helper's.
@@ -1094,6 +1104,9 @@ impl Music {
             dice: Dice::new(seed),
             last: None,
             asked: None,
+            played: Vec::new(),
+            going_back: false,
+            held: false,
             playing: None,
             opening: None,
             wait: false,
@@ -1141,6 +1154,34 @@ impl Music {
     pub fn next(&mut self) {
         self.playing = None;
         self.opening = None;
+    }
+
+    /// Back to the song before the one playing (P174), and on from it as the pick says; with none
+    /// before it, the one playing from its start. Whether there was a song to go to.
+    pub fn back(&mut self) -> bool {
+        if self.played.len() >= 2 {
+            self.played.pop();
+        }
+        let Some(id) = self.played.last().cloned() else { return false };
+        self.asked = Some(id);
+        self.going_back = true;
+        self.next();
+        true
+    }
+
+    /// The songs started, oldest first, the one playing last (P174).
+    #[allow(dead_code)]
+    pub fn played(&self) -> &[String] {
+        &self.played
+    }
+
+    /// Hold the music where it is, or let it go on (P174's pause/play).
+    pub fn hold(&mut self, on: bool) {
+        self.held = on;
+    }
+
+    pub fn held(&self) -> bool {
+        self.held
     }
 
     /// Play `id` now, and then go on as the pick says (P56): under Shuffle or In Order the song after
@@ -1213,6 +1254,12 @@ impl Music {
             return;
         };
         self.last = Some(id.clone());
+        if !std::mem::take(&mut self.going_back) {
+            self.played.push(id.clone());
+            if self.played.len() > HISTORY {
+                self.played.remove(0);
+            }
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let want = id.clone();
         if self.wait {
@@ -1231,7 +1278,7 @@ impl Music {
     /// Add the music into a mix of `acc.len() / 2` frames.
     pub fn mix(&mut self, acc: &mut [f32], volume: f32) {
         self.tend();
-        if volume <= 0.0 {
+        if volume <= 0.0 || self.held {
             return;
         }
         let Some((_, stream)) = self.playing.as_mut() else { return };
@@ -2882,18 +2929,40 @@ impl Speakers {
         &self.mixer
     }
 
-    /// Play a song now (the pause's song row, P56).
+    /// Play a song now (the pause's song row, P56), the music held or not (P174).
     pub fn play_now(&self, id: &str) {
         if let Ok(mut m) = self.mixer.lock() {
+            m.music.hold(false);
             m.music.play_now(id);
         }
     }
 
-    /// On to the next song (the pause's Skip Song).
+    /// On to the next song (the pause's Skip Song), playing if it was held (P174).
     pub fn skip(&self) {
         if let Ok(mut m) = self.mixer.lock() {
+            m.music.hold(false);
             m.music.next();
         }
+    }
+
+    /// Back to the song before (P174's pause player), playing if it was held.
+    pub fn back(&self) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.music.hold(false);
+            m.music.back();
+        }
+    }
+
+    /// Hold the music where it is, or let it play on (P174's pause player).
+    pub fn hold(&self, on: bool) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.music.hold(on);
+        }
+    }
+
+    /// Whether the music is held.
+    pub fn held(&self) -> bool {
+        self.mixer.lock().is_ok_and(|m| m.music.held())
     }
 
     /// The song playing, by id.
