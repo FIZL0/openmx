@@ -1129,14 +1129,19 @@ fn what_the_pad_sets_is_what_the_file_says() {
     assert_eq!(m.page()[m.cursor(Screen::Garage)].value, "Mx");
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
-    // The HUD off (Display: the row's other choice since P170), wrecks off (Ride).
+    // The HUD off (Display: the row's other choice since P170), wrecks off (Ride's Game Modifiers
+    // since P175).
     settings_at(&mut m, &mut r, "Display");
     down_to(&mut m, &mut r, menu::Key::Hud);
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::L1);
+    down_to(&mut m, &mut r, menu::Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
     down_to(&mut m, &mut r, menu::Key::Wrecks);
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Settings));
     tab_to(&mut m, &mut r, "Controls");
     // 1P's bike and biplane controls are rows of their own, each round either way (P50, P81): the
     // bike's left from New wraps to the original's last preset.
@@ -2566,7 +2571,7 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     let rows = m.page();
-    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 1 + 4, "{rows:?}");
+    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 3 + 1 + 4, "{rows:?}");
     assert_eq!(rows.last().unwrap().label, "Reset to Original");
     assert!(rows.iter().filter(|r| r.world).all(|r| !matches!(r.key, Key::Knob(k) if k.per_seat())));
 
@@ -2935,21 +2940,27 @@ fn a_guests_page_changes_only_its_own_seat_and_not_the_world() {
     assert!(m.take_mods_all().is_empty());
 }
 
-/// P138: the Ride tab's Air Wrecks row, under Wrecks, turns the airborne wrecks off and on, is
-/// written to the file only when off and read back after a restart; it is dimmed while Wrecks are
-/// off, held in the pause of a ride the shell keeps it on, and Original mode puts it back on.
+/// P138: the Air Wrecks row, under Wrecks, turns the airborne wrecks off and on, is written to the
+/// file only when off and read back after a restart; it is dimmed while Wrecks are off, held in the
+/// pause of a ride the shell keeps it on, and Original mode puts it back on. Since P175 both rows are
+/// the Game Modifiers page's, the world's, and no longer the Ride tab's.
 #[test]
 fn the_air_wrecks_row_toggles_and_survives_a_restart() {
     use menu::Key;
     let (mut m, mut r) = fresh();
     assert!(m.settings.air_wrecks, "on is the default, the original's");
     settings_at(&mut m, &mut r, "Ride");
+    assert!(!m.page().iter().any(|r| matches!(r.key, Key::Wrecks | Key::AirWrecks)), "the Ride tab keeps no wrecks rows");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
     down_to(&mut m, &mut r, Key::AirWrecks);
     let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::AirWrecks).unwrap();
     let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
     let at = keys.iter().position(|k| *k == Key::AirWrecks).unwrap();
     assert_eq!(keys[at - 1], Key::Wrecks, "Air Wrecks sits under Wrecks: {keys:?}");
     assert_eq!(row(&m).value, "On");
+    assert!(row(&m).world, "one Air Wrecks for every player");
     tap(&mut m, &mut r, Control::Right);
     assert!(!m.settings.air_wrecks);
     assert_eq!(row(&m).value, "Off");
@@ -2982,6 +2993,8 @@ fn the_air_wrecks_row_toggles_and_survives_a_restart() {
     tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
     tap(&mut m, &mut r, Control::Cross);
     tab_to(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
     down_to(&mut m, &mut r, Key::AirWrecks);
     assert!(row(&m).note.unwrap_or_default().contains("when the pause closes"));
     let held = "Online the room's Air Wrecks holds for the ride";
@@ -2997,6 +3010,69 @@ fn the_air_wrecks_row_toggles_and_survives_a_restart() {
     m.set_original(true);
     assert!(m.settings.air_wrecks);
     assert_eq!(m.original(), menu::Original::On);
+}
+
+/// P175: Wrecks and Air Wrecks on the Game Modifiers page count as its changes on the Ride tab's
+/// row, are the host's alone, go back on with the host's All Players Reset to Original (not with one
+/// player's), stay out of saved presets, and settings.txt's old words still read.
+#[test]
+fn wrecks_are_game_modifiers() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    let count = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Modifiers).unwrap().value;
+    m.settings.wrecks = false;
+    assert_eq!(count(&m), "1 Changed");
+    m.settings.air_wrecks = false;
+    assert_eq!(count(&m), "2 Changed");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    let row = |m: &Menu, k: Key| m.page().into_iter().find(|r| r.key == k).unwrap();
+    let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
+    let at = keys.iter().position(|k| *k == Key::Wrecks).unwrap();
+    assert_eq!(keys[at + 1], Key::AirWrecks, "{keys:?}");
+    assert!(matches!(keys[at - 2], Key::Knob(_)) && keys[at - 1] == Key::Heading, "after the modifiers, under a heading: {keys:?}");
+    assert!(row(&m, Key::Wrecks).world);
+
+    // A preset saved now and loaded later leaves the wrecks as they are.
+    let saved = m.settings.modifiers;
+    m.settings.wrecks = true;
+    m.settings.air_wrecks = true;
+    m.settings.presets.push(("p".into(), saved));
+    down_to(&mut m, &mut r, Key::LoadPreset);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.wrecks && m.settings.air_wrecks, "presets do not carry the wrecks");
+
+    // One player's reset leaves the world's wrecks; All Players' puts them back on.
+    m.settings.wrecks = false;
+    m.settings.air_wrecks = false;
+    down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.mods_whose(), "2P");
+    down_to(&mut m, &mut r, Key::ResetMods);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(!m.settings.wrecks && !m.settings.air_wrecks, "2P's reset moved the world's wrecks");
+    down_to(&mut m, &mut r, Key::Player);
+    tap_until(&mut m, &mut r, Control::Left, |m| m.mods_whose() == "All");
+    down_to(&mut m, &mut r, Key::ResetMods);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.wrecks && m.settings.air_wrecks);
+
+    // Not the host's page (an online guest's pause): the rows are held.
+    m.guest = true;
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
+    tap(&mut m, &mut r, Control::Cross);
+    tab_to(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.mods_own(), Some(0));
+    assert_eq!(row(&m, Key::Wrecks).off.as_deref(), Some("The world's: only the host sets it."));
+    assert_eq!(row(&m, Key::AirWrecks).off.as_deref(), Some("The world's: only the host sets it."));
+
+    // settings.txt's words are the old ones, and a file from before reads.
+    let old = Settings::parse("wrecks = off\nair_wrecks = off\n");
+    assert!(!old.wrecks && !old.air_wrecks);
 }
 
 // ---- the pause's Game Audio Options (P56) -----------------------------------------------------------
@@ -3597,7 +3673,7 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera", "Original"]);
     tab_to(&mut m, &mut r, "Ride");
     // Controls has no Player row with one seat (P81); Graphics opens past its World heading.
-    let first = [Key::Wrecks, Key::Hud, Key::DrawDistance, Key::Mix, Key::BikeLayout, Key::Player, Key::Original];
+    let first = [Key::Bays, Key::Hud, Key::DrawDistance, Key::Mix, Key::BikeLayout, Key::Player, Key::Original];
     let here = |m: &Menu, s: Screen| (m.tab(s), m.page()[m.cursor(s)].key);
     for (i, key) in first.iter().enumerate() {
         assert_eq!(here(&m, Screen::Settings), (i, *key));
@@ -3605,7 +3681,7 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
         tap(&mut m, &mut r, Control::Down);
         tap(&mut m, &mut r, Control::R1);
     }
-    assert_eq!(here(&m, Screen::Settings), (0, Key::Wrecks), "R1 from Original is Ride");
+    assert_eq!(here(&m, Screen::Settings), (0, Key::Bays), "R1 from Original is Ride");
     tap(&mut m, &mut r, Control::L1);
     assert_eq!(here(&m, Screen::Settings), (6, Key::Original), "L1 from Ride is Original");
     for i in (0..6).rev() {
