@@ -7687,6 +7687,13 @@ const S67_RUN2: &str = "s67/run2";
 /// [`S67_RUN2`]'s save states, as [`S67_STATES`].
 const S67_RUN2_STATES: [(u64, u64); 2] = [(2750, 2751), (2751, 2751)];
 
+/// S115's playback of the same recording over frames 1939..3485, with the save states taken on the
+/// nose-first drop's last two airborne ticks: its touchdown tick is run from the original's own flight.
+const S115_NOSE: &str = "s115/landings";
+
+/// [`S115_NOSE`]'s save states, as [`S67_STATES`].
+const S115_NOSE_STATES: [(u64, u64); 2] = [(3457, 3459), (3458, 3459)];
+
 /// Ticks past the touchdown each run is compared for.
 const S67_AFTER: u64 = 12;
 
@@ -7697,13 +7704,9 @@ const S67_AFTER: u64 = 12;
 /// two playbacks of the one recording already part in the last bits, the capture's rows are read at
 /// three phases of a frame, and the state is a few ticks of the port's own flight from the ground.
 /// Before S67's two fixes the big drop bounced back up by a foot and more; after them the worst
-/// landing here is 0.33°, 0.023 and 0.18.
+/// landing here is 0.33°, 0.023 and 0.18. The nose-first drop (3452) had a bound of its own until S115,
+/// at 2.69° and 2.36 in the velocity; with the fixes since it rides within 0.04°, 0.003 and 0.043.
 const S67_BOUND: [f32; 6] = [0.5, 0.05, 0.3, 0.01, 0.05, 0.01];
-
-/// The nose-first drop's bound (frame 3452's state): it lands front first at 48 a second straight
-/// down, and the one tick of that impact parts by 0.3 in the velocity, which takes the port into first
-/// gear two ticks before the original. Not found; see S67's journal.
-const S67_NOSE_FIRST_BOUND: [f32; 6] = [3.5, 0.5, 3.0, 0.05, 0.5, 0.07];
 
 impl SaveState {
     /// A RAM image at `at`, its rider found down whichever of the two list shapes the states in this
@@ -7954,7 +7957,7 @@ impl SaveState {
 fn each_captured_landing_rides_like_the_original() {
     let dir = private_dir("capture");
     let mut compared = 0;
-    for (name, states) in [(S67_LANDINGS, &S67_STATES[..]), (S67_RUN2, &S67_RUN2_STATES[..])] {
+    for (name, states) in [(S67_LANDINGS, &S67_STATES[..]), (S67_RUN2, &S67_RUN2_STATES[..]), (S115_NOSE, &S115_NOSE_STATES[..])] {
     let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
         println!("no {name}.csv — S67's journal says how it is recorded");
         continue;
@@ -8028,11 +8031,10 @@ fn each_captured_landing_rides_like_the_original() {
             let worst = worst_from(&ports, &origs, touchdown);
             println!("  {name} {saved}: worst from the touchdown on: {:.2} deg, cofg {:.3}, vel {:.3}, comp {:.3}, \
                       drawn {:.4}, aim {:.4}", worst[0], worst[1], worst[2], worst[3], worst[4], worst[5]);
-            let bound = if name == S67_LANDINGS && asked == 3452 { S67_NOSE_FIRST_BOUND } else { S67_BOUND };
             assert!(
-                (0..6).all(|i| worst[i] <= bound[i]),
+                (0..6).all(|i| worst[i] <= S67_BOUND[i]),
                 "{name} {saved}: the landing rides {worst:?} from the original's (deg, cofg, vel, comp, drawn, aim), \
-                 past {bound:?}",
+                 past {S67_BOUND:?}",
             );
             assert!(origs.last().is_some_and(|&(c, _)| c == touchdown + S67_AFTER), "{name} {saved}: rows to the end");
             compared += 1;
@@ -8098,6 +8100,97 @@ fn the_vehicle_update_leaves_the_chassis_its_nodes_quaternion() {
         ran += 1;
     }
     println!("{ran} states updated");
+}
+
+/// **The nose-first drop's touchdown tick is the original's to the bit** (S115): from the RAM images
+/// on its last two airborne ticks, the original's whole vehicle update runs one tick in the oracle,
+/// and the port, seeded from the same image as [`each_captured_landing_rides_like_the_original`] does
+/// and given the pad that tick read, runs its one tick beside it. The front touches down at 48 a
+/// second straight down on the 3458 image's tick, the rear still in the air: S67's touchdown that
+/// parted by 0.3 in the velocity. Chassis attitude, centre, velocity and spin, the node's rows and
+/// origin, and each wheel's compression and spring force, held bit for bit (before S115's
+/// `orientation_point` the centre and the origin were an ulp off in z on both ticks). Skipped with a
+/// line where the images are not here.
+#[test]
+fn the_nose_first_touchdown_tick_is_the_originals() {
+    use ps2_oracle::{Ee, addr};
+    let dir = private_dir("capture");
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{S115_NOSE}.csv"))) else {
+        println!("no {S115_NOSE}.csv — S115's journal says how it is recorded");
+        return;
+    };
+    let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{S115_NOSE}.csv: {e}"));
+    let mut ran = 0;
+    in_the_world_of(&whole, |world, _, bike| {
+        let Some(Ridden { tables, mounts, .. }) = bike else {
+            println!("no Race 125 on this disc");
+            return;
+        };
+        let Some(phy) = Disc::open().and_then(|mut disc| the_class_named(&mut disc, &tables, S67_PHY)) else {
+            println!("no {S67_PHY} on this disc");
+            return;
+        };
+        for &(asked, _) in &S115_NOSE_STATES {
+            let at = dir.join(format!("{S115_NOSE}-{asked}.ee.bin"));
+            let (Some(st), Ok(mut ee)) = (SaveState::open_either(&at), Ee::from_ram(&at)) else {
+                println!("no {}", at.display());
+                continue;
+            };
+            let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+            let cap = dense_run(&whole, saved);
+            let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{S115_NOSE}.csv: {e}"));
+            let rows = rows_by_counter(&cap);
+            // The pad of the tick after the state, as the landing test finds it (S67's f−2).
+            let pad = tape.frames[rows[&(saved + 1)] - 2];
+            let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+            rider.sense.wrecks_enabled = false;
+            let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+            st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+            sim.frame(pad.dt(), &pad.reports, world);
+            let ride = &sim.rider.ride;
+
+            ee.set(28, u64::from(addr("boot_gp").unwrap()));
+            let (ch, front, rear) = (st.rider_at(0x7a4).unwrap(), st.rider_at(0x7b0).unwrap(), st.rider_at(0x7b4).unwrap());
+            ee.call(addr("bike_vehicle_update").unwrap(), &[u64::from(st.rider)], &[pad.dt().0], 500_000_000);
+            let v = |o: u32| [0, 4, 8, 12].map(|k| ee.u32_at(o + k));
+            let bits = |v: Vf| v.0.map(f32::to_bits);
+            let tf = ee.u32_at(ch + 0x254);
+            let lanes = [
+                ("quat", v(ch + 0x1a0), bits(ride.chassis.quat)),
+                ("cofg", v(ch + 0x60), bits(ride.chassis.cofg_world)),
+                ("vel", v(ch + 0x260), bits(ride.chassis.vel)),
+                ("spin", v(ch + 0x280), bits(ride.chassis.world_ang_vel)),
+                ("node right", v(tf + 0x80), bits(ride.transform().0[0])),
+                ("node up", v(tf + 0x90), bits(ride.transform().0[1])),
+                ("node forward", v(tf + 0xa0), bits(ride.transform().0[2])),
+                ("node origin", v(tf + 0xb0), bits(ride.transform().0[3])),
+            ];
+            let wheels = [
+                ("front comp", ee.u32_at(front + 0xf0), ride.front.w.compression.0.to_bits()),
+                ("front spring force", ee.u32_at(front + 0xf8), ride.front.w.spring_force.0.to_bits()),
+                ("rear comp", ee.u32_at(rear + 0xf0), ride.rear.w.compression.0.to_bits()),
+                ("rear spring force", ee.u32_at(rear + 0xf8), ride.rear.w.spring_force.0.to_bits()),
+            ];
+            let f = |b: [u32; 4]| b.map(f32::from_bits);
+            println!("{S115_NOSE} {saved} -> {}:", saved + 1);
+            for (name, orig, port) in lanes {
+                println!("  {name:>18} orig {:?} port {:?}", f(orig), f(port));
+            }
+            for (name, orig, port) in wheels {
+                println!("  {name:>18} orig {} port {}", f32::from_bits(orig), f32::from_bits(port));
+            }
+            let ulps = |a: u32, b: u32| (a as i32).wrapping_sub(b as i32).unsigned_abs();
+            let parted: Vec<String> = lanes
+                .iter()
+                .filter(|(_, o, p)| o != p)
+                .map(|(name, o, p)| format!("{name} by {:?} ulp", [0, 1, 2, 3].map(|i| ulps(o[i], p[i]))))
+                .chain(wheels.iter().filter(|(_, o, p)| o != p).map(|(name, o, p)| format!("{name} by {} ulp", ulps(*o, *p))))
+                .collect();
+            assert!(parted.is_empty(), "{S115_NOSE} {saved}: the port's tick parts from the original's: {parted:?}");
+            ran += 1;
+        }
+    });
+    println!("{ran} touchdown ticks compared");
 }
 
 // --- S58: the tyres' slip, case by case ------------------------------------------------------------

@@ -1365,7 +1365,7 @@ fn answers(calls: &[chassis::Call], entry: &Mat4) -> chassis::Given {
     let before = Mat3::new(entry.0[0], entry.0[1], entry.0[2]);
     for call in calls {
         match *call {
-            chassis::Call::PointCofg(v) => g.cofg_world = math::transform_point(entry, v),
+            chassis::Call::PointCofg(v) => g.cofg_world = orientation_point(entry, v),
             chassis::Call::MatrixQuat => g.matrix_quat = math::mat4_to_quat(entry),
             chassis::Call::QuatDeriv(q, w) => g.quat_deriv = math::quat_deriv(q, w),
             chassis::Call::CorrectionQuat(axis, angle) => {
@@ -1417,6 +1417,18 @@ fn dot3(a: Vf, b: Vf) -> F {
 /// `v.xyz`'s length, through the same accumulator and the FPU's square root.
 fn length(v: Vf) -> F {
     dot3(v, v).sqrt()
+}
+
+/// A point out of the frame `m` describes into the world, as the transform's point call the
+/// integrator asks for the centre of gravity with: the origin into the accumulator first (`vaddax`
+/// against `vf0`'s zero `x`), then `vmaddax`, `vmadday` and `vmaddz` of rows 0, 1 and 2, `xyz` written
+/// and `w` the point's. Not [`math::transform_point`], which adds the origin last: the sums round in
+/// a different order and part by an ulp at a world coordinate of four thousand (S115).
+fn orientation_point(m: &Mat4, v: Vf) -> Vf {
+    let acc = m.0[3].add(Vf::new(0.0, 0.0, 0.0, 1.0).bc(Field::X));
+    let acc = Vf::madd(acc, m.0[0], v.bc(Field::X));
+    let acc = Vf::madd(acc, m.0[1], v.bc(Field::Y));
+    v.merge(Dest::XYZ, Vf::madd(acc, m.0[2], v.bc(Field::Z)))
 }
 
 /// A world *point* back into the frame `m` describes, which is what `transform_unpoint` does: the
