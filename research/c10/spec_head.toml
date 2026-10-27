@@ -1,0 +1,43 @@
+# 2p.toml — the user's 2p recording, both riders, every tick (C10). The human recording of record for
+# wrecks, collisions, ragdoll, rider-vs-rider, the trucks and the animations.
+#
+# Generated: `python3 -B research/c10/make_spec.py > watch/2p.toml` (edit the generator, not this file).
+# Played by research/c10/play_capture.sh (S93's recipe) on a kit copy whose PCSX2.ini has
+# `[Pad2] Type = DualShock2` and NominalScalar 0.05 (the recorder needs the time for ~17 KB a row; at
+# 0.25 it lost 36 ticks of 12,917; the capture of record ran at 0.05 with none lost). Edit the ini while
+# the copy is stopped: PCSX2 writes it on exit.
+#
+#   export WAYLAND_DISPLAY=wayland-1 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 QT_ACCESSIBILITY=1
+#   ./kit pcsx2 start
+#   ./kit pcsx2 with -- bash research/c10/play_capture.sh PID context/recordings/split/2p.p2m2 \
+#       127882 12917 context/capture/2p/2p.csv
+#
+# The tape's state holds frame_counter 127881. This state ticks at 60 Hz (dt 1/60) and the playback
+# reads one tape field a tick (research/c10/align.py), so the movie's 12,917 fields
+# are the ticks 127882..140798; PCSX2 pauses at its end.
+# crates/game-sim/tests/two_p.rs reads the capture.
+#
+# The list, measured in the 2p state's RAM (research/c10/peek.py): 0 and 1 the biplanes (type 1), 2 P2's
+# ridden vehicle (player +0x30 = 1), 3 P1's (player 0), 4 P1's bike actor, 5 P2's. Both are local
+# humans. Every rider's columns carry the type, player index and joint-count guards, so a row whose list
+# moved under it says so. Per rider (`p1_`/`p2_`):
+#
+#   * split.toml's vehicle, chassis, collision record (11 entries) and bike actor;
+#   * C6's air, backflip and trick-machine words (acceptance.toml);
+#   * each wheel's contact flag, owner and vehicle (+0x1f4: the path car it stands on, S136) and the
+#     car velocity it subtracts;
+#   * the rider body (bike actor - 0x400): its mode (rider_body_mode: 0 placed, 1 riding, 2 the wreck
+#     ragdoll, 3 table/hold, 4 the start line or a look-around), the ragdoll's flags, the motion clock
+#     and the machine (rider-joints.toml), the 22 posed joints and the 18 ragdoll parts' bodies
+#     (s56-ragdoll.toml).
+#
+# Then the six path cars by their fixed heap addresses (vtable at +8; three cabs and three trailers).
+
+[watch]
+name        = "2p"
+description = "the user's 2p recording: both riders, wrecks, contacts, bodies and the path cars"
+every       = 1
+frames      = 12917
+
+[setup]
+warmup = 0
