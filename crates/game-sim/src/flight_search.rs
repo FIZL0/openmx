@@ -573,6 +573,31 @@ pub fn refresh_flown(
     refill(&mut objects, &mut broad, search);
 }
 
+/// **The world the plane's search takes at `node`** (V96): [`World::wooded_near`] around the ray
+/// probe's reach, which a world of many tiles answers with the shapes near one square of it (MD28)
+/// rather than every tile's, so a tick's two broad phases ([`Scene::flown`], [`refresh_flown`]) do
+/// not grow with the world. The kept nearby list names collidables by their place in the set it was
+/// gathered in, so a probe that has come to another square's set has it forgotten and gathered again
+/// there. A world of one map hands its whole set at every square ([`World::near_set`] `None`), as
+/// before, and nothing is forgotten.
+///
+/// [`World::wooded_near`]: crate::world::World::wooded_near
+/// [`World::near_set`]: crate::world::World::near_set
+pub fn near_world<'w>(
+    world: &'w mut dyn crate::world::World,
+    rays: &Rays,
+    node: &Frame,
+    search: &mut broad_phase::Search,
+) -> (Option<Box<dyn crate::contact_search::Heightfield + 'w>>, Option<&'w Props>, Option<&'w Trees>) {
+    let (at, _) = reach(rays, &matrix(node));
+    let [x, y, z, _] = search.centre;
+    if search.built && world.near_set(at) != world.near_set(Vf::new(x.0, y.0, z.0, 1.0)) {
+        search.built = false;
+        search.nearby.found.clear();
+    }
+    world.wooded_near(at)
+}
+
 /// The gather, after forgetting a list that names more collidables than this world has (it was
 /// gathered in another one).
 fn refill(objects: &mut [Collidable], broad: &mut Broad, search: &mut broad_phase::Search) {

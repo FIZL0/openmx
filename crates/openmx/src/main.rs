@@ -1519,6 +1519,9 @@ struct Args {
     /// `--trace-at X,Z,DEG`: put the bike on the ground at `x, z` facing `DEG` instead of on the start
     /// line.
     trace_at: Option<(f32, f32, f32)>,
+    /// `--fly-at X,Z,DEG,FT` (V96): the first seat's plane put in the air `FT` feet over the ground
+    /// at `X,Z`, heading `DEG`, already flying — a high flight to measure without the climb.
+    fly_at: Option<[f32; 4]>,
     /// `--world-ground all`: build a world's whole ground before the first frame instead of the
     /// pieces in reach of the start (MD17).
     world_ground_all: bool,
@@ -4924,6 +4927,15 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // its rider, so each rider meets them where its own state has them.
     seats.iter_mut().for_each(|s| s.sim.traffic = cars.clone());
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
+    // `--fly-at` (V96): the first seat's plane flying high over the world from the first tick, at
+    // the biplane's cruise.
+    if let Some([x, z, deg, ft]) = args.fly_at {
+        let (on, _) = sim_world::World::ground(&mut world.place, Vf::new(x, 1.0e4, z, 1.0));
+        let h = deg.to_radians();
+        let seat = &mut world.seats[0];
+        let tables = Arc::clone(&seat.sim.tables);
+        seat.garage.launch_plane(Vf::new(x, on.y().max(0.0) + ft, z, 1.0), Vf::new(h.sin(), 0.0, h.cos(), 0.0), 120.0, &tables.ride.acos);
+    }
     // A played tape rides Air Wrecks as it was made (P138): on, the original's, until the tape says
     // otherwise, whatever the Settings screen or the command line say.
     if head.is_some() {
@@ -8855,6 +8867,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_air: false,
         phy: None,
         trace_at: None,
+        fly_at: None,
         world_ground_all: false,
         world_reach: None,
         world_chunks: None,
@@ -9140,6 +9153,15 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let [x, z, deg] = v[..] else { return Err("--trace-at: x,z,degrees".into()) };
                 args.trace_at = Some((x, z, deg));
             }
+            "--fly-at" => {
+                let v: Vec<f32> = next("x,z,degrees,feet")?
+                    .split(',')
+                    .map(|w| w.trim().parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| "--fly-at: x,z,degrees,feet")?;
+                let [x, z, deg, ft] = v[..] else { return Err("--fly-at: x,z,degrees,feet".into()) };
+                args.fly_at = Some([x, z, deg, ft]);
+            }
             "--vehicle" => args.vehicle = Kind::parse(&next("a vehicle, bike or biplane")?)?,
             "--players" => {
                 let n = next("a number of players, 1 to 8")?;
@@ -9408,6 +9430,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      the next, and adds the backflip's columns to --trace-feel's line;\n\
                      --trace-camera prints each view's camera a frame (preset, distance, pitch,\n\
                      field of view, eye and look-at) beside a ride;\n\
+                     --fly-at X,Z,DEG,FT starts the plane flying FT feet over the ground there;\n\
                      --trace-at X,Z,DEG starts the bike there instead of the start line, and\n\
                      --phy NAME rides the bike archive's NAME (pro125a.phy) instead of Race125P.phy,\n\
                      --set WORD the bike's own file of that set (race250a, pro500p) on its class,\n\

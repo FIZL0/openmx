@@ -54,6 +54,8 @@ pub struct Dressed {
     pub posed: Vec<Option<game_render::mat::M4>>,
     /// Each car's wheels (V82), `None` for a car with none, for [`Dressed::wheel_poses`].
     pub wheels: Vec<Option<toy::Wheels>>,
+    /// Each car's ground at its warm-up steps, kept from picture to picture (V96, [`toy::Path::pose_kept`]).
+    pub grounds: Vec<toy::Kept>,
 }
 
 /// How near a camera a world's car is posed every picture (MD28). A car is posed by replaying
@@ -81,8 +83,9 @@ impl Dressed {
     ) -> Vec<(String, game_render::mat::M4)> {
         let shift = self.shift;
         self.posed.resize(self.traffic.cars.len(), None);
+        self.grounds.resize_with(self.traffic.cars.len(), Default::default);
         let mut out = Vec::with_capacity(self.traffic.cars.len());
-        for (i, ((car, path), posed)) in self.traffic.cars.iter().zip(&mut self.posed).enumerate() {
+        for (i, (((car, path), posed), kept)) in self.traffic.cars.iter().zip(&mut self.posed).zip(&mut self.grounds).enumerate() {
             let near = |m: &game_render::mat::M4| {
                 let at = [m.0[3][0], m.0[3][2]];
                 eyes.iter().any(|e| (at[0] - e[0]).hypot(at[1] - e[1]) < CARS_NEAR)
@@ -93,7 +96,7 @@ impl Dressed {
             };
             if due {
                 let at = toy::clock(elapsed, car.time_scale, path.last());
-                let mut m = path.pose(car, at, toy::SCENE_STEP * car.time_scale, &mut |p| ground(p, shift)).transform;
+                let mut m = path.pose_kept(car, at, toy::SCENE_STEP * car.time_scale, &mut |p| ground(p, shift), kept).transform;
                 m.0[3][0] += shift[0];
                 m.0[3][2] += shift[1];
                 *posed = Some(m);
@@ -362,7 +365,7 @@ pub fn take(
         .iter()
         .map(|(car, path)| toy::Wheels::new(&assets.models.get(&format!("{prefix}{}", car.stem()))?.model, car, path))
         .collect();
-    Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken, posed: Vec::new(), wheels }
+    Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken, posed: Vec::new(), wheels, grounds: Vec::new() }
 }
 
 /// A world's ground as the software renderer draws it (MD15): every piece within [`ground::REACH`]
