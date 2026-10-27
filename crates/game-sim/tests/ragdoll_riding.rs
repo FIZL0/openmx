@@ -1788,3 +1788,88 @@ fn the_wreck_enters_from_the_riding_bodies() {
     game_sim::wreck_sound::Emitter::retail().wreck(11, false, &mut rng);
     assert_eq!(rng.state(), rng_out, "the generator after the entry: the port drew {:?}, the original {:?}", draws(rng_in, rng.state(), 1000), draws(rng_in, rng_out, 1000));
 }
+
+
+// --- P152: Foot Dust while riding --------------------------------------------------------------------
+
+/// The flags the particle manager's ParticleCollisionConstraint entry reads off one bone collision:
+/// no contact 1, the ground 2, the scene 4, each on its own (both can be set).
+fn constraint_flags(c: &Contact) -> u32 {
+    u32::from(!c.ground && !c.scene) | if c.ground { 2 } else { 0 } | if c.scene { 4 } else { 0 }
+}
+
+/// **The riding feet raise the original's Foot Dust** (P152): the bike's `Foot Dust` entry
+/// (`AttachToParticleCollisionConstraints` 0x3, Disable NoContact|ObjectContact|Wrecking) emits at
+/// the riding body's bone collisions 0 and 1 when one touches only the ground, on a surface its zones
+/// draw (the road, surface 0, is `none` for Dust in `mxparticlezones.dat`). Each time it does, the
+/// original's manager writes the contact's point into the emitter's position, so P74's capture
+/// (`context/capture/p74/run.csv`, the same animandpump playback) shows the feeds as rows whose
+/// `e4_at` moved.
+///
+/// Stepping the port's riding actor from each of run1's rows, its feet touch on the same stretches:
+/// the standstill before the launch, the landings at 2204 and 2304, the slow rolls at 3011 and 3108,
+/// and nowhere else; the road at 2787..2889, where they touch too, is zone-off. The two captures'
+/// frame counters are not caught at the same point of the frame: a port tick's touch is the
+/// original's feed one or two labels on, so each side is held to the other within that.
+#[test]
+fn the_riding_feet_raise_the_originals_foot_dust() {
+    let Some(cap) = Capture::load("run1") else { return };
+    let Some(p74) = ctx("capture/p74/run.csv") else { return };
+    let text = std::fs::read_to_string(p74).expect("read P74's capture");
+    let mut lines = text.lines();
+    let cols: Vec<&str> = lines.next().expect("a header").split(',').collect();
+    let col = |name: &str| cols.iter().position(|c| *c == name).unwrap_or_else(|| panic!("no {name} in P74's capture"));
+    let (fc, at) = (col("frame_counter"), ["e4_at.x", "e4_at.y", "e4_at.z"].map(col));
+    let rows: Vec<(u32, [String; 3])> = lines
+        .map(|l| l.split(',').collect::<Vec<_>>())
+        .map(|r| (r[fc].parse().expect("a frame counter"), at.map(|k| r[k].to_string())))
+        .collect();
+    // The original fed Foot Dust on a row a single frame on whose emitter position moved.
+    let single: HashMap<u32, bool> = rows.windows(2).filter(|w| w[1].0 == w[0].0 + 1).map(|w| (w[1].0, w[1].1 != w[0].1)).collect();
+    let Some(mut ee) = state() else { return };
+    let foot_dust_disable = 1 | 4 | 8;
+    let mut ours: HashMap<u32, bool> = HashMap::new();
+    let mut zoned_off = 0;
+    for frame in START + 2.. {
+        if !cap.has(frame) {
+            break;
+        }
+        seed_bones(&mut ee, &cap, frame - 1);
+        lay_in(&mut ee, &cap, frame);
+        set_rng(&mut ee, cap.int(frame - 1, "rng_state"));
+        let mut port = None;
+        port_tick(&mut ee, &cap, frame, 0, None, Some(&mut port));
+        let port = port.expect("the port's actor");
+        // The surface each collision's ground query left, off the original's tick (the port's
+        // contacts carry none; the shell asks its own ground under the point).
+        let fed = (0..2).any(|i| {
+            let touches = foot_dust_disable & constraint_flags(&port.contacts[i]) == 0;
+            let surface = ee.u8_at(collision(&ee, i) + 0x3c);
+            zoned_off += usize::from(touches && surface == 0);
+            touches && surface != 0
+        });
+        ours.insert(frame, fed);
+    }
+    assert!(ours.len() >= 1200, "only {} ticks in run1", ours.len());
+    assert!(zoned_off > 0, "the road's zone-off never came up");
+    let mut wrong = Vec::new();
+    for (&frame, &fed) in &ours {
+        // Theirs a label or two on, where those rows are single frames.
+        let later: Vec<bool> = (1..=2).filter_map(|k| single.get(&(frame + k)).copied()).collect();
+        if fed && !later.is_empty() && !later.contains(&true) {
+            wrong.push(format!("{frame}: the port's feet raise dust, the original's not on the next two"));
+        }
+    }
+    for (&frame, &fed) in &single {
+        let earlier: Vec<bool> = (1..=2).filter_map(|k| ours.get(&(frame - k)).copied()).collect();
+        if fed && earlier.len() == 2 && !earlier.contains(&true) {
+            wrong.push(format!("{frame}: the original fed foot dust, the port's feet not on the two before"));
+        }
+    }
+    wrong.sort();
+    let touched = ours.values().filter(|&&f| f).count();
+    let theirs = single.iter().filter(|&(&f, &fed)| fed && ours.contains_key(&f)).count();
+    note(&format!("P152: the port's feet raise dust on {touched} ticks, the original fed it on {theirs} rows; {zoned_off} touches zoned off"));
+    assert!(touched >= 70 && theirs >= 70, "the port's feet on {touched} ticks, the original's feeds {theirs}");
+    assert!(wrong.is_empty(), "{} disagree:\n{}", wrong.len(), wrong.join("\n"));
+}

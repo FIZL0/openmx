@@ -586,7 +586,7 @@ pub enum Kind {
     /// second when they stop (P74: the bike's roost and chunks).
     Spray(SprayKeys),
     /// At each of the rider's collision spheres whose bit `mask` has (P74: the wreck's and the
-    /// feet's dust).
+    /// feet's dust; the feet's off the riding body too, P152).
     Constraint { mask: u32 },
 }
 
