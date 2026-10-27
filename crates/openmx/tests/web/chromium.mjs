@@ -1,5 +1,6 @@
 // The page in a real browser: serve web/, open it in headless chromium, pick the disc the way a user does, wait for
-// the frame, reload, and wait for it again without being asked for the disc (crates/openmx/tests/web.rs,
+// the frame, reload, press Ride on the menu the stored disc opens on (P181), and wait for it again without being asked
+// for the disc (crates/openmx/tests/web.rs,
 // `the_page_starts_in_a_browser`, which is ignored: it copies the whole disc into a scratch browser profile).
 //
 //   node chromium.mjs <web dir> <disc.iso> <scratch profile dir> [--no-opfs]
@@ -16,7 +17,7 @@ import { spawn } from 'node:child_process';
 const [webdir, iso, profile, flag] = process.argv.slice(2);
 const noOpfs = flag === '--no-opfs';
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.svg': 'image/svg+xml',
-  '.webmanifest': 'application/manifest+json' };
+  '.webmanifest': 'application/manifest+json', '.ttf': 'font/ttf' };
 const server = http.createServer((req, res) => {
   let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (p.endsWith('/')) p += 'index.html';
@@ -105,6 +106,8 @@ t0 = Date.now();
 // (marked first, so the old document's `started` is never read as the new one's)
 await evaluate("document.body.dataset.state = 'reloading'");
 await send('Page.reload');
+// A stored disc opens on the menu (P181), and its Ride starts the game; no menu means it asked or failed.
+if ((await until(['menu', 'started', 'failed', 'asking'], 60000)) === 'menu') await evaluate("document.getElementById('ride').click()");
 visits.push({ state: await until(['started', 'failed', 'asking'], 60000), seconds: (Date.now() - t0) / 1000, shot: await shot() });
 
 const usage = await evaluate('navigator.storage.estimate().then(e => e.usage)');

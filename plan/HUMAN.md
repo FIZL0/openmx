@@ -227,3 +227,11 @@ Two things that bite:
       New's R2 analogue on the bike after all, say so: it goes in as an addition (the bike's pad read
       keeping the strength under the New layout only, recorded on the tape), with nothing in the original
       to prove it against, and the Original layout stays the switch (research/journal/2026-10-26-p77-lever-switches).
+- [ ] **The web launcher's look, and its placeholders (P181).** The brief said to ask you to approve or
+      redirect the look first; the run was unattended, so P181 built it to the concept canvas's three boards
+      and landed it for you to judge. Open web/ over localhost (no build needed for the site; `tools/web.sh`
+      for Ride), or set `OPENMX_WEB_SHOTS=<dir>` and run `./kit check -- -p openmx --test web -- the_launcher`
+      for the four shots (landing and menu, 1440 and 390 wide). Then fill in the `SITE` object at the top of
+      web/index.html's module script: the Discord invite, the disc dump guide URL, the donate URL, a sentence
+      on what donations pay for, and the prompt/token/commit counts. Until then those links show dimmed and
+      inert and the counts show a dash (research/journal/2026-10-26-p181-web-launcher).
