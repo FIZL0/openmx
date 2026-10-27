@@ -20,30 +20,49 @@
 //! The port's window is no video mode, so which of the two displays it stands for is read off the
 //! frame's shape: whichever of 4:3 and 16:9 it is nearer ([`Display::of`]).
 //!
-//! # 4:3 kept
+//! # The fixed shapes (P176)
 //!
-//! `--aspect 4:3` is the shell as it was before: the largest 4:3 frame inside the window, bars round
-//! it, and the television's display. `--aspect fill`, the default, draws the window's own shape.
+//! `--aspect` (and the Display tab's Aspect Ratio row) takes opentennis's choices: `auto` (or `fill`),
+//! the default, draws the window's own shape; `4:3`, `16:9`, `16:10` and `21:9` draw the largest frame
+//! of that shape inside the window, centred, bars round it — and since the 3D, the HUD, the menus and
+//! every split view are all drawn into that frame, all of them take its shape. `4:3` is the shell as
+//! it was before V24, and the television's display. `stretch` is opentennis's whole window, safe area
+//! and all; the shell has no safe area to keep clear of, so here it is the window's shape, as `auto`.
 
 use crate::split::Layout;
 
 /// What shape of frame a window is drawn at: `--aspect`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Aspect {
-    /// The window's own shape, whatever it is.
+    /// The window's own shape, whatever it is: Auto.
     #[default]
     Fill,
     /// The television's, the largest 4:3 frame that fits, with bars round it.
     Television,
+    /// 16:9, with bars.
+    Wide,
+    /// 16:10, with bars.
+    Monitor,
+    /// 21:9, with bars.
+    Cinema,
+    /// The whole window (opentennis's Stretch: no safe area kept, which the shell has none of).
+    Stretch,
 }
 
 impl Aspect {
+    /// Every choice, in the Aspect Ratio row's order.
+    pub const ALL: [Aspect; 6] = [Aspect::Fill, Aspect::Television, Aspect::Wide, Aspect::Monitor, Aspect::Cinema, Aspect::Stretch];
+
     /// `--aspect`'s word for it.
     pub fn parse(word: &str) -> Result<Aspect, String> {
         match word.to_ascii_lowercase().as_str() {
-            "fill" => Ok(Aspect::Fill),
+            "fill" | "auto" => Ok(Aspect::Fill),
             "4:3" | "4x3" | "43" => Ok(Aspect::Television),
-            _ => Err(format!("--aspect: {word:?} is fill (the window's shape) or 4:3")),
+            "16:9" | "16x9" | "169" => Ok(Aspect::Wide),
+            "16:10" | "16x10" | "1610" => Ok(Aspect::Monitor),
+            "21:9" | "21x9" | "219" => Ok(Aspect::Cinema),
+            "stretch" => Ok(Aspect::Stretch),
+            _ => Err(format!("--aspect: {word:?} is auto (the window's shape), 4:3, 16:9, 16:10, 21:9 or stretch")),
         }
     }
 
@@ -52,15 +71,30 @@ impl Aspect {
         match self {
             Aspect::Fill => "fill",
             Aspect::Television => "4:3",
+            Aspect::Wide => "16:9",
+            Aspect::Monitor => "16:10",
+            Aspect::Cinema => "21:9",
+            Aspect::Stretch => "stretch",
+        }
+    }
+
+    /// The shape it fixes the frame to, across by down; none for the window's own.
+    pub fn ratio(self) -> Option<(usize, usize)> {
+        match self {
+            Aspect::Fill | Aspect::Stretch => None,
+            Aspect::Television => Some((4, 3)),
+            Aspect::Wide => Some((16, 9)),
+            Aspect::Monitor => Some((16, 10)),
+            Aspect::Cinema => Some((21, 9)),
         }
     }
 
     /// The frame a window of `window` pixels is drawn with at `scale` window pixels to a frame pixel.
     /// Never smaller than a pixel each way, so a window shrunk to nothing still has a frame to draw.
     pub fn frame(self, window: (usize, usize), scale: usize) -> (usize, usize) {
-        match self {
-            Aspect::Fill => ((window.0 / scale.max(1)).max(1), (window.1 / scale.max(1)).max(1)),
-            Aspect::Television => fit_frame(window, scale),
+        match self.ratio() {
+            None => ((window.0 / scale.max(1)).max(1), (window.1 / scale.max(1)).max(1)),
+            Some(ratio) => fit_ratio(window, scale, ratio),
         }
     }
 }
@@ -69,11 +103,18 @@ impl Aspect {
 /// pixel: `--aspect 4:3`'s, and what every window got before V24. The rest of the window is bars
 /// ([`crate::window::Window::present`]).
 pub fn fit_frame(window: (usize, usize), scale: usize) -> (usize, usize) {
+    fit_ratio(window, scale, (4, 3))
+}
+
+/// The largest frame of `across` by `down`'s shape inside a window of `window` pixels, at `scale`
+/// window pixels to a frame pixel, the rest of the window bars: pillarboxed in a window wider than
+/// the shape, letterboxed in one taller (a portrait window too).
+pub fn fit_ratio(window: (usize, usize), scale: usize, (across, down): (usize, usize)) -> (usize, usize) {
     let (w, h) = (window.0 / scale.max(1), window.1 / scale.max(1));
-    let (w, h) = if w * 3 > h * 4 {
-        (h * 4 / 3, h)
+    let (w, h) = if w * down > h * across {
+        (h * across / down, h)
     } else {
-        (w, w * 3 / 4)
+        (w, w * down / across)
     };
     (w.max(1), h.max(1))
 }
@@ -90,7 +131,8 @@ pub enum Display {
 impl Display {
     /// The display a frame of `width` by `height` square pixels stands for: whichever of the two
     /// aspects its own is nearer, as a ratio — so 16:10 and 21:9 are wide, 3:2 and every portrait
-    /// window are the television. The PS2's own 640x448 is the television's.
+    /// window are the television. The PS2's own 640x448 is the television's. A fixed shape's frame
+    /// is that shape, so 4:3 is the television and 16:9, 16:10 and 21:9 are wide (P176).
     pub fn of(width: usize, height: usize, aspect: Aspect) -> Display {
         if aspect == Aspect::Television {
             return Display::Television;

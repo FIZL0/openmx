@@ -1457,8 +1457,9 @@ struct Args {
     players: usize,
     /// `--split h|v`: which of the original's two layouts two players get.
     split: Split,
-    /// `--aspect fill|4:3`: the frame at the window's own shape, or the largest 4:3 one inside it
-    /// with bars round it, which is the shell as it was before V24.
+    /// `--aspect auto|4:3|16:9|16:10|21:9|stretch`: the frame at the window's own shape, or the
+    /// largest one of the fixed shape inside it with bars round it (P176); 4:3 is the shell as it
+    /// was before V24.
     aspect: Aspect,
     /// Whether `--aspect` was given: if so it wins over the settings' Picture Shape (P126).
     aspect_asked: bool,
@@ -2372,6 +2373,10 @@ fn aspect_of(picture: menu::Picture) -> Aspect {
     match picture {
         menu::Picture::Fill => Aspect::Fill,
         menu::Picture::Television => Aspect::Television,
+        menu::Picture::Wide => Aspect::Wide,
+        menu::Picture::Monitor => Aspect::Monitor,
+        menu::Picture::Cinema => Aspect::Cinema,
+        menu::Picture::Stretch => Aspect::Stretch,
     }
 }
 
@@ -8693,7 +8698,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 Layout::for_players(args.players, args.split)?;
             }
             "--split" => args.split = Split::parse(&next("h or v")?)?,
-            "--aspect" => (args.aspect, args.aspect_asked) = (Aspect::parse(&next("fill or 4:3")?)?, true),
+            "--aspect" => (args.aspect, args.aspect_asked) = (Aspect::parse(&next("auto, 4:3, 16:9, 16:10, 21:9 or stretch")?)?, true),
             "--wheels" => match next("blurred or original")?.as_str() {
                 "original" => args.original_wheels = true,
                 "blurred" => args.original_wheels = false,
@@ -8911,8 +8916,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      ride 60 a second, and --draw-fps N at most N.\n\
                      The window opens at the screen's size and the frame fills it, re-made when\n\
                      the window is resized, wider or taller as the original's own 16:9 mode\n\
-                     would draw it; --aspect 4:3 draws the largest 4:3 frame inside it instead,\n\
-                     with bars. --size draws a fixed frame (640x448 is the PS2's), and --scale\n\
+                     would draw it; --aspect 4:3, 16:9, 16:10 or 21:9 draws the largest frame of\n\
+                     that shape inside it instead, with bars, the HUD, menus and split screens\n\
+                     too (auto and stretch fill the window). --size draws a fixed frame (640x448 is the PS2's), and --scale\n\
                      draws each frame pixel N times across and down. --render-scale draws the\n\
                      3D at a fraction of the frame and stretches it over, the HUD and menus\n\
                      still sharp; auto, the default, lowers it while the GPU misses the\n\

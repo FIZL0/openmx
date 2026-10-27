@@ -495,23 +495,45 @@ pub struct Settings {
 
 /// The shape a ride's picture is drawn in (P126), as `settings.txt` spells it: the shell's
 /// `aspect::Aspect`, which this file cannot name because `tests/menu.rs` compiles it on its own.
+/// The Display tab's Aspect Ratio row (P176), opentennis's six.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Picture {
-    /// The window's own shape, whatever it is.
+    /// The window's own shape, whatever it is: Auto.
     #[default]
     Fill,
     /// The original's television, the largest 4:3 frame that fits, with bars round it.
     Television,
+    /// 16:9, with bars.
+    Wide,
+    /// 16:10, with bars.
+    Monitor,
+    /// 21:9, with bars.
+    Cinema,
+    /// The whole window, as Auto: opentennis's Stretch drops the safe area, which the shell has none of.
+    Stretch,
 }
 
 impl Picture {
-    pub const ALL: [Picture; 2] = [Picture::Fill, Picture::Television];
+    pub const ALL: [Picture; 6] = [Picture::Fill, Picture::Television, Picture::Wide, Picture::Monitor, Picture::Cinema, Picture::Stretch];
 
     /// The file's word, which is also `--aspect`'s.
     pub fn word(self) -> &'static str {
         match self {
             Picture::Fill => "fill",
             Picture::Television => "4:3",
+            Picture::Wide => "16:9",
+            Picture::Monitor => "16:10",
+            Picture::Cinema => "21:9",
+            Picture::Stretch => "stretch",
+        }
+    }
+
+    /// The Aspect Ratio row's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Picture::Fill => "Auto",
+            Picture::Stretch => "Stretch",
+            p => p.word(),
         }
     }
 
@@ -519,6 +541,9 @@ impl Picture {
         Picture::ALL.into_iter().find(|p| p.word() == w)
     }
 }
+
+/// Aspect Ratio's row's help, on the Display tab and in the Original switch's reach (P176).
+pub const ASPECT_HELP: &str = "The shape of the picture, the HUD and the menus on screen, split screens too. Auto fills the window; 4:3, 16:9, 16:10 and 21:9 keep that shape with bars round it. The original is the television's 4:3. Stretch fills the window as Auto does.";
 
 /// Texture Filtering's row's help, on the Graphics tab and in the Original switch's reach (V83).
 pub const FILTERING_HELP: &str = "How sharp textures stay when seen at a glance, like the ground down a straight. 16x keeps them sharp into the distance; Off blurs them as the original did. The software renderer draws without it either way.";
@@ -646,7 +671,7 @@ impl Departure {
             Departure::Fog => "Fog and Draw Distance",
             Departure::Plants => "Plant Detail",
             Departure::Foliage => "Leaves",
-            Departure::Picture => "Picture Shape",
+            Departure::Picture => "Aspect Ratio",
             Departure::Filtering => "Texture Filtering",
             Departure::Markers => "Markers",
             Departure::Textures => "Upscaled Textures",
@@ -661,7 +686,7 @@ impl Departure {
             Departure::Fog => ["Whole Map", "Original Fog"],
             Departure::Plants => ["Smooth", "Original"],
             Departure::Foliage => ["Crisp", "Original"],
-            Departure::Picture => ["Fill the Window", "4:3"],
+            Departure::Picture => ["Auto", "4:3"],
             Departure::Filtering => ["16x", "Off"],
             Departure::Markers => ["On", "Off"],
             Departure::Textures => ["Upscaled", "Original"],
@@ -676,7 +701,7 @@ impl Departure {
             Departure::Fog => "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
             Departure::Plants => "How bushes and trees turn into flat pictures far off. Smooth dissolves them over a wide band; Original swaps them as the game did.",
             Departure::Foliage => "How leaves lie over what is behind them. Crisp cuts each leaf out, so trees show through each other's gaps; Original blends them as the game did, and a near tree's soft edges can hide the trees behind it.",
-            Departure::Picture => "The ride's shape on screen. Original is the television's 4:3, with bars at the sides.",
+            Departure::Picture => ASPECT_HELP,
             Departure::Filtering => FILTERING_HELP,
             Departure::Markers => "Every player's session markers on the d-pad. Off, the d-pad steers, leans and does tricks as in the original.",
             Departure::Textures => "The world's textures from texture packs, mods/texture-replacements and mods' own upscales, where there are any. Original is the disc's alone. From the next ride; the software renderer draws them too, slower.",

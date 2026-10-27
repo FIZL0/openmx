@@ -5,7 +5,7 @@
 use super::*;
 
 /// Settings' tabs, which L1 and R1 step through, round from either end.
-/// Display is the screen's HUD; Graphics (P128) the world's draw, the picture and its rate, under
+/// Display is the screen's HUD and its aspect ratio (P176); Graphics (P128) the world's draw, the picture and its rate, under
 /// headings, with the Original tab's graphics sub-switches (P126).
 pub const SETTINGS_TABS: [&str; 7] = ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera", "Original"];
 pub const TAB_RIDE: usize = 0;
@@ -91,6 +91,8 @@ pub enum Key {
     DrawDistance,
     WorldSky,
     TextureFiltering,
+    /// The Display tab's Aspect Ratio (P176): the Picture departure's row, as Draw Distance is the fog's.
+    AspectRatio,
     RenderScale,
     VSync,
     FrameLimit,
@@ -390,12 +392,14 @@ impl Menu {
                 "The size of the whole HUD, each piece in its own corner. 100% is the original's.",
             )
             .off_if(s.overlay == Overlay::None, "The HUD is off"),
+            // P176: opentennis's Aspect Ratio, the Picture departure's switch.
+            Row::choice(Key::AspectRatio, "Aspect Ratio", &Picture::ALL.map(Picture::label), at(&Picture::ALL, s.picture), ASPECT_HELP),
         ]
     }
 
     /// The Graphics tab (P128): each graphics setting once, under the group it is in. The Original
     /// tab's graphics sub-switches (P126) are here and not there: Draw Distance is its fog, and
-    /// Plant Detail and Picture Shape its own rows.
+    /// Plant Detail its own row. Picture Shape went to the Display tab as Aspect Ratio (P176).
     fn graphics_rows(&self) -> Vec<Row> {
         let s = &self.settings;
         let scales = RenderScale::ALL.map(RenderScale::label);
@@ -423,7 +427,6 @@ impl Menu {
             )
             .tips(&["One sky for the whole world", "Each map its own"]),
             Row::heading("Picture"),
-            self.departure_row(Departure::Picture),
             // V83: the Original switch's too, but five choices to its two, as Draw Distance's three.
             Row::choice(
                 Key::TextureFiltering,
@@ -446,7 +449,7 @@ impl Menu {
             "Original Game",
             &["Off", "On"],
             0,
-            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves, picture shape and texture filtering; the HUD stays openmx's. Each switch below can be set on its own, and the fog, plants, leaves, picture shape and texture filtering on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
+            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves, aspect ratio and texture filtering; the HUD stays openmx's. Each switch below can be set on its own, the fog, plants, leaves and texture filtering on the Graphics tab, and the aspect ratio on the Display tab. The ride itself is the original's either way; Game Modifiers change it.",
         )
         .tips(&["Every enhancement on", "The game as it shipped"]);
         match self.original() {
@@ -1082,6 +1085,7 @@ impl Menu {
             Key::DrawDistance => s.graphics = Graphics::ALL[next(row)],
             Key::WorldSky => s.world_sky = WorldSky::ALL[next(row)],
             Key::TextureFiltering => s.filtering = Filtering::ALL[next(row)],
+            Key::AspectRatio => s.picture = Picture::ALL[next(row)],
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
             Key::FrameLimit => s.frame_limit = s.frame_limit.step(p.left),
@@ -1304,7 +1308,9 @@ impl Departure {
     /// the Original tab's master switch.
     pub fn tab(self) -> usize {
         match self {
-            Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Picture | Departure::Textures | Departure::Filtering => TAB_GRAPHICS,
+            Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Textures | Departure::Filtering => TAB_GRAPHICS,
+            // P176: Aspect Ratio, on Display.
+            Departure::Picture => TAB_DISPLAY,
             Departure::Controls | Departure::Cameras | Departure::Markers => TAB_ORIGINAL,
         }
     }
@@ -1314,6 +1320,7 @@ impl Departure {
         match self {
             Departure::Fog => Key::DrawDistance,
             Departure::Filtering => Key::TextureFiltering,
+            Departure::Picture => Key::AspectRatio,
             d => Key::Departure(d),
         }
     }
