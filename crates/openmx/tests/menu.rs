@@ -516,6 +516,10 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     settings_at(&mut m, &mut r, "Graphics");
     down_to(&mut m, &mut r, menu::Key::DrawDistance);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Whole Map");
+    // V95's Farther Fog sits between the whole map and Far Fog.
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.graphics, Graphics::Farther);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Farther Fog");
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.graphics, Graphics::Far);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Far Fog");
@@ -523,9 +527,13 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     assert_eq!(m.settings.graphics, Graphics::Original);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Original Fog");
     assert!(m.take_changed());
-    tap(&mut m, &mut r, Control::Left);
-    tap(&mut m, &mut r, Control::Left);
+    for _ in 0..3 {
+        tap(&mut m, &mut r, Control::Left);
+    }
     assert_eq!(m.settings.graphics, Graphics::Full);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.graphics, Graphics::Farther);
+    assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Farther);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.graphics, Graphics::Far);
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Far);
@@ -533,6 +541,7 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     assert_eq!(m.settings.graphics, Graphics::Original);
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Original);
     assert_eq!(Settings::parse("graphics = far\n").graphics, Graphics::Far);
+    assert_eq!(Settings::parse("graphics = farther\n").graphics, Graphics::Farther);
     assert_eq!(Settings::parse("graphics = full\n").graphics, Graphics::Full);
     assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Full);
 }
@@ -3896,11 +3905,11 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     assert_eq!(m.settings.graphics, Graphics::Full);
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
-    // main's Far Fog (a1a33f84) is next after the Whole Map
-    assert_eq!(m.settings.graphics, Graphics::Far);
+    // V95's Farther Fog is next after the Whole Map
+    assert_eq!(m.settings.graphics, Graphics::Farther);
     let dir = scratch("graphics-tab");
     menu::save(&dir, &m.settings, &Controls::default()).unwrap();
-    assert_eq!(menu::load(&dir).0.graphics, Graphics::Far);
+    assert_eq!(menu::load(&dir).0.graphics, Graphics::Farther);
     std::fs::remove_dir_all(&dir).ok();
     // `--screen graphics` opens the same tab.
     assert_eq!(Screen::from_word("graphics"), Some(Screen::Graphics));

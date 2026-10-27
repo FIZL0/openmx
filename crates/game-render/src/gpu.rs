@@ -5416,6 +5416,13 @@ mod tests {
         let far = Graphics::Far.fog(&light, span);
         assert_eq!(far, Fog { near: 4.0 * fog.near, far: 4000.0, max: 1.0, reach: 4000.0 });
         assert_eq!(Graphics::Far.far_clip(&light, span), 4000.0);
+        // Farther (V95): eight times as far, between Far and the whole map.
+        let farther = Graphics::Farther.fog(&light, span);
+        assert_eq!(farther, Fog { near: 8.0 * fog.near, far: 8000.0, max: 1.0, reach: 8000.0 });
+        assert!(far.near < farther.near && far.far < farther.far && far.reach < farther.reach);
+        assert!(farther.reach < full.reach && farther.far < full.far);
+        let clip = Graphics::Farther.far_clip(&light, span);
+        assert!(Graphics::Far.far_clip(&light, span) < clip && clip < Graphics::Full.far_clip(&light, span));
         assert_eq!(Graphics::default(), Graphics::Full);
         for g in Graphics::ALL {
             assert_eq!(Graphics::from_word(g.word()), Some(g));
@@ -5442,6 +5449,11 @@ mod tests {
         assert!(far.sees(v3(100.0, 0.0, 3500.0), radius), "past the disc's far clip, inside four times it");
         assert!(!far.sees(far_edge, radius), "but not the whole map");
         assert!(!far.sees(behind, radius));
+        let farther = Cull::of(&camera, 1920, 1080, Graphics::Farther, &light, span);
+        assert!(farther.sees(v3(100.0, 0.0, 6000.0), radius), "past Far's, inside eight times the disc's");
+        assert!(!far.sees(v3(100.0, 0.0, 6000.0), radius));
+        assert!(!farther.sees(v3(100.0, 0.0, 9000.0), radius), "but not the whole map");
+        assert!(!farther.sees(behind, radius));
     }
 
     /// A flat chunk of `cells` cells `size` feet each at chunk (`x`, `z`).
@@ -5542,7 +5554,7 @@ mod tests {
         };
         let fog = [61u8, 68, 76];
         let near_fog = |c: [u8; 3]| c.iter().zip(fog).all(|(a, b)| a.abs_diff(b) <= 2);
-        for graphics in [Graphics::Original, Graphics::Far, Graphics::Full] {
+        for graphics in Graphics::ALL {
             gpu.set_graphics(graphics);
             gpu.set_wrap(None);
             let (alone, sky) = draw(&mut gpu);
