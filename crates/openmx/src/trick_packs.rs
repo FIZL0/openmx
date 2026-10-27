@@ -157,7 +157,8 @@ impl Pack {
     /// What the ride shows of the pack's tricks (MD21): which of its extras and 360s found no clip
     /// on the rider (`rider`) and the bike (`bike`) — the names [`game_render::anim::PackClips::fill`]
     /// answered, `None` for a body or chassis that was not loaded — and the front flip, which has no
-    /// clip in either game and shows the backflip's.
+    /// clip in either game: the rider leans forward on the airborne row (P159) and the bike, which
+    /// follows the body's state (MD41), stays on its own airborne row, not the backflip's clip.
     pub fn missing_clips(&self, stunts: &Set, rider: Option<&[String]>, bike: Option<&[String]>) -> String {
         let extras = stunts.stunts.iter().skip(game_sim::trick::SLOTS).filter(|s| !s.name.is_empty()).count();
         let side = |who: &str, missing: Option<&[String]>| match missing {
@@ -166,7 +167,7 @@ impl Pack {
             Some(names) => format!("the {who} has {} of {}, none for {}", extras + 2 - names.len(), extras + 2, names.join(", ")),
         };
         format!(
-            "tricks: clips from {} for {extras} extras and the two 360s: {}; {}; the front flip has none in either game and shows the backflip's",
+            "tricks: clips from {} for {extras} extras and the two 360s: {}; {}; the front flip has none in either game: the rider leans forward and the bike stays on its airborne row",
             self.folder.display(),
             side("rider", rider),
             side("bike", bike)

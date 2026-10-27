@@ -689,6 +689,28 @@ pub struct Body {
     /// lets both feet off the pegs, so the stopped row's clip draws them on the ground, and a slow,
     /// tipped one puts the inside foot out. [`Body::holds`] is what the draw holds each limb with.
     pub feet: game_sim::foot_down::Feet,
+    /// **MD41:** the bike under this rider has no clip for the trick the body is in, or the body is
+    /// still fading out of one ([`crate::vehicle::Chassis::bare_under`]), so the bike does not move
+    /// with the trick. The shell sets it after the chassis' frame; while it is up the draw holds each hand the
+    /// clip leaves near its grip on the grip ([`bare_reach`]), whatever [`Body::hold`] says.
+    pub bare: bool,
+}
+
+/// **The port's own (MD41):** within this far of its grip, in feet, a hand of a trick clip the bike
+/// has no clip for is drawn on the grip ([`bare_reach`]). Measured on the disc's 24 gesture clips
+/// thrown off a jump, in a backflip and in a front flip: a hand a clip keeps on the bars is at most
+/// 0.74 ft off its grip (the stalelin in a backflip), and one it takes off them reaches 2.06 ft or
+/// further (the super can Indian air's) — this sits above the first.
+pub const BARE_NEAR: f32 = 0.8;
+/// **The port's own (MD41):** this far from its grip or further, a hand of such a clip is let go of:
+/// it is off the bars on purpose (a no-hander, a super can). Between [`BARE_NEAR`] and this the hold
+/// fades, so a hand leaving the bars is not snapped back on.
+pub const BARE_FAR: f32 = 1.6;
+
+/// How hard a hand `off` feet from its grip is held there while the bike has no clip for the trick
+/// ([`Body::bare`]): all of it within [`BARE_NEAR`], none from [`BARE_FAR`], a straight line between.
+pub fn bare_reach(off: f32) -> f32 {
+    ((BARE_FAR - off) / (BARE_FAR - BARE_NEAR)).clamp(0.0, 1.0)
 }
 
 impl Body {
@@ -753,6 +775,7 @@ impl Body {
             posed: false,
             hold: 1.0,
             feet: Default::default(),
+            bare: false,
         })
     }
 
@@ -814,6 +837,22 @@ impl Body {
     pub fn holds(&self) -> [f32; 4] {
         let [l, r] = self.feet.strength();
         [self.hold * l, self.hold * r, self.hold, self.hold]
+    }
+
+    /// [`Body::holds`] against this frame's anchors (MD41): while [`Body::bare`], each hand is held
+    /// at least by [`bare_reach`] of how far the clip (`world`) has it from its target.
+    pub fn holds_on(&self, world: &[M4], targets: &Anchors) -> [f32; 4] {
+        let mut out = self.holds();
+        if !self.bare {
+            return out;
+        }
+        let skel = &self.rig.set.skeleton;
+        for i in 2..4 {
+            let (Some(target), Some(j)) = (targets[i], skel.find(LIMBS[i].anchor)) else { continue };
+            let Some(m) = world.get(j) else { continue };
+            out[i] = out[i].max(bare_reach(m.point(v3(0.0, 0.0, 0.0)).sub(target).len()));
+        }
+        out
     }
 
     /// Write the pose a frame of the body's own machine asked for, from the clock the simulation
@@ -884,7 +923,10 @@ impl Body {
     ) -> [Option<f32>; 4] {
         let mut world = self.rig.world();
         let held = match hold {
-            Some(targets) => hold_limbs(&self.rig.set.skeleton, &mut world, targets, self.holds()),
+            Some(targets) => {
+                let strength = self.holds_on(&world, targets);
+                hold_limbs(&self.rig.set.skeleton, &mut world, targets, strength)
+            }
             None => [None; 4],
         };
         loaded.tris = skin(&loaded.model, &world, group);
@@ -897,7 +939,10 @@ impl Body {
     pub fn palette(&self, hold: Option<&Anchors>) -> (Vec<M4>, [Option<f32>; 4]) {
         let mut world = self.rig.world();
         let held = match hold {
-            Some(targets) => hold_limbs(&self.rig.set.skeleton, &mut world, targets, self.holds()),
+            Some(targets) => {
+                let strength = self.holds_on(&world, targets);
+                hold_limbs(&self.rig.set.skeleton, &mut world, targets, strength)
+            }
             None => [None; 4],
         };
         (world, held)

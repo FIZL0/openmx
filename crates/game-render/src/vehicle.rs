@@ -457,9 +457,72 @@ impl Chassis {
 
     /// **MD21:** a trick pack's bike clips in the stance's states past the sixty — its extras and the
     /// 360s — bound to this chassis. Answers the names that found no clip.
+    ///
+    /// **MD41:** and in the holes the disc left in the sixty: a gesture slot `bike.mcf` has no clip
+    /// for, and the backflip ([`crate::anim::PackClips::fill_empty`]). [`Chassis::bare_slots`] says
+    /// which are still empty.
     pub fn add_pack(&mut self, pack: &crate::anim::PackClips, stunts: &[Stunt]) -> Vec<String> {
         let Stance { set, lib, .. } = &mut self.stance;
+        pack.fill_empty(set, lib, stunts, crate::anim::PackClips::bike_members);
         pack.fill(set, lib, stunts, crate::anim::PackClips::bike_members)
+    }
+
+    /// **MD41:** the gesture slots of `stunts` this chassis has no clip for, by name — with a pack
+    /// added, the ones neither the disc nor the pack has.
+    pub fn bare_slots(&self, stunts: &[Stunt]) -> Vec<String> {
+        stunts
+            .iter()
+            .take(SLOTS)
+            .enumerate()
+            .filter(|(k, s)| !s.name.is_empty() && self.stance.lib.clip[*k].is_none())
+            .map(|(_, s)| s.name.clone())
+            .collect()
+    }
+
+    /// **MD41:** a trick state — a gesture slot or a pack's state past the sixty — that this chassis
+    /// has no clip for, which [`Chassis::want_under`] keeps the bike on its own row through.
+    pub fn lacks(&self, state: i32) -> bool {
+        let trick = (0..SLOTS as i32).contains(&state) || state >= va::PACK_EXTRA;
+        trick && self.stance.lib.clip(state).is_none()
+    }
+
+    /// **MD41:** the rider's body (`body`, its machine's driver) is in a trick this chassis has no
+    /// clip for, or still fading out of one: what [`crate::rider::Body::bare`] is set from, so the
+    /// drawn rider keeps on the bars the hands the clip leaves near them while the bike stays on its
+    /// own row ([`Chassis::want_under`]).
+    pub fn bare_under(&self, body: &va::Driver) -> bool {
+        self.lacks(body.state) || (body.ramp > F::ZERO && self.lacks(body.prev))
+    }
+
+    /// **MD41:** the state to run under a rider whose body's machine asked for `body` this frame:
+    /// [`Chassis::want_beside`], and the body's own trick and backflip as well. A gesture slot the
+    /// body runs is the bike's from the same frame (the trick machine's `current` is a frame
+    /// behind the body's request at a trick's end), and the backflip's hold is when this chassis has
+    /// a clip for it — a trick pack's `bike_backflip` ([`Chassis::add_pack`]); without one the bike
+    /// stays on the airborne row, as before.
+    ///
+    /// A trick this chassis has no clip for ([`Chassis::lacks`]) is not run at all: the bike stays
+    /// where it would be without the trick — the backflip it is turning (the body's own test,
+    /// `game_sim::rider::Rider::body_frame`'s), the airborne row in the air, the riding grid on the
+    /// ground — so it keeps turning and crossing up under the rider instead of standing still in the
+    /// shape it was modelled in. **The port's own** — MX vs. ATV's table marks exactly the stunts
+    /// that ship a bike clip `UsedForBike`, and what its bike draws under the rest was not read.
+    pub fn want_under(&self, ride: &Ride, tricks: &Tricks, body: i32) -> i32 {
+        let has_backflip = self.stance.lib.clip(va::BACKFLIP).is_some();
+        let want = match body {
+            s if (0..SLOTS as i32).contains(&s) => s,
+            va::BACKFLIP if has_backflip => va::BACKFLIP,
+            _ => Chassis::want_beside(ride, tricks, body),
+        };
+        if !self.lacks(want) {
+            return want;
+        }
+        let front = ride.tricks.as_ref().is_some_and(|t| game_sim::air::front_flipping(&ride.air, t.flip_row));
+        match () {
+            _ if has_backflip && ride.air.flipping && !front => va::BACKFLIP,
+            _ if !ride.air.on_ground => va::AIR,
+            _ => va::TURN_RIDING,
+        }
     }
 
     /// [`Chassis::want`] with a trick pack's states (MD21): an extra in progress plays its own clip

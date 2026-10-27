@@ -975,9 +975,15 @@ impl PackClips {
         out
     }
 
-    /// The members a bike clip could be, in the order they are tried.
+    /// The members a bike clip could be, in the order they are tried. The freestyle bike's
+    /// `MXF_Bike_<stunt>` is the last resort (MD41): the motocross rider's prefix is `MX`, and no
+    /// pack spells a bike clip `MX_Bike_`.
     pub fn bike_members(&self, stunt: &str) -> Vec<String> {
-        vec![format!("Veh\\Anim\\{}_Bike_{stunt}.mot", self.prefix), format!("Veh\\Anim\\bike_{stunt}.mot")]
+        vec![
+            format!("Veh\\Anim\\{}_Bike_{stunt}.mot", self.prefix),
+            format!("Veh\\Anim\\bike_{stunt}.mot"),
+            format!("Veh\\Anim\\MXF_Bike_{stunt}.mot"),
+        ]
     }
 
     /// Every `.mot` in the pack, by member name.
@@ -1021,6 +1027,45 @@ impl PackClips {
         for (k, stunt) in wants {
             lib.pack[k] = set.load_pack(&self.res, &stunt, &members(self, &stunt));
             if lib.pack[k].is_none() {
+                missing.push(stunt);
+            }
+        }
+        missing
+    }
+}
+
+impl PackClips {
+    /// **MD41:** fill the holes the disc left in `lib`'s own sixty out of this pack — each of the 24
+    /// gesture slots `stunts` names and the backflip's state ([`vehicle_anim::BACKFLIP`]), where
+    /// the set bound nothing — through `members`, the same way [`Self::fill`] fills the extras. A
+    /// slot the disc filled keeps the disc's clip. Answers the names that found no clip, the
+    /// backflip as `backflip`.
+    ///
+    /// A bike's set binds 7 of the 24 off `bike.mcf` and no backflip; MX vs. ATV's pack ships
+    /// `bike_backflip.mot` and a bike clip for some of the stunts, so a trick in a flip moves the bike
+    /// as it does out of one.
+    pub fn fill_empty(
+        &self,
+        set: &mut Set,
+        lib: &mut vehicle_anim::Library,
+        stunts: &[Stunt],
+        members: impl Fn(&Self, &str) -> Vec<String>,
+    ) -> Vec<String> {
+        let mut wants: Vec<(usize, String)> = stunts
+            .iter()
+            .take(SLOTS)
+            .enumerate()
+            .filter(|(_, s)| !s.name.is_empty())
+            .map(|(k, s)| (k, s.name.clone()))
+            .collect();
+        wants.push((vehicle_anim::BACKFLIP as usize, "backflip".to_string()));
+        let mut missing = Vec::new();
+        for (state, stunt) in wants {
+            if lib.clip[state].is_some() {
+                continue;
+            }
+            lib.clip[state] = set.load_pack(&self.res, &stunt, &members(self, &stunt));
+            if lib.clip[state].is_none() {
                 missing.push(stunt);
             }
         }
