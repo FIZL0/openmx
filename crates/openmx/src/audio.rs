@@ -2030,6 +2030,9 @@ pub struct RiderSounds {
     pub impact: List,
     pub near: f32,
     pub far: f32,
+    /// `[Params]`' `MinImpulse`: how fast the thrown body must be going for a touch to cry out
+    /// ([`RiderVoice`], P180).
+    pub min_impulse: f32,
 }
 
 impl RiderSounds {
@@ -2041,7 +2044,89 @@ impl RiderSounds {
             impact: List::read(section(&s, "IMPACT"), lib),
             near: params.and_then(|p| p.number("MinDistance")).unwrap_or(30.0),
             far: params.and_then(|p| p.number("MaxDistance")).unwrap_or(150.0),
+            min_impulse: params.and_then(|p| p.number("MinImpulse")).unwrap_or(12.8),
         }
+    }
+}
+
+/// What the rider's voice reads of the thrown body in a tick, after the tick (P180).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RiderBody {
+    /// Wrecked, for any reason but the shootoff's 13.
+    pub down: bool,
+    /// Something of the body is on the ground.
+    pub touching: bool,
+    /// How fast the body is going.
+    pub speed: f32,
+    /// Where the body is.
+    pub at: [f32; 3],
+}
+
+impl RiderBody {
+    /// The thrown body after the tick: the ragdoll's own sensors when the ride runs one, else the one
+    /// point the wreck has for the rider — the same two the body's settle test reads.
+    pub fn of(rider: &game_sim::rider::Rider) -> RiderBody {
+        let reason = rider.state.wreck.map_or(0, |w| w.0 as i32);
+        let (touching, vel) = match (rider.ragdoll.as_ref(), rider.crash.as_ref()) {
+            (Some(doll), _) => (doll.sensed.touching, doll.sensed.vel),
+            (None, Some(down)) => (down.landed, down.rider_vel),
+            (None, None) => return RiderBody::default(),
+        };
+        let at = game_sim::rider::Rider::main_bone(&rider.ride, None, rider.ragdoll.as_ref(), rider.crash.as_ref());
+        RiderBody {
+            down: reason != 0 && reason != 13,
+            touching,
+            speed: length([vel.x(), vel.y(), vel.z()]),
+            at: [at.x(), at.y(), at.z()],
+        }
+    }
+}
+
+/// **The rider's voice** (P180), the original's rider emitter: the wreck's own cry is played through
+/// it at the entry ([`Sound::frame`]), and every tick after, while the body is down, touching and
+/// faster than `MinImpulse` with nothing of its own still playing, it cries out again — a no-repeat
+/// pick of `[IMPACT]` at full level, on the body and following it. So a fall off the back is its
+/// short `[Fall]` grunt as the rider leaves the bike and then a scream as they hit the ground, which
+/// is what S109's recorded fall has (the grunt at the entry, the scream about 0.1 s after the body's
+/// touching flag); a body still sliding fast cries again once the scream is over.
+///
+/// `[IMPACT]` is streamed like the bike's clank, so "over" keeps [`WRECK_TAIL`] past the clip's end.
+///
+/// The speed held against `MinImpulse` is the larger of this tick's and the last: the speed the body
+/// came down at. The port's bodies can lose it on the very tick they touch — the one point a ride with
+/// no ragdoll has for the rider stops dead on it — where the original's body reads it the tick after.
+#[derive(Debug, Default)]
+pub struct RiderVoice {
+    voice: Option<VoiceId>,
+    tail: f32,
+    /// The body's speed the tick before.
+    was: f32,
+}
+
+impl RiderVoice {
+    /// Whether the voice is still busy, `dt` on; a voice still playing follows the body to `at`.
+    fn busy(&mut self, m: &mut Mixer, at: [f32; 3], dt: f32) -> bool {
+        let playing = self.voice.filter(|&id| m.playing(id));
+        if let Some(id) = playing {
+            let gain = m.gain_of(id).unwrap_or(0.0);
+            m.set(id, gain, 1.0, Some(at));
+        } else if self.voice.is_some() {
+            self.tail = WRECK_TAIL;
+        } else {
+            self.tail = (self.tail - dt).max(0.0);
+        }
+        self.voice = playing;
+        playing.is_some() || self.tail > 0.0
+    }
+
+    /// The voice's sound now: the voice playing, if one is.
+    pub fn voice(&self) -> Option<VoiceId> {
+        self.voice
+    }
+
+    /// Every voice was stopped.
+    pub fn hushed(&mut self) {
+        *self = RiderVoice::default();
     }
 }
 
@@ -2379,6 +2464,8 @@ pub struct SeatFrame {
     pub crash: PlaneCrash,
     /// What the shootoff's sound reads (P85).
     pub edge: EdgeFrame,
+    /// What the rider's voice reads of the thrown body (P180).
+    pub body: RiderBody,
     /// This seat's own pause is open (P172): everything of its own holds where it is, silent, and
     /// goes on from there when it closes, while the other seats play on.
     pub paused: bool,
@@ -2390,6 +2477,8 @@ pub struct SeatSound {
     pub engine: Engine,
     plane: PlaneNote,
     pub clank: WreckClank,
+    /// The rider's own voice (P180).
+    pub voice: RiderVoice,
     last: [i32; 4],
     was_grounded: bool,
     dice: Dice,
@@ -2408,6 +2497,7 @@ impl SeatSound {
             engine: Engine::new(seed),
             plane: PlaneNote::default(),
             clank: WreckClank::default(),
+            voice: RiderVoice::default(),
             last: [-1; 4],
             was_grounded: true,
             dice: Dice::new(seed.wrapping_mul(31).wrapping_add(7)),
@@ -2520,6 +2610,7 @@ impl Sound {
             s.plane.silence(m);
             s.engine.update(h, dt, m, &s.bike);
             let near = Play { at: Some(h.at), near: self.rider.near, far: self.rider.far, ..Play::default() };
+            let busy = s.voice.busy(m, f.body.at, dt);
             if let Some(reason) = f.wreck {
                 // The rider's voice by the wreck reason, as `game_sim::wreck_sound` sorts them: a fall
                 // off the front or back is `[Fall]`, the rest `[IMPACT]`.
@@ -2530,7 +2621,9 @@ impl Sound {
                 };
                 if let Some((list, k)) = list {
                     if let Some((clip, _)) = list.pick(&mut s.dice, &mut s.last[k]) {
-                        s.shots.push(m.play(clip, near));
+                        let id = m.play(clip, near);
+                        s.voice.voice = Some(id);
+                        s.shots.push(id);
                     }
                 }
                 let bike = Play { near: s.bike.wreck_near, far: s.bike.wreck_far, ..near };
@@ -2540,6 +2633,18 @@ impl Sound {
                 s.shots.retain(|&v| m.playing(v));
                 if let Some((clip, _)) = self.world.oh.pick(&mut self.dice, &mut self.last[1]) {
                     m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
+                }
+            }
+            // The rider's voice on the thrown body's touches (P180): `[IMPACT]`'s no-repeat pick, the
+            // same one the entry's `[IMPACT]` reasons draw from.
+            let b = &f.body;
+            let speed = b.speed.max(s.voice.was);
+            s.voice.was = if b.down { b.speed } else { 0.0 };
+            if f.wreck.is_none() && !busy && b.down && b.touching && self.rider.min_impulse < speed {
+                if let Some((clip, _)) = self.rider.impact.pick(&mut s.dice, &mut s.last[0]) {
+                    let id = m.play(clip, Play { at: Some(b.at), ..near });
+                    s.voice.voice = Some(id);
+                    s.shots.push(id);
                 }
             }
             if h.grounded && !s.was_grounded && f.wreck.is_none() {
@@ -2572,6 +2677,9 @@ impl Sound {
             if let Some(id) = s.clank.voice() {
                 m.stop(id);
             }
+            if let Some(id) = s.voice.voice() {
+                m.stop(id);
+            }
         }
     }
 
@@ -2588,6 +2696,7 @@ impl Sound {
             s.shots.clear();
             s.held = false;
             s.clank.hushed();
+            s.voice.hushed();
             // A pause in a cannonball must not boom again on the way out: the rider's reasons stay.
             s.edge.hushed();
         }
