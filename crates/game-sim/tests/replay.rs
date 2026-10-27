@@ -2813,6 +2813,193 @@ fn the_human_recording_in_context_drives_the_port() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The 2p recording: the human reference (C10, A6)
+// ---------------------------------------------------------------------------------------------------
+
+/// A name of [`replay::two_p`]'s, in this worktree's `context/`.
+fn two_p_file(rel: &str) -> PathBuf {
+    private_dir("").join(rel)
+}
+
+/// The 2p capture with the columns the reference's own tests read: the counter, `dt`, both pads, and
+/// each rider's guards, wreck reason and bike place. A slim read of a ~215 MB file.
+fn two_p_capture() -> Option<Capture> {
+    let at = two_p_file(replay::two_p::CAPTURE);
+    let Ok(file) = std::fs::File::open(&at) else {
+        println!("no {} — C10's journal says how it is captured", at.display());
+        return None;
+    };
+    let lane = ["type", "index", "ctl_src", "bike_type", "bike_player", "wreck_reason", "bike_xform.m30", "bike_xform.m31", "bike_xform.m32"];
+    let keep = |c: &str| {
+        ["frame_counter", "dt"].contains(&c)
+            || c.starts_with("pad")
+            || c.starts_with("stamp")
+            || ["p1_", "p2_"].iter().any(|p| c.strip_prefix(p).is_some_and(|rest| lane.contains(&rest)))
+    };
+    let cap = replay::two_p::read(std::io::BufReader::new(file), keep).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+    Some(cap)
+}
+
+/// The 2p state's two riders down the game manager's actor list (`watch/2p.toml`): entry 3 is P1's
+/// ridden vehicle, entry 2 P2's. Research addresses, in a test that reads a RAM image.
+const TWO_P_RIDERS: [&[u32]; 2] = [&[0x34, 0x34, 0x8, 0x8, 0x8, 0x0], &[0x34, 0x34, 0x8, 0x8, 0x0]];
+
+/// The 2p riders' bike, as the state's loader read it (C10's journal: both load `Race500P.phy`).
+const TWO_P_PHY: &str = "race500p.phy";
+
+/// **The 2p recording, the human reference: both riders' tapes drive the port from the 2p state.**
+///
+/// The tape is read the one way this ride needs (a field a tick, [`replay::P2m2::tape_per_field`]) and
+/// held against the capture's own two pads ([`replay::two_p::tape`]) field for field; each rider's lane
+/// reads as a one-rider capture whose tape is that rider's pad alone ([`replay::two_p::lane`],
+/// [`PadTape::alone`]); and the port, seeded from the tape's own state (both bikes' whole ride off
+/// `2p-start.ram`) on the disc's Race 500 over free09, rides the whole tape with two players, each
+/// holding on every tick what its own pad held.
+///
+/// What it does not prove: that the port rides where the original did. The positions are printed
+/// beside the capture's, not held to them — the wreck, ragdoll and collision tasks (S155..S160) are
+/// where the 2p ride's lanes become verdicts. Skips with a line when the tape, capture, state or disc
+/// is not here.
+#[test]
+fn the_2p_recording_drives_both_riders_from_its_state() {
+    use replay::two_p::{self, Rider as Seat};
+    let at = two_p_file(two_p::TAPE);
+    let Ok(bytes) = std::fs::read(&at) else {
+        println!("no {} — the user's 2p recording (C10)", at.display());
+        return;
+    };
+    let movie = replay::P2m2::parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+    assert!(movie.from_savestate, "the tape starts from its state");
+    assert_eq!(movie.fields(), two_p::ROWS, "a field a tick, as many as the capture's rows");
+    assert_eq!(movie.check_pressures().expect("the file agrees with itself"), two_p::ROWS * 2 * 12, "both pads, every field");
+    let fields = movie.tape_per_field(F(1.0 / 60.0));
+    assert!(fields.frames.iter().all(|f| f.reports.iter().all(|r| r.status() == 0)), "both pads written on every field");
+
+    let Some(cap) = two_p_capture() else { return };
+    assert_eq!(cap.rows.len(), two_p::ROWS);
+    assert_eq!(cap.frames.len(), two_p::ROWS);
+    let tape = two_p::tape(&cap).expect("both pads off the capture");
+    assert_eq!(tape.len(), two_p::ROWS - 1, "row 0 is the tick before");
+    // The capture's dt is the engine's own sixtieth, never the 30 Hz clamp.
+    let (least, most) = tape.dt_range().unwrap();
+    assert!(least > F(0.0166) && most < F(0.0168), "dt {least:?}..{most:?}");
+
+    // The tape's fields are the capture's polled pads: row r's polled pad (frames[r - 1]) is field
+    // r + d for one small d, the same for both riders.
+    let mut best = None;
+    for d in -3i64..=3 {
+        let agree = |pad: usize| {
+            (0..tape.len())
+                .filter(|&k| {
+                    let f = k as i64 + 1 + d;
+                    f >= 0 && (f as usize) < fields.len() && {
+                        let (a, b) = (&tape.frames[k], &fields.frames[f as usize]);
+                        a.held_mask(pad) == b.held_mask(pad) && a.stick(pad) == b.stick(pad)
+                    }
+                })
+                .count()
+        };
+        let (p1, p2) = (agree(0), agree(1));
+        println!("2p: capture pads against tape fields at offset {d:+}: P1 {p1}, P2 {p2} of {}", tape.len());
+        if best.is_none_or(|(_, n)| p1 + p2 > n) {
+            best = Some((d, p1 + p2));
+        }
+    }
+    let (d, n) = best.unwrap();
+    println!("2p: the capture's polled pads are the tape's fields at offset {d:+} ({n} of {} agree)", 2 * tape.len());
+    assert!(n * 100 >= 2 * tape.len() * 95, "the tape and the capture are not the same pads: best {n} at {d:+}");
+    assert_eq!(d, -(two_p::POLLED_FIELD_LAG as i64), "row r polls field r - {}", two_p::POLLED_FIELD_LAG);
+
+    // Either rider's lane is a one-rider capture, and its tape is that rider's pad alone.
+    for seat in Seat::BOTH {
+        let lane = two_p::lane(&cap, seat).expect("a lane");
+        let col = |name: &str| column(&lane, name).unwrap();
+        for r in 0..lane.rows.len() {
+            assert_eq!(cell(&lane, r, col("type")), "2", "{seat:?} row {r}: the ridden vehicle");
+            assert_eq!(cell(&lane, r, col("index")), seat.pad().to_string(), "{seat:?} row {r}: the player");
+            assert_eq!(cell(&lane, r, col("ctl_src")), "1", "{seat:?} row {r}: a local human");
+            assert_eq!(cell(&lane, r, col("bike_player")), seat.pad().to_string(), "{seat:?} row {r}: the bike's player");
+        }
+        let alone = two_p::tape_of(&cap, seat).expect("a lane's tape");
+        assert_eq!(alone.frames, tape.alone(seat.pad()).frames, "{seat:?}'s lane tape is its pad of the two");
+        assert!(alone.frames.iter().all(|f| f.reports[1] == Report::missing()));
+    }
+
+    // The port from the 2p state.
+    let ram = two_p_file(two_p::START_RAM);
+    let states: Vec<SaveState> = TWO_P_RIDERS.iter().filter_map(|hops| SaveState::open_image(&ram, hops)).collect();
+    let [p1, p2] = &states[..] else {
+        println!("no {} with both riders in it", ram.display());
+        return;
+    };
+    assert_eq!(u64::from(p1.word(SaveState::FRAME_COUNTER).unwrap()) + 1, two_p::FIRST_FRAME, "the state is the tick before row 0");
+    let p1_lane = two_p::lane(&cap, Seat::P1).unwrap();
+    let ran = in_the_world_on(&p1_lane, TWO_P_PHY, "500", |world, named, bike| {
+        let Some(Ridden { tables, phy, .. }) = bike else {
+            println!("no {TWO_P_PHY} on this disc");
+            return None;
+        };
+        let col = Disc::open().and_then(|mut disc| the_bike_col(&mut disc)).map(Arc::new);
+        println!("2p: riding {named} on {TWO_P_PHY}, body rays {}", if col.is_some() { "on" } else { "off (not on this disc)" });
+        let rider_of = |st: &SaveState| {
+            let [front, rear] = st.wheels().expect("the state's wheel mounts").map(|q| Vf(q.map(f32::from_bits)));
+            let mut r = Rider::new(&phy, (front, rear), Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+            if let Some(c) = &col {
+                r.carries_bike_col(Arc::clone(c));
+            }
+            r
+        };
+        let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider_of(p1));
+        p1.seed_ride(&mut sim.rider.ride).expect("P1's whole bike");
+        sim.add_player(phy.clone(), rider_of(p2));
+        p2.seed_ride(&mut sim.others[0].rider.ride).expect("P2's whole bike");
+        // A Sim plugs pad 0 alone; the 2p state has both in (the capture polls both, every row).
+        sim.input.pad_mut(1).connected = true;
+        let start: Vec<Vf> = (0..2).map(|i| sim.rider_of(i).ride.chassis.cofg_world).collect();
+
+        let place = |r: usize, p: &str| -> [f32; 3] {
+            ["m30", "m31", "m32"].map(|m| cell(&cap, r, column(&cap, &format!("{p}bike_xform.{m}")).unwrap()).parse::<f32>().unwrap())
+        };
+        for (k, frame) in tape.frames.iter().enumerate() {
+            let controls = sim.poll_all(frame.dt(), &frame.reports);
+            sim.step_all(frame.dt(), &controls, world);
+            for seat in Seat::BOTH {
+                assert_eq!(
+                    sim.input.pad(seat.pad()).held_mask(),
+                    frame.held_mask(seat.pad()),
+                    "tick {}: {seat:?} holds what its pad held",
+                    k + 1
+                );
+            }
+            if [1, 30, 300, 3000, tape.len() - 1].contains(&k) {
+                for seat in Seat::BOTH {
+                    let c = sim.rider_of(seat.pad()).ride.chassis.cofg_world;
+                    println!(
+                        "2p tick {}: {seat:?} port centre {:?}, original's bike {:?}",
+                        k + 1,
+                        [c.x(), c.y(), c.z()],
+                        place(k + 1, seat.prefix())
+                    );
+                }
+            }
+        }
+        let moved: Vec<f32> = (0..2)
+            .map(|i| {
+                let (a, b) = (start[i], sim.rider_of(i).ride.chassis.cofg_world);
+                ((a.x() - b.x()).powi(2) + (a.z() - b.z()).powi(2)).sqrt()
+            })
+            .collect();
+        Some((sim.ticks, moved))
+    });
+    let Some(Some((ticks, moved))) = ran else { return };
+    assert_eq!(ticks as usize, tape.len(), "the whole tape, a tick a field");
+    for (i, m) in moved.iter().enumerate() {
+        assert!(*m > 10.0, "player {} rode {m} ft from the state: the pad never moved the bike", i + 1);
+    }
+    println!("2p: both riders rode the whole tape from the state ({moved:?} ft from where they started)");
+}
+
 // ===================================================================================================
 // S8 — the acceptance run, against the human's own recording
 // ===================================================================================================

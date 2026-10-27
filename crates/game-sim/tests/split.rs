@@ -14,6 +14,11 @@
 //! actor whose bytes differ from the row before, and a named contact is the first row of a run.
 //!
 //! The captures are game data, git-ignored: absent, the tests skip.
+//!
+//! These two rides are S93's. The human recording of record for wrecks, collisions, the ragdoll,
+//! rider-vs-rider, the trucks and the animations is the user's 2p ride (C10, [`game_sim::replay::two_p`]):
+//! a new test of those reads it, and [`the_2p_reference_has_both_riders_lanes_as_these_rides_do`] holds
+//! it to the guards these rides are held to.
 
 use ps2_oracle::{Kit, skip};
 use std::collections::HashMap;
@@ -193,4 +198,41 @@ fn the_named_contacts_are_at_their_ticks() {
     assert!(short.speed(short.row_at(5998), 1) > 20.0, "P1 is not pushed");
     assert!(short.wrecks(1).is_empty());
     assert_eq!(short.wrecks(2), [(5998, 1)]);
+}
+
+/// **The 2p ride, the human reference, beside these two** (A6): read through the one reader the tests
+/// share ([`two_p::read`], [`two_p::lane`]), each rider's lane holds what both rides here hold on every
+/// row — the ridden vehicle and its bike actor, the player's index, a local human's control — and a
+/// lane's pad tape is that rider's pad alone, live on both.
+#[test]
+fn the_2p_reference_has_both_riders_lanes_as_these_rides_do() {
+    use game_sim::replay::two_p::{self, Rider as Seat};
+    let Some(path) = ctx(two_p::CAPTURE) else { return };
+    let guards = ["type", "index", "ctl_src", "bike_type", "bike_player"];
+    let keep = |c: &str| {
+        c == "frame_counter" || c == "dt" || c.starts_with("pad") || c.starts_with("stamp")
+            || ["p1_", "p2_"].iter().any(|p| c.strip_prefix(p).is_some_and(|r| guards.contains(&r)))
+    };
+    let file = std::fs::File::open(&path).expect("open the capture");
+    let cap = two_p::read(std::io::BufReader::new(file), keep).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert_eq!(cap.rows.len(), two_p::ROWS, "rows of the 2p ride");
+    for (r, &f) in cap.frames.iter().enumerate() {
+        assert_eq!(cap.rows[r][1].parse::<u64>().unwrap(), two_p::FIRST_FRAME + r as u64, "a gap at row {r} (frame {f})");
+    }
+    for seat in Seat::BOTH {
+        let lane = two_p::lane(&cap, seat).expect("a lane");
+        let at = |name: &str| lane.columns.iter().position(|c| c == name).unwrap_or_else(|| panic!("{seat:?}: no {name}"));
+        let want = [("type", 2), ("index", seat.pad()), ("ctl_src", 1), ("bike_type", 4), ("bike_player", seat.pad())];
+        for (name, v) in want {
+            let c = at(name);
+            for (r, row) in lane.rows.iter().enumerate() {
+                assert_eq!(row[c], v.to_string(), "{seat:?} {name} at frame {}", two_p::FIRST_FRAME + r as u64);
+            }
+        }
+        assert!(lane.columns.iter().all(|c| !c.starts_with("p1_") && !c.starts_with("p2_")), "{seat:?}: the other lane left out");
+        let tape = two_p::tape_of(&cap, seat).expect("the lane's pad");
+        assert_eq!(tape.len(), two_p::ROWS - 1);
+        let moves = tape.frames.windows(2).filter(|w| w[0].held_mask(0) != w[1].held_mask(0)).count();
+        assert!(moves > 100, "{seat:?}'s pad changes on {moves} ticks: not a pad anyone rode");
+    }
 }

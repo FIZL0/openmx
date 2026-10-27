@@ -147,6 +147,29 @@ Two properties worth paying for:
   divergence is the best possible regression test, because it tests the real thing rather than your
   theory of the thing.
 
+### The human reference: the 2p ride
+
+The user's two-player recording is the human recording of record (C10, A6): **a new test of wrecks,
+collisions, the ragdoll, rider-vs-rider, moving platforms, wreck thresholds or the animations reads
+it.** `game_sim::replay::two_p` is the one place that names it — the tape, the capture of record (both
+riders' lanes, `p1_`/`p2_`), the tape's start image and the per-event RAM images — and it has the
+readers: `two_p::read` streams the ~215 MB capture keeping only the columns asked for, `two_p::lane`
+turns either rider's lane into a one-rider `Capture` every older reader understands, `two_p::tape` is
+both pads with the engine's own `dt`, `two_p::tape_of` / `PadTape::alone` one rider's pad on port 0, and
+`P2m2::tape_per_field` reads the `.p2m2` a field a tick. Two facts first: this state **ticks at 60 Hz,
+one tape field a tick** (not the one-player tape's one field in two), and a capture row's polled pad is
+the field `two_p::POLLED_FIELD_LAG` behind it. `tests/replay.rs`'s
+`the_2p_recording_drives_both_riders_from_its_state` seats both riders from the start image on the
+disc's Race 500 over free09 and rides the whole tape; start a new test from it. The event index (every
+wreck, near miss, contact, ragdoll and animation stretch at its tick) is C10's journal and
+`research/c10/events.json`; read that, not the rows.
+
+When an older test of one of those subjects reads first_recording, recording2, animandpump or the S93
+split tapes, the task in its area adds the 2p case beside it. Old bit-exact pins stay; drop an older
+fixture only where the 2p case covers the same thing, and say so in the journal. The ride holds no
+rider-vs-rider contact, truck ride or prop contact (C10): those cases wait on a second recording
+(`plan/HUMAN.md`).
+
 ---
 
 ## Reading the PC exe first: aim the proof, don't widen it
