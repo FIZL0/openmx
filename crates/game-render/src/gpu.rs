@@ -4177,26 +4177,40 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
         s.push_str(ground_mesh::WGSL_BINDINGS);
     }
     s.push_str(GROUND_VS_WGSL);
+    s.push_str(&crate::splat::paint_depth_wgsl());
     s.push_str(
         "@fragment fn fs(i: Out) -> @location(0) vec4f {\n\
            let x = i.world.x;\n\
            let z = i.world.z;\n\
+           let depth = log2(max(paint_depth(i.world), 1.0));\n\
            var frame = vec4f(0.0);\n\
            var src = vec4f(0.0);\n\
-           var t = vec4f(0.0);\n",
+           var t = vec4f(0.0);\n\
+           var uv = vec2f(0.0);\n\
+           var k = 1.0;\n",
     );
     let f = |v: f32| format!("{v:?}");
     if let Some(p) = paint {
         for pass in &p.passes {
             let (sin, cos) = pass.angle.sin_cos();
             s.push_str(&format!(
-                "  t = textureSample(layer{}, tiled, vec2f((x * {c} + z * {sn}) * {su}, (z * {c} - x * {sn}) * {sv})) * 255.0;\n",
-                pass.texture,
+                "  uv = vec2f((x * {c} + z * {sn}) * {su}, (z * {c} - x * {sn}) * {sv});\n",
                 c = f(cos),
                 sn = f(sin),
                 su = f(pass.scale[0]),
                 sv = f(pass.scale[1]),
             ));
+            // V97: no sharper than the level the original's paint camera reads it at.
+            match &pass.mip {
+                Some(m) => s.push_str(&format!(
+                    "  k = mip_floor(dpdx(uv), dpdy(uv), {size}, clamp(depth + {bias}, 0.0, {levels}));\n",
+                    size = f(p.textures[pass.texture].width.max(p.textures[pass.texture].height).max(1) as f32),
+                    bias = f(m.bias),
+                    levels = f(m.levels as f32),
+                )),
+                None => s.push_str("  k = 1.0;\n"),
+            }
+            s.push_str(&format!("  t = textureSampleGrad(layer{}, tiled, uv, dpdx(uv) * k, dpdy(uv) * k) * 255.0;\n", pass.texture));
             s.push_str(&format!(
                 "  src = vec4f(t.rgb * vec3f({}, {}, {}) / 128.0, min(t.a * 0.5 * {} / 128.0, 255.0));\n",
                 f(pass.rgba[0]),
@@ -4408,7 +4422,7 @@ fn splat_binding(w: &WorldPaint, packed: &[Option<Packed>]) -> u32 {
 fn splat_passes_wgsl(paint: &Splat, first: u32) -> String {
     let f = |v: f32| format!("{v:?}");
     let mut s = String::new();
-    for pass in &paint.passes {
+    for (j, pass) in paint.passes.iter().enumerate() {
         let (sin, cos) = pass.angle.sin_cos();
         let uv = |p: &str| {
             format!(
@@ -4419,8 +4433,21 @@ fn splat_passes_wgsl(paint: &Splat, first: u32) -> String {
                 sv = f(pass.scale[1]),
             )
         };
+        // V97: no sharper than the level the original's paint camera reads it at.
+        let soft = match &pass.mip {
+            Some(m) => format!(
+                "mip_floor({}, {}, {size}, clamp(paint_level + {bias}, 0.0, {levels}))",
+                uv("gx"),
+                uv("gy"),
+                size = f(paint.textures[pass.texture].width.max(paint.textures[pass.texture].height).max(1) as f32),
+                bias = f(m.bias),
+                levels = f(m.levels as f32),
+            ),
+            None => "1.0".to_string(),
+        };
+        s.push_str(&format!("  let soft{j} = {soft};\n"));
         s.push_str(&format!(
-            "  s = textureSampleGrad(splat_layers, tiled, {}, {}, {}, {}) * 255.0;\n",
+            "  s = textureSampleGrad(splat_layers, tiled, {}, {}, {} * soft{j}, {} * soft{j}) * 255.0;\n",
             uv("q"),
             first + pass.texture as u32,
             uv("gx"),
@@ -4482,6 +4509,8 @@ fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
         s.push_str(&format!("@group(1) @binding({}) var splat_layers: texture_2d_array<f32>;\n", splat_binding(w, packed)));
     }
     s.push_str(GROUND_VS_WGSL);
+    s.push_str(&crate::splat::paint_depth_wgsl());
+    s.push_str("// log2 of the pixel's depth from the original's paint camera, for the splat passes' mips (V97).\nvar<private> paint_level: f32;\n");
     s.push_str(&format!(
         "fn inside(p: vec2f, r: vec4f) -> bool {{ return all(p >= r.xy) && all(p < r.zw); }}
 fn near1(v: f32, lo: f32, hi: f32, period: f32) -> f32 {{
@@ -4585,7 +4614,7 @@ fn mirror(xz: vec2f, r: vec4f) -> vec2f {{ let p = near(xz, r); return vec2f(mir
         s.push_str(&format!("fn tile{i}(xz: vec2f, gx: vec2f, gy: vec2f) -> vec3f {{\n  {body}\n}}\n"));
     }
     let n = w.tiles.len();
-    s.push_str("@fragment fn fs(i: Out) -> @location(0) vec4f {\n  let xz = i.world.xz;\n  let gx = dpdx(xz);\n  let gy = dpdy(xz);\n  var owner = -1;\n");
+    s.push_str("@fragment fn fs(i: Out) -> @location(0) vec4f {\n  let xz = i.world.xz;\n  let gx = dpdx(xz);\n  let gy = dpdy(xz);\n  paint_level = log2(max(paint_depth(i.world), 1.0));\n  var owner = -1;\n");
     for i in (0..n).rev() {
         s.push_str(&format!("  if inside(xz, {}) {{ owner = {i}; }}\n", rect(i)));
     }
@@ -5011,6 +5040,7 @@ mod tests {
                 angle: 0.0,
                 turn: 0f32.sin_cos(),
                 reads: (true, true),
+                mip: None,
                 rgba: [128.0; 4],
                 blend: Some([0, 1, 0, 1]),
                 fixed: 128.0,
@@ -5714,6 +5744,7 @@ mod tests {
                 angle: 0.3,
                 turn: 0.3f32.sin_cos(),
                 reads: (true, true),
+                mip: None,
                 rgba: [128.0; 4],
                 blend: [None, Some([0, 1, 0, 1]), Some([1, 2, 1, 0]), Some([2, 0, 2, 2])][i % 4],
                 fixed: 64.0,

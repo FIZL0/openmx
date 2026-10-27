@@ -35,7 +35,11 @@
 //! program's own erosion layer again and which the original shows no trace of (V77,
 //! [`crate::ground_mesh::repeats_a_layer`]).
 //!
-//! None of this is 1:1: textures are sampled nearest, without the original's mip chain; the
+//! The layers and the detail map are read at the mip level the original's own paint camera reads
+//! them at ([`Mip`], [`paint_depth`]), which is what makes its ground soft (V97).
+//!
+//! None of this is 1:1: the mip levels are box-filtered halvings, not the disc's own, and the paint
+//! camera's pitch is a fit to two readings; the
 //! direction the `Angle` turns is chosen by eye; the screen-space target's own resolution and the
 //! mesh's ground-fog parameters are not modelled.
 
@@ -66,6 +70,139 @@ pub struct Pass {
     /// Which of the texel's colour and alpha anything reads ([`Splat::reads`]): a mask's colour
     /// and a layer's alpha are never looked at, so they are never mixed.
     pub reads: (bool, bool),
+    /// How far the pass's texture is softened with distance ([`Mip`]); `None` for a pass that names
+    /// no mips (the masks), which reads its full-size texture at every distance.
+    pub mip: Option<Mip>,
+}
+
+/// A pass's mip levels as the GS picks them (V97): `MipMap_1` levels below the full size, and the
+/// level at a pixel `log2(depth) + K / 16` — the GS's `LCM = 0` LOD, `Q` being one over the depth
+/// in feet — kept between 0 and the last level. The original draws the paint through a camera of
+/// its own, high over the ground ([`paint_depth`]), so no ground is nearer than about 55 feet to it
+/// and the layers read about their quarter-size level everywhere on `free09` (`K = -65`; past 17
+/// feet a layer reads its half-size level, past 67 its quarter). That is most of why the
+/// original's ground is so soft. The level is a floor: where the screen squeezes a texture smaller
+/// still, the renderer's own filtering goes on from there.
+#[derive(Clone, Debug)]
+pub struct Mip {
+    /// `MipMap_1`.
+    pub levels: u32,
+    /// `K / 16`: the level at a depth of one foot.
+    pub bias: f32,
+    /// The levels below the full size, each half the last (box-filtered; the software path's).
+    pub chain: std::sync::Arc<Vec<Texture>>,
+}
+
+impl PartialEq for Mip {
+    fn eq(&self, other: &Mip) -> bool {
+        self.levels == other.levels && self.bias == other.bias
+    }
+}
+
+impl Mip {
+    /// The level the original reads at `depth` feet from the eye along its view.
+    pub fn level(&self, depth: f32) -> f32 {
+        if !(depth > 1.0) {
+            return 0.0;
+        }
+        (depth.log2() + self.bias).clamp(0.0, self.levels as f32)
+    }
+
+    /// `levels` box-filtered halvings of `t`, for a pass whose `.psm` names them with `K`.
+    pub fn of(t: &Texture, levels: u32, k: f32) -> Mip {
+        let mut chain: Vec<Texture> = Vec::new();
+        for _ in 0..levels {
+            let above = chain.last().unwrap_or(t);
+            if above.width < 2 && above.height < 2 {
+                break;
+            }
+            chain.push(half(above));
+        }
+        Mip { levels: chain.len() as u32, bias: k / 16.0, chain: std::sync::Arc::new(chain) }
+    }
+
+    /// The texture at `level` (0 the full size `full`) between its two nearest levels, as a
+    /// trilinear filter reads it.
+    fn sample(&self, full: &Texture, level: f32, u: f32, v: f32, rgb: bool, alpha: bool) -> [u8; 4] {
+        let at = |l: usize| if l == 0 { full } else { &self.chain[l - 1] };
+        let lo = level.max(0.0) as usize;
+        let lo = lo.min(self.chain.len());
+        let f = level - lo as f32;
+        let a = at(lo).sample_smooth_parts(u, v, rgb, alpha);
+        if f <= 0.0 || lo >= self.chain.len() {
+            return a;
+        }
+        let b = at(lo + 1).sample_smooth_parts(u, v, rgb, alpha);
+        std::array::from_fn(|k| (a[k] as f32 + (b[k] as f32 - a[k] as f32) * f + 0.5) as u8)
+    }
+}
+
+/// How high the original's paint camera stands over the ground at the least, in feet (V97).
+pub const PAINT_EYE_LEAST: f32 = 75.0;
+/// How far over the player's eye's height above the ground the paint camera stands, if that is higher.
+pub const PAINT_EYE_OVER: f32 = 15.0;
+/// The paint camera's pitch below level, as its (sine, cosine): read off the running game on
+/// `free09` and `free06` (forward's y −0.732 and −0.739, from player pitches of −18° and −27°).
+pub const PAINT_PITCH: (f32, f32) = (0.735, 0.678);
+
+/// How far ground point `p` is from the original's paint camera along its view (V97), the depth
+/// a pass's [`Mip`] level is read at. The original copies the player's camera into one of its
+/// own, lifts it to [`PAINT_EYE_LEAST`] feet over the ground (or [`PAINT_EYE_OVER`] over the
+/// player's eye, if higher), and tips it to [`PAINT_PITCH`] whatever the player's pitch; it then
+/// draws the paint on a flat plane from there. So a point's depth is its distance ahead along the
+/// player's heading, foreshortened by the pitch, plus the height's share; points behind the eye
+/// count as under it.
+pub fn paint_depth(eye: crate::V3, forward: crate::V3, p: crate::V3) -> f32 {
+    let (sin, cos) = PAINT_PITCH;
+    let n = (forward.x * forward.x + forward.z * forward.z).sqrt();
+    let ahead = if n > 1e-4 { (((p.x - eye.x) * forward.x + (p.z - eye.z) * forward.z) / n).max(0.0) } else { 0.0 };
+    let high = PAINT_EYE_LEAST.max(PAINT_EYE_OVER + eye.y - p.y);
+    cos * ahead + sin * high
+}
+
+/// The nearest any ground is to the original's paint camera, in feet: what a bake that cannot know
+/// the camera ([`paint_depth`]) reads the paint at, so it is never softer than the original's.
+pub const PAINT_NEAREST: f32 = PAINT_EYE_LEAST * PAINT_PITCH.0;
+
+/// [`paint_depth`] in WGSL, `paint_depth(p)` against the shader's `view.eye` and `view.forward`.
+pub fn paint_depth_wgsl() -> String {
+    let f = |v: f32| format!("{v:?}");
+    format!(
+        "fn paint_depth(p: vec3f) -> f32 {{
+  let n = length(view.forward.xz);
+  let ahead = select(0.0, max(dot(p.xz - view.eye.xz, view.forward.xz / max(n, 1e-6)), 0.0), n > 1e-4);
+  let high = max({least}, {over} + view.eye.y - p.y);
+  return {cos} * ahead + {sin} * high;
+}}
+// How much to stretch a texture's gradients so it reads no sharper than `level` of a `size`-texel side.
+fn mip_floor(gx: vec2f, gy: vec2f, size: f32, level: f32) -> f32 {{
+  return max(1.0, exp2(level) / size / max(min(length(gx), length(gy)), 1e-9));
+}}
+",
+        least = f(PAINT_EYE_LEAST),
+        over = f(PAINT_EYE_OVER),
+        cos = f(PAINT_PITCH.1),
+        sin = f(PAINT_PITCH.0),
+    )
+}
+
+/// `t` at half the size, each texel the mean of the four it covers.
+fn half(t: &Texture) -> Texture {
+    let (w, h) = ((t.width / 2).max(1), (t.height / 2).max(1));
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            for k in 0..4 {
+                let mut sum = 0u32;
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let (sx, sy) = ((2 * x + dx).min(t.width - 1), (2 * y + dy).min(t.height - 1));
+                    sum += t.rgba[4 * (sy * t.width + sx) + k] as u32;
+                }
+                rgba[4 * (y * w + x) + k] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    Texture { width: w, height: h, rgba }
 }
 
 /// A freeride track's ground paint.
@@ -162,11 +299,14 @@ impl Splat {
             let blend = (s.number("alphaBlendingOnOff").unwrap_or(0.0) != 0.0).then(|| {
                 [input("inputColorA"), input("inputColorB"), input("inputAlphaC"), input("inputColorD")]
             });
+            let levels = s.number("MipMap_1").unwrap_or(0.0).max(0.0) as u32;
+            let mip = (levels > 0).then(|| Mip::of(&textures[index], levels, s.number("K").unwrap_or(0.0)));
             passes.push(Pass {
                 texture: index,
                 scale,
                 turn: angle.sin_cos(),
                 reads: (true, true),
+                mip,
                 angle,
                 rgba,
                 blend,
@@ -203,7 +343,14 @@ impl Splat {
     /// the GS's way in its own units (alpha 128 = one), then the scene's screen-space meshes over
     /// them ([`GroundMeshes::paint`]).
     pub fn paint(&self, x: f32, z: f32) -> [u8; 3] {
-        let mut frame = self.passes_frame(x, z);
+        self.paint_at(x, z, 0.0)
+    }
+
+    /// [`Splat::paint`] as the original's camera sees it `depth` feet ahead (V97): each pass read at
+    /// its [`Mip`] level there, so far ground is as soft as the original's. A depth of 0 reads every
+    /// texture at its full size, as [`Splat::paint`] does.
+    pub fn paint_at(&self, x: f32, z: f32, depth: f32) -> [u8; 3] {
+        let mut frame = self.passes_frame(x, z, depth);
         if let Some(m) = &self.meshes {
             frame = m.paint(x, z, frame);
         }
@@ -213,16 +360,25 @@ impl Splat {
     /// [`Splat::paint`] without the screen-space meshes: the passes alone (MD35, what a world draws
     /// per pixel, its baked pages giving back the roads and the light).
     pub fn paint_passes(&self, x: f32, z: f32) -> [u8; 3] {
-        self.passes_frame(x, z).map(|c| c.clamp(0.0, 255.0) as u8)[..3].try_into().unwrap()
+        self.paint_passes_at(x, z, 0.0)
+    }
+
+    /// [`Splat::paint_passes`] at `depth` feet from the original's paint camera, as [`Splat::paint_at`].
+    pub fn paint_passes_at(&self, x: f32, z: f32, depth: f32) -> [u8; 3] {
+        self.passes_frame(x, z, depth).map(|c| c.clamp(0.0, 255.0) as u8)[..3].try_into().unwrap()
     }
 
     /// The frame every pass leaves, in the GS's units.
-    fn passes_frame(&self, x: f32, z: f32) -> [f32; 4] {
+    fn passes_frame(&self, x: f32, z: f32, depth: f32) -> [f32; 4] {
         let mut frame = [0.0f32; 4];
         for p in &self.passes {
             let (s, c) = p.turn;
             let (u, v) = ((x * c + z * s) * p.scale[0], (z * c - x * s) * p.scale[1]);
-            let t = self.textures[p.texture].sample_smooth_parts(u, v, p.reads.0, p.reads.1);
+            let full = &self.textures[p.texture];
+            let t = match &p.mip {
+                Some(m) if depth > 0.0 => m.sample(full, m.level(depth), u, v, p.reads.0, p.reads.1),
+                _ => full.sample_smooth_parts(u, v, p.reads.0, p.reads.1),
+            };
             // Modulate by the pass's constant colour; the `.pst` decoder doubled the alpha, so halve it
             // back to the GS's scale.
             let src = [

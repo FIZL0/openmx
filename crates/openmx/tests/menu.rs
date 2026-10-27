@@ -5120,6 +5120,7 @@ fn texture_filtering_rebuilds_the_road_targets_sampler() {
         blend: Some([0, 1, 0, 1]),
         fixed: 128.0,
         reads: (true, true),
+        mip: None,
     };
     let road = Flat::new([[0.0, 0.0], [40.0, 0.0], [0.0, 40.0]], [[0.0; 2]; 3], [[128.0; 4]; 3], pass.clone());
     let splat = Splat { textures: vec![layer()], passes: vec![pass], shadow: None, meshes: GroundMeshes::of(vec![layer()], vec![road]) };

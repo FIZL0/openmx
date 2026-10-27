@@ -355,13 +355,17 @@ impl<'a> Ground<'a> {
                 }
             }
         }
+        // V97: each layer as soft as the original's paint camera reads it there; the ground's own
+        // height is not at hand per pixel, so the eye's stands in (the camera's least height wins).
+        let eye_forward = camera.at.sub(camera.eye).norm();
         let paint = |tag: u32, x: f32, z: f32| match &self.paint {
             None if tag == PAGED => {
                 let c = self.pages.as_ref().and_then(|p| p.paint(x, z)).unwrap_or([255; 3]);
                 [c[0], c[1], c[2], 255]
             }
             Some(splat) if tag != UNPAINTED => {
-                let c = splat.paint(x, z);
+                let depth = game_render::splat::paint_depth(camera.eye, eye_forward, v3(x, camera.eye.y, z));
+                let c = splat.paint_at(x, z, depth);
                 let l = if tag == BAKED { splat.light(x, z).unwrap_or(1.0) } else { 1.0 };
                 let lit = c.map(|c| (c as f32 * l).min(255.0) as u8);
                 [lit[0], lit[1], lit[2], 255]

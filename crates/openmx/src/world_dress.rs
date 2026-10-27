@@ -512,7 +512,8 @@ pub fn bake_splat_sharp(
                 let on = |p: usize| ((((p as f32 + 0.5) / n as f32) - BORDER) / INNER * PAGE_SAMPLES as f32).clamp(0.0, PAGE_SAMPLES as f32);
                 let (lx, lz) = (on(px), on(py));
                 let (x, z) = ((sx0 as f32 + lx) * spacing, (sz0 as f32 + lz) * spacing);
-                let c = splat.paint(x, z);
+                // V97: as soft as the original's nearest paint; a page cannot know the camera.
+                let c = splat.paint_at(x, z, game_render::splat::PAINT_NEAREST);
                 let lit: [f32; 3] = match splat.light(x, z) {
                     Some(l) => {
                         let s = sunlit[(lz as usize).min(side - 1) * side + (lx as usize).min(side - 1)];
@@ -520,7 +521,7 @@ pub fn bake_splat_sharp(
                     }
                     None => c.map(f32::from),
                 };
-                let p = splat.paint_passes(x, z);
+                let p = splat.paint_passes_at(x, z, game_render::splat::PAINT_NEAREST);
                 let m = [0, 1, 2].map(|k| game_render::terrain::modulation_byte(match p[k] {
                     0 if lit[k] < 0.5 => 1.0,
                     p => lit[k] / f32::from(p.max(1)),
@@ -563,7 +564,7 @@ mod tests {
         let bytes = generate::terrain_painted("md35", (4, 4), SPACING, |_, _| 40.0, |_, _| 1, None);
         let terrain = track::Terrain::parse(&bytes).expect("the generated terrain reads");
         let layer = Texture { width: 2, height: 2, rgba: [250, 200, 60, 255].repeat(4) };
-        let pass = Pass { texture: 0, scale: [0.125; 2], angle: 0.0, rgba: [128.0; 4], blend: None, fixed: 0.0, turn: (0.0, 1.0), reads: (true, false) };
+        let pass = Pass { texture: 0, scale: [0.125; 2], angle: 0.0, rgba: [128.0; 4], blend: None, fixed: 0.0, turn: (0.0, 1.0), reads: (true, false), mip: None };
         let mut splat = Splat { textures: vec![layer], passes: vec![pass], shadow: None, meshes: None };
         let light = game_render::world::Lighting::of(&game_render::scene::Scene::parse(""));
         let (pages, modulate) = bake_splat_sharp(&splat, &terrain, SPACING, (4, 4), &light).expect("it bakes");

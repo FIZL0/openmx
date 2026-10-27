@@ -471,6 +471,7 @@ mod tests {
             blend: Some([0, 1, 0, 1]),
             fixed: 128.0,
             reads: (true, true),
+            mip: None,
         };
         let tri = Flat::new([[0.0, 0.0], [4000.0, 0.0], [0.0, 4000.0]], [[0.0; 2]; 3], [[128.0; 4]; 3], pass);
         let m = GroundMeshes::of(vec![Texture { width: 2, height: 2, rgba: vec![128; 16] }], vec![tri]).unwrap();
