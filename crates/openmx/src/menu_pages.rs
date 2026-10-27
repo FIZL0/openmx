@@ -80,7 +80,6 @@ pub enum Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Player,
-    StartOn,
     Wrecks,
     AirWrecks,
     Bays,
@@ -344,8 +343,6 @@ impl Menu {
     }
 
     fn ride_rows(&self) -> Vec<Row> {
-        let machines: Vec<&str> = Machine::ALL.iter().map(|m| m.label()).collect();
-        let at = Machine::ALL.iter().position(|m| *m == self.settings.machines[0]).unwrap_or(0);
         let changed = Knob::MENU
             .iter()
             .filter(|k| (0..SEATS_MAX).any(|s| self.settings.modifiers.get(s, **k) != game_sim::modifiers::ORIGINAL))
@@ -363,7 +360,6 @@ impl Menu {
         }
         let air = air.off_if(!self.settings.wrecks, "Wrecks are off").off_if(self.air_held().is_some(), self.air_held().unwrap_or(""));
         vec![
-            Row::choice(Key::StartOn, "Start On", &machines, at, "The machine a ride starts on. You can switch at any time from the pause, or by stopping at a bay."),
             Row::on_off(Key::Wrecks, "Wrecks", self.settings.wrecks, "Whether a hard landing throws the rider off. Off, you ride out every crash."),
             air,
             Row::on_off(Key::Bays, "Machines at Bays", self.settings.bays, "The lot's bikes and the biplane stand at their bays, see-through, and the original's pop-up offers them when you stop beside one."),
@@ -1070,7 +1066,6 @@ impl Menu {
                 self.player = cycle(self.player, d, n);
                 return;
             }
-            Key::StartOn => s.machines[0] = Machine::ALL[next(row)],
             Key::Wrecks => s.wrecks = !s.wrecks,
             Key::AirWrecks => s.air_wrecks = !s.air_wrecks,
             Key::Bays => s.bays = !s.bays,

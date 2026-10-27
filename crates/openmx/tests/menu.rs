@@ -354,16 +354,6 @@ fn the_settings_file_reads_back_as_it_was_written() {
         air_wrecks: false,
         track: "free11".into(),
         track_filter: "MX vs. ATV Untamed".into(),
-        machines: [
-            Machine::Biplane,
-            Machine::Bike,
-            Machine::Biplane,
-            Machine::Bike,
-            Machine::Bike,
-            Machine::Bike,
-            Machine::Bike,
-            Machine::Biplane,
-        ],
         split: split::Split::SideBySide,
         music: "disc:headstrong".into(),
         music_volume: 35,
@@ -1362,47 +1352,33 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     assert_eq!(garages[1].up, Kind::Biplane);
 }
 
+/// P177: no pick of a start machine is left. The ride setup's Square, L1 and R1 change nothing,
+/// the ride starts on the bike, and an old settings.txt with its machines line loads and drops it.
 #[test]
-fn the_setups_pick_starts_the_ride_on_it() {
+fn a_ride_starts_on_the_bike() {
     let (mut m, mut r) = fresh();
     m.riders = 2;
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
-    // Square changes 1P's machine; R1 on to 2P and back to bike-then-plane leaves 2P on the plane;
-    // R1 again wraps to 1P (P118: the setup strip's seat is on the shoulders, the d-pad's up and
-    // down walk the tracks; left and right step the pick's categories, of which the disc alone has
-    // one, so they change nothing here).
-    tap(&mut m, &mut r, Control::Square);
-    assert_eq!(m.settings.machines[0], Machine::Biplane);
-    tap(&mut m, &mut r, Control::R1);
-    tap(&mut m, &mut r, Control::Square);
-    tap(&mut m, &mut r, Control::Right);
-    tap(&mut m, &mut r, Control::Left);
-    assert_eq!(m.settings.machines[..2], [Machine::Biplane, Machine::Biplane]);
-    tap(&mut m, &mut r, Control::R1);
-    tap(&mut m, &mut r, Control::Square);
-    assert_eq!(m.settings.machines[..3], [Machine::Bike, Machine::Biplane, Machine::Bike]);
-    tap(&mut m, &mut r, Control::L1);
-    tap(&mut m, &mut r, Control::L1);
-    tap(&mut m, &mut r, Control::Square);
-    tap(&mut m, &mut r, Control::Down);
-    assert_eq!(m.cursor(Screen::Tracks), 1);
-    assert_eq!(m.settings.machines[..2], [Machine::Biplane, Machine::Biplane]);
+    let before = m.settings.clone();
+    for c in [Control::Square, Control::R1, Control::Square, Control::L1] {
+        let acts = tap(&mut m, &mut r, c);
+        assert!(acts.iter().all(|a| *a == Act::Stay), "{c:?}: {acts:?}");
+        assert_eq!(m.screen(), Some(Screen::Tracks));
+    }
+    assert_eq!(m.settings, before);
+    assert!(!m.take_changed());
     let acts = tap(&mut m, &mut r, Control::Cross);
-    assert!(acts.contains(&Act::Ride("free07".into())), "{acts:?}");
-    assert!(m.take_changed());
-
-    // The ride starts on the pick: the shell reads 1P's as `--vehicle`'s word into the garage.
-    let up = Kind::parse(m.settings.machines[0].word()).unwrap();
-    assert_eq!(garage(0, up).up, Kind::Biplane);
-    // And the pick is what the file keeps, so the next session's setup opens on it.
-    let dir = scratch("machines");
-    menu::save(&dir, &m.settings, &m.controls).unwrap();
-    assert_eq!(menu::load(&dir).0.machines, m.settings.machines);
-    assert!(std::fs::read_to_string(dir.join(menu::SETTINGS_FILE)).unwrap().contains("machines = biplane biplane bike"));
-    std::fs::remove_dir_all(dir).ok();
-    // An older file, with no machines line, rides the bike.
-    assert_eq!(Settings::parse("track = free07\n").machines, [Machine::Bike; menu::SEATS_MAX]);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    // The Ride tab has no Start On row.
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Settings");
+    tab_to(&mut m, &mut r, "Ride");
+    assert!(m.page().iter().all(|row| row.label != "Start On"));
+    // An old file's machines line loads, and is not written back.
+    let old = Settings::parse("track = free07\nmachines = biplane biplane bike\n");
+    assert_eq!(old, Settings { track: "free07".into(), ..Settings::default() });
+    assert!(!old.text().contains("machines"));
 }
 
 /// Whether two boxes (left, top, width, height) share any pixels.
@@ -3360,8 +3336,7 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_mxu", "down wraps inside the worlds");
     tap(&mut m, &mut r, Control::Up);
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_ultra");
-    // Left from the first category wraps to the last; the machine stays as it was.
-    let machine = m.settings.machines[0];
+    // Left from the first category wraps to the last.
     for _ in 0..3 {
         tap(&mut m, &mut r, Control::Left);
     }
@@ -3370,7 +3345,6 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
         tap(&mut m, &mut r, Control::Right);
     }
     assert_eq!(m.track_filter_group(), 2);
-    assert_eq!(m.settings.machines[0], machine, "left and right no longer change the machine");
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Ride("world_mxu".into())), "{acts:?}");
     // Back on the pick it opens on the world, and a category comes back to the ride's track.
@@ -3524,7 +3498,7 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera", "Original"]);
     tab_to(&mut m, &mut r, "Ride");
     // Controls has no Player row with one seat (P81); Graphics opens past its World heading.
-    let first = [Key::StartOn, Key::Hud, Key::DrawDistance, Key::Mix, Key::BikeLayout, Key::Player, Key::Original];
+    let first = [Key::Wrecks, Key::Hud, Key::DrawDistance, Key::Mix, Key::BikeLayout, Key::Player, Key::Original];
     let here = |m: &Menu, s: Screen| (m.tab(s), m.page()[m.cursor(s)].key);
     for (i, key) in first.iter().enumerate() {
         assert_eq!(here(&m, Screen::Settings), (i, *key));
@@ -3532,7 +3506,7 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
         tap(&mut m, &mut r, Control::Down);
         tap(&mut m, &mut r, Control::R1);
     }
-    assert_eq!(here(&m, Screen::Settings), (0, Key::StartOn), "R1 from Original is Ride");
+    assert_eq!(here(&m, Screen::Settings), (0, Key::Wrecks), "R1 from Original is Ride");
     tap(&mut m, &mut r, Control::L1);
     assert_eq!(here(&m, Screen::Settings), (6, Key::Original), "L1 from Ride is Original");
     for i in (0..6).rev() {
@@ -3724,14 +3698,12 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
         custom.text(),
         CameraView::DEFAULT.text()
     );
-    let (b, p) = (Machine::Bike, Machine::Biplane);
     let want = Settings {
         name: "Ricky C".into(),
         overlay: Overlay::None,
         speedometer: Speedometer::Analog,
         wrecks: false,
         track: "free11".into(),
-        machines: [p, b, p, b, b, b, b, p],
         split: split::Split::SideBySide,
         music: "disc:headstrong".into(),
         music_volume: 35,
@@ -3760,7 +3732,10 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
         ..Settings::default()
     };
     assert_eq!(Settings::parse(&old), want);
-    assert_eq!(want.text(), old, "the redo writes an old file's settings as they were");
+    // Every line but the ride setup's machines, which went with Start On (P177).
+    let machines = "machines = biplane bike biplane bike bike bike bike biplane\n";
+    assert!(old.contains(machines));
+    assert_eq!(want.text(), old.replace(machines, ""), "the redo writes an old file's settings as they were");
     // The original's few keys from P36 alone.
     let p36 = Settings::parse("name = Rider\noverlay = on\nwrecks = on\n");
     assert_eq!(p36, Settings { name: "Rider".into(), ..Settings::default() });

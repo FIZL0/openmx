@@ -1991,11 +1991,6 @@ fn front_end(args: Args) -> Result<(), String> {
                     a.modifiers = shell.front.menu.settings.modifiers;
                 }
                 a.wiring = shell.front.wiring();
-                // The ride setup's machine for 1P (P41), unless `--vehicle biplane` asked for the plane
-                // whatever the setup says. The other seats' picks are read where their garages are.
-                if args.vehicle == Kind::Bike {
-                    a.vehicle = Kind::parse(shell.front.menu.settings.machines[0].word())?;
-                }
                 // The shot is the menu's unless it is of the pause, which is drawn over the ride.
                 a.shot = shot.take_if(|_| shell.front.menu.screen() == Some(menu::Screen::Pause));
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
@@ -2285,9 +2280,9 @@ fn front_end(args: Args) -> Result<(), String> {
             let text = pick_markers.of(&shell.front.dir, &track, &profile, &bike).to_string();
             shell.front.menu.lobby.set_markers(text);
         }
-        // 1P's ride setup machine into it too (N18), which every machine starts the seat on, as the
-        // ride's own start reads it: `--vehicle biplane` over the setup.
-        let machine = if args.vehicle == Kind::Biplane { Kind::Biplane.name() } else { shell.front.menu.settings.machines[0].word() };
+        // 1P's start machine into it too (N18), which every machine starts the seat on: the bike
+        // (P177), or the plane under `--vehicle biplane`.
+        let machine = args.vehicle.name();
         shell.front.menu.lobby.set_machine(machine);
         // 1P's own modifiers into it too, and the host's room every seat's (P134).
         shell.front.menu.lobby_mods();
@@ -4667,25 +4662,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }];
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
-        // that parks none for them, starting beside the start line (P113), and starts in it if the
-        // setup picked it (P41). Only a disc without the plane rides the bike, and says so.
+        // that parks none for them, starting beside the start line (P113). A local seat starts on the
+        // bike (P177) and switches from the pause or at a bay.
         // An online peer's seat (N16) starts as its own machine says, at tick 0 or as it is taken on.
-        let pick = match i + 1 < args.players {
-            true => front.as_ref().map_or(menu::Machine::Bike, |f| f.menu.settings.machines[i + 1]),
-            false => menu::Machine::Bike,
-        };
         let plane = match plane_starts.get(i + 1) {
             Some(&start) => lot.plane_anywhere(i + 1, flight_for(i + 1), start),
             None => lot.plane(i + 1, flight_for(i + 1)),
         };
-        let up = match (pick, &plane) {
-            (menu::Machine::Biplane, Some(_)) => Kind::Biplane,
-            (menu::Machine::Bike, _) => Kind::Bike,
-            (pick, None) => {
-                println!("vehicle: player {} picked the {}, but this ride has none; the bike", i + 2, pick.word());
-                Kind::Bike
-            }
-        };
+        let up = Kind::Bike;
         seats.push(Seat {
             reports: [Report::missing(); PADS],
             sim: Sim::with_rider(0, tables.clone(), phy, rider),

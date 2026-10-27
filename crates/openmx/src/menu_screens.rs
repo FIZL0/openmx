@@ -978,7 +978,6 @@ impl Pen<'_> {
             self.framed_still(menu, track, b, &format!("Last ridden · {town}"));
             let y = self.heading("", h, &p, x, b[1] + b[3] + 1.0, w, 2.6);
             let chips = vec![
-                menu.settings.machines[0].label().to_string(),
                 format!("Wrecks *{}*", if menu.settings.wrecks { "On" } else { "Off" }),
                 format!("Modifiers *{}*", modifiers_word(menu)),
             ];
@@ -1235,29 +1234,14 @@ impl Pen<'_> {
         let room = w - self.wide(Weight::Bold, &count, 1.2) - 2.0;
         let y = self.heading("", name, "", x, b[1] + b[3] + 1.0, room, 2.6);
         self.text(Weight::Bold, &count, x + w - 1.0, b[1] + b[3] + 1.0 + CAP * 1.2, 1.2, 0.0, EYEBROW, Align::Right);
-        // The setup strip: each rider's machine, the wrecks, the modifiers.
-        let riders = menu.riders.clamp(1, SEATS_MAX);
-        let seat = menu.setup_seat.min(riders - 1);
-        let mut chips: Vec<String> = (0..riders)
-            .map(|i| {
-                let m = menu.settings.machines[i].label();
-                match (riders, i == seat) {
-                    (1, _) => format!("Machine *{m}*"),
-                    (_, true) => format!("{}P *{m}* ‹", i + 1).replace(" ‹", ""),
-                    _ => format!("{}P {m}", i + 1),
-                }
-            })
-            .collect();
-        chips.push(format!("Wrecks *{}*", if menu.settings.wrecks { "On" } else { "Off" }));
-        chips.push(format!("Modifiers *{}*", modifiers_word(menu)));
+        // The setup strip: the wrecks and the modifiers. Every ride starts on the bike (P177); the
+        // machine is switched from the pause or at a bay.
+        let chips = vec![format!("Wrecks *{}*", if menu.settings.wrecks { "On" } else { "Off" }), format!("Modifiers *{}*", modifiers_word(menu))];
         self.chips(&chips, x, y + 1.0, w);
         self.title(Screen::Tracks.title());
-        let mut hints = vec![(Btn::Circle, "Back"), (Btn::Square, "Machine"), (Btn::Triangle, "Wrecks")];
+        let mut hints = vec![(Btn::Circle, "Back"), (Btn::Triangle, "Wrecks")];
         if groups.len() > 1 {
             hints.push((Btn::LeftRight, "Game"));
-        }
-        if riders > 1 {
-            hints.push((Btn::L1R1, "Player"));
         }
         hints.push((Btn::Cross, "Ride"));
         self.hints(&hints);

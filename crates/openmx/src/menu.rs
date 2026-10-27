@@ -408,8 +408,6 @@ pub struct Settings {
     pub air_wrecks: bool,
     /// The last track ridden, which the track pick opens on.
     pub track: String,
-    /// The machine each seat's ride starts on, the ride setup's pick (P41), 1P's first.
-    pub machines: [Machine; SEATS_MAX],
     /// How a local game of two shares the screen, the split layout's pick (P43): `--split`'s.
     pub split: Split,
     /// The music (P42): `off`, `shuffle`, `order` (P56), or one song's id, repeated
@@ -1131,7 +1129,6 @@ impl Default for Settings {
             wrecks: true,
             air_wrecks: true,
             track: TRACKS[0].0.into(),
-            machines: [Machine::Bike; SEATS_MAX],
             split: Split::default(),
             music: "shuffle".into(),
             music_volume: 70,
@@ -1243,14 +1240,9 @@ impl Settings {
                 "wrecks" => s.wrecks = v != "off",
                 "air_wrecks" => s.air_wrecks = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
-                // One word a seat, 1P's first; a seat the line does not reach rides the bike.
-                "machines" => {
-                    for (i, w) in v.split_whitespace().take(SEATS_MAX).enumerate() {
-                        if let Some(m) = Machine::from_word(w) {
-                            s.machines[i] = m;
-                        }
-                    }
-                }
+                // The ride setup's machine a seat (P41), gone with Start On (P177): every ride starts
+                // on the bike, so an old file's line loads and is dropped.
+                "machines" => {}
                 "split" => s.split = Split::parse(v).unwrap_or(s.split),
                 "music" if !v.is_empty() => s.music = v.to_string(),
                 "music_volume" => s.music_volume = level(v, s.music_volume),
@@ -1345,13 +1337,12 @@ impl Settings {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nspeedometer = {}\nwrecks = {}\ntrack = {}\nmachines = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\nfolder_volume = {}\ncrowd_volume = {}\nengine_volume = {}\nmenu_volume = {}\nmix = {}\ncustom = {}\ngraphics = {}\nrender_scale = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nspeedometer = {}\nwrecks = {}\ntrack = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\nfolder_volume = {}\ncrowd_volume = {}\nengine_volume = {}\nmenu_volume = {}\nmix = {}\ncustom = {}\ngraphics = {}\nrender_scale = {}\n",
             self.name,
             self.overlay.word(),
             self.speedometer.word(),
             on_off(self.wrecks),
             self.track,
-            self.machines.map(Machine::word).join(" "),
             split_word(self.split),
             self.music,
             self.music_volume,
@@ -2471,8 +2462,6 @@ pub struct Menu {
     /// The machine the pause's switch row has picked (P102): left and right step it through the
     /// pauser's [`Menu::choices`], and OK switches to it. `None` until a step, which is the first.
     switch_pick: Option<Machine>,
-    /// The seat whose machine the ride setup's machine row is picking.
-    setup_seat: usize,
     /// What the garage offers, off the disc; empty until [`Menu::with_garage`] gives it one.
     pub catalogue: Catalogue,
     /// Every seat's pick, as `garage.txt` keeps them.
@@ -2753,7 +2742,6 @@ impl Menu {
             switchable: [false; SEATS_MAX],
             pauser: 0,
             switch_pick: None,
-            setup_seat: 0,
             catalogue: Catalogue::default(),
             picks: Picks::default(),
             garages: Vec::new(),
@@ -2929,7 +2917,6 @@ impl Menu {
                     let riders = self.join.riders();
                     let devices: Vec<usize> = self.join.views().into_iter().filter_map(|i| riders[i]).collect();
                     self.riders = devices.len();
-                    self.setup_seat = 0;
                     let at = layouts(self.riders).iter().position(|l| {
                         *l == split::Layout::for_players(self.riders, self.settings.split).unwrap_or(split::Layout::Full)
                     });
@@ -3807,21 +3794,9 @@ impl Menu {
                 }
             }
             Screen::Tracks => {
-                let riders = self.riders.clamp(1, SEATS_MAX);
-                if p.l1 || p.r1 {
-                    let at = self.setup_seat.min(riders - 1);
-                    self.setup_seat = if p.l1 { (at + riders - 1) % riders } else { (at + 1) % riders };
-                    return Act::Stay;
-                }
                 // Triangle is the strip's Wrecks; it is also Back, so it goes first.
                 if p.triangle {
                     self.settings.wrecks = !self.settings.wrecks;
-                    self.changed = true;
-                    return Act::Stay;
-                }
-                if p.delete {
-                    let seat = self.setup_seat.min(riders - 1);
-                    self.settings.machines[seat] = self.settings.machines[seat].other();
                     self.changed = true;
                     return Act::Stay;
                 }
