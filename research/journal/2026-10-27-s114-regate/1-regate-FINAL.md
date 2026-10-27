@@ -1,4 +1,4 @@
-# 1 — regate (PART)
+# 1 — regate (FINAL)
 
 Task S114. 2026-10-27.
 
