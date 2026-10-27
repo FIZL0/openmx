@@ -1,0 +1,108 @@
+# check.toml — a small spec for comparing two playbacks of the 2p recording (C10): which PCSX2 build
+# rides the user's ride. Few enough words to poll every tick at NominalScalar 0.5. The chains are
+# watch/2p.toml's (research/c10/make_spec.py).
+# Played by research/c10/play_capture.sh with SPEC=research/c10/check.toml.
+
+[watch]
+name        = "2p-check"
+description = "the 2p recording, both riders' positions, wrecks and body modes"
+every       = 1
+frames      = 12917
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "p1_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p1_wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p1_ch_centre"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "p1_rec_count"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "p1_wf_car"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1f4"
+type = "u32"
+
+[[field]]
+name = "p2_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p2_wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p2_ch_centre"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "p2_rec_count"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "p2_wf_car"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1f4"
+type = "u32"
+
+[[field]]
+name = "pad0_a"
+addr = "@pad_buffers"
+type = "bytes:8"
+
+[[field]]
+name = "pad1_a"
+addr = "@pad_buffers + 0x400"
+type = "bytes:8"
+
+[[field]]
+name = "car0_pos"
+addr = "0x00fec250"
+type = "f32x3"
+
+[[field]]
+name = "car1_pos"
+addr = "0x01b800b0"
+type = "f32x3"
+
+[[field]]
+name = "car2_pos"
+addr = "0x01b8f610"
+type = "f32x3"
+
+[[field]]
+name = "car3_pos"
+addr = "0x01b94200"
+type = "f32x3"
+
+[[field]]
+name = "car4_pos"
+addr = "0x01ba0d10"
+type = "f32x3"
+
+[[field]]
+name = "car5_pos"
+addr = "0x01ba5920"
+type = "f32x3"

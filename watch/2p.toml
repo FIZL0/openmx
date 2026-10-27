@@ -1,0 +1,1108 @@
+# 2p.toml — the user's 2p recording, both riders, every tick (C10). The human recording of record for
+# wrecks, collisions, ragdoll, rider-vs-rider, the trucks and the animations.
+#
+# Generated: `python3 -B research/c10/make_spec.py > watch/2p.toml` (edit the generator, not this file).
+# Played by research/c10/play_capture.sh (S93's recipe) on a kit copy whose PCSX2.ini has
+# `[Pad2] Type = DualShock2` and NominalScalar 0.05 (the recorder needs the time for ~17 KB a row; at
+# 0.25 it lost 36 ticks of 12,917; the capture of record ran at 0.05 with none lost). Edit the ini while
+# the copy is stopped: PCSX2 writes it on exit.
+#
+#   export WAYLAND_DISPLAY=wayland-1 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 QT_ACCESSIBILITY=1
+#   ./kit pcsx2 start
+#   ./kit pcsx2 with -- bash research/c10/play_capture.sh PID context/recordings/split/2p.p2m2 \
+#       127882 12917 context/capture/2p/2p.csv
+#
+# The tape's state holds frame_counter 127881. This state ticks at 60 Hz (dt 1/60) and the playback
+# reads one tape field a tick (research/c10/align.py), so the movie's 12,917 fields
+# are the ticks 127882..140798; PCSX2 pauses at its end.
+# crates/game-sim/tests/two_p.rs reads the capture.
+#
+# The list, measured in the 2p state's RAM (research/c10/peek.py): 0 and 1 the biplanes (type 1), 2 P2's
+# ridden vehicle (player +0x30 = 1), 3 P1's (player 0), 4 P1's bike actor, 5 P2's. Both are local
+# humans. Every rider's columns carry the type, player index and joint-count guards, so a row whose list
+# moved under it says so. Per rider (`p1_`/`p2_`):
+#
+#   * split.toml's vehicle, chassis, collision record (11 entries) and bike actor;
+#   * C6's air, backflip and trick-machine words (acceptance.toml);
+#   * each wheel's contact flag, owner and vehicle (+0x1f4: the path car it stands on, S136) and the
+#     car velocity it subtracts;
+#   * the rider body (bike actor - 0x400): its mode (rider_body_mode: 0 placed, 1 riding, 2 the wreck
+#     ragdoll, 3 table/hold, 4 the start line or a look-around), the ragdoll's flags, the motion clock
+#     and the machine (rider-joints.toml), the 22 posed joints and the 18 ragdoll parts' bodies
+#     (s56-ragdoll.toml).
+#
+# Then the six path cars by their fixed heap addresses (vtable at +8; three cabs and three trailers).
+
+[watch]
+name        = "2p"
+description = "the user's 2p recording: both riders, wrecks, contacts, bodies and the path cars"
+every       = 1
+frames      = 12917
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[array]]
+name   = "ctl0"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0x0
+type = "u32"
+
+[[array]]
+name   = "ctl1"
+addr   = "@pad1_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0x0
+type = "u32"
+
+[[field]]
+name = "pad0_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "pad0_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "pad1_a"
+addr = "@pad_buffers + 0x400"
+type = "bytes:20"
+
+[[field]]
+name = "pad1_b"
+addr = "@pad_buffers + 0x480"
+type = "bytes:20"
+
+[[field]]
+name = "stamp0_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "stamp0_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+[[field]]
+name = "stamp1_a"
+addr = "@pad_buffers + 0x458"
+type = "u32"
+
+[[field]]
+name = "stamp1_b"
+addr = "@pad_buffers + 0x4d8"
+type = "u32"
+
+# ----------------------------------------------------------------------------------------------------
+# P1: vehicle @game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0
+
+[[field]]
+name = "p1_type"  # 2 = the ridden vehicle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p1_index"  # player +0x30: 0 for P1, 1 for P2
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p1_ctl_src"  # 1 = a local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "p1_wreck_reason"  # 0 riding, else the reason
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p1_wreck_state"  # the wrecked flag, 2 = put-back ghost
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xb7c"
+type = "u32"
+
+[[field]]
+name = "p1_on_ground"  # the air step: either wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "p1_both_wheels"  # both wheels touch
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x578"
+type = "u32"
+
+[[field]]
+name = "p1_airborne"  # neither wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x57c"
+type = "u32"
+
+[[field]]
+name = "p1_g_peak"  # the substeps' max-by-magnitude body-frame acceleration
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x550"
+type = "f32x4"
+
+[[field]]
+name = "p1_joust_vel"  # the velocity a joust copies in
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x560"
+type = "f32x3"
+
+[[field]]
+name = "p1_flip_torqued"  # the backflip (C6)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x4f4"
+type = "u32"
+
+[[field]]
+name = "p1_flip_ramp"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x4f8"
+type = "u32"
+
+[[field]]
+name = "p1_flip_on"  # fired
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x4fc"
+type = "u32"
+
+[[field]]
+name = "p1_flip_arm"  # armed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x500"
+type = "u32"
+
+[[field]]
+name = "p1_flip_grace"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x50c"
+type = "f32"
+
+[[field]]
+name = "p1_flip_torque"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x520"
+type = "f32x4"
+
+[[field]]
+name = "p1_fresh"  # just put back; no trick may start
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x750"
+type = "u32"
+
+[[field]]
+name = "p1_trick_latched"  # the trick machine (C6)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x864"
+type = "u32"
+
+[[field]]
+name = "p1_trick_group"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x9fc"
+type = "u32"
+
+[[field]]
+name = "p1_trick_dir"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa00"
+type = "u32"
+
+[[field]]
+name = "p1_trick_count"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa04"
+type = "u32"
+
+[[field]]
+name = "p1_trick_running"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa0c"
+type = "u32"
+
+[[field]]
+name = "p1_trick_safe"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa10"
+type = "u32"
+
+[[field]]
+name = "p1_trick_armed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa18"
+type = "u32"
+
+[[field]]
+name = "p1_trick_elapsed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa1c"
+type = "f32"
+
+[[field]]
+name = "p1_trick_id"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa78"
+type = "u32"
+
+[[field]]
+name = "p1_trick_req"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa7c"
+type = "u32"
+
+[[field]]
+name = "p1_was_airborne"  # the air step: airborne the substep before
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x580"
+type = "u32"
+
+[[field]]
+name = "p1_hang_time"  # seconds in the air
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x4f0"
+type = "f32"
+
+[[field]]
+name = "p1_crossup"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x600"
+type = "f32"
+
+[[field]]
+name = "p1_ch_centre"  # chassis: centre
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_speed"  # chassis_measure: speed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "p1_ch_euler"  # chassis_measure: pitch, yaw, roll (the wreck test reads +0x90, +0x98)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x90"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_force"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x130"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_moment"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x140"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_shock"  # impulse shock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x170"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_twist"  # impulse twist
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x180"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x3"
+
+[[field]]
+name = "p1_ch_rates"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x290"
+type = "f32x3"
+
+[[field]]
+name = "p1_rec_count"  # the collision record: contacts (cap 11)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "p1_rec_struck"  # raised when another record mirrors a hit in
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x40"
+type = "bytes:16"
+
+[[array]]
+name   = "p1_c"  # the record's contact list, 0x80-byte entries
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0x0
+type = "u32"
+
+[[array.field]]
+name = "end"
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "other"
+off  = 0x74
+type = "u32"
+
+[[field]]
+name = "p1_wf_contact"  # wheel_set_contact's flag
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xd4"
+type = "u32"
+
+[[field]]
+name = "p1_wf_owner"  # the object the contact belongs to
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1f0"
+type = "u32"
+
+[[field]]
+name = "p1_wf_car"  # the vehicle under the wheel: a path car when riding one (S136)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1f4"
+type = "u32"
+
+[[field]]
+name = "p1_wf_car_vel"  # the car velocity the wheel subtracts
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1b0"
+type = "f32x3"
+
+[[field]]
+name = "p1_wr_contact"  # wheel_set_contact's flag
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xd4"
+type = "u32"
+
+[[field]]
+name = "p1_wr_owner"  # the object the contact belongs to
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x1f0"
+type = "u32"
+
+[[field]]
+name = "p1_wr_car"  # the vehicle under the wheel: a path car when riding one (S136)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x1f4"
+type = "u32"
+
+[[field]]
+name = "p1_wr_car_vel"  # the car velocity the wheel subtracts
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x1b0"
+type = "f32x3"
+
+[[field]]
+name = "p1_bike_type"  # 4 = a bike actor
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p1_bike_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p1_bike_vel"  # 0.8 of the body's
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x3"
+
+[[field]]
+name = "p1_bike_xform"  # row 3 the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
+[[field]]
+name = "p1_joint_count"  # 22
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x230 - 0x400"
+type = "u32"
+
+[[field]]
+name = "p1_mode"  # 0 placed, 1 riding, 2 wreck ragdoll, 3 table/hold, 4 start/look
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x47c - 0x400"
+type = "s32"
+
+[[field]]
+name = "p1_mode_prev"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x480 - 0x400"
+type = "s32"
+
+[[field]]
+name = "p1_touching"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x48c - 0x400"
+type = "u32"
+
+[[field]]
+name = "p1_roll"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x490 - 0x400"
+type = "f32"
+
+[[field]]
+name = "p1_rag_flags"  # riding, repose, placed, active, stiff, torques
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2a4 - 0x400"
+type = "bytes:24"
+
+[[field]]
+name = "p1_off_bike"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b0 - 0x400"
+type = "u32"
+
+[[field]]
+name = "p1_settled"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b4 - 0x400"
+type = "u32"
+
+[[field]]
+name = "p1_flung"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b8 - 0x400"
+type = "u32"
+
+[[field]]
+name = "p1_m_finished"  # the motion clock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x3c - 0x400"
+type = "u32"
+
+[[field]]
+name = "p1_m_clock"  # +0x48 clip, +0x4c from, +0x50 last, +0x54 time, +0x80.. fade
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x48 - 0x400"
+type = "bytes:80"
+
+[[field]]
+name = "p1_d_flags"  # the machine: +0x68c ramp
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x680 - 0x400"
+type = "bytes:40"
+
+[[field]]
+name = "p1_d_cross"  # +0x8f0 state, +0x8f4 want
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8dc - 0x400"
+type = "bytes:36"
+
+[[field]]
+name = "p1_d_extra"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x9f0 - 0x400"
+type = "s32"
+
+[[field]]
+name = "p1_d_reverse"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa3c - 0x400"
+type = "f32"
+
+[[field]]
+name = "p1_req_placing"  # the request: placement flag
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0xc"
+type = "u32"
+
+[[field]]
+name = "p1_req_wreck"  # the request: wreck reason
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x104"
+type = "u32"
+
+[[field]]
+name = "p1_req_axes"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x170"
+type = "f32x3"
+
+[[field]]
+name = "p1_req_progress"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1a4"
+type = "f32"
+
+[[array]]
+name   = "p1_j"  # the 22 posed joints
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x234 - 0x400 -> 0x0"
+count  = 22
+stride = 0x60
+
+[[array.field]]
+name = "t"
+off  = 0x40
+type = "f32x4"
+
+[[array.field]]
+name = "q"
+off  = 0x50
+type = "f32x4"
+
+[[array]]
+name   = "p1_bone"  # the 18 ragdoll parts' rigid bodies
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2f4 - 0x400 -> 0x0"
+count  = 18
+stride = 0xb0
+
+[[array.field]]
+name = "pos"
+off  = "0xa4 -> 0x60"
+type = "f32x3"
+
+[[array.field]]
+name = "vel"
+off  = "0xa4 -> 0x70"
+type = "f32x3"
+
+[[array.field]]
+name = "quat"
+off  = "0xa4 -> 0x170"
+type = "f32x4"
+
+# ----------------------------------------------------------------------------------------------------
+# P2: vehicle @game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0
+
+[[field]]
+name = "p2_type"  # 2 = the ridden vehicle
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p2_index"  # player +0x30: 0 for P1, 1 for P2
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p2_ctl_src"  # 1 = a local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "p2_wreck_reason"  # 0 riding, else the reason
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p2_wreck_state"  # the wrecked flag, 2 = put-back ghost
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xb7c"
+type = "u32"
+
+[[field]]
+name = "p2_on_ground"  # the air step: either wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "p2_both_wheels"  # both wheels touch
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x578"
+type = "u32"
+
+[[field]]
+name = "p2_airborne"  # neither wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x57c"
+type = "u32"
+
+[[field]]
+name = "p2_g_peak"  # the substeps' max-by-magnitude body-frame acceleration
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x550"
+type = "f32x4"
+
+[[field]]
+name = "p2_joust_vel"  # the velocity a joust copies in
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x560"
+type = "f32x3"
+
+[[field]]
+name = "p2_flip_torqued"  # the backflip (C6)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f4"
+type = "u32"
+
+[[field]]
+name = "p2_flip_ramp"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f8"
+type = "u32"
+
+[[field]]
+name = "p2_flip_on"  # fired
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4fc"
+type = "u32"
+
+[[field]]
+name = "p2_flip_arm"  # armed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x500"
+type = "u32"
+
+[[field]]
+name = "p2_flip_grace"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x50c"
+type = "f32"
+
+[[field]]
+name = "p2_flip_torque"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x520"
+type = "f32x4"
+
+[[field]]
+name = "p2_fresh"  # just put back; no trick may start
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x750"
+type = "u32"
+
+[[field]]
+name = "p2_trick_latched"  # the trick machine (C6)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x864"
+type = "u32"
+
+[[field]]
+name = "p2_trick_group"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9fc"
+type = "u32"
+
+[[field]]
+name = "p2_trick_dir"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa00"
+type = "u32"
+
+[[field]]
+name = "p2_trick_count"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa04"
+type = "u32"
+
+[[field]]
+name = "p2_trick_running"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa0c"
+type = "u32"
+
+[[field]]
+name = "p2_trick_safe"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa10"
+type = "u32"
+
+[[field]]
+name = "p2_trick_armed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa18"
+type = "u32"
+
+[[field]]
+name = "p2_trick_elapsed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa1c"
+type = "f32"
+
+[[field]]
+name = "p2_trick_id"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa78"
+type = "u32"
+
+[[field]]
+name = "p2_trick_req"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa7c"
+type = "u32"
+
+[[field]]
+name = "p2_was_airborne"  # the air step: airborne the substep before
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x580"
+type = "u32"
+
+[[field]]
+name = "p2_hang_time"  # seconds in the air
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f0"
+type = "f32"
+
+[[field]]
+name = "p2_crossup"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x600"
+type = "f32"
+
+[[field]]
+name = "p2_ch_centre"  # chassis: centre
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_speed"  # chassis_measure: speed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "p2_ch_euler"  # chassis_measure: pitch, yaw, roll (the wreck test reads +0x90, +0x98)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x90"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_force"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x130"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_moment"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x140"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_shock"  # impulse shock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x170"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_twist"  # impulse twist
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x180"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x3"
+
+[[field]]
+name = "p2_ch_rates"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x290"
+type = "f32x3"
+
+[[field]]
+name = "p2_rec_count"  # the collision record: contacts (cap 11)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "p2_rec_struck"  # raised when another record mirrors a hit in
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x40"
+type = "bytes:16"
+
+[[array]]
+name   = "p2_c"  # the record's contact list, 0x80-byte entries
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x108 -> 0x0"
+count  = 11
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0x0
+type = "u32"
+
+[[array.field]]
+name = "end"
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "other"
+off  = 0x74
+type = "u32"
+
+[[field]]
+name = "p2_wf_contact"  # wheel_set_contact's flag
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xd4"
+type = "u32"
+
+[[field]]
+name = "p2_wf_owner"  # the object the contact belongs to
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1f0"
+type = "u32"
+
+[[field]]
+name = "p2_wf_car"  # the vehicle under the wheel: a path car when riding one (S136)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1f4"
+type = "u32"
+
+[[field]]
+name = "p2_wf_car_vel"  # the car velocity the wheel subtracts
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x1b0"
+type = "f32x3"
+
+[[field]]
+name = "p2_wr_contact"  # wheel_set_contact's flag
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xd4"
+type = "u32"
+
+[[field]]
+name = "p2_wr_owner"  # the object the contact belongs to
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x1f0"
+type = "u32"
+
+[[field]]
+name = "p2_wr_car"  # the vehicle under the wheel: a path car when riding one (S136)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x1f4"
+type = "u32"
+
+[[field]]
+name = "p2_wr_car_vel"  # the car velocity the wheel subtracts
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x1b0"
+type = "f32x3"
+
+[[field]]
+name = "p2_bike_type"  # 4 = a bike actor
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p2_bike_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p2_bike_vel"  # 0.8 of the body's
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x3"
+
+[[field]]
+name = "p2_bike_xform"  # row 3 the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
+[[field]]
+name = "p2_joint_count"  # 22
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x230 - 0x400"
+type = "u32"
+
+[[field]]
+name = "p2_mode"  # 0 placed, 1 riding, 2 wreck ragdoll, 3 table/hold, 4 start/look
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x47c - 0x400"
+type = "s32"
+
+[[field]]
+name = "p2_mode_prev"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x480 - 0x400"
+type = "s32"
+
+[[field]]
+name = "p2_touching"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x48c - 0x400"
+type = "u32"
+
+[[field]]
+name = "p2_roll"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x490 - 0x400"
+type = "f32"
+
+[[field]]
+name = "p2_rag_flags"  # riding, repose, placed, active, stiff, torques
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2a4 - 0x400"
+type = "bytes:24"
+
+[[field]]
+name = "p2_off_bike"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b0 - 0x400"
+type = "u32"
+
+[[field]]
+name = "p2_settled"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b4 - 0x400"
+type = "u32"
+
+[[field]]
+name = "p2_flung"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x6b8 - 0x400"
+type = "u32"
+
+[[field]]
+name = "p2_m_finished"  # the motion clock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x3c - 0x400"
+type = "u32"
+
+[[field]]
+name = "p2_m_clock"  # +0x48 clip, +0x4c from, +0x50 last, +0x54 time, +0x80.. fade
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x48 - 0x400"
+type = "bytes:80"
+
+[[field]]
+name = "p2_d_flags"  # the machine: +0x68c ramp
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x680 - 0x400"
+type = "bytes:40"
+
+[[field]]
+name = "p2_d_cross"  # +0x8f0 state, +0x8f4 want
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8dc - 0x400"
+type = "bytes:36"
+
+[[field]]
+name = "p2_d_extra"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x9f0 - 0x400"
+type = "s32"
+
+[[field]]
+name = "p2_d_reverse"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa3c - 0x400"
+type = "f32"
+
+[[field]]
+name = "p2_req_placing"  # the request: placement flag
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0xc"
+type = "u32"
+
+[[field]]
+name = "p2_req_wreck"  # the request: wreck reason
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x104"
+type = "u32"
+
+[[field]]
+name = "p2_req_axes"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x170"
+type = "f32x3"
+
+[[field]]
+name = "p2_req_progress"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1a4"
+type = "f32"
+
+[[array]]
+name   = "p2_j"  # the 22 posed joints
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x234 - 0x400 -> 0x0"
+count  = 22
+stride = 0x60
+
+[[array.field]]
+name = "t"
+off  = 0x40
+type = "f32x4"
+
+[[array.field]]
+name = "q"
+off  = 0x50
+type = "f32x4"
+
+[[array]]
+name   = "p2_bone"  # the 18 ragdoll parts' rigid bodies
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2f4 - 0x400 -> 0x0"
+count  = 18
+stride = 0xb0
+
+[[array.field]]
+name = "pos"
+off  = "0xa4 -> 0x60"
+type = "f32x3"
+
+[[array.field]]
+name = "vel"
+off  = "0xa4 -> 0x70"
+type = "f32x3"
+
+[[array.field]]
+name = "quat"
+off  = "0xa4 -> 0x170"
+type = "f32x4"
+
+# ----------------------------------------------------------------------------------------------------
+# the six path cars: car +0x2a0 the world matrix the step left (row 3 the position), +0x310 the
+# position the tick before. A car's velocity is a virtual (S136): (xform row 3 - prev) * 60 gives it.
+# car%d_vel (+0x260) reads 0 and car%d_clock (+0x43c) stays put in the 2p run: not what they were
+# taken for, kept so the captures keep their columns
+
+[[field]]
+name = "car0_xform"
+addr = "0x00fec1e0"
+type = "mat4"
+
+[[field]]
+name = "car0_prev"  # the position row before the step
+addr = "0x00fec250"
+type = "f32x3"
+
+[[field]]
+name = "car0_vel"  # reads 0: not the velocity
+addr = "0x00fec1a0"
+type = "f32x3"
+
+[[field]]
+name = "car0_clock"  # constant: not the path clock
+addr = "0x00fec37c"
+type = "f32"
+
+[[field]]
+name = "car1_xform"
+addr = "0x01b80040"
+type = "mat4"
+
+[[field]]
+name = "car1_prev"  # the position row before the step
+addr = "0x01b800b0"
+type = "f32x3"
+
+[[field]]
+name = "car1_vel"  # reads 0: not the velocity
+addr = "0x01b80000"
+type = "f32x3"
+
+[[field]]
+name = "car1_clock"  # constant: not the path clock
+addr = "0x01b801dc"
+type = "f32"
+
+[[field]]
+name = "car2_xform"
+addr = "0x01b8f5a0"
+type = "mat4"
+
+[[field]]
+name = "car2_prev"  # the position row before the step
+addr = "0x01b8f610"
+type = "f32x3"
+
+[[field]]
+name = "car2_vel"  # reads 0: not the velocity
+addr = "0x01b8f560"
+type = "f32x3"
+
+[[field]]
+name = "car2_clock"  # constant: not the path clock
+addr = "0x01b8f73c"
+type = "f32"
+
+[[field]]
+name = "car3_xform"
+addr = "0x01b94190"
+type = "mat4"
+
+[[field]]
+name = "car3_prev"  # the position row before the step
+addr = "0x01b94200"
+type = "f32x3"
+
+[[field]]
+name = "car3_vel"  # reads 0: not the velocity
+addr = "0x01b94150"
+type = "f32x3"
+
+[[field]]
+name = "car3_clock"  # constant: not the path clock
+addr = "0x01b9432c"
+type = "f32"
+
+[[field]]
+name = "car4_xform"
+addr = "0x01ba0ca0"
+type = "mat4"
+
+[[field]]
+name = "car4_prev"  # the position row before the step
+addr = "0x01ba0d10"
+type = "f32x3"
+
+[[field]]
+name = "car4_vel"  # reads 0: not the velocity
+addr = "0x01ba0c60"
+type = "f32x3"
+
+[[field]]
+name = "car4_clock"  # constant: not the path clock
+addr = "0x01ba0e3c"
+type = "f32"
+
+[[field]]
+name = "car5_xform"
+addr = "0x01ba58b0"
+type = "mat4"
+
+[[field]]
+name = "car5_prev"  # the position row before the step
+addr = "0x01ba5920"
+type = "f32x3"
+
+[[field]]
+name = "car5_vel"  # reads 0: not the velocity
+addr = "0x01ba5870"
+type = "f32x3"
+
+[[field]]
+name = "car5_clock"  # constant: not the path clock
+addr = "0x01ba5a4c"
+type = "f32"
