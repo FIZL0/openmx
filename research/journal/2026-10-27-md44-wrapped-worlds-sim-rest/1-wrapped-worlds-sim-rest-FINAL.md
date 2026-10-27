@@ -1,4 +1,4 @@
-# 1 — wrapped worlds sim rest (PART)
+# 1 — wrapped worlds sim rest (FINAL)
 
 Task MD44. 2026-10-27.
 
