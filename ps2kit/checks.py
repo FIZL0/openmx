@@ -32,6 +32,7 @@ import shlex
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from ps2kit.config import cfg, ROOT
@@ -74,11 +75,7 @@ def _slot(block: bool = True):
     waited = False
     while True:
         for i in range(n):
-            l = plat.Lock(f'check{i}')
-            # Deliberately override the path: plat.Lock() suffixes the per-agent instance (KIT_PCSX2), which
-            # is right for the emulator — each agent has its own — and wrong here, where the whole point is
-            # that every worktree on this machine queues in the *same* N slots.
-            l.path = plat.rt(f'kit-check{i}.lock')
+            l = _check_lock(f'check{i}')
             if l.take(block=False):
                 return l
         if not block:
@@ -87,6 +84,68 @@ def _slot(block: bool = True):
             print(f'waiting: {n} test runs already going (KIT_CHECK_SLOTS={n})', file=sys.stderr, flush=True)
             waited = True
         time.sleep(5)
+
+
+def _check_lock(name: str, note: str = '') -> plat.Lock:
+    l = plat.Lock(name, note)
+    # Deliberately override the path: plat.Lock() suffixes the per-agent instance (KIT_PCSX2), which is
+    # right for the emulator — each agent has its own — and wrong here, where the whole point is that every
+    # worktree on this machine queues in the *same* N slots.
+    l.path = plat.rt(f'kit-{name}.lock')
+    return l
+
+
+# The check slot this process holds, if it took one: `alone` gives it up and takes another after.
+_HOLD: list[plat.Lock] = []
+
+
+def _take_slot() -> None:
+    _HOLD[:] = [_slot()]
+
+
+def _release_slot() -> None:
+    for l in _HOLD:
+        l.release()
+    _HOLD.clear()
+
+
+@contextmanager
+def alone():
+    """Every check slot at once, so a binary that times itself (gate.toml's `[alone]`) and failed gets its
+    rerun on a machine no other test run is loading — not just after this gate's own pool, while two other
+    worktrees' gates go on. Only on a failure: holding the machine stalls every other gate till theirs end.
+
+    Deadlock-free by never waiting for a lock while holding another: this process's own slot is given up
+    first; then the `check-alone` lock, which queues gates that reach this point at the same time; then
+    every slot in index order. A plain gate holds one slot and waits on nothing while it does, so each slot
+    comes free when that gate ends. After, the slots go back and this process takes one again.
+
+    A process that holds no slot (`./kit check --no-gate`) asked for no queueing, and gets none here.
+    """
+    if not _HOLD:
+        yield
+        return
+    _release_slot()
+    turn = _check_lock('check-alone', "another gate's time-budget tests")
+    taken: list[plat.Lock] = []
+    try:
+        turn.take()
+        waited = False
+        for i in range(_slots()):
+            l = _check_lock(f'check{i}')
+            if not l.take(block=False):
+                if not waited:
+                    print('waiting: the time-budget tests run with no other test run going',
+                          file=sys.stderr, flush=True)
+                    waited = True
+                l.take()
+            taken.append(l)
+        yield
+    finally:
+        for l in taken:
+            l.release()
+        turn.release()
+        _take_slot()
 
 
 def _jobs() -> int:
@@ -173,7 +232,7 @@ def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: b
         ref = f'{remote}/{shared}' if not _git(cwd)('rev-parse', '-q', '--verify', f'{remote}/{shared}').returncode \
             else shared
         rc, notes = cargo_gate.run(cmd, cwd, e, jobs, log, ref, all_slow or os.environ.get('KIT_CHECK_ALL') == '1',
-                                   cfg(False).ctx('notes/check-times.json'))
+                                   cfg(False).ctx('notes/check-times.json'), alone=alone)
         NOTES.extend(notes)
         return rc
     with open(log, 'w', encoding='utf-8') as f:
@@ -269,13 +328,13 @@ def cmd_check(argv: list[str]) -> int:
         return 2
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
     log = _log_path()
-    lock = None if a.no_gate else _slot()
+    if not a.no_gate:
+        _take_slot()
     try:
         _cap_build_dirs(cwd)
         rc = _run(c.test_cmd, extra, cwd, log, all_slow=a.all)
     finally:
-        if lock:
-            lock.release()
+        _release_slot()
     for l in summarise(rc, log):
         print(l)
     return 0 if rc == 0 else 1
@@ -515,7 +574,7 @@ def cmd_done(argv: list[str]) -> int:
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
 
     if c.test_cmd:
-        lock = _slot()
+        _take_slot()
         try:
             _cap_build_dirs(cwd)
             log = _log_path()
@@ -535,7 +594,7 @@ def cmd_done(argv: list[str]) -> int:
                     print('\nNothing ticked, nothing committed (the lint is a gate too).', file=sys.stderr)
                     return 1
         finally:
-            lock.release()
+            _release_slot()
     else:
         print('! no [build] test in kit.toml: committing without a test gate', file=sys.stderr)
 

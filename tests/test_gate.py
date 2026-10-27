@@ -3,7 +3,7 @@
 
     python3 tests/test_gate.py          (needs cargo; no kit.toml, no network, about ten seconds)
 
-What it holds the gate to: the binaries really run at the same time (an `[alone]` one after them), a `[[slow]]` binary is left out
+What it holds the gate to: the binaries really run at the same time (an `[alone]` one after them, a failed one rerun holding the machine), a `[[slow]]` binary is left out
 until the work touches its paths (or `--all`), a `[flaky]` failure gets one lone rerun and counts as a
 pass only when that rerun passes, and a real failure still fails, with cargo's own rerun line in the log.
 """
@@ -14,6 +14,7 @@ import shutil
 import subprocess as sp
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -78,10 +79,20 @@ def test_gate() -> None:
         g('checkout', '-qb', 'task/T1', cwd=w)
         env = {**os.environ, 'CARGO_TARGET_DIR': str(w / 'target'), 'RUST_TEST_THREADS': '4'}
 
-        def gate(all_slow=False):
+        held = []  # one entry each time the gate takes the machine (checks.alone's place here)
+
+        @contextmanager
+        def machine(also=None):
+            held.append(1)
+            if also:
+                also()
+            yield
+
+        def gate(all_slow=False, alone=machine):
             (w / 'stamps').unlink(missing_ok=True)
+            held.clear()
             return cargo_gate.run('cargo test -q --message-format=short', w, env, 4, w / 'log', 'main',
-                                  all_slow, w / 'times.json')
+                                  all_slow, w / 'times.json', alone=alone)
 
         check(cargo_gate.applies('cargo test -q --message-format=short', []), 'a bare cargo test is a whole run')
         check(not cargo_gate.applies('cargo test -q', ['-p', 'a']), 'a filtered one is left to cargo')
@@ -103,6 +114,15 @@ def test_gate() -> None:
         rc, _ = gate()
         s = {k: float(v) for k, v in (l.split() for l in (w / 'stamps').read_text().splitlines())}
         check(rc == 0 and s['two+'] >= s['one-'], 'an [alone] binary runs after the pool, not beside it')
+        check(not held, 'and one that passes never takes the machine')
+        (w / 'gate.toml').write_text('[alone]\ntests = ["-p a --test net"]\n')
+        (w / 'flake').write_text('')
+        rc, notes = gate()
+        check(rc == 0 and held == [1], f'an [alone] failure reruns once holding the machine, and passes (rc {rc}, held {held})')
+        check(any('machine to itself' in n and 'binds_a_port' in n for n in notes), 'and the verdict names it')
+        (w / 'flake').write_text('')
+        rc, _ = gate(alone=lambda: machine(lambda: (w / 'flake').write_text('')))
+        check(rc == 101 and 'failed again' in (w / 'log').read_text(), 'one that fails with the machine to itself fails the gate')
         (w / 'gate.toml').write_text(gt)
         rc, notes = gate(all_slow=True)
         check(rc == 0 and '-p a --test slow' in (w / 'log').read_text(), '--all runs it untouched')
