@@ -1708,3 +1708,443 @@ fn the_put_back_holds_the_body_as_the_original_does() {
         assert!(entries >= 3 && entered == entries, "only {entered} of {entries} wreck entries proved, not three");
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// V90: the 2p riders' poses
+// ---------------------------------------------------------------------------------------------------
+
+mod two_p_poses {
+    use game_render::disc::Disc;
+    use game_render::rider::{Body as Drawn, Sex};
+    use game_sim::input::{EventQueue, Pad};
+    use game_sim::phy;
+    use game_sim::replay::two_p;
+    use game_sim::ride::Controls;
+    use game_sim::rider_anim::{Ask, Body, Clock, Mode, Params, Pool};
+    use game_sim::trick::{SLOTS, Set, Stunts, Trick};
+    use game_sim::vehicle_anim::Request;
+    use ps2_float::F;
+
+    const A_RIDER: &str = "thq1";
+    const STUNT_ARCHIVE: &str = "appstart.res";
+    const STUNT_TABLE: &str = "rider\\anim\\stunts.ini";
+
+    fn member(disc: &Disc, ends: &str) -> String {
+        let want = ends.to_ascii_lowercase();
+        disc.entries()
+            .iter()
+            .filter(|e| e.name.to_ascii_lowercase().ends_with(&want))
+            .min_by_key(|e| e.name.len())
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| panic!("the disc has no {ends}"))
+    }
+
+    /// The drawn rider: its sixty-state clip table and the clip lengths the body's machine asks for.
+    pub fn drawn() -> Option<Drawn> {
+        let mut disc = match Disc::open_configured() {
+            Ok(d) => d,
+            Err(why) => {
+                println!("SKIPPED: {why}");
+                return None;
+            }
+        };
+        let stunts = {
+            let name = member(&disc, STUNT_ARCHIVE);
+            let res = disc.res(&name).expect("the app archive opens");
+            let bytes = res.read_suffix(STUNT_TABLE).expect("the stunt table");
+            Set::new(Stunts::parse(&bytes).expect("the stunt table parses").selection(0))
+        };
+        let name = member(&disc, &format!("{A_RIDER}.res"));
+        let res = disc.res(&name).expect("the rider archive opens");
+        let params = game_sim::motion::Params::default();
+        Some(Drawn::load(vec![res], A_RIDER, Sex::Male, "", &stunts.stunts, params).expect("the body loads"))
+    }
+
+    /// The capture of record with the columns this needs: the request words the body reads, what the
+    /// body played, and both pads.
+    fn capture() -> Option<game_sim::replay::Capture> {
+        read(false)
+    }
+
+    /// The same with the 22 posed joints of both riders, which are most of the file.
+    pub fn with_joints() -> Option<game_sim::replay::Capture> {
+        read(true)
+    }
+
+    fn read(joints: bool) -> Option<game_sim::replay::Capture> {
+        let kit = match ps2_oracle::Kit::load() {
+            Ok(kit) => kit,
+            Err(why) => {
+                println!("SKIPPED: no kit.toml ({why})");
+                return None;
+            }
+        };
+        let local = kit.root.join("context").join(two_p::CAPTURE);
+        let path = if local.exists() { local } else { kit.ctx(two_p::CAPTURE) };
+        let Ok(file) = std::fs::File::open(&path) else {
+            println!("SKIPPED: no {}", path.display());
+            return None;
+        };
+        let lane = [
+            "airborne", "flip_ramp", "trick_id", "req_placing", "req_wreck", "req_axes.x", "req_axes.y",
+            "req_axes.z", "req_progress", "d_cross", "d_flags", "m_clock", "m_finished", "mode", "settled",
+        ];
+        let keep = |c: &str| {
+            ["frame_counter", "dt"].contains(&c)
+                || c.starts_with("pad")
+                || c.starts_with("stamp")
+                || c.strip_prefix("p1_").or_else(|| c.strip_prefix("p2_")).is_some_and(|c| {
+                    lane.contains(&c) || (joints && c.starts_with('j') && c.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
+                })
+        };
+        Some(two_p::read(std::io::BufReader::new(file), keep).expect("the 2p capture reads"))
+    }
+
+    pub struct Col<'a>(pub &'a game_sim::replay::Capture);
+    impl Col<'_> {
+        fn at(&self, name: &str) -> usize {
+            self.0.columns.iter().position(|c| c == name).unwrap_or_else(|| panic!("no column {name}"))
+        }
+        pub fn text(&self, row: usize, name: &str) -> &str {
+            &self.0.rows[row][self.at(name)]
+        }
+        pub fn f(&self, row: usize, name: &str) -> f32 {
+            self.text(row, name).parse().unwrap_or_else(|_| panic!("{name} in row {row}"))
+        }
+        pub fn u(&self, row: usize, name: &str) -> i64 {
+            self.text(row, name).parse().unwrap_or_else(|_| panic!("{name} in row {row}"))
+        }
+        pub fn word(&self, row: usize, name: &str, off: usize) -> u32 {
+            let hex = self.text(row, name);
+            let b = |i: usize| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex");
+            u32::from_le_bytes([b(off), b(off + 1), b(off + 2), b(off + 3)])
+        }
+    }
+
+    /// One rider's body as the original's request drove it, tick by tick: what the port's machine
+    /// plays (state, mode) beside what the original's did.
+    pub struct Tick {
+        pub frame: u32,
+        pub theirs: (i32, i32),
+        pub ours: (i32, i32),
+        /// The cross-fade ramp, the original's and the port's, as bits.
+        pub ramp: (u32, u32),
+        /// How far the drawn rider's joints are from the original's, the worst lane of the 22
+        /// quaternions and translations, when the replay was asked to pose them.
+        pub joints: Option<f32>,
+    }
+
+    fn mode_number(m: Mode) -> i32 {
+        match m {
+            Mode::Held => 0,
+            Mode::Riding => 1,
+            Mode::Wrecked => 2,
+            Mode::Posed => 3,
+            Mode::Gate => 4,
+        }
+    }
+
+    trait Lag {
+        fn lag(&self) -> usize;
+    }
+    impl Lag for two_p::Rider {
+        fn lag(&self) -> usize {
+            match self {
+                two_p::Rider::P1 => 0,
+                two_p::Rider::P2 => 1,
+            }
+        }
+    }
+
+    pub fn replay() -> Option<Vec<Vec<Tick>>> {
+        run(capture()?, false)
+    }
+
+    /// The same, posing each rider's drawn body off its machine's frame as the shell does
+    /// ([`Drawn::posed_by`]) and holding its joints against the captured ones.
+    pub fn replay_posed() -> Option<Vec<Vec<Tick>>> {
+        run(with_joints()?, true)
+    }
+
+    fn run(cap: game_sim::replay::Capture, posed: bool) -> Option<Vec<Vec<Tick>>> {
+        let mut drawn = drawn()?;
+        let tape = two_p::tape(&cap).expect("both pads off the capture");
+        let c = Col(&cap);
+        let mut out = vec![];
+        for rider in two_p::Rider::BOTH {
+            if rider != two_p::Rider::P1 {
+                drawn = self::drawn()?;
+            }
+            let p = rider.prefix();
+            let n = |s: &str| format!("{p}{s}");
+            let mut body = Body::default();
+            let numbers = Params::built();
+            let mut rates = game_render::vehicle::params();
+            let mut pool = Pool::default();
+            let clock = Clock::default();
+            let mut r = Request::default();
+            let mut pad = Pad::new(rider.pad() as u32);
+            pad.connected = true;
+            let mut events = EventQueue::new();
+            let mut ticks = vec![];
+            let mut hands = vec![F::ZERO];
+            for row in 1..cap.rows.len() {
+                // A 2p row's dt is the next frame's: this tick ran on the last row's.
+                let dt = F(c.f(row - 1, "dt"));
+                let frame = &tape.frames[row - 1];
+                pad.poll(dt, &frame.reports[rider.pad()], &mut events);
+                let (speed, up) = (F(c.f(row - 1, &n("req_axes.z"))), c.u(row - 1, &n("airborne")) != 0);
+                let controls = Controls::from_pad(&pad).reverse_rule(speed, up);
+                hands.push(controls.reverse);
+                r.held = c.u(row, &n("req_placing")) != 0;
+                r.phase_axis = F(c.f(row, &n("req_axes.x")));
+                r.mix_axis = F(c.f(row, &n("req_axes.y")));
+                r.band = F(c.f(row, &n("req_axes.z")));
+                r.progress = F(c.f(row, &n("req_progress")));
+                // The request's count is what the tail latches into the machine: this row's latch.
+                r.seq = (c.word(row, &n("d_cross"), 0x20) & 0xff) as i32;
+                // The bike's own words are read a tick late: the body asks off the bike as the
+                // last tick left it, before this tick's bike update writes them again.
+                let late = row - rider.lag();
+                let id = Trick(c.u(row, &n("trick_id")) as u8);
+                let ask = Ask {
+                    airborne: c.u(late, &n("airborne")) != 0,
+                    backflip: c.u(late, &n("flip_ramp")) != 0,
+                    no_hander: false,
+                    wreck: c.u(row, &n("req_wreck")) != 0,
+                    countdown: F::ZERO,
+                    throttle: controls.gas,
+                    reversing: hands[hands.len() - 1 - rider.lag()],
+                    gesture: id.slot().map_or(SLOTS as i32, |s| s as i32),
+                    spin: None,
+                };
+                // The settle is the ragdoll's (S160), which this does not run: the original's own flag
+                // as its mode machine left it last tick, for this tick's entries to clear.
+                body.settled = c.u(row - 1, &n("settled")) != 0;
+                body.mode(dt, &r, &ask, &phy::Wrecks::default(), None, &mut pool, clock);
+                let lib = &drawn.pose_lib;
+                let (frame, clocked) =
+                    body.frame_clocked(dt, &numbers, &mut rates, &mut r, &ask, lib, &mut pool, clock, true, &|id| drawn.timing(id));
+                let joints = posed.then(|| {
+                    drawn.posed_by(frame, &body.player, clocked);
+                    let pose = &drawn.rig.set.pose;
+                    // The worst lane against the original's joints of this row, or of the row either side
+                    // of it, whichever is closest: a lane's joints are read either side of its body's
+                    // step (the rows' phase).
+                    let off = |rr: usize| {
+                        let mut w = 0.0f32;
+                        for j in 0..pose.rot.len() {
+                            for (lane, axis) in ["x", "y", "z", "w"].iter().enumerate() {
+                                for (mine, what) in [(pose.rot[j][lane], "q"), (pose.pos[j][lane], "t")] {
+                                    w = w.max((mine - c.f(rr, &n(&format!("j{j}.{what}.{axis}")))).abs());
+                                }
+                            }
+                        }
+                        w
+                    };
+                    (row.saturating_sub(1)..(row + 2).min(cap.rows.len())).map(off).fold(f32::MAX, f32::min)
+                });
+                ticks.push(Tick {
+                    frame: c.u(row, "frame_counter") as u32,
+                    theirs: (c.word(row, &n("d_cross"), 0x14) as i32, c.u(row, &n("mode")) as i32),
+                    ours: (body.veh.state, mode_number(body.machine.mode)),
+                    ramp: (c.word(row, &n("d_flags"), 0xc), body.veh.ramp.to_f32().to_bits()),
+                    joints,
+                });
+            }
+            out.push(ticks);
+        }
+        Some(out)
+    }
+}
+
+/// Every tick of the 2p state where the two pinned parts sit, by rider: the frame, the original's
+/// (state, mode) and the port's. Both are a row's phase that two ticks of slack does not cover:
+///
+/// * P1 134857: a one-tick riding pose in the middle of a take-off, on a row whose airborne word
+///   already reads 1 — the original's body saw the bike down for one more tick.
+/// * P2 140364: the wreck request is on the row a tick before the original's body takes it, and
+///   the port goes down on it.
+const TWO_P_PARTS: [&[(u32, (i32, i32), (i32, i32))]; 2] =
+    [&[(134857, (30, 1), (35, 1))], &[(140364, (30, 1), (40, 2))]];
+
+/// The ticks of each rider whose machine played the original's state and mode, its ramp as well,
+/// bit for bit (V90).
+const TWO_P_SAME: [(usize, usize); 2] = [(12880, 11864), (12875, 11891)];
+
+/// **V90 — the 2p riders' poses against the original's.** Each rider's body machine
+/// ([`Body::mode`] and [`Body::frame_clocked`] on the drawn rider's own clip table) is driven by the
+/// original's request words off C10's capture (held, wreck, the three axes, progress, the latch) and
+/// by the bike's (airborne, the backflip, the trick) with the pads' reverse rule, and each tick's
+/// state and mode are held against the original's: riding lean, air, reverse, every trick and
+/// backflip of the ride, the wrecks and their limbs, and the put-backs.
+///
+/// What is allowed: a limb drawn differently (41 to 45; the random pool is not the original's), and a
+/// state the port plays within two ticks of the original's (the rows' phase). Two ticks are past that
+/// and pinned ([`TWO_P_PARTS`]). The cross-fade ramp is held too: on ticks where both played the same
+/// state twice running, it is the original's bit for bit or a whole one or two ticks of the state's
+/// rate off it (a restart a tick apart) — except the run after P1's 134857, where the original
+/// restarted twice.
+#[test]
+fn the_2p_riders_poses() {
+    let Some(riders) = two_p_poses::replay() else { return };
+    // The limb a settled body holds is a random draw, and the pool is not the original's: any of the
+    // five limbs is the same pose for this.
+    let same = |a: (i32, i32), b: (i32, i32)| a == b || (a.1 == b.1 && (41..=45).contains(&a.0) && (41..=45).contains(&b.0));
+    for (k, ticks) in riders.iter().enumerate() {
+        // A tick whose clip the port plays within two ticks of it is the row's phase, not a part.
+        let near = |i: usize| (i.saturating_sub(2)..(i + 3).min(ticks.len())).any(|j| same(ticks[i].theirs, ticks[j].ours));
+        let parts: Vec<_> =
+            ticks.iter().enumerate().filter(|&(i, _)| !near(i)).map(|(_, t)| (t.frame, t.theirs, t.ours)).collect();
+        let mut clips = std::collections::BTreeMap::<i32, (usize, usize)>::new();
+        for t in ticks {
+            let e = clips.entry(t.theirs.0).or_default();
+            e.0 += 1;
+            e.1 += usize::from(same(t.theirs, t.ours));
+        }
+        let exact = ticks.iter().filter(|t| same(t.theirs, t.ours)).count();
+        println!("P{}: {exact} of {} ticks the same; by clip (ticks, the same) {clips:?}", k + 1, ticks.len());
+
+        // The ramp, on the ticks where both played the same state this tick and the last.
+        let both = |i: usize| i > 0 && ticks[i].theirs == ticks[i].ours && ticks[i - 1].theirs == ticks[i - 1].ours;
+        let steady: Vec<usize> = (0..ticks.len()).filter(|&i| both(i)).collect();
+        let ramps = steady.iter().filter(|&&i| ticks[i].ramp.0 == ticks[i].ramp.1).count();
+        println!("  ramp bit for bit on {ramps} of {} steady ticks", steady.len());
+        // The ramp runs down at one of the state rates (4, 3.25 or 0.25 a second): a ramp one or two
+        // of those 60 Hz ticks off the original's is the same run started a tick or two apart, and
+        // one that has run out a tick before the other is that too, the ramp stopping at nothing.
+        // Each tick's own dt moves a ramp a few ten-thousandths off the even steps.
+        let shifted = |i: usize| {
+            let (a, b) = (f32::from_bits(ticks[i].ramp.0), f32::from_bits(ticks[i].ramp.1));
+            let off = (a - b).abs();
+            let rates = [4.0f32, 3.25, 0.25];
+            let out = (a == 0.0 || b == 0.0) && rates.iter().any(|r| off <= 2.0 * r / 60.0);
+            out || rates.iter().any(|r| (0..=2).any(|n| (off - n as f32 * r / 60.0).abs() < 5e-4))
+        };
+        let odd: Vec<u32> =
+            steady.iter().filter(|&&i| ticks[i].ramp.0 != ticks[i].ramp.1 && !shifted(i)).map(|&i| ticks[i].frame).collect();
+        for t in &parts {
+            println!("  part {} theirs (state, mode) {:?} ours {:?}", t.0, t.1, t.2);
+        }
+        if !odd.is_empty() {
+            println!("  ramp off on {odd:?}");
+        }
+
+        assert_eq!(parts, TWO_P_PARTS[k], "P{}'s parts past the phase", k + 1);
+        assert_eq!((exact, ramps), TWO_P_SAME[k], "P{}'s ticks the same and its ramps bit for bit", k + 1);
+        // Only the run after P1's pinned blip, where the original restarted the ramp twice.
+        assert!(odd.iter().all(|&f| k == 0 && (134858..134876).contains(&f)), "P{}'s ramps off on {odd:?}", k + 1);
+    }
+}
+
+/// **V90 — the 2p riders' joints against the original's**, the way V12 held the human's recording:
+/// on every tick of the 2p ride where the original's body sampled one clip and nothing else (a
+/// gesture come into from no gesture, or a played-once clip running free) with no fade running and
+/// the snapshot ramp run out, that clip of the drawn rider's own table is posed at the second the
+/// original sampled it, and each of the 22 joints' quaternion and translation is held against the
+/// captured ones lane by lane within V12's 1e-4.
+///
+/// The clip is the state's slot of the port's table: the original's table is not in this capture, so
+/// what stands for V12's pointer check is that every pointer the original sampled answers one state
+/// only over the whole ride.
+#[test]
+fn the_2p_riders_joints() {
+    use game_sim::replay::two_p;
+    const JOINTS: usize = 22;
+    const TOLERANCE: f32 = 1e-4;
+    let Some(drawn) = two_p_poses::drawn() else { return };
+    let Some(cap) = two_p_poses::with_joints() else { return };
+    let c = two_p_poses::Col(&cap);
+    let set = &drawn.rig.set;
+    assert_eq!(set.skeleton.len(), JOINTS, "the drawn rider is not the original's 22 joints");
+    let float = |row: usize, col: &str, off: usize| f32::from_bits(c.word(row, col, off));
+    let mut pose = game_render::skin::Pose::new(JOINTS);
+    for rider in two_p::Rider::BOTH {
+        let p = rider.prefix();
+        let n = |s: &str| format!("{p}{s}");
+        let mut slot_of = std::collections::BTreeMap::<u32, i32>::new();
+        let mut by_state = std::collections::BTreeMap::<i32, usize>::new();
+        let mut worst = (0.0f32, 0usize, 0i64);
+        for row in 0..cap.rows.len() {
+            let (state, prev) = (c.word(row, &n("d_cross"), 0x14) as i32, c.word(row, &n("d_cross"), 0x10) as i32);
+            let ramp = float(row, &n("d_flags"), 0xc);
+            // The motion block from +0x48: the free-running clip, the last sample's clip and second,
+            // the transition flag at +0x80 and the clip clock at +0x84.
+            let m = n("m_clock");
+            let (playing, last, sample) = (c.word(row, &m, 0), c.word(row, &m, 8), float(row, &m, 0xc));
+            let (fading, clock) = (c.word(row, &m, 0x38) != 0, float(row, &m, 0x3c));
+            let single = match state {
+                0..=23 => !(0..=23).contains(&prev),
+                40..=59 => playing != 0,
+                _ => false,
+            };
+            if !single || fading || ramp != 0.0 {
+                continue;
+            }
+            let ptr = if playing != 0 { playing } else { last };
+            let was = *slot_of.entry(ptr).or_insert(state);
+            assert_eq!(was, state, "{p} row {row}: the clip {ptr:#x} the original sampled answers states {was} and {state}");
+            let id = drawn.pose_lib.clip[state as usize].unwrap_or_else(|| panic!("the drawn rider has no clip for state {state}"));
+            let bound = set.get(id).expect("a bound clip of the drawn rider's set");
+            let at = if playing != 0 { clock } else { sample };
+            bound.clip.pose(at, &bound.joints, &mut pose);
+            let frame = c.u(row, "frame_counter");
+            for j in 0..JOINTS {
+                for (lane, axis) in ["x", "y", "z", "w"].iter().enumerate() {
+                    for (mine, what) in [(pose.rot[j][lane], "q"), (pose.pos[j][lane], "t")] {
+                        let theirs = c.f(row, &n(&format!("j{j}.{what}.{axis}")));
+                        let off = (mine - theirs).abs();
+                        if off > worst.0 {
+                            worst = (off, j, frame);
+                        }
+                        assert!(
+                            off <= TOLERANCE,
+                            "{p} {frame}: joint {j} ({}) {what}.{axis} is {mine}, the original's {theirs}, in {} at {at}s",
+                            set.skeleton.bones[j].name,
+                            bound.name
+                        );
+                    }
+                }
+            }
+            *by_state.entry(state).or_default() += 1;
+        }
+        let compared: usize = by_state.values().sum();
+        println!("{p}: {compared} single-clip ticks posed, by state {by_state:?}; worst {:e} on joint {} at {}", worst.0, worst.1, worst.2);
+        assert!(compared >= 100, "{p}: only {compared} single-clip ticks");
+    }
+}
+
+/// The ticks of each rider where the port played the original's state and mode, and of those the
+/// ones whose drawn joints are the original's within V12's 1e-4 (this row or either side of it).
+const TWO_P_DRAWN: [(usize, usize); 2] = [(12244, 9959), (12463, 6428)];
+
+/// **V90 — the 2p riders' drawn joints, tick by tick.** The same replay as
+/// [`the_2p_riders_poses`], with the drawn rider posed off each tick's frame
+/// ([`posed_by`](game_render::rider::Body::posed_by)) and its 22 joints held against the
+/// original's. Not every tick is within 1e-4 — the blended arms (riding with the lean on, the air,
+/// reverse) sample their clips off the port's eased axes and the original's own eased records are
+/// not in the capture (the journal's table by state) — so the count of those that are is pinned
+/// and may only go up.
+#[test]
+fn the_2p_riders_drawn_poses() {
+    let Some(riders) = two_p_poses::replay_posed() else { return };
+    for (k, ticks) in riders.iter().enumerate() {
+        let mut by = std::collections::BTreeMap::<(i32, i32), (usize, usize, usize, f32)>::new();
+        for t in ticks.iter().filter(|t| t.theirs == t.ours) {
+            let off = t.joints.expect("posed");
+            let e = by.entry(t.theirs).or_default();
+            e.0 += 1;
+            e.1 += usize::from(off <= 1e-4);
+            e.2 += usize::from(off <= 1e-2);
+            e.3 = e.3.max(off);
+        }
+        println!("P{}: (state, mode) -> (ticks, within 1e-4, within 1e-2, worst)", k + 1);
+        for (key, v) in &by {
+            println!("  {key:?} {v:?}");
+        }
+        let total = (by.values().map(|v| v.0).sum::<usize>(), by.values().map(|v| v.1).sum::<usize>());
+        println!("P{}: {} of {} ticks within 1e-4", k + 1, total.1, total.0);
+        assert_eq!(total.0, TWO_P_DRAWN[k].0, "P{}'s ticks on the original's clip", k + 1);
+        assert!(total.1 >= TWO_P_DRAWN[k].1, "P{}: {} ticks within 1e-4, down from {}", k + 1, total.1, TWO_P_DRAWN[k].1);
+    }
+}
