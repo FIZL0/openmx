@@ -1309,12 +1309,42 @@ impl WorldMod {
     }
 }
 
+/// MX Unleashed's National (outdoor motocross) tracks by the names the disc gives them: the
+/// STR_NAT01..STR_NAT22 strings of appstart/loc's l_ui_eng.bin, which tracks.dat's `[NatXX]
+/// TextID` points at.
+pub const NATIONALS: [(&str, &str); 22] = [
+    ("nat01", "Seneca Butte"),
+    ("nat02", "Bodie"),
+    ("nat03", "Racine: Long"),
+    ("nat04", "Doha"),
+    ("nat05", "Blueridge"),
+    ("nat06", "Summerhaven"),
+    ("nat07", "Pine Bluff"),
+    ("nat08", "Slack Jaw"),
+    ("nat09", "Goblin Valley"),
+    ("nat10", "Foxpark"),
+    ("nat11", "Hillsboro"),
+    ("nat12", "Black Hills"),
+    ("nat13", "Rattlesnake Pass"),
+    ("nat14", "Grandview"),
+    ("nat15", "Cedar Mills"),
+    ("nat16", "Casa De Cobre"),
+    ("nat17", "Waimea"),
+    ("nat18", "Manassas Park"),
+    ("nat19", "Ensenada"),
+    ("nat20", "Sliderock"),
+    ("nat21", "Signal Butte"),
+    ("nat22", "Racine: Short"),
+];
+
 /// The name the radar gives a map (MD42): a free-ride track by the town it is named for, as the
-/// track pick names it (`free06` is Dallas), anything else as it is.
+/// track pick names it (`free06` is Dallas), a national by its disc name (`nat17` is Waimea),
+/// anything else as it is.
 pub fn map_title(name: &str) -> String {
-    match crate::menu::TRACKS.iter().find(|(archive, _)| archive.eq_ignore_ascii_case(name.trim())) {
+    let name = name.trim();
+    match crate::menu::TRACKS.iter().chain(NATIONALS.iter()).find(|(archive, _)| archive.eq_ignore_ascii_case(name)) {
         Some((_, town)) => town.to_string(),
-        None => name.trim().to_string(),
+        None => name.to_string(),
     }
 }
 
@@ -1558,6 +1588,10 @@ mod tests {
         assert_eq!(names.around([200.0, 40.0]), (Some("low"), [Some("high"), Some("far"), None, Some("tall")]));
         let alone = crate::hud::MapNames::alone(&map_title("free09"));
         assert_eq!(alone.around([-1.0e6, 3.0e6]), (Some("Bridgeport"), [None; 4]));
+        // A national goes by its disc name, another game's track by its own.
+        assert_eq!(map_title("nat17"), "Waimea");
+        assert_eq!(map_title(" NAT03 "), "Racine: Long");
+        assert_eq!(map_title("Glamis"), "Glamis");
     }
 
     /// MD29: a world file's `wrap` reads as off, one axis or both, and anything else is refused.

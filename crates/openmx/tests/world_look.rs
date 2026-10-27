@@ -241,6 +241,29 @@ fn the_paint_blends_across_the_join_with_no_step() {
     assert!(BLEND_REACH > 207.0);
 }
 
+/// MD48: join ground past `BLEND_REACH` of both maps is still theirs, not one flat dirt colour: a
+/// mix of `a`'s red and `b`'s green (blue between their 40 and 60, where the dirt's is 86) leaning
+/// to the nearer, and walking straight out from `a` no step where the reach ends.
+#[test]
+fn ground_far_from_every_map_is_still_the_nearest_maps() {
+    let w = paint();
+    let far = 567.0 + 3.0 * BLEND_REACH;
+    let (past_a, past_b) = (w.paint(-3.0 * BLEND_REACH, 300.0), w.paint(1215.0 + 3.0 * BLEND_REACH, 300.0));
+    for c in [past_a, past_b] {
+        assert!(c[2] > 39.0 && c[2] < 61.0, "{c:?} is not a's red and b's green mixed");
+    }
+    assert!(past_a[0] > past_b[0] + 40.0 && past_b[1] > past_a[1] + 40.0, "past a {past_a:?}, past b {past_b:?}");
+    let (mut worst, mut z) = (0.0f32, 600.0f32);
+    let mut last = w.paint(100.0, z);
+    while z < far {
+        z += 0.5;
+        let c = w.paint(100.0, z);
+        worst = worst.max((0..3).map(|k| (c[k] - last[k]).abs()).fold(0.0, f32::max));
+        last = c;
+    }
+    assert!(worst < 1.0, "a step of {worst} levels in half a foot walking out of a");
+}
+
 /// The shell's GPU frame looking straight down on the join: red at one end of the middle row,
 /// green at the other, and from pixel to pixel no step a seam would make.
 #[test]
