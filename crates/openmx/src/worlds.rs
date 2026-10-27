@@ -772,6 +772,8 @@ pub struct GroundStream {
     pub chunks_a_frame: usize,
     /// What building and dropping did since the shell last took the lines.
     log: Vec<String>,
+    /// Each rider's place when its heading was last taken, and the heading (V92).
+    heading: Vec<([f32; 2], [f32; 2])>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -797,7 +799,19 @@ pub enum Change {
     /// More of a piece added already ([`game_render::gpu::Renderer::more_ground_piece`]).
     More(usize, GroundPiece),
     Drop(usize),
+    /// A piece all of whose chunks are handed over now (V92), to be shown over its stand-in.
+    Show(usize),
 }
+
+/// How far a rider goes before its heading is taken again (V92), in feet.
+const HEADING_FEET: f32 = 50.0;
+
+/// How a piece ahead of a rider is put before one as near behind it (V92): its gap counts for
+/// `1 - AHEAD * cos` of the angle between the rider's heading and the way to the piece.
+const AHEAD: f32 = 0.5;
+
+/// A move between headings taken too far to have been ridden (V92), in feet.
+const TELEPORT_FEET: f32 = 2000.0;
 
 impl GroundStream {
     /// The stream, and the pieces it built before the ride: those within `reach.load` of `near`,
@@ -842,7 +856,7 @@ impl GroundStream {
                 }
             }
         });
-        let mut stream = GroundStream { held: vec![Held::Out; tiles.len()], tiles, reach, work, built, pending: VecDeque::new(), chunks_a_frame: CHUNKS_A_FRAME, log: Vec::new() };
+        let mut stream = GroundStream { held: vec![Held::Out; tiles.len()], tiles, reach, work, built, pending: VecDeque::new(), chunks_a_frame: CHUNKS_A_FRAME, log: Vec::new(), heading: Vec::new() };
         let mut out = Vec::new();
         for (i, r) in ready {
             if let Some(chunks) = stream.arrived(i, r) {
@@ -875,6 +889,7 @@ impl GroundStream {
     /// and the wait said.
     pub fn update(&mut self, near: &[[f32; 2]]) -> Vec<Change> {
         let gaps: Vec<f32> = self.tiles.iter().map(|t| nearest(t, near)).collect();
+        let order = self.ahead_first(near);
         let mut out = Vec::new();
         {
             let (lock, wake) = &*self.work;
@@ -883,7 +898,7 @@ impl GroundStream {
                 self.held[i] = Held::Out;
             }
             let mut want: Vec<usize> = (0..self.tiles.len()).filter(|&i| self.held[i] == Held::Out && gaps[i] <= self.reach.load.0).collect();
-            want.sort_by(|a, b| gaps[*b].total_cmp(&gaps[*a]));
+            want.sort_by(|a, b| order[*b].total_cmp(&order[*a]));
             for &i in &want {
                 self.held[i] = Held::Asked;
             }
@@ -906,9 +921,9 @@ impl GroundStream {
             self.log.push(format!("world ground: waited {:.0} ms for {}", at.elapsed().as_secs_f32() * 1000.0, self.tiles[i].name));
             take(self, done);
         }
-        // A frame's worth of parts, nearest piece first, and all of any piece a rider is on.
+        // A frame's worth of parts, the piece ahead first, and all of any piece a rider is on.
         let mut pending: Vec<_> = std::mem::take(&mut self.pending).into();
-        pending.sort_by(|a, b| gaps[a.0].total_cmp(&gaps[b.0]));
+        pending.sort_by(|a, b| order[a.0].total_cmp(&order[b.0]));
         let mut budget = self.chunks_a_frame;
         for (i, part, first) in pending {
             if part.chunks.len() > budget && gaps[i] > 0.0 {
@@ -918,6 +933,12 @@ impl GroundStream {
             budget = budget.saturating_sub(part.chunks.len());
             out.push(if first { Change::Add(i, part) } else { Change::More(i, part) });
         }
+        // The pieces whose last part went this frame.
+        let mut whole: Vec<usize> = out.iter().filter_map(|c| if let Change::Add(i, _) | Change::More(i, _) = c { Some(*i) } else { None }).collect();
+        whole.sort_unstable();
+        whole.dedup();
+        whole.retain(|i| !self.pending.iter().any(|p| p.0 == *i));
+        out.extend(whole.into_iter().map(Change::Show));
         for i in 0..self.tiles.len() {
             if self.held[i] == Held::In && gaps[i] > self.reach.drop.0 {
                 self.pending.retain(|p| p.0 != i);
@@ -927,6 +948,38 @@ impl GroundStream {
             }
         }
         out
+    }
+
+    /// Each piece's place in the stream's order (V92), least first: its gap to the riders, less as
+    /// much as [`AHEAD`] for a piece the way a rider is heading, so the tile ahead lands first.
+    fn ahead_first(&mut self, near: &[[f32; 2]]) -> Vec<f32> {
+        if self.heading.len() != near.len() {
+            self.heading = near.iter().map(|&p| (p, [0.0, 0.0])).collect();
+        }
+        for (h, p) in self.heading.iter_mut().zip(near) {
+            let d = [p[0] - h.0[0], p[1] - h.0[1]];
+            let l = d[0].hypot(d[1]);
+            if l >= HEADING_FEET {
+                // A jump of more than a ride goes in a few frames (a respawn, a teleport) has no heading.
+                *h = (*p, if l < TELEPORT_FEET { [d[0] / l, d[1] / l] } else { [0.0, 0.0] });
+            }
+        }
+        self.tiles
+            .iter()
+            .map(|t| {
+                let [x0, z0, x1, z1] = rect(t, 0.0);
+                near.iter()
+                    .zip(&self.heading)
+                    .map(|(p, (_, h))| {
+                        let g = gap(t, p[0], p[1]);
+                        let to = [(x0 + x1) * 0.5 - p[0], (z0 + z1) * 0.5 - p[1]];
+                        let l = to[0].hypot(to[1]);
+                        let cos = if l > 0.0 { (to[0] * h[0] + to[1] * h[1]) / l } else { 0.0 };
+                        g * (1.0 - AHEAD * cos)
+                    })
+                    .fold(f32::MAX, f32::min)
+            })
+            .collect()
     }
 
     /// How many pieces are held now.
@@ -981,6 +1034,183 @@ impl Files {
     fn load_terrain(&mut self, index: usize) -> Result<Vec<u8>, String> {
         self.pieces[index].terrain()
     }
+}
+
+/// The most cells a world's stand-in has (V92): 512 x 512, about 6 MB of corners on the GPU however
+/// big the world, at a sixteenth of the finest piece's samples or coarser.
+pub const STAND_IN_CELLS: f32 = 262_144.0;
+
+/// A whole world's ground at its coarsest (V92), drawn wherever a piece is not loaded yet so the far
+/// tiles are there from the first frame ([`game_render::gpu::Renderer::set_ground_stand_in`]): a grid
+/// over every piece's rectangle, each corner the height and normal of the sample nearest it on the
+/// piece that owns the place ([`Tiled::owner`]), in chunks of `cells` cells as the pieces' are. A cell
+/// no piece owns any corner or the middle of is left out. Every owning piece's terrain is read once,
+/// on every core.
+pub fn stand_in(w: &WorldMod, tiled: &Tiled, cells: u32) -> Result<game_render::gpu::StandIn, String> {
+    let cells = cells.max(1).next_power_of_two();
+    let rects: Vec<[f32; 4]> = w.pieces.iter().map(|p| rect(&p.tile, 0.0)).collect();
+    let lo = rects.iter().fold([f32::MAX; 2], |a, r| [a[0].min(r[0]), a[1].min(r[1])]);
+    let hi = rects.iter().fold([f32::MIN; 2], |a, r| [a[0].max(r[2]), a[1].max(r[3])]);
+    let [width, depth] = [hi[0] - lo[0], hi[1] - lo[1]];
+    if rects.is_empty() || !(width > 0.0 && depth > 0.0) {
+        return Err("a world with no ground".into());
+    }
+    let finest = w.pieces.iter().map(|p| p.tile.spacing.0).fold(f32::MAX, f32::min);
+    // The width a whole number of cells, so a wrapped world's copies meet cell to cell.
+    let least = (16.0 * finest).max((width * depth / STAND_IN_CELLS).sqrt());
+    let step = width / (width / least).ceil();
+    let [nx, nz] = [(width / step).round().max(1.0) as u32, (depth / step).ceil().max(1.0) as u32];
+    let row = nx + 1;
+    // Each corner's owner, asked a hair inside the world's far sides.
+    let at = |gx: u32, gz: u32| {
+        let x = (lo[0] + gx as f32 * step).min(hi[0] - 0.5);
+        let z = (lo[1] + gz as f32 * step).min(hi[1] - 0.5);
+        tiled.owner(F(x), F(z))
+    };
+    let mut asks: HashMap<usize, Vec<(usize, f32, f32)>> = HashMap::new();
+    for gz in 0..=nz {
+        for gx in 0..=nx {
+            if let Some((i, lx, lz)) = at(gx, gz) {
+                asks.entry(i).or_default().push(((gz * row + gx) as usize, lx.0, lz.0));
+            }
+        }
+    }
+    let mut owners: Vec<(usize, Vec<(usize, f32, f32)>)> = asks.into_iter().collect();
+    owners.sort_by_key(|(i, _)| *i);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(owners.len()).max(1);
+    let corners: Vec<(usize, Option<GroundVertexAt>)> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = (0..threads)
+            .map(|t| {
+                let owners = &owners;
+                scope.spawn(move || {
+                    let mut out = Vec::new();
+                    for (i, points) in owners.iter().skip(t).step_by(threads) {
+                        let piece = &w.pieces[*i];
+                        let bytes = Files { pieces: vec![piece.clone()] }.load_terrain(0).ok();
+                        let terrain = bytes.as_deref().and_then(|b| Terrain::parse(b).ok());
+                        for &(v, lx, lz) in points {
+                            out.push((v, terrain.as_ref().and_then(|t| sample_near(t, &piece.tile, lx, lz))));
+                        }
+                    }
+                    out
+                })
+            })
+            .collect();
+        jobs.into_iter().flat_map(|j| j.join().expect("a stand-in reader")).collect()
+    });
+    let mut grid = vec![None; (row * (nz + 1)) as usize];
+    for (v, c) in corners {
+        grid[v] = c;
+    }
+    // A cell is drawn where a piece owns its middle or a corner; a corner no terrain gave is its
+    // found neighbours' mean, so a drawn cell at the edge of the ground does not drop to nothing.
+    let drawn: Vec<bool> = (0..nz * nx)
+        .map(|n| {
+            let (gx, gz) = (n % nx, n / nx);
+            let mid = tiled.owner(F((lo[0] + (gx as f32 + 0.5) * step).min(hi[0] - 0.5)), F((lo[1] + (gz as f32 + 0.5) * step).min(hi[1] - 0.5))).is_some();
+            mid || [(0, 0), (1, 0), (0, 1), (1, 1)].iter().any(|&(dx, dz)| grid[((gz + dz) * row + gx + dx) as usize].is_some())
+        })
+        .collect();
+    for _ in 0..4 {
+        let before = grid.clone();
+        for gz in 0..=nz {
+            for gx in 0..=nx {
+                if before[(gz * row + gx) as usize].is_some() {
+                    continue;
+                }
+                let near: Vec<GroundVertexAt> = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .filter_map(|&(dx, dz): &(i32, i32)| {
+                        let (x, z) = (gx as i32 + dx, gz as i32 + dz);
+                        (x >= 0 && z >= 0 && x <= nx as i32 && z <= nz as i32).then(|| before[(z as u32 * row + x as u32) as usize]).flatten()
+                    })
+                    .collect();
+                if !near.is_empty() {
+                    let k = near.len() as f32;
+                    let y = near.iter().map(|c| c.0).sum::<f32>() / k;
+                    let n = near.iter().fold([0.0; 3], |a, c| [a[0] + c.1[0], a[1] + c.1[1], a[2] + c.1[2]]);
+                    grid[(gz * row + gx) as usize] = Some(GroundVertexAt(y, n));
+                }
+            }
+        }
+    }
+    let floor = grid.iter().flatten().map(|c| c.0).fold(f32::MAX, f32::min);
+    let floor = if floor == f32::MAX { 0.0 } else { floor };
+    let mut chunks = Vec::new();
+    for cz in 0..nz.div_ceil(cells) {
+        for cx in 0..nx.div_ceil(cells) {
+            let side = cells + 1;
+            let mut vertices = Vec::with_capacity((side * side) as usize);
+            let (mut low, mut high) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for j in 0..side {
+                for i in 0..side {
+                    // Past the grid's far sides, its last corner along that row or column.
+                    let (gx, gz) = ((cx * cells + i).min(nx), (cz * cells + j).min(nz));
+                    let c = grid[(gz * row + gx) as usize];
+                    let pos = [lo[0] + gx as f32 * step, c.map_or(floor, |c| c.0), lo[1] + gz as f32 * step];
+                    let n = c.map_or([0.0, 1.0, 0.0], |c| c.1);
+                    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    let normal = if l > 0.0 { n.map(|v| v / l) } else { [0.0, 1.0, 0.0] };
+                    if c.is_some() {
+                        for k in 0..3 {
+                            low[k] = low[k].min(pos[k]);
+                            high[k] = high[k].max(pos[k]);
+                        }
+                    }
+                    vertices.push(game_render::gpu::GroundVertex { pos, normal });
+                }
+            }
+            let missing: Vec<bool> = (0..cells * cells)
+                .map(|n| {
+                    let (gx, gz) = (cx * cells + n % cells, cz * cells + n / cells);
+                    gx >= nx || gz >= nz || !drawn[(gz * nx + gx) as usize]
+                })
+                .collect();
+            if missing.iter().all(|&m| m) {
+                continue;
+            }
+            let centre = game_render::mat::v3((low[0] + high[0]) * 0.5, (low[1] + high[1]) * 0.5, (low[2] + high[2]) * 0.5);
+            let radius = ((high[0] - centre.x).powi(2) + (high[1] - centre.y).powi(2) + (high[2] - centre.z).powi(2)).sqrt();
+            chunks.push(GroundChunk {
+                vertices,
+                cells,
+                at: (cx, cz),
+                missing: if missing.iter().any(|&m| m) { missing } else { Vec::new() },
+                centre,
+                radius,
+            });
+        }
+    }
+    Ok(game_render::gpu::StandIn {
+        piece: GroundPiece::of(chunks),
+        step,
+        origin: lo,
+        cells: [nx, nz],
+        rects: rects.into_iter().enumerate().map(|(i, r)| (i as u32, r)).collect(),
+    })
+}
+
+/// A stand-in corner: its height in world feet, and its normal as the terrain stores it.
+#[derive(Clone, Copy)]
+struct GroundVertexAt(f32, [f32; 3]);
+
+/// The ground at the sample nearest a point in a piece's own feet (V92): from the cell it starts,
+/// or failing that from a neighbour's corner, as [`crate::ground::Ground::chunks`] finds them.
+fn sample_near(t: &Terrain, tile: &Tile, lx: f32, lz: f32) -> Option<GroundVertexAt> {
+    let spacing = tile.spacing.0;
+    let [sx_n, sz_n] = tile.samples();
+    let sx = ((lx / spacing).round().max(0.0) as u32).min(sx_n.saturating_sub(1));
+    let sz = ((lz / spacing).round().max(0.0) as u32).min(sz_n.saturating_sub(1));
+    for (k, dx, dz) in [(0, 0, 0), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
+        if sx < dx || sz < dz {
+            continue;
+        }
+        if let Some(q) = t.cell(sx - dx, sz - dz, 1) {
+            let n = q.normal[k];
+            return Some(GroundVertexAt(t.scale.0 * q.height[k].0, [n[0].0, n[1].0, n[2].0]));
+        }
+    }
+    None
 }
 
 /// What a world looks like by map (MD9): its ground's paint, and each map's light and sky.

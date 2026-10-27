@@ -60,7 +60,7 @@ use crate::ground_tree::{GroundTree, Look, Pick, TreeChunk};
 use crate::terrain::{Packed, Pages, WorldPaint, lod_errors, lod_hole_errors, lod_indices, lod_indices_holed, lod_level, lod_levels};
 use crate::world::{Assets, Camera, Fog, Graphics, Lighting, Surface};
 use bytemuck::{Pod, Zeroable};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
 
 mod sprites;
@@ -427,12 +427,139 @@ struct GpuGround {
     textures: Vec<wgpu::TextureView>,
     anisotropy: u16,
     pipeline: wgpu::RenderPipeline,
+    /// [`GpuGround::pipeline`] leaving out the pixels a fading piece does not draw (V92).
+    fading: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
     /// The roads and ruts a freeride scene paints into the ground (V67).
     meshes: Option<ground_mesh::GpuMeshes>,
+    /// The pieces part shown (V92): how much of each is drawn, 0 to 1, and how fast that changes a
+    /// second ([`Renderer::show_ground_piece`]). A piece not here is drawn whole.
+    fades: HashMap<u32, (f32, f32)>,
+    /// The world's stand-in (V92, [`Renderer::set_ground_stand_in`]), held as piece [`STAND_IN`].
+    cover: Option<Cover>,
+    /// The shader the pipelines are made of, kept for the stand-in's.
+    module: wgpu::ShaderModule,
+}
+
+/// The piece number the world's stand-in is held as (V92, [`Renderer::set_ground_stand_in`]).
+pub const STAND_IN: u32 = u32::MAX;
+
+/// The share of a prop's pixels drawn `d` feet from the eye under a fade `[far, band]` (V92).
+fn faded_by(fade: Option<[f32; 2]>, d: f32) -> f32 {
+    match fade {
+        Some([far, band]) if band > 0.0 => ((far - d) / band).clamp(0.0, 1.0),
+        Some([far, _]) => if d < far { 1.0 } else { 0.0 },
+        None => 1.0,
+    }
+}
+
+/// How many steps a piece part shown is drawn in: each step another share of an 8x8 screen pattern's
+/// pixels ([`faded_ground`]), the stand-in drawing the rest.
+const FADE_STEPS: u32 = 64;
+
+/// A whole world's ground at its coarsest (V92): a heightfield of `cells` square cells `step` feet a
+/// side from `origin`, each height the ground of the piece owning the place, as one piece of
+/// chunks; and each piece's rectangle in world feet, which is where the stand-in gives way to it.
+pub struct StandIn {
+    pub piece: GroundPiece,
+    pub step: f32,
+    /// Where its first cell's corner is, `x` and `z`.
+    pub origin: [f32; 2],
+    pub cells: [u32; 2],
+    /// By piece number: `[x0, z0, x1, z1]`.
+    pub rects: Vec<(u32, [f32; 4])>,
+}
+
+/// The stand-in on the GPU: a texel for each of its cells, saying how many of the 64 places of the
+/// screen pattern the pieces there draw — the stand-in draws the others — and what makes it.
+struct Cover {
+    texture: wgpu::Texture,
+    bind: wgpu::BindGroup,
+    pipeline: wgpu::RenderPipeline,
+    size: [u32; 2],
+    /// Each texel's level as last written.
+    levels: Vec<u8>,
+    /// Each piece's texels, `[x0, z0, x1, z1]` inclusive, by piece number, and the pieces whose
+    /// texels overlap each one's.
+    rects: HashMap<u32, [u32; 4]>,
+    neighbours: HashMap<u32, Vec<u32>>,
+    /// Pieces whose texels are to be written again before the next frame.
+    dirty: HashSet<u32>,
+}
+
+/// How much of a piece shown `shown` draws, in screen pattern places: none, all, or a step between.
+fn fade_level(shown: f32) -> u32 {
+    if shown >= 1.0 {
+        FADE_STEPS
+    } else if shown <= 0.0 {
+        0
+    } else {
+        ((shown * FADE_STEPS as f32).round() as u32).clamp(1, FADE_STEPS - 1)
+    }
 }
 
 impl GpuGround {
+    /// How much of piece `piece` is drawn, 0 to 1 (V92): a piece not held, none.
+    fn shown(&self, piece: u32) -> f32 {
+        if !self.hashes.contains_key(&piece) {
+            return 0.0;
+        }
+        self.fades.get(&piece).map_or(1.0, |f| f.0)
+    }
+
+    /// The instance a piece's draw is made with (V92), which its shader reads as how it is shown: 0
+    /// for whole, `1..FADE_STEPS` for its share of the screen pattern.
+    fn fade_instance(&self, piece: u32) -> u32 {
+        match fade_level(self.shown(piece)) {
+            FADE_STEPS => 0,
+            k => k,
+        }
+    }
+
+    /// Piece `piece`'s draw changed: its stand-in's texels are written again.
+    fn changed(&mut self, piece: u32) {
+        if let Some(c) = &mut self.cover {
+            c.dirty.insert(piece);
+        }
+    }
+
+    /// Write the texels of the pieces whose draw changed (V92): each the least any piece there draws,
+    /// so where any piece is not wholly drawn the stand-in shows, and seams are never left bare.
+    fn write_cover(&mut self, queue: &wgpu::Queue) {
+        let Some(c) = &self.cover else { return };
+        if c.dirty.is_empty() {
+            return;
+        }
+        let dirty: Vec<u32> = c.dirty.iter().copied().collect();
+        let levels: HashMap<u32, u8> =
+            dirty.iter().flat_map(|p| c.neighbours.get(p).into_iter().flatten()).map(|&q| (q, fade_level(self.shown(q)) as u8)).collect();
+        let c = self.cover.as_mut().expect("checked");
+        for p in dirty {
+            let Some(&[x0, z0, x1, z1]) = c.rects.get(&p) else { continue };
+            let near = c.neighbours.get(&p).map_or(&[][..], Vec::as_slice);
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    let least = near
+                        .iter()
+                        .filter(|q| c.rects[q].iter().zip([x, z, x, z]).enumerate().all(|(k, (&r, v))| if k < 2 { r <= v } else { v <= r }))
+                        .map(|q| levels[q])
+                        .min()
+                        .unwrap_or(0);
+                    c.levels[(z * c.size[0] + x) as usize] = least;
+                }
+            }
+            let (w, h) = (x1 - x0 + 1, z1 - z0 + 1);
+            let rows: Vec<u8> = (z0..=z1).flat_map(|z| c.levels[(z * c.size[0] + x0) as usize..][..w as usize].to_vec()).collect();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &c.texture, mip_level: 0, origin: wgpu::Origin3d { x: x0, y: z0, z: 0 }, aspect: wgpu::TextureAspect::All },
+                &rows,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+        c.dirty.clear();
+    }
+
     /// Free piece `piece`'s chunks' places; [`GpuGround::regrid`] after.
     fn forget(&mut self, piece: u32) {
         let corners = (self.cells + 1) * (self.cells + 1);
@@ -462,7 +589,10 @@ impl GpuGround {
                 _ => runs.push((c.piece, i, 1)),
             }
         }
-        self.trees.retain(|p, _| runs.iter().any(|r| r.0 == *p));
+        // By set (V92: a world's stand-ins are thousands of pieces, and a walk of the runs for each
+        // was most of a piece's coming).
+        let held: std::collections::HashSet<u32> = runs.iter().map(|r| r.0).collect();
+        self.trees.retain(|p, _| held.contains(p));
         for (piece, first, count) in runs {
             match self.trees.get_mut(&piece) {
                 Some(t) if t.2.len() > 0 => (t.0, t.1) = (first, count),
@@ -733,6 +863,10 @@ pub struct Renderer {
     /// How far the world is drawn (V32), and how far apart the ground's two farthest points are.
     graphics: Graphics,
     span: f32,
+    /// Where props and plants fade out with distance (V92), `[far, band]` in feet: drawn whole
+    /// nearer than `far - band`, and a share of a screen pattern's pixels less every foot to none at
+    /// `far`; none fade with `None`, or under [`Graphics::Original`].
+    prop_fade: Option<[f32; 2]>,
     /// A world that wraps round (MD43): drawn again one width off across each seam out to the reach.
     wrap: Option<crate::wrap::Wrap>,
     /// Each copy's own ground view by the view and the copy's offset in widths, kept from frame to
@@ -1945,6 +2079,7 @@ impl Renderer {
             groves: Vec::new(),
             graphics: Graphics::default(),
             span: 0.0,
+            prop_fade: None,
             wrap: None,
             copy_slots: std::collections::HashMap::new(),
             scratch: Vec::new(),
@@ -2331,12 +2466,14 @@ impl Renderer {
         }
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ground"),
-            source: wgpu::ShaderSource::Wgsl(match (pages, &world) {
-                (Some(p), _) => ground_pages_wgsl(p, dirt),
-                (None, Some((w, packed))) => ground_world_wgsl(w, packed),
-                (None, None) => ground_wgsl(paint, dirt),
-            }
-            .into()),
+            source: wgpu::ShaderSource::Wgsl(
+                faded_ground(match (pages, &world) {
+                    (Some(p), _) => ground_pages_wgsl(p, dirt),
+                    (None, Some((w, packed))) => ground_world_wgsl(w, packed),
+                    (None, None) => ground_wgsl(paint, dirt),
+                })
+                .into(),
+            ),
         });
         let mut entries = vec![
             sampler_entry(0),
@@ -2386,31 +2523,10 @@ impl Renderer {
             bind_group_layouts: &[Some(&self.view_layout), Some(&layout), meshes.as_ref().map(|m| &m.layout)],
             immediate_size: 0,
         });
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ground"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GroundVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
-                })],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Greater)),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(self.format.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        // And the same with a share of its pixels left out, for a piece fading in or out (V92): a
+        // pipeline of its own, so the whole ground's keeps its early depth test.
+        let pipeline = ground_pipeline(&self.device, &module, &pipeline_layout, self.format, "fs");
+        let fading = ground_pipeline(&self.device, &module, &pipeline_layout, self.format, "fs_fade");
         self.ground = Some(GpuGround {
             pages: vec![vertex_buffer],
             per_page: ((self.device.limits().max_buffer_size / (u64::from((cells + 1) * (cells + 1)) * std::mem::size_of::<GroundVertex>() as u64))
@@ -2418,12 +2534,16 @@ impl Renderer {
             capacity: 1,
             free: vec![0],
             hashes: HashMap::new(),
+            fades: HashMap::new(),
+            cover: None,
+            module,
             chunks: Vec::new(),
             cells,
             trees: std::collections::BTreeMap::new(),
             patterns,
             views: Vec::new(),
             pipeline,
+            fading,
             bind,
             layout,
             shadow,
@@ -2462,6 +2582,13 @@ impl Renderer {
         }
         if fresh {
             g.forget(piece);
+            // A piece with a stand-in under it comes in unseen, and is shown once it is all here (V92).
+            if piece != STAND_IN && g.cover.as_ref().is_some_and(|c| c.rects.contains_key(&piece)) {
+                g.fades.insert(piece, (0.0, 0.0));
+            } else {
+                g.fades.remove(&piece);
+            }
+            g.changed(piece);
         }
         g.hashes.insert(piece, made.hash);
         while g.free.len() < chunks.len() {
@@ -2510,8 +2637,167 @@ impl Renderer {
         if let Some(g) = &mut self.ground {
             g.forget(piece);
             g.hashes.remove(&piece);
+            g.fades.remove(&piece);
+            g.changed(piece);
             g.regrid();
         }
+    }
+
+    /// The world's stand-in (V92): its whole ground at its coarsest, held from the load as piece
+    /// [`STAND_IN`] and drawn wherever no piece's own ground is drawn whole — before a piece comes,
+    /// while it fades in, and after it goes. A piece added afterwards inside the stand-in's rectangles
+    /// is not drawn until [`Renderer::show_ground_piece`] says. Needs a ground set first.
+    pub fn set_ground_stand_in(&mut self, s: StandIn) -> Result<(), String> {
+        let Some(g) = &self.ground else { return Err("no ground to stand in for".into()) };
+        let limits = self.device.limits();
+        let [w, h] = s.cells;
+        if w == 0 || h == 0 || w > limits.max_texture_dimension_2d || h > limits.max_texture_dimension_2d || !(s.step > 0.0) {
+            return Err(format!("a stand-in of {w} x {h} cells of {} feet", s.step));
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ground cover"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let grid = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ground cover grid"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&grid, 0, bytemuck::cast_slice(&[1.0 / s.step, -s.origin[0] / s.step, -s.origin[1] / s.step, 0.0f32]));
+        let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ground cover"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let view = texture.create_view(&Default::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ground cover"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: grid.as_entire_binding() },
+            ],
+        });
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ground stand-in"),
+            bind_group_layouts: &[Some(&self.view_layout), Some(&g.layout), g.meshes.as_ref().map(|m| &m.layout), Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = ground_pipeline(&self.device, &g.module, &pipeline_layout, self.format, "fs_stand_in");
+        // Each piece's texels, and the pieces overlapping them, found a column of texels at a time.
+        let to_texels = |r: [f32; 4]| {
+            let t = |v: f32, o: f32, n: u32| (((v - o) / s.step).floor().max(0.0) as u32).min(n - 1);
+            let [ox, oz] = s.origin;
+            [t(r[0], ox, w), t(r[1], oz, h), t(r[2], ox, w), t(r[3], oz, h)]
+        };
+        let rects: HashMap<u32, [u32; 4]> = s.rects.iter().map(|&(p, r)| (p, to_texels(r))).collect();
+        let mut columns: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (&p, r) in &rects {
+            for x in r[0] / 16..=r[2] / 16 {
+                columns.entry(x).or_default().push(p);
+            }
+        }
+        let overlap = |a: &[u32; 4], b: &[u32; 4]| a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
+        let neighbours: HashMap<u32, Vec<u32>> = rects
+            .iter()
+            .map(|(&p, r)| {
+                let mut near: Vec<u32> = (r[0] / 16..=r[2] / 16)
+                    .flat_map(|x| columns.get(&x).into_iter().flatten().copied())
+                    .filter(|q| overlap(r, &rects[q]))
+                    .collect();
+                near.sort_unstable();
+                near.dedup();
+                (p, near)
+            })
+            .collect();
+        let dirty = rects.keys().copied().collect();
+        let g = self.ground.as_mut().expect("checked");
+        g.cover = Some(Cover { texture, bind, pipeline, size: [w, h], levels: vec![0; (w * h) as usize], rects, neighbours, dirty });
+        // The pieces held already stay drawn as they were.
+        self.put_ground_piece(STAND_IN, s.piece, true)
+    }
+
+    /// Show piece `piece`, all of whose chunks are here now (V92): over `seconds` from its stand-in,
+    /// a share of a screen pattern's pixels more each frame ([`Renderer::advance_ground_fades`]), or
+    /// at once for 0. A piece with no stand-in is drawn whole from when it is added, and this changes
+    /// nothing.
+    pub fn show_ground_piece(&mut self, piece: u32, seconds: f32) {
+        let Some(g) = &mut self.ground else { return };
+        let Some(f) = g.fades.get_mut(&piece) else { return };
+        if seconds > 0.0 {
+            f.1 = 1.0 / seconds;
+        } else {
+            g.fades.remove(&piece);
+            g.changed(piece);
+        }
+    }
+
+    /// Let piece `piece` go over `seconds` back to its stand-in (V92), then drop it as
+    /// [`Renderer::drop_ground_piece`] does; at once without a stand-in or for 0.
+    pub fn fade_out_ground_piece(&mut self, piece: u32, seconds: f32) {
+        let Some(g) = &mut self.ground else { return };
+        if seconds > 0.0 && g.cover.as_ref().is_some_and(|c| c.rects.contains_key(&piece)) && g.hashes.contains_key(&piece) {
+            let shown = g.fades.get(&piece).map_or(1.0, |f| f.0);
+            g.fades.insert(piece, (shown, -1.0 / seconds));
+            g.changed(piece);
+        } else {
+            self.drop_ground_piece(piece);
+        }
+    }
+
+    /// Move every piece fading in or out on by `dt` seconds (V92), dropping those faded out.
+    pub fn advance_ground_fades(&mut self, dt: f32) {
+        let Some(g) = &mut self.ground else { return };
+        let (mut gone, mut moved) = (Vec::new(), Vec::new());
+        g.fades.retain(|&piece, f| {
+            if f.1 != 0.0 {
+                let was = fade_level(f.0);
+                f.0 = (f.0 + f.1 * dt).min(1.0);
+                if fade_level(f.0) != was {
+                    moved.push(piece);
+                }
+            }
+            if f.1 < 0.0 && f.0 <= 0.0 {
+                gone.push(piece);
+            }
+            f.0 < 1.0 && !(f.1 < 0.0 && f.0 <= 0.0)
+        });
+        for piece in moved {
+            g.changed(piece);
+        }
+        for piece in gone {
+            self.drop_ground_piece(piece);
+        }
+    }
+
+    /// How many pieces are fading in or out now, and how many chunks the stand-in has (V92).
+    pub fn ground_fades(&self) -> (usize, usize) {
+        self.ground.as_ref().map_or((0, 0), |g| {
+            (g.fades.values().filter(|f| f.1 != 0.0).count(), g.trees.get(&STAND_IN).map_or(0, |t| t.1))
+        })
     }
 
     /// Piece `piece`'s chunks as the ground holds them, as one number: every corner, hole, place and
@@ -2532,6 +2818,13 @@ impl Renderer {
 
     pub fn graphics(&self) -> Graphics {
         self.graphics
+    }
+
+    /// Where props and plants fade out with distance from now on (V92): `[far, band]` in feet, or
+    /// none. A streamed world's dressing comes in within its reach, so faded to nothing by its reach
+    /// it comes in unseen.
+    pub fn set_prop_fade(&mut self, fade: Option<[f32; 2]>) {
+        self.prop_fade = fade;
     }
 
     /// Whether the world wraps round from now on (MD43), and its sides: every view draws its ground,
@@ -3126,11 +3419,16 @@ impl Renderer {
             let focal = camera.focal(h as usize);
             // The props: culled against the frustum and the reach (the fog's end, as `draw_scene` culls
             // them, or the whole map), and each at the level of detail the disc's own test picks.
+            let fade = self.prop_fade.filter(|_| self.graphics != Graphics::Original);
             for prop in &self.props {
                 let Some(Some(m)) = prop.model else { continue };
                 let model = &self.models[m];
                 let centre = v3(prop.at.0[3][0], prop.at.0[3][1], prop.at.0[3][2]);
                 if !cull.sees(centre, model.radius) || !cull.big_enough(centre, model.radius, PROP_PIXELS) {
+                    continue;
+                }
+                let cover = faded_by(fade, centre.sub(camera.eye).len());
+                if cover <= 0.0 {
                     continue;
                 }
                 drawn.props += 1;
@@ -3142,7 +3440,7 @@ impl Renderer {
                     InstanceRaw {
                         m: prop.at.0,
                         palette: [model.bind_palette, model.nodes],
-                        cover: 1.0,
+                        cover,
                     },
                 ));
             }
@@ -3189,13 +3487,20 @@ impl Renderer {
                     if !cull.sees(centre, radius) || !cull.big_enough(centre, radius, PROP_PIXELS) {
                         continue;
                     }
+                    let share = faded_by(fade, centre.sub(camera.eye).len());
+                    if share <= 0.0 {
+                        continue;
+                    }
                     let ghost = if d.alpha < 1.0 { d.alpha.to_bits() } else { 0 };
                     let key = ((p as u64) << 48) | ((m as u64) << 16);
-                    let inst = InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes], cover: d.cover };
+                    let inst = InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes], cover: d.cover * share };
                     self.scratch.push((key, ghost, inst));
                 }
             }
             let ground_at = std::time::Instant::now();
+            if let Some(g) = &mut self.ground {
+                g.write_cover(&self.queue);
+            }
             ground_counts[p] = self.ground_for(slot, &cull, focal, &mut drawn);
             drawn.ground_time += ground_at.elapsed();
         }
@@ -3314,11 +3619,16 @@ impl Renderer {
         let level = |e: &[f32], d: f32| lod_level(e, d, focal, GROUND_PIXELS);
         let holds = |c: V3, r: f32| cull.holds(c, r);
         let look = Look { look: &see, level: &level, holds: &holds };
+        let hidden: HashSet<u32> = g.fades.iter().filter(|f| f.1 .0 <= 0.0).map(|f| *f.0).collect();
         let (cells, gv) = (g.cells, &mut g.views[v]);
         gv.frame += 1;
         let frame = gv.frame;
         let mut picks = std::mem::take(&mut gv.picks);
         for (&piece, (first, count, tree)) in &mut g.trees {
+            // A piece not shown, or a stand-in whose piece is wholly (V92), draws nothing.
+            if hidden.contains(&piece) {
+                continue;
+            }
             drawn.ground_visits += tree.select(&look, &mut picks);
             // The picks come in the tree's order, so a block's, or a whole node's, are one run.
             let block = |p: &Pick| {
@@ -3459,11 +3769,30 @@ impl Renderer {
                 if let Some(m) = &ground.meshes {
                     pass.set_bind_group(2, m.bind(v), &[]);
                 }
-                for part in gv.parts.values().filter(|p| p.count > 0) {
+                // 0 the whole ground's pipeline, 1 a fading piece's, 2 the stand-in's (V92).
+                let mut using = 0;
+                for (key, part) in gv.parts.iter().filter(|(_, p)| p.count > 0) {
+                    // How much of its piece is shown, as the instance (V92). The stand-in's number
+                    // is the last, so it is drawn after every piece, behind them.
+                    let fade = ground.fade_instance(key.0);
+                    let wants = match (&ground.cover, key.0 == STAND_IN) {
+                        (Some(c), true) => {
+                            if using != 2 {
+                                pass.set_pipeline(&c.pipeline);
+                                pass.set_bind_group(3, &c.bind, &[]);
+                            }
+                            2
+                        }
+                        _ => usize::from(fade != 0),
+                    };
+                    if wants != using && wants != 2 {
+                        pass.set_pipeline(if wants == 1 { &ground.fading } else { &ground.pipeline });
+                    }
+                    using = wants;
                     pass.set_index_buffer(part.buffer.slice(..), wgpu::IndexFormat::Uint32);
                     for &(page, first, count) in &part.runs {
                         pass.set_vertex_buffer(0, ground.pages[page as usize].slice(..));
-                        pass.draw_indexed(first..first + count, 0, 0..1);
+                        pass.draw_indexed(first..first + count, 0, fade..fade + 1);
                         drawn.draws += 1;
                     }
                 }
@@ -3933,10 +4262,11 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
 
 /// The ground's vertex shader, the same for every paint: the world position goes on to the paint,
 /// and the sun on the stored normal and the fog are worked out per corner.
-const GROUND_VS_WGSL: &str = r#"struct Out { @builtin(position) clip: vec4f, @location(0) world: vec3f, @location(1) sunlit: vec3f, @location(2) fog: f32 }
-@vertex fn vs(@location(0) pos: vec3f, @location(1) normal: vec3f) -> Out {
+const GROUND_VS_WGSL: &str = r#"struct Out { @builtin(position) clip: vec4f, @location(0) world: vec3f, @location(1) sunlit: vec3f, @location(2) fog: f32, @location(3) @interpolate(flat) fade: u32 }
+@vertex fn vs(@location(0) pos: vec3f, @location(1) normal: vec3f, @builtin(instance_index) fade: u32) -> Out {
   var o: Out;
   o.clip = to_clip(pos);
+  o.fade = fade;
   o.world = pos;
   let l = length(normal);
   let n = select(normal, normal / l, l > 0.0);
@@ -3945,6 +4275,73 @@ const GROUND_VS_WGSL: &str = r#"struct Out { @builtin(position) clip: vec4f, @lo
   return o;
 }
 "#;
+
+/// A ground pipeline: the shader's `vs` and its fragment program `fs` (V92: the whole ground's, a
+/// fading piece's and the stand-in's).
+fn ground_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat, fs: &str) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("ground"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<GroundVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+            })],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Greater)),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState { module, entry_point: Some(fs), compilation_options: Default::default(), targets: &[Some(format.into())] }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// A ground shader's fragment program as three (V92): `fs`, every pixel; `fs_fade`, the share of an
+/// 8x8 screen pattern the draw's instance says ([`GpuGround::fade_instance`]); and `fs_stand_in`,
+/// the world's stand-in, drawing the places of the pattern its cover texel says the pieces there do
+/// not. A piece fading in draws the pattern's first `k` of 64 places and the stand-in the rest, so the
+/// two together cover each pixel once, and a step of the fade changes a sixty-fourth of the piece's
+/// pixels.
+fn faded_ground(wgsl: String) -> String {
+    let head = "@fragment fn fs(i: Out) -> @location(0) vec4f {";
+    debug_assert!(wgsl.contains(head), "a ground shader without its fragment program");
+    let mut s = wgsl.replacen(head, "fn shade(i: Out) -> vec4f {", 1);
+    s.push_str(&format!(
+        "fn bayer(p: vec2u) -> u32 {{
+  let x = p.x & 7u;
+  let v = x ^ (p.y & 7u);
+  return ((v & 1u) << 5u) | ((x & 1u) << 4u) | ((v & 2u) << 2u) | ((x & 2u) << 1u) | ((v & 4u) >> 1u) | ((x & 4u) >> 2u);
+}}
+@fragment fn fs(i: Out) -> @location(0) vec4f {{
+  return shade(i);
+}}
+@fragment fn fs_fade(i: Out) -> @location(0) vec4f {{
+  let c = shade(i);
+  if bayer(vec2u(i.clip.xy)) >= i.fade {{
+    discard;
+  }}
+  return c;
+}}
+@group(3) @binding(0) var cover: texture_2d<u32>;
+@group(3) @binding(1) var<uniform> cover_grid: vec4f;
+@fragment fn fs_stand_in(i: Out) -> @location(0) vec4f {{
+  let c = shade(i);
+  let size = vec2i(textureDimensions(cover));
+  let at = clamp(vec2i(floor(i.world.xz * cover_grid.x + cover_grid.yz)), vec2i(0), size - vec2i(1));
+  if bayer(vec2u(i.clip.xy)) < textureLoad(cover, at, 0).r {{
+    discard;
+  }}
+  return c;
+}}
+"
+    ));
+    s
+}
 
 /// The ground's shader for a mod track's terrain pages (MD4, [`Pages`]): the page each leaf takes
 /// looked up per pixel, at the place on it the original's mapping gives, the detail map blended over
