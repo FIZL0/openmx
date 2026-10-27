@@ -258,11 +258,11 @@ Two things that bite:
       on what donations pay for, and the prompt/token/commit counts. Until then those links show dimmed and
       inert and the counts show a dash (research/journal/2026-10-26-p181-web-launcher).
 
-## A tail landing the port rides out and the original does not (S177)
+## A tail landing the port rides out and the original does not (S178)
 
 S144 put twelve tail-first landings to the original (slams, a hard drop, crossed up, leaned, on the gas)
 and the port judged every one as the original does, so the generous landing you saw is not among them.
 To find it: ride the shell with `--record context/tapes/tail.tape` (from the repo root, the track you
 were on), land the way that rode out, quit, and add the tape's path, the track and roughly where on it
-to S177 (`./kit plan S177`). Five minutes. If the shell will not record, say which track and jump; an
+to S178 (`./kit plan S178`). Five minutes. If the shell will not record, say which track and jump; an
 agent can then try to make the same landing in the original by teleport.

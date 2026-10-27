@@ -8,5 +8,5 @@ port wrecked or rode out on every one as the original does, with the same reason
 touchdown g and pitch matched the original to print precision. The original is about as generous as the
 port: a 55° tail-down landing at 53 ft/s down, on the gas, rides out in both. The wreck clauses were not
 changed. Changing them now would be a guess. The test `tail_landings_wreck_as_the_original_does`
-holds the twelve cases. The landing the user saw is S177, which needs a tape of their ride (plan/HUMAN.md).
+holds the twelve cases. The landing the user saw is S178, which needs a tape of their ride (plan/HUMAN.md).
 Details in the numbered files; the newest one's suffix says whose move it is (FINAL · PART · READY).
