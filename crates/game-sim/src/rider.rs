@@ -236,6 +236,11 @@ pub struct Rider {
     /// ([`Rider::carries_bike_col`]): what this bike strikes other riders with and what they strike.
     /// A constant, like [`Rider::wreckage`]; with none the bike is in nobody's way.
     pub bike_col: Option<Arc<crate::bike_col::BikeCol>>,
+    /// The bike was built from a file whose name says 50cc to the original (S157,
+    /// [`crate::track::fifty_reach`]) — which `Race500P` does too: the wreck test's hit clause takes
+    /// its body rays from [`air::HIT_REACH_FIFTY`] up rather than [`air::HIT_REACH`]. A constant like
+    /// [`Rider::bike_col`], set by the shell that knows the file; `false` from [`Rider::new`].
+    pub fifty: bool,
     /// The ragdoll of the wreck being ridden out (S53): the rider's bones, thrown off the bike and
     /// stepped while they are down. `None` when the rider is up, and for a rider with no kit or no
     /// [`Wreckage`], who is down as one point of [`Crash`]'s as before.
@@ -367,6 +372,7 @@ impl Rider {
             crash: None,
             ragdoll_kit: None,
             bike_col: None,
+            fifty: false,
             ragdoll: None,
             skeleton: None,
             drawn: Vec::new(),
@@ -577,7 +583,7 @@ impl Rider {
         let Rider {
             ride, tricks, state, motion, packed_pose, packed_fore_aft, set, clips, sense, racing, wreckage, crash, animation,
             flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, riding, wreck_sounds, idles, ghost, edge_armed, page,
-            put_back, ragdoll_shown, score, bike_col, ..
+            put_back, ragdoll_shown, score, bike_col, fifty, ..
         } = self;
         *ragdoll_shown = None;
         let mut sense = *sense;
@@ -639,6 +645,8 @@ impl Rider {
         let cars = bump.as_deref().map_or_else(Vec::new, |b| crate::mover_contact::wreck_contacts(&b.contacts));
         // What the body rays found in the ground (P147), which the wreck test reads too.
         let mut in_ground = Vec::new();
+        // And what they found on the scenery (S157): a 50cc bike's shoulder rays reach the hit clause.
+        let mut on_scenery = Vec::new();
         if state.wreck.is_none() {
             // The body rays against the world's props (S138), from where the last tick left the bike,
             // as its collision object searches them before the bikes are updated: what they touch goes
@@ -651,6 +659,7 @@ impl Rider {
                 Some((f, m)) => (Some(f), m),
                 None => (None, Vec::new()),
             };
+            on_scenery = found.as_deref().map_or_else(Vec::new, crate::mover_contact::wreck_contacts);
             let scenery = match &found {
                 Some(f) => Some(!f.is_empty() || !ground.is_empty()),
                 None => (!ground.is_empty()).then_some(true),
@@ -868,6 +877,7 @@ impl Rider {
         if state.wreck.is_none() {
             hits.extend(ride::hits_among(ride, world, rivals));
             hits.extend(cars);
+            hits.extend(on_scenery);
         }
         let touched = ride.touching || !hits.is_empty();
         let (mass, height) = (F::ONE / ride.chassis.inv_mass, F(ride.chassis.cofg_world.y()));
@@ -911,10 +921,9 @@ impl Rider {
                 // Both can enter a wreck on one substep, and the entry stores its reason without
                 // looking, so the hit's — asked second — is the one that stays.
                 let landed = air::wreck_test_in(&p.air, air, &chassis, &step, &loads, allowed.air);
-                // Never a 50cc bike's lower limit: the original's flag is the bike's name containing
-                // "Race50" or "Pro50" (`track::physics_file`'s), and the rider is not told which file
-                // it was built from — nor does `ride::hits` sweep the two shoulder rays it would add.
-                let hit = air::hit_wreck(&p.air, air, touched, false, mass, height, &hits);
+                // A 50cc bike's lower limit when the shell said the file was one (S157): its body
+                // rays' own scenery entries carry the rays that reach above it.
+                let hit = air::hit_wreck(&p.air, air, touched, *fifty, mass, height, &hits);
                 let spun = spun.filter(|_| allowed.air || !spun_aloft);
                 hit.or(landed).or(spun).map(Wreck::from)
             },

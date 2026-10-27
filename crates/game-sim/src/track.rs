@@ -1279,6 +1279,15 @@ pub fn physics_file(engine: Engine, pro: bool, tuning: Tuning) -> String {
     format!("Bike\\{tier}{cc}{which}.phy")
 }
 
+/// Whether the bike built from physics file `name` ([`physics_file`]'s) takes the wreck test's
+/// 50cc reach ([`crate::air::HIT_REACH_FIFTY`]): the original's constructor asks only whether the name
+/// holds "Race50" or "Pro50", so the 500s take it as well as the 50s (S157). The name it asks is the
+/// one built here, capitals and all; a disc member's lower-case name is asked the same.
+pub fn fifty_reach(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("race50") || name.contains("pro50")
+}
+
 /// What a freeride track's bike is, absent a career profile saying otherwise: the 125 of the lower tier,
 /// i.e. `Bike\Race125P.phy` and `Bike\Race125A.phy`.
 ///
@@ -1456,6 +1465,16 @@ mod tests {
         // The freeride pair, the one the physics proofs are compared against.
         assert_eq!(physics_file(FREERIDE_ENGINE, FREERIDE_PRO, Tuning::P), "Bike\\Race125P.phy");
         assert_eq!(physics_file(FREERIDE_ENGINE, FREERIDE_PRO, Tuning::A), "Bike\\Race125A.phy");
+    }
+
+    #[test]
+    fn the_50cc_reach_is_a_name_test_the_500s_pass_too() {
+        let fifty = |engine, pro, tuning| fifty_reach(&physics_file(engine, pro, tuning));
+        assert!(fifty(Engine::Cc50, false, Tuning::A) && fifty(Engine::Cc50, true, Tuning::P));
+        // The 2p recording's bikes (S157): the original's flag is set on both.
+        assert!(fifty(Engine::Cc500, false, Tuning::P) && fifty(Engine::Cc500, true, Tuning::A));
+        assert!(!fifty(Engine::Cc125, false, Tuning::P) && !fifty(Engine::Cc250, true, Tuning::A));
+        assert!(fifty_reach("bike\\race500p.phy"));
     }
 
     fn word(out: &mut Vec<u8>, w: u32) {
