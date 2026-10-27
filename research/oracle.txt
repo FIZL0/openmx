@@ -4051,13 +4051,26 @@ machine_wreck_load boot 0x003dc570 [<p>Wreck]: Min/MaxDistance, MinImpulse +0x22
 bike_wreck_clank boot 0x003dc8c0 the wreck emitter's frame (vt +0x38): when *+0x200 (bike +0x948 =
 #                                wrecked, from the +0x868 reason copy) and *+0x204 (record +0x40
 #                                touched) and the emitter idle and |bike +0x550| >= MinImpulse: a
-#                                no-repeat rand pick at min(100, |imp|/MaxImpulse*100)%. Not ported:
-#                                the port plays one [Wreck] at the wreck entry instead
+#                                no-repeat rand pick at min(100, |imp|/MaxImpulse*100)%. Ported
+#                                (P144, audio.rs WreckClank on BikeCrash): see P144 below
 bike_wreck_entry_clank boot 0x003dcb90 (emitter, 0) the player's wreck entry's call: when the
 #                                      emitter is idle, 0x003dc730 -- the same gate on the impulse
 #                                      (|*+0x224| >= MinImpulse, else nothing), a no-repeat rand() pick
 #                                      and the same level. So the entry clank is not unconditional
 #                                      either: S109's reason-11 fall had none (P180's matched filter)
+# P144 -- the bike's [Wreck] emitter (bike +0x1498, made in engine_sound_hands 0x00280fb0 with
+# machine_wreck_load(emitter, ini, "" , bike+0x820 position, +0x840 velocity, bike+0x948,
+# *(bike+0x7d0)+0x40), then 0x003dcb80(emitter, bike+0x550)). Live (journal p144-wreck-clank,
+# capture/clank.toml + play.sh; context/capture/p144/clank2.csv, animandpump.p2m2 in copy 2, rows
+# 3700..3939): the emitter's +0x224 is bike+0x550 and +0x200 bike+0x948 (start.ee.bin too). +0x748 = 11
+# at 3725, +0x948 at 3726 (a tick late), both 0 at 3919. While down, bike+0x550 equals the wreck body's
+# shock peak (*(*(bike+0x7a8)+0x110)+0xb0) on every row: (27.78, 54.63, -21.47) at 3792, then 15.23,
+# 15.47 and 8.39 (|v|) at 3796, 3847, 3876, 0 elsewhere; the record's +0x40 the emitter reads is set
+# 3792-3798, 3833-3835, 3842-3845, 3847-3850, 3870-3874, 3876-3883, 3892-3912 (the wreck bike's
+# touches: a downed rider's riding record carries the wreck body, as noted above). The 125's emitter reads
+# MinImpulse 18.8, MaxImpulse 40 (= Bike\125sx.res vehicle_*.aud [Wreck]). Its last pick (+0x220)
+# goes -1 -> 3 at 3792 and nowhere else: one clank, at the bike's touchdown, level 100; the entry
+# (+0x550 = 0 on a fall off the back) and the three later hits (< 18.8) are silent.
 # P180 -- the rider's voice past the wreck entry. rider.aud [Params] MinImpulse (12.8) is at +0x238.
 rider_voice_frame boot 0x0033e790 the rider emitter's frame: when +0x23c == 0 and the body record at
 #                                 +0x240 has reason +0x104 not 0 and not 13, +0x1bc set (touching, as

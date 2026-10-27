@@ -1,0 +1,91 @@
+# P144: the bike's [Wreck] emitter (bike +0x1498) and the three words it gates on, over S109's wreck.
+# The bike is the first_recording chain's 0x8 -> 0x0 (animandpump's own, as S109's wreck_reason).
+
+[watch]
+name        = "p144-clank"
+description = "the bike's wreck clank: its gates, its impulse and its last pick"
+every       = 1
+frames      = 260
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"  # +0x748
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "wrecked_948"  # the reason copy the emitter's +0x200 points at
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x948"
+type = "u32"
+
+[[field]]
+name = "g_peak"  # +0x550, the emitter's +0x224
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x550"
+type = "f32x4"
+
+[[field]]
+name = "rec_touch"  # *(bike+0x7d0) +0x40, the emitter's +0x204
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x7d0 -> 0x40"
+type = "u32"
+
+[[field]]
+name = "gate_a"  # what the emitter's +0x200 points at
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x200 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "gate_b"  # what its +0x204 points at
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x204 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "imp_ptr"  # its +0x224, a pointer (bike + 0x550)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x224"
+type = "u32"
+
+[[field]]
+name = "bike_addr"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "min_impulse"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x228"
+type = "f32"
+
+[[field]]
+name = "max_impulse"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x22c"
+type = "f32"
+
+[[field]]
+name = "last_pick"  # +0x220: changes on every clank of a list of two or more
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x220"
+type = "s32"
+
+[[field]]
+name = "rec_ptr"  # bike +0x7d0, the riding record's pointer
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x7d0"
+type = "u32"
+
+[[field]]
+name = "wb_peak_p"  # the wreck body's shock peak, the body a pointer at the part's +0x110
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x7a8 -> 0x110 -> 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "wb_peak_e"  # the same, the body embedded at the part's +0x110
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x7a8 -> 0x1c0"
+type = "f32x4"

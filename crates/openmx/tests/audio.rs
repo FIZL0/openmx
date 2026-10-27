@@ -333,7 +333,7 @@ fn tone_bike() -> BikeSounds {
         decel: one(tone(2500.0, 0.6), false),
         clutch: one(tone(6000.0, 0.3), false),
         panic: List { sounds: vec![(tone(6000.0, 0.5), false), (tone(6000.0, 0.3), true)] },
-        wreck: List::default(),
+        wreck: audio::MachineWreck { near: 30.0, far: 150.0, max_impulse: 1.0, ..Default::default() },
         low_torque_speed: 25.0 * 1.4667,
         airborne_to_decel: 0.3,
         rev_midpoint: 0.311,
@@ -342,8 +342,6 @@ fn tone_bike() -> BikeSounds {
         doppler: 1.3,
         near: 20.0,
         far: 200.0,
-        wreck_near: 30.0,
-        wreck_far: 150.0,
     }
 }
 
@@ -1720,6 +1718,8 @@ struct Cry {
     list: &'static str,
     touching: bool,
     speed: f32,
+    /// What the bike's clank read on that tick.
+    bike: audio::BikeCrash,
 }
 
 /// **A wreck ride**: the bike dropped 30 ft onto flat ground with nobody on the pad, wrecked by the
@@ -1727,7 +1727,7 @@ struct Cry {
 /// at the recording's 30 Hz and the sound hearing what the shell hands it: the tick's own wreck and
 /// the thrown body ([`audio::RiderBody::of`]). The mixer renders each tick's samples. Returns every
 /// sound started, sorted to its list, and the wreck's reason and tick.
-fn ride_a_wreck(rider: &audio::RiderSounds, bike: BikeSounds) -> (Vec<Cry>, i32, usize) {
+fn ride_a_wreck(rider: &audio::RiderSounds, bike: BikeSounds) -> (Vec<Cry>, i32, usize, f32) {
     use game_sim::phy;
     use game_sim::ride::Controls;
     let tables = Tables::build();
@@ -1739,7 +1739,8 @@ fn ride_a_wreck(rider: &audio::RiderSounds, bike: BikeSounds) -> (Vec<Cry>, i32,
     let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
     let mut sound = audio::Sound::new(mixer.clone());
     sound.rider = rider.clone();
-    let clank = bike.wreck.clone();
+    let clank = bike.wreck.list.clone();
+    let min_impulse = bike.wreck.min_impulse;
     sound.seats.push(audio::SeatSound::new(Arc::new(bike), 1));
     let lists: [(&'static str, &List); 3] = [("fall", &rider.fall), ("impact", &rider.impact), ("clank", &clank)];
     let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
@@ -1751,11 +1752,12 @@ fn ride_a_wreck(rider: &audio::RiderSounds, bike: BikeSounds) -> (Vec<Cry>, i32,
         let at = r.ride.position();
         let hands = Hands { grounded: r.ride.air.on_ground, at: [at.x(), at.y(), at.z()], ..Hands::default() };
         let body = audio::RiderBody::of(&r);
+        let crash = audio::BikeCrash::of(&r);
         let said = f.wreck.map(|w| w.0 as i32);
         if let Some(w) = said.filter(|_| wreck.is_none()) {
             wreck = Some((w, tick));
         }
-        sound.frame(&[audio::SeatFrame { hands, wreck: said, body, ..Default::default() }], 1.0 / 30.0);
+        sound.frame(&[audio::SeatFrame { hands, wreck: said, body, bike: crash, ..Default::default() }], 1.0 / 30.0);
         let mut m = mixer.lock().unwrap();
         let now: Vec<Arc<Clip>> = m.clips().into_iter().map(|c| c.0).collect();
         for clip in &now {
@@ -1763,7 +1765,7 @@ fn ride_a_wreck(rider: &audio::RiderSounds, bike: BikeSounds) -> (Vec<Cry>, i32,
                 continue;
             }
             if let Some((list, _)) = lists.iter().find(|(_, l)| l.sounds.iter().any(|(c, _)| Arc::ptr_eq(c, clip))) {
-                cries.push(Cry { tick, list, touching: body.touching, speed: body.speed });
+                cries.push(Cry { tick, list, touching: body.touching, speed: body.speed, bike: crash });
             }
         }
         sounding = now;
@@ -1773,30 +1775,40 @@ fn ride_a_wreck(rider: &audio::RiderSounds, bike: BikeSounds) -> (Vec<Cry>, i32,
         }
     }
     let (reason, at) = wreck.expect("the drop never wrecked");
-    (cries, reason, at)
+    (cries, reason, at, min_impulse)
 }
 
 /// A bike whose `[Wreck]` is one 1.3 s clank, the rest [`tone_bike`]'s.
 fn clanking_bike() -> BikeSounds {
-    BikeSounds { wreck: List { sounds: vec![(tone(7000.0, 1.3), false)] }, ..tone_bike() }
+    let list = List { sounds: vec![(tone(7000.0, 1.3), false)] };
+    BikeSounds { wreck: audio::MachineWreck { list, near: 30.0, far: 150.0, min_impulse: 0.0, max_impulse: 1.0 }, ..tone_bike() }
 }
 
-/// What a wreck ride's sounds should be: the wreck's own cry and the bike's clank on the wreck's tick
-/// — `[IMPACT]` for the drop's reason 5 — and after it, only `[IMPACT]` screams, each on a tick the
-/// body touched. With `touchdown`, at least one: the thrown rider hitting the ground once the
-/// wreck's own cry is over (the disc's 0.9 s screams still hold the voice when the drop's rider lands).
-fn assert_a_wreck_is_heard(cries: &[Cry], reason: i32, at: usize, touchdown: bool) {
+/// What a wreck ride's sounds should be: the wreck's own cry on the wreck's tick — `[IMPACT]` for the
+/// drop's reason 5 — and the bike's clank with it when the landing's impulse is `MinImpulse` or over
+/// (P144); and after it `[IMPACT]` screams, each on a tick the body touched, and clanks,
+/// each on a tick the wreck body touched at `MinImpulse` or over. With `touchdown`, at least one
+/// scream: the thrown rider hitting the ground once the wreck's own cry is over (the disc's 0.9 s
+/// screams still hold the voice when the drop's rider lands).
+fn assert_a_wreck_is_heard(cries: &[Cry], reason: i32, at: usize, min_impulse: f32, touchdown: bool) {
     println!("wreck {reason} at tick {at}: {cries:?}");
     assert_eq!(reason, 5, "the drop's wreck is the vertical one");
     let entry: Vec<&str> = cries.iter().filter(|c| c.tick == at).map(|c| c.list).collect();
     assert!(entry.contains(&"impact"), "no voice on the wreck's tick: {cries:?}");
-    assert!(entry.contains(&"clank"), "no clank on the wreck's tick: {cries:?}");
+    let impulse = cries.iter().find(|c| c.tick == at).unwrap().bike.entry_impulse;
+    assert_eq!(entry.contains(&"clank"), impulse >= min_impulse, "the entry's clank at {impulse} against MinImpulse {min_impulse}: {cries:?}");
     assert!(cries.iter().all(|c| c.tick >= at), "a sound before the wreck: {cries:?}");
     let after: Vec<&Cry> = cries.iter().filter(|c| c.tick > at).collect();
-    assert!(!touchdown || !after.is_empty(), "the rider hit the ground in silence: {cries:?}");
+    assert!(!touchdown || after.iter().any(|c| c.list == "impact"), "the rider hit the ground in silence: {cries:?}");
     for c in &after {
-        assert_eq!(c.list, "impact", "after the wreck's tick, at {}: {cries:?}", c.tick);
-        assert!(c.touching, "a scream off the ground, at {}: {cries:?}", c.tick);
+        match c.list {
+            "impact" => assert!(c.touching, "a scream off the ground, at {}: {cries:?}", c.tick),
+            "clank" => {
+                let b = &c.bike.crash;
+                assert!(b.wrecked && b.touching && b.impulse >= min_impulse, "a clank the gate shuts, at {}: {cries:?}", c.tick);
+            }
+            l => panic!("{l} after the wreck's tick, at {}: {cries:?}", c.tick),
+        }
     }
 }
 
@@ -1804,8 +1816,8 @@ fn assert_a_wreck_is_heard(cries: &[Cry], reason: i32, at: usize, touchdown: boo
 #[test]
 fn a_wreck_ride_hears_the_voice_and_clank() {
     let rider = tone_rider();
-    let (cries, reason, at) = ride_a_wreck(&rider, clanking_bike());
-    assert_a_wreck_is_heard(&cries, reason, at, true);
+    let (cries, reason, at, min) = ride_a_wreck(&rider, clanking_bike());
+    assert_a_wreck_is_heard(&cries, reason, at, min, true);
 }
 
 /// The same ride on the disc's own `rider.aud` and the 125's `[Wreck]`.
@@ -1815,10 +1827,13 @@ fn a_wreck_ride_hears_the_discs_voice_and_clank() {
     let mut lib = audio::Library::open(d).unwrap();
     let mut read = audio::Reading { lib: &mut lib };
     let (bike, rider) = (read.bike("Bike\\125sx.res"), read.rider("Rider\\ff_fox1.res"));
-    assert_eq!((rider.fall.sounds.len(), rider.impact.sounds.len(), bike.wreck.sounds.len()), (5, 5, 4));
+    assert_eq!((rider.fall.sounds.len(), rider.impact.sounds.len(), bike.wreck.list.sounds.len()), (5, 5, 4));
     assert_eq!((rider.near, rider.far, rider.min_impulse), (30.0, 150.0, 12.8));
-    let (cries, reason, at) = ride_a_wreck(&rider, bike);
-    assert_a_wreck_is_heard(&cries, reason, at, false);
+    // The live emitter's impulses on S109's bike (P144's capture).
+    let w = &bike.wreck;
+    assert_eq!((w.near, w.far, w.min_impulse, w.max_impulse), (30.0, 150.0, 18.8, 40.0));
+    let (cries, reason, at, min) = ride_a_wreck(&rider, bike);
+    assert_a_wreck_is_heard(&cries, reason, at, min, false);
 }
 
 /// The original's rider emitter cries out only while the body is down for a reason that is not the
@@ -1863,4 +1878,119 @@ fn the_rider_cries_only_down_touching_and_fast() {
     for _ in 0..30 {
         assert_eq!(tick(&mut sound, None, b), None);
     }
+}
+
+// --- the bike's wreck clank (P144) ------------------------------------------------------------------
+
+/// S109 run2's fall off the back (reason 11), live (P144's capture, context/capture/p144/clank2.csv,
+/// research/journal/2026-10-27-p144-wreck-clank): the reason set at 3725 and its copy, the clank's
+/// gate, from 3726 to the put-back at 3919; the riding record's touched flag (the wreck body's while
+/// down) in these runs; and the bike's impulse (`+0x550`, equal to the wreck body's shock peak on
+/// every row) on its four nonzero ticks. The bike's `[Wreck]` reads `MinImpulse` 18.8, `MaxImpulse` 40.
+const S109_ENTRY: u32 = 3725;
+const S109_PUT_BACK: u32 = 3919;
+const S109_TOUCHED: [(u32, u32); 7] = [(3792, 3798), (3833, 3835), (3842, 3845), (3847, 3850), (3870, 3874), (3876, 3883), (3892, 3912)];
+const S109_HITS: [(u32, [f32; 3]); 4] = [
+    (3792, [27.777517, 54.63204, -21.469978]),
+    (3796, [6.667242, 12.666171, -5.1974034]),
+    (3847, [3.41453, 13.605559, -6.5144758]),
+    (3876, [0.95954835, 7.5853825, -3.4554358]),
+];
+/// The one clank the emitter started (its last pick changed), and its level: the bike's touchdown,
+/// 1.2 s after a silent entry — and, by P180's matched filter over the same run's video, WRECK05 at
+/// about 3787.
+const S109_CLANKS: [(u32, i32); 1] = [(3792, 100)];
+
+/// A bike whose `[Wreck]` is five ~1 s tones at the S109 bike's impulses.
+fn s109_bike() -> BikeSounds {
+    let list = List { sounds: (0..5).map(|i| (tone(7000.0, 0.9 + 0.07 * i as f32), false)).collect() };
+    BikeSounds { wreck: audio::MachineWreck { list, near: 30.0, far: 150.0, min_impulse: 18.8, max_impulse: 40.0 }, ..tone_bike() }
+}
+
+/// One tick of S109's fall as the shell hands it to the sound.
+fn s109_tick(frame: u32) -> audio::SeatFrame {
+    let wrecked = frame > S109_ENTRY && frame < S109_PUT_BACK;
+    let touching = S109_TOUCHED.iter().any(|&(a, b)| (a..=b).contains(&frame));
+    let impulse = S109_HITS.iter().find(|h| h.0 == frame).map_or(0.0, |h| audio::length(h.1));
+    audio::SeatFrame {
+        wreck: (frame == S109_ENTRY).then_some(11),
+        bike: audio::BikeCrash {
+            crash: audio::PlaneCrash { wrecked, touching: wrecked && touching, impulse },
+            entry_impulse: 0.0,
+            at: [0.0; 3],
+        },
+        ..Default::default()
+    }
+}
+
+/// **S109's fall clanks where the original's did** (P144): no clank at the entry — a fall off the
+/// back has no impulse — then one at the bike's touchdown, at full level, and none on the three later
+/// hits, all under `MinImpulse`. Every seed: the pick is the presentation's dice, the gates are not.
+#[test]
+fn s109s_fall_clanks_where_the_original_did() {
+    for seed in 0..16 {
+        let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+        let mut s = audio::Sound::new(mixer.clone());
+        s.seats.push(audio::SeatSound::new(Arc::new(s109_bike()), seed));
+        let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+        let mut started = Vec::new();
+        let mut was = None;
+        for frame in 3700..3940 {
+            s.frame(&[s109_tick(frame)], 1.0 / 30.0);
+            let v = s.seats[0].bike_clank.voice();
+            if v.is_some() && v != was {
+                let gain = mixer.lock().unwrap().gain_of(v.unwrap()).unwrap();
+                started.push((frame, (gain * 100.0).round() as i32));
+            }
+            was = v;
+            mixer.lock().unwrap().render(&mut out);
+        }
+        assert_eq!(started, S109_CLANKS, "seed {seed}");
+    }
+    for (frame, level) in S109_CLANKS {
+        let hit = S109_HITS.iter().find(|h| h.0 == frame).unwrap().1;
+        assert_eq!(audio::wreck_level(audio::length(hit), 40.0), level);
+    }
+    assert!(S109_HITS[1..].iter().all(|h| audio::length(h.1) < 18.8));
+}
+
+/// The entry's own clank asks only for the emitter idle and the riding impulse at `MinImpulse` or
+/// over, at the same level; the tick's asks for the copy of the reason too (not on the entry's own
+/// tick), the record touched and the wreck body's impulse.
+#[test]
+fn the_bike_clank_is_gated_on_the_impulse() {
+    let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+    let mut s = audio::Sound::new(mixer.clone());
+    s.seats.push(audio::SeatSound::new(Arc::new(s109_bike()), 3));
+    let entry = |impulse: f32| audio::SeatFrame {
+        wreck: Some(5),
+        bike: audio::BikeCrash { crash: audio::PlaneCrash { wrecked: true, touching: true, impulse: 40.0 }, entry_impulse: impulse, at: [0.0; 3] },
+        ..Default::default()
+    };
+    let down = |touching: bool, impulse: f32, wrecked: bool| audio::SeatFrame {
+        bike: audio::BikeCrash { crash: audio::PlaneCrash { wrecked, touching, impulse }, ..Default::default() },
+        ..Default::default()
+    };
+    let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+    // Shut: under MinImpulse at the entry (the wreck body's 40 on that tick is not read), off the
+    // ground, not wrecked, under MinImpulse down.
+    for f in [entry(18.7), down(false, 40.0, true), down(true, 40.0, false), down(true, 18.7, true)] {
+        s.frame(&[f], 1.0 / 30.0);
+        assert_eq!(s.seats[0].bike_clank.voice(), None, "{:?}", f.bike);
+    }
+    s.frame(&[entry(30.0)], 1.0 / 30.0);
+    let v = s.seats[0].bike_clank.voice().expect("the entry's clank at MinImpulse and over");
+    assert_eq!(mixer.lock().unwrap().gain_of(v), Some(0.75), "30 of MaxImpulse 40");
+    // Busy through the clip and its tail: a hit then is quiet, and the next one after plays.
+    let mut k = 0;
+    loop {
+        mixer.lock().unwrap().render(&mut out);
+        s.frame(&[down(true, 40.0, true)], 1.0 / 30.0);
+        k += 1;
+        if s.seats[0].bike_clank.voice().is_some_and(|w| w != v) {
+            break;
+        }
+        assert!(k < 90, "no second clank in three seconds");
+    }
+    assert!((38..=50).contains(&k), "the second clank {k} ticks on: past the 0.9..1.18 s clip and its 0.4 s tail");
 }
