@@ -537,15 +537,18 @@ impl GpuGround {
         for p in dirty {
             let Some(&[x0, z0, x1, z1]) = c.rects.get(&p) else { continue };
             let near = c.neighbours.get(&p).map_or(&[][..], Vec::as_slice);
+            // Every texel of the piece's is under it, so starts at all and comes down to each
+            // overlapping piece's own over the texels the two share.
             for z in z0..=z1 {
-                for x in x0..=x1 {
-                    let least = near
-                        .iter()
-                        .filter(|q| c.rects[q].iter().zip([x, z, x, z]).enumerate().all(|(k, (&r, v))| if k < 2 { r <= v } else { v <= r }))
-                        .map(|q| levels[q])
-                        .min()
-                        .unwrap_or(0);
-                    c.levels[(z * c.size[0] + x) as usize] = least;
+                c.levels[(z * c.size[0] + x0) as usize..][..(x1 - x0 + 1) as usize].fill(FADE_STEPS as u8);
+            }
+            for q in near {
+                let r = c.rects[q];
+                let level = levels[q];
+                for z in z0.max(r[1])..=z1.min(r[3]) {
+                    for t in &mut c.levels[(z * c.size[0] + x0.max(r[0])) as usize..=(z * c.size[0] + x1.min(r[2])) as usize] {
+                        *t = (*t).min(level);
+                    }
                 }
             }
             let (w, h) = (x1 - x0 + 1, z1 - z0 + 1);
@@ -2708,10 +2711,13 @@ impl Renderer {
         });
         let pipeline = ground_pipeline(&self.device, &g.module, &pipeline_layout, self.format, "fs_stand_in");
         // Each piece's texels, and the pieces overlapping them, found a column of texels at a time.
+        // A far side on a texel's edge ends in the texel before it, not its neighbour's.
         let to_texels = |r: [f32; 4]| {
-            let t = |v: f32, o: f32, n: u32| (((v - o) / s.step).floor().max(0.0) as u32).min(n - 1);
+            let near = |v: f32, o: f32, n: u32| (((v - o) / s.step).floor().max(0.0) as u32).min(n - 1);
+            let far = |v: f32, o: f32, n: u32, from: u32| ((((v - o) / s.step).ceil() - 1.0).max(0.0) as u32).min(n - 1).max(from);
             let [ox, oz] = s.origin;
-            [t(r[0], ox, w), t(r[1], oz, h), t(r[2], ox, w), t(r[3], oz, h)]
+            let (x0, z0) = (near(r[0], ox, w), near(r[1], oz, h));
+            [x0, z0, far(r[2], ox, w, x0), far(r[3], oz, h, z0)]
         };
         let rects: HashMap<u32, [u32; 4]> = s.rects.iter().map(|&(p, r)| (p, to_texels(r))).collect();
         let mut columns: HashMap<u32, Vec<u32>> = HashMap::new();
