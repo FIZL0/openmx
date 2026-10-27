@@ -1,4 +1,4 @@
-# 1 — save state tick one (PART)
+# 1 — save state tick one (FINAL)
 
 Task S107. 2026-10-25.
 
@@ -39,7 +39,7 @@ Task S107. 2026-10-25.
     default. On its own this did not move tick 1, but it is the image's state.
 
   With both fixes the first substep of tick 1 agrees word for word at every contributor. The second
-  parts at the front wheel's tire forces: see below and S121.
+  parts at the front wheel's tire forces: see below and S123.
 - **S89 ratchets.** `S89_AGREES_THROUGH` [0, 1] → [1, 1] (`along` already agreed through its tick 1; the
   first compared tick of both rides is 2). In `S89_LANES_AGREE_THROUGH` I re-pinned the two lanes that
   are S120's red on bare HEAD to this run's values: front `slip.locked` 279 → 280, rear 277 → 276. They
@@ -95,7 +95,7 @@ A rigid body's inertia setter (chassis vtable `+0x7c`, `./kit fn 0x00158e10`) st
   front wheel's swept contact on the bed is placed at z 2902.216 where the original's is 2902.207
   (`0x45356375` vs `0x45356353`; the port's equals its load point), and the compression (`0x3eec9c09`
   vs `0x3eec9a08`) and the spring force follow. I did not find how the original places a swept-only
-  contact's point. That is S121. So S89's bit-exact acceptance is **not** reached, and
+  contact's point. That is S123. So S89's bit-exact acceptance is **not** reached, and
   `S89_AGREES_THROUGH` is only [1, 1].
 - **The S89 lane re-pin is not S120's fix.** Front/rear `slip.locked` were re-pinned to this run (280,
   276). Why main moved them on the old `race250a` run is unexplained, and S120 stays open for that.
@@ -104,8 +104,9 @@ A rigid body's inertia setter (chassis vtable `+0x7c`, `./kit fn 0x00158e10`) st
   (not read). No `.phy` on the disc has a zero inertia lane, so the fallback never runs.
 - **The gate is red, but not on S107.** `./kit check --all` fails only on S119's
   `the_captured_backwards_turns_never_wreck` ("flat agrees through tick 213, S68_AGREES_THROUGH says
-  330"), which S119 found on bare HEAD bb13cfa6 with the same 213. `./kit done` refuses a red gate, so
-  the work is committed and pushed on task/S107 without a tick.
+  330"), which S119 found on bare HEAD bb13cfa6 with the same 213. `./kit done` refused the red gate,
+  so the work was merged on 2026-10-25 without a tick. 2026-10-27: S119 is ticked; the tick is rerun on
+  main 56e5bb0b (the S107 code has been on main since b68f3977).
 - **Cross-architecture**: `crates/game-sim/tests/cross/platforms.sh` passes `platforms` (the new
   vectors) on aarch64-unknown-linux-musl and wasm32-wasip1. Both fail `replay`: aarch64 on the same S119
   line, wasm32 with a message-less abort I did not chase to a test (wasm panics carry no text).
@@ -114,6 +115,5 @@ A rigid body's inertia setter (chassis vtable `+0x7c`, `./kit fn 0x00158e10`) st
 
 ## Next
 
-Rerun `./kit done S107 "<msg>" --skip-audit` once S119 has made main's gate green (the audit's only
-leaks are other tasks' plan/DONE.md addresses). After that, S121 (the swept contact's point on the rail
+S123 (the swept contact's point on the rail
 bed), then raise `S89_AGREES_THROUGH`.
