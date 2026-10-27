@@ -234,7 +234,9 @@ for p in (1, 2):
                 break
             if all(abs(r - s) > 15 for s in best):
                 best.append(r)
-        if not best:
+        if not best and not among:
+            print('| P%d | %s | %.2f | (no row) | | | |' % (p, lab, lim))   # e.g. a rider that never leaves the ground
+        elif not best:
             top = max(among, key=key)
             print('| P%d | %s | %.2f | (best %d) | %d | %.2f | %.0f%% |' % (p, lab, lim, fc(top), top, key(top),
                                                                         100 * key(top) / lim))
