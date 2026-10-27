@@ -2481,6 +2481,9 @@ pub struct Menu {
     garages: Vec<Garage>,
     /// How many seats have a player, which is how many columns the garage shows.
     pub seated: usize,
+    /// The player riding the keyboard rather than a pad, if one is (P178): the Controls tab shows
+    /// that player the keyboard's keys and every other the pad. The shell fills it.
+    pub keys_seat: Option<usize>,
     /// The picks changed since [`Menu::take_picks_changed`] last said so.
     picks_changed: bool,
     /// The saved looks (P86), as `riders.txt` keeps them.
@@ -2755,6 +2758,7 @@ impl Menu {
             picks: Picks::default(),
             garages: Vec::new(),
             seated: 1,
+            keys_seat: None,
             picks_changed: false,
             looks: roster::Presets::default(),
             looks_changed: false,

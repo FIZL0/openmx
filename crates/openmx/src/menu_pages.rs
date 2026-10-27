@@ -532,6 +532,12 @@ impl Menu {
         if self.many_seats() { self.player.min(SEATS - 1) } else { 0 }
     }
 
+    /// The Controls tab shows the keyboard's keys rather than the pad (P178): its seat rides the
+    /// keyboard, not a pad.
+    pub fn controls_on_keys(&self) -> bool {
+        self.keys_seat == Some(self.control_seat())
+    }
+
     fn control_rows(&self) -> Vec<Row> {
         let c = &self.controls;
         let p = self.control_seat();

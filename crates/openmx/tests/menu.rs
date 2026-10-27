@@ -6055,3 +6055,20 @@ fn a_second_seat_s_pause_moves_the_same_at_every_frame_rate() {
         }
     }
 }
+
+/// P178: the Controls tab shows the keyboard's keys only to a player riding the keyboard. A lone 1P
+/// on a pad gets the pad, as does every seat while nobody rides the keyboard.
+#[test]
+fn the_controls_tab_shows_the_keyboard_only_to_its_rider() {
+    let (mut m, _) = fresh();
+    assert_eq!(m.keys_seat, None);
+    assert!(!m.controls_on_keys(), "1P on a pad");
+    m.keys_seat = Some(0);
+    assert!(m.controls_on_keys(), "1P on the keyboard");
+    m.keys_seat = Some(1);
+    assert!(!m.controls_on_keys(), "one seat: the keyboard is not 1P's");
+    m.seated = 2;
+    assert!(!m.controls_on_keys(), "two seats, 1P's rows: 2P rides the keyboard");
+    m.keys_seat = Some(0);
+    assert!(m.controls_on_keys());
+}
