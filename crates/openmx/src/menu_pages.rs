@@ -346,27 +346,47 @@ impl Menu {
         let changed = Knob::MENU
             .iter()
             .filter(|k| (0..SEATS_MAX).any(|s| self.settings.modifiers.get(s, **k) != game_sim::modifiers::ORIGINAL))
-            .count();
-        let mut mods = Row::new(Key::Modifiers, Kind::Opens, "Game Modifiers", "Speed, grip, gravity and the rest, per player. Saved presets live here too.");
+            .count()
+            + self.wrecks_changed();
+        let mut mods = Row::new(Key::Modifiers, Kind::Opens, "Game Modifiers", "Speed, grip, gravity, wrecks and the rest, per player. Saved presets live here too.");
         mods.value = match changed {
             0 => "Original".into(),
             n => format!("{n} Changed"),
         };
-        // Air Wrecks (P138): beside Wrecks, and nothing to switch with Wrecks off. Under the pause a
-        // change takes as it closes, unless the ride holds it.
-        let mut air = Row::on_off(Key::AirWrecks, "Air Wrecks", self.settings.air_wrecks, AIR_WRECKS_HELP);
-        if self.stack.first() == Some(&Screen::Pause) {
-            air.note = Some("Changes take when the pause closes.".into());
-        }
-        let air = air.off_if(!self.settings.wrecks, "Wrecks are off").off_if(self.air_held().is_some(), self.air_held().unwrap_or(""));
         vec![
-            Row::on_off(Key::Wrecks, "Wrecks", self.settings.wrecks, "Whether a hard landing throws the rider off. Off, you ride out every crash."),
-            air,
             Row::on_off(Key::Bays, "Machines at Bays", self.settings.bays, "The lot's bikes and the biplane stand at their bays, see-through, and the original's pop-up offers them when you stop beside one."),
             mods,
             Row::choice(Key::Tricks, "Tricks", &Tricks::ALL.map(Tricks::label), Tricks::ALL.iter().position(|t| *t == self.settings.tricks).unwrap_or(0), TRICKS_HELP)
                 .off_if(!self.settings.mods, "Needs a trick pack in the mods folder"),
         ]
+    }
+
+    /// How many of Wrecks and Air Wrecks are off the original's on (P175), for the Game Modifiers
+    /// row's count.
+    fn wrecks_changed(&self) -> usize {
+        usize::from(!self.settings.wrecks) + usize::from(!self.settings.air_wrecks)
+    }
+
+    /// The modifiers page's Wrecks and Air Wrecks (P175, from the Ride tab's P138 rows): the
+    /// world's, one switch for every player as the room and the tape carry one, set by the host
+    /// alone; Air Wrecks has nothing to switch with Wrecks off, and under the pause it takes as the
+    /// pause closes, unless the ride holds it.
+    fn wrecks_rows(&self) -> Vec<Row> {
+        let host_only = self.mods_own().map(|_| "The world's: only the host sets it.");
+        let mut wrecks = Row::on_off(Key::Wrecks, "Wrecks", self.settings.wrecks, "Whether a hard landing throws the rider off. Off, you ride out every crash.");
+        wrecks.world = true;
+        wrecks.note = Some("The world's: one value for every player. On is the original game.".into());
+        let mut air = Row::on_off(Key::AirWrecks, "Air Wrecks", self.settings.air_wrecks, AIR_WRECKS_HELP);
+        air.world = true;
+        air.note = Some(match self.stack.first() {
+            Some(Screen::Pause) => "Changes take when the pause closes.".into(),
+            _ => "The world's: one value for every player. On is the original game.".into(),
+        });
+        let air = air
+            .off_if(!self.settings.wrecks, "Wrecks are off")
+            .off_if(self.air_held().is_some(), self.air_held().unwrap_or(""))
+            .off_if(host_only.is_some(), host_only.unwrap_or(""));
+        vec![Row::heading("Wrecks"), wrecks.off_if(host_only.is_some(), host_only.unwrap_or("")), air]
     }
 
     fn display_rows(&self) -> Vec<Row> {
@@ -829,6 +849,7 @@ impl Menu {
             let lock = held.as_deref().or(self.knob_held(knob));
             rows.push(r.off_if(lock.is_some(), lock.unwrap_or("")));
         }
+        rows.extend(self.wrecks_rows());
         rows.push(Row::heading("Presets"));
         let names: Vec<&str> = self.settings.presets.iter().map(|(n, _)| n.as_str()).collect();
         let none = names.is_empty();
@@ -844,7 +865,7 @@ impl Menu {
         rows.push(Row::action(Key::SavePreset, "Save Preset", &format!("Name and keep {whose} set, with the world's. Any player can load it.")));
         rows.push(Row::action(Key::DeletePreset, "Delete Preset", "Forgets the preset Load Preset is on.").off_if(none, "No presets saved yet"));
         let reset = match self.mods_seat() {
-            None => "Every modifier back to the original game.",
+            None => "Every modifier back to the original game, Wrecks and Air Wrecks on.",
             Some(_) if own.is_some() => "Your own modifiers back to the original game.",
             Some(_) => "This player's modifiers back to the original game; the world's stay.",
         };
@@ -1189,7 +1210,16 @@ impl Menu {
                 self.settings.presets.remove(self.mod_preset.min(n - 1));
                 self.mod_preset = self.mod_preset.min(self.settings.presets.len().saturating_sub(1));
             }
-            Key::ResetMods if p.ok => self.load_mods(&Mods::original()),
+            Key::ResetMods if p.ok => {
+                self.load_mods(&Mods::original());
+                // The host's All Players reset is the whole ride's: the world's wrecks back on too.
+                if self.mods_seat().is_none() {
+                    self.settings.wrecks = true;
+                    if self.air_held().is_none() {
+                        self.settings.air_wrecks = true;
+                    }
+                }
+            }
             Key::ModsFolder => s.mods = !s.mods,
             // From Mixed, a press is On first.
             Key::Original => self.set_original(next(row) == 1 || row.now.is_none()),
