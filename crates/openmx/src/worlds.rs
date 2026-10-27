@@ -995,6 +995,44 @@ impl WorldMod {
     }
 }
 
+/// The name the radar gives a map (MD42): a free-ride track by the town it is named for, as the
+/// track pick names it (`free06` is Dallas), anything else as it is.
+pub fn map_title(name: &str) -> String {
+    match crate::menu::TRACKS.iter().find(|(archive, _)| archive.eq_ignore_ascii_case(name.trim())) {
+        Some((_, town)) => town.to_string(),
+        None => name.trim().to_string(),
+    }
+}
+
+impl WorldMod {
+    /// The maps the radar names (MD42): every tile's rectangle ([`WorldMod::regions`]) and its
+    /// name — its own `mod.json`'s for a world mod's tile, falling back to its folder's, and a disc
+    /// track's own — through [`map_title`].
+    pub fn map_names(&self) -> crate::hud::MapNames {
+        let regions = self.regions();
+        let maps = self.pieces[..self.tile_count]
+            .iter()
+            .zip(regions.owned)
+            .map(|(p, rect)| {
+                let named = match p.origin {
+                    Origin::Folder => std::fs::read_to_string(p.dir.join("mod.json"))
+                        .ok()
+                        .and_then(|t| Json::parse(&t).ok())
+                        .and_then(|j| j.get("name").and_then(Json::str).map(str::to_string))
+                        .filter(|n| !n.trim().is_empty()),
+                    _ => None,
+                };
+                let name = named.unwrap_or_else(|| match p.origin {
+                    Origin::Folder => p.tile.name.clone(),
+                    _ => p.stem.clone(),
+                });
+                (rect, map_title(&name))
+            })
+            .collect();
+        crate::hud::MapNames { maps }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,5 +1143,64 @@ mod tests {
         std::fs::write(cut, &bytes[..TerrainHead::MOST.min(bytes.len())]).unwrap();
         assert!(find(&mods, "md18_world").unwrap_err().contains("does not fit"));
         let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+    }
+
+    /// MD42: a world's maps as the radar names them — each tile's own `mod.json` name (a free-ride
+    /// track's by its town), its folder's where it has none — and, for a rider walked across the
+    /// grid, the map they are on and the one each way, changing as they cross a tile's edge or ride
+    /// a join between two.
+    #[test]
+    fn a_worlds_radar_names_the_map_underfoot_and_each_neighbour() {
+        let mods = std::env::temp_dir().join(format!("openmx-md42-{}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        let world = mods.join("tracks").join("md42_world");
+        // (folder, its mod.json's name, at): a 2x2 grid, 200 ft apart, each tile 124 ft across.
+        let tiles = [("sw", Some("free06"), [0, 0]), ("se", Some("MD42 Quarry"), [200, 0]), ("nw", None, [0, 200]), ("ne", Some(" "), [200, 200])];
+        let mut listed = Vec::new();
+        for &(name, title, [x, z]) in &tiles {
+            let stem = name.to_uppercase();
+            let dir = world.join("tiles").join(name);
+            if let Some(title) = title {
+                write(&dir, "mod.json", format!(r#"{{"standard": 1, "kind": "track", "id": "md42_{name}", "name": "{title}"}}"#));
+            }
+            let scene = format!("[SceneInfo]\r\nSceneName={name}\r\nDefaultStartPosition=60.00,10.00,60.00\r\nDefaultStartDirection=1.00,0.00,0.00\r\n[Environment]\r\nTerrainFile={stem}.trn\r\nTerrainWidth=2\r\nTerrainBreadth=2\r\nTerrainWidthScale=4.00\r\nTerrainBreadthScale=4.00\r\n");
+            write(&dir, &format!("Env/{stem}/{stem}.scn"), scene);
+            write(&dir, &format!("Env/{stem}/{stem}.ps2.trn"), generate::terrain(name, (2, 2), 4.0, |_, _| 10.0, |_, _| 1));
+            listed.push(format!(r#"{{"tile": "{name}", "at": [{x}.0, {z}.0], "keep": [0, 0, 31, 31]}}"#));
+        }
+        write(&world, "mod.json", format!(r#"{{"kind": "world", "id": "md42_world", "name": "MD42", "tiles": [{}]}}"#, listed.join(", ")));
+        let w = find(&mods, "md42_world").expect("the world reads");
+        let names = w.map_names();
+        let titles: Vec<&str> = names.maps.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(titles, ["Dallas", "MD42 Quarry", "nw", "ne"]);
+        assert_eq!(names.maps[1].0, [200.0, 0.0, 324.0, 124.0]);
+
+        // N E S W from the south-west tile, then across its east edge, then on to the north-east.
+        assert_eq!(names.around([60.0, 60.0]), (Some("Dallas"), [Some("nw"), Some("MD42 Quarry"), None, None]));
+        // Between the two south tiles, nearer the first: still on it.
+        assert_eq!(names.around([150.0, 60.0]).0, Some("Dallas"));
+        assert_eq!(names.around([180.0, 60.0]), (Some("MD42 Quarry"), [Some("ne"), None, None, Some("Dallas")]));
+        assert_eq!(names.around([260.0, 260.0]), (Some("ne"), [None, None, Some("MD42 Quarry"), Some("nw")]));
+        let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+    }
+
+    /// MD42: the neighbour each way is the map across from the rider — of two maps east, the one
+    /// whose span along `z` holds the rider's `z` — and a lone track is one map with none.
+    #[test]
+    fn the_neighbour_each_way_is_the_one_across_from_the_rider() {
+        let maps = vec![
+            ([0.0, 0.0, 100.0, 200.0], "tall".to_string()),
+            ([150.0, 0.0, 250.0, 90.0], "low".to_string()),
+            ([150.0, 110.0, 250.0, 200.0], "high".to_string()),
+            ([400.0, 0.0, 500.0, 200.0], "far".to_string()),
+        ];
+        let names = crate::hud::MapNames { maps };
+        assert_eq!(names.around([50.0, 40.0]).1[1], Some("low"));
+        assert_eq!(names.around([50.0, 160.0]).1[1], Some("high"));
+        // In the gap between the two, riding east meets neither: the map past them it does meet.
+        assert_eq!(names.around([50.0, 104.0]).1[1], Some("far"));
+        assert_eq!(names.around([200.0, 40.0]), (Some("low"), [Some("high"), Some("far"), None, Some("tall")]));
+        let alone = crate::hud::MapNames::alone(&map_title("free09"));
+        assert_eq!(alone.around([-1.0e6, 3.0e6]), (Some("Bridgeport"), [None; 4]));
     }
 }

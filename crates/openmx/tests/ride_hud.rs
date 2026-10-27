@@ -30,6 +30,9 @@ mod overlay;
 #[path = "../src/ride_hud.rs"]
 #[allow(dead_code)]
 mod ride_hud;
+#[path = "../src/hud.rs"]
+#[allow(dead_code)]
+mod hud;
 
 use game_render::Frame;
 use game_render::gpu::Sprite;
@@ -68,6 +71,8 @@ fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Optio
         markers,
         scale: 1.0,
         minimap: true,
+        map: None,
+        around: [None; 4],
         join: false,
     }
 }
@@ -704,4 +709,77 @@ fn sixty_four_markers_scroll_short_of_the_score_bar_with_the_selection_in_view()
             }
         }
     }
+}
+
+/// MD42: the radar names the map the rider is on under itself and the map each way by its compass
+/// letter — at 1080p and 4K, facing each way: the map's name centred under the radar's lowest
+/// letter, each neighbour's nearer its own letter than any other, none on the map's name, all in
+/// the view; and a rider walked across a world's tile edge sees the name and the neighbours change.
+#[test]
+fn the_radar_names_the_map_underfoot_and_the_map_each_way() {
+    let t0 = Instant::now();
+    let tracker = Tracker::default();
+    let g = gauges(Speedometer::Digital);
+    let mut out = Vec::new();
+    let dist = |a: [f32; 2], b: [f32; 2]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+    let middle = |r: [f32; 4]| [(r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0];
+    let meets = |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    for (w, h) in SIZES {
+        for k in 0..16 {
+            let a = k as f32 * std::f32::consts::TAU / 16.0;
+            let mut s = shown(&g, &[], &[], None);
+            s.forward = [a.sin(), a.cos()];
+            s.map = Some("Dallas");
+            s.around = [Some("Norfolk"), Some("Bridgeport"), None, Some("MD42 Long Quarry Name")];
+            let d = ride_hud::sprites(&mut out, 0, [0.0, 0.0, w, h], &s, &tracker, t0);
+            let at = format!("{w}x{h} facing {k}/16");
+            let (c, r) = d.radar.unwrap();
+            let map = d.map.clone().unwrap_or_else(|| panic!("{at}: no map name"));
+            assert_eq!(map.text, "Dallas");
+            assert!(near(middle(map.rect)[0], c[0], 1.0), "{at}: map name {:?} not centred under {c:?}", map.rect);
+            let lowest = d.compass.iter().map(|l| l.1[1]).fold(f32::MIN, f32::max);
+            assert!(map.rect[1] > lowest && map.rect[1] > c[1] + r && map.rect[3] <= h, "{at}: map name {:?} not under the radar", map.rect);
+            let letters: Vec<char> = d.around.iter().map(|(l, _)| *l).collect();
+            assert_eq!(letters, ['N', 'E', 'W'], "{at}");
+            for (l, line) in &d.around {
+                let want = s.around[['N', 'E', 'S', 'W'].iter().position(|x| x == l).unwrap()].unwrap();
+                assert_eq!(line.text, want, "{at}");
+                let m = middle(line.rect);
+                let own = d.compass.iter().find(|x| x.0 == *l).unwrap().1;
+                for other in d.compass.iter().filter(|x| x.0 != *l) {
+                    assert!(dist(m, own) < dist(m, other.1), "{at}: {l}'s {:?} nearer {}", line.rect, other.0);
+                }
+                assert!(!meets(line.rect, map.rect), "{at}: {l}'s {:?} on the map name {:?}", line.rect, map.rect);
+                assert!(line.rect[0] >= 0.0 && line.rect[1] >= 0.0 && line.rect[2] <= w && line.rect[3] <= h, "{at}: {l}'s {:?} off the view", line.rect);
+            }
+        }
+    }
+
+    // A world of four maps in a square: crossing from the south-west map's east edge.
+    let maps = hud::MapNames {
+        maps: vec![
+            ([0.0, 0.0, 100.0, 100.0], "SW".into()),
+            ([120.0, 0.0, 220.0, 100.0], "SE".into()),
+            ([0.0, 120.0, 100.0, 220.0], "NW".into()),
+            ([120.0, 120.0, 220.0, 220.0], "NE".into()),
+        ],
+    };
+    let mut seen = Vec::new();
+    for x in (50..=170).step_by(10) {
+        let own = [x as f32, 50.0];
+        let (map, around) = maps.around(own);
+        let mut s = shown(&g, &[], &[], None);
+        s.own = own;
+        s.map = map;
+        s.around = around;
+        let d = ride_hud::sprites(&mut out, 0, [0.0, 0.0, 1920.0, 1080.0], &s, &tracker, t0);
+        let named: Vec<(char, String)> = d.around.iter().map(|(l, line)| (*l, line.text.clone())).collect();
+        seen.push((x, d.map.unwrap().text, named));
+    }
+    let on_sw = seen.iter().filter(|s| s.1 == "SW").count();
+    assert!(seen[..on_sw].iter().all(|s| s.1 == "SW") && seen[on_sw..].iter().all(|s| s.1 == "SE"), "{seen:?}");
+    assert_eq!(seen[0].2, [('N', "NW".to_string()), ('E', "SE".to_string())]);
+    assert_eq!(seen.last().unwrap().2, [('N', "NE".to_string()), ('W', "SW".to_string())]);
+    // The name changes in the join, at its middle.
+    assert_eq!(seen[on_sw].0, 120, "{seen:?}");
 }
