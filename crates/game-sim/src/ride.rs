@@ -1169,8 +1169,15 @@ type BackCache = Option<Box<crate::back_search::Cache>>;
 /// gathered list ([`crate::back_search`], S83); in any other, [`World::solid`] and
 /// [`World::crowded`], whose answer is the world's (S75).
 fn back_solid(bundle: &Bundle, world: &mut dyn World, cache: &mut BackCache, found: &mut Record) -> bool {
+    // A world that hands near sets (MD28): the list was gathered in the set at its own spot, and
+    // names what it found by place in that set, so a bundle in another set's square gathers anew.
+    if let Some(key) = world.near_set(bundle.centre)
+        && cache.as_ref().is_some_and(|c| world.near_set(c.at) != Some(key))
     {
-        let (field, props, trees) = world.wooded();
+        *cache = None;
+    }
+    {
+        let (field, props, trees) = world.wooded_near(bundle.centre);
         if props.is_some() || trees.is_some() {
             let field = field.as_ref().map(|f| {
                 let (lo, hi) = (f.min(), f.max());
@@ -1587,7 +1594,7 @@ fn velocity_bundle(ch: &chassis::Chassis, dt: F) -> Bundle {
 fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (Vec<WheelHit>, F) {
     let node = rider_contact::node(m);
     {
-        let (field, props, trees) = world.wooded();
+        let (field, props, trees) = world.wooded_near(m.0[3]);
         if props.is_some() || trees.is_some() {
             let bounds = field.as_ref().map(|f| {
                 let (lo, hi) = (f.min(), f.max());

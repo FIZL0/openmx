@@ -343,3 +343,147 @@ fn a_query_costs_little_more_than_the_tile_alone() {
     let alone_ns = t0.elapsed().as_nanos() as f64 / f64::from(n);
     println!("a world query {world_ns:.0} ns, the tile alone {alone_ns:.0} ns ({sum})");
 }
+
+// --- MD28: the bike's searches over the shapes near, not the world's ---------------------------------
+
+/// A wall facing −z, ten feet wide and ten high, in its own space at the origin.
+fn post() -> game_sim::track::Mesh {
+    use game_sim::track::{Mesh, Node, Points, Triangle};
+    let v = |x: f32, y: f32| [F(x), F(y), F::ZERO];
+    Mesh {
+        version: 0,
+        surface: None,
+        transform: [
+            [F::ONE, F::ZERO, F::ZERO],
+            [F::ZERO, F::ONE, F::ZERO],
+            [F::ZERO, F::ZERO, F::ONE],
+            [F::ZERO, F::ZERO, F::ZERO],
+        ],
+        vertices: Points::Wide(vec![v(-5.0, 0.0), v(5.0, 0.0), v(5.0, 10.0), v(-5.0, 10.0)]),
+        normals: None,
+        nodes: vec![Node {
+            volume: F::ZERO,
+            centre: [F::ZERO, F(5.0), F::ZERO],
+            half_extent: [F(5.0), F(5.0), F(0.5)],
+            children: [0x8000, 0x8001],
+        }],
+        triangles: vec![
+            Triangle { distance: F::ZERO, normal: [F::ZERO; 3], vertices: [0, 2, 1] },
+            Triangle { distance: F::ZERO, normal: [F::ZERO; 3], vertices: [0, 3, 2] },
+        ],
+    }
+}
+
+/// [`Memory`] with a post every 40 feet over each tile's own ground, at the ground's height.
+struct Posted(Memory);
+
+impl Source for Posted {
+    fn load(&mut self, index: usize) -> Result<Piece, String> {
+        let mut piece = self.0.load(index)?;
+        let s = &SPECS[index];
+        let (w, d) = (s.cells.0 as f32 * 16.0 * s.spacing, s.cells.1 as f32 * 16.0 * s.spacing);
+        let (mut x, mut k) = (7.0f32, 0u32);
+        while x < w {
+            let mut z = 11.0f32;
+            while z < d {
+                let y = relief(f64::from(s.at[0] as f32 + x), f64::from(z)) as f32;
+                let look = if k % 3 == 0 { [0.6, 0.0, 0.8] } else { [0.0, 0.0, 1.0] };
+                piece.shapes.push((post(), game_sim::track::Placement {
+                    file: "post.col".into(),
+                    position: [F(x), F(y), F(z)],
+                    look: look.map(F),
+                    ..game_sim::track::Placement::default()
+                }));
+                z += 40.0;
+                k += 1;
+            }
+            x += 40.0;
+        }
+        Ok(piece)
+    }
+}
+
+fn posted() -> Tiled {
+    let loads = Arc::new(AtomicUsize::new(0));
+    let tiles = SPECS
+        .iter()
+        .map(|s| {
+            let mut t = Tile {
+                name: s.name.into(),
+                at: [F(s.at[0] as f32), F(s.at[1] as f32)],
+                layout: layout(s),
+                spacing: F(s.spacing),
+                levels: 1,
+                keep: [0; 4],
+                first_owner: 0,
+            };
+            t.keep = s.keep.unwrap_or_else(|| t.every_cell());
+            t
+        })
+        .collect();
+    let source = Posted(Memory { files: SPECS.iter().map(|s| bytes(s)).collect(), loads });
+    Tiled::new(tiles, Box::new(source), Reach::DESKTOP).unwrap()
+}
+
+/// A put-back ring at a spot: the down probe and eight round it, as the ride's record update asks.
+fn ring(x: f32, z: f32, turn: f32) -> game_sim::collide::Bundle {
+    use game_sim::collide::{Bundle, Probe};
+    let y = relief(f64::from(x), f64::from(z)) as f32;
+    let mut b = Bundle { count: 9, centre: Vf::new(x, y, z, 1.0), radius: F(25.0), ..Bundle::default() };
+    b.probes[0] = Probe::between(Vf::new(x, y + 10.0, z, 1.0), Vf::new(x, y - 10.0, z, 1.0));
+    for i in 1..9 {
+        let a = turn + i as f32 * 0.785_398_2;
+        let (s, c) = a.sin_cos();
+        b.probes[i] = Probe::between(Vf::new(x, y + 3.0, z, 1.0), Vf::new(x + 20.0 * s, y + 3.0, z + 20.0 * c, 1.0));
+    }
+    b
+}
+
+/// A world of many tiles hands the bike's searches only the shapes near ([`World::wooded_near`]),
+/// and what they find there is what they find over the whole world: the put-back query (a broad
+/// phase gathered and swept) over 4,000 rings, its record bit for bit and its answer, against every
+/// tile's shapes together. A track hands the whole set, as before.
+#[test]
+fn the_bikes_searches_over_the_shapes_near_find_what_the_whole_world_holds() {
+    use game_sim::back_search::{self, Cache, Race, Scene};
+    use game_sim::collide::Record;
+    let mut whole = posted();
+    let mut near = posted();
+    let every: Vec<Vf> = whole.every_shape().props.iter().map(|p| p.centre).collect();
+    let field = {
+        let f = whole.field();
+        let (lo, hi) = (f.min(), f.max());
+        Some(([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())]))
+    };
+    let mut rng = Lcg(28);
+    let (mut met, mut refused, mut fewest) = (0, 0, usize::MAX);
+    for i in 0..4000 {
+        let (x, z) = (rng.unit() as f32 * 1700.0, rng.unit() as f32 * 560.0);
+        let b = ring(x, z, rng.unit() as f32 * 6.283);
+        let (mut a, mut n) = (Record::new(), Record::new());
+        let all = &whole.collision().1.unwrap().props[..];
+        let said = back_search::query(Scene { props: all, trees: None, field }, &b, &mut Cache::default(), Race::default(), &mut a);
+        let key = near.near_set(b.centre).expect("a world of tiles hands near sets");
+        let (_, set, _) = near.wooded_near(b.centre);
+        let set = &set.unwrap().props[..];
+        fewest = fewest.min(set.len());
+        // In the whole set's order, every shape that comes near the square.
+        let mut at = 0;
+        for p in set {
+            at += every[at..].iter().position(|&c| bits(c) == bits(p.centre)).expect("a near shape out of the whole set's order") + 1;
+        }
+        let says = back_search::query(Scene { props: set, trees: None, field }, &b, &mut Cache::default(), Race::default(), &mut n);
+        assert_eq!(said, says, "ring {i} at {x}, {z} (square {key:?}): refused {said} over the world, {says} near");
+        for p in 0..b.count {
+            assert_eq!(a.hit[p], n.hit[p], "ring {i} probe {p}: met");
+            assert_eq!(a.fraction[p].0.to_bits(), n.fraction[p].0.to_bits(), "ring {i} probe {p}: fraction");
+            assert_eq!(bits(a.point[p]), bits(n.point[p]), "ring {i} probe {p}: point");
+            assert_eq!(bits(a.normal[p]), bits(n.normal[p]), "ring {i} probe {p}: normal");
+        }
+        met += a.hit[..b.count].iter().filter(|&&h| h).count();
+        refused += usize::from(said);
+    }
+    println!("{} shapes; the nearest set {fewest}; {met} probes met, {refused} rings refused", every.len());
+    assert!(met > 1000 && refused > 500, "the rings must meet the posts: {met} met, {refused} refused");
+    assert!(fewest * 4 < every.len(), "a near set must be a corner of the world: {fewest} of {}", every.len());
+}
