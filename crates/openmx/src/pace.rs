@@ -131,6 +131,12 @@ impl Pacer {
         true
     }
 
+    /// Wall time `d` the ride did not run in (P150: the warm frame behind the loading screen): the
+    /// ride starts that much later, so no tick is owed for it and `--seconds` still rides as many.
+    pub fn hold(&mut self, d: Duration) {
+        self.start += d;
+    }
+
     /// A tick has run.
     pub fn ran(&mut self) {
         self.done += 1;

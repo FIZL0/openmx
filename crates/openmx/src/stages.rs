@@ -177,6 +177,11 @@ impl Stages {
         self.last = now;
     }
 
+    /// Charge the time since the last mark to no stage (P150): work that is not the ride's frame.
+    pub fn skip(&mut self) {
+        self.last = Instant::now();
+    }
+
     /// Charge `d` of what `from` was charged to `to` instead: a stage measured inside another.
     pub fn shift(&mut self, from: Stage, to: Stage, d: Duration) {
         let [f, t] = [from, to].map(|s| STAGES.iter().position(|&x| x == s).expect("every stage is listed"));

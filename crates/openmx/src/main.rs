@@ -1475,6 +1475,9 @@ struct Args {
     /// `--world-stand-in on|off`: draw a world's whole ground at its coarsest where its pieces are
     /// not loaded, and fade each piece in over it (V92). On by default.
     world_stand_in: bool,
+    /// `--warm on|off`: draw the ride's first picture once offscreen, and cut a world's near shapes,
+    /// before the ride's clock starts (P150), so its first frame is not the slowest. On by default.
+    warm: bool,
     /// `--world-sweep X0,Z0,X1,Z1`: a world's ground streams about a point that goes from `x0, z0` to
     /// `x1, z1` in world feet over the ride's `--frames` instead of about the riders (MD23), so a
     /// short ride can be seen to load and let go a whole map's ground; the riders and the
@@ -5158,6 +5161,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // What the last tick left for the picture: whether it simulated, and each player's ride for the
     // camera and the overlay.
     let mut simulated = false;
+    // Whether the ride's first picture has been drawn behind the loading screen (P150).
+    let mut warmed = !args.warm;
     let mut ridden: Vec<Ridden> = Vec::with_capacity(args.players);
     let mut top = Instant::now();
     let mut limiter = pace::Limiter::default();
@@ -5166,6 +5171,17 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         (None, Some(_)) => menu::load(&menu::store_dir(Disc::configured_path().ok().as_deref())).0,
         _ => menu::Settings::default(),
     };
+    // A world's shapes and the near sets around each rider cut now, behind the loading screen,
+    // not in tick 1 (P150).
+    let near_at = Instant::now();
+    let starts: Vec<Vf> = world.seats.iter().map(|s| s.sim.rider.ride.position()).collect();
+    if let Some(t) = world.place.tiled().filter(|_| args.warm) {
+        for at in starts {
+            t.prepare_near(at);
+        }
+        println!("world shapes: near sets cut in {:.2} ms", near_at.elapsed().as_secs_f64() * 1000.0);
+        stages.skip();
+    }
     perf.begin();
     loop {
         // A replacement changed while riding (V86): its textures' pixels swapped where the software
@@ -7238,7 +7254,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             perf.lap(Stage::Scene, scene_at, spent);
             stages.mark(stages::Stage::Scene);
 
-            let draw_at = Instant::now();
+            let mut draw_at = Instant::now();
             let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, sprites: &gpu_sprites, light: &light };
             let mut sprites = plane_fx.as_ref().map_or_else(Vec::new, |(fx, _)| plane_sprites(fx, blend.0));
             sprites.extend(bike_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
@@ -7246,6 +7262,28 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
+            // The ride's first picture drawn once offscreen before it is shown (P150), while the
+            // window still shows the loading screen: the first view's ground index lists, the
+            // pipelines and the first uploads were tick 1's frame (MD28: 26 ms on world_mxu). The
+            // ride's clock and the stages leave it out; it is the load's.
+            if !warmed {
+                warmed = true;
+                if let Some(r) = renderer_of(&mut offscreen, window) {
+                    let warm_at = Instant::now();
+                    r.set_graphics(graphics);
+                    set_plane_sprites(r, &mut fx_sheet, &sprites);
+                    set_glows(r, &mut glow_textures, &glows);
+                    let t = r.offscreen(fw, fh);
+                    let view = t.create_view(&Default::default());
+                    r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
+                    r.finish();
+                    let took = warm_at.elapsed();
+                    pacer.hold(took);
+                    stages.skip();
+                    draw_at += took;
+                    println!("warm frame: {:.2} ms behind the loading screen", took.as_secs_f64() * 1000.0);
+                }
+            }
             let mut waited = Duration::ZERO;
             let out = match (&mut offscreen, window.as_mut().and_then(|w| w.gpu())) {
                 (Some((r, texture)), _) => {
@@ -8742,6 +8780,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         world_reach: None,
         world_chunks: None,
         world_stand_in: true,
+        warm: true,
         world_sweep: None,
         trace_switch: None,
         trace_stick_y: Vec::new(),
@@ -9070,6 +9109,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                     w => return Err(format!("--world-stand-in: on or off, not {w}")),
                 }
             }
+            "--warm" => {
+                args.warm = match next("on or off")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    w => return Err(format!("--warm: on or off, not {w}")),
+                }
+            }
             "--world-chunks" => {
                 args.world_chunks = Some(next("chunks")?.parse().ok().filter(|&n| n > 0).ok_or("--world-chunks: a count over 0")?);
             }
@@ -9185,7 +9231,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--overview] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
-                            [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off]\n\
+                            [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off] [--warm on|off]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
