@@ -48,6 +48,13 @@ const CAMERAS: [(&str, &str); 5] = [
     ("Biplane Height", "How high above the biplane."),
 ];
 
+/// One preset's sliders (P163), in [`cameras::Look::get`]'s order.
+const PRESET_CAMERAS: [(&str, &str); 3] = [
+    ("Field of View", "How wide this preset's view is: the original's angle, opened or narrowed by this many degrees."),
+    ("Distance", "How far behind its machine this preset sits."),
+    ("Height", "How high above its machine this preset sits."),
+];
+
 /// What Music Plays offers, as `settings.txt`'s words; One Song is a song's id there.
 const PLAYS: [&str; 4] = ["Shuffle", "In Order", "One Song", "Off"];
 const PLAYS_ONE: usize = 2;
@@ -106,6 +113,17 @@ pub enum Key {
     Camera(usize),
     CameraDefault,
     CameraOriginal,
+    /// Which preset the camera sliders move (P163): every preset, one of the disc's, or one of the
+    /// player's own.
+    CameraPreset,
+    /// One preset's slider, by its index in [`PRESET_CAMERAS`].
+    CameraOwn(usize),
+    /// A disc preset back on every preset's numbers.
+    CameraFollow,
+    CameraSave,
+    CameraDelete,
+    /// What the camera button cycles through.
+    CameraCycle,
     Garage(roster::Row),
     Knob(Knob),
     LoadPreset,
@@ -585,20 +603,62 @@ impl Menu {
     }
 
     fn camera_page(&self) -> Vec<Row> {
-        let v = self.settings.cameras[self.player.min(SEATS_MAX - 1)];
+        let seat = self.camera_seat();
+        let v = self.settings.cameras[seat];
+        let set = &self.settings.camera_sets[seat];
         let mut rows = vec![self.player_row("Whose camera these sliders move. Split-screen players each have their own.")];
-        for (i, (label, about)) in CAMERAS.iter().enumerate() {
-            let (lo, hi) = match i {
+        let picked = self.camera_picked();
+        let mut choices = vec!["All Presets".to_string()];
+        choices.extend(self.camera_choices().iter().map(cameras::Pick::label));
+        let mut r = Row::new(Key::CameraPreset, Kind::Choice, "Preset", "Which camera the sliders below move: all of them at once, or one preset on its own. A preset you have not moved follows All Presets.");
+        r.now = Some(if picked.is_some() { self.camera_pick } else { 0 });
+        r.value = choices[r.now.unwrap_or(0)].clone();
+        let lone = choices.len() == 1;
+        r.choices = choices;
+        rows.push(r.off_if(lone, "The disc's camera presets were not read, and you have none of your own."));
+        let meter = |slider: usize, v: i32| {
+            let (lo, hi) = match slider {
                 0 => (i32::from(CAMERA_FOV.0), i32::from(CAMERA_FOV.1)),
                 _ => (i32::from(CAMERA_SHARE.0), i32::from(CAMERA_SHARE.1)),
             };
-            let meter = (v.get(i) - lo) as f32 / (hi - lo) as f32;
-            let mut r = Row::slider(Key::Camera(i), label, v.label(i), meter, about);
-            r.note = Some("Cross puts it back to the original's.".into());
-            rows.push(r);
+            (v - lo) as f32 / (hi - lo) as f32
+        };
+        match &picked {
+            None => {
+                for (i, (label, about)) in CAMERAS.iter().enumerate() {
+                    let mut r = Row::slider(Key::Camera(i), label, v.label(i), meter(i, v.get(i)), about);
+                    r.note = Some("Cross puts it back to the original's.".into());
+                    rows.push(r);
+                }
+                rows.push(Row::action(Key::CameraDefault, "Reset to Default", "Back to the port's defaults for this player."));
+                rows.push(Row::action(Key::CameraOriginal, "Reset to Original", "Back to the disc's camera for this player."));
+            }
+            Some(pick) => {
+                let look = self.camera_look(pick);
+                for (i, (label, about)) in PRESET_CAMERAS.iter().enumerate() {
+                    let mut r = Row::slider(Key::CameraOwn(i), label, look.label(i), meter(i, look.get(i)), about);
+                    r.note = Some("Cross puts it back to the original's.".into());
+                    rows.push(r);
+                }
+                if pick.custom {
+                    rows.push(Row::action(Key::CameraDelete, "Delete Preset", "Forget this preset of yours."));
+                } else {
+                    rows.push(
+                        Row::action(Key::CameraFollow, "Same as All Presets", "This preset back on All Presets' numbers.")
+                            .off_if(set.own_of(pick.machine, &pick.name).is_none(), "It is on All Presets' numbers already."),
+                    );
+                }
+            }
         }
-        rows.push(Row::action(Key::CameraDefault, "Reset to Default", "Back to the port's defaults for this player."));
-        rows.push(Row::action(Key::CameraOriginal, "Reset to Original", "Back to the disc's camera for this player."));
+        rows.push(
+            Row::action(Key::CameraSave, "Save as New Preset", "Keep this preset, framed as it is now, under a name of your own: the camera button reaches it after the disc's.")
+                .off_if(picked.is_none(), "Pick the preset to copy on the Preset row first."),
+        );
+        let cycles: Vec<&str> = cameras::Cycle::ALL.iter().map(|c| c.label()).collect();
+        rows.push(
+            Row::choice(Key::CameraCycle, "Camera Button", &cycles, at(&cameras::Cycle::ALL, set.cycle), "What the camera button steps through: the disc's presets, the disc's and then yours, or yours in place of the disc's.")
+                .tips(&["The disc's presets alone.", "The disc's, then yours.", "Yours alone, while you have some for that machine."]),
+        );
         rows
     }
 
@@ -1066,7 +1126,34 @@ impl Menu {
             }
             Key::CameraDefault | Key::CameraOriginal if p.ok => {
                 let to = if row.key == Key::CameraDefault { CameraView::DEFAULT } else { CameraView::ORIGINAL };
-                self.settings.cameras[self.player.min(SEATS_MAX - 1)] = to;
+                let seat = self.camera_seat();
+                self.settings.cameras[seat] = to;
+                // Every preset's: the disc presets' own numbers go too (P163).
+                self.settings.camera_sets[seat].clear_disc_looks();
+            }
+            Key::CameraPreset => {
+                self.step_camera_pick(d);
+                return;
+            }
+            Key::CameraOwn(i) => {
+                let Some(pick) = self.camera_picked() else { return };
+                self.step_camera_look(&pick, i, p.left, p.right);
+            }
+            Key::CameraFollow | Key::CameraDelete if p.ok => {
+                let Some(pick) = self.camera_picked() else { return };
+                let seat = self.camera_seat();
+                self.settings.camera_sets[seat].remove(pick.machine, &pick.name);
+                if row.key == Key::CameraDelete {
+                    self.camera_pick = 0;
+                }
+            }
+            Key::CameraSave if p.ok => {
+                self.type_for(Typing::Camera);
+                return;
+            }
+            Key::CameraCycle => {
+                let seat = self.camera_seat();
+                self.settings.camera_sets[seat].cycle = cameras::Cycle::ALL[next(row)];
             }
             Key::Garage(g) => {
                 self.change_garage(g, p);

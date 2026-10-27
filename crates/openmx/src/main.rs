@@ -781,6 +781,8 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
         plane_camera: p.cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
         wreck_camera: chase::WreckCamera::new(false),
         framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
+        camera_presets: Default::default(),
+        camera_started: false,
         fov_ease: Default::default(),
         look_back: Default::default(),
         odometer: overlay::Odometer::default(),
@@ -960,6 +962,12 @@ struct Rig {
     /// How this player's two follow cameras' presets are framed now (P82), the bike's and the
     /// plane's: the original's as they were read, until the frame lays the player's own over them.
     framing: (chase::Framing, chase::Framing),
+    /// The seat's own camera presets laid over the two follow cameras' now (P163): the disc presets'
+    /// own numbers, the player's own presets, and what the camera button cycles: none until a front
+    /// end's Camera page has some.
+    camera_presets: (Vec<menu::cameras::Own>, menu::cameras::Cycle),
+    /// Whether the two cameras were put on the presets the seat was last left on (P163).
+    camera_started: bool,
     /// The two follow cameras' fields of view easing over a framing change (P119), the bike's and the
     /// plane's.
     fov_ease: (chase::FovEase, chase::FovEase),
@@ -1327,6 +1335,8 @@ struct Args {
     /// `--camera NAME`: which of the track's camera presets to start on, by the name its
     /// `cpresets.ini` gives it. The default is the one the original itself is on in a freeride (P14).
     camera: String,
+    /// Whether `--camera` was given, which wins over the preset a seat was last left on (P163).
+    camera_asked: bool,
     /// `--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT` (P82): every player's camera
     /// framing, over the front end's Camera page. Unset, the page's, and without a front end the
     /// shipped default.
@@ -1838,6 +1848,7 @@ fn front_end(args: Args) -> Result<(), String> {
     let (settings, controls) = menu::load(&dir);
     println!("front end: settings in {}", dir.display());
     let mut sound = start_sound(&args, &mut disc, &dir, &settings);
+    let camera_names = camera_names(&mut disc);
     drop(disc);
     // The front end's music and clicks (P65), when anything plays them.
     if sound.live().is_some() {
@@ -1873,6 +1884,7 @@ fn front_end(args: Args) -> Result<(), String> {
         sound,
     };
     front.menu.music_choices = front.sound.choices();
+    front.menu.camera_names = camera_names;
     // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
     let mut mods_on = front.menu.settings.mods;
     let listed = mod_tracks(&args, &front.dir, mods_on);
@@ -4189,6 +4201,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
+            camera_presets: Default::default(),
+            camera_started: false,
             fov_ease: Default::default(),
             look_back: Default::default(),
             odometer: overlay::Odometer::default(),
@@ -4219,6 +4233,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             plane_camera,
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
+            camera_presets: Default::default(),
+            camera_started: false,
             fov_ease: Default::default(),
             look_back: Default::default(),
             odometer: overlay::Odometer::default(),
@@ -5601,6 +5617,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             plane_camera: join_cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
                             wreck_camera: chase::WreckCamera::new(false),
                             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
+                            camera_presets: Default::default(),
+                            camera_started: false,
                             fov_ease: Default::default(),
                             look_back: Default::default(),
                             odometer: overlay::Odometer::default(),
@@ -6261,11 +6279,31 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .camera_view
                 .or_else(|| front.as_deref().map(|f| f.menu.settings.cameras[i.min(menu::SEATS_MAX - 1)]))
                 .unwrap_or(menu::CameraView::DEFAULT);
-            if framings(view) != rig.framing {
+            // And the seat's own presets (P163), the Camera page's too; `--camera-view` is every
+            // preset's alone.
+            let seat_sets = front.as_deref().filter(|_| args.camera_view.is_none()).map(|f| &f.menu.settings.camera_sets[i.min(menu::SEATS_MAX - 1)]);
+            let laid = seat_sets.map(menu::cameras::Seat::framing_part).unwrap_or_default();
+            if framings(view) != rig.framing || laid != rig.camera_presets {
                 let bike = cpresets.as_deref().map(|b| layout_presets(b, layout, display, "cpresets.ini")).unwrap_or_default();
                 let plane = plane_presets.as_deref().map(|b| layout_presets(b, layout, display, PLANE_PRESETS)).unwrap_or_default();
                 println!("{who}camera view: {}", view.text());
+                if laid != rig.camera_presets {
+                    println!("{who}camera presets: {} of the seat's own, the button on {}", laid.0.len(), laid.1.label());
+                }
+                rig.camera_presets = laid;
                 frame_rig(rig, &bike, &plane, framings(view));
+            }
+            // The seat's first frame (P163): each camera on the preset the seat's camera button last
+            // left it on, unless the command line named one; under Mine Only, a camera on a preset
+            // that is not in the cycle on the first of the seat's own.
+            if !std::mem::replace(&mut rig.camera_started, true) && !args.camera_asked {
+                let start = seat_sets.map(|s| s.start.clone()).unwrap_or_default();
+                let mine_only = rig.camera_presets.1 == menu::cameras::Cycle::Mine;
+                for (cam, start) in std::iter::once(&mut rig.camera).chain(rig.plane_camera.as_mut()).zip(&start) {
+                    if chase::start_on(cam, start, mine_only) {
+                        println!("{who}camera: starts on {}, where it was left", cam.cam.preset().name);
+                    }
+                }
             }
             rig.wreck_camera.frame(rig.framing.0);
 
@@ -6292,6 +6330,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // Whichever machine has the controller has the camera: the bike's, on the track's presets, or
             // the plane's, on its own file's.
             // With the field of view's ease over a framing change (P119), which is the camera's own.
+            let flying = seat.garage.up == Kind::Biplane && rig.plane_camera.is_some();
             let (follow, fov_ease, look_back) = match (seat.garage.up, &mut rig.plane_camera) {
                 (Kind::Biplane, Some(cam)) => (cam, &mut rig.fov_ease.1, &mut rig.look_back.1),
                 _ => (&mut rig.camera, &mut rig.fov_ease.0, &mut rig.look_back.0),
@@ -6341,6 +6380,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     follow.cam.next_preset();
                     println!("{who}camera: {}", follow.cam.preset().name);
                     rig.ride_hud.note_camera(Instant::now(), &follow.cam.preset().name);
+                    // The seat's next ride on this machine starts on it (P163).
+                    let machine = if flying { menu::Machine::Biplane } else { menu::Machine::Bike };
+                    if let Some(f) = front.as_deref_mut()
+                        && f.menu.camera_left_on(i.min(menu::SEATS_MAX - 1), machine, &follow.cam.preset().name)
+                    {
+                        f.save();
+                    }
                 }
             }
             // The camera's target block, as the original's vehicle fills it once a frame (`chase.rs`).
@@ -7617,6 +7663,23 @@ fn layout_presets(bytes: &[u8], layout: Layout, display: Display, file: &str) ->
     own
 }
 
+/// The disc's camera presets the camera button cycles through (P163), the bike's and the plane's, by
+/// name, for the Camera page's Preset row: free06's files, whose names every track's shares (the
+/// freerides' and the races' read alike). Empty where they cannot be read.
+fn camera_names(disc: &mut Disc) -> [Vec<String>; 2] {
+    let Some(kit) = member_ending(disc, PLANE_KIT_ARCHIVE).ok().and_then(|name| disc.res(&name).ok()) else {
+        println!("camera: no {PLANE_KIT_ARCHIVE}, so no presets to list on the Camera page");
+        return Default::default();
+    };
+    let names = |file: &str| -> Vec<String> {
+        let presets = kit.read_suffix(file).map(|b| Preset::read_bytes(&b, "")).unwrap_or_default();
+        presets.into_iter().filter(|p| p.cycle_thru_this_preset).map(|p| p.name).collect()
+    };
+    let out = [names("cpresets.ini"), names(PLANE_PRESETS)];
+    println!("camera: the Camera page lists {:?} and {:?}", out[0], out[1]);
+    out
+}
+
 /// Every player's cameras onto `display`'s copy of their presets (V24): the file read again for it,
 /// and the preset each camera is on re-set from the new copy — the original's own reload when a
 /// camera's split changes, which keeps the preset and clears the player's nudges.
@@ -7634,9 +7697,21 @@ fn set_display(rigs: &mut [Rig], layout: Layout, display: Display, bike: Option<
 /// player's nudges, and eases the field of view over ([`chase::reframe`], P119). At
 /// [`chase::Framing::ORIGINAL`] the presets are the file's, untouched.
 fn frame_rig(rig: &mut Rig, bike: &[Preset], plane: &[Preset], framing: (chase::Framing, chase::Framing)) {
-    chase::reframe(&mut rig.camera, &chase::framed(bike, framing.0), &mut rig.fov_ease.0);
+    // With the seat's own presets over them (P163): a disc preset's own numbers, and the player's
+    // own presets after the disc's unless the camera button is on the disc's alone.
+    let (own, cycle) = (&rig.camera_presets.0, rig.camera_presets.1);
+    let laid = |m: menu::Machine| -> Vec<chase::Own> {
+        menu::cameras::laid(own, cycle, m)
+            .map(|o| {
+                let (fov, distance, height) = o.look.framing();
+                chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
+            })
+            .collect()
+    };
+    let mine_only = cycle == menu::cameras::Cycle::Mine;
+    chase::reframe(&mut rig.camera, &chase::seat_presets(bike, framing.0, &laid(menu::Machine::Bike), mine_only), &mut rig.fov_ease.0);
     if let Some(cam) = &mut rig.plane_camera {
-        chase::reframe(cam, &chase::framed(plane, framing.1), &mut rig.fov_ease.1);
+        chase::reframe(cam, &chase::seat_presets(plane, framing.1, &laid(menu::Machine::Biplane), mine_only), &mut rig.fov_ease.1);
     }
     rig.framing = framing;
 }
@@ -8326,6 +8401,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         world_sky: None,
         hud_scale: None,
         camera: START_CAMERA.to_string(),
+        camera_asked: false,
         camera_view: None,
         trace_camera: false,
         moment: None,
@@ -8545,7 +8621,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                     ),
                 };
             }
-            "--camera" => args.camera = next("a camera preset's name, like \"Freestyle Cam\"")?,
+            "--camera" => {
+                args.camera = next("a camera preset's name, like \"Freestyle Cam\"")?;
+                args.camera_asked = true;
+            }
             "--camera-view" => {
                 let v = next("original, default, or five numbers: fov,distance,height,plane distance,plane height")?;
                 args.camera_view = Some(match v.as_str() {
