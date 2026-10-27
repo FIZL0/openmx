@@ -79,6 +79,8 @@ def use() -> Path:
     if not f.exists() or f.read_text(encoding='utf-8') != text:
         write_atomic(f, text)
     os.environ['AGENT_RUNNER_CONFIG'] = str(f)
+    from ps2kit import uvtool
+    uvtool.self_calls()
     return f
 
 

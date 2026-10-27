@@ -41,18 +41,17 @@ python3 --version          # must be 3.11 or newer
 
 Reading the disc, the ELFs and the decompilation runs on a stock Python with no packages. The task list
 (`./kit plan`, `./kit done`) and the unattended run (`./kit run`) use
-[agent-runner](https://github.com/FIZL0/agent-runner), a stdlib-only package; install it for the Python
-that runs `./kit`:
+[agent-runner](https://github.com/FIZL0/agent-runner), a stdlib-only package. Install it as a uv tool
+(for a newer version, run it again with the new tag and `--force`):
 
 ```sh
-pip install --user git+https://github.com/FIZL0/agent-runner@v0.5.0
+uv tool install git+https://github.com/FIZL0/agent-runner@v0.5.0
 ```
 
-On a distribution that refuses `pip install --user` (externally managed Python, e.g. Arch), add
-`--break-system-packages`: agent-runner has no dependencies and installs only into `~/.local`, so it
-cannot conflict with system packages.
-`uv tool install` and `pipx` put it in an isolated environment the kit cannot import from, so they do not
-work here.
+`./kit` stays on the system Python and adds the tool's venv (`$UV_TOOL_DIR` or `~/.local/share/uv/tools`) to
+its path; the runner's hooks run with the tool's own Python (`ps2kit/uvtool.py`). `pip install --user` for the
+Python that runs `./kit` works too, and wins over the tool when both are there. A running `./kit run` keeps
+the copy it started with: restart it after an upgrade.
 
 Two optional packages, each needed by exactly one feature:
 
