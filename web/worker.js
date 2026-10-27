@@ -13,7 +13,7 @@
 // Online (N4): `{ online }` joins or hosts a lobby through a relay and rides once the host starts, a frame per
 // tick of the ride's 30 Hz clock on this thread's timer; the page's seat rides a pad nobody holds (web.rs says why). It needs no disc.
 //
-// Messages in:  { import: File }            copy the disc into OPFS, then start
+// Messages in:  { import: File, canvas? }   copy the disc into OPFS, then start
 //               { start: { canvas?, file? } } start on the OPFS copy, or on `file` when given
 //               { online: { name, relay, codes?, join?, host?, bike, ticks? } }
 // Messages out: { progress: [done, total] } | { started: true } | { error: String } | { missing: true }
@@ -172,12 +172,14 @@ async function online({ name, relay, codes, join, host, bike, ticks }) {
 
 onmessage = async ({ data }) => {
   try {
+    // The canvas comes once, with whichever comes first of a start and an import (index.html sends it when the menu's
+    // Ride is pressed or a disc is picked); a later start (the picked file) draws in the same one.
+    const given = data.start?.canvas ?? data.canvas;
+    if (given) {
+      canvas = given;
+      context = canvas.getContext('2d');
+    }
     if (data.start) {
-      // The canvas comes once, with the first start; a later start (the picked file) draws in the same one.
-      if (data.start.canvas) {
-        canvas = data.start.canvas;
-        context = canvas.getContext('2d');
-      }
       await start(data.start.file);
     } else if (data.online) {
       await online(data.online);

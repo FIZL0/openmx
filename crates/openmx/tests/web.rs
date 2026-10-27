@@ -245,3 +245,43 @@ fn the_page_starts_in_a_browser() {
     assert_eq!(states(&private), ["started", "asking"], "with OPFS refused the page should play off the file and ask again");
     assert_eq!(shots(&private)[0], s[0], "the picked file drew a different picture from the OPFS copy");
 }
+
+/// The launcher (P181) in headless chromium at a desktop's width and a phone's
+/// (`tests/web/shots.mjs`): with nothing stored the page is the landing page and asks for the
+/// disc; with a disc in OPFS it opens on the menu stage with Ride lit. Neither look may pan
+/// sideways, and both must be in the menus' own face. Needs no disc and no game module: the stored
+/// disc is a stand-in neither look reads. Skips without node or chromium. With `OPENMX_WEB_SHOTS`
+/// set to a directory the shots are kept there, to hold beside the concept.
+#[test]
+fn the_launcher_fits_a_phone_and_a_desktop() {
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    let scratch = std::env::temp_dir().join(format!("openmx-web-shots-{}", std::process::id()));
+    let out = std::env::var_os("OPENMX_WEB_SHOTS").map(PathBuf::from).unwrap_or_else(|| scratch.join("out"));
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/shots.mjs");
+    let run = Command::new("node").arg(&drive).arg(repo().join("web")).arg(&out).arg(scratch.join("profile")).output().expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    println!("{}{text}", String::from_utf8_lossy(&run.stderr));
+    assert!(run.status.success(), "shots.mjs failed");
+
+    // Flat JSON, read with `split` as the_page_starts_in_a_browser does: one object per shot.
+    let shots: Vec<&str> = text.split("{\"state\":").skip(1).collect();
+    assert_eq!(shots.len(), 4, "two looks at two widths:\n{text}");
+    let field = |shot: &str, key: &str| -> String {
+        shot.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string()
+    };
+    for (shot, (state, width)) in shots.iter().zip([("asking", 1440), ("menu", 1440), ("asking", 390), ("menu", 390)]) {
+        assert!(shot.starts_with(&format!("\"{state}\"")), "wanted {state} at {width}: {shot}");
+        assert_eq!(field(shot, "width"), width.to_string());
+        let scroll: u32 = field(shot, "scroll").parse().expect("scrollWidth");
+        assert!(scroll <= width, "{state} at {width} pans sideways: {scroll} wide");
+        assert_eq!(field(shot, "fonts"), "true", "{state} at {width}: M PLUS Rounded 1c did not load");
+        let lit = field(shot, "lit");
+        assert_eq!(lit, if state == "menu" { "Ride" } else { "null" }, "{state} at {width}: the lit item");
+    }
+}
