@@ -711,10 +711,11 @@ fn sixty_four_markers_scroll_short_of_the_score_bar_with_the_selection_in_view()
     }
 }
 
-/// MD42: the radar names the map the rider is on under itself and the map each way by its compass
-/// letter — at 1080p and 4K, facing each way: the map's name centred under the radar's lowest
-/// letter, each neighbour's nearer its own letter than any other, none on the map's name, all in
-/// the view; and a rider walked across a world's tile edge sees the name and the neighbours change.
+/// MD42, MD46: the radar names the map the rider is on and the map each way by its compass letter,
+/// all inside the disc — at 1080p and 4K, facing each way: every label's box in the disc, the map's
+/// name centred under the arrow, each neighbour's nearer its own letter than any other, no two on
+/// each other or on the arrow; and a rider walked across a world's tile edge sees the name and the
+/// neighbours change.
 #[test]
 fn the_radar_names_the_map_underfoot_and_the_map_each_way() {
     let t0 = Instant::now();
@@ -736,21 +737,34 @@ fn the_radar_names_the_map_underfoot_and_the_map_each_way() {
             let (c, r) = d.radar.unwrap();
             let map = d.map.clone().unwrap_or_else(|| panic!("{at}: no map name"));
             assert_eq!(map.text, "Dallas");
-            assert!(near(middle(map.rect)[0], c[0], 1.0), "{at}: map name {:?} not centred under {c:?}", map.rect);
-            let lowest = d.compass.iter().map(|l| l.1[1]).fold(f32::MIN, f32::max);
-            assert!(map.rect[1] > lowest && map.rect[1] > c[1] + r && map.rect[3] <= h, "{at}: map name {:?} not under the radar", map.rect);
+            assert!(near(middle(map.rect)[0], c[0], 1.0), "{at}: map name {:?} not centred on {c:?}", map.rect);
+            assert!(map.rect[1] > c[1], "{at}: map name {:?} not under the arrow", map.rect);
+            let in_disc = |b: [f32; 4]| [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].iter().all(|&p| dist(p, c) <= r);
+            assert!(in_disc(map.rect), "{at}: map name {:?} outside the radar {c:?} r {r}", map.rect);
             let letters: Vec<char> = d.around.iter().map(|(l, _)| *l).collect();
             assert_eq!(letters, ['N', 'E', 'W'], "{at}");
+            let mut placed = vec![map.rect];
             for (l, line) in &d.around {
                 let want = s.around[['N', 'E', 'S', 'W'].iter().position(|x| x == l).unwrap()].unwrap();
-                assert_eq!(line.text, want, "{at}");
+                let shorter = line.text.strip_suffix('.').is_some_and(|t| want.starts_with(t.trim_end()));
+                assert!(line.text == want || shorter, "{at}: {l} says {:?}, not {want:?}", line.text);
+                assert!(in_disc(line.rect), "{at}: {l}'s {:?} outside the radar {c:?} r {r}", line.rect);
                 let m = middle(line.rect);
                 let own = d.compass.iter().find(|x| x.0 == *l).unwrap().1;
                 for other in d.compass.iter().filter(|x| x.0 != *l) {
                     assert!(dist(m, own) < dist(m, other.1), "{at}: {l}'s {:?} nearer {}", line.rect, other.0);
                 }
-                assert!(!meets(line.rect, map.rect), "{at}: {l}'s {:?} on the map name {:?}", line.rect, map.rect);
-                assert!(line.rect[0] >= 0.0 && line.rect[1] >= 0.0 && line.rect[2] <= w && line.rect[3] <= h, "{at}: {l}'s {:?} off the view", line.rect);
+                assert!(dist(m, c) > r * 0.5, "{at}: {l}'s {:?} not by the rim", line.rect);
+                for p in &placed {
+                    assert!(!meets(line.rect, *p), "{at}: {l}'s {:?} on {p:?}", line.rect);
+                }
+                placed.push(line.rect);
+            }
+            // The player's arrow, ±12 radar units of 86 about the middle, is clear of every label.
+            let u = r / 86.0;
+            let arrow = [c[0] - 6.0 * u, c[1] - 12.0 * u, c[0] + 6.0 * u, c[1] + 8.0 * u];
+            for p in &placed {
+                assert!(!meets(arrow, *p), "{at}: {p:?} on the arrow");
             }
         }
     }
@@ -783,3 +797,45 @@ fn the_radar_names_the_map_underfoot_and_the_map_each_way() {
     // The name changes in the join, at its middle.
     assert_eq!(seen[on_sw].0, 120, "{seen:?}");
 }
+
+/// MD46: on a wrapped world the label at a wrapped edge names the map across the seam — the first
+/// over it — and an edge on an axis that does not wrap stays blank; drawn, every name is in the disc.
+#[test]
+fn a_wrapped_edge_names_the_map_across_the_seam() {
+    let t0 = Instant::now();
+    let tracker = Tracker::default();
+    let g = gauges(Speedometer::Digital);
+    let mut out = Vec::new();
+    // Three maps in a row along x, a 100-foot seam join past the last; x wraps, z does not.
+    let maps = hud::MapNames {
+        maps: vec![([0.0, 0.0, 500.0, 500.0], "West".into()), ([500.0, 0.0, 1000.0, 500.0], "Middle".into()), ([1000.0, 0.0, 1500.0, 500.0], "East".into())],
+    };
+    let wrap = game_render::wrap::Wrap::of([true, false], [1600.0, 500.0]);
+    let mut named = |at: [f32; 2], wrap| {
+        let (map, around) = maps.around_in(at, wrap);
+        let mut s = shown(&g, &[], &[], None);
+        s.own = at;
+        s.map = map;
+        s.around = around;
+        let d = ride_hud::sprites(&mut out, 0, [0.0, 0.0, 1920.0, 1080.0], &s, &tracker, t0);
+        let (c, r) = d.radar.unwrap();
+        let lines: Vec<&ride_hud::Line> = d.map.iter().chain(d.around.iter().map(|(_, l)| l)).collect();
+        for l in &lines {
+            let b = l.rect;
+            for p in [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]] {
+                assert!(((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2)).sqrt() <= r, "{:?} {b:?} outside the radar", l.text);
+            }
+        }
+        let ways: Vec<(char, String)> = d.around.iter().map(|(k, l)| (*k, l.text.clone())).collect();
+        (d.map.unwrap().text, ways)
+    };
+    let east = |s: &str| ('E', s.to_string());
+    let west = |s: &str| ('W', s.to_string());
+    // The west edge's tile: east is Middle, west across the seam is East; nothing north or south.
+    assert_eq!(named([100.0, 250.0], wrap), ("West".to_string(), vec![east("Middle"), west("East")]));
+    assert_eq!(named([1400.0, 250.0], wrap), ("East".to_string(), vec![east("West"), west("Middle")]));
+    // Unwrapped, the world's edges are blank.
+    assert_eq!(named([100.0, 250.0], None), ("West".to_string(), vec![east("Middle")]));
+    assert_eq!(named([1400.0, 250.0], None), ("East".to_string(), vec![west("Middle")]));
+}
+

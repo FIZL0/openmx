@@ -1270,6 +1270,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(mods.parent().unwrap());
     }
 
+    /// MD46: a world file saying `"wrap": "x"` — MD42's 2x2 grid — names, at the tile on a wrapped
+    /// edge, the map across the seam (the first tile on the far side) the way the edge faces, as the
+    /// ride's radar takes it ([`crate::hud::MapNames::around_in`] with the drawn wrap); along `z`,
+    /// which does not wrap, the edge's label stays blank, and so do both without the switch.
+    #[test]
+    fn a_wrapped_worlds_edge_names_the_map_across_the_seam() {
+        let mods = std::env::temp_dir().join(format!("openmx-md46-{}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        let tiles = [("sw", [0, 0]), ("se", [200, 0]), ("nw", [0, 200]), ("ne", [200, 200])];
+        let mut listed = Vec::new();
+        for &(name, [x, z]) in &tiles {
+            let stem = name.to_uppercase();
+            for id in ["md46_round", "md46_edged"] {
+                let dir = mods.join("tracks").join(id).join("tiles").join(name);
+                let scene = format!("[SceneInfo]\r\nSceneName={name}\r\nDefaultStartPosition=60.00,10.00,60.00\r\nDefaultStartDirection=1.00,0.00,0.00\r\n[Environment]\r\nTerrainFile={stem}.trn\r\nTerrainWidth=2\r\nTerrainBreadth=2\r\nTerrainWidthScale=4.00\r\nTerrainBreadthScale=4.00\r\n");
+                write(&dir, &format!("Env/{stem}/{stem}.scn"), scene);
+                write(&dir, &format!("Env/{stem}/{stem}.ps2.trn"), generate::terrain(name, (2, 2), 4.0, |_, _| 10.0, |_, _| 1));
+            }
+            listed.push(format!(r#"{{"tile": "{name}", "at": [{x}.0, {z}.0], "keep": [0, 0, 31, 31]}}"#));
+        }
+        for (id, wrap) in [("md46_round", r#""wrap": "x", "#), ("md46_edged", "")] {
+            write(&mods.join("tracks").join(id), "mod.json", format!(r#"{{"kind": "world", "id": "{id}", "name": "MD46", {wrap}"tiles": [{}]}}"#, listed.join(", ")));
+        }
+        let read = |id: &str| {
+            let w = find(&mods, id).unwrap_or_else(|e| panic!("{id}: {e}"));
+            let t = w.tiled(Reach::DESKTOP).unwrap();
+            (w.map_names(), game_render::wrap::Wrap::of(t.wraps(), t.extent().map(|v| v.0)))
+        };
+        let (names, wrap) = read("md46_round");
+        assert!(wrap.is_some_and(|w| w.on == [true, false]), "{wrap:?}");
+        assert_eq!(names.maps.len(), 4, "the seam joins are no map: {:?}", names.maps);
+        // The west column's west label names the east column's tile across the seam, and back.
+        assert_eq!(names.around_in([60.0, 60.0], wrap), (Some("sw"), [Some("nw"), Some("se"), None, Some("se")]));
+        assert_eq!(names.around_in([260.0, 60.0], wrap), (Some("se"), [Some("ne"), Some("sw"), None, Some("sw")]));
+        assert_eq!(names.around_in([60.0, 260.0], wrap), (Some("nw"), [None, Some("ne"), Some("sw"), Some("ne")]));
+        let (names, wrap) = read("md46_edged");
+        assert_eq!(wrap, None);
+        assert_eq!(names.around_in([60.0, 60.0], wrap), (Some("sw"), [Some("nw"), Some("se"), None, None]));
+        assert_eq!(names.around_in([260.0, 60.0], wrap), (Some("se"), [Some("ne"), None, None, Some("sw")]));
+        let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+    }
+
     /// MD42: the neighbour each way is the map across from the rider — of two maps east, the one
     /// whose span along `z` holds the rider's `z` — and a lone track is one map with none.
     #[test]

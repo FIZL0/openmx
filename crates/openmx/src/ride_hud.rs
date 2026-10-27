@@ -172,8 +172,8 @@ pub struct Shown<'a> {
     /// The HUD scale (1 is the disc's size) and whether the radar is drawn.
     pub scale: f32,
     pub minimap: bool,
-    /// The map the rider is on, named under the radar, and the map that lies each way, N E S W,
-    /// named by its compass letter (MD42, `hud::MapNames::around`).
+    /// The map the rider is on, named in the radar, and the map that lies each way, N E S W,
+    /// named inside the rim by its compass letter (MD42, MD46, `hud::MapNames::around`).
     pub map: Option<&'a str>,
     pub around: [Option<&'a str>; 4],
     /// Whether this view says how to join the ride (P171): a seat is free and a controller idle.
@@ -461,7 +461,7 @@ pub struct Drawn {
     /// and the icons.
     pub radar: Option<([f32; 2], f32)>,
     pub compass: Vec<(char, [f32; 2])>,
-    /// The map's name under the radar, and each neighbour's by its compass letter (MD42).
+    /// The map's name in the radar, and each neighbour's inside the rim by its compass letter (MD42, MD46).
     pub map: Option<Line>,
     pub around: Vec<(char, Line)>,
     pub dots: Vec<(usize, [f32; 2], [u8; 4])>,
@@ -948,51 +948,83 @@ fn radar(pen: &mut Pen, shown: &Shown, drawn: &mut Drawn) {
     drawn.radar = Some((pen.px(RADAR), RADAR_R * pen.s));
 }
 
-/// The radar's map names (MD42): the map the rider is on centred under the radar, below the S's
-/// lowest reach, and each neighbour's name past its compass letter, in smaller type — inside the
-/// rim instead where, held to the layout, it would sit on its letter or on the map's own name.
+/// How near the radar's middle a neighbour's name may come, of the radius: nearer, it is no longer
+/// by its letter.
+const AROUND_IN: f32 = 0.6;
+
+/// The radar's map names (MD42, inside the disc since MD46): the map the rider is on just under the
+/// arrow, and each neighbour's just inside the rim by its compass letter, turning with the radar —
+/// in small type, made smaller still (and at last cut short) until the box lies in the disc, by the
+/// rim, and off the arrow, the map's own name and the labels already placed.
 fn map_names(pen: &mut Pen, shown: &Shown, turn: f32, drawn: &mut Drawn) {
-    let (lw, lh) = overlay::LAYOUT;
-    // A centred line's box (left, top, right, bottom in layout pixels) held inside the layout.
-    let held = |c: (f32, f32), w: f32, h: f32| {
-        let x = (c.0 - w / 2.0).min(lw - 2.0 - w).max(2.0);
-        let y = (c.1 - h / 2.0).min(lh - 2.0 - h).max(2.0);
-        [x, y, x + w, y + h]
-    };
     let meets = |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    // Whether a box (left, top, right, bottom in layout pixels) lies in the disc, short of its rim.
+    let inside = |b: [f32; 4]| {
+        let r = RADAR_R - 2.5 * RK;
+        [(b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3])].iter().all(|p| (p.0 - RADAR.0).powi(2) + (p.1 - RADAR.1).powi(2) <= r * r)
+    };
+    let boxed = |c: (f32, f32), w: f32, h: f32| [c.0 - w / 2.0, c.1 - h / 2.0, c.0 + w / 2.0, c.1 + h / 2.0];
+    let arrow = [RADAR.0 - 6.0 * RK, RADAR.1 - 12.0 * RK, RADAR.0 + 6.0 * RK, RADAR.1 + 8.0 * RK];
     let write = |pen: &mut Pen, text: &str, b: [f32; 4], size: f32, colour: [u8; 4]| {
-        let r = pen.edged(Face::Words, Weight::Heavy, text, (b[0], b[3]), size, ink::SLANT, colour, shade(255), 1.1 * RK);
+        let r = pen.edged(Face::Words, Weight::Heavy, text, (b[0], b[3]), size, ink::SLANT, colour, shade(255), 0.9 * RK);
         Line { text: text.to_string(), rect: r, colour }
     };
-    let mut own = None;
+    // The text at each size from `big` down to `small`, then cut ever shorter at `small`.
+    let tries = |name: &str, big: f32, small: f32| {
+        let mut out: Vec<(String, f32)> = Vec::new();
+        let mut size = big;
+        while size > small {
+            out.push((name.to_string(), size));
+            size -= 0.5 * RK;
+        }
+        let chars: Vec<char> = name.chars().collect();
+        for n in (1..=chars.len()).rev() {
+            let cut: String = chars[..n].iter().collect();
+            out.push((if n == chars.len() { cut } else { format!("{}.", cut.trim_end()) }, small));
+        }
+        out
+    };
+    let mut taken = vec![arrow];
     if let Some(name) = shown.map.filter(|n| !n.is_empty()) {
-        let size = 11.0 * RK;
-        let (w, h) = (Pen::measure(Face::Words, Weight::Heavy, name, size), Pen::cap(Face::Words, size));
-        let top = RADAR.1 + 95.0 * RK + 9.0 * RK;
-        let b = held((RADAR.0, top + h / 2.0), w, h);
-        drawn.map = Some(write(pen, name, b, size, CHALK));
-        own = Some(b);
+        let mut last = None;
+        for (text, size) in tries(name, 9.0 * RK, 6.0 * RK) {
+            let (w, h) = (Pen::measure(Face::Words, Weight::Heavy, &text, size), Pen::cap(Face::Words, size));
+            let b = boxed((RADAR.0, arrow[3] + 4.0 * RK + h / 2.0), w, h);
+            last = Some((text, size, b));
+            if inside(b) {
+                break;
+            }
+        }
+        if let Some((text, size, b)) = last {
+            drawn.map = Some(write(pen, &text, b, size, CHALK));
+            taken.push(b);
+        }
     }
     for (k, name) in shown.around.iter().enumerate() {
         let Some(name) = name.filter(|n| !n.is_empty()) else { continue };
         let a = turn + k as f32 * FRAC_PI_2;
         let e = (a.sin(), -a.cos());
-        let size = 8.0 * RK;
-        let (w, h) = (Pen::measure(Face::Words, Weight::Heavy, name, size), Pen::cap(Face::Words, size));
-        // How far the box's middle stands off its edge the way `e` points.
-        let reach = (w / 2.0) * e.0.abs() + (h / 2.0) * e.1.abs();
-        let letter = {
-            let at = (RADAR.0 + e.0 * 95.0 * RK, RADAR.1 + e.1 * 95.0 * RK);
-            let r = 7.5 * RK;
-            [at.0 - r, at.1 - r, at.0 + r, at.1 + r]
-        };
-        let out = 95.0 * RK + 9.0 * RK + reach;
-        let mut b = held((RADAR.0 + e.0 * out, RADAR.1 + e.1 * out), w, h);
-        if meets(b, letter) || own.is_some_and(|o| meets(b, o)) {
-            let inn = RADAR_R - 4.0 * RK - reach;
-            b = held((RADAR.0 + e.0 * inn, RADAR.1 + e.1 * inn), w, h);
+        let mut last = None;
+        'fit: for (text, size) in tries(name, 7.5 * RK, 5.0 * RK) {
+            let (w, h) = (Pen::measure(Face::Words, Weight::Heavy, &text, size), Pen::cap(Face::Words, size));
+            // In from the rim along `e`, the farthest out the box lies in the disc — no nearer the
+            // middle than [`AROUND_IN`] of the radius, or the text is made smaller.
+            let mut t = RADAR_R;
+            while t >= AROUND_IN * RADAR_R {
+                let b = boxed((RADAR.0 + e.0 * t, RADAR.1 + e.1 * t), w, h);
+                if inside(b) {
+                    last = Some((text.clone(), size, b));
+                    if !taken.iter().any(|&o| meets(b, o)) {
+                        break 'fit;
+                    }
+                    break;
+                }
+                t -= 0.5 * RK;
+            }
         }
-        let line = write(pen, name, b, size, BONE);
+        let Some((text, size, b)) = last else { continue };
+        let line = write(pen, &text, b, size, BONE);
+        taken.push(b);
         drawn.around.push((['N', 'E', 'S', 'W'][k], line));
     }
 }
