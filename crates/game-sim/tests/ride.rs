@@ -4416,10 +4416,13 @@ fn it_lands_crooked_without_a_snap() {
                 ORIGINAL_LANDING_TURN
             );
         }
-        // And the slide is gone two ticks after the touchdown, as the original's is.
-        let after = rows[5].1;
+        // And the slide is gone within two ticks of the touchdown, as the original's is. Since S118
+        // the crossup is this tick's heading against this tick's velocity, as the capture's is (it
+        // was a tick stale); on the tick after, the half stick still held turns the bike, and the
+        // sideways landing settles at about 9° of steady slip (the original's 341 holds 6-7.5°).
+        let after = rows[4].1.abs().min(rows[5].1.abs());
         assert!(
-            after.abs() <= ORIGINAL_LANDING_CROSSUP,
+            after <= ORIGINAL_LANDING_CROSSUP,
             "{what}: still {after} deg crossed up two ticks after landing; the original is inside \
              {ORIGINAL_LANDING_CROSSUP}"
         );
@@ -5964,7 +5967,8 @@ fn md20_one_short_of_either_wrecks() {
 /// and again with S106's braking speed source on top of it, and with S107's inverse inertia (the
 /// original's general inverse, an ulp off the old reciprocal on one axis), and with S138's Euler angles
 /// measured again after the substeps (the attachment walk's measure, which the wreck test reads), and
-/// with S115's centre of gravity put into the world origin first (an ulp, as the original rounds it).
+/// with S115's centre of gravity put into the world origin first (an ulp, as the original rounds it), and
+/// with S118's crossup measured from the heading the substeps left (the auto-level's yaw a tick sooner).
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -5976,8 +5980,8 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0x5ad923a109eec826;
-const MD25_DIAGONAL_FOLD: u64 = 0xccc259f6d830eb53;
+const MD25_GESTURE_FOLD: u64 = 0x75f7f418b219075b;
+const MD25_DIAGONAL_FOLD: u64 = 0x066916a5d938f4e4;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
 /// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope. 0.31 until S67's

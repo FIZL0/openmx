@@ -2259,6 +2259,11 @@ impl Ride {
         astep.front_vel = front.chassis_local_velocity;
         astep.rear_vel = rear.chassis_local_velocity;
         astep.touching = *touching;
+        // The air state takes the node's two axes afresh as it starts, so its crossup measures the
+        // heading the substeps left against their velocity, not the frame's first heading (S118:
+        // a tick late, the yaw the auto-level pulls towards parted roll's lip, tick 61).
+        astep.heading = out.forward(Frame::Chassis);
+        astep.up = out.mat3(Frame::Chassis).rows[1].merge(Dest::W, Vf::ZERO);
         let ac = air_chassis!();
         air::contact(&p.air, air, &ac, &astep, &tables.acos);
 
