@@ -721,6 +721,13 @@ pub struct Ride {
     /// Whether the body itself is against something solid — a prop, a wall, the scene. `air.rs`
     /// reads it to know a landing is not the only way to be stopped.
     pub touching: bool,
+    /// The material the rear wheel rolls on when that is a prop (P145): the low byte of the struck
+    /// mesh's surface word, an id into the track's `Col\template.cmt`, or 0 for none. The original's
+    /// distributor keeps the rear wheel's last contact node, cleared each substep, and the drive-on
+    /// sound reads the node's material byte after the frame. The terrain is never such a node, so
+    /// it gives 0. Sound only: nothing in the simulation reads it, so the state hash and the snapshot
+    /// leave it out.
+    pub rear_material: u8,
     /// A trick is running. The original's airborne control and its wreck test both read one word on
     /// the bike for this (the trick clocks' "in progress"), and the clocks run *after* the ground
     /// step, so what a frame's air code sees is the previous frame's verdict. [`crate::rider`] is
@@ -803,6 +810,7 @@ impl Ride {
             back: Back { at, facing, up: UP },
             near: F::ONE,
             touching: false,
+            rear_material: 0,
             stunt: false,
             drag_halved: false,
             riding_speed_sq: F(BIKE_MAX_SPEED_SQ),
@@ -1604,11 +1612,15 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (V
             let mut scene = flight_search::Scene::wooded(props, trees, None, bounds, rays, &node, &mut search);
             let hits = crate::contact_search::Search::rays(&mut scene, true);
             let near = if hits.is_empty() { F::ONE } else { scene.ray_record().nearest };
-            let on = |object: usize| {
-                let prop = props?.props.get(object.checked_sub(flight_search::FIRST)?)?;
-                Some((object as u32, prop.moving?))
-            };
-            return (hits.iter().map(|h| (h.from, h.point, h.normal, on(h.struck.object))).collect(), near);
+            let prop = |object: usize| props?.props.get(object.checked_sub(flight_search::FIRST)?);
+            let on = |object: usize| Some((object as u32, prop(object)?.moving?));
+            // A mesh's material is its surface word's low byte (a file too old for one, and a tree's
+            // cylinder, have 0).
+            let material = |object: usize| prop(object).and_then(|p| p.mesh.surface).map_or(0, |s| s as u8);
+            return (
+                hits.iter().map(|h| (h.from, h.point, h.normal, on(h.struck.object), material(h.struck.object))).collect(),
+                near,
+            );
         }
     }
     let mut b = Bundle::default();
@@ -1625,14 +1637,14 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (V
     world.groups(&b, &mut record);
     let hits = (0..b.count)
         .filter(|&i| record.hit[i])
-        .map(|i| (rays.segments[i].from, record.point[i], record.normal[i], None))
+        .map(|i| (rays.segments[i].from, record.point[i], record.normal[i], None, 0))
         .collect();
     (hits, if record.hits > 0 { record.nearest } else { F::ONE })
 }
 
-/// One of [`wheel_hits`]' contacts: the segment's from, the point, the normal, and the moving thing
-/// it is on, with its handle, when it is on one.
-type WheelHit = (Vf, Vf, Vf, Option<(u32, crate::traffic::Moving)>);
+/// One of [`wheel_hits`]' contacts: the segment's from, the point, the normal, the moving thing it is
+/// on, with its handle, when it is on one, and the struck prop's material ([`Ride::rear_material`]).
+type WheelHit = (Vf, Vf, Vf, Option<(u32, crate::traffic::Moving)>, u8);
 
 /// One surface out of a tire's table, by the index the ground query answered with. A tire with no
 /// table at all — or an index past its end — gets a surface of all zeroes, which is a tire with no
@@ -1859,7 +1871,7 @@ impl Ride {
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
-            drag_halved, tricks, ..
+            drag_halved, tricks, rear_material, ..
         } = self;
         *touching = false;
         // MX vs. ATV's moves (MD16), only for a bike a trick pack is laid over.
@@ -2115,7 +2127,7 @@ impl Ride {
             rear.w.swept_contact = 0;
 
             calls.push(mv::Call::Contacts(s.dt));
-            let movers = contacts(chassis, &mut mvc, &out.chassis, front, rear, near, touching, scenery, s.dt, world);
+            let movers = contacts(chassis, &mut mvc, &out.chassis, front, rear, near, touching, rear_material, scenery, s.dt, world);
 
             for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
                 calls.push(mv::Call::Suspension(side, h));
@@ -2276,14 +2288,14 @@ impl Ride {
 /// ported: a trunk between the rays would be ridden through without it.
 #[allow(clippy::too_many_arguments)] // one frame's worth of the bike, and all of it needed
 fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &mut Wheel,
-            rear: &mut Wheel, near: &mut F, touching: &mut bool, scenery: Option<bool>, dt: F, world: &mut dyn World)
-            -> Vec<(u32, crate::traffic::Moving)> {
+            rear: &mut Wheel, near: &mut F, touching: &mut bool, rear_material: &mut u8, scenery: Option<bool>, dt: F,
+            world: &mut dyn World) -> Vec<(u32, crate::traffic::Moving)> {
     let rays = wheel_rays(&front.w, &rear.w);
     let (hits, wheel_near) = wheel_hits(&rays, m, world);
     let look = !hits.is_empty();
     let cs: Vec<chassis::Contact> = hits
         .iter()
-        .map(|&(from, point, normal, on)| chassis::Contact {
+        .map(|&(from, point, normal, on, _)| chassis::Contact {
             // `select` is the segment's own start, along the bike: the front wheel's is forward.
             select: F(from.z()),
             normal,
@@ -2337,6 +2349,9 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
     let mut rc = chassis::WheelContact::default();
     let mut rear_node = 0;
     chassis::wheel_contacts(&mut fc, &mut rc, &mut rear_node, look, &cs, dt);
+    // The rear wheel's node as the distributor keeps it — its last contact, by the same rule — and
+    // so the material the drive-on sound plays (P145).
+    *rear_material = cs.iter().zip(&hits).rev().find(|(c, _)| !(c.select > F::ZERO)).map_or(0, |(_, h)| h.4);
     for (wc, wh) in [(fc, &mut *front), (rc, &mut *rear)] {
         if wc.touching != 0 {
             wh.w.contact_point = wc.point;
