@@ -313,13 +313,16 @@ impl Sim {
         if self.plane.is_some() {
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
-            // machine (biplane.p2m2's state). A downed rider's bike and a ghost's are out too.
+            // machine (biplane.p2m2's state). A downed rider's bike and a ghost's are out too. On a
+            // world that wraps (MD44), each where it is nearest the plane.
+            let flying = self.plane.as_ref().map_or(Vf::ZERO, |p| p.body.position);
             let bikes: Vec<flight_search::Bike> = self
                 .others
                 .iter()
-                .map(|p| flight_search::Bike {
-                    transform: p.rider.ride.transform(),
-                    in_world: p.rider.state.wreck.is_none() && !p.rider.ghost.on,
+                .map(|p| {
+                    let mut transform = p.rider.ride.transform();
+                    transform.0[3] = nearest_copy(&*world, flying, transform.0[3]);
+                    flight_search::Bike { transform, in_world: p.rider.state.wreck.is_none() && !p.rider.ghost.on }
                 })
                 .collect();
             let plane = self.plane.as_mut().expect("a plane ride");
@@ -328,9 +331,9 @@ impl Sim {
             // What the bikes' struck listeners kept is for their wreck tests, which only run when
             // they are stepped — not while a plane flies — and which never wreck on a plane's probe
             // ([`flight_search::struck_wreck`]), so it goes no further.
-            let _struck = plane.frame_among(dt, flight::pad(self.input.pad(0)), world, &self.tables.ride, &bikes);
+            let (_struck, seam) = plane.frame_seamed(dt, flight::pad(self.input.pad(0)), world, &self.tables.ride, &bikes);
             self.ticks += 1;
-            return crate::rider::Frame::default();
+            return crate::rider::Frame { seam, ..crate::rider::Frame::default() };
         }
         // The bike's body rays against the cars (S137), gathered as the rider-against-rider contacts
         // are, before the bike is stepped.
@@ -406,14 +409,15 @@ impl Sim {
         self.traffic.frame(dt, world);
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
-        let mut lists = self.bike_contacts(dt);
+        // On a world that wraps (MD44), each bike against every other's nearest copy.
+        let mut lists = self.bike_contacts_in(dt, &*world);
         // And every bike's body rays against the cars (S137), from the same tick's places.
         let mut cars: Vec<Vec<contact::Contact>> = (0..self.players()).map(|i| self.car_contacts(i, world, dt)).collect();
         for (i, c) in controls.iter().enumerate().rev() {
             let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
                 .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
                 .filter(|l| !l.is_empty())
-                .map(|l| self.bump(i, l));
+                .map(|l| self.bump_in(i, l, &*world));
             let rivals: Vec<ride::Rival> = (0..self.players())
                 .filter(|&j| j != i)
                 .map(|j| self.rider_of(j))
@@ -923,6 +927,10 @@ pub mod bike_col;
 /// Rider against rider (S78): the bikes' body rays against each other's frames, and the contacts
 /// resolved in each bike's ground step.
 pub mod rider_contact;
+
+/// Over a seam (MD44): the plane, the riding ragdoll and a wreck's bodies moved by a world's width,
+/// as the rider's chassis is.
+pub mod seam;
 
 #[cfg(test)]
 mod tests {

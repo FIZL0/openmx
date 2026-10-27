@@ -505,14 +505,52 @@ impl Flight {
         tables: &ride::Tables,
         bikes: &[flight_search::Bike],
     ) -> Vec<Option<u32>> {
+        self.frame_seamed(dt, pad, ground, tables, bikes).0
+    }
+
+    /// [`Flight::frame_among`], and the widths the plane was moved over a seam this frame, `[x, z]`
+    /// ([`Flight::wrap_round`]): what the shell moves its camera by. `[0, 0]` on every world that
+    /// does not wrap.
+    pub fn frame_seamed(
+        &mut self,
+        dt: F,
+        pad: Pad,
+        ground: &mut dyn world::World,
+        tables: &ride::Tables,
+        bikes: &[flight_search::Bike],
+    ) -> (Vec<Option<u32>>, [i8; 2]) {
         let mesh = self.bike.clone();
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
         let (struck, movers) = self.search(dt, ground, bikes);
-        WORLD.step(dt, &mut Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers });
+        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, seam: [0, 0] };
+        WORLD.step(dt, &mut listeners);
+        let seam = listeners.seam;
         if self.attitude.flown {
             self.pad = pad;
         }
-        struck
+        (struck, seam)
+    }
+
+    /// **Over a seam** (MD44, the port's own; [`crate::rider::Rider::wrap_round`]'s for the plane): on
+    /// a world that wraps, a plane whose body has crossed a seam is moved back one width on that
+    /// axis — its body, its collision record and its collider ([`crate::seam`]) — and the answer is
+    /// the widths it was past, `[x, z]`. Its speed, spin and attitude are not places and do not
+    /// change, so it flies on as it was flying; the measure is taken again, for its matrix's origin.
+    /// The spawn a wreck's recovery puts it back on is a place in the world already.
+    pub fn wrap_round(&mut self, world: &dyn world::World, acos: &AcosTable) -> [i8; 2] {
+        let wrap = world.wrap();
+        let Some(area) = world.area().filter(|_| wrap != [false, false]) else { return [0, 0] };
+        let at = self.body.position;
+        let laps = [crate::seam::lap(wrap[0], at.x(), area.width), crate::seam::lap(wrap[1], at.z(), area.depth)];
+        if laps == [0, 0] {
+            return laps;
+        }
+        let by = [crate::seam::by(laps[0], area.width), crate::seam::by(laps[1], area.depth)];
+        crate::seam::body(&mut self.body, by);
+        crate::seam::record(&mut self.record, by);
+        self.collider.cofg_world = crate::seam::moved(self.collider.cofg_world, by);
+        self.remeasure(acos);
+        laps
     }
 
     /// The collision object's search, before the world steps (the plane's world node, as the wreck
@@ -763,6 +801,8 @@ struct Listeners<'a> {
     bikes: Option<Bikes<'a>>,
     /// The movers the search's contacts name (S145).
     movers: &'a [contact::Mover],
+    /// The widths the post moved the plane over a seam (MD44).
+    seam: [i8; 2],
 }
 
 impl Dynamics for Listeners<'_> {
@@ -789,6 +829,9 @@ impl Dynamics for Listeners<'_> {
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
+        // Over a seam (MD44), first: the refill gathers where the plane now is.
+        let seam = self.plane.wrap_round(&*self.ground.0, &self.tables.acos);
+        self.seam = [self.seam[0] + seam[0], self.seam[1] + seam[1]];
         self.plane.refresh(&mut *self.ground.0, self.bikes);
         // A world of several terrains' holes and bare sky (MD14), where the plane stands now.
         let at = self.plane.body.position;
