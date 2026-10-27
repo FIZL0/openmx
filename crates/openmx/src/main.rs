@@ -7576,6 +7576,7 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::Seat
         plane,
         crash,
         edge,
+        body: audio::RiderBody::of(&seat.sim.rider),
         // Not riding — their own pause, a pad pulled out, Start's freeze — their sounds hold where
         // they are while the others ride on (P172).
         paused: !seat.riding,

@@ -4053,6 +4053,24 @@ bike_wreck_clank boot 0x003dc8c0 the wreck emitter's frame (vt +0x38): when *+0x
 #                                touched) and the emitter idle and |bike +0x550| >= MinImpulse: a
 #                                no-repeat rand pick at min(100, |imp|/MaxImpulse*100)%. Not ported:
 #                                the port plays one [Wreck] at the wreck entry instead
+bike_wreck_entry_clank boot 0x003dcb90 (emitter, 0) the player's wreck entry's call: when the
+#                                      emitter is idle, 0x003dc730 -- the same gate on the impulse
+#                                      (|*+0x224| >= MinImpulse, else nothing), a no-repeat rand() pick
+#                                      and the same level. So the entry clank is not unconditional
+#                                      either: S109's reason-11 fall had none (P180's matched filter)
+# P180 -- the rider's voice past the wreck entry. rider.aud [Params] MinImpulse (12.8) is at +0x238.
+rider_voice_frame boot 0x0033e790 the rider emitter's frame: when +0x23c == 0 and the body record at
+#                                 +0x240 has reason +0x104 not 0 and not 13, +0x1bc set (touching, as
+#                                 read; not proven) and |+0x130..+0x138| > MinImpulse, and the emitter
+#                                 idle (vt +0x90 == 0): 0x0033e850(emitter, 1), an [IMPACT] pick
+rider_voice_pick boot 0x0033e850 (emitter, which) 0: [Fall] (+0x200 count, +0x208 sounds, +0x218
+#                                last), 1: [IMPACT] (+0x21c, +0x224, +0x234); the no-repeat pick
+#                                0x001b5820 draws rand() for two or more, then 0x0033e900 plays it
+#                                (no level set: full). The sim does not draw for these touchdown picks
+rider_voice_play boot 0x0033e900 (emitter, sound) starts it on the emitter
+# S109 run2 (reason 11 at tick 3716, video t = (fc - 1938)/60): the matched filter finds pre_fall3 at
+# 29.66 s (the entry), Vehicle WRECK05 at 30.82 s (tick ~3787, a_touching rises then) and Rider FALL02
+# ([IMPACT]) at 30.93 s; nothing else from 26 s to 34.5 s.
 drive_on_frame boot 0x001b9690 the drive-on emitter's frame (vtable 0x004505e0): per wheel, the touched
 #                              material's id (contact +0x89) plays its DriveOnSoundFile (vt +0xa8)
 #                              or stops it (vt +0xbc)

@@ -1590,3 +1590,223 @@ fn the_plane_crash_sounds_are_the_discs() {
         assert!((clip.seconds() - seconds).abs() < 0.001, "{} against {seconds}", clip.seconds());
     }
 }
+
+// --- the rider's wreck (P180) -----------------------------------------------------------------------
+
+/// `game-sim`'s ridden test bike, and its wreck fixture (`tests/ride.rs`' `WRECK_LIMITS`, `WRECK_PART`
+/// and `RIDER_WRECKS`): a vertical limit low enough that a drop onto flat ground wrecks, a wreck body
+/// and the rider's half of the wreck. Plausible numbers, not the disc's.
+const WRECK_BIKE: &str = include_str!("../../game-sim/tests/freeride-bike.phy.txt");
+const DROP_LIMITS: &str = "
+[Wrecks]
+MaxWreckTime = 2
+CannonballWreckTime = 5
+FrontWreckSpeedLimit = 400
+BackWreckSpeedLimit = 400
+SideWreckSpeedLimit = 400
+RacingDownWreckSpeedLimit = 400
+FreestyleDownWreckSpeedLimit = 5
+GroundPitchDownWreckAngle = 85
+GroundPitchUpWreckAngle = 85
+AirbornePitchDownWreckAngle = 175
+AirbornePitchUpWreckAngle = 175
+AirborneRollWreckAngle = 175
+NoHanderWreckSpeedLimit = 400
+NoHanderMaxRollAngle = 45
+JoustWreckHeight = 2
+CrossupWreck = 1
+CrossupWreckTime = 0.3
+";
+const DROP_PART: &str = "
+[PhysicsPart1]
+Type = RigidBody
+Name = wreck_physics
+Weight = 250.0
+CollisionWeight = 0.0001
+GravityScale = 1.0
+InertiaScale = 1.0, 1.0, 1.0
+SpringStiffness = 5.0
+SpringDamping = 0.4
+MaxPenetration = 0.5
+CofG = 0.0, 1.5, 0.0
+SpringMomentScale = 1.0, 1.0, 1.0
+FrictionMomentScale = 1.0, 1.0, 1.0
+FrictionZone1 = 0.5
+Radius = 1.0
+AccelerationThreshold = 0.01
+AngularAccelerationThreshold = 0.01
+";
+const DROP_RIDER: &str = "
+[Wrecks]
+HitBottomForceTime = 0.1
+HitBottomHandHoldTime = 0.3
+HitBottomForce = 0.0, 800.0, 0.0
+GroundAngularRateDamping = 1.0
+RiderFlailHeight = 3.0
+RiderRollTime = 0.75
+RiderRollSpeed = 0.0
+";
+
+/// `rider.aud`'s shape in tones: a short `[Fall]` grunt, two `[IMPACT]` screams, `MinImpulse` 12.8.
+/// The screams are short, so that the wreck's own is over before the rider comes down.
+fn tone_rider() -> audio::RiderSounds {
+    audio::RiderSounds {
+        fall: List { sounds: vec![(tone(5000.0, 0.3), false)] },
+        impact: List { sounds: vec![(tone(5000.0, 0.2), false), (tone(5000.0, 0.25), false)] },
+        near: 30.0,
+        far: 150.0,
+        min_impulse: 12.8,
+    }
+}
+
+/// One sound a wreck ride started: the tick, which list it is of, and the body's state then.
+#[derive(Debug)]
+struct Cry {
+    tick: usize,
+    list: &'static str,
+    touching: bool,
+    speed: f32,
+}
+
+/// **A wreck ride**: the bike dropped 30 ft onto flat ground with nobody on the pad, wrecked by the
+/// landing, the rider thrown and lying there until the clock puts them back — `game_sim` stepping
+/// at the recording's 30 Hz and the sound hearing what the shell hands it: the tick's own wreck and
+/// the thrown body ([`audio::RiderBody::of`]). The mixer renders each tick's samples. Returns every
+/// sound started, sorted to its list, and the wreck's reason and tick.
+fn ride_a_wreck(rider: &audio::RiderSounds, bike: BikeSounds) -> (Vec<Cry>, i32, usize) {
+    use game_sim::phy;
+    use game_sim::ride::Controls;
+    let tables = Tables::build();
+    let p = Phy::read_bytes(format!("{WRECK_BIKE}{DROP_LIMITS}").as_bytes(), &tables.ride.curve);
+    let mut r = game_sim::rider::Rider::new(&p, stock::MOUNTS, Vf::new(0.0, 30.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let part = phy::Part::read_bytes(DROP_PART.as_bytes(), "PhysicsPart1");
+    r.carries_wreck(part, phy::Wrecks::read_bytes(DROP_RIDER.as_bytes()), part.inertia(Vf::new(2.5, 4.0, 7.0, 1.0)));
+    let mut world = game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+    let mut sound = audio::Sound::new(mixer.clone());
+    sound.rider = rider.clone();
+    let clank = bike.wreck.clone();
+    sound.seats.push(audio::SeatSound::new(Arc::new(bike), 1));
+    let lists: [(&'static str, &List); 3] = [("fall", &rider.fall), ("impact", &rider.impact), ("clank", &clank)];
+    let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+    let mut cries = Vec::new();
+    let mut wreck = None;
+    let mut sounding: Vec<Arc<Clip>> = Vec::new();
+    for tick in 0..400 {
+        let f = r.frame(&p, &tables, &Controls::default(), F(0.03333), &mut world);
+        let at = r.ride.position();
+        let hands = Hands { grounded: r.ride.air.on_ground, at: [at.x(), at.y(), at.z()], ..Hands::default() };
+        let body = audio::RiderBody::of(&r);
+        let said = f.wreck.map(|w| w.0 as i32);
+        if let Some(w) = said.filter(|_| wreck.is_none()) {
+            wreck = Some((w, tick));
+        }
+        sound.frame(&[audio::SeatFrame { hands, wreck: said, body, ..Default::default() }], 1.0 / 30.0);
+        let mut m = mixer.lock().unwrap();
+        let now: Vec<Arc<Clip>> = m.clips().into_iter().map(|c| c.0).collect();
+        for clip in &now {
+            if sounding.iter().any(|c| Arc::ptr_eq(c, clip)) {
+                continue;
+            }
+            if let Some((list, _)) = lists.iter().find(|(_, l)| l.sounds.iter().any(|(c, _)| Arc::ptr_eq(c, clip))) {
+                cries.push(Cry { tick, list, touching: body.touching, speed: body.speed });
+            }
+        }
+        sounding = now;
+        m.render(&mut out);
+        if f.respawned && wreck.is_some() {
+            break;
+        }
+    }
+    let (reason, at) = wreck.expect("the drop never wrecked");
+    (cries, reason, at)
+}
+
+/// A bike whose `[Wreck]` is one 1.3 s clank, the rest [`tone_bike`]'s.
+fn clanking_bike() -> BikeSounds {
+    BikeSounds { wreck: List { sounds: vec![(tone(7000.0, 1.3), false)] }, ..tone_bike() }
+}
+
+/// What a wreck ride's sounds should be: the wreck's own cry and the bike's clank on the wreck's tick
+/// — `[IMPACT]` for the drop's reason 5 — and after it, only `[IMPACT]` screams, each on a tick the
+/// body touched. With `touchdown`, at least one: the thrown rider hitting the ground once the
+/// wreck's own cry is over (the disc's 0.9 s screams still hold the voice when the drop's rider lands).
+fn assert_a_wreck_is_heard(cries: &[Cry], reason: i32, at: usize, touchdown: bool) {
+    println!("wreck {reason} at tick {at}: {cries:?}");
+    assert_eq!(reason, 5, "the drop's wreck is the vertical one");
+    let entry: Vec<&str> = cries.iter().filter(|c| c.tick == at).map(|c| c.list).collect();
+    assert!(entry.contains(&"impact"), "no voice on the wreck's tick: {cries:?}");
+    assert!(entry.contains(&"clank"), "no clank on the wreck's tick: {cries:?}");
+    assert!(cries.iter().all(|c| c.tick >= at), "a sound before the wreck: {cries:?}");
+    let after: Vec<&Cry> = cries.iter().filter(|c| c.tick > at).collect();
+    assert!(!touchdown || !after.is_empty(), "the rider hit the ground in silence: {cries:?}");
+    for c in &after {
+        assert_eq!(c.list, "impact", "after the wreck's tick, at {}: {cries:?}", c.tick);
+        assert!(c.touching, "a scream off the ground, at {}: {cries:?}", c.tick);
+    }
+}
+
+/// **A wreck ride hears the voice and clank** (P180): see [`assert_a_wreck_is_heard`].
+#[test]
+fn a_wreck_ride_hears_the_voice_and_clank() {
+    let rider = tone_rider();
+    let (cries, reason, at) = ride_a_wreck(&rider, clanking_bike());
+    assert_a_wreck_is_heard(&cries, reason, at, true);
+}
+
+/// The same ride on the disc's own `rider.aud` and the 125's `[Wreck]`.
+#[test]
+fn a_wreck_ride_hears_the_discs_voice_and_clank() {
+    let Some(d) = disc() else { return };
+    let mut lib = audio::Library::open(d).unwrap();
+    let mut read = audio::Reading { lib: &mut lib };
+    let (bike, rider) = (read.bike("Bike\\125sx.res"), read.rider("Rider\\ff_fox1.res"));
+    assert_eq!((rider.fall.sounds.len(), rider.impact.sounds.len(), bike.wreck.sounds.len()), (5, 5, 4));
+    assert_eq!((rider.near, rider.far, rider.min_impulse), (30.0, 150.0, 12.8));
+    let (cries, reason, at) = ride_a_wreck(&rider, bike);
+    assert_a_wreck_is_heard(&cries, reason, at, false);
+}
+
+/// The original's rider emitter cries out only while the body is down for a reason that is not the
+/// shootoff's, touching, faster than `MinImpulse`, and with nothing of its own still playing — the
+/// entry's own cry included, and a short tail past it.
+#[test]
+fn the_rider_cries_only_down_touching_and_fast() {
+    let rider = tone_rider();
+    let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+    let mut sound = audio::Sound::new(mixer.clone());
+    sound.rider = rider.clone();
+    sound.seats.push(audio::SeatSound::new(Arc::new(clanking_bike()), 1));
+    let body = |down: bool, touching: bool, speed: f32| audio::RiderBody { down, touching, speed, at: [0.0; 3] };
+    let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+    let mut tick = |sound: &mut audio::Sound, wreck: Option<i32>, b: audio::RiderBody| {
+        sound.frame(&[audio::SeatFrame { wreck, body: b, ..Default::default() }], 1.0 / 30.0);
+        let v = sound.seats[0].voice.voice();
+        mixer.lock().unwrap().render(&mut out);
+        v
+    };
+    // Slow is slow on this tick and the last: the speed it came down at.
+    for b in [body(true, true, 12.8), body(false, true, 40.0), body(true, false, 40.0)] {
+        assert_eq!(tick(&mut sound, None, b), None, "{b:?}");
+    }
+    // The fall's grunt (0.3 s) holds the voice, and then its tail; then a touch screams.
+    let grunt = tick(&mut sound, Some(11), body(true, false, 40.0)).expect("the wreck's own cry");
+    let mut k = 1;
+    let scream = loop {
+        match tick(&mut sound, None, body(true, true, 40.0)) {
+            Some(v) if v != grunt => break v,
+            _ => k += 1,
+        }
+        assert!(k < 60, "no scream in two seconds");
+    };
+    assert!((9..=23).contains(&k), "the scream {k} ticks after the grunt: past the 0.3 s clip and its 0.4 s tail");
+    assert!(scream != grunt);
+    // A shootoff's throw (13) is the edge's own sound, not this one.
+    let mut sound = audio::Sound::new(mixer.clone());
+    sound.rider = rider;
+    sound.seats.push(audio::SeatSound::new(Arc::new(clanking_bike()), 1));
+    let b = audio::RiderBody { down: false, ..body(true, true, 40.0) };
+    for _ in 0..30 {
+        assert_eq!(tick(&mut sound, None, b), None);
+    }
+}
