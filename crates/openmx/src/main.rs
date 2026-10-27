@@ -4460,6 +4460,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         println!("world look: {paged} of {} tiles painted from their pages, {skies} with a sky of their own", l.paint.tiles.len());
         l
     });
+    // `--seams` (MD51): the ground and its paint between each two maps that face, the wrap's too.
+    if let (true, Some(w), Some(l), Land::Tiles(t)) = (args.seams, &world_mod, &world_look, &sim) {
+        for line in w.crossings(t, &l.paint) {
+            println!("{line}");
+        }
+    }
     // Everything the GPU draws, uploaded once: the props, the sky, the ground and every model.
     // Under the front end the models go up a slice between loading frames (P127).
     if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {

@@ -678,6 +678,11 @@ pub const FAR_WEIGHT: f32 = 1.0 / (BLEND_REACH * BLEND_REACH * 2048.0);
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Regions {
     pub owned: Vec<[f32; 4]>,
+    /// The world's sides on the axes it wraps round (MD29), `[x, z]` in feet, 0 on one that does not:
+    /// a map is as near as its nearest copy a side over, so the ground past one seam blends toward
+    /// the map across it (MD51: Norfolk's paint ran up to world_mxu_free's x seam and Dallas's began
+    /// on it, one straight line).
+    pub period: [f32; 2],
 }
 
 impl Regions {
@@ -694,7 +699,7 @@ impl Regions {
         if let Some(o) = self.owner(x, z) {
             return (0..self.owned.len()).map(|i| if i == o { 1.0 } else { 0.0 }).collect();
         }
-        self.owned.iter().map(|r| reach(distance_to(r, x, z))).collect()
+        self.owned.iter().map(|r| reach(distance_to(r, x, z, self.period))).collect()
     }
 
     /// Each map's share of the ground, the light and the sky at a point: [`Regions::weights`]
@@ -708,17 +713,42 @@ impl Regions {
         w
     }
 
-    /// A point read in map `i`'s rectangle: itself inside it, mirrored back in across the edge past it.
+    /// A point read in map `i`'s rectangle: itself inside it, mirrored back in across the edge past it
+    /// — of the map's nearest copy on a wrapped axis, so across a seam it reads on from the map's own
+    /// edge there.
     pub fn mirrored(&self, i: usize, x: f32, z: f32) -> (f32, f32) {
         let r = self.owned[i];
+        let (x, z) = (nearest(x, r[0], r[2], self.period[0]), nearest(z, r[1], r[3], self.period[1]));
         (mirror(x, r[0], r[2]), mirror(z, r[1], r[3]))
     }
 }
 
-/// How far a point is from a rectangle, 0 inside it.
-fn distance_to(r: &[f32; 4], x: f32, z: f32) -> f32 {
-    let dx = (r[0] - x).max(x - r[2]).max(0.0);
-    let dz = (r[1] - z).max(z - r[3]).max(0.0);
+/// How far `v` is from `lo..hi` along one axis, 0 inside it.
+fn distance_1d(v: f32, lo: f32, hi: f32) -> f32 {
+    (lo - v).max(v - hi).max(0.0)
+}
+
+/// `v` moved by whole `period`s to where it is nearest `lo..hi`: unmoved on an axis that does not
+/// wrap (`period` 0), and on a tie. A world's point and rectangle both lie in `0..period`, so one
+/// period either way is every copy that can be nearest.
+fn nearest(v: f32, lo: f32, hi: f32, period: f32) -> f32 {
+    if period <= 0.0 {
+        return v;
+    }
+    let mut best = (distance_1d(v, lo, hi), v);
+    for moved in [v - period, v + period] {
+        let d = distance_1d(moved, lo, hi);
+        if d < best.0 {
+            best = (d, moved);
+        }
+    }
+    best.1
+}
+
+/// How far a point is from a rectangle's nearest copy ([`Regions::period`]), 0 inside it.
+fn distance_to(r: &[f32; 4], x: f32, z: f32, period: [f32; 2]) -> f32 {
+    let dx = distance_1d(nearest(x, r[0], r[2], period[0]), r[0], r[2]);
+    let dz = distance_1d(nearest(z, r[1], r[3], period[1]), r[1], r[3]);
     (dx * dx + dz * dz).sqrt()
 }
 
@@ -1157,5 +1187,45 @@ mod tests {
         assert_eq!(levels[2 * across + 2], 0);
         assert_eq!(levels[2 * across + 3], 1);
         assert_eq!(lod_coarser(&levels, across, along, 2, 2), [true; 4]);
+    }
+
+    /// MD51: on a world that wraps, a map is as near as its nearest copy a side over. Two maps in a
+    /// row 1000 feet wide, `a` red at 100..400 and `b` green at 500..800: past `b` the ground blends
+    /// back toward `a` across the seam at 1000 and reads `a`'s own edge there, so the paint runs
+    /// over the 300 feet from `b` round to `a` with no step at the seam; unwrapped, `a`'s paint
+    /// starts at the seam all at once.
+    #[test]
+    fn a_wrapped_worlds_join_blends_across_the_seam() {
+        let paint = |period: f32| WorldPaint {
+            regions: Regions { owned: vec![[100.0, 0.0, 400.0, 300.0], [500.0, 0.0, 800.0, 300.0]], period: [period, 0.0] },
+            tiles: vec![PaintTile { at: [100.0, 0.0], pages: None, sharp: None }, PaintTile { at: [500.0, 0.0], pages: None, sharp: None }],
+            dirt: [0.0; 3],
+        };
+        // Each map's share of the ground: the colour a red `a` and a green `b` blend to.
+        let colour = |p: &WorldPaint, x: f32| {
+            let s = p.regions.shares(x, 150.0);
+            [255.0 * s[0], 255.0 * s[1]]
+        };
+        let steepest = |p: &WorldPaint| {
+            let xs: Vec<f32> = (0..=300).map(|i| (800.0 + i as f32).rem_euclid(1000.0)).collect();
+            xs.windows(2).map(|w| (0..2).map(|k| (colour(p, w[1])[k] - colour(p, w[0])[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max)
+        };
+        let (wrapped, open) = (paint(1000.0), paint(0.0));
+        // Wrapped: a foot either side of the seam is the same ground, half `a` and half `b` midway.
+        let (before, after) = (colour(&wrapped, 999.9), colour(&wrapped, 0.1));
+        assert!((0..2).all(|k| (before[k] - after[k]).abs() < 0.5), "{before:?} | {after:?}");
+        let mid = colour(&wrapped, 950.0);
+        assert!((mid[0] - mid[1]).abs() < 1.0, "midway {mid:?}");
+        // And no step anywhere from `b` round to `a` bigger than the join's 150 feet each side allow.
+        assert!(steepest(&wrapped) < 10.0, "wrapped: {} a foot", steepest(&wrapped));
+        // Unwrapped, the seam is a step: `a` is 599 feet off before it and 100 after.
+        assert!(steepest(&open) > 100.0, "unwrapped: {} a foot", steepest(&open));
+        // The weights are the same where nothing is near the seam.
+        assert_eq!(wrapped.regions.weights(450.0, 150.0), open.regions.weights(450.0, 150.0));
+        // A map's paint read across the seam is its own edge's: the point is moved a period first.
+        let (x, _) = wrapped.regions.mirrored(0, 990.0, 150.0);
+        assert!((x - 210.0).abs() < 0.01, "{x}");
+        assert_eq!(wrapped.regions.mirrored(0, 990.0, 150.0), wrapped.regions.mirrored(0, -10.0, 150.0));
+        assert_eq!(open.regions.mirrored(0, 990.0, 150.0).0, mirror(990.0, 100.0, 400.0));
     }
 }
