@@ -662,13 +662,9 @@ impl Rider {
                     let found: Vec<_> = found.unwrap_or_default().into_iter().filter(|f| !b.contacts.iter().any(|c| c.other.is_none() && c.from == f.from && c.on_body == f.on_body)).collect();
                     b.contacts.splice(0..0, ground);
                     b.contacts.extend(found);
-                    // The cars' entries (S137) name their movers by prop too (S145): the scenery
-                    // search's list is every prop's, and with nothing struck there, the world's.
-                    b.movers = if movers.is_empty() && b.contacts.iter().any(|c| c.mover.is_some()) {
-                        world.moving().map_or_else(Vec::new, |props| crate::flight_search::movers(&props.props))
-                    } else {
-                        movers
-                    };
+                    // The body rays' entries on a moving prop name it as their mover (S145); the car
+                    // search's (S137) still name none, so they keep the scenery response.
+                    b.movers = movers;
                     Some(b)
                 }
                 (None, found) => {

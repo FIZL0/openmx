@@ -13,9 +13,7 @@
 //!
 //! * once a tick, before the bike is stepped, as the rider-against-rider contacts are gathered
 //!   ([`crate::rider_contact::gather`]): the same record, the same capacity, a car being what a prop
-//!   is to the search, with no collision object ([`contact_search::collide`]) — but a mover, the car
-//!   (S145: its mesh collidable's owner is the car, a vehicle of kind 2, as S142 read), named by its
-//!   prop's index ([`crate::rider_contact::Bump::movers`]), so the response meets the car's motion;
+//!   is to the search, with no collision object and no mover ([`contact_search::collide`]);
 //! * the list is resolved by the ground step at the top of every substep with the bike's scenery
 //!   response ([`crate::rider_contact::Bump::resolve`]), the impulse the first substep's;
 //! * and the wreck test reads it: the first entry whose ray reaches above the hit reach is a
@@ -101,8 +99,6 @@ fn distance(a: Vf, b: Vf) -> F {
 struct Probe<'a> {
     strikes: Strikes<'a>,
     objects: Vec<Collidable>,
-    /// The first car's index among the world's props: what its mover is named by (S145).
-    first: usize,
 }
 
 impl Probe<'_> {
@@ -130,7 +126,7 @@ impl Search for Probe<'_> {
             .contacts
             .iter()
             .map(|c| {
-                let struck = Struck { object: c.object as usize, other: None, mover: self.mover(c.object as usize) };
+                let struck = Struck { object: c.object as usize, other: None, mover: None };
                 Hit { from: c.from, to: c.to, point: c.point, normal: c.normal, struck }
             })
             .collect()
@@ -142,31 +138,14 @@ impl Search for Probe<'_> {
 
     fn moved(&mut self, _node: &Node) {}
 
-    /// A car's velocity, its mover's `vt+0xb8` (S145). The sweep is not run here, so nothing asks.
-    fn velocity(&self, struck: &Struck) -> Vf {
-        match struck.mover.and_then(|(m, _)| self.strikes.cars.get(m.checked_sub(self.first)?)?.moving) {
-            Some(m) => m.velocity,
-            None => Vf::ZERO,
-        }
-    }
-}
-
-impl Probe<'_> {
-    /// Collidable `object`'s mover (S145): a car's collision mesh has no collision object (`+0x80` is
-    /// 0) and its owner (`+0x7c`) is the car, a vehicle of kind 2 (S142), named by its prop's index
-    /// among the world's ([`crate::flight_search::movers`]). A car the traffic has not yet stepped
-    /// has no motion to give, and none.
-    fn mover(&self, object: usize) -> Option<(usize, u32)> {
-        let k = object.checked_sub(CARS)?;
-        self.strikes.cars.get(k)?.moving?;
-        Some((self.first + k, contact_search::MOVER_KIND))
+    fn velocity(&self, _struck: &Struck) -> Vf {
+        Vf::ZERO
     }
 }
 
 /// **A riding bike's contacts with the cars**: its body rays (`col`) on the chassis at `at`, against
-/// `cars` where they stand. One entry per ray that struck, at most [`CAPACITY`]. `first` is the first
-/// car's index among the world's props, which a contact names its car's mover by (S145).
-pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> Vec<Contact> {
+/// `cars` where they stand. One entry per ray that struck, at most [`CAPACITY`].
+pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], dt: F) -> Vec<Contact> {
     if cars.is_empty() {
         return Vec::new();
     }
@@ -183,7 +162,7 @@ pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> V
     }));
     let ray = ray_probe::Record { listed: true, capacity: CAPACITY, one_per_ray: true, ..ray_probe::Record::default() };
     let strikes = Strikes { col, at: *at, cars, facets: vec![None; cars.len()], ray };
-    let mut probe = Probe { strikes, objects, first };
+    let mut probe = Probe { strikes, objects };
     let mut records = vec![Record {
         search: true,
         sweep_back: true,
@@ -197,7 +176,7 @@ pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> V
     }];
     contact_search::collide(&mut records, 0, None, None, &mut probe, dt);
     let mut list = records.swap_remove(0).contacts;
-    if let Some(e) = inside(col, at, cars, first).filter(|_| list.len() < CAPACITY) {
+    if let Some(e) = inside(col, at, cars).filter(|_| list.len() < CAPACITY) {
         if !list.iter().any(|c| c.from == e.from && c.on_body == e.on_body) {
             list.push(e);
         }
@@ -214,10 +193,10 @@ pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> V
 /// meet, has nothing on its list while the train runs through it. The original's chassis sweep back
 /// (not ported) answers the bike's own travel, not the car's. As the head ray's entry, the wreck test
 /// reads it as scenery struck ([`wreck_contacts`]): a rider the train ran into comes off.
-fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize) -> Option<Contact> {
+fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop]) -> Option<Contact> {
     let head = col.rays.segments.iter().max_by(|a, b| a.to.y().total_cmp(&b.to.y()))?;
     let end = math::transform_point(at, head.to);
-    for (k, p) in cars.iter().enumerate() {
+    for p in cars {
         let Some(root) = p.mesh.nodes.first() else { continue };
         let local = math::transform_point(&p.from_world, end);
         let (c, h) = (root.centre, root.half_extent);
@@ -246,7 +225,7 @@ fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize) -> Option<Conta
             other_arm: Vf::VF0,
             surface: contact_search::NO_SURFACE,
             other: None,
-            mover: p.moving.map(|_| first + k),
+            mover: None,
         });
     }
     None
@@ -254,8 +233,8 @@ fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize) -> Option<Conta
 
 /// What of a bike's list the wreck test reads as scenery: its own entries (kind 0) with nothing on
 /// the other side, each reaching as high as its ray's end in the bike's model space. The test reads
-/// the other side's record (`+0x74`) alone, so an entry on a car, which names only its mover
-/// (`+0x78`), is scenery (S145).
+/// the other side's record (`+0x74`) alone, so an entry naming only a mover (`+0x78`), as the body
+/// rays' on a moving prop do, is scenery (S145).
 pub fn wreck_contacts(list: &[Contact]) -> Vec<air::Contact> {
     list.iter()
         .filter(|c| c.kind == 0 && c.other.is_none())
@@ -283,6 +262,6 @@ impl crate::Sim {
         }
         let Some(props) = world.moving() else { return Vec::new() };
         let cars = props.props.get(first..).unwrap_or(&[]);
-        struck(col, &r.ride.transform(), cars, first, dt)
+        struck(col, &r.ride.transform(), cars, dt)
     }
 }
