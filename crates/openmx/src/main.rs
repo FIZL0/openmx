@@ -3495,6 +3495,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         rider
     };
     let mut rider = new_rider(&phy, at, heading);
+    // The wreck test's 50cc reach (S157) goes by the file's name, which the 500s' names pass too.
+    rider.fifty = game_sim::track::fifty_reach(&bike_words[0]);
     mods.ride(0, &mut rider.ride);
     // The other local players (V22), beside the first on the start line: where the original puts a
     // second rider was not read (R9), so this is the port's own — every SEAT_SPACING feet along the
@@ -3509,6 +3511,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let (x, z) = (at.x() + right.x() * off, at.z() + right.z() * off);
             let (on, _) = sim_world::World::ground(&mut sim, Vf::new(x, 1.0e4, z, 1.0));
             let mut rider = new_rider(&other_phys[i - 1], Vf::new(x, at.y() + (on.y() - under_first.y()), z, 1.0), heading);
+            rider.fifty = game_sim::track::fifty_reach(&bike_words[i]);
             mods.ride(i, &mut rider.ride);
             rider
         })

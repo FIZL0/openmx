@@ -5750,3 +5750,15 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # (pos 2439.249, 133.697, 4059.953). Its +0x2a0 and +0x2e0 are still identity in every state: the
 # update never ran, so 0x001dd7b0 would answer the node's position x 30. Not run live. s89-along,
 # s89-across and the biplane states hold none of the class.
+# S157 — the 2p recording's world contacts. Journal: research/journal/2026-10-27-s157-2p-world-contacts.
+# Tests crates/game-sim/tests/two_p_world.rs (C10's images, c10-<frame>.ram, track Tracks\Free09_SS).
+# The level's collision node in the 2p state is 0x0061e630 (S88's split state: 0x0061e720): objects
+# 0x1060110, 0x1e54e80, then the two riders' records in either order (P2 0xdc24b0 / P1 0x1033d70 at
+# 130412-131482, P1 first at 130895). A wrecked rider's record leaves the list; its wreck bike's object
+# (0xdc4550 for P2) takes the place. At 60 Hz (dt 1/60) each riding record resolves once a tick, first=1.
+# Both bikes are Race500P: the constructor's strstr("Race50") matches "Bike\Race500P.phy", so +0x588 = 1
+# on both, and the hit clause's reach is 4: rays 0 and 1 (end y 4.580028) wreck on the scenery. All
+# three of P2's world contacts are tree trunks (none of the scene's props is there): 130413 ray end y
+# 1.8583021 no wreck, 130417 4.580028 -> 6, 130896 4.580028 -> 6. P1's at 131483 is the ground search
+# (bike on its side), 1.8583021, ridden out. The node tick from 130416 already holds P2's reason 6
+# (capture row 130418: the capture is a separate playback, one row behind the images here).
