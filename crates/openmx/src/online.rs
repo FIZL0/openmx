@@ -15,7 +15,9 @@
 //! own lane ([`crate::vehicle::Wanted`]): copied into the shell's seat like the rest of it, which the
 //! shell's garage follows for the picture.
 //!
-//! Not here yet: only the first local seat has a pad (P35's seats bring the rest); no Start freeze
+//! Each of this machine's seats rides its own local player's pad ([`Online::frame_seats`]), and a
+//! player on it can take a seat or give theirs up as the ride runs (N20, [`Online::sit`] and
+//! [`Online::leave_session`]): the session's join and leave restarts. Not here yet: no Start freeze
 //! or tape online.
 //!
 //! From the lobby (N3, [`Online::lobby`]) the session's datagrams go over the lobby's own iroh
@@ -212,7 +214,9 @@ impl Online {
             return Err(format!("{} seats and {} rides", lineup.seats.len(), sims.len()));
         }
         let seat = *lineup.mine(me).first().ok_or("the lobby's line-up gives this machine no seat")?;
-        let session = Netplay::new(lineup.clone(), me, Timing::default(), crate::net::desync::dumps())?;
+        let mut session = Netplay::new(lineup.clone(), me, Timing::default(), crate::net::desync::dumps())?;
+        // a player this machine adds mid-ride (N20) starts where its first seat started
+        session.admit.spawn = Some(rides::seat_bytes(&sims[seat]));
         println!("online: lobby ride, seat {} of {}, seed {:#010x}", seat + 1, lineup.seats.len(), room.seed);
         Ok(Online {
             net: session,
@@ -246,7 +250,9 @@ impl Online {
     /// starts, which every peer that joins rides in from.
     pub fn open(net: Arc<openmx_net::Net>, sim: Sim, spawn: &Sim) -> Result<Online, String> {
         let me = openmx_net::HOST;
-        let session = Netplay::new(Lineup { seats: vec![Some(me.to_string())] }, me, Timing::default(), crate::net::desync::dumps())?;
+        let mut session = Netplay::new(Lineup { seats: vec![Some(me.to_string())] }, me, Timing::default(), crate::net::desync::dumps())?;
+        // a second player on this machine (N20) rides in where a joiner does
+        session.admit.spawn = Some(rides::seat_bytes(spawn));
         println!("online: the ride is open to online players");
         Ok(Online {
             net: session,
@@ -279,9 +285,11 @@ impl Online {
     /// and sends the ride's state. `first` is the host's first seat's rider and bike, whose
     /// constants every seat of the ride is decoded onto ([`Rides`]).
     pub fn drop_in(net: Arc<openmx_net::Net>, room: &openmx_net::Room, me: &str, first: Sim) -> Result<Online, String> {
-        let session = Netplay::joining(openmx_net::HOST, me, Timing::default(), crate::net::desync::dumps())?;
+        let mut session = Netplay::joining(openmx_net::HOST, me, Timing::default(), crate::net::desync::dumps())?;
         println!("online: dropping in on {}'s ride, waiting for the host", room.name);
         let spare = Some(rides::seat_bytes(&first));
+        // where a player this machine adds would spawn (N20), should the room come to it
+        session.admit.spawn = spare.clone();
         Ok(Online {
             net: session,
             wire: Wire::Lobby { net, kept: Vec::new() },
@@ -440,6 +448,28 @@ impl Online {
     /// This machine's seats in the ride.
     pub fn my_seats(&self) -> Vec<usize> {
         self.net.lineup.mine(&self.net.me)
+    }
+
+    /// Whether a player on this machine can take a seat in the ride as it runs (N20): a ride over
+    /// the lobby (a `--peer` ride's seats are its `--seats`, every machine's presets and markers
+    /// swapped for them before it starts) this machine is in and not leaving.
+    pub fn can_sit(&self) -> bool {
+        matches!(self.wire, Wire::Lobby { .. }) && self.seated() && self.net.end.is_none() && !self.net.leave.leaving()
+    }
+
+    /// One more player on this machine takes a seat (N20), on controller preset `preset`: the host
+    /// seats them at a tick every machine takes it at ([`Netplay::sit`]); this machine's
+    /// [`Online::my_seats`] has the seat from then, its shell seat right after its other players'
+    /// ([`Online::drawn`]), riding the pad [`Online::frame_seats`] hands it.
+    pub fn sit(&mut self, preset: u8) -> Result<(), String> {
+        if !self.can_sit() {
+            return Err("this ride takes no more players from this machine".into());
+        }
+        let r = self.net.sit(preset);
+        for line in self.net.said.drain(..) {
+            println!("{line}");
+        }
+        r
     }
 
     /// The host changes the ride's modifiers (P100): every machine takes them at the tick of the
@@ -677,6 +707,9 @@ impl Online {
                     if self.spawn.is_none() {
                         self.spawn = self.spare.take();
                     }
+                    if self.net.admit.spawn.is_none() {
+                        self.net.admit.spawn = self.spawn.clone();
+                    }
                 }
                 match end {
                     Some(why) => Err(why),
@@ -719,9 +752,16 @@ impl Online {
     }
 
     /// The seats in the order the shell holds them: this machine's first, then every other in seat
-    /// order. Shell seat `d` is seat `drawn()[d]`.
+    /// order. Shell seat `d` is seat `drawn()[d]`. With more than one player here (N20) each of
+    /// this machine's seats comes first, in seat order — the shell's views, one a local player.
     pub fn drawn(&self) -> Vec<usize> {
-        std::iter::once(self.seat).chain((0..self.sims.len()).filter(|&s| s != self.seat)).collect()
+        let mut lead: Vec<usize> = self.my_seats().into_iter().filter(|&s| s < self.sims.len()).collect();
+        if lead.first() != Some(&self.seat) {
+            lead.retain(|&s| s != self.seat);
+            lead.insert(0, self.seat);
+        }
+        let rest: Vec<usize> = (0..self.sims.len()).filter(|s| !lead.contains(s)).collect();
+        lead.into_iter().chain(rest).collect()
     }
 
     /// Every seat's player by name, `None` for an empty seat: what the markers' slot display calls
@@ -777,6 +817,12 @@ impl Online {
     /// `body` is any rider's, for the clip table the body's machine reads. `Err` is why the ride is
     /// over.
     pub fn frame(&mut self, pad: Report, place: &mut dyn World, body: Option<&Body>) -> Result<(), String> {
+        self.frame_seats(&[pad], place, body)
+    }
+
+    /// [`Online::frame`] with a pad for each of this machine's players (N20): `pads[k]` rides its
+    /// `k`th seat in seat order, a seat with no pad here an idle one.
+    pub fn frame_seats(&mut self, pads: &[Report], place: &mut dyn World, body: Option<&Body>) -> Result<(), String> {
         let came = match self.receive() {
             Ok(came) => came,
             Err(why) => {
@@ -796,7 +842,7 @@ impl Online {
             return Err(format!("online: {why}"));
         }
         let mine = self.net.lineup.mine(&self.net.me);
-        let local: Vec<Report> = mine.iter().map(|&s| if s == self.seat { pad } else { Report::idle() }).collect();
+        let local: Vec<Report> = (0..mine.len()).map(|k| pads.get(k).copied().unwrap_or_else(Report::idle)).collect();
         let real = std::mem::replace(&mut self.last, Instant::now()).elapsed().as_secs_f32();
         let (me, mut hands) = (self.seat, None);
         let poses = &mut self.poses;

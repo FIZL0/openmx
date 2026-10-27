@@ -60,6 +60,10 @@ pub enum Msg {
     /// which the host puts on the guest's seats and takes as a change of its own
     /// ([`super::Netplay::remodify`]), every machine at one tick.
     Mine { to: String },
+    /// A peer to the host: one more player on that machine takes a seat (N20, a second local player's
+    /// Cross on a free pad), on controller preset `preset`; the host takes it on as it takes a joiner
+    /// ([`super::admit`]), every machine at one tick.
+    Sit { preset: u8 },
 }
 
 pub enum Kind<'a> {

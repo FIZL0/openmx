@@ -4996,6 +4996,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The online peers' rigs dressed mid-ride (N16), each under model names of its own, and the
     // first player's pick, which a peer whose pick does not say is drawn as.
     let mut peers_dressed = 0usize;
+    // Online (N20): the pad seats whose players asked the session for a seat, in the order they
+    // asked, and this machine's seats as the views were last laid out for them.
+    let mut online_sits: Vec<usize> = Vec::new();
+    let mut online_mine: Vec<usize> = online.as_ref().map(online::Online::my_seats).unwrap_or_default();
     let own = own_pick(&args);
     // The session markers kept between rides (P99), in `markers/` beside `settings.txt`. A played
     // tape starts its first player on the markers it was made with and keeps nothing — its ride is
@@ -5055,9 +5059,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         front.menu.mods_lock = mods_lock(head.is_some(), online.as_ref().map(|on| (on.host(), on.own_rows())));
         front.menu.guest = online.as_ref().is_some_and(|on| !on.host());
         front.menu.air_lock = air_lock(head.is_some(), online.is_some());
-        // Local players join and leave a local freeride as it runs (P76); online the ride's one
-        // local seat is the session's, and a tape is its first player's ride.
-        front.menu.seats_open = online.is_none() && head.is_none() && world.tape.is_none();
+        // Local players join and leave a local freeride as it runs (P76), and online through the
+        // session's join and leave (N20) once this machine is in a lobby's ride; a tape is its first
+        // player's ride.
+        front.menu.seats_open = online.as_ref().is_none_or(online::Online::can_sit) && head.is_none() && world.tape.is_none();
         front.menu.leave_to = online.as_ref().map_or(menu::LeaveTo::Main, online::Online::leaves_to);
         front.menu.session = online.is_some();
     }
@@ -5624,6 +5629,23 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     }
                     println!("markers: {profile} on {} cleared", args.track);
                 }
+                // A player on a free pad joining an online ride (N20): the host seats them at a tick
+                // every machine takes, and the views are laid out again once the session has it.
+                Act::Join(d) if online.is_some() => {
+                    let preset = pad_seats.as_ref().map_or(args.wiring.presets[0], |s| s.preset(d));
+                    if let Some(on) = &mut online {
+                        match on.sit(preset as u8) {
+                            Ok(()) => {
+                                online_sits.push(d);
+                                front.menu.note = Some("Asking for a seat...".into());
+                            }
+                            Err(why) => {
+                                println!("online: cannot add a player: {why}");
+                                front.menu.note = Some(format!("Cannot join: {why}"));
+                            }
+                        }
+                    }
+                }
                 Act::Stay
                 | Act::Resume
                 | Act::Ride(_)
@@ -5638,6 +5660,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // one way, so each staying player keeps their machine, camera, markers and pad where
             // they were, and the views laid out again for the new count.
             let change = match act {
+                _ if online.is_some() => None,
                 Act::Join(d) if front.menu.seats_open && world.seats.len() < join::IN_RIDE => Some(join::Change::Join(d)),
                 Act::Leave(i) if front.menu.seats_open && i < world.seats.len() && world.seats.len() > 1 => Some(join::Change::Leave(i)),
                 _ => None,
@@ -5895,27 +5918,34 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             online_frames += 1;
             // Paused, this machine's rider lets go of the pad and says so in it (P84): from the tick
             // that lands on, every machine freezes this seat where it is, and the others ride on.
-            let paused = front.as_deref().is_some_and(|f| f.menu.paused(0));
-            let mut pad = match paused {
-                true => Report::idle(),
-                false => world.seats[0].reports[0],
-            };
-            // The machine this player picked and their biplane scheme, which every machine reads at
-            // the tick it lands on (N17).
-            let scheme = world.seats[0].garage.plane.as_ref().map_or((false, false), |p| (p.every_bank, p.round_stick));
-            // And their Markers switch (P129) and their layout's reset chord (P67), which every
-            // machine's step reads too.
-            pad.0[net::SWITCH] =
-                vehicle::Wanted {
-                    to: online_want,
-                    every_bank: scheme.0,
-                    round_stick: scheme.1,
-                    dpad_rides: !world.seats[0].markers,
-                    together: world.seats[0].together,
-                    paused,
-                }
-                .byte();
-            if let Err(end) = on.frame(pad, &mut world.place, rigs[0].body.as_ref()) {
+            // Each local player's (N20: one a view, this machine's seats first).
+            let local = online_mine.len().clamp(1, args.players.min(world.seats.len()));
+            let pads: Vec<Report> = (0..local)
+                .map(|k| {
+                    let paused = front.as_deref().is_some_and(|f| f.menu.paused(k));
+                    let mut pad = match paused {
+                        true => Report::idle(),
+                        false => world.seats[k].reports[0],
+                    };
+                    // The machine this player picked and their biplane scheme, which every machine
+                    // reads at the tick it lands on (N17).
+                    let scheme = world.seats[k].garage.plane.as_ref().map_or((false, false), |p| (p.every_bank, p.round_stick));
+                    // And their Markers switch (P129) and their layout's reset chord (P67), which
+                    // every machine's step reads too.
+                    pad.0[net::SWITCH] =
+                        vehicle::Wanted {
+                            to: if k == 0 { online_want } else { None },
+                            every_bank: scheme.0,
+                            round_stick: scheme.1,
+                            dpad_rides: !world.seats[k].markers,
+                            together: world.seats[k].together,
+                            paused,
+                        }
+                        .byte();
+                    pad
+                })
+                .collect();
+            if let Err(end) = on.frame_seats(&pads, &mut world.place, rigs[0].body.as_ref()) {
                 println!("{end}");
                 if front.is_some() {
                     leave = Leave::Menu;
@@ -5927,6 +5957,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if let Some(front) = front.as_deref_mut() {
                 front.menu.leave_to = on.leaves_to();
                 front.menu.session = !on.leaving();
+                // and whether a player on a free pad can take a seat in it (N20): once seated, until
+                // on its way out
+                front.menu.seats_open = on.can_sit() && world.tape.is_none();
             }
             // Every peer's rider in their own look (N16): a seat the session took on since the ride
             // loaded (a freeride opened online, a drop-in) gets a shell seat of its own, posed and
@@ -6019,6 +6052,78 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     Err(e) => println!("online: seat {} ({}): not dressed: {e}", d + 1, taken.peer),
                 }
                 peer_dress.dress(d, taken);
+            }
+            // A player on this machine took a seat or gave theirs up (N20), at the tick every machine
+            // took it at: a view each, laid out again for the local count as a local freeride's are
+            // (P76). This machine's seats lead the shell's ([`online::Online::drawn`]), so the shell
+            // seats past them are the others' again once [`online::Online::show`] fills them below.
+            let mine = on.my_seats();
+            if online_mine.is_empty() || mine.is_empty() {
+                // a drop-in seated for the first time, or this machine on its way out
+                online_mine.clone_from(&mine);
+            }
+            while online_mine.len() != mine.len() && mine.len() <= world.seats.len() {
+                let devices: Vec<usize> = (0..online_mine.len()).map(|i| args.pad_seat(i)).collect();
+                let change = match mine.iter().find(|s| !online_mine.contains(s)) {
+                    Some(&s) if mine.len() > online_mine.len() => {
+                        online_mine.push(s);
+                        online_mine.sort_unstable();
+                        // the pad seat that asked first; one this machine did not ask for (a host's
+                        // restart batching two) on the next pad seat no player reads
+                        let d = match online_sits.is_empty() {
+                            false => online_sits.remove(0),
+                            true => (0..pad::SEATS).find(|d| !devices.contains(d)).unwrap_or(0),
+                        };
+                        join::Change::Join(d)
+                    }
+                    _ => {
+                        let Some(i) = online_mine.iter().position(|s| !mine.contains(s)) else { break };
+                        online_mine.remove(i);
+                        join::Change::Leave(i)
+                    }
+                };
+                let n = online_mine.len();
+                change.apply(&mut idle_pads, || Pads::unplugged(args.wiring.clone()));
+                view_triangles.resize(n.max(view_triangles.len()), 0);
+                if let join::Change::Leave(i) = change
+                    && i < cameras.len()
+                {
+                    cameras.remove(i);
+                }
+                match change {
+                    join::Change::Join(_) if start_readers.len() + 1 < n => start_readers.push(Reader::at(RIDE_HZ)),
+                    join::Change::Leave(i) if i > 0 && i - 1 < start_readers.len() => {
+                        start_readers.remove(i - 1);
+                    }
+                    _ => {}
+                }
+                args.pad_of = change.devices(&devices);
+                args.players = n;
+                if let Some(front) = front.as_deref_mut() {
+                    front.menu.reseated(change);
+                    layout = Layout::for_players(n, front.menu.party().map_or(args.split, |p| p.split))?;
+                } else {
+                    layout = Layout::for_players(n, args.split)?;
+                }
+                (rects, view_frames) = views_of(frame.width, frame.height, layout, n);
+                set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
+                if let join::Change::Join(_) = change {
+                    let (seat, rig) = (&world.seats[n - 1], &mut rigs[n - 1]);
+                    rig.follow(seat.garage.up);
+                }
+                println!(
+                    "players: online, {}; views: {n} players, {}, {}x{} each",
+                    match change {
+                        join::Change::Join(d) => format!("player {n} joined on pad seat {}", d + 1),
+                        join::Change::Leave(i) => format!("player {} left", i + 1),
+                    },
+                    layout.name(),
+                    rects[0].w,
+                    rects[0].h
+                );
+            }
+            if online_mine.len() == mine.len() {
+                online_mine = mine;
             }
             // Every seat back into the shell's, this machine's first: the others are drawn beside it.
             for (d, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {

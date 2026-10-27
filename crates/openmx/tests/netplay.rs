@@ -955,6 +955,86 @@ fn a_local_seat_on_an_online_peer_leaves_and_its_machine_rides_on() {
     assert_eq!(h.log[t + 5][2], wire(&Report::missing()));
 }
 
+/// N20's acceptance, session side: an online freeride of two machines, each one player. `g`'s second
+/// player sits down mid-ride (Cross on a free pad), then the host's, then `g`'s second leaves again
+/// from their pause — each through the join/leave restart, every machine taking it at one tick. The
+/// added seats spawn where the ride started on their own preset and ride their own machine's pads;
+/// from each change on both machines agree, and the ride never goes back to its start.
+#[test]
+fn a_machine_adds_a_local_seat_mid_ride_and_drops_it_again() {
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    let mut asked = Vec::new();
+    let r = run("host,g", short(), Ride::new, &link, 0..1000, |round, r, _| {
+        if round == 1 {
+            r.nets[0].admit.spawn = Some(rides::seat_bytes(&sims(1)[0]));
+            assert!(r.nets[1].sit(2).is_ok(), "a guest only asks");
+        }
+        if round == 2 {
+            assert_eq!(r.nets[0].admit.sits.len(), 0, "not before the ask is in");
+        }
+        if round == 250 {
+            asked.push(r.nets[0].tick());
+            r.nets[0].sit(1).unwrap();
+        }
+        if round == 500 {
+            let mine = r.nets[1].lineup.mine("g");
+            assert_eq!(mine, [1, 2]);
+            asked.push(r.nets[1].tick());
+            r.nets[1].leave(&[2]).unwrap();
+        }
+    });
+    let (h, g) = (&r.nets[0], &r.nets[1]);
+    let sits: Vec<(&str, usize)> = h.admit.sits.iter().map(|s| (s.0.as_str(), s.1)).collect();
+    assert_eq!(sits, [("g", 2), ("host", 3)]);
+    assert!(h.admit.joins.is_empty(), "nobody joined: the machines were in");
+    let (t1, t2, t3) = (h.admit.sits[0].2 as usize, h.admit.sits[1].2 as usize, h.leave.left[0].2 as usize);
+    assert!(t1 < 40, "g's player sat at tick {t1}");
+    assert!((asked[0] - 10..asked[0] + 30).contains(&t2), "the host's player sat at {t2}, asked at {}", asked[0]);
+    assert!((asked[1] - 10..asked[1] + 30).contains(&t3), "g's second left at {t3}, asked at {}", asked[1]);
+    for np in [h, g] {
+        assert_eq!((np.lineup.text().as_str(), np.recover.restarts, np.end.as_deref()), ("host,g,-,host", 3, None), "{}", np.me);
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+        assert!(!np.leave.leaving(), "{} rides on", np.me);
+    }
+    for i in 0..2 {
+        assert_eq!(r.games[i].sims.len(), 4, "{}: every seat a bike", r.names[i]);
+        let presets: Vec<Option<usize>> = r.games[i].sims[2..].iter().map(rides::preset).collect();
+        assert_eq!(presets, [Some(2), Some(1)], "{}: each added seat on its player's preset", r.names[i]);
+    }
+    // the ride went on through every change, never further back than a rollback re-runs — each
+    // restart holds a few rounds while ggrs syncs again — and never back to its start
+    for (i, ran) in r.ran.iter().enumerate() {
+        let back = ran.windows(2).find(|w| w[1] + WINDOW < w[0]);
+        assert_eq!(back, None, "{} went back", r.names[i]);
+    }
+    assert!(r.games[0].sims[0].ticks > 800, "the host's bike rode {} ticks", r.games[0].sims[0].ticks);
+    for (from, n) in [(t1, 700), (t2, 500), (t3, 250)] {
+        let agree = r.agree(&[0, 1], from);
+        assert!(agree > n, "agree on {agree} ticks from {from}");
+    }
+    // each added seat rides its own machine's pads (a tick or so behind: the input delay), and the
+    // one that left is unplugged
+    for (seat, t) in [(2, t1 + 20), (3, t2 + 20)] {
+        assert!((0..4).any(|d| h.log[t][seat] == wire(&mash(seat, t - d))), "seat {}: {:?}", seat + 1, h.log[t][seat]);
+    }
+    assert_eq!(h.log[t3 + 10][2], wire(&Report::missing()), "g's second player's seat unplugged");
+    assert!(r.biggest <= DATAGRAM_MAX, "a {}-byte datagram", r.biggest);
+}
+
+/// N20: a seat is only added where it can be: not without a spawn, not by a machine with no seat.
+#[test]
+fn a_seat_that_cannot_be_added_says_why() {
+    let lineup = Lineup::parse("host,g").unwrap();
+    let mut h: Netplay<rides::State> = Netplay::new(lineup.clone(), "host", short(), dumps()).unwrap();
+    assert_eq!(h.sit(0), Err("this ride has nowhere to spawn a new seat".into()));
+    h.admit.spawn = Some(rides::seat_bytes(&sims(1)[0]));
+    assert_eq!(h.sit(0), Ok(()));
+    assert_eq!(h.admit.pending(), 1);
+    assert_eq!(h.sit(4), Err("controller preset 4".into()));
+    let mut j: Netplay<rides::State> = Netplay::joining("host", "k", short(), dumps()).unwrap();
+    assert_eq!(j.sit(0), Err("not in the ride yet".into()));
+}
+
 /// On the ride: `h` goes silent at round 150 for good, the others hold, and after the wait the host
 /// hands everyone its state and the new line-up — `h`'s seat empty, its bike left with an unplugged
 /// pad — and the two ride on in sync, every seat's state alike on both.
