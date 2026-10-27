@@ -66,7 +66,9 @@ fn track_json(id: &str) -> String {
     )
 }
 
-/// The world's file, with `wrap` as its switch's JSON (none at all for `None`).
+/// The world's file, with `wrap` as its switch's JSON (none at all for `None`). The start is `a`'s
+/// own in world feet: a tile spawn on a wrapped world moves to the middle tile (MD50), here `b`, and
+/// the software renderer's ground follows the rider, so the seam's far side would be out of its reach.
 fn world_json(id: &str, wrap: Option<&str>) -> String {
     let tiles: Vec<String> = TILES.iter().map(|(name, _, at)| format!(r#"{{"tile": "{name}", "at": [{at}.0, 0.0], "keep": [0, 0, 63, 63]}}"#)).collect();
     let wrap = wrap.map(|w| format!(r#""wrap": {w}, "#)).unwrap_or_default();
@@ -77,7 +79,7 @@ fn world_json(id: &str, wrap: Option<&str>) -> String {
   "version": "1.0.0", "author": "crates/openmx/tests/wrapped_world.rs", "permission": "public-domain",
   "tiles": [{}],
   "joins": [],
-  {wrap}"drop": [], "sky": "a", "spawn": {{"tile": "a"}}, "todo": []
+  {wrap}"drop": [], "sky": "a", "spawn": {{"position": [200, 40, 283], "direction": [1, 0, 0]}}, "todo": []
 }}"#,
         tiles.join(", ")
     )
