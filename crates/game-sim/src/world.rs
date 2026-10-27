@@ -107,6 +107,14 @@ pub trait World {
         None
     }
 
+    /// Which of [`World::area`]'s axes wrap round (MD29, the port's own): `[x, z]`. Riding off a
+    /// wrapped axis' far edge comes in at its near one, and the edge test is not asked on it
+    /// ([`crate::off_map::outside_wrapped`]). Only a world of several terrains whose file asks for it
+    /// wraps ([`crate::tiles::Tiled::wrapped`]); every disc map has the original's edge on both.
+    fn wrap(&self) -> [bool; 2] {
+        [false, false]
+    }
+
     /// Whether a point, or one `margin` from it along `x` or `z`, is over a hole in the world (MD8):
     /// inside [`World::area`]'s rectangle but on no ground. Only a world of several terrains has
     /// holes ([`crate::tiles::Tiled`]); the rectangle's own edge is [`crate::off_map::outside`]'s.

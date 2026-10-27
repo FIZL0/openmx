@@ -138,6 +138,33 @@ pub struct Sim {
     pub traffic: traffic::Traffic,
 }
 
+/// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
+/// wrapped axis where that is nearer: where another rider is, seen across a seam. `at` itself on
+/// every world that does not wrap.
+pub fn nearest_copy(world: &dyn world::World, from: Vf, at: Vf) -> Vf {
+    let wrap = world.wrap();
+    let Some(area) = world.area().filter(|_| wrap != [false, false]) else { return at };
+    let near = |on: bool, from: F, at: F, side: F| -> F {
+        if !on {
+            return at;
+        }
+        let half = side * F(0.5);
+        if at - from > half {
+            at - side
+        } else if from - at > half {
+            at + side
+        } else {
+            at
+        }
+    };
+    Vf::new(
+        near(wrap[0], F(from.x()), F(at.x()), area.width).0,
+        at.y(),
+        near(wrap[1], F(from.z()), F(at.z()), area.depth).0,
+        at.w(),
+    )
+}
+
 /// The most riders a session holds: the original's start fills a field of up to eight.
 pub const MAX_PLAYERS: usize = 8;
 
@@ -314,6 +341,8 @@ impl Sim {
             let mut bump = self.bump(0, cars);
             self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], Some(&mut bump))
         };
+        let mut said = said;
+        said.seam = self.rider.wrap_round(&*world);
         self.ticks += 1;
         said
     }
@@ -393,6 +422,11 @@ impl Sim {
                 // filter reads both bodies' lists (S63, `ghost`).
                 .filter(|r| !r.ghost.on)
                 .map(|r| r.ride.rival())
+                // On a world that wraps (MD29), each rival where it is nearest this rider.
+                .map(|mut r| {
+                    r.centre = nearest_copy(&*world, self.rider_of(i).ride.chassis.cofg_world, r.centre);
+                    r
+                })
                 .collect();
             let tables = &self.tables;
             let frame = if i == 0 {
@@ -407,6 +441,11 @@ impl Sim {
             frames.push(frame);
         }
         frames.reverse();
+        // Over a seam (MD29), each rider after every rider has moved.
+        for (i, frame) in frames.iter_mut().enumerate() {
+            let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
+            frame.seam = rider.wrap_round(&*world);
+        }
         self.ticks += 1;
         frames
     }

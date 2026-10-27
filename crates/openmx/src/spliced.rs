@@ -217,7 +217,7 @@ pub fn world(disc: &mut Disc) -> Result<WorldMod, String> {
         j.tile.first_owner = first_owner;
         pieces.push(j);
     }
-    Ok(WorldMod { id: ID.to_string(), name: NAME.to_string(), dir: PathBuf::new(), pieces, tile_count, home: 0, spawn: Spawn::Tile(0) })
+    Ok(WorldMod { id: ID.to_string(), name: NAME.to_string(), dir: PathBuf::new(), pieces, tile_count, home: 0, spawn: Spawn::Tile(0), wrap: [false, false] })
 }
 
 /// The log's lines for the layout: where each map is and the ground it keeps, west to east, in

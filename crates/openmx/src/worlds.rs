@@ -101,6 +101,9 @@ pub struct WorldMod {
     pub home: usize,
     /// Where the ride starts: a tile's own spawn moved by its offset, or the world's own in world feet.
     pub spawn: Spawn,
+    /// Which axes wrap round, `[x, z]` (MD29): the world file's `wrap`, off unless it says so. A
+    /// wrapped world's last pieces are its seam joins ([`WorldMod::close_seams`]).
+    pub wrap: [bool; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -329,7 +332,34 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
             }
         },
     };
-    Ok(WorldMod { id: id.to_string(), name, dir, pieces, tile_count, home, spawn })
+    let wrap = wrap_switch(json.get("wrap")).map_err(|e| format!("{id}: mod.json: {e}"))?;
+    let mut world = WorldMod { id: id.to_string(), name, dir, pieces, tile_count, home, spawn, wrap: [false, false] };
+    if wrap != [false, false] {
+        world.close_seams(wrap).map_err(|e| format!("{id}: {e}"))?;
+    }
+    Ok(world)
+}
+
+/// The world file's `wrap` (MD29): which axes of the world come round, `[x, z]`. Absent, `null`,
+/// `false` or `"none"` is neither, the original's world with its edge; `"x"`, `"z"` or `"xz"` names
+/// them, `true` is both, and `[true, false]` says each.
+pub fn wrap_switch(v: Option<&Json>) -> Result<[bool; 2], String> {
+    match v {
+        None | Some(Json::Null) | Some(Json::Bool(false)) => Ok([false, false]),
+        Some(Json::Bool(true)) => Ok([true, true]),
+        Some(Json::Str(s)) => match s.to_ascii_lowercase().as_str() {
+            "none" | "" => Ok([false, false]),
+            "x" => Ok([true, false]),
+            "z" => Ok([false, true]),
+            "xz" | "zx" | "both" => Ok([true, true]),
+            _ => Err(format!("wrap \"{s}\" is not \"x\", \"z\" or \"xz\"")),
+        },
+        Some(Json::Arr(a)) if a.len() == 2 => match (&a[0], &a[1]) {
+            (Json::Bool(x), Json::Bool(z)) => Ok([*x, *z]),
+            _ => Err("wrap is not two true-or-falses".into()),
+        },
+        _ => Err("wrap is not \"x\", \"z\", \"xz\", true or two true-or-falses".into()),
+    }
 }
 
 /// Where a join's terrain file is: `<join>.ps2.trn`, or `<join>.trn` where that is not there.
@@ -414,7 +444,63 @@ impl WorldMod {
     /// The simulation's world, reading each piece from its folder when it is first needed.
     pub fn tiled(&self, reach: Reach) -> Result<Tiled, String> {
         let files = Ahead::new(Files { pieces: self.pieces.clone() });
-        Tiled::new(self.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(files), reach)
+        Tiled::new(self.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(files), reach)?.wrapped(self.wrap)
+    }
+
+    /// **Close the world round** on the axes `wrap` names (MD29): a seam join past the far edge of
+    /// each ([`game_sim::tiles::generate::seam_joins`]), made in memory from the ground along the
+    /// world's edges, and the world wrapped. The joins' spacing is the coarsest whole spacing of the
+    /// pieces that divides each wrapped side, or a foot. Where an edge has no ground (a hole reaching
+    /// it), the strip takes the ground in from it toward the middle, up to a cell, or else 0 feet.
+    pub fn close_seams(&mut self, wrap: [bool; 2]) -> Result<(), String> {
+        use game_sim::tiles::generate;
+        let open = Tiled::new(self.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(Files { pieces: self.pieces.clone() }), Reach::DESKTOP)?;
+        let extent = open.extent().map(|v| v.0);
+        let whole = extent.map(|v| v as u32);
+        for axis in 0..2 {
+            if wrap[axis] && whole[axis] as f32 != extent[axis] {
+                return Err(format!("a world {} feet {} is not a whole number of feet, and cannot wrap", extent[axis], ["wide", "deep"][axis]));
+            }
+        }
+        let mut spacings: Vec<u32> = self.pieces.iter().map(|p| p.tile.spacing.0).filter(|s| s.fract() == 0.0 && *s >= 1.0).map(|s| s as u32).collect();
+        spacings.sort_unstable_by(|a, b| b.cmp(a));
+        let spacing = spacings.into_iter().find(|s| (0..2).all(|a| !wrap[a] || whole[a] % s == 0)).unwrap_or(1);
+        let ground = |x: f64, z: f64| {
+            // Just inside the far edges, which no piece owns; then in toward the middle, a sixteenth
+            // of a cell a step, past a hole at the edge.
+            let (x, z) = ((x as f32).clamp(0.0, extent[0] - 0.01), (z as f32).clamp(0.0, extent[1] - 0.01));
+            for k in 0..=16u8 {
+                let t = f32::from(k) * spacing as f32 / 16.0;
+                let step = |v: f32, e: f32| if v < e / 2.0 { v + t } else { v - t };
+                if let Some(h) = open.at(F(step(x, extent[0])), F(step(z, extent[1]))) {
+                    return (f64::from(h.y.0), h.surface);
+                }
+            }
+            (0.0, 0)
+        };
+        let joins = generate::seam_joins(whole, wrap, spacing, &ground)?;
+        let first_owner = self.pieces.iter().map(|p| p.tile.first_owner).max().unwrap_or(0);
+        for (mut tile, bytes) in joins {
+            tile.first_owner = first_owner;
+            let stem = tile.name.clone();
+            self.pieces.push(WorldPiece { tile, dir: PathBuf::new(), scene: None, stem, dropped: Vec::new(), scene_bytes: None, origin: Origin::Made(bytes.into()) });
+        }
+        self.wrap = wrap;
+        Ok(())
+    }
+
+    /// The log line for a world that wraps (MD29): which axes, and the seam joins that close it.
+    /// `None` for one that does not.
+    pub fn wrap_line(&self, tiled: &Tiled) -> Option<String> {
+        if self.wrap == [false, false] {
+            return None;
+        }
+        let axes: Vec<String> = (0..2)
+            .filter(|&a| self.wrap[a])
+            .map(|a| format!("{} every {:.0} feet", ["x", "z"][a], tiled.extent()[a].0))
+            .collect();
+        let seams = self.pieces.iter().filter(|p| p.stem.starts_with("seam_") && matches!(p.origin, Origin::Made(_))).count();
+        Some(format!("world wraps: {}, closed by {seams} seam joins", axes.join(" and ")))
     }
 
     /// Piece `index`'s terrain file, read from its folder (MD15: the software renderer's ground).
@@ -1202,5 +1288,18 @@ mod tests {
         assert_eq!(names.around([200.0, 40.0]), (Some("low"), [Some("high"), Some("far"), None, Some("tall")]));
         let alone = crate::hud::MapNames::alone(&map_title("free09"));
         assert_eq!(alone.around([-1.0e6, 3.0e6]), (Some("Bridgeport"), [None; 4]));
+    }
+
+    /// MD29: a world file's `wrap` reads as off, one axis or both, and anything else is refused.
+    #[test]
+    fn the_wrap_switch_reads_its_spellings() {
+        let read = |text: &str| wrap_switch(Some(&Json::parse(text).unwrap()));
+        assert_eq!(wrap_switch(None), Ok([false, false]));
+        for (text, want) in [("null", [false, false]), ("false", [false, false]), ("\"none\"", [false, false]), ("true", [true, true]), ("\"x\"", [true, false]), ("\"z\"", [false, true]), ("\"xz\"", [true, true]), ("\"both\"", [true, true]), ("[false, true]", [false, true])] {
+            assert_eq!(read(text), Ok(want), "{text}");
+        }
+        for text in ["\"y\"", "3", "[true]", "{}"] {
+            assert!(read(text).is_err(), "{text}");
+        }
     }
 }

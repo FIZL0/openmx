@@ -114,6 +114,10 @@ pub struct Frame {
     pub separated: bool,
     /// The rider was put back on the bike this frame.
     pub respawned: bool,
+    /// The widths the rider was moved back over a seam at the end of the frame (MD29,
+    /// [`Rider::wrap_round`]), `[x, z]`: what the shell moves its camera and whatever else it keeps
+    /// in world feet by. `[0, 0]` on every world that does not wrap.
+    pub seam: [i8; 2],
 }
 
 /// What the rider's own animation needs that the rider does not hold.
@@ -342,6 +346,75 @@ pub struct Rider {
 }
 
 impl Rider {
+    /// **Over a seam** (MD29, the port's own): on a world that wraps, a rider whose chassis has
+    /// crossed a seam is moved back one width on that axis ([`Rider::shift`]), and the answer is the
+    /// widths it was past, `[x, z]`: `1` past the far seam (moved back by the width, exactly), `-1`
+    /// short of the near one (moved on by it, rounding to the far side's last bit). Nothing moves
+    /// while the rider is down or the riding bodies are up: everything a ride asks is asked past a
+    /// seam as well ([`crate::tiles::Tiled::fold`]), and the put-back sets the bike down inside the
+    /// world, where the next riding tick looks again. Every peer asks after the same tick, from the
+    /// same state, so a session stays in step.
+    pub fn wrap_round(&mut self, world: &dyn World) -> [i8; 2] {
+        let wrap = world.wrap();
+        let Some(area) = world.area().filter(|_| wrap != [false, false]) else { return [0, 0] };
+        if self.state.wreck.is_some() || self.crash.is_some() || self.ragdoll.is_some() || self.riding.is_some() {
+            return [0, 0];
+        }
+        let at = self.ride.chassis.cofg_world;
+        let lap = |on: bool, v: f32, side: F| -> i8 {
+            if !on {
+                0
+            } else if F(v) >= side {
+                1
+            } else if v < 0.0 {
+                -1
+            } else {
+                0
+            }
+        };
+        let laps = [lap(wrap[0], at.x(), area.width), lap(wrap[1], at.z(), area.depth)];
+        if laps == [0, 0] {
+            return laps;
+        }
+        let by = |lap: i8, side: F| match lap {
+            1 => F::ZERO - side,
+            -1 => side,
+            _ => F::ZERO,
+        };
+        self.shift([by(laps[0], area.width), by(laps[1], area.depth)], [area.width, area.depth]);
+        laps
+    }
+
+    /// Move a riding rider's world-space state along `x` and `z` by `by` (MD29): the chassis' centre
+    /// of gravity and the transform's origin, the wheels' world points, the drawn skeleton's
+    /// origins, and the put-back record when it is past the world's `sides` on a moved axis — a
+    /// record from before the crossing is a place in the world already. The put-back's mesh query
+    /// gathers afresh: what it kept was gathered on the other side. Velocities, forces, normals and
+    /// everything in the bike's own frame are not places and do not move.
+    pub fn shift(&mut self, by: [F; 2], sides: [F; 2]) {
+        let moved = |v: Vf| Vf::new((F(v.x()) + by[0]).0, v.y(), (F(v.z()) + by[1]).0, v.w());
+        let ride = &mut self.ride;
+        ride.chassis.cofg_world = moved(ride.chassis.cofg_world);
+        ride.origin = moved(ride.origin);
+        for wheel in [&mut ride.front, &mut ride.rear] {
+            let w = &mut wheel.w;
+            w.mount_world = moved(w.mount_world);
+            w.probe_end_world = moved(w.probe_end_world);
+            w.contact_point = moved(w.contact_point);
+            w.load_point = moved(w.load_point);
+        }
+        let out = |v: f32, side: F| v < 0.0 || F(v) >= side;
+        let back = ride.back.at;
+        let past = (by[0] != F::ZERO && out(back.x(), sides[0])) || (by[1] != F::ZERO && out(back.z(), sides[1]));
+        if past {
+            ride.back.at = moved(back);
+        }
+        ride.back_search = None;
+        for m in &mut self.drawn {
+            m.0[3] = moved(m.0[3]);
+        }
+    }
+
     /// A rider on a bike, at a spawn.
     ///
     /// `set` is the rider's own 24 stunts: [`crate::trick::Stunts::selection`] of the player's slot,
@@ -887,6 +960,8 @@ impl Rider {
         let bone = Self::main_bone(ride, ragdoll_kit.as_deref(), ragdoll.as_ref(), crash.as_ref());
         // A world of several terrains has holes inside its rectangle as well (MD8), asked the same.
         let holed = edge.is_some() && off_map::off_world(&*world, bone, ride.chassis.cofg_world);
+        // A world that wraps (MD29) has seams, not an edge, on its wrapped axes.
+        let wrap = world.wrap();
         // MX vs. ATV's 360 landed part way round (MD16): a wreck off the back, the original's 0xb.
         // Cut short in the air instead (S154), it is the airborne attitude's wreck, which Air Wrecks
         // Off does not ask: the landing is left to the wreck test.
@@ -910,7 +985,7 @@ impl Rider {
                 }
                 // The first clause, and the only one that runs for a rider already down: off the
                 // map, the bike is thrown back and nothing else is asked.
-                if let Some(area) = edge.filter(|a| holed || off_map::outside(a, bone, thrown.cofg_world)) {
+                if let Some(area) = edge.filter(|a| holed || off_map::outside_wrapped(a, wrap, bone, thrown.cofg_world)) {
                     off_map::throw(&area, thrown, origin, ragdoll_ride::generator(idles));
                     *drag_halved = true;
                     return Some(Wreck::CANNONBALL);
