@@ -4991,6 +4991,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut window_of_frames = (Instant::now(), 0u32, 0usize);
     // Each view's triangles over the session, for the line a split session ends on.
     let mut view_triangles = vec![0usize; args.players];
+    // The GPU ground's quadtree nodes looked at (V65): over the session, the most in a frame, frames.
+    let mut ground_visits = (0usize, 0usize, 0usize);
     let mut cameras: Vec<Camera> = Vec::with_capacity(args.players);
     // How the ride ended, for the front end: anything but the pause's own two is a quit.
     let mut leave = Leave::Quit;
@@ -7013,6 +7015,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             stages.mark(stages::Stage::Present);
             if let Some(d) = out {
                 stages.shift(stages::Stage::Present, stages::Stage::Ground, d.ground_time);
+                ground_visits = (ground_visits.0 + d.ground_visits, ground_visits.1.max(d.ground_visits), ground_visits.2 + 1);
                 for (v, tris) in d.triangles.iter().enumerate() {
                     view_triangles[v] += tris;
                     drawn += tris;
@@ -7499,6 +7502,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     if args.timings {
         println!("session {}; {}", stages.session(), stages.session_worst());
+        if ground_visits.2 > 0 {
+            println!("ground nodes looked at a frame: {} on average, {} at most", ground_visits.0 / ground_visits.2, ground_visits.1);
+        }
         // Bytes read count the window's socket and every pad's events too, so only a ride with
         // neither, a headless one, should say none.
         let (tally, bytes) = loaded.unwrap_or_else(|| (game_render::tally::Tally::now(), None));

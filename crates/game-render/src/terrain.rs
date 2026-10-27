@@ -393,6 +393,34 @@ pub fn lod_errors(heights: &[f32], cells: u32) -> Vec<f32> {
     out
 }
 
+/// The weight a chunk with holes gives its holes' edges straying sideways, against its height
+/// errors ([`lod_hole_errors`]): an eighth, so an edge moves at most about eight times as many pixels
+/// as a height may (six). A world piece's holes are its seams, where the next piece's own ground is
+/// under the stray, so it does not show there.
+pub const HOLE_EDGE_WEIGHT: f32 = 0.125;
+
+/// [`lod_errors`] for a chunk with holes, `spacing` feet a cell (V65): at level `l` its quads are
+/// `2^l` cells a side and one is drawn where any of its cells is ([`lod_indices_holed`]), so a hole's
+/// edge strays up to `2^l - 1` cells sideways, which counts as an error at [`HOLE_EDGE_WEIGHT`]. A
+/// holed chunk then coarsens with distance as any other does, rather than staying whole at level 0
+/// and holding every chunk round it fine (a world's pieces are cut along their seams, so each of
+/// them had a ring of such chunks).
+pub fn lod_hole_errors(errors: &mut [f32], spacing: f32) {
+    for (l, e) in errors.iter_mut().enumerate() {
+        *e = e.max(((1u32 << l) - 1) as f32 * spacing * HOLE_EDGE_WEIGHT);
+    }
+}
+
+/// [`lod_indices`] for a chunk with holes: `missing` its cells' holes, row by row, and a quad of
+/// `level` drawn where any of the cells it covers is not missing.
+pub fn lod_indices_holed(cells: u32, level: u32, coarser: [bool; 4], missing: &[bool]) -> Vec<u32> {
+    let step = 1u32 << level.min(lod_levels(cells));
+    let row = cells as usize;
+    lod_indices_where(cells, level, coarser, |i, j| {
+        (j..(j + step).min(cells)).any(|y| (i..(i + step).min(cells)).any(|x| !missing[y as usize * row + x as usize]))
+    })
+}
+
 /// The coarsest level whose error, `distance` away through a lens of `focal` pixels, is at most
 /// `pixels` pixels on screen. Level 0 when the camera is inside the chunk's sphere.
 pub fn lod_level(errors: &[f32], distance: f32, focal: f32, pixels: f32) -> u32 {
@@ -1069,6 +1097,37 @@ mod tests {
         // Flat ground is one quad wherever it is.
         let flat = lod_errors(&vec![5.0; 17 * 17], cells);
         assert_eq!(lod_level(&flat, 1.0, focal, 1.0), 4);
+    }
+
+    #[test]
+    fn a_holed_chunk_keeps_every_cell_it_has_at_every_level() {
+        let cells = 16;
+        // A ragged hole: a seam's cut, and a few cells besides.
+        let missing: Vec<bool> = (0..cells * cells).map(|k| (k % cells) + (k / cells) / 3 > 9 || k % 37 == 5).collect();
+        for level in 0..=lod_levels(cells) {
+            let step = 1 << level;
+            let tris = lod_indices_holed(cells, level, [false; 4], &missing);
+            let a = areas(&tris, cells);
+            assert!(a.iter().all(|&a| a > 0));
+            // Each quad drawn is one with a cell of ground in it, and every cell of ground is under one.
+            let quads: std::collections::HashSet<(u32, u32)> = tris.chunks(6).map(|t| (t[0] % (cells + 1), t[0] / (cells + 1))).collect();
+            for j in 0..cells {
+                for i in 0..cells {
+                    let quad = (i / step * step, j / step * step);
+                    if !missing[(j * cells + i) as usize] {
+                        assert!(quads.contains(&quad), "level {level}: cell {i},{j} lost");
+                    }
+                }
+            }
+            if level == 0 {
+                assert_eq!(tris, lod_indices_where(cells, 0, [false; 4], |i, j| !missing[(j * cells + i) as usize]));
+            }
+        }
+        // The edge's stray is an error that grows with the level.
+        let mut e = vec![0.0; 5];
+        lod_hole_errors(&mut e, 9.0);
+        assert_eq!(e[0], 0.0);
+        assert!(e.windows(2).all(|w| w[0] < w[1]), "{e:?}");
     }
 
     #[test]
