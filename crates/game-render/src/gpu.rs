@@ -56,7 +56,8 @@ use crate::pst::Texture;
 use crate::scene::{Scene, Shading};
 use crate::sky::Sky;
 use crate::splat::Splat;
-use crate::terrain::{Packed, Pages, WorldPaint, lod_balance, lod_coarser, lod_errors, lod_indices, lod_indices_where, lod_level, lod_levels};
+use crate::ground_tree::{GroundTree, Look, Pick, TreeChunk};
+use crate::terrain::{Packed, Pages, WorldPaint, lod_errors, lod_hole_errors, lod_indices, lod_indices_holed, lod_level, lod_levels};
 use crate::world::{Assets, Camera, Fog, Graphics, Lighting, Surface};
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
@@ -77,6 +78,11 @@ pub const ANISOTROPY_MAX: u16 = 16;
 
 /// How many pixels a chunk of ground's height may be out by, at the level of detail it is drawn at.
 const GROUND_PIXELS: f32 = 0.75;
+
+/// The side, in chunks, of a block of the ground that is written as one part ([`Renderer::ground_for`]):
+/// a change of level near the rider writes that block's indices again, not the whole piece's (V65: a
+/// national's piece, rewritten whole, was over a million indices a frame).
+const GROUND_BLOCK: u32 = 8;
 /// How few pixels across a prop may be before it is not drawn at all: less than one can show.
 const PROP_PIXELS: f32 = 0.5;
 /// Node matrices a palette row holds (four texels each).
@@ -338,7 +344,16 @@ pub struct GroundPiece {
 
 impl GroundPiece {
     pub fn of(chunks: Vec<GroundChunk>) -> GroundPiece {
-        let errors = chunks.iter().map(|c| lod_errors(&c.vertices.iter().map(|v| v.pos[1]).collect::<Vec<f32>>(), c.cells)).collect();
+        let errors = chunks
+            .iter()
+            .map(|c| {
+                let mut e = lod_errors(&c.vertices.iter().map(|v| v.pos[1]).collect::<Vec<f32>>(), c.cells);
+                if c.missing.iter().any(|&m| m) && c.vertices.len() > 1 {
+                    lod_hole_errors(&mut e, (c.vertices[1].pos[0] - c.vertices[0].pos[0]).abs());
+                }
+                e
+            })
+            .collect();
         GroundPiece { hash: chunks_hash(&chunks), errors, chunks }
     }
 
@@ -365,9 +380,9 @@ struct GpuChunk {
     radius: f32,
     /// Its height error at each level ([`lod_errors`]).
     errors: Vec<f32>,
-    /// A chunk with holes: which cells it lacks, and its whole grid stitched each of the sixteen
-    /// ways, each made the first time it is drawn that way (a world has thousands of such chunks,
-    /// and all sixteen of each were most of its memory, MD17).
+    /// A chunk with holes: which cells it lacks, and each level stitched each of the sixteen ways
+    /// (`level * 16 + coarser sides`), each made the first time it is drawn that way (a world has
+    /// thousands of such chunks, and all sixteen of each were most of its memory, MD17).
     own: Option<(Vec<bool>, Vec<Option<Vec<u32>>>)>,
     /// The piece of ground it came with ([`Renderer::add_ground_piece`]), and where in that piece.
     piece: u32,
@@ -377,7 +392,7 @@ struct GpuChunk {
 impl GpuChunk {
     /// A chunk of `cells` cells whose corners start at `base` in the vertex buffer.
     fn of(c: &GroundChunk, errors: Vec<f32>, page: u32, base: u32, piece: u32) -> GpuChunk {
-        let own = c.missing.iter().any(|&m| m).then(|| (c.missing.clone(), vec![None; 16]));
+        let own = c.missing.iter().any(|&m| m).then(|| (c.missing.clone(), vec![None; 16 * (lod_levels(c.cells) as usize + 1)]));
         GpuChunk { page, base, centre: c.centre, radius: c.radius, errors, own, piece, at: c.at }
     }
 }
@@ -395,10 +410,9 @@ struct GpuGround {
     hashes: HashMap<u32, u64>,
     chunks: Vec<GpuChunk>,
     cells: u32,
-    across: usize,
-    along: usize,
-    /// The grid of chunks: which one is at each place, if any.
-    slots: Vec<Option<usize>>,
+    /// Each piece's chunks in a quadtree (V65), with where its run of [`GpuGround::chunks`] starts and
+    /// how long it is.
+    trees: std::collections::BTreeMap<u32, (usize, usize, GroundTree)>,
     /// Every level's triangles, stitched each of the sixteen ways: `level * 16 + coarser sides`.
     patterns: Vec<Vec<u32>>,
     /// Each view's triangles, as last built, and what they were built from.
@@ -409,7 +423,6 @@ struct GpuGround {
     shadow: wgpu::TextureView,
     textures: Vec<wgpu::TextureView>,
     anisotropy: u16,
-    levels: Vec<u32>,
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
     /// The roads and ruts a freeride scene paints into the ground (V67).
@@ -428,36 +441,36 @@ impl GpuGround {
             c.piece != piece
         });
         for v in &mut self.views {
-            v.parts.remove(&piece);
+            v.parts.retain(|k, _| k.0 != piece);
         }
+        self.trees.remove(&piece);
     }
 
-    /// Lay the chunks out in one grid again: each piece in a column band of its own, in piece
-    /// order, one empty column after it so no piece is stitched to the next. Every view's parts are
-    /// checked against their chunks' levels again on its next frame.
+    /// Find each piece's run of chunks again and make the tree of any piece that has none
+    /// ([`GpuGround::forget`] and more of a piece take a piece's away). A piece is stitched to itself
+    /// and to no other piece.
     fn regrid(&mut self) {
-        // Each piece's width, in one walk over the chunks (MD28: a walk for each piece took ~2 ms
+        // Each piece's run, in one walk over the chunks (MD28: a walk for each piece took ~2 ms
         // every time one of a world's pieces came or went).
-        let mut wide: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
-        for c in &self.chunks {
-            let w = wide.entry(c.piece).or_default();
-            *w = (*w).max(c.at.0 as usize + 1);
-        }
-        let pieces: Vec<u32> = wide.keys().copied().collect();
-        let mut band = Vec::with_capacity(pieces.len());
-        let mut column = 0usize;
-        for w in wide.values() {
-            band.push(column);
-            column += w + 1;
-        }
-        self.across = column.saturating_sub(1);
-        self.along = self.chunks.iter().map(|c| c.at.1 as usize + 1).max().unwrap_or(0);
-        self.slots = vec![None; self.across * self.along];
+        let mut runs: Vec<(u32, usize, usize)> = Vec::new();
         for (i, c) in self.chunks.iter().enumerate() {
-            let x = band[pieces.binary_search(&c.piece).expect("listed")] + c.at.0 as usize;
-            self.slots[c.at.1 as usize * self.across + x] = Some(i);
+            match runs.last_mut() {
+                Some(r) if r.0 == c.piece => r.2 += 1,
+                _ => runs.push((c.piece, i, 1)),
+            }
         }
-        self.levels = vec![0; self.slots.len()];
+        self.trees.retain(|p, _| runs.iter().any(|r| r.0 == *p));
+        for (piece, first, count) in runs {
+            match self.trees.get_mut(&piece) {
+                Some(t) if t.2.len() > 0 => (t.0, t.1) = (first, count),
+                _ => {
+                    let chunks = &self.chunks[first..first + count];
+                    let leaves: Vec<TreeChunk> =
+                        chunks.iter().map(|c| TreeChunk { at: c.at, centre: c.centre, radius: c.radius, errors: &c.errors }).collect();
+                    self.trees.insert(piece, (first, count, GroundTree::new(&leaves)));
+                }
+            }
+        }
     }
 }
 
@@ -487,24 +500,32 @@ fn ground_vertex_buffer(device: &wgpu::Device, cells: u32, chunks: u32) -> wgpu:
     })
 }
 
-/// One view's ground: a part a piece, each kept until the chunks it sees or their levels change.
+/// One view's ground: a part for each block of a piece it draws, each kept until what it picks there
+/// changes.
 struct GroundView {
-    parts: std::collections::BTreeMap<u32, GroundPart>,
+    /// Its parts by piece and block ([`Renderer::ground_for`]).
+    parts: std::collections::BTreeMap<(u32, u64), GroundPart>,
+    /// How many frames it has been drawn: what its parts were last picked in.
+    frame: u64,
     count: u32,
-    /// The indices of the part being built.
+    /// The indices of the part being built, and the picks of the piece being chosen.
     indices: Vec<u32>,
+    picks: Vec<Pick>,
 }
 
-/// A piece's part of a view's ground (MD28): what it drew last frame, kept until the piece's chunks
-/// it sees or their levels change, or the piece goes.
+/// A block's part of a view's ground (MD28, V65): what it drew last frame, kept until what the view
+/// picks there changes, or the piece goes.
 struct GroundPart {
     buffer: wgpu::Buffer,
     capacity: u64,
-    /// For each of the piece's chunks, the pattern it was drawn with, or `u32::MAX` for not drawn.
-    key: Vec<u32>,
+    /// What its piece's tree picked for it ([`GroundTree::select`]); `None` till it is built, and
+    /// again when the piece's chunks change.
+    key: Option<Vec<Pick>>,
     count: u32,
     /// The indices' runs a page at a time: the page, its first index and how many.
     runs: Vec<(u32, u32, u32)>,
+    /// The view's frame it was last picked in.
+    frame: u64,
 }
 
 /// Something to draw in a view besides the scene's own props: a bike, its parts, a rider, the plane.
@@ -615,6 +636,9 @@ pub struct Drawn {
     pub draws: usize,
     /// Ground chunks drawn, at each level of detail, over every view.
     pub ground_levels: Vec<usize>,
+    /// The nodes of the ground's quadtrees looked at choosing them, over every view (V65): what the
+    /// choice cost, which grows with what is in view, not with the ground held.
+    pub ground_visits: usize,
     /// Props drawn, over every view.
     pub props: usize,
     /// What choosing the ground's chunks and writing their indices took on the CPU, over every view
@@ -1571,6 +1595,11 @@ impl Cull {
         centre.sub(self.eye).len() - radius <= self.reach && sees(&self.planes, centre, radius)
     }
 
+    /// Whether a sphere is wholly in view: inside every plane of the frustum and within the reach.
+    pub fn holds(&self, centre: V3, radius: f32) -> bool {
+        centre.sub(self.eye).len() + radius <= self.reach && self.planes.iter().all(|p| p[0] * centre.x + p[1] * centre.y + p[2] * centre.z + p[3] >= radius)
+    }
+
     /// How far the camera is from a sphere's surface; 0 inside it.
     pub fn distance(&self, centre: V3, radius: f32) -> f32 {
         (centre.sub(self.eye).len() - radius).max(0.0)
@@ -2379,12 +2408,9 @@ impl Renderer {
             capacity: 1,
             free: vec![0],
             hashes: HashMap::new(),
-            levels: Vec::new(),
             chunks: Vec::new(),
             cells,
-            across: 0,
-            along: 0,
-            slots: Vec::new(),
+            trees: std::collections::BTreeMap::new(),
             patterns,
             views: Vec::new(),
             pipeline,
@@ -2460,6 +2486,11 @@ impl Renderer {
             new.push(GpuChunk::of(c, errors, page, at * corners as u32, piece));
         }
         g.chunks.splice(to..to, new);
+        // Its tree made again, and every view's part of it chosen again.
+        g.trees.remove(&piece);
+        for v in &mut g.views {
+            v.parts.retain(|k, _| k.0 != piece);
+        }
         g.regrid();
         Ok(())
     }
@@ -2996,6 +3027,7 @@ impl Renderer {
             triangles: vec![0; views.len()],
             draws: 0,
             ground_levels: Vec::new(),
+            ground_visits: 0,
             props: 0,
             ground_time: std::time::Duration::ZERO,
         };
@@ -3213,123 +3245,114 @@ impl Renderer {
         drawn
     }
 
-    /// View `v`'s ground for this frame: each chunk's level from this view's camera, balanced so
-    /// neighbours differ by one at most, stitched, and the chunks it sees written into the view's own
-    /// index buffer — only when something changed since its last frame. How many indices it holds.
+    /// View `v`'s ground for this frame: what each piece's quadtree picks from this view's camera
+    /// ([`GroundTree::select`]: culled and coarsened a branch at a time, balanced and stitched), and
+    /// the chunks picked written into the view's own index buffers, a part for each block of
+    /// [`GROUND_BLOCK`] chunks a side and one for each bigger node drawn whole — a part only when its
+    /// picks changed since its last frame. How many indices it holds.
     fn ground_for(&mut self, v: usize, cull: &Cull, focal: f32, drawn: &mut Drawn) -> u32 {
         let Some(g) = &mut self.ground else { return 0 };
         let top = lod_levels(g.cells);
-        for (slot, level) in g.slots.iter().zip(g.levels.iter_mut()) {
-            *level = match slot {
-                Some(c) => {
-                    let c = &g.chunks[*c];
-                    match c.own {
-                        Some(_) => 0,
-                        None => lod_level(&c.errors, cull.distance(c.centre, c.radius), focal, GROUND_PIXELS),
-                    }
-                }
-                // No chunk here: it holds nobody back.
-                None => top + 1,
-            };
-        }
-        lod_balance(&mut g.levels, g.across, g.along);
-        for (slot, level) in g.slots.iter().zip(g.levels.iter_mut()) {
-            if slot.is_none() {
-                *level = 0;
-            }
-        }
         while g.views.len() <= v {
-            g.views.push(GroundView { parts: std::collections::BTreeMap::new(), count: 0, indices: Vec::new() });
+            g.views.push(GroundView { parts: std::collections::BTreeMap::new(), count: 0, indices: Vec::new(), picks: Vec::new(), frame: 0 });
         }
         if drawn.ground_levels.len() <= top as usize {
             drawn.ground_levels.resize(top as usize + 1, 0);
         }
-        // Each chunk's pattern, by chunk, or `u32::MAX` for not drawn.
-        let mut key = vec![u32::MAX; g.chunks.len()];
-        for (at, slot) in g.slots.iter().enumerate() {
-            let Some(c) = *slot else { continue };
-            let chunk = &g.chunks[c];
-            if !cull.sees(chunk.centre, chunk.radius) {
-                continue;
-            }
-            let level = g.levels[at];
-            let coarser = lod_coarser(&g.levels, g.across, g.along, at % g.across, at / g.across);
-            let mask = coarser.iter().enumerate().map(|(i, &b)| (b as u32) << i).sum::<u32>();
-            drawn.ground_levels[level as usize] += 1;
-            key[c] = level * 16 + mask;
-        }
-        // A piece's chunks are together in the list: its part is built again only when its chunks'
-        // patterns change (MD28: the whole view's, millions of indices in a world, was built again
-        // nearly every frame).
+        let see = |c: V3, r: f32| cull.sees(c, r).then(|| cull.distance(c, r));
+        let level = |e: &[f32], d: f32| lod_level(e, d, focal, GROUND_PIXELS);
+        let holds = |c: V3, r: f32| cull.holds(c, r);
+        let look = Look { look: &see, level: &level, holds: &holds };
         let (cells, gv) = (g.cells, &mut g.views[v]);
-        let mut first = 0;
-        while first < g.chunks.len() {
-            let piece = g.chunks[first].piece;
-            let end = first + g.chunks[first..].iter().take_while(|c| c.piece == piece).count();
-            let (chunks, keys) = (&mut g.chunks[first..end], &key[first..end]);
-            first = end;
-            let part = gv.parts.entry(piece).or_insert_with(|| GroundPart {
-                buffer: self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("ground indices"),
-                    size: 4,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }),
-                capacity: 0,
-                key: Vec::new(),
-                count: 0,
-                runs: Vec::new(),
-            });
-            if part.key == keys {
-                continue;
-            }
-            // The stitchings of chunks with holes this key asks for that are not made yet.
-            for (chunk, &k) in chunks.iter_mut().zip(keys) {
-                if k == u32::MAX {
+        gv.frame += 1;
+        let frame = gv.frame;
+        let mut picks = std::mem::take(&mut gv.picks);
+        for (&piece, (first, count, tree)) in &mut g.trees {
+            drawn.ground_visits += tree.select(&look, &mut picks);
+            // The picks come in the tree's order, so a block's, or a whole node's, are one run.
+            let block = |p: &Pick| {
+                let (x, z, size) = tree.square(p.node);
+                if size >= GROUND_BLOCK { (1u64 << 63) | u64::from(p.node) } else { u64::from(x / GROUND_BLOCK) << 32 | u64::from(z / GROUND_BLOCK) }
+            };
+            let mut at = 0;
+            while at < picks.len() {
+                let key = block(&picks[at]);
+                let end = at + picks[at..].iter().take_while(|p| block(p) == key).count();
+                let run = &picks[at..end];
+                at = end;
+                for p in run {
+                    drawn.ground_levels[p.level as usize] += tree.chunks(p.node).len();
+                }
+                // A part is built again only when its picks change (MD28: the whole view's,
+                // millions of indices in a world, was built again nearly every frame).
+                let part = gv.parts.entry((piece, key)).or_insert_with(|| GroundPart {
+                    buffer: self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("ground indices"),
+                        size: 4,
+                        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    capacity: 0,
+                    key: None,
+                    count: 0,
+                    runs: Vec::new(),
+                    frame,
+                });
+                part.frame = frame;
+                if part.key.as_deref() == Some(run) {
                     continue;
                 }
-                if let Some((missing, made)) = &mut chunk.own {
-                    made[(k % 16) as usize].get_or_insert_with(|| {
-                        let row = cells as usize;
-                        lod_indices_where(cells, 0, sides((k % 16) as usize), |i, j| !missing[j as usize * row + i as usize])
+                let chunks = &mut g.chunks[*first..*first + *count];
+                // The stitchings of chunks with holes these picks ask for that are not made yet.
+                for p in run {
+                    for &c in tree.chunks(p.node) {
+                        if let Some((missing, made)) = &mut chunks[c as usize].own {
+                            made[(p.level * 16 + p.mask) as usize].get_or_insert_with(|| lod_indices_holed(cells, p.level, sides(p.mask as usize), missing));
+                        }
+                    }
+                }
+                let indices = &mut gv.indices;
+                indices.clear();
+                part.runs.clear();
+                for page in 0..g.pages.len() as u32 {
+                    let from = indices.len() as u32;
+                    for p in run {
+                        for &c in tree.chunks(p.node) {
+                            let chunk = &chunks[c as usize];
+                            if chunk.page != page {
+                                continue;
+                            }
+                            let pattern = match &chunk.own {
+                                Some((_, made)) => made[(p.level * 16 + p.mask) as usize].as_ref().expect("made above"),
+                                None => &g.patterns[(p.level * 16 + p.mask) as usize],
+                            };
+                            indices.extend(pattern.iter().map(|i| i + chunk.base));
+                        }
+                    }
+                    if indices.len() as u32 > from {
+                        part.runs.push((page, from, indices.len() as u32 - from));
+                    }
+                }
+                let bytes = (indices.len() * 4) as u64;
+                if bytes > part.capacity {
+                    part.capacity = bytes.next_power_of_two();
+                    part.buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("ground indices"),
+                        size: part.capacity,
+                        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
                     });
                 }
-            }
-            let indices = &mut gv.indices;
-            indices.clear();
-            part.runs.clear();
-            for page in 0..g.pages.len() as u32 {
-                let from = indices.len() as u32;
-                for (chunk, &k) in chunks.iter().zip(keys) {
-                    if k == u32::MAX || chunk.page != page {
-                        continue;
-                    }
-                    let pattern = match &chunk.own {
-                        Some((_, made)) => made[(k % 16) as usize].as_ref().expect("made above"),
-                        None => &g.patterns[k as usize],
-                    };
-                    indices.extend(pattern.iter().map(|i| i + chunk.base));
+                if !indices.is_empty() {
+                    self.queue.write_buffer(&part.buffer, 0, bytemuck::cast_slice(indices));
                 }
-                if indices.len() as u32 > from {
-                    part.runs.push((page, from, indices.len() as u32 - from));
-                }
+                part.count = indices.len() as u32;
+                part.key = Some(run.to_vec());
             }
-            let bytes = (indices.len() * 4) as u64;
-            if bytes > part.capacity {
-                part.capacity = bytes.next_power_of_two();
-                part.buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("ground indices"),
-                    size: part.capacity,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-            }
-            if !indices.is_empty() {
-                self.queue.write_buffer(&part.buffer, 0, bytemuck::cast_slice(indices));
-            }
-            part.count = indices.len() as u32;
-            part.key = keys.to_vec();
         }
+        // What this frame did not pick is not drawn.
+        gv.parts.retain(|_, p| p.frame == frame);
+        gv.picks = picks;
         gv.count = gv.parts.values().map(|p| p.count).sum();
         gv.count
     }

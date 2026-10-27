@@ -13,6 +13,7 @@
 //!   terrain.rs   `.trn` ground: a patched height field, its palette and its ground texture
 //!   sky.rs       `.cub` skies: a cube of vertex-coloured strips around the camera
 //!   splat.rs     the freeride ground's paint: masked layers, a detail map and a baked light map
+//!   ground_tree.rs  a ground piece's chunks in a quadtree, culled and coarsened a branch at a time
 //!   ground_mesh.rs  the roads, ruts and runways a freeride scene paints into that ground
 //!   skin.rs      `.mot` motion clips: the channels, the quaternion blend, and the joints on a model
 //!   anim.rs      the animation seam: the sim's driving on the disc's clips, bound to one skeleton
@@ -47,6 +48,7 @@ pub mod glow;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod ground_mesh;
+pub mod ground_tree;
 pub mod ini;
 pub mod mat;
 pub mod particle;
