@@ -4103,6 +4103,35 @@ drive_on_play boot 0x001b8da0 (emitter, wheel, material, level) starts/keeps the
 material_table_load boot 0x003ea350 Col\template.cmt: per [material] ID, DriveOn*, Collision* (sound
 #                                   file, distances, Min/MaxImpulse). Only props' materials (IDs 1..22
 #                                   on free09); no dirt entry
+# P145 -- the wheels' drive-on loop (journal drive-on-loop). The bike's emitter has one wheel, the rear,
+# and no terrain slot: the ground gives material 0 and stops the loop. crates/openmx/src/audio.rs
+# DriveOn; the material is game_sim's Ride::rear_material.
+drive_on_lookup   boot 0x001b8d30 (emitter, material) the material's sound in the +0x214/+0x21c list, or 0
+drive_on_update   boot 0x001b9060 (emitter, wheel, level) cur +0x22c == 0: nothing; else works out pitch
+#                                 and level, sets position, pitch (vt +0x38), volume (vt +0x30), and
+#                                 sound_3d; 0 from it stops the sound (vt +0x28) and keeps cur. Never
+#                                 starts one
+drive_on_speed    boot 0x001b91f0 mph = (int)(0.68182 * sqrt(x*x+y*y+z*z)) of the copied velocity
+#                                 (+0xc0, mula/madda/madd); k (+0x208 per wheel, -1 unset) =
+#                                 (int)(0.5 + FreqSlope * (own / (float)SampleSpeed)), own = sound vt +0x48
+#                                 (+0x54); pitch = (int)(own + (float)((mph-SS)*k - (int)((k+1) *
+#                                 (2^-31 * rand())))); level: mph <= RFS: (100-MinVol)/(RFS-MinSpeed) *
+#                                 (mph-MinSpeed) + MinVol, else -(100-MinVol)/(MaxSpeed-RFS) * (mph-MaxSpeed)
+#                                 + MinVol, integer quotients, clamped 0..100
+drive_on_stop_old boot 0x001b94a0 (emitter, wheel) cur = 0, k = -1, stops cur's sound
+drive_on_stop     boot 0x001b9570 (emitter, wheel) stops every material's sound for the wheel, k = -1, cur = 0
+drive_on_ctor     boot 0x001b8790 the emitter; init 0x001b8a10 callocs the per-wheel arrays (+0x200 position,
+#                                 +0x204 contact object, +0x208 terrain char, +0x20c touched word, +0x210
+#                                 terrain gate), count at +0x230, level share +0x234
+drive_on_table    boot 0x001b8be0 builds the material sound list from the table, +0x238 TerrainMask (200)
+drive_on_wheel    boot 0x001b9a20 (emitter, wheel, position, contact object, touched): the bike's builder
+#                                 0x00280fb0 calls it once, (bike+0x14a0, 0, rear wheel +0x140, bike +0x7d4,
+#                                 rear wheel +0xd4); +0x208/+0x210 stay NULL. bike +0x7d4 is cleared each
+#                                 substep by bike_wheel_contacts and set to the last rear (from.z <= 0)
+#                                 contact's struck object; its +0x89 is the .col surface word's low byte
+drive_on_share    boot 0x001b98b0 the level share: 100 / wheels when |copied velocity| != 0, else 0
+sound_set_pitch   boot 0x00166a20 sound vt +0x38: +0x44 = pitch only when (unsigned) pitch < 0x4000
+sound_set_volume  boot 0x001667e0 sound vt +0x30: volume clamped 0..100
 
 # ---------------------------------------------------------------------------------------------------
 # V31 — the wreck camera (MXCameraWreck over SimpleWreckCam). How each was read, and the live logs, are

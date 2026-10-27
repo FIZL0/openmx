@@ -7843,6 +7843,12 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::Seat
         touchdown,
         edge,
         body: audio::RiderBody::of(&seat.sim.rider),
+        // The rear wheel on a prop (P145): its material, where it touches, and the body's velocity.
+        drive_on: audio::DriveOnFrame {
+            material: r.rear_material,
+            at: [r.rear.w.contact_point.x(), r.rear.w.contact_point.y(), r.rear.w.contact_point.z()],
+            vel: [v.x(), v.y(), v.z()],
+        },
         // Not riding — their own pause, a pad pulled out, Start's freeze — their sounds hold where
         // they are while the others ride on (P172).
         paused: !seat.riding,

@@ -2637,6 +2637,226 @@ impl TireTouchdown {
     }
 }
 
+// --- the wheels' drive-on loop (P145) ----------------------------------------------------------------
+
+/// One material of a track's `Col\template.cmt`: what a wheel rolling on a prop of it plays. The
+/// whole numbers are the loader's whole numbers (a missing one is 0); `FreqSlope` is its one float.
+#[derive(Clone, Debug, Default)]
+pub struct DriveOnMaterial {
+    /// The material's `ID`, the low byte of a collision mesh's surface word.
+    pub id: u8,
+    /// `DriveOnSoundFile`.
+    pub clip: Option<Arc<Clip>>,
+    pub sample_speed: i32,
+    pub min_volume: i32,
+    pub min_speed: i32,
+    pub max_speed: i32,
+    pub resonant_speed: i32,
+    pub freq_slope: f32,
+    /// `DriveOnMinDistance` / `DriveOnMaxDistance`: full volume within the one, not started (and
+    /// stopped) beyond the other — so a material whose `MaxDistance` is 0 is never heard.
+    pub near: f32,
+    pub far: f32,
+}
+
+/// A track's drive-on materials, from its `Col\template.cmt` (the same file in every track archive on
+/// the disc: 22 materials, every one `Impact\drv_drt1.vag`, six of them heard).
+#[derive(Clone, Debug, Default)]
+pub struct DriveOnTable {
+    pub materials: Vec<DriveOnMaterial>,
+}
+
+impl DriveOnTable {
+    /// Every section with an `ID` but `[Settings]`.
+    pub fn read(text: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> DriveOnTable {
+        let int = |s: &Section, k: &str| s.get(k).and_then(|v| v.trim().parse::<i32>().ok()).unwrap_or(0);
+        let materials = ini::parse(text)
+            .iter()
+            .filter(|s| !s.name.eq_ignore_ascii_case("Settings"))
+            .filter_map(|s| {
+                let id = u8::try_from(s.get("ID")?.trim().parse::<i32>().ok()?).ok()?;
+                Some(DriveOnMaterial {
+                    id,
+                    clip: s.get("DriveOnSoundFile").and_then(|n| lib(n)),
+                    sample_speed: int(s, "DriveOnSampleSpeed"),
+                    min_volume: int(s, "DriveOnMinVolume"),
+                    min_speed: int(s, "DriveOnMinSpeed"),
+                    max_speed: int(s, "DriveOnMaxSpeed"),
+                    resonant_speed: int(s, "DriveOnResonantFreqSpeed"),
+                    freq_slope: s.number("DriveOnFreqSlope").unwrap_or(0.0),
+                    near: int(s, "DriveOnMinDistance") as f32,
+                    far: int(s, "DriveOnMaxDistance") as f32,
+                })
+            })
+            .collect();
+        DriveOnTable { materials }
+    }
+
+    pub fn get(&self, id: u8) -> Option<&DriveOnMaterial> {
+        self.materials.iter().find(|m| m.id == id)
+    }
+}
+
+/// A sound's own pitch in the original's units, 4096 a sample played at 48 kHz, as its bank holds it.
+pub fn own_pitch(clip: &Clip) -> i32 {
+    (clip.rate as u64 * 4096 / RATE as u64) as i32
+}
+
+/// **The drive-on speed**: the velocity's length in miles an hour, cut to a whole one.
+pub fn drive_on_mph(vel: [f32; 3]) -> i32 {
+    let v = vel.map(F);
+    (F(0.68182) * F::dot(v, v).sqrt()).to_i32()
+}
+
+/// **The pitch slope**, pitch units a mile an hour: `FreqSlope` of the sound's own pitch per
+/// `SampleSpeed`, rounded. The emitter keeps it until the sound is stopped.
+pub fn drive_on_slope(m: &DriveOnMaterial, own: i32) -> i32 {
+    (F(0.5) + F(m.freq_slope) * (F::from(own) / F::from(m.sample_speed))).to_i32()
+}
+
+/// **The pitch** at `mph`: the sound's own at `SampleSpeed`, `slope` a mile an hour off it, less a
+/// draw of `0..=slope`.
+pub fn drive_on_pitch(m: &DriveOnMaterial, own: i32, slope: i32, mph: i32, d: &mut impl Draw) -> i32 {
+    let draw = (F::from(slope + 1) * (F(1.0 / 2_147_483_648.0) * F::from(d.rand()))).to_i32();
+    let off = (mph - m.sample_speed).wrapping_mul(slope) - draw;
+    (F::from(own) + F::from(off)).to_i32()
+}
+
+/// **The level** at `mph`, `0..=100`: up a line from `MinVolume` at `MinSpeed` to 100 at
+/// `ResonantFreqSpeed`, then down one to `MinVolume` at `MaxSpeed` — each line's slope a whole-number
+/// quotient, as the original divides.
+pub fn drive_on_level(m: &DriveOnMaterial, mph: i32) -> i32 {
+    let rise = 100 - m.min_volume;
+    let v = if mph <= m.resonant_speed {
+        rise.checked_div(m.resonant_speed - m.min_speed).unwrap_or(0) * (mph - m.min_speed) + m.min_volume
+    } else {
+        (-rise).checked_div(m.max_speed - m.resonant_speed).unwrap_or(0) * (mph - m.max_speed) + m.min_volume
+    };
+    v.clamp(0, 100)
+}
+
+/// What the drive-on loop reads of a seat after its tick.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DriveOnFrame {
+    /// The material under the rear wheel ([`game_sim::ride::Ride::rear_material`]): 0 on the ground.
+    pub material: u8,
+    /// Where the rear wheel touches.
+    pub at: [f32; 3],
+    /// The body's velocity, feet a second.
+    pub vel: [f32; 3],
+}
+
+/// **One wheel's drive-on loop**, the original's drive-on emitter as the bike makes it: one wheel,
+/// the rear, its material that of the prop it last touched this tick. Each tick: a still bike or no
+/// material stops it; a new material starts its loop where it touches, if someone is near enough to
+/// hear; the same one moves it and sets its pitch and level by speed, and stops it, for good, past
+/// its `MaxDistance` — it is not started again until the wheel leaves the prop or the bike stops.
+#[derive(Clone, Debug)]
+pub struct DriveOn {
+    /// The material sounding (or meant to be), 0 for none.
+    cur: u8,
+    voice: Option<VoiceId>,
+    /// The pitch slope, worked out on the first pitch after a stop.
+    slope: Option<i32>,
+    /// The pitch last set: a worked-out one outside `0..0x4000` is not taken, and the sound keeps
+    /// what it had (its own, before any).
+    pitch: Option<i32>,
+    /// The host's draws for the pitch's wobble, the loop's own.
+    dice: Dice,
+}
+
+impl DriveOn {
+    pub fn new(seed: u64) -> DriveOn {
+        DriveOn { cur: 0, voice: None, slope: None, pitch: None, dice: Dice::new(seed) }
+    }
+
+    pub fn voice(&self) -> Option<VoiceId> {
+        self.voice
+    }
+
+    /// The material it is on, 0 for none.
+    pub fn material(&self) -> u8 {
+        self.cur
+    }
+
+    pub fn tick(&mut self, m: &mut Mixer, table: &DriveOnTable, f: &DriveOnFrame) {
+        // One wheel takes the whole level, while the body moves at all.
+        let v = f.vel.map(F);
+        if F::dot(v, v).sqrt() == F::ZERO || f.material == 0 {
+            self.stop(m);
+            return;
+        }
+        let share = 100;
+        let sounding = self.voice.is_some_and(|id| m.playing(id));
+        if f.material == self.cur || !sounding {
+            if self.cur != 0 {
+                // The material it is meant to be on keeps the loop even when the wheel has moved to
+                // another one and the loop has gone quiet.
+                return self.update(m, table, f, share);
+            }
+        } else {
+            self.stop(m);
+        }
+        let Some(mat) = table.get(f.material) else { return };
+        let Some(clip) = mat.clip.clone() else { return };
+        self.cur = f.material;
+        let (pitch, level) = self.work_out(mat, &clip, f.vel);
+        let gain = (level * share / 100) as f32 / 100.0;
+        if m.within(f.at, mat.far) {
+            let play = Play {
+                gain,
+                pitch: pitch as f32 / own_pitch(&clip).max(1) as f32,
+                looping: true,
+                at: Some(f.at),
+                near: mat.near,
+                far: mat.far,
+                ..Play::default()
+            };
+            self.voice = Some(m.play(clip, play));
+        }
+    }
+
+    fn update(&mut self, m: &mut Mixer, table: &DriveOnTable, f: &DriveOnFrame, share: i32) {
+        let Some(mat) = table.get(self.cur) else { return };
+        let Some(clip) = mat.clip.clone() else { return };
+        let (pitch, level) = self.work_out(mat, &clip, f.vel);
+        let Some(id) = self.voice else { return };
+        let gain = (level * share / 100) as f32 / 100.0;
+        m.set(id, gain, pitch as f32 / own_pitch(&clip).max(1) as f32, Some(f.at));
+        if !m.within(f.at, mat.far) {
+            m.stop(id);
+        }
+    }
+
+    /// The pitch (in pitch units) and level the loop is set to at the body's speed.
+    fn work_out(&mut self, mat: &DriveOnMaterial, clip: &Clip, vel: [f32; 3]) -> (i32, i32) {
+        let mph = drive_on_mph(vel);
+        let own = own_pitch(clip);
+        let slope = *self.slope.get_or_insert_with(|| drive_on_slope(mat, own));
+        let pitch = drive_on_pitch(mat, own, slope, mph, &mut self.dice);
+        if (pitch as u32) < 0x4000 {
+            self.pitch = Some(pitch);
+        }
+        (self.pitch.unwrap_or(own), drive_on_level(mat, mph))
+    }
+
+    /// Stop the loop and forget the material and the slope.
+    pub fn stop(&mut self, m: &mut Mixer) {
+        if let Some(id) = self.voice.take() {
+            m.stop(id);
+        }
+        self.slope = None;
+        self.cur = 0;
+    }
+
+    /// The ride is over and the mixer stopped everything.
+    pub fn hushed(&mut self) {
+        self.voice = None;
+        self.slope = None;
+        self.cur = 0;
+    }
+}
+
 // --- the shell's sound ------------------------------------------------------------------------------
 
 /// What one seat hands the sound each frame.
@@ -2659,6 +2879,8 @@ pub struct SeatFrame {
     pub edge: EdgeFrame,
     /// What the rider's voice reads of the thrown body (P180).
     pub body: RiderBody,
+    /// What the wheels' drive-on loop reads (P145).
+    pub drive_on: DriveOnFrame,
     /// This seat's own pause is open (P172): everything of its own holds where it is, silent, and
     /// goes on from there when it closes, while the other seats play on.
     pub paused: bool,
@@ -2676,6 +2898,8 @@ pub struct SeatSound {
     pub tires: TireTouchdown,
     /// The rider's own voice (P180).
     pub voice: RiderVoice,
+    /// The rear wheel's loop on a prop (P145).
+    pub drive_on: DriveOn,
     last: [i32; 4],
     was_grounded: bool,
     dice: Dice,
@@ -2697,6 +2921,7 @@ impl SeatSound {
             bike_clank: WreckClank::default(),
             tires: TireTouchdown::default(),
             voice: RiderVoice::default(),
+            drive_on: DriveOn::new(seed.wrapping_mul(131).wrapping_add(45)),
             last: [-1; 4],
             was_grounded: true,
             dice: Dice::new(seed.wrapping_mul(31).wrapping_add(7)),
@@ -2713,6 +2938,7 @@ impl SeatSound {
         out.extend(&self.plane.voices);
         out.extend(self.tires.voice());
         out.extend(self.edge.voices());
+        out.extend(self.drive_on.voice());
         out.extend(&self.shots);
         out
     }
@@ -2740,6 +2966,8 @@ pub struct Sound {
     /// `machine.aud`'s `[biplaneTireTouchdown]` (P146).
     pub plane_touchdown: MachineTouchdown,
     pub shootoff: Shootoff,
+    /// The track's `Col\template.cmt` (P145).
+    pub drive_on: DriveOnTable,
     started: bool,
     world_voices: Vec<VoiceId>,
     dice: Dice,
@@ -2757,6 +2985,7 @@ impl Sound {
             plane_wreck: MachineWreck::default(),
             plane_touchdown: MachineTouchdown::default(),
             shootoff: Shootoff::default(),
+            drive_on: DriveOnTable::default(),
             started: false,
             world_voices: Vec::new(),
             dice: Dice::new(0x5eed),
@@ -2805,6 +3034,7 @@ impl Sound {
             if let Some((note, at)) = f.plane {
                 s.engine.silence(m);
                 s.edge.stop_rumble(m);
+                s.drive_on.stop(m);
                 s.plane.update(m, &self.plane, note, at);
                 s.clank.tick(m, &self.plane_wreck, &f.crash, at, dt, &mut s.dice);
                 s.tires.tick(m, &self.plane_touchdown, f.touchdown, at, &mut s.dice);
@@ -2813,6 +3043,7 @@ impl Sound {
             s.edge.tick(m, &self.shootoff, &f.edge);
             s.plane.silence(m);
             s.engine.update(h, dt, m, &s.bike);
+            s.drive_on.tick(m, &self.drive_on, &f.drive_on);
             let near = Play { at: Some(h.at), near: self.rider.near, far: self.rider.far, ..Play::default() };
             let busy = s.voice.busy(m, f.body.at, dt);
             if let Some(reason) = f.wreck {
@@ -2894,6 +3125,7 @@ impl Sound {
             if let Some(id) = s.voice.voice() {
                 m.stop(id);
             }
+            s.drive_on.stop(&mut m);
         }
     }
 
@@ -2913,6 +3145,7 @@ impl Sound {
             s.bike_clank.hushed();
             s.tires.hushed();
             s.voice.hushed();
+            s.drive_on.hushed();
             // A pause in a cannonball must not boom again on the way out: the rider's reasons stay.
             s.edge.hushed();
         }
@@ -2976,6 +3209,13 @@ impl Reading<'_> {
     }
 
     /// The plane's wreck clank (P164): `machine.aud`'s `[biplaneWreck]` in the machines' archive.
+    /// A track's drive-on materials, out of its archive's `Col\template.cmt` (P145).
+    pub fn drive_on(&mut self, track_res: &str) -> DriveOnTable {
+        let text = self.text(track_res, "col\\template.cmt");
+        let lib = &mut *self.lib;
+        DriveOnTable::read(&text, &mut |n| lib.clip(n))
+    }
+
     pub fn plane_wreck(&mut self, res: &str) -> MachineWreck {
         let text = self.text(res, "aud\\machine.aud");
         let lib = &mut *self.lib;
@@ -3300,6 +3540,7 @@ impl Sound {
         sound.plane_touchdown = read.plane_touchdown(machines);
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));
+        sound.drive_on = read.drive_on(track_res);
         Ok(sound)
     }
 }
