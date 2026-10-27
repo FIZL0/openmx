@@ -277,6 +277,13 @@ const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 /// (`--moment`) is made at.
 const PS2_FRAME: (usize, usize) = (640, 448);
 
+/// How long a world's piece takes to fade in over its stand-in when it streams in mid-ride, and out
+/// when it is let go (V92), in seconds.
+const GROUND_FADE: f32 = 1.0;
+
+/// How far before a world's dressing reach its props and plants fade out to nothing (V92), in feet.
+const PROP_FADE_BAND: f32 = 1500.0;
+
 /// The near clip plane the frame is drawn with, in feet, and the number the follow camera is handed
 /// as its distance floor, because the original's call site hands its camera the near plane of the
 /// viewport it is drawing into — one field, read by the projection and by the camera alike.
@@ -1465,6 +1472,9 @@ struct Args {
     /// `--world-chunks N`: the most ground chunks a frame of a world ride hands the GPU instead of
     /// [`worlds::CHUNKS_A_FRAME`] (MD28).
     world_chunks: Option<usize>,
+    /// `--world-stand-in on|off`: draw a world's whole ground at its coarsest where its pieces are
+    /// not loaded, and fade each piece in over it (V92). On by default.
+    world_stand_in: bool,
     /// `--world-sweep X0,Z0,X1,Z1`: a world's ground streams about a point that goes from `x0, z0` to
     /// `x1, z1` in world feet over the ride's `--frames` instead of about the riders (MD23), so a
     /// short ride can be seen to load and let go a whole map's ground; the riders and the
@@ -4374,6 +4384,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut ground_written = (0usize, 0usize, 0usize);
     // The most chunks the GPU's ground held at once in the ride, and the most it had room for (MD23).
     let mut ground_most = (0usize, 0usize);
+    // The picture time a world's ground fades were last moved to (V92), in seconds.
+    let mut ground_shown = 0.0f32;
     // A world's look by map (MD9): every tile's ground paint, light and sky, read from its folder.
     let world_look = world_mod.as_ref().map(|w| {
         let l = w.look(&archives[1..], ground::DIRT, Lighting::of(&look));
@@ -4429,6 +4441,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         r.set_sky(sky.as_ref());
         r.set_ground_painted(&chunks, paint, ground::DIRT)?;
         r.set_wrap(None);
+        r.set_prop_fade(None);
         if let (Some(w), Land::Tiles(t)) = (&world_mod, &sim) {
             let (reach, cells) = (t.reach, ground.chunk_cells());
             let ground_at = Instant::now();
@@ -4458,9 +4471,23 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     l.paint.tiles.iter().zip(&packed).filter(|(t, at)| at.is_some() && t.sharp().is_some()).count(),
                 );
             }
+            // The whole world at its coarsest under it, where a piece is not loaded yet, and its
+            // props and plants faded out by the reach they come in at (V92).
+            if args.world_stand_in {
+                r.set_prop_fade(Some([reach.load.0, PROP_FADE_BAND.min(reach.load.0 * 0.5)]));
+                let at = Instant::now();
+                match worlds::stand_in(w, t, cells).and_then(|s| {
+                    let line = format!("{} x {} cells of {:.0} ft, {} chunks", s.cells[0], s.cells[1], s.step, s.piece.chunks.len());
+                    r.set_ground_stand_in(s).map(|_| line)
+                }) {
+                    Ok(line) => println!("world stand-in: {line} in {:.2} s", at.elapsed().as_secs_f32()),
+                    Err(e) => println!("world stand-in: none: {e}"),
+                }
+            }
             let built = first.len();
             for (i, made) in first {
                 r.add_ground_piece_of(i as u32, made)?;
+                r.show_ground_piece(i as u32, 0.0);
             }
             for line in stream.take_log() {
                 println!("{line}");
@@ -6277,7 +6304,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     .iter()
                     .map(|c| match c {
                         worlds::Change::Add(_, made) | worlds::Change::More(_, made) => made.chunks.len(),
-                        worlds::Change::Drop(_) => 0,
+                        worlds::Change::Drop(_) | worlds::Change::Show(_) => 0,
                     })
                     .sum();
                 if written > 0 {
@@ -6288,7 +6315,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         match change {
                             worlds::Change::Add(i, made) => r.add_ground_piece_of(i as u32, made)?,
                             worlds::Change::More(i, made) => r.more_ground_piece(i as u32, made)?,
-                            worlds::Change::Drop(i) => r.drop_ground_piece(i as u32),
+                            worlds::Change::Drop(i) => r.fade_out_ground_piece(i as u32, GROUND_FADE),
+                            worlds::Change::Show(i) => r.show_ground_piece(i as u32, GROUND_FADE),
                         }
                     }
                     let (held, room) = r.ground_chunks();
@@ -6757,6 +6785,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // tick before the last to the last by how far the wall clock is past it. Render-side only:
         // nothing below writes the simulation.
         let blend = pace::Blend(pacer.blend(moment));
+        // A world's pieces fading in over their stand-in (V92), on the picture's own clock.
+        if ground_stream.is_some() {
+            let shown = (pacer.ticks() as f32 - 1.0 + blend.0).max(0.0) * pace::TICK.as_secs_f32();
+            if let Some(r) = renderer_of(&mut offscreen, window) {
+                r.advance_ground_fades((shown - ground_shown).max(0.0));
+            }
+            ground_shown = shown;
+        }
         // The path cars at the picture's own moment (V47): where the first seat's simulation stood
         // them on the tick before the last and on the last (S81), blended by the bike's blend, so they
         // move every frame drawn and are drawn where the bike meets them.
@@ -8705,6 +8741,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         world_ground_all: false,
         world_reach: None,
         world_chunks: None,
+        world_stand_in: true,
         world_sweep: None,
         trace_switch: None,
         trace_stick_y: Vec::new(),
@@ -9026,6 +9063,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                     w => return Err(format!("--world-ground: all or near, not {w}")),
                 }
             }
+            "--world-stand-in" => {
+                args.world_stand_in = match next("on or off")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    w => return Err(format!("--world-stand-in: on or off, not {w}")),
+                }
+            }
             "--world-chunks" => {
                 args.world_chunks = Some(next("chunks")?.parse().ok().filter(|&n| n > 0).ok_or("--world-chunks: a count over 0")?);
             }
@@ -9141,7 +9185,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--overview] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
-                            [--world-sweep X0,Z0,X1,Z1]\n\
+                            [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off]\n\
                             [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
