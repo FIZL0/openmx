@@ -20,7 +20,8 @@ tracked rather than in `kit.toml` because every worktree has to agree on it, and
     [flaky]                        # failures rerun alone once before they count: load, not the change
     tests = ["-p openmx --test lobby::", "::two_builds_since_the_id"]
 
-    [alone]                        # binaries that time themselves: run one by one after the pool
+    [alone]                        # binaries that time themselves: one by one after the pool, with no
+                                   # other worktree's test run going either (every check slot held)
     tests = ["-p openmx --test one_fps"]
 
 A slow binary runs anyway under `./kit check --all`, which is what a run's merge check uses, and a filtered
@@ -43,6 +44,7 @@ import subprocess
 import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 
 WHOLE = re.compile(r'^\s*cargo\s+test(\s|$)')
@@ -150,10 +152,18 @@ def failed_tests(out: str) -> list[str]:
     return names
 
 
+def alone_tests(cwd: Path) -> list[str]:
+    """gate.toml's `[alone]` binaries, each as its rerun args (`-p openmx --test one_fps`)."""
+    return [' '.join(x.split()) for x in (gate_config(cwd).get('alone') or {}).get('tests', [])]
+
+
 def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, all_slow: bool,
-        times_path: Path) -> tuple[int, list[str]]:
+        times_path: Path, alone=nullcontext) -> tuple[int, list[str]]:
     """The whole gate. Returns cargo's exit code shape (0 passed, 101 a test failed, else the build's) and
-    the notes `./kit check` adds to its one line: slow binaries left out, flakes that passed alone."""
+    the notes `./kit check` adds to its one line: slow binaries left out, flakes that passed alone.
+
+    `alone` is a context manager the `[alone]` binaries run inside: `./kit check` passes one that holds
+    every check slot on the machine (checks.alone), so no other worktree's gate is loading it either."""
     gc = gate_config(cwd)
     notes = []
     with open(log_path, 'w', encoding='utf-8') as log:
@@ -182,7 +192,7 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
         bins.sort(key=lambda b: -float(last.get(b.args, 0)))
         # A binary that holds itself to a frame budget measures the machine as much as the code, and a pool
         # of other binaries is a busy machine: those run after it, one at a time.
-        solo = set(' '.join(x.split()) for x in (gc.get('alone') or {}).get('tests', []))
+        solo = set(alone_tests(cwd))
         later = [b for b in bins if b.args in solo]
         pooled = [b for b in bins if b.args not in solo]
         workers = max(1, jobs)
@@ -198,8 +208,10 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
             dfut = pool.submit(doc_tests)
             list(pool.map(lambda b: _run_one(b, benv), pooled))
             drc, dout = dfut.result()
-        for b in later:
-            _run_one(b, benv)
+        if later:
+            with alone():
+                for b in later:
+                    _run_one(b, benv)
 
         # A failure that is load and not the change gets one more go, alone, now the pool is quiet.
         flaky = [re.compile(p) for p in (gc.get('flaky') or {}).get('tests', [])]

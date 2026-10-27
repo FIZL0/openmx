@@ -26,7 +26,10 @@ tests = [
 ]
 
 [alone]
-# Binaries that hold themselves to a time budget: run one by one after the pool, on a machine the gate's own
-# other binaries are not loading. one_fps and ecosystem's densest view both red in the first parallel merge
-# gate (P128, 10-23 16:16) and are the original's frame-budget and the smooth rule's no-slower checks.
+# Binaries that hold themselves to a time budget: run one by one after the pool, holding every check slot on
+# the machine, so neither the gate's own other binaries nor another worktree's gate is loading it (K6: alone
+# in its own gate was not enough with three gates at once — P179 parked red on one_fps, 10-27). A filtered
+# check naming one of them (the run's retest) takes the machine too. one_fps and ecosystem's densest view both
+# red in the first parallel merge gate (P128, 10-23 16:16) and are the original's frame-budget and the smooth
+# rule's no-slower checks.
 tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem"]
