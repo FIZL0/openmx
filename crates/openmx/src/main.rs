@@ -2835,6 +2835,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     if let Some(w) = &world_mod {
         w.place_spawn(&mut place)?;
+        if let worlds::Spawn::Tile(i) = w.spawn {
+            println!("world spawn: {} at {:.1},{:.1}", w.pieces[i].tile.name, place.start[0].0, place.start[2].0);
+        }
     }
     let mut look = view::Scene::parse(&ini::text(&scn_bytes));
     if let Some(w) = &world_mod {

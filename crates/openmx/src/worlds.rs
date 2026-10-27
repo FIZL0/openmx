@@ -336,6 +336,13 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
     let mut world = WorldMod { id: id.to_string(), name, dir, pieces, tile_count, home, spawn, wrap: [false, false] };
     if wrap != [false, false] {
         world.close_seams(wrap).map_err(|e| format!("{id}: {e}"))?;
+        // A wrapped world starts as far from its seams as it can (MD50): on the middle tile, whatever
+        // tile the file names. A start given in world feet is the file's to keep.
+        if let Spawn::Tile(_) = world.spawn {
+            if let Some(i) = world.middle_tile().map_err(|e| format!("{id}: {e}"))? {
+                world.spawn = Spawn::Tile(i);
+            }
+        }
     }
     Ok(world)
 }
@@ -485,6 +492,30 @@ impl WorldMod {
         }
         self.wrap = wrap;
         Ok(())
+    }
+
+    /// **The middle tile** (MD50): of the tiles whose own start stands inside their kept rectangle,
+    /// the one whose kept rectangle's middle is nearest the middle of the world's extent, so a ride
+    /// starting there is as far from a wrapped world's seams as it can be. The first in the file's
+    /// order on a tie; `None` where no tile's start is kept. A pure function of the world file and
+    /// the tiles' headers, so every seat of an online ride picks the same one.
+    pub fn middle_tile(&self) -> Result<Option<usize>, String> {
+        let world = Tiled::new(self.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(Files { pieces: self.pieces.clone() }), Reach::DESKTOP)?;
+        let extent = world.wrapped(self.wrap)?.extent().map(|v| f64::from(v.0));
+        let mut best: Option<(f64, usize)> = None;
+        for (i, p) in self.pieces[..self.tile_count].iter().enumerate() {
+            let kept = keep_feet(p.tile.keep, p.tile.spacing);
+            let Some(scene) = &p.scene else { continue };
+            if !inside(kept, scene.start[0].0, scene.start[2].0) {
+                continue;
+            }
+            let mid = [0, 1].map(|a| f64::from(p.tile.at[a].0) + f64::from(kept[a] + kept[a + 2]) / 2.0);
+            let d = (mid[0] - extent[0] / 2.0).powi(2) + (mid[1] - extent[1] / 2.0).powi(2);
+            if best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, i));
+            }
+        }
+        Ok(best.map(|(_, i)| i))
     }
 
     /// The log line for a world that wraps (MD29): which axes, and the seam joins that close it.
@@ -1618,5 +1649,54 @@ mod tests {
         for text in ["\"y\"", "3", "[true]", "{}"] {
             assert!(read(text).is_err(), "{text}");
         }
+    }
+
+    /// MD50: a wrapped 3x3 world (nine 124-foot tiles 200 feet apart, the file's spawn the corner
+    /// tile `a`) starts on the middle tile `e`, at `e`'s own start; without the switch it starts on
+    /// `a` as the file says; a start in world feet is kept; and where the middle tile's own start is
+    /// cut out of its keep, the nearest tile whose start is kept is taken, the first on a tie.
+    #[test]
+    fn a_wrapped_world_starts_on_its_middle_tile() {
+        let mods = std::env::temp_dir().join(format!("openmx-md50-{}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+        let worlds = [
+            ("md50_round", r#""wrap": "xz", "spawn": {"tile": "a"}, "#, false),
+            ("md50_edged", r#""spawn": {"tile": "a"}, "#, false),
+            ("md50_feet", r#""wrap": "xz", "spawn": {"position": [30, 10, 40], "direction": [0, 0, 1]}, "#, false),
+            ("md50_cut", r#""wrap": "xz", "spawn": {"tile": "a"}, "#, true),
+        ];
+        for (id, head, cut) in worlds {
+            let mut listed = Vec::new();
+            for (n, name) in names.iter().enumerate() {
+                let (x, z) = (n % 3 * 200, n / 3 * 200);
+                let stem = name.to_uppercase();
+                let dir = mods.join("tracks").join(id).join("tiles").join(name);
+                // The middle tile's start past its keep's 124 feet, on the ground the keep leaves out.
+                let start = if cut && *name == "e" { "126.00,10.00,60.00" } else { "60.00,10.00,60.00" };
+                let scene = format!("[SceneInfo]\r\nSceneName={name}\r\nDefaultStartPosition={start}\r\nDefaultStartDirection=1.00,0.00,0.00\r\n[Environment]\r\nTerrainFile={stem}.trn\r\nTerrainWidth=2\r\nTerrainBreadth=2\r\nTerrainWidthScale=4.00\r\nTerrainBreadthScale=4.00\r\n");
+                write(&dir, &format!("Env/{stem}/{stem}.scn"), scene);
+                write(&dir, &format!("Env/{stem}/{stem}.ps2.trn"), generate::terrain(name, (2, 2), 4.0, |_, _| 10.0, |_, _| 1));
+                listed.push(format!(r#"{{"tile": "{name}", "at": [{x}.0, {z}.0], "keep": [0, 0, 31, 31]}}"#));
+            }
+            write(&mods.join("tracks").join(id), "mod.json", format!(r#"{{"kind": "world", "id": "{id}", "name": "MD50", {head}"tiles": [{}]}}"#, listed.join(", ")));
+        }
+        let start = |id: &str| {
+            let w = find(&mods, id).unwrap_or_else(|e| panic!("{id}: {e}"));
+            let mut scene = w.pieces[w.home].scene.clone().unwrap();
+            w.place_spawn(&mut scene).unwrap();
+            let tile = match w.spawn {
+                Spawn::Tile(i) => Some(w.pieces[i].tile.name.clone()),
+                Spawn::At(..) => None,
+            };
+            (tile, [scene.start[0].0, scene.start[2].0], w.pieces[w.home].tile.name.clone())
+        };
+        assert_eq!(start("md50_round"), (Some("e".into()), [260.0, 260.0], "a".into()), "the sky stays the file's");
+        assert_eq!(start("md50_edged"), (Some("a".into()), [60.0, 60.0], "a".into()));
+        assert_eq!(start("md50_feet"), (None, [30.0, 40.0], "a".into()));
+        // The seam strip past the far edges puts the world's middle east and north of `e`'s, so of
+        // the four tiles beside `e`, `f` and `h` are nearest, and `f` comes first.
+        assert_eq!(start("md50_cut"), (Some("f".into()), [460.0, 260.0], "a".into()));
+        let _ = std::fs::remove_dir_all(mods.parent().unwrap());
     }
 }
