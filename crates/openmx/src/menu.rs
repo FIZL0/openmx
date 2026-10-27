@@ -387,6 +387,13 @@ pub const TRACKS: [(&str, &str); 5] = [
     ("free11", "Cleveland"),
 ];
 
+/// Every free-ride map spliced into one (P71, `crate::spliced`), `(id, name)`: the pick's row after
+/// the five maps, ridden as `--track free_all` is.
+pub const SPLICED: (&str, &str) = ("free_all", "Every free ride");
+
+/// The pick's rows the disc gives: its five towns, then [`SPLICED`]. The mods' come after.
+pub const DISC_PICK: usize = TRACKS.len() + 1;
+
 /// `settings.txt`: the rider and the ride.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -1527,9 +1534,13 @@ impl Settings {
         out
     }
 
-    /// The track pick's index of [`Settings::track`].
+    /// The track pick's index of [`Settings::track`]: a town's, or [`SPLICED`]'s after them.
     pub fn track_index(&self) -> usize {
-        TRACKS.iter().position(|t| t.0 == self.track).unwrap_or(0)
+        match TRACKS.iter().position(|t| t.0 == self.track) {
+            Some(i) => i,
+            None if self.track == SPLICED.0 => TRACKS.len(),
+            None => 0,
+        }
     }
 }
 
@@ -2443,7 +2454,8 @@ impl Act {
 /// load has got.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Loading {
-    /// The track's place in [`TRACKS`] for its still, or `usize::MAX` for a mod's, which has none.
+    /// The track's place in the pick for its still: a disc town's in [`TRACKS`], [`SPLICED`]'s after
+    /// them, or `usize::MAX` for a mod's, which has none.
     pub still: usize,
     pub name: String,
     pub pack: String,
@@ -3253,8 +3265,9 @@ impl Menu {
     /// A ride on `track` is loading (P127): the loading screen, with the track's name and its pack
     /// as the pick shows them, and nothing done yet.
     pub fn start_loading(&mut self, track: &str) {
-        let disc = TRACKS.iter().position(|(id, _)| *id == track);
+        let disc = TRACKS.iter().position(|(id, _)| *id == track).or((track == SPLICED.0).then_some(TRACKS.len()));
         let name = match disc {
+            Some(i) if i == TRACKS.len() => SPLICED.1.to_string(),
             Some(i) => TRACKS[i].1.to_string(),
             None => self.mod_tracks.iter().find(|(id, _)| id == track).map_or_else(|| track.to_string(), |(_, n)| n.clone()),
         };
@@ -4736,9 +4749,9 @@ const TEXTURES: [&str; 4] = ["background", "frontend_background_radial", "mainme
 // ---- the track mods' place in the pick (MD2) -------------------------------------------------------
 
 impl Menu {
-    /// The tracks the pick lists: the disc's [`TRACKS`], then the mods'.
+    /// The tracks the pick lists: the disc's [`TRACKS`] and [`SPLICED`], then the mods'.
     pub fn track_count(&self) -> usize {
-        TRACKS.len() + self.shown_mods().count()
+        DISC_PICK + self.shown_mods().count()
     }
 
     /// The mod tracks the pick lists: the mods' less the packs switched off (P118).
@@ -4746,13 +4759,15 @@ impl Menu {
         self.mod_tracks.iter().filter(|(id, _)| !self.settings.mods_off.iter().any(|p| p == pack_of(id)))
     }
 
-    /// The pick's track `at`, `(id, name)`: a disc track's archive and town, or a mod's id and name.
+    /// The pick's track `at`, `(id, name)`: a disc track's archive and town, the spliced maps', or a
+    /// mod's id and name.
     pub fn track_at(&self, at: usize) -> (&str, &str) {
         match TRACKS.get(at) {
             Some(&(id, name)) => (id, name),
+            None if at == TRACKS.len() => SPLICED,
             None => self
                 .shown_mods()
-                .nth(at - TRACKS.len())
+                .nth(at - DISC_PICK)
                 .map_or(TRACKS[0], |(id, name)| (id.as_str(), name.as_str())),
         }
     }
@@ -4770,16 +4785,16 @@ impl Menu {
     /// maps) right after (user, 2026-10-23), then each other source game that has a track, by name.
     /// With none, the disc's alone.
     pub fn track_groups(&self) -> Vec<(String, Range<usize>)> {
-        let mut out = vec![(DISC_GAME.to_string(), 0..TRACKS.len())];
+        let mut out = vec![(DISC_GAME.to_string(), 0..DISC_PICK)];
         for (i, (id, _)) in self.shown_mods().enumerate() {
-            let at = TRACKS.len() + i;
+            let at = DISC_PICK + i;
             let game = self.track_game(id);
             match out.last_mut() {
                 Some((name, r)) if *name == game => r.end = at + 1,
                 _ => out.push((game, at..at + 1)),
             }
         }
-        if self.track_count() > TRACKS.len() {
+        if self.track_count() > DISC_PICK {
             out.insert(0, (ALL_GAMES.to_string(), 0..self.track_count()));
         }
         out
@@ -4803,10 +4818,11 @@ impl Menu {
         self.track_groups().iter().position(|(name, _)| name == want).unwrap_or(0)
     }
 
-    /// The game a track of the pick is from (MD11): MX Unleashed for the disc's, Worlds for a
-    /// combined map, else its `mod.json`'s source game, or its pack's name where the shell gave none.
+    /// The game a track of the pick is from (MD11): MX Unleashed for the disc's and their splice,
+    /// Worlds for a combined map, else its `mod.json`'s source game, or its pack's name where the
+    /// shell gave none.
     pub fn track_game(&self, id: &str) -> String {
-        if TRACKS.iter().any(|t| t.0 == id) {
+        if TRACKS.iter().any(|t| t.0 == id) || id == SPLICED.0 {
             return DISC_GAME.into();
         }
         if pack_of(id) == WORLDS {
@@ -4944,9 +4960,14 @@ impl Art {
     }
 
     /// Which of [`Art::images`] a track's card shows as its `i`th picture: a disc track's still
-    /// (turning through its five), or a mod's picture; `None` where there is none.
+    /// (turning through its five), the spliced maps' (each map's in turn, west to east), or a mod's
+    /// picture; `None` where there is none.
     pub fn track_image(&self, id: &str, i: usize) -> Option<usize> {
         let first = TEXTURES.len() + 1;
+        if id == SPLICED.0 {
+            let n = TRACKS.len();
+            return (0..n).find_map(|k| self.track_image(TRACKS[(i + k) % n].0, (i + k) / n));
+        }
         if let Some(track) = TRACKS.iter().position(|t| t.0 == id) {
             let n = self.stills[track].len();
             let before: usize = self.stills[..track].iter().map(Vec::len).sum();
