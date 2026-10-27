@@ -1210,6 +1210,15 @@ fn plane_jumped(before: Option<M4>, plane: &Plane, dt: F) -> Option<V3> {
     pace::jump(V3 { x: b.0[3][0], y: b.0[3][1], z: b.0[3][2] }, vector(plane.at), plane.speed().0 * dt.0)
 }
 
+/// The whole widths a bike moved over a frame on a world that wraps (MD29), `[x, 0, z]` in feet:
+/// a seam's move, which a frame's own riding never comes near (half the world). `None` with none.
+fn seam_moved((wrap, side): ([bool; 2], [f32; 2]), was: Option<M4>, now: Vf) -> Option<[f32; 3]> {
+    let was = was?;
+    let lap = |axis: usize, d: f32| if wrap[axis] && d.abs() > side[axis] / 2.0 { (d / side[axis]).round() * side[axis] } else { 0.0 };
+    let by = [lap(0, now.x() - was.0[3][0]), 0.0, lap(1, now.z() - was.0[3][2])];
+    (by != [0.0; 3]).then_some(by)
+}
+
 /// Where the plane is drawn: at its body's pose, nose and up off the plane's own measure.
 fn plane_at(plane: &Plane) -> M4 {
     M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up))
@@ -2757,6 +2766,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         Some(w) => {
             let t = w.tiled(args.world_reach.unwrap_or(game_sim::tiles::Reach::DESKTOP))?;
             println!("{}", w.line(&t));
+            if let Some(line) = w.wrap_line(&t) {
+                println!("{line}");
+            }
             if spliced {
                 for line in spliced::layout(w) {
                     println!("{line}");
@@ -3638,6 +3650,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 // The path cars first, as a tick of the ride steps them (S81).
                 cars.frame(dt, &mut sim);
                 let f = rider.frame(&phy, &tables, &now, dt, &mut sim);
+                // Over a seam (MD29), as a tick of the ride is.
+                rider.wrap_round(&sim);
                 let r = &rider.ride;
                 let (v, p, m) = (r.chassis.vel, r.position(), r.transform());
                 if args.trace_air {
@@ -3747,6 +3761,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         for i in 0..frames {
             cars.frame(dt, &mut sim);
             let f = rider.frame(&phy, &tables, &controls, dt, &mut sim);
+            rider.wrap_round(&sim);
             if let Some(w) = f.wreck {
                 println!("frame {i}: WRECK {w:?}");
             }
@@ -6198,6 +6213,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
         cameras.clear();
         ridden.clear();
+        // A world that wraps (MD29): which axes, and the width a seam moves a bike by on each.
+        let seams = world.place.tiled().filter(|t| t.wraps() != [false, false]).map(|t| (t.wraps(), t.extent().map(|v| v.0)));
         for (i, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
             // How a player other than the first is named in the lines below; the first's lines are
             // the ones a one-player session has always printed.
@@ -6373,6 +6390,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let ride_out = std::mem::take(&mut seat.teleported) && seat.garage.up == Kind::Bike;
             if ride_out {
                 follow.cam.snap = true;
+            }
+            // A seam the bike rode over (MD29) takes the camera over with it, one width, so it lags
+            // on from beside the bike rather than flying the world's width back to it.
+            if seat.garage.up == Kind::Bike
+                && let Some(by) = seams.and_then(|s| seam_moved(s, before.get(i).map(|b| b.bike), seat.sim.bike_pos()))
+            {
+                chase::carry(&mut follow.cam, by);
             }
             // The look-back command (P78), held: the follow camera on its look-back preset until it
             // is let go — L2 under the original's layout, Square under the new one. A ride with MX
