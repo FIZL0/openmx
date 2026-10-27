@@ -8200,16 +8200,24 @@ fn the_nose_first_touchdown_tick_is_the_originals() {
 /// scripts and the job), in `context/capture/s58-slip/`.
 ///
 /// With each, the last tick the bike's path (`origin`) is bit-exact and the last tick all four slip
-/// flags agree, as S58 left them: a ratchet, to raise. The path parts by an ulp first (S107's drift
-/// from tick 1, grown); the slip flags part after the launch's, the brake's and the traverse's landing
-/// off the jump face at tick 124 and after the turn's quaternion sign flip at 130 (journal
-/// 2026-10-23-s58-slip-cases).
+/// flags agree (`u64::MAX`: every tick of the capture): a ratchet, to raise. S58 left them at 82/146,
+/// 96/126, 105/130 and 82/123, parted by S107's tick-1 drift, the landing off the jump face at 124 and
+/// the turn's quaternion sign flip at 130 (journal 2026-10-23-s58-slip-cases). The flip is the stunt
+/// clocks' copy-back (S67): the frame ends on `mat4_to_quat` of the node's matrix, whose largest
+/// candidate goes from `y` to `w` at 130, so the sign does; the port has done it since S67 and S116
+/// raised the pins. The turn's path now parts at 178 by an ulp, after its angular history at 173; the
+/// launch's and the brake's at the landing (124, 106).
 const S58_CASES: [(&str, &str, u64, u64); 4] = [
-    ("turn", "a hard turn at speed on flat dirt", 82, 146),
-    ("launch", "a full-gas launch from standing", 96, 126),
-    ("brake", "a locked brake at speed", 105, 130),
-    ("traverse", "a part-steered ride up the jump face and across a side slope", 82, 123),
+    ("turn", "a hard turn at speed on flat dirt", 177, u64::MAX),
+    ("launch", "a full-gas launch from standing", 123, u64::MAX),
+    ("brake", "a locked brake at speed", 105, u64::MAX),
+    ("traverse", "a part-steered ride up the jump face and across a side slope", u64::MAX, u64::MAX),
 ];
+
+/// S116: the tick the turn's chassis quaternion changes sign in the original — the same rotation,
+/// written by the copy-back after the integrate, so the quaternion's history keeps the old sign for a
+/// tick. The turn's replay must cross it.
+const S116_FLIP: u64 = 130;
 
 /// How many ticks ahead of a quarter-speed row's ride state its pad is. A row at tick `t` (the ride
 /// as it is after tick `t`, [`quarter_ticks`]) carries the control state tick `t + 2` rides on, which
@@ -8353,8 +8361,21 @@ fn the_slip_cases_replay_from_the_save_state() {
                 .collect();
             println!("  agree on every tick: {}", agree.join(" "));
             let first = |lane: &str| parted.iter().find(|(_, d)| d.contains(lane)).map_or(u64::MAX, |(t, _)| *t);
-            assert!(first(".origin[") > path_through, "{case}: the path parts at {}, not after {path_through}", first(".origin["));
-            assert!(first(".slip.") > slip_through, "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
+            // `u64::MAX` asks for every tick, which `>` alone cannot say.
+            let past = |at: u64, through: u64| at > through || at == u64::MAX;
+            assert!(past(first(".origin["), path_through), "{case}: the path parts at {}, not after {path_through}", first(".origin["));
+            assert!(past(first(".slip."), slip_through), "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
+            if case == "turn" {
+                // The capture really has the flip: `w` and the history's `w` change sign a tick apart.
+                let w = |col: &str, t: u64| {
+                    let r = ticks.iter().position(|&k| k == t).unwrap_or_else(|| panic!("no row for tick {t}"));
+                    cell(&cap, r, column(&cap, col).unwrap()).parse::<f32>().unwrap()
+                };
+                let (q, h) = ("ch_quat.w", "ch_quat_hist.w");
+                assert!(w(q, S116_FLIP - 1) < 0.0 && w(q, S116_FLIP) > 0.0, "turn: no quaternion flip at {S116_FLIP}");
+                assert!(w(h, S116_FLIP) < 0.0 && w(h, S116_FLIP + 1) > 0.0, "turn: the history flips with it");
+                assert!(first("chassis.quat") > S116_FLIP + 1, "turn: the quaternion parts at {}", first("chassis.quat"));
+            }
         });
     }
 }
