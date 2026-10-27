@@ -671,6 +671,16 @@ impl Tiled {
         self.every.get_or_insert_with(Props::default)
     }
 
+    /// [`Tiled::every_shape`] and the near sets of the squares around `at` cut ahead of the ride
+    /// (P150), at the load rather than in its first tick (7 ms on world_mxu). Both are kept caches
+    /// and pure functions of the world's source and the square, so the ride is the same.
+    pub fn prepare_near(&mut self, at: Vf) {
+        let [x, z] = near_key(at);
+        for key in [[x, z], [x - 1, z], [x + 1, z], [x, z - 1], [x, z + 1]].into_iter().take(NEAR_KEPT).rev() {
+            self.near(key);
+        }
+    }
+
     /// The near set at square `key` ([`World::wooded_near`], MD28): of [`Tiled::every_shape`],
     /// in its order, every shape whose box on the ground plane comes within
     /// [`world::NEAR_MARGIN`] of the square. Cut once and kept while it is among the last
