@@ -1367,7 +1367,9 @@ pub struct BikeSounds {
     pub decel: List,
     pub clutch: List,
     pub panic: List,
-    pub wreck: List,
+    /// `[Wreck]`, the clank (P144): read by the same loader as a machine's `[<prefix>Wreck]`, with no
+    /// prefix.
+    pub wreck: MachineWreck,
     /// `LowTorqueSpeed` in feet a second (the file's mph, ×1.46666 as the loader does).
     pub low_torque_speed: f32,
     pub airborne_to_decel: f32,
@@ -1381,8 +1383,6 @@ pub struct BikeSounds {
     pub doppler: f32,
     pub near: f32,
     pub far: f32,
-    pub wreck_near: f32,
-    pub wreck_far: f32,
 }
 
 impl BikeSounds {
@@ -1390,8 +1390,6 @@ impl BikeSounds {
         let s = ini::parse(text);
         let params = section(&s, "Params");
         let p = |k: &str, d: f32| params.and_then(|p| p.number(k)).unwrap_or(d);
-        let wreck = section(&s, "Wreck");
-        let w = |k: &str, d: f32| wreck.and_then(|p| p.number(k)).unwrap_or(d);
         BikeSounds {
             idle: List::read(section(&s, "Idle"), lib),
             low: List::read(section(&s, "LowAccel"), lib),
@@ -1401,7 +1399,7 @@ impl BikeSounds {
             decel: List::read(section(&s, "Decel"), lib),
             clutch: List::read(section(&s, "Clutch"), lib),
             panic: List::read(section(&s, "Panic"), lib),
-            wreck: List::read(wreck, lib),
+            wreck: MachineWreck::read(text, "", lib),
             low_torque_speed: p("LowTorqueSpeed", 25.0) * 1.46666,
             airborne_to_decel: p("AirborneTimeToDecel", 0.3),
             rev_midpoint: p("RevMidpoint", 0.311),
@@ -1410,8 +1408,6 @@ impl BikeSounds {
             doppler: p("DopplerFactor", 0.25),
             near: p("MinAttenuationDistance", 20.0),
             far: p("MaxAttenuationDistance", 100.0),
-            wreck_near: w("MinDistance", 30.0),
-            wreck_far: w("MaxDistance", 150.0),
         }
     }
 
@@ -2424,6 +2420,35 @@ pub struct PlaneCrash {
     pub impulse: f32,
 }
 
+/// What the bike's wreck emitter reads in a tick, after the tick (P144). Its words are the bike's:
+/// the wreck reason's copy, the riding collision record's touched flag and the bike's impulse
+/// (`+0x550`). While the rider is down, the riding record is the wreck body's and the impulse is the
+/// wreck body's shock peak, the two equal on every row of P144's capture over S109's fall.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BikeCrash {
+    /// Down, and the clank's gate: wrecked, the record touched, the wreck body's shock peak.
+    pub crash: PlaneCrash,
+    /// The riding bike's impulse this tick: the bottom-out closing speed its ground step took up,
+    /// the largest over the substeps. What the wreck entry's own call reads.
+    pub entry_impulse: f32,
+    /// Where the bike is: the wreck body while down.
+    pub at: [f32; 3],
+}
+
+impl BikeCrash {
+    pub fn of(rider: &game_sim::rider::Rider) -> BikeCrash {
+        let g = rider.ride.mv.g_peak;
+        let p = rider.ride.position();
+        let mut out = BikeCrash { entry_impulse: length([g.x(), g.y(), g.z()]), at: [p.x(), p.y(), p.z()], ..BikeCrash::default() };
+        if let (Some(_), Some(down)) = (rider.state.wreck, rider.crash.as_ref()) {
+            let (b, peak) = (&down.bike, down.bike.body.shock_peak);
+            out.crash = PlaneCrash { wrecked: true, touching: b.record.touching, impulse: length([peak.x(), peak.y(), peak.z()]) };
+            out.at = [b.body.position.x(), b.body.position.y(), b.body.position.z()];
+        }
+        out
+    }
+}
+
 /// A vector's length as the emitter takes it: `sqrt(z² + y² + x²)`, in that order.
 pub fn length(v: [f32; 3]) -> f32 {
     (v[2] * v[2] + v[1] * v[1] + v[0] * v[0]).sqrt()
@@ -2460,6 +2485,27 @@ pub const WRECK_TAIL: f32 = 0.4;
 impl WreckClank {
     /// One tick, `dt` long. The voice started, if one was.
     pub fn tick(&mut self, m: &mut Mixer, w: &MachineWreck, f: &PlaneCrash, at: [f32; 3], dt: f32, dice: &mut Dice) -> Option<VoiceId> {
+        let busy = self.busy(m, at, dt);
+        if !(f.wrecked && f.touching) || busy || f.impulse < w.min_impulse {
+            return None;
+        }
+        self.play(m, w, f.impulse, at, dice)
+    }
+
+    /// The tick of the player's wreck entry (P144), in place of [`WreckClank::tick`]: the entry's own
+    /// call, which asks for nothing but the emitter idle and `impulse` at least `MinImpulse`, and
+    /// plays the same pick at the same level. A fall off the back, with no impulse, is silent.
+    pub fn entry(&mut self, m: &mut Mixer, w: &MachineWreck, impulse: f32, at: [f32; 3], dt: f32, dice: &mut Dice) -> Option<VoiceId> {
+        let busy = self.busy(m, at, dt);
+        if busy || impulse < w.min_impulse {
+            return None;
+        }
+        self.play(m, w, impulse, at, dice)
+    }
+
+    /// Whether anything of the emitter's own still sounds, its tail counted: the voice that plays
+    /// follows `at`, and one that ended starts the tail.
+    fn busy(&mut self, m: &mut Mixer, at: [f32; 3], dt: f32) -> bool {
         let playing = self.voice.filter(|&id| m.playing(id));
         if let Some(id) = playing {
             let gain = m.gain_of(id).unwrap_or(0.0);
@@ -2470,14 +2516,15 @@ impl WreckClank {
             self.tail = (self.tail - dt).max(0.0);
         }
         self.voice = playing;
-        let busy = playing.is_some() || self.tail > 0.0;
-        if !(f.wrecked && f.touching) || busy || f.impulse < w.min_impulse {
-            return None;
-        }
+        playing.is_some() || self.tail > 0.0
+    }
+
+    /// A no-repeat pick of the list at [`wreck_level`] of `impulse`, placed at `at`.
+    fn play(&mut self, m: &mut Mixer, w: &MachineWreck, impulse: f32, at: [f32; 3], dice: &mut Dice) -> Option<VoiceId> {
         let mut last = self.last.unwrap_or(-1);
         let (clip, looping) = w.list.pick(dice, &mut last)?;
         self.last = Some(last);
-        let gain = wreck_level(f.impulse, w.max_impulse) as f32 / 100.0;
+        let gain = wreck_level(impulse, w.max_impulse) as f32 / 100.0;
         let id = m.play(clip, Play { gain, looping, at: Some(at), near: w.near, far: w.far, ..Play::default() });
         self.voice = Some(id);
         Some(id)
@@ -2509,6 +2556,8 @@ pub struct SeatFrame {
     pub plane: Option<(f32, [f32; 3])>,
     /// What the plane's wreck clank reads (P164), while in the plane.
     pub crash: PlaneCrash,
+    /// What the bike's wreck clank reads (P144).
+    pub bike: BikeCrash,
     /// What the shootoff's sound reads (P85).
     pub edge: EdgeFrame,
     /// What the rider's voice reads of the thrown body (P180).
@@ -2524,6 +2573,8 @@ pub struct SeatSound {
     pub engine: Engine,
     plane: PlaneNote,
     pub clank: WreckClank,
+    /// The bike's `[Wreck]` clank (P144), an emitter of its own.
+    pub bike_clank: WreckClank,
     /// The rider's own voice (P180).
     pub voice: RiderVoice,
     last: [i32; 4],
@@ -2544,6 +2595,7 @@ impl SeatSound {
             engine: Engine::new(seed),
             plane: PlaneNote::default(),
             clank: WreckClank::default(),
+            bike_clank: WreckClank::default(),
             voice: RiderVoice::default(),
             last: [-1; 4],
             was_grounded: true,
@@ -2673,13 +2725,20 @@ impl Sound {
                         s.shots.push(id);
                     }
                 }
-                let bike = Play { near: s.bike.wreck_near, far: s.bike.wreck_far, ..near };
-                if let Some((clip, _)) = s.bike.wreck.pick(&mut s.dice, &mut s.last[2]) {
-                    s.shots.push(m.play(clip, bike));
+                // The bike's clank, by the entry's own call (P144): only at `MinImpulse` and over.
+                if let Some(id) = s.bike_clank.entry(m, &s.bike.wreck, f.bike.entry_impulse, f.bike.at, dt, &mut s.dice) {
+                    s.shots.push(id);
                 }
                 s.shots.retain(|&v| m.playing(v));
                 if let Some((clip, _)) = self.world.oh.pick(&mut self.dice, &mut self.last[1]) {
                     m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
+                }
+            }
+            // The bike's clank on the wreck body's hits (P144), every tick but the entry's: the
+            // reason's copy it gates on is set a tick after the reason.
+            if f.wreck.is_none() {
+                if let Some(id) = s.bike_clank.tick(m, &s.bike.wreck, &f.bike.crash, f.bike.at, dt, &mut s.dice) {
+                    s.shots.push(id);
                 }
             }
             // The rider's voice on the thrown body's touches (P180): `[IMPACT]`'s no-repeat pick, the
@@ -2721,7 +2780,7 @@ impl Sound {
         if let Ok(mut m) = self.mixer.lock() {
             s.engine.silence(&mut m);
             s.plane.silence(&mut m);
-            if let Some(id) = s.clank.voice() {
+            for id in s.clank.voice().into_iter().chain(s.bike_clank.voice()) {
                 m.stop(id);
             }
             if let Some(id) = s.voice.voice() {
@@ -2743,6 +2802,7 @@ impl Sound {
             s.shots.clear();
             s.held = false;
             s.clank.hushed();
+            s.bike_clank.hushed();
             s.voice.hushed();
             // A pause in a cannonball must not boom again on the way out: the rider's reasons stay.
             s.edge.hushed();
