@@ -4460,8 +4460,8 @@ fn splat_passes_wgsl(paint: &Splat, first: u32) -> String {
 
 /// The ground's shader for a world (MD9, [`WorldPaint`]): each map's pages over the cells it owns,
 /// as [`ground_pages_wgsl`] draws one map's, and on a join every near map's read mirrored back
-/// inside it and blended by [`crate::terrain::Regions::weights`], with the dirt's trace. Each map's
-/// numbers are written into the shader, one block of code a map.
+/// inside it and blended by [`crate::terrain::Regions::weights`]. Each map's numbers are written
+/// into the shader, one block of code a map.
 fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
     let f = |v: f32| format!("{v:?}");
     let mut s = String::from(VIEW_WGSL);
@@ -4487,15 +4487,21 @@ fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
 fn reach(p: vec2f, r: vec4f) -> f32 {{
   let d = max(length(max(max(r.xy - p, p - r.zw), vec2f(0.0))), 0.001);
   let w = max(1.0 / d - 1.0 / {reach}, 0.0);
-  return w * w;
+  let f = {reach} / max(d, {reach});
+  let f2 = f * f;
+  let f4 = f2 * f2;
+  return w * w + {far} * f4 * f4;
 }}
 fn mirror1(v: f32, lo: f32, hi: f32) -> f32 {{
-  let top = max(hi - 0.001, lo);
-  return select(select(v, max(top - (v - top), lo), v > top), min(lo + (lo - v), top), v < lo);
+  let span = max(hi - 0.001, lo) - lo;
+  if span <= 0.0 {{ return lo; }}
+  let t = (v - lo) - floor((v - lo) / (2.0 * span)) * (2.0 * span);
+  return lo + select(t, 2.0 * span - t, t > span);
 }}
 fn mirror(p: vec2f, r: vec4f) -> vec2f {{ return vec2f(mirror1(p.x, r.x, r.z), mirror1(p.y, r.y, r.w)); }}
 ",
         reach = f(crate::terrain::BLEND_REACH),
+        far = f(crate::terrain::FAR_WEIGHT),
     ));
     let dirt = format!("vec3f({}, {}, {})", f(w.dirt[0]), f(w.dirt[1]), f(w.dirt[2]));
     let rect = |i: usize| {
@@ -4572,11 +4578,11 @@ fn mirror(p: vec2f, r: vec4f) -> vec2f {{ return vec2f(mirror1(p.x, r.x, r.z), m
     for i in 0..n {
         s.push_str(&format!("    if owner == {i} {{ texel = tile{i}(xz, gx, gy); }}\n"));
     }
-    s.push_str(&format!("  }} else {{\n    var total = {};\n", f(crate::terrain::DIRT_WEIGHT)));
+    s.push_str("  } else {\n    var total = 0.0;\n");
     for i in 0..n {
         s.push_str(&format!("    let w{i} = reach(xz, {});\n    total += w{i};\n", rect(i)));
     }
-    s.push_str(&format!("    var c = {dirt} * ({} / total);\n", f(crate::terrain::DIRT_WEIGHT)));
+    s.push_str("    var c = vec3f(0.0);\n");
     for i in 0..n {
         s.push_str(&format!("    if w{i} / total > {} {{ c += tile{i}(xz, gx, gy) * (w{i} / total); }}\n", f(1.0 / 512.0)));
     }

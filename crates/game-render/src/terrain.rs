@@ -656,15 +656,21 @@ fn leaf_page(terrain: &game_sim::track::Terrain, lx: u32, lz: u32) -> Option<u16
 // every near map's paint blended by how near the map is, so the join starts as the map behind it and
 // ends as the map ahead, with no step anywhere. A map's paint is read past its edge by mirroring the
 // point back inside it: the mirror is continuous at the edge, so the join begins on exactly the
-// map's last pixel and carries its texture on, not one leaf's quarter-page repeated. Nothing in the
-// original covers several maps; this is by eye.
+// map's last pixel and carries its texture on, not one leaf's quarter-page repeated, and past the
+// map's far side it folds back again, so a join wider than a map still reads the map's own ground
+// (MD48). Nothing in the original covers several maps; this is by eye.
 
-/// Feet from a map's ground within which it still tints a join: past it a map plays no part.
+/// Feet from a map's ground within which it tints a join strongly; past it a map holds only by
+/// [`FAR_WEIGHT`].
 pub const BLEND_REACH: f32 = 1500.0;
 
-/// How strongly dirt holds where no map is near: a map `BLEND_REACH / 2` away outweighs it about
-/// two thousand times, so the dirt shows only in a hole well clear of every map.
-pub const DIRT_WEIGHT: f32 = 1.0 / (BLEND_REACH * BLEND_REACH * 2048.0);
+/// How strongly a map holds join ground past [`BLEND_REACH`] of every map: `FAR_WEIGHT ·
+/// (BLEND_REACH / d)⁸` there and `FAR_WEIGHT` within it, so far out the nearest maps share the
+/// ground, fading by distance with no seam, and near one a map `BLEND_REACH / 2` away outweighs it
+/// about two thousand times. MD48: this was dirt, one flat beige
+/// colour over every join more than `BLEND_REACH` from every map (a plane between Bridgeport and
+/// Dallas, 90 of world_mxu's 626 joins).
+pub const FAR_WEIGHT: f32 = 1.0 / (BLEND_REACH * BLEND_REACH * 2048.0);
 
 /// The world rectangles the maps of a world own, `[x0, z0, x1, z1]` in feet, half-open, in the
 /// world's order (a point two claim is the first's), and how each tints the ground and the light
@@ -682,31 +688,22 @@ impl Regions {
 
     /// Each map's weight at a point, not normalised: 1 for the owner and 0 for every other where a
     /// map owns it, and otherwise `(1/d - 1/BLEND_REACH)²` of the distance `d` to each map's ground,
-    /// which grows without bound at a map's edge and is 0 from `BLEND_REACH` out.
+    /// which grows without bound at a map's edge and is 0 from `BLEND_REACH` out, plus the
+    /// [`FAR_WEIGHT`] every map keeps at any distance.
     pub fn weights(&self, x: f32, z: f32) -> Vec<f32> {
         if let Some(o) = self.owner(x, z) {
             return (0..self.owned.len()).map(|i| if i == o { 1.0 } else { 0.0 }).collect();
         }
-        self.owned
-            .iter()
-            .map(|r| {
-                let d = distance_to(r, x, z).max(1e-3);
-                (1.0 / d - 1.0 / BLEND_REACH).max(0.0).powi(2)
-            })
-            .collect()
+        self.owned.iter().map(|r| reach(distance_to(r, x, z))).collect()
     }
 
-    /// Each map's share of the light and the sky at a point: [`Regions::weights`] summing to one, or
-    /// the nearest map's alone where none is within reach.
+    /// Each map's share of the ground, the light and the sky at a point: [`Regions::weights`]
+    /// summing to one.
     pub fn shares(&self, x: f32, z: f32) -> Vec<f32> {
         let mut w = self.weights(x, z);
         let total: f32 = w.iter().sum();
         if total > 0.0 {
             w.iter_mut().for_each(|w| *w /= total);
-        } else if let Some(near) = (0..self.owned.len()).min_by(|&a, &b| {
-            distance_to(&self.owned[a], x, z).total_cmp(&distance_to(&self.owned[b], x, z))
-        }) {
-            w[near] = 1.0;
         }
         w
     }
@@ -725,16 +722,23 @@ fn distance_to(r: &[f32; 4], x: f32, z: f32) -> f32 {
     (dx * dx + dz * dz).sqrt()
 }
 
-/// `v` reflected into `lo..hi` across the edge it is past, kept a hair inside the far edge.
+/// A map's weight `d` feet from its ground ([`Regions::weights`]).
+fn reach(d: f32) -> f32 {
+    let d = d.max(1e-3);
+    (1.0 / d - 1.0 / BLEND_REACH).max(0.0).powi(2) + FAR_WEIGHT * (BLEND_REACH / d.max(BLEND_REACH)).powi(8)
+}
+
+/// `v` reflected into `lo..hi` across the edge it is past, kept a hair inside the far edge, and
+/// folded back and forth as often as it takes (MD48: it stopped at the far edge, and a join wider
+/// than the map smeared that edge's one pixel across the rest).
 fn mirror(v: f32, lo: f32, hi: f32) -> f32 {
     let top = (hi - 1e-3).max(lo);
-    if v < lo {
-        (lo + (lo - v)).min(top)
-    } else if v > top {
-        (top - (v - top)).max(lo)
-    } else {
-        v
+    let span = top - lo;
+    if span <= 0.0 {
+        return lo;
     }
+    let t = (v - lo).rem_euclid(2.0 * span);
+    lo + if t > span { 2.0 * span - t } else { t }
 }
 
 /// One map of a world as its ground is painted: where its terrain's sample (0, 0) is, and its pages.
@@ -808,14 +812,17 @@ impl WorldPaint {
     }
 
     /// The ground's colour before any light at a point of the world (0..255): the owner's own paint,
-    /// or on a join every near map's blended with a trace of dirt.
+    /// or on a join every near map's blended.
     pub fn paint(&self, x: f32, z: f32) -> [f32; 3] {
         if let Some(o) = self.regions.owner(x, z) {
             return self.tile_paint(o, x, z);
         }
         let w = self.regions.weights(x, z);
-        let total: f32 = w.iter().sum::<f32>() + DIRT_WEIGHT;
-        let mut c = self.dirt.map(|d| d * DIRT_WEIGHT / total);
+        let total: f32 = w.iter().sum();
+        if total <= 0.0 {
+            return self.dirt;
+        }
+        let mut c = [0.0; 3];
         for (i, &w) in w.iter().enumerate() {
             if w / total > 1.0 / 512.0 {
                 let t = self.tile_paint(i, x, z);
