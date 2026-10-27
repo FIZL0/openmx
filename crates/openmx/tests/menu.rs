@@ -1117,8 +1117,8 @@ fn a_custom_camera_preset_joins_the_cycle_with_its_own_numbers() {
 
 /// P179 (1): Save as New Preset saves from wherever the Camera page is. On All Presets it copies the
 /// preset the seat's rides start on, framed as All Presets frames it: the disc's first in the cycle
-/// (the shell's own start) before the camera button has moved, else where it was last left, and the
-/// biplane's when the seat starts on the biplane. The typed name lands in the seat's set, the camera
+/// (the shell's own start) before the camera button has moved, else where it was last left, on the
+/// bike every ride starts on (P177). The typed name lands in the seat's set, the camera
 /// button reaches it, and it is there after a restart.
 #[test]
 fn a_camera_preset_saves_from_all_presets_and_survives_a_restart() {
@@ -1172,19 +1172,6 @@ fn a_camera_preset_saves_from_all_presets_and_survives_a_restart() {
     let near = m.settings.camera_sets[0].customs(Machine::Bike).find(|o| o.name == "Near").cloned().unwrap();
     assert_eq!((near.base.as_str(), near.look), ("Freestyle Cam", look));
 
-    // A seat that starts on the biplane copies the biplane's.
-    m.settings.machines[0] = Machine::Biplane;
-    down_to(&mut m, &mut r, Key::CameraPreset);
-    tap_until(&mut m, &mut r, Control::Right, |m| m.camera_picked().is_none());
-    down_to(&mut m, &mut r, Key::CameraSave);
-    tap(&mut m, &mut r, Control::Cross);
-    type_keys(&mut m, &mut r, "high");
-    tap(&mut m, &mut r, Control::Start);
-    let high = m.settings.camera_sets[0].customs(Machine::Biplane).find(|o| o.name == "High").cloned().unwrap();
-    assert_eq!((high.base.as_str(), high.look), (m.camera_names[1][0].as_str(), Look::of(&m.settings.cameras[0], Machine::Biplane)));
-    let mut cam = follow_on(laid(&m, 0, Machine::Biplane, &plane), &m.camera_names[1][0].clone());
-    assert!(walk(&mut cam).contains(&"High".to_string()));
-
     // A restart: written, read back into a new menu, the Preset row and the camera button have them.
     let dir = scratch("camera-save-all");
     menu::save(&dir, &m.settings, &m.controls).unwrap();
@@ -1193,7 +1180,7 @@ fn a_camera_preset_saves_from_all_presets_and_survives_a_restart() {
     let mut again = Menu::new(settings, controls);
     again.camera_names = m.camera_names.clone();
     let labels: Vec<String> = again.camera_choices().iter().map(|p| p.label()).collect();
-    for want in ["Wide (Mine)", "Near (Mine)", "Biplane: High (Mine)"] {
+    for want in ["Wide (Mine)", "Near (Mine)"] {
         assert!(labels.contains(&want.to_string()), "{labels:?}");
     }
     let mut cam = follow_on(laid(&again, 0, Machine::Bike, &bike), "Race Cam 1");
@@ -4798,7 +4785,7 @@ fn the_original_game_page_is_a_page_of_the_ride_tab() {
     assert!(m.tabs(Screen::Original).is_empty(), "no tabs of its own");
     let keys: Vec<Key> = m.page().into_iter().filter(|r| r.selectable()).map(|r| r.key).collect();
     let mut want = vec![Key::Original];
-    want.extend(Departure::ALL.into_iter().filter(|d| menu::SETTINGS_TABS[d.tab()] != "Graphics").map(Key::Departure));
+    want.extend(Departure::ALL.into_iter().filter(|d| menu::SETTINGS_TABS[d.tab()] == "Ride").map(Key::Departure));
     assert_eq!(keys, want);
     // L1 and R1 do nothing here; Cross the switch.
     tap(&mut m, &mut r, Control::R1);

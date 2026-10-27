@@ -337,16 +337,15 @@ impl super::Menu {
     }
 
     /// The preset Save as New Preset copies (P179): the Preset row's, or on All Presets the one the
-    /// seat's rides start on, on the machine they start on — where its camera button last left
-    /// it, else the disc's first in the cycle. `None` with no presets to copy at all.
+    /// seat's rides start on, on the bike every ride starts on (P177) — where its camera button last
+    /// left it, else the disc's first in the cycle. `None` with no presets to copy at all.
     pub fn camera_to_save(&self) -> Option<Pick> {
         if let Some(pick) = self.camera_picked() {
             return Some(pick);
         }
         let seat = self.camera_seat();
-        let machine = self.settings.machines[seat];
-        let m = usize::from(machine == Machine::Biplane);
-        let start = &self.settings.camera_sets[seat].start[m];
+        let machine = Machine::Bike;
+        let start = &self.settings.camera_sets[seat].start[0];
         let choices = self.camera_choices();
         let on = |p: &&Pick| p.machine == machine;
         choices
