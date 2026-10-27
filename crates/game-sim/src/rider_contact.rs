@@ -281,6 +281,19 @@ fn collidables(seats: &[Seat<'_>]) -> Vec<Collidable> {
 /// **The tick's contacts**: every listed bike's list emptied, then every one searched in player order,
 /// from where `seats` stand. One list a player (empty for one off the list).
 pub fn gather(seats: &[Seat<'_>], dt: F) -> Vec<Vec<Contact>> {
+    gather_near(seats, dt, &|_, at| at)
+}
+
+/// The copy of a point `at` nearest another, `from` (MD44): [`crate::nearest_copy`] on a world that
+/// wraps, `at` itself on any other.
+pub type Near<'a> = &'a dyn Fn(Vf, Vf) -> Vf;
+
+/// [`gather`] on a world that wraps (MD44, the port's own): each bike searched with every other where
+/// it is nearest it (`near`, from its transform's origin), so two bikes a seam apart strike as two a
+/// few feet apart do. The struck bike's half of a contact is put back by its own copy: its world
+/// point is the copy nearest where it really stands. On a world that does not wrap `near` answers
+/// the point it is given, and this is [`gather`] to the bit.
+pub fn gather_near(seats: &[Seat<'_>], dt: F, near: Near<'_>) -> Vec<Vec<Contact>> {
     let mut records: Vec<Record> = seats
         .iter()
         .map(|s| Record {
@@ -302,9 +315,27 @@ pub fn gather(seats: &[Seat<'_>], dt: F) -> Vec<Vec<Contact>> {
         if !seats[me].listed() {
             continue;
         }
+        let from = seats[me].at.0[3];
+        let placed: Vec<Seat<'_>> = seats
+            .iter()
+            .enumerate()
+            .map(|(j, s)| {
+                let mut s = *s;
+                if j != me {
+                    s.at.0[3] = near(from, s.at.0[3]);
+                }
+                s
+            })
+            .collect();
+        let before: Vec<usize> = records.iter().map(|r| r.contacts.len()).collect();
         let ray = ray_probe::Record { listed: true, capacity: CAPACITY, one_per_ray: true, ..ray_probe::Record::default() };
-        let mut probe = Probe { strikes: Strikes { seats, ray }, objects: objects.clone(), me };
+        let mut probe = Probe { strikes: Strikes { seats: &placed, ray }, objects: objects.clone(), me };
         contact_search::collide(&mut records, me, None, None, &mut probe, dt);
+        for (o, r) in records.iter_mut().enumerate().filter(|&(o, _)| o != me) {
+            for c in &mut r.contacts[before[o]..] {
+                c.point = near(seats[o].at.0[3], c.point);
+            }
+        }
     }
     records.into_iter().map(|r| r.contacts).collect()
 }
@@ -465,22 +496,36 @@ pub fn alone(ride: &crate::ride::Ride, p: &Phy, contacts: Vec<Contact>) -> Bump 
 }
 
 /// `riders`' contacts, or `None` when none of them carries its collision files.
-fn contacts_of(riders: &[(&Rider, bool)], dt: F) -> Option<Vec<Vec<Contact>>> {
+fn contacts_of(riders: &[(&Rider, bool)], dt: F, near: Near<'_>) -> Option<Vec<Vec<Contact>>> {
     if riders.iter().all(|(r, _)| r.bike_col.is_none()) {
         return None;
     }
     let seats: Vec<Seat<'_>> = riders.iter().map(|&(r, seated)| seat_of(r, seated)).collect();
-    Some(gather(&seats, dt))
+    Some(gather_near(&seats, dt, near))
 }
 
-fn bump_of(riders: &[(&Rider, &Phy)], me: usize, contacts: Vec<Contact>) -> Bump {
-    Bump {
-        me,
-        contacts,
-        colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(),
-        vehicles: riders.iter().map(|&(r, p)| vehicle_of(r, p)).collect(),
-        movers: Vec::new(),
-    }
+/// The bump of player `me`, every other player's chassis where it is nearest `me`'s (`near`, MD44):
+/// where [`gather_near`] struck it, so the levers the resolve measures from its centre are the
+/// few feet they are, not a width.
+fn bump_of(riders: &[(&Rider, &Phy)], me: usize, contacts: Vec<Contact>, near: Near<'_>) -> Bump {
+    let from = riders[me].0.ride.transform().0[3];
+    let vehicles = riders
+        .iter()
+        .enumerate()
+        .map(|(j, &(r, p))| {
+            let mut v = vehicle_of(r, p);
+            if j != me {
+                v.node.origin = near(from, v.node.origin);
+            }
+            v
+        })
+        .collect();
+    Bump { me, contacts, colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(), vehicles, movers: Vec::new() }
+}
+
+/// `at` as it is: the copy of a point on a world that does not wrap.
+fn here(_: Vf, at: Vf) -> Vf {
+    at
 }
 
 /// What `bump`'s resolution did to another player's chassis: its velocity and its rates. The two
@@ -504,13 +549,26 @@ impl crate::Sim {
     /// stepped; `None` when no bike carries its collision files, which is every session before S78.
     pub fn bike_contacts(&self, dt: F) -> Option<Vec<Vec<Contact>>> {
         let riders: Vec<(&Rider, bool)> = (0..self.players()).map(|i| (self.rider_of(i), true)).collect();
-        contacts_of(&riders, dt)
+        contacts_of(&riders, dt, &here)
+    }
+
+    /// [`crate::Sim::bike_contacts`] on `world`: across its seams when it wraps (MD44,
+    /// [`gather_near`]).
+    pub fn bike_contacts_in(&self, dt: F, world: &dyn World) -> Option<Vec<Vec<Contact>>> {
+        let riders: Vec<(&Rider, bool)> = (0..self.players()).map(|i| (self.rider_of(i), true)).collect();
+        contacts_of(&riders, dt, &|from, at| crate::nearest_copy(world, from, at))
     }
 
     /// Player `me`'s contacts, with every player's object and chassis as they stand now.
     pub fn bump(&self, me: usize, contacts: Vec<Contact>) -> Bump {
         let riders: Vec<(&Rider, &Phy)> = (0..self.players()).map(|i| (self.rider_of(i), self.phy_of(i))).collect();
-        bump_of(&riders, me, contacts)
+        bump_of(&riders, me, contacts, &here)
+    }
+
+    /// [`crate::Sim::bump`] on `world`: every other chassis where it is nearest `me`'s (MD44).
+    pub fn bump_in(&self, me: usize, contacts: Vec<Contact>, world: &dyn World) -> Bump {
+        let riders: Vec<(&Rider, &Phy)> = (0..self.players()).map(|i| (self.rider_of(i), self.phy_of(i))).collect();
+        bump_of(&riders, me, contacts, &|from, at| crate::nearest_copy(world, from, at))
     }
 
     /// What `bump` did to the other players' chassis, written back ([`bumped_one`]).
@@ -550,13 +608,29 @@ pub fn among(sims: &[Sim], seated: &[bool], dt: F) -> Option<Vec<Vec<Contact>>> 
         .enumerate()
         .map(|(i, s)| (&s.rider, seated.get(i).copied().unwrap_or(false) && s.plane.is_none()))
         .collect();
-    contacts_of(&riders, dt)
+    contacts_of(&riders, dt, &here)
+}
+
+/// [`among`] on `world`: across its seams when it wraps (MD44, [`gather_near`]).
+pub fn among_in(sims: &[Sim], seated: &[bool], dt: F, world: &dyn World) -> Option<Vec<Vec<Contact>>> {
+    let riders: Vec<(&Rider, bool)> = sims
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (&s.rider, seated.get(i).copied().unwrap_or(false) && s.plane.is_none()))
+        .collect();
+    contacts_of(&riders, dt, &|from, at| crate::nearest_copy(world, from, at))
 }
 
 /// Seat `me`'s contacts, for [`Sim::step_bumped`].
 pub fn bump_among(sims: &[Sim], me: usize, contacts: Vec<Contact>) -> Bump {
     let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
-    bump_of(&riders, me, contacts)
+    bump_of(&riders, me, contacts, &here)
+}
+
+/// [`bump_among`] on `world`: every other seat's chassis where it is nearest `me`'s (MD44).
+pub fn bump_among_in(sims: &[Sim], me: usize, contacts: Vec<Contact>, world: &dyn World) -> Bump {
+    let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
+    bump_of(&riders, me, contacts, &|from, at| crate::nearest_copy(world, from, at))
 }
 
 /// What seat `bump.me`'s step did to the other seats' chassis, written back.

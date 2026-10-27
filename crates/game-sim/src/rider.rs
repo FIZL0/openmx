@@ -349,38 +349,22 @@ impl Rider {
     /// **Over a seam** (MD29, the port's own): on a world that wraps, a rider whose chassis has
     /// crossed a seam is moved back one width on that axis ([`Rider::shift`]), and the answer is the
     /// widths it was past, `[x, z]`: `1` past the far seam (moved back by the width, exactly), `-1`
-    /// short of the near one (moved on by it, rounding to the far side's last bit). Nothing moves
-    /// while the rider is down or the riding bodies are up: everything a ride asks is asked past a
-    /// seam as well ([`crate::tiles::Tiled::fold`]), and the put-back sets the bike down inside the
-    /// world, where the next riding tick looks again. Every peer asks after the same tick, from the
-    /// same state, so a session stays in step.
+    /// short of the near one (moved on by it, rounding to the far side's last bit). Every peer asks
+    /// after the same tick, from the same state, so a session stays in step.
+    ///
+    /// While the rider is down (MD44) it is the wreck bike's body that is asked, and the whole wreck
+    /// moves with it — the bike, the ragdoll, the chassis left where it wrecked — so a wreck thrown
+    /// over a seam lies on the far side as one; the riding ragdoll's bones move with the chassis
+    /// ([`Rider::shift`]).
     pub fn wrap_round(&mut self, world: &dyn World) -> [i8; 2] {
         let wrap = world.wrap();
         let Some(area) = world.area().filter(|_| wrap != [false, false]) else { return [0, 0] };
-        if self.state.wreck.is_some() || self.crash.is_some() || self.ragdoll.is_some() || self.riding.is_some() {
-            return [0, 0];
-        }
-        let at = self.ride.chassis.cofg_world;
-        let lap = |on: bool, v: f32, side: F| -> i8 {
-            if !on {
-                0
-            } else if F(v) >= side {
-                1
-            } else if v < 0.0 {
-                -1
-            } else {
-                0
-            }
-        };
-        let laps = [lap(wrap[0], at.x(), area.width), lap(wrap[1], at.z(), area.depth)];
+        let at = self.crash.as_ref().map_or(self.ride.chassis.cofg_world, |c| c.bike.body.position);
+        let laps = [crate::seam::lap(wrap[0], at.x(), area.width), crate::seam::lap(wrap[1], at.z(), area.depth)];
         if laps == [0, 0] {
             return laps;
         }
-        let by = |lap: i8, side: F| match lap {
-            1 => F::ZERO - side,
-            -1 => side,
-            _ => F::ZERO,
-        };
+        let by = crate::seam::by;
         self.shift([by(laps[0], area.width), by(laps[1], area.depth)], [area.width, area.depth]);
         laps
     }
@@ -391,6 +375,9 @@ impl Rider {
     /// record from before the crossing is a place in the world already. The put-back's mesh query
     /// gathers afresh: what it kept was gathered on the other side. Velocities, forces, normals and
     /// everything in the bike's own frame are not places and do not move.
+    ///
+    /// And the bodies (MD44, [`crate::seam`]): the riding ragdoll's, a wreck's bike and ragdoll, and
+    /// the ragdoll drawn on a put-back's tick.
     pub fn shift(&mut self, by: [F; 2], sides: [F; 2]) {
         let moved = |v: Vf| Vf::new((F(v.x()) + by[0]).0, v.y(), (F(v.z()) + by[1]).0, v.w());
         let ride = &mut self.ride;
@@ -412,6 +399,15 @@ impl Rider {
         ride.back_search = None;
         for m in &mut self.drawn {
             m.0[3] = moved(m.0[3]);
+        }
+        if let Some(r) = self.riding.as_deref_mut() {
+            crate::seam::riding(r, by);
+        }
+        if let Some(c) = self.crash.as_mut() {
+            crate::seam::crash(c, by);
+        }
+        for d in self.ragdoll.iter_mut().chain(self.ragdoll_shown.as_deref_mut()) {
+            crate::seam::down(d, by);
         }
     }
 
