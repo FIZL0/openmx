@@ -258,6 +258,7 @@ fn a_particle_ages_grows_moves_drags_and_falls_in_that_order() {
     let mut p = Particle {
         emitter: 0,
         at: v3(0.0, 0.0, 0.0),
+        was: v3(0.0, 0.0, 0.0),
         vel: v3(10.0, 0.0, 0.0),
         size: 1.0,
         growth: 2.0,
@@ -610,6 +611,7 @@ fn falling(y: f32, vy: f32) -> Particle {
     Particle {
         emitter: 0,
         at: v3(1.0, y, 2.0),
+        was: v3(1.0, y, 2.0),
         vel: v3(4.0, vy, -2.0),
         size: 1.0,
         growth: 0.0,

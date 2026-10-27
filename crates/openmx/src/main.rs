@@ -6110,20 +6110,6 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let place = &mut world.place;
             fx.step_over(&plane_fx_frame(plane, binds), dt.0, &mut |at| plane_fx_ground(place, at));
         }
-        // The bikes' (P74): a frame for each seat, off its rider as the simulation left them. A seat
-        // with the plane up has no bike in the world: its emitters are off and what is in the air
-        // runs out. Nobody's under `--overview` (P166), which draws no bike.
-        if simulated && !args.overview && let Some(list) = &bike_fx_list {
-            bike_fx.resize_with(world.seats.len(), || list.clone());
-            let place = &mut world.place;
-            for ((seat, rig), fx) in world.seats.iter().zip(&rigs).zip(&mut bike_fx) {
-                let frame = match seat.garage.up {
-                    Kind::Bike => bike_fx_frame(fx, &seat.sim.rider, rig, &assets, place),
-                    _ => particles::PlaneFrame::default(),
-                };
-                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
-            }
-        }
         // The track's (V45): a frame for each frame simulated, as the bikes' are.
         if simulated && let Some(fx) = &mut track_fx {
             let place = &mut world.place;
@@ -6609,6 +6595,22 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             ridden.push(rider);
             stages.mark(stages::Stage::Camera);
         }
+        // The bikes' (P74): a frame for each seat, off its rider as the simulation left them and its
+        // chassis as this tick posed it (P162: read before the pose, the tire nodes were the tick
+        // before's swing arm and bars on this tick's placement). A seat
+        // with the plane up has no bike in the world: its emitters are off and what is in the air
+        // runs out. Nobody's under `--overview` (P166), which draws no bike.
+        if simulated && !args.overview && let Some(list) = &bike_fx_list {
+            bike_fx.resize_with(world.seats.len(), || list.clone());
+            let place = &mut world.place;
+            for ((seat, rig), fx) in world.seats.iter().zip(&rigs).zip(&mut bike_fx) {
+                let frame = match seat.garage.up {
+                    Kind::Bike => bike_fx_frame(fx, &seat.sim.rider, rig, &assets, place),
+                    _ => particles::PlaneFrame::default(),
+                };
+                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
+            }
+        }
         perf.lap(Stage::Scene, scene_at, spent);
 
         // The frame's sound (P42), off what the ride just did, heard from every view's camera. A
@@ -7083,9 +7085,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
             let draw_at = Instant::now();
             let scene = Scene3 { views: &views, poses: &gpu_poses, overlay: &gpu_patches, sprites: &gpu_sprites, light: &light };
-            let mut sprites = plane_fx.as_ref().map_or_else(Vec::new, |(fx, _)| plane_sprites(fx));
-            sprites.extend(bike_fx.iter().flat_map(plane_sprites));
-            sprites.extend(track_fx.iter().flat_map(|t| plane_sprites(&t.fx)));
+            let mut sprites = plane_fx.as_ref().map_or_else(Vec::new, |(fx, _)| plane_sprites(fx, blend.0));
+            sprites.extend(bike_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
+            sprites.extend(track_fx.iter().flat_map(|t| plane_sprites(&t.fx, blend.0)));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -7375,12 +7377,15 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The plane's particles (P62), after the models and before the overlay, as the GPU draws
             // them, two triangles a square in the count.
             if let (Some((fx, _)), Some(sheet)) = (&plane_fx, &soft_sheet) {
-                tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
+                tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, blend.0), &light);
             }
             // And the bikes' (P74), the same way.
             if let Some(sheet) = &soft_sheet {
-                for fx in bike_fx.iter().chain(track_fx.iter().map(|t| &t.fx)) {
-                    tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx), &light);
+                for (p, fx) in bike_fx.iter().enumerate() {
+                    tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, fx_blend(blend.0, &cut, p)), &light);
+                }
+                for fx in track_fx.iter().map(|t| &t.fx) {
+                    tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, blend.0), &light);
                 }
             }
             // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
@@ -8486,16 +8491,22 @@ fn tire_mark_glow(marks: &[tire_tracks::Tracks], texture: usize) -> game_render:
 }
 
 /// The plane's particles as the GPU draws them.
-fn plane_sprites(fx: &particles::PlaneFx) -> Vec<game_render::gpu::Particle> {
-    fx.drawn()
+fn plane_sprites(fx: &particles::PlaneFx, by: f32) -> Vec<game_render::gpu::Particle> {
+    fx.drawn_at(by)
         .iter()
         .map(|d| game_render::gpu::Particle { at: [d.at.x, d.at.y, d.at.z], size: d.size, uv: d.uv, alpha: d.alpha, _pad: [0.0; 3] })
         .collect()
 }
 
+/// How far between its last two ticks seat `p`'s particles are drawn (P162): the picture's blend, as
+/// its bike is, and the last tick where the seat's picture cuts this frame.
+fn fx_blend(blend: f32, cut: &[bool], p: usize) -> f32 {
+    if cut.get(p).copied().unwrap_or(true) { 1.0 } else { blend }
+}
+
 /// The plane's particles as the software path draws them (P62).
-fn plane_particles(fx: &particles::PlaneFx) -> Vec<game_render::particle::Particle> {
-    fx.drawn()
+fn plane_particles(fx: &particles::PlaneFx, by: f32) -> Vec<game_render::particle::Particle> {
+    fx.drawn_at(by)
         .iter()
         .map(|d| game_render::particle::Particle { at: [d.at.x, d.at.y, d.at.z], size: d.size, uv: d.uv, alpha: d.alpha })
         .collect()
