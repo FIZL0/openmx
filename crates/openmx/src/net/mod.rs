@@ -318,6 +318,39 @@ impl<S: Clone + 'static> Netplay<S> {
         Ok(())
     }
 
+    /// One more player on this machine takes a seat in the ride under way (N20), on controller preset
+    /// `preset`: the host seats them as it takes a joiner on ([`admit`]), every machine at one tick,
+    /// and this machine's [`Lineup::mine`] has the new seat from that tick. A guest asks the host; the
+    /// host seats its own at once if it can. Leaving that seat again is [`Netplay::leave`].
+    pub fn sit(&mut self, preset: u8) -> Result<(), String> {
+        if self.waiting() {
+            return Err("not in the ride yet".into());
+        }
+        if self.end.is_some() || self.leave.leaving() {
+            return Err("this machine is leaving the ride".into());
+        }
+        if self.host() {
+            let seat = admit::sit(self, &self.me.clone(), preset)?;
+            self.say(format!("online: a player here takes seat {} at the next tick every machine agrees", seat + 1));
+            return Ok(());
+        }
+        let host = self.lineup.host().to_string();
+        self.link.send(&host, Msg::Sit { preset });
+        self.say("online: asked the host for a seat for a player here".into());
+        Ok(())
+    }
+
+    /// The host: guest `from` asked for a seat for one more of its players (N20).
+    fn sat(&mut self, from: &str, preset: u8) {
+        if !self.host() {
+            return;
+        }
+        match admit::sit(self, from, preset) {
+            Ok(seat) => self.say(format!("online: {from} adds a player on seat {} at the next tick every machine agrees", seat + 1)),
+            Err(e) => self.say(format!("online: {from} cannot add a player: {e}")),
+        }
+    }
+
     /// This machine's seats `seats` leave the ride (N11, the pause's Leave Session; every seat it
     /// has when empty): they go at one tick on every machine, and the others ride on ([`leave`]).
     /// The host leaving hands the ride to the peer in the first seat left. Once every seat of this
@@ -432,6 +465,7 @@ impl<S: Clone + 'static> Netplay<S> {
             Msg::End(why) => self.finish(why),
             Msg::Leave { seats } => leave::heard(self, from, seats),
             Msg::Mine { to } => self.mine(from, &to),
+            Msg::Sit { preset } => self.sat(from, preset),
         }
     }
 

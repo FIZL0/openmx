@@ -1023,6 +1023,69 @@ fn a_lobby_ride_draws_each_peer_in_their_own_look() {
     let _ = go.leave();
 }
 
+/// N20, end to end over two real lobbies on the LAN: in a running lobby ride a second player on the
+/// guest's machine takes a seat — the room's first open one, the host seating them at a tick both
+/// machines take — and rides it on their own pad and preset as the guest's shell seat 1, right
+/// after its first player's (a view of their own); then they leave it again from their pause and the
+/// two first players ride on, the two machines' settled ticks agreeing all through.
+#[test]
+fn a_second_player_on_an_online_machine_sits_down_and_leaves_again() {
+    use game_sim::world::Flat;
+    let (hn, gn) = (Arc::new(lan("Hosty", 1)), Arc::new(lan("Guesty", 1)));
+    let (mut h, mut hr) = fresh("Hosty", "thq1");
+    let (mut g, mut gr) = fresh("Guesty", "thq2");
+    host_and_join(&mut h, &mut hr, &hn, &mut g, &mut gr, &gn);
+    gn.send(Cmd::Prepared(true));
+    until((&mut h, &hn), (&mut g, &gn), "ready", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.all_ready()));
+    hn.send(Cmd::Start);
+    let ((hroom, hme), (groom, gme)) = (started(&hn, "host"), started(&gn, "guest"));
+    let sims = |room: &Room| -> Vec<game_sim::Sim> { (0..room.seats.len()).map(|_| game_sim::Sim::new(1)).collect() };
+    let mut ho = online::Online::lobby(hn.clone(), &hroom, &hme, sims(&hroom)).unwrap();
+    let mut go = online::Online::lobby(gn.clone(), &groom, &gme, sims(&groom)).unwrap();
+    assert!(hroom.seats.len() > 2, "an open seat to sit in: {}", hroom.seats.len());
+    let (mut hw, mut gw) = (Flat::default(), Flat::default());
+    let gas = Report::from_buttons(Control::Cross.mask());
+    let mut lean = Report::from_buttons(Control::Cross.mask());
+    lean.set_axis(2, 0x10);
+    let mut both = |ho: &mut online::Online, go: &mut online::Online, rounds: usize, done: &dyn Fn(&online::Online) -> bool| {
+        for _ in 0..rounds {
+            ho.frame(gas, &mut hw, None).unwrap();
+            go.frame_seats(&[gas, lean], &mut gw, None).unwrap();
+            std::thread::sleep(Duration::from_millis(33));
+            if done(go) {
+                return true;
+            }
+        }
+        false
+    };
+    both(&mut ho, &mut go, 45, &|_| false);
+    assert_eq!(go.my_seats(), [1]);
+    go.sit(2).unwrap();
+    assert!(both(&mut ho, &mut go, 300, &|go| go.my_seats().len() == 2), "the guest's second player never sat");
+    // the host has the seat too by now (it made the restart)
+    assert_eq!(ho.names()[2].as_deref(), Some(gme.as_str()), "the host sees the guest's second player");
+    assert_eq!(go.my_seats(), [1, 2]);
+    assert_eq!(go.drawn()[..2], [1, 2], "the guest's players lead its shell seats");
+    assert!(ho.can_sit() && go.can_sit());
+    both(&mut ho, &mut go, 60, &|_| false);
+    let mut sim = game_sim::Sim::new(1);
+    assert!(go.show(1, &mut sim, None), "the second player's seat is sat in and drawn");
+    assert_eq!(net::rides::preset(&sim), Some(2), "on their own controller preset");
+    assert!(sim.ticks > 30, "and riding: {} ticks", sim.ticks);
+    // their pause's Leave Session: the guest's local player 2
+    go.leave_session(1).unwrap();
+    assert!(both(&mut ho, &mut go, 300, &|go| go.my_seats().len() == 1), "the guest's second player never left");
+    both(&mut ho, &mut go, 60, &|_| false);
+    assert_eq!(ho.names()[2], None, "the seat is empty on the host");
+    assert!(go.seated() && !go.leaving(), "the guest's first player rides on");
+    let ((ha, hd), (ga, gd)) = (ho.settled(), go.settled());
+    let n = ha.len().min(ga.len());
+    assert!(n > 100, "{n} settled ticks");
+    assert_eq!((hd, gd), (0, 0), "no desync");
+    assert_eq!(ha[..n], ga[..n], "the two machines agree on every settled tick");
+    let _ = go.leave();
+}
+
 /// N16, mid-ride: a freeride opened online (N10) takes a peer on, and each machine's session grows a
 /// seat the shell's ride did not load with. That seat says who sits in it and in what look, so the
 /// shell dresses it as it comes ([`peer_looks::Dressed::changed`]) — the host the joiner in the

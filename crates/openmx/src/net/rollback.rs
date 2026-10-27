@@ -219,6 +219,10 @@ pub(super) fn confirmed<S: Clone + 'static, G: Game<State = S>>(np: &Netplay<S>,
     if rb.sess.remote_player_handles().is_empty() && f as usize >= rb.frame - rb.base {
         return Some((rb.frame as u32, game.encode()?));
     }
+    // every pad in past the last tick run (a peer's pads ahead of this machine's ticks): the last
+    // tick run is settled, and its cell the newest saved (N20: a leave made then waited forever)
+    let f = f.min((rb.frame - rb.base) as i32 - 1);
+    let t = (rb.base + f as usize) as u32;
     let then = rb.cell(f)?.load()?;
     let now = game.save();
     game.restore(&then);
