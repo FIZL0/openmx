@@ -143,7 +143,9 @@ port's `off_map`, already ported). A world of several maps is the port's own (MD
 ## Next
 
 MD27's work is complete: openmx-mods M23 landed the ridge cut, and this side was run against it.
+The code merged to main as a2e44c66, but the task stayed unticked because main's gate was red.
 
-It is not ticked. `./kit done` gates on the full suite, and main is red (S119 and the new Dallas S
-task). The work is committed on task/MD27 and pushed by hand. Once those land, rerun
-`./kit done MD27 "<msg>"` to tick.
+2026-10-27, on main 71b1b75f: `world_mxu_free_throws_only_off_its_outer_edge` (`--ignored`,
+`OPENMX_WORLDS` set to openmx-mods-slots/s1's `out/mods`, M23's ridge-cut build from 10-23 18:34)
+passed again. The test has no skip path. This session only reran the proof and ticks the task with
+`./kit done`. No code changed.
