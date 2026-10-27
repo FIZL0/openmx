@@ -3778,6 +3778,21 @@ impl SaveState {
         Some([self.word(a)?, self.word(a + 4)?, self.word(a + 8)?, self.word(a + 12)?])
     }
 
+    /// The pad's control state (`@pad0_control_state`): sixteen controls, 0x18 bytes each, `held`
+    /// the first word.
+    const CONTROL_STATE: u32 = 0x0067_8f08;
+
+    /// The controls the game believed were held when the state was saved, as the game's bitmask.
+    fn held_controls(&self) -> Option<u16> {
+        let mut held = 0;
+        for (i, c) in Control::ALL.iter().enumerate() {
+            if self.word(Self::CONTROL_STATE + 0x18 * i as u32)? == 1 {
+                held |= c.mask();
+            }
+        }
+        Some(held)
+    }
+
     /// The rider's word at `+off`, followed as a pointer.
     fn rider_at(&self, off: u32) -> Option<u32> {
         self.word(self.rider + off)
@@ -8203,13 +8218,27 @@ fn the_nose_first_touchdown_tick_is_the_originals() {
 /// flags agree, as S58 left them: a ratchet, to raise. The path parts by an ulp first (S107's drift
 /// from tick 1, grown); the slip flags part after the launch's, the brake's and the traverse's landing
 /// off the jump face at tick 124 and after the turn's quaternion sign flip at 130 (journal
-/// 2026-10-23-s58-slip-cases).
-const S58_CASES: [(&str, &str, u64, u64); 4] = [
+/// 2026-10-23-s58-slip-cases). S117's two held traverses of a steep face agree to the bit while both
+/// wheels are on it (74 and 97 ticks, side loads up to 1.8 times the wheel's load) and part on the
+/// first tick both are off, in the chassis' angular acceleration: steep's slip flags then agree to
+/// its last tick, steep2's part at 134, after its landing.
+const S58_CASES: [(&str, &str, u64, u64); 6] = [
     ("turn", "a hard turn at speed on flat dirt", 82, 146),
     ("launch", "a full-gas launch from standing", 96, 126),
     ("brake", "a locked brake at speed", 105, 130),
     ("traverse", "a part-steered ride up the jump face and across a side slope", 82, 123),
+    ("steep", "full gas from standing across a 46° face side on, held up it", 90, 250),
+    ("steep2", "the same from 20 ft further back along the face, 48° there", 106, 133),
 ];
+
+/// The S58 cases ridden from a save state of their own rather than first_recording's, by the RAM
+/// image in `context/states/` it is replayed from. S117's `steep` is S106's `side` spot (S106's tele.py,
+/// `95 -2.7 -10`: the 46° face to the right of the start, the bike side on) and `steep2` the same face
+/// 20 ft further back (`95 -2.7 -30`), each ridden on with the gas
+/// (`research/journal/2026-10-27-s117-steep-traverse/`). A teleported state's levers and engine are
+/// not first_recording's, so these go through [`replay_a_save_state_case`], which seeds them too, with
+/// the ticks whose row the recorder read out of step (its `late`), none here.
+const S58_OWN_STATES: [(&str, &str, &[u64]); 2] = [("steep", "s117-steep", &[]), ("steep2", "s117-steep2", &[])];
 
 /// How many ticks ahead of a quarter-speed row's ride state its pad is. A row at tick `t` (the ride
 /// as it is after tick `t`, [`quarter_ticks`]) carries the control state tick `t + 2` rides on, which
@@ -8224,7 +8253,14 @@ const PAD_LEADS: usize = 1;
 /// row gives (the ones up to the second row's, and the one a late row skips), the nearest one before
 /// it, or after it before the first. Checked against the control state the same row carries, which
 /// is what the game itself believed was held.
-fn save_state_inputs(cap: &Capture, ticks: &[u64]) -> Result<Vec<Input>, String> {
+///
+/// Except the first tick's buttons, when `own` gives them: the controls the state itself was saved
+/// holding ([`SaveState::held_controls`]). The game's first tick after a load rides on the control
+/// state it was saved with, and only the next one on the pad the kit sends after the load (S117:
+/// steep's state was saved with the brake held, the pad released before the load; with the brake on
+/// tick 1 alone, ticks 2 to 14 are the original's to the bit, with it on ticks 1 and 2 or on neither
+/// they part at the first compared tick).
+fn save_state_inputs(cap: &Capture, ticks: &[u64], own: Option<u16>) -> Result<Vec<Input>, String> {
     let tape = PadTape::from_capture(cap).map_err(|e| e.to_string())?;
     let last = *ticks.last().ok_or("no rows")? as usize;
     let mut on = vec![None; last + 1 + PAD_LEADS];
@@ -8254,6 +8290,11 @@ fn save_state_inputs(cap: &Capture, ticks: &[u64]) -> Result<Vec<Input>, String>
             }
             now
         })
+        .enumerate()
+        .map(|(k, i)| match own {
+            Some(buttons) if k == 0 => Input { buttons, ..i },
+            _ => i,
+        })
         .collect())
 }
 
@@ -8272,9 +8313,20 @@ fn the_slip_cases_replay_from_the_save_state() {
             println!("{case} ({what}): no capture — `watch/s58-slip.toml` says how it is recorded");
             continue;
         };
+        if let Some((_, image, late)) = S58_OWN_STATES.iter().find(|(c, _, _)| *c == case) {
+            let Some(own) = SaveState::open_at(private_dir("states").join(format!("{image}.eeMemory.bin"))) else {
+                println!("{case} ({what}): no RAM image of its save state ({image})");
+                continue;
+            };
+            let parted = replay_a_save_state_case(&acc, &own, seed, &text, case, what, late);
+            let first = |lane: &str| parted.iter().find(|(_, d)| d.contains(lane)).map_or(u64::MAX, |(t, _)| *t);
+            assert!(first(".origin[") > path_through, "{case}: the path parts at {}, not after {path_through}", first(".origin["));
+            assert!(first(".slip.") > slip_through, "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
+            continue;
+        }
         let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
         let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
-        let inputs = save_state_inputs(&cap, &ticks).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+        let inputs = save_state_inputs(&cap, &ticks, None).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
         in_the_world_of(&acc, |world, named, bike| {
             let mut sim = acceptance_start(&acc, seed, bike).unwrap();
             let ride = &mut sim.rider.ride;
@@ -8372,7 +8424,7 @@ fn replay_a_save_state_case(acc: &Capture, st: &SaveState, seed: u32, text: &str
     let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
     let cap = Capture::parse(text).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
     let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
-    let inputs = save_state_inputs(&cap, &ticks).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+    let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
     in_the_world_of(acc, |world, named, bike| {
         let mut sim = acceptance_start(acc, seed, bike).unwrap();
         let ride = &mut sim.rider.ride;

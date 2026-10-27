@@ -1,0 +1,8 @@
+# S117 steep2: tele.py 95 -2.7 -30 (S106's 46-degree face, 20 ft further back along it), side on; a
+# second's wait, then full gas with the stick part left, up the face, to hold the line across it.
+# Wall-clock, at a quarter speed (4 ms here is 1 ms ridden).
+sleep 1000
+down cross
+stick l -0.3 0
+sleep 34000
+release

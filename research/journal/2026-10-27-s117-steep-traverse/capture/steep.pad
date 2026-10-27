@@ -1,0 +1,9 @@
+# S117 steep: tele.py's state on S106's 46-degree face, side on (the face falls to the bike's right);
+# a second's wait (so the rows say what the first ticks read), then full gas with the stick part
+# left, up the face, to hold the line across it. Wall-clock, at a quarter speed (4 ms here is 1 ms
+# ridden).
+sleep 1000
+down cross
+stick l -0.3 0
+sleep 34000
+release
