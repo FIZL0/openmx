@@ -25,7 +25,7 @@ Task S144. 2026-10-26.
   `[Wrecks]`, which are MX vs. ATV's own (freestyle down g 48 MPH against MX Unleashed's 45). The shell
   adds the bike's collision files and steps at `tick_dt`'s 30 Hz, the same as the test.
 - Took nothing from opentennis: it has no bike landing.
-- Filed S145 and a plan/HUMAN.md item to get the user's actual landing on tape.
+- Filed S177 and a plan/HUMAN.md item to get the user's actual landing on tape.
 
 ## What the original does
 
@@ -75,7 +75,7 @@ both read g (−0.19, 46.52, −0.23).
 - **The user's own landing was not reproduced.** None of the twelve landings is more generous in the port
   than in the original, so whatever the user saw is outside them. Candidates not captured: a sloped
   landing ramp, a rider other than recording2's (another bike set's limits), a race (the 58.67 racing limit
-  and its flag were never set here), and free06. S145 waits on a tape of the user's ride.
+  and its flag were never set here), and free06. S177 waits on a tape of the user's ride.
 - **The shell was not run.** That the shell judges landings as `Sim::frame` does in the test rests on
   reading main.rs (same rider build, bike col, `tick_dt` at 30 Hz), not on a replay through the shell.
 - **The landings are thrown by hand.** Velocity and pitch/yaw rates were poked into a standing bike, then
@@ -98,4 +98,4 @@ both read g (−0.19, 46.52, −0.23).
 
 ## Next
 
-S145: get the user's tape (plan/HUMAN.md), find the landing, put it to the original and replay both.
+S177: get the user's tape (plan/HUMAN.md), find the landing, put it to the original and replay both.
