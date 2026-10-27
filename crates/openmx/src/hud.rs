@@ -146,3 +146,70 @@ impl MarkerBar {
 pub fn markers_shown_in(v: usize, online: bool) -> bool {
     !online || v == 0
 }
+
+// ---- the radar's map names (MD42) ---------------------------------------------------------------
+
+/// The ground directions the radar's compass letters stand for, N E S W, as `x`, `z`: the rose's
+/// north is `+z`, the way a bearing of 0 points ([`crate::overlay::bearing`]), and east `+x`.
+pub const COMPASS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 0.0], [0.0, -1.0], [-1.0, 0.0]];
+
+/// **The maps the radar names** (MD42): each map of the ride, the world rectangle it owns
+/// (`[x0, z0, x1, z1]` in feet) and the name the HUD gives it. A world's are its tiles (its joins
+/// are no map); a lone track is one map covering everything, with no neighbours. The port's own:
+/// the original rides one map and its radar names nothing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MapNames {
+    pub maps: Vec<([f32; 4], String)>,
+}
+
+impl MapNames {
+    /// One map, the whole ride: a lone track's.
+    pub fn alone(name: &str) -> MapNames {
+        MapNames { maps: vec![([f32::NEG_INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY], name.to_string())] }
+    }
+
+    /// The map a rider at `at` (`x`, `z`) is on: the one whose rectangle holds it, or — on a join,
+    /// between maps — the nearest, the one just left or about to be met. `None` with no maps.
+    pub fn on(&self, at: [f32; 2]) -> Option<usize> {
+        let gap = |r: &[f32; 4]| {
+            let dx = (r[0] - at[0]).max(at[0] - r[2]).max(0.0);
+            let dz = (r[1] - at[1]).max(at[1] - r[3]).max(0.0);
+            dx * dx + dz * dz
+        };
+        (0..self.maps.len()).min_by(|&a, &b| gap(&self.maps[a].0).total_cmp(&gap(&self.maps[b].0)))
+    }
+
+    /// The map that lies `toward` ([`COMPASS`]'s direction) of map `from` for a rider at `at`: of the
+    /// maps whose middle is past `from`'s edge that way, the one across from the rider — its span
+    /// across that way holds the rider's, or comes nearest it — and of those the nearest past the
+    /// edge. `None` where no map lies that way.
+    pub fn toward(&self, from: usize, at: [f32; 2], toward: usize) -> Option<usize> {
+        let [dx, dz] = COMPASS[toward % 4];
+        let (axis, sign) = if dx != 0.0 { (0, dx) } else { (1, dz) };
+        let across = 1 - axis;
+        let here = self.maps.get(from)?.0;
+        let edge = if sign > 0.0 { here[axis + 2] } else { here[axis] };
+        let mut best: Option<(f32, f32, usize)> = None;
+        for (i, (r, _)) in self.maps.iter().enumerate() {
+            let middle = (r[axis] + r[axis + 2]) / 2.0;
+            if i == from || sign * (middle - edge) <= 0.0 {
+                continue;
+            }
+            let near = if sign > 0.0 { r[axis] } else { r[axis + 2] };
+            let ahead = (sign * (near - edge)).max(0.0);
+            let off = (r[across] - at[across]).max(at[across] - r[across + 2]).max(0.0);
+            if best.is_none_or(|(o, a, _)| (off, ahead) < (o, a)) {
+                best = Some((off, ahead, i));
+            }
+        }
+        best.map(|(_, _, i)| i)
+    }
+
+    /// What the radar says for a rider at `at`: the name of the map they are on, and of the map that
+    /// lies each way, N E S W.
+    pub fn around(&self, at: [f32; 2]) -> (Option<&str>, [Option<&str>; 4]) {
+        let Some(on) = self.on(at) else { return (None, [None; 4]) };
+        let name = |i: usize| self.maps[i].1.as_str();
+        (Some(name(on)), std::array::from_fn(|k| self.toward(on, at, k).map(name)))
+    }
+}
