@@ -697,6 +697,70 @@ pub fn framed(presets: &[game_sim::camera::Preset], framing: Framing) -> Vec<gam
         .collect()
 }
 
+/// A preset of a seat's own (P163), as the shell hands the camera it: the disc preset it copies by
+/// the name its file gives it, its own name, and how it is framed. Named as its base, it is that disc
+/// preset's own numbers; named otherwise, it is a preset of the player's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Own<'a> {
+    pub base: &'a str,
+    pub name: &'a str,
+    pub framing: Framing,
+}
+
+/// A seat's presets (P163): the disc's `presets`, each as its own numbers frame it or else as `all`
+/// does (the Camera page's one set, [`framed`]), and after them the player's own, each a copy of its
+/// disc preset under its own name, framed by its own numbers and on the camera button's cycle. With
+/// `mine_only` and at least one of the player's own, the disc's leave the cycle; they stay in the
+/// list, so the look-back preset is still found and a camera on one keeps it. A player's preset whose
+/// disc preset this file does not have is left out. With no `own` this is [`framed`]'s list exactly.
+pub fn seat_presets(presets: &[game_sim::camera::Preset], all: Framing, own: &[Own], mine_only: bool) -> Vec<game_sim::camera::Preset> {
+    let named = |o: &&Own, n: &str| o.name.eq_ignore_ascii_case(n);
+    let mut out: Vec<game_sim::camera::Preset> = presets
+        .iter()
+        .map(|p| {
+            let framing = own.iter().find(|o| o.base.eq_ignore_ascii_case(o.name) && named(o, &p.name)).map_or(all, |o| o.framing);
+            framed(std::slice::from_ref(p), framing).remove(0)
+        })
+        .collect();
+    let mut mine = 0;
+    for o in own.iter().filter(|o| !o.base.eq_ignore_ascii_case(o.name)) {
+        let Some(base) = presets.iter().find(|p| p.name.eq_ignore_ascii_case(o.base)) else { continue };
+        let mut p = framed(std::slice::from_ref(base), o.framing).remove(0);
+        p.name = o.name.to_string();
+        p.cycle_thru_this_preset = true;
+        p.is_look_back_cam = false;
+        out.push(p);
+        mine += 1;
+    }
+    if mine_only && mine > 0 {
+        for p in &mut out[..presets.len()] {
+            p.cycle_thru_this_preset = false;
+        }
+    }
+    out
+}
+
+/// A follow camera onto the preset a seat's camera button last left it on (P163), `start` by name,
+/// at the start of a ride: under `mine_only`, a camera on a preset out of the cycle onto the first
+/// in it instead. Whether it moved.
+pub fn start_on(cam: &mut game_sim::camera::Race, start: &str, mine_only: bool) -> bool {
+    if cam.cam.presets.is_empty() {
+        return false;
+    }
+    let to = match game_sim::camera::Preset::find(&cam.cam.presets, start).filter(|_| !start.is_empty()) {
+        Some(at) => Some(at),
+        None if mine_only && !cam.cam.preset().cycle_thru_this_preset => cam.cam.presets.iter().position(|p| p.cycle_thru_this_preset),
+        None => None,
+    };
+    match to {
+        Some(at) if at != cam.cam.preset => {
+            cam.cam.set_preset(at);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// How long a framing change takes to ease the field of view over (P119), in seconds: the lag's time
 /// constant, about the eye's own (the presets' position lags are a quarter to a third of a second).
 pub const FOV_EASE: f32 = 0.25;
@@ -742,7 +806,10 @@ pub fn reframe(cam: &mut game_sim::camera::Race, presets: &[game_sim::camera::Pr
         return;
     }
     let was = cam.cam.fov_filter.value.0 + ease.offset;
-    let at = cam.cam.preset.min(presets.len() - 1);
+    // The preset it is on by name, which a player's own preset coming or going before it moves
+    // (P163); one the new list does not have, by its place.
+    let on = &cam.cam.presets[cam.cam.preset.min(cam.cam.presets.len() - 1)].name;
+    let at = game_sim::camera::Preset::find(presets, on).unwrap_or(cam.cam.preset.min(presets.len() - 1));
     cam.cam.presets = presets.to_vec();
     cam.cam.preset = at;
     cam.cam.previous = at;

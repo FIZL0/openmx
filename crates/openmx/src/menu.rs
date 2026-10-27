@@ -54,6 +54,8 @@ use std::path::{Path, PathBuf};
 pub mod ink;
 #[path = "menu_pages.rs"]
 mod pages;
+#[path = "menu_cameras.rs"]
+pub mod cameras;
 #[path = "menu_screens.rs"]
 mod screens;
 #[allow(unused_imports)] // the tests' and the shell's, not every includer's
@@ -450,6 +452,9 @@ pub struct Settings {
     /// Each seat's camera (P82), the Camera page's: the field of view, and how far behind and how
     /// high above the bike and the biplane the follow cameras sit. 1P's first.
     pub cameras: [CameraView; SEATS_MAX],
+    /// Each seat's camera presets (P163): the preset each machine's camera was last left on, the
+    /// disc presets' own numbers and the player's own presets, and what the camera button cycles.
+    pub camera_sets: [cameras::Seat; SEATS_MAX],
     /// Whether the shell reads the `mods/` folder beside this file (MD2): Off, nothing is read from it
     /// and the pick is the disc's alone. On unless turned off.
     pub mods: bool,
@@ -687,7 +692,7 @@ impl Menu {
         let (s, c) = (&self.settings, &self.controls);
         match d {
             Departure::Controls => c.layouts.iter().chain(&c.planes).all(|l| *l == Layout::Original),
-            Departure::Cameras => s.cameras.iter().all(|v| *v == CameraView::ORIGINAL),
+            Departure::Cameras => s.cameras.iter().all(|v| *v == CameraView::ORIGINAL) && s.camera_sets.iter().all(cameras::Seat::is_disc),
             Departure::Fog => s.graphics == Graphics::Original,
             Departure::Plants => s.plants == Lod::Original,
             Departure::Foliage => s.foliage == Foliage::Original,
@@ -724,7 +729,15 @@ impl Menu {
                     c.presets = [0; SEATS];
                 }
             }
-            Departure::Cameras => s.cameras = [if original { CameraView::ORIGINAL } else { CameraView::DEFAULT }; SEATS_MAX],
+            Departure::Cameras => {
+                s.cameras = [if original { CameraView::ORIGINAL } else { CameraView::DEFAULT }; SEATS_MAX];
+                // The disc presets' own numbers go with the sliders (P163); the player's own presets
+                // stay, out of the cycle at the original's.
+                for set in &mut s.camera_sets {
+                    set.clear_disc_looks();
+                    set.cycle = if original { cameras::Cycle::Disc } else { cameras::Cycle::Both };
+                }
+            }
             Departure::Fog => s.graphics = if original { Graphics::Original } else { Graphics::Full },
             Departure::Plants => s.plants = if original { Lod::Original } else { Lod::Smooth },
             Departure::Foliage => s.foliage = if original { Foliage::Original } else { Foliage::Cutout },
@@ -1138,6 +1151,7 @@ impl Default for Settings {
             presets: Vec::new(),
             lobby_seats: LOBBY_SEATS,
             cameras: [CameraView::DEFAULT; SEATS_MAX],
+            camera_sets: Default::default(),
             mods: true,
             mods_off: Vec::new(),
             track_filter: String::new(),
@@ -1270,6 +1284,7 @@ impl Settings {
                 "texture_packs_off" => s.texture_packs_off = pack_names(v),
                 "texture_filtering" => s.filtering = Filtering::from_word(v).unwrap_or(s.filtering),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
+                "camera_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
@@ -1360,6 +1375,7 @@ impl Settings {
             + &self.tricks_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
+            + &cameras::text(&self.camera_sets)
             + &self.markers_text()
             + &self.modifiers_text()
 
@@ -2429,6 +2445,12 @@ pub struct Menu {
     typing: String,
     typing_for: Typing,
     key: (usize, usize),
+    /// The disc's camera presets the camera button cycles through (P163), the bike's and the
+    /// biplane's, by the names their files give them: the Camera page's Preset row lists them. The
+    /// shell reads them off the disc; empty, the row has the player's own presets alone.
+    pub camera_names: [Vec<String>; 2],
+    /// The Camera page's Preset row: 0 for every preset, then [`Menu::camera_choices`]' order.
+    camera_pick: usize,
     /// Frames shown, for the track stills' slideshow.
     pub tick: u32,
     /// The settings changed since [`Menu::take_changed`] last said so.
@@ -2716,6 +2738,8 @@ impl Menu {
             typing: String::new(),
             typing_for: Typing::Name,
             key: (0, 0),
+            camera_names: Default::default(),
+            camera_pick: 0,
             tick: 0,
             changed: false,
             note: None,
@@ -3914,7 +3938,7 @@ impl Menu {
                     // code is all capitals.
                     let word_start = self.typing.is_empty() || self.typing.ends_with(' ');
                     let upper = match self.typing_for {
-                        Typing::Name | Typing::Preset => word_start,
+                        Typing::Name | Typing::Preset | Typing::Camera => word_start,
                         Typing::Code => true,
                         Typing::Chat | Typing::Number => false,
                     };
@@ -3965,6 +3989,13 @@ impl Menu {
                 self.pop();
                 if !name.is_empty() {
                     self.save_preset(&name);
+                }
+            }
+            Typing::Camera => {
+                let name = clean_name(&self.typing);
+                self.pop();
+                if !name.is_empty() {
+                    self.save_camera(&name);
                 }
             }
             Typing::Number => {
@@ -4260,6 +4291,8 @@ enum Typing {
     Preset,
     /// A rider's number, digits only (P118).
     Number,
+    /// A camera preset of the player's own (P163).
+    Camera,
 }
 
 impl Typing {
@@ -4269,7 +4302,7 @@ impl Typing {
             // A code is four; a little over lets a slip be seen and deleted.
             Typing::Code => 8,
             Typing::Chat => 40,
-            Typing::Preset => NAME_MAX,
+            Typing::Preset | Typing::Camera => NAME_MAX,
             Typing::Number => roster::NUMBER_MAX,
         }
     }
@@ -4280,6 +4313,7 @@ impl Typing {
             Typing::Code => "Room Code",
             Typing::Chat => "Chat",
             Typing::Preset => "Preset Name",
+            Typing::Camera => "Camera Name",
             Typing::Number => "Number",
         }
     }
