@@ -1595,6 +1595,12 @@ impl<P: Clone + PartialEq> PadSlots<P> {
         self.last[i] = None;
     }
 
+    /// Seat `i` rides the keyboard: the keyboard drives it and no pad holds it (P178). A seat with a
+    /// pad in it is the pad's, even where the keyboard rides alongside it.
+    pub fn on_keys(&self, i: usize) -> bool {
+        self.held.get(i).is_some_and(Option::is_none) && self.keys() == Some(i)
+    }
+
     /// The seat the keyboard drives: 1P without `--pads` (alongside 1P's pad), else its own seat if
     /// it has one; with none, 1P while 1P's pad is out, so the keyboard can play on (opentennis's
     /// B388).
@@ -2391,6 +2397,11 @@ impl Seats {
     /// Seat `seat`'s controller preset (P79), as its layout rides it: 0 under the new layout.
     pub fn preset(&self, seat: usize) -> usize {
         self.wiring.schemes[seat].preset(self.wiring.presets[seat])
+    }
+
+    /// Seat `i` rides the keyboard ([`PadSlots::on_keys`]).
+    pub fn on_keys(&self, i: usize) -> bool {
+        self.slots.on_keys(i)
     }
 
     /// The keyboard's report this frame when it drives no seat — a pad is 1P — for the pause, which
@@ -3296,6 +3307,22 @@ pub(crate) mod tests {
         assert_eq!(s.keys(), None);
         s.update(&[a]);
         assert_eq!(s.keys(), None, "2P's pad out: the keyboard is 1P's stand-in only");
+    }
+
+    /// P178: a seat is the keyboard's only while no pad holds it. Without `--pads` the keyboard
+    /// rides alongside 1P's pad, and 1P is still on the pad.
+    #[test]
+    fn a_seat_with_a_pad_is_not_on_the_keyboard() {
+        let mut s = PadSlots::<u32>::default();
+        s.update(&[5]);
+        assert_eq!(s.keys(), Some(0));
+        assert!(!s.on_keys(0));
+        s.update(&[]);
+        assert!(s.on_keys(0), "1P's pad out: the keyboard rides it");
+        let mut s = PadSlots::<u32>::default();
+        s.set_first(Some(Device::Keys));
+        s.update(&[5]);
+        assert!(s.on_keys(0) && !s.on_keys(1) && !s.on_keys(SEATS));
     }
 
     #[test]
@@ -4342,6 +4369,7 @@ pub(crate) mod tests {
         s.set_first(Some(Device::Keys));
         s.update(&[5]);
         assert_eq!((s.held[0], s.keys()), (Some(5), Some(1)));
+        assert!(!s.on_keys(0) && s.on_keys(1));
     }
 
     /// P46 over devices: each device's own report for the menus; then 1P a pad that is not the

@@ -717,8 +717,9 @@ impl<'a> Pen<'a> {
             y = self.note(note, x, y + 0.9, w);
         }
         if screen == Screen::Settings && menu.tab(screen) == pages::TAB_CONTROLS {
-            // The keyboard under the Player row, or under the layout row on a tab of one seat (P81).
-            if r.kind == Kind::Player || (r.key == Key::BikeLayout && !menu.many_seats()) {
+            // The keyboard under the Player row, or under the layout row on a tab of one seat (P81),
+            // for a player riding it; a player on a pad gets the pad (P178).
+            if menu.controls_on_keys() && (r.kind == Kind::Player || (r.key == Key::BikeLayout && !menu.many_seats())) {
                 self.keys(menu, x, y + 1.0, w);
             } else if room - y > 10.0 {
                 self.pad(menu, x, y + 0.6, w.min((room - y - 0.6) * 2.0));

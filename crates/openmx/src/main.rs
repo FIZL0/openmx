@@ -2181,6 +2181,7 @@ fn front_end(args: Args) -> Result<(), String> {
         };
         let seated = (0..roster::SEATS).rposition(|i| seat_dev(i).is_some() || seats.slots.waiting(i));
         shell.front.menu.seated = seated.map_or(1, |i| i + 1);
+        shell.front.menu.keys_seat = (0..roster::SEATS).find(|&i| seats.on_keys(i));
         // The join screen's controllers (P43) are the pad seats: which are in, and what each is.
         let present: Vec<usize> = (0..roster::SEATS).filter(|&i| seat_dev(i).is_some()).collect();
         shell.front.menu.present(&present);
@@ -5340,6 +5341,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             escape = esc;
             front.menu.music_now = front.sound.now();
+            // In a ride the menu's players are the ride's seats, each on its own pad seat.
+            front.menu.keys_seat = pad_seats.as_ref().and_then(|s| (0..world.seats.len()).find(|&i| s.on_keys(args.pad_seat(i))));
             let paused: Vec<bool> = (0..world.seats.len()).map(|i| front.menu.paused(i)).collect();
             let mut act = front.menu.step_seats(&presses);
             // The presses the tick held past each seat's first, a step a round (P165).
