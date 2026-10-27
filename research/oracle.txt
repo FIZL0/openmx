@@ -5831,3 +5831,22 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # body mode goes 0; the fader takes the rest. The human ended P1's 128995, 129945 and 130966 early with
 # L1+R1 (pad byte 3 0xb3/0xf3 on the put-back row): ride_reset_request(bike, 1, 0) with bike+0x14d0 = 1
 # respawns at once.
+# S144 — tail-first landings. Journal: research/journal/2026-10-26-s144-tail-landing-wrecks.
+# No new function. bike_wreck_test (0x002522c0) has no clause of its own for a tail landing: on
+# recording2's rider (+0x750..+0x790: 0, front g 18.33, back g 22.0, side g 19.07, racing down g 58.67,
+# freestyle down g 66.0, ground pitch down/up 1.2217/1.2217, airborne pitch down/up 1.396/1.4835, roll
+# 1.4835, no-hander g 29.33, cos(no-hander roll) 0.5003, joust 2.5, landing crossup now 0.4999,
+# CrossupWreck 0.99, CrossupWreckTime 0.75) a tail landing wrecks by the down g peak (reason 5, the
+# rear shock's bottoming impulse lands in the same +0x554 load), by the post-physics pitch past
+# GroundPitchUpWreckAngle once a wheel is down (reason 11, +0x574 set), or by the side g / airborne
+# limits. A rear-first touchdown left g.x and g.z at 0 in every capture: the load is all vertical.
+# Captures (context/capture/s144, git-ignored; research/s144/tail.sh, research/s144_tail.py, pads in
+# research/s144/*.pad): recording2 (slot 3) teleported to (4642.5, 135.6, 3650), thrown up with a
+# tail-down pitch rate (airborne auto-levelling damps it: -8 gives ~15 deg, -30 ~70 deg), states saved
+# on the record's first row. Ridden out: 8 deg at 26/s down (g.y 20.2), 15 at 32, flat at 47 (46.5),
+# 52 at 49 (48.7, rear comp 0.93), 55 at 53 on the gas, 34 at 41 crossed 13, 25 at 40 crossed 35 rolled
+# 43, 35 at 64 crossed 20 (62.1, rear comp 1.00). Wrecked: 70 at 52 (48.8, comp 1.00; pitch 69.5 ->
+# 71.37) reason 11 three ticks after touchdown; 52 at 73 (g.y 72.46) reason 5 on touchdown; crossed 49
+# and leaned 50 front-first reason 2; stick held back loops it over in the air, reason 11.
+# A yaw rate alone does not cross the bike up: the unyaw torque (stick centred) takes it out in ~7 ticks;
+# a held sideways stick (research/s144/cross*.pad) keeps it. The port matches all twelve (S144 test).

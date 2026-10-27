@@ -257,3 +257,12 @@ Two things that bite:
       web/index.html's module script: the Discord invite, the disc dump guide URL, the donate URL, a sentence
       on what donations pay for, and the prompt/token/commit counts. Until then those links show dimmed and
       inert and the counts show a dash (research/journal/2026-10-26-p181-web-launcher).
+
+## A tail landing the port rides out and the original does not (S145)
+
+S144 put twelve tail-first landings to the original (slams, a hard drop, crossed up, leaned, on the gas)
+and the port judged every one as the original does, so the generous landing you saw is not among them.
+To find it: ride the shell with `--record context/tapes/tail.tape` (from the repo root, the track you
+were on), land the way that rode out, quit, and add the tape's path, the track and roughly where on it
+to S145 (`./kit plan S145`). Five minutes. If the shell will not record, say which track and jump; an
+agent can then try to make the same landing in the original by teleport.

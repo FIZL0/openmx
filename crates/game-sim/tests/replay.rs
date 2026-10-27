@@ -8827,6 +8827,45 @@ fn roof_landings_wreck_as_the_original_does_air_wrecks_on_and_off() {
     for (name, asked, ticks, what) in P147_LANDINGS {
         let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
             println!("no {name}.csv — P147's journal says how it is recorded");
+/// The tail landings S144 captured in the original (context/capture/s144, research/s144/tail.sh):
+/// recording2's bike thrown up in free09's farmyard with a tail-down pitch rate (and, for the crossed-up
+/// one, a yaw rate), from a state saved in the air, onto the yard's flat ground with the pad idle. Name,
+/// the frame its state was asked at, how many ticks to ride, and what it is.
+const S144_TAILS: [(&str, u64, u64, &str); 12] = [
+    ("s144/probe1", 2718, 60, "a 8 degree tail-down landing at 26 a second down, rolled on"),
+    ("s144/probe2", 2710, 70, "a 15 degree tail-down landing at 32 a second down"),
+    ("s144/probe3", 2740, 100, "a flat landing at 47 a second down"),
+    ("s144/mid", 2742, 100, "a 52 degree tail-down landing at 49 a second down, the rear shock bottomed"),
+    ("s144/probe4", 2740, 100, "a 70 degree tail-down slam at 52 a second down, the rear shock bottomed"),
+    ("s144/tall", 2742, 145, "a 52 degree tail-down slam at 73 a second down, past the vertical g limit"),
+    ("s144/cross5", 2735, 100, "a 34 degree tail-down landing at 41 a second down, crossed up 13 degrees"),
+    ("s144/cross7", 2755, 90, "a 25 degree tail-down landing at 40 a second down, crossed up 35 and leaned 43"),
+    ("s144/cross8", 2752, 130, "a 35 degree tail-down landing at 64 a second down, crossed up 20 degrees"),
+    ("s144/cross6", 2742, 90, "crossed up 49 degrees and leaned 50, landing front wheel first"),
+    ("s144/midgas", 2751, 120, "a 55 degree tail-down landing at 53 a second down on the gas"),
+    ("s144/midback", 2734, 60, "on the gas with the stick pulled back: looped over in the air"),
+];
+
+/// **A tail-first landing wrecks or rides out as the original's does** (S144): each of
+/// [`S144_TAILS`] ridden by the port from the original's state with the original's pad, the same way
+/// and to the same tolerance as S138's walls and nose landings
+/// ([`walls_and_nose_landings_wreck_as_the_original_does`]): the first wreck's reason and tick ±1, or
+/// none on both sides. Skipped with a line where a capture or state is missing.
+#[test]
+fn tail_landings_wreck_as_the_original_does() {
+    let parted = wrecks_as_the_original_does(&S144_TAILS);
+    assert!(parted.is_empty(), "{}", parted.join("\n"));
+}
+
+/// Rides each case from its state in free09's world and answers the ones whose wreck verdict parts
+/// from the capture's. Prints both sides' centre of mass, velocity, g peak and pitch every tick, and
+/// the original's rear shock compression and the port's wheels on the ground.
+fn wrecks_as_the_original_does(cases: &[(&str, u64, u64, &str)]) -> Vec<String> {
+    let dir = private_dir("capture");
+    let (mut compared, mut parted) = (0, Vec::new());
+    for &(name, asked, ticks, what) in cases {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
+            println!("no {name}.csv — S144's journal says how it is recorded");
             continue;
         };
         let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
@@ -8836,6 +8875,7 @@ fn roof_landings_wreck_as_the_original_does_air_wrecks_on_and_off() {
             continue;
         };
         let Some((_, acc)) = acceptance_capture() else { return };
+        let Some((_, acc)) = acceptance_capture() else { break };
         in_the_world_of(&acc, |world, _, bike| {
             let Some(Ridden { tables, phy, mounts }) = bike else {
                 println!("no Race 125 on this disc");
@@ -8896,4 +8936,55 @@ fn roof_landings_wreck_as_the_original_does_air_wrecks_on_and_off() {
     }
     println!("{compared} landings compared");
     assert!(parted.is_empty(), "{}", parted.join("\n"));
+            // The pad two frames back, as S138's; these states are saved on the capture's first row and
+            // the pad is idle throughout (research/s138/idle.pad), so the first two ticks take row 0's.
+            let pad_of = |counter: u64| rows.get(&counter).map(|&r| tape.frames[r.saturating_sub(2)]);
+            let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+            rider.carries_bike_col(Arc::new(col));
+            let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+            st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+            let want = first_wreck(&cap, saved).filter(|&(c, _)| c <= saved + ticks);
+            println!("{name} ({what}), from the state at frame {saved}: the original {}",
+                     want.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
+            let num = |r: usize, n: &str| cell(&cap, r, column(&cap, n).unwrap()).parse::<f32>().unwrap();
+            let lane = |r: usize, n: &str| ["x", "y", "z"].map(|l| num(r, &format!("{n}.{l}")));
+            let mut got = None;
+            for counter in saved + 1..=saved + ticks {
+                let Some(pad) = pad_of(counter) else {
+                    println!("  {counter}: no row in the capture");
+                    break;
+                };
+                sim.frame(pad.dt(), &pad.reports, world);
+                let ride = &sim.rider.ride;
+                let (c, v, gp) = (ride.chassis.cofg_world, ride.chassis.vel, ride.mv.g_peak);
+                if let Some(&r) = rows.get(&counter) {
+                    let (oc, ov, og, q) = (lane(r, "ch_cofg"), lane(r, "ch_vel"), lane(r, "g_peak"), lane(r, "ch_quat"));
+                    let (pitch, ..) = attitude(Vf::new(q[0], q[1], q[2], num(r, "ch_quat.w")));
+                    println!("  {counter} orig cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2} pitch {pitch:7.3} \
+                              comp {:.2} {:.2}",
+                             oc[0], oc[1], oc[2], ov[0], ov[1], ov[2], og[0], og[1], og[2], num(r, "f_comp"), num(r, "r_comp"));
+                }
+                let (pitch, ..) = attitude(ride.chassis.quat);
+                println!("  {counter} port cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2} pitch {pitch:7.3} \
+                          ground {}{}",
+                         c.x(), c.y(), c.z(), v.x(), v.y(), v.z(), gp.x(), gp.y(), gp.z(), ride.air.on_ground,
+                         sim.rider.state.wreck.map_or(String::new(), |w| format!("  wreck {}", w.0)));
+                if got.is_none() && let Some(w) = sim.rider.state.wreck {
+                    got = Some((counter, w.0));
+                }
+            }
+            println!("  the port {}", got.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
+            let agrees = match (want, got) {
+                (None, None) => true,
+                (Some((wc, wr)), Some((gc, gr))) => gr == wr && gc.abs_diff(wc) <= 1,
+                _ => false,
+            };
+            if !agrees {
+                parted.push(format!("{name} ({what}): the original {want:?}, the port {got:?} (tick, reason)"));
+            }
+            compared += 1;
+        });
+    }
+    println!("{compared} landings compared");
+    parted
 }
