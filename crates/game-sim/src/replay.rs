@@ -2310,3 +2310,266 @@ impl Iterator for Head {
         (left, Some(left))
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The human recording of record: the user's 2p ride (C10, A6)
+// ---------------------------------------------------------------------------------------------------
+
+/// **The human reference**: the user's two-player ride on free09's split-screen scene, both pads live,
+/// captured off the original on both riders' lanes by C10 (`research/journal/2026-10-26-c10-2p-capture`
+/// indexes every wreck, ragdoll, near miss, trick and animation stretch in it, and
+/// `research/c10/events.json` holds that index).
+///
+/// It is the recording of record (user, 2026-10-26): every **new** test of wrecks, collisions, the
+/// ragdoll, rider-vs-rider, moving platforms, wreck thresholds or the animations reads it — through
+/// the names here, never a path of its own — and where an older test of one of those reads
+/// first_recording, recording2, animandpump or the S93 split tapes, the task in its area adds the 2p
+/// case beside it (`docs/PROVING.md`, "The human reference").
+///
+/// Every name is relative to `context/` and is game data, git-ignored: a test resolves it against the
+/// worktree's context folder and skips with a line when it is not there.
+///
+/// Two facts of this ride a reader needs before anything else:
+///
+/// - **It ticks at 60 Hz** and the playback reads **one tape field a tick**: the capture's `dt` is the
+///   engine's measured sixtieth (0.0166667 and 0.0167 alternating, never the 30 Hz clamp), and its
+///   12,917 rows are the tape's 12,917 fields, frames [`FIRST_FRAME`] on. So [`P2m2::tape`]'s one
+///   field in two is the wrong reader here, and [`P2m2::tape_per_field`] is the right one.
+/// - **Both riders are local humans**, P1 on pad 0 (the `p1_` lane, the left half) and P2 on pad 1
+///   (`p2_`, the right half), both on `Race500P.phy` and the `mrider` skeleton.
+pub mod two_p {
+    use super::{Capture, PadFrame, PadTape, ParseError, column_at, dense_ticks, err, parse_f32, parse_u64, report_from_hex};
+    use crate::input::{PADS, Report};
+
+    /// The user's PCSX2 input recording, both pads. Read-only on disc: PCSX2 records over a movie it
+    /// plays, so a playback plays a writable copy.
+    pub const TAPE: &str = "recordings/split/2p.p2m2";
+    /// The PCSX2 save state the tape starts from.
+    pub const TAPE_STATE: &str = "recordings/split/2p.p2m2_SaveState.p2s";
+    /// The capture of record: one row a tick, both riders' lanes (`p1_`/`p2_`), both pads, the six
+    /// path cars (`watch/2p.toml`).
+    pub const CAPTURE: &str = "capture/2p/2p.csv";
+    /// The tape's own state as an EE RAM image: the tick before the capture's first row.
+    pub const START_RAM: &str = "states/c10/2p-start.ram";
+    /// The index of the ride's events, repository-relative (research, not game data).
+    pub const EVENTS: &str = "research/c10/events.json";
+
+    /// The game's frame counter on the capture's first row; the start state holds the one before.
+    pub const FIRST_FRAME: u64 = 127_882;
+    /// The capture's rows, which are the tape's fields: one a tick.
+    pub const ROWS: usize = 12_917;
+    /// How many fields behind its row a capture row's polled pad is: row `r`'s older half
+    /// ([`tape`]'s `frames[r - 1]`) is the tape's field `r - 2` (0-based over the written fields), on
+    /// 25,808 of the 25,832 pads of the capture of record. Which field the tick itself acted on is not
+    /// pinned by this; the wreck and contact tasks pin it against the ride.
+    pub const POLLED_FIELD_LAG: usize = 2;
+
+    /// The EE RAM image C10 saved at `frame`, the tick before (or two before) an indexed event.
+    pub fn ram_at(frame: u64) -> String {
+        format!("states/c10/c10-{frame}.ram")
+    }
+
+    /// The PCSX2 save state the image [`ram_at`] was unpacked from, for loading into a kit copy.
+    pub fn p2s_at(frame: u64) -> String {
+        format!("states/c10/p2s/c10-{frame}.p2s")
+    }
+
+    /// **The capture, read with only the columns `keep` names** (and `frame`, which a [`Capture`]
+    /// always leads with). The whole file is ~17 KB a row — the 22 joints and 18 ragdoll bodies of
+    /// both riders are two thirds of it — so it is streamed a line at a time and never held whole.
+    /// Rows short of the header are refused by their line, as [`Capture::parse`] refuses them.
+    pub fn read(text: impl std::io::BufRead, keep: impl Fn(&str) -> bool) -> Result<Capture, ParseError> {
+        let mut lines = text.lines().enumerate();
+        let header = match lines.next() {
+            Some((_, Ok(h))) => h,
+            _ => return err(1, "the capture is empty"),
+        };
+        let header: Vec<&str> = header.split(',').map(str::trim).collect();
+        if header.first() != Some(&"frame") {
+            return err(1, "a capture's first column must be 'frame'");
+        }
+        let wanted: Vec<usize> = (0..header.len()).filter(|&i| i == 0 || keep(header[i])).collect();
+        let mut cap = Capture {
+            columns: wanted.iter().map(|&i| header[i].to_string()).collect(),
+            frames: Vec::new(),
+            rows: Vec::new(),
+        };
+        for (i, line) in lines {
+            let n = i + 1;
+            let Ok(line) = line else { return err(n, "the capture could not be read here") };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let cells: Vec<&str> = line.split(',').map(str::trim).collect();
+            if cells.len() != header.len() {
+                return err(n, format!("{} cells for {} columns", cells.len(), header.len()));
+            }
+            let Some(frame) = parse_u64(cells[0]) else {
+                return err(n, format!("frame '{}' is not a number", cells[0]));
+            };
+            cap.frames.push(frame);
+            cap.rows.push(wanted.iter().map(|&k| cells[k].to_string()).collect());
+        }
+        if cap.frames.is_empty() {
+            return err(1, "the capture has a header and no rows");
+        }
+        Ok(cap)
+    }
+
+    /// [`read`]'s `keep` for every column but the bodies: the riders' 22 posed joints (`p1_j0.…`) and
+    /// 18 ragdoll bodies (`p1_bone0.…`), which only a body test needs.
+    pub fn no_bodies(col: &str) -> bool {
+        let rest = col.strip_prefix("p1_").or_else(|| col.strip_prefix("p2_")).unwrap_or("");
+        let numbered = |pre: &str| rest.strip_prefix(pre).is_some_and(|t| t.starts_with(|c: char| c.is_ascii_digit()));
+        !(numbered("j") || numbered("bone"))
+    }
+
+    /// One of the ride's two players.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Rider {
+        P1,
+        P2,
+    }
+
+    impl Rider {
+        /// Both, in player order.
+        pub const BOTH: [Rider; 2] = [Rider::P1, Rider::P2];
+
+        /// The pad the rider rides on, which is the player index too.
+        pub fn pad(self) -> usize {
+            match self {
+                Rider::P1 => 0,
+                Rider::P2 => 1,
+            }
+        }
+
+        /// The prefix of the rider's lane in the capture.
+        pub fn prefix(self) -> &'static str {
+            match self {
+                Rider::P1 => "p1_",
+                Rider::P2 => "p2_",
+            }
+        }
+
+        fn other(self) -> Rider {
+            match self {
+                Rider::P1 => Rider::P2,
+                Rider::P2 => Rider::P1,
+            }
+        }
+    }
+
+    /// **One rider's lane as a one-rider capture**, the shape every reader of this module and every
+    /// older test already knows: the rider's columns with their prefix dropped (`p2_bike_xform.m30` is
+    /// `bike_xform.m30`), the other rider's left out, the shared ones (`frame`, `frame_counter`, `dt`,
+    /// the pads, the cars) as they are, and `pad_a`/`pad_b`/`stamp_a`/`stamp_b` naming the rider's own
+    /// pad — so [`PadTape::from_capture`] of a lane is that rider's pad on port 0.
+    pub fn lane(cap: &Capture, rider: Rider) -> Result<Capture, ParseError> {
+        let (mine, theirs) = (rider.prefix(), rider.other().prefix());
+        let pad = rider.pad();
+        let mut picks: Vec<(usize, String)> = Vec::new();
+        for (i, c) in cap.columns.iter().enumerate() {
+            if let Some(rest) = c.strip_prefix(mine) {
+                picks.push((i, rest.to_string()));
+            } else if !c.starts_with(theirs) {
+                picks.push((i, c.clone()));
+            }
+        }
+        if !picks.iter().any(|(i, _)| cap.columns[*i].starts_with(mine)) {
+            return err(1, format!("no '{mine}' column: not a two-rider capture"));
+        }
+        for half in ["a", "b"] {
+            picks.push((column_at(cap, &format!("pad{pad}_{half}"))?, format!("pad_{half}")));
+            picks.push((column_at(cap, &format!("stamp{pad}_{half}"))?, format!("stamp_{half}")));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if let Some((_, dup)) = picks.iter().find(|(_, name)| !seen.insert(name.clone())) {
+            return err(1, format!("'{dup}' is both a shared column and the {mine} lane's"));
+        }
+        Ok(Capture {
+            columns: picks.iter().map(|(_, n)| n.clone()).collect(),
+            frames: cap.frames.clone(),
+            rows: cap.rows.iter().map(|row| picks.iter().map(|(i, _)| row[*i].clone()).collect()).collect(),
+        })
+    }
+
+    /// **Both riders' pads off the capture**, each from its own pair of halves and stamps, with the
+    /// `dt` the engine handed each tick: [`PadTape::from_capture`]'s three rules (the older stamp's
+    /// half is the one the game read, row 0 is the tick before the capture, every tick present), for
+    /// pad 0 and pad 1 at once.
+    pub fn tape(cap: &Capture) -> Result<PadTape, ParseError> {
+        let dt = column_at(cap, "dt")?;
+        let mut halves = Vec::new();
+        for pad in 0..PADS {
+            halves.push([
+                column_at(cap, &format!("pad{pad}_a"))?,
+                column_at(cap, &format!("pad{pad}_b"))?,
+                column_at(cap, &format!("stamp{pad}_a"))?,
+                column_at(cap, &format!("stamp{pad}_b"))?,
+            ]);
+        }
+        dense_ticks(cap)?;
+        let mut tape = PadTape::new("2p");
+        for row in 1..cap.rows.len() {
+            let line = row + 2;
+            let number = |at: usize| -> Result<u64, ParseError> {
+                let cell = cap.rows[row][at].as_str();
+                parse_u64(cell).ok_or_else(|| ParseError {
+                    line,
+                    message: format!("'{cell}' in column '{}' is not a number", cap.columns[at]),
+                })
+            };
+            let mut reports = [Report::missing(); PADS];
+            for (pad, [a, b, sa, sb]) in halves.iter().copied().enumerate() {
+                let older = if number(sa)? <= number(sb)? { a } else { b };
+                reports[pad] = report_from_hex(&cap.rows[row][older], line, &cap.columns[older])?;
+            }
+            let cell = cap.rows[row][dt].as_str();
+            let Some(step) = parse_f32(cell) else {
+                return err(line, format!("dt '{cell}' is not a number"));
+            };
+            tape.push(PadFrame { dt: step, reports });
+        }
+        Ok(tape)
+    }
+
+    /// One rider's pad off the capture, on port 0 and nothing on port 1: what a one-rider test of
+    /// either player rides.
+    pub fn tape_of(cap: &Capture, rider: Rider) -> Result<PadTape, ParseError> {
+        let mut tape = PadTape::from_capture(&lane(cap, rider)?)?;
+        tape.name = format!("2p-{}", rider.prefix().trim_end_matches('_'));
+        Ok(tape)
+    }
+}
+
+impl P2m2 {
+    /// **A tape that reads every field**: one tick a PCSX2 frame, for a state that simulates at the
+    /// field rate. The 2p ride's split screen is one ([`two_p`]: its `dt` is a sixtieth and its rows
+    /// are the tape's fields one for one); a one-player ride is not ([`P2M2_FIELDS_PER_TICK`]).
+    pub fn tape_per_field(&self, dt: F) -> PadTape {
+        let mut tape = PadTape::new(format!("p2m2-{}-{}f-every", slug(&self.author), self.total_frames));
+        for field in 0..self.fields() {
+            let mut reports = [Report::missing(); PADS];
+            for (pad, report) in reports.iter_mut().enumerate() {
+                *report = self.field(field, pad);
+            }
+            tape.push(PadFrame::new(dt, reports));
+        }
+        tape
+    }
+}
+
+impl PadTape {
+    /// The same tape with pad `pad` moved to port 0 and nothing on port 1: one rider of a two-pad
+    /// recording, for a test (or the one-player [`Sim`]) that rides player 1's pad.
+    pub fn alone(&self, pad: usize) -> PadTape {
+        let mut tape = self.clone();
+        for frame in &mut tape.frames {
+            let mine = frame.reports[pad];
+            frame.reports = [Report::missing(); PADS];
+            frame.reports[0] = mine;
+        }
+        tape.name = format!("{}-pad{pad}", self.name);
+        tape
+    }
+}

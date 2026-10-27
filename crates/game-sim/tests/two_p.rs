@@ -52,7 +52,7 @@ fn capture() -> Option<&'static TwoP> {
 impl TwoP {
     /// `keep` says which columns to hold on to.
     fn load(keep: impl Fn(&str) -> bool) -> Option<TwoP> {
-        let file = std::fs::File::open(ctx("capture/2p/2p.csv")?).expect("open the capture");
+        let file = std::fs::File::open(ctx(game_sim::replay::two_p::CAPTURE)?).expect("open the capture");
         let mut lines = std::io::BufReader::new(file).lines().map(|l| l.expect("read the capture"));
         let head = lines.next().expect("a header");
         let header: Vec<&str> = head.split(',').collect();
