@@ -1,4 +1,4 @@
-# 1 — Foot Dust while riding (PART)
+# 1 — Foot Dust while riding (FINAL)
 
 Task P152 (P74 follow-up). 2026-10-27.
 
