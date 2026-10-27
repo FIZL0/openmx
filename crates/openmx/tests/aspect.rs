@@ -82,7 +82,50 @@ fn the_frame_fills_the_window_and_four_by_three_keeps_its_bars() {
     assert_eq!(Aspect::default(), Aspect::Fill);
     assert_eq!(Aspect::parse("4:3"), Ok(Aspect::Television));
     assert_eq!(Aspect::parse("FILL"), Ok(Aspect::Fill));
-    assert!(Aspect::parse("16:9").is_err());
+    assert!(Aspect::parse("3:2").is_err());
+}
+
+/// P176: opentennis's choices. Each fixed shape is the largest frame of it inside every window, with
+/// bars round it (pillarboxed in a wider window, letterboxed in a taller one, portrait too); Auto and
+/// Stretch fill it; the frame stands for whichever display its shape is nearer; and the split views,
+/// laid out in the frame, share it.
+#[test]
+fn each_fixed_shape_is_the_largest_one_inside_the_window() {
+    let words = ["auto", "4:3", "16:9", "16:10", "21:9", "stretch"];
+    assert_eq!(Aspect::ALL.map(|a| Aspect::parse(a.name()).unwrap()), Aspect::ALL);
+    assert_eq!(words.map(|w| Aspect::parse(w).unwrap()), Aspect::ALL);
+    // (window) -> the frame at 4:3, 16:9, 16:10, 21:9.
+    let want: [[(usize, usize); 4]; 4] = [
+        [(1440, 1080), (1440, 810), (1440, 900), (1440, 617)],
+        [(1440, 1080), (1920, 1080), (1728, 1080), (1920, 822)],
+        [(1440, 1080), (1920, 1080), (1728, 1080), (2520, 1080)],
+        [(1080, 810), (1080, 607), (1080, 675), (1080, 462)],
+    ];
+    let fixed = [Aspect::Television, Aspect::Wide, Aspect::Monitor, Aspect::Cinema];
+    for (i, (name, window)) in WINDOWS.iter().enumerate() {
+        assert_eq!(Aspect::Stretch.frame(*window, 1), Aspect::Fill.frame(*window, 1), "{name}");
+        for (j, a) in fixed.into_iter().enumerate() {
+            let (w, h) = a.frame(*window, 1);
+            assert_eq!((w, h), want[i][j], "{name} at {}", a.name());
+            // Inside the window, and touching two of its sides: the bars are on the other two.
+            assert!(w <= window.0 && h <= window.1 && (w == window.0 || h == window.1), "{name} {}", a.name());
+            // Its shape, to the pixel the rounding down leaves.
+            let (x, y) = a.ratio().unwrap();
+            assert!((w * y).abs_diff(h * x) < x.max(y), "{name} {}: {w}x{h}", a.name());
+            // 4:3 is the television, every wider shape the 16:9 display.
+            let display = if a == Aspect::Television { Display::Television } else { Display::Wide };
+            assert_eq!(Display::of(w, h, a), display, "{name} {}", a.name());
+            // The split views tile the fixed frame, not the window.
+            for layout in layouts() {
+                let rects = layout.rects(w, h);
+                assert_eq!(rects.iter().map(|r| r.w * r.h).sum::<usize>(), w * h, "{name} {} {layout:?}", a.name());
+                assert!(rects.iter().all(|r| r.x + r.w <= w && r.y + r.h <= h), "{name} {} {layout:?}", a.name());
+            }
+        }
+    }
+    // `--scale 2` halves it, as at 4:3.
+    assert_eq!(Aspect::Wide.frame((2560, 1080), 2), (960, 540));
+    assert_eq!(Aspect::Cinema.frame((0, 0), 1), (1, 1));
 }
 
 #[test]

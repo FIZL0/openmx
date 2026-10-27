@@ -3563,7 +3563,7 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     use menu::{Departure, Key};
     let groups = [
         ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::Departure(Departure::Foliage), Key::Departure(Departure::Textures), Key::WorldSky]),
-        ("Picture", vec![Key::Departure(Departure::Picture), Key::TextureFiltering]),
+        ("Picture", vec![Key::TextureFiltering]),
         ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit]),
     ];
     let graphics: Vec<Key> = groups.iter().flat_map(|(_, keys)| keys.clone()).collect();
@@ -3612,7 +3612,7 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     for _ in 0..5 {
         tap(&mut m, &mut r, Control::Down);
     }
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::Departure(Departure::Picture));
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::TextureFiltering);
     for _ in 0..5 {
         tap(&mut m, &mut r, Control::Up);
     }
@@ -3633,6 +3633,45 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     assert_eq!(m.screen(), Some(Screen::Settings));
     assert_eq!(tab(&m), "Graphics");
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
+}
+
+/// P176: the Display tab's Aspect Ratio row has opentennis's six choices, steps through them by the
+/// pad into `Settings::picture`, which is saved by `--aspect`'s word, and is the Picture departure's
+/// switch: the Original switch puts it at 4:3 and back to Auto.
+#[test]
+fn the_display_tab_has_opentennis_aspect_ratios() {
+    use menu::{Departure, Key, Picture};
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Settings");
+    tab_to(&mut m, &mut r, "Display");
+    let row = m.page().into_iter().find(|row| row.key == Key::AspectRatio).expect("an Aspect Ratio row on Display");
+    assert_eq!(row.label, "Aspect Ratio");
+    assert_eq!(row.choices, ["Auto", "4:3", "16:9", "16:10", "21:9", "Stretch"]);
+    assert_eq!(row.value, "Auto");
+    assert_eq!(Departure::Picture.key(), Key::AspectRatio);
+    assert_eq!(menu::SETTINGS_TABS[Departure::Picture.tab()], "Display");
+    while m.page()[m.cursor(Screen::Settings)].key != Key::AspectRatio {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    for want in [Picture::Television, Picture::Wide, Picture::Monitor, Picture::Cinema, Picture::Stretch, Picture::Fill] {
+        tap(&mut m, &mut r, Control::Right);
+        assert!(m.take_changed());
+        assert_eq!(m.settings.picture, want);
+        let dir = scratch("aspect-ratio-row");
+        menu::save(&dir, &m.settings, &Controls::default()).unwrap();
+        assert_eq!(menu::load(&dir).0.picture, want, "{want:?} saved");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    for p in Picture::ALL {
+        assert_eq!(Picture::from_word(p.word()), Some(p));
+    }
+    // 16:9 is ours, 4:3 the original's.
+    m.settings.picture = Picture::Wide;
+    assert!(!m.is_original(Departure::Picture));
+    m.set_departure(Departure::Picture, true);
+    assert_eq!(m.settings.picture, Picture::Television);
+    m.set_departure(Departure::Picture, false);
+    assert_eq!(m.settings.picture, Picture::Fill);
 }
 
 /// P118: every row of every Settings tab, of the modifiers page and of the Mods page is reachable by
@@ -4432,7 +4471,9 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
         down_to(&mut m, &mut r, d.key());
         tap(&mut m, &mut r, Control::Right);
         assert!(!m.some_original(d), "{d:?} back to ours");
-        assert_eq!(value(&m, d.key()), d.choices()[0], "{d:?}");
+        // Aspect Ratio's six (P176) step on from 4:3 to 16:9, another of ours.
+        let ours = if d == Departure::Picture { "16:9" } else { d.choices()[0] };
+        assert_eq!(value(&m, d.key()), ours, "{d:?}");
         tab_to(&mut m, &mut r, "Original");
         for o in Departure::ALL.into_iter().filter(|o| *o != d) {
             assert!(m.is_original(o), "{d:?} turned back moved {o:?}");
@@ -4510,7 +4551,7 @@ fn the_original_switches_round_trip_through_the_files() {
     let (s, c) = menu::load(&dir);
     assert_eq!(Menu::new(s, c).original(), Original::On);
     assert_eq!(Settings::parse("plants = original\n").plants, game_render::eco::Lod::Original);
-    assert_eq!(Settings::parse("plants = fancy\npicture = 16:10\n"), Settings::default());
+    assert_eq!(Settings::parse("plants = fancy\npicture = 3:2\n"), Settings::default());
     std::fs::remove_dir_all(dir).ok();
 }
 
