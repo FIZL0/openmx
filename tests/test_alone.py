@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-test for `checks.alone` (K6): a gate's `[alone]` binaries run with every check slot on the machine held.
+"""Self-test for `checks.alone` (K6): a failed `[alone]` binary reruns with every check slot on the machine held.
 
     python3 tests/test_alone.py         (no cargo, no kit.toml reads past import; a few seconds)
 

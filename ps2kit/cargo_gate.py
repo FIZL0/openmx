@@ -20,8 +20,8 @@ tracked rather than in `kit.toml` because every worktree has to agree on it, and
     [flaky]                        # failures rerun alone once before they count: load, not the change
     tests = ["-p openmx --test lobby::", "::two_builds_since_the_id"]
 
-    [alone]                        # binaries that time themselves: one by one after the pool, with no
-                                   # other worktree's test run going either (every check slot held)
+    [alone]                        # binaries that time themselves: one by one after the pool; a failure
+                                   # reruns once with no other worktree's test run going (every slot held)
     tests = ["-p openmx --test one_fps"]
 
 A slow binary runs anyway under `./kit check --all`, which is what a run's merge check uses, and a filtered
@@ -162,8 +162,9 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
     """The whole gate. Returns cargo's exit code shape (0 passed, 101 a test failed, else the build's) and
     the notes `./kit check` adds to its one line: slow binaries left out, flakes that passed alone.
 
-    `alone` is a context manager the `[alone]` binaries run inside: `./kit check` passes one that holds
-    every check slot on the machine (checks.alone), so no other worktree's gate is loading it either."""
+    `alone` is a context manager a failed `[alone]` binary's rerun runs inside: `./kit check` passes one
+    that holds every check slot on the machine (checks.alone). Only a failure takes the machine — a budget
+    test that passes beside the other worktrees' gates has no reason to stop them."""
     gc = gate_config(cwd)
     notes = []
     with open(log_path, 'w', encoding='utf-8') as log:
@@ -208,10 +209,21 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
             dfut = pool.submit(doc_tests)
             list(pool.map(lambda b: _run_one(b, benv), pooled))
             drc, dout = dfut.result()
-        if later:
-            with alone():
-                for b in later:
-                    _run_one(b, benv)
+        for b in later:
+            _run_one(b, benv)
+        # Over budget may be the other worktrees' gates, not the change: one more go with the machine to
+        # itself, and only that one counts.
+        for b in later:
+            if b.rc and (names := failed_tests(b.out)):
+                again = Binary(b.exe, b.pkg, b.kind, b.name, str(Path(b.dir) / 'Cargo.toml'))
+                with alone():
+                    _run_one(again, benv, names)
+                b.out += f'\n(kit: {len(names)} time-budget test(s) failed; rerun with no other test run going: ' \
+                         f'{"passed" if not again.rc else "failed again"})\n' + again.out
+                if not again.rc:
+                    b.rc = 0
+                    notes.append(f'passed on a rerun with the machine to itself (time budget, gate.toml): '
+                                 f'{", ".join(n.rsplit("::", 1)[-1] for n in names)}')
 
         # A failure that is load and not the change gets one more go, alone, now the pool is quiet.
         flaky = [re.compile(p) for p in (gc.get('flaky') or {}).get('tests', [])]

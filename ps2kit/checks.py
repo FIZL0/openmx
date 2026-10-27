@@ -32,7 +32,7 @@ import shlex
 import subprocess
 import sys
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 
 from ps2kit.config import cfg, ROOT
@@ -111,8 +111,9 @@ def _release_slot() -> None:
 
 @contextmanager
 def alone():
-    """Every check slot at once, so a binary that times itself (gate.toml's `[alone]`) runs on a machine no
-    other test run is loading — not just after this gate's own pool, while two other worktrees' gates go on.
+    """Every check slot at once, so a binary that times itself (gate.toml's `[alone]`) and failed gets its
+    rerun on a machine no other test run is loading — not just after this gate's own pool, while two other
+    worktrees' gates go on. Only on a failure: holding the machine stalls every other gate till theirs end.
 
     Deadlock-free by never waiting for a lock while holding another: this process's own slot is given up
     first; then the `check-alone` lock, which queues gates that reach this point at the same time; then
@@ -145,14 +146,6 @@ def alone():
             l.release()
         turn.release()
         _take_slot()
-
-
-def _is_alone(cwd: Path, extra: list[str]) -> bool:
-    """A filtered check that names an `[alone]` binary (the run's retest of one, say), which also gets the
-    machine to itself."""
-    from ps2kit import cargo_gate
-    args = ' '.join(extra)
-    return any(re.search(rf'{re.escape(t)}(\s|$)', args) for t in cargo_gate.alone_tests(cwd))
 
 
 def _jobs() -> int:
@@ -242,7 +235,7 @@ def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: b
                                    cfg(False).ctx('notes/check-times.json'), alone=alone)
         NOTES.extend(notes)
         return rc
-    with open(log, 'w', encoding='utf-8') as f, (alone() if _is_alone(cwd, extra) else nullcontext()):
+    with open(log, 'w', encoding='utf-8') as f:
         f.write(f'$ {full}\n(cwd {cwd}, {jobs} jobs)\n\n')
         f.flush()
         return subprocess.run(full, shell=True, cwd=str(cwd), stdout=f, stderr=subprocess.STDOUT, env=e).returncode
