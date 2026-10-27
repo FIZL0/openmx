@@ -4046,6 +4046,18 @@ machine_touchdown_play boot 0x003dd0a0 (emitter, 0, v*) touchdown: a no-repeat r
 #                                      clamp01((s - MinLevelVelocity)/(Max - Min)) * range, then sound_3d
 #                                      and start. The car calls it on the frame its record's +0x40 goes
 #                                      0 -> touched (0x0038e894), v the body's +0xb0 rotated by +0x18c
+# P146 -- the plane's touchdown (crates/openmx/src/audio.rs TireTouchdown, proofs in openmx
+#   tests/audio.rs and game-sim tests/flight_collision.rs). biplane_audio loads +0x67c with at = body
+#   +0x60, vel = body +0x70, so |vel+0xd4| is the body velocity's length. biplane_measure calls it with
+#   a1 0 on the grounded flag's rise (+0x594 0, +0x590 1). The disc has [biplaneTireParams] 30/150 and
+#   [biplaneTireTouchdown] 60/40/150/100, one sound (Impact\plane_tire, 22050 Hz mono, 0.324 s), and
+#   no [biplaneSuspension]: the suspension half never runs for the plane. The speeds are chopped on the
+#   FPU: 87.99959564 and 219.99899292 (IEEE would give one bit more). The pick calls rand() (0x0040fd40)
+#   once even for a list of one, before the crash test; +0x218 is never written (-1 throughout). The
+#   sound's level word is its +0x3c (a1 of vt +0x30). biplane.p2m2 (frames 10971..12688): touchdowns
+#   11665 (the nose-in's wreck tick) 42, 11739 (a bounce, wrecked) 40, 11748 (the put-back) 40, 12465
+#   (a landing) 62, 12650 (the put-back) 40; the sound's +0x40 changes on each, 11748's too, though the
+#   bounce's clip still sounds (9 ticks < 0.324 s): it starts over.
 machine_wreck_load boot 0x003dc570 [<p>Wreck]: Min/MaxDistance, MinImpulse +0x228, MaxImpulse +0x22c,
 #                                  list +0x208; +0x200/+0x204 the two gate words, +0x224 the impulse*
 bike_wreck_clank boot 0x003dc8c0 the wreck emitter's frame (vt +0x38): when *+0x200 (bike +0x948 =

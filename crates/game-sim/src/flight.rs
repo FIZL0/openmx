@@ -686,7 +686,12 @@ impl Flight {
     /// crosses a seam as the bike does, and the rest of the crash test is the same.
     fn post(&mut self, dt: F, acos: &AcosTable, holed: bool, bare: bool, wrap: [bool; 2]) {
         let wheels = self.tires.map(|t| t.touching);
-        let (_touchdown, true_speed) = self.measure.contacts(wheels, false);
+        let (touchdown, true_speed) = self.measure.contacts(wheels, false);
+        // The touchdown sound's pick (P146) draws one `rand()` even from its list of one, before the
+        // crash test's: the plane's draws include it.
+        if touchdown {
+            self.rng.rand();
+        }
         self.aero.true_speed = true_speed;
         let m = &self.measure;
         // What the world rays last struck, in the plane's mask of categories the speed rule spares.

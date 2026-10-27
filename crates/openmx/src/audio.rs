@@ -2542,6 +2542,101 @@ impl WreckClank {
     }
 }
 
+// --- the plane's wheels (P146) ----------------------------------------------------------------------
+
+/// The `.aud` speeds are miles an hour; the loader keeps them in feet a second.
+pub const MPH: f32 = 1.46666;
+
+/// A machine's wheel touchdown in `machine.aud`: `[<prefix>TireParams]`, which must be there for the
+/// rest to load, gives the distances, and `[<prefix>TireTouchdown]` the list (the plane's is one,
+/// `Impact\plane_tire`), the speeds its level runs between and the levels at each end. The plane's:
+/// 30 ft to 150 ft, level 40 at 60 mph and under, 100 at 150 mph and over.
+#[derive(Clone, Debug, Default)]
+pub struct MachineTouchdown {
+    pub list: List,
+    pub near: f32,
+    pub far: f32,
+    /// `MinLevelVelocity` and `MaxLevelVelocity`, in ft/s.
+    pub slow: f32,
+    pub fast: f32,
+    /// `MinLevelAttenuation`, and `MaxLevelAttenuation` less it.
+    pub level: i32,
+    pub range: i32,
+}
+
+impl MachineTouchdown {
+    /// The loader's defaults where a key is missing: distances 0 and 1, speeds and levels 0. No
+    /// `[<prefix>TireParams]`, no touchdown.
+    pub fn read(machine: &str, prefix: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> MachineTouchdown {
+        let s = ini::parse(machine);
+        let Some(p) = section(&s, &format!("{prefix}TireParams")) else { return MachineTouchdown::default() };
+        let mut t = MachineTouchdown { near: p.number("MinDistance").unwrap_or(0.0), far: p.number("MaxDistance").unwrap_or(1.0), ..Default::default() };
+        if let Some(d) = section(&s, &format!("{prefix}TireTouchdown")) {
+            let n = |k: &str| d.number(k).unwrap_or(0.0);
+            // On the EE's FPU, which chops: an IEEE multiply lands one bit high on both.
+            t.slow = (F(n("MinLevelVelocity")) * F(MPH)).to_f32();
+            t.fast = (F(n("MaxLevelVelocity")) * F(MPH)).to_f32();
+            t.level = n("MinLevelAttenuation") as i32;
+            t.range = n("MaxLevelAttenuation") as i32 - t.level;
+            t.list = List::read(Some(d), lib);
+        }
+        t
+    }
+
+    /// The level, `0..=100` on the disc's numbers, of a touchdown at `speed` (the body velocity's
+    /// length): the speed held between the two, its share of the way across, cut to a whole level.
+    pub fn level_at(&self, speed: f32) -> i32 {
+        let s = if self.slow < speed { speed } else { self.slow };
+        let s = if s < self.fast { s } else { self.fast };
+        (self.level as f32 + (s - self.slow) / (self.fast - self.slow) * self.range as f32) as i32
+    }
+}
+
+/// **One plane's wheels touching down**, the original's machine emitter on the plane's grounded flag:
+/// on the tick no wheel was down at the last measure and one is now — a landing, a bounce, the crash's
+/// own tick when a wheel is in it, the put-back onto the spawn — the list's pick plays at
+/// [`MachineTouchdown::level_at`] the body's speed, placed on the plane and following it. Nothing
+/// holds it off: a touchdown while the last one still sounds starts it over, as the original's one
+/// sound object does.
+#[derive(Debug, Default)]
+pub struct TireTouchdown {
+    voice: Option<VoiceId>,
+    last: Option<i32>,
+}
+
+impl TireTouchdown {
+    /// One tick: `speed` is the body's on a touchdown tick, `None` on any other. The voice started,
+    /// if one was.
+    pub fn tick(&mut self, m: &mut Mixer, t: &MachineTouchdown, speed: Option<f32>, at: [f32; 3], dice: &mut Dice) -> Option<VoiceId> {
+        self.voice = self.voice.filter(|&id| m.playing(id));
+        if let Some(id) = self.voice {
+            let gain = m.gain_of(id).unwrap_or(0.0);
+            m.set(id, gain, 1.0, Some(at));
+        }
+        let speed = speed?;
+        let mut last = self.last.unwrap_or(-1);
+        let (clip, looping) = t.list.pick(dice, &mut last)?;
+        self.last = Some(last);
+        if let Some(id) = self.voice.take() {
+            m.stop(id);
+        }
+        let gain = t.level_at(speed) as f32 / 100.0;
+        let id = m.play(clip, Play { gain, looping, at: Some(at), near: t.near, far: t.far, ..Play::default() });
+        self.voice = Some(id);
+        Some(id)
+    }
+
+    /// The touchdown's voice while it plays.
+    pub fn voice(&self) -> Option<VoiceId> {
+        self.voice
+    }
+
+    /// Every voice was stopped.
+    pub fn hushed(&mut self) {
+        self.voice = None;
+    }
+}
+
 // --- the shell's sound ------------------------------------------------------------------------------
 
 /// What one seat hands the sound each frame.
@@ -2558,6 +2653,8 @@ pub struct SeatFrame {
     pub crash: PlaneCrash,
     /// What the bike's wreck clank reads (P144).
     pub bike: BikeCrash,
+    /// The plane's wheels touched down this tick (P146): the body's speed then.
+    pub touchdown: Option<f32>,
     /// What the shootoff's sound reads (P85).
     pub edge: EdgeFrame,
     /// What the rider's voice reads of the thrown body (P180).
@@ -2575,6 +2672,8 @@ pub struct SeatSound {
     pub clank: WreckClank,
     /// The bike's `[Wreck]` clank (P144), an emitter of its own.
     pub bike_clank: WreckClank,
+    /// The plane's wheels (P146).
+    pub tires: TireTouchdown,
     /// The rider's own voice (P180).
     pub voice: RiderVoice,
     last: [i32; 4],
@@ -2596,6 +2695,7 @@ impl SeatSound {
             plane: PlaneNote::default(),
             clank: WreckClank::default(),
             bike_clank: WreckClank::default(),
+            tires: TireTouchdown::default(),
             voice: RiderVoice::default(),
             last: [-1; 4],
             was_grounded: true,
@@ -2611,6 +2711,7 @@ impl SeatSound {
     pub fn voices(&self) -> Vec<VoiceId> {
         let mut out: Vec<VoiceId> = self.engine.voices().collect();
         out.extend(&self.plane.voices);
+        out.extend(self.tires.voice());
         out.extend(self.edge.voices());
         out.extend(&self.shots);
         out
@@ -2636,6 +2737,8 @@ pub struct Sound {
     pub plane: LoopEngine,
     /// `machine.aud`'s `[biplaneWreck]` (P164).
     pub plane_wreck: MachineWreck,
+    /// `machine.aud`'s `[biplaneTireTouchdown]` (P146).
+    pub plane_touchdown: MachineTouchdown,
     pub shootoff: Shootoff,
     started: bool,
     world_voices: Vec<VoiceId>,
@@ -2652,6 +2755,7 @@ impl Sound {
             world: WorldSounds::default(),
             plane: LoopEngine::default(),
             plane_wreck: MachineWreck::default(),
+            plane_touchdown: MachineTouchdown::default(),
             shootoff: Shootoff::default(),
             started: false,
             world_voices: Vec::new(),
@@ -2703,6 +2807,7 @@ impl Sound {
                 s.edge.stop_rumble(m);
                 s.plane.update(m, &self.plane, note, at);
                 s.clank.tick(m, &self.plane_wreck, &f.crash, at, dt, &mut s.dice);
+                s.tires.tick(m, &self.plane_touchdown, f.touchdown, at, &mut s.dice);
                 continue;
             }
             s.edge.tick(m, &self.shootoff, &f.edge);
@@ -2783,6 +2888,9 @@ impl Sound {
             for id in s.clank.voice().into_iter().chain(s.bike_clank.voice()) {
                 m.stop(id);
             }
+            if let Some(id) = s.tires.voice() {
+                m.stop(id);
+            }
             if let Some(id) = s.voice.voice() {
                 m.stop(id);
             }
@@ -2803,6 +2911,7 @@ impl Sound {
             s.held = false;
             s.clank.hushed();
             s.bike_clank.hushed();
+            s.tires.hushed();
             s.voice.hushed();
             // A pause in a cannonball must not boom again on the way out: the rider's reasons stay.
             s.edge.hushed();
@@ -2871,6 +2980,13 @@ impl Reading<'_> {
         let text = self.text(res, "aud\\machine.aud");
         let lib = &mut *self.lib;
         MachineWreck::read(&text, "biplane", &mut |n| lib.clip(n))
+    }
+
+    /// The plane's wheels (P146): `machine.aud`'s `[biplaneTireParams]` and `[biplaneTireTouchdown]`.
+    pub fn plane_touchdown(&mut self, res: &str) -> MachineTouchdown {
+        let text = self.text(res, "aud\\machine.aud");
+        let lib = &mut *self.lib;
+        MachineTouchdown::read(&text, "biplane", &mut |n| lib.clip(n))
     }
 
     /// `track` is the track's name (`free10`): its `.aud` is in `tracks\free10.res`, the race's events
@@ -3181,6 +3297,7 @@ impl Sound {
         }
         sound.plane = read.machines(machines);
         sound.plane_wreck = read.plane_wreck(machines);
+        sound.plane_touchdown = read.plane_touchdown(machines);
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));
         Ok(sound)

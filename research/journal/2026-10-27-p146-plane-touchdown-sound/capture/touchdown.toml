@@ -1,0 +1,110 @@
+# P146 — the biplane's touchdown emitter (plane +0x67c, machine.aud [biplaneTireTouchdown]) over
+# biplane.p2m2's playback, beside the grounded flag it fires on and the body velocity it reads.
+# Same frames as P164's capture (its touchdowns 11664 11739 11748 12464 12650). The emitter: +0x200
+# count, +0x208 the sound array, +0x218 last pick, +0x21c/+0x220 the speeds (x1.46666), +0x224 the
+# min level, +0x228 max - min, +0x88/+0x8c the distances, +0xd4 the velocity pointer. The one sound's
+# level is its +0x38 (P164). rand_state to see the pick's draw.
+[watch]
+name        = "p146-plane-touchdown-sound"
+description = "the biplane's touchdown emitter beside its grounded flag"
+every       = 1
+start       = "frame_counter >= 10971 and frame_counter <= 11000 and plane_type == 1"
+frames      = 1718
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "plane_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x3b0"
+type = "u32"
+
+[[field]]
+name = "on_ground"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x590"
+type = "u32"
+
+[[field]]
+name = "was_ground"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x594"
+type = "u32"
+
+[[field]]
+name = "body"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160"
+type = "u32"
+
+[[field]]
+name = "body_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "body_pos"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "rand_state"
+addr = "@rand_state"
+type = "u64"
+
+[[field]]
+name = "em_count"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x200"
+type = "u32"
+
+[[field]]
+name = "em_last"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x218"
+type = "s32"
+
+[[field]]
+name = "em_lo"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x21c"
+type = "f32"
+
+[[field]]
+name = "em_hi"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x220"
+type = "f32"
+
+[[field]]
+name = "em_min"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x224"
+type = "s32"
+
+[[field]]
+name = "em_range"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x228"
+type = "s32"
+
+[[field]]
+name = "em_near"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x88"
+type = "f32"
+
+[[field]]
+name = "em_far"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x8c"
+type = "f32"
+
+[[field]]
+name = "em_vel_ptr"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0xd4"
+type = "u32"
+
+[[field]]
+name = "snd"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x67c -> 0x208 -> 0x0 -> 0x0"
+type = "bytes:128"

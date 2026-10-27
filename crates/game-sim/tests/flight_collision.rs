@@ -374,6 +374,37 @@ fn a_plane_crash_is_heard() {
     panic!("the plane's crash was never heard (wrecked at {wrecked:?})");
 }
 
+/// **A touchdown draws one `rand()`** (P146): the original's touchdown sound picks from its list of
+/// one with a `rand()` all the same, in the measure before the crash test. A plane dropped level onto
+/// flat ground from 6 ft touches down, and on each tick its wheels first touch (and on no other, the
+/// engine's noise once built) the plane's generator moves on exactly one draw.
+#[test]
+fn a_touchdown_draws_one_rand() {
+    let Some((_, f, _, _)) = the_plane() else { return };
+    let tables = game_sim::ride::Tables::build();
+    let mut f = f;
+    f.attitude.flown = true;
+    let lowest = f.tires.iter().map(|t| F(t.center.y()) - t.radius).fold(F(f32::MAX), |a, b| a.min(b));
+    f.place(Vf::new(0.0, (F(6.0) - lowest).to_f32(), 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &tables.acos);
+    let mut ground = Flat::default();
+    let dt = F(1.0 / 30.0);
+    f.frame(dt, Default::default(), &mut ground, &tables);
+    assert!(!f.measure.grounded, "on the ground from 6 ft up");
+    let mut touchdowns = 0;
+    for tick in 1..90 {
+        let before = f.rng.state();
+        f.frame(dt, Default::default(), &mut ground, &tables);
+        let touchdown = f.measure.grounded && !f.measure.was_grounded;
+        let mut once = game_sim::rng::Rng::from_state(before);
+        once.rand();
+        let want = if touchdown { once.state() } else { before };
+        assert_eq!(f.rng.state(), want, "tick {tick}: touchdown {touchdown}");
+        touchdowns += touchdown as u32;
+        assert_eq!(f.crash.reason, 0, "tick {tick}: a 6 ft drop wrecked the plane");
+    }
+    assert!(touchdowns >= 1, "never touched down");
+}
+
 /// **On its wheels, the collision object is clear of the ground**: a plane at rest and then taking
 /// off at full throttle over flat ground rides its tires, and its rays touch nothing — so the
 /// take-off of `tests/flight.rs` still leaves the ground, with the collision object on.
