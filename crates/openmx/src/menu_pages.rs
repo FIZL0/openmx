@@ -1412,10 +1412,11 @@ impl Departure {
     }
 }
 
-/// Draw Distance's names for the world's three.
+/// Draw Distance's names for the world's four.
 pub fn graphics_label(g: Graphics) -> &'static str {
     match g {
         Graphics::Full => "Whole Map",
+        Graphics::Farther => "Farther Fog",
         Graphics::Far => "Far Fog",
         Graphics::Original => "Original Fog",
     }

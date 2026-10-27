@@ -87,6 +87,27 @@ fn the_nodes_looked_at_grow_with_the_view_not_the_ground() {
         far_small.ground_visits,
         far_wide.ground_visits
     );
+    // Farther Fog (V95), twice Far's reach: 1600 feet, past the small ground's edge but inside one
+    // twice as wide, so that one and the wide one hold the same ground, and more of it than Far's.
+    let mid = hills(96);
+    let farther_mid = frame(&mut gpu, &mid, Graphics::Farther);
+    let farther_wide = frame(&mut gpu, &wide, Graphics::Farther);
+    assert_eq!(drawn(&farther_mid), drawn(&farther_wide), "the same chunks in Farther Fog's reach");
+    assert!(drawn(&farther_wide) > drawn(&far_wide), "Farther draws past Far: {} against {}", drawn(&farther_wide), drawn(&far_wide));
+    assert!(
+        farther_wide.ground_visits <= farther_mid.ground_visits + 32,
+        "Farther Fog: {} nodes looked at on the middle ground, {} on the wide",
+        farther_mid.ground_visits,
+        farther_wide.ground_visits
+    );
+    println!(
+        "Farther Fog: {} chunks for {} nodes on {} chunks, {} nodes on {}",
+        drawn(&farther_mid),
+        farther_mid.ground_visits,
+        mid.len(),
+        farther_wide.ground_visits,
+        wide.len()
+    );
     // Whole Map draws all of what is in front of the camera, a branch at a time where it is far.
     let whole = frame(&mut gpu, &wide, Graphics::Full);
     println!(
