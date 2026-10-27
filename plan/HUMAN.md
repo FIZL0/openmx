@@ -73,17 +73,6 @@ never by a path of its own. Older tests on first_recording, recording2, animandp
 tapes keep their pins and get a 2p case beside them. `docs/PROVING.md` ("The human reference") says
 the same to agents.
 
-- [ ] **A second 2p recording with the riders meeting and a truck ride.** C10 played yours back on both
-      PCSX2 builds and the ride never brings the riders within 136 ft of each other or a rider within
-      184 ft of a path car (truck or trailer), and it touches no prop: the rider-vs-rider (S158), truck
-      (S159) and prop (S157) cases have nothing to read. Record one the same way (Tools → Input
-      Recording → New, from a 2p state, both pads), in which the two riders ride into each other a few
-      times (head-on, a side swipe, one landing on the other, one into the other's wreck), ride onto a
-      moving truck or trailer and stay on it a while, and hit a crate, a sign and a tree. Save it as
-      `context/recordings/split/2p-contacts.p2m2` (with its `_SaveState.p2s`) and say here what is in it
-      and roughly when. An agent then checks it plays back into the same ride before it becomes the next
-      reference (research/c10/play_capture.sh). About ten minutes.
-
 ## Save states and recordings
 
 Agents can load states and replay recordings, but only a person can play the game to the interesting
