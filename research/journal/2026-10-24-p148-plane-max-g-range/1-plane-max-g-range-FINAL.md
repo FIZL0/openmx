@@ -66,3 +66,10 @@ scratch worktree, so P148 did not cause them. They are filed as S119:
 `the_captured_backwards_turns_never_wreck` (flat agrees through 213, not 330) and
 `the_slip_cases_replay_from_the_save_state` (turn parts at 75). Once S119 lands, rerun
 `./kit done P148 "..."`.
+
+**2026-10-26, reopened.** The code has been on main since 785041dc. Since then P160 changed biplane.rs
+and was undone (afe52ec4). On main aa8a4481, `plane_max_g` passes again (7 tests). The two S119 replay
+tests now pass in `./kit check --all`. The only red in that run was menu.rs
+`every_menu_moves_the_same_for_the_same_hand_at_every_frame_rate` (two taps in 120 ms at 120 Hz). It
+passed when rerun alone, so I count it as a load flake and not as P148's. There is no code change in this
+session.
