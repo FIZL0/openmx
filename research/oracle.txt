@@ -5311,6 +5311,20 @@ path_car_turn         boot 0x001dd8c0 (a0 out, a1 car) vt+0xc0: vadd.xyz(cross(c
 #   (0x00426d70). Then +0x170 = own point velocity - +0x1c0, +0x180 = chassis+0x260 - +0x1b0, +0x190
 #   = unrotate(chassis node, +0x180) (0x001b30e0), +0x1a0 = 1. Nothing between the distributor and it
 #   clears +0x1f4 (only wheel_clear does): a wheel whose terrain ray wins still subtracts the car.
+# S141 — the plane on the moving train: crates/game-sim/src/flight_search.rs (world_flown,
+# Scene::flown, TOY) and flight.rs (movers), proved in crates/game-sim/tests/traffic.rs on
+# biplane.p2m2's state (free06, plane flown) and s89-along.
+#   The plane's tire probe asks ground_query (0x001dc960): the cell cache and the cell reader
+#   0x001ddaf0, the terrain alone; its wheels never see a car. It meets the train through its
+#   collision object's ray probe (biplanem.col's 36 segments) and contact::resolve's mover branch.
+#   The plane's moving list (ray probe +0x04 space, +0x04 table, +0x38 list; list +0x38 last, +0x3c
+#   blocks): slots 0..20 the path cars' mesh collidables in free06.toy's Car1..Car21 order, category
+#   0x48, flags 0x05 (ENABLED|NO_GROUPS) plus the search mark 0x10, +0x7c the car (path car vtable
+#   0x0044d370, kind 2 at +0x1b0), +0x80 owner 0; slots 21..22 the two driving toys (vtable
+#   0x0045f070); then the plane's own (category 0x42058 / 8), the bikes and the rest. Scenery meshes:
+#   category 0x220, flags 0x0c, in the static tree. Radii = the meshes' bounds (35.5157 the engine ..
+#   20.5384 a scraper back). MinWreckSpeed plane+0x3b8 = 73.333 ft/s, over the train's ~55; the crash
+#   test's spare bit is VEHICLE 0x2000, which 0x48 lacks.
 # V82 — the path cars' wheels: crates/game-render/src/toy.rs (Wheels), proved in
 # crates/game-render/tests/path_car_wheels.rs on s89-along (journal *-v82-path-car-wheels).
 #   the init (vt+0xc4, 0x001147c0) looks up "TireFrontL" "TireFrontR" "TireBackL" "TireBackR" "TireMidL"

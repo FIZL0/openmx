@@ -528,7 +528,7 @@ impl Flight {
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props, trees) = world.wooded();
         let bounds = field.as_deref().map(field_box);
-        let mut scene = Scene::wooded(props, trees, bikes, bounds, &rays, &self.record.node, &mut self.nearby);
+        let mut scene = Scene::flown(props, trees, bikes, bounds, &rays, &self.record.node, &mut self.nearby);
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
         let movers = contact_search::Search::movers(&scene);
         (scene.struck, movers)
@@ -543,7 +543,7 @@ impl Flight {
         let Some(rays) = self.rays.as_ref() else { return };
         let (field, props, trees) = world.wooded();
         let bounds = field.as_deref().map(field_box);
-        flight_search::refresh_wooded(props, trees, bikes.as_ref(), bounds, rays, &node_of(&self.body), &mut self.nearby);
+        flight_search::refresh_flown(props, trees, bikes.as_ref(), bounds, rays, &node_of(&self.body), &mut self.nearby);
     }
 
     /// The preforce listener.

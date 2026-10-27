@@ -15,6 +15,10 @@
 //!    on one of the state's cars and on one whose contact is on the world, is
 //!    [`ride::wheel_contact_velocity`] on [`Moving::at`], bit for bit;
 //! 6. **the ride** (S136) — a bike parked on the moving train's roof moves with it and stays on it.
+//! 7. **the plane's world** (S141) — the plane's world holds the cars as the original's does: toys
+//!    in its moving list ahead of its probes, in the order biplane.p2m2's state has them;
+//! 8. **the plane on the train** (S141) — a plane set down on the moving train's roof stays on it
+//!    and moves with it, rollback or not; one flown into its side meets it.
 
 use game_sim::archive::{Psr, Res};
 use game_sim::math::Mat4;
@@ -713,4 +717,357 @@ fn a_wreck_bike_dropped_on_the_train_rides_it() {
     assert!(carried.along < 3.0, "the carried bike slid {} ft along the deck", carried.along);
     assert!(0.0 < carried.over && carried.over < 3.0, "the carried bike is {} ft over the roof", carried.over);
     assert!(left.along > DECK, "without the wagon's motion the bike still stayed on: {left:?}");
+}
+
+// --- S141: the plane and the train ------------------------------------------------------------------
+
+/// biplane.p2m2's state: free06, the plane flown, the train and the earth movers on their clips.
+const PLANE_STATE: &str = "biplane.p2m2_SaveState.eeMemory.bin";
+/// The plane, and its collision record's ray probe (S48's offsets).
+const PLANE: u32 = 0x00c4_4a40;
+const PLANE_COLLISION: u32 = 0x170;
+const RAY_PROBE: u32 = 0x1f0;
+
+/// A collidable's fields, and the broad phase's (S44, S45, S96).
+mod col_at {
+    pub const SPACE: u32 = 0x04;
+    pub const RADIUS: u32 = 0x60;
+    pub const MOVER: u32 = 0x7c;
+    pub const OWNER: u32 = 0x80;
+    pub const CATEGORY: u32 = 0x84;
+    pub const FLAGS: u32 = 0x116;
+    pub const TABLE: u32 = 0x04;
+    pub const MOVING: u32 = 0x38;
+    pub const LIST_LAST: u32 = 0x38;
+    pub const LIST_BLOCKS: u32 = 0x3c;
+}
+
+/// What a search leaves on a collidable's flags (its two marks) and the two bits it never reads.
+const MARKS: u8 = 0xf0;
+
+/// **The plane's world holds the cars as the original's does** (S141). biplane.p2m2's state is the
+/// plane's world on free06: the first 21 slots of its moving list are the path cars' mesh
+/// collidables in free06.toy's order (the order a ride's load attaches the cars in), each of category
+/// 0x48 with its car (path car vtable, vehicle kind 2) as its mover and no collision object, then the
+/// two driving toys, then the plane's own. The port's [`flight_search::world_flown`] lists its cars
+/// in its props' order, all ahead of its two probes, each with the state's category, flags and (by
+/// its model) radius; its scenery world ([`flight_search::world_wooded`]) still files them in the
+/// tree.
+#[test]
+fn the_planes_world_holds_the_cars_as_the_originals_does() {
+    use game_sim::flight_search::{self, FIRST, RAY, SWEEP, TOY};
+    use game_sim::broad_phase::Structure;
+    let Some(along) = state() else { return };
+    let Some(kit) = Kit::load().ok() else { return };
+    let path = kit.ctx("states").join(PLANE_STATE);
+    if !path.exists() {
+        skip(&format!("{} is not there: `./kit state ram` of biplane.p2m2_SaveState.p2s", path.display()));
+        return;
+    }
+    let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+
+    // The state's moving list, and its path cars.
+    let ray = ee.u32_at(ee.u32_at(PLANE + PLANE_COLLISION) + RAY_PROBE);
+    let list = ee.u32_at(ee.u32_at(ee.u32_at(ray + col_at::SPACE) + col_at::TABLE) + col_at::MOVING);
+    let block = ee.u32_at(ee.u32_at(list + col_at::LIST_BLOCKS));
+    let last = ee.i32_at(list + col_at::LIST_LAST) as u32;
+    let slots: Vec<u32> = (0..last).map(|k| ee.u32_at(block + 4 * k)).collect();
+    let path_car = ee.u32_at(CARS[0] + at::VTABLE).max(along.u32_at(CARS[0] + at::VTABLE));
+    let cars: Vec<u32> = slots.iter().copied().take_while(|&o| o & 2 == 0 && {
+        let m = ee.u32_at(o + col_at::MOVER);
+        m != 0 && ee.u32_at(m + at::VTABLE) == path_car
+    }).collect();
+    assert_eq!(cars.len(), CARS.len(), "the moving list's first slots are the path cars");
+
+    let Some((world, traffic)) = free06_with_cars() else { return };
+    let first = traffic.first.expect("attached");
+    let props = &world.props.props;
+    let (flown, objects) = flight_search::world_flown(props, None, None, None, Vf::new(0.0, 0.0, 0.0, 1.0), F::ZERO);
+    let Structure::List(moving) = &flown.structures[1] else { panic!("the moving list") };
+    let listed: Vec<usize> = moving.blocks.as_ref().expect("a block")[0].iter().take(moving.last as usize).map(|o| o.expect("a slot")).collect();
+    let toys: Vec<usize> = (0..CARS.len()).map(|k| FIRST + first + k).collect();
+    assert_eq!(listed, [&toys[..], &[RAY, SWEEP]].concat(), "the port's moving list: the cars, then the probes");
+
+    // The original's: the `.toy`'s cars in its order, which is the order a ride's load attaches them in.
+    let models = toy_models(&archives().expect("free06's archives"));
+    for (k, &o) in cars.iter().enumerate() {
+        let theirs = ee.u32_at(o + col_at::MOVER);
+        assert_eq!(name(&ee, theirs), models[k], "slot {k}: the .toy's Car{}", k + 1);
+        assert_eq!(ee.u32_at(theirs + at::KIND), 2, "slot {k}: the car's vehicle kind");
+        assert_eq!(ee.u32_at(o + col_at::OWNER), 0, "slot {k}: no collision object");
+        assert_eq!(ee.u32_at(o + col_at::CATEGORY), TOY, "slot {k}: the category");
+    }
+    // s89-along's cars are in their addresses' order, not the `.toy`'s: each matches the state's by its
+    // model.
+    for (k, &car) in CARS.iter().enumerate() {
+        let model = name(&along, car);
+        let o = cars[models.iter().position(|m| *m == model).unwrap_or_else(|| panic!("car {k}: {model} in the .toy"))];
+        let ours = &objects[FIRST + first + k];
+        assert_eq!(ours.category, TOY, "car {k}: the category");
+        assert_eq!(ee.u8_at(o + col_at::FLAGS) & !MARKS, ours.flags, "car {k}: the flags");
+        assert_eq!(ee.f32_at(o + col_at::RADIUS).to_bits(), ours.radius.0.to_bits(), "car {k} ({model}): the radius");
+    }
+
+    // The worlds the cars are not toys in yet: the tree's, scenery.
+    let (_, scenery) = flight_search::world_wooded(props, None, None, None, Vf::new(0.0, 0.0, 0.0, 1.0), F::ZERO);
+    assert_eq!(scenery[FIRST + first].category, flight_search::SCENERY, "a car in the scenery world");
+}
+
+/// free06.toy's cars' models in its order, `Car1` on, leaving out the `HasPhysics` vehicles.
+fn toy_models(parts: &[(Vec<u8>, Res)]) -> Vec<String> {
+    let text = String::from_utf8_lossy(&member(parts, "free06.toy").expect("free06.toy")).into_owned();
+    let mut cars: Vec<(usize, String, bool)> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(n) = line.strip_prefix("[Car").and_then(|l| l.strip_suffix(']')).and_then(|n| n.parse().ok()) {
+            cars.push((n, String::new(), false));
+        } else if let (Some(car), Some((key, value))) = (cars.last_mut(), line.split_once('=')) {
+            match key.trim() {
+                "FileName" => car.1 = value.trim().to_string(),
+                "HasPhysics" => car.2 = value.trim().eq_ignore_ascii_case("true"),
+                _ => {}
+            }
+        }
+    }
+    cars.sort_by_key(|c| c.0);
+    cars.into_iter().filter(|c| !c.2).map(|c| c.1).collect()
+}
+
+/// The machines' archive's member `name`, out of the disc's `MX.PSR`.
+fn machine(name: &str) -> Option<Vec<u8>> {
+    let kit = Kit::load().ok()?;
+    let mut file = std::fs::File::open(kit.ctx("iso").join("MX.PSR")).ok()?;
+    let mut front = vec![0u8; 64 << 10];
+    std::io::Read::read_exact(&mut file, &mut front).expect("the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("machine.res").expect("machine.res is in MX.PSR");
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    std::io::Read::read_exact(&mut file, &mut bytes).expect("read");
+    let res = Res::parse(&bytes).expect("machine.res");
+    let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(name))?;
+    res.read(&bytes, e).ok()
+}
+
+/// The biplane off the disc, with its ray probe: the plane a ride flies.
+fn biplane() -> Option<game_sim::flight::Flight> {
+    use game_sim::flight_search::{BIPLANE_RAYS, Rays};
+    let plane = game_sim::phy::Plane::read_bytes(&machine(game_sim::phy::BIPLANE_PHY)?);
+    let rays = game_sim::track::Rays::parse(&machine(BIPLANE_RAYS)?).expect("biplanem.col");
+    let mut f = game_sim::flight::Flight::new(&plane).with_rays(Rays::of(&rays));
+    f.attitude.flown = true;
+    Some(f)
+}
+
+/// free06 with s89-along's cars on it, stepped once so that every car has its motion.
+fn free06_with_cars() -> Option<(Place<'static>, Traffic)> {
+    let ee = state()?;
+    let parts = archives()?;
+    let scn = member(&parts, "free06.scn").expect("free06.scn");
+    let scene = Box::leak(Box::new(Scene::parse(&scn).expect("free06's scene")));
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let bytes: &'static [u8] = Box::leak(member(&parts, &leaf).expect("free06's terrain").into_boxed_slice());
+    let terrain = Box::leak(Box::new(Terrain::parse(bytes).expect("free06's terrain")));
+    let mut world = Place { ground: Ground::new(terrain, &scene.terrain), props: Props::default() };
+    let mut traffic = traffic_of(&ee, &parts, &mut world.props);
+    traffic.frame(DT, &mut world);
+    Some((world, traffic))
+}
+
+/// How long the plane rides the wagon: five seconds.
+const FLOWN: usize = 150;
+
+/// What [`set_down`] measured.
+#[derive(Debug)]
+struct SetDown {
+    /// The most the plane moved along and across the deck, and up or down off it, in the wagon's
+    /// own frame, after [`SETTLE`].
+    along: f32,
+    up: f32,
+    /// The ticks before it left the deck ([`FLOWN`] if it never did), and before it first wrecked.
+    on: usize,
+    wrecked: Option<usize>,
+    /// Whether its rays were on a car with the car as the contacts' mover, on every tick after
+    /// [`SETTLE`] it was on the deck.
+    on_the_car: bool,
+    /// Its speed at the end, and the wagon's.
+    speed: f32,
+    car: f32,
+    /// Every tick's body position and velocity, bit for bit.
+    trace: Vec<[u32; 8]>,
+}
+
+/// The plane set down, throttle shut, a foot over [`WAGON`]'s roof, facing the way the wagon goes and
+/// at its speed, flown for [`FLOWN`] ticks — cars first, then the plane, as `Sim::step` has them.
+/// `still` takes the cars' motion away from the plane's contacts, which then hold on to the world.
+/// `rollback` keeps the plane and the cars at that tick and, at the end, puts them back the way an
+/// online rollback's restore does (the plane through the snapshot's wire, which leaves the movers
+/// out; the cars' meshes stood again, their motions left as the later tick wrote them) and flies the
+/// ticks after it again.
+fn set_down(still: bool, drag: bool, rollback: Option<usize>) -> Option<SetDown> {
+    let (mut world, mut traffic) = free06_with_cars()?;
+    let first = traffic.first.expect("attached");
+    let tables = game_sim::ride::Tables::build();
+    let mut f = biplane()?;
+    if !drag {
+        (f.aero.drag0, f.aero.drag1, f.aero.drag_de) = (F::ZERO, F::ZERO, F::ZERO);
+    }
+    let moving = world.props.props[first + WAGON].moving.expect("the wagon moves");
+    let lowest = f.tires.iter().map(|t| F(t.center.y()) - t.radius).fold(F(f32::MAX), |a, b| a.min(b));
+    let deck = Vf::new(moving.pose.0[3].x(), ROOF - lowest.to_f32() + 1.0, moving.pose.0[3].z(), 1.0);
+    f.launch(deck, moving.pose.0[2], moving.velocity, &tables.acos);
+    let off = |f: &game_sim::flight::Flight, car: &Mat4| {
+        let at = f.body.position;
+        let d = Vf::new(at.x() - car.0[3].x(), at.y() - car.0[3].y(), at.z() - car.0[3].z(), 0.0);
+        chassis::unrotate(&Mat3::new(car.0[0], car.0[1], car.0[2]), d)
+    };
+    let mut out = SetDown { along: 0.0, up: 0.0, on: FLOWN, wrecked: None, on_the_car: true, speed: 0.0, car: 0.0, trace: Vec::new() };
+    let mut start = None;
+    let mut kept = None;
+    let mut rolled = false;
+    let mut tick = 0;
+    while tick < FLOWN {
+        if rollback == Some(tick) && !rolled && kept.is_none() {
+            kept = Some((f.clone(), traffic.cars.clone()));
+        }
+        traffic.frame(DT, &mut world);
+        if still {
+            for p in world.props.props.iter_mut() {
+                if let Some(m) = &mut p.moving {
+                    (m.velocity, m.spin) = (Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 0.0, 1.0));
+                }
+            }
+        }
+        f.frame(DT, Default::default(), &mut world, &tables);
+        let b = &f.body;
+        let row = [b.position.to_bits(), b.velocity.to_bits()].concat();
+        if out.trace.len() > tick {
+            out.trace[tick] = row.try_into().unwrap();
+        } else {
+            out.trace.push(row.try_into().unwrap());
+        }
+        let now = off(&f, &traffic.cars[WAGON].pose);
+        if out.on == FLOWN && (now.x().abs().max(now.z().abs()) > DECK || now.y() < -2.0) {
+            out.on = tick;
+        }
+        if out.wrecked.is_none() && f.crash.reason != 0 {
+            out.wrecked = Some(tick);
+        }
+        if tick == SETTLE {
+            start = Some(now);
+        }
+        if let Some(start) = start.filter(|_| out.on == FLOWN) {
+            out.along = out.along.max((now.x() - start.x()).abs()).max((now.z() - start.z()).abs());
+            out.up = out.up.max((now.y() - start.y()).abs());
+            out.on_the_car &= f.record.contacts.iter().any(|c| c.mover.is_some());
+        }
+        tick += 1;
+        if tick == FLOWN
+            && let Some((plane, cars)) = kept.take()
+        {
+            let wire = game_sim::snapshot::encode_flights(&[Some(Box::new(plane))]);
+            let mut back = game_sim::snapshot::decode_flights(&wire).expect("the plane's wire");
+            let mut restored = *back.pop().flatten().expect("the plane");
+            // As `snapshot::decode` does: the probe is this machine's, not the wire's.
+            (restored.rays, restored.bike) = (f.rays.clone(), f.bike.clone());
+            f = restored;
+            traffic.cars = cars;
+            traffic.place(&mut world);
+            tick = rollback.expect("kept at the rollback's tick");
+            rolled = true;
+            start = None;
+        }
+    }
+    let v = f.body.velocity;
+    let car = world.props.props[first + WAGON].moving.expect("the wagon moves").velocity;
+    out.speed = (v.x() * v.x() + v.z() * v.z()).sqrt();
+    out.car = (car.x() * car.x() + car.z() * car.z()).sqrt();
+    Some(out)
+}
+
+/// **A plane set down on the moving train's roof stays on it and moves with it** (S141). The plane's
+/// wheels ask the terrain alone (the original's tire probe is the world's ground query), so on a
+/// wagon it is the collision object's rays that hold it up: their hits on the car's mesh carry the
+/// car as their mover, and the resolution's spring and friction work against the car's motion at
+/// the contact ([`game_sim::contact::resolve`], S42's mover branch). At the wagon's 55 ft/s, under
+/// MinWreckSpeed's 73, the contact does not wreck it.
+///
+/// The control takes the cars' motion from the contacts: the plane's rays then hold on to the
+/// world, and the wagon runs out from under it. And a rollback in the middle of the ride, which
+/// restores the plane without its movers, flies the rest of it bit for bit as it was flown.
+#[test]
+fn a_plane_set_down_on_the_train_rides_it() {
+    let quiet = |s: &SetDown| format!("{:?}", SetDown { trace: Vec::new(), ..*s });
+    let Some(carried) = set_down(false, false, None) else { return };
+    eprintln!("carried, drag off: {}", quiet(&carried));
+    assert_eq!(carried.wrecked, None, "the plane wrecked on the wagon: {}", quiet(&carried));
+    assert_eq!(carried.on, FLOWN, "the plane left the deck: {}", quiet(&carried));
+    assert!(carried.on_the_car, "the plane's contacts were not on the car");
+    assert!(carried.along < 0.25, "the plane moved {} ft along the wagon's deck", carried.along);
+    assert!(carried.up < 0.25, "the plane rose or sank {} ft off the deck", carried.up);
+    assert!((carried.speed - carried.car).abs() < 0.05, "the plane is at {} ft/s on a wagon at {}", carried.speed, carried.car);
+
+    let left = set_down(true, false, None).expect("the same state");
+    eprintln!("left, drag off: {}", quiet(&left));
+    assert!(left.on < FLOWN / 2, "without the wagon's motion the plane still stayed on for {} ticks", left.on);
+
+    // The plane's own drag reads its speed over the air, as the original's does: it slips back a
+    // little, and still rides.
+    let dragged = set_down(false, true, None).expect("the same state");
+    eprintln!("carried, drag on: {}", quiet(&dragged));
+    assert_eq!((dragged.wrecked, dragged.on), (None, FLOWN), "the plane with its drag: {}", quiet(&dragged));
+    assert!(dragged.along < 4.0 && (dragged.speed - dragged.car).abs() < 1.0, "the plane with its drag: {}", quiet(&dragged));
+
+    let again = set_down(false, true, Some(FLOWN / 2)).expect("the same state");
+    assert_eq!(again.trace, dragged.trace, "the ride after the rollback is not the ride");
+}
+
+/// The plane flown level at 120 ft/s, gas on, from 60 ft abeam of [`WAGON`] straight at its side, a
+/// few feet under its roof, for a second and a half: the tick it wrecked and why, the mesh its record struck,
+/// and whether any of its contacts on the way had a car as its mover. With `cars` off it is the
+/// same flight over free06 with no cars on it.
+fn flown_into(cars: bool) -> Option<(Option<(usize, u32)>, Option<usize>, bool, usize)> {
+    let (mut world, traffic) = free06_with_cars()?;
+    let first = traffic.first.expect("attached");
+    let moving = world.props.props[first + WAGON].moving.expect("the wagon moves");
+    let mut traffic = cars.then_some(traffic);
+    if !cars {
+        world.props.props.clear();
+    }
+    let tables = game_sim::ride::Tables::build();
+    let mut f = biplane()?;
+    let (side, centre) = (moving.pose.0[0], moving.pose.0[3]);
+    let start = Vf::new(centre.x() + 60.0 * side.x(), ROOF - 6.0, centre.z() + 60.0 * side.z(), 1.0);
+    let facing = Vf::new(-side.x(), 0.0, -side.z(), 0.0);
+    f.launch(start, facing, Vf::new(-120.0 * side.x(), 0.0, -120.0 * side.z(), 1.0), &tables.acos);
+    let gas = game_sim::biplane::Pad { forward: F::ONE, ..Default::default() };
+    let (mut wrecked, mut met) = (None, false);
+    for tick in 0..45 {
+        if let Some(t) = &mut traffic {
+            t.frame(DT, &mut world);
+        }
+        f.frame(DT, gas, &mut world, &tables);
+        met |= f.record.contacts.iter().any(|c| c.mover.is_some());
+        if f.crash.reason != 0 {
+            wrecked = Some((tick, f.crash.reason));
+            break;
+        }
+    }
+    Some((wrecked, f.record.struck, met, first))
+}
+
+/// **A plane flown into the train's side meets it** (S141). The cars are in the plane's world as
+/// toys, so its rays strike a wagon's mesh, the contacts carry the car, and the crash test wrecks
+/// it: a toy's category is not the vehicle bit that spares a plane striking a bike. Over the same
+/// ground with no cars on it the same flight flies on.
+#[test]
+fn a_plane_flown_into_the_trains_side_meets_it() {
+    let Some((wrecked, struck, met, first)) = flown_into(true) else { return };
+    eprintln!("into the train: wrecked {wrecked:?}, struck {struck:?}, on a car {met}");
+    let cars = game_sim::flight_search::FIRST + first..game_sim::flight_search::FIRST + first + CARS.len();
+    assert_eq!(wrecked.map(|w| w.1), Some(game_sim::biplane::CRASHED), "the plane flew through the train");
+    assert!(struck.is_some_and(|s| cars.contains(&s)), "the plane struck {struck:?}, not a car ({cars:?})");
+    assert!(met, "no contact had a car as its mover");
+
+    let (open, ..) = flown_into(false).expect("the same state");
+    assert_eq!(open, None, "with no cars the plane still wrecked");
 }

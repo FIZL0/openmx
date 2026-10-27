@@ -70,6 +70,13 @@ pub const SCENERY: u32 = 0x220;
 /// A scenery mesh's flag byte: struck, and gathered only within the search's bound.
 const SCENERY_FLAGS: u8 = flags::ENABLED | more_flags::WITHIN_BOUND;
 
+/// A toy's category (`+0x84`) and flag byte (S141): the path cars' mesh collidables, which the plane's
+/// world holds in its moving list ahead of the probes, gathered wherever their spheres are, in the
+/// order the track built them (biplane.p2m2's state: its first 21 slots are the path cars, each with
+/// its car as a mover of kind 2, then the two driving toys; flags 0x05 but for a search's marks).
+pub const TOY: u32 = 0x48;
+const TOY_FLAGS: u8 = flags::ENABLED | flags::NO_GROUPS;
+
 /// The plane's nearby search as its collision object is built with it: the box queried is
 /// `2 × SEARCH_LEAST` across, the bound may grow to `SEARCH_EXTRA`, and at most `SEARCH_CAPACITY`
 /// candidates are kept (biplane.p2m2's save state).
@@ -310,6 +317,21 @@ pub fn world_among(
     centre: Vf,
     radius: F,
 ) -> (Broad, Vec<Collidable>) {
+    world_of(props, bikes, field, centre, radius, false)
+}
+
+/// [`world_among`], and with `toys` the props that move ([`Prop::moving`], the path cars) are toys
+/// ([`TOY`]): in the moving list ahead of the probes rather than in the tree, as the plane's world
+/// holds them (S141). Without, every prop is scenery, as the worlds the port has not yet told about
+/// the cars (the wreck bike's, the put-back query's) still hold them.
+fn world_of(
+    props: &[Prop],
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+    toys: bool,
+) -> (Broad, Vec<Collidable>) {
     let probe = |flags, radius| Collidable {
         class: Class::Object,
         flags,
@@ -327,7 +349,23 @@ pub fn world_among(
     let (mut tree, cell_size) = broad_build::tree_over(lo, hi, F(TREE_LEAST));
     // It reports the box its cells cover, which is what the gather's bound is measured in.
     tree.flags = 2;
+    let mut moving = Vec::new();
     for (i, p) in props.iter().enumerate() {
+        if toys && p.moving.is_some() {
+            objects.push(Collidable {
+                class: Class::Object,
+                flags: TOY_FLAGS,
+                nearby: true,
+                radius: p.radius,
+                category: TOY,
+                collides_with: PROBE_COLLIDES_WITH,
+                categories: any_category(),
+                ..Collidable::default()
+            });
+            places.push(Placement { centre: prop_box(p).0, ..Placement::default() });
+            moving.push(FIRST + i);
+            continue;
+        }
         objects.push(Collidable {
             class: Class::Object,
             flags: SCENERY_FLAGS,
@@ -346,8 +384,11 @@ pub fn world_among(
         broad_build::insert(&mut tree, FIRST + i, key);
     }
     let mut block = vec![None; MOVING_BLOCK as usize];
-    (block[RAY], block[SWEEP]) = (Some(RAY), Some(SWEEP));
-    let mut last = 2;
+    moving.extend([RAY, SWEEP]);
+    for (slot, &o) in block.iter_mut().zip(&moving) {
+        *slot = Some(o);
+    }
+    let mut last = moving.len().min(block.len()) as i32;
     for (k, b) in bikes.map_or(&[][..], |b| b.bikes).iter().enumerate() {
         let mesh = bikes.map(|b| b.mesh).expect("bikes come with their mesh");
         let (_, radius) = bike_sphere(mesh, &b.transform);
@@ -394,7 +435,31 @@ pub fn world_wooded(
     centre: Vf,
     radius: F,
 ) -> (Broad, Vec<Collidable>) {
-    let Some(trees) = trees else { return world_among(props, bikes, field, centre, radius) };
+    wooded_of(props, trees, bikes, field, centre, radius, false)
+}
+
+/// [`world_wooded`] as the plane's world holds it (S141): the path cars are toys ([`world_of`]).
+pub fn world_flown(
+    props: &[Prop],
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+) -> (Broad, Vec<Collidable>) {
+    wooded_of(props, trees, bikes, field, centre, radius, true)
+}
+
+fn wooded_of(
+    props: &[Prop],
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+    toys: bool,
+) -> (Broad, Vec<Collidable>) {
+    let Some(trees) = trees else { return world_of(props, bikes, field, centre, radius, toys) };
     // With no terrain to lay the tree over (none, or one with no edge), it spans the trunks as well
     // as the props.
     let bare = tree_box(props, None);
@@ -405,7 +470,7 @@ pub fn world_wooded(
             Some(([a[0].min(c[0]), a[1].min(c[1])], [b[0].max(d[0]), b[1].max(d[1])]))
         }
     };
-    let (mut broad, mut objects) = world_among(props, bikes, field, centre, radius);
+    let (mut broad, mut objects) = world_of(props, bikes, field, centre, radius, toys);
     let (_, hi) = tree_box(props, field);
     let Structure::Tree(tree) = &mut broad.structures[0] else { unreachable!("the table's first structure is its tree") };
     for g in trees.groups() {
@@ -492,6 +557,22 @@ pub fn refresh_wooded(
     refill(&mut objects, &mut broad, search);
 }
 
+/// [`refresh_wooded`] in the plane's world, the path cars toys in it ([`world_flown`]).
+pub fn refresh_flown(
+    props: Option<&Props>,
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    rays: &Rays,
+    node: &Frame,
+    search: &mut broad_phase::Search,
+) {
+    let props = props.map_or(&[][..], |p| &p.props[..]);
+    let (centre, radius) = reach(rays, &matrix(node));
+    let (mut broad, mut objects) = world_flown(props, trees, bikes, field, centre, radius);
+    refill(&mut objects, &mut broad, search);
+}
+
 /// The gather, after forgetting a list that names more collidables than this world has (it was
 /// gathered in another one).
 fn refill(objects: &mut [Collidable], broad: &mut Broad, search: &mut broad_phase::Search) {
@@ -540,10 +621,40 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
+        Scene::of(props, trees, bikes, field, rays, node, search, false)
+    }
+
+    /// [`Scene::wooded`] in the plane's own world (S141, [`world_flown`]): the path cars are toys,
+    /// and a probe's hit on one carries its car as the hit's mover of kind 2 — what the original's
+    /// mesh collidable names at `+0x7c` — so the contact's relative velocity is against the car's
+    /// ([`Search::movers`], [`crate::contact::resolve`]'s mover branch).
+    pub fn flown(
+        props: Option<&'a Props>,
+        trees: Option<&'a Trees>,
+        bikes: Option<Bikes<'a>>,
+        field: Option<([F; 2], [F; 2])>,
+        rays: &'a Rays,
+        node: &Frame,
+        search: &mut broad_phase::Search,
+    ) -> Scene<'a> {
+        Scene::of(props, trees, bikes, field, rays, node, search, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn of(
+        props: Option<&'a Props>,
+        trees: Option<&'a Trees>,
+        bikes: Option<Bikes<'a>>,
+        field: Option<([F; 2], [F; 2])>,
+        rays: &'a Rays,
+        node: &Frame,
+        search: &mut broad_phase::Search,
+        toys: bool,
+    ) -> Scene<'a> {
         let props = props.map_or(&[][..], |p| &p.props[..]);
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
-        let (mut broad, mut objects) = world_wooded(props, trees, bikes.as_ref(), field, centre, radius);
+        let (mut broad, mut objects) = wooded_of(props, trees, bikes.as_ref(), field, centre, radius, toys);
         if !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
             refill(&mut objects, &mut broad, search);
         }
