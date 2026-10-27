@@ -177,3 +177,24 @@ pub fn entry_spin(rng: &mut Rng, w: f32) -> Vf {
 pub fn unwreck(ch: &mut Chassis) {
     ch.max_speed_sq = RIDING_MAX_SPEED * RIDING_MAX_SPEED;
 }
+
+/// **A world that wraps** (MD29, the port's own): [`outside`] asked only on the axes that have an
+/// edge. A wrapped axis has seams instead ([`crate::world::World::wrap`]), and a rider who rides
+/// over one comes in on the far side rather than being thrown, so neither point is asked on it.
+/// With neither axis wrapped this is [`outside`], clause for clause.
+pub fn outside_wrapped(area: &Area, wrap: [bool; 2], rider: Vf, cofg: Vf) -> bool {
+    if wrap == [false, false] {
+        return outside(area, rider, cofg);
+    }
+    let unset = rider.0.iter().zip(NOTHING.0.iter()).all(|(a, b)| a.to_bits() == b.to_bits());
+    let by_rider = !unset && outside_axes(area, wrap, rider, MARGIN);
+    let by_bike = outside_axes(area, wrap, cofg, MARGIN);
+    by_rider || by_bike
+}
+
+/// [`Area::outside`] on the axes `wrap` leaves an edge on: within `margin` of that edge, past it, or
+/// `NaN` there. Nothing on an axis that wraps.
+pub fn outside_axes(area: &Area, wrap: [bool; 2], at: Vf, margin: F) -> bool {
+    let inside = |v: f32, extent: F| !(v < margin.0) && F(v) <= extent - margin;
+    !((wrap[0] || inside(at.x(), area.width)) && (wrap[1] || inside(at.z(), area.depth)))
+}

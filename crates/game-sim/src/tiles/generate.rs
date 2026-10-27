@@ -159,3 +159,96 @@ pub fn terrain_painted(
     }
     out
 }
+
+/// Cells across a seam join ([`seam_joins`]): one leaf, 16 samples.
+pub const SEAM_CELLS: u32 = 15;
+
+/// **The joins that close a world round** (MD29): on each axis `wrap` names, a strip of
+/// [`SEAM_CELLS`] cells at `spacing` feet past the world's far edge, its ground running straight
+/// from the far edge's to the near edge's, so the strip's far side is the world's first ground and a
+/// seam there is no step. `extent` is the world's `[width, depth]` before them, in whole feet, and
+/// `ground(x, z)` its height in feet and surface at a point inside it; the strips ask it only at the
+/// edges, `0` and the extent. The surface across a strip is the nearer edge's.
+///
+/// The `z` strip runs the world's width; the `x` strip runs its new depth, the `z` strip's end
+/// too, so the corner is closed: there it runs between the `z` strip's two ends. Each strip is cut
+/// into terrains of at most 16 leaves along it, and the last keeps only the cells up to the edge, so
+/// the world comes out exactly [`SEAM_CELLS`] × `spacing` feet longer on each wrapped axis. The
+/// tiles come out joins (every cell kept, `first_owner` 0 for the caller to set), `z` strip first,
+/// with their files beside them. Refuses an extent that is not a whole number of `spacing`s.
+pub fn seam_joins(
+    extent: [u32; 2],
+    wrap: [bool; 2],
+    spacing: u32,
+    ground: &dyn Fn(f64, f64) -> (f64, u8),
+) -> Result<Vec<(super::Tile, Vec<u8>)>, String> {
+    use super::Tile;
+    use crate::track::TerrainLayout;
+    use ps2_float::F;
+    if spacing == 0 {
+        return Err("a seam join's spacing of 0 feet".into());
+    }
+    for axis in 0..2 {
+        if wrap[axis] && (extent[axis] == 0 || extent[axis] % spacing != 0) {
+            return Err(format!("a world {} feet {} is not a whole number of {spacing}-foot cells to wrap", extent[axis], ["wide", "deep"][axis]));
+        }
+    }
+    let [w0, d0] = extent.map(f64::from);
+    let strip = f64::from(SEAM_CELLS * spacing);
+    let sp = f64::from(spacing);
+    let lerp = |a: (f64, u8), b: (f64, u8), t: f64| (a.0 + (b.0 - a.0) * t, if t * 2.0 < 1.0 { a.1 } else { b.1 });
+    // The ground with the `z` strip laid: past the far edge, between the far edge and the near one.
+    let with_z = |x: f64, z: f64| {
+        let x = x.clamp(0.0, w0);
+        if wrap[1] && z > d0 {
+            lerp(ground(x, d0), ground(x, 0.0), ((z - d0) / strip).min(1.0))
+        } else {
+            ground(x, z.clamp(0.0, d0))
+        }
+    };
+    let with_both = |x: f64, z: f64| {
+        if wrap[0] && x > w0 {
+            lerp(with_z(w0, z), with_z(0.0, z), ((x - w0) / strip).min(1.0))
+        } else {
+            with_z(x, z)
+        }
+    };
+    let mut out = Vec::new();
+    // `(along axis, cells along, start of the strip across)` for each strip, `z` first.
+    let d1 = if wrap[1] { extent[1] + SEAM_CELLS * spacing } else { extent[1] };
+    let strips = [(1usize, extent[0] / spacing, extent[1]), (0usize, d1 / spacing, extent[0])];
+    for (across, cells, from) in strips {
+        if !wrap[across] {
+            continue;
+        }
+        let mut start = 0;
+        let mut k = 0;
+        while start < cells {
+            let left = cells - start;
+            let leaves = (left + 1).div_ceil(16).min(16);
+            let owns = (leaves * 16 - 1).min(left);
+            let name = format!("seam_{}_{k}", ["x", "z"][across]);
+            // The terrain's own axes: `along` runs the strip, `across` its 16 samples.
+            let (cx, cz) = if across == 0 { (1, leaves) } else { (leaves, 1) };
+            let at = if across == 0 { [from, start * spacing] } else { [start * spacing, from] };
+            let (ax, az) = (f64::from(at[0]), f64::from(at[1]));
+            let sample = |sx: u32, sz: u32| with_both(ax + f64::from(sx) * sp, az + f64::from(sz) * sp);
+            let bytes = terrain(&name, (cx, cz), spacing as f32, |sx, sz| sample(sx, sz).0, |sx, sz| sample(sx, sz).1);
+            let layout = TerrainLayout { width: cx, breadth: cz, width_scale: F(spacing as f32), breadth_scale: F(spacing as f32), ..TerrainLayout::default() };
+            let keep = if across == 0 { [0, 0, SEAM_CELLS, owns] } else { [0, 0, owns, SEAM_CELLS] };
+            let tile = Tile {
+                name,
+                at: [F(at[0] as f32), F(at[1] as f32)],
+                layout,
+                spacing: F(spacing as f32),
+                levels: 1,
+                keep,
+                first_owner: 0,
+            };
+            out.push((tile, bytes));
+            start += owns;
+            k += 1;
+        }
+    }
+    Ok(out)
+}

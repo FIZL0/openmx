@@ -643,7 +643,10 @@ impl Flight {
 
     /// The post listener: the measure, with the crash test between its halves. `holed` and `bare` are
     /// [`CrashContact`]'s, which only a world of several terrains sets.
-    fn post(&mut self, dt: F, acos: &AcosTable, holed: bool, bare: bool) {
+    ///
+    /// On a world that wraps (MD29), the map edge is asked only on the axes that do not: the plane
+    /// crosses a seam as the bike does, and the rest of the crash test is the same.
+    fn post(&mut self, dt: F, acos: &AcosTable, holed: bool, bare: bool, wrap: [bool; 2]) {
         let wheels = self.tires.map(|t| t.touching);
         let (_touchdown, true_speed) = self.measure.contacts(wheels, false);
         self.aero.true_speed = true_speed;
@@ -652,7 +655,8 @@ impl Flight {
         let ignored = self.record.struck.is_some_and(|o| flight_search::category(o) & VEHICLE != 0);
         let c = CrashContact { touching: self.record.touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()), holed, bare };
         let b = &mut self.body;
-        let out = self.crash.step_in(&c, self.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut self.edge_scale, &mut self.rng, dt);
+        let edge = self.area.filter(|a| wrap == [false, false] || holed || crate::off_map::outside_axes(a, wrap, b.position, F(crate::biplane::EDGE)));
+        let out = self.crash.step_in(&c, edge.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut self.edge_scale, &mut self.rng, dt);
         if out.wreck.is_some() {
             self.wreck();
         }
@@ -790,7 +794,8 @@ impl Dynamics for Listeners<'_> {
         let at = self.plane.body.position;
         let holed = self.plane.area.is_some() && self.ground.0.off_world(at, F(crate::biplane::EDGE));
         let bare = !self.ground.0.keeps(at) && at.y() < 0.0;
-        self.plane.post(dt, &self.tables.acos, holed, bare);
+        let wrap = self.ground.0.wrap();
+        self.plane.post(dt, &self.tables.acos, holed, bare, wrap);
     }
 }
 

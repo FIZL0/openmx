@@ -718,6 +718,10 @@ impl<W: World> World for Wooded<W> {
         self.world.off_world(at, margin)
     }
 
+    fn wrap(&self) -> [bool; 2] {
+        self.world.wrap()
+    }
+
     fn keeps(&mut self, at: Vf) -> bool {
         self.world.keeps(at)
     }

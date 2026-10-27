@@ -229,6 +229,8 @@ pub struct Tiled {
     /// Every tile's shapes in one set, in owner order, once the plane's search has asked
     /// ([`Tiled::every_shape`]).
     every: Option<Props>,
+    /// Which axes wrap round, `[x, z]` (MD29, [`Tiled::wrapped`]).
+    wrap: [bool; 2],
 }
 
 /// The index square a world point is in.
@@ -292,11 +294,89 @@ impl Tiled {
             index,
             log: RefCell::new(Vec::new()),
             every: None,
+            wrap: [false, false],
         })
     }
 
-    /// The tile that owns a world point, and the point in its coordinates.
+    /// **The world wrapped round** (MD29, the port's own): on each axis `wrap` names, the far edge
+    /// is a seam onto the near one. Every question about a point past a seam is asked of the point
+    /// one width back ([`Tiled::fold`]), the edge test is not asked on that axis
+    /// ([`crate::off_map::outside_wrapped`]), and the ride moves a rider who crosses a seam back by
+    /// one width ([`crate::rider::Rider::shift`]). The width is the world's rectangle, so its far
+    /// edge must meet its near one — the world's file puts a seam join there
+    /// ([`generate::seam_joins`]). Refuses a wrapped side that is not a whole number of feet below
+    /// 2²⁴, the same rule as an offset's: a shift by it is then exact for every point past it.
+    pub fn wrapped(mut self, wrap: [bool; 2]) -> Result<Tiled, String> {
+        for (axis, on) in wrap.into_iter().enumerate() {
+            let side = self.extent()[axis];
+            if on && (!(side > F::ZERO && side < F(MAX_AT)) || F::from(side.to_i32()) != side) {
+                return Err(format!("a world {} feet {} is not a whole number of feet from 1 to 2^24, and cannot wrap", side.0, ["wide", "deep"][axis]));
+            }
+        }
+        self.wrap = wrap;
+        self.every = None;
+        Ok(self)
+    }
+
+    /// Which axes wrap, `[x, z]`.
+    pub fn wraps(&self) -> [bool; 2] {
+        self.wrap
+    }
+
+    /// The world's rectangle's sides, `[width, depth]`: on a wrapped axis, the shift a seam makes.
+    pub fn extent(&self) -> [F; 2] {
+        [self.area.width, self.area.depth]
+    }
+
+    /// One coordinate brought inside the world on a wrapped axis: less a width while it is at or
+    /// past the far seam, which is exact (the point is at or past a whole number of feet below 2²⁴,
+    /// as the module note argues for an offset), and plus a width while it is short of the near
+    /// one, which rounds to the far side's last bit (`1/256` ft at 100,000 ft) and stays short of
+    /// the far seam. Unchanged on an axis that does not wrap, and for `NaN`.
+    pub fn fold_axis(&self, axis: usize, v: F) -> F {
+        if !self.wrap[axis] {
+            return v;
+        }
+        let side = self.extent()[axis];
+        let mut v = v;
+        for _ in 0..64 {
+            if v >= side {
+                v = v - side;
+            } else if v < F::ZERO {
+                v = v + side;
+                if v >= side {
+                    // A point a hair short of the near seam rounded onto the far one.
+                    v = F(f32::from_bits(side.0.to_bits() - 1));
+                }
+            } else {
+                break;
+            }
+        }
+        v
+    }
+
+    /// A world point brought inside the world on its wrapped axes ([`Tiled::fold_axis`]).
+    pub fn fold(&self, x: F, z: F) -> (F, F) {
+        (self.fold_axis(0, x), self.fold_axis(1, z))
+    }
+
+    /// The whole widths a point is past the world's seams, `[x, z]`: what [`Tiled::fold`] takes off
+    /// it, in widths. 0 on an axis that does not wrap, and for a point inside.
+    pub fn laps(&self, x: F, z: F) -> [i32; 2] {
+        let lap = |axis: usize, v: F| -> i32 {
+            if !self.wrap[axis] || !(v >= F::ZERO || v < F::ZERO) {
+                return 0;
+            }
+            let side = self.extent()[axis];
+            if v >= side { 1 } else if v < F::ZERO { -1 } else { 0 }
+        };
+        [lap(0, x), lap(1, z)]
+    }
+
+    /// The tile that owns a world point, and the point in its coordinates. On a world that wraps,
+    /// a point past a seam is the one a width back ([`Tiled::fold`]).
     pub fn owner(&self, x: F, z: F) -> Option<(usize, F, F)> {
+        let (x, z) = self.fold(x, z);
         if !(x >= F::ZERO && z >= F::ZERO && x < F(MAX_AT) && z < F(MAX_AT)) {
             return None;
         }
@@ -378,7 +458,7 @@ impl Tiled {
     pub fn stream(&mut self, near: &[Vf]) {
         let asked = std::mem::replace(&mut *self.asked.borrow_mut(), vec![false; self.tiles.len()]);
         for i in 0..self.tiles.len() {
-            let gap = near.iter().map(|p| self.tiles[i].gap(F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min);
+            let gap = near.iter().map(|p| self.gap(i, F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min);
             let (held, out) = match self.slots.borrow()[i] {
                 Slot::In(_) => (true, false),
                 Slot::Out => (false, true),
@@ -406,7 +486,7 @@ impl Tiled {
     /// (MD28), where waiting costs no frame.
     pub fn load_near(&mut self, near: &[Vf]) {
         for i in 0..self.tiles.len() {
-            let gap = near.iter().map(|p| self.tiles[i].gap(F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min);
+            let gap = near.iter().map(|p| self.gap(i, F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min);
             if gap <= self.reach.load {
                 self.ensure(i);
             }
@@ -440,7 +520,76 @@ impl Tiled {
 
     /// Sweep a world-space bundle against the shapes of every tile it could reach, tile by tile into
     /// one record, each tile's shapes numbered from its [`Tile::first_owner`].
+    ///
+    /// On a world that wraps (MD29), a bundle within reach of a seam is swept again one width over,
+    /// against the shapes by the far edge, and what that finds is moved back to where the bundle is.
     pub fn sweep(&self, bundle: &Bundle, record: &mut Record) -> bool {
+        let mut looked = self.sweep_here(bundle, record);
+        for by in self.copies(bundle.centre, bundle.radius + SHAPE_REACH) {
+            let mut moved = *bundle;
+            moved.centre = shifted(bundle.centre, by);
+            for p in moved.probes.iter_mut().take(moved.count) {
+                p.origin = shifted(p.origin, by);
+            }
+            let before = *record;
+            looked |= self.sweep_here(&moved, record);
+            let back = [F::ZERO - by[0], F::ZERO - by[1]];
+            for k in 0..record.point.len() {
+                if !same(record.point[k], before.point[k]) || record.fraction[k] != before.fraction[k] {
+                    record.point[k] = shifted(record.point[k], back);
+                }
+            }
+            if !same(record.nearest_point, before.nearest_point) || record.nearest != before.nearest {
+                record.nearest_point = shifted(record.nearest_point, back);
+            }
+        }
+        looked
+    }
+
+    /// The shifts, in feet, that bring a point within `reach` of a seam to the copy of the world
+    /// on the seam's far side: none on a world that does not wrap, and up to three by a corner.
+    fn copies(&self, at: Vf, reach: F) -> Vec<[F; 2]> {
+        if self.wrap == [false, false] {
+            return Vec::new();
+        }
+        let ways = |axis: usize, v: F| -> Vec<F> {
+            let side = self.extent()[axis];
+            let mut out = vec![F::ZERO];
+            if self.wrap[axis] {
+                if v + reach >= side {
+                    out.push(F::ZERO - side);
+                }
+                if v - reach < F::ZERO {
+                    out.push(side);
+                }
+            }
+            out
+        };
+        let (xs, zs) = (ways(0, F(at.x())), ways(1, F(at.z())));
+        let mut out = Vec::new();
+        for &dz in &zs {
+            for &dx in &xs {
+                if dx != F::ZERO || dz != F::ZERO {
+                    out.push([dx, dz]);
+                }
+            }
+        }
+        out
+    }
+
+    /// How far a world point is from tile `i`'s rectangle ([`Tile::gap`]), the nearest of its copies
+    /// on a world that wraps.
+    fn gap(&self, i: usize, x: F, z: F) -> F {
+        let t = &self.tiles[i];
+        let mut gap = t.gap(x, z);
+        for by in self.copies(Vf::new(x.0, 0.0, z.0, 1.0), gap) {
+            gap = gap.min(t.gap(x + by[0], z + by[1]));
+        }
+        gap
+    }
+
+    /// [`Tiled::sweep`] with the bundle where it is.
+    fn sweep_here(&self, bundle: &Bundle, record: &mut Record) -> bool {
         let mut looked = false;
         for i in self.shaped(bundle.centre, bundle.radius) {
             let slots = self.slots.borrow();
@@ -484,12 +633,29 @@ impl Tiled {
     pub fn every_shape(&mut self) -> &Props {
         if self.every.is_none() {
             let mut all = Props::default();
+            let mut placed: Vec<(Mesh, Placement)> = Vec::new();
             for (i, tile) in self.tiles.iter().enumerate() {
                 match self.source.get_mut().shapes(i) {
-                    Ok(shapes) => all.props.extend(shapes.into_iter().map(|(mesh, at)| Prop::place(mesh, &moved(&at, tile.at)))),
+                    Ok(shapes) => all.props.extend(shapes.into_iter().map(|(mesh, at)| {
+                        let at = moved(&at, tile.at);
+                        if self.wrap != [false, false] {
+                            placed.push((mesh.clone(), at.clone()));
+                        }
+                        Prop::place(mesh, &at)
+                    })),
                     Err(e) => self.log.get_mut().push(format!("world: {} has no shapes for the plane: {e}", tile.name)),
                 }
             }
+            // A world that wraps (MD29): the shapes by a seam stand again one width over, after
+            // every tile's own, so the plane's search meets them from the far side and every
+            // shape keeps its number.
+            let mut copied = Vec::new();
+            for (prop, (mesh, at)) in all.props.iter().zip(&placed) {
+                for by in self.copies(prop.centre, prop.radius) {
+                    copied.push(Prop::place(mesh.clone(), &moved(at, by)));
+                }
+            }
+            all.props.extend(copied);
             self.every = Some(all);
         }
         self.every.get_or_insert_with(Props::default)
@@ -501,7 +667,9 @@ impl Tiled {
     /// (`y` −10⁶, and the camera's angles go with it), or thrown again on its first tick.
     pub fn keeps(&self, at: Vf) -> bool {
         let margin = crate::off_map::MARGIN;
-        self.at(F(at.x()), F(at.z())).is_some() && !self.area.outside(at, margin) && !self.off_world(at, margin)
+        self.at(F(at.x()), F(at.z())).is_some()
+            && !crate::off_map::outside_axes(&self.area, self.wrap, at, margin)
+            && !self.off_world(at, margin)
     }
 
     /// **Every hole inside the world** (MD27): the rectangles of [`Tiled::area`] that no tile or join
@@ -552,6 +720,16 @@ impl Tile {
     }
 }
 
+/// A point moved along `x` and `z`.
+fn shifted(v: Vf, by: [F; 2]) -> Vf {
+    Vf::new((F(v.x()) + by[0]).0, v.y(), (F(v.z()) + by[1]).0, v.w())
+}
+
+/// Two vectors the same, word for word.
+fn same(a: Vf, b: Vf) -> bool {
+    a.0.iter().zip(b.0.iter()).all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
 /// A placement in a tile's coordinates moved by the tile's offset into the world's.
 fn moved(at: &Placement, by: [F; 2]) -> Placement {
     let mut out = at.clone();
@@ -587,12 +765,18 @@ impl World for Tiled {
         Some(self.area)
     }
 
+    fn wrap(&self) -> [bool; 2] {
+        self.wrap
+    }
+
     fn off_world(&self, at: Vf, margin: F) -> bool {
         let (x, z) = (F(at.x()), F(at.z()));
         // Only inside the rectangle: its own edge is the area's test, with the original's margin.
+        // On a world that wraps, a point past a seam is the one a width back (MD29).
         let inside = |x: F, z: F| x >= F::ZERO && z >= F::ZERO && x < self.area.width && z < self.area.depth;
         [(x, z), (x - margin, z), (x + margin, z), (x, z - margin), (x, z + margin)]
             .into_iter()
+            .map(|(x, z)| self.fold(x, z))
             .any(|(x, z)| inside(x, z) && self.hole(x, z))
     }
 
@@ -638,11 +822,17 @@ impl Obstacles for Tiled {
 pub struct TiledField<'a>(&'a Tiled);
 
 impl Heightfield for TiledField<'_> {
+    /// The world's rectangle, and on a wrapped axis (MD29) a width more each way, so a search near a
+    /// seam asks past it and [`Heightfield::tile`] folds the point back.
     fn min(&self) -> Vf {
-        Vf::new(0.0, 0.0, 0.0, 1.0)
+        let [w, d] = self.0.wrap;
+        let lo = |on: bool, side: F| if on { (F::ZERO - side).0 } else { 0.0 };
+        Vf::new(lo(w, self.0.area.width), 0.0, lo(d, self.0.area.depth), 1.0)
     }
     fn max(&self) -> Vf {
-        Vf::new(self.0.area.width.0, 0.0, self.0.area.depth.0, 1.0)
+        let [w, d] = self.0.wrap;
+        let hi = |on: bool, side: F| if on { (side + side).0 } else { side.0 };
+        Vf::new(hi(w, self.0.area.width), 0.0, hi(d, self.0.area.depth), 1.0)
     }
     fn per_sample(&self) -> F {
         F::ONE
@@ -726,6 +916,13 @@ impl World for Land<'_> {
             Land::Track(p) => p.off_world(at, margin),
             Land::Tiles(t) => t.off_world(at, margin),
             Land::Woods(w) => w.off_world(at, margin),
+        }
+    }
+    fn wrap(&self) -> [bool; 2] {
+        match self {
+            Land::Track(p) => p.wrap(),
+            Land::Tiles(t) => World::wrap(&**t),
+            Land::Woods(w) => w.wrap(),
         }
     }
     fn keeps(&mut self, at: Vf) -> bool {
