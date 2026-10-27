@@ -1016,6 +1016,17 @@ impl Garage {
         Ok(Garage { up, plane, taken: up == Kind::Biplane })
     }
 
+    /// **The plane put in the air** (V96's `--fly-at`, a measurement start): stood at `at` along
+    /// `facing`, wings level, flying at `speed` feet a second along it ([`Flight::launch`]), its spawn
+    /// left where the ride put it. Nothing for a ride with no plane.
+    pub fn launch_plane(&mut self, at: Vf, facing: Vf, speed: f32, acos: &game_sim::air::AcosTable) {
+        let Some(plane) = self.plane.as_mut() else { return };
+        let Some(f) = plane.flight.as_mut() else { return };
+        f.launch(at, facing, facing.mul(Vf::splat(speed)), acos);
+        plane.placed = true;
+        plane.pose();
+    }
+
     /// The machines this player can be put on: the bike, and the plane whenever the ride has one —
     /// on every map since P113, parked copy or not.
     pub fn machines(&self) -> Vec<Kind> {

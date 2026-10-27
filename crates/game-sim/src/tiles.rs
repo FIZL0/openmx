@@ -224,6 +224,9 @@ pub struct Tiled {
     asked: RefCell<Vec<bool>>,
     /// Each 1024-ft square's tiles, in owner order.
     index: HashMap<(i32, i32), Vec<usize>>,
+    /// Each tile's rectangle in those squares, `[x0, z0, x1, z1]`, one square wider all round than
+    /// its span's (V96): what [`Tiled::stream`] rules a tile out by before measuring its gap.
+    squares: Vec<[i32; 4]>,
     /// What loading and dropping did since the shell last took the lines ([`Tiled::take_log`]).
     log: RefCell<Vec<String>>,
     /// Every tile's shapes in one set, in owner order, once the plane's search has asked
@@ -289,6 +292,14 @@ impl Tiled {
                 }
             }
         }
+        let squares = tiles
+            .iter()
+            .map(|t| {
+                let [x0, z0, x1, z1] = t.span();
+                let (lo, hi) = (bucket(x0, z0), bucket(x1, z1));
+                [lo.0 - 1, lo.1 - 1, hi.0 + 1, hi.1 + 1]
+            })
+            .collect();
         let slots = tiles.iter().map(|_| Slot::Out).collect();
         let asked = vec![false; tiles.len()];
         Ok(Tiled {
@@ -300,6 +311,7 @@ impl Tiled {
             slots: RefCell::new(slots),
             asked: RefCell::new(asked),
             index,
+            squares,
             log: RefCell::new(Vec::new()),
             every: None,
             wrap: [false, false],
@@ -467,8 +479,16 @@ impl Tiled {
     /// simulation asks for first is loaded then, as a tile past reach is.
     pub fn stream(&mut self, near: &[Vf]) {
         let asked = std::mem::replace(&mut *self.asked.borrow_mut(), vec![false; self.tiles.len()]);
+        // A world of thousands of joins measures only the tiles that could be within the drop
+        // reach (V96); every other one is past it, which is all the branches below ask of its gap.
+        let around = self.around(near, self.reach.drop);
         for i in 0..self.tiles.len() {
-            let gap = near.iter().map(|p| self.gap(i, F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min);
+            let sq = self.squares[i];
+            let apart = |b: &[i32; 4]| b[2] < sq[0] || sq[2] < b[0] || b[3] < sq[1] || sq[3] < b[1];
+            let gap = match around.iter().all(apart) {
+                true => F(f32::MAX),
+                false => near.iter().map(|p| self.gap(i, F(p.x()), F(p.z()))).fold(F(f32::MAX), F::min),
+            };
             let (held, out) = match self.slots.borrow()[i] {
                 Slot::In(_) => (true, false),
                 Slot::Out => (false, true),
@@ -490,6 +510,32 @@ impl Tiled {
                 self.source.borrow_mut().forget(i);
             }
         }
+    }
+
+    /// The squares within `reach` of each of `near` and of each of its copies one width over on a
+    /// wrapped axis ([`Tiled::copies`] at any reach), `[x0, z0, x1, z1]`, one square wider all round:
+    /// a tile whose [`Tiled::squares`] meet none of them is more than `reach` from every point
+    /// [`Tiled::gap`] measures (V96).
+    fn around(&self, near: &[Vf], reach: F) -> Vec<[i32; 4]> {
+        let ways = |axis: usize| -> Vec<F> {
+            let side = self.extent()[axis];
+            match self.wrap[axis] {
+                true => vec![F::ZERO, F::ZERO - side, side],
+                false => vec![F::ZERO],
+            }
+        };
+        let (xs, zs) = (ways(0), ways(1));
+        let mut out = Vec::with_capacity(near.len() * xs.len() * zs.len());
+        for p in near {
+            for &dz in &zs {
+                for &dx in &xs {
+                    let (x, z) = (F(p.x()) + dx, F(p.z()) + dz);
+                    let (lo, hi) = (bucket(x - reach, z - reach), bucket(x + reach, z + reach));
+                    out.push([lo.0 - 1, lo.1 - 1, hi.0 + 1, hi.1 + 1]);
+                }
+            }
+        }
+        out
     }
 
     /// Load every tile within [`Reach::load`] of any of `near` now, read ahead or not: before a ride

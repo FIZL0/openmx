@@ -327,6 +327,77 @@ impl Path {
     }
 }
 
+/// The ground [`Path::pose_kept`] found at a car's warm-up steps (V96): one entry a step of the
+/// clock's grid, from step `first` on, so the next picture asks only for the steps it has not seen.
+#[derive(Clone, Debug, Default)]
+pub struct Kept {
+    first: i64,
+    at: std::collections::VecDeque<(V3, V3)>,
+}
+
+impl Path {
+    /// [`Path::pose`] for a car posed picture after picture (V96, a world's dressing): its [`WARM`]
+    /// warm-up frames stand on the clock's grid of `step`s rather than back from `clock` itself, so
+    /// one picture's are the last one's moved on by a step or none, and the ground under each is
+    /// kept in `kept` rather than asked again; the last frame is at `clock`, on the ground asked
+    /// there. The filters settle as [`Path::pose`]'s do, from frames up to a step apart from its: a
+    /// pose differs from [`Path::pose`]'s by what the filters make of that, which is not drawn
+    /// apart. A presampling car, or no step, is [`Path::pose`].
+    pub fn pose_kept(&self, car: &Car, clock: f32, step: f32, ground: &mut Ground, kept: &mut Kept) -> Pose {
+        if car.presample || !(step > 0.0) {
+            return self.pose(car, clock, step, ground);
+        }
+        let period = self.last();
+        let wrap = |s: f32| if period > 0.0 { s.rem_euclid(period) } else { 0.0 };
+        let last = (clock / step).floor() as i64;
+        let first = last - WARM as i64 + 1;
+        // Steps before this picture's first go; a clock that went back, or jumped past them all, starts over.
+        let end = kept.first + kept.at.len() as i64;
+        if first < kept.first || end < first {
+            kept.at.clear();
+            kept.first = first;
+        }
+        while kept.first < first {
+            kept.at.pop_front();
+            kept.first += 1;
+        }
+        let mut head = v3(0.0, 0.0, 0.0);
+        let mut normal = v3(0.0, 1.0, 0.0);
+        let mut before: Option<V3> = None;
+        let mut pose = None;
+        for g in first..=last + 1 {
+            let at = if g <= last { g as f32 * step } else { clock };
+            let s = wrap(at);
+            let s = if car.lag > 0.0 { self.lagged(s, car.lag) } else { s };
+            let (path, _, _) = self.point(s);
+            if let Some(before) = before {
+                let moved = path.sub(before);
+                let flat = v3(moved.x, 0.0, moved.z);
+                if flat.len() > 0.0 {
+                    let dir = flat.norm();
+                    head = head.scale(car.heading_filter).add(dir.scale(1.0 - car.heading_filter));
+                }
+            }
+            before = Some(path);
+            let (pos, up) = match (g - kept.first) as usize {
+                _ if g > last => ground(path),
+                k if k < kept.at.len() => kept.at[k],
+                _ => {
+                    let on = ground(path);
+                    kept.at.push_back(on);
+                    on
+                }
+            };
+            if normal.dot(up) > 0.707 {
+                normal = normal.scale(car.normal_filter).add(up.scale(1.0 - car.normal_filter));
+            }
+            pose = Some((path, pos));
+        }
+        let (path, pos) = pose.expect("a frame ran");
+        Pose { path, pos, head, normal, transform: upright(pos, head, normal) }
+    }
+}
+
 /// The engine's look-at keeping the up: `forward` is bent square to `up`, the right axis is
 /// `up × forward`, and the rows are right, up, forward, position.
 pub fn upright(pos: V3, forward: V3, up: V3) -> M4 {

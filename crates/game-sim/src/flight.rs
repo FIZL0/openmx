@@ -564,7 +564,7 @@ impl Flight {
         let Some(rays) = self.rays.clone() else { return (none, Vec::new()) };
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
-        let (field, props, trees) = world.wooded();
+        let (field, props, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
         let bounds = field.as_deref().map(field_box);
         let mut scene = Scene::flown(props, trees, bikes, bounds, &rays, &self.record.node, &mut self.nearby);
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
@@ -579,9 +579,10 @@ impl Flight {
     /// plane came down. Once a world step, before the other bodies' posts move them.
     fn refresh(&mut self, world: &mut dyn world::World, bikes: Option<Bikes<'_>>) {
         let Some(rays) = self.rays.as_ref() else { return };
-        let (field, props, trees) = world.wooded();
+        let node = node_of(&self.body);
+        let (field, props, trees) = flight_search::near_world(world, rays, &node, &mut self.nearby);
         let bounds = field.as_deref().map(field_box);
-        flight_search::refresh_flown(props, trees, bikes.as_ref(), bounds, rays, &node_of(&self.body), &mut self.nearby);
+        flight_search::refresh_flown(props, trees, bikes.as_ref(), bounds, rays, &node, &mut self.nearby);
     }
 
     /// The preforce listener.
