@@ -357,6 +357,10 @@ pub struct Particle {
     /// Which of the emitters made it, which its update and its fades follow.
     pub emitter: usize,
     pub at: V3,
+    /// Where the picture has it on the tick before (P162): the last tick's `at`, and for one born
+    /// this tick its birth point carried back by its emitter's travel over the tick, so a picture
+    /// blended between the two ticks draws it where the blended bike draws its emitter.
+    pub was: V3,
     pub vel: V3,
     /// Feet across, and feet a second it grows by.
     pub size: f32,
@@ -499,6 +503,7 @@ impl Source {
         self.carry -= whole;
         let n = (whole.max(emt.min_per_frame.floor())) as usize;
         let turned = |d: V3| turn.map_or(d, |m| m.dir(d));
+        let travel = at.sub(from);
         for i in 0..n {
             let along = from.add(at.sub(from).scale((i + 1) as f32 / n as f32));
             let mut vel = turned(velocity);
@@ -520,6 +525,7 @@ impl Source {
             out.push(Particle {
                 emitter: index,
                 at,
+                was: at.sub(travel),
                 vel,
                 size: rng.between(emt.size),
                 growth: rng.between(emt.growth),
@@ -999,6 +1005,7 @@ impl PlaneFx {
         let tested = self.tick & 1 == 1;
         self.particles.retain_mut(|p| {
             let emt = &entries[p.emitter].emt;
+            p.was = p.at;
             if !p.step(emt, dt) {
                 return false;
             }
@@ -1204,8 +1211,15 @@ impl PlaneFx {
         }
     }
 
-    /// The particles as squares to draw, in the order they were made.
+    /// The particles as squares to draw, in the order they were made, where the last tick left them.
     pub fn drawn(&self) -> Vec<Drawn> {
+        self.drawn_at(1.0)
+    }
+
+    /// [`PlaneFx::drawn`] for a picture `by` of the way from the tick before the last to the last
+    /// (P162), as the shell blends the machines: each particle slid from [`Particle::was`] to where it
+    /// is, so the roost leaves the drawn tire and not the tick's.
+    pub fn drawn_at(&self, by: f32) -> Vec<Drawn> {
         self.particles
             .iter()
             .filter_map(|p| {
@@ -1217,7 +1231,8 @@ impl PlaneFx {
                 if p.mirror.1 {
                     (t, b) = (b, t);
                 }
-                Some(Drawn { at: p.at, size: p.size, uv: [l, t, r, b], alpha: p.alpha(emt) })
+                let at = p.was.add(p.at.sub(p.was).scale(by));
+                Some(Drawn { at, size: p.size, uv: [l, t, r, b], alpha: p.alpha(emt) })
             })
             .collect()
     }
