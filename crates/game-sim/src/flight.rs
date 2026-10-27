@@ -164,6 +164,11 @@ pub struct Flight {
     /// The collision object's nearby search (S96): what the broad phase last gathered around the ray
     /// probe, kept from frame to frame while the probe stays within its bound.
     pub nearby: broad_phase::Search,
+    /// The movers the frame's contacts name (S141): the path cars the search found the plane's rays
+    /// on, as the search saw them move this tick ([`Scene::movers`]). Made again with the contacts by
+    /// every search, so it is no state of its own: a rollback puts back the cars, and the next
+    /// search makes it from them.
+    pub movers: Vec<contact::Mover>,
     /// The ride's bikes' collision mesh (S95, `bike\col\bikef.col`): with it the other riders' bikes
     /// are in the plane's world ([`Flight::frame_among`]). Geometry off the disc, like the rays.
     pub bike: Option<Arc<track::Mesh>>,
@@ -527,8 +532,9 @@ impl Flight {
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props, trees) = world.wooded();
         let bounds = field.as_deref().map(field_box);
-        let mut scene = Scene::wooded(props, trees, bikes, bounds, &rays, &self.record.node, &mut self.nearby);
+        let mut scene = Scene::flown(props, trees, bikes, bounds, &rays, &self.record.node, &mut self.nearby);
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
+        self.movers = scene.movers().to_vec();
         scene.struck
     }
 
@@ -541,7 +547,7 @@ impl Flight {
         let Some(rays) = self.rays.as_ref() else { return };
         let (field, props, trees) = world.wooded();
         let bounds = field.as_deref().map(field_box);
-        flight_search::refresh_wooded(props, trees, bikes.as_ref(), bounds, rays, &node_of(&self.body), &mut self.nearby);
+        flight_search::refresh_flown(props, trees, bikes.as_ref(), bounds, rays, &node_of(&self.body), &mut self.nearby);
     }
 
     /// The preforce listener.
@@ -555,9 +561,9 @@ impl Flight {
 
     /// The force listener, one substep of `h`.
     fn forces(&mut self, h: F, ground: &mut Ground<'_>, curve: &CurveTable, acos: &AcosTable) {
-        let (collider, contacts, mass) = (&mut self.collider, &mut self.record.contacts, self.mass);
+        let (collider, contacts, mass, movers) = (&mut self.collider, &mut self.record.contacts, self.mass, &self.movers);
         collision_force(&mut self.body, self.gravity, |body| {
-            contact::resolve(collider, &mut Weighed { body, mass }, contacts, &mut [], &[], true);
+            contact::resolve(collider, &mut Weighed { body, mass }, contacts, &mut [], movers, true);
         });
         if self.crash.reason == 0 {
             self.attitude = self.measure.attitude(self.attitude.flown, &self.body);

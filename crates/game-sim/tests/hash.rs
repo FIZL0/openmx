@@ -525,7 +525,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // while there is one, and the shell's holds (`Rider::holds`), not state and not walked.
     // 11536 since V68: each rider's foot switch (`Rider::feet`), the body's frame's output for the
     // draw, not walked: the body's machine is not in the walk.
+    // 11560 since S141: the plane's movers (`Flight::movers`), the path cars its contacts are on,
+    // made again from the cars by every search: not state, not walked.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11536, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11560, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
