@@ -48,6 +48,13 @@ use ps2_float::{Acc, Dest, F, Field, Vf, vu};
 /// says `TerrainWidth=1`, so counting `16^levels` would make it 16 samples a side.
 pub const SAMPLES_PER_WIDTH: u32 = 256;
 
+/// The side of [`World::near_set`]'s squares, feet (MD28).
+pub const NEAR_CELL: i32 = 128;
+/// How far past its square a near set's shapes reach, feet: a shape whose box comes within this of
+/// the square is in the set (MD28). Far more than any of the bike's searches gather, which reach a
+/// bike's length plus the broad phase's thirty extra feet.
+pub const NEAR_MARGIN: f32 = 256.0;
+
 /// The height a ground query answers with where there is no ground: far enough below anything a wheel
 /// can reach that [`wheel::suspension`]'s "the ground is below the probe's end" test refuses it.
 pub(crate) const NO_GROUND: f32 = -1.0e6;
@@ -152,6 +159,23 @@ pub trait World {
     fn wooded(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&crate::eco::Trees>) {
         let (field, props) = self.collision();
         (field, props, None)
+    }
+
+    /// [`World::wooded`] for a search around `at` that reaches no further than [`NEAR_MARGIN`] past
+    /// [`World::near_set`]'s square (MD28): the bike's wheel, body and put-back searches, which
+    /// build their broad phase afresh from every prop handed over. A world of many tiles hands only
+    /// the shapes standing near, so a tick's searches do not grow with the world; every other world
+    /// hands the whole set, as the original's one map does.
+    fn wooded_near(&mut self, at: Vf) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&crate::eco::Trees>) {
+        let _ = at;
+        self.wooded()
+    }
+
+    /// Which set [`World::wooded_near`] hands out at `at`: the same key, the same props in the same
+    /// order. `None` where it is always [`World::wooded`]'s whole set.
+    fn near_set(&self, at: Vf) -> Option<[i32; 2]> {
+        let _ = at;
+        None
     }
 
     /// The props a moving thing's mesh is among, for it to be moved ([`crate::traffic::Traffic`]). A

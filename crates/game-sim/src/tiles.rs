@@ -231,7 +231,15 @@ pub struct Tiled {
     every: Option<Props>,
     /// Which axes wrap round, `[x, z]` (MD29, [`Tiled::wrapped`]).
     wrap: [bool; 2],
+    /// [`Tiled::every_shape`]'s boxes on the ground plane, `[x0, z0, x1, z1]`, and the near sets cut
+    /// from it lately, newest last ([`World::wooded_near`], MD28).
+    boxes: Vec<[F; 4]>,
+    near: Vec<([i32; 2], Props)>,
 }
+
+/// How many near sets a world keeps cut: one for each rider of a full local ride, and their moves
+/// back over a square's edge.
+const NEAR_KEPT: usize = 8;
 
 /// The index square a world point is in.
 fn bucket(x: F, z: F) -> (i32, i32) {
@@ -295,6 +303,8 @@ impl Tiled {
             log: RefCell::new(Vec::new()),
             every: None,
             wrap: [false, false],
+            boxes: Vec::new(),
+            near: Vec::new(),
         })
     }
 
@@ -661,6 +671,52 @@ impl Tiled {
         self.every.get_or_insert_with(Props::default)
     }
 
+    /// The near set at square `key` ([`World::wooded_near`], MD28): of [`Tiled::every_shape`],
+    /// in its order, every shape whose box on the ground plane comes within
+    /// [`world::NEAR_MARGIN`] of the square. Cut once and kept while it is among the last
+    /// [`NEAR_KEPT`] asked; a pure function of the square, so a search is the same whichever
+    /// rider asked first.
+    fn near(&mut self, key: [i32; 2]) -> &Props {
+        if let Some(i) = self.near.iter().position(|(k, _)| *k == key) {
+            let kept = self.near.remove(i);
+            self.near.push(kept);
+        } else {
+            self.every_shape();
+            let every = self.every.as_ref().map_or(&[][..], |p| &p.props[..]);
+            if self.boxes.len() != every.len() {
+                self.boxes = every
+                    .iter()
+                    .map(|p| {
+                        let (c, h) = crate::flight_search::prop_box(p);
+                        [c[0] - h[0], c[2] - h[2], c[0] + h[0], c[2] + h[2]]
+                    })
+                    .collect();
+            }
+            let side = world::NEAR_CELL;
+            let margin = F(world::NEAR_MARGIN);
+            let lo = [F(fpu_from(key[0] * side)) - margin, F(fpu_from(key[1] * side)) - margin];
+            let hi = [F(fpu_from((key[0] + 1) * side)) + margin, F(fpu_from((key[1] + 1) * side)) + margin];
+            let props = every
+                .iter()
+                .zip(&self.boxes)
+                .filter(|(_, b)| b[0] <= hi[0] && lo[0] <= b[2] && b[1] <= hi[1] && lo[1] <= b[3])
+                .map(|(p, _)| Prop {
+                    mesh: p.mesh.clone(),
+                    to_world: p.to_world,
+                    from_world: p.from_world,
+                    centre: p.centre,
+                    radius: p.radius,
+                    moving: p.moving,
+                })
+                .collect();
+            if NEAR_KEPT <= self.near.len() {
+                self.near.remove(0);
+            }
+            self.near.push((key, Props { props }));
+        }
+        &self.near.last().expect("just kept").1
+    }
+
     /// Whether the put-back record may keep a spot ([`World::keeps`], MD14): a tile owns the ground
     /// under it, and the edge test would not throw from it — [`crate::off_map::MARGIN`] inside the
     /// world's rectangle and from every hole in it. Anywhere else a bike put back is on no ground
@@ -794,6 +850,28 @@ impl World for Tiled {
         let (this, every) = (&*self, self.every.as_ref());
         (Some(Box::new(this.field())), every)
     }
+
+    fn wooded_near(&mut self, at: Vf) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&crate::eco::Trees>) {
+        // The bike's searches build their broad phase from every prop handed over, each tick: only
+        // the shapes near, or a tick costs the whole world's (MD28).
+        self.near(near_key(at));
+        let (this, near) = (&*self, self.near.last().map(|(_, p)| p));
+        (Some(Box::new(this.field())), near, None)
+    }
+
+    fn near_set(&self, at: Vf) -> Option<[i32; 2]> {
+        Some(near_key(at))
+    }
+}
+
+/// A whole number of feet as a float, exactly (every near square's corner is well inside 2²⁴).
+fn fpu_from(v: i32) -> f32 {
+    ps2_float::fpu::from_i32(v)
+}
+
+/// The near square a world point is in ([`World::near_set`], MD28).
+fn near_key(at: Vf) -> [i32; 2] {
+    [F(at.x()).to_i32().div_euclid(world::NEAR_CELL), F(at.z()).to_i32().div_euclid(world::NEAR_CELL)]
 }
 
 impl Surface for Tiled {
@@ -947,6 +1025,20 @@ impl World for Land<'_> {
             Land::Track(p) => p.wooded(),
             Land::Tiles(t) => t.wooded(),
             Land::Woods(w) => w.wooded(),
+        }
+    }
+    fn wooded_near(&mut self, at: Vf) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&crate::eco::Trees>) {
+        match self {
+            Land::Track(p) => p.wooded_near(at),
+            Land::Tiles(t) => t.wooded_near(at),
+            Land::Woods(w) => w.wooded_near(at),
+        }
+    }
+    fn near_set(&self, at: Vf) -> Option<[i32; 2]> {
+        match self {
+            Land::Track(p) => p.near_set(at),
+            Land::Tiles(t) => t.near_set(at),
+            Land::Woods(w) => w.near_set(at),
         }
     }
     fn moving(&mut self) -> Option<&mut Props> {

@@ -410,8 +410,8 @@ fn vehicle_on(ride: &crate::ride::Ride, p: &Phy) -> Vehicle {
 /// [`crate::flight_search::Scene`]): the sweep back meets it at its velocity, and the contacts on it
 /// name it in the movers that come back with them, which [`Bump::movers`] carries to the resolve.
 pub fn scenery(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>)> {
+    let (field, props, trees) = world.wooded_near(at.0[3]);
     let at = node(at);
-    let (field, props, trees) = world.wooded();
     if props.is_none() && trees.is_none() {
         return None;
     }
