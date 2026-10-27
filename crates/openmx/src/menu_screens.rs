@@ -931,7 +931,7 @@ impl Pen<'_> {
             Screen::Main => self.main(menu),
             Screen::Pause => self.pause(menu),
             Screen::Online => self.online(menu),
-            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods => self.page(menu, screen),
+            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page(menu, screen),
             Screen::Tracks => self.tracks(menu),
             Screen::Join => self.join(menu),
             Screen::Split => self.split(menu),

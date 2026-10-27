@@ -6,8 +6,9 @@ use super::*;
 
 /// Settings' tabs, which L1 and R1 step through, round from either end.
 /// Display is the screen's HUD; Graphics (P128) the world's draw, the picture and its rate, under
-/// headings, with the Original tab's graphics sub-switches (P126).
-pub const SETTINGS_TABS: [&str; 7] = ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera", "Original"];
+/// headings, with the Original Game page's graphics sub-switches (P126). The Original Game page is
+/// the Ride tab's, a row there opening it (P179), and no tab of its own.
+pub const SETTINGS_TABS: [&str; 6] = ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera"];
 pub const TAB_RIDE: usize = 0;
 /// The Tricks row's help (MD16): what MX vs. ATV's tricks add, and what is the port's own.
 const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds that game's from a trick pack in the mods folder: \
@@ -22,7 +23,6 @@ pub const TAB_GRAPHICS: usize = 2;
 pub const TAB_AUDIO: usize = 3;
 pub const TAB_CONTROLS: usize = 4;
 pub const TAB_CAMERA: usize = 5;
-pub const TAB_ORIGINAL: usize = 6;
 /// The Garage's tabs, each starting with the same Player row.
 pub const GARAGE_TABS: [&str; 3] = ["Rider", "Bike", "Gear"];
 
@@ -138,6 +138,8 @@ pub enum Key {
     Tricks,
     /// The Original switch (P126), and each departure's under it.
     Original,
+    /// The Ride tab's row into the Original Game page (P179).
+    OriginalPage,
     Departure(Departure),
     Heading,
 }
@@ -319,19 +321,19 @@ impl Menu {
                 TAB_GRAPHICS => self.graphics_rows(),
                 TAB_AUDIO => self.audio_page(),
                 TAB_CONTROLS => self.control_rows(),
-                TAB_ORIGINAL => self.original_rows(),
                 _ => self.camera_page(),
             },
             Screen::Garage => self.garage_rows(),
             Screen::Modifiers => self.modifier_page(),
             Screen::Mods => self.mods_rows(),
+            Screen::Original => self.original_rows(),
             _ => Vec::new(),
         }
     }
 
     /// Whether a screen is an option page.
     pub fn is_page(screen: Screen) -> bool {
-        matches!(screen, Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods)
+        matches!(screen, Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original)
     }
 
     fn player_row(&self, about: &str) -> Row {
@@ -362,6 +364,14 @@ impl Menu {
             air.note = Some("Changes take when the pause closes.".into());
         }
         let air = air.off_if(!self.settings.wrecks, "Wrecks are off").off_if(self.air_held().is_some(), self.air_held().unwrap_or(""));
+        // The Original Game page (P179), once a tab of Settings' own: Cross goes in, Circle back.
+        let mut original = Row::new(
+            Key::OriginalPage,
+            Kind::Opens,
+            "Original Game",
+            "The game as it shipped, or openmx's enhancements: the master switch and the controls, cameras and markers' own switches. Cross opens them.",
+        );
+        original.value = self.original().label().into();
         vec![
             Row::choice(Key::StartOn, "Start On", &machines, at, "The machine a ride starts on. You can switch at any time from the pause, or by stopping at a bay."),
             Row::on_off(Key::Wrecks, "Wrecks", self.settings.wrecks, "Whether a hard landing throws the rider off. Off, you ride out every crash."),
@@ -370,6 +380,7 @@ impl Menu {
             mods,
             Row::choice(Key::Tricks, "Tricks", &Tricks::ALL.map(Tricks::label), Tricks::ALL.iter().position(|t| *t == self.settings.tricks).unwrap_or(0), TRICKS_HELP)
                 .off_if(!self.settings.mods, "Needs a trick pack in the mods folder"),
+            original,
         ]
     }
 
@@ -443,14 +454,15 @@ impl Menu {
         ]
     }
 
-    /// The Original tab (P126): the master switch, and every departure's own under it.
+    /// The Original Game page (P126, the Ride tab's since P179): the master switch, and every
+    /// departure's own under it but the Graphics tab's.
     fn original_rows(&self) -> Vec<Row> {
         let mut master = Row::choice(
             Key::Original,
             "Original Game",
             &["Off", "On"],
             0,
-            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves, picture shape and texture filtering; the HUD stays openmx's. Each switch below can be set on its own, and the fog, plants, leaves, picture shape and texture filtering on the Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
+            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves, picture shape and texture filtering; the HUD stays openmx's. Each switch below can be set on its own, and the fog, plants, leaves, picture shape and texture filtering on Settings' Graphics tab. The ride itself is the original's either way; Game Modifiers change it.",
         )
         .tips(&["Every enhancement on", "The game as it shipped"]);
         match self.original() {
@@ -462,7 +474,7 @@ impl Menu {
             }
         }
         let mut rows = vec![master, Row::heading("Enhancements")];
-        for d in Departure::ALL.into_iter().filter(|d| d.tab() == TAB_ORIGINAL) {
+        for d in Departure::ALL.into_iter().filter(|d| d.tab() == TAB_RIDE) {
             rows.push(self.departure_row(d));
         }
         rows
@@ -651,8 +663,12 @@ impl Menu {
             }
         }
         rows.push(
-            Row::action(Key::CameraSave, "Save as New Preset", "Keep this preset, framed as it is now, under a name of your own: the camera button reaches it after the disc's.")
-                .off_if(picked.is_none(), "Pick the preset to copy on the Preset row first."),
+            Row::action(
+                Key::CameraSave,
+                "Save as New Preset",
+                "Keep this preset, framed as it is now, under a name of your own: the camera button reaches it after the disc's. On All Presets, the preset this player's rides start on, as All Presets frames it.",
+            )
+            .off_if(self.camera_to_save().is_none(), "The disc's camera presets were not read, and you have none of your own."),
         );
         let cycles: Vec<&str> = cameras::Cycle::ALL.iter().map(|c| c.label()).collect();
         rows.push(
@@ -895,6 +911,12 @@ impl Menu {
         preset_of(&self.settings.modifiers, self.mods_seat().unwrap_or(0))
     }
 
+    /// Open the Original Game page (P179) from the Ride tab's row, on its master switch.
+    pub(super) fn open_original(&mut self) {
+        self.push(Screen::Original);
+        self.cursor[Screen::Original.index()] = 0;
+    }
+
     /// Open the Game Modifiers page on its Player row, from the Ride tab, the pause or the lobby.
     pub(super) fn open_modifiers(&mut self) {
         self.push(Screen::Modifiers);
@@ -1071,6 +1093,10 @@ impl Menu {
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],
             Key::Modifiers if p.ok => {
                 self.open_modifiers();
+                return;
+            }
+            Key::OriginalPage if p.ok => {
+                self.open_original();
                 return;
             }
             Key::Hud => s.overlay = Overlay::CHOICES[next(row)],
@@ -1300,11 +1326,11 @@ impl Menu {
 
 impl Departure {
     /// The Settings tab its switch is on (P128): the graphics ones are on Graphics, the rest under
-    /// the Original tab's master switch.
+    /// the Original Game page's master switch, which the Ride tab opens (P179).
     pub fn tab(self) -> usize {
         match self {
             Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Picture | Departure::Textures | Departure::Filtering => TAB_GRAPHICS,
-            Departure::Controls | Departure::Cameras | Departure::Markers => TAB_ORIGINAL,
+            Departure::Controls | Departure::Cameras | Departure::Markers => TAB_RIDE,
         }
     }
 

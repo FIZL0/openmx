@@ -105,6 +105,17 @@ fn tap_until(m: &mut Menu, r: &mut Reader, control: Control, done: impl Fn(&Menu
 
 /// R1 along the open screen's tabs to the one named `tab` (P118).
 fn tab_to(m: &mut Menu, r: &mut Reader, tab: &str) {
+    // The Original Game page is the Ride tab's since P179: Circle out of it, and its row to go in.
+    if m.screen() == Some(Screen::Original) {
+        tap(m, r, Control::Circle);
+    }
+    if tab == "Original" {
+        tab_to(m, r, "Ride");
+        down_to(m, r, menu::Key::OriginalPage);
+        tap(m, r, Control::Cross);
+        assert_eq!(m.screen(), Some(Screen::Original));
+        return;
+    }
     let screen = m.screen().unwrap();
     assert!(m.tabs(screen).contains(&tab), "{screen:?} has no {tab} tab");
     tap_until(m, r, Control::R1, |m| m.tabs(screen)[m.tab(screen)] == tab);
@@ -1112,6 +1123,98 @@ fn a_custom_camera_preset_joins_the_cycle_with_its_own_numbers() {
     // A name a disc preset has is taken as the player's own with a word after it.
     let kept = m.settings.camera_sets[0].save_custom(Machine::Biplane, "Flight Cam 1", "Slot Cam", Look::ORIGINAL, &m.camera_names[1].clone());
     assert_eq!(kept, "Slot Cam Mine");
+}
+
+/// P179 (1): Save as New Preset saves from wherever the Camera page is. On All Presets it copies the
+/// preset the seat's rides start on, framed as All Presets frames it: the disc's first in the cycle
+/// (the shell's own start) before the camera button has moved, else where it was last left, and the
+/// biplane's when the seat starts on the biplane. The typed name lands in the seat's set, the camera
+/// button reaches it, and it is there after a restart.
+#[test]
+fn a_camera_preset_saves_from_all_presets_and_survives_a_restart() {
+    use menu::Key;
+    use menu::cameras::Look;
+    let (mut m, mut r) = fresh();
+    let (bike, plane) = (camera_file("cpresets.ini"), camera_file("biplanecpresets.ini"));
+    m.camera_names = [cycling(&bike), cycling(&plane)];
+    // The shell's own start, an empty start word, is the file's first preset, which cycles.
+    let shell = game_sim::camera::Race::new(bike.clone(), ps2_float::F(5.0));
+    assert_eq!(shell.cam.preset().name, m.camera_names[0][0]);
+    let shell = game_sim::camera::Race::new(plane.clone(), ps2_float::F(5.0));
+    assert_eq!(shell.cam.preset().name, m.camera_names[1][0]);
+
+    settings_at(&mut m, &mut r, "Camera");
+    assert_eq!(m.camera_picked(), None, "All Presets");
+    let save = m.page().into_iter().find(|r| r.key == Key::CameraSave).unwrap();
+    assert_eq!(save.off, None, "not dimmed on All Presets");
+    down_to(&mut m, &mut r, Key::CameraSave);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Keyboard));
+    type_keys(&mut m, &mut r, "wide");
+    tap(&mut m, &mut r, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    assert!(m.take_changed());
+    // In 1P's set, over the start preset, on All Presets' bike numbers; the Preset row goes onto it.
+    let set = &m.settings.camera_sets[0];
+    let own: Vec<_> = set.customs(Machine::Bike).collect();
+    assert_eq!(own.len(), 1);
+    assert_eq!((own[0].name.as_str(), own[0].base.as_str()), ("Wide", m.camera_names[0][0].as_str()));
+    assert_eq!(own[0].look, Look::of(&m.settings.cameras[0], Machine::Bike));
+    assert_eq!(m.camera_picked().map(|p| p.label()), Some("Wide (Mine)".to_string()));
+    assert_eq!(m.settings.camera_sets[1], Default::default(), "2P's are their own");
+
+    // The camera button: the disc's, then Wide.
+    let now = laid(&m, 0, Machine::Bike, &bike);
+    let mut cam = follow_on(now, "Race Cam 1");
+    assert!(walk(&mut cam).contains(&"Wide".to_string()));
+
+    // Where the camera button was last left: the copy is that preset's, on its own numbers.
+    m.camera_left_on(0, Machine::Bike, "Freestyle Cam");
+    let mut look = Look::of(&m.settings.cameras[0], Machine::Bike);
+    look.step(1, true, false);
+    m.settings.camera_sets[0].set_look(Machine::Bike, "Freestyle Cam", look);
+    down_to(&mut m, &mut r, Key::CameraPreset);
+    tap_until(&mut m, &mut r, Control::Right, |m| m.camera_picked().is_none());
+    down_to(&mut m, &mut r, Key::CameraSave);
+    tap(&mut m, &mut r, Control::Cross);
+    type_keys(&mut m, &mut r, "near");
+    tap(&mut m, &mut r, Control::Start);
+    let near = m.settings.camera_sets[0].customs(Machine::Bike).find(|o| o.name == "Near").cloned().unwrap();
+    assert_eq!((near.base.as_str(), near.look), ("Freestyle Cam", look));
+
+    // A seat that starts on the biplane copies the biplane's.
+    m.settings.machines[0] = Machine::Biplane;
+    down_to(&mut m, &mut r, Key::CameraPreset);
+    tap_until(&mut m, &mut r, Control::Right, |m| m.camera_picked().is_none());
+    down_to(&mut m, &mut r, Key::CameraSave);
+    tap(&mut m, &mut r, Control::Cross);
+    type_keys(&mut m, &mut r, "high");
+    tap(&mut m, &mut r, Control::Start);
+    let high = m.settings.camera_sets[0].customs(Machine::Biplane).find(|o| o.name == "High").cloned().unwrap();
+    assert_eq!((high.base.as_str(), high.look), (m.camera_names[1][0].as_str(), Look::of(&m.settings.cameras[0], Machine::Biplane)));
+    let mut cam = follow_on(laid(&m, 0, Machine::Biplane, &plane), &m.camera_names[1][0].clone());
+    assert!(walk(&mut cam).contains(&"High".to_string()));
+
+    // A restart: written, read back into a new menu, the Preset row and the camera button have them.
+    let dir = scratch("camera-save-all");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (settings, controls) = menu::load(&dir);
+    assert_eq!(settings.camera_sets, m.settings.camera_sets);
+    let mut again = Menu::new(settings, controls);
+    again.camera_names = m.camera_names.clone();
+    let labels: Vec<String> = again.camera_choices().iter().map(|p| p.label()).collect();
+    for want in ["Wide (Mine)", "Near (Mine)", "Biplane: High (Mine)"] {
+        assert!(labels.contains(&want.to_string()), "{labels:?}");
+    }
+    let mut cam = follow_on(laid(&again, 0, Machine::Bike, &bike), "Race Cam 1");
+    let seen = walk(&mut cam);
+    assert!(seen.contains(&"Wide".to_string()) && seen.contains(&"Near".to_string()), "{seen:?}");
+    std::fs::remove_dir_all(dir).ok();
+
+    // With no presets read and none of the player's, there is nothing to copy: the row is dim.
+    let (mut bare, mut r) = fresh();
+    settings_at(&mut bare, &mut r, "Camera");
+    assert!(bare.page().into_iter().find(|r| r.key == Key::CameraSave).unwrap().off.is_some());
 }
 
 #[test]
@@ -3513,18 +3616,18 @@ fn the_mods_page_lists_music_packs_beside_the_track_packs() {
     assert!(m.page().iter().all(|r| r.label != "Nothing in the mods folder"));
 }
 
-/// P118: L1 and R1 walk Settings' seven tabs (P128's Graphics third, P126's Original last) and the Garage's three round from either end, each tab
-/// opening on its first row.
+/// P118: L1 and R1 walk Settings' six tabs (P128's Graphics third; P126's Original a page of Ride's
+/// since P179) and the Garage's three round from either end, each tab opening on its first row.
 #[test]
 fn l1_and_r1_walk_every_tab_round_from_either_end() {
     use menu::Key;
     let (mut m, mut r) = fresh();
     main_to(&mut m, &mut r, "Settings");
     assert_eq!(m.tabs(Screen::Settings), menu::SETTINGS_TABS);
-    assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera", "Original"]);
+    assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera"]);
     tab_to(&mut m, &mut r, "Ride");
     // Controls has no Player row with one seat (P81); Graphics opens past its World heading.
-    let first = [Key::StartOn, Key::Hud, Key::DrawDistance, Key::Mix, Key::BikeLayout, Key::Player, Key::Original];
+    let first = [Key::StartOn, Key::Hud, Key::DrawDistance, Key::Mix, Key::BikeLayout, Key::Player];
     let here = |m: &Menu, s: Screen| (m.tab(s), m.page()[m.cursor(s)].key);
     for (i, key) in first.iter().enumerate() {
         assert_eq!(here(&m, Screen::Settings), (i, *key));
@@ -3532,10 +3635,10 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
         tap(&mut m, &mut r, Control::Down);
         tap(&mut m, &mut r, Control::R1);
     }
-    assert_eq!(here(&m, Screen::Settings), (0, Key::StartOn), "R1 from Original is Ride");
+    assert_eq!(here(&m, Screen::Settings), (0, Key::StartOn), "R1 from Camera is Ride");
     tap(&mut m, &mut r, Control::L1);
-    assert_eq!(here(&m, Screen::Settings), (6, Key::Original), "L1 from Ride is Original");
-    for i in (0..6).rev() {
+    assert_eq!(here(&m, Screen::Settings), (5, Key::Player), "L1 from Ride is Camera");
+    for i in (0..5).rev() {
         tap(&mut m, &mut r, Control::L1);
         assert_eq!(here(&m, Screen::Settings), (i, first[i]));
     }
@@ -3600,7 +3703,7 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
         assert_eq!(graphics.contains(&d.key()), menu::SETTINGS_TABS[d.tab()] == "Graphics", "{d:?}");
     }
     // On no other tab: Display is the HUD's, Ride no longer repeats any, Original keeps the rest.
-    for other in menu::SETTINGS_TABS.into_iter().filter(|t| *t != "Graphics") {
+    for other in menu::SETTINGS_TABS.into_iter().filter(|t| *t != "Graphics").chain(["Original"]) {
         tab_to(&mut m, &mut r, other);
         for row in m.page() {
             assert!(!graphics.contains(&row.key), "{other} has {} too", row.label);
@@ -3684,6 +3787,15 @@ fn every_row_of_every_settings_tab_and_page_changes_by_pad() {
             (m, r)
         },
         "Mods",
+    );
+    // The Original Game page, the Ride tab's since P179.
+    every_row_changes(
+        &|| {
+            let (mut m, mut r) = shell();
+            settings_at(&mut m, &mut r, "Original");
+            (m, r)
+        },
+        "Original",
     );
 }
 
@@ -3922,6 +4034,10 @@ fn every_walked_screen() -> Vec<(String, Menu, Reader)> {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     out.push(("Modifiers".to_string(), m, r));
+    // The Ride tab's Original Game page (P179), once Settings' last tab.
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Original");
+    out.push(("Original".to_string(), m, r));
     let (mut m, mut r) = fresh();
     main_to(&mut m, &mut r, "Garage");
     down_to(&mut m, &mut r, menu::Key::Garage(roster::Row::Name));
@@ -4402,7 +4518,7 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     settings_at(&mut m, &mut r, "Original");
     let value = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap().value;
     assert_eq!(value(&m, Key::Original), "Off");
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::Original, "the tab opens on the switch");
+    assert_eq!(m.page()[m.cursor(Screen::Original)].key, Key::Original, "the page opens on the switch");
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.take_changed());
     assert_eq!(m.original(), Original::On);
@@ -4418,7 +4534,11 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     // The sim is none of them (P55).
     assert!(s.modifiers.is_original());
     // Each sub-switch on its tab: the graphics ones on Graphics since P128.
-    let on_tab = |m: &mut Menu, r: &mut Reader, d: Departure| tab_to(m, r, menu::SETTINGS_TABS[d.tab()]);
+    let on_tab = |m: &mut Menu, r: &mut Reader, d: Departure| match menu::SETTINGS_TABS[d.tab()] {
+        // the Ride tab's Original Game page (P179)
+        "Ride" => tab_to(m, r, "Original"),
+        t => tab_to(m, r, t),
+    };
     for d in Departure::ALL {
         on_tab(&mut m, &mut r, d);
         assert_eq!(value(&m, d.key()), d.choices()[1], "{d:?}");
@@ -4467,6 +4587,59 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     let mut n = m.clone();
     n.set_departure(Departure::Controls, false);
     assert_eq!(n.original(), Original::Off);
+}
+
+/// P179 (2): the Original tab is gone; its rows are a page the Ride tab's Original Game row opens,
+/// whose value is the master switch's, and Circle there is back on the Ride tab, on that row.
+/// `--screen original` opens the page as the pad reaches it.
+#[test]
+fn the_original_game_page_is_a_page_of_the_ride_tab() {
+    use menu::{Departure, Key, Kind};
+    let (mut m, mut r) = fresh();
+    assert!(!menu::SETTINGS_TABS.contains(&"Original"));
+    settings_at(&mut m, &mut r, "Ride");
+    let row = m.page().into_iter().find(|r| r.key == Key::OriginalPage).unwrap();
+    assert_eq!((row.kind, row.label.as_str(), row.value.as_str()), (Kind::Opens, "Original Game", "Off"));
+    down_to(&mut m, &mut r, Key::OriginalPage);
+    let at = m.cursor(Screen::Settings);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Original));
+    assert!(m.tabs(Screen::Original).is_empty(), "no tabs of its own");
+    let keys: Vec<Key> = m.page().into_iter().filter(|r| r.selectable()).map(|r| r.key).collect();
+    let mut want = vec![Key::Original];
+    want.extend(Departure::ALL.into_iter().filter(|d| menu::SETTINGS_TABS[d.tab()] != "Graphics").map(Key::Departure));
+    assert_eq!(keys, want);
+    // L1 and R1 do nothing here; Cross the switch.
+    tap(&mut m, &mut r, Control::R1);
+    assert_eq!(m.screen(), Some(Screen::Original));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.original(), menu::Original::On);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Settings));
+    assert_eq!((m.tab(Screen::Settings), m.cursor(Screen::Settings)), (0, at), "back on the Ride tab's row");
+    assert_eq!(m.page()[at].value, "On");
+    m.set_departure(Departure::Markers, false);
+    assert_eq!(m.page()[at].value, "Mixed");
+    // From the pause's Settings too, and back to the pause by Circle twice.
+    let (mut m, mut r) = fresh();
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.cursor(Screen::Pause) == 4);
+    tap(&mut m, &mut r, Control::Cross);
+    tab_to(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::OriginalPage);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Original));
+    tap(&mut m, &mut r, Control::Circle);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    // `--screen original`.
+    assert_eq!(Screen::from_word("original"), Some(Screen::Original));
+    let (mut m, mut r) = fresh();
+    m.open(Screen::Original);
+    assert_eq!(m.screen(), Some(Screen::Original));
+    assert_eq!(m.page()[m.cursor(Screen::Original)].key, Key::Original);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!((m.screen(), m.tab(Screen::Settings)), (Some(Screen::Settings), 0));
 }
 
 /// P170: Original Game on from a fresh menu rides openmx's HUD — the switch reads On with the HUD

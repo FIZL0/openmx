@@ -2047,10 +2047,12 @@ pub enum Screen {
     Mods,
     /// Settings' Graphics tab (P128): the world's draw and the picture's rate, `--screen graphics`.
     Graphics,
+    /// The Original Game switch and its departures (P126), a page of the Ride tab's (P179).
+    Original,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 18] = [
+    pub const ALL: [Screen; 19] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2069,6 +2071,7 @@ impl Screen {
         Screen::Camera,
         Screen::Mods,
         Screen::Graphics,
+        Screen::Original,
     ];
 
     fn index(self) -> usize {
@@ -2096,6 +2099,7 @@ impl Screen {
             Screen::Camera => "camera",
             Screen::Mods => "mods",
             Screen::Graphics => "graphics",
+            Screen::Original => "original",
         }
     }
 
@@ -2123,6 +2127,7 @@ impl Screen {
             Screen::Camera => "Camera",
             Screen::Mods => "Mods",
             Screen::Graphics => "Graphics",
+            Screen::Original => "Original Game",
         }
     }
 }
@@ -3531,6 +3536,11 @@ impl Menu {
                 self.open_settings(pages::TAB_RIDE);
                 self.open_modifiers();
             }
+            Screen::Original => {
+                self.main();
+                self.open_settings(pages::TAB_RIDE);
+                self.open_original();
+            }
             Screen::Keyboard => {
                 self.main();
                 self.open_garage();
@@ -3578,7 +3588,7 @@ impl Menu {
             Screen::Splash => 1,
             Screen::Main => MAIN.len(),
             Screen::Tracks => self.track_count(),
-            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods => self.page_of(screen).len().max(1),
+            Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page_of(screen).len().max(1),
             Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => 1,
             Screen::Keyboard => KEY_ROWS.len() + 1,
             Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No) + usize::from(self.session || self.seats_open),
@@ -3902,7 +3912,7 @@ impl Menu {
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
-            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods => unreachable!(),
+            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => unreachable!(),
         }
         Act::Stay
     }
