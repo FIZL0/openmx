@@ -207,7 +207,7 @@ fn paint() -> WorldPaint {
             PaintTile { at: [s.at[0] as f32, s.at[1] as f32], pages: Some(pages), sharp: None }
         })
         .collect();
-    WorldPaint { regions: Regions { owned }, tiles, dirt: [150.0, 118.0, 86.0] }
+    WorldPaint { regions: Regions { owned, period: [0.0; 2] }, tiles, dirt: [150.0, 118.0, 86.0] }
 }
 
 /// The CPU's paint along `z` 288 from inside `a` to inside `b`: each tile its own colour in its

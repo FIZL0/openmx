@@ -62,7 +62,7 @@ fn baked_pages() -> Pages {
 /// The world: the baked map first, at the origin, and the mod map at [`AT`].
 fn world(pages: Pages) -> WorldPaint {
     WorldPaint {
-        regions: Regions { owned: vec![[0.0, 0.0, SIDE, SIDE], [AT[0], AT[1], AT[0] + SIDE, AT[1] + SIDE]] },
+        regions: Regions { owned: vec![[0.0, 0.0, SIDE, SIDE], [AT[0], AT[1], AT[0] + SIDE, AT[1] + SIDE]], period: [0.0; 2] },
         tiles: vec![PaintTile { at: [0.0, 0.0], pages: Some(baked_pages()), sharp: None }, PaintTile { at: AT, pages: Some(pages), sharp: None }],
         dirt: DIRT,
     }
@@ -210,7 +210,7 @@ fn disc_world(sharp: bool) -> WorldPaint {
     let pages = Pages { pages: vec![page], across: 4, along: 4, page_of: vec![Some(0); 16], spacing: SPACING, detail: None, detail_repeat: SPACING * 8.0 };
     let sharp = sharp.then(|| SharpSplat { splat: std::sync::Arc::new(splat()), modulate: vec![modulate] });
     WorldPaint {
-        regions: Regions { owned: vec![[0.0, 0.0, SIDE, SIDE], [AT[0], AT[1], AT[0] + SIDE, AT[1] + SIDE]] },
+        regions: Regions { owned: vec![[0.0, 0.0, SIDE, SIDE], [AT[0], AT[1], AT[0] + SIDE, AT[1] + SIDE]], period: [0.0; 2] },
         tiles: vec![PaintTile { at: [0.0, 0.0], pages: Some(baked_pages()), sharp: None }, PaintTile { at: AT, pages: Some(pages), sharp }],
         dirt: DIRT,
     }

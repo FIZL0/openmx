@@ -544,7 +544,117 @@ impl WorldMod {
             w.seams, w.points, w.met, w.rough, w.steepest.0, w.steepest_at[0].0, w.steepest_at[1].0, w.steepest_between[0], w.steepest_between[1], w.wrap_steepest.0
         )
     }
+
+    /// `--seams` (MD51): the ground between each map and the next one along `x` and along `z` whose
+    /// side faces it (at least [`CROSSING_FACE`] feet of it), across a seam too on a wrapped axis —
+    /// how steep the ground is there and how fast its paint changes, so a crossing over the wrap can
+    /// be held to the joins stitch makes between two maps. Each is read on 16 lines spread over the
+    /// facing span, every [`CROSSING_STEP`] feet from one map's edge to the other's: the slope is the
+    /// steepest of any line's steps, the paint the steepest change of the 16 lines' mean colour (one
+    /// map's pages are mirrored on across a join, so a single line is its texture's noise), the
+    /// largest of the three channels, in levels a foot. One line each.
+    pub fn crossings(&self, tiled: &Tiled, paint: &game_render::terrain::WorldPaint) -> Vec<String> {
+        let rects = &paint.regions.owned;
+        let period = [0, 1].map(|a| if tiled.wraps()[a] { tiled.extent()[a].0 } else { 0.0 });
+        let fold = |v: f32, a: usize| if period[a] > 0.0 { v.rem_euclid(period[a]) } else { v };
+        // Each map's own colour: its paint's mean over a 32 x 32 grid of its ground.
+        let colours: Vec<[f32; 3]> = rects
+            .iter()
+            .map(|r| {
+                let mut m = [0.0f32; 3];
+                for (i, j) in (0..32).flat_map(|i| (0..32).map(move |j| (i, j))) {
+                    let c = paint.paint(r[0] + (i as f32 + 0.5) / 32.0 * (r[2] - r[0]), r[1] + (j as f32 + 0.5) / 32.0 * (r[3] - r[1]));
+                    (0..3).for_each(|k| m[k] += c[k] / 1024.0);
+                }
+                m
+            })
+            .collect();
+        let mut out = Vec::new();
+        for axis in 0..2 {
+            let other = 1 - axis;
+            for (a, ra) in rects.iter().enumerate() {
+                // The nearest map ahead whose side faces this one's, and whether across the seam.
+                let mut next: Option<(f32, usize, bool)> = None;
+                for (b, rb) in rects.iter().enumerate() {
+                    let face = ra[other + 2].min(rb[other + 2]) - ra[other].max(rb[other]);
+                    if b == a || face < CROSSING_FACE {
+                        continue;
+                    }
+                    let shifts: &[f32] = if period[axis] > 0.0 { &[0.0, period[axis]] } else { &[0.0] };
+                    for &shift in shifts {
+                        let gap = rb[axis] + shift - ra[axis + 2];
+                        if gap >= 0.0 && next.is_none_or(|n| gap < n.0) {
+                            next = Some((gap, b, shift > 0.0));
+                        }
+                    }
+                }
+                let Some((gap, b, wrapped)) = next else { continue };
+                let rb = rects[b];
+                let (lo, hi) = (ra[other].max(rb[other]), ra[other + 2].min(rb[other + 2]));
+                let steps = (gap / CROSSING_STEP).ceil().max(1.0) as usize;
+                let lines: Vec<f32> = (0..16).map(|k| lo + (k as f32 + 0.5) / 16.0 * (hi - lo)).collect();
+                let point = |i: usize, across: f32| {
+                    let along = fold(ra[axis + 2] + gap * i as f32 / steps as f32, axis);
+                    let across = fold(across, other);
+                    if axis == 0 { (along, across) } else { (across, along) }
+                };
+                let mut slope = 0.0f32;
+                let mut height_before: Vec<Option<f32>> = vec![None; lines.len()];
+                // The 16 lines' mean paint, and their mean blend of the maps' own colours: before,
+                // and the steepest change of each so far and where.
+                let mut before: Option<([f32; 3], [f32; 3])> = None;
+                let (mut paint_rate, mut blend_rate) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32));
+                let step = gap / steps as f32;
+                for i in 0..=steps {
+                    let (mut mean, mut blend) = ([0.0f32; 3], [0.0f32; 3]);
+                    for (k, &across) in lines.iter().enumerate() {
+                        let (x, z) = point(i, across);
+                        let h = tiled.at(F(x), F(z)).map(|h| h.y.0);
+                        if let (Some(h), Some(b)) = (h, height_before[k]) {
+                            slope = slope.max((h - b).abs() / step);
+                        }
+                        height_before[k] = h;
+                        let c = paint.paint(x, z);
+                        let shares = paint.regions.shares(x, z);
+                        for ch in 0..3 {
+                            mean[ch] += c[ch] / lines.len() as f32;
+                            blend[ch] += shares.iter().zip(&colours).map(|(s, m)| s * m[ch]).sum::<f32>() / lines.len() as f32;
+                        }
+                    }
+                    if let Some((m0, b0)) = before {
+                        let along = fold(ra[axis + 2] + gap * i as f32 / steps as f32, axis);
+                        let rate = |p: [f32; 3], q: [f32; 3]| (0..3).map(|c| (p[c] - q[c]).abs()).fold(0.0, f32::max) / step;
+                        for (r, best) in [(rate(mean, m0), &mut paint_rate), (rate(blend, b0), &mut blend_rate)] {
+                            if r > best.0 {
+                                *best = (r, along);
+                            }
+                        }
+                    }
+                    before = Some((mean, blend));
+                }
+                let name = |i: usize| &self.pieces[i].tile.name;
+                let seam = if wrapped { " across the seam" } else { "" };
+                let ax = ["x", "z"][axis];
+                out.push(format!(
+                    "world crossing: {ax} {} > {}{seam}, {gap:.0} ft of join, slope {slope:.3}, blend {:.3} a foot at {ax} {:.0}, paint {:.3} a foot at {ax} {:.0}",
+                    name(a),
+                    name(b),
+                    blend_rate.0,
+                    blend_rate.1,
+                    paint_rate.0,
+                    paint_rate.1
+                ));
+            }
+        }
+        out
+    }
 }
+
+/// [`WorldMod::crossings`]: the least span of two maps' sides that face each other for the ground
+/// between them to count as a crossing, in feet.
+pub const CROSSING_FACE: f32 = 200.0;
+/// [`WorldMod::crossings`]: feet a step across the ground between two maps, half a disc map's cell.
+pub const CROSSING_STEP: f32 = 4.5;
 
 /// The world's pieces on disk, as the simulation's [`Source`].
 struct Files {
@@ -1235,7 +1345,9 @@ pub struct WorldLook {
 }
 
 impl WorldMod {
-    /// The world rectangles each tile owns, in the world's order: its `keep` cells moved by its offset.
+    /// The world rectangles each tile owns, in the world's order: its `keep` cells moved by its offset;
+    /// and on each axis the world wraps, its side, which [`WorldMod::tiled`]'s extent is: the farthest
+    /// any piece (the seam joins too) owns, by the same sums.
     pub fn regions(&self) -> game_render::terrain::Regions {
         let owned = self.pieces[..self.tile_count]
             .iter()
@@ -1245,7 +1357,11 @@ impl WorldMod {
                 [ax + x0, az + z0, ax + x1, az + z1]
             })
             .collect();
-        game_render::terrain::Regions { owned }
+        let side = |a: usize| {
+            let far = |p: &WorldPiece| (p.tile.at[a] + F::from(p.tile.keep[a + 2] as i32) * p.tile.spacing).0;
+            if self.wrap[a] { self.pieces.iter().map(far).fold(0.0, f32::max) } else { 0.0 }
+        };
+        game_render::terrain::Regions { owned, period: [side(0), side(1)] }
     }
 
     /// Every tile's ground paint, light and sky, read from its own folder: its terrain's pages with its

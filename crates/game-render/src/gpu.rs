@@ -4484,7 +4484,20 @@ fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
     s.push_str(GROUND_VS_WGSL);
     s.push_str(&format!(
         "fn inside(p: vec2f, r: vec4f) -> bool {{ return all(p >= r.xy) && all(p < r.zw); }}
-fn reach(p: vec2f, r: vec4f) -> f32 {{
+fn near1(v: f32, lo: f32, hi: f32, period: f32) -> f32 {{
+  if period <= 0.0 {{ return v; }}
+  var best = v;
+  var d = max(max(lo - v, v - hi), 0.0);
+  for (var k = -1.0; k <= 1.0; k += 2.0) {{
+    let moved = v + k * period;
+    let e = max(max(lo - moved, moved - hi), 0.0);
+    if e < d {{ best = moved; d = e; }}
+  }}
+  return best;
+}}
+fn near(p: vec2f, r: vec4f) -> vec2f {{ return vec2f(near1(p.x, r.x, r.z, {period_x}), near1(p.y, r.y, r.w, {period_z})); }}
+fn reach(xz: vec2f, r: vec4f) -> f32 {{
+  let p = near(xz, r);
   let d = max(length(max(max(r.xy - p, p - r.zw), vec2f(0.0))), 0.001);
   let w = max(1.0 / d - 1.0 / {reach}, 0.0);
   let f = {reach} / max(d, {reach});
@@ -4498,10 +4511,12 @@ fn mirror1(v: f32, lo: f32, hi: f32) -> f32 {{
   let t = (v - lo) - floor((v - lo) / (2.0 * span)) * (2.0 * span);
   return lo + select(t, 2.0 * span - t, t > span);
 }}
-fn mirror(p: vec2f, r: vec4f) -> vec2f {{ return vec2f(mirror1(p.x, r.x, r.z), mirror1(p.y, r.y, r.w)); }}
+fn mirror(xz: vec2f, r: vec4f) -> vec2f {{ let p = near(xz, r); return vec2f(mirror1(p.x, r.x, r.z), mirror1(p.y, r.y, r.w)); }}
 ",
         reach = f(crate::terrain::BLEND_REACH),
         far = f(crate::terrain::FAR_WEIGHT),
+        period_x = f(w.regions.period[0]),
+        period_z = f(w.regions.period[1]),
     ));
     let dirt = format!("vec3f({}, {}, {})", f(w.dirt[0]), f(w.dirt[1]), f(w.dirt[2]));
     let rect = |i: usize| {
@@ -5726,9 +5741,10 @@ mod tests {
             }),
             ("ground meshes", ground_mesh::DRAW_WGSL.to_string()),
             ("ground, pages", ground_pages_wgsl(&pages, [200.0, 180.0, 150.0])),
+            // Wrapped on x (MD51), so the shader reads each map's nearest copy across the seam.
             ("ground, world", {
                 let world = WorldPaint {
-                    regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]] },
+                    regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]], period: [72.0, 0.0] },
                     tiles: vec![
                         crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(pages.clone()), sharp: None },
                         crate::terrain::PaintTile { at: [40.0, 0.0], pages: None, sharp: None },
@@ -5741,7 +5757,7 @@ mod tests {
             ("ground, world of two page sizes", {
                 let small = Pages { pages: vec![Texture { width: 128, height: 128, rgba: vec![255; 128 * 128 * 4] }], ..pages.clone() };
                 let world = WorldPaint {
-                    regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]] },
+                    regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]], period: [0.0; 2] },
                     tiles: vec![
                         crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(small), sharp: None },
                         crate::terrain::PaintTile { at: [40.0, 0.0], pages: Some(pages.clone()), sharp: None },
