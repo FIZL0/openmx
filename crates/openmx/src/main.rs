@@ -4871,6 +4871,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             Some(&start) => lot.plane_anywhere(i + 1, flight_for(i + 1), start),
             None => lot.plane(i + 1, flight_for(i + 1)),
         };
+        // Where it stands, as the first player's is said (MD32: a world's in world feet).
+        if let Some(p) = plane.as_ref().filter(|_| lot.bay(Machine::Biplane, i + 1).is_some()) {
+            println!("player {}: biplane parked at {:.0}, {:.0}, {:.0}", i + 2, p.at.x(), p.at.y(), p.at.z());
+        }
         let up = Kind::Bike;
         seats.push(Seat {
             reports: [Report::missing(); PADS],
