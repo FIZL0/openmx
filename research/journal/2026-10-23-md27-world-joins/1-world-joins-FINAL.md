@@ -1,4 +1,4 @@
-# 1 — world joins (PART)
+# 1 — world joins (FINAL)
 
 Task MD27. 2026-10-23.
 
