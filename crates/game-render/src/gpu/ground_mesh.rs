@@ -14,7 +14,10 @@
 //! Every view has a near target of its own (V89: split screen's second player saw only the far
 //! target's whole-map paint), and views standing in the same square share one. Each near target has
 //! its own bind group — group 2 of the ground's pipeline: the near and far targets and where they lie
-//! — and a view's ground is drawn with its target's group. A near target is 2048² texels with its
+//! — and a view's ground is drawn with its target's group. Both are read through a clamped sampler
+//! from the renderer's own (V91), trilinear and as anisotropic as its Texture Filtering, so a road
+//! seen down its length keeps its paint sharp across rather than picking one blurred mip; the
+//! renderer hands a new one to [`GpuMeshes::set_sampler`] and every group is made again. A near target is 2048² texels with its
 //! mips, about 21 MiB, made only when a view stands in a square no other view's target holds, so one
 //! view costs what it always did and eight views apart cost about 171 MiB; a target no view needs any
 //! more is drawn over for the next square that does, and the pool shrinks back when views go.
@@ -66,9 +69,14 @@ struct Near {
     square: Option<[i32; 2]>,
     at: wgpu::Buffer,
     ground: wgpu::BindGroup,
+    /// The anisotropy `ground`'s sampler filtered with when it was made.
+    anisotropy: u16,
 }
 
 pub(super) struct GpuMeshes {
+    /// The sampler group 2 reads both targets with (V91), and the anisotropy it filters with.
+    sampler: wgpu::Sampler,
+    anisotropy: u16,
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     /// Runs of triangles with one texture, in drawing order: texture, first vertex, vertex count.
@@ -88,26 +96,28 @@ pub(super) struct GpuMeshes {
 pub(super) const WGSL_BINDINGS: &str = "struct MeshAt { near: vec4f, far: vec4f }\n\
   @group(2) @binding(0) var mesh_near: texture_2d<f32>;\n\
   @group(2) @binding(1) var mesh_far: texture_2d<f32>;\n\
-  @group(2) @binding(2) var<uniform> mesh_at: MeshAt;\n";
+  @group(2) @binding(2) var<uniform> mesh_at: MeshAt;\n\
+  @group(2) @binding(3) var mesh_smp: sampler;\n";
 
 /// The ground shader's code that lays the meshes over `frame`, the splat's colour in 0..255, at the
 /// world's `x` and `z`. Both targets are sampled everywhere, as the derivatives need, and the near
 /// one is used where it reaches.
 pub(super) const APPLY_WGSL: &str = "  let mesh_un = (vec2f(x, z) - mesh_at.near.xy) * mesh_at.near.z;\n\
   let mesh_uf = (vec2f(x, z) - mesh_at.far.xy) * mesh_at.far.z;\n\
-  let mesh_n = textureSample(mesh_near, clamped, mesh_un);\n\
-  let mesh_f = textureSample(mesh_far, clamped, mesh_uf);\n\
+  let mesh_n = textureSample(mesh_near, mesh_smp, mesh_un);\n\
+  let mesh_f = textureSample(mesh_far, mesh_smp, mesh_uf);\n\
   let mesh_in_near = all(mesh_un > vec2f(0.001)) && all(mesh_un < vec2f(0.999));\n\
   let mesh_in_far = all(mesh_uf >= vec2f(0.0)) && all(mesh_uf <= vec2f(1.0));\n\
   let mesh = select(select(vec4f(0.0, 0.0, 0.0, 1.0), mesh_f, mesh_in_far), mesh_n, mesh_in_near);\n\
   frame = vec4f(frame.rgb * mesh.a + mesh.rgb * 255.0, frame.a);\n";
 
 /// The bind group layout entries of the ground's group 2, [`WGSL_BINDINGS`].
-fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
     [
         texture_entry(0, true, wgpu::TextureViewDimension::D2),
         texture_entry(1, true, wgpu::TextureViewDimension::D2),
         uniform_entry(2, wgpu::ShaderStages::FRAGMENT),
+        sampler_entry(3),
     ]
 }
 
@@ -133,7 +143,15 @@ struct Out { @builtin(position) clip: vec4f, @location(0) uv: vec2f, @location(1
 
 impl GpuMeshes {
     /// Upload the meshes, and draw the far target.
-    pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, sampler: &wgpu::Sampler, m: &GroundMeshes) -> GpuMeshes {
+    /// `sampler` draws the meshes' own textures into the targets; `read` is what the ground reads the
+    /// targets with and its anisotropy ([`GpuMeshes::set_sampler`]).
+    pub(super) fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sampler: &wgpu::Sampler,
+        read: (&wgpu::Sampler, u16),
+        m: &GroundMeshes,
+    ) -> GpuMeshes {
         let mut vertices = Vec::with_capacity(m.tris.len() * 3);
         let mut runs: Vec<(usize, u32, u32)> = Vec::new();
         for t in m.tris.iter().filter(|t| t.pass.blend == Some([0, 1, 0, 1])) {
@@ -250,6 +268,8 @@ impl GpuMeshes {
         let side = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0);
         let far_rect = [lo[0], lo[1], 1.0 / side, 0.0];
         let mut meshes = GpuMeshes {
+            sampler: read.0.clone(),
+            anisotropy: read.1,
             pipeline,
             vertices: vertex_buffer,
             runs,
@@ -280,16 +300,39 @@ impl GpuMeshes {
             mapped_at_creation: false,
         });
         queue.write_buffer(&at, 0, bytemuck::cast_slice(&[[f32::MAX, f32::MAX, 0.0, 0.0], self.far_rect]));
-        let ground = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let ground = self.ground_bind(device, &target, &at);
+        self.nears.push(Near { target, square: None, at, ground, anisotropy: self.anisotropy });
+    }
+
+    /// The ground's group 2 over near target `target` placed by `at`: it, the far one and the sampler.
+    fn ground_bind(&self, device: &wgpu::Device, target: &Target, at: &wgpu::Buffer) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ground meshes"),
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&target.view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.far.view) },
                 wgpu::BindGroupEntry { binding: 2, resource: at.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
-        });
-        self.nears.push(Near { target, square: None, at, ground });
+        })
+    }
+
+    /// Read both targets with `sampler`, filtering up to `anisotropy`, from now on (V91): every near
+    /// target's group is made again, and with it the far target's reading.
+    pub(super) fn set_sampler(&mut self, device: &wgpu::Device, sampler: &wgpu::Sampler, anisotropy: u16) {
+        self.sampler = sampler.clone();
+        self.anisotropy = anisotropy;
+        for i in 0..self.nears.len() {
+            let ground = self.ground_bind(device, &self.nears[i].target, &self.nears[i].at);
+            self.nears[i].ground = ground;
+            self.nears[i].anisotropy = anisotropy;
+        }
+    }
+
+    /// The anisotropy each near target's group was made with: what a test reads (V91).
+    pub(super) fn bound_anisotropy(&self) -> impl Iterator<Item = u16> + '_ {
+        self.nears.iter().map(|n| n.anisotropy)
     }
 
     /// Give each of `eyes` (a view's each) the near target round its square: one already there, or
@@ -431,7 +474,7 @@ mod tests {
         };
         let tri = Flat::new([[0.0, 0.0], [4000.0, 0.0], [0.0, 4000.0]], [[0.0; 2]; 3], [[128.0; 4]; 3], pass);
         let m = GroundMeshes::of(vec![Texture { width: 2, height: 2, rgba: vec![128; 16] }], vec![tri]).unwrap();
-        let mut meshes = GpuMeshes::new(&gpu.device, &gpu.queue, &gpu.sampler, &m);
+        let mut meshes = GpuMeshes::new(&gpu.device, &gpu.queue, &gpu.sampler, (&gpu.sampler, 1), &m);
         let mut follow = |eyes: &[V3]| {
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             meshes.follow(&gpu.device, &gpu.queue, &mut encoder, eyes);
@@ -446,6 +489,15 @@ mod tests {
         assert_eq!(follow(&[a, c]), (2, vec![0, 1]));
         // Swapping seats swaps targets without drawing either again.
         assert_eq!(follow(&[c, a]), (2, vec![1, 0]));
+        // A new sampler (V91's Texture Filtering) reaches both targets' groups.
+        meshes.set_sampler(&gpu.device, &gpu.sampler, 16);
+        assert_eq!(meshes.bound_anisotropy().collect::<Vec<_>>(), vec![16, 16]);
+        let mut follow = |eyes: &[V3]| {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            meshes.follow(&gpu.device, &gpu.queue, &mut encoder, eyes);
+            gpu.queue.submit([encoder.finish()]);
+            (meshes.near_targets(), meshes.view_near.clone())
+        };
         // Eight seats apart: eight targets; four of them gone, four.
         let eight: Vec<V3> = (0..8).map(|k| v3(k as f32 * 500.0, 0.0, 0.0)).collect();
         assert_eq!(follow(&eight).0, 8);

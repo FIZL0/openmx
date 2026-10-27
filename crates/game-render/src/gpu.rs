@@ -244,6 +244,9 @@ struct MaterialSource {
 type SamplerKey = ([bool; 2], bool);
 /// The plain repeating, trilinear one: most materials' and the ground's.
 const REPEAT: SamplerKey = ([false; 2], false);
+/// Clamped both ways and trilinear: the ground's roads' and ruts' targets (V91), read nearly edge-on
+/// down a road as the ground is.
+const CLAMPED: SamplerKey = ([true; 2], false);
 
 /// A textured sampler under `anisotropy` (V83). One reading a single mip level is never anisotropic:
 /// wgpu filters anisotropically only with every filter linear.
@@ -2059,6 +2062,9 @@ impl Renderer {
             let g = self.ground.as_mut().expect("just read");
             g.bind = bind;
             g.anisotropy = anisotropy;
+            if let Some(m) = &mut g.meshes {
+                m.set_sampler(&self.device, &self.samplers[&CLAMPED], anisotropy);
+            }
         }
     }
 
@@ -2069,11 +2075,14 @@ impl Renderer {
     }
 
     /// The anisotropy each live material's bind groups and the ground's were last made with, the
-    /// ground's last if there is one: what a test reads to see a change reach every one of them. A
-    /// material reading one mip level is listed as 1, since its sampler can filter no other way.
+    /// ground's after them if there is one and then each of its roads' near targets' (V91): what a
+    /// test reads to see a change reach every one of them. A material reading one mip level is listed
+    /// as 1, since its sampler can filter no other way.
     pub fn bound_anisotropy(&self) -> Vec<u16> {
         let materials = self.materials.iter().filter_map(|m| m.source.as_ref()).map(|s| if s.sampler.1 { 1 } else { s.anisotropy });
-        materials.chain(self.ground.as_ref().map(|g| g.anisotropy)).collect()
+        let ground = self.ground.as_ref().map(|g| g.anisotropy);
+        let meshes = self.ground.iter().filter_map(|g| g.meshes.as_ref()).flat_map(|m| m.bound_anisotropy());
+        materials.chain(ground).chain(meshes).collect()
     }
 
     /// Where `owner`'s props are drawn now, in world feet: what a test reads to see a world tile's
@@ -2267,7 +2276,14 @@ impl Renderer {
         let max = self.device.limits().max_sampled_textures_per_shader_stage as usize;
         // The roads and ruts painted in after the passes (V67) are two more.
         let meshes = paint.and_then(|p| p.meshes.as_ref()).filter(|_| pages.is_none() && world.is_none());
-        let meshes = meshes.map(|m| ground_mesh::GpuMeshes::new(&self.device, &self.queue, &self.sampler, m));
+        if meshes.is_some() {
+            let anisotropy = self.anisotropy;
+            self.samplers.entry(CLAMPED).or_insert_with(|| texture_sampler(&self.device, CLAMPED, anisotropy));
+        }
+        let meshes = meshes.map(|m| {
+            let read = (&self.samplers[&CLAMPED], self.anisotropy);
+            ground_mesh::GpuMeshes::new(&self.device, &self.queue, &self.sampler, read, m)
+        });
         if layers.len() + 1 + if meshes.is_some() { 2 } else { 0 } > max {
             return Err(format!(
                 "the ground's paint has {} textures and this device samples {max} at once",

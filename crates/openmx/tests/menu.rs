@@ -4688,6 +4688,56 @@ fn texture_filtering_rebuilds_every_sampler_with_its_clamp() {
     assert_eq!(gpu.bound_anisotropy()[0], 4u16.min(most));
 }
 
+/// V91: the roads' and ruts' paint targets a freeride ground reads (V67's near and far, group 2 of
+/// its pipeline) are read through a sampler of the renderer's own, made again with the ground's and
+/// every material's under each Texture Filtering choice: Off is plain trilinear, 16x as far as the
+/// device goes.
+#[test]
+fn texture_filtering_rebuilds_the_road_targets_sampler() {
+    use game_render::ground_mesh::{Flat, GroundMeshes};
+    use game_render::gpu::{GroundChunk, GroundPaint, GroundVertex, Renderer};
+    use game_render::mat::v3;
+    use game_render::splat::{Pass, Splat};
+    use menu::Filtering;
+    let mut gpu = match Renderer::headless() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let most = gpu.anisotropy().1;
+    let cells = 4;
+    let vertices = (0..=cells)
+        .flat_map(|j| (0..=cells).map(move |i| (i, j)))
+        .map(|(i, j)| GroundVertex { pos: [i as f32 * 10.0, 0.0, j as f32 * 10.0], normal: [0.0, 1.0, 0.0] })
+        .collect();
+    let chunk = GroundChunk { vertices, cells, at: (0, 0), missing: Vec::new(), centre: v3(20.0, 0.0, 20.0), radius: 30.0 };
+    let layer = || game_render::Texture { width: 2, height: 2, rgba: vec![128; 16] };
+    let pass = Pass {
+        texture: 0,
+        scale: [1.0, 1.0],
+        angle: 0.0,
+        turn: (0.0, 1.0),
+        rgba: [128.0; 4],
+        blend: Some([0, 1, 0, 1]),
+        fixed: 128.0,
+        reads: (true, true),
+    };
+    let road = Flat::new([[0.0, 0.0], [40.0, 0.0], [0.0, 40.0]], [[0.0; 2]; 3], [[128.0; 4]; 3], pass.clone());
+    let splat = Splat { textures: vec![layer()], passes: vec![pass], shadow: None, meshes: GroundMeshes::of(vec![layer()], vec![road]) };
+    // A ground set under a choice is made with it: Off, plain trilinear.
+    gpu.set_anisotropy(Filtering::Off.anisotropy());
+    gpu.set_ground_painted(&[chunk], GroundPaint::Splat(&splat), [0.5; 3]).expect("a meshed ground");
+    assert_eq!(gpu.bound_anisotropy(), vec![1, 1]);
+    for f in Filtering::ALL.into_iter().chain(Filtering::ALL.into_iter().rev()) {
+        gpu.set_anisotropy(f.anisotropy());
+        let want = f.anisotropy().min(most);
+        // The ground's group, then its near target's group 2 (which reads the far one too).
+        assert_eq!(gpu.bound_anisotropy(), vec![want, want], "{f:?}: the road targets' bind group made again");
+    }
+}
+
 /// P129: each seat has a Markers row on the Controls tab, On by default, saved in settings.txt; the
 /// Original switch turns every seat's off, and the switch's own Markers row reads them all.
 #[test]
