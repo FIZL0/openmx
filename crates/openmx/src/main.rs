@@ -1170,6 +1170,7 @@ fn trace_picture(
     cut: &[bool],
     blend: &pace::Blend,
     tick: u64,
+    before_planes: &[Option<M4>],
 ) {
     let (Some(seat), Some(rig), Some(camera)) = (seats.first(), rigs.first(), cameras.first()) else { return };
     let now = Shown::of(seat, rig, assets, ragdolled, true);
@@ -1201,6 +1202,23 @@ fn trace_picture(
         p3(camera.eye),
         p3(camera.at),
     );
+    // And the plane while it is flown, as its draw takes it: from the tick before to this one, and
+    // slid between them unless the seat cuts.
+    if let Some(plane) = seat.garage.plane_flown() {
+        let now = plane_at(plane);
+        let was = before_planes.first().copied().flatten();
+        let drawn = was.filter(|_| !cut).map_or(now, |b| blend.slide(b, now));
+        println!(
+            "picture plane: tick {tick} blend {:.4} cut {} from {} to {} drawn {} eye {} at {}",
+            blend.0,
+            cut as u8,
+            was.as_ref().map_or_else(|| "none".to_string(), spot),
+            spot(&now),
+            spot(&drawn),
+            p3(camera.eye),
+            p3(camera.at),
+        );
+    }
 }
 
 /// The spots a seat's [`pace::Cut`] measures a tick's move by: where its machine is — the plane
@@ -1232,6 +1250,41 @@ fn seam_moved((wrap, side): ([bool; 2], [f32; 2]), was: Option<M4>, now: Vf) -> 
     let lap = |axis: usize, d: f32| if wrap[axis] && d.abs() > side[axis] / 2.0 { (d / side[axis]).round() * side[axis] } else { 0.0 };
     let by = [lap(0, now.x() - was.0[3][0]), 0.0, lap(1, now.z() - was.0[3][2])];
     (by != [0.0; 3]).then_some(by)
+}
+
+/// The whole widths a seat's machine moved over a seam this tick (MD29, MD44): the plane's while it
+/// is flown, from its spot `plane` before the tick, else the bike's from `bike` ([`seam_moved`]).
+fn seat_seam(seams: ([bool; 2], [f32; 2]), seat: &Seat, bike: Option<M4>, plane: Option<M4>) -> Option<[f32; 3]> {
+    match seat.garage.plane_flown() {
+        Some(p) => seam_moved(seams, plane, p.at),
+        None => seam_moved(seams, bike, seat.sim.bike_pos()),
+    }
+}
+
+/// What the picture slides from, moved `by` a seam the seat's machine crossed this tick: the
+/// machine's spot before the tick — the plane's when `flying`, the bike's otherwise, so a parked one
+/// stays put — the camera before it, and the spots the seat's cut is measured from. The tick is
+/// then drawn slid from just short of the seam to just past it, as any other tick, and does not cut
+/// (P120): before, a crossing cut the seat's picture, so its frames between the two ticks all showed
+/// the later one — the plane (or bike) stepped two frames' way and stood a frame.
+fn seam_carry(by: [f32; 3], flying: bool, before: Option<&mut Shown>, plane: Option<&mut Option<M4>>, camera: Option<&mut Camera>, cut: Option<&mut pace::Cut>) {
+    let d = V3 { x: by[0], y: by[1], z: by[2] };
+    let carried = |m: &mut M4| {
+        m.0[3][0] += by[0];
+        m.0[3][2] += by[2];
+    };
+    match (flying, plane, before) {
+        (true, Some(Some(p)), _) => carried(p),
+        (false, _, Some(b)) => carried(&mut b.bike),
+        _ => {}
+    }
+    if let Some(c) = camera {
+        c.eye = c.eye.add(d);
+        c.at = c.at.add(d);
+    }
+    if let Some(c) = cut {
+        c.carry(d);
+    }
 }
 
 /// A world that wraps (MD29) as its draw takes it (MD43): which axes, and its sides.
@@ -6402,8 +6455,18 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
 
         cameras.clear();
         ridden.clear();
-        // A world that wraps (MD29): which axes, and the width a seam moves a bike by on each.
+        // A world that wraps (MD29): which axes, and the width a seam moves a bike or a plane by on each.
         let seams = world.place.tiled().filter(|t| t.wraps() != [false, false]).map(|t| (t.wraps(), t.extent().map(|v| v.0)));
+        // The seam each seat's machine crossed this tick, and everything the picture slides from — the
+        // machine's spot, the camera, the cut's spots — moved over with it ([`seam_carry`]).
+        let seamed: Vec<Option<[f32; 3]>> = (0..world.seats.len())
+            .map(|i| {
+                let seat = &world.seats[i];
+                let by = seams.and_then(|s| seat_seam(s, seat, before.get(i).map(|b| b.bike), before_planes.get(i).copied().flatten()))?;
+                seam_carry(by, seat.garage.plane_flown().is_some(), before.get_mut(i), before_planes.get_mut(i), before_cameras.get_mut(i), cuts.get_mut(i));
+                Some(by)
+            })
+            .collect();
         for (i, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
             // How a player other than the first is named in the lines below; the first's lines are
             // the ones a one-player session has always printed.
@@ -6585,11 +6648,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if ride_out {
                 follow.cam.snap = true;
             }
-            // A seam the bike rode over (MD29) takes the camera over with it, one width, so it lags
-            // on from beside the bike rather than flying the world's width back to it.
-            if seat.garage.up == Kind::Bike
-                && let Some(by) = seams.and_then(|s| seam_moved(s, before.get(i).map(|b| b.bike), seat.sim.bike_pos()))
-            {
+            // A seam the bike rode or the plane flew over (MD29, MD44) takes the camera over with it,
+            // one width and no more, so it lags on from beside the machine rather than flying the
+            // world's width back to it — or, measured as a jump, being carried a tick's flight too far.
+            if let Some(by) = seamed.get(i).copied().flatten() {
                 chase::carry(&mut follow.cam, by);
             }
             // The look-back command (P78), held: the follow camera on its look-back preset until it
@@ -6932,7 +6994,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             })
             .collect();
         if args.trace_picture {
-            trace_picture(&world.seats, &rigs, &assets, ragdolled.as_ref(), &before, &cameras, &cut, &blend, pacer.ticks());
+            trace_picture(&world.seats, &rigs, &assets, ragdolled.as_ref(), &before, &cameras, &cut, &blend, pacer.ticks(), &before_planes);
         }
         // `--shot-pose` (MD10): the first view looks from the pose instead, whatever the ride does.
         let mut cameras = cameras;

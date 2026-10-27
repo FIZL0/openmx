@@ -342,6 +342,16 @@ impl Cut {
         self.at = Some(spots);
     }
 
+    /// The spots before moved `by`, with the machine they follow, over a wrapped world's seam
+    /// (MD29): the whole width is no move of the picture's.
+    pub fn carry(&mut self, by: V3) {
+        if let Some(at) = &mut self.at {
+            for s in at {
+                *s = s.add(by);
+            }
+        }
+    }
+
     /// Whether the last tick's spots, `now`, jumped from the ones before: a cut. `marked` is a jump
     /// the simulation says it made (a put-back), whatever the distance.
     pub fn cuts(&self, now: [V3; 3], marked: bool) -> bool {
