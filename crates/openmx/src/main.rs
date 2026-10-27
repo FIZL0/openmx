@@ -6561,8 +6561,9 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         None => chassis.want_with_pack(ride, &seat.sim.rider.tricks),
                     };
                     // The rider's two axes and not zeros: in the air they are the crossup sweep the
-                    // chassis' clip is played at, and zero is the sweep's far end (P29).
-                    let request = Chassis::riding(&seat.sim.rider);
+                    // chassis' clip is played at, and zero is the sweep's far end (P29) — centred
+                    // under a trick the bike has no clip for, so the whip comes out with the rider's (V98).
+                    let request = chassis.riding_under(&seat.sim.rider, want);
                     chassis.original_wheels = args.original_wheels;
                     perf.time(Stage::Animation, || chassis.frame(dt, want, &request, Drive::of(ride)));
                     // A trick the bike has no clip for: the drawn hands stay on the bars (MD41).

@@ -7,6 +7,8 @@
 //! shell steps them, and measure the rider against the bike every frame.
 //!
 //! **V69:** a 360's fade back to the airborne row keeps the drawn hands on the bars.
+//!
+//! **V98:** a No Footer started with the whip still on, and every other trick the same way.
 
 use game_render::anim::PackClips;
 use game_render::chassis::grips;
@@ -146,6 +148,10 @@ struct Seen {
     hold: f32,
     /// The rider's pelvis.
     pelvis: V3,
+    /// The body is in a trick the bike has no clip for, or fading out of one ([`Body::bare`]).
+    bare: bool,
+    /// The body's machine's two axes (phase, mix) and the bike's, as the frame left them.
+    axes: [(f32, f32); 2],
 }
 
 impl Seen {
@@ -184,8 +190,9 @@ fn into(m: &M4, p: V3) -> V3 {
 }
 
 /// The shell's frame, call for call (`main.rs`): the ride, the body ([`Body::ride`]), the chassis
-/// ([`Chassis::want_beside`] the body's state, at [`Chassis::riding`]'s request), with `script`'s
-/// hands from each tick on and the gas held. Wrecks off: what is measured is the rider on the bike.
+/// under it ([`Chassis::want_under`] the body's state, at [`Chassis::riding_under`]'s request; V98)
+/// and the body told whether the bike has a clip for its trick ([`Chassis::bare_under`], MD41), with
+/// `script`'s hands from each tick on and the gas held. Wrecks off: what is measured is the rider on the bike.
 fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen> {
     let p = &kit.phy;
     // The chassis model's own wheel nodes, which is what the shell hands the simulation (S22).
@@ -208,8 +215,10 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
         let c = Controls { gas: F::ONE, ..now.clone() };
         r.frame(p, &kit.tables, &c, FRAME, &mut world);
         kit.body.ride(FRAME, &mut r, &c, rider::Gate::default());
-        let want = Chassis::want_beside(&r.ride, &r.tricks, r.body.veh.want);
-        kit.chassis.frame(FRAME, want, &Chassis::riding(&r), Drive::of(&r.ride));
+        let want = kit.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
+        let request = kit.chassis.riding_under(&r, want);
+        kit.chassis.frame(FRAME, want, &request, Drive::of(&r.ride));
+        kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let world = kit.body.rig.world();
         let g = grips(&kit.chassis);
         let (drawn, _) = kit.body.palette(Some(&g));
@@ -224,6 +233,11 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
             drawn: hands.map(|j| into(&bike, at(&drawn[j]))),
             hold: kit.body.holds()[2].min(kit.body.holds()[3]),
             pelvis: into(&bike, at(&world[pelvis])),
+            bare: kit.body.bare,
+            axes: [(r.body.veh.phase.value.0, r.body.veh.mix.value.0), {
+                let d = &kit.chassis.stance.driver;
+                (d.phase.value.0, d.mix.value.0)
+            }],
         });
     }
     out
@@ -300,7 +314,9 @@ fn a_whipped_trick_keeps_the_rider_on_the_bike() {
         let (mut worst, mut last) = ((0.0f32, 0usize), whip_gap);
         for k in TRICK..down {
             let (w, s) = (&whipped[k], &square[k]);
-            assert_eq!(w.bike, w.body, "{name} at {k}: the bike runs {} under a body in {}", w.bike, w.body);
+            // The body's state, or the airborne row under a trick the bike has no clip for (MD41).
+            assert!(w.bike == w.body || (w.bare && w.bike == game_sim::vehicle_anim::AIR),
+                    "{name} at {k}: the bike runs {} under a body in {}", w.bike, w.body);
             assert_eq!(w.body, s.body, "{name} at {k}: the two rides are in different states");
             let apart = w.apart(s);
             assert!(apart <= last + STEP, "{name} at {k}: the whipped rider jumped from {last:.3} to {apart:.3} ft off the square one's place");
@@ -355,4 +371,184 @@ fn a_360_keeps_the_hands_on_the_bars() {
     assert!(clips.0 > 0.5 && exit.iter().any(|&e| (e..e + 15).contains(&clips.1)),
             "the clips' worst is no longer the exit's fade: {:.2} ft at {}", clips.0, clips.1);
     assert!(drawn.0 <= SPIN_HELD, "the 360 drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
+}
+
+/// The extras' gesture group: Cross is 7, Square 8 ([`game_sim::trick::group_with`]).
+const EXTRA_GROUPS: [[bool; 2]; 2] = [[true, false], [false, true]];
+
+/// The stick for each of [`game_sim::trick::slot_of`]'s directions: up, down, left, right.
+const DIRS: [(f32, f32); 4] = [(0.0, -1.0), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)];
+
+/// The hands for trick id `t` ([`game_sim::trick::trick_of`]): its group's buttons and its direction.
+fn gesture(t: usize) -> Controls {
+    let (group, dir) = if t >= SLOTS { (7 + (t - SLOTS) / 4, (t - SLOTS) % 4) } else { (1 + t / 4, t % 4) };
+    let trick = match group {
+        1 => [true, false, false],
+        2 => [false, true, false],
+        3 => [true, true, false],
+        4 => [true, false, true],
+        5 => [false, true, true],
+        6 => [true, true, true],
+        _ => [false; 3],
+    };
+    let extra = if group >= 7 { EXTRA_GROUPS[group - 7] } else { [false; 2] };
+    hands(trick, extra, DIRS[dir])
+}
+
+use game_sim::trick::SLOTS;
+
+/// How long the trick's buttons are down: a tap, three frames.
+const TAP: usize = 3;
+
+/// The frames before the landing that are left out: the wheels reach the ground first and the
+/// suspension moves the grips, and a whipped bike comes down at another attitude than a square
+/// one. Measured (V98): with a bike clip the two rides are 0.000 ft apart up to two frames out.
+const LANDING: usize = 3;
+
+/// How much further apart than the whip itself a whipped trick's rider may come in the trick's
+/// fade in, in feet. Measured (V98): 0.015 at worst, the Superman's, where the two riders' clips
+/// cross over; the Flatliner, with a bike clip of its own, 0.005.
+const OVER: f32 = 0.025;
+
+/// How much further off its grip a hand of a trick the bike has no clip for may be drawn whipped
+/// than square: the hold's rounding.
+const HELD: f32 = 0.02;
+
+/// **V98, the user's ride:** off the flip ramp, the stick hard right and held — the whip, not a
+/// 360 — and Square tapped with it still held, which is the No Footer (the pack's extra on Square
+/// Right, a stunt the bike has no clip for). Through the trick the bike stays on its airborne row
+/// (MD41) and that row eases square ([`Chassis::riding_under`]), so the rider is where a No Footer
+/// started square puts it, within [`APART`] past the fade, the drawn hands held on the grips; and
+/// when the trick ends with the whip still held, both go back to the whip together and the rider
+/// is where a whip with no trick puts it, within [`APART`] once that fade is over.
+///
+/// Before the fix the bike held the whip's crossup under the trick's square clip: the pelvis 0.68
+/// ft off the square No Footer's for the whole trick.
+#[test]
+fn a_no_footer_started_whipped_keeps_the_rider_on_the_bike() {
+    let Some(kit) = kit() else { return };
+    let no_footer = SLOTS + 7;
+    assert_eq!(kit.set.stunts[no_footer].name, "nofooter", "Square Right is the No Footer");
+    assert!(kit.bike_lacks.iter().any(|n| n == "nofooter"), "the bike has a No Footer clip: {:?}", kit.bike_lacks);
+    drop(kit);
+    let w = whipped_trick(no_footer);
+    println!("{w:?}");
+    assert!(!w.bike_has && w.end > TRICK + FADE, "the No Footer ran {TRICK}..{} with a bike clip {}", w.end, w.bike_has);
+    assert_whipped(&w);
+}
+
+/// [`Whipped`]'s bounds: through the fade the gap is never more than the whip's own, past it and
+/// past the trick within [`APART`], and the hands drawn on the grips as square.
+fn assert_whipped(w: &Whipped) {
+    assert!(w.fading.0 <= w.whip + OVER, "{}: the whipped rider came {:.3} ft off the square one's place in the fade, at {}, from {:.3} before it",
+            w.name, w.fading.0, w.fading.1, w.whip);
+    assert!(w.past.0 <= APART, "{}: the whipped rider came {:.3} ft off the square one's place, at {}", w.name, w.past.0, w.past.1);
+    assert!(w.after.0 == 0, "{}: past the trick the bike and the body ran {} frames on different axes, from {}", w.name, w.after.0, w.after.1);
+    assert!(w.drawn.0 <= HELD, "{}: the whipped rider draws a hand {:.3} ft further off its grip than square, at {}", w.name, w.drawn.0, w.drawn.1);
+}
+
+/// **V98:** every trick a whip can start, the same way as [`a_no_footer_started_whipped_keeps_the_rider_on_the_bike`]:
+/// the 24 gesture slots and the pack's 8 extras, each tapped with the stick held right through it,
+/// whether or not the bike has a clip for it.
+#[test]
+fn every_trick_started_whipped_keeps_the_rider_on_the_bike() {
+    let Some(kit) = kit() else { return };
+    let n = kit.set.stunts.len();
+    drop(kit);
+    let all: Vec<Whipped> = (0..n).map(whipped_trick).collect();
+    for w in &all {
+        println!("{:>20} state {:>2} {}..{} landing {} bike clip {:>5}: whip {:.3}, fade {:.3} at {}, past {:.3} at {}, apart {} from {}, drawn {:+.3}, off the plain whip {:.3} at the end",
+                 w.name, w.state, TRICK, w.end, w.down, w.bike_has, w.whip, w.fading.0, w.fading.1, w.past.0, w.past.1, w.after.0, w.after.1, w.drawn.0, w.settled);
+    }
+    all.iter().for_each(assert_whipped);
+}
+
+/// What one trick started whipped came to ([`whipped_trick`]), each worst with its frame.
+#[derive(Debug)]
+struct Whipped {
+    name: String,
+    /// The trick's state, and the frames it ran from [`TRICK`] to (the landing at the latest).
+    state: i32,
+    end: usize,
+    down: usize,
+    /// The bike has its own clip for the trick.
+    bike_has: bool,
+    /// The two riders apart the frame before the trick: the whip itself.
+    whip: f32,
+    /// Apart through the trick's fade in, and past it.
+    fading: (f32, usize),
+    past: (f32, usize),
+    /// Past the trick and its fade out, the frames the bike and the body ran the airborne row on
+    /// two different pairs of axes, and the first of them.
+    after: (usize, usize),
+    /// How much further off its grip the whipped ride draws a hand than the square one, while the
+    /// bike has no clip for the trick and the square one draws them on the grips.
+    drawn: (f32, usize),
+    /// Apart from the plain whip's rider on the last frame measured.
+    settled: f32,
+}
+
+/// One trick id tapped at [`TRICK`] with the whip held from [`WHIP`] to the landing, against the
+/// same tap with no whip before it and against the whip with no trick, measured frame by frame.
+fn whipped_trick(t: usize) -> Whipped {
+    let fresh = || kit().expect("the kit loaded once");
+    let whip = hands([false; 3], [false; 2], (1.0, 0.0));
+    let trick = gesture(t);
+    let rest = Controls::default();
+    let mut kit = fresh();
+    let name = kit.set.stunts[t].name.clone();
+    let whipped = ride(&mut kit, &[(WHIP, whip.clone()), (TRICK, trick.clone()), (TRICK + TAP, whip.clone())], FRAMES);
+    let square = ride(&mut fresh(), &[(TRICK, trick), (TRICK + TAP, rest)], FRAMES);
+    let plain = ride(&mut fresh(), &[(WHIP, whip)], FRAMES);
+    let state = whipped[TRICK].body;
+    assert!(state != whipped[TRICK - 1].body && state != game_sim::vehicle_anim::AIR,
+            "{name}: no trick started at {TRICK}: {} then {}", whipped[TRICK - 1].body, state);
+    let bike_has = !kit.chassis.lacks(state);
+    let down = TRICK + whipped[TRICK..].iter().position(|s| s.on_ground).expect("a landing");
+    // The trick runs until the body leaves its state; one still running at the landing is measured
+    // up to it.
+    let end = TRICK + whipped[TRICK..down].iter().position(|s| s.body != state).unwrap_or(down - TRICK);
+    let worse = |m: &mut (f32, usize), v: f32, k: usize| {
+        if v > m.0 {
+            *m = (v, k);
+        }
+    };
+    let mut w = Whipped {
+        name, state, end, down, bike_has,
+        whip: whipped[TRICK - 1].apart(&square[TRICK - 1]),
+        fading: (0.0, 0), past: (0.0, 0), after: (0, 0), drawn: (0.0, 0), settled: 0.0,
+    };
+    for k in TRICK..end.min(down - LANDING) {
+        let (a, b) = (&whipped[k], &square[k]);
+        assert_eq!(a.body, b.body, "{} at {k}: the two rides are in different states", w.name);
+        // The body's state, or the airborne row under a trick the bike has no clip for (MD41).
+        assert!(a.bike == a.body || (a.bare && a.bike == game_sim::vehicle_anim::AIR),
+                "{} at {k}: the bike runs {} under a body in {}", w.name, a.bike, a.body);
+        let apart = a.apart(b);
+        if k < TRICK + FADE {
+            worse(&mut w.fading, apart, k);
+        } else {
+            worse(&mut w.past, apart, k);
+        }
+        // Where the square ride draws the hands on the grips: a no-hander's are off them on purpose.
+        if a.bare && b.drawn_off() <= SPIN_HELD {
+            worse(&mut w.drawn, a.drawn_off() - b.drawn_off(), k);
+        }
+    }
+    // Past the trick, the whip still held: once the body's fade out is over, the two are on the
+    // airborne row on one pair of axes again, as before the trick (P29), and whip on together.
+    for (k, a) in whipped.iter().enumerate().take(down - LANDING).skip(end) {
+        if a.body == game_sim::vehicle_anim::AIR && !a.bare && (a.bike != a.body || a.axes[0] != a.axes[1]) {
+            w.after = (w.after.0 + 1, if w.after.0 == 0 { k } else { w.after.1 });
+        }
+    }
+    // And the frame before the trick, too: the whip is the same on both, so whipped against
+    // square is the whip alone.
+    assert_eq!(whipped[TRICK - 1].axes[0], whipped[TRICK - 1].axes[1], "{}: the bike and the body whip on different axes", w.name);
+    // The ride with no trick at all is where both end up: once the whip has crossed both rides up
+    // all the way (the shown crossup at its end), the whipped trick's rider sits where the plain
+    // whip's does.
+    let last = down - LANDING - 1;
+    w.settled = whipped[last].apart(&plain[last]);
+    w
 }
