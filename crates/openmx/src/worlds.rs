@@ -452,16 +452,14 @@ impl WorldMod {
     /// world's edges, and the world wrapped. The joins' spacing is the coarsest whole spacing of the
     /// pieces that divides each wrapped side, or a foot. Where an edge has no ground (a hole reaching
     /// it), the strip takes the ground in from it toward the middle, up to a cell, or else 0 feet.
+    /// A side that ends part way into a foot (a 4.5-foot tile's odd sample, 40099.5 feet) has its
+    /// strip start at the whole foot short of the edge: the tile still owns the ground up to its edge
+    /// (a tile comes before a join), and the wrapped width, the strip's far end, is whole.
     pub fn close_seams(&mut self, wrap: [bool; 2]) -> Result<(), String> {
         use game_sim::tiles::generate;
         let open = Tiled::new(self.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(Files { pieces: self.pieces.clone() }), Reach::DESKTOP)?;
         let extent = open.extent().map(|v| v.0);
         let whole = extent.map(|v| v as u32);
-        for axis in 0..2 {
-            if wrap[axis] && whole[axis] as f32 != extent[axis] {
-                return Err(format!("a world {} feet {} is not a whole number of feet, and cannot wrap", extent[axis], ["wide", "deep"][axis]));
-            }
-        }
         let mut spacings: Vec<u32> = self.pieces.iter().map(|p| p.tile.spacing.0).filter(|s| s.fract() == 0.0 && *s >= 1.0).map(|s| s as u32).collect();
         spacings.sort_unstable_by(|a, b| b.cmp(a));
         let spacing = spacings.into_iter().find(|s| (0..2).all(|a| !wrap[a] || whole[a] % s == 0)).unwrap_or(1);
