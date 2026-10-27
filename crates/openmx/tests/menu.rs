@@ -3622,32 +3622,69 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
     assert_eq!(names, ["All Games", "MX Unleashed", "MX vs. ATV Unleashed", "MX vs. ATV Untamed"]);
 }
 
+/// P149: every free-ride map spliced into one (P71) is the pick's row after the five maps, in the
+/// disc's own filter: Cross on it rides `free_all`, the settings open on it next time, the loading
+/// screen names it with its picture, and a mod still comes after it. Online keeps to the towns.
+#[test]
+fn the_pick_lists_the_spliced_maps_after_the_five_and_rides_them() {
+    let (mut m, mut r) = fresh();
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    assert_eq!(m.cursor(Screen::Tracks), 0);
+    for _ in 0..menu::TRACKS.len() {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len());
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)), ("free_all", "Every free ride"));
+    assert_eq!(m.track_game("free_all"), menu::DISC_GAME);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("free_all".into())), "{acts:?}");
+    assert_eq!(m.settings.track, "free_all");
+    m.start_loading("free_all");
+    let l = m.loading.as_ref().expect("the loading screen");
+    assert_eq!((l.name.as_str(), l.pack.as_str(), l.still), ("Every free ride", "MX Unleashed", menu::TRACKS.len()));
+    // Kept: the next start's pick is on it.
+    let again = Settings::parse(&m.settings.text());
+    assert_eq!(again.track, "free_all");
+    let mut next = Menu::new(again, Controls::default());
+    assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len());
+    assert_eq!(next.online_tracks(), menu::TRACKS.map(|t| t.0), "the splice is not ridden online");
+    // With a mod, the mod is after it and the splice stays in MX Unleashed's filter.
+    next.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into())]);
+    assert_eq!(next.track_at(menu::DISC_PICK), ("md2_flat", "MD2 Flat"));
+    let groups = next.track_groups();
+    let disc = groups.iter().find(|(n, _)| n == menu::DISC_GAME).expect("the disc's filter");
+    assert_eq!(disc.1, 0..menu::DISC_PICK);
+    assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len());
+}
+
 /// MD2: the track pick lists the mods folder's tracks after the disc's, a mod rides by its id, and
 /// the Mods page turns the folder, or one pack of it, off and is saved. With no mods the pick is the
-/// disc's five.
+/// disc's five and their splice (P149).
 #[test]
 fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     use menu::Key;
     let (mut m, mut r) = fresh();
-    assert_eq!(m.track_count(), menu::TRACKS.len());
+    assert_eq!(m.track_count(), menu::DISC_PICK);
     for (i, t) in menu::TRACKS.iter().enumerate() {
         assert_eq!(m.track_at(i), *t);
     }
+    assert_eq!(m.track_at(menu::TRACKS.len()), menu::SPLICED);
     assert!(m.settings.mods, "the folder is read unless asked");
     assert!(!m.settings.text().contains("mods"), "a file without mods says nothing of them");
 
     m.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into())]);
-    assert_eq!(m.track_count(), menu::TRACKS.len() + 1);
-    assert_eq!(m.track_at(menu::TRACKS.len()), ("md2_flat", "MD2 Flat"));
+    assert_eq!(m.track_count(), menu::DISC_PICK + 1);
+    assert_eq!(m.track_at(menu::DISC_PICK), ("md2_flat", "MD2 Flat"));
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
     tap(&mut m, &mut r, Control::Up);
-    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "up from the first wraps inside All Games");
+    assert_eq!(m.cursor(Screen::Tracks), menu::DISC_PICK, "up from the first wraps inside All Games");
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Up);
-    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len() - 1, "up from the first wraps inside the disc's towns");
+    assert_eq!(m.cursor(Screen::Tracks), menu::DISC_PICK - 1, "up from the first wraps inside the disc's own, to the splice");
     tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len(), "right is the mods' game");
+    assert_eq!(m.cursor(Screen::Tracks), menu::DISC_PICK, "right is the mods' game");
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Ride("md2_flat".into())), "{acts:?}");
     assert_eq!(m.settings.track, "md2_flat");
@@ -3656,7 +3693,7 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     assert_eq!(again.track, "md2_flat");
     let mut next = Menu::new(again, Controls::default());
     next.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into())]);
-    assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len());
+    assert_eq!(next.cursor(Screen::Tracks), menu::DISC_PICK);
     // Gone from the folder, it opens on the first track; a name that cannot be a mod's is not kept.
     next.set_mod_tracks(Vec::new());
     assert_eq!(next.cursor(Screen::Tracks), 0);
@@ -3675,7 +3712,7 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.take_changed());
     assert_eq!(m.settings.mods_off, [menu::pack_of("md2_flat")]);
-    assert_eq!(m.track_count(), menu::TRACKS.len() + 1);
+    assert_eq!(m.track_count(), menu::DISC_PICK + 1);
     assert!(m.settings.text().contains(&format!("mods_off = {}\n", menu::pack_of("md2_flat"))), "{}", m.settings.text());
     tap(&mut m, &mut r, Control::Cross);
     assert!(m.settings.mods_off.is_empty());
@@ -3719,7 +3756,7 @@ fn the_mods_page_lists_music_packs_beside_the_track_packs() {
     assert_eq!(m.settings.mods_off, ["mxvatv_music"]);
     assert_eq!(m.page().iter().find(|r| r.key == Key::MusicPack(0)).unwrap().value, "Off");
     assert_eq!(m.page().iter().find(|r| r.key == Key::Pack(0)).unwrap().value, "On");
-    assert_eq!(m.track_count(), menu::TRACKS.len() + 1, "a music pack off leaves the tracks alone");
+    assert_eq!(m.track_count(), menu::DISC_PICK + 1, "a music pack off leaves the tracks alone");
     let text = m.settings.text();
     assert!(text.contains("mods_off = mxvatv_music\n"), "{text}");
     assert_eq!(Settings::parse(&text).mods_off, ["mxvatv_music"]);
@@ -5168,12 +5205,16 @@ fn the_pick_is_a_card_a_track_with_its_own_picture() {
         assert_eq!(m.screen(), Some(Screen::Tracks));
         let shown = cards(&art, &m, w, h);
         let ids: Vec<&str> = shown.iter().map(|c| c.0.as_str()).collect();
-        assert_eq!(ids, menu::TRACKS.map(|t| t.0), "a card for every disc track at {w}x{h}");
+        let mut want: Vec<&str> = menu::TRACKS.map(|t| t.0).to_vec();
+        want.push(menu::SPLICED.0);
+        assert_eq!(ids, want, "a card for every disc track, then the splice (P149), at {w}x{h}");
         let images = art.images();
         for (i, (id, card, pic, image, lit)) in shown.iter().enumerate() {
             assert_eq!(*lit, i == m.cursor(Screen::Tracks), "{id}");
             let image = image.unwrap_or_else(|| panic!("{id} has no picture"));
-            assert_eq!(images[image].rgba, still(id, 1).rgba, "{id}'s card shows its first still");
+            // The splice's first picture is its first map's.
+            let first = if id == menu::SPLICED.0 { "free06" } else { id.as_str() };
+            assert_eq!(images[image].rgba, still(first, 1).rgba, "{id}'s card shows its first still");
             // The picture on its card, 16:9, and the cards one under the other.
             assert!(pic[0] >= card[0] && pic[1] >= card[1] && pic[0] + pic[2] <= card[0] + card[2] + 0.5 && pic[1] + pic[3] <= card[1] + card[3] + 0.5, "{id} at {w}x{h}");
             assert!((pic[2] / pic[3] - 16.0 / 9.0).abs() < 0.01);
@@ -5189,6 +5230,12 @@ fn the_pick_is_a_card_a_track_with_its_own_picture() {
         let turned = cards(&art, &m, w, h);
         assert_eq!(images[turned[lit].3.unwrap()].rgba, still(menu::TRACKS[lit].0, 2).rgba);
         assert_eq!(images[turned[(lit + 1) % 5].3.unwrap()].rgba, still(menu::TRACKS[(lit + 1) % 5].0, 1).rgba, "an unlit card stays");
+    }
+    // The splice's card (P149) turns through each map's stills in turn, west to east.
+    let images = art.images();
+    for i in 0..10 {
+        let map = menu::TRACKS[i % 5].0;
+        assert_eq!(images[art.track_image("free_all", i).unwrap()].rgba, still(map, i / 5 + 1).rgba, "picture {i}: {map}");
     }
     // The mods, in a category of their own: the pictured one shows its picture, the other none.
     let (mut m, mut r) = fresh();
@@ -5259,7 +5306,9 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
             seen.push(id);
         }
     };
-    let disc: Vec<String> = menu::TRACKS.iter().map(|t| t.0.to_string()).collect();
+    let towns: Vec<String> = menu::TRACKS.iter().map(|t| t.0.to_string()).collect();
+    let mut disc = towns.clone();
+    disc.push(menu::SPLICED.0.to_string());
     let mut every = disc.clone();
     every.extend(["world_gen", "gen_a1", "gen_a2", "beta_a3", "gen_b1", "gen_b2"].map(String::from));
     let mut all = walk(&mut m, &mut r);
@@ -5302,7 +5351,7 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
     assert_eq!(next.track_at(next.cursor(Screen::Tracks)).0, "gen_b2");
     // Online the room's pick is the filter's disc tracks: the disc's for a mod game (MD6 not yet),
     // and with no mods a kept game's filter is All, which is the disc's.
-    assert_eq!(next.online_tracks(), disc.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(next.online_tracks(), towns.iter().map(String::as_str).collect::<Vec<_>>(), "the splice is not ridden online");
     next.set_mod_tracks(Vec::new());
     assert_eq!(next.track_groups().len(), 1);
     assert_eq!(next.cursor(Screen::Tracks), 0);

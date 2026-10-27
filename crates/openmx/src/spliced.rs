@@ -40,10 +40,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The track's id: `--track`'s word, and the name its saved markers are kept under.
-pub const ID: &str = "free_all";
+pub const ID: &str = crate::menu::SPLICED.0;
 
 /// What it is called.
-pub const NAME: &str = "Every free ride";
+pub const NAME: &str = crate::menu::SPLICED.1;
 
 /// The maps, west to east.
 pub const MAPS: [&str; 5] = ["free06", "free07", "free09", "free10", "free11"];
