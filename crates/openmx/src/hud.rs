@@ -206,7 +206,9 @@ impl MapNames {
 
     /// [`MapNames::toward`] on a world that may wrap (MD43), from map `from`'s copy `by` feet off: the
     /// maps' copies one width off on each wrapped axis are looked at too, so past the last map
-    /// toward a seam lies the first one over it — or, one map wide, the map itself.
+    /// toward a seam lies the first one over it. A map is never its own neighbour in any copy
+    /// (MD49): where the way over a seam leads only back to it (one map wide, or a row with a gap),
+    /// the nearest other map that way is named, or none.
     pub fn toward_in(&self, from: usize, by: [f32; 2], at: [f32; 2], toward: usize, wrap: Option<Wrap>) -> Option<usize> {
         let [dx, dz] = COMPASS[toward % 4];
         let (axis, sign) = if dx != 0.0 { (0, dx) } else { (1, dz) };
@@ -218,7 +220,7 @@ impl MapNames {
             for (i, (r, _)) in self.maps.iter().enumerate() {
                 let r = moved(r, off);
                 let middle = (r[axis] + r[axis + 2]) / 2.0;
-                if (i == from && off == by) || sign * (middle - edge) <= 0.0 {
+                if i == from || sign * (middle - edge) <= 0.0 {
                     continue;
                 }
                 let near = if sign > 0.0 { r[axis] } else { r[axis + 2] };
@@ -327,5 +329,36 @@ mod tests {
         // On the seam's join, past B and nearer A over the seam, the rider is on A.
         assert_eq!(maps.around_in(own, wrap()).0, Some("A"));
         assert_eq!(maps.around(own).0, Some("B"));
+    }
+
+    #[test]
+    fn no_map_is_its_own_neighbour_on_a_wrapped_world() {
+        // world_mxu_free's layout (MD49): 5472-foot tiles kept from 704 to 5448 feet, three along x
+        // by two along z, wrapping both ways, with no tile at the second row's first place — north
+        // and south of the first tile is only its own copy one world-height over.
+        let t = 5472.0;
+        let tile = |c: f32, r: f32, n: &str| ([c * t + 704.0, r * t + 696.0, c * t + 5448.0, r * t + 5440.0], n.to_string());
+        let maps = MapNames {
+            maps: vec![tile(0.0, 0.0, "Dallas"), tile(2.0, 0.0, "C"), tile(2.0, 1.0, "D"), tile(1.0, 0.0, "E"), tile(1.0, 1.0, "F")],
+        };
+        let wrap = Wrap::of([true, true], [3.0 * t, 2.0 * t]);
+        for (i, (r, own)) in maps.maps.iter().enumerate() {
+            for fx in [0.02, 0.5, 0.98] {
+                for fz in [0.02, 0.5, 0.98] {
+                    let at = [r[0] + fx * (r[2] - r[0]), r[1] + fz * (r[3] - r[1])];
+                    let (on, ways) = maps.around_in(at, wrap);
+                    assert_eq!(on, Some(own.as_str()), "at {at:?}");
+                    assert!(!ways.contains(&Some(own.as_str())), "{own} at {at:?} names itself: {ways:?}");
+                    for k in 0..4 {
+                        assert_ne!(maps.toward_in(i, [0.0; 2], at, k, wrap), Some(i));
+                    }
+                }
+            }
+        }
+        // Dallas's north and south are other maps (over the seams), not Dallas again.
+        let (_, ways) = maps.around_in([2700.0, 2700.0], wrap);
+        assert!(ways[0].is_some() && ways[2].is_some(), "{ways:?}");
+        // Without the wrap, nothing lies north of Dallas but the row above's maps, off to the east.
+        assert_eq!(maps.around([2700.0, 2700.0]).1[2], None);
     }
 }
