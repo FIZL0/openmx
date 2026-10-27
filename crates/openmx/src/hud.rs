@@ -8,6 +8,7 @@
 use game_sim::bindings::Table;
 use game_sim::input::Pad;
 use game_sim::markers::Pick;
+use game_render::wrap::Wrap;
 use std::time::{Duration, Instant};
 
 /// **The markers' slot display** (P88): the slots and the other players, shown for a while
@@ -171,12 +172,28 @@ impl MapNames {
     /// The map a rider at `at` (`x`, `z`) is on: the one whose rectangle holds it, or — on a join,
     /// between maps — the nearest, the one just left or about to be met. `None` with no maps.
     pub fn on(&self, at: [f32; 2]) -> Option<usize> {
+        self.on_in(at, None).map(|(i, _)| i)
+    }
+
+    /// [`MapNames::on`] on a world that may wrap (MD43): a map across a seam is as near as its copy
+    /// one width off, so on a seam's join the map just over the seam is met. With the offset, in
+    /// feet `[x, z]`, of the copy it was met at.
+    pub fn on_in(&self, at: [f32; 2], wrap: Option<Wrap>) -> Option<(usize, [f32; 2])> {
         let gap = |r: &[f32; 4]| {
             let dx = (r[0] - at[0]).max(at[0] - r[2]).max(0.0);
             let dz = (r[1] - at[1]).max(at[1] - r[3]).max(0.0);
             dx * dx + dz * dz
         };
-        (0..self.maps.len()).min_by(|&a, &b| gap(&self.maps[a].0).total_cmp(&gap(&self.maps[b].0)))
+        let mut best: Option<(f32, usize, [f32; 2])> = None;
+        for by in copies(wrap) {
+            for (i, (r, _)) in self.maps.iter().enumerate() {
+                let g = gap(&moved(r, by));
+                if best.is_none_or(|(b, _, _)| g < b) {
+                    best = Some((g, i, by));
+                }
+            }
+        }
+        best.map(|(_, i, by)| (i, by))
     }
 
     /// The map that lies `toward` ([`COMPASS`]'s direction) of map `from` for a rider at `at`: of the
@@ -184,22 +201,32 @@ impl MapNames {
     /// across that way holds the rider's, or comes nearest it — and of those the nearest past the
     /// edge. `None` where no map lies that way.
     pub fn toward(&self, from: usize, at: [f32; 2], toward: usize) -> Option<usize> {
+        self.toward_in(from, [0.0; 2], at, toward, None)
+    }
+
+    /// [`MapNames::toward`] on a world that may wrap (MD43), from map `from`'s copy `by` feet off: the
+    /// maps' copies one width off on each wrapped axis are looked at too, so past the last map
+    /// toward a seam lies the first one over it — or, one map wide, the map itself.
+    pub fn toward_in(&self, from: usize, by: [f32; 2], at: [f32; 2], toward: usize, wrap: Option<Wrap>) -> Option<usize> {
         let [dx, dz] = COMPASS[toward % 4];
         let (axis, sign) = if dx != 0.0 { (0, dx) } else { (1, dz) };
         let across = 1 - axis;
-        let here = self.maps.get(from)?.0;
+        let here = moved(&self.maps.get(from)?.0, by);
         let edge = if sign > 0.0 { here[axis + 2] } else { here[axis] };
         let mut best: Option<(f32, f32, usize)> = None;
-        for (i, (r, _)) in self.maps.iter().enumerate() {
-            let middle = (r[axis] + r[axis + 2]) / 2.0;
-            if i == from || sign * (middle - edge) <= 0.0 {
-                continue;
-            }
-            let near = if sign > 0.0 { r[axis] } else { r[axis + 2] };
-            let ahead = (sign * (near - edge)).max(0.0);
-            let off = (r[across] - at[across]).max(at[across] - r[across + 2]).max(0.0);
-            if best.is_none_or(|(o, a, _)| (off, ahead) < (o, a)) {
-                best = Some((off, ahead, i));
+        for off in copies(wrap) {
+            for (i, (r, _)) in self.maps.iter().enumerate() {
+                let r = moved(r, off);
+                let middle = (r[axis] + r[axis + 2]) / 2.0;
+                if (i == from && off == by) || sign * (middle - edge) <= 0.0 {
+                    continue;
+                }
+                let near = if sign > 0.0 { r[axis] } else { r[axis + 2] };
+                let ahead = (sign * (near - edge)).max(0.0);
+                let off = (r[across] - at[across]).max(at[across] - r[across + 2]).max(0.0);
+                if best.is_none_or(|(o, a, _)| (off, ahead) < (o, a)) {
+                    best = Some((off, ahead, i));
+                }
             }
         }
         best.map(|(_, _, i)| i)
@@ -208,8 +235,97 @@ impl MapNames {
     /// What the radar says for a rider at `at`: the name of the map they are on, and of the map that
     /// lies each way, N E S W.
     pub fn around(&self, at: [f32; 2]) -> (Option<&str>, [Option<&str>; 4]) {
-        let Some(on) = self.on(at) else { return (None, [None; 4]) };
+        self.around_in(at, None)
+    }
+
+    /// [`MapNames::around`] on a world that may wrap (MD43): across a seam each way's label names the
+    /// map over it.
+    pub fn around_in(&self, at: [f32; 2], wrap: Option<Wrap>) -> (Option<&str>, [Option<&str>; 4]) {
+        let Some((on, by)) = self.on_in(at, wrap) else { return (None, [None; 4]) };
         let name = |i: usize| self.maps[i].1.as_str();
-        (Some(name(on)), std::array::from_fn(|k| self.toward(on, at, k).map(name)))
+        (Some(name(on)), std::array::from_fn(|k| self.toward_in(on, by, at, k, wrap).map(name)))
+    }
+}
+
+/// Where the radar takes something at `at` (`x`, `z`) for a rider at `own` on a world that may wrap
+/// (MD43): at its copy nearest the rider, so another rider, a zone or a marker just over a seam is
+/// marked just off the radar's middle and not held to its rim from across the world.
+pub fn radar_near(wrap: Option<Wrap>, own: [f32; 2], at: [f32; 2]) -> [f32; 2] {
+    let Some(w) = wrap else { return at };
+    let near = w.nearest(game_render::mat::v3(own[0], 0.0, own[1]), game_render::mat::v3(at[0], 0.0, at[1]));
+    [near.x, near.z]
+}
+
+/// The offsets, in feet `[x, z]`, of a world's copies one width off on each wrapped axis, the world
+/// itself first: only `[0, 0]` for a world that does not wrap.
+fn copies(wrap: Option<Wrap>) -> Vec<[f32; 2]> {
+    let mut out = vec![[0.0; 2]];
+    if let Some(w) = wrap {
+        let laps = |a: usize| if w.on[a] { vec![-1.0, 0.0, 1.0] } else { vec![0.0] };
+        for kz in laps(1) {
+            for kx in laps(0) {
+                if [kx, kz] != [0.0, 0.0] {
+                    out.push([kx * w.side[0], kz * w.side[1]]);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A rectangle `[x0, z0, x1, z1]` moved `by` feet.
+fn moved(r: &[f32; 4], by: [f32; 2]) -> [f32; 4] {
+    [r[0] + by[0], r[1] + by[1], r[2] + by[0], r[3] + by[1]]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::overlay::radar_mark;
+
+    /// MD43's world: two 567-foot maps in a row along `x`, a 135-foot seam join past them, wrapping on `x`.
+    const WIDTH: f32 = 1269.0;
+
+    fn wrap() -> Option<Wrap> {
+        Wrap::of([true, false], [WIDTH, 567.0])
+    }
+
+    #[test]
+    fn the_radars_dot_stays_on_the_radar_over_a_seam() {
+        let own = [WIDTH - 20.0, 283.0];
+        let other = [20.0, 283.0];
+        let span = 400.0;
+        let mark = |at: [f32; 2]| radar_mark(own, [1.0, 0.0], at, span);
+        let middle = mark(own);
+        let dist = |a: (f32, f32)| ((a.0 - middle.0).powi(2) + (a.1 - middle.1).powi(2)).sqrt();
+        let rim = dist(mark([own[0] + span, own[1]]));
+        let near = radar_near(wrap(), own, other);
+        assert_eq!(near, [WIDTH + 20.0, 283.0]);
+        assert!(dist(mark(near)) < rim * 0.25, "40 feet ahead is by the middle: {} of a rim at {rim}", dist(mark(near)));
+        assert!(dist(mark(other)) >= rim - 0.01, "without the wrap it is held to the rim");
+        assert_eq!(radar_near(None, own, other), other);
+        // Not across a seam, nothing moves.
+        assert_eq!(radar_near(wrap(), [600.0, 283.0], [700.0, 100.0]), [700.0, 100.0]);
+    }
+
+    #[test]
+    fn the_labels_name_the_map_across_the_seam() {
+        let maps = MapNames { maps: vec![([0.0, 0.0, 567.0, 567.0], "A".into()), ([567.0, 0.0, 1134.0, 567.0], "B".into())] };
+        let own = [WIDTH - 20.0, 283.0];
+        // Without the wrap, A lies one way only and nothing past the world's end.
+        let (on, ways) = maps.around([1000.0, 283.0]);
+        assert_eq!(on, Some("B"));
+        assert_eq!(ways.iter().filter(|w| **w == Some("A")).count(), 1);
+        // Wrapped, A is both ways along x: past B and over the seam.
+        let (on, ways) = maps.around_in([1000.0, 283.0], wrap());
+        assert_eq!(on, Some("B"));
+        assert_eq!(ways.iter().filter(|w| **w == Some("A")).count(), 2);
+        assert_eq!(ways.iter().filter(|w| w.is_some()).count(), 2, "nothing across z, which does not wrap: {ways:?}");
+        let (on, ways) = maps.around_in([10.0, 283.0], wrap());
+        assert_eq!(on, Some("A"));
+        assert_eq!(ways.iter().filter(|w| **w == Some("B")).count(), 2);
+        // On the seam's join, past B and nearer A over the seam, the rider is on A.
+        assert_eq!(maps.around_in(own, wrap()).0, Some("A"));
+        assert_eq!(maps.around(own).0, Some("B"));
     }
 }

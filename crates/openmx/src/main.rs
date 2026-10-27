@@ -819,6 +819,9 @@ struct RideHud<'a> {
     span: f32,
     /// The maps the radar names (MD42).
     maps: &'a hud::MapNames,
+    /// A world that wraps (MD43): the radar marks everything at its copy nearest the rider, and
+    /// names the maps across a seam.
+    wrap: Option<game_render::wrap::Wrap>,
     speedometer: menu::Speedometer,
     names: &'a [Option<String>],
     table: &'a Stunts,
@@ -846,7 +849,7 @@ impl RideHud<'_> {
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != v)
-            .map(|(_, r)| ride_hud::Dot { at: [r.target.body_point.x(), r.target.body_point.z()], ai: false })
+            .map(|(_, r)| ride_hud::Dot { at: hud::radar_near(self.wrap, [b.x(), b.z()], [r.target.body_point.x(), r.target.body_point.z()]), ai: false })
             .collect();
         let markers = marker.map(|(pick, filled, _, others, holding, home, cleared)| ride_hud::Panel {
             pick: *pick,
@@ -857,14 +860,19 @@ impl RideHud<'_> {
             holding: *holding,
             machine: seat.garage.up.name().to_string(),
         });
-        let (map, around) = self.maps.around([b.x(), b.z()]);
+        let (map, around) = self.maps.around_in([b.x(), b.z()], self.wrap);
+        let blips = self.art.radar.get(v).map_or(&[][..], Vec::as_slice);
+        let near_blips: Vec<overlay::Blip> = match self.wrap {
+            Some(_) => blips.iter().map(|&k| overlay::Blip { at: hud::radar_near(self.wrap, [b.x(), b.z()], k.at), ..k }).collect(),
+            None => Vec::new(),
+        };
         let shown = ride_hud::Shown {
             speed: me.speed.0,
             gauges: &gauges,
             own: [b.x(), b.z()],
             forward: [me.target.forward.x(), me.target.forward.z()],
             riders: &riders,
-            blips: self.art.radar.get(v).map_or(&[], Vec::as_slice),
+            blips: if self.wrap.is_some() { &near_blips } else { blips },
             span: self.span,
             tag: self.art.tags.get(v).map(overlay::Tag::text).filter(|t| !t.is_empty()),
             offer: self.art.offers.get(v).copied().flatten(),
@@ -1217,6 +1225,40 @@ fn seam_moved((wrap, side): ([bool; 2], [f32; 2]), was: Option<M4>, now: Vf) -> 
     let lap = |axis: usize, d: f32| if wrap[axis] && d.abs() > side[axis] / 2.0 { (d / side[axis]).round() * side[axis] } else { 0.0 };
     let by = [lap(0, now.x() - was.0[3][0]), 0.0, lap(1, now.z() - was.0[3][2])];
     (by != [0.0; 3]).then_some(by)
+}
+
+/// A world that wraps (MD29) as its draw takes it (MD43): which axes, and its sides.
+fn drawn_wrap(t: &game_sim::tiles::Tiled) -> Option<game_render::wrap::Wrap> {
+    game_render::wrap::Wrap::of(t.wraps(), t.extent().map(|v| v.0))
+}
+
+/// The points a world's pieces are streamed in around (MD17), with each point's copies one width
+/// off on each wrapped axis (MD43): a piece near a rider's copy is a piece drawn across the seam.
+fn wrapped_near(wrap: Option<game_render::wrap::Wrap>, near: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let Some(w) = wrap else { return near.to_vec() };
+    let laps = |a: usize| if w.on[a] { -1..=1 } else { 0..=0 };
+    let mut out = near.to_vec();
+    for &[x, z] in near {
+        for kz in laps(1) {
+            for kx in laps(0) {
+                if [kx, kz] != [0, 0] {
+                    out.push([x - kx as f32 * w.side[0], z - kz as f32 * w.side[1]]);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `at` moved to its copy nearest `eye` on a wrapped world (MD43), as the sim takes a rival
+/// ([`game_sim::nearest_copy`]): another rider, a plane or a prop is drawn where it is nearest the
+/// view, across a seam when that is nearer. Unchanged on a world that does not wrap.
+fn nearest_drawn(wrap: Option<game_render::wrap::Wrap>, eye: V3, at: M4) -> M4 {
+    let Some(w) = wrap else { return at };
+    let near = w.nearest(eye, v3(at.0[3][0], at.0[3][1], at.0[3][2]));
+    let mut m = at;
+    (m.0[3][0], m.0[3][2]) = (near.x, near.z);
+    m
 }
 
 /// Where the plane is drawn: at its body's pose, nose and up off the plane's own measure.
@@ -4287,12 +4329,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // on a thread of their own (MD28: a tile's at once was a 57 ms frame).
     type Levels = std::sync::mpsc::Receiver<Vec<(usize, u8, game_render::gpu::Mips)>>;
     let mut unshown: Vec<(usize, Vec<String>, Option<Levels>)> = Vec::new();
-    let world_reach = match &sim {
-        Land::Tiles(t) => Some(t.reach),
-        _ => None,
+    let (world_reach, wrap) = match &sim {
+        Land::Tiles(t) => (Some(t.reach), drawn_wrap(t)),
+        _ => (None, None),
     };
     if let (Some(w), Some(reach)) = (&world_mod, world_reach) {
         let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane_flown().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
+        // With what stands across a wrapped world's seams (MD43).
+        let starts = wrapped_near(wrap, &starts);
         let dress_at = Instant::now();
         let (mut stream, first) = world_dress::DressStream::start(w, reach, &starts, args.plants.unwrap_or_default());
         for b in first {
@@ -4375,11 +4419,16 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         r.set_sky(sky.as_ref());
         r.set_ground_painted(&chunks, paint, ground::DIRT)?;
+        r.set_wrap(None);
         if let (Some(w), Land::Tiles(t)) = (&world_mod, &sim) {
             let (reach, cells) = (t.reach, ground.chunk_cells());
             let ground_at = Instant::now();
+            // A wrapped world's copies' ground is built with the world's own (MD43).
+            let starts = wrapped_near(drawn_wrap(t), &starts);
             let (mut stream, first) = worlds::GroundStream::start(w, cells, reach, &starts, args.world_ground_all);
             r.set_ground_streamed(cells, paint, ground::DIRT, t.area.width.0.hypot(t.area.depth.0))?;
+            // And drawn again one width off across each seam.
+            r.set_wrap(drawn_wrap(t));
             // Which maps' pages went up, and at what size (MD31): a map past the device's layers is dirt.
             if let Some(l) = &world_look {
                 let limits = r.device.limits();
@@ -4588,6 +4637,11 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         (Some(w), _) => w.map_names(),
         (None, Some(t)) => hud::MapNames::alone(&t.name),
         (None, None) => hud::MapNames::alone(&worlds::map_title(&args.track)),
+    };
+    // And on a world that wraps (MD43), across its seams.
+    let hud_wrap = match &sim {
+        Land::Tiles(t) => drawn_wrap(t),
+        _ => None,
     };
     // A world's edge is its whole rectangle's (MD8), and so is the radar's ground.
     let edge = sim_world::World::area(&sim).unwrap_or_else(|| Area::new(
@@ -6101,6 +6155,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 .flat_map(|s| [Some(game_sim::markers::Spot::of(&s.sim.rider).at), s.garage.plane_flown().map(|p| p.at)])
                 .flatten()
                 .collect();
+            // A wrapped world's ground and dressing come in round each rider's copies too (MD43).
+            let wrap = world.place.tiled().and_then(|t| drawn_wrap(t));
             if let Some(t) = world.place.tiled() {
                 t.stream(&near);
                 for line in t.take_log() {
@@ -6114,7 +6170,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         let t = (pacer.ticks() as f32 / n.max(1) as f32).min(1.0);
                         vec![[x0 + (x1 - x0) * t, z0 + (z1 - z0) * t]]
                     }
-                    _ => near.iter().map(|p| [p.x(), p.z()]).collect(),
+                    _ => wrapped_near(wrap, &near.iter().map(|p| [p.x(), p.z()]).collect::<Vec<_>>()),
                 };
                 let changes = stream.update(&near);
                 let written: usize = changes
@@ -6144,7 +6200,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             // And what stands on it (MD15).
             if let (Some(stream), Some(w)) = (&mut dress_stream, &world_mod) {
-                let near: Vec<[f32; 2]> = near.iter().map(|p| [p.x(), p.z()]).collect();
+                let near = wrapped_near(wrap, &near.iter().map(|p| [p.x(), p.z()]).collect::<Vec<_>>());
                 for change in stream.update(&near) {
                     match change {
                         world_dress::Change::Add(b) => {
@@ -6838,7 +6894,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
                     let join = join_view == Some(v);
-                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, speedometer, names: &names, table: &table, simulated, join };
+                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join };
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                         ride_hud::sprites(&mut gpu_sprites, hud_base, view, shown, tracker, now);
                     });
@@ -6993,14 +7049,30 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     if ghosts.is_empty() { Vec::new() } else { actors.iter().cloned().chain(ghosts).collect() }
                 })
                 .collect();
+            // On a wrapped world each view has its own list, everything in it at its copy nearest
+            // the view's camera (MD43).
+            let wrap = world.place.tiled().and_then(|t| drawn_wrap(t));
+            let nearest: Vec<Vec<Actor>> = match wrap {
+                Some(_) => cameras
+                    .iter()
+                    .take(world.seats.len())
+                    .enumerate()
+                    .map(|(v, camera)| {
+                        let list = marked.get(v).filter(|own| !own.is_empty()).unwrap_or(&actors);
+                        list.iter().map(|a| Actor { at: nearest_drawn(wrap, camera.eye, a.at), ..*a }).collect()
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
             let views: Vec<View> = rects
                 .iter()
                 .zip(&cameras)
                 .take(world.seats.len())
                 .enumerate()
                 .map(|(v, (at, camera))| {
-                    let actors = match marked.get(v) {
-                        Some(own) if !own.is_empty() => own,
+                    let actors = match (nearest.get(v), marked.get(v)) {
+                        (Some(own), _) => own,
+                        (None, Some(own)) if !own.is_empty() => own,
                         _ => &actors,
                     };
                     View { rect: [at.x as u32, at.y as u32, at.w as u32, at.h as u32], camera, actors }
@@ -7076,6 +7148,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         let split_views = !view_frames.is_empty();
         let join_view = join_cue.then(|| cue_view(&rects, frame.width));
+        // A wrapped world (MD43), whose ground the software path draws again across each seam.
+        let soft_wrap = if gpu_on { None } else { world.place.tiled().and_then(|t| drawn_wrap(t)) };
         for (v, at) in rects.iter().enumerate().filter(|_| !gpu_on) {
             if v >= world.seats.len() {
                 // A layout with room for more players than there are: the spare views are black.
@@ -7098,7 +7172,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let mut tris = match (&world_mod, &world.place) {
                 (Some(w), Land::Tiles(t)) => {
                     let paint = world_look.as_ref().map(|l| &l.paint);
-                    world_dress::draw_ground(target, camera, &light, pos, w, t, &mut soft_terrains, paint)
+                    world_dress::draw_ground(target, camera, &light, pos, w, t, &mut soft_terrains, paint, soft_wrap)
                 }
                 _ => ground.draw(target, camera, &light, pos, ground.radius()),
             };
@@ -7265,22 +7339,36 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     actor.push((copy.as_str(), *at));
                 }
             }
+            // On a wrapped world (MD43) every rider, plane and car at its copy nearest the camera.
+            if soft_wrap.is_some() {
+                for a in &mut actor {
+                    a.1 = nearest_drawn(soft_wrap, camera.eye, a.1);
+                }
+            }
             // A world's tiles' props and plants (MD15), culled at the fog as `draw_scene` culls the
-            // scene's; a plant only once it is solid, as there.
+            // scene's; a plant only once it is solid, as there. On a wrapped world each at its copy
+            // nearest the camera, and the plants of the copies the fog reaches too.
             let mut plants = Vec::new();
+            let mut plant_cameras = vec![*camera];
+            if let Some(w) = soft_wrap {
+                plant_cameras.extend(w.copies(camera.eye, light.fog_far).into_iter().map(|k| w.moved(camera, k)));
+            }
             for d in &dressed {
                 for p in &d.props {
                     let radius = assets.models.get(&p.model).map_or(0.0, |l| l.radius);
-                    if p.pos.sub(camera.eye).len() - radius <= light.fog_far {
-                        actor.push((p.model.as_str(), p.transform()));
+                    let at = nearest_drawn(soft_wrap, camera.eye, p.transform());
+                    if v3(at.0[3][0], at.0[3][1], at.0[3][2]).sub(camera.eye).len() - radius <= light.fog_far {
+                        actor.push((p.model.as_str(), at));
                     }
                 }
                 if let Some(grove) = &d.grove {
                     let fov = game_render::eco::horizontal_fov(camera, target.width as f32 / target.height.max(1) as f32);
-                    grove.draws(camera, fov, light.fog_far, &mut plants);
+                    for c in &plant_cameras {
+                        grove.draws(c, fov, light.fog_far, &mut plants);
+                    }
                 }
             }
-            actor.extend(plants.iter().filter(|d| d.alpha >= 1.0).map(|d| (d.model, d.at)));
+            actor.extend(plants.iter().filter(|d| d.alpha >= 1.0).map(|d| (d.model, nearest_drawn(soft_wrap, camera.eye, d.at))));
             perf.lap(Stage::Scene, scene_at, spent);
             let draw_at = Instant::now();
             tris += draw_scene(target, &look, &assets, &actor, camera);
@@ -7309,7 +7397,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if overlay_mode == menu::Overlay::Hud {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
                 let join = join_view == Some(v);
-                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, speedometer, names: &names, table: &table, simulated, join };
+                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join };
                 ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                     ride_hud::draw(target, shown, tracker, now);
                 });

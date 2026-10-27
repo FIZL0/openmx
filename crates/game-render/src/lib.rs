@@ -23,6 +23,7 @@
 //!   eco.rs       `.esb` ecosystems: a track's trees and bushes, as models near and pictures far
 //!   toy.rs       `.toy` moving scenery: the cars that drive a clip's path, free06's train among them
 //!   world.rs     a track in memory: models, materials and textures matched up by name, and drawn
+//!   wrap.rs      a world that wraps round, drawn again one width off across each seam
 //!   rider.rs     the rider: its `.sub`, the `.mcf` it names, its skeleton and how it bolts on
 //!   chassis.rs   where the renderer put the bike, measured against where the solver put it
 //!   gpu.rs       the same world through wgpu: uploaded once, skinned and batched on the GPU
@@ -68,6 +69,7 @@ pub mod texhash;
 pub mod toy;
 pub mod vehicle;
 pub mod world;
+pub mod wrap;
 
 pub use anim::{Rig, Set};
 pub use disc::{Disc, Res};

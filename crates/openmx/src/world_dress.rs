@@ -367,8 +367,9 @@ pub fn take(
 
 /// A world's ground as the software renderer draws it (MD15): every piece within [`ground::REACH`]
 /// of `around`, each cell by the piece that owns it as the ride's ground does ([`Tiled::owner`]),
-/// painted by the world's paint (MD9) or dirt. A piece's terrain is read once and kept in `files`
-/// while it is near. The triangles drawn.
+/// painted by the world's paint (MD9) or dirt. On a world that wraps (MD43) the same again one width
+/// off across each seam the fog reaches, drawn from the camera moved back by the copy's offset. A
+/// piece's terrain is read once and kept in `files` while it is near. The triangles drawn.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_ground(
     frame: &mut game_render::raster::Frame,
@@ -379,27 +380,41 @@ pub fn draw_ground(
     tiled: &Tiled,
     files: &mut HashMap<usize, Vec<u8>>,
     paint: Option<&game_render::terrain::WorldPaint>,
+    wrap: Option<game_render::wrap::Wrap>,
 ) -> usize {
-    let here = [[around.x, around.z]];
-    let near: Vec<usize> = (0..w.pieces.len()).filter(|&i| worlds::nearest(&w.pieces[i].tile, &here) <= ground::REACH).collect();
-    files.retain(|i, _| worlds::nearest(&w.pieces[*i].tile, &here) <= 4.0 * ground::REACH);
+    // The world itself, then each copy: the camera it is drawn from, and where round it — the copy
+    // of `around` nearest that camera, which riding is `around` less the copy's offset, and for a
+    // posed camera far from the rider (`--shot-pose`) still the near side's pieces it looks at.
+    let mut views = vec![(*camera, around)];
+    if let Some(wr) = wrap {
+        views.extend(wr.copies(camera.eye, light.fog_far).into_iter().map(|k| {
+            let moved = wr.moved(camera, k);
+            (moved, wr.nearest(moved.eye, around))
+        }));
+    }
+    let heres: Vec<[f32; 2]> = views.iter().map(|(_, a)| [a.x, a.z]).collect();
+    files.retain(|i, _| worlds::nearest(&w.pieces[*i].tile, &heres) <= 4.0 * ground::REACH);
     let mut batch = game_render::raster::Batch::new(frame.width, frame.height);
     let mut drawn = 0;
-    for &i in &near {
-        if !files.contains_key(&i) {
-            match w.piece_terrain(i) {
-                Ok(bytes) => files.insert(i, bytes),
-                Err(_) => continue,
-            };
+    for (camera, around) in &views {
+        let here = [[around.x, around.z]];
+        let near: Vec<usize> = (0..w.pieces.len()).filter(|&i| worlds::nearest(&w.pieces[i].tile, &here) <= ground::REACH).collect();
+        for &i in &near {
+            if !files.contains_key(&i) {
+                match w.piece_terrain(i) {
+                    Ok(bytes) => files.insert(i, bytes),
+                    Err(_) => continue,
+                };
+            }
+            let Some(terrain) = files.get(&i).and_then(|b| track::Terrain::parse(b).ok()) else { continue };
+            let tile = &w.pieces[i].tile;
+            let mut g = ground::Ground::new(terrain, &tile.layout);
+            [g.samples_x, g.samples_z] = tile.samples();
+            let at = tile.at.map(|a| a.0);
+            let spacing = g.spacing;
+            let owns = |sx: u32, sz: u32| worlds::owns_cell(tiled, i, at, spacing, sx, sz);
+            drawn += g.queue_piece(&mut batch, camera, (frame.width, frame.height), light, *around, g.radius(), at, &owns);
         }
-        let Some(terrain) = files.get(&i).and_then(|b| track::Terrain::parse(b).ok()) else { continue };
-        let tile = &w.pieces[i].tile;
-        let mut g = ground::Ground::new(terrain, &tile.layout);
-        [g.samples_x, g.samples_z] = tile.samples();
-        let at = tile.at.map(|a| a.0);
-        let spacing = g.spacing;
-        let owns = |sx: u32, sz: u32| worlds::owns_cell(tiled, i, at, spacing, sx, sz);
-        drawn += g.queue_piece(&mut batch, camera, (frame.width, frame.height), light, around, g.radius(), at, &owns);
     }
     let dirt = ground::DIRT;
     match paint {

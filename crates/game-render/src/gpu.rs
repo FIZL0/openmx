@@ -89,6 +89,9 @@ const PROP_PIXELS: f32 = 0.5;
 const PALETTE_ROW: u32 = 256;
 /// A view's uniforms, padded to the alignment a dynamic offset needs.
 const VIEW_STRIDE: u64 = 256;
+/// Where a wrapped world's copies' ground views start among a ground's views (MD43): past any real
+/// view's.
+const COPY_GROUND: usize = 16;
 
 /// A vertex of a model as its `.psg` strip has it: in its node's space, and which node that is.
 #[repr(C)]
@@ -730,6 +733,11 @@ pub struct Renderer {
     /// How far the world is drawn (V32), and how far apart the ground's two farthest points are.
     graphics: Graphics,
     span: f32,
+    /// A world that wraps round (MD43): drawn again one width off across each seam out to the reach.
+    wrap: Option<crate::wrap::Wrap>,
+    /// Each copy's own ground view by the view and the copy's offset in widths, kept from frame to
+    /// frame so its parts are kept as a view's are; the slots past [`COPY_GROUND`].
+    copy_slots: std::collections::HashMap<(usize, [i32; 2]), usize>,
     /// The frame's instances and batches, kept to reuse their allocations.
     /// Each copy's batch key, its see-through alpha's bits (0 for solid) and the copy.
     scratch: Vec<(u64, u32, InstanceRaw)>,
@@ -1937,6 +1945,8 @@ impl Renderer {
             groves: Vec::new(),
             graphics: Graphics::default(),
             span: 0.0,
+            wrap: None,
+            copy_slots: std::collections::HashMap::new(),
             scratch: Vec::new(),
             batches: Vec::new(),
             flat: Vec::new(),
@@ -2524,6 +2534,18 @@ impl Renderer {
         self.graphics
     }
 
+    /// Whether the world wraps round from now on (MD43), and its sides: every view draws its ground,
+    /// props and plants again one width off on each wrapped side, as far as its fog reaches.
+    pub fn set_wrap(&mut self, wrap: Option<crate::wrap::Wrap>) {
+        if self.wrap != wrap {
+            self.copy_slots.clear();
+            if let Some(g) = &mut self.ground {
+                g.views.truncate(COPY_GROUND);
+            }
+        }
+        self.wrap = wrap;
+    }
+
     /// The fog every view is drawn with, under the current [`Graphics`], and where its far plane is.
     pub fn fog(&self, light: &Lighting) -> (Fog, f32) {
         (self.graphics.fog(light, self.span), self.graphics.far_clip(light, self.span))
@@ -2983,9 +3005,27 @@ impl Renderer {
     /// uploaded from `assets` as they are first seen.
     pub fn render(&mut self, target: &Target, assets: &Assets, frame: &Scene3) -> Drawn {
         let views = frame.views;
+        // Each view, and after it each copy of a wrapped world it reaches (MD43), with the ground
+        // view it picks its ground into: a pass a view is drawn in, with its own uniforms, props and
+        // ground. A copy is the same world drawn from the view's camera moved back by its offset.
+        let mut passes: Vec<(usize, Option<[i32; 2]>, usize)> = Vec::with_capacity(views.len());
+        let mut copies_used = Vec::new();
+        for (v, view) in views.iter().enumerate() {
+            passes.push((v, None, v));
+            if let Some(w) = self.wrap {
+                let light = *self.view_light(v, frame.light);
+                let reach = self.graphics.fog(&light, self.span).reach;
+                for k in w.copies(view.camera.eye, reach) {
+                    let next = self.copy_slots.len();
+                    let slot = COPY_GROUND + *self.copy_slots.entry((v, k)).or_insert(next);
+                    copies_used.push(slot);
+                    passes.push((v, Some(k), slot));
+                }
+            }
+        }
         // Everything a view needs to know before the pass: its uniforms, and its batches.
-        if views.len() as u64 > self.view_capacity {
-            self.view_capacity = views.len() as u64;
+        if passes.len() as u64 > self.view_capacity {
+            self.view_capacity = passes.len() as u64;
             self.view_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("views"),
                 size: VIEW_STRIDE * self.view_capacity,
@@ -3021,8 +3061,8 @@ impl Renderer {
         }
         let pose_starts = self.write_palette(frame.poses);
 
-        let mut uniforms = vec![0u8; (VIEW_STRIDE as usize) * views.len()];
-        let mut ground_counts = vec![0u32; views.len()];
+        let mut uniforms = vec![0u8; (VIEW_STRIDE as usize) * passes.len()];
+        let mut ground_counts = vec![0u32; passes.len()];
         let mut drawn = Drawn {
             triangles: vec![0; views.len()],
             draws: 0,
@@ -3032,8 +3072,9 @@ impl Renderer {
             ground_time: std::time::Duration::ZERO,
         };
         self.scratch.clear();
-        let mut origins = Vec::with_capacity(views.len());
-        for (v, view) in views.iter().enumerate() {
+        let mut origins = Vec::with_capacity(passes.len());
+        for (p, &(v, copy, slot)) in passes.iter().enumerate() {
+            let view = &views[v];
             // Its own light and fog, a world's view over its own map (P142), or the frame's.
             let light = &{ *self.view_light(v, frame.light) };
             let (fog, far) = self.fog(light);
@@ -3043,7 +3084,8 @@ impl Renderer {
             };
             let [_, _, w, h] = view.rect;
             let (w, h) = (w * target.scale, h * target.scale);
-            let camera = view.camera;
+            let moved = copy.zip(self.wrap).map(|(k, wrap)| wrap.moved(view.camera, k));
+            let camera = moved.as_ref().unwrap_or(view.camera);
             let vp = view_projection(camera, w, h, far);
             let cull = Cull::of(camera, w, h, self.graphics, light, self.span);
             // The sky's ray, as `Sky::draw` makes it: the screen's right and up, whichever way the
@@ -3079,7 +3121,7 @@ impl Renderer {
                 origin: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
                 _pad: [0.0; 8],
             };
-            let at = v * VIEW_STRIDE as usize;
+            let at = p * VIEW_STRIDE as usize;
             uniforms[at..at + std::mem::size_of::<ViewUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
             let focal = camera.focal(h as usize);
             // The props: culled against the frustum and the reach (the fog's end, as `draw_scene` culls
@@ -3093,7 +3135,7 @@ impl Renderer {
                 }
                 drawn.props += 1;
                 let group = crate::psg::group_at(&model.group_distance, centre.sub(camera.eye).len(), model.radius, focal);
-                let key = ((v as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
+                let key = ((p as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((
                     key,
                     0,
@@ -3104,8 +3146,9 @@ impl Renderer {
                     },
                 ));
             }
-            // The actors: few, and each at the level of detail this camera has earned.
-            for a in view.actors {
+            // The actors: few, and each at the level of detail this camera has earned. Not in a
+            // copy: the shell puts each where its nearest copy is.
+            for a in view.actors.iter().filter(|_| copy.is_none()) {
                 let Some(Some(m)) = self.model_ids.get(a.model).copied() else { continue };
                 if !(a.alpha > 0.0) {
                     continue;
@@ -3124,7 +3167,7 @@ impl Renderer {
                     Some((start, len)) => [start, len as u32],
                     None => [model.bind_palette, model.nodes],
                 };
-                let key = ((v as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
+                let key = ((p as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette, cover: 1.0 }));
             }
             // The trees and bushes: each a model near, a picture far and both between (V48). Under
@@ -3147,14 +3190,22 @@ impl Renderer {
                         continue;
                     }
                     let ghost = if d.alpha < 1.0 { d.alpha.to_bits() } else { 0 };
-                    let key = ((v as u64) << 48) | ((m as u64) << 16);
+                    let key = ((p as u64) << 48) | ((m as u64) << 16);
                     let inst = InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes], cover: d.cover };
                     self.scratch.push((key, ghost, inst));
                 }
             }
             let ground_at = std::time::Instant::now();
-            ground_counts[v] = self.ground_for(v, &cull, focal, &mut drawn);
+            ground_counts[p] = self.ground_for(slot, &cull, focal, &mut drawn);
             drawn.ground_time += ground_at.elapsed();
+        }
+        // A copy no view reaches this frame lets go of its parts.
+        if let Some(g) = &mut self.ground {
+            for (s, gv) in g.views.iter_mut().enumerate().skip(COPY_GROUND) {
+                if !copies_used.contains(&s) {
+                    gv.parts.clear();
+                }
+            }
         }
         self.queue.write_buffer(&self.view_buffer, 0, &uniforms);
 
@@ -3225,7 +3276,7 @@ impl Renderer {
                     let (x1, y1) = ((((x + w) * s) as f32 * kx).round() as u32, (((y + h) * s) as f32 * ky).round() as u32);
                     [x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)]
                 };
-                self.draw_views(&mut pass, views, &ground_counts, rect, size, &mut drawn);
+                self.draw_views(&mut pass, views, &passes, &ground_counts, rect, size, &mut drawn);
             }
             let depth = self.depth_for(target.size);
             let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame");
@@ -3238,7 +3289,7 @@ impl Renderer {
             let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame");
             let s = target.scale;
             let rect = |[x, y, w, h]: [u32; 4]| [fx + x * s, fy + y * s, w * s, h * s];
-            self.draw_views(&mut pass, views, &ground_counts, rect, target.size, &mut drawn);
+            self.draw_views(&mut pass, views, &passes, &ground_counts, rect, target.size, &mut drawn);
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         }
         self.queue.submit([encoder.finish()]);
@@ -3363,6 +3414,7 @@ impl Renderer {
         &self,
         pass: &mut wgpu::RenderPass,
         views: &[View],
+        passes: &[(usize, Option<[i32; 2]>, usize)],
         ground_counts: &[u32],
         rect: impl Fn([u32; 4]) -> [u32; 4],
         bounds: (u32, u32),
@@ -3370,28 +3422,36 @@ impl Renderer {
     ) {
         let stride = std::mem::size_of::<InstanceRaw>() as u64;
         let mut b = 0;
-        for (v, view) in views.iter().enumerate() {
+        for (p, &(v, copy, slot)) in passes.iter().enumerate() {
+            let view = &views[v];
             let [x, y, w, h] = rect(view.rect);
+            // A copy of a wrapped world goes after its view's own pass, into the same depth, and
+            // without a backdrop of its own.
+            let end = (b..self.batches.len()).find(|&i| self.batches[i].view != p).unwrap_or(self.batches.len());
+            let mine = &self.batches[b..end];
+            b = end;
             if w == 0 || h == 0 || x + w > bounds.0 || y + h > bounds.1 {
                 continue;
             }
             pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
             pass.set_scissor_rect(x, y, w, h);
-            let offset = [(v as u64 * VIEW_STRIDE) as u32];
+            let offset = [(p as u64 * VIEW_STRIDE) as u32];
             // The backdrop: the sky, or the fog's colour.
-            pass.set_pipeline(&self.sky_pipeline);
-            pass.set_bind_group(0, &self.view_bind, &offset);
-            let sky = match self.view_skies.get(v) {
-                Some(Some(s)) => &s.bind,
-                _ => &self.sky_bind,
-            };
-            pass.set_bind_group(1, sky, &[]);
-            pass.draw(0..3, 0..1);
-            drawn.draws += 1;
+            if copy.is_none() {
+                pass.set_pipeline(&self.sky_pipeline);
+                pass.set_bind_group(0, &self.view_bind, &offset);
+                let sky = match self.view_skies.get(v) {
+                    Some(Some(s)) => &s.bind,
+                    _ => &self.sky_bind,
+                };
+                pass.set_bind_group(1, sky, &[]);
+                pass.draw(0..3, 0..1);
+                drawn.draws += 1;
+            }
             // The ground: the chunks this view sees, each at its level, in a draw a piece and page.
             if let Some(ground) = &self.ground
-                && let Some(gv) = ground.views.get(v)
-                && ground_counts[v] > 0
+                && let Some(gv) = ground.views.get(slot)
+                && ground_counts[p] > 0
             {
                 pass.set_pipeline(&ground.pipeline);
                 pass.set_bind_group(0, &self.view_bind, &offset);
@@ -3407,12 +3467,9 @@ impl Renderer {
                         drawn.draws += 1;
                     }
                 }
-                drawn.triangles[v] += (ground_counts[v] / 3) as usize;
+                drawn.triangles[v] += (ground_counts[p] / 3) as usize;
             }
             // The models: the opaque runs of every batch, then the translucent ones over them.
-            let end = (b..self.batches.len()).find(|&i| self.batches[i].view != v).unwrap_or(self.batches.len());
-            let mine = &self.batches[b..end];
-            b = end;
             for blended in [false, true] {
                 let mut current: Option<PipelineKey> = None;
                 let mut bound: Option<usize> = None;
@@ -3486,6 +3543,10 @@ impl Renderer {
                         drawn.draws += 1;
                     }
                 }
+            }
+            // The particles and the glows are the view's own, not a copy's.
+            if copy.is_some() {
+                continue;
             }
             // The particles, over the models (P58).
             if let Some(particles) = &self.particles
@@ -5031,6 +5092,61 @@ mod tests {
         assert_eq!(drawn(&mut gpu, Graphics::Original), 1, "the chunk ahead only");
         // And back: the per-view index list follows the setting.
         assert_eq!(drawn(&mut gpu, Graphics::Full), 2);
+    }
+
+    #[test]
+    fn a_wrapped_world_draws_the_far_side_across_its_seam() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        // An 800-foot square world of 200-foot chunks, and a camera 10 feet short of its east edge
+        // looking east over it, a little down.
+        let chunks: Vec<GroundChunk> = (0..16).map(|i| flat_chunk(8, 25.0, i % 4, i / 4)).collect();
+        let scene = crate::scene::Scene::parse("[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=25.00\nMaximumFogDistance=1000.00\n");
+        let light = Lighting::of(&scene);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        gpu.set_ground(&chunks, None, [150.0, 118.0, 86.0]).unwrap();
+        let camera = Camera { eye: v3(790.0, 30.0, 400.0), at: v3(900.0, 20.0, 400.0), fov: 1.0, near: 2.4, far: 1000.0 };
+        let (w, h) = (160u32, 90u32);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }];
+        let assets = Assets::default();
+        let mut draw = |gpu: &mut Renderer| {
+            let d = gpu.render(
+                &Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 },
+                &assets,
+                &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light },
+            );
+            let px = gpu.read(&texture);
+            // Two points under the horizon in the middle column, 150 and 95 feet out: past the seam.
+            let at = |y: u32| -> [u8; 3] {
+                let i = ((y * w + w / 2) * 3) as usize;
+                [px[i], px[i + 1], px[i + 2]]
+            };
+            (d.ground_levels.iter().sum::<usize>(), [at(h * 6 / 10), at(h * 8 / 10)])
+        };
+        let fog = [61u8, 68, 76];
+        let near_fog = |c: [u8; 3]| c.iter().zip(fog).all(|(a, b)| a.abs_diff(b) <= 2);
+        for graphics in [Graphics::Original, Graphics::Far, Graphics::Full] {
+            gpu.set_graphics(graphics);
+            gpu.set_wrap(None);
+            let (alone, sky) = draw(&mut gpu);
+            assert!(sky.iter().all(|&c| near_fog(c)), "{graphics:?}: past the edge is the fog's colour, {sky:?}");
+            gpu.set_wrap(crate::wrap::Wrap::of([true, false], [800.0, 800.0]));
+            let (wrapped, ground) = draw(&mut gpu);
+            assert!(wrapped > alone, "{graphics:?}: the copy's chunks, {wrapped} against {alone}");
+            assert!(ground.iter().all(|&c| !near_fog(c)), "{graphics:?}: across the seam is ground, {ground:?}");
+            // Drawn again, its parts kept.
+            assert_eq!(draw(&mut gpu), (wrapped, ground));
+        }
+        gpu.set_wrap(None);
+        assert_eq!(draw(&mut gpu).1.map(near_fog), [true, true], "and gone with the wrap");
     }
 
     /// [`known_scene`] with a HUD's worth of sprites over it (V30): a picture, plain panels, a disc,
