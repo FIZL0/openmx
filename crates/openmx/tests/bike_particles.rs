@@ -24,7 +24,7 @@ use game_render::Disc;
 use game_render::biplane;
 use game_render::ini;
 use game_render::mat::{M4, V3, v3};
-use particles::{Atlas, Disable, Entry, Kind, PlaneFrame, PlaneFx, SprayKeys, TireFrame, Zone};
+use particles::{Atlas, ConstraintFrame, Disable, Entry, Kind, PlaneFrame, PlaneFx, SprayKeys, TireFrame, Zone};
 
 const TRACK: &str = "free09";
 
@@ -327,4 +327,32 @@ fn the_bikes_emitters_follow_the_original() {
     for i in [5, 6, 7, 9, 10, 11, 12] {
         assert!(emitted[i] > 0, "entry {i} never emitted: {emitted:?}");
     }
+}
+
+/// **Foot Dust while riding** (P152): the riding body's feet, its bone collisions 0 and 1, feed the
+/// disc's `Foot Dust` entry while the rider is up. A foot moving on the dirt raises dust; the same
+/// foot on the road (surface 0, `none` for Dust), still, also on the scene (the manager sets ground and
+/// object on their own, and the entry's Disable has ObjectContact), past the mask (collision 2), or
+/// with the rider down raises none. `ragdoll_riding.rs`' `the_riding_feet_raise_the_originals_foot_dust`
+/// holds the riding body's feet to the original's feeds.
+#[test]
+fn the_riding_feet_raise_foot_dust() {
+    let Some(fx) = disc_fx() else { return };
+    let foot = ConstraintFrame { ground: true, at: v3(4250.0, 184.0, 3346.0), vel: v3(-40.0, -5.0, 10.0), zone: 13, ..Default::default() };
+    let tire = TireFrame { ground: true, zone: 13, ..Default::default() };
+    let dust = |constraints: Vec<ConstraintFrame>, wrecked: bool| {
+        let mut fx = fx.clone();
+        let frame = PlaneFrame { tires: vec![tire, tire], constraints, wrecked, ..Default::default() };
+        for _ in 0..10 {
+            fx.step(&frame, 1.0 / 60.0);
+        }
+        fx.counts().iter().find(|(name, _)| *name == "Foot Dust").map_or(0, |&(_, n)| n)
+    };
+    assert!(dust(vec![foot], false) > 0, "a foot on the dirt raises no dust");
+    assert!(dust(vec![ConstraintFrame::default(), foot], false) > 0, "the right foot raises no dust");
+    assert_eq!(dust(vec![ConstraintFrame { zone: 0, ..foot }], false), 0, "the road is zone-off");
+    assert_eq!(dust(vec![ConstraintFrame { vel: v3(0.0, 0.0, 0.0), ..foot }], false), 0, "a still foot");
+    assert_eq!(dust(vec![ConstraintFrame { object: true, ..foot }], false), 0, "a foot on the scene too");
+    assert_eq!(dust(vec![ConstraintFrame::default(), ConstraintFrame::default(), foot], false), 0, "collision 2 is past the mask");
+    assert_eq!(dust(vec![foot], true), 0, "Foot Dust is off in a wreck");
 }
