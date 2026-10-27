@@ -279,6 +279,7 @@ fn port_resolve(ee: &Ee, recs: [u32; 2], me: usize, first: bool, colliders: &[Co
         contacts: list_at(ee, recs[me], &recs),
         colliders: colliders.to_vec(),
         vehicles: recs.iter().map(|&r| vehicle_at(ee, r)).collect(),
+        movers: Vec::new(),
     };
     let mut own = ridden_at(ee, recs[me]);
     bump.resolve(&mut own, first);

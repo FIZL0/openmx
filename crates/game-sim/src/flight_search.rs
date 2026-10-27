@@ -760,6 +760,22 @@ fn struck(object: usize) -> Struck {
     Struck { object, other: None, mover: None }
 }
 
+impl Scene<'_> {
+    /// What `object` is to the contact search (S145): a prop that moves this frame (a path car,
+    /// [`Prop::moving`]) is a mesh collidable with no collision object whose owner is the car, a
+    /// mover of kind 2, so it is struck with its mover — by the prop's index, the order
+    /// [`Search::movers`] lists them in. Anything else is only itself ([`struck`]).
+    fn struck_of(&self, object: usize) -> Struck {
+        let mover = self.prop(object).filter(|&i| self.props[i].moving.is_some());
+        Struck { mover: mover.map(|i| (i, crate::contact_search::MOVER_KIND)), ..struck(object) }
+    }
+
+    /// Prop `i`, when `object` is one of the props' collidables.
+    fn prop(&self, object: usize) -> Option<usize> {
+        object.checked_sub(FIRST).filter(|&i| i < self.props.len())
+    }
+}
+
 impl Search for Scene<'_> {
     /// The ray probe's search. The plane's collision object always has a nearby search; without one
     /// the original asks the broad phase directly, which here is the same list.
@@ -771,7 +787,7 @@ impl Search for Scene<'_> {
         self.ray
             .contacts
             .iter()
-            .map(|c| Hit { from: c.from, to: c.to, point: c.point, normal: c.normal, struck: struck(self.id(c.object as usize)) })
+            .map(|c| Hit { from: c.from, to: c.to, point: c.point, normal: c.normal, struck: self.struck_of(self.id(c.object as usize)) })
             .collect()
     }
 
@@ -782,16 +798,35 @@ impl Search for Scene<'_> {
         let hit = world_search::search_nearby(&mut objects, SWEEP, &nearby, self);
         (self.objects, self.nearby) = (objects, nearby);
         let a = &self.sweep.answer;
-        hit.then(|| Swept { push: a.record.nearest_normal, point: a.record.nearest_point, struck: struck(self.id(a.struck[0].unwrap_or(SWEEP))) })
+        hit.then(|| Swept { push: a.record.nearest_normal, point: a.record.nearest_point, struck: self.struck_of(self.id(a.struck[0].unwrap_or(SWEEP))) })
     }
 
     fn moved(&mut self, node: &Frame) {
         self.transform = matrix(node);
     }
 
-    fn velocity(&self, _struck: &Struck) -> Vf {
-        Vf::ZERO
+    /// A struck prop that moves answers its car's velocity, the mover's `vt+0xb8` (S145); the rest
+    /// stand still.
+    fn velocity(&self, struck: &Struck) -> Vf {
+        match struck.mover.and_then(|(i, _)| self.props[i].moving) {
+            Some(m) => m.velocity,
+            None => Vf::ZERO,
+        }
     }
+
+    fn movers(&self) -> Vec<crate::contact::Mover> {
+        movers(self.props)
+    }
+}
+
+/// **The props as movers** (S145): one a prop, by its index, while any prop moves ([`Prop::moving`],
+/// [`crate::traffic::Moving::mover`]); empty while none does. A still prop's is never named, so it is
+/// left at the default.
+pub fn movers(props: &[Prop]) -> Vec<crate::contact::Mover> {
+    if props.iter().all(|p| p.moving.is_none()) {
+        return Vec::new();
+    }
+    props.iter().map(|p| p.moving.map(|m| m.mover()).unwrap_or_default()).collect()
 }
 
 /// The category of what [`Scene`] reports as struck: a trunk's ([`TREES`]) is [`TREE`], a bike's

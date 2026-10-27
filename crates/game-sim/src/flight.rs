@@ -507,8 +507,8 @@ impl Flight {
     ) -> Vec<Option<u32>> {
         let mesh = self.bike.clone();
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
-        let struck = self.search(dt, ground, bikes);
-        WORLD.step(dt, &mut Listeners { plane: self, ground: Ground(ground), tables, bikes });
+        let (struck, movers) = self.search(dt, ground, bikes);
+        WORLD.step(dt, &mut Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers });
         if self.attitude.flown {
             self.pad = pad;
         }
@@ -519,17 +519,19 @@ impl Flight {
     /// bike's runs it): its contacts emptied, then the sweep back, the rays against the terrain and
     /// the rays against the track's collision meshes ([`contact_search::collide`] over
     /// [`flight_search::Scene`]). The transform is where the body stood after last frame's post
-    /// listener, which is where the original's post listener leaves it.
-    fn search(&mut self, dt: F, world: &mut dyn world::World, bikes: Option<Bikes<'_>>) -> Vec<Option<u32>> {
+    /// listener, which is where the original's post listener leaves it. With what the bikes' struck
+    /// listeners kept, it gives the movers its contacts name ([`Search::movers`], S145).
+    fn search(&mut self, dt: F, world: &mut dyn world::World, bikes: Option<Bikes<'_>>) -> (Vec<Option<u32>>, Vec<contact::Mover>) {
         let none = vec![None; bikes.map_or(0, |b| b.bikes.len())];
-        let Some(rays) = self.rays.clone() else { return none };
+        let Some(rays) = self.rays.clone() else { return (none, Vec::new()) };
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props, trees) = world.wooded();
         let bounds = field.as_deref().map(field_box);
         let mut scene = Scene::wooded(props, trees, bikes, bounds, &rays, &self.record.node, &mut self.nearby);
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
-        scene.struck
+        let movers = contact_search::Search::movers(&scene);
+        (scene.struck, movers)
     }
 
     /// The search's refill (S99), first in the post listener: the original's body post sets the
@@ -554,10 +556,10 @@ impl Flight {
     }
 
     /// The force listener, one substep of `h`.
-    fn forces(&mut self, h: F, ground: &mut Ground<'_>, curve: &CurveTable, acos: &AcosTable) {
+    fn forces(&mut self, h: F, ground: &mut Ground<'_>, curve: &CurveTable, acos: &AcosTable, movers: &[contact::Mover]) {
         let (collider, contacts, mass) = (&mut self.collider, &mut self.record.contacts, self.mass);
         collision_force(&mut self.body, self.gravity, |body| {
-            contact::resolve(collider, &mut Weighed { body, mass }, contacts, &mut [], &[], true);
+            contact::resolve(collider, &mut Weighed { body, mass }, contacts, &mut [], movers, true);
         });
         if self.crash.reason == 0 {
             self.attitude = self.measure.attitude(self.attitude.flown, &self.body);
@@ -755,6 +757,8 @@ struct Listeners<'a> {
     ground: Ground<'a>,
     tables: &'a ride::Tables,
     bikes: Option<Bikes<'a>>,
+    /// The movers the search's contacts name (S145).
+    movers: &'a [contact::Mover],
 }
 
 impl Dynamics for Listeners<'_> {
@@ -768,7 +772,7 @@ impl Dynamics for Listeners<'_> {
         self.plane.preforce(dt);
     }
     fn force(&mut self, _: i32, h: F) {
-        self.plane.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos);
+        self.plane.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos, self.movers);
     }
     fn enabled(&self, _: i32) -> bool {
         self.plane.body.enabled

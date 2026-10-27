@@ -5695,3 +5695,26 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # neighbour, or one car twice, bit for bit (12,848 hits; the second car took 67); 10,000 push-outs
 # against a real car collidable bit for bit. Bone sphere colliders: vtable +0x38 0x00451cd0, e.g.
 # 0x0085c9d0 (r 0.75); a bone collision is found by +0x88 = a sphere and +0x7c a body of its radius.
+# ---------------------------------------------------------------------------------------------------
+# S145 — moving toys and body contacts. Journal: research/journal/2026-10-26-s145-moving-toys-and-body-contacts.
+# Port: contact.rs other_at, flight_search.rs Scene::struck_of/movers, mover_contact.rs Probe::mover,
+# toys.rs Toys::frame (Moving), ride.rs contacts (platform kill), rider_contact.rs Bump::movers.
+# wheel_contact_velocity's owner branch (taken first, +0x1a0 == 0 and wheel +0x1f0 != 0): the owner is
+# a collision object; +0x90 its cofg, written turned into the world at +0xa0. With +0xf4 (a body:
+# +0x60 position, +0x70 velocity, +0x170 quaternion, +0x1b0 rates in its frame) the point's arm is
+# unturned from (point - (position + +0xa0)), velocity +0x1b0 = body +0x70, point velocity +0x1c0 =
+# turn(rates x arm) + velocity. Else +0xf0 (a chassis: +0x190 cofg, +0x260 velocity, +0x290 rates)
+# with node +0xf8: +0xa0 = rotate(node, cofg), arm = unplace(node, point) - (chassis cofg + +0xa0).
+# Then the common tail, as the vehicle branch's. Proved: tests/traffic.rs, 20,000 generated wheels,
+# both sides, bit for bit, through contact::other_at.
+# Kinematic body class (vtable 0x00451700, ctor 0x001dd580, +0x1b0 kind 2, +0x2a0/+0x2e0 set to
+# identity from 0x00426dd0 by the ctor): shares the path car's vt+0xb4..+0xc0 (0x001dd740 local
+# velocity, 0x001dd7b0 velocity = (node(+0x254)+0xb0 - +0x310) * app+0x348, 0x001dd850 spin,
+# 0x001dd8c0 turn). Its update vt+0x38 0x001dd9b0: +0x2e0 = +0x2a0, +0x2a0 = node +0x80..+0xbc.
+# A toy's collision part (animated_toy_collision): a 0x250-byte mesh collidable, +0x7c = one of these
+# 800-byte bodies, +0x80 = 0, so a contact on it names a mover of kind 2 (+0x78), no other (+0x74).
+# free09 (first_recording, recording2, SLUS .05, .08): exactly one body of the class, 0x01291210, the
+# rustic windmill's collision part (mesh collidable 0x01290850), node 0x012905c0 the toy's static root
+# (pos 2439.249, 133.697, 4059.953). Its +0x2a0 and +0x2e0 are still identity in every state: the
+# update never ran, so 0x001dd7b0 would answer the node's position x 30. Not run live. s89-along,
+# s89-across and the biplane states hold none of the class.

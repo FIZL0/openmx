@@ -256,3 +256,106 @@ fn the_toys_turn_as_the_originals_do() {
         assert_eq!(ours, hints(&ee), "tick {tick}: the clips' hints");
     }
 }
+
+/// A world of nothing but props, which the toys move.
+struct Shelf(game_sim::world::Props);
+
+impl game_sim::world::World for Shelf {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        (Vf::new(at.x(), -1.0e6, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 1.0))
+    }
+    fn solid(&mut self, _bundle: &game_sim::collide::Bundle, _record: &mut game_sim::collide::Record) -> bool {
+        false
+    }
+    fn moving(&mut self) -> Option<&mut game_sim::world::Props> {
+        Some(&mut self.0)
+    }
+}
+
+/// S145: a toy's collision parts carry their joints' motion. Every toy of first_recording's state
+/// on its clip, with two empty parts each — one on the root (the placement), one on the last joint —
+/// put among a world's props and stepped by [`Toys::frame`]: each part's mesh is told the
+/// [`game_sim::traffic::Moving`] of its joint's world matrix from the tick before to this one, the
+/// path car's arithmetic (the kinematic body's two virtuals are the car's), and a part on the root
+/// stands still. The windmills turn, so the last joint's spins.
+#[test]
+fn a_toys_collision_parts_carry_their_joints_motion() {
+    use game_sim::toys::Part;
+    use game_sim::traffic::Moving;
+    let Some(ee) = state() else { return };
+    let mut clips: HashMap<u32, usize> = HashMap::new();
+    let mut motions = Vec::new();
+    let mut channels: Vec<Vec<u32>> = Vec::new();
+    let mut specs = Vec::new();
+    let empty = game_sim::track::Mesh {
+        version: 1,
+        surface: None,
+        transform: [[F::ONE, F::ZERO, F::ZERO], [F::ZERO, F::ONE, F::ZERO], [F::ZERO, F::ZERO, F::ONE], [F::ZERO; 3]],
+        vertices: game_sim::track::Points::Wide(Vec::new()),
+        normals: None,
+        nodes: Vec::new(),
+        triangles: Vec::new(),
+    };
+    for &toy in &TOYS {
+        let model = ee.u32_at(toy + at::MODEL);
+        let clip = ee.u32_at(ee.u32_at(model + at::HANDLE) + 4);
+        let k = *clips.entry(clip).or_insert_with(|| {
+            let (m, rot) = motion_of(&ee, clip);
+            motions.push(m);
+            channels.push(rot);
+            motions.len() - 1
+        });
+        let m = &motions[k];
+        let names = m.rotation.iter().map(|c| c.name).chain(m.position.iter().map(|c| c.name)).max().map_or(0, |n| n + 1);
+        let mut spec = spec_of(&ee, model, k, names);
+        let last = spec.rig.parents.len() - 1;
+        spec.parts = vec![Part { joint: None, mesh: empty.clone() }, Part { joint: Some(last), mesh: empty.clone() }];
+        specs.push(spec);
+    }
+    let mut toys = Toys::new(motions, specs);
+    toys.hints = channels.iter().flatten().map(|&ch| Hint(ee.u32_at(ch + at::HINT))).collect();
+    toys.clocks = TOYS
+        .iter()
+        .map(|&toy| {
+            let model = ee.u32_at(toy + at::MODEL);
+            Clock { time: f(&ee, model + at::TIME), prev: f(&ee, model + at::PREV), finished: ee.u32_at(model + at::FINISHED) != 0 }
+        })
+        .collect();
+    let mut world = Shelf(game_sim::world::Props::default());
+    toys.attach(&mut world.0);
+    assert_eq!(world.0.props.len(), 2 * TOYS.len(), "two parts a toy");
+    let inv_dt = F::ONE / DT;
+    let mut spun = 0;
+    for tick in 0..30 {
+        // What the step will make of each toy, on a copy: the joint's world matrix either side.
+        let mut copy = toys.clone();
+        let before: Vec<Mat4> = (0..TOYS.len()).map(|k| {
+            let mut hints = toys.hints.clone();
+            let base = toys.base[toys.specs[k].motion];
+            let locals = game_sim::toys::pose(&toys.motions[toys.specs[k].motion], &toys.specs[k].rig, toys.clocks[k].time, &mut hints[base..]);
+            *toys.worlds(k, &locals).last().expect("joints")
+        }).collect();
+        let after: Vec<Mat4> = (0..TOYS.len()).map(|k| {
+            let locals = copy.advance(k, DT).expect("a looping clip");
+            *copy.worlds(k, &locals).last().expect("joints")
+        }).collect();
+        toys.frame(DT, &mut world);
+        for k in 0..TOYS.len() {
+            let what = |field: &str| format!("tick {tick}: toy {k} {field}");
+            let root = world.0.props[2 * k].moving.expect("the root part is told");
+            let place = toys.specs[k].place;
+            let still = Moving::of(&place, &place, inv_dt);
+            assert_eq!((root.velocity.0.map(f32::to_bits), root.spin.0.map(f32::to_bits)), (still.velocity.0.map(f32::to_bits), still.spin.0.map(f32::to_bits)), "{}", what("root part's motion"));
+            assert!(root.velocity.0[..3].iter().chain(&root.spin.0[..3]).all(|v| *v == 0.0), "{}", what("root part moves"));
+            let tip = world.0.props[2 * k + 1].moving.expect("the joint's part is told");
+            let want = Moving::of(&before[k], &after[k], inv_dt);
+            assert_eq!(mat_bits(&tip.pose), mat_bits(&want.pose), "{}", what("joint part's pose"));
+            assert_eq!(tip.velocity.0.map(f32::to_bits), want.velocity.0.map(f32::to_bits), "{}", what("joint part's velocity"));
+            assert_eq!(tip.spin.0.map(f32::to_bits), want.spin.0.map(f32::to_bits), "{}", what("joint part's spin"));
+            if tip.spin.0[..3].iter().any(|v| *v != 0.0) {
+                spun += 1;
+            }
+        }
+    }
+    assert_eq!(spun, 30 * TOYS.len(), "every toy's last joint turns on every tick");
+}

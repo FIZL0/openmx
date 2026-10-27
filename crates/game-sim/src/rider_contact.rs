@@ -317,6 +317,9 @@ pub struct Bump {
     pub contacts: Vec<Contact>,
     pub colliders: Vec<Collider>,
     pub vehicles: Vec<Vehicle>,
+    /// The movers the list's scenery contacts name: the props that moved this tick ([`scenery`],
+    /// S145). Empty while nothing the rays struck moves.
+    pub movers: Vec<crate::contact::Mover>,
 }
 
 impl Bump {
@@ -333,7 +336,7 @@ impl Bump {
             .zip(self.vehicles.iter_mut())
             .map(|(collider, v)| Other { collider, side: Side::Vehicle(v) })
             .collect();
-        contact::resolve_ridden(&mut mine, own, &mut self.contacts, &mut others, &[], first);
+        contact::resolve_ridden(&mut mine, own, &mut self.contacts, &mut others, &self.movers, first);
         self.colliders[self.me] = mine;
     }
 }
@@ -371,7 +374,11 @@ fn vehicle_on(ride: &crate::ride::Ride, p: &Phy) -> Vehicle {
 /// resolves it, a prop being a contact with no other side (the world does not move). Resolving it is
 /// what loads the chassis' shock (`+0x170`) on a wall, and so the g peak the wreck test reads.
 /// `None` when the world hands over no props or trees, where the ride's own probe stands in.
-pub fn scenery(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Option<Vec<Contact>> {
+///
+/// A prop that moves this tick (a path car's mesh) is struck with its mover (S145,
+/// [`crate::flight_search::Scene`]): the sweep back meets it at its velocity, and the contacts on it
+/// name it in the movers that come back with them, which [`Bump::movers`] carries to the resolve.
+pub fn scenery(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>)> {
     let at = node(at);
     let (field, props, trees) = world.wooded();
     if props.is_none() && trees.is_none() {
@@ -396,8 +403,9 @@ pub fn scenery(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Option
         ..Record::default()
     }];
     contact_search::collide(&mut records, 0, None, None, &mut scene, dt);
+    let movers = contact_search::Search::movers(&scene);
     let [record] = records;
-    Some(record.contacts)
+    Some((record.contacts, movers))
 }
 
 /// The up the ground step's end turns the record's ground search on at or under (P147): the bike's
@@ -453,7 +461,7 @@ pub fn ground_hits(contacts: &[Contact]) -> Vec<crate::air::Contact> {
 
 /// A bike alone in its list: `contacts` against its own object and chassis, the one seat there is.
 pub fn alone(ride: &crate::ride::Ride, p: &Phy, contacts: Vec<Contact>) -> Bump {
-    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)] }
+    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)], movers: Vec::new() }
 }
 
 /// `riders`' contacts, or `None` when none of them carries its collision files.
@@ -471,6 +479,7 @@ fn bump_of(riders: &[(&Rider, &Phy)], me: usize, contacts: Vec<Contact>) -> Bump
         contacts,
         colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(),
         vehicles: riders.iter().map(|&(r, p)| vehicle_of(r, p)).collect(),
+        movers: Vec::new(),
     }
 }
 

@@ -379,6 +379,121 @@ fn the_wheel_on_a_car_moves_as_the_originals_does() {
     assert!(on_cars > WHEELS / 2, "only {on_cars} wheels on a car");
 }
 
+/// The wheel's contact-velocity step's owner branch (S145) against [`contact::other_at`]: the wheel's
+/// contact on another collision object (`+0x1f0`), laid out in RAM s89-along leaves empty, half the
+/// cases on a dynamics body (`+0xf4`: its centre `+0x60`, velocity `+0x70`, unit quaternion
+/// `+0x170`, rates `+0x1b0`) and half on a vehicle's chassis (`+0xf0`: its centre of mass `+0x190`,
+/// velocity `+0x260`, rates `+0x290`, on one of the cars' transform nodes at `+0xf8`), the object's
+/// own centre of mass at `+0x90`. The owner branch is taken over a vehicle the wheel also names
+/// (`+0x1f4`, a car in a third of the cases). Compared: the object's centre in the world (`+0xa0`),
+/// `+0x1b0`, `+0x1c0`, and the step's `+0x170`, `+0x180`, `+0x190` after it. Every `w` lane is random.
+#[test]
+fn the_wheel_on_another_object_moves_as_the_originals_does() {
+    use game_sim::biplane::Body;
+    use game_sim::contact::{self, Collider, Node, Other, Side, Vehicle, Weighed};
+    const WHEEL: u32 = 0x01f8_0000;
+    const CHASSIS: u32 = 0x01f9_0000;
+    const OWNER: u32 = 0x01fa_0000;
+    const OTHER: u32 = 0x01fa_1000;
+    let Some(mut ee) = state() else { return };
+    let step = addr("wheel_contact_velocity").unwrap();
+    let put = |ee: &mut Ee, a: u32, v: Vf| {
+        for (k, x) in v.0.into_iter().enumerate() {
+            ee.set_f32(a + 4 * k as u32, x);
+        }
+    };
+    let mut rng = Rng(0x5145_5145_5145_5145);
+    let mut bodies = 0;
+    for case in 0..WHEELS {
+        let car = CARS[rng.next() as usize % CARS.len()];
+        let hung = CARS[rng.next() as usize % CARS.len()];
+        let on_body = rng.next() % 2 == 0;
+        let named = rng.next() % 3 == 0;
+        let node_at = ee.u32_at(car + at::NODE);
+        let centre = mat(&ee, node_at + at::WORLD).0[3];
+        let (vel, spin) = (rng.around(Vf::ZERO, 60.0, 0.0), rng.around(Vf::ZERO, 6.0, 0.0));
+        let (cofg, load, contact_at) = (rng.around(centre, 8.0, 1.0), rng.around(centre, 8.0, 1.0), rng.around(centre, 8.0, 1.0));
+        let contact_at = Vf::new(contact_at.x(), contact_at.y(), contact_at.z(), rng.f(2.0));
+        let theirs_v = Vf::new(rng.f(60.0), rng.f(60.0), rng.f(60.0), rng.f(2.0));
+        let rates = Vf::new(rng.f(6.0), rng.f(6.0), rng.f(6.0), rng.f(2.0));
+        let own_cofg = Vf::new(rng.f(3.0), rng.f(3.0), rng.f(3.0), rng.f(2.0));
+        let other_centre = Vf::new(centre.x() + rng.f(8.0), centre.y() + rng.f(8.0), centre.z() + rng.f(8.0), rng.f(2.0));
+        let chassis_cofg = Vf::new(rng.f(3.0), rng.f(3.0), rng.f(3.0), rng.f(2.0));
+        let q = {
+            let v = [rng.f(1.0), rng.f(1.0), rng.f(1.0), rng.f(1.0)];
+            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-3);
+            Vf::new(v[0] / n, v[1] / n, v[2] / n, v[3] / n)
+        };
+        for o in (0..0x220).step_by(4) {
+            ee.set_u32(WHEEL + o, 0);
+        }
+        for o in (0..0x2a0).step_by(4) {
+            ee.set_u32(CHASSIS + o, 0);
+        }
+        for o in (0..0x100).step_by(4) {
+            ee.set_u32(OWNER + o, 0);
+        }
+        for o in (0..0x2a0).step_by(4) {
+            ee.set_u32(OTHER + o, 0);
+        }
+        ee.set_u32(WHEEL + 0x1e4, CHASSIS);
+        ee.set_u32(WHEEL + 0x1f0, OWNER);
+        ee.set_u32(WHEEL + 0x1f4, if named { car } else { 0 });
+        put(&mut ee, WHEEL + 0x120, contact_at);
+        put(&mut ee, WHEEL + 0x140, load);
+        ee.set_u32(CHASSIS + at::NODE, ee.u32_at(hung + at::NODE));
+        put(&mut ee, CHASSIS + 0x60, cofg);
+        put(&mut ee, CHASSIS + 0x260, vel);
+        put(&mut ee, CHASSIS + 0x280, spin);
+        put(&mut ee, OWNER + 0x90, own_cofg);
+        if on_body {
+            ee.set_u32(OWNER + 0xf4, OTHER);
+            put(&mut ee, OTHER + 0x60, other_centre);
+            put(&mut ee, OTHER + 0x70, theirs_v);
+            put(&mut ee, OTHER + 0x170, q);
+            put(&mut ee, OTHER + 0x1b0, rates);
+        } else {
+            ee.set_u32(OWNER + 0xf0, OTHER);
+            ee.set_u32(OWNER + 0xf8, node_at);
+            put(&mut ee, OTHER + 0x190, chassis_cofg);
+            put(&mut ee, OTHER + 0x260, theirs_v);
+            put(&mut ee, OTHER + 0x290, rates);
+        }
+        ee.call(step, &[u64::from(WHEEL)], &[], BUDGET);
+
+        let mut collider = Collider { cofg: own_cofg, ..Collider::default() };
+        let under = if on_body {
+            let mut body = Body { position: other_centre, velocity: theirs_v, quat: q, rates, ..Body::default() };
+            let mut rigid = Weighed { body: &mut body, mass: F::ONE };
+            contact::other_at(&mut Other { collider: &mut collider, side: Side::Body(&mut rigid) }, contact_at)
+        } else {
+            let m = mat(&ee, node_at + at::WORLD);
+            let mut v = Vehicle {
+                node: Node { rows: [m.0[0], m.0[1], m.0[2]], origin: m.0[3] },
+                cofg: chassis_cofg,
+                velocity: theirs_v,
+                rates,
+                ..Vehicle::default()
+            };
+            contact::other_at(&mut Other { collider: &mut collider, side: Side::Vehicle(&mut v) }, contact_at)
+        };
+        let own = ride::contact_velocity(vel, spin, load, cofg);
+        let (contact_vel, chassis_vel) = ride::wheel_contact_velocity(own, vel, Some(under));
+        let hung_m = mat(&ee, ee.u32_at(hung + at::NODE) + at::WORLD);
+        let local = chassis::unrotate(&Mat3::new(hung_m.0[0], hung_m.0[1], hung_m.0[2]), chassis_vel);
+        let what = |field: &str| format!("case {case}: on a {}: {field}", if on_body { "body" } else { "chassis" });
+        assert_eq!(bits(vf(&ee, OWNER + 0xa0)), bits(collider.cofg_world), "{}", what("+0xa0 the object's centre in the world"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x1b0)), bits(under.0), "{}", what("+0x1b0 its velocity"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x1c0)), bits(under.1), "{}", what("+0x1c0 its velocity at the contact"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x170)), bits(contact_vel), "{}", what("+0x170 the contact's velocity"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x180)), bits(chassis_vel), "{}", what("+0x180 the chassis' velocity"));
+        assert_eq!(bits(vf(&ee, WHEEL + 0x190)), bits(local), "{}", what("+0x190 the chassis' velocity, its own way"));
+        assert_eq!(ee.u32_at(WHEEL + 0x1a0), 1, "{}", what("+0x1a0"));
+        bodies += usize::from(on_body);
+    }
+    assert!(bodies > WHEELS / 3 && bodies < 2 * WHEELS / 3, "{bodies} of {WHEELS} on a body");
+}
+
 /// The state's cars, stepped by the port, their meshes in `props`: what the shell hands every seat.
 fn traffic_of(ee: &Ee, parts: &[(Vec<u8>, Res)], props: &mut Props) -> Traffic {
     let specs: Vec<Spec> = CARS
@@ -515,4 +630,87 @@ fn a_bike_parked_on_the_train_rides_it() {
     let dragged = parked(false, true).expect("the same state");
     let control = parked(true, true).expect("the same state");
     assert!(dragged.on > 75 && dragged.on > 2 * control.on, "with its drag the bike stayed on {} ticks, {} without the wagon", dragged.on, control.on);
+}
+
+/// What [`thrown`] measured: the wreck bike's slip along [`WAGON`]'s deck and its height over the
+/// roof, both in the wagon's own frame, and how many of its contacts named the wagon as their mover.
+#[derive(Debug)]
+struct Thrown {
+    along: f32,
+    over: f32,
+    on_mover: usize,
+}
+
+/// The wreck bike (`bike\wreckbike.phy`, the thrown machine) let go a foot over [`WAGON`]'s roof at
+/// the wagon's own velocity, and ticked among the world's props for [`PARKED`] ticks, the cars first
+/// as `Sim::step` has them. `still` takes the cars' motion away from the search, the port before
+/// S145, where a body met a car as it meets a wall.
+fn thrown(still: bool) -> Option<Thrown> {
+    use game_sim::contact_search::Search;
+    let ee = state()?;
+    let parts = archives()?;
+    let part = game_sim::phy::Part::read_bytes(&member(&parts, "bike\\wreckbike.phy").expect("the wreck bike's file"), "PhysicsPart1");
+    let scn = member(&parts, "free06.scn").expect("free06.scn");
+    let scene = Scene::parse(&scn).expect("free06's scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_bytes = member(&parts, &leaf).expect("free06's terrain");
+    let terrain = Terrain::parse(&terrain_bytes).expect("free06's terrain");
+    let mut world = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let mut traffic = traffic_of(&ee, &parts, &mut world.props);
+    let first = traffic.first.expect("attached");
+    traffic.frame(DT, &mut world);
+    let car = world.props.props[first + WAGON].moving.expect("the wagon moves");
+    let at = Vf::new(car.pose.0[3].x(), ROOF + 1.0, car.pose.0[3].z(), 1.0);
+    let mut bike = game_sim::wreck_bike::WreckBike::new(&part, ride::WRECK_INERTIA, at, Vf::new(0.0, 0.0, 0.0, 1.0));
+    bike.body.velocity = Vf::new(car.velocity.x(), car.velocity.y(), car.velocity.z(), 0.0);
+    let (mut along, mut over, mut on_mover) = (0.0f32, f32::MIN, 0);
+    for tick in 0..PARKED {
+        traffic.frame(DT, &mut world);
+        if still {
+            world.props.props.iter_mut().for_each(|p| p.moving = None);
+        }
+        let rays = game_sim::wreck_bike::ray_tree();
+        let mut nearby = game_sim::flight_search::search();
+        let mut scene = game_sim::flight_search::Scene::wooded(Some(&world.props), None, None, None, &rays, &bike.record.node, &mut nearby);
+        if !still {
+            // The scene's movers are every prop's, by index, and a car's is its own motion.
+            let movers = scene.movers();
+            let moving = world.props.props[first + WAGON].moving.expect("the wagon moves");
+            assert_eq!(movers.len(), world.props.props.len(), "one mover a prop");
+            assert_eq!(movers[first + WAGON], moving.mover(), "the wagon's mover");
+            let struck = game_sim::contact_search::Struck { object: game_sim::flight_search::FIRST + first + WAGON, other: None, mover: Some((first + WAGON, 2)) };
+            assert_eq!(scene.velocity(&struck).0.map(f32::to_bits), moving.velocity.0.map(f32::to_bits), "the wagon's velocity");
+        }
+        bike.tick(DT, None, &mut scene);
+        on_mover += bike.record.contacts.iter().filter(|c| c.mover == Some(first + WAGON)).count();
+        let pose = traffic.cars[WAGON].pose;
+        let p = bike.body.position;
+        let d = Vf::new(p.x() - pose.0[3].x(), p.y() - pose.0[3].y(), p.z() - pose.0[3].z(), 0.0);
+        let local = chassis::unrotate(&Mat3::new(pose.0[0], pose.0[1], pose.0[2]), d);
+        if tick >= SETTLE {
+            along = along.max(local.z().abs()).max(local.x().abs());
+            over = over.max(p.y() - ROOF);
+        }
+    }
+    Some(Thrown { along, over, on_mover })
+}
+
+/// S145's test: a body's contacts ride their platform. The wreck bike dropped on the moving
+/// wagon's roof lands on it, its contacts name the wagon as their mover (`+0x78`), and the response
+/// meets the wagon's motion, so it is carried; the control, the same with the wagon's motion kept
+/// from the search, has the roof braking the bike against the world and the wagon runs out from
+/// under it.
+#[test]
+fn a_wreck_bike_dropped_on_the_train_rides_it() {
+    let Some(carried) = thrown(false) else { return };
+    eprintln!("carried {carried:?}");
+    assert!(carried.on_mover > 0, "no contact named the wagon: {carried:?}");
+    let left = thrown(true).expect("the same state");
+    eprintln!("still {left:?}");
+    assert_eq!(left.on_mover, 0, "a still car is no mover");
+    // Measured: 1.18 ft of slip and 1.36 ft at most over the roof while carried; 212 ft (off the
+    // wagon's back) without its motion.
+    assert!(carried.along < 3.0, "the carried bike slid {} ft along the deck", carried.along);
+    assert!(0.0 < carried.over && carried.over < 3.0, "the carried bike is {} ft over the roof", carried.over);
+    assert!(left.along > DECK, "without the wagon's motion the bike still stayed on: {left:?}");
 }

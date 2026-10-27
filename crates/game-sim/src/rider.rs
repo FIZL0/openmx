@@ -647,7 +647,10 @@ impl Rider {
             // contacts head the list.
             let ground = bike_col.as_deref().map_or_else(Vec::new, |col| crate::rider_contact::ground(col, &ride.transform(), world, dt));
             in_ground = crate::rider_contact::ground_hits(&ground);
-            let found = bike_col.as_deref().and_then(|col| crate::rider_contact::scenery(col, &ride.transform(), world, dt));
+            let (found, movers) = match bike_col.as_deref().and_then(|col| crate::rider_contact::scenery(col, &ride.transform(), world, dt)) {
+                Some((f, m)) => (Some(f), m),
+                None => (None, Vec::new()),
+            };
             let scenery = match &found {
                 Some(f) => Some(!f.is_empty() || !ground.is_empty()),
                 None => (!ground.is_empty()).then_some(true),
@@ -659,12 +662,19 @@ impl Rider {
                     let found: Vec<_> = found.unwrap_or_default().into_iter().filter(|f| !b.contacts.iter().any(|c| c.other.is_none() && c.from == f.from && c.on_body == f.on_body)).collect();
                     b.contacts.splice(0..0, ground);
                     b.contacts.extend(found);
+                    // The cars' entries (S137) name their movers by prop too (S145): the scenery
+                    // search's list is every prop's, and with nothing struck there, the world's.
+                    b.movers = if movers.is_empty() && b.contacts.iter().any(|c| c.mover.is_some()) {
+                        world.moving().map_or_else(Vec::new, |props| crate::flight_search::movers(&props.props))
+                    } else {
+                        movers
+                    };
                     Some(b)
                 }
                 (None, found) => {
                     let mut list = ground;
                     list.extend(found.unwrap_or_default());
-                    if list.is_empty() { None } else { Some(alone.insert(crate::rider_contact::alone(ride, p, list))) }
+                    if list.is_empty() { None } else { Some(alone.insert(crate::rider_contact::Bump { movers, ..crate::rider_contact::alone(ride, p, list) })) }
                 }
             };
             // The bike's limiter reads the no-hander as the rider's last tick left it (`+0xa44`).
