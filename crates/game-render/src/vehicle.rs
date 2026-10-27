@@ -928,6 +928,46 @@ impl Chassis {
             ..Chassis::request(&rider.ride, &rider.tricks)
         }
     }
+
+    /// **V98:** [`Chassis::riding`] for this chassis running `want` ([`Chassis::want_under`]) under
+    /// the rider. While the body is in a trick this chassis has no clip for ([`Chassis::lacks`]) and
+    /// the bike is on the airborne row for it, the row's two axes are taken to the middle — the
+    /// middle clip at its midpoint, square — in step with the body's own fade into the trick's
+    /// clip, and back out to the body's axes in step with its fade out of it.
+    ///
+    /// The packed pose is the motion driver's, and its airborne arm is the only one that writes it
+    /// from the crossup: a pack's extra leaves it where the whip was, so the bike held the whip under
+    /// a body whose trick clip is square, and the pelvis came 0.68 ft off the seat for a No Footer
+    /// started whipped. A square row is the original's own pose for a stunt the bike has no clip for:
+    /// the motion driver's gesture arm falls back on `bike_air_Mid` at its midpoint
+    /// ([`game_sim::motion`]'s table). The machine's own lags would ease there by their time
+    /// constants, which leave the whip slower than the body's straight ramp does and part the two
+    /// by 0.2 ft in the fade; so the axes are written, lag and request alike, at the body's axes
+    /// scaled towards the middle by its ramp (the two machines' lags follow one request, so the
+    /// body's are where the bike's would be without the trick). Once the body's fade out is over the
+    /// bike's lags are the body's, to the bit, and they stay on them until the body starts something
+    /// else.
+    pub fn riding_under(&mut self, rider: &Rider, want: i32) -> Request {
+        let r = Chassis::riding(rider);
+        let body = &rider.body.veh;
+        let ramp = body.ramp.0.clamp(0.0, 1.0);
+        let whip = match (self.lacks(body.state), self.lacks(body.prev)) {
+            _ if want != va::AIR => return r,
+            // Into the trick out of the airborne row, or out of one trick into another.
+            (true, false) => ramp,
+            (true, true) => 0.0,
+            // Out of the trick, back to the body's own axes, and on them once its ramp is out.
+            (false, true) => 1.0 - ramp,
+            _ => return r,
+        };
+        let mid = va::AXIS_START.0;
+        let towards = |axis: F| if whip >= 1.0 { axis } else { F(mid + (axis.0 - mid) * whip) };
+        let (phase, mix) = (towards(body.phase.value), towards(body.mix.value));
+        // The lags step towards the request from where they are; put them there so the step lands on it.
+        self.stance.driver.phase.value = phase;
+        self.stance.driver.mix.value = mix;
+        Request { phase_axis: phase, mix_axis: mix, ..r }
+    }
 }
 
 impl Geometry {
