@@ -242,6 +242,60 @@ fn the_music_sources_are_listed_and_switched() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn the_music_goes_back_a_song_and_holds_where_it_is() {
+    // A folder of its own: the other music test empties its folder when it starts and ends.
+    let dir = std::env::temp_dir().join(format!("openmx-p174-music-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("b-low.wav"), tone_wav(220.0, 0.5, 44100)).unwrap();
+    std::fs::write(dir.join("a-high.wav"), tone_wav(880.0, 0.25, 22050)).unwrap();
+    let mut music = Music::new(vec![Arc::new(audio::FolderMusic::scan(&dir))], 7);
+    music.wait = true;
+    let mut mixer = Mixer::new(music);
+    mixer.music_volume = 1.0;
+    mixer.folder_volume = 1.0;
+    // With nothing played there is nothing to go back to.
+    assert!(!mixer.music.back());
+    mixer.music.set_pick(Pick::Order);
+    listen(&mut mixer);
+    assert_eq!(mixer.music.now(), Some("folder:a-high.wav"));
+    // Back from the first song is that song again, from its start, and not a second entry.
+    assert!(mixer.music.back());
+    listen(&mut mixer);
+    assert_eq!(mixer.music.now(), Some("folder:a-high.wav"));
+    assert_eq!(mixer.music.played(), ["folder:a-high.wav"]);
+    mixer.music.next();
+    listen(&mut mixer);
+    assert_eq!(mixer.music.now(), Some("folder:b-low.wav"));
+    assert_eq!(mixer.music.played(), ["folder:a-high.wav", "folder:b-low.wav"]);
+    assert!(mixer.music.back());
+    listen(&mut mixer);
+    assert_eq!(mixer.music.now(), Some("folder:a-high.wav"), "back is the song before");
+    assert_eq!(mixer.music.played(), ["folder:a-high.wav"]);
+    // and In Order goes on from it, to the one after it
+    mixer.music.next();
+    listen(&mut mixer);
+    assert_eq!(mixer.music.now(), Some("folder:b-low.wav"));
+
+    // Held: silent, the same song, and not a frame further on (a 0.5 s song held for a second).
+    mixer.music.hold(true);
+    for _ in 0..10 {
+        assert_eq!(rms(&listen(&mut mixer)), 0.0);
+    }
+    assert_eq!(mixer.music.now(), Some("folder:b-low.wav"));
+    mixer.music.hold(false);
+    assert!(rms(&listen(&mut mixer)) > 3000.0);
+    assert_eq!(mixer.music.now(), Some("folder:b-low.wav"), "it goes on where it stopped");
+
+    // The history keeps the last few songs only.
+    for _ in 0..3 * audio::HISTORY {
+        mixer.music.next();
+        listen(&mut mixer);
+    }
+    assert_eq!(mixer.music.played().len(), audio::HISTORY);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------------------------------
 // the engine on a headless ride
 // ---------------------------------------------------------------------------------------------------

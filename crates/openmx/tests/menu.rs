@@ -3072,21 +3072,120 @@ fn hum_listen(speakers: &audio::Speakers) -> Vec<i16> {
 fn tap_heard(m: &mut Menu, r: &mut Reader, speakers: &audio::Speakers, dir: &std::path::Path, control: Control) {
     for report in [Report::from_buttons(control.mask()), Report::idle(), Report::idle(), Report::idle()] {
         m.music_now = speakers.now();
+        m.music_held = speakers.held();
         m.step(r.read(&report));
-        if m.changed() {
-            speakers.apply(&m.settings.music, levels(&m.settings));
-            for tune in m.take_tunes() {
-                match tune {
-                    menu::Tune::Play(id) => speakers.play_now(&id),
-                    menu::Tune::Skip => speakers.skip(),
-                }
-            }
-            if m.take_changed() {
-                menu::save(dir, &m.settings, &m.controls).unwrap();
-            }
-        }
+        hear_tunes(m, speakers, dir);
         hum_listen(speakers);
     }
+}
+
+/// `Front::hear` after a frame that changed the settings, and the save.
+fn hear_tunes(m: &mut Menu, speakers: &audio::Speakers, dir: &std::path::Path) {
+    if m.changed() {
+        speakers.apply(&m.settings.music, levels(&m.settings));
+        for tune in m.take_tunes() {
+            match tune {
+                menu::Tune::Play(id) => speakers.play_now(&id),
+                menu::Tune::Skip => speakers.skip(),
+                menu::Tune::Back => speakers.back(),
+                menu::Tune::Hold(on) => speakers.hold(on),
+            }
+        }
+        if m.take_changed() {
+            menu::save(dir, &m.settings, &m.controls).unwrap();
+        }
+    }
+}
+
+#[test]
+fn the_pauses_player_goes_back_holds_and_skips_by_pad_and_click() {
+    use menu::{Deck, Key};
+    let dir = scratch("p174");
+    let (mut m, mut r) = fresh();
+    let speakers = hum_speakers(&m.settings);
+    m.music_choices = speakers.choices();
+    let tap = |m: &mut Menu, r: &mut Reader, c: Control| tap_heard(m, r, &speakers, &dir, c);
+    let size = (1280, 720);
+    // A click as the shell gives one, the music told to the menu first and heard after.
+    let click = |m: &mut Menu, at: [f32; 2]| {
+        m.music_now = speakers.now();
+        m.music_held = speakers.held();
+        let hit = m.click(at, size);
+        hear_tunes(m, &speakers, &dir);
+        hum_listen(&speakers);
+        hit
+    };
+    let loud = || hum_listen(&speakers)[100];
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert!(m.player_shown());
+    let first = speakers.now().expect("a song under Shuffle");
+
+    // R1 skips, L1 goes back to the song before, the pause still up.
+    tap(&mut m, &mut r, Control::R1);
+    let second = speakers.now().unwrap();
+    assert_ne!(second, first, "R1 is the next song");
+    tap(&mut m, &mut r, Control::L1);
+    assert_eq!(speakers.now(), Some(first.clone()), "L1 is the song before");
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert!(m.paused(0));
+
+    // Square holds it, silent where it is, and plays it on.
+    tap(&mut m, &mut r, Control::Square);
+    assert!(speakers.held() && m.music_held);
+    assert_eq!(loud(), 0, "held is silent");
+    assert_eq!(speakers.now(), Some(first.clone()), "and the same song");
+    tap(&mut m, &mut r, Control::Square);
+    assert!(!speakers.held());
+    assert!(loud() > 500);
+
+    // A click on a control is its press, at once.
+    assert!(click(&mut m, menu::deck_point(Deck::Skip, size)));
+    let third = speakers.now().unwrap();
+    assert_ne!(third, first);
+    assert!(click(&mut m, menu::deck_point(Deck::Back, size)));
+    assert_eq!(speakers.now(), Some(first.clone()));
+    assert!(click(&mut m, menu::deck_point(Deck::Hold, size)));
+    assert!(speakers.held());
+    assert!(!click(&mut m, [10.0, 10.0]), "nowhere near the player");
+    // A skip from held plays the next song.
+    tap(&mut m, &mut r, Control::R1);
+    assert!(!speakers.held() && !m.music_held);
+    assert!(loud() > 500);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+
+    // Settings > Audio has the same two beside Skip Song.
+    m.open(Screen::Audio);
+    let rows = m.page();
+    let label = |k: Key| rows.iter().find(|r| r.key == k).map(|r| r.label.clone());
+    assert_eq!(label(Key::BackSong).as_deref(), Some("Previous Song"));
+    assert_eq!(label(Key::HoldMusic).as_deref(), Some("Pause Music"));
+
+    // With the music off the player does nothing, a click on it refused.
+    let (mut m, mut r) = fresh();
+    m.settings.music = "off".into();
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Start);
+    tap(&mut m, &mut r, Control::R1);
+    assert!(m.take_tunes().is_empty());
+    assert_eq!(m.player_off(), Some("The music is off"));
+    assert!(m.click(menu::deck_point(Deck::Hold, size), size));
+    assert!(m.take_tunes().is_empty() && !m.music_held);
+    // Nor is it there under the pause's confirm.
+    let (mut m, mut r) = fresh();
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Start);
+    while m.pause_rows()[m.cursor(Screen::Pause)] != "Main Menu" {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.confirming().is_some());
+    assert!(!m.player_shown());
+    assert!(!m.click(menu::deck_point(Deck::Skip, size), size));
 }
 
 #[test]

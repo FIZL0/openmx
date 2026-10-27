@@ -91,11 +91,18 @@ pub(super) struct Pen<'a> {
     pub(super) parts: Vec<Part>,
 }
 
+/// The stage in a `size` frame: an em's pixels, and where the stage's corner is.
+pub(super) fn fit(size: (usize, usize)) -> (f32, [f32; 2]) {
+    let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    let em = (w / STAGE.0).min(h / STAGE.1);
+    (em, [(w - STAGE.0 * em) / 2.0, (h - STAGE.1 * em) / 2.0])
+}
+
 impl<'a> Pen<'a> {
     pub(super) fn new(art: &'a Art, out: &'a mut Vec<Sprite>, base: usize, size: (usize, usize)) -> Pen<'a> {
         let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
-        let em = (w / STAGE.0).min(h / STAGE.1);
-        Pen { art, out, base, em, o: [(w - STAGE.0 * em) / 2.0, (h - STAGE.1 * em) / 2.0], size: [w, h], fade: 1.0, parts: Vec::new() }
+        let (em, o) = fit(size);
+        Pen { art, out, base, em, o, size: [w, h], fade: 1.0, parts: Vec::new() }
     }
 
     // ---- coordinates -------------------------------------------------------------------------
@@ -1043,10 +1050,8 @@ impl Pen<'_> {
         let (x, w) = (34.0, 40.0);
         let y = self.heading(&eyebrow, &h, about, x, 10.0, w, 2.6);
         let mut chips = Vec::new();
+        // The song playing is the player's to say (P174).
         if row == "Resume" || row == "Audio" {
-            if let Some(now) = &menu.music_now {
-                chips.push(format!("Now playing *{}*", menu.song_label(now)));
-            }
             chips.push(menu.settings.mix.label().to_string());
         }
         if row.starts_with("Online") || row.starts_with("Seats") {
@@ -1059,12 +1064,80 @@ impl Pen<'_> {
         self.chips(&chips, x, y + 1.0, w);
         let title = if menu.riders > 1 { format!("{}P Paused", menu.pauser + 1) } else { "Paused".into() };
         self.title(&title);
+        if menu.player_shown() {
+            self.music_player(menu);
+        }
         if let Some((ask, rows, row)) = menu.confirming() {
             self.hints(&[(Btn::Circle, "Stay"), (Btn::Cross, "Select")]);
             self.popup(ask, &rows, row);
         } else {
             self.hints(&[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);
         }
+    }
+
+    /// The pause's music player (P174): a glass box with the song playing and its three controls,
+    /// each a disc with its pad button under it, dimmed while the music is off.
+    fn music_player(&mut self, menu: &Menu) {
+        use super::player::{BOX, Deck, RADIUS, centre};
+        let b = BOX;
+        self.round([b[0] + 0.3, b[1] + 0.35, b[2], b[3]], 0.9, SHADOW, SHADOW);
+        self.round(b, 0.9, GLASS, GLASS);
+        self.ring(b, 0.9, 0.08, RIM);
+        let off = menu.player_off();
+        let text_w = centre(Deck::Back)[0] - RADIUS - 1.2 - (b[0] + 1.2);
+        let eyebrow = match (off, menu.music_held) {
+            (Some(_), _) => "MUSIC",
+            (None, true) => "PAUSED",
+            (None, false) => "NOW PLAYING",
+        };
+        self.text(Weight::Bold, eyebrow, b[0] + 1.2, b[1] + 1.4 + CAP, 0.9, 0.0, EYEBROW, Align::Left);
+        let song = match (off, &menu.music_now) {
+            (Some(why), _) => why.to_string(),
+            (None, Some(now)) => menu.song_label(now),
+            (None, None) => "No song yet".to_string(),
+        };
+        let size = 1.3;
+        let song = self.fit(Weight::Heavy, &song, size, text_w);
+        self.text(Weight::Heavy, &song, b[0] + 1.2, b[1] + 3.6 + CAP * size, size, 0.0, if off.is_some() { DUST } else { CHALK }, Align::Left);
+        let was = self.fade;
+        if off.is_some() {
+            self.fade = was * 0.45;
+        }
+        for d in Deck::ALL {
+            let [x, y] = centre(d);
+            self.disc(x, y, RADIUS, SHOULDER);
+            self.ring([x - RADIUS, y - RADIUS, 2.0 * RADIUS, 2.0 * RADIUS], RADIUS, 0.1, RIM);
+            let k = RADIUS * 0.42;
+            match d {
+                // a bar and two heads, pointing the way the song goes
+                Deck::Back | Deck::Skip => {
+                    let dir = if d == Deck::Back { -1.0 } else { 1.0 };
+                    self.arrow(x - dir * k * 0.45, y, [dir, 0.0], k * 1.1, CHALK);
+                    self.arrow(x + dir * k * 0.45, y, [dir, 0.0], k * 1.1, CHALK);
+                    let bar = x + dir * k * 1.1;
+                    self.line([bar, y - k * 0.75], [bar, y + k * 0.75], k * 0.18, k * 0.18, CHALK);
+                }
+                Deck::Hold if menu.music_held => self.arrow(x + k * 0.15, y, [1.0, 0.0], k * 1.6, CHALK),
+                Deck::Hold => {
+                    for dx in [-0.42, 0.42] {
+                        self.line([x + dx * k, y - k * 0.8], [x + dx * k, y + k * 0.8], k * 0.3, k * 0.3, CHALK);
+                    }
+                }
+            }
+            // its pad button, under it
+            let hy = y + RADIUS + 0.95;
+            match d {
+                Deck::Hold => self.button(Btn::Square, x, hy, 1.05),
+                _ => {
+                    let word = if d == Deck::Back { "L1" } else { "R1" };
+                    let size = 0.55;
+                    let w = self.wide(Weight::Heavy, word, size) + 0.65;
+                    self.round([x - w / 2.0, hy - 0.42, w, 0.84], 0.27, SHOULDER, SHOULDER);
+                    self.text(Weight::Heavy, word, x, Pen::mid(hy, size), size, 0.0, CHALK, Align::Centre);
+                }
+            }
+        }
+        self.fade = was;
     }
 
     fn online(&mut self, menu: &Menu) {

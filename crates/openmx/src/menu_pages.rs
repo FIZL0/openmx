@@ -102,6 +102,9 @@ pub enum Key {
     MusicPlays,
     Song,
     SkipSong,
+    /// Back to the song before, and the music held or played on (P174): the pause player's two.
+    BackSong,
+    HoldMusic,
     /// A seat's one Controls choice (P81): New, or Original on one of its controller presets.
     BikeLayout,
     PlaneLayout,
@@ -517,6 +520,13 @@ impl Menu {
             skip.value = self.song_label(now);
         }
         rows.push(skip);
+        let off = s.music == "off";
+        rows.push(Row::action(Key::BackSong, "Previous Song", "Back to the song before this one.").off_if(off, "The music is off"));
+        rows.push(match self.music_held {
+            true => Row::action(Key::HoldMusic, "Play Music", "The music is paused. On from where it stopped."),
+            false => Row::action(Key::HoldMusic, "Pause Music", "Hold the song where it is, until Play Music."),
+        }
+        .off_if(off, "The music is off"));
         rows
     }
 
@@ -1094,7 +1104,16 @@ impl Menu {
             Key::Level(i) => s.nudge(i, p.left, p.right),
             Key::MusicPlays => self.music_plays(d),
             Key::Song if side => self.step_song(d),
-            Key::SkipSong if p.ok => self.skip_song(),
+            Key::SkipSong if p.ok => {
+                self.music_held = false;
+                self.skip_song();
+            }
+            Key::BackSong if p.ok => {
+                self.work_deck(Deck::Back);
+            }
+            Key::HoldMusic if p.ok => {
+                self.work_deck(Deck::Hold);
+            }
             Key::BikeLayout => {
                 let i = self.control_seat();
                 let (layout, preset) = control_choices()[next(row)];
@@ -1262,11 +1281,22 @@ impl Menu {
     }
 
     /// Skip Song: on to the next song, which under One Song is the next one repeated.
-    fn skip_song(&mut self) {
+    pub(super) fn skip_song(&mut self) {
         if self.plays() == PLAYS_ONE {
             self.step_song(1);
         } else {
             self.tunes.push(Tune::Skip);
+        }
+    }
+
+    /// Back a song (P174): the one played before, which under One Song is the one before in the
+    /// list, repeated. The music plays on if it was held.
+    pub(super) fn back_song(&mut self) {
+        self.music_held = false;
+        if self.plays() == PLAYS_ONE {
+            self.step_song(-1);
+        } else {
+            self.tunes.push(Tune::Back);
         }
     }
 

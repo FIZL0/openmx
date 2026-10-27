@@ -58,6 +58,10 @@ mod pages;
 pub mod cameras;
 #[path = "menu_screens.rs"]
 mod screens;
+#[path = "menu_player.rs"]
+mod player;
+#[allow(unused_imports)]
+pub use player::{Deck, deck_point};
 #[allow(unused_imports)] // the tests' and the shell's, not every includer's
 pub use pages::{GARAGE_TABS, Key, Kind, PLAYERS, Pack, Row, SETTINGS_TABS, graphics_label, pack_name, pack_of};
 
@@ -2364,6 +2368,10 @@ pub enum Tune {
     Play(String),
     /// On to the next song.
     Skip,
+    /// Back to the song before (P174).
+    Back,
+    /// Hold the music where it is (`true`), or let it play on (P174).
+    Hold(bool),
 }
 
 /// What a press did, for the sound it makes (P65): the original's menus play one of `ui.aud`'s
@@ -2588,6 +2596,8 @@ pub struct Menu {
     pub air_lock: Option<String>,
     /// The song playing, by id, as the shell last said (P56).
     pub music_now: Option<String>,
+    /// Whether the music is held, as the shell last said, or as the pause's player just asked (P174).
+    pub music_held: bool,
     /// The song the Game Audio Options' song row is on, in [`Menu::music_choices`].
     music_at: usize,
     /// What the song rows asked since [`Menu::take_tunes`] last took it.
@@ -2807,6 +2817,7 @@ impl Menu {
             mods_lock: None,
             air_lock: None,
             music_now: None,
+            music_held: false,
             music_at: 0,
             tunes: Vec::new(),
             cues: Cues::default(),
@@ -3842,6 +3853,11 @@ impl Menu {
                 if p.back || p.start {
                     self.stack.clear();
                     return Act::Resume;
+                }
+                // The pause's music player (P174): L1 back, Square pause or play, R1 skip.
+                if let Some(c) = player::press(p) {
+                    self.work_deck(c);
+                    return Act::Stay;
                 }
                 if at == PAUSE_SEATS && self.opening != Opening::No {
                     if p.ok || p.left || p.right {

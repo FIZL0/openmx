@@ -133,6 +133,14 @@ impl Screen {
             }
     }
 
+    /// Where the mouse's left button went down in the last poll, in window pixels (P174).
+    pub fn clicks(&self) -> &[(i32, i32)] {
+        match &self.inner {
+            Inner::X(w) => w.clicks(),
+            Inner::Gpu(w) => w.clicks(),
+        }
+    }
+
     pub fn resized(&mut self) -> bool {
         let r = match &mut self.inner {
             Inner::X(w) => w.resized(),

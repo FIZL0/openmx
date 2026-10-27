@@ -100,3 +100,15 @@ fn the_cursor_is_hidden_only_for_an_unpaused_ride_in_focus() {
     assert!(m.paused(1) && !m.paused(0) && m.screen().is_none());
     assert!(shown(Showing::Ride(Some(&m)), true), "2P's pause shows it");
 }
+
+#[test]
+fn a_click_is_read_in_the_frame_the_window_shows() {
+    use cursor::to_frame;
+    // A frame the window's own size: the same point, at the pixel's middle.
+    assert_eq!(to_frame((10, 20), (1280, 720), (1280, 720), 1), Some([10.5, 20.5]));
+    // At twice the scale, centred in a wider window with bars either side (a 4:3 frame).
+    assert_eq!(to_frame((160 + 2 * 50, 4 * 2), (1600, 960), (640, 480), 2), Some([50.25, 4.25]));
+    assert_eq!(to_frame((100, 300), (1600, 960), (640, 480), 2), None, "in the bar");
+    assert_eq!(to_frame((1600 - 100, 300), (1600, 960), (640, 480), 2), None);
+    assert_eq!(to_frame((-1, 5), (640, 480), (640, 480), 1), None);
+}
