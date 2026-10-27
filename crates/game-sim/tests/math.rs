@@ -153,6 +153,13 @@ impl Gen {
         core::array::from_fn(|i| (v[i] / n).to_bits())
     }
 
+    /// A unit quaternion a few degrees off the identity on each axis, the way a bike in the air is.
+    fn small_turn(&mut self) -> [u32; 4] {
+        let v = [self.range(-0.1, 0.1), self.range(-0.3, 0.3), self.range(-0.1, 0.1), 1.0f32];
+        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]).sqrt();
+        core::array::from_fn(|i| (v[i] / n).to_bits())
+    }
+
     /// A quaternion: usually a unit one, sometimes an arbitrary quadword.
     fn quat(&mut self) -> [u32; 4] {
         if self.one_in(5) { self.quad() } else { self.unit_quat() }
@@ -447,6 +454,42 @@ fn the_spherical_interpolation() {
     println!("{guarded} of {N} inputs came back as `a` (the nearly-parallel guard, or t = 0)");
     assert!(guarded > 100, "the |cos| >= 1 guard was barely reached: {guarded}");
     assert_eq!(wrong, 0, "{wrong} of {N} interpolations differ");
+}
+
+/// A quaternion as three Euler angles (S118), against the original reading the game's own arc cosine
+/// table. Half the inputs are small turns, a few degrees of roll and pitch off level, where the arc
+/// cosine's argument sits just under one and a last bit in it is a large step in the angle; the first
+/// is the roll capture's orientation at its tick 66, whose roll the airborne control levels against.
+#[test]
+fn a_quaternion_as_euler_angles() {
+    let Some(mut ee) = game_or_skip() else { return };
+    ee.hooks.insert(addr("mem_alloc").unwrap(), Box::new(|ee| ee.set(2, TABLE as u64)));
+    ee.call(addr("acos_table_build").unwrap(), &[], &[], 2_000_000_000);
+    assert_eq!(ee.v0(), 1, "the game's arc cosine table builder reported failure");
+    let table = AcosTable::build();
+
+    let at = addr("quat_to_euler").unwrap();
+    let (out, q) = (SCRATCH, SCRATCH + 0x10);
+    let mut g = Gen(0x5118_e01e);
+    let mut wrong = 0;
+    for i in 0..N {
+        let qq = match i {
+            0 => [0x3e42_48c9, 0xbca0_03ed, 0x3cf7_21ef, 0x3f7b_2e80],
+            _ if i % 2 == 0 => g.small_turn(),
+            _ => g.quat(),
+        };
+        put(&mut ee, q, qq);
+        ee.call(at, &[out as u64, q as u64], &[], 10_000);
+        let ours = math::quat_to_euler(vf(qq), &table);
+        let theirs = get(&ee, out);
+        // The original writes the three angles and leaves `w` as the stack had it.
+        let ours = ours.to_bits();
+        if !same("euler", i, [theirs[0], theirs[1], theirs[2], ours[3]], ours) {
+            wrong += 1;
+            assert!(wrong < 6, "stopping after six");
+        }
+    }
+    assert_eq!(wrong, 0, "{wrong} of {N} quaternions' angles differ");
 }
 
 // --- the inverse ------------------------------------------------------------------------------------

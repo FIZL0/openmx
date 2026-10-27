@@ -8467,14 +8467,17 @@ fn replay_a_save_state_case(acc: &Capture, st: &SaveState, seed: u32, text: &str
 /// the start itself, rolled over the lip and braked down the face (`roll`: 37 ft/s off the lip, a
 /// 45-tick flight and a landing at 64 ft/s; `roll2`: coasted on at 15 ft/s, braked to a stop on the
 /// face, held there 150 ticks and let go). The states' RAM images are `./kit state ram`'s of the
-/// slots `tele.py` saved, in `context/states/`. Then the ticks not compared (`late`), and the last
-/// tick the path and the slip flags agree through. The slip flags agree on every tick of nose, side
-/// and roll2; the path parts by ulps (S107's drift), and roll's slip at the 64 ft/s landing (S67).
+/// slots `tele.py` saved, in `context/states/`. Then the ticks not compared (`late`: roll's row 70
+/// was read a tick late, the same words as its row 71), and the last tick the path and the slip
+/// flags agree through. The slip flags agree on every tick of all four, roll's past its landing
+/// (S118); side and roll2 agree on every lane of every tick. Nose's path parts by an ulp at 180, and
+/// roll's flight by its roll rate at 67 (S118's journal: not the Euler angles, not the wheels), which
+/// reaches its path at 132.
 const S106_CASES: [(&str, &str, &str, &[u64], u64, u64); 4] = [
-    ("nose", "s106-nose", "the brake held from standing on a 53° face, nose down", &[1], 27, 200),
-    ("side", "s106-side", "the brake held from standing on a 46° face, side on", &[], 76, 200),
-    ("roll", "", "rolled over the lip and braked down the face", &[], 61, 112),
-    ("roll2", "", "coasted over the lip at 15 ft/s, braked to a stop on the face, then let go", &[], 73, 421),
+    ("nose", "s106-nose", "the brake held from standing on a 53° face, nose down", &[1], 179, 200),
+    ("side", "s106-side", "the brake held from standing on a 46° face, side on", &[], 200, 200),
+    ("roll", "", "rolled over the lip and braked down the face", &[70], 131, 240),
+    ("roll2", "", "coasted over the lip at 15 ft/s, braked to a stop on the face, then let go", &[], 421, 421),
 ];
 
 /// **Each of S106's braked slopes, replayed in the port from its own save state**
