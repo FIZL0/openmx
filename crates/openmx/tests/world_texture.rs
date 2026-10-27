@@ -196,6 +196,7 @@ fn splat() -> Splat {
         fixed: 0.0,
         turn: angle.sin_cos(),
         reads: (true, false),
+        mip: None,
     };
     Splat { textures: vec![layer], passes: vec![pass], shadow: None, meshes: None }
 }

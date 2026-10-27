@@ -33,7 +33,7 @@ fn flat_chunk(cells: u32, size: f32, x: u32, z: u32) -> GroundChunk {
 }
 
 fn pass(blend: Option<[u8; 4]>) -> Pass {
-    Pass { texture: 0, scale: [0.05, 0.05], angle: 0.0, turn: (0.0, 1.0), rgba: [128.0; 4], blend, fixed: 128.0, reads: (true, true) }
+    Pass { texture: 0, scale: [0.05, 0.05], angle: 0.0, turn: (0.0, 1.0), rgba: [128.0; 4], blend, fixed: 128.0, reads: (true, true), mip: None }
 }
 
 /// A road `side` feet square at `x0`, `z0`: texture 0 across it once.

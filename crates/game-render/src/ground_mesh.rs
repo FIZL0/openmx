@@ -296,6 +296,7 @@ mod tests {
             blend: Some([0, 1, 0, 1]),
             fixed: 128.0,
             reads: (true, true),
+            mip: None,
         }
     }
 
