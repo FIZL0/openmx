@@ -78,7 +78,11 @@ S136 gave only path cars a `traffic::Moving`, and only the wheels read it. Now:
   part's motion is zero.
 - `./kit check --all` (the gate). The first run went red on train.rs's nose test (above, fixed) and
   on `one_fps` (a frame took 83.7 ms at load 27). Run alone at load 10, `one_fps` passed with no
-  change to the code, so it was a load flake. The lobby load flakes passed on their own rerun.
+  change to the code, so it was a load flake. It went red again in `./kit done`'s gate at load 41
+  (93 ms), with ecosystem.rs's `the_densest_view_draws_no_slower` red too. So I built the merge base
+  (6d41630e) beside it and ran `openmx --headless --track free06 --timings --renderer software
+  --frames 120` alternately, three times each, at load ~40. The base gave 52–79 ms a frame and S145
+  37–71 ms, the sim ~8–38 ms in both. That is noise from the load, not a cost of S145's. The lobby load flakes passed on their own rerun.
 
 ## Not verified / not 1:1
 
