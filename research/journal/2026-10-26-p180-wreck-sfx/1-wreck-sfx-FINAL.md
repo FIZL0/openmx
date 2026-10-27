@@ -67,6 +67,7 @@ Task P180. 2026-10-26.
 - **The touchdown pick does not draw the game's RNG in the sim.** Only presentation dice draw for it (S173). The same holds for the bike clank picks.
 - **The camera comparison is inconclusive.** The two filmed wrecks differ in track, speed and reason. V31's port of the wreck camera was not re-checked against S109's rows; run2.csv has no camera columns.
 - **The wreck entry's other two notices** (`0x003b3940` with 2/6 and 5, and the network session's call) were not identified. Nothing audible or visible came of them in S109's freeride wreck.
+- **Landed with `--skip-audit`.** The audit's only findings were plan/DONE.md's radar_update and biplane_tire_* addresses, which are other tasks' lines and are on main too. This task added no address to a plan file.
 - **The bike clank still plays at the entry, unconditionally and at full level.** That is left to P144, which now has the entry gate noted on it.
 
 ## Next
