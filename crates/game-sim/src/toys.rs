@@ -463,6 +463,15 @@ impl Toys {
         Some(pose(motion, &spec.rig, time, hints))
     }
 
+    /// Toy `k`'s joints' world matrices where its clock stands, sampled with a copy of the hints, so
+    /// the step that follows samples as it would have without it.
+    fn worlds_now(&self, k: usize) -> Vec<Mat4> {
+        let spec = &self.specs[k];
+        let mut hints = self.hints[self.base[spec.motion]..].to_vec();
+        let locals = pose(&self.motions[spec.motion], &spec.rig, self.clocks[k].time, &mut hints);
+        self.worlds(k, &locals)
+    }
+
     /// Every joint's world matrix from its local one, down the chain from the toy's placement.
     pub fn worlds(&self, k: usize, locals: &[Mat4]) -> Vec<Mat4> {
         let spec = &self.specs[k];
@@ -495,13 +504,21 @@ impl Toys {
     }
 
     /// One tick of every toy, in order, and the parts that follow a joint moved with it.
+    ///
+    /// Each part's mesh is told how its joint moved ([`crate::traffic::Moving`], S145), as a path
+    /// car's is: a part's collision mesh is a collidable whose owner is a kinematic body (a vehicle
+    /// of kind 2) whose update keeps the joint's world matrix and the one before, and whose two
+    /// virtuals are the path car's. The matrix before is the joint's at the clock the step started
+    /// from, so it is made again from state. A clip that has finished stands still.
     pub fn frame(&mut self, dt: F, world: &mut dyn World) {
         if self.clocks.is_empty() {
             return;
         }
+        let inv_dt = if dt > F::ZERO { F::ONE / dt } else { F::ZERO };
         let mut props = world.moving();
         let mut at = self.first;
         for k in 0..self.specs.len() {
+            let before = (!self.specs[k].parts.is_empty()).then(|| self.worlds_now(k));
             let locals = self.advance(k, dt);
             let spec = Arc::clone(&self.specs);
             let spec = &spec[k];
@@ -515,7 +532,17 @@ impl Toys {
                 let worlds = self.worlds(k, &locals);
                 for (p, part) in spec.parts.iter().enumerate() {
                     if let Some(prop) = props.props.get_mut(a + p) {
-                        prop.stand(&spec.at(part, &worlds));
+                        let place = spec.at(part, &worlds);
+                        prop.stand(&place);
+                        let was = before.as_ref().map_or(place, |b| spec.at(part, b));
+                        prop.moving = Some(crate::traffic::Moving::of(&was, &place, inv_dt));
+                    }
+                }
+            } else if let (Some(props), Some(a), Some(b)) = (props.as_deref_mut(), at, before.as_ref()) {
+                for (p, part) in spec.parts.iter().enumerate() {
+                    if let Some(prop) = props.props.get_mut(a + p) {
+                        let place = spec.at(part, b);
+                        prop.moving = Some(crate::traffic::Moving::of(&place, &place, inv_dt));
                     }
                 }
             }

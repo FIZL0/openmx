@@ -267,8 +267,8 @@ pub struct WreckBike {
 }
 
 /// The node's dynamics world as the wreck bike sees it: one body, the part's force listener, its
-/// preforce and post listeners.
-struct Lists<'a>(&'a mut WreckBike);
+/// preforce and post listeners, and the movers the search's contacts name (S145).
+struct Lists<'a>(&'a mut WreckBike, &'a [contact::Mover]);
 
 impl Dynamics for Lists<'_> {
     fn count(&self, list: List) -> i32 {
@@ -282,9 +282,10 @@ impl Dynamics for Lists<'_> {
     }
     fn force(&mut self, _i: i32, _h: F) {
         let WreckBike { body, mass, gravity, collider, record } = &mut *self.0;
+        let movers = self.1;
         biplane::collision_force(body, *gravity, |body| {
             let mut rigid = Weighed { body, mass: *mass };
-            contact::resolve(collider, &mut rigid, &mut record.contacts, &mut [], &[], true);
+            contact::resolve(collider, &mut rigid, &mut record.contacts, &mut [], movers, true);
         });
     }
     fn enabled(&self, _body: i32) -> bool {
@@ -343,7 +344,8 @@ impl WreckBike {
     pub fn tick(&mut self, dt: F, ground: Option<&dyn Heightfield>, objects: &mut dyn Search) {
         contact_search::clear(&mut self.record, Some(&mut self.body));
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), ground, objects, dt);
-        WORLD.step(dt, &mut Lists(self));
+        let movers = objects.movers();
+        WORLD.step(dt, &mut Lists(self, &movers));
     }
 
     /// [`WreckBike::tick`] in a world with the ecosystem's plants in it: [`WreckBike::tick_among`]

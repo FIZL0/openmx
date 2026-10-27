@@ -1436,8 +1436,10 @@ pub fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> V
 /// and its velocity at the wheel's contact point (`+0x1b0`, `+0x1c0`, [`crate::traffic::Moving::at`]),
 /// `None` on the world, where the original takes off its `(0, 0, 0, 1)`, which changes nothing.
 ///
-/// Each is a `vsub.xyz`, so `w` is the first operand's. The owner-body branch (a contact on another
-/// body, `+0x1f0`) is not here: nothing the port's bike can stand on is one.
+/// Each is a `vsub.xyz`, so `w` is the first operand's. On another collision object (`+0x1f0`, a
+/// body or a vehicle's chassis), which the original asks before the vehicle, `under` is
+/// [`crate::contact::other_at`]'s (S145, proved); the ride's wheel search finds none, as it has no
+/// other riders' bikes in it, so [`under`] only ever answers a vehicle.
 pub fn wheel_contact_velocity(own: Vf, vel: Vf, under: Option<(Vf, Vf)>) -> (Vf, Vf) {
     match under {
         Some((velocity, at)) => (sub_xyz(own, at), sub_xyz(vel, velocity)),
@@ -1558,6 +1560,8 @@ const BIKE_SEARCH_CAPACITY: i32 = 256;
 ///
 /// **This probe is the port's.** The original stops the bike with its eleven body rays (`+0x7c4`)
 /// and the chassis' sweep back, neither of which the ride runs against the world's props yet.
+/// Against a prop that moves, [`contacts`] kills only the velocity into it relative to the prop's
+/// (S145).
 fn velocity_bundle(ch: &chassis::Chassis, dt: F) -> Bundle {
     let mut b = Bundle::default();
     let cofg = ch.cofg_world;
@@ -2291,11 +2295,17 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
 
     let b = velocity_bundle(ch, dt);
     let mut record = Record::new();
+    // What the probe stopped on, when that is a prop that moves this frame (S145).
+    let mut platform = None;
     if let Some(touched) = scenery {
         *touching |= touched;
     } else {
         world.solid(&b, &mut record);
+        let solid = (record.hit[0], record.fraction[0], record.owner[0]);
         world.groups(&b, &mut record);
+        if solid.0 && record.fraction[0] == solid.1 && record.owner[0] == solid.2 {
+            platform = world.moving().and_then(|p| p.props.get(usize::try_from(solid.2).ok()?)?.moving);
+        }
     }
     if record.hit[0] {
         // `Record::push`'s own arithmetic: the travel the triangle took away, along the normal —
@@ -2306,7 +2316,12 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
         let left = scale(probe.dir, F::ONE - record.fraction[0]);
         let blocked = scale(normal, dot3(left, normal));
         ch.impulse = sub_xyz(ch.impulse, scale(blocked, probe.length));
-        let into = dot3(mvc.vel, normal).min(F::ZERO);
+        // On a moving prop (a path car's mesh) only the velocity into it relative to the car's at the
+        // hit point is killed (S145): the bike rides its platform as the wheels do ([`under`]).
+        let into = match platform {
+            Some(moving) => dot3(sub_xyz(mvc.vel, moving.at(record.point[0]).1), normal).min(F::ZERO),
+            None => dot3(mvc.vel, normal).min(F::ZERO),
+        };
         mvc.vel = sub_xyz(mvc.vel, scale(normal, into));
         *touching = true;
     }

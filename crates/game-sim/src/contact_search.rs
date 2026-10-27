@@ -380,6 +380,11 @@ pub trait Search {
     /// The velocity of what the sweep struck: its collision object's body (or vehicle chassis), or,
     /// with none, its mover's.
     fn velocity(&self, struck: &Struck) -> Vf;
+    /// The movers a [`Struck::mover`] indexes, for [`crate::contact::resolve`] (S145). None by
+    /// default: a world whose hits name no mover.
+    fn movers(&self) -> Vec<crate::contact::Mover> {
+        Vec::new()
+    }
 }
 
 /// The sweep back, on an object with a body. (The original also sweeps an object on a vehicle's

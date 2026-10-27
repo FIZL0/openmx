@@ -232,10 +232,12 @@ fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop]) -> Option<Contact> {
 }
 
 /// What of a bike's list the wreck test reads as scenery: its own entries (kind 0) with nothing on
-/// the other side, each reaching as high as its ray's end in the bike's model space.
+/// the other side, each reaching as high as its ray's end in the bike's model space. The test reads
+/// the other side's record (`+0x74`) alone, so an entry naming only a mover (`+0x78`), as the body
+/// rays' on a moving prop do, is scenery (S145).
 pub fn wreck_contacts(list: &[Contact]) -> Vec<air::Contact> {
     list.iter()
-        .filter(|c| c.kind == 0 && c.other.is_none() && c.mover.is_none())
+        .filter(|c| c.kind == 0 && c.other.is_none())
         .map(|c| air::Contact { mirrored: false, reach: F(c.on_body.y()), other: air::Other::Scenery })
         .collect()
 }

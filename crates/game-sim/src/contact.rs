@@ -557,6 +557,33 @@ fn against(own: &mut Collider, e: &mut Contact, other: Option<&mut Other<'_>>, m
     own.normal_speed = dot(own.relative, e.normal);
 }
 
+/// **What a wheel stands on, when it is another collision object** (S145): the wheel's
+/// contact-velocity step's owner branch (`+0x1f0` set), which the step takes before the vehicle one.
+/// The object's own centre of mass is put into the world first, as [`Collider::cofg_world`]
+/// (`+0xa0`); then, on a dynamics body (`+0xf4`), the body's velocity and its velocity at the world
+/// `point`, its arm from the body's centre turned into the body's frame — or, on a vehicle's chassis
+/// (`+0xf0`, its transform `+0xf8`), the same through the transform, the arm from the chassis' centre
+/// of mass moved by the object's. The two are what the step keeps at `+0x1b0` and `+0x1c0`: the
+/// arithmetic the resolution's other side has ([`relative_velocity`]), with no contact to keep the
+/// arm in.
+pub fn other_at(o: &mut Other<'_>, point: Vf) -> (Vf, Vf) {
+    match &o.side {
+        Side::Body(b) => {
+            let q = b.quat();
+            o.collider.cofg_world = turn(q, o.collider.cofg);
+            let centre = plus(b.position(), o.collider.cofg_world);
+            let arm = unturn(q, minus(point, centre));
+            (b.velocity(), plus(turn(q, cross(b.rates(), arm)), b.velocity()))
+        }
+        Side::Vehicle(v) => {
+            o.collider.cofg_world = v.node.rotate(o.collider.cofg);
+            let local = v.node.unplace(point);
+            let arm = minus(local, plus(v.cofg, o.collider.cofg_world));
+            (v.velocity, plus(v.node.rotate(cross(v.rates, arm)), v.velocity))
+        }
+    }
+}
+
 /// A force at a world point on the body: the moment about the centre of mass, into the body's frame and
 /// masked lane by lane, then the force itself.
 fn apply(own: &Collider, side: &mut Own<'_>, f: Vf, at: Vf, mask: Vf) {
