@@ -18,7 +18,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// The rider body actor in every s56 state (the human's vehicle less 0x400).
-const ACTOR: u32 = 0x017a_7700;
+const ACTOR_S56: u32 = 0x017a_7700;
+
+std::thread_local! {
+    /// The rider body actor the helpers read: S56's, or a 2p rider's ([`with_actor`]).
+    static ACTOR_AT: std::cell::Cell<u32> = const { std::cell::Cell::new(ACTOR_S56) };
+}
+
+/// The rider body actor the helpers below read and the original's update is called on.
+fn body_actor() -> u32 {
+    ACTOR_AT.with(|a| a.get())
+}
+
+/// Points the helpers at another rider body actor (a 2p rider's) on this test's thread.
+fn with_actor(a: u32) {
+    ACTOR_AT.with(|c| c.set(a));
+}
 const PARTS: u32 = 0x2f4;
 
 /// One wreck: its capture's name, and the frame of its state.
@@ -125,7 +140,7 @@ fn state_in(dir: &str, w: &Wreck) -> Option<Ee> {
     if let Some(spr) = ctx(&format!("capture/{dir}/{}-{}.spr.bin", w.name, w.frame)) {
         ee.spr = std::fs::read(spr).expect("the scratchpad");
     }
-    assert_eq!(ee.u32_at(ACTOR + 0x2e0), 18, "no rider body actor at {ACTOR:#x}");
+    assert_eq!(ee.u32_at(body_actor() + 0x2e0), 18, "no rider body actor at {:#x}", body_actor());
     assert_eq!(ee.u32_at(addr("frame_counter").unwrap()), w.frame, "the state is not frame {}", w.frame);
     Some(ee)
 }
@@ -135,7 +150,7 @@ fn quad(ee: &Ee, a: u32) -> Vf {
 }
 
 fn bone_body(ee: &Ee, i: usize) -> u32 {
-    ee.u32_at(ee.u32_at(ACTOR + PARTS) + 0xb0 * i as u32 + 0xa4)
+    ee.u32_at(ee.u32_at(body_actor() + PARTS) + 0xb0 * i as u32 + 0xa4)
 }
 
 /// What the capture holds of each bone's body, by column and offset.
@@ -178,7 +193,7 @@ fn lay_in(ee: &mut Ee, cap: &Capture, frame: u32) {
 /// [`lay_in`], with the wreck bike put back in the tree ([`place_bike`]) or, `placed` false, left
 /// where the first state had it (S62's replay before S113).
 fn lay_in_as(ee: &mut Ee, cap: &Capture, frame: u32, placed: bool) {
-    let req = ee.u32_at(ACTOR + 0x488);
+    let req = ee.u32_at(body_actor() + 0x488);
     set_bytes(ee, req - 0x200, &cap.bytes(frame, "req_area"));
     let far = ee.u32_at(req + 0x1ac);
     if cap.cols.contains_key("bike_a") {
@@ -210,7 +225,7 @@ fn lay_in_as(ee: &mut Ee, cap: &Capture, frame: u32, placed: bool) {
 /// it out of the broad phase (`B+4` 0, S108), out of every node of the track's tree too, as the
 /// game's unwreck, which the replay does not run, leaves it.
 fn place_bike(ee: &mut Ee) {
-    let b = ee.u32_at(ee.u32_at(ACTOR + 0x488) + 0x1ac);
+    let b = ee.u32_at(ee.u32_at(body_actor() + 0x488) + 0x1ac);
     let place = ee.u32_at(b + 4);
     if place == 0 {
         let sphere = ee.u32_at(collision(ee, 0) + coll_at::SPHERE);
@@ -369,7 +384,7 @@ fn originals_tick_as(ee: &mut Ee, cap: &Capture, frame: u32, placed: bool) -> Re
             r.rand();
         });
         set_rng(ee, r.state());
-        ee.call(update, &[u64::from(ACTOR)], &[cap.get(frame, "dt")], 2_000_000_000);
+        ee.call(update, &[u64::from(body_actor())], &[cap.get(frame, "dt")], 2_000_000_000);
         let drew = draws(r.state(), rng_at(ee), 1000).expect("the body's draws");
         let d = differ(cap, frame, &ee_bones(ee));
         if d.is_empty() {
@@ -475,7 +490,7 @@ fn what_the_wrecks_read() {
     for w in &WRECKS {
         let Some(cap) = Capture::load(w.name) else { return };
         let Some(mut ee) = state(w) else { return };
-        let req = ee.u32_at(ACTOR + 0x488);
+        let req = ee.u32_at(body_actor() + 0x488);
         let far = ee.u32_at(req + 0x1ac);
         let mut frame = w.frame + 1;
         let mut parted = None;
@@ -484,7 +499,7 @@ fn what_the_wrecks_read() {
             if originals_tick(&mut ee, &cap, frame).is_err() {
                 parted.get_or_insert(frame);
                 set_rng(&mut ee, cap.int(frame - 1, "rng_state"));
-                ee.call(addr("rider_body_update").unwrap(), &[u64::from(ACTOR)], &[cap.get(frame, "dt")], 2_000_000_000);
+                ee.call(addr("rider_body_update").unwrap(), &[u64::from(body_actor())], &[cap.get(frame, "dt")], 2_000_000_000);
             }
             let reads = ee.reads.borrow_mut().take().unwrap();
             wanted.extend(reads.into_iter().filter(|&x| {
@@ -492,7 +507,7 @@ fn what_the_wrecks_read() {
                     && !ee.written.contains(&x)
                     && !(req - 0x200..req + 0x300).contains(&x)
                     && !(far..far + 0x100).contains(&x)
-                    && !(ACTOR..ACTOR + 0x1000).contains(&x)
+                    && !(body_actor()..body_actor() + 0x1000).contains(&x)
                     && changing.contains(&(x & 0x01ff_ffff))
             }));
             frame += 1;
@@ -718,15 +733,15 @@ fn bone_of(ee: &Ee, body: u32) -> usize {
 }
 
 fn joint_pin(ee: &Ee, i: usize) -> u32 {
-    ee.u32_at(ee.u32_at(ACTOR + at::JOINT_RECORDS) + 0x50 * i as u32 + 8)
+    ee.u32_at(ee.u32_at(body_actor() + at::JOINT_RECORDS) + 0x50 * i as u32 + 8)
 }
 
 fn collision(ee: &Ee, i: usize) -> u32 {
-    ee.u32_at(ee.u32_at(ACTOR + at::COLLISIONS) + 4 * i as u32)
+    ee.u32_at(ee.u32_at(body_actor() + at::COLLISIONS) + 4 * i as u32)
 }
 
 fn pins(ee: &Ee) -> Vec<u32> {
-    at::HOLDS.iter().map(|&h| ee.u32_at(ACTOR + h)).chain((0..17).map(|i| joint_pin(ee, i))).collect()
+    at::HOLDS.iter().map(|&h| ee.u32_at(body_actor() + h)).chain((0..17).map(|i| joint_pin(ee, i))).collect()
 }
 
 fn pin_of(ee: &Ee, p: u32) -> Pin {
@@ -797,7 +812,7 @@ fn throw_at(ee: &Ee, a: u32) -> Throw {
 
 /// The actor's `[Wrecks]`: the seven throws and the settle test's four numbers.
 fn wrecks_of(ee: &Ee) -> Wrecks {
-    let t = |k: u32| throw_at(ee, ACTOR + at::WRECKS + 0x40 * k);
+    let t = |k: u32| throw_at(ee, body_actor() + at::WRECKS + 0x40 * k);
     Wrecks {
         hit_front: t(0),
         hit_side: t(1),
@@ -806,16 +821,16 @@ fn wrecks_of(ee: &Ee) -> Wrecks {
         fall_off_front: t(4),
         fall_off_back: t(5),
         stunt: t(6),
-        ground_angular_rate_damping: quad(ee, ACTOR + at::GROUND_DAMPING),
-        rider_flail_height: f(ee, ACTOR + at::FLAIL_HEIGHT),
-        rider_roll_time: f(ee, ACTOR + at::ROLL_TIME),
-        rider_roll_speed: f(ee, ACTOR + at::ROLL_SPEED),
+        ground_angular_rate_damping: quad(ee, body_actor() + at::GROUND_DAMPING),
+        rider_flail_height: f(ee, body_actor() + at::FLAIL_HEIGHT),
+        rider_roll_time: f(ee, body_actor() + at::ROLL_TIME),
+        rider_roll_speed: f(ee, body_actor() + at::ROLL_SPEED),
         ..Wrecks::default()
     }
 }
 
 fn ragdoll_of(ee: &Ee) -> Ragdoll {
-    let recs = ee.u32_at(ACTOR + at::PART_RECORDS);
+    let recs = ee.u32_at(body_actor() + at::PART_RECORDS);
     let parts = (0..ragdoll::PARTS as u32)
         .map(|i| {
             let r = recs + 0x60 * i;
@@ -830,7 +845,7 @@ fn ragdoll_of(ee: &Ee) -> Ragdoll {
             }
         })
         .collect();
-    let jrecs = ee.u32_at(ACTOR + at::JOINT_RECORDS);
+    let jrecs = ee.u32_at(body_actor() + at::JOINT_RECORDS);
     let joints: Vec<_> = (0..17)
         .map(|i| {
             let r = jrecs + 0x50 * i as u32;
@@ -863,29 +878,29 @@ fn ragdoll_of(ee: &Ee) -> Ragdoll {
         let k = collision(ee, i);
         *c = Collision { bone: c.bone, enabled: ee.u32_at(k + coll_at::ON) != 0, touching: ee.u32_at(k + coll_at::TOUCHED) != 0 };
     }
-    let w = ee.u32_at(ACTOR + at::WORLD);
+    let w = ee.u32_at(body_actor() + at::WORLD);
     r.world = Stepped { iterations: ee.i32_at(w), rate: f(ee, w + 4) };
-    r.holds = at::HOLDS.map(|h| ee.u32_at(ee.u32_at(ACTOR + h) + pin_at::ON) != 0);
-    r.bike_box = ee.u32_at(ee.u32_at(ACTOR + at::BOX) + 4) != 0;
-    let force = ee.u32_at(ACTOR + at::FORCE);
+    r.holds = at::HOLDS.map(|h| ee.u32_at(ee.u32_at(body_actor() + h) + pin_at::ON) != 0);
+    r.bike_box = ee.u32_at(ee.u32_at(body_actor() + at::BOX) + 4) != 0;
+    let force = ee.u32_at(body_actor() + at::FORCE);
     r.throwing = ee.u32_at(force) != 0;
     r.launch = Launch {
-        force: quad(ee, ACTOR + at::LAUNCH),
-        force_time: f(ee, ACTOR + at::FORCE_TIME),
-        hand_hold: f(ee, ACTOR + at::HAND_HOLD),
+        force: quad(ee, body_actor() + at::LAUNCH),
+        force_time: f(ee, body_actor() + at::FORCE_TIME),
+        hand_hold: f(ee, body_actor() + at::HAND_HOLD),
         target: bone_of(ee, ee.u32_at(force + 0x24)),
-        world_frame: ee.u32_at(ACTOR + at::WORLD_FRAME) != 0,
-        other_frame: ee.u32_at(ACTOR + at::OTHER_FRAME) != 0,
+        world_frame: ee.u32_at(body_actor() + at::WORLD_FRAME) != 0,
+        other_frame: ee.u32_at(body_actor() + at::OTHER_FRAME) != 0,
     };
-    r.entered = ee.u32_at(ACTOR + at::ENTERED) != 0;
-    r.stiff = ee.u32_at(ACTOR + at::STIFF) != 0;
-    r.riding = ee.u32_at(ACTOR + at::RIDING) != 0;
-    r.off_bike = ee.u32_at(ACTOR + at::OFF_BIKE) != 0;
-    r.flung = ee.u32_at(ACTOR + at::FLUNG) != 0;
-    r.settled = ee.u32_at(ACTOR + at::SETTLED) != 0;
-    r.roll = f(ee, ACTOR + at::ROLL);
+    r.entered = ee.u32_at(body_actor() + at::ENTERED) != 0;
+    r.stiff = ee.u32_at(body_actor() + at::STIFF) != 0;
+    r.riding = ee.u32_at(body_actor() + at::RIDING) != 0;
+    r.off_bike = ee.u32_at(body_actor() + at::OFF_BIKE) != 0;
+    r.flung = ee.u32_at(body_actor() + at::FLUNG) != 0;
+    r.settled = ee.u32_at(body_actor() + at::SETTLED) != 0;
+    r.roll = f(ee, body_actor() + at::ROLL);
     r.pins = pins(ee).iter().map(|&p| pin_of(ee, p)).collect();
-    r.pull = quad(ee, ACTOR + at::PULL);
+    r.pull = quad(ee, body_actor() + at::PULL);
     r
 }
 
@@ -933,7 +948,7 @@ fn mat_at(ee: &Ee, a: u32) -> Mat4 {
 
 /// The actor as the port's, off the RAM.
 fn actor_of(ee: &Ee) -> Actor {
-    let a = |o: u32| ACTOR + o;
+    let a = |o: u32| body_actor() + o;
     let pair = |o: u32| [f(ee, a(o)), f(ee, a(o + 4))];
     let mut actor = Actor::new(ragdoll_of(ee), 9);
     actor.contacts = (0..9).map(|i| contact_of(ee, collision(ee, i))).collect();
@@ -981,7 +996,7 @@ fn actor_of(ee: &Ee) -> Actor {
 /// The riding request as the port's, off the RAM.
 fn request_of(ee: &Ee) -> Request {
     use req_at::*;
-    let r = ee.u32_at(ACTOR + at::BIKE);
+    let r = ee.u32_at(body_actor() + at::BIKE);
     let on = |o: u32| ee.u32_at(r + o) != 0;
     let q = |o: u32| quad(ee, r + o);
     let (bx, half) = (ee.u32_at(r + BOX[0]), ee.u32_at(r + BOX[1]));
@@ -1015,8 +1030,8 @@ fn request_of(ee: &Ee) -> Request {
 
 fn rest_at(ee: &Ee, bone: usize) -> u32 {
     let idx = ee.u32_at(bone_body(ee, bone) + 8);
-    let part = ee.u32_at(ACTOR + at::PARTS) + 0xb0 * idx;
-    ee.u32_at(ACTOR + at::SKELETON) + 0x60 * ee.u32_at(part + 0x40) + 0x50
+    let part = ee.u32_at(body_actor() + at::PARTS) + 0xb0 * idx;
+    ee.u32_at(body_actor() + at::SKELETON) + 0x60 * ee.u32_at(part + 0x40) + 0x50
 }
 
 fn tables_of(ee: &Ee) -> Tables {
@@ -1217,7 +1232,7 @@ fn listen(ee: &mut Ee) -> Rc<RefCell<Heard>> {
         }),
     );
     // The normalisation right after the step: the skeleton's rests as the step read them.
-    let normalise = ee.u32_at(ee.u32_at(ACTOR + at::VTABLE) + 0xac);
+    let normalise = ee.u32_at(ee.u32_at(body_actor() + at::VTABLE) + 0xac);
     let h = Rc::clone(&heard);
     ee.hooks.insert(
         normalise,
@@ -1226,7 +1241,7 @@ fn listen(ee: &mut Ee) -> Rc<RefCell<Heard>> {
             through(ee);
         }),
     );
-    let reset = ee.u32_at(ee.u32_at(ACTOR + at::VTABLE) + 0xa0);
+    let reset = ee.u32_at(ee.u32_at(body_actor() + at::VTABLE) + 0xa0);
     let h = Rc::clone(&heard);
     ee.hooks.insert(
         reset,
@@ -1433,7 +1448,7 @@ fn port_tick(ee: &mut Ee, cap: &Capture, frame: u32, draws_before: u32, drew: Op
 
     let saved = std::mem::take(&mut ee.hooks);
     let heard = listen(ee);
-    ee.call(update, &[u64::from(ACTOR)], &[dt], 2_000_000_000);
+    ee.call(update, &[u64::from(body_actor())], &[dt], 2_000_000_000);
     ee.hooks = saved;
     let mut out = Vec::new();
     let d = if drew.is_some() { differ(cap, frame, &ee_bones(ee)) } else { Vec::new() };
@@ -1443,7 +1458,7 @@ fn port_tick(ee: &mut Ee, cap: &Capture, frame: u32, draws_before: u32, drew: Op
     let drew = drew.unwrap_or_else(|| draws(r.state(), rng_at(ee), 1000).expect("the body's draws"));
     let after = Snapshot::of(ee);
     let game = actor_of(ee);
-    let req = ee.u32_at(ACTOR + at::BIKE);
+    let req = ee.u32_at(body_actor() + at::BIKE);
     let game_tail = (ee.u32_at(req + req_at::TOUCHING) != 0, bits(quad(ee, req + req_at::IMPACT)), bits(quad(ee, req + req_at::MAIN)));
 
     let mut carried = carried;
@@ -1667,7 +1682,7 @@ fn raw_quad(ee: &Ee, a: u32) -> Vf {
 
 /// The wreck bike's collidable (the request's `+0x1ac`) and its frame (`+0x120`, rows then origin).
 fn bike_collidable(ee: &Ee) -> (u32, game_sim::contact::Node) {
-    let b = ee.u32_at(ee.u32_at(ACTOR + 0x488) + 0x1ac);
+    let b = ee.u32_at(ee.u32_at(body_actor() + 0x488) + 0x1ac);
     let frame = game_sim::contact::Node { rows: [0, 1, 2].map(|k| raw_quad(ee, b + 0x120 + 0x10 * k)), origin: raw_quad(ee, b + 0x150) };
     (b, frame)
 }
@@ -1783,7 +1798,7 @@ fn bytemuck_quad(v: Vf) -> [u8; 16] {
 /// The bones' search as the original holds it (the one the actor's `+0x628` points at): where the
 /// first collision's sphere stands, the list's centre, bound and built flag, and the bike's place in the list.
 fn search_in_ram(ee: &Ee, b: u32, sphere: u32) -> BikeSearch {
-    let s = ee.u32_at(ACTOR + 0x628);
+    let s = ee.u32_at(body_actor() + 0x628);
     let n = ee.u32_at(s + 4);
     let found = (0..n).map(|i| ee.u32_at(s) + 8 * i).find(|&at| ee.u32_at(at) == b);
     BikeSearch {
@@ -2100,7 +2115,7 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
                     m.stood = Some(raw_quad(ee, s0 + 0x40));
                     let reach = F(ee.f32_at(s0 + 0x60));
                     let bike_sphere = (raw_quad(ee, b + 0x40), F(ee.f32_at(b + 0x60)));
-                    let offered = ee.u32_at(ACTOR + 0x6b0) != 0 && key.is_some();
+                    let offered = ee.u32_at(body_actor() + 0x6b0) != 0 && key.is_some();
                     // The put-back's tick (S108): the bike's unwreck has taken it out of the tree and
                     // lowered the pair's gate on it before the body's update gathers.
                     let gone = ee.u32_at(b + 4) == 0;
@@ -2118,7 +2133,7 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
                     through(ee);
                 }),
             );
-            ee.call(update, &[u64::from(ACTOR)], &[cap.get(frame, "dt")], 2_000_000_000);
+            ee.call(update, &[u64::from(body_actor())], &[cap.get(frame, "dt")], 2_000_000_000);
             ee.hooks = saved;
             let mut theirs = search_in_ram(&ee, b, spheres[0]);
             let ours = *model.borrow();
@@ -2214,7 +2229,7 @@ fn bike_tick(ee: &mut Ee, cap: &Capture, frame: u32, n: u32, placed: bool) -> Bi
     set_rng(ee, r.state());
     let (b, _) = bike_collidable(ee);
     let spheres: Vec<u32> = (0..9).map(|i| ee.u32_at(collision(ee, i) + coll_at::SPHERE)).collect();
-    let search = ee.u32_at(ACTOR + 0x628);
+    let search = ee.u32_at(body_actor() + 0x628);
     let centre = raw_quad(ee, search + 0x10);
     let heard = Rc::new(RefCell::new(BikeTick::default()));
     let h = Rc::clone(&heard);
@@ -2237,7 +2252,7 @@ fn bike_tick(ee: &mut Ee, cap: &Capture, frame: u32, n: u32, placed: bool) -> Bi
             }
         }),
     );
-    ee.call(addr("rider_body_update").unwrap(), &[u64::from(ACTOR)], &[cap.get(frame, "dt")], 2_000_000_000);
+    ee.call(addr("rider_body_update").unwrap(), &[u64::from(body_actor())], &[cap.get(frame, "dt")], 2_000_000_000);
     ee.hooks.clear();
     let mut t = std::mem::take(&mut *heard.borrow_mut());
     t.rebuilt = bits(raw_quad(ee, search + 0x10)) != bits(centre);
@@ -2823,4 +2838,341 @@ fn s155_how_long_an_image_holds() {
             eprintln!("{t} P{p}: row {row0}, held to {to} ({} ticks); the first tick off by {off:?}", to - row0);
         }
     }
+}
+
+// --- S160: the ragdoll in the 2p recording ---------------------------------------------------------
+
+/// The 2p capture's bones, modes and the rest S160 reads, for one rider, rows by frame counter.
+struct TwoPBody {
+    rows: HashMap<u32, Vec<f64>>,
+    cols: HashMap<String, usize>,
+}
+
+/// The lanes of a bone the 2p capture carries (watch/2p.toml's `p<N>_bone`).
+const BONE_LANES: [(&str, usize); 3] = [("pos", 3), ("vel", 3), ("quat", 4)];
+
+impl TwoPBody {
+    fn load(p: u32) -> Option<TwoPBody> {
+        use std::io::BufRead;
+        let mut want: Vec<String> = ["frame_counter", "dt", "rng_state"].map(String::from).to_vec();
+        for c in ["mode", "mode_prev", "touching", "off_bike", "settled", "flung", "wreck_reason"] {
+            want.push(format!("p{p}_{c}"));
+        }
+        for i in 0..18 {
+            for (n, k) in BONE_LANES {
+                for l in &["x", "y", "z", "w"][..k] {
+                    want.push(format!("p{p}_bone{i}.{n}.{l}"));
+                }
+            }
+        }
+        let file = std::fs::File::open(ctx("capture/2p/2p.csv")?).expect("open the 2p capture");
+        let mut lines = std::io::BufReader::new(file).lines().map(|l| l.expect("read the 2p capture"));
+        let head = lines.next().expect("a header");
+        let header: Vec<&str> = head.split(',').collect();
+        let at: Vec<usize> = want.iter().map(|c| header.iter().position(|h| h == c).unwrap_or_else(|| panic!("no column {c}"))).collect();
+        let cols = want.iter().enumerate().map(|(k, c)| (c.clone(), k)).collect();
+        let rows = lines
+            .map(|l| {
+                let all: Vec<&str> = l.split(',').collect();
+                let kept: Vec<f64> = at.iter().map(|&i| all[i].parse().unwrap_or_else(|_| panic!("{:?}", all[i]))).collect();
+                (kept[0] as u32, kept)
+            })
+            .collect();
+        Some(TwoPBody { rows, cols })
+    }
+
+    fn get(&self, frame: u32, col: &str) -> f64 {
+        self.rows.get(&frame).unwrap_or_else(|| panic!("no row {frame}"))[*self.cols.get(col).unwrap_or_else(|| panic!("no column {col}"))]
+    }
+
+    fn rng(&self, frame: u32) -> u64 {
+        self.get(frame, "rng_state") as u64
+    }
+
+    /// Rider `p`'s bone lanes on `frame` that differ from the image's, bit for bit, as names.
+    fn differ(&self, ee: &Ee, frame: u32, p: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 0..18 {
+            let body = bone_body(ee, i);
+            for (n, k) in BONE_LANES {
+                let o = match n {
+                    "pos" => 0x60,
+                    "vel" => 0x70,
+                    _ => 0x170,
+                };
+                for (l, lane) in ["x", "y", "z", "w"][..k].iter().enumerate() {
+                    let want = self.get(frame, &format!("p{p}_bone{i}.{n}.{lane}")) as f32;
+                    let got = ee.f32_at(body + o + 4 * l as u32);
+                    if want.to_bits() != got.to_bits() {
+                        out.push(format!("bone{i}.{n}.{lane} {got:e} want {want:e}"));
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Rider `p`'s body actor in a 2p image: the game manager's list after the two bikes (P2's bike,
+/// P1's bike, P1's body, P2's body: watch/2p.toml), its record less 0x400.
+fn two_p_actor(ee: &Ee, p: u32) -> u32 {
+    let hops: &[u32] = if p == 1 { &[0x34, 0x34, 0x8, 0x8, 0x8, 0x8, 0x0] } else { &[0x34, 0x34, 0x8, 0x8, 0x8, 0x8, 0x8, 0x0] };
+    let mut a = ee.u32_at(GAME_MANAGER);
+    for &h in hops {
+        a = ee.u32_at(a + h);
+    }
+    let a = a - 0x400;
+    assert_eq!(ee.u32_at(a + 0x2e0), 18, "P{p}: no rider body actor at {a:#x}");
+    a
+}
+
+/// The ridden player's update (`./kit fn 0x0027c890`): the bike's vehicle update and the work round
+/// it that hands the rider body its request (the bike's vehicle update alone leaves the body a tick
+/// behind its bike in every riding row).
+const PLAYER_UPDATE: u32 = 0x0027_c890;
+
+/// `ride_reset_request` (bike, kind, page) and `bike_page_listener` (the bike's +0x1340): S5, S72.
+const RESET_REQUEST: u32 = 0x0027_b9f0;
+const PAGE_LISTENER: u32 = 0x0028_1c10;
+
+/// The 2p wrecks the human ended with the L1+R1 chord before the ride machine's own put-back
+/// (P1's pad byte 3 goes `0xb3`/`0xf3` on the row the capture's body mode goes 0).
+const CHORDS: [u32; 3] = [128995, 129945, 130966];
+
+/// A two-row stand-in for an s56 [`Capture`], so [`port_tick`] runs on a 2p tick: `frame`'s dt and
+/// the generator before it.
+fn tick_rows(frame: u32, dt: f32, rng: u64) -> Capture {
+    let cols = [("frame_counter", 0), ("dt", 1), ("rng_state", 2)].map(|(c, k)| (c.to_string(), k)).into_iter().collect();
+    let row = |f: u32| vec![f.to_string(), format!("{dt:e}"), rng.to_string()];
+    Capture { cols, rows: [(frame - 1, row(frame - 1)), (frame, row(frame))].into_iter().collect() }
+}
+
+/// One 2p wreck run by [`ragdoll_2p`].
+#[derive(Debug, Default)]
+struct Ran2p {
+    /// The image's row (the bike's and the body's), and the last row the original's run held every
+    /// captured bone of the rider to, bit for bit.
+    row0: u32,
+    held: u32,
+    /// The ticks the port's tick was compared on, and the ones it parted on (row, first numbers).
+    ticks: usize,
+    parted: Vec<(u32, Vec<String>)>,
+    /// The original's body modes as the run went, with the row each began on, and the capture's.
+    modes: Vec<(u32, i32)>,
+    captured: Vec<(u32, i32)>,
+    went: Went,
+    hits: usize,
+    /// The ride machine's put-back requests (row, kind, page), and the row whose end the page's
+    /// listener respawned the bike on.
+    asked: Vec<(u32, u32, u32)>,
+    respawned: Option<u32>,
+    /// The first row after the put-back whose captured bones the run's are again, bit for bit.
+    rejoined: Option<u32>,
+}
+
+/// Rider `p`'s wreck `frame` of the 2p recording, from the RAM image before it to `rows` past the
+/// put-back the capture shows: the original's player update and body update each tick (each on the
+/// dt of the row before: S155), the body's generator draws found from the capture's while the run
+/// still holds its bones; and on every tick, from the original's RAM before the body's update, the
+/// port's actor tick ([`port_tick`]: every number the update writes, the world's answers the
+/// original's own) on its own state, carried from tick to tick (from the original's after a tick
+/// that parts).
+fn ragdoll_2p(cap: &TwoP, body: &TwoPBody, frame: u32, p: u32, rows: u32, chord: bool) -> Option<(String, Ran2p)> {
+    let (image, mut ee, row0) = image_before(cap, frame, p)?;
+    let bike = two_p_bike(&ee, p);
+    with_actor(two_p_actor(&ee, p));
+    let mut row0 = row0;
+    if !body.differ(&ee, row0, p).is_empty() && body.differ(&ee, row0 + 1, p).is_empty() {
+        // Saved between the body's update and its bike's: the bike's tick first.
+        ee.call(PLAYER_UPDATE, &[u64::from(bike)], &[body.get(row0, "dt") as f32], 2_000_000_000);
+        row0 += 1;
+    }
+    let mode = |f: u32| body.get(f, &format!("p{p}_mode")) as i32;
+    let back = (frame..).take_while(|&f| body.rows.contains_key(&f)).find(|&f| mode(f) == 0 && mode(f - 1) != 0).unwrap_or(frame);
+    let last = (back + rows).min(*body.rows.keys().max().unwrap());
+    let mut ran = Ran2p { row0, held: if body.differ(&ee, row0, p).is_empty() { row0 } else { 0 }, ..Ran2p::default() };
+    let mut port = None;
+    // The original's actor as its update left it, to tell what the rest of the frame wrote after.
+    let mut left: Option<Actor> = None;
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    for row in row0 + 1..=last {
+        let dt = body.get(row - 1, "dt") as f32;
+        let a = Rc::clone(&asked);
+        ee.hooks.insert(
+            RESET_REQUEST,
+            Box::new(move |ee: &mut Ee| {
+                if ee.r(4) as u32 == bike {
+                    a.borrow_mut().push((row, ee.r(5) as u32, ee.r(6) as u32));
+                }
+                through(ee);
+            }),
+        );
+        if row == back && chord {
+            // The human's L1+R1 on the put-back row (pad0/pad1 byte 3 `0xb3`/`0xf3`): the chord's
+            // handler, an input event ahead of the updates, takes its latch and asks for kind 1
+            // with no page, which respawns at once (`player_hand_reset`, S84).
+            ee.set_u32(bike + 0x14d0, 1);
+            ee.call(RESET_REQUEST, &[u64::from(bike), 1, 0], &[], 2_000_000_000);
+            ran.respawned = Some(row);
+        }
+        ee.call(PLAYER_UPDATE, &[u64::from(bike)], &[dt], 2_000_000_000);
+        ee.hooks.clear();
+        // While the run holds the capture: the draws the rest of the frame made before the body.
+        let mut n = 0;
+        if ran.held + 1 == row {
+            let snap = Snapshot::of(&ee);
+            for k in 0..40u32 {
+                snap.back(&mut ee);
+                let mut r = Rng::from_state(body.rng(row - 1));
+                (0..k).for_each(|_| {
+                    r.rand();
+                });
+                set_rng(&mut ee, r.state());
+                ee.call(addr("rider_body_update").unwrap(), &[u64::from(body_actor())], &[dt], 2_000_000_000);
+                if body.differ(&ee, row, p).is_empty() {
+                    (n, ran.held) = (k, row);
+                    break;
+                }
+                if rng_at(&ee) == r.state() {
+                    break; // the body drew nothing: the generator is not the difference
+                }
+            }
+            snap.back(&mut ee);
+        }
+        let rng = if ran.held == row { body.rng(row - 1) } else { rng_at(&ee) };
+        let was = actor_of(&ee);
+        if let Some(left) = left.as_ref().filter(|&l| *l != was) {
+            // Carrying the port's actor is the original's only if nothing but the body's update
+            // writes it: not the player update, the respawn or the chord (none did, on any run).
+            ran.parted.push((row, vec![format!("the frame wrote the actor between its updates (mode {:?} -> {:?})", left.mode, was.mode)]));
+        }
+        let (d, moving) = port_tick(&mut ee, &tick_rows(row, dt, rng), row, n, None, Some(&mut port));
+        left = Some(actor_of(&ee));
+        if let (Some(mine), Some(game)) = (&mut port, &left) {
+            // The vehicle animation's two outputs the body's mode reads, which the original's update
+            // runs (through the actor's vtable) and the port's actor tick does not: vehicle_anim.rs.
+            mine.posed = game.posed;
+            mine.clip = game.clip;
+        }
+        ran.ticks += 1;
+        ran.hits += usize::from(moving > 0);
+        if !d.is_empty() {
+            ran.parted.push((row, d[..d.len().min(6)].to_vec()));
+            port = None; // the next tick starts the port from the original's RAM again
+        }
+        ran.went.add(&was, &ee);
+        let m = ee.i32_at(body_actor() + at::MODE);
+        if ran.modes.last().map(|&(_, l)| l) != Some(m) {
+            ran.modes.push((row, m));
+        }
+        if ran.captured.last().map(|&(_, l)| l) != Some(mode(row)) {
+            ran.captured.push((row, mode(row)));
+        }
+        if ran.respawned.is_some_and(|r| r < row) && body.differ(&ee, row, p).is_empty() {
+            ran.rejoined.get_or_insert(row);
+        }
+        if row + 1 == back && !chord && !asked.borrow().is_empty() {
+            // The fade's black draw at the end of the tick before the capture's put-back: the
+            // page's listener on the bike respawns it (S72, S84). The fader is not run here.
+            ee.call(PAGE_LISTENER, &[u64::from(bike + 0x1340)], &[], 2_000_000_000);
+            ran.respawned = Some(row);
+        }
+    }
+    ran.asked = asked.borrow().clone();
+    Some((image, ran))
+}
+
+/// How many of the 2p wrecks the original's run from its image enters, puts back and rides on
+/// again (all 17 but P2's two Scenery wrecks, which S155's runs never enter: S176).
+const TWO_P_RAGDOLLS: usize = 15;
+
+/// How many of the runs hold every captured bone of the rider bit for bit from the image to the
+/// wreck's row, over at least one tick (three of P2's images are on the wreck's row already).
+const TWO_P_BONES_TO_THE_WRECK: usize = 5;
+
+/// How many of the runs' wreck entries (mode 2) and riding re-entries (mode 1) begin on the
+/// capture's own row.
+const TWO_P_SWITCHES_ON_THE_ROW: usize = 21;
+
+/// **Every 2p wreck's bones: the port's ragdoll is the original's from the wreck to the put-back
+/// and back on the bike** (S160). For each of C10's 17 wrecks of the 2p recording, both riders,
+/// [`ragdoll_2p`] runs the original from the RAM image before it, to ten rows past the capture's
+/// put-back. The port's actor tick runs beside it on its own state, carried from tick to tick, with
+/// only the world's answers and the vehicle animation's two outputs taken from the original. On every
+/// tick of every run (the entry pose, the flight, the ground contacts, the rest, the put-back and the
+/// riding entry), every bone, pin, joint, collision and actor number the update writes must be the
+/// original's bit for bit, and nothing but the body's update may write the actor.
+/// Each run that enters must go 2 → 0 → 1 as the capture does. Floors: [`TWO_P_RAGDOLLS`] runs
+/// enter, [`TWO_P_BONES_TO_THE_WRECK`] hold the captured bones to the wreck row, and
+/// [`TWO_P_SWITCHES_ON_THE_ROW`] mode switches land on the capture's row. Skips with a line when the
+/// capture or the images are not in this worktree.
+#[test]
+fn every_2p_wrecks_bones_are_the_originals() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let Some(cap) = TwoP::load() else { return };
+    let (Some(one), Some(two)) = (TwoPBody::load(1), TwoPBody::load(2)) else { return };
+    let bodies = [one, two];
+    let next = AtomicUsize::new(0);
+    let runs = Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            s.spawn(|| {
+                while let Some(&(frame, p, reason)) = WRECKS_2P.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let ran = ragdoll_2p(&cap, &bodies[p as usize - 1], frame, p, 10, CHORDS.contains(&frame));
+                    runs.lock().unwrap().push((frame, p, reason, ran));
+                }
+            });
+        }
+    });
+    let mut runs = runs.into_inner().unwrap();
+    runs.sort_by_key(|r| (r.1, r.0));
+    let (mut missing, mut entered, mut not_entered, mut held, mut on_row, mut off_row) = (Vec::new(), 0, Vec::new(), 0, 0, Vec::new());
+    let mut went = Went::default();
+    for (frame, p, reason, ran) in runs {
+        let Some((image, ran)) = ran else {
+            missing.push(format!("P{p} {frame}"));
+            continue;
+        };
+        eprintln!(
+            "P{p} {frame} ({reason}): {image} row {}, the bones held to {}; {} ticks; modes {:?}, the capture's {:?}; put back on {:?} (asked {:?}); {:?}",
+            ran.row0, ran.held, ran.ticks, ran.modes, ran.captured, ran.respawned, ran.asked, ran.went
+        );
+        if let Some((row, d)) = ran.parted.first() {
+            panic!("P{p} {frame}: the port's ragdoll parts from the original's on row {row} ({} ticks part): {d:?}", ran.parted.len());
+        }
+        held += usize::from(ran.held >= frame && ran.held > ran.row0);
+        let w = &ran.went;
+        (went.ticks, went.entries, went.touching, went.off_bike) = (went.ticks + w.ticks, went.entries + w.entries, went.touching + w.touching, went.off_bike + w.off_bike);
+        (went.flung, went.landed, went.settles, went.settled) = (went.flung + w.flung, went.landed + w.landed, went.settles + w.settles, went.settled + w.settled);
+        if ran.went.entries == 0 {
+            not_entered.push(format!("P{p} {frame} ({reason})"));
+            continue;
+        }
+        entered += 1;
+        assert_eq!((ran.went.entries, ran.went.off_bike), (1, 1), "P{p} {frame}: one wreck, the rider off the bike once");
+        assert!(ran.respawned.is_some(), "P{p} {frame}: never put back");
+        let from_wreck = |m: &[(u32, i32)]| m.iter().skip_while(|s| s.1 != 2).copied().collect::<Vec<_>>();
+        let (run, captured) = (from_wreck(&ran.modes), from_wreck(&ran.captured));
+        assert_eq!(run.iter().map(|s| s.1).collect::<Vec<_>>(), [2, 0, 1], "P{p} {frame}: the run's modes from the wreck {run:?}");
+        assert_eq!(captured.iter().map(|s| s.1).collect::<Vec<_>>(), [2, 0, 1], "P{p} {frame}: the capture's modes from the wreck {captured:?}");
+        for k in [0, 2] {
+            if run[k].0 == captured[k].0 {
+                on_row += 1;
+            } else {
+                off_row.push(format!("P{p} {frame} mode {} on {} (the capture's {})", run[k].1, run[k].0, captured[k].0));
+            }
+        }
+    }
+    eprintln!("{entered} wrecks entered, put back and ridden on again, {held} with the bones held to the wreck row; {went:?}");
+    eprintln!("not entered by the original's run: {not_entered:?}");
+    eprintln!("{on_row} mode switches on the capture's row; off it: {off_row:?}");
+    if !missing.is_empty() {
+        skip(&format!("S160: no RAM image before {} of the 2p wrecks: {missing:?} (research/s155/rams.py says how they are saved)", missing.len()));
+        return;
+    }
+    assert!(entered >= TWO_P_RAGDOLLS, "only {entered} of the 2p wrecks were entered and put back (was {TWO_P_RAGDOLLS})");
+    assert!(held >= TWO_P_BONES_TO_THE_WRECK, "only {held} runs held the captured bones to the wreck (was {TWO_P_BONES_TO_THE_WRECK})");
+    assert!(on_row >= TWO_P_SWITCHES_ON_THE_ROW, "only {on_row} mode switches on the capture's row (was {TWO_P_SWITCHES_ON_THE_ROW})");
+    assert!(went.touching > 0 && went.landed > 0 && went.settles >= entered - 1, "the runs never touched, landed or settled: {went:?}");
 }

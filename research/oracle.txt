@@ -5762,3 +5762,18 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # 1.8583021 no wreck, 130417 4.580028 -> 6, 130896 4.580028 -> 6. P1's at 131483 is the ground search
 # (bike on its side), 1.8583021, ridden out. The node tick from 130416 already holds P2's reason 6
 # (capture row 130418: the capture is a separate playback, one row behind the images here).
+# S160 — the 2p recording's ragdolls. Journal: research/journal/2026-10-27-s160-2p-ragdoll.
+# Test every_2p_wrecks_bones_are_the_originals in crates/game-sim/tests/ragdoll_wrecks.rs.
+# Each rider's body actor in a 2p image: game manager 0x34,0x34,0x8,0x8,0x8,0x8 (P1) or one more 0x8
+# (P2), then 0x0: the body's record; actor = record - 0x400 (+0x2e0 == 18). The list is P2 bike, P1 bike,
+# P1 body, P2 body. A tick is the player update 0x0027c890 (bike) then rider_body_update (actor), both
+# on the dt of the row before; bike_vehicle_update alone leaves the body a tick behind. Updating both
+# riders in list order changes nothing. The body's update runs the vehicle animation through the
+# actor's vtable: +0x680 (from the clip table) and +0x8f4 (the state asked for) change inside it, and
+# the body mode reads +0x680 (Posed) on the next tick; e.g. P1 133954 (the NoHander entry): 1 -> 0
+# and 5 -> 40. Nothing but the body's update writes the actor between two updates: not the player
+# update, not ride_reset_request (0x0027b9f0), not bike_page_listener (0x00281c10, a0 = bike+0x1340,
+# the respawn). The ride machine asks for the put-back (kind 1, page 1) 5-10 rows before the capture's
+# body mode goes 0; the fader takes the rest. The human ended P1's 128995, 129945 and 130966 early with
+# L1+R1 (pad byte 3 0xb3/0xf3 on the put-back row): ride_reset_request(bike, 1, 0) with bike+0x14d0 = 1
+# respawns at once.
