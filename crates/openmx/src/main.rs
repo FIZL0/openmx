@@ -817,6 +817,8 @@ struct RideHud<'a> {
     ridden: &'a [Ridden],
     art: &'a overlay::Art,
     span: f32,
+    /// The maps the radar names (MD42).
+    maps: &'a hud::MapNames,
     speedometer: menu::Speedometer,
     names: &'a [Option<String>],
     table: &'a Stunts,
@@ -855,6 +857,7 @@ impl RideHud<'_> {
             holding: *holding,
             machine: seat.garage.up.name().to_string(),
         });
+        let (map, around) = self.maps.around([b.x(), b.z()]);
         let shown = ride_hud::Shown {
             speed: me.speed.0,
             gauges: &gauges,
@@ -869,6 +872,8 @@ impl RideHud<'_> {
             markers,
             scale: self.art.scale,
             minimap: self.art.minimap,
+            map,
+            around,
             join: self.join,
         };
         draw(&shown, &rig.ride_hud, now);
@@ -4557,6 +4562,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The radar's world is the scene's terrain scales' (MD3): the original reads the larger of the
     // two the map edge measures with, which on the disc is the terrain file's own spacing.
     let radar_span = overlay::radar_span(place.terrain.width_scale.0.max(place.terrain.breadth_scale.0));
+    // The maps the radar names (MD42): a world's tiles, or the one track — a mod's by its name, a
+    // disc track's by its town.
+    let map_names = match (&world_mod, &modded) {
+        (Some(w), _) => w.map_names(),
+        (None, Some(t)) => hud::MapNames::alone(&t.name),
+        (None, None) => hud::MapNames::alone(&worlds::map_title(&args.track)),
+    };
     // A world's edge is its whole rectangle's (MD8), and so is the radar's ground.
     let edge = sim_world::World::area(&sim).unwrap_or_else(|| Area::new(
         F(place.terrain.width as f32),
@@ -6784,7 +6796,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
                     let join = join_view == Some(v);
-                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, speedometer, names: &names, table: &table, simulated, join };
+                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, speedometer, names: &names, table: &table, simulated, join };
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                         ride_hud::sprites(&mut gpu_sprites, hud_base, view, shown, tracker, now);
                     });
@@ -7254,7 +7266,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             if overlay_mode == menu::Overlay::Hud {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
                 let join = join_view == Some(v);
-                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, speedometer, names: &names, table: &table, simulated, join };
+                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, speedometer, names: &names, table: &table, simulated, join };
                 ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                     ride_hud::draw(target, shown, tracker, now);
                 });
