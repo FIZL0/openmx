@@ -2306,3 +2306,521 @@ fn front_parts_at_2628_without_the_bike_in_the_tree() {
     let (d0, v0) = ([0, 1, 2].map(|l| pb[0][1][l] - lb[0][1][l]), lb[0][2]);
     assert!(d0[1] < -0.5 && v0[1] > 5.0 && (0..3).map(|l| d0[l] * v0[l]).sum::<f32>() < 0.0, "bone 0 pushed back: {d0:?}, velocity {v0:?}");
 }
+
+
+// --- S155: every wreck of the 2p recording, from the RAM image before it -------------------------
+
+use game_sim::air;
+
+/// The 2p capture's few columns these tests read, rows by frame counter (C10's
+/// `context/capture/2p/2p.csv`, 12,917 rows of ~17 KB: only these columns are kept).
+struct TwoP {
+    rows: HashMap<u32, Vec<String>>,
+    cols: HashMap<&'static str, usize>,
+}
+
+/// The columns [`TwoP`] keeps.
+const TWO_P_COLS: [&str; 12] = [
+    "frame_counter", "dt", "p1_wreck_reason", "p2_wreck_reason", "p1_mode", "p2_mode",
+    "p1_ch_centre.x", "p1_ch_centre.y", "p1_ch_centre.z", "p2_ch_centre.x", "p2_ch_centre.y", "p2_ch_centre.z",
+];
+
+impl TwoP {
+    fn load() -> Option<TwoP> {
+        use std::io::BufRead;
+        let file = std::fs::File::open(ctx("capture/2p/2p.csv")?).expect("open the 2p capture");
+        let mut lines = std::io::BufReader::new(file).lines().map(|l| l.expect("read the 2p capture"));
+        let head = lines.next().expect("a header");
+        let header: Vec<&str> = head.split(',').collect();
+        let at: Vec<usize> = TWO_P_COLS.iter().map(|c| header.iter().position(|h| h == c).unwrap_or_else(|| panic!("no column {c}"))).collect();
+        let cols = TWO_P_COLS.iter().enumerate().map(|(k, &c)| (c, k)).collect();
+        let rows = lines
+            .map(|l| {
+                let all: Vec<&str> = l.split(',').collect();
+                let kept: Vec<String> = at.iter().map(|&i| all[i].to_string()).collect();
+                (kept[0].parse().expect("a frame counter"), kept)
+            })
+            .collect();
+        Some(TwoP { rows, cols })
+    }
+
+    fn text(&self, frame: u32, col: &str) -> &str {
+        &self.rows.get(&frame).unwrap_or_else(|| panic!("no row {frame}"))[self.cols[col]]
+    }
+
+    fn dt(&self, frame: u32) -> f32 {
+        self.text(frame, "dt").parse::<f64>().expect("a dt") as f32
+    }
+
+    fn int(&self, frame: u32, col: &str) -> u32 {
+        self.text(frame, col).parse().unwrap_or_else(|_| panic!("{col} at {frame}"))
+    }
+}
+
+/// A rider's ridden vehicle in a 2p RAM image: the game manager's list, P1 its fourth entry, P2 its
+/// third (watch/2p.toml).
+fn two_p_bike(ee: &Ee, p: u32) -> u32 {
+    let hops: &[u32] = if p == 1 { &[0x34, 0x34, 0x8, 0x8, 0x8, 0x0] } else { &[0x34, 0x34, 0x8, 0x8, 0x0] };
+    let mut a = ee.u32_at(GAME_MANAGER);
+    for &h in hops {
+        a = ee.u32_at(a + h);
+    }
+    a
+}
+
+/// One of C10's RAM images (`context/states/c10/c10-<tick>.ram`), holding frame `tick`.
+fn c10_state(tick: u32) -> Option<Ee> {
+    let path = ctx(&format!("states/c10/c10-{tick}.ram")).or_else(|| ctx(&format!("states/s155/c10-{tick}.ram")))?;
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    assert_eq!(ee.u32_at(addr("frame_counter").unwrap()), tick, "c10-{tick}.ram is not frame {tick}");
+    Some(ee)
+}
+
+
+impl TwoP {
+    /// Rider `p`'s chassis centre on the row of `frame`, as bits.
+    fn centre(&self, frame: u32, p: u32) -> [u32; 3] {
+        ["x", "y", "z"].map(|c| (self.text(frame, &format!("p{p}_ch_centre.{c}")).parse::<f64>().expect("a centre") as f32).to_bits())
+    }
+
+    fn reason(&self, frame: u32, p: u32) -> u32 {
+        self.int(frame, &format!("p{p}_wreck_reason"))
+    }
+
+    /// The row whose chassis centre is the image's, bit for bit, and its wreck reason too (a wrecked
+/// bike's centre stands still), within a few ticks of its own
+    /// counter: an image holds its counter's row or the one after (C10's states sit a tick off).
+    fn row_of(&self, ee: &Ee, p: u32) -> Option<u32> {
+        let bike = two_p_bike(ee, p);
+        let ch = ee.u32_at(bike + 0x7a4);
+        let at = [0, 4, 8].map(|k| ee.u32_at(ch + 0x60 + k));
+        let fc = ee.u32_at(addr("frame_counter").unwrap());
+        let reason = ee.u32_at(bike + 0x748);
+        (fc.saturating_sub(2)..=fc + 2).find(|&f| self.rows.contains_key(&f) && self.centre(f, p) == at && self.reason(f, p) == reason)
+    }
+}
+
+/// The wreck test's inputs off a real bike: `tests/air.rs`' `poke`, read back the other way. Its
+/// heading and up are left for the caller: the test takes them from the transform as it runs.
+fn wreck_inputs(ee: &Ee, bike: u32, dt: f32) -> (air::Params, air::Air, air::Chassis, air::Step, air::Loads) {
+    let f = |a: u32| F(ee.f32_at(a));
+    let b = |a: u32| ee.u32_at(a) != 0;
+    let v = |a: u32| Vf([0, 4, 8, 12].map(|k| ee.f32_at(a + k)));
+    let (o, ch, fw, rw, coll) = (bike, ee.u32_at(bike + 0x7a4), ee.u32_at(bike + 0x7b0), ee.u32_at(bike + 0x7b4), ee.u32_at(bike + 0x7d0));
+    let p = air::Params {
+        airborne_control_moment: v(o + 0x4d0),
+        airborne_damping: f(o + 0x4e0),
+        airborne_control_force: f(o + 0x4e4),
+        brake_gyro_torque: f(o + 0x6ac),
+        unroll_gain: f(o + 0x6b0),
+        unroll_torque: f(o + 0x6b4),
+        unyaw_gain: f(o + 0x6b8),
+        unyaw_torque: f(o + 0x6bc),
+        control_authority_time: f(o + 0x4ec),
+        preload_time: f(o + 0x4ac),
+        max_preload: f(o + 0x4c4),
+        min_preload_time: f(o + 0x4b4),
+        max_preload_time: f(o + 0x4b8),
+        min_dpad_preload_time: f(o + 0x4bc),
+        max_dpad_preload_time: f(o + 0x4c0),
+        min_backflip_time: f(o + 0x504),
+        max_backflip_time: f(o + 0x508),
+        min_backflip_torque: f(o + 0x510),
+        max_backflip_torque: f(o + 0x514),
+        backflip_torque_rate_increase: f(o + 0x518),
+        backflip_torque_rate_decrease: f(o + 0x51c),
+        front_wreck_speed_limit: f(o + 0x754),
+        back_wreck_speed_limit: f(o + 0x758),
+        side_wreck_speed_limit: f(o + 0x75c),
+        racing_down_wreck_speed_limit: f(o + 0x760),
+        freestyle_down_wreck_speed_limit: f(o + 0x764),
+        ground_pitch_down_wreck_angle: f(o + 0x768),
+        ground_pitch_up_wreck_angle: f(o + 0x76c),
+        airborne_pitch_down_wreck_angle: f(o + 0x770),
+        airborne_pitch_up_wreck_angle: f(o + 0x774),
+        airborne_roll_wreck_angle: f(o + 0x778),
+        no_hander_wreck_speed_limit: f(o + 0x77c),
+        no_hander_max_roll_angle: f(o + 0x780),
+        joust_wreck_height: f(o + 0x784),
+        crossup_wreck: f(o + 0x78c),
+        crossup_wreck_time: f(o + 0x790),
+        rotation_speed: None,
+    };
+    let a = air::Air {
+        on_ground: b(o + 0x574),
+        both_wheels: b(o + 0x578),
+        airborne: b(o + 0x57c),
+        was_airborne: b(o + 0x580),
+        hang_time: f(o + 0x4f0),
+        contact_vel: v(o + 0x430),
+        crossup: f(o + 0x600),
+        authority: f(o + 0x4e8),
+        preload_ready: b(o + 0x4a0),
+        preload_firing: b(o + 0x4a4),
+        preload_armed: b(o + 0x4a8),
+        preload_timer: f(o + 0x4b0),
+        preload_force: v(o + 0x490),
+        flip_torque_applied: b(o + 0x4f4),
+        flipping: b(o + 0x4f8),
+        flip_active: b(o + 0x4fc),
+        flip_armed: b(o + 0x500),
+        flip_grace: f(o + 0x50c),
+        flip_torque: v(o + 0x520),
+        wreck_impact: v(o + 0x560),
+        ..air::Air::default()
+    };
+    let c = air::Chassis {
+        speed: f(ch + 0x34),
+        pitch: f(ch + 0x90),
+        roll: f(ch + 0x98),
+        force: v(ch + 0x130),
+        moment: v(ch + 0x140),
+        vel: v(ch + 0x260),
+        local_vel: v(ch + 0x270),
+        ang_vel: v(ch + 0x290),
+    };
+    let st = air::Step {
+        dt: F(dt),
+        stick_hold: f(o + 0x630),
+        front_contact: b(fw + 0xdc),
+        rear_contact: b(rw + 0xdc),
+        front_vel: v(fw + 0x190),
+        rear_vel: v(rw + 0x190),
+        stick: (f(o + 0x628), f(o + 0x62c)),
+        dpad_y: b(o + 0x624),
+        dpad_dir: ee.i32_at(o + 0x9fc),
+        brake: f(o + 0x640),
+        front_brake: f(o + 0x650),
+        rear_brake: f(o + 0x654),
+        lean: f(o + 0x670),
+        stunt: b(o + 0xa0c),
+        touching: b(coll + 0x40),
+        ..air::Step::default()
+    };
+    let lo = air::Loads {
+        side: f(o + 0x550),
+        vertical: f(o + 0x554),
+        fore_aft: f(o + 0x558),
+        landing_crossup: f(o + 0x788),
+        no_hander: b(o + 0xa44),
+        racing: b(o + 0x810),
+        pose: ee.i32_at(o + 0xa78),
+        pose_wanted: ee.i32_at(o + 0xa84),
+        pose_blend: f(o + 0xa2c),
+        trick_wrecked: b(o + 0xa10),
+    };
+    (p, a, c, st, lo)
+}
+
+/// The wreck test's last clause's inputs off a real bike: its collision record's contact list (S37's
+/// layout, `tests/air.rs`' `lay` read back), the 50cc flag, and the chassis' mass and height.
+fn hit_inputs(ee: &Ee, bike: u32) -> (bool, F, F, Vec<air::Contact>) {
+    let (ch, coll) = (ee.u32_at(bike + 0x7a4), ee.u32_at(bike + 0x7d0));
+    let v = |a: u32| Vf([0, 4, 8, 12].map(|k| ee.f32_at(a + k)));
+    let (n, list) = (ee.u32_at(coll + 0x100), ee.u32_at(coll + 0x108));
+    let list = (0..n)
+        .map(|i| {
+            let e = list + 0x80 * i;
+            let other = match ee.u32_at(e + 0x74) {
+                0 => air::Other::Scenery,
+                o if ee.u32_at(o + 0xf0) != 0 => {
+                    let body = ee.u32_at(o + 0xf0);
+                    air::Other::Rider { height: F(ee.f32_at(body + 0x64)), vel: v(body + 0x260) }
+                }
+                o => {
+                    let body = ee.u32_at(o + 0xf4);
+                    air::Other::Object { mass: F(ee.f32_at(body + 0xc)), vel: v(body + 0x70) }
+                }
+            };
+            air::Contact { mirrored: ee.u32_at(e) != 0, reach: F(ee.f32_at(e + 0x24)), other }
+        })
+        .collect();
+    (ee.u32_at(bike + 0x588) != 0, F(ee.f32_at(ch + 0x210)), F(ee.f32_at(ch + 0x64)), list)
+}
+
+/// One call of the original's wreck test on the bike, and the port's answer to the same inputs.
+#[derive(Clone, Debug, PartialEq)]
+struct Judged {
+    /// The capture row the tick makes (the image's row plus the ticks run).
+    row: u32,
+    /// The reason the bike held going in (0 riding).
+    held: u32,
+    /// The reasons the original entered, in order.
+    original: Vec<u32>,
+    /// The port's: [`air::wreck_test`] then [`air::hit_wreck`], as `rider.rs` composes them (the
+    /// hit's reason is the one that stays; both are entered).
+    port: Vec<u32>,
+    /// What the clauses judged: pitch, roll (degrees), the g loads, hang time, the crossup shown.
+    seen: (f32, f32, [f32; 3], f32, f32),
+}
+
+/// The original's own vehicle update on rider `p`'s bike from a 2p RAM image, `ticks` times (each
+/// with the capture's `dt` for the row it makes), the wreck test heard at every call: its inputs
+/// read off the bike as it is entered, the port asked the same, and the original's calls of the
+/// bike's "came off" slot written down. The image's row is found by its chassis centre. Returns that
+/// row, the last row the run's chassis centre still held to the capture's bit for bit (only this
+/// bike is updated, so the rest of the frame — the pad, the rider's body — is the image's), and
+/// every call.
+fn judge_from(cap: &TwoP, ee: &mut Ee, p: u32, ticks: u32) -> (u32, u32, Vec<Judged>) {
+    let bike = two_p_bike(ee, p);
+    let row0 = cap.row_of(ee, p).unwrap_or_else(|| panic!("P{p}: no row of the capture is the image's chassis centre"));
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let off = ee.u32_at(ee.u32_at(bike + 0x48) + 0xfc);
+    let c = Rc::clone(&calls);
+    ee.hooks.insert(
+        off,
+        Box::new(move |ee: &mut Ee| {
+            if ee.r(4) as u32 == bike {
+                c.borrow_mut().push(ee.r(5) as u32);
+            }
+            through(ee);
+        }),
+    );
+    let judged = Rc::new(RefCell::new(Vec::new()));
+    let row = Rc::new(RefCell::new(row0));
+    let (j, r, c) = (Rc::clone(&judged), Rc::clone(&row), Rc::clone(&calls));
+    ee.hooks.insert(
+        addr("bike_wreck_test").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            if ee.r(4) as u32 != bike {
+                return through(ee);
+            }
+            let dt = ee.f(12);
+            let held = ee.u32_at(bike + 0x748);
+            let (prm, mut a, ch, mut st, lo) = wreck_inputs(ee, bike, dt);
+            let (fifty, mass, height, list) = hit_inputs(ee, bike);
+            c.borrow_mut().clear();
+            through(ee);
+            // The two axes the test takes off the transform as it runs (`orientation_axes`).
+            st.heading = Vf([0, 4, 8, 12].map(|k| ee.f32_at(bike + 0x410 + k)));
+            st.up = Vf([0, 4, 8, 12].map(|k| ee.f32_at(bike + 0x420 + k)));
+            let landed = if held == 0 { air::wreck_test(&prm, &mut a, &ch, &st, &lo) } else { None };
+            let hit = air::hit_wreck(&prm, &mut a, st.touching, fifty, mass, height, &list);
+            let port = landed.into_iter().chain(hit).map(|w| w as u32).collect();
+            let seen = (ch.pitch.0.to_degrees(), ch.roll.0.to_degrees(), [lo.side.0, lo.vertical.0, lo.fore_aft.0], a.hang_time.0, lo.landing_crossup.0);
+            j.borrow_mut().push(Judged { row: *r.borrow() + 1, held, original: c.borrow().clone(), port, seen });
+        }),
+    );
+    let mut held_to = row0;
+    for _ in 0..ticks {
+        let next = *row.borrow() + 1;
+        // The tick that writes row `next` steps on the dt its row before holds: a row's dt is
+        // the one the frame after it will take (with `next`'s own, most runs part at once).
+        ee.call(addr("bike_vehicle_update").unwrap(), &[u64::from(bike)], &[cap.dt(next - 1)], 2_000_000_000);
+        *row.borrow_mut() = next;
+        let ch = ee.u32_at(bike + 0x7a4);
+        if held_to + 1 == next && cap.rows.contains_key(&next) && cap.centre(next, p) == [0, 4, 8].map(|k| ee.u32_at(ch + 0x60 + k)) {
+            held_to = next;
+        }
+    }
+    ee.hooks.clear();
+    let out = judged.borrow().clone();
+    (row0, held_to, out)
+}
+
+
+/// C10's index of the 2p capture's wrecks (research/c10/events.json): the first row holding the
+/// reason, the rider and the reason.
+const WRECKS_2P: [(u32, u32, u32); 17] = [
+    (128995, 1, 8), // NoseDive
+    (129945, 1, 8), // NoseDive
+    (130966, 1, 11), // Tail
+    (132997, 1, 3), // Right
+    (133313, 1, 12), // NoHander
+    (133953, 1, 12), // NoHander
+    (134381, 1, 12), // NoHander
+    (135196, 1, 12), // NoHander
+    (135855, 1, 12), // NoHander
+    (136559, 1, 12), // NoHander
+    (139659, 1, 2), // Left
+    (130418, 2, 6), // Scenery
+    (130897, 2, 6), // Scenery
+    (131595, 2, 1), // Front
+    (133800, 2, 8), // NoseDive
+    (134315, 2, 12), // NoHander
+    (140363, 2, 2), // Left
+];
+
+/// Which of the wreck test's limits a near miss came close to (C10's near-miss index).
+#[derive(Clone, Copy, Debug)]
+enum Clause {
+    VerticalG,
+    GroundPitchDown,
+    GroundPitchUp,
+    TouchPitchDown,
+    TouchPitchUp,
+    TouchRoll,
+}
+
+impl Clause {
+    /// The quantity the clause judges, out of what the wreck test was handed.
+    fn of(self, j: &Judged) -> f32 {
+        let (pitch, roll, g, _, _) = j.seen;
+        match self {
+            Clause::VerticalG => g[1],
+            Clause::GroundPitchDown | Clause::TouchPitchDown => -pitch,
+            Clause::GroundPitchUp | Clause::TouchPitchUp => pitch,
+            Clause::TouchRoll => roll.abs(),
+        }
+    }
+}
+
+/// C10's near misses: the row, the rider, the clause and the value the index read off the row
+/// (rounded to three places), each ridden out by the original.
+const NEAR_2P: [(u32, u32, Clause, f32); 29] = [
+    (128520, 1, Clause::GroundPitchUp, 43.275),
+    (128892, 1, Clause::GroundPitchUp, 43.028),
+    (129123, 1, Clause::TouchPitchDown, 40.386),
+    (129124, 1, Clause::GroundPitchDown, 40.542),
+    (129485, 1, Clause::GroundPitchDown, 60.252),
+    (129485, 1, Clause::TouchPitchDown, 60.252),
+    (129486, 1, Clause::VerticalG, 55.874),
+    (130420, 1, Clause::GroundPitchDown, 67.43),
+    (130420, 1, Clause::TouchPitchDown, 67.43),
+    (131484, 1, Clause::TouchRoll, 85.949),
+    (131628, 1, Clause::GroundPitchUp, 48.143),
+    (131872, 1, Clause::VerticalG, 53.274),
+    (132463, 1, Clause::VerticalG, 34.328),
+    (132608, 1, Clause::TouchRoll, 69.417),
+    (135076, 1, Clause::TouchRoll, 50.019),
+    (128467, 2, Clause::VerticalG, 44.553),
+    (128849, 2, Clause::GroundPitchDown, 50.332),
+    (128849, 2, Clause::TouchPitchDown, 50.332),
+    (128851, 2, Clause::VerticalG, 48.348),
+    (131576, 2, Clause::GroundPitchDown, 41.341),
+    (131576, 2, Clause::TouchPitchDown, 41.341),
+    (133253, 2, Clause::GroundPitchDown, 45.492),
+    (133538, 2, Clause::VerticalG, 64.094),
+    (133744, 2, Clause::GroundPitchUp, 52.783),
+    (135556, 2, Clause::TouchRoll, 49.217),
+    (136062, 2, Clause::GroundPitchUp, 56.896),
+    (136062, 2, Clause::TouchPitchUp, 56.896),
+    (136142, 2, Clause::GroundPitchUp, 50.572),
+    (137982, 2, Clause::TouchRoll, 43.005),
+];
+
+/// The latest 2p RAM image from before row `frame` for rider `p`: C10's (`states/c10/`) and
+/// S155's earlier ones (`states/s155/`, the same playback recipe a few ticks sooner), up to eight
+/// ticks back, whose chassis centre is a row before `frame`'s. With the row it holds.
+fn image_before(cap: &TwoP, frame: u32, p: u32) -> Option<(String, Ee, u32)> {
+    let kit = Kit::load().ok()?;
+    let mut found: Vec<(u32, PathBuf)> = Vec::new();
+    for dir in ["states/c10", "states/s155"] {
+        let local = kit.root.join("context").join(dir);
+        let at = if local.exists() { local } else { kit.ctx(dir) };
+        for t in frame.saturating_sub(8)..frame {
+            let path = at.join(format!("c10-{t}.ram"));
+            if path.exists() {
+                found.push((t, path));
+            }
+        }
+    }
+    found.sort();
+    for (t, path) in found.into_iter().rev() {
+        let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+        ee.set(28, u64::from(addr("boot_gp").unwrap()));
+        assert_eq!(ee.u32_at(addr("frame_counter").unwrap()), t, "{} is not frame {t}", path.display());
+        if let Some(row) = cap.row_of(&ee, p).filter(|&r| r < frame) {
+            return Some((path.display().to_string(), ee, row));
+        }
+    }
+    None
+}
+
+/// How many of the 46 indexed events the original's run from its image reproduces on the
+/// capture's own line (see the test).
+const TWO_P_ON_THE_CAPTURE: usize = 22;
+
+/// **Every wreck of the 2p recording, and every near miss, judged by the port as the original
+/// judged it** (S155). From the RAM image before each indexed event the original's own vehicle
+/// update runs the rider's bike to a tick past it, each tick on the dt of the capture row before
+/// (a row's dt is the next frame's). At every call of the original's wreck test the port's
+/// [`air::wreck_test`] and [`air::hit_wreck`] are handed the same inputs, read off the bike as the
+/// test is entered, and must enter what the original entered, on every call of every run.
+/// Where the run is still the capture's (the chassis centre bit for bit from the image to the row of the
+/// event, and on it: the test runs after the tick has moved the chassis): each wreck is the original's first, on the indexed row, with the indexed reason; each
+/// near miss is ridden out through the row after, with the clause's quantity the index's value.
+/// Runs that leave the capture first (the image holds the bike, not the rest of the frame's work
+/// on it) are listed; [`TWO_P_ON_THE_CAPTURE`] is the floor on the others. A skip with a line
+/// where the capture or the images are not in this worktree.
+#[test]
+fn the_2p_wrecks_are_the_originals() {
+    let Some(cap) = TwoP::load() else { return };
+    let (mut exact, mut missing, mut drifted) = (Vec::new(), Vec::new(), Vec::new());
+    for (frame, p, reason) in WRECKS_2P {
+        assert_eq!((cap.reason(frame - 1, p), cap.reason(frame, p)), (0, reason), "P{p} {frame}: the index's wreck is not in the capture");
+        let Some((image, mut ee, row0)) = image_before(&cap, frame, p) else {
+            missing.push(format!("wreck P{p} {frame}"));
+            continue;
+        };
+        let (_, to, js) = judge_from(&cap, &mut ee, p, frame + 1 - row0);
+        eprintln!("P{p} wreck {reason} at {frame}: from {image} (row {row0}), the capture's centre held to {to}");
+        for j in &js {
+            eprintln!("    {j:?}");
+            assert_eq!(j.port, j.original, "P{p} {frame}: row {}: the port's wreck test answers {:?}, the original's {:?}", j.row, j.port, j.original);
+        }
+        let first = js.iter().find(|j| j.held == 0 && !j.original.is_empty());
+        // While the original's run is still the capture's (its chassis centre bit for bit up to the event
+        // row), its first wreck is the indexed one on the indexed row. A run that has left
+        // the capture is the original riding a different line; it is listed, not judged.
+        if to >= frame {
+            let first = first.unwrap_or_else(|| panic!("P{p} {frame}: the original never wrecked though its run held the capture to {to}"));
+            assert_eq!((first.row, first.original.last().copied()), (frame, Some(reason)), "P{p} {frame}: the original's first wreck: {first:?}");
+            exact.push(format!("wreck P{p} {frame}"));
+        } else {
+            drifted.push(format!("wreck P{p} {frame} (left at {to}; the original's wreck: {:?})", first.map(|j| (j.row, j.original.clone()))));
+        }
+    }
+    for (frame, p, clause, value) in NEAR_2P {
+        let Some((image, mut ee, row0)) = image_before(&cap, frame, p) else {
+            missing.push(format!("near miss P{p} {frame} {clause:?}"));
+            continue;
+        };
+        let (_, to, js) = judge_from(&cap, &mut ee, p, frame + 1 - row0 + 1);
+        let at = js.iter().find(|j| j.row == frame).unwrap_or_else(|| panic!("P{p} {frame}: no wreck test on the row"));
+        eprintln!("P{p} near miss {clause:?} {value} at {frame}: from {image} (row {row0}), held to {to}, judged {}", clause.of(at));
+        for j in &js {
+            assert_eq!(j.port, j.original, "P{p} {frame} {clause:?}: row {}: the port's wreck test answers {:?}, the original's {:?}", j.row, j.port, j.original);
+        }
+        if to >= frame {
+            for j in &js {
+                assert!(j.held == 0 && j.original.is_empty(), "P{p} {frame} {clause:?}: the original wrecked on row {}: {j:?}", j.row);
+            }
+            assert!((clause.of(at) - value).abs() < 0.0015, "P{p} {frame} {clause:?}: the wreck test judged {} on the row, the index {value}", clause.of(at));
+            exact.push(format!("near miss P{p} {frame} {clause:?}"));
+        } else {
+            drifted.push(format!("near miss P{p} {frame} {clause:?} (left at {to}; judged {})", clause.of(at)));
+        }
+    }
+    eprintln!("{} of {} events on the capture's own run: {exact:?}", exact.len(), WRECKS_2P.len() + NEAR_2P.len());
+    eprintln!("left the capture first: {drifted:?}");
+    if !missing.is_empty() {
+        skip(&format!("S155: no RAM image before {} of the 2p events: {missing:?} (research/s155/rams.py says how they are saved)", missing.len()));
+        return;
+    }
+    assert_eq!(exact.len() + drifted.len(), WRECKS_2P.len() + NEAR_2P.len());
+    assert!(exact.len() >= TWO_P_ON_THE_CAPTURE, "only {} of the 2p events ran on the capture's own line (was {TWO_P_ON_THE_CAPTURE})", exact.len());
+}
+
+#[test]
+#[ignore = "exploration"]
+fn s155_how_long_an_image_holds() {
+    let Some(cap) = TwoP::load() else { return };
+    let ticks: Vec<u32> = std::env::var("S155_TICKS").unwrap_or_default().split(',').filter_map(|t| t.parse().ok()).collect();
+    for t in ticks {
+        for p in [1, 2] {
+            let Some(mut ee) = c10_state(t) else { continue };
+            let Some(row0) = cap.row_of(&ee, p) else {
+                eprintln!("{t} P{p}: no row");
+                continue;
+            };
+            let Some(mut one) = c10_state(t) else { continue };
+            judge_from(&cap, &mut one, p, 1);
+            let ch = one.u32_at(two_p_bike(&one, p) + 0x7a4);
+            let off: Vec<Vec<f32>> = (0..3).map(|d| (0..3).map(|k| one.f32_at(ch + 0x60 + 4 * k as u32) - f32::from_bits(cap.centre(row0 + d, p)[k])).collect()).collect();
+            let (_, to, _) = judge_from(&cap, &mut ee, p, 8);
+            eprintln!("{t} P{p}: row {row0}, held to {to} ({} ticks); the first tick off by {off:?}", to - row0);
+        }
+    }
+}
