@@ -1,0 +1,46 @@
+# stream.toml — C12: does the 60 FPS patch's 30 fps branch ever fire in the 2p ride? The IOP read flag the
+# patch tests, the frame-limiter word it writes, and the frame's dt. Played by research/c12/play_variant.sh.
+
+[watch]
+name        = "2p-stream"
+description = "the 60 FPS patch's condition and the frame dt through the 2p ride"
+every       = 1
+frames      = 12917
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "p1_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p1_wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p2_wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "read_busy"
+addr = "0x425da8"
+type = "u32"
+
+[[field]]
+name = "limiter_word"
+addr = "0x19210c"
+type = "u32"

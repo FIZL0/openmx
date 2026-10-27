@@ -73,6 +73,23 @@ never by a path of its own. Older tests on first_recording, recording2, animandp
 tapes keep their pins and get a 2p case beside them. `docs/PROVING.md` ("The human reference") says
 the same to agents.
 
+- [ ] **C12: the 2p tape plays back into a ride that is not yours** (2026-10-27). Every playback of
+      `2p.p2m2`, on either PCSX2 build, with or without the 60 FPS patch you recorded with, rides one
+      and the same ride, and it never reaches the trucks. Film of it: `context/c12/baseline.mp4` (s1).
+      Ruled out: the pad path (every byte reaches the game unchanged), the tape's start (field 0 is
+      never read; a field earlier or later is a different ride again), the save-state load (a mid-ride
+      save/load rides on unchanged), and the 60 FPS patch (its 30 fps branch never fires in this ride).
+      EE overclock +1/+2 gives other rides, still with no truck. Your own reactions on the tape (you
+      let go of the pad after a crash) match the playback's P1 crash at ~34 s and nothing after ~40 s,
+      so it parts there for both riders. Why is still open.
+      **Your new `truck.p2m2` plays back as your ride:** P1 gets on the moving truck (car 3) at ~11 s
+      and rides it, reversing on the deck, until ~24 s, with no wreck, the same on two playbacks. Film:
+      `context/c12/truck.mp4`; capture `context/capture/2p/truck.csv`, index
+      `context/capture/2p/truck.index.md` (all s1). That covers S159 (truck rides). **Still wanted for
+      S158:** a 2p ride where the riders touch each other: P2 stands still in `truck.p2m2`. A short
+      tape like this one plays back fine. If you remember your recording machine's Emulation settings
+      (EE cycle rate/skip, anything off default), write them here too.
+
 ## Save states and recordings
 
 Agents can load states and replay recordings, but only a person can play the game to the interesting
