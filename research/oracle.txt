@@ -5637,6 +5637,26 @@ node_name             boot 0x001b4fa0 node +0x120 is a pointer to the name
 #   sequence toys: list 0x003b50c0 (0x170 bytes, ctor 0x003b51c0, vtable 0x0045dcf0), section 0x003b52c0
 #   (base 0x002144d0, motion by name 0x001426a0), next motion 0x003b5630 (int(rand x 2^-31 x 100) <=
 #   chance - 1, or past count tries), update 0x003b5480 (only while 0x00215050 says visible).
+#
+# V75 — a bird trigger's shape and who strikes it (creature.rs Trigger::struck; journal
+#   2026-10-28-v75-bird-trigger-shape). The box class: ctor 0x001e79d0, vtable 0x00451850, kind 6;
+#   set 0x001e7b10 stores centre +0x160 (the zero vector 0x00426d70) and Box +0x170 as they are read.
+#   AABB 0x001e8050: centre M.c, extent |R|.h; bounding radius 0x001e7f70 = |h|; box-vs-box
+#   0x00109330 (c, h, M). So Box is half extents about Position. The trigger reader's basis call is
+#   0x0013e330(trigger +0x90, Position, LookVector, UpVector, 0, 1): no squaring of the two.
+#   The shape's category +0x84 = the word at 0x00468f78 (0x100 in every state) — the category the
+#   bike's second ray probe ignores. Contact only through the collision pass 0x0011a150 / 0x0011a9d0:
+#   mover vt+0x94 pair test, then the struck one's +0x110 (0x001c6190). Pair tests against kind 6:
+#   the ray class 0x001ebe70 case 6 -> 0x0010a9b0 (rays into box space, tree 0x0010a890, node
+#   0x00106000, leaf below); mesh class 0x001ed740 -> 0x001ed910 -> 0x0010a6d0; the sphere class
+#   0x001e9540, kind-5 class 0x001f1790 and hierarchy 0x0011a140 have no kind 6 (0). So of a riding
+#   bike only the body rays (record +0x1f0, bikem.col, queried by 0x002708a0) strike it: the sweep
+#   0x00270390 and the camera 0x001fa4c0 are spheres, the second probe (0x00257820) ignores 0x100.
+#   Trigger update 0x001c7110 only exit-tests (0x001e7bc0) actors already in its +0xe0 list.
+#   No save state holds a trigger box (callback 0x001c6190 scanned in every .p2s RAM image here).
+segment_box_touch     boot 0x00106590 (centre*, half*, a*, b*, rows*) -> v0 1 touching: a, b through
+#                                    the four rows (origin first), less centre; mid/half-length apart
+#                                    on a box axis, then the three cross axes on the FPU; inclusive.
 # ---------------------------------------------------------------------------------------------------
 # P91: the dressed rider's NameDefault painter (crates/openmx/src/dress.rs, draw/Face/uniform)
 nameplate_paint       boot 0x0020baa0 the player: profile = rider +0x6b4; name strcpy'd (13 bytes) from

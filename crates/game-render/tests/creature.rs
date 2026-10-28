@@ -90,7 +90,7 @@ fn nat02s_vultures_sit_until_the_rider_comes() {
     assert_eq!(c.triggers.len(), 3);
     let at: Vec<V3> = sitting.iter().map(|&b| c.birds[b].pos).collect();
     for _ in 0..60 {
-        c.step(TICK, &[v3(1e6, 0.0, 1e6)]);
+        c.step(TICK, &[creature::Rays::at(v3(1e6, 0.0, 1e6))]);
     }
     assert!(sitting.iter().zip(&at).all(|(&b, a)| !c.birds[b].flying && c.birds[b].pos == *a), "nobody near: they stay");
 
@@ -102,7 +102,7 @@ fn nat02s_vultures_sit_until_the_rider_comes() {
         sitting.iter().copied().filter(|&b| t.scares.iter().any(|s| c.birds[b].pos.sub(s.at).len() < s.distance)).collect();
     println!("trigger {} at {:?}, scares {:?}, near {near:?}", t.name, t.at, t.scares);
     assert!(!near.is_empty(), "the trigger's scare reaches a vulture");
-    c.step(TICK, &[rider]);
+    c.step(TICK, &[creature::Rays::at(rider)]);
     for &b in &near {
         assert!(c.birds[b].flying);
         assert!(matches!(c.birds[b].playing.motion, Some(TAKE_OFF) | Some(FLY)), "{:?}", c.birds[b].playing);
@@ -143,4 +143,43 @@ fn nat07_has_mills_and_elk_and_nat01_draws_nothing() {
     let c = Creatures::load(&arch, "nat01");
     println!("nat01 skipped: {:?}", c.skipped);
     assert!(c.birds.is_empty() && c.toys.is_empty());
+}
+
+/// V75: every bird trigger on the disc is a box (no `Radius`), its look and up square to each other,
+/// so the frame the reader builds with its squaring off is a rotation and the port's transpose takes a
+/// point into the box. nat02's vulture_10_trigger is printed: Box is half its size along each axis.
+#[test]
+fn every_bird_trigger_is_a_square_box() {
+    let Some(mut disc) = disc() else { return };
+    let mut tracks: Vec<String> = disc
+        .entries()
+        .iter()
+        .filter_map(|e| {
+            let n = e.name.to_ascii_lowercase();
+            let stem = n.rsplit('\\').next()?.strip_suffix(".res")?.to_string();
+            (stem.len() == 5 && (stem.starts_with("nat") || stem.starts_with("free"))).then_some(stem)
+        })
+        .collect();
+    tracks.sort();
+    tracks.dedup();
+    let mut seen = 0;
+    for t in &tracks {
+        let arch = archives(&mut disc, t);
+        let c = Creatures::load(&arch, t);
+        for tr in c.triggers.iter().filter(|tr| !tr.scares.is_empty()) {
+            seen += 1;
+            println!("{t} {}: at {:?} box {:?} look {:?} up {:?} percent {} one_time {}", tr.name, tr.at, tr.half, tr.look, tr.up, tr.percent, tr.one_time);
+            assert!(tr.radius.is_none(), "{t} {} is a sphere", tr.name);
+            assert!(tr.look.dot(tr.up).abs() < 1e-6, "{t} {}: look·up {}", tr.name, tr.look.dot(tr.up));
+            assert!(tr.half.x > 0.0 && tr.half.y > 0.0 && tr.half.z > 0.0, "{t} {}", tr.name);
+        }
+    }
+    assert!(seen >= 3, "nat02's three at least: {seen} on {tracks:?}");
+    let arch = archives(&mut disc, "nat02");
+    let c = Creatures::load(&arch, "nat02");
+    let v = c.triggers.iter().find(|t| t.name.eq_ignore_ascii_case("vulture_10_trigger")).expect("vulture_10_trigger");
+    // Inside by just under its half on each axis, out by just over.
+    let along = |s: f32| v.at.add(v.right.scale(s * v.half.x)).add(v.up.scale(s * v.half.y)).add(v.look.scale(s * v.half.z));
+    assert!(v.holds(along(0.99)) && v.holds(along(-0.99)));
+    assert!(!v.holds(along(1.01)) && !v.holds(along(-1.01)));
 }
