@@ -8941,7 +8941,8 @@ fn load_sun_flares(archives: &[Res], track: &str) -> Vec<(game_render::sun_flare
 /// the bike's snapshot: each entry's node where it is — the chassis' (the tires' particle nodes) or
 /// a part's (the exhaust pipe's), on the bike's place — the throttle, the clutch and the chassis'
 /// speed, the wreck, the two tires (front, rear: `AttachedToTire`'s 0 and 1) with their ground and
-/// object contacts, surface, spin and side force; while down, the wreck body's contacts; and the
+/// object contacts, surface, spin and side force; while down, the wreck body's contacts and their
+/// relative velocity; and the
 /// rider's collision spheres, the ragdoll's while down and the riding body's while up (P152), each with
 /// the surface the ride's terrain query has under it.
 fn bike_fx_frame(
@@ -8997,17 +8998,12 @@ fn bike_fx_frame(
         tires: vec![tire(&ride.front), tire(&ride.rear)],
         ..Default::default()
     };
+    // While down, the wreck bike's collision object's contacts, which its `CollisionModel` entries'
+    // points spread along the object's relative velocity at its last resolved contact (P156), as the
+    // plane's do (P63); the body's velocity stays the frame's for everything else.
     if let Some(crash) = &rider.crash {
-        let record = &crash.bike.record;
         frame.vel = vector(crash.bike.body.velocity);
-        let points: Vec<V3> = record.contacts.iter().map(|c| vector(c.point)).collect();
-        if record.on_ground {
-            frame.ground_contacts = points.clone();
-            frame.ground_zones = record.contacts.iter().map(|c| c.surface.clamp(0, 255) as u8).collect();
-        }
-        if record.on_object {
-            frame.object_contacts = points;
-        }
+        frame.touch(&crash.bike.record, crash.bike.collider.relative);
     }
     // The rider's bone collisions, in the kit's order (the entries' mask bits): the wreck's ragdoll
     // while down, and while up the riding body's (P152), whose feet (collisions 0 and 1) raise Foot
