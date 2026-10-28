@@ -1,6 +1,7 @@
 """S138: capture the original's bike into a wall or onto its front wheel, with save states before the hit.
 
 usage: python3 -B research/s138_hits.py NAME --pad SCRIPT --state SLOT --when EXPR [--frames N] [--save 5,6,7]
+                                         [--watch SPEC]
 
 Runs research/s138/hits.toml (S67's whole-bike spec on recording2's rider chain, wreck reason included)
 through `ps2kit.record` into context/capture/s138/NAME.csv, from save state `--state` with the pad
@@ -8,6 +9,7 @@ script played from there. From the first tick EXPR holds — a Python expression
 of mass `x y z` and velocity `vx vy vz` (+0x60, +0x260) — a state is saved into each `--save` slot in
 turn, one a tick: what a test starts the port from a few ticks before the impact. Each is copied to
 context/capture/s138/NAME-<frame asked>.p2s at the end. The wreck reason's first tick is printed.
+`--watch` records another spec instead (S139: research/s139/sweep.toml, the chassis sweep back too).
 
 Run it under `./kit pcsx2 with --`, with `./kit pad serve` up for the copy and the game not paused.
 """
@@ -79,11 +81,12 @@ def main() -> int:
     ap.add_argument('--when', required=True)
     ap.add_argument('--save', default='5,6,7')
     ap.add_argument('--frames', type=int, default=300)
+    ap.add_argument('--watch', default=str(ROOT / 'research' / 's138' / 'hits.toml'))
     a = ap.parse_args()
     out = ROOT / 'context' / 'capture' / 's138'
     out.mkdir(parents=True, exist_ok=True)
     p = When([int(s) for s in a.save.split(',')], a.when)
-    watch = record.Watch(ROOT / 'research' / 's138' / 'hits.toml')
+    watch = record.Watch(Path(a.watch))
     res = record.record(watch, out / f'{a.name}.csv', frames=a.frames, state=a.state, pad=a.pad, pine=p)
     print(f'{res.frames} rows, frames {res.first}..{res.last}, {res.skipped} torn, {res.dropped} dropped; '
           f'ended: {res.ended}')
