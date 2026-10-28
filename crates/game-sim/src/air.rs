@@ -1341,8 +1341,7 @@ pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, c
             }
         }
     } else {
-        let h = spin_heading(step.heading, table);
-        let turned = (spin.start - h).abs().min((spin.start + F(TWO_PI) - h).abs());
+        let turned = spin_turned(spin.start, spin_heading(step.heading, table));
         if air.on_ground || step.touching || F(spin.torque.y()).abs() < t.min_torque_y {
             spin.active = false;
             spin.armed = false;
@@ -1365,24 +1364,45 @@ pub fn three_sixty(t: &SpinTuning, p: &Params, air: &mut Air, spin: &mut Spin, c
             chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(m));
             spin.applied = true;
             spin.ramp = true;
-            let past = turned > SPIN_CLIP;
-            if spin.clip == 0 {
-                if past {
-                    spin.clip = 1;
-                }
-            } else if !past {
-                if spin.clip == 2 {
-                    spin.came_round = true;
-                }
-                spin.clip = 0;
-            } else if spin.clip == 1 {
-                spin.clip = 2;
-            }
+            spin_clip(spin, turned);
         }
     }
     if spin.ramp && air.on_ground {
         spin.ramp = false;
         air.authority = p.control_authority_time;
+    }
+}
+
+/// **MD36:** how far the bike is off the heading it took off on, as MX vs. ATV measures it for the
+/// 360's clip: `min(|start − h|, |start + 2π − h|)`, both headings 0..2π. It is not the angle between
+/// them: the second term only folds a heading that has wrapped past 2π *downwards*, so a bike that
+/// leaves the ground a few degrees under 2π and turns up through 0 reads nearly a whole turn off the
+/// moment it crosses (352° and 2.4° read 349.6°). Its clip then starts ~10° into the turn, comes
+/// round ~35° short of a whole one, and starts again as the heading crosses 0 a second time — two
+/// plays on one 360, which is the original's own rule (the PC exe's 360 step, R10, `fadd 2π` then
+/// the two `fabs` and the lesser; openmx-mods `notes/tricks.md` step 3 reads it the same off the PS2).
+pub fn spin_turned(start: F, h: F) -> F {
+    (start - h).abs().min((start + F(TWO_PI) - h).abs())
+}
+
+/// **MD36:** the 360's clip state, one airborne substep, as MX vs. ATV's 360 step runs it (the PC
+/// exe, R10): from none (0) the clip starts (1) once [`spin_turned`] is *over* [`SPIN_CLIP`]; started,
+/// it plays on (2) once the turn is *at or over* it; playing, it stops (0, [`Spin::came_round`])
+/// once the turn is *under* it. A clip only started and back under the angle stays started — it is
+/// neither stopped nor played, and a landing on it is still the mid-clip wreck. No latch: a clip
+/// that stopped starts again the next time the turn is over the angle.
+pub fn spin_clip(spin: &mut Spin, turned: F) {
+    if spin.clip == 0 {
+        if turned > SPIN_CLIP {
+            spin.clip = 1;
+        }
+    } else if turned >= SPIN_CLIP {
+        if spin.clip == 1 {
+            spin.clip = 2;
+        }
+    } else if spin.clip == 2 {
+        spin.came_round = true;
+        spin.clip = 0;
     }
 }
 
