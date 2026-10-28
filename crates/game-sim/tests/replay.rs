@@ -7389,32 +7389,33 @@ const S89_RIDER: [u32; 6] = [0x34, 0x34, 0x8, 0x8, 0x8, 0x0];
 
 /// The tick each of [`S89_RIDES`] agrees through on every lane, in that order. A ratchet like
 /// [`SAVE_STATE_AGREES_THROUGH`]: parting at or before it fails, agreeing further asks to raise it.
-/// S107 had both parting at their first compared tick (2); by S123 every lane agrees through 30 along
-/// and 15 across. Ee-stepping the along image's ground step shows the original's swept contacts on the
-/// bed are the wheel probe record's points as the port's search finds them, word for word, in both
-/// substeps of tick 1, and so are the load points and compressions. Along parts at 31 as the original's
-/// engine starts driving the rear wheel (wheel torque 379 against the port's 0); across at 16 on the
-/// chassis velocity.
-const S89_AGREES_THROUGH: [u64; 2] = [30, 15];
+/// S107 had both parting at their first compared tick (2). S123 Ee-stepped the along image's ground
+/// step: the original's swept contacts on the bed are the wheel probe record's points as the port's
+/// search finds them, word for word, in both substeps of tick 1, and so are the load points and
+/// compressions. Both now part in the air, on the angular history's z (the first lane to go): along at
+/// 237, four ticks after it leaves the bed's shoulder (233), by an ulp; across at 142, 24 ticks into its
+/// flight off the bed (118). Up to there every lane is the original's on every tick (S124: the pads go on
+/// the ticks, [`save_state_inputs`], and no longer on the rows).
+const S89_AGREES_THROUGH: [u64; 2] = [236, 141];
 
 /// The tick each wheel's slip and contact lanes agree through on each of [`S89_RIDES`] (`u64::MAX`:
-/// every tick), though the chassis parts at tick 1. A ratchet: parting earlier fails. The two locked
-/// lanes were re-pinned by S107, which put the rides on the states' own bike and levers: front 280
-/// (from 279), rear 276 (from 277).
+/// every tick), though the chassis parts in the air ([`S89_AGREES_THROUGH`]). A ratchet: parting
+/// earlier fails. Before S124 the pads went on the rows, so the gas came a tick late and the bed's
+/// edge (along 106/108, across 50/53) parted on a ride already off the original's.
 const S89_LANES_AGREE_THROUGH: [(&str, [u64; 2]); 12] = [
     ("rider.ride.front.slip.spinning", [u64::MAX, u64::MAX]),
-    ("rider.ride.front.slip.locked", [280, u64::MAX]),
+    ("rider.ride.front.slip.locked", [571, u64::MAX]),
     ("rider.ride.front.slip.sliding", [u64::MAX, u64::MAX]),
-    ("rider.ride.rear.slip.spinning", [31, 16]),
-    ("rider.ride.rear.slip.locked", [276, u64::MAX]),
+    ("rider.ride.rear.slip.spinning", [u64::MAX, u64::MAX]),
+    ("rider.ride.rear.slip.locked", [571, u64::MAX]),
     ("rider.ride.rear.slip.sliding", [u64::MAX, u64::MAX]),
-    // Along, the bed is rows 0-107: the contact agrees until the wheels drop off it.
-    ("rider.ride.front.w.ray_hit", [105, 49]),
-    ("rider.ride.front.w.swept_contact", [105, 49]),
-    ("rider.ride.front.surface", [164, 59]),
-    ("rider.ride.rear.w.ray_hit", [107, 52]),
-    ("rider.ride.rear.w.swept_contact", [107, 52]),
-    ("rider.ride.rear.surface", [166, 62]),
+    // Along, the bed is rows 0-107: the contact holds through the wheels dropping off it.
+    ("rider.ride.front.w.ray_hit", [517, u64::MAX]),
+    ("rider.ride.front.w.swept_contact", [u64::MAX, u64::MAX]),
+    ("rider.ride.front.surface", [u64::MAX, u64::MAX]),
+    ("rider.ride.rear.w.ray_hit", [518, u64::MAX]),
+    ("rider.ride.rear.w.swept_contact", [u64::MAX, u64::MAX]),
+    ("rider.ride.rear.surface", [u64::MAX, u64::MAX]),
 ];
 
 /// A tick of a ride, as the original's row and the port's run each had it: the bike's speed across
@@ -7523,7 +7524,9 @@ fn the_dallas_rail_rides_replay_from_their_save_states() {
         assert!(slid < 2.0, "{name}: the original slid at {slid} on the bed");
 
         let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let inputs = inputs_from_capture(&cap).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // On the ticks, not the rows: a row's pad is the one PAD_LEADS on, and the first tick rides on
+        // the controls the state was saved holding (S124; S117's rule).
+        let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{name}: {e}"));
         in_the_world_on(&cap, "race250p.phy", "250_motoxxx", |world, named, bike| {
             if let Some(b) = &bike {
                 for (w, mount) in [b.mounts.0, b.mounts.1].into_iter().enumerate() {
@@ -7655,7 +7658,7 @@ fn the_dallas_rail_rides_replay_from_their_save_states() {
             let on = port.iter().filter(|(_, p)| p.on_the_bed()).count();
             let port_slid = port.iter().filter(|(_, p)| p.swept[0] || p.swept[1]).map(|(_, p)| p.side.abs()).fold(0.0, f32::max);
             println!("{name}: the port on the bed {on} of {} ticks, at most {port_slid} across its heading on a prop", port.len());
-            // Not bit-exact over the whole ride ([`S89_AGREES_THROUGH`]), but the port rides the bed the
+            // Not bit-exact the whole way (it parts in the air, [`S89_AGREES_THROUGH`]), but the port rides the bed the
             // original's way: as long, through the sweep, on the terrain's surface byte, and no slide.
             assert!(on >= least, "{name}: the port was on the bed {on} ticks, the original {}", bed.len());
             for (t, p) in port.iter().filter(|(_, p)| p.on_the_bed()) {
