@@ -505,6 +505,8 @@ pub struct Prop {
     pub body: Body,
     /// The part's gravity force (`GravityScale` times the weight, down).
     pub gravity: Vf,
+    /// The collision object's tuning, off the part's keys and the body's mass and inertia (S198).
+    pub collider: crate::contact::Collider,
 }
 
 /// The origin a direction-only basis is built round.
@@ -607,7 +609,7 @@ pub fn bodies(
             let size = box_size(node_box(member));
             let (position, quat) = pose(&models[member.model]);
             let made = WreckBike::new(part, part.inertia(size), position, quat);
-            out.push(Prop { collection: c, member: m, body: made.body, gravity: made.gravity });
+            out.push(Prop { collection: c, member: m, body: made.body, gravity: made.gravity, collider: made.collider });
         }
     }
     out

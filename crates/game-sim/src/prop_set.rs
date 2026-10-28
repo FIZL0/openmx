@@ -9,33 +9,41 @@
 //! depth, which is the edge object every free09 prop names in the first_recording state
 //! (`0..6912` on both axes, free09's three root cells of 256 samples nine feet apart).
 //!
-//! Once a frame ([`PropSet::frame`]) every collection runs its node's update ([`Collection::tick`]),
-//! in the order they were made. A collection nothing has woken does nothing, so a track full of props
-//! at rest costs a walk of the list.
+//! Each body has its collision object (S198, [`Collision`]): the part's tuning, and the model's
+//! `<node>m.col` read off the disc as its ray probe (a model with no ray file — the signs — has no ray
+//! probe and no sweep probe).
+//!
+//! Once a frame ([`PropSet::frame_among`]) the props' world node updates: every filed collision
+//! object searches the terrain and the scene ([`Collection::search`]), then every collection steps its
+//! world and runs its listeners ([`Collection::step`]), in the order they were made. A collection
+//! nothing has woken does nothing, so a track full of props at rest costs a walk of the list.
 //!
 //! The state is [`PropSet::collections`]: hashed and sent with a rollback snapshot, on a track that
 //! has props (an empty set is not walked or sent, so every state without props hashes and encodes as
 //! before). Which scene model each body stands on ([`PropSet::models`]) and the ragdoll's tables the
 //! pins solve with are constants of the track, shared by every clone.
 //!
-//! What is not here yet (filed as their own tasks): each prop's own collision object (its `m.col` rays
-//! and sweep against the terrain and the scene, resolved in its force listener), its `f.col` as a
-//! collidable the bike, the rider, the wreck bike and the plane strike — whose struck listener wakes
-//! it — and the contacts' impulse on its body. Until then nothing in a ride wakes a prop.
+//! What is not here yet (filed as its own task, S197): a prop's `f.col` as a collidable the bike, the
+//! rider, the wreck bike, the plane and the other props strike — whose struck listener wakes it — and
+//! the contacts' impulse on its body. Until then nothing in a ride wakes a prop.
 
 #![deny(clippy::float_arithmetic)]
 
 use std::sync::Arc;
 
 use crate::biplane::Area;
-use crate::hash::{State, Walk};
 use crate::contact::Node;
+use crate::contact_search::Heightfield;
+use crate::eco::Trees;
+use crate::flight_search::{self, Rays};
+use crate::hash::{State, Walk};
 use crate::math::Mat4;
 use crate::phy::{Ini, Part};
-use crate::prop_world::{Collection, Edge, Joint, Listener, Object, Unmade};
+use crate::prop_world::{Collection, Collision, Edge, Joint, Listener, Object, Unmade};
 use crate::props::{self, Member, NodeBox};
 use crate::ragdoll::{Bone, Tables};
-use crate::track::Placement;
+use crate::track::{self, Placement};
+use crate::world::Props;
 use ps2_float::{F, Vf};
 
 /// The track's knockable props: their worlds, and the constants they were made from.
@@ -48,6 +56,9 @@ pub struct PropSet {
     pub models: Arc<Vec<Vec<usize>>>,
     /// The tables the pins' solve reads: built once, shared. `None` only for an empty set.
     pub tables: Option<Arc<Tables>>,
+    /// Each body's ray probe tree (its model's `m.col`, `None` for a model with none), collection by
+    /// collection in object order. A constant of the track.
+    pub rays: Arc<Vec<Vec<Option<Rays>>>>,
 }
 
 impl PropSet {
@@ -95,17 +106,35 @@ impl PropSet {
         let edge = area.map(|a| Edge { min: [F::ZERO, F::ZERO], max: [a.width, a.depth] });
         let mut collections = Vec::with_capacity(kept.len());
         let mut on = Vec::with_capacity(kept.len());
+        let mut trees = Vec::with_capacity(kept.len());
+        // Each model's ray file, read once: `None` where it has none, or it does not parse (said).
+        let mut ray_files: std::collections::BTreeMap<String, Option<Rays>> = std::collections::BTreeMap::new();
         let mut bodies = bodies.into_iter().peekable();
         for (c, coll) in kept.iter().enumerate() {
             let mut parts: Vec<(&Part, &str)> = Vec::new();
             let mut bones = Vec::new();
             let mut frames: Vec<Mat4> = Vec::new();
+            let mut colliders = Vec::new();
+            let mut probes = Vec::new();
             while let Some(made) = bodies.next_if(|p| p.collection == c) {
                 let m = coll.members[made.member];
                 let entry = &coll.pco.parts[m.part];
                 parts.push((&entry.part, &entry.name));
                 bones.push(Bone { body: made.body, mass: entry.part.mass, inertia: Vf::ZERO, reference: Vf::VF0 });
                 frames.push(props::frame(&models[m.model]));
+                colliders.push(made.collider);
+                let file = props::rays_file(&models[m.model].file);
+                let probe = ray_files.entry(file.clone()).or_insert_with(|| {
+                    let bytes = psg(&file)?;
+                    match track::Rays::parse(&bytes) {
+                        Ok(r) => Some(flight_search::Rays::of(&r)),
+                        Err(why) => {
+                            said.push(format!("{}: {file}: {why}", coll.name));
+                            None
+                        }
+                    }
+                });
+                probes.push(probe.clone());
             }
             let (mut world, unmade) = Collection::new(&coll.pco, &parts, bones, &frames, &tables.curve);
             for u in unmade {
@@ -115,10 +144,14 @@ impl PropSet {
                 });
             }
             world.edge = edge;
+            for (((o, collider), probe), (part, _)) in world.objects.iter_mut().zip(colliders).zip(&probes).zip(&parts) {
+                o.collision = Some(Collision::new(part, collider, probe.as_ref().map(Rays::pairs)));
+            }
             on.push(coll.members.iter().map(|m| m.model).collect());
+            trees.push(probes);
             collections.push(world);
         }
-        let set = PropSet { collections, models: Arc::new(on), tables: Some(tables) };
+        let set = PropSet { collections, models: Arc::new(on), tables: Some(tables), rays: Arc::new(trees) };
         (set, said)
     }
 
@@ -127,11 +160,23 @@ impl PropSet {
         self.collections.is_empty()
     }
 
-    /// **One frame**: every collection's node update, in the order they were made.
+    /// **One frame** with nothing to strike: [`PropSet::frame_among`] with no terrain and no scene.
     pub fn frame(&mut self, dt: F) {
+        self.frame_among(dt, None, None, None);
+    }
+
+    /// **One frame**: the props' world node's update — every filed collision object's search against
+    /// the terrain `field`, the scene's collision meshes `props` and the ecosystem's `trees`
+    /// ([`Collection::search`]), then every collection's step and listeners ([`Collection::step`]), in
+    /// the order they were made.
+    pub fn frame_among(&mut self, dt: F, field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
         let Some(tables) = &self.tables else { return };
+        for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
+            c.search(dt, rays, field, props, trees);
+        }
+        let movers = props.map(|p| flight_search::movers(&p.props)).unwrap_or_default();
         for c in &mut self.collections {
-            c.tick(dt, tables);
+            c.step(dt, tables, &movers);
         }
     }
 
@@ -207,6 +252,28 @@ impl State for Object {
             w.vf(["row0", "row1", "row2"][k], *row);
         }
         w.vf("origin", self.node.origin);
+        if let Some(c) = &self.collision {
+            w.field("collision", c);
+        }
+    }
+}
+
+impl State for Collision {
+    /// What a search and a resolve write; the node is the object's, walked there.
+    fn walk(&self, w: &mut Walk<'_>) {
+        let c = &self.collider;
+        w.f("normal_speed", c.normal_speed);
+        w.vf("relative", c.relative);
+        w.vf("cofg_world", c.cofg_world);
+        let r = &self.record;
+        w.bool("touching", r.touching);
+        w.bool("on_ground", r.on_ground);
+        w.bool("on_object", r.on_object);
+        w.bool("touching_other", r.touching_other);
+        w.vf("swept_from", r.swept_from);
+        w.vf("swept_to", r.swept_to);
+        w.u32("contacts", r.contacts.len() as u32);
+        w.u32("struck", r.struck.map_or(u32::MAX, |s| s as u32));
     }
 }
 

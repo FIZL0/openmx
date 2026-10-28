@@ -529,7 +529,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // `Rider::bike_col`, not walked.
     // 11584 since S131: the knockable props (`Traffic::props`), walked as `props` only on a track
     // with any, so the leaves do not move.
+    // 11592 since S198: the props' ray probe trees (`PropSet::rays`), a constant of the track, shared and
+    // not walked; each object's collision object is walked with it.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11584, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11592, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
