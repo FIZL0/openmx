@@ -1471,6 +1471,9 @@ pub struct PadSlots<P> {
     /// alone (with no `--pads`) decides whether the keyboard rides there. `None` before the splash
     /// and without the front end: the keyboard rides with 1P's pad, as before.
     first: Option<Device<P>>,
+    /// The seat the keyboard took by joining a running ride whose 1P is a pad (P173): it drives it
+    /// as a pad would, and no pad is given it while it does.
+    keys_joined: Option<usize>,
 }
 
 /// A device a seat can be given: the keyboard or a pad.
@@ -1487,6 +1490,7 @@ impl<P> Default for PadSlots<P> {
             seats: None,
             last: std::array::from_fn(|_| None),
             first: None,
+            keys_joined: None,
         }
     }
 }
@@ -1510,6 +1514,7 @@ impl<P: Clone + PartialEq> PadSlots<P> {
                 self.last[0] = Some(p.clone());
             }
         }
+        self.keys_joined = None;
         self.first = first;
     }
 
@@ -1540,7 +1545,7 @@ impl<P: Clone + PartialEq> PadSlots<P> {
         }
         let keys_first = self.seats.is_none() && self.first == Some(Device::Keys);
         let wants = |i: usize| {
-            if i == 0 && keys_first {
+            if (i == 0 && keys_first) || self.keys_joined == Some(i) {
                 return None;
             }
             self.seats.map_or(Some(None), |seats| match seats[i] {
@@ -1595,6 +1600,32 @@ impl<P: Clone + PartialEq> PadSlots<P> {
         self.last[i] = None;
     }
 
+    /// The seat the keyboard would take to join the ride (P173): only while it drives no seat (1P is
+    /// a pad, with no `--pads`), the first after 1P's that no pad holds or waits for and that is not
+    /// in `riding`, the pad seats the ride's players read.
+    pub fn keys_free_seat(&self, riding: &[usize]) -> Option<usize> {
+        if self.seats.is_some() || self.keys().is_some() || !matches!(self.first, Some(Device::Pad(_))) {
+            return None;
+        }
+        (1..SEATS).find(|&i| self.held[i].is_none() && self.last[i].is_none() && !riding.contains(&i))
+    }
+
+    /// The keyboard drives seat `seat` from now, a player who joined on it (P173), until
+    /// [`PadSlots::leave_keys`] or the splash's next 1P.
+    pub fn join_keys(&mut self, seat: usize) {
+        if seat < SEATS && self.held[seat].is_none() {
+            self.keys_joined = Some(seat);
+        }
+    }
+
+    /// The keyboard's player left seat `seat` (P173): the keyboard drives no seat again, and the seat
+    /// is free for the next pad.
+    pub fn leave_keys(&mut self, seat: usize) {
+        if self.keys_joined == Some(seat) {
+            self.keys_joined = None;
+        }
+    }
+
     /// Seat `i` rides the keyboard: the keyboard drives it and no pad holds it (P178). A seat with a
     /// pad in it is the pad's, even where the keyboard rides alongside it.
     pub fn on_keys(&self, i: usize) -> bool {
@@ -1608,11 +1639,13 @@ impl<P: Clone + PartialEq> PadSlots<P> {
     /// With a 1P from the splash and no `--pads` (P46): 1P when the keyboard is 1P, and otherwise no
     /// seat — the keyboard does not move a pad's player — except 1P's while its pad is out, the same
     /// take-over.
+    ///
+    /// A keyboard that joined the ride (P173, [`PadSlots::join_keys`]) drives the seat it took.
     pub fn keys(&self) -> Option<usize> {
         if self.seats.is_none()
             && let Some(Device::Pad(_)) = &self.first
         {
-            return self.held[0].is_none().then_some(0);
+            return self.keys_joined.or(self.held[0].is_none().then_some(0));
         }
         self.seats.map_or(Some(0), |seats| {
             seats.iter().position(|s| *s == Some(Seat::Keys)).or(
@@ -2397,6 +2430,21 @@ impl Seats {
     /// Seat `seat`'s controller preset (P79), as its layout rides it: 0 under the new layout.
     pub fn preset(&self, seat: usize) -> usize {
         self.wiring.schemes[seat].preset(self.wiring.presets[seat])
+    }
+
+    /// The pad seat the keyboard would join the ride on, while it drives none ([`PadSlots::keys_free_seat`], P173).
+    pub fn keys_free_seat(&self, riding: &[usize]) -> Option<usize> {
+        self.slots.keys_free_seat(riding)
+    }
+
+    /// The keyboard joined the ride on pad seat `seat` ([`PadSlots::join_keys`], P173).
+    pub fn join_keys(&mut self, seat: usize) {
+        self.slots.join_keys(seat);
+    }
+
+    /// The keyboard's player left pad seat `seat` ([`PadSlots::leave_keys`], P173).
+    pub fn leave_keys(&mut self, seat: usize) {
+        self.slots.leave_keys(seat);
     }
 
     /// Seat `i` rides the keyboard ([`PadSlots::on_keys`]).
@@ -4412,6 +4460,82 @@ pub(crate) mod tests {
         assert_eq!(seats.first(), Some(&Device::Keys));
         assert!(down(playing(frame(&mut seats, &|code| code == key::H)[0]), Control::Square));
         assert!(seats.keyboard_alone().is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// P173: beside a pad 1P the keyboard drives no seat, so it joins on the first pad seat no pad
+    /// holds or waits for and no player reads; it drives that seat from then, no new pad takes it,
+    /// and when its player leaves it is the next pad's again.
+    #[test]
+    fn the_keyboard_joins_a_pad_1p_ride_on_a_free_seat() {
+        let mut s = PadSlots::<u32>::default();
+        s.set_first(Some(Device::Pad(8)));
+        s.update(&[8, 5]);
+        assert_eq!((s.held[..3].to_vec(), s.keys()), (vec![Some(8), Some(5), None], None));
+        assert_eq!(s.keys_free_seat(&[0]), Some(2), "seat 1 has pad 5 in it");
+        assert_eq!(s.keys_free_seat(&[0, 2]), Some(3), "a seat a player reads is not free");
+        s.join_keys(2);
+        assert_eq!(s.keys(), Some(2));
+        assert!(s.on_keys(2) && !s.on_keys(0));
+        assert_eq!(s.keys_free_seat(&[0, 2]), None, "the keyboard has its seat");
+        // A pad plugged in passes the keyboard's seat by.
+        s.update(&[8, 5, 9]);
+        assert_eq!(s.held[..4], [Some(8), Some(5), None, Some(9)]);
+        // 1P's pad out: the keyboard stays its own player's.
+        s.update(&[5, 9]);
+        assert!(s.waiting(0));
+        assert_eq!(s.keys(), Some(2));
+        s.update(&[8, 5, 9]);
+        s.leave_keys(1);
+        assert_eq!(s.keys(), Some(2), "another seat's leaving is not the keyboard's");
+        s.leave_keys(2);
+        assert_eq!(s.keys(), None);
+        s.update(&[8, 5, 9, 4]);
+        assert_eq!(s.held[2], Some(4), "the seat is the next pad's again");
+        // The splash's next 1P starts the keyboard over.
+        s.join_keys(4);
+        s.set_first(Some(Device::Pad(8)));
+        assert_eq!(s.keys(), None);
+
+        // No free seat with the keyboard 1P, under `--pads`, or before the splash.
+        let mut s = PadSlots::<u32>::default();
+        s.set_first(Some(Device::Keys));
+        assert_eq!(s.keys_free_seat(&[0]), None);
+        let mut s = PadSlots::<u32>::with_seats(Seat::parse_list("0,1").unwrap());
+        s.set_first(Some(Device::Pad(8)));
+        assert_eq!(s.keys_free_seat(&[0]), None);
+        assert_eq!(PadSlots::<u32>::default().keys_free_seat(&[0]), None);
+    }
+
+    /// P173 over devices: 1P a pad and the keyboard alone, it joins on seat 1 and rides it on its
+    /// own keys, no longer alone, and leaving hands it back to the pause it worked before.
+    #[test]
+    fn a_joined_keyboard_drives_its_seat() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("keys_join");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        sys_entry(&sys, "js0", "Pad A", "usb-1/input0");
+        let _a = FakePad::plug(&dev, "js0");
+        let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
+        seats.since_scan = None;
+        let got = seats.devices(&nothing);
+        let Device::Pad(a_id) = got[1].0.clone() else { panic!("a pad") };
+        seats.set_first(Some(Device::Pad(a_id)));
+        let now = frame(&mut seats, &|code| code == key::H);
+        assert!(matches!(now[0], SeatInput::Playing(_)) && now[1] == SeatInput::Empty);
+        assert!(seats.keyboard_alone().is_some_and(|k| down(k, Control::Square)));
+        assert_eq!(seats.keys_free_seat(&[0]), Some(1));
+
+        seats.join_keys(1);
+        let now = frame(&mut seats, &|code| code == key::H);
+        assert!(!down(playing(now[0]), Control::Square), "1P is A's alone");
+        assert!(down(playing(now[1]), Control::Square), "2P is the keyboard's");
+        assert!(seats.keyboard_alone().is_none() && seats.on_keys(1));
+
+        seats.leave_keys(1);
+        assert_eq!(frame(&mut seats, &|code| code == key::H)[1], SeatInput::Empty);
+        assert!(seats.keyboard_alone().is_some_and(|k| down(k, Control::Square)));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
