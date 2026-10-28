@@ -1,0 +1,237 @@
+# c9-event.toml — C9: free09's stunt competition, tick by tick: the activity, its score manager and
+# the cards on it. Addresses are first_recording's heap (the activity is built when the world loads:
+# activity_manager -> 0x58 -> 0x24); floats are read as u32 so the comparison is bit for bit.
+
+[watch]
+name        = "c9-event"
+description = "the stunt competition's activity, its manager and its cards"
+every       = 1
+frames      = 4400
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "u32"
+
+[[field]]
+name = "act_players"  # +0x180 the activity player list count (humans and AI)
+addr = "0x1853460"
+type = "u32"
+
+[[field]]
+name = "act_humans"  # +0x19c human riders joined
+addr = "0x185347c"
+type = "u32"
+
+[[field]]
+name = "act_target"  # +0x1a0 the hit.dat target
+addr = "0x1853480"
+type = "u32"
+
+[[field]]
+name = "act_leader"  # +0x1a4 the leading player
+addr = "0x1853484"
+type = "u32"
+
+[[field]]
+name = "act_tie"  # +0x1b4 two riders level
+addr = "0x1853494"
+type = "u32"
+
+[[field]]
+name = "mgr_flags"
+addr = "0x185338c"
+type = "u32"
+
+[[field]]
+name = "mgr_mode"
+addr = "0x1853394"
+type = "u32"
+
+[[field]]
+name = "mgr_limit"
+addr = "0x18533d0"
+type = "u32"
+
+[[field]]
+name = "mgr_length"
+addr = "0x18533ec"
+type = "u32"
+
+[[field]]
+name = "mgr_interval"
+addr = "0x18533f0"
+type = "u32"
+
+[[field]]
+name = "mgr_elapsed"
+addr = "0x18533f4"
+type = "u32"
+
+[[field]]
+name = "mgr_tally"
+addr = "0x18533f8"
+type = "u32"
+
+[[field]]
+name = "mgr_clock"
+addr = "0x1853428"
+type = "u32"
+
+[[field]]
+name = "mgr_card0"
+addr = "0x1853364"
+type = "u32"
+
+[[field]]
+name = "p0_player"
+addr = "0x1853468 -> 0x0 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "p0_reached"
+addr = "0x1853468 -> 0x0 -> 0xc0"
+type = "u32"
+
+[[field]]
+name = "p0_ctl"
+addr = "0x1853468 -> 0x0 -> 0x54 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "p1_player"
+addr = "0x1853468 -> 0x4 -> 0x54"
+type = "u32"
+
+[[field]]
+name = "p1_reached"
+addr = "0x1853468 -> 0x4 -> 0xc0"
+type = "u32"
+
+[[field]]
+name = "p1_ctl"
+addr = "0x1853468 -> 0x4 -> 0x54 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "c0_flags"
+addr = "0x1853364 -> 0x8"
+type = "u32"
+
+[[field]]
+name = "c0_ridden"
+addr = "0x1853364 -> 0xb4"
+type = "u32"
+
+[[field]]
+name = "c0_left"
+addr = "0x1853364 -> 0xc4"
+type = "u32"
+
+[[field]]
+name = "c0_total"
+addr = "0x1853364 -> 0xdc"
+type = "u32"
+
+[[field]]
+name = "c0_owner"
+addr = "0x1853364 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "c1_flags"
+addr = "0x1853364 -> 0x1c8 -> 0x8"
+type = "u32"
+
+[[field]]
+name = "c1_ridden"
+addr = "0x1853364 -> 0x1c8 -> 0xb4"
+type = "u32"
+
+[[field]]
+name = "c1_left"
+addr = "0x1853364 -> 0x1c8 -> 0xc4"
+type = "u32"
+
+[[field]]
+name = "c1_total"
+addr = "0x1853364 -> 0x1c8 -> 0xdc"
+type = "u32"
+
+[[field]]
+name = "c1_owner"
+addr = "0x1853364 -> 0x1c8 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "c2_flags"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0x8"
+type = "u32"
+
+[[field]]
+name = "c2_ridden"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0xb4"
+type = "u32"
+
+[[field]]
+name = "c2_left"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0xc4"
+type = "u32"
+
+[[field]]
+name = "c2_total"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0xdc"
+type = "u32"
+
+[[field]]
+name = "c2_owner"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "c3_flags"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0x1c8 -> 0x8"
+type = "u32"
+
+[[field]]
+name = "c3_ridden"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0x1c8 -> 0xb4"
+type = "u32"
+
+[[field]]
+name = "c3_left"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0x1c8 -> 0xc4"
+type = "u32"
+
+[[field]]
+name = "c3_total"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0x1c8 -> 0xdc"
+type = "u32"
+
+[[field]]
+name = "c3_owner"
+addr = "0x1853364 -> 0x1c8 -> 0x1c8 -> 0x1c8 -> 0x4"
+type = "u32"
+
+[[field]]
+name = "p0_saved"  # the player entry +0x734: the join's freeride total, cut to an int
+addr = "0x1853468 -> 0x0 -> 0x734"
+type = "u32"
+
+[[field]]
+name = "free_flags"  # the human's freeride card, read straight: it leaves the manager at the end
+addr = "0x1c833c8"
+type = "u32"
+
+[[field]]
+name = "free_total"  # its total: seeded before the join, put back by the end
+addr = "0x1c8349c"
+type = "u32"
