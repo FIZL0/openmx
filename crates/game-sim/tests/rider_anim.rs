@@ -1772,6 +1772,34 @@ mod two_p_poses {
     }
 
     fn read(joints: bool) -> Option<game_sim::replay::Capture> {
+        read_at(two_p::CAPTURE, joints)
+    }
+
+    /// C11's second playback of the same tape, the spec with the body's two lag records added
+    /// (`lag_mix`, `lag_phase`: `{value, tau, ratio}` each). Its rows are a playback of their own,
+    /// not the capture of record's rows with columns added: they part from it in the low bits.
+    pub const EASED: &str = "capture/2p/2p-eased.csv";
+
+    /// [`EASED`], with the 22 posed joints if `joints`.
+    pub fn eased(joints: bool) -> Option<game_sim::replay::Capture> {
+        read_at(EASED, joints)
+    }
+
+    /// Both pads off the capture of record, and the frame_counter of its first row.
+    fn record_pads() -> Option<(game_sim::replay::PadTape, i64)> {
+        let kit = ps2_oracle::Kit::load().ok()?;
+        let local = kit.root.join("context").join(two_p::CAPTURE);
+        let path = if local.exists() { local } else { kit.ctx(two_p::CAPTURE) };
+        let Ok(file) = std::fs::File::open(&path) else {
+            println!("SKIPPED: no {}", path.display());
+            return None;
+        };
+        let keep = |c: &str| ["frame_counter", "dt"].contains(&c) || c.starts_with("pad") || c.starts_with("stamp");
+        let cap = two_p::read(std::io::BufReader::new(file), keep).expect("the 2p capture reads");
+        Some((two_p::tape(&cap).expect("both pads off the capture of record"), Col(&cap).u(0, "frame_counter")))
+    }
+
+    fn read_at(rel: &str, joints: bool) -> Option<game_sim::replay::Capture> {
         let kit = match ps2_oracle::Kit::load() {
             Ok(kit) => kit,
             Err(why) => {
@@ -1779,8 +1807,8 @@ mod two_p_poses {
                 return None;
             }
         };
-        let local = kit.root.join("context").join(two_p::CAPTURE);
-        let path = if local.exists() { local } else { kit.ctx(two_p::CAPTURE) };
+        let local = kit.root.join("context").join(rel);
+        let path = if local.exists() { local } else { kit.ctx(rel) };
         let Ok(file) = std::fs::File::open(&path) else {
             println!("SKIPPED: no {}", path.display());
             return None;
@@ -1788,6 +1816,7 @@ mod two_p_poses {
         let lane = [
             "airborne", "flip_ramp", "trick_id", "req_placing", "req_wreck", "req_axes.x", "req_axes.y",
             "req_axes.z", "req_progress", "d_cross", "d_flags", "m_clock", "m_finished", "mode", "settled",
+            "lag_mix.x", "lag_mix.y", "lag_mix.z", "lag_phase.x", "lag_phase.y", "lag_phase.z", "d_reverse",
         ];
         let keep = |c: &str| {
             ["frame_counter", "dt"].contains(&c)
@@ -1832,6 +1861,11 @@ mod two_p_poses {
         /// How far the drawn rider's joints are from the original's, the worst lane of the 22
         /// quaternions and translations, when the replay was asked to pose them.
         pub joints: Option<f32>,
+        /// The two eased axes after the tick's step, mix then phase, the original's and the port's as
+        /// bits, on a capture that has the lag records (C11).
+        pub eased: Option<[(u32, u32); 2]>,
+        /// The reverse pair's own phase clock after the tick, the original's and the port's, as bits.
+        pub reverse: (u32, u32),
     }
 
     fn mode_number(m: Mode) -> i32 {
@@ -1867,9 +1901,22 @@ mod two_p_poses {
     }
 
     fn run(cap: game_sim::replay::Capture, posed: bool) -> Option<Vec<Vec<Tick>>> {
+        run_with(cap, posed, false)
+    }
+
+    /// [`run`] on a capture with the lag records. With `seed`, each tick's two axes and the reverse
+    /// pair's clock start from the original's as the last row left them, so the port's
+    /// [`Lag`](game_sim::vehicle_anim::Lag) and clock step from where the original's did and the pose
+    /// is sampled off the original's eased values rather than the port's own run of them.
+    pub fn run_with(cap: game_sim::replay::Capture, posed: bool, seed: bool) -> Option<Vec<Vec<Tick>>> {
         let mut drawn = drawn()?;
-        let tape = two_p::tape(&cap).expect("both pads off the capture");
         let c = Col(&cap);
+        // A capture the recorder dropped rows from (C11's) has no tape of its own: its pads are the
+        // tape's fields, so the capture of record's, by frame_counter.
+        let (tape, first) = match two_p::tape(&cap) {
+            Ok(tape) => (tape, c.u(0, "frame_counter")),
+            Err(_) => record_pads()?,
+        };
         let mut out = vec![];
         for rider in two_p::Rider::BOTH {
             if rider != two_p::Rider::P1 {
@@ -1877,6 +1924,7 @@ mod two_p_poses {
             }
             let p = rider.prefix();
             let n = |s: &str| format!("{p}{s}");
+            let has_eased = cap.columns.iter().any(|col| *col == n("lag_mix.x"));
             let mut body = Body::default();
             let numbers = Params::built();
             let mut rates = game_render::vehicle::params();
@@ -1891,8 +1939,15 @@ mod two_p_poses {
             for row in 1..cap.rows.len() {
                 // A 2p row's dt is the next frame's: this tick ran on the last row's.
                 let dt = F(c.f(row - 1, "dt"));
-                let frame = &tape.frames[row - 1];
-                pad.poll(dt, &frame.reports[rider.pad()], &mut events);
+                // The pad of each tick since the last row: one, but for a row after a dropped one.
+                let (from, to) = (c.u(row - 1, "frame_counter") + 1, c.u(row, "frame_counter"));
+                if (to - first) as usize > tape.frames.len() {
+                    break;
+                }
+                for f in from..=to {
+                    let frame = &tape.frames[(f - first - 1) as usize];
+                    pad.poll(dt, &frame.reports[rider.pad()], &mut events);
+                }
                 let (speed, up) = (F(c.f(row - 1, &n("req_axes.z"))), c.u(row - 1, &n("airborne")) != 0);
                 let controls = Controls::from_pad(&pad).reverse_rule(speed, up);
                 hands.push(controls.reverse);
@@ -1922,6 +1977,11 @@ mod two_p_poses {
                 // as its mode machine left it last tick, for this tick's entries to clear.
                 body.settled = c.u(row - 1, &n("settled")) != 0;
                 body.mode(dt, &r, &ask, &phy::Wrecks::default(), None, &mut pool, clock);
+                if seed && has_eased {
+                    body.veh.mix.value = F(c.f(row - 1, &n("lag_mix.x")));
+                    body.veh.phase.value = F(c.f(row - 1, &n("lag_phase.x")));
+                    body.veh.reverse = F(c.f(row - 1, &n("d_reverse")));
+                }
                 let lib = &drawn.pose_lib;
                 let (frame, clocked) =
                     body.frame_clocked(dt, &numbers, &mut rates, &mut r, &ask, lib, &mut pool, clock, true, &|id| drawn.timing(id));
@@ -1950,6 +2010,14 @@ mod two_p_poses {
                     ours: (body.veh.state, mode_number(body.machine.mode)),
                     ramp: (c.word(row, &n("d_flags"), 0xc), body.veh.ramp.to_f32().to_bits()),
                     joints,
+                    reverse: (c.f(row, &n("d_reverse")).to_bits(), body.veh.reverse.to_f32().to_bits()),
+                    eased: has_eased.then(|| {
+                        let theirs = |col: &str| c.f(row, &n(col)).to_bits();
+                        [
+                            (theirs("lag_mix.x"), body.veh.mix.value.to_f32().to_bits()),
+                            (theirs("lag_phase.x"), body.veh.phase.value.to_f32().to_bits()),
+                        ]
+                    }),
                 });
             }
             out.push(ticks);
@@ -2147,4 +2215,144 @@ fn the_2p_riders_drawn_poses() {
         assert_eq!(total.0, TWO_P_DRAWN[k].0, "P{}'s ticks on the original's clip", k + 1);
         assert!(total.1 >= TWO_P_DRAWN[k].1, "P{}: {} ticks within 1e-4, down from {}", k + 1, total.1, TWO_P_DRAWN[k].1);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// C11: the 2p riders' eased axes
+// ---------------------------------------------------------------------------------------------------
+
+/// Per rider, per axis (mix, phase), on C11's capture: the riding ticks stepped, the ones the port's
+/// [`Lag`] steps to bit for bit, the torn rows (see the test) and the ones left unexplained.
+const TWO_P_EASED_STEPS: [[(usize, usize, usize, usize); 2]; 2] =
+    [[(10983, 10947, 29, 7), (10983, 10921, 43, 19)], [(11179, 11055, 114, 10), (11179, 10852, 291, 36)]];
+
+/// **C11 — the body's two lag records, step by step.** C11's playback of the 2p tape carries the
+/// original's two eased-axis records (`{value, time constant, ratio}`, the mix axis stepped first)
+/// beside the request's two targets. On every riding tick each record is stepped by the port's
+/// [`Lag::step`] from the original's own value of the row before, on that row's dt (a 2p row's dt is
+/// the next frame's) and the request's target — snapped to it first when the request is holding, as
+/// the body's frame does — and the value and the ratio it leaves are held against the original's bit
+/// for bit. The time constants are the port's on every row.
+///
+/// The target is this row's or the row before's: the request is written at its own phase of the tick,
+/// and P2's lane is read on the other side of its body's step (V90), so a row's target is either side
+/// of the one the step read. A tick that matches neither is a torn row when the record did not move
+/// (the row was read before the step), moved two steps (read after the next one) or moved towards a
+/// target between two rows' targets (the request was written twice between reads, and the step saw
+/// the write in the middle). What is left is counted and pinned.
+#[test]
+fn the_2p_eased_axes_step_as_the_ports_lag() {
+    use game_sim::replay::two_p;
+    use vehicle_anim::{Lag, MIX_TAU, PHASE_TAU};
+    let Some(cap) = two_p_poses::eased(false) else { return };
+    let c = two_p_poses::Col(&cap);
+    let bits = |v: F| v.to_f32().to_bits();
+    let mut all = vec![];
+    for (k, rider) in two_p::Rider::BOTH.into_iter().enumerate() {
+        let p = rider.prefix();
+        let n = |s: &str| format!("{p}{s}");
+        let mut counts = [(0usize, 0usize, 0usize, 0usize); 2];
+        let mut unexplained = vec![];
+        for row in 2..cap.rows.len() - 1 {
+            // A row after one the recorder missed has no row before it to step from.
+            let frame = c.u(row, "frame_counter");
+            if c.u(row, &n("mode")) != 1 || frame != c.u(row - 1, "frame_counter") + 1 {
+                continue;
+            }
+            let dt = F(c.f(row - 1, "dt"));
+            for (a, (lag, target, tau)) in
+                [("lag_mix", "req_axes.y", MIX_TAU), ("lag_phase", "req_axes.x", PHASE_TAU)].into_iter().enumerate()
+            {
+                let col = |r: usize, l: &str| F(c.f(r, &n(&format!("{lag}.{l}"))));
+                assert_eq!(col(row, "y"), tau, "{p} row {row}: {lag}'s time constant");
+                let (theirs, ratio, before) = (col(row, "x"), col(row, "z"), col(row - 1, "x"));
+                let from = Lag { value: before, tau, ratio: F::ZERO };
+                let step = |at: usize| {
+                    let target = F(c.f(at, &n(target)));
+                    let mut l = from;
+                    if c.u(at, &n("req_placing")) != 0 && target != F(f32::MAX) {
+                        l.value = target;
+                    }
+                    l.step(dt, target);
+                    l
+                };
+                let e = &mut counts[a];
+                e.0 += 1;
+                if [row, row - 1].into_iter().map(step).any(|l| bits(l.value) == bits(theirs) && bits(l.ratio) == bits(ratio)) {
+                    e.1 += 1;
+                    continue;
+                }
+                let mut twice = Lag { value: col(row - 2, "x"), tau, ratio: F::ZERO };
+                twice.step(F(c.f(row - 2, "dt")), F(c.f(row - 1, &n(target))));
+                twice.step(dt, F(c.f(row, &n(target))));
+                // The target the step must have read, off the ratio the original left.
+                let implied = (before + (theirs - before) / ratio).to_f32();
+                let targets: Vec<f32> = (row - 2..=row + 1).map(|r| c.f(r, &n(target))).collect();
+                let lo = targets.iter().copied().fold(f32::MAX, f32::min) - 1e-4;
+                let hi = targets.iter().copied().fold(f32::MIN, f32::max) + 1e-4;
+                if bits(theirs) == bits(before)
+                    || (twice.value - theirs).abs().to_f32() <= 1e-6
+                    || (lo..=hi).contains(&implied)
+                {
+                    e.2 += 1;
+                } else {
+                    e.3 += 1;
+                    unexplained.push((frame, lag, theirs.to_f32(), implied, targets));
+                }
+            }
+        }
+        println!("{p}: (riding ticks, bit for bit, torn, unexplained) mix {:?} phase {:?}", counts[0], counts[1]);
+        for u in unexplained.iter().take(12) {
+            println!("  {u:?}");
+        }
+        all.push(counts);
+        let _ = k;
+    }
+    assert_eq!(all, TWO_P_EASED_STEPS, "the eased steps, P1 then P2");
+}
+
+/// Per rider on C11's capture: the ticks on the original's (state, mode), and of those the ones whose
+/// eased mix and phase the port's own run left bit for bit, and the ones whose drawn joints are within
+/// 1e-4 posed off the port's eased axes and off the original's (seeded).
+const TWO_P_EASED_POSES: [(usize, usize, usize, usize, usize); 2] =
+    [(12234, 11526, 11409, 9956, 10156), (12452, 6458, 3823, 6242, 7736)];
+
+/// **C11 — V90's blended arms against the original's eased axes.** V90's replay of both riders'
+/// bodies, on C11's capture: each tick the port's eased mix and phase are held against the original's
+/// records, and the drawn rider's 22 joints are held against the captured ones twice — posed off the
+/// port's own eased axes, and with each tick's two axes and reverse clock stepped from the original's
+/// values of the row before (`seed`), so whatever still parts on a blended arm (riding lean, air,
+/// reverse) is not the eased axes. The table by (state, mode) also counts the reverse clock bit for
+/// bit, both ways; the totals are pinned (the journal, 2026-10-28-c11, reads them).
+#[test]
+fn the_2p_riders_eased_poses() {
+    let Some(free) = two_p_poses::eased(true).and_then(|cap| two_p_poses::run_with(cap, true, false)) else { return };
+    let Some(seeded) = two_p_poses::eased(true).and_then(|cap| two_p_poses::run_with(cap, true, true)) else { return };
+    let mut all = vec![];
+    for (k, (free, seeded)) in free.iter().zip(&seeded).enumerate() {
+        let mut by = std::collections::BTreeMap::<(i32, i32), [usize; 7]>::new();
+        for (f, s) in free.iter().zip(seeded) {
+            if f.theirs != f.ours {
+                continue;
+            }
+            let eased = f.eased.expect("the capture has the lag records");
+            let e = by.entry(f.theirs).or_default();
+            e[0] += 1;
+            e[1] += usize::from(eased[0].0 == eased[0].1);
+            e[2] += usize::from(eased[1].0 == eased[1].1);
+            e[3] += usize::from(f.joints.expect("posed") <= 1e-4);
+            e[4] += usize::from(s.theirs == s.ours && s.joints.expect("posed") <= 1e-4);
+            e[5] += usize::from(f.reverse.0 == f.reverse.1);
+            e[6] += usize::from(s.reverse.0 == s.reverse.1);
+        }
+        println!("P{}: (state, mode) -> [ticks, mix bit for bit, phase bit for bit, joints ≤1e-4 ours, seeded, reverse clock bit for bit ours, seeded]", k + 1);
+        for (key, v) in &by {
+            println!("  {key:?} {v:?}");
+        }
+        let sum = |i: usize| by.values().map(|v| v[i]).sum::<usize>();
+        let total = (sum(0), sum(1), sum(2), sum(3), sum(4));
+        println!("P{}: {total:?}", k + 1);
+        all.push(total);
+    }
+    assert_eq!(all, TWO_P_EASED_POSES, "the eased axes and joints, P1 then P2");
 }
