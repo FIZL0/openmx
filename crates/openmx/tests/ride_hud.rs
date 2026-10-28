@@ -74,6 +74,7 @@ fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Optio
         map: None,
         around: [None; 4],
         join: false,
+        event: None,
     }
 }
 

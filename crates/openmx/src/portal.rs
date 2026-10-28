@@ -34,6 +34,17 @@ pub struct Spot {
     pub number: Option<usize>,
 }
 
+/// The track's freestyle event (P155): its `hit.dat`'s stunt zones, `spots` of [`spots`], as the
+/// simulation's trigger boxes, and the file's target.
+pub fn stunt_event(spots: &[Spot], hit_dat: &str) -> game_sim::event::Event {
+    let zones = spots
+        .iter()
+        .filter(|s| s.activity == Activity::Stunt)
+        .map(|s| game_sim::event::Zone::new(s.at, s.look, s.size))
+        .collect();
+    game_sim::event::Event::on_track(zones, game_sim::event::target(hit_dat).unwrap_or(0))
+}
+
 /// The start zones of a track's `hit.dat`, in the file's order. A section with a type this does not
 /// know, or no position, is left out, as [`crate::overlay::zones`] leaves it.
 pub fn spots(text: &str) -> Vec<Spot> {

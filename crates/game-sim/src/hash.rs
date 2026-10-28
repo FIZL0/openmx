@@ -511,6 +511,79 @@ impl State for Sim {
             w.list("toys", &self.traffic.toys.clocks);
             w.list("toy_hints", &self.traffic.toys.hints);
         }
+        // The freestyle event (P155), once a rider has been in a stunt zone: a walk without it is
+        // what it was.
+        if !self.event.fresh() {
+            w.field("event", &self.event);
+        }
+    }
+}
+
+impl State for crate::event::Event {
+    /// What a tick changes: the start's holds, the competition, the verdicts and the results' clock.
+    /// The zones and the target are the map's.
+    fn walk(&self, w: &mut Walk<'_>) {
+        w.group("holds", |w| {
+            w.u32("count", self.holds.len() as u32);
+            self.holds.iter().for_each(|&h| w.f("hold", h));
+        });
+        if let Some(c) = &self.on {
+            w.field("competition", c);
+        }
+        let verdicts: Vec<Verdict> = self.verdicts.iter().map(|v| Verdict(*v)).collect();
+        w.list("verdicts", &verdicts);
+        w.f("shown", self.shown);
+    }
+}
+
+/// A seat's end, as the hash walks it.
+struct Verdict(Option<(crate::event::Verdict, i32)>);
+
+impl State for Verdict {
+    fn walk(&self, w: &mut Walk<'_>) {
+        use crate::event::Verdict as V;
+        let (kind, points) = match self.0 {
+            None => (0, 0),
+            Some((V::Win, p)) => (1, p),
+            Some((V::Lose, p)) => (2, p),
+            Some((V::Tie, p)) => (3, p),
+        };
+        w.u8("verdict", kind);
+        w.i32("points", points);
+    }
+}
+
+impl State for crate::event::Competition {
+    fn walk(&self, w: &mut Walk<'_>) {
+        w.i32("target", self.target);
+        w.list("seats", &self.seats);
+        w.f("limit", self.limit);
+        w.f("length", self.length);
+        w.f("interval", self.interval);
+        w.f("elapsed", self.elapsed);
+        w.f("tally", self.tally);
+        w.bool("counting", self.counting);
+        w.bool("running", self.running);
+        w.bool("over", self.over);
+        w.bool("timed_out", self.timed_out);
+        w.bool("ended", self.ended);
+        w.f("clock", self.clock);
+        w.i32("leader", self.leader.map_or(-1, |k| k as i32));
+        w.bool("tie", self.tie);
+        w.f("heard", self.heard.unwrap_or(F(-1.0)));
+    }
+}
+
+impl State for crate::event::Seat {
+    fn walk(&self, w: &mut Walk<'_>) {
+        w.f("left", self.left);
+        w.f("ridden", self.ridden);
+        w.bool("taking_part", self.taking_part);
+        w.bool("out", self.out);
+        w.bool("paused", self.paused);
+        w.bool("reached", self.reached);
+        w.bool("warning", self.warning);
+        w.i32("saved", self.saved);
     }
 }
 

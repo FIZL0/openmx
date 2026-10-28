@@ -139,7 +139,7 @@ impl Panel {
 }
 
 /// A challenge's start prompt: the activity, its name, what it asks, and how far a hold to start
-/// it is, 0 to 1. Nothing in the port starts an activity yet.
+/// it is, 0 to 1. The freestyle event is the one the port starts (P155).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Challenge {
     pub activity: Activity,
@@ -178,7 +178,73 @@ pub struct Shown<'a> {
     pub around: [Option<&'a str>; 4],
     /// Whether this view says how to join the ride (P171): a seat is free and a controller idle.
     pub join: bool,
+    /// The freestyle event while one is on (P155).
+    pub event: Option<EventShown>,
 }
+
+/// The freestyle event as a view shows it (P155): [`EventShown::of`] off the ride's event and the
+/// view's rider.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EventShown {
+    /// The track's target.
+    pub target: i32,
+    /// The countdown's number, 3 to 1, while it counts; 0 is its "GO!", up for the clock's first
+    /// second.
+    pub countdown: Option<u32>,
+    /// Seconds left on the rider's clock while it runs.
+    pub left: Option<f32>,
+    /// The last-seconds warning is up.
+    pub warning: bool,
+    /// The target is reached.
+    pub reached: bool,
+    /// The rider's end: the verdict, the event's points and the freeride total with them put back.
+    pub verdict: Option<(game_sim::event::Verdict, i32, i32)>,
+}
+
+impl EventShown {
+    /// What `seat` of the ride's `event` shows, its card `card`; `None` with no competition on or a
+    /// rider who is not in it.
+    pub fn of(event: &game_sim::event::Event, seat: usize, card: &Score) -> Option<EventShown> {
+        let c = event.on.as_ref()?;
+        let s = c.seats.get(seat)?;
+        let countdown = if c.counting {
+            Some(3u32.saturating_sub(c.elapsed.0.max(0.0) as u32).max(1))
+        } else if c.running && c.clock.0 < 1.0 {
+            Some(0)
+        } else {
+            None
+        };
+        let verdict = event.verdicts.get(seat).copied().flatten().map(|(v, profile)| (v, profile.wrapping_sub(s.saved), card.total.0 as i32));
+        Some(EventShown {
+            target: c.target,
+            countdown,
+            left: (c.running && verdict.is_none()).then_some(s.left.0),
+            warning: s.warning,
+            reached: s.reached,
+            verdict,
+        })
+    }
+}
+
+/// The clock as the event's HUD spells it, `M:SS`, a second shown until it has gone.
+pub fn clock_text(left: f32) -> String {
+    let s = left.max(0.0).ceil() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// What a verdict says.
+pub fn verdict_text(v: game_sim::event::Verdict) -> &'static str {
+    match v {
+        game_sim::event::Verdict::Win => "YOU WIN",
+        game_sim::event::Verdict::Lose => "YOU LOSE",
+        game_sim::event::Verdict::Tie => "TIE",
+    }
+}
+
+/// The announcer's line when the target is reached.
+pub const REACHED_TEXT: &str = "TARGET REACHED!";
+/// How long it stays up, seconds.
+const REACHED_UP: f32 = 3.0;
 
 // ---- what moves with time -------------------------------------------------------------------------
 
@@ -220,6 +286,9 @@ pub struct Tracker {
     /// under it: what the original's Stunt movie writes (P68).
     newest_points: f32,
     flipping: bool,
+    /// The event's target was reached at the last frame, and when it was (P155).
+    reached: bool,
+    reached_at: Option<Instant>,
 }
 
 /// The pop-up as it stands.
@@ -300,6 +369,23 @@ impl Tracker {
     /// How long an ended combo stays: a landed chain holds its total first.
     fn length(o: Out) -> f32 {
         if o.totals() { HOLD + OUT } else { OUT }
+    }
+
+    /// A frame of the freestyle event (P155): when its target was reached, for the announcer's line.
+    pub fn note_event(&mut self, now: Instant, event: Option<&EventShown>) {
+        let reached = event.is_some_and(|e| e.reached);
+        if reached && !self.reached {
+            self.reached_at = Some(now);
+        }
+        if event.is_none() {
+            self.reached_at = None;
+        }
+        self.reached = reached;
+    }
+
+    /// Whether the announcer's target line is up at `now`.
+    pub fn reached_line(&self, now: Instant) -> bool {
+        self.reached_at.is_some_and(|t| since(now, t) < REACHED_UP)
     }
 
     /// A camera preset `name` came up.
@@ -471,6 +557,9 @@ pub struct Drawn {
     pub camera: Option<Line>,
     /// The join cue (P171).
     pub join: Option<Line>,
+    /// The freestyle event's lines (P155): the target, the countdown or the clock, the announcer's
+    /// line and the verdict, as drawn.
+    pub event: Vec<Line>,
 }
 
 // ---- the pen --------------------------------------------------------------------------------------
@@ -646,6 +735,9 @@ pub fn sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], shown: &Shown
     speedometer(&mut pen, shown, &mut drawn);
     prompts(&mut pen, shown, &mut drawn);
     top_right(&mut pen, shown, tracker, now, &mut drawn);
+    if let Some(e) = &shown.event {
+        event(&mut pen, e, tracker, now, &mut drawn);
+    }
     if let Some(p) = tracker.popup(now) {
         let lines = trick(&mut pen, &p);
         drawn.trick = Some((p, lines));
@@ -698,6 +790,50 @@ fn score(pen: &mut Pen, shown: &Shown, tracker: &Tracker, now: Instant, drawn: &
         let at = (UNDER_SCORE.0, UNDER_SCORE.1 + i as f32 * 1.4 * size);
         let r = pen.text(Face::Words, Weight::Heavy, &l, at, size, ink::SLANT, GREY);
         drawn.under_score.push(Line { text: l, rect: r, colour: GREY });
+    }
+}
+
+/// The event's middle, top centre, under the score bar's line.
+const EVENT_AT: (f32, f32) = (320.0, 25.0);
+
+/// The freestyle event (P155), top centre: the target over the clock in a dark pill, the clock
+/// maroon and blinking under the warning; the countdown's number big in the middle; the announcer's
+/// line under the pill a while after the target is reached; and the verdict in the middle over the
+/// event's points and the freeride total.
+fn event(pen: &mut Pen, e: &EventShown, tracker: &Tracker, now: Instant, drawn: &mut Drawn) {
+    pen.corner = Corner::TopLeft;
+    let (cx, top) = EVENT_AT;
+    let centred = |pen: &mut Pen, text: &str, y: f32, size: f32, colour: [u8; 4], drawn: &mut Drawn| {
+        let w = Pen::measure(Face::Words, Weight::Heavy, text, size);
+        let r = pen.edged(Face::Words, Weight::Heavy, text, (cx - w / 2.0, y), size, ink::SLANT, colour, OUTLINE, 0.1 * EM);
+        drawn.event.push(Line { text: text.to_string(), rect: r, colour });
+    };
+    let target = format!("TARGET {}", grouped(e.target as f32));
+    let clock = e.left.map(clock_text);
+    let (small, big) = (0.8 * EM, 1.6 * EM);
+    let w = Pen::measure(Face::Words, Weight::Heavy, &target, small).max(clock.as_ref().map_or(0.0, |c| Pen::measure(Face::Words, Weight::Heavy, c, big))) + 2.0 * EM;
+    let h = if clock.is_some() { small + big + 1.4 * EM } else { small + 1.2 * EM };
+    pen.round([cx - w / 2.0, top, w, h], 0.8 * EM, shade(128), shade(128));
+    let colour = if e.reached { ORANGE } else { GREY };
+    centred(pen, &target, top + 0.6 * EM + small, small, colour, drawn);
+    let under = top + h + 1.6 * EM;
+    if let Some(c) = &clock {
+        // Blinking four times a second, on the clock's own time.
+        let blink = e.left.is_some_and(|l| (l * 4.0) as u32 % 2 == 0);
+        let colour = if e.warning { if blink { MAROON.0 } else { WHITE } } else { CHALK };
+        centred(pen, c, top + 0.9 * EM + small + big, big, colour, drawn);
+    }
+    if tracker.reached_line(now) {
+        centred(pen, REACHED_TEXT, under, 1.1 * EM, ORANGE, drawn);
+    }
+    if let Some(n) = e.countdown {
+        let text = if n == 0 { "GO!".to_string() } else { n.to_string() };
+        centred(pen, &text, 200.0, 4.0 * EM, ORANGE, drawn);
+    }
+    if let Some((v, points, total)) = e.verdict {
+        centred(pen, verdict_text(v), 190.0, 3.0 * EM, ORANGE, drawn);
+        centred(pen, &format!("EVENT {}", grouped(points as f32)), 190.0 + 2.2 * EM, 1.1 * EM, CHALK, drawn);
+        centred(pen, &format!("FREERIDE TOTAL {}", grouped(total as f32)), 190.0 + 3.7 * EM, 1.1 * EM, CHALK, drawn);
     }
 }
 

@@ -884,16 +884,30 @@ impl RideHud<'_> {
             span: self.span,
             tag: self.art.tags.get(v).map(overlay::Tag::text).filter(|t| !t.is_empty()),
             offer: self.art.offers.get(v).copied().flatten(),
-            challenge: None,
+            challenge: stunt_challenge(&seat.sim),
             markers,
             scale: self.art.scale,
             minimap: self.art.minimap,
             map,
             around,
             join: self.join,
+            event: ride_hud::EventShown::of(&seat.sim.event, 0, &seat.sim.rider.score),
         };
+        rig.ride_hud.note_event(now, shown.event.as_ref());
         draw(&shown, &rig.ride_hud, now);
     }
+}
+
+/// The freestyle event's start prompt (P155): up while the seat's rider is asked to start it — on
+/// the bike, slow, in a stunt zone, no event on — with the hold so far.
+fn stunt_challenge(sim: &Sim) -> Option<ride_hud::Challenge> {
+    let e = &sim.event;
+    e.asks(&sim.event_rider(0)).then(|| ride_hud::Challenge {
+        activity: overlay::Activity::Stunt,
+        name: "Stunt Competition".into(),
+        goal: format!("Score over {} in 2 minutes", ride_hud::grouped(e.target as f32)),
+        hold: e.held(0).0,
+    })
 }
 
 /// The view the join cue (P171) is drawn in: the one in the frame's top right corner, which is the
@@ -4957,6 +4971,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The path cars (S81) on every seat's state, from the track's load: each seat steps them before
     // its rider, so each rider meets them where its own state has them.
     seats.iter_mut().for_each(|s| s.sim.traffic = cars.clone());
+    // The freestyle event (P155) on every seat's state: the track's stunt zones and target.
+    let hit_dat = archives.iter().find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let stunt = portal::stunt_event(&zone_spots, &hit_dat);
+    if !stunt.zones.is_empty() {
+        println!("freestyle event: {} stunt zones, target {}", stunt.zones.len(), stunt.target);
+    }
+    seats.iter_mut().for_each(|s| s.sim.event = stunt.clone());
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
     // `--fly-at` (V96): the first seat's plane flying high over the world from the first tick, at
     // the biplane's cruise.

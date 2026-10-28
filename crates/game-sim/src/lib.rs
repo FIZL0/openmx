@@ -136,6 +136,10 @@ pub struct Sim {
     /// top of every tick, before the riders, which is where the original's scene walk moves them.
     /// Empty on a track without them, and then not walked or sent ([`traffic`]).
     pub traffic: traffic::Traffic,
+    /// The freestyle event (P155): the track's stunt zones, and the competition a rider riding into
+    /// one starts, stepped at the top of every tick before the riders. A ride without zones never
+    /// starts one, and a fresh event is not walked or sent ([`event::Event::fresh`]).
+    pub event: event::Event,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -241,6 +245,7 @@ impl Sim {
             markers: markers::Markers::default(),
             home: Arc::default(),
             traffic: traffic::Traffic::default(),
+            event: event::Event::default(),
         }
     }
 
@@ -310,6 +315,7 @@ impl Sim {
             return self.step_all(dt, &all, world).swap_remove(0);
         }
         self.traffic.frame(dt, world);
+        self.event_frame(dt);
         if self.plane.is_some() {
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
@@ -348,6 +354,31 @@ impl Sim {
         said.seam = self.rider.wrap_round(&*world);
         self.ticks += 1;
         said
+    }
+
+    /// Player `i` as the freestyle event's start reads them (P155): where their bike is, its speed,
+    /// whether they are up on it, and their Circle.
+    pub fn event_rider(&self, i: usize) -> event::Rider {
+        let r = self.rider_of(i);
+        event::Rider {
+            at: r.ride.position(),
+            speed: r.ride.chassis.speed,
+            riding: self.plane.is_none() && r.state.wreck.is_none() && r.crash.is_none(),
+            circle: i < input::PADS && self.input.pad(i).held(input::Control::Circle),
+        }
+    }
+
+    /// The freestyle event's tick (P155, [`event::Event::tick`]): every rider where the last tick
+    /// left them and every rider's card, in player order.
+    fn event_frame(&mut self, dt: F) {
+        if self.event.zones.is_empty() && self.event.on.is_none() {
+            return;
+        }
+        let riders: Vec<event::Rider> = (0..self.players()).map(|i| self.event_rider(i)).collect();
+        let mut cards: Vec<&mut crate::score::Score> = std::iter::once(&mut self.rider.score)
+            .chain(self.others.iter_mut().map(|p| &mut p.rider.score))
+            .collect();
+        self.event.tick(dt, &riders, &mut cards);
     }
 
     /// How many riders the session holds: player 1 and the others.
@@ -407,6 +438,7 @@ impl Sim {
             return vec![self.step(dt, &controls[0], world)];
         }
         self.traffic.frame(dt, world);
+        self.event_frame(dt);
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         // On a world that wraps (MD44), each bike against every other's nearest copy.
@@ -544,6 +576,7 @@ impl Clone for Sim {
             markers: self.markers.clone(),
             home: Arc::clone(&self.home),
             traffic: self.traffic.clone(),
+            event: self.event.clone(),
         }
     }
 }
