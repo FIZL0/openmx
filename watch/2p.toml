@@ -30,6 +30,9 @@
 #     ragdoll, 3 table/hold, 4 the start line or a look-around), the ragdoll's flags, the motion clock
 #     and the machine (rider-joints.toml), the 22 posed joints and the 18 ragdoll parts' bodies
 #     (s56-ragdoll.toml).
+#   * the body's two eased-axis records (C11): `lag_mix` and `lag_phase`, `{value, time constant,
+#     ratio}` through the body's +0x630/+0x634 pointers, the mix axis stepped first. The capture of
+#     record (2p.csv) predates them; C11's playback with them is context/capture/2p/2p-eased.csv.
 #
 # Then the six path cars by their fixed heap addresses (vtable at +8; three cabs and three trailers).
 
@@ -494,6 +497,16 @@ addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa3
 type = "f32"
 
 [[field]]
+name = "p1_lag_mix"  # the lag record stepped first, the mix axis: {value, tau, ratio} (C11)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x630 - 0x400 -> 0x0"
+type = "f32x3"
+
+[[field]]
+name = "p1_lag_phase"  # the lag record stepped second, the phase axis: {value, tau, ratio} (C11)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x634 - 0x400 -> 0x0"
+type = "f32x3"
+
+[[field]]
 name = "p1_req_placing"  # the request: placement flag
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0xc"
 type = "u32"
@@ -923,6 +936,16 @@ type = "s32"
 name = "p2_d_reverse"
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa3c - 0x400"
 type = "f32"
+
+[[field]]
+name = "p2_lag_mix"  # the lag record stepped first, the mix axis: {value, tau, ratio} (C11)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x630 - 0x400 -> 0x0"
+type = "f32x3"
+
+[[field]]
+name = "p2_lag_phase"  # the lag record stepped second, the phase axis: {value, tau, ratio} (C11)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x634 - 0x400 -> 0x0"
+type = "f32x3"
 
 [[field]]
 name = "p2_req_placing"  # the request: placement flag

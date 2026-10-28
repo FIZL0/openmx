@@ -30,6 +30,9 @@
 #     ragdoll, 3 table/hold, 4 the start line or a look-around), the ragdoll's flags, the motion clock
 #     and the machine (rider-joints.toml), the 22 posed joints and the 18 ragdoll parts' bodies
 #     (s56-ragdoll.toml).
+#   * the body's two eased-axis records (C11): `lag_mix` and `lag_phase`, `{value, time constant,
+#     ratio}` through the body's +0x630/+0x634 pointers, the mix axis stepped first. The capture of
+#     record (2p.csv) predates them; C11's playback with them is context/capture/2p/2p-eased.csv.
 #
 # Then the six path cars by their fixed heap addresses (vtable at +8; three cabs and three trailers).
 

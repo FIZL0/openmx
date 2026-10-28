@@ -32,6 +32,14 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
 <meta name="theme-color" content="#2a1408">
+<!-- P197: from the home screen it opens fullscreen (iOS reads these, not the manifest's display) -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="openMX">
+<link rel="apple-touch-icon" href="icon-180.png">
+<!-- P197: the on-screen pad, audio unlock and phone bits; before the page's module so its AudioContext is resumable -->
+<script src="touch.js"></script>
 <style>
 @font-face { font-family: "OMX"; font-weight: 800; font-display: swap; src: url(fonts/MPLUSRounded1c-ExtraBold.ttf) format("truetype"); }
 @font-face { font-family: "OMX"; font-weight: 700; font-display: swap; src: url(fonts/MPLUSRounded1c-Bold.ttf) format("truetype"); }

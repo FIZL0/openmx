@@ -123,6 +123,8 @@ BODY = [
     ('d_cross', '0x8dc', 'bytes:36', '+0x8f0 state, +0x8f4 want'),
     ('d_extra', '0x9f0', 's32', ''),
     ('d_reverse', '0xa3c', 'f32', ''),
+    ('lag_mix', '0x630 -> 0x0', 'f32x3', 'the lag record stepped first, the mix axis: {value, tau, ratio} (C11)'),
+    ('lag_phase', '0x634 -> 0x0', 'f32x3', 'the lag record stepped second, the phase axis: {value, tau, ratio} (C11)'),
     ('req_placing', '0x488 -> 0xc', 'u32', 'the request: placement flag'),
     ('req_wreck', '0x488 -> 0x104', 'u32', 'the request: wreck reason'),
     ('req_axes', '0x488 -> 0x170', 'f32x3', ''),
