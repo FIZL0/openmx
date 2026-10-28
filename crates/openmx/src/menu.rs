@@ -417,6 +417,10 @@ pub struct Settings {
     /// rolled past the bike's airborne limits. Off, the jump is ridden out and only the landing is
     /// judged ([`game_sim::state::Sense::air_wrecks`]). On, the original's, unless turned off.
     pub air_wrecks: bool,
+    /// Whether a landing with the bike facing back against its way throws the rider off (S161,
+    /// [`game_sim::state::Sense::backwards_bail`]). Not the original's: off, the default, is the
+    /// original, which rides such a landing out.
+    pub backwards_bail: bool,
     /// The last track ridden, which the track pick opens on.
     pub track: String,
     /// How a local game of two shares the screen, the split layout's pick (P43): `--split`'s.
@@ -787,7 +791,7 @@ impl Menu {
     /// every seat (whatever Air Wrecks), Mixed otherwise. The HUD is not read: since P170 there is
     /// only openmx's, or none.
     pub fn original(&self) -> Original {
-        if Departure::ALL.iter().all(|d| self.is_original(*d)) && self.settings.air_wrecks {
+        if Departure::ALL.iter().all(|d| self.is_original(*d)) && self.settings.air_wrecks && !self.settings.backwards_bail {
             Original::On
         } else if !Departure::ALL.iter().any(|d| self.some_original(*d)) {
             Original::Off
@@ -807,6 +811,8 @@ impl Menu {
         if on {
             // Air Wrecks back on (P138): the original throws the rider off in the air.
             self.settings.air_wrecks = true;
+            // Backwards Landings Bail off (S161): the original rides a backwards landing out.
+            self.settings.backwards_bail = false;
         }
     }
 }
@@ -1164,6 +1170,7 @@ impl Default for Settings {
             world_sky: WorldSky::Global,
             wrecks: true,
             air_wrecks: true,
+            backwards_bail: false,
             track: TRACKS[0].0.into(),
             split: Split::default(),
             music: "shuffle".into(),
@@ -1275,6 +1282,7 @@ impl Settings {
                 "world_sky" => s.world_sky = WorldSky::from_word(v).unwrap_or(s.world_sky),
                 "wrecks" => s.wrecks = v != "off",
                 "air_wrecks" => s.air_wrecks = v != "off",
+                "backwards_bail" => s.backwards_bail = v == "on",
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // The ride setup's machine a seat (P41), gone with Start On (P177): every ride starts
                 // on the bike, so an old file's line loads and is dropped.
@@ -1394,6 +1402,7 @@ impl Settings {
         ) + &self.display_text()
             + &self.bays_text()
             + &self.air_wrecks_text()
+            + &self.backwards_bail_text()
             + &self.hud_text()
             + &self.original_text()
             + &self.filtering_text()
@@ -1424,6 +1433,12 @@ impl Settings {
     fn air_wrecks_text(&self) -> String {
         if self.air_wrecks { String::new() } else { "air_wrecks = off
 ".into() }
+    }
+
+    /// The Backwards Landings Bail switch (S161), only when it is on, so a file from before it is
+    /// written as it was.
+    fn backwards_bail_text(&self) -> String {
+        if self.backwards_bail { "backwards_bail = on\n".into() } else { String::new() }
     }
 
     /// The minimap and the HUD's scale (V52), only where they are not the defaults, so a file from
@@ -4476,6 +4491,7 @@ impl Lobby {
         let mut room = Room::new(&settings.name, track, settings.lobby_seats);
         room.wrecks = settings.wrecks;
         room.air_wrecks = settings.air_wrecks;
+        room.backwards_bail = settings.backwards_bail;
         room.take(HOST, std::slice::from_ref(&self.pick));
         // The host's own on its seat and the world's (P134); a guest's seat takes theirs as they come.
         let mine: Vec<usize> = room.seats.iter().enumerate().filter(|(_, s)| s.as_ref().is_some_and(|s| s.peer == HOST)).map(|(i, _)| i).collect();

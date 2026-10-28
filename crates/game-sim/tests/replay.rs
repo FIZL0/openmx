@@ -8954,6 +8954,14 @@ struct Turned {
 #[allow(clippy::type_complexity)]
 fn ride_a_crooked_landing(name: &str, asked: u64, ticks: u64)
     -> Option<(Vec<Turned>, Option<(u64, u8)>, Option<(u64, u8)>)> {
+    ride_a_crooked_landing_bailing(name, asked, ticks, false)
+}
+
+/// [`ride_a_crooked_landing`] with the port's Backwards Landings Bail switch (S161,
+/// [`game_sim::state::Sense::backwards_bail`]) set to `bail`; false is the original's.
+#[allow(clippy::type_complexity)]
+fn ride_a_crooked_landing_bailing(name: &str, asked: u64, ticks: u64, bail: bool)
+    -> Option<(Vec<Turned>, Option<(u64, u8)>, Option<(u64, u8)>)> {
     let dir = private_dir("capture");
     let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
         println!("no {name}.csv — S150's journal says how it is recorded");
@@ -8985,6 +8993,7 @@ fn ride_a_crooked_landing(name: &str, asked: u64, ticks: u64)
         rider.carries_bike_col(Arc::new(col));
         let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
         st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+        sim.rider.sense.backwards_bail = bail;
         let want = first_wreck(&cap, saved).filter(|&(c, _)| c <= saved + ticks);
         let num = |r: usize, n: &str| cell(&cap, r, column(&cap, n).unwrap()).parse::<f32>().unwrap();
         let (mut seen, mut got) = (Vec::new(), None);
@@ -9064,6 +9073,45 @@ fn crooked_landings_wreck_or_swing_round_as_the_original_does() {
                 }
             }
             _ => parted.push(format!("{name}: the original {want:?}, the port {got:?}")),
+        }
+    }
+    println!("{compared} landings compared");
+    assert!(parted.is_empty(), "{}", parted.join("\n"));
+}
+
+/// **S161.** Backwards Landings Bail on, the port's own switch: S150's three landings from the same
+/// states with the same pad. r50 (118 degrees, which the original already wrecks) wrecks exactly as
+/// the original does, on its tick and reason, so the switch adds nothing where the original's own
+/// test fires. r60 and r70, which the original rides out (the arcsine reads them 31 and 8 degrees),
+/// wreck on the tick the port touches down, which is the original's touchdown ±1, to a side (reason
+/// 2 or 3). Off, the same three are [`crooked_landings_wreck_or_swing_round_as_the_original_does`].
+#[test]
+fn backwards_landings_bail_when_the_switch_is_on() {
+    let (mut compared, mut parted) = (0, Vec::new());
+    for (name, asked, ticks, what) in S150_LANDINGS {
+        let Some((seen, want, got)) = ride_a_crooked_landing_bailing(name, asked, ticks, true) else { continue };
+        compared += 1;
+        println!("{name} ({what}), bailing: the original {want:?}, the port {got:?}");
+        match want {
+            Some((c, r)) => match got {
+                Some((gc, gr)) if gr == r && gc.abs_diff(c) <= 1 => {}
+                _ => parted.push(format!("{name}: the original wrecks {want:?}, the port with the switch on {got:?}")),
+            },
+            None => {
+                let Some(o) = seen.iter().position(|t| t.original.is_some_and(|(_, g)| g)) else {
+                    parted.push(format!("{name}: the original never touches down in the capture"));
+                    continue;
+                };
+                let Some(p) = seen.iter().position(|t| t.port.1) else {
+                    parted.push(format!("{name}: the port never touches down"));
+                    continue;
+                };
+                match got {
+                    Some((gc, 2 | 3)) if gc == seen[p].counter && p.abs_diff(o) <= 1 => {}
+                    _ => parted.push(format!("{name}: down at {} (the original at {}), the port with the switch on {got:?}",
+                                             seen[p].counter, seen[o].counter)),
+                }
+            }
         }
     }
     println!("{compared} landings compared");

@@ -1497,6 +1497,10 @@ struct Args {
     /// ([`game_sim::state::Sense::air_wrecks`], P138): the Settings screen's Air Wrecks row, which
     /// `--no-air-wrecks` turns off. On by default, the original's.
     air_wrecks: bool,
+    /// Whether a landing with the bike facing back against its way throws the rider off
+    /// ([`game_sim::state::Sense::backwards_bail`], S161): the Settings screen's Backwards Landings
+    /// Bail row, which `--backwards-bail` turns on. Off by default, the original's.
+    backwards_bail: bool,
     /// `--modifiers TEXT` (P55): the game modifiers the ride loads with, as `settings.txt` spells
     /// them (`gravity=50 bike_speed.1=200`). The original game's by default; under the front end the
     /// Settings screen's unless this asked for others. A `--play` tape rides with its own, and a
@@ -2136,6 +2140,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 }
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
                 a.air_wrecks = args.air_wrecks && shell.front.menu.settings.air_wrecks;
+                a.backwards_bail = args.backwards_bail || shell.front.menu.settings.backwards_bail;
                 if args.modifiers.is_original() {
                     a.modifiers = shell.front.menu.settings.modifiers;
                 }
@@ -2227,6 +2232,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 }
                 a.wrecks = room.wrecks;
                 a.air_wrecks = room.air_wrecks;
+                a.backwards_bail = room.backwards_bail;
                 // This machine's rider in the first seat's look (P86), as the room was told.
                 a.look = shell.front.menu.picks.0[0].look.clone();
                 a.wiring = shell.front.wiring();
@@ -3653,6 +3659,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         rider.sense.wrecks_enabled = args.wrecks;
         rider.sense.air_wrecks = args.air_wrecks;
+        rider.sense.backwards_bail = args.backwards_bail;
         // The eight numbers the body's *step* reads, which `Rider::new` leaves at zero and says a shell
         // is expected to fill: the five fade rates, the stunt cross-fade's cap and the pose grid's three
         // speed thresholds, as V12 measured them off the body's own object in the running original. With
@@ -4010,6 +4017,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         // and a ride with Air Wrecks off says so before its first frame (P138)
         if !args.air_wrecks {
             recorder.air_wrecks(false);
+        }
+        // and one with Backwards Landings Bail on, the same (S161)
+        if args.backwards_bail {
+            recorder.backwards_bail(true);
         }
         recorder
     });
@@ -5061,6 +5072,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // otherwise, whatever the Settings screen or the command line say.
     if head.is_some() {
         world.seats[0].sim.rider.sense.air_wrecks = true;
+        // and Backwards Landings Bail off, the original's (S161)
+        world.seats[0].sim.rider.sense.backwards_bail = false;
     }
     // The start zones' portals (V51), laid over the ground once: they never move.
     let zone_portals: Vec<portal::Portal> = portal::shown(&zone_spots, false)
@@ -5314,6 +5327,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut menu_mods = front.as_deref().map(|f| f.menu.settings.modifiers);
     // And the Air Wrecks switch it last said (P138), taken the same way at the pause's close.
     let mut menu_air = front.as_deref().map(|f| f.menu.settings.air_wrecks);
+    // And Backwards Landings Bail's (S161).
+    let mut menu_back = front.as_deref().map(|f| f.menu.settings.backwards_bail);
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
     // `--overview` (P166) draws nobody's.
     let mut seated = vec![!args.overview; world.seats.len()];
@@ -5487,6 +5502,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 tape.air_wrecks(on);
             }
             println!("air wrecks: {} (the tape's, before frame {})", if on { "on" } else { "off" }, head.as_ref().map_or(0, Head::at));
+        }
+        // And Backwards Landings Bail (S161).
+        if let Some(on) = head.as_ref().and_then(Head::backwards_bail) {
+            world.seats[0].sim.rider.sense.backwards_bail = on;
+            if let Some(tape) = &mut world.tape {
+                tape.backwards_bail(on);
+            }
+            println!("backwards landings bail: {} (the tape's, before frame {})", if on { "on" } else { "off" }, head.as_ref().map_or(0, Head::at));
         }
         match &mut head {
             // The seats', otherwise: seat i feeds player i's own pad port (V22's players). A seat
@@ -5845,6 +5868,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         let mut room = openmx_net::Room::new(&settings.name, &args.track, settings.lobby_seats);
                         room.wrecks = args.wrecks && settings.wrecks;
                         room.air_wrecks = args.air_wrecks && settings.air_wrecks;
+                        room.backwards_bail = args.backwards_bail || settings.backwards_bail;
                         room.modifiers = mods.text();
                         // the trick pack this ride rides (MD19), which every joiner's machine lays
                         // (`ride_trick_pack`'s pick, which this ride was built on)
@@ -6175,6 +6199,21 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         tape.air_wrecks(on);
                     }
                     println!("air wrecks: {} (from the pause)", if on { "on" } else { "off" });
+                }
+            }
+            // And on a Backwards Landings Bail switch the player changed (S161), the same way.
+            if closed && menu_back != Some(front.menu.settings.backwards_bail) {
+                let on = front.menu.settings.backwards_bail;
+                menu_back = Some(on);
+                if front.menu.air_lock.is_none() {
+                    let on = args.backwards_bail || on;
+                    for seat in &mut world.seats {
+                        seat.sim.rider.sense.backwards_bail = on;
+                    }
+                    if let Some(tape) = &mut world.tape {
+                        tape.backwards_bail(on);
+                    }
+                    println!("backwards landings bail: {} (from the pause)", if on { "on" } else { "off" });
                 }
             }
             // Each player frozen while their own pause is open (P84), the others riding on. Online the
@@ -9233,6 +9272,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         moment: None,
         wrecks: true,
         air_wrecks: true,
+        backwards_bail: false,
         modifiers: game_sim::modifiers::Mods::original(),
         trace: None,
         trace_dt: None,
@@ -9472,6 +9512,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--display" => args.display = next("a display, like :0")?,
             "--no-wrecks" => args.wrecks = false,
             "--no-air-wrecks" => args.air_wrecks = false,
+            "--backwards-bail" => args.backwards_bail = true,
             "--modifiers" => {
                 args.modifiers =
                     game_sim::modifiers::Mods::parse(&next("modifiers, like gravity=50")?).map_err(|e| format!("--modifiers: {e}"))?
@@ -9703,7 +9744,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
@@ -9794,7 +9835,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --no-wrecks turns the session's wrecks off (a wreck otherwise throws the\n\
                      rider, tumbles the bike and puts you back on it); --no-air-wrecks keeps\n\
                      the rider on whatever the bike's attitude in the air (a landing is still\n\
-                     judged); --modifiers sets the\n\
+                     judged); --backwards-bail throws the rider off a landing\n\
+                     with the bike facing back against its way, which the original rides\n\
+                     out (off by default); --modifiers sets the\n\
                      game modifiers, percentages of what the ride loads (a tape keeps its own);\n\
                      --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\

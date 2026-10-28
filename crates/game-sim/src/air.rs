@@ -1599,6 +1599,36 @@ pub fn wreck_test_in(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, 
     Some(Wreck::NoHander)
 }
 
+/// Not the original's (S161): a landing with the bike pointing back against the way it is going — more
+/// than a quarter turn crossed up — is a wreck, to the side it is crossed up to.
+///
+/// The original's landing clause in [`wreck_test`] judges the crossup [`contact`] measures, and that
+/// is an arcsine: bounded at a quarter turn, it reads a landing θ crossed up as 180° − θ. So a bike that
+/// comes down further round than 180° less the limit (about 135°) reads as nearly straight, rides out,
+/// and the tyres swing it round to its velocity (S150's r60 and r70). This clause judges the same
+/// touchdown on the same flattened heading and velocity, but by their dot product, which knows
+/// backwards from forwards. It is asked on the substep the wheels come down after a jump long enough to
+/// count ([`Params::crossup_wreck_time`]), while the bike is not mid-backflip and is moving faster
+/// than [`SLOW`] — the same conditions under which the crossup is measured and judged. `forward` is
+/// the bike's forward axis ([`crate::ride::Ride::axes`]), what [`Step::heading`] is to [`contact`].
+///
+/// Only called when the player's switch is on ([`crate::state::Sense::backwards_bail`]) and the
+/// original's test let the landing go; off, the default, nothing asks it.
+pub fn backwards_landing(p: &Params, air: &Air, chassis: &Chassis, forward: Vf) -> Option<Wreck> {
+    let landing = air.was_airborne && !air.airborne && air.hang_time > p.crossup_wreck_time;
+    if !landing || air.flipping || chassis.speed <= SLOW {
+        return None;
+    }
+    let heading = normalize(Vf::new(forward.x(), 0.0, forward.z(), 1.0));
+    let vel = normalize(Vf::new(chassis.vel.x(), 0.0, chassis.vel.z(), 1.0));
+    let along = F(heading.x()) * F(vel.x()) + F(heading.z()) * F(vel.z());
+    if along >= F::ZERO {
+        return None;
+    }
+    // The side is the crossup's sign, and a positive crossup shows the rider crossed up to the left.
+    Some(if cross(heading, vel).y() < 0.0 { Wreck::Right } else { Wreck::Left })
+}
+
 // --- 5b: the hits ------------------------------------------------------------------------------------
 
 /// How far up the bike a body ray has to reach before something it hits throws the rider off: above

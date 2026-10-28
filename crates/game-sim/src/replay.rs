@@ -1165,12 +1165,17 @@ pub struct PadTape {
     /// frame `k` is stepped. Empty for a ride with it on throughout, the original's, which is every
     /// tape before P138; a ride started with it off says so at frame 0.
     pub air_wrecks: Vec<(usize, bool)>,
+    /// The first player's Backwards Landings Bail switch (S161, [`crate::state::Sense::backwards_bail`])
+    /// where the ride set it, the same way as [`PadTape::air_wrecks`]. Empty for a ride with it off
+    /// throughout, the original's, which is every tape before S161; a ride started with it on says so
+    /// at frame 0.
+    pub backwards_bail: Vec<(usize, bool)>,
 }
 
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new() }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new(), backwards_bail: Vec::new() }
     }
 
     /// The modifiers frame `k` rides on: the set the ride loaded with, as the changes before it left
@@ -1187,6 +1192,11 @@ impl PadTape {
     /// The Air Wrecks switch put on just before frame `k` (P138), if the ride set it there.
     pub fn air_wrecks_at(&self, k: usize) -> Option<bool> {
         self.air_wrecks.iter().rev().find(|(at, _)| *at == k).map(|(_, on)| *on)
+    }
+
+    /// The Backwards Landings Bail switch put on just before frame `k` (S161), if the ride set it there.
+    pub fn backwards_bail_at(&self, k: usize) -> Option<bool> {
+        self.backwards_bail.iter().rev().find(|(at, _)| *at == k).map(|(_, on)| *on)
     }
 
     /// The machines the first player is switched to just before frame `k`, in the order they were.
@@ -1396,6 +1406,22 @@ impl PadTape {
                     }
                     tape.air_wrecks.push((at, on));
                 }
+                // The Backwards Landings Bail switch from this frame on (S161): the frame, then on or off.
+                "backwards_bail" => {
+                    let (Some(at), Some(on), None) = (word.next().and_then(parse_u64), word.next(), word.next()) else {
+                        return err(n, "backwards_bail wants the frame it takes before, then on or off");
+                    };
+                    let on = match on {
+                        "on" => true,
+                        "off" => false,
+                        _ => return err(n, format!("backwards_bail wants on or off, not '{on}'")),
+                    };
+                    let at = at as usize;
+                    if tape.backwards_bail.last().is_some_and(|(last, _)| *last > at) {
+                        return err(n, format!("backwards_bail {at} comes after a later one"));
+                    }
+                    tape.backwards_bail.push((at, on));
+                }
                 // The first player's markers cleared before this frame (P99).
                 "markers_cleared" => {
                     let Some(at) = word.next().and_then(parse_u64) else {
@@ -1459,6 +1485,9 @@ impl PadTape {
         }
         for (at, on) in &self.air_wrecks {
             let _ = writeln!(s, "air_wrecks {at} {}", if *on { "on" } else { "off" });
+        }
+        for (at, on) in &self.backwards_bail {
+            let _ = writeln!(s, "backwards_bail {at} {}", if *on { "on" } else { "off" });
         }
         for frame in &self.frames {
             let _ = write!(s, "frame 0x{:08x}", frame.dt);
@@ -1648,7 +1677,7 @@ pub fn play(tape: &PadTape, seed: u32) -> Playback {
 }
 
 /// Play a whole recording into a run that starts from `sim`, with the markers the tape started with
-/// when it says (P99) and the first player's Air Wrecks switch where it set it (P138). Panics on markers this build cannot read ([`PadTape::start_markers`]).
+/// when it says (P99) and the first player's Air Wrecks (P138) and Backwards Landings Bail (S161) switches where it set them. Panics on markers this build cannot read ([`PadTape::start_markers`]).
 pub fn play_from(tape: &PadTape, sim: Sim) -> Playback {
     let mut run = Playback::from_state(sim);
     if let Some(markers) = tape.start_markers().expect("the tape's markers") {
@@ -1660,6 +1689,9 @@ pub fn play_from(tape: &PadTape, sim: Sim) -> Playback {
         }
         if let Some(on) = tape.air_wrecks_at(k) {
             run.sim.rider.sense.air_wrecks = on;
+        }
+        if let Some(on) = tape.backwards_bail_at(k) {
+            run.sim.rider.sense.backwards_bail = on;
         }
         run.advance(frame);
     }
@@ -2210,6 +2242,16 @@ impl Recorder {
         self.tape.air_wrecks.push((at, on));
     }
 
+    /// Write down that the first player's Backwards Landings Bail switch is now `on` (S161), as
+    /// [`Recorder::air_wrecks`] does.
+    pub fn backwards_bail(&mut self, on: bool) {
+        let at = self.tape.len();
+        if self.tape.backwards_bail.last().is_some_and(|(last, _)| *last == at) {
+            self.tape.backwards_bail.pop();
+        }
+        self.tape.backwards_bail.push((at, on));
+    }
+
     /// How many frames have been recorded.
     pub fn len(&self) -> usize {
         self.tape.len()
@@ -2285,6 +2327,12 @@ impl Head {
     /// out next (P138), where the recording set it there.
     pub fn air_wrecks(&self) -> Option<bool> {
         self.tape.air_wrecks_at(self.at)
+    }
+
+    /// The Backwards Landings Bail switch the first player's ride takes before the frame
+    /// [`Head::next`] hands out next (S161), where the recording set it there.
+    pub fn backwards_bail(&self) -> Option<bool> {
+        self.tape.backwards_bail_at(self.at)
     }
 
     /// Whether the recording cleared the first player's markers before the frame [`Head::next`]

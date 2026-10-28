@@ -92,6 +92,10 @@ pub struct Room {
     /// from a peer that does not say, the original's.
     #[serde(default = "on")]
     pub air_wrecks: bool,
+    /// The Backwards Landings Bail switch (S161), not the original's: off from a peer that does not
+    /// say, the original's.
+    #[serde(default)]
+    pub backwards_bail: bool,
     pub biplane: bool,
     /// Seats in order (1P..), `None` open; as many as the host opened (2..=[`SEATS`]).
     pub seats: Vec<Option<Seat>>,

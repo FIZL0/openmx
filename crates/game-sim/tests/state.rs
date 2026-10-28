@@ -488,13 +488,14 @@ fn port(c: &Case) -> (Out, Allowed, Step) {
         owner: c.owner.map(|(human, screen)| Owner { human, screen }),
         wrecks_enabled: c.enabled,
         air_wrecks: true,
+        backwards_bail: false,
         settles: c.settles,
     };
     let params = Params { max_wreck_time: F(c.max), cannonball_wreck_time: F(c.cannonball) };
     // The wreck test, told only what the machine hands it — so the gates in front of it are the
     // port's answer and not this test's.
     let was = ride.wreck;
-    let gates = Rc::new(Cell::new(Allowed { wrecks: false, landing: false, air: false }));
+    let gates = Rc::new(Cell::new(Allowed { wrecks: false, landing: false, air: false, backwards: false }));
     let told = Rc::clone(&gates);
     let step = ride.step(
         F(c.dt),
@@ -1063,6 +1064,7 @@ fn the_clocks_take_the_frames_the_docs_say() {
         owner: Some(Owner { human: true, screen: true }),
         wrecks_enabled: true,
         air_wrecks: true,
+        backwards_bail: false,
         settles: true,
     };
 
