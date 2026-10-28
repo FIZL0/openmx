@@ -5543,6 +5543,18 @@ path_car_turn         boot 0x001dd8c0 (a0 out, a1 car) vt+0xc0: vadd.xyz(cross(c
 #   category 0x220, flags 0x0c, in the static tree. Radii = the meshes' bounds (35.5157 the engine ..
 #   20.5384 a scraper back). MinWreckSpeed plane+0x3b8 = 73.333 ft/s, over the train's ~55; the crash
 #   test's spare bit is VEHICLE 0x2000, which 0x48 lacks.
+# S172 — the plane's world's two "driving toys" are free06's HasPhysics trucks (proved in
+# crates/game-sim/tests/physics_cars.rs, the_planes_world_holds_every_toy_as_the_originals_does).
+#   biplane.p2m2's moving list slots 21..22: ctruck.psg, mover vtable 0x0045f070 (physics_car_vtable),
+#   category 0x48, flags 0x05 (+marks), owner 0, radius 9.933427; slot 23 the plane's (owner nonzero).
+#   The list's 23 car slots are free06.toy's Car1..Car23 in order. Why the .toy order holds for both
+#   classes: the reader 0x00289710 news and inits each car as it reads it (path car vt+0xc4, the
+#   subclass vt+0xf8, which runs the path car's init first), and the path car's init 0x001147c0 adds
+#   its mesh (+0x428) to the world (0x00119c60 at 0x00114f40) inside the init, so the list order is the
+#   read order whatever the class. The subclass's physics object adds nothing to the list (slot 23 is
+#   the plane's right after Car23). The optional second collidable (+0x42c, also added in the init) is
+#   absent on free06's cars. free11's .toy interleaves them (PPP....P....): read-order there too.
+#   Each toy's +0x40 after one original update = the port's placement (prop_box centre) bit for bit.
 # V82 — the path cars' wheels: crates/game-render/src/toy.rs (Wheels), proved in
 # crates/game-render/tests/path_car_wheels.rs on s89-along (journal *-v82-path-car-wheels).
 #   the init (vt+0xc4, 0x001147c0) looks up "TireFrontL" "TireFrontR" "TireBackL" "TireBackR" "TireMidL"
