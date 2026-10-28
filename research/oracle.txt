@@ -5364,6 +5364,33 @@ path_car_measure      boot 0x00115330 each segment's arc: ten chords of the curv
 path_car_lag          boot 0x00116150 the clip time LagDistance of arc behind s (walks keys back, wraps)
 path_car_curve        boot 0x00116410 Hermite on the cursor's segment, Catmull-Rom tangents (chord at ends)
 path_car_vtable       boot 0x0044d370 the path car's vtable, at +8 of the car (scan a RAM image for it to find the cars)
+# S128 — the path cars' ground switches: crates/game-sim/src/traffic.rs (Spec::presample, Level,
+# Spec::curve_kept, Spec::lagged), proved in crates/game-sim/tests/presample.rs on recording2's state
+# of free09 (six cars: free_trailercab x3, free_trailerC/A/D, at 0x01241f40 0x01252a20 0x01263570
+# 0x01268160 0x01274cc0 0x012798e0) and tests/two_p_truck.rs on the s159 images of free09_ss.
+#   The init (vt+0xc4, 0x001147c0) copies the .toy reader's (0x00289710) switches: +0x4d0 PathIsLevel
+#   (key 0x00434258, default FALSE), +0x4e8 DriveOnSoultree (0x00434280, default TRUE: every car on the
+#   disc sets FALSE), +0x4ec PresampleTerrain (0x004342b0), +0x4d8 SteerFrontTires. Every free09 car:
+#   +0x4ec 1, +0x4d0 0, +0x4e8 0, +0x420 (the clip loops) 1, ground query object +0x56c.
+#   The ctor leaves +0x4dc (first frame done) 0, +0x4fc (tangents dirty) 1, the cursor 0, +0x568 (the
+#   level's last height) 0xff7fffff, +0x4d4 (level held) 0.
+#   path_car_update, after the clock, on the first frame (+0x4dc == 0): the soultree segment set up
+#   (0x001eab40, half length +0x54c = 5.0); with +0x4ec, ground_query (0x001dc960) on every key's
+#   position (+0x10) and normal (+0x20) in place. The lengths stay the measure's, made on the clip's
+#   keys at load (vt+0xd0 0x00115330, which leaves the cursor on segment n-2 and its tangents cached).
+#   Curve (vt+0xd8 0x00116410): the cursor's keys are pointers +0x500/+0x504, moved only with the
+#   cursor; the tangents +0x510/+0x520 are made again only when +0x4fc is set (by a cursor move), so a
+#   car whose first point is on segment n-2 rides the raw keys' tangents. +0x538 the segment's t.
+#   Lag (vt+0xd4 0x00116150): walking back it tests s against the time of the key the cursor started
+#   on (the $7 of its entry), not the reached key's, so a step back goes to key 0 and the arc covered
+#   is segment 0's extrapolated; then back by whole lengths, wrapping past key 0 onto key n-1.
+#   Presample: height = the curve point's y; up = key i's and key j's normals lane by lane on the FPU
+#   at +0x538 (t <= 0: i's; t < 1: a + t (b - a), sub.s mul.s add.s; else j's); its w is stack.
+#   PathIsLevel (no presample), not held: ground query (skipped when +0x420 is 0 and the path is
+#   level), path +0x10 = its y; equal to +0x568: +0x4d4 = 1, else +0x568 = y. Held: y = path +0x10,
+#   up (0,1,0,1). A level car's basis takes the raw up with no orthogonalising and keeps no filtered up.
+#   DriveOnSoultree: a vertical segment ray through the collidable's move virtual and probe_collide_world
+#   (0x0011a150), the hit taken if higher. Not ported.
 # S136 — a wheel standing on a path car rides with it: crates/game-sim/src/traffic.rs (Moving) and
 # ride.rs (wheel_contact_velocity, under), proved in crates/game-sim/tests/traffic.rs on s89-along.
 #   path_car_update copies the node's world matrix (node+0x80..0xbc) to car+0x2e0..0x31c (rows x, y, z,

@@ -62,7 +62,7 @@ pub struct Car {
     pub normal_filter: f32,
     /// `LagDistance`: feet of path behind the clock's point.
     pub lag: f32,
-    /// `PathIsLevel`. Off for every car on the disc; the path it takes when on is not ported.
+    /// `PathIsLevel`. Off for every car on the disc; the simulation rides it (S128), this module does not.
     pub path_is_level: bool,
     /// `PresampleTerrain`: snap the keys to the ground once instead of the car every frame.
     pub presample: bool,
@@ -129,6 +129,9 @@ pub struct Key {
 #[derive(Clone, Debug)]
 pub struct Path {
     pub keys: Vec<Key>,
+    /// The clip's own key positions, before any presample moved them: what the simulation's car
+    /// measures and presamples itself (S128).
+    pub clip: Vec<V3>,
 }
 
 /// Where a car is and which way it faces.
@@ -186,8 +189,9 @@ impl Path {
         if points.len() < 2 {
             return None;
         }
+        let clip = points.iter().map(|&(_, pos)| pos).collect();
         let keys = points.into_iter().map(|(t, pos)| Key { t, len: 0.0, pos, normal: v3(0.0, 1.0, 0.0) }).collect();
-        let mut path = Path { keys };
+        let mut path = Path { keys, clip };
         path.measure();
         Some(path)
     }
@@ -472,9 +476,15 @@ impl Traffic {
                         None
                     }
                 };
-                let points: Vec<(F, Vf)> = path.keys.iter().map(|k| (F(k.t), Vf::new(k.pos.x, k.pos.y, k.pos.z, 1.0))).collect();
+                // The clip's own keys: the simulation's car presamples them itself, on its first frame.
+                let points: Vec<(F, Vf)> = path.keys.iter().zip(&path.clip).map(|(k, p)| (F(k.t), Vf::new(p.x, p.y, p.z, 1.0))).collect();
                 let f = F;
-                game_sim::traffic::Spec::new(&points, f(car.time_scale), f(car.heading_filter), f(car.normal_filter), f(car.lag), mesh)
+                let spec = game_sim::traffic::Spec::new(&points, f(car.time_scale), f(car.heading_filter), f(car.normal_filter), f(car.lag), mesh);
+                spec.map(|mut spec| {
+                    spec.presample = car.presample;
+                    spec.level = car.path_is_level;
+                    spec
+                })
             })
             .collect();
         game_sim::traffic::Traffic::new(specs)

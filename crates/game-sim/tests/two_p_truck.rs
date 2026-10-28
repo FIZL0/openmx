@@ -25,7 +25,7 @@ use game_render::disc::Disc;
 use game_sim::chassis::{self, Mat3};
 use game_sim::math::Mat4;
 use game_sim::ride;
-use game_sim::traffic::{Car, Moving, Spec};
+use game_sim::traffic::{Car, Key, Moving, Spec};
 use game_sim::track::{Scene, Terrain};
 use game_sim::world::Ground;
 use ps2_float::{F, Vf};
@@ -54,6 +54,8 @@ mod at {
     pub const UP: u32 = 0x4a0;
     pub const FIRST: u32 = 0x4e4;
     pub const CURSOR: u32 = 0x4f4;
+    pub const DIRTY: u32 = 0x4fc;
+    pub const TANGENTS: u32 = 0x510;
     pub const TIME_SCALE: u32 = 0x534;
     pub const LAG: u32 = 0x558;
     pub const HEADING_FILTER: u32 = 0x55c;
@@ -127,13 +129,29 @@ fn truck() -> u32 {
     CARS[TRUCK]
 }
 
-/// A car's path and numbers, out of the image (tests/traffic.rs's `spec_of`, no mesh).
-fn spec_of(ee: &Ee, car: u32) -> Spec {
+fn keys_of(ee: &Ee, car: u32) -> Vec<Key> {
     let path = ee.u32_at(car + at::PATH);
-    let (n, keys) = (ee.u32_at(path), ee.u32_at(path + at::KEYS));
-    let points: Vec<(F, Vf)> = (0..n).map(|k| keys + k * at::KEY).map(|k| (F(ee.f32_at(k)), vf(ee, k + 0x10))).collect();
+    let (n, table) = (ee.u32_at(path), ee.u32_at(path + at::KEYS));
+    (0..n)
+        .map(|k| table + k * at::KEY)
+        .map(|k| Key { t: F(ee.f32_at(k)), len: F(ee.f32_at(k + 4)), pos: vf(ee, k + 0x10), normal: vf(ee, k + 0x20) })
+        .collect()
+}
+
+/// A car's path and numbers, out of the image (tests/traffic.rs's `spec_of`, no mesh). Every car of
+/// free09 is `PresampleTerrain` (S128): the image's keys are already on the ground, and their
+/// lengths were measured on the clip's before, so they are the image's, not these keys'; the curve's
+/// tangents are the ones it kept.
+fn spec_of(ee: &Ee, car: u32) -> Spec {
+    let keys = keys_of(ee, car);
+    let points: Vec<(F, Vf)> = keys.iter().map(|k| (k.t, k.pos)).collect();
     let f = |o| F(ee.f32_at(car + o));
-    Spec::new(&points, f(at::TIME_SCALE), f(at::HEADING_FILTER), f(at::NORMAL_FILTER), f(at::LAG), None).expect("a path")
+    let mut spec = Spec::new(&points, f(at::TIME_SCALE), f(at::HEADING_FILTER), f(at::NORMAL_FILTER), f(at::LAG), None).expect("a path");
+    for (ours, theirs) in spec.keys.iter_mut().zip(&keys) {
+        ours.len = theirs.len;
+    }
+    spec.measured = [vf(ee, car + at::TANGENTS), vf(ee, car + at::TANGENTS + 16)];
+    spec.presampled(keys)
 }
 
 /// A car's state, out of the image (tests/traffic.rs's `car_of`).
@@ -146,6 +164,9 @@ fn car_of(ee: &Ee, car: u32) -> Car {
         normal: vf(ee, car + at::UP),
         first: ee.u32_at(car + at::FIRST) != 0,
         pose: mat(ee, ee.u32_at(car + at::NODE) + at::WORLD),
+        // The tangents the curve kept, until its cursor moves.
+        stale: ee.u32_at(car + at::DIRTY) == 0,
+        level: Default::default(),
     }
 }
 
@@ -185,34 +206,48 @@ fn the_images_are_the_truck_ride() {
     assert!(seen > 0, "no image has a wheel on the truck");
 }
 
-/// The port's arc lengths of the cars' paths (`Spec::new`, S81) against the ones the image holds.
-/// Red: free09's cars are presampled onto the ground, which the port does not model (S181).
+/// The port's arc lengths of the cars' paths (`Spec::new`, S81), built by the shell from
+/// free09_ss's `.toy` and clips, against the ones the image holds: measured on the clip's keys,
+/// before the presample puts them on the ground (S128).
 #[test]
-#[ignore = "red until S181 ports presampled path cars: 1500 key lengths differ"]
 fn the_paths_measure_as_the_originals() {
     let Some(ee) = image(IMAGES[0]) else { return };
-    let mut wrong = Vec::new();
+    let mut disc = match Disc::open_configured() {
+        Ok(disc) => disc,
+        Err(why) => return skip(&why),
+    };
+    let parts = ["Tracks\\free09_ss.res", "Tracks\\free09_ss_2.res"].map(|n| disc.res(n).unwrap_or_else(|e| panic!("{n}: {e}")));
+    let mut flat = |p: game_render::mat::V3| (p, game_render::mat::v3(0.0, 1.0, 0.0));
+    let specs = game_render::toy::Traffic::load(&parts, "free09_ss", &mut flat).sim(&parts).specs.as_ref().clone();
+    let (mut wrong, mut checked) = (Vec::new(), 0);
     for (c, &car) in CARS.iter().enumerate() {
-        let spec = spec_of(&ee, car);
-        let table = ee.u32_at(ee.u32_at(car + at::PATH) + at::KEYS);
-        for (k, key) in spec.keys.iter().enumerate() {
-            let theirs = ee.u32_at(table + k as u32 * at::KEY + 4);
-            if key.len.to_bits() != theirs {
-                wrong.push(format!("car {c} key {k}: {} against {}", key.len.0, f32::from_bits(theirs)));
+        let theirs = keys_of(&ee, car);
+        let f = |o| ee.u32_at(car + o);
+        let spec = specs
+            .iter()
+            .find(|s| {
+                (s.lag.to_bits(), s.time_scale.to_bits()) == (f(at::LAG), f(at::TIME_SCALE))
+                    && s.keys.len() == theirs.len()
+                    && s.keys.iter().zip(&theirs).all(|(a, b)| a.t.to_bits() == b.t.to_bits() && a.pos.x().to_bits() == b.pos.x().to_bits() && a.pos.z().to_bits() == b.pos.z().to_bits())
+            })
+            .unwrap_or_else(|| panic!("car {c}: no car of free09_ss's .toy drives this path"));
+        assert!(spec.presample, "car {c}: the shell's spec does not presample");
+        for (k, (ours, theirs)) in spec.keys.iter().zip(&theirs).enumerate() {
+            checked += 1;
+            if ours.len.to_bits() != theirs.len.to_bits() {
+                wrong.push(format!("car {c} key {k}: {} against {}", ours.len.0, theirs.len.0));
             }
         }
     }
     assert!(wrong.is_empty(), "{} keys differ:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(checked > 100, "only {checked} keys");
 }
 
 /// The port's car steps (`Spec::step`, S81) from each image, every car in the level's order as
 /// [`Traffic::frame`](game_sim::traffic::Traffic::frame) steps them, at the next tick's `dt`, against
 /// the next tick's image: the clock, the cursor, the point and frames, and the world matrix the
-/// wheel's carry reads. Red: the clocks and cursors match, but the cars' up comes from presampled
-/// key normals in the original and from the ground under the point in the port, and the lagged
-/// cars' points trail by ~0.2 ft (S181).
+/// wheel's carry reads: the presampled key normals and the lag's own walk (S128).
 #[test]
-#[ignore = "red until S181 ports presampled path cars: up and lagged points differ"]
 fn the_truck_drives_from_each_image_into_the_next() {
     let (mut pairs, mut wrong) = (0, Vec::new());
     for w in IMAGES.windows(2) {
