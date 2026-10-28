@@ -506,10 +506,12 @@ impl State for Sim {
         if !self.traffic.cars.is_empty() {
             w.list("cars", &self.traffic.cars);
         }
-        // The track's animated toys (V43), on a track with any: their clocks and the clips' hints.
+        // The track's animated toys (V43), on a track with any: their clocks and the clips' hints,
+        // and how far their collision bodies are from the load's identity (S167).
         if !self.traffic.toys.is_empty() {
             w.list("toys", &self.traffic.toys.clocks);
             w.list("toy_hints", &self.traffic.toys.hints);
+            w.list("toy_bodies", &self.traffic.toys.bodies);
         }
         // The track's knockable props (S131), on a track with any.
         if !self.traffic.props.is_empty() {

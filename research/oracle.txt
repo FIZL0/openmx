@@ -6208,6 +6208,27 @@ atv_stunt_state_pack        atv 0x004d9f30 = pc_stunt_state_pack (align, 0.37; w
 #   node's world in both states); the windsock's mesh part's body, like free09's, never is.
 kinematic_body_vtable boot 0x00451700 the kinematic body's vtable, at +8 of the body (ctor 0x001dd580)
 kinematic_body_update boot 0x001dd9b0 (a0 body) vt+0x38: +0x2e0 = +0x2a0, +0x2a0 = node(+0x254)+0x80..+0xbc
+# S167 — the windmill's body, live. Journal: research/journal/2026-10-28-s167-windmill-body-fling.
+# Who updates the body: it is a scene node (+0x14 next, +0x18 first child, +0x1c parent, flags +0x20/+0x29),
+#   the last child of group node 0x01290290 (vtable 0x0044d550, vt+0x38 0x00149270, which ends in
+#   node_update_children), after the toy's root 0x012905c8 and the mesh collidable 0x01290858; the group is
+#   the first child of the rustic windmill toy 0x0128fa80. animated_toy_update's last call is
+#   node_update_children(dt, toy), past the visibility gate, so the body updates on each tick the toy steps
+#   and on no other. Its two matrices leave the identity only after two drawn steps.
+# Velocity vt+0xb8 0x001dd7b0 (a0 out, a1 body) and spin vt+0xbc 0x001dd850 (vt+0xc0 turn: cross(+0x300,
+#   node+0xa0) + cross(+0x2f0, node+0x90), x app+0x348, into +0x280; turned by the node into +0x290 and out)
+#   on first_recording's body before the second step: (73177.47, 4010.912, 121798.58, 1) and (0, 1.6167299,
+#   0, 0); after it, zero. The port's Toys::frame tells the mesh the same (tests/toys.rs S167 test).
+# Live (research/s167_windmill.py, slot 5 of copy 1, a free09 state with the body at 0x01291210; csvs in
+#   s1's context/capture/s167): the bike set at rest 4 ft over the apex (2439.25, 176, 4059.9) lands on the
+#   2 ft top, wrecks 5 ticks later, and the vehicle's position then moves 1967 ft a tick (~59,000 ft/s)
+#   out to x 112,000 until the put-back. Set beside the south face (2439, 140, 4067.5), the first contact
+#   throws it from rest to (7.8, 18.6, 133.4) ft/s and it wrecks. Neither run updated the body before the
+#   hit; in the south one it updates from 4 ticks after (the wreck camera's view). The control on open ground
+#   (2439, 137, 4085) rolls downhill under 23 ft/s. Both windmill runs later show the same launch, horizontal
+#   300.45 along the heading and 100.312 up (the put-back's throw).
+# Contact records 0x80 apart (chassis 0xdfa240 + 0x2b70.., +0x20 normal, +0x30 world point, +0x68 the body)
+#   name the body as their mover after the south hit.
 # S157 — the 2p recording's world contacts. Journal: research/journal/2026-10-27-s157-2p-world-contacts.
 # Tests crates/game-sim/tests/two_p_world.rs (C10's images, c10-<frame>.ram, track Tracks\Free09_SS).
 # The level's collision node in the 2p state is 0x0061e630 (S88's split state: 0x0061e720): objects

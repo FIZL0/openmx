@@ -34,6 +34,14 @@
 //! between ticks; with nobody setting it every toy steps. `UpdateSearch` off skips the step's
 //! re-placing of the collision parts ([`Spec::search`]).
 //!
+//! **The collision bodies** (S167). Every toy's collision, a `.col` mesh or a hierarchy's part, is
+//! owned by a kinematic body that a contact names as a mover. The body keeps the world matrix of its
+//! node from its last two updates, and the constructor sets both to the identity. Its update runs at
+//! the end of the toy's step, past the gate, so a toy the camera has not passed over twice since the
+//! load answers its motion from the identity: its node's position times `1/dt` (~120,000 ft/s for
+//! free09's rustic windmill), and the turn from no rotation to its own. The original flings a bike
+//! that touches the windmill before it has been in view ([`Toys::bodies`]).
+//!
 //! Not here: the sounds, `CameraCollision`, `DisableWhenIdle`, `DependentToyN`,
 //! `AnimateWhenZoneNotVisible` and `InitialFrame` (no animated toy on the disc writes the middle three).
 
@@ -405,6 +413,10 @@ pub struct Clock {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hint(pub u32);
 
+/// How many times a toy's collision bodies have been updated since the load, up to two (S167).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bodies(pub u8);
+
 /// The track's animated toys: their clips and constants, their clocks, and where their collision is.
 #[derive(Clone, Default)]
 pub struct Toys {
@@ -418,6 +430,9 @@ pub struct Toys {
     pub clocks: Vec<Clock>,
     /// Every motion's rotation channels' hints, one after another.
     pub hints: Vec<Hint>,
+    /// For each toy: how many times its collision bodies have been updated since the load, up to two
+    /// (S167). Below two, a body's matrix from the update before is still the constructor's identity.
+    pub bodies: Vec<Bodies>,
     /// Where the toys' meshes begin in the world's props ([`Toys::attach`]).
     pub first: Option<usize>,
     /// For each toy: whether the frame since its last step drew it (V76). Not state: the picture's,
@@ -439,6 +454,7 @@ impl Toys {
         let mut toys = Toys {
             clocks: vec![Clock::default(); specs.len()],
             hints: vec![Hint(1); n],
+            bodies: vec![Bodies::default(); specs.len()],
             seen: vec![true; specs.len()],
             motions: Arc::new(motions),
             specs: Arc::new(specs),
@@ -537,6 +553,10 @@ impl Toys {
     /// from, so it is made again from state. A clip that has finished stands still, and so does a
     /// toy the visibility gate passes over ([`Toys::steps`]): nothing of it is stepped. A toy with
     /// `UpdateSearch` off steps its clip but leaves its parts where they stand.
+    ///
+    /// A `.col` mesh is told the same of the placement, which never moves (S167). Until its toy has
+    /// stepped twice since the load, the body's matrix before is the identity ([`Toys::bodies`]), for
+    /// a mesh and a part alike.
     pub fn frame(&mut self, dt: F, world: &mut dyn World) {
         if self.clocks.is_empty() {
             return;
@@ -545,11 +565,23 @@ impl Toys {
         let mut props = world.moving();
         let mut at = self.first;
         for k in 0..self.specs.len() {
+            let steps = self.steps(k);
+            // The body update is the step's last call, so a contact after it reads this tick's count.
+            if steps {
+                self.bodies[k].0 = (self.bodies[k].0 + 1).min(2);
+            }
+            let fresh = self.bodies[k].0 < 2;
             let before = (!self.specs[k].parts.is_empty()).then(|| self.worlds_now(k));
-            let locals = if self.steps(k) { self.advance(k, dt) } else { None };
+            let locals = if steps { self.advance(k, dt) } else { None };
             let spec = Arc::clone(&self.specs);
             let spec = &spec[k];
+            let was = |place: Mat4| if fresh { Mat4::IDENTITY } else { place };
             if spec.mesh.is_some() {
+                if let (Some(props), Some(a)) = (props.as_deref_mut(), at)
+                    && let Some(prop) = props.props.get_mut(a)
+                {
+                    prop.moving = Some(crate::traffic::Moving::of(&was(spec.place), &spec.place, inv_dt));
+                }
                 at = at.map(|a| a + 1);
             }
             if spec.parts.is_empty() {
@@ -563,15 +595,15 @@ impl Toys {
                         if spec.search {
                             prop.stand(&place);
                         }
-                        let was = before.as_ref().map_or(place, |b| spec.at(part, b));
-                        prop.moving = Some(crate::traffic::Moving::of(&was, &place, inv_dt));
+                        let from = was(before.as_ref().map_or(place, |b| spec.at(part, b)));
+                        prop.moving = Some(crate::traffic::Moving::of(&from, &place, inv_dt));
                     }
                 }
             } else if let (Some(props), Some(a), Some(b)) = (props.as_deref_mut(), at, before.as_ref()) {
                 for (p, part) in spec.parts.iter().enumerate() {
                     if let Some(prop) = props.props.get_mut(a + p) {
                         let place = spec.at(part, b);
-                        prop.moving = Some(crate::traffic::Moving::of(&place, &place, inv_dt));
+                        prop.moving = Some(crate::traffic::Moving::of(&was(place), &place, inv_dt));
                     }
                 }
             }
@@ -614,5 +646,11 @@ impl State for Clock {
 impl State for Hint {
     fn walk(&self, w: &mut Walk<'_>) {
         w.u32("hint", self.0);
+    }
+}
+
+impl State for Bodies {
+    fn walk(&self, w: &mut Walk<'_>) {
+        w.u8("updated", self.0);
     }
 }
