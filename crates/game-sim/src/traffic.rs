@@ -463,13 +463,15 @@ pub struct Traffic {
     pub first: Option<usize>,
     /// The track's animated toys (V43), stepped with the cars.
     pub toys: crate::toys::Toys,
+    /// The track's knockable props (S131), ticked with the cars.
+    pub props: crate::prop_set::PropSet,
 }
 
 impl Traffic {
     /// The cars of a track, as its load leaves them.
     pub fn new(specs: Vec<Spec>) -> Traffic {
         let cars = specs.iter().map(Car::new).collect();
-        Traffic { specs: Arc::new(specs), cars, first: None, toys: Default::default() }
+        Traffic { specs: Arc::new(specs), cars, first: None, toys: Default::default(), props: Default::default() }
     }
 
     /// Put the cars' meshes at the end of the world's props, each where its car stands now, and
@@ -487,6 +489,7 @@ impl Traffic {
     /// One tick of every car, in order, and their meshes moved to where they now stand.
     pub fn frame(&mut self, dt: F, world: &mut dyn World) {
         self.toys.frame(dt, world);
+        self.props.frame(dt);
         if self.cars.is_empty() {
             return;
         }

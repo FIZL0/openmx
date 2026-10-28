@@ -475,7 +475,6 @@ impl NodeBox {
     /// a second node, so that merge is not ported and such a model is an error.
     pub fn from_model(psg: &[u8]) -> Result<NodeBox, String> {
         const NODES: usize = 12;
-        const RECORD: usize = 224;
         const CENTRE: usize = 192;
         const HALF: usize = 204;
         let word = |at: usize| -> Result<u32, String> {

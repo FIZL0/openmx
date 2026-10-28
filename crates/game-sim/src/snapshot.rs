@@ -112,8 +112,16 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         traffic.toys.clocks.put(&mut out);
         traffic.toys.hints.put(&mut out);
     }
+    // The knockable props (S131) the same way, behind theirs.
+    if !traffic.props.is_empty() {
+        PROPS.put(&mut out);
+        traffic.props.collections.put(&mut out);
+    }
     out
 }
+
+/// What begins [`encode`]'s knockable props section.
+const PROPS: u64 = u64::from_le_bytes(*b"S131prop");
 
 /// What begins [`encode`]'s cars section.
 const CARS: u64 = u64::from_le_bytes(*b"S81cars\0");
@@ -140,8 +148,10 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let mut rider: crate::rider::Rider = Wire::take(&mut r)?;
     let mut plane: Option<crate::flight::Flight> = Wire::take(&mut r)?;
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
+    // No players' list ahead of any tagged section (S131: the props' tag was read as one).
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
-        if r.at < bytes.len() && !tagged(&r) { Wire::take(&mut r)? } else { Vec::new() };
+        if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
     if r.at < bytes.len() && tagged(&r) {
         r.at += 8;
@@ -174,6 +184,32 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         (toys.clocks, toys.hints) = (clocks, hints);
     } else if !traffic.toys.is_empty() {
         return Err(format!("no animated toys in the state, {} here", traffic.toys.clocks.len()));
+    }
+    if r.bytes.get(r.at..r.at + 8) == Some(&PROPS.to_le_bytes()[..]) {
+        r.at += 8;
+        let collections: Vec<crate::prop_world::Collection> = Wire::take(&mut r)?;
+        let here = &traffic.props.collections;
+        let shape = |c: &crate::prop_world::Collection| (c.objects.len(), c.joints.len());
+        if collections.len() != here.len() || collections.iter().map(shape).ne(here.iter().map(shape)) {
+            return Err(format!("{} prop collections in the state, {} here", collections.len(), here.len()));
+        }
+        // An index past a collection's bodies would be a panic in the next tick, not a desync.
+        for c in &collections {
+            let n = c.objects.len();
+            let lists = [&c.bodies, &c.forces, &c.preforce, &c.posts];
+            let listed = lists.iter().flat_map(|l| l.iter().copied());
+            let heard = c.listeners.iter().filter_map(|l| match *l {
+                crate::prop_world::Listener::Object(k) => Some(k),
+                crate::prop_world::Listener::Settle => None,
+            });
+            let pinned = c.joints.iter().flat_map(|j| std::iter::once(j.pin.first).chain(j.pin.second));
+            if listed.chain(heard).chain(pinned).any(|k| k >= n) || c.bones.len() != n {
+                return Err("a prop collection names a body it does not have".into());
+            }
+        }
+        traffic.props.collections = collections;
+    } else if !traffic.props.is_empty() {
+        return Err(format!("no props in the state, {} here", traffic.props.collections.len()));
     }
     // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
     let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone()));
@@ -621,6 +657,26 @@ wire!(crate::ragdoll::Collision { bone, enabled, touching });
 wire!(crate::ragdoll::Launch { force, force_time, hand_hold, target, world_frame, other_frame });
 wire!(crate::ragdoll::Pin { first, second, anchors, target, target_velocity, lower, upper, hit, sticky, gains });
 wire!(crate::biplane::World { iterations, rate });
+wire!(crate::prop_world::Collection { world, bones, objects, joints, bodies, forces, preforce, posts, listeners, active, pin_to_body, reset_time, countdown, edge });
+wire!(crate::prop_world::Object { place, look, up, gravity, collision_enabled, detect_when_disabled, reset_off_edge, reset_time, countdown, thresholds, fresh, listens, filed, node });
+wire!(crate::prop_world::Joint { pin, on, limited });
+wire!(crate::prop_world::Edge { min, max });
+
+impl Wire for crate::prop_world::Listener {
+    fn put(&self, out: &mut Vec<u8>) {
+        match *self {
+            crate::prop_world::Listener::Settle => None,
+            crate::prop_world::Listener::Object(k) => Some(k),
+        }
+        .put(out);
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(match <Option<usize> as Wire>::take(r)? {
+            None => crate::prop_world::Listener::Settle,
+            Some(k) => crate::prop_world::Listener::Object(k),
+        })
+    }
+}
 wire!(crate::ragdoll_contact::Contact { touched, ground, scene, swept, point, normal, dv });
 wire!(crate::rider_anim::Thrown { throw, touching, vel, clearance, launch });
 wire!(crate::wreck_sound::Emitter { crash, fall });

@@ -3569,6 +3569,32 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     if let Some(props) = sim_world::World::moving(&mut sim) {
         cars.attach(props);
     }
+    // The knockable props (S131): the `.toy`'s collections over the scene's models, each a body asleep
+    // where its model stands, stepped with the cars and drawn where their bodies are. A world's tiles
+    // have none, as they have no cars.
+    if world_mod.is_none() {
+        let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+        if let Some(toy) = read(&format!("{stem}.toy")) {
+            let area = sim_world::World::area(&sim).unwrap_or_else(|| {
+                Area::new(F(place.terrain.width as f32), F(place.terrain.breadth as f32), place.terrain.width_scale, place.terrain.breadth_scale)
+            });
+            // A `.pco` by its path, or (a mod's folder) by its file name wherever it is.
+            let mut pco = |p: &str| archives.iter().find_map(|a| a.read(p).ok()).or_else(|| read(p.rsplit('\\').next().unwrap_or(p)));
+            let (props, said) = game_sim::prop_set::PropSet::load(
+                &phy::Ini::parse_bytes(&toy),
+                &format!("Tracks\\{stem}\\"),
+                &place.models,
+                &mut pco,
+                &mut |p| read(p),
+                Some(area),
+            );
+            if !props.is_empty() || !said.is_empty() {
+                println!("props: {} collections, {} bodies", props.collections.len(), props.nodes().count());
+                said.iter().for_each(|why| println!("  {why}"));
+            }
+            cars.props = props;
+        }
+    }
     let traffic_time = 0.0f64;
     // The scene's clock at the tick before the last, which the picture blends from (V47).
     let traffic_before = 0.0f64;
@@ -3997,6 +4023,25 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     };
     // Where the first seat's path cars stood before the last tick (S81), which the picture blends from.
     let mut cars_before: Vec<game_sim::math::Mat4> = Vec::new();
+    // The knockable props' bodies (S131), each by its scene model's place in the picture's list (found
+    // by its name and place), with where that model stands as loaded and the body's node at rest
+    // there: a body off that node is drawn at its node, one put back where the scene stands it.
+    let prop_looks: Vec<Option<(usize, view::Placement, game_sim::contact::Node)>> = cars
+        .props
+        .nodes()
+        .map(|(m, rest)| {
+            let p = &place.models[m];
+            let at = v3(p.position[0].0, p.position[1].0, p.position[2].0);
+            let name = view::slt_name(&p.file);
+            // The two readers' numbers may part by a rounding (the simulation's is the game's own).
+            let k = look.models.iter().position(|l| l.pos.sub(at).len() < 0.01 && l.model.eq_ignore_ascii_case(&name))?;
+            Some((k, look.models[k].clone(), *rest))
+        })
+        .collect();
+    let unseen = prop_looks.iter().filter(|p| p.is_none()).count();
+    if unseen > 0 {
+        println!("props: {unseen} bodies with no model in the picture, drawn where the scene stands them");
+    }
     if let Some(since) = load_screen.since {
         println!("loading: built, {} frames drawn over {:.2} s", load_screen.frames, since.elapsed().as_secs_f32());
     }
@@ -6994,6 +7039,25 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         if !creature_copies.is_empty() {
             creatures_at = creatures.placed(blend.0);
+        }
+        // The knockable props (S131) where the first seat's bodies are, on the last tick: both
+        // pictures draw the scene's list, so a moved prop is moved there.
+        for ((_, node), seen) in world.seats[0].sim.traffic.props.nodes().zip(&prop_looks) {
+            let Some((k, made, rest)) = seen else { continue };
+            let shown = match node == rest {
+                true => made.clone(),
+                false => {
+                    let xyz = |v: Vf| v3(v.x(), v.y(), v.z());
+                    view::Placement { model: made.model.clone(), pos: xyz(node.origin), look: xyz(node.rows[2]), up: xyz(node.rows[1]) }
+                }
+            };
+            let drawn = &mut look.models[*k];
+            if (drawn.pos, drawn.look, drawn.up) != (shown.pos, shown.look, shown.up) {
+                if let Some(r) = renderer_of(&mut offscreen, window) {
+                    r.move_scene_prop(*k, shown.transform());
+                }
+                *drawn = shown;
+            }
         }
         // The animated toys (V43) where the first seat's simulation has them: at their places, posed
         // at their clips' clocks blended between the tick before the last and the last.

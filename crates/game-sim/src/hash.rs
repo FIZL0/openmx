@@ -511,6 +511,10 @@ impl State for Sim {
             w.list("toys", &self.traffic.toys.clocks);
             w.list("toy_hints", &self.traffic.toys.hints);
         }
+        // The track's knockable props (S131), on a track with any.
+        if !self.traffic.props.is_empty() {
+            w.list("props", &self.traffic.props.collections);
+        }
     }
 }
 

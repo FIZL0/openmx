@@ -859,7 +859,7 @@ pub fn pad(pad: &input::Pad) -> Pad {
 
 /// The body under the names a capture of the original gives its four quads (`pos`, `vel`, `quat`,
 /// `rate`), then the rest in declaration order.
-struct BodyWalk<'a>(&'a Body);
+pub(crate) struct BodyWalk<'a>(pub(crate) &'a Body);
 
 impl State for BodyWalk<'_> {
     fn walk(&self, w: &mut Walk<'_>) {
