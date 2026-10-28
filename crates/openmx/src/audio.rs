@@ -2233,6 +2233,55 @@ impl WorldSounds {
     }
 }
 
+// --- the path cars' loops (V74) ---------------------------------------------------------------------
+
+/// **A toy's sound** (V74): a loop a path car carries, out of the track's `.toy`.
+///
+/// A `[CarN]` names its sounds (`NumberOfSounds`, `Sound1..n`: `game_render::toy::Car::sounds`). The
+/// original's path-car reader makes one sound object per name and hands it the car's model to ride
+/// on. That object's reader formats `ToySound_<name>` and, where the `.toy` has the section and the
+/// section a `SoundResourceFile`, reads `Looping`, `OneShot`, `ResetWhenInaudible`, `Force2D`,
+/// `Stereo`, `OneShotDistance` (20), `RandomTriggerPercent` (100), `CycleTime`, `MinDistance` and
+/// `MaxDistance` (0 where missing), `Priority` (10), `IsStream`, `StartEnabled` (on),
+/// `AttachToObject` (`body`) and `RolloffFactor` (1); a name with no section is no sound. Its class
+/// is the plain world sound's but for that reader: nothing of it follows the car's speed, so the
+/// loop plays at its own pitch, only its place moving with the car.
+///
+/// On the disc every one is an enabled loop with both distances: free06's train (the engine's
+/// `trainengine`, the cars behind it `trainloop1..3`), and the `semi` and `car` loops of the trucks of
+/// free06, free07, free09, free10 and free11. `[ToySound_Shovel2]` (free06) is named by no car:
+/// its shovels are commented out of the file, and it never plays.
+#[derive(Clone, Debug)]
+pub struct ToySound {
+    pub clip: Arc<Clip>,
+    pub looping: bool,
+    /// `StartEnabled`: off, the sound is made and never started (nothing on the disc turns one off).
+    pub enabled: bool,
+    pub near: f32,
+    pub far: f32,
+}
+
+impl ToySound {
+    /// `[ToySound_<name>]` of a parsed `.toy`, or `None` where the section or its file is missing.
+    pub fn read(toy: &[Section], name: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> Option<ToySound> {
+        let s = section(toy, &format!("ToySound_{name}"))?;
+        let clip = lib(s.get("SoundResourceFile")?.trim())?;
+        Some(ToySound {
+            clip,
+            looping: s.get("Looping").is_some_and(truthy),
+            enabled: s.get("StartEnabled").is_none_or(truthy),
+            near: s.number("MinDistance").unwrap_or(0.0),
+            far: s.number("MaxDistance").unwrap_or(0.0),
+        })
+    }
+
+    /// Every car's sounds, `names[k]` being car `k`'s `Sound1..n`: what [`Sound::toys_at`] plays.
+    pub fn cars(toy: &str, names: &[Vec<String>], lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> Vec<Vec<ToySound>> {
+        let toy = ini::parse(toy);
+        names.iter().map(|car| car.iter().filter_map(|n| ToySound::read(&toy, n, lib)).collect()).collect()
+    }
+}
+
 // --- the shootoff (P85) -----------------------------------------------------------------------------
 
 /// The wreck reason of the cannonball, the throw back off the map's edge (S59).
@@ -2983,8 +3032,13 @@ pub struct Sound {
     pub shootoff: Shootoff,
     /// The track's `Col\template.cmt` (P145).
     pub drive_on: DriveOnTable,
+    /// The path cars' loops (V74), by car: [`Sound::set_toys`] reads them, [`Sound::toys_at`] plays them.
+    pub toys: Vec<Vec<ToySound>>,
     started: bool,
     world_voices: Vec<VoiceId>,
+    /// `(car, voice)` for every toy loop sounding, once [`Sound::toys_at`] has started them.
+    toy_voices: Vec<(usize, VoiceId)>,
+    toys_started: bool,
     dice: Dice,
     last: [i32; 3],
 }
@@ -3001,8 +3055,11 @@ impl Sound {
             plane_touchdown: MachineTouchdown::default(),
             shootoff: Shootoff::default(),
             drive_on: DriveOnTable::default(),
+            toys: Vec::new(),
             started: false,
             world_voices: Vec::new(),
+            toy_voices: Vec::new(),
+            toys_started: false,
             dice: Dice::new(0x5eed),
             last: [-1; 3],
         }
@@ -3122,6 +3179,30 @@ impl Sound {
         }
     }
 
+    /// The path cars' loops (V74) where the cars are this tick, `at[k]` car `k`'s place in the order
+    /// [`Sound::toys`] has them. The first call after the load (or after [`Sound::quiet`]) starts
+    /// every enabled one, as the original's are started when the track loads; each later call moves
+    /// them with their cars. A car missing from `at` keeps its loops where they were.
+    pub fn toys_at(&mut self, at: &[[f32; 3]]) {
+        let Ok(mut m) = self.mixer.lock() else { return };
+        if !self.toys_started {
+            self.toys_started = true;
+            for (k, sounds) in self.toys.iter().enumerate() {
+                let Some(&p) = at.get(k) else { continue };
+                for t in sounds.iter().filter(|t| t.enabled) {
+                    let play = Play { looping: t.looping, at: Some(p), near: t.near, far: t.far, ..Play::default() };
+                    self.toy_voices.push((k, m.play(t.clip.clone(), play)));
+                }
+            }
+            return;
+        }
+        for &(k, id) in &self.toy_voices {
+            if let Some(&p) = at.get(k) {
+                m.set(id, 1.0, 1.0, Some(p));
+            }
+        }
+    }
+
     /// A player joined the running ride (P76): a seat of sounds on the first player's bike.
     pub fn seat_joined(&mut self) {
         let Some(bike) = self.seats.first().map(|s| s.bike.clone()) else { return };
@@ -3158,6 +3239,8 @@ impl Sound {
         }
         self.started = false;
         self.world_voices.clear();
+        self.toys_started = false;
+        self.toy_voices.clear();
         for s in &mut self.seats {
             s.engine = Engine::new(s.dice.below(u32::MAX) as u64);
             s.plane = PlaneNote::default();
@@ -3265,6 +3348,17 @@ impl Reading<'_> {
         let t = self.text(track_res, &format!("tracks\\{track}\\{track}.aud"));
         let lib = &mut *self.lib;
         WorldSounds::read(&t, "", &mut |n| lib.clip(n))
+    }
+
+    /// The path cars' loops (V74): `names[k]` is car `k`'s `Sound1..n`, looked up in the track's own
+    /// `.toy` beside its `.aud`.
+    pub fn toys(&mut self, track_res: &str, track: &str, names: &[Vec<String>]) -> Vec<Vec<ToySound>> {
+        if names.iter().all(|n| n.is_empty()) {
+            return vec![Vec::new(); names.len()];
+        }
+        let t = self.text(track_res, &format!("tracks\\{track}\\{track}.toy"));
+        let lib = &mut *self.lib;
+        ToySound::cars(&t, names, &mut |n| lib.clip(n))
     }
 
     /// The shootoff's boom and rumble, out of the race events' `aud\event.aud`.
@@ -3578,6 +3672,19 @@ pub struct MapSounds {
 }
 
 impl Sound {
+    /// The path cars' loops (V74), read off the disc for the track's cars: `names[k]` is car `k`'s
+    /// `Sound1..n` (`game_render::toy::Car::sounds`), in the order the ride drives them.
+    pub fn set_toys(&mut self, disc: Disc, track_res: &str, track: &str, names: &[Vec<String>]) -> Result<(), String> {
+        let mut lib = Library::open(disc)?;
+        let mut read = Reading { lib: &mut lib };
+        self.toys = read.toys(track_res, track, names);
+        let n: usize = self.toys.iter().map(Vec::len).sum();
+        if n > 0 {
+            println!("sound: {n} toy loops on {} cars", self.toys.iter().filter(|t| !t.is_empty()).count());
+        }
+        Ok(())
+    }
+
     /// A world of disc tracks' fixed emitters (P71): every map's own `.aud` ones, each moved by its
     /// map's offset, and those standing on ground the map no longer owns left out. They take the
     /// place of the home map's, which is among `maps`. The random ones and the crowd stay the home

@@ -74,6 +74,9 @@ pub struct Car {
     pub has_physics: bool,
     /// `SteerFrontTires` (on where it is missing): the first two wheels turn into the bends ([`Wheels`]).
     pub steer_front: bool,
+    /// `NumberOfSounds`, then `Sound1..n`: each a name whose `[ToySound_<name>]` is the loop the car
+    /// carries (V74, `openmx::audio::ToySound`). A name with no such section plays nothing.
+    pub sounds: Vec<String>,
 }
 
 impl Car {
@@ -114,6 +117,10 @@ fn car(s: &Section) -> Car {
         drive_on_soultree: flag("DriveOnSoultree"),
         has_physics: flag("HasPhysics"),
         steer_front: s.get("SteerFrontTires").is_none_or(ini::switch),
+        sounds: (1..=s.number("NumberOfSounds").unwrap_or(0.0).max(0.0) as usize)
+            .filter_map(|i| s.get(&format!("Sound{i}")).map(|n| n.trim().to_string()))
+            .filter(|n| !n.is_empty())
+            .collect(),
     }
 }
 

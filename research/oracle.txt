@@ -6023,3 +6023,17 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # -> 0x00220470 queues the z-sample occlusion box, 0x00220670 draws a 2*flareScreenSize px sprite on the
 # sun's point, alpha flareAlpha x in-frustum. PC (MX vs ATV) SunFlare vf16/vf18 at 004c54f0/004c56f0:
 # 1 - r*0.0025, saturation 0.25*occlusion + 0.75*centredness (guide only).
+
+# --- V74: the path cars' toy sounds -----------------------------------------------------------------
+# Path-car reader 0x00289710: NumberOfSounds (0x00434308), Sound%d (0x00434318), one 0x40-byte sound
+# object each (ctor 0x003e54f0, vtable 0x0045f290, class name "CarProceduralSound"; the vtable is
+# StaticSound's 0x0045f410 but for the dtor and +0x78), whose +0x78 reader 0x003e55c0 formats
+# "ToySound_%s" (0x00448c78) and reads Looping/OneShot/ResetWhenInaudible/Force2D/Stereo, OneShotDistance
+# 20, RandomTriggerPercent 100, CycleTime, MaxDistance/MinDistance 0, Priority 10, IsStream, StartEnabled
+# 1, AttachToObject "body", RolloffFactor 1; flags OneShot 1 | Looping 4 | ResetWhenInaudible 8 |
+# IsStream 0x10 into the world-sound maker 0x00103ef0; AttenuationCurve "Under" swaps the curve
+# (0x001b7050). The car then attaches it to its model (0x001b7290, the car's +0x254), which looks the
+# AttachToObject node up (0x001b37b0). Animated toys read NumberOfSounds too (0x002144d0, 0x0042f200,
+# AnimatedToySound ctor 0x003e58f0, reader 0x003e59d0 adds MotionName/StartTime/ConfigFile): no
+# AnimatedToy on the disc names one. PC: CarProceduralSound::vf32 / AnimatedToySound::vf32 at
+# 005068c0 / 00506b90 (guide only).
