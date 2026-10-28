@@ -60,11 +60,29 @@ async function opfs() {
   return navigator.storage.getDirectory();
 }
 
+// A sync access handle holds its file's lock, one per file. WebKit refuses a second with InvalidStateError (others
+// say NoModificationAllowedError): an iOS home-screen app reloaded under an update whose old worker still holds the
+// disc, or a second tab. `held(f)` gives such a holder ~3 s to let go, then throws.
+const LOCKED = ['InvalidStateError', 'NoModificationAllowedError'];
+async function held(f) {
+  for (let tries = 0; ; tries++) {
+    try {
+      return await f();
+    } catch (e) {
+      if (tries >= 10 || !LOCKED.includes(e?.name)) throw e;
+      await new Promise(go => setTimeout(go, 300));
+    }
+  }
+}
+
 // The picked disc into OPFS, under a temporary name first so a copy cut short is never taken for a disc.
 async function importDisc(file) {
+  // the copy about to be replaced lets go of its lock first
+  disc.close?.();
+  disc = { size: 0, read: () => -1 };
   const dir = await opfs();
   const part = await dir.getFileHandle(`${DISC}.part`, { create: true });
-  const h = await part.createSyncAccessHandle();
+  const h = await held(() => part.createSyncAccessHandle());
   try {
     h.truncate(0);
     for (let at = 0; at < file.size; at += CHUNK) {
@@ -81,7 +99,7 @@ async function importDisc(file) {
     h.close();
   }
   // (directory, name): WebKit's move takes no name-only form
-  if (part.move) await part.move(dir, DISC);
+  if (part.move) await held(() => part.move(dir, DISC));
   else {
     const out = await (await dir.getFileHandle(DISC, { create: true })).createWritable();
     await out.write(await part.getFile());
@@ -103,14 +121,23 @@ async function openDisc(file) {
       },
     };
   }
+  // this worker has the copy open already (Ride pressed again): its lock is ours, so keep it
+  if (disc.opfs) return disc;
   let handle;
   try {
     handle = await (await opfs()).getFileHandle(DISC);
   } catch {
     return null;
   }
-  const h = await handle.createSyncAccessHandle();
-  return { size: h.getSize(), read: (at, into) => h.read(into, { at }) };
+  try {
+    const h = await held(() => handle.createSyncAccessHandle());
+    return { size: h.getSize(), read: (at, into) => h.read(into, { at }), opfs: true, close: () => h.close() };
+  } catch (e) {
+    if (!LOCKED.includes(e?.name)) throw e;
+    // still held elsewhere: the copy's File reads without a lock
+    console.log(`disc: ${e.name} on the sync handle, reading the copy's File instead`);
+    return { ...(await openDisc(await handle.getFile())), opfs: true };
+  }
 }
 
 async function start(file) {
@@ -188,6 +215,10 @@ onmessage = async ({ data }) => {
       await start();
     }
   } catch (e) {
-    postMessage({ error: String(e) });
+    postMessage({
+      error: LOCKED.includes(e?.name)
+        ? `The disc is busy in another openMX window or tab: close the others, then reload. (${e.name})`
+        : String(e),
+    });
   }
 };
