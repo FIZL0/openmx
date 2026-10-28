@@ -458,6 +458,45 @@ pub struct NodeBox {
     pub half_extent: Vf,
 }
 
+/// The `.psg` file of the model a scene line names (`SLT=`), as the track's archive keeps it.
+pub fn model_file(model: &str) -> String {
+    format!("{model}.psg")
+}
+
+impl NodeBox {
+    /// The box a body's node gets from its model, the `.psg`'s bytes: the node reader reads each
+    /// node's 224-byte record (a 128-byte name, the 64-byte local matrix, then the centre and the
+    /// half extent as three floats each, a radius and the parent's index), and the model's first
+    /// node is the scene node itself — it copies the two vectors in and marks the node as having a
+    /// box, every time. Only three lanes are read; the `w` lanes stay as the node was made, 1 in both.
+    ///
+    /// A model of more than one node would have its children's boxes merged into the span by
+    /// [`box_size`]'s query, through their world matrices; no knockable prop's model on the disc has
+    /// a second node, so that merge is not ported and such a model is an error.
+    pub fn from_model(psg: &[u8]) -> Result<NodeBox, String> {
+        const NODES: usize = 12;
+        const RECORD: usize = 224;
+        const CENTRE: usize = 192;
+        const HALF: usize = 204;
+        let word = |at: usize| -> Result<u32, String> {
+            psg.get(at..at + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .ok_or_else(|| format!(".psg ends at {} before byte {at}", psg.len()))
+        };
+        if psg.get(..4) != Some(b"psg\0".as_slice()) {
+            return Err("not a .psg: no psg\\0 at the front".into());
+        }
+        let count = word(8)?;
+        if count != 1 {
+            return Err(format!("a model of {count} nodes: the children's boxes are not merged"));
+        }
+        let three = |at: usize, w: f32| -> Result<Vf, String> {
+            Ok(Vf::from_bits([word(at)?, word(at + 4)?, word(at + 8)?, w.to_bits()]))
+        };
+        Ok(NodeBox { centre: three(NODES + CENTRE, 1.0)?, half_extent: three(NODES + HALF, 1.0)? })
+    }
+}
+
 /// The box the inertia formula takes: the node's bounds query, which spans the box as its corners
 /// `centre ∓ half` and answers half their difference, doubled by the loader. A box whose centre is
 /// off zero comes back a rounding away from twice its half extent — which is the egg's inertia. A
@@ -473,8 +512,8 @@ pub fn box_size(node: Option<NodeBox>) -> Vf {
 
 /// Every collection's bodies, in collection order and member order within one.
 ///
-/// `node_box` is a member's model node's box ([`NodeBox`], or `None` for a node with none). The
-/// port has no scene graph — the box comes off the model — so the caller supplies it.
+/// `node_box` is a member's model node's box ([`NodeBox`], or `None` for a node with none): what
+/// [`NodeBox::from_model`] reads off the model's `.psg`, which the caller fetches from the disc.
 pub fn bodies(
     collections: &[Collection],
     models: &[Placement],
