@@ -5345,6 +5345,14 @@ vehicle_fx_entry_on   boot 0x003d86d0 flag |= 1 (live); the emitter on (vt +0x98
 #   (-9.19, 14.22, -28.94) at 58.2 ft/s. Clearing wrecks_enabled (0x00420bc0) in a paused state and
 #   saving it keeps wrecks off through a .p2m2 playback of that state. A generated .p2m2 here plays two
 #   fields per 30 Hz tick (300 fields held Cross for 150 ticks).
+# S126 — the same hit in the port (tests eco.rs a_free09_tree_against_the_original, replay.rs
+#   a_free09_trunk_wrecks_as_the_original_does from tree.p2m2_SaveState.p2s's eeMemory.bin). The
+#   routing is S138's: rider_contact::scenery searches trunks with the body rays and the bump's
+#   resolve loads the shock; S157 proved that resolve on trunks bit for bit. S100's port ride carried no
+#   bike collision files, so it fell back on the frame probe and never loaded g_peak. Seeded from the
+#   state, the port wrecks 1 at counter 2974 (the original 2978) on g_peak (-11.5, -4.3, -35.8), the
+#   centre of mass 4.34 ft off the axis (the original 3.49): its launch is quicker (P154), so it meets
+#   the trunk at another phase of a tick, one front ray deep rather than two.
 # S81 — the path cars in the simulation: crates/game-sim/src/traffic.rs, proved in
 # crates/game-sim/tests/traffic.rs against s89-along (free06, the train and the earth movers).
 #   The car (V41's class, ctor 0x00114560): +0x430 path {n, keys (0x30 each: t, len, pos at +0x10,

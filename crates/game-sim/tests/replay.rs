@@ -9090,3 +9090,115 @@ fn wrecks_as_the_original_does(cases: &[(&str, u64, u64, &str)]) -> Vec<String> 
     println!("{compared} landings compared");
     parted
 }
+
+// --- S126: a free09 trunk, ridden into from S100's save state -------------------------------------
+
+/// S100's two rides of recording2's 125 flat out into free09's plant 347 (a TreeB), each with the
+/// state it starts from (`context/capture/s100/<name>.ee.bin`, the `.p2s`'s `eeMemory.bin`): `tree`
+/// as the state is, `nowreck` with the original's wrecks switched off.
+const S100_TREE: &str = "s100/tree";
+
+/// Ticks of [`S100_TREE`] ridden: the run-up (61 ticks) and the hit, with room either side.
+const S100_TICKS: u64 = 70;
+
+/// Plant 347's axis on the ground plane (S100): the trunk the ride is aimed at.
+const S100_TRUNK: [f32; 2] = [4968.84, 3087.89];
+
+/// How many ticks before the original's the port's wreck comes. All of it is the launch (P154): from
+/// the same state and pad the port's 125 is 3.3 ft/s quicker by 2920 and reaches the trunk 4 ticks
+/// early, at 57.4 ft/s against the original's 58.2. Zero once the launch is the original's.
+const S100_EARLY: u64 = 4;
+
+/// **A free09 trunk wrecks the rider as the original's does** (S126): S100's ride replayed in the
+/// port from its own state — the whole bike seeded, free09's ground, props and every trunk of its
+/// ecosystem standing, the bike's body rays carried, the original's pad — wrecks on the tick the
+/// original does, over the bars (reason 1), on the impact load the resolve of the rays' trunk
+/// contacts leaves in g_peak.
+#[test]
+fn a_free09_trunk_wrecks_as_the_original_does() {
+    use game_sim::camera::CurveTable;
+    use game_sim::eco::{Trees, Wooded};
+    let dir = private_dir("capture");
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{S100_TREE}.csv"))) else {
+        println!("no {S100_TREE}.csv — S100's journal says how it is recorded");
+        return;
+    };
+    let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{S100_TREE}.csv: {e}"));
+    let at = dir.join(format!("{S100_TREE}.ee.bin"));
+    let Some(st) = SaveState::open_either(&at) else {
+        println!("no {} — the eeMemory.bin of S100's tree.p2m2_SaveState.p2s", at.display());
+        return;
+    };
+    let Some(mut disc) = Disc::open() else { return };
+    let track = "Tracks\\free09.res";
+    let Some(area) = Area::all_of(&mut disc, track).into_iter().next() else {
+        println!("no {track} on this disc");
+        return;
+    };
+    let (props, _) = area.props(&mut disc);
+    let terrain = Terrain::parse(&area.terrain).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &area.scene.terrain);
+    let bytes = disc.member(track).expect("free09's archive");
+    let res = Res::parse(&bytes).expect("free09's archive");
+    let esb = by_suffix(&res, "free09.esb").and_then(|e| res.read(&bytes, e).ok()).expect("free09's ecosystem");
+    let (trees, missed) = Trees::on_ground(&esb, &ground, &CurveTable::build()).expect("free09's ecosystem");
+    assert!(missed.is_empty(), "free09's trunks the port lacks: {missed:?}");
+    let mut world = Wooded { world: Place { ground, props }, trees };
+    let tables = Arc::new(RiderTables::build());
+    let phy = the_bike_named(&mut disc, &tables, FREERIDE_PHY).expect("race125p.phy");
+    let mounts = the_wheels_of(&mut disc, FREERIDE_MODEL).expect("the 125's wheels");
+    let col = the_bike_col(&mut disc).expect("the bike's collision files");
+
+    let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+    let cap = dense_run(&whole, saved);
+    let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{S100_TREE}.csv: {e}"));
+    let rows = rows_by_counter(&cap);
+    // The recorder polls the pad two frames back; the first two rows' are the tape's first, idle
+    // frame (the tape holds Cross from its second row, S100).
+    let pad_of = |counter: u64| rows.get(&counter).map(|&r| tape.frames[r.saturating_sub(2)]);
+    let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    rider.carries_bike_col(Arc::new(col));
+    let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+    st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+    let want = first_wreck(&cap, saved).expect("the original wrecks");
+    let lane = |r: usize, n: &str| -> [f32; 3] {
+        ["x", "y", "z"].map(|l| cell(&cap, r, column(&cap, &format!("{n}.{l}")).unwrap()).parse::<f32>().unwrap())
+    };
+    println!("from the state at frame {saved}: the original wrecks at {}, reason {}", want.0, want.1);
+    let mut got = None;
+    for counter in saved + 1..=saved + S100_TICKS {
+        let Some(pad) = pad_of(counter) else {
+            println!("  {counter}: no row in the capture");
+            break;
+        };
+        sim.frame(pad.dt(), &pad.reports, &mut world);
+        let ride = &sim.rider.ride;
+        let (c, v, g) = (ride.chassis.cofg_world, ride.chassis.vel, ride.mv.g_peak);
+        if counter + 8 >= want.0 && counter <= want.0 + 2 {
+            if let Some(&r) = rows.get(&counter) {
+                let (oc, ov, og) = (lane(r, "ch_cofg"), lane(r, "ch_vel"), lane(r, "g_peak"));
+                println!("  {counter} orig cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2}",
+                         oc[0], oc[1], oc[2], ov[0], ov[1], ov[2], og[0], og[1], og[2]);
+            }
+            println!("  {counter} port cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2}{}",
+                     c.x(), c.y(), c.z(), v.x(), v.y(), v.z(), g.x(), g.y(), g.z(),
+                     sim.rider.state.wreck.map_or(String::new(), |w| format!("  wreck {}", w.0)));
+        } else if counter % 10 == 0 {
+            if let Some(&r) = rows.get(&counter) {
+                println!("  {counter} speed: original {:.2}, port {:.2}", lane(r, "ch_vel")[2], v.z());
+            }
+        }
+        if got.is_none() && let Some(w) = sim.rider.state.wreck {
+            got = Some((counter, w.0, g, c));
+        }
+    }
+    println!("the port {}", got.map_or("rides it out".to_string(), |(c, r, g, _)| format!("wrecks at {c}, reason {r}, g_peak {g:?}")));
+    let (gc, gr, g, c) = got.expect("the port wrecks on the trunk");
+    let off = |x: f32, z: f32| ((x - S100_TRUNK[0]).powi(2) + (z - S100_TRUNK[1]).powi(2)).sqrt();
+    let theirs = lane(rows[&want.0], "ch_cofg");
+    println!("at the wreck the centre of mass is {:.2} ft off the trunk's axis, the original's {:.2}", off(c.x(), c.z()), off(theirs[0], theirs[2]));
+    assert_eq!(gr, want.1, "over the bars, as the original");
+    assert!(g.z() < -phy.air.front_wreck_speed_limit.0, "on the fore-aft impact load, past the 125's front limit");
+    assert!((2.5..5.0).contains(&off(c.x(), c.z())), "against the trunk, nose first");
+    assert_eq!(want.0.checked_sub(gc), Some(S100_EARLY), "the port's wreck, the original's at {}, comes S100_EARLY ticks before it (P154)", want.0);
+}

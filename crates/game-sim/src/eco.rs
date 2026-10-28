@@ -30,8 +30,10 @@
 //! Which searches see the trunks is the part that is the original's own and not this module's: the
 //! bike's eleven body rays search placed groups, its swept-sphere probe does not, and the put-back
 //! never sweeps a group but refuses any spot within twenty feet of one ([`Trees::crowded`], S75's
-//! rule). The port has no body rays (S86/S87), so [`World::groups`] answers its own frame probes and
-//! the head ray: see the S97 journal. The biplane's and the wreck bike's ray probes search them
+//! rule). A bike carrying its collision files searches them with its body rays through
+//! [`World::wooded`] (S138, `rider_contact::scenery`), and the resolve of what they find loads the
+//! impact a head-on trunk wrecks the rider on, as the original's does (S126); one without them falls
+//! back on [`World::groups`] for its own frame probes and the head ray (the S97 journal). The biplane's and the wreck bike's ray probes search them
 //! through their nearby lists as the original's do, the plants placed groups in the world's tree
 //! ([`World::wooded`], [`crate::flight_search::Scene::wooded`], S102); the camera never asks the
 //! world for anything but the terrain.
