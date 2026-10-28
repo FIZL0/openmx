@@ -413,8 +413,9 @@ fn the_train_moves_every_frame_drawn_and_stays_coupled() {
 }
 
 /// The simulation's cars (S81) off the disc, against the original's in S89's s89-along save state on
-/// free06: every one of the state's 21 path cars has a car of the port's with its path's keys (time,
-/// arc length and point) and its four numbers bit for bit, and a collision mesh.
+/// free06: every one of the state's 21 path cars and its two `HasPhysics` trucks (S127) has a car of
+/// the port's with its path's keys (time, arc length and point) and its four numbers bit for bit, and
+/// a collision mesh; and the port has no other.
 #[test]
 fn the_simulations_cars_are_the_originals_paths() {
     use ps2_oracle::{Ee, Kit, addr, skip};
@@ -437,10 +438,14 @@ fn the_simulations_cars_are_the_originals_paths() {
         None => (p, v3(0.0, 1.0, 0.0)),
     };
     let sim = toy::Traffic::load(&archives, "free06", &mut on_ground).sim(&archives);
-    // The state's cars: the path car's vtable, eight bytes in.
-    let vtable = addr("path_car_vtable").unwrap();
-    let cars: Vec<u32> = (0..32u32 << 20).step_by(4).filter(|&a| ee.u32_at(a) == vtable).map(|a| a - 8).collect();
+    // The state's cars: the path car's vtable or its physics subclass's, eight bytes in.
+    let of = |vtable: u32| -> Vec<u32> { (0..32u32 << 20).step_by(4).filter(|&a| ee.u32_at(a) == vtable).map(|a| a - 8).collect() };
+    let mut cars = of(addr("path_car_vtable").unwrap());
     assert_eq!(cars.len(), 21, "the state's path cars");
+    let trucks = of(addr("physics_car_vtable").unwrap());
+    assert_eq!(trucks.len(), 2, "the state's physics cars");
+    cars.extend(trucks);
+    assert_eq!(sim.specs.len(), cars.len(), "the port's cars against the state's");
     for car in cars {
         let path = ee.u32_at(car + 0x430);
         let (n, keys) = (ee.u32_at(path), ee.u32_at(path + 0x8));

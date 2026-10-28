@@ -5372,6 +5372,46 @@ path_car_measure      boot 0x00115330 each segment's arc: ten chords of the curv
 path_car_lag          boot 0x00116150 the clip time LagDistance of arc behind s (walks keys back, wraps)
 path_car_curve        boot 0x00116410 Hermite on the cursor's segment, Catmull-Rom tangents (chord at ends)
 path_car_vtable       boot 0x0044d370 the path car's vtable, at +8 of the car (scan a RAM image for it to find the cars)
+# S127 — the HasPhysics cars (journal 2026-10-27-s127-physics-cars; tests crates/game-sim/tests/physics_cars.rs).
+#   The .toy's car reader reads [Cars] NumberOfCars and Car1..CarN only (free06's [Car24] is never read,
+#   so free06 has two: Car22 ctruck_03, Car23 ctruck_02; free09 none). Keys and defaults: TimeScale 1,
+#   HeadingFilter 0.5, NormalFilter 0.2, LagDistance 0, PathIsLevel 0, SteerFrontTires 1,
+#   DriveOnSoultree 1, CollidesWithOthers 1, PresampleTerrain 0, HasPhysics 0, UseBackfaceCull 0,
+#   LightingType. StopAnimationWithPhysics is not a key the reader asks for: the init's last stack
+#   argument (car +0x590, "stop the clock while physical") is a literal 0.
+#   HasPhysics 0: a 0x580-byte path car into the scene's update list. 1: a 0x6a0-byte subclass into
+#   the toy world's list (reader +0xc -> +0x3c). Subclass fields: +0x580/+0x584 two interfaces
+#   (struck listener, world-node listener), +0x588 physical, +0x58c physical last update, +0x590 the
+#   stop flag, +0x594 the .pco path ("%s%s.pco", "", model name without extension, so
+#   "Tracks\Free06\ctruck.pco" in s89-along), +0x698 a physics object (physics_object_ctor, 0x1e0).
+#   The physics object (vt +0x38 0x0044e760): +0x110 its body (+0 enabled), +0x124 the m.col ray probe,
+#   +0x128 the f.col mesh, +0x130 = +0x124, +0x134 the world node (0x0060b200 in s89-along), +0x13c the
+#   car's model node, +0x1bc the reset countdown (-1), +0x1c0 ResetTime (10 from the .pco).
+physics_car_ctor      boot 0x003e3570 the path car ctor, then the subclass's vtables and fields
+physics_car_vtable    boot 0x0045f070 the subclass's vtable: the path car's but for +0x8, +0x38 update, +0x6c,
+#                                    +0xf8 init; shares vt+0xb4..+0xc0 (velocity, spin) with the path car
+physics_car_init      boot 0x003e3680 vt+0xf8: the path car's init (0x001147c0) with the same arguments, then
+#                                    the physics object, the .pco read (physics_car_read_pco), body off,
+#                                    the struck listener (+0x580) on the car's mesh (+0x428) and on the
+#                                    object's ray probe, and the ignore pairs between the car's
+#                                    collidables (+0x424, +0x428, +0x42c) and the object's (0x0011ade0)
+physics_car_read_pco  boot 0x003e3920 opens +0x594 and hands it to the physics object's vt+0xe8 (the .phy reader)
+physics_car_update    boot 0x003e3990 vt+0x38 (f12 dt, a0 car): with +0x588 0, path_car_update and, when
+#                                    +0x58c, +0x2e0 = +0x2a0. With +0x588 1: the path clock goes on
+#                                    (fmodf, twice, unless +0x590 or no path), the probe's search
+#                                    gathered when the body is off and +0x130 set, then the kinematic
+#                                    update (0x001dd9b0). +0x58c = +0x588
+physics_car_wake      boot 0x003e3b00 (car) struck: unless +0x588, body on (vt+0x11c), +0x588 = 1, the car's
+#                                    meshes +0x428/+0x42c stood down (their +0x10 interface vt+0x18),
+#                                    body placed off the model node, velocity +0x70 = vt+0xb8, rates
+#                                    +0x1b0 = vt+0xbc, +0x584 onto the world node's listeners (0x0026f7d0)
+physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: body on -> when vt+0x118
+#                                    (at rest) holds, body off, countdown = ResetTime; body off and the
+#                                    countdown > 0 -> it runs down; at <= 0 the body is put away
+#                                    (vt+0x120), +0x588 = 0, the meshes stood up (vt+0x20), answers 1
+#   Interface thunks: +0x580 vt+8 0x003e3dd0 (-> vt+0xfc -> wake), vt+0xc 0x003e3dc0 (wake): the
+#   listener calls a search makes on what it struck (collide_against_search). +0x584 vt+8 0x003e3de0.
+toy_cars_read         boot 0x00289710 the .toy's [Cars] reader (above)
 # S136 — a wheel standing on a path car rides with it: crates/game-sim/src/traffic.rs (Moving) and
 # ride.rs (wheel_contact_velocity, under), proved in crates/game-sim/tests/traffic.rs on s89-along.
 #   path_car_update copies the node's world matrix (node+0x80..0xbc) to car+0x2e0..0x31c (rows x, y, z,

@@ -5,9 +5,10 @@
 //! flares, the terrain's sound zones, a physics collection or two. This module reads the cars, and
 //! of those only the ones the original drives along a clip. That is free06's train (thirteen cars on
 //! `train_spline.mot`), its four dump trucks and two scrapers, free09's trailers, and the rest of the
-//! freeride tracks' trucks: everything with `HasPhysics` off. A car with it on is another class in
-//! the original, a vehicle with a body of its own, and [`Car::has_physics`] is only read so that a
-//! caller can leave those out.
+//! freeride tracks' trucks. A car with `HasPhysics` on (free06's two company trucks, free07's ranger
+//! and water trucks, free10's and free11's) is a subclass in the original that carries a rigid body
+//! for when it is struck; until then its update is the path car's own, so it is driven here like
+//! the rest (S127).
 //!
 //! **The section.** `[Cars] NumberOfCars = n`, then `[Car1]` … `[Carn]`; a `[Car24]` past the count
 //! (free06 has one, naming a clip the disc does not carry) is never read. The keys and their defaults
@@ -68,7 +69,8 @@ pub struct Car {
     pub presample: bool,
     /// `DriveOnSoultree`. Off for every car on the disc; the ground ray it asks for is not ported.
     pub drive_on_soultree: bool,
-    /// `HasPhysics`: another class altogether, a vehicle with a body. Not drawn by this module.
+    /// `HasPhysics`: the path car's subclass with a rigid body of its own, which wakes when something
+    /// strikes the car (S127). Driven along its clip like any other until then.
     pub has_physics: bool,
     /// `SteerFrontTires` (on where it is missing): the first two wheels turn into the bends ([`Wheels`]).
     pub steer_front: bool,
@@ -417,8 +419,7 @@ pub fn upright(pos: V3, forward: V3, up: V3) -> M4 {
 #[derive(Clone, Debug, Default)]
 pub struct Traffic {
     pub cars: Vec<(Car, Path)>,
-    /// The cars left out, each with why: the ones with a body of their own, and any whose clip is
-    /// missing or has no `Body`.
+    /// The cars left out, each with why: any whose clip is missing or has no `Body`.
     pub skipped: Vec<String>,
 }
 
@@ -431,10 +432,6 @@ impl Traffic {
         let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
         let Some(text) = read(&format!("{track}.toy")) else { return traffic };
         for car in cars(&ini::text(&text)) {
-            if car.has_physics {
-                traffic.skipped.push(format!("{}: HasPhysics", car.model));
-                continue;
-            }
             let clip = read(&car.mot).ok_or_else(|| "no such member".to_string()).and_then(|b| skin::Clip::parse(&b));
             match clip.map(|c| Path::from_clip(&c)) {
                 Ok(Some(mut path)) => {
