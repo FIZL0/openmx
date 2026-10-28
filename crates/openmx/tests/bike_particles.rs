@@ -356,3 +356,66 @@ fn the_riding_feet_raise_foot_dust() {
     assert_eq!(dust(vec![ConstraintFrame::default(), ConstraintFrame::default(), foot], false), 0, "collision 2 is past the mask");
     assert_eq!(dust(vec![foot], true), 0, "Foot Dust is off in a wreck");
 }
+
+/// P156: **the wreck bike's dust comes off its contacts' velocity**, as the plane's does (P63). The
+/// disc's wreck bike (`wreckbike.phy`) thrown spinning onto flat ground as `game-sim`'s
+/// `wreck_bike.rs` runs it, the frame fed as the shell's `bike_fx_frame` feeds it (the body's
+/// velocity, and `PlaneFrame::touch` with the collision object's relative velocity at its last
+/// resolved contact), stepped through free09's `Vehicle Dust` and `Vehicle Chunks`: nothing before the
+/// bike first touches, and every puff from then on starts within the emitter's extent and a frame's
+/// path along the contact's velocity of a contact of that frame. The spin makes the contact's velocity
+/// part from the body's, so the frame's points are the collision object's and not the body's.
+#[test]
+fn the_wreck_bike_puffs_off_its_contacts_velocity() {
+    use game_sim::wreck_bike::{NoObjects, WreckBike};
+    use ps2_float::{F, Vf};
+    let Some(mut fx) = disc_fx() else { return };
+    fx.entries.retain(|e| e.kind == Kind::CollisionModel);
+    assert_eq!(fx.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Vehicle Dust", "Vehicle Chunks"]);
+    let mut disc = Disc::open_configured().expect("the disc opened for disc_fx");
+    let names = disc.entries().iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+    let phy = names
+        .iter()
+        .filter(|n| n.to_ascii_lowercase().contains(TRACK) && n.to_ascii_lowercase().ends_with(".res"))
+        .find_map(|n| disc.res(n).ok()?.read_suffix("\\wreckbike.phy").ok())
+        .expect("wreckbike.phy in a free09 archive");
+    let part = game_sim::phy::Part::read_bytes(&phy, "PhysicsPart1");
+
+    const DT: f32 = 1.0 / 30.0;
+    let mut bike = WreckBike::new(&part, game_sim::ride::WRECK_INERTIA, Vf::new(0.0, 4.0, 0.0, 1.0), Vf::new(0.0, 0.0, 0.0, 1.0));
+    bike.body.velocity = Vf::new(25.0, -15.0, 10.0, 1.0);
+    bike.body.rates = Vf::new(6.0, 2.0, -4.0, 1.0);
+    let ground = game_sim::world::Flat::default();
+    let (mut touched, mut puffed, mut parted) = (None, None, 0.0f32);
+    for tick in 0..90 {
+        bike.tick(F(DT), Some(&ground), &mut NoObjects);
+        let body = v3(bike.body.velocity.x(), bike.body.velocity.y(), bike.body.velocity.z());
+        let mut frame = PlaneFrame { wrecked: true, vel: body, ..PlaneFrame::default() };
+        frame.touch(&bike.record, bike.collider.relative);
+        // The flat ground has no surfaces, and its contacts' 0 is the road, which free09's zones keep
+        // dust off: the dirt's 13, as the riding feet's test stands on.
+        assert!(frame.ground_zones.iter().all(|&z| z == 0));
+        frame.ground_zones.fill(13);
+        let before = fx.particles.iter().filter(|p| p.age + DT * 1000.0 <= p.life).count();
+        fx.step(&frame, DT);
+        if bike.record.on_ground {
+            touched.get_or_insert(tick);
+            parted = parted.max(frame.contact_vel.unwrap().sub(body).len());
+        }
+        if fx.particles.len() > before {
+            puffed.get_or_insert(tick);
+            let reach = frame.contact_vel.unwrap().len() * DT + 2.0;
+            for p in &fx.particles[before..] {
+                let near = frame.ground_contacts.iter().map(|c| c.sub(p.at).len()).fold(f32::MAX, f32::min);
+                assert!(near <= reach, "tick {tick}: a puff {near} ft from every contact (reach {reach})");
+            }
+        }
+        if touched.is_none() {
+            assert!(fx.particles.is_empty(), "tick {tick}: dust before the bike touched");
+        }
+    }
+    eprintln!("touched {touched:?}, first puff {puffed:?}, contact velocity off the body's by up to {parted} ft/s, {} in the air", fx.particles.len());
+    let touched = touched.expect("the collision object never found the ground");
+    assert!(puffed.is_some_and(|p| p > touched), "no dust after the bike touched");
+    assert!(parted > 1.0, "the contact's velocity never parted from the body's");
+}
