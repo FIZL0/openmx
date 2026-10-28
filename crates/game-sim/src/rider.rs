@@ -716,6 +716,9 @@ impl Rider {
         let mut in_ground = Vec::new();
         // And what they found on the scenery (S157): a 50cc bike's shoulder rays reach the hit clause.
         let mut on_scenery = Vec::new();
+        // Whether the body rays searched the world's props and plants this tick (S152): then the head
+        // ray's sweep through them at the frame's end is not the wreck test's stand-in any more.
+        let mut searched = false;
         if state.wreck.is_none() {
             // The body rays against the world's props (S138), from where the last tick left the bike,
             // as its collision object searches them before the bikes are updated: what they touch goes
@@ -732,6 +735,7 @@ impl Rider {
                 None => (None, Vec::new()),
             };
             on_scenery = found.as_deref().map_or_else(Vec::new, crate::mover_contact::wreck_contacts);
+            searched = found.is_some();
             let scenery = Some(found.as_ref().is_some_and(|f| !f.is_empty()) || !ground.is_empty());
             let mut alone = None;
             let bump = match (bump, found) {
@@ -937,15 +941,21 @@ impl Rider {
             None => crash.as_ref().is_some_and(Crash::settles),
         };
         // The wreck test's last clause reads the collision record's contact list: what the bike's
-        // body rays hit. The port's is its head ray, swept at the frame's end (`ride::hits`). The
-        // chassis' mass is not held, only its reciprocal; it is read only for an actor, and the
+        // body rays hit — theirs where they searched the props (S138), else the port's head ray,
+        // swept at the frame's end (`ride::hits`). The chassis' mass is not held, only its reciprocal; it is read only for an actor, and the
         // port's world has none.
         // A ghost's head ray sweeps the world alone: its body ignores the vehicle class (S63).
         let rivals = if ghost.on { &[][..] } else { rivals };
         // The ground's entries are the list's first (P147), the rider's head among them.
         let mut hits = in_ground;
         if state.wreck.is_none() {
-            hits.extend(ride::hits_among(ride, world, rivals));
+            // Where the body rays searched the props (S138) their entries are the list's; the head
+            // ray is swept against the other riders alone (S152). Elsewhere it stands in for them.
+            if searched {
+                hits.extend(ride::hits_riders(ride, rivals));
+            } else {
+                hits.extend(ride::hits_among(ride, world, rivals));
+            }
             hits.extend(cars);
             hits.extend(on_scenery);
         }

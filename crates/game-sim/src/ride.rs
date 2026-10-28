@@ -2631,6 +2631,26 @@ pub fn hits_among(ride: &Ride, world: &mut dyn World, rivals: &[Rival]) -> Vec<a
     best.map(|(_, other)| vec![air::Contact { mirrored: false, reach, other }]).unwrap_or_default()
 }
 
+/// [`hits_among`] with the world left out (S152): the head ray against the riders in `rivals` alone,
+/// the nearest kept. For a bike whose body rays searched the world's props and plants this tick
+/// ([`crate::rider_contact::scenery`]): what they struck is already on its list, the head ray's own
+/// entry among them, so sweeping the head ray through the same props again would list it twice and
+/// from the frame's end rather than from where the search looked.
+pub fn hits_riders(ride: &Ride, rivals: &[Rival]) -> Vec<air::Contact> {
+    let m = ride.transform();
+    let from = math::transform_point(&m, air::HEAD.0);
+    let to = math::transform_point(&m, air::HEAD.1);
+    let reach = F(air::HEAD.1.y());
+    let mut best: Option<(F, air::Other)> = None;
+    for r in rivals {
+        let Some(t) = enters(from, to, r.centre, r.radius) else { continue };
+        if best.is_none_or(|(near, _)| t < near) {
+            best = Some((t, air::Other::Rider { height: r.height, vel: r.vel }));
+        }
+    }
+    best.map(|(_, other)| vec![air::Contact { mirrored: false, reach, other }]).unwrap_or_default()
+}
+
 // --- the state hash ---------------------------------------------------------------------------------
 
 /// **Every word of the ride, in declaration order.**
