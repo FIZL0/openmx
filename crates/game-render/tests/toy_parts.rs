@@ -17,7 +17,7 @@
 use game_render::animated_toy::Animated;
 use game_render::disc::{Disc, Res};
 use game_sim::math::Mat4;
-use game_sim::toys::{Clock, Hint, Motion, RotKeys, Toys};
+use game_sim::toys::{Bodies, Clock, Hint, Motion, RotKeys, Toys};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
 
@@ -52,6 +52,8 @@ mod at {
     pub const VTABLE: u32 = 0x8;
     pub const BODY_NODE: u32 = 0x254;
     pub const BODY_NOW: u32 = 0x2a0;
+    /// The matrix it had before its last update (S167).
+    pub const BODY_BEFORE: u32 = 0x2e0;
     /// The clip.
     pub const POSITIONS: u32 = 0x18;
     pub const ROTATIONS: u32 = 0x1c;
@@ -259,6 +261,11 @@ fn parts_ride_their_nodes(track: &str, state: &str, toys_want: usize, parts_want
             prev: F(ee.f32_at(m.model + at::PREV)),
             finished: ee.u32_at(m.model + at::FINISHED) != 0,
         };
+        // How many updates the toy's bodies have had (S167): an identity matrix has not had one yet.
+        let identity = bits(&Mat4::IDENTITY);
+        sim.bodies[k] = Bodies(m.bodies.first().map_or(2, |&b| {
+            u8::from(mat(&ee, b + at::BODY_NOW) != identity) + u8::from(mat(&ee, b + at::BODY_BEFORE) != identity)
+        }));
     }
     // The scene's step and its reciprocal: the body's virtuals read the original's, the port makes
     // its own with one division.
