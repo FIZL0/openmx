@@ -70,10 +70,13 @@ pub const SCENERY: u32 = 0x220;
 /// A scenery mesh's flag byte: struck, and gathered only within the search's bound.
 const SCENERY_FLAGS: u8 = flags::ENABLED | more_flags::WITHIN_BOUND;
 
-/// A toy's category (`+0x84`) and flag byte (S141): the path cars' mesh collidables, which the plane's
-/// world holds in its moving list ahead of the probes, gathered wherever their spheres are, in the
-/// order the track built them (biplane.p2m2's state: its first 21 slots are the path cars, each with
-/// its car as a mover of kind 2, then the two driving toys; flags 0x05 but for a search's marks).
+/// A toy's category (`+0x84`) and flag byte (S141): the `.toy`'s cars' mesh collidables, which the
+/// plane's world holds in its moving list ahead of the probes, gathered wherever their spheres are, in
+/// the order the track built them (biplane.p2m2's state: its first 23 slots are free06's `Car1` to
+/// `Car23`, each with its car as a mover of kind 2; flags 0x05 but for a search's marks). The
+/// `HasPhysics` cars are toys like the path cars, in their `.toy` place among them (S172): the
+/// subclass's init is the path car's first, which adds the mesh to the world as the reader reads it.
+/// What they are once struck, a body of their own, is not here (S186).
 pub const TOY: u32 = 0x48;
 const TOY_FLAGS: u8 = flags::ENABLED | flags::NO_GROUPS;
 
@@ -320,7 +323,7 @@ pub fn world_among(
     world_of(props, bikes, field, centre, radius, false)
 }
 
-/// [`world_among`], and with `toys` the props that move ([`Prop::moving`], the path cars) are toys
+/// [`world_among`], and with `toys` the props that move ([`Prop::moving`], the `.toy`'s cars) are toys
 /// ([`TOY`]): in the moving list ahead of the probes rather than in the tree, as the plane's world
 /// holds them (S141). Without, every prop is scenery, as the worlds the port has not yet told about
 /// the cars (the wreck bike's, the put-back query's) still hold them.

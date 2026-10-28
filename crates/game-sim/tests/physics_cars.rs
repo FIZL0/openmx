@@ -351,8 +351,9 @@ fn the_planes_world_lists_the_trucks_after_the_path_cars() {
     let toy = toy_cars(&parts);
     let cars: Vec<u32> = slots.iter().copied().take_while(|&o| kind(o) == path || kind(o) == physics).collect();
     assert_eq!(cars.len(), toy.len(), "the moving list's car slots against the .toy's {} cars", toy.len());
-    // The original: path cars first in the .toy's order, then the physics cars in theirs.
-    let order: Vec<(String, bool)> = toy.iter().filter(|c| !c.1).chain(toy.iter().filter(|c| c.1)).cloned().collect();
+    // The original: the .toy's order, path cars and physics cars alike (each car's init adds its mesh
+    // to the world as the reader reads it, S172).
+    let order: Vec<(String, bool)> = toy.clone();
     for (k, &o) in cars.iter().enumerate() {
         let car = ee.u32_at(o + col_at::MOVER);
         assert_eq!(name(&ee, car), order[k].0, "slot {k}: the model");
@@ -390,5 +391,98 @@ fn the_planes_world_lists_the_trucks_after_the_path_cars() {
         assert_eq!(ours.category, TOY, "truck {k}: the category");
         assert_eq!(ee.u8_at(o + col_at::FLAGS) & !MARKS, ours.flags, "truck {k}: the flags");
         assert_eq!(ee.f32_at(o + col_at::RADIUS).to_bits(), ours.radius.0.to_bits(), "truck {k}: the radius");
+    }
+}
+
+/// **The plane's world holds all 23 of free06's toys as the original's does** (S172). S141 named
+/// biplane.p2m2's slots 21..22 "two driving toys": they are this file's two `HasPhysics` trucks
+/// (`ctruck.psg`, the subclass's vtable), so the toys and the trucks are one thing.
+///
+/// The state's moving list opens with exactly the `.toy`'s `Car1..Car<NumberOfCars>`, slot for car,
+/// path cars and trucks alike: the reader inits each car as it reads it, and the path car's init (the
+/// subclass's runs it first) adds the car's mesh to the world there and then, so the `.toy`'s order is
+/// the list's whatever the class. Each is of category 0x48 with the car as its mover and no collision
+/// object, and the plane's own collidable follows the last.
+///
+/// The port's: the state's 23 cars, their meshes off the disc, attached in that order and stepped
+/// one tick beside the original's own updates (each through its vtable, path car or subclass);
+/// [`game_sim::flight_search::world_flown`] then lists the 23 ahead of the two probes, each with the
+/// state's category, flags (marks masked) and radius, and placed at the state's centre (`+0x40`),
+/// bit for bit.
+#[test]
+fn the_planes_world_holds_every_toy_as_the_originals_does() {
+    use game_sim::broad_phase::Structure;
+    use game_sim::flight_search::{self, FIRST, RAY, SWEEP, TOY};
+    let Some(mut ee) = ram(PLANE_STATE) else { return };
+    let Some(parts) = archives() else { return };
+    let ray = ee.u32_at(ee.u32_at(PLANE + PLANE_COLLISION) + RAY_PROBE);
+    let list = ee.u32_at(ee.u32_at(ee.u32_at(ray + col_at::SPACE) + col_at::TABLE) + col_at::MOVING);
+    let block = ee.u32_at(ee.u32_at(list + col_at::LIST_BLOCKS));
+    let last = ee.i32_at(list + col_at::LIST_LAST) as u32;
+    let slots: Vec<u32> = (0..last).map(|k| ee.u32_at(block + 4 * k)).collect();
+    let (physics, path) = (addr("physics_car_vtable").unwrap(), addr("path_car_vtable").unwrap());
+    let class = |o: u32| {
+        let m = ee.u32_at(o + col_at::MOVER);
+        if o & 2 != 0 || m == 0 { 0 } else { ee.u32_at(m + at::VTABLE) }
+    };
+    let toy = toy_cars(&parts);
+    assert_eq!(toy.len(), 23, "free06's NumberOfCars");
+    let slotted: Vec<u32> = slots.iter().copied().take_while(|&o| class(o) == path || class(o) == physics).collect();
+    assert_eq!(slotted.len(), toy.len(), "the moving list's car slots against the .toy's cars");
+    let next = slots[toy.len()];
+    assert_ne!(ee.u32_at(next + col_at::OWNER), 0, "after the cars: the plane's own collidable");
+    for (k, &o) in slotted.iter().enumerate() {
+        let car = ee.u32_at(o + col_at::MOVER);
+        assert_eq!(name(&ee, car), toy[k].0, "slot {k}: the .toy's Car{}", k + 1);
+        assert_eq!(class(o) == physics, toy[k].1, "slot {k}: HasPhysics");
+        assert_eq!(ee.u32_at(car + at::MESH), o, "slot {k}: the car's own mesh");
+        assert_eq!(ee.u32_at(o + col_at::CATEGORY), TOY, "slot {k}: the category");
+        assert_eq!(ee.u32_at(o + col_at::OWNER), 0, "slot {k}: no collision object");
+    }
+    let cars: Vec<u32> = slotted.iter().map(|&o| ee.u32_at(o + col_at::MOVER)).collect();
+    assert_eq!(cars.iter().filter(|&&c| ee.u32_at(c + at::VTABLE) == physics).count(), 2, "the two driving toys are the trucks");
+
+    // The port's cars, the state's, in the list's order, stepped one tick beside the original's.
+    let scn = member(&parts, "free06.scn").expect("free06.scn");
+    let scene = Scene::parse(&scn).expect("free06's scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_bytes = member(&parts, &leaf).expect("free06's terrain");
+    let terrain = Terrain::parse(&terrain_bytes).expect("free06's terrain");
+    let mut world = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let specs: Vec<Spec> = cars
+        .iter()
+        .map(|&car| {
+            let col = name(&ee, car).to_ascii_lowercase().replace(".psg", ".col");
+            let mesh = member(&parts, &col).map(|b| Mesh::parse(&b).unwrap_or_else(|e| panic!("{col}: {e}")));
+            assert!(mesh.is_some(), "no {col} in free06's archives");
+            spec_of(&ee, car, mesh)
+        })
+        .collect();
+    let mut traffic = Traffic::new(specs);
+    traffic.cars = cars.iter().map(|&car| car_of(&ee, car)).collect();
+    traffic.attach(&mut world.props);
+    let first = traffic.first.expect("attached");
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    ee.set_f32(app + at::INV_DT, (F::ONE / DT).0);
+    ee.set_f32(app + at::DT, DT.0);
+    for &car in &cars {
+        let update = ee.u32_at(ee.u32_at(car + at::VTABLE) + at::UPDATE_SLOT);
+        ee.call(update, &[u64::from(car)], &[DT.0], BUDGET);
+    }
+    traffic.frame(DT, &mut world);
+
+    let (flown, objects) = flight_search::world_flown(&world.props.props, None, None, None, Vf::new(0.0, 0.0, 0.0, 1.0), F::ZERO);
+    let Structure::List(moving) = &flown.structures[1] else { panic!("the moving list") };
+    let listed: Vec<usize> = moving.blocks.as_ref().expect("a block")[0].iter().take(moving.last as usize).map(|o| o.expect("a slot")).collect();
+    let toys: Vec<usize> = (0..cars.len()).map(|k| FIRST + first + k).collect();
+    assert_eq!(listed, [&toys[..], &[RAY, SWEEP]].concat(), "the port's moving list: the 23 cars, then the probes");
+    for (k, &o) in slotted.iter().enumerate() {
+        let what = format!("slot {k} ({})", toy[k].0);
+        let ours = &objects[FIRST + first + k];
+        assert_eq!(ours.category, ee.u32_at(o + col_at::CATEGORY), "{what}: the category");
+        assert_eq!(ours.flags, ee.u8_at(o + col_at::FLAGS) & !MARKS, "{what}: the flags");
+        assert_eq!(ours.radius.0.to_bits(), ee.u32_at(o + col_at::RADIUS), "{what}: the radius");
+        let centre = flown.places[FIRST + first + k].centre.map(|c| c.0.to_bits());
+        assert_eq!(centre[..3], bits(vf(&ee, o + at::CENTRE))[..3], "{what}: the centre");
     }
 }
