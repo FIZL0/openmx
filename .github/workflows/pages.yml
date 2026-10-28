@@ -97,7 +97,9 @@ jobs:
           gh release create beta --prerelease --latest=false --target "$GITHUB_SHA" --title "Beta (${GITHUB_SHA::7})" \
             --notes-file notes.md openmx-linux-x86_64.tar.gz web.tar.gz
           if [ -n "$DISPATCH" ]; then
-            GH_TOKEN=$DISPATCH gh api repos/FIZL0/openmx-beta/dispatches -f event_type=beta
+            # a bad or expired token only costs the instant deploy: the beta release is already up
+            GH_TOKEN=$DISPATCH gh api repos/FIZL0/openmx-beta/dispatches -f event_type=beta ||
+              echo "::warning::BETA_DISPATCH_TOKEN was refused (expired or wrong?): beta.openmx.dev catches up on its own half-hourly check"
           else
             echo "::warning::no BETA_DISPATCH_TOKEN secret: beta.openmx.dev catches up on its own half-hourly check"
           fi
