@@ -6,7 +6,11 @@
 //! 2. **the clips** — every toy, started from the state's (its clock, its clip's hints), advanced by
 //!    the port and by the original's own `motion_advance` in the interpreter for [`TICKS`] ticks, is
 //!    the original's on every tick: the clock, every rotation channel's hint, every joint's local
-//!    matrix and, composed by the original's `transform_rebuild`, every joint's world matrix.
+//!    matrix and, composed by the original's `transform_rebuild`, every joint's world matrix;
+//! 3. **the visibility gate** (V76) — the original's own toy update, run whole in the interpreter on
+//!    each toy with `AnimateWhenNotVisible` on and off, its root node's search stamp moved or not and
+//!    its in-view bit set or not, steps exactly the toys [`Toys::frame`] steps when the shell says a
+//!    toy was drawn (stamp moved and in view), each clock bit for bit.
 
 use std::collections::HashMap;
 
@@ -177,7 +181,7 @@ fn spec_of(ee: &Ee, model: u32, motion: usize, names: u32) -> Spec {
         map: (0..names).map(|i| ee.u8_at(map_at + i)).collect(),
     };
     assert_eq!(ee.u32_at(root + at::PARENT), 0, "the root node {root:#x} has a parent");
-    Spec { motion, rig, place: mat(ee, root + at::LOCAL), start: F::ZERO, mesh: None, parts: Vec::new() }
+    Spec { motion, rig, place: mat(ee, root + at::LOCAL), start: F::ZERO, mesh: None, parts: Vec::new(), unseen: true, search: true }
 }
 
 #[test]
@@ -358,4 +362,99 @@ fn a_toys_collision_parts_carry_their_joints_motion() {
         }
     }
     assert_eq!(spun, 30 * TOYS.len(), "every toy's last joint turns on every tick");
+}
+
+/// The fields the toy update's visibility gate reads (`research/oracle.txt` V76).
+mod gate {
+    /// The toy's `AnimateWhenNotVisible`.
+    pub const UNSEEN: u32 = 0x10c;
+    /// The toy's copy of its root node's search stamp, taken on each step.
+    pub const STAMP: u32 = 0x144;
+    /// The root node's flags byte whose bit 0 is the draw's last frustum test.
+    pub const IN_VIEW: u32 = 0x111;
+}
+
+/// V76: the update's visibility gate. For each toy of the state in turn and each of the eight ways
+/// of its three inputs — `AnimateWhenNotVisible` on or off, its root node's search stamp moved since
+/// the toy's last step or not, the node's in-view bit set or not — the original's whole update
+/// (`animated_toy_update`, dt in `f12`) is run on that toy alone, and the port's [`Toys::frame`]
+/// with that toy's [`Spec::unseen`](game_sim::toys::Spec) set the same and the others' off and
+/// unseen, its [`Toys::seen`] the stamp having moved *and* the bit set. Every toy's clock is the
+/// original's after each: the gated toy's untouched, the stepped one's advanced, bit for bit. A
+/// stepped toy takes its node's stamp, so the frame after one that did not reach it is gated again.
+#[test]
+fn the_visibility_gate_is_the_originals() {
+    let Some(mut ee) = state() else { return };
+    let update = addr("animated_toy_update").unwrap();
+    let mut clips: HashMap<u32, usize> = HashMap::new();
+    let mut motions = Vec::new();
+    let mut channels: Vec<Vec<u32>> = Vec::new();
+    let mut specs = Vec::new();
+    for &toy in &TOYS {
+        let model = ee.u32_at(toy + at::MODEL);
+        let clip = ee.u32_at(ee.u32_at(model + at::HANDLE) + 4);
+        let k = *clips.entry(clip).or_insert_with(|| {
+            let (m, rot) = motion_of(&ee, clip);
+            motions.push(m);
+            channels.push(rot);
+            motions.len() - 1
+        });
+        let m = &motions[k];
+        let names = m.rotation.iter().map(|c| c.name).chain(m.position.iter().map(|c| c.name)).max().map_or(0, |n| n + 1);
+        specs.push(spec_of(&ee, model, k, names));
+        // free09.toy writes it off for all five, and nothing has set it since the load.
+        assert_eq!(ee.u32_at(toy + gate::UNSEEN), 0, "{toy:#x}'s AnimateWhenNotVisible");
+    }
+    let mut toys = Toys::new(motions, specs);
+    toys.hints = channels.iter().flatten().map(|&ch| Hint(ee.u32_at(ch + at::HINT))).collect();
+    let clocks = |ee: &Ee| -> Vec<Clock> {
+        TOYS.iter()
+            .map(|&toy| {
+                let model = ee.u32_at(toy + at::MODEL);
+                Clock { time: f(ee, model + at::TIME), prev: f(ee, model + at::PREV), finished: ee.u32_at(model + at::FINISHED) != 0 }
+            })
+            .collect()
+    };
+    toys.clocks = clocks(&ee);
+    let mut world = Shelf(game_sim::world::Props::default());
+    let (mut stepped, mut gated) = (0, 0);
+    for (k, &toy) in TOYS.iter().enumerate() {
+        let root = ee.u32_at(ee.u32_at(toy + at::MODEL) + at::ROOT);
+        for case in 0..8u32 {
+            let (unseen, moved, in_view) = (case & 1 != 0, case & 2 != 0, case & 4 != 0);
+            let what = format!("toy {k} ({toy:#x}), AnimateWhenNotVisible {unseen}, stamp moved {moved}, in view {in_view}");
+            ee.set_u32(toy + gate::UNSEEN, u32::from(unseen));
+            let stamp = ee.u32_at(root) & 0xffff;
+            ee.write(toy + gate::STAMP, 2, u128::from(if moved { stamp ^ 1 } else { stamp }));
+            let flags = ee.u8_at(root + gate::IN_VIEW) & !1;
+            ee.write(root + gate::IN_VIEW, 1, u128::from(flags | u8::from(in_view)));
+            let was = clocks(&ee);
+            ee.call(update, &[u64::from(toy)], &[DT.0], BUDGET);
+            let now = clocks(&ee);
+
+            let specs = std::sync::Arc::make_mut(&mut toys.specs);
+            for (j, spec) in specs.iter_mut().enumerate() {
+                spec.unseen = j == k && unseen;
+            }
+            toys.seen = (0..TOYS.len()).map(|j| j == k && moved && in_view).collect();
+            toys.frame(DT, &mut world);
+            for (j, (ours, theirs)) in toys.clocks.iter().zip(&now).enumerate() {
+                assert_eq!(
+                    (ours.time.to_bits(), ours.prev.to_bits(), ours.finished),
+                    (theirs.time.to_bits(), theirs.prev.to_bits(), theirs.finished),
+                    "{what}: toy {j}'s clock"
+                );
+            }
+            if now[k] == was[k] {
+                gated += 1;
+                assert!(!unseen && !(moved && in_view), "{what}: the original passed it over");
+            } else {
+                stepped += 1;
+                assert_eq!(ee.u32_at(toy + gate::STAMP) & 0xffff, stamp, "{what}: the step takes the node's stamp");
+            }
+        }
+        // Put the toy back as the state had it.
+        ee.set_u32(toy + gate::UNSEEN, 0);
+    }
+    assert_eq!((stepped, gated), (5 * TOYS.len(), 3 * TOYS.len()), "five of the eight ways step a toy");
 }

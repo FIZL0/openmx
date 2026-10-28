@@ -532,7 +532,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // 11736 since P155: the freestyle event on a ride (`Sim::event`), walked as `event` only once a
     // hold or a competition is on, so the leaves do not move; its zones and target are the map's,
     // not walked.
+    // 11760 since V76: which animated toys the last frame drew (`Toys::seen`), the shell's picture
+    // told to the next tick and never online, not walked: the toys' clocks it holds still are.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11736, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11760, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

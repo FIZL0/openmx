@@ -13,6 +13,9 @@
 //! - `InitialMotion` (`none`): the clip, by the set's name for it.
 //! - `InitialTime` (0): one advance of the clip at load. No toy on the disc writes it.
 //! - `HasCollision`: whether the `.col` is loaded.
+//! - `AnimateWhenNotVisible` (on): off, the toy steps only after a frame that drew it (V76,
+//!   [`game_sim::toys::Toys::seen`]); free09's five toys, nat02's bell and free10's windsock turn it off.
+//! - `UpdateSearch` (on): off, the toy's step leaves its collision parts where they stand.
 //! - `Position` (the origin), `LookVector` (0,0,1) and `UpVector` (0,1,0): the placement, which is
 //!   `mat4_basis` of the three with both of its flags set ([`game_sim::math::basis`]). The reader
 //!   takes `Yaw`, `Pitch` and `Roll` instead when there is a `Yaw`; no animated toy on the disc has
@@ -31,7 +34,8 @@
 
 use crate::anim::Set;
 use crate::disc::Res;
-use crate::mat::M4;
+use crate::mat::{M4, V3, v3};
+use crate::world::Camera;
 use crate::psg::Model;
 use crate::rider::MotionSet;
 use crate::skin::{self, Skeleton};
@@ -55,6 +59,10 @@ pub struct Toy {
     pub start: F,
     /// `HasCollision`.
     pub collision: bool,
+    /// `AnimateWhenNotVisible`.
+    pub unseen: bool,
+    /// `UpdateSearch`.
+    pub search: bool,
     /// The placement: `mat4_basis(Position, LookVector, UpVector, 1, 1)`.
     pub place: Mat4,
 }
@@ -90,6 +98,8 @@ fn toy(s: &Section) -> Toy {
         motion: text("InitialMotion", "none"),
         start: s.float_or("InitialTime", F::ZERO),
         collision: s.flag("HasCollision", false),
+        unseen: s.flag("AnimateWhenNotVisible", true),
+        search: s.flag("UpdateSearch", true),
         place: math::basis(pos, look, up, true, true),
     }
 }
@@ -226,7 +236,7 @@ impl Animated {
                 continue;
             };
             let (mesh, parts) = if toy.collision { collision(archives, toy, &set.skeleton) } else { (None, Vec::new()) };
-            specs.push(Spec { motion: *motion, rig: rig(&set.skeleton, joints), place: toy.place, start: toy.start, mesh, parts });
+            specs.push(Spec { motion: *motion, rig: rig(&set.skeleton, joints), place: toy.place, start: toy.start, mesh, parts, unseen: toy.unseen, search: toy.search });
             out.models.push(set.geometry.clone());
             out.names.push(toy.name.clone());
             out.bones.push(set.skeleton.bones.iter().map(|b| b.name.clone()).collect());
@@ -337,6 +347,37 @@ pub fn place(sim: &Toys, k: usize) -> M4 {
     m4(&sim.specs[k].place)
 }
 
+/// A model's box in its own space, as a centre and a half extent: the box round its finest level of
+/// detail's triangles at rest. `None` for a model with none.
+pub fn bound(tris: &[crate::psg::Tri]) -> Option<(V3, V3)> {
+    let mut points = tris.iter().flat_map(|t| t.v.iter().map(|v| v.pos));
+    let first = points.next()?;
+    let (lo, hi) = points.fold((first, first), |(lo, hi), p| {
+        (v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)), v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)))
+    });
+    Some((lo.add(hi).scale(0.5), hi.sub(lo).scale(0.5)))
+}
+
+/// Whether a view drew toy `k` (V76): its model's box ([`bound`]), at its place, not wholly outside
+/// any one side of the camera's clip volume for a view `width` by `height` — the test the original's
+/// draw makes of the toy's root node, whose answer its next step reads ([`Toys::seen`]).
+pub fn drawn(sim: &Toys, k: usize, (centre, half): (V3, V3), camera: &Camera, width: usize, height: usize) -> bool {
+    let to_clip = place(sim, k).mul(camera.view_projection(width.max(1), height.max(1)));
+    let corners: Vec<[f32; 4]> = (0..8)
+        .map(|c| {
+            let side = |bit: usize, h: f32| if c & bit != 0 { h } else { -h };
+            to_clip.clip(v3(centre.x + side(1, half.x), centre.y + side(2, half.y), centre.z + side(4, half.z)))
+        })
+        .collect();
+    let outside = |out: &dyn Fn(&[f32; 4]) -> bool| corners.iter().all(out);
+    !(outside(&|p| p[0] < -p[3])
+        || outside(&|p| p[0] > p[3])
+        || outside(&|p| p[1] < -p[3])
+        || outside(&|p| p[1] > p[3])
+        || outside(&|p| p[2] < 0.0)
+        || outside(&|p| p[2] > p[3]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,11 +404,34 @@ mod tests {
         let t = &listed[0];
         assert_eq!((t.name.as_str(), t.mcf.as_str(), t.motion.as_str(), t.stem()), ("gondola_01", "gondola.mcf", "gondola_01", "gondola"));
         assert!(t.collision);
+        assert!(t.unseen && t.search, "AnimateWhenNotVisible and UpdateSearch are on unless written off");
         assert_eq!(t.start, F::ZERO);
         let rows = t.place.0.map(|r| [r.x(), r.y(), r.z(), r.w()]);
         assert_eq!(rows, [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]);
         let free11 = b"[animatedtoys]\nNumberOfanimatedtoys=0\n\n[AnimatedToy1]\nMCFName=balloon_a.mcf\n";
         assert!(toys(free11).is_empty(), "free11 writes its balloons under a count of 0");
+    }
+
+    #[test]
+    fn a_toy_is_drawn_while_any_of_its_box_is_in_the_view() {
+        let motion = Motion { timing: game_sim::motion::Clip { duration: F(1.0), looping: true, ..Default::default() }, rotation: Vec::new(), position: Vec::new() };
+        let at = |x: f32, z: f32| Spec {
+            motion: 0,
+            rig: Rig { parents: Vec::new(), rest: Vec::new(), map: Vec::new() },
+            place: math::basis(Vf::new(x, 0.0, z, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0), Vf::new(0.0, 1.0, 0.0, 1.0), true, true),
+            start: F::ZERO,
+            mesh: None,
+            parts: Vec::new(),
+            unseen: false,
+            search: true,
+        };
+        // Ahead, behind, past the far plane, and off to the side with one corner of its box still in.
+        let sim = Toys::new(vec![motion], vec![at(0.0, 50.0), at(0.0, -50.0), at(0.0, 500.0), at(60.0, 50.0)]);
+        let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 1.0), fov: 1.2, near: 0.5, far: 300.0 };
+        let box_ = (v3(0.0, 0.0, 0.0), v3(5.0, 5.0, 5.0));
+        let seen: Vec<bool> = (0..4).map(|k| drawn(&sim, k, box_, &camera, 640, 448)).collect();
+        assert_eq!(seen, [true, false, false, false]);
+        assert!(drawn(&sim, 3, (v3(0.0, 0.0, 0.0), v3(40.0, 5.0, 5.0)), &camera, 640, 448), "a box reaching into the view");
     }
 
     #[test]
