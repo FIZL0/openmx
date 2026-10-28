@@ -29,10 +29,13 @@
 //!
 //! What is not here, and is the follow-up's: the collection world's step, the constraints' solve, the
 //! enable/disable and reset lifecycle, the props against the bike and rider, and their place in the
-//! rollback snapshot. Also not here: the part-name search a plain entry falls back on when no model
-//! carries its name (it finds each part's model by the part's own `Name` and a `RefName` suffix — the
-//! nat07 snowmen), and a part with `Create = TRUE`, which no retail file has; [`claim`] reports both
-//! rather than guessing.
+//! rollback snapshot. Also not here: a part with `Create = TRUE`, which no retail file has; [`claim`]
+//! reports it rather than guessing.
+//!
+//! An entry no model is named after falls back on a **part search** ([`part_models`]): each part's
+//! model is found by the part's own `Name`, part 0's model's `RefName` giving the suffix the rest are
+//! looked up by (nat07's `SnowmanA` is `Nat07_Sman_Head` `_1`, `Nat07_Sman_Hat_1`, …). It makes one
+//! collection a time, for as long as every part is found — two snowmen of each kind on nat07.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -251,12 +254,13 @@ pub struct Collection {
     pub members: Vec<Member>,
 }
 
-/// What [`claim`] could not load, and why. Nothing in free09 is one of these.
+/// What [`claim`] could not load, and why. No retail track has one.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Unported {
-    /// A plain entry no model is named after: the original then searches for each part's model by
-    /// the part's own name.
-    PartNameSearch { entry: String },
+    /// An entry no model is named after whose `.pco` is missing or has no parts. The original's part
+    /// search passes such a file without finding anything, so its loader makes empty collections of
+    /// it forever; the port makes none and says so.
+    EndlessSearch { entry: String },
     /// A part with `Create = TRUE`.
     Create { entry: String, part: String },
 }
@@ -281,7 +285,7 @@ pub fn claim(
         let file = entry.pco(track_dir);
         let (prefix, starred) = entry.prefix();
         if !starred {
-            create(kind, &file, &entry.name, models, &mut claimed, pco, &mut out, &mut unported, true);
+            create(kind, &file, &entry.name, models, &mut claimed, pco, &mut out, &mut unported);
             continue;
         }
         for i in 0..models.len() {
@@ -293,7 +297,7 @@ pub fn claim(
                 && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes());
             if starts {
                 let name = name.clone();
-                create(kind, &file, &name, models, &mut claimed, pco, &mut out, &mut unported, false);
+                create(kind, &file, &name, models, &mut claimed, pco, &mut out, &mut unported);
             }
         }
     }
@@ -311,7 +315,6 @@ fn create(
     pco: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
     out: &mut Vec<Collection>,
     unported: &mut Vec<Unported>,
-    plain: bool,
 ) {
     let fresh = || Collection {
         name: name.to_string(),
@@ -336,12 +339,23 @@ fn create(
                     out.push(c);
                 }
             }
-            // With no model of the name, the original goes looking for each part by its own name.
-            // Whether it finds anything is the file's business: say so if the file has parts.
-            if !any && plain {
-                let parts = pco(file).map(|b| Pco::read_bytes(&b).parts.len()).unwrap_or(0);
-                if parts > 0 {
-                    unported.push(Unported::PartNameSearch { entry: name.to_string() });
+            // With no model of the name, the original goes looking for each part's model by the
+            // part's own name: a collection a time, for as long as the search finds every part. (A
+            // starred entry never gets here: it names a model it has just seen.)
+            if !any {
+                loop {
+                    let Some(file_parts) = pco(file).map(|b| Pco::read_bytes(&b)).filter(|f| !f.parts.is_empty())
+                    else {
+                        unported.push(Unported::EndlessSearch { entry: name.to_string() });
+                        break;
+                    };
+                    let mut look = claimed.to_vec();
+                    if part_models(&file_parts, models, &mut look, false).iter().any(Option::is_none) {
+                        break;
+                    }
+                    let mut c = fresh();
+                    attach_parts(&mut c, models, claimed, pco, unported);
+                    out.push(c);
                 }
             }
         }
@@ -395,6 +409,74 @@ fn attach(
     }
     c.pco = file;
     any
+}
+
+/// The part search's attach: a collection with no model to stand on finds each part's model by
+/// [`part_models`], claiming them as it goes, and makes a body of every rigid part it found. A
+/// collection made this way is kept whatever it found; it is never a one-body collection.
+fn attach_parts(
+    c: &mut Collection,
+    models: &[Placement],
+    claimed: &mut [bool],
+    pco: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    unported: &mut Vec<Unported>,
+) {
+    let Some(bytes) = pco(&c.pco_file) else { return };
+    let file = Pco::read_bytes(&bytes);
+    let found = part_models(&file, models, claimed, true);
+    for (p, (entry, model)) in file.parts.iter().zip(found).enumerate() {
+        let Some(model) = model else { continue };
+        if !entry.rigid() {
+            continue;
+        }
+        if entry.create {
+            unported.push(Unported::Create { entry: c.name.clone(), part: entry.name.clone() });
+            continue;
+        }
+        c.members.push(Member { model, part: p });
+    }
+    c.pco = file;
+}
+
+/// The model each part of `file` stands on when its collection has none, as the part search finds
+/// them, in part order (`None` where none is found):
+///
+/// * until a suffix is known, a part's model is the first unclaimed model whose name is the part's
+///   `Name` (case aside);
+/// * part 0's model, found so, gives the suffix: its `RefName` past the part's name, when the
+///   `RefName` starts with it (case counts here) — `Nat07_Sman_Head_1` gives `_1`;
+/// * with a suffix, a part's model is the first model whose `RefName` is the part's name and the
+///   suffix (case aside), claimed or not.
+///
+/// `mark` claims each model as it is found, which is the attach; the search that decides whether
+/// to attach at all marks nothing.
+pub fn part_models(file: &Pco, models: &[Placement], claimed: &mut [bool], mark: bool) -> Vec<Option<usize>> {
+    let mut suffix: Option<String> = None;
+    let mut out = Vec::with_capacity(file.parts.len());
+    for (p, part) in file.parts.iter().enumerate() {
+        let found = match &suffix {
+            Some(tail) => {
+                let full = format!("{}{tail}", part.name);
+                models.iter().position(|m| m.ref_name.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&full)))
+            }
+            None => {
+                let found = (0..models.len()).find(|&i| !claimed[i] && models[i].file.eq_ignore_ascii_case(&part.name));
+                if p == 0
+                    && let Some(i) = found
+                    && let Some(r) = models[i].ref_name.as_deref()
+                    && let Some(tail) = r.strip_prefix(part.name.as_str())
+                {
+                    suffix = Some(tail.to_string());
+                }
+                found
+            }
+        };
+        if mark && let Some(i) = found {
+            claimed[i] = true;
+        }
+        out.push(found);
+    }
+    out
 }
 
 /// The ray probe's file of a body standing on node `node` (`"%sm.col"`, after any extension the
