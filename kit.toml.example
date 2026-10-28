@@ -43,6 +43,10 @@ timeout = 7200                # seconds one headless analysis may take
 [other.pc]
 file = "context/mxvatv-pc/MXvsATV.exe"   # MX vs. ATV Unleashed, PC (research/mxvatv-pc.md)
 
+[other.atv]
+file = "context/mxvatv-ps2/atv_game.elf"  # MX vs. ATV Unleashed, PS2: the boot ELF + GAME_REL.BIN (tools/mxvatv_overlay.py)
+processor = "r5900:LE:32:default"
+
 [build]
 # How `./kit check` runs the port's tests, and `./kit done` gates a commit on them.
 # Any build system: cargo, meson, make, pytest… Leave empty to skip the test gate.
