@@ -29,7 +29,8 @@
 //! the ecosystem's plants (S102), and the wreck bike's two probes search them as the biplane's do
 //! ([`WreckBike::tick_among`]): its probes are the plane's (category, mask, flags, an empty category
 //! list on the ray probe), and what they leave out — the bike's own collidable, each other, the riding
-//! bike and the rider, and on the sweep the categories 0x8 and 0x800 — is none of the scenery's. A
+//! bike and the rider, and on the sweep the categories 0x8 and 0x800 — is none of the scenery's. The
+//! path cars are the world's toys, in its moving list, as the plane's world holds them (S171). A
 //! world with neither gets [`NoObjects`].
 
 #![deny(clippy::float_arithmetic)]
@@ -356,11 +357,17 @@ impl WreckBike {
 
     /// [`WreckBike::tick`] in a world with objects in it: the scene's collision meshes (`props`) and
     /// the ecosystem's plants (`trees`), searched by the ray probe ([`ray_tree`]) and the sweep probe
-    /// through a nearby list as the plane's are ([`flight_search::Scene::wooded`]; the wreck bike's
-    /// search has the plane's numbers, and its sweep probe's flags keep it off placed groups, so a
-    /// trunk is met by the rays alone). The list is gathered fresh each frame where the probe stands:
-    /// the original keeps it between gathers, which hands out the same candidates within reach, in
-    /// its walk's order then rather than now.
+    /// through a nearby list as the plane's are; the wreck bike's search has the plane's numbers, and
+    /// its sweep probe's flags keep it off placed groups, so a trunk is met by the rays alone. The
+    /// list is gathered fresh each frame where the probe stands: the original keeps it between
+    /// gathers, which hands out the same candidates within reach, in its walk's order then rather
+    /// than now.
+    ///
+    /// The world is the plane's own ([`flight_search::Scene::flown`], S171): both of the original's
+    /// wreck-bike probes are placed in the table whose moving list holds the path cars ahead of
+    /// everything else, the list the plane's probes are in, so a car is a toy here too — in the
+    /// moving list, not the tree — and a ray or sweep hit on one carries its car as the contact's
+    /// mover.
     pub fn tick_among(&mut self, dt: F, ground: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
         let rays = ray_tree();
         let bounds = ground.map(|f| {
@@ -368,7 +375,7 @@ impl WreckBike {
             ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
         });
         let mut nearby = flight_search::search();
-        let mut scene = Scene::wooded(props, trees, None, bounds, &rays, &self.record.node, &mut nearby);
+        let mut scene = Scene::flown(props, trees, None, bounds, &rays, &self.record.node, &mut nearby);
         self.tick(dt, ground, &mut scene);
     }
 

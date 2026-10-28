@@ -21,8 +21,9 @@
 //! so [`crate::ride`] reads it the same way: probe 0 met with the highest point and its normal, the
 //! other probes by whether any object met them.
 //!
-//! The broad phase's world is the plane's ([`flight_search::world_wooded`]) with the bundle in the
-//! ray probe's slot; it is built only when the list is gathered.
+//! The broad phase's world is the plane's ([`flight_search::world_flown`]: the path cars toys in its
+//! moving list, S171) with the bundle in the ray probe's slot; it is built only when the list is
+//! gathered. A race's static-only gather so never lists a car.
 //!
 //! [`World::solid`]: crate::world::World::solid
 
@@ -131,8 +132,8 @@ pub fn query_each(
             continue;
         }
         if let Some(i) = c.object.checked_sub(flight_search::FIRST).filter(|&i| i < scene.props.len()) {
-            // A prop is struck by nearby searches and is scenery, which the mask lets through; the
-            // bikes it masks are not in the port's world.
+            // A prop is struck by nearby searches and is scenery or a toy, which the mask lets
+            // through; the bikes it masks are not in the port's world.
             if !sweep_object(bundle, &scene.props[i], &mut record) {
                 continue;
             }
@@ -190,7 +191,7 @@ fn gather(scene: Scene<'_>, bundle: &Bundle, cache: &mut Cache, race: Race<'_>) 
         cache.world = world;
     }
     let (mut broad, mut objects) =
-        flight_search::world_wooded(scene.props, scene.trees, None, scene.field, bundle.centre, bundle.radius);
+        flight_search::world_flown(scene.props, scene.trees, None, scene.field, bundle.centre, bundle.radius);
     objects[flight_search::RAY] = Collidable {
         flags: BUNDLE_FLAGS,
         category: 0,
