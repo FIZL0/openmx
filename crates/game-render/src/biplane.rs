@@ -107,6 +107,16 @@ impl Biplane {
         // A plane with no cone still flies; it is drawn without one.
         assets.load(archives, PROP);
         assets.load(archives, PROP_BROKEN);
+        // The blur's disc is see-through, but its material writes depth (V107): drawn before the
+        // train's carriages, a bike or a toy behind it, it hid them inside the disc. Its blended
+        // surfaces leave depth alone, and both renderers draw those after everything that does.
+        for cone in [PROP, PROP_BROKEN] {
+            if let Some(loaded) = assets.models.get_mut(cone) {
+                for s in loaded.surfaces.iter_mut().filter(|s| s.blend) {
+                    s.depth_write = false;
+                }
+            }
+        }
         let loaded = &assets.models[model].model;
         Some(Biplane {
             model: model.to_string(),

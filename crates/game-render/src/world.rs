@@ -734,7 +734,10 @@ pub fn draw_model(
     light: &Lighting,
 ) -> usize {
     let mut batch = Batch::new(frame.width, frame.height);
-    let drawn = queue_model(&mut batch, loaded, assets, transform, view_projection, eye, light, 1.0);
+    let drawn = [false, true]
+        .into_iter()
+        .map(|late| queue_model(&mut batch, loaded, assets, transform, view_projection, eye, light, 1.0, late))
+        .sum();
     frame.draw(&batch, &texel_of(assets), light.fog_color);
     drawn
 }
@@ -770,8 +773,15 @@ fn tag_of(texture: Option<usize>, surface: &Surface) -> u32 {
     tag
 }
 
+/// A surface mixed over the frame that leaves depth alone (V107): it hides nothing, so it is queued
+/// after every other triangle of the scene, or what is behind it and queued later is not seen through
+/// it — the train's carriages behind the biplane's spinning prop.
+fn late(s: &Surface) -> bool {
+    s.blend && !s.depth_write
+}
+
 /// [`draw_model`]'s triangles, queued into `batch` rather than drawn, in the order it would have
-/// drawn them (P47).
+/// drawn them (P47): those that are [`late`] or those that are not, by `late`.
 fn queue_model(
     batch: &mut Batch,
     loaded: &Loaded,
@@ -781,6 +791,7 @@ fn queue_model(
     eye: V3,
     light: &Lighting,
     cover: f32,
+    late: bool,
 ) -> usize {
     let mvp = transform.mul(view_projection);
     let mut drawn = 0;
@@ -802,6 +813,9 @@ fn queue_model(
             .get(tri.material)
             .copied()
             .unwrap_or_default();
+        if self::late(&surface) != late {
+            continue;
+        }
         let mut behind = 0;
         for (k, v) in tri.v.iter().enumerate() {
             let world = transform.point(v.pos);
@@ -883,7 +897,7 @@ pub fn draw_scene(
     // core queueing them all, and in a four-way split the vertex work is most of the scene (P47).
     let queue = |batch: &mut Batch, jobs: &[(&Loaded, M4, f32)]| {
         jobs.iter()
-            .map(|&(loaded, at, cover)| queue_model(batch, loaded, assets, at, view_projection, camera.eye, &light, cover))
+            .map(|&(loaded, at, cover)| queue_model(batch, loaded, assets, at, view_projection, camera.eye, &light, cover, false))
             .sum::<usize>()
     };
     let mut batch = Batch::new(frame.width, frame.height);
@@ -928,6 +942,13 @@ pub fn draw_scene(
         }
         drawn
     };
+    // The see-through surfaces that write no depth, over everything else, in the scene's order.
+    let drawn = drawn
+        + jobs
+            .iter()
+            .filter(|(loaded, _, _)| loaded.surfaces.iter().any(late))
+            .map(|&(loaded, at, cover)| queue_model(&mut batch, loaded, assets, at, view_projection, camera.eye, &light, cover, true))
+            .sum::<usize>();
     frame.draw(&batch, &texel_of(assets), light.fog_color);
     drawn
 }
