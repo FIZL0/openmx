@@ -121,6 +121,11 @@ pub struct Score {
     /// started while the backflip watch stands at 3 (round, not yet scored) still opens one, and a
     /// combo already open scores and banks as before.
     pub out: bool,
+    /// **The start-gate penalty (P158),** seconds (the card's `+0x1c0`): while it is above 0 the bike's
+    /// tick cuts the gas ([`crate::ride::Controls::gas_cut`]), and the manager's tick runs it down.
+    /// The original's race sets it to 1 + a random fraction when a rider crosses its closed start
+    /// gate; nothing in the port sets it yet, and the card's join sets it to 0.
+    pub gate_penalty: F,
 }
 
 /// What the rider's tick reads to score: the bike's words as the frame left them.
@@ -432,6 +437,10 @@ impl Score {
     /// **The manager's tick**, after every rider's: the combo's clock, the newest node grown, and the
     /// combo's points summed over the nodes that count.
     pub fn grow(&mut self, dt: F) {
+        // Every card's start-gate penalty first, joined or not (P158).
+        if F::ZERO < self.gate_penalty {
+            self.gate_penalty = self.gate_penalty - dt;
+        }
         // An event's card that does not take part is passed over, and a manager not running does
         // not tick its cards at all (S92).
         if !self.combo || self.shut {

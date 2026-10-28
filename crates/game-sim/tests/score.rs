@@ -94,6 +94,8 @@ fn card_of(ee: &Ee, rider: u32) -> Score {
             mgr & 1 == 0 || mgr & 8 != 0 || flags & 2 == 0
         },
         out: flags & 1 != 0,
+        // The start-gate penalty (P158): 0 outside a race.
+        gate_penalty: F(ee.f32_at(card + 0x1c0)),
     }
 }
 

@@ -4652,6 +4652,34 @@ camera_thrill_off    boot 0x002008b0 (manager) +0x148 = 1; the thrill camera act
 #     bike's own +0x610 / +0x614 (a no-op). Every riding save state: +0x610 = +0x614 = +0x618 = 1,
 #     +0x61c = 0. The same tick, before the copy, gas +0x63c = 0 while *(+0xf9c)+0x1c0 > 0 (0x0027ca18).
 #     The port has no lock that clears them, so it leaves the latch, the enables and the +0x1c0 cut out.
+#     (P158 ported all three; below.)
+# P158 — what clears the enables, and the +0x1c0 cut. Port: ride::Lock in Held (inverted: a lock where
+#   the original keeps an enable), Held::step's latch / steer / throttle half, Controls::gate_cut and
+#   Score::gate_penalty (crates/game-sim/src/ride.rs, score.rs); proof crates/game-sim/tests/levers.rs
+#   (the enables, the latch and the cut generated over the 20000 cases, +0x640/+0x648/+0x618/+0x61c/
+#   +0x670 compared after the limiter; the card list's run-down in the interpreter).
+#   Nothing clears +0x610 / +0x614 during a ride. Every store to bike +0x610..+0x61c in the ELF (an
+#   objdump scan of every sw at those offsets, and of every address formed as base+0x610/0x614): the
+#   base vehicle ctor 0x002472c0 (all four 0), the vehicle builder 0x00249cb0 (0x0024a0f4..0x0024a138:
+#   the type-8 parts whose +0x7c->+8 kind is 0x0e/0x11/0x10/0x0d go to +0x61c/+0x618/+0x610/+0x614 as
+#   pointers -- the "message handler" P77 named is this, the set-up), the set-up 0x0024f5d4 (1, 1, 1,
+#   0), the put-back 0x0027f61c (+0x610 = 1), the limiter's +0x618/+0x61c, and the bike tick's copy
+#   0x0027ca2c / 0x0027ca38 through +0x1068 / +0x106c, which are written only by the ctor 0x00279ed0 (0)
+#   and the same tick (0x0027cab4: bike+0x610 / +0x614 when +0x1068 is 0). The other sw hits at those
+#   offsets (0x001e009c, 0x0011d6cc, 0x00393b78) are other objects. So the latch never sets in the
+#   shipped game; neither the freestyle event's countdown nor a race's start or finish touches them.
+#   The +0x1c0 cut is the score card's start-gate penalty: card +0x1c0 is 0 at the card's join
+#   (0x0025f4d0), run down by dt while above 0 for every card on mgr+0x34 (score_gate_penalty_tick,
+#   first thing in score_manager_tick unless the manager's flag 8), and set by the race manager's tick
+#   (0x002fcff0, vtable 0x004587a4, its manager at +0x50): while its start gate +0x3dc has flag 1 (closed),
+#   every card on +0x84 whose entity crossed the gate between last tick's +0x60 and now
+#   (start_gate_crossed == 1) is pushed back along its +0x20 vector times (-5 - 5*rand/2^31) and gets
+#   +0x1c0 = rand*(1/2^31) + 1.0 -- one to two seconds of no gas. The bike tick's cut (0x0027ca18) runs
+#   before the base update's limiter (vt+0xec, 0x002520d0); pad_to_gesture is reached from a vtable
+#   slot (0x0027ff90, vtable word 0x00454f10) whose caller was not traced, so "after the pad read" is
+#   assumed from the cut being live at all, not proved.
+score_gate_penalty_tick boot 0x0025ffc0 (dt f12, mgr) every card on mgr+0x34 (+0x1c8 next): +0x1c0 -= dt while above 0
+start_gate_crossed boot 0x00246720 (gate, from, to) 1 crossed, 2 beside, 0 not, 4 gate not closed (flag 1 clear)
 # Strings: the preset screen's labels are STR_BUTTON_1..6_TEXT / STR_BUTTON_DES_* in AppStart's
 #   loc\ui.loc, whose values are encoded (not plain or UTF-16); not decoded.
 # S66 — the bike's put-back record and where L1+R1 / the wreck clock put the bike, ported as

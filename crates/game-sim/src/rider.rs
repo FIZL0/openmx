@@ -751,8 +751,9 @@ impl Rider {
                     if list.is_empty() { None } else { Some(alone.insert(crate::rider_contact::Bump { movers, ..crate::rider_contact::alone(ride, p, list) })) }
                 }
             };
-            // The bike's limiter reads the no-hander as the rider's last tick left it (`+0xa44`).
-            let c = Controls { respawn: false, hands_off: tricks.no_hander, ..*c };
+            // The bike's limiter reads the no-hander as the rider's last tick left it (`+0xa44`), and
+            // its tick the card's start-gate penalty as the manager's last tick left it (P158).
+            let c = Controls { respawn: false, hands_off: tricks.no_hander, gas_cut: F::ZERO < score.gate_penalty, ..*c };
             ride.frame_searched(p, &t.ride, &c, dt, world, bump, scenery);
         } else if let (Some(w), Some(down)) = (wreckage.as_ref(), crash.as_mut()) {
             // The physics of a rider who is down: the wreck body tumbling and the rider coming off
