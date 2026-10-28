@@ -1815,4 +1815,108 @@ mod tests {
         assert_eq!(start("md50_cut"), (Some("f".into()), [460.0, 260.0], "a".into()));
         let _ = std::fs::remove_dir_all(mods.parent().unwrap());
     }
+
+    /// Where each tile of `w` does not read as that map alone (MD56): its ground as the simulation
+    /// asks the world ([`Tiled::at`]) against the tile's own terrain ([`game_sim::world::Ground`]) at
+    /// the same point of it, on a 40 x 40 grid over its keep, and its drawn ground's corners
+    /// ([`piece_chunks`]) against the same. The world's point is the tile's moved by its `at`, and the
+    /// tile's is read back from it as the world does, so the two answers are the same to the bit. A
+    /// corner is drawn at a sample's height, which a far-off world's float position can put a hair off
+    /// the sample, so the drawn ground may be off by 0.05 feet at one corner in a thousand.
+    fn tiles_unlike_alone(w: &WorldMod) -> Vec<String> {
+        let tiled = w.tiled(Reach::DESKTOP).unwrap();
+        let mut out = Vec::new();
+        for (i, p) in w.pieces[..w.tile_count].iter().enumerate() {
+            let name = &p.tile.name;
+            let bytes = p.terrain().unwrap_or_else(|e| panic!("{name}: {e}"));
+            let terrain = Terrain::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let alone = game_sim::world::Ground::new(&terrain, &p.tile.layout);
+            let [ax, az] = p.tile.at;
+            let [k0, k1, k2, k3] = keep_feet(p.tile.keep, p.tile.spacing);
+            let (mut asked, mut off, mut low, mut high) = (0, 0, f32::MAX, f32::MIN);
+            for gz in 0..40 {
+                for gx in 0..40 {
+                    let x = F(k0 + (k2 - k0) * (gx as f32 + 0.37) / 40.0) + ax;
+                    let z = F(k1 + (k3 - k1) * (gz as f32 + 0.61) / 40.0) + az;
+                    let own = alone.at(x - ax, z - az).map(|h| h.y.0);
+                    let world = tiled.at(x, z).map(|h| h.y.0);
+                    asked += 1;
+                    if world != own || own.is_none() {
+                        off += 1;
+                    }
+                    if let Some(h) = own {
+                        (low, high) = (low.min(h), high.max(h));
+                    }
+                }
+            }
+            if off > 0 {
+                out.push(format!("{name}: {off} of {asked} points read otherwise in the world than alone"));
+            }
+            if !(high - low > 1.0) {
+                out.push(format!("{name}: flat alone ({low}..{high}), so nothing told"));
+            }
+            let chunks = piece_chunks(&p.tile, i, &bytes, &tiled, 32).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (mut corners, mut wrong) = (0usize, 0usize);
+            for v in chunks.iter().flat_map(|c| &c.vertices) {
+                if let Some(h) = alone.at(F(v.pos[0]) - ax, F(v.pos[2]) - az) {
+                    corners += 1;
+                    if (h.y.0 - v.pos[1]).abs() > 0.05 {
+                        wrong += 1;
+                    }
+                }
+            }
+            if corners == 0 || wrong * 1000 > corners {
+                out.push(format!("{name}: {wrong} of {corners} drawn corners off its own ground"));
+            }
+        }
+        out
+    }
+
+    /// MD56: every tile of a world reads the same heights as that map alone, at its `at` — the
+    /// simulation's ground and the drawn ground's corners — on a generated world of three maps of
+    /// their own hills at 9, 4.5 and Nat_OR's 4.499999 feet a sample, each cut to a keep, and a join.
+    #[test]
+    fn every_tile_of_a_world_reads_its_heights_as_alone() {
+        let mods = std::env::temp_dir().join(format!("openmx-md56-{}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        let world = mods.join("tracks").join("md56_world");
+        // (name, root cells, spacing, at): hills of their own on each, so a tile read at the wrong
+        // place or from another's file reads otherwise.
+        let tiles = [("t0", (3u32, 2u32), 9.0f32, [0, 0]), ("t1", (4, 4), 4.5, [600, 0]), ("t2", (4, 3), 4.499999, [0, 700])];
+        let mut listed = Vec::new();
+        for (n, &(name, cells, spacing, [x, z])) in tiles.iter().enumerate() {
+            let stem = name.to_uppercase();
+            let dir = world.join("tiles").join(name);
+            let scene = format!("[SceneInfo]\r\nSceneName={name}\r\nDefaultStartPosition=60.00,10.00,60.00\r\nDefaultStartDirection=1.00,0.00,0.00\r\n[Environment]\r\nTerrainFile={stem}.trn\r\nTerrainWidth={}\r\nTerrainBreadth={}\r\nTerrainWidthScale={spacing}\r\nTerrainBreadthScale={spacing}\r\n", cells.0, cells.1);
+            write(&dir, &format!("Env/{stem}/{stem}.scn"), scene);
+            let k = 1.0 + n as f64;
+            let height = |sx: u32, sz: u32| 200.0 + 60.0 * (f64::from(sx) * 0.11 * k).sin() * (f64::from(sz) * 0.07 + k).cos() + f64::from((sx * 13 + sz * 7) % 5);
+            write(&dir, &format!("Env/{stem}/{stem}.ps2.trn"), generate::terrain(name, cells, spacing, height, |_, _| 1));
+            listed.push(format!(r#"{{"tile": "{name}", "at": [{x}.0, {z}.0], "keep": [3, 2, {}, {}]}}"#, cells.0 * 16 - 4, cells.1 * 16 - 3));
+        }
+        write(&world, "joins/j0/j0.ps2.trn", generate::terrain("j0", (4, 4), 9.0, |_, _| 150.0, |_, _| 1));
+        write(
+            &world,
+            "mod.json",
+            format!(r#"{{"kind": "world", "id": "md56_world", "name": "MD56", "tiles": [{}], "joins": [{{"join": "j0", "at": [300.0, 300.0]}}]}}"#, listed.join(", ")),
+        );
+        let w = find(&mods, "md56_world").expect("the world reads");
+        assert_eq!(w.tile_count, 3);
+        assert_eq!(tiles_unlike_alone(&w), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+    }
+
+    /// MD56 on the installed worlds: every tile of each reads the same heights as that map alone.
+    /// The user's flat "maps" were the joins between them (see [`crate::hud::OFF_MAP`]).
+    #[test]
+    #[ignore = "needs the stitched worlds in $OPENMX_WORLDS/tracks"]
+    fn every_installed_worlds_tiles_read_as_alone() {
+        let mods = PathBuf::from(std::env::var_os("OPENMX_WORLDS").expect("OPENMX_WORLDS names a mods folder"));
+        let mut wrong = Vec::new();
+        for id in ["world_mxu", "world_mxu_free", "world_mxvatv", "world_untamed", "world_ultra"] {
+            let w = find(&mods, id).unwrap_or_else(|e| panic!("{id}: {e}"));
+            wrong.extend(tiles_unlike_alone(&w).into_iter().map(|e| format!("{id} {e}")));
+        }
+        assert_eq!(wrong, Vec::<String>::new());
+    }
 }
