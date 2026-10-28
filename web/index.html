@@ -21,8 +21,69 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>openMX: MX Unleashed, rewritten, in your browser</title>
-<meta name="description" content="openMX is a from-scratch rewrite of the PS2's MX Unleashed. It plays in your browser from your own disc image, and online.">
+<title>openMX: MX Unleashed remaster for PC, browser and online</title>
+<meta name="description" content="openMX is a free, open-source remaster of the PS2 game MX Unleashed: rewritten from scratch, it plays in your browser, on PC and Steam Deck, and online, with mods and MX vs. ATV Unleashed tracks. Bring your own disc.">
+<!-- P194, as opentennis's M107: search and link previews. The site's one address is openmx.dev; the beta site's
+     canonical points back to it and it says noindex (the script below). The originals are named only as what this is
+     a remaster of (the name is openMX). The pictures are docs/screenshots, copied into shots/ by tools/web.sh. -->
+<link rel="canonical" href="https://openmx.dev/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="openMX">
+<meta property="og:url" content="https://openmx.dev/">
+<meta property="og:title" content="openMX: a remaster of MX Unleashed">
+<meta property="og:description" content="The PS2's MX Unleashed, rewritten from scratch: the same physics tick for tick, in your browser, on PC and Steam Deck, online, with mods. Bring your own disc.">
+<meta property="og:image" content="https://openmx.dev/shots/ride-free06.jpg">
+<meta property="og:image:width" content="1600">
+<meta property="og:image:height" content="900">
+<meta property="og:image:alt" content="A rider crossing the railway on the Dallas freeride map in openMX">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="openMX: a remaster of MX Unleashed">
+<meta name="twitter:description" content="The PS2's MX Unleashed, rewritten from scratch: in your browser, on PC and Steam Deck, online. Bring your own disc.">
+<meta name="twitter:image" content="https://openmx.dev/shots/ride-free06.jpg">
+<meta name="twitter:image:alt" content="A rider crossing the railway on the Dallas freeride map in openMX">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "VideoGame",
+  "name": "openMX",
+  "description": "A free, open-source remaster of the PlayStation 2 game MX Unleashed: the same bike physics, tricks, wrecks and biplane, rewritten from scratch in Rust and proved against the original, with a new renderer, online play, split screen, mods and tracks from MX vs. ATV Unleashed. Runs from the player's own disc image.",
+  "url": "https://openmx.dev/",
+  "image": "https://openmx.dev/shots/ride-free06.jpg",
+  "screenshot": ["https://openmx.dev/shots/ride-free06.jpg", "https://openmx.dev/shots/air-cancan.jpg",
+    "https://openmx.dev/shots/biplane.jpg", "https://openmx.dev/shots/rain-nat01.jpg", "https://openmx.dev/shots/split-4p.jpg",
+    "https://openmx.dev/shots/menu-main.jpg"],
+  "genre": ["Racing", "Sports", "Motocross"],
+  "gamePlatform": ["Web browser", "PC", "Linux", "Steam Deck"],
+  "operatingSystem": "Linux, SteamOS, any browser with WebGPU or WebGL2",
+  "applicationCategory": "GameApplication",
+  "playMode": ["SinglePlayer", "MultiPlayer"],
+  "numberOfPlayers": { "@type": "QuantitativeValue", "minValue": 1, "maxValue": 16 },
+  "inLanguage": "en",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "sameAs": ["https://github.com/FIZL0/openmx"],
+  "isBasedOn": {
+    "@type": "VideoGame",
+    "name": "MX Unleashed",
+    "gamePlatform": ["PlayStation 2", "Xbox"],
+    "sameAs": ["https://en.wikipedia.org/wiki/MX_Unleashed", "https://www.mobygames.com/game/12609/mx-unleashed/",
+      "https://wiki.pcsx2.net/MX_Unleashed"],
+    "datePublished": "2004",
+    "author": { "@type": "Organization", "name": "Rainbow Studios" },
+    "publisher": { "@type": "Organization", "name": "THQ" }
+  }
+}
+</script>
+<script>
+// P194: the beta site has the same page; only openmx.dev is for search engines (the canonical link above says so too)
+if (location.hostname.startsWith('beta.')) {
+  const m = document.createElement('meta');
+  m.name = 'robots';
+  m.content = 'noindex';
+  document.head.append(m);
+}
+</script>
+<link rel="preload" as="image" href="shots/ride-free06.jpg" fetchpriority="high">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
 <meta name="theme-color" content="#2a1408">
@@ -102,6 +163,15 @@ body[data-mode="online"] { background: #000; }
 .lede { margin: 0; max-width: 40em; font-size: 18px; color: #fff3e6; text-shadow: 0 1px 4px rgba(0,0,0,.45); }
 .row { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; }
 body[data-disc="yes"] .hero { display: none; }
+/* the hero's picture (P194): beside the text on a wide screen, under it on a narrow one */
+.htext { display: grid; gap: 18px; align-content: center; min-width: 0; }
+.hshot { margin: 0; min-width: 0; }
+.hshot img, .shot img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 10px;
+  border: 2px solid rgba(245,240,232,.85); box-shadow: 8px 10px 0 rgba(0,0,0,.3), 0 18px 40px rgba(0,0,0,.35); background: var(--umber); }
+@media (min-width: 960px) {
+  .hero .wrap { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 32px; align-items: center; }
+  .hshot img { transform: rotate(1.2deg); }
+}
 
 /* the ink band with the button hints, under the hero and the stage */
 .band { position: relative; z-index: 1; background: var(--ink); }
@@ -219,8 +289,24 @@ body[data-disc="yes"] #disc { display: none; }
 .count b { display: block; font-weight: 800; font-style: oblique 10deg; font-size: 30px; color: var(--chalk); font-variant-numeric: tabular-nums; }
 .count span { color: var(--dust); font-size: 13px; }
 
+/* Screenshots, Questions, Credits (P194) */
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 18px; }
+.shot { margin: 0; min-width: 0; }
+.shot img { box-shadow: 5px 6px 0 rgba(0,0,0,.3); border-width: 1px; border-radius: 8px; }
+.shot a:hover img, .shot a:focus-visible img { border-color: var(--chalk); filter: brightness(1.08); }
+.shot figcaption { margin-top: 8px; color: var(--bone); font-size: 14px; }
+.feat { grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
+.faq { display: grid; gap: 8px; }
+.faq details { background: rgba(0,0,0,.28); border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 14px 20px; }
+.faq summary { cursor: pointer; color: var(--chalk); font-weight: 800; font-style: oblique 10deg; font-size: 18px; }
+.faq details p { margin: 10px 0 2px; max-width: 52em; }
+.links { margin: 10px 0 0; padding-left: 1.2em; }
+.links li { margin: 4px 0; }
+
 footer { background: var(--ink); color: var(--dust); font-size: 14px; }
-footer .wrap { display: flex; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; padding-block: 24px calc(24px + env(safe-area-inset-bottom, 0px)); }
+footer .wrap { display: grid; gap: 10px; padding-block: 24px calc(24px + env(safe-area-inset-bottom, 0px)); }
+footer nav { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+footer p { margin: 0; max-width: 60em; }
 footer a { color: var(--bone); }
 /* a newer build is on the site (version.txt): offer the reload, never force it */
 #fresh { position: fixed; left: 50%; bottom: calc(1em + env(safe-area-inset-bottom, 0px)); transform: translate(-50%, 2em); opacity: 0; pointer-events: none;
@@ -261,22 +347,27 @@ footer a { color: var(--bone); }
   <!-- the landing hero: no disc in this browser yet -->
   <header class="hero backdrop">
     <div class="wrap">
+      <div class="htext">
       <div class="logo" aria-label="openMX"><span class="open">open</span><span class="mx">MX</span></div>
-      <span class="kicker">openMX · a rewrite of MX Unleashed</span>
+      <span class="kicker">openMX · a remaster of MX Unleashed</span>
       <h1>Motocross, the way it rode on the PS2.</h1>
-      <p class="lede">openMX is MX Unleashed rewritten from scratch, the same game tick for tick, running in your browser and
-        on your desktop, online with friends. You bring the disc.</p>
+      <p class="lede">openMX is a remaster of MX Unleashed, rewritten from scratch: the same game tick for tick, running in
+        your browser, on PC and Steam Deck, online with friends. You bring the disc.</p>
       <div class="row">
-        <a class="pill" href="#disc">Pick your disc</a>
+        <a class="pill" href="#disc">Play in your browser</a>
+        <a class="pill ghost" href="#get">Desktop downloads</a>
         <a class="pill ghost" href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
       </div>
+      </div>
+      <figure class="hshot"><img src="shots/ride-free06.jpg" width="1600" height="900" fetchpriority="high"
+        alt="openMX: a rider crossing the railway on the Dallas freeride map, the hills of MX Unleashed behind"></figure>
     </div>
     <div class="band"><div class="wrap">
       <span class="who">Free and open source · <b>your own disc</b></span>
       <span class="hints">
         <a class="hint" href="#disc"><span class="btn x"><svg viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>Pick your disc</a>
-        <a class="hint" href="#about"><span class="btn tri"><svg viewBox="0 0 10 10"><path d="M5 1.8 8.4 7.8H1.6Z" stroke="#fff" stroke-width="1.4" fill="none" stroke-linejoin="round"/></svg></span>About</a>
-        <a class="hint" href="#files"><span class="btn sq"><svg viewBox="0 0 10 10"><rect x="2.2" y="2.2" width="5.6" height="5.6" stroke="#fff" stroke-width="1.5" fill="none"/></svg></span>Files</a>
+        <a class="hint" href="#shots"><span class="btn tri"><svg viewBox="0 0 10 10"><path d="M5 1.8 8.4 7.8H1.6Z" stroke="#fff" stroke-width="1.4" fill="none" stroke-linejoin="round"/></svg></span>Screenshots</a>
+        <a class="hint" href="#faq"><span class="btn sq"><svg viewBox="0 0 10 10"><rect x="2.2" y="2.2" width="5.6" height="5.6" stroke="#fff" stroke-width="1.5" fill="none"/></svg></span>Questions</a>
       </span>
     </div></div>
   </header>
@@ -319,6 +410,51 @@ footer a { color: var(--bone); }
         <label class="pill" tabindex="0" role="button">Pick disc image<input id="pick" type="file" accept=".iso,application/x-iso9660-image"></label>
         <small>or drop it anywhere on this page</small>
         <a data-link="guide" target="_blank" rel="noopener">How to dump your disc</a>
+      </div>
+    </section>
+
+    <!-- P194: the pictures are our renderer's (docs/screenshots, copied in by tools/web.sh); none loads before it is near -->
+    <section id="shots">
+      <h2 class="head"><span class="skew">Screenshots</span></h2>
+      <div class="gallery">
+        <figure class="shot"><a href="shots/air-cancan.jpg" target="_blank" rel="noopener"><img src="shots/air-cancan.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="A Can Can trick in the air over the railway on Dallas"></a><figcaption>A Can Can off the rail jump, the trick and its score on the HUD.</figcaption></figure>
+        <figure class="shot"><a href="shots/biplane.jpg" target="_blank" rel="noopener"><img src="shots/biplane.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="The red biplane flying over the hills of Dallas"></a><figcaption>The biplane, with its own flight model, over Dallas.</figcaption></figure>
+        <figure class="shot"><a href="shots/wreck.jpg" target="_blank" rel="noopener"><img src="shots/wreck.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="The rider thrown off the bike into a bush"></a><figcaption>Wrecks throw the rider; the bike tumbles on.</figcaption></figure>
+        <figure class="shot"><a href="shots/rain-nat01.jpg" target="_blank" rel="noopener"><img src="shots/rain-nat01.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="A rider on a national track in the rain"></a><figcaption>Rain on the national tracks.</figcaption></figure>
+        <figure class="shot"><a href="shots/road-free09.jpg" target="_blank" rel="noopener"><img src="shots/road-free09.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="A wide view over the Bridgeport freeride map"></a><figcaption>Bridgeport: free roam to the horizon.</figcaption></figure>
+        <figure class="shot"><a href="shots/split-4p.jpg" target="_blank" rel="noopener"><img src="shots/split-4p.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="Four riders on one screen in split screen"></a><figcaption>Up to eight riders on one screen, or sixteen online.</figcaption></figure>
+        <figure class="shot"><a href="shots/mxvatv-nat04.jpg" target="_blank" rel="noopener"><img src="shots/mxvatv-nat04.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="A rider by the sea on a track imported from MX vs. ATV Unleashed"></a><figcaption>A track from MX vs. ATV Unleashed, as a mod.</figcaption></figure>
+        <figure class="shot"><a href="shots/menu-main.jpg" target="_blank" rel="noopener"><img src="shots/menu-main.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="The main menu"></a><figcaption>Menus in the original's style, redrawn sharp.</figcaption></figure>
+        <figure class="shot"><a href="shots/menu-online.jpg" target="_blank" rel="noopener"><img src="shots/menu-online.jpg" width="1600" height="900" loading="lazy" decoding="async"
+          alt="The online menu: Quickplay, Host, Find Games, Join by Code"></a><figcaption>Online: quickplay, room codes and LAN.</figcaption></figure>
+      </div>
+    </section>
+
+    <section id="features">
+      <h2 class="head"><span class="skew">What is in it</span></h2>
+      <div class="grid3 feat">
+        <div class="card"><h3>Browser, PC and Steam Deck</h3><p>Plays in a web browser with nothing to install, or as a native
+          build for Linux and the Steam Deck. A Windows build is on the way. Pads, keyboard, any resolution, widescreen, and a
+          frame rate as high as your screen's.</p></div>
+        <div class="card"><h3>Online</h3><p>Ride with friends over the internet or your LAN: send a room code, or quickplay into an
+          open lobby. Rollback netcode keeps every rider in step, up to sixteen seats, browser and desktop together.</p></div>
+        <div class="card"><h3>The original's ride</h3><p>The bike physics, the 24 tricks, landings, wrecks and the biplane are
+          ported from MX Unleashed and checked against it in an emulator, tick for tick. Free roam, nationals and supercross
+          on the disc's own maps.</p></div>
+        <div class="card"><h3>Split screen</h3><p>Up to eight riders on one screen, each with their own pad, bike, rider and
+          controls, in the original's two-player layouts or quarters and eighths.</p></div>
+        <div class="card"><h3>Mods</h3><p>Track and music mods, upscaled texture packs and gameplay modifiers. Turn them off and
+          the ride is the original's again, exactly.</p></div>
+        <div class="card"><h3>MX vs. ATV Unleashed tracks</h3><p>Tracks from MX vs. ATV Unleashed and MX vs. ATV Untamed import
+          as mods from your own copies of those games, and ride with MX Unleashed's bikes.</p></div>
       </div>
     </section>
 
@@ -366,6 +502,32 @@ footer a { color: var(--bone); }
       </div>
     </section>
 
+    <!-- P194, as opentennis's M107: the questions people search with, answered in text -->
+    <section id="faq">
+      <h2 class="head"><span class="skew">Questions</span></h2>
+      <div class="faq">
+        <details open><summary>Do I need the game?</summary><p>Yes: your own disc. openMX has none of MX Unleashed's data. It
+          reads the tracks, bikes, rider, textures, menus and sound from an .iso you make of your own PlayStation 2 disc
+          (the US release, SLUS-20767), on your own machine. Nothing from the disc is on this site or uploaded anywhere.</p></details>
+        <details><summary>Can I play MX Unleashed on PC?</summary><p>Yes. openMX is a remaster of MX Unleashed that runs in a web
+          browser and natively on Linux and the Steam Deck, with Windows coming. It isn't an emulator: the game is rewritten,
+          so it runs at any resolution, in widescreen and at a high frame rate, with a pad or the keyboard.</p></details>
+        <details><summary>Is it the same game as the original?</summary><p>On the bike, yes. The physics, tricks, wrecks, biplane
+          and timing are ported from MX Unleashed and proved against it in an emulator, so the same inputs ride out the same
+          way. The renderer and the menus are new.</p></details>
+        <details><summary>Is this a decompilation?</summary><p>It's a rewrite. The original's code was studied to port its
+          behaviour, function by function, into new Rust; none of the original's code or data is in openMX. That is also why
+          it needs your disc.</p></details>
+        <details><summary>Is this MX vs. ATV Unleashed remastered?</summary><p>No, openMX remasters MX Unleashed, the 2004 game
+          before it. But MX vs. ATV Unleashed's tracks import as mods from your own copy, and ride in openMX.</p></details>
+        <details><summary>Can I play online?</summary><p>Yes, in the browser and on the desktop: host a lobby and send its code,
+          join one, or quickplay. Rollback netcode keeps the ride smooth, and a handshake makes sure every machine rides the
+          same build.</p></details>
+        <details><summary>Does it cost anything?</summary><p>No. openMX is free and open source, on GitHub. It is a fan project, not
+          affiliated with THQ, Rainbow Studios or Sony.</p></details>
+      </div>
+    </section>
+
     <section id="files">
       <h2 class="head"><span class="skew">Settings &amp; files</span></h2>
       <div class="rows">
@@ -404,11 +566,37 @@ footer a { color: var(--bone); }
         </div>
       </div>
     </section>
+    <section id="links">
+      <h2 class="head"><span class="skew">Credits &amp; links</span></h2>
+      <div class="grid2">
+        <div class="card">
+          <h3>openMX</h3>
+          <p>Written by FIZL0 with AI agents, in Rust. Type: M PLUS Rounded 1c.</p>
+          <ul class="links">
+            <li><a href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener">Source code on GitHub</a></li>
+            <li><a href="https://github.com/FIZL0/openmx/releases" target="_blank" rel="noopener">Releases and release notes</a></li>
+            <li><a href="https://github.com/FIZL0/openmx/issues" target="_blank" rel="noopener">Report a bug</a></li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>The originals</h3>
+          <p>MX Unleashed (2004) and MX vs. ATV Unleashed (2005) were made by Rainbow Studios and published by THQ.</p>
+          <ul class="links">
+            <li><a href="https://en.wikipedia.org/wiki/MX_Unleashed" target="_blank" rel="noopener">MX Unleashed on Wikipedia</a></li>
+            <li><a href="https://en.wikipedia.org/wiki/MX_vs._ATV_Unleashed" target="_blank" rel="noopener">MX vs. ATV Unleashed on Wikipedia</a></li>
+            <li><a href="https://www.mobygames.com/game/12609/mx-unleashed/" target="_blank" rel="noopener">MX Unleashed on MobyGames</a></li>
+            <li><a href="https://wiki.pcsx2.net/MX_Unleashed" target="_blank" rel="noopener">MX Unleashed on the PCSX2 wiki</a></li>
+          </ul>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer><div class="wrap">
-    <span>openMX is a fan project, not affiliated with THQ, Rainbow Studios or Sony. You need your own disc.</span>
-    <span><span id="build"></span> <a href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener">GitHub</a> · <a data-link="discord" target="_blank" rel="noopener">Discord</a></span>
+    <nav><a href="#disc">Play</a><a href="#shots">Screenshots</a><a href="#get">Desktop</a><a href="#faq">Questions</a><a href="#files">Settings &amp; files</a><a href="#support">Support</a>
+      <a data-link="discord" target="_blank" rel="noopener">Discord</a><a href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener">GitHub</a></nav>
+    <p>openMX is an unofficial fan project, not affiliated with THQ Nordic, Rainbow Studios, THQ or Sony Interactive Entertainment.
+      MX Unleashed is their trademark. This site hosts no game data: you bring your own disc. <span id="build"></span></p>
   </div></footer>
 </div>
 <div id="fresh" role="status"><span>A new version of openMX is out.</span><button class="pill small" id="reload">Reload</button></div>
@@ -752,7 +940,7 @@ footer a { color: var(--bone); }
   let ours = '';
   built().then(v => {
     ours = v;
-    if (v) $('#build').textContent = `${BETA ? 'Beta ' : ''}${v} ·`;
+    if (v) $('#build').textContent = `${BETA ? 'Beta build' : 'Build'} ${v}.`;
   });
   const recheck = async () => {
     const v = await built();

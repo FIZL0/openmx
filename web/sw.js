@@ -1,9 +1,10 @@
 // Offline play: the page, its worker and the game module are kept in the browser's cache and served from it when
 // the network is not there. Network first, so a new build is what an online visit gets. The disc is in OPFS, never in
-// this cache: nothing from the disc is hosted or fetched.
+// this cache: nothing from the disc is hosted or fetched. The game module is not fetched ahead (P194: a first visit
+// loads the page alone, the module only on Ride); the fetch below keeps it once a ride has loaded it.
 const CACHE = 'openmx';
 const SHELL = ['./', 'worker.js', 'manifest.webmanifest', 'icon.svg', 'fonts/MPLUSRounded1c-Bold.ttf',
-  'fonts/MPLUSRounded1c-ExtraBold.ttf', 'pkg/openmx_web.js', 'pkg/openmx_web_bg.wasm'];
+  'fonts/MPLUSRounded1c-ExtraBold.ttf'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
