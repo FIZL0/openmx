@@ -2377,9 +2377,11 @@ struct TwoP {
 }
 
 /// The columns [`TwoP`] keeps.
-const TWO_P_COLS: [&str; 12] = [
+const TWO_P_COLS: [&str; 24] = [
     "frame_counter", "dt", "p1_wreck_reason", "p2_wreck_reason", "p1_mode", "p2_mode",
     "p1_ch_centre.x", "p1_ch_centre.y", "p1_ch_centre.z", "p2_ch_centre.x", "p2_ch_centre.y", "p2_ch_centre.z",
+    "pad0_a", "pad0_b", "pad1_a", "pad1_b", "stamp0_a", "stamp0_b", "stamp1_a", "stamp1_b",
+    "p1_ch_euler.x", "p1_ch_euler.z", "p2_ch_euler.x", "p2_ch_euler.z",
 ];
 
 impl TwoP {
@@ -2411,6 +2413,12 @@ impl TwoP {
 
     fn int(&self, frame: u32, col: &str) -> u32 {
         self.text(frame, col).parse().unwrap_or_else(|_| panic!("{col} at {frame}"))
+    }
+
+    /// Pad half `k` (pad0_a, pad0_b, pad1_a, pad1_b) as the recorder read it on the row of `frame`.
+    fn pad(&self, frame: u32, k: usize) -> Vec<u8> {
+        let hex = self.text(frame, ["pad0_a", "pad0_b", "pad1_a", "pad1_b"][k]);
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("a pad byte")).collect()
     }
 }
 
@@ -2711,6 +2719,17 @@ enum Clause {
 }
 
 impl Clause {
+    /// The quantity off a pitch and roll (radians), for the clauses that judge the attitude.
+    fn of_attitude(self, [pitch, roll]: [f32; 2]) -> Option<f32> {
+        let (pitch, roll) = (pitch.to_degrees(), roll.to_degrees());
+        match self {
+            Clause::VerticalG => None,
+            Clause::GroundPitchDown | Clause::TouchPitchDown => Some(-pitch),
+            Clause::GroundPitchUp | Clause::TouchPitchUp => Some(pitch),
+            Clause::TouchRoll => Some(roll.abs()),
+        }
+    }
+
     /// The quantity the clause judges, out of what the wreck test was handed.
     fn of(self, j: &Judged) -> f32 {
         let (pitch, roll, g, _, _) = j.seen;
@@ -2785,79 +2804,114 @@ fn image_before(cap: &TwoP, frame: u32, p: u32) -> Option<(String, Ee, u32)> {
     None
 }
 
-/// How many of the 46 indexed events the original's run from its image reproduces on the
-/// capture's own line (see the test).
-const TWO_P_ON_THE_CAPTURE: usize = 22;
+/// How many of the 46 indexed events the original's whole-frame run from its image reproduces on
+/// the capture's own line (see the test): all of them.
+const TWO_P_ON_THE_CAPTURE: usize = 46;
 
-/// **Every wreck of the 2p recording, and every near miss, judged by the port as the original
-/// judged it** (S155). From the RAM image before each indexed event the original's own vehicle
-/// update runs the rider's bike to a tick past it, each tick on the dt of the capture row before
-/// (a row's dt is the next frame's). At every call of the original's wreck test the port's
-/// [`air::wreck_test`] and [`air::hit_wreck`] are handed the same inputs, read off the bike as the
-/// test is entered, and must enter what the original entered, on every call of every run.
-/// Where the run is still the capture's (the chassis centre bit for bit from the image to the row of the
-/// event, and on it: the test runs after the tick has moved the chassis): each wreck is the original's first, on the indexed row, with the indexed reason; each
-/// near miss is ridden out through the row after, with the clause's quantity the index's value.
-/// Runs that leave the capture first (the image holds the bike, not the rest of the frame's work
-/// on it) are listed; [`TWO_P_ON_THE_CAPTURE`] is the floor on the others. A skip with a line
-/// where the capture or the images are not in this worktree.
+/// The near misses whose row was read inside the frame, after the physics moved the centre and before
+/// chassis_measure took the new pitch and roll (+0x90, once a frame, after the physics): the row holds
+/// its frame's centre and the frame before's pitch and roll, bit for bit. P1 131628 reads pitch
+/// 48.143 deg, frame 131627's; the wreck test judged frame 131628's 48.044, which row 131629 reads.
+/// P1 135076 reads |roll| 50.019, frame 135075's; the wreck test judged 52.482 on the touch. C10's
+/// index read the rows as they stand.
+const TWO_P_ATTITUDE_LAGS: [(u32, u32); 2] = [(131628, 1), (135076, 1)];
+
+/// **Every wreck of the 2p recording, and every near miss, run by the original's whole frame from
+/// the image before it, on the capture's own line, and judged by the port as the original judged
+/// it** (S155, S176). From the latest RAM image that ends a frame for the rider two or more before
+/// each indexed event, the original's own frame ([`whole_frame`]: the device update on the recorded pads, the
+/// listener markers and the scene root's simulate slot, so both riders, their bodies and the world)
+/// runs to a frame past the event. At every call of the original's wreck test on the rider's bike the
+/// port's [`air::wreck_test`] and [`air::hit_wreck`] are handed the same inputs, read off the bike
+/// as the test is entered, and must enter what the original entered, on every call of every run.
+/// The run must hold the capture (each row the rider's centre and wreck reason after its own frame
+/// or the one before, bit for bit, or torn inside its frame, each axis one the centre held there:
+/// [`WholeRun::held_to`]) from the image to the event's row and on it. Each wreck is then the
+/// original's first, in the frame the event's row shows, with the indexed reason; each near miss is
+/// ridden out through the row after, the clause's quantity as the wreck test judged it in the frame
+/// the row shows the index's value, or, for a row read before that frame's measure
+/// ([`TWO_P_ATTITUDE_LAGS`]), the row's pitch and roll the frame before's, bit for bit, and the
+/// index's value.
+/// [`TWO_P_ON_THE_CAPTURE`] is the floor. A skip with a line where the capture or the images are not
+/// in this worktree.
 #[test]
 fn the_2p_wrecks_are_the_originals() {
     let Some(cap) = TwoP::load() else { return };
     let (mut exact, mut missing, mut drifted) = (Vec::new(), Vec::new(), Vec::new());
+    let mut lagging = Vec::new();
+    let mut kinds = std::collections::BTreeMap::new();
     for (frame, p, reason) in WRECKS_2P {
         assert_eq!((cap.reason(frame - 1, p), cap.reason(frame, p)), (0, reason), "P{p} {frame}: the index's wreck is not in the capture");
-        let Some((image, mut ee, row0)) = image_before(&cap, frame, p) else {
+        let Some((image, mut ee, t)) = image_ending_a_frame(&cap, frame, p) else {
             missing.push(format!("wreck P{p} {frame}"));
             continue;
         };
-        let (_, to, js) = judge_from(&cap, &mut ee, p, frame + 1 - row0);
-        eprintln!("P{p} wreck {reason} at {frame}: from {image} (row {row0}), the capture's centre held to {to}");
-        for j in &js {
-            eprintln!("    {j:?}");
-            assert_eq!(j.port, j.original, "P{p} {frame}: row {}: the port's wreck test answers {:?}, the original's {:?}", j.row, j.port, j.original);
+        let run = judge_whole(&cap, &mut ee, p, t, frame + 1);
+        let to = run.held_to(&cap, p);
+        for row in t + 1..=to {
+            *kinds.entry(format!("{:?}", run.shows(&cap, p, row))).or_insert(0) += 1;
         }
-        let first = js.iter().find(|j| j.held == 0 && !j.original.is_empty());
-        // While the original's run is still the capture's (its chassis centre bit for bit up to the event
-        // row), its first wreck is the indexed one on the indexed row. A run that has left
-        // the capture is the original riding a different line; it is listed, not judged.
+        eprintln!("P{p} wreck {reason} at {frame}: from {image}, the capture held to {to}");
+        for j in &run.judged {
+            eprintln!("    {j:?}");
+            assert_eq!(j.port, j.original, "P{p} {frame}: frame {}: the port's wreck test answers {:?}, the original's {:?}", j.row, j.port, j.original);
+        }
+        let first = run.judged.iter().find(|j| j.held == 0 && !j.original.is_empty());
         if to >= frame {
             let first = first.unwrap_or_else(|| panic!("P{p} {frame}: the original never wrecked though its run held the capture to {to}"));
-            assert_eq!((first.row, first.original.last().copied()), (frame, Some(reason)), "P{p} {frame}: the original's first wreck: {first:?}");
+            let shown = run.frames_of(&cap, p, frame);
+            assert!(shown.contains(&first.row) && first.original.last() == Some(&reason), "P{p} {frame}: the original's first wreck {first:?}, the row shows frames {shown:?}");
             exact.push(format!("wreck P{p} {frame}"));
         } else {
             drifted.push(format!("wreck P{p} {frame} (left at {to}; the original's wreck: {:?})", first.map(|j| (j.row, j.original.clone()))));
         }
     }
     for (frame, p, clause, value) in NEAR_2P {
-        let Some((image, mut ee, row0)) = image_before(&cap, frame, p) else {
+        let Some((image, mut ee, t)) = image_ending_a_frame(&cap, frame, p) else {
             missing.push(format!("near miss P{p} {frame} {clause:?}"));
             continue;
         };
-        let (_, to, js) = judge_from(&cap, &mut ee, p, frame + 1 - row0 + 1);
-        let at = js.iter().find(|j| j.row == frame).unwrap_or_else(|| panic!("P{p} {frame}: no wreck test on the row"));
-        eprintln!("P{p} near miss {clause:?} {value} at {frame}: from {image} (row {row0}), held to {to}, judged {}", clause.of(at));
-        for j in &js {
-            assert_eq!(j.port, j.original, "P{p} {frame} {clause:?}: row {}: the port's wreck test answers {:?}, the original's {:?}", j.row, j.port, j.original);
+        let run = judge_whole(&cap, &mut ee, p, t, frame + 1);
+        let to = run.held_to(&cap, p);
+        for row in t + 1..=to {
+            *kinds.entry(format!("{:?}", run.shows(&cap, p, row))).or_insert(0) += 1;
         }
-        if to >= frame {
-            for j in &js {
-                assert!(j.held == 0 && j.original.is_empty(), "P{p} {frame} {clause:?}: the original wrecked on row {}: {j:?}", j.row);
+        for j in &run.judged {
+            assert_eq!(j.port, j.original, "P{p} {frame} {clause:?}: frame {}: the port's wreck test answers {:?}, the original's {:?}", j.row, j.port, j.original);
+        }
+        let shown = run.frames_of(&cap, p, frame);
+        let at = if let [f] = shown[..] { run.judged.iter().find(|j| j.row == f) } else { None };
+        eprintln!("P{p} near miss {clause:?} {value} at {frame}: from {image}, held to {to}, judged {:?}", at.map(|j| clause.of(j)));
+        if to > frame {
+            for j in &run.judged {
+                assert!(j.held == 0 && j.original.is_empty(), "P{p} {frame} {clause:?}: the original wrecked in frame {}: {j:?}", j.row);
             }
-            assert!((clause.of(at) - value).abs() < 0.0015, "P{p} {frame} {clause:?}: the wreck test judged {} on the row, the index {value}", clause.of(at));
+            let at = at.unwrap_or_else(|| panic!("P{p} {frame} {clause:?}: the row shows frames {shown:?}, not one the wreck test ran in"));
+            let row = cap.attitude(frame, p);
+            if matches!(clause, Clause::VerticalG) || run.attitude(at.row) == Some(row) {
+                assert!((clause.of(at) - value).abs() < 0.0015, "P{p} {frame} {clause:?}: the wreck test judged {} in frame {}, the index {value}", clause.of(at), at.row);
+            } else {
+                assert_eq!(run.attitude(at.row - 1), Some(row), "P{p} {frame} {clause:?}: the row's pitch and roll are neither frame {}'s nor the one before's", at.row);
+                let read = clause.of_attitude(row.map(f32::from_bits)).unwrap_or_else(|| panic!("P{p} {frame} {clause:?}: a g clause on a row read before the measure"));
+                assert!((read - value).abs() < 0.0015, "P{p} {frame} {clause:?}: frame {}'s pitch and roll give {read}, the index {value}", at.row - 1);
+                eprintln!("P{p} {frame} {clause:?}: the row reads frame {}'s pitch and roll beside frame {}'s centre; the wreck test judged {} in frame {}", at.row - 1, at.row, clause.of(at), at.row);
+                lagging.push((frame, p));
+            }
             exact.push(format!("near miss P{p} {frame} {clause:?}"));
         } else {
-            drifted.push(format!("near miss P{p} {frame} {clause:?} (left at {to}; judged {})", clause.of(at)));
+            drifted.push(format!("near miss P{p} {frame} {clause:?} (left at {to})"));
         }
     }
     eprintln!("{} of {} events on the capture's own run: {exact:?}", exact.len(), WRECKS_2P.len() + NEAR_2P.len());
     eprintln!("left the capture first: {drifted:?}");
+    eprintln!("the rows the runs held, by how they show the run: {kinds:?}");
     if !missing.is_empty() {
-        skip(&format!("S155: no RAM image before {} of the 2p events: {missing:?} (research/s155/rams.py says how they are saved)", missing.len()));
+        skip(&format!("S176: no RAM image before {} of the 2p events: {missing:?} (research/s155/rams.py says how they are saved)", missing.len()));
         return;
     }
     assert_eq!(exact.len() + drifted.len(), WRECKS_2P.len() + NEAR_2P.len());
     assert!(exact.len() >= TWO_P_ON_THE_CAPTURE, "only {} of the 2p events ran on the capture's own line (was {TWO_P_ON_THE_CAPTURE})", exact.len());
+    assert_eq!(lagging, TWO_P_ATTITUDE_LAGS, "the near misses whose row reads the frame before's pitch and roll");
 }
 
 #[test]
@@ -3387,4 +3441,295 @@ fn the_bones_sweep_against_the_wreck_bike_as_the_originals() {
     }
     eprintln!("{swept} of the 5000 widened segments swept the bike; {far} lists with it off at a distance");
     assert!(swept > 500 && swept < 4500, "{swept} swept");
+}
+
+// --- S176: the whole simulation step from a 2p image -----------------------------------------------
+
+/// Frame `f` of the 2p capture through the engine tick's own sequence (`./kit dis` at the oracle's `engine_tick`), from
+/// the device update to the second frame marker: the pad halves laid into libpad's buffers, the
+/// device manager's update (dev vt +0x10: a1 1, dt in f12), the first marker (the app's vt +0x80, a1
+/// 1: the listener dispatch), the phase word, `dt` and `1/dt` stored, the frame counter stepped, the
+/// scene root's simulate slot (root vt +0x38: every node of the ride in the original's own order,
+/// both riders, their bodies and the world), the phase cleared and the second marker. The clock that
+/// makes the dt is not run (the capture row's dt stands in for it), nor the render.
+///
+/// The frame steps on row `f`'s dt: the recorder reads a row after the frame counter has stepped,
+/// so a row's dt is its own frame's (the image's stored dt is its counter's row's, bit for bit, on
+/// every image). The pads are row `f − 1`'s: libpad's stamp on row `f` is the frame counter + 8827
+/// on all but 31 of the 12,917 rows, and those 31 (read the soonest after the counter stepped) hold
+/// the half before, so the DMA that row `f` shows lands after frame `f`'s device update has read
+/// the pads (with row `f`'s pads most runs part within a few frames, with row `f − 1`'s they hold).
+fn whole_frame(ee: &mut Ee, cap: &TwoP, f: u32, clock: &mut f64) {
+    let dt = cap.dt(f);
+    for (k, at) in [0u32, 0x80, 0x400, 0x480].into_iter().enumerate() {
+        set_bytes(ee, PAD_BUFFERS + at, &cap.pad(f - 1, k));
+        ee.set_u32(PAD_BUFFERS + at + 0x58, cap.int(f - 1, PAD_STAMPS[k]));
+    }
+    let stubs = [addr("interrupts_off").unwrap(), addr("interrupts_on").unwrap(), SIF_SET_DMA, SIF_DMA_STAT, DCACHE_RANGE];
+    ee.hooks.insert(stubs[0], Box::new(|ee: &mut Ee| ee.set(2, 1)));
+    ee.hooks.insert(stubs[1], Box::new(|_: &mut Ee| {}));
+    // libpad's command DMA to the IOP is the hardware's (the buffers it would fill are laid in
+    // above): the transfer is queued and reported done, and the cache has nothing to write back.
+    ee.hooks.insert(SIF_SET_DMA, Box::new(|ee: &mut Ee| ee.set(2, 1)));
+    ee.hooks.insert(SIF_DMA_STAT, Box::new(|ee: &mut Ee| ee.set(2, u64::MAX)));
+    ee.hooks.insert(DCACHE_RANGE, Box::new(|_: &mut Ee| {}));
+    for at in TIMER_READS {
+        let word = ee.u32_at(at);
+        assert!(word & 0xffe0_ffff == 0x3c00_1000 || word & 0xffe0_ffff == 0x3c00_0000, "{at:#x} is not a `lui $r, 0x1000`: a different build");
+        ee.set_u32(at, word & 0xffff_0000);
+    }
+    // The wall clock the listeners stamp their samples with (the stick ring's flick speed), which
+    // the capture does not hold: the image's 100 ms ticks, stepped on by the frames' dts since.
+    *clock += f64::from(dt) * 1000.0;
+    let wall = (*clock / 100.0).floor();
+    ee.set_u32(addr("wall_ticks").unwrap(), wall as u32);
+    ee.set_u32(TIMER_COUNT, ((*clock - wall * 100.0) * 576.0) as u32);
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    let virt = |ee: &Ee, obj: u32, table: u32, slot: u32| ee.u32_at(ee.u32_at(obj + table) + slot);
+    let dev = ee.u32_at(app + 0x104);
+    ee.call(virt(ee, dev, 0x65c, 0x10), &[u64::from(dev), 1], &[dt], 4_000_000_000);
+    let marker = virt(ee, app, 0x3c4, 0x80);
+    ee.call(marker, &[u64::from(app), 1], &[], 4_000_000_000);
+    ee.set_u32(app + 0x32c, 2);
+    ee.set_f32(app + 0x344, dt);
+    ee.set_f32(app + 0x348, ps2_float::fpu::div(1.0, dt));
+    ee.set_u32(app + 0x374, ee.u32_at(app + 0x374) + 1);
+    assert_eq!(ee.u32_at(app + 0x374), f, "the image's frame counter is not the frame before {f}");
+    let root = ee.u32_at(app + 0x378);
+    ee.call(virt(ee, root, 0x8, 0x38), &[u64::from(root)], &[dt], 4_000_000_000);
+    assert_ne!(ee.v0(), 0, "frame {f}: the simulation asked to stop");
+    ee.set_u32(app + 0x32c, 0);
+    ee.call(marker, &[u64::from(app), 2], &[], 4_000_000_000);
+    for at in stubs {
+        ee.hooks.remove(&at);
+    }
+}
+
+/// libpad's pad buffers: port 0's two halves (+0x80 the second, each half's stamp at +0x58), +0x400
+/// port 1's (watch/2p.toml).
+const PAD_BUFFERS: u32 = 0x0047_a980;
+/// The capture's stamp column for each pad half, in [`whole_frame`]'s order.
+const PAD_STAMPS: [&str; 4] = ["stamp0_a", "stamp0_b", "stamp1_a", "stamp1_b"];
+/// `sceSifSetDma` and `sceSifDmaStat` (below 0: that transfer is done), and the data cache's
+/// write-back over a range (`cache` ops), which libpad's per-frame command send calls.
+const SIF_SET_DMA: u32 = 0x003f_c3a0;
+const SIF_DMA_STAT: u32 = 0x003f_c380;
+const DCACHE_RANGE: u32 = 0x003f_c8d8;
+/// The `lui $r, 0x1000` instructions in the frame that form Timer 0's register address, pointed at
+/// RAM's first page instead, where [`TIMER_COUNT`] stands in for the counter: a profiling read whose
+/// value nothing keeps, and the listener dispatch's clock.
+const TIMER_READS: [u32; 2] = [0x0016_7dc0, 0x0013_21fc];
+const TIMER_COUNT: u32 = 0;
+
+/// Rider `p`'s chassis centre (bits) and wreck reason in `ee`.
+fn rider_state(ee: &Ee, p: u32) -> ([u32; 3], u32) {
+    let bike = two_p_bike(ee, p);
+    let ch = ee.u32_at(bike + 0x7a4);
+    ([0, 4, 8].map(|k| ee.u32_at(ch + 0x60 + k)), ee.u32_at(bike + 0x748))
+}
+
+/// Rider `p`'s chassis pitch and roll (+0x90, +0x98: what the wreck test and C10's index read).
+fn rider_attitude(ee: &Ee, p: u32) -> [u32; 2] {
+    let ch = ee.u32_at(two_p_bike(ee, p) + 0x7a4);
+    [ee.u32_at(ch + 0x90), ee.u32_at(ch + 0x98)]
+}
+
+impl TwoP {
+    /// Rider `p`'s chassis pitch and roll on the row of `frame`.
+    fn attitude(&self, frame: u32, p: u32) -> [u32; 2] {
+        ["x", "z"].map(|c| (self.text(frame, &format!("p{p}_ch_euler.{c}")).parse::<f64>().expect("an angle") as f32).to_bits())
+    }
+
+    /// Rider `p`'s chassis centre and wreck reason on the row of `frame`.
+    fn state(&self, frame: u32, p: u32) -> ([u32; 3], u32) {
+        (self.centre(frame, p), self.reason(frame, p))
+    }
+}
+
+/// One rider's whole-frame run from a 2p image ([`judge_whole`]).
+struct WholeRun {
+    /// The image's frame counter.
+    image: u32,
+    /// The rider's centre and reason as the image holds them ([0]) and after each frame since.
+    states: Vec<([u32; 3], u32)>,
+    /// The rider's pitch and roll alongside.
+    attitudes: Vec<[u32; 2]>,
+    /// The centre chassis_integrate rebuilt from the chassis' transform as it began in each frame
+    /// (`None` for the image's own, or a frame the integrate did not run in).
+    rebuilt: Vec<Option<[u32; 3]>>,
+    /// Every call of the original's wreck test on the rider's bike; `row` is the frame it ran in.
+    judged: Vec<Judged>,
+}
+
+/// How a capture row shows a whole-frame run's rider.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Shows {
+    /// The row is the run after its own frame (the recorder read it after the simulation).
+    After,
+    /// The run after the frame before (read between the counter's step and the simulation).
+    Before,
+    /// Both (a bike standing still).
+    Both,
+    /// Neither, but each axis of the row's centre is one the run's centre held in its frame (before,
+    /// as the integrate rebuilt it from the transform, or after), with the run's reason: read while
+    /// the simulation had the bike half done.
+    Torn,
+    /// Not the run's.
+    Off,
+}
+
+impl WholeRun {
+    /// The run's pitch and roll after frame `f`.
+    fn attitude(&self, f: u32) -> Option<[u32; 2]> {
+        f.checked_sub(self.image).and_then(|k| self.attitudes.get(k as usize)).copied()
+    }
+
+    /// The run's state after frame `f` (the image's own for its counter).
+    fn at(&self, f: u32) -> Option<([u32; 3], u32)> {
+        f.checked_sub(self.image).and_then(|k| self.states.get(k as usize)).copied()
+    }
+
+    fn shows(&self, cap: &TwoP, p: u32, row: u32) -> Shows {
+        let got = cap.state(row, p);
+        let (after, before) = (self.at(row), self.at(row - 1));
+        match (after == Some(got), before == Some(got)) {
+            (true, true) => Shows::Both,
+            (true, false) => Shows::After,
+            (false, true) => Shows::Before,
+            _ => {
+                let (Some((a, ra)), Some((b, rb))) = (after, before) else { return Shows::Off };
+                let mid = row.checked_sub(self.image).and_then(|k| self.rebuilt.get(k as usize)).copied().flatten();
+                let held = (0..3).all(|k| got.0[k] == a[k] || got.0[k] == b[k] || mid.is_some_and(|m| got.0[k] == m[k]));
+                if held && (got.1 == ra || got.1 == rb) { Shows::Torn } else { Shows::Off }
+            }
+        }
+    }
+
+    /// The last row from the image's on that the run holds the capture to: each row the run after its
+    /// own frame or the one before, or a torn row within its frame with whole rows either side.
+    fn held_to(&self, cap: &TwoP, p: u32) -> u32 {
+        let last = self.image + self.states.len() as u32 - 1;
+        let mut held = self.image;
+        for row in self.image + 1..=last {
+            match self.shows(cap, p, row) {
+                Shows::Off => break,
+                Shows::Torn if row == last || self.shows(cap, p, row + 1) == Shows::Off => break,
+                _ => held = row,
+            }
+        }
+        held
+    }
+
+    /// The frames whose wreck test the capture's row shows: the row's own (read after it, or inside
+    /// it: torn), the one before, or either (a bike standing still); none for a row off the run.
+    fn frames_of(&self, cap: &TwoP, p: u32, row: u32) -> Vec<u32> {
+        match self.shows(cap, p, row) {
+            Shows::After | Shows::Torn => vec![row],
+            Shows::Before => vec![row - 1],
+            Shows::Both => vec![row - 1, row],
+            Shows::Off => vec![],
+        }
+    }
+}
+
+/// The latest 2p RAM image ending a frame for rider `p` at least two before row `frame` (the row may
+/// show the frame before its own, whose wreck test the run must see): one whose centre and wreck
+/// reason are its counter's row's or the next row's, that row before `frame`'s (an image saved partway
+/// through the rider's update, or between its move and its wreck test, is neither). From C10's
+/// (`states/c10/`) and S155's earlier ones (`states/s155/`), up to eight frames back.
+fn image_ending_a_frame(cap: &TwoP, frame: u32, p: u32) -> Option<(String, Ee, u32)> {
+    let kit = Kit::load().ok()?;
+    let mut found: Vec<(u32, PathBuf)> = Vec::new();
+    for dir in ["states/c10", "states/s155"] {
+        let local = kit.root.join("context").join(dir);
+        let at = if local.exists() { local } else { kit.ctx(dir) };
+        for t in frame.saturating_sub(8)..frame - 1 {
+            let path = at.join(format!("c10-{t}.ram"));
+            if path.exists() {
+                found.push((t, path));
+            }
+        }
+    }
+    found.sort();
+    for (t, path) in found.into_iter().rev() {
+        let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+        ee.set(28, u64::from(addr("boot_gp").unwrap()));
+        assert_eq!(ee.u32_at(addr("frame_counter").unwrap()), t, "{} is not frame {t}", path.display());
+        let app = ee.u32_at(addr("app_pointer").unwrap());
+        assert_eq!(ee.f32_at(app + 0x344).to_bits(), cap.dt(t).to_bits(), "{}: its dt is not row {t}'s", path.display());
+        let now = rider_state(&ee, p);
+        if now == cap.state(t, p) || (t + 1 < frame && now == cap.state(t + 1, p)) {
+            return Some((path.display().to_string(), ee, t));
+        }
+    }
+    None
+}
+
+/// The original's whole frame from a 2p image ([`whole_frame`]), through frame `last`, the wreck
+/// test heard on rider `p`'s bike as [`judge_from`] hears it: the port handed the inputs the
+/// original's test was entered with, and the original's calls of the bike's "came off" slot.
+fn judge_whole(cap: &TwoP, ee: &mut Ee, p: u32, image: u32, last: u32) -> WholeRun {
+    let bike = two_p_bike(ee, p);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let off = ee.u32_at(ee.u32_at(bike + 0x48) + 0xfc);
+    let c = Rc::clone(&calls);
+    ee.hooks.insert(
+        off,
+        Box::new(move |ee: &mut Ee| {
+            if ee.r(4) as u32 == bike {
+                c.borrow_mut().push(ee.r(5) as u32);
+            }
+            through(ee);
+        }),
+    );
+    let judged = Rc::new(RefCell::new(Vec::new()));
+    let frame = Rc::new(RefCell::new(image));
+    let (j, fr, c) = (Rc::clone(&judged), Rc::clone(&frame), Rc::clone(&calls));
+    ee.hooks.insert(
+        addr("bike_wreck_test").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            if ee.r(4) as u32 != bike {
+                return through(ee);
+            }
+            let dt = ee.f(12);
+            let held = ee.u32_at(bike + 0x748);
+            let (prm, mut a, ch, mut st, lo) = wreck_inputs(ee, bike, dt);
+            let (fifty, mass, height, list) = hit_inputs(ee, bike);
+            c.borrow_mut().clear();
+            through(ee);
+            st.heading = Vf([0, 4, 8, 12].map(|k| ee.f32_at(bike + 0x410 + k)));
+            st.up = Vf([0, 4, 8, 12].map(|k| ee.f32_at(bike + 0x420 + k)));
+            let landed = if held == 0 { air::wreck_test(&prm, &mut a, &ch, &st, &lo) } else { None };
+            let hit = air::hit_wreck(&prm, &mut a, st.touching, fifty, mass, height, &list);
+            let port = landed.into_iter().chain(hit).map(|w| w as u32).collect();
+            let seen = (ch.pitch.0.to_degrees(), ch.roll.0.to_degrees(), [lo.side.0, lo.vertical.0, lo.fore_aft.0], a.hang_time.0, lo.landing_crossup.0);
+            j.borrow_mut().push(Judged { row: *fr.borrow(), held, original: c.borrow().clone(), port, seen });
+        }),
+    );
+    let mut clock = f64::from(ee.u32_at(addr("wall_ticks").unwrap())) * 100.0;
+    // chassis_integrate's first act: the centre rebuilt from the transform (one quad store), then the
+    // transform's rotation turned back into a quaternion, which hook catches it at.
+    let rebuild = Rc::new(RefCell::new(None));
+    let (rb, ch) = (Rc::clone(&rebuild), ee.u32_at(bike + 0x7a4));
+    let after_rebuild = addr("chassis_integrate").unwrap() + 0x50;
+    ee.hooks.insert(
+        addr("mat4_to_quat").unwrap(),
+        Box::new(move |ee: &mut Ee| {
+            if ee.r(31) as u32 == after_rebuild && ee.r(16) as u32 == ch {
+                *rb.borrow_mut() = Some([0, 4, 8].map(|k| ee.u32_at(ch + 0x60 + k)));
+            }
+            through(ee);
+        }),
+    );
+    let (mut states, mut attitudes, mut rebuilt) = (vec![rider_state(ee, p)], vec![rider_attitude(ee, p)], vec![None]);
+    for f in image + 1..=last {
+        *frame.borrow_mut() = f;
+        whole_frame(ee, cap, f, &mut clock);
+        states.push(rider_state(ee, p));
+        attitudes.push(rider_attitude(ee, p));
+        rebuilt.push(rebuild.borrow_mut().take());
+    }
+    ee.hooks.clear();
+    let judged = judged.borrow().clone();
+    WholeRun { image, states, attitudes, rebuilt, judged }
 }
