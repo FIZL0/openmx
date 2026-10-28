@@ -5,8 +5,8 @@
 //! run on the disc's `free09.toy`, `free09.scn` and the `.pco` files: the order, the name, the `.pco`
 //! path, the world's two numbers, the one-body flag, the member count, and every body's place, mass,
 //! damping, inertia and gravity, bit for bit; the turn by value, one crate an ulp off (see below).
-//! The inertia's box is the one input the port cannot make (it is the scene node's bounding box),
-//! so it is read off the state's node and handed in.
+//! The inertia's box is the scene node's bounding box, which the node takes from its model's `.psg`;
+//! it is read off the disc and checked against the state's node.
 //!
 //! Skipped with a line where the disc, the kit or the state is not there.
 
@@ -129,13 +129,18 @@ fn free09s_props_are_the_collections_the_original_built() {
             .expect("a member of some collection");
         ee.u32_at(ee.u32_at(game[c] + BODIES + 8) + 4 * k as u32)
     };
+    // Every node's box, read off its model's .psg (S131), is the one the original's node holds, bit
+    // for bit and all four lanes; the bodies are then made from the model's box.
     let mut node_box = |m: Member| {
         let node = ee.u32_at(wrapper(m) + NODE);
         assert_eq!(ee.u32_at(node + CHILDREN), 0, "a prop node with children");
-        (ee.u8_at(node + FLAGS) & HAS_BOX != 0).then(|| props::NodeBox {
-            centre: Vf::from_bits(quad(&ee, node + CENTRE)),
-            half_extent: Vf::from_bits(quad(&ee, node + HALF)),
-        })
+        assert_ne!(ee.u8_at(node + FLAGS) & HAS_BOX, 0, "a prop node with no box");
+        let file = &scene.models[m.model].file;
+        let psg = res.read_suffix(&props::model_file(file)).expect("the prop's .psg");
+        let made = props::NodeBox::from_model(&psg).expect("a one-node model");
+        bits(&format!("{file}'s box centre"), made.centre, quad(&ee, node + CENTRE));
+        bits(&format!("{file}'s box half extent"), made.half_extent, quad(&ee, node + HALF));
+        Some(made)
     };
     let bodies = props::bodies(&port, &scene.models, &mut node_box);
     assert_eq!(bodies.len(), 62, "one body a collection");

@@ -5600,6 +5600,12 @@ physics_object_init   boot 0x001597b0 builds the body: quat = axes_to_quat(look,
 node_bounds           boot 0x001b3f50 (node, out centre, out half): corners centre -/+ half (+0xc0, +0xd0,
 #                                    only if node byte +0x110 bit 2, else vf0), children merged (+0x104
 #                                    first, +0x108 next), answers (min+max)/2 and (max-min)/2
+psg_node_read         boot 0x001b3890 (S131) a .psg's node records: count, then per node name[0x80], local
+#                                    matrix 0x40 (+0x40), centre 12 bytes (+0xc0), half 12 (+0xd0), +0x114,
+#                                    parent index; node 0 is the scene node itself; sets +0x110 bits 5 and 2
+#                                    every time. An instance of a loaded model copies the box (in the
+#                                    model loader 0x001a0360, for a one-node template only). Every
+#                                    knockable prop's .psg on the disc is one node (S131 probe), w lanes 1
 scene_model_read      boot 0x001a8cd0 SLT, Position, LookVector (0,0,1,1), UpVector (0,1,0,1), RefName;
 #                                    node frame via node_set_axes(look, up, orth 1, keep 0)
 node_set_axes         boot 0x001b1d70 mat4_basis into node +0x40..+0x70, then the world rebuild
