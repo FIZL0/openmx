@@ -619,6 +619,11 @@ fn parked(still: bool, drag: bool) -> Option<Parked> {
 /// stock bike's drag — the original's too, against the bike's speed over the *world* — 55 ft/s of
 /// head wind out-pulls both braked tires, the bike slips back at 8 ft/s and goes off the wagon's back
 /// in three seconds rather than one.
+///
+/// S146 compared against the original: its 250 braked on a wagon's roof creeps back about 0.2 ft/s and
+/// stays on, drag and all, and the port's replay of it agrees bit for bit (tests/replay.rs
+/// `a_bike_parked_on_the_trains_roof_rides_it_as_the_original_does`). The 8 ft/s slip here is this
+/// stock bike's and these controls', not a carrying fault.
 #[test]
 fn a_bike_parked_on_the_train_rides_it() {
     let Some(carried) = parked(false, false) else { return };
@@ -1073,4 +1078,98 @@ fn a_plane_flown_into_the_trains_side_meets_it() {
 
     let (open, ..) = flown_into(false).expect("the same state");
     assert_eq!(open, None, "with no cars the plane still wrecked");
+}
+
+// --- S146: the cars from a ride's save state ---------------------------------------------------------
+
+/// The curve's cached tangents (`+0x510`, `+0x520`) and its "tangents dirty" word (`+0x4fc`, research/
+/// oracle.txt S128): the curve makes the tangents again only when the word is set, which a cursor move
+/// does, and the next evaluation clears it.
+const TANGENTS: [u32; 2] = [0x510, 0x520];
+const TANGENTS_DIRTY: u32 = 0x4fc;
+
+/// Whether a car caught in a RAM image still rides [`Spec::measured`] — the port's [`Car::stale`]: the
+/// tangents it has cached are the measuring's, bit for bit. The dirty word cannot say so: it is clear
+/// both on a car that has not moved since its load and on one whose cursor has moved since and whose
+/// tangents were made again for its own segment.
+fn stale_of(ee: &Ee, car: u32, spec: &Spec) -> bool {
+    TANGENTS.iter().zip(&spec.measured).all(|(&o, m)| bits(vf(ee, car + o))[..3] == bits(*m)[..3])
+}
+
+/// A save state of the ride, out of the slot's `context/states`.
+fn image(file: &str) -> Option<Ee> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let path = kit.ctx("states").join(file);
+    if !path.exists() {
+        skip(&format!("{} is not there", path.display()));
+        return None;
+    }
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    Some(ee)
+}
+
+/// How many ticks [`the_cars_drive_on_from_a_rides_state`] runs each image.
+const RIDE_TICKS: usize = 90;
+
+/// **S146: the cars seeded from a ride's save state drive on as the original's.** S129's and S146's
+/// images, each with its 21 cars seeded as the replays seed them ([`stale_of`]), stepped by the port
+/// and by the original's `path_car_update` on the same RAM for [`RIDE_TICKS`] ticks: every car's world
+/// matrix, bit for bit. Seeding [`Car::stale`] from the dirty word being clear instead (S129's first
+/// replay) put every moving car on the measuring's tangents: S146's wagon swung 60° off its rails on
+/// the first tick and threw the bike parked on its roof.
+#[test]
+fn the_cars_drive_on_from_a_rides_state() {
+    let Some(parts) = archives() else { return };
+    let scn = member(&parts, "free06.scn").expect("free06.scn");
+    let scene = Scene::parse(&scn).expect("free06's scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_bytes = member(&parts, &leaf).expect("free06's terrain");
+    let terrain = Terrain::parse(&terrain_bytes).expect("free06's terrain");
+    let update = addr("path_car_update").unwrap();
+    let mut ran = 0;
+    for file in ["s146-roof.eeMemory.bin", "s129-across.eeMemory.bin", "s129-braked.eeMemory.bin", STATE] {
+        let Some(mut ee) = image(file) else { continue };
+        let specs: Vec<Spec> = CARS
+            .iter()
+            .map(|&car| {
+                let col = name(&ee, car).to_ascii_lowercase().replace(".psg", ".col");
+                spec_of(&ee, car, member(&parts, &col).map(|b| Mesh::parse(&b).unwrap()))
+            })
+            .collect();
+        // Whether the dirty word's rule would have seeded the same: it does not on any car that has
+        // left its first segment.
+        let dirty_rule: Vec<bool> = CARS.iter().map(|&car| ee.u32_at(car + TANGENTS_DIRTY) == 0).collect();
+        let stale: Vec<bool> = CARS.iter().zip(&specs).map(|(&car, spec)| stale_of(&ee, car, spec)).collect();
+        println!("{file}: stale {stale:?}, the dirty word's rule {dirty_rule:?}");
+        let mut world = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+        let mut traffic = Traffic::new(specs);
+        traffic.cars = CARS.iter().zip(&stale).map(|(&car, &stale)| Car { stale, ..car_of(&ee, car) }).collect();
+        // The control: the dirty word's rule, one tick on, has cars off the original's place.
+        let mut control = traffic.clone();
+        control.cars.iter_mut().zip(&dirty_rule).for_each(|(c, &d)| c.stale = d);
+        let mut other = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+        control.frame(DT, &mut other);
+        let mut ours = traffic.clone();
+        ours.frame(DT, &mut other);
+        let off = (0..CARS.len()).filter(|&k| mat_bits(&control.cars[k].pose) != mat_bits(&ours.cars[k].pose)).count();
+        println!("{file}: {off} cars off their place a tick on with the dirty word's rule");
+        assert!(off > 0, "{file}: the dirty word's rule seeds the same cars");
+        traffic.attach(&mut world.props);
+        ee.set_f32(app(&ee) + at::INV_DT, (F::ONE / DT).0);
+        for tick in 0..RIDE_TICKS {
+            for &car in &CARS {
+                ee.call(update, &[u64::from(car)], &[DT.0], BUDGET);
+            }
+            traffic.frame(DT, &mut world);
+            for (k, &car) in CARS.iter().enumerate() {
+                let node = ee.u32_at(car + at::NODE);
+                let what = format!("{file} tick {tick}: {} ({car:#x})", name(&ee, car));
+                assert_eq!(mat_bits(&traffic.cars[k].pose), mat_bits(&mat(&ee, node + at::WORLD)), "{what}: world matrix");
+                assert_eq!(traffic.cars[k].seg, ee.u32_at(car + at::CURSOR), "{what}: cursor");
+            }
+        }
+        ran += 1;
+    }
+    println!("{ran} images driven");
 }
