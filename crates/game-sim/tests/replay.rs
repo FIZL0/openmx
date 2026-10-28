@@ -9243,7 +9243,7 @@ mod s129_car {
     pub const UP: u32 = 0x4a0;
     pub const FIRST: u32 = 0x4e4;
     pub const CURSOR: u32 = 0x4f4;
-    pub const DIRTY: u32 = 0x4fc;
+    pub const TANGENTS: u32 = 0x510;
     pub const TIME_SCALE: u32 = 0x534;
     pub const LAG: u32 = 0x558;
     pub const HEADING_FILTER: u32 = 0x55c;
@@ -9302,9 +9302,11 @@ impl SaveState {
             })
             .collect();
         let mut traffic = Traffic::new(specs);
+        let measured: Vec<[Vf; 2]> = traffic.specs.iter().map(|s| s.measured).collect();
         traffic.cars = cars
             .iter()
-            .map(|&car| Car {
+            .zip(measured)
+            .map(|(&car, measured)| Car {
                 clock: self.float(self.word(car + at::PATH).unwrap() + at::CLOCK).unwrap(),
                 seg: self.word(car + at::CURSOR).unwrap(),
                 point: self.vf(car + at::LAST).unwrap(),
@@ -9312,7 +9314,13 @@ impl SaveState {
                 normal: self.vf(car + at::UP).unwrap(),
                 first: self.word(car + at::FIRST).unwrap() != 0,
                 pose: self.mat(self.word(car + at::NODE).unwrap() + at::WORLD).unwrap(),
-                stale: self.word(car + at::DIRTY).unwrap() == 0,
+                // Still on the measuring's tangents only while the cached ones are those, bit for
+                // bit: the dirty word is clear on a car that has moved since as well (S146,
+                // tests/traffic.rs `the_cars_drive_on_from_a_rides_state`).
+                stale: [at::TANGENTS, at::TANGENTS + 0x10]
+                    .iter()
+                    .zip(measured)
+                    .all(|(&o, m)| self.vf(car + o).unwrap().to_bits()[..3] == m.to_bits()[..3]),
                 level: Default::default(),
             })
             .collect();
@@ -9579,5 +9587,190 @@ fn the_parked_bike_never_gathers_the_train() {
             assert_eq!([c.normal.x(), c.normal.y(), c.normal.z()].map(f32::to_bits), [normal.x(), normal.y(), normal.z()].map(f32::to_bits));
             assert!([c.point.x() - point.x(), c.point.y() - point.y(), c.point.z() - point.z()].iter().all(|d| d.abs() < 0.001) && (c.fraction.0 - fraction.0).abs() < 0.001, "ray {}", c.segment);
         }
+    });
+}
+
+// --- S146: a bike parked on the Dallas train's roof, in the original and replayed ----------------------
+//
+// `research/s146/roof.py` on S129's along state (copy 2's slot 8): both brakes held, the bike moved 2.5 ft
+// over the middle of the tenth path car's roof (S81's order; `train_car_06`, the train's second boxcar)
+// with the chassis at the wagon's own velocity, ridden there 30 frames and saved (slot 13). Recorded from
+// that state at a quarter speed with `watch/s129-train.toml` and S129's braked pad:
+//
+//   ./kit pcsx2 with -- ./kit record watch/s129-train.toml --state 13 --pad watch/pads/s129-braked.pad \
+//       -n 270 -o context/capture/s146/roof.csv
+//
+// The state's RAM is `context/states/s146-roof.eeMemory.bin`; its bike search holds all the train's cars.
+
+/// The path car the bike rides in S146's state, by its place among the image's path cars (address order,
+/// [`SaveState::path_cars`]).
+const S146_WAGON: usize = 9;
+
+/// The tick each row's *bike* is at, where [`quarter_ticks`] numbers a row by its frame. The recorder
+/// mostly reads between a frame's path cars and its bike (S129), but now and then after the bike as
+/// well: such a row's bike is a tick ahead of its frame's, until a row that repeats it. S146's roof ride
+/// has three such runs (rows 161-162, 179, 198 and 211: the original's row 161 is the port's tick 162,
+/// lane for lane), and nothing in a row says which it is. The bike there rides the train at a steady
+/// 55 ft/s, so its own step says how many ticks lie between two rows: the change in `ch_cofg.x` over
+/// the row before's `ch_vel.x` × `dt`, rounded. Each row's tick is then within one of its frame's.
+fn bike_ticks(cap: &Capture, ticks: &[u64]) -> Vec<u64> {
+    let col = |c: &str| column(cap, c).unwrap_or_else(|e| panic!("{e}"));
+    let num = |r: usize, c: &str| -> f64 { cell(cap, r, col(c)).parse().unwrap() };
+    let mut out = ticks.to_vec();
+    for r in 1..out.len() {
+        let step = num(r - 1, "ch_vel.x") * num(r - 1, "dt");
+        let n = ((num(r, "ch_cofg.x") - num(r - 1, "ch_cofg.x")) / step).round();
+        assert!((0.0..=2.0).contains(&n), "row {r}: {n} ticks after the row before");
+        out[r] = out[r - 1] + n as u64;
+        assert!(out[r] == ticks[r] || out[r] == ticks[r] + 1, "row {r}: the bike at tick {}, its frame's {}", out[r], ticks[r]);
+    }
+    out
+}
+
+/// `w` with every sample after the first on its tick dropped: a row that repeats the next one's bike.
+fn first_on_each_tick(mut w: Watch) -> Watch {
+    w.samples.dedup_by_key(|s| s.tick);
+    w
+}
+
+/// **S146: a braked bike on the moving train's roof, in the original and replayed.** The original's
+/// bike stays where it was put on the wagon. The port is replayed from the same image among the same
+/// cars, lane by lane, and both bikes' places on the deck (along it, over it) are put side by side.
+#[test]
+fn a_bike_parked_on_the_trains_roof_rides_it_as_the_original_does() {
+    let path = private_dir("capture").join("s146").join("roof.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no {} — `research/s146/roof.py` says how it is made", path.display());
+        return;
+    };
+    let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let image = private_dir("states").join("s146-roof.eeMemory.bin");
+    let Some(st) = SaveState::open_image(&image, &S89_RIDER) else { return };
+    assert!(st.bike_search_holds_cars(), "the roof state's bike search holds the cars");
+    let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+    let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("roof: {e}"));
+    let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("roof: {e}"));
+    let bike = bike_ticks(&cap, &ticks);
+    in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, named, ridden, traffic| {
+        assert_eq!(traffic.cars.len(), 21, "free06's path cars");
+        let mut sim = acceptance_start(&cap, 0, ridden).unwrap();
+        sim.traffic = traffic;
+        let ride = &mut sim.rider.ride;
+        st.seed_chassis(ride).expect("the chassis");
+        st.seed_wheels(ride).expect("both wheels");
+        st.seed_balance(ride).expect("the balance");
+        st.seed_engine_outputs(ride).expect("the engine");
+        st.seed_air(ride).expect("the air state");
+        if let Some(d) = st.drivetrain() {
+            d.seed(ride);
+        }
+        st.seed_levers(ride).expect("the levers");
+        st.seed_engine_state(ride).expect("the engine's state");
+
+        let mut watches = Vec::new();
+        for (col, path) in chassis_lanes() {
+            let Ok(w) = cap.float(&col, &path) else { continue };
+            watches.push(first_on_each_tick(retick(w, &bike, 0)));
+        }
+        for (col, path) in slip_lanes() {
+            let Ok(w) = cap.bool(&col, &path) else { continue };
+            watches.push(first_on_each_tick(retick(w, &bike, 0)));
+        }
+        for (col, wheel) in [("f", "front"), ("r", "rear")] {
+            for (c, p) in [("ray_hit", "w.ray_hit"), ("swept", "w.swept_contact")] {
+                if let Ok(w) = cap.int(&format!("{col}_{c}"), &format!("rider.ride.{wheel}.{p}")) {
+                    watches.push(first_on_each_tick(retick(w, &bike, 0)));
+                }
+            }
+        }
+        // A row's train is a tick ahead of its bike (S129: the cars run before the bike in a frame).
+        if let Ok(w) = cap.float("train_clock", "cars[0].clock") {
+            watches.push(retick(w, &ticks, 1));
+        }
+        let last = *ticks.last().unwrap() as usize + 1;
+        let mut pads = inputs.clone();
+        pads.resize(last.max(pads.len()), Input::default());
+        let f = Fixture {
+            name: "s146 roof from its save state".into(),
+            seed: 0,
+            start: Some(sim.clone()),
+            inputs: pads.clone(),
+            watches,
+            world: Some(named.clone()),
+            ..Default::default()
+        };
+        let parts = |f: &Fixture, world: &mut dyn World| match replay::verify_in(f, world) {
+            Ok(_) => {
+                println!("{}: agrees on every tick", f.name);
+                None
+            }
+            Err(d) => {
+                println!("{}: {d}", f.name);
+                Some(d.tick)
+            }
+        };
+        let whole = parts(&f, world);
+        let mut apart = Vec::new();
+        for w in &f.watches {
+            let one = Fixture { name: format!("  {}", w.path), watches: vec![w.clone()], hashes: Vec::new(), ..f.clone() };
+            if parts(&one, world).is_some() {
+                apart.push(w.path.clone());
+            }
+        }
+        assert!(!apart.iter().any(|p| p == "cars[0].clock"), "the train parts from the original");
+
+        // Each bike's place on the wagon's deck, in the wagon's own frame: the port's wagon for both,
+        // its clock being the original's on every tick (the lane above).
+        let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+        let num = |r: usize, c: &str| -> f32 { cell(&cap, r, col(c)).parse().unwrap_or(f32::NAN) };
+        let mut port = sim.clone();
+        let mut on_deck = Vec::with_capacity(last);
+        let mut wrecked = None;
+        for t in 1..last {
+            let frame = port.tick_in(pads[t - 1], world);
+            if wrecked.is_none() {
+                wrecked = frame.wreck.map(|w| (t, w));
+            }
+            let pose = port.traffic.cars[S146_WAGON].pose;
+            let deck = move |p: [f32; 3]| {
+                let d = Vf::new(p[0] - pose.0[3].x(), p[1] - pose.0[3].y(), p[2] - pose.0[3].z(), 0.0);
+                game_sim::chassis::unrotate(&game_sim::chassis::Mat3::new(pose.0[0], pose.0[1], pose.0[2]), d)
+            };
+            let c = port.rider.ride.chassis.cofg_world;
+            let v = port.rider.ride.chassis.vel;
+            on_deck.push((t as u64, deck([c.x(), c.y(), c.z()]), v.x(), deck));
+        }
+        println!("roof: the port's first wreck {wrecked:?}");
+        let mut original_along = (f32::MAX, f32::MIN);
+        let mut port_along = (f32::MAX, f32::MIN);
+        for (r, &t) in bike.iter().enumerate() {
+            let Some((_, p, pv, deck)) = on_deck.iter().find(|(pt, ..)| *pt == t) else { continue };
+            let o = deck([num(r, "ch_cofg.x"), num(r, "ch_cofg.y"), num(r, "ch_cofg.z")]);
+            original_along = (original_along.0.min(o.z()), original_along.1.max(o.z()));
+            port_along = (port_along.0.min(p.z()), port_along.1.max(p.z()));
+            if r % 15 == 0 || r + 1 == bike.len() {
+                println!(
+                    "roof tick {t:4}: original on deck ({:6.2}, {:5.2}, {:6.2}) vel.x {:6.2} wreck {} | port ({:6.2}, {:5.2}, {:6.2}) vel.x {pv:6.2}",
+                    o.x(), o.y(), o.z(), num(r, "ch_vel.x"), num(r, "wreck_reason"), p.x(), p.y(), p.z()
+                );
+            }
+            assert_eq!(num(r, "wreck_reason"), 0.0, "roof row {r}: the original's bike went down");
+        }
+        println!("roof: along the deck the original ranged {original_along:?}, the port {port_along:?}");
+        // Parked and carried: the original's bike creeps back along the deck, ~1.5 ft in nine
+        // seconds (about 0.2 ft/s, not S136's stock bike's 8 ft/s), and never leaves it.
+        assert!(original_along.0 > -3.0 && original_along.1 < 3.0, "the original's bike slid {original_along:?} along the deck");
+        assert_eq!(whole, None, "the roof ride parts from the original");
+
+        // The control: the same ride with the bike's air drag off. The drag reads the bike's speed
+        // over the world (55 ft/s here, wagon or no wagon), and the original's bits have it in them.
+        let drag = sim.phy.mv.drag;
+        assert!(drag > F::ZERO, "the 250's drag is {}", drag.0);
+        let mut still = sim.clone();
+        Arc::make_mut(&mut still.phy).mv.drag = F::ZERO;
+        let control = Fixture { name: "s146 roof without the air drag".into(), start: Some(still), hashes: Vec::new(), ..f.clone() };
+        let parted = parts(&control, world);
+        println!("roof: the 250's drag {}; without it the ride parts at {parted:?}", drag.0);
+        assert!(parted.is_some(), "the roof ride agrees without the air drag too");
     });
 }
