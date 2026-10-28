@@ -39,7 +39,7 @@ let context;
 let disc = { size: 0, read: () => -1 };
 // What the page has said since the shell last asked.
 let keys = [];
-const held = new Set();
+const heldKeys = new Set();
 let clicks = [];
 let view = [640, 448];
 let pads = [];
@@ -279,11 +279,11 @@ onmessage = async ({ data }) => {
     }
     if (data.key !== undefined) {
       keys.push(data.key);
-      if (data.key & 1) held.add(data.key >> 1);
-      else held.delete(data.key >> 1);
+      if (data.key & 1) heldKeys.add(data.key >> 1);
+      else heldKeys.delete(data.key >> 1);
     } else if (data.blur) {
-      for (const k of held) keys.push(k << 1);
-      held.clear();
+      for (const k of heldKeys) keys.push(k << 1);
+      heldKeys.clear();
     } else if (data.click) {
       clicks.push(...data.click);
     } else if (data.view) {
