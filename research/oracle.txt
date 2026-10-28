@@ -6002,6 +6002,14 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # (pos 2439.249, 133.697, 4059.953). Its +0x2a0 and +0x2e0 are still identity in every state: the
 # update never ran, so 0x001dd7b0 would answer the node's position x 30. Not run live. s89-along,
 # s89-across and the biplane states hold none of the class.
+# S133 — the hierarchy toys' parts (crates/game-render/tests/toy_parts.rs, states s133-free10/-nat11
+#   from R7's scripted boot). The parts list is the motion object's +0x300 (count +0x304); a part's
+#   +0x230 is by then a node of the toy's skeleton (one of its joints' +0x34; a mesh .col's single part
+#   is on the root node +0x30), and its body's +0x254 is that same node (vt+0x74, a one-store setter).
+#   The bodies of hierarchy parts are updated every frame after their toy's nodes (+0x2a0 = the
+#   node's world in both states); the windsock's mesh part's body, like free09's, never is.
+kinematic_body_vtable boot 0x00451700 the kinematic body's vtable, at +8 of the body (ctor 0x001dd580)
+kinematic_body_update boot 0x001dd9b0 (a0 body) vt+0x38: +0x2e0 = +0x2a0, +0x2a0 = node(+0x254)+0x80..+0xbc
 # S157 — the 2p recording's world contacts. Journal: research/journal/2026-10-27-s157-2p-world-contacts.
 # Tests crates/game-sim/tests/two_p_world.rs (C10's images, c10-<frame>.ram, track Tracks\Free09_SS).
 # The level's collision node in the 2p state is 0x0061e630 (S88's split state: 0x0061e720): objects
