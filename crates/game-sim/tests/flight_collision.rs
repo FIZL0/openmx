@@ -340,7 +340,9 @@ fn a_plane_flown_into_the_ground_crashes() {
 /// `[biplaneWreck]`'s `MinImpulse` of 5) within a second of the crash test wrecking a plane flown
 /// into the ground, and never before it. Not on the wreck tick itself, as the original's nose-in
 /// was: dived in at 45°, the tires take the hit the tick before (a peak of 91) and the collision
-/// object, touching the next tick, adds no impulse until the tumble's first bounce.
+/// object, touching the next tick, adds no impulse until the tumble's first bounce. The original's
+/// own nose-in, replayed through the port (`tests/plane_crash_peak.rs`, S163), is heard on its wreck
+/// tick: its wheels are under compression, not bottomed, when the nose meets the ground.
 #[test]
 fn a_plane_crash_is_heard() {
     let Some((_, f, _, _)) = the_plane() else { return };
