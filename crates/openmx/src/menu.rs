@@ -421,6 +421,9 @@ pub struct Settings {
     /// [`game_sim::state::Sense::backwards_bail`]). Not the original's: off, the default, is the
     /// original, which rides such a landing out.
     pub backwards_bail: bool,
+    /// Whether a wreck rumbles the rider's pad (P183): the original's controller vibration option.
+    /// On by default, the original's.
+    pub vibration: bool,
     /// The last track ridden, which the track pick opens on.
     pub track: String,
     /// How a local game of two shares the screen, the split layout's pick (P43): `--split`'s.
@@ -1171,6 +1174,7 @@ impl Default for Settings {
             wrecks: true,
             air_wrecks: true,
             backwards_bail: false,
+            vibration: true,
             track: TRACKS[0].0.into(),
             split: Split::default(),
             music: "shuffle".into(),
@@ -1283,6 +1287,7 @@ impl Settings {
                 "wrecks" => s.wrecks = v != "off",
                 "air_wrecks" => s.air_wrecks = v != "off",
                 "backwards_bail" => s.backwards_bail = v == "on",
+                "vibration" => s.vibration = v != "off",
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // The ride setup's machine a seat (P41), gone with Start On (P177): every ride starts
                 // on the bike, so an old file's line loads and is dropped.
@@ -1403,6 +1408,7 @@ impl Settings {
             + &self.bays_text()
             + &self.air_wrecks_text()
             + &self.backwards_bail_text()
+            + &self.vibration_text()
             + &self.hud_text()
             + &self.original_text()
             + &self.filtering_text()
@@ -1439,6 +1445,12 @@ impl Settings {
     /// written as it was.
     fn backwards_bail_text(&self) -> String {
         if self.backwards_bail { "backwards_bail = on\n".into() } else { String::new() }
+    }
+
+    /// The Vibration switch (P183), only when it is off, so a file from before it is written as it
+    /// was.
+    fn vibration_text(&self) -> String {
+        if self.vibration { String::new() } else { "vibration = off\n".into() }
     }
 
     /// The minimap and the HUD's scale (V52), only where they are not the defaults, so a file from

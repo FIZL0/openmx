@@ -929,6 +929,21 @@ bike_wreck_entry            boot 0x00252ca0 (bike, reason) slot +0xfc on the bas
 player_wreck_entry          boot 0x0027b810 (bike, reason) the player's override: the jump record is
 #                                           ended, the base entry runs, the camera/rumble/announcer are
 #                                           told, then +0x14b4 = (reason != 0) and +0x12f8 += 1
+#                                           The rumble (P183): only for a human (+0x34 == 1) and the
+#                                           options word *(*(app+0x3d4)+4) == 0, the pad device's vt
+#                                           +0x4c as (f12 1.0, dev, 0, 200) — motor 0 (big) at level
+#                                           200 for 1.0 s, not "1.0 for 200 ms"
+pad_rumble_set              boot 0x0016b7e0 (dev, motor, level, f12 seconds) pad vtable 0x44ef70 +0x4c. Does
+#                                           nothing unless app(*0x0041f770)+0x325 bit 1 (set in the app
+#                                           constructor) and dev +0x6d0 bits 1-2 == 3 (DualShock). Motor 0:
+#                                           +0x6e4 = clamp(f12, 0, 5), +0x6ec = float(clamp(level, 0, 255));
+#                                           motor 1 (small, on/off): +0x6e8 = clamp(f12, 0, 5). A second ask
+#                                           while it runs restarts the timer
+pad_rumble_stop             boot 0x0016b7a0 (dev, motor) vt +0x48: zeroes +0x6e4 (0) or +0x6e8 (1);
+#                                           0x0016b7d0 (vt +0x50) zeroes both
+pad_update_motors           boot 0x0016ab10 (dev) vt +0x6c: in pad mode 6 counts +0x6e4/+0x6e8 down by dt,
+#                                           writes the level byte +0x72d (big) and +0x72c (small on/off),
+#                                           sends them with scePadSetActDirect 0x0041b358
 bike_unwreck                boot 0x00252ee0 (bike, kind) slot +0x100: +0x748 = 0, the attitude vector
 #                                           at +0x550 cleared, a cannonball's damping at +0x6a8
 #                                           doubled back, the action ids at +0xa78/+0xa7c = 0x1c (the
@@ -2901,7 +2916,8 @@ biplane_wreck_check boot 0x00353180 (self, dt). Reason 13, the map edge: within 
 biplane_wreck boot 0x003535d0 (self, reason) +0x3b0 = reason, WreckInertia/WreckDamping onto the body,
 #                             gravity -WreckGravity*mass*32.2, throttle and engine +0x70 zeroed, the
 #                             engine sound stopped. MX 0x00354aa0 adds a rumble (1.0, 200) for a
-#                             player and calls this
+#                             player and calls this. No options check there:
+#                             the big motor at 200 for 1.0 s even with vibration off
 biplane_unwreck boot 0x003536e0 undoes all of it (the halved gravity scale too for 13), restarts the
 #                               engine sound, then vt +0x198
 mxbiplane_reset boot 0x00355b00 back to the spawn transform +0xe10, throttle and surfaces zeroed,

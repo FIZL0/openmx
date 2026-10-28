@@ -47,6 +47,12 @@ ab_glyph = "0.2"
 # upscales, read, and --dump-textures' written, as opentennis reads and writes them (its texhash.rs).
 png = "0.18"
 
+# The pad's motors (P183): a wreck rumbles its rider's pad as the original's does. The js device the
+# pad is read through takes no force feedback; its sibling event node does, through an ioctl the shell
+# (unsafe-free) leaves to the evdev crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+
 # The browser's build (N4), as opentennis's is: wasm-bindgen for the page's calls, and ggrs' clock and
 # random numbers from the page (its `wasm-bindgen` feature).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
