@@ -5340,6 +5340,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
     // `--overview` (P166) draws nobody's.
     let mut seated = vec![!args.overview; world.seats.len()];
+    // What the online ride's riders said between drawn frames (P184), for the sound and the lines.
+    let mut online_said = audio::Said::default();
     // Whether the ride says how to join it (P171): a seat free and a controller idle.
     let mut join_cue = false;
 
@@ -6505,7 +6507,12 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 println!("modifiers: {} (the host's, from tick {})", if mods.is_original() { "the original game's".into() } else { mods.text() }, on.remodified_at().unwrap_or(0));
             }
             world.seats[0].hands = on.hands;
-            world.seats[0].said = rider::Frame::default();
+            // What each rider did since the last drawn frame (P184), off the ride as drawn: the
+            // session ran the rider's own frames, re-running some on a rollback, and kept none.
+            let drawn = on.drawn();
+            for (d, seat) in world.seats.iter_mut().enumerate() {
+                seat.said = drawn.get(d).map_or_else(rider::Frame::default, |&s| online_said.of(s, &seat.sim.rider));
+            }
             // An opened ride's lobby (N10) is the pause's to show: its code, who is in.
             if let Some(front) = front.as_deref_mut()
                 && front.menu.opening == menu::Opening::Open
