@@ -1,0 +1,17 @@
+# V70: from first_recording's state, a second's wait, full gas straight on for 0.9 s (a hard launch
+# that spins the rear; any longer and the bike reaches the drop ~30 ft ahead of the spawn), the brake
+# (square) for 3 s to a stop, then gas with the brake and the bars full over to back up (P72) on an
+# arc for 2.5 s, which leaves the bike beside its marks rather than on them, and the brake alone held for 6 s, for the chase camera to settle, and the shot (the spawn sits
+# on the drop's lip, so a released bike rolls off it): shot.py releases the pad after the shot.
+sleep 1000
+down cross
+sleep 900
+release
+down square
+sleep 3000
+down cross
+stick l 1 0
+sleep 2500
+up cross
+stick l 0 0
+sleep 6000

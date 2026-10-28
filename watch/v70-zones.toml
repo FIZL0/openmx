@@ -1,0 +1,104 @@
+# v70-zones.toml — V70: each wheel's surface byte beside the rider's zone bytes the tire tracks read.
+#
+# Ridden from first_recording's own save state (free09, slot 8) with the kit's pad, at full speed.
+# Per wheel (rider +0x7b0 front, +0x7b4 rear): the surface byte the heightfield query leaves (+0x110),
+# the ray's end in the world that query was asked at (+0x160), the ray's hit (+0xd0) and the load
+# point (+0x140). Then the snapshot the particle manager's tire records point at (stunt_state_pack
+# copies wheel +0x110 into rider +0x910/+0x911) and the manager's own per-tire zone (+0xf64 +0x29 and
+# +0x55). crates/game-sim/tests/wheel_zone.rs reads it (journal 2026-10-27-v70-tire-tracks-beside).
+
+[watch]
+name        = "v70-zones"
+description = "free09 from first_recording's state: each wheel's surface byte, its ray's end and the zone bytes the tracks read"
+every       = 1
+start       = "rider_type == 2"
+
+[setup]
+state     = 8
+warmup    = 0
+settle_ms = 300
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x860"
+type = "f32"
+
+[[field]]
+name = "f_surface"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x110"
+type = "u8"
+
+[[field]]
+name = "f_hit"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0xd0"
+type = "u32"
+
+[[field]]
+name = "f_end"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x160"
+type = "f32x4"
+
+[[field]]
+name = "f_load"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b0 -> 0x140"
+type = "f32x4"
+
+[[field]]
+name = "r_surface"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x110"
+type = "u8"
+
+[[field]]
+name = "r_hit"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0xd0"
+type = "u32"
+
+[[field]]
+name = "r_end"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x160"
+type = "f32x4"
+
+[[field]]
+name = "r_load"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7b4 -> 0x140"
+type = "f32x4"
+
+[[field]]
+name = "s910"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x910"
+type = "u8"
+
+[[field]]
+name = "s911"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x911"
+type = "u8"
+
+[[field]]
+name = "s914"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x914"
+type = "u32"
+
+[[field]]
+name = "s928"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x928"
+type = "u32"
+
+[[field]]
+name = "t0_zone"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf64 -> 0x29"
+type = "u8"
+
+[[field]]
+name = "t1_zone"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xf64 -> 0x55"
+type = "u8"

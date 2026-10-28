@@ -4358,6 +4358,10 @@ track_strip_add       boot 0x003d8f10 (Ghidra folds it into 0x003d8d80; read 0x3
 track_strip_end       boot 0x003d9600 ended = 1; count and u to 0 if it had rows
 # bike_tire_record      0x0027adf0 builds each wheel's record the manager reads: position, ground and
 #   object contact, compression, spinning (+0xe0), zone byte (rider +0x910/+0x911 live on free09 = 13).
+# V70 — stunt_state_pack copies the zone bytes straight from each wheel's surface byte (+0x910 from
+#   the front wheel (rider +0x7b0) +0x110, +0x911 from the rear (+0x7b4)): equal on all 1100 rows of
+#   animandpump played back (free09 dirt 13, road 0); the manager's per-tire zone (+0xf64 then +0x29 /
+#   +0x55) follows a frame late and read 0xff on the one reset tick (2996). Journal 2026-10-27-v70-tire-tracks-beside.
 # mxparticlezones.dat [TireTrack] differs a track: free06 and free10 none off, free07/free09 Zone1,
 # free11 Zone1 and Zone10. bike\tex\ttrack.pst 32x64, black, the tread in alpha (<= 95 doubled).
 # S58 — the spin step whole (wheel_spin_integrate, wheel_surface_drag, wheel_set_tire's 1/I), ported as
