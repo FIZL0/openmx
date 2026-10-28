@@ -6340,3 +6340,16 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 #   down) and +0xe80 0, +0xe60 = +0x820 (point), +0xe70 = +0x840 (velocity); then +0xe80 = (+0x93c == 0)
 #   — the target block +0xdd0's +0xb0 airborne flag, +0x90 / +0xa0 the takeoff.
 # PC exe (MX Unleashed PC): MXThrillCamera vf35 / vf37 and SimpleThrillCamera vf36 read alongside.
+# ---------------------------------------------------------------------------------------------------
+# S151 — the path cars on the bike's collision record. Journal: research/journal/2026-10-28-s151-train-cars-as-movers.
+# Port: mover_contact.rs Probe::mover / inside, rider.rs (the bump's movers), tests/traffic.rs
+# the_car_search_names_the_car_as_its_mover.
+# collision_record_collide's actor loop (0x00270c48..0x00270cc0) hands collision_record_add a ninth
+# argument on the stack (sd $6, 0($sp) at 0x00270ca8; the adder stores it at entry +0x78, 0x002702c4):
+# the struck collidable's +0x7c when that object's +0x1b0 == 2, else 0. The decompile drops it. The
+# mirrored entry (kind 1, into the other's record) gets 0 (sd $zero at 0x00270d58). The terrain rays'
+# entries get 0 there too (sd $zero, 0($sp) in the delay slot at 0x00270bd4).
+# Every path car's mesh collidable (car +0x428) has +0x7c = the car, +0x80 = 0, and the car's
+# +0x1b0 = 2, in all 21 cars of s129-across, s89-along, s146-roof and s129-braked: so a bike's body
+# ray on a car is an own entry with other (+0x74) 0 (scenery to the wreck test) and mover (+0x78) the
+# car, whose resolve meets the car's vt+0xb8 velocity and vt+0xbc spin (collision_relative_velocity).

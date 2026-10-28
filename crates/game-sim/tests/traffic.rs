@@ -1173,3 +1173,73 @@ fn the_cars_drive_on_from_a_rides_state() {
     }
     println!("{ran} images driven");
 }
+
+// --- S151: the riding bike's body rays name the car as their mover ----------------------------------
+
+/// The riding bike's body rays (`BikeCol::rays`, the disc's `Bike\Col\bike` files) against free06's
+/// cars from beside [`WAGON`], facing its side, `off` feet out from its middle along its side row:
+/// the car search's list ([`game_sim::mover_contact::struck`]). `still` takes the cars' motion away.
+fn beside(off: f32, still: bool) -> Option<(Vec<game_sim::contact::Contact>, usize, Vec<game_sim::contact::Mover>, Moving)> {
+    let ee = state()?;
+    let parts = archives()?;
+    let file = |name: String| member(&parts, &name).unwrap_or_else(|| panic!("{name} is not in free06's archives"));
+    let col = game_sim::bike_col::BikeCol::load(&file(game_sim::bike_col::rays_file(game_sim::bike_col::MODEL)), &file(game_sim::bike_col::shape_file(game_sim::bike_col::MODEL)))
+        .expect("the bike's collision files");
+    let scn = member(&parts, "free06.scn").expect("free06.scn");
+    let scene = Scene::parse(&scn).expect("free06's scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_bytes = member(&parts, &leaf).expect("free06's terrain");
+    let terrain = Terrain::parse(&terrain_bytes).expect("free06's terrain");
+    let mut world = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let mut traffic = traffic_of(&ee, &parts, &mut world.props);
+    let first = traffic.first.expect("attached");
+    traffic.frame(DT, &mut world);
+    traffic.frame(DT, &mut world);
+    let moving = world.props.props[first + WAGON].moving.expect("the wagon moves");
+    if still {
+        world.props.props.iter_mut().for_each(|p| p.moving = None);
+    }
+    let pose = moving.pose.0;
+    let side = pose[0];
+    let at = Vf::new(pose[3].x() + side.x() * off, pose[3].y() + game_sim::stock::SPAWN.y(), pose[3].z() + side.z() * off, 1.0);
+    let mut sim = game_sim::Sim::new(0x5151);
+    sim.rider.ride.place(at, Vf::new(-side.x(), 0.0, -side.z(), 0.0));
+    let cars = &world.props.props[first..];
+    let list = game_sim::mover_contact::struck(&col, &sim.rider.ride.transform(), cars, first, DT);
+    Some((list, first, game_sim::flight_search::movers(&world.props.props), moving))
+}
+
+/// S151: the original's contact search (`collision_record_collide`, its actor loop) writes each own
+/// entry's mover (`+0x78`) from the struck collidable's owner (`+0x7c`) when that is a vehicle of
+/// kind 2 (`+0x1b0`), else 0 — an argument the decompile drops, read off the disassembly
+/// (`research/oracle.txt` S151). Every path car's mesh collidable has the car as that owner, kind 2,
+/// and no collision object (S141's test, and the S151 journal on four ride images), so the original's
+/// bike struck by a car carries the car's motion in its response, and the wreck test (which reads
+/// `+0x74` alone) still calls it scenery. The port's car search names the same: every entry beside
+/// the moving wagon names a car's prop as its mover, and that prop's mover is the car's own motion;
+/// with the cars still, none does.
+#[test]
+fn the_car_search_names_the_car_as_its_mover() {
+    let mut found = None;
+    for off in [4.0f32, 5.0, 6.0, 7.0, 8.0, 9.0] {
+        let Some((list, first, movers, moving)) = beside(off, false) else { return };
+        if !list.is_empty() {
+            found = Some((off, list, first, movers, moving));
+            break;
+        }
+    }
+    let (off, list, first, movers, moving) = found.expect("no body ray met the wagon's side");
+    eprintln!("{off} ft out: {} entries", list.len());
+    for c in &list {
+        let m = c.mover.unwrap_or_else(|| panic!("an entry on a moving car named no mover: {c:?}"));
+        assert!(m >= first, "the mover {m} is not a car");
+        assert!(c.other.is_none(), "a car has no collision object");
+    }
+    assert!(list.iter().any(|c| c.mover == Some(first + WAGON)), "no entry named the wagon: {list:?}");
+    assert_eq!(movers[first + WAGON], moving.mover(), "the wagon's mover is its motion");
+    assert!(game_sim::mover_contact::wreck_contacts(&list).len() == list.len(), "the wreck test reads a car as scenery");
+
+    let (still, ..) = beside(off, true).expect("the same state");
+    assert!(!still.is_empty(), "the still wagon was not struck");
+    assert!(still.iter().all(|c| c.mover.is_none()), "a still car named a mover");
+}
