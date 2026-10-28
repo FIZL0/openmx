@@ -51,6 +51,9 @@ use crate::room::{HOST, Listing, Pick, Room, quick_pick};
 pub const ALPN: &[u8] = b"openmx/lobby/2";
 /// How long Find listens on the LAN before it shows what it has (mDNS answers come within a second or two).
 const LAN_WAIT: Duration = Duration::from_secs(3);
+/// How long a code with the internet off waits for its host's mDNS listing. mDNS answers only ~2 peers a 0.7 s
+/// round, so with many on the LAN (the lobby tests run ~50 at once) one host can take well past [`LAN_WAIT`].
+const LAN_CODE_WAIT: Duration = Duration::from_secs(20);
 /// A host's listing and code go out again this often, and on a change at most every [`LIST_GAP`].
 const REPUBLISH: Duration = Duration::from_secs(60);
 const LIST_GAP: Duration = Duration::from_secs(10);
@@ -1149,7 +1152,7 @@ async fn resolve(cx: &Ctx, code: &str) -> Result<EndpointAddr, String> {
             }
         });
     }
-    let until = Instant::now() + if online { RESOLVE } else { LAN_WAIT * 2 };
+    let until = Instant::now() + if online { RESOLVE } else { LAN_CODE_WAIT };
     let mut last = Ok(None);
     loop {
         if let Some(id) = board::lan_code(&cx.lan, &code).and_then(|l| l.id.parse::<EndpointId>().ok()) {
