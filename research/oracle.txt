@@ -6445,3 +6445,24 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # +0x1b0 = 2, in all 21 cars of s129-across, s89-along, s146-roof and s129-braked: so a bike's body
 # ray on a car is an own entry with other (+0x74) 0 (scenery to the wreck test) and mover (+0x78) the
 # car, whose resolve meets the car's vt+0xb8 velocity and vt+0xbc spin (collision_relative_velocity).
+# ---------------------------------------------------------------------------------------------------
+# S165 — the ragdoll's bones against the track's static props. Journal: research/journal/2026-10-28-s165-ragdoll-static-props.
+# Port: ragdoll_scene.rs Statics / StillProp / BikeSearch::gather_among / WreckBikeScene.props,
+# ragdoll_ride.rs step_posed_with (Down::statics).
+# The bones' search (body actor +0x628; least +0x24 10, extra +0x28 30, capacity +0x34 128,
+# no_groups +0x2c 0) is gathered by collision_search_gather (0x00218b80, kind 3) round collision 0's
+# sphere (actor +0x624 -> [0] -> +0x88; s89-along e.g. 0x0085c9d0, category +0x84 0x8, mask +0xcc
+# 0xffffffff). Its table 0x00d999c0's static tree 0x00d99b10 holds free06's scene meshes: class byte
+# +2 = 2, vtable +0x38 0x00451b50, category 0x220, +0x116 low nibble 0xc (ENABLED | WITHIN_BOUND:
+# listed only when its reach from the probe (+0x40 centre, +0x60 radius) is < the bound).
+# collision_pair_filter (0x00119d70)(bone sphere, mesh, 0) answers 1 for every scene mesh in the tree.
+# The tree's walk lists them in the port's Query order (nodes, chunks of 4, stamps), the centre and
+# bound as S105's; a kept list (sphere reach inside the bound) is only measured again.
+# Also in the tree, not ported (follow-ups): class-1 placed groups (plants; the filter on one hangs
+# the Ee, not called), category 0x18 meshes with +0x116 0x4 (12), category 0x100 vtable 0x00451850
+# (42), one category 0x9a058 mesh +0x116 0x14.
+# Proved on s89-along (tests/ragdoll_props.rs): 6,000 gathers (3,000 fresh round a prop, 3,000 kept)
+# list the same meshes in the same order at the same distances, bit for bit; 20,000 spheres paired
+# with one mesh, a mesh and its nearest, or one mesh twice through sphere_collider_pair, bit for bit
+# (12,465 hits; the second took 64); 10,000 bone_collision_push_out with the contact's other a scene
+# mesh equal the port's against STILL (0,0,0,1), bit for bit.
