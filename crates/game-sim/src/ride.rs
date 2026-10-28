@@ -1582,22 +1582,55 @@ const BIKE_SEARCH_LEAST: f32 = 30.0;
 const BIKE_SEARCH_EXTRA: f32 = 50.0;
 const BIKE_SEARCH_CAPACITY: i32 = 256;
 
-/// The one body probe the frame sweeps: the centre of mass along its own velocity for the frame,
-/// which is what stops the bike dead against a wall rather than letting it tunnel through at speed.
-///
-/// **This probe is the port's.** The original stops the bike with its eleven body rays (`+0x7c4`)
-/// and the chassis' sweep back, neither of which the ride runs against the world's props yet.
-/// Against a prop that moves, [`contacts`] kills only the velocity into it relative to the prop's
-/// (S145).
-fn velocity_bundle(ch: &chassis::Chassis, dt: F) -> Bundle {
-    let mut b = Bundle::default();
-    let cofg = ch.cofg_world;
-    let to = add_xyz(cofg, scale(ch.vel, dt));
-    b.probes[0] = Probe::between(cofg, to);
-    b.count = 1;
-    b.centre = cofg;
-    b.radius = length(sub_xyz(to, cofg));
-    b
+/// The chassis' sweep back's record (S125): the riding bike's collision object (`+0x7d0`) as its
+/// builder leaves it, the sweep's switch, offset, lead, push-out and facing cosine being the bike's
+/// `[Collisions]` high-speed keys ([`phy::Collisions`]), its transform the chassis' node. The bike's
+/// object has a sweep probe (`+0x1f4`) and a near-field search (`+0x10c`), and has no body (`+0xf4`):
+/// the split-screen RAM images' two riders' records hold these words (`tests/rider_contact.rs`).
+pub fn sweep_record(c: &phy::Collisions, at: &Mat4) -> crate::contact_search::Record {
+    crate::contact_search::Record {
+        sweep_back: c.check_for_high_speed_collisions,
+        offset: c.high_speed_ray_offset,
+        lead: c.high_speed_ray_speed_scale,
+        push_out: c.high_speed_unpenetration_distance,
+        facing: c.high_speed_min_collision_angle,
+        node: rider_contact::node(at),
+        nearby: true,
+        sweeps: true,
+        ..crate::contact_search::Record::default()
+    }
+}
+
+/// A world that answers only [`World::solid`] (the worlds tests build) as the sweep probe's search:
+/// the segment swept as a bundle of one probe, the port's sweep, its hit's normal the push-out. Nothing
+/// it strikes moves, and it has no ray probe.
+struct SolidSweep<'a>(&'a mut dyn World);
+
+impl crate::contact_search::Search for SolidSweep<'_> {
+    fn rays(&mut self, _nearby: bool) -> Vec<crate::contact_search::Hit> {
+        Vec::new()
+    }
+
+    fn sweep(&mut self, from: Vf, to: Vf, _nearby: bool) -> Option<crate::contact_search::Swept> {
+        let mut b = Bundle::default();
+        b.probes[0] = Probe::between(from, to);
+        b.count = 1;
+        b.centre = from;
+        b.radius = length(sub_xyz(to, from));
+        let mut record = Record::new();
+        self.0.solid(&b, &mut record);
+        record.hit[0].then(|| crate::contact_search::Swept {
+            push: record.normal[0],
+            point: record.point[0],
+            struck: crate::contact_search::Struck::default(),
+        })
+    }
+
+    fn moved(&mut self, _node: &crate::contact::Node) {}
+
+    fn velocity(&self, _struck: &crate::contact_search::Struck) -> Vf {
+        Vf::ZERO
+    }
 }
 
 /// The wheel probe's contacts where the chassis stands at `m`, as `(segment's from, point, normal)`,
@@ -1850,6 +1883,64 @@ fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, other_contact: bo
     calls
 }
 
+impl Ride {
+    /// **The chassis' sweep back** (S125): the riding bike's collision object's first search of the
+    /// tick, before its body rays look ([`crate::rider_contact::scenery`]), from where the last tick
+    /// left the bike. A segment from the offset point ([`phy::Collisions::high_speed_ray_offset`],
+    /// three feet up the frame) back along the chassis' velocity times the lead time, searched through
+    /// the bike's nearby search; when it strikes something the chassis' node is put back out of it,
+    /// the push-out distance along the hit's push direction from the hit, unless what it struck moves
+    /// and the two are going the same way ([`crate::contact_search::sweep_back_chassis`]). It is what
+    /// stops a bike too fast for its body rays from passing through a wall in one tick.
+    ///
+    /// The node is the ride's [`Ride::origin`]: the chassis takes its centre of mass back off it when
+    /// it next integrates, as the original's does. The velocity is left alone, and nothing is touched:
+    /// the record's touching flags are the rays'.
+    ///
+    /// The search is gathered around `rays` (the body rays, [`crate::bike_col::BikeCol::rays`], in the
+    /// original), or the wheel probe ([`wheel_rays`]) when the rider has no collision files, in a world
+    /// that hands its props over ([`World::wooded_near`]); in one that only answers [`World::solid`] the
+    /// segment is a bundle of one probe ([`SolidSweep`]). `true` when it moved the bike.
+    pub fn sweep_back(&mut self, p: &Phy, rays: Option<&flight_search::Rays>, world: &mut dyn World, dt: F) -> bool {
+        let at = self.transform();
+        let mut rec = sweep_record(&p.collisions, &at);
+        let vel = self.chassis.vel;
+        let moved = {
+            let (field, props, trees) = world.wooded_near(at.0[3]);
+            if props.is_some() || trees.is_some() {
+                let bounds = field.as_ref().map(|f| {
+                    let (lo, hi) = (f.min(), f.max());
+                    ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+                });
+                let wheels;
+                let rays = match rays {
+                    Some(r) => r,
+                    None => {
+                        wheels = wheel_rays(&self.front.w, &self.rear.w);
+                        &wheels
+                    }
+                };
+                let mut search = bike_search();
+                let mut scene = flight_search::Scene::wooded(props, trees, None, bounds, rays, &rec.node, &mut search);
+                Some(crate::contact_search::sweep_back_chassis(&mut rec, vel, &mut scene, dt))
+            } else {
+                None
+            }
+        };
+        let moved = match moved {
+            Some(m) => m,
+            None => crate::contact_search::sweep_back_chassis(&mut rec, vel, &mut SolidSweep(world), dt),
+        };
+        match moved {
+            Some(origin) => {
+                self.origin = Vf::new(origin.x(), origin.y(), origin.z(), self.origin.w());
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 // --- one frame of the bike --------------------------------------------------------------------------
 
 impl Ride {
@@ -1871,13 +1962,18 @@ impl Ride {
 
     /// [`Ride::frame_bumped`] for a bike whose body rays searched the world's props as well as the
     /// other riders this tick (S138, [`crate::rider_contact::scenery`]): `scenery` is whether any of
-    /// them touched one. Those contacts are in `bump`'s list, so when one did the port's own body probe
-    /// ([`velocity_bundle`]) is not swept: the props stop the bike through the list's resolve, which is
-    /// what loads the chassis' shock and so the wreck test's g peak, as the original's do. With `None`
-    /// it is `frame_bumped`.
+    /// them touched one. Those contacts are in `bump`'s list: the props stop the bike through the
+    /// list's resolve, which is what loads the chassis' shock and so the wreck test's g peak, as the
+    /// original's do. `Some` says the caller ran the tick's search, the chassis' sweep back
+    /// ([`Ride::sweep_back`]) first; with `None` nobody did, and the frame runs the sweep back itself
+    /// (`frame_bumped`'s, with no body rays).
     #[allow(clippy::too_many_arguments)] // frame_bumped's, and what the search found
     pub fn frame_searched(&mut self, p: &Phy, tables: &Tables, c: &Controls, dt: F, world: &mut dyn World,
                           mut bump: Option<&mut crate::rider_contact::Bump>, scenery: Option<bool>) -> Vec<mv::Call> {
+        if scenery.is_none() {
+            self.sweep_back(p, None, world, dt);
+        }
+        let scenery = scenery.unwrap_or(false);
         if c.respawn {
             self.place_back();
         }
@@ -2139,7 +2235,7 @@ impl Ride {
             rear.w.swept_contact = 0;
 
             calls.push(mv::Call::Contacts(s.dt));
-            let movers = contacts(chassis, &mut mvc, &out.chassis, front, rear, near, touching, rear_material, scenery, s.dt, world);
+            let movers = contacts(&out.chassis, front, rear, near, touching, rear_material, scenery, s.dt, world);
 
             for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
                 calls.push(mv::Call::Suspension(side, h));
@@ -2297,16 +2393,13 @@ impl Ride {
 /// The wheel probe ([`wheel_rays`], [`wheel_hits`]) is the original's, and so is what its contacts go
 /// through: [`chassis::wheel_contacts`], the distributor, with its rule that a contact whose segment
 /// starts forward of the chassis' origin is the front wheel's and anything else the rear's. The body
-/// probe ([`velocity_bundle`]) is resolved here: the travel the prop took away comes out of the
-/// position and the part of the velocity that was going into the surface is killed, which is what
-/// stops a rider against a prop instead of through it. When the body rays searched the props
-/// ([`Ride::frame_searched`]) and touched one, the probe is not swept: the list's resolve stops the
-/// bike. When they touched none it still is, as the stand-in for the chassis' sweep back, which is not
-/// ported: a trunk between the rays would be ridden through without it.
-#[allow(clippy::too_many_arguments)] // one frame's worth of the bike, and all of it needed
-fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &mut Wheel,
-            rear: &mut Wheel, near: &mut F, touching: &mut bool, rear_material: &mut u8, scenery: Option<bool>, dt: F,
-            world: &mut dyn World) -> Vec<(u32, crate::traffic::Moving)> {
+/// is not searched here: its rays against the props were searched once for the tick before the bike
+/// was updated, and their contacts are resolved at the top of the substep through the bump's list
+/// ([`crate::rider_contact::scenery`], [`crate::contact::resolve_ridden`]); `scenery` is whether they touched
+/// anything, which is the record's touching flag the air state reads. The chassis' sweep back
+/// ([`Ride::sweep_back`]) ran before them.
+fn contacts(m: &Mat4, front: &mut Wheel, rear: &mut Wheel, near: &mut F, touching: &mut bool, rear_material: &mut u8,
+            scenery: bool, dt: F, world: &mut dyn World) -> Vec<(u32, crate::traffic::Moving)> {
     let rays = wheel_rays(&front.w, &rear.w);
     let (hits, wheel_near) = wheel_hits(&rays, m, world);
     let look = !hits.is_empty();
@@ -2329,38 +2422,8 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
         .collect();
     let movers = hits.iter().filter_map(|h| h.3).collect();
 
-    let b = velocity_bundle(ch, dt);
-    let mut record = Record::new();
-    // What the probe stopped on, when that is a prop that moves this frame (S145).
-    let mut platform = None;
-    if let Some(touched) = scenery {
-        *touching |= touched;
-    } else {
-        world.solid(&b, &mut record);
-        let solid = (record.hit[0], record.fraction[0], record.owner[0]);
-        world.groups(&b, &mut record);
-        if solid.0 && record.fraction[0] == solid.1 && record.owner[0] == solid.2 {
-            platform = world.moving().and_then(|p| p.props.get(usize::try_from(solid.2).ok()?)?.moving);
-        }
-    }
-    if record.hit[0] {
-        // `Record::push`'s own arithmetic: the travel the triangle took away, along the normal —
-        // times the probe's length, because the record's version is a fraction of one unit of travel
-        // and not of the probe.
-        let probe = b.probes[0];
-        let normal = record.normal[0];
-        let left = scale(probe.dir, F::ONE - record.fraction[0]);
-        let blocked = scale(normal, dot3(left, normal));
-        ch.impulse = sub_xyz(ch.impulse, scale(blocked, probe.length));
-        // On a moving prop (a path car's mesh) only the velocity into it relative to the car's at the
-        // hit point is killed (S145): the bike rides its platform as the wheels do ([`under`]).
-        let into = match platform {
-            Some(moving) => dot3(sub_xyz(mvc.vel, moving.at(record.point[0]).1), normal).min(F::ZERO),
-            None => dot3(mvc.vel, normal).min(F::ZERO),
-        };
-        mvc.vel = sub_xyz(mvc.vel, scale(normal, into));
-        *touching = true;
-    }
+    // What the body rays found on the props this tick (S138), searched before the bikes are updated.
+    *touching |= scenery;
 
     let mut fc = chassis::WheelContact::default();
     let mut rc = chassis::WheelContact::default();
@@ -2381,17 +2444,16 @@ fn contacts(ch: &mut chassis::Chassis, mvc: &mut mv::Chassis, m: &Mat4, front: &
         }
     }
 
-    // What the ground step reads as `node_distance`: how close the nearest thing either search found
-    // came, as a fraction of the probe that found it.
-    let body_near = if record.hits > 0 { record.nearest } else { F::ONE };
-    *near = wheel_near.min(body_near);
+    // What the ground step reads as `node_distance`: how close the nearest thing the wheel probe found
+    // came, as a fraction of its segment.
+    *near = wheel_near;
     movers
 }
 
 /// The contact list [`air::hit_wreck`] reads: the bike's head ray ([`air::HEAD`]) swept against
 /// everything solid at the transform the frame ended on.
 ///
-/// **This composition is the port's**, like [`velocity_bundle`]'s. The original sweeps eleven body rays out of
+/// **This composition is the port's.** The original sweeps eleven body rays out of
 /// the bike's model every substep and resolves what they hit; the port has no model, so it sweeps the
 /// one ray that can wreck a rider who is not on a 50cc bike, once, after the frame, and resolves
 /// nothing — the frame's own probes have already done the pushing. A prop is the world, so what it

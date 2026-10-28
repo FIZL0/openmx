@@ -117,6 +117,41 @@ fn bits(v: Vf) -> [u32; 4] {
     v.to_bits()
 }
 
+/// S125: the riding bike's object's sweep back as the images hold it — on, with a sweep probe
+/// (`+0x1f4`) and a near-field search (`+0x10c`), no body, its transform the chassis' node — and its
+/// offset (`+0xb0`), lead (`+0xc0`), push-out (`+0xc4`) and facing cosine (`+0xc8`) the file's,
+/// bit for bit, as [`game_sim::ride::sweep_record`] builds them.
+#[test]
+fn the_sweep_back_is_the_originals() {
+    let tables = Tables::build();
+    let Some((phy, _)) = disc(&tables) else { return };
+    let want = game_sim::ride::sweep_record(&phy.collisions, &game_sim::math::Mat4([Vf::ZERO; 4]));
+    let mut seen = 0;
+    for name in IMAGES {
+        let Some(ee) = image(name) else { continue };
+        for (player, v) in PLAYERS.into_iter().enumerate() {
+            let r = ee.u32_at(v + RECORD);
+            let at = |field: u32| ee.u32_at(r + field);
+            let who = format!("{name} P{}", player + 1);
+            assert_eq!(at(0x3c) != 0, want.sweep_back, "{who}: the sweep back's switch");
+            assert_eq!(at(0x1f4) != 0, want.sweeps, "{who}: the sweep probe");
+            assert_eq!(at(0x10c) != 0, want.nearby, "{who}: the near-field search");
+            assert_eq!(at(rec::BODY), 0, "{who}: no body, so the chassis' branch");
+            let chassis = at(rec::CHASSIS);
+            assert_eq!(chassis, ee.u32_at(v + 0x7a4), "{who}: the chassis");
+            assert_eq!(at(0xf8), ee.u32_at(chassis + 0x254), "{who}: the transform is the chassis' node");
+            assert_eq!(quad(&ee, r + 0xb0), bits(want.offset), "{who}: the offset");
+            assert_eq!(at(0xc0), want.lead.0.to_bits(), "{who}: the lead");
+            assert_eq!(at(0xc4), want.push_out.0.to_bits(), "{who}: the push-out");
+            assert_eq!(at(0xc8), want.facing.0.to_bits(), "{who}: the facing cosine");
+            seen += 1;
+        }
+    }
+    if seen == 0 {
+        skip("no S93 image");
+    }
+}
+
 #[test]
 fn the_collider_is_the_originals() {
     let tables = Tables::build();

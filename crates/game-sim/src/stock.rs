@@ -18,7 +18,10 @@
 //! tests have ridden since P2 — two copies because `src` cannot `include_str!` a `tests` fixture and
 //! neither half is the disc's, so a drift between them costs nothing but a different stand-in.
 //! One line has drifted on purpose: `ReverseSpeed` here is the −10 every disc bike carries, because
-//! the fixture's +4 pushes a reversing bike forwards (S122).
+//! the fixture's +4 pushes a reversing bike forwards (S122). The `[Collisions]` pair is the disc
+//! bike's too (S125): with the file's defaults the chassis' sweep back starts at the bike's origin,
+//! under a deck it rides, and pushes it up out of anything not moving within a degree of its own
+//! way — a bike parked on the train was pushed along the wagon's deck.
 
 use ps2_float::Vf;
 
@@ -146,6 +149,9 @@ RollGain = 6
 MaxRollCommand = 0.4
 [Pitch Control]
 WheelieTopSpeed = 40
+[Collisions]
+HighSpeedRayOffset = 0, 3, 0
+HighSpeedMinCollisionAngle = 45
 ";
 
 /// The stand-in bike's parameters, through the ported loader.

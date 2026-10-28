@@ -419,6 +419,39 @@ pub fn sweep_back(rec: &mut Record, body: &mut Body, search: &mut dyn Search, dt
     rec.swept_to = at;
 }
 
+/// The sweep back, on an object with no body of its own whose transform is a vehicle's chassis' node
+/// (`+0xf4` empty, `+0xf0` the chassis): the riding bike's (S125). The same sweep as [`sweep_back`]'s,
+/// but the reference point is the offset turned by the node's rows onto its translation, the lead is
+/// along the chassis' velocity (`+0x260`), and a hit moves the node and nothing else: the chassis
+/// reads its centre of mass back off its node when it next integrates. `Some` with the node's new
+/// translation when the sweep moved it.
+pub fn sweep_back_chassis(rec: &mut Record, velocity: Vf, search: &mut dyn Search, dt: F) -> Option<Vf> {
+    if !rec.sweep_back || !rec.sweeps {
+        return None;
+    }
+    let r = rec.node.rotate(rec.offset);
+    rec.swept_to = plus(rec.node.origin, r);
+    let back = scaled(scaled(velocity, rec.lead), dt);
+    rec.swept_from = minus(rec.swept_to, back);
+    let hit = search.sweep(rec.swept_from, rec.swept_to, rec.nearby)?;
+    if hit.struck.other.is_some() || hit.struck.mover().is_some() {
+        let theirs = search.velocity(&hit.struck);
+        if !(dot(velocity, velocity).sqrt() <= F::ONE) && !(dot(theirs, theirs).sqrt() <= F::ONE) {
+            let (ours, theirs) = (unit(velocity), unit(theirs));
+            if !(dot(ours, theirs) <= rec.facing) {
+                return None;
+            }
+        }
+    }
+    let at = minus(plus(hit.point, scaled(hit.push, rec.push_out)), r);
+    rec.node.origin = rec.node.origin.merge(Dest::XYZ, at);
+    if rec.rays.is_some() {
+        search.moved(&rec.node);
+    }
+    rec.swept_to = at;
+    Some(rec.node.origin)
+}
+
 /// The whole search for `records[me]`: the sweep back, the heightfield rays, the world rays.
 pub fn collide(
     records: &mut [Record],
