@@ -5619,6 +5619,47 @@ node_name             boot 0x001b4fa0 node +0x120 is a pointer to the name
 # rest), and twelve rotated ones drift an ulp or two off the scene's frame: the bodies were made off
 # already-posed nodes (a second load?). SH_CrateC model 529's start turn is an ulp off the port's.
 
+# S130 — the props' tick (crates/game-sim/src/prop_world.rs; journal 2026-10-28-s130-props-tick).
+# tests/prop_world.rs runs free09's Sign_SpeedLmt through wake, swing, sleep, countdown and put-back
+# against the first_recording state in the interpreter, and node_bounds over every scene node with
+# children. Collection vtable 0x0045da90; the wrapper's 0x0044e760.
+# update 0x003b28a0: paused -> nothing; dynamics_world_step(coll +0x250) then the node's children.
+# activate 0x003b27a0: +0x20 |= 2, files coll +0x34 on the node's listener list (node +0x48 {count,
+# cap, +8 items}) via 0x0026f7d0; with PinToBody (+0x3c) every body enabled and +0x338 = -1.
+physics_collection_settle boot 0x003b2440 the collection's node listener: any body awake -> keep; all
+#                                    asleep -> ResetTime (+0x33c) < 0 deactivates, else counts +0x338
+#                                    down by dt, at <= 0 resets every body and deactivates
+physics_collection_unflag boot 0x003b2860 vt +0xac: clears the +0x20 active bit only
+physics_constraint_attach boot 0x001f3d00 a constraint's anchors (body-local pin points) and bodies
+torsion_spring_ctor   boot 0x001f2f90 BodyTorsionSpring, 0x40 bytes, vtable 0x00451ea0; filed on
+#                                    collection +0x270 / +0x2b8 (pins +0x288 / +0x2d0). Not ported.
+torsion_spring_read   boot 0x001f3060 vt +0x14: stiffness = Spring x body +0x110 inertia, damping
+#                                    2 * zeta * sqrt(I * k)
+torsion_spring_force  boot 0x001f3180 the pull back through quat_axis_angle
+# Constraint read (0x003b15b0) beyond S80: degrees x 0x3c8efa34; limits only when min <= max in every
+# lane (pin +0x8c = 0, lower/upper = curve_sine(angle * 0.5), +0x70 ConstrainAngles); the Pin's world
+# point = orientation_transform_point of the node's world rows. The pin's vtable 0x00451df0 +0x18 is
+# ragdoll pin_solve (0x001f49b0).
+physics_object_edge_check boot 0x0015b1a0 vt +0x10c, from post: with +0x70 set and a bounds pointer
+#                                    (+0x100), inside iff min.x (+0x30) < x < max.x (+0x40) and
+#                                    min.z (+0x38) < z < max.z (+0x48); outside -> disable + reset;
+#                                    inside -> transform_set_pose
+physics_object_at_rest boot 0x0015b400 +0x1b0 fresh -> no; else |vel| < +0x1c4, |rates| < +0x1c8,
+#                                    |accel| < +0x1cc, |ang accel| < +0x1d0, |shock| < +0x1d4,
+#                                    |twist| < +0x1d8
+physics_object_disable boot 0x0015b8c0 vt +0x128
+physics_object_place  boot 0x0015a1b0 vt +0xe4 (wrapper, place, look, up): side = look x up, up
+#                                    re-crossed, both normalised by rsqrt; start pos/turn, body reset,
+#                                    node pose; physics_object_reset (0x0015a030) calls it on
+#                                    +0x90/+0xa0/+0xb0
+physics_object_struck boot 0x0015ad40 like 0x0015acf0: wakes the wrapper through vt +0x124
+# The wrapper's listener (0x0015b2a0, filed at +0x50) counts its own ResetTime down the same way.
+node_bounds_merge     boot 0x001b42a0 (child, &any, lo, hi, parent rows, 1): rows x parent's rigid
+#                                    inverse, centre and |M0 h.x| + |M1 h.y| + |M2 h.z| into lo/hi
+#                                    (vmini/vmax xyzw; lo/hi w start from M0.w/M1.w, two zeros order
+#                                    -0 under +0), then its children. node_bounds' own corner and
+#                                    final sums are .xyz: centre.w = lo.w, half.w = hi.w.
+
 # V44 — the birds and the SequenceAnimatedToys (crates/game-render/src/creature.rs; journal
 #   2026-10-26-v44-creatures). Strings: ToyBirds.cpp 0x00444b00, the bird keys 0x00444b10..0x00444e98
 #   (StartPosition 0x00444d00, IsFlying 0x00444d10, StartingSplineName 0x00444d20, StartingSplineNode
