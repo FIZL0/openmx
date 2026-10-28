@@ -4125,6 +4125,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 }
                 Ok(s)
             });
+            // The path cars' loops (V74), off the same `.toy` the cars are: each rides its car.
+            let read = read.and_then(|mut s| {
+                let names: Vec<Vec<String>> = traffic.cars.iter().map(|(car, _)| car.sounds.clone()).collect();
+                if track_member.is_ok() && names.iter().any(|n| !n.is_empty()) {
+                    s.set_toys(Disc::open_configured()?, &track_res, &stem, &names)?;
+                }
+                Ok(s)
+            });
             match read {
                 Ok(s) => Some(s),
                 Err(e) => {
@@ -6924,6 +6932,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 sound.listen(&ears);
                 let area = sim_world::World::area(&world.place);
                 let frames: Vec<audio::SeatFrame> = world.seats.iter().map(|s| seat_sound(s, area)).collect();
+                // By the first seat's cars, which are the `.toy`'s as long as none was left out.
+                if !sound.toys.is_empty() && world.seats[0].sim.traffic.cars.len() == sound.toys.len() {
+                    let cars: Vec<[f32; 3]> = world.seats[0].sim.traffic.cars.iter().map(|c| {
+                        let t = c.pose.0[3].0;
+                        [t[0] + car_shift[0], t[1], t[2] + car_shift[1]]
+                    }).collect();
+                    sound.toys_at(&cars);
+                }
                 sound.frame(&frames, dt.0);
                 hushed = false;
             } else if !hushed {

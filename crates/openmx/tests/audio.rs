@@ -2212,3 +2212,101 @@ fn a_plane_thrown_off_the_edge_has_no_engine_until_it_respawns() {
     let rows = fly_and_listen(&mut f, &mut ground, &tables, 30 * 30);
     engine_stops_through_the_wreck(&rows, game_sim::biplane::THROWN, &f);
 }
+
+// ---------------------------------------------------------------------------------------------------
+// the path cars' loops (V74)
+// ---------------------------------------------------------------------------------------------------
+
+/// **A toy's loop rides its car** (V74): started on the first [`audio::Sound::toys_at`], loud with
+/// its car inside `MinDistance`, gone past `MaxDistance`, back when the car comes back; a ride that
+/// goes quiet starts it over on the next tick it sounds.
+#[test]
+fn a_toy_loop_rides_its_car() {
+    let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+    let mut s = audio::Sound::new(mixer.clone());
+    let toy = |near, far| audio::ToySound { clip: tone(8000.0, 0.5), looping: true, enabled: true, near, far };
+    // Car 0 carries one loop, car 1 none, car 2 one that never starts.
+    s.toys = vec![vec![toy(10.0, 100.0)], Vec::new(), vec![audio::ToySound { enabled: false, ..toy(10.0, 100.0) }]];
+    s.listen(&[audio::Listener { at: [0.0; 3], right: [1.0, 0.0, 0.0] }]);
+    let heard = |s: &mut audio::Sound, at: [f32; 3]| {
+        s.toys_at(&[at, [0.0; 3], [0.0; 3]]);
+        // Twice: the mixer eases a voice's gain toward its target.
+        listen(&mut mixer.lock().unwrap());
+        rms(&listen(&mut mixer.lock().unwrap()))
+    };
+    let near = heard(&mut s, [0.0, 0.0, 5.0]);
+    assert_eq!(mixer.lock().unwrap().voices(), 1, "the disabled one does not start");
+    let half = heard(&mut s, [0.0, 0.0, 55.0]);
+    let far = heard(&mut s, [150.0, 0.0, 0.0]);
+    let back = heard(&mut s, [0.0, 0.0, -5.0]);
+    println!("near {near} half {half} far {far} back {back}");
+    assert!(near > 1000.0, "{near}");
+    assert!(half > near * 0.3 && half < near * 0.7, "{half} of {near}");
+    assert!(far < 1.0, "{far}");
+    assert!((back - near).abs() < near * 0.1, "{back} vs {near}");
+    assert_eq!(mixer.lock().unwrap().voices(), 1, "moved, not started again");
+    s.quiet();
+    // Stopped voices fade out over the next render.
+    listen(&mut mixer.lock().unwrap());
+    assert_eq!(mixer.lock().unwrap().voices(), 0);
+    let again = heard(&mut s, [0.0, 0.0, 5.0]);
+    assert!(again > 1000.0, "{again}");
+    assert_eq!(mixer.lock().unwrap().voices(), 1);
+}
+
+/// **The toy loops are the disc's** (V74): every freeride scene's path cars name sounds whose
+/// `[ToySound_*]` is in the `.toy` and whose file is in the bank — free06's train its engine's
+/// `trainengine` and `trainloop1..3` behind it, the trucks `semi` and `car` — and no other track's
+/// cars name any.
+#[test]
+fn the_toy_loops_are_the_discs() {
+    let Some(mut d) = disc() else { return };
+    let mut tracks: Vec<String> = d
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| n.starts_with("Tracks\\") && n.ends_with(".res"))
+        .collect();
+    tracks.sort();
+    tracks.dedup();
+    let mut lib = audio::Library::open(d).unwrap();
+    let mut read = audio::Reading { lib: &mut lib };
+    let mut seen = Vec::new();
+    for member in &tracks {
+        let track = &member["Tracks\\".len()..member.len() - ".res".len()];
+        let Some(text) = read.lib.text(member, &format!("tracks\\{track}\\{track}.toy")) else { continue };
+        let names: Vec<Vec<String>> = game_render::toy::cars(&text).iter().map(|c| c.sounds.clone()).collect();
+        let named: usize = names.iter().map(Vec::len).sum();
+        if named == 0 {
+            continue;
+        }
+        let toys = read.toys(member, track, &names);
+        assert_eq!(toys.len(), names.len());
+        for (k, (n, t)) in names.iter().zip(&toys).enumerate() {
+            assert_eq!(n.len(), t.len(), "{track} car {}: {n:?}", k + 1);
+            for t in t {
+                assert!(t.looping && t.enabled && t.near > 0.0 && t.far > t.near, "{track} car {}", k + 1);
+                assert!(t.clip.seconds() > 0.1, "{track} car {}", k + 1);
+            }
+        }
+        if track.starts_with("free06") {
+            let train: Vec<(f32, f32)> = toys[..12].iter().map(|t| (t[0].near, t[0].far)).collect();
+            assert_eq!(names[0], ["train_car_01"]);
+            assert_eq!(train[0], (30.0, 150.0));
+            assert!(train[1..].iter().all(|&d| d == (30.0, 200.0)), "{train:?}");
+        }
+        let mut kinds: Vec<&str> = names.iter().flatten().map(String::as_str).collect();
+        kinds.sort();
+        kinds.dedup();
+        seen.push(format!("{track} {named} {}", kinds.join(",")));
+    }
+    let seen = seen.join("; ");
+    println!("{seen}");
+    assert_eq!(
+        seen,
+        "free06 21 car,semi,train_car_01,train_car_02,train_car_03,train_car_04; \
+         free06_ss 21 car,semi,train_car_01,train_car_02,train_car_03,train_car_04; \
+         free07 4 car,semi; free07_ss 4 car,semi; free09 3 semi; free09_ss 3 semi; free10 4 car; \
+         free10_ss 4 car; free11 8 car,semi; free11_ss 8 car,semi"
+    );
+}

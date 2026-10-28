@@ -6075,3 +6075,17 @@ weather_action_read  boot 0x003db500 trigger action: WeatherBoxName +0x20, NewMi
 weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >= 0 -> target +0xd0; step
 #                                    >= 0 -> +0xdc; aspect > 0 -> +0x25c; min > 0 or max > 0 -> both
 #                                    velocities and the speed table.
+
+# --- V74: the path cars' toy sounds -----------------------------------------------------------------
+# Path-car reader 0x00289710: NumberOfSounds (0x00434308), Sound%d (0x00434318), one 0x40-byte sound
+# object each (ctor 0x003e54f0, vtable 0x0045f290, class name "CarProceduralSound"; the vtable is
+# StaticSound's 0x0045f410 but for the dtor and +0x78), whose +0x78 reader 0x003e55c0 formats
+# "ToySound_%s" (0x00448c78) and reads Looping/OneShot/ResetWhenInaudible/Force2D/Stereo, OneShotDistance
+# 20, RandomTriggerPercent 100, CycleTime, MaxDistance/MinDistance 0, Priority 10, IsStream, StartEnabled
+# 1, AttachToObject "body", RolloffFactor 1; flags OneShot 1 | Looping 4 | ResetWhenInaudible 8 |
+# IsStream 0x10 into the world-sound maker 0x00103ef0; AttenuationCurve "Under" swaps the curve
+# (0x001b7050). The car then attaches it to its model (0x001b7290, the car's +0x254), which looks the
+# AttachToObject node up (0x001b37b0). Animated toys read NumberOfSounds too (0x002144d0, 0x0042f200,
+# AnimatedToySound ctor 0x003e58f0, reader 0x003e59d0 adds MotionName/StartTime/ConfigFile): no
+# AnimatedToy on the disc names one. PC: CarProceduralSound::vf32 / AnimatedToySound::vf32 at
+# 005068c0 / 00506b90 (guide only).
