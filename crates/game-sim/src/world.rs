@@ -312,14 +312,32 @@ pub struct Ground<'a> {
 impl<'a> Ground<'a> {
     /// The ground of one track: its terrain file, and the scene's own statement of how many root cells
     /// it has. A field is `width × 256` samples ([`SAMPLES_PER_WIDTH`]), whatever the tree's depth.
+    ///
+    /// Capped at the samples the tree holds (MD33, the port's own): a generated tile of fewer than
+    /// sixteen one-level cells, whose scene counts root cells as a world's file does
+    /// ([`crate::tiles::Tile::samples`]), would otherwise have its edge sixteen times past its ground,
+    /// and a bike ridden off the field would fall for ever. Every disc map's tree is its scene's
+    /// width × 256, so there the cap changes nothing and the edge is the original's to the bit; the
+    /// imported maps it bites on (MX vs. ATV's sx07 and nat04, Untamed's sm_hs) get their edge at
+    /// their last ground.
     pub fn new(terrain: &'a Terrain<'a>, layout: &TerrainLayout) -> Ground<'a> {
+        let tree = terrain.samples().unwrap_or([0, 0]);
+        let cap = |count: u32, axis: usize| {
+            let scene = count.max(1) * SAMPLES_PER_WIDTH;
+            if tree[axis] > 0 && tree[axis] < scene { (tree[axis], Some(tree[axis])) } else { (scene, None) }
+        };
+        let ((samples_x, short_x), (samples_z, short_z)) = (cap(layout.width, 0), cap(layout.breadth, 1));
+        // The edge's count of 256-sample units: the scene's, or the tree's own where it is shorter.
+        let units = |count: u32, short: Option<u32>| {
+            short.map_or(F(count as f32), |s| F::from(s as i32) / F::from(SAMPLES_PER_WIDTH as i32))
+        };
         Ground {
             spacing: terrain.scale,
-            samples_x: layout.width.max(1) * SAMPLES_PER_WIDTH,
-            samples_z: layout.breadth.max(1) * SAMPLES_PER_WIDTH,
+            samples_x,
+            samples_z,
             area: crate::biplane::Area::new(
-                F(layout.width as f32),
-                F(layout.breadth as f32),
+                units(layout.width, short_x),
+                units(layout.breadth, short_z),
                 layout.width_scale,
                 layout.breadth_scale,
             ),
