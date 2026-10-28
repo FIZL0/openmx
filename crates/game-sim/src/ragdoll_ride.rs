@@ -528,6 +528,10 @@ impl Down {
             let reach = kit.spheres.iter().fold(F::ZERO, |r, s| r.max(s.radius));
             b.cars = world.moving().map_or_else(Vec::new, |p| crate::ragdoll_scene::PathCar::near(&p.props, probe, reach));
         }
+        // The bones' segments are offered the bike through its collidable's sphere (S166).
+        if let Some(b) = &mut bike_scene {
+            b.sphere = bike;
+        }
         let scene: &mut dyn crate::ragdoll_contact::Scene = match &mut bike_scene {
             Some(b) => b,
             None => &mut open,
