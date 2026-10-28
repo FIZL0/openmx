@@ -5468,6 +5468,17 @@ physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: b
 #   Interface thunks: +0x580 vt+8 0x003e3dd0 (-> vt+0xfc -> wake), vt+0xc 0x003e3dc0 (wake): the
 #   listener calls a search makes on what it struck (collide_against_search). +0x584 vt+8 0x003e3de0.
 toy_cars_read         boot 0x00289710 the .toy's [Cars] reader (above)
+# S169 — the .toy's HasPhysics things, and what their collidables name (journal 2026-10-28-s169-physics-props;
+#   tests crates/game-sim/tests/prop_under.rs). On the disc only [CarN] sections carry HasPhysics (free06,
+#   free07, free09 Car7, free10, free11 and their _ss twins); the other rigid-body props are the
+#   [PhysicsCollections] (S80-S198: bales, banners, crates, barrels, cans, signs, BeachBall, EyeBall).
+#   A HasPhysics car's mesh (+0x428): +0x7c = the car (a vehicle, kind 2), +0x80 = 0 (S127) -> a Moving.
+#   A collection prop's f.col (collision object +0x1f8): +0x7c = 0, +0x80 = the collision object
+#   (physics object +0x120), whose +0xf4 = the object's body (+0x110) and +0xf0 (chassis) = 0, on all
+#   62 free09 props in first_recording. So no mover: a wheel on a prop takes wheel_contact_velocity's
+#   owner branch (+0x1f0 = the object) on a dynamics body. Run in the interpreter on each free09 prop
+#   with a generated body pose, velocity and spin: +0xa0, +0x1b0, +0x1c0, +0x170, +0x180, +0x190 bit for
+#   bit with prop_world Collection::under.
 # S128 — the path cars' ground switches: crates/game-sim/src/traffic.rs (Spec::presample, Level,
 # Spec::curve_kept, Spec::lagged), proved in crates/game-sim/tests/presample.rs on recording2's state
 # of free09 (six cars: free_trailercab x3, free_trailerC/A/D, at 0x01241f40 0x01252a20 0x01263570
