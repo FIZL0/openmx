@@ -815,6 +815,111 @@ const KEY_STICKS_NEW: [(usize, u8, u8); 4] = [
 /// the right stick's two, then the left stick's.
 const KEY_STICK_SLOTS: [usize; 4] = [REPORT_RIGHT_X, REPORT_RIGHT_Y, REPORT_LEFT_X, REPORT_LEFT_Y];
 
+/// One ask of a pad's motors (P183), as the original's pad device takes it: the big motor at a level
+/// of 255 for so many seconds. The original's setter clamps both — the seconds to 0..5, the level to
+/// 0..255 — and its pad update counts the seconds down by the frame's dt, sending the level to the
+/// DualShock 2's big motor until they run out; an ask while one runs starts the count again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rumble {
+    pub seconds: f32,
+    pub level: u8,
+}
+
+impl Rumble {
+    /// The player's wreck entry's, and the biplane's crash's: the big motor at 200 of 255 for a
+    /// second (the entry's call is `(1.0, pad, 0, 200)`: seconds in the float register, motor 0 the
+    /// big one, then the level).
+    pub const WRECK: Rumble = Rumble { seconds: 1.0, level: 200 };
+
+    /// An ask clamped as the original's setter clamps it.
+    pub fn new(seconds: f32, level: i32) -> Rumble {
+        Rumble { seconds: seconds.clamp(0.0, 5.0), level: level.clamp(0, 255) as u8 }
+    }
+
+    /// How long the host's motor runs, in the kernel's milliseconds.
+    pub fn millis(self) -> u16 {
+        (self.seconds * 1000.0).round() as u16
+    }
+
+    /// The level on the kernel's scale for a rumble's strong motor, `0..=0xffff`.
+    pub fn magnitude(self) -> u16 {
+        u16::from(self.level) * 257
+    }
+}
+
+/// Which frames of a seat rumble its pad (P183): the frame the rider's wreck entry ran, and the
+/// frame the biplane's crash word went up — the two places the original asks a human's pad for
+/// [`Rumble::WRECK`]. The bike's entry asks only when the options' vibration is on; the biplane's
+/// wrapper asks without looking, and here the Vibration setting holds for both (the player who
+/// turned it off meant every rumble).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WreckRumble {
+    /// The plane's crash word was up last frame.
+    plane_was: bool,
+}
+
+impl WreckRumble {
+    /// This frame's: `wreck` the bike's wreck entry ran, `plane_wrecked` the plane's crash word now.
+    pub fn frame(&mut self, wreck: bool, plane_wrecked: bool, vibration: bool) -> Option<Rumble> {
+        let crashed = plane_wrecked && !self.plane_was;
+        self.plane_was = plane_wrecked;
+        ((wreck || crashed) && vibration).then_some(Rumble::WRECK)
+    }
+}
+
+/// A pad's motors, through its event node's force feedback (the js node has none): one rumble
+/// effect uploaded on the first ask and rewritten on each one after, then played once — the
+/// kernel times it, so a frame the shell spends loading does not stretch it.
+#[cfg(target_os = "linux")]
+struct Motor {
+    device: evdev::Device,
+    effect: Option<evdev::FFEffect>,
+}
+
+#[cfg(target_os = "linux")]
+impl Motor {
+    /// The event node beside js node `node` (sysfs `<node>/device/eventN`), if it opens for writing
+    /// and says it can rumble.
+    fn open(dir: &std::path::Path, sys: &std::path::Path, node: &str) -> Option<Motor> {
+        let event = std::fs::read_dir(sys.join(node).join("device"))
+            .ok()?
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .find(|n| n.strip_prefix("event").is_some_and(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit())))?;
+        let device = evdev::Device::open(dir.join(event)).ok()?;
+        device.supported_ff()?.contains(evdev::FFEffectCode::FF_RUMBLE).then_some(Motor { device, effect: None })
+    }
+
+    fn play(&mut self, r: Rumble) -> std::io::Result<()> {
+        let data = evdev::FFEffectData {
+            direction: 0,
+            trigger: evdev::FFTrigger::default(),
+            replay: evdev::FFReplay { length: r.millis(), delay: 0 },
+            kind: evdev::FFEffectKind::Rumble { strong_magnitude: r.magnitude(), weak_magnitude: 0 },
+        };
+        match &mut self.effect {
+            Some(effect) => effect.update(data)?,
+            None => self.effect = Some(self.device.upload_ff_effect(data)?),
+        }
+        self.effect.as_mut().expect("uploaded").play(1)
+    }
+}
+
+/// No force feedback off Linux: the asks are kept and nothing turns.
+#[cfg(not(target_os = "linux"))]
+struct Motor;
+
+#[cfg(not(target_os = "linux"))]
+impl Motor {
+    fn open(_: &std::path::Path, _: &std::path::Path, _: &str) -> Option<Motor> {
+        None
+    }
+
+    fn play(&mut self, _: Rumble) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// One seat's pad and keyboard, as one report a frame: a joystick device, the keyboard, or both
 /// folded together (the first seat's pad and the keyboard, on a machine nobody has set seats up on).
 /// [`Seats`] owns one of these per pad that is plugged in and one for the keyboard.
@@ -873,6 +978,10 @@ pub struct Pads {
     moments: Vec<(u64, Report)>,
     /// A test's clock for the shell's, in microseconds: `None` reads [`crate::window::shell_us`].
     fake_now: Option<u64>,
+    /// The device's motors, where its event node takes force feedback (P183).
+    motor: Option<Motor>,
+    /// Every rumble asked of this pad, in order, whether or not a motor turned.
+    asked: Vec<Rumble>,
 }
 
 impl Pads {
@@ -927,7 +1036,26 @@ impl Pads {
             stamped: Vec::new(),
             moments: Vec::new(),
             fake_now: None,
+            motor: None,
+            asked: Vec::new(),
         }
+    }
+
+    /// Ask the pad's motors for a rumble (P183). A pad whose motor fails (unplugged mid-ask, or
+    /// the driver refuses) is not asked again.
+    pub fn rumble(&mut self, r: Rumble) {
+        self.asked.push(r);
+        if let Some(motor) = &mut self.motor
+            && motor.play(r).is_err()
+        {
+            self.motor = None;
+        }
+    }
+
+    /// Every rumble asked of this pad (P183).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn rumbles(&self) -> &[Rumble] {
+        &self.asked
     }
 
     /// The shell's clock now, or the test's.
@@ -2230,6 +2358,7 @@ impl Seats {
                 name => format!("{name} ({})", path.display()),
             });
             pads.device = Some(file);
+            pads.motor = Motor::open(&self.dir, &self.sys, node);
             pads.map = info.map();
             pads.nintendo = info.nintendo();
             pads.fake_now = self.fake_now;
@@ -2238,6 +2367,26 @@ impl Seats {
             pads.drain();
             self.joined.push(Joined { path, id, pads });
         }
+    }
+
+    /// Ask seat `seat`'s pad for a rumble (P183): the pad holding the seat, and nothing for a seat
+    /// the keyboard rides or nobody holds. Whether a pad was asked.
+    pub fn rumble(&mut self, seat: usize, r: Rumble) -> bool {
+        let Some(id) = self.slots.held.get(seat).cloned().flatten() else { return false };
+        match self.joined.iter_mut().find(|j| j.id == id) {
+            Some(j) => {
+                j.pads.rumble(r);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Every rumble asked of seat `seat`'s pad (P183), none for a seat with no pad.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn rumbles(&self, seat: usize) -> &[Rumble] {
+        let id = self.slots.held.get(seat).and_then(Option::as_ref);
+        id.and_then(|id| self.joined.iter().find(|j| &j.id == id)).map_or(&[], |j| j.pads.rumbles())
     }
 
     /// Rewire every pad and the keyboard, which the front end's Controls screen does between frames
@@ -4805,5 +4954,121 @@ pub(crate) mod tests {
         // The BTN_MISC block comes after the gamepad's in the joystick interface's numbering.
         let keys = format!("{} 0 0 0 0\n", format!("{:x}", (1u64 << 48) | 1));
         assert_eq!(js_order(&keys, (BTN_JOYSTICK..=KEY_MAX).chain(BTN_MISC..BTN_JOYSTICK)), [0x130, 0x100]);
+    }
+
+    /// **A seat's rumble reaches the pad holding it** (P183): 1P's ask is asked of 1P's pad and
+    /// of no other, and a seat with no pad (or the keyboard's) asks nothing. A fake pad has no event
+    /// node, so no motor turns: what is checked is who is asked.
+    #[test]
+    fn a_seats_rumble_asks_its_own_pad() {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        let root = scratch("rumble");
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        sys_entry(&sys, "js0", "Pad A", "usb-1/input0");
+        sys_entry(&sys, "js1", "Pad B", "usb-2/input0");
+        let _a = FakePad::plug(&dev, "js0");
+        let _b = FakePad::plug(&dev, "js1");
+        let mut seats = Seats::in_dir(&dev, &sys, None, None, Wiring::default(), Bindings::default());
+        frame(&mut seats, &nothing);
+        assert!(seats.rumble(1, Rumble::WRECK));
+        assert_eq!(seats.rumbles(0), []);
+        assert_eq!(seats.rumbles(1), [Rumble::WRECK]);
+        assert!(!seats.rumble(2, Rumble::WRECK));
+        assert_eq!(seats.rumbles(2), []);
+    }
+
+    /// The original setter's clamps (P183), and the wreck's ask on the kernel's scales.
+    #[test]
+    fn a_rumble_clamps_as_the_originals_setter() {
+        assert_eq!(Rumble::new(9.0, 300), Rumble { seconds: 5.0, level: 255 });
+        assert_eq!(Rumble::new(-1.0, -4), Rumble { seconds: 0.0, level: 0 });
+        assert_eq!(Rumble::new(1.0, 200), Rumble::WRECK);
+        assert_eq!((Rumble::WRECK.millis(), Rumble::WRECK.magnitude()), (1000, 51400));
+    }
+
+    /// **A rumble turns a real motor** (P183): a uinput pad that says it can rumble, opened as the
+    /// shell opens a pad's event node, takes the wreck's effect — a strong rumble at 200 of 255 for
+    /// 1000 ms — and is told to play it once. Needs `/dev/uinput` writable and the new node's
+    /// event device readable; run by hand: `--ignored a_rumble_turns_a_uinput_motor`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn a_rumble_turns_a_uinput_motor() {
+        use evdev::uinput::VirtualDevice;
+        use evdev::{AbsInfo, AbsoluteAxisCode, AttributeSet, EventSummary, FFEffectCode, FFEffectKind, KeyCode, UInputCode, UinputAbsSetup};
+        let mut ff = AttributeSet::<FFEffectCode>::new();
+        ff.insert(FFEffectCode::FF_RUMBLE);
+        let mut keys = AttributeSet::<KeyCode>::new();
+        keys.insert(KeyCode::BTN_SOUTH);
+        keys.insert(KeyCode::BTN_EAST);
+        // a stick as well, or udev does not call it a joystick and the node is root's alone
+        let stick = |code| UinputAbsSetup::new(code, AbsInfo::new(0, -32768, 32767, 0, 0, 0));
+        let mut pad = VirtualDevice::builder()
+            .unwrap()
+            .name("openmx rumble test")
+            .with_keys(&keys)
+            .unwrap()
+            .with_absolute_axis(&stick(AbsoluteAxisCode::ABS_X))
+            .unwrap()
+            .with_absolute_axis(&stick(AbsoluteAxisCode::ABS_Y))
+            .unwrap()
+            .with_ff(&ff)
+            .unwrap()
+            .with_ff_effects_max(4)
+            .build()
+            .unwrap();
+        let node = pad.enumerate_dev_nodes_blocking().unwrap().flatten().next().expect("an event node");
+        let name = node.file_name().unwrap().to_str().unwrap().to_string();
+        // the js node's sysfs entry, as the shell finds the event node beside it
+        let sys = scratch("rumble-uinput");
+        std::fs::create_dir_all(sys.join("js9").join("device").join(&name)).unwrap();
+        // udev makes the node and its permissions a moment after the device: try for two seconds.
+        // And a watchdog, since the loop below blocks on the device for as long as nobody writes.
+        let asker = std::thread::spawn(move || {
+            let mut motor = (0..40)
+                .find_map(|_| Motor::open(node.parent().unwrap(), &sys, "js9").or_else(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    None
+                }))
+                .expect("a motor");
+            motor.play(Rumble::WRECK).unwrap();
+            motor
+        });
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            eprintln!("no rumble in 10 s");
+            std::process::exit(1);
+        });
+        let (mut uploaded, mut played) = (None, None);
+        while played.is_none() {
+            for e in pad.fetch_events().unwrap().collect::<Vec<_>>() {
+                match e.destructure() {
+                    EventSummary::UInput(ev, UInputCode::UI_FF_UPLOAD, ..) => {
+                        let mut up = pad.process_ff_upload(ev).unwrap();
+                        uploaded = Some(up.effect());
+                        up.set_retval(0);
+                    }
+                    EventSummary::ForceFeedback(_, code, value) => played = Some((code, value)),
+                    _ => {}
+                }
+            }
+        }
+        let motor = asker.join().unwrap();
+        let effect = uploaded.expect("the effect uploaded");
+        assert_eq!(effect.replay.length, 1000);
+        assert!(matches!(effect.kind, FFEffectKind::Rumble { strong_magnitude: 51400, weak_magnitude: 0 }));
+        assert_eq!(played.map(|p| p.1), Some(1));
+        // The motor let go erases its effect, which waits on this side to say so.
+        let dropper = std::thread::spawn(move || drop(motor));
+        'erase: loop {
+            for e in pad.fetch_events().unwrap().collect::<Vec<_>>() {
+                if let EventSummary::UInput(ev, UInputCode::UI_FF_ERASE, ..) = e.destructure() {
+                    pad.process_ff_erase(ev).unwrap();
+                    break 'erase;
+                }
+            }
+        }
+        dropper.join().unwrap();
     }
 }

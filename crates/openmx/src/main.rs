@@ -1501,6 +1501,9 @@ struct Args {
     /// ([`game_sim::state::Sense::backwards_bail`], S161): the Settings screen's Backwards Landings
     /// Bail row, which `--backwards-bail` turns on. Off by default, the original's.
     backwards_bail: bool,
+    /// Whether a wreck rumbles the rider's pad (P183, [`pad::WreckRumble`]): `--no-vibration` turns
+    /// it off, and under the front end the Controls tab's Vibration row does, live.
+    vibration: bool,
     /// `--modifiers TEXT` (P55): the game modifiers the ride loads with, as `settings.txt` spells
     /// them (`gravity=50 bike_speed.1=200`). The original game's by default; under the front end the
     /// Settings screen's unless this asked for others. A `--play` tape rides with its own, and a
@@ -5337,6 +5340,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut menu_air = front.as_deref().map(|f| f.menu.settings.air_wrecks);
     // And Backwards Landings Bail's (S161).
     let mut menu_back = front.as_deref().map(|f| f.menu.settings.backwards_bail);
+    // Each seat's wreck rumble (P183): the plane's crash word last frame, to see it go up.
+    let mut wreck_rumbles: Vec<pad::WreckRumble> = Vec::new();
     // Which shell seats have a rider in them online, for the picture: an empty seat is not drawn.
     // `--overview` (P166) draws nobody's.
     let mut seated = vec![!args.overview; world.seats.len()];
@@ -6732,6 +6737,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 Some(by)
             })
             .collect();
+        // Whether a wreck rumbles a pad this frame (P183): `--no-vibration`, and the Vibration row
+        // as it stands now, the pause's change taken at once.
+        let vibration = args.vibration && front.as_deref().is_none_or(|f| f.menu.settings.vibration);
+        wreck_rumbles.resize(world.seats.len(), pad::WreckRumble::default());
         for (i, (seat, rig)) in world.seats.iter_mut().zip(&mut rigs).enumerate() {
             // How a player other than the first is named in the lines below; the first's lines are
             // the ones a one-player session has always printed.
@@ -6822,6 +6831,16 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             if seat.said.respawned {
                 println!("{who}put back");
+            }
+            // The wreck's rumble (P183), the original's on a human's pad: the bike's wreck entry, or
+            // the plane's crash word going up, asks this player's pad seat. Online only the players
+            // at this machine have a pad here.
+            let crashed = seat.garage.plane_flown().and_then(|p| p.flight.as_ref()).is_some_and(|f| f.crash.reason != 0);
+            if let Some(r) = wreck_rumbles[i].frame(seat.said.wreck.is_some(), crashed, vibration)
+                && i < args.players
+                && let Some(seats) = pad_seats.as_mut()
+            {
+                seats.rumble(args.pad_seat(i), r);
             }
             // Online, the other machines' riders past the local players have no view of their own:
             // posed and drawn, no camera.
@@ -9281,6 +9300,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         wrecks: true,
         air_wrecks: true,
         backwards_bail: false,
+        vibration: true,
         modifiers: game_sim::modifiers::Mods::original(),
         trace: None,
         trace_dt: None,
@@ -9521,6 +9541,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-wrecks" => args.wrecks = false,
             "--no-air-wrecks" => args.air_wrecks = false,
             "--backwards-bail" => args.backwards_bail = true,
+            "--no-vibration" => args.vibration = false,
             "--modifiers" => {
                 args.modifiers =
                     game_sim::modifiers::Mods::parse(&next("modifiers, like gravity=50")?).map_err(|e| format!("--modifiers: {e}"))?
@@ -9752,7 +9773,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
@@ -9845,7 +9866,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      the rider on whatever the bike's attitude in the air (a landing is still\n\
                      judged); --backwards-bail throws the rider off a landing\n\
                      with the bike facing back against its way, which the original rides\n\
-                     out (off by default); --modifiers sets the\n\
+                     out (off by default); --no-vibration keeps the pad still\n\
+                     when its rider wrecks; --modifiers sets the\n\
                      game modifiers, percentages of what the ride loads (a tape keeps its own);\n\
                      --moment draws one frame posed\n\
                      from a moment of the original and quits; --trace N rides N frames with\n\

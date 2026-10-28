@@ -87,6 +87,8 @@ pub enum Key {
     Wrecks,
     AirWrecks,
     BackwardsBail,
+    /// Whether a wreck rumbles the pad (P183), every player's.
+    Vibration,
     Bays,
     Modifiers,
     Hud,
@@ -662,6 +664,12 @@ impl Menu {
             ),
             device,
             pressure,
+            Row::on_off(
+                Key::Vibration,
+                "Vibration",
+                self.settings.vibration,
+                "Whether a pad rumbles when its rider wrecks, as the original's did. Every player's pad. On is the original game.",
+            ),
         ]);
         rows
     }
@@ -1141,6 +1149,7 @@ impl Menu {
             }
             Key::Wrecks => s.wrecks = !s.wrecks,
             Key::AirWrecks => s.air_wrecks = !s.air_wrecks,
+            Key::Vibration => s.vibration = !s.vibration,
             Key::BackwardsBail => s.backwards_bail = !s.backwards_bail,
             Key::Bays => s.bays = !s.bays,
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],

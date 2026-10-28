@@ -365,6 +365,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         air_wrecks: false,
         // Backwards Landings Bail on (S161).
         backwards_bail: true,
+        // Vibration off (P183).
+        vibration: false,
         track: "free11".into(),
         track_filter: "MX vs. ATV Untamed".into(),
         split: split::Split::SideBySide,
@@ -3490,7 +3492,7 @@ fn the_controls_tab_is_one_choice_a_seat_and_a_plane_stick() {
     settings_at(&mut m, &mut r, "Controls");
     let row = |m: &Menu, k: Key| m.page().into_iter().find(|r| r.key == k).unwrap();
     let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
-    assert_eq!(keys, [Key::BikeLayout, Key::PlaneLayout, Key::Markers, Key::Nintendo, Key::Controller, Key::Pressure], "one seat: no Player row");
+    assert_eq!(keys, [Key::BikeLayout, Key::PlaneLayout, Key::Markers, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration], "one seat: no Player row");
     assert!(!m.page().iter().any(|r| r.label.contains("Throttle")), "no throttle row");
     assert_eq!(row(&m, Key::BikeLayout).value, "New");
     let plane = row(&m, Key::PlaneLayout);
@@ -6453,4 +6455,30 @@ fn the_backwards_bail_row_toggles_and_survives_a_restart() {
     down_to(&mut m, &mut r, Key::ResetMods);
     tap(&mut m, &mut r, Control::Cross);
     assert!(!m.settings.backwards_bail, "the host's reset left it on");
+}
+
+/// P183: the Controls tab ends on a Vibration row, every player's; on is the default and the
+/// original's. Off, it is written to the file and read back after a restart.
+#[test]
+fn the_vibration_row_toggles_and_survives_a_restart() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    assert!(m.settings.vibration, "on is the default, the original's");
+    assert!(!m.settings.text().contains("vibration"), "{}", m.settings.text());
+    settings_at(&mut m, &mut r, "Controls");
+    assert_eq!(m.page().last().map(|r| r.key), Some(Key::Vibration));
+    down_to(&mut m, &mut r, Key::Vibration);
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Vibration).unwrap();
+    assert_eq!(row(&m).value, "On");
+    tap(&mut m, &mut r, Control::Right);
+    assert!(!m.settings.vibration);
+    assert_eq!(row(&m).value, "Off");
+    assert!(m.settings.text().contains("vibration = off\n"));
+
+    let dir = scratch("vibration");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (settings, _) = menu::load(&dir);
+    assert!(!settings.vibration);
+    std::fs::remove_dir_all(dir).ok();
+    assert!(Settings::parse("vibration = on\n").vibration);
 }
