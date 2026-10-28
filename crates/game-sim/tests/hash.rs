@@ -534,7 +534,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // not walked.
     // 11760 since V76: which animated toys the last frame drew (`Toys::seen`), the shell's picture
     // told to the next tick and never online, not walked: the toys' clocks it holds still are.
+    // 11768 since S198: the props' ray probe trees (`PropSet::rays`), a constant of the track, shared and
+    // not walked; each object's collision object is walked with it.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11760, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11768, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

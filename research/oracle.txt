@@ -6224,3 +6224,19 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 #   free09_ss, nat01, nat08, nat11, nat15, free10 shovel_01. No file writes DependentToy,
 #   AnimateWhenZoneNotVisible or DisableWhenIdle. UpdateSearch False only where the collision cannot
 #   move (free09/nat01 windmills' part on the static root, nat15 steamsaw a plain mesh).
+
+# --- S198: a prop's own collision object (crates/game-sim/src/prop_world.rs Collision; journal 2026-10-28-s198-prop-collision)
+# Collision object init 0x0026fcb0 (on the wrapper's +0x120): capacity +0x104 = the ray probe's count
+# (probe +0x168), or 8 with no ray probe; nearby +0x10c set only with a probe. Prop words: collidable
+# 0x18, collides_with 0xffffffff on every free09 prop (the wreck bike's 0x9a058 / 0x40000). Rays per
+# model: BeachBall 18, egg 191, crate 8, barrel 16, cans 24 / 9, tool_box 12; signs none.
+# The record's node pointer is the wrapper's model node (+0x13c); world node +0x134.
+# Collision vtable (rec +0x08): +0x74 clear, +0x7c collide(dt), +0x80 resolve.
+# Node update 0x0026f800: clear + collide on every filed object, step, children, then listeners.
+# File 0x0026f680 / unfile 0x0026f720 (clear first, off the node's +0x30 list, then vt +0xc listeners).
+# Wrapper: force listener 0x0015af40 = gravity then vt +0x80 resolve; enable 0x0015b790; disable
+# 0x0015b8c0 (DetectCollisionsWhenDisabled +0x6c: probe mode 0 and wake category 0x40); hit listener
+# 0x0015acf0 (not ported); object listener 0x0015b2a0 on countdown expiry: vt +0xdc put back, unfile,
+# then with detect and a probe 0x0011b070(probe, 1) and 0x0011b1b0 (category list emptied).
+# Wrapper flags: +0x54 collision enabled, +0x58 hit listener, +0x60 listens, +0x6c detect.
+# free09's free_trailerA.col / free_trailerb.col are toy meshes, not in the scene collision list.

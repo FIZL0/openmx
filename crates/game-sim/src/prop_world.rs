@@ -28,16 +28,31 @@
 //! anchors together; both limit the turn lane by lane when `ConstrainAngles` (the curve sine of half
 //! of each `MinAngles`/`MaxAngles` degree), a lone pin against the body's start turn.
 //!
-//! What is not here: the props' contacts (the collision object's force and its search, the struck
-//! entries that wake a prop — S131), and `BodyTorsionSpring`, which [`Collection::new`] reports
-//! rather than guesses (no free09 prop has one).
+//! **A body's own collision object** (S198, [`Collision`]) is the wreck bike's kind
+//! ([`crate::wreck_bike`]): the part's tuning, a ray probe out of the model's `<node>m.col` and a sweep
+//! probe. Waking a body files it on the world node, and the node's update searches every filed one
+//! before anything steps ([`Collection::search`]: the sweep back, the rays against the terrain, the rays
+//! against the world's objects); the body's force listener then resolves what it found
+//! ([`crate::contact::resolve`]) after adding gravity, so a loose prop lands, bounces and rolls instead
+//! of falling through the ground. A body put to sleep keeps its collision object filed when the part
+//! says `DetectCollisionsWhenDisabled`: it goes on searching, its rays among the categories that wake
+//! it only ([`crate::flight_search::WAKE_MASK`]).
+//!
+//! What is not here: the props struck (their `f.col` as a collidable others' searches meet, and the
+//! wake that strike or the rays' own hit gives — S197), and `BodyTorsionSpring`, which
+//! [`Collection::new`] reports rather than guesses (no free09 prop has one).
 
 #![deny(clippy::float_arithmetic)]
 
-use crate::biplane::{Body, Dynamics, List, World};
+use crate::biplane::{self, Body, Dynamics, List, World};
 use crate::camera::CurveTable;
 use crate::chassis::turn;
-use crate::contact::Node;
+use crate::contact::{self, Collider, Mover, Node, Weighed};
+use crate::contact_search::{self, Heightfield, Hit, Record, Search, Struck, Swept};
+use crate::eco::Trees;
+use crate::flight_search::{self, Rays, Scene};
+use crate::world::Props;
+use crate::wreck_bike::{self, NoObjects};
 use crate::math::{Mat4, basis, mat4_to_quat};
 use crate::phy::Part;
 use crate::props::{Constraint, NodeBox, Pco};
@@ -82,6 +97,44 @@ pub struct Object {
     pub filed: bool,
     /// The model's node: the transform the post listener and the placement write.
     pub node: Node,
+    /// The collision object (S198), when the loader made one.
+    pub collision: Option<Collision>,
+}
+
+/// The flags of a prop's collidable (its `f.col`: the collision object's `+0x1f8`, its `+0x84`) and
+/// its collides-with mask (`+0x114`), the same on every free09 prop. Read off the running game, as the
+/// wreck bike's ([`wreck_bike::COLLIDABLE`]): they decide only what the object does against another
+/// collision object, which nothing here meets yet (S197).
+pub const COLLIDABLE: u32 = 0x18;
+pub const COLLIDES_WITH: u32 = 0xffff_ffff;
+
+/// The contact capacity of a collision object with no ray probe (one a ray otherwise).
+pub const CAPACITY: usize = 8;
+
+/// A body's collision object (S198): the wreck bike's kind, tuned by the same setters off the part's
+/// keys ([`wreck_bike::collider`], [`wreck_bike::record`]), its ray probe the model's `m.col` rays (an
+/// object with none — the signs — has no ray probe and no sweep probe either, so its search finds
+/// nothing). Its transform is the model's node, [`Object::node`]: the record holds it only while it
+/// searches (a sweep back moves it), and is left at the default between.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Collision {
+    pub collider: Collider,
+    pub record: Record,
+}
+
+impl Collision {
+    /// The part's collision object, `collider` the tuning the body's loader made with it, `rays` the
+    /// model's ray file's segments (`[start, end]`, model space).
+    pub fn new(part: &Part, mut collider: Collider, rays: Option<Vec<[Vf; 2]>>) -> Collision {
+        collider.collides_with = COLLIDES_WITH;
+        collider.collidable = Some(COLLIDABLE);
+        let mut record = wreck_bike::record(part, Node::default());
+        record.capacity = rays.as_ref().map_or(CAPACITY, Vec::len);
+        record.nearby = rays.is_some();
+        record.sweeps = rays.is_some();
+        record.rays = rays;
+        Collision { collider, record }
+    }
 }
 
 impl Object {
@@ -109,6 +162,7 @@ impl Object {
             listens: true,
             filed: false,
             node: Node { rows: [Vf::ZERO; 3], origin: ORIGIN },
+            collision: None,
         }
     }
 }
@@ -288,18 +342,37 @@ impl Collection {
         self.forces.retain(|&i| i != k);
         self.posts.retain(|&i| i != k);
         self.bones[k].body.enabled = false;
-        let o = &mut self.objects[k];
+        let o = &self.objects[k];
         if o.filed && !o.detect_when_disabled {
-            o.filed = false;
+            self.unfile(k);
+        }
+    }
+
+    /// The collision object taken off the world node: its list and flags emptied first (its clear),
+    /// so a put-back object touches nothing until a wake files it again.
+    fn unfile(&mut self, k: usize) {
+        let o = &mut self.objects[k];
+        if !o.filed {
+            return;
+        }
+        o.filed = false;
+        if let Some(c) = o.collision.as_mut() {
+            contact_search::clear(&mut c.record, Some(&mut self.bones[k].body));
         }
     }
 
     /// **One frame** of the world node, for this collection: its world stepped while it is active,
     /// then its listeners on the node, each taken off when it is done.
     pub fn tick(&mut self, dt: F, tables: &Tables) {
+        self.step(dt, tables, &[]);
+    }
+
+    /// [`Collection::tick`] after a [`Collection::search`]: the contacts' `movers` are what the search's
+    /// hits name.
+    pub fn step(&mut self, dt: F, tables: &Tables, movers: &[Mover]) {
         if self.active {
             let world = self.world;
-            world.step(dt, &mut Lists { c: self, tables });
+            world.step(dt, &mut Lists { c: self, tables, movers });
         }
         let mut i = 0;
         while i < self.listeners.len() {
@@ -312,6 +385,45 @@ impl Collection {
             } else {
                 i += 1;
             }
+        }
+    }
+
+    /// **The node's collide pass** for this collection (S198): every filed collision object empties its
+    /// list and searches ([`contact_search::clear`], [`contact_search::collide`]) — the sweep back from
+    /// where the body was a little while ago, the rays against the terrain `field`, the rays against
+    /// the world's objects: the scene's collision meshes `props` and the ecosystem's `trees`, through a
+    /// nearby list gathered where the probe stands, as the wreck bike's ([`wreck_bike::WreckBike::tick_among`]).
+    /// `rays` is each object's ray probe tree (the model's `m.col`), in object order.
+    ///
+    /// A sleeping body's object (filed still, `DetectCollisionsWhenDisabled`) searches too, the body
+    /// standing still; its ray probe's category list is then the wake mask alone, so its rays keep only
+    /// what that meets.
+    pub fn search(&mut self, dt: F, rays: &[Option<Rays>], field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
+        for k in 0..self.objects.len() {
+            let o = &mut self.objects[k];
+            let (true, Some(c)) = (o.filed, o.collision.as_mut()) else { continue };
+            let body = &mut self.bones[k].body;
+            let asleep = !body.enabled;
+            c.record.node = o.node;
+            contact_search::clear(&mut c.record, Some(body));
+            let world: &mut dyn Search;
+            let mut none = NoObjects;
+            let mut scene;
+            match (rays.get(k).and_then(Option::as_ref), props.is_some() || trees.is_some()) {
+                (Some(tree), true) => {
+                    let bounds = field.map(|f| {
+                        let (lo, hi) = (f.min(), f.max());
+                        ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+                    });
+                    let mut nearby = flight_search::search();
+                    scene = Scene::wooded(props, trees, None, bounds, tree, &c.record.node, &mut nearby);
+                    world = &mut scene;
+                }
+                _ => world = &mut none,
+            }
+            let mut waking = Waking { world, asleep };
+            contact_search::collide(std::slice::from_mut(&mut c.record), 0, Some(body), field, &mut waking, dt);
+            o.node = std::mem::take(&mut c.record.node);
         }
     }
 
@@ -330,7 +442,7 @@ impl Collection {
                 return false;
             }
             self.reset(k);
-            self.objects[k].filed = false;
+            self.unfile(k);
             return true;
         }
         if !self.at_rest(k) {
@@ -535,6 +647,7 @@ fn listen(list: &mut Vec<Listener>, l: Listener) {
 struct Lists<'a> {
     c: &'a mut Collection,
     tables: &'a Tables,
+    movers: &'a [Mover],
 }
 
 impl Dynamics for Lists<'_> {
@@ -552,12 +665,20 @@ impl Dynamics for Lists<'_> {
         let k = self.c.preforce[i as usize];
         self.c.bones[k].body.clear_shock_peak();
     }
+    /// The object's force listener: gravity, then its collision object's contacts resolved.
     fn force(&mut self, i: i32, _h: F) {
         let k = self.c.forces[i as usize];
-        let b = &mut self.c.bones[k].body;
-        if b.enabled {
-            b.add_force(self.c.objects[k].gravity);
-            self.c.objects[k].fresh = false;
+        let bone = &mut self.c.bones[k];
+        let o = &mut self.c.objects[k];
+        let movers = self.movers;
+        let pushed = biplane::collision_force(&mut bone.body, o.gravity, |body| {
+            if let Some(c) = o.collision.as_mut() {
+                let mut rigid = Weighed { body, mass: bone.mass };
+                contact::resolve(&mut c.collider, &mut rigid, &mut c.record.contacts, &mut [], movers, true);
+            }
+        });
+        if pushed {
+            o.fresh = false;
         }
     }
     fn enabled(&self, i: i32) -> bool {
@@ -578,6 +699,35 @@ impl Dynamics for Lists<'_> {
     fn post(&mut self, i: i32, _dt: F) {
         let k = self.c.posts[i as usize];
         self.c.post(k);
+    }
+}
+
+/// The world as a collision object's search sees it: a sleeping body's ray probe keeps only the hits on
+/// what its category list (the wake mask) meets.
+struct Waking<'a> {
+    world: &'a mut dyn Search,
+    asleep: bool,
+}
+
+impl Search for Waking<'_> {
+    fn rays(&mut self, nearby: bool) -> Vec<Hit> {
+        let mut hits = self.world.rays(nearby);
+        if self.asleep {
+            hits.retain(|h| flight_search::category(h.struck.object) & flight_search::WAKE_MASK != 0);
+        }
+        hits
+    }
+    fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<Swept> {
+        self.world.sweep(from, to, nearby)
+    }
+    fn moved(&mut self, node: &Node) {
+        self.world.moved(node);
+    }
+    fn velocity(&self, struck: &Struck) -> Vf {
+        self.world.velocity(struck)
+    }
+    fn movers(&self) -> Vec<Mover> {
+        self.world.movers()
     }
 }
 

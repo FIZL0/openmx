@@ -489,7 +489,12 @@ impl Traffic {
     /// One tick of every car, in order, and their meshes moved to where they now stand.
     pub fn frame(&mut self, dt: F, world: &mut dyn World) {
         self.toys.frame(dt, world);
-        self.props.frame(dt);
+        if self.props.collections.iter().any(|c| c.objects.iter().any(|o| o.filed)) {
+            let (field, props, trees) = world.wooded();
+            self.props.frame_among(dt, field.as_deref(), props, trees);
+        } else {
+            self.props.frame(dt);
+        }
         if self.cars.is_empty() {
             return;
         }

@@ -202,7 +202,9 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.at += 8;
         let collections: Vec<crate::prop_world::Collection> = Wire::take(&mut r)?;
         let here = &traffic.props.collections;
-        let shape = |c: &crate::prop_world::Collection| (c.objects.len(), c.joints.len());
+        let shape = |c: &crate::prop_world::Collection| {
+            (c.objects.len(), c.joints.len(), c.objects.iter().map(|o| o.collision.is_some()).collect::<Vec<_>>())
+        };
         if collections.len() != here.len() || collections.iter().map(shape).ne(here.iter().map(shape)) {
             return Err(format!("{} prop collections in the state, {} here", collections.len(), here.len()));
         }
@@ -218,6 +220,14 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
             let pinned = c.joints.iter().flat_map(|j| std::iter::once(j.pin.first).chain(j.pin.second));
             if listed.chain(heard).chain(pinned).any(|k| k >= n) || c.bones.len() != n {
                 return Err("a prop collection names a body it does not have".into());
+            }
+        }
+        let mut collections = collections;
+        for (c, h) in collections.iter_mut().zip(here) {
+            for (o, h) in c.objects.iter_mut().zip(&h.objects) {
+                if let (Some(c), Some(h)) = (o.collision.as_mut(), h.collision.as_ref()) {
+                    c.record.rays.clone_from(&h.record.rays);
+                }
             }
         }
         traffic.props.collections = collections;
@@ -683,7 +693,66 @@ wire!(crate::ragdoll::Launch { force, force_time, hand_hold, target, world_frame
 wire!(crate::ragdoll::Pin { first, second, anchors, target, target_velocity, lower, upper, hit, sticky, gains });
 wire!(crate::biplane::World { iterations, rate });
 wire!(crate::prop_world::Collection { world, bones, objects, joints, bodies, forces, preforce, posts, listeners, active, pin_to_body, reset_time, countdown, edge });
-wire!(crate::prop_world::Object { place, look, up, gravity, collision_enabled, detect_when_disabled, reset_off_edge, reset_time, countdown, thresholds, fresh, listens, filed, node });
+wire!(crate::prop_world::Object { place, look, up, gravity, collision_enabled, detect_when_disabled, reset_off_edge, reset_time, countdown, thresholds, fresh, listens, filed, node, collision });
+
+impl Wire for crate::prop_world::Collision {
+    /// The record less its rays: the model's `m.col`, a constant of the track [`decode`] puts back.
+    fn put(&self, out: &mut Vec<u8>) {
+        self.collider.put(out);
+        let crate::contact_search::Record { search_ground, search, sweep_back, touching, touching_other, on_ground, on_object, damp, rest_linear, rest_angular, offset, lead, push_out, facing, swept_from, swept_to, node, contacts, capacity, nearby, rays: _, sweeps, struck } = &self.record;
+        search_ground.put(out);
+        search.put(out);
+        sweep_back.put(out);
+        touching.put(out);
+        touching_other.put(out);
+        on_ground.put(out);
+        on_object.put(out);
+        damp.put(out);
+        rest_linear.put(out);
+        rest_angular.put(out);
+        offset.put(out);
+        lead.put(out);
+        push_out.put(out);
+        facing.put(out);
+        swept_from.put(out);
+        swept_to.put(out);
+        node.put(out);
+        contacts.put(out);
+        capacity.put(out);
+        nearby.put(out);
+        sweeps.put(out);
+        struck.put(out);
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        let collider = Wire::take(r)?;
+        let record = crate::contact_search::Record {
+            search_ground: Wire::take(r)?,
+            search: Wire::take(r)?,
+            sweep_back: Wire::take(r)?,
+            touching: Wire::take(r)?,
+            touching_other: Wire::take(r)?,
+            on_ground: Wire::take(r)?,
+            on_object: Wire::take(r)?,
+            damp: Wire::take(r)?,
+            rest_linear: Wire::take(r)?,
+            rest_angular: Wire::take(r)?,
+            offset: Wire::take(r)?,
+            lead: Wire::take(r)?,
+            push_out: Wire::take(r)?,
+            facing: Wire::take(r)?,
+            swept_from: Wire::take(r)?,
+            swept_to: Wire::take(r)?,
+            node: Wire::take(r)?,
+            contacts: Wire::take(r)?,
+            capacity: Wire::take(r)?,
+            nearby: Wire::take(r)?,
+            rays: None,
+            sweeps: Wire::take(r)?,
+            struck: Wire::take(r)?,
+        };
+        Ok(crate::prop_world::Collision { collider, record })
+    }
+}
 wire!(crate::prop_world::Joint { pin, on, limited });
 wire!(crate::prop_world::Edge { min, max });
 
