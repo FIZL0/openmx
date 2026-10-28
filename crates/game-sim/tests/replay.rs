@@ -9979,3 +9979,126 @@ fn a_bike_parked_on_the_trains_roof_rides_it_as_the_original_does() {
         assert!(parted.is_some(), "the roof ride agrees without the air drag too");
     });
 }
+
+// --- S162: an idle bike rolling off on free06, from S162's own save states --------------------------
+//
+// Two states made from S89's along state with `research/s162/turn.py` (the bike teleported onto a spot
+// of S153's idle sweep, ridden round to the sweep's heading, put back on the spot, braked and saved),
+// recorded at a quarter speed with `watch/s89-rails.toml` and nothing on the pad
+// (`research/s162/idle.pad`):
+//
+// - **bump**: 3999.8,4000.3 facing 167°, up free06's slope south of the bump at about 3940,4097. The
+//   bike rolls back down the slope, tail first, to 40 ft/s and into the bump, and the original bails
+//   the rider Back (4).
+// - **prop**: 2500.6,3099.7 facing 72°, beside a prop; the bike rolls off forwards to 7 ft/s, slows and
+//   stops 32 ft on. The original never wrecks.
+
+/// S162's rides: `context/capture/s162/<name>.csv` and `context/states/s162-<name>.eeMemory.bin`, what
+/// the original does in each — its first wreck's tick and reason, or none — and how far, in feet, the
+/// port's centre of mass may stray from the original's while both ride.
+const S162_RIDES: [(&str, Option<(u64, u8)>, f32); 2] = [("bump", Some((206, 4)), 2.0), ("prop", None, 0.01)];
+
+/// **S162: an idle bike rolls off and wrecks, or does not, as the original's does**: each of
+/// [`S162_RIDES`] ridden by the port from the original's save state (its whole bike, the 250, wrecks
+/// on and the body rays carried) on free06 with its props and path cars and the original's pad, and the
+/// first wreck held to the capture's: the same reason within a tick, or none (S138's rule). Skipped with
+/// a line where a capture or state is missing.
+#[test]
+fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
+    let mut parted = Vec::new();
+    for (name, recorded, limit) in S162_RIDES {
+        let path = private_dir("capture").join("s162").join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("no {} — `research/s162/turn.py` says how it is recorded", path.display());
+            continue;
+        };
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let image = private_dir("states").join(format!("s162-{name}.eeMemory.bin"));
+        let Some(st) = SaveState::open_image(&image, &S89_RIDER) else {
+            println!("no {} with the human's rider in it", image.display());
+            continue;
+        };
+        let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+        let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+        let num = |r: usize, c: &str| -> f32 { cell(&cap, r, col(c)).parse().unwrap_or(f32::NAN) };
+        let want = (0..ticks.len()).find(|&r| num(r, "wreck_reason") != 0.0).map(|r| (ticks[r], num(r, "wreck_reason") as u8));
+        assert_eq!(want, recorded, "{name}: the original's first wreck (tick, reason)");
+        let Some(bike_col) = Disc::open().and_then(|mut disc| the_bike_col(&mut disc)) else {
+            println!("no bike collision files on this disc");
+            continue;
+        };
+        in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, _, bike, traffic| {
+            let mut sim = acceptance_start(&cap, 0, bike).unwrap();
+            sim.traffic = traffic;
+            sim.rider.sense.wrecks_enabled = true;
+            sim.rider.carries_bike_col(Arc::new(bike_col));
+            let ride = &mut sim.rider.ride;
+            st.seed_chassis(ride).expect("the chassis");
+            st.seed_wheels(ride).expect("both wheels");
+            st.seed_balance(ride).expect("the balance");
+            st.seed_engine_outputs(ride).expect("the engine");
+            st.seed_air(ride).expect("the air state");
+            if let Some(d) = st.drivetrain() {
+                d.seed(ride);
+            }
+            st.seed_levers(ride).expect("the levers");
+            st.seed_engine_state(ride).expect("the engine's state");
+
+            let last = *ticks.last().unwrap() as usize + 1;
+            let mut pads = inputs.clone();
+            pads.resize(last.max(pads.len()), Input::default());
+            let mut got = None;
+            let mut at = Vec::with_capacity(last);
+            for t in 1..last {
+                sim.tick_in(pads[t - 1], world);
+                if got.is_none() && let Some(w) = sim.rider.state.wreck {
+                    got = Some((t as u64, w.0));
+                }
+                let (c, v) = (sim.rider.ride.chassis.cofg_world, sim.rider.ride.chassis.vel);
+                at.push((t as u64, [c.x(), c.y(), c.z()], [v.x(), v.y(), v.z()]));
+            }
+            for (r, &t) in ticks.iter().enumerate() {
+                let near = want.is_some_and(|(w, _)| t + 3 >= w && t <= w + 1) || got.is_some_and(|(g, _)| t + 3 >= g && t <= g + 1);
+                if r % 25 != 0 && !near {
+                    continue;
+                }
+                let Some((_, p, v)) = at.iter().find(|(pt, ..)| *pt == t) else { continue };
+                println!(
+                    "{name} tick {t:4}: original cofg ({:8.2}, {:7.2}, {:8.2}) vel ({:6.2}, {:6.2}, {:6.2}) wreck {} | port ({:8.2}, {:7.2}, {:8.2}) vel ({:6.2}, {:6.2}, {:6.2})",
+                    num(r, "ch_cofg.x"), num(r, "ch_cofg.y"), num(r, "ch_cofg.z"), num(r, "ch_vel.x"), num(r, "ch_vel.y"), num(r, "ch_vel.z"),
+                    num(r, "wreck_reason"), p[0], p[1], p[2], v[0], v[1], v[2]
+                );
+            }
+            // How far apart the two centres of mass get while both ride.
+            let riding = want.map_or(u64::MAX, |w| w.0).min(got.map_or(u64::MAX, |g| g.0));
+            let gaps: Vec<(u64, f32)> = ticks
+                .iter()
+                .enumerate()
+                .filter(|&(_, &t)| t < riding)
+                .filter_map(|(r, &t)| {
+                    let (_, p, _) = at.iter().find(|(pt, ..)| *pt == t)?;
+                    let o = [num(r, "ch_cofg.x"), num(r, "ch_cofg.y"), num(r, "ch_cofg.z")];
+                    Some((t, (0..3).map(|k| (p[k] - o[k]).powi(2)).sum::<f32>().sqrt()))
+                })
+                .collect();
+            let apart = gaps.iter().map(|g| g.1).fold(0.0, f32::max);
+            let first = gaps.iter().find(|g| g.1 > 0.001).map(|g| g.0);
+            println!("{name}: the original {want:?}, the port {got:?} (tick, reason); at most {apart:.3} ft apart while both ride, \
+                      first more than a thousandth at tick {first:?}");
+            if apart > limit {
+                parted.push(format!("{name}: the port's bike strays {apart:.3} ft from the original's, over {limit}"));
+            }
+            let agrees = match (want, got) {
+                (None, None) => true,
+                (Some((wt, wr)), Some((gt, gr))) => gr == wr && gt.abs_diff(wt) <= 1,
+                _ => false,
+            };
+            if !agrees {
+                parted.push(format!("{name}: the original {want:?}, the port {got:?} (tick, reason)"));
+            }
+        });
+    }
+    assert!(parted.is_empty(), "{}", parted.join("\n"));
+}
