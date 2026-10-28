@@ -596,11 +596,15 @@ fn ride(cars: Cars, offset: Vf, push: Vf, ticks: usize) -> Option<Vec<Seen>> {
         b.body.rates = Vf::ZERO;
     }
 
+    let mut bare = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
     let mut seen = Vec::new();
     let mut last = wagon;
     for _ in 0..ticks {
         frame_cars(&mut traffic, &mut world);
-        doll.step_posed_with(&kit, None, DT, &crash, &mut world, false);
+        // Gone, the bones ride a world without the cars: one whose cars stand still would hold
+        // them as static props (S165).
+        let bones_world = if cars == Cars::Gone { &mut bare } else { &mut world };
+        doll.step_posed_with(&kit, None, DT, &crash, bones_world, false);
         let pose = traffic.cars[WAGON].pose;
         let rows = Mat3::new(pose.0[0], pose.0[1], pose.0[2]);
         let m = doll.main();

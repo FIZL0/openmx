@@ -40,7 +40,7 @@ use crate::phy::{Ini, Throw, Wrecks};
 use crate::ragdoll::{Among, Bike, Carrier, Drive, HOLD_BONES, Launch, MAIN, PARTS, Ragdoll, Records, Tables};
 use crate::ragdoll_body::{self, Fade};
 use crate::ragdoll_contact::{Contact, Open, Sphere};
-use crate::ragdoll_scene::{BikeSearch, Cells, WreckBikeScene};
+use crate::ragdoll_scene::{BikeSearch, Cells, Statics, WreckBikeScene};
 use crate::ragdoll_pose::{self, Bone, Start};
 use crate::rider_anim::{Clock, Pool, Thrown};
 use crate::rng::Rng;
@@ -334,6 +334,8 @@ pub struct Down {
     pub touching: bool,
     /// What the bones' search holds of the wreck bike (S105).
     pub search: BikeSearch,
+    /// And of the track's static props (S165).
+    pub statics: Statics,
 }
 
 impl Down {
@@ -437,6 +439,7 @@ impl Down {
             fade: Fade { length: F::ONE, left: F::ZERO },
             touching: false,
             search: BikeSearch::default(),
+            statics: Statics::default(),
         };
         down.sense(world);
         down
@@ -469,10 +472,19 @@ impl Down {
         let bike = kit.bike.map(|(centre, radius)| (bike_centre(&frame, centre), radius));
         // The bones' search, once a frame before the off-bike test, round the first sphere.
         if let (Some(b), Some(s)) = (bike, kit.spheres.first()) {
-            // The bike is put in the track's tree where it stands, every frame.
-            let cells = world.heightfield().and_then(|f| Cells::of(&*f));
+            // The bike is put in the track's tree where it stands, every frame, among the track's
+            // static props (S165), which stand there from the start.
+            let (field, props) = world.collision();
+            let cells = field.and_then(|f| Cells::of(&*f));
             let key = cells.as_ref().zip(kit.bike_mesh.as_deref()).map_or(0, |(c, mesh)| c.key(mesh, &frame));
-            self.search.gather(cells.as_ref(), s.radius, b, key, bike_in && !self.ragdoll.ignores_bike);
+            let props = props.map_or(&[][..], |p| &p.props[..]);
+            // The props' keys only for a gather that queries the tree.
+            let keys = match &cells {
+                Some(c) if self.search.regathers(s.radius) && kit.bike_mesh.is_some() => Statics::keys(c, props),
+                _ => Vec::new(),
+            };
+            let offered = bike_in && !self.ragdoll.ignores_bike;
+            self.search.gather_among(cells.as_ref(), s.radius, b, key, offered, props, &keys, &mut self.statics);
         }
         ragdoll_body::wreck_arm(
             &mut self.ragdoll,
@@ -527,6 +539,10 @@ impl Down {
         if let (Some(b), Some(probe), true) = (&mut bike_scene, self.search.stood, self.search.built) {
             let reach = kit.spheres.iter().fold(F::ZERO, |r, s| r.max(s.radius));
             b.cars = world.moving().map_or_else(Vec::new, |p| crate::ragdoll_scene::PathCar::near(&p.props, probe, reach));
+            // And the static props it listed (S165), measured again from the same probe.
+            let (_, props) = world.collision();
+            b.props = props.map_or_else(Vec::new, |p| crate::ragdoll_scene::StillProp::near(&p.props, &self.statics, probe, reach));
+            b.bike_at = self.statics.bike_at;
         }
         let scene: &mut dyn crate::ragdoll_contact::Scene = match &mut bike_scene {
             Some(b) => b,
@@ -626,6 +642,10 @@ impl crate::hash::State for Down {
         w.bool("search_built", self.search.built);
         w.bool("search_listed", self.search.listed);
         w.f("search_distance", self.search.distance);
+        // And the static props it lists (S165): nothing on a track without them.
+        for &i in &self.statics.props {
+            w.i32("search_prop", i as i32);
+        }
         for b in &self.ragdoll.bones {
             w.vf("position", b.body.position);
             w.vf("velocity", b.body.velocity);

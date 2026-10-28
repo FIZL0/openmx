@@ -16,6 +16,12 @@
 //! sphere is tested against a car's mesh too when the car is within its reach, on the same record,
 //! and the push-out measures the bone against the car's motion ([`PathCar`]).
 //!
+//! The search lists the track's static props too (S165): the scene's collision meshes stand in the
+//! same tree as the bike ([`crate::flight_search::prop_box`]'s keys), and a regather lists each one
+//! whose cells the query reaches and whose reach is inside the bound, in the walk's order with the
+//! bike ([`Statics`]); a sphere is tested against a listed prop's mesh, on the same record, when its
+//! distance is within the sphere's radius, and a prop does not move ([`StillProp`]).
+//!
 //! What is not here: the hierarchy class of collision file, which the wreck bike is not; the swept
 //! test, which S62's wrecks never needed against the bike; and the bike leaving the broad phase,
 //! which the put-back does (S108) and the caller says ([`crate::ragdoll_ride::Down::step_posed_with`]).
@@ -289,31 +295,78 @@ impl Cells {
     }
 
     /// **The search's query round `probe`**: the box of side `2 × least` round it through the tree
-    /// with the bike put under `key`; whether the bike comes out, and the box the cells cover
-    /// (`x`, `z`; in cells times the cell size, the tree's origin not added back; zero for a box off
-    /// the tree).
-    fn query(&self, probe: Vf, key: u32) -> (bool, [F; 2], [F; 2]) {
+    /// with the static props in it, prop `i` under its key in `props` `(i, key)` (S165), and the bike
+    /// after them under `key`; where the walk met the bike (how many props before it), the props it
+    /// met in its order, and the box the cells cover (`x`, `z`; in cells times the cell size, the
+    /// tree's origin not added back; zero for a box off the tree).
+    fn query_among(&self, probe: Vf, key: u32, props: &[(usize, u32)]) -> (Option<usize>, Vec<usize>, [F; 2], [F; 2]) {
         let mut tree = self.tree.clone();
+        let most = props.iter().map(|&(i, _)| i + 1).max().unwrap_or(0);
+        for &(i, k) in props {
+            broad_build::insert(&mut tree, i + 1, k);
+        }
         broad_build::insert(&mut tree, 0, key);
         let mut broad = Broad {
             spaces: vec![Space { next: None, tables: 0 }],
             tables: vec![Tables { own: Pair { fixed: Some(0), moving: None }, subs: Vec::new() }],
             structures: vec![Structure::Tree(tree)],
             cell_size: self.size,
-            places: vec![Placement::default()],
+            places: vec![Placement::default(); most + 1],
             ..Broad::default()
         };
         let centre = [F(probe.x()), F(probe.y()), F(probe.z()), F(probe.w())];
         let half = [F(SEARCH_LEAST), F(SEARCH_LEAST), F(SEARCH_LEAST), F::ONE];
         let (mut lo, mut hi) = ([F::ZERO; 4], [F::ZERO; 4]);
         let mut q = Query::begin(&mut broad, 0, 1, centre, half, Some((&mut lo, &mut hi)), true);
-        let mut found = false;
+        let (mut bike, mut met) = (None, Vec::new());
         while let Some(o) = q.next(&mut broad, Some((&mut lo, &mut hi))) {
-            found |= o == 0;
+            match o {
+                0 => bike = bike.or(Some(met.len())),
+                i => met.push(i - 1),
+            }
         }
         q.end(&mut broad);
-        (found, [lo[0], lo[2]], [hi[0], hi[2]])
+        (bike, met, [lo[0], lo[2]], [hi[0], hi[2]])
     }
+}
+
+/// The bones' search's capacity (`+0x34`): it stops listing at this many.
+const SEARCH_CAPACITY: usize = 128;
+
+/// **The track's static props the bones' search lists** (S165): the scene's collision meshes in the
+/// track's tree, each listed at a regather when the query's cells reach it and its reach from the
+/// probe is under the bound (a scenery mesh's flags ask for the bound, the bike's do not), and kept
+/// as listed while the list is kept. The pair filter passes every bone sphere to every scenery mesh
+/// (s89-along, `tests/ragdoll_props.rs`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Statics {
+    /// The listed props, by their index in the world's set ([`crate::world::World::collision`]), in
+    /// the order the tree's walk met them.
+    pub props: Vec<usize>,
+    /// How many of them the walk met before the bike: where the bike stands in the list.
+    pub bike_at: usize,
+}
+
+impl Statics {
+    /// Each scene prop's key in `cells`' tree, by its index in `props`: the ones that stand still.
+    pub fn keys(cells: &Cells, props: &[crate::world::Prop]) -> Vec<(usize, u32)> {
+        props
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.moving.is_none())
+            .map(|(i, p)| {
+                let (c, h) = crate::flight_search::prop_box(p);
+                (i, broad_build::key(&cells.tree, cells.hi, c, h))
+            })
+            .collect()
+    }
+}
+
+/// Where a static prop stands to the search, its reach measured from: its box's centre and its
+/// sphere's radius.
+fn prop_reach(p: &crate::world::Prop) -> (Vf, F) {
+    let (c, _) = crate::flight_search::prop_box(p);
+    (Vf::new(c[0].0, c[1].0, c[2].0, c[3].0), p.radius)
 }
 
 /// **What the bones' search holds of the wreck bike** (S105). The original gathers one search for
@@ -342,19 +395,65 @@ impl BikeSearch {
     /// filter lets the bike through (the bones no longer ignore it). Nothing before the sphere has
     /// stood anywhere.
     pub fn gather(&mut self, cells: Option<&Cells>, reach: F, bike: (Vf, F), key: u32, offered: bool) {
+        self.gather_among(cells, reach, bike, key, offered, &[], &[], &mut Statics::default());
+    }
+
+    /// [`BikeSearch::gather`] with the track's static props in the tree (S165): `props` the world's
+    /// set and `keys` [`Statics::keys`] of it. A regather lists the props into `statics`; a kept list
+    /// keeps them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gather_among(
+        &mut self,
+        cells: Option<&Cells>,
+        reach: F,
+        bike: (Vf, F),
+        key: u32,
+        offered: bool,
+        props: &[crate::world::Prop],
+        keys: &[(usize, u32)],
+        statics: &mut Statics,
+    ) {
         let Some(probe) = self.stood else { return };
-        if self.built && length(minus(probe, self.centre)) + reach < self.bound {
+        if !self.regathers(reach) {
             self.distance = reach_distance(bike, probe);
             return;
         }
         // Without a tree the bike is anywhere the query looks, and the bound is its least.
-        let (found, [lo_x, lo_z], [hi_x, hi_z]) = cells.map_or((true, [F::ZERO; 2], [F::ZERO; 2]), |c| c.query(probe, key));
+        let (at, met, [lo_x, lo_z], [hi_x, hi_z]) = cells.map_or((Some(0), Vec::new(), [F::ZERO; 2], [F::ZERO; 2]), |c| c.query_among(probe, key, keys));
         let (x, z) = (F(probe.x()), F(probe.z()));
         self.centre = probe;
         self.bound = (x - lo_x).min(z - lo_z).min(hi_x - x).min(hi_z - z).min(F(SEARCH_EXTRA).max(reach)).max(F(SEARCH_LEAST));
-        self.listed = offered && found;
+        // The list in the walk's order, the bike where the walk met it, up to the capacity.
+        let bike_at = at.filter(|_| offered);
+        statics.props.clear();
+        statics.bike_at = 0;
+        let mut listed = false;
+        for (n, &i) in met.iter().enumerate() {
+            if bike_at == Some(n) && !listed {
+                listed = statics.props.len() < SEARCH_CAPACITY;
+                statics.bike_at = statics.props.len();
+            }
+            if statics.props.len() + usize::from(listed) >= SEARCH_CAPACITY {
+                break;
+            }
+            if reach_distance(prop_reach(&props[i]), probe) < self.bound {
+                statics.props.push(i);
+            }
+        }
+        if bike_at.is_some_and(|n| n >= met.len()) && !listed {
+            listed = statics.props.len() < SEARCH_CAPACITY;
+            statics.bike_at = statics.props.len();
+        }
+        self.listed = listed;
         self.distance = reach_distance(bike, probe);
         self.built = true;
+    }
+
+    /// Whether this frame's gather, the probe of `reach` where the first sphere last stood, queries
+    /// the tree anew: the sphere has stood, and the list is not built or the probe's reach has left
+    /// its bound.
+    pub fn regathers(&self, reach: F) -> bool {
+        self.stood.is_some_and(|p| !(self.built && length(minus(p, self.centre)) + reach < self.bound))
     }
 
     /// Whether a sphere of `radius` is paired with the bike.
@@ -418,6 +517,46 @@ impl PathCar {
     }
 }
 
+/// **A static prop as the bones' search lists it** (S165): a scene collision mesh, standing where
+/// the scene put it ([`crate::world::Prop`]'s `to_world`, the collidable's frame), measured from
+/// where the first collision's sphere last stood. It does not move: a contact on it is with the
+/// scenery ([`crate::ragdoll_contact::Scene::other`] `None`).
+#[derive(Clone, Debug)]
+pub struct StillProp {
+    pub mesh: track::Mesh,
+    pub frame: Node,
+    /// How far the prop's reach is from the probe, measured again each frame.
+    pub distance: F,
+}
+
+impl StillProp {
+    /// The prop as the bones see it, measured from `probe`.
+    pub fn of(prop: &crate::world::Prop, probe: Vf) -> StillProp {
+        let [x, y, z, at] = prop.to_world.0;
+        StillProp { mesh: prop.mesh.clone(), frame: Node { rows: [x, y, z], origin: at }, distance: reach_distance(prop_reach(prop), probe) }
+    }
+
+    /// **The listed props a frame's spheres can be paired with**: those of `statics` whose distance
+    /// from `probe` is within `reach` (the largest sphere's radius), in the list's order, each with
+    /// its place in the list. The rest no sphere reaches, so their meshes are not copied.
+    pub fn near(props: &[crate::world::Prop], statics: &Statics, probe: Vf, reach: F) -> Vec<(usize, StillProp)> {
+        statics
+            .props
+            .iter()
+            .enumerate()
+            .filter_map(|(n, &i)| props.get(i).map(|p| (n, p)))
+            .filter(|(_, p)| reach_distance(prop_reach(p), probe) <= reach)
+            .map(|(n, p)| (n, StillProp::of(p, probe)))
+            .collect()
+    }
+
+    /// The sphere test against the prop's mesh on a record holding a hit at `held`; `Some` when this
+    /// prop took the record.
+    pub fn touch(&self, centre: Vf, radius: F, held: Option<F>) -> Option<Touch> {
+        touch_mesh(&self.mesh, Normals::Unpacked, &self.frame, centre, radius, held)
+    }
+}
+
 /// **A ride's ragdoll scene: the wreck bike**, standing in its frame. A bone that touches the mesh
 /// is with the bike's own body object, and the push-out measures the bone against the bike's body
 /// there.
@@ -436,7 +575,12 @@ pub struct WreckBikeScene<'a> {
     /// The path cars the search lists near the bones this frame (S142), after the bike; empty
     /// before the search is built.
     pub cars: Vec<PathCar>,
-    /// What the last sphere's contact is with: 0 the bike, `k + 1` the car `k`.
+    /// The static props the search lists near the bones this frame (S165), each with its place in
+    /// the list, and where the bike stands among them ([`Statics::bike_at`]).
+    pub props: Vec<(usize, StillProp)>,
+    pub bike_at: usize,
+    /// What the last sphere's contact is with: 0 the bike, `k + 1` the car `k`; `None` for nothing
+    /// or a static prop, which is the scenery.
     pub with: Option<usize>,
 }
 
@@ -453,22 +597,42 @@ impl<'a> WreckBikeScene<'a> {
             search,
             stood: Vec::new(),
             cars: Vec::new(),
+            props: Vec::new(),
+            bike_at: 0,
             with: None,
         }
     }
 }
 
 impl Scene for WreckBikeScene<'_> {
-    /// The sphere's one record, offered the bike and then each listed car it reaches: a later
-    /// candidate's hit replaces the held one only when strictly nearer (the record's single slot).
+    /// The sphere's one record, offered the static tree's candidates in the list's order (the props,
+    /// the bike where the walk met it) and then each listed car it reaches: a later candidate's hit
+    /// replaces the held one only when strictly nearer (the record's single slot).
     fn touching(&mut self, centre: Vf, radius: F) -> Option<Vec<(Vf, Vf)>> {
         self.stood.push(centre);
         self.with = None;
         let mut best: Option<Touch> = None;
-        if self.search.reaches(radius) {
-            if let Some(t) = self.mesh.touch(&self.frame, centre, radius) {
+        let mut bike_done = false;
+        let mut props = self.props.iter().peekable();
+        loop {
+            let prop_next = props.peek().map(|(n, _)| *n);
+            if !bike_done && prop_next.is_none_or(|n| self.bike_at <= n) {
+                bike_done = true;
+                if self.search.reaches(radius)
+                    && let Some(t) = touch_mesh(&self.mesh.mesh, Normals::Packed(&self.mesh.normals), &self.frame, centre, radius, best.map(|b| b.distance))
+                {
+                    best = Some(t);
+                    self.with = Some(0);
+                }
+                continue;
+            }
+            let Some((_, prop)) = props.next() else { break };
+            if !(prop.distance <= radius) {
+                continue;
+            }
+            if let Some(t) = prop.touch(centre, radius, best.map(|b| b.distance)) {
                 best = Some(t);
-                self.with = Some(0);
+                self.with = None;
             }
         }
         if self.search.built {

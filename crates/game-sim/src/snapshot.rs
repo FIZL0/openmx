@@ -674,8 +674,9 @@ wire!(crate::event::Competition { target, seats, limit, length, interval, elapse
 wire_enum!(crate::event::Verdict { Win, Lose, Tie });
 wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out, gate_penalty });
 wire!(crate::score::Node { flags, id, points, base, rate, mult, extra, held, granularity });
-wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching, search });
+wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching, search, statics });
 wire!(crate::ragdoll_scene::BikeSearch { stood, centre, bound, built, listed, distance });
+wire!(crate::ragdoll_scene::Statics { props, bike_at });
 wire!(crate::ragdoll_body::Fade { length, left });
 wire!(crate::ragdoll_riding::Riding { actor, drawn, was, rng });
 wire!(crate::ragdoll_body::Actor { ragdoll, contacts, mode, prev, posed, latched, idle, look_pose, clip, touching, fade, foot_fade, foot_weight, look, pose_spring, pose_damping, pose_damping_base, stand_speed, slow_speed, gate_step, gate_clock, foot_points, hold_targets, hold_velocity, bike_box, bike_frame, placed, active, repose, cut, impact, model, gravity_scale, torques });
