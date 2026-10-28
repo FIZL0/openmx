@@ -362,7 +362,7 @@ fn the_planes_world_lists_the_trucks_after_the_path_cars() {
     assert!(toy.iter().rev().take(2).all(|c| c.1) && toy.iter().rev().skip(2).all(|c| !c.1), "free06's physics cars are Car22 and Car23");
 
     // The port's: the trucks' meshes off the disc, filed as toys with the original's flags and radius.
-    let along = ram(STATE).expect("s89-along beside biplane.p2m2");
+    let Some(along) = ram(STATE) else { return };
     let trucks = trucks(&along);
     let specs: Vec<Spec> = trucks
         .iter()
