@@ -52,7 +52,8 @@
 //!   collision model, at the contact, as if it had come from the collision object's relative velocity
 //!   at its last resolved contact a frame back (P63; the body's where the caller has none) — the
 //!   wreck's dust where the hull hits the ground. Its flags are its own: no contact at all is
-//!   `NoContact`, which both entries disable.
+//!   `NoContact`, which both entries disable. It is one emitter with one carry, run once for each
+//!   contact in turn (P153), so two contacts emit twice the share a frame.
 //!
 //! * **Dust** (the three `Tire Dust`s, P60): on its node, and on its tire (`AttachedToTire`). The
 //!   manager gives each tire flags of its own the same way — `NoContact` with neither a ground nor an
@@ -81,6 +82,9 @@
 //!   switched by the bike's flags alone, emitted by hand at each of the rider's collision spheres whose
 //!   bit `AttachToParticleCollisionConstraints` has and whose own contact flags the entry allows, as if
 //!   the point had come from its bone's velocity a frame back ([`ConstraintFrame`]).
+//!
+//! Both of those switch their emitter on themselves, and as the original's emitter does, the first
+//! point it is run at after going on only becomes where it last was: it emits from the next (P153).
 //!
 //! The manager runs an entry only while its flag byte is exactly *live* ([`Entry::flag`]): none of its
 //! `Disable` bits in the flags, and — for an entry on a tire — the tire's surface not a `none` zone.
@@ -162,6 +166,12 @@ pub struct Emt {
     pub gravity: f32,
     /// `MinimumEmissionSpeed`, feet a second.
     pub min_speed: f32,
+    /// `ParticlesToDistanceRatio` and `ParticlesToSpeedRatio` (P153): where either is above 0 and the
+    /// emitter moves faster than `MinimumMovementSpeed`, a frame's share of particles is the distance
+    /// it moved and its speed by these, held between the rate's two ends, in place of a random rate.
+    pub distance_ratio: f32,
+    pub speed_ratio: f32,
+    pub min_movement_speed: f32,
     /// `GroundLevel` is in the file: its particles meet the ground. The value itself is not what they
     /// meet — the terrain under them is — so only its presence counts. A `CollisionModel` entry's
     /// `HasCollision` switches it on as well ([`PlaneFx::new`]).
@@ -203,6 +213,9 @@ impl Default for Emt {
             fade_out: 0.7,
             gravity: 3.0,
             min_speed: 0.0,
+            distance_ratio: 0.0,
+            speed_ratio: 0.0,
+            min_movement_speed: 0.0,
             collides: false,
             restitution: 0.55,
             has_velocity: false,
@@ -250,6 +263,9 @@ impl Emt {
             fade_out: number("FadeOutFromPercentAge", d.fade_out),
             gravity: number("GravityMultiplier", d.gravity),
             min_speed: number("MinimumEmissionSpeed", d.min_speed),
+            distance_ratio: number("ParticlesToDistanceRatio", d.distance_ratio),
+            speed_ratio: number("ParticlesToSpeedRatio", d.speed_ratio),
+            min_movement_speed: number("MinimumMovementSpeed", d.min_movement_speed),
             collides: find("GroundLevel").is_some(),
             restitution: number("Restitution", d.restitution),
             has_velocity: flag("HasVelocity"),
@@ -494,14 +510,27 @@ impl Source {
         if dt <= 0.0 {
             return;
         }
-        let speed = at.sub(from).len() / dt;
+        let distance = at.sub(from).len();
+        let speed = distance / dt;
         if speed < emt.min_speed {
             return;
         }
-        self.carry += rng.between(emt.rate) * dt;
-        let whole = self.carry.floor();
-        self.carry -= whole;
-        let n = (whole.max(emt.min_per_frame.floor())) as usize;
+        // The frame's share (P153): by the distance and speed where the file asks for that and the
+        // emitter moves, held between the rate's ends, else a random rate between them.
+        let (low, high) = (emt.rate.0 * dt, emt.rate.1 * dt);
+        let share = if emt.min_movement_speed < speed && (emt.distance_ratio > 0.0 || emt.speed_ratio > 0.0) {
+            (emt.distance_ratio * distance + emt.speed_ratio * speed).max(low).min(high)
+        } else {
+            rng.between(emt.rate) * dt
+        };
+        // Whole particles leave only once the carry is past one: exactly one stays carried.
+        self.carry += share;
+        let mut whole = 0.0;
+        if self.carry > 1.0 {
+            whole = self.carry.trunc();
+            self.carry -= whole;
+        }
+        let n = (whole.max(emt.min_per_frame.trunc())) as usize;
         let turned = |d: V3| turn.map_or(d, |m| m.dir(d));
         let travel = at.sub(from);
         for i in 0..n {
@@ -1168,6 +1197,11 @@ impl PlaneFx {
                             Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
                             None => {}
                         }
+                        // The first sphere after it went on only takes its point (P153).
+                        if entry.sources[0].last.is_none() {
+                            entry.sources[0].last = Some(c.at);
+                            continue;
+                        }
                         let from = c.at.sub(c.vel.scale(dt));
                         entry.sources[0].emit_over(index, &entry.emt, entry.frames, c.at, Some(from), None, entry.emt.velocity, c.vel, wind, dt, &mut self.rng, &mut self.particles, &mut |p| ground(p).map(|(y, _)| y));
                     }
@@ -1183,25 +1217,29 @@ impl PlaneFx {
                     if flags & (Disable::GROUND_CONTACT | Disable::OBJECT_CONTACT) == 0 {
                         flags |= Disable::NO_CONTACT;
                     }
-                    if entry.disable & flags != 0 {
-                        entry.sources.clear();
+                    entry.sources.resize_with(1, Source::default);
+                    entry.lit = entry.disable & flags == 0;
+                    if !entry.lit {
+                        entry.sources[0].off();
                         continue;
                     }
-                    let contacts: Vec<V3> = plane.ground_contacts.iter().chain(&plane.object_contacts).copied().collect();
-                    entry.sources.resize_with(contacts.len(), Source::default);
-                    for (n, (source, &at)) in entry.sources.iter_mut().zip(&contacts).enumerate() {
+                    // One emitter for every contact (P153: the capture's one carry), emitted at each
+                    // in turn as if the point had come from the contact's velocity a frame back: its
+                    // speed is the contact's, and its particles spread along that path.
+                    let vel = plane.contact_vel.unwrap_or(plane.vel);
+                    let source = &mut entry.sources[0];
+                    for (n, &at) in plane.ground_contacts.iter().chain(&plane.object_contacts).enumerate() {
                         // A ground contact on a surface the zones say `none` to emits nothing (P74).
                         match plane.ground_zones.get(n).and_then(|&z| entry.zones.get(usize::from(z))) {
-                            Some(Zone::Off) => {
-                                source.off();
-                                continue;
-                            }
+                            Some(Zone::Off) => continue,
                             Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
                             None => {}
                         }
-                        // As if the point had come from the contact's velocity a frame back: its speed
-                        // is the contact's, and its particles spread along that path.
-                        let vel = plane.contact_vel.unwrap_or(plane.vel);
+                        // The first contact after it went on only takes its point.
+                        if source.last.is_none() {
+                            source.last = Some(at);
+                            continue;
+                        }
                         let from = at.sub(vel.scale(dt));
                         source.emit(index, &entry.emt, entry.frames, at, Some(from), None, entry.emt.velocity, vel, wind, dt, &mut self.rng, &mut self.particles);
                     }
