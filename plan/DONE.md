@@ -350,6 +350,7 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 - [x] **P152** P74 follow-up: Foot Dust while riding — feed the riding rider's foot contacts to the ParticleCollisionConstraint entry (mask 0x3)
 - [x] **S122** stock::BIKE (crates/game-sim/src/stock.rs) says ReverseSpeed +4, which pushes forwards when reversing; every disc .phy says -10 (P72's journal). Set it to -10 and re-baseline whatever stock-bike numbers move, or say why +4
 - [x] **P151** P74 follow-up: the bike's TireTrack entries (mxparticles.dat's two TireTrack lines) as a decal trail behind each tire
+- [x] **S124** find what parts S89's along ride at tick 2 (chassis vel, ang_hist, vel_hist.y 0.00077 vs 0.00017) with the wheel probe now the original's (S114): substep by substep against the s89-along image, before the bed-edge contact lanes (106/108, 50/53) can move | j: 2026-10-25-s114-wheel-ray-probe
 
 ### Phase 2 — a decompilation you can read
 - [x] **R1** (after D4) Ghidra: `./kit ghidra` on the boot ELF and each overlay, with the EmotionEngine extension, producing `context/decomp/<program>.c`. Check the dumps are at the right addresses (a function in the overlay dump should sit inside the overlay's load range) and note how long a full analysis takes on this machine → kit.toml `[ghidra]` · ghidra_scripts/ | t: `./kit fn <addr>` prints one function from each program | j: r1-decompile
