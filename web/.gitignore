@@ -1,2 +1,3 @@
 # tools/web.sh builds into it
 pkg/
+version.txt

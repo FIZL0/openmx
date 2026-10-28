@@ -22,6 +22,7 @@
 # Environment:
 #   OPENMX_CROSS_DIR      where the scratch toolchain lives
 #   OPENMX_CROSS_OFFLINE  set to 1 to refuse to download (a missing std is then an error saying so)
+#   OPENMX_COMMIT, OPENMX_VERSION  what web/version.txt says the build is (below)
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -121,4 +122,13 @@ if [ "$check" = 1 ]; then
 fi
 mkdir -p "$repo/web/pkg"
 cp "$out/pkg/openmx_web.js" "$out/pkg/openmx_web_bg.wasm" "$repo/web/pkg/"
+# The build the page was made from (web/index.html reads it to offer a reload once the site has a newer one):
+# OPENMX_VERSION (a release's tag, tools/release.sh) and the commit, OPENMX_COMMIT when the caller stamps it (Actions,
+# tools/release.sh), else this checkout's, with a + when it has uncommitted changes.
+commit=${OPENMX_COMMIT:-}
+if [ -z "$commit" ]; then
+    commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null | cut -c1-7)
+    [ -z "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ] || commit=$commit+
+fi
+echo "${OPENMX_VERSION:+$OPENMX_VERSION }${commit:-unknown}" >"$repo/web/version.txt"
 echo "$repo/web/pkg ($(wc -c <"$out/pkg/openmx_web_bg.wasm") bytes of module): serve $repo/web on localhost"

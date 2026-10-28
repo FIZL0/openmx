@@ -1,0 +1,20 @@
+# The checks a beta waits for (pages.yml's `ci` job); also runs by itself on pull requests and pushes to other branches.
+# CI has no disc, so it is the part of the suite that needs none: the arithmetic and the simulation's own unit tests,
+# and that the whole workspace builds with the lockfile as committed. `./kit check` on the dev machine is the real gate.
+name: ci
+on:
+  pull_request:
+  push:
+    branches-ignore: [main, beta]
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - run: rustup update --no-self-update stable && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+      - run: cargo test --locked -p ps2-float -p game-sim --lib
+      - run: cargo build --locked --workspace

@@ -272,3 +272,32 @@ To find it: ride the shell with `--record context/tapes/tail.tape` (from the rep
 were on), land the way that rode out, quit, and add the tape's path, the track and roughly where on it
 to S178 (`./kit plan S178`). Five minutes. If the shell will not record, say which track and jump; an
 agent can then try to make the same landing in the original by teleport.
+
+## Releases and the websites (openmx.dev, beta.openmx.dev)
+
+Set up 2026-10-28, as opentennis's: every push to main is a beta (`.github/workflows/pages.yml`: the rolling `beta`
+release with the Linux build and the website, put on https://beta.openmx.dev by FIZL0/openmx-beta, whose one
+workflow is `tools/beta-site.yml`); `tools/release.sh VERSION [publish]` makes a release, and publishing it puts its
+website on https://openmx.dev. What only you can do:
+
+1. **DNS at Namecheap** (openmx.dev → Advanced DNS). Delete the parking records (the `@` URL redirect / A
+   162.255.119.163 and the `www` CNAME to parkingpage), then add:
+   - `CNAME  beta  fizl0.github.io.`  — the beta site, now
+   - `A  @  185.199.108.153`, `A  @  185.199.109.153`, `A  @  185.199.110.153`, `A  @  185.199.111.153`
+     and `CNAME  www  fizl0.github.io.` — openmx.dev, served from the first published release on
+   Then in GitHub, each repo's Settings → Pages: wait for the DNS check to go green and tick **Enforce HTTPS**
+   (FIZL0/openmx-beta for beta.openmx.dev, FIZL0/openmx for openmx.dev). Optional: verify openmx.dev under your
+   GitHub account's Settings → Pages → Verified domains, so nobody else's repo can claim a subdomain.
+2. **The beta dispatch token** (optional: without it beta.openmx.dev catches up within half an hour): a
+   fine-grained token (github.com/settings/personal-access-tokens), repository FIZL0/openmx-beta only, permission
+   Contents read and write, then `gh secret set BETA_DISPATCH_TOKEN -R FIZL0/openmx`.
+3. **The release signing key**, before the first release: `sudo pacman -S minisign`, then
+   `mkdir -p ~/.config/openmx && minisign -G -p ~/.config/openmx/release.pub -s ~/.config/openmx/release.key`
+   (pick a password; keep the .key and the password backed up — the updater, P191, only takes releases signed
+   with it). Optionally `~/.config/openmx/release.pass` (mode 600) for unattended releases. P191 needs the public
+   key's second line for its PUBLIC_KEY.
+4. **The first release**: write the bullets in RELEASE_NOTES.md, then `tools/release.sh 0.1.0` (a draft: check it on
+   GitHub, then publish) or `tools/release.sh 0.1.0 publish`. Needs docker (the Linux build runs in Valve's Steam
+   Runtime container).
+5. **The page's links**: web/index.html's `SITE` (Discord, the dump guide, donate) are still empty and show as
+   "Coming soon".

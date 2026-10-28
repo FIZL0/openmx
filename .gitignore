@@ -61,3 +61,6 @@ Thumbs.db
 /tmp/
 *.log
 *.tmp
+
+# tools/build.sh and tools/release.sh build into it
+/dist/

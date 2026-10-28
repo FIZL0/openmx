@@ -1,0 +1,122 @@
+# The beta and the website, as opentennis's pages.yml (no game data anywhere: players pick their own ISO).
+# - Every push to main is a beta once ci passes: the rolling "Beta" release (tag `beta`, a pre-release, never Latest) is
+#   replaced with that commit's Linux build and website (web.tar.gz), and FIZL0/openmx-beta (one workflow,
+#   tools/beta-site.yml) is asked to put the website on https://beta.openmx.dev. The ask needs the secret
+#   BETA_DISPATCH_TOKEN (a fine-grained token with Contents read/write on FIZL0/openmx-beta); without it the beta site
+#   still catches up, from that repo's own half-hourly check.
+# - A published release (tools/release.sh) goes on https://openmx.dev, this repo's own Pages: its web.tar.gz as
+#   built by the release script, deployed without building (~1 min).
+name: pages
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: read
+# a running beta always finishes; GitHub keeps only the newest queued one. Releases have their own group.
+concurrency:
+  group: pages-${{ github.event_name == 'release' && 'release' || 'beta' }}
+  cancel-in-progress: false
+jobs:
+  ci:
+    if: ${{ github.event_name != 'release' }}
+    uses: ./.github/workflows/ci.yml
+  web:
+    if: ${{ github.event_name != 'release' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - run: rustup update --no-self-update stable && rustup default stable && rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          # tools/web.sh builds in target/web, and builds wasm-bindgen-cli once into OPENMX_CROSS_DIR
+          cache-directories: ~/openmx-cross
+      # the online build id's commit, the same as the Linux job's
+      - run: OPENMX_COMMIT=${GITHUB_SHA::7} OPENMX_CROSS_DIR=$HOME/openmx-cross tools/web.sh
+      - run: tar -czf web.tar.gz -C web .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: web
+          path: web.tar.gz
+  linux:
+    if: ${{ github.event_name != 'release' }}
+    runs-on: ubuntu-latest
+    # Steam Runtime sniper (glibc 2.31) like tools/build.sh, so it runs on every SteamOS / Steam Deck
+    container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+      # tools/build.sh's linux build and packaging, without its docker step; the commit from Actions (the container's
+      # checkout may have no usable git)
+      - run: |
+          export OPENMX_COMMIT=$(echo "$GITHUB_SHA" | cut -c1-7)
+          cargo build --locked --release -p openmx --bin openmx
+          mkdir -p dist/linux
+          strip -o dist/linux/openmx target/release/openmx
+          sed -n '/^extras() {/,/^}/p' tools/build.sh > extras.sh
+          bash -c '. ./extras.sh && extras dist/linux'
+          tar -czf openmx-linux-x86_64.tar.gz -C dist/linux .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: linux
+          path: openmx-linux-x86_64.tar.gz
+  beta:
+    needs: [ci, web, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DISPATCH: ${{ secrets.BETA_DISPATCH_TOKEN }}
+        run: |
+          # tagging a commit whose workflow files differ from main's is a workflow change, which github.token may not
+          # make (HTTP 403), and the delete below would leave no release: leave that to the newer run. A stale run still
+          # publishes unless the beta already shows a newer commit.
+          wf=$(gh api "repos/$GH_REPO/compare/$GITHUB_SHA...main" -q '[.files[].filename|select(startswith(".github/workflows/"))]|length')
+          [ "$wf" = 0 ] || { echo "workflow files changed on main since, skipping"; exit 0; }
+          cur=$(gh api "repos/$GH_REPO/commits/beta" -q .sha 2>/dev/null || true)
+          if [ -n "$cur" ] && [ "$(gh api "repos/$GH_REPO/compare/$cur...$GITHUB_SHA" -q .status)" = behind ]; then
+            echo "beta already at newer ${cur::7}, skipping"; exit 0
+          fi
+          # recreated each time so the tag moves to this commit; the download links stay the same
+          gh release delete beta --cleanup-tag -y || true
+          printf '%s\n\n%s\n\n%s\n' \
+            "**Beta: rebuilt on every change to main (${GITHUB_SHA::7}). Newer than the latest release, less tested.**" \
+            "No game data is included: you need your own *MX Unleashed (USA)* (SLUS-20767) ISO. Linux: unpack, put the ISO's path in \`kit.toml\`, run \`./run.sh\`." \
+            "Beta in the browser: https://beta.openmx.dev/" > notes.md
+          gh release create beta --prerelease --latest=false --target "$GITHUB_SHA" --title "Beta (${GITHUB_SHA::7})" \
+            --notes-file notes.md openmx-linux-x86_64.tar.gz web.tar.gz
+          if [ -n "$DISPATCH" ]; then
+            GH_TOKEN=$DISPATCH gh api repos/FIZL0/openmx-beta/dispatches -f event_type=beta
+          else
+            echo "::warning::no BETA_DISPATCH_TOKEN secret: beta.openmx.dev catches up on its own half-hourly check"
+          fi
+  # openmx.dev: the published release's own website
+  site:
+    if: ${{ github.event_name == 'release' && github.event.release.tag_name != 'beta' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: mkdir web && gh release download "${{ github.event.release.tag_name }}" -R "${{ github.repository }}" -p web.tar.gz -O - | tar xz -C web
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3.0.1
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e  # v4.0.5

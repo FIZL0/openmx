@@ -222,6 +222,11 @@ body[data-disc="yes"] #disc { display: none; }
 footer { background: var(--ink); color: var(--dust); font-size: 14px; }
 footer .wrap { display: flex; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; padding-block: 24px calc(24px + env(safe-area-inset-bottom, 0px)); }
 footer a { color: var(--bone); }
+/* a newer build is on the site (version.txt): offer the reload, never force it */
+#fresh { position: fixed; left: 50%; bottom: calc(1em + env(safe-area-inset-bottom, 0px)); transform: translate(-50%, 2em); opacity: 0; pointer-events: none;
+  z-index: 30; display: flex; gap: .8em; align-items: center; padding: .5em .6em .5em 1.2em; border-radius: 999px; background: var(--ink); color: var(--chalk);
+  box-shadow: 0 6px 24px rgba(0,0,0,.5); transition: opacity .2s, transform .2s; white-space: nowrap; max-width: calc(100vw - 32px); }
+#fresh.up { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
 
 @media (max-width: 640px) {
   .hero { padding-top: 32px; }
@@ -344,6 +349,23 @@ footer a { color: var(--bone); }
       </div>
     </section>
 
+    <section id="get">
+      <h2 class="head"><span class="skew">Desktop</span></h2>
+      <div class="grid2">
+        <div class="card">
+          <h3>Linux &amp; Steam Deck</h3>
+          <p>The same game as a native build: the GPU renderer, pads, split screen and mods. Unpack it, put <code>kit.toml</code> beside it
+            with your disc image's path, and run <code>openmx</code>.</p>
+          <div class="row" style="margin-top:14px"><a class="pill" data-file="openmx-linux-x86_64.tar.gz">Download for Linux</a></div>
+        </div>
+        <div class="card">
+          <h3>Windows</h3>
+          <p>Coming soon. Every build, its release notes and its signed checksums are on GitHub.</p>
+          <div class="row" style="margin-top:14px"><a class="pill ghost" id="builds" target="_blank" rel="noopener">All builds</a></div>
+        </div>
+      </div>
+    </section>
+
     <section id="files">
       <h2 class="head"><span class="skew">Settings &amp; files</span></h2>
       <div class="rows">
@@ -386,9 +408,10 @@ footer a { color: var(--bone); }
 
   <footer><div class="wrap">
     <span>openMX is a fan project, not affiliated with THQ, Rainbow Studios or Sony. You need your own disc.</span>
-    <span><a href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener">GitHub</a> · <a data-link="discord" target="_blank" rel="noopener">Discord</a></span>
+    <span><span id="build"></span> <a href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener">GitHub</a> · <a data-link="discord" target="_blank" rel="noopener">Discord</a></span>
   </div></footer>
 </div>
+<div id="fresh" role="status"><span>A new version of openMX is out.</span><button class="pill small" id="reload">Reload</button></div>
 
 <script type="module">
   // What the user fills in (P181): an empty link stays on the page, dimmed and inert, until it has an address.
@@ -712,6 +735,32 @@ footer a { color: var(--bone); }
     }
     requestAnimationFrame(padLoop);
   }
+
+  // ---- the build ----
+  // beta.openmx.dev is every push to main (the rolling `beta` release); openmx.dev is the latest release (.github/workflows/pages.yml).
+  // version.txt is the build tools/web.sh made; read again every few minutes and when the tab comes back, a different one means
+  // the site has moved on, and the page offers a reload (a ride in progress is never cut short).
+  const BETA = location.hostname.startsWith('beta.');
+  const RELEASES = 'https://github.com/FIZL0/openmx/releases';
+  for (const a of document.querySelectorAll('[data-file]')) a.href = `${RELEASES}/${BETA ? 'download/beta' : 'latest/download'}/${a.dataset.file}`;
+  $('#builds').href = `${RELEASES}/${BETA ? 'tag/beta' : 'latest'}`;
+  const built = () =>
+    fetch('version.txt', { cache: 'no-store' })
+      .then(r => (r.ok ? r.text() : ''))
+      .then(t => t.trim())
+      .catch(() => '');
+  let ours = '';
+  built().then(v => {
+    ours = v;
+    if (v) $('#build').textContent = `${BETA ? 'Beta ' : ''}${v} ·`;
+  });
+  const recheck = async () => {
+    const v = await built();
+    if (ours && v && v !== ours) $('#fresh').classList.add('up');
+  };
+  setInterval(recheck, 5 * 60e3);
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && recheck());
+  $('#reload').onclick = () => location.reload();
 
   // ---- where the visit starts ----
   const ask = new URLSearchParams(location.search);
