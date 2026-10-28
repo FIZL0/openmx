@@ -2573,6 +2573,55 @@ fn v35_rows() -> Option<Vec<std::collections::HashMap<String, String>>> {
     Some(lines.map(|l| head.iter().cloned().zip(l.split(',').map(str::to_owned)).collect()).collect())
 }
 
+/// V35's two checks run over a capture of the body (V35's `flips.toml` or a spec carrying its
+/// fields): on every riding tick, the request is the bike's words (asserted here), and the port's
+/// body handed those words asks for and runs the original's state. Returns the ticks checked, the
+/// original's (tick, state) on each of them, and the ticks the port's body parted on as (tick, the
+/// original's (want, state), the port's); `None` without the disc's 125.
+#[allow(clippy::type_complexity)]
+fn v35_body_over(rows: &[std::collections::HashMap<String, String>]) -> Option<(usize, Vec<(u32, i32)>, Vec<(u32, (i32, i32), (i32, i32))>)> {
+    use game_sim::trick::Trick;
+    let tables = Tables::build();
+    let Some((phy, wheels)) = the_disc_125(&tables) else { return None };
+    let mut r = game_sim::rider::Rider::new(&phy, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let lib = v35_library();
+    let dt = F(1.0 / 30.0);
+    let c = Controls { gas: F::ONE, ..Controls::default() };
+    // The body starts at the gate; the throttle lets it ride, as recording2's rider is at its start.
+    for _ in 0..10 {
+        r.body_frame(dt, &c, game_sim::rider::Gate::default(), &lib, &v35_clip);
+    }
+    assert_eq!(r.body.veh.state, 30, "the body does not ride after the gate");
+
+    let n = |row: &std::collections::HashMap<String, String>, col: &str| -> u32 {
+        row[col].parse().unwrap_or_else(|_| panic!("column {col} is {:?}", row[col]))
+    };
+    let (mut checked, mut states, mut missed) = (0, Vec::new(), Vec::new());
+    for row in rows {
+        let tick = n(row, "frame_counter");
+        if n(row, "wreck_reason") != 0 || n(row, "req_wreck") != 0 {
+            continue;
+        }
+        let (airborne, flipping, trick) = (n(row, "airborne") != 0, n(row, "flipping") != 0, n(row, "trick_id"));
+        let slot = if trick < 24 { trick } else { 24 };
+        assert_eq!(n(row, "req_backflip") != 0, flipping, "tick {tick}: the request's backflip is not the bike's turning flag");
+        assert_eq!(n(row, "req_airborne") != 0, airborne, "tick {tick}: the request's airborne is not the bike's");
+        assert_eq!(n(row, "req_gesture"), slot, "tick {tick}: the request's gesture is not the trick id's slot");
+
+        r.ride.air.airborne = airborne;
+        r.ride.air.flipping = flipping;
+        r.tricks.requested = Trick(trick as u8);
+        r.body_frame(dt, &c, game_sim::rider::Gate::default(), &lib, &v35_clip);
+        let (want, state) = (n(row, "state_want") as i32, n(row, "state") as i32);
+        if (r.body.veh.want, r.body.veh.state) != (want, state) {
+            missed.push((tick, (want, state), (r.body.veh.want, r.body.veh.state)));
+        }
+        states.push((tick, state));
+        checked += 1;
+    }
+    Some((checked, states, missed))
+}
+
 /// V35: the body plays the original's clips through recording2's two backflips, on the original's
 /// ticks.
 ///
@@ -2595,54 +2644,49 @@ fn v35_rows() -> Option<Vec<std::collections::HashMap<String, String>>> {
 /// is not thrown, so it has no wreck to follow.
 #[test]
 fn the_body_plays_the_originals_backflip_through_recording2() {
-    use game_sim::trick::Trick;
     use game_sim::vehicle_anim::BACKFLIP;
     let Some(rows) = v35_rows() else {
         eprintln!("skipped: no context/capture/v35/flips.csv (V35's capture of recording2)");
         return;
     };
-    let tables = Tables::build();
-    let Some((phy, wheels)) = the_disc_125(&tables) else { return };
-    let mut r = game_sim::rider::Rider::new(&phy, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
-    let lib = v35_library();
-    let dt = F(1.0 / 30.0);
-    let c = Controls { gas: F::ONE, ..Controls::default() };
-    // The body starts at the gate; the throttle lets it ride, as recording2's rider is at its start.
-    for _ in 0..10 {
-        r.body_frame(dt, &c, game_sim::rider::Gate::default(), &lib, &v35_clip);
-    }
-    assert_eq!(r.body.veh.state, 30, "the body does not ride after the gate");
-
-    let n = |row: &std::collections::HashMap<String, String>, col: &str| -> u32 {
-        row[col].parse().unwrap_or_else(|_| panic!("column {col} is {:?}", row[col]))
-    };
-    let (mut checked, mut backflips, mut missed) = (0, Vec::new(), Vec::new());
-    for row in &rows {
-        let tick = n(row, "frame_counter");
-        if n(row, "wreck_reason") != 0 || n(row, "req_wreck") != 0 {
-            continue;
-        }
-        let (airborne, flipping, trick) = (n(row, "airborne") != 0, n(row, "flipping") != 0, n(row, "trick_id"));
-        let slot = if trick < 24 { trick } else { 24 };
-        assert_eq!(n(row, "req_backflip") != 0, flipping, "tick {tick}: the request's backflip is not the bike's turning flag");
-        assert_eq!(n(row, "req_airborne") != 0, airborne, "tick {tick}: the request's airborne is not the bike's");
-        assert_eq!(n(row, "req_gesture"), slot, "tick {tick}: the request's gesture is not the trick id's slot");
-
-        r.ride.air.airborne = airborne;
-        r.ride.air.flipping = flipping;
-        r.tricks.requested = Trick(trick as u8);
-        r.body_frame(dt, &c, game_sim::rider::Gate::default(), &lib, &v35_clip);
-        let (want, state) = (n(row, "state_want") as i32, n(row, "state") as i32);
-        if (r.body.veh.want, r.body.veh.state) != (want, state) {
-            missed.push((tick, (want, state), (r.body.veh.want, r.body.veh.state)));
-        }
-        if state == BACKFLIP {
-            backflips.push(tick);
-        }
-        checked += 1;
-    }
+    let Some((checked, states, missed)) = v35_body_over(&rows) else { return };
+    let backflips: Vec<u32> = states.iter().filter(|s| s.1 == BACKFLIP).map(|s| s.0).collect();
     assert!(checked > 900, "only {checked} riding ticks in the capture");
     assert_eq!(backflips, (2513..2544).collect::<Vec<_>>(), "the original's backflip ticks moved: the capture is not V35's");
+    assert!(missed.is_empty(), "{} of {checked} ticks: (tick, the original's (want, state), the port's): {:?}", missed.len(), &missed[..missed.len().min(12)]);
+}
+
+/// C8's capture of its tape (recording2 with flip 1's Taunt lifted and the next jump's cancan made a
+/// no-hander, research/journal/2026-10-26-c8-flip-capture) played back on the original, run 1; one
+/// map per row, `None` when this checkout does not have it.
+fn c8_rows() -> Option<Vec<std::collections::HashMap<String, String>>> {
+    let ctx = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context");
+    let text = std::fs::read_to_string(ctx.join("capture/c8/run1.csv")).ok()?;
+    let mut lines = text.lines();
+    let head: Vec<String> = lines.next()?.split(',').map(str::to_owned).collect();
+    Some(lines.map(|l| head.iter().cloned().zip(l.split(',').map(str::to_owned)).collect()).collect())
+}
+
+/// V81: V35's two checks over C8's ride, where nothing cuts the backflip short and a trick is played
+/// in the air. The backflip's clip (38) runs uncut for the whole of the bike's turn, 2513..2579, and
+/// hands back to the airborne pose the tick the rotation is over; the no-hander (trick 4) plays its
+/// gesture's state 4 from the tick it is asked, 2651, to the tick it ends, 2696. Every other riding
+/// tick of the capture's 440 is riding or the airborne pose, as the original's, and the port's body
+/// parts from the original on none of them.
+#[test]
+fn the_body_plays_the_originals_uncut_backflip_and_no_hander_through_c8() {
+    use game_sim::vehicle_anim::{AIR, BACKFLIP};
+    let Some(rows) = c8_rows() else {
+        eprintln!("skipped: no context/capture/c8/run1.csv (C8's capture of its tape)");
+        return;
+    };
+    let Some((checked, states, missed)) = v35_body_over(&rows) else { return };
+    assert_eq!(checked, 440, "C8's run 1 is 440 riding ticks, none of them a wreck");
+    let at = |want: i32| -> Vec<u32> { states.iter().filter(|s| s.1 == want).map(|s| s.0).collect() };
+    assert_eq!(at(BACKFLIP), (2513..2580).collect::<Vec<_>>(), "the original's backflip ticks moved: the capture is not C8's run 1");
+    assert_eq!(at(4), (2651..2697).collect::<Vec<_>>(), "the original's no-hander ticks moved: the capture is not C8's run 1");
+    let other: Vec<(u32, i32)> = states.iter().copied().filter(|s| ![BACKFLIP, 4, AIR, 30].contains(&s.1)).collect();
+    assert!(other.is_empty(), "the original's body played other states: {other:?}");
     assert!(missed.is_empty(), "{} of {checked} ticks: (tick, the original's (want, state), the port's): {:?}", missed.len(), &missed[..missed.len().min(12)]);
 }
 
