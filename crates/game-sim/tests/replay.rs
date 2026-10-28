@@ -8733,6 +8733,158 @@ fn walls_and_nose_landings_wreck_as_the_original_does() {
     assert!(parted.is_empty(), "{}", parted.join("\n"));
 }
 
+// --- S139: the chassis' sweep back, a bike thrown sideways through a wall and a post ------------------
+
+/// S139's captures (`research/s139/shove.sh`, `research/s139/sweep.toml`: S138's whole bike plus the
+/// riding bike's sweep back — the record's swept segment, its sweep probe's flags and contact), in
+/// `context/capture/s138/` beside S138's: recording2's bike teleported about free09's farmyard and
+/// thrown by hand at 200 ft/s (clamped to the riding 135 on its first integrate), 8 up, or ridden in
+/// on the gas. The body rays reach ±1.3 ft sideways and 3.6 ft ahead of the hub, so a bike moving 4.4
+/// ft a tick sideways passes a wall between two ticks' rays, and only the sweep back meets it; head on
+/// the rays meet a post first and the sweep never strikes. The capture, the state the port starts from
+/// (the third saved, as the recorder's first two rows have no pad), the ticks ridden, and what it is.
+const S139_SWEEPS: [(&str, u64, u64, &str); 3] = [
+    ("s138/side1", 2469, 20, "thrown west through the shed's east wall, mid-wall"),
+    ("s138/sidepost", 2470, 16, "thrown west through the shed's south-east corner post"),
+    ("s138/post", 2564, 10, "ridden head-on into the south-east corner post at 82 a second, the gas held"),
+];
+
+/// The sweep probe's flag bit for "its last search struck something" (`+0x116` 0x20).
+const SWEEP_STRUCK: u32 = 0x20;
+
+/// How far the port may put the bike back from where the original does on a tick both strike, and
+/// its chassis stray from the original's while both ride, in feet, per lane.
+const SWEPT_TO_THE_ORIGINALS: f32 = 0.05;
+
+/// **A bike too fast for its body rays is put back out of a thin prop as the original's is** (S139):
+/// each of [`S139_SWEEPS`] ridden by the port from the original's save state with the original's pad,
+/// as [`walls_and_nose_landings_wreck_as_the_original_does`] rides S138's. Every tick, before the
+/// frame, the chassis' sweep back ([`game_sim::ride::Ride::sweep_back`], the search the rider's tick
+/// opens with) is run on a copy of the port's bike: it must strike on the ticks the original's sweep
+/// probe reads struck, and put the node where the original's record says it put it
+/// ([`SWEPT_TO_THE_ORIGINALS`]); the chassis the rider's own sweep puts back keeps to the
+/// original's path while both ride; and the first wreck is the original's (reason, tick ±1).
+#[test]
+fn the_sweep_back_puts_a_fast_bike_back_out_of_a_post_as_the_original_does() {
+    let dir = private_dir("capture");
+    let (mut compared, mut swept, mut parted) = (0, 0, Vec::new());
+    for (name, asked, ticks, what) in S139_SWEEPS {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
+            println!("no {name}.csv — S139's journal says how it is recorded");
+            continue;
+        };
+        let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+        let at = dir.join(format!("{name}-{asked}.ee.bin"));
+        let Some(st) = SaveState::open_either(&at) else {
+            println!("no {} with the human's rider in it", at.display());
+            continue;
+        };
+        let Some((_, acc)) = acceptance_capture() else { return };
+        in_the_world_of(&acc, |world, _, bike| {
+            let Some(Ridden { tables, phy, mounts }) = bike else {
+                println!("no Race 125 on this disc");
+                return;
+            };
+            let Some(col) = Disc::open().and_then(|mut disc| the_bike_col(&mut disc)) else {
+                println!("no bike collision files on this disc");
+                return;
+            };
+            let col = Arc::new(col);
+            let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+            let cap = dense_run(&whole, saved);
+            let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+            let rows = rows_by_counter(&cap);
+            let pad_of = |counter: u64| rows.get(&counter).filter(|&&r| r >= 2).map(|&r| tape.frames[r - 2]);
+            let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+            rider.carries_bike_col(Arc::clone(&col));
+            let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+            st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+            let want = first_wreck(&cap, saved).filter(|&(c, _)| c <= saved + ticks);
+            println!("{name} ({what}), from the state at frame {saved}: the original {}",
+                     want.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
+            let num = |r: usize, n: &str| cell(&cap, r, column(&cap, n).unwrap()).parse::<f32>().unwrap();
+            let lane = |r: usize, n: &str| [num(r, &format!("{n}.x")), num(r, &format!("{n}.y")), num(r, &format!("{n}.z"))];
+            // The port's tick N is the original's row N + 1 (its chassis lanes read the tick's end a
+            // frame late); the sweep lanes are read at the tick's top, so a struck row may instead hold
+            // the next tick's sweep (sidepost's rows 2474..2476): a row is met by the port's sweep of
+            // the tick before it or of its own tick, and a sweep a read-ahead row hides is held only to
+            // fall among the original's own strikes.
+            let (mut got, mut ours_all, mut theirs_all) = (None, Vec::new(), Vec::new());
+            for counter in saved + 1..=saved + ticks {
+                let Some(pad) = pad_of(counter) else {
+                    println!("  {counter}: no row in the capture");
+                    break;
+                };
+                // The port's sweep back on this tick, on a copy: the rider's tick runs the same one
+                // first, from the same bike, while it is riding.
+                let ours = (sim.rider.state.wreck.is_none()).then(|| {
+                    let mut probe = sim.rider.ride.clone();
+                    probe.sweep_back(&phy, Some(&col.rays), world, pad.dt()).then_some(probe.origin)
+                }).flatten();
+                let ours = ours.map(|o| [o.x(), o.y(), o.z()]);
+                sim.frame(pad.dt(), &pad.reports, world);
+                let ride = &sim.rider.ride;
+                let c = ride.chassis.cofg_world;
+                let show = |s: Option<[f32; 3]>| s.map_or("-".to_string(), |s| format!("{:9.3} {:8.3} {:9.3}", s[0], s[1], s[2]));
+                if let Some(o) = ours {
+                    ours_all.push((counter, o));
+                }
+                if let Some(&r) = rows.get(&(counter + 1)) {
+                    let theirs = (num(r, "sw_flags") as u32 & SWEEP_STRUCK != 0 && num(r, "wreck_reason") == 0.0).then(|| lane(r, "sw_to"));
+                    let oc = lane(r, "ch_cofg");
+                    println!("  {} orig cofg {:9.3} {:8.3} {:9.3} swept to {}", counter + 1, oc[0], oc[1], oc[2], show(theirs));
+                    // The bike the rider's own sweep put back rides the original's path until either
+                    // wrecks; a row read a tick ahead (post's 2567 repeats 2568) holds the next tick's,
+                    // and the port's tick before has no row.
+                    let riding = sim.rider.state.wreck.is_none() && num(r, "wreck_reason") == 0.0;
+                    let ahead = rows.get(&(counter + 2)).is_some_and(|&n| lane(n, "ch_cofg") == oc);
+                    if riding && !ahead && (0..3).any(|k| ([c.x(), c.y(), c.z()][k] - oc[k]).abs() > SWEPT_TO_THE_ORIGINALS) {
+                        parted.push(format!("{name} at {counter}: the port's chassis at {c:?}, the original's at {oc:?}"));
+                    }
+                    if let Some(t) = theirs.filter(|_| counter < saved + ticks) {
+                        theirs_all.push((counter + 1, t));
+                    }
+                }
+                println!("  {counter} port cofg {:9.3} {:8.3} {:9.3} swept to {}{}", c.x(), c.y(), c.z(), show(ours),
+                         sim.rider.state.wreck.map_or(String::new(), |w| format!("  wreck {}", w.0)));
+                if got.is_none() && let Some(w) = sim.rider.state.wreck {
+                    got = Some((counter + 1, w.0));
+                }
+            }
+            let near = |a: [f32; 3], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() <= SWEPT_TO_THE_ORIGINALS);
+            // Only rows before the port's wreck (a wrecked port bike sweeps no more) are held.
+            let theirs_all: Vec<_> = theirs_all.into_iter().filter(|&(r, _)| got.is_none_or(|(g, _)| r < g)).collect();
+            for &(r, t) in &theirs_all {
+                if !ours_all.iter().any(|&(c, o)| (r - 1..=r).contains(&c) && near(o, t)) {
+                    parted.push(format!("{name} at row {r}: the original's sweep puts the bike back at {t:?}, no port sweep of tick {} or {r} does", r - 1));
+                }
+            }
+            for &(c, o) in &ours_all {
+                let seen = theirs_all.iter().any(|&(r, t)| (c + 1 == r || c == r) && near(o, t));
+                let among = theirs_all.iter().any(|&(r, _)| r + 1 >= c && r <= c + 3);
+                if !seen && !among && want.is_none_or(|(w, _)| c + 2 < w) {
+                    parted.push(format!("{name} at {c}: the port's sweep puts the bike back at {o:?}, the original's sweep strikes on no row near it"));
+                }
+            }
+            swept += theirs_all.len();
+            println!("  the port {}; the original's sweep struck on {} rows, the port's on {} ticks",
+                     got.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")), theirs_all.len(), ours_all.len());
+            let agrees = match (want, got) {
+                (None, None) => true,
+                (Some((wc, wr)), Some((gc, gr))) => gr == wr && gc.abs_diff(wc) <= 1,
+                _ => false,
+            };
+            if !agrees {
+                parted.push(format!("{name} ({what}): the original {want:?}, the port {got:?} (tick, reason)"));
+            }
+            compared += 1;
+        });
+    }
+    println!("{compared} sweeps compared, {swept} of the original's put-backs met");
+    assert!(compared == 0 || swept > 0, "no capture's sweep struck: the comparison proved nothing");
+    assert!(parted.is_empty(), "{}", parted.join("\n"));
+}
+
 // --- S150: crooked landings, each from a save state taken in the air ------------------------------
 
 /// One tick of a crooked landing, both sides: the frame, the original's heading and whether its row
