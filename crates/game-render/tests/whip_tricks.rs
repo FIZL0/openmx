@@ -152,6 +152,13 @@ struct Seen {
     bare: bool,
     /// The body's machine's two axes (phase, mix) and the bike's, as the frame left them.
     axes: [(f32, f32); 2],
+    /// The simulated bike's heading, radians about up from `+z` (its node's forward row, the one
+    /// the 360 measures, flattened), the 360's clip state ([`game_sim::air::Spin::clip`]) and its yaw torque (MD36).
+    heading: f32,
+    clip: u8,
+    spin_yaw: f32,
+    /// The heading the 360 took off on, 0..2π ([`game_sim::air::Spin::start`]).
+    spin_start: f32,
 }
 
 impl Seen {
@@ -238,6 +245,13 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
                 let d = &kit.chassis.stance.driver;
                 (d.phase.value.0, d.mix.value.0)
             }],
+            heading: {
+                let f = r.ride.node[2];
+                f.x().atan2(f.z())
+            },
+            clip: r.ride.tricks.as_ref().map_or(0, |t| t.spin.clip),
+            spin_yaw: r.ride.tricks.as_ref().map_or(0.0, |t| t.spin.torque.y()),
+            spin_start: r.ride.tricks.as_ref().map_or(0.0, |t| t.spin.start.0),
         });
     }
     out
@@ -551,4 +565,52 @@ fn whipped_trick(t: usize) -> Whipped {
     let last = down - LANDING - 1;
     w.settled = whipped[last].apart(&plain[last]);
     w
+}
+
+
+/// **MD36:** why V69's 360 plays `threesixtyR` twice on one jump — not a latch the port lacks, and
+/// not the port turning too far: MX vs. ATV measures the turn as [`game_sim::air::spin_turned`] does
+/// (the PC exe's 360 step), which folds only a heading wrapped downwards. This ramp's take-off heading
+/// is a few degrees under 2π and the 360 turns up through 0, so the measure reads nearly a whole turn
+/// off ~10° in: the clip starts there, comes round ~35° short of a whole turn, and starts again as the
+/// heading crosses 0 the second time, ~10° past it. Both starts are asserted at their true turn (the
+/// heading unwrapped from take-off), with the measure over [`game_sim::air::SPIN_CLIP`] at each.
+#[test]
+fn a_360_taking_off_under_two_pi_plays_its_clip_twice() {
+    let Some(mut kit) = kit() else { return };
+    let r1 = hands([false, false, true], [false; 2], (0.0, 0.0));
+    let left = hands([false, false, true], [false; 2], (-1.0, 0.0));
+    let right = hands([false, false, true], [false; 2], (1.0, 0.0));
+    let spin = ride(&mut kit, &[(130, r1.clone()), (150, left), (158, right), (166, r1), (180, Controls::default())], FRAMES);
+    // The bike is dropped onto the ramp at the start: the take-off is the first flight after the 360 fires.
+    let up = 166 + spin[166..].iter().position(|s| !s.on_ground).expect("a take-off");
+    let down = up + spin[up..].iter().position(|s| s.on_ground).expect("a landing");
+    let tau = std::f32::consts::TAU;
+    // The heading as the 360 reads it, 0..2π, and the turn from take-off unwrapped frame by frame.
+    let h = |s: &Seen| s.heading.rem_euclid(tau);
+    let mut path = vec![0.0f32; FRAMES];
+    for k in up + 1..FRAMES {
+        let d = (spin[k].heading - spin[k - 1].heading + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
+        path[k] = path[k - 1] + if spin[k].on_ground { 0.0 } else { d };
+    }
+    // The body plays the clip exactly while the 360's clip state is set, in the air.
+    for k in up..down {
+        assert_eq!(spin[k].body == game_sim::vehicle_anim::SPIN_RIGHT, spin[k].clip != 0, "frame {k}: body {} under clip state {}", spin[k].body, spin[k].clip);
+    }
+    let starts: Vec<usize> = (up..down).filter(|&k| spin[k].clip == 1).collect();
+    assert_eq!(starts.len(), 2, "the clip started at {starts:?}");
+    let start = spin[starts[0]].spin_start;
+    assert!(start > tau - 0.6108652 && spin[starts[0]].spin_yaw > 0.0,
+            "the ramp leaves the ground {:.1}° under a whole turn, turning up", (tau - start).to_degrees());
+    let turns: Vec<f32> = starts.iter().map(|&k| path[k].to_degrees()).collect();
+    println!("the 360: off at {up} heading {:.1}°, clip started at {starts:?} ({:.1}° and {:.1}° turned), landed at {down} {:.1}° turned",
+             start.to_degrees(), turns[0], turns[1], path[down].to_degrees());
+    for (&k, &t) in starts.iter().zip(&turns) {
+        let measured = game_sim::air::spin_turned(F(start), F(h(&spin[k]))).0;
+        assert!(measured > 0.6108652, "frame {k}: the measure reads {:.1}°", measured.to_degrees());
+        // Less than 35° from a whole number of turns: the wrap started it, not the turn.
+        let off = (t - 360.0 * (t / 360.0).round()).abs();
+        assert!(off < 35.0, "frame {k}: the clip started {t:.1}° into the turn");
+    }
+    assert!(turns[0] < 35.0 && (360.0..395.0).contains(&turns[1]));
 }
