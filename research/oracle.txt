@@ -5869,6 +5869,13 @@ node_count             boot 0x001b3420 1 + a node's descendants: what a hierarch
 #   nprobe3/4/6/7 (research/s138_nose.py, idle pad): thrown up and pitched forward at (4642.5, 3650):
 #          62 deg at 30/s and 66 at 44/s down ride out (g.y 26.6 / 42.7), 70.06 -> 69.86 rides out,
 #          74.95 -> 75.03 reason 1 on touchdown. States 2791, 2819, 2790, 2787.
+# S140 — the walk's measure writes +0x34 (speed = |+0x260|) too, after the physics. On all nine S67/S115
+# RAM images the oracle's bike_vehicle_update leaves +0x34 == the port's measure of its own post-update
+# +0x260, bit for bit, and != the measure of the velocity it began with; every capture row's ch_speed is
+# its own row's |ch_vel|. No reader inside the frame: stunt_request, stunt_idle, stunt_clocks and
+# bike_wreck_test load no +0x34 (their +0x7a4 uses touch +0x1a0, +0x260, +0x264, +0x294..+0x29c and a
+# vt+0x80 call). Readers after the update: vehicle_camera_target through rider+0x860 (0x0027c5ec), the
+# speedometer and the engine's sound.
 
 # S139 — the riding chassis' sweep back on a capture. Journal: research/journal/2026-10-28-s139-post-sweep-back.
 # The port is S125's (Ride::sweep_back, run at the top of the rider's tick); S139 is its proof. No new function.

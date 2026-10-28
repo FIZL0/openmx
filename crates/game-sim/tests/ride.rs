@@ -5981,7 +5981,8 @@ fn md20_one_short_of_either_wrecks() {
 /// original's general inverse, an ulp off the old reciprocal on one axis), and with S138's Euler angles
 /// measured again after the substeps (the attachment walk's measure, which the wreck test reads), and
 /// with S115's centre of gravity put into the world origin first (an ulp, as the original rounds it), and
-/// with S118's crossup measured from the heading the substeps left (the auto-level's yaw a tick sooner).
+/// with S118's crossup measured from the heading the substeps left (the auto-level's yaw a tick sooner), and
+/// with S140's speed measured again after the substeps (the same walk's measure; the ride does not move).
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -5993,8 +5994,8 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0x75f7f418b219075b;
-const MD25_DIAGONAL_FOLD: u64 = 0x066916a5d938f4e4;
+const MD25_GESTURE_FOLD: u64 = 0xf7529726e979e7cf;
+const MD25_DIAGONAL_FOLD: u64 = 0xd10571ecd9dc0e29;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
 /// lip (1.6 s, take-off to touchdown): [`FLIP_RAMP`] at a shallower slope. 0.31 until S67's

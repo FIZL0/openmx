@@ -7241,12 +7241,12 @@ fn save_state_watches(cap: &Capture, ticks: &[u64]) -> Vec<Watch> {
         let Ok(w) = cap.float(&col, &path) else { continue };
         watches.push(retick(w, ticks, 0));
     }
-    // The chassis' speed is measured at the top of a frame, from the velocity the frame before
-    // left (`chassis::measure`). The original's rows carry it already measured — every row's
-    // `ch_speed` is the length of its own `ch_vel`, the save state's too — and the port's is
-    // measured a tick later: a row's speed is the port's on the tick after it.
+    // The chassis' speed is measured at the top of a frame and again by the attachment walk after
+    // the physics (`chassis::measure`, S140): every row's `ch_speed` is the length of its own
+    // `ch_vel`, the save state's too, and so is the port's on the same tick. Before S140 the port
+    // took only the top-of-frame one, and a row's speed was the port's on the tick after it.
     if let Ok(w) = cap.float("ch_speed", "rider.ride.chassis.speed") {
-        watches.push(retick(w, ticks, 1));
+        watches.push(retick(w, ticks, 0));
     }
     for (col, path) in slip_lanes() {
         let Ok(w) = cap.bool(&col, &path) else { continue };
@@ -8193,6 +8193,8 @@ fn the_nose_first_touchdown_tick_is_the_originals() {
                 ("front spring force", ee.u32_at(front + 0xf8), ride.front.w.spring_force.0.to_bits()),
                 ("rear comp", ee.u32_at(rear + 0xf0), ride.rear.w.compression.0.to_bits()),
                 ("rear spring force", ee.u32_at(rear + 0xf8), ride.rear.w.spring_force.0.to_bits()),
+                // The speed the attachment walk's measure leaves after the physics (S140).
+                ("chassis speed", ee.u32_at(ch + 0x34), ride.chassis.speed.0.to_bits()),
             ];
             let f = |b: [u32; 4]| b.map(f32::from_bits);
             println!("{S115_NOSE} {saved} -> {}:", saved + 1);
@@ -8214,6 +8216,55 @@ fn the_nose_first_touchdown_tick_is_the_originals() {
         }
     });
     println!("{ran} touchdown ticks compared");
+}
+
+/// **The chassis' speed is measured again after the physics** (S140): the riding branch of the bike's
+/// vehicle update walks the bike's attachments after the air state, and the chassis' frame update there
+/// is its measure, which writes `+0x34` as well as the euler (S138 ported only the euler). On every
+/// S67 and S115 RAM image the original's whole vehicle update runs one tick in the oracle, and the
+/// speed it leaves is held, to the bit, to the port's [`game_sim::chassis::measure`] of the velocity
+/// the same update left — not of the velocity the frame began with, which the top-of-frame measure
+/// takes and which differs from it on every image here. The saved image's own speed is the measure
+/// of its own velocity too: the state was saved after a frame's walk. The port's side of the same
+/// tick, from the original's state and pad, is [`the_nose_first_touchdown_tick_is_the_originals`]'s
+/// `chassis speed` lane. Skipped with a line where the images are not here.
+#[test]
+fn the_attachment_walk_measures_the_speed_after_the_physics() {
+    use ps2_oracle::{Ee, addr};
+    let dir = private_dir("capture");
+    let measured = |vel: Vf| {
+        let mut ch = game_sim::chassis::Chassis { vel, ..Default::default() };
+        game_sim::chassis::measure(&mut ch, F::ZERO, Vf::ZERO);
+        ch.speed.0.to_bits()
+    };
+    let mut ran = 0;
+    let states = S67_STATES.iter().map(|&(asked, _)| (S67_LANDINGS, asked))
+        .chain(S67_RUN2_STATES.iter().map(|&(asked, _)| (S67_RUN2, asked)))
+        .chain(S115_NOSE_STATES.iter().map(|&(asked, _)| (S115_NOSE, asked)));
+    for (name, asked) in states {
+        let at = dir.join(format!("{name}-{asked}.ee.bin"));
+        let (Some(st), Ok(mut ee)) = (SaveState::open_either(&at), Ee::from_ram(&at)) else {
+            println!("no {}", at.display());
+            continue;
+        };
+        ee.set(28, u64::from(addr("boot_gp").unwrap()));
+        let ch = st.rider_at(0x7a4).unwrap();
+        let vel = |ee: &Ee| Vf::new(ee.f32_at(ch + 0x260), ee.f32_at(ch + 0x264), ee.f32_at(ch + 0x268), ee.f32_at(ch + 0x26c));
+        let (vel_before, speed_before) = (vel(&ee), ee.u32_at(ch + 0x34));
+        assert_eq!(speed_before, measured(vel_before), "{name}-{asked}: the saved speed is its own velocity's");
+        let dt = ee.f32_at(addr("frame_dt").unwrap());
+        ee.call(addr("bike_vehicle_update").unwrap(), &[u64::from(st.rider)], &[dt], 500_000_000);
+        let (vel_after, speed_after) = (vel(&ee), ee.u32_at(ch + 0x34));
+        println!(
+            "{name}-{asked}: speed {} -> {} (|vel| before {}, after {})",
+            f32::from_bits(speed_before), f32::from_bits(speed_after),
+            f32::from_bits(measured(vel_before)), f32::from_bits(measured(vel_after)),
+        );
+        assert_eq!(speed_after, measured(vel_after), "{name}-{asked}: the update leaves the measure of its own velocity");
+        assert_ne!(speed_after, measured(vel_before), "{name}-{asked}: and not the frame's first velocity's");
+        ran += 1;
+    }
+    println!("{ran} states updated");
 }
 
 // --- S58: the tyres' slip, case by case ------------------------------------------------------------
