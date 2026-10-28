@@ -3812,21 +3812,24 @@ impl Renderer {
                 }
                 drawn.triangles[v] += (ground_counts[p] / 3) as usize;
             }
-            // The models: the opaque runs of every batch, then the translucent ones over them.
-            for blended in [false, true] {
+            // The models: the opaque runs of every batch, then the translucent ones over them —
+            // those that write depth first, then those that leave it alone (V107), which can hide
+            // nothing and so must come after whatever is behind them: the prop's spinning disc.
+            for (blended, writes) in [(false, true), (true, true), (true, false)] {
+                let late = |r: &Range| r.blended == blended && (!blended || self.materials[r.material].pipeline.depth_write == writes);
                 let mut current: Option<PipelineKey> = None;
                 let mut bound: Option<usize> = None;
                 for batch in mine.iter().filter(|b| b.ghost == 0) {
                     let model = &self.models[batch.model];
                     let ranges = model.group(batch.group);
-                    if !ranges.iter().any(|r| r.blended == blended) {
+                    if !ranges.iter().any(late) {
                         continue;
                     }
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
                     // The batch's own copies, from the start of the buffer slice: WebGL2 has no
                     // first instance to draw from.
                     pass.set_vertex_buffer(1, self.instances.slice(batch.first as u64 * stride..(batch.first + batch.count) as u64 * stride));
-                    for r in ranges.iter().filter(|r| r.blended == blended) {
+                    for r in ranges.iter().filter(|r| late(r)) {
                         let material = &self.materials[r.material];
                         if current != Some(material.pipeline) {
                             pass.set_pipeline(&self.pipelines[&material.pipeline]);
