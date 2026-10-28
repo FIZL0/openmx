@@ -37,6 +37,10 @@ with a handshake that refuses a peer whose build would ride differently.
 **The browser.** `tools/web.sh` builds the same shell to WebAssembly in `web/`; the page keeps its
 copy of your disc in the browser's private storage and plays online too.
 
+**iPhone and iPad.** The iPhone build is on its way through FIZL0's app source: add
+`https://fizl0.github.io/apps/source.json` under Sources in Feather, AltStore or SideStore
+(or tap one on [openmx.dev](https://openmx.dev/#get)) and openMX appears there when it lands.
+
 **Additions, layered on top.** Track and music mods (`mods/`, `--mods`), including tracks imported from
 MX vs. ATV and Untamed, gameplay modifiers, markers you can drop and return to, camera and FOV
 settings. With them off the ride is the original's, and the replay tests say so.

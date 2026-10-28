@@ -353,7 +353,7 @@ footer a { color: var(--bone); }
     </section>
 
     <section id="get">
-      <h2 class="head"><span class="skew">Desktop</span></h2>
+      <h2 class="head"><span class="skew">Desktop &amp; mobile</span></h2>
       <div class="grid2">
         <div class="card">
           <h3>Linux &amp; Steam Deck</h3>
@@ -365,6 +365,13 @@ footer a { color: var(--bone); }
           <h3>Windows</h3>
           <p>Coming soon. Every build, its release notes and its signed checksums are on GitHub.</p>
           <div class="row" style="margin-top:14px"><a class="pill ghost" id="builds" target="_blank" rel="noopener">All builds</a></div>
+        </div>
+        <div class="card">
+          <h3>iPhone &amp; iPad</h3>
+          <p>The iPhone build is on its way. Add FIZL0's app source to Feather, AltStore or SideStore now and openMX shows up there,
+            with updates, when it lands.</p>
+          <div class="row" style="margin-top:14px"><a class="pill" id="feather">Add to Feather</a><a class="pill ghost" id="altstore">AltStore</a><a class="pill ghost" id="sidestore">SideStore</a><a class="pill ghost" id="copysrc" href="#">Copy source URL</a></div>
+          <p style="margin-top:10px; overflow-wrap:anywhere"><code id="srcurl">https://fizl0.github.io/apps/source.json</code></p>
         </div>
       </div>
     </section>
@@ -749,6 +756,16 @@ footer a { color: var(--bone); }
   // the site has moved on, and the page offers a reload (a ride in progress is never cut short).
   const BETA = location.hostname.startsWith('beta.');
   const RELEASES = 'https://github.com/FIZL0/openmx/releases';
+  // FIZL0's shared sideloading source (github.com/FIZL0/apps), which openMX's iPhone build joins (P200/P201).
+  const SOURCE = 'https://fizl0.github.io/apps/source.json';
+  $('#feather').href = `feather://source/${SOURCE}`;
+  $('#altstore').href = `altstore://source?url=${encodeURIComponent(SOURCE)}`;
+  $('#sidestore').href = `sidestore://source?url=${encodeURIComponent(SOURCE)}`;
+  $('#copysrc').onclick = (e) => {
+    e.preventDefault();
+    navigator.clipboard.writeText(SOURCE).then(() => { e.target.textContent = 'Copied'; },
+      () => { getSelection().selectAllChildren($('#srcurl')); e.target.textContent = 'Select and copy the URL below'; });
+  };
   for (const a of document.querySelectorAll('[data-file]')) a.href = `${RELEASES}/${BETA ? 'download/beta' : 'latest/download'}/${a.dataset.file}`;
   $('#builds').href = `${RELEASES}/${BETA ? 'tag/beta' : 'latest'}`;
   const built = () =>
