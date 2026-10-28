@@ -101,9 +101,11 @@ jobs:
           else
             echo "::warning::no BETA_DISPATCH_TOKEN secret: beta.openmx.dev catches up on its own half-hourly check"
           fi
-  # openmx.dev: the published release's own website
+  # openmx.dev: the published release's own website. Only a normal release (tools/release.sh VERSION without a
+  # suffix): the beta and pre-releases (1.1.0-rc.1) never go on it. The github-pages environment allows main and v*
+  # tags; beta.openmx.dev is FIZL0/openmx-beta's Pages, never this repo's.
   site:
-    if: ${{ github.event_name == 'release' && github.event.release.tag_name != 'beta' }}
+    if: ${{ github.event_name == 'release' && !github.event.release.prerelease && github.event.release.tag_name != 'beta' }}
     runs-on: ubuntu-latest
     permissions:
       pages: write
