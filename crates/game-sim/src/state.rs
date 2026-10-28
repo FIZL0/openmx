@@ -167,6 +167,12 @@ pub struct Sense {
     /// player's Air Wrecks switch turned off makes it false, and the rider rides the jump out. The
     /// landing is judged as ever either way.
     pub air_wrecks: bool,
+    /// Not the original's (S161): a landing more than a quarter turn crossed up — the bike pointing
+    /// back against where it is going — wrecks ([`crate::air::backwards_landing`]). The original's
+    /// crossup is an arcsine, so it reads such a landing as 180° less its angle and rides out one past
+    /// about 135° (S150). False, the default, is the original; a player's Backwards Landings Bail
+    /// switch turned on makes it true.
+    pub backwards_bail: bool,
     /// The vehicle has settled: the window in front of the reset clock may start. **Not a property of
     /// the class** — S5 read it as one and said so here, and that was wrong. It is a runtime signal,
     /// written during a wreck by the rider's own side of it, and a player bike's copy of it
@@ -192,6 +198,8 @@ pub struct Allowed {
     pub landing: bool,
     /// The airborne attitude clause among the landing ones: [`Sense::air_wrecks`].
     pub air: bool,
+    /// The backwards landing clause, not the original's: [`Sense::backwards_bail`].
+    pub backwards: bool,
 }
 
 /// What the machine asks for when the clock runs out.
@@ -284,7 +292,7 @@ impl Ride {
         let mut out = Step::default();
         let driven = sense.ai_route || sense.owner.is_some_and(|o| o.human);
         if driven {
-            let allowed = Allowed { wrecks: sense.wrecks_enabled, landing: self.wreck.is_none(), air: sense.air_wrecks };
+            let allowed = Allowed { wrecks: sense.wrecks_enabled, landing: self.wreck.is_none(), air: sense.air_wrecks, backwards: sense.backwards_bail };
             if let Some(reason) = test(allowed) {
                 self.enter(reason);
                 out.wreck = Some(reason);

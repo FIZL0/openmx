@@ -18,6 +18,10 @@ const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds th
 /// The Air Wrecks row's help (P138).
 const AIR_WRECKS_HELP: &str = "Whether the bike's angle in the air throws the rider off: upside down, nosed over or rolled too far. \
      Off, you ride every jump out, and only the landing is judged. On is the original game.";
+/// The Backwards Landings Bail row's help (S161).
+const BACKWARDS_BAIL_HELP: &str = "Whether a landing with the bike facing back against the way it is going throws the rider off. \
+     The original game judges a crossed-up landing by an angle that reads one past about 135 degrees as nearly straight, so the bike \
+     rides it out and swings round. Off is the original game.";
 pub const TAB_DISPLAY: usize = 1;
 pub const TAB_GRAPHICS: usize = 2;
 pub const TAB_AUDIO: usize = 3;
@@ -82,6 +86,7 @@ pub enum Key {
     Player,
     Wrecks,
     AirWrecks,
+    BackwardsBail,
     Bays,
     Modifiers,
     Hud,
@@ -380,7 +385,7 @@ impl Menu {
     /// How many of Wrecks and Air Wrecks are off the original's on (P175), for the Game Modifiers
     /// row's count.
     fn wrecks_changed(&self) -> usize {
-        usize::from(!self.settings.wrecks) + usize::from(!self.settings.air_wrecks)
+        usize::from(!self.settings.wrecks) + usize::from(!self.settings.air_wrecks) + usize::from(self.settings.backwards_bail)
     }
 
     /// The modifiers page's Wrecks and Air Wrecks (P175, from the Ride tab's P138 rows): the
@@ -402,7 +407,19 @@ impl Menu {
             .off_if(!self.settings.wrecks, "Wrecks are off")
             .off_if(self.air_held().is_some(), self.air_held().unwrap_or(""))
             .off_if(host_only.is_some(), host_only.unwrap_or(""));
-        vec![Row::heading("Wrecks"), wrecks.off_if(host_only.is_some(), host_only.unwrap_or("")), air]
+        // S161's, not the original's: off is the original, and like Air Wrecks it is the world's.
+        let mut back = Row::on_off(Key::BackwardsBail, "Backwards Landings Bail", self.settings.backwards_bail, BACKWARDS_BAIL_HELP);
+        back.world = true;
+        back.note = Some(match self.stack.first() {
+            Some(Screen::Pause) => "Changes take when the pause closes.".into(),
+            _ => "The world's: one value for every player. Off is the original game.".into(),
+        });
+        // Held where Air Wrecks is (a played tape, an online room), for the same reasons.
+        let back = back
+            .off_if(!self.settings.wrecks, "Wrecks are off")
+            .off_if(self.air_held().is_some(), "The tape or the room holds it for the ride")
+            .off_if(host_only.is_some(), host_only.unwrap_or(""));
+        vec![Row::heading("Wrecks"), wrecks.off_if(host_only.is_some(), host_only.unwrap_or("")), air, back]
     }
 
     fn display_rows(&self) -> Vec<Row> {
@@ -1124,6 +1141,7 @@ impl Menu {
             }
             Key::Wrecks => s.wrecks = !s.wrecks,
             Key::AirWrecks => s.air_wrecks = !s.air_wrecks,
+            Key::BackwardsBail => s.backwards_bail = !s.backwards_bail,
             Key::Bays => s.bays = !s.bays,
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],
             Key::Modifiers if p.ok => {
@@ -1266,6 +1284,7 @@ impl Menu {
                     self.settings.wrecks = true;
                     if self.air_held().is_none() {
                         self.settings.air_wrecks = true;
+                        self.settings.backwards_bail = false;
                     }
                 }
             }

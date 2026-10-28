@@ -363,6 +363,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         wrecks: false,
         // Air Wrecks off (P138).
         air_wrecks: false,
+        // Backwards Landings Bail on (S161).
+        backwards_bail: true,
         track: "free11".into(),
         track_filter: "MX vs. ATV Untamed".into(),
         split: split::Split::SideBySide,
@@ -2670,7 +2672,7 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     let rows = m.page();
-    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 3 + 1 + 4, "{rows:?}");
+    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 4 + 1 + 4, "{rows:?}");
     assert_eq!(rows.last().unwrap().label, "Reset to Original");
     assert!(rows.iter().filter(|r| r.world).all(|r| !matches!(r.key, Key::Knob(k) if k.per_seat())));
 
@@ -6400,4 +6402,55 @@ fn the_controls_tab_shows_the_keyboard_only_to_its_rider() {
     assert!(!m.controls_on_keys(), "two seats, 1P's rows: 2P rides the keyboard");
     m.keys_seat = Some(0);
     assert!(m.controls_on_keys());
+}
+
+/// S161: the Backwards Landings Bail row sits under Air Wrecks on the Game Modifiers page, the
+/// world's; off is the default and the original's. On, it is written to the file and read back after
+/// a restart, it makes Original mode Mixed, and Original mode's On and the host's All Players reset
+/// turn it back off. Dimmed while Wrecks are off, and held where Air Wrecks is.
+#[test]
+fn the_backwards_bail_row_toggles_and_survives_a_restart() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    assert!(!m.settings.backwards_bail, "off is the default, the original's");
+    assert!(!m.settings.text().contains("backwards_bail"), "{}", m.settings.text());
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    down_to(&mut m, &mut r, Key::BackwardsBail);
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::BackwardsBail).unwrap();
+    let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
+    let at = keys.iter().position(|k| *k == Key::BackwardsBail).unwrap();
+    assert_eq!(keys[at - 1], Key::AirWrecks, "under Air Wrecks: {keys:?}");
+    assert_eq!(row(&m).value, "Off");
+    assert!(row(&m).world);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.settings.backwards_bail);
+    assert_eq!(row(&m).value, "On");
+    assert!(m.settings.text().contains("backwards_bail = on\n"));
+    assert_ne!(m.original(), menu::Original::On, "Backwards Landings Bail on is not the original");
+
+    let dir = scratch("backwards-bail");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (settings, _) = menu::load(&dir);
+    assert!(settings.backwards_bail);
+    std::fs::remove_dir_all(dir).ok();
+    assert!(!Settings::parse("backwards_bail = off\n").backwards_bail);
+
+    m.settings.wrecks = false;
+    assert_eq!(row(&m).off.as_deref(), Some("Wrecks are off"));
+    m.settings.wrecks = true;
+    assert_eq!(row(&m).off, None);
+
+    m.set_original(true);
+    assert!(!m.settings.backwards_bail);
+    assert_eq!(m.original(), menu::Original::On);
+
+    m.settings.backwards_bail = true;
+    down_to(&mut m, &mut r, Key::Player);
+    tap_until(&mut m, &mut r, Control::Left, |m| m.mods_whose() == "All");
+    down_to(&mut m, &mut r, Key::ResetMods);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(!m.settings.backwards_bail, "the host's reset left it on");
 }

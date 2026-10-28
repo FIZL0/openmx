@@ -434,6 +434,7 @@ impl Rider {
                 owner: Some(state::Owner { human: true, screen: true }),
                 wrecks_enabled: true,
                 air_wrecks: true,
+                backwards_bail: false,
                 settles: false,
             },
             racing: false,
@@ -895,7 +896,7 @@ impl Rider {
         }
 
         // 6 — the machine, carrying the wreck test.
-        let (_, up) = ride.axes();
+        let (forward, up) = ride.axes();
         // The pitch and roll the attitude limits are measured on are the Euler pair the frame's
         // attachment walk left behind, after the physics (`Ride::frame`'s step 4b, S138).
         let euler = ride.chassis.euler;
@@ -993,6 +994,9 @@ impl Rider {
                 // Both can enter a wreck on one substep, and the entry stores its reason without
                 // looking, so the hit's — asked second — is the one that stays.
                 let landed = air::wreck_test_in(&p.air, air, &chassis, &step, &loads, allowed.air);
+                // Not the original's (S161), and asked only when the original's own test let the
+                // landing go: a bike landed facing back against its way bails.
+                let landed = landed.or_else(|| allowed.backwards.then(|| air::backwards_landing(&p.air, air, &chassis, forward)).flatten());
                 // A 50cc bike's lower limit when the shell said the file was one (S157): its body
                 // rays' own scenery entries carry the rays that reach above it.
                 let hit = air::hit_wreck(&p.air, air, touched, *fifty, mass, height, &hits);
