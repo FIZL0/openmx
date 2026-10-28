@@ -192,6 +192,16 @@ pub struct Emt {
     pub wind: bool,
     /// `MatchTerrainContour`: each particle starts on the ground under it, raised by its extent.
     pub matches_terrain: bool,
+    /// `EmitMode` and its timers (V71), as [`Gate`] runs them: 0 on while switched on, 1 a one-shot,
+    /// 2 on and off for random times, 3 on and off for fixed ones.
+    pub mode: i32,
+    /// `DelayTime`: seconds switched on before it starts.
+    pub delay: f32,
+    /// The four times the mode's keys fill, as the read stores them: the least and most time on,
+    /// the least and most time off. Mode 1's `OneShotTime` is the most time on; mode 2's are the
+    /// `RandomMin`/`MaxTimeOn`/`Off`; mode 3's `TimedTimeOn` and `TimedTimeOff` the two most.
+    /// What a mode does not read stays 0.
+    pub times: [f32; 4],
 }
 
 impl Default for Emt {
@@ -229,6 +239,9 @@ impl Default for Emt {
             mirror_y: false,
             wind: false,
             matches_terrain: false,
+            mode: 0,
+            delay: 0.0,
+            times: [0.0; 4],
         }
     }
 }
@@ -279,6 +292,177 @@ impl Emt {
             mirror_y: flag("RandomMirrorAboutY"),
             wind: flag("Wind"),
             matches_terrain: flag("MatchTerrainContour"),
+            mode: find("EmitMode").and_then(|v| v.trim().parse::<i32>().ok()).unwrap_or(d.mode),
+            delay: number("DelayTime", d.delay),
+            times: {
+                // Only the emitter's own mode's keys are read, each 0 where the file leaves it out.
+                let mode = find("EmitMode").and_then(|v| v.trim().parse::<i32>().ok()).unwrap_or(d.mode);
+                let n = |key: &str| number(key, 0.0);
+                match mode {
+                    1 => [0.0, n("OneShotTime"), 0.0, 0.0],
+                    2 => [n("RandomMinTimeOn"), n("RandomMaxTimeOn"), n("RandomMinTimeOff"), n("RandomMaxTimeOff")],
+                    3 => [0.0, n("TimedTimeOn"), 0.0, n("TimedTimeOff")],
+                    _ => [0.0; 4],
+                }
+            },
+        }
+    }
+}
+
+/// An emitter's switch and timers (V71): the original's emit gate (`research/oracle.txt` § V71),
+/// which every frame says whether the emitter emits, before the speed gate of [`Source::emit_over`]
+/// has its say. Its arithmetic is the PS2's ([`ps2_float::fpu`]).
+///
+/// **On and off.** Switching on an emitter that is off sets it on and just switched on, and its idle
+/// time to 0; switching off clears on and emitting, and the idle time. Neither touches the timers.
+///
+/// **A frame**, in this order: just switched on, it only takes its point (that flag cleared) and
+/// emits nothing. Then while its delay is left it emits nothing, the delay running down only while
+/// it is on. Then by its mode — off, it emits nothing and its idle time grows, in every mode:
+/// - 1, a one-shot: while time is left it runs down and it emits (the frame it runs out too); then,
+///   once it has emitted a particle in this shot, it is switched off; if it never did, it carries
+///   on as mode 0.
+/// - 2 and 3: on with time left, the time runs down; while some is left it emits, and when it runs
+///   out the time off is drawn (2: the least time off and a random share up to the most, from the
+///   game's `rand` scaled by 2⁻³¹; 3: the time off) and it is switched off. Off with time left, the
+///   same, to the time on and switched on — and that frame it emits. With no time left at all it is
+///   mode 0.
+/// - 0: on, it emits and is emitting.
+///
+/// **A reset** (the emitter toy's reset and the trigger's `particles` action): the delay back to
+/// `DelayTime`, the time to the most time on (mode 2: drawn as above), and a one-shot's "it emitted"
+/// cleared. Reading the `.emt` does the same.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Gate {
+    pub mode: i32,
+    pub delay_time: f32,
+    /// The delay left, and the time left on or off.
+    pub delay: f32,
+    pub left: f32,
+    /// [`Emt::times`].
+    pub times: [f32; 4],
+    /// Seconds off since it was last switched.
+    pub idle: f32,
+    /// [`Gate::SHOT`], [`Gate::JUST_ON`], [`Gate::ON`], [`Gate::EMITTING`].
+    pub flags: u8,
+}
+
+impl Gate {
+    /// A one-shot has emitted in this shot.
+    pub const SHOT: u8 = 1;
+    pub const JUST_ON: u8 = 2;
+    pub const ON: u8 = 4;
+    pub const EMITTING: u8 = 8;
+
+    /// The gate of an `.emt` as it is read: off, its timers reset. `rand` is the game's `rand`, a
+    /// number in `0..2³¹`.
+    pub fn new(emt: &Emt, rand: &mut dyn FnMut() -> i32) -> Gate {
+        let mut g = Gate { mode: emt.mode, delay_time: emt.delay, times: emt.times, ..Gate::default() };
+        g.reset(rand);
+        g
+    }
+
+    /// `min + (max − min) · rand · 2⁻³¹`.
+    fn draw(min: f32, max: f32, rand: &mut dyn FnMut() -> i32) -> f32 {
+        use ps2_float::fpu::{add, from_i32, mul, sub};
+        let share = mul(f32::from_bits(0x3000_0000), from_i32(rand()));
+        add(min, mul(sub(max, min), share))
+    }
+
+    pub fn reset(&mut self, rand: &mut dyn FnMut() -> i32) {
+        self.delay = self.delay_time;
+        match self.mode {
+            1 => {
+                self.left = self.times[1];
+                self.flags &= !Gate::SHOT;
+            }
+            2 => self.left = Gate::draw(self.times[0], self.times[1], rand),
+            3 => self.left = self.times[1],
+            _ => {}
+        }
+    }
+
+    pub fn on(&mut self) {
+        if self.flags & Gate::ON == 0 {
+            self.flags |= Gate::ON;
+            self.idle = 0.0;
+            self.flags |= Gate::JUST_ON;
+        }
+    }
+
+    pub fn off(&mut self) {
+        self.flags &= !(Gate::ON | Gate::EMITTING);
+        self.idle = 0.0;
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.flags & Gate::ON != 0
+    }
+
+    /// Off for the frame: idle, not emitting.
+    fn rest(&mut self, dt: f32) -> bool {
+        self.idle = ps2_float::fpu::add(self.idle, dt);
+        self.flags &= !Gate::EMITTING;
+        false
+    }
+
+    /// One frame of `dt` seconds: whether it emits.
+    pub fn pass(&mut self, dt: f32, rand: &mut dyn FnMut() -> i32) -> bool {
+        use ps2_float::fpu::sub;
+        if self.flags & Gate::JUST_ON != 0 {
+            self.flags &= !Gate::JUST_ON;
+            return false;
+        }
+        if !(self.delay <= 0.0) {
+            if self.is_on() {
+                self.delay = sub(self.delay, dt);
+            }
+            return false;
+        }
+        let on = self.is_on();
+        match self.mode {
+            1 if !on => return self.rest(dt),
+            1 if !(self.left <= 0.0) => {
+                self.left = sub(self.left, dt);
+                return true;
+            }
+            1 if self.flags & Gate::SHOT != 0 => {
+                self.off();
+                return false;
+            }
+            2 | 3 if !(self.left <= 0.0) => {
+                self.left = sub(self.left, dt);
+                let out = self.left <= 0.0;
+                return match (on, out) {
+                    (_, false) if on => true,
+                    (_, false) => self.rest(dt),
+                    (true, true) => {
+                        self.left = if self.mode == 2 { Gate::draw(self.times[2], self.times[3], rand) } else { self.times[3] };
+                        self.off();
+                        false
+                    }
+                    (false, true) => {
+                        self.left = if self.mode == 2 { Gate::draw(self.times[0], self.times[1], rand) } else { self.times[1] };
+                        self.on();
+                        self.idle = 0.0;
+                        true
+                    }
+                };
+            }
+            _ => {}
+        }
+        if on {
+            self.flags |= Gate::EMITTING;
+            true
+        } else {
+            self.rest(dt)
+        }
+    }
+
+    /// What the frame's emit made: a one-shot that made a particle has had its shot.
+    pub fn emitted(&mut self, made: usize) {
+        if made > 0 && self.mode == 1 {
+            self.flags |= Gate::SHOT;
         }
     }
 }
@@ -332,6 +516,16 @@ pub struct Rng(u32);
 impl Rng {
     pub fn new(seed: u32) -> Rng {
         Rng(seed.max(1))
+    }
+
+    /// A number in `0..2³¹`, as the game's `rand` draws them, for a [`Gate`]'s timers.
+    pub fn rand(&mut self) -> i32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        (x >> 1) as i32
     }
 
     /// The next number in `0..1`.
@@ -827,6 +1021,12 @@ pub struct Entry {
     pub lit: bool,
     /// A spray's fade: a quarter second when its tire throws, run down while it does not.
     pub clock: f32,
+    /// Its `.emt`'s switch and timers (V71). Only an entry `held` reads it: a vehicle's entries
+    /// are switched by the manager's flags and every `.emt` they name on the disc is mode 0 with no
+    /// delay, for which the gate is `lit` (the frame after it goes on is its first).
+    pub gate: Gate,
+    /// Switched by its toy, not by the flags (V71: a track's emitter): `gate` says when it emits.
+    pub held: bool,
 }
 
 impl Entry {
@@ -1012,6 +1212,8 @@ impl PlaneFx {
                 flag: 0,
                 lit: false,
                 clock: 0.0,
+                gate: Gate::default(),
+                held: false,
             });
         }
         PlaneFx { entries, atlas, particles: Vec::new(), skipped, rng: Rng::new(0x5eed_0058), wind: V3::default(), tick: 0 }
@@ -1165,6 +1367,27 @@ impl PlaneFx {
                     }
                     entry.sources.resize_with(1, Source::default);
                     let source = &mut entry.sources[0];
+                    if entry.held {
+                        // A toy's emitter: its gate says (V71). Not emitting it still takes its point,
+                        // which the original's does whenever it is on a node, and a fixed one never moves.
+                        match node {
+                            Some((_, m)) => {
+                                let at = m.point(v3(0.0, 0.0, 0.0));
+                                let rng = &mut self.rng;
+                                if entry.gate.pass(dt, &mut || rng.rand()) {
+                                    let before = self.particles.len();
+                                    let velocity = entry.emt.velocity;
+                                    source.emit_over(index, &entry.emt, entry.frames, at, None, Some(*m), velocity, plane.vel, wind, dt, &mut self.rng, &mut self.particles, &mut |p| ground(p).map(|(y, _)| y));
+                                    entry.gate.emitted(self.particles.len() - before);
+                                } else {
+                                    source.last = Some(at);
+                                }
+                            }
+                            None => source.off(),
+                        }
+                        entry.lit = entry.gate.is_on();
+                        continue;
+                    }
                     let lit = entry.lit;
                     entry.lit = on && node.is_some();
                     match node {
@@ -1285,31 +1508,59 @@ impl PlaneFx {
     }
 }
 
-/// The track's own emitters (V45): the `.toy`'s `[ParticleEmitterN]` that stand at a `Position`
-/// and start on — nat08's camp fires and chimney, nat09's smoke and bonfire, nat11's and nat17's
-/// water mist, nat12's puddle fog and mist, the torches and smokes of nat14, nat15, nat17 and nat18.
+/// The track's own emitters (V45): the `.toy`'s `[ParticleEmitterN]` — nat08's camp fires and
+/// chimney, nat09's smoke and bonfire, nat11's and nat17's water mist, nat12's puddle fog and mist and
+/// its geysers, the torches and smokes of nat14, nat15, nat17 and nat18, every sx track's fireworks.
 ///
 /// Each is the plain emitter the plane's `Generic` entries build ([`game_render::toy::Emitter`]),
-/// fixed where the toy stands, turned by nothing, never moving, and so never gated by its speed. The
-/// toy switches it on as it is read, so the frame after the track loads is its first, and it emits
-/// from the one after, as any emitter switched on does. They run as [`PlaneFx`] entries on a node
-/// each — the entry's position — with no plane: no `Disable`, no tire, no wreck.
+/// fixed where the toy stands and turned by nothing — or, one with `AttachToToy` (V71), on its toy's
+/// `AttachToSubObject` node, `OffsetFromObject` from it, turned with it ([`TrackFx::place`]). They
+/// run as [`PlaneFx`] entries on a node each with no plane: no `Disable`, no tire, no wreck, and each
+/// `held`, so its [`Gate`] says when it emits.
 ///
-/// Left out, by name in [`TrackFx::skipped`]: the ones that start off, which a trigger switches on
-/// (nat12's geysers) or the race's finish (every sx track's fireworks, which also ride the finish
-/// gate's animated toy); the ones on an object; and any class but the plain one.
+/// **The toy** resets its emitter as it is read (its delay and its one-shot) and switches it on or
+/// off by `StartOn`. One switched on as the track loads has the frame after for its first, and emits
+/// from the one after, as any emitter switched on does. One that starts off waits for:
+/// - a trigger's `particles` action ([`TrackFx::touch`], [`game_render::toy::Trigger`]): nat12's two
+///   geyser triggers, each with a coin toss as a rider comes in, reset and switch on their geyser's
+///   blast, spray and mist, one-shots of 15 seconds;
+/// - the race's finish ([`TrackFx::finish`]): every `Fireworks%02d` toy, from 01 until one is
+///   missing, switched on — not reset — so each waits its `.emt`'s `DelayTime` and makes its shot.
+///
+/// Left out, by name in [`TrackFx::skipped`]: the ones on a scene object (`AttachToSceneRef`, or
+/// `AttachToObject` without a toy), which no track's list has, and any class but the plain one.
 #[derive(Clone, Debug)]
 pub struct TrackFx {
     pub fx: PlaneFx,
-    /// Each entry's node, its emitter's position.
+    /// Each entry's node: its emitter's position, or its toy node's place once placed.
     pub frame: PlaneFrame,
     /// The `.toy`'s emitters the port does not run, and why.
     pub skipped: Vec<(String, String)>,
+    /// Each of [`TrackFx::fx`]'s entries' toy, in step with them.
+    pub toys: Vec<game_render::toy::Emitter>,
+    /// Every emitter toy's name in the `.toy`, run or not: what the finish looks its fireworks up in.
+    pub listed: Vec<String>,
+    /// The `.toy`'s triggers with `particles` actions, and what each has seen.
+    pub triggers: Vec<Touch>,
+    /// Actions fired with a `TriggerActionDelayTimer` still to run: seconds left, emitter, on.
+    pub pending: Vec<(f32, String, bool)>,
+    /// The triggers' coin tosses: their own numbers, not the particles' nor the sim's.
+    pub rng: Rng,
+}
+
+/// A trigger and what it saw.
+#[derive(Clone, Debug)]
+pub struct Touch {
+    pub trigger: game_render::toy::Trigger,
+    /// It has fired (a `OneTimeOnly` one fires once).
+    pub fired: bool,
+    /// The riders in it last frame, by their place in [`TrackFx::touch`]'s list.
+    pub inside: Vec<usize>,
 }
 
 impl TrackFx {
     /// The emitters of a `.toy`'s `list` that the port runs, with their `.emt`s out of `read` and
-    /// their frames out of the track's `atlas`.
+    /// their frames out of the track's `atlas`, and no triggers ([`TrackFx::with_triggers`]).
     pub fn new(list: &[game_render::toy::Emitter], atlas: Atlas, read: impl Fn(&str) -> Option<Vec<u8>>) -> TrackFx {
         let mut skipped = Vec::new();
         let mut entries = Vec::new();
@@ -1317,16 +1568,17 @@ impl TrackFx {
         for (i, e) in list.iter().enumerate() {
             let why = if !e.is_plain() {
                 format!("class {}", e.kind)
-            } else if e.attached {
+            } else if e.attached && e.toy.is_none() {
                 "on an object".to_string()
-            } else if !e.start_on {
-                "starts off".to_string()
             } else {
-                // Its node is named by its place in the list: two emitters may share a name.
+                // Its node is named by its place in the list: two emitters may share a name. One
+                // on a toy has none until it is placed.
                 let node = format!("ParticleEmitter{}", i + 1);
-                let mut at = M4::IDENTITY;
-                at.0[3] = [e.position.x, e.position.y, e.position.z, 1.0];
-                nodes.push((node.clone(), at));
+                if e.toy.is_none() {
+                    let mut at = M4::IDENTITY;
+                    at.0[3] = [e.position.x, e.position.y, e.position.z, 1.0];
+                    nodes.push((node.clone(), at));
+                }
                 entries.push(Emitter { name: e.name.clone(), kind: "Generic".into(), emitter: e.file.clone(), node: Some(node), ..Emitter::default() });
                 continue;
             };
@@ -1335,12 +1587,178 @@ impl TrackFx {
         let mut fx = PlaneFx::new(&entries, atlas, read);
         fx.rng = Rng::new(0x5eed_0045);
         skipped.append(&mut fx.skipped);
-        TrackFx { fx, frame: PlaneFrame { nodes, ..PlaneFrame::default() }, skipped }
+        let toys = fx
+            .entries
+            .iter()
+            .map(|entry| {
+                let k: usize = entry.node.as_deref().and_then(|n| n.strip_prefix("ParticleEmitter")).and_then(|n| n.parse().ok()).unwrap_or(1);
+                list[k - 1].clone()
+            })
+            .collect();
+        let rng = &mut fx.rng;
+        for entry in &mut fx.entries {
+            entry.held = true;
+            entry.gate = Gate::new(&entry.emt, &mut || rng.rand());
+        }
+        let mut out = TrackFx {
+            fx,
+            frame: PlaneFrame { nodes, ..PlaneFrame::default() },
+            skipped,
+            toys,
+            listed: list.iter().map(|e| e.name.clone()).collect(),
+            triggers: Vec::new(),
+            pending: Vec::new(),
+            rng: Rng::new(0x5eed_0071),
+        };
+        out.reset();
+        out
     }
 
-    /// One frame of `dt` seconds: the particles in the air, then what each emitter makes. `ground` as
-    /// [`PlaneFx::step_over`]'s.
+    /// [`TrackFx::new`] with the `.toy`'s triggers that have `particles` actions.
+    pub fn with_triggers(mut self, triggers: Vec<game_render::toy::Trigger>) -> TrackFx {
+        self.triggers = triggers.into_iter().map(|trigger| Touch { trigger, fired: false, inside: Vec::new() }).collect();
+        self
+    }
+
+    /// The emitter toys' reset (the track's load, the race's restart): each emitter's timers reset,
+    /// then on or off by its `StartOn`.
+    pub fn reset(&mut self) {
+        let rng = &mut self.fx.rng;
+        for (entry, toy) in self.fx.entries.iter_mut().zip(&self.toys) {
+            entry.gate.reset(&mut || rng.rand());
+            if toy.start_on {
+                entry.gate.on();
+            } else {
+                entry.gate.off();
+            }
+        }
+        self.pending.clear();
+    }
+
+    /// The emitter toy's on/off message to every emitter named `name`: switched, its timers left.
+    pub fn switch(&mut self, name: &str, on: bool) {
+        for entry in self.fx.entries.iter_mut().filter(|e| e.name.eq_ignore_ascii_case(name)) {
+            if on {
+                entry.gate.on();
+            } else {
+                entry.gate.off();
+            }
+        }
+    }
+
+    /// A trigger's `particles` action on `name`: on, its timers reset first; off, just off.
+    pub fn fire(&mut self, name: &str, on: bool) {
+        let rng = &mut self.fx.rng;
+        for entry in self.fx.entries.iter_mut().filter(|e| e.name.eq_ignore_ascii_case(name)) {
+            if on {
+                entry.gate.reset(&mut || rng.rand());
+                entry.gate.on();
+            } else {
+                entry.gate.off();
+            }
+        }
+    }
+
+    /// The race's finish, when its winner crosses the line: every `Fireworks01`, `Fireworks02`… the
+    /// `.toy` lists, until a number it does not, switched on. Nothing calls it until the port has a
+    /// race to finish.
+    #[allow(dead_code)]
+    pub fn finish(&mut self) {
+        for n in 1.. {
+            let name = format!("Fireworks{n:02}");
+            if !self.listed.iter().any(|l| l.eq_ignore_ascii_case(&name)) {
+                break;
+            }
+            self.switch(&name, true);
+        }
+    }
+
+    /// Who is in the triggers this frame: `riders` are the points the triggers test. A trigger that
+    /// is enabled, and not a `OneTimeOnly` one that has fired, fires for each rider in it; one under
+    /// 100 percent rolls for each only on a frame no rider was in it the frame before, and fires on
+    /// `percent ≥ int(rand · 2⁻³¹ · 100) + 1`. Firing runs its actions for a rider not in it the
+    /// frame before, each now or after its `TriggerActionDelayTimer`.
+    pub fn touch(&mut self, riders: &[V3]) {
+        use ps2_float::fpu::{from_i32, mul, to_i32};
+        for t in &mut self.triggers {
+            let now: Vec<usize> = (0..riders.len()).filter(|&i| t.trigger.holds(riders[i])).collect();
+            for &i in &now {
+                if !t.trigger.enabled || (t.trigger.one_time && t.fired) {
+                    break;
+                }
+                if t.trigger.percent != 100 {
+                    if !t.inside.is_empty() {
+                        break;
+                    }
+                    let roll = to_i32(mul(mul(from_i32(self.rng.rand()), f32::from_bits(0x3000_0000)), 100.0)) + 1;
+                    if t.trigger.percent < roll {
+                        continue;
+                    }
+                }
+                t.fired = true;
+                if t.inside.contains(&i) {
+                    continue;
+                }
+                for a in &t.trigger.actions {
+                    self.pending.push((a.delay, a.emitter.clone(), a.on));
+                }
+            }
+            t.inside = now;
+        }
+        self.run_pending(0.0);
+    }
+
+    /// The fired actions whose delay has run out by `dt` more, done.
+    fn run_pending(&mut self, dt: f32) {
+        let mut due = Vec::new();
+        self.pending.retain_mut(|(left, name, on)| {
+            *left -= dt;
+            if *left <= 0.0 {
+                due.push((name.clone(), *on));
+                false
+            } else {
+                true
+            }
+        });
+        for (name, on) in due {
+            self.fire(&name, on);
+        }
+    }
+
+    /// Put the emitters on toys where their nodes are: `node(toy, sub_object)` answers the world
+    /// place of a toy's node by name (row vectors, its point the node's origin), `None` where the
+    /// toy or the node is not there. One whose node is not found has none, and emits nothing.
+    pub fn place(&mut self, node: &mut dyn FnMut(&str, &str) -> Option<M4>) {
+        for (entry, toy) in self.fx.entries.iter().zip(&self.toys) {
+            let (Some(name), Some(at)) = (&toy.toy, &entry.node) else { continue };
+            let sub = toy.sub_object.as_deref().unwrap_or("");
+            let placed = node(name, sub).map(|m| {
+                let mut out = if toy.rotate { m } else { M4::IDENTITY };
+                let p = m.point(toy.offset);
+                out.0[3] = [p.x, p.y, p.z, 1.0];
+                out
+            });
+            let slot = self.frame.nodes.iter().position(|(n, _)| n == at);
+            match (placed, slot) {
+                (Some(m), Some(k)) => self.frame.nodes[k].1 = m,
+                (Some(m), None) => self.frame.nodes.push((at.clone(), m)),
+                (None, Some(k)) => {
+                    self.frame.nodes.remove(k);
+                }
+                (None, None) => {}
+            }
+        }
+    }
+
+    /// Whether any emitter rides a toy: the shell asks before looking its toys' nodes up.
+    pub fn on_toys(&self) -> bool {
+        self.toys.iter().any(|t| t.toy.is_some())
+    }
+
+    /// One frame of `dt` seconds: the fired actions whose delay runs out, the particles in the air,
+    /// then what each emitter makes. `ground` as [`PlaneFx::step_over`]'s.
     pub fn step_over(&mut self, dt: f32, ground: &mut dyn FnMut(V3) -> Option<(f32, u8)>) {
+        self.run_pending(dt);
         self.fx.step_over(&self.frame, dt, ground);
     }
 }

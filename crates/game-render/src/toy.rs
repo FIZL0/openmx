@@ -783,6 +783,15 @@ pub struct Emitter {
     pub attached: bool,
     /// `EmitterFilename`.
     pub file: String,
+    /// `AttachToToy`, where `AttachToSceneRef` does not come first (V71): the toy it rides — every
+    /// sx track's fireworks ride the `FinishGate` animated toy.
+    pub toy: Option<String>,
+    /// `AttachToSubObject`: the node under the toy's object it rides (`FireworksDummy01`…).
+    pub sub_object: Option<String>,
+    /// `OffsetFromObject`, from the node it rides (0, 0, 0 where missing).
+    pub offset: V3,
+    /// `RotateWithObject` (on where missing, as the read's default 1): it turns with that node.
+    pub rotate: bool,
 }
 
 impl Emitter {
@@ -822,5 +831,111 @@ fn emitter(s: &Section) -> Emitter {
         position,
         attached: ["AttachToSceneRef", "AttachToToy", "AttachToObject"].iter().any(|k| s.get(k).is_some()),
         file: text("EmitterFilename"),
+        // The reader tries the scene ref first, then the toy, then the scene object.
+        toy: s.get("AttachToSceneRef").is_none().then(|| s.get("AttachToToy").map(|t| t.trim().to_string())).flatten(),
+        sub_object: s.get("AttachToSubObject").map(|t| t.trim().to_string()),
+        offset: s.numbers("OffsetFromObject").filter(|n| n.len() >= 3).map_or(v3(0.0, 0.0, 0.0), |n| v3(n[0], n[1], n[2])),
+        rotate: s.number("RotateWithObject").is_none_or(|n| n != 0.0),
     }
+}
+
+/// One `[TriggerN]` of a `.toy` with its `particles` actions (V71): nat12's two geyser triggers,
+/// which switch their geyser's blast, spray and mist on.
+///
+/// **The volume.** `Radius` above 0 makes it a sphere, else `Box` gives the half sizes along its
+/// right, up and look, framed as a placed shape is: look is `LookVector`, right `UpVector` × look,
+/// up look × right.
+///
+/// **The contact** (the trigger's contact handler): a trigger that is enabled and, if
+/// `OneTimeOnly`, has not fired, fires on a frame something is in it — but one under 100 percent
+/// only rolls on the frame it comes in (the trigger keeps last frame's contact), and goes off when
+/// `RandomTriggerPercent < int(rand · 100) + 1`.
+///
+/// **The action.** `ActionType = particles`: `EmitterName`'s emitter toy has its timers reset (its
+/// delay, its one-shot) and is switched on with `TurnOn` (on where missing), or off without it,
+/// `TriggerActionDelayTimer` seconds after the trigger fired.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trigger {
+    pub name: String,
+    pub at: V3,
+    pub half: V3,
+    pub radius: Option<f32>,
+    pub right: V3,
+    pub up: V3,
+    pub look: V3,
+    /// `StartEnabled` (on where missing).
+    pub enabled: bool,
+    /// `OneTimeOnly`.
+    pub one_time: bool,
+    /// `RandomTriggerPercent` (100 where missing).
+    pub percent: i32,
+    /// Its `particles` actions.
+    pub actions: Vec<ParticleAction>,
+}
+
+/// A trigger's `particles` action.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParticleAction {
+    /// `EmitterName`.
+    pub emitter: String,
+    /// `TriggerActionDelayTimer`, seconds.
+    pub delay: f32,
+    /// `TurnOn`.
+    pub on: bool,
+}
+
+impl Trigger {
+    /// Whether a point is inside.
+    pub fn holds(&self, p: V3) -> bool {
+        let d = p.sub(self.at);
+        match self.radius {
+            Some(r) => d.len() < r,
+            None => d.dot(self.right).abs() <= self.half.x && d.dot(self.up).abs() <= self.half.y && d.dot(self.look).abs() <= self.half.z,
+        }
+    }
+}
+
+/// The triggers a `.toy` lists, `Trigger1` to the count its `[Triggers]` says, that have a
+/// `particles` action.
+pub fn particle_triggers(text: &str) -> Vec<Trigger> {
+    let sections = ini::parse(text);
+    let find = |name: &str| sections.iter().find(|s| s.name.eq_ignore_ascii_case(name));
+    let count = find("Triggers").and_then(|s| s.number("NumberOfTriggers")).unwrap_or(0.0).max(0.0) as usize;
+    let mut out = Vec::new();
+    for n in 1..=count {
+        let Some(s) = find(&format!("Trigger{n}")) else { continue };
+        let vec = |k: &str, d: V3| s.numbers(k).filter(|v| v.len() >= 3).map_or(d, |v| v3(v[0], v[1], v[2]));
+        let look = vec("LookVector", v3(0.0, 0.0, 1.0)).norm();
+        let right = vec("UpVector", v3(0.0, 1.0, 0.0)).cross(look).norm();
+        let up = look.cross(right);
+        let mut actions = Vec::new();
+        for a in 1..=s.number("NumberOfActions").unwrap_or(0.0).max(0.0) as usize {
+            let Some(act) = find(&format!("Trigger{n}Action{a}")) else { continue };
+            if !act.get("ActionType").is_some_and(|t| t.trim().eq_ignore_ascii_case("particles")) {
+                continue;
+            }
+            actions.push(ParticleAction {
+                emitter: act.get("EmitterName").unwrap_or("").trim().to_string(),
+                delay: act.number("TriggerActionDelayTimer").unwrap_or(0.0),
+                on: act.get("TurnOn").is_none_or(ini::switch),
+            });
+        }
+        if actions.is_empty() {
+            continue;
+        }
+        out.push(Trigger {
+            name: s.get("Name").unwrap_or("").trim().to_string(),
+            at: vec("Position", V3::default()),
+            half: vec("Box", V3::default()),
+            radius: s.number("Radius").filter(|r| *r > 0.0),
+            right,
+            up,
+            look,
+            enabled: s.get("StartEnabled").is_none_or(ini::switch),
+            one_time: s.get("OneTimeOnly").is_some_and(ini::switch),
+            percent: s.number("RandomTriggerPercent").unwrap_or(100.0) as i32,
+            actions,
+        });
+    }
+    out
 }
