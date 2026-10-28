@@ -2420,6 +2420,21 @@ pub struct PlaneCrash {
     pub impulse: f32,
 }
 
+impl PlaneCrash {
+    /// The plane's, off its flight after the tick: the wreck word (either reason), the collision
+    /// record's touched flag and the body's shock peak.
+    pub fn of(f: &game_sim::flight::Flight) -> PlaneCrash {
+        let p = f.body.shock_peak;
+        PlaneCrash { wrecked: f.crash.reason != 0, touching: f.record.touching, impulse: length([p.x(), p.y(), p.z()]) }
+    }
+}
+
+/// The flight's engine note, `0..1` of its range: what the engine sound reads. The wreck zeroes it
+/// and stops the sound, and it stands at zero until the engine steps again after the unwreck (P187).
+pub fn plane_note(f: &game_sim::flight::Flight) -> f32 {
+    f.engine.note.0 / f.engine.max_rpm.0.max(1.0)
+}
+
 /// What the bike's wreck emitter reads in a tick, after the tick (P144). Its words are the bike's:
 /// the wreck reason's copy, the riding collision record's touched flag and the bike's impulse
 /// (`+0x550`). While the rider is down, the riding record is the wreck body's and the impulse is the
@@ -3035,7 +3050,14 @@ impl Sound {
                 s.engine.silence(m);
                 s.edge.stop_rumble(m);
                 s.drive_on.stop(m);
-                s.plane.update(m, &self.plane, note, at);
+                // The wreck stops the engine sound and the unwreck (the respawn, or the L1+R1 reset)
+                // starts it again (P187): silent from the wreck tick, back at the note the flight
+                // gives it — idle, on the reset's closed throttle — on the first tick after.
+                if f.crash.wrecked {
+                    s.plane.silence(m);
+                } else {
+                    s.plane.update(m, &self.plane, note, at);
+                }
                 s.clank.tick(m, &self.plane_wreck, &f.crash, at, dt, &mut s.dice);
                 s.tires.tick(m, &self.plane_touchdown, f.touchdown, at, &mut s.dice);
                 continue;

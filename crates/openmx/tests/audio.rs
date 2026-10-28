@@ -2119,3 +2119,96 @@ fn the_plane_touchdown_is_the_discs() {
     assert_eq!((clip.rate, clip.channels), (22050, 1));
     assert!((clip.seconds() - TIRE_SECONDS).abs() < 0.001, "{} against {TIRE_SECONDS}", clip.seconds());
 }
+
+/// The disc's biplane, and its rays, as the shell builds it — or `None` without a disc.
+fn disc_flight() -> Option<(game_sim::flight::Flight, game_sim::ride::Tables)> {
+    use game_sim::flight_search::{BIPLANE_RAYS, Rays};
+    let mut disc = disc()?;
+    let machines = disc.res("machine.res").expect("the machines' archive");
+    let plane = game_sim::phy::Plane::read_bytes(&machines.read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy"));
+    let rays = game_sim::track::Rays::parse(&machines.read_suffix(BIPLANE_RAYS).expect("biplanem.col")).expect("its rays");
+    Some((game_sim::flight::Flight::new(&plane).with_rays(Rays::of(&rays)), game_sim::ride::Tables::build()))
+}
+
+/// One loop heard at every rpm, louder as it climbs, so a voice's gain says which note it plays.
+fn tone_plane() -> audio::LoopEngine {
+    let keys = vec![(0.0, 50.0, 0.0), (5000.0, 100.0, 0.0)];
+    audio::LoopEngine { loops: vec![audio::Loop { clip: tone(4000.0, 1.0), keys }], max_rpm: 5000.0, base_rate: 22050.0, near: 80.0, far: 700.0 }
+}
+
+/// Flies `f` over `ground` on an idle pad, through the sound as the shell hands it each tick (its
+/// note and its crash, [`audio::plane_note`] and [`audio::PlaneCrash::of`]), and returns per tick the
+/// wreck reason, the note handed over and the plane's voices' gains.
+fn fly_and_listen(f: &mut game_sim::flight::Flight, ground: &mut dyn game_sim::world::World, tables: &game_sim::ride::Tables, ticks: usize) -> Vec<(u32, f32, Vec<f32>)> {
+    let mut s = plane_sound(1);
+    s.plane = tone_plane();
+    let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+    let mut rows = Vec::new();
+    for _ in 0..ticks {
+        f.frame(F(1.0 / 30.0), game_sim::biplane::Pad::default(), ground, tables);
+        let at = [f.body.position.x(), f.body.position.y(), f.body.position.z()];
+        let note = audio::plane_note(f);
+        s.frame(&[audio::SeatFrame { plane: Some((note, at)), crash: audio::PlaneCrash::of(f), ..Default::default() }], 1.0 / 30.0);
+        let mut m = s.mixer.lock().unwrap();
+        // The clank is the wreck's own, not the engine: the plane's voices are the rest.
+        let clank = s.seats[0].clank.voice();
+        let gains = s.seats[0].voices().into_iter().filter(|v| Some(*v) != clank).filter_map(|v| m.gain_of(v)).collect();
+        m.render(&mut out);
+        rows.push((f.crash.reason, note, gains));
+    }
+    rows
+}
+
+/// The engine's voice through one wreck: playing before it, none from the wreck tick until the
+/// unwreck, and back on the unwreck — on the tick after it at idle, the throttle closed.
+fn engine_stops_through_the_wreck(rows: &[(u32, f32, Vec<f32>)], reason: u32, f: &game_sim::flight::Flight) {
+    let wreck = rows.iter().position(|r| r.0 == reason).unwrap_or_else(|| panic!("the plane never wrecked for reason {reason}"));
+    let back = wreck + rows[wreck..].iter().position(|r| r.0 == 0).expect("the plane never came back from its wreck");
+    assert!(wreck > 0 && !rows[wreck - 1].2.is_empty(), "no engine before the wreck at {wreck}");
+    assert_eq!(rows[wreck].1, 0.0, "the wreck zeroes the engine's note");
+    for (t, r) in rows.iter().enumerate().take(back).skip(wreck) {
+        assert!(r.2.is_empty(), "tick {t}, wrecked ({}): the engine still sounds {:?}", r.0, r.2);
+    }
+    assert_eq!(rows[back].2.len(), 1, "the unwreck at {back} starts the engine again");
+    let idle = rows.get(back + 1).expect("a tick after the unwreck");
+    let e = tone_plane();
+    let want = e.at(&e.loops[0], idle.1.clamp(0.0, 1.0) * e.max_rpm).0 * 0.6;
+    assert_eq!(idle.2, [want], "the engine after the unwreck");
+    // Idle: the throttle closed by the reset, the note at the bottom of its range (0.1, the smooth
+    // noise's ±0.2 and the nose's ±0.1 on it).
+    assert!((0.0..=0.4).contains(&idle.1), "the note after the unwreck is {}, not idle", idle.1);
+    assert_eq!(f.surfaces.throttle, F::ZERO);
+    eprintln!("reason {reason}: wrecked at {wreck}, back at {back}, idle note {}", idle.1);
+}
+
+/// **P187: a plane crashed into the ground has no engine voice** from its wreck tick until it
+/// respawns (the original's wreck stops the engine sound and zeroes the note, its unwreck starts the
+/// sound again), and then the engine is back at idle. The propeller wears the bent cone and stands
+/// still meanwhile ([`game_sim::biplane_anim::surfaces`] with the wreck word).
+#[test]
+fn a_crashed_plane_has_no_engine_until_it_respawns() {
+    let Some((mut f, tables)) = disc_flight() else { return };
+    let mut ground = game_sim::world::Flat::default();
+    f.attitude.flown = true;
+    f.place(Vf::new(0.0, 30.0, 0.0, 1.0), Vf::new(0.0, -1.0, 1.0, 0.0), &tables.acos);
+    f.body.velocity = Vf::new(0.0, -80.0, 80.0, 1.0);
+    // Its engine running at full throttle before the dive, so the note has somewhere to fall from.
+    f.surfaces.throttle = F::ONE;
+    let rows = fly_and_listen(&mut f, &mut ground, &tables, 30 * 10);
+    engine_stops_through_the_wreck(&rows, game_sim::biplane::CRASHED, &f);
+}
+
+/// **The same for a plane thrown off the map's edge** (reason 13): silent from the throw until the
+/// plane, landed and waited out, is put back, then idle.
+#[test]
+fn a_plane_thrown_off_the_edge_has_no_engine_until_it_respawns() {
+    let Some((mut f, tables)) = disc_flight() else { return };
+    let mut ground = game_sim::world::Flat::default();
+    f.area = Some(game_sim::biplane::Area { width: F(2000.0), depth: F(2000.0) });
+    f.attitude.flown = true;
+    f.place(Vf::new(1000.0, 200.0, 1000.0, 1.0), Vf::new(1.0, 0.0, 0.0, 0.0), &tables.acos);
+    f.body.velocity = Vf::new(120.0, 0.0, 0.0, 1.0);
+    f.surfaces.throttle = F::ONE;
+    let rows = fly_and_listen(&mut f, &mut ground, &tables, 30 * 30);
+    engine_stops_through_the_wreck(&rows, game_sim::biplane::THROWN, &f);
+}

@@ -5830,7 +5830,9 @@ fn nearest_opponent(
 // flight: every input of the autopilot agreed but the `{cos, sin}` table its turn term reads, which
 // the port built in single precision. Built like the game's (fdlibm in double, chopped), the run
 // agrees through tick 691 and parts at 692, the plane's first crash, on `engine.power`. Over the port's own ground ([`Ground::at`], one ulp low under
-// the plane) it parts at tick 1; the run prints both.
+// the plane) it parts at tick 1; the run prints both. P187: the original's wreck zeroes the engine's
+// note, not its power; with that, both grounds agree through tick 774 and part at 775 on the body's
+// position, the port's plane already back at its spawn.
 
 /// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
 const BIPLANE_ACCEPTANCE: &str = "biplane";
@@ -5838,8 +5840,8 @@ const BIPLANE_ACCEPTANCE: &str = "biplane";
 /// **The last tick of the biplane recording the port is known to agree with the original on.** The
 /// same contract as [`ACCEPTANCE_AGREES_THROUGH`]: further prints a line asking for it to be raised,
 /// short of it fails. Tick 0 is the start state: the capture's second row, over the save state stepped
-/// to it. 691 is the last tick before the plane's first crash parts it (S104; S94 left it at 261).
-const BIPLANE_AGREES_THROUGH: u64 = 691;
+/// to it. 774 is the last before the chord's respawn parts it (P187; S104 left it at 691, the first crash, on `engine.power`).
+const BIPLANE_AGREES_THROUGH: u64 = 774;
 
 /// The container of the area the plane was flown over. Not found by [`recorded_on`]: that fits a
 /// *bike's* rows, and a plane's minute is mostly air. Named instead, and checked against the plane's own
