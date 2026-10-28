@@ -1528,8 +1528,11 @@ pub fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> V
 ///
 /// Each is a `vsub.xyz`, so `w` is the first operand's. On another collision object (`+0x1f0`, a
 /// body or a vehicle's chassis), which the original asks before the vehicle, `under` is
-/// [`crate::contact::other_at`]'s (S145, proved); the ride's wheel search finds none, as it has no
-/// other riders' bikes in it, so [`under`] only ever answers a vehicle.
+/// [`crate::contact::other_at`]'s (S145, proved). No riding bike's wheel meets one (S168): the wheel
+/// ray probe ignores the bike's own actor category, which every bike's frame and wreck part carry,
+/// and every owned collidable in the original's searches carries it too, so [`under`] answers only a
+/// vehicle. The one owner the probe is not barred from is a HasPhysics truck's physics mesh, which a
+/// woken truck stands up and the port does not simulate (S169).
 pub fn wheel_contact_velocity(own: Vf, vel: Vf, under: Option<(Vf, Vf)>) -> (Vf, Vf) {
     match under {
         Some((velocity, at)) => (sub_xyz(own, at), sub_xyz(vel, velocity)),
@@ -2480,7 +2483,8 @@ fn contacts(m: &Mat4, front: &mut Wheel, rear: &mut Wheel, near: &mut F, touchin
             point,
             // The collision node and the owner are the scene's, and the port has no handle to put
             // here: a prop is the world, which is what a zero owner means. A path car's mesh is a
-            // vehicle of kind 2, as every one of the original's path cars is (S136).
+            // vehicle of kind 2, as every one of the original's path cars is (S136). Other riders'
+            // bikes are not searched: the wheel probe's category list refuses every bike (S168).
             node: 0,
             owner: 0,
             vehicle: on.map_or(0, |(k, _)| k),

@@ -3265,3 +3265,126 @@ fn front_2889_is_a_row_read_before_the_tick() {
     lay_bones(&mut ee, &cap, 2890);
     originals_tick(&mut ee, &cap, 2891).unwrap_or_else(|d| panic!("2891: {:?}", &d[..d.len().min(4)]));
 }
+
+/// A scene that is only a search's list, as a bone's segment probe with the include list `.0` meets
+/// it (S166).
+struct SweptList<'a>(u32, Vec<game_sim::ragdoll_scene::Candidate<'a>>);
+
+impl Scene for SweptList<'_> {
+    fn sweep(&mut self, from: Vf, to: Vf) -> Option<(Vf, Vf)> {
+        game_sim::ragdoll_scene::sweep_through(from, to, self.0, self.1.iter().copied())
+    }
+}
+
+/// **A bone's sweep against the wreck bike is the original's** (S166): in front's 2603 state,
+/// 10,000 bones on the nine bone collisions, each moving so that its last `1/15` s crosses a point
+/// near the wreck bike's mesh (from a standstill to 120 ft/s, a random way), with the collision's
+/// search listing the bike alone at a distance that is mostly 0 and sometimes past the segment's
+/// reach. The original's bone collision sweep against the port's solve on a scene of that list:
+/// swept or not, the contact's point and normal, the bone's position and velocity and the
+/// contact's change of velocity, bit for bit.
+///
+/// The bike's class is not the scenery's, the one a bone's probe includes: half the segments run
+/// as the game has them and none is swept, in either; the other half have the probe's include word
+/// widened to one of the bike's bits in both, which runs the pair on the bike's mesh.
+#[test]
+fn the_bones_sweep_against_the_wreck_bike_as_the_originals() {
+    use game_sim::ragdoll_scene::{Candidate, class};
+    let Some(bike) = wreck_bike_mesh() else { return };
+    let Some(mut ee) = state_in("s62", &Wreck { name: "front", frame: 2603 }) else { return };
+    let (b, frame) = bike_collidable(&ee);
+    assert_eq!(ee.u32_at(b + 0x84), class::WRECK_BIKE, "the wreck bike's class");
+    let (centre, radius) = (raw_quad(&ee, b + 0x40), F(ee.f32_at(b + 0x60)));
+    let table = tables_of(&ee).curve;
+    let sweep = addr("bone_collision_sweep").unwrap();
+    let collisions: Vec<u32> = (0..9).map(|i| collision(&ee, i)).collect();
+    for &c in &collisions {
+        let p = ee.u32_at(c + coll_at::SEGMENT);
+        let list = (ee.u32_at(p + 0xe8), ee.u32_at(p + 0xf0), ee.u32_at(ee.u32_at(p + 0xec)));
+        assert_eq!(list, (0, 1, class::BONE_SWEEP), "{c:#x}'s probe's include list");
+    }
+    // The search, in a stretch of RAM nothing uses.
+    let free = (0x01f0_0000u32..0x01ff_0000).step_by(0x100).find(|&a| (0..0x100).step_by(4).all(|k| ee.u32_at(a + k) == 0)).expect("free RAM");
+    let (search, list) = (free, free + 0x80);
+    ee.set_u32(search, list);
+    ee.set_u32(search + 4, 1);
+    ee.set_u32(list, b);
+    let game_sim::track::Points::Wide(v) = &bike.mesh.vertices else { panic!("packed") };
+    let mut seed = 0x5166_b1ce_0bad_d00du64;
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 40) as f32) / (1u64 << 24) as f32
+    };
+    let (mut swept, mut far) = (0, 0);
+    for i in 0..10_000 {
+        let c = collisions[i % 9];
+        let body = ee.u32_at(c + coll_at::BODY);
+        let p = ee.u32_at(c + coll_at::SEGMENT);
+        let includes = if i % 2 == 0 { class::BONE_SWEEP } else { 0x8 };
+        ee.set_u32(ee.u32_at(p + 0xec), includes);
+        let at = v[(next() * v.len() as f32) as usize % v.len()];
+        let q = frame.place(Vf::new(at[0].0, at[1].0, at[2].0, 1.0));
+        let q = Vf::new(q.x() + next() - 0.5, q.y() + next() - 0.5, q.z() + next() - 0.5, 1.0);
+        let d = Vf::new(next() - 0.5, next() - 0.5, next() - 0.5, 0.0);
+        let n = (d.x() * d.x() + d.y() * d.y() + d.z() * d.z()).sqrt().max(1e-3);
+        let length = if i % 23 == 0 { 0.0 } else { 8.0 * next() } / n;
+        let u = next();
+        let pos = Vf::new(q.x() + d.x() * length * u, q.y() + d.y() * length * u, q.z() + d.z() * length * u, 1.0);
+        let vel = Vf::new(d.x() * length * 15.0, d.y() * length * 15.0, d.z() * length * 15.0, if i % 7 == 0 { next() } else { 0.0 });
+        let distance = if i % 4 == 3 { 4.0 * next() } else { 0.0 };
+        ee.set_f32(list + 4, distance);
+
+        for (o, q) in [(body_at::POSITION, pos), (body_at::VELOCITY, vel), (c + coll_at::POINT - body, pos)] {
+            ee.write(body + o, 16, u128::from_le_bytes(bytemuck_quad(q)));
+        }
+        ee.set_u32(body, 1);
+        for (o, w) in [(coll_at::ON, 1), (coll_at::SWEEP, 1), (0x84, search), (0x70, 0), (0x74, 0), (coll_at::SCENE, 0), (coll_at::SWEPT, 0)] {
+            ee.set_u32(c + o, w);
+        }
+        let sphere = Sphere {
+            bone: 0,
+            radius: f(&ee, body + body_at::RADIUS),
+            unpenetration: f(&ee, c + coll_at::UNPENETRATION),
+            rotation: f(&ee, c + coll_at::ROTATION),
+            restitution: f(&ee, c + coll_at::RESTITUTION),
+            friction: f(&ee, c + coll_at::FRICTION),
+            sweep: true,
+            sweep_back: f(&ee, c + coll_at::SWEEP_BACK),
+        };
+        let mut port_body = Body {
+            enabled: true,
+            inv_mass: f(&ee, body + body_at::INV_MASS),
+            position: pos,
+            velocity: vel,
+            inv_inertia: raw_quad(&ee, body + body_at::INV_INERTIA),
+            quat: raw_quad(&ee, body + body_at::QUAT),
+            rates: raw_quad(&ee, body + body_at::RATES),
+            ..Body::default()
+        };
+        let mut contact = Contact { touched: false, ground: false, scene: false, swept: false, point: pos, normal: pos, dv: raw_quad(&ee, c + coll_at::DV) };
+        let candidate = Candidate { distance: F(distance), class: class::WRECK_BIKE, centre, radius, mesh: &bike.mesh, frame: &frame };
+        contact.solve(true, &sphere, &mut port_body, None, &mut SweptList(includes, vec![candidate]), &table);
+        ee.call(sweep, &[u64::from(c)], &[], 50_000_000);
+
+        let hit = ee.u32_at(c + coll_at::SWEPT) != 0;
+        let what = format!("{i}: includes {includes:#x}, distance {distance}, bone at {pos:?} moving {vel:?}");
+        assert_eq!(contact.swept, hit, "{what}: swept");
+        let mut fields = vec![("position", port_body.position, raw_quad(&ee, body + body_at::POSITION)), ("velocity", port_body.velocity, raw_quad(&ee, body + body_at::VELOCITY))];
+        if hit {
+            fields.extend([
+                ("point", contact.point, raw_quad(&ee, c + coll_at::POINT)),
+                ("normal", contact.normal, raw_quad(&ee, c + coll_at::NORMAL)),
+                ("dv", contact.dv, raw_quad(&ee, c + coll_at::DV)),
+            ]);
+        }
+        for (field, got, want) in fields {
+            assert_eq!(bits(got), bits(want), "{what}: {field} is {want:?} in the game, {got:?} in the port");
+        }
+        assert!(!(hit && includes == class::BONE_SWEEP), "{what}: the game's probe swept the bike");
+        swept += usize::from(hit);
+        far += usize::from(distance > 0.0);
+        ee.set_u32(ee.u32_at(p + 0xec), class::BONE_SWEEP);
+    }
+    eprintln!("{swept} of the 5000 widened segments swept the bike; {far} lists with it off at a distance");
+    assert!(swept > 500 && swept < 4500, "{swept} swept");
+}

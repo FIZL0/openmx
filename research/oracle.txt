@@ -5468,6 +5468,17 @@ physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: b
 #   Interface thunks: +0x580 vt+8 0x003e3dd0 (-> vt+0xfc -> wake), vt+0xc 0x003e3dc0 (wake): the
 #   listener calls a search makes on what it struck (collide_against_search). +0x584 vt+8 0x003e3de0.
 toy_cars_read         boot 0x00289710 the .toy's [Cars] reader (above)
+# S169 — the .toy's HasPhysics things, and what their collidables name (journal 2026-10-28-s169-physics-props;
+#   tests crates/game-sim/tests/prop_under.rs). On the disc only [CarN] sections carry HasPhysics (free06,
+#   free07, free09 Car7, free10, free11 and their _ss twins); the other rigid-body props are the
+#   [PhysicsCollections] (S80-S198: bales, banners, crates, barrels, cans, signs, BeachBall, EyeBall).
+#   A HasPhysics car's mesh (+0x428): +0x7c = the car (a vehicle, kind 2), +0x80 = 0 (S127) -> a Moving.
+#   A collection prop's f.col (collision object +0x1f8): +0x7c = 0, +0x80 = the collision object
+#   (physics object +0x120), whose +0xf4 = the object's body (+0x110) and +0xf0 (chassis) = 0, on all
+#   62 free09 props in first_recording. So no mover: a wheel on a prop takes wheel_contact_velocity's
+#   owner branch (+0x1f0 = the object) on a dynamics body. Run in the interpreter on each free09 prop
+#   with a generated body pose, velocity and spin: +0xa0, +0x1b0, +0x1c0, +0x170, +0x180, +0x190 bit for
+#   bit with prop_world Collection::under.
 # S128 — the path cars' ground switches: crates/game-sim/src/traffic.rs (Spec::presample, Level,
 # Spec::curve_kept, Spec::lagged), proved in crates/game-sim/tests/presample.rs on recording2's state
 # of free09 (six cars: free_trailercab x3, free_trailerC/A/D, at 0x01241f40 0x01252a20 0x01263570
@@ -6176,6 +6187,19 @@ atv_stunt_state_pack        atv 0x004d9f30 = pc_stunt_state_pack (align, 0.37; w
 # (pos 2439.249, 133.697, 4059.953). Its +0x2a0 and +0x2e0 are still identity in every state: the
 # update never ran, so 0x001dd7b0 would answer the node's position x 30. Not run live. s89-along,
 # s89-across and the biplane states hold none of the class.
+# S168 — the wheel's owner branch in the ride (tests crates/game-sim/tests/bike_col.rs; journal
+#   research/journal/2026-10-28-s168-wheel-owner). collision_pair_filter(bike+0x7c8, x, 0|1) on S93's
+#   three images refuses the other player's frame (+0x7c0, 0x9a048) and wreck part (+0x7a8)+0x128
+#   (0x9a058), and every candidate with a collision object (+0x80) in the bike's nearby search
+#   (+0x7bc): 3 a bike there, all 0x9a048 or 0x42058 (the biplane 0x0060b1f0, 0x00c97be0, both with
+#   +0xf4 bodies). recording2-ram.bin: S134's three AI bikes (+0x390 0x2000) each refuse the others'
+#   frames and their 4 owned candidates (0x9a048 x3, 0x52058 0x600ae0 with a body). Cause: the wheel
+#   probe's +0xe8 list [0x100, bike+0x390] and +0x390 = 0x2000 on every bike, a bit every owned
+#   collidable seen carries. So the owner word +0x1f0 stays 0 for these. s89-along (free06): both
+#   HasPhysics trucks' physics meshes (car+0x698 -> +0x128) are category 0x18, +0x80 = a collision
+#   object with +0xf0 0 and +0xf4 a body, flags 0x04/0x44, nearby bit clear; the filter accepts the
+#   four bikes' wheel probes against them with nearby 0 and refuses with nearby 1. A woken truck is
+#   the one owner seen that the wheel's owner branch could read (body side). Not run live.
 # S133 — the hierarchy toys' parts (crates/game-render/tests/toy_parts.rs, states s133-free10/-nat11
 #   from R7's scripted boot). The parts list is the motion object's +0x300 (count +0x304); a part's
 #   +0x230 is by then a node of the toy's skeleton (one of its joints' +0x34; a mesh .col's single part
@@ -6481,3 +6505,19 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # with one mesh, a mesh and its nearest, or one mesh twice through sphere_collider_pair, bit for bit
 # (12,465 hits; the second took 64); 10,000 bone_collision_push_out with the contact's other a scene
 # mesh equal the port's against STILL (0,0,0,1), bit for bit.
+# S166 — the bones' segment sweep against the wreck bike and the path cars. Journal:
+# research/journal/2026-10-28-s166-bone-sweep-class-filter.
+# Port: ragdoll_scene.rs sweep_through / class, WreckBikeScene::sweep;
+# tests/ragdoll_cars.rs the_bones_sweep_through_the_cars_as_the_originals,
+# tests/ragdoll_wrecks.rs the_bones_sweep_against_the_wreck_bike_as_the_originals.
+# bone_collision_sweep (0x001f7400): with +0x24 and +0x8c set, the segment runs from pos - vel*(+0x28)
+# (xyz; the start keeps the bone's w, as the replays show) to pos; 0x001e8850 sets it, 0x00119be0 refreshes the probe,
+# then collide_against_search(probe, c+0x84) (0x0011a9d0); on probe +0x116 & 0x20 it sets +0x1c and
+# +0x20, point from the record +0x30, normal from +0x20, and pushes out (0x001f6c40).
+# The probe (+0x8c) is a sweep probe (ctor 0x001e80f0, vtable 0x00451910). The bone collision's ctor
+# 0x001f66c0 calls 0x0011b070(probe, 0) (include mode) and 0x0011b080(probe, [0x00468f60] = 0x20):
+# every bone's segment includes only class 0x20, the track's static scenery (its 161 mesh
+# collidables carry 0x220). Path cars are class 0x48 (all 21 in s89-along), the wreck bike's
+# collidable 0x9a058 (s62 front 2603): the filter (0x00119d70) drops both, so the original's bones
+# never sweep against the bike or a car — a fast bone goes through a wagon's wall in the game too.
+# Widening the include word (0x8) in RAM runs the pair on their meshes; the port matches bit for bit.

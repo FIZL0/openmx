@@ -47,7 +47,7 @@
 use crate::biplane::{self, Body, Dynamics, List, World};
 use crate::camera::CurveTable;
 use crate::chassis::turn;
-use crate::contact::{self, Collider, Mover, Node, Weighed};
+use crate::contact::{self, Collider, Mover, Node, Other, Side, Weighed};
 use crate::contact_search::{self, Heightfield, Hit, Record, Search, Struck, Swept};
 use crate::eco::Trees;
 use crate::flight_search::{self, Rays, Scene};
@@ -518,6 +518,27 @@ impl Collection {
             .iter()
             .zip(o.thresholds)
             .all(|(&v, t)| size(v) < t)
+    }
+
+    /// **Body `k` as the other side of a contact** (S169), when it has a collision object: what a
+    /// contact on the prop's `f.col` meets. The original's `f.col` names no mover (`+0x7c` is 0, so
+    /// a prop gives no [`crate::traffic::Moving`] as a path car or a toy part does); it names its
+    /// owner, the collision object (`+0x80`), whose body (`+0xf4`) is this one. A wheel or a body ray
+    /// standing on a moving prop reads its motion through that object ([`contact::other_at`], the
+    /// resolve's other side), not through a mover.
+    pub fn other<R>(&mut self, k: usize, f: impl FnOnce(&mut Other<'_>) -> R) -> Option<R> {
+        let bone = &mut self.bones[k];
+        let c = self.objects[k].collision.as_mut()?;
+        let mut rigid = Weighed { body: &mut bone.body, mass: bone.mass };
+        Some(f(&mut Other { collider: &mut c.collider, side: Side::Body(&mut rigid) }))
+    }
+
+    /// **What a wheel standing on body `k` reads** (S169): the wheel contact-velocity step's owner
+    /// branch on the prop's collision object — the body's velocity and its velocity at the world
+    /// `point` ([`contact::other_at`]), the object's centre of mass put into the world on the way.
+    /// `None` for a body with no collision object.
+    pub fn under(&mut self, k: usize, point: Vf) -> Option<(Vf, Vf)> {
+        self.other(k, |o| contact::other_at(o, point))
     }
 
     /// **Puts one object back**: its body reset to where it was made and its node with it
