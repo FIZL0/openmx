@@ -241,11 +241,14 @@ impl MapNames {
     }
 
     /// [`MapNames::around`] on a world that may wrap (MD43): across a seam each way's label names the
-    /// map over it.
+    /// map over it. Farther than [`OFF_MAP`] from every map the rider is on no map (MD56), and only
+    /// the ways are named, from the nearest.
     pub fn around_in(&self, at: [f32; 2], wrap: Option<Wrap>) -> (Option<&str>, [Option<&str>; 4]) {
         let Some((on, by)) = self.on_in(at, wrap) else { return (None, [None; 4]) };
         let name = |i: usize| self.maps[i].1.as_str();
-        (Some(name(on)), std::array::from_fn(|k| self.toward_in(on, by, at, k, wrap).map(name)))
+        let r = moved(&self.maps[on].0, by);
+        let off = (r[0] - at[0]).max(at[0] - r[2]).max(r[1] - at[1]).max(at[1] - r[3]);
+        (Some(name(on)).filter(|_| off <= OFF_MAP), std::array::from_fn(|k| self.toward_in(on, by, at, k, wrap).map(name)))
     }
 }
 
@@ -274,6 +277,13 @@ fn copies(wrap: Option<Wrap>) -> Vec<[f32; 2]> {
     }
     out
 }
+
+/// How far past a map's rectangle, in feet on either axis, the radar still says the rider is on it
+/// (MD56): the widest band openmx-mods' stitch cuts off a map's edge (its 150-foot shootoff and a
+/// berm of up to 400), so the join there stands where the map's own edge ground stood. Past it a
+/// join is the stitch's blend between maps, smooth ground no map has; half of world_mxu and
+/// world_ultra is that, and named for the nearest map it read as that map ridden flat.
+pub const OFF_MAP: f32 = 550.0;
 
 /// A rectangle `[x0, z0, x1, z1]` moved `by` feet.
 fn moved(r: &[f32; 4], by: [f32; 2]) -> [f32; 4] {
@@ -329,6 +339,28 @@ mod tests {
         // On the seam's join, past B and nearer A over the seam, the rider is on A.
         assert_eq!(maps.around_in(own, wrap()).0, Some("A"));
         assert_eq!(maps.around(own).0, Some("B"));
+    }
+
+    /// MD56: out on a join's open ground, past [`OFF_MAP`] from every map, the radar names no map
+    /// underfoot — the ground there is the stitch's blend, not the nearest map — but still the maps
+    /// each way; within it, and over a seam's copy, the nearest map as before.
+    #[test]
+    fn a_rider_far_out_on_a_join_is_on_no_map() {
+        // Two 5000-foot maps 4000 feet apart along x, wrapping with another 4000 feet past the second.
+        let maps = MapNames { maps: vec![([0.0, 0.0, 5000.0, 5000.0], "A".into()), ([9000.0, 0.0, 14000.0, 5000.0], "B".into())] };
+        let wrap = Wrap::of([true, false], [18000.0, 5000.0]);
+        assert_eq!(maps.around([5000.0 + OFF_MAP, 2500.0]).0, Some("A"));
+        assert_eq!(maps.around([9000.0 - OFF_MAP, 2500.0]).0, Some("B"));
+        let (on, ways) = maps.around([7000.0, 2500.0]);
+        assert_eq!(on, None, "2000 feet from either map");
+        assert_eq!(ways.iter().flatten().count(), 1, "the nearest's way along x is still named: {ways:?}");
+        assert_eq!(maps.around([5000.0 + OFF_MAP + 1.0, 2500.0]).0, None);
+        // Over the wrap's seam: 300 feet past B, then 300 feet short of A's copy, then between.
+        assert_eq!(maps.around_in([14300.0, 2500.0], wrap).0, Some("B"));
+        assert_eq!(maps.around_in([17700.0, 2500.0], wrap).0, Some("A"));
+        assert_eq!(maps.around_in([16000.0, 2500.0], wrap).0, None);
+        // Across z too: a rider 2000 feet north of A is off it.
+        assert_eq!(maps.around([2500.0, 7000.0]).0, None);
     }
 
     #[test]
