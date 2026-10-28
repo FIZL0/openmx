@@ -106,7 +106,7 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **P205** The browser's ride draws ~2 fps (P196): the software ground's splat paint is ~70% of a frame on one wasm thread. Bring it to 30 fps — P48's GPU on the canvas, or the ground across workers — and lift web_host::PIXELS's 640x448 cap
 - [ ] **P203** Mods in the page (P196): the browser has no mods folder — import world/texture/music mods into OPFS and make worlds.rs/world_dress.rs streaming and track preview stills run without std::thread::spawn there
 - [ ] **P204** Online from the game's own menu in the browser (P196): drive Host and Join from the shell's Online menu in headless chromium (two pages) and ride; tests/netplay_browser.rs only covers the ?join=/?host= page
-- [ ] **P206** the ride HUD and the menus' hint band clear of the touch pad (after P197): on a phone with web/touch.js's pad up, the speedometer/gear sits under GAS, the minimap under the stick's rest spot and the front end's button-hint band under BRAKE/GAS (seen at 844x390 in headless chromium). Have the page tell the shell the pad is up (a host call or a pad-name check of 'Touch controls') and inset those by the pad's footprint
+- [ ] **P207** the ride HUD and the menus' hint band clear of the touch pad (after P197): on a phone with web/touch.js's pad up, the speedometer/gear sits under GAS, the minimap under the stick's rest spot and the front end's button-hint band under BRAKE/GAS (seen at 844x390 in headless chromium). Have the page tell the shell the pad is up (a host call or a pad-name check of 'Touch controls') and inset those by the pad's footprint
 ### Phase 2 — a decompilation you can read
 
 
