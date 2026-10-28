@@ -173,7 +173,7 @@ pub fn build(piece: &WorldPiece, index: usize, lod: Lod) -> Result<Built, String
     // them on the ground.
     let mut cars = 0;
     if let Ok(toy_text) = archives[0].read_suffix(&format!("{}.toy", piece.stem)) {
-        for car in toy::cars(&ini::text(&toy_text)).iter().filter(|c| !c.has_physics) {
+        for car in toy::cars(&ini::text(&toy_text)).iter() {
             cars += assets.load_placed(&archives, car.stem()) as usize;
         }
     }

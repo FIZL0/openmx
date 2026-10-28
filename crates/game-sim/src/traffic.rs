@@ -26,7 +26,13 @@
 //!
 //! Not here, each the original's and none of free06's (every car there sets them `FALSE`):
 //! `PathIsLevel`, `PresampleTerrain` and `DriveOnSoultree`'s ray down onto the props. A car that
-//! sets them is moved the way free06's are. Nor the `HasPhysics` cars, which are another class.
+//! sets them is moved the way free06's are.
+//!
+//! The `HasPhysics` cars (S127) are a subclass of the path car with a rigid body beside it. Until
+//! something strikes the car, the subclass's update is the path car's own and nothing else, so they
+//! are cars here like the rest, in the `.toy`'s order. What the original does once one is struck
+//! (the body wakes with the car's motion, the car's own meshes stand down, and it goes back on its
+//! path a `ResetTime` after it comes to rest) is not here.
 
 #![deny(clippy::float_arithmetic)] // every sum below is the PS2's, through ps2-float
 
