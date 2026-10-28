@@ -567,6 +567,11 @@ fn a_free09_tree_against_the_original() {
         Rider::new(&phy, wheels, Vf::new(start[0], tree[1] + 1.0, start[2], 1.0), Vf::new(fx / n, 0.0, fz / n, 0.0), Set::default());
     let gas = Controls { gas: F::ONE, ..Controls::default() };
     let idle = Controls::default();
+    // Stood first, until the clutch's launch ramp is spent, as it is in the captured state (P154): a
+    // bike given the gas the frame after it is built launches on 3x the engine's torque.
+    for _ in 0..60 {
+        rider.frame(&phy, &tables, &idle, F(game_sim::tick::DeltaTime::CAP_30), &mut world);
+    }
     let mut ours = Vec::new();
     for t in 0..free.rows.len() {
         let f = rider.frame(&phy, &tables, if t == 0 { &idle } else { &gas }, F(game_sim::tick::DeltaTime::CAP_30), &mut world);

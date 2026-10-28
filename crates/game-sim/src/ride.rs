@@ -760,6 +760,11 @@ impl Ride {
     /// `mounts` are where the two wheels hang off the chassis, in the chassis' own frame. The original
     /// reads them off the bike's model — the `fwheel` and `rwheel` nodes — which is the renderer's
     /// side of the disc, so they are handed in rather than read here.
+    ///
+    /// The clutch's launch ramp ([`mv::clutch`]) starts unspent, its timer at 0 as the original's
+    /// constructor leaves it. So a bike given the gas on its first frames launches on up to
+    /// `MaxClutchTorqueScale` times the engine's torque. One that has stood or ridden with the lever
+    /// out for `ClutchTorqueScaleTime` launches on the engine's own torque, as a captured state does (P154).
     pub fn new(p: &Phy, mounts: (Vf, Vf), at: Vf, facing: Vf) -> Ride {
         let mass = p.mass.mass;
         let inertia = p.mass.inertia;
