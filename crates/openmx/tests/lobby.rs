@@ -7,6 +7,13 @@
 //! holds another race125p is refused and told why. Last, what the shell hashes for the handshake,
 //! against the disc when there is one.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

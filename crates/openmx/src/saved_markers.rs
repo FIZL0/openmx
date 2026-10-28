@@ -67,7 +67,7 @@ pub fn load(dir: &Path, track: &str, profile: &str, bike: &str) -> Markers {
     let mut out = Markers::default();
     for (on, name) in names(bike) {
         let file = path_of(dir, track, profile, on);
-        let Ok(bytes) = std::fs::read(&file) else { continue };
+        let Ok(bytes) = crate::files::read(&file) else { continue };
         match Markers::from_file(&bytes, name) {
             Ok(m) if m.any_on(on) || !m.any() => out.join(m),
             Ok(_) => println!("markers: {} not loaded: another machine's", file.display()),
@@ -88,16 +88,16 @@ pub fn save(dir: &Path, track: &str, profile: &str, bike: &str, markers: &Marker
 pub fn save_of(dir: &Path, track: &str, profile: &str, on: Vehicle, name: &str, markers: &Markers) -> Result<(), String> {
     let file = path_of(dir, track, profile, on);
     if !markers.any_on(on) {
-        return match std::fs::remove_file(&file) {
+        return match crate::files::remove_file(&file) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", file.display())),
             _ => Ok(()),
         };
     }
     let parent = file.parent().expect("a file in a folder");
-    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    crate::files::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     let part = file.with_extension("markers.part");
-    std::fs::write(&part, markers.set_file(on, name)).map_err(|e| format!("{}: {e}", part.display()))?;
-    std::fs::rename(&part, &file).map_err(|e| format!("{}: {e}", file.display()))
+    crate::files::write(&part, markers.set_file(on, name)).map_err(|e| format!("{}: {e}", part.display()))?;
+    crate::files::rename(&part, &file).map_err(|e| format!("{}: {e}", file.display()))
 }
 
 /// What a seat's slots hold, as one word: a change of it is a slot placed or cleared, on any

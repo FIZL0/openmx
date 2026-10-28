@@ -14,6 +14,16 @@
 //!
 //! Everything here needs the disc's `biplane.phy` and skips without it, saying so.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/thread.rs"]
+mod thread;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

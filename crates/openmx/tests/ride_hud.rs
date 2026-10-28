@@ -6,6 +6,13 @@
 //! every slot and player and its hold; the settings' new default and its migration; and the shell
 //! itself drawing each `--overlay` (that one needs the disc and skips without it).
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

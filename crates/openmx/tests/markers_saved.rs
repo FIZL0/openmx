@@ -3,6 +3,10 @@
 //! step, then `markers::frame` (`Seat::pass`). The stand-in bike on a flat floor, at the 30 Hz clamp.
 //! The files go in a folder of the test's own under the system's temp dir, never beside the disc.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/saved_markers.rs"]
 #[allow(dead_code)]
 mod saved_markers;

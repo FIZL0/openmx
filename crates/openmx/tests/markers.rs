@@ -8,6 +8,13 @@
 //! P107's at the end: the plane's own set, flown as `Seat::pass` flies it — the garage's step, then
 //! `Garage::markers` — on the disc's biplane over a flat floor (skipped without a disc).
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

@@ -6,6 +6,10 @@
 //! The shell keeps its files beside the disc (`menu::store_dir`), so each run gets a directory of its
 //! own: a `kit.toml` naming a link to the user's disc, and the files saved there, never the user's.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

@@ -14,8 +14,9 @@
 //! # The host calls
 //!
 //! Through `wasm-bindgen`, as opentennis's build is (`tools/web.sh` runs its CLI): ggrs takes its
-//! clock and its random numbers from the page through it, and so does iroh. The page's own four are
-//! on the worker's global `openmx` object:
+//! clock and its random numbers from the page through it, and so does iroh. The page's own are on
+//! the worker's global `openmx` object — these four, and the game's (P196: the canvas's size, keys,
+//! pointer, gamepads, sound, files and frame clock), which `web_host.rs` lists:
 //!
 //! * `disc_size() -> number` and `disc_read(at, into: Uint8Array) -> number` — the image, by offset,
 //!   out of the OPFS file (`at` a JavaScript number, exact up to 2^53, as the disc is larger than an
@@ -23,8 +24,9 @@
 //! * `present(rgba: Uint8Array, width, height)` — one frame, which the worker puts into its canvas;
 //! * `log(line)` — a line for the console, and where a panic's message goes.
 //!
-//! and it calls back the exports below: `openmx_start` and `openmx_frame` for the picture, and
-//! [`Online`](host::Online) for a ride against other machines.
+//! and it calls back the exports below: `openmx_run` for the game, `openmx_start` and
+//! `openmx_frame` for the start line's still (the desktop's tests compare it), and
+//! [`Online`](host::Online) for a ride against other machines (the tests' `?join=`/`?host=` page).
 //!
 //! # Online
 //!
@@ -34,28 +36,51 @@
 //! peers of one lobby, joined by its ticket or room code; `crates/openmx/tests/netplay/browser.rs` has
 //! them agree on every tick's hash.
 //!
-//! # What it draws, for now
+//! # The game (P196)
 //!
-//! The place the ride starts in: the track's terrain and every prop its scene stands there, from
-//! behind the start line, lit and fogged by the scene's own values — the desktop shell's own ground
-//! pass ([`ground`]) and the renderer's own scene pass, over the same disc. **It is not the ride.**
-//! The desktop's loop is one function (`run` in `main.rs`) that owns its window, its clock and its
-//! pad, and is being rebuilt by the front end (P36) and rollback (N2) at the same time as this; the
-//! browser rides once that loop can be stepped a frame at a time from a host it does not own. The
-//! journal entry `n4-in-a-browser` says what is left.
+//! The desktop's own shell — `main.rs` and every module of it, mounted here as `shell` — is the
+//! game in the page: the press-start splash, the main menu and its attract camera, and the rides,
+//! online lobby, settings and mods it starts, the same 30 Hz simulation under the same fixed-step
+//! pacing. Its frame loops are `async` and end each picture by awaiting the page's next animation
+//! frame (`pace::shown`), so `openmx_run` steps it a frame at a time off the page's clock, and the
+//! lobby's network tasks run between frames; the desktop waits on the same future with nothing in
+//! between. What a page has in place of the desktop's window, pads, speakers, clock, threads and
+//! files is `web_host.rs`, `clock.rs`, `thread.rs` and `files.rs`. The picture is the desktop's
+//! software rasteriser on one thread until P48 puts the GPU's on the canvas.
 
 // The desktop shell's own ground pass, compiled into this build too; the parts of it only the ride
 // asks for go unused here.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 mod ground;
 // The desktop shell's own online session (N2), compiled into this build too (N4).
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 #[path = "net/mod.rs"]
 pub mod net;
 pub mod peer;
 // The machines (N17): a seat's switch online is the session's, so the session needs them.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code, unused_imports)]
 mod vehicle;
+
+// The whole desktop shell (P196): in the browser the page runs the desktop's own front end and ride,
+// so the module the browser loads is `main.rs` and every module it mounts, which come up to this
+// root where their `crate::` paths look for them. Only the browser's build takes it: the desktop's
+// is the binary, and the native rlib the tests link keeps to the parts above.
+#[cfg(target_arch = "wasm32")]
+#[allow(unused)]
+#[path = "main.rs"]
+mod shell;
+#[cfg(target_arch = "wasm32")]
+#[allow(unused_imports)]
+pub(crate) use shell::*;
+// The page's canvas, keys, pads, sound and files, which the shell's modules ask for in the
+// browser (P196). Beside the shell rather than in it: wasm-bindgen's glue is unsafe code.
+#[cfg(target_arch = "wasm32")]
+mod web_host;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use host::present as host_present;
 
 use game_render::disc::{Disc, Res};
 use game_render::mat::v3;
@@ -162,7 +187,7 @@ mod host {
         #[wasm_bindgen(js_namespace = openmx)]
         fn disc_read(at: f64, into: &mut [u8]) -> i32;
         #[wasm_bindgen(js_namespace = openmx)]
-        fn present(rgba: &[u8], width: u32, height: u32);
+        pub(crate) fn present(rgba: &[u8], width: u32, height: u32);
         #[wasm_bindgen(js_namespace = openmx, js_name = log)]
         fn host_log(line: &str);
     }
@@ -237,6 +262,29 @@ mod host {
                 why
             }
         })
+    }
+
+    /// The disc the page has, opened afresh: what the shell's [`Disc::open_configured`] opens in the
+    /// browser.
+    fn page_disc() -> Result<Box<dyn game_render::disc::Image>, String> {
+        Ok(Box::new(HostImage { at: 0, size: disc_size() as u64 }))
+    }
+
+    /// The game (P196): the desktop's own front end — the press-start splash, the main menu, and
+    /// the rides, online, settings and mods it starts — on the page's canvas, keys, pads and
+    /// speakers, a frame each time the page's clock comes round. Runs until the shell quits; the
+    /// promise is what it ended with, empty when it ended well.
+    #[wasm_bindgen]
+    pub async fn openmx_run() -> String {
+        hook();
+        game_render::disc::set_page_disc(page_disc);
+        match crate::shell::run().await {
+            Ok(()) => String::new(),
+            Err(e) => {
+                say(&format!("openmx: {e}"));
+                e
+            }
+        }
     }
 
     /// Hand the page the current frame.

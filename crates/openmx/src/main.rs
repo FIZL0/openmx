@@ -167,13 +167,25 @@
 
 #![forbid(unsafe_code)]
 
+// The shell's modules, crate-visible: the browser's build (P196, `web.rs`) mounts this file as a module of
+// its own and takes them up to its root, where their `crate::` paths look for them.
+macro_rules! modules {
+    ($($(#[$m:meta])* mod $name:ident;)*) => { $($(#[$m])* pub(crate) mod $name;)* };
+}
+modules! {
 mod audio;
 mod aspect;
 mod chase;
+// The clock, the threads and the shell's files, which the browser has its own of (P196).
+mod clock;
+mod files;
+mod thread;
 // Whether the mouse cursor is drawn over the window (P167).
 mod cursor;
 // The riders' names and numbers on their jerseys and plates (P86).
 mod dress;
+// The browser has no GPU window yet (P48): its stand-in, which never opens.
+#[cfg_attr(target_arch = "wasm32", path = "web_gpu.rs")]
 mod gpuwin;
 mod ground;
 mod hud;
@@ -223,9 +235,12 @@ mod roster;
 mod screen;
 mod vehicle;
 mod window;
+}
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use clock::Instant;
 
 use game_render::biplane::{self, Biplane};
 use game_render::chassis::{grips as chassis_grips, placed as chassis_at, wrecked as chassis_wrecked};
@@ -351,7 +366,9 @@ fn main() {
     if cfg!(debug_assertions) {
         eprintln!("openmx: a debug build, slow to draw; `cargo run --release -p openmx` is the one to ride");
     }
-    if let Err(e) = run() {
+    // The loop is a future (P196) so the browser can step it a frame at a time; here it is waited
+    // on whole, boxed for its size.
+    if let Err(e) = pollster::block_on(Box::pin(run())) {
         eprintln!("openmx: {e}");
         std::process::exit(1);
     }
@@ -1781,7 +1798,7 @@ fn own_pick(args: &Args) -> roster::Pick {
     }
 }
 
-fn run() -> Result<(), String> {
+pub(crate) async fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().is_some_and(|a| a == "--dump-textures") {
         return dump_textures(&argv[1..]);
@@ -1790,7 +1807,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     };
     if args.menu || !args.ride_flag {
-        return front_end(args);
+        return front_end(args).await;
     }
     let mut args = args;
     if args.garage {
@@ -1803,7 +1820,7 @@ fn run() -> Result<(), String> {
             apply_picks(&mut args, &picks);
         }
     }
-    ride(args, None).map(|_| ())
+    ride(args, None).await.map(|_| ())
 }
 
 /// The window, the pad and the menu, which outlive a ride under the front end.
@@ -1944,6 +1961,14 @@ fn open_seats(args: &Args, pad: Option<&str>, wiring: Wiring) -> Seats {
     Seats::open(pad, args.pads, wiring, bindings)
 }
 
+/// A GPU drawing offscreen, for `--headless`; the browser has none to offer yet (P48).
+fn headless_gpu() -> Result<Renderer, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return Renderer::headless();
+    #[cfg(target_arch = "wasm32")]
+    return Err("the browser draws in software for now (P48)".into());
+}
+
 /// The sound (P42): the music sources — the disc's songs, then the user's own folder beside the
 /// settings — and the player it all goes out through, set as `settings` says. Silent with
 /// `--no-sound` or `--headless`, and where the desktop has no player.
@@ -1951,7 +1976,7 @@ fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &m
     let image = Disc::configured_path().ok();
     let sources = audio::sources(image.map(|path| (disc, path)), dir);
     // Which song a shuffle starts on is the host's business and nothing of the game's: the clock.
-    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+    let seed = clock::SystemTime::now().duration_since(clock::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     let music = audio::Music::new(sources, seed);
     println!(
         "music: {} songs from {}; your own .wav files go in {}",
@@ -1987,7 +2012,7 @@ enum Leave {
 }
 
 /// The front end (P36): the menus until one of them starts a ride, the ride, and back.
-fn front_end(args: Args) -> Result<(), String> {
+async fn front_end(args: Args) -> Result<(), String> {
     let mut disc = Disc::open_configured()?;
     let art = Art::load(&mut disc)?;
     let catalogue = match roster::Catalogue::read(&mut disc) {
@@ -2106,6 +2131,8 @@ fn front_end(args: Args) -> Result<(), String> {
     // 1P's saved markers on the lobby's track, for this machine's pick (P99).
     let mut pick_markers = saved_markers::PickMarkers::default();
     loop {
+        // The picture before this one is the page's until its next frame (P196).
+        pace::shown().await;
         if matches!(act, Act::Ride(_) | Act::Online) {
             pick_markers.stale();
         }
@@ -2166,7 +2193,7 @@ fn front_end(args: Args) -> Result<(), String> {
                     apply_picks(&mut a, &picks);
                 }
                 shell.front.note_clear();
-                let left = ride(a, Some(&mut shell));
+                let left = ride(a, Some(&mut shell)).await;
                 shell.front.menu.loading = None;
                 match left {
                     Ok(Leave::Restart) => continue,
@@ -2239,7 +2266,7 @@ fn front_end(args: Args) -> Result<(), String> {
                 a.shot = None;
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
                 shell.front.note_clear();
-                let left = ride(a, Some(&mut shell));
+                let left = ride(a, Some(&mut shell)).await;
                 shell.front.menu.loading = None;
                 match left {
                     Ok(Leave::Quit) => return Ok(()),
@@ -2574,7 +2601,8 @@ fn load_in_front<'env, T: Send + 'env>(
     build: impl FnOnce() -> Result<Result<T, Leave>, String> + Send + 'env,
 ) -> Result<Result<T, Leave>, String> {
     let Shell { window, seats, front } = shell;
-    let wait = || load_tick(window, seats, Some(&mut *front), args, progress, screen);
+    // Never called in the browser, whose load runs before the loading screen would draw (`thread`).
+    let wait = || pollster::block_on(load_tick(window, seats, Some(&mut *front), args, progress, screen));
     match loading::on_worker(progress, build, wait)? {
         Ok(built) => Ok(built),
         Err(leave) => {
@@ -2586,7 +2614,7 @@ fn load_in_front<'env, T: Send + 'env>(
 
 /// One loading frame where the front end has one, between two steps of a ride's load (P127): what
 /// to leave the ride for, if anything. A cancel puts the pick back.
-fn load_tick(
+async fn load_tick(
     window: &mut Option<Screen>,
     seats: &mut Option<Seats>,
     front: Option<&mut Front>,
@@ -2598,7 +2626,7 @@ fn load_tick(
     if front.menu.loading.is_none() {
         front.menu.start_loading(&args.track);
     }
-    match loading_frame(window, seats, front, args, progress, screen)? {
+    match loading_frame(window, seats, front, args, progress, screen).await? {
         Wait::On => Ok(None),
         Wait::Cancel => {
             front.menu.back_to_pick();
@@ -2626,7 +2654,7 @@ fn timed_reports(seats: &Seats, devices: Vec<(Device<String>, Report, u16)>) -> 
 
 /// The loading screen, drawn once, and the window's events and the menus' devices read: the
 /// front end's frame (`front_end`'s loop) with the load's bar for its menu.
-fn loading_frame(
+async fn loading_frame(
     window: &mut Option<Screen>,
     seats: &mut Option<Seats>,
     front: &mut Front,
@@ -2697,10 +2725,11 @@ fn loading_frame(
     screen.frames += 1;
     let floor = picture_floor(window, args.pacing(&front.menu.settings));
     screen.limiter.wait(args.draw_frame().or(menu_floor(window, floor)).or(Some(Duration::from_millis(16))));
+    pace::shown().await;
     Ok(if back { Wait::Cancel } else { Wait::On })
 }
 
-fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
+async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The world's replaced textures (V84), set before anything of the ride is decoded and kept while
     // it rides: a world's tiles stream in later and are replaced as they load.
     let mut texture_reload = install_textures(&args);
@@ -4232,7 +4261,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
         }
     };
-    if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
+    if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen).await? {
         return Ok(leave);
     }
     if let Some(pads) = args.pads {
@@ -4293,7 +4322,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // What draws the picture: the window's own GPU, or with no window one drawing offscreen — unless
     // `--renderer software`, or no GPU to be had, leaves it to the rasteriser.
     let mut offscreen: Option<(Renderer, Option<wgpu::Texture>)> = match (&*window, args.renderer) {
-        (None, Backend::Gpu) => match Renderer::headless() {
+        (None, Backend::Gpu) => match headless_gpu() {
             Ok(r) => {
                 println!("gpu: {} offscreen", r.adapter);
                 Some((r, None))
@@ -4316,7 +4345,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     let mut rigs: Vec<Rig> = Vec::with_capacity(args.players);
     let body_model = body.as_ref().map(|b| b.geometry().to_string());
     for i in 1..riders {
-        if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
+        if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen).await? {
             return Ok(leave);
         }
         // Its own rider's archive when the garage picked one, the first player's otherwise.
@@ -4579,7 +4608,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     // Everything the GPU draws, uploaded once: the props, the sky, the ground and every model.
     // Under the front end the models go up a slice between loading frames (P127).
-    if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
+    if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen).await? {
         return Ok(leave);
     }
     // A world's tiles within reach of the start read while loading, not on the ride's first frame
@@ -4694,7 +4723,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         names.sort();
         for (i, slice) in names.chunks(UPLOAD_SLICE).enumerate() {
             progress.count(i * UPLOAD_SLICE, names.len())?;
-            if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen)? {
+            if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen).await? {
                 return Ok(leave);
             }
             renderer_of(&mut offscreen, window).expect("checked").upload_models(&assets, slice);
@@ -5420,6 +5449,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     }
     perf.begin();
     loop {
+        // The picture before this one is the page's until its next frame (P196).
+        pace::shown().await;
         // A replacement changed while riding (V86): its textures' pixels swapped where the software
         // renderer reads them, and uploaded again for the GPU's.
         for (key, texture) in texture_reload.as_mut().map(textures::Reload::poll).unwrap_or_default() {
@@ -6668,7 +6699,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                                 let work: Vec<_> =
                                     r.mips_wanted(&assets, &d.taken.models).into_iter().map(|(t, keep)| (t, keep, assets.textures[t].clone())).collect();
                                 let (send, levels) = std::sync::mpsc::channel();
-                                std::thread::spawn(move || {
+                                thread::spawn(move || {
                                     let _ = send.send(work.into_iter().map(|(t, keep, tex)| (t, keep, game_render::gpu::Mips::of(&tex, keep))).collect());
                                 });
                                 unshown.push((d.index, d.taken.models.iter().rev().cloned().collect(), Some(levels)));

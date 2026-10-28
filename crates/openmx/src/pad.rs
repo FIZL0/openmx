@@ -42,6 +42,13 @@ use crate::window::key;
 
 /// Where the kernel puts its joystick devices, and where it says what each one is.
 const PAD_DIR: &str = "/dev/input";
+
+/// A joystick device as it is read: a `/dev/input/js*` node, or in the browser one of the page's
+/// gamepads put out as the same events (P196, [`crate::web_host::PadNode`]).
+#[cfg(not(target_arch = "wasm32"))]
+type Node = std::fs::File;
+#[cfg(target_arch = "wasm32")]
+type Node = crate::web_host::PadNode;
 const PAD_SYS: &str = "/sys/class/input";
 
 /// `O_NONBLOCK`, so a frame with no pad event does not wait for one. The value is Linux's, and this
@@ -820,7 +827,7 @@ const KEY_STICK_SLOTS: [usize; 4] = [REPORT_RIGHT_X, REPORT_RIGHT_Y, REPORT_LEFT
 /// [`Seats`] owns one of these per pad that is plugged in and one for the keyboard.
 pub struct Pads {
     /// The joystick device, if one opened.
-    device: Option<std::fs::File>,
+    device: Option<Node>,
     /// Which of the shell's slots each of the device's js numbers is ([`JsMap`]).
     map: JsMap,
     /// A Nintendo pad, whose A (the right button) confirms only if the wiring says labels.
@@ -863,7 +870,7 @@ pub struct Pads {
     /// When the last report was built, so the ramps travel at a rate in seconds rather than one a
     /// frame: the shell paces itself to 60 Hz but a heavy frame overruns, and a keyboard that leans
     /// further when the picture is cheap would be its own bug.
-    clock: Option<std::time::Instant>,
+    clock: Option<crate::clock::Instant>,
     /// The device's event clock on the shell's (P165, [`crate::window::Stamps`]).
     stamps: crate::window::Stamps,
     /// The menu controls after each change since the last report, by the events' clock unwrapped
@@ -1062,7 +1069,7 @@ impl Pads {
     /// How long since the last report was built, in seconds, capped at [`KEY_STEP_MAX`]. The first
     /// report of a run gets nothing, which leaves the sticks where they start: at centre.
     fn since_the_last_report(&mut self) -> f32 {
-        let now = std::time::Instant::now();
+        let now = crate::clock::Instant::now();
         match self.clock.replace(now) {
             Some(then) => now.duration_since(then).as_secs_f32().min(KEY_STEP_MAX),
             None => 0.0,
@@ -1352,6 +1359,9 @@ impl DeviceInfo {
     /// `sys/<node>/device/…`, as much of it as is there. A node with no sysfs entry (a test's fifo,
     /// or a container with no `/sys`) is known by its path alone.
     fn read(sys: &std::path::Path, node: &str) -> DeviceInfo {
+        // A page's gamepad has a name and nothing else (P196).
+        #[cfg(target_arch = "wasm32")]
+        return DeviceInfo { name: crate::web_host::pad_name(node), ..DeviceInfo::default() };
         let dir = sys.join(node).join("device");
         let text = |name: &str| {
             std::fs::read_to_string(dir.join(name)).map(|t| t.trim().to_string()).unwrap_or_default()
@@ -1903,7 +1913,7 @@ impl Bindings {
     /// Read `path`, or write the defaults there if there is nothing to read; messages for whatever
     /// in it was not understood, or for a file that could not be written, come back beside it.
     pub fn load(path: &std::path::Path) -> (Bindings, Vec<String>) {
-        match std::fs::read_to_string(path) {
+        match crate::files::read_to_string(path) {
             Ok(text) => {
                 let (b, errors) = Bindings::parse(&text);
                 let errors = errors.into_iter().map(|e| format!("{}: {e}", path.display())).collect();
@@ -1913,7 +1923,7 @@ impl Bindings {
                 let b = Bindings::default();
                 // Written beside and renamed over, so a session reading it never sees half a file.
                 let partial = path.with_extension("txt.partial");
-                let wrote = std::fs::write(&partial, b.text()).and_then(|_| std::fs::rename(&partial, path));
+                let wrote = crate::files::write(&partial, b.text()).and_then(|_| crate::files::rename(&partial, path));
                 let said = match wrote {
                     Ok(()) => format!("wrote the default controls to {}", path.display()),
                     Err(e) => format!("{}: {e} (riding on the default controls)", path.display()),
@@ -2100,7 +2110,7 @@ pub struct Seats {
     keys: Pads,
     wiring: Wiring,
     bindings: Bindings,
-    since_scan: Option<std::time::Instant>,
+    since_scan: Option<crate::clock::Instant>,
     /// What each seat was last frame, for [`Seats::said`].
     was: [SeatKind; SEATS],
     /// Last frame's keyboard Start, so a take-over is a press and not a hold.
@@ -2183,7 +2193,10 @@ impl Seats {
 
     /// Open every js node not open yet, in `js` number order.
     fn scan(&mut self) {
-        self.since_scan = Some(std::time::Instant::now());
+        self.since_scan = Some(crate::clock::Instant::now());
+        #[cfg(target_arch = "wasm32")]
+        let mut found = crate::web_host::pads();
+        #[cfg(not(target_arch = "wasm32"))]
         let mut found: Vec<(u32, std::path::PathBuf)> = match &self.only {
             Some(path) => vec![(0, path.clone())],
             None => std::fs::read_dir(&self.dir)
@@ -2212,11 +2225,15 @@ impl Seats {
                 });
                 continue;
             }
+            #[cfg(not(target_arch = "wasm32"))]
             use std::os::unix::fs::OpenOptionsExt;
+            #[cfg(not(target_arch = "wasm32"))]
             let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(&path)
             else {
                 continue;
             };
+            #[cfg(target_arch = "wasm32")]
+            let Ok(file) = Node::open(&path) else { continue };
             // Two of the same pad on one hub port must still be two: the first free of `id`,
             // `id #2`, `id #3`…, so a pad that comes back gets the name it had if it is free.
             let base = info.identity(&path);

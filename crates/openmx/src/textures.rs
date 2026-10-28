@@ -30,7 +30,9 @@ use game_render::pst::Texture;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
+
+use crate::clock::Instant;
 
 /// Your own key-named files, under the mods folder.
 pub const REPLACEMENTS: &str = "texture-replacements";
@@ -299,7 +301,7 @@ pub struct Reload {
     /// The lookup as the installed source answers it, kept up to date.
     files: Arc<RwLock<Found>>,
     seen: HashMap<String, Stamp>,
-    walk: Option<std::thread::JoinHandle<Found>>,
+    walk: Option<crate::thread::JoinHandle<Found>>,
     next: Instant,
 }
 
@@ -316,7 +318,7 @@ impl Reload {
         if self.walk.is_none() && Instant::now() >= self.next {
             self.next = Instant::now() + RELOAD_EVERY;
             let (mods, order, off) = (self.mods.clone(), self.order.clone(), self.off.clone());
-            self.walk = Some(std::thread::spawn(move || scan_saying(&mods, &order, &off, false)));
+            self.walk = Some(crate::thread::spawn(move || scan_saying(&mods, &order, &off, false)));
         }
         Vec::new()
     }

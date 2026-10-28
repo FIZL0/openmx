@@ -15,7 +15,11 @@
 //! document's, in its own order, which is why the request builders read as a list of pushes.
 
 use std::io::{ErrorKind, Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::os::unix::net::UnixStream;
+// A browser has no display socket (P196): one that never connects, so this compiles there.
+#[cfg(target_arch = "wasm32")]
+use crate::web_host::NoSocket as UnixStream;
 
 /// Request opcodes, by the names the protocol gives them.
 const CREATE_WINDOW: u8 = 1;
@@ -79,8 +83,8 @@ const ZPIXMAP: u8 = 2;
 /// a bounce and a hold by, whatever the frame rate. The pads' and the keyboard's own timestamps are
 /// put on it by [`Stamps`].
 pub fn shell_us() -> u64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64
+    static START: std::sync::OnceLock<crate::clock::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(crate::clock::Instant::now).elapsed().as_micros() as u64
 }
 
 /// A key going down (`true`) or up, by X keycode, and when on [`shell_us`]'s clock (P165).

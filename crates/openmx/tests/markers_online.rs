@@ -7,6 +7,10 @@
 //! every seat mashing a pad of the original's bytes — a lone Up among them, which rides a seat back
 //! to its first marker, so the markers are in the ride and not only in its state.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[allow(dead_code)]
 #[path = "../src/net/mod.rs"]
 mod net;

@@ -17,7 +17,9 @@
 //!   ticks ([`Blend`]), by how far the wall clock is past the last one. It is render-side only: the
 //!   simulation never sees it.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::Instant;
 
 use game_render::mat::{M4, V3};
 use game_render::world::Camera;
@@ -186,12 +188,22 @@ impl Limiter {
         };
         match self.last.map(|last| last + floor) {
             Some(due) if due > now => {
+                // The browser's loop waits for the page's next frame instead ([`shown`]).
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(due - now);
                 self.last = Some(due);
             }
             _ => self.last = Some(now),
         }
     }
+}
+
+/// The end of a picture (P196): nothing on the desktop, whose loop has slept to its floor in
+/// [`Limiter::wait`]; in the browser, the page's turn until its next animation frame, which is what
+/// paces the page's pictures and lets it hand over keys, pads, sound and the network's messages.
+pub async fn shown() {
+    #[cfg(target_arch = "wasm32")]
+    crate::web_host::next_frame().await;
 }
 
 /// A move longer than this between two ticks is a jump — a respawn, a swap, a camera cut — and is

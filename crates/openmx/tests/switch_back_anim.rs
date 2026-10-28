@@ -13,6 +13,10 @@
 //! `Body::ride` while the bike is up — on the disc's biplane, the stock bike and `thq1`'s body, over
 //! a flat floor at the 30 Hz clamp. Skipped without a disc.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

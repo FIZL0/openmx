@@ -2045,7 +2045,7 @@ pub const CONTROLS_FILE: &str = "controls.txt";
 
 /// Both files out of `dir`; a missing file is the defaults.
 pub fn load(dir: &Path) -> (Settings, Controls) {
-    let read = |name| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+    let read = |name| crate::files::read_to_string(dir.join(name)).unwrap_or_default();
     (Settings::parse(&read(SETTINGS_FILE)), Controls::parse(&read(CONTROLS_FILE)))
 }
 
@@ -2053,7 +2053,7 @@ pub fn load(dir: &Path) -> (Settings, Controls) {
 pub fn save(dir: &Path, settings: &Settings, controls: &Controls) -> Result<(), String> {
     for (name, text) in [(SETTINGS_FILE, settings.text()), (CONTROLS_FILE, controls.text())] {
         let path = dir.join(name);
-        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        crate::files::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(())
 }

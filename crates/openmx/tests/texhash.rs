@@ -14,6 +14,13 @@
 //! time, the loading screen (`ui\*.lsi`, not a `.pst`) and two 1024x1024 32-bit render targets.
 //! Skips, saying so, without the disc or the dump.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/thread.rs"]
+mod thread;
 #[path = "../src/track_mods.rs"]
 #[allow(dead_code)]
 mod track_mods;

@@ -4,6 +4,10 @@
 
 use std::sync::Arc;
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/thread.rs"]
+mod thread;
 #[allow(dead_code)]
 #[path = "../src/audio.rs"]
 mod audio;
