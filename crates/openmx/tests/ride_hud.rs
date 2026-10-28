@@ -840,3 +840,45 @@ fn a_wrapped_edge_names_the_map_across_the_seam() {
     assert_eq!(named([1400.0, 250.0], None), ("East".to_string(), vec![west("Middle")]));
 }
 
+
+/// P182: a wrecked ride's HUD speed is 0. The original's readout drops to 0 on the wreck and stays
+/// there until the put-back (S109's run2.mp4, 29.6–33.6 s); the camera's target block follows the
+/// tumbling wreck body at 30 ft/s, and the speedometer must not read it.
+#[test]
+fn a_wrecked_rides_hud_speed_is_0() {
+    let mut bike = game_sim::wreck_bike::WreckBike::default();
+    bike.body.velocity = ps2_float::Vf::new(0.0, 0.0, 30.0, 1.0);
+    let crash = game_sim::ride::Crash {
+        reason: game_sim::trick::Wreck::THROWN,
+        hit: None,
+        throw: Default::default(),
+        clock: F::ZERO,
+        holding: false,
+        throwing: F::ZERO,
+        bike,
+        origin: ps2_float::Vf::new(0.0, 0.0, 0.0, 1.0),
+        rider: ps2_float::Vf::new(0.0, 0.0, 0.0, 1.0),
+        rider_vel: ps2_float::Vf::ZERO,
+        landed: false,
+        ground: F::ZERO,
+        resting: false,
+        facing: ps2_float::Vf::new(0.0, 0.0, 1.0, 0.0),
+    };
+    let me = chase::wrecked(&crash);
+    assert!(me.speed.0 > 29.0, "the wreck target moves: {}", me.speed.0);
+    let now = Instant::now();
+    for speedometer in [Speedometer::Digital, Speedometer::Analog] {
+        let g = gauges(speedometer);
+        let mut shown = shown(&g, &[], &[], None);
+        shown.speed = ride_hud::speed_shown(me.speed.0, true);
+        let mut out = Vec::new();
+        let d = ride_hud::sprites(&mut out, 0, [0.0, 0.0, 1920.0, 1080.0], &shown, &Tracker::default(), now);
+        if speedometer == Speedometer::Digital {
+            assert_eq!(d.speed.expect("the digital readout").text, "0");
+        }
+        assert_eq!(overlay::needle_degrees(shown.speed), overlay::needle_degrees(0.0));
+    }
+    // Riding, the readout is the ridden speed.
+    assert_eq!(ride_hud::speed_shown(20.0, false), 20.0);
+    assert_eq!(overlay::speed_text(ride_hud::speed_shown(20.0, false)), overlay::speed_text(20.0));
+}
