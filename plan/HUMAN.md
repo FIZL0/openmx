@@ -301,3 +301,16 @@ website on https://openmx.dev. What only you can do:
    Runtime container).
 5. **The page's links**: web/index.html's `SITE` (Discord, the dump guide, donate) are still empty and show as
    "Coming soon".
+6. **Search engines and link previews for openmx.dev (P194)**, once the first release has put the site on
+   https://openmx.dev (check that `/robots.txt`, `/sitemap.xml` and `/shots/ride-free06.jpg` load). (a) Google Search
+   Console (search.google.com/search-console) → Add property → *Domain* `openmx.dev` → add the TXT record it gives
+   at Namecheap (Advanced DNS), Verify. Sitemaps → submit `https://openmx.dev/sitemap.xml`. URL inspection →
+   `https://openmx.dev/` → Request indexing; its "View tested page" screenshot should show the landing page (the
+   openMX logo, the railway picture, "Questions" further down), not a blank page. (b) Bing Webmaster Tools
+   (bing.com/webmasters) → *Import from Google Search Console* (or add the site with the same DNS TXT), submit the
+   same sitemap (this covers DuckDuckGo and Yahoo too). (c) Check a link preview: paste https://openmx.dev into
+   Discord or https://www.opengraph.xyz → the railway picture with "openMX: a remaster of MX Unleashed". (d) The
+   repo's homepage still says https://beta.openmx.dev/: switch it with `gh repo edit FIZL0/openmx --homepage
+   https://openmx.dev/` (filed as a task too, so an agent may already have done it), and optionally add topics
+   `mx-unleashed`, `mx-vs-atv`, `motocross`, `ps2`, `remaster`, `decompilation`. Don't add beta.openmx.dev as a
+   property: its page says noindex and its canonical points to openmx.dev.

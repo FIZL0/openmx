@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- P194: the site is one page (index.html); its pictures are docs/screenshots, copied into shots/ by tools/web.sh -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://openmx.dev/</loc>
+    <image:image><image:loc>https://openmx.dev/shots/ride-free06.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/air-cancan.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/biplane.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/wreck.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/rain-nat01.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/road-free09.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/split-4p.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/mxvatv-nat04.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/menu-main.jpg</image:loc></image:image>
+    <image:image><image:loc>https://openmx.dev/shots/menu-online.jpg</image:loc></image:image>
+  </url>
+</urlset>

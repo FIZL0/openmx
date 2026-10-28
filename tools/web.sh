@@ -122,6 +122,8 @@ if [ "$check" = 1 ]; then
 fi
 mkdir -p "$repo/web/pkg"
 cp "$out/pkg/openmx_web.js" "$out/pkg/openmx_web_bg.wasm" "$repo/web/pkg/"
+# The site's pictures (P194): our own renderer's shots in docs/screenshots, the same files the README may link
+mkdir -p "$repo/web/shots" && cp "$repo"/docs/screenshots/*.jpg "$repo/web/shots/"
 # The build the page was made from (web/index.html reads it to offer a reload once the site has a newer one):
 # OPENMX_VERSION (a release's tag, tools/release.sh) and the commit, OPENMX_COMMIT when the caller stamps it (Actions,
 # tools/release.sh), else this checkout's, with a + when it has uncommitted changes.

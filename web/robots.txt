@@ -1,0 +1,5 @@
+# P194: everything may be crawled; the page's canonical link is https://openmx.dev/ (beta.openmx.dev says noindex)
+User-agent: *
+Allow: /
+
+Sitemap: https://openmx.dev/sitemap.xml
