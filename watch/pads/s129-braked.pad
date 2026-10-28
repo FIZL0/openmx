@@ -1,0 +1,8 @@
+# s129-braked.pad — S129: both brakes held on the rail while the train comes, from s129-train.toml's
+# braked state (saved with the same brakes held). Quarter speed: 4000 ms a game second.
+#
+#   ./kit record watch/s129-train.toml --state 9 --pad watch/pads/s129-braked.pad -n 360
+down square
+down r2
+sleep 60000
+release

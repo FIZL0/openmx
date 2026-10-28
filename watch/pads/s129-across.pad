@@ -1,0 +1,9 @@
+# s129-across.pad — S129: from s129-train.toml's across state (bike 70 ft short of the z≈2318 rail,
+# facing it, saved with both brakes held as the engine passes), let go and hold the gas into the
+# passing train. Quarter speed: 4000 ms a game second.
+#
+#   ./kit record watch/s129-train.toml --state 10 --pad watch/pads/s129-across.pad -n 300
+release
+down cross
+sleep 44000
+release
