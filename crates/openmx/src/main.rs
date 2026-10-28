@@ -876,7 +876,7 @@ impl RideHud<'_> {
             None => Vec::new(),
         };
         let shown = ride_hud::Shown {
-            speed: me.speed.0,
+            speed: ride_hud::speed_shown(me.speed.0, seat.garage.up == Kind::Bike && seat.sim.rider.crash.is_some()),
             gauges: &gauges,
             own: [b.x(), b.z()],
             forward: [me.target.forward.x(), me.target.forward.z()],

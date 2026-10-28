@@ -226,6 +226,14 @@ impl EventShown {
     }
 }
 
+/// The speed the speedometer reads off its rider (P182): the ridden speed, and 0 while the rider is
+/// down. The original's readout drops to 0 on the wreck's tick and stays there until the put-back
+/// (S109's run2.mp4, 29.6–33.6 s); the port's target block follows the tumbling wreck body then
+/// ([`crate::chase::wrecked`]), which is the camera's and not the HUD's.
+pub fn speed_shown(speed: f32, down: bool) -> f32 {
+    if down { 0.0 } else { speed }
+}
+
 /// The clock as the event's HUD spells it, `M:SS`, a second shown until it has gone.
 pub fn clock_text(left: f32) -> String {
     let s = left.max(0.0).ceil() as u32;
