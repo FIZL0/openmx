@@ -11,6 +11,10 @@
 //!
 //! The pure parts need no disc. The drawing tests load the disc's art and skip without it.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

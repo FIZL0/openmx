@@ -2,6 +2,16 @@
 //! pause (any seat's), a menu, the front end and a lost focus. The decision is fed a real
 //! [`menu::Menu`] walked into a ride by pad reports, as the ride loop feeds it the front end's.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/thread.rs"]
+mod thread;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/cursor.rs"]
 mod cursor;
 #[path = "../src/menu.rs"]

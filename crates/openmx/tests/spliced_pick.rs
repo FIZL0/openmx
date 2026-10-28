@@ -4,6 +4,10 @@
 //! opened on the pause: that starts the settings' track through the same ride the pick's Cross
 //! starts, and the ride has to be the spliced world. Skips without the disc.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

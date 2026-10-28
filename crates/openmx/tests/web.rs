@@ -4,8 +4,8 @@
 //! * [`the_shell_builds_for_the_browser`] builds `crates/openmx/src/web.rs` for
 //!   `wasm32-unknown-unknown` through `tools/web.sh` — the same script a release uses, wasm-bindgen
 //!   and all — and reads the module's import section: everything it imports must come from
-//!   wasm-bindgen's glue, and the glue must ask the page for exactly the four host calls
-//!   `web/worker.js` supplies. An import from anywhere else (`env`: a C dependency's missing symbol,
+//!   wasm-bindgen's glue, and the glue must ask the page for exactly the host calls
+//!   `web/worker.js` supplies ([`HOST_CALLS`]). An import from anywhere else (`env`: a C dependency's missing symbol,
 //!   a WASI function) is a module the page cannot instantiate, and this is the only test that would
 //!   see it.
 //! * [`the_browser_draws_what_the_desktop_draws`] runs that module in node with `tests/web/host.mjs`
@@ -26,14 +26,19 @@ use std::sync::OnceLock;
 use game_render::disc::{Disc, configured_image};
 use openmx_web::{TRACK, rgba, start_line};
 
-/// The four host calls `web/worker.js` supplies, on its global `openmx`.
-const HOST_CALLS: [&str; 4] = ["disc_size", "disc_read", "present", "log"];
+/// The host calls `web/worker.js` supplies, on its global `openmx`: the disc, the picture and the
+/// log (N4); and the game's canvas size, keys, pointer, gamepads, sound, files and frame clock
+/// (P196, `src/web_host.rs`).
+const HOST_CALLS: [&str; 14] = [
+    "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame",
+];
 
 /// The module wasm-bindgen's glue answers the imports under (`--target web`).
 const GLUE: &str = "./openmx_web_bg.js";
 
-/// What the page calls, through the glue: the picture, and the online ride (`Online`'s methods).
-const EXPORTS: [&str; 9] = ["memory", "openmx_start", "openmx_frame", "online_new", "online_host", "online_join", "online_frame", "online_state", "online_ticks"];
+/// What the page calls, through the glue: the game (P196), the picture, and the online ride
+/// (`Online`'s methods).
+const EXPORTS: [&str; 10] = ["memory", "openmx_run", "openmx_start", "openmx_frame", "online_new", "online_host", "online_join", "online_frame", "online_state", "online_ticks"];
 
 /// The frame both sides draw: the PS2's own.
 const SIZE: (usize, usize) = (640, 448);

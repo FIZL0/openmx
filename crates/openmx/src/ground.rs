@@ -21,7 +21,6 @@ use game_render::mat::{V3, v3};
 use game_render::raster::{Batch, Frame, Mode, Shade};
 use game_render::splat::Splat;
 use game_render::terrain::Pages;
-#[cfg(not(target_arch = "wasm32"))]
 use game_render::gpu::{GroundChunk, GroundVertex};
 use game_render::world::{Camera, Lighting};
 use game_sim::track::{Terrain, TerrainLayout};
@@ -133,7 +132,6 @@ impl<'a> Ground<'a> {
     /// Which of the field's leaves the terrain's tree has, as [`Terrain::leaf`] finds them, from one
     /// walk of the tree rather than a descent per sample: the field's width in leaves, and a flag per
     /// leaf, row by row.
-    #[cfg(not(target_arch = "wasm32"))]
     fn leaf_map(&self) -> (u32, Vec<bool>) {
         let t = &self.terrain;
         let (w, h) = (self.samples_x.div_ceil(LEAF_SAMPLES), self.samples_z.div_ceil(LEAF_SAMPLES));
@@ -169,7 +167,6 @@ impl<'a> Ground<'a> {
     ///
     /// `cells` is rounded up to a power of two. A chunk past the field's far edge repeats the edge's
     /// corners, and a cell the terrain has no quad for is listed in the chunk's `missing`.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn chunks(&self, cells: u32) -> Vec<GroundChunk> {
         let cells = cells.max(1).next_power_of_two();
         let (across, along) = (self.samples_x - 1, self.samples_z - 1);
@@ -386,7 +383,6 @@ impl<'a> Ground<'a> {
     /// world feet: the piece's cells within `radius` samples of `around` (in the world) that `owns`
     /// keeps (by the cell's own sample), moved by the piece's offset `at`, lit by the sun on the
     /// stored normals and left for [`draw_world`]'s paint. The triangles queued.
-    #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
     pub fn queue_piece(
         &self,
@@ -440,7 +436,6 @@ impl<'a> Ground<'a> {
 
 /// A world's ground queued by [`Ground::queue_piece`], drawn painted by `paint` (0..255 at a world
 /// point, before any light: the world's paint, MD9).
-#[cfg(not(target_arch = "wasm32"))]
 pub fn draw_world(frame: &mut Frame, batch: &Batch, light: &Lighting, paint: &(dyn Fn(f32, f32) -> [f32; 3] + Sync)) {
     let paint = |_: u32, x: f32, z: f32| {
         let c = paint(x, z);

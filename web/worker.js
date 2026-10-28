@@ -10,13 +10,22 @@
 // `openmx` wasm-bindgen's glue calls them on; that list and crates/openmx/tests/web/host.mjs, which answers them in
 // node for the tests, are kept call for call alike. A module worker: the glue is an ES module.
 //
+// The game (P196): `{ start }` runs the desktop's own front end — splash, main menu, and the rides, lobby, settings
+// and mods it starts — a frame each time this thread's animation frame comes round (`frame`), until the shell quits.
+// The page sends what it has that a worker cannot read: keys (X keycodes), pointer presses, the gamepads, the canvas's
+// size; the mixer's sound goes back to it to play. The shell's own files (settings, controls, picks, markers) are
+// OPFS's `files/` folder, each read before the game starts and written back as it changes.
+//
 // Online (N4): `{ online }` joins or hosts a lobby through a relay and rides once the host starts, a frame per
 // tick of the ride's 30 Hz clock on this thread's timer; the page's seat rides a pad nobody holds (web.rs says why). It needs no disc.
 //
 // Messages in:  { import: File, canvas? }   copy the disc into OPFS, then start
 //               { start: { canvas?, file? } } start on the OPFS copy, or on `file` when given
 //               { online: { name, relay, codes?, join?, host?, bike, ticks? } }
+//               { key: code << 1 | down } | { blur } | { click: [x, y] } | { view: [w, h] } | { pads, names? }
+//               { played: frames }
 // Messages out: { progress: [done, total] } | { started: true } | { error: String } | { missing: true }
+//               { play: Float32Array } (the mixer's next stereo frames) | { quit: String } (the shell ended)
 //               { online: state } (Online.state(), a few times a second) | { ticks: String } (once `ticks` settled)
 
 const DISC = 'disc.iso';
@@ -28,6 +37,20 @@ let canvas;
 let context;
 // What the host calls read: the disc once there is one.
 let disc = { size: 0, read: () => -1 };
+// What the page has said since the shell last asked.
+let keys = [];
+const held = new Set();
+let clicks = [];
+let view = [640, 448];
+let pads = [];
+let padNames = {};
+// Stereo frames handed to the page and not played yet.
+let queued = 0;
+// The shell's files, by path ("settings.txt", "markers/…"), read before it starts; each change goes back to OPFS in turn.
+const files = new Map();
+let saving = Promise.resolve();
+const FILES = 'files';
+const fileKey = path => path.replace(/^\/opfs\//, '').replace(/^\.\//, '');
 
 globalThis.openmx = {
   disc_size: () => disc.size,
@@ -44,7 +67,56 @@ globalThis.openmx = {
     context.putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
   },
   log: line => console.log(line),
+  view: () => Uint32Array.from(view),
+  keys: () => Uint32Array.from(keys.splice(0)),
+  clicks: () => Int32Array.from(clicks.splice(0)),
+  gamepads: () => Float32Array.from(pads),
+  gamepad_name: i => padNames[i] ?? '',
+  play: samples => {
+    queued += samples.length / 2;
+    const copy = Float32Array.from(samples);
+    postMessage({ play: copy }, [copy.buffer]);
+  },
+  queued: () => queued,
+  file_read: path => files.get(fileKey(path)),
+  file_write: (path, bytes) => {
+    const key = fileKey(path);
+    if (bytes) files.set(key, Uint8Array.from(bytes));
+    else files.delete(key);
+    saving = saving.then(() => store(key, bytes)).catch(e => console.log(`openmx: ${key}: ${e}`));
+  },
+  frame: () => new Promise(r => (self.requestAnimationFrame ?? (f => setTimeout(f, 16)))(r)),
 };
+
+// One of the shell's files into OPFS (`files/`, its path as one name), or out of it.
+async function store(key, bytes) {
+  const dir = await (await opfs()).getDirectoryHandle(FILES, { create: true });
+  const name = encodeURIComponent(key);
+  if (!bytes) {
+    await dir.removeEntry(name).catch(() => {});
+    return;
+  }
+  const h = await (await dir.getFileHandle(name, { create: true })).createSyncAccessHandle();
+  try {
+    h.truncate(0);
+    h.write(bytes, { at: 0 });
+    h.flush();
+  } finally {
+    h.close();
+  }
+}
+
+// Every one of the shell's files OPFS has, before the shell reads any.
+async function loadFiles() {
+  try {
+    const dir = await (await opfs()).getDirectoryHandle(FILES, { create: true });
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind === 'file') files.set(decodeURIComponent(name), new Uint8Array(await (await handle.getFile()).arrayBuffer()));
+    }
+  } catch {
+    // no OPFS (a private window): the shell starts on its defaults and keeps nothing
+  }
+}
 
 // The module, once: wasm-bindgen's glue fetches pkg/openmx_web_bg.wasm beside itself.
 let loaded;
@@ -120,14 +192,13 @@ async function start(file) {
     return;
   }
   disc = opened;
+  await loadFiles();
   const glue = await game();
-  const err = glue.openmx_start(canvas.width, canvas.height);
-  if (err) {
-    postMessage({ error: err });
-    return;
-  }
-  glue.openmx_frame();
   postMessage({ started: true });
+  const ended = await glue.openmx_run();
+  await saving;
+  if (ended) postMessage({ error: ended });
+  else postMessage({ quit: '' });
 }
 
 // A ride against other machines: join (a room code or ticket) or host (that many seats), then a frame every tick of
@@ -179,7 +250,23 @@ onmessage = async ({ data }) => {
       canvas = given;
       context = canvas.getContext('2d');
     }
-    if (data.start) {
+    if (data.key !== undefined) {
+      keys.push(data.key);
+      if (data.key & 1) held.add(data.key >> 1);
+      else held.delete(data.key >> 1);
+    } else if (data.blur) {
+      for (const k of held) keys.push(k << 1);
+      held.clear();
+    } else if (data.click) {
+      clicks.push(...data.click);
+    } else if (data.view) {
+      view = data.view;
+    } else if (data.pads) {
+      pads = data.pads;
+      if (data.names) padNames = data.names;
+    } else if (data.played) {
+      queued = Math.max(0, queued - data.played);
+    } else if (data.start) {
       await start(data.start.file);
     } else if (data.online) {
       await online(data.online);

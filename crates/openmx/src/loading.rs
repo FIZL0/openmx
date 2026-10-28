@@ -12,7 +12,9 @@
 //! ride it makes is the same ride: tests/loading.rs rides one both ways and compares the hashes.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::Instant;
 
 /// A ride's load, in the order it goes: [`Progress::reach`] says which is under way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +237,14 @@ pub fn on_worker<'env, T: Send + 'env, L>(
     build: impl FnOnce() -> Result<T, String> + Send + 'env,
     mut wait: impl FnMut() -> Result<Option<L>, String>,
 ) -> Result<Result<T, L>, String> {
+    // The browser has no second thread (P196): the build runs here, whole, and `wait` never does.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (progress, &mut wait);
+        let _running = Running::new();
+        return build().map(Ok);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name("ride load".into())

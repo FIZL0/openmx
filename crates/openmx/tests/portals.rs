@@ -6,6 +6,10 @@
 //! bike on a flat floor, the d-pad through `markers::frame`). The portals' pictures and models are the
 //! disc's (`free09_2.res`); the tests that need them skip without it.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

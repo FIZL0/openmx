@@ -11,6 +11,13 @@
 //! the trick buttons pressed for real through the rider's own trick machine. No disc needed: the
 //! plane is a parked one, which is all the switch needs to stand it by the bike.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

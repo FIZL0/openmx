@@ -7,6 +7,13 @@
 //!
 //! Every texture here is a hand-made `.pst`; no byte comes off a disc, so nothing skips.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/thread.rs"]
+mod thread;
 #[path = "../src/track_mods.rs"]
 #[allow(dead_code)]
 mod track_mods;

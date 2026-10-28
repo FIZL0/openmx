@@ -9,7 +9,9 @@
 //!
 //! Nothing here reads or writes the simulation; it only reads the wall clock.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::Instant;
 
 /// The stages a frame is cut into, in the order the loop runs them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -7,7 +7,9 @@
 //! the first frame — a file read, a texture decode — has started costing something again. Off by
 //! default, and off it is one `Instant::now` a stage, which is nothing beside a frame.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::Instant;
 
 /// The loop's stages, in the order a frame runs them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -26,7 +26,9 @@ use game_render::{Frame, Texture};
 use game_sim::markers::{HOLD_MS, MAX_SLOTS, Pick};
 use game_sim::score::Score;
 use std::f32::consts::{FRAC_PI_2, TAU};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::Instant;
 
 /// The layout's em: the concept's, a view's height over 45, at the disc's 448.
 const EM: f32 = 448.0 / 45.0;

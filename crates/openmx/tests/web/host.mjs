@@ -26,6 +26,18 @@ globalThis.openmx = {
     frame = Buffer.from(rgba.slice(0, w * h * 4));
   },
   log: (line) => console.error(line),
+  // the game's (openmx_run's), which the start line's still never asks for: an empty window, no
+  // input, no sound, no saved files, and a frame clock that never comes round
+  view: () => Uint32Array.of(Number(width), Number(height)),
+  keys: () => new Uint32Array(),
+  clicks: () => new Int32Array(),
+  gamepads: () => new Float32Array(),
+  gamepad_name: () => '',
+  play: () => {},
+  queued: () => 0,
+  file_read: () => undefined,
+  file_write: () => {},
+  frame: () => new Promise(() => {}),
 };
 const glue = await import(pathToFileURL(path.join(pkg, 'openmx_web.js')));
 await glue.default({ module_or_path: fs.readFileSync(path.join(pkg, 'openmx_web_bg.wasm')) });

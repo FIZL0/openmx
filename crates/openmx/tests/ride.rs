@@ -86,6 +86,13 @@ use std::sync::Arc;
 // `use` it; both files are std and `game_sim` only, and are compiled into this test as they stand.
 // Their own unit tests come with them and run here a second time, which is the price of not moving
 // either file.
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[allow(dead_code)]
 #[path = "../src/window.rs"]
 mod window;

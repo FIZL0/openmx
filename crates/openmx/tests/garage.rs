@@ -11,6 +11,10 @@
 //! pick changes how it rides by exactly what the files differ by. The rider's half is the rider
 //! archive the pick names loading with its own gear.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[allow(dead_code)]
 #[path = "../src/roster.rs"]
 mod roster;

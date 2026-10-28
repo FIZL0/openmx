@@ -34,7 +34,7 @@
 //! state comes.
 
 use std::sync::Arc;
-use std::time::Instant;
+use crate::clock::Instant;
 
 use game_render::rider::Body;
 use game_sim::input::Report;

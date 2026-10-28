@@ -7,6 +7,13 @@
 //! The first test is hand-made bytes and needs no disc; the ride needs the user's disc and skips
 //! without one.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/thread.rs"]
+mod thread;
 #[path = "../src/track_mods.rs"]
 #[allow(dead_code)]
 mod track_mods;

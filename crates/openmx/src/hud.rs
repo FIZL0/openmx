@@ -9,7 +9,9 @@ use game_sim::bindings::Table;
 use game_sim::input::Pad;
 use game_sim::markers::Pick;
 use game_render::wrap::Wrap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::Instant;
 
 /// **The markers' slot display** (P88): the slots and the other players, shown for a while
 /// whenever the selection or a slot changes, and for as long as a d-pad direction is held for the

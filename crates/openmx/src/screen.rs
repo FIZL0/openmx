@@ -5,7 +5,11 @@
 //! close and a resize — so the loop holds a [`Screen`] and asks [`Screen::gpu`] only where it draws.
 
 use crate::gpuwin::GpuWindow;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::window::Window;
+// The page's canvas in the X window's place (P196).
+#[cfg(target_arch = "wasm32")]
+use crate::web_host::Canvas as Window;
 
 /// Which renderer draws the picture.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -62,6 +66,9 @@ impl Screen {
         scale: usize,
         title: &str,
     ) -> Result<Screen, String> {
+        // No GPU window in the browser yet (P48): its canvas draws in software.
+        #[cfg(target_arch = "wasm32")]
+        let backend = Backend::Software;
         let inner = match backend {
             // VSync on until the loop says otherwise (P90): the settings' default.
             Backend::Gpu => match GpuWindow::open(size, scale, title, true) {

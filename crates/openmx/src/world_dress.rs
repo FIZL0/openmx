@@ -233,8 +233,8 @@ impl DressStream {
         let pieces: Vec<WorldPiece> = w.pieces[..w.tile_count].to_vec();
         let tiles: Vec<Tile> = pieces.iter().map(|p| p.tile.clone()).collect();
         let first: Vec<usize> = (0..tiles.len()).filter(|&i| worlds::nearest(&tiles[i], near) <= reach.load.0).collect();
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
-        let mut ready: Vec<(usize, Result<Built, String>)> = std::thread::scope(|scope| {
+        let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
+        let mut ready: Vec<(usize, Result<Built, String>)> = crate::thread::scope(|scope| {
             let jobs: Vec<_> = (0..threads)
                 .map(|t| {
                     let (first, pieces) = (&first, &pieces);

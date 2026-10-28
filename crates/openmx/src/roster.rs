@@ -420,15 +420,15 @@ impl Picks {
 
     /// `garage.txt` out of `dir`; a missing file is every seat on the stock pick.
     pub fn load(dir: &Path) -> Picks {
-        Picks::parse(&std::fs::read_to_string(dir.join(GARAGE_FILE)).unwrap_or_default())
+        Picks::parse(&crate::files::read_to_string(dir.join(GARAGE_FILE)).unwrap_or_default())
     }
 
     /// `garage.txt` into `dir`, written whole and then moved into place, so a reader never sees half.
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         let path = dir.join(GARAGE_FILE);
         let part = dir.join(format!("{GARAGE_FILE}.part"));
-        std::fs::write(&part, self.text()).map_err(|e| format!("{}: {e}", part.display()))?;
-        std::fs::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))
+        crate::files::write(&part, self.text()).map_err(|e| format!("{}: {e}", part.display()))?;
+        crate::files::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 
@@ -760,15 +760,15 @@ impl Presets {
     }
 
     pub fn load(dir: &Path) -> Presets {
-        Presets::parse(&std::fs::read_to_string(dir.join(PRESETS_FILE)).unwrap_or_default())
+        Presets::parse(&crate::files::read_to_string(dir.join(PRESETS_FILE)).unwrap_or_default())
     }
 
     /// Written whole and moved into place, as [`Picks::save`].
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         let path = dir.join(PRESETS_FILE);
         let part = dir.join(format!("{PRESETS_FILE}.part"));
-        std::fs::write(&part, self.text()).map_err(|e| format!("{}: {e}", part.display()))?;
-        std::fs::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))
+        crate::files::write(&part, self.text()).map_err(|e| format!("{}: {e}", part.display()))?;
+        crate::files::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     pub fn find(&self, key: &str) -> Option<&Pick> {

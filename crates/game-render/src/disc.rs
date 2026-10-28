@@ -62,6 +62,10 @@ impl Disc {
     /// The disc this crate's tools use when nothing else is said: `[game] iso` from `kit.toml`, looked
     /// for in this directory and its parents. The error is the message a test should skip with.
     pub fn open_configured() -> Result<Disc, String> {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(open) = PAGE_DISC.get() {
+            return Disc::read_from(open()?);
+        }
         let (root, iso) = configured_iso()?;
         let path = root.join(iso);
         if !path.exists() {
@@ -76,6 +80,10 @@ impl Disc {
     /// Where `open_configured` looks for the disc, whether or not it is there: the shell keeps its
     /// settings beside it (P36).
     pub fn configured_path() -> Result<PathBuf, String> {
+        #[cfg(target_arch = "wasm32")]
+        if PAGE_DISC.get().is_some() {
+            return Ok(PathBuf::from(PAGE_DISC_PATH));
+        }
         let (root, iso) = configured_iso()?;
         Ok(root.join(iso))
     }
@@ -303,6 +311,21 @@ fn normalise(name: &str) -> String {
 }
 
 /// `(repo root, iso path as written)` from the nearest `kit.toml`.
+/// The browser's disc (P196): a page has no kit.toml and no file system, so it says once how to
+/// open its own copy of the disc, and [`Disc::open_configured`] opens that every time it is asked.
+#[cfg(target_arch = "wasm32")]
+static PAGE_DISC: std::sync::OnceLock<fn() -> Result<Box<dyn Image>, String>> = std::sync::OnceLock::new();
+
+/// Where the page's disc is said to be, for what is kept beside it: the page's own storage.
+#[cfg(target_arch = "wasm32")]
+pub const PAGE_DISC_PATH: &str = "/opfs/disc.iso";
+
+/// Set the page's disc ([`PAGE_DISC`]); the first one set stays.
+#[cfg(target_arch = "wasm32")]
+pub fn set_page_disc(open: fn() -> Result<Box<dyn Image>, String>) {
+    let _ = PAGE_DISC.set(open);
+}
+
 fn configured_iso() -> Result<(PathBuf, String), String> {
     let mut dir = std::env::current_dir().map_err(|e| e.to_string())?;
     loop {

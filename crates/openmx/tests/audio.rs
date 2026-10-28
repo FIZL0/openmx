@@ -16,6 +16,10 @@ use std::sync::Arc;
 
 // The shell is a binary; its sound module is std, `game_sim` and `game_render` only, and is compiled
 // in here as it stands.
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/thread.rs"]
+mod thread;
 #[allow(dead_code)]
 #[path = "../src/audio.rs"]
 mod audio;

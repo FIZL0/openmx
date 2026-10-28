@@ -3335,6 +3335,8 @@ dependencies = [
  "serde",
  "tokio",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
  "winit",
 ]
 

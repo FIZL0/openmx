@@ -11,6 +11,13 @@
 //!
 //! No disc: the bike is the simulation crate's stand-in and the camera `Race Cam 1`'s numbers.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[allow(dead_code)]
 #[path = "../src/vehicle.rs"]
 mod vehicle;

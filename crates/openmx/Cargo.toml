@@ -53,6 +53,18 @@ png = "0.18"
 ggrs = { path = "../../third_party/ggrs", features = ["wasm-bindgen"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
+# The desktop's whole front end and ride run in the page (P196), so it takes the shell's own: the
+# renderer's GPU half (its types; the page draws in software until P48 puts it on a canvas), the
+# menus' type and the replaced textures' PNGs; and wasm-bindgen's futures, which step the shell's
+# loop a frame at a time off the page's clock.
+game-render = { path = "../game-render", features = ["gpu"] }
+ab_glyph = "0.2"
+png = "0.18"
+wasm-bindgen-futures = "0.4"
+# The clock (`src/clock.rs`), which wasm32's std has none of.
+web-time = "1"
+# `src/main.rs` waits on its few futures with it on both builds (P196).
+pollster = "1"
 
 [dev-dependencies]
 # tests/netplay_browser.rs's local relay: iroh's own relay server, as crates/openmx-net's tests run it

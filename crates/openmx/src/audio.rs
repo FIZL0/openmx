@@ -1265,7 +1265,7 @@ impl Music {
         if self.wait {
             let _ = tx.send(source.open(&want));
         } else {
-            std::thread::spawn(move || {
+            crate::thread::spawn(move || {
                 let _ = tx.send(source.open(&want));
             });
         }
@@ -3391,7 +3391,16 @@ pub struct Output {
 }
 
 impl Output {
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     pub fn start(mixer: Arc<Mutex<Mixer>>) -> Result<Output, String> {
+        // The browser (P196): no players and no thread; the page's WebAudio, kept fed a frame at a
+        // time ([`crate::web_host::next_frame`]) for as long as the mixer lives.
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::web_host::sound_from(Arc::downgrade(&mixer));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            return Ok(Output { stop, thread: None, player: "the page's WebAudio".into() });
+        }
         let mut child = None;
         for (name, args) in PLAYERS {
             let spawned = std::process::Command::new(name)

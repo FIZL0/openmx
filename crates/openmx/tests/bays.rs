@@ -11,6 +11,10 @@
 //! `src/vehicle.rs`, `src/overlay.rs` and what they lean on are compiled in by path, the way
 //! `tests/overlay.rs` takes them.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/menu.rs"]
 #[allow(dead_code)]
 mod menu;

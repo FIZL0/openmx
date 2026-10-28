@@ -7,6 +7,13 @@
 //! one cancelled goes back to the pick with nothing left running, and a ride built on the worker is
 //! the plain build's ride, hash for hash.
 
+// the browser's own clock, threads and files, which are std's here (P196)
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/loading.rs"]
 #[allow(dead_code)]
 mod loading;

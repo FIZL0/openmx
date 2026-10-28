@@ -179,7 +179,7 @@ impl Network {
 
     /// `online.txt` as it stands (the defaults when there is none).
     pub fn online(&self) -> Online {
-        Online::parse(&std::fs::read_to_string(&self.file).unwrap_or_default())
+        Online::parse(&crate::files::read_to_string(&self.file).unwrap_or_default())
     }
 
     /// The configuration the network starts with: `online.txt`'s, under the player's name, and with
@@ -231,7 +231,7 @@ impl Network {
                 (false, Relay::Off) => Relay::N0,
                 (false, r) => r,
             };
-            if let Err(e) = std::fs::write(&self.file, o.text()) {
+            if let Err(e) = crate::files::write(&self.file, o.text()) {
                 menu.note = Some(format!("Could not save {}: {e}", self.file.display()));
             }
             // Started again with the new network the next time it is asked for.

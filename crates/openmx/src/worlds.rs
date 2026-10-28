@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use crate::clock::Instant;
 
 /// One tile or join of a world, as the world's file and its own files say.
 #[derive(Clone, Debug)]
@@ -972,8 +972,8 @@ impl GroundStream {
     pub fn start(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool) -> (GroundStream, Vec<(usize, GroundPiece)>) {
         let tiles: Vec<Tile> = w.pieces.iter().map(|p| p.tile.clone()).collect();
         let first: Vec<usize> = (0..tiles.len()).filter(|&i| all || nearest(&tiles[i], near) <= reach.load.0).collect();
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
-        let mut ready: Vec<(usize, Result<GroundPiece, String>)> = std::thread::scope(|scope| {
+        let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
+        let mut ready: Vec<(usize, Result<GroundPiece, String>)> = crate::thread::scope(|scope| {
             let jobs: Vec<_> = (0..threads)
                 .map(|t| {
                     let (first, pieces) = (&first, &w.pieces);
@@ -1229,8 +1229,8 @@ pub fn stand_in(w: &WorldMod, tiled: &Tiled, cells: u32) -> Result<game_render::
     }
     let mut owners: Vec<(usize, Vec<(usize, f32, f32)>)> = asks.into_iter().collect();
     owners.sort_by_key(|(i, _)| *i);
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(owners.len()).max(1);
-    let corners: Vec<(usize, Option<GroundVertexAt>)> = std::thread::scope(|scope| {
+    let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(owners.len()).max(1);
+    let corners: Vec<(usize, Option<GroundVertexAt>)> = crate::thread::scope(|scope| {
         let jobs: Vec<_> = (0..threads)
             .map(|t| {
                 let owners = &owners;
@@ -1442,8 +1442,8 @@ impl WorldMod {
             })
         };
         let maps = &self.pieces[..self.tile_count];
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(maps.len()).max(1);
-        let mut read: Vec<(usize, _)> = std::thread::scope(|scope| {
+        let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(maps.len()).max(1);
+        let mut read: Vec<(usize, _)> = crate::thread::scope(|scope| {
             let jobs: Vec<_> = (0..threads)
                 .map(|t| {
                     let read_one = &read_one;
