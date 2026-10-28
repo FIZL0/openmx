@@ -1766,3 +1766,175 @@ impl Race {
         View { position, look_at, fov }
     }
 }
+
+// --- the thrill camera (P157) ----------------------------------------------------------------------
+
+/// How fast the rider has to be going, the length of the target block's velocity in feet a second,
+/// for the other-camera command to bring the thrill camera up. The camera manager's press handler
+/// tests `> 3`: at 3 or slower the press does nothing.
+pub const THRILL_SPEED: f32 = 3.0;
+
+/// The field of view the thrill camera opens at, with the rider [`THRILL_NEAR`] or nearer.
+const THRILL_WIDE_FOV: f32 = 75.0;
+/// The field of view it closes to, with the rider [`THRILL_FAR`] or further.
+const THRILL_NARROW_FOV: f32 = 18.0;
+/// The two flat distances from the eye to the look-at the zoom runs between.
+const THRILL_FAR: f32 = 200.0;
+const THRILL_NEAR: f32 = 20.0;
+/// How far the spot keeps over the ground, and off a wall it was swept into. The race's setup
+/// passes the one number for both; the spot's own clearance is the larger of it and twice the near
+/// plane, which at the shell's 2.4 ft is still this.
+const THRILL_CLEARANCE: f32 = 5.0;
+/// How far over the target point the camera looks: the target block's `+0x24`, 3.0 in a riding
+/// state's RAM, which the camera copies when it is handed its target.
+const THRILL_LOOK_HEIGHT: f32 = 3.0;
+/// Vertical speed into lead: about a thirty-second of it, the time a jump at that climb takes to top
+/// out at the game's gravity.
+const THRILL_CLIMB_TIME: f32 = 0.0310559;
+/// A spot picked on the ground leads from a velocity at least this long.
+const THRILL_LEAST_SPEED: f32 = 30.0;
+
+/// The camera manager's other camera: a trackside camera the race camera hands the screen to while
+/// the other-camera command is held (`MXCameraThrill` over the engine's simple thrill camera).
+///
+/// It picks one spot when it comes up — ahead of the rider along the way it is going, a little back
+/// and off to one side, put on the ground over the dirt — and stays there: the eye does not move again
+/// until the command is let go and pressed again. It looks at the rider, three feet over the target
+/// point, and zooms as the rider goes away, from 75° of view with the rider within 20 ft of the spot
+/// to 18° at 200 ft and further.
+///
+/// Up in the air the spot is picked off the jump's takeoff rather than off the rider: the target
+/// block keeps the point and velocity of the first airborne frame ([`Thrill::watch`] keeps them
+/// here), and the spot goes out along that velocity a climb's worth, so the camera frames the jump.
+///
+/// The original keeps its eye in three lags (0.6 s) whose value it overwrites with the spot when it
+/// picks it, and whose target is the spot from then on, so the lags never move it; this keeps the
+/// spot. It is presentation: nothing here reaches the simulation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Thrill {
+    /// Where the eye is, once a spot is picked.
+    pub spot: Option<Vf>,
+    /// The jump's takeoff, point and velocity, as the target block keeps them.
+    pub takeoff: Option<(Vf, Vf)>,
+    /// Was the rider airborne last frame: the block keeps the takeoff on the first airborne frame.
+    pub airborne: bool,
+    /// The zoom ran out (the rider past [`THRILL_FAR`]). The original raises the same flag and no
+    /// reader of it was found; kept for the same reason.
+    pub expired: bool,
+}
+
+impl Thrill {
+    /// Is a target moving at `vel` fast enough to bring the camera up: the manager's test.
+    pub fn fast_enough(vel: Vf) -> bool {
+        let (x, y, z) = (F(vel.x()), F(vel.y()), F(vel.z()));
+        F(THRILL_SPEED) < (z * z + y * y + x * x).sqrt()
+    }
+
+    /// Once a frame, whatever has the screen: the target block's takeoff, kept on the first frame
+    /// the rider is airborne (`vehicle_camera_target`).
+    pub fn watch(&mut self, rider: &Ridden) {
+        if rider.airborne && !self.airborne {
+            self.takeoff = Some((rider.target.body_point, rider.target.vel));
+        }
+        self.airborne = rider.airborne;
+    }
+
+    /// Bring the camera up: pick the spot. `from` is where the screen's eye is now, the start of the
+    /// sweep that keeps a spot on the near side of a wall; `near_clip` the viewport's near plane;
+    /// `ceiling` the highest the ground lead's probe may go ([`Race::ceiling_for_fog`]'s rule, 200 on
+    /// a scene fogged past 1500 ft).
+    pub fn place(&mut self, rider: &Ridden, from: Vf, near_clip: F, ceiling: F, scene: &mut (impl Surface + Obstacles)) -> Vf {
+        let clearance = F(THRILL_CLEARANCE).max(near_clip * 2.0);
+        let spot = match (rider.airborne, self.takeoff) {
+            (true, Some((point, vel))) => Self::off_the_takeoff(point, vel, clearance, scene),
+            _ => Self::off_the_ground(rider.target.body_point, rider.target.vel, from, clearance, ceiling, scene),
+        };
+        self.spot = Some(spot);
+        self.expired = false;
+        spot
+    }
+
+    /// The spot on the ground: ahead along the velocity (stretched to at least 30 ft a second), by a
+    /// lead that grows with the climb and shrinks where the ground ahead rises over the rider, then
+    /// a fifth back and 0.45 to the side, swept from `from` and set on the ground.
+    fn off_the_ground(point: Vf, vel: Vf, from: Vf, clearance: F, ceiling: F, scene: &mut (impl Surface + Obstacles)) -> Vf {
+        let vy = F(vel.y());
+        let climb = vy.abs();
+        let lead = vy * THRILL_CLIMB_TIME * 1.5;
+        let mut lead = if F(1.5) < lead { lead } else { F(1.5) };
+        let reach = vy * THRILL_CLIMB_TIME * 2.0;
+        let reach = if F(3.0) < reach { reach } else { F(3.0) };
+        let (x, z) = (F(vel.x()), F(vel.z()));
+        let squared = z * z + vy * vy + x * x;
+        let vel = if squared < F(THRILL_LEAST_SPEED * THRILL_LEAST_SPEED) {
+            scale(vel, F(THRILL_LEAST_SPEED) / squared.sqrt())
+        } else {
+            vel
+        };
+        // How high the ground ahead stands, the probe a reach ahead along the flat velocity: kept
+        // under the ceiling and the clearance over the ground.
+        let probe = add3(point, scale(Vf::new(vel.x(), 0.0, vel.z(), vel.w()), reach));
+        let under = scene.on_surface(probe).y();
+        let mut probe_y = F(probe.y()).min(ceiling);
+        if probe_y - F(under) < F(THRILL_CLEARANCE) {
+            probe_y = F(under) + THRILL_CLEARANCE;
+        }
+        if F(5.0) < climb {
+            lead = lead + (F(point.y()) - probe_y) / climb * 0.5;
+        }
+        let mut spot = Self::lead_out(point, vel, lead);
+        // The sweep from the eye out to the spot: a wall in the way keeps the spot the clearance off
+        // it, out along its face.
+        if let Some(hit) = scene.nearest(from, spot) {
+            spot = add3(hit.point, scale(hit.normal, clearance));
+        }
+        let ground = F(scene.on_surface(spot).y());
+        let low = ground + clearance + 1.0;
+        let half = F(point.y()) - (F(point.y()) - ground) * 0.5;
+        spot[1] = if low < half { half } else { low }.0;
+        spot
+    }
+
+    /// The spot off a jump: out from the takeoff along its velocity a climb's worth, then a fifth
+    /// back and 0.45 to the side, and as high as the takeoff (with a tenth of the climb on a steep
+    /// one), less a foot — but never within the clearance and a foot of the ground.
+    fn off_the_takeoff(point: Vf, vel: Vf, clearance: F, scene: &mut impl Surface) -> Vf {
+        let vy = F(vel.y());
+        let lead = vy * THRILL_CLIMB_TIME * 1.5;
+        let mut spot = Self::lead_out(point, vel, lead);
+        let ground = F(scene.on_surface(spot).y());
+        let mut top = F(point.y());
+        if F(10.0) < vy {
+            top = top + vy * lead * 0.1;
+        }
+        let top = top - 1.0;
+        let low = ground + clearance + 1.0;
+        spot[1] = if low < top { top } else { low }.0;
+        spot
+    }
+
+    /// `point + vel * lead`, a fifth of `vel` back, and 0.45 of it turned a quarter to the side.
+    fn lead_out(point: Vf, vel: Vf, lead: F) -> Vf {
+        let side = scale(Vf::new(vel.z(), 0.0, -vel.x(), 1.0), F(0.45));
+        let back = scale(vel, F(-0.2));
+        let spot = add3(add3(add3(point, scale(vel, lead)), back), side);
+        Vf::new(spot.x(), spot.y(), spot.z(), 1.0)
+    }
+
+    /// One frame while it has the screen: the eye on the spot, the look-at three feet over the
+    /// target point, and the zoom from the flat distance between them.
+    pub fn frame(&mut self, rider: &Ridden) -> Option<View> {
+        let eye = self.spot?;
+        let p = rider.target.body_point;
+        let look_at = Vf::new(p.x(), (F(p.y()) + THRILL_LOOK_HEIGHT).0, p.z(), p.w());
+        let (dx, dz) = (F(eye.x()) - F(look_at.x()), F(eye.z()) - F(look_at.z()));
+        let away = (dz * dz + dx * dx).sqrt();
+        let narrow = F(THRILL_NARROW_FOV);
+        let mut fov = narrow + (F(THRILL_WIDE_FOV) - narrow) * ((F(THRILL_FAR) - away) / (F(THRILL_FAR) - THRILL_NEAR));
+        if fov < narrow {
+            self.expired = true;
+            fov = narrow;
+        }
+        Some(View { position: eye, look_at, fov: fov.min(THRILL_WIDE_FOV) })
+    }
+}
