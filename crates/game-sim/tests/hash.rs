@@ -529,7 +529,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // `Rider::bike_col`, not walked.
     // 11584 since S131: the knockable props (`Traffic::props`), walked as `props` only on a track
     // with any, so the leaves do not move.
+    // 11736 since P155: the freestyle event on a ride (`Sim::event`), walked as `event` only once a
+    // hold or a competition is on, so the leaves do not move; its zones and target are the map's,
+    // not walked.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11584, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11736, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

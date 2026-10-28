@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others, markers, home: _, traffic } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others, markers, home: _, traffic, event } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -117,11 +117,23 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         PROPS.put(&mut out);
         traffic.props.collections.put(&mut out);
     }
+    // The freestyle event (P155), once a rider has been in a stunt zone, behind its own tag; the
+    // zones and the target are the map's, kept local.
+    if !event.fresh() {
+        EVENT.put(&mut out);
+        event.holds.put(&mut out);
+        event.on.put(&mut out);
+        event.verdicts.put(&mut out);
+        event.shown.put(&mut out);
+    }
     out
 }
 
 /// What begins [`encode`]'s knockable props section.
 const PROPS: u64 = u64::from_le_bytes(*b"S131prop");
+
+/// What begins [`encode`]'s freestyle event section.
+const EVENT: u64 = u64::from_le_bytes(*b"P155evnt");
 
 /// What begins [`encode`]'s cars section.
 const CARS: u64 = u64::from_le_bytes(*b"S81cars\0");
@@ -148,8 +160,9 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let mut rider: crate::rider::Rider = Wire::take(&mut r)?;
     let mut plane: Option<crate::flight::Flight> = Wire::take(&mut r)?;
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
-    // No players' list ahead of any tagged section (S131: the props' tag was read as one).
-    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
+    // No players' list ahead of any tagged section (S131: the props' tag was read as one; P155: nor
+    // the event's).
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, EVENT].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
@@ -211,6 +224,14 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     } else if !traffic.props.is_empty() {
         return Err(format!("no props in the state, {} here", traffic.props.collections.len()));
     }
+    let mut event = crate::event::Event { zones: Arc::clone(&sim.event.zones), target: sim.event.target, ..Default::default() };
+    if r.bytes.get(r.at..r.at + 8) == Some(&EVENT.to_le_bytes()[..]) {
+        r.at += 8;
+        event.holds = Wire::take(&mut r)?;
+        event.on = Wire::take(&mut r)?;
+        event.verdicts = Wire::take(&mut r)?;
+        event.shown = Wire::take(&mut r)?;
+    }
     // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
     let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone()));
     if let Some((rays, bike)) = &probe {
@@ -270,6 +291,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         markers,
         home: Arc::clone(&sim.home),
         traffic,
+        event,
     };
     Ok(())
 }
@@ -637,6 +659,9 @@ wire!(crate::toys::Hint; at);
 wire!(crate::ghost::Ghost { clock, alpha, on });
 wire!(crate::foot_down::Feet { held, fade, weight });
 wire!(crate::rider::PutBack { placed, filled, held, wreck });
+wire!(crate::event::Seat { left, ridden, taking_part, out, paused, reached, warning, saved });
+wire!(crate::event::Competition { target, seats, limit, length, interval, elapsed, tally, counting, running, over, timed_out, ended, clock, leader, tie, heard });
+wire_enum!(crate::event::Verdict { Win, Lose, Tie });
 wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out });
 wire!(crate::score::Node { flags, id, points, base, rate, mult, extra, held, granularity });
 wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching, search });

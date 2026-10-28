@@ -39,7 +39,8 @@
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::score::Score;
-use ps2_float::{F, fpu};
+use ps2_float::{F, Vf, fpu};
+use std::sync::Arc;
 
 /// The countdown's length, seconds.
 pub const COUNTDOWN: F = F(3.33);
@@ -321,5 +322,180 @@ impl Competition {
         let s = &self.seats[k];
         card.shut = !self.running || !s.taking_part;
         card.out = s.out;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The event on a ride (P155)
+// ---------------------------------------------------------------------------------------------------
+
+/// How long the verdict stays up once the event is over, seconds, before the ride is a free ride
+/// again. The port's own: the original goes to its results menu here.
+pub const RESULTS: F = F(6.0);
+
+/// A stunt-competition start zone's trigger (V51's `[ASZ n]` of type `Stunt`): the original builds
+/// it as a box at the zone's `Position`, turned along its `LookVector`, half its `Scale` across and
+/// along and 30 feet up and down.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Zone {
+    /// `Position`'s `x`, `y` and `z`.
+    pub at: [F; 3],
+    /// `LookVector`'s `x` and `z`: the box's length runs this way.
+    pub look: [F; 2],
+    /// Half the box across (`Scale`'s `x`) and along (`Scale`'s `z`).
+    pub half: [F; 2],
+}
+
+/// The trigger box's half height, feet.
+pub const ZONE_HALF_HEIGHT: F = F(30.0);
+
+impl Zone {
+    /// A zone off `hit.dat`'s numbers: its position, its look and its full size across and along.
+    pub fn new(at: [f32; 3], look: [f32; 2], size: [f32; 2]) -> Zone {
+        Zone { at: at.map(F), look: look.map(F), half: size.map(|s| F(s) * F(0.5)) }
+    }
+
+    /// Whether the point `p` is in the box.
+    pub fn holds(&self, p: Vf) -> bool {
+        let (dx, dy, dz) = (F(p.x()) - self.at[0], F(p.y()) - self.at[1], F(p.z()) - self.at[2]);
+        let [lx, lz] = self.look;
+        let mut len = (lx * lx + lz * lz).sqrt();
+        let (lx, lz) = if len == F::ZERO {
+            len = F::ONE;
+            (F::ZERO, F::ONE)
+        } else {
+            (lx, lz)
+        };
+        let along = (dx * lx + dz * lz).abs();
+        let side = (dx * lz - dz * lx).abs();
+        dy.abs() <= ZONE_HALF_HEIGHT && along <= self.half[1] * len && side <= self.half[0] * len
+    }
+}
+
+/// How long Circle is held in a stunt zone to start the event, seconds: the HUD's "Hold to start".
+/// The port's own; the original asks on a start menu.
+pub const HOLD: F = F(1.0);
+
+/// The fastest a rider may go and still be asked, feet a second: the machine offer's 40 mph
+/// (the original's `freeride_near_machine` limit), the port's choice for the event's prompt too.
+pub const ASK_TOP_SPEED: F = F(58.667);
+
+/// One rider as the event's start reads them, at the top of a tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rider {
+    /// Where the bike is.
+    pub at: Vf,
+    /// Its speed along itself, feet a second.
+    pub speed: F,
+    /// On the bike and up: not down and not in a plane.
+    pub riding: bool,
+    /// Circle is held.
+    pub circle: bool,
+}
+
+/// The freestyle event as a ride carries it: the track's stunt zones and target, the start's hold,
+/// and the competition while one is on. Default — no zones — is a ride without the event, which
+/// steps, hashes and sends exactly as before ([`Event::fresh`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Event {
+    /// The track's stunt zones: a constant of the map, shared by every clone, never hashed or sent.
+    pub zones: Arc<Vec<Zone>>,
+    /// The track's target ([`target`]): a constant of the map like the zones.
+    pub target: i32,
+    /// Each player's Circle held in a zone so far, seconds; the event starts at [`HOLD`].
+    pub holds: Vec<F>,
+    /// The competition, from the tick a hold starts it until its results are taken down.
+    pub on: Option<Competition>,
+    /// Each seat's end once their time is out: the verdict and the points the profile adds.
+    pub verdicts: Vec<Option<(Verdict, i32)>>,
+    /// Seconds the verdict has been up since the competition ended.
+    pub shown: F,
+}
+
+impl Event {
+    /// The track's event: its stunt zones and its `hit.dat` target (0 if the file names none).
+    pub fn on_track(zones: Vec<Zone>, target: i32) -> Event {
+        Event { zones: Arc::new(zones), target, ..Event::default() }
+    }
+
+    /// Nothing has happened: nobody is holding to start and no competition is on. A fresh event is
+    /// not walked into the hash or put on the wire.
+    pub fn fresh(&self) -> bool {
+        self.on.is_none() && self.holds.iter().all(|&h| h == F::ZERO)
+    }
+
+    /// Whether a rider is asked to start the event: no event on, and up on the bike in a stunt zone
+    /// at no more than [`ASK_TOP_SPEED`].
+    pub fn asks(&self, r: &Rider) -> bool {
+        self.on.is_none() && r.riding && r.speed.abs() <= ASK_TOP_SPEED && self.zones.iter().any(|z| z.holds(r.at))
+    }
+
+    /// How far player `i`'s hold is, 0 to 1.
+    pub fn held(&self, i: usize) -> F {
+        self.holds.get(i).map_or(F::ZERO, |&h| (h * F(1.0 / HOLD.0)).min(F::ONE))
+    }
+
+    /// **A tick of the event**, before the riders' own (`riders` and `cards` in player order, the
+    /// riders where the last tick left them): a rider asked ([`Event::asks`]) and holding Circle for
+    /// [`HOLD`] starts the competition with every rider in it, which then runs its tick
+    /// ([`Competition::tick`]); a card that runs out gets its end ([`Competition::finish`]); and
+    /// [`RESULTS`] after the end the competition is taken down and every card opens again.
+    pub fn tick(&mut self, dt: F, riders: &[Rider], cards: &mut [&mut Score]) {
+        if self.zones.is_empty() && self.on.is_none() {
+            return;
+        }
+        // A player who left the session takes the event with them.
+        if self.on.as_ref().is_some_and(|c| c.seats.len() > cards.len()) {
+            self.close(cards);
+        }
+        let holds: Vec<F> = riders
+            .iter()
+            .enumerate()
+            .map(|(i, r)| match self.asks(r) && r.circle {
+                true => self.holds.get(i).copied().unwrap_or(F::ZERO) + dt,
+                false => F::ZERO,
+            })
+            .collect();
+        let start = holds.iter().any(|&h| HOLD <= h);
+        self.holds = if start { vec![F::ZERO; holds.len()] } else { holds };
+        if start {
+            let mut c = Competition::new(self.target);
+            for card in cards.iter_mut() {
+                c.join(card);
+            }
+            c.start();
+            self.verdicts = vec![None; c.seats.len()];
+            self.shown = F::ZERO;
+            self.on = Some(c);
+        }
+        let Some(c) = self.on.as_mut() else { return };
+        // A player who joined since rides outside it.
+        let n = c.seats.len();
+        let cards = &mut cards[..n];
+        c.tick(dt, cards);
+        for k in 0..n {
+            if c.seats[k].out && self.verdicts[k].is_none() {
+                self.verdicts[k] = Some(c.finish(k, cards[k]));
+            }
+        }
+        if c.ended {
+            if RESULTS <= self.shown {
+                self.close(cards);
+            } else {
+                self.shown = self.shown + dt;
+            }
+        }
+    }
+
+    /// The competition taken down: every card it held opens again.
+    fn close(&mut self, cards: &mut [&mut Score]) {
+        if let Some(c) = self.on.take() {
+            for card in cards.iter_mut().take(c.seats.len()) {
+                card.shut = false;
+                card.out = false;
+            }
+        }
+        self.verdicts.clear();
+        self.shown = F::ZERO;
     }
 }
