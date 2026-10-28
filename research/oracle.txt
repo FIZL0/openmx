@@ -6481,3 +6481,17 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # with one mesh, a mesh and its nearest, or one mesh twice through sphere_collider_pair, bit for bit
 # (12,465 hits; the second took 64); 10,000 bone_collision_push_out with the contact's other a scene
 # mesh equal the port's against STILL (0,0,0,1), bit for bit.
+# S171 — the wreck bike's world and the put-back's: crates/game-sim/src/wreck_bike.rs (tick_among on
+# Scene::flown) and back_search.rs (gather on world_flown), proved in crates/game-sim/tests/traffic.rs
+# on context/states/s171-thrown.eeMemory.bin (s3 only: s89-along with the bike teleported 40 ft ahead
+# of car 0 at 0x00d525f0, thrown at ~300 ft/s, saved ~5 s on) and biplane.p2m2's state.
+#   Four collision objects with the wreck bike's collidable (+0x1f8 -> +0x84 0x9a058): 0x008017c0,
+#   0x015ad9d0, 0x018c1bd0 with their probes unplaced (+0x04 0), and 0x01970060 placed, touching and
+#   on the ground. Its ray probe 0x0196f220 (placement 0x0100b950) and sweep probe 0x0196fe10
+#   (0x00ee5d10) are both in table 0x00d999c0, moving list 0x00d9a660: the address biplane.p2m2's plane
+#   ray probe reaches too. Its first 23 slots: the 21 path cars in free06.toy's order, then two ctruck
+#   driving toys, all category 0x48, flags 0x05 (marks masked), kind-2 mover at +0x7c, owner 0; then
+#   0x42058 / 8 / 8 (another object and its two probes), the bikes' 0x9a048 / 0x18008 / 8 triples and
+#   the rest. The wreck bike's probes are not in the list. Leave-out lists (mode 1): ray [0x9a058, 0x8,
+#   0x9a048, 0x18000], sweep [0x9a058, 0x8]; category lists: ray empty, sweep [0x8, 0x800], as S76's
+#   free09 ones. None of them leaves out 0x48.
