@@ -265,6 +265,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     rider.clips = here.clips;
     rider.wreckage = here.wreckage;
     rider.ragdoll_kit = here.ragdoll_kit.clone();
+    rider.wreck_kit = here.wreck_kit.clone();
     rider.bike_col = here.bike_col.clone();
     rider.fifty = here.fifty;
     rider.skeleton = here.skeleton.clone();
@@ -280,6 +281,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.clips = p.rider.clips;
         r.wreckage = p.rider.wreckage;
         r.ragdoll_kit = p.rider.ragdoll_kit.clone();
+        r.wreck_kit = p.rider.wreck_kit.clone();
         r.bike_col = p.rider.bike_col.clone();
         r.fifty = p.rider.fifty;
         r.skeleton = p.rider.skeleton.clone();
@@ -574,6 +576,8 @@ impl Wire for Rider {
             riding,
             holds: _,
             wreck_sounds,
+            wreck_kit: _,
+            wreck_clocks,
             animation,
             body,
             body_numbers: _,
@@ -604,6 +608,7 @@ impl Wire for Rider {
         drawn.put(out);
         riding.put(out);
         wreck_sounds.put(out);
+        wreck_clocks.put(out);
         animation.put(out);
         body.put(out);
         body_rates.put(out);
@@ -641,6 +646,8 @@ impl Wire for Rider {
             riding: Wire::take(r)?,
             holds: None,
             wreck_sounds: Wire::take(r)?,
+            wreck_kit: Default::default(),
+            wreck_clocks: Wire::take(r)?,
             animation: Wire::take(r)?,
             body: Wire::take(r)?,
             body_numbers: Default::default(),
@@ -776,6 +783,7 @@ wire!(crate::ragdoll_contact::Contact { touched, ground, scene, swept, point, no
 wire!(crate::rider_anim::Thrown { throw, touching, vel, clearance, launch });
 wire!(crate::wreck_sound::Emitter { crash, fall });
 wire!(crate::wreck_sound::List { count, last });
+wire!(crate::wreck_sound::Clocks { voice, clank, clank_last, was });
 wire!(crate::rider_anim::Clocked { played, snapshot });
 
 /// The plane by hand: its ray probe's geometry (S48's) is a constant of the disc, kept local like the

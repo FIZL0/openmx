@@ -444,8 +444,10 @@ const RIDERS_DIGEST: u64 = 0x1d4ac8eeb11bb86c;
 /// four riders).
 /// 13495 since P158: each rider's steer/throttle locks and start-line latch (four bytes) and its
 /// card's start-gate penalty (four), all clear (four riders).
-const RIDERS_WIRE_DIGEST: u64 = 0x921ec0485045af19;
-const RIDERS_WIRE_LEN: usize = 13499;
+/// 13563 since S173: each rider's wreck emitters' clocks, the clank's last pick and the body's speed
+/// the tick before (sixteen bytes, four riders), all idle.
+const RIDERS_WIRE_DIGEST: u64 = 0xc165e275ee489431;
+const RIDERS_WIRE_LEN: usize = 13563;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed
