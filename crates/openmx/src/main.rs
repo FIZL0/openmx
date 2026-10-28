@@ -4794,7 +4794,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The bike's tire tracks (V40): the track's `TireTrack` entries and their tread, drawn as glows
     // after the portals' pictures, one set of strips a seat.
     let tread = load_tire_tracks(&archives);
-    let glow_list: Vec<game_render::pst::Texture> = portal_art
+    let mut glow_list: Vec<game_render::pst::Texture> = portal_art
         .as_ref()
         .map(|a| a.textures.clone())
         .unwrap_or_default()
@@ -4802,6 +4802,21 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         .chain(tread.as_ref().map(|(_, t)| t.clone()))
         .collect();
     let tread_texture = tread.as_ref().map(|_| glow_list.len() - 1);
+    // The sun's flares (V72): the `.toy`'s list and each one's picture, after the tread among the
+    // glows' pictures. A world mod's tiles have none of their own.
+    let sun_flares: Vec<(game_render::sun_flare::SunFlare, usize)> = match &world_mod {
+        None => load_sun_flares(&archives, &stem)
+            .into_iter()
+            .map(|(flare, picture)| {
+                glow_list.push(picture);
+                (flare, glow_list.len() - 1)
+            })
+            .collect(),
+        Some(_) => Vec::new(),
+    };
+    // Each view's share of each flare's sample rays that reach the sky, and the simulated frame it
+    // was asked on.
+    let mut flare_sky: std::collections::HashMap<(usize, usize), (u64, f32)> = std::collections::HashMap::new();
     let mut tire_marks: Vec<tire_tracks::Tracks> = Vec::new();
     // The GPU's copy of its pictures, uploaded with the first frame's glows.
     let mut glow_textures = (!glow_list.is_empty()).then(|| glow_list.clone());
@@ -7144,6 +7159,32 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 view.insert(0, marks.clone());
             }
         }
+        // The sun's flares (V72), over everything else the views lay, each by its own view's camera
+        // and at the share of its sample rays that reach the sky.
+        if !sun_flares.is_empty() {
+            glows.resize_with(world.seats.len(), Vec::new);
+            for (v, view) in glows.iter_mut().enumerate() {
+                let (Some(camera), Some(at)) = (cameras.get(v), rects.get(v)) else { continue };
+                for (flare, texture) in &sun_flares {
+                    if !flare.in_view(camera, at.w, at.h) {
+                        continue;
+                    }
+                    // Asked again once a simulated frame, not every picture: the ground query is
+                    // the simulation's, and a few hundred of them cost a millisecond.
+                    let key = (v, *texture);
+                    let sky = match flare_sky.get(&key) {
+                        Some(&(tick, sky)) if tick == pacer.ticks() => sky,
+                        _ => {
+                            let rays = flare.sample_rays(camera);
+                            let sky = game_render::sun_flare::sky_share(camera.eye, &rays, camera.far, |x, _, z| portal_ground(&mut world.place, x, 1.0e4, z));
+                            flare_sky.insert(key, (pacer.ticks(), sky));
+                            sky
+                        }
+                    };
+                    view.extend(flare.glow(camera, at.w, at.h, sky, *texture));
+                }
+            }
+        }
 
         // The pictures, one a view (V22), each drawn by its own player's camera into a frame of its
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
@@ -8656,6 +8697,36 @@ fn toy_node(animated: &game_render::animated_toy::Animated, sim: &game_sim::toys
     let k = animated.names.iter().position(|n| n.eq_ignore_ascii_case(toy))?;
     let j = animated.bones[k].iter().position(|b| b.eq_ignore_ascii_case(node))?;
     Some(palette(sim, k, 1.0).get(j)?.mul(place(sim, k)))
+}
+
+/// The track's sun flares (V72), each with its picture, out of the track's archives. Says what it
+/// draws and what it cannot.
+fn load_sun_flares(archives: &[Res], track: &str) -> Vec<(game_render::sun_flare::SunFlare, game_render::pst::Texture)> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let Some(toy) = read(&format!("{track}.toy")) else {
+        println!("track: no sun flares: no {track}.toy");
+        return Vec::new();
+    };
+    let flares = game_render::sun_flare::flares(&ini::text(&toy));
+    if flares.is_empty() {
+        println!("track: no sun flares");
+    }
+    flares
+        .into_iter()
+        .filter_map(|flare| {
+            let name = format!("{}.pst", flare.texture.to_ascii_lowercase());
+            match read(&name).map(|d| game_render::pst::Texture::parse(&d)) {
+                Some(Ok(picture)) => {
+                    println!("track: sun flare: {} ({} px at {})", flare.texture, flare.screen_size, flare.alpha);
+                    Some((flare, picture))
+                }
+                _ => {
+                    println!("track: sun flare: {} has no picture, not drawn", flare.texture);
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// What the bike's particles read off one rider this frame (P74), as the original's manager reads

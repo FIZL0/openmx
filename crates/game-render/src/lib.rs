@@ -63,6 +63,7 @@ pub mod scene;
 pub mod skin;
 pub mod sky;
 pub mod splat;
+pub mod sun_flare;
 pub mod tally;
 pub mod terrain;
 pub mod texhash;

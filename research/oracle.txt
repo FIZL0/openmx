@@ -6010,3 +6010,16 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # +0x1e0 the previous one. A scan of boot.elf for loads at +0x1e0..+0x21c off a collidable in the
 # contact code (the ray/sweep pairs, collide_against_search's callees) found no reader: the contact
 # uses the current +0x120. Not traced live.
+# --- V72: the .toy's sun flares ---------------------------------------------------------------------
+# Reader: `./kit fn 0x002887b0` (the [SunFlares] list: NumberOfSunFlares, then SunFlare1..n). Keys and
+# defaults: TextureMap, RetrieveMaterial ("flarezretrieve"), Saturation, MinScale 4, MaxScale 4, Width/
+# Height 128, VertexColor 128,128,128, LightDirection (else TargetPosition - Position, normalised),
+# useToyFlareSettings 1, then occlusionSampleSize 16, flareColor 128x4 (0x00420f40), flareAlpha 40,
+# flareScreenSize 350 into the OcclusionFlare filter +0x178/+0x180..188/+0x18c/+0x194. The disc writes
+# FlareRGBA, never flareColor. Per-zone SaturationMin/MaxColor: 0x001ccef0.
+# The flare object (sunflare.cpp): ctor 0x001cc8c0, vtable 0x004512d0, init 0x001ccaf0 (+0x38 MinScale,
+# +0x3c a constant 4, MaxScale unread, dir at +0x50). Update 0x001ccf40: point = camera - dir*20
+# (0x004206d0), +0x98 in-frustum, screen point +0x90/+0x94, +0x40 = 1 - r/400 facing it. Draw 0x001cd240
+# -> 0x00220470 queues the z-sample occlusion box, 0x00220670 draws a 2*flareScreenSize px sprite on the
+# sun's point, alpha flareAlpha x in-frustum. PC (MX vs ATV) SunFlare vf16/vf18 at 004c54f0/004c56f0:
+# 1 - r*0.0025, saturation 0.25*occlusion + 0.75*centredness (guide only).
