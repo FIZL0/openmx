@@ -6416,7 +6416,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         if simulated {
             traffic_time += f64::from(dt.0);
-            let riders: Vec<V3> = world.seats.iter().map(|s| s.sim.rider.ride.position()).map(|p| V3 { x: p.x(), y: p.y(), z: p.z() }).collect();
+            let riders: Vec<game_render::creature::Rays> = world.seats.iter().map(|s| creature_rays(&s.sim.rider)).collect();
             creatures.step(dt.0, &riders);
         }
         // The preload meter's movie runs a frame a tick, as the original's HUD does (V53).
@@ -8758,6 +8758,23 @@ fn load_track_fx(archives: &[Res], track: &str) -> Result<(particles::TrackFx, g
         println!("track: particles: {name} ({why}) not run");
     }
     Ok((fx, texture))
+}
+
+/// What of a rider strikes a creature trigger (V75): the bike's body rays at its chassis, as the
+/// original's collision pass meets the trigger's box; a bike with no collision files is its rider's
+/// position.
+fn creature_rays(r: &game_sim::rider::Rider) -> game_render::creature::Rays {
+    let Some(col) = r.bike_col.as_deref() else {
+        let p = r.ride.position();
+        return game_render::creature::Rays::at(V3 { x: p.x(), y: p.y(), z: p.z() });
+    };
+    let m = r.ride.transform().0;
+    let at = |c: Vf| V3 {
+        x: m[3].x() + m[0].x() * c.x() + m[1].x() * c.y() + m[2].x() * c.z(),
+        y: m[3].y() + m[0].y() * c.x() + m[1].y() * c.y() + m[2].y() * c.z(),
+        z: m[3].z() + m[0].z() * c.x() + m[1].z() * c.y() + m[2].z() * c.z(),
+    };
+    game_render::creature::Rays(col.rays.segments.iter().map(|s| [at(s.from), at(s.to)]).collect())
 }
 
 /// A track toy's node in the world (V71): the animated toy named `toy`'s joint named `node` at its

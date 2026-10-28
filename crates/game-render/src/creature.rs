@@ -2,7 +2,7 @@
 //!
 //! Both are drawn only — nothing in the ride touches them — but the birds answer the rider: a
 //! `[TriggerN]` box with a `ScareBirds` action sends the perched birds near it up their take-off
-//! splines. So this module is stepped by the simulation's ticks with the riders' positions
+//! splines. So this module is stepped by the simulation's ticks with each rider's body rays
 //! ([`Creatures::step`]), not by frames, and two runs of the same ride see the same birds.
 //!
 //! **Splines.** `[BirdSplines]`, then `[BirdSplineN]`: a `VUE` file of nodes, `LoopSequence` (default
@@ -47,6 +47,7 @@ use crate::rider::MotionSet;
 use crate::skin::{Clip, Pose, Skeleton};
 use crate::toy::upright;
 use game_sim::rng::Rng;
+use ps2_float::{Vf, fpu};
 
 /// The original's `rand()` scale, `2⁻³¹` as the single it multiplies by.
 const UNIT: f32 = 4.656_613e-10;
@@ -318,12 +319,27 @@ pub struct Scare {
     pub delay: f32,
 }
 
+/// What of one rider touches a trigger: the bike's body rays (`bikem.col`, the eleven segments
+/// from the seat out) at the chassis, in world space. The original's trigger is struck through
+/// the collision pass, and of a riding bike's probes only these rays reach it: the sweep is a
+/// sphere, whose pair test has no case for a box, and the second ray probe ignores the trigger
+/// category. Not the rider's position, which is a point the collision pass never tests.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Rays(pub Vec<[V3; 2]>);
+
+impl Rays {
+    /// A single point, for a rider with no body rays.
+    pub fn at(p: V3) -> Rays {
+        Rays(vec![[p, p]])
+    }
+}
+
 /// One `[TriggerN]` with the actions this module answers to.
 #[derive(Clone, Debug)]
 pub struct Trigger {
     pub name: String,
     pub at: V3,
-    /// `Box`: half the box along its right, up and look.
+    /// `Box`: half the box along its right, up and look (the shape keeps it as its half extents).
     pub half: V3,
     /// `Radius`, which makes it a sphere instead.
     pub radius: Option<f32>,
@@ -338,27 +354,85 @@ pub struct Trigger {
 }
 
 impl Trigger {
-    /// Whether a point is inside.
+    /// Whether a point is inside: a segment of no length.
     pub fn holds(&self, p: V3) -> bool {
-        let d = p.sub(self.at);
+        self.struck(p, p)
+    }
+
+    /// Whether the segment `a`–`b` touches the shape. For a box this is the original's
+    /// segment-against-box test, in the box's own frame: the segment's midpoint `m` and half
+    /// length `d`, apart on one of the box's axes (`|m| > half + |d|`) or on one of the three
+    /// axes across the segment, and they miss; the edges count as touching.
+    pub fn struck(&self, a: V3, b: V3) -> bool {
+        let local = |p: V3| {
+            let d = p.sub(self.at);
+            v3(d.dot(self.right), d.dot(self.up), d.dot(self.look))
+        };
         match self.radius {
-            Some(r) => d.len() < r,
+            Some(r) => segment_point_distance(a, b, self.at) < r,
             None => {
-                d.dot(self.right).abs() <= self.half.x
-                    && d.dot(self.up).abs() <= self.half.y
-                    && d.dot(self.look).abs() <= self.half.z
+                let (a, b, h) = (local(a), local(b), self.half);
+                let vf = |v: V3| Vf::new(v.x, v.y, v.z, 1.0);
+                segment_touches_box(Vf::ZERO, vf(h), vf(a), vf(b), &BOX_SPACE)
             }
         }
     }
 }
 
+/// The box test's segment transform when the points are already in the box's frame.
+const BOX_SPACE: [Vf; 4] = [
+    Vf::new(1.0, 0.0, 0.0, 0.0),
+    Vf::new(0.0, 1.0, 0.0, 0.0),
+    Vf::new(0.0, 0.0, 1.0, 0.0),
+    Vf::new(0.0, 0.0, 0.0, 1.0),
+];
+
+/// The engine's segment-against-box test, the leaf of a ray tree against a box shape: the segment
+/// `a`–`b` through `m` (rows right, up, look, origin, summed origin first), then about the box's
+/// `centre` with half extents `half`. Its midpoint `m` and half length `d`: apart on a box axis
+/// (`|m| - half - |d| > 0`) or on one of the three axes across the segment, and they miss; touching
+/// counts. The VU's sums and the FPU's accumulator, as the original runs them.
+pub fn segment_touches_box(centre: Vf, half: Vf, a: Vf, b: Vf, m: &[Vf; 4]) -> bool {
+    let through = |p: Vf| {
+        let acc = m[3].add(Vf::ZERO);
+        let acc = Vf::madd(acc, m[0], Vf::splat(p.x()));
+        let acc = Vf::madd(acc, m[1], Vf::splat(p.y()));
+        Vf::madd(acc, m[2], Vf::splat(p.z()))
+    };
+    let (a, b) = (through(a).sub(centre), through(b).sub(centre));
+    let mid = a.add(b).mul(Vf::splat(0.5));
+    let d = mid.sub(a);
+    let abs = |v: Vf| Vf::from_bits(v.to_bits().map(|x| x & 0x7fff_ffff));
+    let (ad, am) = (abs(d), abs(mid));
+    let apart = am.sub(half).sub(ad);
+    if apart.x() > 0.0 || apart.y() > 0.0 || apart.z() > 0.0 {
+        return false;
+    }
+    let (h, (mx, my, mz), (dx, dy, dz)) = (half, (mid.x(), mid.y(), mid.z()), (d.x(), d.y(), d.z()));
+    let across = |m1: f32, d1: f32, m2: f32, d2: f32| fpu::abs(fpu::msub(fpu::mula(m1, d1), m2, d2));
+    let reach = |h1: f32, a1: f32, h2: f32, a2: f32| fpu::madd(fpu::mula(h1, a1), h2, a2);
+    across(my, dz, mz, dy) <= reach(h.y(), ad.z(), h.z(), ad.y())
+        && across(mx, dz, mz, dx) <= reach(h.x(), ad.z(), h.z(), ad.x())
+        && across(mx, dy, my, dx) <= reach(h.x(), ad.y(), h.y(), ad.x())
+}
+
+/// How near the segment `a`–`b` comes to `p`.
+fn segment_point_distance(a: V3, b: V3, p: V3) -> f32 {
+    let ab = b.sub(a);
+    let len = ab.dot(ab);
+    let t = if len > 0.0 { (p.sub(a).dot(ab) / len).clamp(0.0, 1.0) } else { 0.0 };
+    p.sub(a.add(ab.scale(t))).len()
+}
+
 fn trigger(s: &Section, actions: &[Section], n: usize) -> Trigger {
     let vec = |k: &str, d: V3| s.numbers(k).filter(|v| v.len() >= 3).map_or(d, |v| v3(v[0], v[1], v[2]));
-    // The box's frame as the original builds a placed shape: right is up × look, and up is made
-    // square to both.
+    // The box's frame as the trigger reader builds it (its basis call with orthogonalising off):
+    // up and look each normalised and kept as they are, right their cross. Every bird trigger on
+    // the disc has the two square to each other, so this frame is a rotation and its transpose
+    // takes a point into the box.
     let look = vec("LookVector", v3(0.0, 0.0, 1.0)).norm();
-    let right = vec("UpVector", v3(0.0, 1.0, 0.0)).cross(look).norm();
-    let up = look.cross(right);
+    let up = vec("UpVector", v3(0.0, 1.0, 0.0)).norm();
+    let right = up.cross(look);
     let count = s.number("NumberOfActions").unwrap_or(0.0) as usize;
     let mut scares = Vec::new();
     for a in 1..=count {
@@ -675,15 +749,16 @@ impl Creatures {
         out
     }
 
-    /// One tick: the triggers the riders are in, then every bird, then every toy.
-    pub fn step(&mut self, dt: f32, riders: &[V3]) {
+    /// One tick: the triggers the riders' body rays touch (each rider a list of world-space
+    /// segments, [`Rays::at`] for a bare point), then every bird, then every toy.
+    pub fn step(&mut self, dt: f32, riders: &[Rays]) {
         self.last_dt = dt;
         for b in &mut self.birds {
             b.before = b.pos;
         }
         for t in 0..self.triggers.len() {
             let tr = &self.triggers[t];
-            if !tr.enabled || tr.one_time && tr.fired || !riders.iter().any(|&p| tr.holds(p)) {
+            if !tr.enabled || tr.one_time && tr.fired || !riders.iter().any(|r| r.0.iter().any(|&[a, b]| tr.struck(a, b))) {
                 continue;
             }
             if tr.percent != 100 && tr.percent < (self.rng.rand() as f32 * UNIT * 100.0) as i32 + 1 {
