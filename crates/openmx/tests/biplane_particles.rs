@@ -222,22 +222,28 @@ fn the_wreck_dust_comes_off_the_contacts() {
         object_contacts: objects,
         ..PlaneFrame::default()
     };
-    // The wreck tick: the hull on the ground at 40 ft/s. A puff at once, with no frame before it:
-    // the contact's speed is the body's.
+    // The wreck tick: the hull on the ground at 40 ft/s. The tick the entry switches on, its first
+    // contact only takes the point (P153: the original's emitter, just switched on, emits nothing on
+    // its first run). 30 a second for a 30th carries exactly 1, and the original only lets go of a
+    // carry over 1: the tick after carries 2 and puffs twice, the contact's speed the body's.
     let mut fx = only(fx(), "Wreck Dust");
     let hit = v3(10.0, 5.0, -3.0);
-    fx.step(&ground(v3(40.0, -10.0, 0.0), vec![hit], vec![]), DT);
-    assert_eq!(fx.particles.len(), 1, "30 a second for a 30th");
-    let p = &fx.particles[0];
+    for n in [0, 0, 2] {
+        fx.step(&ground(v3(40.0, -10.0, 0.0), vec![hit], vec![]), DT);
+        assert_eq!(fx.particles.len(), n, "30 a second for a 30th");
+    }
+    // Two let go over the frame's path: the newest at the contact.
+    let p = fx.particles.last().unwrap();
     assert!((p.at.y - 5.5).abs() < 1e-4, "half a foot up: {:?}", p.at);
     assert!(p.at.sub(v3(10.0, 5.5, -3.0)).len() < 1e-4, "{:?}", p.at);
     assert!((p.vel.x - 40.0).abs() <= 1.0 && (p.vel.y - (6.0 - 10.0)).abs() <= 1.0, "the body's velocity on top: {:?}", p.vel);
-    // Two contacts, two emitters: each carries its own.
+    // Two contacts, one emitter run for each in turn (P153), sharing one carry: 59 runs after the
+    // first, which only takes the point, and the last 1 of them still carried, not over 1.
     let mut fx = only(self::fx(), "Wreck Dust");
     for _ in 0..30 {
         fx.step(&ground(v3(40.0, 0.0, 0.0), vec![hit, v3(0.0, 0.0, 0.0)], vec![]), DT);
     }
-    assert_eq!(fx.particles.len(), 60);
+    assert_eq!(fx.particles.len(), 58);
     // Slower than its gate, touching nothing, or touching something that is not the ground: none.
     for frame in [
         ground(v3(1.0, 0.0, 0.0), vec![hit], vec![]),
@@ -399,7 +405,10 @@ fn the_discs_biplane_particles() {
     let before = fx.particles.len();
     fx.step(&PlaneFrame { nodes: at(30.0 * 40.0 * DT), airspeed: 40.0, wrecked: true, ..PlaneFrame::default() }, DT);
     assert!(fx.particles.len() <= before, "the wreck tick makes no smoke");
-    fx.step(&PlaneFrame { wrecked: true, vel: v3(0.0, -60.0, 50.0), ground_contacts: vec![v3(0.0, 0.0, 0.0)], ..PlaneFrame::default() }, DT);
+    // Two ticks: the first only takes the point (P153).
+    for _ in 0..2 {
+        fx.step(&PlaneFrame { wrecked: true, vel: v3(0.0, -60.0, 50.0), ground_contacts: vec![v3(0.0, 0.0, 0.0)], ..PlaneFrame::default() }, DT);
+    }
     assert!(fx.counts().iter().any(|c| c.0 == "Vehicle Dust" && c.1 >= 1), "{:?}", fx.counts());
 
     // The wreck's chunks on flat ground: a third of a second of contacts at 15 ft/s and more, then
@@ -728,6 +737,8 @@ fn the_wind_is_added_to_the_start_velocity() {
         let mut fx = only(chunks("TRUE"), "Chunks");
         fx.wind = wind;
         let f = PlaneFrame { wrecked: true, vel: v3(0.0, 0.0, 20.0), ground_contacts: vec![v3(0.0, 50.0, 0.0)], ..PlaneFrame::default() };
+        // The tick it switches on only takes the point (P153).
+        fx.step(&f, DT);
         fx.step(&f, DT);
         fx.particles[0].vel
     };
@@ -773,9 +784,12 @@ fn the_collision_objects_contacts_feed_the_wreck_dust() {
     assert!(none.ground_contacts.is_empty() && none.object_contacts.is_empty());
 
     // Emitted: one puff a contact on the ground (30 a second for a 30th), none against an object or
-    // with nothing touched.
+    // with nothing touched. Over two ticks, as the tick it switches on only takes its first point
+    // (P153): one run, then two. The runs carry exactly 1 each and only a carry over 1 lets go, so
+    // the second tick's first run puffs twice.
     let count = |frame: &PlaneFrame| {
         let mut fx = only(fx(), "Wreck Dust");
+        fx.step(frame, DT);
         fx.step(frame, DT);
         fx.particles
     };
@@ -859,7 +873,8 @@ fn a_plane_flown_into_the_ground_puffs_where_it_hits() {
     eprintln!("touched {touched:?}, crashed {crashed:?}, first puff {puffed:?}, {} in the air", fx.particles.len());
     let touched = touched.expect("the collision object never found the ground");
     assert_eq!(crashed.map(|c| c >= touched), Some(true), "the plane did not crash on touching");
-    assert_eq!(puffed, Some(touched), "the dust is the contact's tick's");
+    // The tick it touches switches the entries on, and their first run only takes the point (P153).
+    assert_eq!(puffed, Some(touched + 1), "the dust is the tick after the contact's");
     let dust = fx.particles.iter().filter(|p| p.emitter == 0).count();
     let chunks = fx.particles.iter().filter(|p| p.emitter == 1).count();
     assert!(dust > 0 && chunks > 0, "dust {dust}, chunks {chunks}");
