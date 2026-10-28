@@ -336,7 +336,7 @@ fn the_same_switch_online_on_a_race_track() {
         let bike = sim.rider.ride.position();
         assert_eq!(vehicle::switch_lane(Kind::Biplane, Some(&template), sim, &mut world), Ok(Kind::Biplane));
         let f = sim.plane.as_ref().expect("the lane holds the plane");
-        assert_eq!((f.spawn.0.x(), f.spawn.0.z()), (bike.x(), bike.z()), "seat {i}'s plane is not on its player");
+        assert_eq!((f.spawn_origin().x(), f.spawn_origin().z()), (bike.x(), bike.z()), "seat {i}'s plane is not on its player");
         for _ in 0..60 {
             vehicle::fly_lane(sim, DT, wanted, &mut world);
         }

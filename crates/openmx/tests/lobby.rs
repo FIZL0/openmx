@@ -782,7 +782,7 @@ fn a_lobby_pick_of_the_plane_starts_its_seat_in_it_on_every_machine() {
     let flying = |on: &online::Online, d: usize| {
         let mut sim = game_sim::Sim::new(1);
         on.show(d, &mut sim, None);
-        sim.plane.map(|f| f.spawn.0)
+        sim.plane.map(|f| f.spawn_origin())
     };
     assert_eq!((flying(&ho, 0), flying(&ho, 1)), (None, Some(bays[1].at)), "the host's start");
     assert_eq!((flying(&go, 0), flying(&go, 1)), (Some(bays[1].at), None), "the guest's start");
@@ -874,7 +874,7 @@ fn a_drop_in_whose_setup_picked_the_plane_rides_in_flying() {
     let flying = |on: &online::Online, d: usize| {
         let mut sim = game_sim::Sim::new(1);
         on.show(d, &mut sim, None);
-        sim.plane.map(|f| f.spawn.0)
+        sim.plane.map(|f| f.spawn_origin())
     };
     // shell seat 0 is this machine's own; the host's 1 is the guest's seat
     let end = Instant::now() + Duration::from_secs(30);

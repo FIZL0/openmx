@@ -366,6 +366,10 @@ pub struct Lot {
     /// ([`spots`]), or the same moved into a world ([`world_spots`]).
     file: Vec<Vec<Spawn>>,
     pub bays: Vec<Bay>,
+    /// How far over the ground the original stands its plane's body when it spawns it on a file
+    /// spot ([`flight::spawn_lift`] off the disc's model, S164), which every plane [`Lot::plane`]
+    /// stands in such a bay carries ([`Plane::lift`]); `None` without the model.
+    pub lift: Option<F>,
 }
 
 impl Lot {
@@ -377,7 +381,7 @@ impl Lot {
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new() };
+        let mut lot = Lot { file, bays: Vec::new(), lift: None };
         lot.resize(players, ground);
         lot
     }
@@ -423,6 +427,7 @@ impl Lot {
             None => Plane::parked(bay.spawn),
         };
         plane.livery = bay.livery;
+        plane.lift = self.lift.filter(|_| bay.original);
         Some(plane)
     }
 }
@@ -641,6 +646,11 @@ pub struct Plane {
     pub dpad: bool,
     /// Which of the disc's liveries it wears, an index into [`Machine::models`] ([`livery`]).
     pub livery: usize,
+    /// Its bay is one of `machine.txt`'s own spots, and this is the lift the original spawns its body
+    /// at over the ground there ([`Lot::lift`], S164): while it is put back at the bay its flight
+    /// stands where the original's does ([`flight::bay_spot`]), not with the model's origin on the
+    /// spot.
+    pub lift: Option<F>,
 }
 
 impl Plane {
@@ -660,6 +670,7 @@ impl Plane {
             round_stick: false,
             dpad: false,
             livery: 0,
+            lift: None,
         }
     }
 
@@ -681,9 +692,9 @@ impl Plane {
     /// The unwreck-and-reset: back to the spawn transform, at rest. The flight is put back by the
     /// next step ([`Flight::reset`]), which is the one with the `Sim`'s tables.
     pub fn reset(&mut self) {
-        let (flight, every_bank, round_stick, dpad, livery, bay) =
-            (self.flight.take(), self.every_bank, self.round_stick, self.dpad, self.livery, self.bay);
-        *self = Plane { flight, every_bank, round_stick, dpad, livery, bay, ..Plane::parked(self.spawn) };
+        let (flight, every_bank, round_stick, dpad, livery, bay, lift) =
+            (self.flight.take(), self.every_bank, self.round_stick, self.dpad, self.livery, self.bay, self.lift);
+        *self = Plane { flight, every_bank, round_stick, dpad, livery, bay, lift, ..Plane::parked(self.spawn) };
     }
 
     /// How high its origin stands over the ground under it when it is parked, feet. With its flight,
@@ -704,7 +715,18 @@ impl Plane {
     pub fn step(&mut self, sim: &Sim, dt: F, world: &mut dyn World) -> bool {
         let Some(f) = &mut self.flight else { return false };
         if !self.placed {
-            f.reset(self.spawn.at, self.spawn.facing, &sim.tables.ride.acos);
+            // At its file bay the original's spot: the body on the ground under the spot, lifted by
+            // the model's bounds (S164). Anywhere else, and with no ground under the bay, the
+            // model's origin on the spot.
+            let at = self.spawn.at;
+            let ground = self.lift.filter(|_| self.spawn == self.bay).and_then(|lift| {
+                let (on, _) = world.ground(Vf::new(at.x(), at.y() + PROBE, at.z(), 1.0));
+                (on.y() > NO_GROUND).then(|| flight::bay_spot(Vf::new(at.x(), on.y(), at.z(), 1.0), lift))
+            });
+            match ground {
+                Some(body) => f.reset_body(body, self.spawn.facing, &sim.tables.ride.acos),
+                None => f.reset(at, self.spawn.facing, &sim.tables.ride.acos),
+            }
             self.placed = true;
         }
         // The input slot runs before the frame. L1 and R1 are the chord under either scheme: P40's
@@ -764,7 +786,7 @@ impl Plane {
     /// A plane round a flight already placed (N17's online seat, whose flight is its [`Sim::plane`]):
     /// its spawn the flight's own, the transform off its body, flown on the pad.
     fn around(flight: Flight) -> Plane {
-        let (at, facing) = flight.spawn;
+        let (at, facing) = (flight.spawn_origin(), flight.spawn.1);
         let mut plane = Plane { placed: true, ..Plane::flying(Spawn { at, facing }, flight) };
         plane.pose();
         plane
@@ -953,7 +975,7 @@ fn arrive(plane: &mut Plane, spot: Spot, world: &mut dyn World, acos: &game_sim:
         }
     }
     if let Some(f) = &plane.flight {
-        plane.spawn = Spawn { at: f.spawn.0, facing: f.spawn.1 };
+        plane.spawn = Spawn { at: f.spawn_origin(), facing: f.spawn.1 };
     }
     plane.placed = true;
     plane.pose();
@@ -1090,7 +1112,7 @@ impl Garage {
         Some(match did? {
             Did::Teleported(Pick::Slot(_)) => {
                 plane.placed = true;
-                plane.spawn = Spawn { at: f.spawn.0, facing: f.spawn.1 };
+                plane.spawn = Spawn { at: f.spawn_origin(), facing: f.spawn.1 };
                 plane.pose();
                 did?
             }
@@ -1313,7 +1335,7 @@ pub fn switch_lane(to: Kind, template: Option<&Flight>, sim: &mut Sim, world: &m
         Some(f) => Plane::around(f),
         None => {
             let f = template.ok_or("this ride has no biplane to take")?.clone();
-            Plane::flying(Spawn { at: f.spawn.0, facing: f.spawn.1 }, f)
+            Plane::flying(Spawn { at: f.spawn_origin(), facing: f.spawn.1 }, f)
         }
     };
     let mut garage = Garage { up, plane: Some(plane), taken: true };
@@ -1393,7 +1415,7 @@ impl Garage {
             (Some(f), Some(plane)) => {
                 plane.flight = Some(f.clone());
                 plane.placed = true;
-                plane.spawn = Spawn { at: f.spawn.0, facing: f.spawn.1 };
+                plane.spawn = Spawn { at: f.spawn_origin(), facing: f.spawn.1 };
                 plane.pose();
                 self.taken = true;
             }
