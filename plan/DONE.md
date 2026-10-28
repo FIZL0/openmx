@@ -389,6 +389,7 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 - [x] **S140** the bike's attachment walk re-measures the chassis speed (+0x34) after the physics as well as the euler (S138 ported only the euler): port the speed and check the trick request's speed read against a capture
 - [x] **S151** Free06 path cars as movers or not: find how the original files the train cars on the collision record (contact::Mover with the car's velocity, or plain scenery as S137 has them) and whether a bike can stand on a moving roof; S137's contacts clear the bike's velocity like a wall
 - [x] **P173** the keyboard joins a running ride whose 1P is a pad: today it has no pad seat then, so only pads can drop in (P171)
+- [x] **S152** Bike body rays against the static props (S137 runs BikeCol's eleven rays only against the moving props, traffic.first..): the ride's velocity ray and head ray still stand in for them against buildings, fences and the rest; run mover_contact's search over every prop and re-pin what moves
 
 ### Phase 2 — a decompilation you can read
 - [x] **R1** (after D4) Ghidra: `./kit ghidra` on the boot ELF and each overlay, with the EmotionEngine extension, producing `context/decomp/<program>.c`. Check the dumps are at the right addresses (a function in the overlay dump should sit inside the overlay's load range) and note how long a full analysis takes on this machine → kit.toml `[ghidra]` · ghidra_scripts/ | t: `./kit fn <addr>` prints one function from each program | j: r1-decompile

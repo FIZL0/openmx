@@ -21,8 +21,10 @@
 //! * and the wreck test reads it: the first entry whose ray reaches above the hit reach is a
 //!   [`crate::air::Wreck::Scenery`] ([`wreck_contacts`]).
 //!
-//! The static props are not searched here: the ride's own probes still stand in for the body rays
-//! against them (see the S137 journal).
+//! The static props are not searched here: the body rays meet every prop, cars among them, in the
+//! tick's scenery search ([`crate::rider_contact::scenery`], S138), which keeps this search's entry
+//! for a ray both list; the wreck test reads both lists and no longer sweeps the head ray through
+//! the props where that search ran (S152).
 
 #![deny(clippy::float_arithmetic)]
 
