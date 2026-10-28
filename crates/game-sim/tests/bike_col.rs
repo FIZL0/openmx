@@ -11,6 +11,11 @@
 //!   against P1's frame mesh, 10,000 cases, each with a segment run through a point on one of the
 //!   frame's triangles (or near it), turned any way, and a rewritten result record; against
 //!   [`BikeCol::strike`]. Compared: the return, the probe's flag byte and the record, bit for bit.
+//! - `the_wheel_probe_never_stands_on_another_bike` (S168): the original's pair filter refuses each
+//!   bike's wheel ray probe every other bike's frame and wreck part, and everything with an owner in
+//!   its nearby search, on S93's images and recording2's three AI bikes; the port's filter agrees.
+//! - `a_physics_trucks_mesh_is_what_a_wheel_could_own` (S168): free06's HasPhysics trucks' physics
+//!   meshes are the owned collidables a wheel probe is not barred from.
 
 use game_render::disc::Disc;
 use game_sim::bike_col::{self, BikeCol};
@@ -605,4 +610,176 @@ fn body_rays_strike_the_other_frame_as_the_original() {
     eprintln!("{CASES} cases: {struck} pairs struck ({twice} on a second pairing), {contacts} contacts written, {cleared} after a clear");
     assert!(struck > CASES / 4, "only {struck} of {CASES} pairs struck: the cases are not reaching the frame");
     assert!(contacts > CASES / 8, "only {contacts} contacts written");
+}
+
+/// The bike's nearby search (`+0x7bc`, list `+0`, count `+4`, 8 bytes a candidate: the collidable and its
+/// distance) and the wheel ray probe's segment count (`+0x168`).
+const NEARBY_SEARCH: u32 = 0x7bc;
+const PROBE_COUNT: u32 = 0x168;
+/// A collidable's vehicle (`+0x78`) and its collision object (`+0x80`, the owner a wheel's contact
+/// names, `+0x1f0` on the wheel).
+const COLLIDABLE_VEHICLE: u32 = 0x78;
+const COLLIDABLE_OBJECT: u32 = 0x80;
+
+/// The three AI bikes' frame collidables in recording2's session (S134's addresses).
+const AI_FRAMES: [u32; 3] = [0x0103_4c00, 0x00c8_9cf0, 0x015a_b1b0];
+
+/// What the original's pair filter answers for `probe` against `other`, both ways of asking (S168):
+/// the two answers, which must agree.
+fn filter(ee: &mut Ee, probe: u32, other: u32) -> bool {
+    let at = addr("collision_pair_filter").unwrap();
+    let answers = [0u64, 1].map(|nearby| {
+        ee.call(at, &[u64::from(probe), u64::from(other), nearby], &[], BUDGET);
+        ee.v0() as u32 != 0
+    });
+    assert_eq!(answers[0], answers[1], "{probe:#x} against {other:#x}: the filter answers differently with nearby");
+    answers[0]
+}
+
+/// One bike's wheel ray probe against everything its nearby search holds: the candidates it accepts
+/// that have a collision object (`+0x80`), and how many it refuses that do.
+fn wheel_owners(ee: &mut Ee, bike: u32) -> (Vec<u32>, usize) {
+    let wheel = ee.u32_at(bike + bike::COLLIDABLES[bike_col::SECOND_RAYS]);
+    let search = ee.u32_at(bike + NEARBY_SEARCH);
+    let (list, count) = (ee.u32_at(search), ee.u32_at(search + 4));
+    let (mut accepted, mut refused) = (Vec::new(), 0);
+    for i in 0..count {
+        let c = ee.u32_at(list + 8 * i);
+        let owner = ee.u32_at(c + COLLIDABLE_OBJECT);
+        if owner == 0 {
+            continue;
+        }
+        if filter(ee, wheel, c) { accepted.push(c) } else { refused += 1 }
+    }
+    (accepted, refused)
+}
+
+/// **S168: a wheel never stands on another bike.** The wheel ray probe (`+0x7c8`, the bike's second
+/// ray probe, two segments) ignores the categories `[0x100, bike +0x390]`, and every bike's `+0x390`
+/// is the actor word `0x2000`, which every bike's frame mesh and wreck part carry. So the original's
+/// pair filter refuses the wheel probe every other bike's frame and wreck part — both split-screen
+/// players' on S93's images, and free09's three AI bikes against each other on recording2's — and
+/// the port's [`world_search::accepts`] over [`bike_col::collidables`] says the same. The wheel's
+/// owner word (`+0x1f0`) is a collision object's, and nothing else the bikes' nearby searches hold in
+/// these images has one.
+#[test]
+fn the_wheel_probe_never_stands_on_another_bike() {
+    use game_sim::world_search::accepts;
+    let Some(col) = load() else { return };
+    // The port: two seats' collidables, each wheel probe against the other's frame.
+    let seats: Vec<Collidable> = [0, 4].iter().flat_map(|&first| bike_col::collidables(&col, first)).collect();
+    for (me, other) in [(0, 4), (4, 0)] {
+        for nearby in [false, true] {
+            assert!(!accepts(&seats, me + bike_col::SECOND_RAYS, other + bike_col::FRAME, nearby), "the port's wheel probe accepts a frame");
+            assert!(accepts(&seats, me + bike_col::BODY_RAYS, other + bike_col::FRAME, nearby), "the port's body rays refuse a frame");
+        }
+    }
+
+    let mut asked = 0;
+    for name in IMAGES {
+        let Some(mut ee) = image(name) else { continue };
+        for (me, other) in [(P1, P2), (P2, P1)] {
+            let wheel = ee.u32_at(me + bike::COLLIDABLES[bike_col::SECOND_RAYS]);
+            assert_eq!(ee.u32_at(wheel + at::KIND), 2, "{name}: the wheel probe is a ray probe");
+            assert_eq!(ee.u32_at(wheel + PROBE_COUNT), 2, "{name}: the wheel probe has its two segments");
+            let frame = ee.u32_at(other + bike::COLLIDABLES[bike_col::FRAME]);
+            let part = ee.u32_at(ee.u32_at(other + bike::WRECK_PART) + bike::PART_COLLIDABLE);
+            assert!(!filter(&mut ee, wheel, frame), "{name}: {me:#x}'s wheel probe accepts the other's frame");
+            assert!(!filter(&mut ee, wheel, part), "{name}: {me:#x}'s wheel probe accepts the other's wreck part");
+            // The control: the same frame is the body rays' to strike.
+            let rays = ee.u32_at(me + bike::COLLIDABLES[bike_col::BODY_RAYS]);
+            assert!(filter(&mut ee, rays, frame), "{name}: the body rays refuse the frame");
+            let (accepted, refused) = wheel_owners(&mut ee, me);
+            assert!(accepted.is_empty(), "{name}: {me:#x}'s wheel probe accepts collidables with an owner: {accepted:x?}");
+            eprintln!("{name} {me:#x}: refused the other's frame and wreck part; {refused} owned candidates in its search, all refused");
+            asked += 1;
+        }
+    }
+
+    match ctx("states/recording2-ram.bin") {
+        Some(path) => {
+            let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+            ee.set(28, u64::from(addr("boot_gp").unwrap()));
+            if AI_FRAMES.iter().all(|&c| ee.u32_at(c + at::CATEGORY) == 0x0009_a048) {
+                let bikes = AI_FRAMES.map(|c| ee.u32_at(c + COLLIDABLE_VEHICLE));
+                for (i, &me) in bikes.iter().enumerate() {
+                    assert_eq!(ee.u32_at(me + bike::ACTOR), bike_col::ACTOR, "recording2 AI {i}: +0x390");
+                    assert_eq!(ee.u32_at(me + bike::COLLIDABLES[bike_col::FRAME]), AI_FRAMES[i], "recording2 AI {i}: its frame");
+                    let wheel = ee.u32_at(me + bike::COLLIDABLES[bike_col::SECOND_RAYS]);
+                    assert_eq!(ee.u32_at(wheel + PROBE_COUNT), 2, "recording2 AI {i}: the wheel probe has its two segments");
+                    for (j, &frame) in AI_FRAMES.iter().enumerate().filter(|&(j, _)| j != i) {
+                        assert!(!filter(&mut ee, wheel, frame), "recording2: AI {i}'s wheel probe accepts AI {j}'s frame");
+                    }
+                    let (accepted, refused) = wheel_owners(&mut ee, me);
+                    assert!(accepted.is_empty(), "recording2 AI {i}: its wheel probe accepts collidables with an owner: {accepted:x?}");
+                    eprintln!("recording2 AI {i}: refused the other AI frames; {refused} owned candidates in its search, all refused");
+                    asked += 1;
+                }
+            } else {
+                eprintln!("recording2-ram.bin does not hold S134's AI bikes where S134 read them");
+            }
+        }
+        None => eprintln!("recording2-ram.bin is not here"),
+    }
+    if asked == 0 {
+        skip("no S93 image and no recording2 image here");
+    }
+}
+
+/// The physics car class's vtable, at `+8` of each car, and the car's physics object (`+0x698`) with its
+/// `f.col` mesh (`+0x128`).
+const PHYSICS_OBJECT: u32 = 0x698;
+const PHYSICS_MESH: u32 = 0x128;
+/// A collision object's chassis (`+0xf0`) and dynamics body (`+0xf4`).
+const OBJECT_CHASSIS: u32 = 0xf0;
+const OBJECT_BODY: u32 = 0xf4;
+
+/// **S168: what a wheel can stand on that has an owner.** free06's two HasPhysics trucks (s89-along)
+/// each carry a physics object whose `f.col` mesh has a collision object (`+0x80`) and is in category
+/// `0x18`, which the wheel ray probe's list does not hold: the pair filter accepts the riders' wheel
+/// probes against it when asked without the nearby bit (the mesh's nearby bit is clear while the truck
+/// sleeps). So a woken truck is the one owner seen that the original's wheel could read through the
+/// owner branch, and the port does not simulate a woken truck (S169).
+#[test]
+fn a_physics_trucks_mesh_is_what_a_wheel_could_own() {
+    let Some(path) = ctx("states/s89-along.eeMemory.bin") else {
+        skip("s89-along.eeMemory.bin is not there: S89's free06 state");
+        return;
+    };
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let vtable = addr("physics_car_vtable").unwrap();
+    let cars: Vec<u32> = (0x0010_0000u32..0x0200_0000).step_by(16).filter(|&o| ee.u32_at(o + 8) == vtable).collect();
+    // The riding bikes: the actor and shape words, and a frame mesh of the bike's category.
+    let bikes: Vec<u32> = (0x0010_0000u32..0x01ff_f000)
+        .step_by(16)
+        .filter(|&o| ee.u32_at(o + bike::ACTOR) == bike_col::ACTOR && ee.u32_at(o + bike::SHAPE) == bike_col::SHAPE)
+        .filter(|&o| {
+            let f = ee.u32_at(o + bike::COLLIDABLES[bike_col::FRAME]);
+            (0x0010_0000..0x0200_0000).contains(&f) && ee.u32_at(f + at::CATEGORY) == 0x0009_a048
+        })
+        .collect();
+    assert_eq!(cars.len(), 2, "free06 has two HasPhysics trucks (S127)");
+    assert!(!bikes.is_empty(), "no riding bike found");
+    let at_ = addr("collision_pair_filter").unwrap();
+    for &car in &cars {
+        let mesh = ee.u32_at(ee.u32_at(car + PHYSICS_OBJECT) + PHYSICS_MESH);
+        let owner = ee.u32_at(mesh + COLLIDABLE_OBJECT);
+        assert_eq!(ee.u32_at(mesh + at::CATEGORY), 0x18, "{car:#x}: the physics mesh's category");
+        assert_ne!(owner, 0, "{car:#x}: the physics mesh has no collision object");
+        for &b in &bikes {
+            let wheel = ee.u32_at(b + bike::COLLIDABLES[bike_col::SECOND_RAYS]);
+            let answers = [0u64, 1].map(|nearby| {
+                ee.call(at_, &[u64::from(wheel), u64::from(mesh), nearby], &[], BUDGET);
+                ee.v0() as u32 != 0
+            });
+            assert_eq!(answers, [true, false], "{car:#x}: bike {b:#x}'s wheel probe against the physics mesh");
+        }
+        eprintln!(
+            "truck {car:#x}: mesh {mesh:#x} owner {owner:#x} (chassis {:#x}, body {:#x}), accepted by {} wheel probes without the nearby bit",
+            ee.u32_at(owner + OBJECT_CHASSIS),
+            ee.u32_at(owner + OBJECT_BODY),
+            bikes.len()
+        );
+    }
 }
