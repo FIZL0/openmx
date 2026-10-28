@@ -26,9 +26,16 @@
 //! not the toy's, so toys that share a clip share it, as in the original, and they are stepped in the
 //! `.toy`'s order.
 //!
-//! Not here: the update's visibility gate (a toy nobody can see, without `AnimateWhenNotVisible`, does
-//! not advance in the original; here every toy does), the sounds, `CameraCollision`,
-//! `DisableWhenIdle` and `InitialFrame`.
+//! **The visibility gate** (V76). The update steps a toy whose `AnimateWhenNotVisible` is off only
+//! when the frame since its last step drew it: its root node was reached by a search of the scene
+//! since (the node's search stamp moved) and the draw's frustum test last put the node's box in view.
+//! A toy it passes over does nothing that tick — no clock, no hints, no collision. Whether the frame
+//! drew it is the picture's question, so here it is an input, [`Toys::seen`], that the shell sets
+//! between ticks; with nobody setting it every toy steps. `UpdateSearch` off skips the step's
+//! re-placing of the collision parts ([`Spec::search`]).
+//!
+//! Not here: the sounds, `CameraCollision`, `DisableWhenIdle`, `DependentToyN`,
+//! `AnimateWhenZoneNotVisible` and `InitialFrame` (no animated toy on the disc writes the middle three).
 
 #![deny(clippy::float_arithmetic)] // every sum below is the PS2's, through ps2-float
 
@@ -368,6 +375,12 @@ pub struct Spec {
     pub mesh: Option<Mesh>,
     /// A `.col` hierarchy's parts (kind 1): each follows its joint.
     pub parts: Vec<Part>,
+    /// `AnimateWhenNotVisible` (on unless the `.toy` turns it off): whether the toy steps on a tick
+    /// after a frame that did not draw it ([`Toys::seen`]).
+    pub unseen: bool,
+    /// `UpdateSearch` (on unless the `.toy` turns it off): whether the toy's step puts its collision
+    /// parts where their joints went. Off, they stand where the load put them.
+    pub search: bool,
 }
 
 impl Spec {
@@ -407,6 +420,10 @@ pub struct Toys {
     pub hints: Vec<Hint>,
     /// Where the toys' meshes begin in the world's props ([`Toys::attach`]).
     pub first: Option<usize>,
+    /// For each toy: whether the frame since its last step drew it (V76). Not state: the picture's,
+    /// which the shell sets between ticks from the camera ([`Toys::frame`] reads it only for a toy
+    /// whose [`Spec::unseen`] is off). Every toy is seen until something says otherwise.
+    pub seen: Vec<bool>,
 }
 
 impl Toys {
@@ -422,6 +439,7 @@ impl Toys {
         let mut toys = Toys {
             clocks: vec![Clock::default(); specs.len()],
             hints: vec![Hint(1); n],
+            seen: vec![true; specs.len()],
             motions: Arc::new(motions),
             specs: Arc::new(specs),
             base: Arc::new(base),
@@ -432,6 +450,13 @@ impl Toys {
             toys.advance(k, start);
         }
         toys
+    }
+
+    /// Whether toy `k` steps this tick: the update's visibility gate. A toy with
+    /// `AnimateWhenNotVisible` off is passed over, clock and collision and all, unless the frame
+    /// since its last step drew it ([`Toys::seen`]).
+    pub fn steps(&self, k: usize) -> bool {
+        self.specs[k].unseen || self.seen.get(k).copied().unwrap_or(true)
     }
 
     /// Whether the track has any.
@@ -509,7 +534,9 @@ impl Toys {
     /// car's is: a part's collision mesh is a collidable whose owner is a kinematic body (a vehicle
     /// of kind 2) whose update keeps the joint's world matrix and the one before, and whose two
     /// virtuals are the path car's. The matrix before is the joint's at the clock the step started
-    /// from, so it is made again from state. A clip that has finished stands still.
+    /// from, so it is made again from state. A clip that has finished stands still, and so does a
+    /// toy the visibility gate passes over ([`Toys::steps`]): nothing of it is stepped. A toy with
+    /// `UpdateSearch` off steps its clip but leaves its parts where they stand.
     pub fn frame(&mut self, dt: F, world: &mut dyn World) {
         if self.clocks.is_empty() {
             return;
@@ -519,7 +546,7 @@ impl Toys {
         let mut at = self.first;
         for k in 0..self.specs.len() {
             let before = (!self.specs[k].parts.is_empty()).then(|| self.worlds_now(k));
-            let locals = self.advance(k, dt);
+            let locals = if self.steps(k) { self.advance(k, dt) } else { None };
             let spec = Arc::clone(&self.specs);
             let spec = &spec[k];
             if spec.mesh.is_some() {
@@ -533,7 +560,9 @@ impl Toys {
                 for (p, part) in spec.parts.iter().enumerate() {
                     if let Some(prop) = props.props.get_mut(a + p) {
                         let place = spec.at(part, &worlds);
-                        prop.stand(&place);
+                        if spec.search {
+                            prop.stand(&place);
+                        }
                         let was = before.as_ref().map_or(place, |b| spec.at(part, b));
                         prop.moving = Some(crate::traffic::Moving::of(&was, &place, inv_dt));
                     }

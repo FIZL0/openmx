@@ -4653,6 +4653,17 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // The software path's own copy of each livery's plane for each seat, by name: what its moving
     // parts are skinned into (V38). Grows as seats join.
     let mut plane_copies: Vec<Vec<String>> = Vec::new();
+    // Each toy's model box, for whether a frame drew it (V76): only the toys that step on nothing
+    // else want one.
+    let toy_bounds: Vec<Option<(V3, V3)>> = animated
+        .models
+        .iter()
+        .zip(animated.sim.specs.iter())
+        .map(|(model, spec)| match spec.unseen {
+            true => None,
+            false => assets.models.get(model).and_then(|loaded| game_render::animated_toy::bound(&loaded.tris)),
+        })
+        .collect();
     // The software path's own copy of each animated toy's model (V43), which its pose is skinned into:
     // one model can be on many toys at many moments (nat06's nineteen windmills).
     let toy_copies: Vec<String> = animated.models.iter().enumerate().map(|(k, m)| format!("{m}@toy{k}")).collect();
@@ -6904,6 +6915,28 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             });
             ridden.push(rider);
             stages.mark(stages::Stage::Camera);
+        }
+        // The animated toys that step only when drawn (V76): whether this tick's picture draws each,
+        // in any view, which the next tick's step reads, as the original's update reads the draw
+        // after it. Every seat's copy of the toys is told the same. Online the toys are the
+        // session's, rolled back and stepped alike on every machine, which no one machine's picture
+        // may steer: they all step.
+        if simulated && online.is_none() && toy_bounds.iter().any(Option::is_some) {
+            let seen: Vec<bool> = toy_bounds
+                .iter()
+                .enumerate()
+                .map(|(k, b)| {
+                    let shown = &world.seats[0].sim.traffic.toys;
+                    b.is_none_or(|b| {
+                        cameras.iter().zip(&rects).any(|(c, r)| game_render::animated_toy::drawn(shown, k, b, c, r.w, r.h))
+                    })
+                })
+                .collect();
+            for seat in &mut world.seats {
+                if seat.sim.traffic.toys.seen.len() == seen.len() {
+                    seat.sim.traffic.toys.seen.clone_from(&seen);
+                }
+            }
         }
         // The bikes' (P74): a frame for each seat, off its rider as the simulation left them and its
         // chassis as this tick posed it (P162: read before the pose, the tire nodes were the tick

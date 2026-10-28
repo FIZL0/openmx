@@ -6177,3 +6177,31 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # AnimatedToySound ctor 0x003e58f0, reader 0x003e59d0 adds MotionName/StartTime/ConfigFile): no
 # AnimatedToy on the disc names one. PC: CarProceduralSound::vf32 / AnimatedToySound::vf32 at
 # 005068c0 / 00506b90 (guide only).
+
+# --- V76: the animated toys' visibility gate and UpdateSearch (crates/game-sim/src/toys.rs Toys::seen /
+#   Spec::unseen / Spec::search, crates/game-render/src/animated_toy.rs drawn, wired in openmx's ride
+#   loop; proved in crates/game-sim/tests/toys.rs the_visibility_gate_is_the_originals) ---
+# animated_toy_read (0x002144d0) stores: HasCollision +0xec, UpdateSearch +0xf0 (default 1),
+#   AnimateWhenNotVisible +0x10c (1), AnimateWhenZoneNotVisible +0x110 (1), DisableWhenIdle +0x148 ->
+#   +0x108 (0), DependentToy%d names at +0x12c, resolved into the list at +0x114. Key strings at
+#   0x0042f120..0x0042f1b0.
+# animated_toy_update (0x002150f0): returns at once when *(0x0041f770) +0x325 bit 3 is set; then the
+#   visibility test 0x00215050 on the toy and each toy of +0x114: visible when +0x10c != 0, or when the
+#   root node's (*(motion +0x30)) u16 +0 search stamp != the toy's copy +0x144 and root +0x111 bit 0
+#   (the draw's last frustum test) is set. Then the +0x110 zone test against the zone id at gp-0x7f64.
+#   Not visible: nothing (no motion_advance, no re-place, no stamp copy). Else, last, +0x144 = the stamp.
+#   UpdateSearch on (and motion +0x60 == 0 or +0x3c == 0): 0x001b4ba0(root), and with HasCollision
+#   0x00119420, which per part runs 0x00119be0 (vt +0xa8 matrix and reach, then 0x00119d00 ->
+#   0x001ab310 re-files the part in the world's tree).
+# The frustum bit: 0x001a1100 sets +0x111 bit 0 from vt +0xb8 = 0x00176e90: node world matrix times the
+#   camera's view-projection (*0x0048a560 +0xc0), box test 0x001cb5e0 on centre +0xe0, half extent
+#   +0xf0. The +0 stamp is the search tree's; the base node ctor 0x001ab330 zeroes it.
+# first_recording's free09: all five toys +0x10c 0, +0x110 1, +0xf0 0; every root +0x111 = 0x2 (out of
+#   view); toy stamps 0x8e30, 0x775f, 0, 0, 0 against root stamps all 0x1244. Root boxes: seti windmill
+#   centre (0.0065, 79.73, -2.13) half (30.0, 79.73, 3.93) (posed, a little different per toy); rustic
+#   windmill centre (-1.62, 22.01, 0.0002) half (8.02, 22.01, 6.54).
+# The disc's .toy files: AnimateWhenNotVisible False on free09's five, free10 SH_windsock, one free10_ss
+#   toy, nat02 church_bell (free11/free11_ss balloons too, under a count of 0, so never loaded); True on
+#   free09_ss, nat01, nat08, nat11, nat15, free10 shovel_01. No file writes DependentToy,
+#   AnimateWhenZoneNotVisible or DisableWhenIdle. UpdateSearch False only where the collision cannot
+#   move (free09/nat01 windmills' part on the static root, nat15 steamsaw a plain mesh).

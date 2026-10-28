@@ -527,7 +527,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // draw, not walked: the body's machine is not in the walk.
     // 11544 since S157: each rider's 50cc reach (`Rider::fifty`), a constant of the bike's file like
     // `Rider::bike_col`, not walked.
+    // 11568 since V76: which animated toys the last frame drew (`Toys::seen`), the shell's picture
+    // told to the next tick and never online, not walked: the toys' clocks it holds still are.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11544, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11568, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
