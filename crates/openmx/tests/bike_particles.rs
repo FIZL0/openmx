@@ -70,7 +70,7 @@ fn capture() -> Option<Vec<HashMap<String, String>>> {
     Some(lines.map(|l| head.iter().cloned().zip(l.split(',').map(str::to_string)).collect()).collect())
 }
 
-/// The disc's list for free09, as the port reads it: fifteen entries, the two tire tracks not ported.
+/// The disc's list for free09, as the port reads it: fifteen entries, the two tire tracks left to `tire_tracks.rs`.
 #[test]
 fn the_discs_bike_particles() {
     let Some(fx) = disc_fx() else { return };
@@ -228,7 +228,7 @@ fn sync(e: &mut Entry, r: &HashMap<String, String>, i: usize) {
 #[test]
 fn the_bikes_emitters_follow_the_original() {
     let (Some(mut fx), Some(rows)) = (disc_fx(), capture()) else { return };
-    // The tire tracks are not ported, so the port's entries are the capture's first thirteen.
+    // The tire tracks are not emitters (`tire_tracks.rs` lays them), so the port's entries are the capture's first thirteen.
     assert_eq!(fx.entries.len(), 13);
     for (i, e) in fx.entries.iter_mut().enumerate() {
         sync(e, &rows[0], i);
