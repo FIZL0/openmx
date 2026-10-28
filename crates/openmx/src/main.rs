@@ -793,6 +793,7 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
         camera_started: false,
         fov_ease: Default::default(),
         look_back: Default::default(),
+        thrill: Default::default(),
         odometer: overlay::Odometer::default(),
         preload_meter: overlay::PreloadMeter::default(),
         pilot_lean: vehicle::PilotLean::default(),
@@ -1008,6 +1009,8 @@ struct Rig {
     fov_ease: (chase::FovEase, chase::FovEase),
     /// The look-back button on the two follow cameras (P78), the bike's and the plane's.
     look_back: (chase::LookBack, chase::LookBack),
+    /// The other-camera button and the thrill camera it brings up over the bike's follow camera (P157).
+    thrill: chase::OtherCamera,
     /// The distance this player's odometer shows (V26).
     odometer: overlay::Odometer,
     /// This player's preload meter, a tick at a time (V53).
@@ -4436,6 +4439,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             camera_started: false,
             fov_ease: Default::default(),
             look_back: Default::default(),
+            thrill: Default::default(),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
             pilot_lean: vehicle::PilotLean::default(),
@@ -4468,6 +4472,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             camera_started: false,
             fov_ease: Default::default(),
             look_back: Default::default(),
+            thrill: Default::default(),
             odometer: overlay::Odometer::default(),
             preload_meter: overlay::PreloadMeter::default(),
             pilot_lean: vehicle::PilotLean::default(),
@@ -5984,6 +5989,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             camera_started: false,
                             fov_ease: Default::default(),
                             look_back: Default::default(),
+                            thrill: Default::default(),
                             odometer: overlay::Odometer::default(),
                             preload_meter: overlay::PreloadMeter::default(),
                             pilot_lean: vehicle::PilotLean::default(),
@@ -6835,7 +6841,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             // The look-back command (P78), held: the follow camera on its look-back preset until it
             // is let go — L2 under the original's layout, Square under the new one. A ride with MX
             // vs. ATV's tricks has those buttons as its two extra tricks, so it has no look-back.
-            if steered && seat.sim.phy.tricks.is_none() && look_back.frame(&mut follow.cam, seat.sim.input.pad(0), seat.sim.table(), !rig.wreck_camera.on) {
+            // Under the thrill camera (P157) it takes no press, as the original's does not.
+            if steered && seat.sim.phy.tricks.is_none() && look_back.frame(&mut follow.cam, seat.sim.input.pad(0), seat.sim.table(), !rig.wreck_camera.on && !rig.thrill.up) {
                 println!("{who}camera: {}", follow.cam.preset().name);
             }
             let presets = follow.cam.presets.len();
@@ -6871,6 +6878,17 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 (Kind::Bike, Some(crash)) => chase::wrecked(crash),
                 _ => chase::ridden(&seat.garage, &seat.sim.rider.ride),
             };
+            // The other-camera command (P157), held: the thrill camera has the screen while the bike
+            // is going faster than 3 ft/s as it goes down, until it is let go — R2 under the original's
+            // layout, Cross under the new one. It is the bike's camera manager's: with the plane up,
+            // or a ride with MX vs. ATV's tricks on those buttons, there is none.
+            if seat.garage.up != Kind::Bike || seat.sim.phy.tricks.is_some() {
+                rig.thrill.up = false;
+            } else if steered
+                && rig.thrill.frame(&mut follow.cam, look_back, seat.sim.input.pad(0), seat.sim.table(), !rig.wreck_camera.on, &rider, F(NEAR_CLIP), &mut world.place)
+            {
+                println!("{who}camera: {}", if rig.thrill.up { "thrill" } else { follow.cam.preset().name.as_str() });
+            }
             // The wreck camera (V31): the moment the rider wrecks, the screen switches to it, starting
             // from the follow camera's eye and look-at as they were last frame; back on, the screen
             // goes back to the follow camera, which snaps rather than lagging in from the wreck.
@@ -6941,12 +6959,17 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 )),
                 (view, _) => view,
             };
+            // The thrill camera over both (P157): the original's wreck switch leaves the screen to it.
+            let view = match (view, rig.thrill.view(&rider)) {
+                (Some(_), Some(thrill)) => Some(thrill),
+                (view, _) => view,
+            };
             if let (true, Some(v)) = (args.trace_camera, &view) {
                 let c = &follow.cam;
                 println!(
                     "camera {i} {} {} preset {:?} distance {} pitch {} yaw {} fov {} eye {} {} {} at {} {} {}",
                     pacer.ticks(),
-                    if wreck.on { "wreck" } else { "follow" },
+                    if rig.thrill.up { "thrill" } else if wreck.on { "wreck" } else { "follow" },
                     c.preset().name,
                     c.distance.0,
                     c.pitch.0,

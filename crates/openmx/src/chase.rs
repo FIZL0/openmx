@@ -169,6 +169,90 @@ impl LookBack {
     }
 }
 
+impl LookBack {
+    /// Put the look-back up now, as if the command had just gone down: the thrill camera let go with
+    /// the look-back still held (P157). False when there is no look-back preset or it is up already.
+    pub fn hold(&mut self, cam: &mut game_sim::camera::Follow) -> bool {
+        match cam.look_back_preset() {
+            Some(back) if cam.preset != back => {
+                self.chosen = Some(cam.preset);
+                cam.set_preset(back);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+// --- the other camera (P157) -----------------------------------------------------------------------
+
+/// The camera manager's other-camera command, held: the thrill camera
+/// ([`game_sim::camera::Thrill`]) has the screen while the command is down, and the follow camera
+/// again when it is let go — or the look-back, if that is still held.
+///
+/// The original's camera manager does it in its press and release handlers. A press with the race
+/// camera on the screen and its target moving faster than [`game_sim::camera::THRILL_SPEED`] makes the
+/// thrill camera the screen's, which picks its spot; at 3 ft/s or slower the press does nothing, and
+/// nothing picks it up later while the command stays down. With the thrill camera up a look-back
+/// press does nothing but note the command is held; the release then puts the race camera back on the
+/// player's preset and, look-back still held, on the look-back. The follow camera runs on underneath
+/// it all, as the shell's runs under the wreck camera, so letting go hands back a camera that is
+/// already where it should be.
+///
+/// The camera is presentation: this reads the seat's pad and writes only the cameras.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OtherCamera {
+    /// The thrill camera has the screen.
+    pub up: bool,
+    pub thrill: game_sim::camera::Thrill,
+}
+
+impl OtherCamera {
+    /// One tick of the command. `rider` is the follow camera's target this frame, `look_back` the
+    /// seat's look-back beside `cam`, `on_screen` whether the follow camera has the screen (a wreck's
+    /// camera does not take the press); `near_clip` and `scene` are the follow camera's. The takeoff
+    /// the thrill camera picks a jump's spot from is watched every tick, up or not. True when the
+    /// screen's camera changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame(
+        &mut self,
+        cam: &mut game_sim::camera::Follow,
+        look_back: &mut LookBack,
+        pad: &game_sim::input::Pad,
+        table: &game_sim::bindings::Table,
+        on_screen: bool,
+        rider: &Ridden,
+        near_clip: F,
+        scene: &mut (impl game_sim::camera::Surface + game_sim::camera::Obstacles),
+    ) -> bool {
+        use game_sim::bindings::Command;
+        use game_sim::camera::Thrill;
+        self.thrill.watch(rider);
+        if !self.up && on_screen && table.pressed(pad, Command::OTHER_CAMERA) && Thrill::fast_enough(rider.target.vel) {
+            // The sweep starts from the eye the screen has now, the follow camera's.
+            let eye = Vf::new(cam.pos_filter[0].value.0, cam.pos_filter[1].value.0, cam.pos_filter[2].value.0, 1.0);
+            self.thrill.place(rider, eye, near_clip, cam.ceiling, scene);
+            self.up = true;
+            return true;
+        }
+        // Not held is let go: a release the shell did not see (the pad was the pause menu's when it
+        // came) lets go all the same.
+        if self.up && !table.held(pad, Command::OTHER_CAMERA) {
+            self.up = false;
+            if table.held(pad, Command::LOOK_BACK) {
+                look_back.hold(cam);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// The thrill camera's view this frame, while it is up.
+    pub fn view(&mut self, rider: &Ridden) -> Option<game_sim::camera::View> {
+        if self.up { self.thrill.frame(rider) } else { None }
+    }
+}
+
 // --- the wreck camera (V31) ------------------------------------------------------------------------
 
 /// What the wreck camera follows while the rider is down: the rider's body first, and the wrecked bike.

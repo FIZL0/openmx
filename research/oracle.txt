@@ -4632,7 +4632,7 @@ camera_look_back_off boot 0x00200820 (manager) +0x144 = 1; the race camera activ
 camera_thrill_off    boot 0x002008b0 (manager) +0x148 = 1; the thrill camera active and +0x14c 0 ->
 #                                   camera_restore (0x001ff140) and, look back let go, the race camera
 #                                   active on preset +0x1a8 (the look-back, as if 0x20 were still
-#                                   pressed: not ported, no thrill camera yet)
+#                                   pressed; ported by P157, below)
 #     +0x658 gas, +0x65c clutch toward those switches; ported by P77 (below).
 # P77 — the levers are switches, and the limiter's walk (crates/game-sim/src/ride.rs: switch,
 #   Controls::pad_read_tail, Held::step; crates/game-sim/tests/levers.rs runs pad_to_gesture then
@@ -6224,3 +6224,35 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 #   free09_ss, nat01, nat08, nat11, nat15, free10 shovel_01. No file writes DependentToy,
 #   AnimateWhenZoneNotVisible or DisableWhenIdle. UpdateSearch False only where the collision cannot
 #   move (free09/nat01 windmills' part on the static root, nat15 steamsaw a plain mesh).
+
+# --- P157: the thrill camera, the manager's +0x64 (crates/game-sim/src/camera.rs Thrill, crates/openmx/
+#   src/chase.rs OtherCamera, wired in openmx's ride loop; proof crates/openmx/tests/thrill_camera.rs) ---
+# Press 0x22 -> camera_thrill (0x00200740): only with the race camera (or +0x5c) active, and only on the
+#   press: the target's +0x50 velocity length (sqrt(z*z + y*y + x*x)) over 3. Held, nothing re-tests it.
+# The wreck switch 0x001ffcb0 leaves the screen alone while +0x64 / +0x58 / +0x6c is active, and sets
+#   +0x14c = +0x144 = +0x148 = 1 — so camera_thrill_off after a wreck does not restore (not ported).
+# The camera: ctor 0x00320b50 over the base 0x003203e0 (+0x94 fov 80, +0xa8 1, +0xac 3, +0xc0 / +0xc4 0);
+#   setup 0x00320d00 (75, 18, 200, 20, 5, ceiling, cam, target, 0): +0x98 wide fov 75, +0x9c narrow 18,
+#   +0xa0 far 200, +0xa4 near 20, +0xdc / +0xe0 clearance 5, +0xe4 ceiling, three lags +0xe8 / +0xec /
+#   +0xf0 (tau .25, .8, .25), +0xf4 the sweep's collision object, +0xd0 = the track's +0x428 ground.
+#   Attach target 0x00320a10: +0xac = target +0x24 (3.0 in recording2's state, the rider's block
+#   +0xdd0 — the look-at height).
+# Vtable 0x00459640: +0x38 frame 0x003204e0 (the spot once, while +0xc0 is 0, by vt +0xe8; fov vt +0xe0
+#   0x00321150 -> 0x00320650; look-at vt +0xe4 0x003206e0 = target point + (0, +0xac, 0)); +0xd4
+#   activate 0x003219a0 (clears +0xc0 through 0x00320600); +0xd8 deactivate 0x00321a00.
+# fov 0x00320650: d the flat distance eye -> look-at; 18 + 57 * ((200 - d) / 180); under 18 -> +0xc4 = 1
+#   (no reader found) and 18; at most 75.
+# The spot 0x003212a0: clearance = max(+0xdc, near clip * 2). On the ground (target +0xb0 0): point
+#   +0x10, velocity +0x50; lead = max(vy * 0.0310559 * 1.5, 1.5), reach = max(vy * 0.0310559 * 2, 3);
+#   |v|^2 under 900 -> v * 30/|v|; probe = p + (vx, 0, vz) * reach through 0x00320fe0 (y at most the
+#   ceiling, at least the ground + 5); |vy| over 5 -> lead += (p.y - probe.y) / |vy| * 0.5; spot = p +
+#   v * lead - v * 0.2 + (vz, 0, -vx) * 0.45; swept from the viewport's eye (+0xf4; a hit -> contact +
+#   normal * clearance); y = max(ground + clearance + 1, p.y - (p.y - ground) * 0.5). In the air: the
+#   takeoff block +0x90 / +0xa0 (point, velocity), lead = vy * 0.0310559 * 1.5 with no floor (a roll-off
+#   with vy <= 0 puts the spot behind the takeoff), no stretch, no sweep; y = max(ground + clearance + 1,
+#   takeoff y (+ vy * lead * 0.1 when vy over 10) - 1). The lags are set to the spot (0.6, 1.0): the eye
+#   does not move.
+# The takeoff block: vehicle_camera_target 0x0027c580 on the rider; with the rider's +0x93c 0 (no wheel
+#   down) and +0xe80 0, +0xe60 = +0x820 (point), +0xe70 = +0x840 (velocity); then +0xe80 = (+0x93c == 0)
+#   — the target block +0xdd0's +0xb0 airborne flag, +0x90 / +0xa0 the takeoff.
+# PC exe (MX Unleashed PC): MXThrillCamera vf35 / vf37 and SimpleThrillCamera vf36 read alongside.
