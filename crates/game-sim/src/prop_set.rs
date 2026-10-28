@@ -187,6 +187,12 @@ impl PropSet {
         c.enable(object);
     }
 
+    /// What a wheel standing on a prop's `f.col` reads (S169, [`Collection::under`]): the body's
+    /// velocity and its velocity at the world `point`. `None` for a body with no collision object.
+    pub fn under(&mut self, collection: usize, object: usize, point: Vf) -> Option<(Vf, Vf)> {
+        self.collections[collection].under(object, point)
+    }
+
     /// Every body's scene model and the node it is drawn by (the body's pose since it was last
     /// woken, else where it was made or put back), collection by collection.
     pub fn nodes(&self) -> impl Iterator<Item = (usize, &Node)> + '_ {
