@@ -885,6 +885,10 @@ pub mod wreck_bike;
 /// they claim, and each prop's body at rest where its model stands.
 pub mod props;
 
+/// The props' tick (S130): a knocked prop's collection world, its pins, its sleep, countdown and
+/// put-back, and the node box merged over a node's children.
+pub mod prop_world;
+
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.
 pub mod ghost;
