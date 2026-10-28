@@ -7389,10 +7389,13 @@ const S89_RIDER: [u32; 6] = [0x34, 0x34, 0x8, 0x8, 0x8, 0x0];
 
 /// The tick each of [`S89_RIDES`] agrees through on every lane, in that order. A ratchet like
 /// [`SAVE_STATE_AGREES_THROUGH`]: parting at or before it fails, agreeing further asks to raise it.
-/// Both now part at their first compared tick (2), in the second substep of tick 1: the front wheel's
-/// swept contact on the bed lands 0.009 ft further along z than the original's, and the compression and
-/// spring force follow it (S107; every force before it agrees word for word with the Ee-stepped image).
-const S89_AGREES_THROUGH: [u64; 2] = [1, 1];
+/// S107 had both parting at their first compared tick (2); by S123 every lane agrees through 30 along
+/// and 15 across. Ee-stepping the along image's ground step shows the original's swept contacts on the
+/// bed are the wheel probe record's points as the port's search finds them, word for word, in both
+/// substeps of tick 1, and so are the load points and compressions. Along parts at 31 as the original's
+/// engine starts driving the rear wheel (wheel torque 379 against the port's 0); across at 16 on the
+/// chassis velocity.
+const S89_AGREES_THROUGH: [u64; 2] = [30, 15];
 
 /// The tick each wheel's slip and contact lanes agree through on each of [`S89_RIDES`] (`u64::MAX`:
 /// every tick), though the chassis parts at tick 1. A ratchet: parting earlier fails. The two locked
@@ -7652,7 +7655,7 @@ fn the_dallas_rail_rides_replay_from_their_save_states() {
             let on = port.iter().filter(|(_, p)| p.on_the_bed()).count();
             let port_slid = port.iter().filter(|(_, p)| p.swept[0] || p.swept[1]).map(|(_, p)| p.side.abs()).fold(0.0, f32::max);
             println!("{name}: the port on the bed {on} of {} ticks, at most {port_slid} across its heading on a prop", port.len());
-            // Not yet bit-exact (tick 1 parts by a few ulps, S107's), but the port rides the bed the
+            // Not bit-exact over the whole ride ([`S89_AGREES_THROUGH`]), but the port rides the bed the
             // original's way: as long, through the sweep, on the terrain's surface byte, and no slide.
             assert!(on >= least, "{name}: the port was on the bed {on} ticks, the original {}", bed.len());
             for (t, p) in port.iter().filter(|(_, p)| p.on_the_bed()) {
