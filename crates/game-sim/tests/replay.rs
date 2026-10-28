@@ -3000,6 +3000,308 @@ fn the_2p_recording_drives_both_riders_from_its_state() {
     println!("2p: both riders rode the whole tape from the state ({moved:?} ft from where they started)");
 }
 
+// --- S175: the port's own 2p ride into each wreck --------------------------------------------------
+
+/// The 2p capture as [`two_p_capture`] reads it, and each rider's chassis centre (`ch_centre`), which
+/// is what places a RAM image on its row.
+fn two_p_capture_with_centres() -> Option<Capture> {
+    let at = two_p_file(replay::two_p::CAPTURE);
+    let Ok(file) = std::fs::File::open(&at) else {
+        println!("no {} — C10's journal says how it is captured", at.display());
+        return None;
+    };
+    let lane = [
+        "type", "index", "ctl_src", "bike_type", "bike_player", "wreck_reason", "bike_xform.m30", "bike_xform.m31",
+        "bike_xform.m32", "ch_centre.x", "ch_centre.y", "ch_centre.z",
+    ];
+    let keep = |c: &str| {
+        ["frame_counter", "dt"].contains(&c)
+            || c.starts_with("pad")
+            || c.starts_with("stamp")
+            || ["p1_", "p2_"].iter().any(|p| c.strip_prefix(p).is_some_and(|rest| lane.contains(&rest)))
+    };
+    Some(replay::two_p::read(std::io::BufReader::new(file), keep).unwrap_or_else(|e| panic!("{}: {e}", at.display())))
+}
+
+/// C10's index of the 2p recording's wrecks (`research/c10/events.json`'s `wrecks`): the first row
+/// holding the reason, the player (0 is P1) and the reason.
+const S175_WRECKS: [(u64, usize, u8); 17] = [
+    (128995, 0, 8),
+    (129945, 0, 8),
+    (130966, 0, 11),
+    (132997, 0, 3),
+    (133313, 0, 12),
+    (133953, 0, 12),
+    (134381, 0, 12),
+    (135196, 0, 12),
+    (135855, 0, 12),
+    (136559, 0, 12),
+    (139659, 0, 2),
+    (130418, 1, 6),
+    (130897, 1, 6),
+    (131595, 1, 1),
+    (133800, 1, 8),
+    (134315, 1, 12),
+    (140363, 1, 2),
+];
+
+/// C10's near misses (`events.json`'s `near`), one a row and rider with their clauses folded: rows
+/// on which a wreck test limit came close and the original rode on.
+const S175_NEAR: [(u64, usize); 24] = [
+    (128520, 0), (128892, 0), (129123, 0), (129124, 0), (129485, 0), (129486, 0), (130420, 0), (131484, 0),
+    (131628, 0), (131872, 0), (132463, 0), (132608, 0), (135076, 0),
+    (128467, 1), (128849, 1), (128851, 1), (131576, 1), (133253, 1), (133538, 1), (133744, 1), (135556, 1),
+    (136062, 1), (136142, 1), (137982, 1),
+];
+
+/// The tape fields behind its row that the tick making a row reads its pad and `dt` from: the row
+/// before's (as S67 and S138 drive their states; a 2p row's `dt` is the next frame's).
+const S175_PAD_LAG: usize = 2;
+
+/// The wrecks the port's own ride does not enter from the image before them, with why: P2's two
+/// trunk hits on Free09, the body rays' scenery wreck, which S155's run of the original's own bike
+/// update does not enter either. Proving the composed wreck list from a 2p image is S174's.
+const S175_KNOWN: [(u64, usize, &str); 2] = [
+    (130418, 1, "P2's trunk (reason 6): S174"),
+    (130897, 1, "P2's trunk (reason 6): S174"),
+];
+
+/// How many of the 41 indexed events the port's seeded ride enters on the indexed row itself, with
+/// the indexed reason (or rides out): the rest agree a row off it, where the capture's rows are torn
+/// (see the test).
+const S175_ON_THE_ROW: usize = 33;
+
+/// Which chassis centre a [`SaveState`] holds, as bits (the chassis record at the bike's `+0x7a4`,
+/// its centre at `+0x60`).
+fn s175_centre(st: &SaveState) -> Option<[u32; 3]> {
+    let ch = st.rider_at(0x7a4)?;
+    Some([st.word(ch + 0x60)?, st.word(ch + 0x64)?, st.word(ch + 0x68)?])
+}
+
+impl SaveState {
+    /// Everything a 2p wreck reads that [`SaveState::seed_ride`] leaves at its defaults, off this
+    /// image's bike: the backflip ([`SaveState::seed_flip`]); the trick machine (`+0xa78` the running
+    /// trick, `+0xa7c` the one asked for, `+0xaf8` the restart, `+0xa04`/`+0xa08` this and last frame's
+    /// count, `+0xa1c` elapsed, `+0xa2c` progress, `+0xa24`/`+0xa28`/`+0xa30` the hold's clocks,
+    /// `+0xa14` the hold done, `+0xa0c` in progress, `+0xa10` safe, `+0xa44` the no-hander, `+0xa18`
+    /// the gesture's armed flag); and the animation driver's shown crossup (`+0x788`), pose
+    /// (`+0x9e8`), fore-aft (`+0x9ec`), cross-fade flag (`+0x9f0`) and ramp (`+0x9f4`), which the
+    /// landing test reads as the rider's crossup. The queue of tricks asked for while one runs (a heap
+    /// list) is not read.
+    fn seed_2p_rider(&self, rider: &mut Rider) -> Option<()> {
+        self.seed_ride(&mut rider.ride)?;
+        self.seed_flip(&mut rider.ride)?;
+        let r = self.rider;
+        let t = &mut rider.tricks;
+        t.current = Trick(self.word(r + 0xa78)? as u8);
+        t.requested = Trick(self.word(r + 0xa7c)? as u8);
+        t.restart = self.flag(r + 0xaf8)?;
+        t.seq = self.word(r + 0xa04)? as i32;
+        t.prev_seq = self.word(r + 0xa08)? as i32;
+        t.elapsed = self.float(r + 0xa1c)?;
+        t.progress = self.float(r + 0xa2c)?;
+        t.hold_elapsed = self.float(r + 0xa24)?;
+        t.wiggle_time = self.float(r + 0xa28)?;
+        t.held = self.float(r + 0xa30)?;
+        t.hold_done = self.flag(r + 0xa14)?;
+        t.in_progress = self.flag(r + 0xa0c)?;
+        t.safe = self.flag(r + 0xa10)?;
+        t.no_hander = self.flag(r + 0xa44)?;
+        t.gesture.armed = self.flag(r + 0xa18)?;
+        let m = &mut rider.motion;
+        m.shown_crossup = self.float(r + 0x788)?;
+        m.pose = self.float(r + 0x9e8)?;
+        m.fore_aft = self.float(r + 0x9ec)?;
+        m.faded = self.flag(r + 0x9f0)?;
+        m.ramp = self.float(r + 0x9f4)?;
+        Some(())
+    }
+}
+
+/// The latest 2p RAM image before `frame` (C10's `states/c10/`, S155's `states/s155/`, up to eight
+/// ticks back) with both riders in it, and the capture row its player `p` is on: the row whose
+/// chassis centre and wreck reason are the image's, within two of its frame counter (C10's images sit
+/// a tick off their counter) and before `frame`.
+fn s175_image_before(cap: &Capture, rows: &std::collections::BTreeMap<u64, usize>, frame: u64, p: usize)
+    -> Option<(PathBuf, [SaveState; 2], u64)> {
+    let prefix = ["p1_", "p2_"][p];
+    let centre_of = |r: usize| -> [u32; 3] {
+        ["x", "y", "z"].map(|l| {
+            let at = column(cap, &format!("{prefix}ch_centre.{l}")).unwrap();
+            (cell(cap, r, at).parse::<f64>().expect("a centre") as f32).to_bits()
+        })
+    };
+    let reason_of = |r: usize| -> u32 { cell(cap, r, column(cap, &format!("{prefix}wreck_reason")).unwrap()).parse::<f64>().unwrap() as u32 };
+    let mut found: Vec<(u64, PathBuf)> = Vec::new();
+    for dir in ["states/c10", "states/s155"] {
+        for t in frame.saturating_sub(8)..frame {
+            let at = two_p_file(dir).join(format!("c10-{t}.ram"));
+            if at.exists() {
+                found.push((t, at));
+            }
+        }
+    }
+    found.sort();
+    for (t, at) in found.into_iter().rev() {
+        let states: Vec<SaveState> = TWO_P_RIDERS.iter().filter_map(|hops| SaveState::open_image(&at, hops)).collect();
+        let Ok::<[SaveState; 2], _>(both) = states.try_into() else { continue };
+        let fc = u64::from(both[p].word(SaveState::FRAME_COUNTER)?);
+        assert_eq!(fc, t, "{} is not frame {t}", at.display());
+        let (centre, reason) = (s175_centre(&both[p])?, both[p].rider_at(0x748)?);
+        let row = (fc.saturating_sub(2)..=fc + 2)
+            .filter(|&c| c < frame)
+            .find(|c| rows.get(c).is_some_and(|&r| centre_of(r) == centre && reason_of(r) == reason));
+        if let Some(row) = row {
+            return Some((at, both, row));
+        }
+    }
+    None
+}
+
+/// **The port's own 2p ride into each wreck** (S175). S155 judged the port's wreck test on the
+/// original's own inputs, call by call; this rides the port's whole Race 500 into them. For each of
+/// C10's indexed wrecks and near misses of the 2p recording, both riders are seeded from the latest
+/// RAM image before it ([`SaveState::seed_ride`] and [`SaveState::seed_2p_rider`], each rider off its
+/// own bike), and the port's two players ride the capture's own two pads over Free09, with the bike's
+/// body rays, to the event row and one past it, each tick on the pad and `dt` of the row before
+/// ([`S175_PAD_LAG`]).
+///
+/// Both riders' first wrecks in the run are held to the capture's: the same reason, on the same row
+/// or one either side of it, as S138 holds its walls. The row is not exact because the 2p capture's
+/// rows tear about these events: a row repeats the one before's chassis centre and the next steps
+/// twice (133310/133311, 135852/135853, 139657/139658), or the bike stands still a row before its
+/// reason shows (135195, 136558, 134314), with every row's `dt` the usual sixtieth. The port's chassis
+/// is on the capture's to a few hundredths of a foot there, and S155's run of the original's own bike
+/// update from the same images wrecks a row early on five of the same six. How many land on the row
+/// itself is a floor ([`S175_ON_THE_ROW`]). A near miss agrees when neither rider wrecks through the
+/// row after it. [`S175_KNOWN`] are the wrecks the port is known not to reach, and why. Each event's
+/// verdict, both riders' wrecks and how far the event rider's chassis is from the capture's on the
+/// event row are printed. A skip with a line where the capture, the images or the disc are not here.
+#[test]
+fn the_ports_own_2p_ride_wrecks_where_the_original_did() {
+    use replay::two_p;
+    let Some(cap) = two_p_capture_with_centres() else { return };
+    let tape = two_p::tape(&cap).expect("both pads off the capture");
+    let rows = rows_by_counter(&cap);
+    let fc = column(&cap, "frame_counter").unwrap();
+    let lane_of = |p: usize, n: &str| column(&cap, &format!("{}{n}", ["p1_", "p2_"][p])).unwrap();
+    let reason_at = |r: usize, p: usize| cell(&cap, r, lane_of(p, "wreck_reason")).parse::<f64>().unwrap() as u8;
+    assert_eq!(cell(&cap, 0, fc).parse::<u64>().unwrap(), two_p::FIRST_FRAME);
+
+    let events: Vec<(u64, usize, Option<u8>)> = S175_WRECKS
+        .iter()
+        .map(|&(f, p, r)| (f, p, Some(r)))
+        .chain(S175_NEAR.iter().map(|&(f, p)| (f, p, None)))
+        .collect();
+    for &(frame, p, want) in &events {
+        let r = rows[&frame];
+        match want {
+            Some(w) => assert_eq!((reason_at(r - 1, p), reason_at(r, p)), (0, w), "P{} {frame}: the index's wreck is not in the capture", p + 1),
+            None => assert!((r - 1..=r + 1).all(|r| reason_at(r, p) == 0), "P{} {frame}: the original wrecked by its near miss", p + 1),
+        }
+    }
+
+    let p1_lane = two_p::lane(&cap, two_p::Rider::P1).unwrap();
+    let ran = in_the_world_on(&p1_lane, TWO_P_PHY, "500", |world, named, bike| {
+        let Some(Ridden { tables, phy, .. }) = bike else {
+            println!("no {TWO_P_PHY} on this disc");
+            return None;
+        };
+        let Some(col) = Disc::open().and_then(|mut disc| the_bike_col(&mut disc)).map(Arc::new) else {
+            println!("no bike collision files on this disc");
+            return None;
+        };
+        println!("S175: riding {named} on {TWO_P_PHY}");
+        let rider_of = |st: &SaveState| {
+            let [front, rear] = st.wheels().expect("the state's wheel mounts").map(|q| Vf(q.map(f32::from_bits)));
+            let mut r = Rider::new(&phy, (front, rear), Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+            r.carries_bike_col(Arc::clone(&col));
+            r
+        };
+        let (mut agree, mut parted, mut missing, mut on_row) = (Vec::new(), Vec::new(), Vec::new(), 0);
+        for &(frame, p, want) in &events {
+            let what = match want {
+                Some(w) => format!("P{} wreck {w} at {frame}", p + 1),
+                None => format!("P{} near miss at {frame}", p + 1),
+            };
+            let Some((image, [s1, s2], row0)) = s175_image_before(&cap, &rows, frame, p) else {
+                missing.push(what);
+                continue;
+            };
+            // A rider the image holds down from a wreck of its own is not judged: the seed carries a
+            // riding bike, not a wreck in progress.
+            let down = [&s1, &s2].map(|s| s.rider_at(0x748) != Some(0));
+            let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider_of(&s1));
+            s1.seed_2p_rider(&mut sim.rider).expect("P1's whole bike");
+            sim.add_player(phy.clone(), rider_of(&s2));
+            s2.seed_2p_rider(&mut sim.others[0].rider).expect("P2's whole bike");
+            sim.input.pad_mut(1).connected = true;
+            let mut got: [Option<(u64, u8)>; 2] = [None; 2];
+            let mut off = f32::NAN;
+            let end = frame + 1;
+            for counter in row0 + 1..=end {
+                let r = rows[&counter];
+                let pad = tape.frames[r - S175_PAD_LAG];
+                let controls = sim.poll_all(pad.dt(), &pad.reports);
+                sim.step_all(pad.dt(), &controls, world);
+                for (i, g) in got.iter_mut().enumerate() {
+                    if g.is_none() && let Some(w) = sim.rider_of(i).state.wreck {
+                        *g = Some((counter, w.0));
+                    }
+                }
+                if counter == frame {
+                    let c = sim.rider_of(p).ride.chassis.cofg_world;
+                    let o = ["x", "y", "z"].map(|l| cell(&cap, r, lane_of(p, &format!("ch_centre.{l}"))).parse::<f32>().unwrap());
+                    off = ((c.x() - o[0]).powi(2) + (c.y() - o[1]).powi(2) + (c.z() - o[2]).powi(2)).sqrt();
+                }
+            }
+            let theirs: Vec<Option<(u64, u8)>> = (0..2)
+                .map(|i| ((row0 + 1)..=end).find_map(|c| {
+                    let r = rows[&c];
+                    (reason_at(r, i) != 0 && reason_at(r - 1, i) == 0).then(|| (c, reason_at(r, i)))
+                }))
+                .collect();
+            // The same reason, on the same row or one either side (see above).
+            let same = |a: Option<(u64, u8)>, b: Option<(u64, u8)>| match (a, b) {
+                (None, None) => true,
+                (Some((ac, ar)), Some((bc, br))) => ar == br && ac.abs_diff(bc) <= 1,
+                _ => false,
+            };
+            assert!(!down[p], "{what}: the image holds the event's rider down");
+            let ok = (0..2).filter(|&i| !down[i]).all(|i| same(got[i], theirs[i]));
+            let name = image.file_name().unwrap().to_string_lossy().to_string();
+            let line = format!(
+                "{what}: from {name} (row {row0}, {} ticks), the original {theirs:?}, the port {got:?}, P{} {off:.3} ft off on the row{}",
+                frame - row0,
+                p + 1,
+                if down[1 - p] { format!(", P{} down in the image", 2 - p) } else { String::new() }
+            );
+            let known = S175_KNOWN.iter().find(|&&(f, q, _)| (f, q) == (frame, p));
+            match (ok, known) {
+                (true, Some(_)) => println!("agrees {line} — it is in S175_KNOWN: take it out"),
+                (true, None) => println!("agrees {line}"),
+                (false, Some((_, _, why))) => println!("known  {line} ({why})"),
+                (false, None) => println!("PARTS  {line}"),
+            }
+            if ok {
+                agree.push(what);
+                on_row += usize::from(got[p] == theirs[p]);
+            } else if known.is_none() {
+                parted.push(line);
+            }
+        }
+        Some((agree, parted, missing, on_row))
+    });
+    let Some(Some((agree, parted, missing, on_row))) = ran else { return };
+    println!("S175: {} of {} events agree, {on_row} on the row itself; parted: {}", agree.len(), events.len(), parted.len());
+    if !missing.is_empty() {
+        println!("S175: no RAM image before {} of the 2p events: {missing:?} (research/s155/rams.py says how they are saved)", missing.len());
+        return;
+    }
+    assert!(parted.is_empty(), "the port's own 2p ride parts from the original:\n{}", parted.join("\n"));
+    assert!(on_row >= S175_ON_THE_ROW, "only {on_row} of the 2p events on the row itself (was {S175_ON_THE_ROW})");
+}
+
 // ===================================================================================================
 // S8 — the acceptance run, against the human's own recording
 // ===================================================================================================
