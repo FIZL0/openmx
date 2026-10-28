@@ -2125,6 +2125,44 @@ impl RiderBody {
     }
 }
 
+/// **What an online seat's rider said** (P184), read off the ride as it is drawn rather than off the
+/// rider's own frames, which online run inside the session — some of them twice, when a late pad
+/// rolls the ride back. A wreck entry is the rider's wreck reason going from none to some between
+/// two drawn frames, and a landed trick the bike coming down between them, off the ground with a
+/// trick asked for before and on it after, with no wreck. A tick rolled back and run again to the
+/// same wreck draws the wreck both times, and is heard once; one that runs out differently takes
+/// the wreck back, and the wreck it does have is heard when it comes. Presentation only: it reads
+/// the ride and writes nothing of it.
+#[derive(Clone, Debug, Default)]
+pub struct Said {
+    /// Each room seat's rider at the last drawn frame: wrecked, off the ground, the trick in flight.
+    /// `None` until the seat is first drawn, which says nothing. By room seat, not shell seat, so a
+    /// join or a leave that moves the shell's seats round moves nobody's memory onto another rider.
+    was: Vec<Option<(bool, bool, game_sim::trick::Trick)>>,
+}
+
+impl Said {
+    /// What room seat `d`'s rider did since the last drawn frame: its wreck entry and its landed
+    /// trick, the rest of the frame left at none.
+    pub fn of(&mut self, d: usize, rider: &game_sim::rider::Rider) -> game_sim::rider::Frame {
+        let (airborne, flight) = rider.in_flight();
+        let now = (rider.state.wreck.is_some(), airborne, flight);
+        if self.was.len() <= d {
+            self.was.resize(d + 1, None);
+        }
+        let mut said = game_sim::rider::Frame::default();
+        if let Some((wrecked, was_airborne, was_flight)) = self.was[d].replace(now) {
+            if !wrecked {
+                said.wreck = rider.state.wreck;
+            }
+            if said.wreck.is_none() && !now.0 && was_airborne && !airborne && was_flight != game_sim::trick::Trick::NONE {
+                said.landed = Some(was_flight);
+            }
+        }
+        said
+    }
+}
+
 /// **The rider's voice** (P180), the original's rider emitter: the wreck's own cry is played through
 /// it at the entry ([`Sound::frame`]), and every tick after, while the body is down, touching and
 /// faster than `MinImpulse` with nothing of its own still playing, it cries out again — a no-repeat

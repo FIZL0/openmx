@@ -635,6 +635,13 @@ impl Rider {
         self.state.phase()
     }
 
+    /// **Off the ground, and the trick a touchdown would land** (P184): what [`Frame::landed`] is
+    /// taken off at the next frame, read for a shell that has the rider's state but not its frames
+    /// (online, where a rollback steps the rider out of the shell's sight). Reads only.
+    pub fn in_flight(&self) -> (bool, Trick) {
+        (self.airborne, self.flight)
+    }
+
     /// **One frame of the rider**, in the original's order. The six steps at the top of this file.
     pub fn frame(&mut self, p: &Phy, t: &Tables, c: &Controls, dt: F, world: &mut dyn World) -> Frame {
         self.frame_among(p, t, c, dt, world, &[])
