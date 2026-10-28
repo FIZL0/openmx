@@ -14,6 +14,12 @@ use game_sim::trick::Set;
 use ps2_float::{F, Vf};
 
 // The shell's pad, compiled in as `tests/ride.rs` takes it: the crate is a binary.
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[allow(dead_code)]
 #[path = "../src/window.rs"]
 mod window;

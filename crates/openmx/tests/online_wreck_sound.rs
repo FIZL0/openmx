@@ -18,6 +18,9 @@ mod peer;
 #[allow(dead_code)]
 #[path = "../src/vehicle.rs"]
 mod vehicle;
+#[allow(unused)]
+#[path = "../src/thread.rs"]
+mod thread;
 #[allow(dead_code)]
 #[path = "../src/audio.rs"]
 mod audio;
