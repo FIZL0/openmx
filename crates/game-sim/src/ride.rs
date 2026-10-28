@@ -2431,9 +2431,14 @@ impl Ride {
         // the Euler angles are taken again off the orientation the substeps left (S138). The wreck
         // test reads them, and so judges a landing's pitch as it lands rather than as it fell: a nose
         // down 70.06° in the air and 69.86° on its touchdown tick rides out in the original. The next
-        // frame's measure takes them again before the ground step reads them. The walk also writes
-        // the speed, which is not taken here: what reads it before then is the trick request.
-        chassis.euler = math::quat_to_euler(chassis.quat, &tables.acos);
+        // frame's measure takes them again before the ground step reads them. The measure writes the
+        // speed too, the length of the velocity the substeps left (S140): nothing in the rest of the
+        // original's frame loads it (the stunt request, idle and clocks and the wreck test read no
+        // `+0x34`), so what it reaches is what reads the bike after its update — the chase camera's
+        // target block, the speedometer, the engine's sound and, here, the shell's and the event's
+        // readers of `chassis.speed`, a frame stale until this.
+        let euler = math::quat_to_euler(chassis.quat, &tables.acos);
+        chassis::measure(chassis, dt, euler);
 
         // 5 — the stunt clocks' copy-back (S67). The state pack snapshots the node's orientation, as
         // a quaternion of its matrix, and the clocks write it straight back into the chassis; so a
