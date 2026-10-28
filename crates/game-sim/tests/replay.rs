@@ -9205,3 +9205,379 @@ fn a_free09_trunk_wrecks_as_the_original_does() {
     assert!((2.5..5.0).contains(&off(c.x(), c.z())), "against the trunk, nose first");
     assert_eq!(want.0.checked_sub(gc), Some(S100_EARLY), "the port's wreck, the original's at {}, comes S100_EARLY ticks before it (P154)", want.0);
 }
+
+// --- S129: the bike meeting free06's train, from S129's own save states -------------------------------
+//
+// Two states made from S89's along state with `research/s129/tele.py` (the bike moved, braked, and
+// saved when the train's engine had its path clock at a set value), recorded at a quarter speed with
+// `watch/s129-train.toml`:
+//
+// - **braked**: the bike braked on the z≈2319 rail at x≈3498, across it (facing +z), the engine four
+//   seconds off. The original's train runs straight through the bike: every car passes over the spot,
+//   and the bike does not move, is not thrown and does not wreck (`context/s129/shots` has the wagon
+//   round the rider).
+// - **across**: the bike 70 ft short of the rail, facing it, the train going by; the gas, into the
+//   wagons' side.
+//
+// The cars are S81's, seeded from the same image: every path car (found by its vtable), its path, its
+// numbers and its state, its collision mesh off the disc, attached to the world's props after the
+// scenery's as the shell does.
+
+/// S129's rides: `context/capture/s129/<name>.csv` and `context/states/s129-<name>.eeMemory.bin`.
+const S129_RIDES: [&str; 2] = ["braked", "across"];
+
+/// The tick each of [`S129_RIDES`] agrees through on every lane, in that order: a ratchet like
+/// [`S89_AGREES_THROUGH`].
+const S129_AGREES_THROUGH: [u64; 2] = [1, 147];
+
+/// The path car's fields (`research/oracle.txt` S81; `tests/traffic.rs` has the rest).
+mod s129_car {
+    pub const VTABLE: u32 = 0x8;
+    pub const NAME: u32 = 0x320;
+    pub const NODE: u32 = 0x254;
+    pub const WORLD: u32 = 0x80;
+    pub const MESH: u32 = 0x428;
+    pub const PATH: u32 = 0x430;
+    pub const LAST: u32 = 0x450;
+    pub const HEAD: u32 = 0x480;
+    pub const UP: u32 = 0x4a0;
+    pub const FIRST: u32 = 0x4e4;
+    pub const CURSOR: u32 = 0x4f4;
+    pub const DIRTY: u32 = 0x4fc;
+    pub const TIME_SCALE: u32 = 0x534;
+    pub const LAG: u32 = 0x558;
+    pub const HEADING_FILTER: u32 = 0x55c;
+    pub const NORMAL_FILTER: u32 = 0x560;
+    pub const KEYS: u32 = 0x8;
+    pub const CLOCK: u32 = 0xc;
+    pub const KEY: u32 = 0x30;
+}
+
+impl SaveState {
+    /// Every path car in the image, in address order: an object whose vtable is the path car's
+    /// (`path_car_vtable`) with a path and a mesh.
+    fn path_cars(&self) -> Vec<u32> {
+        let vtable = ps2_oracle::addr("path_car_vtable").expect("path_car_vtable in research/oracle.txt");
+        let ok = |a: u32| (0x10_0000..0x200_0000).contains(&a);
+        (0x10_0000u32..0x200_0000 - 0x600)
+            .step_by(16)
+            .filter(|&a| self.word(a + s129_car::VTABLE) == Some(vtable))
+            .filter(|&a| self.word(a + s129_car::PATH).is_some_and(ok) && self.word(a + s129_car::MESH).is_some_and(ok))
+            .collect()
+    }
+
+    fn mat(&self, a: u32) -> Option<Mat4> {
+        Some(Mat4([self.vf(a)?, self.vf(a + 16)?, self.vf(a + 32)?, self.vf(a + 48)?]))
+    }
+
+    fn c_string(&self, a: u32) -> String {
+        let bytes: Vec<u8> = (0..64)
+            .map_while(|k| {
+                let w = self.word((a + k) & !3)?;
+                let b = (w >> (8 * ((a + k) & 3))) as u8;
+                (b != 0).then_some(b)
+            })
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The image's path cars as the port's [`game_sim::traffic::Traffic`]: each car's path and numbers
+    /// out of RAM, its collision mesh out of `meshes` by the name the car carries.
+    fn traffic(&self, meshes: impl Fn(&str) -> Option<Vec<u8>>) -> game_sim::traffic::Traffic {
+        use game_sim::traffic::{Car, Spec, Traffic};
+        use s129_car as at;
+        let cars = self.path_cars();
+        let specs = cars
+            .iter()
+            .map(|&car| {
+                let path = self.word(car + at::PATH).unwrap();
+                let (n, keys) = (self.word(path).unwrap(), self.word(path + at::KEYS).unwrap());
+                let points: Vec<(F, Vf)> =
+                    (0..n).map(|k| keys + k * at::KEY).map(|k| (self.float(k).unwrap(), self.vf(k + 0x10).unwrap())).collect();
+                let f = |o| self.float(car + o).unwrap();
+                let col = self.c_string(car + at::NAME).to_ascii_lowercase().replace(".psg", ".col");
+                let mesh = meshes(&col).map(|b| game_sim::track::Mesh::parse(&b).unwrap_or_else(|e| panic!("{col}: {e}")));
+                assert!(mesh.is_some(), "no {col} in the track's archives");
+                Spec::new(&points, f(at::TIME_SCALE), f(at::HEADING_FILTER), f(at::NORMAL_FILTER), f(at::LAG), mesh).expect("a path")
+            })
+            .collect();
+        let mut traffic = Traffic::new(specs);
+        traffic.cars = cars
+            .iter()
+            .map(|&car| Car {
+                clock: self.float(self.word(car + at::PATH).unwrap() + at::CLOCK).unwrap(),
+                seg: self.word(car + at::CURSOR).unwrap(),
+                point: self.vf(car + at::LAST).unwrap(),
+                head: self.vf(car + at::HEAD).unwrap(),
+                normal: self.vf(car + at::UP).unwrap(),
+                first: self.word(car + at::FIRST).unwrap() != 0,
+                pose: self.mat(self.word(car + at::NODE).unwrap() + at::WORLD).unwrap(),
+                stale: self.word(car + at::DIRTY).unwrap() == 0,
+                level: Default::default(),
+            })
+            .collect();
+        traffic
+    }
+}
+
+impl SaveState {
+    /// Whether the bike's nearby search (`rider +0x7bc`: the list at `+0`, its count at `+4`, eight
+    /// bytes a candidate) holds any of the path cars' meshes. Its wheel probe and body rays collide
+    /// only against that list, and the list is gathered again only once the bike has moved out of its
+    /// bound (`broad_phase::Search`), so a bike that last gathered as a ghost — whose categories leave
+    /// out `0x40`, the cars', toys' and bikes' bit — and has stood since never meets a car.
+    fn bike_search_holds_cars(&self) -> bool {
+        const BIKE_SEARCH: u32 = 0x7bc;
+        let meshes: Vec<u32> = self.path_cars().iter().map(|&c| self.word(c + s129_car::MESH).unwrap()).collect();
+        let search = self.rider_at(BIKE_SEARCH).expect("the bike's search");
+        let (list, count) = (self.word(search).unwrap(), self.word(search + 4).unwrap());
+        (0..count).any(|k| meshes.contains(&self.word(list + 8 * k).unwrap()))
+    }
+}
+
+/// [`in_the_world_on`] on free06 with the state's path cars in it: the scenery's props, then the cars'
+/// meshes ([`game_sim::traffic::Traffic::attach`]) when the state's bike search holds them
+/// ([`SaveState::bike_search_holds_cars`]; the cars run either way), and the traffic to put in the
+/// sim. Named rather than found from the rows ([`recorded_on`]): a bike that stands still fits every
+/// area's ground.
+fn in_the_world_with_cars<R>(
+    st: &SaveState,
+    phy: &str,
+    model: &str,
+    then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>, game_sim::traffic::Traffic) -> R,
+) -> Option<R> {
+    let mut disc = Disc::open()?;
+    let area = Area::all_of(&mut disc, "Tracks\\free06.res").into_iter().next()?;
+    let (mut props, _) = area.props(&mut disc);
+    let mut parts = Vec::new();
+    for name in [area.named.track.clone(), area.named.track.replace(".res", "_2.res")] {
+        if let Some(bytes) = disc.member(&name) {
+            if let Ok(res) = Res::parse(&bytes) {
+                parts.push((bytes, res));
+            }
+        }
+    }
+    let mut traffic = st.traffic(|want| parts.iter().find_map(|(bytes, res)| by_suffix(res, want).and_then(|e| res.read(bytes, e).ok())));
+    if st.bike_search_holds_cars() {
+        traffic.attach(&mut props);
+    }
+    let terrain = Terrain::parse(&area.terrain).ok()?;
+    let ground = Ground::new(&terrain, &area.scene.terrain);
+    let tables = Arc::new(RiderTables::build());
+    let bike = the_bike_named(&mut disc, &tables, phy).map(|phy| {
+        let mounts = the_wheels_of(&mut disc, model).expect("the bike model's tire nodes");
+        Ridden { tables: Arc::clone(&tables), phy, mounts }
+    });
+    let mut place = Place { ground, props };
+    Some(then(&mut place, &area.named, bike, traffic))
+}
+
+/// **S129: the bike meeting the Dallas train, in the original and replayed.**
+#[test]
+fn the_bike_meets_the_dallas_train_as_the_original_does() {
+    for (k, name) in S129_RIDES.iter().enumerate() {
+        let path = private_dir("capture").join("s129").join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("no {} — `watch/s129-train.toml` says how it is recorded", path.display());
+            continue;
+        };
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let image = private_dir("states").join(format!("s129-{name}.eeMemory.bin"));
+        let Some(st) = SaveState::open_image(&image, &S89_RIDER) else { continue };
+        let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+        let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, named, bike, traffic| {
+            assert_eq!(traffic.cars.len(), 21, "{name}: free06's path cars");
+            let mut sim = acceptance_start(&cap, 0, bike).unwrap();
+            sim.traffic = traffic;
+            let ride = &mut sim.rider.ride;
+            st.seed_chassis(ride).expect("the chassis");
+            st.seed_wheels(ride).expect("both wheels");
+            st.seed_balance(ride).expect("the balance");
+            st.seed_engine_outputs(ride).expect("the engine");
+            st.seed_air(ride).expect("the air state");
+            if let Some(d) = st.drivetrain() {
+                d.seed(ride);
+            }
+            st.seed_levers(ride).expect("the levers");
+            st.seed_engine_state(ride).expect("the engine's state");
+
+            let mut watches = Vec::new();
+            for (col, path) in chassis_lanes() {
+                let Ok(w) = cap.float(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, path) in slip_lanes() {
+                let Ok(w) = cap.bool(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, wheel) in [("f", "front"), ("r", "rear")] {
+                for (c, p) in [("ray_hit", "w.ray_hit"), ("swept", "w.swept_contact")] {
+                    if let Ok(w) = cap.int(&format!("{col}_{c}"), &format!("rider.ride.{wheel}.{p}")) {
+                        watches.push(retick(w, &ticks, 0));
+                    }
+                }
+            }
+            // A row's train is a tick ahead of its bike: the recorder reads after the next frame has
+            // run its path cars and before it runs the bike, the port's order (cars, then rider).
+            if let Ok(w) = cap.float("train_clock", "cars[0].clock") {
+                watches.push(retick(w, &ticks, 1));
+            }
+            let last = *ticks.last().unwrap() as usize + 1;
+            let mut pads = inputs.clone();
+            pads.resize(last.max(pads.len()), Input::default());
+            let f = Fixture {
+                name: format!("s129 {name} from its save state"),
+                seed: 0,
+                start: Some(sim.clone()),
+                inputs: pads.clone(),
+                watches,
+                world: Some(named.clone()),
+                ..Default::default()
+            };
+            let parts = |f: &Fixture, world: &mut dyn World| match replay::verify_in(f, world) {
+                Ok(_) => {
+                    println!("{}: agrees on every tick", f.name);
+                    None
+                }
+                Err(d) => {
+                    println!("{}: {d}", f.name);
+                    Some(d.tick)
+                }
+            };
+            let whole = parts(&f, world);
+            let mut apart = Vec::new();
+            for w in &f.watches {
+                let one = Fixture { name: format!("  {}", w.path), watches: vec![w.clone()], hashes: Vec::new(), ..f.clone() };
+                if parts(&one, world).is_some() {
+                    apart.push(w.path.clone());
+                }
+            }
+            // The train runs as the original's in both, every tick. Braked, the bike's search holds no
+            // car (the_parked_bike_never_gathers_the_train) and the port, with none in its scene, keeps
+            // the original's place, wheel contacts and ground under the whole train: only the creep the
+            // original has at tick 2 (a few thousandths of a foot a second, not the port's) parts it.
+            let must_agree: &[&str] = match *name {
+                "braked" => &[
+                    "cars[0].clock",
+                    "rider.ride.chassis.cofg[0]",
+                    "rider.ride.chassis.cofg[1]",
+                    "rider.ride.chassis.cofg[2]",
+                    "rider.ride.front.w.ground_normal[1]",
+                    "rider.ride.rear.w.ground_normal[1]",
+                    "rider.ride.front.w.ray_hit",
+                    "rider.ride.front.w.swept_contact",
+                    "rider.ride.rear.w.ray_hit",
+                    "rider.ride.rear.w.swept_contact",
+                ],
+                _ => &["cars[0].clock"],
+            };
+            for path in must_agree {
+                assert!(f.watches.iter().any(|w| w.path == *path), "{name}: no {path} lane");
+                assert!(!apart.iter().any(|p| p == path), "{name}: {path} parts from the original");
+            }
+
+            // Where each was, every ten ticks.
+            let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+            let num = |r: usize, c: &str| -> f32 { cell(&cap, r, col(c)).parse().unwrap_or(f32::NAN) };
+            if *name == "braked" {
+                // The original's bike under the train: never shoved (it creeps 0.18 ft down the bed over
+                // the twelve seconds, braked, the port's cofg with it bit for bit), never down.
+                for r in 0..cap.rows.len() {
+                    for c in ["ch_cofg.x", "ch_cofg.y", "ch_cofg.z"] {
+                        assert!((num(r, c) - num(0, c)).abs() < 0.25, "braked row {r}: the original's bike moved on {c}");
+                    }
+                    assert_eq!(num(r, "wreck_reason"), 0.0, "braked row {r}: the original's bike went down");
+                }
+            }
+            let mut port = sim.clone();
+            let mut at = Vec::with_capacity(last);
+            let mut wrecked = None;
+            for t in 1..last {
+                let frame = port.tick_in(pads[t - 1], world);
+                if wrecked.is_none() {
+                    wrecked = frame.wreck.map(|w| (t, w));
+                }
+                let c = port.rider.ride.chassis.cofg_world;
+                at.push((t as u64, [c.x(), c.y(), c.z()], wrecked.is_some(), port.traffic.cars[0].pose.0[3].x()));
+            }
+            println!("{name}: the port's first wreck {wrecked:?}");
+            for (r, &t) in ticks.iter().enumerate().step_by(10) {
+                if let Some((_, p, wrecked, engine)) = at.iter().find(|(pt, ..)| *pt == t) {
+                    println!(
+                        "{name} tick {t:4}: original cofg ({:.2}, {:.2}, {:.2}) wreck {} engine x {:.2} | port ({:.2}, {:.2}, {:.2}) wrecked {wrecked} engine x {engine:.2}",
+                        num(r, "ch_cofg.x"), num(r, "ch_cofg.y"), num(r, "ch_cofg.z"), num(r, "wreck_reason"), num(r, "train_pos.x"), p[0], p[1], p[2]
+                    );
+                }
+            }
+            match whole {
+                Some(t) if t <= S129_AGREES_THROUGH[k] => panic!(
+                    "{name} parts from the original at tick {t}, at or before S129_AGREES_THROUGH[{k}] = {}: a regression",
+                    S129_AGREES_THROUGH[k]
+                ),
+                Some(t) if t > S129_AGREES_THROUGH[k] + 1 => println!("{name} now agrees through tick {}: raise S129_AGREES_THROUGH[{k}]", t - 1),
+                None => println!("{name} agrees on every tick: raise S129_AGREES_THROUGH[{k}]"),
+                _ => {}
+            }
+        });
+    }
+}
+
+/// **S129: why the braked bike never meets the train.** The bike's wheel probe and body rays collide
+/// only against its nearby search's list ([`SaveState::bike_search_holds_cars`]), and in the braked
+/// state that list was last gathered while the bike was a ghost: it holds the scenery, a placed group
+/// and the race gates, and nothing whose category has the ghost's `0x40` (the cars, toys and bikes).
+/// The bike stands, so the list is never gathered again and the train runs through it. In the across
+/// state the list holds every path car. Then, from the braked image saved at frame 16344 (the front
+/// wheel's ray inside the second wagon's side): the port's wheel probe, built from the image's own
+/// wheels over the scenery alone, records what the original's did — the rail under both rays, its
+/// face's normal bit for bit (with the wagons in the scene it records the wagon's side instead).
+#[test]
+fn the_parked_bike_never_gathers_the_train() {
+    const GHOST: u32 = 0x40;
+    for (name, holds) in [("braked", false), ("braked-12", false), ("across", true)] {
+        let image = private_dir("states").join(format!("s129-{name}.eeMemory.bin"));
+        let Some(st) = SaveState::open_image(&image, &S89_RIDER) else { continue };
+        assert_eq!(st.bike_search_holds_cars(), holds, "{name}: the path cars in the bike's search");
+        let search = st.rider_at(0x7bc).unwrap();
+        let (list, count) = (st.word(search).unwrap(), st.word(search + 4).unwrap());
+        let ghostly = (0..count).filter(|&k| st.word(st.word(list + 8 * k).unwrap() + 0x84).unwrap() & GHOST != 0).count();
+        println!("{name}: {count} candidates, {ghostly} of them with the ghost's category");
+        assert_eq!(ghostly == 0, !holds, "{name}: candidates in the ghost's category");
+    }
+
+    let image = private_dir("states").join("s129-braked-12.eeMemory.bin");
+    let Some(st) = SaveState::open_image(&image, &S89_RIDER) else { return };
+    let path = private_dir("capture").join("s129").join("braked.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let cap = Capture::parse(&text).unwrap();
+    let original = st.wheel_record();
+    assert_eq!(original.len(), 2, "both rays struck in the original");
+    in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, _named, bike, _traffic| {
+        let mut sim = acceptance_start(&cap, 0, bike).unwrap();
+        let ride = &mut sim.rider.ride;
+        st.seed_chassis(ride).unwrap();
+        st.seed_wheels(ride).unwrap();
+        let rays = game_sim::ride::wheel_rays(&ride.front.w, &ride.rear.w);
+        assert_eq!(bits_of_rays(&rays), bits_of_rays(&st.wheel_probe().unwrap()), "the wheel probe");
+        let node = game_sim::rider_contact::node(&ride.transform());
+        let (field, props, trees) = world.wooded();
+        let bounds = field.as_ref().map(|f| {
+            let (lo, hi) = (f.min(), f.max());
+            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+        });
+        let mut search = game_sim::broad_phase::Search { least: F(30.0), extra: F(50.0), capacity: 256, ..Default::default() };
+        let mut scene = game_sim::flight_search::Scene::wooded(props, trees, None, bounds, &rays, &node, &mut search);
+        let _ = game_sim::contact_search::Search::rays(&mut scene, true);
+        let port = &scene.ray_record().contacts;
+        assert_eq!(port.len(), original.len(), "the wheel probe's contacts at frame 16344");
+        for (c, (point, normal, fraction)) in port.iter().zip(&original) {
+            println!("ray {}: port {:?} {:?} {:?}, original {point:?} {normal:?} {fraction:?}", c.segment, c.point, c.normal, c.fraction);
+            // The normal is the rail's face, bit for bit; the point and the fraction a few ulps apart,
+            // the probe having run from the substep's pose and not the frame's end the image holds.
+            assert_eq!([c.normal.x(), c.normal.y(), c.normal.z()].map(f32::to_bits), [normal.x(), normal.y(), normal.z()].map(f32::to_bits));
+            assert!([c.point.x() - point.x(), c.point.y() - point.y(), c.point.z() - point.z()].iter().all(|d| d.abs() < 0.001) && (c.fraction.0 - fraction.0).abs() < 0.001, "ray {}", c.segment);
+        }
+    });
+}

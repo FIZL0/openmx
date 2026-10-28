@@ -5938,3 +5938,37 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # 0x00390340, 0x00391f10). No put-back resets it. The ramp runs on every frame with the lever out until
 # the timer passes the time, gas or no gas, so a fresh bike spends it standing. P21's and S100's captured
 # launches drive at the engine's own torque (24.028 at 4500 rpm full gas, x1).
+# S129 — the bike meeting free06's train. Journal: research/journal/2026-10-27-s129-bike-meets-the-train.
+# Proofs: crates/game-sim/tests/replay.rs the_bike_meets_the_dallas_train_as_the_original_does and
+# the_parked_bike_never_gathers_the_train (states and quarter-speed captures in s2's context/states and
+# context/capture/s129, made with research/s129/*.py and watch/s129-train.toml). No new function.
+# Order: a capture row's train clock (engine path +0xc) is the port's car clock one bike tick on, on
+# every row of both rides: the frame runs the path cars before the bike, the port's order.
+# The bike's wheel probe (+0x7c8) collides only against the bike's nearby search: 0x00257a00 clears
+# +0x7d4, marks the probe moved (vt +0xa8) and calls collide_against_search(+0x7c8, *(bike+0x7bc)) at
+# 0x00257868, before the substeps. A candidate is tried only when its distance (from the gather) is
+# <= the wheel probe's reach +0x60 (2.79). The search (list +0, count +4, 8 bytes a candidate: object,
+# distance; centre +0x10, bound +0x20, least +0x24 30, extra +0x28 50, built +0x30, capacity +0x34
+# 0x100) is gathered once a tick after the substeps around the body rays +0x7c4 (S114's 0x00258374),
+# and collision_search_gather does nothing unless the probe's reach left the bound (+0x20, 44.07 in the
+# braked image) of where it was last gathered. The gather keeps a candidate through
+# collision_pair_filter(body rays, candidate, 0): the body rays' +0xe8 category list (mode 1, exclude)
+# holds the ghost's [0x468f68] = 0x40 while the bike is a ghost, which drops every 0x40 category: the
+# path cars' meshes (category 0x48), the toys (0x48) and the bikes (0x9a048).
+# So a bike that last gathered as a ghost and has not moved its bound since meets no car: S129's braked
+# state (the bike put on the rail by tele.py from a pause-menu switch) holds 11 candidates — two
+# scenery meshes (0x220), a placed group and eight race gates (0x200020) — and the whole train runs
+# through it, the bike creeping 0.18 ft down the bed, braked, no wreck (the port, with no car in its
+# scene, agrees on the place and the wheel contacts on all 360 ticks). In frame 16344 of that ride the
+# front ray is inside the second wagon's side and the record (+0x6c) holds the rail under both rays.
+# The across state (the bike 70 ft off, having moved) holds 36: the 21 path cars, two more 0x48 toys,
+# three bikes and the gates, plus the scenery.
+# The car's mesh collidable (car +0x428): +0x84 0x48, +0xcc ~0, +0x116 0x15, +0x31 bit 0 set, object
+# list (mode 1) its own car body, empty category list (mode 1). The wheel probe: +0x84 0x18000, +0xcc
+# ~0, +0xe8 mode 1 [0x100, 0x2000], object list the body rays, f.col and the sweep. The pair filter
+# admits the car for both the wheel probe and the body rays.
+# +0x1e0, the collidable's previous matrix: written by 0x001edb60/0x001ed9f0 with the node's last pose
+# (the copy at car +0x2e0); in the braked images +0x120 and +0x1a0 are the node's current pose and
+# +0x1e0 the previous one. A scan of boot.elf for loads at +0x1e0..+0x21c off a collidable in the
+# contact code (the ray/sweep pairs, collide_against_search's callees) found no reader: the contact
+# uses the current +0x120. Not traced live.
