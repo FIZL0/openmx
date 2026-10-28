@@ -376,9 +376,11 @@ fn the_walk_names_every_field_once() {
     // MD16 moved the size alone (2424 before it): MX vs. ATV's moves' state, boxed and walked only
     // when a trick pack is on — `None`, as here, is no leaf. S83 moved the size alone (2432 before
     // it): the put-back query's gathered list, boxed and walked only once a world with props or
-    // plants has been asked — `None` here too.
+    // plants has been asked — `None` here too. P158 moved the size alone (2440 before it): the held
+    // levers' steer/throttle locks and start-line latch, which nothing in the original's ride sets,
+    // not walked.
     assert_eq!(dump.fields.len(), 631, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2440, "the ride's own size");
+    assert_eq!(std::mem::size_of::<Ride>(), 2448, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");

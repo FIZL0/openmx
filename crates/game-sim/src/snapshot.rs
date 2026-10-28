@@ -662,7 +662,7 @@ wire!(crate::rider::PutBack { placed, filled, held, wreck });
 wire!(crate::event::Seat { left, ridden, taking_part, out, paused, reached, warning, saved });
 wire!(crate::event::Competition { target, seats, limit, length, interval, elapsed, tally, counting, running, over, timed_out, ended, clock, leader, tie, heard });
 wire_enum!(crate::event::Verdict { Win, Lose, Tie });
-wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out });
+wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out, gate_penalty });
 wire!(crate::score::Node { flags, id, points, base, rate, mult, extra, held, granularity });
 wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching, search });
 wire!(crate::ragdoll_scene::BikeSearch { stood, centre, bound, built, listed, distance });
@@ -808,7 +808,8 @@ wire!(crate::vehicle_anim::Request { held, at_base, cut, offset, base, rotation,
 wire!(crate::biplane::Area { width, depth });
 wire!(crate::biplane::Attitude { flown, grounded, nose_y, roll, speed, pitch_rate });
 wire!(crate::input::EventQueue { count, events });
-wire!(crate::ride::Held { gas, brake, front_brake, rear_brake, clutch, stick, digital, lean, flick, ring, reverse });
+wire!(crate::ride::Held { gas, brake, front_brake, rear_brake, clutch, stick, digital, lean, flick, ring, reverse, lock });
+wire!(crate::ride::Lock { steer, throttle, steer_was, latch });
 wire!(crate::rider_anim::Machine { mode, prev, places_itself, thrown, loose, spin, roll, touching, flung, stiff });
 wire!(crate::biplane::Measure { grounded, was_grounded, airspeed, alpha, beta, world_rates, velocity, forward, up, euler, matrix });
 wire!(crate::state::Owner { human, screen });

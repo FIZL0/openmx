@@ -151,6 +151,11 @@ pub struct Controls {
     /// (`+0xa44`, [`crate::trick::Tricks::no_hander`] as the rider's last tick left it). The limiter
     /// holds the gas at 0 while it is set (P77). A pad leaves it false; the rider fills it in.
     pub hands_off: bool,
+    /// **The rider's, not the pad's:** the card's start-gate penalty is running
+    /// ([`crate::score::Score::gate_penalty`], the card's `+0x1c0` above 0), and the bike's tick
+    /// cuts the gas lever before its limiter reads it (P158, [`Controls::gate_cut`]). A pad leaves it
+    /// false; the rider fills it in.
+    pub gas_cut: bool,
 }
 
 impl Controls {
@@ -211,6 +216,7 @@ impl Controls {
                 || (pressed(Command::RESET_RIGHT) && held(Command::RESET_LEFT)),
             extra: [false; trick::EXTRA_BUTTONS],
             hands_off: false,
+            gas_cut: false,
         }
     }
 }
@@ -283,6 +289,16 @@ impl Controls {
     }
 }
 
+impl Controls {
+    /// The bike tick's own cut, after the pad read and before the limiter (P158): while the card's
+    /// start-gate penalty runs ([`Controls::gas_cut`]) the gas lever is 0. The penalty is set by a
+    /// race's closed start gate pushing back a rider who crossed it, for one to two seconds; the
+    /// freeride and the freestyle event never set it.
+    pub fn gate_cut(self) -> Controls {
+        if self.gas_cut { Controls { gas: F::ZERO, ..self } } else { self }
+    }
+}
+
 /// The forward speed below which gas and brake held together reverse the bike
 /// ([`Controls::reverse_rule`]), in the bike's feet a second.
 pub const REVERSE_BELOW: f32 = 5.0;
@@ -336,8 +352,33 @@ pub struct Held {
     /// The reverse command this frame's pad read left (`+0x648`, [`Controls::reverse_rule`]): what
     /// the rider's animation request copies after the physics. Not in the hash walk: it is the pad
     /// read's own output, written before anything reads it every frame, so it carries nothing from
-    /// one tick to the next.
+    /// one tick to the next. The start-line latch zeroes it ([`Lock::latch`]).
     pub reverse: F,
+    /// The steer and throttle locks and the start-line brake latch (P158).
+    pub lock: Lock,
+}
+
+/// The bike's steer and throttle enables and the start-line brake latch (P158): the limiter's
+/// `+0x610`..`+0x61c`, kept the other way round (a lock where the original keeps an enable) so that
+/// a [`Held::default`] rides.
+///
+/// **Nothing in the original sets a lock during a ride.** The enables are written by the bike's
+/// set-up (on), a put-back (steering on) and the bike tick's copy from two pointers that only ever
+/// point at the enables themselves; no message, countdown or finish clears them (P158 scanned every
+/// store in the ELF). They are here so that a scripted lock — a race of the port's own, a mod — locks
+/// the bike the original's way: [`Held::step`] runs the limiter's whole lever half on them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lock {
+    /// Steering is off (`+0x610` clear): the sideways lean is held at 0.
+    pub steer: bool,
+    /// The throttle is off (`+0x614` clear): the gas lever is held at 0.
+    pub throttle: bool,
+    /// Steering was off last frame (`+0x618`, the limiter's copy of `+0x610`).
+    pub steer_was: bool,
+    /// The start-line latch (`+0x61c`): set on the frame steering goes off; let go when steering is
+    /// back, or with the throttle on, the gas asked for and the clutch lever let go. While it is set
+    /// the brake is held full and the reverse is cut.
+    pub latch: bool,
 }
 
 impl Held {
@@ -346,15 +387,30 @@ impl Held {
         // The gas and the brake only *rise* at their rates: let go, either is the lever at once
         // (S58). That is the original's limiter, and why a released throttle hands the engine its
         // own braking on the same tick rather than two ticks later.
-        // Both hands off the bars, no gas at all (`+0xa44`).
-        self.gas = if c.hands_off { F::ZERO } else { rise(self.gas, c.gas, j.gas_rate_limit, dt) };
-        self.brake = rise(self.brake, c.brake, j.brake_rate_limit, dt);
+        // The start-line latch first (P158), in the limiter's order: set as steering goes off, let go
+        // as it comes back or as the rider pulls away (throttle on, gas asked, clutch let go); while it
+        // is set the brake is full and there is no reverse.
+        let l = &mut self.lock;
+        if l.steer && !l.steer_was {
+            l.latch = true;
+        }
+        if l.latch && (!l.steer || (!l.throttle && c.gas > F::ZERO && c.clutch == F::ZERO)) {
+            l.latch = false;
+        }
+        let brake = if l.latch { F::ONE } else { c.brake };
+        if l.latch {
+            self.reverse = F::ZERO;
+        }
+        l.steer_was = l.steer;
+        // Both hands off the bars, or the throttle off, no gas at all (`+0xa44`, `+0x614`).
+        self.gas = if c.hands_off || self.lock.throttle { F::ZERO } else { rise(self.gas, c.gas, j.gas_rate_limit, dt) };
+        self.brake = rise(self.brake, brake, j.brake_rate_limit, dt);
         // One lever or two. S17 proved that `bike+0x650` is the front wheel's brake and `+0x654` the
         // rear's, and left open who writes them; the original's limiter walks `+0x650` and copies it
         // to `+0x654`. A shell with one brake button writes both, so the general brake is folded into
         // each and a wheel's own lever can only ask for more.
-        self.front_brake = rise(self.front_brake, c.front_brake.max(c.brake), j.brake_rate_limit, dt);
-        self.rear_brake = rise(self.rear_brake, c.rear_brake.max(c.brake), j.brake_rate_limit, dt);
+        self.front_brake = rise(self.front_brake, c.front_brake.max(brake), j.brake_rate_limit, dt);
+        self.rear_brake = rise(self.rear_brake, c.rear_brake.max(brake), j.brake_rate_limit, dt);
         // The clutch has a rate each way: in fast, out slow, which is how a launch is held.
         let clutch_rate =
             if self.clutch < c.clutch { j.clutch_in_rate_limit } else { j.clutch_out_rate_limit };
@@ -368,7 +424,9 @@ impl Held {
         self.stick = (squared(raw.x), squared(raw.y));
         let rx = if raw.digital[0] { j.x_dpad_rate_limit } else { j.x_axis_rate_limit } * dt;
         let ry = if raw.digital[1] { j.y_dpad_rate_limit } else { j.y_axis_rate_limit } * dt;
-        self.lean = (limit(self.lean.0, self.stick.0, rx), limit(self.lean.1, self.stick.1, ry));
+        // Steering off holds the sideways lean at 0 (`+0x670`); the fore-aft lean still walks.
+        let lean_x = if self.lock.steer { F::ZERO } else { limit(self.lean.0, self.stick.0, rx) };
+        self.lean = (lean_x, limit(self.lean.1, self.stick.1, ry));
     }
 }
 
@@ -1994,7 +2052,7 @@ impl Ride {
 
         // 0 — the tail of the pad read: the stoppie's brake, and gas and brake held together, slow,
         // are the reverse.
-        let c = &c.pad_read_tail(ride.stoppie, p.pitch.stoppie_brake, F(air.contact_vel.z()), air.airborne);
+        let c = &c.pad_read_tail(ride.stoppie, p.pitch.stoppie_brake, F(air.contact_vel.z()), air.airborne).gate_cut();
         held.reverse = c.reverse;
 
         // 1 — the input layer's rate limit.
@@ -2049,7 +2107,7 @@ impl Ride {
             // idle rule below — which writes `+0x65c` — from rearming or stalling that ramp.
             clutch: c.clutch,
             gas_rate_limited: held.gas,
-            reverse: c.reverse,
+            reverse: held.reverse,
             balancing: c.balance,
             // Per substep, in the loop: see [`mv::g_peak`]'s call below.
             local_accel: mv::NOTHING,
