@@ -544,6 +544,10 @@ impl Down {
             b.props = props.map_or_else(Vec::new, |p| crate::ragdoll_scene::StillProp::near(&p.props, &self.statics, probe, reach));
             b.bike_at = self.statics.bike_at;
         }
+        // The bones' segments are offered the bike through its collidable's sphere (S166).
+        if let Some(b) = &mut bike_scene {
+            b.sphere = bike;
+        }
         let scene: &mut dyn crate::ragdoll_contact::Scene = match &mut bike_scene {
             Some(b) => b,
             None => &mut open,

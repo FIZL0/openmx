@@ -6494,3 +6494,19 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # with one mesh, a mesh and its nearest, or one mesh twice through sphere_collider_pair, bit for bit
 # (12,465 hits; the second took 64); 10,000 bone_collision_push_out with the contact's other a scene
 # mesh equal the port's against STILL (0,0,0,1), bit for bit.
+# S166 — the bones' segment sweep against the wreck bike and the path cars. Journal:
+# research/journal/2026-10-28-s166-bone-sweep-class-filter.
+# Port: ragdoll_scene.rs sweep_through / class, WreckBikeScene::sweep;
+# tests/ragdoll_cars.rs the_bones_sweep_through_the_cars_as_the_originals,
+# tests/ragdoll_wrecks.rs the_bones_sweep_against_the_wreck_bike_as_the_originals.
+# bone_collision_sweep (0x001f7400): with +0x24 and +0x8c set, the segment runs from pos - vel*(+0x28)
+# (xyz; the start keeps the bone's w, as the replays show) to pos; 0x001e8850 sets it, 0x00119be0 refreshes the probe,
+# then collide_against_search(probe, c+0x84) (0x0011a9d0); on probe +0x116 & 0x20 it sets +0x1c and
+# +0x20, point from the record +0x30, normal from +0x20, and pushes out (0x001f6c40).
+# The probe (+0x8c) is a sweep probe (ctor 0x001e80f0, vtable 0x00451910). The bone collision's ctor
+# 0x001f66c0 calls 0x0011b070(probe, 0) (include mode) and 0x0011b080(probe, [0x00468f60] = 0x20):
+# every bone's segment includes only class 0x20, the track's static scenery (its 161 mesh
+# collidables carry 0x220). Path cars are class 0x48 (all 21 in s89-along), the wreck bike's
+# collidable 0x9a058 (s62 front 2603): the filter (0x00119d70) drops both, so the original's bones
+# never sweep against the bike or a car — a fast bone goes through a wagon's wall in the game too.
+# Widening the include word (0x8) in RAM runs the pair on their meshes; the port matches bit for bit.
