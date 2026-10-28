@@ -310,6 +310,32 @@ fn repeated(cap: &Capture, frame: u32) -> bool {
         && cap.quad(frame, "bone0.pos") == cap.quad(frame - 1, "bone0.pos")
 }
 
+/// Whether the recorder read row `frame` in its tick before the body's update ran (S147): the
+/// recorder wakes on the frame counter, which the main loop steps before it simulates, so such a row
+/// holds the tick before's bones and request under the new counter while the generator has moved on.
+/// The tick ran all the same: the next row holds two steps, the first on a request no row carries.
+fn torn(cap: &Capture, frame: u32) -> bool {
+    cap.int(frame, "rng_state") != cap.int(frame - 1, "rng_state")
+        && (0..18).all(|i| BODY.iter().all(|(n, _)| {
+            let col = format!("bone{i}.{n}");
+            bits(cap.quad(frame, &col)) == bits(cap.quad(frame - 1, &col))
+        }))
+}
+
+/// Every bone's captured body (the six quads of [`BODY`]) of row `frame` written into the Ee: past a
+/// torn row the replay goes on from the original's own bones.
+fn lay_bones(ee: &mut Ee, cap: &Capture, frame: u32) {
+    for i in 0..18 {
+        let body = bone_body(ee, i);
+        for (name, o) in BODY {
+            let q = cap.quad(frame, &format!("bone{i}.{name}"));
+            for l in 0..4 {
+                ee.set_u32(body + o + 4 * l as u32, q[l].to_bits());
+            }
+        }
+    }
+}
+
 fn rng_at(ee: &Ee) -> u64 {
     let at = addr("rand_state").unwrap();
     u64::from(ee.u32_at(at)) | u64::from(ee.u32_at(at + 4)) << 32
@@ -1607,20 +1633,24 @@ fn the_ports_tick_is_the_originals_to_rest() {
 /// S62's captures (`research/s62_wreck.py`, context/capture/s62): each wreck's first state, and the
 /// last tick the original's own update holds every captured bone through with the wreck bike's
 /// object and the broad phase's pools laid in (tests/ragdoll_bike.rs) and the bike kept in the
-/// track's tree where the game keeps it (S113: front stopped at 2627 without it).
+/// track's tree where the game keeps it (S113: front stopped at 2627 without it). Front's three
+/// torn rows (2889, 2892, 2894: [`torn`]) and the double steps after them are run but not compared,
+/// and the bones laid in from the row after each (S147: front stopped at 2888 without it).
 const S62: [(&str, u32, u32); 5] =
-    [("front", 2602, 2888), ("side", 2607, 3146), ("back", 2477, 3179), ("tip", 2472, 3179), ("front3", 2630, 2687)];
+    [("front", 2602, 3180), ("side", 2607, 3146), ("back", 2477, 3179), ("tip", 2472, 3179), ("front3", 2630, 2687)];
 
 /// **The port replays each s62 wreck through the bike to the rider at rest** (S62): from each
 /// wreck's first state the port's actor runs on its own state, tick after tick, handed only the
 /// world's answers the original heard (the ground, the scene's hits and what each is with, the
 /// sweeps, the skeleton), and every number the update writes is compared with the original's tick,
 /// bit for bit. Up to the last tick the original holds the capture through, that is the game's own
-/// wreck; past it (front's last 292 ticks) the original runs on in the oracle from its own state.
+/// wreck (side's last 34 ticks run on in the oracle from its own state). A torn row and the one after
+/// it are the original's ticks on the capture's request, compared with the port but not with the
+/// capture; the port then takes the original's actor with the next row's bones laid in.
 #[test]
 fn the_port_replays_the_wrecks_through_the_bike() {
     let mut went = Went::default();
-    let (mut hits, mut exact) = (0, 0);
+    let (mut hits, mut exact, mut gaps) = (0, 0, 0);
     for (name, start, to) in S62 {
         let w = Wreck { name, frame: start };
         let Some(cap) = Capture::load_in("s62", name) else { return };
@@ -1633,7 +1663,8 @@ fn the_port_replays_the_wrecks_through_the_bike() {
                 frame += 1;
                 continue;
             }
-            let (n, drew) = if frame <= to {
+            let gap = torn(&cap, frame) || torn(&cap, frame - 1);
+            let (n, drew) = if frame <= to && !gap {
                 let before = Snapshot::of(&ee);
                 let (n, drew) = originals_tick(&mut ee, &cap, frame).unwrap_or_else(|d| panic!("{name}: {frame}: {:?}", &d[..d.len().min(4)]));
                 before.back(&mut ee);
@@ -1651,6 +1682,11 @@ fn the_port_replays_the_wrecks_through_the_bike() {
             }
             assert!(d.is_empty(), "{name}: tick {frame} parts in {} numbers: {:#?}", d.len(), &d[..d.len().min(12)]);
             went.add(&was, &ee);
+            if gap && !torn(&cap, frame) {
+                lay_bones(&mut ee, &cap, frame);
+                port = None;
+                gaps += 1;
+            }
             frame += 1;
         }
         eprintln!("{name}: {start}..{}, the capture's own to {to}, settles {}", frame - 1, went.settles - settles);
@@ -1658,8 +1694,10 @@ fn the_port_replays_the_wrecks_through_the_bike() {
     eprintln!("{went:?}, {exact} ticks the capture's own, {hits} with a moving hit");
     // Every wreck through to the bones at rest, each settling once (front3's state is from inside its
     // wreck, so four entries), and the hits against the wreck bike's body: told they
-    // were with the still scenery instead, the port parts at front's 2611.
-    assert!(went.ticks >= 2600 && exact >= 2000 && went.entries == 4 && went.settles == 5 && went.settled > 2500, "{went:?}, {exact} exact");
+    // were with the still scenery instead, the port parts at front's 2611. Front's three torn rows
+    // are the only gaps (S147).
+    assert_eq!(gaps, 3, "the torn rows");
+    assert!(went.ticks >= 2600 && exact >= 2500 && went.entries == 4 && went.settles == 5 && went.settled > 2500, "{went:?}, {exact} exact");
     assert!(hits >= 11, "{hits} ticks with a moving hit");
 }
 
@@ -2012,7 +2050,8 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
                 frame += 1;
                 continue;
             }
-            let n = if frame <= to {
+            let gap = torn(&cap, frame) || torn(&cap, frame - 1);
+            let n = if frame <= to && !gap {
                 let before = Snapshot::of(&ee);
                 let (n, _) = originals_tick(&mut ee, &cap, frame).unwrap_or_else(|d| panic!("{name}: {frame}: {:?}", &d[..d.len().min(4)]));
                 before.back(&mut ee);
@@ -2146,6 +2185,9 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
             assert_eq!(format!("{ours:?}"), format!("{theirs:?}"), "{name} {frame}: the search");
             assert!(k.wrong.is_empty(), "{name} {frame}: {:#?}", &k.wrong[..k.wrong.len().min(6)]);
             drop(k);
+            if gap && !torn(&cap, frame) {
+                lay_bones(&mut ee, &cap, frame);
+            }
             frame += 1;
         }
     }
@@ -3175,4 +3217,51 @@ fn every_2p_wrecks_bones_are_the_originals() {
     assert!(held >= TWO_P_BONES_TO_THE_WRECK, "only {held} runs held the captured bones to the wreck (was {TWO_P_BONES_TO_THE_WRECK})");
     assert!(on_row >= TWO_P_SWITCHES_ON_THE_ROW, "only {on_row} mode switches on the capture's row (was {TWO_P_SWITCHES_ON_THE_ROW})");
     assert!(went.touching > 0 && went.landed > 0 && went.settles >= entered - 1, "the runs never touched, landed or settled: {went:?}");
+}
+
+// --- S147: front's 2889, the row read before the tick -------------------------------------------
+
+/// **Front parts at 2889 because the capture's row was read before the tick** (S147), not because of
+/// a collidable: the bike is out of the broad phase (since 2681) and the tick makes no sphere test.
+/// Front's capture has three torn rows ([`torn`]), 2889, 2892 and 2894, and the other s62 captures
+/// none. Row 2889 is row 2888's word for word, bones, request and the race clock alike, and only the
+/// generator has moved on; the next row holds two steps (the clock +2 dt) and its `last_pos` is the
+/// first step's. That step ran on a request no row carries: run on 2888's request (2889's) it
+/// leaves bone 0 short of the capture's 2890 `last_pos`, on 2890's past it. With 2890's bones laid
+/// in, the original's own update holds 2891 again.
+#[test]
+fn front_2889_is_a_row_read_before_the_tick() {
+    let Some(cap) = Capture::load_in("s62", "front") else { return };
+    let Some(mut ee) = state_in("s62", &Wreck { name: "front", frame: 2602 }) else { return };
+    for (name, start, _) in S62 {
+        let Some(c) = Capture::load_in("s62", name) else { return };
+        let rows: Vec<u32> = (start + 2..).take_while(|&f| c.has(f)).filter(|&f| torn(&c, f)).collect();
+        assert_eq!(rows, if name == "front" { vec![2889, 2892, 2894] } else { vec![] }, "{name}: the torn rows");
+    }
+    for col in ["req_area", "req_far", "bike_a", "bike_b", "w05ca1f8"] {
+        assert_eq!(cap.text(2889, col), cap.text(2888, col), "{col}: row 2889 is 2888's");
+    }
+    let clock = |f: u32| f32::from_le_bytes(cap.bytes(f, "w05ca1f8")[..4].try_into().unwrap());
+    let tick = clock(2888) - clock(2887);
+    assert!(clock(2890) - clock(2888) > 1.5 * tick && clock(2891) - clock(2890) < 1.5 * tick, "two ticks between 2888 and 2890");
+    for frame in 2603..=2888 {
+        if !repeated(&cap, frame) {
+            originals_tick(&mut ee, &cap, frame).unwrap_or_else(|d| panic!("{frame}: {:?}", &d[..d.len().min(4)]));
+        }
+    }
+    let at = Snapshot::of(&ee);
+    let want = cap.quad(2890, "bone0.last_pos")[0];
+    let mut first_step = Vec::new();
+    for row in [2888, 2890] {
+        at.back(&mut ee);
+        lay_in(&mut ee, &cap, row);
+        set_rng(&mut ee, cap.int(2888, "rng_state"));
+        ee.call(addr("rider_body_update").unwrap(), &[u64::from(body_actor())], &[cap.get(2889, "dt")], 2_000_000_000);
+        assert_eq!(rng_at(&ee), cap.int(2888, "rng_state"), "the hidden tick draws nothing");
+        first_step.push(ee_bones(&ee)[0][1][0]);
+    }
+    eprintln!("bone 0's first step x on 2888's request {}, on 2890's {}, the capture's {want}", first_step[0], first_step[1]);
+    assert!(first_step[0] > want && want > first_step[1], "the hidden tick's request lies between 2888's and 2890's: {first_step:?}, want {want}");
+    lay_bones(&mut ee, &cap, 2890);
+    originals_tick(&mut ee, &cap, 2891).unwrap_or_else(|d| panic!("2891: {:?}", &d[..d.len().min(4)]));
 }
