@@ -8609,7 +8609,9 @@ fn load_bike_fx(archives: &[Res], track: &str) -> Result<(particles::PlaneFx, ga
         println!("bike: particles: {} ({:?}) from {:?}", e.name, e.kind, e.emt.group);
     }
     for (name, why) in &fx.skipped {
-        println!("bike: particles: {name} ({why}) not ported");
+        // The `TireTrack` entries are not emitters: `tire_tracks.rs` lays them (V40, P151).
+        let how = if why.eq_ignore_ascii_case("TireTrack") { "laid by the tire tracks" } else { "not ported" };
+        println!("bike: particles: {name} ({why}) {how}");
     }
     Ok((fx, texture))
 }
