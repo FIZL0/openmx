@@ -5975,6 +5975,91 @@ pc_engine_sound_load        pc 0x00472710 = engine_sound_load (str)
 pc_engine_sound_list        pc 0x00472b40 = engine_sound_list (str)
 pc_actor_manager_add        pc 0x00447650 = actor_manager_add (ActorManager::vf31)
 pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
+# R11 — the bike's per-frame virtuals, by a call-graph walk out from the rows above (`walk`: called in
+# the same place, in the same order, from a function already paired), with the float constants and the
+# branch shape as the check. Journal: research/journal/2026-10-28-r11-pc-per-frame-virtuals.
+# The PC splits bike_vehicle_update over the physics world's listeners on MXVehicleMotocross:
+# vf0_at_48 (PreProcessListener) = bike_ground_step's head, vf0_at_60 (ForceListener) = its substep
+# body (no substep loop: the physics world substeps), vf0_at_52 (PostProcessListener) = bike_air_state
+# with the no-hander and the ground step's tail. The bike's fields sit +0xacc..+0xd20 above the PS2's
+# (+0x670 -> +0x1308, +0x6c0 -> +0x1368, +0xa4c -> +0x1518, +0x550 -> +0x1270), not one constant.
+pc_bike_vehicle_update      pc 0x005fab90 = bike_vehicle_update (MXVehicleMotoShared::vf14_at_12; walk: ghost step first, then the wreck test; kinds 3/4 take the remote branch PS2 +0x80c == 2 takes)
+pc_bike_input_limiter       pc 0x005ff8b0 = bike_input_limiter (MotoShared::vf36, from PreProcess; the lean pair's slew, the hold latch; no stick squaring here)
+pc_bike_ground_head         pc 0x005f6900 = bike_ground_step's pre-loop half (Motocross::vf0_at_48; const pi/2, 14.6666/29.3333 lerps)
+pc_bike_ground_step         pc 0x005f9950 = bike_ground_step's substep body (Motocross::vf0_at_60; walk: engine_update, wheel_clear/suspension/tire_forces)
+pc_bike_air_state           pc 0x005f9ab0 = bike_air_state (Motocross::vf0_at_52; wheel-down flags, airtime, 10.0; plus the no-hander and the 0.25 tail)
+pc_bike_auto_shift          pc 0x005fb490 = bike_ground_step's inline gear block (const 7.3333, 9.549296; calls pc_bike_set_gear)
+pc_bike_clutch              pc 0x00601180 = bike_clutch (walk, fields +0xca8; the PS2's chassis +0x198 term is missing)
+pc_bike_stand_upright       pc 0x005f88e0 = bike_stand_upright (walk; const 10.0)
+pc_bike_balance             pc 0x005f82d0 = bike_balance (walk; the smooth-noise wobble, fields +0xacc)
+pc_bike_roll_pitch          pc 0x005f8530 = bike_roll_pitch (walk; const -0.1 5 7 15 500 1000, all shared)
+pc_bike_preload             pc 0x00600d80 = bike_preload (walk; const 0.8 5 30)
+pc_bike_backflip            pc 0x006003b0 = bike_backflip (walk; const 0.8 1.25 pi/2 5 30, plus -0.79)
+pc_bike_air_drag            pc 0x006012a0 = bike_ground_step's inline drag, -k 0.5 v^2 along v (walk)
+pc_bike_airborne_control    pc 0x006024e0 = bike_airborne_control (walk; const 0.1 0.4 0.5 10, plus cos 20deg)
+pc_bike_ground_pitch_torque pc 0x005f6370 = bike_ground_step's inline k (target - speed) pitch torque, rear wheel down (walk; body 0x005fb420)
+pc_bike_wheel_contacts      pc 0x005f8b70 = bike_wheel_contacts (walk; calls pc_wheel_set_contact)
+pc_bike_peak_rates          pc 0x00601330 = bike_ground_step's inline |max| hold into the attitude vector (PS2 +0x550, PC +0x1270)
+pc_bike_no_hander           pc 0x005f7f40 = bike_no_hander (const 0.17, the only function with it; once a frame from PostProcess)
+pc_wheel_integrate          pc 0x004726d0 = wheel_integrate (walk; calls surface_drag, spin_integrate; wheel_steer_stop inlined)
+pc_wheel_steer_integrate    pc 0x0046fe60 = wheel_steer_integrate (fields -0xC; clamp order differs, see the journal)
+pc_bike_wreck_test          pc 0x005fe9c0 = bike_wreck_test (MotoShared::vf90; walk; the same reasons 1-8, 11-13 through vt +0xac, plus 14, 15)
+pc_bike_wreck_entry         pc 0x005fe7c0 = bike_wreck_entry + player_wreck_entry (MotoShared::vf43; three rand() for reason 13, the shown flag, the count)
+pc_bike_unwreck             pc 0x005fe8a0 = bike_unwreck + player_respawn (MotoShared::vf44; attitude vector cleared, fresh = 1, the race bit back)
+pc_bike_put_back            pc 0x005d1330 = 0x0027b650's put-back (MXVehicle::vf55: the stored frame, then ghost on/off by kind)
+pc_ghost_start              pc 0x005fab50 = ghost_start, kind != 0 (MotoShared::vf53 -> MXVehicle::vf53: alpha 0.5, the class mask, state 2)
+pc_ghost_end                pc 0x005fab00 = ghost_start's kind 0 / ghost_step's end (MotoShared::vf52: alpha 1.0)
+pc_ghost_step               pc 0x005fe4b0 = ghost_step (MotoShared::vf54; the +0x126 bit 0x20 overlap hold, alpha 0.1..1)
+pc_stunt_request            pc 0x00600180 = stunt_request (MotoShared::vf100; the 0.3 s overlap take-over; advances elapsed/progress itself)
+pc_stunt_idle               pc 0x005fb370 = stunt_idle (MotoShared::vf103; walk; ids renumbered: air 0x2e, ground 0xff)
+pc_stunt_clocks             pc 0x006000e0 = stunt_clocks' elapsed/progress only (MotoShared::vf101; weak: 145 bytes against 2716)
+pc_stunt_state_pack         pc 0x005f6f30 = stunt_state_pack (Motocross::vf47, the network snapshot; weak: by purpose)
+# R11 — the same functions in SLUS-21104 (MX vs. ATV Unleashed, PS2), program `atv`: the boot ELF with
+# GAME_REL.BIN folded in at its load address (tools/mxvatv_overlay.py; the game's code is all in the
+# overlay). It is the PC's code built for the EE: the same five listener vptrs at +0x30..+0x40 (each
+# a thunk to a slot of the primary table at the +4 vptr), the same call orders, the PC's field layout
+# 0x20 lower in the high fields (PC +0x1308 -> +0x12e8, +0x17d0 -> +0x17b0). Slots were placed by
+# aligning the PC's MXVehicleMotocross table against the primary one by content, then checked at the
+# call sites (`call`: bike_vehicle_update's +0x3a4/+0x49c/+0x4f0/+0x4f8/+0x4e8/+0x4a0 land on these).
+atv_bike_vehicle_update     atv 0x004e1b90 = bike_vehicle_update, pc_bike_vehicle_update (call: from the Motocross override 0x004da210 = PC 0x005f7380)
+atv_bike_input_limiter      atv 0x004e3ea0 = bike_input_limiter, pc vf36 (call: the PreProcess's first, vt +0x34c)
+atv_bike_ground_head        atv 0x004d8b20 = pc_bike_ground_head (the PreProcess thunk's target, this - 48; 0.987, pi/2)
+atv_bike_ground_step        atv 0x004d90f0 = pc_bike_ground_step (the ForceListener thunk's target, this - 60; every call in order)
+atv_bike_air_state          atv 0x004d9290 = pc_bike_air_state (the PostProcess thunk's target, this - 52; 10.0, 0.25, the (8, 13) event)
+atv_bike_auto_shift         atv 0x004e5fe0 = pc_bike_auto_shift (seq in the PreProcess; off 1.00, const 1.00)
+atv_bike_clutch             atv 0x004e6a60 = bike_clutch, pc_bike_clutch (seq; no chassis +0x198 term, as on the PC)
+atv_bike_stand_upright      atv 0x004dc970 = bike_stand_upright (seq in the Force body)
+atv_bike_balance            atv 0x004dc240 = bike_balance (seq; the same +0x1524 == +0x152c guard as the PC's)
+atv_bike_roll_pitch         atv 0x004dc4f0 = bike_roll_pitch (seq; const 1.00)
+atv_bike_preload            atv 0x004e60d0 = bike_preload (seq)
+atv_bike_backflip           atv 0x004e4f20 = bike_backflip (seq)
+atv_bike_spin_air           atv 0x004e53d0 = PC 0x00600790, no MX Unleashed twin (seq: between the backflip and engine_update)
+atv_engine_update           atv 0x0049fbb0 = engine_update, pc_engine_update (seq)
+atv_bike_air_drag           atv 0x004e6c00 = pc_bike_air_drag (seq)
+atv_bike_airborne_control   atv 0x004e65d0 = bike_airborne_control (seq)
+atv_bike_ground_pitch_torque atv 0x004dcc80 = pc_bike_ground_pitch_torque (seq)
+atv_wheel_clear             atv 0x004a0c30 = wheel_clear (seq)
+atv_bike_wheel_contacts     atv 0x004dccd0 = bike_wheel_contacts (seq)
+atv_wheel_suspension        atv 0x004a0cb0 = wheel_suspension (seq)
+atv_wheel_tire_forces       atv 0x004a16f0 = wheel_tire_forces (seq)
+atv_wheel_integrate         atv 0x004a1680 = wheel_integrate (seq; surface drag 0x004a1ec0, spin 0x004a2040)
+atv_wheel_steer_integrate   atv 0x004a2cb0 = wheel_steer_integrate (MX Unleashed's clamp order, the PC's fields)
+atv_wheel_steer_stop        atv 0x004a2ca0 = wheel_steer_stop (a function here, inlined on the PC)
+atv_engine_rev_limit        atv 0x0049ff40 = engine_rev_limit (seq)
+atv_bike_peak_rates         atv 0x004e6c90 = pc_bike_peak_rates (seq, the Force body's last)
+atv_bike_no_hander          atv 0x004dbd10 = bike_no_hander (call: from the PostProcess; const 0.17)
+atv_bike_wreck_test         atv 0x004e24a0 = bike_wreck_test, pc vf90 (call: vt +0x49c)
+atv_bike_wreck_entry        atv 0x004e2260 = bike_wreck_entry + player_wreck_entry, pc vf43 (align; three rand draws x 2^-31 for reason 13)
+atv_bike_unwreck            atv 0x004e2380 = bike_unwreck + player_respawn, pc vf44 (align; ids 0xff, the 0x40000 race bit)
+atv_bike_put_back           atv 0x004a6f70 = pc_bike_put_back (MXVehicle::vf55: what the Motocross override 0x004d8940 calls, as PC 0x005f4e60 does)
+atv_ghost_end               atv 0x004e1910 = pc_ghost_end (align; alpha 1.0)
+atv_ghost_start             atv 0x004e19a0 = ghost_start, pc_ghost_start (align; alpha 0.5)
+atv_ghost_step              atv 0x004e1a20 = ghost_step (call: vt +0x3a4, first in the update; the +0x126 bit 0x20 hold)
+atv_stunt_specials          atv 0x004dd280 = stunt_specials, pc vf87 (align, 0.68)
+atv_stunt_request           atv 0x004e49c0 = stunt_request (call: stunt_idle's vt +0x4e4; the 0.3 cap)
+atv_stunt_clocks            atv 0x004e4900 = pc_stunt_clocks (call: vt +0x4e8 in the remote branch; weak as on the PC)
+atv_stunt_idle              atv 0x004e5d20 = stunt_idle (call: vt +0x4f0; ids 0x2e/0xff as on the PC)
+atv_stunt_state_pack        atv 0x004d9f30 = pc_stunt_state_pack (align, 0.37; weak)
 # ---------------------------------------------------------------------------------------------------
 # S150 — crooked landings. Journal: research/journal/2026-10-26-s150-trick-landing-spin.
 # No new function. bike_wreck_test (0x002522c0)'s landing crossup clause decides a crooked landing, and

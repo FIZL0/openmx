@@ -119,8 +119,72 @@ The 59 `pc` rows in oracle.txt, found three ways:
 Differences seen, not chased: `wheel_set_tire`'s spin inertia is `m·r²/12·0.5` on the PC and `2π·r²`-scaled
 on the PS2; the engine takes two driven wheels.
 
-Not paired: the bike's per-frame virtuals (`bike_vehicle_update`, the input limiter, the wreck test and
-entry, unwreck, the stunt and ghost slots). The vehicle's layout changed (15 vtables, a rider object of its
-own), so offsets do not carry over and they share no strings; pairing them needs a call-graph walk from the
-sure rows above. Nor `wheel_integrate`, `wheel_steer_integrate`, `wheel_steer_stop` (PC 0x0046fe60 clamps
-the steering and may be the last), the helicopter models, or anything against SLUS-21104.
+### The bike's per-frame virtuals (R11)
+
+Paired by walking the call graph out from the sure rows: a callee called at the same place and in the same
+order by a function already paired is its twin, checked by its float constants and branch shape (31 `pc`
+rows, `# R11` in oracle.txt).
+
+The PC does not run the frame as one function. `bike_vehicle_update` is `MXVehicleMotoShared::vf14_at_12`
+(ghost step first, then the wreck test, and for remote kinds 3/4 the branch PS2 takes on `+0x80c == 2`).
+`bike_ground_step` is split over the physics world's listeners on `MXVehicleMotocross`:
+
+| listener | PC | holds the PS2's |
+|---|---|---|
+| `vf0_at_48` PreProcess | 0x005f6900 | the pre-loop: the input limiter (vf36), front steer, the rear fade (±π/2), the 14.67/29.33 lerps, the auto shift, the clutch |
+| `vf0_at_60` Force | 0x005f9950 | the substep body, in the PS2's order; no 55 Hz loop of its own (the physics world substeps) |
+| `vf0_at_52` PostProcess | 0x005f9ab0 | `bike_air_state`, the ground step's 0.25 tail, the no-hander (once a frame) and an out-of-world wreck |
+
+The substep's inline blocks are functions on the PC: the auto shift (0x005fb490), the air drag
+(0x006012a0, `-k·½v²` along v, k from the `.phy` record, PS2 `+0x6a8`), the rear-wheel pitch torque
+(0x005f6370), the attitude peak hold (0x00601330, PS2 `+0x550` → PC `+0x1270`). The player's overrides are
+merged into the base slots: `bike_wreck_entry` + `player_wreck_entry` = vf43, `bike_unwreck` +
+`player_respawn` = vf44. The ghost is three slots (vf52 off, vf53 on, vf54 step) with the put-back in
+`MXVehicle::vf55`.
+
+Differences seen (the journal has the detail):
+
+- `bike_clutch`: the PS2's last term (chassis `+0x198` less `+0x6cc · lerp(+0x6a0)`) is not on the PC, nor in
+  SLUS-21104: MX vs. ATV's change, not the port's (the lerp goes to the engine's `+0x7c` instead).
+- `bike_wreck_test`: the same reasons through the same slot, plus 14 (no rider) and 15; thresholds 2.9/4.5;
+  the PS2's 0.4, 4, 6, 100.3 and 1497.6 are not there.
+- `player_wreck_entry`'s draws are `rand()/32768` on the PC, `rand·2⁻³¹` on the PS2. Action and stunt ids are
+  renumbered (PS2 25/28/0x1c → PC 0x2e/0xff), and the race-record bit is 0x40000 (PS2 0x80000).
+- `bike_no_hander` runs once a frame on the PC, each substep on the PS2 (which also zeroes the balance there).
+- `wheel_steer_integrate`: the same math with fields 0xC lower, but the clamp tests `max < a` then `a < min`
+  where the PS2 tests `a <= max` then `a < min` — the same but for NaN. `wheel_steer_stop` is inlined.
+- PC 0x00600790 (35°, ±0.7, 5, 30), called beside the preload and the backflip, has no PS2 twin: likely MX
+  vs. ATV's 360 (SLUS-21104 has it at the same place).
+
+Not paired: the PS2's network-state unpack 0x00259150 (the PC's `Motocross::vf104` places the wheels from
+the chassis instead), 0x00252270 (maybe PC vf91 0x005fad80, weak), 0x00252280, 0x00252fe0, and the
+helicopter models. Weak: `pc_stunt_clocks` (145 bytes against 2716: the clocks only), `pc_stunt_state_pack`
+(by purpose), `pc_bike_put_back`.
+
+### Beside SLUS-21104 (MX vs. ATV Unleashed, PS2)
+
+SLUS_211.04 is only the engine: the game is the overlay GAME_REL.BIN (the front end UI_REL.BIN), a
+CodeWarrior "MWo3" image loaded whole, 64-byte header included, at 0x0045c580 into an empty LOAD segment,
+with no relocations. `tools/mxvatv_overlay.py` folds it into the ELF so Ghidra sees one program; the
+`[other.atv]` block in kit.toml.example names the result. 39 `atv` rows in oracle.txt (`# R11 — the same
+functions in SLUS-21104`).
+
+It is the PC's code built for the EE, not MX Unleashed's: the same five listener vptrs (at +0x30..+0x40,
+each a `j slot; addiu a0,a0,-N` thunk), the same Pre/Force/Post split and call orders, the 360 function, the
+PC's ids (0x2e/0xff) and race bit (0x40000), the PC's field layout with the high fields 0x20 lower (PC
+`+0x1308` → `+0x12e8`; some blocks 0x14). The primary vptr is at +4. Where the PC and MX Unleashed part, it
+tells which side moved:
+
+| | MX Unleashed | SLUS-21104 | PC | so |
+|---|---|---|---|---|
+| clutch's chassis `+0x198` term | yes | no | no | MX vs. ATV dropped it |
+| wreck-entry draws | `rand·2⁻³¹` | `rand·2⁻³¹` | `rand()/32768` | the PC's libc |
+| steer clamp | `a <= max`, `a < min` | as MX Unleashed | `max < a`, `a < min` | the PC compiler |
+| `wheel_steer_stop` | a function | a function | inlined | the PC compiler |
+| ids, race bit | 25/28, 0x80000 | 0x2e/0xff, 0x40000 | as SLUS-21104 | MX vs. ATV |
+
+SLUS-21104 multiplies with `madd.s`/`msub.s` where MX Unleashed has a `mul.s` then `add.s`, so even where
+the math is the same its rounding is not MX Unleashed's (`openmx` follows MX Unleashed).
+
+Weak here as on the PC: `atv_stunt_clocks`, `atv_stunt_state_pack`. The wreck test was paired by slot and
+call site, not compared clause by clause.
