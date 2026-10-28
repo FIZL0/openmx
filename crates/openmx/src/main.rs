@@ -5095,6 +5095,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
     // Every pad seat's presses (P76), read each frame so that a controller with no player in the
     // ride joins it on Cross, and one that just left does not join again on the press that left.
     let mut idle_readers: Vec<Reader> = (0..pad::SEATS).map(|_| Reader::at(RIDE_HZ)).collect();
+    // And the keyboard's while it drives no seat (1P a pad), which joins on a free pad seat (P173).
+    let mut keys_reader = Reader::at(RIDE_HZ);
     // Software models copied for joiners, each under a name of its own.
     let mut joined_models = 0usize;
     // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
@@ -5476,6 +5478,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             println!("markers: cleared (the tape's, before frame {})", head.as_ref().map_or(0, Head::at));
         }
         let mut idle_presses: Vec<(usize, menu::Press)> = Vec::new();
+        // The free pad seat the keyboard's presses this frame are for, if it drives none (P173).
+        let mut keys_join: Option<usize> = None;
         // And set Air Wrecks there (P138).
         if let Some(on) = head.as_ref().and_then(Head::air_wrecks) {
             world.seats[0].sim.rider.sense.air_wrecks = on;
@@ -5545,6 +5549,20 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                             while let Some(p) = reader.more() {
                                 idle_presses.push((d, p));
                             }
+                        }
+                    }
+                    // The keyboard beside a pad 1P (P173): its presses are a controller on the first
+                    // free pad seat, so its Cross joins as an idle pad's does. Not while 1P's pause
+                    // is open, which the keyboard works (P46).
+                    let report = seats.keyboard_alone().unwrap_or_else(Report::idle);
+                    let moments = seats.keyboard_alone_moments();
+                    let press = keys_reader.read_timed(&[(report, 0, moments.as_deref())], read_us);
+                    let pause_one = front.as_deref().is_some_and(|f| f.menu.paused(0));
+                    if let Some(d) = seats.keys_free_seat(&ride).filter(|_| !pause_one && seats.keyboard_alone().is_some()) {
+                        keys_join = Some(d);
+                        idle_presses.push((d, press));
+                        while let Some(p) = keys_reader.more() {
+                            idle_presses.push((d, p));
                         }
                     }
                 }
@@ -5668,8 +5686,16 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                 None => front.menu.elapse(1_000_000 / u64::from(RIDE_HZ)),
             }
             let esc = held(window, key::ESCAPE);
+            // The keyboard's own player's once it joined the ride on a seat of its own (P173).
+            let keys_player = front.menu.keys_seat.filter(|&k| k > 0 && k < presses.len());
             if esc && !escape {
-                if !front.menu.paused(0) {
+                if let Some(k) = keys_player {
+                    if !front.menu.paused(k) {
+                        front.menu.pause_for(k);
+                    } else {
+                        presses[k].back = true;
+                    }
+                } else if !front.menu.paused(0) {
                     front.menu.pause();
                 } else if let Some(p) = presses.get_mut(front.menu.driver()) {
                     p.back = true;
@@ -6059,6 +6085,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
                         join::Change::Leave(i) => sound.seat_left(i),
                     }
                 }
+                // The keyboard rides the pad seat it joined on, and lets it go when its player leaves (P173).
+                if let Some(seats) = pad_seats.as_mut() {
+                    match change {
+                        join::Change::Join(d) if keys_join == Some(d) => seats.join_keys(d),
+                        join::Change::Leave(i) => seats.leave_keys(devices.get(i).copied().unwrap_or(usize::MAX)),
+                        join::Change::Join(_) => {}
+                    }
+                }
                 // Every player's pad seat, kept as the players are.
                 args.pad_of = change.devices(&devices);
                 args.players = n;
@@ -6096,7 +6130,8 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             }
             // The join cue (P171) while a seat is free and a controller on a pad seat no player reads
             // is in; gone once it is seated, or the ride is full.
-            let idle: Vec<usize> = idle_presses.iter().map(|(d, _)| *d).collect();
+            // The keyboard is always there, so it is no cue of its own (P173).
+            let idle: Vec<usize> = idle_presses.iter().map(|(d, _)| *d).filter(|d| Some(*d) != keys_join).collect();
             join_cue = front.menu.join_cue(&idle);
             // The pause closing on modifiers the player changed in it: the ride takes them now, from
             // where it is (P98), and a tape being written takes the change at the tick it is on.
