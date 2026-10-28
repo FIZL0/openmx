@@ -1,0 +1,150 @@
+# S173: the rider's voice (actor +0xa74) and the bike's [Wreck] clank (bike +0x1498) over S109's wreck:
+# both emitters' gates, their last picks (each pick of a list of two or more moves one) and the lengths
+# of their sounds. The bike is the chain's 0x8 -> 0x0, the rider body actor the 0x8 x6 -> 0x0 one less
+# 0x400 (S109's animandpump.toml).
+
+[watch]
+name        = "s173-voices"
+description = "the wreck's two sound emitters: gates, last picks, clip lengths"
+every       = 1
+frames      = 260
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"  # the bike's +0x748
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+# --- the rider's emitter -----------------------------------------------------------------------
+
+[[field]]
+name = "r_off"  # +0x23c: the frame's gate, 0 to act
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x23c"
+type = "u32"
+
+[[field]]
+name = "r_min"  # +0x238 MinImpulse
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x238"
+type = "f32"
+
+[[field]]
+name = "r_fall_n"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x200"
+type = "s32"
+
+[[field]]
+name = "r_fall_last"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x218"
+type = "s32"
+
+[[field]]
+name = "r_imp_n"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x21c"
+type = "s32"
+
+[[field]]
+name = "r_imp_last"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x234"
+type = "s32"
+
+[[field]]
+name = "rec_reason"  # the body record's (+0x240) +0x104
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x240 -> 0x104"
+type = "u32"
+
+[[field]]
+name = "rec_touch"  # +0x1bc
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x240 -> 0x1bc"
+type = "u32"
+
+[[field]]
+name = "rec_vel"  # +0x130..+0x138, held against MinImpulse
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x240 -> 0x130"
+type = "f32x4"
+
+[[array]]
+name   = "r_fall"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x208 -> 0x0"
+count  = 5
+stride = 4
+
+[[array.field]]
+name = "len"  # the sound's +0x24, seconds
+off  = "0x0 -> 0x24"
+type = "f32"
+
+[[array]]
+name   = "r_imp"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0xa74 - 0x400 -> 0x224 -> 0x0"
+count  = 5
+stride = 4
+
+[[array.field]]
+name = "len"
+off  = "0x0 -> 0x24"
+type = "f32"
+
+# --- the bike's [Wreck] emitter ----------------------------------------------------------------
+
+[[field]]
+name = "b_gate_a"  # what +0x200 points at (bike +0x948)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x200 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "b_gate_b"  # what +0x204 points at (the riding record's touched)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x204 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "b_imp"  # what +0x224 points at (bike +0x550)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x224 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "b_min"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x228"
+type = "f32"
+
+[[field]]
+name = "b_n"  # +0x208, the list's count
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x208"
+type = "s32"
+
+[[field]]
+name = "b_last"  # +0x220
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x220"
+type = "s32"
+
+[[array]]
+name   = "b_snd"
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x1498 -> 0x210 -> 0x0"
+count  = 5
+stride = 4
+
+[[array.field]]
+name = "len"
+off  = "0x0 -> 0x24"
+type = "f32"

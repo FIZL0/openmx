@@ -3300,6 +3300,35 @@ impl Reading<'_> {
         BikeSounds::read(&text, &mut |n| lib.clip(n))
     }
 
+    /// **The wreck emitters' lengths for the simulation** (S173): the rider's `[Fall]` and `[IMPACT]`
+    /// clips and the bike's `[Wreck]` ones, each list's in order, with the two `MinImpulse`s. The
+    /// sim's emitters pick only while idle, and how long a pick keeps them busy is its clip's length,
+    /// so every machine of a ride reads these whether its sound is on or not.
+    pub fn wreck_kit(&mut self, bike: &str, rider: Option<&str>) -> game_sim::wreck_sound::Kit {
+        let lengths = |l: &List| l.sounds.iter().map(|(c, _)| F(c.seconds())).collect::<Vec<_>>();
+        let mut kit = game_sim::wreck_sound::Kit::default();
+        if let Some(res) = rider {
+            let r = self.rider(res);
+            (kit.fall, kit.crash, kit.voice_min) = (lengths(&r.fall), lengths(&r.impact), F(r.min_impulse));
+        }
+        let member = self.lib.disc.res(bike).ok().and_then(|r| {
+            r.entries()
+                .iter()
+                .find(|e| {
+                    let n = e.name.to_ascii_lowercase();
+                    n.contains("vehicle_") && n.ends_with(".aud")
+                })
+                .map(|e| e.name.clone())
+        });
+        if let Some(member) = member {
+            let text = self.text(bike, &member);
+            let lib = &mut *self.lib;
+            let w = MachineWreck::read(&text, "", &mut |n| lib.clip(n));
+            (kit.clank, kit.clank_min) = (lengths(&w.list), F(w.min_impulse));
+        }
+        kit
+    }
+
     pub fn rider(&mut self, res: &str) -> RiderSounds {
         let text = self.text(res, "aud\\rider.aud");
         let lib = &mut *self.lib;
@@ -3659,6 +3688,12 @@ impl Sound {
         sound.drive_on = read.drive_on(track_res);
         Ok(sound)
     }
+}
+
+/// [`Reading::wreck_kit`] off the disc: what each sim rider's wreck emitters are loaded with (S173).
+pub fn wreck_kit(disc: Disc, bike: &str, rider: Option<&str>) -> Result<game_sim::wreck_sound::Kit, String> {
+    let mut lib = Library::open(disc)?;
+    Ok(Reading { lib: &mut lib }.wreck_kit(bike, rider))
 }
 
 /// One map of a world of disc tracks (P71), as its sound emitters are read: its archive

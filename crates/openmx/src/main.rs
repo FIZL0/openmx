@@ -3658,6 +3658,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         node_at("TireFront").unwrap_or(game_sim::stock::MOUNTS.0),
         node_at("TireRear").unwrap_or(game_sim::stock::MOUNTS.1),
     );
+    // The wreck emitters' clip lengths (S173), read whether the ride's sound is on or not: how long a
+    // pick keeps them busy moves the game's draws. Every seat's are the first bike's.
+    let wreck_kit = Disc::open_configured()
+        .and_then(|d| audio::wreck_kit(d, &bike_member, rider_member.as_deref()))
+        .unwrap_or_else(|e| {
+            println!("wreck sounds: {e} — the sim's emitters count every clip as lasting nothing");
+            game_sim::wreck_sound::Kit::default()
+        });
     let new_rider = |phy: &Phy, at: Vf, heading: Vf| -> Rider {
         let mut rider = Rider::new(phy, mounts, at, heading, stunts.clone());
         // The fork the front wheel steers about, from the model's shocks to its handlebars, which is the
@@ -3693,6 +3701,7 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         if let Some(col) = &bike_col {
             rider.carries_bike_col(Arc::clone(col));
         }
+        rider.wreck_kit = wreck_kit.clone();
         rider
     };
     let mut rider = new_rider(&phy, at, heading);

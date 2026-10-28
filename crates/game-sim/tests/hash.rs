@@ -543,7 +543,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // `search_prop` only while it lists any, so the leaves do not move.
     // 11832 since S167: how far each animated toy's collision bodies are from the load's identity
     // (`Toys::bodies`), walked as `toy_bodies` only on a track with toys, so the leaves do not move.
+    // 11928 since S173: each rider's wreck emitters' clocks (`Rider::wreck_clocks`), walked as
+    // `wreck_clocks` only once one has played, so the leaves do not move, and their clip lengths
+    // (`Rider::wreck_kit`), configuration and not walked.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11832, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11928, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

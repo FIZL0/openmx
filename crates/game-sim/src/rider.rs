@@ -272,6 +272,12 @@ pub struct Rider {
     /// The rider's wreck sounds, as far as the pick goes: which was played last, so that the next
     /// wreck draws as the original does ([`wreck_sound`]).
     pub wreck_sounds: wreck_sound::Emitter,
+    /// The two wreck emitters' clip lengths and thresholds (S173): configuration, which a shell that
+    /// has the sound files hands in, never sent.
+    pub wreck_kit: wreck_sound::Kit,
+    /// The rider's voice and the bike's clank past the entry (S173): how long each still plays, so
+    /// that their picks on the wreck's later touches draw as the original's do.
+    pub wreck_clocks: wreck_sound::Clocks,
     /// What the animation driving asked for this frame: the one thing [`motion::Driver::frame`]
     /// answers, kept rather than dropped.
     ///
@@ -449,6 +455,8 @@ impl Rider {
             riding: None,
             holds: None,
             wreck_sounds: wreck_sound::Emitter::retail(),
+            wreck_kit: wreck_sound::Kit::default(),
+            wreck_clocks: wreck_sound::Clocks::default(),
             animation: motion::Frame { blend: motion::Blend::Free, restart: false },
             body: rider_anim::Body::default(),
             body_numbers: rider_anim::Params::built(),
@@ -652,11 +660,13 @@ impl Rider {
         self.riding_tick(dt, world);
         let Rider {
             ride, tricks, state, motion, packed_pose, packed_fore_aft, set, clips, sense, racing, wreckage, crash, animation,
-            flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, riding, wreck_sounds, idles, ghost, edge_armed, page,
+            flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, riding, wreck_sounds, wreck_kit, wreck_clocks, idles, ghost, edge_armed, page,
             put_back, ragdoll_shown, score, bike_col, fifty, ..
         } = self;
         *ragdoll_shown = None;
         let mut sense = *sense;
+        // The wreck emitters' clips play on through the tick (S173).
+        wreck_clocks.age(dt);
 
         // 0 — the ghost's tick, the first thing in the bike's update: its clock holds while the
         // body is inside another rider's (`rivals` holds no ghosts, whose lists reject this one).
@@ -1032,6 +1042,11 @@ impl Rider {
             *crash = wreckage
                 .as_ref()
                 .map(|w| Crash::begin(ride, reason, &w.part, w.inertia, &w.wrecks, spin));
+            // The player's wreck entry asks the bike's `[Wreck]` emitter for a clank on the riding
+            // bike's impulse (S173), before the body actor's entry below.
+            if crash.is_some() {
+                wreck_clocks.clank_entry(wreck_kit, wreck_sound::magnitude(ride.mv.g_peak), ragdoll_ride::generator(idles));
+            }
             // The body actor's wreck entry: the bones off the bike, then the wreck sound picked.
             // Both draw from the game's one generator, which is the idle pool's.
             *ragdoll = match (ragdoll_kit.as_ref(), wreckage.as_ref(), crash.as_ref()) {
@@ -1060,7 +1075,7 @@ impl Rider {
                         rng,
                         world,
                     );
-                    wreck_sounds.wreck(i32::from(reason.0), false, rng);
+                    wreck_clocks.voice_entry(wreck_sounds, wreck_kit, i32::from(reason.0), rng);
                     Some(doll)
                 }
                 _ => None,
@@ -1139,6 +1154,29 @@ impl Rider {
         } else {
             // The riding body too (S110): the next one is placed afresh off the pose.
             *riding = None;
+        }
+        // 7b — the two wreck emitters' frames past the entry's tick (S173), the bike's then the
+        // rider's: the clank on the wreck body's hits (the reason's copy it gates on is set a tick
+        // after the reason), and the voice on the thrown body's touches. Both draw.
+        if out.wreck.is_none() {
+            if let (Some(_), Some(down)) = (state.wreck, crash.as_ref()) {
+                let b = &down.bike;
+                let peak = wreck_sound::magnitude(b.body.shock_peak);
+                wreck_clocks.clank_frame(wreck_kit, true, b.record.touching, peak, ragdoll_ride::generator(idles));
+            }
+            if ragdoll_kit.is_some() {
+                let reason = state.wreck.map_or(0, |w| i32::from(w.0));
+                let body = match (ragdoll.as_ref(), crash.as_ref()) {
+                    (Some(doll), _) => Some((doll.sensed.touching, doll.sensed.vel)),
+                    (None, Some(down)) => Some((down.landed, down.rider_vel)),
+                    (None, None) => None,
+                };
+                let (down, touching, speed) = match body {
+                    Some((touching, vel)) => (reason != 0 && reason != 13, touching, wreck_sound::magnitude(vel)),
+                    None => (false, false, F(0.0)),
+                };
+                wreck_clocks.voice_frame(wreck_sounds, wreck_kit, down, touching, speed, ragdoll_ride::generator(idles));
+            }
         }
         // 8 — the points (S79): the rider's tick, on the frame's wheels and wreck, and then the
         // manager's, which in the original runs after every rider's and touches only this one's card.
@@ -1388,6 +1426,16 @@ impl State for Rider {
             w.group("wreck_sounds", |w| {
                 w.i32("crash_last", self.wreck_sounds.crash.last);
                 w.i32("fall_last", self.wreck_sounds.fall.last);
+            });
+        }
+        // The emitters' clocks and the clank's pick (S173), once anything has played: a rider never
+        // down hashes as before.
+        if !self.wreck_clocks.idle() {
+            w.group("wreck_clocks", |w| {
+                w.f("voice", self.wreck_clocks.voice);
+                w.f("clank", self.wreck_clocks.clank);
+                w.i32("clank_last", self.wreck_clocks.clank_last);
+                w.f("was", self.wreck_clocks.was);
             });
         }
         // The points (S79), once anything has scored or started to: a rider who never has hashes as
