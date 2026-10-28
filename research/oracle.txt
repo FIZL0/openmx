@@ -4914,6 +4914,19 @@ stunt_competition_join      boot 0x003dd520 (activity, player) the card re-regis
 stunt_competition_frame     boot 0x003ddf70 (dt, activity) leader, tie, warning, target; then the tick
 stunt_competition_end       boot 0x003dd870 (activity, player) the verdict; the total put back
 stunt_countdown_listener    boot 0x003dec80 (listener) thunk to 0x003de8c0: past 3.33 s the limit 120
+# C9 — a live stunt competition on free09, captured (research/journal/2026-10-28-c9-freestyle-event-capture,
+#   spec c9-event.toml) and checked in crates/game-sim/tests/event.rs. The activity is built when the
+#   world loads: *(*(*activity_manager + 0x58) + 0x24); first_recording's is at 0x018532e0. Activity
+#   +0x180 the player list's count, +0x188 the list (entries at *(list + 8)[i]), +0x44 its vtable,
+#   +0x20 of which is the end (0x003dd870, reached through 0x00282180).
+# Correction to S92: the join's saved freeride total is the *player entry's* +0x734 (entry +0x54 the
+#   player object, +0x58 the warning HUD, +0xc0 the reached latch), not the rider's. The join does not
+#   reset card +0xb4: the seconds ridden carry the freeride manager's.
+# free09 hit.dat [ASZ 12] Type=Stunt at 3400, 191, 3348 (scale 40) is the event's start zone; the ASZ
+#   loader 0x003259b0 gives Type Stunt +0x78 = 4.
+# The out listeners mode 3 calls in this event are no-ops: the card owner (rider +0xf9c, slot 0x18
+#   0x00281b00 -> jr ra), the card's chain (slot 0x18 0x00261170), the activity listener (+0x14
+#   0x00261160).
 # --- V42: the speedometer's digital readout, the default in crates/openmx/src/overlay.rs ---
 # speedo_mode's setting is *(*(*(*0x0041f770 + 0x3d4) + 8) + 0x1c), 1 = digital; speedo_update
 #   forces digital when the byte at *(opts + 0xc) + 0x114 (players) is 2 or more. speedo_mode runs

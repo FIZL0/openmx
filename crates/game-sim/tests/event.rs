@@ -7,7 +7,10 @@
 //!    part* and *out* flags and the manager's *all done* and *timed out*, after every tick, at the
 //!    game's dt and at random ones, one card and two;
 //! 2. **the frame** — the activity's leader, tie, warning, target and verdict rules, by example
-//!    (not run against the original: its frame reaches into the HUD and the session's player list).
+//!    (not run against the original: its frame reaches into the HUD and the session's player list);
+//! 3. **a live event** (C9) — free09's stunt competition ridden in PCSX2, its activity, manager and
+//!    card read every frame, beside the port joined, started and ticked on the capture's totals: the
+//!    join's saved total, the countdown, the clock, the leader, the end and the total put back.
 
 use game_sim::event::{self, Competition, Verdict};
 use game_sim::score::Score;
@@ -345,4 +348,192 @@ fn the_target_from_hit_dat() {
     assert_eq!(event::target(dat), Some(400_000));
     assert_eq!(event::target("[HitData]\nType=Hit\n"), None);
     assert_eq!(event::target("[hitdata]\nstuntcompetitionscore=150000 ; free10\n"), Some(150_000));
+}
+
+/// One row of a C9 capture, by column name; an empty cell (a null pointer chain) is `None`.
+struct Row<'a> {
+    cols: &'a [&'a str],
+    cells: Vec<&'a str>,
+}
+
+impl Row<'_> {
+    fn get(&self, name: &str) -> Option<u32> {
+        let i = self.cols.iter().position(|c| *c == name)?;
+        self.cells.get(i).filter(|c| !c.is_empty()).map(|c| c.parse().unwrap_or_else(|e| panic!("{name} = {c}: {e}")))
+    }
+    fn word(&self, name: &str) -> u32 {
+        self.get(name).unwrap_or_else(|| panic!("frame {:?}: no {name}", self.get("frame_counter")))
+    }
+}
+
+/// The words a capture row and the port share, in the original's encoding: the manager's flags
+/// (running 0x1, all done 0x2, timed out 0x10, counting 0x80, ended 0x2000), the countdown's
+/// elapsed, accumulator, length and interval, the limit, the clock, the card's flags (out 0x1,
+/// taking part 0x2), time left and seconds ridden, a leader, the tie and the target-reached latch.
+const WORDS: [&str; 14] = [
+    "mgr_flags", "mgr_elapsed", "mgr_tally", "mgr_length", "mgr_interval", "mgr_limit", "mgr_clock", "c0_flags",
+    "c0_left", "c0_ridden", "act_leader", "act_tie", "p0_reached", "act_players",
+];
+/// The manager's and the card's flag bits the port models.
+const MGR_BITS: u32 = 0x1 | 0x2 | 0x10 | 0x80 | 0x2000;
+const CARD_BITS: u32 = 0x1 | 0x2;
+
+fn words_of(row: &Row) -> [u32; 14] {
+    let mut w = WORDS.map(|n| row.word(n));
+    w[0] &= MGR_BITS;
+    w[7] &= CARD_BITS;
+    w[10] = u32::from(w[10] != 0);
+    w
+}
+
+fn words(comp: &Competition) -> [u32; 14] {
+    let s = &comp.seats[0];
+    let mgr = u32::from(comp.running)
+        | u32::from(comp.over) << 1
+        | u32::from(comp.timed_out) << 4
+        | u32::from(comp.counting) << 7
+        | u32::from(comp.ended) << 13;
+    [
+        mgr,
+        comp.elapsed.to_bits(),
+        comp.tally.to_bits(),
+        comp.length.to_bits(),
+        comp.interval.to_bits(),
+        comp.limit.to_bits(),
+        comp.clock.to_bits(),
+        u32::from(s.out) | u32::from(s.taking_part) << 1,
+        s.left.to_bits(),
+        s.ridden.to_bits(),
+        u32::from(comp.leader == Some(0)),
+        u32::from(comp.tie),
+        u32::from(s.reached),
+        comp.seats.len() as u32,
+    ]
+}
+
+/// **A live event** (C9): free09's stunt competition ridden in PCSX2 from the zone's prompt to the
+/// end, its activity, manager and card read every frame (`context/capture/c9/run*.csv`, spec
+/// `research/journal/2026-10-28-c9-freestyle-event-capture/c9-event.toml`), beside
+/// [`Competition`] joined, started and ticked at the capture's dt on the capture's totals.
+///
+/// A row is not a tick: the game sits still while the instructions are up, and PINE's reads land
+/// between ticks, two ticks apart or in the middle of one. So every row must equal the port after
+/// some tick, never going back — or, read mid-tick, every word must be that tick's or the next's.
+/// The card's seconds ridden are not reset by the join (the original carries the freeride
+/// manager's), so the seat is given the join row's. At the end the original takes the rider out
+/// (the player list empties): the port must have ended, and its finish must put the freeride total
+/// back as the original did.
+#[test]
+fn a_live_event_runs_like_the_port() {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(why) => return skip(&why),
+    };
+    let dir = kit.ctx("capture/c9");
+    let mut runs = 0;
+    for name in ["run1.csv", "run2.csv"] {
+        let path = dir.join(name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            skip(&format!("{} is not there: C9's capture (see its journal)", path.display()));
+            continue;
+        };
+        let mut lines = text.lines();
+        let cols: Vec<&str> = lines.next().expect("a header").split(',').collect();
+        let rows: Vec<Row> = lines.map(|l| Row { cols: &cols, cells: l.split(',').collect() }).collect();
+        let join = rows.iter().position(|r| r.get("act_players") == Some(1)).expect("nobody joined");
+        let gone = join + rows[join..].iter().position(|r| r.get("act_players") == Some(0)).expect("the event never ended");
+        let target = rows[join].word("act_target") as i32;
+        assert_eq!(target, 100_000, "{name}: free09's target");
+
+        // The freeride card before the join, when the capture has it (run2 seeded it by hand).
+        let before = rows[join - 1].get("free_total").map_or(F::ZERO, F::from_bits);
+        let mut card = Score { total: before, ..Score::default() };
+        let mut comp = Competition::new(target);
+        comp.join(&mut card);
+        comp.start();
+        assert_eq!(card.total, F::ZERO, "{name}: the join puts the total aside");
+        if let Some(saved) = rows[join].get("p0_saved") {
+            assert_eq!(comp.seats[0].saved, saved as i32, "{name}: the join's saved total");
+        }
+        comp.seats[0].ridden = F::from_bits(rows[join].word("c0_ridden"));
+
+        // The port after 0, 1, 2 … ticks, made as the rows ask for them. A tick made ahead takes
+        // this row's total: alone and under the target, only the leader reads it (set on tick one).
+        let mut after = vec![words(&comp)];
+        let mut k = 0;
+        let (mut exact, mut torn, mut still, mut double) = (0, 0, 0, 0);
+        // How often each word was read a tick ahead of the rest.
+        let mut ahead = [0; 14];
+        for (i, row) in rows[join..gone].iter().enumerate() {
+            let want = words_of(row);
+            let dt = F::from_bits(row.word("dt"));
+            let total = F::from_bits(row.word("c0_total"));
+            let mut tick = |after: &mut Vec<[u32; 14]>, comp: &mut Competition, card: &mut Score| {
+                card.total = total;
+                comp.tick(dt, &mut [card]);
+                after.push(words(comp));
+            };
+            // A whole tick first, then a row read mid-tick, a few ticks on at most.
+            let from = k;
+            while after.len() < from + 6 {
+                tick(&mut after, &mut comp, &mut card);
+            }
+            let found = if let Some(j) = (from..from + 5).find(|&j| after[j] == want) {
+                k = j;
+                exact += 1;
+                true
+            } else if let Some(j) =
+                (from..from + 4).find(|&j| (0..14).all(|w| want[w] == after[j][w] || want[w] == after[j + 1][w]))
+            {
+                k = j;
+                torn += 1;
+                for w in (0..14).filter(|&w| want[w] != after[j][w]) {
+                    ahead[w] += 1;
+                }
+                true
+            } else {
+                false
+            };
+            assert!(
+                found,
+                "{name}, frame {}: no tick from {from} on matches\n row  {:08x?}\n port {:08x?}\n next {:08x?}",
+                row.word("frame_counter"),
+                want,
+                after[from],
+                after[from + 1]
+            );
+            match k - from {
+                0 if i > 0 => still += 1,
+                2.. => double += 1,
+                _ => {}
+            }
+        }
+        // The row the rider is gone on: the manager has ended (all done, timed out), the clock on the
+        // tick that ended it. The port has looked a few ticks ahead; the card is out, so those ticks
+        // moved nothing but the clock.
+        let end = &rows[gone];
+        let ended = (k..after.len()).find(|&j| after[j][0] & 0x2000 != 0).expect("the port never ended");
+        assert!(ended - k <= 2, "{name}: the port ends {} ticks after the last row", ended - k);
+        assert!(comp.seats[0].out, "{name}: the card is not out at the end");
+        assert_eq!(end.word("mgr_flags") & MGR_BITS, after[ended][0], "{name}: the manager's flags when the rider leaves");
+        assert_eq!(end.word("mgr_clock"), after[ended][6], "{name}: the clock when the rider leaves");
+        let event = card.total;
+        let (verdict, profile) = comp.finish(0, &mut card);
+        assert_eq!(verdict, Verdict::Lose, "{name}: {event:?} is under the target");
+        if let Some(after_end) = end.get("free_total") {
+            assert_eq!(card.total.to_bits(), after_end, "{name}: the freeride total put back");
+        }
+        println!(
+            "{name}: {} rows, {ended} event ticks: {exact} rows a tick, {torn} read mid-tick, {still} with no tick, {double} two or more; \
+             total {event:?} + saved {} = {:?} ({profile} to the profile), {verdict:?}; read ahead: {:?}",
+            gone - join,
+            comp.seats[0].saved,
+            card.total,
+            WORDS.iter().zip(ahead).filter(|(_, n)| *n > 0).collect::<Vec<_>>()
+        );
+        runs += 1;
+    }
+    if runs == 0 {
+        skip("no C9 capture");
+    }
 }
