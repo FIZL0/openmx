@@ -5584,7 +5584,21 @@ physics_collection_constraint boot 0x003b15b0 PinToBody (Name1/2, BodyPinPositio
 physics_collection_part_search boot 0x003b1c60 the fallback when no model has the entry's name: part 0's
 #                                    model by its Name plus the RefName suffix ("_1") off the scene's
 #                                    RefName table (scene +0x3dc, 0x24 stride {obj, name[32]}) — nat07
-#                                    snowmen, nat15 Nat02_up_bale_hay. Not ported.
+#                                    snowmen, nat15 Nat02_up_bale_hay. Ported S132 (props::part_models):
+#                                    (coll, 0) answers 1 when every part's model is found, marking
+#                                    nothing; attach (coll, 0) then finds them again, marking each. Until
+#                                    a suffix is known: first unclaimed model whose node name stricmps
+#                                    the part Name; part 0's model's RefName past strncmp(Name) gives the
+#                                    suffix; then "%s%s" (Name, suffix) through the RefName lookup,
+#                                    claimed or not. create loops a collection at a time until the search
+#                                    answers 0; a missing or part-less .pco answers 1 and loops forever.
+scene_refname_lookup boot 0x001a6180 (scene, name) -> the first table entry's model whose RefName
+#                                    stricmps, or 0
+scene_refname_of     boot 0x001a6230 (scene, model, dst) -> 1 and its RefName copied, or 0
+#   The model reader 0x001a8cd0 appends {model, RefName} when [ModelN] has RefName (read into 32 bytes,
+#   31 kept), before the model loads, so a model that fails to load is in the table with no node.
+toy_collection_list_add boot 0x00289f50 (list, coll): appends the collection unless it is in already
+track_dir            boot 0x004692d0 the track's directory, "Tracks\Free09\"-style: the .toy's paths start with it
 physics_collection_find_part boot 0x003b1150
 physics_collection_activate boot 0x003b27a0
 physics_collection_deactivate boot 0x003b2700

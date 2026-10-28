@@ -156,6 +156,10 @@ pub struct Placement {
     pub up: V3,
     /// The `Type=` key, where the scene gives one. A name, not a number.
     pub kind: Option<String>,
+    /// A model's `RefName=`, where the scene gives one: the scene's name for this one instance
+    /// (nat07's `Nat07_Sman_Head_1`), which the props' part search looks parts up by. The reader
+    /// keeps 31 characters of it.
+    pub ref_name: Option<String>,
 }
 
 impl Default for Placement {
@@ -166,6 +170,7 @@ impl Default for Placement {
             look: [F::ZERO, F::ZERO, F(1.0)],
             up: [F::ZERO, F(1.0), F::ZERO],
             kind: None,
+            ref_name: None,
         }
     }
 }
@@ -217,6 +222,7 @@ impl Scene {
                     "lookvector" => current.look = vector(value)?,
                     "upvector" => current.up = vector(value)?,
                     "type" => current.kind = Some(value.to_owned()),
+                    "refname" if collecting == Some(false) => current.ref_name = Some(ref_name(value)),
                     "hide" => keys.hide = Some(value.to_owned()),
                     "hascol" => keys.has_col = Some(value.to_owned()),
                     _ => {}
@@ -384,6 +390,18 @@ impl FreeRide {
 /// A name as the game compares it here: no white space, any case.
 fn squeezed(name: &str) -> String {
     name.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase()
+}
+
+/// A `RefName=` value as the model reader keeps it: squeezed like any ini value, then cut to the
+/// 32-byte buffer it is read into.
+fn ref_name(value: &str) -> String {
+    let mut name = crate::phy::squeeze(value);
+    let mut end = name.len().min(31);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.truncate(end);
+    name
 }
 
 /// `model17` is `Model<n>`; `models` is not.
