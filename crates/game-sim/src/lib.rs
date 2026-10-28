@@ -889,6 +889,10 @@ pub mod props;
 /// put-back, and the node box merged over a node's children.
 pub mod prop_world;
 
+/// A track's knockable props in a ride (S131): every collection the `.toy` makes, held in the state,
+/// ticked with the track's cars, hashed and sent with a rollback snapshot.
+pub mod prop_set;
+
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.
 pub mod ghost;

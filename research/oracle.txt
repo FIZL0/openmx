@@ -6177,3 +6177,14 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # AnimatedToySound ctor 0x003e58f0, reader 0x003e59d0 adds MotionName/StartTime/ConfigFile): no
 # AnimatedToy on the disc names one. PC: CarProceduralSound::vf32 / AnimatedToySound::vf32 at
 # 005068c0 / 00506b90 (guide only).
+
+# --- S131: free09's props in a ride (crates/game-sim/src/prop_set.rs; journal 2026-10-28-s131-props-vs-bike-and-rider)
+# Physics object init 0x001597b0 makes, beside the body: the collision object at +0x120 (ctor 0x0026f980,
+# the wreck bike's kind), the <model>m.col ray probe at +0x124, the <model>f.col mesh at +0x128 (category
+# flags 0x00468f50 | 0x00468f58; owner through vt +0x80 = the wrapper's +0x48, the struck listener
+# 0x0015ad40) and a sweep probe at +0x12c. Sign_SpeedLmt has only an f.col; BeachBall both. None of the
+# props' f.col files is in free09's scene collision list (276 entries; only nat13_forsale_sign.col of the
+# .col names matched), so the bike passes through every prop until they are filed (S197).
+# The edge object (+0x100) every free09 prop names in the first_recording state: min (0, 0, 0, 1), max
+# (6912, 268.6465, 6912, 1) — the terrain's extent, 256 x cells x spacing on x and z; the port takes it
+# from the track's Area (tests/prop_set.rs checks the x/z lanes bit for bit on all 62).

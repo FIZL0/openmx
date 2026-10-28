@@ -527,7 +527,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // draw, not walked: the body's machine is not in the walk.
     // 11544 since S157: each rider's 50cc reach (`Rider::fifty`), a constant of the bike's file like
     // `Rider::bike_col`, not walked.
+    // 11584 since S131: the knockable props (`Traffic::props`), walked as `props` only on a track
+    // with any, so the leaves do not move.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11544, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11584, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
