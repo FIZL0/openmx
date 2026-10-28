@@ -386,7 +386,7 @@ fn riding_into_a_free09_tree_stops_the_bike_at_its_trunk() {
     let (trees, _) = Trees::new(&eco, eco::cell_size(F(6912.0)), &CurveTable::build());
     let trunk_z = trees.props.props[0].centre.z();
     let floor = || Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
-    // Each tick's distance up the floor, speed along it, and the wreck the tick started.
+    // Each tick's distance up the floor, speed along it, and the wreck it enters.
     let ride = |world: &mut dyn World| {
         let tables = Tables::build();
         let mut rider = Rider::new(&phy, wheels, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
@@ -398,13 +398,12 @@ fn riding_into_a_free09_tree_stops_the_bike_at_its_trunk() {
                 let f = rider.frame(&phy, &tables, &gas, F(game_sim::tick::DeltaTime::CAP_30), world);
                 (rider.ride.position().z(), rider.ride.chassis.vel.z(), f.wreck)
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<(f32, f32, Option<game_sim::trick::Wreck>)>>()
     };
-    // Where a ride flat out first falls from over 50 ft/s to under 10, or wrecks: the original wrecks
-    // here, over the bars on the impact load (S100, `a_free09_tree_against_the_original`).
+    // Where a ride flat out (over 50 ft/s) first loses more than 15 ft/s in a tick: the original's
+    // 125 goes 58 -> 35 on the trunk (S100), and a wreck freezes the chassis there.
     let stop = |ticks: &[(f32, f32, Option<game_sim::trick::Wreck>)]| {
-        let fast = ticks.iter().position(|t| t.1 > 50.0)?;
-        ticks[fast..].iter().find(|t| t.1 < 10.0 || t.2.is_some()).map(|t| (t.0, t.2))
+        ticks.windows(2).find(|w| w[0].1 > 50.0 && w[0].1 - w[1].1 > 15.0).map(|w| w[1].0)
     };
     let open = ride(&mut floor());
     let mut wooded = Wooded { world: floor(), trees };
@@ -413,10 +412,15 @@ fn riding_into_a_free09_tree_stops_the_bike_at_its_trunk() {
     println!("a trunk at z {trunk_z}: stops at {:?}", stop(&blocked));
     assert_eq!(stop(&open), None, "the open floor never stops the bike");
     assert!(open.last().unwrap().0 > tree_z + 100.0, "and takes it past where the tree stands");
-    let (at, wreck) = stop(&blocked).expect("the tree stops the bike");
-    println!("stopped at {at}, wreck {wreck:?}");
-    assert_eq!(wreck, Some(game_sim::trick::Wreck(1)), "over the bars, as the original goes on its trunk");
+    let at = stop(&blocked).expect("the tree stops the bike");
     assert!(at < trunk_z - 1.5 && at > tree_z - 10.0, "at its trunk: the centre of mass {at} ft up the floor");
+    // Over the bars, on the tick it stops, as the original does (S100, S126).
+    let hit = blocked.iter().position(|t| t.0 == at).unwrap();
+    let wreck = blocked.iter().position(|t| t.2.is_some());
+    println!("a trunk at z {trunk_z}: wreck {:?} on tick {wreck:?}, the stop on tick {hit}", wreck.map(|w| blocked[w].2));
+    assert_eq!(wreck, Some(hit), "the trunk wrecks the rider on the tick it stops the bike");
+    assert_eq!(blocked[hit].2, Some(game_sim::trick::Wreck(1)), "over the bars");
+    assert!(open.iter().all(|t| t.2.is_none()), "the open floor wrecks nobody");
 }
 
 /// S100's captures: recording2's 125 moved 60 ft short of free09's plant 347 (a TreeB at
@@ -464,9 +468,12 @@ impl Rows {
 /// - with wrecks off the bike rears up against the trunk, comes round, and under the same gas rides
 ///   away the way it came.
 ///
-/// The port reaches the trunk too and stops on it in one tick, but measures no impact load, does not
-/// wreck, and creeps on round the trunk; the run-up is quicker than the original's. Those gaps are
-/// printed, not asserted (S100's journal and its follow-ups).
+/// The port (S126), its 125 carrying its body rays, from the capture's first place and from ten ticks
+/// out at the original's speed there: the rays find the trunk, their contacts' resolve leaves a
+/// fore-aft load past the front limit, and the bike wrecks over the bars on that tick. Its run-up is
+/// quicker than the original's (P154), so the tick it reaches the trunk on, and so the depth of the
+/// rays in it and the load, are its own; `a_free09_trunk_wrecks_as_the_original_does` in
+/// tests/replay.rs rides the same hit from the original's state.
 #[test]
 #[allow(clippy::float_arithmetic)]
 fn a_free09_tree_against_the_original() {
@@ -554,50 +561,93 @@ fn a_free09_tree_against_the_original() {
     assert!(free.f(last, "ch_vel.z") < -40.0 && fwd[1] < -0.8, "back the way it came");
 
     // The port: the same bike from the capture's first place and heading, on a flat floor at the
-    // plant's foot, with that one plant standing.
+    // plant's foot, with that one plant standing, carrying its body rays.
     let mut eco = esb.clone();
     eco.plants = vec![plant];
-    let (trees, missed) = Trees::new(&eco, eco::cell_size(F(6912.0)), &CurveTable::build());
-    assert!(missed.is_empty(), "{missed:?}");
-    let floor = Flat { y: F(tree[1]), normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
-    let mut world = Wooded { world: floor, trees };
-    let (fx, fz) = (free.f(0, "bike_xform.m20"), free.f(0, "bike_xform.m22"));
-    let n = (fx * fx + fz * fz).sqrt();
-    let start = free.v(0, "ch_cofg");
+    assert!(Trees::new(&eco, eco::cell_size(F(6912.0)), &CurveTable::build()).1.is_empty(), "every solid built");
     let tables = Tables::build();
-    let mut rider =
-        Rider::new(&phy, wheels, Vf::new(start[0], tree[1] + 1.0, start[2], 1.0), Vf::new(fx / n, 0.0, fz / n, 0.0), Set::default());
-    rider.carries_bike_col(col);
-    let gas = Controls { gas: F::ONE, ..Controls::default() };
-    let idle = Controls::default();
-    // Stood first, until the clutch's launch ramp is spent, as it is in the captured state (P154): a
-    // bike given the gas the frame after it is built launches on 3x the engine's torque.
-    for _ in 0..60 {
-        rider.frame(&phy, &tables, &idle, F(game_sim::tick::DeltaTime::CAP_30), &mut world);
-    }
-    let mut ours = Vec::new();
-    for t in 0..free.rows.len() {
-        let f = rider.frame(&phy, &tables, if t == 0 { &idle } else { &gas }, F(game_sim::tick::DeltaTime::CAP_30), &mut world);
-        let c = rider.ride.chassis;
-        ours.push(([c.cofg_world.x(), c.cofg_world.y(), c.cofg_world.z()], c.vel.z(), f.wreck, rider.ride.mv.g_peak));
-    }
-    let stop = (1..ours.len()).find(|&t| ours[t - 1].1 - ours[t].1 > 15.0).expect("the port stops on the trunk");
-    let (p, v, _, _) = ours[stop - 1];
-    println!(
-        "port: stops on tick {stop} from {v:.2} to {:.2} ft/s, the centre of mass {:.2} ft off the axis; g_peak {:?}; \
-         wreck {:?}",
-        ours[stop].1,
-        off(p),
-        ours[stop].3,
-        ours.iter().find_map(|o| o.2),
-    );
-    let end = ours.last().unwrap();
-    println!("port at the end: {:.1} ft off the trunk, {:.1} ft past it, going {:.2} ft/s", off(end.0), end.0[2] - tree[2], end.1);
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    // One port ride from capture row `from`, at the original's speed there when `moving`, for `ticks`.
+    let port = |from: usize, moving: bool, ticks: usize| {
+        let floor = Flat { y: F(tree[1]), normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+        let mut world = Wooded { world: floor, trees: Trees::new(&eco, eco::cell_size(F(6912.0)), &CurveTable::build()).0 };
+        let (fx, fz) = (free.f(from, "bike_xform.m20"), free.f(from, "bike_xform.m22"));
+        let n = (fx * fx + fz * fz).sqrt();
+        let start = free.v(from, "ch_cofg");
+        let mut rider =
+            Rider::new(&phy, wheels, Vf::new(start[0], tree[1] + 1.0, start[2], 1.0), Vf::new(fx / n, 0.0, fz / n, 0.0), Set::default());
+        rider.carries_bike_col(col.clone());
+        let gas = Controls { gas: F::ONE, ..Controls::default() };
+        let idle = Controls::default();
+        // Stood first, until the clutch's launch ramp is spent, as it is in the captured state (P154): a
+        // bike given the gas the frame after it is built launches on 3x the engine's torque.
+        for _ in 0..60 {
+            rider.frame(&phy, &tables, &idle, dt, &mut world);
+        }
+        if moving {
+            let v = free.v(from, "ch_vel");
+            rider.ride.chassis.vel = Vf::new(v[0], 0.0, v[2], 0.0);
+            let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
+            for w in [&mut rider.ride.front, &mut rider.ride.rear] {
+                w.mv.spin = F(speed * w.mv.inv_radius.0);
+            }
+        }
+        (0..ticks)
+            .map(|t| {
+                // What the body rays find from where the last tick left the bike, as the frame's own
+                // search will.
+                let found = game_sim::rider_contact::scenery(&col, &rider.ride.transform(), &mut world, dt)
+                    .map_or(0, |(c, _)| c.iter().filter(|c| c.other.is_none()).count());
+                let f = rider.frame(&phy, &tables, if t == 0 && !moving { &idle } else { &gas }, dt, &mut world);
+                let c = rider.ride.chassis;
+                Tick { at: [c.cofg_world.x(), c.cofg_world.y(), c.cofg_world.z()], vel: c.vel.z(), found, wreck: f.wreck, g: rider.ride.mv.g_peak }
+            })
+            .collect::<Vec<Tick>>()
+    };
+    let report = |what: &str, ours: &[Tick]| {
+        let hit = ours.iter().position(|t| t.found > 0).unwrap_or_else(|| panic!("{what}: the port's body rays find the trunk"));
+        let before = if hit == 0 { None } else { Some(&ours[hit - 1]) };
+        let wreck = ours.iter().position(|t| t.wreck.is_some());
+        println!(
+            "port {what}: the rays find the trunk on tick {hit} ({} contacts) from {:?} ft/s, {:?} ft off the axis; \
+             after it {:.2} ft/s, g_peak {:?}; wreck {:?} on tick {wreck:?}",
+            ours[hit].found,
+            before.map(|b| b.vel),
+            before.map(|b| off(b.at)),
+            ours[hit].vel,
+            ours[hit].g,
+            wreck.map(|w| ours[w].wreck),
+        );
+        (hit, before.map_or(0.0, |b| b.vel), wreck)
+    };
+    let rest = port(0, false, free.rows.len());
     for t in [10, 20, 30, 40, 50] {
-        println!("  run-up tick {t}: original {:.2} ft/s, port {:.2}", free.f((0..free.rows.len()).find(|&r| tick(r) >= t).unwrap(), "ch_vel.z"), ours[t].1);
+        println!("  run-up tick {t}: original {:.2} ft/s, port {:.2}", free.f((0..free.rows.len()).find(|&r| tick(r) >= t).unwrap(), "ch_vel.z"), rest[t].vel);
     }
-    assert!((2.5..4.5).contains(&off(p)), "the port's bike stops at the trunk, nose first, as the original's does");
-    assert!(ours[stop].1 < speed * 0.75, "in one tick");
+    // The port's launch is quicker than the original's (P154), so it also rides in from ten ticks out
+    // at the original's own place and speed there.
+    let at_speed = port(before - 10, true, 40);
+    let mut checks = Vec::new();
+    for (what, ours) in [("from rest", &rest), ("at the original's speed 10 ticks out", &at_speed)] {
+        let (hit, speed_in, wreck) = report(what, ours);
+        checks.push((what, hit, speed_in, wreck, ours[hit].g, ours[hit].wreck));
+    }
+    for (what, hit, speed_in, wreck, g, kind) in checks {
+        assert!(speed_in > 50.0, "{what}: flat out into the trunk");
+        assert_eq!(wreck, Some(hit), "{what}: the port wrecks on the tick its rays find the trunk, as the original does");
+        assert_eq!(kind, Some(game_sim::trick::Wreck(1)), "{what}: wreck 1, over the bars");
+        assert!(g.z() < -phy.air.front_wreck_speed_limit.0, "{what}: on the fore-aft impact load, past the 125's front limit");
+    }
+}
+
+/// One tick of the port's ride into the trunk.
+struct Tick {
+    at: [f32; 3],
+    vel: f32,
+    /// Scenery contacts the body rays found from where the last tick left the bike.
+    found: usize,
+    wreck: Option<game_sim::trick::Wreck>,
+    g: Vf,
 }
 
 /// The disc's `race125p.phy` and the `125_faisst` wheels, as tests/modifiers.rs loads them.
