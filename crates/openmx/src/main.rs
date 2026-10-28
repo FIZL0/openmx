@@ -6354,6 +6354,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         // The track's (V45): a frame for each frame simulated, as the bikes' are.
         if simulated && let Some(fx) = &mut track_fx {
+            // V71: the riders in the triggers switch theirs on, and the ones on a toy ride its node
+            // where the first seat's simulation has it.
+            let riders: Vec<V3> = world.seats.iter().map(|s| s.sim.rider.ride.position()).map(|p| V3 { x: p.x(), y: p.y(), z: p.z() }).collect();
+            fx.touch(&riders);
+            if fx.on_toys() {
+                let toys = &world.seats[0].sim.traffic.toys;
+                fx.place(&mut |toy, node| toy_node(&animated, toys, toy, node));
+            }
             let place = &mut world.place;
             fx.step_over(dt.0, &mut |at| plane_fx_ground(place, at));
         }
@@ -8629,7 +8637,10 @@ fn load_track_fx(archives: &[Res], track: &str) -> Result<(particles::TrackFx, g
     let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
     let texture = game_render::pst::Texture::parse(&texture)?;
     let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
-    let fx = particles::TrackFx::new(&list, atlas, read);
+    let fx = particles::TrackFx::new(&list, atlas, read).with_triggers(game_render::toy::particle_triggers(&ini::text(&toy)));
+    for t in &fx.triggers {
+        println!("track: particles: trigger {} ({} actions, {}%)", t.trigger.name, t.trigger.actions.len(), t.trigger.percent);
+    }
     for e in &fx.fx.entries {
         println!("track: particles: {} ({}) from {:?}", e.name, e.node.as_deref().unwrap_or(""), e.emt.group);
     }
@@ -8637,6 +8648,18 @@ fn load_track_fx(archives: &[Res], track: &str) -> Result<(particles::TrackFx, g
         println!("track: particles: {name} ({why}) not run");
     }
     Ok((fx, texture))
+}
+
+/// A track toy's node in the world (V71): the animated toy named `toy`'s joint named `node` at its
+/// clip's last tick, on its place. `None` where the toy or the node is not there.
+fn toy_node(animated: &game_render::animated_toy::Animated, sim: &game_sim::toys::Toys, toy: &str, node: &str) -> Option<M4> {
+    use game_render::animated_toy::{palette, place};
+    if sim.specs.len() != animated.names.len() {
+        return None;
+    }
+    let k = animated.names.iter().position(|n| n.eq_ignore_ascii_case(toy))?;
+    let j = animated.bones[k].iter().position(|b| b.eq_ignore_ascii_case(node))?;
+    Some(palette(sim, k, 1.0).get(j)?.mul(place(sim, k)))
 }
 
 /// What the bike's particles read off one rider this frame (P74), as the original's manager reads

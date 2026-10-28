@@ -165,6 +165,10 @@ pub struct Animated {
     pub sim: Toys,
     /// The toys left out, each with why.
     pub skipped: Vec<String>,
+    /// For each of the sim's toys: its name in the `.toy`, and its skeleton's bone names by joint
+    /// (V71: the emitters that ride a toy's node find it by these).
+    pub names: Vec<String>,
+    pub bones: Vec<Vec<String>>,
 }
 
 impl Animated {
@@ -224,6 +228,8 @@ impl Animated {
             let (mesh, parts) = if toy.collision { collision(archives, toy, &set.skeleton) } else { (None, Vec::new()) };
             specs.push(Spec { motion: *motion, rig: rig(&set.skeleton, joints), place: toy.place, start: toy.start, mesh, parts });
             out.models.push(set.geometry.clone());
+            out.names.push(toy.name.clone());
+            out.bones.push(set.skeleton.bones.iter().map(|b| b.name.clone()).collect());
         }
         out.sim = Toys::new(motions, specs);
         out
