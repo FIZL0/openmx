@@ -1,0 +1,5 @@
+# S134: stand while the AI rider brakes in front, then full gas into it
+sleep 900
+down cross
+sleep 20000
+release

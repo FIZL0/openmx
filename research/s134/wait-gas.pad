@@ -1,0 +1,5 @@
+# S134: wait for the AI rider, then full gas straight on across its route
+sleep 7300
+down cross
+sleep 20000
+release

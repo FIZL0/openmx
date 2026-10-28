@@ -6196,3 +6196,17 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # The edge object (+0x100) every free09 prop names in the first_recording state: min (0, 0, 0, 1), max
 # (6912, 268.6465, 6912, 1) — the terrain's extent, 256 x cells x spacing on x and z; the port takes it
 # from the track's Area (tests/prop_set.rs checks the x/z lanes bit for bit on all 62).
+
+# S134 — the wreck bike's nearby list and free09's AI bikes (blocked: no wreck into a bike captured yet).
+# Journal: research/journal/2026-10-28-s134-wreck-into-a-bike. Wreck bike b = u32(u32(0x017a7700+0x488)+0x1ac):
+# body b-0x780 (position +0x60), collision record b+0x8c0, record+0x10c -> the nearby search (list +0, count
+# +4, 8 bytes a candidate). s62 garage-2882's list: scenery 0x220, 0x18 objects, 0x48 toys, 0x20a, 0x52058
+# (0x600ae0), three 0x9a048 AI bikes, twelve 0x200020 gates. The wreck bike also keeps the three AI bike
+# collidables at b+0x2a0/+0x2a8/+0x2b0 (bike_a +0xc20.. in watch/s134-bike-hit.toml) whether or not they are near.
+# free09's AI bikes in recording2's session (S76's farmyard state, slot 4): collidable / chassis / record
+# 0x1034c00 / 0x1032f80 / 0x1035d10, 0xc89cf0 / 0xd5d610 / 0xc8ab40, 0x15ab1b0 / 0x15a96b0 / 0x15ac000.
+# Collidable +0x78 bike, +0x7c chassis, +0x80 record, +0x84 category 0x9a048, +0x120 the chassis' world
+# transform (origin +0x150). Chassis: mass 12.4224 (inv 0.0805), inverse inertia 0.0446428582, 0.0543478243,
+# 0.0917431191, velocity +0x260. Record: mass 12.4224/0.0805, inverse inertia (0,0,0,1), cofg 0, +0xf0 the
+# chassis, +0xf4 0 (no body), +0x1f8 the collidable, actors +0x110 0x2008, collides +0x114 0xffffffff.
+# Against the wreck bike (collidable 0x9a058, actors 8, collides 0x40000) a bike is an actor contact, not mutual.
