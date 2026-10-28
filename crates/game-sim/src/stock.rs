@@ -17,6 +17,8 @@
 //! The text is the same bike as `crates/game-sim/tests/freeride-bike.phy.txt`, which the crate's
 //! tests have ridden since P2 — two copies because `src` cannot `include_str!` a `tests` fixture and
 //! neither half is the disc's, so a drift between them costs nothing but a different stand-in.
+//! One line has drifted on purpose: `ReverseSpeed` here is the −10 every disc bike carries, because
+//! the fixture's +4 pushes a reversing bike forwards (S122).
 
 use ps2_float::Vf;
 
@@ -129,7 +131,7 @@ ClutchCofGTravelBack = 0.2
 UpShiftRPM = 9500
 DownShiftRPM = 3000
 ReverseGain = 40
-ReverseSpeed = 4
+ReverseSpeed = -10
 [Aerodynamics]
 Drag = 0.5
 [Joystick]
