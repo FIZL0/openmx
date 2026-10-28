@@ -272,14 +272,14 @@ footer a { color: var(--bone); }
       <p class="lede">openMX is MX Unleashed rewritten from scratch, the same game tick for tick, running in your browser and
         on your desktop, online with friends. You bring the disc.</p>
       <div class="row">
-        <a class="pill" href="#disc">Pick your disc</a>
+        <a class="pill" href="#disc" data-pick>Pick your disc</a>
         <a class="pill ghost" href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
       </div>
     </div>
     <div class="band"><div class="wrap">
       <span class="who">Free and open source · <b>your own disc</b></span>
       <span class="hints">
-        <a class="hint" href="#disc"><span class="btn x"><svg viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>Pick your disc</a>
+        <a class="hint" href="#disc" data-pick><span class="btn x"><svg viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>Pick your disc</a>
         <a class="hint" href="#about"><span class="btn tri"><svg viewBox="0 0 10 10"><path d="M5 1.8 8.4 7.8H1.6Z" stroke="#fff" stroke-width="1.4" fill="none" stroke-linejoin="round"/></svg></span>About</a>
         <a class="hint" href="#files"><span class="btn sq"><svg viewBox="0 0 10 10"><rect x="2.2" y="2.2" width="5.6" height="5.6" stroke="#fff" stroke-width="1.5" fill="none"/></svg></span>Files</a>
       </span>
@@ -704,6 +704,8 @@ footer a { color: var(--bone); }
     worker.postMessage(opfs ? { import: file, ...msg } : { start: { file, ...msg } }, move);
   }
   $('#pick').onchange = ({ target }) => picked(target.files[0]);
+  // The hero's and the band's Pick your disc open the file dialog at once, not only scroll to the card.
+  for (const a of document.querySelectorAll('[data-pick]')) a.onclick = (e) => { e.preventDefault(); $('#pick').click(); };
   const zone = $('#dropzone');
   let drags = 0;
   const droppable = () => !sent && !document.body.dataset.mode;
