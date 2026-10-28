@@ -6233,3 +6233,171 @@ fn s154_cut_short_moves_ride_down_with_air_wrecks_off() {
     let w = off.iter().position(|t| t.wreck.is_some()).expect("landing part way round wrecks");
     assert!(off[w].on_ground && off[w - 1].spin.clip == 2, "on the touch, part way round");
 }
+
+
+// ---------------------------------------------------------------------------------------------------
+// P154: the 125's launch from rest
+// ---------------------------------------------------------------------------------------------------
+//
+// S100 found the port's 125 launching quicker than the original's: 30.9 ft/s at tick 20 against
+// 18.5. Neither the drive force nor the gearing is the difference. It is the start state. The clutch's
+// launch ramp (`mv::clutch`: a torque multiplier of `MaxClutchTorqueScale` from a standstill, fading
+// to 1 over `ClutchTorqueScaleTime`) runs on every frame the clutch lever is out until its timer
+// passes the ramp's time, and the bike's constructor leaves that timer at 0 (`research/oracle.txt`,
+// P154). So a bike that is built and given the gas on its next frame launches on 3x the engine's
+// torque, which is what S100's port run did. Both captures start from a state the original had been
+// riding and standing in for far longer than the ramp's 1.5 s, so their ramp is spent and the engine
+// drives at 1x. Only the lever held in with the gas pinned (a clutch launch) rearms it.
+
+/// S100's run: the same 125 flat out from a standstill on free09's flat by plant 347, wrecks off.
+const TREE_RUN_UP: [&str; 2] = ["capture/s100", "nowreck.csv"];
+
+/// One tick of [`launch_125`]: speed in ft/s, the gear, the revs, and the torque reaching the rear
+/// wheel.
+#[derive(Clone, Copy, Debug)]
+struct Pull {
+    speed: f32,
+    gear: i32,
+    rpm: f32,
+    wheel_torque: f32,
+}
+
+/// The disc's 125 settled for two seconds on a flat floor, then the gas pinned for `ticks` frames at
+/// 30 Hz. With `spent`, the settle has the lever out, so the clutch's launch ramp runs out while
+/// the bike stands, as it has in a state the original has been ridden in. Without it the lever is held
+/// in through the settle, which leaves the ramp where the constructor put it. Element 0 is the last
+/// settled frame, and element `t` the `t`-th frame of gas.
+fn launch_125(p: &Phy, wheels: (Vf, Vf), tables: &rider::Tables, spent: bool, ticks: usize) -> Vec<Pull> {
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let mut r = Rider::new(p, wheels, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let mut world = floor();
+    let settle = Controls { clutch: if spent { F::ZERO } else { F::ONE }, ..Controls::default() };
+    for _ in 0..60 {
+        r.frame(p, tables, &settle, dt, &mut world);
+    }
+    let ramp = p.mv.clutch_torque_scale_time;
+    assert_eq!(r.ride.mv.clutch_timer > ramp, spent, "the ramp's timer after the settle: {}", r.ride.mv.clutch_timer.0);
+    let pull = |r: &Rider| {
+        let v = r.ride.chassis.vel;
+        let e = &r.ride.engine;
+        Pull {
+            speed: (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt(),
+            gear: e.gear,
+            rpm: e.rpm.0,
+            wheel_torque: e.wheel_torque.0,
+        }
+    };
+    let gas = Controls { gas: F::ONE, ..Controls::default() };
+    let mut out = vec![pull(&r)];
+    for _ in 0..ticks {
+        let f = r.frame(p, tables, &gas, dt, &mut world);
+        assert!(f.wreck.is_none(), "the launch wrecked");
+        out.push(pull(&r));
+    }
+    out
+}
+
+/// **P154.** Flat out from a standstill, the port's 125 does what the original's does, tick by tick.
+///
+/// Against P21's capture (the x = 4620 lane of free09), which also has the engine's lanes. Its row 1 is
+/// the press and the throttle opens on row 2, so the port's `t`-th gas frame is row `t + 1`:
+///
+/// - the speed on every tick of first gear, within 0.25 ft/s;
+/// - the torque reaching the wheel while the clutch slips out, on the three ticks the lever's rate
+///   limit takes;
+/// - the revs pinned at `MinRPM` while the road turns the engine slower than that;
+/// - the shift into second, within a tick.
+///
+/// Against S100's run-up to the tree, whose rows read at mixed phases, only the rate is compared:
+/// its speed gained from tick 10 to tick 50, within 2%.
+///
+/// And the cause: the same settle with the ramp left unspent launches at more than 1.4x the speed by
+/// tick 20 (S100's port run, the task's 30.9 against 18.5).
+///
+/// Skipped, with a line, where the disc or P21's capture is not in this checkout. S100's rate check is
+/// skipped alone where its capture is missing.
+#[test]
+fn the_125_launches_as_the_original() {
+    let tables = rider::Tables::build();
+    let Some((p, wheels)) = the_disc_125(&tables) else {
+        println!("no race125p.phy or 125_faisst wheels on a disc in context/iso — skipped");
+        return;
+    };
+    let path = private_dir(FLAT_OUT_CAPTURE[0]).join(FLAT_OUT_CAPTURE[1]);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no flat-out capture at {} — skipped (P21's capture/flat_capture.sh records it)", path.display());
+        return;
+    };
+    let cap = game_sim::replay::Capture::parse(&text).expect("the flat-out capture parses");
+    let col = |name: &str| cap.columns.iter().position(|c| c == name).unwrap_or_else(|| panic!("no {name} column"));
+    let at = |row: usize, name: &str| -> f32 { cap.rows[row][col(name)].parse().expect("a number") };
+    assert_eq!(at(1, "throttle"), 0.0, "the press is on row 1");
+    assert!(at(2, "throttle") > 0.0, "and the throttle opens on row 2");
+
+    const TICKS: usize = 70;
+    let ours = launch_125(&p, wheels, &tables, true, TICKS);
+    let shift = |gear: &dyn Fn(usize) -> i32, n: usize| (0..n).find(|&t| gear(t) == 2);
+    let theirs_shift = shift(&|t| at(t + 1, "eng_gear") as i32, TICKS).expect("the original shifts into second");
+    let ours_shift = shift(&|t| ours[t].gear, TICKS + 1).expect("the port shifts into second");
+    println!("into second: the original on tick {theirs_shift}, the port on tick {ours_shift}");
+
+    let mut worst = (0.0f32, 0);
+    for t in 1..theirs_shift.min(ours_shift) {
+        let d = (ours[t].speed - at(t + 1, "ch_speed")).abs();
+        if d > worst.0 {
+            worst = (d, t);
+        }
+        if t % 10 == 0 || t <= 6 {
+            println!(
+                "  tick {t}: original {:.3} ft/s, gear {}, {:.1} rpm, {:.3} at the wheel; port {:.3}, gear {}, {:.1} rpm, {:.3}",
+                at(t + 1, "ch_speed"),
+                at(t + 1, "eng_gear"),
+                at(t + 1, "eng_rpm"),
+                at(t + 1, "eng_wheel_torque"),
+                ours[t].speed,
+                ours[t].gear,
+                ours[t].rpm,
+                ours[t].wheel_torque,
+            );
+        }
+    }
+    println!("first gear: the speeds part by {:.3} ft/s at most (tick {})", worst.0, worst.1);
+    assert!(worst.0 < 0.25, "tick {}: the port's launch parts from the original's by {} ft/s", worst.1, worst.0);
+    for t in 1..=3 {
+        let (o, w) = (ours[t].wheel_torque, at(t + 1, "eng_wheel_torque"));
+        assert!((o - w).abs() < 0.01, "tick {t}: {o} at the wheel while the clutch slips out, the original {w}");
+    }
+    for t in 6..=25 {
+        assert_eq!((ours[t].rpm, at(t + 1, "eng_rpm")), (4500.0, 4500.0), "tick {t}: the revs at MinRPM");
+    }
+    assert!(ours_shift.abs_diff(theirs_shift) <= 1, "second gear on tick {ours_shift}, the original's on {theirs_shift}");
+
+    // S100's run-up, by its rate.
+    let tree = private_dir(TREE_RUN_UP[0]).join(TREE_RUN_UP[1]);
+    match std::fs::read_to_string(&tree) {
+        Err(_) => println!("no S100 capture at {} — its rate check skipped", tree.display()),
+        Ok(text) => {
+            let cap = game_sim::replay::Capture::parse(&text).expect("S100's capture parses");
+            let col = |name: &str| cap.columns.iter().position(|c| c == name).unwrap_or_else(|| panic!("no {name} column"));
+            let at = |row: usize, name: &str| -> f32 { cap.rows[row][col(name)].parse().expect("a number") };
+            let speed = |row: usize| {
+                let (x, y, z) = (at(row, "ch_vel.x"), at(row, "ch_vel.y"), at(row, "ch_vel.z"));
+                (x * x + y * y + z * z).sqrt()
+            };
+            let first = at(0, "frame_counter");
+            let row = |t: f32| (0..cap.rows.len()).find(|&r| at(r, "frame_counter") - first >= t).expect("the tick");
+            let theirs = (speed(row(50.0)) - speed(row(10.0))) / 40.0;
+            let ours = (ours[49].speed - ours[9].speed) / 40.0;
+            println!("S100's run-up: the original gains {theirs:.4} ft/s a tick from tick 10 to 50, the port {ours:.4}");
+            assert!((ours / theirs - 1.0).abs() < 0.02, "the port gains {ours} ft/s a tick, the original {theirs}");
+        }
+    }
+
+    // The cause: the same bike with the ramp where the constructor leaves it.
+    let fresh = launch_125(&p, wheels, &tables, false, 20);
+    println!(
+        "with the ramp unspent: {:.2} ft/s at tick 20 against {:.2}, {:.1} at the wheel on tick 6 against {:.1}",
+        fresh[20].speed, ours[20].speed, fresh[6].wheel_torque, ours[6].wheel_torque
+    );
+    assert!(fresh[20].speed > 1.4 * ours[20].speed, "the launch ramp is what made S100's port run quick");
+}

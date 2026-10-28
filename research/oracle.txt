@@ -5854,3 +5854,12 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # and leaned 50 front-first reason 2; stick held back loops it over in the air, reason 11.
 # A yaw rate alone does not cross the bike up: the unyaw torque (stick centred) takes it out in ~7 ticks;
 # a held sideways stick (research/s144/cross*.pad) keeps it. The port matches all twelve (S144 test).
+# --- P154: the clutch's launch ramp at construction -----------------------------------------------
+# bike+0x6c0 is bike_clutch's ramp timer (+0x6c4 the multiplier it started at, +0x6c8 ClutchTorqueScaleTime,
+# +0x6cc the cofg-travel weight). Its only writers on a bike, from an objdump store scan: the bike
+# constructor (boot 0x0024f420, sw 0 at 0x0024f6d8) and bike_clutch itself (0x002573f8 adds dt,
+# 0x002574cc rearms to 0 with lever +0x644 = 1 and gas +0x63c = 1). The other 0x6c0 stores are other
+# objects' constructors (0x002472c0 vehicle_anim_ctor, 0x0024ad90/0x0024c7e0 the rider body, 0x00369b00,
+# 0x00390340, 0x00391f10). No put-back resets it. The ramp runs on every frame with the lever out until
+# the timer passes the time, gas or no gas, so a fresh bike spends it standing. P21's and S100's captured
+# launches drive at the engine's own torque (24.028 at 4500 rpm full gas, x1).
