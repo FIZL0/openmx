@@ -6023,3 +6023,49 @@ pc_name_bit                 pc 0x0040c020 = name_bit (BitFieldRegistry.cpp)
 # -> 0x00220470 queues the z-sample occlusion box, 0x00220670 draws a 2*flareScreenSize px sprite on the
 # sun's point, alpha flareAlpha x in-frustum. PC (MX vs ATV) SunFlare vf16/vf18 at 004c54f0/004c56f0:
 # 1 - r*0.0025, saturation 0.25*occlusion + 0.75*centredness (guide only).
+# V73 — nat01's rain: the weather box toy and the triggers' Weather action (journal *-v73-nat01-rain).
+#   tests/weather.rs reads nat01's [WeatherBoxToy1] and RainBegins/RainEnds off the disc and runs
+#   weather.rs's ramp; the draw is matched by eye (VU1 microprogram Vu1RainSimulation, not read).
+weather_box_list     boot 0x003d97b0 [WeatherBoxToys] NumberOfWeatherBoxToys, then per [WeatherBoxToyN] a
+#                                    0x270-byte toy (ctor 0x003d9a20, vtable 0x0045e920, class name
+#                                    ToyWeatherBox) read by its vt +0x74 and registered by name.
+weather_box_read     boot 0x003d9cb0 IsRain (1) +0xcc, NumberOfParticles (0), FollowCamera (1) +0xe8,
+#                                    CameraIndex (0) +0xec, MinParticleVelocity (-180) +0xf8, Max (-220)
+#                                    +0xfc, Min/MaxParticleSize (3/5), Min/MaxParticleLife (0.2/1) +0x244
+#                                    +0x248, AdjustLifeAndRangeToSpeed (0) +0x250, MaximumSpeed (1) +0x258,
+#                                    MinStartingRangeFromTop (25) +0x254, Max (100), AspectRatio (5) +0x260,
+#                                    CameraTilt (4) +0x264, StartDensity (1) +0xd8, StartDensityStep (0.1)
+#                                    +0xe0, Material. Copies: +0x24c = life, +0xf0/+0xf4 = velocities,
+#                                    +0x25c aspect, +0xd0 target = +0xd4 density = start, +0xdc step,
+#                                    +0x23c ramp = 1. Box (+0x90.., Radius > 0 all three) is the base
+#                                    toy's. 16 entries: +0x184 (MaxLife-MinLife)*rand, +0x1c4 Box.y*(MaxRange
+#                                    -MinRange)*0.01*rand, +0x144 MinSize + i*(Max-Min)/15; +0x254 *= 0.01;
+#                                    3n points (+0x230): Box.x*rand - Box.x/2, (Box.y - Box.y*+0x254*rand)
+#                                    - Box.y/2, Box.z*rand - Box.z/2. n/3+1 packets (+0xc4) of 3 drops
+#                                    (0x350 bytes each). Every draw is the C rand (0x0040fd40): 7232 at
+#                                    nat01's load.
+weather_speed_table  boot 0x003da550 +0x104[i] = +0xf0 + (15-i)*(+0xf4 - +0xf0)/15, i 0..15.
+weather_box_reset    boot 0x003da3d0 vt +0x7c: velocities, aspect, density/target/step back to the read,
+#                                    ramp 1, clock +0x240 = 0, +0xbc = 0, packet k's time = k*life/n.
+weather_box_update   boot 0x003daa70 vt +0x38 (dt): enabled (+0x3c) and not paused -> clock += dt; ramp
+#                                    2 (falling): target <= d -> d -= step, d < target -> d = target,
+#                                    ramp 1; else ramp 1, life = base. 1: d > target -> 2, d < target ->
+#                                    0. 0 (rising): d <= target -> life = base*0.5, d += step, target < d
+#                                    -> d = target, ramp 1, life = base; else ramp 1, life = base. The
+#                                    step is a frame's, not dt-scaled.
+weather_box_draw     boot 0x003dac10 vt +0x48: following, box centre +0x210 = camera +0x140; dir =
+#                                    norm(centre + (0,CameraTilt,0) - last centre +0x220) ((0,1,0)-ish
+#                                    default when 0), width = cross(dir, camera +0x150). live = packets
+#                                    whose time > clock; each expired packet while live < int(n*d):
+#                                    time = clock + life + +0x184[idx], 3 drops (0x003db130); then packets
+#                                    from index live on with time > clock are set to clock.
+weather_drop_start   boot 0x003db130 per drop: velocity (-dir.x, +0x104[idx], -dir.z), size +0x144[idx],
+#                                    start centre + point[+0x234] (- speed share * +0x1c4[idx] in y only
+#                                    with +0x250), streak = start - dir*size*aspect, width size; born at
+#                                    the clock; idx and the point index advance.
+weather_action_read  boot 0x003db500 trigger action: WeatherBoxName +0x20, NewMinParticleVelocity (0) +0x30,
+#                                    NewMax (0) +0x34, NewAspectRatio (0) +0x2c, ChangeDensity (-1) +0x24,
+#                                    ChangeDensityStep (-1) +0x28.
+weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >= 0 -> target +0xd0; step
+#                                    >= 0 -> +0xdc; aspect > 0 -> +0x25c; min > 0 or max > 0 -> both
+#                                    velocities and the speed table.

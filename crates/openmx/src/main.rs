@@ -209,6 +209,7 @@ mod split;
 mod spliced;
 mod stages;
 mod tire_tracks;
+mod weather;
 mod textures;
 mod track_mods;
 mod track_previews;
@@ -4046,6 +4047,13 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         }
         (Some(_), _) => (None, soft_sheet),
     };
+    // nat01's rain (V73): the `.toy`'s weather box and the triggers that turn it up and down, drawn as
+    // glows of the box's texture. A world's tiles have none.
+    let (mut rain, rain_art) = match world_mod {
+        None => load_rain(&archives, &stem).map_or((None, None), |(rain, art)| (Some(rain), Some(art))),
+        Some(_) => (None, None),
+    };
+    let mut rain_dt = 0.0f32;
 
     // ---- the window and the pad ---------------------------------------------------------------
     // `--headless` opens neither: no window to show the frame in and no host pad to read, so every
@@ -4802,6 +4810,10 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         .chain(tread.as_ref().map(|(_, t)| t.clone()))
         .collect();
     let tread_texture = tread.as_ref().map(|_| glow_list.len() - 1);
+    let rain_texture = rain_art.map(|art| {
+        glow_list.push(art);
+        glow_list.len() - 1
+    });
     // The sun's flares (V72): the `.toy`'s list and each one's picture, after the tread among the
     // glows' pictures. A world mod's tiles have none of their own.
     let sun_flares: Vec<(game_render::sun_flare::SunFlare, usize)> = match &world_mod {
@@ -6380,6 +6392,15 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             let place = &mut world.place;
             fx.step_over(dt.0, &mut |at| plane_fx_ground(place, at));
         }
+        // The track's rain (V73): who rode into its triggers, then a frame of its box where the
+        // camera it follows is.
+        if simulated && let Some(rain) = &mut rain {
+            let riders: Vec<V3> = world.seats.iter().map(|s| s.sim.rider.ride.position()).map(|p| V3 { x: p.x(), y: p.y(), z: p.z() }).collect();
+            rain.touch(&riders);
+            rain.update(dt.0);
+            rain.emit(cameras.get(rain.weather.camera).map(|c| c.eye));
+            rain_dt = dt.0;
+        }
         // The bike's tire tracks (V40): a tick of each seat's that rode its bike this frame. They read
         // the ride and write nothing back. None under `--overview` (P166).
         if simulated && !args.overview && let Some((list, _)) = &tread {
@@ -7157,6 +7178,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
             glows.resize_with(world.seats.len(), Vec::new);
             for view in &mut glows {
                 view.insert(0, marks.clone());
+            }
+        }
+        // The rain (V73), over the portals, in every view, each turned to its own eye and drawn where
+        // it was between the last two ticks.
+        if let (Some(rain), Some(texture)) = (&rain, rain_texture) {
+            glows.resize_with(world.seats.len(), Vec::new);
+            for (view, camera) in glows.iter_mut().zip(&cameras) {
+                view.push(rain.glows(texture, camera.eye, (1.0 - blend.0) * rain_dt, RAIN_TINT));
             }
         }
         // The sun's flares (V72), over everything else the views lay, each by its own view's camera
@@ -8659,6 +8688,34 @@ fn load_bike_fx(archives: &[Res], track: &str) -> Result<(particles::PlaneFx, ga
         println!("bike: particles: {name} ({why}) {how}");
     }
     Ok((fx, texture))
+}
+
+/// How the rain's streaks are tinted (V73): matched by eye against the original's nat01.
+const RAIN_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// The track's weather box (V73), its triggers and its material's texture, out of the track's
+/// archives. Says what it found; `None` for a track with none.
+fn load_rain(archives: &[Res], track: &str) -> Option<(weather::Rain, game_render::pst::Texture)> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let toy = ini::text(&read(&format!("{track}.toy"))?);
+    let weather = weather::boxes(&toy).into_iter().find(|b| b.rain)?;
+    let texture = match read(&format!("{}.pst", weather.material)).map(|t| game_render::pst::Texture::parse(&t)) {
+        Some(Ok(t)) => t,
+        Some(Err(why)) => {
+            println!("track: no rain: {}.pst: {why}", weather.material);
+            return None;
+        }
+        None => {
+            println!("track: no rain: no {}.pst", weather.material);
+            return None;
+        }
+    };
+    let rain = weather::Rain::new(weather, weather::triggers(&toy));
+    println!("track: rain: {} ({} packets, density {})", rain.weather.name, rain.packets.len(), rain.density);
+    for (t, actions, _, _) in &rain.triggers {
+        println!("track: rain: trigger {} ({} actions, {}%)", t.name, actions.len(), t.percent);
+    }
+    Some((rain, texture))
 }
 
 /// The track's own emitters (V45): the `.toy`'s list, each `.emt` it names, and the track's sheet,
