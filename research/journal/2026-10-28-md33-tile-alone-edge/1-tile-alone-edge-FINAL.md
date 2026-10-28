@@ -1,4 +1,4 @@
-# 1 — tile alone edge (PART)
+# 1 — tile alone edge (FINAL)
 
 Task MD33. 2026-10-28.
 
@@ -75,4 +75,4 @@ scenes (57 of 57), so the original never meets a tree smaller than its scene.
 
 ## Next
 
--
+Nothing; MD33 is done.
