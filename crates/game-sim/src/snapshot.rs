@@ -111,6 +111,7 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         TOYS.put(&mut out);
         traffic.toys.clocks.put(&mut out);
         traffic.toys.hints.put(&mut out);
+        traffic.toys.bodies.put(&mut out);
     }
     // The knockable props (S131) the same way, behind theirs.
     if !traffic.props.is_empty() {
@@ -190,11 +191,12 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.at += 8;
         let clocks: Vec<crate::toys::Clock> = Wire::take(&mut r)?;
         let hints: Vec<crate::toys::Hint> = Wire::take(&mut r)?;
+        let bodies: Vec<crate::toys::Bodies> = Wire::take(&mut r)?;
         let toys = &mut traffic.toys;
-        if clocks.len() != toys.clocks.len() || hints.len() != toys.hints.len() {
+        if clocks.len() != toys.clocks.len() || hints.len() != toys.hints.len() || bodies.len() != toys.bodies.len() {
             return Err(format!("{} animated toys in the state, {} here", clocks.len(), toys.clocks.len()));
         }
-        (toys.clocks, toys.hints) = (clocks, hints);
+        (toys.clocks, toys.hints, toys.bodies) = (clocks, hints, bodies);
     } else if !traffic.toys.is_empty() {
         return Err(format!("no animated toys in the state, {} here", traffic.toys.clocks.len()));
     }
@@ -666,6 +668,7 @@ wire!(crate::traffic::Car { clock, seg, point, head, normal, first, pose, stale,
 wire!(crate::traffic::Level { y, last, held });
 wire!(crate::toys::Clock { time, prev, finished });
 wire!(crate::toys::Hint; at);
+wire!(crate::toys::Bodies; n);
 wire!(crate::ghost::Ghost { clock, alpha, on });
 wire!(crate::foot_down::Feet { held, fade, weight });
 wire!(crate::rider::PutBack { placed, filled, held, wreck });

@@ -322,8 +322,9 @@ pub fn world_among(
 
 /// [`world_among`], and with `toys` the props that move ([`Prop::moving`], the path cars) are toys
 /// ([`TOY`]): in the moving list ahead of the probes rather than in the tree, as the plane's world
-/// holds them (S141). Without, every prop is scenery, as the worlds the port has not yet told about
-/// the cars (the wreck bike's, the put-back query's) still hold them.
+/// holds them (S141), and the wreck bike's and the put-back query's with it (S171). Without, every
+/// prop is scenery, as the worlds the port has not yet told about the cars (the riding bike's wheel
+/// and body searches, the props' own world) still hold them.
 fn world_of(
     props: &[Prop],
     bikes: Option<&Bikes<'_>>,
@@ -438,7 +439,8 @@ pub fn world_wooded(
     wooded_of(props, trees, bikes, field, centre, radius, false)
 }
 
-/// [`world_wooded`] as the plane's world holds it (S141): the path cars are toys ([`world_of`]).
+/// [`world_wooded`] as the plane's world holds it (S141): the path cars are toys ([`world_of`]). The
+/// wreck bike's world and the put-back query's are this one (S171).
 pub fn world_flown(
     props: &[Prop],
     trees: Option<&Trees>,

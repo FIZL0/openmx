@@ -541,7 +541,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // ride sets them, so they carry nothing in any replay; they are on the wire.
     // 11808 since S165: the static props the bones' search lists (`Down::statics`), walked as
     // `search_prop` only while it lists any, so the leaves do not move.
+    // 11832 since S167: how far each animated toy's collision bodies are from the load's identity
+    // (`Toys::bodies`), walked as `toy_bodies` only on a track with toys, so the leaves do not move.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11808, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11832, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

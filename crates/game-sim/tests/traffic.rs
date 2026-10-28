@@ -19,6 +19,9 @@
 //!    in its moving list ahead of its probes, in the order biplane.p2m2's state has them;
 //! 8. **the plane on the train** (S141) — a plane set down on the moving train's roof stays on it
 //!    and moves with it, rollback or not; one flown into its side meets it.
+//! 9. **the wreck bike's world** (S171) — the original's wreck bike searches the plane's world, the
+//!    cars toys in its moving list; the port's thrown wreck bike rides the wagon's roof, and the
+//!    put-back's query gathers the cars from the moving list.
 
 use game_sim::archive::{Psr, Res};
 use game_sim::math::Mat4;
@@ -1242,4 +1245,200 @@ fn the_car_search_names_the_car_as_its_mover() {
     let (still, ..) = beside(off, true).expect("the same state");
     assert!(!still.is_empty(), "the still wagon was not struck");
     assert!(still.iter().all(|c| c.mover.is_none()), "a still car named a mover");
+}
+
+// --- S171: the wreck bike's world and the put-back's ---------------------------------------------
+
+/// S171's state of free06, the train running: s89-along's ride with the bike teleported into the
+/// train's front car, so that a wreck bike is in the world (`./kit state ram` of the slot, saved a few
+/// seconds on).
+const WRECK_STATE: &str = "s171-thrown.eeMemory.bin";
+/// The wreck bike's collision object in it, the one whose probes are placed in the world: its
+/// collidable (`+0x1f8`) of the wreck bike's category, its ray probe and sweep probe (`+0x1f0`,
+/// `+0x1f4`, S76).
+const WRECK_RECORD: u32 = 0x0197_0060;
+const WRECK_RAY: u32 = 0x1f0;
+const WRECK_SWEEP: u32 = 0x1f4;
+const WRECK_COLLIDABLE: u32 = 0x1f8;
+/// A probe's leave-out list (mode, array, count) and its category list.
+const LEAVE_OUT: u32 = 0xd0;
+const CATEGORY_LIST: u32 = 0xe8;
+
+/// A probe's moving list: its placement's table's (`+0x04`, `+0x04`, `+0x38`), as its slots.
+fn moving_of(ee: &Ee, probe: u32) -> (u32, Vec<u32>) {
+    let list = ee.u32_at(ee.u32_at(ee.u32_at(probe + col_at::SPACE) + col_at::TABLE) + col_at::MOVING);
+    let block = ee.u32_at(ee.u32_at(list + col_at::LIST_BLOCKS));
+    let last = ee.i32_at(list + col_at::LIST_LAST) as u32;
+    (list, (0..last).map(|k| ee.u32_at(block + 4 * k)).collect())
+}
+
+/// The models of a moving list's toys at its head (category 0x48, a kind-2 vehicle as mover, no
+/// collision object), with each one's flags, marks masked.
+fn toys_of(ee: &Ee, slots: &[u32]) -> Vec<(String, u8)> {
+    slots
+        .iter()
+        .take_while(|&&o| o & 2 == 0 && ee.u32_at(o + col_at::CATEGORY) == game_sim::flight_search::TOY)
+        .map(|&o| {
+            let m = ee.u32_at(o + col_at::MOVER);
+            assert_eq!(ee.u32_at(m + at::KIND), 2, "a toy's mover is a vehicle of kind 2");
+            assert_eq!(ee.u32_at(o + col_at::OWNER), 0, "a toy has no collision object");
+            (name(ee, m), ee.u8_at(o + col_at::FLAGS) & !MARKS)
+        })
+        .collect()
+}
+
+/// **The wreck bike's world holds the cars as the plane's does** (S171). In the original's free06
+/// with a wreck bike in the world, both of the wreck bike's probes are placed in the one table whose
+/// moving list biplane.p2m2's plane is in: the path cars at its head in the `.toy`'s order, then the
+/// two driving toys, each a toy of category 0x48 with its car as mover — the same models, in the same
+/// order, with the same flags as biplane.p2m2's. Neither probe leaves the toys out (the ray probe's
+/// category list is empty, the sweep's masks 0x8 and 0x800 only), so the wreck bike's search meets
+/// the cars as the plane's does: the world [`game_sim::flight_search::world_flown`] builds, which
+/// [`game_sim::wreck_bike::WreckBike::tick_among`] now searches.
+#[test]
+fn the_wreck_bikes_world_holds_the_cars_as_the_planes_does() {
+    use game_sim::flight_search::{TOY, WAKE_MASK};
+    let Some(kit) = Kit::load().map_err(|w| skip(&w)).ok() else { return };
+    let (wreck, plane) = (kit.ctx("states").join(WRECK_STATE), kit.ctx("states").join(PLANE_STATE));
+    for p in [&wreck, &plane] {
+        if !p.exists() {
+            skip(&format!("{} is not there (S171's and S141's free06 states)", p.display()));
+            return;
+        }
+    }
+    let ee = Ee::from_ram(&wreck).unwrap_or_else(|e| panic!("{e}"));
+    let flown = Ee::from_ram(&plane).unwrap_or_else(|e| panic!("{e}"));
+
+    let collidable = ee.u32_at(WRECK_RECORD + WRECK_COLLIDABLE);
+    assert_eq!(ee.u32_at(collidable + col_at::CATEGORY), game_sim::wreck_bike::COLLIDABLE, "the wreck bike's collidable");
+    let (ray, sweep) = (ee.u32_at(WRECK_RECORD + WRECK_RAY), ee.u32_at(WRECK_RECORD + WRECK_SWEEP));
+    let (list, slots) = moving_of(&ee, ray);
+    assert_eq!(moving_of(&ee, sweep).0, list, "both probes are in one table");
+
+    let plane_ray = flown.u32_at(flown.u32_at(PLANE + PLANE_COLLISION) + RAY_PROBE);
+    let (plane_list, plane_slots) = moving_of(&flown, plane_ray);
+    assert_eq!(list, plane_list, "the wreck bike's moving list is where the plane's is");
+
+    let theirs = toys_of(&ee, &slots);
+    assert_eq!(theirs, toys_of(&flown, &plane_slots), "the wreck bike's toys are the plane's, in its order");
+    assert_eq!(theirs.len(), CARS.len() + 2, "the path cars and the two driving toys");
+    let models = toy_models(&archives().expect("free06's archives"));
+    let cars: Vec<&str> = theirs[..CARS.len()].iter().map(|t| t.0.as_str()).collect();
+    assert_eq!(cars, models.iter().map(String::as_str).collect::<Vec<_>>(), "the cars in the .toy's order");
+    assert!(TOY & WAKE_MASK != 0, "a toy wakes the bike's body");
+
+    // What the probes leave out: none of it a toy's.
+    for (probe, cats) in [(ray, &[][..]), (sweep, &[0x8u32, 0x800][..])] {
+        let (mode, array, count) = (ee.u32_at(probe + LEAVE_OUT), ee.u32_at(probe + LEAVE_OUT + 4), ee.u32_at(probe + LEAVE_OUT + 8));
+        assert_eq!(mode, 1, "the leave-out list is on");
+        let left: Vec<u32> = (0..count).map(|k| ee.u32_at(ee.u32_at(array + 4 * k) + col_at::CATEGORY)).collect();
+        assert!(!left.contains(&TOY), "a probe leaves a toy out: {left:x?}");
+        let (array, count) = (ee.u32_at(probe + CATEGORY_LIST + 4), ee.u32_at(probe + CATEGORY_LIST + 8));
+        let listed: Vec<u32> = (0..count).map(|k| ee.u32_at(array + 4 * k)).collect();
+        assert_eq!(listed, cats, "the probe's category list");
+    }
+}
+
+/// How fast the wrecked rider is thrown back along the wagon's roof, over the wagon's own speed.
+const SLIDE: f32 = 12.0;
+
+/// What [`slid`] measured.
+#[derive(Debug)]
+struct Slid {
+    /// The ticks before the bike left the deck ([`PARKED`] if it never did).
+    on: usize,
+    /// How far it slid back along the deck, at most, and its speed over the wagon's at the end.
+    back: f32,
+    relative: f32,
+    /// How many of its contacts named the wagon as their mover.
+    on_mover: usize,
+}
+
+/// The wreck bike thrown onto [`WAGON`]'s moving roof the way a rider's wreck hands it to the ride:
+/// [`game_sim::wreck_bike::WreckBike::tick_among`] among the world's props, the cars stepped first,
+/// let go two feet over the roof at the wagon's velocity less [`SLIDE`] ft/s along it and falling at
+/// 10 ft/s. `still` takes the cars' motion away: they are then scenery in the tree, as every car was
+/// to the wreck bike before S171.
+fn slid(still: bool) -> Option<Slid> {
+    let (mut world, mut traffic) = free06_with_cars()?;
+    let parts = archives()?;
+    let part = game_sim::phy::Part::read_bytes(&member(&parts, "bike\\wreckbike.phy").expect("the wreck bike's file"), "PhysicsPart1");
+    let first = traffic.first.expect("attached");
+    let car = world.props.props[first + WAGON].moving.expect("the wagon moves");
+    let v = car.velocity;
+    let speed = (v.x() * v.x() + v.z() * v.z()).sqrt();
+    let ahead = Vf::new(v.x() / speed, 0.0, v.z() / speed, 0.0);
+    let at = Vf::new(car.pose.0[3].x(), ROOF + 2.0, car.pose.0[3].z(), 1.0);
+    let mut bike = game_sim::wreck_bike::WreckBike::new(&part, ride::WRECK_INERTIA, at, Vf::new(0.0, 0.0, 0.0, 1.0));
+    bike.body.velocity = Vf::new(car.velocity.x() - SLIDE * ahead.x(), -10.0, car.velocity.z() - SLIDE * ahead.z(), 0.0);
+    let (mut on, mut back, mut on_mover) = (PARKED, 0.0f32, 0);
+    for tick in 0..PARKED {
+        traffic.frame(DT, &mut world);
+        if still {
+            world.props.props.iter_mut().for_each(|p| p.moving = None);
+        }
+        bike.tick_among(DT, None, Some(&world.props), None);
+        on_mover += bike.record.contacts.iter().filter(|c| c.mover == Some(first + WAGON)).count();
+        let pose = traffic.cars[WAGON].pose;
+        let p = bike.body.position;
+        let d = Vf::new(p.x() - pose.0[3].x(), p.y() - pose.0[3].y(), p.z() - pose.0[3].z(), 0.0);
+        let local = chassis::unrotate(&Mat3::new(pose.0[0], pose.0[1], pose.0[2]), d);
+        back = back.max(local.z().abs()).max(local.x().abs());
+        if on == PARKED && (local.z().abs() > DECK || local.x().abs() > DECK || p.y() < ROOF - 3.0) {
+            on = tick;
+        }
+    }
+    let car = world.props.props[first + WAGON].moving.map_or(Vf::ZERO, |m| m.velocity);
+    let v = bike.body.velocity;
+    let relative = ((v.x() - car.x()).powi(2) + (v.y() - car.y()).powi(2) + (v.z() - car.z()).powi(2)).sqrt();
+    Some(Slid { on, back, relative, on_mover })
+}
+
+/// **A wrecked rider thrown onto the moving train's roof slides with it** (S171): the wreck bike,
+/// thrown back along the wagon's roof, is braked by the roof against the wagon's motion — its
+/// contacts name the wagon as their mover — and comes to ride with it, still on the deck. With the
+/// cars' motion taken away the roof brakes it against the world and the wagon runs out from under it.
+#[test]
+fn a_wrecked_rider_thrown_onto_the_moving_train_slides_with_it() {
+    let Some(carried) = slid(false) else { return };
+    eprintln!("carried {carried:?}");
+    assert!(carried.on_mover > 0, "no contact named the wagon: {carried:?}");
+    assert_eq!(carried.on, PARKED, "the thrown bike left the wagon: {carried:?}");
+    assert!(carried.back < DECK, "the thrown bike slid {} ft along the deck", carried.back);
+    assert!(carried.relative < 2.0, "the thrown bike ends {} ft/s off the wagon's speed", carried.relative);
+    let left = slid(true).expect("the same state");
+    eprintln!("still {left:?}");
+    assert_eq!(left.on_mover, 0, "a still car is no mover");
+    assert!(left.on < PARKED, "without the wagon's motion the thrown bike still stayed on: {left:?}");
+}
+
+/// **The put-back's query gathers the cars from the moving list** (S171): its world is the plane's,
+/// so a bundle over the wagon's roof gathers every car (the moving list hands them all out wherever
+/// they are), ahead of the scenery, and meets the roof; a race's static-only gather lists none of
+/// them and meets nothing there.
+#[test]
+fn the_put_back_gathers_the_cars_from_the_moving_list() {
+    use game_sim::back_search::{self, Cache, Race};
+    use game_sim::collide::{Bundle, Probe, Record};
+    use game_sim::flight_search::FIRST;
+    let Some((world, traffic)) = free06_with_cars() else { return };
+    let first = traffic.first.expect("attached");
+    let pose = traffic.cars[WAGON].pose.0[3];
+    let mut bundle = Bundle { count: 1, centre: Vf::new(pose.x(), ROOF + 5.0, pose.z(), 1.0), radius: F(10.0), ..Bundle::default() };
+    bundle.probes[0] = Probe { origin: Vf::new(pose.x(), ROOF + 10.0, pose.z(), 1.0), dir: Vf::new(0.0, -1.0, 0.0, 0.0), length: F(10.0) };
+    let scene = back_search::Scene { props: &world.props.props, trees: None, field: None };
+    let ask = |race: Race<'_>| {
+        let (mut cache, mut found) = (Cache::default(), Record::new());
+        back_search::query(scene, &bundle, &mut cache, race, &mut found);
+        let listed: Vec<usize> = cache.list.nearby.found.iter().map(|c| c.object).collect();
+        (listed, found)
+    };
+    let cars: Vec<usize> = (0..CARS.len()).map(|k| FIRST + first + k).collect();
+    let (listed, found) = ask(Race::default());
+    assert_eq!(&listed[..cars.len()], &cars[..], "the cars head the list");
+    assert!(found.hit[0], "the bundle did not meet the roof");
+    assert!((found.point[0].y() - ROOF).abs() < 0.5, "met at y {}, not the roof", found.point[0].y());
+    let (listed, found) = ask(Race { static_only: true, checkpoints: None });
+    assert!(listed.iter().all(|o| !cars.contains(o)), "a static gather listed a car: {listed:?}");
+    assert!(!found.hit[0], "a static gather met the roof");
 }

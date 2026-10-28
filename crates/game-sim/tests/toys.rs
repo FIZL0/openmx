@@ -10,14 +10,17 @@
 //! 3. **the visibility gate** (V76) — the original's own toy update, run whole in the interpreter on
 //!    each toy with `AnimateWhenNotVisible` on and off, its root node's search stamp moved or not and
 //!    its in-view bit set or not, steps exactly the toys [`Toys::frame`] steps when the shell says a
-//!    toy was drawn (stamp moved and in view), each clock bit for bit.
+//!    toy was drawn (stamp moved and in view), each clock bit for bit;
+//! 4. **the windmill's body** (S167) — the rustic windmill's collision body, never updated in the
+//!    state, answers its motion through its own two virtuals as the port's mesh is told it, bit for
+//!    bit, before and after the toy's first and second steps.
 
 use std::collections::HashMap;
 
 use game_sim::math::Mat4;
 use game_sim::motion::Clip;
 use game_sim::toys::{
-    Clock, Hint, Motion, NarrowKey, PosChannel, PosKey, Rig, RotChannel, RotKey, RotKeys, Spec, Toys, Turns,
+    Bodies, Clock, Hint, Motion, NarrowKey, PosChannel, PosKey, Rig, RotChannel, RotKey, RotKeys, Spec, Toys, Turns,
 };
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
@@ -325,6 +328,9 @@ fn a_toys_collision_parts_carry_their_joints_motion() {
             Clock { time: f(&ee, model + at::TIME), prev: f(&ee, model + at::PREV), finished: ee.u32_at(model + at::FINISHED) != 0 }
         })
         .collect();
+    // Bodies a toy has stepped since the load (S167): the matrix before is the joint's, not the
+    // constructor's identity.
+    toys.bodies = vec![Bodies(2); TOYS.len()];
     let mut world = Shelf(game_sim::world::Props::default());
     toys.attach(&mut world.0);
     assert_eq!(world.0.props.len(), 2 * TOYS.len(), "two parts a toy");
@@ -457,4 +463,124 @@ fn the_visibility_gate_is_the_originals() {
         ee.set_u32(toy + gate::UNSEEN, 0);
     }
     assert_eq!((stepped, gated), (5 * TOYS.len(), 3 * TOYS.len()), "five of the eight ways step a toy");
+}
+
+/// The kinematic body's fields (`research/oracle.txt` S145).
+mod body {
+    /// The body's node: the rustic windmill's static root.
+    pub const NODE: u32 = 0x254;
+    /// Its update's two matrices: the node's world at its last update, and at the one before.
+    pub const NOW: u32 = 0x2a0;
+    pub const BEFORE: u32 = 0x2e0;
+    /// The vehicle virtuals a contact asks: velocity and spin (`a0` out, `a1` the body).
+    pub const VELOCITY_SLOT: u32 = 0xb8;
+    pub const SPIN_SLOT: u32 = 0xbc;
+    /// The application object's `1/dt`, which the velocity virtual scales by.
+    pub const INV_DT: u32 = 0x348;
+}
+
+/// S167: **the rustic windmill's collision answers the original's motion, bogus or not.** In
+/// first_recording's state free09's one kinematic body is the rustic windmill's collision part, on
+/// the toy's static root, and its two matrices are still the constructor's identity: the toy has
+/// not been in view since the load. Over a run of ticks the windmill is drawn or not; the original's
+/// own toy update runs in the interpreter with its gate set to match, then the body's velocity and
+/// spin virtuals are asked, as a contact on the part asks them. The port's [`Toys::frame`] with the
+/// toy's [`Toys::seen`] the same tells the windmill's mesh the same [`game_sim::traffic::Moving`],
+/// bit for bit: the node's position times `1/dt` and the turn from the identity to the placement
+/// until the toy has stepped twice, then nothing. A live capture (`research/s167_windmill.py`) shows
+/// the original flinging a bike that lands on it.
+#[test]
+fn the_windmills_body_answers_the_originals_motion() {
+    let Some(mut ee) = state() else { return };
+    let update = addr("animated_toy_update").unwrap();
+    let vtable = addr("kinematic_body_vtable").unwrap();
+    let bodies: Vec<u32> = (0..32u32 << 20).step_by(4).filter(|&a| ee.u32_at(a) == vtable).map(|a| a - 8).collect();
+    assert_eq!(bodies.len(), 1, "free09's kinematic bodies");
+    let windmill = TOYS[4];
+    let model = ee.u32_at(windmill + at::MODEL);
+    let root = ee.u32_at(model + at::ROOT);
+    let b = bodies[0];
+    assert_eq!(ee.u32_at(b + body::NODE), root, "the body is on the rustic windmill's root");
+    for m in [body::NOW, body::BEFORE] {
+        assert_eq!(mat_bits(&mat(&ee, b + m)), mat_bits(&Mat4::IDENTITY), "the state's body +{m:#x}: never updated");
+    }
+    let mut clips: HashMap<u32, usize> = HashMap::new();
+    let mut motions = Vec::new();
+    let mut channels: Vec<Vec<u32>> = Vec::new();
+    let mut specs = Vec::new();
+    for &toy in &TOYS {
+        let model = ee.u32_at(toy + at::MODEL);
+        let clip = ee.u32_at(ee.u32_at(model + at::HANDLE) + 4);
+        let k = *clips.entry(clip).or_insert_with(|| {
+            let (m, rot) = motion_of(&ee, clip);
+            motions.push(m);
+            channels.push(rot);
+            motions.len() - 1
+        });
+        let m = &motions[k];
+        let names = m.rotation.iter().map(|c| c.name).chain(m.position.iter().map(|c| c.name)).max().map_or(0, |n| n + 1);
+        let mut spec = spec_of(&ee, model, k, names);
+        spec.unseen = false;
+        if toy == windmill {
+            assert_eq!(mat_bits(&mat(&ee, root + at::WORLD)), mat_bits(&spec.place), "the root's world is its placement");
+            spec.mesh = Some(game_sim::track::Mesh {
+                version: 1,
+                surface: None,
+                transform: [[F::ONE, F::ZERO, F::ZERO], [F::ZERO, F::ONE, F::ZERO], [F::ZERO, F::ZERO, F::ONE], [F::ZERO; 3]],
+                vertices: game_sim::track::Points::Wide(Vec::new()),
+                normals: None,
+                nodes: Vec::new(),
+                triangles: Vec::new(),
+            });
+        }
+        specs.push(spec);
+    }
+    let mut toys = Toys::new(motions, specs);
+    toys.hints = channels.iter().flatten().map(|&ch| Hint(ee.u32_at(ch + at::HINT))).collect();
+    toys.clocks = TOYS
+        .iter()
+        .map(|&toy| {
+            let model = ee.u32_at(toy + at::MODEL);
+            Clock { time: f(&ee, model + at::TIME), prev: f(&ee, model + at::PREV), finished: ee.u32_at(model + at::FINISHED) != 0 }
+        })
+        .collect();
+    let mut world = Shelf(game_sim::world::Props::default());
+    toys.attach(&mut world.0);
+    assert_eq!(world.0.props.len(), 1, "the rustic windmill's mesh alone");
+    let inv_dt = F::ONE / DT;
+    let app = ee.u32_at(addr("app_pointer").unwrap());
+    ee.set_f32(app + body::INV_DT, inv_dt.0);
+    let out = ee.scratch(0);
+    let ask = |ee: &mut Ee, slot: u32| -> Vf {
+        let f = ee.u32_at(ee.u32_at(b + 8) + slot);
+        ee.call(f, &[u64::from(out), u64::from(b)], &[], BUDGET);
+        vf(ee, out)
+    };
+    let lanes = |v: Vf| [v.0[0].to_bits(), v.0[1].to_bits(), v.0[2].to_bits()];
+    // Drawn or not, tick by tick: twice unseen, the first step, unseen, the second, and on.
+    let drawn = [false, false, true, false, false, true, false, true, true, false];
+    let (mut flung, mut still) = (0, 0);
+    for (tick, &seen) in drawn.iter().enumerate() {
+        let what = format!("tick {tick} (drawn {seen})");
+        let stamp = ee.u32_at(root) & 0xffff;
+        ee.write(windmill + gate::STAMP, 2, u128::from(if seen { stamp ^ 1 } else { stamp }));
+        let flags = ee.u8_at(root + gate::IN_VIEW) & !1;
+        ee.write(root + gate::IN_VIEW, 1, u128::from(flags | u8::from(seen)));
+        ee.call(update, &[u64::from(windmill)], &[DT.0], BUDGET);
+        let (velocity, spin) = (ask(&mut ee, body::VELOCITY_SLOT), ask(&mut ee, body::SPIN_SLOT));
+
+        toys.seen = TOYS.iter().map(|&t| t == windmill && seen).collect();
+        toys.frame(DT, &mut world);
+        let ours = world.0.props[0].moving.expect("the windmill's mesh is a mover");
+        println!("{what}: velocity {:?} / {:?}, spin {:?} / {:?}", velocity.0, ours.velocity.0, spin.0, ours.spin.0);
+        assert_eq!(lanes(ours.velocity), lanes(velocity), "{what}: the velocity");
+        assert_eq!(lanes(ours.spin), lanes(spin), "{what}: the spin");
+        if velocity.0[..3].iter().all(|v| *v == 0.0) && spin.0[..3].iter().all(|v| *v == 0.0) {
+            still += 1;
+        } else {
+            assert!(velocity.0[2] > 100_000.0, "{what}: the bogus velocity is the root's position x 30");
+            flung += 1;
+        }
+    }
+    assert_eq!((flung, still), (5, 5), "bogus until the second step, still after");
 }

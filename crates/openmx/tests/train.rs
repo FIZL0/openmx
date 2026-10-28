@@ -8,7 +8,7 @@
 //! and steps and the ride is the one `vehicle.rs` steps through `Sim::step`:
 //!
 //! - the user's path: full gas square at the line from the east, into the train's side;
-//! - a bike standing on the rails, which the train's nose runs into;
+//! - a bike standing on the rails, which the train's nose runs into, head-on and from behind (S170);
 //! - a bike the train already holds (stood where car 0 is at the first tick).
 
 use std::path::{Path, PathBuf};
@@ -73,6 +73,9 @@ fn east_of_line(p: [f32; 3]) -> f32 {
     (p[0] - 2408.0) * 0.98 - (p[2] - 3897.0) * 0.17
 }
 
+/// Reason 1: over the bars, the fore-and-aft load.
+const FRONT: u32 = 1;
+
 /// Reason 6: scenery struck.
 const SCENERY: u32 = 6;
 
@@ -93,11 +96,22 @@ fn a_bike_standing_on_the_rails_is_thrown_by_the_trains_nose() {
     // On the line ahead of the train, facing it, nothing held: car 0's nose reaches it at about
     // tick 50. Before S137 the train ran through it and it stood on.
     // Since S151 the car is the contacts' mover, as the original's record names it: the nose's
-    // response carries the bike towards the train's speed and that is a g wreck (1), where the
-    // scenery response (S137) braked it against a still wall and the head ray's reach made it 6.
-    // Which of the two the original enters is S170's capture.
+    // response carries the bike back towards the train's speed, and that is a fore-and-aft wreck
+    // over the bars (1). S170 captured the original's bike standing on the rails facing the nose
+    // (4 degrees off head-on): it enters reason 1 on the first tick the nose touches it, and its
+    // record's entries name the engine as their mover.
     let Some(said) = ride("2385.8,3779.9,10", &tape("idle", 100, false), 100) else { return };
-    assert!(wrecks(&said).first().is_some_and(|r| [1, SCENERY].contains(r)), "the nose did not throw the rider:\n{said}");
+    assert_eq!(wrecks(&said).first(), Some(&FRONT), "the nose did not throw the rider over the bars:\n{said}");
+}
+
+#[test]
+fn a_bike_the_nose_meets_from_behind_is_carried_into_a_scenery_wreck() {
+    // S170's other capture: the original's bike standing on the rails with the train coming from 36
+    // degrees off its tail (the train runs at 190 degrees here, so the bike faces 154). The nose
+    // carries it up towards the train's speed over seven ticks with no fore-and-aft wreck, and then
+    // the head ray meets the car: reason 6.
+    let Some(said) = ride("2385.8,3779.9,154", &tape("behind", 100, false), 100) else { return };
+    assert_eq!(wrecks(&said).first(), Some(&SCENERY), "the nose from behind did not end in a scenery wreck:\n{said}");
 }
 
 #[test]
