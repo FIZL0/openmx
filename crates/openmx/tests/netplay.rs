@@ -2011,8 +2011,10 @@ fn two_peers_take_the_plane_and_the_bike_back_and_stay_in_sync() {
             assert_eq!(up, asked == Some(vehicle::Kind::Biplane), "seat {} at tick {tick}, its pad asked for {asked:?}", s + 1);
             if up && flying[s].last().is_none_or(|&(_, t)| t + 1 != tick) {
                 // taken this tick: the plane is put down where the bike was
-                let at = seats[s].plane.as_ref().unwrap().spawn.0;
-                assert_eq!((at.x(), at.z()), (before[s].x(), before[s].z()), "seat {} took the plane at {tick}", s + 1);
+                let at = seats[s].plane.as_ref().unwrap().spawn_origin();
+                // a rounding off: the flight keeps the body's spot (S164)
+                let off = (at.x() - before[s].x()).abs().max((at.z() - before[s].z()).abs());
+                assert!(off < 1e-4, "seat {} took the plane at {tick}: {at:?} against {:?}", s + 1, before[s]);
             }
             if let Some(up) = garages[s].follow(&seats[s]) {
                 took[s].push((tick, up));
@@ -2118,9 +2120,10 @@ fn a_seat_starts_the_ride_in_the_plane_on_every_machine() {
     // offline: the same start, the same pads
     let mut seats = Starting::new(2, &template).ride.sims;
     assert!(seats[1].plane.is_some() && seats[0].plane.is_none());
-    let at = seats[1].plane.as_ref().unwrap().spawn;
+    let at = seats[1].plane.as_ref().map(|f| (f.spawn_origin(), f.spawn.1)).unwrap();
     let want = bay(1, &template);
-    assert_eq!((at.0, at.1), (want.at, want.facing), "g's plane stands in its bay");
+    // the flight keeps the body's spot (S164), the bay's origin a rounding off it
+    assert!({ let (a, b) = (at.0, want.at); [(a.x(), b.x()), (a.y(), b.y()), (a.z(), b.z())].iter().all(|(p, q)| (p - q).abs() < 1e-5) } && at.1 == want.facing, "g's plane stands in its bay");
     let mut world = Flat::default();
     let mut plane = template.clone();
     // the offline shell's seat for a player who picked the plane: its own bike, its plane in its bay
@@ -2180,8 +2183,8 @@ fn a_joiner_that_picked_the_plane_is_seated_flying_from_its_bay() {
     vehicle::start_lane(&template, bay(2, &template), &mut want);
     assert_eq!(seats.len(), 3);
     assert_eq!(seats[2].plane, want.plane, "the joiner's flight is N18's start in its bay");
-    let at = seats[2].plane.as_ref().map(|f| f.spawn).unwrap();
-    assert_eq!((at.0, at.1), (bay(2, &template).at, bay(2, &template).facing));
+    let at = seats[2].plane.as_ref().map(|f| (f.spawn_origin(), f.spawn.1)).unwrap();
+    assert!({ let (a, b) = (at.0, bay(2, &template).at); [(a.x(), b.x()), (a.y(), b.y()), (a.z(), b.z())].iter().all(|(p, q)| (p - q).abs() < 1e-5) } && at.1 == bay(2, &template).facing);
     assert_eq!(rides::preset(&seats[2]), Some(3), "on its own preset");
     assert!(seats[2].markers.slots[0].is_some() && seats[1].markers.slots[0].is_none(), "with its saved markers");
     assert!(seats[0].plane.is_none() && seats[1].plane.is_none(), "the others on their bikes");

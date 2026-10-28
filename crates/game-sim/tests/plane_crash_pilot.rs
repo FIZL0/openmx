@@ -14,11 +14,11 @@
 
 use game_sim::archive::{Psr, Res};
 use game_sim::biplane::{CRASHED, Pad};
-use game_sim::flight::Flight;
+use game_sim::flight::{self, Flight};
 use game_sim::flight_search::{self, Rays};
 use game_sim::phy::{self, Ini, Plane};
 use game_sim::track::{self, Scene, Terrain};
-use game_sim::world::{Ground, Place, Props};
+use game_sim::world::{Ground, Place, Props, World};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Kit, skip};
 use std::fs::File;
@@ -122,7 +122,9 @@ fn entry(res: &Res, bytes: &[u8], suffix: &str) -> Option<Vec<u8>> {
 }
 
 /// The disc's plane with its ray probe, standing where free06's `machine.txt` parks the first
-/// player's (`[Biplane1]`), which is where a recovered wreck is put back.
+/// player's (`[Biplane1]`) as the original's placement stands it — its body on the ground query's
+/// answer there raised by the model's bounds ([`flight::bay_spot`]) — which is where a recovered
+/// wreck is put back.
 fn the_plane(acos: &game_sim::air::AcosTable) -> Option<Flight> {
     let bytes = psr_member("machine.res")?;
     let res = Res::parse(&bytes).expect("machine.res");
@@ -133,7 +135,11 @@ fn the_plane(acos: &game_sim::air::AcosTable) -> Option<Flight> {
     let bay = ini.section("Biplane1");
     let at = bay.vector("Position", Vf::default());
     let facing = bay.vector("Direction", Vf::new(0.0, 0.0, 1.0, 0.0));
-    f.place(Vf::new(at.x(), at.y(), at.z(), 1.0), Vf::new(facing.x(), facing.y(), facing.z(), 0.0), acos);
+    let lift = flight::spawn_lift(&entry(&res, &bytes, flight::BIPLANE_MODEL).expect("biplane.psg")).expect("biplane.psg's nodes");
+    let (terrain, scene, _) = free06()?;
+    let terrain = Terrain::parse(&terrain).expect("free06's terrain");
+    let (ground, _) = Ground::new(&terrain, &scene.terrain).ground(Vf::new(at.x(), at.y(), at.z(), 1.0));
+    f.place_body(flight::bay_spot(ground, lift), Vf::new(facing.x(), facing.y(), facing.z(), 0.0), acos);
     f.attitude.flown = true;
     Some(f)
 }
@@ -285,9 +291,8 @@ fn the_wreck_tumbles_as_the_originals_a_tick_at_a_time() {
 /// of them, and the port's plane, flown on from three ticks before the wreck, is wrecked as many ticks
 /// with the same clock on its last, then put back on the game's tick, at rest and facing as the game's.
 ///
-/// Not where: the port stands the model's origin on `machine.txt`'s `Position`, the original its body
-/// (the centre of gravity, 2.5 ft back along the plane and 3.5 up) with its own height, so the port's
-/// put-back is 2.5 ft along and 0.11 ft below the game's (printed; a follow-up).
+/// And where (S164): on the spot the original's placement made of free06's `[Biplane1]`, the body's
+/// centre of gravity on the ground there raised by the model's bounds, bit for bit.
 #[test]
 fn each_wreck_is_put_back_after_151_ticks() {
     let Some(kit) = kit() else { return };
@@ -296,8 +301,11 @@ fn each_wreck_is_put_back_after_151_ticks() {
         let wreck = rows.iter().position(|r| r.wreck == CRASHED).expect("a wreck");
         let back = wreck + rows[wreck..].iter().position(|r| r.wreck == 0).expect("a put-back");
         let game: usize = (wreck + 1..=back).map(|i| ticks(&rows, i)).sum();
-        let (mut wrecked, mut last, mut put) = (0, F::ZERO, None);
+        let (mut wrecked, mut last, mut put, mut next) = (0, F::ZERO, None, None);
         fly(&kit, &rows[..(back + 3).min(rows.len())], false, |i, f, n| {
+            if i == back + 1 {
+                next = Some(f.body.position);
+            }
             if f.crash.reason != 0 {
                 (wrecked, last) = (wrecked + n, f.crash.clock);
             } else if wrecked > 0 && put.is_none() {
@@ -318,7 +326,21 @@ fn each_wreck_is_put_back_after_151_ticks() {
             assert_eq!((body.velocity, body.rates), (rows[back].vel, rows[back].rates), "{name}: the put-back is not at rest");
         }
         let (p, g) = (body.last_position, rows[back].last_pos);
-        println!("{name}: put back at {:.3} {:.3} {:.3}, the game at {:.3} {:.3} {:.3}", p.x(), p.y(), p.z(), g.x(), g.y(), g.z());
+        println!("{name}: put back at {:.5} {:.5} {:.5}, the game at {:.5} {:.5} {:.5}", p.x(), p.y(), p.z(), g.x(), g.y(), g.z());
+        if rows[back].last_pos == rows[back].pos {
+            assert!((0..3).all(|k| p[k].to_bits() == g[k].to_bits()), "{name}: put back at {p:?}, the game at {g:?}");
+        } else {
+            // The row was read a tick late: the game's plane has settled since its put-back.
+            assert!(dist(p, g) < 0.01, "{name}: put back {} ft off the game's", dist(p, g));
+        }
+        if let Some(n) = next {
+            // The first frame off the spot settles onto the wheels as the game's does: nose and belly
+            // bit for bit, wing 0.0007 ft aside in x and z (not chased; its stick is held full over
+            // through the put-back).
+            let off = dist(n, rows[back + 1].pos);
+            println!("{name}: a tick on at {n:?}, the game at {:?}, {off} ft off", rows[back + 1].pos);
+            assert!(off < 0.001, "{name}: a tick after the put-back the port is {off} ft off the game");
+        }
     }
 }
 
@@ -379,3 +401,4 @@ fn the_pilots_lean_follows_the_stick_through_the_wreck() {
     });
     assert!(ticks > 100 && moved >= 2, "waggle: {ticks} wrecked ticks, the stick moved {moved} times");
 }
+

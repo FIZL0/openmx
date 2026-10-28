@@ -3405,6 +3405,14 @@ fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
         let mut ground = |at: Vf| lot_ground(tiled.as_deref_mut(), &mut probe, at);
         machines.as_ref().map_or_else(Lot::default, |(_, b)| Lot::around(lot_spots(b, &mut ground), args.players.max(1), &mut ground))
     };
+    // And how high the original stands the plane's body over a file bay's ground (S164): the
+    // model's bounds, off its own `.psg`.
+    let mut lot = lot;
+    lot.lift = machine_res.as_ref().and_then(|res| {
+        let e = res.find_suffix(game_sim::flight::BIPLANE_MODEL)?;
+        let bytes = res.read(&e.name).ok()?;
+        game_sim::flight::spawn_lift(&bytes).map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight::BIPLANE_MODEL)).ok()
+    });
     // What it reads its own (P127): it outlives the load's thread.
     let flight_for = {
         let (plane_phy, plane_rays, bike_box, t) = (plane_phy.clone(), plane_rays.clone(), bike_box.clone(), place.terrain.clone());

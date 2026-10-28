@@ -2946,6 +2946,21 @@ machine_placement boot 0x0020f6e0 "%s%s\machine.txt" [Machines] NumberOfMachines
 #                                 "Biplane%d" (i+1): Type, Position, Direction, HasPlayer, HasAI,
 #                                 MachineRacer, SetGroundHeight; else "Machine%d". free06:
 #                                 [Biplane1] 2304,135,2281 dir 0,0,-1
+#                                 S164: SetGroundHeight (default 1, key string 0x42edb0) puts
+#                                 Position on the ground: ground_query on the point itself (x, z
+#                                 kept); off, the query runs on a copy and only its normal is used.
+#                                 The normal is the spawn's up. vehicle_spawn then lifts the point:
+#                                 0x001b44b0(model node +0x18c, &centre, &half) reads the node's
+#                                 merged bounds (+0xe0 centre, +0xf0 half; node_bounds 0x001b3f50
+#                                 over the whole tree) and pos.y += centre.y; vt(+0x88)+0xe0
+#                                 (0x0015a180) stores (pos, dir, up) at +0xe0/+0xf0/+0x100, copied to
+#                                 the spawn +0xe10.., and physics_object_place 0x0015a1b0 (vt +0xe4)
+#                                 puts the BODY (the centre of gravity) on pos, not the model origin.
+#                                 free06: ground 134.9986 (0x4306ffa4) + biplane.psg centre y
+#                                 3.6154737 = 138.61406 (0x430a9d33), the captured body y; body
+#                                 (2304, 138.614, 2281), model origin (2304, 135.114, 2278.5).
+#                                 mxbiplane_reset (0x00355b00) and the chord put the body back there
+#                                 through 0x00351df0 -> 0x0015a030 -> vt +0xe4 on the same three.
 freeride_near_machine boot 0x003a8330 the switch trigger, each frame for the HUD's player: for kinds
 #                                     0..5 ("MotocrossVehicle", "Biplane", "Helicopter", "MXBuggy",
 #                                     "MXMonsterTruck", "MXBaja"), unless the kind is locked in the

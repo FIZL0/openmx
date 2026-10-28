@@ -144,7 +144,12 @@ pub struct Flight {
     pub edge_scale: F,
     /// `[Wrecks]`.
     pub wrecks: phy::PlaneWrecks,
-    /// Where the plane is put back when a wreck recovers: the model's origin and its nose.
+    /// Where the plane is put back when a wreck recovers or the reset chord is pressed: where its
+    /// body (its centre of gravity) goes, and its nose — the original's spawn transform, which its
+    /// reset stands the body on as it is (S164). [`Flight::place`] and [`Flight::reset`] are handed
+    /// the model's origin and keep the body's spot it makes; [`Flight::place_body`] and
+    /// [`Flight::reset_body`] the body's spot itself, as the original's placement gives one
+    /// ([`bay_spot`]).
     pub spawn: (Vf, Vf),
     /// The terrain's extent, for the map-edge throw; `None` over a world with no terrain, which has
     /// no edge.
@@ -417,19 +422,53 @@ impl Flight {
         self
     }
 
-    /// The plane stood at `origin` (the model's, which is where `machine.txt` parks it) with its nose
-    /// along `facing` and its wings level, at rest; then measured, so that the first frame's wheels
-    /// are placed by where it now is. Also where a recovered wreck is put back.
+    /// The plane stood with its model's origin at `origin` (the port's own spots: a switch's landing,
+    /// a start line) with its nose along `facing` and its wings level, at rest; then measured, so that
+    /// the first frame's wheels are placed by where it now is. Also where a recovered wreck is put
+    /// back: the spawn keeps the body's spot this makes, the origin turned on by the centre of gravity.
     pub fn place(&mut self, origin: Vf, facing: Vf, acos: &AcosTable) {
-        self.spawn = (origin, facing);
+        self.spawn = (self.body_at(origin, facing), facing);
         self.put(acos);
     }
 
-    /// The plane unwrecked and put back at a new spawn: what the original's swap does to the plane it
-    /// hands the controller (its unwreck, then its reset), with the throttle and the surfaces at zero.
+    /// [`Flight::place`] with the body's spot given, not the model's: what the original's placement
+    /// does with a track's `machine.txt` spot ([`bay_spot`]), the body's centre of gravity put on
+    /// `body` (S164).
+    pub fn place_body(&mut self, body: Vf, facing: Vf, acos: &AcosTable) {
+        self.spawn = (body, facing);
+        self.put(acos);
+    }
+
+    /// The plane unwrecked and put back at a new spawn, its model's origin at `origin` as
+    /// [`Flight::place`] stands it: what the original's swap does to the plane it hands the controller
+    /// (its unwreck, then its reset), with the throttle and the surfaces at zero.
     pub fn reset(&mut self, origin: Vf, facing: Vf, acos: &AcosTable) {
-        self.spawn = (origin, facing);
+        self.spawn = (self.body_at(origin, facing), facing);
         self.unwreck(acos);
+    }
+
+    /// [`Flight::reset`] onto the body's spot `body`, as [`Flight::place_body`] stands it.
+    pub fn reset_body(&mut self, body: Vf, facing: Vf, acos: &AcosTable) {
+        self.spawn = (body, facing);
+        self.unwreck(acos);
+    }
+
+    /// The model's origin of the spawn: the body's spot with the centre of gravity, turned along the
+    /// spawn's nose, taken back off. What the drawn plane's spawn is; a rounding off the origin a
+    /// [`Flight::place`] was handed.
+    pub fn spawn_origin(&self) -> Vf {
+        let (at, facing) = self.spawn;
+        let q = spawn_turn(at, facing);
+        let o = at.merge(Dest::XYZ, at.sub(turn(q, self.body.cofg)));
+        Vf::new(o.x(), o.y(), o.z(), 1.0)
+    }
+
+    /// Where the body goes for the model's origin at `origin` along `facing`: the centre of gravity
+    /// turned with the plane and added on.
+    fn body_at(&self, origin: Vf, facing: Vf) -> Vf {
+        let q = spawn_turn(origin, facing);
+        let at = origin.merge(Dest::XYZ, origin.add(turn(q, self.body.cofg)));
+        Vf::new(at.x(), at.y(), at.z(), 1.0)
     }
 
     /// **The reset chord** (S57), from the input slot, before the frame: `respawn` is
@@ -448,14 +487,12 @@ impl Flight {
         true
     }
 
-    /// The spawn into the body, and the measure after it.
+    /// The spawn into the body, and the measure after it: the body on the spawn's spot as it is, as
+    /// the original's reset places it (S164), turned along its nose with its wings level.
     fn put(&mut self, acos: &AcosTable) {
-        let (origin, facing) = self.spawn;
-        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
-        let q = mat4_to_quat(&basis(origin, facing, up, true, false));
+        let (at, facing) = self.spawn;
+        let q = spawn_turn(at, facing);
         let b = &mut self.body;
-        let at = origin.merge(Dest::XYZ, origin.add(turn(q, b.cofg)));
-        let at = Vf::new(at.x(), at.y(), at.z(), 1.0);
         (b.quat, b.last_quat, b.position, b.last_position) = (q, q, at, at);
         (b.velocity, b.rates, b.force, b.moment) = (CLEAR, CLEAR, CLEAR, CLEAR);
         self.remeasure(acos);
@@ -753,6 +790,95 @@ impl Flight {
     pub fn pose(&self) -> (Vf, Vf) {
         self.body.pose()
     }
+}
+
+/// The spawn's orientation: nose along `facing`, wings level under the world's up.
+fn spawn_turn(at: Vf, facing: Vf) -> Vf {
+    mat4_to_quat(&basis(at, facing, Vf::new(0.0, 1.0, 0.0, 0.0), true, false))
+}
+
+/// The plane's model in `machine.res` (the factory's livery 0), whose bounds lift a spawn
+/// ([`spawn_lift`]).
+pub const BIPLANE_MODEL: &str = "biplane\\anim\\biplane.psg";
+
+/// **Where the original's placement puts a parked plane's body** (S164), `ground` being the ground
+/// query's answer at the track's `machine.txt` spot (with `SetGroundHeight`, on by default, the spot
+/// moved onto the ground there; its `x` and `z` are the file's) and `lift` [`spawn_lift`] of the
+/// plane's model: the spot raised by the height of the model's bounds' centre. The machine factory
+/// adds that height to the position after it builds the plane, and the position is the body's — its
+/// centre of gravity's — from then on: its spawn transform keeps it and its reset stands the body on
+/// it as it is. On free06's `[Biplane1]` the body is at (2304, 138.61406, 2281) with its model's
+/// origin 3.5 ft under it and 2.5 ft along, where S143's put-backs stand.
+pub fn bay_spot(ground: Vf, lift: F) -> Vf {
+    Vf::new(ground.x(), (F(ground.y()) + lift).to_f32(), ground.z(), 1.0)
+}
+
+/// How far the machine factory raises a plane's spot (S164): the `y` of its model's bounds' centre
+/// as the scene node answers it ([`crate::prop_world::node_bounds`]) — the model's root box widened
+/// by every node under it, each placed by its local matrix under its parent's — out of the model's
+/// `.psg` bytes ([`BIPLANE_MODEL`]). The rudder's box reaches over the root's, so the answer is
+/// not the file's own centre: 3.6154737 ft on the disc's plane, against the root's 3.6148021.
+/// The root is taken where the model has it, unplaced: the centre comes back in its frame.
+pub fn spawn_lift(psg: &[u8]) -> Result<F, String> {
+    use crate::math::{Mat4, mul};
+    use crate::prop_world::BoundsNode;
+    use crate::props::NodeBox;
+    const NODES: usize = 12;
+    const RECORD: usize = 224;
+    const MATRIX: usize = 128;
+    const CENTRE: usize = 192;
+    const HALF: usize = 204;
+    const PARENT: usize = 220;
+    let word = |at: usize| -> Result<u32, String> {
+        psg.get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(|| format!(".psg ends at {} before byte {at}", psg.len()))
+    };
+    if psg.get(..4) != Some(b"psg\0".as_slice()) {
+        return Err("not a .psg: no psg\\0 at the front".into());
+    }
+    let count = word(8)? as usize;
+    let at = |i: usize| NODES + i * RECORD;
+    let mut parents = Vec::with_capacity(count);
+    for i in 0..count {
+        parents.push(word(at(i) + PARENT)? as i32);
+    }
+    let three = |at: usize| -> Result<Vf, String> { Ok(Vf::from_bits([word(at)?, word(at + 4)?, word(at + 8)?, 1f32.to_bits()])) };
+    let local = |i: usize| -> Result<Mat4, String> {
+        let row = |r: usize| -> Result<Vf, String> {
+            let b = at(i) + MATRIX + r * 16;
+            Ok(Vf::from_bits([word(b)?, word(b + 4)?, word(b + 8)?, word(b + 12)?]))
+        };
+        Ok(Mat4([row(0)?, row(1)?, row(2)?, row(3)?]))
+    };
+    fn node(
+        i: usize,
+        parent: Option<&Mat4>,
+        parents: &[i32],
+        local: &dyn Fn(usize) -> Result<Mat4, String>,
+        three: &dyn Fn(usize) -> Result<Vf, String>,
+        at: &dyn Fn(usize) -> usize,
+    ) -> Result<BoundsNode, String> {
+        let world = match parent {
+            Some(p) => mul(&local(i)?, p),
+            None => local(i)?,
+        };
+        let mut children = Vec::new();
+        for (k, &p) in parents.iter().enumerate() {
+            // A node comes after its parent in the file; a later index cannot loop back.
+            if p == i as i32 && k > i {
+                children.push(node(k, Some(&world), parents, local, three, at)?);
+            }
+        }
+        // The node reader marks every node as having a box, the dummies' empty ones too.
+        let own = Some(NodeBox { centre: three(at(i) + CENTRE)?, half_extent: three(at(i) + HALF)? });
+        Ok(BoundsNode { own, world, children })
+    }
+    if count == 0 || parents[0] != -1 {
+        return Err("a .psg whose first node is not its root".into());
+    }
+    let root = node(0, None, &parents, &local, &three, &at)?;
+    Ok(F(crate::prop_world::node_bounds(&root).centre.y()))
 }
 
 /// One wheel off its `biplane.phy` section, at rest.

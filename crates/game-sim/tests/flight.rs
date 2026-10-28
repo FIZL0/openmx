@@ -359,6 +359,8 @@ fn the_reset_chord_puts_the_flown_plane_back() {
     let spawn = (Vf::new(2048.0, (-lowest).to_f32(), 2048.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0));
     f.area = Some(game_sim::biplane::Area::new(F(16.0), F(16.0), F(1.0), F(1.0)));
     f.place(spawn.0, spawn.1, acos);
+    // The spawn transform it keeps: the body's spot, the original's (S164).
+    let put = f.spawn;
     let built = (f.gravity, f.body.damping, f.body.ang_damping, f.body.inv_inertia);
     let mut ground = Flat::default();
     let dt = F(1.0 / 30.0);
@@ -391,7 +393,7 @@ fn the_reset_chord_puts_the_flown_plane_back() {
 
     // Wrecked: thrown back off the map's west edge, then the chord, still in the air.
     f.place(Vf::new(50.0, spawn.0.y() + 2000.0, 2048.0, 1.0), spawn.1, acos);
-    f.spawn = spawn;
+    f.spawn = put;
     f.frame(dt, Pad::default(), &mut ground, &tables);
     assert_eq!(f.crash.reason, 13, "the map's edge did not throw the plane");
     assert_ne!(f.gravity, built.0, "a wreck's gravity");
