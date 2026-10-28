@@ -849,7 +849,7 @@ pub struct Plane {
     /// A second scale the map-edge throw halves and its unwreck doubles back. Zero in the shipped
     /// state, and nothing in this module reads it.
     pub edge_scale: F,
-    /// The throttle, and the engine's power, which a wreck cuts.
+    /// The throttle, and the engine's note (the engine object's sound rpm), which a wreck cuts.
     pub throttle: F,
     pub engine_power: F,
     /// The surfaces a reset zeroes: elevator, elevator command, aileron, rudder.

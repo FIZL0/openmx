@@ -7985,18 +7985,14 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::Seat
     let v = r.chassis.vel;
     let plane = match (seat.garage.up, &seat.garage.plane) {
         (Kind::Biplane, Some(plane)) => {
-            let note = plane.flight.as_ref().map_or(0.0, |f| f.engine.note.0 / f.engine.max_rpm.0.max(1.0));
+            let note = plane.flight.as_ref().map_or(0.0, audio::plane_note);
             Some((note, [plane.at.x(), plane.at.y(), plane.at.z()]))
         }
         _ => None,
     };
     // The plane's wreck clank (P164): its wreck word, its collision record and its body's shock peak.
     let crash = match (seat.garage.up, seat.garage.plane.as_ref().and_then(|p| p.flight.as_ref())) {
-        (Kind::Biplane, Some(f)) => audio::PlaneCrash {
-            wrecked: f.crash.reason != 0,
-            touching: f.record.touching,
-            impulse: audio::length([f.body.shock_peak.x(), f.body.shock_peak.y(), f.body.shock_peak.z()]),
-        },
+        (Kind::Biplane, Some(f)) => audio::PlaneCrash::of(f),
         _ => audio::PlaneCrash::default(),
     };
     // The plane's wheels (P146): the measure's grounded flag rising, and the body's speed then.

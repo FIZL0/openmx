@@ -712,7 +712,8 @@ impl Flight {
 
     /// The wreck's effect on the plane (S36's `Plane::wreck`): the body spun up and given `[Wrecks]`'
     /// damping, its inertia scaled by `WreckInertia` and its gravity by `WreckGravity`, the throttle
-    /// and the engine cut.
+    /// and the engine's note cut (P187: the original zeroes the note the engine sound reads, not the
+    /// power, which keeps its last value through the wreck — the engine is not stepped while wrecked).
     fn wreck(&mut self) {
         let w = &self.wrecks;
         let b = &mut self.body;
@@ -726,7 +727,7 @@ impl Flight {
         b.inv_inertia = inv;
         self.gravity = gravity_force(w.wreck_gravity, self.mass);
         self.surfaces.throttle = F::ZERO;
-        self.engine.power = F::ZERO;
+        self.engine.note = F::ZERO;
     }
 
     /// The recovery: everything [`Flight::wreck`] changed put back, and the plane reset to its spawn
