@@ -290,3 +290,63 @@ fn the_launcher_fits_a_phone_and_a_desktop() {
         assert_eq!(lit, if state == "menu" { "Ride" } else { "null" }, "{state} at {width}: the lit item");
     }
 }
+
+/// The on-screen pad (P197) in headless chromium with a phone's touch screen emulated
+/// (`tests/web/touch.mjs`): none on the site; once the game has started, every control on the
+/// screen, none over another and none smaller than a fingertip; the stick, GAS and BRAKE held by
+/// three fingers at once reach `navigator.getGamepads()` as the standard mapping's axes 0/1 and R2
+/// and L2, and all let go with the fingers; a quick tap on the stick's area is a click on the
+/// canvas (the menus'); a drag scrolls nothing and the viewport refuses zoom; upright the pad
+/// gives way to the hint to turn the phone; a hardware key hides it and a touch brings it back.
+/// Needs no disc and no game module. Skips without node or chromium; with `OPENMX_WEB_SHOTS` set
+/// to a directory its two shots are kept there.
+#[test]
+fn the_touch_pad_rides_on_a_phone() {
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    let scratch = std::env::temp_dir().join(format!("openmx-web-touch-{}", std::process::id()));
+    let out = std::env::var_os("OPENMX_WEB_SHOTS").map(PathBuf::from).unwrap_or_else(|| scratch.join("out"));
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/touch.mjs");
+    let run = Command::new("node").arg(&drive).arg(repo().join("web")).arg(&out).arg(scratch.join("profile")).output().expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    println!("{}{text}", String::from_utf8_lossy(&run.stderr));
+    assert!(run.status.success(), "touch.mjs failed");
+
+    // Flat-ish JSON read with `split`, as the other page tests do.
+    let field = |key: &str| -> String {
+        let rest = text.split(&format!("\"{key}\":")).nth(1).unwrap_or("");
+        if rest.starts_with('{') { rest[..=rest.find('}').unwrap_or(0)].to_string() } else { rest.split([',', '}']).next().unwrap_or("").trim_matches('"').to_string() }
+    };
+    assert_eq!(field("site"), "false", "the site has no pad: {text}");
+    assert_eq!(field("shown"), "true", "a started game on a touch screen shows the pad: {text}");
+    assert_eq!(field("buttons"), "10", "{text}");
+    assert_eq!(field("inside"), "true", "a control off the screen: {text}");
+    assert_eq!(field("overlaps"), "0", "controls on top of each other: {text}");
+    assert_eq!(field("small"), "0", "a control smaller than a fingertip: {text}");
+    let axes = |key: &str| -> Vec<f64> {
+        let f = field(key);
+        f.split("\"axes\":[").nth(1).unwrap_or("").split(']').next().unwrap_or("").split(',').filter_map(|v| v.parse().ok()).collect()
+    };
+    let down = |key: &str| -> String { field(key).split("\"down\":").nth(1).unwrap_or("").trim_end_matches('}').to_string() };
+    for key in ["steer", "gas", "both"] {
+        let a = axes(key);
+        assert!(a.len() == 2 && a[0] > 0.9 && a[1] > 0.1 && a[1] < 0.4, "{key}: the stick pushed right and a little down: {a:?}");
+    }
+    assert_eq!(down("steer"), "[]", "the stick presses no button");
+    assert_eq!(down("gas"), "[7]", "GAS is R2");
+    assert_eq!(down("both"), "[6,7]", "BRAKE is L2, with GAS still held");
+    assert_eq!(axes("released"), [0.0, 0.0], "the stick centres when the thumb lifts");
+    assert_eq!(down("released"), "[]", "every button up with the fingers");
+    assert_eq!(field("tap"), "1", "a quick tap on the stick's area clicks the canvas once");
+    assert_eq!(text.split("\"scroll\":[").nth(1).unwrap_or("").split(']').next(), Some("0,0,0,0"), "the page scrolled: {text}");
+    assert_eq!(field("zoom"), "true", "the viewport still zooms while riding");
+    let portrait = field("portrait");
+    assert!(portrait.contains("\"pad\":\"none\"") && portrait.contains("\"hint\":\"flex\""), "upright: {portrait}");
+    assert_eq!(field("keyboard"), "false", "a hardware key hides the pad");
+    assert_eq!(field("again"), "true", "a touch brings it back");
+}
