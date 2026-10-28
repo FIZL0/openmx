@@ -22,6 +22,9 @@ Task S122. 2026-10-27.
   (machines_everywhere). It binds 127.0.0.1:47613 outright, and four `./kit done` runs here went red only
   on "Address already in use" while other slots' gates ran it. It passed alone (91/91). It now gets
   the list's single lone rerun, like lobby's and udp's port tests.
+- `gate.toml` `[flaky]`: added `--test fixed_rate::`. Its tests ride a few seconds of wall clock and
+  compare tick counts and positions; they went red in three of five gates here at load 30–45
+  ("5 fps: 90 ticks … 60 fps: 89 ticks") and passed alone with this change in.
 - Nothing was taken from opentennis: it has no bike `.phy`.
 
 ## What the original does
