@@ -253,14 +253,15 @@ fn a_world_rides_across_both_joins_and_shoots_off_at_its_outer_edge() {
 }
 
 /// Tile `a` is at the world's origin, so a ride on it is the same floats as on `a` alone: tick for
-/// tick to the bit, up to where the world's join begins.
+/// tick to the bit, up to where the world's join begins or `a` alone throws at its own edge, its
+/// field's 576 feet less the margin (MD33), which the world does not have there.
 #[test]
 fn the_tile_at_the_origin_rides_as_it_does_alone() {
     let Some(world) = ride("origin_world", "md8_world", 160.0, 200.0, 90.0, 240) else { return };
     let Some(alone) = ride("origin_alone", "md8_a", 160.0, 200.0, 90.0, 240) else { return };
     let mut compared = 0;
     for (w, a) in world.iter().zip(&alone) {
-        if w.x > 480.0 {
+        if w.x > 480.0 || a.wreck {
             break;
         }
         assert_eq!(w.text, a.text, "tick {}", w.frame);
@@ -270,7 +271,8 @@ fn the_tile_at_the_origin_rides_as_it_does_alone() {
 }
 
 /// The same ride on tile `b`, 648 feet out in the world and at its own origin alone: the ground is
-/// the same, the sums are not. How long they stay together, for the journal.
+/// the same, the sums are not. How long they stay together, for the journal, up to where `b` alone
+/// throws at its own edge (MD33).
 #[test]
 fn a_tile_away_from_the_origin_parts_from_itself_alone() {
     let Some(world) = ride("far_world", "md8_world", 648.0 + 200.0, 200.0, 90.0, 200) else { return };
@@ -278,7 +280,7 @@ fn a_tile_away_from_the_origin_parts_from_itself_alone() {
     let mut first = None;
     let mut worst = 0.0f32;
     for (w, a) in world.iter().zip(&alone) {
-        if w.x > 1150.0 {
+        if w.x > 1150.0 || a.wreck {
             break;
         }
         let dx = (w.x - 648.0 - a.x).abs().max((w.y - a.y).abs()).max((w.z - a.z).abs());

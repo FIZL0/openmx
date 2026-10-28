@@ -967,6 +967,24 @@ impl<'a> Terrain<'a> {
         if word == 0 { None } else { Some(word) }
     }
 
+    /// The samples the tree holds across and along (MD33): its last root cell present on each axis,
+    /// plus one, times 16 per level below the root. Every disc map's and every openmx-mods track's
+    /// is its scene's `TerrainWidth` × 256; a generated tile's of fewer than 16 one-level cells is
+    /// less. `None` with no root.
+    pub fn samples(&self) -> Option<[u32; 2]> {
+        let root = self.root()?;
+        let mut cells = [0u32; 2];
+        for cz in 0..TREE_ARITY {
+            for cx in 0..TREE_ARITY {
+                if self.child(&root, cx, cz).is_some() {
+                    cells = [cells[0].max(cx + 1), cells[1].max(cz + 1)];
+                }
+            }
+        }
+        let per_root = TREE_ARITY.pow(self.levels.saturating_sub(1)) * (BLOCK_SAMPLES - 1);
+        Some(cells.map(|c| c * per_root))
+    }
+
     /// Walk down to the leaf holding one terrain sample, and say where in that leaf it lands.
     ///
     /// This is the game's own descent: shift the sample coordinates down by four bits per level, take the

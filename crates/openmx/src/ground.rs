@@ -79,13 +79,19 @@ impl<'a> Ground<'a> {
     /// cells it has.
     ///
     /// A field is `width x 256` samples, as the simulation's ground has it, whatever the tree's depth
-    /// ([`game_sim::world::SAMPLES_PER_WIDTH`]).
+    /// ([`game_sim::world::SAMPLES_PER_WIDTH`]), capped at the samples the tree holds as the
+    /// simulation's is (MD33, [`game_sim::world::Ground::new`]).
     pub fn new(terrain: Terrain<'a>, layout: &TerrainLayout) -> Ground<'a> {
         let per_width = game_sim::world::SAMPLES_PER_WIDTH;
+        let tree = terrain.samples().unwrap_or([0, 0]);
+        let cap = |count: u32, axis: usize| {
+            let scene = count.max(1) * per_width;
+            if tree[axis] > 0 { scene.min(tree[axis]) } else { scene }
+        };
         Ground {
             spacing: terrain.scale.0,
-            samples_x: layout.width.max(1) * per_width,
-            samples_z: layout.breadth.max(1) * per_width,
+            samples_x: cap(layout.width, 0),
+            samples_z: cap(layout.breadth, 1),
             terrain,
             paint: None,
             pages: None,
