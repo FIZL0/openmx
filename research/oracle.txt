@@ -6176,6 +6176,19 @@ atv_stunt_state_pack        atv 0x004d9f30 = pc_stunt_state_pack (align, 0.37; w
 # (pos 2439.249, 133.697, 4059.953). Its +0x2a0 and +0x2e0 are still identity in every state: the
 # update never ran, so 0x001dd7b0 would answer the node's position x 30. Not run live. s89-along,
 # s89-across and the biplane states hold none of the class.
+# S168 — the wheel's owner branch in the ride (tests crates/game-sim/tests/bike_col.rs; journal
+#   research/journal/2026-10-28-s168-wheel-owner). collision_pair_filter(bike+0x7c8, x, 0|1) on S93's
+#   three images refuses the other player's frame (+0x7c0, 0x9a048) and wreck part (+0x7a8)+0x128
+#   (0x9a058), and every candidate with a collision object (+0x80) in the bike's nearby search
+#   (+0x7bc): 3 a bike there, all 0x9a048 or 0x42058 (the biplane 0x0060b1f0, 0x00c97be0, both with
+#   +0xf4 bodies). recording2-ram.bin: S134's three AI bikes (+0x390 0x2000) each refuse the others'
+#   frames and their 4 owned candidates (0x9a048 x3, 0x52058 0x600ae0 with a body). Cause: the wheel
+#   probe's +0xe8 list [0x100, bike+0x390] and +0x390 = 0x2000 on every bike, a bit every owned
+#   collidable seen carries. So the owner word +0x1f0 stays 0 for these. s89-along (free06): both
+#   HasPhysics trucks' physics meshes (car+0x698 -> +0x128) are category 0x18, +0x80 = a collision
+#   object with +0xf0 0 and +0xf4 a body, flags 0x04/0x44, nearby bit clear; the filter accepts the
+#   four bikes' wheel probes against them with nearby 0 and refuses with nearby 1. A woken truck is
+#   the one owner seen that the wheel's owner branch could read (body side). Not run live.
 # S133 — the hierarchy toys' parts (crates/game-render/tests/toy_parts.rs, states s133-free10/-nat11
 #   from R7's scripted boot). The parts list is the motion object's +0x300 (count +0x304); a part's
 #   +0x230 is by then a node of the toy's skeleton (one of its joints' +0x34; a mesh .col's single part
