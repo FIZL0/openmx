@@ -14,8 +14,8 @@
 //! 2. **The ride is deterministic.** The same inputs over the same world ride to the same per-tick
 //!    hash, twice, from two separate states — which is what every port after this one is checked with
 //!    and the one property a replay fixture is worthless without.
-//! 3. **A prop stops the rider.** A rider thrown at a wall ends up on this side of it, with the
-//!    body-contact flag the air state reads set, and does not pass through.
+//! 3. **A prop stops the rider.** A rider thrown at a wall is put back on this side of it by the
+//!    chassis' sweep back (S125), and does not pass through.
 //! 4. **The state hash sees the whole ride.** Every field of the walk is distinct and the walk's leaf
 //!    count is pinned, so a field added to [`Ride`] without a line in the walk fails here instead of
 //!    hashing to the same value for ever.
@@ -302,7 +302,10 @@ fn wall(z: f32) -> Prop {
 #[test]
 fn a_prop_stops_the_rider() {
     let tables = Tables::build();
-    let p = bike(&tables);
+    let mut p = bike(&tables);
+    // This file's bike has no `[Collisions]`, so its sweep's point would be the origin, under the
+    // floor; the disc's bikes start it three feet up the frame (`tests/rider_contact.rs`).
+    p.collisions.high_speed_ray_offset = Vf::new(0.0, 3.0, 0.0, 1.0);
     let mut ride = rider(&p);
     let mut yard = Yard { floor: floor(), props: Props { props: vec![wall(30.0)] } };
 
@@ -310,15 +313,23 @@ fn a_prop_stops_the_rider() {
     // frame does with its record, not the engine's acceleration.
     ride.chassis.vel = Vf::new(0.0, 0.0, 60.0, 0.0);
 
-    let mut touched = false;
+    // The chassis' sweep back (S125) is all that stops a bike in a world that only answers `solid`:
+    // it has no body rays there. It runs at the top of each frame, from where the last one left the
+    // bike, so a frame can end with the sweep's point (three feet up the frame) one frame's travel
+    // past the wall; the next frame's sweep puts it back two feet short of it.
+    let point = |r: &game_sim::ride::Ride| game_sim::math::transform_point(&r.transform(), p.collisions.high_speed_ray_offset);
+    let travel = 60.0 * DT.0;
+    let mut swept = false;
     for _ in 0..120 {
+        swept |= ride.clone().sweep_back(&p, None, &mut yard, DT);
         ride.frame(&p, &tables, &Controls::default(), DT, &mut yard);
-        touched |= ride.touching;
-        let z = ride.position().z();
-        assert!(z < 31.0, "the rider went through the wall, to z = {z}");
+        let z = point(&ride).z();
+        assert!(z < 30.0 + travel + 0.01, "the rider went through the wall, to z = {z}");
     }
-    assert!(touched, "the body contact the air state reads was never set");
+    assert!(swept, "the sweep back never put the bike back");
     assert!(ride.position().z() > 20.0, "the rider never reached the wall");
+    ride.sweep_back(&p, None, &mut yard, DT);
+    assert!(point(&ride).z() < 30.0, "after the sweep the bike is short of the wall: {}", point(&ride).z());
 
     // The same throw with nothing in the way goes straight past where the wall was, which is what
     // makes the assertion above a test of the wall and not of the bike's drag.

@@ -722,6 +722,9 @@ impl Rider {
             // on the bump's list beside the other riders' frames, or on a list of its own.
             // Tipped past its up limit, the same rays look for the terrain first (P147): those
             // contacts head the list.
+            // The object's search opens with the chassis' sweep back (S125), which puts the bike back
+            // out of what it passed into since the last tick; the rays look from where it leaves it.
+            ride.sweep_back(p, bike_col.as_deref().map(|col| &col.rays), world, dt);
             let ground = bike_col.as_deref().map_or_else(Vec::new, |col| crate::rider_contact::ground(col, &ride.transform(), world, dt));
             in_ground = crate::rider_contact::ground_hits(&ground);
             let (found, movers) = match bike_col.as_deref().and_then(|col| crate::rider_contact::scenery(col, &ride.transform(), world, dt)) {
@@ -729,10 +732,7 @@ impl Rider {
                 None => (None, Vec::new()),
             };
             on_scenery = found.as_deref().map_or_else(Vec::new, crate::mover_contact::wreck_contacts);
-            let scenery = match &found {
-                Some(f) => Some(!f.is_empty() || !ground.is_empty()),
-                None => (!ground.is_empty()).then_some(true),
-            };
+            let scenery = Some(found.as_ref().is_some_and(|f| !f.is_empty()) || !ground.is_empty());
             let mut alone = None;
             let bump = match (bump, found) {
                 (Some(b), found) => {

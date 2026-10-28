@@ -379,32 +379,32 @@ fn riding_into_a_free09_tree_stops_the_bike_at_its_trunk() {
     use game_sim::rider::{Rider, Tables};
     use game_sim::trick::Set;
     let Some(esb) = free09_esb() else { return };
-    let Some((phy, wheels)) = the_125() else { return };
+    let Some((phy, wheels, col)) = the_125() else { return };
     // free09's TreeB (the file's slot 1), 1.5 feet round, standing 120 feet up the floor from the start.
     let tree_z = 120.0;
     let eco = one_tree(&esb, 1, 0.0, tree_z);
     let (trees, _) = Trees::new(&eco, eco::cell_size(F(6912.0)), &CurveTable::build());
     let trunk_z = trees.props.props[0].centre.z();
     let floor = || Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
-    // Each tick's distance up the floor and speed along it.
+    // Each tick's distance up the floor, speed along it, and the wreck the tick started.
     let ride = |world: &mut dyn World| {
         let tables = Tables::build();
         let mut rider = Rider::new(&phy, wheels, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+        // Its body rays are what find the trunk (S125), as the shell's rider's do.
+        rider.carries_bike_col(col.clone());
         let gas = Controls { gas: F::ONE, ..Controls::default() };
         (0..30 * 6)
             .map(|_| {
-                // The original wrecks here, over the bars on the impact load (S100,
-                // `a_free09_tree_against_the_original`); the port measures no load off a trunk yet, so
-                // nothing about a wreck is asserted.
-                rider.frame(&phy, &tables, &gas, F(game_sim::tick::DeltaTime::CAP_30), world);
-                (rider.ride.position().z(), rider.ride.chassis.vel.z())
+                let f = rider.frame(&phy, &tables, &gas, F(game_sim::tick::DeltaTime::CAP_30), world);
+                (rider.ride.position().z(), rider.ride.chassis.vel.z(), f.wreck)
             })
-            .collect::<Vec<(f32, f32)>>()
+            .collect::<Vec<_>>()
     };
-    // Where a ride flat out first falls from over 50 ft/s to under 10.
-    let stop = |ticks: &[(f32, f32)]| {
+    // Where a ride flat out first falls from over 50 ft/s to under 10, or wrecks: the original wrecks
+    // here, over the bars on the impact load (S100, `a_free09_tree_against_the_original`).
+    let stop = |ticks: &[(f32, f32, Option<game_sim::trick::Wreck>)]| {
         let fast = ticks.iter().position(|t| t.1 > 50.0)?;
-        ticks[fast..].iter().find(|t| t.1 < 10.0).map(|t| t.0)
+        ticks[fast..].iter().find(|t| t.1 < 10.0 || t.2.is_some()).map(|t| (t.0, t.2))
     };
     let open = ride(&mut floor());
     let mut wooded = Wooded { world: floor(), trees };
@@ -413,7 +413,9 @@ fn riding_into_a_free09_tree_stops_the_bike_at_its_trunk() {
     println!("a trunk at z {trunk_z}: stops at {:?}", stop(&blocked));
     assert_eq!(stop(&open), None, "the open floor never stops the bike");
     assert!(open.last().unwrap().0 > tree_z + 100.0, "and takes it past where the tree stands");
-    let at = stop(&blocked).expect("the tree stops the bike");
+    let (at, wreck) = stop(&blocked).expect("the tree stops the bike");
+    println!("stopped at {at}, wreck {wreck:?}");
+    assert_eq!(wreck, Some(game_sim::trick::Wreck(1)), "over the bars, as the original goes on its trunk");
     assert!(at < trunk_z - 1.5 && at > tree_z - 10.0, "at its trunk: the centre of mass {at} ft up the floor");
 }
 
@@ -485,7 +487,7 @@ fn a_free09_tree_against_the_original() {
     };
     let (Some(wrecks), Some(free)) = (read(TREE_RIDE), read(TREE_RIDE_NO_WRECKS)) else { return };
     let Some(esb) = free09_esb() else { return };
-    let Some((phy, wheels)) = the_125() else { return };
+    let Some((phy, wheels, col)) = the_125() else { return };
     let plant = esb.plants[TREE_PLANT];
     let cell = eco::cell_size(F(6912.0)).0;
     let tree = [f32::from(plant.cell[0]) * cell, f32::from(plant.cell[1]) * cell, f32::from(plant.cell[2]) * cell];
@@ -565,6 +567,7 @@ fn a_free09_tree_against_the_original() {
     let tables = Tables::build();
     let mut rider =
         Rider::new(&phy, wheels, Vf::new(start[0], tree[1] + 1.0, start[2], 1.0), Vf::new(fx / n, 0.0, fz / n, 0.0), Set::default());
+    rider.carries_bike_col(col);
     let gas = Controls { gas: F::ONE, ..Controls::default() };
     let idle = Controls::default();
     // Stood first, until the clutch's launch ramp is spent, as it is in the captured state (P154): a
@@ -598,7 +601,7 @@ fn a_free09_tree_against_the_original() {
 }
 
 /// The disc's `race125p.phy` and the `125_faisst` wheels, as tests/modifiers.rs loads them.
-fn the_125() -> Option<(game_sim::phy::Phy, (Vf, Vf))> {
+fn the_125() -> Option<(game_sim::phy::Phy, (Vf, Vf), std::sync::Arc<game_sim::bike_col::BikeCol>)> {
     use game_sim::archive::{Psr, Res};
     use std::io::{Read, Seek, SeekFrom};
     let tables = game_sim::rider::Tables::build();
@@ -641,10 +644,17 @@ fn the_125() -> Option<(game_sim::phy::Phy, (Vf, Vf))> {
             n.starts_with("bike\\") && n.ends_with(".res")
         })
         .collect();
-    let (mut phy, mut wheels) = (None, None);
+    let (mut phy, mut wheels, mut col) = (None, None, None);
     for archive in &archives {
         let Some(bytes) = member(archive) else { continue };
         let Ok(res) = Res::parse(&bytes) else { continue };
+        // The bike's collision files (S125): its body rays are what a trunk stops it with.
+        if col.is_none()
+            && let (Some(m), Some(f)) = (leaf(&res, "bikem.col"), leaf(&res, "bikef.col"))
+            && let (Ok(m), Ok(f)) = (res.read(&bytes, &m), res.read(&bytes, &f))
+        {
+            col = game_sim::bike_col::BikeCol::load(&m, &f).ok().map(std::sync::Arc::new);
+        }
         if phy.is_none()
             && let Some(e) = leaf(&res, "race125p.phy")
         {
@@ -665,10 +675,10 @@ fn the_125() -> Option<(game_sim::phy::Phy, (Vf, Vf))> {
             wheels = node("TireFront").zip(node("TireRear"));
         }
     }
-    match phy.zip(wheels) {
-        Some(found) => Some(found),
-        None => {
-            skip("no race125p.phy or 125_faisst wheels in MX.PSR");
+    match (phy, wheels, col) {
+        (Some(phy), Some(wheels), Some(col)) => Some((phy, wheels, col)),
+        _ => {
+            skip("no race125p.phy, 125_faisst wheels or the bike's collision files in MX.PSR");
             None
         }
     }
