@@ -594,7 +594,8 @@ impl Wire for Rider {
 }
 
 wire!(crate::Input { buttons, stick });
-wire!(crate::traffic::Car { clock, seg, point, head, normal, first, pose });
+wire!(crate::traffic::Car { clock, seg, point, head, normal, first, pose, stale, level });
+wire!(crate::traffic::Level { y, last, held });
 wire!(crate::toys::Clock { time, prev, finished });
 wire!(crate::toys::Hint; at);
 wire!(crate::ghost::Ghost { clock, alpha, on });

@@ -17,16 +17,28 @@
 //!    old heading by `HeadingFilter`.
 //! 4. **The ground**: the terrain's height and normal under the point ([`World::ground`]); the normal
 //!    blended into the old one by `NormalFilter` while the two are within 45° (a cosine above
-//!    0.707), and kept as it was past that.
+//!    0.707), and kept as it was past that. Two `.toy` switches change where the ground comes from
+//!    (S128):
+//!    - `PresampleTerrain` (free09's and free11's trailers): on the car's first frame every key of
+//!      its path is put on the ground once, with the ground's normal there ([`Spec::presample`]),
+//!      and from then on the height is the curve's own and the normal the segment's two key normals
+//!      blended at the curve's parameter. No ground query after the first frame;
+//!    - `PathIsLevel`: the ground's height is written into the path each frame until two frames in a
+//!      row find the same, and from then on the car rides at that height with straight up for its up
+//!      ([`Level`]). The up is the ground's own, unfiltered, and the look-at keeps it as it is.
 //! 5. **The pose**: the engine's look-at ([`math::basis`], up kept, forward made square to it) at
 //!    the point with the ground's height, and the car's collision mesh moved there.
 //!
 //! The cars are state ([`Traffic::cars`], hashed and sent) so a rollback or a replay moves them with
 //! everything else; their paths and numbers are a constant of the track ([`Traffic::specs`]).
 //!
-//! Not here, each the original's and none of free06's (every car there sets them `FALSE`):
-//! `PathIsLevel`, `PresampleTerrain` and `DriveOnSoultree`'s ray down onto the props. A car that
-//! sets them is moved the way free06's are.
+//! The curve keeps its two tangents between evaluations and makes them again only when its cursor
+//! moves onto another segment. A presampled car's keys move after its path was measured, so until
+//! its cursor first leaves the segment the measuring left it on, its curve rides that segment on the
+//! tangents of the clip's own keys ([`Car::stale`], [`Spec::measured`]).
+//!
+//! Not here: `DriveOnSoultree`'s ray down onto the props, which every car on the disc sets `FALSE`
+//! (the original's default is `TRUE`); a car that sets it rides the terrain alone.
 //!
 //! The `HasPhysics` cars (S127) are a subclass of the path car with a rigid body beside it. Until
 //! something strikes the car, the subclass's update is the path car's own and nothing else, so they
@@ -36,7 +48,7 @@
 
 #![deny(clippy::float_arithmetic)] // every sum below is the PS2's, through ps2-float
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use ps2_float::{Acc, Dest, F, Vf, libm, vu};
 
@@ -51,8 +63,11 @@ pub struct Key {
     pub t: F,
     /// The segment's length to the next key ([`Spec::measure`]); the last key's is zero.
     pub len: F,
-    /// The `Body` channel's position, `w` 1.
+    /// The `Body` channel's position, `w` 1; a presampled key's is on the ground.
     pub pos: Vf,
+    /// The ground's normal under a presampled key ([`Spec::presample`]); straight up otherwise,
+    /// and read only by a presampled car.
+    pub normal: Vf,
 }
 
 /// A car's constants: its path and its `.toy` numbers. Built once, when the track is.
@@ -71,6 +86,31 @@ pub struct Spec {
     pub mesh: Option<Mesh>,
     /// Which segment the measuring left the curve's cursor on: where a fresh car's cursor starts.
     pub cursor: u32,
+    /// The curve's two tangents on that segment, as the measuring left them: what a car whose cursor
+    /// has not moved yet rides on ([`Car::stale`]).
+    pub measured: [Vf; 2],
+    /// `PresampleTerrain`: put the keys on the ground on the first frame, and ride them.
+    pub presample: bool,
+    /// `PathIsLevel`: ride the path at one height, found on the ground ([`Level`]).
+    pub level: bool,
+    /// The presampled keys, made on the first frame that steps a car ([`Spec::presample`]). The
+    /// terrain is the same for every seat and every frame, so once made they stand for good.
+    sampled: OnceLock<Vec<Key>>,
+}
+
+/// A `PathIsLevel` car's height: the path's (`path+0x10`), the one before it (`+0x568`, the
+/// float's most negative at the car's construction) and whether the two have met (`+0x4d4`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Level {
+    pub y: F,
+    pub last: F,
+    pub held: bool,
+}
+
+impl Default for Level {
+    fn default() -> Level {
+        Level { y: F::ZERO, last: F(f32::from_bits(0xff7f_ffff)), held: false }
+    }
 }
 
 /// What a car is doing: the state its update reads and writes.
@@ -93,6 +133,12 @@ pub struct Car {
     pub first: bool,
     /// Where the car stands: its model node's world matrix after the update, which its mesh is at.
     pub pose: Mat4,
+    /// The curve's cursor has not left the segment the measuring left it on, so the curve still
+    /// rides the tangents [`Spec::measured`] made of the clip's own keys (the curve's `+0x4fc` not
+    /// set since). Only a presampled car's keys move after the measuring, so only its can differ.
+    pub stale: bool,
+    /// A `PathIsLevel` car's height.
+    pub level: Level,
 }
 
 impl Car {
@@ -111,6 +157,8 @@ impl Car {
                 Vf::new(0.0, 0.0, 1.0, 0.0),
                 Vf::new(0.0, 0.0, 0.0, 1.0),
             ]),
+            stale: true,
+            level: Level::default(),
         }
     }
 }
@@ -128,10 +176,45 @@ impl Spec {
         if points.len() < 2 {
             return None;
         }
-        let keys = points.iter().map(|&(t, p)| Key { t, len: F::ZERO, pos: Vf::new(p.x(), p.y(), p.z(), 1.0) }).collect();
-        let mut spec = Spec { keys, time_scale, heading_filter, normal_filter, lag, mesh, cursor: 0 };
+        let up = Vf::new(0.0, 1.0, 0.0, 1.0);
+        let keys = points.iter().map(|&(t, p)| Key { t, len: F::ZERO, pos: Vf::new(p.x(), p.y(), p.z(), 1.0), normal: up }).collect();
+        let none = [Vf::ZERO; 2];
+        let mut spec = Spec { keys, time_scale, heading_filter, normal_filter, lag, mesh, cursor: 0, measured: none, presample: false, level: false, sampled: OnceLock::new() };
         spec.cursor = spec.measure(0);
+        let c = spec.find(spec.cursor, spec.keys[spec.cursor as usize].t);
+        spec.measured = spec.tangents(&c);
         Some(spec)
+    }
+
+    /// The keys the curve rides: the presampled ones once they are made, the clip's before.
+    pub fn keys(&self) -> &[Key] {
+        self.sampled.get().map_or(&self.keys, |k| k)
+    }
+
+    /// `PresampleTerrain`'s first frame: every key put on the ground with the ground's normal there
+    /// (the ground query on the key's position and normal, in place). Their lengths stay the
+    /// measured ones. Done once; a later call, or a car that does not presample, changes nothing.
+    pub fn presample(&self, world: &mut dyn World) {
+        if !self.presample || self.sampled.get().is_some() {
+            return;
+        }
+        let keys = self
+            .keys
+            .iter()
+            .map(|k| {
+                let (on, normal) = world.ground(k.pos);
+                Key { pos: on, normal, ..*k }
+            })
+            .collect();
+        let _ = self.sampled.set(keys);
+    }
+
+    /// The spec with its keys already presampled to these, their lengths and times as given: a
+    /// presampling car caught after its first frame, as a RAM image holds it.
+    pub fn presampled(mut self, keys: Vec<Key>) -> Spec {
+        self.presample = true;
+        self.sampled = OnceLock::from(keys);
+        self
     }
 
     /// The arc length of every segment, from a cursor at `seg`, which it answers where it leaves:
@@ -167,10 +250,11 @@ impl Spec {
     /// Move the cursor onto the segment `s` falls in: forward while `s` is past the segment's end
     /// (and there is a key after it), then back while it is before the segment's start.
     fn find(&self, seg: u32, s: F) -> Cursor {
-        let n = self.keys.len();
+        let keys = self.keys();
+        let n = keys.len();
         let mut i = (seg as usize).min(n - 2);
         let mut j = i + 1;
-        while j < n && !(s <= self.keys[j].t) {
+        while j < n && !(s <= keys[j].t) {
             i += 1;
             j += 1;
         }
@@ -180,22 +264,78 @@ impl Spec {
             i = n - 2;
             j = n - 1;
         }
-        while i != 0 && s < self.keys[i].t {
+        while i != 0 && s < keys[i].t {
             i -= 1;
             j -= 1;
         }
         Cursor { i, j }
     }
 
+    /// [`Spec::lagged`]'s walk to `s`'s segment from the cursor at `seg`: forward as the curve's, back
+    /// while `s` is before the time of the key at `seg`.
+    fn lag_find(&self, seg: u32, s: F) -> Cursor {
+        let n = self.keys.len();
+        let from = (seg as usize).min(n - 2);
+        let mut i = from;
+        let mut j = i + 1;
+        while j < n && !(s <= self.keys[j].t) {
+            i += 1;
+            j += 1;
+        }
+        // Past the last key the original reads one key beyond its array, as the curve's walk does.
+        if j >= n {
+            i = n - 2;
+            j = n - 1;
+        }
+        while i != 0 && s < self.keys[from].t {
+            i -= 1;
+            j -= 1;
+        }
+        Cursor { i, j }
+    }
+
+    /// The curve's two tangents on the cursor's segment: Catmull-Rom, each the chord and its
+    /// neighbour summed and scaled by the time spans (the chord alone at either end of the path).
+    fn tangents(&self, c: &Cursor) -> [Vf; 2] {
+        let keys = self.keys();
+        let n = keys.len();
+        let (ki, kj) = (keys[c.i], keys[c.j]);
+        let chord = sub3(kj.pos, ki.pos);
+        let m0 = if c.i == 0 {
+            chord
+        } else {
+            let kh = keys[c.i - 1];
+            let f = (kj.t - ki.t) / (kj.t - kh.t);
+            scale3(add3(sub3(ki.pos, kh.pos), chord), f)
+        };
+        let m1 = if c.j == n - 1 {
+            chord
+        } else {
+            let kk = keys[c.j + 1];
+            let f = (kj.t - ki.t) / (kk.t - ki.t);
+            scale3(add3(chord, sub3(kk.pos, kj.pos)), f)
+        };
+        [m0, m1]
+    }
+
     /// The point on the path at `s`, and the segment's own parameter there, from the cursor at `seg`,
     /// which moves onto `s`'s segment: the cubic Hermite through the segment's two keys with
-    /// Catmull-Rom tangents, each the chord and its neighbour summed and scaled by the time spans (the
-    /// chord alone at either end of the path).
+    /// Catmull-Rom tangents ([`Spec::tangents`]).
     pub fn curve(&self, seg: &mut u32, s: F) -> (Vf, F) {
-        let n = self.keys.len();
+        self.curve_kept(seg, s, &mut false)
+    }
+
+    /// [`Spec::curve`] as a car's curve runs it, its tangents kept between evaluations: while
+    /// `stale`, a cursor that does not move rides [`Spec::measured`]; a cursor that moves makes them
+    /// again and clears it.
+    pub fn curve_kept(&self, seg: &mut u32, s: F, stale: &mut bool) -> (Vf, F) {
+        let keys = self.keys();
         let c = self.find(*seg, s);
+        if c.i as u32 != *seg {
+            *stale = false;
+        }
         *seg = c.i as u32;
-        let (ki, kj) = (self.keys[c.i], self.keys[c.j]);
+        let (ki, kj) = (keys[c.i], keys[c.j]);
         let t = (s - ki.t) / (kj.t - ki.t);
         let t2 = t * t;
         let t3 = t * t2;
@@ -203,21 +343,7 @@ impl Spec {
         let one_h = F::ONE - h;
         let w1 = t3 - t2;
         let w0 = t + (w1 - t2);
-        let chord = sub3(kj.pos, ki.pos);
-        let m0 = if c.i == 0 {
-            chord
-        } else {
-            let kh = self.keys[c.i - 1];
-            let f = (kj.t - ki.t) / (kj.t - kh.t);
-            scale3(add3(sub3(ki.pos, kh.pos), chord), f)
-        };
-        let m1 = if c.j == n - 1 {
-            chord
-        } else {
-            let kk = self.keys[c.j + 1];
-            let f = (kj.t - ki.t) / (kk.t - ki.t);
-            scale3(add3(chord, sub3(kk.pos, kj.pos)), f)
-        };
+        let [m0, m1] = if *stale { self.measured } else { self.tangents(&c) };
         let a = scale3(m1, w1);
         let b = scale3(m0, w0);
         let cc = scale3(kj.pos, h);
@@ -229,9 +355,13 @@ impl Spec {
     /// move), the arc already covered in it, then whole segments back (wrapping past the first key
     /// onto the last) until the lag is used up, and the rest as a fraction of that segment's time.
     /// Zero when the segment it ends in has no length.
+    ///
+    /// Its own walk to `s`'s segment is not the curve's: walking back it tests `s` against the time
+    /// of the key the cursor started on, not the key it has reached, so a step back goes all the way
+    /// to the first key, and the arc covered is that segment's, extrapolated past its end.
     pub fn lagged(&self, seg: u32, s: F, lag: F) -> F {
         let n = self.keys.len();
-        let c = self.find(seg, s);
+        let c = self.lag_find(seg, s);
         let mut i = c.i;
         let mut along = ((s - self.keys[i].t) / (self.keys[c.j].t - self.keys[i].t)) * self.keys[i].len;
         while along < lag {
@@ -258,8 +388,10 @@ impl Spec {
         if !(car.clock <= last) {
             car.clock = F(libm::fmodf(car.clock.0, last.0));
         }
+        // The first frame's presample comes after the clock and before the curve.
+        self.presample(world);
         let s = if self.lag <= F::ZERO { car.clock } else { self.lagged(car.seg, car.clock, self.lag) };
-        let (point, _) = self.curve(&mut car.seg, s);
+        let (point, t) = self.curve_kept(&mut car.seg, s, &mut car.stale);
         // The step since last tick on the ground plane, normalised by VU0's `vrsqrt` (a car that did
         // not move gets a zero direction, not a NaN: 0 times the divider's max).
         let moved = sub3(point, car.point);
@@ -273,7 +405,38 @@ impl Spec {
             let hf = self.heading_filter;
             add3(scale3(car.head, hf), scale3(dir, F::ONE - hf))
         };
-        let (ground, up) = world.ground(point);
+        let (y, up) = if self.presample {
+            // The curve's own height, and the segment's two key normals blended at its parameter
+            // lane by lane on the FPU (`sub.s`, `mul.s`, `add.s`), the ends taken as they are. The
+            // `w` is whatever the original's stack held: the up's own is kept.
+            let keys = self.keys();
+            let (a, b) = (keys[car.seg as usize].normal, keys[car.seg as usize + 1].normal);
+            let lane = |a: F, b: F| if t <= F::ZERO { a } else if t < F::ONE { a + t * (b - a) } else { b };
+            let lane = |a: f32, b: f32| lane(F(a), F(b)).0;
+            (F(point.y()), Vf::new(lane(a.x(), b.x()), lane(a.y(), b.y()), lane(a.z(), b.z()), car.normal.w()))
+        } else if car.level.held {
+            (car.level.y, Vf::new(0.0, 1.0, 0.0, 1.0))
+        } else {
+            // A `PathIsLevel` car on a path that does not loop skips the query (and rides an up the
+            // original never set); every path car the port drives loops.
+            let (ground, up) = world.ground(point);
+            if self.level {
+                car.level.y = F(ground.y());
+                if car.level.y.0 == car.level.last.0 {
+                    car.level.held = true;
+                } else {
+                    car.level.last = car.level.y;
+                }
+            }
+            (F(ground.y()), up)
+        };
+        let at = Vf::new(point.x(), y.0, point.z(), 1.0);
+        if self.level {
+            // The level car's up is the ground's, unfiltered and not kept, and the look-at takes the
+            // two axes as they are.
+            car.pose = math::basis(at, car.head, up, false, true);
+            return;
+        }
         if car.first {
             car.normal = up;
         } else {
@@ -284,7 +447,6 @@ impl Spec {
                 car.normal = add3(scale3(old, nf), scale3(up, F::ONE - nf));
             }
         }
-        let at = Vf::new(point.x(), ground.y(), point.z(), 1.0);
         car.pose = math::basis(at, car.head, car.normal, true, false);
     }
 }
@@ -461,6 +623,10 @@ impl State for Car {
         for (name, row) in ["pose0", "pose1", "pose2", "pose3"].into_iter().zip(self.pose.0) {
             w.vf(name, row);
         }
+        w.bool("stale", self.stale);
+        w.f("level_y", self.level.y);
+        w.f("level_last", self.level.last);
+        w.bool("level_held", self.level.held);
     }
 }
 

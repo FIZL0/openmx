@@ -464,6 +464,9 @@ fn car_of(ee: &Ee, car: u32) -> Car {
         normal: vf(ee, car + at::UP),
         first: ee.u32_at(car + at::FIRST) != 0,
         pose: mat(ee, ee.u32_at(car + at::NODE) + at::WORLD),
+        // Caught mid-ride: the cursor has long left where the measuring put it.
+        stale: false,
+        level: Default::default(),
     }
 }
 

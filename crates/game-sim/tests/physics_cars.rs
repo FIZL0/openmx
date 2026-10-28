@@ -187,6 +187,8 @@ fn car_of(ee: &Ee, car: u32) -> Car {
         normal: vf(ee, car + at::UP),
         first: ee.u32_at(car + at::FIRST) != 0,
         pose: mat(ee, ee.u32_at(car + at::NODE) + at::WORLD),
+        stale: false,
+        level: Default::default(),
     }
 }
 
