@@ -870,6 +870,10 @@ pub mod trick_pack;
 /// changed, ported from its own ELF. Nothing here runs on the original's handling.
 pub mod handling;
 
+/// The ATV (MD37b): MX vs. ATV's quad's own ground steps — stand-upright, wheelie and stoppie, ground
+/// push, rear-pair flag — ported from its ELF.
+pub mod quad;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground
