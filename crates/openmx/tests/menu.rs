@@ -3972,7 +3972,7 @@ fn the_mods_page_lists_music_packs_beside_the_track_packs() {
     main_to(&mut m, &mut r, "Mods");
     let rows = m.page();
     let keys: Vec<&Key> = rows.iter().filter(|r| r.selectable()).map(|r| &r.key).collect();
-    assert_eq!(keys, [&Key::ModsFolder, &Key::Pack(0), &Key::MusicPack(0), &Key::MusicPack(1)]);
+    assert_eq!(keys, [&Key::ModsFolder, &Key::Store, &Key::Pack(0), &Key::MusicPack(0), &Key::MusicPack(1)]);
     let music = rows.iter().find(|r| r.key == Key::MusicPack(1)).unwrap();
     assert_eq!((music.label.as_str(), music.value.as_str()), ("Untamed music", "On"));
     assert!(music.about.contains("1 song,"), "{}", music.about);

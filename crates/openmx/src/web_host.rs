@@ -67,6 +67,63 @@ extern "C" {
     /// `software` once neither is to be had.
     #[wasm_bindgen(js_namespace = openmx)]
     fn gpu(api: &str);
+    /// The mod store (P198): `url` fetched into the page's storage as the download `name`, streamed
+    /// through a sync access handle; a promise of its bytes, refused with why.
+    #[wasm_bindgen(js_namespace = openmx, js_name = store_fetch)]
+    fn host_store_fetch(url: &str, name: &str, size: f64) -> js_sys::Promise;
+    /// How many bytes of the download `name` are in so far.
+    #[wasm_bindgen(js_namespace = openmx, js_name = store_got)]
+    fn host_store_got(name: &str) -> f64;
+    /// `n` bytes of the download `name` from `at`, or none.
+    #[wasm_bindgen(js_namespace = openmx, js_name = store_read)]
+    fn host_store_read(name: &str, at: f64, n: u32) -> Option<Vec<u8>>;
+    /// The download `name` closed and removed.
+    #[wasm_bindgen(js_namespace = openmx, js_name = store_close)]
+    fn host_store_close(name: &str);
+    /// A promise of an installed mod's file written into the page's `mods/` (`mods/<kind>/<id>/…`).
+    #[wasm_bindgen(js_namespace = openmx, js_name = store_put)]
+    fn host_store_put(path: &str, bytes: &[u8]) -> js_sys::Promise;
+    /// A promise of a folder of the page's `mods/` removed, all of it.
+    #[wasm_bindgen(js_namespace = openmx, js_name = store_drop)]
+    fn host_store_drop(path: &str) -> js_sys::Promise;
+    /// A page opened in a new tab (the store's Report).
+    #[wasm_bindgen(js_namespace = openmx, js_name = open_url)]
+    fn host_open_url(url: &str);
+}
+
+/// A refused promise's reason, as text.
+fn refused(e: JsValue) -> String {
+    e.as_string().unwrap_or_else(|| format!("{e:?}"))
+}
+
+/// [`crate::modstore`]'s downloads, files and pages, on the page (`web/worker.js`).
+pub async fn store_fetch(url: &str, name: &str, size: u64) -> Result<u64, String> {
+    let got = wasm_bindgen_futures::JsFuture::from(host_store_fetch(url, name, size as f64)).await.map_err(refused)?;
+    Ok(got.as_f64().unwrap_or(0.0) as u64)
+}
+
+pub fn store_got(name: &str) -> u64 {
+    host_store_got(name) as u64
+}
+
+pub fn store_read(name: &str, at: u64, n: usize) -> Result<Vec<u8>, String> {
+    host_store_read(name, at as f64, n as u32).filter(|b| b.len() == n).ok_or_else(|| "the zip is cut short".to_string())
+}
+
+pub fn store_close(name: &str) {
+    host_store_close(name)
+}
+
+pub async fn store_put(path: &str, bytes: &[u8]) -> Result<(), String> {
+    wasm_bindgen_futures::JsFuture::from(host_store_put(path, bytes)).await.map(|_| ()).map_err(refused)
+}
+
+pub async fn store_drop(path: &str) -> Result<(), String> {
+    wasm_bindgen_futures::JsFuture::from(host_store_drop(path)).await.map(|_| ()).map_err(refused)
+}
+
+pub fn open_url(url: &str) {
+    host_open_url(url)
 }
 
 /// [`gpu`]: told before each API's device is asked for, so a panic in the asking is that API's.

@@ -30,9 +30,11 @@ use openmx_web::{TRACK, rgba, start_line};
 
 /// The host calls `web/worker.js` supplies, on its global `openmx`: the disc, the picture and the
 /// log (N4); and the game's canvas size, keys, pointer, gamepads, sound, files and frame clock
-/// (P196, `src/web_host.rs`); and which GPU API draws and its first frame (P48, `src/web_gpu.rs`).
-const HOST_CALLS: [&str; 16] = [
+/// (P196, `src/web_host.rs`); and which GPU API draws and its first frame (P48, `src/web_gpu.rs`); and the mod
+/// store's downloads into OPFS, its unpacking and a page opened for Report (P198, `src/modstore.rs`).
+const HOST_CALLS: [&str; 23] = [
     "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame", "gpu", "drawn",
+    "store_fetch", "store_got", "store_read", "store_close", "store_put", "store_drop", "open_url",
 ];
 
 /// The module wasm-bindgen's glue answers the imports under (`--target web`).
@@ -423,4 +425,48 @@ fn the_browser_rides_on_the_gpu() {
         println!("{api_seen}: {median} fps (median of {:?}), {lit} of {pixels} pixels lit", fps);
         assert!(median >= 30.0, "{api_seen} rides at {median} fps, under 30:\n{text}");
     }
+}
+
+/// The mod store in the page (P198, `tests/web/store.mjs`): headless chromium opens the page with
+/// `--screen store` pointed at a fake store on the page's own loopback server, the disc picked; one
+/// Space (Cross) on the store's only card downloads its mod.zip through the redirect to the "CDN" into
+/// OPFS, checks and unpacks it, and the track is in OPFS `mods/tracks/<id>/` with its store.json,
+/// the download gone. The module is `tools/web.sh --check`'s. Skips without the disc, node or
+/// chromium.
+#[test]
+fn the_browser_installs_from_the_store() {
+    let iso = match Disc::open_configured() {
+        Ok(_) => configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    let scratch = std::env::temp_dir().join(format!("openmx-web-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/store.mjs");
+    let run = Command::new("node").arg(&drive).arg(repo().join("web")).arg(built()).arg(&iso).arg(scratch.join("profile")).output().expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    println!("{}{text}", String::from_utf8_lossy(&run.stderr));
+    assert!(run.status.success(), "store.mjs failed");
+
+    let field = |key: &str| -> String { text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string() };
+    let list = |key: &str| -> String { text.split(&format!("\"{key}\":[")).nth(1).unwrap_or("").split(']').next().unwrap_or("").to_string() };
+    assert_eq!(field("state"), "started", "{text}");
+    assert_eq!(
+        list("files"),
+        r#""tracks/web_store_track/MC01.scn","tracks/web_store_track/mod.json","tracks/web_store_track/previews/0.png","tracks/web_store_track/store.json""#,
+        "the mod's files, and its store.json, in OPFS mods/: {text}"
+    );
+    assert_eq!(field("stamp"), field("sha"), "store.json names the zip it came from: {text}");
+    assert_eq!(list("left"), "", "the download is gone from OPFS store/: {text}");
+    // one GET at the store and one at the CDN it sends to, neither asking a Range (B242)
+    assert_eq!((field("zips").as_str(), field("ranges").as_str()), ("2", "0"), "{text}");
 }

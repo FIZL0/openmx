@@ -36,6 +36,15 @@ ggrs = { path = "../../third_party/ggrs" }
 bincode = "1.3"
 serde = { version = "1.0", features = ["derive"] }
 openmx-net = { path = "../openmx-net" }
+# The mod store (P198, `src/modstore.rs`): its listing and meta.json as JSON, the download's sha256,
+# the zip's deflate, and the store's preview.webp pictures. Every one already built for iroh or png
+# but the WebP decoder, image-rs' own pure-Rust one. reqwest is openmx-net's: rustls natively, the
+# page's fetch in the browser.
+serde_json = "1"
+sha2 = "0.11"
+miniz_oxide = "0.8"
+image-webp = "0.2"
+reqwest = { version = "0.13", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The desktop draws on the GPU by default (P44): the renderer's wgpu half, and winit for a window a
@@ -50,6 +59,10 @@ ab_glyph = "0.2"
 # Replaced textures (V84): the key-named PNGs of texture packs, mods/texture-replacements and mods'
 # upscales, read, and --dump-textures' written, as opentennis reads and writes them (its texhash.rs).
 png = "0.18"
+# The mod store's HTTPS (P198) on openmx-net's ring, and a runtime for each of its jobs' threads.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["rt"] }
 
 # The pad's motors (P183): a wreck rumbles its rider's pad as the original's does. The js device the
 # pad is read through takes no force feedback; its sibling event node does, through an ioctl the shell
