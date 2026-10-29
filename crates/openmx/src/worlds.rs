@@ -1920,3 +1920,64 @@ mod tests {
         assert_eq!(wrong, Vec::<String>::new());
     }
 }
+
+/// V94: the stream's order puts the piece a rider heads for before one as near behind or beside it,
+/// once the rider has ridden [`HEADING_FEET`], and forgets the heading over a teleport.
+#[cfg(test)]
+mod heading_order {
+    use super::*;
+
+    /// A 5x5 world of 1000 ft pieces, and a stream over it that builds nothing.
+    fn stream() -> GroundStream {
+        let layout = TerrainLayout { width: 1, breadth: 1, ..TerrainLayout::default() };
+        let tiles: Vec<Tile> = (0..25)
+            .map(|i| Tile { name: format!("p{}{}", i % 5, i / 5), at: [F((i % 5 * 1000) as f32), F((i / 5 * 1000) as f32)], layout, spacing: F(62.5), levels: 1, keep: [0, 0, 16, 16], first_owner: 0 })
+            .collect();
+        let reach = Reach { load: F(1500.0), drop: F(2000.0) };
+        GroundStream {
+            held: vec![Held::Out; tiles.len()],
+            tiles,
+            reach,
+            work: Arc::new((Mutex::new((Vec::new(), false)), Condvar::new())),
+            built: channel().1,
+            pending: VecDeque::new(),
+            chunks_a_frame: CHUNKS_A_FRAME,
+            log: Vec::new(),
+            heading: Vec::new(),
+        }
+    }
+
+    /// The pieces in reach of `at` in the order the builder takes them (update's `want`, popped).
+    fn queue(s: &mut GroundStream, at: [f32; 2]) -> Vec<String> {
+        let order = s.ahead_first(&[at]);
+        let mut want: Vec<usize> = (0..s.tiles.len()).filter(|&i| nearest(&s.tiles[i], &[at]) <= s.reach.load.0).collect();
+        want.sort_by(|a, b| order[*b].total_cmp(&order[*a]));
+        want.iter().rev().map(|&i| s.tiles[i].name.clone()).collect()
+    }
+
+    #[test]
+    fn the_piece_ahead_is_built_before_the_one_behind() {
+        let mut s = stream();
+        // Standing on the middle piece: no heading yet, so ahead and behind tie on their gap.
+        let order = s.ahead_first(&[[2500.0, 2500.0]]);
+        let at = |s: &GroundStream, name: &str| s.tiles.iter().position(|t| t.name == name).unwrap();
+        assert_eq!(order[at(&s, "p32")], order[at(&s, "p12")], "no heading before the rider moves");
+        // Ridden 100 ft east: east ahead of west, north and south between.
+        let order = s.ahead_first(&[[2600.0, 2500.0]]);
+        let (e, w, n, so) = (order[at(&s, "p32")], order[at(&s, "p12")], order[at(&s, "p23")], order[at(&s, "p21")]);
+        assert!(e < n && n == so && so < w, "east {e} north {n} south {so} west {w}");
+        // In the builder's queue, so is the piece two ahead (gap 1400, counted 700) before the one
+        // behind (gap 600, counted 900).
+        let q = queue(&mut s, [2600.0, 2500.0]);
+        let pos = |name: &str| q.iter().position(|n| n == name).unwrap();
+        assert_eq!(q[0], "p22", "the piece underfoot first: {q:?}");
+        assert!(pos("p32") < pos("p23") && pos("p23") < pos("p12"), "{q:?}");
+        assert!(pos("p42") < pos("p12"), "the piece two ahead before the one behind: {q:?}");
+        // Turned north and ridden 100 ft: north first now.
+        let order = s.ahead_first(&[[2600.0, 2600.0]]);
+        assert!(order[at(&s, "p23")] < order[at(&s, "p32")], "north before east after the turn");
+        // A teleport has no heading: the gaps alone again.
+        let order = s.ahead_first(&[[600.0, 600.0]]);
+        assert_eq!(order[at(&s, "p10")], order[at(&s, "p01")], "no heading over a teleport");
+    }
+}
