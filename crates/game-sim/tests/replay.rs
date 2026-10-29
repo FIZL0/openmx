@@ -8901,16 +8901,15 @@ fn replay_a_save_state_case(acc: &Capture, st: &SaveState, seed: u32, text: &str
 /// the start itself, rolled over the lip and braked down the face (`roll`: 37 ft/s off the lip, a
 /// 45-tick flight and a landing at 64 ft/s; `roll2`: coasted on at 15 ft/s, braked to a stop on the
 /// face, held there 150 ticks and let go). The states' RAM images are `./kit state ram`'s of the
-/// slots `tele.py` saved, in `context/states/`. Then the ticks not compared (`late`: roll's row 70
-/// was read a tick late, the same words as its row 71), and the last tick the path and the slip
-/// flags agree through. The slip flags agree on every tick of all four, roll's past its landing
-/// (S118); side and roll2 agree on every lane of every tick. Nose's path parts by an ulp at 180, and
-/// roll's flight by its roll rate at 67 (S118's journal: not the Euler angles, not the wheels), which
-/// reaches its path at 132.
+/// slots `tele.py` saved, in `context/states/`. Then the ticks not compared (`late`: roll's rows 70
+/// and 148 were read a tick late, the same words as its rows 71 and 149), and the last tick the path
+/// and the slip flags agree through. The slip flags agree on every tick of all four, roll's past its
+/// landing (S118); side, roll and roll2 agree on every lane of every tick (roll's flight since the
+/// auto-level reads the walk's roll, S180). Nose's path parts by an ulp at 180.
 const S106_CASES: [(&str, &str, &str, &[u64], u64, u64); 4] = [
     ("nose", "s106-nose", "the brake held from standing on a 53° face, nose down", &[1], 179, 200),
     ("side", "s106-side", "the brake held from standing on a 46° face, side on", &[], 200, 200),
-    ("roll", "", "rolled over the lip and braked down the face", &[70], 131, 240),
+    ("roll", "", "rolled over the lip and braked down the face", &[70, 148], 240, 240),
     ("roll2", "", "coasted over the lip at 15 ft/s, braked to a stop on the face, then let go", &[], 421, 421),
 ];
 
@@ -10328,4 +10327,72 @@ fn a_bike_parked_on_the_trains_roof_rides_it_as_the_original_does() {
         println!("roof: the 250's drag {}; without it the ride parts at {parted:?}", drag.0);
         assert!(parted.is_some(), "the roof ride agrees without the air drag too");
     });
+}
+
+/// **The airborne control reads the roll the attachment walk measured** (S180). first_recording's
+/// save state, ridden on the Ee frame by frame as S106's `roll` capture rode it (the controls each row
+/// held, and the gas and clutch levers poked from the row before, since the pad's gesture step is
+/// outside the vehicle update): the chassis' angular history matches the capture to the bit over the
+/// whole flight to tick 69 (row 68). At the top of every frame the chassis' Euler angles are the ones
+/// its measure took during the last frame's attachment walk, of the quaternion the walk saw, and not
+/// the angles of the quaternion the stunt clocks copied back after it. At tick 66 the two quaternions
+/// part by an ulp or two, and the roll the copy gives is 2e-6 rad off: the roll rate roll's port
+/// parted on at tick 67 before `ride.rs` kept the walk's angles.
+#[test]
+fn the_airborne_control_reads_the_walks_roll() {
+    use ps2_oracle::{Ee, addr};
+    use std::{cell::RefCell, rc::Rc};
+    let at = private_dir("states").join(format!("{RECORDING}_SaveState.eeMemory.bin"));
+    let csv = private_dir("capture").join("s106-slope").join("roll.csv");
+    let (Some(st), Ok(mut ee), Ok(text)) = (SaveState::open_at(at.clone()), Ee::from_ram(&at), std::fs::read_to_string(&csv)) else {
+        println!("no {} or {}", at.display(), csv.display());
+        return;
+    };
+    let cap = Capture::parse(&text).unwrap();
+    let lane = |r: usize, n: &str| cell(&cap, r, column(&cap, n).unwrap()).parse::<f32>().unwrap();
+    let table = game_sim::air::AcosTable::build();
+    let ch = st.rider_at(0x7a4).unwrap();
+    let quat = move |ee: &Ee| Vf::new(ee.f32_at(ch + 0x1a0), ee.f32_at(ch + 0x1a4), ee.f32_at(ch + 0x1a8), ee.f32_at(ch + 0x1ac));
+    let euler = |ee: &Ee| [0, 4, 8].map(|k| ee.u32_at(ch + 0x90 + k));
+    let bits = |v: Vf| [v.x().to_bits(), v.y().to_bits(), v.z().to_bits()];
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    // Each chassis measure's quaternion, run through as a nested call.
+    let measured: Rc<RefCell<Vec<Vf>>> = Rc::default();
+    let measure = addr("chassis_measure").unwrap();
+    let seen = measured.clone();
+    ee.hooks.insert(measure, Box::new(move |ee: &mut Ee| {
+        if ee.r(4) as u32 == ch {
+            seen.borrow_mut().push(quat(ee));
+        }
+        let ints: Vec<u64> = (4..12).map(|i| ee.r(i)).collect();
+        let floats: Vec<f32> = (12..20).map(|i| ee.f(i)).collect();
+        let (ra, sp, stack) = (ee.r(31), ee.r(29), ee.stack);
+        ee.stack = (sp as u32 - 0x100) & !0xf;
+        ee.call(measure, &ints, &floats, 500_000_000);
+        (ee.stack, ee.pc) = (stack, measure);
+        ee.set(29, sp);
+        ee.set(31, ra);
+    }));
+    let mut copies_part = Vec::new();
+    for r in 0..=68 {
+        for i in 0..16u32 {
+            ee.set_u32(SaveState::CONTROL_STATE + 0x18 * i, lane(r, &format!("ctl{i}.held")) as u32);
+        }
+        ee.set_f32(st.rider + 0x63c, if r > 0 { lane(r - 1, "gas_lever") } else { 0.0 });
+        ee.set_f32(st.rider + 0x644, if r > 0 { lane(r - 1, "clutch_lever") } else { 1.0 });
+        measured.borrow_mut().clear();
+        ee.call(addr("bike_vehicle_update").unwrap(), &[u64::from(st.rider)], &[lane(r, "dt")], 500_000_000);
+        assert_eq!(
+            ee.f32_at(ch + 0x318).to_bits(),
+            lane(r, "ch_ang_hist.z").to_bits(),
+            "row {r}: the Ee's angular history z is the capture's"
+        );
+        let walk = *measured.borrow().last().unwrap_or_else(|| panic!("row {r}: no measure of the chassis"));
+        assert_eq!(euler(&ee), bits(math::quat_to_euler(walk, &table)), "row {r}: the angles kept are the walk's");
+        if bits(math::quat_to_euler(quat(&ee), &table)) != euler(&ee) {
+            copies_part.push(r);
+        }
+    }
+    println!("the copied-back quaternion measures otherwise on rows {copies_part:?}");
+    assert!(copies_part.contains(&65), "tick 66's copy measures its own roll");
 }

@@ -15,8 +15,8 @@
 //! first, then the air state, then the animation and the ride state machine. So [`Ride::frame`] is
 //!
 //! 1. the input layer's rate limit, which turns what the pad says into what the bike is holding,
-//! 2. the chassis' measure — [`chassis::measure`] with [`crate::math::quat_to_euler`]'s three angles,
-//!    which is where `air.rs`' pitch and roll come from,
+//! 2. the chassis' measure — [`chassis::measure`] with the three angles last frame's walk took
+//!    ([`crate::math::quat_to_euler`]), which is where `air.rs`' pitch and roll come from,
 //! 3. the ground step, written out here in [`mv::step`]'s own order with the callees dispatched,
 //! 4. the air state ([`air::contact`]), which decides whether the bike is airborne and for how long.
 //!
@@ -998,6 +998,8 @@ impl Ride {
     pub fn place_on(&mut self, at: Vf, facing: Vf, up: Vf) {
         let m = math::basis(at, facing, up, true, false);
         self.chassis.quat = math::mat4_to_quat(&m);
+        // The angles the next frame reads (its measure keeps the last walk's, S180), of this attitude.
+        self.chassis.euler = math::quat_to_euler(self.chassis.quat, acos_table());
         self.origin = Vf::new(at.x(), at.y(), at.z(), 1.0);
         self.chassis.cofg_world = math::transform_point(&m, self.chassis.cofg);
         for v in [
@@ -1123,6 +1125,13 @@ impl Ride {
 pub struct Tables {
     pub acos: AcosTable,
     pub curve: CurveTable,
+}
+
+/// One arc cosine table for the code outside a frame that has no [`Tables`] to hand: a bike set
+/// down measuring its own angles ([`Ride::place_on`]).
+fn acos_table() -> &'static AcosTable {
+    static TABLE: std::sync::OnceLock<AcosTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(AcosTable::build)
 }
 
 impl Tables {
@@ -2066,8 +2075,12 @@ impl Ride {
         }
 
         // 2 — the chassis' measure, which is where the pitch and roll `air.rs` reads come from. The
-        // euler angles are the one call it makes that this crate ports.
-        let euler = math::quat_to_euler(chassis.quat, &tables.acos);
+        // euler angles are not taken again here: they are the ones last frame's attachment walk (4b)
+        // took off the orientation the substeps left, *before* the stunt clocks copied the node's
+        // quaternion back over it (S180). The two quaternions part by an ulp or two, and the original's
+        // auto-level reads the walk's roll: roll's flight parted at tick 67 by 2e-6 rad of roll,
+        // measured off the copy. A bike set down anew measures its own ([`Ride::place_on`]).
+        let euler = chassis.euler;
         chassis::measure(chassis, dt, euler);
 
         // The chassis' transform as the last frame left it — the no-hander's roll included, which the

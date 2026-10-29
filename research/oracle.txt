@@ -5933,6 +5933,11 @@ node_count             boot 0x001b3420 1 + a node's descendants: what a hierarch
 #   bike_wreck_test reads +0x90 (pitch) and +0x98 (roll) from there: a nose 70.058 deg down in the air
 #   and 69.863 on its touchdown tick rides out (GroundPitchDownWreckAngle 1.2217); 74.95 in the air,
 #   75.03 on touchdown wrecks reason 1 on that tick.
+#   S180: that walk is the last measure of a frame. The stunt clocks then copy the node's quaternion
+#   back over +0x1a0 but nothing takes the angles again, so next frame's bike_airborne_control reads
+#   +0x98 (roll) as the walk measured it, not as the copy would: first_recording's flight in S106's
+#   roll capture, tick 66, roll 0xbd64caed against the copy's 0xbd64cd5e (Ee, per frame,
+#   tests/replay.rs the_airborne_control_reads_the_walks_roll).
 # Captures (context/capture/s138, git-ignored; research/s138_hits.py, research/s138/*.sh): recording2
 # (slot 3) teleported (research/s76_tele.py) about free09's farmyard. Garage shed (props 205ff): walls
 # x 4612..4673, z 3817..3877, open south side with corner posts at (4670.5, 3818) and (4613.5, 3818).
