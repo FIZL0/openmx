@@ -109,7 +109,7 @@ build. Do them in order; inside a later phase, tasks that touch different files 
 - [ ] **P208** the ride HUD and the menus' hint band clear of the touch pad (after P197): on a phone with web/touch.js's pad up, the speedometer/gear sits under GAS, the minimap under the stick's rest spot and the front end's button-hint band under BRAKE/GAS (seen at 844x390 in headless chromium). Have the page tell the shell the pad is up (a host call or a pad-name check of 'Touch controls') and inset those by the pad's footprint
 - [ ] **V109** the 2p blended arms' residue past the eased axes — C11 seeded the original's eased mix/phase, the reverse clock and the ramp into V90's replay and P1's reverse still poses 3/17 (33) and 10/24 (34) within 1e-4, air 1550/2200: capture the pose the fade starts from (the snapshot) and the cross-fade weights per tick in the 2p ride (context/capture/2p/2p-eased.csv has the lag records) and find which layer parts | j: 2p-blend-residue
 - [ ] **S217** film a queued trick pair in the original (a generated .p2m2: one gesture in the air, then a second while it runs) and compare the bike's and rider's joints across the switch with the port's, S214's trick_chain.rs as the port side; S214 fixed the bike's missing latch without a capture
-- [ ] **P212** P210 follow-up: drag a Controllers-screen card with the mouse onto another seat to move or swap it (opentennis's drag fix); openmx's menus have no pointer beyond P174's pause clicks
+- [ ] **P214** P210 follow-up: drag a Controllers-screen card with the mouse onto another seat to move or swap it (opentennis's drag fix); openmx's menus have no pointer beyond P174's pause clicks
 ### Phase 2 — a decompilation you can read
 
 
