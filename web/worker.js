@@ -100,6 +100,27 @@ globalThis.openmx = {
     else files.delete(key);
     saving = saving.then(() => store(key, bytes)).catch(e => console.log(`openmx: ${key}: ${e}`));
   },
+  // The mod store (P198): a download streamed into OPFS `store/` through a sync access handle (B204, B358) and read
+  // back a piece at a time, and an installed mod's files written into OPFS `mods/`.
+  store_fetch: (url, name, size) => storeFetch(url, name, size).catch(e => Promise.reject(String(e?.message ?? e))),
+  store_got: name => downloads.get(name)?.got ?? 0,
+  store_read: (name, at, n) => {
+    const h = downloads.get(name)?.handle;
+    if (!h) return undefined;
+    const b = new Uint8Array(n);
+    return h.read(b, { at }) === n ? b : undefined;
+  },
+  store_close: name => {
+    const d = downloads.get(name);
+    downloads.delete(name);
+    d?.handle?.close();
+    storeDir()
+      .then(dir => dir.removeEntry(name))
+      .catch(() => {});
+  },
+  store_put: (path, bytes) => storePut(path, Uint8Array.from(bytes)).catch(e => Promise.reject(`${path}: ${e?.message ?? e}`)),
+  store_drop: path => storeDrop(path).catch(e => Promise.reject(`${path}: ${e?.message ?? e}`)),
+  open_url: url => postMessage({ open: url }),
   frame: () => {
     pictures++;
     const now = performance.now();
@@ -127,6 +148,70 @@ async function store(key, bytes) {
     h.flush();
   } finally {
     h.close();
+  }
+}
+
+// The mod store's downloads under way, by name: the open handle and the bytes in so far.
+const downloads = new Map();
+async function storeDir() {
+  return (await opfs()).getDirectoryHandle('store', { create: true });
+}
+
+// `url` into OPFS `store/<name>`, streamed: never more than `size` bytes, which the shell then hashes and checks. No
+// Range is asked, so B242's phones that drop one on the CDN's redirect get the same whole file. Its bytes.
+async function storeFetch(url, name, size) {
+  const file = await (await storeDir()).getFileHandle(name, { create: true });
+  const handle = await held(() => file.createSyncAccessHandle());
+  const d = { handle, got: 0 };
+  downloads.set(name, d);
+  handle.truncate(0);
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw r.status === 429 || r.status >= 500 ? 'The mod store is busy, try again in a minute.' : `the store said ${r.status}`;
+  const reader = r.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (d.got + value.length > size) {
+      reader.cancel();
+      throw `the download is more than the ${size} bytes the store says`;
+    }
+    handle.write(value, { at: d.got });
+    d.got += value.length;
+  }
+  handle.flush();
+  return d.got;
+}
+
+// The folder `parts` names under OPFS's root, made as it goes.
+async function folder(parts) {
+  let dir = await opfs();
+  for (const p of parts) dir = await dir.getDirectoryHandle(p, { create: true });
+  return dir;
+}
+
+// One of an installed mod's files, `mods/<kind>/<id>/…` (the shell checked the path), into OPFS.
+async function storePut(path, bytes) {
+  const parts = path.split('/');
+  const name = parts.pop();
+  const file = await (await folder(parts)).getFileHandle(name, { create: true });
+  const h = await held(() => file.createSyncAccessHandle());
+  try {
+    h.truncate(0);
+    h.write(bytes, { at: 0 });
+    h.flush();
+  } finally {
+    h.close();
+  }
+}
+
+// A folder of OPFS `mods/` out, all of it; one not there is out already.
+async function storeDrop(path) {
+  const parts = path.split('/');
+  const name = parts.pop();
+  try {
+    await (await folder(parts)).removeEntry(name, { recursive: true });
+  } catch (e) {
+    if (e?.name !== 'NotFoundError') throw e;
   }
 }
 

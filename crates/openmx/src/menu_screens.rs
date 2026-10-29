@@ -966,6 +966,7 @@ impl Pen<'_> {
             Screen::Tracks => self.tracks(menu),
             Screen::Join => self.join(menu),
             Screen::Assign => self.assign(menu),
+            Screen::Store => self.store(menu),
             Screen::Split => self.split(menu),
             Screen::Keyboard => self.keyboard(menu),
             Screen::Games => self.games(menu),
@@ -1416,6 +1417,112 @@ impl Pen<'_> {
         if first + shown < n {
             self.arrow(x + w / 2.0, y - CARD_GAP + 0.6, [0.0, 1.0], 0.7, BONE);
         }
+    }
+
+    /// The mod store (P198): the lit tab's mods as a grid of cards ([`STORE_COLUMNS`] across, two
+    /// rows in view, the lit one kept there), each its preview, name, author and source game, size
+    /// and Verified, and Installed, Update or an install's bar.
+    fn store(&mut self, menu: &Menu) {
+        self.logo(true);
+        let shop = &menu.store;
+        self.tabs(&STORE_TABS, shop.tab, 4.0, 7.6);
+        if let Some(note) = &shop.note {
+            let line = self.fit(Weight::Bold, note, 1.0, 34.0);
+            self.text(Weight::Bold, &line, 76.0, Pen::mid(7.6 + 1.17, 1.0), 1.0, 0.0, NOTE, Align::Right);
+        }
+        let shown = shop.shown();
+        let lit = menu.store_lit();
+        let (x0, top, w) = (3.8, 11.4, 72.4);
+        let gap = 0.8;
+        let cw = (w - gap * (STORE_COLUMNS - 1) as f32) / STORE_COLUMNS as f32;
+        let ph = (cw - 0.7) * 9.0 / 16.0;
+        let ch = ph + 4.25;
+        let say = |pen: &mut Pen, s: &str| {
+            let base = Pen::mid(top + 8.0, 1.4);
+            pen.text(Weight::Bold, s, STAGE.0 / 2.0, base, 1.4, 0.0, BONE, Align::Centre);
+        };
+        match &shop.listed {
+            _ if shop.off => say(self, "The mods folder is off (--mods off): nothing to install into"),
+            Listed::Asking if shown.is_empty() => say(self, "Reading the mod store…"),
+            Listed::Failed(why) if shown.is_empty() => {
+                let why = self.fit(Weight::Bold, why, 1.2, w);
+                say(self, &why);
+            }
+            _ if shown.is_empty() => say(self, &format!("No {} in the store yet", STORE_TABS[shop.tab].to_lowercase())),
+            _ => {}
+        }
+        let at = shown.iter().position(|&i| Some(i) == lit).unwrap_or(0);
+        let rows = shown.len().div_ceil(STORE_COLUMNS);
+        let first_row = (at / STORE_COLUMNS).saturating_sub(1).min(rows.saturating_sub(2));
+        if first_row > 0 {
+            self.arrow(STAGE.0 / 2.0, top - 0.6, [0.0, -1.0], 0.7, BONE);
+        }
+        for (k, &i) in shown.iter().enumerate().skip(first_row * STORE_COLUMNS).take(2 * STORE_COLUMNS) {
+            let c = &shop.cards[i];
+            let on = Some(i) == lit;
+            let (col, row) = (k % STORE_COLUMNS, k / STORE_COLUMNS - first_row);
+            let (x, y) = (x0 + col as f32 * (cw + gap), top + row as f32 * (ch + gap));
+            let b = [x, y, cw, ch];
+            let r = 0.7;
+            if on {
+                self.round([x + 0.25, y + 0.27, cw, ch], r, SHADOW, SHADOW);
+                self.round(b, r, LIT_TOP, LIT_BOTTOM);
+                self.ring(b, r, 0.13, CHALK);
+            } else {
+                self.round(b, r, GLASS, GLASS);
+                self.ring(b, r, 0.08, RIM);
+            }
+            let pb = [x + 0.35, y + 0.35, cw - 0.7, ph];
+            self.round(pb, 0.35, [0x22, 0x22, 0x22, 255], [0x22, 0x22, 0x22, 255]);
+            let image = self.art.track_image(&c.picture, 0);
+            let picture = image.and_then(|im| self.art.images().get(im).map(|t| (self.base + im, *t)));
+            if let Some((im, t)) = picture {
+                self.cover(im, t, pb, CHALK);
+            }
+            if let Some((share, _)) = c.progress {
+                let bar = [pb[0] + 0.5, pb[1] + pb[3] - 1.1, pb[2] - 1.0, 0.6];
+                self.round(bar, 0.3, [0, 0, 0, 170], [0, 0, 0, 170]);
+                self.round([bar[0], bar[1], (bar[2] * share.clamp(0.0, 1.0)).max(0.6), bar[3]], 0.3, PEACH, ORANGE);
+            }
+            self.ring(pb, 0.35, if on { 0.1 } else { 0.06 }, if on { CHALK } else { RIM });
+            let (tx, room) = (x + 0.6, cw - 1.2);
+            let (kw, kc, ks) = if on { (Weight::Heavy, CHALK, SLANT) } else { (Weight::Bold, BONE, 0.0) };
+            let name = self.fit(kw, &c.name, 1.2, room);
+            self.text(kw, &name, tx, pb[1] + ph + 1.45, 1.2, ks, kc, Align::Left);
+            let by = [c.author.as_str(), c.source.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+            let by = self.fit(Weight::Bold, &by, 0.85, room);
+            let dim = if on { PEACH } else { DUST };
+            self.text(Weight::Bold, &by, tx, pb[1] + ph + 2.55, 0.85, 0.0, dim, Align::Left);
+            let left = format!("{}{}", size_words(c.size), if c.verified { " · Verified" } else { " · Not reviewed" });
+            self.text(Weight::Bold, &left, tx, pb[1] + ph + 3.6, 0.85, 0.0, dim, Align::Left);
+            let state = match (&c.progress, c.got) {
+                (Some((share, _)), _) => format!("{:.0}%", share * 100.0),
+                (None, Got::Installed) => "Installed".into(),
+                (None, Got::Update) => "Update".into(),
+                (None, Got::Own) => "In your folder".into(),
+                (None, Got::No) => String::new(),
+            };
+            self.text(Weight::Heavy, &state, x + cw - 0.6, pb[1] + ph + 3.6, 0.85, 0.0, if on { CHALK } else { HEADING }, Align::Right);
+            let image = image;
+            self.parts.push(Part::Card { id: c.key.clone(), card: self.b(b), picture: self.b(pb), image, lit: on });
+        }
+        if first_row + 2 < rows {
+            self.arrow(STAGE.0 / 2.0, top + 2.0 * (ch + gap) - gap + 0.4, [0.0, 1.0], 0.7, BONE);
+        }
+        self.title(Screen::Store.title());
+        let mut hints = vec![(Btn::Circle, "Back"), (Btn::L1R1, "Tabs"), (Btn::Start, "Refresh")];
+        if let Some(c) = lit.map(|i| &shop.cards[i]) {
+            hints.push((Btn::Triangle, "Report"));
+            if c.progress.is_none() && matches!(c.got, Got::Installed | Got::Update) {
+                hints.push((Btn::Square, "Remove"));
+            }
+            match (c.progress.is_some(), c.got) {
+                (false, Got::No) => hints.push((Btn::Cross, "Install")),
+                (false, Got::Update) => hints.push((Btn::Cross, "Update")),
+                _ => {}
+            }
+        }
+        self.hints(&hints);
     }
 
     /// A ride loading (P127): the pick's still and name of its track over a bar the load's stages

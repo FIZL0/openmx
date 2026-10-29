@@ -59,6 +59,9 @@ mod pages;
 pub mod cameras;
 #[path = "menu_screens.rs"]
 mod screens;
+#[path = "menu_store.rs"]
+mod store;
+pub use store::{Card, Got, Listed, STORE_COLUMNS, STORE_TABS, Shop, StoreAsk, size_words};
 #[path = "menu_player.rs"]
 mod player;
 #[allow(unused_imports)]
@@ -2165,10 +2168,12 @@ pub enum Screen {
     /// The Controllers screen (P210): every device plugged in on a seat or on none, from the main
     /// menu and the pause.
     Assign,
+    /// The mod store (P198), Mods' Browse the Store: its mods as a picture grid, a tab a kind.
+    Store,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 20] = [
+    pub const ALL: [Screen; 21] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2189,6 +2194,7 @@ impl Screen {
         Screen::Graphics,
         Screen::Original,
         Screen::Assign,
+        Screen::Store,
     ];
 
     fn index(self) -> usize {
@@ -2218,6 +2224,7 @@ impl Screen {
             Screen::Graphics => "graphics",
             Screen::Original => "original",
             Screen::Assign => "controllers",
+            Screen::Store => "store",
         }
     }
 
@@ -2247,6 +2254,7 @@ impl Screen {
             Screen::Graphics => "Graphics",
             Screen::Original => "Original Game",
             Screen::Assign => "Controllers",
+            Screen::Store => "Mod Store",
         }
     }
 }
@@ -2729,6 +2737,8 @@ pub struct Menu {
     music_at: usize,
     /// What the song rows asked since [`Menu::take_tunes`] last took it.
     tunes: Vec<Tune>,
+    /// The mod store's screen (P198), as the shell fills it.
+    pub store: Shop,
     /// The sounds the presses made since [`Menu::take_cues`] last took them (P65).
     cues: Cues,
     /// The time the shell says has passed (P165), as the ticks the menu's own timers count.
@@ -2949,6 +2959,7 @@ impl Menu {
             music_held: false,
             music_at: 0,
             tunes: Vec::new(),
+            store: Shop::default(),
             cues: Cues::default(),
             pace: Pace::default(),
             sides: Vec::new(),
@@ -3868,6 +3879,7 @@ impl Menu {
             Screen::Lobby => self.lobby.items().len(),
             Screen::Join => join::ON_SCREEN,
             Screen::Assign => join::MOST + 1,
+            Screen::Store => self.store.shown().len().max(1),
             Screen::Split => layouts(self.riders).len(),
         }
     }
@@ -4003,6 +4015,10 @@ impl Menu {
             // One press with no device to it ([`Menu::step`]): 1P's.
             let dev = self.p1.clone().unwrap_or(Dev::Keys);
             self.walk_assign(&dev, p);
+            return Act::Stay;
+        }
+        if screen == Screen::Store {
+            self.walk_store(p);
             return Act::Stay;
         }
         if screen == Screen::Pause && self.leaving.is_some() {
@@ -4187,7 +4203,7 @@ impl Menu {
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
-            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Assign | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => unreachable!(),
+            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Assign | Screen::Store | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => unreachable!(),
         }
         Act::Stay
     }

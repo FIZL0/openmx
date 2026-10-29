@@ -199,6 +199,8 @@ mod lobby;
 // The join screen (P38's rules), which the front end's local game seats its players through (P43).
 mod join;
 mod menu;
+// The mod store (P198): Browse and Install from the public dataset.
+mod modstore;
 mod moment;
 mod net;
 mod online;
@@ -1723,6 +1725,8 @@ struct Args {
     mods: Option<std::path::PathBuf>,
     /// Whether `--mods DIR|off` was given, or the front end set [`Args::mods`] from its settings.
     mods_asked: bool,
+    /// `--mod-store URL` (P198): the mod store's address in place of Hugging Face's, a test's own.
+    mod_store: Option<String>,
     /// `--tricks original|mxvatv` (MD16): whose tricks the ride has. Unset, the front end's Tricks
     /// row says, and a ride outside it has the original's. `--online` is always the original's; a
     /// ride from the lobby is its room's ([`Args::room_tricks`]).
@@ -2123,6 +2127,10 @@ async fn front_end(args: Args) -> Result<(), String> {
     front.menu.set_mod_games(mod_games(&args, &front.dir, mods_on, &listed));
     front.menu.set_mod_tracks(listed);
     front.menu.set_music_packs(music_packs(&args, &front.dir, mods_on));
+    // The mod store (P198): into the mods folder beside the settings, or `--mods DIR`'s; none under
+    // `--mods off`.
+    let mut store = StoreFront::new(&args, &front.dir);
+    front.menu.store.off = store.is_none();
     // Online, this machine's player rides the freeride's bike set unless the lobby changes it, as
     // the rider the command line names.
     front.menu.lobby.bikes = lobby::bikes();
@@ -2157,6 +2165,10 @@ async fn front_end(args: Args) -> Result<(), String> {
             None => front.menu.open(screen),
         },
         None => front.menu.splash(),
+    }
+    // `--screen store` (P198's browser check) opens the store without Browse's ask for its listing.
+    if front.menu.screen() == Some(menu::Screen::Store) {
+        front.menu.ask_store_listing();
     }
     let mut shell = Shell { window: Some(window), seats: Some(seats), front };
 
@@ -2512,7 +2524,13 @@ async fn front_end(args: Args) -> Result<(), String> {
                 }
             }
         }
-        if shell.front.menu.settings.mods != mods_on {
+        // The store's asks and what it did; an install or removal reads the mods folder again, so a
+        // track installed is in Free Ride's pick at once.
+        let (rescan, art) = store.as_mut().map_or((false, false), |s| s.frame(&mut shell.front.menu, &mut shell.front.art));
+        if art {
+            (shown_look, menu_images) = (None, false);
+        }
+        if shell.front.menu.settings.mods != mods_on || rescan {
             mods_on = shell.front.menu.settings.mods;
             let listed = mod_tracks(&args, &shell.front.dir, mods_on);
             stills = mod_pictures(&mut shell.front.art, mods_folder(&args, &shell.front.dir, mods_on).as_deref(), &listed);
@@ -8979,6 +8997,139 @@ fn music_packs(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, Str
     packs
 }
 
+/// The mod store as the front end runs it (P198): `modstore.rs`'s store, its last listing, and the
+/// previews asked for, by the zip's sha256.
+struct StoreFront {
+    store: modstore::Store,
+    listing: Vec<modstore::Entry>,
+    asked: std::collections::HashSet<String>,
+}
+
+impl StoreFront {
+    /// The store, at `--mod-store`'s address if given (a test's own), installing into the mods
+    /// folder whether or not it is read; none under `--mods off`.
+    fn new(args: &Args, dir: &std::path::Path) -> Option<StoreFront> {
+        let mods = mods_folder(args, dir, true)?;
+        let base = args.mod_store.clone().unwrap_or_else(|| modstore::HF.to_string());
+        Some(StoreFront { store: modstore::Store::new(&base, dir, &mods), listing: Vec::new(), asked: Default::default() })
+    }
+
+    fn entry(&self, key: &str) -> Option<&modstore::Entry> {
+        self.listing.iter().find(|e| e.key() == key)
+    }
+
+    /// The menu's cards from the listing, against what is installed; an install's bar kept.
+    fn cards(&self, menu: &mut menu::Menu) {
+        let (stamps, own) = (self.store.stamps(), self.store.own_ids());
+        let old = std::mem::take(&mut menu.store.cards);
+        menu.store.cards = self
+            .listing
+            .iter()
+            .filter_map(|e| {
+                let got = match modstore::Store::have(e, &stamps, &own) {
+                    modstore::Have::No => menu::Got::No,
+                    modstore::Have::Installed => menu::Got::Installed,
+                    modstore::Have::Update => menu::Got::Update,
+                    modstore::Have::Own => menu::Got::Own,
+                };
+                let progress = old.iter().find(|c| c.key == e.key()).and_then(|c| c.progress.clone());
+                Some(menu::Card {
+                    key: e.key(),
+                    tab: e.meta.kind.tab()?,
+                    name: e.meta.name.clone(),
+                    author: e.meta.author.clone(),
+                    source: e.meta.source.clone(),
+                    size: e.meta.size,
+                    verified: e.verified,
+                    got,
+                    picture: format!("store:{}", e.meta.sha256),
+                    progress,
+                })
+            })
+            .collect();
+    }
+
+    /// One frame: the menu's asks to the store, the store's events to the menu and its previews to
+    /// the art. Whether the mods folder changed, and whether the art did.
+    fn frame(&mut self, menu: &mut menu::Menu, art: &mut Art) -> (bool, bool) {
+        let (mut rescan, mut drawn) = (false, false);
+        for ask in menu.take_store_asks() {
+            match ask {
+                menu::StoreAsk::List { fresh } => self.store.list(fresh),
+                menu::StoreAsk::Install(key) => {
+                    if let Some(e) = self.entry(&key) {
+                        println!("mod store: installing {key} ({}, {} bytes)", e.rev, e.meta.size);
+                        self.store.install(e);
+                    }
+                }
+                menu::StoreAsk::Remove(key) => {
+                    if let Some(e) = self.entry(&key) {
+                        self.store.remove(&key, e.meta.kind, &e.meta.id);
+                    }
+                }
+                menu::StoreAsk::Report(key) => {
+                    if let Some(e) = self.entry(&key) {
+                        let url = modstore::report_url(e);
+                        println!("mod store: report {key}: {url}");
+                        if let Err(why) = modstore::open(&url) {
+                            menu.store.note = Some(format!("Report it at huggingface.co/datasets/{}: {why}", modstore::REPO));
+                        }
+                    }
+                }
+            }
+        }
+        let name = |s: &StoreFront, key: &str| s.entry(key).map_or(key.to_string(), |e| e.meta.name.clone());
+        for ev in self.store.take() {
+            match ev {
+                modstore::Event::Listing(Ok(l)) => {
+                    self.listing = l;
+                    menu.store.listed = menu::Listed::Shown;
+                    self.cards(menu);
+                }
+                modstore::Event::Listing(Err(why)) => menu.store.listed = menu::Listed::Failed(why),
+                modstore::Event::Note(n) => menu.store.note = Some(n),
+                modstore::Event::Progress(key, share, line) => {
+                    if let Some(c) = menu.store.cards.iter_mut().find(|c| c.key == key) {
+                        c.progress = Some((share, line));
+                    }
+                }
+                modstore::Event::Installed(ref key, ref got) | modstore::Event::Removed(ref key, ref got) => {
+                    let (key, got) = (key.clone(), got.clone());
+                    let what = name(self, &key);
+                    if let Some(c) = menu.store.cards.iter_mut().find(|c| c.key == key) {
+                        c.progress = None;
+                    }
+                    let done = if matches!(ev, modstore::Event::Removed(..)) { "Removed" } else { "Installed" };
+                    menu.store.note = Some(match &got {
+                        Ok(_) => format!("{done} {what}"),
+                        Err(why) => format!("{what}: {why}"),
+                    });
+                    println!("mod store: {key}: {got:?}");
+                    rescan |= got.is_ok();
+                    self.cards(menu);
+                }
+                modstore::Event::Preview(sha, Some(p)) => {
+                    art.set_mod_picture(&format!("store:{sha}"), game_render::pst::Texture { width: p.width, height: p.height, rgba: p.rgba });
+                    drawn = true;
+                }
+                modstore::Event::Preview(_, None) => {}
+            }
+        }
+        // The lit tab's previews, each zip's once (B259: an update's new zip is a new picture).
+        if menu.screen() == Some(menu::Screen::Store) {
+            for i in menu.store.shown() {
+                let key = menu.store.cards[i].key.clone();
+                if let Some(e) = self.listing.iter().find(|e| e.key() == key)
+                    && self.asked.insert(e.meta.sha256.clone())
+                {
+                    self.store.preview(e);
+                }
+            }
+        }
+        (rescan, drawn)
+    }
+}
+
 /// The listed mod tracks' source games (MD11), which the pick's filters are by.
 fn mod_games(args: &Args, dir: &std::path::Path, on: bool, listed: &[(String, String)]) -> Vec<(String, String)> {
     let Some(folder) = mods_folder(args, dir, on) else { return Vec::new() };
@@ -9674,6 +9825,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         render_scale_asked: false,
         mods: None,
         mods_asked: false,
+        mod_store: None,
         tricks: None,
         handling: None,
         room_tricks: None,
@@ -9714,6 +9866,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.mods_asked = true;
                 args.mods = (v != "off").then(|| std::path::PathBuf::from(v));
             }
+            "--mod-store" => args.mod_store = Some(next("the mod store's address, like http://127.0.0.1:8000")?),
             "--bike" => args.bike = next("a bike name, like 125sx")?,
             "--rider" => args.rider = next("a rider name, like thq1, or none")?,
             "--pad" => args.pad = Some(next("a device, like /dev/input/js0")?),
@@ -10105,7 +10258,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--preset 0..3|0,2,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--graphics full|farther|far|original] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
-                            [--no-sound] [--mods DIR|off]\n\
+                            [--no-sound] [--mods DIR|off] [--mod-store URL]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
                      rides the freeride area from the disc named in kit.toml straight away.\n\
@@ -10220,6 +10373,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Track mods: a --track not on the disc is looked for in mods/tracks/<id>/\n\
                      beside the settings (openmx-mods' standard), or in --mods DIR; --mods off,\n\
                      or Settings' Mods Off, reads nothing there. A mod rides as a freeride.\n\
+                     Mods' Browse the Store installs from the openmx-mods store on Hugging\n\
+                     Face (P198), or from --mod-store URL's.\n\
                      \n\
                      Textures (V84): --dump-textures [OUT] [--from DIR] writes every disc\n\
                      texture (or a mod folder's) as <name>-<key>.png to mods/textures-src/;\n\

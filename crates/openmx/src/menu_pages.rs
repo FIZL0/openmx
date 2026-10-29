@@ -149,6 +149,8 @@ pub enum Key {
     DeletePreset,
     ResetMods,
     ModsFolder,
+    /// Browse the Store (P198).
+    Store,
     /// A mod pack by its place in [`Menu::packs`].
     Pack(usize),
     /// A music pack by its place in [`Menu::music_packs`] (P122).
@@ -1062,6 +1064,7 @@ impl Menu {
 
     fn mods_rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::on_off(Key::ModsFolder, "Read the Mods Folder", self.settings.mods, "Off, nothing is read from mods/ beside the disc and every pick is the disc's alone.")];
+        rows.push(Row::new(Key::Store, Kind::Opens, "Browse the Store", "Tracks, trick packs and music from the openMX mod store, checked and installed into the mods folder."));
         rows.push(Row::heading("Installed"));
         let packs = self.packs();
         if packs.is_empty() && self.music_seen.is_empty() {
@@ -1202,6 +1205,10 @@ impl Menu {
             }
             Key::OriginalPage if p.ok => {
                 self.open_original();
+                return;
+            }
+            Key::Store if p.ok => {
+                self.open_store();
                 return;
             }
             Key::Hud => s.overlay = Overlay::CHOICES[next(row)],

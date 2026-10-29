@@ -751,6 +751,9 @@ footer a { color: var(--bone); }
       document.body.dataset.drawn = data.drawn.join(' ');
     } else if (data.fps !== undefined) {
       document.body.dataset.fps = data.fps.toFixed(1);
+    } else if (data.open) {
+      // the mod store's Report (P198): its Community discussion, prefilled, in a tab of its own
+      if (/^https:\/\/huggingface\.co\//.test(data.open)) window.open(data.open, '_blank', 'noopener');
     } else if (data.quit !== undefined) {
       // the shell quit (its Quit, or an error it ended on): back to the page, which then stays even with the switch on
       try {
