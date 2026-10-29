@@ -519,6 +519,74 @@ pub struct Settings {
     /// bar hides, and the d-pad rides as the original's — steering, leaning and the trick gestures.
     /// On unless turned off.
     pub markers: [bool; SEATS_MAX],
+    /// Settings → Updates (P191): what the desktop does about a newer build. Ask unless set.
+    pub updates: Updates,
+}
+
+/// The Updates setting (P191, opentennis's M140): the main menu offers a newer build with Square
+/// (Ask), installs it by itself (Always), or never asks GitHub (Never). The desktop's alone: the
+/// browser's page reloads into its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Updates {
+    #[default]
+    Ask,
+    Always,
+    Never,
+}
+
+impl Updates {
+    pub const ALL: [Updates; 3] = [Updates::Ask, Updates::Always, Updates::Never];
+
+    /// Its row's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Updates::Ask => "Ask",
+            Updates::Always => "Always",
+            Updates::Never => "Never",
+        }
+    }
+
+    /// The file's word.
+    pub fn word(self) -> &'static str {
+        match self {
+            Updates::Ask => "ask",
+            Updates::Always => "always",
+            Updates::Never => "never",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Updates> {
+        Updates::ALL.into_iter().find(|u| u.word() == w)
+    }
+}
+
+/// Updates' row's help (P191).
+pub const UPDATES_HELP: &str = "When a newer openMX is out it shows on the main menu. Ask: Square updates the game and starts it again. Always: it updates by itself. Never: the game never asks GitHub for one.";
+
+/// The desktop updater's hooks (P191, `update.rs`), which the shell hands the menu at start: a menu
+/// without them (the browser's, the tests') has no updater.
+pub struct Updater {
+    /// The newer build out, asking at start and every half hour (never under Never).
+    pub latest: fn(Updates) -> Option<String>,
+    /// Square on the notice: install it and restart, or open its release page.
+    pub act: fn(),
+    /// The install's words while it runs, or why it failed.
+    pub progress: fn() -> Option<String>,
+    /// Whether Square installs in place (Update) rather than opening the release page (Download).
+    pub installs: fn() -> bool,
+}
+
+/// The shell's [`Updater`], set once at start on the desktop.
+pub static UPDATER: std::sync::OnceLock<Updater> = std::sync::OnceLock::new();
+
+/// The notice's Square: the updater's Update or Download, the page's Reload.
+pub fn update_button() -> &'static str {
+    UPDATER.get().map_or("Reload", |u| if (u.installs)() { "Update" } else { "Download" })
+}
+
+/// The main menu's line for the newer build `n`: the install's words while one runs.
+pub fn update_line(n: &str) -> String {
+    UPDATER.get().and_then(|u| (u.progress)()).unwrap_or_else(|| format!("New version out: {n}"))
 }
 
 /// The shape a ride's picture is drawn in (P126), as `settings.txt` spells it: the shell's
@@ -1231,6 +1299,7 @@ impl Default for Settings {
             filtering: Filtering::default(),
             shadows: shadows_default(),
             markers: [true; SEATS_MAX],
+            updates: Updates::default(),
         }
     }
 }
@@ -1416,6 +1485,7 @@ impl Settings {
                 "texture_packs_off" => s.texture_packs_off = pack_names(v),
                 "texture_filtering" => s.filtering = Filtering::from_word(v).unwrap_or(s.filtering),
                 "shadows" => s.shadows = Shadows::from_word(v).unwrap_or(s.shadows),
+                "updates" => s.updates = Updates::from_word(v).unwrap_or(s.updates),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "camera_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
@@ -1504,6 +1574,7 @@ impl Settings {
             + &self.hud_text()
             + &self.original_text()
             + &self.filtering_text()
+            + &self.updates_text()
             + &self.shadows_text()
             + &self.world_sky_text()
             + &self.mods_text()
@@ -1579,6 +1650,11 @@ impl Settings {
     fn filtering_text(&self) -> String {
         if self.filtering == Filtering::default() { String::new() } else { format!("texture_filtering = {}\n", self.filtering.word()) }
     }
+    /// Updates (P191), only when not Ask, so a file from before it is written as it was.
+    fn updates_text(&self) -> String {
+        if self.updates == Updates::default() { String::new() } else { format!("updates = {}\n", self.updates.word()) }
+    }
+
     /// Shadows (V108), only when not the default (ours, or the original's on a phone: P205), so a file
     /// from before it is written as it was.
     fn shadows_text(&self) -> String {
@@ -2687,6 +2763,8 @@ pub struct Menu {
     pub updated: Option<(String, u32)>,
     /// Whether the main menu has asked [`updated_build`] yet: once a run.
     updated_asked: bool,
+    /// P191: the newer build Updates on Always last installed by itself, so it starts once.
+    update_started: Option<String>,
     /// The ride being loaded (P127), which the loading screen shows over everything while it is.
     pub loading: Option<Loading>,
     /// The screens the pick's ride was started from, which a cancelled load goes back to.
@@ -2987,6 +3065,7 @@ impl Menu {
             newer: None,
             updated: None,
             updated_asked: false,
+            update_started: None,
             loading: None,
             ride_stack: Vec::new(),
             riders: 1,
@@ -4070,7 +4149,15 @@ impl Menu {
     /// The main menu's word on builds (P193), each frame it is up: the newer build the site has, and
     /// the first time it shows in a run, "Updated to …" when this is a new build's first start.
     fn builds(&mut self) {
-        let newer = newer_build();
+        let mut newer = newer_build();
+        // P191: the desktop's updater, unless Settings → Updates is Never
+        if let Some(u) = UPDATER.get().filter(|_| self.settings.updates != Updates::Never) {
+            newer = newer.or_else(|| (u.latest)(self.settings.updates));
+            if self.settings.updates == Updates::Always && newer.is_some() && newer != self.update_started && (u.installs)() {
+                self.update_started = newer.clone();
+                (u.act)();
+            }
+        }
         if newer.is_some() && newer != self.newer {
             page_says(&format!("openmx: the main menu offers {}", newer.as_deref().unwrap_or_default()));
         }
@@ -4167,8 +4254,12 @@ impl Menu {
             // Back on the main menu is the splash again, 1P free for the next press (opentennis's
             // B533); Quit is a row, and Back on the splash asks.
             Screen::Main if p.back => self.splash(),
-            // P193: Square reloads the page into the newer build the main menu offers.
-            Screen::Main if p.delete && self.newer.is_some() => reload_page(),
+            // P193: Square reloads the page into the newer build the main menu offers; P191: the
+            // desktop's installs it, or opens its release page.
+            Screen::Main if p.delete && self.newer.is_some() => match UPDATER.get() {
+                Some(u) => (u.act)(),
+                None => reload_page(),
+            },
             Screen::Main => match (p.ok || p.start, p.back, at) {
                 (true, _, MAIN_FREE) => {
                     if self.party.take().is_some() {

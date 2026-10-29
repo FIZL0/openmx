@@ -7,7 +7,7 @@
 // opentennis: watching .git/logs/HEAD rebuilt the test binaries on every commit in the shared checkout).
 // OPENMX_VERSION (a release's tag, tools/release.sh) is passed through for the corner, the crate's version without it.
 //
-// Emits OPENMX_COMMIT, OPENMX_VERSION and OPENMX_BUILD_ID, the id: "<crate version> <commit>, 30 Hz" — an unstamped
+// Emits OPENMX_COMMIT, OPENMX_VERSION and OPENMX_BUILD_ID (and OPENMX_TAG for a release, P191), the id: "<crate version> <commit>, 30 Hz" — an unstamped
 // dev build's is then handshake.rs's own default, so dev builds of one version still meet each other.
 // `crates/openmx/tests/build_stamp.rs` mounts this file for its functions.
 
@@ -60,4 +60,8 @@ fn main() {
     println!("cargo:rustc-env=OPENMX_COMMIT={commit}");
     println!("cargo:rustc-env=OPENMX_VERSION={}", version(std::env::var("OPENMX_VERSION").ok().as_deref(), &crate_version));
     println!("cargo:rustc-env=OPENMX_BUILD_ID={}", id(&crate_version, &commit));
+    // P191: a release's tag only when it is one, for the updater (`src/update.rs`) to ask for newer releases
+    if let Some(v) = std::env::var("OPENMX_VERSION").ok().filter(|v| !v.trim().is_empty()) {
+        println!("cargo:rustc-env=OPENMX_TAG=v{}", version(Some(&v), &crate_version));
+    }
 }

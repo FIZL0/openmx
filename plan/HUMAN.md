@@ -294,8 +294,9 @@ website on https://openmx.dev. What only you can do:
 3. **The release signing key**, before the first release: `sudo pacman -S minisign`, then
    `mkdir -p ~/.config/openmx && minisign -G -p ~/.config/openmx/release.pub -s ~/.config/openmx/release.key`
    (pick a password; keep the .key and the password backed up — the updater, P191, only takes releases signed
-   with it). Optionally `~/.config/openmx/release.pass` (mode 600) for unattended releases. P191 needs the public
-   key's second line for its PUBLIC_KEY.
+   with it). Optionally `~/.config/openmx/release.pass` (mode 600) for unattended releases. Done: the key is made,
+   and its public half (`RWR5k+YX2E…`) is `crates/openmx/src/update.rs`'s PUBLIC_KEY (P191); a new key means a new
+   PUBLIC_KEY, and builds from before it can't update past it.
 4. **The first release**: write the bullets in RELEASE_NOTES.md, then `tools/release.sh 0.1.0` (a draft: check it on
    GitHub, then publish) or `tools/release.sh 0.1.0 publish`. Needs docker (the Linux build runs in Valve's Steam
    Runtime container).

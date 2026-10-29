@@ -225,6 +225,9 @@ mod ride_hud;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
+// The desktop updater (P191): a newer release found, downloaded, checked and swapped in.
+#[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+mod update;
 mod saved_markers;
 // MD10: `--shot-pose`, the first view's camera held where the accuracy harness asks.
 mod shot_pose;
@@ -1872,6 +1875,12 @@ pub(crate) async fn run() -> Result<(), String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let start = player::start(&mut std::env::args().skip(1).collect())?;
+        // P191: the main menu's updater, and an update's leftover (Windows' .old) gone
+        #[cfg(not(target_os = "ios"))]
+        {
+            update::cleanup();
+            let _ = menu::UPDATER.set(update::updater());
+        }
         if args.where_only {
             let disc = Disc::configured_path()?;
             let dir = menu::store_dir(Some(&disc));
@@ -9876,6 +9885,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--ride" => {}
             "--menu" => args.menu = true,
             "--where" => args.where_only = true,
+            // P191: the updater asks nothing this run (a flag the browser's and the iPhone's builds take and ignore)
+            "--no-update-check" => {
+                #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+                update::NO_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             "--screen" => {
                 let w = next("a screen: main, tracks, garage, settings, controls, keyboard or pause, or a tab")?;
                 match (menu::Screen::from_word(&w), menu::Screen::tab_from_word(&w)) {
@@ -10268,10 +10282,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "openmx [DISC.iso] [--where]\n\
+                    "openmx [DISC.iso] [--where] [--no-update-check]\n\
                      \x20      (the disc: this, else kit.toml's above the working directory, else the one\n\
                      \x20      remembered in the data folder, else a picker asks; --where says which, and\n\
-                     \x20      where settings.txt, controls.txt and mods/ are)\n\
+                     \x20      where settings.txt, controls.txt and mods/ are; --no-update-check: the main\n\
+                     \x20      menu doesn't ask GitHub for a newer build this run)\n\
                      openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause|TAB]]\n\
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\

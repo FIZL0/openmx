@@ -63,6 +63,8 @@ png = "0.18"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["rt"] }
+# The desktop updater (P191, `src/update.rs`): a release's SHA256SUMS is signed with minisign.
+minisign-verify = "0.3"
 
 # The pad's motors (P183): a wreck rumbles its rider's pad as the original's does. The js device the
 # pad is read through takes no force feedback; its sibling event node does, through an ioctl the shell

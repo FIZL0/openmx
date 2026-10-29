@@ -6,7 +6,7 @@
 #   openmx-linux-x86_64.tar.gz   what players download: openmx and README.txt. ./openmx "disc.iso" (or drop the .iso on
 #                                it) the first time, ./openmx after: it remembers the disc, and keeps settings, controls and
 #                                mods/ in ~/.local/share/openmx (P190)
-#   openmx-linux-x86_64          the bare binary, for the in-game updater (plan/TODO.md) to fetch
+#   openmx-linux-x86_64          the bare binary, for the in-game updater (P191, crates/openmx/src/update.rs) to fetch
 #   openmx-ios.ipa               P201: the unsigned iPhone / iPad app (tools/ios-ipa.sh; needs the iOS SDK, tools/ios-sdk.py)
 #   altstore-source.json         P201: that app as an AltStore / SideStore / Feather source (tools/ios-source.sh). FIZL0's
 #                                shared source (github.com/FIZL0/apps) merges it; players add https://fizl0.github.io/apps/source.json
@@ -76,12 +76,10 @@ tar -czf "$out/web.tar.gz" -C web .
 (cd "$out" && sha256sum openmx-* web.tar.gz > SHA256SUMS)
 printf %s "$pw" | minisign -S -s "$key" -m "$out/SHA256SUMS" -x "$out/SHA256SUMS.sig" -t "openMX $tag"
 minisign -V -P "$pub" -m "$out/SHA256SUMS" -x "$out/SHA256SUMS.sig" -q || { echo "SHA256SUMS.sig doesn't verify against $pubfile" >&2; exit 1; }
-# the game checks against the key built into it once the updater lands (plan/TODO.md): refuse a release it would turn down
+# the game's updater (P191) checks against the key built into it: refuse a release it would turn down
 upd=crates/openmx/src/update.rs
-if [ -f $upd ]; then
-    minisign -V -P "$(sed -n 's/^pub const PUBLIC_KEY: &str = "\(.*\)";/\1/p' $upd)" -m "$out/SHA256SUMS" -x "$out/SHA256SUMS.sig" -q \
-        || { echo "SHA256SUMS.sig doesn't match $upd's PUBLIC_KEY: wrong key?" >&2; exit 1; }
-fi
+minisign -V -P "$(sed -n 's/^pub const PUBLIC_KEY: &str = "\(.*\)";/\1/p' $upd)" -m "$out/SHA256SUMS" -x "$out/SHA256SUMS.sig" -q \
+    || { echo "SHA256SUMS.sig doesn't match $upd's PUBLIC_KEY: wrong key?" >&2; exit 1; }
 
 body=$out/notes.md
 {
