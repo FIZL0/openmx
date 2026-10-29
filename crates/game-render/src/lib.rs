@@ -60,6 +60,7 @@ pub mod raster;
 pub mod replace;
 pub mod rider;
 pub mod scene;
+pub mod shadow;
 pub mod skin;
 pub mod sky;
 pub mod splat;
