@@ -756,6 +756,17 @@ impl Menu {
         rows
     }
 
+    /// The pick the Garage shows (P213): the seat its Player row is on, while it is the screen.
+    pub fn garage_pick(&self) -> Option<&roster::Pick> {
+        (self.screen() == Some(Screen::Garage)).then(|| self.garages.get(self.garage_seat()).map(|g| &g.pick)).flatten()
+    }
+
+    /// Where the Garage stands its pick in a `size` frame, in pixels: x, y, width, height. None off
+    /// the Garage.
+    pub fn garage_stage(&self, size: (usize, usize)) -> Option<[f32; 4]> {
+        (self.screen() == Some(Screen::Garage)).then(|| super::screens::garage_stage(size))
+    }
+
     /// The garage seat the Player row is on.
     fn garage_seat(&self) -> usize {
         self.player.min(self.garages.len().saturating_sub(1))
@@ -779,19 +790,19 @@ impl Menu {
                 let mut number = row(G::Number, "Number", "The number on the plate and the jersey.");
                 number.note = Some("Cross types one.".into());
                 rows.push(number);
-                rows.push(row(G::Rider, "Rider", "Who rides."));
+                rows.push(row(G::Rider, "Gear Set", "Whose gear the rider wears: a maker's, or a pro's own."));
                 rows.push(row(G::Colours, "Colours", "The rider's two colours, used on the gear below."));
-                rows.push(row(G::Outfit, "Jersey & Pants", "One pick for the two, as they come as a set."));
+                rows.push(row(G::Outfit, "Jersey/Pants", "One pick for the two, as they come as a set."));
                 let mut save = Row::new(Key::Garage(G::Preset), Kind::Action, "Save as Preset", "Keeps this rider, bike and gear under a name, for the next session or another seat.");
                 save.value = value(G::Preset);
                 save.note = Some("Left and right load a saved one.".into());
                 rows.push(save);
             }
             1 => {
-                rows.push(row(G::Class, "Class", "The bike's class."));
+                rows.push(row(G::Class, "Bike Class", "The bike's class."));
                 rows.push(row(G::Model, "Bike", "The bike in this class."));
                 rows.push(row(G::Livery, "Paint", "The bike's livery."));
-                rows.push(row(G::Tier, "Tier", "Higher tiers are faster bikes."));
+                rows.push(row(G::Tier, "Driving Model", "Race Physics, or Pro Physics: faster bikes."));
                 rows.push(row(G::Tuning, "Tuning", "Suspension and gearing set-up."));
             }
             _ => {

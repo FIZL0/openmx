@@ -1641,6 +1641,126 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
     assert!(pills >= 11 * 12 * 4, "{pills} pills");
 }
 
+/// A png the shell wrote, as RGB rows: its blocks are stored, not compressed.
+fn read_png(path: &std::path::Path) -> (usize, usize, Vec<u8>) {
+    let png = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let be = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+    let (mut at, mut size, mut idat) = (8, (0, 0), Vec::new());
+    while at + 8 <= png.len() {
+        let (len, tag) = (be(at), &png[at + 4..at + 8]);
+        match tag {
+            b"IHDR" => size = (be(at + 8), be(at + 12)),
+            b"IDAT" => idat.extend_from_slice(&png[at + 8..at + 8 + len]),
+            _ => {}
+        }
+        at += 12 + len;
+    }
+    let mut raw = Vec::new();
+    let mut i = 2;
+    loop {
+        let last = idat[i] & 1 != 0;
+        let n = u16::from_le_bytes([idat[i + 1], idat[i + 2]]) as usize;
+        raw.extend_from_slice(&idat[i + 5..i + 5 + n]);
+        i += 5 + n;
+        if last {
+            break;
+        }
+    }
+    let (w, h) = size;
+    let rgb = (0..h).flat_map(|y| raw[y * (1 + 3 * w) + 1..(y + 1) * (1 + 3 * w)].to_vec()).collect();
+    (w, h, rgb)
+}
+
+/// The Garage's Bike tab shot at 640x360 from a store of its own whose 1P rides `bike`, or none
+/// without a disc.
+fn garage_shot(bike: &str) -> Option<Vec<u8>> {
+    let iso = match game_render::disc::Disc::configured_path() {
+        Ok(p) if p.is_file() => p,
+        _ => {
+            eprintln!("skipped: no disc");
+            return None;
+        }
+    };
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("p213-{bike}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("kit.toml"), "[game]\niso = \"disc.iso\"\n").unwrap();
+    std::os::unix::fs::symlink(&iso, dir.join("disc.iso")).unwrap();
+    let mut picks = roster::Picks::default();
+    picks.0[0].bike = bike.into();
+    picks.save(&dir).unwrap();
+    let shot = dir.join("shot.png");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_openmx"))
+        .current_dir(&dir)
+        .args(["--headless", "--menu", "--screen", "bike", "--size", "640x360", "--frames", "3", "--seconds", "120", "--no-sound"])
+        .arg("--shot")
+        .arg(&shot)
+        .output()
+        .expect("the shell runs");
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
+    let (w, h, rgb) = read_png(&shot);
+    assert_eq!((w, h), (640, 360));
+    std::fs::remove_dir_all(&dir).ok();
+    Some(rgb)
+}
+
+/// P213: the Garage stands the seat's bike and rider, as the ride draws them, right of the plate
+/// where the original's turns: grey tyres, gear and metal over the orange page, which has none —
+/// and another paint of the same bike is another picture there.
+#[test]
+fn the_garage_shows_the_picked_bike_and_rider_in_its_paint() {
+    let Some(stock) = garage_shot("125sx") else { return };
+    let painted = garage_shot("125sx_one").unwrap();
+    // The stage at 640x360 (8 px an em): x 59..79.6, y 1.6..24.8 em.
+    let stage: Vec<usize> = (13..198).flat_map(|y| (472..636).map(move |x| 3 * (y * 640 + x))).collect();
+    let grey = |rgb: &[u8]| {
+        stage.iter().filter(|&&i| rgb[i..i + 3].iter().max().unwrap() - rgb[i..i + 3].iter().min().unwrap() < 40).count()
+    };
+    // And the page's own orange beside it, under the side panel's title, has none.
+    let page: Vec<usize> = (205..215).flat_map(|y| (560..636).map(move |x| 3 * (y * 640 + x))).collect();
+    let page_grey = page.iter().filter(|&&i| stock[i..i + 3].iter().max().unwrap() - stock[i..i + 3].iter().min().unwrap() < 40).count();
+    assert_eq!(page_grey, 0, "the page is orange");
+    let shown = grey(&stock);
+    assert!(shown > stage.len() / 20, "{shown} of {} stage pixels are the bike and rider", stage.len());
+    assert!(grey(&painted) > stage.len() / 20);
+    let apart = stage.iter().filter(|&&i| (0..3).any(|k| stock[i + k].abs_diff(painted[i + k]) > 24)).count();
+    assert!(apart > 500, "only {apart} pixels changed with the paint");
+}
+
+/// P213: the garage's rows are the original's — Bike Class, Bike, Driving Model on the Bike tab,
+/// Gear Set and Jersey/Pants on the Rider tab — and the bike is named as its logo names it.
+#[test]
+fn the_garage_rows_carry_the_originals_names() {
+    use roster::{Catalogue, Picks};
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue, Picks::default());
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Bike");
+    let row = |m: &Menu, label: &str| {
+        m.page().iter().find(|row| row.label == label).map(|row| row.value.clone()).unwrap_or_else(|| {
+            panic!("no {label} row in {:?}", m.page().iter().map(|row| &row.label).collect::<Vec<_>>())
+        })
+    };
+    assert_eq!(row(&m, "Bike Class"), "125cc");
+    assert_eq!(row(&m, "Driving Model"), "Race Physics");
+    let bike = row(&m, "Bike");
+    assert!(["KTM", "Honda", "Kawasaki", "Suzuki", "Yamaha"].iter().any(|maker| bike.starts_with(maker)), "{bike}");
+    tab_to(&mut m, r, "Rider");
+    row(&m, "Gear Set");
+    row(&m, "Jersey/Pants");
+}
+
 #[test]
 fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     use game_render::rider::{Rider as Body, Sex};

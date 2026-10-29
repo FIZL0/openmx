@@ -50,6 +50,9 @@ const CAP: f32 = 0.73;
 const STAGE: (f32, f32) = (80.0, 45.0);
 /// The black band along the bottom.
 const BAND: f32 = 4.6;
+/// Where the Garage stands its bike and rider (P213): right of the plate, over the side panel, in
+/// the stage's top right as the original's model stands in its screen's — x, y, width, height.
+const GARAGE_STAGE: [f32; 4] = [59.0, 1.6, 20.6, 23.2];
 /// The main list's type, and how far a pill reaches past its label either side, in ems of the
 /// stage ([`PILL_PAD`] in the stage's ems).
 const ITEM: f32 = 1.7;
@@ -96,6 +99,13 @@ pub(super) fn fit(size: (usize, usize)) -> (f32, [f32; 2]) {
     let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
     let em = (w / STAGE.0).min(h / STAGE.1);
     (em, [(w - STAGE.0 * em) / 2.0, (h - STAGE.1 * em) / 2.0])
+}
+
+/// [`GARAGE_STAGE`] in a `size` frame's pixels: x, y, width, height.
+pub(super) fn garage_stage(size: (usize, usize)) -> [f32; 4] {
+    let (em, o) = fit(size);
+    let [x, y, w, h] = GARAGE_STAGE;
+    [o[0] + x * em, o[1] + y * em, w * em, h * em]
 }
 
 impl<'a> Pen<'a> {
@@ -1222,7 +1232,8 @@ impl Pen<'_> {
         let mut side = if screen == Screen::Settings && menu.tab(screen) == pages::TAB_CONTROLS { 4.5 } else { 7.6 };
         if screen == Screen::Garage {
             self.plate(menu, 45.0, 4.0);
-            side = 18.6;
+            // under the bike and rider (P213)
+            side = 25.2;
         }
         self.side(menu, screen, &page, r, 45.0, side, 31.0);
         let title = match screen {
