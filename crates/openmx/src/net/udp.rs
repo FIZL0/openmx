@@ -335,11 +335,12 @@ mod tests {
 
     #[test]
     fn two_builds_since_the_id_both_say_why() {
-        let (ga, gb) = (UdpSocket::bind(local()).unwrap(), UdpSocket::bind(local()).unwrap());
-        let (at_a, at_b) = (ga.local_addr().unwrap(), gb.local_addr().unwrap());
-        drop((ga, gb));
-        let mut a = Udp::bind_as(at_a, vec![("b".into(), at_b)], "0.1.0 dev, 30 Hz", &[0]).unwrap();
-        let mut b = Udp::bind_as(at_b, vec![("a".into(), at_a)], "0.1.0 dev, 60 Hz", &[0]).unwrap();
+        // both bound on ports of their own before either names the other: a port freed and bound
+        // again is anyone's in between, another test's under a busy gate (K11)
+        let mut a = Udp::bind_as(local(), vec![], "0.1.0 dev, 30 Hz", &[0]).unwrap();
+        let mut b = Udp::bind_as(local(), vec![], "0.1.0 dev, 60 Hz", &[0]).unwrap();
+        a.meet(vec![("b".into(), b.at())]);
+        b.meet(vec![("a".into(), a.at())]);
         // b's one datagram: a refuses it and goes quiet, and b hears why from a's answer alone
         b.send("a", b"\x01session");
         assert!(wait(&mut a).unwrap_err().contains("b runs build \"0.1.0 dev, 60 Hz\""));
