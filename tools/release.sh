@@ -5,6 +5,10 @@
 # (~/.config/openmx/release.key, asks its password unless ~/.config/openmx/release.pass holds it) and upload to GitHub:
 #   openmx-linux-x86_64.tar.gz   what players download
 #   openmx-linux-x86_64          the bare binary, for the in-game updater (plan/TODO.md) to fetch
+#   openmx-ios.ipa               P201: the unsigned iPhone / iPad app (tools/ios-ipa.sh; needs the iOS SDK, tools/ios-sdk.py)
+#   altstore-source.json         P201: that app as an AltStore / SideStore / Feather source (tools/ios-source.sh). FIZL0's
+#                                shared source (github.com/FIZL0/apps) merges it; players add https://fizl0.github.io/apps/source.json
+#                                (web/ios.html), which a published release rebuilds at once (`gh workflow run source -R FIZL0/apps`)
 #   SHA256SUMS  SHA256SUMS.sig
 #   web.tar.gz                   the website, which pages.yml deploys to openmx.dev as built here
 # VERSION with a suffix (1.1.0-rc.1) is a pre-release, never Latest. notes.md is the "New in …" list (Markdown
@@ -33,6 +37,9 @@ pre=
 last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
 [ -n "$notes" ] || [ -n "$last" ] || { echo "the first release needs a notes.md or bullets in RELEASE_NOTES.md (no earlier v* tag to list commits from)" >&2; exit 1; }
 [ -z "$notes" ] || [ -f "$notes" ] || { echo "no such notes file: $notes" >&2; exit 1; }
+command -v jq >/dev/null || { echo "jq missing: sudo pacman -S jq" >&2; exit 1; }
+sdk=${OPENMX_IOS_SDK:-$HOME/.local/share/hst-ios/iPhoneOS.sdk}
+[ -d "$sdk" ] || { echo "no iOS SDK at $sdk (the release carries openmx-ios.ipa): run tools/ios-sdk.py Xcode.xip" >&2; exit 1; }
 command -v minisign >/dev/null || { echo "minisign missing: sudo pacman -S minisign" >&2; exit 1; }
 [ -f "$key" ] && [ -f "$pubfile" ] || { echo "no signing key at $key (once: mkdir -p ~/.config/openmx && minisign -G -p $pubfile -s $key)" >&2; exit 1; }
 pub=$(tail -1 "$pubfile")
@@ -59,6 +66,9 @@ out=dist/release
 rm -rf "$out" && mkdir -p "$out"
 tar -czf "$out/openmx-linux-x86_64.tar.gz" -C dist/linux .
 cp dist/linux/openmx "$out/openmx-linux-x86_64"
+tools/ios-ipa.sh "$out/openmx-ios.ipa"
+# P201: the sideloading source, at a URL that always serves the latest release's copy (FIZL0/apps reads it there)
+tools/ios-source.sh "$version" "$out/openmx-ios.ipa" >/dev/null
 tools/web.sh
 tar -czf "$out/web.tar.gz" -C web .
 (cd "$out" && sha256sum openmx-* web.tar.gz > SHA256SUMS)
@@ -82,6 +92,7 @@ body=$out/notes.md
     echo "| Platform | File | How to play |"
     echo "|---|---|---|"
     echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, put your ISO's path in \`kit.toml\`, run \`./run.sh\` |"
+    echo "| **iPhone** / **iPad** (iOS 15+) | [add the source in one tap](https://openmx.dev/ios.html) | Easiest: add the source in one tap (Feather, AltStore, SideStore), or add \`https://fizl0.github.io/apps/source.json\` under Sources by hand; install openMX from it and updates arrive there. Then put your ISO in Files → On My iPhone → openMX. Touch controls or a controller. Signing it yourself instead: [\`openmx-ios.ipa\`](https://github.com/$repo/releases/download/$tag/openmx-ios.ipa) (unsigned; Sideloadly, AltStore…) |"
     echo "| **Browser** | [openmx.dev](https://openmx.dev/) | Nothing to install |"
     echo
     echo "## What you need"
@@ -105,7 +116,9 @@ body=$out/notes.md
 } > "$body"
 git push -q origin HEAD:main
 gh release create "$tag" -R $repo --target "$(git rev-parse HEAD)" --title "openMX $version" \
-    --notes-file "$body" $pre $publish "$out"/openmx-* "$out"/web.tar.gz "$out"/SHA256SUMS "$out"/SHA256SUMS.sig
+    --notes-file "$body" $pre $publish "$out"/openmx-* "$out"/web.tar.gz "$out"/SHA256SUMS "$out"/SHA256SUMS.sig "$out"/altstore-source.json
+# the shared FIZL0 source (github.com/FIZL0/apps) picks up this release now, not at its next hourly poll
+[ "$publish" = --latest ] && { gh workflow run source -R FIZL0/apps || echo "FIZL0/apps did not rebuild; it will within the hour" >&2; }
 if [ "$notes" = RELEASE_NOTES.md ]; then
     sed -i '/^<!--/!d' RELEASE_NOTES.md
     git commit -qm "Release notes: emptied after v$version" -- RELEASE_NOTES.md && git push -q origin HEAD:main
