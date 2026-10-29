@@ -79,6 +79,11 @@ pub struct Rollback<S: Clone + 'static> {
     count: usize,
     /// The next tick a run gives its pads to.
     pub frame: usize,
+    /// The last tick run on every seat's own pads, re-runs done: ggrs' confirmed frame as of the
+    /// last `advance_frame`, which rolls back to whatever pads came in first. A poll between ticks
+    /// (a frame that sits out, a hold) moves ggrs' confirmed frame on with no rollback yet, so a
+    /// tick up to `confirmed` can still hold its prediction; one up to `settled` cannot.
+    pub settled: i64,
     /// The tick ggrs' frame 0 is (a session restarted mid-ride), and the restart's number (every
     /// datagram carries it, so an older session's are dropped).
     pub base: usize,
@@ -127,6 +132,7 @@ impl<S: Clone + 'static> Rollback<S> {
             seats,
             count: lineup.seats.len(),
             frame: base,
+            settled: base as i64 - 1,
             base,
             round,
             since: 0,
@@ -334,6 +340,7 @@ fn advance<S: Clone + 'static, G: Game<State = S>>(np: &mut Netplay<S>, game: &m
     match np.rb.sess.advance_frame() {
         Ok(reqs) => {
             handle(np, game, reqs);
+            np.rb.settled = (np.rb.base as i64 + np.rb.sess.confirmed_frame() as i64).min(np.rb.frame as i64 - 1);
             // at the prediction window ggrs answers with a rollback's re-runs and no new tick (B299)
             let new = np.rb.frame > f0;
             np.rb.held += !new as u64;

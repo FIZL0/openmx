@@ -280,8 +280,8 @@ async function online({ name, relay, codes, join, host, bike, ticks }) {
       net.start();
       started = true;
     }
-    // settled can be ahead of the ticks run here: wait for every line
-    const lines = ticks && !sent && s.confirmed >= Number(ticks) ? net.ticks(0, Number(ticks)) : '';
+    // settled, not confirmed: a tick confirmed between runs can still hold its prediction (K7)
+    const lines = ticks && !sent && s.settled >= Number(ticks) ? net.ticks(0, Number(ticks)) : '';
     if (lines && lines.split('\n').filter(Boolean).length === Number(ticks)) {
       postMessage({ ticks: lines });
       sent = true;

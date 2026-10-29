@@ -417,7 +417,7 @@ mod host {
         }
 
         /// Where things are: `status`, `ticket`, `code`, `taken`, `ready` (every guest), `riding`,
-        /// `me`, `tick`, `confirmed`, `desyncs`, `failed`, `too_big`.
+        /// `me`, `tick`, `confirmed`, `settled` (`Netplay::settled`), `desyncs`, `failed`, `too_big`.
         pub fn state(&self) -> Object {
             let o = Object::new();
             let set = |k: &str, v: JsValue| {
@@ -434,6 +434,7 @@ mod host {
                 set("me", r.np.me.as_str().into());
                 set("tick", (r.np.tick() as u32).into());
                 set("confirmed", (r.np.confirmed() as f64).into());
+                set("settled", (r.np.settled() as f64).into());
                 set("desyncs", (r.np.desyncs.len() as u32).into());
             }
             set("failed", p.failed.as_deref().map_or(JsValue::NULL, JsValue::from));

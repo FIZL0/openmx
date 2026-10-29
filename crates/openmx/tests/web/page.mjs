@@ -6,7 +6,8 @@
 //
 // `/pkg/` is served from <pkg dir> (tools/web.sh --check's build), the rest from <web dir>. The chromium profile is
 // a scratch directory, removed at the end. Prints what peer.mjs prints: `state <JSON>` a few times a second (the
-// page's `window.openmxOnline`), and once the page has them, `tick <line>` for each of `window.openmxTicks`' lines.
+// page's `window.openmxOnline`), and once the page has them, `tick <line>` for each of `window.openmxTicks`' lines;
+// before the page has a state, `page <step>` as chromium starts and the page opens (each is progress to the test).
 // Runs until stdin closes.
 import http from 'node:http';
 import fs from 'node:fs';
@@ -66,6 +67,7 @@ const wsUrl = await new Promise(resolve => {
     }
   });
 });
+process.stdout.write('page chromium\n');
 const targets = await (await fetch(wsUrl.replace('ws://', 'http://').replace(/\/devtools.*/, '/json'))).json();
 const ws = new WebSocket(targets.find(t => t.type === 'page').webSocketDebuggerUrl);
 await new Promise(r => ws.addEventListener('open', r));
@@ -89,6 +91,7 @@ const evaluate = async expression =>
 await send('Runtime.enable');
 await send('Page.enable');
 await send('Page.navigate', { url });
+process.stdout.write('page opened\n');
 let sent = false;
 for (;;) {
   await new Promise(r => setTimeout(r, 250));
