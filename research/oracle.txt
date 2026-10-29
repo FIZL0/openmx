@@ -6155,6 +6155,43 @@ atv_stunt_request           atv 0x004e49c0 = stunt_request (call: stunt_idle's v
 atv_stunt_clocks            atv 0x004e4900 = pc_stunt_clocks (call: vt +0x4e8 in the remote branch; weak as on the PC)
 atv_stunt_idle              atv 0x004e5d20 = stunt_idle (call: vt +0x4f0; ids 0x2e/0xff as on the PC)
 atv_stunt_state_pack        atv 0x004d9f30 = pc_stunt_state_pack (align, 0.37; weak)
+# MD37 — the ATV, MXVehicleAtv (a MXVehicleMotoShared beside MXVehicleMotocross), on the PC and in
+# SLUS-21104. Journal: research/journal/2026-10-29-md37-atvs. No MX Unleashed twin: SLUS-20767 has no ATV.
+# SLUS-21104's ATV table runs parallel to the bike's, 0x2200 lower (entry 0x003ce364 = Force, 0x003ce368 =
+# PreProcess, 0x003ce36c = PostProcess, against 0x003d0564/68/6c for the bike); entries equal in both are
+# MotoShared's, the rest are the ATV's own, paired to the PC by the bike's twin at the same table place
+# (`table`), by strings (`str`) or by call order (`seq`). Four wheels at +0x17b0/+0x17b4/+0x17b8/+0x17bc
+# (PC +0x17d0..+0x17dc): left front, right front (steered), left rear, right rear (driven).
+pc_quad_update              pc 0x005d8350 = MXVehicleAtv::vf14_at_12: pc_bike_vehicle_update first, then the quad's own tail (0.95, 0.73, 0.1)
+pc_quad_ground_head         pc 0x005d7570 = Atv::vf0_at_48 PreProcess: pc_bike_ground_head's every clause, each wheel write made to both wheels of the pair
+pc_quad_ground_step         pc 0x005db7d0 = Atv::vf0_at_60 Force: the bike's substep body on four wheels (see the journal for the order)
+pc_quad_air_state           pc 0x005db9c0 = Atv::vf0_at_52 PostProcess: pc_bike_air_state's 10.0 and 0.25 on four wheels; no no-hander call
+pc_quad_stand_upright       pc 0x005da870 = the Force body's first, in place of bike_stand_upright + bike_balance: the four contact normals' mean, below 10 ft/s
+pc_quad_roll_pitch          pc 0x005da3d0 = the Force body's second, in place of bike_roll_pitch (const -0.1 5 7 15 500 as the bike's; 0.5 1 -1; no 1000)
+pc_quad_ground_pitch_torque pc 0x005d6da0 = the bike's pitch torque body 0x005fb420 under the quad's guard (seq)
+pc_quad_wheel_contacts      pc 0x005dab70 = bike_wheel_contacts for four (seq; calls pc_wheel_set_contact)
+pc_quad_init                pc 0x005d6750 = MXVehicleAtv::vf84 (str: WreckATVm.col, PHYSICSBODY, TRIGGER)
+pc_quad_attach_nodes        pc 0x005d7980 = MXVehicleAtv::vf85 (str: WheelLeftFront ... AarmUpperLeft, SwingArm, LeftHub, RightHub)
+pc_quad_tire_phy            pc 0x005d91e0 = MXVehicleAtv::vf110: [Front Tire]/[Rear Tire] read into the four wheels (str: the tire keys, %d per surface)
+pc_quad_net_unpack          pc 0x005d8bb0 = MXVehicleAtv::vf104: the remote quad's wheels from the chassis, spin integrated, wrapped to +-pi
+pc_quad_put_back            pc 0x005d65d0 = MXVehicleAtv::vf55 (table: the Motocross override's place)
+pc_quad_stunt_specials      pc 0x005d6dd0 = MXVehicleAtv::vf87 (table)
+pc_quad_stunt_state_pack    pc 0x005d7e00 = MXVehicleAtv::vf47 (table; weak, as the bike's is)
+atv_quad_update             atv 0x004ba9f0 = pc_quad_update (table: the bike's 0x004da210; calls atv_bike_vehicle_update first)
+atv_quad_ground_head        atv 0x004b9020 = pc_quad_ground_head (table; calls atv_bike_auto_shift, atv_bike_clutch)
+atv_quad_ground_step        atv 0x004b9580 = pc_quad_ground_step (table; every call in the PC's order)
+atv_quad_air_state          atv 0x004b97a0 = pc_quad_air_state (table)
+atv_quad_stand_upright      atv 0x004bcee0 = pc_quad_stand_upright (seq)
+atv_quad_roll_pitch         atv 0x004bc9e0 = pc_quad_roll_pitch (seq)
+atv_quad_ground_pitch_torque atv 0x004bd290 = pc_quad_ground_pitch_torque (seq)
+atv_quad_wheel_contacts     atv 0x004bd2d0 = pc_quad_wheel_contacts (seq; also from atv_quad_net_unpack)
+atv_quad_init               atv 0x004b9db0 = pc_quad_init (str: WreckATVm.col at 0x004ba0e4; Ghidra has no function there)
+atv_quad_attach_nodes       atv 0x004ba310 = pc_quad_attach_nodes (str)
+atv_quad_tire_phy           atv 0x004bb880 = pc_quad_tire_phy (str: Front Tire, UseParametricCurve, StrutCompression, ...)
+atv_quad_net_unpack         atv 0x004bdd20 = pc_quad_net_unpack (table; four wheel_clear / suspension like the Force body)
+atv_quad_put_back           atv 0x004b8e30 = pc_quad_put_back (table: the bike's 0x004d8940)
+atv_quad_stunt_specials     atv 0x004bdb10 = pc_quad_stunt_specials (table: the bike's atv_stunt_specials)
+atv_quad_stunt_state_pack   atv 0x004ba690 = pc_quad_stunt_state_pack (table: the bike's atv_stunt_state_pack; weak)
 # ---------------------------------------------------------------------------------------------------
 # S150 — crooked landings. Journal: research/journal/2026-10-26-s150-trick-landing-spin.
 # No new function. bike_wreck_test (0x002522c0)'s landing crossup clause decides a crooked landing, and
