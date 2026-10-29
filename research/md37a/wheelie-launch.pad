@@ -1,0 +1,7 @@
+# a wheelie off the line: the stick back (y +1) and gas together from rest for 2.6 s, then all released
+# (stops short of the obstacle at (2965, 3258))
+stick l 0 1
+down cross
+sleep 2600
+release
+sleep 3000

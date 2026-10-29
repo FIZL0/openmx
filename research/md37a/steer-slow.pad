@@ -1,0 +1,10 @@
+# steer at low speed (the speed curve's low end): gas 0.8 s, then coast with full right lock, then full left
+down cross
+sleep 800
+up cross
+stick l 1 0
+sleep 1500
+stick l -1 0
+sleep 1500
+release
+sleep 1000

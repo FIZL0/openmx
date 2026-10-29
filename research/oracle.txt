@@ -6192,6 +6192,22 @@ atv_quad_net_unpack         atv 0x004bdd20 = pc_quad_net_unpack (table; four whe
 atv_quad_put_back           atv 0x004b8e30 = pc_quad_put_back (table: the bike's 0x004d8940)
 atv_quad_stunt_specials     atv 0x004bdb10 = pc_quad_stunt_specials (table: the bike's atv_stunt_specials)
 atv_quad_stunt_state_pack   atv 0x004ba690 = pc_quad_stunt_state_pack (table: the bike's atv_stunt_state_pack; weak)
+# MD37a — ATV captures. Journal: research/journal/2026-10-29-md37a-atv-captures. States, RAM images and
+# csvs in s2's context/ (git-ignored): context/mxvatv-ps2/md37a/atv-{r,s}-{spawn,air}.{p2s,ee.bin},
+# context/capture/md37a/{race,s}-*.csv. Desert Oasis Free Ride; the game ticks at 30 Hz (vsync +2 a row).
+# The player ATV: vptr 0x003ce250 at +4 (the object is the hit - 4), 0x015e0690 in the atv_ (Race) states,
+# 0x015e0b90 in the atv_s_ ones; a second, idle ATV sits at 0x01657090 / 0x016573d0. ATV-relative:
+# +0xb8 rigid body (pos +0x60, velocity +0x80, quat +0x170, angular velocity +0x1c0), +0x142c engine
+# (+0x34 final drive: 4.558 atv_, 10.538 atv_s_), +0x310 brake (Square; reads 0.25 in a stoppie),
+# +0x314 throttle (Cross), +0x12a8/+0x12ac stick, +0x12e8/+0x12ec the limited stick, +0x324 on the
+# ground, +0x360 euler, +0xc38 speed, +0x6e4 1 from the first wreck on (stays 1 after the put-back).
+# Wheels 0x920 apart; wheel +0xdc touching, +0xb4 the rear-pair flag, tire table +0x778..+0x7b4 (150
+# atv_, 325 atv_s_). The +0x14ec trick-buttons word of the bike is not that on the ATV.
+# Profile model strings: 0x00913c1c (player 1's slot) and 0x00914134; Start Event rewrites both from the
+# menu's index, and the atv_s_ models are not selectable on this memory card. atv_phy_path picks atv_s_
+# by strstr(model, 0x0039f4e1 "ATV_S_"); the atv_s_ states were made with that needle poked to "ATV_R_"
+# (0x0039f4e5 = 'R') before loading the track, so they are the R quad's look on the atv_s_ files (A or P not checked).
+atv_phy_path                atv 0x00218ae0 = the .phy path: "%s%sRace250P.phy" / Pro, prefix mx_ / atv_s_ / atv_ (str; strstr ATV_S_)
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the

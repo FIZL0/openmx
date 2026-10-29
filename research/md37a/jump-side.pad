@@ -1,0 +1,9 @@
+# the same throw, the stick held left then right in the air (yaw/roll air control), gas held
+down cross
+stick l -1 0
+sleep 700
+stick l 1 0
+sleep 700
+stick l 0 0
+sleep 3000
+release

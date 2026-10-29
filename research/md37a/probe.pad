@@ -1,0 +1,19 @@
+# which button is which: gas, then each face button and shoulder in turn
+down cross
+sleep 2000
+up cross
+down square
+sleep 1000
+up square
+down circle
+sleep 1000
+up circle
+down r2
+sleep 800
+up r2
+down l2
+sleep 800
+up l2
+down triangle
+sleep 800
+release

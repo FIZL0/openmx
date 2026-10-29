@@ -1,0 +1,12 @@
+# steer.pad for the faster atv_s_ quad: 1.6 s of gas (~50 ft/s) so the turn starts before the palm
+down cross
+sleep 1600
+stick l -1 0
+sleep 1500
+stick l 0 0
+sleep 700
+stick l 1 0
+sleep 1500
+stick l 0 0
+sleep 1500
+release

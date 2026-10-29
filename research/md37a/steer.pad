@@ -1,0 +1,12 @@
+# steer at speed and the 0.987 hold: gas to ~45 ft/s, full left, centre, full right, centre, gas on
+down cross
+sleep 2500
+stick l -1 0
+sleep 1500
+stick l 0 0
+sleep 700
+stick l 1 0
+sleep 1500
+stick l 0 0
+sleep 1500
+release

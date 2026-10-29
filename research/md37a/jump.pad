@@ -1,0 +1,10 @@
+# a jump with air control, from throw.py's mid-air state (45 ft/s, +30 ft/s up): gas held, the stick
+# forward (nose down), then back (nose up), then centred for the landing
+down cross
+stick l 0 -1
+sleep 600
+stick l 0 1
+sleep 600
+stick l 0 0
+sleep 3500
+release
