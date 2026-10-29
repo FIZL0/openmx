@@ -481,22 +481,27 @@ pub struct StandIn {
     pub rects: Vec<(u32, [f32; 4])>,
 }
 
-/// The stand-in on the GPU: a texel for each of its cells, saying how many of the 64 places of the
-/// screen pattern the pieces there draw — the stand-in draws the others — and what makes it.
+/// The stand-in on the GPU (V92, V93): a texel for each of its cells naming the pieces whose
+/// rectangles overlap it, and for each piece its rectangle and how many of the 64 places of the screen
+/// pattern it draws. A pixel of the stand-in inside a piece's rectangle draws the places that piece
+/// does not; one inside none of them, the places the least drawn of them does not. So the stand-in
+/// stops at a shown piece's own edge, not at its cell's, and never pokes up through a shown piece
+/// that shares a cell with one not shown yet.
 struct Cover {
-    texture: wgpu::Texture,
     bind: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
-    size: [u32; 2],
-    /// Each texel's level as last written.
-    levels: Vec<u8>,
-    /// Each piece's texels, `[x0, z0, x1, z1]` inclusive, by piece number, and the pieces whose
-    /// texels overlap each one's.
-    rects: HashMap<u32, [u32; 4]>,
-    neighbours: HashMap<u32, Vec<u32>>,
-    /// Pieces whose texels are to be written again before the next frame.
+    /// Each piece's draw, in places of the pattern, by its slot, and the texture they are read from.
+    levels: wgpu::Texture,
+    shown: Vec<u8>,
+    /// Each piece's slot in the pieces' textures, by piece number.
+    slots: HashMap<u32, u32>,
+    /// Pieces whose draw is to be written again before the next frame.
     dirty: HashSet<u32>,
 }
+
+/// How many slots a row of the stand-in's piece textures holds (V93); a texel's list of pieces is
+/// read the same, [`COVER_ROW`] entries a row.
+const COVER_ROW: u32 = 256;
 
 /// How much of a piece shown `shown` draws, in screen pattern places: none, all, or a step between.
 fn fade_level(shown: f32) -> u32 {
@@ -534,44 +539,26 @@ impl GpuGround {
         }
     }
 
-    /// Write the texels of the pieces whose draw changed (V92): each the least any piece there draws,
-    /// so where any piece is not wholly drawn the stand-in shows, and seams are never left bare.
+    /// Write the draw of the pieces whose draw changed (V92): each piece's own level, which the
+    /// stand-in's shader reads over the piece's rectangle (V93).
     fn write_cover(&mut self, queue: &wgpu::Queue) {
         let Some(c) = &self.cover else { return };
         if c.dirty.is_empty() {
             return;
         }
-        let dirty: Vec<u32> = c.dirty.iter().copied().collect();
-        let levels: HashMap<u32, u8> =
-            dirty.iter().flat_map(|p| c.neighbours.get(p).into_iter().flatten()).map(|&q| (q, fade_level(self.shown(q)) as u8)).collect();
+        let levels: Vec<(u32, u8)> = c.dirty.iter().filter_map(|p| Some((*c.slots.get(p)?, fade_level(self.shown(*p)) as u8))).collect();
         let c = self.cover.as_mut().expect("checked");
-        for p in dirty {
-            let Some(&[x0, z0, x1, z1]) = c.rects.get(&p) else { continue };
-            let near = c.neighbours.get(&p).map_or(&[][..], Vec::as_slice);
-            // Every texel of the piece's is under it, so starts at all and comes down to each
-            // overlapping piece's own over the texels the two share.
-            for z in z0..=z1 {
-                c.levels[(z * c.size[0] + x0) as usize..][..(x1 - x0 + 1) as usize].fill(FADE_STEPS as u8);
-            }
-            for q in near {
-                let r = c.rects[q];
-                let level = levels[q];
-                for z in z0.max(r[1])..=z1.min(r[3]) {
-                    for t in &mut c.levels[(z * c.size[0] + x0.max(r[0])) as usize..=(z * c.size[0] + x1.min(r[2])) as usize] {
-                        *t = (*t).min(level);
-                    }
-                }
-            }
-            let (w, h) = (x1 - x0 + 1, z1 - z0 + 1);
-            let rows: Vec<u8> = (z0..=z1).flat_map(|z| c.levels[(z * c.size[0] + x0) as usize..][..w as usize].to_vec()).collect();
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo { texture: &c.texture, mip_level: 0, origin: wgpu::Origin3d { x: x0, y: z0, z: 0 }, aspect: wgpu::TextureAspect::All },
-                &rows,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            );
+        for (slot, level) in levels {
+            c.shown[slot as usize] = level;
         }
         c.dirty.clear();
+        let rows = c.shown.len() as u32 / COVER_ROW;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &c.levels, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &c.shown,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(COVER_ROW), rows_per_image: Some(rows) },
+            wgpu::Extent3d { width: COVER_ROW, height: rows, depth_or_array_layers: 1 },
+        );
     }
 
     /// Free piece `piece`'s chunks' places; [`GpuGround::regrid`] after.
@@ -2643,7 +2630,7 @@ impl Renderer {
         if fresh {
             g.forget(piece);
             // A piece with a stand-in under it comes in unseen, and is shown once it is all here (V92).
-            if piece != STAND_IN && g.cover.as_ref().is_some_and(|c| c.rects.contains_key(&piece)) {
+            if piece != STAND_IN && g.cover.as_ref().is_some_and(|c| c.slots.contains_key(&piece)) {
                 g.fades.insert(piece, (0.0, 0.0));
             } else {
                 g.fades.remove(&piece);
@@ -2714,16 +2701,75 @@ impl Renderer {
         if w == 0 || h == 0 || w > limits.max_texture_dimension_2d || h > limits.max_texture_dimension_2d || !(s.step > 0.0) {
             return Err(format!("a stand-in of {w} x {h} cells of {} feet", s.step));
         }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("ground cover"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Uint,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        // Each piece's texels: a far side on a texel's edge ends in the texel before it, not its
+        // neighbour's.
+        let to_texels = |r: [f32; 4]| {
+            let near = |v: f32, o: f32, n: u32| (((v - o) / s.step).floor().max(0.0) as u32).min(n - 1);
+            let far = |v: f32, o: f32, n: u32, from: u32| ((((v - o) / s.step).ceil() - 1.0).max(0.0) as u32).min(n - 1).max(from);
+            let [ox, oz] = s.origin;
+            let (x0, z0) = (near(r[0], ox, w), near(r[1], oz, h));
+            [x0, z0, far(r[2], ox, w, x0), far(r[3], oz, h, z0)]
+        };
+        // Each texel's pieces as a list of slots, the texels with the same pieces sharing one: a
+        // texel is its list's start, times 256, plus its length.
+        let mut at: Vec<Vec<u32>> = vec![Vec::new(); (w * h) as usize];
+        for (slot, &(_, r)) in s.rects.iter().enumerate() {
+            let [x0, z0, x1, z1] = to_texels(r);
+            for z in z0..=z1 {
+                for t in &mut at[(z * w + x0) as usize..=(z * w + x1) as usize] {
+                    t.push(slot as u32);
+                }
+            }
+        }
+        let mut lists: HashMap<&[u32], u32> = HashMap::new();
+        let mut list: Vec<u32> = Vec::new();
+        let mut texels = vec![0u32; (w * h) as usize];
+        for (t, pieces) in texels.iter_mut().zip(&at) {
+            if pieces.is_empty() {
+                continue;
+            }
+            if pieces.len() > 255 {
+                return Err(format!("{} pieces over one stand-in cell", pieces.len()));
+            }
+            let start = *lists.entry(pieces).or_insert_with(|| {
+                list.extend_from_slice(pieces);
+                (list.len() - pieces.len()) as u32
+            });
+            *t = start << 8 | pieces.len() as u32;
+        }
+        drop(lists);
+        let rows_of = |n: usize| (n as u32).div_ceil(COVER_ROW).max(1);
+        let (list_rows, piece_rows) = (rows_of(list.len()), rows_of(s.rects.len()));
+        if list.len() >= 1 << 24 || list_rows.max(piece_rows) > limits.max_texture_dimension_2d {
+            return Err(format!("a stand-in of {} pieces listed {} times over its cells", s.rects.len(), list.len()));
+        }
+        list.resize((list_rows * COVER_ROW) as usize, 0);
+        let mut bounds: Vec<[f32; 4]> = s.rects.iter().map(|r| r.1).collect();
+        bounds.resize((piece_rows * COVER_ROW) as usize, [0.0; 4]);
+        let texture = |label: &str, [width, height]: [u32; 2], format: wgpu::TextureFormat, bytes: &[u8], texel: u32| {
+            let t = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytes,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * texel), rows_per_image: Some(height) },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            t
+        };
+        let cover = texture("ground cover", [w, h], wgpu::TextureFormat::R32Uint, bytemuck::cast_slice(&texels), 4);
+        let lists = texture("ground cover lists", [COVER_ROW, list_rows], wgpu::TextureFormat::R32Uint, bytemuck::cast_slice(&list), 4);
+        let rects = texture("ground cover pieces", [COVER_ROW, piece_rows], wgpu::TextureFormat::Rgba32Float, bytemuck::cast_slice(&bounds), 16);
+        let shown = vec![0u8; (piece_rows * COVER_ROW) as usize];
+        let levels = texture("ground cover shown", [COVER_ROW, piece_rows], wgpu::TextureFormat::R8Uint, &shown, 1);
         let grid = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ground cover grid"),
             size: 16,
@@ -2731,34 +2777,37 @@ impl Renderer {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&grid, 0, bytemuck::cast_slice(&[1.0 / s.step, -s.origin[0] / s.step, -s.origin[1] / s.step, 0.0f32]));
+        let read = |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+            count: None,
+        };
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ground cover"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Uint,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                read(0, wgpu::TextureSampleType::Uint),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
+                read(2, wgpu::TextureSampleType::Uint),
+                read(3, wgpu::TextureSampleType::Float { filterable: false }),
+                read(4, wgpu::TextureSampleType::Uint),
             ],
         });
-        let view = texture.create_view(&Default::default());
+        let views = [&cover, &lists, &rects, &levels].map(|t| t.create_view(&Default::default()));
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ground cover"),
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[0]) },
                 wgpu::BindGroupEntry { binding: 1, resource: grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&views[1]) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&views[2]) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&views[3]) },
             ],
         });
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2767,38 +2816,10 @@ impl Renderer {
             immediate_size: 0,
         });
         let pipeline = ground_pipeline(&self.device, &g.module, &pipeline_layout, self.format, "fs_stand_in");
-        // Each piece's texels, and the pieces overlapping them, found a column of texels at a time.
-        // A far side on a texel's edge ends in the texel before it, not its neighbour's.
-        let to_texels = |r: [f32; 4]| {
-            let near = |v: f32, o: f32, n: u32| (((v - o) / s.step).floor().max(0.0) as u32).min(n - 1);
-            let far = |v: f32, o: f32, n: u32, from: u32| ((((v - o) / s.step).ceil() - 1.0).max(0.0) as u32).min(n - 1).max(from);
-            let [ox, oz] = s.origin;
-            let (x0, z0) = (near(r[0], ox, w), near(r[1], oz, h));
-            [x0, z0, far(r[2], ox, w, x0), far(r[3], oz, h, z0)]
-        };
-        let rects: HashMap<u32, [u32; 4]> = s.rects.iter().map(|&(p, r)| (p, to_texels(r))).collect();
-        let mut columns: HashMap<u32, Vec<u32>> = HashMap::new();
-        for (&p, r) in &rects {
-            for x in r[0] / 16..=r[2] / 16 {
-                columns.entry(x).or_default().push(p);
-            }
-        }
-        let overlap = |a: &[u32; 4], b: &[u32; 4]| a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
-        let neighbours: HashMap<u32, Vec<u32>> = rects
-            .iter()
-            .map(|(&p, r)| {
-                let mut near: Vec<u32> = (r[0] / 16..=r[2] / 16)
-                    .flat_map(|x| columns.get(&x).into_iter().flatten().copied())
-                    .filter(|q| overlap(r, &rects[q]))
-                    .collect();
-                near.sort_unstable();
-                near.dedup();
-                (p, near)
-            })
-            .collect();
-        let dirty = rects.keys().copied().collect();
+        let slots: HashMap<u32, u32> = s.rects.iter().enumerate().map(|(slot, &(p, _))| (p, slot as u32)).collect();
+        let dirty = slots.keys().copied().collect();
         let g = self.ground.as_mut().expect("checked");
-        g.cover = Some(Cover { texture, bind, pipeline, size: [w, h], levels: vec![0; (w * h) as usize], rects, neighbours, dirty });
+        g.cover = Some(Cover { bind, pipeline, levels, shown, slots, dirty });
         // The pieces held already stay drawn as they were.
         self.put_ground_piece(STAND_IN, s.piece, true)
     }
@@ -2822,7 +2843,7 @@ impl Renderer {
     /// [`Renderer::drop_ground_piece`] does; at once without a stand-in or for 0.
     pub fn fade_out_ground_piece(&mut self, piece: u32, seconds: f32) {
         let Some(g) = &mut self.ground else { return };
-        if seconds > 0.0 && g.cover.as_ref().is_some_and(|c| c.rects.contains_key(&piece)) && g.hashes.contains_key(&piece) {
+        if seconds > 0.0 && g.cover.as_ref().is_some_and(|c| c.slots.contains_key(&piece)) && g.hashes.contains_key(&piece) {
             let shown = g.fades.get(&piece).map_or(1.0, |f| f.0);
             g.fades.insert(piece, (shown, -1.0 / seconds));
             g.changed(piece);
@@ -4456,10 +4477,13 @@ fn ground_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &
 
 /// A ground shader's fragment program as three (V92): `fs`, every pixel; `fs_fade`, the share of an
 /// 8x8 screen pattern the draw's instance says ([`GpuGround::fade_instance`]); and `fs_stand_in`,
-/// the world's stand-in, drawing the places of the pattern its cover texel says the pieces there do
-/// not. A piece fading in draws the pattern's first `k` of 64 places and the stand-in the rest, so the
-/// two together cover each pixel once, and a step of the fade changes a sixty-fourth of the piece's
-/// pixels.
+/// the world's stand-in, drawing the places of the pattern the piece whose rectangle the pixel is in
+/// does not (V93: its cover texel lists the pieces whose rectangles overlap it). A piece fading in
+/// draws the pattern's first `k` of 64 places and the stand-in the rest, so the two together cover
+/// each pixel once, and a step of the fade changes a sixty-fourth of the piece's pixels. In a cell
+/// shared with a piece drawn less, the stand-in draws the places of the piece's own behind
+/// everything rather than not at all: where the stand-in beyond the piece's edge stands higher than
+/// the piece, it closes the gap it would leave there, and it never shows in front of the piece.
 fn faded_ground(wgsl: String) -> String {
     let head = "@fragment fn fs(i: Out) -> @location(0) vec4f {";
     debug_assert!(wgsl.contains(head), "a ground shader without its fragment program");
@@ -4484,16 +4508,49 @@ fn faded_ground(wgsl: String) -> String {
 }}
 @group(3) @binding(0) var cover: texture_2d<u32>;
 @group(3) @binding(1) var<uniform> cover_grid: vec4f;
-@fragment fn fs_stand_in(i: Out) -> @location(0) vec4f {{
-  let c = shadowed(i, shade(i));
+@group(3) @binding(2) var cover_lists: texture_2d<u32>;
+@group(3) @binding(3) var cover_rects: texture_2d<f32>;
+@group(3) @binding(4) var cover_shown: texture_2d<u32>;
+fn cover_slot(n: u32) -> vec2i {{
+  return vec2i(i32(n % {row}u), i32(n / {row}u));
+}}
+struct Behind {{ @location(0) color: vec4f, @builtin(frag_depth) depth: f32 }}
+@fragment fn fs_stand_in(i: Out) -> Behind {{
   let size = vec2i(textureDimensions(cover));
   let at = clamp(vec2i(floor(i.world.xz * cover_grid.x + cover_grid.yz)), vec2i(0), size - vec2i(1));
-  if bayer(vec2u(i.clip.xy)) < textureLoad(cover, at, 0).r {{
-    discard;
+  let pieces = textureLoad(cover, at, 0).r;
+  // Inside a piece's rectangle, that piece's draw; inside none of the cell's, the least of theirs.
+  var least = {steps}u;
+  var inside = {steps}u;
+  var found = false;
+  for (var k = 0u; k < (pieces & 255u); k++) {{
+    let slot = cover_slot(textureLoad(cover_lists, cover_slot((pieces >> 8u) + k), 0).r);
+    let shown = textureLoad(cover_shown, slot, 0).r;
+    least = min(least, shown);
+    let r = textureLoad(cover_rects, slot, 0);
+    if all(i.world.xz >= r.xy) && all(i.world.xz < r.zw) {{
+      inside = min(inside, shown);
+      found = true;
+    }}
   }}
-  return c;
+  if (pieces & 255u) == 0u {{
+    least = 0u;
+  }}
+  var depth = i.clip.z;
+  if bayer(vec2u(i.clip.xy)) < select(least, inside, found) {{
+    // The piece draws this place. In a cell another piece there draws less of, the stand-in is
+    // drawn behind everything instead, so it fills only what the piece's edge leaves open where the
+    // stand-in beyond the edge stands higher than the piece.
+    if !found || least >= inside {{
+      discard;
+    }}
+    depth = i.clip.z * 0.001;
+  }}
+  return Behind(shadowed(i, shade(i)), depth);
 }}
-"
+",
+        row = COVER_ROW,
+        steps = FADE_STEPS,
     ));
     s
 }
