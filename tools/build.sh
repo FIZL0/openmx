@@ -1,6 +1,7 @@
 #!/bin/bash
 # tools/build.sh [linux|windows|all] — the optimised builds players download, into dist/ (as opentennis's tools/build.sh):
-#   dist/linux/         openmx, run.sh, kit.toml, README.txt: unpack, put the disc's path in kit.toml, ./run.sh
+#   dist/linux/         openmx, README.txt: unpack, ./openmx "your disc.iso" (or drop the .iso on it) the first time,
+#                       ./openmx after that; settings, controls and mods/ in ~/.local/share/openmx (P190)
 #   dist/windows/       openmx.exe — not yet: the shell's pads (/dev/input/js*), sound (pw-cat) and software window (X11)
 #                       are Linux-only until the Windows port lands (plan/TODO.md), so `windows` says so and stops
 # No game data goes into dist/. OPENMX_COMMIT / OPENMX_VERSION in the environment are passed into the build
@@ -22,26 +23,22 @@ if [ -z "$OPENMX_COMMIT" ]; then
 fi
 export OPENMX_COMMIT
 
-# what goes beside the binary: the run script (the shell finds kit.toml from the working directory), a kit.toml
-# naming the disc, and how to start it. $1 is the folder.
+# what goes beside the binary: how to start it. With no kit.toml the shell takes its disc from its first argument
+# and remembers it, its settings in the per-user data folder (P190). $1 is the folder.
 extras() {
-    printf '#!/bin/sh\n# openMX looks for kit.toml in the folder it is started from: start it from this one\ncd "$(dirname "$0")" && exec ./openmx "$@"\n' >"$1/run.sh"
-    chmod +x "$1/run.sh"
-    cat >"$1/kit.toml" <<'EOF'
-# Where your own dump of MX Unleashed (USA, SLUS-20767) is: a path relative to this folder, or an absolute one.
-[game]
-serial = "SLUS-20767"
-iso    = "MX Unleashed (USA).iso"
-EOF
     cat >"$1/README.txt" <<'EOF'
 openMX — MX Unleashed (PS2) rewritten. https://openmx.dev/
 
 No game data is included. You need your own disc image of MX Unleashed (USA, SLUS-20767).
 
-1. Put your .iso in this folder as "MX Unleashed (USA).iso", or write its path into kit.toml.
-2. Run ./run.sh (or ./run.sh --help for the options).
+1. The first time, start it with your disc: ./openmx "/path/to/MX Unleashed (USA).iso",
+   or drop the .iso on openmx in your file manager. Started with nothing, it asks for the disc
+   (a file picker when zenity or kdialog is installed, else in the terminal).
+2. After that, ./openmx: it remembers the disc. Start it with another .iso to change it.
 
-Settings, controls and the mods/ folder live beside the disc image.
+Settings, controls and the mods/ folder live in ~/.local/share/openmx ($XDG_DATA_HOME/openmx),
+beside disc.txt, the disc it remembers. ./openmx --where says which disc and which folder;
+./openmx --help lists the options.
 EOF
 }
 

@@ -2101,13 +2101,26 @@ fn seat_text(layouts: &[Layout; SEATS]) -> String {
     layouts.iter().map(|l| l.word()).collect::<Vec<_>>().join(",")
 }
 
-/// Where the two files live: beside the disc, as opentennis keeps its own, or here when there is no
+/// Where the two files live: the per-user data folder when the shell is a player's (P190,
+/// [`set_data_dir`]); else beside the disc, as opentennis keeps its own, or here when there is no
 /// disc path to be beside.
 pub fn store_dir(iso: Option<&Path>) -> PathBuf {
+    if let Some(dir) = DATA_DIR.get() {
+        return dir.clone();
+    }
     iso.and_then(|p| p.parent())
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
         .to_path_buf()
+}
+
+/// The per-user data folder (P190): with no kit.toml above the working directory, `settings.txt`,
+/// `controls.txt`, `mods/` and the rest of what [`store_dir`] holds are kept there.
+static DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Keep the shell's files in `dir` from here on ([`DATA_DIR`]); the first one set stays.
+pub fn set_data_dir(dir: PathBuf) {
+    let _ = DATA_DIR.set(dir);
 }
 
 pub const SETTINGS_FILE: &str = "settings.txt";

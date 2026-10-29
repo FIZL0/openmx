@@ -111,7 +111,7 @@ jobs:
           gh release delete beta --cleanup-tag -y || true
           printf '%s\n\n%s\n\n%s\n' \
             "**Beta: rebuilt on every change to main (${GITHUB_SHA::7}). Newer than the latest release, less tested.**" \
-            "No game data is included: you need your own *MX Unleashed (USA)* (SLUS-20767) ISO. Linux: unpack, put the ISO's path in \`kit.toml\`, run \`./run.sh\`." \
+            "No game data is included: you need your own *MX Unleashed (USA)* (SLUS-20767) ISO. Linux: unpack, run \`./openmx your.iso\` (or drop the ISO on it) once, \`./openmx\` after." \
             "Beta in the browser: https://beta.openmx.dev/" > notes.md
           ipa=
           if [ -f openmx-ios.ipa ]; then

@@ -66,6 +66,9 @@ impl Disc {
         if let Some(open) = PAGE_DISC.get() {
             return Disc::read_from(open()?);
         }
+        if let Some(path) = PLAYER_DISC.get() {
+            return Disc::open(path);
+        }
         let (root, iso) = configured_iso()?;
         let path = root.join(iso);
         if !path.exists() {
@@ -84,8 +87,7 @@ impl Disc {
         if PAGE_DISC.get().is_some() {
             return Ok(PathBuf::from(PAGE_DISC_PATH));
         }
-        let (root, iso) = configured_iso()?;
-        Ok(root.join(iso))
+        configured_image()
     }
 
     /// Every member of `MX.PSR`, in directory order.
@@ -300,7 +302,11 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u32)>) -> Result<(), Str
 
 /// Where [`Disc::open_configured`] looks: `[game] iso` from the nearest `kit.toml`, joined to the
 /// directory it was found in. The web shell's test hands this path to its stand-in for the browser.
+/// A disc the player named ([`set_player_disc`]) comes before it.
 pub fn configured_image() -> Result<PathBuf, String> {
+    if let Some(path) = PLAYER_DISC.get() {
+        return Ok(path.clone());
+    }
     let (root, iso) = configured_iso()?;
     Ok(root.join(iso))
 }
@@ -310,7 +316,30 @@ fn normalise(name: &str) -> String {
     name.replace('\\', "/").to_ascii_lowercase()
 }
 
-/// `(repo root, iso path as written)` from the nearest `kit.toml`.
+/// The disc a player named (P190): the shell's first argument, the path it remembered, or the one
+/// the player picked. Set, it is the disc every [`Disc::open_configured`] opens, kit.toml or not.
+static PLAYER_DISC: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Set the player's disc ([`PLAYER_DISC`]); the first one set stays.
+pub fn set_player_disc(path: PathBuf) {
+    let _ = PLAYER_DISC.set(path);
+}
+
+/// The nearest `kit.toml` in the working directory or above it: a dev checkout, or a folder set up
+/// as one. Without one the shell is a player's (P190), its files in the per-user data folder.
+pub fn kit_toml() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let toml = dir.join("kit.toml");
+        if toml.is_file() {
+            return Some(toml);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
 /// The browser's disc (P196): a page has no kit.toml and no file system, so it says once how to
 /// open its own copy of the disc, and [`Disc::open_configured`] opens that every time it is asked.
 #[cfg(target_arch = "wasm32")]
@@ -326,6 +355,7 @@ pub fn set_page_disc(open: fn() -> Result<Box<dyn Image>, String>) {
     let _ = PAGE_DISC.set(open);
 }
 
+/// `(repo root, iso path as written)` from the nearest `kit.toml`.
 fn configured_iso() -> Result<(PathBuf, String), String> {
     let mut dir = std::env::current_dir().map_err(|e| e.to_string())?;
     loop {
