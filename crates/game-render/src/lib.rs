@@ -55,6 +55,7 @@ pub mod mat;
 pub mod particle;
 pub mod png;
 pub mod psg;
+pub mod quad;
 pub mod pst;
 pub mod raster;
 pub mod replace;
