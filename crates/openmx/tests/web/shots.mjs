@@ -1,13 +1,13 @@
 // The launcher's two looks in headless chromium (P181; crates/openmx/tests/web.rs, `the_launcher_fits_a_phone_and_a_desktop`):
 // web/ served on loopback and opened at a desktop's width and a phone's, first with nothing stored (the landing page,
-// `asking`), then with a stand-in `disc.iso` written into OPFS (the menu stage, `menu`). Needs no disc and no game
+// `asking`), then with a stand-in `disc.iso` written into OPFS (Play, `menu`). Needs no disc and no game
 // module: neither look starts the game, and the stand-in is never read.
 //
 //   node shots.mjs <web dir> <out dir> <scratch profile dir> [width...]
 //
 // Writes <state>-<width>.png (the whole page) into <out dir> and prints one JSON line:
 // { shots: [{ state, width, scroll, fonts, lit, file }...] }, `scroll` the page's scrollWidth (wider than `width` is a
-// page that pans sideways), `fonts` whether M PLUS Rounded 1c loaded, `lit` the menu's lit item (the menu only).
+// page that pans sideways), `fonts` whether M PLUS Rounded 1c loaded, `lit` the Play button's text while it shows (the menu only).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -105,7 +105,7 @@ for (const width of widths) {
       : clearOpfs);
     await visit(want);
     const look = await evaluate(`({ scroll: document.scrollingElement.scrollWidth, fonts: document.fonts.check('800 16px OMX'),
-      lit: document.querySelector('.item.on')?.textContent ?? null, height: document.scrollingElement.scrollHeight })`);
+      lit: (b => (b?.offsetParent ? b.textContent : null))(document.querySelector('#ride')), height: document.scrollingElement.scrollHeight })`);
     const png = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true,
       clip: { x: 0, y: 0, width, height: look.height, scale: 1 } });
     const file = path.join(out, `${want}-${width}.png`);

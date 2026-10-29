@@ -287,7 +287,7 @@ fn the_launcher_fits_a_phone_and_a_desktop() {
         assert!(scroll <= width, "{state} at {width} pans sideways: {scroll} wide");
         assert_eq!(field(shot, "fonts"), "true", "{state} at {width}: M PLUS Rounded 1c did not load");
         let lit = field(shot, "lit");
-        assert_eq!(lit, if state == "menu" { "Ride" } else { "null" }, "{state} at {width}: the lit item");
+        assert_eq!(lit, if state == "menu" { "Play" } else { "null" }, "{state} at {width}: the Play button");
     }
 }
 

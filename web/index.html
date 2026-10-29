@@ -1,17 +1,17 @@
 <!doctype html>
 <!--
   openmx in a browser (N4). The game runs in worker.js and draws into this page's canvas; this page is the site around
-  it (P181): with no disc stored it is a scrolling page that asks for one, and once a disc is in OPFS it opens on a stage
-  with the one Ride on it, with the same page underneath. Its look is docs/menu-concept.html's: the ember
+  it (P181): with no disc stored it is a scrolling page that asks for one, and once a disc is in OPFS its first card is
+  Play, with a switch that opens straight to the game on later visits (`?site` shows the page again), as opentennis's. Its look is docs/menu-concept.html's: the ember
   backdrop with the ghosted MX and streaks, maroon pills with chalk rims, oblique ExtraBold titles, the ink band with
   the button hints, in M PLUS Rounded 1c (web/fonts, copies of crates/openmx/assets/fonts). Build the module with
   tools/web.sh and serve this folder on localhost (or https: OPFS needs a secure context).
 
   `body[data-state]` says where the page is: asking (no disc), menu (a disc is stored, nothing started yet), copying,
   started, failed. crates/openmx/tests/web/chromium.mjs waits on it and presses `#ride` on the menu; `#pick` is the
-  disc's file input. `body[data-disc]` is yes/no: whether the menu stage or the landing hero shows.
+  disc's file input. `body[data-disc]` is yes/no: whether Play or Pick your disc shows.
 
-  The game (P196): the stage's Ride, or a picked disc, starts the desktop's own front end in the canvas — its press-start
+  The game (P196): Play, or a picked disc, starts the desktop's own front end in the canvas — its press-start
   splash and main menu, and the rides, online lobby, settings and mods it starts. The canvas then fills the window in
   device pixels and follows a resize or a turn of the phone; the page hands the worker its keys (on X keycodes, the
   desktop's), the pointer's presses, the gamepads (standard mapping) and the canvas's size, and plays the mixer's sound
@@ -176,7 +176,6 @@ body[data-mode="online"] { background: #000; }
   text-shadow: .06em .08em 0 rgba(0,0,0,.4); max-width: 15em; text-wrap: balance; }
 .lede { margin: 0; max-width: 40em; font-size: 18px; color: #fff3e6; text-shadow: 0 1px 4px rgba(0,0,0,.45); }
 .row { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; }
-body[data-disc="yes"] .hero { display: none; }
 /* the hero's picture (P194): beside the text on a wide screen, under it on a narrow one */
 .htext { display: grid; gap: 18px; align-content: center; min-width: 0; }
 .hshot { margin: 0; min-width: 0; }
@@ -187,60 +186,17 @@ body[data-disc="yes"] .hero { display: none; }
   .hshot img { transform: rotate(1.2deg); }
 }
 
-/* the ink band with the button hints, under the hero and the stage */
+/* the ink band with the button hints, under the hero */
 .band { position: relative; z-index: 1; background: var(--ink); }
 .band .wrap { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 24px; min-height: 64px; padding-block: 10px; }
 .band .who { color: var(--bone); font-size: 17px; }
 .band .who b { color: var(--chalk); font-weight: 800; }
 .band .hints { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 17px; }
 
-/* ---- the menu stage (a disc is stored) ---- */
-#menu { display: none; padding-top: 24px; }
-body[data-disc="yes"] #menu { display: block; }
-.frame { container-type: inline-size; width: 100%; position: relative; z-index: 1; padding-bottom: 24px; }
-.stage { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; font-size: calc(100cqw / 80); border-radius: 6px; user-select: none; outline: none;
-  border: 1px solid rgba(255,255,255,.08); box-shadow: 0 18px 40px rgba(0,0,0,.45); }
-.stage:focus-visible { outline: 2px solid var(--chalk); outline-offset: 3px; }
-.stage .strip { position: absolute; left: 10em; width: 18em; top: 0; bottom: 4.6em; background: var(--strip); z-index: 1; }
-.stage .logo { position: absolute; left: 2.4em; top: 1.6em; z-index: 3; }
-.stage .list { position: absolute; left: 10em; width: 18em; top: 12.4em; display: flex; flex-direction: column; align-items: center; gap: .55em; z-index: 2; }
-.item { position: relative; font: inherit; font-weight: 700; font-size: 1.7em; line-height: 1; padding: .34em .95em .4em; border-radius: 999px; color: var(--bone);
-  background: none; text-shadow: 0 .06em 0 rgba(0,0,0,.6), 0 0 .2em rgba(0,0,0,.5); cursor: pointer; white-space: nowrap; border: .1em solid transparent; }
-.item:focus { outline: none; }
-.item.on { color: var(--chalk); font-style: oblique 12deg; font-weight: 800; border-color: var(--chalk);
-  background: linear-gradient(180deg, #b31a23 0%, var(--maroon) 45%, var(--maroon-lo) 100%);
-  box-shadow: inset 0 .12em 0 rgba(255,255,255,.22), inset 0 -.1em 0 rgba(0,0,0,.35), .28em .3em 0 rgba(0,0,0,.33); }
-.item .t { display: inline-block; }
-.item.on .t { transform: skewX(-11deg); }
-.stage .panel { position: absolute; left: 34em; width: 40em; top: 9em; z-index: 2; color: var(--chalk); }
-.stage .panel h2 { margin: 0; font-weight: 800; font-size: 2.6em; font-style: oblique 12deg; line-height: 1.05; text-shadow: .07em .09em 0 rgba(0,0,0,.35); transform: skewX(-11deg); transform-origin: left bottom; }
-.stage .panel p { margin: .6em 0 0; font-size: 1.25em; line-height: 1.4; color: #fff3e6; max-width: 28em; text-shadow: 0 .06em .2em rgba(0,0,0,.45); }
-.stage .eyebrow { font-size: 1em; letter-spacing: .14em; text-transform: uppercase; color: #ffe0c4; opacity: .85; }
-.stage .title { position: absolute; left: 1.45em; bottom: 1.6em; transform: skewX(-11deg); transform-origin: left bottom; font-weight: 800; font-size: 3.1em;
-  font-style: oblique 12deg; color: var(--chalk); text-shadow: .08em .1em 0 rgba(0,0,0,.4); z-index: 3; white-space: nowrap; }
-.stage .sband { position: absolute; left: 0; right: 0; bottom: 0; height: 4.6em; background: var(--ink); z-index: 2; display: flex; align-items: center; padding-left: 5em; }
-.stage .sband .who { font-size: 1.5em; color: var(--bone); white-space: nowrap; }
-.stage .sband .who b { color: var(--chalk); font-weight: 800; }
-.stage .shints { position: absolute; right: 0; bottom: 4.6em; height: 3.4em; padding: 0 2em 0 4em; background: var(--ink); clip-path: polygon(3em 0, 100% 0, 100% 100%, 0 100%);
-  display: flex; align-items: center; gap: 1.6em; z-index: 2; }
-.stage .shints .hint { font-size: 1.55em; }
-.toast { position: absolute; left: 50%; top: 1.4em; transform: translateX(-50%); font-size: 1.25em; padding: .4em 1.1em; border-radius: 999px; background: rgba(0,0,0,.7);
-  color: var(--chalk); border: .08em solid rgba(255,255,255,.3); z-index: 5; transition: opacity .25s; white-space: nowrap; opacity: 0; pointer-events: none; }
+/* errors, over whatever shows */
+.toast { position: fixed; left: 50%; top: 1.4em; transform: translateX(-50%); z-index: 30; padding: .4em 1.1em; border-radius: 999px; background: rgba(0,0,0,.8);
+  color: var(--chalk); border: 2px solid rgba(255,255,255,.3); transition: opacity .25s; max-width: calc(100vw - 32px); opacity: 0; pointer-events: none; }
 .toast.up { opacity: 1; }
-/* a phone: the stage stands up, the list over the panel, in bigger type */
-@container (max-width: 640px) {
-  .stage { aspect-ratio: auto; font-size: calc(100cqw / 34); display: flex; flex-direction: column; padding-bottom: 6.4em; }
-  .stage .strip { left: 0; right: 0; width: auto; top: 6.6em; bottom: auto; height: 21.4em; }
-  .stage .logo { position: relative; left: 1.4em; top: 1.2em; font-size: .62em; align-self: flex-start; margin-bottom: 2.6em; }
-  .stage .list { position: relative; left: 0; top: 0; width: 100%; padding: 1em 0; gap: .45em; min-height: 21.4em; justify-content: center; }
-  .stage .panel { position: relative; left: 0; top: 0; width: auto; padding: 1.6em 1.4em 1.2em; }
-  .stage .panel h2 { font-size: 2.3em; }
-  .stage .panel p { font-size: 1.2em; }
-  .stage .shints { display: none; }
-  .stage .sband { height: 4.6em; padding-left: 1.4em; }
-  .stage .sband .who { font-size: 1.25em; }
-  .stage .title { display: none; }
-}
 
 /* ---- the page's sections ---- */
 main { display: grid; gap: 56px; padding-block: 48px 64px; }
@@ -267,7 +223,19 @@ section h2.head .skew { transform: skewX(-9deg); }
 .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #b31a23, var(--chalk)); }
 #copybar { display: none; margin-top: 8px; }
 body[data-state="copying"] #copybar { display: block; }
-body[data-disc="yes"] #disc { display: none; }
+body[data-disc="yes"] [data-new], body[data-disc="no"] [data-have] { display: none !important; }
+/* back again (as opentennis's): Play, and a switch that skips this page on later visits */
+#disc .play { display: grid; gap: 14px; justify-items: end; text-align: right; }
+#disc .play small { color: var(--dust); }
+.pill.huge { font-size: 26px; padding: .45em 2.2em .5em; }
+.autoplay { display: inline-flex; align-items: center; gap: .6em; cursor: pointer; color: var(--bone); }
+.autoplay input { position: absolute; opacity: 0; pointer-events: none; }
+.autoplay .sw { position: relative; flex: none; width: 2.4em; height: 1.35em; border-radius: 999px; background: rgba(255,255,255,.15); border: 2px solid rgba(245,240,232,.55); }
+.autoplay .sw::after { content: ""; position: absolute; top: .12em; left: .12em; width: .9em; height: .9em; border-radius: 50%; background: var(--chalk); transition: left .12s; }
+.autoplay input:checked + .sw { background: var(--maroon); border-color: var(--chalk); }
+.autoplay input:checked + .sw::after { left: calc(100% - 1.02em); }
+.autoplay:focus-within .sw { outline: 2px solid var(--chalk); outline-offset: 2px; }
+.autoplay:not(:has(input:checked)) + small { display: none; }
 #dropzone { position: fixed; inset: 0; z-index: 20; display: none; place-items: center; background: rgba(42,20,8,.88); color: var(--chalk);
   font-weight: 800; font-style: oblique 12deg; font-size: clamp(28px, 5vw, 56px); border: 4px dashed var(--chalk); }
 #dropzone.up { display: grid; }
@@ -324,7 +292,7 @@ footer a { color: var(--bone); }
   .hero .logo { font-size: 15px; }
   .lede { font-size: 16px; }
   #disc { grid-template-columns: 1fr; padding: 20px; }
-  #disc .side { justify-items: start; text-align: left; }
+  #disc .side, #disc .play { justify-items: start; text-align: left; }
   .frow { grid-template-columns: 1fr; }
   .frow > .pill, .frow > input { justify-self: start; }
   .band .hints, .band .who { font-size: 15px; }
@@ -332,9 +300,7 @@ footer a { color: var(--bone); }
   .counts b { font-size: 24px; }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .item, .pill { transition: background-color .08s, border-color .08s, filter .08s; }
-  .stage .panel.in { animation: slide .18s ease-out both; }
-  @keyframes slide { from { transform: translateX(-.8em); opacity: .4; } to { transform: none; opacity: 1; } }
+  .pill { transition: background-color .08s, border-color .08s, filter .08s; }
 }
 </style>
 </head>
@@ -349,7 +315,7 @@ footer a { color: var(--bone); }
     <a class="pill small" data-link="discord" target="_blank" rel="noopener">Join the Discord</a>
   </div></div>
 
-  <!-- the landing hero: no disc in this browser yet -->
+  <!-- the landing hero; with a disc stored its first buttons play -->
   <header class="hero backdrop">
     <div class="wrap">
       <div class="htext">
@@ -359,7 +325,7 @@ footer a { color: var(--bone); }
       <p class="lede">openMX is a remaster of MX Unleashed, rewritten from scratch: the same game tick for tick, running in
         your browser, on PC and Steam Deck, online with friends. You bring the disc.</p>
       <div class="row">
-        <a class="pill" href="#disc" data-pick>Play in your browser</a>
+        <a class="pill" href="#disc" data-pick data-new>Play in your browser</a><a class="pill" href="#disc" data-go data-have>Play</a>
         <a class="pill ghost" href="#get">Desktop downloads</a>
         <a class="pill ghost" href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
       </div>
@@ -370,46 +336,35 @@ footer a { color: var(--bone); }
     <div class="band"><div class="wrap">
       <span class="who">Free and open source · <b>your own disc</b></span>
       <span class="hints">
-        <a class="hint" href="#disc" data-pick><span class="btn x"><svg viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>Pick your disc</a>
+        <a class="hint" href="#disc" data-pick data-new><span class="btn x"><svg viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>Pick your disc</a><a class="hint" href="#disc" data-go data-have><span class="btn x"><svg viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>Play</a>
         <a class="hint" href="#shots"><span class="btn tri"><svg viewBox="0 0 10 10"><path d="M5 1.8 8.4 7.8H1.6Z" stroke="#fff" stroke-width="1.4" fill="none" stroke-linejoin="round"/></svg></span>Screenshots</a>
         <a class="hint" href="#faq"><span class="btn sq"><svg viewBox="0 0 10 10"><rect x="2.2" y="2.2" width="5.6" height="5.6" stroke="#fff" stroke-width="1.5" fill="none"/></svg></span>Questions</a>
       </span>
     </div></div>
   </header>
 
-  <!-- back again: a disc is in OPFS, so the page opens on the game's main menu -->
-  <section id="menu" class="backdrop">
-    <div class="wrap"><div class="frame">
-      <div class="stage backdrop" id="stage" tabindex="0" aria-label="Ride: Enter or Cross starts openMX">
-        <div class="strip"></div>
-        <div class="logo" aria-label="openMX"><span class="open">open</span><span class="mx">MX</span></div>
-        <div class="list">
-          <button class="item" id="ride"><span class="t">Ride</span></button>
-        </div>
-        <div class="panel" id="panel"><div class="eyebrow">Your disc</div><h2>Ride</h2>
-          <p>Starts openMX on the disc in this browser, on the game's own main menu: ride, go online, change the settings
-            and the mods from there, with the keyboard or a pad. Esc in the game is its own back.</p></div>
-        <div class="shints">
-          <span class="hint" data-act="ok"><span class="btn x"><svg viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg></span>Select</span>
-        </div>
-        <div class="sband"><span class="who">Riding as <b class="rider">Browser</b></span></div>
-        <div class="toast" id="toast"></div>
-      </div>
-    </div></div>
-  </section>
+  <div class="toast" id="toast"></div>
 
   <main class="wrap">
     <section id="disc" class="card">
       <div>
-        <h2 class="head"><span class="skew">Pick your disc</span></h2>
-        <p>openMX plays from your own copy of <b>MX Unleashed</b> for the PlayStation 2. Pick the disc image you dumped. It is
+        <h2 class="head" data-new><span class="skew">Pick your disc</span></h2>
+        <h2 class="head" data-have><span class="skew">Your disc is here</span></h2>
+        <p data-have>Play starts openMX on the game's own main menu: ride, go online, change the settings and the mods from
+          there, with a pad, the keyboard or touch. Riding as <b class="rider">Browser</b>.</p>
+        <p data-new>openMX plays from your own copy of <b>MX Unleashed</b> for the PlayStation 2. Pick the disc image you dumped. It is
           copied into this browser's own storage for this site (OPFS), stays there for your next visit, and never leaves your
           machine.</p>
-        <div class="chips"><span class="chip">MX Unleashed</span><span class="chip">PlayStation 2 · USA</span><span class="chip"><b>SLUS-20767</b></span><span class="chip">.iso</span></div>
+        <div class="chips" data-new><span class="chip">MX Unleashed</span><span class="chip">PlayStation 2 · USA</span><span class="chip"><b>SLUS-20767</b></span><span class="chip">.iso</span></div>
         <p id="status"></p>
         <div class="bar" id="copybar"><i></i></div>
       </div>
-      <div class="side">
+      <div class="play" data-have>
+        <button class="pill huge" id="ride">Play</button>
+        <label class="autoplay"><input type="checkbox" id="autoplay"><span class="sw"></span>Open straight to the game</label>
+        <small>To see this page again, add <code>?site</code> to the address.</small>
+      </div>
+      <div class="side" data-new>
         <label class="pill" tabindex="0" role="button">Pick disc image<input id="pick" type="file" accept=".iso,application/x-iso9660-image"></label>
         <small>or drop it anywhere on this page</small>
         <a data-link="guide" target="_blank" rel="noopener">How to dump your disc</a>
@@ -466,7 +421,7 @@ footer a { color: var(--bone); }
       <div class="grid3">
         <div class="card step"><span class="n">1</span><h3>Dump your disc</h3><p>Make an .iso of your own MX Unleashed disc with a PC drive or a PS2. <a data-link="guide" target="_blank" rel="noopener">The guide</a> walks through it.</p></div>
         <div class="card step"><span class="n">2</span><h3>Pick it here</h3><p>It is copied once into this browser. Nothing is uploaded, and nothing from the disc is on this site.</p></div>
-        <div class="card step"><span class="n">3</span><h3>Ride</h3><p>Next time the page opens straight on the menu. Ride alone, or join a friend with their code.</p></div>
+        <div class="card step"><span class="n">3</span><h3>Ride</h3><p>Next time Play is the first thing on the page, or the game itself with the switch on. Ride alone, or join a friend with their code.</p></div>
       </div>
     </section>
 
@@ -640,11 +595,7 @@ footer a { color: var(--bone); }
 
   // `body[data-state]` says where the page is (asking, menu, copying, started, failed): crates/openmx/tests/web/chromium.mjs
   // waits on it.
-  // the stage's Ride is lit while the stage is up, as the game's lit item is
-  const state = s => {
-    $('#ride').classList.toggle('on', s === 'menu');
-    return (document.body.dataset.state = s);
-  };
+  const state = s => (document.body.dataset.state = s);
   const gb = n => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
 
   // The game's canvas goes to the worker once, with whatever starts first: a ride off the stored disc or a picked file.
@@ -772,7 +723,10 @@ footer a { color: var(--bone); }
     } else if (data.play) {
       queue.push(data.play);
     } else if (data.quit !== undefined) {
-      // the shell quit (its Quit, or an error it ended on): back to the page
+      // the shell quit (its Quit, or an error it ended on): back to the page, which then stays even with the switch on
+      try {
+        sessionStorage.setItem('openmx.quit', '1');
+      } catch {}
       location.reload();
     } else if (data.online) {
       const o = data.online;
@@ -913,14 +867,19 @@ footer a { color: var(--bone); }
     if (droppable()) picked(e.dataTransfer.files[0]);
   });
 
-  // ---- the stage: its one Ride opens the game's own main menu (P196) ----
-  const stage = $('#stage');
+  // ---- back again: Play opens the game's own main menu (P196); the switch skips the page on later visits ----
   $('#ride').onclick = () => ride();
-  stage.addEventListener('keydown', e => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    e.preventDefault();
-    ride();
-  });
+  for (const a of document.querySelectorAll('[data-go]')) a.onclick = (e) => { e.preventDefault(); ride(); };
+  const AUTO = 'openmx.autoplay';
+  const auto = $('#autoplay');
+  try {
+    auto.checked = localStorage.getItem(AUTO) === '1';
+  } catch {}
+  auto.onchange = () => {
+    try {
+      localStorage.setItem(AUTO, auto.checked ? '1' : '0');
+    } catch {}
+  };
   let toastTimer;
   function toast(text) {
     const t = $('#toast');
@@ -938,6 +897,21 @@ footer a { color: var(--bone); }
     if (down && !pressed && document.body.dataset.disc === 'yes') ride();
     pressed = down;
     requestAnimationFrame(padLoop);
+  }
+
+  // `?pads`: what the browser says of its gamepads, every frame, over everything (for a pad the game does not read)
+  if (new URLSearchParams(location.search).has('pads')) {
+    const o = document.body.appendChild(document.createElement('pre'));
+    o.style.cssText = 'position:fixed;left:8px;top:8px;z-index:40;margin:0;padding:8px;background:rgba(0,0,0,.8);color:#fff;font:12px monospace;pointer-events:none;white-space:pre-wrap;max-width:calc(100vw - 16px)';
+    const show = () => {
+      const list = [...(navigator.getGamepads?.() ?? [])].filter(Boolean);
+      o.textContent = `getGamepads: ${navigator.getGamepads ? list.length : 'none'}  secure: ${isSecureContext}  focus: ${document.hasFocus()}\n` +
+        list.map(g => `${g.index} ${g.connected ? '' : '(gone) '}"${g.id}" mapping "${g.mapping}"\n  down ${g.buttons.map((b, i) => (b.pressed || b.value > 0.1 ? i : '')).filter(String).join(' ') || '-'}` +
+          `  axes ${[...g.axes].map(a => a.toFixed(2)).join(' ')}`).join('\n');
+      requestAnimationFrame(show);
+    };
+    show();
+    for (const e of ['gamepadconnected', 'gamepaddisconnected']) addEventListener(e, ev => console.log(e, ev.gamepad?.id));
   }
 
   // ---- the build ----
@@ -986,8 +960,15 @@ footer a { color: var(--bone); }
     const size = await showStorage();
     if (!sent) {
       document.body.dataset.disc = size ? 'yes' : 'no';
-      if (size) stage.focus({ preventScroll: true });
       state(size ? 'menu' : 'asking');
+      // straight into the game with the switch on, unless `?site` asked for the page or the game's Quit brought it back
+      let skip = false;
+      try {
+        skip = localStorage.getItem(AUTO) === '1' && !ask.has('site') && sessionStorage.getItem('openmx.quit') !== '1';
+        sessionStorage.removeItem('openmx.quit');
+      } catch {}
+      if (size && skip) ride();
+      else if (size) $('#ride').focus({ preventScroll: true });
     }
     requestAnimationFrame(padLoop);
   }
