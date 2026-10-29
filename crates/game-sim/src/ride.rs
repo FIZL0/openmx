@@ -3158,11 +3158,14 @@ impl Crash {
         }
 
         // The body: the world node's tick, against the terrain, the scene's collision meshes and the
-        // ecosystem's trees (see `wreck_bike`); a part with its collision off searches nothing.
+        // ecosystem's trees (see `wreck_bike`); a part with its collision off searches nothing. The
+        // search builds its broad phase afresh from every prop handed over, so a world of tiles
+        // hands only the shapes near the body (`World::wooded_near`, V99): its rays reach a few
+        // feet, well inside the near set's margin.
         if !part.collision_enabled {
             self.bike.tick(dt, None, &mut NoObjects);
         } else {
-            match world.wooded() {
+            match world.wooded_near(self.bike.origin()) {
                 (field, None, None) => self.bike.tick(dt, field.as_deref(), &mut NoObjects),
                 (field, props, trees) => self.bike.tick_among(dt, field.as_deref(), props, trees),
             }
