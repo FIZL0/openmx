@@ -7526,7 +7526,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             for (v, view) in glows.iter_mut().enumerate() {
                 let (Some(camera), Some(at)) = (cameras.get(v), rects.get(v)) else { continue };
                 for (flare, texture) in &sun_flares {
-                    if !flare.in_view(camera, at.w, at.h) {
+                    if !flare.on_screen(camera, at.w, at.h) {
                         continue;
                     }
                     // Asked again once a simulated frame, not every picture: the ground query is
