@@ -5,15 +5,17 @@
 # On the phone: the app's folder in the Files app ("On My iPhone → openMX") takes the ISO, settings.txt and mods/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-out=$(realpath -m "${1:-target/openmx-ios.ipa}")
+out=${1:-target/openmx-ios.ipa}
+[[ $out == /* ]] || out=$PWD/$out  # not realpath -m: a Mac's has no -m (pages.yml's beta IPA)
 build=$(git rev-list --count HEAD)
-OPENMX_BUILD=$build OPENMX_COMMIT=$(git rev-parse --short HEAD) tools/ios-build.sh build --release -p openmx --bin openmx
+# the caller's commit stamp when it has one (tools/release.sh, pages.yml), so the online build id is every platform's
+OPENMX_BUILD=$build OPENMX_COMMIT=${OPENMX_COMMIT:-$(git rev-parse --short HEAD)} tools/ios-build.sh build --release -p openmx --bin openmx
 target=${CARGO_TARGET_DIR:-$PWD/target/ios}/aarch64-apple-ios
 stage=$target/ipa
 app=$stage/Payload/openMX.app
 rm -rf "$stage"
 mkdir -p "$app"
-llvm-strip -o "$app/openmx" "$target/release/openmx"
+$(command -v llvm-strip || echo strip) -o "$app/openmx" "$target/release/openmx"
 cp web/icon-180.png "$app/AppIcon60x60@3x.png"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)  # [workspace.package]
 cat > "$app/Info.plist" <<EOF

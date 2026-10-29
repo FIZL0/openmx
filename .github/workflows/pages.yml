@@ -1,6 +1,6 @@
 # The beta and the website, as opentennis's pages.yml (no game data anywhere: players pick their own ISO).
 # - Every push to main is a beta once ci passes: the rolling "Beta" release (tag `beta`, a pre-release, never Latest) is
-#   replaced with that commit's Linux build and website (web.tar.gz), and FIZL0/openmx-beta (one workflow,
+#   replaced with that commit's Linux build, website (web.tar.gz) and unsigned iPhone app (openmx-ios.ipa, P201), and FIZL0/openmx-beta (one workflow,
 #   tools/beta-site.yml) is asked to put the website on https://beta.openmx.dev. The ask needs the secret
 #   BETA_DISPATCH_TOKEN (a fine-grained token with Contents read/write on FIZL0/openmx-beta); without it the beta site
 #   still catches up, from that repo's own half-hourly check.
@@ -65,8 +65,27 @@ jobs:
         with:
           name: linux
           path: openmx-linux-x86_64.tar.gz
+  # P201: the beta's unsigned iPhone app, tools/ios-ipa.sh on a Mac (the Linux cross-build needs Xcode's SDK, which a
+  # runner can't fetch). Never holds the beta back: if it fails the beta goes up without the .ipa.
+  ios:
+    if: ${{ github.event_name != 'release' }}
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0  # CFBundleVersion is the commit count
+      - run: rustup update --no-self-update stable && rustup default stable && rustup target add aarch64-apple-ios
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          workspaces: ". -> target/ios"
+      - run: OPENMX_COMMIT=${GITHUB_SHA::7} tools/ios-ipa.sh "$PWD/openmx-ios.ipa"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ios
+          path: openmx-ios.ipa
   beta:
-    needs: [ci, web, linux]
+    needs: [ci, web, linux, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -94,8 +113,15 @@ jobs:
             "**Beta: rebuilt on every change to main (${GITHUB_SHA::7}). Newer than the latest release, less tested.**" \
             "No game data is included: you need your own *MX Unleashed (USA)* (SLUS-20767) ISO. Linux: unpack, put the ISO's path in \`kit.toml\`, run \`./run.sh\`." \
             "Beta in the browser: https://beta.openmx.dev/" > notes.md
+          ipa=
+          if [ -f openmx-ios.ipa ]; then
+            ipa=openmx-ios.ipa
+            printf '%s\n' "iPhone / iPad: \`openmx-ios.ipa\` is unsigned; sign and install it yourself (Sideloadly, AltStore…), then put the ISO in Files → On My iPhone → openMX. The release's app, with updates, is at https://openmx.dev/ios.html." >> notes.md
+          else
+            echo "::warning::no openmx-ios.ipa (the ios job failed): the beta goes up without it"
+          fi
           gh release create beta --prerelease --latest=false --target "$GITHUB_SHA" --title "Beta (${GITHUB_SHA::7})" \
-            --notes-file notes.md openmx-linux-x86_64.tar.gz web.tar.gz
+            --notes-file notes.md openmx-linux-x86_64.tar.gz web.tar.gz $ipa
           if [ -n "$DISPATCH" ]; then
             # a bad or expired token only costs the instant deploy: the beta release is already up
             GH_TOKEN=$DISPATCH gh api repos/FIZL0/openmx-beta/dispatches -f event_type=beta ||

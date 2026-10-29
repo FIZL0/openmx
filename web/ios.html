@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- P201, as opentennis's web/ios.html: one-tap "add source" for the iPhone app. The source is FIZL0's shared one
+     (github.com/FIZL0/apps), which merges every release's altstore-source.json (tools/ios-source.sh). GitHub's Markdown
+     drops altstore:// / sidestore:// / feather:// links, so the README and the release notes link here instead. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>openMX for iPhone and iPad</title>
+<meta name="description" content="Add the openMX source to Feather, AltStore or SideStore to install and update openMX, MX Unleashed rewritten, on iPhone and iPad.">
+<link rel="canonical" href="https://openmx.dev/ios.html">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#2a1408">
+<style>
+@font-face { font-family: "OMX"; font-weight: 100 900; font-stretch: 50% 125%; font-display: swap; src: url(fonts/Saira.ttf) format("truetype"); }
+/* index.html's colours (docs/menu-concept.html's) */
+:root { color-scheme: dark; --ember: #f0954a; --rust: #8a4420; --umber: #2a1408; --maroon: #8e0f17; --maroon-lo: #5a070c;
+  --chalk: #f5f0e8; --bone: #d8cfc2; --dust: #9c8f80; --face: "OMX", "Saira", system-ui, sans-serif; }
+* { box-sizing: border-box; }
+html, body { margin: 0; color: var(--bone); font: 700 16px/1.5 var(--face); font-stretch: 105%; letter-spacing: .04em;
+  background: radial-gradient(90% 60% at 50% 0%, var(--rust) 0%, var(--umber) 70%) fixed, var(--umber); }
+main { max-width: 540px; margin: 0 auto; padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left)); }
+header { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+header img { width: 64px; height: 64px; border-radius: 14px; border: 2px solid var(--chalk); }
+h1, h2 { margin: 0; color: var(--chalk); font-weight: 800; font-style: oblique 12deg; line-height: 1.15; }
+h1 { font-size: 1.6em; }
+h2 { font-size: 1.25em; margin-top: 1.6em; }
+p { margin: .6em 0; }
+a { color: #ffcf9e; }
+.muted { color: var(--dust); font-size: .92em; }
+.btn { display: block; width: 100%; margin: 12px 0; padding: .7em 1em .75em; border-radius: 999px; border: 2px solid rgba(245,240,232,.55);
+  background: rgba(0,0,0,.35); color: var(--chalk); font: inherit; font-weight: 800; text-align: center; text-decoration: none; cursor: pointer;
+  box-shadow: 4px 5px 0 rgba(0,0,0,.25); }
+.btn.main { border-color: var(--chalk); font-style: oblique 12deg; text-shadow: 0 1px 0 rgba(0,0,0,.6);
+  background: linear-gradient(180deg, #b31a23 0%, var(--maroon) 45%, var(--maroon-lo) 100%);
+  box-shadow: inset 0 2px 0 rgba(255,255,255,.22), inset 0 -2px 0 rgba(0,0,0,.35), 4px 5px 0 rgba(0,0,0,.33); }
+.btn:hover, .btn:focus-visible { filter: brightness(1.12); outline: none; }
+code { display: block; overflow-wrap: anywhere; padding: .6em .8em; border-radius: 10px; background: rgba(0,0,0,.35);
+  border: 1px solid rgba(255,255,255,.18); color: var(--chalk); font-size: .85em; }
+code.i { display: inline; padding: .05em .35em; border-radius: 6px; }
+ol { padding-left: 1.3em; }
+li { margin: .35em 0; }
+b { color: var(--chalk); }
+</style>
+</head>
+<body>
+<main>
+  <header><img src="icon-180.png" alt=""><h1>openMX for iPhone&nbsp;&amp;&nbsp;iPad</h1></header>
+  <p>Add FIZL0's app source to your sideloading app once, then install openMX from it and get every update there.
+    You sign it with your own certificate, so it installs only on your devices.</p>
+
+  <a class="btn main" id="feather">Add to Feather</a>
+  <a class="btn" id="altstore">Add to AltStore</a>
+  <a class="btn" id="sidestore">Add to SideStore</a>
+  <button class="btn" id="copy" type="button">Copy source URL</button>
+  <code id="url"></code>
+  <p class="muted">The same source has every <a href="https://fizl0.github.io/apps/">FIZL0 app</a>, so one add covers them all.
+    Nothing happens when you tap? Open this page in Safari on the iPhone with the app installed, or copy the URL and add
+    it under Sources in the app.</p>
+
+  <h2>Put your disc on the phone</h2>
+  <ol>
+    <li>Start openMX once, so its folder appears.</li>
+    <li>Open the <b>Files</b> app → <b>On My iPhone</b> (or <b>On My iPad</b>) → <b>openMX</b>.</li>
+    <li>Put your own <i>MX Unleashed</i> (USA, SLUS-20767) disc image there: AirDrop or save the <code class="i">.iso</code>
+      to Files, then move it into the openMX folder. No game data is included.</li>
+    <li>Start openMX again. Touch controls, or pair a controller in Settings → Bluetooth.</li>
+  </ol>
+  <p class="muted"><code class="i">settings.txt</code> and a <code class="i">mods</code> folder go
+    in the same place. Signing it yourself instead:
+    <a href="https://github.com/FIZL0/openmx/releases/latest/download/openmx-ios.ipa">the unsigned .ipa</a>.
+    <a href="./">Back to openmx.dev</a></p>
+</main>
+<script>
+  const src = 'https://fizl0.github.io/apps/source.json';
+  const q = encodeURIComponent(src);
+  document.getElementById('url').textContent = src;
+  document.getElementById('feather').href = 'feather://source/' + src;
+  document.getElementById('altstore').href = 'altstore://source?url=' + q;
+  document.getElementById('sidestore').href = 'sidestore://source?url=' + q;
+  const copy = document.getElementById('copy');
+  copy.onclick = () => navigator.clipboard.writeText(src).then(() => { copy.textContent = 'Copied'; },
+    () => { getSelection().selectAllChildren(document.getElementById('url')); copy.textContent = 'Select and copy the URL above'; });
+</script>
+</body>
+</html>

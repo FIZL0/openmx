@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- P194: the site is one page (index.html); its pictures are docs/screenshots, copied into shots/ by tools/web.sh -->
+<!-- P194: the site is index.html (and P201's ios.html); its pictures are docs/screenshots, copied into shots/ by tools/web.sh -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
   <url>
     <loc>https://openmx.dev/</loc>
@@ -13,5 +13,8 @@
     <image:image><image:loc>https://openmx.dev/shots/mxvatv-nat04.jpg</image:loc></image:image>
     <image:image><image:loc>https://openmx.dev/shots/menu-main.jpg</image:loc></image:image>
     <image:image><image:loc>https://openmx.dev/shots/menu-online.jpg</image:loc></image:image>
+  </url>
+  <url>
+    <loc>https://openmx.dev/ios.html</loc>
   </url>
 </urlset>

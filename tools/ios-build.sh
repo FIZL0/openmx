@@ -6,6 +6,12 @@
 # Usage: tools/ios-build.sh [cargo args…]   (default: build --release -p openmx --bin openmx)
 set -euo pipefail
 export PATH=$HOME/.cargo/bin:$PATH
+# On a Mac (pages.yml's beta IPA, P201) Xcode has the SDK and the linker: cargo needs nothing more than the target
+if [ "$(uname)" = Darwin ]; then
+    export IPHONEOS_DEPLOYMENT_TARGET=15.0 CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target/ios}
+    [ $# -gt 0 ] || set -- build --release -p openmx --bin openmx
+    exec cargo "$1" --target aarch64-apple-ios "${@:2}"
+fi
 sdk=${OPENMX_IOS_SDK:-$HOME/.local/share/hst-ios/iPhoneOS.sdk}
 [ -d "$sdk" ] || { echo "no SDK at $sdk: run tools/ios-sdk.py Xcode.xip" >&2; exit 1; }
 rustup target list --installed | grep -qx aarch64-apple-ios || { echo "no aarch64-apple-ios std: rustup target add aarch64-apple-ios" >&2; exit 1; }
