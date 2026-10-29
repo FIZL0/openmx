@@ -24,3 +24,9 @@ opt-level = 2
 
 [profile.dev]
 opt-level = 1
+
+# Vendored crates patched in for the whole workspace (third_party/README.md says what each changes and why).
+[patch.crates-io]
+# P200: opentennis's winit 0.30.13 fork — iOS 27's UIScene lifecycle (M91) and the rotation lock's
+# one-sided landscape, ValidOrientations::LandscapeRight (B694); its Android changes are unused here.
+winit = { path = "third_party/winit" }
