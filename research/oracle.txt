@@ -6155,6 +6155,20 @@ atv_stunt_request           atv 0x004e49c0 = stunt_request (call: stunt_idle's v
 atv_stunt_clocks            atv 0x004e4900 = pc_stunt_clocks (call: vt +0x4e8 in the remote branch; weak as on the PC)
 atv_stunt_idle              atv 0x004e5d20 = stunt_idle (call: vt +0x4f0; ids 0x2e/0xff as on the PC)
 atv_stunt_state_pack        atv 0x004d9f30 = pc_stunt_state_pack (align, 0.37; weak)
+# MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
+# context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
+# 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the
+# ground, +0xc30 contact velocity, +0x310 brake, +0x12ac stick y, +0x12b0 its hold, +0x14ec the trick
+# buttons (the low nibble; 4 = R1 alone), +0x1188/+0x118c authority and its time, +0x1194 applied,
+# +0x1198 flipping, +0x119c active, +0x11a0 armed, +0x11a4..+0x11bc the six [Backflip] keys, +0x11ac grace,
+# +0x11c0 torque, +0x11d0/+0x11d8 the 360's applied/active, +0x1404/+0x1408 the airborne pitch wreck
+# angles, +0x360/+0x368 pitch/roll, +0x1528 the rider's stunt id, +0x1754 the backflip clip, +0x13b8 its
+# stunt id, +0xc8 the collision record (+0x34 touching), +0xe4 the node (+0x84 row x .y, +0x94 row y .y).
+atv_bike_start_stunt        atv 0x004e6370 = vt +0x4b8 (a0 bike, a1 stunt id, a2 1; v0 started)
+atv_bike_end_stunt          atv 0x004e4db0 = vt +0x4ac (a0 bike, a1 stunt id)
+atv_bike_set_flip_clip      atv 0x004e7a30 = vt +0x53c (sw a1, +0x1754)
+atv_bike_flip_wreck_steep   atv 0x004e8370 = the backflip's mid-clip wreck's reason test (v0: 0xf, else 0xb)
+atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into body +0x1b0, then its +0xe8 listeners)
 # ---------------------------------------------------------------------------------------------------
 # S150 — crooked landings. Journal: research/journal/2026-10-26-s150-trick-landing-spin.
 # No new function. bike_wreck_test (0x002522c0)'s landing crossup clause decides a crooked landing, and
