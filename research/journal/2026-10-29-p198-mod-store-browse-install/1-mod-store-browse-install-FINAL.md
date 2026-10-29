@@ -1,4 +1,4 @@
-# 1 — mod store browse install (PART)
+# 1 — mod store browse install (FINAL)
 
 Task P198. 2026-10-29.
 
