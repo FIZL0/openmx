@@ -15,8 +15,9 @@
 //! first, then the air state, then the animation and the ride state machine. So [`Ride::frame`] is
 //!
 //! 1. the input layer's rate limit, which turns what the pad says into what the bike is holding,
-//! 2. the chassis' measure — [`chassis::measure`] with [`crate::math::quat_to_euler`]'s three angles,
-//!    which is where `air.rs`' pitch and roll come from,
+//! 2. the chassis' angles as the last frame's measure left them — [`chassis::measure`] with
+//!    [`crate::math::quat_to_euler`]'s three angles, taken after the physics (S179), which is where
+//!    `air.rs`' pitch and roll come from,
 //! 3. the ground step, written out here in [`mv::step`]'s own order with the callees dispatched,
 //! 4. the air state ([`air::contact`]), which decides whether the bike is airborne and for how long.
 //!
@@ -1015,6 +1016,10 @@ impl Ride {
             *v = Vf::ZERO;
         }
         self.chassis.speed = F::ZERO;
+        // The angles the next frame's ground step and air control read are the measure's, which runs
+        // only after the physics (S179); a bike set down takes the ones of the pose it is set in.
+        static ACOS: std::sync::OnceLock<AcosTable> = std::sync::OnceLock::new();
+        self.chassis.euler = math::quat_to_euler(self.chassis.quat, ACOS.get_or_init(AcosTable::build));
         self.chassis.pos_hist = Default::default();
         self.chassis.vel_hist = Default::default();
         self.chassis.ang_hist = Default::default();
@@ -2065,10 +2070,12 @@ impl Ride {
             t.side_flick = t.side.sample(raw.x, dt);
         }
 
-        // 2 — the chassis' measure, which is where the pitch and roll `air.rs` reads come from. The
-        // euler angles are the one call it makes that this crate ports.
-        let euler = math::quat_to_euler(chassis.quat, &tables.acos);
-        chassis::measure(chassis, dt, euler);
+        // 2 — the pitch and roll `air.rs` reads: the euler angles the chassis' measure took at the end
+        // of the last frame, off the orientation its substeps left. The original measures once a
+        // frame, in the attachments' walk (4b below), and nothing takes them again here; the stunt
+        // clocks' copy-back since (5) can move the quaternion by an ulp, and angles taken off that
+        // part from the original's on a held traverse's flight (S179).
+        let euler = chassis.euler;
 
         // The chassis' transform as the last frame left it — the no-hander's roll included, which the
         // body's quaternion only takes in at its next integration (P32).
@@ -2433,8 +2440,8 @@ impl Ride {
         // stunt clocks, which runs each enabled one's frame update: the chassis' is its measure, so
         // the Euler angles are taken again off the orientation the substeps left (S138). The wreck
         // test reads them, and so judges a landing's pitch as it lands rather than as it fell: a nose
-        // down 70.06° in the air and 69.86° on its touchdown tick rides out in the original. The next
-        // frame's measure takes them again before the ground step reads them. The measure writes the
+        // down 70.06° in the air and 69.86° on its touchdown tick rides out in the original. They are the
+        // ones the next frame's ground step and air control read, too (S179). The measure writes the
         // speed too, the length of the velocity the substeps left (S140): nothing in the rest of the
         // original's frame loads it (the stunt request, idle and clocks and the wreck test read no
         // `+0x34`), so what it reaches is what reads the bike after its update — the chase camera's

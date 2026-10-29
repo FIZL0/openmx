@@ -8520,6 +8520,168 @@ fn the_nose_first_touchdown_tick_is_the_originals() {
     println!("{ran} touchdown ticks compared");
 }
 
+/// S179's ride of S117's `steep` (S106's 46° face side on, `tele.py 95 -2.7 -10 20 2`), with the gas
+/// and the stick (`-0.3`, uphill) held from before the load, so the ride is the same on every playback
+/// (`research/journal/2026-10-29-s179-steep-face-takeoff/capture/held.sh`), and states saved on the last
+/// ticks before the bike leaves the face.
+const S179_STEEP: &str = "s179/steep";
+
+/// [`S179_STEEP`]'s save states, by the frame they were asked for: the front off (2873), the rear's
+/// last tick on the face (2874), its first off with the rear still compressed (2875), the first tick
+/// both wheels are off and the rear is out too (2876), and three ticks of the flight (2877..2879), the
+/// first of which parted in the roll lane of the angular acceleration until the port stopped taking the
+/// euler again at the top of the frame.
+const S179_STEEP_STATES: [u64; 7] = [2873, 2874, 2875, 2876, 2877, 2878, 2879];
+
+/// **The takeoff off a steep side face is the original's to the bit** (S179): S117's traverses parted on
+/// the first tick both wheels were off the face, in the chassis' angular acceleration. From each
+/// [`S179_STEEP_STATES`] image the original's whole vehicle update runs one tick in the oracle, and the
+/// port, seeded from the same image, runs its one tick beside it on the pad that tick read, as
+/// [`the_nose_first_touchdown_tick_is_the_originals`] does. Skipped with a line where the images are
+/// not here.
+#[test]
+fn the_steep_face_takeoff_tick_is_the_originals() {
+    use ps2_oracle::{Ee, addr};
+    let dir = private_dir("capture");
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{S179_STEEP}.csv"))) else {
+        println!("no {S179_STEEP}.csv — S179's journal says how it is recorded");
+        return;
+    };
+    let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{S179_STEEP}.csv: {e}"));
+    let mut ran = 0;
+    in_the_world_of(&whole, |world, _, bike| {
+        let Some(Ridden { tables, mounts, .. }) = bike else {
+            println!("no Race 125 on this disc");
+            return;
+        };
+        let Some(phy) = Disc::open().and_then(|mut disc| the_class_named(&mut disc, &tables, "race125p.phy")) else {
+            println!("no race125p.phy on this disc");
+            return;
+        };
+        let mut parted = Vec::new();
+        for asked in S179_STEEP_STATES {
+            let at = dir.join(format!("{S179_STEEP}-{asked}.ee.bin"));
+            let (Some(st), Ok(mut ee)) = (SaveState::open_either(&at), Ee::from_ram(&at)) else {
+                println!("no {}", at.display());
+                continue;
+            };
+            let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+            let cap = dense_run(&whole, saved);
+            let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{S179_STEEP}.csv: {e}"));
+            let rows = rows_by_counter(&cap);
+            let pad = tape.frames[rows[&(saved + 1)] - 2];
+            let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+            rider.sense.wrecks_enabled = false;
+            let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+            st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+            st.seed_levers(&mut sim.rider.ride).expect("the levers");
+            st.seed_engine_state(&mut sim.rider.ride).expect("the engine's state");
+            sim.frame(pad.dt(), &pad.reports, world);
+            let ride = &sim.rider.ride;
+
+            ee.set(28, u64::from(addr("boot_gp").unwrap()));
+            let (ch, front, rear) = (st.rider_at(0x7a4).unwrap(), st.rider_at(0x7b0).unwrap(), st.rider_at(0x7b4).unwrap());
+            ee.call(addr("bike_vehicle_update").unwrap(), &[u64::from(st.rider)], &[pad.dt().0], 500_000_000);
+            let v = |o: u32| [0, 4, 8, 12].map(|k| ee.u32_at(o + k));
+            let v3 = |o: u32| [ee.u32_at(o), ee.u32_at(o + 4), ee.u32_at(o + 8), 0];
+            let bits = |v: Vf| v.0.map(f32::to_bits);
+            let bits3 = |v: [F; 3]| [v[0].0.to_bits(), v[1].0.to_bits(), v[2].0.to_bits(), 0];
+            let tf = ee.u32_at(ch + 0x254);
+            let lanes = [
+                ("quat", v(ch + 0x1a0), bits(ride.chassis.quat)),
+                ("cofg", v(ch + 0x60), bits(ride.chassis.cofg_world)),
+                ("vel", v(ch + 0x260), bits(ride.chassis.vel)),
+                ("spin", v(ch + 0x280), bits(ride.chassis.world_ang_vel)),
+                ("body spin", v(ch + 0x290), bits(ride.chassis.ang_vel)),
+                ("ang accel", v(ch + 0x80), bits(ride.chassis.ang_accel)),
+                ("ang_hist", v3(ch + 0x310), bits3(ride.chassis.ang_hist.dx)),
+                ("node right", v(tf + 0x80), bits(ride.transform().0[0])),
+                ("node up", v(tf + 0x90), bits(ride.transform().0[1])),
+                ("node forward", v(tf + 0xa0), bits(ride.transform().0[2])),
+                ("node origin", v(tf + 0xb0), bits(ride.transform().0[3])),
+            ];
+            let wheels = [
+                ("front comp", ee.u32_at(front + 0xf0), ride.front.w.compression.0.to_bits()),
+                ("rear comp", ee.u32_at(rear + 0xf0), ride.rear.w.compression.0.to_bits()),
+                ("crossup", ee.u32_at(st.rider + 0x600), ride.air.crossup.0.to_bits()),
+            ];
+            let f = |b: [u32; 4]| b.map(f32::from_bits);
+            println!("{S179_STEEP} {saved} -> {}:", saved + 1);
+            for (name, orig, port) in lanes {
+                println!("  {name:>14} orig {:?} port {:?}", f(orig), f(port));
+            }
+            for (name, orig, port) in wheels {
+                println!("  {name:>14} orig {} port {}", f32::from_bits(orig), f32::from_bits(port));
+            }
+            let ulps = |a: u32, b: u32| (a as i32).wrapping_sub(b as i32).unsigned_abs();
+            parted.extend(
+                lanes
+                    .iter()
+                    .filter(|(_, o, p)| o != p)
+                    .map(|(name, o, p)| format!("{saved}: {name} by {:?} ulp", [0, 1, 2, 3].map(|i| ulps(o[i], p[i]))))
+                    .chain(wheels.iter().filter(|(_, o, p)| o != p).map(|(name, o, p)| format!("{saved}: {name} by {} ulp", ulps(*o, *p)))),
+            );
+            ran += 1;
+        }
+        assert!(parted.is_empty(), "the port's takeoff ticks part from the original's: {parted:#?}");
+    });
+    println!("{ran} takeoff ticks compared");
+}
+
+/// **The air control reads the euler the last frame's measure left** (S179): the original measures the
+/// chassis once a frame, in the vehicle update's walk of the bike's attachments after the air state, and
+/// not again at the top of the next frame. From each [`S179_STEEP_STATES`] image its whole vehicle update
+/// runs one tick in the oracle with the chassis' measure and the airborne control hooked: the measure
+/// runs once, after both substeps' air control, and the roll and pitch every air control reads are the
+/// image's own `+0x98` and `+0x90` — not the angles of the image's quaternion, which the stunt clocks'
+/// copy-back left an ulp off the one the measure took them from (on 2877 its roll is 0.4423988, the
+/// stored one 0.4423991). Skipped with a line where the images are not here.
+#[test]
+fn the_air_control_reads_the_last_frames_euler() {
+    use ps2_oracle::{Ee, addr};
+    use std::{cell::RefCell, rc::Rc};
+    let dir = private_dir("capture");
+    let mut ran = 0;
+    for asked in S179_STEEP_STATES {
+        let at = dir.join(format!("{S179_STEEP}-{asked}.ee.bin"));
+        let (Some(st), Ok(mut ee)) = (SaveState::open_either(&at), Ee::from_ram(&at)) else {
+            println!("{S179_STEEP} {asked}: no RAM image");
+            continue;
+        };
+        ee.set(28, u64::from(addr("boot_gp").unwrap()));
+        let ch = st.rider_at(0x7a4).unwrap();
+        let stored = [ee.f32_at(ch + 0x90), ee.f32_at(ch + 0x98)].map(f32::to_bits);
+        // What each hooked call saw, in order: `None` a measure, `Some` an air control's pitch and roll.
+        let seen: Rc<RefCell<Vec<Option<[u32; 2]>>>> = Rc::default();
+        for (f, air) in [(addr("chassis_measure").unwrap(), false), (addr("bike_airborne_control").unwrap(), true)] {
+            let seen = seen.clone();
+            ee.hooks.insert(
+                f,
+                Box::new(move |ee: &mut Ee| {
+                    let (a0, ra, sp, stack, dt) = (ee.r(4), ee.r(31), ee.r(29), ee.stack, ee.f(12));
+                    let c = if air { ee.u32_at(a0 as u32 + 0x7a4) } else { a0 as u32 };
+                    seen.borrow_mut().push(air.then(|| [ee.f32_at(c + 0x90), ee.f32_at(c + 0x98)].map(f32::to_bits)));
+                    // The real function under its own hook, and the hook put back for its next call.
+                    ee.stack = (sp as u32 - 0x40) & !0xf;
+                    ee.call(f, &[a0], &[dt], 100_000_000);
+                    (ee.stack, ee.pc) = (stack, f);
+                    ee.set(29, sp);
+                    ee.set(31, ra);
+                }),
+            );
+        }
+        ee.call(addr("bike_vehicle_update").unwrap(), &[u64::from(st.rider)], &[ee.f32_at(addr("frame_dt").unwrap())], 500_000_000);
+        let seen = seen.borrow();
+        let airs: Vec<_> = seen.iter().flatten().collect();
+        assert!(!airs.is_empty(), "{asked}: no air control ran");
+        assert_eq!(seen.iter().filter(|s| s.is_none()).count(), 1, "{asked}: the measure runs once a frame: {seen:?}");
+        assert!(seen.last().unwrap().is_none(), "{asked}: the measure runs after the air control: {seen:?}");
+        assert!(airs.iter().all(|a| **a == stored), "{asked}: the air control reads the stored euler {stored:?}: {seen:?}");
+        ran += 1;
+    }
+    println!("{ran} vehicle updates traced");
+}
+
 /// **The chassis' speed is measured again after the physics** (S140): the riding branch of the bike's
 /// vehicle update walks the bike's attachments after the air state, and the chassis' frame update there
 /// is its measure, which writes `+0x34` as well as the euler (S138 ported only the euler). On every
@@ -8585,14 +8747,18 @@ fn the_attachment_walk_measures_the_speed_after_the_physics() {
 /// launch's and the brake's at the landing (124, 106). S117's two held traverses of a steep face agree
 /// to the bit while both wheels are on it (74 and 97 ticks, side loads up to 1.8 times the wheel's
 /// load) and part on the first tick both are off, in the chassis' angular acceleration: steep's slip
-/// flags then agree to its last tick, steep2's part at 134, after its landing.
+/// flags then agree to its last tick, steep2's part at 134, after its landing. S179 found the flight's
+/// part in the euler the air control reads: the port took them again at the top of each frame, off the
+/// quaternion the copy-back left, where the original reads the ones its measure took after the last
+/// frame's physics. With that gone every case's path and slip flags agree to the capture's last tick but
+/// steep2's path, which parts at 189 (the turn's had already got there before S179).
 const S58_CASES: [(&str, &str, u64, u64); 6] = [
-    ("turn", "a hard turn at speed on flat dirt", 177, u64::MAX),
-    ("launch", "a full-gas launch from standing", 123, u64::MAX),
-    ("brake", "a locked brake at speed", 105, u64::MAX),
+    ("turn", "a hard turn at speed on flat dirt", u64::MAX, u64::MAX),
+    ("launch", "a full-gas launch from standing", u64::MAX, u64::MAX),
+    ("brake", "a locked brake at speed", u64::MAX, u64::MAX),
     ("traverse", "a part-steered ride up the jump face and across a side slope", u64::MAX, u64::MAX),
-    ("steep", "full gas from standing across a 46° face side on, held up it", 90, 250),
-    ("steep2", "the same from 20 ft further back along the face, 48° there", 106, 133),
+    ("steep", "full gas from standing across a 46° face side on, held up it", u64::MAX, u64::MAX),
+    ("steep2", "the same from 20 ft further back along the face, 48° there", 188, u64::MAX),
 ];
 
 /// S116: the tick the turn's chassis quaternion changes sign in the original — the same rotation,
@@ -8689,8 +8855,10 @@ fn the_slip_cases_replay_from_the_save_state() {
             };
             let parted = replay_a_save_state_case(&acc, &own, seed, &text, case, what, late);
             let first = |lane: &str| parted.iter().find(|(_, d)| d.contains(lane)).map_or(u64::MAX, |(t, _)| *t);
-            assert!(first(".origin[") > path_through, "{case}: the path parts at {}, not after {path_through}", first(".origin["));
-            assert!(first(".slip.") > slip_through, "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
+            // `u64::MAX` asks for every tick, which `>` alone cannot say.
+            let past = |at: u64, through: u64| at > through || at == u64::MAX;
+            assert!(past(first(".origin["), path_through), "{case}: the path parts at {}, not after {path_through}", first(".origin["));
+            assert!(past(first(".slip."), slip_through), "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
             continue;
         }
         let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
