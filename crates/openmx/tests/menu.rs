@@ -4075,7 +4075,7 @@ fn the_pauses_rows_are_trimmed_and_main_menu_sits_above_quit() {
     let rows = m.pause_rows();
     assert_eq!(rows[0..2], ["Resume", "Restart"]);
     assert!(rows[2].starts_with("Switch To Machine"), "{rows:?}");
-    assert_eq!(rows[3..], ["Settings", "Game Modifiers", "Open to Online", "Main Menu", "Quit"]);
+    assert_eq!(rows[3..], ["Settings", "Controllers", "Game Modifiers", "Open to Online", "Main Menu", "Quit"]);
     // The cursor walks exactly those rows: Up from Resume is Quit.
     tap(&mut m, &mut r, Control::Up);
     assert_eq!(m.cursor(Screen::Pause), rows.len() - 1);
@@ -4083,7 +4083,7 @@ fn the_pauses_rows_are_trimmed_and_main_menu_sits_above_quit() {
     // Opened, Seats sits under the online row, and Main Menu and Quit stay last.
     m.opening = menu::Opening::Open;
     let rows = m.pause_rows();
-    assert_eq!(rows[5..], ["Online: opening...", &format!("Seats: {}", m.settings.lobby_seats), "Main Menu", "Quit"]);
+    assert_eq!(rows[6..], ["Online: opening...", &format!("Seats: {}", m.settings.lobby_seats), "Main Menu", "Quit"]);
     // Main Menu from its new place still asks first, and Quit under it too.
     tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Main Menu");
     tap(&mut m, &mut r, Control::Cross);
