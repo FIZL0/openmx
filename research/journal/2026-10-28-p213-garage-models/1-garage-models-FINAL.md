@@ -1,4 +1,4 @@
-# 1 — garage models (PART)
+# 1 — garage models (FINAL)
 
 Task P213. 2026-10-28.
 
