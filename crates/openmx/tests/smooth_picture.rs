@@ -43,7 +43,9 @@ fn ride(fps: u32, at: &str, ticks: usize) -> Option<String> {
         eprintln!("skipped: {e}");
         return None;
     }
-    let tape = scratch("throttle.tape");
+    // One tape a length: the tests run side by side, and a shared file let the 150-tick ride's
+    // shorter tape be the one the shootoff played (its throttle out at tick 180, short of the edge).
+    let tape = scratch(&format!("throttle-{ticks}.tape"));
     std::fs::write(&tape, throttle_tape(ticks + 30)).expect("the tape is written");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
