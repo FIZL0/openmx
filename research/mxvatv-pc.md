@@ -188,3 +188,45 @@ the math is the same its rounding is not MX Unleashed's (`openmx` follows MX Unl
 
 Weak here as on the PC: `atv_stunt_clocks`, `atv_stunt_state_pack`. The wreck test was paired by slot and
 call site, not compared clause by clause.
+
+### The ATV (MD37)
+
+`MXVehicleAtv` is a `MXVehicleMotoShared` beside `MXVehicleMotocross`: the same `.phy` loader (slot 12), the
+same engine and tire models, the same air, trick, wreck and ghost steps. What it overrides is the wheel
+count. Rows `pc_quad_*` / `atv_quad_*` in oracle.txt (`# MD37`). SLUS-21104 has the PC's code here as for the
+bike, and MX Unleashed has no ATV, so the proof can only be against SLUS-21104.
+
+- **Data.** `Veh\atv_{Race,Pro}250{A,P}.phy` and `atv_s_…`: 8 files, only the 250 class. Their sections and
+  keys are exactly `mx_Race250A.phy`'s (`game_sim::phy::Phy::read` reads the format already); 139 values
+  differ (gears 2.25/1.9/1.52/1.32/1.14, CofG y 1.0 against 2.0, the clutch scale, the tires). The `atv_s_`
+  set changes the gearing (final 10.538 against 4.558) and the brakes (front 325 against 150). The path
+  builder (PC 0x00566480) takes machine kind 0 → `mx_`, kind 1 → `atv_`, or `atv_s_` when the machine's
+  model name holds `ATV_S_`. Wreck body: `WreckATVm.col`. Nodes: `WheelLeftFront`, `WheelRightFront`,
+  `WheelLeftRear`, `WheelRightRear`, `SwingArm`, `LeftHub`, `RightHub`, `Aarm{Lower,Upper}{Left,Right}`.
+- **Wheels.** Four tire models, left front and right front (steered), left rear and right rear (driven),
+  where the bike has two. `pc_quad_tire_phy` (slot 110) reads `[Front Tire]` and `[Rear Tire]` into them.
+- **PreProcess** (`pc_quad_ground_head`): `pc_bike_ground_head` clause for clause (the input limiter, the
+  steer from the speed curve and the 0.987 hold ramp, the ±π/2 rear fade, the 14.67/29.33 lerps, the auto
+  shift, the clutch). Each write to "the front wheel" or "the rear wheel" goes to both wheels of the pair, and
+  both fronts get the +0x30 flag the bike sets on its front (PC fields, relative to the listener).
+- **Force** (`pc_quad_ground_step`), the bike's body with these changes:
+
+  | bike | ATV |
+  |---|---|
+  | `bike_stand_upright`, then `bike_balance` when +0x1524 == +0x152c, then `bike_roll_pitch` | `quad_stand_upright` (the four contact normals' mean, a torque below 10 ft/s; its guard reads the pair `bike_balance` tests, the other way round, if both see the same `this`, which is not checked), then `quad_roll_pitch`. No balance wobble. |
+  | preload, backflip, 360, engine, air drag, airborne control | the same functions |
+  | `bike_ground_pitch_torque` | `quad_ground_pitch_torque` (the bike's body under its own guard) |
+  | 2× `wheel_clear`, `bike_wheel_contacts`, 2× suspension, 2× tire forces | 4× each, `quad_wheel_contacts` |
+  | rear +0xb4 = front down and rear up | both rears' +0xb4 = a front down and both rears up |
+  | 2× `wheel_integrate`, rev limit, peak rates | 4× `wheel_integrate`, the same |
+
+- **PostProcess** (`pc_quad_air_state`): the bike's air state over four wheels, without the no-hander.
+- **Update** (`pc_quad_update`): `bike_vehicle_update` first, then its own tail (0.95, 0.73, 0.1; not read).
+
+Not paired: PC slots 33, 35, 38, 39, 67, 70, 80, 86 against SLUS-21104's 0x004b89a0, 0x004b8ab0, 0x004b8b80,
+0x004bb360, 0x004bb370, 0x004bb400, 0x004bb710, 0x004be3b0, 0x004be3c0, 0x004be8d0 (slot 111?), 0x004ba510
+(slot 86?). The tables are not one slot per entry on both sides, so the place alone does not pair them.
+
+The ATV's step leans on every shared MotoShared step as SLUS-21104 runs it, and on its frame driver (the
+physics world's substeps, not MX Unleashed's 55 Hz loop). Those are MD40's work for the bikes, so the ATV's
+port (MD37b) comes after MD40.
