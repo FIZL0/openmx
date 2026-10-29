@@ -1,0 +1,8 @@
+# standing still: a short roll, brake to a stop, then nothing (the stand-upright under 10 ft/s)
+down cross
+sleep 1000
+up cross
+down square
+sleep 1500
+release
+sleep 6000

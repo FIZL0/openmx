@@ -1,0 +1,9 @@
+# a stoppie that ends before the obstacle: gas 2.2 s (~45 ft/s), brake (square) + the stick forward 1.5 s, then nothing
+down cross
+sleep 2200
+up cross
+down square
+stick l 0 -1
+sleep 1500
+release
+sleep 2500

@@ -1,0 +1,104 @@
+# MD37a: MX vs. ATV Unleashed's player ATV, every frame. ATV is replaced by the object's address in the
+# loaded state (record.sh does it; the object is 4 bytes before the primary vptr 0x003ce250, see
+# research/oracle.txt # MD37). Decoded columns first, then raw blocks for what is not mapped yet.
+[watch]
+name        = "atv"
+description = "MX vs. ATV (SLUS-21104) player ATV per frame: attitude, chassis, pad, four wheels (+0x17b0..+0x17bc), engine (+0x142c), raw object"
+every       = 1
+frames      = 300
+
+[setup]
+warmup    = 2
+settle_ms = 300
+
+[[field]]
+name = "euler"          # +0x360 pitch, +0x364 heading, +0x368 roll
+addr = "ATV + 0x360"
+type = "f32x4"
+
+[[field]]
+name = "speed"          # +0xc38
+addr = "ATV + 0xc38"
+type = "f32"
+
+[[field]]
+name = "ground"         # +0x324: a wheel touches
+addr = "ATV + 0x324"
+type = "u32"
+
+[[field]]
+name = "stick"          # +0x12a8 x, +0x12ac y, +0x12b0 y flick, +0x12b4 x flick
+addr = "ATV + 0x12a8"
+type = "f32x4"
+
+[[field]]
+name = "ctl"            # +0x308..+0x314 (+0x310 brake, +0x314 throttle: the input limiter's reads)
+addr = "ATV + 0x308"
+type = "f32x4"
+
+[[field]]
+name = "stick_lim"      # +0x12e8 x, +0x12ec y: the input limiter's ramped stick (then +0x12f0, +0x12f4)
+addr = "ATV + 0x12e8"
+type = "f32x4"
+
+[[field]]
+name = "wreck"          # +0x6e4 (the wreck word, M19)
+addr = "ATV + 0x6e4"
+type = "u32"
+
+[[field]]
+name = "pos"            # rigid body (+0xb8) +0x60
+addr = "ATV + 0xb8 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "quat"           # body +0x170
+addr = "ATV + 0xb8 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "angvel"         # body +0x1c0
+addr = "ATV + 0xb8 -> 0x1c0"
+type = "f32x4"
+
+[[field]]
+name = "body"           # the rigid body, raw
+addr = "ATV + 0xb8 -> 0x0"
+type = "bytes:640"
+
+[[field]]
+name = "engine"         # *(+0x142c), raw (engine_update reads up to +0x1d4)
+addr = "ATV + 0x142c -> 0x0"
+type = "bytes:512"
+
+[[field]]
+name = "obj0"           # the ATV object, raw, +0x0..+0xc00
+addr = "ATV + 0x0"
+type = "bytes:3072"
+
+[[field]]
+name = "obj1"           # +0xc00..+0x1800
+addr = "ATV + 0xc00"
+type = "bytes:3072"
+
+[[array]]
+name   = "wheel"        # left front, right front, left rear, right rear
+addr   = "ATV + 0x17b0"
+count  = 4
+stride = 4
+deref  = true
+
+[[array.field]]
+name = "touch"          # +0xdc (the Force body's down test)
+off  = 0xdc
+type = "u32"
+
+[[array.field]]
+name = "flag_b4"        # +0xb4: rears set when a front is down and both rears are up
+off  = 0xb4
+type = "u32"
+
+[[array.field]]
+name = "raw"            # +0x0..+0x300 (the per-surface tables past it are static)
+off  = 0x0
+type = "bytes:768"
