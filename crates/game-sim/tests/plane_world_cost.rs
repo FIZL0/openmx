@@ -301,3 +301,124 @@ fn a_planes_tick_asks_a_world_of_tiles_only_for_the_shapes_near_it() {
         assert!(widest > 0 && widest * 8 < every_deep, "{name}: a near set must be a corner of the world: {widest} of {every_deep}");
     }
 }
+
+/// [`Counted`] as the wreck's search took a world before V99: its near set is the whole world's
+/// ([`World::wooded`]), wherever it is asked.
+struct Whole(Counted);
+
+impl World for Whole {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.0.ground(at)
+    }
+    fn surface(&mut self, at: Vf) -> u8 {
+        self.0.surface(at)
+    }
+    fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
+        self.0.solid(bundle, record)
+    }
+    fn area(&self) -> Option<Area> {
+        self.0.area()
+    }
+    fn wrap(&self) -> [bool; 2] {
+        self.0.wrap()
+    }
+    fn off_world(&self, at: Vf, margin: F) -> bool {
+        self.0.off_world(at, margin)
+    }
+    fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
+        self.0.heightfield()
+    }
+    fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>) {
+        self.0.collision()
+    }
+    fn wooded(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&Trees>) {
+        self.0.wooded()
+    }
+    fn wooded_near(&mut self, _: Vf) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>, Option<&Trees>) {
+        self.0.wooded()
+    }
+}
+
+/// The disc's wreck bike: its physics part out of free09's second track archive
+/// (`tests/wreck_bike.rs`'s).
+fn the_wreck_part() -> Option<phy::Part> {
+    let kit = Kit::load().ok()?;
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/iso/MX.PSR");
+    let path = if here.exists() { here } else { kit.ctx("iso").join("MX.PSR") };
+    let Ok(mut f) = File::open(&path) else {
+        skip(&format!("no {} — `./kit extract MX.PSR` writes it", path.display()));
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("Tracks\\free09_ss_2.res").expect("free09_ss_2.res is in MX.PSR");
+    f.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    f.read_exact(&mut bytes).expect("read");
+    let res = Res::parse(&bytes).expect("free09_ss_2.res");
+    Some(phy::Part::read_bytes(&member(&res, &bytes, "bike\\wreckbike.phy"), "PhysicsPart1"))
+}
+
+/// What a wreck is, in full (`Debug`'s every digit), but for its search's bookkeeping: the shape the
+/// sweep back struck last is named by its place in the set the search was handed, which is another
+/// number in a near set than in the whole world's, so it is named here by where it stands.
+fn wrecked(crash: &game_sim::ride::Crash, set: Option<&Props>) -> String {
+    let mut c = crash.clone();
+    let struck = c.bike.record.struck.take().map(|i| set.expect("a set to strike in").props[i].to_world);
+    format!("{c:?} struck {struck:?}")
+}
+
+/// **A wreck's frame asks a world of tiles only for the shapes near it** (V99): the bike wrecked at
+/// 40 ft/s three feet over the ground, spinning, into a post of the world's second row, stepped 150
+/// frames over a world of 3 rows of posted tiles, over the same world 9 rows deep, and over the
+/// 3 rows handing the whole world's shapes to every search (the port before this task): the same
+/// wreck each frame ([`wrecked`]), the same questions of
+/// both worlds, and the whole world's set never asked for.
+#[test]
+fn a_wrecks_frame_asks_a_world_of_tiles_only_for_the_shapes_near_it() {
+    let Some(part) = the_wreck_part() else { return };
+    assert!(part.collision_enabled, "the disc's wreck bike searches the world");
+    let wrecks = phy::Wrecks::default();
+    let (x, z) = (207.0f32, ROW + 41.0);
+    let y = relief(f64::from(x), f64::from(z)) as f32 + 3.0;
+    let mut ride = game_sim::ride::Ride::default();
+    ride.chassis.quat = Vf::new(0.0, 0.0, 0.0, 1.0);
+    ride.origin = Vf::new(x, y, z, 1.0);
+    ride.chassis.vel = Vf::new(0.0, 0.0, 40.0, 0.0);
+    ride.chassis.ang_vel = Vf::new(0.0, 1.5, 0.0, 0.0);
+    let begin = || game_sim::ride::Crash::begin(&ride, game_sim::trick::Wreck(5), &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+    let mut small = Counted { world: world(3), asked: Asked::default() };
+    let mut deep = Counted { world: world(9), asked: Asked::default() };
+    let mut whole = Whole(Counted { world: world(3), asked: Asked::default() });
+    let every = deep.world.every_shape().props.len();
+    let (mut a, mut b, mut c) = (begin(), begin(), begin());
+    let (mut touched, mut widest) = (0, 0);
+    for frame in 0..150 {
+        small.asked = Asked::default();
+        deep.asked = Asked::default();
+        let at = [a.bike.origin(), b.bike.origin(), c.bike.origin()];
+        a.step(DT, &part, &wrecks, &mut small);
+        b.step(DT, &part, &wrecks, &mut deep);
+        c.step(DT, &part, &wrecks, &mut whole);
+        let fa = wrecked(&a, small.world.wooded_near(at[0]).1);
+        let fb = wrecked(&b, deep.world.wooded_near(at[1]).1);
+        let fc = wrecked(&c, whole.0.world.wooded().1);
+        assert_eq!(fa, fc, "frame {frame}: the wreck over the near set parted from the wreck over the whole world");
+        assert_eq!(fa, fb, "frame {frame}: the wreck over 9 rows parted from the wreck over 3");
+        assert_eq!(small.asked, deep.asked, "frame {frame}: the questions asked of the world");
+        for asked in [&small.asked, &deep.asked] {
+            for whole in ["collision", "wooded", "heightfield"] {
+                assert!(!asked.calls.contains_key(whole), "frame {frame}: the wreck asked for the whole world's `{whole}`");
+            }
+        }
+        touched += usize::from(!a.bike.record.contacts.is_empty());
+        widest = widest.max(deep.asked.widest);
+    }
+    println!(
+        "ended at {:?} resting {}; {touched} frames touching; the widest near set {widest} of {every} shapes",
+        a.bike.body.position, a.resting
+    );
+    assert!(touched > 10, "the wreck must come down among the posts ({touched} frames touching)");
+    assert!(widest > 0 && widest * 8 < every, "a near set must be a corner of the world: {widest} of {every}");
+}
