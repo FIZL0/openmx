@@ -16,7 +16,8 @@
 //!
 //! 1. the input layer's rate limit, which turns what the pad says into what the bike is holding,
 //! 2. the chassis' measure — [`chassis::measure`] with the three angles last frame's walk took
-//!    ([`crate::math::quat_to_euler`]), which is where `air.rs`' pitch and roll come from,
+//!    ([`crate::math::quat_to_euler`]) after the physics (S179, S180), which is where `air.rs`' pitch
+//!    and roll come from,
 //! 3. the ground step, written out here in [`mv::step`]'s own order with the callees dispatched,
 //! 4. the air state ([`air::contact`]), which decides whether the bike is airborne and for how long.
 //!
@@ -2078,8 +2079,9 @@ impl Ride {
         // euler angles are not taken again here: they are the ones last frame's attachment walk (4b)
         // took off the orientation the substeps left, *before* the stunt clocks copied the node's
         // quaternion back over it (S180). The two quaternions part by an ulp or two, and the original's
-        // auto-level reads the walk's roll: roll's flight parted at tick 67 by 2e-6 rad of roll,
-        // measured off the copy. A bike set down anew measures its own ([`Ride::place_on`]).
+        // auto-level reads the walk's roll: roll's flight parted at tick 67 by 2e-6 rad of roll, and a
+        // held traverse's flight off a steep face parted too (S179), measured off the copy. A bike set
+        // down anew measures its own ([`Ride::place_on`]).
         let euler = chassis.euler;
         chassis::measure(chassis, dt, euler);
 
@@ -2446,8 +2448,8 @@ impl Ride {
         // stunt clocks, which runs each enabled one's frame update: the chassis' is its measure, so
         // the Euler angles are taken again off the orientation the substeps left (S138). The wreck
         // test reads them, and so judges a landing's pitch as it lands rather than as it fell: a nose
-        // down 70.06° in the air and 69.86° on its touchdown tick rides out in the original. The next
-        // frame's measure takes them again before the ground step reads them. The measure writes the
+        // down 70.06° in the air and 69.86° on its touchdown tick rides out in the original. They are the
+        // ones the next frame's ground step and air control read, too (S179). The measure writes the
         // speed too, the length of the velocity the substeps left (S140): nothing in the rest of the
         // original's frame loads it (the stunt request, idle and clocks and the wreck test read no
         // `+0x34`), so what it reaches is what reads the bike after its update — the chase camera's
