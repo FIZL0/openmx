@@ -1,4 +1,4 @@
-# 1 — seeded truck roll (PART)
+# 1 — seeded truck roll (FINAL)
 
 Task S182. 2026-10-29.
 
