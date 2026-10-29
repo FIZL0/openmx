@@ -121,9 +121,12 @@ fn feed() {
     play(&floats);
 }
 
-/// The most pixels a frame is drawn with: the PS2's own 640×448. The page's renderer is the desktop's
-/// rasteriser on one thread (the GPU's is P48's), and a window's worth of pixels is a picture a
-/// second; at this many the page stretches a frame of the window's shape over it.
+/// The most pixels a software frame is drawn with: the PS2's own 640×448. The software renderer is
+/// the desktop's rasteriser on one thread, the page's last fallback, and a window's worth of pixels
+/// is a picture a second; at this many the page stretches a frame of the window's shape over it.
+/// The GPU's frame (P48's `web_gpu.rs`, the page's renderer wherever WebGPU or WebGL2 can be had)
+/// is not held to it: it is the canvas's whole size in device pixels, a phone's 2532×1170 at 30 fps
+/// and more (P205).
 pub const PIXELS: usize = 640 * 448;
 
 /// The frame for a canvas of `view` device pixels: its shape, at no more than [`PIXELS`].

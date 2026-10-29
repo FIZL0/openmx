@@ -86,6 +86,10 @@ mod web_host;
 pub(crate) use host::present as host_present;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use host::page_args;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use host::say as host_say;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use host::phone as host_phone;
 
 use game_render::disc::{Disc, Res};
 use game_render::mat::v3;
@@ -283,6 +287,21 @@ mod host {
     /// The command line the page gave [`openmx_run`].
     pub fn page_args() -> Vec<String> {
         ARGS.with_borrow(Clone::clone)
+    }
+
+    /// Whether the page is a phone's (P205), as [`openmx_phone`] said.
+    static PHONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// The page says it is a phone's (P205: a touch screen for its pointer, or `?phone`), before
+    /// [`openmx_run`]: the settings a phone has never saved are then a phone's defaults.
+    #[wasm_bindgen]
+    pub fn openmx_phone(on: bool) {
+        PHONE.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether [`openmx_phone`] said the page is a phone's.
+    pub fn phone() -> bool {
+        PHONE.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The game (P196): the desktop's own front end — the press-start splash, the main menu, and

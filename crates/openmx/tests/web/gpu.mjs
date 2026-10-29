@@ -5,7 +5,9 @@
 //   node gpu.mjs <web dir> <disc.iso> <scratch profile dir> <out.png> [query] [chromium flag...]
 //
 // `query` is added to the page's address (`webgl2`, `software`). With OPENMX_GPU_PKG set to a directory, the page's
-// pkg/ is served from there (the test's `tools/web.sh --check` module) instead of web/pkg. Prints one JSON line:
+// pkg/ is served from there (the test's `tools/web.sh --check` module) instead of web/pkg. With OPENMX_GPU_PHONE set
+// to `width,height,ratio` the page is a phone's (P205): that viewport in CSS pixels at that device-pixel ratio, with
+// touch. Prints one JSON line:
 // { state, gpu, drawn, fps: [per second...], lit, pixels, png } — `gpu` what the page says draws (worker.js's `gpu`),
 // `drawn` its first GPU frame, `fps` the page's pictures a second as worker.js counts them, and `lit` how many of the
 // last screenshot's `pixels` are not black. The screenshot is written to <out.png>.
@@ -17,6 +19,7 @@ import { spawn } from 'node:child_process';
 const [webdir, iso, profile, out, query = '', ...flags] = process.argv.slice(2);
 const SECONDS = Number(process.env.OPENMX_GPU_SECONDS ?? 20);
 const PKG = process.env.OPENMX_GPU_PKG;
+const PHONE = process.env.OPENMX_GPU_PHONE;
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.svg': 'image/svg+xml',
   '.webmanifest': 'application/manifest+json', '.ttf': 'font/ttf' };
 const server = http.createServer((req, res) => {
@@ -94,6 +97,11 @@ await send('Runtime.enable');
 await send('Page.enable');
 // the worker's console too: what the module says (its renderer, its adapter) is how a failure explains itself
 await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+if (PHONE) {
+  const [width, height, deviceScaleFactor] = PHONE.split(',').map(Number);
+  await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile: true });
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true });
+}
 await send('Page.navigate', { url });
 // a fallback reloads the page with a new query, which asks for the disc again: pick it each time it asks
 let d;

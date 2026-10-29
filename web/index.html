@@ -603,12 +603,14 @@ footer a { color: var(--bone); }
   const asked = new URLSearchParams(location.search);
   const api = asked.has('software') ? 'software' : asked.has('webgl2') ? 'webgl2' : 'auto';
   const args = asked.get('args') ?? '';
+  // A phone (P205): a touch screen for its pointer, or `?phone`. The game's defaults are a phone's on one (low shadows).
+  const phone = matchMedia('(pointer: coarse)').matches || asked.has('phone');
   let sent = false;
   const canvas = () => {
     if (sent) return {};
     sent = true;
     const offscreen = screen.transferControlToOffscreen();
-    return { msg: { canvas: offscreen, api, args }, move: [offscreen] };
+    return { msg: { canvas: offscreen, api, args, phone }, move: [offscreen] };
   };
   // The GPU failing before its first frame (a refused first frame, a WebGPU validation error, a panic): the page starts
   // again on the next API down, WebGPU to WebGL2 to software, as opentennis's does (its B244, B378). A canvas keeps the

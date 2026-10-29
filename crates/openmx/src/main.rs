@@ -1822,6 +1822,15 @@ fn argv() -> Vec<String> {
     return crate::page_args();
 }
 
+/// A `--timings` line: standard output on the desktop; in the browser, whose standard output goes
+/// nowhere, the page's console (P205: the ride's profile in headless chromium).
+fn timing(line: String) {
+    #[cfg(not(target_arch = "wasm32"))]
+    println!("{line}");
+    #[cfg(target_arch = "wasm32")]
+    crate::host_say(&line);
+}
+
 pub(crate) async fn run() -> Result<(), String> {
     let argv: Vec<String> = argv();
     if argv.first().is_some_and(|a| a == "--dump-textures") {
@@ -5588,9 +5597,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         stages.skip();
     }
     perf.begin();
+    // Whether the last time round ran a tick and drew nothing (P205).
+    let mut ticked = false;
     loop {
-        // The picture before this one is the page's until its next frame (P196).
-        pace::shown().await;
+        // The picture before this one is the page's until its next frame (P196). A tick is not a
+        // picture: waiting for the page's frame after one as well spent a display frame on every
+        // tick, which held a 60 Hz page to 30 pictures a second and a slower one to fewer still.
+        if !std::mem::take(&mut ticked) {
+            pace::shown().await;
+        }
         // A replacement changed while riding (V86): its textures' pixels swapped where the software
         // renderer reads them, and uploaded again for the GPU's.
         for (key, texture) in texture_reload.as_mut().map(textures::Reload::poll).unwrap_or_default() {
@@ -7369,6 +7384,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
 
         pacer.ran();
+        ticked = true;
         continue;
         }
 
@@ -8343,10 +8359,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         stages.frame();
         loaded.get_or_insert_with(|| (game_render::tally::Tally::now(), stages::bytes_read_mark()));
         if let Some(slow) = stages.take_slow().filter(|_| args.timings) {
-            println!("     {slow} at tick {}", pacer.ticks());
+            timing(format!("     {slow} at tick {}", pacer.ticks()));
         }
         if args.timings && stages_since.elapsed() >= Duration::from_secs(1) {
-            println!("     {}; {}", stages.line(), stages.worst_line());
+            timing(format!("     {}; {}", stages.line(), stages.worst_line()));
             stages_since = Instant::now();
         }
         top = Instant::now();

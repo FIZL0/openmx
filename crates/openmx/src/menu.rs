@@ -1222,10 +1222,20 @@ impl Default for Settings {
             texture_packs: Vec::new(),
             texture_packs_off: Vec::new(),
             filtering: Filtering::default(),
-            shadows: Shadows::default(),
+            shadows: shadows_default(),
             markers: [true; SEATS_MAX],
         }
     }
+}
+
+/// The Shadows a rider has before choosing (P205): ours, but the original's on a phone's page,
+/// whose GPU the two shadow maps cost most (opentennis's B413: low shadows by default on phones).
+fn shadows_default() -> Shadows {
+    #[cfg(target_arch = "wasm32")]
+    if crate::host_phone() {
+        return Shadows::Original;
+    }
+    Shadows::default()
 }
 
 /// A `texture_packs` line's folder names (V84): comma-separated, each part of a path under `mods/`
@@ -1503,10 +1513,10 @@ impl Settings {
     fn filtering_text(&self) -> String {
         if self.filtering == Filtering::default() { String::new() } else { format!("texture_filtering = {}\n", self.filtering.word()) }
     }
-
-    /// Shadows (V108), only when not ours, so a file from before it is written as it was.
+    /// Shadows (V108), only when not the default (ours, or the original's on a phone: P205), so a file
+    /// from before it is written as it was.
     fn shadows_text(&self) -> String {
-        if self.shadows == Shadows::default() { String::new() } else { format!("shadows = {}\n", self.shadows.word()) }
+        if self.shadows == shadows_default() { String::new() } else { format!("shadows = {}\n", self.shadows.word()) }
     }
 
     /// A world's sky (MD9), only when it is not the default, so a file from before it is written as

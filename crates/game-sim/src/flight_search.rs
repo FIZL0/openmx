@@ -336,6 +336,73 @@ fn world_of(
     radius: F,
     toys: bool,
 ) -> (Broad, Vec<Collidable>) {
+    let (mut broad, objects, filing) = world_unfiled(props, bikes, field, centre, radius, toys);
+    filing.file(&mut broad);
+    (broad, objects)
+}
+
+/// What a world's static tree is filed with, in order (the props', then the plants'), and the box it
+/// is laid over: the tree [`Filing::file`] fills is a function of these alone (P205).
+struct Filing {
+    lo: [F; 2],
+    hi: [F; 2],
+    items: Vec<(usize, [F; 4], [F; 4])>,
+}
+
+/// How many filled trees each thread keeps ([`Filing::file`]): a tick's worlds are a few (the bike's
+/// three searches share one; the plane's, the wreck's and the put-back's are the flown one), more
+/// only where a world of many tiles hands over another square's set.
+const FILED_KEPT: usize = 8;
+
+thread_local! {
+    /// The trees last filled, newest first, each under its [`Filing`] as bits.
+    static FILED: std::cell::RefCell<Vec<(Vec<u32>, broad_phase::Quadtree)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl Filing {
+    /// Every item into `broad`'s tree as [`broad_build::key`] places it. The ride builds its worlds
+    /// afresh for every search, three or more a tick, and filing every prop and plant of the near set
+    /// was half the browser's frame (P205); the tree is a pure function of the box and the items, so
+    /// one filed from the same items, bit for bit, is the same tree and is copied rather than filed
+    /// again.
+    fn file(self, broad: &mut Broad) {
+        let Structure::Tree(tree) = &mut broad.structures[0] else { unreachable!("the table's first structure is its tree") };
+        let bits = |v: &[F]| v.iter().map(|f| f.0.to_bits()).collect::<Vec<u32>>();
+        let mut stamp = Vec::with_capacity(4 + 9 * self.items.len());
+        stamp.extend(bits(&self.lo));
+        stamp.extend(bits(&self.hi));
+        for (o, c, h) in &self.items {
+            stamp.push(u32::try_from(*o).expect("a collidable's number fits a word"));
+            stamp.extend(bits(c));
+            stamp.extend(bits(h));
+        }
+        FILED.with(|filed| {
+            let mut filed = filed.borrow_mut();
+            if let Some(k) = filed.iter().position(|(s, _)| *s == stamp) {
+                let kept = filed.remove(k);
+                *tree = kept.1.clone();
+                filed.insert(0, kept);
+                return;
+            }
+            for (o, c, h) in &self.items {
+                let key = broad_build::key(tree, self.hi, *c, *h);
+                broad_build::insert(tree, *o, key);
+            }
+            filed.insert(0, (stamp, tree.clone()));
+            filed.truncate(FILED_KEPT);
+        });
+    }
+}
+
+/// [`world_of`] with its tree laid but nothing filed in it yet, and what to file.
+fn world_unfiled(
+    props: &[Prop],
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+    toys: bool,
+) -> (Broad, Vec<Collidable>, Filing) {
     let probe = |flags, radius| Collidable {
         class: Class::Object,
         flags,
@@ -353,6 +420,7 @@ fn world_of(
     let (mut tree, cell_size) = broad_build::tree_over(lo, hi, F(TREE_LEAST));
     // It reports the box its cells cover, which is what the gather's bound is measured in.
     tree.flags = 2;
+    let mut filing = Filing { lo, hi, items: Vec::new() };
     let mut moving = Vec::new();
     for (i, p) in props.iter().enumerate() {
         if toys && p.moving.is_some() {
@@ -384,8 +452,7 @@ fn world_of(
         // so not quite [`Prop::centre`]).
         let (c, h) = prop_box(p);
         places.push(Placement { centre: c, ..Placement::default() });
-        let key = broad_build::key(&tree, hi, c, h);
-        broad_build::insert(&mut tree, FIRST + i, key);
+        filing.items.push((FIRST + i, c, h));
     }
     let mut block = vec![None; MOVING_BLOCK as usize];
     moving.extend([RAY, SWEEP]);
@@ -424,7 +491,7 @@ fn world_of(
         places,
         ..Broad::default()
     };
-    (broad, objects)
+    (broad, objects, filing)
 }
 
 /// [`world_among`] with the ecosystem's plants standing in it (S102): after the bikes, plant `g` as a
@@ -475,17 +542,16 @@ fn wooded_of(
             Some(([a[0].min(c[0]), a[1].min(c[1])], [b[0].max(d[0]), b[1].max(d[1])]))
         }
     };
-    let (mut broad, mut objects) = world_of(props, bikes, field, centre, radius, toys);
-    let (_, hi) = tree_box(props, field);
-    let Structure::Tree(tree) = &mut broad.structures[0] else { unreachable!("the table's first structure is its tree") };
+    // The plants are filed after the props, in the same tree over the same box.
+    let (mut broad, mut objects, mut filing) = world_unfiled(props, bikes, field, centre, radius, toys);
     for g in trees.groups() {
         let (c, h) = g.bounds(trees.cell());
         let o = objects.len();
         objects.push(Collidable { class: Class::Group, nearby: true, ..Collidable::default() });
         broad.places.push(Placement { centre: c, cell: [g.cell[0], g.cell[2]], model: g.model, blend: g.blend, ..Placement::default() });
-        let key = broad_build::key(tree, hi, c, h);
-        broad_build::insert(tree, o, key);
+        filing.items.push((o, c, h));
     }
+    filing.file(&mut broad);
     for p in &trees.props.props {
         objects.push(Collidable {
             class: Class::Object,
