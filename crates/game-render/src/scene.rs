@@ -408,6 +408,50 @@ impl Preset {
         }
         out
     }
+
+    /// Every follow camera of one screen layout in an MX vs. ATV Unleashed camera file
+    /// (`Cam\FC_ATVDefault.pb`, `FC_ATV.ini`): sections `[<aspect>/<viewport>/<n>]`, so `view` is
+    /// `4x3/1p`, `16x9/1p`, `4x3/2pv` and the like. The keys are `cpresets.ini`'s, with more beside
+    /// them (`Min`/`MaxFollowingDistance`, `Min`/`MaxFOV`, the filters, `OffsetFromBodyPoint`) that
+    /// nothing reads yet.
+    pub fn parse_follow(text: &str, view: &str) -> Vec<Preset> {
+        let mut out = Vec::new();
+        for s in ini::parse(text) {
+            let ours = s
+                .name
+                .rsplit_once('/')
+                .is_some_and(|(v, n)| v.eq_ignore_ascii_case(view) && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            if !ours {
+                continue;
+            }
+            out.push(Preset {
+                name: s.get("Name").unwrap_or("").trim_matches('"').to_string(),
+                angle_y: s.number("AngleY").unwrap_or(180.0),
+                angle_x: s.number("AngleX").unwrap_or(65.0),
+                distance: s.number("FollowingDistance").unwrap_or(13.0),
+                look_ahead: s.number("LookAheadDistance").unwrap_or(20.0),
+                fov: s.number("FOV").unwrap_or(85.0),
+            });
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::Preset;
+
+    /// MX vs. ATV's camera file names each preset `[<aspect>/<viewport>/<n>]` (MD37c).
+    #[test]
+    fn follow_presets_are_read_by_layout() {
+        let text = "; comment\r\n[4x3/1p/1]\r\nName = \"Race Camera 1\"\r\nAngleX = 42.0\r\nFollowingDistance = 14.5\r\n\
+                    FOV = 85.0\r\n\r\n[4x3/2pv/1]\r\nName = \"Split\"\r\n\r\n[16x9/1p/1]\r\nName = \"Wide\"\r\n\
+                    [4x3/1p/2]\r\nName = \"Race Camera 2\"\r\n";
+        let one: Vec<_> = Preset::parse_follow(text, "4x3/1p").into_iter().map(|p| (p.name, p.angle_x, p.distance)).collect();
+        assert_eq!(one, [("Race Camera 1".to_string(), 42.0, 14.5), ("Race Camera 2".to_string(), 65.0, 13.0)]);
+        assert_eq!(Preset::parse_follow(text, "16x9/1p")[0].name, "Wide");
+        assert!(Preset::parse(text).is_empty());
+    }
 }
 
 /// One part of a vehicle: a model, and the node of the chassis it is placed at.

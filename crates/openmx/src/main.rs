@@ -240,6 +240,7 @@ mod textures;
 mod track_mods;
 mod track_previews;
 mod trick_packs;
+mod machine_packs;
 mod worlds;
 mod world_dress;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
@@ -1867,6 +1868,9 @@ pub(crate) async fn run() -> Result<(), String> {
     let argv: Vec<String> = argv();
     if argv.first().is_some_and(|a| a == "--dump-textures") {
         return dump_textures(&argv[1..]);
+    }
+    if argv.first().is_some_and(|a| a == "--machine-packs") {
+        return machine_packs_report(&argv[1..]);
     }
     // P199: the store maintainer's card, index and uploads, on a thread of its own (its own runtime)
     #[cfg(not(target_arch = "wasm32"))]
@@ -8901,6 +8905,30 @@ fn install_textures(args: &Args) -> Option<textures::Reload> {
         println!("textures: OPENMX_TEXTURE_RELOAD: changed files are drawn while riding");
     }
     reload
+}
+
+/// `openmx --machine-packs [MODS]` (MD37c): every machine pack in `MODS/machines/` (the mods folder
+/// beside the settings by default) read through openmx's readers, a report each. Loading one is all
+/// it does; nothing rides a machine pack yet.
+fn machine_packs_report(rest: &[String]) -> Result<(), String> {
+    let mods = match rest {
+        [] => menu::store_dir(Disc::configured_path().ok().as_deref()).join(track_mods::MODS_DIR),
+        [dir] => std::path::PathBuf::from(dir),
+        _ => return Err("--machine-packs wants at most a mods folder".into()),
+    };
+    let (packs, why) = machine_packs::find(&mods);
+    for pack in &packs {
+        for line in pack.report() {
+            println!("{line}");
+        }
+    }
+    for w in &why {
+        println!("machine packs: {w}");
+    }
+    if packs.is_empty() {
+        println!("machine packs: none in {} (openmx-mods' tools/import-atv makes one)", mods.join(machine_packs::MACHINES_DIR).display());
+    }
+    Ok(())
 }
 
 /// `openmx --dump-textures [OUT] [--from DIR]` (V84): every disc texture, or with `--from` every one a
