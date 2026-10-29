@@ -199,7 +199,7 @@ pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> V
     }];
     contact_search::collide(&mut records, 0, None, None, &mut probe, dt);
     let mut list = records.swap_remove(0).contacts;
-    if let Some(e) = inside(col, at, cars, first).filter(|_| list.len() < CAPACITY) {
+    if let Some(e) = inside(col, at, cars, first, dt).filter(|_| list.len() < CAPACITY) {
         if !list.iter().any(|c| c.from == e.from && c.on_body == e.on_body) {
             list.push(e);
         }
@@ -208,15 +208,26 @@ pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> V
 }
 
 /// **A car that came over the head ray** (the port's own): the ray reaching highest
-/// ([`air::HEAD`]'s, ray 8 of the files') with its end inside a car's root box, as a contact on the
-/// box's nearest face (a side, an end or the roof; never the floor) at the end's place.
+/// ([`air::HEAD`]'s, ray 8 of the files') with its end inside a car's root box, and either enclosed by
+/// the car's mesh ([`enclosed`]) or just come under the end it drives forward, as a contact on the box's
+/// nearest face (a side, an end or the roof; never the floor) at the end's place.
 ///
 /// A ray that starts inside a mesh strikes nothing, its every face a back face, so a car whose end
 /// sweeps into a bike standing beside the line, or a bike squeezed between two cars where they
 /// meet, has nothing on its list while the train runs through it. The original's chassis sweep back
 /// (not ported) answers the bike's own travel, not the car's. As the head ray's entry, the wreck test
 /// reads it as scenery struck ([`wreck_contacts`]): a rider the train ran into comes off.
-fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize) -> Option<Contact> {
+///
+/// The box alone is not the car (S216). Free06's dump truck's is 28 ft wide, 26 tall and 46 long
+/// round a body that narrows under its bed and between its wheels, so a bike riding up beside one had
+/// its head ray's end inside the box with no face of the truck near it, and came off at once with
+/// nothing struck. So the end counts when the car's mesh shuts it in ([`enclosed`]), or when the box
+/// face it is nearest is the end the car drives forward and that end came over it this tick (no
+/// deeper than the car's step): a locomotive's nose narrows inside its box, and the bike it runs
+/// down from behind (S170) has its head there, outside the mesh, as it comes off. A bike beside a
+/// car is nearest a side, and one that rides into a car's flank near its front came in by its own
+/// travel, deeper than the car's step.
+fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> Option<Contact> {
     let head = col.rays.segments.iter().max_by(|a, b| a.to.y().total_cmp(&b.to.y()))?;
     let end = math::transform_point(at, head.to);
     for (k, p) in cars.iter().enumerate() {
@@ -232,11 +243,20 @@ fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize) -> Option<Conta
         // The nearest face out, `(axis, outward sign, how far)`: x first, then z, then up.
         let faces = [(0, F::ONE, hi[0] - q[0]), (0, F(-1.0), q[0] - lo[0]), (2, F::ONE, hi[2] - q[2]),
                      (2, F(-1.0), q[2] - lo[2]), (1, F::ONE, hi[1] - q[1])];
-        let (axis, sign, _) = faces.into_iter().fold(faces[0], |best, f| if f.2 < best.2 { f } else { best });
+        let (axis, sign, within) = faces.into_iter().fold(faces[0], |best, f| if f.2 < best.2 { f } else { best });
+        let row = p.to_world.0[axis];
+        // The end the car drives forward, come over the head this tick: no further in than its step.
+        let leading = axis == 2
+            && p.moving.is_some_and(|m| {
+                let ahead = crate::contact::dot(m.velocity, row) * sign;
+                F::ZERO < ahead && within < ahead * dt
+            });
+        if !leading && !enclosed(&p.mesh, q) {
+            continue;
+        }
         let mut on = q;
         on[axis] = if sign > F::ZERO { hi[axis] } else { lo[axis] };
         let point = math::transform_point(&p.to_world, Vf::new(on[0].0, on[1].0, on[2].0, 1.0));
-        let row = p.to_world.0[axis];
         let normal = Vf::new((F(row.x()) * sign).0, (F(row.y()) * sign).0, (F(row.z()) * sign).0, 0.0);
         return Some(Contact {
             kind: 0,
@@ -252,6 +272,34 @@ fn inside(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize) -> Option<Conta
         });
     }
     None
+}
+
+/// Whether `q`, a point in a car's own frame, is shut in by its mesh (the port's own, S216): a ray
+/// from it along each of the car's axes but down — out of both sides, both ends and the roof —
+/// meets one of its faces. Either facing counts: a train car's end faces point into it, and its body
+/// has faces inside. Down is not asked, because a train car's mesh is open underneath. A point
+/// beside the car, or in a notch of its box, sees out on at least one side.
+fn enclosed(mesh: &crate::track::Mesh, q: [F; 3]) -> bool {
+    let m = crate::collide::MeshRef::of(mesh);
+    [(0, F::ONE), (0, F(-1.0)), (2, F::ONE), (2, F(-1.0)), (1, F::ONE)].into_iter().all(|(a, s)| {
+        m.triangles.iter().any(|t| {
+            let along = t.normal[a] * s;
+            if along == F::ZERO {
+                return false;
+            }
+            let height = t.normal[0] * q[0] + t.normal[1] * q[1] + t.normal[2] * q[2] + t.distance;
+            if !(F::ZERO < -height / along) {
+                return false;
+            }
+            // The crossing, in the two axes across the ray, inside the triangle: on the same side
+            // of all three edges.
+            let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+            let corners = m.corners(t).map(|c| [F(c.0[u]), F(c.0[v])]);
+            let side = |e0: [F; 2], e1: [F; 2]| (e1[0] - e0[0]) * (q[v] - e0[1]) - (e1[1] - e0[1]) * (q[u] - e0[0]);
+            let sides = [side(corners[0], corners[1]), side(corners[1], corners[2]), side(corners[2], corners[0])];
+            sides.iter().all(|&d| !(d < F::ZERO)) || sides.iter().all(|&d| !(F::ZERO < d))
+        })
+    })
 }
 
 /// What of a bike's list the wreck test reads as scenery: its own entries (kind 0) with nothing on
