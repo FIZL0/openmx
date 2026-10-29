@@ -38,8 +38,12 @@ const ask = new URLSearchParams({ join: ticket, relay, codes: '', ticks, name: '
 const url = `http://127.0.0.1:${server.address().port}/?${ask}`;
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openmx-page-'));
+// No extensions (K7): this machine's chromium brings its own into every profile, the policy's force-installed one
+// fetched from the web store a few seconds in, and one arriving mid-load aborted the worker's module fetch (the page
+// then waits on a ride that never starts); nor its background calls to Google (GCM sign-in, component updates).
 const chrome = spawn('chromium', ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-  '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  '--no-first-run', '--no-default-browser-check', '--disable-extensions',
+  '--disable-component-extensions-with-background-pages', '--disable-background-networking', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
 const quit = code => {
   const done = () => {
     fs.rmSync(profile, { recursive: true, force: true });
@@ -85,17 +89,28 @@ const send = (method, params = {}) => new Promise(r => {
   pending.set(i, r);
   ws.send(JSON.stringify({ id: i, method, params }));
 });
-const evaluate = async expression =>
-  (await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result?.result?.value;
+// A reply that never comes (K7 diagnostics): said on stderr, and the loop asks again.
+const evaluate = async expression => {
+  let late;
+  const r = await Promise.race([send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }),
+    new Promise(go => (late = setTimeout(() => go(null), 10000)))]);
+  clearTimeout(late);
+  if (!r) console.error('page: no answer to Runtime.evaluate in 10 s');
+  return r?.result?.result?.value;
+};
 
 await send('Runtime.enable');
 await send('Page.enable');
 await send('Page.navigate', { url });
 process.stdout.write('page opened\n');
 let sent = false;
+let quiet = 0;
 for (;;) {
   await new Promise(r => setTimeout(r, 250));
-  const [state, lines] = (await evaluate('[JSON.stringify(window.openmxOnline ?? null), window.openmxTicks ?? ""]')) ?? [];
+  const [state, lines, page] = (await evaluate('[JSON.stringify(window.openmxOnline ?? null), window.openmxTicks ?? "", ' +
+    'JSON.stringify([document.readyState, document.body?.dataset.state, document.querySelector("#status")?.textContent])]')) ?? [];
+  // no state yet: what the page is at, every five seconds, on stderr (the test's log, not progress)
+  if ((!state || state === 'null') && ++quiet % 20 === 0) console.error(`page: no state yet, at ${page}`);
   if (!sent && lines) {
     process.stdout.write(lines.split('\n').filter(Boolean).map(l => `tick ${l}\n`).join(''));
     sent = true;

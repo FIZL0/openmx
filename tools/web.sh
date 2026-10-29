@@ -118,10 +118,16 @@ fi
 # the result moved into place whole.
 exec 8>"$out/pkg.lock"
 command -v flock >/dev/null 2>&1 && flock 8
-rm -rf "$out/pkg.new"
-"$wb" --target web --no-typescript --out-dir "$out/pkg.new" "$wasm"
-rm -rf "$out/pkg"
-mv "$out/pkg.new" "$out/pkg"
+# Not again for the module the pkg/ there was made from (K7): a test serves pkg/ while the next test's --check runs,
+# and the swap below leaves a moment with no pkg/ at all, which a page loading then reads as a failed fetch.
+stamp="$(cksum <"$wasm") $wbv"
+if [ ! -f "$out/pkg/openmx_web_bg.wasm" ] || [ ! -f "$out/pkg/openmx_web.js" ] || [ "$(cat "$out/pkg.stamp" 2>/dev/null)" != "$stamp" ]; then
+    rm -rf "$out/pkg.new"
+    "$wb" --target web --no-typescript --out-dir "$out/pkg.new" "$wasm"
+    rm -rf "$out/pkg"
+    mv "$out/pkg.new" "$out/pkg"
+    echo "$stamp" >"$out/pkg.stamp"
+fi
 exec 8>&-
 if [ "$check" = 1 ]; then
     echo "$out/pkg"
