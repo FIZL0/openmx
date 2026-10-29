@@ -313,8 +313,8 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Restart), "{acts:?}");
     tap(&mut m, &mut r, Control::Start);
-    // under Game Modifiers since P134
-    for _ in 0..7 {
+    // under Game Modifiers since P134, and Controllers since P210
+    for _ in 0..8 {
         tap(&mut m, &mut r, Control::Down);
     }
     // Main Menu asks first, on Stay (P110): Up onto the leaving row, then Cross.
@@ -6494,4 +6494,310 @@ fn the_vibration_row_toggles_and_survives_a_restart() {
     assert!(!settings.vibration);
     std::fs::remove_dir_all(dir).ok();
     assert!(Settings::parse("vibration = on\n").vibration);
+}
+
+/// The Controllers screen's rig (P210): two Pro Controllers plugged in beside the keyboard, the
+/// shell's seats over them with the keyboard 1P, and a menu on the main menu with the keyboard its
+/// 1P — the screen read the way main.rs's front end reads it, every device on its own.
+struct Controllers {
+    root: std::path::PathBuf,
+    a: pad::tests::FakePad,
+    b: pad::tests::FakePad,
+    ids: [String; 2],
+    seats: pad::Seats,
+    m: Menu,
+    r: Reader,
+    readers: Readers,
+    now: u64,
+}
+
+impl Controllers {
+    fn new(name: &str) -> Controllers {
+        let root = pad::tests::scratch(name);
+        let (dev, sys) = (root.join("dev"), root.join("sys"));
+        std::fs::create_dir_all(&dev).unwrap();
+        let a = pro_controller(&dev, &sys, "js0");
+        let b = pro_controller(&dev, &sys, "js1");
+        let mut seats = pad::tests::seats_in(&dev, &sys, pad::Wiring::default());
+        seats.at(1_000_000);
+        let ids: Vec<String> = pad::tests::devices_now(&mut seats, &|_| false)
+            .into_iter()
+            .filter_map(|(d, _, _)| match d {
+                pad::Device::Pad(id) => Some(id),
+                pad::Device::Keys => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2, "two pads: {ids:?}");
+        assert_ne!(ids[0], ids[1]);
+        seats.set_first(Some(pad::Device::Keys));
+        let (mut m, r) = fresh();
+        m.set_p1(Dev::Keys);
+        let mut rig = Controllers { root, a, b, ids: [ids[0].clone(), ids[1].clone()], seats, m, r, readers: Readers::new(), now: 1_000_000 };
+        rig.frame(&|_| false);
+        rig
+    }
+
+    fn dev(&self, pad: usize) -> Dev {
+        Dev::Pad(self.ids[pad].clone())
+    }
+
+    fn device(&self, pad: usize) -> pad::Device<String> {
+        pad::Device::Pad(self.ids[pad].clone())
+    }
+
+    /// One front-end frame, 1/60 s on: the take-over gate, the devices read, the menu's 1P moved
+    /// after a take-over, the Controllers screen given the seats, every device's presses stepped,
+    /// and what the screen moved handed back to the seats.
+    fn frame(&mut self, held: &dyn Fn(u8) -> bool) {
+        self.now += 16_667;
+        self.seats.at(self.now);
+        self.seats.set_take_over(self.m.takes_over());
+        let first = self.seats.first().cloned();
+        let devices = pad::tests::devices_now(&mut self.seats, held);
+        if self.seats.first() != first.as_ref()
+            && let Some(f) = self.seats.first()
+        {
+            self.m.set_p1(dev_of(f.clone()));
+        }
+        let assigned: Vec<Option<Dev>> = self.seats.assigned().into_iter().map(|d| d.map(dev_of)).collect();
+        let present: Vec<(Dev, String)> = devices.iter().map(|(d, _, _)| (dev_of(d.clone()), String::new())).collect();
+        self.m.controllers(&assigned, &present);
+        let reports: Vec<(Dev, Report, u16)> = devices.into_iter().map(|(d, r, t)| (dev_of(d), r, t)).collect();
+        let presses = self.readers.read_taps(&reports);
+        self.m.step_devices(&presses);
+        if let Some(moved) = self.m.take_assigned() {
+            let mut to: [Option<pad::Device<String>>; pad::SEATS] = Default::default();
+            for (i, d) in moved.into_iter().enumerate() {
+                to[i] = d.map(|d| match d {
+                    Dev::Keys => pad::Device::Keys,
+                    Dev::Pad(id) => pad::Device::Pad(id),
+                });
+            }
+            self.seats.assign(&to);
+        }
+    }
+
+    /// Pad `pad`'s B, the bottom button (Cross, P64), pressed and let go before a frame.
+    fn cross(&mut self, pad: usize) {
+        let p = if pad == 0 { &mut self.a } else { &mut self.b };
+        p.button(0, true);
+        p.button(0, false);
+        self.frame(&|_| false);
+        self.frame(&|_| false);
+    }
+
+    /// Pad `pad`'s hat pushed left (or right) and back before a frame.
+    fn hat(&mut self, pad: usize, left: bool) {
+        let p = if pad == 0 { &mut self.a } else { &mut self.b };
+        p.axis(4, if left { -i16::MAX } else { i16::MAX });
+        p.axis(4, 0);
+        self.frame(&|_| false);
+        self.frame(&|_| false);
+    }
+
+    /// Pad `pad`'s Square (js 3, the left face button), the screen's Take Off.
+    fn square(&mut self, pad: usize) {
+        let p = if pad == 0 { &mut self.a } else { &mut self.b };
+        p.button(3, true);
+        p.button(3, false);
+        self.frame(&|_| false);
+        self.frame(&|_| false);
+    }
+
+    /// A key tapped: down a frame, up a frame.
+    fn key(&mut self, code: u8) {
+        self.frame(&|c| c == code);
+        self.frame(&|_| false);
+    }
+
+    /// The Controllers screen from the main menu, by the keyboard.
+    fn open(&mut self) {
+        main_to(&mut self.m, &mut self.r, "Controllers");
+        assert_eq!(self.m.screen(), Some(Screen::Assign));
+        self.frame(&|_| false);
+    }
+
+    /// Off the screen by the keyboard's Circle, back on the main menu.
+    fn close(&mut self) {
+        self.m.step_devices(&[(Dev::Keys, Press { back: true, ..Press::default() })]);
+        assert_eq!(self.m.screen(), Some(Screen::Main));
+        self.frame(&|_| false);
+    }
+
+    /// One ride frame of the seats with `held` the keyboard.
+    fn ride(&mut self, held: &dyn Fn(u8) -> bool) -> [pad::SeatInput; pad::SEATS] {
+        self.now += 16_667;
+        self.seats.at(self.now);
+        pad::tests::frame(&mut self.seats, held)
+    }
+}
+
+impl Drop for Controllers {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).ok();
+    }
+}
+
+fn dev_of(d: pad::Device<String>) -> Dev {
+    match d {
+        pad::Device::Keys => Dev::Keys,
+        pad::Device::Pad(id) => Dev::Pad(id),
+    }
+}
+
+/// P210: on the Controllers screen the second pad steps left onto 2P, swapping with the first pad,
+/// and the keyboard steps right, swapping with it, so the second pad is 1P — and the ride after it
+/// reads them so: the second pad's B on 1P, the keyboard's Left on 2P, the first pad's B on 3P.
+/// The pad moved onto 1P takes the screen (and the menus) at its first press there, and its card
+/// glows for it.
+#[test]
+fn the_controllers_screen_moves_and_swaps_the_seats_the_next_ride_reads() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Controllers::new("menu-controllers-swap");
+    let (a, b) = (rig.device(0), rig.device(1));
+    // The keyboard is 1P, and the pads took 2P and 3P as they came.
+    let seats = rig.seats.assigned();
+    assert_eq!(seats[..3], [Some(pad::Device::Keys), Some(a.clone()), Some(b.clone())]);
+    rig.open();
+
+    rig.hat(1, true);
+    assert_eq!(rig.m.assign.seats[..3], [Some(Dev::Keys), Some(rig.dev(1)), Some(rig.dev(0))], "the second pad swapped onto 2P");
+    assert_eq!(rig.seats.assigned()[..3], [Some(pad::Device::Keys), Some(b.clone()), Some(a.clone())], "and the seats have it at once");
+    assert!(rig.m.assign.slid(&rig.dev(1)).is_some(), "its card slides over");
+
+    rig.key(window::key::RIGHT);
+    assert_eq!(rig.m.assign.seats[..3], [Some(rig.dev(1)), Some(Dev::Keys), Some(rig.dev(0))], "the keyboard swapped with it");
+    assert_eq!(rig.seats.assigned()[..3], [Some(b.clone()), Some(pad::Device::Keys), Some(a.clone())]);
+    assert_eq!(rig.m.p1(), Some(&Dev::Keys), "the pad has not pressed on 1P yet");
+    rig.cross(1);
+    assert_eq!(rig.m.p1(), Some(&rig.dev(1)), "the pad moved onto 1P takes the screen at its first press");
+    assert!(rig.m.assign.glow(&rig.dev(1)) > 0.0, "and its card lights");
+    // The slide is opentennis's 0.3 s.
+    assert_eq!(join::SLIDE_TICKS, 18);
+
+    rig.close();
+    assert_eq!(rig.seats.first(), Some(&b), "1P is the second pad");
+    // The next ride: each seat its device's.
+    rig.ride(&|_| false);
+    rig.b.button(0, true);
+    rig.a.button(0, true);
+    let now = rig.ride(&|c| c == window::key::LEFT);
+    let has = |s: &pad::SeatInput, c: Control| matches!(s, pad::SeatInput::Playing(r) if r.buttons() & c.mask() != 0);
+    assert!(has(&now[0], Control::Cross), "1P rides the second pad: {:?}", now[0]);
+    assert!(!has(&now[0], Control::Left), "and not the keyboard");
+    assert!(has(&now[1], Control::Left), "2P rides the keyboard: {:?}", now[1]);
+    assert!(has(&now[2], Control::Cross), "3P rides the first pad: {:?}", now[2]);
+    rig.b.button(0, false);
+    rig.a.button(0, false);
+    // Still so a while later: the seats' own update leaves them be.
+    for _ in 0..5 {
+        rig.ride(&|_| false);
+    }
+    assert_eq!(rig.seats.assigned()[..3], [Some(b), Some(pad::Device::Keys), Some(a)]);
+}
+
+/// P210: with the keyboard on 1P and the first pad taken off every seat on the Controllers screen,
+/// that pad's press on the main menu takes 1P — the menus are its — and the keyboard rides on
+/// beside it: a ride's 1P reads both.
+#[test]
+fn a_pad_pressed_while_the_keyboard_holds_1p_takes_1p_and_the_keyboard_still_steers() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Controllers::new("menu-controllers-take");
+    let a = rig.device(0);
+    rig.open();
+    rig.square(0);
+    assert_eq!(rig.m.assign.seats[..3], [Some(Dev::Keys), None, Some(rig.dev(1))], "the first pad is on no seat");
+    assert!(rig.m.assign.loose().contains(&rig.dev(0)));
+    rig.close();
+    assert!(rig.m.takes_over());
+    // Nobody seats it again on their own.
+    rig.frame(&|_| false);
+    assert_eq!(rig.seats.assigned()[1], None);
+
+    rig.cross(0);
+    assert_eq!(rig.seats.first(), Some(&a), "the pad took 1P");
+    assert_eq!(rig.seats.assigned()[0], Some(a.clone()));
+    assert_eq!(rig.m.p1(), Some(&rig.dev(0)), "the menus are its");
+    assert!(rig.m.hosts(&Dev::Keys), "and the keyboard's as well");
+
+    rig.ride(&|_| false);
+    let now = rig.ride(&|c| c == window::key::LEFT);
+    let has = |s: &pad::SeatInput, c: Control| matches!(s, pad::SeatInput::Playing(r) if r.buttons() & c.mask() != 0);
+    assert!(has(&now[0], Control::Left), "the keyboard still steers 1P: {:?}", now[0]);
+    rig.a.button(0, true);
+    let now = rig.ride(&|_| false);
+    assert!(has(&now[0], Control::Cross), "beside the pad: {:?}", now[0]);
+    rig.a.button(0, false);
+    rig.ride(&|_| false);
+}
+
+/// P210: a pad on 2P never takes 1P from the keyboard: not one a person put there on the
+/// Controllers screen, nor one a ride's 2P rides on. Only on the Controllers screen does it move.
+#[test]
+fn a_2p_pad_never_takes_1p() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Controllers::new("menu-controllers-2p");
+    let b = rig.device(1);
+    // Placed on 2P: the second pad steps left onto it.
+    rig.open();
+    rig.hat(1, true);
+    rig.close();
+    assert_eq!(rig.seats.assigned()[1], Some(b.clone()));
+    rig.cross(1);
+    assert_eq!(rig.seats.first(), Some(&pad::Device::Keys), "the placed 2P pad did not take 1P");
+    assert_eq!(rig.m.p1(), Some(&Dev::Keys));
+    assert_eq!(rig.seats.assigned()[1], Some(b.clone()));
+
+    // A rider's 2P: the pads as they came, the ride reading pad seats 0 and 1.
+    let mut rig = Controllers::new("menu-controllers-2p-ride");
+    let a = rig.device(0);
+    rig.seats.set_riding(&[0, 1]);
+    rig.seats.set_take_over(true);
+    rig.ride(&|_| false);
+    rig.a.button(0, true);
+    rig.ride(&|_| false);
+    rig.a.button(0, false);
+    rig.ride(&|_| false);
+    assert_eq!(rig.seats.first(), Some(&pad::Device::Keys), "2P's rider kept their pad");
+    assert_eq!(rig.seats.assigned()[1], Some(a));
+    // While the pad on 3P, which no rider reads and nobody placed, does take it.
+    rig.b.button(0, true);
+    rig.ride(&|_| false);
+    rig.b.button(0, false);
+    rig.ride(&|_| false);
+    assert_eq!(rig.seats.first(), Some(&rig.device(1)));
+}
+
+/// P210's take-back and the touch pad, on the seats' own state: the keyboard's press takes 1P back
+/// only from a pad nobody placed there, and a real pad takes 1P from the touch pad.
+#[test]
+fn the_keyboard_takes_1p_back_and_a_real_pad_takes_it_from_the_touch_pad() {
+    let touch = |p: &&str| p.contains("Touch controls");
+    let mut slots: pad::PadSlots<&str> = pad::PadSlots::default();
+    slots.set_first(Some(pad::Device::Keys));
+    slots.update(&["pad"]);
+    assert!(slots.take_first(&"pad", &touch));
+    assert_eq!(slots.keys(), Some(0), "the keyboard rides beside it");
+    assert!(slots.take_back());
+    assert_eq!(slots.first(), Some(&pad::Device::Keys));
+    assert_eq!(slots.held[0], None);
+    // A pad placed on 1P on the Controllers screen is kept.
+    let mut seats: [Option<pad::Device<&str>>; pad::SEATS] = Default::default();
+    seats[0] = Some(pad::Device::Pad("pad"));
+    seats[1] = Some(pad::Device::Keys);
+    slots.assign(&seats, &["pad"]);
+    assert!(!slots.take_back());
+
+    // The touch pad as 1P: a real pad's press takes 1P, even once the touch pad hid.
+    let mut slots: pad::PadSlots<&str> = pad::PadSlots::default();
+    slots.set_first(Some(pad::Device::Pad("Touch controls")));
+    slots.update(&["Touch controls", "pad"]);
+    assert!(!slots.take_first(&"Touch controls", &touch));
+    slots.update(&["pad"]);
+    assert!(slots.take_first(&"pad", &touch));
+    assert_eq!(slots.first(), Some(&pad::Device::Pad("pad")));
+    // The menu keeps its 1P over the touch pad hiding, rather than the splash.
+    let (mut m, _) = fresh();
+    m.set_p1(Dev::Pad("Touch controls".into()));
+    assert!(!m.lost(&["pad".to_string()]));
 }

@@ -868,6 +868,11 @@ fn main_panel(menu: &Menu, at: usize) -> (&'static str, String, Vec<String>) {
             ("Mods", "Tracks, maps and music from the mods folder. Switch whole packs on and off.".into(), chips)
         }
         MAIN_SETTINGS => ("Settings", "Ride, Display, Audio, Controls and Camera, one tab each.".into(), vec!["L1 / R1 between tabs".into()]),
+        MAIN_CONTROLLERS => (
+            "Controllers",
+            "Which pad, keyboard or touch pad drives which seat. Every one moves itself with left and right, and lights up when pressed.".into(),
+            Vec::new(),
+        ),
         _ => ("Quit", "Back to the desktop. Everything is already saved.".into(), Vec::new()),
     }
 }
@@ -879,6 +884,7 @@ fn pause_panel(row: &str) -> (String, &'static str) {
         "Restart" => "Back to the start of this track, same machine, same modifiers.",
         "Audio" => "The Audio tab of Settings, opened straight from here.",
         "Settings" => "Every setting takes effect when the pause closes.",
+        "Controllers" => "Which pad, keyboard or touch pad drives which seat. The riders swap when their pads do.",
         "Clear Markers" => "Removes your session markers on this track, the saved ones with them.",
         "Main Menu" => "Ends the ride.",
         "Leave Session" => "Gives up your seat: your bike goes and the others ride on. The last one out ends the ride.",
@@ -942,6 +948,7 @@ impl Pen<'_> {
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page(menu, screen),
             Screen::Tracks => self.tracks(menu),
             Screen::Join => self.join(menu),
+            Screen::Assign => self.assign(menu),
             Screen::Split => self.split(menu),
             Screen::Keyboard => self.keyboard(menu),
             Screen::Games => self.games(menu),
@@ -1488,6 +1495,95 @@ impl Pen<'_> {
             hints.push((Btn::Start, "Pick Track"));
         }
         self.hints(&hints);
+    }
+
+    /// The Controllers screen (P210, opentennis's assign.rs): a column of the devices on no seat,
+    /// then the seats, 1P to 8P, four to a line, each with the card of what drives it. A card slides
+    /// from the column it left, and glows for a while when its device presses.
+    fn assign(&mut self, menu: &Menu) {
+        self.logo(true);
+        let a = &menu.assign;
+        let top = 8.0;
+        let bottom = STAGE.1 - BAND - 5.0;
+        let gap = 1.2;
+        let (lx, lw) = (3.0, 14.0);
+        let (x0, w) = (lx + lw + 2.0, 77.0 - (lx + lw + 2.0));
+        let cw = (w - gap * 3.0) / 4.0;
+        let lines = a.seats.len().div_ceil(4).max(1);
+        let ch = ((bottom - top - gap * (lines - 1) as f32) / lines as f32).min(14.0);
+        let seat_box = |i: usize| [x0 + (cw + gap) * (i % 4) as f32, top + (ch + gap) * (i / 4) as f32, cw, ch];
+        // No seat's column: a header, and the cards in it under each other.
+        let loose = a.loose();
+        let lh = 4.2f32.min((bottom - top - 2.4) / loose.len().max(1) as f32 - 0.6);
+        let loose_box = |k: usize| [lx, top + 2.4 + (lh + 0.6) * k as f32, lw, lh];
+        self.round([lx - 0.5, top - 0.5, lw + 1.0, bottom - top + 1.0], 1.0, [10, 5, 2, 110], [10, 5, 2, 110]);
+        self.text(Weight::Heavy, "No seat", lx + lw / 2.0, Pen::mid(top + 0.9, 1.3), 1.3, SLANT, [255, 240, 225, 160], Align::Centre);
+        // Where a column's card goes: a seat's box, or the next free place in no seat's column.
+        let home = |d: &Dev| match a.column(d) {
+            0 => loose_box(loose.iter().position(|l| l == d).unwrap_or(0)),
+            c => seat_box(c - 1),
+        };
+        let from = |c: usize| if c == 0 { loose_box(loose.len()) } else { seat_box(c - 1) };
+        for i in 0..a.seats.len() {
+            let b = seat_box(i);
+            let shut = i >= a.open;
+            self.fade = if shut { 0.4 } else { 1.0 };
+            self.round(b, 1.1, [10, 5, 2, 128], [10, 5, 2, 128]);
+            self.dashed(b, 1.1);
+            let big = 2.6f32.min(ch / 4.0);
+            self.text(Weight::Heavy, &format!("{}P", i + 1), b[0] + b[2] / 2.0, b[1] + ch * 0.42, big, SLANT, [255, 240, 225, 128], Align::Centre);
+            self.fade = 1.0;
+        }
+        // Every card at its place, sliding there from the one it left.
+        let mut cards: Vec<Dev> = a.seats.iter().flatten().cloned().collect();
+        cards.extend(loose.iter().cloned());
+        for d in &cards {
+            let to = home(d);
+            let b = match a.slid(d) {
+                Some((c, t)) => {
+                    let f = from(c);
+                    let mix = |k: usize| f[k] + (to[k] - f[k]) * t;
+                    [mix(0), mix(1), mix(2), mix(3)]
+                }
+                None => to,
+            };
+            let gone = !a.plugged(d);
+            let glow = a.glow(d);
+            let seat = a.column(d);
+            self.fade = if gone { 0.5 } else { 1.0 };
+            self.round([b[0] + 0.3, b[1] + 0.35, b[2], b[3]], 1.0, SHADOW, SHADOW);
+            if seat > 0 {
+                self.round(b, 1.0, [142, 15, 23, 235], [70, 6, 10, 235]);
+            } else {
+                self.round(b, 1.0, [60, 40, 30, 235], [30, 20, 14, 235]);
+            }
+            self.ring(b, 1.0, 0.18 + 0.3 * glow, if glow > 0.0 { PEACH } else { CHALK });
+            let mid = b[0] + b[2] / 2.0;
+            let size = 1.2f32.min(b[3] / 3.2);
+            let name = self.fit(Weight::Bold, &menu.dev_name(d), size, b[2] - 2.0);
+            let ny = if seat > 0 { b[1] + b[3] * 0.66 } else { b[1] + b[3] * 0.4 };
+            self.text(Weight::Bold, &name, mid, Pen::mid(ny, size), size, 0.0, CHALK, Align::Centre);
+            if seat > 0 {
+                let big = 2.6f32.min(b[3] / 4.0);
+                self.text(Weight::Heavy, &format!("{}P", seat), mid, b[1] + b[3] * 0.38, big, SLANT, CHALK, Align::Centre);
+            }
+            let y = b[1] + b[3] * if seat > 0 { 0.86 } else { 0.76 };
+            if gone {
+                self.text(Weight::Bold, "Gone: plug it back in", mid, Pen::mid(y, 0.95), 0.95, 0.0, PEACH, Align::Centre);
+            } else if glow > 0.0 {
+                self.text(Weight::Bold, "This is you", mid, Pen::mid(y, 0.95), 0.95, 0.0, PEACH, Align::Centre);
+            } else {
+                if seat > 0 {
+                    self.arrow(b[0] + 1.2, y, [-1.0, 0.0], 0.8, CHALK);
+                }
+                if seat < a.open {
+                    self.arrow(b[0] + b[2] - 1.2, y, [1.0, 0.0], 0.8, CHALK);
+                }
+            }
+            self.fade = 1.0;
+        }
+        self.title(Screen::Assign.title());
+        self.hints(&[(Btn::Circle, "Done"), (Btn::Square, "Take Off"), (Btn::Cross, "Find / Join"), (Btn::LeftRight, "Move")]);
     }
 
     /// A dashed rim round a box: short chalk dashes along its straight sides.
