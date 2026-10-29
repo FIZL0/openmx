@@ -917,7 +917,7 @@ fn trick(pen: &mut Pen, p: &Popup) -> Vec<Line> {
 }
 
 /// The speedometer, bottom right at `speedometer.lyt`'s places: the DSEG7 number with its right
-/// edge at the layout's and its top by the meter's, or the dial; and on the bike the preload meter
+/// edge at the layout's and centred on the meter's height, or the dial; and on the bike the preload meter
 /// standing right of either, filling orange from the bottom with the charge (V53).
 fn speedometer(pen: &mut Pen, shown: &Shown, drawn: &mut Drawn) {
     pen.corner = Corner::BottomRight;
@@ -947,8 +947,7 @@ fn speedometer(pen: &mut Pen, shown: &Shown, drawn: &mut Drawn) {
     let text = overlay::speed_text(shown.speed);
     let size = 4.6 * EM;
     let w = Pen::measure(Face::Digits, Weight::Heavy, &text, size);
-    let top = my + 2.0;
-    let at = (right - w, top + Pen::cap(Face::Digits, size));
+    let at = (right - w, my + (mh + Pen::cap(Face::Digits, size)) / 2.0);
     pen.text(Face::Digits, Weight::Heavy, &text, (at.0 + 0.05 * size, at.1 + 0.06 * size), size, 0.0, [0, 0, 0, 115]);
     let rect = pen.text(Face::Digits, Weight::Heavy, &text, at, size, 0.0, WHITE);
     drawn.speed = Some(Line { text, rect, colour: WHITE });

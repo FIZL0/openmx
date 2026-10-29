@@ -147,7 +147,7 @@ fn every_piece_sits_at_its_layout_place_at_1080p_and_4k() {
         assert!(r[0] >= 82.0 * s && r[2] <= (14.0 + 168.0) * s, "{at}: the score's number {r:?} is out of its bar");
         assert!(r[1] >= 25.0 * s && r[3] <= 45.5 * s, "{at}: the score's number {r:?} is out of its bar");
         // The meter at speedometer.lyt's place from the bottom right, the readout left of it with
-        // its right at the layout's and its top by the meter's.
+        // its right at the layout's and centred on the meter's height.
         let m = d.meter.expect("the bike's meter");
         let want = [w - (640.0 - 599.0) * s, h - (448.0 - 314.0) * s, 20.0 * s, 85.0 * s];
         assert!(m.iter().zip(want).all(|(a, b)| near(*a, b, 0.01)), "{at}: meter {m:?}, want {want:?}");
@@ -155,7 +155,8 @@ fn every_piece_sits_at_its_layout_place_at_1080p_and_4k() {
         let speed = d.speed.as_ref().expect("the digital readout");
         assert!(near(speed.rect[2], w - (640.0 - 588.0) * s, 0.5), "{at}: the readout's right {:?}", speed.rect);
         assert!(speed.rect[2] < m[0], "{at}: the readout {:?} is not left of the meter {m:?}", speed.rect);
-        assert!(near(speed.rect[1], m[1], 4.0 * s), "{at}: the readout's top {} is not by the meter's {}", speed.rect[1], m[1]);
+        let (mid, meter_mid) = ((speed.rect[1] + speed.rect[3]) / 2.0, m[1] + m[3] / 2.0);
+        assert!(near(mid, meter_mid, 4.0 * s), "{at}: the readout's middle {mid} is not the meter's {meter_mid}");
         // The radar where the original's is, from the bottom left, N E S W outside its rim.
         let (c, r) = d.radar.expect("the radar");
         assert!(near(c[0], 87.0 * s, 0.01) && near(c[1], h - (448.0 - 363.0) * s, 0.01), "{at}: radar at {c:?}");
