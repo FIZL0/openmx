@@ -6208,6 +6208,24 @@ atv_quad_stunt_state_pack   atv 0x004ba690 = pc_quad_stunt_state_pack (table: th
 # by strstr(model, 0x0039f4e1 "ATV_S_"); the atv_s_ states were made with that needle poked to "ATV_R_"
 # (0x0039f4e5 = 'R') before loading the track, so they are the R quad's look on the atv_s_ files (A or P not checked).
 atv_phy_path                atv 0x00218ae0 = the .phy path: "%s%sRace250P.phy" / Pro, prefix mx_ / atv_s_ / atv_ (str; strstr ATV_S_)
+# MD37b — the quad's own ground steps (crates/game-sim/src/quad.rs; tests/atv_quad.rs runs the four off
+# MD37a's atv-r-spawn.ee.bin). Journal: research/journal/2026-10-29-md37b-atv-step. More ATV-relative
+# fields: +0xe8 the physics world (gravity at +0x40, (0, -432.6, 0, 1)), +0x318 gas limited, +0x340 world
+# angular velocity, +0xdd8 the ground push on, +0x123c/+0x1240 its target speed / gain (-14.67, 30),
+# +0x12c4 its gate, +0x1270/+0x1274/+0x1278 all / front / rear down, +0x12cc/+0x12d0 front / rear brake,
+# +0x12d4 clutch, +0x139c..+0x13a8 [Wheelie] (max pitch command, gain, rate gain, 1 / top speed),
+# +0x13ac the pitch integral, +0x13b0 the stoppie latch, +0x13cc..+0x13d8 [Stoppie] (max pitch command,
+# gain, yaw-rate scale, top speed), +0x1524/+0x152c stand-upright runs while they differ, wheel pointers
+# +0x17b0/+0x17b4/+0x17b8/+0x17bc (LF RF LR RR); wheel +0x2c steered, +0x130 the contact normal.
+# Rigid body (vt 0x003cd200): +0xa0 force, +0x1b0 moment, +0x190 the quaternion the rotates use, +0x1d0
+# local angular velocity, +0xe8 the force-listener count. The quad's yaw-rate gain is 500 (the bike's
+# 1000); its wheelie yaw term is scaled by a literal 0 but still goes through the local-moment call.
+# The rear-pair flag is the Force body's tail after the four tire forces: (LF || RF touching) && !LR && !RR
+# sets both rears' +0xb4 to 1, else both 0.
+atv_body_add_force          atv 0x00494000 = rigid body vt +0x48 (and +0x80's stub): vadd.xyz into body +0xa0, then the +0xe8 listeners
+atv_body_local_moment       atv 0x0049c1a0 = rigid body vt +0x88: rotate by the conjugate of body +0x190 (world to local), then vt +0x78
+atv_body_local_force        atv 0x0049c050 = rigid body vt +0x74: rotate by body +0x190 (local to world), then vt +0x48
+atv_quat_axes               atv 0x001351d0 = math::quat_axes (forward a1, up a2 from a quaternion)
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the
