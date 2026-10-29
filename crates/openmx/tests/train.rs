@@ -120,3 +120,24 @@ fn a_bike_inside_a_car_comes_off_at_once() {
     let Some(said) = ride("2407,3902,190", &tape("still", 5, false), 5) else { return };
     assert_eq!(wrecks(&said), [SCENERY], "a bike inside the train rode on:\n{said}");
 }
+
+/// A pad tape of `frames` frames: full throttle for the first `gas`, then nothing held.
+fn burst(name: &str, frames: usize, gas: usize) -> PathBuf {
+    let on = std::fs::read_to_string(tape(&format!("{name}-on"), gas, true)).expect("the gas tape");
+    let off = std::fs::read_to_string(tape(&format!("{name}-off"), frames - gas, false)).expect("the idle tape");
+    let frames_of = |t: &str| t.lines().filter(|l| l.starts_with("frame ")).map(|l| format!("{l}\n")).collect::<String>();
+    let text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape {name}\n{}{}", frames_of(&on), frames_of(&off));
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("s137-train").join(format!("{name}.tape"));
+    std::fs::write(&path, text).expect("the tape is written");
+    path
+}
+
+#[test]
+fn a_bike_riding_up_beside_the_dump_truck_rides_on() {
+    // S216, the user's: "hitting the moving vehicles on dallas makes us bail instantly". A short
+    // burst from beside the dump truck by the east road, rolling in alongside it at a glancing angle:
+    // the bike's head is inside the truck's 28 ft wide box all along, clear of its body, and before
+    // S216 the rider came off at once with nothing struck.
+    let Some(said) = ride("2955,3800,240", &burst("beside", 200, 25), 200) else { return };
+    assert_eq!(wrecks(&said), [] as [u32; 0], "a bike beside the dump truck came off:\n{said}");
+}
