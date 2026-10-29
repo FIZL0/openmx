@@ -332,10 +332,12 @@ pub fn start_spots(start: Spawn, machine: Machine, players: usize, rest: f32, gr
 /// `[Biplane1]` one [`Machine::spacing`] to the right of the world's spawn `start` (across its
 /// heading flattened, as [`park`] steps a copy), every other spot keeping its place beside it. Each
 /// keeps the clearance it had over its own ground, which in the world is the home tile's ground at
-/// the spot moved by the tile's offset `home` (`x`, `z`); `ground` is the world's. A file with no
-/// plane is moved by the first spot it does have. The port's own placement: the original has no
-/// worlds.
-pub fn world_spots(machine_txt: &[u8], home: [f32; 2], start: Spawn, ground: &mut dyn FnMut(Vf) -> f32) -> Vec<Vec<Spawn>> {
+/// the spot moved by the tile's offset `home` (`x`, `z`); `ground` is the world's. A home tile whose
+/// ground does not reach the file's place (a mod tile smaller than the track the file is for, MD55)
+/// has no clearance to keep there, and the spot stands `rest` feet over the world's ground instead
+/// ([`Plane::rest_height`]: on its wheels). A file with no plane is moved by the first spot it does
+/// have. The port's own placement: the original has no worlds.
+pub fn world_spots(machine_txt: &[u8], home: [f32; 2], start: Spawn, rest: f32, ground: &mut dyn FnMut(Vf) -> f32) -> Vec<Vec<Spawn>> {
     let file: Vec<Vec<Spawn>> = Machine::ALL.iter().map(|&m| spots(machine_txt, m)).collect();
     let Some(anchor) = file.iter().find_map(|s| s.first().copied()) else {
         return file;
@@ -348,7 +350,8 @@ pub fn world_spots(machine_txt: &[u8], home: [f32; 2], start: Spawn, ground: &mu
         .map(|s| {
             s.into_iter()
                 .map(|spot| {
-                    let clear = spot.at.y() - ground(Vf::new(spot.at.x() + home[0], spot.at.y(), spot.at.z() + home[1], 1.0));
+                    let under = ground(Vf::new(spot.at.x() + home[0], spot.at.y(), spot.at.z() + home[1], 1.0));
+                    let clear = if under > NO_GROUND { spot.at.y() - under } else { rest };
                     let (x, z) = (spot.at.x() + dx, spot.at.z() + dz);
                     let y = ground(Vf::new(x, spot.at.y(), z, 1.0)) + clear;
                     Spawn { at: Vf::new(x, y, z, 1.0), facing: spot.facing }
@@ -703,7 +706,7 @@ impl Plane {
     /// ground's height under the bay.
     pub fn rest_height(&self, bay_ground: f32) -> f32 {
         match &self.flight {
-            Some(f) => -f.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min),
+            Some(f) => wheels_height(f),
             None => self.bay.at.y() - bay_ground,
         }
     }
@@ -919,6 +922,13 @@ const PROBE: f32 = 20.0;
 /// Below this the ground query found nothing ([`game_sim::world::World::ground`]'s no-ground answer is
 /// a million feet down).
 const NO_GROUND: f32 = -1.0e5;
+
+/// How high a plane's origin stands over the ground on its wheels, feet: the lowest of its tires'
+/// bottoms is on the ground (the tires' centres are in the origin's frame). [`Plane::rest_height`]
+/// with its flight.
+pub fn wheels_height(flight: &Flight) -> f32 {
+    -flight.tires.iter().map(|t| t.center.y() - t.radius.0).fold(f32::MAX, f32::min)
+}
 
 /// A heading flattened onto the ground plane, or `None` straight up or down.
 fn level(v: Vf) -> Option<Vf> {
@@ -1583,7 +1593,7 @@ mod tests {
         let mut ground = |at: Vf| at.z() * 0.05;
         // The world's spawn faces +x, so its right (as park steps a copy) is +z.
         let start = Spawn { at: Vf::new(7000.0, 0.0, 9000.0, 1.0), facing: Vf::new(2.0, 0.5, 0.0, 0.0) };
-        let moved = world_spots(TWO_OF_EACH.as_bytes(), home, start, &mut ground);
+        let moved = world_spots(TWO_OF_EACH.as_bytes(), home, start, 4.0, &mut ground);
         let gap = Machine::Biplane.spacing();
         for (i, m) in Machine::ALL.iter().enumerate() {
             let file = spots(TWO_OF_EACH.as_bytes(), *m);
@@ -1604,7 +1614,30 @@ mod tests {
         assert!(gap > OFFER_RANGE);
         assert_eq!(lot.of(Machine::Helicopter).count(), 2);
         // A file with no spots stays empty.
-        assert!(world_spots(b"[Machines]\n", home, start, &mut ground).iter().all(Vec::is_empty));
+        assert!(world_spots(b"[Machines]\n", home, start, 4.0, &mut ground).iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn a_spot_off_the_home_ground_stands_on_the_worlds_ground() {
+        // A home tile 1143 feet square at 5000, 3000 in a world sloping up along z: the file's spots,
+        // for a bigger track, sit past the tile's edge, where it answers no ground.
+        let (home, size) = ([5000.0, 3000.0], 1143.0);
+        let mut ground = |at: Vf| {
+            let (x, z) = (at.x() - home[0], at.z() - home[1]);
+            let tile = (0.0..size).contains(&x) && (0.0..size).contains(&z);
+            if tile || at.z() > 8000.0 { at.z() * 0.05 } else { -1.0e6 }
+        };
+        let start = Spawn { at: Vf::new(7000.0, 0.0, 9000.0, 1.0), facing: Vf::new(1.0, 0.0, 0.0, 0.0) };
+        let txt = "[Biplane1]\nPosition = 2000, 40, 1500\nDirection = 1, 0, 0\n";
+        let rest = 4.0;
+        let plane = Machine::ALL.iter().position(|&m| m == Machine::Biplane).unwrap();
+        let at = world_spots(txt.as_bytes(), home, start, rest, &mut ground)[plane][0].at;
+        assert_eq!((at.x(), at.z()), (7000.0, 9000.0 + Machine::Biplane.spacing()));
+        assert!((at.y() - (at.z() * 0.05 + rest)).abs() < 1e-2, "on its wheels on the world's ground, not {}", at.y());
+        // A spot the tile does cover keeps its own clearance.
+        let txt = "[Biplane1]\nPosition = 500, 40, 500\nDirection = 1, 0, 0\n";
+        let at = world_spots(txt.as_bytes(), home, start, rest, &mut ground)[plane][0].at;
+        assert!((at.y() - (at.z() * 0.05 + 40.0 - 3500.0 * 0.05)).abs() < 1e-2, "{}", at.y());
     }
 
     #[test]
