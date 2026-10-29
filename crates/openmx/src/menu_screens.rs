@@ -725,8 +725,10 @@ impl<'a> Pen<'a> {
         }
         if screen == Screen::Settings && menu.tab(screen) == pages::TAB_CONTROLS {
             // The keyboard under the Player row, or under the layout row on a tab of one seat (P81),
-            // for a player riding it; a player on a pad gets the pad (P178).
-            if menu.controls_on_keys() && (r.kind == Kind::Player || (r.key == Key::BikeLayout && !menu.many_seats())) {
+            // for a player riding it; a player on a pad gets the pad (P178). And under the keyboard's
+            // own row (P207).
+            let layout_row = matches!(r.key, Key::BikeLayout | Key::Keyboard);
+            if menu.controls_on_keys() && (r.kind == Kind::Player || (layout_row && !menu.many_seats())) {
                 self.keys(menu, x, y + 1.0, w);
             } else if room - y > 10.0 {
                 self.pad(menu, x, y + 0.6, w.min((room - y - 0.6) * 2.0));
@@ -738,7 +740,7 @@ impl<'a> Pen<'a> {
     fn keys(&mut self, menu: &Menu, x: f32, top: f32, w: f32) {
         let p = menu.control_seat();
         let layout = menu.controls.layouts[p];
-        let rows = &menu.keyboard[keyboard_at(layout, menu.controls.presets[p])];
+        let rows = &menu.keyboard[keyboard_at(layout, menu.controls.presets[p], menu.controls.home_row_keys)];
         if rows.is_empty() {
             return;
         }

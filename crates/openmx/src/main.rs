@@ -1879,6 +1879,7 @@ impl Front {
             }
         }
         w.nintendo_positions = self.menu.controls.nintendo_positions;
+        w.keys = if self.menu.controls.home_row_keys { pad::Keys::HomeRow } else { pad::Keys::Modern };
         if !self.scheme_flag {
             for (scheme, layout) in w.schemes.iter_mut().zip(self.menu.controls.layouts) {
                 *scheme = match layout {
@@ -2087,9 +2088,11 @@ async fn front_end(args: Args) -> Result<(), String> {
     let seats = open_seats(&args, pad.as_deref(), front.wiring());
     // The Controls screen lists the keyboard under each layout (P54), as the bindings file has it.
     // And the original's on each of its controller presets (P79), in `menu::keyboard_at`'s order.
+    // The new layout's on both its keyboards (P207), modern then the home row.
     front.menu.keyboard = std::array::from_fn(|i| match i {
-        0 => seats.keyboard_layout(Scheme::New),
-        p => seats.keyboard_layout_on(Scheme::Original, p - 1),
+        0 => seats.keyboard_layout_keys(pad::Keys::Modern),
+        1 => seats.keyboard_layout_keys(pad::Keys::HomeRow),
+        p => seats.keyboard_layout_on(Scheme::Original, p - 2),
     });
     match seats.name(0) {
         Some(name) => println!("pad: {name}"),
@@ -4288,7 +4291,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         && seats.name(0).is_none()
     {
         match schemes[0] {
-            Scheme::New => println!("pad: none found — riding on the keyboard (J or Space gas, K or Shift brake, WASD and YUIO the sticks, H L G ; the face buttons)"),
+            Scheme::New if seats.keys() == pad::Keys::HomeRow => println!("pad: none found — riding on the keyboard (J or Space gas, K or Shift brake, WASD and YUIO the sticks, H L G ; the face buttons)"),
+            Scheme::New => println!("pad: none found — riding on the keyboard (W gas, S brake, A D steer, I K lean, Shift clutch, F G E tricks, R reset, C camera)"),
             Scheme::Original => println!("pad: none found — riding on the keyboard (X throttle, Z brake, arrows)"),
         }
     }
@@ -9864,10 +9868,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                      they move the plane the same way on the screen.\n\
                      --preset 1..3 (or the Controls screen, under Original) rides the original\n\
                      layout on one of the original's other controller presets; 0 is the shipped one.\n\
-                     On the keyboard, under the new layout: WASD the left stick (A/D steer, W/S\n\
-                     lean), YUIO the right stick, J (or Space) gas, K (or Shift) brake, Q/E L1/R1,\n\
-                     Tab or C the camera, arrows the d-pad, H Square, L Circle, G Cross,\n\
-                     ; Triangle, Enter Start, Escape the pause. Under the original's (--controls original): X throttle, Z brake,\n\
+                     On the keyboard, under the new layout: W gas, S brake, A/D steer (J/L too),\n\
+                     I/K lean, Shift or Q clutch (L1), F G E the three tricks (Circle, Triangle,\n\
+                     R1), Space and V Cross and Square (MX vs. ATV's tricks 4 and 5), R reset,\n\
+                     C or Tab the camera, B and Z R3 and L3, 7890 the right stick, arrows the\n\
+                     d-pad, Enter Start, Escape the pause; keys = home-row in controls.txt (or\n\
+                     the Controls screen) brings back the home row's J gas, K brake, WASD and\n\
+                     YUIO the sticks, H Square, L Circle, G Cross, ; Triangle. Under the original's (--controls original): X throttle, Z brake,\n\
                      arrows steer, IJKL the right stick, C/V/D trick, A+D reset.\n\
                      The throttle is a pressure and not a switch (the game reads Cross from its\n\
                      pressure byte): a key ramps it, --throttle r2 rides it on a trigger instead,\n\

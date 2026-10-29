@@ -458,6 +458,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         presets: [0, 2, 0, 0, 0, 0, 0, 0],
         // A Nintendo pad's B as Cross, by where it sits (P53).
         nintendo_positions: true,
+        // The new layout on P80's home-row keyboard (P207).
+        home_row_keys: true,
     };
     menu::save(&dir, &settings, &controls).unwrap();
     assert_eq!(menu::load(&dir), (settings, controls));
@@ -3502,7 +3504,7 @@ fn the_controls_tab_is_one_choice_a_seat_and_a_plane_stick() {
     settings_at(&mut m, &mut r, "Controls");
     let row = |m: &Menu, k: Key| m.page().into_iter().find(|r| r.key == k).unwrap();
     let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
-    assert_eq!(keys, [Key::BikeLayout, Key::PlaneLayout, Key::Markers, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration], "one seat: no Player row");
+    assert_eq!(keys, [Key::BikeLayout, Key::Keyboard, Key::PlaneLayout, Key::Markers, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration], "one seat: no Player row");
     assert!(!m.page().iter().any(|r| r.label.contains("Throttle")), "no throttle row");
     assert_eq!(row(&m, Key::BikeLayout).value, "New");
     let plane = row(&m, Key::PlaneLayout);
@@ -3539,6 +3541,35 @@ fn the_controls_tab_is_one_choice_a_seat_and_a_plane_stick() {
     down_to(&mut m, &mut r, Key::PlaneLayout);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!((m.controls.planes[0], m.controls.planes[1]), (Layout::New, Layout::Original));
+}
+
+/// P207: the Controls tab's Keyboard row picks the new layout's keyboard — modern MX games' by
+/// default, P80's home row the other — and the wiring file keeps it as `keys`; under the original's
+/// layout, which keeps its own keyboard, the row is dim.
+#[test]
+fn the_controls_tab_picks_the_new_layout_s_keyboard() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Controls");
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Keyboard).unwrap();
+    assert_eq!((row(&m).label.as_str(), row(&m).value.as_str(), row(&m).off.is_none()), ("Keyboard", "Modern", true));
+    assert_eq!(row(&m).choices, ["Modern", "Home Row"]);
+    assert!(!m.controls.home_row_keys);
+    assert!(Controls::default().text().contains("\nkeys = modern\n"));
+    down_to(&mut m, &mut r, Key::Keyboard);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!((row(&m).value.as_str(), m.controls.home_row_keys), ("Home Row", true));
+    assert!(m.take_changed());
+    let dir = scratch("p207");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (_, controls) = menu::load(&dir);
+    assert!(controls.home_row_keys);
+    assert!(m.controls.text().contains("\nkeys = home-row\n"));
+    std::fs::remove_dir_all(dir).ok();
+    assert!(!Controls::parse("keys = modern").home_row_keys);
+    assert!(!Controls::parse("layout = new").home_row_keys, "a file from before P207 is on the modern keyboard");
+    m.controls.layouts[0] = Layout::Original;
+    assert!(row(&m).off.is_some(), "the original's layout keeps its own keyboard");
 }
 
 /// P79, P81: the Controls tab offers the original's controller presets inside Original, on the one
@@ -3592,8 +3623,9 @@ fn the_controls_row_offers_the_originals_presets() {
     assert_eq!(Controls::parse("preset = one").presets, [0; 8]);
     assert!(Controls::default().text().contains("\npreset = 0\n"));
     // Where the pad diagram keeps each one's keyboard list.
-    assert_eq!(menu::keyboard_at(n, 2), 0);
-    assert_eq!((0..4).map(|p| menu::keyboard_at(o, p)).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    assert_eq!(menu::keyboard_at(n, 2, false), 0);
+    assert_eq!(menu::keyboard_at(n, 2, true), 1, "P80's home row (P207)");
+    assert_eq!((0..4).map(|p| menu::keyboard_at(o, p, true)).collect::<Vec<_>>(), [2, 3, 4, 5]);
 }
 
 /// Left and Right step the pick's categories: the disc's towns, the worlds right after them, then
@@ -4114,7 +4146,7 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
     assert_eq!(p36, Settings { name: "Rider".into(), ..Settings::default() });
 
     let old = "throttle = r2\npad = /dev/input/js1\npressure = ds2@8\nlayout = new,original,new,new,new,new,new,new\n\
-               biplane = new,new,original,new,new,new,new,new\nnintendo = positions\npreset = 0,2,0,0,0,0,0,0\n";
+               biplane = new,new,original,new,new,new,new,new\nnintendo = positions\npreset = 0,2,0,0,0,0,0,0\nkeys = modern\n";
     let (n, o) = (Layout::New, Layout::Original);
     let want = Controls {
         throttle: Gas::R2,
@@ -4124,6 +4156,7 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
         planes: [n, n, o, n, n, n, n, n],
         presets: [0, 2, 0, 0, 0, 0, 0, 0],
         nintendo_positions: true,
+        home_row_keys: false,
     };
     assert_eq!(Controls::parse(old), want);
     assert!(want.text().ends_with(old), "{}", want.text());

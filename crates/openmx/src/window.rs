@@ -169,6 +169,13 @@ pub mod key {
     // The new layout's Cross and Triangle (P80), either side of HJKL on the home row.
     pub const G: u8 = 42;
     pub const SEMICOLON: u8 = 47;
+    // The modern layout's (P207): R the reset, B the camera's reset, 7890 the right stick.
+    pub const R: u8 = 27;
+    pub const B: u8 = 56;
+    pub const N7: u8 = 16;
+    pub const N8: u8 = 17;
+    pub const N9: u8 = 18;
+    pub const N0: u8 = 19;
 }
 
 /// An open window on an X display.
