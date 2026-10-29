@@ -1,0 +1,193 @@
+openmx 1.0.0 (b6d4a742 build 2023) on iOS, memory 1 MB, 6654 MB left before iOS closes the app
+ios: holding Portrait
+front end: settings in /private/var/mobile/Containers/Data/Application/21D53AA2-A337-45C9-9081-7510E538E6FA/Documents
+music: 13 songs from disc and folder; your own .wav files go in /private/var/mobile/Containers/Data/Application/21D53AA2-A337-45C9-9081-7510E538E6FA/Documents/music
+sound: through an AudioQueue
+camera: the Camera page lists ["Race Cam 1", "Race Cam 2", "Freestyle Cam", "Slot Cam"] and ["Flight Cam 1", "Flight Cam 2", "Slot Cam"]
+garage: 54 bikes, 80 riders; seat 1 rides 125sx on race125p as warpt2
+gpu: Apple A17 Pro GPU (Metal) into a Bgra8Unorm surface, Fifo
+pad: none found — the menus are on the keyboard (arrows, Space, Return, Escape)
+ios: holding Landscape
+1P: Touch pad (gamepad/16) — the menus and the first seat are its
+textures: 0 from 0 texture packs, 0 key-named in mods/texture-replacements, 0 PCSX2-named, 0 mods' own upscales
+stunts: 57 on the disc, 24 this rider can do
+Supercross01[Quadzilla]: 577 props, 353 collision shapes, ground 6903 x 6903 feet in 768 x 768 samples
+solid: 353 of 353 collision meshes
+trees: 0 trunks under 5600 plants
+plants: smooth
+foliage: cutout
+loaded: 92 of 59 models, 29 textures, bike
+wrecks: 1043 bytes of wreck bike, 16916 bytes of rider wreck set
+rider: warpt2 wearing mrider.mcf -> rider.mcf -> mrider.psg, 63 clips bound, 24 of 24 gesture slots, 3 airborne
+rider: 24 of 24 gesture slots and 36 of 36 pose clips for its own machine
+ragdoll: 18 parts off the riding pose
+rider contact: the bikes push each other apart
+chassis: bike.mcf -> bike.psg, 12 clips bound, 7 of 24 gesture slots, 3 of 36              pose clips, nodes Nodes { root: Some(0), bars: Some(3), shocks: Some(9), front: Some(14), swingarm: Some(5), rear: Some(20) }
+chassis: no bike clip on the disc for lazyboy, cancan, nohandedlander, pendulum, hartattack, indianair, barhop, supercan, superman, saranwrap, stalelin, onehandindianair, shoalin, cordova, deadbody, rigamortis, stripper; the rider's hands hold the bars through them
+machines: 1 biplane, 1 helicopter (not ported), 1 buggy (not ported), 1 monster (not ported), 1 baja (not ported) for 1 players
+biplane: flies on its biplane.phy
+biplane: parked by tracks\free06\machine.txt at 2304, 135, 2281 facing 180 degrees
+biplane: 5 camera presets in biplanecpresets.ini
+biplane: 1 of 1 liveries loaded
+biplane: particles: Vehicle Dust (CollisionModel) from "Dust 1"
+biplane: particles: Vehicle Chunks (CollisionModel) from "Chunks 1"
+biplane: particles: Smoke (Generic) from "Smoke 2"
+biplane: particles: Left Exhaust (Exhaust { max_speed: 35.0 }) from "Smoke 1"
+biplane: particles: Right Exhaust (Exhaust { max_speed: 35.0 }) from "Smoke 1"
+biplane: particles: Front Left Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Front Right Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Rear Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Dust (HelicopterDust { begin: 20.0, end: 25.0 }) from "Dust 1"
+traffic: 23 cars on clips, 0 left out
+props: 6 collections, 6 bodies
+start: 2884, 338, 2750 facing 0 degrees, 11 camera presets
+the dirt under the start line is at 336.7 feet
+the dirt under the biplane is at 135.0 feet
+loading: built, 17 frames drawn over 0.58 s
+creatures: 50 birds, 0 toys, 0 left out
+bike: particles: Vehicle Dust (CollisionModel) from "Dust 1"
+bike: particles: Vehicle Chunks (CollisionModel) from "Chunks 1"
+bike: particles: Rider Dust (Constraint { mask: 508 }) from "Dust 1"
+bike: particles: Rider Chunks (Constraint { mask: 508 }) from "Chunks 1"
+bike: particles: Foot Dust (Constraint { mask: 3 }) from "Dust 1"
+bike: particles: Right Exhuast (Exhaust { max_speed: 15.0 }) from "Smoke 1"
+bike: particles: Left Exhuast (Exhaust { max_speed: 15.0 }) from "Smoke 1"
+bike: particles: Rear Tire Dust Spray (Generic) from "Dust 1"
+bike: particles: Front Tire Dirt Spray (Spray(SprayKeys { side_scale: 1.5, side_threshold: 8.0, min_y: 0.0, max_y: 2.0, ramp: 0.0 })) from "Dirt 1"
+bike: particles: Rear Tire Dirt Spray (Spray(SprayKeys { side_scale: 1.0, side_threshold: 5.0, min_y: 0.0, max_y: 5.0, ramp: 0.0 })) from "Dirt 1"
+bike: particles: Front Tire Chunks (Spray(SprayKeys { side_scale: 1.75, side_threshold: 4.0, min_y: 0.0, max_y: 10.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Rear Tire Chunks (Spray(SprayKeys { side_scale: 4.0, side_threshold: 5.0, min_y: 0.0, max_y: 20.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Rear Tire Collision Chunks (Spray(SprayKeys { side_scale: 4.0, side_threshold: 3.0, min_y: 0.0, max_y: 10.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Front Tire Track (TireTrack) laid by the tire tracks
+bike: particles: Rear Tire Track (TireTrack) laid by the tire tracks
+track: no particles: free06.toy has none
+sound: 21 toy loops on 21 cars
+controls: new
+biplane controls: new
+renderer: gpu
+chassis: the fork is drawn to a compression of 0.814
+gpu: 108 models, 75 materials, 75 textures and 576 ground chunks uploaded in 0.23 s
+texture filtering: 16x (anisotropy 16, this device 16 at most)
+graphics: full (fog 768..10534 up to 30%, far clip 19533; the disc's fog 352..768 in [97, 93, 92])
+loading: done, 26 frames drawn over 0.88 s
+render scale: auto, for 120 Hz
+window 2202x1119 (screen 1179x2556), drawing 2202x1119 at scale 1, --aspect fill, a 16:9 display
+picture shape: fill
+camera: cpresets.ini's Preset{n}w copies, 11 of 11, for full screen on a 16:9 display
+camera: biplanecpresets.ini's Preset{n}w copies, 5 of 5, for full screen on a 16:9 display
+map: 6912 x 6912 feet to its edge, shot back from 150 feet short of it; radar 1728 feet across
+tire tracks: Front Tire Track on tire 0, 32 strips, ttrack
+tire tracks: Rear Tire Track on tire 1, 32 strips, ttrack
+track: sun flare: SunFlare03 (200 px at 50)
+freestyle event: 1 stunt zones, target 400000
+vehicle: bike
+markers: R on free06: 1 kept
+1P: Touch pad (gamepad/16)
+camera: cpresets.ini's Preset{n}w copies, 11 of 11, for full screen on a 16:9 display
+camera: biplanecpresets.ini's Preset{n}w copies, 5 of 5, for full screen on a 16:9 display
+camera view: 4 115 110 120 115
+camera: starts on Freestyle Cam, where it was left
+warm frame: 19.38 ms behind the loading screen
+render scale: 0.5 (auto)
+  1s 30.2 fps, 438552 triangles a frame,   1.9 mph
+     bike particles: Right Exhuast 1, Rear Tire Dust Spray 4, Rear Tire Collision Chunks 14
+  2s 30.0 fps, 473037 triangles a frame,  10.5 mph
+     bike particles: Rear Tire Dust Spray 70, Rear Tire Dirt Spray 60, Rear Tire Collision Chunks 16
+  3s 30.0 fps, 490044 triangles a frame,  11.2 mph
+     bike particles: Rear Tire Dust Spray 118, Rear Tire Collision Chunks 4
+  4s 29.9 fps, 485423 triangles a frame,  15.6 mph
+     bike particles: Rear Tire Dust Spray 116
+  5s 30.1 fps, 369824 triangles a frame,  28.5 mph
+     bike particles: Rear Tire Dust Spray 71
+  6s 30.0 fps, 313885 triangles a frame,  27.4 mph
+     bike particles: Rear Tire Dust Spray 81
+  7s 30.0 fps, 407414 triangles a frame,  29.9 mph
+     bike particles: Rear Tire Dust Spray 60
+  8s 30.0 fps, 386681 triangles a frame,  25.5 mph
+     bike particles: Rear Tire Dust Spray 35
+  9s 30.1 fps, 381007 triangles a frame,  27.8 mph
+     bike particles: Rear Tire Dust Spray 65
+camera: thrill
+camera: Freestyle Cam
+camera: thrill
+camera: Freestyle Cam
+camera: thrill
+ 10s 30.0 fps, 310204 triangles a frame,  32.1 mph
+     bike particles: Rear Tire Dust Spray 59
+camera: Freestyle Cam
+ 11s 30.0 fps, 355108 triangles a frame,  28.5 mph
+     bike particles: Rear Tire Dust Spray 110
+ 12s 30.0 fps, 446386 triangles a frame,  47.1 mph
+     bike particles: Rear Tire Dust Spray 116
+ 13s 30.1 fps, 442152 triangles a frame,  56.3 mph
+     bike particles: Rear Tire Dust Spray 118
+trick: Taunt
+ 14s 30.0 fps, 424125 triangles a frame,  37.2 mph
+     bike particles: Rear Tire Dust Spray 80, Rear Tire Dirt Spray 231, Rear Tire Chunks 7, Rear Tire Collision Chunks 35
+ 15s 30.0 fps, 400707 triangles a frame,  23.4 mph
+     bike particles: Rear Tire Dust Spray 19, Rear Tire Collision Chunks 11
+ 16s 30.0 fps, 370955 triangles a frame,  28.1 mph
+     bike particles: none
+landed: Taunt
+ 17s 30.0 fps, 375109 triangles a frame,  23.7 mph
+     bike particles: Rear Tire Dust Spray 47, Rear Tire Dirt Spray 219, Rear Tire Chunks 35, Rear Tire Collision Chunks 44
+ 18s 30.0 fps, 414070 triangles a frame,  39.9 mph
+     bike particles: Rear Tire Dust Spray 108, Rear Tire Dirt Spray 346, Rear Tire Chunks 41, Rear Tire Collision Chunks 97
+ 19s 30.0 fps, 419111 triangles a frame,  48.2 mph
+     bike particles: Rear Tire Dust Spray 115, Rear Tire Dirt Spray 191, Rear Tire Chunks 28, Rear Tire Collision Chunks 78
+ 20s 30.0 fps, 410260 triangles a frame,  42.2 mph
+     bike particles: Rear Tire Dust Spray 105, Rear Tire Dirt Spray 149, Rear Tire Chunks 1, Rear Tire Collision Chunks 72
+trick: No Hander
+ 21s 30.0 fps, 403195 triangles a frame,  37.3 mph
+     bike particles: Rear Tire Dust Spray 27, Rear Tire Collision Chunks 13
+ 22s 30.0 fps, 374703 triangles a frame,  44.3 mph
+     bike particles: none
+landed: No Hander
+ 23s 30.0 fps, 361646 triangles a frame,  53.0 mph
+     bike particles: Rear Tire Dust Spray 46, Rear Tire Dirt Spray 54, Rear Tire Collision Chunks 23
+ 24s 30.0 fps, 354244 triangles a frame,  62.7 mph
+     bike particles: Rear Tire Dust Spray 79, Rear Tire Dirt Spray 103, Rear Tire Chunks 8, Rear Tire Collision Chunks 52
+camera: Slot Cam
+settings: saved in /private/var/mobile/Containers/Data/Application/21D53AA2-A337-45C9-9081-7510E538E6FA/Documents
+ 25s 30.0 fps, 374560 triangles a frame,  66.1 mph
+     bike particles: Rear Tire Dust Spray 112, Rear Tire Dirt Spray 113, Rear Tire Collision Chunks 25
+ 26s 30.0 fps, 365572 triangles a frame,  57.2 mph
+     bike particles: Rear Tire Dust Spray 98, Rear Tire Dirt Spray 16, Rear Tire Chunks 2, Rear Tire Collision Chunks 7
+trick: Taunt
+ 27s 30.0 fps, 355600 triangles a frame,  48.0 mph
+     bike particles: Rear Tire Dust Spray 29, Rear Tire Collision Chunks 1
+camera: Race Cam 1
+settings: saved in /private/var/mobile/Containers/Data/Application/21D53AA2-A337-45C9-9081-7510E538E6FA/Documents
+ 28s 29.9 fps, 340090 triangles a frame,  49.3 mph
+     bike particles: none
+ 29s 30.0 fps, 293250 triangles a frame,  58.0 mph
+     bike particles: none
+landed: Taunt
+ 30s 30.0 fps, 318869 triangles a frame,  55.1 mph
+     bike particles: Rear Tire Dust Spray 76, Rear Tire Collision Chunks 9
+ 32s 30.0 fps, 357551 triangles a frame,  54.4 mph
+     bike particles: Rear Tire Dust Spray 122, Rear Tire Dirt Spray 134, Rear Tire Collision Chunks 20
+ 33s 30.0 fps, 352210 triangles a frame,  56.0 mph
+     bike particles: Rear Tire Dust Spray 114, Rear Tire Collision Chunks 19
+ 34s 30.0 fps, 362743 triangles a frame,  52.7 mph
+     bike particles: Rear Tire Dust Spray 117, Rear Tire Dirt Spray 348, Rear Tire Chunks 19, Rear Tire Collision Chunks 60
+ 35s 30.0 fps, 367093 triangles a frame,  47.6 mph
+     bike particles: Rear Tire Dust Spray 40, Rear Tire Collision Chunks 30
+ 36s 30.0 fps, 357533 triangles a frame,  45.0 mph
+     bike particles: Rear Tire Dust Spray 63, Rear Tire Collision Chunks 10
+ 37s 30.0 fps, 358633 triangles a frame,  39.8 mph
+     bike particles: Rear Tire Dust Spray 111, Rear Tire Collision Chunks 1
+ 38s 30.0 fps, 338703 triangles a frame,   8.5 mph
+     bike particles: Rear Tire Dust Spray 115, Rear Tire Collision Chunks 21
+ 39s 30.0 fps, 347768 triangles a frame,   7.5 mph
+     bike particles: Rear Tire Dust Spray 118, Rear Tire Collision Chunks 4
+ 40s 29.3 fps, 347568 triangles a frame,   6.5 mph
+     bike particles: Rear Tire Dust Spray 109
+render scale: 0.5625 (auto)
+render scale: 0.625 (auto)
+render scale: 0.6875 (auto)
+render scale: 0.75 (auto)
+render scale: 0.8125 (auto)
+render scale: 0.875 (auto)
+render scale: 0.9375 (auto)
+render scale: 1 (auto)
