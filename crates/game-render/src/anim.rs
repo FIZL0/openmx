@@ -828,6 +828,14 @@ impl Stance {
             driver.frame(dt, &self.params, r, &self.lib, true, |id| set.timing(Some(id)).duration)
         };
         self.driver = driver;
+        // **S214.** The update's latch ([`vehicle_anim::Update::serviced`]), which the body has in
+        // [`game_sim::rider_anim::Body::latch`] and the chassis went without: with the count never
+        // taken, every frame of a queued trick (a count of 2 and up) read as a new request and
+        // restarted the bike's clip, and the stunt cross-fade started the outgoing clip at phase 0
+        // rather than where it was a frame ago — the bike, and the rider sat on it, snapped into the
+        // next trick of a chain.
+        self.params.start_phase = r.progress;
+        self.driver.seq = r.seq as u8;
 
         if frame.restart {
             self.set.rewind(&mut self.snapshot);
