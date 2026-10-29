@@ -18,10 +18,9 @@ pub const STORE_PAGES: [&str; 2] = ["Upload", "My Mods"];
 pub const UPLOAD_TAB: usize = STORE_TABS.len();
 pub const MINE_TAB: usize = STORE_TABS.len() + 1;
 /// What a player agrees to before they upload (`plan/P198.md` § P199): shown first, once a session.
-pub const STORE_RULES: [&str; 5] = [
+pub const STORE_RULES: [&str; 4] = [
     "Uploads go on the public openMX mod store, for anyone to download.",
     "You are responsible for what you share: only mods you made or may give away.",
-    "Nothing copied from a game disc: a mod made from your own disc stays with you.",
     "Each goes up as a pull request under your Hugging Face account, listed at once.",
     "Anyone can report a mod, and take-downs go through the store's Community page.",
 ];
@@ -106,8 +105,6 @@ pub struct Upload {
     pub name: String,
     /// Its kind's tab name ([`STORE_TABS`]).
     pub kind: String,
-    /// Why it cannot go up (made from a game disc, …), if it cannot.
-    pub refused: Option<String>,
     /// Its upload's state and line, once asked.
     pub status: Option<(Phase, String)>,
 }
@@ -185,7 +182,7 @@ impl Shop {
 
     /// The mods Upload all sends: every one that may go up and is not going up now.
     pub fn uploadable(&self) -> Vec<usize> {
-        (0..self.locals.len()).filter(|&i| self.locals[i].refused.is_none() && !matches!(self.locals[i].status, Some((Phase::Busy, _)))).collect()
+        (0..self.locals.len()).filter(|&i| !matches!(self.locals[i].status, Some((Phase::Busy, _)))).collect()
     }
 }
 
@@ -373,9 +370,7 @@ impl Menu {
                 }
                 Some(UpRow::Mod(i)) => {
                     let l = &mut shop.locals[*i];
-                    if let Some(why) = &l.refused {
-                        shop.note = Some(format!("{} can't go up: {why}", l.name));
-                    } else if !matches!(l.status, Some((Phase::Busy, _))) {
+                    if !matches!(l.status, Some((Phase::Busy, _))) {
                         l.status = Some((Phase::Busy, "Waiting to upload".into()));
                         shop.asks.push(StoreAsk::Upload(vec![l.id.clone()]));
                     }

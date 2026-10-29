@@ -9108,7 +9108,6 @@ impl StoreFront {
                 id: l.id.clone(),
                 name: l.name.clone(),
                 kind: l.kind.tab().map_or("Mod", |t| menu::STORE_TABS[t]).to_string(),
-                refused: l.shareable().err(),
                 status: old.iter().find(|o| o.id == l.id).and_then(|o| o.status.clone()),
             })
             .collect();

@@ -1,5 +1,5 @@
 //! The upload side's tests (P199): the token read from a paste and kept owner-only, the player's own
-//! mods found and a disc-made one refused, a mod folder packed into a zip Install's checks take, the
+//! mods found (a disc-made one among them), a mod folder packed into a zip Install's checks take, the
 //! re-upload plan, and a fake Hugging Face on localhost that takes commits (preupload, LFS in one PUT
 //! and in parts, the commit's NDJSON, a PR's status): an upload opens a PR another player's Browse
 //! lists and installs, a re-upload and a second mod go onto that PR, the same zip is skipped, My
@@ -361,22 +361,17 @@ fn a_token_is_found_in_a_paste_and_kept_owner_only() {
 }
 
 #[test]
-fn a_disc_made_mod_stays_home_and_a_store_install_is_not_the_players() {
+fn the_players_mods_are_listed_and_a_store_install_is_not_theirs() {
     let (dir, mods) = scratch("locals");
     let own = music(&mods, "disc_music", "own-disc", "1.0.0", b"OggS disc");
-    let mine = music(&mods, "my_music", "public-domain", "1.0.0", b"OggS mine");
-    let none = music(&mods, "bare_music", "", "1.0.0", b"OggS bare");
+    music(&mods, "my_music", "public-domain", "1.0.0", b"OggS mine");
+    music(&mods, "bare_music", "", "1.0.0", b"OggS bare");
     let installed = music(&mods, "store_music", "public-domain", "1.0.0", b"OggS store");
     std::fs::write(installed.dir.join(STAMP), "{}").unwrap();
     // a folder whose mod.json is another kind's, and one not a mod at all
     std::fs::create_dir_all(mods.join("music/stray")).unwrap();
     let ids: Vec<String> = locals(&mods).into_iter().map(|l| l.id).collect();
     assert_eq!(ids, ["bare_music", "disc_music", "my_music"], "by name, the store's install left out");
-    assert!(own.shareable().unwrap_err().contains("own-disc"));
-    assert!(none.shareable().unwrap_err().contains("no permission"));
-    assert_eq!(mine.shareable(), Ok(()));
-    assert!(package(&mods, &own, "tester").err().unwrap().contains("own-disc"));
-    assert!(!mods.join(".upload-disc_music.zip").exists());
     assert_eq!(own.source, "Made by me");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -437,7 +432,7 @@ fn a_track_preview_goes_up_as_webp() {
         e.write_header().unwrap().write_image_data(&vec![200; 960 * 540 * 4]).unwrap();
     }
     std::fs::write(&still, &png).unwrap();
-    let l = Local { id: "my_track".into(), kind: Kind::Track, name: "Mine".into(), version: String::new(), source: String::new(), permission: "public-domain".into(), dir: mods.join("tracks/my_track") };
+    let l = Local { id: "my_track".into(), kind: Kind::Track, name: "Mine".into(), version: String::new(), source: String::new(), dir: mods.join("tracks/my_track") };
     let w = preview_of(&mods, &l).unwrap();
     assert!(w.starts_with(b"RIFF") && &w[8..12] == b"WEBP");
     let p = decode_preview(&w).unwrap();
@@ -520,11 +515,10 @@ fn an_upload_is_listed_installed_re_uploaded_and_taken_down() {
         assert_eq!(meta.author, "tester");
     }
 
-    // Upload all: the disc-made one is refused, the rest go in turn, a status line each
-    let disc = music(&mods, "c_music", "own-disc", "1.0.0", &song(4));
-    s.upload(vec![disc.clone(), a.clone()]);
+    // Upload all: in turn, a status line each
+    s.upload(vec![b.clone(), a.clone()]);
     let got = until(&s, |e| matches!(e, Event::Upload(id, up) if id == "a_music" && up.over()));
-    assert!(got.iter().any(|e| matches!(e, Event::Upload(id, Up::Failed(l)) if id == "c_music" && l.contains("own-disc"))), "{got:?}");
+    assert!(got.iter().any(|e| matches!(e, Event::Upload(id, Up::Skipped(_)) if id == "b_music")), "{got:?}");
     assert!(got.iter().any(|e| matches!(e, Event::Upload(id, Up::Skipped(_)) if id == "a_music")), "{got:?}");
 
     // My public mods: both, on PR #1

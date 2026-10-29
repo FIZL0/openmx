@@ -1580,12 +1580,11 @@ impl Pen<'_> {
                     UpRow::All => (format!("Upload all ({})", shop.uploadable().len()), String::new(), "Each mod that can go up, one after another, in the background".into()),
                     UpRow::Mod(i) => {
                         let l = &shop.locals[i];
-                        let (state, under) = match (&l.refused, &l.status) {
-                            (_, Some((Phase::Busy, s))) => ("Uploading".to_string(), s.clone()),
-                            (_, Some((Phase::Done, s))) => ("Done".into(), s.clone()),
-                            (_, Some((Phase::Failed, s))) => ("Failed".into(), s.clone()),
-                            (Some(why), None) => ("Can't share".into(), why.clone()),
-                            (None, None) => ("Upload".into(), format!("{} · {}", l.kind, l.id)),
+                        let (state, under) = match &l.status {
+                            Some((Phase::Busy, s)) => ("Uploading".to_string(), s.clone()),
+                            Some((Phase::Done, s)) => ("Done".into(), s.clone()),
+                            Some((Phase::Failed, s)) => ("Failed".into(), s.clone()),
+                            None => ("Upload".into(), format!("{} · {}", l.kind, l.id)),
                         };
                         (l.name.clone(), state, under)
                     }

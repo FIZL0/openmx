@@ -10,8 +10,7 @@
 //! the same checks Install puts a download through (the zip's directory, `mod.json` against its meta,
 //! every entry inflated and CRC-checked, the shell's parsers for its kind), `meta.json` and
 //! `preview.webp` made, and `mods/<id>/` committed as a pull request on [`REPO`] under the player's
-//! account. A mod copied from a game disc (`permission` `own-disc`, the standard's "never shared") is
-//! refused. A re-upload goes onto the player's own open PR, over the old copy ([`plan`]); a new mod
+//! account. A re-upload goes onto the player's own open PR, over the old copy ([`plan`]); a new mod
 //! goes onto their newest open PR, so a player has one PR, not one per mod. Upload all: one commit a
 //! mod, in turn, in the background, a status line each ([`Event::Upload`]).
 //!
@@ -157,20 +156,7 @@ pub struct Local {
     pub version: String,
     /// `mod.json`'s `source.game`.
     pub source: String,
-    /// `mod.json`'s `permission` ("" when it has none).
-    pub permission: String,
     pub dir: PathBuf,
-}
-
-impl Local {
-    /// Whether it may go on the store: the standard's `permission` says so (`own-disc`: never shared).
-    pub fn shareable(&self) -> Result<(), String> {
-        match self.permission.as_str() {
-            "" => Err("its mod.json has no permission, which the standard asks for".into()),
-            "own-disc" => Err("made from your own game disc (permission own-disc): it stays with you".into()),
-            _ => Ok(()),
-        }
-    }
 }
 
 /// A mod folder's `mod.json` read as a [`Local`], if it is one of `folder`'s kinds.
@@ -185,7 +171,7 @@ pub fn local_of(dir: &Path, folder: &str) -> Option<Local> {
     }
     let source = json.get("source").and_then(|j| j.get("game").or(Some(j))).and_then(Json::str).map(|v| plain_text(v, 40)).unwrap_or_default();
     let name = Some(s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone());
-    Some(Local { id, kind, name, version: s("version"), source, permission: s("permission"), dir: dir.to_path_buf() })
+    Some(Local { id, kind, name, version: s("version"), source, dir: dir.to_path_buf() })
 }
 
 /// The player's own mods in `mods`, by name: every folder of a kind the store takes that is not a
@@ -394,7 +380,6 @@ impl Drop for Packed {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn package(mods: &Path, l: &Local, author: &str) -> Result<Packed, String> {
     use std::io::{Read, Seek, SeekFrom};
-    l.shareable()?;
     let files = files_of(&l.dir)?;
     let to = mods.join(format!(".upload-{}.zip", safe(&l.id)));
     let got = pack(&files, &to);

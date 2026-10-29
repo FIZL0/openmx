@@ -205,12 +205,12 @@ fn the_upload_and_my_mods_pages_ask_only_when_they_may() {
     tap(&mut m, &mut reader, Control::Cross);
     assert_eq!(m.take_store_asks(), [StoreAsk::Paste]);
 
-    // signed in, with one mod that may go up and one made from a disc
+    // signed in, with two mods (one made from a disc goes up like any other)
     m.store.signing = false;
     m.store.account = Some("tester".into());
     m.store.locals = vec![
-        Upload { id: "disc".into(), name: "Disc".into(), kind: "Tracks".into(), refused: Some("own-disc".into()), status: None },
-        Upload { id: "mine".into(), name: "Mine".into(), kind: "Music".into(), refused: None, status: None },
+        Upload { id: "disc".into(), name: "Disc".into(), kind: "Tracks".into(), status: None },
+        Upload { id: "mine".into(), name: "Mine".into(), kind: "Music".into(), status: None },
     ];
     // rows: Sign out, Upload all, Disc, Mine
     for _ in 0..3 {
@@ -224,13 +224,13 @@ fn the_upload_and_my_mods_pages_ask_only_when_they_may() {
     assert_eq!(m.take_store_asks(), [], "not twice while it goes");
     tap(&mut m, &mut reader, Control::Up);
     tap(&mut m, &mut reader, Control::Cross);
-    assert_eq!(m.take_store_asks(), [], "the disc's mod stays");
-    assert!(m.store.note.as_deref().unwrap_or("").contains("own-disc"));
-    // Upload all: what may go and is not going already
+    assert_eq!(m.take_store_asks(), [StoreAsk::Upload(vec!["disc".into()])], "the disc's mod goes up too");
+    // Upload all: what is not going already
+    m.store.locals[0].status = Some((Phase::Done, "Uploaded".into()));
     m.store.locals[1].status = Some((Phase::Done, "Uploaded".into()));
     tap(&mut m, &mut reader, Control::Up);
     tap(&mut m, &mut reader, Control::Cross);
-    assert_eq!(m.take_store_asks(), [StoreAsk::Upload(vec!["mine".into()])]);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Upload(vec!["disc".into(), "mine".into()])]);
     tap(&mut m, &mut reader, Control::Cross);
     assert_eq!(m.take_store_asks(), [], "nothing left to send");
     tap(&mut m, &mut reader, Control::Start);
