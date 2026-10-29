@@ -6617,3 +6617,20 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 #   the rest. The wreck bike's probes are not in the list. Leave-out lists (mode 1): ray [0x9a058, 0x8,
 #   0x9a048, 0x18000], sweep [0x9a058, 0x8]; category lists: ray empty, sweep [0x8, 0x800], as S76's
 #   free09 ones. None of them leaves out 0x48.
+
+# ---------------------------------------------------------------------------------------------------
+# V108 — the original's shadow under moving things (ProjectedShadow), research/journal/*-v108-shadows.
+# All boot. Kept as comments: nothing in the port calls them.
+#   0x001a81b0  light reader: CastsShadows (default 1), ShadowIntensity (default -1; > 0 sets the
+#               global 0x00420710 = intensity * 128, else it stays 85), ShadowRGB ("none" = black,
+#               the colour at 0x0048abf0). free09's and free06's sun: 25,25,25 at 0.7.
+#   0x00208700  shadow ranges by view count, set through 0x00250c60: 1P (100, 40) = drawn to 100 ft,
+#               fading from 60; 2P+ (65, 10).
+#   0x0044ea40  ProjectedShadow vtable: dtor 0x00163f70; 0x001646d0 makes the 128x128 target on first
+#               use; 0x00164920 culls by camera distance against +0x154; 0x00164ae0 takes the caster's
+#               bounds through 0x001b44b0 and keeps radius * (+0x134) at +0x12c; 0x001654b0 /
+#               0x001656a0 draw and submit.
+#   shadows.res: shadowcasterN, terrainshadowreceiverN(lod), shadowreceiverN .psm, N = 1..8. The caster
+#   clears to 0 and is blurred once (filterTexture 1, filterPasses 1); the receivers blend
+#   (Cs-Cd)*As+Cd, clamp, alpha test ref 1, no z write. In PCSX2 the shadow's core leaves 0.63 of the
+#   dirt, as the intensity squared does (0.7 x 0.7): not read in the code.

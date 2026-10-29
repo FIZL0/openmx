@@ -67,6 +67,7 @@ mod sprites;
 pub use sprites::Sprite as Particle;
 
 mod glows;
+mod shadows;
 
 /// The format of the depth buffer.
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -88,7 +89,7 @@ const PROP_PIXELS: f32 = 0.5;
 /// Node matrices a palette row holds (four texels each).
 const PALETTE_ROW: u32 = 256;
 /// A view's uniforms, padded to the alignment a dynamic offset needs.
-const VIEW_STRIDE: u64 = 256;
+const VIEW_STRIDE: u64 = 1024;
 /// Where a wrapped world's copies' ground views start among a ground's views (MD43): past any real
 /// view's.
 const COPY_GROUND: usize = 16;
@@ -140,7 +141,13 @@ struct ViewUniform {
     /// Where the view's coordinates start (MD15): the camera's eye. Everything is drawn relative to
     /// it, so a world 116,000 feet across does not jitter where it is drawn far from the origin.
     origin: [f32; 4],
-    _pad: [f32; 8],
+    /// The sun's shadows (V108, [`shadows`]): the mode (0 none, 1 the original's, 2 ours), how many
+    /// maps the view reads and the first, and how far ours reach; the original's tint, or the light
+    /// maps' levels for ours; and each map's filtering and matrix.
+    sun_maps: [f32; 4],
+    sun_tint: [f32; 4],
+    sun_layer: [[f32; 4]; shadows::MAPS],
+    sun_m: [[[f32; 4]; 4]; shadows::MAPS],
 }
 
 #[repr(C)]
@@ -889,6 +896,8 @@ pub struct Renderer {
     particles: Option<sprites::Sprites>,
     /// The glow textures and this frame's glows (V51).
     glows: Option<glows::Glows>,
+    /// The sun's shadow maps (V108).
+    sun: shadows::SunMaps,
 }
 
 /// A prop the scene places, as culling needs it.
@@ -1293,6 +1302,7 @@ fn view_bind_group(
     layout: &wgpu::BindGroupLayout,
     buffer: &wgpu::Buffer,
     palette: &wgpu::Texture,
+    sun: &shadows::SunMaps,
 ) -> wgpu::BindGroup {
     let palette = palette.create_view(&Default::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1310,6 +1320,14 @@ fn view_bind_group(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(&palette),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&sun.array),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(&sun.sampler),
             },
         ],
     })
@@ -1821,7 +1839,7 @@ impl Renderer {
 
         let mesh_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh"),
-            source: wgpu::ShaderSource::Wgsl(MESH_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(mesh_wgsl().into()),
         });
         let view_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("view"),
@@ -1846,6 +1864,8 @@ impl Renderer {
                     },
                     count: None,
                 },
+                shadows::layout_entries()[0].clone(),
+                shadows::layout_entries()[1].clone(),
             ],
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2017,7 +2037,9 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let view_bind = view_bind_group(&device, &view_layout, &view_buffer, &palette);
+        let mut sun = shadows::SunMaps::new(&device, &mesh_module, &material_layout);
+        sun.rebind(&device, &view_buffer, &palette);
+        let view_bind = view_bind_group(&device, &view_layout, &view_buffer, &palette, &sun);
         let instance_capacity = 4096;
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instances"),
@@ -2094,6 +2116,7 @@ impl Renderer {
             render_scale: 1.0,
             particles: None,
             glows: None,
+            sun,
         })
     }
 
@@ -2111,6 +2134,7 @@ impl Renderer {
             .collect();
         self.grove = scene.ecosystem.clone();
         self.groves.clear();
+        self.sun.tint = scene.shadow_tint();
     }
 
     /// Draw the scene's prop `k` (its index in the models [`Renderer::set_scene`] was given) at `at`
@@ -2446,6 +2470,9 @@ impl Renderer {
             GroundPaint::Splat(s) => Some(s),
             _ => None,
         };
+        // What our shadows darken the ground to (V108): its light map's own shadows.
+        let baked = paint.and_then(|p| p.shadow.as_ref()).and_then(|s| crate::shadow::light_map_levels(&s.tiles));
+        self.sun.levels = baked.unwrap_or((0.0, crate::shadow::SHADE_DEFAULT));
         if !cells.is_power_of_two() {
             return Err(format!("ground chunks of {cells} cells: not a power of two"));
         }
@@ -2469,7 +2496,8 @@ impl Renderer {
             let read = (&self.samplers[&CLAMPED], self.anisotropy);
             ground_mesh::GpuMeshes::new(&self.device, &self.queue, &self.sampler, read, m)
         });
-        if layers.len() + 1 + if meshes.is_some() { 2 } else { 0 } > max {
+        // The light map and the sun's shadow maps (V108) besides.
+        if layers.len() + 2 + if meshes.is_some() { 2 } else { 0 } > max {
             return Err(format!(
                 "the ground's paint has {} textures and this device samples {max} at once",
                 layers.len()
@@ -3263,7 +3291,8 @@ impl Renderer {
         if rows > self.palette_rows {
             self.palette_rows = rows.next_power_of_two().max(16);
             self.palette = palette_texture(&self.device, self.palette_rows);
-            self.view_bind = view_bind_group(&self.device, &self.view_layout, &self.view_buffer, &self.palette);
+            self.view_bind = view_bind_group(&self.device, &self.view_layout, &self.view_buffer, &self.palette, &self.sun);
+            self.sun.rebind(&self.device, &self.view_buffer, &self.palette);
             self.statics_written = 0;
         }
         let write = |queue: &wgpu::Queue, palette: &wgpu::Texture, first: u32, m: &[[f32; 16]]| {
@@ -3330,16 +3359,20 @@ impl Renderer {
                 }
             }
         }
+        // The sun's shadow maps (V108), each with uniforms of its own after the passes'.
+        self.plan_sun_maps(views, &passes, frame.light);
+        let slots = passes.len() + self.sun.count();
         // Everything a view needs to know before the pass: its uniforms, and its batches.
-        if passes.len() as u64 > self.view_capacity {
-            self.view_capacity = passes.len() as u64;
+        if slots as u64 > self.view_capacity {
+            self.view_capacity = slots as u64;
             self.view_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("views"),
                 size: VIEW_STRIDE * self.view_capacity,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            self.view_bind = view_bind_group(&self.device, &self.view_layout, &self.view_buffer, &self.palette);
+            self.view_bind = view_bind_group(&self.device, &self.view_layout, &self.view_buffer, &self.palette, &self.sun);
+            self.sun.rebind(&self.device, &self.view_buffer, &self.palette);
         }
         // Resolve what the frame names before the palette is written, so a model seen for the first
         // time has its bind pose in this frame's palette.
@@ -3414,6 +3447,7 @@ impl Renderer {
             // and copy is moved by the eye before it, so far from the map's origin nothing jitters.
             let from_origin = Camera { eye: v3(0.0, 0.0, 0.0), at: camera.at.sub(camera.eye), ..*camera };
             origins.push(camera.eye);
+            let (sun_maps, sun_tint, sun_layer, sun_m) = self.sun.fields(p);
             let u = ViewUniform {
                 vp: reversed(view_projection(&from_origin, w, h, far)).0,
                 eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
@@ -3426,7 +3460,10 @@ impl Renderer {
                 right: [right.x * half_w, right.y * half_w, right.z * half_w, 0.0],
                 up: [up.x * half_h, up.y * half_h, up.z * half_h, 0.0],
                 origin: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
-                _pad: [0.0; 8],
+                sun_maps,
+                sun_tint,
+                sun_layer,
+                sun_m,
             };
             let at = p * VIEW_STRIDE as usize;
             uniforms[at..at + std::mem::size_of::<ViewUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
@@ -3434,10 +3471,17 @@ impl Renderer {
             // The props: culled against the frustum and the reach (the fog's end, as `draw_scene` culls
             // them, or the whole map), and each at the level of detail the disc's own test picks.
             let fade = self.prop_fade.filter(|_| self.graphics != Graphics::Original);
+            let casting = self.sun.takes_all(p);
             for prop in &self.props {
                 let Some(Some(m)) = prop.model else { continue };
                 let model = &self.models[m];
                 let centre = v3(prop.at.0[3][0], prop.at.0[3][1], prop.at.0[3][2]);
+                // A prop out of sight still casts into the view (V108).
+                if casting {
+                    let group = crate::psg::group_at(&model.group_distance, centre.sub(camera.eye).len(), model.radius, focal);
+                    let inst = InstanceRaw { m: prop.at.0, palette: [model.bind_palette, model.nodes], cover: 1.0 };
+                    self.sun.cast(p, None, centre, model.radius, m, group, inst);
+                }
                 if !cull.sees(centre, model.radius) || !cull.big_enough(centre, model.radius, PROP_PIXELS) {
                     continue;
                 }
@@ -3460,7 +3504,7 @@ impl Renderer {
             }
             // The actors: few, and each at the level of detail this camera has earned. Not in a
             // copy: the shell puts each where its nearest copy is.
-            for a in view.actors.iter().filter(|_| copy.is_none()) {
+            for (i, a) in view.actors.iter().enumerate().filter(|_| copy.is_none()) {
                 let Some(Some(m)) = self.model_ids.get(a.model).copied() else { continue };
                 if !(a.alpha > 0.0) {
                     continue;
@@ -3481,6 +3525,11 @@ impl Renderer {
                 };
                 let key = ((p as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette, cover: 1.0 }));
+                if ghost == 0 {
+                    let row = |r: usize| v3(a.at.0[r][0], a.at.0[r][1], a.at.0[r][2]);
+                    let radius = model.radius * row(0).len().max(row(1).len()).max(row(2).len());
+                    self.sun.cast(p, Some(i), row(3), radius, m, group, InstanceRaw { m: a.at.0, palette, cover: 1.0 });
+                }
             }
             // The trees and bushes: each a model near, a picture far and both between (V48). Under
             // the original's rule the pictures come in see-through as the actors' ghosts are drawn;
@@ -3509,6 +3558,9 @@ impl Renderer {
                     let key = ((p as u64) << 48) | ((m as u64) << 16);
                     let inst = InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes], cover: d.cover * share };
                     self.scratch.push((key, ghost, inst));
+                    if casting && ghost == 0 {
+                        self.sun.cast(p, None, centre, radius, m, 0, inst);
+                    }
                 }
             }
             let ground_at = std::time::Instant::now();
@@ -3526,6 +3578,8 @@ impl Renderer {
                 }
             }
         }
+        self.sun_map_uniforms(&mut uniforms, passes.len());
+        self.upload_sun_casters();
         self.queue.write_buffer(&self.view_buffer, 0, &uniforms);
 
         // Gather the copies into batches, model by model, and upload them as one buffer.
@@ -3574,6 +3628,7 @@ impl Renderer {
         };
         let sprites = self.sprites.prepare(&self.device, &self.queue, place, target.size, frame.sprites);
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        drawn.draws += self.draw_sun_maps(&mut encoder, passes.len());
         // The roads and ruts under each view, drawn sharp again round any that has moved (V67, V89).
         if let Some(m) = self.ground.as_mut().and_then(|g| g.meshes.as_mut()) {
             let eyes: Vec<V3> = views.iter().map(|v| v.camera.eye).collect();
@@ -4263,7 +4318,8 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
         "  let u = (x - {x0}) / ({x1} - {x0});\n\
            let v = ({z1} - z) / ({z1} - {z0});\n\
            let baked = textureSample(shadow, clamped, vec2f(u, v)).r * 255.0 / 128.0;\n\
-           let inside = {mapped} && u >= 0.0 && u < 1.0 && v >= 0.0 && v < 1.0;\n",
+           let inside = {mapped} && u >= 0.0 && u < 1.0 && v >= 0.0 && v < 1.0;\n\
+           ground_baked = select(-1.0, baked, inside);\n",
         x0 = f(x0),
         x1 = f(x1),
         z0 = f(z0),
@@ -4342,6 +4398,8 @@ fn faded_ground(wgsl: String) -> String {
     let head = "@fragment fn fs(i: Out) -> @location(0) vec4f {";
     debug_assert!(wgsl.contains(head), "a ground shader without its fragment program");
     let mut s = wgsl.replacen(head, "fn shade(i: Out) -> vec4f {", 1);
+    s.push_str(&shadows::shadow_wgsl());
+    s.push_str(GROUND_SHADOWED_WGSL);
     s.push_str(&format!(
         "fn bayer(p: vec2u) -> u32 {{
   let x = p.x & 7u;
@@ -4349,10 +4407,10 @@ fn faded_ground(wgsl: String) -> String {
   return ((v & 1u) << 5u) | ((x & 1u) << 4u) | ((v & 2u) << 2u) | ((x & 2u) << 1u) | ((v & 4u) >> 1u) | ((x & 4u) >> 2u);
 }}
 @fragment fn fs(i: Out) -> @location(0) vec4f {{
-  return shade(i);
+  return shadowed(i, shade(i));
 }}
 @fragment fn fs_fade(i: Out) -> @location(0) vec4f {{
-  let c = shade(i);
+  let c = shadowed(i, shade(i));
   if bayer(vec2u(i.clip.xy)) >= i.fade {{
     discard;
   }}
@@ -4361,7 +4419,7 @@ fn faded_ground(wgsl: String) -> String {
 @group(3) @binding(0) var cover: texture_2d<u32>;
 @group(3) @binding(1) var<uniform> cover_grid: vec4f;
 @fragment fn fs_stand_in(i: Out) -> @location(0) vec4f {{
-  let c = shade(i);
+  let c = shadowed(i, shade(i));
   let size = vec2i(textureDimensions(cover));
   let at = clamp(vec2i(floor(i.world.xz * cover_grid.x + cover_grid.yz)), vec2i(0), size - vec2i(1));
   if bayer(vec2u(i.clip.xy)) < textureLoad(cover, at, 0).r {{
@@ -4373,6 +4431,31 @@ fn faded_ground(wgsl: String) -> String {
     ));
     s
 }
+
+/// The sun's shadows over the ground's colour `c` (V108). The original's lays its tint over it at
+/// its share, as `(Cs - Cd) * As + Cd` does. Ours take the sun's share away: on a light map, down to
+/// the level the map keeps in its own shadows (`ground_baked`, which the painted ground sets; under
+/// the baked shadows nothing more), elsewhere down to the ambient light. Both under the fog.
+const GROUND_SHADOWED_WGSL: &str = r#"
+var<private> ground_baked: f32 = -1.0;
+fn shadowed(i: Out, c: vec4f) -> vec4f {
+  if (view.sun_maps.x < 0.5) {
+    return c;
+  }
+  let h = sun_hidden(i.world - view.origin.xyz);
+  let fog = view.fog_color.rgb / 255.0;
+  if (view.sun_maps.x < 1.5) {
+    let s = view.sun_tint.rgb / 255.0 * (1.0 - i.fog) + fog * i.fog;
+    return vec4f(mix(c.rgb, s, view.sun_tint.a * h), c.a);
+  }
+  var dim = view.ambient.rgb / max(i.sunlit, vec3f(1e-3));
+  if (ground_baked >= 0.0) {
+    dim = vec3f(view.sun_tint.x / max(ground_baked, 1e-3));
+  }
+  let k = mix(vec3f(1.0), min(dim, vec3f(1.0)), h);
+  return vec4f(c.rgb * k + fog * i.fog * (1.0 - k), c.a);
+}
+"#;
 
 /// The ground's shader for a mod track's terrain pages (MD4, [`Pages`]): the page each leaf takes
 /// looked up per pixel, at the place on it the original's mapping gives, the detail map blended over
@@ -4661,6 +4744,10 @@ struct View {
   right: vec4f,
   up: vec4f,
   origin: vec4f,
+  sun_maps: vec4f,
+  sun_tint: vec4f,
+  sun_layer: array<vec4f, 8>,
+  sun_m: array<mat4x4f, 8>,
 }
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var palette: texture_2d<f32>;
@@ -4691,6 +4778,10 @@ struct View {
   right: vec4f,
   up: vec4f,
   origin: vec4f,
+  sun_maps: vec4f,
+  sun_tint: vec4f,
+  sun_layer: array<vec4f, 8>,
+  sun_m: array<mat4x4f, 8>,
 }
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var palette: texture_2d<f32>;
@@ -4732,6 +4823,9 @@ struct Out {
   @location(1) lit: vec3f,
   @location(2) fog: f32,
   @location(3) @interpolate(flat) cover: f32,
+  // Where it is from the view's origin, and the share of its light the sun gives (V108).
+  @location(4) at: vec3f,
+  @location(5) sun: vec3f,
 }
 
 // `eco::covers`: whether a copy drawn at `cover` keeps this pixel of a 4x4 ordered dither; below 0
@@ -4765,12 +4859,17 @@ fn node_matrix(i: u32) -> mat4x4f {
   let normal = select(n, n / l, l > 0.0);
   let paint = v.color.rgb * 255.0 / 128.0;
   var lit = (view.ambient.rgb + view.sun_color.rgb * max(-dot(normal, view.sun.xyz), 0.0)) * paint;
+  var sun = view.sun_color.rgb * max(-dot(normal, view.sun.xyz), 0.0) * paint;
   if (material.shading == 1u) {
     lit = paint;
+    sun = vec3f(0.0);
   } else if (material.shading == 2u) {
     lit = material.constant.rgb / 128.0;
+    sun = vec3f(0.0);
   }
   var o: Out;
+  o.at = world;
+  o.sun = sun;
   // The copy's place came already moved by the view's origin (MD15), as `vp` looks from it.
   o.clip = rows(view.vp, world);
   o.uv = v.uv;
@@ -4809,10 +4908,34 @@ fn node_matrix(i: u32) -> mat4x4f {
   if (a < material.cutoff || a >= material.below || (i.cover < 1.0 && !covers(i.clip.xy, i.cover))) {
     discard;
   }
-  let out = clamp(t.rgb * i.lit * (1.0 - i.fog) + view.fog_color.rgb * i.fog, vec3f(0.0), vec3f(255.0));
+  // Our shadows (V108) take the sun's share away, or a prelit model's light down to what the light
+  // maps keep in their shadows; the original's fall on the ground alone.
+  var lit = i.lit;
+  if (view.sun_maps.x > 1.5 && material.shading != 2u) {
+    let h = sun_hidden(i.at);
+    if (material.shading == 1u) {
+      lit = lit * mix(1.0, view.sun_tint.y, h);
+    } else {
+      lit = lit - i.sun * h;
+    }
+  }
+  let out = clamp(t.rgb * lit * (1.0 - i.fog) + view.fog_color.rgb * i.fog, vec3f(0.0), vec3f(255.0));
   return vec4f(out / 255.0, t.a / 255.0);
 }
+
+// Drawn into a shadow map (V108): depth only, from the texels that are drawn.
+@fragment fn fs_shadow(i: Out) {
+  let a = textureSample(tex, samp, i.uv).a * 255.0;
+  if (a < material.cutoff || a >= material.below || (i.cover < 1.0 && !covers(i.clip.xy, i.cover))) {
+    discard;
+  }
+}
 "#;
+
+/// The models' shader with the shadow maps' reading ([`shadows::SHADOW_WGSL`]).
+fn mesh_wgsl() -> String {
+    format!("{MESH_WGSL}{}", shadows::shadow_wgsl())
+}
 
 /// The backdrop: the sky's faces looked up along each pixel's ray (`Sky::color`), or the fog's colour.
 const SKY_WGSL: &str = r#"
@@ -5748,7 +5871,8 @@ mod tests {
         use naga::back::glsl;
         let layer = || Texture { width: 1, height: 1, rgba: vec![0; 4] };
         let max = wgpu::Limits::downlevel_webgl2_defaults().max_sampled_textures_per_shader_stage as usize;
-        let passes = (0..max - 1)
+        // Every layer but the light map's and the sun's shadow maps' (V108).
+        let passes = (0..max - 2)
             .map(|i| crate::splat::Pass {
                 texture: i,
                 scale: [0.5, 0.25],
@@ -5762,7 +5886,7 @@ mod tests {
             })
             .collect();
         let shadow = crate::splat::Shadow { tiles: vec![layer()], across: 1, x0: -10.0, x1: 10.0, z0: -10.0, z1: 10.0 };
-        let paint = Splat { textures: (0..max - 1).map(|_| layer()).collect(), passes, shadow: Some(shadow), meshes: None };
+        let paint = Splat { textures: (0..max - 2).map(|_| layer()).collect(), passes, shadow: Some(shadow), meshes: None };
         let pages = Pages {
             pages: vec![layer()],
             across: 1,
@@ -5773,28 +5897,28 @@ mod tests {
             detail_repeat: 8.0,
         };
         let shaders = [
-            ("mesh", MESH_WGSL.to_string()),
+            ("mesh", mesh_wgsl()),
             ("sky", SKY_WGSL.to_string()),
             ("place", PLACE_WGSL.to_string()),
             ("sprite", sprite::SPRITE_WGSL.to_string()),
             ("glow", format!("{VIEW_WGSL}{}", glows::GLOW_WGSL)),
             ("upscale", scale::UPSCALE_WGSL.to_string()),
-            ("ground, painted", ground_wgsl(Some(&paint), [200.0, 180.0, 150.0])),
-            ("ground, bare", ground_wgsl(None, [200.0, 180.0, 150.0])),
+            ("ground, painted", faded_ground(ground_wgsl(Some(&paint), [200.0, 180.0, 150.0]))),
+            ("ground, bare", faded_ground(ground_wgsl(None, [200.0, 180.0, 150.0]))),
             // With the roads and ruts (V67), whose two targets take two layers' places.
             ("ground, meshed", {
                 let pass = paint.passes[1].clone();
                 let flat = crate::ground_mesh::Flat::new([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], [[0.0; 2]; 3], [[128.0; 4]; 3], pass);
                 let meshed = Splat {
-                    textures: (0..max - 3).map(|_| layer()).collect(),
-                    passes: paint.passes[..max - 3].to_vec(),
+                    textures: (0..max - 4).map(|_| layer()).collect(),
+                    passes: paint.passes[..max - 4].to_vec(),
                     shadow: Some(crate::splat::Shadow { tiles: vec![layer()], across: 1, x0: -10.0, x1: 10.0, z0: -10.0, z1: 10.0 }),
                     meshes: crate::ground_mesh::GroundMeshes::of(vec![layer()], vec![flat]),
                 };
-                ground_wgsl(Some(&meshed), [200.0, 180.0, 150.0])
+                faded_ground(ground_wgsl(Some(&meshed), [200.0, 180.0, 150.0]))
             }),
             ("ground meshes", ground_mesh::DRAW_WGSL.to_string()),
-            ("ground, pages", ground_pages_wgsl(&pages, [200.0, 180.0, 150.0])),
+            ("ground, pages", faded_ground(ground_pages_wgsl(&pages, [200.0, 180.0, 150.0]))),
             // Wrapped on x (MD51), so the shader reads each map's nearest copy across the seam.
             ("ground, world", {
                 let world = WorldPaint {
@@ -5805,7 +5929,7 @@ mod tests {
                     ],
                     dirt: [200.0, 180.0, 150.0],
                 };
-                ground_world_wgsl(&world, &world.pack(256, 2048))
+                faded_ground(ground_world_wgsl(&world, &world.pack(256, 2048)))
             }),
             // Two page sizes, so two page arrays (MD31): a disc map's baked pages and a mod map's.
             ("ground, world of two page sizes", {
@@ -5820,7 +5944,7 @@ mod tests {
                 };
                 let packed = world.pack(256, 2048);
                 assert_eq!(world.array_sizes(&packed).len(), 2, "{packed:?}");
-                ground_world_wgsl(&world, &packed)
+                faded_ground(ground_world_wgsl(&world, &packed))
             }),
         ];
         let mut written = 0;

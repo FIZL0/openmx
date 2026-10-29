@@ -1646,6 +1646,9 @@ struct Args {
     /// `--texture-filtering off|2|4|8|16` (V83): how far the GPU filters textures anisotropically;
     /// the front end's setting when not given, 16x without one.
     filtering: Option<menu::Filtering>,
+    /// `--shadows better|original|off` (V108): our sun shadows, the original's under each racer, or
+    /// none; the front end's setting when not given, Better without one.
+    shadows: Option<game_render::shadow::Shadows>,
     /// `--wheels original` (V59): the bike's wheels drawn turning at the original's own angle and
     /// never blurred, rather than held under the wagon-wheel alias and blurred when they spin fast.
     original_wheels: bool,
@@ -2162,6 +2165,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.foliage = Some(args.foliage.unwrap_or(shell.front.menu.settings.foliage));
                 a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
                 a.filtering = Some(args.filtering.unwrap_or(shell.front.menu.settings.filtering));
+                a.shadows = Some(args.shadows.unwrap_or(shell.front.menu.settings.shadows));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -2254,6 +2258,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.foliage = Some(args.foliage.unwrap_or(shell.front.menu.settings.foliage));
                 a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
                 a.filtering = Some(args.filtering.unwrap_or(shell.front.menu.settings.filtering));
+                a.shadows = Some(args.shadows.unwrap_or(shell.front.menu.settings.shadows));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -4749,6 +4754,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         r.set_anisotropy(filtering.anisotropy());
         let (aniso, most) = r.anisotropy();
         println!("texture filtering: {} (anisotropy {aniso}, this device {most} at most)", filtering.label());
+        // Shadows (V108), from the first frame.
+        let shadows = args.shadows.unwrap_or_default();
+        r.set_shadows(shadows);
+        let tint = r.shadow_tint();
+        let [tr, tg, tb] = tint.rgb;
+        println!("shadows: {} (the original's in {tr},{tg},{tb} at {:.3})", shadows.word(), tint.alpha);
         let lit = Lighting::of(&look);
         let (fog, far) = r.fog(&lit);
         println!(
@@ -4764,6 +4775,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         );
     } else if args.graphics.is_some_and(|g| g != Graphics::Original) {
         println!("graphics: the software renderer draws the original's fog and far clip only");
+    }
+    if !(gpu_on && renderer_of(&mut offscreen, window).is_some()) && args.shadows.is_some_and(|s| s != game_render::shadow::Shadows::Off) {
+        println!("shadows: the software renderer draws none");
     }
     // The load is over (P127): the ride is on the screen from its first frame.
     if let Some(f) = front.as_deref_mut()
@@ -4984,6 +4998,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut plants = args.plants.unwrap_or_default();
     let mut foliage = args.foliage.unwrap_or_default();
     let mut filtering = args.filtering.unwrap_or_default();
+    let mut shadows = args.shadows.unwrap_or_default();
     // Set when the pause's settings change the picture's shape: the frame is re-made as for a resize.
     let mut reshaped = false;
     let mut frame = Frame::new(width, height, look.fog_color);
@@ -5842,6 +5857,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     filtering = front.menu.settings.filtering;
                     if let Some(r) = renderer_of(&mut offscreen, window) {
                         r.set_anisotropy(filtering.anisotropy());
+                    }
+                }
+                // Shadows (V108), from the next frame.
+                if shadows != front.menu.settings.shadows {
+                    shadows = front.menu.settings.shadows;
+                    if let Some(r) = renderer_of(&mut offscreen, window) {
+                        r.set_shadows(shadows);
                     }
                 }
                 if !args.aspect_asked && aspect != aspect_of(front.menu.settings.picture) {
@@ -9386,6 +9408,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         foliage: None,
         textures: None,
         filtering: None,
+        shadows: None,
         original_wheels: false,
         headless: false,
         frames: None,
@@ -9687,6 +9710,10 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--texture-filtering" => {
                 let word = next("off, 2, 4, 8 or 16")?;
                 args.filtering = Some(menu::Filtering::from_word(&word).ok_or_else(|| format!("--texture-filtering: {word:?} is not off, 2, 4, 8 or 16"))?);
+            }
+            "--shadows" => {
+                let word = next("better, original or off")?;
+                args.shadows = Some(game_render::shadow::Shadows::from_word(&word).ok_or_else(|| format!("--shadows: {word:?} is not better, original or off"))?);
             }
             "--headless" => args.headless = true,
             "--no-sound" => args.sound = false,
