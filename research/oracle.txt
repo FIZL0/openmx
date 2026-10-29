@@ -6769,3 +6769,29 @@ car_phy_load                boot 0x00394450 the shared loader (car, ini): part, 
 #   inertia; 0x003999e0 +0x58 loss*0.01; 0x00399980 +0x68 maxK, +0x64 0.001*pump, +0xf0; 0x003999a0
 #   shift points +0x90..+0xc0; 0x00399a50 NOX +0x84..+0x8c; 0x00399a40 TCS +0x74..+0x7c; +0x70 MinRPM,
 #   +0x4c IdleThrottle.
+# S149c — the car's engine and automatic gearbox running (MXCar.cpp), research/journal/*-s149c-car-engine.
+# Ported as game_sim::car::Drivetrain; tests/car_engine.rs runs each against the original on the S149a
+# switched images (engine object = read32(car + 0x544), car 0x00605270).
+car_engine_step             boot 0x00399e40 (engine, dt in f12): once a physics substep, called by the
+#                                           car's force listener 0x00397f40 before the tire steps; the
+#                                           world runs (int)(dt*115)+1 substeps of dt/n.
+car_engine_shift            boot 0x00399bb0 (engine, dt in f12): the automatic box, once a frame from the
+#                                           car's pre-force listener 0x00398150. Calls 0x003a6070 (the
+#                                           shift sound, engine +0x13c) on a shift.
+car_engine_set_gear         boot 0x00399a60 (engine, gear)
+car_engine_set_reverse      boot 0x00399b30 (engine, on)
+car_engine_reset            boot 0x00399e20 (engine): rpm, wheel rpm 0, gear 1
+car_tire_add_drive          boot 0x0039b660 (tire, torque in f12): tire +0x1f0 += torque
+# Engine running words: +0x40/+0x44/+0x48 pointers to the car's throttle +0x3ec, clutch +0x3f0, brake
+#   +0x3f8; +0x6c launch boost (car-written, ctor 1); +0x80 NOX on (car-written int); +0xac shift timer;
+#   +0xb0 last shift was up; +0xc4 shift-throttle timer; +0xc8 reverse; +0xcc gear; +0xec wheel rpm;
+#   +0xf4 converter (pump) torque; +0xf8 multiplication; +0xfc output torque; +0x100 torque-curve cursor
+#   {count, index, frac, xs*} for curve_seek/curve_value; +0x110 net engine torque; +0x114 engine
+#   braking; +0x118..+0x124 drive torque per slot; +0x128 rpm; +0x12c slip rpm (the shift's load);
+#   +0x134 sound clock; +0x138 sound pitch (rpm units); +0x13c sound object.
+# Tire words the engine reads: +0xc0 contact (int), +0x1a4 spin, +0x20c slip ratio (TCS), +0xdc
+#   compression, +0x3c MaxCompression; writes +0x1f0 drive torque, +0xa0 top wheel speed.
+# The pitch's top wobble reads the curve table (pointer 0x0046a7f0, 1/step 0x0046a698) entry's sine;
+#   its bottom one smooth_noise. (S149a's journal calls +0x104 throttle and +0x108 a gear word: they are
+#   the cursor's index and weight.)
+car_shift_sound             boot 0x003a6070 (sound, 0): what the shift calls with the engine's +0x13c on a shift
