@@ -17,7 +17,8 @@
 //! `MinimumEmissionSpeed` it emits nothing. Otherwise a rate is drawn between the two emit rates, a
 //! second's worth of it times the frame's length is added to a carry, and the whole particles in the
 //! carry are emitted (at least `MinParticlesPerFrame`), spread along the path from last frame's point
-//! to this one. Each takes a random size, life and growth from its ranges, the emitter's velocity
+//! to this one. Each takes a random size, life and growth from its ranges — a size or life with a
+//! speed ratio is the emitter's speed by it instead, once it moves (P185, [`Emt::size_and_life`]) —, the emitter's velocity
 //! turned by the node, a noise point in a ball between the noise bounds turned the same way, and the
 //! emitter's own velocity when `ApplyEmitterVelocity` says so. The first frame after an emitter is
 //! switched on its last point is its point: it has not moved. A node's emitter switched on by the
@@ -172,6 +173,12 @@ pub struct Emt {
     pub distance_ratio: f32,
     pub speed_ratio: f32,
     pub min_movement_speed: f32,
+    /// `InitialSizeToSpeedRatio` and `LifeToSpeedRatio` (P185): where one is above 0 and the emitter
+    /// moves faster than `MinimumMovementSpeed`, a particle's size (feet) or life (milliseconds) is
+    /// the emitter's speed by it, held between the file's two ends, in place of a random one
+    /// ([`Emt::size_and_life`]).
+    pub size_ratio: f32,
+    pub life_ratio: f32,
     /// `GroundLevel` is in the file: its particles meet the ground. The value itself is not what they
     /// meet — the terrain under them is — so only its presence counts. A `CollisionModel` entry's
     /// `HasCollision` switches it on as well ([`PlaneFx::new`]).
@@ -223,9 +230,12 @@ impl Default for Emt {
             fade_out: 0.7,
             gravity: 3.0,
             min_speed: 0.0,
-            distance_ratio: 0.0,
+            // The speed emitter's read leaves a missing ratio at these, not 0 (P185).
+            distance_ratio: 0.01,
             speed_ratio: 0.0,
             min_movement_speed: 0.0,
+            size_ratio: 0.01,
+            life_ratio: 5.0,
             collides: false,
             restitution: 0.55,
             has_velocity: false,
@@ -247,6 +257,23 @@ impl Default for Emt {
 }
 
 impl Emt {
+    /// A new particle's size and life (P185), in the PS2's arithmetic: for an emitter going `speed`
+    /// feet a second, `moving` when that is past `MinimumMovementSpeed`. Each is its ratio times the
+    /// speed, held between the file's two ends, where the emitter is moving and the ratio is above
+    /// 0; otherwise the low end plus the span by `u_size` or `u_life`, two draws in `0..1`.
+    pub fn size_and_life(&self, speed: f32, moving: bool, u_size: f32, u_life: f32) -> (f32, f32) {
+        use ps2_float::fpu::{add, mul, sub};
+        let pick = |(low, high): (f32, f32), ratio: f32, u: f32| {
+            if moving && ratio > 0.0 {
+                let v = mul(ratio, speed);
+                if v < low { low } else if v <= high { v } else { high }
+            } else {
+                add(low, mul(sub(high, low), u))
+            }
+        };
+        (pick(self.size, self.size_ratio, u_size), pick(self.life, self.life_ratio, u_life))
+    }
+
     /// Read an `.emt`'s text.
     pub fn parse(text: &str) -> Emt {
         let sections = ini::parse(text);
@@ -279,6 +306,8 @@ impl Emt {
             distance_ratio: number("ParticlesToDistanceRatio", d.distance_ratio),
             speed_ratio: number("ParticlesToSpeedRatio", d.speed_ratio),
             min_movement_speed: number("MinimumMovementSpeed", d.min_movement_speed),
+            size_ratio: number("InitialSizeToSpeedRatio", d.size_ratio),
+            life_ratio: number("LifeToSpeedRatio", d.life_ratio),
             collides: find("GroundLevel").is_some(),
             restitution: number("Restitution", d.restitution),
             has_velocity: flag("HasVelocity"),
@@ -712,7 +741,8 @@ impl Source {
         // The frame's share (P153): by the distance and speed where the file asks for that and the
         // emitter moves, held between the rate's ends, else a random rate between them.
         let (low, high) = (emt.rate.0 * dt, emt.rate.1 * dt);
-        let share = if emt.min_movement_speed < speed && (emt.distance_ratio > 0.0 || emt.speed_ratio > 0.0) {
+        let moves = emt.min_movement_speed < speed;
+        let share = if moves && (emt.distance_ratio > 0.0 || emt.speed_ratio > 0.0) {
             (emt.distance_ratio * distance + emt.speed_ratio * speed).max(low).min(high)
         } else {
             rng.between(emt.rate) * dt
@@ -737,7 +767,7 @@ impl Source {
                 vel = vel.add(wind);
             }
             let vel = vel.add(turned(rng.spread(emt.noise)));
-            let life = rng.between(emt.life);
+            let u_life = rng.unit();
             let (first, last) = frames;
             let frame = first + ((rng.unit() * (last + 1 - first) as f32) as usize).min(last - first);
             let extent = turned(rng.spread(emt.extent));
@@ -745,12 +775,13 @@ impl Source {
             if emt.matches_terrain && let Some(y) = ground(at) {
                 at.y = y + extent.y;
             }
+            let (size, life) = emt.size_and_life(speed, moves, rng.unit(), u_life);
             out.push(Particle {
                 emitter: index,
                 at,
                 was: at.sub(travel),
                 vel,
-                size: rng.between(emt.size),
+                size,
                 growth: rng.between(emt.growth),
                 age: life * emt.initial_age,
                 life,

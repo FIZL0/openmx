@@ -4341,7 +4341,17 @@ emit                 boot 0x00150540 places the frame's particles along prev..po
 emit_count           boot 0x00151d80 carry += rate * dt, emits floor(carry), at least
 #                                    MinParticlesPerFrame
 particle_life_size   boot 0x00152030 draws a particle's life, size and growth between the file's two
+#                                    P185: (emitter a0, size out a1, life out a2, moving a3; f12 speed,
+#                                    f13/f14 the size and life draws). moving && ISR (+0x3b4) > 0: size =
+#                                    clamp(ISR*speed, +0x2f4, +0x2f8), else +0x2f4 + +0x2fc*f13; life the
+#                                    same off LSR (+0x3b8) and +0x330/+0x334/+0x338. Then, only with +0x23c
+#                                    (the other emit path, 0x001512b0), life *= max(0.5, +0x254 * sys+0x84).
+#                                    emit (0x00150540) passes f27 = |pos - prev|/dt and moving = MMS < f27.
 speed_emitter_read   boot 0x00152230 the speed-gated emitter's own keys (MinimumEmissionSpeed)
+#                                    P185: section General Info; defaults InitialSizeToSpeedRatio 0.01
+#                                    +0x3b4, LifeToSpeedRatio 5 +0x3b8, ParticlesToDistanceRatio 0.01
+#                                    +0x3bc, ParticlesToSpeedRatio 0 +0x3c0, MinimumEmissionSpeed 0 +0x3c4,
+#                                    MinimumMovementSpeed 0 +0x3c8 (the ctor 0x001503e0's 25/15 overwritten)
 particle_update      boot 0x001556b0 per particle: age += dt * 1000, dead past life; grows (flag 8)
 #                                    size += growth dt and y += growth dt; moves (4) pos += vel dt;
 #                                    drag (0x80000) vel -= vel drag dt; gravity (0x20000) vel.y -=
