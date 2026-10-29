@@ -22,6 +22,11 @@ wgpu = { version = "30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "1", optional = true }
 
+# A browser's clock (P48): wasm32's std has none, and `Instant::now` panics there; the GPU renderer
+# times its ground pass with web-time's, which reads the page's `performance.now()`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [features]
 default = ["gpu"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]

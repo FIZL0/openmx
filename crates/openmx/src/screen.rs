@@ -66,9 +66,6 @@ impl Screen {
         scale: usize,
         title: &str,
     ) -> Result<Screen, String> {
-        // No GPU window in the browser yet (P48): its canvas draws in software.
-        #[cfg(target_arch = "wasm32")]
-        let backend = Backend::Software;
         let inner = match backend {
             // VSync on until the loop says otherwise (P90): the settings' default.
             Backend::Gpu => match GpuWindow::open(size, scale, title, true) {

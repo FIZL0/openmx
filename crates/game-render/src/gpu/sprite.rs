@@ -326,6 +326,10 @@ struct Place {
   size: vec2f,
   origin: vec2f,
   scale: f32,
+  // to SpritePlace's 32 bytes: WebGL2 binds a uniform in whole 16-byte rows (P48)
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
 }
 @group(0) @binding(0) var<uniform> place: Place;
 @group(1) @binding(0) var image: texture_2d<f32>;

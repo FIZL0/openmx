@@ -1372,6 +1372,7 @@ dependencies = [
  "ps2-float",
  "ps2-oracle",
  "twox-hash",
+ "web-time",
  "wgpu",
 ]
 
@@ -3379,6 +3380,7 @@ dependencies = [
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "web-time",
  "winit",
 ]

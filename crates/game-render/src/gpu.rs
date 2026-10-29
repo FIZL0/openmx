@@ -60,6 +60,10 @@ use crate::ground_tree::{GroundTree, Look, Pick, TreeChunk};
 use crate::terrain::{Packed, Pages, WorldPaint, lod_errors, lod_hole_errors, lod_indices, lod_indices_holed, lod_level, lod_levels};
 use crate::world::{Assets, Camera, Fog, Graphics, Lighting, Surface};
 use bytemuck::{Pod, Zeroable};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
 
@@ -1325,7 +1329,7 @@ fn sky_faces(device: &wgpu::Device, queue: &wgpu::Queue, sky: Option<&Sky>) -> w
         size: wgpu::Extent3d {
             width: w,
             height: h,
-            depth_or_array_layers: 6,
+            depth_or_array_layers: array_layers(6, w, h),
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -1407,7 +1411,7 @@ fn upload_pages(device: &wgpu::Device, queue: &wgpu::Queue, p: &Pages) -> [wgpu:
     let levels = mips(&first).len() as u32;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("ground pages"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: p.pages.len().max(1) as u32 },
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: array_layers(p.pages.len() as u32, w, h) },
         mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1506,10 +1510,22 @@ pub struct ArrayShape {
 
 /// The array [`upload_array`] makes of these layers: the widest's width and the tallest's height (1 x
 /// 1 for none), at least two layers, and every mip level down to 1 x 1, as [`mips`] makes them.
+/// How many layers an array texture of `n` takes so the GL backend (WebGL2, P48) binds it as one:
+/// wgpu's GL makes a one-layer 2D texture a plain 2D one, and a square one of six (or 12, ...) a
+/// cube map, and either samples black through a `texture_2d_array` (the sky drew black). A spare
+/// layer past the used ones is never read.
+fn array_layers(n: u32, width: u32, height: u32) -> u32 {
+    let n = n.max(2);
+    match width == height && n % 6 == 0 {
+        true => n + 1,
+        false => n,
+    }
+}
+
 fn array_shape(layers: &[&Texture]) -> ArrayShape {
     let width = layers.iter().map(|t| t.width).max().unwrap_or(1).max(1) as u32;
     let height = layers.iter().map(|t| t.height).max().unwrap_or(1).max(1) as u32;
-    ArrayShape { width, height, layers: layers.len().max(2) as u32, mips: 32 - width.max(height).leading_zeros() }
+    ArrayShape { width, height, layers: array_layers(layers.len() as u32, width, height), mips: 32 - width.max(height).leading_zeros() }
 }
 
 /// A world's paint as [`Renderer::set_ground_streamed`] uploads it (MD31): each page array, by its
@@ -3511,7 +3527,7 @@ impl Renderer {
                     self.scratch.push((key, ghost, inst));
                 }
             }
-            let ground_at = std::time::Instant::now();
+            let ground_at = Instant::now();
             if let Some(g) = &mut self.ground {
                 g.write_cover(&self.queue);
             }
@@ -5739,6 +5755,18 @@ mod tests {
         assert!(share < 0.01, "{:.2}% of pixels differ by more than 40", share * 100.0);
     }
 
+    /// No array texture is one wgpu's GL backend takes for a plain 2D texture or a cube map (P48:
+    /// the sky's six square faces were a cube there, and sampled black on WebGL2).
+    #[test]
+    fn array_textures_stay_arrays_on_gl() {
+        assert_eq!(array_layers(0, 4, 4), 2);
+        assert_eq!(array_layers(1, 4, 8), 2);
+        assert_eq!(array_layers(6, 512, 512), 7, "six square layers are a cube");
+        assert_eq!(array_layers(12, 64, 64), 13);
+        assert_eq!(array_layers(6, 512, 256), 6, "not square: no cube");
+        assert_eq!(array_layers(5, 64, 64), 5);
+    }
+
     /// Every shader, written out as the GLSL ES 3.00 wgpu's WebGL2 backend hands the browser (P48):
     /// WebGL2 has no storage buffers, no compute and no textures read without a sampler in GLSL's
     /// sense, and a shader that needs any of them fails to translate here. The ground's is written
@@ -5778,6 +5806,7 @@ mod tests {
             ("place", PLACE_WGSL.to_string()),
             ("sprite", sprite::SPRITE_WGSL.to_string()),
             ("glow", format!("{VIEW_WGSL}{}", glows::GLOW_WGSL)),
+            ("sprites", format!("{VIEW_WGSL}{}", sprites::SPRITE_WGSL)),
             ("upscale", scale::UPSCALE_WGSL.to_string()),
             ("ground, painted", ground_wgsl(Some(&paint), [200.0, 180.0, 150.0])),
             ("ground, bare", ground_wgsl(None, [200.0, 180.0, 150.0])),
@@ -5829,6 +5858,17 @@ mod tests {
             let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
                 .validate(&module)
                 .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            // WebGL2's uniform blocks are bound in whole 16-byte rows: wgpu refuses a pipeline whose
+            // uniform is any other size where the adapter lacks BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED,
+            // as every WebGL2 one does (the desktop's adapters have it, so only a browser saw it).
+            for (_, var) in module.global_variables.iter() {
+                if var.space == naga::AddressSpace::Uniform {
+                    let size = module.types[var.ty].inner.size(module.to_ctx());
+                    if size % 16 != 0 {
+                        return Err(format!("{name}: the uniform {:?} is {size} bytes, not a multiple of 16", var.name));
+                    }
+                }
+            }
             let options = glsl::Options {
                 version: glsl::Version::Embedded { version: 300, is_webgl: true },
                 writer_flags: glsl::WriterFlags::ADJUST_COORDINATE_SPACE | glsl::WriterFlags::FORCE_POINT_SIZE,
@@ -5851,13 +5891,16 @@ mod tests {
             }
             Ok(())
         };
-        for (name, source) in &shaders {
-            translate(name, source).unwrap();
-        }
+        let refused: Vec<String> = shaders.iter().filter_map(|(name, source)| translate(name, source).err()).collect();
+        assert!(refused.is_empty(), "{}", refused.join("\n"));
         // The check bites: a storage buffer, which WebGPU has and WebGL2 does not, is refused.
         let storage = "@group(0) @binding(0) var<storage, read> palette: array<vec4f>;\n\
                        @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f { return palette[i]; }\n";
         assert!(translate("storage", storage).is_err());
+        // And so is a uniform of 24 bytes (the sprites' place had one).
+        let ragged = "struct P { a: vec2f, b: vec2f, c: f32 }\n@group(0) @binding(0) var<uniform> p: P;\n\
+                      @vertex fn vs() -> @builtin(position) vec4f { return vec4f(p.a, p.b.x, p.c); }\n";
+        assert!(translate("ragged", ragged).unwrap_err().contains("24 bytes"));
         // mesh: vs + its fragment entries; sky, place, and the two grounds: one of each at least.
         assert!(written >= 2 * shaders.len(), "only {written} entry points written");
     }

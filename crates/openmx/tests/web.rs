@@ -13,6 +13,8 @@
 //!   user's own disc, and compares its frame with [`openmx_web::start_line`] drawn natively. Rendering
 //!   is "looks right" in this project (AGENT.md), so the comparison has a tolerance, and what it
 //!   measured is printed.
+//! * [`the_browser_rides_on_the_gpu`] opens the page in headless chromium on the machine's GPU and
+//!   rides on WebGPU and on WebGL2 (P48): a lit frame, and the pictures a second it rode at.
 //!
 //! The build needs the wasm32 standard library. `tools/web.sh` takes it from this machine's
 //! toolchain, or downloads the matching upstream release once into `$TMPDIR/openmx-cross`; with
@@ -28,9 +30,9 @@ use openmx_web::{TRACK, rgba, start_line};
 
 /// The host calls `web/worker.js` supplies, on its global `openmx`: the disc, the picture and the
 /// log (N4); and the game's canvas size, keys, pointer, gamepads, sound, files and frame clock
-/// (P196, `src/web_host.rs`).
-const HOST_CALLS: [&str; 14] = [
-    "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame",
+/// (P196, `src/web_host.rs`); and which GPU API draws and its first frame (P48, `src/web_gpu.rs`).
+const HOST_CALLS: [&str; 16] = [
+    "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame", "gpu", "drawn",
 ];
 
 /// The module wasm-bindgen's glue answers the imports under (`--target web`).
@@ -349,4 +351,66 @@ fn the_touch_pad_rides_on_a_phone() {
     assert!(portrait.contains("\"pad\":\"none\"") && portrait.contains("\"hint\":\"flex\""), "upright: {portrait}");
     assert_eq!(field("keyboard"), "false", "a hardware key hides the pad");
     assert_eq!(field("again"), "true", "a touch brings it back");
+}
+
+/// The ride on the GPU in headless chromium (P48, `tests/web/gpu.mjs`): the page opened with
+/// `?args=--ride`, once as it comes (WebGPU) and once with `?webgl2`, each on this machine's GPU
+/// (chromium's own Vulkan, not SwiftShader). Each must draw on the API asked for — not fall back to
+/// the software picture — show a frame that is not black, and ride at 30 pictures a second or more,
+/// as the worker counts them; what each rode at is printed. The module is `tools/web.sh --check`'s,
+/// served as the page's pkg/. Skips without the disc, node or chromium.
+#[test]
+fn the_browser_rides_on_the_gpu() {
+    let iso = match Disc::open_configured() {
+        Ok(_) => configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    // Headless chromium draws WebGL2 on SwiftShader (~2 fps for this ride) and has no WebGPU at all
+    // unless told to use the GPU: these are the flags that give it the machine's own.
+    const FLAGS: [&str; 4] = ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-angle=vulkan", "--ignore-gpu-blocklist"];
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/gpu.mjs");
+    let field = |text: &str, key: &str| -> String {
+        text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string()
+    };
+    for (query, api) in [("", "webgpu"), ("webgl2", "webgl2")] {
+        let scratch = std::env::temp_dir().join(format!("openmx-web-gpu-{}-{api}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let run = Command::new("node")
+            .arg(&drive)
+            .arg(repo().join("web"))
+            .arg(&iso)
+            .arg(scratch.join("profile"))
+            .arg(scratch.join("ride.png"))
+            .arg(query)
+            .args(FLAGS)
+            .env("OPENMX_GPU_PKG", built())
+            .env("OPENMX_GPU_SECONDS", "10")
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let text = String::from_utf8_lossy(&run.stdout).into_owned();
+        assert!(run.status.success(), "gpu.mjs ({api}) failed:\n{}{text}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(field(&text, "gpu"), api, "the page did not draw on {api}:\n{text}");
+        assert!(field(&text, "drawn").starts_with(api), "no first {api} frame:\n{text}");
+        let lit: f64 = field(&text, "lit").parse().expect("lit");
+        let pixels: f64 = field(&text, "pixels").parse().expect("pixels");
+        assert!(lit > pixels / 2.0, "{api}: only {lit} of {pixels} pixels are not black:\n{text}");
+        // The first seconds are the module settling and the world streaming in; the rest is the ride.
+        let list = text.split("\"fps\":[").nth(1).and_then(|s| s.split(']').next()).unwrap_or("");
+        let mut fps: Vec<f64> = list.split(',').filter_map(|f| f.parse().ok()).skip(2).collect();
+        assert!(!fps.is_empty(), "{api}: no pictures a second counted:\n{text}");
+        fps.sort_by(f64::total_cmp);
+        let median = fps[fps.len() / 2];
+        println!("{api}: {median} fps (median of {:?}), {lit} of {pixels} pixels lit", fps);
+        assert!(median >= 30.0, "{api} rides at {median} fps, under 30:\n{text}");
+    }
 }

@@ -598,13 +598,33 @@ footer a { color: var(--bone); }
   const gb = n => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
 
   // The game's canvas goes to the worker once, with whatever starts first: a ride off the stored disc or a picked file.
+  // With it, what draws on it (P48): the GPU — WebGPU when the browser grants an adapter, else WebGL2 — unless the
+  // address says `?webgl2` or `?software`; and `?args=` the shell's command line (the tests' `--ride`).
+  const asked = new URLSearchParams(location.search);
+  const api = asked.has('software') ? 'software' : asked.has('webgl2') ? 'webgl2' : 'auto';
+  const args = asked.get('args') ?? '';
   let sent = false;
   const canvas = () => {
     if (sent) return {};
     sent = true;
     const offscreen = screen.transferControlToOffscreen();
-    return { msg: { canvas: offscreen }, move: [offscreen] };
+    return { msg: { canvas: offscreen, api, args }, move: [offscreen] };
   };
+  // The GPU failing before its first frame (a refused first frame, a WebGPU validation error, a panic): the page starts
+  // again on the next API down, WebGPU to WebGL2 to software, as opentennis's does (its B244, B378). A canvas keeps the
+  // context it was first given, so the next try needs a fresh page.
+  let drawing = '';
+  let drawn = false;
+  const fallBack = why => {
+    if (drawn || !drawing || drawing === 'software') return false;
+    const next = new URLSearchParams(location.search);
+    next.delete('webgl2');
+    next.set(drawing === 'webgpu' ? 'webgl2' : 'software', '');
+    console.log(`openmx: ${drawing} failed before its first frame (${why}); starting again on ${drawing === 'webgpu' ? 'webgl2' : 'software'}`);
+    location.replace(`${location.pathname}?${next.toString().replace(/=(&|$)/g, '$1')}`);
+    return true;
+  };
+  worker.addEventListener('error', e => fallBack(e.message));
   const ride = () => {
     const { msg = {}, move = [] } = canvas();
     playing();
@@ -721,6 +741,14 @@ footer a { color: var(--bone); }
       screen.focus?.();
     } else if (data.play) {
       queue.push(data.play);
+    } else if (data.gpu) {
+      drawing = data.gpu;
+      document.body.dataset.gpu = data.gpu;
+    } else if (data.drawn) {
+      drawn = true;
+      document.body.dataset.drawn = data.drawn.join(' ');
+    } else if (data.fps !== undefined) {
+      document.body.dataset.fps = data.fps.toFixed(1);
     } else if (data.quit !== undefined) {
       // the shell quit (its Quit, or an error it ended on): back to the page, which then stays even with the switch on
       try {
@@ -737,6 +765,7 @@ footer a { color: var(--bone); }
     } else if (data.ticks) {
       window.openmxTicks = data.ticks;
     } else if (data.error) {
+      if (fallBack(data.error)) return;
       status.textContent = data.error;
       toast(data.error);
       state('failed');

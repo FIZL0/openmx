@@ -20,8 +20,7 @@ crate-type = ["cdylib", "rlib"]
 # The simulation (input layer, fixed update, track, collision) and the renderer. The window, the pad
 # and the frame pacing are all std; online play's three are below.
 game-sim = { path = "../game-sim" }
-# Without its GPU half here: the browser's build (N4) is instantiated by hand and cannot take wgpu's
-# bindings yet. The desktop's turns it on below.
+# Without its GPU half here: the desktop's and the browser's builds each turn it on below.
 game-render = { path = "../game-render", default-features = false }
 ps2-float = { path = "../ps2-float" }
 # Online play (N2, `src/net`): ggrs' rollback core as opentennis vendors it (third_party/ggrs, with its
@@ -60,10 +59,12 @@ ggrs = { path = "../../third_party/ggrs", features = ["wasm-bindgen"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 # The desktop's whole front end and ride run in the page (P196), so it takes the shell's own: the
-# renderer's GPU half (its types; the page draws in software until P48 puts it on a canvas), the
+# renderer's GPU half on the page's canvas (P48: WebGPU, and WebGL2 where a browser has none), the
 # menus' type and the replaced textures' PNGs; and wasm-bindgen's futures, which step the shell's
 # loop a frame at a time off the page's clock.
-game-render = { path = "../game-render", features = ["gpu"] }
+game-render = { path = "../game-render", features = ["webgl"] }
+# The OffscreenCanvas the worker hands the GPU (P48).
+web-sys = { version = "0.3", features = ["OffscreenCanvas"] }
 ab_glyph = "0.2"
 png = "0.18"
 wasm-bindgen-futures = "0.4"
