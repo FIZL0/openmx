@@ -20,6 +20,9 @@ Task P189. 2026-10-29.
 - `menu.rs`: `BUILD_CORNER` = `v<version> · <commit>`; `menu_screens.rs` draws it small (DUST, shadowed) in the
   main menu's top-right corner after the band. Looked at in a `--menu --screen main --headless --shot` frame:
   `v1.0.0 · dev` sits clear of the logo and the panel.
+- `tools/web.sh --check` (the tests' wasm module, a release build) stamps OPENMX_COMMIT=dev unless the caller set
+  one: the first gate run had netplay_browser's browser refused ("host 1.0.0 dev, 30 Hz, you 1.0.0 a30e66d, 30 Hz")
+  because a release build asks git. Now it meets the tests' dev desktop peer again, and a commit doesn't rebuild it.
 - Tests: `tests/build_stamp.rs` (a stamped build's id names its commit, env wins in both profiles, release from git
   with `+`; an unstamped dev build keeps `<version> dev, 30 Hz` and equals handshake's default),
   `tests/menu.rs` `the_main_menus_corner_names_the_build`.
@@ -36,8 +39,8 @@ Unit tests over the stamp functions and the built test crate's own constants; th
 
 - A real stamped build (OPENMX_COMMIT=abc1234 cargo build, or a release build from git) was not built and run: it
   recompiles the shell in this slot's target twice for the gate; the functions it runs are the ones the test covers.
-- The wasm build (`web.rs`'s `openmx_run` / `Online::new` stamps) was not compiled: no wasm32 target installed in
-  this toolchain here. The calls are the same `openmx_net::handshake::set_build(crate::BUILD_ID)` as the desktop's.
+- The wasm build compiles (tools/web.sh --check in netplay_browser/web tests), but no test reads the page's own id
+  directly; it matches the desktop's because the browser-to-desktop lobby in netplay_browser.rs joins.
 - A release build's `+` follows a dirty tree only when HEAD, logs/HEAD or the index change (as opentennis's): editing
   a tracked file without staging it does not rerun build.rs, so an earlier clean stamp can stay. The shipped builds
   all pass OPENMX_COMMIT, so they are unaffected.
