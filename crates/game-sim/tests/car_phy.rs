@@ -1,5 +1,6 @@
-//! The car loader (S149) against the original's: every word the loader writes, read back out of the
-//! monster truck free09 parks beside the bike, in a RAM image of the human's first freeride session.
+//! The car loader (S149) against the original's: every word the loader writes, read back out of each
+//! car a free-ride track parks — the monster truck free09 parks beside the bike, in a RAM image of the
+//! human's first freeride session, and the baja and buggy free07 and free11 park (S149a's images).
 //! No interpreter — the image is the original's answer, and every comparison names its key.
 
 use game_sim::archive::{Psr, Res};
@@ -10,15 +11,48 @@ use ps2_oracle::{Ee, Kit, skip};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-/// The RAM image, in `context/states`.
-const STATE: &str = "first_recording.p2m2_SaveState.eeMemory.bin";
-/// The parked truck in it, and the two words that say it is one: its vtable (after the base
-/// classes' header) and its machine kind.
-const TRUCK: u32 = 0x00e1e210;
+/// A parked car in a RAM image in `context/states`, and the two words that say it is the one: its
+/// vtable (after the base classes' header) and its machine kind.
+struct Parked {
+    kind: Kind,
+    state: &'static str,
+    /// How to make the image when it is missing.
+    recipe: &'static str,
+    at: u32,
+    vtable: u32,
+    machine: u32,
+}
 const VTABLE: u32 = 0x48;
-const TRUCK_VTABLE: u32 = 0x0045ed50;
 const KIND: u32 = 0xd50;
-const KIND_TRUCK: u32 = 4;
+/// The truck's class, and the one the buggy and the baja share.
+const TRUCK_VTABLE: u32 = 0x0045ed50;
+const CAR_VTABLE: u32 = 0x0045cf80;
+
+const TRUCK: Parked = Parked {
+    kind: Kind::MonsterTruck,
+    state: "first_recording.p2m2_SaveState.eeMemory.bin",
+    recipe: "`./kit state ram context/recordings/first_recording.p2m2_SaveState.p2s` writes it",
+    at: 0x00e1e210,
+    vtable: TRUCK_VTABLE,
+    machine: 4,
+};
+/// S149a's boots: research/journal/2026-10-29-s149a-car-captures/boot.py, then `./kit state ram`.
+const BAJA: Parked = Parked {
+    kind: Kind::Baja,
+    state: "s149a-free07.ee.bin",
+    recipe: "S149a's boot.py free07 2 5 <slot>, then `./kit state ram <slot> --out` it",
+    at: 0x00605270,
+    vtable: CAR_VTABLE,
+    machine: 5,
+};
+const BUGGY: Parked = Parked {
+    kind: Kind::Buggy,
+    state: "s149a-free11.ee.bin",
+    recipe: "S149a's boot.py free11 2 5 <slot>, then `./kit state ram <slot> --out` it",
+    at: 0x00611ba0,
+    vtable: CAR_VTABLE,
+    machine: 3,
+};
 
 /// The car's layout: the rigid-body part, then the pointers to what it built.
 const PART: u32 = 0x50;
@@ -60,6 +94,22 @@ fn lanes(v: Vf) -> [u32; 4] {
 /// `MonsterTruck\monstertruck.phy` off the disc.
 #[test]
 fn monster_truck_phy_matches_the_parked_truck() {
+    prove(&TRUCK);
+}
+
+/// The baja free07 parks, against `Baja\baja.phy`.
+#[test]
+fn baja_phy_matches_the_parked_baja() {
+    prove(&BAJA);
+}
+
+/// The buggy free11 parks, against `Buggy\buggy.phy`.
+#[test]
+fn buggy_phy_matches_the_parked_buggy() {
+    prove(&BUGGY);
+}
+
+fn prove(car_at: &Parked) {
     let kit = match Kit::load() {
         Ok(k) => k,
         Err(why) => {
@@ -67,23 +117,21 @@ fn monster_truck_phy_matches_the_parked_truck() {
             return;
         }
     };
-    let at = kit.ctx("states").join(STATE);
+    let at = kit.ctx("states").join(car_at.state);
     let img = match Ee::from_ram(&at) {
         Ok(ee) => ee,
         Err(why) => {
-            skip(&format!(
-                "{why} — `./kit state ram context/recordings/first_recording.p2m2_SaveState.p2s` writes it"
-            ));
+            skip(&format!("{why} — {}", car_at.recipe));
             return;
         }
     };
-    let b = TRUCK;
-    if img.u32_at(b + VTABLE) != TRUCK_VTABLE || img.u32_at(b + KIND) != KIND_TRUCK {
-        skip(&format!("no monster truck at {b:#010x} in {} — a different moment, or build", at.display()));
+    let (b, kind) = (car_at.at, car_at.kind);
+    if img.u32_at(b + VTABLE) != car_at.vtable || img.u32_at(b + KIND) != car_at.machine {
+        skip(&format!("no {kind:?} at {b:#010x} in {} — a different moment, or build", at.display()));
         return;
     }
-    let Some(bytes) = car_file(&kit, Kind::MonsterTruck) else { return };
-    let c = Car::read_bytes(&bytes, Kind::MonsterTruck);
+    let Some(bytes) = car_file(&kit, kind) else { return };
+    let c = Car::read_bytes(&bytes, kind);
 
     let ptr = |at: u32| {
         let p = img.u32_at(at);
@@ -197,7 +245,7 @@ fn monster_truck_phy_matches_the_parked_truck() {
     f1("ShiftUpThrottle", engine + 0xb8, s.shift_up_throttle);
     f1("ShiftDownDuration", engine + 0xbc, s.shift_down_duration);
     f1("ShiftDownThrottle", engine + 0xc0, s.shift_down_throttle);
-    let first = e.first.expect("the truck has gears");
+    let first = e.first.expect("a car has gears");
     f1("first gear's ratio", engine + 0xe4, first.ratio);
     f1("first gear's ratio, inverted", engine + 0xe8, first.inv_ratio);
     f1("MaxPumpTorque", engine + 0xf0, e.max_pump_torque);
@@ -261,21 +309,34 @@ fn monster_truck_phy_matches_the_parked_truck() {
         f1(&format!("RearSteerSpeed{}", k + 1), b + 0x520 + 8 * k as u32, *speed);
         f1(&format!("RearSteerScale{}", k + 1), b + 0x524 + 8 * k as u32, *scale);
     }
-    // [Animation], the truck's own.
-    f1("RearTireSteerScale", b + 0xfd4, c.animation.rear_tire_steer_scale.expect("the truck's"));
+    // [Animation]: the truck's class keeps its pelvis box further on and alone reads a rear-tire
+    // steer scale; the buggy's and the baja's reads none.
+    let pelvis = match kind {
+        Kind::MonsterTruck => {
+            f1("RearTireSteerScale", b + 0xfd4, c.animation.rear_tire_steer_scale.expect("the truck's"));
+            b + 0x1010
+        }
+        Kind::Buggy | Kind::Baja => {
+            assert_eq!(c.animation.rear_tire_steer_scale, None, "{kind:?} reads no RearTireSteerScale");
+            b + 0xf20
+        }
+    };
 
     // The quadwords, lane by lane. The loader also copies `CofG` into the car's current centre of
-    // mass, but a parked truck has no driver and has since moved that one to `CofGAI`, so it is the
-    // step's word by now and not the loader's.
+    // mass, but a parked car with no driver has since moved that one to `CofGAI`, so it is the step's
+    // word by now and not the loader's — though where the file has no `CofGAI` the two are the same.
     let mut quads: Vec<(String, u32, Vf)> = vec![
         ("CofG, as the car's".into(), b + 0x230, m.cofg),
         ("CofGAI".into(), b + 0x240, c.cofg_ai),
         ("CollisionCofGOffset".into(), coll + 0x90, m.collision_cofg_offset),
         ("HighSpeedRayOffset".into(), coll + 0xb0, m.high_speed_ray_offset),
         ("AirborneControlMoment".into(), b + 0x490, a.airborne_control_moment),
-        ("PelvisBoxPosition".into(), b + 0x1010, c.animation.pelvis_box_position),
-        ("PelvisBoxSize".into(), b + 0x1020, c.animation.pelvis_box_size),
+        ("PelvisBoxPosition".into(), pelvis, c.animation.pelvis_box_position),
+        ("PelvisBoxSize".into(), pelvis + 0x10, c.animation.pelvis_box_size),
     ];
+    if c.cofg_ai == m.cofg {
+        quads.push(("CofG, as the car's current (= CofGAI)".into(), b + 0x250, m.cofg));
+    }
     for (k, w) in a.wings.iter().enumerate() {
         quads.push((format!("Wing {} Position", k + 1), wings + 0x20 * k as u32 + 0x10, w.position));
     }
@@ -312,15 +373,15 @@ fn monster_truck_phy_matches_the_parked_truck() {
         let theirs = img.u32_at(*at);
         if theirs != *ours {
             println!(
-                "{what}: the parked truck {theirs:#010x} ({}) ours {ours:#010x} ({})",
+                "{what}: the parked {kind:?} {theirs:#010x} ({}) ours {ours:#010x} ({})",
                 f32::from_bits(theirs),
                 f32::from_bits(*ours)
             );
             bad += 1;
         }
     }
-    assert_eq!(bad, 0, "{bad} of {} words differ from the truck free09 parks", want.len());
-    println!("the parked truck: {} words off {}, bit-exact", want.len(), car::MONSTER_TRUCK_PHY);
+    assert_eq!(bad, 0, "{bad} of {} words differ from the parked {kind:?} in {}", want.len(), car_at.state);
+    println!("the parked {kind:?}: {} words off {}, bit-exact", want.len(), kind.phy());
 }
 
 /// The surface tables are the bulk of the file and the easiest place for a key to slip: a file with
@@ -342,8 +403,8 @@ fn a_changed_surface_key_moves_its_word() {
     assert_eq!(c.animation.rear_tire_steer_scale, None);
 }
 
-/// The buggy and the baja have no RAM image to prove against yet; their files are at least where the
-/// vehicle table says, and read to what they write — the buggy's five gears, the keys the truck has
+/// The buggy's and the baja's files without a RAM image: where the vehicle table says, and read to
+/// what they write — the buggy's five gears, the keys the truck has
 /// and they lack left at the loader's defaults (the baja does write `TireWidth`).
 #[test]
 fn the_buggy_and_the_baja_read() {
