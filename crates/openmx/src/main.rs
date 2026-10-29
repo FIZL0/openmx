@@ -954,6 +954,30 @@ fn cue_view(rects: &[split::Rect], width: usize) -> usize {
     rects.iter().position(|r| r.y == 0 && r.x + r.w == width).unwrap_or(0)
 }
 
+/// The 1 s line's word on seat 0's rider (P212a): of the frames its bike drew in, how many drew no
+/// rider over it — all of them is "no rider drawn", some of them says how many, none says nothing.
+/// `frames` is (frames the bike drew in, those of them the rider drew none in).
+fn rider_left_out(frames: (u32, u32)) -> String {
+    match frames {
+        (_, 0) => String::new(),
+        (bike, none) if none >= bike => " (no rider drawn)".into(),
+        (bike, none) => format!(" (no rider drawn in {none} of {bike} frames)"),
+    }
+}
+
+#[cfg(test)]
+mod rider_left_out_line {
+    use super::rider_left_out;
+
+    #[test]
+    fn the_line_says_when_the_rider_was_not_drawn() {
+        assert_eq!(rider_left_out((0, 0)), "");
+        assert_eq!(rider_left_out((60, 0)), "");
+        assert_eq!(rider_left_out((60, 60)), " (no rider drawn)");
+        assert_eq!(rider_left_out((60, 3)), " (no rider drawn in 3 of 60 frames)");
+    }
+}
+
 /// The view's HUD tracker a frame on from its seat's score card (P121, P68): each view follows its
 /// own rider's, so a split or an online ride shows every player their own tricks.
 fn track_score(seat: &Seat, rig: &mut Rig, table: &Stunts, now: Instant) {
@@ -5649,6 +5673,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The ride's clock: the wall's, or `--steady-clock`'s, which only the pictures move.
     let mut clock = if args.steady_clock { pace::Clock::steady(started) } else { pace::Clock::wall(started) };
     let mut window_of_frames = (Instant::now(), 0u32, 0usize);
+    // Seat 0's rider on the GPU over the line's second (P212a): frames its bike drew in, and those
+    // of them its rider drew no triangle in.
+    let mut rider_frames = (0u32, 0u32);
     // Each view's triangles over the session, for the line a split session ends on.
     let mut view_triangles = vec![0usize; args.players];
     // The GPU ground's quadtree nodes looked at (V65): over the session, the most in a frame, frames.
@@ -7854,6 +7881,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let (scene_at, spent) = (Instant::now(), perf.spent());
             gpu_poses.clear();
             let mut actors: Vec<Actor> = Vec::new();
+            // Seat 0's bike and rider in the list (P212a), to ask the frame what each drew.
+            let (mut bike_actor, mut rider_actor) = (None, None);
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 if seat.garage.up != Kind::Bike || !seated[p] {
                     continue;
@@ -7874,6 +7903,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // See-through for a while after a put-back, the bike, its parts and the rider alike (P57).
                 // And while the player's own pause is open (P84).
                 let alpha = vehicle::shown_alpha(seat.sim.rider.ghost.shown(), seat.paused);
+                if p == 0 {
+                    bike_actor = Some(actors.len());
+                }
                 actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha });
                 // A wheel spinning fast is drawn blurred (V59): see-through copies of it trailing
                 // behind, the chassis' own model with every other node shrunk away. Not on a put-back
@@ -7904,6 +7936,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // bike otherwise ([`Shown::of`]).
                 if let (Some(pose), Some(model)) = (shown.body, &rig.body_model) {
                     gpu_poses.push(pose);
+                    if p == 0 {
+                        rider_actor = Some(actors.len());
+                    }
                     actors.push(Actor {
                         model: model.as_str(),
                         at: bike_at,
@@ -8101,6 +8136,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 for (v, tris) in d.triangles.iter().enumerate() {
                     view_triangles[v] += tris;
                     drawn += tris;
+                }
+                // Seat 0's own view, where its actors keep their places in every list (P212a).
+                if bike_actor.is_some_and(|i| d.actor(0, i) > 0) {
+                    rider_frames.0 += 1;
+                    if rider_actor.is_none_or(|i| d.actor(0, i) == 0) {
+                        rider_frames.1 += 1;
+                    }
                 }
             }
         }
@@ -8406,7 +8448,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if window_of_frames.0.elapsed() >= Duration::from_secs(1) {
             let (since, frames, triangles) = window_of_frames;
             println!(
-                "{:>3.0}s {:>4.1} fps, {:>6} triangles a frame, {:>5.1} mph{}{}",
+                "{:>3.0}s {:>4.1} fps, {:>6} triangles a frame, {:>5.1} mph{}{}{}",
                 clock.elapsed().as_secs_f32(),
                 frames as f32 / since.elapsed().as_secs_f32(),
                 triangles / frames.max(1) as usize,
@@ -8419,6 +8461,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     (_, Phase::Riding) => "",
                     (_, Phase::Down) => " (down)",
                     (_, Phase::Resetting) => " (getting up)",
+                },
+                // Only while riding (P212a): a bike with nobody on it, as the user saw on the phone.
+                match (world.seats[0].riding && simulated && !world.seats[0].waiting, world.seats[0].sim.rider.phase()) {
+                    (true, Phase::Riding) if bike_up => rider_left_out(rider_frames),
+                    _ => String::new(),
                 },
                 match args.players {
                     1 => String::new(),
@@ -8451,6 +8498,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("     bike particles: {}", if counts.is_empty() { "none".to_string() } else { counts.join(", ") });
             }
             window_of_frames = (Instant::now(), 0, 0);
+            rider_frames = (0, 0);
         }
         stages.mark(stages::Stage::Log);
 
