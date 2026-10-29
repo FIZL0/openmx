@@ -1975,7 +1975,8 @@ fn headless_gpu() -> Result<Renderer, String> {
 /// The sound (P42): the music sources — the disc's songs, then the user's own folder beside the
 /// settings — and the player it all goes out through, set as `settings` says. Silent with
 /// `--no-sound` or `--headless`, and where the desktop has no player.
-fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &menu::Settings) -> audio::Speakers {
+/// `front_end` when the menus come first: no song until a ride.
+fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &menu::Settings, front_end: bool) -> audio::Speakers {
     let image = Disc::configured_path().ok();
     let sources = audio::sources(image.map(|path| (disc, path)), dir);
     // Which song a shuffle starts on is the host's business and nothing of the game's: the clock.
@@ -1988,6 +1989,9 @@ fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &m
         audio::folder(dir).display()
     );
     let speakers = audio::Speakers::start(music, args.sound && !args.headless);
+    if front_end {
+        speakers.open_on_front_end();
+    }
     speakers.apply(&settings.music, levels(settings));
     speakers
 }
@@ -2028,7 +2032,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
     let (settings, controls) = menu::load(&dir);
     println!("front end: settings in {}", dir.display());
-    let mut sound = start_sound(&args, &mut disc, &dir, &settings);
+    let mut sound = start_sound(&args, &mut disc, &dir, &settings, true);
     let camera_names = camera_names(&mut disc);
     drop(disc);
     // The front end's music and clicks (P65), when anything plays them.
@@ -4206,7 +4210,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None if args.sound && !args.headless => {
             let dir = menu::store_dir(Disc::configured_path().ok().as_deref());
             let (settings, _) = menu::load(&dir);
-            own_sound.insert(start_sound(&args, &mut disc, &dir, &settings)).live()
+            own_sound.insert(start_sound(&args, &mut disc, &dir, &settings, false)).live()
         }
         None => None,
     };

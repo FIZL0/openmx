@@ -447,8 +447,8 @@ pub struct Mixer {
     /// The front end's own music (P65), the original's `UI\UI_001` pair: one stereo loop, under the
     /// music slider, playing while [`Mixer::front_end`] is on in place of the songs.
     pub menu_music: Option<Arc<Clip>>,
-    /// The front end is up: the menu's loop plays and the songs hold where they are. Off, the ride's
-    /// songs play. A change fades over [`MENU_FADE`].
+    /// The front end is up: the menu's loop plays and the songs hold where they are, silent even
+    /// before the loop has loaded. Off, the ride's songs play. A change fades over [`MENU_FADE`].
     pub front_end: bool,
     /// Where the fade is: 0 the songs alone, 1 the menu's loop alone.
     menu_fade: f32,
@@ -650,7 +650,7 @@ impl Mixer {
     /// asks. A song under a full fade holds where it is, for the next ride.
     fn mix_menu_music(&mut self, acc: &mut [f32], gain: f32) {
         let frames = acc.len() / 2;
-        let want = if self.front_end && self.menu_music.is_some() { 1.0 } else { 0.0 };
+        let want = if self.front_end { 1.0 } else { 0.0 };
         let from = self.menu_fade;
         let step = frames as f32 / (MENU_FADE * RATE as f32);
         let to = if want > from { (from + step).min(want) } else { (from - step).max(want) };
@@ -3603,12 +3603,25 @@ impl Speakers {
         self.menu = Some(sounds);
     }
 
-    /// Whether the front end is up (P65): the menu's loop in place of the ride's songs.
+    /// Whether the front end is up (P65): the menu's loop in place of the ride's songs. Going into a
+    /// ride starts a new song rather than the one held under the menus.
     pub fn front_end(&self, on: bool) {
         if let Ok(mut m) = self.mixer.lock()
             && m.front_end != on
         {
             m.front_end = on;
+            if !on {
+                m.music.next();
+            }
+        }
+    }
+
+    /// Start on the front end, the songs silent from the first sample: the shell opens on its menus,
+    /// so no song plays before their loop.
+    pub fn open_on_front_end(&self) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.front_end = true;
+            m.menu_fade = 1.0;
         }
     }
 

@@ -5414,11 +5414,7 @@ fn the_menus_play_their_music_click_on_every_move_and_hand_over_to_the_ride() {
     let speakers = hum_speakers(&m.settings);
     let sounds = menu_sounds();
     let mixer = speakers.mixer().clone();
-    {
-        let mut x = mixer.lock().unwrap();
-        x.menu_music = sounds.music.clone();
-        x.front_end = true;
-    }
+    speakers.open_on_front_end();
     let listen = |secs: usize| {
         let mut last = Vec::new();
         for _ in 0..secs * 10 {
@@ -5426,6 +5422,10 @@ fn the_menus_play_their_music_click_on_every_move_and_hand_over_to_the_ride() {
         }
         last
     };
+    // Before the menu's loop has loaded, no song plays either: the songs wait for a ride.
+    let heard = listen(1);
+    assert!(heard.iter().all(|&v| v == 0), "a song under the menus before their loop: {:?}", &heard[..4]);
+    mixer.lock().unwrap().menu_music = sounds.music.clone();
     // On the main menu the loop plays alone, under the music's 70; the shuffle's song holds.
     assert_eq!(m.screen(), Some(Screen::Main));
     let heard = listen(2);
@@ -5464,11 +5464,14 @@ fn the_menus_play_their_music_click_on_every_move_and_hand_over_to_the_ride() {
     assert_eq!(press(&mut m, &mut r, Control::Circle), [menu::Cue::Back]);
     assert!(m.riding());
 
-    // The ride hands over to its music: the loop fades out over a second and the song comes in.
-    mixer.lock().unwrap().front_end = false;
+    // The ride hands over to its music: the loop fades out over a second and a new song comes in,
+    // not the one held under the menus.
+    let held = speakers.now().expect("the shuffle's song, held");
+    speakers.front_end(false);
     let heard = listen(2);
     assert_eq!(mixer.lock().unwrap().menu_fade(), 0.0);
     let song = speakers.now().expect("the shuffle's song");
+    assert_ne!(song, held, "the ride starts a new song");
     let level = match song.as_str() {
         "hum:one" => 1000.0,
         "hum:two" => 2000.0,
@@ -5477,7 +5480,7 @@ fn the_menus_play_their_music_click_on_every_move_and_hand_over_to_the_ride() {
     assert!((heard[100] as f32 - level * 0.7).abs() <= 2.0, "the ride's song: {} for {song}", heard[100]);
     assert!((heard[101] as f32 - level * 0.7).abs() <= 2.0, "the loop is gone on the right: {}", heard[101]);
     // And back in the front end, the loop again.
-    mixer.lock().unwrap().front_end = true;
+    speakers.front_end(true);
     let heard = listen(2);
     assert!((heard[101] as f32 + 5000.0 * 0.7).abs() <= 3.0, "the loop is back: {}", heard[101]);
 }
