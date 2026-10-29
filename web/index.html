@@ -589,6 +589,17 @@ footer a { color: var(--bone); }
     worker.postMessage({ lastBuild });
   }
 
+  // the mod store's Hugging Face token (P199): kept in this site's storage only, never exported; and what is pasted
+  // into the page, for the store's Paste token (the worker has no clipboard)
+  const TOKEN = 'openmx.hf-token';
+  try {
+    worker.postMessage({ token: localStorage.getItem(TOKEN) ?? '' });
+  } catch {}
+  addEventListener('paste', e => {
+    const text = e.clipboardData?.getData('text') ?? '';
+    if (text) worker.postMessage({ pasted: text.slice(0, 4096) });
+  });
+
   for (const a of document.querySelectorAll('[data-link]')) {
     const url = SITE[a.dataset.link];
     if (url) a.href = url;
@@ -767,6 +778,11 @@ footer a { color: var(--bone); }
       document.body.dataset.drawn = data.drawn.join(' ');
     } else if (data.fps !== undefined) {
       document.body.dataset.fps = data.fps.toFixed(1);
+    } else if (data.keepToken !== undefined) {
+      try {
+        if (data.keepToken) localStorage.setItem(TOKEN, data.keepToken);
+        else localStorage.removeItem(TOKEN);
+      } catch {}
     } else if (data.open) {
       // the mod store's Report (P198): its Community discussion, prefilled, in a tab of its own
       if (/^https:\/\/huggingface\.co\//.test(data.open)) window.open(data.open, '_blank', 'noopener');
@@ -854,7 +870,7 @@ footer a { color: var(--bone); }
     const out = {};
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      if (k.startsWith('openmx')) out[k] = localStorage.getItem(k);
+      if (k.startsWith('openmx') && k !== TOKEN) out[k] = localStorage.getItem(k);
     }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }));

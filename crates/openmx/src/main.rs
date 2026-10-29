@@ -1865,6 +1865,12 @@ pub(crate) async fn run() -> Result<(), String> {
     if argv.first().is_some_and(|a| a == "--dump-textures") {
         return dump_textures(&argv[1..]);
     }
+    // P199: the store maintainer's card, index and uploads, on a thread of its own (its own runtime)
+    #[cfg(not(target_arch = "wasm32"))]
+    if argv.first().is_some_and(|a| a == "--mod-store-admin") {
+        let rest = argv[1..].to_vec();
+        return std::thread::spawn(move || modstore::up::admin(&rest)).join().map_err(|_| "the store admin stopped".to_string())?;
+    }
     let Some(args) = parse_args()? else {
         return Ok(());
     };
@@ -9031,6 +9037,9 @@ struct StoreFront {
     store: modstore::Store,
     listing: Vec<modstore::Entry>,
     asked: std::collections::HashSet<String>,
+    /// P199: the signed-in account's mods on the store (My Mods), and the player's own mods (Upload).
+    mine: Vec<modstore::Entry>,
+    locals: Vec<modstore::up::Local>,
 }
 
 impl StoreFront {
@@ -9039,7 +9048,7 @@ impl StoreFront {
     fn new(args: &Args, dir: &std::path::Path) -> Option<StoreFront> {
         let mods = mods_folder(args, dir, true)?;
         let base = args.mod_store.clone().unwrap_or_else(|| modstore::HF.to_string());
-        Some(StoreFront { store: modstore::Store::new(&base, dir, &mods), listing: Vec::new(), asked: Default::default() })
+        Some(StoreFront { store: modstore::Store::new(&base, dir, &mods), listing: Vec::new(), asked: Default::default(), mine: Vec::new(), locals: Vec::new() })
     }
 
     fn entry(&self, key: &str) -> Option<&modstore::Entry> {
@@ -9077,6 +9086,79 @@ impl StoreFront {
             .collect();
     }
 
+    /// P199: the Upload page's mods from the mods folder (an upload's state kept), and the account.
+    fn locals(&mut self, menu: &mut menu::Menu) {
+        self.locals = self.store.locals();
+        menu.store.account = self.store.signed_in();
+        menu.store.web = cfg!(target_arch = "wasm32");
+        let old = std::mem::take(&mut menu.store.locals);
+        menu.store.locals = self
+            .locals
+            .iter()
+            .map(|l| menu::Upload {
+                id: l.id.clone(),
+                name: l.name.clone(),
+                kind: l.kind.tab().map_or("Mod", |t| menu::STORE_TABS[t]).to_string(),
+                refused: l.shareable().err(),
+                status: old.iter().find(|o| o.id == l.id).and_then(|o| o.status.clone()),
+            })
+            .collect();
+    }
+
+    /// P199: My Mods from the account's mods on the store.
+    fn posted(&self, menu: &mut menu::Menu) {
+        menu.store.mine = self
+            .mine
+            .iter()
+            .map(|e| menu::Posted {
+                key: e.key(),
+                name: e.meta.name.clone(),
+                kind: e.meta.kind.tab().map_or("Mod", |t| menu::STORE_TABS[t]).to_string(),
+                size: e.meta.size,
+                verified: e.verified,
+                pr: modstore::up::pr_of(&e.rev),
+                busy: false,
+            })
+            .collect();
+    }
+
+    /// P199's asks: the sign-in, uploads, My Mods and take-downs.
+    fn upload_ask(&mut self, ask: menu::StoreAsk, menu: &mut menu::Menu) {
+        match ask {
+            menu::StoreAsk::Locals => self.locals(menu),
+            menu::StoreAsk::Tokens => {
+                if let Err(why) = modstore::open(modstore::up::TOKENS) {
+                    menu.store.note = Some(format!("Make a write token at huggingface.co/settings/tokens: {why}"));
+                }
+            }
+            menu::StoreAsk::Paste => match modstore::up::clipboard() {
+                Ok(text) => self.store.sign_in(&text),
+                Err(why) => {
+                    menu.store.signing = false;
+                    menu.store.note = Some(why);
+                }
+            },
+            menu::StoreAsk::SignOut => {
+                self.store.sign_out();
+                self.mine.clear();
+                println!("mod store: signed out");
+            }
+            menu::StoreAsk::Upload(ids) => {
+                let go: Vec<_> = self.locals.iter().filter(|l| ids.contains(&l.id)).cloned().collect();
+                println!("mod store: uploading {}", ids.join(", "));
+                self.store.upload(go);
+            }
+            menu::StoreAsk::Mine => self.store.mine(),
+            menu::StoreAsk::TakeDown(key) => {
+                if let Some(e) = self.mine.iter().find(|e| e.key() == key) {
+                    println!("mod store: taking down {key} ({})", e.rev);
+                    self.store.take_down(e, &self.mine);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// One frame: the menu's asks to the store, the store's events to the menu and its previews to
     /// the art. Whether the mods folder changed, and whether the art did.
     fn frame(&mut self, menu: &mut menu::Menu, art: &mut Art) -> (bool, bool) {
@@ -9104,6 +9186,7 @@ impl StoreFront {
                         }
                     }
                 }
+                ask => self.upload_ask(ask, menu),
             }
         }
         let name = |s: &StoreFront, key: &str| s.entry(key).map_or(key.to_string(), |e| e.meta.name.clone());
@@ -9141,6 +9224,49 @@ impl StoreFront {
                     drawn = true;
                 }
                 modstore::Event::Preview(_, None) => {}
+                modstore::Event::Signed(got) => {
+                    menu.store.signing = false;
+                    println!("mod store: sign-in: {}", got.as_ref().map_or_else(|e| e.as_str(), |n| n.as_str()));
+                    menu.store.note = Some(match &got {
+                        Ok(name) => format!("Signed in as {name}"),
+                        Err(why) => why.clone(),
+                    });
+                    if got.is_ok() {
+                        self.locals(menu);
+                    }
+                }
+                modstore::Event::Upload(id, up) => {
+                    use modstore::up::Up;
+                    let phase = match &up {
+                        Up::Waiting | Up::Working(_) => menu::Phase::Busy,
+                        Up::Done(_) | Up::Skipped(_) => menu::Phase::Done,
+                        Up::Failed(_) => menu::Phase::Failed,
+                    };
+                    if up.over() {
+                        println!("mod store: upload {id}: {}", up.line());
+                        menu.store.note = Some(up.line().to_string());
+                    }
+                    if let Some(l) = menu.store.locals.iter_mut().find(|l| l.id == id) {
+                        l.status = Some((phase, up.line().to_string()));
+                    }
+                }
+                modstore::Event::Mine(Ok(l)) => {
+                    self.mine = l;
+                    menu.store.mine_listed = menu::Listed::Shown;
+                    self.posted(menu);
+                }
+                modstore::Event::Mine(Err(why)) => menu.store.mine_listed = menu::Listed::Failed(why),
+                modstore::Event::TakenDown(key, got) => {
+                    println!("mod store: take-down {key}: {got:?}");
+                    if got.is_ok() {
+                        // the store's own copy may linger in a PR the index read: My Mods reads again
+                        self.mine.retain(|e| e.key() != key);
+                        self.posted(menu);
+                    } else if let Some(m) = menu.store.mine.iter_mut().find(|m| m.key == key) {
+                        m.busy = false;
+                    }
+                    menu.store.note = Some(got.unwrap_or_else(|why| format!("Not taken down: {why}")));
+                }
             }
         }
         // The lit tab's previews, each zip's once (B259: an update's new zip is a new picture).

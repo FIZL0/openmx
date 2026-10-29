@@ -89,6 +89,15 @@ extern "C" {
     /// A page opened in a new tab (the store's Report).
     #[wasm_bindgen(js_namespace = openmx, js_name = open_url)]
     fn host_open_url(url: &str);
+    /// The store's Hugging Face token as the page keeps it (P199), `name\ntoken`, or empty.
+    #[wasm_bindgen(js_namespace = openmx, js_name = token)]
+    fn host_token() -> String;
+    /// The token kept by the page, private to the site (empty: forgotten).
+    #[wasm_bindgen(js_namespace = openmx, js_name = token_keep)]
+    fn host_token_keep(text: &str);
+    /// The last text pasted into the page.
+    #[wasm_bindgen(js_namespace = openmx, js_name = pasted)]
+    fn host_pasted() -> String;
 }
 
 /// A refused promise's reason, as text.
@@ -124,6 +133,19 @@ pub async fn store_drop(path: &str) -> Result<(), String> {
 
 pub fn open_url(url: &str) {
     host_open_url(url)
+}
+
+/// [`crate::modstore::up`]'s sign-in, on the page (`web/worker.js`, `web/index.html`).
+pub fn token() -> String {
+    host_token()
+}
+
+pub fn token_keep(text: &str) {
+    host_token_keep(text)
+}
+
+pub fn pasted() -> String {
+    host_pasted()
 }
 
 /// [`gpu`]: told before each API's device is asked for, so a panic in the asking is that API's.

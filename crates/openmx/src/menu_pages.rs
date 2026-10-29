@@ -151,6 +151,8 @@ pub enum Key {
     ModsFolder,
     /// Browse the Store (P198).
     Store,
+    /// Upload to the Store (P199): the store screen's Upload page.
+    Upload,
     /// A mod pack by its place in [`Menu::packs`].
     Pack(usize),
     /// A music pack by its place in [`Menu::music_packs`] (P122).
@@ -1065,6 +1067,7 @@ impl Menu {
     fn mods_rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::on_off(Key::ModsFolder, "Read the Mods Folder", self.settings.mods, "Off, nothing is read from mods/ beside the disc and every pick is the disc's alone.")];
         rows.push(Row::new(Key::Store, Kind::Opens, "Browse the Store", "Tracks, trick packs and music from the openMX mod store, checked and installed into the mods folder."));
+        rows.push(Row::new(Key::Upload, Kind::Opens, "Upload to the Store", "Share mods you made on the openMX mod store, signed in with a Hugging Face token; and take yours down."));
         rows.push(Row::heading("Installed"));
         let packs = self.packs();
         if packs.is_empty() && self.music_seen.is_empty() {
@@ -1209,6 +1212,10 @@ impl Menu {
             }
             Key::Store if p.ok => {
                 self.open_store();
+                return;
+            }
+            Key::Upload if p.ok => {
+                self.open_store_upload();
                 return;
             }
             Key::Hud => s.overlay = Overlay::CHOICES[next(row)],

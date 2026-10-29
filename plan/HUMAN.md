@@ -314,3 +314,24 @@ website on https://openmx.dev. What only you can do:
    https://openmx.dev/` (filed as a task too, so an agent may already have done it), and optionally add topics
    `mx-unleashed`, `mx-vs-atv`, `motocross`, `ps2`, `remaster`, `decompilation`. Don't add beta.openmx.dev as a
    property: its page says noindex and its canonical points to openmx.dev.
+
+## Seeding the mod store (P199)
+
+The store's dataset card is up (https://huggingface.co/datasets/FIZL0/openmx-mods, from
+`research/p199/dataset-README.md`), but no mods are: every mod in `~/repos/openmx/mods` says `"permission":
+"own-disc"` (built from your own disc, or the `elev_*` worlds with MX vs. ATV's sky), and the store's own rules
+(and openMX's Upload) refuse those. To seed it with mods that may be shared (about 10 minutes each):
+
+1. **Pick what may go up.** In `~/repos/openmx-mods`, notes/elevation.md says an `elev_*` world built with
+   `--sky none` has no game data: rebuild those you want into a scratch mods folder, e.g.
+   `~/scratch-mods/tracks/elev_<name>/`, and set their `mod.json` `"permission": "public-domain"` (or a sentence
+   naming who allowed it). Any mod you made yourself from scratch (a Blender track, your own music) qualifies too.
+   Don't change the permission of a mod that holds files from a game disc.
+2. **Upload them.** Either in the game: Mods → Upload to the Store, agree, Get a token / Paste token, then
+   Upload all; or from a shell with the token already in `~/.config/openmx/hf-token.txt`:
+   `cargo run --release -p openmx -- --mod-store-admin upload ~/scratch-mods [ID…]` (one commit per mod, all on
+   one pull request under FIZL0).
+3. **Verify them.** Merge that pull request on the dataset's Community tab: Browse then shows them as Verified.
+   Optionally write the listing's index afterwards: `cargo run --release -p openmx -- --mod-store-admin index`.
+
+If an upload says "not uploaded: …", the line names the file or check that failed (the same checks Install runs).
