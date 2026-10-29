@@ -2242,6 +2242,9 @@ impl Screen {
 /// The main menu's rows: opentennis's Local and Online beside Free Ride, as `home.rs` lists them.
 /// Mods is P118's: the mods folder's switch and its packs, out of Settings.
 /// Controllers is P210's: which device drives which seat.
+/// The main menu's corner (P189): which build this is, `v<version> · <commit>` from `build.rs`'s stamp.
+pub const BUILD_CORNER: &str = concat!("v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT"));
+
 pub const MAIN: [&str; 8] = ["Free Ride", "Local Game", "Online", "Garage", "Mods", "Settings", "Controllers", "Quit"];
 const MAIN_FREE: usize = 0;
 const MAIN_LOCAL: usize = 1;

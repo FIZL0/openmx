@@ -91,6 +91,10 @@ pub(crate) use host::say as host_say;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use host::phone as host_phone;
 
+/// This build's online id (P189, `build.rs`): its version and commit, as the desktop's `run` stamps it. The page's
+/// lobbies stamp it themselves before they start.
+pub const BUILD_ID: &str = env!("OPENMX_BUILD_ID");
+
 use game_render::disc::{Disc, Res};
 use game_render::mat::v3;
 use game_render::raster::Frame;
@@ -316,6 +320,7 @@ mod host {
     #[wasm_bindgen]
     pub async fn openmx_run(canvas: Option<web_sys::OffscreenCanvas>, api: String, args: String) -> String {
         hook();
+        openmx_net::handshake::set_build(crate::BUILD_ID);
         ARGS.with_borrow_mut(|a| *a = args.split_whitespace().map(String::from).collect());
         match canvas {
             Some(canvas) if api != "software" => match crate::gpuwin::prepare(canvas, api == "webgl2").await {
@@ -368,6 +373,7 @@ mod host {
         #[wasm_bindgen(constructor)]
         pub fn new(name: String, relay: String, code_servers: Option<String>) -> Online {
             hook();
+            openmx_net::handshake::set_build(crate::BUILD_ID);
             let relay = if relay.is_empty() { Relay::N0 } else { Relay::Own(relay) };
             let code_servers = code_servers.map(|c| c.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect());
             let cfg = Settings { name, relay, board: Board::Off, lan: false, code_servers, relay_only: true, ..Settings::default() };
