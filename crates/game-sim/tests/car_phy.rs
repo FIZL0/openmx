@@ -40,7 +40,7 @@ const TRUCK: Parked = Parked {
 const BAJA: Parked = Parked {
     kind: Kind::Baja,
     state: "s149a-free07.ee.bin",
-    recipe: "S149a's boot.py free07 2 5 <slot>, then `./kit state ram <slot> --out` it",
+    recipe: "S149a's boot.py free07 2 5 <slot> 5 (the baja parked, the human on the bike), then `./kit state ram <slot> --out` it",
     at: 0x00605270,
     vtable: CAR_VTABLE,
     machine: 5,
@@ -48,7 +48,7 @@ const BAJA: Parked = Parked {
 const BUGGY: Parked = Parked {
     kind: Kind::Buggy,
     state: "s149a-free11.ee.bin",
-    recipe: "S149a's boot.py free11 2 5 <slot>, then `./kit state ram <slot> --out` it",
+    recipe: "S149a's boot.py free11 2 5 <slot> 3 (the buggy parked), then `./kit state ram <slot> --out` it",
     at: 0x00611ba0,
     vtable: CAR_VTABLE,
     machine: 3,
