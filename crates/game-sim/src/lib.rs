@@ -888,6 +888,10 @@ pub mod vehicle_anim;
 /// rather than in alphabetical order, beside the step it drives.
 pub mod biplane_anim;
 
+/// The Kiowa helicopter's own flight, beginning with its flight controller: the pad turned into
+/// rate commands, chased with the cyclic and the pedal, and the collective's climb and height hold.
+pub mod kiowa;
+
 /// The world outside the bike, as the ride asks about it: where the ground is under a point, and the
 /// scene's collision meshes stood where the scene puts them, with the sweep against the lot.
 pub mod world;
