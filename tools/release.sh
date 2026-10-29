@@ -3,7 +3,9 @@
 # set the workspace's version to VERSION (a "Release vVERSION" commit if it changes), build every platform tools/build.sh
 # builds today (Linux; Windows once its port lands) and the website (tools/web.sh), sign SHA256SUMS with the minisign key
 # (~/.config/openmx/release.key, asks its password unless ~/.config/openmx/release.pass holds it) and upload to GitHub:
-#   openmx-linux-x86_64.tar.gz   what players download
+#   openmx-linux-x86_64.tar.gz   what players download: openmx and README.txt. ./openmx "disc.iso" (or drop the .iso on
+#                                it) the first time, ./openmx after: it remembers the disc, and keeps settings, controls and
+#                                mods/ in ~/.local/share/openmx (P190)
 #   openmx-linux-x86_64          the bare binary, for the in-game updater (plan/TODO.md) to fetch
 #   openmx-ios.ipa               P201: the unsigned iPhone / iPad app (tools/ios-ipa.sh; needs the iOS SDK, tools/ios-sdk.py)
 #   altstore-source.json         P201: that app as an AltStore / SideStore / Feather source (tools/ios-source.sh). FIZL0's
@@ -91,7 +93,7 @@ body=$out/notes.md
     echo
     echo "| Platform | File | How to play |"
     echo "|---|---|---|"
-    echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, put your ISO's path in \`kit.toml\`, run \`./run.sh\` |"
+    echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, run \`./openmx your.iso\` (or drop the ISO on it) once; \`./openmx\` after |"
     echo "| **iPhone** / **iPad** (iOS 15+) | [add the source in one tap](https://openmx.dev/ios.html) | Easiest: add the source in one tap (Feather, AltStore, SideStore), or add \`https://fizl0.github.io/apps/source.json\` under Sources by hand; install openMX from it and updates arrive there. Then put your ISO in Files → On My iPhone → openMX. Touch controls or a controller. Signing it yourself instead: [\`openmx-ios.ipa\`](https://github.com/$repo/releases/download/$tag/openmx-ios.ipa) (unsigned; Sideloadly, AltStore…) |"
     echo "| **Browser** | [openmx.dev](https://openmx.dev/) | Nothing to install |"
     echo

@@ -211,6 +211,10 @@ mod garage_view;
 mod overlay;
 mod pace;
 mod pad;
+// A desktop build a player can start (P190): the disc from the command line, kit.toml, the path
+// remembered or a picker, and the per-user data folder.
+#[cfg(not(target_arch = "wasm32"))]
+mod player;
 mod particles;
 mod plane_draw;
 mod perf;
@@ -1734,6 +1738,8 @@ struct Args {
     /// player's Markers switch. Unset, the front end's Markers rows say, and a ride outside it has
     /// them on.
     markers: Option<[bool; menu::SEATS_MAX]>,
+    /// `--where` (P190): say which disc and which settings the shell would start with, and stop.
+    where_only: bool,
     /// The pad seat each player reads, the front end's local game's (P43): player i rides seat
     /// `pad_of[i]`'s controller. Empty is seat i for player i, which is every ride outside one.
     pad_of: Vec<usize>,
@@ -1821,8 +1827,13 @@ fn own_pick(args: &Args) -> roster::Pick {
 /// The command line: the desktop's own, or in the browser what the page gave `openmx_run` (P48:
 /// its `?args=`).
 fn argv() -> Vec<String> {
+    // the disc a player starts it with comes first, and is [`player::start`]'s (P190)
     #[cfg(not(target_arch = "wasm32"))]
-    return std::env::args().skip(1).collect();
+    {
+        let mut argv = std::env::args().skip(1).collect();
+        player::take_disc(&mut argv);
+        argv
+    }
     #[cfg(target_arch = "wasm32")]
     return crate::page_args();
 }
@@ -1849,6 +1860,23 @@ pub(crate) async fn run() -> Result<(), String> {
     let Some(args) = parse_args()? else {
         return Ok(());
     };
+    // the disc and where the settings are (P190), once the command line is known to be one
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let start = player::start(&mut std::env::args().skip(1).collect())?;
+        if args.where_only {
+            let disc = Disc::configured_path()?;
+            let dir = menu::store_dir(Some(&disc));
+            println!("disc: {} (from {})", disc.display(), start.from.word());
+            match &start.data {
+                Some(data) => println!("data: {}", data.display()),
+                None => println!("data: none, a dev checkout's kit.toml"),
+            }
+            println!("settings: {}", dir.join(menu::SETTINGS_FILE).display());
+            println!("rider: {}", menu::load(&dir).0.name);
+            return Ok(());
+        }
+    }
     if args.menu || !args.ride_flag {
         return front_end(args).await;
     }
@@ -9622,6 +9650,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         tricks: None,
         room_tricks: None,
         markers: None,
+        where_only: false,
     };
     let mut argv = argv().into_iter();
     while let Some(a) = argv.next() {
@@ -9638,6 +9667,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         match a.as_str() {
             "--ride" => {}
             "--menu" => args.menu = true,
+            "--where" => args.where_only = true,
             "--screen" => {
                 let w = next("a screen: main, tracks, garage, settings, controls, keyboard or pause, or a tab")?;
                 match (menu::Screen::from_word(&w), menu::Screen::tab_from_word(&w)) {
@@ -10024,7 +10054,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause|TAB]]\n\
+                    "openmx [DISC.iso] [--where]\n\
+                     \x20      (the disc: this, else kit.toml's above the working directory, else the one\n\
+                     \x20      remembered in the data folder, else a picker asks; --where says which, and\n\
+                     \x20      where settings.txt, controls.txt and mods/ are)\n\
+                     openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause|TAB]]\n\
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
