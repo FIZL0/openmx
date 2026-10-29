@@ -4336,11 +4336,12 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
            let x = i.world.x;\n\
            let z = i.world.z;\n\
            let depth = log2(max(paint_depth(i.world), 1.0));\n\
+           let paint_ft = paint_texel(max(paint_depth(i.world), 1.0));\n\
            var frame = vec4f(0.0);\n\
            var src = vec4f(0.0);\n\
            var t = vec4f(0.0);\n\
            var uv = vec2f(0.0);\n\
-           var k = 1.0;\n",
+           var g = mat2x2f();\n",
     );
     let f = |v: f32| format!("{v:?}");
     if let Some(p) = paint {
@@ -4353,17 +4354,19 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
                 su = f(pass.scale[0]),
                 sv = f(pass.scale[1]),
             ));
-            // V97: no sharper than the level the original's paint camera reads it at.
+            // V97: no sharper than the level the original's paint camera reads it at; V101: and
+            // the paint target's texel on top, both added to the screen's footprint.
             match &pass.mip {
                 Some(m) => s.push_str(&format!(
-                    "  k = mip_floor(dpdx(uv), dpdy(uv), {size}, clamp(depth + {bias}, 0.0, {levels}));\n",
+                    "  g = floor_grads(dpdx(uv), dpdy(uv), mip_width({size}, clamp(depth + {bias}, 0.0, {levels}), paint_ft, {scale}));\n",
                     size = f(p.textures[pass.texture].width.max(p.textures[pass.texture].height).max(1) as f32),
                     bias = f(m.bias),
                     levels = f(m.levels as f32),
+                    scale = f(pass.scale[0].abs().max(pass.scale[1].abs())),
                 )),
-                None => s.push_str("  k = 1.0;\n"),
+                None => s.push_str("  g = mat2x2f(dpdx(uv), dpdy(uv));\n"),
             }
-            s.push_str(&format!("  t = textureSampleGrad(layer{}, tiled, uv, dpdx(uv) * k, dpdy(uv) * k) * 255.0;\n", pass.texture));
+            s.push_str(&format!("  t = textureSampleGrad(layer{}, tiled, uv, g[0], g[1]) * 255.0;\n", pass.texture));
             s.push_str(&format!(
                 "  src = vec4f(t.rgb * vec3f({}, {}, {}) / 128.0, min(t.a * 0.5 * {} / 128.0, 255.0));\n",
                 f(pass.rgba[0]),
@@ -4650,25 +4653,25 @@ fn splat_passes_wgsl(paint: &Splat, first: u32) -> String {
                 sv = f(pass.scale[1]),
             )
         };
-        // V97: no sharper than the level the original's paint camera reads it at.
+        // V97: no sharper than the level the original's paint camera reads it at; V101: and the
+        // paint target's texel on top, both added to the screen's footprint.
         let soft = match &pass.mip {
             Some(m) => format!(
-                "mip_floor({}, {}, {size}, clamp(paint_level + {bias}, 0.0, {levels}))",
+                "floor_grads({}, {}, mip_width({size}, clamp(paint_level + {bias}, 0.0, {levels}), paint_texel_ft, {scale}))",
                 uv("gx"),
                 uv("gy"),
                 size = f(paint.textures[pass.texture].width.max(paint.textures[pass.texture].height).max(1) as f32),
                 bias = f(m.bias),
                 levels = f(m.levels as f32),
+                scale = f(pass.scale[0].abs().max(pass.scale[1].abs())),
             ),
-            None => "1.0".to_string(),
+            None => format!("mat2x2f({}, {})", uv("gx"), uv("gy")),
         };
         s.push_str(&format!("  let soft{j} = {soft};\n"));
         s.push_str(&format!(
-            "  s = textureSampleGrad(splat_layers, tiled, {}, {}, {} * soft{j}, {} * soft{j}) * 255.0;\n",
+            "  s = textureSampleGrad(splat_layers, tiled, {}, {}, soft{j}[0], soft{j}[1]) * 255.0;\n",
             uv("q"),
             first + pass.texture as u32,
-            uv("gx"),
-            uv("gy")
         ));
         s.push_str(&format!(
             "  src = vec4f(s.rgb * vec3f({}, {}, {}) / 128.0, min(s.a * 0.5 * {} / 128.0, 255.0));\n",
@@ -4727,7 +4730,7 @@ fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
     }
     s.push_str(GROUND_VS_WGSL);
     s.push_str(&crate::splat::paint_depth_wgsl());
-    s.push_str("// log2 of the pixel's depth from the original's paint camera, for the splat passes' mips (V97).\nvar<private> paint_level: f32;\n");
+    s.push_str("// log2 of the pixel's depth from the original's paint camera, for the splat passes' mips (V97).\nvar<private> paint_level: f32;\n// One paint-target texel's width on the ground there, in feet (V101).\nvar<private> paint_texel_ft: f32;\n");
     s.push_str(&format!(
         "fn inside(p: vec2f, r: vec4f) -> bool {{ return all(p >= r.xy) && all(p < r.zw); }}
 fn near1(v: f32, lo: f32, hi: f32, period: f32) -> f32 {{
@@ -4831,7 +4834,7 @@ fn mirror(xz: vec2f, r: vec4f) -> vec2f {{ let p = near(xz, r); return vec2f(mir
         s.push_str(&format!("fn tile{i}(xz: vec2f, gx: vec2f, gy: vec2f) -> vec3f {{\n  {body}\n}}\n"));
     }
     let n = w.tiles.len();
-    s.push_str("@fragment fn fs(i: Out) -> @location(0) vec4f {\n  let xz = i.world.xz;\n  let gx = dpdx(xz);\n  let gy = dpdy(xz);\n  paint_level = log2(max(paint_depth(i.world), 1.0));\n  var owner = -1;\n");
+    s.push_str("@fragment fn fs(i: Out) -> @location(0) vec4f {\n  let xz = i.world.xz;\n  let gx = dpdx(xz);\n  let gy = dpdy(xz);\n  paint_level = log2(max(paint_depth(i.world), 1.0));\n  paint_texel_ft = paint_texel(max(paint_depth(i.world), 1.0));\n  var owner = -1;\n");
     for i in (0..n).rev() {
         s.push_str(&format!("  if inside(xz, {}) {{ owner = {i}; }}\n", rect(i)));
     }
