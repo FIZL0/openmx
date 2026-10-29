@@ -9,6 +9,11 @@ publish.workspace = true
 name = "openmx"
 path = "src/main.rs"
 
+# The iPhone's build (P200): the UIKit, GameController, CoreMotion and AudioToolbox calls, which
+# are unsafe, in a crate of their own so this one goes on forbidding unsafe code.
+[target.'cfg(target_os = "ios")'.dependencies]
+openmx-ios = { path = "../openmx-ios" }
+
 # The browser's build (N4): the part of the shell a web page runs, as a WebAssembly module with no
 # bindings crate (`tools/web.sh`). An rlib as well, so the desktop's tests can draw the same frame.
 [lib]

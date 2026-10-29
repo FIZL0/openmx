@@ -186,7 +186,11 @@ mod cursor;
 mod dress;
 // The browser's GPU window is the page's canvas (P48).
 #[cfg_attr(target_arch = "wasm32", path = "web_gpu.rs")]
+#[cfg_attr(target_os = "ios", path = "ios_gpu.rs")]
 mod gpuwin;
+// The iPhone app (P200).
+#[cfg(target_os = "ios")]
+mod ios;
 mod ground;
 mod hud;
 // What the CPU still draws over the GPU's picture (P44), as patches.
@@ -233,6 +237,7 @@ mod world_dress;
 #[allow(dead_code)]
 mod roster;
 mod screen;
+mod touch_pad;
 mod vehicle;
 mod window;
 }
@@ -360,7 +365,11 @@ const BIKE_PREFIX: &str = "bike_";
 const STUNT_ARCHIVE: &str = "appstart.res";
 const STUNT_TABLE: &str = "stunts.ini";
 
+#[cfg_attr(target_os = "ios", allow(unreachable_code))]
 fn main() {
+    // The iPhone runs UIKit on this thread and the shell on another (P200).
+    #[cfg(target_os = "ios")]
+    return ios::main();
     // `cargo run -p openmx` without `--release` is the dev profile, opt-level 1: several times
     // slower a frame, which is not what the shell costs (P47).
     if cfg!(debug_assertions) {

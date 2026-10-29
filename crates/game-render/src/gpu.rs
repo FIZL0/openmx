@@ -796,6 +796,11 @@ pub struct Target<'a> {
     pub scale: u32,
 }
 
+/// Sprites with pictures of their own, drawn over a finished frame (P200: the iPhone's touch pad).
+pub struct Layer {
+    sprites: sprite::Sprites,
+}
+
 /// The renderer: a device, what is on it, and how to draw it.
 pub struct Renderer {
     pub device: wgpu::Device,
@@ -3969,6 +3974,51 @@ impl Renderer {
     /// The pictures [`Sprite::image`] counts into, uploaded now and kept: the HUD's art.
     pub fn set_images(&mut self, images: &[&Texture]) {
         self.sprites.set_images(&self.device, &self.queue, &self.clamp_sampler, images);
+    }
+
+    /// A [`Layer`] of sprites with its own `images`, for [`Renderer::draw_layer`].
+    pub fn layer(&self, images: &[&Texture]) -> Layer {
+        let mut sprites = sprite::Sprites::new(&self.device, &self.queue, self.format, &self.clamp_sampler);
+        sprites.set_images(&self.device, &self.queue, &self.clamp_sampler, images);
+        Layer { sprites }
+    }
+
+    /// Draw `sprites` over what `target` already shows, as [`Renderer::draw_sprites`] does but
+    /// without clearing it first (P200).
+    pub fn draw_layer(&mut self, layer: &mut Layer, target: &Target, sprites: &[Sprite]) {
+        let place = PlaceUniform {
+            origin: [target.frame[0] as f32, target.frame[1] as f32],
+            scale: target.scale.max(1) as f32,
+            _pad: 0.0,
+        };
+        if !layer.sprites.prepare(&self.device, &self.queue, place, target.size, sprites) {
+            return;
+        }
+        let depth = self.depth_for(target.size);
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("layer"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let [x, y, w, h] = target.frame;
+            pass.set_scissor_rect(x, y, w.min(target.size.0.saturating_sub(x)), h.min(target.size.1.saturating_sub(y)));
+            layer.sprites.draw(&mut pass);
+        }
+        self.queue.submit([encoder.finish()]);
     }
 
     /// Put this frame's overlay patches into the overlay textures, after putting last frame's back.

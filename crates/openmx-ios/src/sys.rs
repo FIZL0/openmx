@@ -1,0 +1,479 @@
+//! The calls themselves: Objective-C messages through `objc_msgSend` cast to each message's own
+//! signature (arm64 has one entry for every return type, structs of four doubles included), and the
+//! C frameworks' functions declared as their headers do.
+
+use std::ffi::{CStr, c_void};
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+type Id = *mut c_void;
+
+#[link(name = "Foundation", kind = "framework")]
+#[link(name = "UIKit", kind = "framework")]
+#[link(name = "GameController", kind = "framework")]
+#[link(name = "CoreMotion", kind = "framework")]
+#[link(name = "AudioToolbox", kind = "framework")]
+unsafe extern "C" {
+    fn objc_msgSend();
+    fn objc_getClass(name: *const std::ffi::c_char) -> Id;
+    fn sel_registerName(name: *const std::ffi::c_char) -> Id;
+    fn objc_autoreleasePoolPush() -> *mut c_void;
+    fn objc_autoreleasePoolPop(pool: *mut c_void);
+    fn NSSetUncaughtExceptionHandler(handler: extern "C" fn(Id));
+    fn pthread_main_np() -> i32;
+}
+
+fn sel(name: &CStr) -> Id {
+    // SAFETY: registering a selector name is always allowed
+    unsafe { sel_registerName(name.as_ptr()) }
+}
+
+fn class(name: &CStr) -> Id {
+    // SAFETY: a lookup; nil when the class is not there
+    unsafe { objc_getClass(name.as_ptr()) }
+}
+
+/// `[o name]` for an object-returning message; nil in, nil out.
+fn get(o: Id, name: &CStr) -> Id {
+    if o.is_null() {
+        return o;
+    }
+    // SAFETY: objc_msgSend cast to `id (id, SEL)`, the signature of every getter it is used for
+    unsafe {
+        let f: extern "C" fn(Id, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        f(o, sel(name))
+    }
+}
+
+/// `[o name]` for an `NSInteger` / `NSUInteger` getter; 0 for nil.
+fn int(o: Id, name: &CStr) -> isize {
+    if o.is_null() {
+        return 0;
+    }
+    // SAFETY: objc_msgSend cast to `NSInteger (id, SEL)`
+    unsafe {
+        let f: extern "C" fn(Id, Id) -> isize = std::mem::transmute(objc_msgSend as *const ());
+        f(o, sel(name))
+    }
+}
+
+/// A `GCControllerButtonInput` / `GCControllerAxisInput`'s `value` (a `float`); 0 for nil.
+fn float(o: Id, name: &CStr) -> f32 {
+    if o.is_null() {
+        return 0.0;
+    }
+    // SAFETY: objc_msgSend cast to `float (id, SEL)`
+    unsafe {
+        let f: extern "C" fn(Id, Id) -> f32 = std::mem::transmute(objc_msgSend as *const ());
+        f(o, sel(name))
+    }
+}
+
+/// An `NSString`'s text; empty for nil.
+fn text(s: Id) -> String {
+    let utf8 = get(s, c"UTF8String") as *const std::ffi::c_char;
+    if utf8.is_null() {
+        return String::new();
+    }
+    // SAFETY: UTF8String is a NUL-terminated string that lives as long as the autorelease pool
+    unsafe { CStr::from_ptr(utf8) }.to_string_lossy().into_owned()
+}
+
+/// Run `f` inside an autorelease pool, as any thread but the main one must for messages that hand
+/// back autoreleased objects.
+fn pool<T>(f: impl FnOnce() -> T) -> T {
+    // SAFETY: push and pop pair up around `f`
+    let p = unsafe { objc_autoreleasePoolPush() };
+    let out = f();
+    unsafe { objc_autoreleasePoolPop(p) };
+    out
+}
+
+fn main_thread() -> bool {
+    // SAFETY: a plain query
+    unsafe { pthread_main_np() != 0 }
+}
+
+// ---- files and the log ---------------------------------------------------------------------------
+
+/// The app's Documents folder: what the Files app shows as On My iPhone → openMX
+/// (UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace in Info.plist). The disc image,
+/// settings.txt, controls.txt and mods/ go in it.
+pub fn documents() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/")).join("Documents")
+}
+
+/// stdout and stderr into `path`, fresh each launch (opentennis M105): the shell's own lines,
+/// panics, and the crash reports below. iOS shows nothing else without a Mac, and writing a file
+/// also makes iOS list the app's folder in Files, which it only does once there is one in it.
+pub fn log_to(path: &std::path::Path) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(f) = std::fs::File::create(path) {
+        // SAFETY: dup2 of an open file over fds 1 and 2; `f` closes its own fd after
+        unsafe {
+            libc::dup2(f.as_raw_fd(), 1);
+            libc::dup2(f.as_raw_fd(), 2);
+        }
+    }
+    // A close with no line and no crash report says nothing: these say which kind of end it was.
+    // SAFETY: the handlers are `extern "C"` functions that live for the process; on_signal makes
+    // only async-signal-safe calls
+    unsafe {
+        libc::atexit(on_exit);
+        for sig in [libc::SIGABRT, libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGTRAP, libc::SIGFPE] {
+            libc::signal(sig, on_signal as *const () as libc::sighandler_t);
+        }
+        NSSetUncaughtExceptionHandler(on_exception);
+    }
+}
+
+extern "C" fn on_exit() {
+    eprintln!("exit() called");
+}
+
+extern "C" fn on_signal(sig: libc::c_int) {
+    let msg: &[u8] = match sig {
+        libc::SIGABRT => b"fatal signal: SIGABRT (abort)\n",
+        libc::SIGSEGV => b"fatal signal: SIGSEGV (bad memory access)\n",
+        libc::SIGBUS => b"fatal signal: SIGBUS (bad memory access)\n",
+        libc::SIGILL => b"fatal signal: SIGILL\n",
+        libc::SIGTRAP => b"fatal signal: SIGTRAP\n",
+        _ => b"fatal signal: SIGFPE\n",
+    };
+    // SAFETY: write, signal and raise are async-signal-safe; `msg` is a static byte string
+    unsafe {
+        libc::write(2, msg.as_ptr().cast(), msg.len());
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// UIKit's failures are Objective-C exceptions: their name and reason, before the abort.
+extern "C" fn on_exception(e: Id) {
+    eprintln!("Objective-C exception {}: {}", text(get(e, c"name")), text(get(e, c"reason")));
+}
+
+unsafe extern "C" {
+    static mach_task_self_: u32;
+    fn task_info(task: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    fn os_proc_available_memory() -> usize;
+}
+
+/// The memory iOS counts against the app (its phys footprint) and what is left before iOS closes
+/// it (opentennis B538), for the log.
+pub fn memory() -> String {
+    // task_vm_info_data_t as u64s: phys_footprint is the 19th
+    let mut info = [0u64; 48];
+    let mut count = (std::mem::size_of_val(&info) / 4) as u32;
+    const TASK_VM_INFO: i32 = 22;
+    // SAFETY: `info` holds `count` natural_t's; the kernel writes at most that many
+    let ok = unsafe { task_info(mach_task_self_, TASK_VM_INFO, info.as_mut_ptr().cast(), &mut count) } == 0;
+    // SAFETY: a plain query (iOS 13+)
+    let left = unsafe { os_proc_available_memory() } as u64;
+    format!("memory {} MB, {} MB left before iOS closes the app", if ok { info[18] >> 20 } else { 0 }, left >> 20)
+}
+
+// ---- the window ----------------------------------------------------------------------------------
+
+/// UIKit's `UIEdgeInsets`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Insets {
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+}
+
+fn view_of(window: &winit::window::Window) -> Option<(Id, Option<Id>)> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::UiKit(h) => Some((h.ui_view.as_ptr(), h.ui_view_controller.map(|v| v.as_ptr()))),
+        _ => None,
+    }
+}
+
+/// The window's safe area, in its pixels: the left, top, right and bottom insets the notch or
+/// Dynamic Island and the home indicator take. Main thread only (UIKit); zeros elsewhere.
+pub fn safe_area(window: &winit::window::Window) -> [u32; 4] {
+    let Some((view, _)) = view_of(window).filter(|_| main_thread()) else {
+        return [0; 4];
+    };
+    // SAFETY: on the main thread; `view` is the window's live UIView; safeAreaInsets returns
+    // UIEdgeInsets (four doubles, returned in registers on arm64) by value
+    let i = unsafe {
+        let f: extern "C" fn(Id, Id) -> Insets = std::mem::transmute(objc_msgSend as *const ());
+        f(view, sel(c"safeAreaInsets"))
+    };
+    let scale = window.scale_factor();
+    [i.left, i.top, i.right, i.bottom].map(|v| (v * scale).ceil().max(0.0) as u32)
+}
+
+/// Hold the window to `hold` (M144, B694): its view controller's orientations, and on iOS 16 and
+/// later the call that makes UIKit turn to them now. Main thread only.
+pub fn hold(window: &winit::window::Window, hold: crate::Hold) {
+    use winit::platform::ios::{ValidOrientations, WindowExtIOS};
+    window.set_valid_orientations(match hold {
+        crate::Hold::Landscape => ValidOrientations::Landscape,
+        crate::Hold::Portrait => ValidOrientations::Portrait,
+        crate::Hold::Locked => ValidOrientations::LandscapeRight,
+    });
+    if let Some((_, Some(vc))) = view_of(window).filter(|_| main_thread()) {
+        let update = sel(c"setNeedsUpdateOfSupportedInterfaceOrientations");
+        // SAFETY: on the main thread; the view controller lives as long as the window;
+        // respondsToSelector: guards iOS 15, which lacks the call
+        unsafe {
+            let responds: extern "C" fn(Id, Id, Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
+            if responds(vc, sel(c"respondsToSelector:"), update) {
+                let f: extern "C" fn(Id, Id) = std::mem::transmute(objc_msgSend as *const ());
+                f(vc, update);
+            }
+        }
+    }
+}
+
+/// CoreMotion's `CMAcceleration`, in g along the device's axes (x right, y up the screen held upright).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Acceleration {
+    x: f64,
+    y: f64,
+    _z: f64,
+}
+
+/// The motion manager, made on first use and kept for the process.
+static MOTION: AtomicUsize = AtomicUsize::new(0);
+
+/// What [`crate::Holder::step`] reads: UIDevice's orientation, and whether the accelerometer has the
+/// phone sideways (`None` while it lies flat). Main thread only.
+pub fn device_turn() -> (isize, Option<bool>) {
+    if !main_thread() {
+        return (0, None);
+    }
+    let device = get(class(c"UIDevice"), c"currentDevice");
+    if MOTION.load(Ordering::Relaxed) == 0 {
+        get(device, c"beginGeneratingDeviceOrientationNotifications");
+        let m = get(get(class(c"CMMotionManager"), c"alloc"), c"init");
+        get(m, c"startAccelerometerUpdates");
+        MOTION.store(m as usize, Ordering::Relaxed);
+    }
+    let data = get(MOTION.load(Ordering::Relaxed) as Id, c"accelerometerData");
+    let gravity = (!data.is_null())
+        .then(|| {
+            // SAFETY: objc_msgSend cast to `CMAcceleration (id, SEL)`, three doubles in registers
+            unsafe {
+                let f: extern "C" fn(Id, Id) -> Acceleration = std::mem::transmute(objc_msgSend as *const ());
+                f(data, sel(c"acceleration"))
+            }
+        })
+        .filter(|a| a.x.abs().max(a.y.abs()) > 0.5)
+        .map(|a| a.x.abs() > a.y.abs());
+    (int(device, c"orientation"), gravity)
+}
+
+// ---- pads ----------------------------------------------------------------------------------------
+
+/// The extended gamepad's buttons, in the Gamepad API's standard mapping (the order the shell's web
+/// pads come in, `web_host.rs`): A B X Y (Apple's bottom, right, left, top), the shoulders, the
+/// triggers, options (select), menu (start), the stick clicks, the d-pad, home.
+const BUTTONS: [&[&CStr]; 17] = [
+    &[c"buttonA"],
+    &[c"buttonB"],
+    &[c"buttonX"],
+    &[c"buttonY"],
+    &[c"leftShoulder"],
+    &[c"rightShoulder"],
+    &[c"leftTrigger"],
+    &[c"rightTrigger"],
+    &[c"buttonOptions"],
+    &[c"buttonMenu"],
+    &[c"leftThumbstickButton"],
+    &[c"rightThumbstickButton"],
+    &[c"dpad", c"up"],
+    &[c"dpad", c"down"],
+    &[c"dpad", c"left"],
+    &[c"dpad", c"right"],
+    &[c"buttonHome"],
+];
+/// The sticks, standard mapping: left x, left y, right x, right y, y down.
+const AXES: [&[&CStr]; 4] = [
+    &[c"leftThumbstick", c"xAxis"],
+    &[c"leftThumbstick", c"yAxis"],
+    &[c"rightThumbstick", c"xAxis"],
+    &[c"rightThumbstick", c"yAxis"],
+];
+
+/// One controller as it is now, in the Gamepad API's standard mapping.
+#[derive(Clone, Debug)]
+pub struct PadState {
+    /// The controller object's address: the same for as long as it stays connected.
+    pub id: usize,
+    pub name: String,
+    pub buttons: [f32; 17],
+    pub axes: [f32; 4],
+}
+
+/// Every connected GameController with an extended gamepad (any MFi, Xbox, PlayStation or Switch
+/// pad). Any thread.
+pub fn pads() -> Vec<PadState> {
+    if class(c"GCController").is_null() {
+        return Vec::new();
+    }
+    pool(|| {
+        let list = get(class(c"GCController"), c"controllers");
+        let n = int(list, c"count").max(0) as usize;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            // SAFETY: objc_msgSend cast to `id (id, SEL, NSUInteger)`, `i` below the array's count
+            let ctrl = unsafe {
+                let f: extern "C" fn(Id, Id, usize) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                f(list, sel(c"objectAtIndex:"), i)
+            };
+            let pad = get(ctrl, c"extendedGamepad");
+            if pad.is_null() {
+                continue;
+            }
+            let element = |path: &[&CStr]| path.iter().fold(pad, |o, name| get(o, name));
+            let mut state = PadState { id: ctrl as usize, name: text(get(ctrl, c"vendorName")), buttons: [0.0; 17], axes: [0.0; 4] };
+            for (b, path) in state.buttons.iter_mut().zip(BUTTONS) {
+                *b = float(element(path), c"value");
+            }
+            for (a, path) in state.axes.iter_mut().zip(AXES) {
+                *a = float(element(path), c"value");
+            }
+            // GameController's y is up; the standard mapping's is down.
+            state.axes[1] = -state.axes[1];
+            state.axes[3] = -state.axes[3];
+            if state.name.is_empty() {
+                state.name = "Controller".into();
+            }
+            out.push(state);
+        }
+        out
+    })
+}
+
+// ---- sound ---------------------------------------------------------------------------------------
+
+#[repr(C)]
+struct StreamFormat {
+    sample_rate: f64,
+    format_id: u32,
+    format_flags: u32,
+    bytes_per_packet: u32,
+    frames_per_packet: u32,
+    bytes_per_frame: u32,
+    channels_per_frame: u32,
+    bits_per_channel: u32,
+    reserved: u32,
+}
+
+#[repr(C)]
+struct QueueBuffer {
+    capacity: u32,
+    data: *mut c_void,
+    size: u32,
+    user: *mut c_void,
+    packet_capacity: u32,
+    packets: *mut c_void,
+    packet_count: u32,
+}
+
+type Queue = *mut c_void;
+type Callback = extern "C" fn(*mut c_void, Queue, *mut QueueBuffer);
+
+unsafe extern "C" {
+    fn AudioQueueNewOutput(format: *const StreamFormat, callback: Callback, user: *mut c_void, run_loop: *mut c_void, mode: *const c_void, flags: u32, out: *mut Queue) -> i32;
+    fn AudioQueueAllocateBuffer(queue: Queue, bytes: u32, out: *mut *mut QueueBuffer) -> i32;
+    fn AudioQueueEnqueueBuffer(queue: Queue, buffer: *mut QueueBuffer, packets: u32, descriptions: *const c_void) -> i32;
+    fn AudioQueueStart(queue: Queue, at: *const c_void) -> i32;
+    fn AudioQueueDispose(queue: Queue, immediate: u8) -> i32;
+}
+
+/// What fills a buffer: interleaved stereo 16-bit samples, as many as the slice holds.
+type Fill = Box<dyn FnMut(&mut [i16]) + Send>;
+
+/// A buffer's frames: 1024 at 48 kHz is 21 ms, three of them queued.
+const FRAMES: u32 = 1024;
+const BUFFERS: usize = 3;
+
+/// The sound going out: an AudioQueue on CoreAudio's own thread, asking `fill` for each buffer as the
+/// last one plays. Dropping it stops the queue at once.
+pub struct Sound {
+    queue: Queue,
+    fill: *mut Fill,
+}
+
+// SAFETY: the queue is CoreAudio's, callable from any thread; `fill` is only touched by the queue's
+// own thread until the drop has disposed of the queue
+unsafe impl Send for Sound {}
+
+extern "C" fn refill(user: *mut c_void, queue: Queue, buffer: *mut QueueBuffer) {
+    // SAFETY: `user` is the `Fill` `Sound::start` boxed, alive until the queue is disposed; `buffer`
+    // is one of the queue's, `capacity` bytes of i16 samples
+    unsafe {
+        let fill = &mut *(user as *mut Fill);
+        let b = &mut *buffer;
+        let samples = std::slice::from_raw_parts_mut(b.data as *mut i16, b.capacity as usize / 2);
+        fill(samples);
+        b.size = b.capacity;
+        AudioQueueEnqueueBuffer(queue, buffer, 0, std::ptr::null());
+    }
+}
+
+impl Sound {
+    /// Start playing `rate` Hz stereo out of `fill`.
+    pub fn start(rate: u32, fill: Fill) -> Result<Sound, String> {
+        let format = StreamFormat {
+            sample_rate: rate as f64,
+            format_id: u32::from_be_bytes(*b"lpcm"),
+            // signed integer, packed
+            format_flags: 4 | 8,
+            bytes_per_packet: 4,
+            frames_per_packet: 1,
+            bytes_per_frame: 4,
+            channels_per_frame: 2,
+            bits_per_channel: 16,
+            reserved: 0,
+        };
+        let fill = Box::into_raw(Box::new(fill));
+        let mut queue: Queue = std::ptr::null_mut();
+        // SAFETY: the format and out-pointer are ours; a null run loop is CoreAudio's own thread
+        let status = unsafe { AudioQueueNewOutput(&format, refill, fill.cast(), std::ptr::null_mut(), std::ptr::null(), 0, &mut queue) };
+        if status != 0 {
+            // SAFETY: the box was never handed to a queue
+            drop(unsafe { Box::from_raw(fill) });
+            return Err(format!("no AudioQueue (OSStatus {status})"));
+        }
+        let sound = Sound { queue, fill };
+        for _ in 0..BUFFERS {
+            let mut buffer = std::ptr::null_mut();
+            // SAFETY: the queue is live; each buffer is primed (filled and queued) before the start
+            unsafe {
+                if AudioQueueAllocateBuffer(queue, FRAMES * 4, &mut buffer) != 0 {
+                    return Err("the AudioQueue gave no buffer".into());
+                }
+                refill(fill.cast(), queue, buffer);
+            }
+        }
+        // SAFETY: the queue is live and primed
+        let status = unsafe { AudioQueueStart(queue, std::ptr::null()) };
+        if status != 0 {
+            return Err(format!("the AudioQueue did not start (OSStatus {status})"));
+        }
+        Ok(sound)
+    }
+}
+
+impl Drop for Sound {
+    fn drop(&mut self) {
+        // SAFETY: an immediate dispose stops the callbacks before it returns, so `fill` is ours again
+        unsafe {
+            AudioQueueDispose(self.queue, 1);
+            drop(Box::from_raw(self.fill));
+        }
+    }
+}

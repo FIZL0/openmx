@@ -45,10 +45,13 @@ const PAD_DIR: &str = "/dev/input";
 
 /// A joystick device as it is read: a `/dev/input/js*` node, or in the browser one of the page's
 /// gamepads put out as the same events (P196, [`crate::web_host::PadNode`]).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
 type Node = std::fs::File;
 #[cfg(target_arch = "wasm32")]
 type Node = crate::web_host::PadNode;
+// The iPhone's GameController pads and its touch pad, put out as the same events (P200).
+#[cfg(target_os = "ios")]
+type Node = crate::ios::PadNode;
 const PAD_SYS: &str = "/sys/class/input";
 
 /// `O_NONBLOCK`, so a frame with no pad event does not wait for one. The value is Linux's, and this
@@ -1486,10 +1489,13 @@ fn has_key(bitmap: &str, code: usize) -> bool {
 impl DeviceInfo {
     /// `sys/<node>/device/…`, as much of it as is there. A node with no sysfs entry (a test's fifo,
     /// or a container with no `/sys`) is known by its path alone.
+    #[cfg_attr(target_os = "ios", allow(unreachable_code, unused_variables))]
     fn read(sys: &std::path::Path, node: &str) -> DeviceInfo {
         // A page's gamepad has a name and nothing else (P196).
         #[cfg(target_arch = "wasm32")]
         return DeviceInfo { name: crate::web_host::pad_name(node), ..DeviceInfo::default() };
+        #[cfg(target_os = "ios")]
+        return DeviceInfo { name: crate::ios::pad_name(node), ..DeviceInfo::default() };
         let dir = sys.join(node).join("device");
         let text = |name: &str| {
             std::fs::read_to_string(dir.join(name)).map(|t| t.trim().to_string()).unwrap_or_default()
@@ -2324,7 +2330,9 @@ impl Seats {
         self.since_scan = Some(crate::clock::Instant::now());
         #[cfg(target_arch = "wasm32")]
         let mut found = crate::web_host::pads();
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(target_os = "ios")]
+        let mut found = crate::ios::pads();
+        #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
         let mut found: Vec<(u32, std::path::PathBuf)> = match &self.only {
             Some(path) => vec![(0, path.clone())],
             None => std::fs::read_dir(&self.dir)
@@ -2353,14 +2361,14 @@ impl Seats {
                 });
                 continue;
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
             use std::os::unix::fs::OpenOptionsExt;
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
             let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(&path)
             else {
                 continue;
             };
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(any(target_arch = "wasm32", target_os = "ios"))]
             let Ok(file) = Node::open(&path) else { continue };
             // Two of the same pad on one hub port must still be two: the first free of `id`,
             // `id #2`, `id #3`…, so a pad that comes back gets the name it had if it is free.
