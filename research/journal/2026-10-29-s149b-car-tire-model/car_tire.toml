@@ -1,0 +1,165 @@
+# car_tire.toml — S149b (S149a's car.toml, tire blocks widened): one of the car machines (monster truck, baja, buggy) driven by a generated .p2m2 on
+# the original, one row per tick: the body, every tire and the engine.
+#
+#   research/journal/2026-10-29-s149a-car-captures/capture.sh CAR ...   (it rewrites CAR below)
+#
+# The car is a fixed heap object in each S149a state, so its address is a literal, not a chain off the
+# game manager: 0x00605270 is where S149a's free07 boot parks whichever kind it asks for (the buggy on
+# free11 and the truck on free09 sit elsewhere; capture.sh substitutes the address, and
+# `car_vtable`/`car_kind` say whether it held). The journal names the tire and engine words.
+# Offsets come from the loader (`car_phy_load`, research/oracle.txt S149 block) and the biplane's
+# rigid body (C7): +0x160 body, +0x544 engine, +0x548..+0x554 the four tires.
+#
+# The tire and engine steps are vtable-only code Ghidra made no functions of, so beside the fields
+# named here every row carries raw blocks of the car (+0x200..+0x700), each tire (+0..+0x240) and the
+# engine (+0..+0x140) as hex: the journal names the words the drive shows, and S149b-S149d read the
+# rest out of the same rows rather than re-recording.
+
+[watch]
+name        = "car"
+description = "a car machine driven by a generated tape: body, tires, engine per tick"
+every       = 1
+frames      = 660
+
+[setup]
+warmup = 0               # the playback script loads the state through PCSX2's Play, not the kit
+
+# --- the clock and the input (as biplane.toml) --------------------------------------------------------
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "pad_b"
+addr = "@pad_buffers + 0x80"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_b"
+addr = "@pad0_stamp_b"
+type = "u32"
+
+# --- which car, and who drives it ---------------------------------------------------------------------
+[[field]]
+name = "car_vtable"            # +0x48: 0x0045ed50 the truck's class, 0x0045cf80 the buggy's and baja's
+addr = "0x00605270 + 0x48"
+type = "u32"
+
+[[field]]
+name = "car_kind"              # +0xd50: 3 buggy, 4 monster truck, 5 baja
+addr = "0x00605270 + 0xd50"
+type = "u32"
+
+[[field]]
+name = "car_player"            # +0x20: the player record driving it
+addr = "0x00605270 + 0x20"
+type = "u32"
+
+[[field]]
+name = "car_ctl"               # +0x14: not understood (1 on a parked car from the S148-style boot)
+addr = "0x00605270 + 0x14"
+type = "u32"
+
+# --- the body (the rigid body at +0x160, laid out as the biplane's) ------------------------------------
+[[field]]
+name = "body_pos"              # body +0x60: the centre of gravity, world
+addr = "0x00605270 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "body_vel"              # body +0x70: world velocity, ft/s
+addr = "0x00605270 + 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "body_quat"             # body +0x170: orientation, x y z w
+addr = "0x00605270 + 0x160 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "body_rate"             # body +0x1b0: world angular velocity, rad/s
+addr = "0x00605270 + 0x160 -> 0x1b0"
+type = "f32x4"
+
+# --- raw blocks: the car's state, each tire, the engine ------------------------------------------------
+[[field]]
+name = "car_raw"               # car +0x200..+0x700
+addr = "0x00605270 + 0x200"
+type = "bytes:1280"
+
+[[field]]
+name = "engine_raw"            # engine +0..+0x140
+addr = "0x00605270 + 0x544 -> 0x0"
+type = "bytes:320"
+
+[[field]]
+name = "tire_fl_raw"           # front left tire +0..+0x2c0: the forces, the steer and Fx/N too
+addr = "0x00605270 + 0x548 -> 0x0"
+type = "bytes:704"
+
+[[field]]
+name = "tire_fr_raw"
+addr = "0x00605270 + 0x54c -> 0x0"
+type = "bytes:704"
+
+[[field]]
+name = "tire_rl_raw"
+addr = "0x00605270 + 0x550 -> 0x0"
+type = "bytes:704"
+
+[[field]]
+name = "tire_rr_raw"
+addr = "0x00605270 + 0x554 -> 0x0"
+type = "bytes:704"
+
+[[field]]
+name = "tire_fl_tail"          # tire +0x9b0..+0x9d0: the friction scale, the camber and its ratio
+addr = "0x00605270 + 0x548 -> 0x9b0"
+type = "bytes:32"
+
+[[field]]
+name = "tire_fr_tail"          # tire +0x9b0..+0x9d0: the friction scale, the camber and its ratio
+addr = "0x00605270 + 0x54c -> 0x9b0"
+type = "bytes:32"
+
+[[field]]
+name = "tire_rl_tail"          # tire +0x9b0..+0x9d0: the friction scale, the camber and its ratio
+addr = "0x00605270 + 0x550 -> 0x9b0"
+type = "bytes:32"
+
+[[field]]
+name = "tire_rr_tail"          # tire +0x9b0..+0x9d0: the friction scale, the camber and its ratio
+addr = "0x00605270 + 0x554 -> 0x9b0"
+type = "bytes:32"
