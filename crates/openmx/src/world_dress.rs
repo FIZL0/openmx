@@ -54,13 +54,14 @@ pub struct Dressed {
     pub posed: Vec<Option<game_render::mat::M4>>,
     /// Each car's wheels (V82), `None` for a car with none, for [`Dressed::wheel_poses`].
     pub wheels: Vec<Option<toy::Wheels>>,
-    /// Each car's ground at its warm-up steps, kept from picture to picture (V96, [`toy::Path::pose_kept`]).
+    /// Each car's ground on its clock's grid, kept from picture to picture (V96, MD45, [`toy::Path::pose_kept`]).
     pub grounds: Vec<toy::Kept>,
 }
 
 /// How near a camera a world's car is posed every picture (MD28). A car is posed by replaying
-/// [`toy::WARM`] scene steps, a ground query each, so 29 cars on a world were 1,400 queries and 3 to
-/// 13 ms a picture; past it, a car posed every [`CARS_FAR_EVERY`]th picture moves under two pixels
+/// [`toy::WARM`] scene steps, which were a ground query each, so 29 cars on a world were 1,400 queries
+/// and 3 to 13 ms a picture (MD45 keeps the ground on the clock's grid, three or four queries a
+/// car a picture); past it, a car posed every [`CARS_FAR_EVERY`]th picture moves under two pixels
 /// between poses at 1080p.
 pub const CARS_NEAR: f32 = 1500.0;
 
@@ -676,5 +677,107 @@ mod tests {
         let log = dress.take_log().join("\n");
         assert!(log.contains("world props: t0 dropped") && log.matches("world props: t0 built").count() == 2, "{log}");
         let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+    }
+
+    /// MD45: a world's cars ask the ground three or four times a car a picture once their first picture has
+    /// filled the grid, not [`toy::WARM`] + 1 times, and stand where [`toy::Traffic::placed`] — which
+    /// replays every warm-up frame on the ground — stands them. A truck and a three-car train on a
+    /// loop of bends over faceted hills (a flat normal a triangle, as a world's ground has), drawn at
+    /// 60 pictures a second for 20 s, a lap of the train's clock wrapping in it.
+    #[test]
+    fn world_cars_ask_the_ground_a_few_times_a_picture_and_stand_where_they_did() {
+        use game_render::mat::{V3, v3};
+        let toy = "[Cars]\r\nNumberOfCars=4\r\n\
+            [Car1]\r\nFileName=truck.psg\r\nMOTFileName=a.mot\r\nTimeScale=0.95\r\nHeadingFilter=0.5\r\nNormalFilter=0.2\r\n\
+            [Car2]\r\nFileName=engine.psg\r\nMOTFileName=b.mot\r\nTimeScale=1.0\r\n\
+            [Car3]\r\nFileName=coach.psg\r\nMOTFileName=b.mot\r\nLagDistance=45\r\n\
+            [Car4]\r\nFileName=coach.psg\r\nMOTFileName=b.mot\r\nLagDistance=90\r\n";
+        let cars = toy::cars(toy);
+        assert_eq!(cars.len(), 4);
+        // Loops of bends: a wobbling circle, the last key back on the first.
+        let ring = |radius: f32, keys: usize, period: f32, y: f32| {
+            let points = (0..=keys)
+                .map(|k| {
+                    let a = k as f32 / keys as f32 * std::f32::consts::TAU;
+                    let r = radius + 40.0 * (3.0 * a).sin();
+                    (period * k as f32 / keys as f32, v3(500.0 + r * a.cos(), y, 400.0 + r * a.sin()))
+                })
+                .collect();
+            toy::Path::new(points).unwrap()
+        };
+        let (truck, train) = (ring(220.0, 18, 40.0, 60.0), ring(320.0, 30, 15.0, -6.0));
+        let paths = [truck, train.clone(), train.clone(), train];
+        let traffic = Traffic { cars: cars.into_iter().zip(paths).collect(), skipped: Vec::new() };
+
+        // Faceted hills on a 9 ft grid, each cell two triangles with a normal of their own.
+        let height = |x: f32, z: f32| 40.0 + 6.0 * (x / 70.0).sin() * (z / 55.0).cos() + 2.0 * (z / 23.0).sin();
+        let faceted = |p: V3| {
+            let (cx, cz) = ((p.x / 9.0).floor(), (p.z / 9.0).floor());
+            let (fx, fz) = (p.x / 9.0 - cx, p.z / 9.0 - cz);
+            let h = |i: f32, j: f32| height((cx + i) * 9.0, (cz + j) * 9.0);
+            let (dx, dz, y) = if fx + fz < 1.0 {
+                let (dx, dz) = (h(1.0, 0.0) - h(0.0, 0.0), h(0.0, 1.0) - h(0.0, 0.0));
+                (dx, dz, h(0.0, 0.0) + dx * fx + dz * fz)
+            } else {
+                let (dx, dz) = (h(1.0, 1.0) - h(0.0, 1.0), h(1.0, 1.0) - h(1.0, 0.0));
+                (dx, dz, h(1.0, 1.0) - dx * (1.0 - fx) - dz * (1.0 - fz))
+            };
+            (v3(p.x, y, p.z), v3(-dx / 9.0, 1.0, -dz / 9.0).norm())
+        };
+
+        let shift = [1200.0f32, -300.0];
+        let mut d = Dressed {
+            index: 0,
+            prefix: "t0::".into(),
+            props: Vec::new(),
+            grove: None,
+            traffic,
+            shift,
+            taken: Taken::default(),
+            posed: Vec::new(),
+            wheels: Vec::new(),
+            grounds: Vec::new(),
+        };
+        let eyes = [[1700.0f32, 100.0]];
+        let pictures = 1200u64;
+        let (mut asked, mut first, mut most) = (0usize, 0usize, 0usize);
+        let (mut off, mut turned) = (0.0f32, 0.0f32);
+        for picture in 0..pictures {
+            let elapsed = picture as f64 / 60.0;
+            let mut n = 0usize;
+            let posed = d.cars_near(elapsed, &eyes, picture, &mut |p, by| {
+                n += 1;
+                let (on, normal) = faceted(v3(p.x + by[0], p.y, p.z + by[1]));
+                (v3(p.x, on.y, p.z), normal)
+            });
+            if picture == 0 {
+                first = n;
+            } else {
+                asked += n;
+                most = most.max(n);
+            }
+            let today = d.traffic.placed(elapsed, &mut |p| {
+                let (on, normal) = faceted(v3(p.x + shift[0], p.y, p.z + shift[1]));
+                (v3(p.x, on.y, p.z), normal)
+            });
+            assert_eq!(posed.len(), today.len());
+            for ((name, m), (stem, t)) in posed.iter().zip(&today) {
+                assert_eq!(name, &format!("t0::{stem}"));
+                let at = |m: &game_render::mat::M4, r: usize| v3(m.0[r][0], m.0[r][1], m.0[r][2]);
+                let t_at = v3(t.0[3][0] + shift[0], t.0[3][1], t.0[3][2] + shift[1]);
+                off = off.max(at(m, 3).sub(t_at).len());
+                // A corner 15 ft out on each axis moves by the axis' turn times 15.
+                for r in 0..3 {
+                    turned = turned.max(at(m, r).sub(at(t, r)).len() * 15.0);
+                }
+            }
+        }
+        let per = asked as f32 / ((pictures - 1) * 4) as f32;
+        println!("MD45: first picture {first} queries, then {per:.2} a car a picture (most {most} in one picture for 4 cars); car off by {off} ft, a 15 ft corner by {turned} ft");
+        assert_eq!(first, 4 * (toy::WARM + 2), "the first picture fills each car's grid and asks at its clock");
+        // KEPT_ASKED a picture and a grid step every other; a lap's wrap starts the train's three grids over once.
+        assert!(per < 3.7, "{per} ground queries a car a picture");
+        assert!(off < 0.01, "a car {off} ft from where Traffic::placed stands it");
+        assert!(turned < 0.01, "a car's corner {turned} ft from Traffic::placed's");
     }
 }

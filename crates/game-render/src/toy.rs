@@ -340,30 +340,47 @@ impl Path {
     }
 }
 
-/// The ground [`Path::pose_kept`] found at a car's warm-up steps (V96): one entry a step of the
-/// clock's grid, from step `first` on, so the next picture asks only for the steps it has not seen.
+/// The ground [`Path::pose_kept`] found at a car's clock grid (V96, MD45): one entry a step of the
+/// grid, from step `first` on, so the next picture asks only for the steps it has not seen.
 #[derive(Clone, Debug, Default)]
 pub struct Kept {
     first: i64,
     at: std::collections::VecDeque<(V3, V3)>,
 }
 
+/// How many of [`Path::pose_kept`]'s newest frames ask the ground where they are rather than read it
+/// off the grid: the normal filter keeps a fifth a frame, so the frame `k` back weighs `0.8 × 0.2^k`
+/// of the up, and a blended up's error past these three is under a 0.01 ft turn at a car's corner
+/// (MD45's test, on faceted ground).
+pub const KEPT_ASKED: usize = 3;
+
 impl Path {
-    /// [`Path::pose`] for a car posed picture after picture (V96, a world's dressing): its [`WARM`]
-    /// warm-up frames stand on the clock's grid of `step`s rather than back from `clock` itself, so
-    /// one picture's are the last one's moved on by a step or none, and the ground under each is
-    /// kept in `kept` rather than asked again; the last frame is at `clock`, on the ground asked
-    /// there. The filters settle as [`Path::pose`]'s do, from frames up to a step apart from its: a
-    /// pose differs from [`Path::pose`]'s by what the filters make of that, which is not drawn
-    /// apart. A presampling car, or no step, is [`Path::pose`].
+    /// [`Path::pose`] for a car posed picture after picture (V96, MD45, a world's dressing), with
+    /// the ground asked three or four times a picture rather than [`WARM`] + 1 times. The warm-up
+    /// frames are [`Path::pose`]'s own, `step` apart back from `clock`, and so is the heading, which
+    /// only reads the path. The ground is asked at `clock` itself, where the car stands, and at the
+    /// frames just before it ([`KEPT_ASKED`]); the older frames' ups, which only feed the normal
+    /// filter, are read off the clock's grid of `step`s instead, kept in `kept` from picture to
+    /// picture: a frame between grid steps `g` and `g + 1` takes their two ups blended by how far
+    /// between them it is (every frame is the same fraction of a step past its grid step as `clock`
+    /// is), normalised. Each picture asks for the grid steps the last did not, one a step. The pose
+    /// is still a function of the clock alone; its place is [`Path::pose`]'s exactly, its turn within
+    /// what the blended ups make of the filter. A presampling car, or no step, is [`Path::pose`].
     pub fn pose_kept(&self, car: &Car, clock: f32, step: f32, ground: &mut Ground, kept: &mut Kept) -> Pose {
         if car.presample || !(step > 0.0) {
             return self.pose(car, clock, step, ground);
         }
         let period = self.last();
         let wrap = |s: f32| if period > 0.0 { s.rem_euclid(period) } else { 0.0 };
-        let last = (clock / step).floor() as i64;
-        let first = last - WARM as i64 + 1;
+        let on_path = |s: f32| {
+            let s = wrap(s);
+            let s = if car.lag > 0.0 { self.lagged(s, car.lag) } else { s };
+            self.point(s).0
+        };
+        let grid = clock / step;
+        let last = grid.floor() as i64;
+        let by = (grid - last as f32).clamp(0.0, 1.0);
+        let first = last - WARM as i64;
         // Steps before this picture's first go; a clock that went back, or jumped past them all, starts over.
         let end = kept.first + kept.at.len() as i64;
         if first < kept.first || end < first {
@@ -374,15 +391,23 @@ impl Path {
             kept.at.pop_front();
             kept.first += 1;
         }
+        // The grid reaches from the oldest frame read off it to the newest: the [`KEPT_ASKED`] after are asked.
+        let newest = last - KEPT_ASKED as i64 + 1;
+        for g in kept.first + kept.at.len() as i64..=newest {
+            kept.at.push_back(ground(on_path(g as f32 * step)));
+        }
+        let up_at = |back: usize| {
+            let g = (last - back as i64 - kept.first) as usize;
+            let (a, b) = (kept.at[g].1, kept.at[g + 1].1);
+            let up = a.add(b.sub(a).scale(by));
+            if up.len() > 0.0 { up.norm() } else if by < 0.5 { a } else { b }
+        };
         let mut head = v3(0.0, 0.0, 0.0);
         let mut normal = v3(0.0, 1.0, 0.0);
         let mut before: Option<V3> = None;
         let mut pose = None;
-        for g in first..=last + 1 {
-            let at = if g <= last { g as f32 * step } else { clock };
-            let s = wrap(at);
-            let s = if car.lag > 0.0 { self.lagged(s, car.lag) } else { s };
-            let (path, _, _) = self.point(s);
+        for back in (0..=WARM).rev() {
+            let path = on_path(clock - back as f32 * step);
             if let Some(before) = before {
                 let moved = path.sub(before);
                 let flat = v3(moved.x, 0.0, moved.z);
@@ -392,21 +417,13 @@ impl Path {
                 }
             }
             before = Some(path);
-            let (pos, up) = match (g - kept.first) as usize {
-                _ if g > last => ground(path),
-                k if k < kept.at.len() => kept.at[k],
-                _ => {
-                    let on = ground(path);
-                    kept.at.push_back(on);
-                    on
-                }
-            };
+            let (pos, up) = if back < KEPT_ASKED { ground(path) } else { (path, up_at(back)) };
             if normal.dot(up) > 0.707 {
                 normal = normal.scale(car.normal_filter).add(up.scale(1.0 - car.normal_filter));
             }
             pose = Some((path, pos));
         }
-        let (path, pos) = pose.expect("a frame ran");
+        let (path, pos) = pose.expect("WARM frames ran");
         Pose { path, pos, head, normal, transform: upright(pos, head, normal) }
     }
 }
