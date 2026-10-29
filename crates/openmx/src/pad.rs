@@ -1669,6 +1669,17 @@ pub struct PadSlots<P> {
     /// The seat the keyboard took by joining a running ride whose 1P is a pad (P173): it drives it
     /// as a pad would, and no pad is given it while it does.
     keys_joined: Option<usize>,
+    /// The keyboard's seat as the Controllers screen or a take-over put it (P210): `Some(None)` no
+    /// seat, `Some(Some(i))` seat `i`, beside the pad in it if there is one. `None`: the rules
+    /// above decide, as before.
+    keys_at: Option<Option<usize>>,
+    /// The pads the Controllers screen took off every seat (P210): no seat is given them until they
+    /// are unplugged, or put on one again.
+    off: Vec<P>,
+    /// The seats a person put a device on (P210): the Controllers screen's, and the ride's players'
+    /// ([`PadSlots::set_riding`]). A pad in one of them never takes 1P over.
+    placed: [bool; SEATS],
+    riding: Vec<usize>,
 }
 
 /// A device a seat can be given: the keyboard or a pad.
@@ -1686,6 +1697,10 @@ impl<P> Default for PadSlots<P> {
             last: std::array::from_fn(|_| None),
             first: None,
             keys_joined: None,
+            keys_at: None,
+            off: Vec::new(),
+            placed: [false; SEATS],
+            riding: Vec::new(),
         }
     }
 }
@@ -1710,6 +1725,9 @@ impl<P: Clone + PartialEq> PadSlots<P> {
             }
         }
         self.keys_joined = None;
+        self.keys_at = None;
+        self.off.clear();
+        self.placed = [false; SEATS];
         self.first = first;
     }
 
@@ -1738,9 +1756,10 @@ impl<P: Clone + PartialEq> PadSlots<P> {
                 self.held[i] = Some(p);
             }
         }
-        let keys_first = self.seats.is_none() && self.first == Some(Device::Keys);
+        self.off.retain(|p| present.contains(p));
+        let keys_first = self.seats.is_none() && self.first == Some(Device::Keys) && self.keys_at.is_none();
         let wants = |i: usize| {
-            if (i == 0 && keys_first) || self.keys_joined == Some(i) {
+            if (i == 0 && keys_first) || self.keys_joined == Some(i) || self.keys_at == Some(Some(i)) {
                 return None;
             }
             self.seats.map_or(Some(None), |seats| match seats[i] {
@@ -1799,9 +1818,10 @@ impl<P: Clone + PartialEq> PadSlots<P> {
         self.claimed(p) || self.first == Some(Device::Pad(p.clone()))
     }
 
-    /// Whether a pad already has a seat, or is the pad a waiting seat is waiting for.
+    /// Whether a pad already has a seat, or is the pad a waiting seat is waiting for, or was taken
+    /// off every seat (P210).
     fn claimed(&self, p: &P) -> bool {
-        self.held.iter().chain(&self.last).any(|q| q.as_ref() == Some(p))
+        self.held.iter().chain(&self.last).any(|q| q.as_ref() == Some(p)) || self.off.contains(p)
     }
 
     /// Whether seat `i`'s pad is out: its player is paused until the pad is plugged back in or the
@@ -1858,6 +1878,9 @@ impl<P: Clone + PartialEq> PadSlots<P> {
     ///
     /// A keyboard that joined the ride (P173, [`PadSlots::join_keys`]) drives the seat it took.
     pub fn keys(&self) -> Option<usize> {
+        if let Some(at) = self.keys_at {
+            return at;
+        }
         if self.seats.is_none()
             && let Some(Device::Pad(_)) = &self.first
         {
@@ -1868,6 +1891,98 @@ impl<P: Clone + PartialEq> PadSlots<P> {
                 (matches!(seats[0], Some(Seat::Pad(_))) && self.held[0].is_none()).then_some(0),
             )
         })
+    }
+
+    /// What drives each seat, for the Controllers screen (P210): its pad, in or out (a waiting seat
+    /// is still its pad's), else the keyboard where it rides alone. A seat with a pad and the
+    /// keyboard beside it is the pad's.
+    pub fn assigned(&self) -> [Option<Device<P>>; SEATS] {
+        let keys = self.keys();
+        std::array::from_fn(|i| match (&self.held[i], &self.last[i]) {
+            (Some(p), _) | (None, Some(p)) => Some(Device::Pad(p.clone())),
+            (None, None) if keys == Some(i) => Some(Device::Keys),
+            (None, None) => None,
+        })
+    }
+
+    /// The Controllers screen's seats (P210): each pad on the seat it was put on (waiting there
+    /// while it is unplugged), the keyboard on its own, every pad in no seat kept off until it is
+    /// unplugged, and 1P the device on the first seat. A seat with a device is placed by a person,
+    /// and its pad never takes 1P over.
+    pub fn assign(&mut self, seats: &[Option<Device<P>>; SEATS], present: &[P]) {
+        let pad = |i: usize| match &seats[i] {
+            Some(Device::Pad(p)) => Some(p.clone()),
+            _ => None,
+        };
+        for i in 0..SEATS {
+            self.last[i] = pad(i);
+            self.held[i] = pad(i).filter(|p| present.contains(p));
+            self.placed[i] = seats[i].is_some();
+        }
+        self.off = present.iter().filter(|p| !seats.contains(&Some(Device::Pad((*p).clone())))).cloned().collect();
+        // A keyboard on no seat is the keyboard as it is beside a pad 1P (P46): on no seat of its
+        // own, working the menus and 1P's pause, and joining a ride on Cross (P173).
+        self.keys_at = seats.iter().position(|s| *s == Some(Device::Keys)).map(Some);
+        self.keys_joined = None;
+        if let Some(d) = &seats[0] {
+            self.first = Some(d.clone());
+        }
+    }
+
+    /// The pad seats the ride's players read (P210): a pad on one is a rider's, and never takes 1P.
+    pub fn set_riding(&mut self, riding: &[usize]) {
+        self.riding = riding.iter().copied().filter(|&i| i > 0).collect();
+    }
+
+    /// Whether 1P is the keyboard or the on-screen touch pad (`touch`), so a real pad's press may
+    /// take it over (P210): the keyboard rides 1P with no pad in it, or 1P's pad is a touch pad (or
+    /// was, and it hid when a real one came).
+    fn first_is_stand_in(&self, touch: &dyn Fn(&P) -> bool) -> bool {
+        match (&self.held[0], &self.last[0]) {
+            (None, None) => self.keys() == Some(0) && self.first.is_some(),
+            (Some(p), _) | (None, Some(p)) => touch(p),
+        }
+    }
+
+    /// Pad `pad` was pressed (P210): it takes 1P if 1P is the keyboard or the touch pad and the pad
+    /// is no person's — in no seat, or in one nobody placed it on and no rider reads. The keyboard
+    /// rides on beside it on 1P, and the seat the pad came from is free. Whether it took 1P.
+    pub fn take_first(&mut self, pad: &P, touch: &dyn Fn(&P) -> bool) -> bool {
+        if self.seats.is_some() || touch(pad) || !self.first_is_stand_in(touch) {
+            return false;
+        }
+        let from = (0..SEATS).find(|&i| self.held[i].as_ref() == Some(pad) || self.last[i].as_ref() == Some(pad));
+        if from.is_some_and(|i| i == 0 || self.placed[i] || self.riding.contains(&i)) {
+            return false;
+        }
+        if let Some(i) = from {
+            self.forget(i);
+        }
+        let keys_on_first = self.keys() == Some(0) || self.first == Some(Device::Keys);
+        self.off.retain(|p| p != pad);
+        self.held[0] = Some(pad.clone());
+        self.last[0] = Some(pad.clone());
+        self.first = Some(Device::Pad(pad.clone()));
+        // The keyboard keeps 1P beside the pad; one that rode elsewhere stays there.
+        self.keys_at = Some(if keys_on_first { Some(0) } else { self.keys() });
+        self.keys_joined = None;
+        true
+    }
+
+    /// The keyboard was pressed while 1P's pad has been idle (P210): the keyboard takes 1P back
+    /// and the pad is a free pad again, which the next [`PadSlots::update`] seats where one is
+    /// free. Not a pad a person placed on 1P, nor while the keyboard rides a seat of its own.
+    /// Whether it took 1P.
+    pub fn take_back(&mut self) -> bool {
+        let Some(Device::Pad(_)) = &self.first else { return false };
+        if self.seats.is_some() || self.held[0].is_none() || self.placed[0] || self.keys().is_some_and(|k| k != 0) {
+            return false;
+        }
+        self.forget(0);
+        self.first = Some(Device::Keys);
+        self.keys_at = Some(Some(0));
+        self.keys_joined = None;
+        true
     }
 }
 
@@ -2342,6 +2457,27 @@ struct Joined {
     path: std::path::PathBuf,
     id: String,
     pads: Pads,
+    /// When it was last pressed or pushed, on the shell's clock (P210): a 1P pad idle for
+    /// [`IDLE_US`] lets the keyboard take 1P back.
+    active_at: u64,
+}
+
+/// What the browser calls web/touch.js's on-screen pad (P197): a stand-in a real pad takes 1P
+/// from (P210).
+pub const TOUCH_PAD: &str = "Touch controls";
+
+/// Whether pad `id` is the on-screen touch pad.
+pub fn is_touch(id: &str) -> bool {
+    id.contains(TOUCH_PAD)
+}
+
+/// How long 1P's pad sits untouched before a keyboard press takes 1P back (P210).
+pub const IDLE_US: u64 = 5_000_000;
+
+/// Whether a report has anything pressed or pushed: a button down or a stick well off centre.
+fn active(r: &Report, taps: u16) -> bool {
+    let off = |i: usize| (r.axis(i) as i32 - AXIS_CENTRE as i32).abs() > 48;
+    taps != 0 || r.buttons() != 0 || (0..4).any(off)
 }
 
 /// How often the shell looks for pads it has not opened yet. A frame's worth of `read_dir` is
@@ -2387,6 +2523,15 @@ pub struct Seats {
     key_moments: Option<Vec<(u64, Report)>>,
     /// A test's clock for the shell's ([`Seats::at`]).
     fake_now: Option<u64>,
+    /// Whether a free pad's press may take 1P from the keyboard or the touch pad this frame
+    /// ([`Seats::set_take_over`], P210): the shell's say, off on the screens a pad joins or works its
+    /// own seat on.
+    take_over: bool,
+    /// The keyboard's buttons last frame, for its presses (P210's take-back).
+    keys_buttons: u16,
+    /// The pads in no seat, as the last [`Seats::frame`] read them (P210): the Controllers screen
+    /// over a ride hears them.
+    loose: Vec<(String, Report, u16)>,
 }
 
 /// [`SeatInput`] without its report, to say when a seat changes.
@@ -2443,6 +2588,9 @@ impl Seats {
             keys_down: [false; crate::window::KEYCODES],
             key_moments: None,
             fake_now: None,
+            take_over: false,
+            keys_buttons: 0,
+            loose: Vec::new(),
         };
         seats.scan();
         seats
@@ -2513,7 +2661,7 @@ impl Seats {
             // Its greeting now, as it opens: the stamps read soonest after they were made, which
             // sets its clock against the shell's (P165).
             pads.drain();
-            self.joined.push(Joined { path, id, pads });
+            self.joined.push(Joined { path, id, pads, active_at: 0 });
         }
     }
 
@@ -2628,7 +2776,87 @@ impl Seats {
             let report = j.pads.report(&no_keys);
             out.push((Device::Pad(j.id.clone()), report, j.pads.taps()));
         }
+        let pressed: Vec<String> = out
+            .iter()
+            .filter_map(|(d, r, t)| match d {
+                Device::Pad(id) if *t != 0 || r.buttons() != 0 => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        self.hands(&out, &pressed, held);
         out
+    }
+
+    /// Who has 1P after this frame's presses (P210): a free pad pressed takes it from the keyboard
+    /// or the touch pad ([`PadSlots::take_first`]), and a keyboard press takes it back from a 1P
+    /// pad idle for [`IDLE_US`] ([`PadSlots::take_back`]). `reports` are the pads' this frame, for
+    /// their idle clocks; `pressed` the pads that pressed a button.
+    fn hands(&mut self, reports: &[(Device<String>, Report, u16)], pressed: &[String], held: &dyn Fn(u8) -> bool) {
+        let now = self.fake_now.unwrap_or_else(crate::window::shell_us);
+        // 1P's report beside the keyboard carries the keyboard's keys too: not the pad's doing.
+        let keys_busy = (0..crate::window::KEYCODES).any(|c| held(c as u8) && self.binds_key(c as u8));
+        for (d, r, t) in reports {
+            if let Device::Pad(id) = d
+                && !(keys_busy && self.slots.keys() == Some(0) && self.slots.held[0].as_ref() == Some(id))
+                && active(r, *t)
+                && let Some(j) = self.joined.iter_mut().find(|j| &j.id == id)
+            {
+                j.active_at = now;
+            }
+        }
+        let keys = self.bindings.buttons(self.keys_scheme(), &[false; BUTTONS], held)
+            | if self.bindings.throttle_key(self.keys_scheme(), held) { Control::Cross.mask() } else { 0 };
+        let keys_pressed = keys & !self.keys_buttons != 0;
+        self.keys_buttons = keys;
+        if !self.take_over {
+            return;
+        }
+        for id in pressed {
+            if self.slots.take_first(id, &|p: &String| is_touch(p)) {
+                let name = self.device_name(id).unwrap_or(id).to_string();
+                self.said.push(format!("1P: {name} takes over (the keyboard rides on beside it)"));
+                self.was[0] = SeatKind::Playing;
+                return;
+            }
+        }
+        let idle = |id: &String| self.joined.iter().find(|j| &j.id == id).is_none_or(|j| now.saturating_sub(j.active_at) >= IDLE_US);
+        if keys_pressed && self.slots.held[0].as_ref().is_some_and(idle) && self.slots.take_back() {
+            self.said.push("1P: the keyboard takes 1P back from an idle pad".to_string());
+        }
+    }
+
+    /// Whether a free pad's press may take 1P over this frame (P210): the shell's say, which is
+    /// off on the screens a pad joins or works its own seat on.
+    pub fn set_take_over(&mut self, on: bool) {
+        self.take_over = on;
+    }
+
+    /// The ride's players' pad seats (P210, [`PadSlots::set_riding`]).
+    pub fn set_riding(&mut self, riding: &[usize]) {
+        self.slots.set_riding(riding);
+    }
+
+    /// What drives each seat (P210, [`PadSlots::assigned`]).
+    pub fn assigned(&self) -> [Option<Device<String>>; SEATS] {
+        self.slots.assigned()
+    }
+
+    /// The Controllers screen's seats (P210, [`PadSlots::assign`]), over the pads plugged in.
+    pub fn assign(&mut self, seats: &[Option<Device<String>>; SEATS]) {
+        let present: Vec<String> = self.joined.iter().map(|j| j.id.clone()).collect();
+        self.slots.assign(seats, &present);
+        self.was = [SeatKind::Empty; SEATS];
+    }
+
+    /// Every pad plugged in, by the name [`Seats::devices`] gives it, in the order found.
+    pub fn plugged(&self) -> Vec<String> {
+        self.joined.iter().map(|j| j.id.clone()).collect()
+    }
+
+    /// The pads in no seat, as the last [`Seats::frame`] read them (P210): their reports and presses,
+    /// for the Controllers screen over a ride.
+    pub fn loose(&self) -> &[(String, Report, u16)] {
+        &self.loose
     }
 
     /// The keyboard's keys that went down and up since the last frame, and when ([`crate::window::KeyMoment`],
@@ -2855,12 +3083,33 @@ impl Seats {
                 None => SeatInput::Empty,
             };
         }
-        // A pad in no seat is read by nobody this frame; its presses are not kept for the menus.
+        // A pad in no seat is read by nobody this frame; its presses are not kept for the menus, but
+        // they may take 1P over (P210), and the Controllers screen over the ride hears them.
+        self.loose.clear();
         for j in &mut self.joined {
             if !self.slots.held.contains(&Some(j.id.clone())) {
+                let report = j.pads.report(&no_keys);
+                self.loose.push((j.id.clone(), report, j.pads.taps()));
                 j.pads.clear_queue();
             }
         }
+        let mut reports: Vec<(Device<String>, Report, u16)> =
+            self.loose.iter().map(|(id, r, t)| (Device::Pad(id.clone()), *r, *t)).collect();
+        for (i, seat) in out.iter().enumerate() {
+            if let (Some(id), SeatInput::Playing(r)) = (&self.slots.held[i], seat) {
+                reports.push((Device::Pad(id.clone()), *r, self.taps[i]));
+            }
+        }
+        let pressed: Vec<String> = reports
+            .iter()
+            .filter_map(|(d, r, t)| match d {
+                Device::Pad(id) if *t != 0 || r.buttons() != 0 => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        // Not the keyboard's own keys in 1P's report beside the pad: those are the keyboard's.
+        let pressed: Vec<String> = pressed.into_iter().filter(|id| self.slots.held[0].as_ref() != Some(id)).collect();
+        self.hands(&reports, &pressed, held);
         for (i, seat) in out.iter().enumerate() {
             let kind = match seat {
                 SeatInput::Empty => SeatKind::Empty,

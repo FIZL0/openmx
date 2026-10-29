@@ -284,3 +284,160 @@ impl Change {
         after
     }
 }
+
+/// How long a card's slide to its new seat lasts on the Controllers screen (P210), in the menu's
+/// 60 Hz ticks: opentennis's 0.3 s.
+pub const SLIDE_TICKS: u32 = 18;
+
+/// How long a pressed card glows on the Controllers screen (P210), in ticks.
+pub const FLASH_TICKS: u32 = 30;
+
+/// The Controllers screen (P210, opentennis's `assign.rs`): every device plugged in — the pads, the
+/// keyboard, the browser's touch pad — on a seat or on none, each moving itself with its own
+/// presses.
+///
+/// A device's place is a column: 0 is "no seat", `k` is seat `k - 1`. **Left** and **Right** step it
+/// a column, and a device already in the column it steps into swaps with it — takes its place, and
+/// it takes the mover's. **Cross** lights its card (press-to-find, the way opentennis's cards flash)
+/// and, from no seat, joins the first open one. **Square** takes it off its seat. Unlike the join
+/// screen, a seat here is not a rider: these are the seats `pad.rs`'s `Seats` hands out, which the
+/// next ride (or this one, from the pause) reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Assign<D> {
+    /// What drives each seat, [`MOST`] of them.
+    pub seats: Vec<Option<D>>,
+    /// The devices plugged in, in the order the shell found them: no seat's column lists them so.
+    pub present: Vec<D>,
+    /// How many seats the screen offers: [`MOST`], or online this machine's own.
+    pub open: usize,
+    /// The cards lit by their own press, and the ticks left of it.
+    pub flash: Vec<(D, u32)>,
+    /// The cards on their way to a new column: the column they left, and the ticks left.
+    pub slide: Vec<(D, usize, u32)>,
+    /// Whether a press moved a device since the shell last took the seats ([`Assign::take`]).
+    pub moved: bool,
+    /// Whether the shell gave the screen its seats ([`Assign::with`]): until it has, the screen takes
+    /// the next ones it is given.
+    pub given: bool,
+}
+
+impl<D: Clone + PartialEq> Default for Assign<D> {
+    fn default() -> Assign<D> {
+        Assign { seats: vec![None; MOST], present: Vec::new(), open: MOST, flash: Vec::new(), slide: Vec::new(), moved: false, given: false }
+    }
+}
+
+impl<D: Clone + PartialEq> Assign<D> {
+    /// The screen over the seats as they are (missing ones empty), with `present` plugged in.
+    pub fn with(seats: &[Option<D>], present: &[D], open: usize) -> Assign<D> {
+        let mut a = Assign { open: open.clamp(1, MOST), given: true, ..Assign::default() };
+        for (s, d) in a.seats.iter_mut().zip(seats) {
+            *s = d.clone();
+        }
+        a.present = present.to_vec();
+        a
+    }
+
+    /// `d`'s column: 0 for none, else its seat plus one.
+    pub fn column(&self, d: &D) -> usize {
+        self.seats.iter().position(|s| s.as_ref() == Some(d)).map_or(0, |i| i + 1)
+    }
+
+    /// The devices with no seat, in the order plugged in.
+    pub fn loose(&self) -> Vec<D> {
+        self.present.iter().filter(|d| self.column(d) == 0).cloned().collect()
+    }
+
+    /// Whether `d` is plugged in (a seat's device may be out: its seat waits for it).
+    pub fn plugged(&self, d: &D) -> bool {
+        self.present.contains(d)
+    }
+
+    /// The devices plugged in now. One unplugged keeps its seat, as `PadSlots` keeps it.
+    pub fn update(&mut self, present: &[D]) {
+        self.present = present.to_vec();
+        self.flash.retain(|(d, _)| present.contains(d));
+    }
+
+    /// `d` to column `to`, whoever is there to `d`'s column.
+    fn move_to(&mut self, d: &D, to: usize) {
+        let from = self.column(d);
+        if to == from || to > self.open {
+            return;
+        }
+        let other = if to == 0 { None } else { self.seats[to - 1].take() };
+        if from > 0 {
+            self.seats[from - 1] = other.clone();
+        }
+        if to > 0 {
+            self.seats[to - 1] = Some(d.clone());
+        }
+        self.start_slide(d, from);
+        if let Some(o) = other.filter(|_| from > 0) {
+            self.start_slide(&o, to);
+        }
+        self.moved = true;
+    }
+
+    fn start_slide(&mut self, d: &D, from: usize) {
+        self.slide.retain(|(s, _, _)| s != d);
+        self.slide.push((d.clone(), from, SLIDE_TICKS));
+    }
+
+    /// Light `d`'s card.
+    pub fn light(&mut self, d: &D) {
+        self.flash.retain(|(f, _)| f != d);
+        self.flash.push((d.clone(), FLASH_TICKS));
+    }
+
+    /// Device `d` pressed `p`. Start and Circle are the screen's to close, not this.
+    pub fn press(&mut self, d: &D, p: Press) {
+        if !self.plugged(d) {
+            return;
+        }
+        let at = self.column(d);
+        match p {
+            Press::Left if at > 0 => self.move_to(d, at - 1),
+            Press::Right => self.move_to(d, at + 1),
+            Press::Join => {
+                if at == 0
+                    && let Some(i) = self.seats[..self.open].iter().position(Option::is_none)
+                {
+                    self.move_to(d, i + 1);
+                }
+                self.light(d);
+            }
+            Press::LetGo => self.move_to(d, 0),
+            _ => {}
+        }
+    }
+
+    /// `ticks` of the menu's clock: the glows fade and the slides land.
+    pub fn tick(&mut self, ticks: u32) {
+        for (_, t) in &mut self.flash {
+            *t = t.saturating_sub(ticks);
+        }
+        self.flash.retain(|(_, t)| *t > 0);
+        for (_, _, t) in &mut self.slide {
+            *t = t.saturating_sub(ticks);
+        }
+        self.slide.retain(|(_, _, t)| *t > 0);
+    }
+
+    /// How lit `d`'s card is, 1 just pressed to 0.
+    pub fn glow(&self, d: &D) -> f32 {
+        self.flash.iter().find(|(f, _)| f == d).map_or(0.0, |(_, t)| *t as f32 / FLASH_TICKS as f32)
+    }
+
+    /// Where `d`'s card is drawn between its old column and its own, 0 there to 1 home (eased).
+    pub fn slid(&self, d: &D) -> Option<(usize, f32)> {
+        let (_, from, t) = self.slide.iter().find(|(s, _, _)| s == d)?;
+        let x = 1.0 - *t as f32 / SLIDE_TICKS as f32;
+        Some((*from, 1.0 - (1.0 - x) * (1.0 - x)))
+    }
+
+    /// The seats, once a press moved one since the last time this was asked.
+    pub fn take(&mut self) -> Option<Vec<Option<D>>> {
+        std::mem::take(&mut self.moved).then(|| self.seats.clone())
+    }
+}

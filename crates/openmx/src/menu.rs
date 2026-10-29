@@ -2140,10 +2140,13 @@ pub enum Screen {
     Graphics,
     /// The Original Game switch and its departures (P126), a page of the Ride tab's (P179).
     Original,
+    /// The Controllers screen (P210): every device plugged in on a seat or on none, from the main
+    /// menu and the pause.
+    Assign,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 19] = [
+    pub const ALL: [Screen; 20] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2163,6 +2166,7 @@ impl Screen {
         Screen::Mods,
         Screen::Graphics,
         Screen::Original,
+        Screen::Assign,
     ];
 
     fn index(self) -> usize {
@@ -2191,6 +2195,7 @@ impl Screen {
             Screen::Mods => "mods",
             Screen::Graphics => "graphics",
             Screen::Original => "original",
+            Screen::Assign => "controllers",
         }
     }
 
@@ -2219,30 +2224,36 @@ impl Screen {
             Screen::Mods => "Mods",
             Screen::Graphics => "Graphics",
             Screen::Original => "Original Game",
+            Screen::Assign => "Controllers",
         }
     }
 }
 
 /// The main menu's rows: opentennis's Local and Online beside Free Ride, as `home.rs` lists them.
 /// Mods is P118's: the mods folder's switch and its packs, out of Settings.
-pub const MAIN: [&str; 7] = ["Free Ride", "Local Game", "Online", "Garage", "Mods", "Settings", "Quit"];
+/// Controllers is P210's: which device drives which seat.
+pub const MAIN: [&str; 8] = ["Free Ride", "Local Game", "Online", "Garage", "Mods", "Settings", "Controllers", "Quit"];
 const MAIN_FREE: usize = 0;
 const MAIN_LOCAL: usize = 1;
 const MAIN_ONLINE: usize = 2;
 const MAIN_GARAGE: usize = 3;
 const MAIN_MODS: usize = 4;
 const MAIN_SETTINGS: usize = 5;
+const MAIN_CONTROLLERS: usize = 6;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
 /// machine a switch would go to. "Game Modifiers" (P134) is the old front end's way in from the
-/// pause, put back: the host's page of every seat's, or the pausing player's own. Audio is only
+/// pause, put back: the host's page of every seat's, or the pausing player's own. "Controllers" is
+/// P210's screen, over the ride. Audio is only
 /// Settings' tab and the port's Clear Markers is gone (P211); a ride's markers clear from the
 /// spawn's Down (P135). The online rows go in above Main Menu, which stays right above Quit
 /// ([`Menu::pause_layout`]).
-pub const PAUSE: [&str; 7] = ["Resume", "Restart", "Switch To Machine", "Settings", "Game Modifiers", "Main Menu", "Quit"];
+pub const PAUSE: [&str; 8] =
+    ["Resume", "Restart", "Switch To Machine", "Settings", "Controllers", "Game Modifiers", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
 const PAUSE_SETTINGS: usize = 3;
-const PAUSE_MODIFIERS: usize = 4;
-const PAUSE_MAIN: usize = 5;
+const PAUSE_CONTROLLERS: usize = 4;
+const PAUSE_MODIFIERS: usize = 5;
+const PAUSE_MAIN: usize = 6;
 /// The pause's "Open to Online" row (N10), on a ride that can be opened ([`Menu::opening`]); opened,
 /// the room code.
 const PAUSE_OPEN_ROW: &str = "Open to Online";
@@ -2280,6 +2291,9 @@ pub enum Opening {
 /// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
 pub const KEY_ROWS: [&str; 4] = ["abcdefghij", "klmnopqrst", "uvwxyz0123", "456789-'.&"];
 const KEY_COMMANDS: [&str; 4] = ["Space", "Delete", "Clear", "Done"];
+
+/// What the browser calls web/touch.js's on-screen pad, as `pad.rs`'s `TOUCH_PAD` (P210).
+const TOUCH_PAD: &str = "Touch controls";
 
 /// A device that can press a menu (P46): the keyboard, or a pad by the name the seats know it by across an unplug (`pad.rs`'s `DeviceInfo::identity`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -2621,6 +2635,11 @@ pub struct Menu {
     pub join: Join<usize>,
     /// What each pad seat's controller is called, for the join screen's cards; the shell fills it.
     pub devices: Vec<String>,
+    /// The Controllers screen (P210): what drives each seat and who is plugged in, which the shell
+    /// gives it ([`Menu::controllers`]) and takes back changed ([`Menu::take_assigned`]).
+    pub assign: join::Assign<Dev>,
+    /// What each device is called on the Controllers screen's cards, by the shell.
+    pub dev_names: Vec<(Dev, String)>,
     /// Every device the shell reads, keyboard first, and the js devices it skips, by name: the
     /// splash lists both, so a pad that cannot become 1P — or one that should not — shows (P53).
     pub heard: Vec<String>,
@@ -2880,6 +2899,8 @@ impl Menu {
             seats_open: false,
             join: Join::new(join::ON_SCREEN, Opened::Menu),
             devices: Vec::new(),
+            assign: join::Assign::default(),
+            dev_names: Vec::new(),
             heard: Vec::new(),
             skipped: Vec::new(),
             keyboard: Default::default(),
@@ -3153,8 +3174,11 @@ impl Menu {
     /// Whether 1P's pad is gone from `plugged` (the pads plugged in, by name): then the splash
     /// comes back for a new 1P, and this says so. Over a ride the seat waits for its pad instead
     /// (P35), so a ride or its pause is left alone; the front end asks again when the ride is over.
+    ///
+    /// Not for the browser's touch pad (P210): it hides as a real pad comes, and that pad's first
+    /// press is 1P's (`pad.rs`'s `Seats`), with the keyboard working the menus till then.
     pub fn lost(&mut self, plugged: &[String]) -> bool {
-        let gone = matches!(&self.p1, Some(Dev::Pad(id)) if !plugged.contains(id));
+        let gone = matches!(&self.p1, Some(Dev::Pad(id)) if !plugged.contains(id) && !id.contains(TOUCH_PAD));
         if gone && !self.stack.is_empty() && !self.stack.contains(&Screen::Pause) {
             self.splash();
             return true;
@@ -3183,8 +3207,117 @@ impl Menu {
             let any = presses.iter().fold(Press::default(), |p, (_, q)| p.or(*q));
             return self.cued(any, |m| m.splash_step(presses));
         }
+        if self.screen() == Some(Screen::Assign) {
+            return self.step_assign(presses);
+        }
         let p = presses.iter().filter(|(d, _)| self.hosts(d)).fold(Press::default(), |p, (_, q)| p.or(*q));
         self.step(p)
+    }
+
+    /// The Controllers screen's frame (P210): every device's presses work its own card, and a host's
+    /// Circle or Start closes it. Over a ride the shell calls it with every device's, the riders'
+    /// and the ones in no seat alike, while 1P's pause has the screen up.
+    pub fn step_assign(&mut self, presses: &[(Dev, Press)]) -> Act {
+        let any = presses.iter().fold(Press::default(), |p, (_, q)| p.or(*q));
+        self.cued(any, |m| {
+            m.tick = m.tick.wrapping_add(m.pace.step);
+            m.assign.tick(m.pace.step);
+            for (d, p) in presses {
+                if m.screen() != Some(Screen::Assign) {
+                    break;
+                }
+                m.walk_assign(d, *p);
+            }
+            Act::Stay
+        })
+    }
+
+    /// One device's press on the Controllers screen.
+    fn walk_assign(&mut self, d: &Dev, p: Press) {
+        if p == Press::default() {
+            return;
+        }
+        // A device moved onto 1P takes the screen, and the menus, at its first press there
+        // (opentennis's fix): until then 1P's old device still drives.
+        if self.assign.seats[0].as_ref() == Some(d) && self.p1.as_ref() != Some(d) {
+            self.p1 = Some(d.clone());
+        }
+        let host = self.hosts(d) || self.assign.seats[0].as_ref() == Some(d);
+        if host && (p.back || p.start) {
+            if self.assign.seats[0].is_none() {
+                self.note = Some("1P needs a controller.".into());
+                return;
+            }
+            self.pop();
+            return;
+        }
+        let presses = [
+            (p.ok, join::Press::Join),
+            (p.left, join::Press::Left),
+            (p.right, join::Press::Right),
+            (p.delete, join::Press::LetGo),
+        ];
+        for (_, jp) in presses.into_iter().filter(|(on, _)| *on) {
+            self.assign.press(d, jp);
+        }
+        if p != Press::default() && !p.ok {
+            self.assign.light(d);
+        }
+    }
+
+    /// The seats as the shell's `Seats` has them and the devices plugged in, each frame (P210). Off
+    /// the Controllers screen they are taken as they are; on it, only who is plugged in, so the
+    /// screen's own moves stand until the shell takes them ([`Menu::take_assigned`]).
+    pub fn controllers(&mut self, seats: &[Option<Dev>], present: &[(Dev, String)]) {
+        let devs: Vec<Dev> = present.iter().map(|(d, _)| d.clone()).collect();
+        if self.screen() == Some(Screen::Assign) && self.assign.given {
+            self.assign.update(&devs);
+        } else {
+            let open = if self.session { self.riders.max(1) } else { join::MOST };
+            let flash = std::mem::take(&mut self.assign.flash);
+            self.assign = join::Assign::with(seats, &devs, open);
+            self.assign.flash = flash;
+        }
+        self.dev_names = present.to_vec();
+    }
+
+    /// Whether a free pad's press may take 1P from the keyboard or the touch pad now (P210): in a
+    /// ride, and on the menus once there is a 1P — not on the screens a pad presses its own way into
+    /// a seat on (the join and its split, the lobby, the garage's columns, the Controllers screen),
+    /// on the on-screen keyboard, nor over the pause, where a free pad's Cross joins the ride (P76).
+    pub fn takes_over(&self) -> bool {
+        match self.screen() {
+            None => self.riding(),
+            Some(Screen::Splash | Screen::Join | Screen::Split | Screen::Lobby | Screen::Garage | Screen::Keyboard | Screen::Assign | Screen::Pause) => false,
+            Some(_) => self.p1.is_some() && self.loading.is_none() && !self.stack.contains(&Screen::Pause),
+        }
+    }
+
+    /// The Controllers screen, on the seats as the shell's next frame gives them (P210).
+    fn open_assign(&mut self) {
+        self.assign.given = false;
+        self.push(Screen::Assign);
+    }
+
+    /// The seats the Controllers screen moved since the last time this was asked, for the shell's
+    /// `Seats` to hand out (P210).
+    pub fn take_assigned(&mut self) -> Option<Vec<Option<Dev>>> {
+        self.assign.take()
+    }
+
+    /// Whether 1P's view has the Controllers screen up over a ride (P210): the shell then gives it
+    /// every device's presses.
+    pub fn assigning(&self) -> bool {
+        self.screen() == Some(Screen::Assign)
+    }
+
+    /// A device's name on the Controllers screen's cards.
+    pub fn dev_name(&self, d: &Dev) -> String {
+        match self.dev_names.iter().find(|(n, _)| n == d) {
+            Some((_, name)) => name.clone(),
+            None if *d == Dev::Keys => "Keyboard".into(),
+            None => "Controller".into(),
+        }
     }
 
     /// The splash's frame.
@@ -3709,6 +3842,7 @@ impl Menu {
             Screen::Games => self.lobby.found.len() + 1,
             Screen::Lobby => self.lobby.items().len(),
             Screen::Join => join::ON_SCREEN,
+            Screen::Assign => join::MOST + 1,
             Screen::Split => layouts(self.riders).len(),
         }
     }
@@ -3840,6 +3974,12 @@ impl Menu {
             self.walk_join(0, p);
             return Act::Stay;
         }
+        if screen == Screen::Assign {
+            // One press with no device to it ([`Menu::step`]): 1P's.
+            let dev = self.p1.clone().unwrap_or(Dev::Keys);
+            self.walk_assign(&dev, p);
+            return Act::Stay;
+        }
         if screen == Screen::Pause && self.leaving.is_some() {
             return self.confirm(p);
         }
@@ -3900,6 +4040,7 @@ impl Menu {
                     self.cursor[Screen::Mods.index()] = 0;
                 }
                 (true, _, MAIN_SETTINGS) => self.open_settings(self.tab(Screen::Settings)),
+                (true, _, MAIN_CONTROLLERS) => self.open_assign(),
                 (true, _, _) => return Act::Quit,
                 _ => {}
             },
@@ -4000,6 +4141,10 @@ impl Menu {
                             }
                         }
                         Some(PauseRow::Fixed(PAUSE_SETTINGS)) => self.open_settings(self.tab(Screen::Settings)),
+                        // 1P's pause only: the screen moves every rider's device, and the other
+                        // riders' pauses are their own (P84).
+                        Some(PauseRow::Fixed(PAUSE_CONTROLLERS)) if self.focus == 0 => self.open_assign(),
+                        Some(PauseRow::Fixed(PAUSE_CONTROLLERS)) => self.note = Some("1P's pause has the Controllers screen.".into()),
                         Some(PauseRow::Fixed(PAUSE_MODIFIERS)) => self.open_modifiers(),
                         // Leaving asks first, on Stay (P110).
                         Some(PauseRow::Fixed(PAUSE_MAIN)) => self.leaving = Some((Leaving::Main, 1)),
@@ -4017,7 +4162,7 @@ impl Menu {
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
-            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => unreachable!(),
+            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Assign | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => unreachable!(),
         }
         Act::Stay
     }

@@ -2339,11 +2339,16 @@ async fn front_end(args: Args) -> Result<(), String> {
         // inside one slow frame — 5 fps at 4K — is still a press. Each comes with its moments, which
         // time its presses and holds by when they were made rather than by this frame (P165).
         seats.keys_at(window.key_moments());
+        // A pad pressed while the keyboard or the touch pad is 1P takes 1P over (P210), on the
+        // screens no pad presses its own way into a seat on.
+        seats.set_take_over(shell.front.menu.takes_over());
+        let first = seats.first().cloned();
         let devices = seats.devices(&|code| window.pressed(code));
         let now = crate::window::shell_us();
         for line in seats.said() {
             println!("{line}");
         }
+        took_over(seats, &mut shell.front.menu, first);
         let plugged: Vec<String> = devices
             .iter()
             .filter_map(|(d, _, _)| match d {
@@ -2381,7 +2386,8 @@ async fn front_end(args: Args) -> Result<(), String> {
         // Past the splash 1P's pad and the keyboard drive the menu as one (P109): a push both see
         // is one press.
         let menu = &shell.front.menu;
-        let hosted = |d: &Dev| menu.screen() != Some(menu::Screen::Splash) && menu.hosts(d);
+        // The Controllers screen hears every device on its own (P210).
+        let hosted = |d: &Dev| !matches!(menu.screen(), Some(menu::Screen::Splash | menu::Screen::Assign)) && menu.hosts(d);
         let mut presses = shell.front.readers.read_at(&reports, &hosted, now);
         // Escape is the keyboard's Back, on its edge: on the main menu the splash, on the splash
         // the Quit popup.
@@ -2414,6 +2420,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 None => format!("Pad {}", i + 1),
             })
             .collect();
+        give_controllers(seats, &mut shell.front.menu);
         shell.front.menu.elapse_to(now);
         for (i, reader) in shell.front.seat_readers.iter_mut().enumerate().skip(1) {
             let (report, taps, moments) = seat_dev(i)
@@ -2437,6 +2444,7 @@ async fn front_end(args: Args) -> Result<(), String> {
             act = shell.front.menu.step_devices(&more);
             shell.front.cue(true);
         }
+        take_controllers(seats, &mut shell.front.menu);
         let after = shell.front.menu.p1().cloned();
         if after != before {
             match &after {
@@ -2445,10 +2453,14 @@ async fn front_end(args: Args) -> Result<(), String> {
                     println!("1P: {name} — the menus and the first seat are its");
                     shell.front.menu.p1_name = name;
                     shell.front.menu.note = None;
-                    seats.set_first(Some(match dev {
+                    let first = Some(match dev {
                         Dev::Keys => Device::Keys,
                         Dev::Pad(id) => Device::Pad(id.clone()),
-                    }));
+                    });
+                    // The Controllers screen already put it on 1P (P210): its seats stand.
+                    if seats.first() != first.as_ref() {
+                        seats.set_first(first);
+                    }
                 }
                 None => seats.set_first(None),
             }
@@ -2574,6 +2586,72 @@ async fn front_end(args: Args) -> Result<(), String> {
 }
 
 /// What the splash calls a device: the keyboard, or a pad by its name without its node.
+/// A take-over in this frame's read of the devices (P210): 1P's device changed from `first` without
+/// the menus, so they are the new one's too.
+fn took_over(seats: &Seats, menu: &mut Menu, first: Option<Device<String>>) {
+    let now = seats.first().cloned();
+    if now == first || first.is_none() {
+        return;
+    }
+    let Some(dev) = now.map(|d| match d {
+        Device::Keys => Dev::Keys,
+        Device::Pad(id) => Dev::Pad(id),
+    }) else {
+        return;
+    };
+    if menu.p1() != Some(&dev) && menu.p1().is_some() {
+        menu.p1_name = dev_name(seats, &dev);
+        menu.set_p1(dev);
+    }
+}
+
+/// The Controllers screen's view of the seats and of every device plugged in (P210), the keyboard
+/// first.
+fn give_controllers(seats: &Seats, menu: &mut Menu) {
+    let assigned: Vec<Option<Dev>> = seats
+        .assigned()
+        .into_iter()
+        .map(|d| {
+            d.map(|d| match d {
+                Device::Keys => Dev::Keys,
+                Device::Pad(id) => Dev::Pad(id),
+            })
+        })
+        .collect();
+    let mut present = vec![(Dev::Keys, "Keyboard".to_string())];
+    for id in seats.plugged() {
+        let dev = Dev::Pad(id);
+        present.push((dev.clone(), dev_name(seats, &dev)));
+    }
+    menu.controllers(&assigned, &present);
+}
+
+/// The seats the Controllers screen moved, handed to the pads (P210).
+fn take_controllers(seats: &mut Seats, menu: &mut Menu) {
+    let Some(moved) = menu.take_assigned() else { return };
+    let mut to: [Option<Device<String>>; pad::SEATS] = Default::default();
+    for (i, d) in moved.into_iter().enumerate().take(pad::SEATS) {
+        to[i] = d.map(|d| match d {
+            Dev::Keys => Device::Keys,
+            Dev::Pad(id) => Device::Pad(id),
+        });
+    }
+    let said: Vec<String> = to
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| {
+            let d = d.as_ref()?;
+            let dev = match d {
+                Device::Keys => Dev::Keys,
+                Device::Pad(id) => Dev::Pad(id.clone()),
+            };
+            Some(format!("{}P {}", i + 1, dev_name(seats, &dev)))
+        })
+        .collect();
+    println!("controllers: {}", if said.is_empty() { "no seats".to_string() } else { said.join(", ") });
+    seats.assign(&to);
+}
+
 fn dev_name(seats: &Seats, dev: &Dev) -> String {
     match dev {
         Dev::Keys => "Keyboard".to_string(),
@@ -5212,6 +5290,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut idle_readers: Vec<Reader> = (0..pad::SEATS).map(|_| Reader::at(RIDE_HZ)).collect();
     // And the keyboard's while it drives no seat (1P a pad), which joins on a free pad seat (P173).
     let mut keys_reader = Reader::at(RIDE_HZ);
+    // Every device's own presses while 1P's pause has the Controllers screen up (P210).
+    let mut assign_readers = Readers::new();
     // Software models copied for joiners, each under a name of its own.
     let mut joined_models = 0usize;
     // H toggles it, on its own edge: the window keeps key state and not key events, so the shell
@@ -5601,6 +5681,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             println!("markers: cleared (the tape's, before frame {})", head.as_ref().map_or(0, Head::at));
         }
         let mut idle_presses: Vec<(usize, menu::Press)> = Vec::new();
+        // Every device's report and presses, each on its own, for the Controllers screen (P210).
+        let mut assign_reports: Vec<(Dev, Report, u16)> = Vec::new();
         // The free pad seat the keyboard's presses this frame are for, if it drives none (P173).
         let mut keys_join: Option<usize> = None;
         // And set Air Wrecks there (P138).
@@ -5628,11 +5710,35 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if let Some(w) = window.as_ref() {
                         seats.keys_at(w.key_moments());
                     }
+                    // A free pad pressed while the keyboard or the touch pad is 1P takes 1P over
+                    // (P210); a rider's pad is not free.
+                    let ride: Vec<usize> = (0..world.seats.len()).map(|i| args.pad_seat(i)).collect();
+                    seats.set_riding(&ride);
+                    seats.set_take_over(front.as_deref().is_some_and(|f| f.menu.takes_over()));
+                    let first = seats.first().cloned();
                     let now = seats.frame(&|code| held(&window, code));
                     let read_us = crate::window::shell_us();
                     menu_us = Some(read_us);
                     for line in seats.said() {
                         println!("{line}");
+                    }
+                    if let Some(front) = front.as_deref_mut() {
+                        took_over(seats, &mut front.menu, first);
+                        give_controllers(seats, &mut front.menu);
+                    }
+                    for (i, input) in now.iter().enumerate() {
+                        let dev = match (&seats.slots.held[i], input) {
+                            (Some(id), SeatInput::Playing(_)) => Dev::Pad(id.clone()),
+                            (None, SeatInput::Playing(_)) => Dev::Keys,
+                            _ => continue,
+                        };
+                        assign_reports.push((dev, input.report(), seats.taps(i)));
+                    }
+                    for (id, report, taps) in seats.loose() {
+                        assign_reports.push((Dev::Pad(id.clone()), *report, *taps));
+                    }
+                    if let Some(keys) = seats.keyboard_alone() {
+                        assign_reports.push((Dev::Keys, keys, 0));
                     }
                     // Each through its seat's layout (P40): what the port reads is the original's. A
                     // local game's player reads the pad seat its join screen gave it (P43).
@@ -5669,7 +5775,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         seat.waiting = now.get(from) == Some(&SeatInput::Waiting);
                     }
                     // A controller on a pad seat no player reads, for the join (P76).
-                    let ride: Vec<usize> = (0..world.seats.len()).map(|i| args.pad_seat(i)).collect();
                     for (d, (reader, input)) in idle_readers.iter_mut().zip(&now).enumerate() {
                         let playing = matches!(input, SeatInput::Playing(_));
                         let report = if playing { input.report() } else { Report::idle() };
@@ -5817,6 +5922,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 None => front.menu.elapse(1_000_000 / u64::from(RIDE_HZ)),
             }
             let esc = held(window, key::ESCAPE);
+            let esc_now = esc && !escape;
             // The keyboard's own player's once it joined the ride on a seat of its own (P173).
             let keys_player = front.menu.keys_seat.filter(|&k| k > 0 && k < presses.len());
             if esc && !escape {
@@ -5838,6 +5944,21 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // In a ride the menu's players are the ride's seats, each on its own pad seat.
             front.menu.keys_seat = pad_seats.as_ref().and_then(|s| (0..world.seats.len()).find(|&i| s.on_keys(args.pad_seat(i))));
             let paused: Vec<bool> = (0..world.seats.len()).map(|i| front.menu.paused(i)).collect();
+            // 1P's pause has the Controllers screen up (P210): every device works its own card, the
+            // riders' and the ones in no seat alike, and 1P's joint press is not stepped again.
+            if front.menu.assigning() {
+                let mut each = assign_readers.read_taps(&assign_reports);
+                if esc_now {
+                    each.push((Dev::Keys, menu::Press { back: true, ..menu::Press::default() }));
+                }
+                front.menu.step_assign(&each);
+                presses[0] = menu::Press::default();
+                if let Some(seats) = pad_seats.as_mut() {
+                    take_controllers(seats, &mut front.menu);
+                }
+            } else {
+                assign_readers.reset();
+            }
             let mut act = front.menu.step_seats(&presses);
             // The presses the tick held past each seat's first, a step a round (P165).
             while act == Act::Stay {
