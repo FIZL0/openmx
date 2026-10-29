@@ -23,6 +23,8 @@ cd "$(dirname "$0")/.."
 key=~/.config/openmx/release.key
 pubfile=~/.config/openmx/release.pub
 repo=FIZL0/openmx
+# where the release commits go: main, or OPENMX_RELEASE_BRANCH (an agent's task branch, which reaches main by its merge)
+branch=${OPENMX_RELEASE_BRANCH:-main}
 notes= publish=--draft version=
 for a; do
     case $a in
@@ -114,13 +116,13 @@ body=$out/notes.md
     echo
     echo "Want the newest changes before the next release? Try the [beta](https://github.com/$repo/releases/tag/beta) or [beta.openmx.dev](https://beta.openmx.dev/)."
 } > "$body"
-git push -q origin HEAD:main
+git push -q origin HEAD:$branch
 gh release create "$tag" -R $repo --target "$(git rev-parse HEAD)" --title "openMX $version" \
     --notes-file "$body" $pre $publish "$out"/openmx-* "$out"/web.tar.gz "$out"/SHA256SUMS "$out"/SHA256SUMS.sig "$out"/altstore-source.json
 # the shared FIZL0 source (github.com/FIZL0/apps) picks up this release now, not at its next hourly poll
 [ "$publish" = --latest ] && { gh workflow run source -R FIZL0/apps || echo "FIZL0/apps did not rebuild; it will within the hour" >&2; }
 if [ "$notes" = RELEASE_NOTES.md ]; then
     sed -i '/^<!--/!d' RELEASE_NOTES.md
-    git commit -qm "Release notes: emptied after v$version" -- RELEASE_NOTES.md && git push -q origin HEAD:main
+    git commit -qm "Release notes: emptied after v$version" -- RELEASE_NOTES.md && git push -q origin HEAD:$branch
 fi
 echo "$tag: $([ "$publish" = --draft ] && echo "draft, publish it on GitHub" || echo published)"
