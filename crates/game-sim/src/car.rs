@@ -26,6 +26,10 @@
 //! `ClutchCofGTravelBack`.
 //!
 //! `tests/car_phy.rs` proves it against the monster truck the human's freeride session left parked.
+//!
+//! [`Drivetrain`] runs the engine and the automatic gearbox the loader set up (S149c): the shift once
+//! a frame, the engine step every physics substep, and the drive torque each driven tire gets.
+//! `tests/car_engine.rs` proves it against the original and against S149a's captured drives.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -1026,5 +1030,450 @@ fn clamp_unit(x: F) -> F {
         if x >= -1.0 { x } else { F(-1.0) }
     } else {
         F::ONE
+    }
+}
+
+/// Engine revs per radian a second: `60 / 2pi`, as the step multiplies by it.
+const RAD_TO_RPM: f32 = 9.549296;
+/// The engine pitch's floor, top and the two thresholds the step picks its wobble by.
+const PITCH_FLOOR: f32 = 0.1;
+const PITCH_HIGH: f32 = 0.95;
+const PITCH_LOW: f32 = 0.2;
+
+/// What the engine reads of a driven tire, and the two words it writes back.
+///
+/// The step takes the drive slots in the engine's order (see [`Engine::driven`]): slots 0 and 1
+/// are always there; slots 2 and 3 only on a four-wheel drive, and the step leaves them alone
+/// otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DriveTire {
+    /// On the ground: the tire's contact word, nonzero when it touches something.
+    pub contact: bool,
+    /// The wheel's spin, radians a second.
+    pub spin: F,
+    /// The tire's longitudinal slip ratio, which traction control reads.
+    pub slip_ratio: F,
+    /// The suspension's compression, and the tire's `MaxCompression` (only slot 0's is read).
+    pub compression: F,
+    pub max_compression: F,
+    /// The torque the drivetrain hands the tire this substep: each step adds its share.
+    pub drive_torque: F,
+    /// The wheel speed the gear tops out at, which every gear change rewrites.
+    pub top_wheel_speed: F,
+}
+
+/// The three pedal words the engine reads through its pointers: the car's throttle, clutch and
+/// brake as the car left them this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pedals {
+    pub throttle: F,
+    pub clutch: F,
+    pub brake: F,
+}
+
+/// Which way [`Drivetrain::shift`] moved the box: the original starts the shift sound on either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shifted {
+    Up,
+    Down,
+}
+
+/// **The car's engine and automatic gearbox, running**: the loader's [`Engine`] plus every word
+/// the step keeps between substeps.
+///
+/// Two calls a frame make it go. [`Drivetrain::shift`] runs once a frame, before the forces: it
+/// counts the shift timer down, and once it has run out picks the gear by revs against shift points
+/// that slide with the load (the revs the converter is slipping). [`Drivetrain::step`] runs every
+/// physics substep, before the tires: the torque curve at the revs, nitrous, the throttle (or the
+/// box's own while a shift is under way), engine braking, the torque converter's pump torque and
+/// multiplication, the revs' next value, and each driven tire's share of the torque, cut by
+/// traction control when the tire slips. Last it works out the engine sound's pitch.
+///
+/// Field names follow what each word does; the original's layout is in research/oracle.txt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drivetrain {
+    /// The torque table: its RPM axis and the torque at each point.
+    pub rpm_points: Vec<F>,
+    pub torque: Vec<F>,
+    /// The table's last RPM, the most the revs can reach.
+    pub redline: F,
+    pub gear_ratios: Vec<F>,
+    pub final_gear_ratio: F,
+    /// Slots 2 and 3 are driven too.
+    pub four_wheel: bool,
+    pub idle_throttle: F,
+    pub engine_braking: F,
+    /// The fraction of the drive torque the box loses.
+    pub transmission_loss: F,
+    pub inv_inertia: F,
+    pub min_rpm: F,
+    pub pump_torque_scale: F,
+    pub max_pump_torque: F,
+    pub max_k: F,
+    /// What the car scales the converter's output by while the box is driving forwards; 1 unless
+    /// the car says otherwise.
+    pub launch_boost: F,
+    pub tcs: bool,
+    pub min_traction_slip: F,
+    pub max_traction_slip: F,
+    /// Nitrous: on (the car sets it), what is left in the bottle, how fast it burns and the
+    /// horsepower it adds.
+    pub nox_on: bool,
+    pub nox_left: F,
+    pub nox_burn_rate: F,
+    pub nox_hp_boost: F,
+    /// The shift points and the shift's throttle; `high_load_rpm` as the setter kept it.
+    pub shift_points: Shift,
+    pub high_load_rpm: F,
+
+    /// Time until the box may shift again.
+    pub shift_timer: F,
+    /// The last shift went up, so the shift's throttle is the up-shift one.
+    pub shifting_up: bool,
+    /// Time left of the shift's own throttle and clutch.
+    pub shift_throttle_timer: F,
+    pub reverse: bool,
+    /// The gear, counted from 1; the overall ratio and its reciprocal.
+    pub gear: i32,
+    pub ratio: F,
+    pub inv_ratio: F,
+    /// The driven wheels' speed in engine revs (the engine's own revs while the clutch is out).
+    pub wheel_rpm: F,
+    /// The torque converter's pump torque, its multiplication, and the torque it hands the box.
+    pub converter_torque: F,
+    pub multiplication: F,
+    pub output_torque: F,
+    /// The torque curve's cursor: the point it sits on and the weight back to the one below.
+    pub cursor_index: u32,
+    pub cursor_frac: F,
+    /// The engine's net torque and the engine braking taken off it.
+    pub engine_torque: F,
+    pub braking_torque: F,
+    /// Each drive slot's torque this substep.
+    pub drive_torque: [F; 4],
+    pub rpm: F,
+    /// The revs the converter slips by: the load the shift points slide with.
+    pub slip_rpm: F,
+    /// The engine sound's clock and its pitch, in the revs the sound plays at.
+    pub sound_clock: F,
+    pub pitch: F,
+}
+
+impl Drivetrain {
+    /// The loader's engine, idle in first.
+    pub fn new(engine: &Engine) -> Drivetrain {
+        let first = engine.first.unwrap_or(FirstGear { ratio: F::ZERO, inv_ratio: F::ZERO, top_wheel_speed: F::ZERO });
+        Drivetrain {
+            rpm_points: engine.rpm.clone(),
+            torque: engine.torque.clone(),
+            redline: engine.max_rpm.unwrap_or(F::ZERO),
+            gear_ratios: engine.gear_ratios.clone(),
+            final_gear_ratio: engine.final_gear_ratio,
+            four_wheel: engine.driven[2].is_some() && engine.driven[3].is_some(),
+            idle_throttle: engine.idle_throttle,
+            engine_braking: engine.engine_braking,
+            transmission_loss: engine.transmission_loss,
+            inv_inertia: engine.inv_inertia.unwrap_or(F::ZERO),
+            min_rpm: engine.min_rpm,
+            pump_torque_scale: engine.pump_torque_scale,
+            max_pump_torque: engine.max_pump_torque,
+            max_k: engine.max_k,
+            launch_boost: F::ONE,
+            tcs: engine.tcs_enabled != 0,
+            min_traction_slip: engine.min_traction_slip,
+            max_traction_slip: engine.max_traction_slip,
+            nox_on: false,
+            nox_left: engine.nox_volume,
+            nox_burn_rate: engine.nox_burn_rate,
+            nox_hp_boost: engine.nox_hp_boost,
+            shift_points: engine.shift,
+            high_load_rpm: engine.shift.high_load_rpm.unwrap_or(F::ZERO),
+            shift_timer: F::ZERO,
+            shifting_up: false,
+            shift_throttle_timer: F::ZERO,
+            reverse: false,
+            gear: 1,
+            ratio: first.ratio,
+            inv_ratio: first.inv_ratio,
+            wheel_rpm: F::ZERO,
+            converter_torque: F::ZERO,
+            multiplication: F::ZERO,
+            output_torque: F::ZERO,
+            cursor_index: 0,
+            cursor_frac: F::ZERO,
+            engine_torque: F::ZERO,
+            braking_torque: F::ZERO,
+            drive_torque: [F::ZERO; 4],
+            rpm: F::ZERO,
+            slip_rpm: F::ZERO,
+            sound_clock: F::ZERO,
+            pitch: F::ZERO,
+        }
+    }
+
+    /// Put the box in gear `gear` (from 1): nothing in reverse or off the ends. The new overall
+    /// ratio sets every driven tire's top wheel speed, the redline's.
+    pub fn set_gear(&mut self, gear: i32, wheels: &mut [DriveTire; 4]) {
+        if gear <= 0 || self.gear_ratios.len() < gear as usize || self.reverse {
+            return;
+        }
+        self.gear = gear;
+        self.ratio = self.final_gear_ratio * self.gear_ratios[gear as usize - 1];
+        self.inv_ratio = F::ONE / self.ratio;
+        let top = F(RPM_TO_RAD) * self.redline * self.inv_ratio;
+        let driven = if self.four_wheel { 4 } else { 2 };
+        for w in &mut wheels[..driven] {
+            w.top_wheel_speed = top;
+        }
+    }
+
+    /// Into reverse — first's ratio turned round, the tires' top speeds left alone — or out of it,
+    /// into first.
+    pub fn set_reverse(&mut self, on: bool, wheels: &mut [DriveTire; 4]) {
+        if on {
+            self.reverse = true;
+            self.gear = 1;
+            self.ratio = self.final_gear_ratio * -self.gear_ratios[0];
+            self.inv_ratio = F::ONE / self.ratio;
+        } else {
+            self.reverse = false;
+            self.set_gear(1, wheels);
+        }
+    }
+
+    /// Stopped: no revs, and first gear's number (the ratio is left as it was).
+    pub fn reset(&mut self) {
+        self.rpm = F::ZERO;
+        self.wheel_rpm = F::ZERO;
+        self.gear = 1;
+    }
+
+    /// A shift point between its low-load and high-load RPMs, by where the slip sits between the
+    /// two loads, held between them.
+    fn shift_point(&self, low: F, high: F) -> F {
+        let (lo, hi) = (self.shift_points.low_load_rpm, self.high_load_rpm);
+        if lo == hi {
+            return low;
+        }
+        let t = (self.slip_rpm - lo) / (hi - lo);
+        Acc::adda(F::ZERO, low).madd(t, high - low).max(low.min(high)).min(low.max(high))
+    }
+
+    /// **The automatic box, once a frame.** Nothing while both front drive slots are off the ground
+    /// or the box is in reverse. A running shift timer counts down by `dt` and that is all; else,
+    /// with the clutch pedal up (`clutch <= 0`), revs over the up-shift point go up a gear and
+    /// revs under the down-shift point go down one, each starting the shift's throttle and the
+    /// timer. Revs over the point in top gear restart the timer with no shift.
+    pub fn shift(&mut self, clutch: F, dt: F, wheels: &mut [DriveTire; 4]) -> Option<Shifted> {
+        if (!wheels[0].contact && !wheels[1].contact) || self.reverse {
+            return None;
+        }
+        if !(self.shift_timer <= F::ZERO) {
+            self.shift_timer = self.shift_timer - dt;
+            return None;
+        }
+        if !(clutch <= F::ZERO) {
+            return None;
+        }
+        let s = self.shift_points;
+        let up = self.shift_point(s.low_load_up_shift_rpm, s.high_load_up_shift_rpm);
+        let down = self.shift_point(s.low_load_down_shift_rpm, s.high_load_down_shift_rpm);
+        let mut shifted = None;
+        if !(self.rpm <= up) {
+            let next = self.gear + 1;
+            if next as usize <= self.gear_ratios.len() {
+                self.shifting_up = true;
+                self.shift_throttle_timer = s.shift_up_duration;
+                self.set_gear(next, wheels);
+                shifted = Some(Shifted::Up);
+            }
+        } else if self.rpm < down {
+            if self.gear < 2 {
+                return None;
+            }
+            self.shifting_up = false;
+            self.shift_throttle_timer = s.shift_down_duration;
+            self.set_gear(self.gear - 1, wheels);
+            shifted = Some(Shifted::Down);
+        } else {
+            return None;
+        }
+        self.shift_timer = s.shift_time;
+        shifted
+    }
+
+    /// Walk the torque curve's cursor to `x`: [`crate::r#move::curve_seek`] over this table.
+    fn seek(&mut self, x: F) {
+        let xs = &self.rpm_points;
+        let points = xs.len() as u32;
+        let mut i = self.cursor_index;
+        while i < points && !(x < xs[i as usize]) {
+            i += 1;
+        }
+        while i != 0 && x < xs[i as usize - 1] {
+            i -= 1;
+        }
+        if i < points {
+            self.cursor_frac = if i == 0 {
+                F::ZERO
+            } else {
+                let hi = xs[i as usize];
+                (hi - x) / (hi - xs[i as usize - 1])
+            };
+        } else {
+            self.cursor_frac = F::ZERO;
+            i = points.wrapping_sub(1);
+        }
+        self.cursor_index = i;
+    }
+
+    fn curve_torque(&self) -> F {
+        let i = self.cursor_index as usize;
+        if i == 0 {
+            self.torque[0]
+        } else {
+            let hi = self.torque[i];
+            hi - self.cursor_frac * (hi - self.torque[i - 1])
+        }
+    }
+
+    /// Traction control's cut for one tire: 1 under the minimum slip, falling to 0 at the maximum.
+    fn traction(&self, slip_ratio: F) -> F {
+        let (lo, hi) = (self.min_traction_slip, self.max_traction_slip);
+        if lo == hi {
+            return F::ONE;
+        }
+        let t = (slip_ratio.abs() - lo) / (hi - lo);
+        Acc::adda(F::ZERO, F::ONE).madd(t, F::ZERO - F::ONE).max(F::ONE.min(F::ZERO)).min(F::ONE.max(F::ZERO))
+    }
+
+    /// **The engine, once a physics substep** of `dt`, before the tires step.
+    ///
+    /// - While the shift's timer runs the box holds the clutch in and sets its own throttle (the up
+    ///   or the down shift's); otherwise the pedals'.
+    /// - The torque curve at the revs, plus nitrous's `5252 * boost / rpm` while it lasts, scaled by
+    ///   the throttle plus the idle throttle (at most 1), less engine braking `rpm * (k * rpm)`.
+    /// - With the clutch up the driven wheels' mean spin through the ratio is the wheel revs, and
+    ///   the engine's lead over them (never more than the revs) is the converter's slip. With it in,
+    ///   the wheel revs are the engine's and nothing slips.
+    /// - The converter pumps `slip² * scale` (signed, held to the maximum) and multiplies it by `maxK`
+    ///   at a stall, easing to 1 as the wheels catch up; the launch boost scales it while driving
+    ///   forwards.
+    /// - The revs move by the net torque less the pump's over the inertia, damped implicitly by the
+    ///   pump's slope, held between the minimum and the redline.
+    /// - Unbraked, each driven tire gets the converter's output through the ratio, its share of the
+    ///   drive less the box's loss, cut by traction control on the ground.
+    /// - The sound's pitch: the revs' place between the minimum and the redline, wobbled by smooth
+    ///   noise at the bottom and the curve table's sine at the top, dropped as the suspension
+    ///   squats, mapped back onto the revs.
+    ///
+    /// `noise` is the engine's shared smooth noise ([`crate::noise::SmoothNoise::at`]).
+    pub fn step(
+        &mut self,
+        pedals: Pedals,
+        wheels: &mut [DriveTire; 4],
+        dt: F,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+    ) {
+        let (clutch, throttle) = if !(self.shift_throttle_timer <= F::ZERO) {
+            let s = &self.shift_points;
+            let throttle = if self.shifting_up { s.shift_up_throttle } else { s.shift_down_throttle };
+            self.shift_throttle_timer = self.shift_throttle_timer - dt;
+            (F::ONE, throttle)
+        } else {
+            (pedals.clutch, pedals.throttle)
+        };
+
+        self.seek(self.rpm);
+        let mut torque = self.curve_torque();
+        if self.nox_on && !(self.rpm <= F::ZERO) && !(self.nox_left <= F::ZERO) {
+            let boost = F(HP_TORQUE) * self.nox_hp_boost / self.rpm;
+            self.nox_left = (self.nox_left - self.nox_burn_rate * dt).max(F::ZERO);
+            torque = torque + boost;
+        }
+        self.engine_torque = torque * (throttle + self.idle_throttle).min(F::ONE);
+        self.braking_torque = self.rpm * (self.engine_braking * self.rpm);
+        self.engine_torque = self.engine_torque - self.braking_torque;
+
+        let (share, spin) = if clutch <= F::ZERO {
+            let mut spin = wheels[0].spin + wheels[1].spin;
+            let share = if self.four_wheel {
+                spin = spin + (wheels[2].spin + wheels[3].spin);
+                F(0.25)
+            } else {
+                F(0.5)
+            };
+            self.wheel_rpm = F(RAD_TO_RPM) * (self.ratio * (share * spin));
+            self.slip_rpm = if self.wheel_rpm < F::ZERO { self.rpm } else { self.rpm - self.wheel_rpm };
+            (share, spin)
+        } else {
+            self.wheel_rpm = self.rpm;
+            self.slip_rpm = F::ZERO;
+            (F::ZERO, F::ZERO)
+        };
+
+        let slip = self.slip_rpm;
+        let sign = F(fpu::from_i32(if slip < F::ZERO { -1 } else { 1 }));
+        self.converter_torque = slip * (slip * (self.pump_torque_scale * sign));
+        self.converter_torque = self.converter_torque.max(-self.max_pump_torque).min(self.max_pump_torque);
+
+        let (wheel_rpm, rpm) = (self.wheel_rpm, self.rpm);
+        self.multiplication = if rpm <= wheel_rpm || rpm <= F::ZERO || wheel_rpm <= F::ZERO {
+            self.max_k
+        } else {
+            self.max_k + (F::ONE - self.max_k) * (wheel_rpm / rpm)
+        };
+        let boost = if self.ratio <= F::ZERO || spin <= F::ZERO { F::ONE } else { self.launch_boost };
+        self.output_torque = self.converter_torque * (boost * self.multiplication);
+
+        // The pump torque's slope in the revs, for the implicit step.
+        let slope = F(0.5) * (slip * (self.pump_torque_scale * (F(2.0) * sign)));
+        let net = self.inv_inertia * (self.engine_torque - self.converter_torque);
+        let damp = F::ONE + dt * (slope * self.inv_inertia);
+        let accel = if damp <= F::ZERO { F::ONE * net } else { (F::ONE / damp) * net };
+        self.rpm = self.rpm + F(RAD_TO_RPM) * (dt * accel);
+        self.rpm = self.rpm.max(self.min_rpm).min(self.redline);
+
+        let drive =
+            if pedals.brake <= F::ZERO { self.ratio * (share * (F::ONE - self.transmission_loss)) } else { F::ZERO };
+        let pairs: &[(usize, usize)] = if self.four_wheel { &[(0, 1), (2, 3)] } else { &[(0, 1)] };
+        for &(a, b) in pairs {
+            let (cut_a, cut_b) = if self.tcs && wheels[a].contact && wheels[b].contact {
+                (self.traction(wheels[a].slip_ratio), self.traction(wheels[b].slip_ratio))
+            } else {
+                (F::ONE, F::ONE)
+            };
+            self.drive_torque[a] = self.output_torque * (cut_a * drive);
+            self.drive_torque[b] = self.output_torque * (cut_b * drive);
+            wheels[a].drive_torque = wheels[a].drive_torque + self.drive_torque[a];
+            wheels[b].drive_torque = wheels[b].drive_torque + self.drive_torque[b];
+        }
+
+        self.sound(wheels, dt, curve, noise);
+    }
+
+    /// The engine sound's pitch, the last thing the step works out.
+    fn sound(&mut self, wheels: &[DriveTire; 4], dt: F, curve: &CurveTable, noise: &mut impl FnMut(F) -> F) {
+        let (lo, hi) = (self.min_rpm, self.redline);
+        let floor = F(PITCH_FLOOR);
+        self.pitch = if lo == hi {
+            floor
+        } else {
+            let t = (self.rpm - lo) / (hi - lo);
+            Acc::adda(F::ZERO, floor).madd(t, F::ONE - floor).max(floor.min(F::ONE)).min(floor.max(F::ONE))
+        };
+        if !(self.pitch <= PITCH_HIGH) {
+            self.pitch = self.pitch + F(0.0125) * curve.coarse_sin(F(35.0) * self.sound_clock);
+        } else if self.pitch < PITCH_LOW {
+            self.pitch = self.pitch + F(0.11) * noise(F(0.25) * self.sound_clock);
+        }
+        let squat = F(0.5) * (wheels[0].compression + wheels[1].compression) / wheels[0].max_compression;
+        if !(squat < floor) {
+            self.pitch = self.pitch - floor * (squat - floor);
+        }
+        self.sound_clock = self.sound_clock + dt;
+        let t = (self.pitch - F::ZERO) / (F::ONE - F::ZERO);
+        self.pitch = Acc::adda(F::ZERO, lo).madd(t, hi - lo).max(lo.min(hi)).min(lo.max(hi));
     }
 }
