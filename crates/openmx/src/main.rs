@@ -3557,8 +3557,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let (s, f) = (point(place.start), point(place.start_direction).norm());
         vehicle::Spawn { at: Vf::new(s.x, s.y, s.z, 1.0), facing: Vf::new(f.x, f.y, f.z, 0.0) }
     };
+    // A home tile's spot its own ground does not reach stands the plane on its wheels (MD55).
+    let spot_rest = plane_phy.as_deref().map_or(0.0, |b| {
+        let mut plane = phy::Plane::read_bytes(b);
+        mods.plane(0, &mut plane);
+        vehicle::wheels_height(&Flight::new(&plane))
+    });
     let lot_spots = |b: &[u8], ground: &mut dyn FnMut(Vf) -> f32| match &world_mod {
-        Some(w) => vehicle::world_spots(b, w.home_at().map(|a| a.0), line_start, ground),
+        Some(w) => vehicle::world_spots(b, w.home_at().map(|a| a.0), line_start, spot_rest, ground),
         None => Machine::ALL.iter().map(|&m| vehicle::spots(b, m)).collect(),
     };
     let lot = {
