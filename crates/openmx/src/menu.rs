@@ -5147,6 +5147,8 @@ pub enum Part {
     Pill { pill: Bounds, label: Bounds },
     /// A row's label with no pill under it.
     Item(Bounds),
+    /// A list's backing plate, the dark strip its rows sit on (V111).
+    Plate(Bounds),
     /// A track pick's card (P70): its box, its picture's box, and which of [`Art::images`] the
     /// picture is, `None` for a track with no picture yet.
     Card { id: String, card: Bounds, picture: Bounds, image: Option<usize>, lit: bool },

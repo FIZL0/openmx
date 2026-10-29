@@ -1507,6 +1507,60 @@ fn overlap(a: menu::Bounds, b: menu::Bounds) -> bool {
     a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
 }
 
+/// V111: on the Online screen every row's words, and the cursor's pill, sit inside the list's
+/// plate, with the network on LAN Only and on Internet + LAN, and the four rows above it do not move
+/// when the last one's word changes.
+#[test]
+fn every_online_row_sits_on_its_plate() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    let inside = |a: menu::Bounds, b: menu::Bounds| a[0] >= b[0] - 0.5 && a[0] + a[2] <= b[0] + b[2] + 0.5;
+    for (w, h) in [(640, 448), (1920, 1080), (2520, 1080), (360, 640)] {
+        let mut seen: Vec<Vec<menu::Bounds>> = Vec::new();
+        for lan in [true, false] {
+            let (mut m, mut reader) = fresh();
+            m.open(Screen::Online);
+            m.lobby.lan = lan;
+            let mut labels = Vec::new();
+            for step in 0..5 {
+                assert_eq!(m.screen(), Some(Screen::Online));
+                let mut frame = game_render::Frame::new(w, h, [90, 90, 90]);
+                let parts = art.parts(&m, &mut frame);
+                let plates: Vec<_> = parts.iter().filter_map(|p| if let menu::Part::Plate(b) = p { Some(*b) } else { None }).collect();
+                assert_eq!(plates.len(), 1, "at {w}x{h}: one plate");
+                let plate = plates[0];
+                let mut rows = 0;
+                for p in &parts {
+                    let (what, b) = match p {
+                        menu::Part::Pill { pill, label } => {
+                            assert!(inside(*pill, plate), "lan {lan} at {w}x{h}, step {step}: the pill {pill:?} past the plate {plate:?}");
+                            ("label", *label)
+                        }
+                        menu::Part::Item(b) => ("item", *b),
+                        _ => continue,
+                    };
+                    rows += 1;
+                    assert!(inside(b, plate), "lan {lan} at {w}x{h}, step {step}: an {what} {b:?} past the plate {plate:?}");
+                    if step == 4 {
+                        labels.push(b);
+                    }
+                }
+                assert_eq!(rows, 5, "lan {lan} at {w}x{h}: five rows");
+                tap(&mut m, &mut reader, Control::Down);
+            }
+            seen.push(labels);
+        }
+        // With the cursor on Network, the rows above it are the same boxes either way.
+        assert_eq!(seen[0][..4], seen[1][..4], "at {w}x{h}: the other rows moved");
+    }
+}
+
 #[test]
 fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
     let mut disc = match game_render::Disc::open_configured() {
@@ -1558,6 +1612,7 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                                 assert!(!overlap(*logo, *b), "{screen:?} at {w}x{h}: an item on the logo");
                             }
                         }
+                        menu::Part::Plate(_) => {}
                         // Unstretched: 512x64 at any shape.
                         menu::Part::Logo(b) => assert!((b[2] / b[3] - 8.0).abs() < 0.01, "{screen:?} at {w}x{h}"),
                         menu::Part::Card { card, .. } => {
