@@ -1,0 +1,14 @@
+# S184: research/v70/launch.pad's launch and back-up, from first_recording's state at a quarter speed
+# (4 ms here is 1 ms ridden): a second's wait, 0.9 s of full gas, 3 s of the brake to a stop, then gas
+# and brake with the bars full right for 2.5 s (P72's reverse), then nothing.
+sleep 4000
+down cross
+sleep 3600
+release
+down square
+sleep 12000
+down cross
+stick l 1 0
+sleep 10000
+release
+sleep 4000

@@ -2,6 +2,11 @@
 the side-by-side: 1 s idle, 0.9 s of full gas, 3 s of brake, 2.5 s of gas and brake with the bars full
 over (backing up, P72), then the brake alone to the end.
 
+Each line carries its frame's length, and the shell ticks on that and not on the line count (`--play`
+rides `played_dt`): the lines are 30 Hz ticks, so the length is the 30 Hz cap, 0.03333 (`0x3d08850a`).
+Until S184 they said 1/60 s (`0x3c888889`), and the shell rode the whole schedule in half the time —
+0.45 s of gas, a 1.25 s back-up that turned 60 degrees where the original's turns 130.
+
 usage: python3 -B research/v70/tape.py OUT [TOTAL_TICKS]
 """
 import sys
@@ -41,4 +46,4 @@ def at(t):
 with open(out, 'w') as f:
     f.write(f'# game-sim pad tape: {total} frames\nformat 1\ntape v70\n')
     for i in range(total):
-        f.write(f'frame 0x3c888889 0x{at(i)} -\n')
+        f.write(f'frame 0x3d08850a 0x{at(i)} -\n')
