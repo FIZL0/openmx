@@ -10567,3 +10567,107 @@ fn the_airborne_control_reads_the_walks_roll() {
     println!("the copied-back quaternion measures otherwise on rows {copies_part:?}");
     assert!(copies_part.contains(&65), "tick 66's copy measures its own roll");
 }
+
+/// S184's capture (`research/s184/`, S68's lanes and recipe): V70's launch from the recording's save
+/// state — a second's wait, 0.9 s of full gas, the brake for 3 s to a stop — then the gas and the
+/// brake (P72's reverse) with the bars full right for 2.5 s, and nothing after. The original backs
+/// round 130 degrees on the lock.
+const S184_BACKUP: &str = "backup";
+
+/// How far the port's bike may be from the original's on any captured tick of the ride: its place on
+/// the ground in feet, and its heading in degrees.
+const S184_FEET: f32 = 0.25;
+const S184_DEGREES: f32 = 0.5;
+
+/// A full-lock back-up rides the original's arc (S184): the captured pad, played from the same save
+/// state, takes the port's bike round the same turn to the same place — every captured tick within
+/// [`S184_FEET`] and [`S184_DEGREES`], the turn made at full lock more than 120 degrees in both. V70
+/// saw the shell back nearly straight on the same schedule: its tape's frames were 1/60 s long against
+/// a schedule of 30 Hz ticks, so the shell rode every step of it in half the time.
+#[test]
+fn a_full_lock_back_up_rides_the_originals_arc() {
+    let Some((_, acc)) = acceptance_capture() else {
+        println!("skipped: no acceptance capture");
+        return;
+    };
+    let Some(st) = SaveState::open().filter(|s| s.leads(&acc)) else {
+        println!("skipped: no save state for the acceptance run");
+        return;
+    };
+    let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+    let seed = acceptance_fixture(&acc).map(|f| f.seed).unwrap_or(0);
+    let path = private_dir("capture").join("s184").join(format!("{S184_BACKUP}.csv"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("skipped: no s184/{S184_BACKUP}.csv (research/s184/capture.sh records it)");
+        return;
+    };
+    let cap = Capture::parse(&text).unwrap();
+    let ticks = quarter_ticks(&cap, saved).unwrap();
+    let tape = PadTape::from_capture(&cap).unwrap();
+    let f = |r: usize, c: &str| -> f32 { cell(&cap, r, column(&cap, c).unwrap()).parse().unwrap() };
+    // A row at tick t carries the pad the port reads on tick t + 1 (S58's PAD_LEADS) and the bike the
+    // port leaves on tick t.
+    let last = *ticks.last().unwrap() as usize;
+    let mut inputs = vec![None; last + 2];
+    let mut states = vec![None; last + 2];
+    for (r, &t) in ticks.iter().enumerate() {
+        if r > 0 {
+            inputs[t as usize + 1] = Some(tape.frames[r - 1].input());
+        }
+        states[t as usize] = Some(r);
+    }
+    let mut now = inputs.iter().flatten().next().copied().unwrap();
+    let inputs: Vec<Input> = inputs.into_iter().map(|i| { now = i.unwrap_or(now); now }).collect();
+    let heading = |m20: f32, m22: f32| m20.atan2(m22).to_degrees();
+    let orig = |r: usize| (f(r, "bike_xform.m30"), f(r, "bike_xform.m32"), heading(f(r, "bike_xform.m20"), f(r, "bike_xform.m22")));
+    let Some((worst, turned)) = in_the_world_of(&acc, |world, _named, bike| {
+        let mut sim = acceptance_start(&acc, seed, bike).unwrap();
+        let ride = &mut sim.rider.ride;
+        st.seed_chassis(ride).expect("the chassis");
+        st.seed_wheels(ride).expect("both wheels");
+        st.seed_balance(ride).expect("the balance");
+        st.seed_engine_outputs(ride).expect("the engine");
+        st.seed_air(ride).expect("the air state");
+        let dt = F(game_sim::tick::DeltaTime::CAP_30);
+        let (mut worst, mut locked) = ((0.0f32, 0.0f32, 0), Vec::new());
+        for k in 0..last {
+            let tick = k + 1;
+            let c = sim.poll(dt, &Sim::reports(inputs[k]));
+            let frame = sim.step(dt, &c, world);
+            assert!(frame.wreck.is_none(), "the port wrecks on tick {tick} ({:?})", frame.wreck);
+            let Some(row) = states[tick] else { continue };
+            let r = &sim.rider.ride;
+            let (p, m) = (r.position(), r.transform());
+            let port = (p.x(), p.z(), heading(m.0[2][0], m.0[2][2]));
+            // A row is read after its tick or before the next one's frame: the nearer of the two.
+            let off = |o: (f32, f32, f32)| {
+                let turn = (port.2 - o.2 + 540.0).rem_euclid(360.0) - 180.0;
+                ((port.0 - o.0).hypot(port.1 - o.1), turn.abs())
+            };
+            let (feet, degrees) = [Some(row), states.get(tick + 1).copied().flatten()]
+                .into_iter()
+                .flatten()
+                .map(|r| off(orig(r)))
+                .fold((f32::INFINITY, f32::INFINITY), |a, b| (a.0.min(b.0), a.1.min(b.1)));
+            if feet > worst.0 || degrees > worst.1 {
+                worst = (worst.0.max(feet), worst.1.max(degrees), tick);
+            }
+            if f(row, "reverse") != 0.0 && f(row, "stick_x") == 1.0 {
+                locked.push((row, port.2));
+            }
+        }
+        let (first, end) = (locked.first().unwrap(), locked.last().unwrap());
+        let span = |a: f32, b: f32| ((a - b + 540.0).rem_euclid(360.0) - 180.0).abs();
+        (worst, (span(first.1, end.1), span(orig(first.0).2, orig(end.0).2)))
+    }) else {
+        println!("skipped: no disc for free09");
+        return;
+    };
+    println!(
+        "{} ticks: at most {:.3} ft and {:.2} deg from the original (worst by tick {}); at full lock backing up the port turns {:.1} deg, the original {:.1}",
+        last, worst.0, worst.1, worst.2, turned.0, turned.1
+    );
+    assert!(turned.1 > 120.0, "the original turns only {:.1} deg on the lock", turned.1);
+    assert!(turned.0 > 120.0, "the port turns only {:.1} deg on the lock", turned.0);
+    assert!(worst.0 < S184_FEET && worst.1 < S184_DEGREES, "the port leaves the original's arc: {worst:?}");
+}
