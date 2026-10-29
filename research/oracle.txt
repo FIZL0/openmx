@@ -6785,3 +6785,30 @@ car_phy_load                boot 0x00394450 the shared loader (car, ini): part, 
 #   inertia; 0x003999e0 +0x58 loss*0.01; 0x00399980 +0x68 maxK, +0x64 0.001*pump, +0xf0; 0x003999a0
 #   shift points +0x90..+0xc0; 0x00399a50 NOX +0x84..+0x8c; 0x00399a40 TCS +0x74..+0x7c; +0x70 MinRPM,
 #   +0x4c IdleThrottle.
+
+# S149b — the car's tire model (MXCar.cpp's tire), research/journal/*-s149b-car-tire-model. All boot.
+# Ported as game_sim::car::Tire::{contact, spring, settle, roll, forces}; tests/car_tire.rs runs the
+# tire step under the interpreter on every row of S149b's captured drives against the port, and checks
+# what a row fixes on its own against the row. The tire block: +0x30 brake, +0x34 steer (pointers into
+# the car, its +0x3f4/+0x3f8 and +0x400/+0x404), +0xa0 top wheel speed, +0xb4 solid, +0xb8 touching,
+# +0xc0 grounded, +0xc8/+0xcc handed load, +0xdc compression, +0xe0 last compression, +0xe4 load,
+# +0x100 surface, +0x110 ground point, +0x120 normal, +0x130 normal as the car sees it, +0x140 contact,
+# +0x150/+0x160 axle points, +0x170 point velocity, +0x1a0 wheel angle, +0x1a4 spin, +0x1bc body,
+# +0x1e0 low-speed grip, +0x1e4 slipping, +0x1e8 sliding, +0x1ec locked, +0x1f0 torque, +0x1f4 last
+# torque, +0x20c slip ratio, +0x210 slip angle, +0x214 slip tangent, +0x220 velocity in the tire's
+# frame, +0x230 last velocity, +0x240 force, +0x250 last force, +0x260 steer angle, +0x270 frame,
+# +0x2b0 side ratio, +0x9b4 friction scale, +0x9bc camber. The world steps a tire (int)(dt*115)+1
+# times a frame, each dt/n.
+car_tires_step              boot 0x00397f40 the car's per-substep tire pass (car, dt); vtable thunk
+#                                           0x003994e0 (this -0x50). Hands the rears the larger front
+#                                           load (+0xc8/+0xcc/+0xd0) before stepping them.
+car_tire_step               boot 0x0039bbd0 one tire's step (tire, f12 dt): suspension, then forces
+car_tire_suspension         boot 0x0039bc20 contact, bottom-out push, spring/dampers, decompression
+car_tire_roll               boot 0x0039c220 rolling resistance, brake and ABS as wheel torque
+car_tire_forces             boot 0x0039c360 steer, slip, surface force, wheel angle, bookkeeping
+car_tire_frame              boot 0x0039c5e0 the tire's frame and the contact velocity in it (+0x220,
+#                                           +0x270..+0x2a0); not ported
+car_tire_slip               boot 0x0039c950 spin, slip ratio/angle/tangent, low-speed grip, camber
+car_tire_surface_force      boot 0x0039cfe0 the surface table into the tire's force (+0x240)
+car_tire_contact_velocity   boot 0x0039b670 the contact point's world velocity (+0x170, +0x180,
+#                                           +0x190); not ported
