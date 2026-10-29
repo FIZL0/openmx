@@ -55,6 +55,9 @@ let clicks = [];
 let view = [640, 448];
 let pads = [];
 let padNames = {};
+// the mod store's token as the page keeps it, and the last text pasted into the page (P199)
+let token = '';
+let pasted = '';
 // Stereo frames handed to the page and not played yet.
 let queued = 0;
 // The shell's files, by path ("settings.txt", "markers/…"), read before it starts; each change goes back to OPFS in turn.
@@ -121,6 +124,12 @@ globalThis.openmx = {
   store_put: (path, bytes) => storePut(path, Uint8Array.from(bytes)).catch(e => Promise.reject(`${path}: ${e?.message ?? e}`)),
   store_drop: path => storeDrop(path).catch(e => Promise.reject(`${path}: ${e?.message ?? e}`)),
   open_url: url => postMessage({ open: url }),
+  token: () => token,
+  token_keep: text => {
+    token = text;
+    postMessage({ keepToken: text });
+  },
+  pasted: () => pasted,
   frame: () => {
     pictures++;
     const now = performance.now();
@@ -387,7 +396,11 @@ onmessage = async ({ data }) => {
     // Ride is pressed or a disc is picked); a later start (the picked file) draws in the same one.
     const given = data.start?.canvas ?? data.canvas;
     if (given) canvas = given;
-    if (data.key !== undefined) {
+    if (data.token !== undefined) {
+      token = data.token;
+    } else if (data.pasted !== undefined) {
+      pasted = data.pasted;
+    } else if (data.key !== undefined) {
       keys.push(data.key);
       if (data.key & 1) heldKeys.add(data.key >> 1);
       else heldKeys.delete(data.key >> 1);

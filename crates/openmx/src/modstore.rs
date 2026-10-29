@@ -201,6 +201,14 @@ pub enum Event {
     Removed(String, Result<String, String>),
     /// The preview of the zip with this sha256, or None (it has none, or it does not decode).
     Preview(String, Option<Picture>),
+    /// P199: a pasted token checked with Hugging Face and kept: the account's name, or why not.
+    Signed(Result<String, String>),
+    /// P199: an upload's state, by the local mod's id ([`up::Up`]).
+    Upload(String, up::Up),
+    /// P199: the signed-in account's own mods on the store (My public mods), never cached.
+    Mine(Result<Vec<Entry>, String>),
+    /// P199: a take-down's outcome ([`Entry::key`]): what it did, or why not.
+    TakenDown(String, Result<String, String>),
 }
 
 // ---- the store's replies, read as hostile input ----------------------------------------------
@@ -1286,3 +1294,8 @@ pub fn open(url: &str) -> Result<(), String> {
 #[cfg(test)]
 #[path = "modstore_tests.rs"]
 mod tests;
+
+/// The upload side (P199): the sign-in, Upload my mod, Upload all, My public mods and take-down, and
+/// the maintainer's index and card.
+#[path = "modstore_up.rs"]
+pub mod up;

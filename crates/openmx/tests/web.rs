@@ -31,10 +31,11 @@ use openmx_web::{TRACK, rgba, start_line};
 /// The host calls `web/worker.js` supplies, on its global `openmx`: the disc, the picture and the
 /// log (N4); and the game's canvas size, keys, pointer, gamepads, sound, files and frame clock
 /// (P196, `src/web_host.rs`); and which GPU API draws and its first frame (P48, `src/web_gpu.rs`); and the mod
-/// store's downloads into OPFS, its unpacking and a page opened for Report (P198, `src/modstore.rs`).
-const HOST_CALLS: [&str; 23] = [
+/// store's downloads into OPFS, its unpacking and a page opened for Report (P198, `src/modstore.rs`);
+/// and its Hugging Face token kept by the page and what is pasted into it (P199, `src/modstore_up.rs`).
+const HOST_CALLS: [&str; 26] = [
     "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame", "gpu", "drawn",
-    "store_fetch", "store_got", "store_read", "store_close", "store_put", "store_drop", "open_url",
+    "store_fetch", "store_got", "store_read", "store_close", "store_put", "store_drop", "open_url", "token", "token_keep", "pasted",
 ];
 
 /// The module wasm-bindgen's glue answers the imports under (`--target web`).

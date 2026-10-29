@@ -1,7 +1,9 @@
 //! P198: the mod store's screen as a pad walks it — the grid's arrows, the kind tabs on L1/R1,
 //! Cross installing (or updating) only what it can, Square removing only the store's own, Triangle
 //! reporting without leaving, Start reading the store again, Circle out; and no store to ask under
-//! `--mods off`. The shell's side (the store itself) is `src/modstore_tests.rs`'s.
+//! `--mods off`. The shell's side (the store itself) is `src/modstore_tests.rs`'s. P199: the Upload
+//! page's rules first, sign-in, Upload and Upload all, and My Mods' take-down asked twice
+//! (`src/modstore_up_tests.rs` has the uploads themselves).
 
 // the browser's own clock, threads and files, which are std's here (P196)
 #[allow(unused)]
@@ -51,7 +53,7 @@ mod track_mods;
 
 
 use game_sim::input::{Control, Report};
-use menu::{Card, Controls, Got, Listed, Menu, Reader, STORE_TABS, Screen, Settings, StoreAsk};
+use menu::{Card, Controls, Got, Listed, Menu, Phase, Posted, Reader, STORE_PAGES, STORE_TABS, Screen, Settings, StoreAsk, UPLOAD_TAB, Upload};
 
 /// One press and release of `control`, at a hand's pace (P109).
 fn tap(menu: &mut Menu, reader: &mut Reader, control: Control) {
@@ -141,10 +143,19 @@ fn the_store_screen_walks_and_asks() {
     assert_eq!(m.take_store_asks(), [], "nothing lit, nothing asked");
     tap(&mut m, &mut reader, Control::R1);
     assert_eq!((m.store.tab, lit(&m).as_deref()), (2, Some("b/m0")));
+    // past Music, P199's Upload and My Mods pages, then round to Tracks
+    tap(&mut m, &mut reader, Control::R1);
+    assert_eq!(m.store.tab, UPLOAD_TAB);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Locals], "Upload reads the player's mods");
+    tap(&mut m, &mut reader, Control::R1);
+    assert_eq!(m.store.tab, UPLOAD_TAB + 1);
+    assert_eq!(m.take_store_asks(), [], "My Mods asks nothing signed out");
     tap(&mut m, &mut reader, Control::R1);
     assert_eq!((m.store.tab, lit(&m).as_deref()), (0, Some("a/t0")), "R1 round to Tracks, the cursor home");
     tap(&mut m, &mut reader, Control::L1);
-    assert_eq!(m.store.tab, STORE_TABS.len() - 1);
+    assert_eq!(m.store.tab, STORE_TABS.len() + STORE_PAGES.len() - 1);
+    tap(&mut m, &mut reader, Control::R1);
+    assert_eq!(m.store.tab, 0);
 
     // Start reads the store again, past the kept listing
     tap(&mut m, &mut reader, Control::Start);
@@ -166,4 +177,92 @@ fn no_store_under_mods_off() {
     tap(&mut m, &mut reader, Control::Start);
     assert_eq!(m.take_store_asks(), []);
     assert_eq!(m.screen(), Some(Screen::Store));
+}
+
+#[test]
+fn the_upload_and_my_mods_pages_ask_only_when_they_may() {
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    m.step(reader.read(&Report::idle()));
+    m.open(Screen::Store);
+    m.store_tab(UPLOAD_TAB);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Locals]);
+
+    // the rules first: nothing to press until Cross agrees; Triangle is not back here
+    assert_eq!(m.store.upload_rows(), []);
+    tap(&mut m, &mut reader, Control::Triangle);
+    tap(&mut m, &mut reader, Control::Down);
+    assert_eq!((m.screen(), m.store.agreed), (Some(Screen::Store), false));
+    tap(&mut m, &mut reader, Control::Cross);
+    assert!(m.store.agreed);
+    assert_eq!(m.take_store_asks(), [], "agreeing asks nothing");
+
+    // signed out: the token page, then Paste (once while it is checked)
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Tokens]);
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Cross);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Paste]);
+
+    // signed in, with one mod that may go up and one made from a disc
+    m.store.signing = false;
+    m.store.account = Some("tester".into());
+    m.store.locals = vec![
+        Upload { id: "disc".into(), name: "Disc".into(), kind: "Tracks".into(), refused: Some("own-disc".into()), status: None },
+        Upload { id: "mine".into(), name: "Mine".into(), kind: "Music".into(), refused: None, status: None },
+    ];
+    // rows: Sign out, Upload all, Disc, Mine
+    for _ in 0..3 {
+        tap(&mut m, &mut reader, Control::Down);
+    }
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Upload(vec!["mine".into()])]);
+    assert_eq!(m.store.locals[1].status.as_ref().map(|s| s.0), Some(Phase::Busy));
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [], "not twice while it goes");
+    tap(&mut m, &mut reader, Control::Up);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [], "the disc's mod stays");
+    assert!(m.store.note.as_deref().unwrap_or("").contains("own-disc"));
+    // Upload all: what may go and is not going already
+    m.store.locals[1].status = Some((Phase::Done, "Uploaded".into()));
+    tap(&mut m, &mut reader, Control::Up);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Upload(vec!["mine".into()])]);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [], "nothing left to send");
+    tap(&mut m, &mut reader, Control::Start);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Locals], "Start reads the mods again");
+
+    // My Mods: listed on the way in; Cross arms, Cross again takes down, moving disarms
+    tap(&mut m, &mut reader, Control::R1);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Mine]);
+    assert_eq!(m.store.mine_listed, Listed::Asking);
+    m.store.mine = vec![
+        Posted { key: "tester/a".into(), name: "A".into(), kind: "Music".into(), size: 1, verified: false, pr: Some(1), busy: false },
+        Posted { key: "tester/b".into(), name: "B".into(), kind: "Music".into(), size: 1, verified: true, pr: None, busy: false },
+    ];
+    m.store.mine_listed = Listed::Shown;
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.store.arm.as_deref(), Some("tester/a"));
+    tap(&mut m, &mut reader, Control::Down);
+    assert_eq!(m.store.arm, None);
+    tap(&mut m, &mut reader, Control::Cross);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [StoreAsk::TakeDown("tester/b".into())]);
+    assert!(m.store.mine[1].busy);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [], "not while it goes");
+    tap(&mut m, &mut reader, Control::Start);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Mine]);
+
+    // signed out, My Mods asks nothing
+    m.store.account = None;
+    tap(&mut m, &mut reader, Control::Cross);
+    tap(&mut m, &mut reader, Control::Start);
+    assert_eq!(m.take_store_asks(), []);
+    tap(&mut m, &mut reader, Control::Circle);
+    assert_ne!(m.screen(), Some(Screen::Store));
 }

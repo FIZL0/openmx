@@ -61,7 +61,7 @@ pub mod cameras;
 mod screens;
 #[path = "menu_store.rs"]
 mod store;
-pub use store::{Card, Got, Listed, STORE_COLUMNS, STORE_TABS, Shop, StoreAsk, size_words};
+pub use store::{Card, Got, Listed, Phase, Posted, STORE_COLUMNS, STORE_PAGES, STORE_RULES, STORE_TABS, Shop, StoreAsk, UPLOAD_TAB, UpRow, Upload, size_words};
 #[path = "menu_player.rs"]
 mod player;
 #[allow(unused_imports)]

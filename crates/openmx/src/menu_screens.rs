@@ -1425,10 +1425,15 @@ impl Pen<'_> {
     fn store(&mut self, menu: &Menu) {
         self.logo(true);
         let shop = &menu.store;
-        self.tabs(&STORE_TABS, shop.tab, 4.0, 7.6);
+        let tabs: Vec<&str> = STORE_TABS.iter().chain(STORE_PAGES.iter()).copied().collect();
+        self.tabs(&tabs, shop.tab, 4.0, 7.6);
         if let Some(note) = &shop.note {
             let line = self.fit(Weight::Bold, note, 1.0, 34.0);
             self.text(Weight::Bold, &line, 76.0, Pen::mid(7.6 + 1.17, 1.0), 1.0, 0.0, NOTE, Align::Right);
+        }
+        if shop.tab >= UPLOAD_TAB {
+            self.store_page(menu);
+            return;
         }
         let shown = shop.shown();
         let lit = menu.store_lit();
@@ -1522,6 +1527,116 @@ impl Pen<'_> {
                 _ => {}
             }
         }
+        self.hints(&hints);
+    }
+
+    /// P199: the store's Upload and My Mods pages, under its tabs: the rules first, then the sign-in
+    /// (Hugging Face's token page, Paste token), then the account, Upload all and each of the player's
+    /// own mods with its state; My Mods their mods on the store, each Verified or its pull request.
+    fn store_page(&mut self, menu: &Menu) {
+        let shop = &menu.store;
+        let (x, top, w) = (4.0, 11.4, 72.0);
+        let line = |pen: &mut Pen, s: &str, y: f32, size: f32, colour: [u8; 4]| {
+            let s = pen.fit(Weight::Bold, s, size, w);
+            pen.text(Weight::Bold, &s, x, Pen::mid(y, size), size, 0.0, colour, Align::Left);
+        };
+        // (label, right-hand words, a second line, lit)
+        let mut rows: Vec<(String, String, String)> = Vec::new();
+        let mut hints = vec![(Btn::Circle, "Back"), (Btn::L1R1, "Tabs")];
+        let c = menu.cursor(Screen::Store);
+        if shop.off {
+            line(self, "The mods folder is off (--mods off): nothing to upload or take down", top + 2.0, 1.4, BONE);
+        } else if shop.tab == UPLOAD_TAB && !shop.agreed {
+            self.text(Weight::Heavy, "Before you upload", x, Pen::mid(top + 1.0, 1.6), 1.6, SLANT, HEADING, Align::Left);
+            for (i, r) in STORE_RULES.iter().enumerate() {
+                line(self, &format!("•  {r}"), top + 4.0 + 2.4 * i as f32, 1.25, BONE);
+            }
+            hints.push((Btn::Cross, "I agree"));
+        } else if shop.tab == UPLOAD_TAB {
+            for r in shop.upload_rows() {
+                rows.push(match r {
+                    UpRow::Tokens => ("Make a token on Hugging Face".into(), String::new(), "Opens huggingface.co: make a token with write access, and copy it".into()),
+                    UpRow::Paste => ("Paste token".into(), if shop.signing { "Checking…".into() } else { String::new() }, "Signs in with the token on the clipboard; it is kept private, beside your settings".into()),
+                    UpRow::SignOut => (format!("Signed in as {}", shop.account.as_deref().unwrap_or("")), "Sign out".into(), "Forgets the token".into()),
+                    UpRow::All => (format!("Upload all ({})", shop.uploadable().len()), String::new(), "Each mod that can go up, one after another, in the background".into()),
+                    UpRow::Mod(i) => {
+                        let l = &shop.locals[i];
+                        let (state, under) = match (&l.refused, &l.status) {
+                            (_, Some((Phase::Busy, s))) => ("Uploading".to_string(), s.clone()),
+                            (_, Some((Phase::Done, s))) => ("Done".into(), s.clone()),
+                            (_, Some((Phase::Failed, s))) => ("Failed".into(), s.clone()),
+                            (Some(why), None) => ("Can't share".into(), why.clone()),
+                            (None, None) => ("Upload".into(), format!("{} · {}", l.kind, l.id)),
+                        };
+                        (l.name.clone(), state, under)
+                    }
+                });
+            }
+            if shop.account.is_some() && shop.locals.is_empty() {
+                let why = if shop.web { "Uploading runs in the desktop game: the browser's mods folder holds only the store's" } else { "No mods of your own in the mods folder" };
+                line(self, why, top + 2.0 * (ROW_H + 1.4) + 1.2, 1.2, BONE);
+            }
+            hints.push((Btn::Start, "Rescan"));
+            if !rows.is_empty() {
+                hints.push((Btn::Cross, "Select"));
+            }
+        } else if shop.account.is_none() {
+            line(self, "Sign in on the Upload tab to see your mods on the store", top + 2.0, 1.4, BONE);
+        } else {
+            match &shop.mine_listed {
+                Listed::Asking if shop.mine.is_empty() => line(self, "Reading your mods on the store…", top + 2.0, 1.4, BONE),
+                Listed::Failed(why) => line(self, why, top + 2.0, 1.4, BONE),
+                _ if shop.mine.is_empty() => line(self, "None of your mods are on the store yet", top + 2.0, 1.4, BONE),
+                _ => {}
+            }
+            for m in &shop.mine {
+                let state = if m.busy {
+                    "Taking down…".to_string()
+                } else if shop.arm.as_deref() == Some(m.key.as_str()) {
+                    "Cross again: take down".into()
+                } else {
+                    String::new()
+                };
+                let place = match m.pr {
+                    Some(n) => format!("pull request #{n}, not reviewed"),
+                    None => "Verified".into(),
+                };
+                rows.push((m.name.clone(), state, format!("{} · {} · {}", m.kind, size_words(m.size), place)));
+            }
+            hints.push((Btn::Start, "Refresh"));
+            if !shop.mine.is_empty() {
+                hints.push((Btn::Cross, "Take down"));
+            }
+        }
+        // the rows, the lit one kept in view
+        let h = ROW_H + 1.4;
+        let most = 6;
+        let first = c.saturating_sub(most - 1).min(rows.len().saturating_sub(most));
+        if first > 0 {
+            self.arrow(STAGE.0 / 2.0, top - 0.6, [0.0, -1.0], 0.7, BONE);
+        }
+        for (k, (label, state, under)) in rows.iter().enumerate().skip(first).take(most) {
+            let y = top + (k - first) as f32 * (h + ROW_GAP);
+            let on = k == c.min(rows.len() - 1);
+            let b = [x - 0.4, y, w + 0.8, h];
+            if on {
+                self.round([b[0] + 0.25, b[1] + 0.27, b[2], b[3]], 0.6, SHADOW, SHADOW);
+                self.round(b, 0.6, LIT_TOP, LIT_BOTTOM);
+                self.ring(b, 0.6, 0.13, CHALK);
+            } else {
+                self.round(b, 0.6, GLASS, GLASS);
+            }
+            let (kw, kc, ks) = if on { (Weight::Heavy, CHALK, SLANT) } else { (Weight::Bold, BONE, 0.0) };
+            let label = self.fit(kw, label, 1.25, w - 16.0);
+            self.text(kw, &label, x + 0.6, Pen::mid(y + 1.3, 1.25), 1.25, ks, kc, Align::Left);
+            self.text(Weight::Heavy, state, x + w - 0.6, Pen::mid(y + 1.3, 1.0), 1.0, 0.0, if on { CHALK } else { HEADING }, Align::Right);
+            let under = self.fit(Weight::Bold, under, 0.85, w - 1.2);
+            self.text(Weight::Bold, &under, x + 0.6, Pen::mid(y + 2.85, 0.85), 0.85, 0.0, if on { PEACH } else { DUST }, Align::Left);
+        }
+        if first + most < rows.len() {
+            self.arrow(STAGE.0 / 2.0, top + most as f32 * (h + ROW_GAP) + 0.2, [0.0, 1.0], 0.7, BONE);
+        }
+        self.title(Screen::Store.title());
         self.hints(&hints);
     }
 
