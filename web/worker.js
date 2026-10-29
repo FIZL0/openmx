@@ -24,8 +24,8 @@
 // frames come through `present`, which is the only thing that takes the canvas's 2D context: a canvas has one kind of
 // context for good. The page restarts on the next API down when the GPU fails before its first frame.
 //
-// Messages in:  { import: File, canvas?, api?, args? }   copy the disc into OPFS, then start
-//               { start: { canvas?, file?, api?, args? } } start on the OPFS copy, or on `file` when given
+// Messages in:  { import: File, canvas?, api?, args?, phone? }   copy the disc into OPFS, then start
+//               { start: { canvas?, file?, api?, args?, phone? } } start on the OPFS copy, or on `file` when given
 //               { online: { name, relay, codes?, join?, host?, bike, ticks? } }
 //               { key: code << 1 | down } | { blur } | { click: [x, y] } | { view: [w, h] } | { pads, names? }
 //               { played: frames }
@@ -236,7 +236,7 @@ async function openDisc(file) {
   }
 }
 
-async function start(file, api, args) {
+async function start(file, api, args, phone) {
   const opened = await openDisc(file);
   if (!opened) {
     postMessage({ missing: true });
@@ -245,6 +245,7 @@ async function start(file, api, args) {
   disc = opened;
   await loadFiles();
   const glue = await game();
+  glue.openmx_phone(!!phone);
   postMessage({ started: true });
   const ended = await glue.openmx_run(canvas, api || 'auto', args || '');
   await saving;
@@ -318,12 +319,12 @@ onmessage = async ({ data }) => {
     } else if (data.played) {
       queued = Math.max(0, queued - data.played);
     } else if (data.start) {
-      await start(data.start.file, data.start.api, data.start.args);
+      await start(data.start.file, data.start.api, data.start.args, data.start.phone);
     } else if (data.online) {
       await online(data.online);
     } else if (data.import) {
       await importDisc(data.import);
-      await start(undefined, data.api, data.args);
+      await start(undefined, data.api, data.args, data.phone);
     }
   } catch (e) {
     postMessage({

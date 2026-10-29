@@ -355,7 +355,8 @@ fn the_touch_pad_rides_on_a_phone() {
 }
 
 /// The ride on the GPU in headless chromium (P48, `tests/web/gpu.mjs`): the page opened with
-/// `?args=--ride`, once as it comes (WebGPU) and once with `?webgl2`, each on this machine's GPU
+/// `?args=--ride`, once as it comes (WebGPU), once with `?webgl2`, and once as a phone's page on
+/// WebGPU at the phone's whole canvas (P205), each on this machine's GPU
 /// (chromium's own Vulkan, not SwiftShader). Each must draw on the API asked for — not fall back to
 /// the software picture — show a frame that is not black, and ride at 30 pictures a second or more,
 /// as the worker counts them; what each rode at is printed. The module is `tools/web.sh --check`'s,
@@ -382,8 +383,12 @@ fn the_browser_rides_on_the_gpu() {
     let field = |text: &str, key: &str| -> String {
         text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string()
     };
-    for (query, api) in [("", "webgpu"), ("webgl2", "webgl2")] {
-        let scratch = std::env::temp_dir().join(format!("openmx-web-gpu-{}-{api}", std::process::id()));
+    // And a phone's page (P205): an iPhone's 844×390 at 3 device pixels to one, drawn at its whole
+    // 2532×1170 — not the software picture's 640×448 cap — with the phone's defaults.
+    let phone = "844,390,3";
+    for (query, api, viewport) in [("", "webgpu", ""), ("webgl2", "webgl2", ""), ("", "webgpu", phone)] {
+        let api_seen = if viewport.is_empty() { api.to_string() } else { format!("{api} on a phone") };
+        let scratch = std::env::temp_dir().join(format!("openmx-web-gpu-{}-{api}{}", std::process::id(), if viewport.is_empty() { "" } else { "-phone" }));
         let _ = std::fs::remove_dir_all(&scratch);
         let run = Command::new("node")
             .arg(&drive)
@@ -395,6 +400,7 @@ fn the_browser_rides_on_the_gpu() {
             .args(FLAGS)
             .env("OPENMX_GPU_PKG", built())
             .env("OPENMX_GPU_SECONDS", "10")
+            .env("OPENMX_GPU_PHONE", viewport)
             .output()
             .expect("run node");
         let _ = std::fs::remove_dir_all(&scratch);
@@ -402,6 +408,9 @@ fn the_browser_rides_on_the_gpu() {
         assert!(run.status.success(), "gpu.mjs ({api}) failed:\n{}{text}", String::from_utf8_lossy(&run.stderr));
         assert_eq!(field(&text, "gpu"), api, "the page did not draw on {api}:\n{text}");
         assert!(field(&text, "drawn").starts_with(api), "no first {api} frame:\n{text}");
+        if !viewport.is_empty() {
+            assert_eq!(field(&text, "drawn"), format!("{api} 2532 1170"), "the phone's frame is not its canvas's whole size:\n{text}");
+        }
         let lit: f64 = field(&text, "lit").parse().expect("lit");
         let pixels: f64 = field(&text, "pixels").parse().expect("pixels");
         assert!(lit > pixels / 2.0, "{api}: only {lit} of {pixels} pixels are not black:\n{text}");
@@ -411,7 +420,7 @@ fn the_browser_rides_on_the_gpu() {
         assert!(!fps.is_empty(), "{api}: no pictures a second counted:\n{text}");
         fps.sort_by(f64::total_cmp);
         let median = fps[fps.len() / 2];
-        println!("{api}: {median} fps (median of {:?}), {lit} of {pixels} pixels lit", fps);
-        assert!(median >= 30.0, "{api} rides at {median} fps, under 30:\n{text}");
+        println!("{api_seen}: {median} fps (median of {:?}), {lit} of {pixels} pixels lit", fps);
+        assert!(median >= 30.0, "{api_seen} rides at {median} fps, under 30:\n{text}");
     }
 }

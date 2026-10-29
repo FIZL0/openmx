@@ -768,3 +768,30 @@ fn the_plants_are_in_the_props_tree_where_the_original_put_them() {
     }
     eprintln!("{groups} plants ({stood} at the state's height) and {} props in {entries} node entries over {} nodes", props.props.len(), paths.len());
 }
+
+/// The world as a thread that has filed no tree before builds it: from nothing, never copied.
+fn fresh_world(props: &Props, field: ([F; 2], [F; 2]), centre: Vf) -> Broad {
+    std::thread::scope(|s| s.spawn(|| flight_search::world(&props.props, Some(field), centre, F(3.0)).0).join().expect("the fresh build"))
+}
+
+/// P205: a world's tree is filed once and copied for every later world filed with the same items,
+/// bit for bit — the ride builds three or more a tick. A copy is the tree filed afresh, wherever the
+/// probe stands, and a prop moved by a foot is filed again rather than copied.
+#[test]
+fn a_kept_tree_is_the_tree_filed_afresh() {
+    let Some((mut props, field)) = free06() else { return };
+    let (here, there) = (Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(812.5, 40.0, -96.25, 1.0));
+    let (first, _) = flight_search::world(&props.props, Some(field), here, F(3.0));
+    let (kept, _) = flight_search::world(&props.props, Some(field), there, F(3.0));
+    assert!(!tree_of(&first).nodes.is_empty(), "free06's props fill the tree");
+    assert_eq!(tree_of(&kept), tree_of(&first), "the same props file the same tree");
+    assert_eq!(kept, fresh_world(&props, field, there), "a kept tree's world is the world built afresh");
+
+    // One prop a foot along x: a different tree's items, filed again (a copy of the kept tree would
+    // still hold the prop in its old cells).
+    let k = props.props.len() / 2;
+    let t = props.props[k].to_world.0[3];
+    props.props[k].to_world.0[3] = Vf::new(t.0[0] + 1.0, t.0[1], t.0[2], t.0[3]);
+    let (moved, _) = flight_search::world(&props.props, Some(field), here, F(3.0));
+    assert_eq!(moved, fresh_world(&props, field, here), "a moved prop's world is the world built afresh");
+}
