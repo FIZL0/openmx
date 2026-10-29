@@ -1836,7 +1836,12 @@ fn timing(line: String) {
     crate::host_say(&line);
 }
 
+/// This build's online id (P189, `build.rs`): its version and commit, so two builds refuse each other's lobbies.
+const BUILD_ID: &str = env!("OPENMX_BUILD_ID");
+
 pub(crate) async fn run() -> Result<(), String> {
+    // before any lobby: the desktop's, the iPhone's and the browser's front ends all come through here
+    openmx_net::handshake::set_build(BUILD_ID);
     let argv: Vec<String> = argv();
     if argv.first().is_some_and(|a| a == "--dump-textures") {
         return dump_textures(&argv[1..]);
