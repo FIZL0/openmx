@@ -1,4 +1,4 @@
-# 1 — shadows (PART)
+# 1 — shadows (FINAL)
 
 Task V108. 2026-10-28.
 
@@ -88,7 +88,21 @@ Looked right beside a screenshot, plus one measurement.
 - Tests: `crates/openmx/tests/shadows.rs`, the menu tests, the shadow.rs unit tests, and game-render's
   WGSL/WebGL2 translation test.
 
-FRAMETIME
+Frame time: release, headless, free06 at 1920x1080 with `--fps`, 900 frames (paced at 60).
+
+| shadows | fps  | over 16.7 ms | draw ms | present ms |
+|---------|------|--------------|---------|------------|
+| Off     | 59.3 | 73           | 1.11    | 1.50       |
+| Original| 59.7 | 23           | 1.13    | 1.58       |
+| Better  | 59.8 | 32           | 1.27    | 1.86       |
+
+With `--players 4`:
+
+- Off: draw 4.67 ms, present 4.67 ms.
+- Better: draw 6.55 ms, present 5.45 ms.
+
+Both ran at about 3 fps, because the headless four-seat sim took about 290 ms a frame with shadows Off
+too. That is not this task's doing, and not chased.
 
 ## Not verified / not 1:1
 
@@ -118,6 +132,8 @@ FRAMETIME
   nothing into view.
 - **The software renderer draws no shadows.** The brief allows Original's "at most"; none were ported
   there.
+- **Four views were not measured at speed.** The four-seat headless sim ran at 3 fps for its own
+  reasons. Only the draw's CPU cost (+1.9 ms) is known there, not the GPU time of 4 × 2 maps at 1024².
 - **The browser (P48/P205)** was not run. The WebGL2 shader translation test passes, and wasm uses
   1024² maps, but nobody measured the browser's fps.
 
