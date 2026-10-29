@@ -336,13 +336,86 @@ pub fn anchors_of(chassis: &Skeleton, world: &[M4]) -> Anchors {
 /// foot; `None` for a limb that was not solved — no target, a joint this skeleton has not got, a limb
 /// with no length, or a `world` that is not this skeleton's.
 pub fn hold_on(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: f32) -> [Option<f32>; 4] {
-    hold_limbs(skel, world, targets, [strength; 4])
+    solve_limbs(skel, world, targets, [strength; 4])
 }
 
 /// [`hold_on`] with a strength of its own for each of [`LIMBS`] (V36): the feet are let go of on
 /// their own, by the riding body's foot switch ([`game_sim::foot_down::Feet`]), while the hands stay
-/// on the grips.
+/// on the grips. What the drawn rider is held with, so the body first leans in to a grip its arm
+/// cannot reach ([`lean_in`], V100).
 pub fn hold_limbs(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: [f32; 4]) -> [Option<f32>; 4] {
+    if world.len() == skel.len() {
+        lean_in(skel, world, targets, strength);
+    }
+    solve_limbs(skel, world, targets, strength)
+}
+
+/// **V100:** move the whole body, as one, the least way that brings each held hand's grip within
+/// its arm's reach, and say how far it went (nothing when both are in reach already).
+///
+/// A full whip (the airborne row's crossup at the sweep's end) poses the rider's right shoulder 2.46
+/// ft from its grip, past the arm's ~2.1, and the limb solve alone straightened the arm at it and
+/// drew the hand 0.32 ft off the bar. The original's arms do not stretch and its grips are the
+/// bike's: its drawn skeleton is the riding ragdoll, whose hand pins pull the bodies after the hands,
+/// so the rider is drawn shifted towards the bars (the ported ragdoll stepped through the same whip
+/// moves the pelvis ~0.8 ft across, to its bike box's side, with the hands within 0.2 ft of the
+/// grips). This is the same give for the clip-drawn rider, as small as it can be: the arms keep
+/// their length and land on the grips, the feet are aimed at the pegs from where the body now is.
+///
+/// Against the target as faded by the hand's strength, as [`aim`] aims, so a hold fading out asks
+/// for less, and a hand let go of (a no-hander) never moves the body.
+pub fn lean_in(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: [f32; 4]) -> V3 {
+    let at = |j: usize| world[j].point(v3(0.0, 0.0, 0.0));
+    let mut arms = Vec::new();
+    for i in 2..4 {
+        let limb = &LIMBS[i];
+        let (Some(target), Some(root), Some(bend), Some(anchor)) =
+            (targets[i], skel.find(limb.root), skel.find(limb.bend), skel.find(limb.anchor))
+        else {
+            continue;
+        };
+        if strength[i] <= SMALL {
+            continue;
+        }
+        let (r, b, e) = (at(root), at(bend), at(anchor));
+        // A hair inside the length [`aim`] straightens to, so the straightened arm lands.
+        let reach = b.sub(r).len() + e.sub(b).len() - REACH_SLACK;
+        arms.push((r, e, target, strength[i], reach));
+    }
+    // Each arm's shortfall taken up along its own line; a second arm short the other way is then
+    // taken up from where the first left the body, and a few rounds settle both.
+    let mut by = v3(0.0, 0.0, 0.0);
+    for _ in 0..4 {
+        let mut moved = false;
+        for &(r, e, target, strength, reach) in &arms {
+            let (r, e) = (r.add(by), e.add(by));
+            let to = e.add(target.sub(e).scale(strength)).sub(r);
+            let short = to.len() - reach;
+            if short > SMALL {
+                by = by.add(to.norm().scale(short));
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    if by.len() > SMALL {
+        for m in world.iter_mut() {
+            m.0[3][0] += by.x;
+            m.0[3][1] += by.y;
+            m.0[3][2] += by.z;
+        }
+    }
+    by
+}
+
+/// How far inside its full length [`lean_in`] leaves an arm: a ten-thousandth of a foot, ten of
+/// [`aim`]'s own guard, so the straightened arm reaches the grip.
+const REACH_SLACK: f32 = 1e-4;
+
+/// The limb solve itself: each of [`LIMBS`] aimed at its target at its own strength.
+fn solve_limbs(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: [f32; 4]) -> [Option<f32>; 4] {
     let mut out = [None; 4];
     if world.len() != skel.len() {
         return out;
