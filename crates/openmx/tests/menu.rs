@@ -7069,3 +7069,22 @@ fn the_main_menus_corner_names_the_build() {
         assert_eq!(menu::BUILD_CORNER, concat!("v", env!("CARGO_PKG_VERSION"), " · dev"));
     }
 }
+
+/// P193: the build the site's `version.txt` names is offered when it is not this one, whether the file
+/// says a version and a commit or a bare commit, and a dirty build's + or a longer hash is still the
+/// same build; "Updated to …" only on a start whose last started build was another.
+#[test]
+fn a_newer_build_is_another_commit() {
+    assert_eq!(menu::newer_than("v0.2.0 abc1234", "0123456").as_deref(), Some("v0.2.0 abc1234"));
+    assert_eq!(menu::newer_than("abc1234", "dev").as_deref(), Some("abc1234"));
+    // a stale version.txt read around a deploy, naming the build already running
+    assert_eq!(menu::newer_than("v0.2.0 abc1234", "abc1234"), None);
+    assert_eq!(menu::newer_than("abc1234+", "abc1234"), None);
+    assert_eq!(menu::newer_than("abc1234def", "abc1234+"), None);
+    assert_eq!(menu::newer_than("", "abc1234"), None);
+    assert_eq!(menu::newer_than("  ", "abc1234"), None);
+    assert!(menu::first_start("abc1234", "0123456"));
+    assert!(!menu::first_start("0123456", "0123456"));
+    // a first visit has no last build: nothing to say
+    assert!(!menu::first_start("", "0123456"));
+}

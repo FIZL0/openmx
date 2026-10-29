@@ -31,10 +31,11 @@ use openmx_web::{TRACK, rgba, start_line};
 /// The host calls `web/worker.js` supplies, on its global `openmx`: the disc, the picture and the
 /// log (N4); and the game's canvas size, keys, pointer, gamepads, sound, files and frame clock
 /// (P196, `src/web_host.rs`); and which GPU API draws and its first frame (P48, `src/web_gpu.rs`); and the mod
-/// store's downloads into OPFS, its unpacking and a page opened for Report (P198, `src/modstore.rs`).
-const HOST_CALLS: [&str; 23] = [
+/// store's downloads into OPFS, its unpacking and a page opened for Report (P198, `src/modstore.rs`); and the
+/// newer build the page saw, the last one started and a reload (P193).
+const HOST_CALLS: [&str; 26] = [
     "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame", "gpu", "drawn",
-    "store_fetch", "store_got", "store_read", "store_close", "store_put", "store_drop", "open_url",
+    "store_fetch", "store_got", "store_read", "store_close", "store_put", "store_drop", "open_url", "latest", "last_build", "reload",
 ];
 
 /// The module wasm-bindgen's glue answers the imports under (`--target web`).
@@ -469,4 +470,51 @@ fn the_browser_installs_from_the_store() {
     assert_eq!(list("left"), "", "the download is gone from OPFS store/: {text}");
     // one GET at the store and one at the CDN it sends to, neither asking a Range (B242)
     assert_eq!((field("zips").as_str(), field("ranges").as_str()), ("2", "0"), "{text}");
+}
+
+/// The in-game update notice (P193, `tests/web/update.mjs`): with a ride on the canvas a changed
+/// `version.txt` puts up neither the page's Reload banner nor anything of the game's; on the next
+/// visit, with another build stored as the last one started, the game's main menu offers the newer
+/// build and says "Updated to …", the page then stores this build as the last one, and Square
+/// reloads the page into the newer build. On the
+/// software renderer, the disc read in place. Skips without the disc, node or chromium.
+#[test]
+fn a_new_build_shows_on_the_menu_not_the_ride() {
+    let iso = match Disc::open_configured() {
+        Ok(_) => configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    let scratch = std::env::temp_dir().join(format!("openmx-web-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/update.mjs");
+    let run = Command::new("node")
+        .arg(&drive)
+        .arg(repo().join("web"))
+        .arg(&iso)
+        .arg(scratch.join("profile"))
+        .env("OPENMX_GPU_PKG", built())
+        .output()
+        .expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert!(run.status.success(), "update.mjs failed:\n{}{text}", String::from_utf8_lossy(&run.stderr));
+    let part = |key: &str| -> String { text.split(&format!("\"{key}\":{{")).nth(1).unwrap_or("").split('}').next().unwrap_or("").to_string() };
+    let (ride, menu) = (part("ride"), part("menu"));
+    assert!(ride.contains("\"state\":\"started\""), "the ride did not stay on: {text}");
+    assert!(ride.contains("\"banner\":false"), "the page's banner went up over the ride: {text}");
+    assert!(ride.contains("\"said\":[]"), "the game showed something about builds during the ride: {text}");
+    assert!(menu.contains("\"banner\":false"), "the page's banner went up over the game: {text}");
+    assert!(menu.contains("the main menu offers v0.0.2 2222222"), "the main menu did not offer the newer build: {text}");
+    assert!(menu.contains(&format!("the main menu says Updated to {}", concat!("v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT")))), "no \"Updated to\" on a new build's first start: {text}");
+    assert!(menu.contains(&format!("\"stored\":\"{}\"", env!("OPENMX_COMMIT"))), "the page did not keep this build as the last started: {text}");
+    assert!(menu.contains("\"reloaded\":\"Build v0.0.2 2222222.\""), "Square on the main menu did not reload into the newer build: {text}");
 }

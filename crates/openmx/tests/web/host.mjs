@@ -38,6 +38,10 @@ globalThis.openmx = {
   file_read: () => undefined,
   file_write: () => {},
   frame: () => new Promise(() => {}),
+  // P193's: no newer build, a first visit, nowhere to reload
+  latest: () => '',
+  last_build: () => undefined,
+  reload: () => {},
   gpu: () => {},
   drawn: () => {},
 };
