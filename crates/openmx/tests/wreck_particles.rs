@@ -252,3 +252,124 @@ fn the_wreck_emits_as_the_original() {
     // Both vehicle and both rider entries emitted, and foot dust (off while wrecking) never did.
     assert!(emitted[..4].iter().all(|&n| n >= 5) && emitted[4] == 0, "{emitted:?}");
 }
+
+/// A capture's rows by frame counter, out of `context/capture/<rel>`.
+fn rows_at(rel: &str) -> Option<HashMap<u32, Row>> {
+    let path = context().join("capture").join(rel);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        eprintln!("skipped: no {}", path.display());
+        return None;
+    };
+    let mut lines = text.lines();
+    let head: Vec<String> = lines.next()?.split(',').map(str::to_string).collect();
+    let rows = lines.map(|l| head.iter().cloned().zip(l.split(',').map(str::to_string)).collect::<Row>());
+    Some(rows.map(|r| (word(&r, "frame_counter"), r)).collect())
+}
+
+/// One of the wreck dusts' particles out of a RAM image: its emitter's entry (0 or 2), age and life
+/// in milliseconds, its size when it was made, and where it sits in the system's list.
+struct Made {
+    entry: usize,
+    age: f32,
+    life: f32,
+    size: f32,
+    slot: usize,
+}
+
+/// The frame counter of an EE RAM image, and the two dusts' live particles in it (P185): the wreck
+/// entries the rider's particle manager holds, their emitter, its particle system's list, and each
+/// particle that emitter made (+0x30 age, +0x34 life, +0x40 the size it was made with, +0x4c the
+/// emitter; `research/oracle.txt` P58, P153 and P185).
+fn dust_in(ram: &[u8]) -> Option<(u32, Vec<Made>)> {
+    let (Ok(manager), Ok(counter)) = (ps2_oracle::addr("game_manager"), ps2_oracle::addr("frame_counter")) else {
+        eprintln!("skipped: game_manager / frame_counter are not in research/oracle.txt");
+        return None;
+    };
+    let u = |a: u32| u32::from_le_bytes(ram[(a & 0x01ff_ffff) as usize..][..4].try_into().unwrap());
+    let f = |a: u32| f32::from_bits(u(a));
+    let rider = u(u(u(u(u(manager) + 0x34) + 0x34) + 0x8));
+    let emitter = |i: u32| u(u(u(u(rider + 0x1490) + 0x3c) + 4 * i) + 0x14);
+    let (vehicle, rider_dust) = (emitter(0), emitter(2));
+    let system = u(vehicle + 0xa0);
+    let made = (0..u(system + 0x108))
+        .filter_map(|k| {
+            let p = u(u(system + 0x118) + 4 * k);
+            let by = u(p + 0x4c);
+            let entry = if by == vehicle { 0 } else if by == rider_dust { 2 } else { return None };
+            Some(Made { entry, age: f(p + 0x30), life: f(p + 0x34), size: f(p + 0x40), slot: k as usize })
+        })
+        .collect();
+    Some((u(counter), made))
+}
+
+/// P185: Vehicle and Rider Dust's particles are as big and live as long as the emitter was fast,
+/// against two RAM images of S109's animandpump wreck (`context/capture/p185/run-3850/3910.ee.bin`,
+/// saved during the capture `run.csv` of P153's spec; journal P185).
+///
+/// - Every one of the two dusts' particles lies on the port's curve: its life is the low end, 1200 ms
+///   (5 ms a foot a second reaches past it only at 240 ft/s), and its size is 0.1 ft a foot a second
+///   from the 3 ft/s emission gate up to 1 ft — none of the original's random range below 0.3 ft or
+///   over 1200 ms.
+/// - The last particle each dust made in a frame was made at the row's own emitter point and the
+///   point it came from: where that row is the frame it was made on, the port's size off that speed
+///   is the original's to within a bit (the speed is the capture's two points over its dt, not the
+///   game's own sum). A frame whose last contact or sphere emitted nothing
+///   holds a point no particle came from; those are only held to the curve.
+#[test]
+fn the_wreck_dusts_grow_with_their_speed() {
+    let (Some(fx), Some(rows)) = (disc_fx(), rows_at("p185/run.csv")) else { return };
+    let mut matched = Vec::new();
+    let mut groups = 0;
+    let mut seen = 0;
+    for image in ["p185/run-3850.ee.bin", "p185/run-3910.ee.bin"] {
+        let path = context().join("capture").join(image);
+        let Ok(ram) = std::fs::read(&path) else {
+            eprintln!("skipped: no {}", path.display());
+            return;
+        };
+        let Some((frame, made)) = dust_in(&ram) else { return };
+        for p in &made {
+            let emt = &fx.entries[p.entry].emt;
+            assert_eq!((emt.size_ratio, emt.life_ratio, emt.min_speed), (0.1, 5.0, 3.0), "{}", fx.entries[p.entry].name);
+            // The speed its size says, which the port's curve must give back.
+            let speed = if p.size < emt.size.1 { p.size / emt.size_ratio } else { 20.0 };
+            let (size, life) = emt.size_and_life(speed, true, 0.0, 0.0);
+            assert!(speed >= emt.min_speed * (1.0 - 1e-6), "{image} slot {}: size {} is under the emission gate", p.slot, p.size);
+            assert!((size - p.size).abs() <= f32::EPSILON * p.size, "{image} slot {}: size {} off the curve ({size})", p.slot, p.size);
+            assert_eq!(life, p.life, "{image} slot {}: life", p.slot);
+            seen += 1;
+        }
+        // The last of each frame's particles, by entry and age (one frame's are all of an age).
+        let mut last: HashMap<(usize, u32), &Made> = HashMap::new();
+        for p in &made {
+            let at = last.entry((p.entry, p.age.to_bits())).or_insert(p);
+            if p.slot > at.slot {
+                *at = p;
+            }
+        }
+        for p in last.values() {
+            groups += 1;
+            let emt = &fx.entries[p.entry].emt;
+            // The tick it was made on, give or take one: its age is ticks of the row's dt.
+            let born = frame as i64 - (p.age / (1000.0 / 60.0)).round() as i64;
+            let hit = (born - 1..=born + 1).filter_map(|b| rows.get(&(b as u32))).find_map(|r| {
+                let e = format!("e{}", p.entry);
+                let speed = vector(r, &format!("{e}_at")).sub(vector(r, &format!("{e}_from"))).len() / num(r, "dt");
+                let (size, life) = emt.size_and_life(speed, emt.min_movement_speed < speed, 0.0, 0.0);
+                let ulps = (size.to_bits() as i64 - p.size.to_bits() as i64).abs();
+                (ulps <= 1 && life == p.life).then_some((speed, ulps))
+            });
+            if let Some((speed, ulps)) = hit {
+                matched.push((p.size, speed, ulps));
+            }
+        }
+    }
+    println!("{seen} particles on the curve; {} of {groups} frames' last ones at the row's speed: {matched:?}", matched.len());
+    assert!(seen > 150, "{seen} particles");
+    // A capped 1 ft is any speed past 10 ft/s, so only the sizes under it count: a random size in
+    // 0.1..1 ft lands within a bit of the row's speed by chance about never, so twenty frames that
+    // do, over a spread of sizes, are the speed's.
+    let sizes: Vec<f32> = matched.iter().map(|m| m.0).filter(|&s| s < 1.0).collect();
+    assert!(sizes.len() >= 15, "{} frames under the cap at the row's speed: {sizes:?}", sizes.len());
+    assert!(sizes.iter().cloned().fold(1.0, f32::min) < 0.35 && sizes.iter().cloned().fold(0.0, f32::max) > 0.7, "{sizes:?}");
+}
