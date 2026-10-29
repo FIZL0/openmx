@@ -1437,8 +1437,12 @@ chassis_integrate boot 0x0015c540 (chassis, dt in f12) the body's own integrate,
 #                                otherwise
 chassis_measure boot 0x0015c4c0 (chassis, dt in f12) the per-frame measure, vtable +0x38: the
 #                              orientation as euler angles into +0x90, the velocity's length into
-#                              +0x34, then the base class' frame update. Called before the ground
-#                              step, so the speed the steering fade reads is last frame's
+#                              +0x34, then the base class' frame update. Called once a frame, by
+#                              the vehicle update's attachment walk 0x00133500 after the ground step
+#                              and air state (the walk calls each child's vt+0x38), and by nothing
+#                              before the next ground step: so the speed the steering fade reads and
+#                              the +0x98 roll the airborne auto-level reads are last frame's, taken
+#                              before the stunt clocks' copy-back (S177)
 chassis_base_update boot 0x00133500 (chassis, dt in f12) the base class' per-frame update, which the
 #                                  measure tail-calls and which this port does not follow
 chassis_clear_contacts boot 0x00158fd0 (chassis) vtable +0xa4: one word, chassis+0x1e0 = 0. The last

@@ -15,8 +15,8 @@
 //! first, then the air state, then the animation and the ride state machine. So [`Ride::frame`] is
 //!
 //! 1. the input layer's rate limit, which turns what the pad says into what the bike is holding,
-//! 2. the chassis' measure — [`chassis::measure`] with [`crate::math::quat_to_euler`]'s three angles,
-//!    which is where `air.rs`' pitch and roll come from,
+//! 2. the chassis' euler angles, which is where `air.rs`' pitch and roll come from, as the last
+//!    frame's measure left them ([`chassis::measure`], which runs once a frame, after the air state),
 //! 3. the ground step, written out here in [`mv::step`]'s own order with the callees dispatched,
 //! 4. the air state ([`air::contact`]), which decides whether the bike is airborne and for how long.
 //!
@@ -998,6 +998,10 @@ impl Ride {
     pub fn place_on(&mut self, at: Vf, facing: Vf, up: Vf) {
         let m = math::basis(at, facing, up, true, false);
         self.chassis.quat = math::mat4_to_quat(&m);
+        // The angles the next frame's ground step reads, of the orientation set here: the frame
+        // measures only after its physics (S177), so a body set down would otherwise be read at the
+        // attitude it was taken from.
+        self.chassis.euler = math::quat_to_euler(self.chassis.quat, placing_acos());
         self.origin = Vf::new(at.x(), at.y(), at.z(), 1.0);
         self.chassis.cofg_world = math::transform_point(&m, self.chassis.cofg);
         for v in [
@@ -1133,6 +1137,13 @@ impl Tables {
     fn mv(&self) -> mv::Tables<'_> {
         mv::Tables { acos: &self.acos, curve: &self.curve }
     }
+}
+
+/// The arc cosine table [`Ride::place_on`] measures a set-down body's angles with, built on first
+/// use: a placement has no frame's [`Tables`] to hand.
+fn placing_acos() -> &'static AcosTable {
+    static TABLE: std::sync::OnceLock<AcosTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(AcosTable::build)
 }
 
 // --- the engine's side of the four controllers -----------------------------------------------------
@@ -2065,10 +2076,14 @@ impl Ride {
             t.side_flick = t.side.sample(raw.x, dt);
         }
 
-        // 2 — the chassis' measure, which is where the pitch and roll `air.rs` reads come from. The
-        // euler angles are the one call it makes that this crate ports.
-        let euler = math::quat_to_euler(chassis.quat, &tables.acos);
-        chassis::measure(chassis, dt, euler);
+        // 2 — the pitch and roll `air.rs` and the pose controllers read: the chassis' euler angles as
+        // the last frame's measure (step 4b) left them. The original measures the chassis once a
+        // frame, in its vehicle update's walk of the attachments after the air state, and nothing
+        // between there and this ground step measures it again (S177) — so the angles are those of
+        // the orientation the substeps left, before the stunt clocks' copy-back (step 5) wrote the
+        // node's own quaternion over it, and they can be an ulp or three off what that quaternion
+        // reads. The turn's first auto-level tick in the air (S58's 173) took its roll off them.
+        let euler = chassis.euler;
 
         // The chassis' transform as the last frame left it — the no-hander's roll included, which the
         // body's quaternion only takes in at its next integration (P32).
@@ -2434,7 +2449,7 @@ impl Ride {
         // the Euler angles are taken again off the orientation the substeps left (S138). The wreck
         // test reads them, and so judges a landing's pitch as it lands rather than as it fell: a nose
         // down 70.06° in the air and 69.86° on its touchdown tick rides out in the original. The next
-        // frame's measure takes them again before the ground step reads them. The measure writes the
+        // frame's ground step reads them as they are here (step 2). The measure writes the
         // speed too, the length of the velocity the substeps left (S140): nothing in the rest of the
         // original's frame loads it (the stunt request, idle and clocks and the wreck test read no
         // `+0x34`), so what it reaches is what reads the bike after its update — the chase camera's
@@ -2445,8 +2460,9 @@ impl Ride {
 
         // 5 — the stunt clocks' copy-back (S67). The state pack snapshots the node's orientation, as
         // a quaternion of its matrix, and the clocks write it straight back into the chassis; so a
-        // frame ends with the body turned by the no-hander's roll, and the next frame's measure reads
-        // it, instead of the roll waiting for the next integrate to fold it in. The velocity and the
+        // frame ends with the body turned by the no-hander's roll, and the next frame's substeps start
+        // from it, instead of the roll waiting for the next integrate to fold it in (the euler
+        // angles do wait for the next measure, step 4b). The velocity and the
         // other word the clocks copy back are the body's own, unchanged.
         chassis.quat = math::mat4_to_quat(&out.chassis);
 

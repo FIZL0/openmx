@@ -8581,18 +8581,19 @@ fn the_attachment_walk_measures_the_speed_after_the_physics() {
 /// the turn's quaternion sign flip at 130 (journal 2026-10-23-s58-slip-cases). The flip is the stunt
 /// clocks' copy-back (S67): the frame ends on `mat4_to_quat` of the node's matrix, whose largest
 /// candidate goes from `y` to `w` at 130, so the sign does; the port has done it since S67 and S116
-/// raised the pins. The turn's path now parts at 178 by an ulp, after its angular history at 173; the
-/// launch's and the brake's at the landing (124, 106). S117's two held traverses of a steep face agree
-/// to the bit while both wheels are on it (74 and 97 ticks, side loads up to 1.8 times the wheel's
-/// load) and part on the first tick both are off, in the chassis' angular acceleration: steep's slip
-/// flags then agree to its last tick, steep2's part at 134, after its landing.
+/// raised the pins. The turn's path then parted at 178 by an ulp, after its angular history at 173,
+/// the first tick of the air control's auto-level; the launch's and the brake's at the landing (124,
+/// 106), and S117's steep faces on the first tick both wheels were off. All of it was one ulp source
+/// (S177): the ground step read its pitch and roll off a measure of the copy-back's quaternion, where
+/// the original reads the angles its one measure a frame took off the substeps' orientation. Since,
+/// every case agrees on every lane on every tick it has.
 const S58_CASES: [(&str, &str, u64, u64); 6] = [
-    ("turn", "a hard turn at speed on flat dirt", 177, u64::MAX),
-    ("launch", "a full-gas launch from standing", 123, u64::MAX),
-    ("brake", "a locked brake at speed", 105, u64::MAX),
+    ("turn", "a hard turn at speed on flat dirt", u64::MAX, u64::MAX),
+    ("launch", "a full-gas launch from standing", u64::MAX, u64::MAX),
+    ("brake", "a locked brake at speed", u64::MAX, u64::MAX),
     ("traverse", "a part-steered ride up the jump face and across a side slope", u64::MAX, u64::MAX),
-    ("steep", "full gas from standing across a 46° face side on, held up it", 90, 250),
-    ("steep2", "the same from 20 ft further back along the face, 48° there", 106, 133),
+    ("steep", "full gas from standing across a 46° face side on, held up it", u64::MAX, u64::MAX),
+    ("steep2", "the same from 20 ft further back along the face, 48° there", u64::MAX, u64::MAX),
 ];
 
 /// S116: the tick the turn's chassis quaternion changes sign in the original — the same rotation,
@@ -8606,8 +8607,9 @@ const S116_FLIP: u64 = 130;
 /// 20 ft further back (`95 -2.7 -30`), each ridden on with the gas
 /// (`research/journal/2026-10-27-s117-steep-traverse/`). A teleported state's levers and engine are
 /// not first_recording's, so these go through [`replay_a_save_state_case`], which seeds them too, with
-/// the ticks whose row the recorder read out of step (its `late`), none here.
-const S58_OWN_STATES: [(&str, &str, &[u64]); 2] = [("steep", "s117-steep", &[]), ("steep2", "s117-steep2", &[])];
+/// the ticks whose row the recorder read out of step (its `late`): steep2's row 189 holds tick 190's
+/// ride, word for word (S177).
+const S58_OWN_STATES: [(&str, &str, &[u64]); 2] = [("steep", "s117-steep", &[]), ("steep2", "s117-steep2", &[189])];
 
 /// How many ticks ahead of a quarter-speed row's ride state its pad is. A row at tick `t` (the ride
 /// as it is after tick `t`, [`quarter_ticks`]) carries the control state tick `t + 2` rides on, which
@@ -8689,8 +8691,10 @@ fn the_slip_cases_replay_from_the_save_state() {
             };
             let parted = replay_a_save_state_case(&acc, &own, seed, &text, case, what, late);
             let first = |lane: &str| parted.iter().find(|(_, d)| d.contains(lane)).map_or(u64::MAX, |(t, _)| *t);
-            assert!(first(".origin[") > path_through, "{case}: the path parts at {}, not after {path_through}", first(".origin["));
-            assert!(first(".slip.") > slip_through, "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
+            // `u64::MAX` asks for every tick, which `>` alone cannot say.
+            let past = |at: u64, through: u64| at > through || at == u64::MAX;
+            assert!(past(first(".origin["), path_through), "{case}: the path parts at {}, not after {path_through}", first(".origin["));
+            assert!(past(first(".slip."), slip_through), "{case}: a slip flag parts at {}, not after {slip_through}", first(".slip."));
             continue;
         }
         let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
@@ -8902,15 +8906,16 @@ fn replay_a_save_state_case(acc: &Capture, st: &SaveState, seed: u32, text: &str
 /// 45-tick flight and a landing at 64 ft/s; `roll2`: coasted on at 15 ft/s, braked to a stop on the
 /// face, held there 150 ticks and let go). The states' RAM images are `./kit state ram`'s of the
 /// slots `tele.py` saved, in `context/states/`. Then the ticks not compared (`late`: roll's row 70
-/// was read a tick late, the same words as its row 71), and the last tick the path and the slip
-/// flags agree through. The slip flags agree on every tick of all four, roll's past its landing
-/// (S118); side and roll2 agree on every lane of every tick. Nose's path parts by an ulp at 180, and
-/// roll's flight by its roll rate at 67 (S118's journal: not the Euler angles, not the wheels), which
-/// reaches its path at 132.
+/// was read a tick late, the same words as its row 71; so were nose's 180 and roll's 148, S177), and
+/// the last tick the path and the slip flags agree through. The slip flags agree on every tick of all
+/// four, roll's past its landing (S118); side and roll2 agree on every lane of every tick. Nose's path
+/// parted by an ulp at 180, and roll's flight by its roll rate at 67, which reached its path at 132:
+/// both the ground step reading its Euler angles off a second measure the original does not take
+/// (S177). Since, all four agree on every lane of every tick compared.
 const S106_CASES: [(&str, &str, &str, &[u64], u64, u64); 4] = [
-    ("nose", "s106-nose", "the brake held from standing on a 53° face, nose down", &[1], 179, 200),
+    ("nose", "s106-nose", "the brake held from standing on a 53° face, nose down", &[1, 180], 200, 200),
     ("side", "s106-side", "the brake held from standing on a 46° face, side on", &[], 200, 200),
-    ("roll", "", "rolled over the lip and braked down the face", &[70], 131, 240),
+    ("roll", "", "rolled over the lip and braked down the face", &[70, 148], 240, 240),
     ("roll2", "", "coasted over the lip at 15 ft/s, braked to a stop on the face, then let go", &[], 421, 421),
 ];
 

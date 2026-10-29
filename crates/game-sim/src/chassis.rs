@@ -274,7 +274,8 @@ pub struct Chassis {
     pub accel: Vf,
     /// `+0x80` the angular acceleration, from the torque and the inverse inertia tensor.
     pub ang_accel: Vf,
-    /// `+0x90` the orientation as euler angles. Also [`measure`]'s, and nothing in the step reads it.
+    /// `+0x90` the orientation as euler angles. Also [`measure`]'s; the integrate does not read it,
+    /// the ground step's pose controllers and air control do (`+0x90` pitch, `+0x98` roll).
     pub euler: Vf,
     /// `+0xf0`, `+0x100`, `+0x110` the inverse inertia tensor.
     pub inv_inertia: Mat3,
@@ -392,8 +393,10 @@ pub struct Given {
 /// The per-frame measure, `Chassis::speed`: the orientation as euler angles, the speed as the
 /// velocity's length, and then the base class' own frame update with the frame's `dt`.
 ///
-/// It is a virtual on the chassis and it is called once a frame, before the ground step — so the
-/// speed the steering fade reads is the one the *previous* frame's integration left.
+/// It is a virtual on the chassis and it is called once a frame, by the vehicle update's walk of its
+/// attachments after the ground step and the air state — so the speed the steering fade and the
+/// angles the air control read are the ones the *previous* frame's integration left, taken before
+/// the stunt clocks wrote the node's orientation back (S177).
 pub fn measure(ch: &mut Chassis, dt: F, g: Vf) -> Vec<Call> {
     let calls = vec![Call::QuatToEuler(ch.quat), Call::FrameUpdate(dt)];
     ch.euler = g;
