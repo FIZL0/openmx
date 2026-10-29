@@ -907,6 +907,9 @@ pub struct Renderer {
     glows: Option<glows::Glows>,
     /// The sun's shadow maps (V108).
     sun: shadows::SunMaps,
+    /// [`Renderer::render_over`] is drawing (P213): the views' actors alone, over what the target
+    /// already shows.
+    over: bool,
 }
 
 /// A prop the scene places, as culling needs it.
@@ -1009,6 +1012,33 @@ fn begin_pass<'e>(encoder: &'e mut wgpu::CommandEncoder, color: &wgpu::TextureVi
             resolve_target: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(0.0),
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
+}
+
+/// A pass over `color` as it is and `depth` cleared ([`Renderer::render_over`]).
+fn begin_pass_over<'e>(encoder: &'e mut wgpu::CommandEncoder, color: &wgpu::TextureView, depth: &wgpu::TextureView) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("over"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: color,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             },
         })],
@@ -2138,6 +2168,7 @@ impl Renderer {
             particles: None,
             glows: None,
             sun,
+            over: false,
         })
     }
 
@@ -3360,8 +3391,19 @@ impl Renderer {
 
     /// Draw one frame into `target`: every view, then the overlay. The models the views name are
     /// uploaded from `assets` as they are first seen.
+    /// [`Renderer::render`] of the views' actors alone, laid over what `target` already shows
+    /// (P213: the Garage's bike and rider over the menu's backdrop): no backdrop, ground, props,
+    /// plants, wrapped copies, particles or glows, and nothing cleared but the depth.
+    pub fn render_over(&mut self, target: &Target, assets: &Assets, frame: &Scene3) -> Drawn {
+        self.over = true;
+        let drawn = self.render(target, assets, frame);
+        self.over = false;
+        drawn
+    }
+
     pub fn render(&mut self, target: &Target, assets: &Assets, frame: &Scene3) -> Drawn {
         let views = frame.views;
+        let over = self.over;
         // Each view, and after it each copy of a wrapped world it reaches (MD43), with the ground
         // view it picks its ground into: a pass a view is drawn in, with its own uniforms, props and
         // ground. A copy is the same world drawn from the view's camera moved back by its offset.
@@ -3369,7 +3411,7 @@ impl Renderer {
         let mut copies_used = Vec::new();
         for (v, view) in views.iter().enumerate() {
             passes.push((v, None, v));
-            if let Some(w) = self.wrap {
+            if let Some(w) = self.wrap.filter(|_| !over) {
                 let light = *self.view_light(v, frame.light);
                 let reach = self.graphics.fog(&light, self.span).reach;
                 for k in w.copies(view.camera.eye, reach) {
@@ -3493,7 +3535,7 @@ impl Renderer {
             // them, or the whole map), and each at the level of detail the disc's own test picks.
             let fade = self.prop_fade.filter(|_| self.graphics != Graphics::Original);
             let casting = self.sun.takes_all(p);
-            for prop in &self.props {
+            for prop in self.props.iter().filter(|_| !over) {
                 let Some(Some(m)) = prop.model else { continue };
                 let model = &self.models[m];
                 let centre = v3(prop.at.0[3][0], prop.at.0[3][1], prop.at.0[3][2]);
@@ -3556,7 +3598,7 @@ impl Renderer {
             // the original's rule the pictures come in see-through as the actors' ghosts are drawn;
             // under the smooth one (V55) model and picture each draw their share of a screen
             // pattern, so they batch with every other copy of their model and need no sorting.
-            for grove in self.grove.iter().chain(self.groves.iter().map(|(_, g)| g)) {
+            for grove in self.grove.iter().chain(self.groves.iter().map(|(_, g)| g)).filter(|_| !over) {
                 let species = grove.ecosystem.species.len();
                 let ids: Vec<Option<usize>> = grove.parts().map(|n| self.model_ids.get(n).copied().flatten()).collect();
                 let mut plants = Vec::new();
@@ -3588,7 +3630,7 @@ impl Renderer {
             if let Some(g) = &mut self.ground {
                 g.write_cover(&self.queue);
             }
-            ground_counts[p] = self.ground_for(slot, &cull, focal, &mut drawn);
+            ground_counts[p] = if over { 0 } else { self.ground_for(slot, &cull, focal, &mut drawn) };
             drawn.ground_time += ground_at.elapsed();
         }
         // A copy no view reaches this frame lets go of its parts.
@@ -3657,7 +3699,7 @@ impl Renderer {
         }
         let scale = scale::quantise(self.render_scale);
         let [fx, fy, fw, fh] = target.frame;
-        if scale < 1.0 && fw > 0 && fh > 0 {
+        if scale < 1.0 && fw > 0 && fh > 0 && !over {
             // The views into the low texture, each view's edges scaled and rounded so they still meet;
             // then the low texture stretched over the frame, and the overlay over that at full size.
             let size = scale::scaled((fw, fh), scale);
@@ -3681,7 +3723,10 @@ impl Renderer {
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         } else {
             let depth = self.depth_for(target.size);
-            let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame");
+            let mut pass = match over {
+                true => begin_pass_over(&mut encoder, target.view, &depth),
+                false => begin_pass(&mut encoder, target.view, &depth, "frame"),
+            };
             let s = target.scale;
             let rect = |[x, y, w, h]: [u32; 4]| [fx + x * s, fy + y * s, w * s, h * s];
             self.draw_views(&mut pass, views, &passes, &ground_counts, rect, target.size, &mut drawn);
@@ -3837,7 +3882,7 @@ impl Renderer {
             pass.set_scissor_rect(x, y, w, h);
             let offset = [(p as u64 * VIEW_STRIDE) as u32];
             // The backdrop: the sky, or the fog's colour.
-            if copy.is_none() {
+            if copy.is_none() && !self.over {
                 pass.set_pipeline(&self.sky_pipeline);
                 pass.set_bind_group(0, &self.view_bind, &offset);
                 let sky = match self.view_skies.get(v) {
@@ -3967,7 +4012,7 @@ impl Renderer {
                 }
             }
             // The particles and the glows are the view's own, not a copy's.
-            if copy.is_some() {
+            if copy.is_some() || self.over {
                 continue;
             }
             // The particles, over the models (P58).

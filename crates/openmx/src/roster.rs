@@ -159,6 +159,99 @@ pub struct Rider {
     pub suit: Vec<(String, String)>,
 }
 
+/// What the original's garage logos say (P213), by the `logo=` name `bike\bikes.dat` gives each bike:
+/// the maker, and the model under it. Read off the logos themselves, which are pictures.
+const BIKE_LOGOS: [(&str, &str, &str); 39] = [
+    ("logo_fast50s", "Fast50s", ""),
+    ("logo_fc_125", "Factory Connection", "125"),
+    ("logo_fc_250", "Factory Connection", "250"),
+    ("logo_fc_250f", "Factory Connection", "250f"),
+    ("logo_fc_450f", "Factory Connection", "450f"),
+    ("logo_ktm_125sx", "KTM", "125 SX"),
+    ("logo_ktm_250sx", "KTM", "250 SX"),
+    ("logo_motoxxx_125", "Moto XXX Racing", "125"),
+    ("logo_motoxxx_250", "Moto XXX Racing", "250"),
+    ("logo_motoxxx_250f", "Moto XXX Racing", "250f"),
+    ("logo_motoxxx_450f", "Moto XXX Racing", "450f"),
+    ("logo_nstyle_125", "N-Style", "125"),
+    ("logo_nstyle_250", "N-Style", "250"),
+    ("logo_nstyle_450f", "N-Style", "450f"),
+    ("logo_oneind_125", "One Industries", "125 SX"),
+    ("logo_oneind_250", "One Industries", "250"),
+    ("logo_procircuit_125", "Pro Circuit", "125"),
+    ("logo_procircuit_250", "Pro Circuit", "250"),
+    ("logo_procircuit_250f", "Pro Circuit", "250f"),
+    ("logo_procircuit_450f", "Pro Circuit", "450f"),
+    ("logo_rainbow_125", "Rainbow Studios", "125"),
+    ("logo_rainbow_250ne", "Rainbow Studios", "250"),
+    ("logo_rainbow_250se", "Rainbow Studios", "250"),
+    ("logo_suzuki_rm125", "Suzuki", "RM 125"),
+    ("logo_suzuki_rm250", "Suzuki", "RM 250"),
+    ("logo_thq_125ne", "THQ", "125"),
+    ("logo_thq_125sr", "THQ", "125"),
+    ("logo_thq_250ne", "THQ", "250"),
+    ("logo_thq_250se", "THQ", "250"),
+    ("logo_thq_fmx125", "THQ", "FMX 125"),
+    ("logo_thq_fmx125re", "THQ", "FMX 125"),
+    ("logo_thq_fmx250", "THQ", "FMX 250"),
+    ("logo_thq_fmx250re", "THQ", "FMX 250"),
+    ("logo_thq_fmx250fre", "THQ", "FMX 250f"),
+    ("logo_thq_fmx450fre", "THQ", "FMX 450f"),
+    ("logo_yamaha_125", "Yamaha", "YZ 125"),
+    ("logo_yamaha_250", "Yamaha", "YZ 250"),
+    ("logo_yamaha_250f", "Yamaha", "YZ 250f"),
+    ("logo_yamaha_450f", "Yamaha", "YZ 450f"),
+];
+
+/// The original's names for the riders a seat rides as (P213), by the name of their archives: the
+/// pros as `rider\riders.dat` lists them, and each gear set by its maker as its logo spells it.
+const RIDER_NAMES: [(&str, &str); 39] = [
+    ("acerbis", "Acerbis"),
+    ("adams", "Troy Adams"),
+    ("alloy", "Alloy"),
+    ("alpinestars", "Alpinestars"),
+    ("answer", "Answer"),
+    ("axo", "AXO"),
+    ("azonic", "Azonic"),
+    ("boniface", "Steve Boniface"),
+    ("faisst", "Ronnie Faisst"),
+    ("ferry", "Tim Ferry"),
+    ("fly", "Fly Racing"),
+    ("fox", "Fox"),
+    ("hansen", "Josh Hansen"),
+    ("jessman", "Brandon Jesseman"),
+    ("langston", "Grant Langston"),
+    ("larocco", "Mike Larocco"),
+    ("lewis", "Kyle Lewis"),
+    ("lusk", "Ezra Lusk"),
+    ("oneal", "O'Neal"),
+    ("parsons", "Doug Parsons"),
+    ("preston", "Travis Preston"),
+    ("rainbow", "Rainbow Studios"),
+    ("reed", "Chad Reed"),
+    ("renner", "Ronnie Renner"),
+    ("roncade", "Stephane Roncada"),
+    ("sellards", "Brock Sellards"),
+    ("shift", "Shift"),
+    ("sinisalo", "Sinisalo"),
+    ("skin", "Skin"),
+    ("smith", "Danny Smith"),
+    ("sorby", "Eric Sorby"),
+    ("styles", "Clark Stiles"),
+    ("thor", "Thor"),
+    ("thq", "THQ"),
+    ("tld", "Troy Lee Designs"),
+    ("tortelli", "Sebastien Tortelli"),
+    ("walker", "Matt Walker"),
+    ("ward", "Larry Ward"),
+    ("wey", "Nick Wey"),
+];
+
+/// A rider archive's name (`tld`, of `tld1`) as the original names the rider (P213), or as it is.
+pub fn rider_label(name: &str) -> String {
+    RIDER_NAMES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map_or_else(|| name.to_string(), |(_, l)| l.to_string())
+}
+
 /// Split `cr125_faisst` into its model and its livery at the first `_`.
 fn model_and_livery(archive: &str) -> (String, String) {
     match archive.split_once('_') {
@@ -246,6 +339,13 @@ impl Catalogue {
 
     pub fn bike(&self, archive: &str) -> Option<&Bike> {
         self.bikes.iter().find(|b| b.archive.eq_ignore_ascii_case(archive))
+    }
+
+    /// A bike as the original's garage names it (P213): the maker and the model its logo spells,
+    /// `("Factory Connection", "250f")`. None for a bike `bikes.dat` gives no logo.
+    pub fn bike_name(&self, archive: &str) -> Option<(&'static str, &'static str)> {
+        let (_, logo) = self.wardrobe.logos.iter().find(|(b, _)| b.eq_ignore_ascii_case(archive))?;
+        BIKE_LOGOS.iter().find(|(l, ..)| l == logo).map(|&(_, maker, model)| (maker, model))
     }
 
     pub fn rider(&self, archive: &str) -> Option<&Rider> {
@@ -589,6 +689,8 @@ pub struct Wardrobe {
     pub pieces: [Vec<String>; 4],
     /// A bike `.sub`'s name, lowercased, and the font its number plates are drawn in.
     pub plates: Vec<(String, String)>,
+    /// A bike `.sub`'s name, lowercased, and the logo its garage names it by, lowercased (P213).
+    pub logos: Vec<(String, String)>,
 }
 
 /// An entry of an `item=` list as written, its quotes off.
@@ -634,6 +736,9 @@ impl Wardrobe {
         for s in game_render::ini::parse(bikes) {
             if let Some(font) = s.get("NumberPlateFont") {
                 out.plates.push((s.name.to_ascii_lowercase(), item(font)));
+            }
+            if let Some(logo) = s.get("logo").map(item).filter(|l| !l.is_empty()) {
+                out.logos.push((s.name.to_ascii_lowercase(), logo.to_ascii_lowercase()));
             }
         }
         out
@@ -1125,18 +1230,25 @@ impl Garage {
         let rider = c.rider(&p.rider);
         match row {
             Row::Class => format!("{}cc", cc(p.set.engine)),
-            Row::Model => bike.map_or(p.bike.clone(), |b| b.model.to_ascii_uppercase()),
-            Row::Livery => match bike {
-                Some(b) if !b.livery.is_empty() => b.livery.replace('_', " "),
+            // The original's own names where its logos give one (P213): the bike its maker and
+            // model, the paint its maker.
+            Row::Model => match c.bike_name(&p.bike) {
+                Some((maker, model)) => format!("{maker} {model}").trim().to_string(),
+                None => bike.map_or(p.bike.clone(), |b| b.model.to_ascii_uppercase()),
+            },
+            Row::Livery => match (c.bike_name(&p.bike), bike) {
+                (Some((maker, _)), _) => maker.into(),
+                (None, Some(b)) if !b.livery.is_empty() => b.livery.replace('_', " "),
                 _ => "stock".into(),
             },
-            Row::Tier => (if p.set.pro { "Pro" } else { "Race" }).into(),
+            // The original's Driving Model's two (P213).
+            Row::Tier => (if p.set.pro { "Pro Physics" } else { "Race Physics" }).into(),
             Row::Tuning => (match p.set.tuning {
                 Tuning::A => "A",
                 Tuning::P => "P",
             })
             .into(),
-            Row::Rider => rider.map_or(p.rider.clone(), |r| r.name.clone()),
+            Row::Rider => rider.map_or(p.rider.clone(), |r| rider_label(&r.name)),
             Row::Colours => rider.map_or(String::new(), |r| r.colours.to_string()),
             Row::Outfit => {
                 let id = if p.look.outfit.is_empty() { &p.rider } else { &p.look.outfit };

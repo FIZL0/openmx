@@ -203,6 +203,7 @@ mod moment;
 mod net;
 mod online;
 mod peer_looks;
+mod garage_view;
 // The original's own HUD (V26) is drawn by none of the shell since P170, which took it off the
 // menu; its drawing stays, held by tests/overlay.rs, beside the layouts and readings the ride HUD
 // takes from it.
@@ -2155,6 +2156,8 @@ async fn front_end(args: Args) -> Result<(), String> {
     let mut shown_look: Option<(menu::Menu, usize, usize)> = None;
     // The menu as GPU sprites, and whether the window's renderer has the menu's pictures.
     let (mut menu_sprites, mut menu_images) = (Vec::new(), false);
+    // The Garage's bike and rider (P213), dressed in the pick it shows.
+    let mut garage = garage_view::Stage::default();
     // What the menu's frames cost before their sleep, for `--timings` (P47).
     let mut busy = Duration::ZERO;
     let mut limiter = pace::Limiter::default();
@@ -2523,12 +2526,21 @@ async fn front_end(args: Args) -> Result<(), String> {
         }
         if matches!(act, Act::Ride(_) | Act::Online) {
             (shown_look, menu_images) = (None, false);
+            // the ride's models take the GPU's place of the garage's
+            garage.uploaded = false;
             continue;
         }
         // On the GPU the menu is sprites over its pictures, uploaded once (V30); the CPU draws it
         // for the X window, and for a shot.
         let shooting = shot.is_some() && shown >= args.shot_frame;
         let look = (shell.front.menu.look(), frame.width, frame.height);
+        // The Garage's pick, dressed again when it changes, and how far round its stand is (P213).
+        let stage = garage_view::rect(&shell.front.menu, (frame.width, frame.height));
+        if let Some(pick) = garage_view::shown_pick(&shell.front.menu) {
+            garage.dress(pick);
+        }
+        // A shot stands it where the stand starts, so two shots of two picks compare.
+        let turn = garage_view::Stage::turn(if shot.is_some() { 0 } else { shell.front.menu.tick });
         if let Some(w) = window.gpu().filter(|_| !shooting) {
             if !menu_images {
                 w.renderer.set_images(&shell.front.art.images());
@@ -2536,17 +2548,28 @@ async fn front_end(args: Args) -> Result<(), String> {
             }
             menu_sprites.clear();
             shell.front.art.sprites(&shell.front.menu, (frame.width, frame.height), 0, &mut menu_sprites);
-            w.draw(frame.width, frame.height, |r, t| r.draw_sprites(t, &menu_sprites))?;
+            w.draw(frame.width, frame.height, |r, t| {
+                r.draw_sprites(t, &menu_sprites);
+                if let Some([x, y, sw, sh]) = stage {
+                    garage.draw_gpu(r, t, [x as u32, y as u32, sw as u32, sh as u32], turn);
+                }
+            })?;
             shown_look = None;
-        } else if shown_look.as_ref() != Some(&look) {
-            // Drawn again only when it looks different (V30): at 4K a menu is most of a tenth of a
-            // second to draw and send.
-            frame.color.fill(0);
-            shell.front.art.draw(&shell.front.menu, &mut frame);
-            window.present(&frame.color, frame.width, frame.height)?;
-            shown_look = Some(look);
         } else {
-            window.present_again(&frame.color, frame.width, frame.height)?;
+            // Drawn again only when it looks different (V30): at 4K a menu is most of a tenth of a
+            // second to draw and send. The Garage's stand turns under it every frame.
+            let fresh = shown_look.as_ref() != Some(&look);
+            if fresh {
+                frame.color.fill(0);
+                shell.front.art.draw(&shell.front.menu, &mut frame);
+                shown_look = Some(look);
+            }
+            let turned = stage.is_some_and(|rect| garage.draw_soft(&mut frame, rect, turn, fresh));
+            if fresh || turned {
+                window.present(&frame.color, frame.width, frame.height)?;
+            } else {
+                window.present_again(&frame.color, frame.width, frame.height)?;
+            }
         }
         if let Some(path) = shot.take_if(|_| shown >= args.shot_frame) {
             if let Some(dir) = path.parent() {
