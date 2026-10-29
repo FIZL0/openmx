@@ -36,12 +36,16 @@
 //! [`crate::ground_mesh::repeats_a_layer`]).
 //!
 //! The layers and the detail map are read at the mip level the original's own paint camera reads
-//! them at ([`Mip`], [`paint_depth`]), which is what makes its ground soft (V97).
+//! them at ([`Mip`], [`paint_depth`]), which is what makes its ground soft (V97), and blurred
+//! again by the target's own texels as the ground reads it back ([`paint_texel`], V101). Both are
+//! blurs on the ground, the same every way, so the GPU adds them to the screen's own footprint
+//! rather than stretching it. The original's finest grain past that is not the ground's: its frame
+//! is 16-bit, dithered 4x4, which the port does not copy.
 //!
 //! None of this is 1:1: the mip levels are box-filtered halvings, not the disc's own, and the paint
-//! camera's pitch is a fit to two readings; the
-//! direction the `Angle` turns is chosen by eye; the screen-space target's own resolution and the
-//! mesh's ground-fog parameters are not modelled.
+//! camera's pitch and field of view are fits to live readings; the target is a blur here, not a
+//! picture drawn and then read; the direction the `Angle` turns is chosen by eye; and the mesh's
+//! ground-fog parameters are not modelled.
 
 use crate::disc::Res;
 use crate::ground_mesh::GroundMeshes;
@@ -108,6 +112,19 @@ impl Mip {
         (depth.log2() + self.bias).clamp(0.0, self.levels as f32)
     }
 
+    /// [`Mip::level`] with the paint target's own texel folded in (V101): the original reads the
+    /// layer at its level into the target, and the ground then reads the target back, one texel
+    /// [`paint_texel`] feet wide. Both blurs stack, so their spreads add; `texel` is the layer's own
+    /// texel in feet. Kept to the last level, which is all a chain holds.
+    pub fn level_through_target(&self, depth: f32, texel: f32) -> f32 {
+        if !(depth > 1.0) || !(texel > 0.0) {
+            return self.level(depth);
+        }
+        let layer = self.level(depth).exp2();
+        let target = paint_texel(depth) / texel;
+        (0.5 * (layer * layer + target * target).log2()).clamp(0.0, self.levels as f32)
+    }
+
     /// `levels` box-filtered halvings of `t`, for a pass whose `.psm` names them with `K`.
     pub fn of(t: &Texture, levels: u32, k: f32) -> Mip {
         let mut chain: Vec<Texture> = Vec::new();
@@ -164,6 +181,26 @@ pub fn paint_depth(eye: crate::V3, forward: crate::V3, p: crate::V3) -> f32 {
 /// the camera ([`paint_depth`]) reads the paint at, so it is never softer than the original's.
 pub const PAINT_NEAREST: f32 = PAINT_EYE_LEAST * PAINT_PITCH.0;
 
+/// The paint target's size in texels, single player (`terrainscreenspaceprologue.psm`'s
+/// `renderTargetWidth` and `renderTargetHeight` in each freeride track's own archive; the `_ss`
+/// archives' 384x448 is not the one a ride loads).
+pub const PAINT_TARGET: (f32, f32) = (512.0, 832.0);
+/// The paint camera's horizontal field of view in degrees, and the width-to-height its projection
+/// keeps, read off the running game on `free09` (108.9 and 1.499; V97 saw 106.8 on another frame).
+pub const PAINT_FOV: (f32, f32) = (108.9, 1.5);
+
+/// How wide one of the paint target's texels is on the ground, in feet, `depth` feet from the paint
+/// camera (V101), as a box filter that spreads as far as the read back's bilinear tent does
+/// (√2 texels). Across, the texel is the view's width over 512 columns; along, its height over 832
+/// rows stretched by the plane's tilt to the camera; the two are taken as one width, their
+/// geometric mean, rather than as an ellipse.
+pub fn paint_texel(depth: f32) -> f32 {
+    let half = (PAINT_FOV.0.to_radians() / 2.0).tan();
+    let across = 2.0 * half / PAINT_TARGET.0;
+    let along = 2.0 * half / PAINT_FOV.1 / PAINT_TARGET.1 / PAINT_PITCH.0;
+    depth.max(0.0) * (across * along).sqrt() * std::f32::consts::SQRT_2
+}
+
 /// [`paint_depth`] in WGSL, `paint_depth(p)` against the shader's `view.eye` and `view.forward`.
 pub fn paint_depth_wgsl() -> String {
     let f = |v: f32| format!("{v:?}");
@@ -174,11 +211,32 @@ pub fn paint_depth_wgsl() -> String {
   let high = max({least}, {over} + view.eye.y - p.y);
   return {cos} * ahead + {sin} * high;
 }}
-// How much to stretch a texture's gradients so it reads no sharper than `level` of a `size`-texel side.
-fn mip_floor(gx: vec2f, gy: vec2f, size: f32, level: f32) -> f32 {{
-  return max(1.0, exp2(level) / size / max(min(length(gx), length(gy)), 1e-9));
+// One paint-target texel's width on the ground, in feet, `depth` feet from the paint camera.
+fn paint_texel(depth: f32) -> f32 {{
+  return max(depth, 0.0) * {texel};
+}}
+// How wide, in texture coordinates, the original's two reads leave a layer of a `size`-texel side
+// read at `level` into the paint target, which is read back over `texel` feet at `scale` per foot.
+fn mip_width(size: f32, level: f32, texel: f32, scale: f32) -> f32 {{
+  return length(vec2f(exp2(level) / size, texel * scale));
+}}
+// The screen's gradients `gx` and `gy` with a blur `width` wide every way added (V101): spreads
+// add, so the footprint's two axes each grow by it, the long one barely. Not one factor on both,
+// which on ground seen edge-on would blur along it four times past the floor.
+fn floor_grads(gx: vec2f, gy: vec2f, width: f32) -> mat2x2f {{
+  let a = gx.x * gx.x + gy.x * gy.x;
+  let b = gx.x * gx.y + gy.x * gy.y;
+  let c = gx.y * gx.y + gy.y * gy.y;
+  let r = sqrt(0.25 * (a - c) * (a - c) + b * b);
+  let long = 0.5 * (a + c) + r;
+  let short = max(0.5 * (a + c) - r, 0.0);
+  let toward = select(vec2f(b, long - a), vec2f(long - c, b), a >= c);
+  let e = select(vec2f(1.0, 0.0), toward / length(toward), length(toward) > 1e-20);
+  let w = width * width;
+  return mat2x2f(e * sqrt(long + w), vec2f(-e.y, e.x) * sqrt(short + w));
 }}
 ",
+        texel = f(paint_texel(1.0)),
         least = f(PAINT_EYE_LEAST),
         over = f(PAINT_EYE_OVER),
         cos = f(PAINT_PITCH.1),
@@ -376,7 +434,10 @@ impl Splat {
             let (u, v) = ((x * c + z * s) * p.scale[0], (z * c - x * s) * p.scale[1]);
             let full = &self.textures[p.texture];
             let t = match &p.mip {
-                Some(m) if depth > 0.0 => m.sample(full, m.level(depth), u, v, p.reads.0, p.reads.1),
+                Some(m) if depth > 0.0 => {
+                    let texel = 1.0 / (p.scale[0].abs().max(p.scale[1].abs()) * full.width.max(full.height).max(1) as f32);
+                    m.sample(full, m.level_through_target(depth, texel), u, v, p.reads.0, p.reads.1)
+                }
                 _ => full.sample_smooth_parts(u, v, p.reads.0, p.reads.1),
             };
             // Modulate by the pass's constant colour; the `.pst` decoder doubled the alpha, so halve it
