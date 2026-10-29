@@ -93,7 +93,7 @@ fn the_cursor_is_hidden_only_for_an_unpaused_ride_in_focus() {
     assert_eq!(m.screen(), Some(Screen::Pause));
     assert!(shown(Showing::Ride(Some(&m)), true), "the pause shows it");
     // Settings out of the pause, a menu over the ride.
-    for _ in 0..4 {
+    for _ in 0..3 {
         tap(&mut m, &mut reader, Control::Down);
     }
     tap(&mut m, &mut reader, Control::Cross);

@@ -554,23 +554,25 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_lets_t
     until((&mut h, &hn), (&mut g, &gn), "the host's room with one seat", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.riding && r.taken() == 1));
 }
 
-/// N10, the menu's side: a local freeride's pause offers "Open to Online" above Quit, which asks the
-/// shell to open the ride, and then shows the room code; a ride that cannot be opened has no such
-/// row and Quit where it was. A guest's join that lands in a ride under way is the lobby's ride with
+/// N10, the menu's side: a local freeride's pause offers "Open to Online" above Main Menu and Quit
+/// (P211), which asks the shell to open the ride, and then shows the room code with Seats under it; a
+/// ride that cannot be opened has no such row. A guest's join that lands in a ride under way is the lobby's ride with
 /// [`menu::Lobby::drop_in`] set, and Find says a listing is a ride to drop in on.
 #[test]
 fn a_freerides_pause_opens_it_online() {
     use menu::Opening;
     let (mut m, mut r) = fresh("Hosty", "thq1");
     m.pause();
-    assert_eq!(m.pause_rows().last().map(String::as_str), Some("Quit"));
-    let quit = m.pause_rows().len() - 1;
+    assert!(!m.pause_rows().iter().any(|row| row.contains("Online")), "{:?}", m.pause_rows());
     m.opening = Opening::Can;
     let rows = m.pause_rows();
-    assert_eq!(rows[rows.len() - 3..], ["Open to Online", &format!("Seats: {LOBBY_SEATS}"), "Quit"]);
-    // six rows down from Resume: Open to Online, and the pause closes over a ride that goes on
+    assert_eq!(rows[rows.len() - 3..], ["Open to Online", "Main Menu", "Quit"]);
+    // no Seats before the ride is opened (P211)
+    assert!(!rows.iter().any(|row| row.starts_with("Seats")), "{rows:?}");
+    let online = rows.len() - 3;
+    // five rows down from Resume: Open to Online, and the pause closes over a ride that goes on
     let mut acts = Vec::new();
-    for _ in 0..quit {
+    for _ in 0..online {
         acts.extend(tap(&mut m, &mut r, Control::Down));
     }
     acts.extend(tap(&mut m, &mut r, Control::Cross));
@@ -580,15 +582,16 @@ fn a_freerides_pause_opens_it_online() {
     // opened: the row is the code once the network says it, and pressing it does nothing
     m.opening = Opening::Open;
     m.pause();
-    assert_eq!(m.pause_rows()[quit], "Online: opening...");
+    assert_eq!(m.pause_rows()[online], "Online: opening...");
     m.heard(Event::Short("QKX4".into()));
-    assert_eq!(m.pause_rows()[quit], "Online: QKX4");
-    taps(&mut m, &mut r, &vec![Control::Down; quit]);
+    assert_eq!(m.pause_rows()[online], "Online: QKX4");
+    assert_eq!(m.pause_rows()[online + 1..], [format!("Seats: {LOBBY_SEATS}"), "Main Menu".into(), "Quit".into()]);
+    taps(&mut m, &mut r, &vec![Control::Down; online]);
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.iter().all(|a| *a == Act::Stay) && m.screen() == Some(Screen::Pause), "{acts:?}");
-    // the last row is still Quit, under Seats (N14)
+    // the last row is still Quit, under Seats (N14) and Main Menu
     // (which asks first since P110: Up off Stay onto Quit)
-    let acts = taps_acts(&mut m, &mut r, &[Control::Down, Control::Down, Control::Cross, Control::Up, Control::Cross]);
+    let acts = taps_acts(&mut m, &mut r, &[Control::Down, Control::Down, Control::Down, Control::Cross, Control::Up, Control::Cross]);
     assert!(acts.contains(&Act::Quit), "{acts:?}");
 
     // a guest dropping in
@@ -605,30 +608,33 @@ fn a_freerides_pause_opens_it_online() {
     assert!(!g.lobby.drop_in, "a ride that starts is not a drop-in");
 }
 
-/// N14: the pause of a ride that can be opened, or is, has a Seats row under the online row. Before
-/// opening it sets the lobby's pick the room opens with; opened, it asks the network, and shows the
-/// room's count once the network says it.
+/// N14: the pause of an opened ride has a Seats row under the online row (only once opened, P211:
+/// before that the lobby's pick the room opens with is the online row's chip). It asks the network,
+/// keeps the pick as the lobby's, and shows the room's count once the network says it.
 #[test]
 fn an_opened_rides_pause_has_a_seats_row() {
     use menu::Opening;
     let (mut m, mut r) = fresh("Hosty", "thq1");
     m.opening = Opening::Can;
     m.pause();
-    let seats = m.pause_rows().len() - 2;
+    assert!(!m.pause_rows().iter().any(|row| row.starts_with("Seats")), "{:?}", m.pause_rows());
+    m.opening = Opening::Open;
+    let seats = m.pause_rows().len() - 3;
+    assert_eq!(m.pause_rows()[seats], format!("Seats: {LOBBY_SEATS}"));
     taps(&mut m, &mut r, &vec![Control::Down; seats]);
     let acts = taps_acts(&mut m, &mut r, &[Control::Right, Control::Right, Control::Left, Control::Cross]);
     assert!(acts.iter().all(|a| *a == Act::Stay) && m.screen() == Some(Screen::Pause), "{acts:?}");
     assert_eq!(m.settings.lobby_seats, LOBBY_SEATS + 2);
     assert_eq!(m.pause_rows()[seats], format!("Seats: {}", LOBBY_SEATS + 2));
-    assert!(m.lobby.out.is_empty(), "nothing to tell before the room is open: {:?}", m.lobby.out);
+    assert_eq!(m.lobby.out.last(), Some(&Cmd::Seats(LOBBY_SEATS + 2)), "each step is asked of the room");
     assert!(m.changed(), "the pick is saved as the lobby's is");
     // round from two to the cap
     m.settings.lobby_seats = 2;
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.lobby_seats, openmx_net::SEATS);
+    m.lobby.out.clear();
 
-    // opened: the room's own count, asked of the network
-    m.opening = Opening::Open;
+    // the room's own count, once the network says it
     let mut room = Room::new("Hosty", "free06", 5);
     room.take(HOST, &[Pick::new("thq1", "race125p")]);
     (room.riding, room.drop_in) = (true, true);
@@ -644,8 +650,8 @@ fn an_opened_rides_pause_has_a_seats_row() {
     assert_eq!(m.screen(), Some(Screen::Pause));
 }
 
-/// N11, the menu's side: an online ride's pause has "Leave Session" just above Quit (under an opened
-/// ride's online rows), which asks first and then hands the shell the pausing player's seat to let
+/// N11, the menu's side: an online ride's pause has "Leave Session" just above Main Menu and Quit
+/// (under an opened ride's online rows, P211), which asks first and then hands the shell the pausing player's seat to let
 /// go, the ride back on under it. A guest the room is handed to hosts the lobby from there.
 #[test]
 fn an_online_rides_pause_leaves_the_session() {
@@ -656,8 +662,8 @@ fn an_online_rides_pause_leaves_the_session() {
     m.session = true;
     m.pause();
     let rows = m.pause_rows();
-    assert_eq!(rows[rows.len() - 2..], ["Leave Session", "Quit"]);
-    let leave = rows.len() - 2;
+    assert_eq!(rows[rows.len() - 3..], ["Leave Session", "Main Menu", "Quit"]);
+    let leave = rows.len() - 3;
     taps(&mut m, &mut r, &vec![Control::Down; leave]);
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.iter().all(|a| *a == Act::Stay), "{acts:?}");
@@ -680,7 +686,7 @@ fn an_online_rides_pause_leaves_the_session() {
     // an opened ride: under its online rows
     m.opening = Opening::Open;
     let rows = m.pause_rows();
-    assert_eq!(rows[rows.len() - 4..], ["Online: opening...", &format!("Seats: {LOBBY_SEATS}"), "Leave Session", "Quit"]);
+    assert_eq!(rows[rows.len() - 5..], ["Online: opening...", &format!("Seats: {LOBBY_SEATS}"), "Leave Session", "Main Menu", "Quit"]);
 
     // the host gone, the room handed to this machine: it hosts the lobby
     m.heard(Event::Me("guest-id".into()));

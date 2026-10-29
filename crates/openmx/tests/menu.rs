@@ -298,23 +298,23 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     assert!(m.riding());
     tap(&mut m, &mut r, Control::Start);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    // Settings from the pause (past the machine switch, P41, and the audio, P56), and back to it.
-    for _ in 0..4 {
+    // Settings from the pause (past the machine switch, P41), and back to it.
+    for _ in 0..3 {
         tap(&mut m, &mut r, Control::Down);
     }
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Settings));
     tap(&mut m, &mut r, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    // Restart and Main Menu (under Clear Markers since P118).
-    for _ in 0..3 {
+    // Restart and Main Menu (right above Quit since P211).
+    for _ in 0..2 {
         tap(&mut m, &mut r, Control::Up);
     }
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Restart), "{acts:?}");
     tap(&mut m, &mut r, Control::Start);
     // under Game Modifiers since P134
-    for _ in 0..7 {
+    for _ in 0..5 {
         tap(&mut m, &mut r, Control::Down);
     }
     // Main Menu asks first, on Stay (P110): Up onto the leaving row, then Cross.
@@ -3401,13 +3401,11 @@ fn the_pause_picks_a_song_skips_it_and_its_music_slider_is_kept() {
     assert!(m.riding());
     tap(&mut m, &mut r, Control::Start);
     assert_eq!(m.screen(), Some(Screen::Pause));
-    assert_eq!(m.pause_rows()[3], "Audio");
-    for _ in 0..3 {
-        tap(&mut m, &mut r, Control::Down);
-    }
+    // The pause's Settings, then its Audio tab (the pause's own Audio row went in P211).
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Settings));
-    assert_eq!(m.tabs(Screen::Settings)[m.tab(Screen::Settings)], "Audio", "the pause's Audio row is Settings' Audio tab (P118)");
+    tap_until(&mut m, &mut r, Control::R1, |m| m.tabs(Screen::Settings)[m.tab(Screen::Settings)] == "Audio");
     // The shuffle the defaults ask for is playing, and the Song row names it, dimmed until One Song.
     let first = speakers.now().expect("a song under Shuffle");
     let label = |m: &Menu, id: &str| m.music_choices.iter().find(|c| c.0 == id).unwrap().1.clone();
@@ -4034,23 +4032,29 @@ fn every_row_of_every_settings_tab_and_page_changes_by_pad() {
     );
 }
 
-/// P118: the pause's Audio row is Settings' Audio tab, and Back from it is the pause.
+/// P211: a local freeride's pause has no Audio (Settings' tab is the way) and no Clear Markers, and no
+/// Seats until the ride is opened; Main Menu and Quit are always the last two.
 #[test]
-fn the_pauses_audio_row_opens_settings_on_its_audio_tab() {
+fn the_pauses_rows_are_trimmed_and_main_menu_sits_above_quit() {
     let (mut m, mut r) = fresh();
+    m.opening = menu::Opening::Can;
     m.pause();
-    assert_eq!(m.pause_rows()[3], "Audio");
-    tap_until(&mut m, &mut r, Control::Down, |m| m.cursor(Screen::Pause) == 3);
+    let rows = m.pause_rows();
+    assert_eq!(rows[0..2], ["Resume", "Restart"]);
+    assert!(rows[2].starts_with("Switch To Machine"), "{rows:?}");
+    assert_eq!(rows[3..], ["Settings", "Game Modifiers", "Open to Online", "Main Menu", "Quit"]);
+    // The cursor walks exactly those rows: Up from Resume is Quit.
+    tap(&mut m, &mut r, Control::Up);
+    assert_eq!(m.cursor(Screen::Pause), rows.len() - 1);
+    tap(&mut m, &mut r, Control::Down);
+    // Opened, Seats sits under the online row, and Main Menu and Quit stay last.
+    m.opening = menu::Opening::Open;
+    let rows = m.pause_rows();
+    assert_eq!(rows[5..], ["Online: opening...", &format!("Seats: {}", m.settings.lobby_seats), "Main Menu", "Quit"]);
+    // Main Menu from its new place still asks first, and Quit under it too.
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Main Menu");
     tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Settings));
-    assert_eq!(m.tabs(Screen::Settings)[m.tab(Screen::Settings)], "Audio");
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, menu::Key::Mix);
-    // Its other tabs are there too, and Back is the pause, on its Audio row.
-    tap(&mut m, &mut r, Control::R1);
-    assert_eq!(m.tabs(Screen::Settings)[m.tab(Screen::Settings)], "Controls");
-    tap(&mut m, &mut r, Control::Circle);
-    assert_eq!(m.screen(), Some(Screen::Pause));
-    assert_eq!(m.cursor(Screen::Pause), 3);
+    assert!(m.confirming().is_some(), "Main Menu asks first");
 }
 
 /// P118 renamed rows and moved them, but every key of the two files is read as it was: a
@@ -4861,7 +4865,7 @@ fn the_original_game_page_is_a_page_of_the_ride_tab() {
     // From the pause's Settings too, and back to the pause by Circle twice.
     let (mut m, mut r) = fresh();
     m.pause();
-    tap_until(&mut m, &mut r, Control::Down, |m| m.cursor(Screen::Pause) == 4);
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
     tap(&mut m, &mut r, Control::Cross);
     tab_to(&mut m, &mut r, "Ride");
     down_to(&mut m, &mut r, Key::OriginalPage);

@@ -2200,28 +2200,36 @@ const MAIN_GARAGE: usize = 3;
 const MAIN_MODS: usize = 4;
 const MAIN_SETTINGS: usize = 5;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
-/// machine a switch would go to; the fourth its "Game Audio Options" (P56), which is Settings' Audio
-/// tab since P118. "Clear Markers" is the port's (P99): the pausing player's session markers on this
-/// track, the saved ones with them. "Game Modifiers" (P134) is the old front end's way in from the
-/// pause, put back: the host's page of every seat's, or the pausing player's own.
-pub const PAUSE: [&str; 9] = ["Resume", "Restart", "Switch To Machine", "Audio", "Settings", "Game Modifiers", "Clear Markers", "Main Menu", "Quit"];
+/// machine a switch would go to. "Game Modifiers" (P134) is the old front end's way in from the
+/// pause, put back: the host's page of every seat's, or the pausing player's own. Audio is only
+/// Settings' tab and the port's Clear Markers is gone (P211); a ride's markers clear from the
+/// spawn's Down (P135). The online rows go in above Main Menu, which stays right above Quit
+/// ([`Menu::pause_layout`]).
+pub const PAUSE: [&str; 7] = ["Resume", "Restart", "Switch To Machine", "Settings", "Game Modifiers", "Main Menu", "Quit"];
 const PAUSE_SWITCH: usize = 2;
-const PAUSE_AUDIO: usize = 3;
-const PAUSE_SETTINGS: usize = 4;
-const PAUSE_MODIFIERS: usize = 5;
-const PAUSE_MARKERS: usize = 6;
-const PAUSE_MAIN: usize = 7;
-/// The pause's "Open to Online" row (N10), before Quit, on a ride that can be opened
-/// ([`Menu::opening`]); Quit moves down one under it.
-const PAUSE_OPEN: usize = 8;
+const PAUSE_SETTINGS: usize = 3;
+const PAUSE_MODIFIERS: usize = 4;
+const PAUSE_MAIN: usize = 5;
+/// The pause's "Open to Online" row (N10), on a ride that can be opened ([`Menu::opening`]); opened,
+/// the room code.
 const PAUSE_OPEN_ROW: &str = "Open to Online";
-/// The pause's Seats row (N14), under the online row: the seats the room opens with, then, opened,
-/// the room's own, as the lobby's Seats row sets them.
-const PAUSE_SEATS: usize = PAUSE_OPEN + 1;
-/// The pause's "Leave Session" row (N11), on an online ride ([`Menu::session`]): before Quit, under the
-/// online rows when there are any. The pausing player's seats go and the ride goes on for the rest.
-/// On a local ride whose seats are open ([`Menu::seats_open`], P76) the pausing player gives up their
-/// seat and the others ride on; the last one leaving is back on the main menu.
+/// The pause's rows as they stand: [`PAUSE`]'s by index, and the ones that come and go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PauseRow {
+    /// One of [`PAUSE`]'s.
+    Fixed(usize),
+    /// "Open to Online", or the room code once opened (N10).
+    Online,
+    /// The opened room's seats (N14): only once the ride is open (P211); until then the online row's
+    /// chip says how many it opens with.
+    Seats,
+    /// "Leave Session" (N11, P76).
+    Leave,
+}
+/// The pause's "Leave Session" row (N11), on an online ride ([`Menu::session`]): under the online
+/// rows when there are any, above Main Menu. The pausing player's seats go and the ride goes on for
+/// the rest. On a local ride whose seats are open ([`Menu::seats_open`], P76) the pausing player
+/// gives up their seat and the others ride on; the last one leaving is back on the main menu.
 const PAUSE_LEAVE_ROW: &str = "Leave Session";
 
 /// Whether the ride under the pause can be opened to online players (N10), and whether it is.
@@ -2456,9 +2464,6 @@ pub enum Act {
     Online,
     /// Open the ride under the pause to online players (N10): host a lobby on it, and carry on.
     OpenOnline,
-    /// Clear this seat's player's session markers on the ride's track, kept and placed (P99); the
-    /// pause stays open.
-    ClearMarkers(usize),
     /// Leave the online ride (N11) for this seat's player: every seat of this machine's for the first
     /// one, that player's alone for another; the ride goes on for the rest.
     LeaveSession(usize),
@@ -3442,41 +3447,48 @@ impl Menu {
         self.changed = true;
     }
 
+    /// The pause's rows in order (P211): [`PAUSE`]'s up to Game Modifiers, then the online row, its
+    /// Seats once opened and Leave Session, then Main Menu and Quit, always the last two.
+    fn pause_layout(&self) -> Vec<PauseRow> {
+        let mut rows: Vec<PauseRow> = (0..PAUSE_MAIN).map(PauseRow::Fixed).collect();
+        if self.opening != Opening::No {
+            rows.push(PauseRow::Online);
+        }
+        if self.opening == Opening::Open {
+            rows.push(PauseRow::Seats);
+        }
+        if self.session || self.seats_open {
+            rows.push(PauseRow::Leave);
+        }
+        rows.extend((PAUSE_MAIN..PAUSE.len()).map(PauseRow::Fixed));
+        rows
+    }
+
     /// The pause's rows as drawn: the switch row names the machine it would go to, or says there is
     /// none for this player.
     pub fn pause_rows(&self) -> Vec<String> {
         let seat = self.pauser;
-        let mut rows: Vec<String> = PAUSE
-            .iter()
-            .enumerate()
-            .map(|(i, row)| match i {
-                PAUSE_SWITCH => match self.switch_to() {
-                    Some(m) if self.choices(seat).len() > 1 => format!("{row}: < {} >", m.label()),
-                    Some(m) => format!("{row}: {}", m.label()),
-                    None => format!("{row}: None"),
+        self.pause_layout()
+            .into_iter()
+            .map(|row| match row {
+                PauseRow::Fixed(PAUSE_SWITCH) => {
+                    let row = PAUSE[PAUSE_SWITCH];
+                    match self.switch_to() {
+                        Some(m) if self.choices(seat).len() > 1 => format!("{row}: < {} >", m.label()),
+                        Some(m) => format!("{row}: {}", m.label()),
+                        None => format!("{row}: None"),
+                    }
+                }
+                PauseRow::Fixed(i) => PAUSE[i].to_string(),
+                PauseRow::Online => match self.opening {
+                    Opening::Open if self.lobby.code.is_empty() => "Online: opening...".into(),
+                    Opening::Open => format!("Online: {}", self.lobby.code),
+                    _ => PAUSE_OPEN_ROW.into(),
                 },
-                _ => row.to_string(),
+                PauseRow::Seats => format!("Seats: {}", self.pause_seats()),
+                PauseRow::Leave => PAUSE_LEAVE_ROW.into(),
             })
-            .collect();
-        match self.opening {
-            Opening::No => {}
-            Opening::Can => rows.insert(PAUSE_OPEN, PAUSE_OPEN_ROW.into()),
-            Opening::Open if self.lobby.code.is_empty() => rows.insert(PAUSE_OPEN, "Online: opening...".into()),
-            Opening::Open => rows.insert(PAUSE_OPEN, format!("Online: {}", self.lobby.code)),
-        }
-        if self.opening != Opening::No {
-            rows.insert(PAUSE_SEATS, format!("Seats: {}", self.pause_seats()));
-        }
-        if let Some(at) = self.pause_leave() {
-            rows.insert(at, PAUSE_LEAVE_ROW.into());
-        }
-        rows
-    }
-
-    /// Where the pause's Leave Session row is (N11), on an online ride: just before Quit; and on a
-    /// local ride whose seats are open (P76), in the same place.
-    fn pause_leave(&self) -> Option<usize> {
-        (self.session || self.seats_open).then_some(PAUSE_OPEN + 2 * usize::from(self.opening != Opening::No))
+            .collect()
     }
 
     /// Player `i`'s pad seat in the ride under the menu: a local game's, or a Free Ride's own seat.
@@ -3560,9 +3572,9 @@ impl Menu {
         }
     }
 
-    /// The pause's Seats row stepped `by` one, round from the cap to two as the lobby's is. Before
-    /// opening it is only the pick the room will open with; opened, the network is asked, and it
-    /// refuses under the last taken seat (its reason comes back as the status).
+    /// The pause's Seats row stepped `by` one, round from the cap to two as the lobby's is. The row is
+    /// there once the ride is opened (P211), so the network is asked, and it refuses under the last
+    /// taken seat (its reason comes back as the status).
     fn pause_seats_by(&mut self, by: i32) {
         let span = (openmx_net::SEATS - 1) as i32;
         let n = 2 + (self.pause_seats() as i32 - 2 + by).rem_euclid(span) as usize;
@@ -3580,8 +3592,8 @@ impl Menu {
             Screen::Splash => self.splash(),
             Screen::Main => self.main(),
             Screen::Pause => self.pause(),
-            // Settings' tabs (P118), which were screens of their own: Audio over the pause, as the
-            // pause's Audio row opens it.
+            // Settings' tabs (P118), which were screens of their own: Audio over the pause, as
+            // Settings there opens on it.
             Screen::Audio => {
                 self.pause();
                 self.open_settings(pages::TAB_AUDIO);
@@ -3658,7 +3670,7 @@ impl Menu {
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page_of(screen).len().max(1),
             Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => 1,
             Screen::Keyboard => KEY_ROWS.len() + 1,
-            Screen::Pause => PAUSE.len() + 2 * usize::from(self.opening != Opening::No) + usize::from(self.session || self.seats_open),
+            Screen::Pause => self.pause_layout().len(),
             Screen::Online => ONLINE.len() + 1,
             Screen::Games => self.lobby.found.len() + 1,
             Screen::Lobby => self.lobby.items().len(),
@@ -3909,13 +3921,14 @@ impl Menu {
                     self.work_deck(c);
                     return Act::Stay;
                 }
-                if at == PAUSE_SEATS && self.opening != Opening::No {
+                let row = self.pause_layout().get(at).copied();
+                if row == Some(PauseRow::Seats) {
                     if p.ok || p.left || p.right {
                         self.pause_seats_by(if p.left { -1 } else { 1 });
                     }
                     return Act::Stay;
                 }
-                if at == PAUSE_SWITCH && (p.left || p.right) {
+                if row == Some(PauseRow::Fixed(PAUSE_SWITCH)) && (p.left || p.right) {
                     let choices = self.choices(self.pauser);
                     if let Some(now) = self.switch_to().and_then(|m| choices.iter().position(|c| *c == m)) {
                         let n = choices.len();
@@ -3923,11 +3936,11 @@ impl Menu {
                     }
                     return Act::Stay;
                 }
-                if p.ok && self.pause_leave() == Some(at) && self.session {
+                if p.ok && row == Some(PauseRow::Leave) && self.session {
                     self.leaving = Some((Leaving::Session, 1));
                     return Act::Stay;
                 }
-                if p.ok && self.pause_leave() == Some(at) {
+                if p.ok && row == Some(PauseRow::Leave) {
                     // The last player out leaves the ride, which asks first as Main Menu does.
                     if self.riders <= 1 {
                         self.leaving = Some((Leaving::Main, 1));
@@ -3937,33 +3950,31 @@ impl Menu {
                     return Act::Leave(self.pauser);
                 }
                 if p.ok {
-                    match at {
-                        0 => {
+                    match row {
+                        Some(PauseRow::Fixed(0)) => {
                             self.stack.clear();
                             return Act::Resume;
                         }
-                        1 => {
+                        Some(PauseRow::Fixed(1)) => {
                             self.stack.clear();
                             return Act::Restart;
                         }
-                        PAUSE_SWITCH => {
+                        Some(PauseRow::Fixed(PAUSE_SWITCH)) => {
                             if let Some(to) = self.switch_to() {
                                 self.stack.clear();
                                 return Act::Switch(self.pauser, to);
                             }
                         }
-                        PAUSE_AUDIO => self.open_settings(pages::TAB_AUDIO),
-                        PAUSE_SETTINGS => self.open_settings(self.tab(Screen::Settings)),
-                        PAUSE_MODIFIERS => self.open_modifiers(),
-                        PAUSE_MARKERS => return Act::ClearMarkers(self.pauser),
+                        Some(PauseRow::Fixed(PAUSE_SETTINGS)) => self.open_settings(self.tab(Screen::Settings)),
+                        Some(PauseRow::Fixed(PAUSE_MODIFIERS)) => self.open_modifiers(),
                         // Leaving asks first, on Stay (P110).
-                        PAUSE_MAIN => self.leaving = Some((Leaving::Main, 1)),
-                        PAUSE_OPEN if self.opening == Opening::Can => {
+                        Some(PauseRow::Fixed(PAUSE_MAIN)) => self.leaving = Some((Leaving::Main, 1)),
+                        Some(PauseRow::Online) if self.opening == Opening::Can => {
                             self.stack.clear();
                             return Act::OpenOnline;
                         }
-                        PAUSE_OPEN if self.opening == Opening::Open => {}
-                        _ => self.leaving = Some((Leaving::Quit, 1)),
+                        Some(PauseRow::Fixed(_)) => self.leaving = Some((Leaving::Quit, 1)),
+                        _ => {}
                     }
                 }
             }

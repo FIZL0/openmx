@@ -877,16 +877,14 @@ fn pause_panel(row: &str) -> (String, &'static str) {
     let about = match row {
         "Resume" => "",
         "Restart" => "Back to the start of this track, same machine, same modifiers.",
-        "Audio" => "The Audio tab of Settings, opened straight from here.",
         "Settings" => "Every setting takes effect when the pause closes.",
-        "Clear Markers" => "Removes your session markers on this track, the saved ones with them.",
         "Main Menu" => "Ends the ride.",
         "Leave Session" => "Gives up your seat: your bike goes and the others ride on. The last one out ends the ride.",
         "Quit" => "Ends the ride and closes the game.",
         "Leave Session" => "Takes you out of the online ride. The others ride on without you.",
         r if r.starts_with("Switch") => "The original pause's machine switch. Your bike waits where you left it.",
         r if r.starts_with("Seats") => "How many seats the online ride has. Left and right change it.",
-        _ => "Lets online players drop into this ride. Your seat stays yours; the code appears here.",
+        _ => "Lets online players drop into this ride with the seats the lobby last chose. Your seat stays yours; the code appears here, and Seats under it.",
     };
     (pause_label(row).0, about)
 }
@@ -1051,10 +1049,11 @@ impl Pen<'_> {
         let y = self.heading(&eyebrow, &h, about, x, 10.0, w, 2.6);
         let mut chips = Vec::new();
         // The song playing is the player's to say (P174).
-        if row == "Resume" || row == "Audio" {
+        if row == "Resume" {
             chips.push(menu.settings.mix.label().to_string());
         }
-        if row.starts_with("Online") || row.starts_with("Seats") {
+        // Before opening the online row's chip is the only place the pause says the count (P211).
+        if row == "Open to Online" || row.starts_with("Online") || row.starts_with("Seats") {
             chips.push(format!("Seats *{}*", menu.pause_seats()));
         }
         // Another controller can ride in from here (P76). Spelt out (P171): the menu's type has no ✕.
