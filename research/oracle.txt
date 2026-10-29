@@ -4187,7 +4187,7 @@ drive_on_wheel    boot 0x001b9a20 (emitter, wheel, position, contact object, tou
 #                                 substep by bike_wheel_contacts and set to the last rear (from.z <= 0)
 #                                 contact's struck object; its +0x89 is the .col surface word's low byte
 drive_on_share    boot 0x001b98b0 the level share: 100 / wheels when |copied velocity| != 0, else 0
-sound_set_pitch   boot 0x00166a20 sound vt +0x38: +0x44 = pitch only when (unsigned) pitch < 0x4000
+sound_store_pitch boot 0x00166a20 sound vt +0x38: +0x44 = pitch only when (unsigned) pitch < 0x4000
 sound_set_volume  boot 0x001667e0 sound vt +0x30: volume clamped 0..100
 
 # ---------------------------------------------------------------------------------------------------
