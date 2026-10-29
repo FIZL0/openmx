@@ -111,7 +111,7 @@ body=$out/notes.md
     echo "\`SHA256SUMS\` is signed with the project's [minisign](https://jedisct1.github.io/minisign/) key:"
     echo
     echo '```'
-    echo "minisign -Vm SHA256SUMS -P $pub && sha256sum -c --ignore-missing SHA256SUMS"
+    echo "minisign -Vm SHA256SUMS -x SHA256SUMS.sig -P $pub && sha256sum -c --ignore-missing SHA256SUMS"
     echo '```'
     echo
     echo "Want the newest changes before the next release? Try the [beta](https://github.com/$repo/releases/tag/beta) or [beta.openmx.dev](https://beta.openmx.dev/)."
