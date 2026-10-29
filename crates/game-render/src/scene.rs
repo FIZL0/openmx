@@ -28,6 +28,10 @@ pub struct Light {
     /// Where the sun is; with `target`, this gives the direction it shines in.
     pub position: V3,
     pub target: V3,
+    /// The colour its shadows are laid in (`ShadowRGB`, 0..255) and their share
+    /// (`ShadowIntensity`), where the scene gives them (V108, [`crate::shadow::Tint`]).
+    pub shadow_rgb: Option<[f32; 3]>,
+    pub shadow_intensity: Option<f32>,
 }
 
 /// What the original's fog object subtracts from the fog's end before `Haziness` scales it, in feet:
@@ -153,6 +157,8 @@ impl Scene {
                     color,
                     position: vec_of(Some(s), "Position", v3(0.0, 1.0, 0.0)),
                     target: vec_of(Some(s), "TargetPosition", v3(0.0, 0.0, 0.0)),
+                    shadow_rgb: s.numbers("ShadowRGB").filter(|n| n.len() >= 3).map(|n| [n[0], n[1], n[2]]),
+                    shadow_intensity: s.numbers("ShadowIntensity").and_then(|n| n.first().copied()),
                 });
             } else if lower.starts_with("model") {
                 // MX vs. ATV's race props: a free ride, the only ride on its maps here, draws no
@@ -209,6 +215,15 @@ impl Scene {
     /// `[Fog]`.
     pub fn fog_range(&self) -> (f32, f32) {
         fog_range(self.fog_near, self.fog_far, self.fog_visibility, self.fog_haziness)
+    }
+
+    /// How the sun's shadows are laid (V108): the first directional light's `ShadowRGB` and
+    /// `ShadowIntensity`, or the game's own default.
+    pub fn shadow_tint(&self) -> crate::shadow::Tint {
+        match self.lights.iter().find(|l| l.directional) {
+            Some(l) => crate::shadow::Tint::of(l.shadow_rgb, l.shadow_intensity),
+            None => crate::shadow::Tint::default(),
+        }
     }
 
     /// The direction the sun shines in, or a default from above and behind if the scene has no

@@ -39,6 +39,7 @@ use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
 use crate::split::{self, Split};
 use game_render::eco::{Foliage, Lod};
+use game_render::shadow::Shadows;
 use game_render::world::Graphics;
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Disc, Frame, Texture};
@@ -504,6 +505,9 @@ pub struct Settings {
     /// How far the GPU filters every texture anisotropically (V83): 16x unless turned down, or Off
     /// under the Original switch's Texture Filtering.
     pub filtering: Filtering,
+    /// The sun's shadows of what moves and stands (V108): ours, the original's under each racer, or
+    /// none. Ours unless turned to another; Original under the Original switch.
+    pub shadows: Shadows,
     /// Each seat's session markers (P129), the Controls tab's Markers row, 1P's first: on, the d-pad
     /// is the markers' and the left stick alone rides; off, the d-pad fires no marker, the marker
     /// bar hides, and the d-pad rides as the original's — steering, leaning and the trick gestures.
@@ -565,6 +569,9 @@ pub const ASPECT_HELP: &str = "The shape of the picture, the HUD and the menus o
 
 /// Texture Filtering's row's help, on the Graphics tab and in the Original switch's reach (V83).
 pub const FILTERING_HELP: &str = "How sharp textures stay when seen at a glance, like the ground down a straight. 16x keeps them sharp into the distance; Off blurs them as the original did. The software renderer draws without it either way.";
+
+/// Shadows' row's help, on the Graphics tab and in the Original switch's reach (V108).
+pub const SHADOWS_HELP: &str = "Shadows of the bikes, riders, machines and the world's models in the sun. Better casts everything near onto the ground and onto each other, softly, as dark as the ground's own shadows; Original is the game's soft patch under each rider. The software renderer draws none.";
 
 /// The Texture Filtering setting (V83): how far the GPU filters textures anisotropically, so a
 /// texture seen edge-on (the ground down a straight) stays sharp along it. Off is the original's
@@ -666,10 +673,12 @@ pub enum Departure {
     Markers,
     /// The world's textures (V84): texture packs' and upscales over the disc's, or the disc's alone.
     Textures,
+    /// The sun's shadows (V108): ours of everything near, or the original's under each racer.
+    Shadows,
 }
 
 impl Departure {
-    pub const ALL: [Departure; 9] = [
+    pub const ALL: [Departure; 10] = [
         Departure::Controls,
         Departure::Cameras,
         Departure::Fog,
@@ -679,6 +688,7 @@ impl Departure {
         Departure::Filtering,
         Departure::Markers,
         Departure::Textures,
+        Departure::Shadows,
     ];
 
     /// Its row's name.
@@ -693,6 +703,7 @@ impl Departure {
             Departure::Filtering => "Texture Filtering",
             Departure::Markers => "Markers",
             Departure::Textures => "Upscaled Textures",
+            Departure::Shadows => "Shadows",
         }
     }
 
@@ -708,6 +719,7 @@ impl Departure {
             Departure::Filtering => ["16x", "Off"],
             Departure::Markers => ["On", "Off"],
             Departure::Textures => ["Upscaled", "Original"],
+            Departure::Shadows => ["Better", "Original"],
         }
     }
 
@@ -723,6 +735,7 @@ impl Departure {
             Departure::Filtering => FILTERING_HELP,
             Departure::Markers => "Every player's session markers on the d-pad. Off, the d-pad steers, leans and does tricks as in the original.",
             Departure::Textures => "The world's textures from texture packs, mods/texture-replacements and mods' own upscales, where there are any. Original is the disc's alone. From the next ride; the software renderer draws them too, slower.",
+            Departure::Shadows => SHADOWS_HELP,
         }
     }
 }
@@ -741,6 +754,7 @@ impl Menu {
             Departure::Filtering => s.filtering == Filtering::Off,
             Departure::Markers => s.markers.iter().all(|m| !*m),
             Departure::Textures => !s.textures,
+            Departure::Shadows => s.shadows == Shadows::Original,
         }
     }
 
@@ -786,6 +800,7 @@ impl Menu {
             Departure::Filtering => s.filtering = if original { Filtering::Off } else { Filtering::X16 },
             Departure::Markers => s.markers = [!original; SEATS_MAX],
             Departure::Textures => s.textures = !original,
+            Departure::Shadows => s.shadows = if original { Shadows::Original } else { Shadows::Better },
         }
     }
 
@@ -1207,6 +1222,7 @@ impl Default for Settings {
             texture_packs: Vec::new(),
             texture_packs_off: Vec::new(),
             filtering: Filtering::default(),
+            shadows: Shadows::default(),
             markers: [true; SEATS_MAX],
         }
     }
@@ -1324,6 +1340,7 @@ impl Settings {
                 "texture_packs" => s.texture_packs = pack_names(v),
                 "texture_packs_off" => s.texture_packs_off = pack_names(v),
                 "texture_filtering" => s.filtering = Filtering::from_word(v).unwrap_or(s.filtering),
+                "shadows" => s.shadows = Shadows::from_word(v).unwrap_or(s.shadows),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "camera_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
@@ -1412,6 +1429,7 @@ impl Settings {
             + &self.hud_text()
             + &self.original_text()
             + &self.filtering_text()
+            + &self.shadows_text()
             + &self.world_sky_text()
             + &self.mods_text()
             + &self.tricks_text()
@@ -1484,6 +1502,11 @@ impl Settings {
     /// was.
     fn filtering_text(&self) -> String {
         if self.filtering == Filtering::default() { String::new() } else { format!("texture_filtering = {}\n", self.filtering.word()) }
+    }
+
+    /// Shadows (V108), only when not ours, so a file from before it is written as it was.
+    fn shadows_text(&self) -> String {
+        if self.shadows == Shadows::default() { String::new() } else { format!("shadows = {}\n", self.shadows.word()) }
     }
 
     /// A world's sky (MD9), only when it is not the default, so a file from before it is written as
