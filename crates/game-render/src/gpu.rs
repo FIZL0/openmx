@@ -4250,7 +4250,7 @@ fn ground_wgsl(paint: Option<&Splat>, dirt: [f32; 3]) -> String {
         }
     }
     if meshed {
-        s.push_str(ground_mesh::APPLY_WGSL);
+        s.push_str(&ground_mesh::apply_wgsl());
     }
     let (x0, x1, z0, z1, mapped) = match paint.and_then(|p| p.shadow.as_ref()) {
         Some(sh) => (sh.x0, sh.x1, sh.z0, sh.z1, true),

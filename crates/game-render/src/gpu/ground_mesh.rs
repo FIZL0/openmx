@@ -9,7 +9,17 @@
 //! * **far**: the whole of the meshes' rectangle, drawn once when the ground is set;
 //! * **near**: [`NEAR_FEET`] round a view's eye at [`NEAR_PER_FOOT`] texels a foot, drawn again
 //!   whenever the eye has moved to another [`STEP`]-foot square, so the meshes under the rider are as
-//!   sharp as their own textures.
+//!   sharp as their own textures;
+//! * **mid** (V106): [`MID_FEET`] round the eye at [`MID_PER_FOOT`] texel a foot, drawn again when the
+//!   eye has moved to another [`MID_STEP`]-foot square, between the two.
+//!
+//! The ground goes from one to the next by the eye's own distance, over [`NEAR_FADE`] and then
+//! [`MID_FADE`], never by where a target's square happens to end (V106: the near target used to stop
+//! in a hard line some 250 feet ahead, its ruts sharp on one side and the whole map's blur on the
+//! other, and the line jumped 64 feet each time the eye crossed a square). Both fades end inside the
+//! least any target reaches from its eye, and a target drawn again round a new square holds the same
+//! texels where the old one did (its corner on a whole texel of every level a fade reads), so a
+//! target following the rider changes nothing on screen.
 //!
 //! Every view has a near target of its own (V89: split screen's second player saw only the far
 //! target's whole-map paint), and views standing in the same square share one. Each near target has
@@ -18,8 +28,8 @@
 //! from the renderer's own (V91), trilinear and as anisotropic as its Texture Filtering, so a road
 //! seen down its length keeps its paint sharp across rather than picking one blurred mip; the
 //! renderer hands a new one to [`GpuMeshes::set_sampler`] and every group is made again. A near target is 2048² texels with its
-//! mips, about 21 MiB, made only when a view stands in a square no other view's target holds, so one
-//! view costs what it always did and eight views apart cost about 171 MiB; a target no view needs any
+//! mips, about 21 MiB, made only when a view stands in a square no other view's target holds, and each comes with
+//! a mid target of the same size, so one view costs about 43 MiB and eight views apart about 342 MiB; a target no view needs any
 //! more is drawn over for the next square that does, and the pool shrinks back when views go.
 //!
 //! Each target is drawn into every mip level, the meshes' own textures sampled at that level's size,
@@ -41,6 +51,18 @@ const FAR_SIZE: u32 = 2048;
 /// The near target is centred on the eye's square of this many feet, so it is drawn again only when
 /// the eye crosses into another, and always reaches at least `NEAR_FEET / 2 - STEP` feet ahead.
 const STEP: f32 = 64.0;
+/// The mid target: as many texels as the near, a foot each, 2048 feet across, centred on the eye's
+/// square of `MID_STEP` feet (a whole number of `STEP`s, so a near square lies in one mid square).
+const MID_SIZE: u32 = 2048;
+pub const MID_PER_FOOT: f32 = 1.0;
+pub const MID_FEET: f32 = MID_SIZE as f32 / MID_PER_FOOT;
+const MID_STEP: f32 = 256.0;
+const MID_PER_STEP: i32 = (MID_STEP / STEP) as i32;
+/// Where the ground goes from the near target to the mid one, in feet from the eye along the ground,
+/// and from the mid to the far: a smoothstep from the first to the second. Each ends short of the
+/// least its target reaches from the eye, `FEET / 2 - STEP / 2` along either axis (224 and 896).
+pub const NEAR_FADE: [f32; 2] = [152.0, 216.0];
+pub const MID_FADE: [f32; 2] = [600.0, 880.0];
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 #[repr(C)]
@@ -61,12 +83,14 @@ struct Target {
     bind: wgpu::BindGroup,
 }
 
-/// A near target, the square its eye stood in when it was drawn, and the ground's bind group that
-/// samples it: the ground shader's uniform `at` (this near square and the far one, each
-/// `x0, z0, 1 / side, 0`), this target and the far one.
+/// A near target and its mid one, the squares its eye stood in when each was drawn, and the ground's
+/// bind group that samples them: the ground shader's uniform `at` (this near square, the mid and the
+/// far one, each `x0, z0, 1 / side, 0`), these targets and the far one.
 struct Near {
     target: Target,
     square: Option<[i32; 2]>,
+    mid: Target,
+    mid_square: Option<[i32; 2]>,
     at: wgpu::Buffer,
     ground: wgpu::BindGroup,
     /// The anisotropy `ground`'s sampler filtered with when it was made.
@@ -93,31 +117,51 @@ pub(super) struct GpuMeshes {
 }
 
 /// The ground shader's declarations: its group 2, one per near target.
-pub(super) const WGSL_BINDINGS: &str = "struct MeshAt { near: vec4f, far: vec4f }\n\
+pub(super) const WGSL_BINDINGS: &str = "struct MeshAt { near: vec4f, mid: vec4f, far: vec4f }\n\
   @group(2) @binding(0) var mesh_near: texture_2d<f32>;\n\
   @group(2) @binding(1) var mesh_far: texture_2d<f32>;\n\
   @group(2) @binding(2) var<uniform> mesh_at: MeshAt;\n\
-  @group(2) @binding(3) var mesh_smp: sampler;\n";
+  @group(2) @binding(3) var mesh_smp: sampler;\n\
+  @group(2) @binding(4) var mesh_mid: texture_2d<f32>;\n";
 
 /// The ground shader's code that lays the meshes over `frame`, the splat's colour in 0..255, at the
-/// world's `x` and `z`. Both targets are sampled everywhere, as the derivatives need, and the near
-/// one is used where it reaches.
-pub(super) const APPLY_WGSL: &str = "  let mesh_un = (vec2f(x, z) - mesh_at.near.xy) * mesh_at.near.z;\n\
-  let mesh_uf = (vec2f(x, z) - mesh_at.far.xy) * mesh_at.far.z;\n\
-  let mesh_n = textureSample(mesh_near, mesh_smp, mesh_un);\n\
-  let mesh_f = textureSample(mesh_far, mesh_smp, mesh_uf);\n\
-  let mesh_in_near = all(mesh_un > vec2f(0.001)) && all(mesh_un < vec2f(0.999));\n\
-  let mesh_in_far = all(mesh_uf >= vec2f(0.0)) && all(mesh_uf <= vec2f(1.0));\n\
-  let mesh = select(select(vec4f(0.0, 0.0, 0.0, 1.0), mesh_f, mesh_in_far), mesh_n, mesh_in_near);\n\
-  frame = vec4f(frame.rgb * mesh.a + mesh.rgb * 255.0, frame.a);\n";
+/// world's `x` and `z`. Every target is sampled everywhere, as the derivatives need, and they are
+/// mixed by the distance from the view's eye ([`NEAR_FADE`], [`MID_FADE`]); a target counts for
+/// nothing outside its square, which the fades keep it from reaching.
+pub(super) fn apply_wgsl() -> String {
+    let f = |v: f32| format!("{v:?}");
+    format!(
+        "  let mesh_un = (vec2f(x, z) - mesh_at.near.xy) * mesh_at.near.z;
+  let mesh_um = (vec2f(x, z) - mesh_at.mid.xy) * mesh_at.mid.z;
+  let mesh_uf = (vec2f(x, z) - mesh_at.far.xy) * mesh_at.far.z;
+  let mesh_n = textureSample(mesh_near, mesh_smp, mesh_un);
+  let mesh_m = textureSample(mesh_mid, mesh_smp, mesh_um);
+  let mesh_f = textureSample(mesh_far, mesh_smp, mesh_uf);
+  let mesh_in_near = all(mesh_un > vec2f(0.001)) && all(mesh_un < vec2f(0.999));
+  let mesh_in_mid = all(mesh_um > vec2f(0.001)) && all(mesh_um < vec2f(0.999));
+  let mesh_in_far = all(mesh_uf >= vec2f(0.0)) && all(mesh_uf <= vec2f(1.0));
+  let mesh_d = length(vec2f(x, z) - view.eye.xz);
+  let mesh_to_mid = select(1.0, smoothstep({n0}, {n1}, mesh_d), mesh_in_near);
+  let mesh_to_far = select(1.0, smoothstep({m0}, {m1}, mesh_d), mesh_in_mid);
+  let mesh_rest = mix(mesh_m, select(vec4f(0.0, 0.0, 0.0, 1.0), mesh_f, mesh_in_far), mesh_to_far);
+  let mesh = mix(mesh_n, mesh_rest, mesh_to_mid);
+  frame = vec4f(frame.rgb * mesh.a + mesh.rgb * 255.0, frame.a);
+",
+        n0 = f(NEAR_FADE[0]),
+        n1 = f(NEAR_FADE[1]),
+        m0 = f(MID_FADE[0]),
+        m1 = f(MID_FADE[1]),
+    )
+}
 
 /// The bind group layout entries of the ground's group 2, [`WGSL_BINDINGS`].
-fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 5] {
     [
         texture_entry(0, true, wgpu::TextureViewDimension::D2),
         texture_entry(1, true, wgpu::TextureViewDimension::D2),
         uniform_entry(2, wgpu::ShaderStages::FRAGMENT),
         sampler_entry(3),
+        texture_entry(4, true, wgpu::TextureViewDimension::D2),
     ]
 }
 
@@ -290,22 +334,25 @@ impl GpuMeshes {
         meshes
     }
 
-    /// Another near target, and its ground bind group.
+    /// Another near target with its mid one, and their ground bind group.
     fn add_near(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let target = target(device, &self.rect_layout, NEAR_SIZE, "ground meshes near");
+        let mid = self::target(device, &self.rect_layout, MID_SIZE, "ground meshes mid");
         let at = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ground meshes at"),
-            size: 32,
+            size: 48,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&at, 0, bytemuck::cast_slice(&[[f32::MAX, f32::MAX, 0.0, 0.0], self.far_rect]));
-        let ground = self.ground_bind(device, &target, &at);
-        self.nears.push(Near { target, square: None, at, ground, anisotropy: self.anisotropy });
+        let nowhere = [f32::MAX, f32::MAX, 0.0, 0.0];
+        queue.write_buffer(&at, 0, bytemuck::cast_slice(&[nowhere, nowhere, self.far_rect]));
+        let ground = self.ground_bind(device, &target, &mid, &at);
+        self.nears.push(Near { target, square: None, mid, mid_square: None, at, ground, anisotropy: self.anisotropy });
     }
 
-    /// The ground's group 2 over near target `target` placed by `at`: it, the far one and the sampler.
-    fn ground_bind(&self, device: &wgpu::Device, target: &Target, at: &wgpu::Buffer) -> wgpu::BindGroup {
+    /// The ground's group 2 over near target `target` and its `mid`, placed by `at`: them, the far
+    /// one and the sampler.
+    fn ground_bind(&self, device: &wgpu::Device, target: &Target, mid: &Target, at: &wgpu::Buffer) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ground meshes"),
             layout: &self.layout,
@@ -314,6 +361,7 @@ impl GpuMeshes {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.far.view) },
                 wgpu::BindGroupEntry { binding: 2, resource: at.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&mid.view) },
             ],
         })
     }
@@ -324,7 +372,7 @@ impl GpuMeshes {
         self.sampler = sampler.clone();
         self.anisotropy = anisotropy;
         for i in 0..self.nears.len() {
-            let ground = self.ground_bind(device, &self.nears[i].target, &self.nears[i].at);
+            let ground = self.ground_bind(device, &self.nears[i].target, &self.nears[i].mid, &self.nears[i].at);
             self.nears[i].ground = ground;
             self.nears[i].anisotropy = anisotropy;
         }
@@ -336,7 +384,8 @@ impl GpuMeshes {
     }
 
     /// Give each of `eyes` (a view's each) the near target round its square: one already there, or
-    /// one no view needs any more drawn again there, or a new one.
+    /// one no view needs any more drawn again there, or a new one. A near target's mid one is drawn
+    /// again only when its square has moved into another mid square.
     pub(super) fn follow(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, eyes: &[V3]) {
         let squares: Vec<[i32; 2]> = eyes.iter().map(|e| [(e.x / STEP).floor() as i32, (e.z / STEP).floor() as i32]).collect();
         // No more targets than views: a seat that has gone gives its memory back.
@@ -358,8 +407,16 @@ impl GpuMeshes {
                     let centre = [(square[0] as f32 + 0.5) * STEP, (square[1] as f32 + 0.5) * STEP];
                     let rect = [centre[0] - NEAR_FEET / 2.0, centre[1] - NEAR_FEET / 2.0, 1.0 / NEAR_FEET, 0.0];
                     queue.write_buffer(&self.nears[n].target.rect, 0, bytemuck::cast_slice(&rect));
-                    queue.write_buffer(&self.nears[n].at, 0, bytemuck::cast_slice(&[rect, self.far_rect]));
                     self.draw(encoder, &self.nears[n].target);
+                    let mid_square = square.map(|s| s.div_euclid(MID_PER_STEP));
+                    let mid_centre = [(mid_square[0] as f32 + 0.5) * MID_STEP, (mid_square[1] as f32 + 0.5) * MID_STEP];
+                    let mid_rect = [mid_centre[0] - MID_FEET / 2.0, mid_centre[1] - MID_FEET / 2.0, 1.0 / MID_FEET, 0.0];
+                    if self.nears[n].mid_square != Some(mid_square) {
+                        self.nears[n].mid_square = Some(mid_square);
+                        queue.write_buffer(&self.nears[n].mid.rect, 0, bytemuck::cast_slice(&mid_rect));
+                        self.draw(encoder, &self.nears[n].mid);
+                    }
+                    queue.write_buffer(&self.nears[n].at, 0, bytemuck::cast_slice(&[rect, mid_rect, self.far_rect]));
                     n
                 }
             };
