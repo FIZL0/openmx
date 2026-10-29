@@ -112,6 +112,18 @@ impl Pack {
         stunts.with_extras(extras)
     }
 
+    /// The bike read from `member` (`race125p.phy`) on MX vs. ATV's handling (MD40): the pack's own
+    /// file for it, `mx_` + its name, read through [`game_sim::handling::mxvatv_phy`]. A bike the
+    /// pack has no file for is `Err` with the line that says so, and rides the original's.
+    pub fn handling(&self, member: &str, curve: &game_sim::camera::CurveTable) -> Result<(Phy, String), String> {
+        let want = trick_pack::phy_name_for(member);
+        let Some((_, path)) = self.phys.iter().find(|(n, _)| *n == want) else {
+            return Err(format!("handling: {} has no {want}, so this bike handles as the original's", self.id));
+        };
+        let bytes = std::fs::read(path).map_err(|e| format!("handling: {}: {e}; the original's", path.display()))?;
+        Ok((game_sim::handling::mxvatv_phy(&bytes, curve), format!("handling: MX vs. ATV's, {want} from {}", self.id)))
+    }
+
     /// Lay the pack's moves over a bike read from `member` (`race125p.phy`): the pack's own file for
     /// that bike, `mx_` + its name. A bike the pack has no file for, or whose file has no 360, keeps
     /// the original's tricks; the line says so.

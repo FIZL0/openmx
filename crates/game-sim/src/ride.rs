@@ -806,6 +806,10 @@ pub struct Ride {
     /// carries a trick pack's numbers ([`Phy::tricks`]). `None` on every ride on the original's tricks,
     /// and the hash walk leaves it out then, so their hashes do not move.
     pub tricks: Option<Box<crate::trick_pack::State>>,
+    /// **The port's own (MD40):** MX vs. ATV's backflip clip, made on the first frame of a bike on
+    /// [`crate::handling::Handling::MxVsAtv`] ([`Phy::handling`]). `None` on every other ride, and
+    /// the hash walk leaves it out then, so their hashes do not move.
+    pub mxvatv: Option<Box<crate::handling::Flip>>,
     /// The put-back's mesh query's own state on the bike (S83, [`crate::back_search::Cache`]): made
     /// the first time the record's update asks a world that hands over its props or plants. `None`
     /// until then, and the hash walk leaves it out then, so a ride with nothing solid about it
@@ -879,6 +883,7 @@ impl Ride {
             drag_halved: false,
             riding_speed_sq: F(BIKE_MAX_SPEED_SQ),
             tricks: None,
+            mxvatv: None,
             back_search: None,
         };
         ride.place(at, facing);
@@ -2057,12 +2062,16 @@ impl Ride {
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
-            drag_halved, tricks, rear_material, ..
+            drag_halved, tricks, mxvatv, rear_material, ..
         } = self;
         *touching = false;
         // MX vs. ATV's moves (MD16), only for a bike a trick pack is laid over.
         if p.tricks.is_some() && tricks.is_none() {
             *tricks = Some(Box::default());
+        }
+        // MX vs. ATV's handling (MD40), only for a bike on it.
+        if p.handling == crate::handling::Handling::MxVsAtv && mxvatv.is_none() {
+            *mxvatv = Some(Box::default());
         }
 
         // 0 — the tail of the pad read: the stoppie's brake, and gas and brake held together, slow,
@@ -2292,7 +2301,12 @@ impl Ride {
                     astep.spinning = t.spin.applied;
                     astep.spin_ramp = t.spin.ramp;
                 }
-                _ => air::backflip(&p.air, air, &mut ac, &astep),
+                // MX vs. ATV's own backflip (MD40) on its handling. Under a trick pack the rows above
+                // are MX vs. ATV's moves already and stay as MD16 laid them.
+                _ => match mxvatv.as_deref_mut() {
+                    Some(f) => crate::handling::ride_backflip(&p.air, air, &mut ac, &astep, c.trick, &out.mat3(Frame::Chassis), f),
+                    None => air::backflip(&p.air, air, &mut ac, &astep),
+                },
             }
             mvc.force = ac.force;
             mvc.torque = ac.moment;
@@ -2733,6 +2747,9 @@ impl State for Ride {
         w.bool("stunt", self.stunt);
         if let Some(t) = &self.tricks {
             w.field("tricks", &**t);
+        }
+        if let Some(f) = &self.mxvatv {
+            w.field("mxvatv", &**f);
         }
         if let Some(b) = &self.back_search {
             w.group("back_search", |w| {

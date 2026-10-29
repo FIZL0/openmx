@@ -430,6 +430,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         hud_scale: 130,
         // MX vs. ATV's tricks (MD16).
         tricks: menu::Tricks::MxVsAtv,
+        // MX vs. ATV's handling (MD40).
+        handling: game_sim::handling::Handling::MxVsAtv,
         // The Original tab's own two at the original's (P126).
         plants: game_render::eco::Lod::Original,
         picture: menu::Picture::Television,

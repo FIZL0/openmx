@@ -446,8 +446,10 @@ const RIDERS_DIGEST: u64 = 0x1d4ac8eeb11bb86c;
 /// card's start-gate penalty (four), all clear (four riders).
 /// 13563 since S173: each rider's wreck emitters' clocks, the clank's last pick and the body's speed
 /// the tick before (sixteen bytes, four riders), all idle.
-const RIDERS_WIRE_DIGEST: u64 = 0xc165e275ee489431;
-const RIDERS_WIRE_LEN: usize = 13563;
+/// 13567 since MD40: each ride's MX vs. ATV backflip clip (`Ride::mxvatv`), `None` (one byte, four
+/// riders).
+const RIDERS_WIRE_DIGEST: u64 = 0xae3197f1c7beaebb;
+const RIDERS_WIRE_LEN: usize = 13567;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed

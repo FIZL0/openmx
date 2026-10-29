@@ -629,6 +629,10 @@ pub struct Phy {
     /// bike ([`crate::trick_pack::apply`]). `None` — every file the disc ships — and the ride runs the
     /// original's tricks alone.
     pub tricks: Option<crate::trick_pack::Moves>,
+    /// **The port's own (MD40):** which game's steps the bike rides on ([`crate::handling`]). The
+    /// reader writes [`crate::handling::Handling::Original`]; the shell sets MX vs. ATV's beside its
+    /// own `mx_*.phy`.
+    pub handling: crate::handling::Handling,
 }
 
 impl Phy {
@@ -952,6 +956,7 @@ impl Phy {
             air,
             max_crossup,
             tricks: None,
+            handling: crate::handling::Handling::Original,
         }
     }
 

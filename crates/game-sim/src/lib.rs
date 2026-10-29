@@ -866,6 +866,10 @@ pub mod trick;
 /// front flip's numbers, the whip's auto-level. Off unless a pack is laid over a bike.
 pub mod trick_pack;
 
+/// Handling (MD40): the original's, or MX vs. ATV's — the setting, and the bike steps MX vs. ATV
+/// changed, ported from its own ELF. Nothing here runs on the original's handling.
+pub mod handling;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground

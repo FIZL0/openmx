@@ -548,7 +548,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // (`Rider::wreck_kit`), configuration and not walked.
     // 11952 since S215: where the path cars lie in the world's props (`Rider::cars`), a constant of
     // the track the Sim lends each rider for a ghost's frame, not walked and not on the wire.
+    // 11960 since MD40: the ride's MX vs. ATV backflip clip (`Ride::mxvatv`), walked only when it is
+    // on, `None` on every original ride.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11952, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11960, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

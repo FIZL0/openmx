@@ -485,6 +485,9 @@ pub struct Settings {
     /// Whose tricks a ride has (MD16): the original's, or MX vs. ATV's read from a trick pack in the
     /// mods folder. The original's unless changed.
     pub tricks: Tricks,
+    /// How the bikes handle (MD40): MX Unleashed's, or MX vs. ATV's bikes and steps read from the
+    /// trick pack's `mx_*.phy`. The original's unless changed.
+    pub handling: game_sim::handling::Handling,
     /// How the plants change from model to picture (V55): ours, smoothed, unless the Original
     /// switch's Plants (P126) is on.
     pub plants: Lod,
@@ -1215,6 +1218,7 @@ impl Default for Settings {
             mods_off: Vec::new(),
             track_filter: String::new(),
             tricks: Tricks::default(),
+            handling: game_sim::handling::Handling::default(),
             plants: Lod::default(),
             foliage: Foliage::default(),
             picture: Picture::default(),
@@ -1339,6 +1343,7 @@ impl Settings {
                 "machine_bays" => s.bays = v != "off",
                 "mods" => s.mods = v != "off",
                 "tricks" => s.tricks = Tricks::from_word(v).unwrap_or(s.tricks),
+                "handling" => s.handling = game_sim::handling::Handling::from_word(v).unwrap_or(s.handling),
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
@@ -1443,6 +1448,7 @@ impl Settings {
             + &self.world_sky_text()
             + &self.mods_text()
             + &self.tricks_text()
+            + &self.handling_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
             + &cameras::text(&self.camera_sets)
@@ -1546,6 +1552,12 @@ impl Settings {
     /// written as it was.
     fn tricks_text(&self) -> String {
         if self.tricks == Tricks::Original { String::new() } else { format!("tricks = {}\n", self.tricks.word()) }
+    }
+
+    /// The handling's line (MD40), only when it is not the original's, as the tricks' is.
+    fn handling_text(&self) -> String {
+        use game_sim::handling::Handling;
+        if self.handling == Handling::Original { String::new() } else { format!("handling = {}\n", self.handling.word()) }
     }
 
     /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
