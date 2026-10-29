@@ -313,7 +313,10 @@ impl<'a> Pen<'a> {
     /// The dark column from the frame's top to the band.
     fn strip(&mut self, x: f32, w: f32) {
         let top = self.top();
-        self.fill([x, top, w, STAGE.1 - BAND - top], STRIP);
+        let b = [x, top, w, STAGE.1 - BAND - top];
+        self.fill(b, STRIP);
+        let pb = self.b(b);
+        self.parts.push(Part::Plate(pb));
     }
 
     /// The disc's logo and its shadow, full size or small.
@@ -511,23 +514,27 @@ impl<'a> Pen<'a> {
     // ---- lists -------------------------------------------------------------------------------
 
     /// The main list's look: rows centred on the column, the chosen one on its pill, a dimmed one
-    /// faded. Returns nothing; the parts say where each went.
-    fn list(&mut self, rows: &[(String, bool)], chosen: usize, centre: f32, top: f32) {
+    /// faded, each row's type shrunk till its pill fits `room` ems across (V111: the Online screen's
+    /// "Network: Internet + LAN" ran off its plate). Returns nothing; the parts say where each went.
+    fn list(&mut self, rows: &[(String, bool)], chosen: usize, centre: f32, top: f32, room: f32) {
         // Clear of the slanted title, which rises over the column from the band.
         let bottom = STAGE.1 - BAND - 4.2;
         let full = ITEM * (1.0 + 0.34 + 0.4) + 0.55;
         let pitch = full.min((bottom - top) / rows.len().max(1) as f32);
-        let size = ITEM.min((pitch - 0.3) / 1.74);
-        let h = size * 1.74;
+        let full_size = ITEM.min((pitch - 0.3) / 1.74);
+        let h = full_size * 1.74;
         for (i, (row, dim)) in rows.iter().enumerate() {
             let y = top + pitch * i as f32;
             let mid = y + h / 2.0;
+            // Measured heavy, lit or not, so a row keeps its size as the cursor passes.
+            let across = self.wide(Weight::Heavy, row, full_size) + 2.0 * PILL_PAD * full_size / ITEM;
+            let size = if across > room { full_size * room / across } else { full_size };
             let base = Pen::mid(mid, size);
             self.fade = if *dim { 0.42 } else { 1.0 };
             if i == chosen {
                 let w = self.wide(Weight::Heavy, row, size);
                 let pad = PILL_PAD * size / ITEM;
-                let b = [centre - w / 2.0 - pad, y, w + 2.0 * pad, h];
+                let b = [centre - w / 2.0 - pad, mid - size * 0.87, w + 2.0 * pad, size * 1.74];
                 self.pill(b, 0.28 * size, 0.1 * size);
                 let label = self.text(Weight::Heavy, row, centre, base, size, SLANT, CHALK, Align::Centre);
                 let pb = self.b(b);
@@ -975,7 +982,7 @@ impl Pen<'_> {
         self.strip(10.0, 18.0);
         self.logo(false);
         let rows: Vec<(String, bool)> = MAIN.iter().map(|s| (s.to_string(), false)).collect();
-        self.list(&rows, at, 19.0, 10.4);
+        self.list(&rows, at, 19.0, 10.4, 18.0);
         let (h, p, chips) = main_panel(menu, at);
         let (x, w) = (34.0, 40.0);
         if at == MAIN_FREE {
@@ -1040,7 +1047,7 @@ impl Pen<'_> {
         self.logo(true);
         let raw = menu.pause_rows();
         let rows: Vec<(String, bool)> = raw.iter().map(|r| pause_label(r)).collect();
-        self.list(&rows, at, 19.0, 7.5);
+        self.list(&rows, at, 19.0, 7.5, 18.0);
         let (_, town) = menu.track_at(menu.track_index());
         let who = if menu.riders > 1 { format!("{}P · ", menu.pauser + 1) } else { String::new() };
         let modified = if menu.modified { " · Modified" } else { "" };
@@ -1147,7 +1154,7 @@ impl Pen<'_> {
         self.logo(true);
         let network = if menu.lobby.lan { "LAN Only" } else { "Internet + LAN" };
         let rows: Vec<(String, bool)> = ONLINE.iter().map(|s| s.to_string()).chain([format!("Network: {network}")]).map(|s| (s, false)).collect();
-        self.list(&rows, at, 19.0, 10.4);
+        self.list(&rows, at, 19.0, 10.4, 18.0);
         let (h, p) = online_panel(at);
         let (x, w) = (34.0, 40.0);
         let mut y = self.heading("openMX", h, p, x, 10.0, w, 2.6);
@@ -1516,7 +1523,7 @@ impl Pen<'_> {
         let all = layouts(menu.riders);
         let at = menu.cursor(Screen::Split).min(all.len().saturating_sub(1));
         let rows: Vec<(String, bool)> = all.iter().map(|l| (layout_label(*l).to_string(), false)).collect();
-        self.list(&rows, at, 19.0, 10.4);
+        self.list(&rows, at, 19.0, 10.4, 18.0);
         if let Some(layout) = all.get(at) {
             let (x, y) = (34.0, 10.0);
             let h = self.heading("openMX", layout_label(*layout), "How the screen splits between the riders.", x, y, 40.0, 2.6);
@@ -1642,7 +1649,7 @@ impl Pen<'_> {
         self.logo(true);
         let rows: Vec<(String, bool)> = l.items().iter().map(|i| (i.label(l), false)).collect();
         let at = menu.cursor(Screen::Lobby);
-        self.list(&rows, at, 19.0, 8.0);
+        self.list(&rows, at, 19.0, 8.0, 18.0);
         let (x, w) = (32.0, (self.right().min(STAGE.0 + 8.0) - 33.0).max(42.0));
         self.round([x - 1.2, 7.0, w + 1.2, 31.0], 1.0, [0, 0, 0, 120], [0, 0, 0, 120]);
         match (&l.room, l.code.as_str()) {
