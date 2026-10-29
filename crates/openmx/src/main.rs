@@ -184,7 +184,7 @@ mod thread;
 mod cursor;
 // The riders' names and numbers on their jerseys and plates (P86).
 mod dress;
-// The browser has no GPU window yet (P48): its stand-in, which never opens.
+// The browser's GPU window is the page's canvas (P48).
 #[cfg_attr(target_arch = "wasm32", path = "web_gpu.rs")]
 mod gpuwin;
 mod ground;
@@ -1801,8 +1801,17 @@ fn own_pick(args: &Args) -> roster::Pick {
     }
 }
 
+/// The command line: the desktop's own, or in the browser what the page gave `openmx_run` (P48:
+/// its `?args=`).
+fn argv() -> Vec<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return std::env::args().skip(1).collect();
+    #[cfg(target_arch = "wasm32")]
+    return crate::page_args();
+}
+
 pub(crate) async fn run() -> Result<(), String> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let argv: Vec<String> = argv();
     if argv.first().is_some_and(|a| a == "--dump-textures") {
         return dump_textures(&argv[1..]);
     }
@@ -9420,7 +9429,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         room_tricks: None,
         markers: None,
     };
-    let mut argv = std::env::args().skip(1);
+    let mut argv = argv().into_iter();
     while let Some(a) = argv.next() {
         let mut next = |what: &str| argv.next().ok_or(format!("{a} wants {what}"));
         // The flags that pick a ride, which is what the shell did before it had a front end.

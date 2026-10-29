@@ -19,12 +19,19 @@
 // Online (N4): `{ online }` joins or hosts a lobby through a relay and rides once the host starts, a frame per
 // tick of the ride's 30 Hz clock on this thread's timer; the page's seat rides a pad nobody holds (web.rs says why). It needs no disc.
 //
-// Messages in:  { import: File, canvas? }   copy the disc into OPFS, then start
-//               { start: { canvas?, file? } } start on the OPFS copy, or on `file` when given
+// The picture (P48): the canvas goes to the module, whose GPU draws on it — WebGPU, WebGL2, as `api` asks (`auto`,
+// `webgl2`, `software`) — and says which with `gpu`, then `drawn` at its first frame. Only the software renderer's
+// frames come through `present`, which is the only thing that takes the canvas's 2D context: a canvas has one kind of
+// context for good. The page restarts on the next API down when the GPU fails before its first frame.
+//
+// Messages in:  { import: File, canvas?, api?, args? }   copy the disc into OPFS, then start
+//               { start: { canvas?, file?, api?, args? } } start on the OPFS copy, or on `file` when given
 //               { online: { name, relay, codes?, join?, host?, bike, ticks? } }
 //               { key: code << 1 | down } | { blur } | { click: [x, y] } | { view: [w, h] } | { pads, names? }
 //               { played: frames }
 // Messages out: { progress: [done, total] } | { started: true } | { error: String } | { missing: true }
+//               { gpu: api } (what the module draws with) | { drawn: [api, w, h] } (its first GPU frame)
+//               { fps: number } (pictures in the last second)
 //               { play: Float32Array } (the mixer's next stereo frames) | { quit: String } (the shell ended)
 //               { online: state } (Online.state(), a few times a second) | { ticks: String } (once `ticks` settled)
 
@@ -34,7 +41,11 @@ const DISC = 'disc.iso';
 const CHUNK = 8 << 20;
 
 let canvas;
+// The 2D context, taken at the software renderer's first frame (P48); null when the GPU has the canvas.
 let context;
+// Pictures since `counted`, the page told each second.
+let pictures = 0;
+let counted = 0;
 // What the host calls read: the disc once there is one.
 let disc = { size: 0, read: () => -1 };
 // What the page has said since the shell last asked.
@@ -63,9 +74,13 @@ globalThis.openmx = {
   },
   present: (rgba, w, h) => {
     if (!canvas) return;
+    context ??= canvas.getContext('2d');
+    if (!context) return;
     if (canvas.width !== w || canvas.height !== h) [canvas.width, canvas.height] = [w, h];
     context.putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
   },
+  gpu: api => postMessage({ gpu: api }),
+  drawn: (api, w, h) => postMessage({ drawn: [api, w, h] }),
   log: line => console.log(line),
   view: () => Uint32Array.from(view),
   keys: () => Uint32Array.from(keys.splice(0)),
@@ -85,7 +100,16 @@ globalThis.openmx = {
     else files.delete(key);
     saving = saving.then(() => store(key, bytes)).catch(e => console.log(`openmx: ${key}: ${e}`));
   },
-  frame: () => new Promise(r => (self.requestAnimationFrame ?? (f => setTimeout(f, 16)))(r)),
+  frame: () => {
+    pictures++;
+    const now = performance.now();
+    if (now - counted >= 1000) {
+      if (counted) postMessage({ fps: (1000 * pictures) / (now - counted) });
+      pictures = 0;
+      counted = now;
+    }
+    return new Promise(r => (self.requestAnimationFrame ?? (f => setTimeout(f, 16)))(r));
+  },
 };
 
 // One of the shell's files into OPFS (`files/`, its path as one name), or out of it.
@@ -212,7 +236,7 @@ async function openDisc(file) {
   }
 }
 
-async function start(file) {
+async function start(file, api, args) {
   const opened = await openDisc(file);
   if (!opened) {
     postMessage({ missing: true });
@@ -222,7 +246,7 @@ async function start(file) {
   await loadFiles();
   const glue = await game();
   postMessage({ started: true });
-  const ended = await glue.openmx_run();
+  const ended = await glue.openmx_run(canvas, api || 'auto', args || '');
   await saving;
   if (ended) postMessage({ error: ended });
   else postMessage({ quit: '' });
@@ -268,15 +292,15 @@ async function online({ name, relay, codes, join, host, bike, ticks }) {
   }, 1001 / 30);
 }
 
+// A panic traps out of the module's task queue: the page hears of it as an error, as it does a refused promise.
+addEventListener('unhandledrejection', e => postMessage({ error: String(e.reason) }));
+
 onmessage = async ({ data }) => {
   try {
     // The canvas comes once, with whichever comes first of a start and an import (index.html sends it when the menu's
     // Ride is pressed or a disc is picked); a later start (the picked file) draws in the same one.
     const given = data.start?.canvas ?? data.canvas;
-    if (given) {
-      canvas = given;
-      context = canvas.getContext('2d');
-    }
+    if (given) canvas = given;
     if (data.key !== undefined) {
       keys.push(data.key);
       if (data.key & 1) heldKeys.add(data.key >> 1);
@@ -294,12 +318,12 @@ onmessage = async ({ data }) => {
     } else if (data.played) {
       queued = Math.max(0, queued - data.played);
     } else if (data.start) {
-      await start(data.start.file);
+      await start(data.start.file, data.start.api, data.start.args);
     } else if (data.online) {
       await online(data.online);
     } else if (data.import) {
       await importDisc(data.import);
-      await start();
+      await start(undefined, data.api, data.args);
     }
   } catch (e) {
     postMessage({

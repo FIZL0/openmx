@@ -140,7 +140,7 @@ impl Renderer {
     }
 }
 
-const SPRITE_WGSL: &str = r#"
+pub(super) const SPRITE_WGSL: &str = r#"
 @group(1) @binding(0) var sheet: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 

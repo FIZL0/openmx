@@ -21,7 +21,9 @@
 //! * `disc_size() -> number` and `disc_read(at, into: Uint8Array) -> number` — the image, by offset,
 //!   out of the OPFS file (`at` a JavaScript number, exact up to 2^53, as the disc is larger than an
 //!   `i32` can address);
-//! * `present(rgba: Uint8Array, width, height)` — one frame, which the worker puts into its canvas;
+//! * `present(rgba: Uint8Array, width, height)` — one frame, which the worker puts into its canvas
+//!   (the software renderer's; the GPU's draws on the canvas itself — `gpu(api)` says which draws,
+//!   and `drawn(api, width, height)` when its first frame is up);
 //! * `log(line)` — a line for the console, and where a panic's message goes.
 //!
 //! and it calls back the exports below: `openmx_run` for the game, `openmx_start` and
@@ -45,8 +47,9 @@
 //! frame (`pace::shown`), so `openmx_run` steps it a frame at a time off the page's clock, and the
 //! lobby's network tasks run between frames; the desktop waits on the same future with nothing in
 //! between. What a page has in place of the desktop's window, pads, speakers, clock, threads and
-//! files is `web_host.rs`, `clock.rs`, `thread.rs` and `files.rs`. The picture is the desktop's
-//! software rasteriser on one thread until P48 puts the GPU's on the canvas.
+//! files is `web_host.rs`, `clock.rs`, `thread.rs` and `files.rs`. The picture is the desktop's GPU
+//! renderer on the page's canvas (P48, `web_gpu.rs`): WebGPU where the browser grants an adapter,
+//! WebGL2 where not, and the software rasteriser only where neither can be had.
 
 // The desktop shell's own ground pass, compiled into this build too; the parts of it only the ride
 // asks for go unused here.
@@ -81,6 +84,8 @@ pub(crate) use shell::*;
 mod web_host;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use host::present as host_present;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use host::page_args;
 
 use game_render::disc::{Disc, Res};
 use game_render::mat::v3;
@@ -270,13 +275,42 @@ mod host {
         Ok(Box::new(HostImage { at: 0, size: disc_size() as u64 }))
     }
 
+    thread_local! {
+        /// The shell's command line, as the page gave it.
+        static ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// The command line the page gave [`openmx_run`].
+    pub fn page_args() -> Vec<String> {
+        ARGS.with_borrow(Clone::clone)
+    }
+
     /// The game (P196): the desktop's own front end — the press-start splash, the main menu, and
     /// the rides, online, settings and mods it starts — on the page's canvas, keys, pads and
     /// speakers, a frame each time the page's clock comes round. Runs until the shell quits; the
     /// promise is what it ended with, empty when it ended well.
+    ///
+    /// `canvas`: where the GPU draws (P48), on `api` — `auto` (WebGPU if the browser grants an
+    /// adapter, else WebGL2), `webgl2`, or `software` (the rasteriser, put up through the host's
+    /// `present`). The adapter and device are awaited here, before the shell starts, as a browser
+    /// cannot block on them. `args`: the shell's command line, split on spaces (the page's `?args=`).
     #[wasm_bindgen]
-    pub async fn openmx_run() -> String {
+    pub async fn openmx_run(canvas: Option<web_sys::OffscreenCanvas>, api: String, args: String) -> String {
         hook();
+        ARGS.with_borrow_mut(|a| *a = args.split_whitespace().map(String::from).collect());
+        match canvas {
+            Some(canvas) if api != "software" => match crate::gpuwin::prepare(canvas, api == "webgl2").await {
+                Ok(api) => say(&format!("renderer: gpu, {}", api.name())),
+                Err(e) => {
+                    say(&format!("renderer: no GPU ({e}); drawing in software"));
+                    crate::web_host::using("software");
+                }
+            },
+            _ => {
+                say("renderer: software");
+                crate::web_host::using("software");
+            }
+        }
         game_render::disc::set_page_disc(page_disc);
         match crate::shell::run().await {
             Ok(()) => String::new(),

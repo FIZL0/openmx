@@ -38,6 +38,8 @@ globalThis.openmx = {
   file_read: () => undefined,
   file_write: () => {},
   frame: () => new Promise(() => {}),
+  gpu: () => {},
+  drawn: () => {},
 };
 const glue = await import(pathToFileURL(path.join(pkg, 'openmx_web.js')));
 await glue.default({ module_or_path: fs.readFileSync(path.join(pkg, 'openmx_web_bg.wasm')) });

@@ -58,6 +58,30 @@ extern "C" {
     /// A promise of the page's next animation frame.
     #[wasm_bindgen(js_namespace = openmx)]
     fn frame() -> js_sys::Promise;
+    /// The GPU's first frame is up (P48): which API drew it (`webgpu`, `webgl2`) and the canvas's
+    /// size. Until the page hears it, a failure is the GPU's, and the page starts again on the next
+    /// API down.
+    #[wasm_bindgen(js_namespace = openmx, js_name = drawn)]
+    fn host_drawn(api: &str, width: u32, height: u32);
+    /// What is about to draw the picture (P48): `webgpu` or `webgl2` as its device is asked for,
+    /// `software` once neither is to be had.
+    #[wasm_bindgen(js_namespace = openmx)]
+    fn gpu(api: &str);
+}
+
+/// [`gpu`]: told before each API's device is asked for, so a panic in the asking is that API's.
+pub fn using(api: &str) {
+    gpu(api)
+}
+
+/// [`host_drawn`]: the GPU window's first frame (`web_gpu.rs`).
+pub fn drawn(api: &str, width: u32, height: u32) {
+    host_drawn(api, width, height)
+}
+
+/// One line to the page's console.
+pub fn say(line: &str) {
+    crate::host::say(line)
 }
 
 /// Back to the page until its next animation frame, the speakers topped up first.
@@ -123,6 +147,9 @@ pub struct Canvas {
     rgba: Vec<u8>,
     /// The canvas in device pixels, which a press is given in.
     view: (usize, usize),
+    /// Whether the frame is the canvas's whole size (the GPU window, P48) rather than [`frame_of`]
+    /// it.
+    whole: bool,
 }
 
 impl Canvas {
@@ -140,7 +167,18 @@ impl Canvas {
             resized: false,
             rgba: Vec::new(),
             view: (1, 1),
+            whole: false,
         };
+        c.size();
+        c.resized = false;
+        Ok(c)
+    }
+
+    /// The page's canvas as the GPU window reads it (P48): its keys and pointer, at its whole size
+    /// in device pixels, which the GPU draws at.
+    pub fn open_whole(title: &str) -> Result<Canvas, String> {
+        let mut c = Canvas::open(title, None, 1, "")?;
+        c.whole = true;
         c.size();
         c.resized = false;
         Ok(c)
@@ -149,7 +187,7 @@ impl Canvas {
     fn size(&mut self) {
         let v = view();
         self.view = (v.first().copied().unwrap_or(640).max(1) as usize, v.get(1).copied().unwrap_or(448).max(1) as usize);
-        let (w, h) = frame_of(self.view);
+        let (w, h) = if self.whole { self.view } else { frame_of(self.view) };
         if (w, h) != (self.width, self.height) {
             (self.width, self.height) = (w, h);
             self.screen = (w, h);

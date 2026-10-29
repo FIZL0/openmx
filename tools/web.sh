@@ -17,12 +17,16 @@
 #   * wasm-bindgen-cli at the version Cargo.lock has of wasm-bindgen (the two must match exactly), as
 #     opentennis's web.sh does: ggrs and iroh take the page's clock, random numbers and WebSocket
 #     through it. Taken from PATH when it is that version; otherwise built once with this machine's
-#     cargo into $OPENMX_CROSS_DIR/wasm-bindgen-<version>. No wasm-opt.
+#     cargo into $OPENMX_CROSS_DIR/wasm-bindgen-<version>.
+#   * wasm-opt (binaryen), as opentennis's web.sh runs it (P48): -O2 --strip-debug over the release's module.
+#     Taken from PATH, else binaryen's own release downloaded once into $OPENMX_CROSS_DIR/binaryen-<version>.
+#     Not on --check, whose module is only read and run by the tests, and not with WEB_FAST=1.
 #
 # Environment:
 #   OPENMX_CROSS_DIR      where the scratch toolchain lives
 #   OPENMX_CROSS_OFFLINE  set to 1 to refuse to download (a missing std is then an error saying so)
 #   OPENMX_COMMIT, OPENMX_VERSION  what web/version.txt says the build is (below)
+#   WEB_FAST              set to 1 to skip wasm-opt
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -122,6 +126,32 @@ if [ "$check" = 1 ]; then
 fi
 mkdir -p "$repo/web/pkg"
 cp "$out/pkg/openmx_web.js" "$out/pkg/openmx_web_bg.wasm" "$repo/web/pkg/"
+if [ -z "${WEB_FAST:-}" ]; then
+    wo=$(command -v wasm-opt || true)
+    if [ -z "$wo" ]; then
+        bv=version_133
+        wo=$scratch/binaryen-$bv/bin/wasm-opt
+        mkdir -p "$scratch"
+        exec 9>"$scratch/fetch.lock"
+        command -v flock >/dev/null 2>&1 && flock 9
+        if [ ! -x "$wo" ]; then
+            if [ "$offline" = 1 ]; then
+                echo "web.sh: no wasm-opt here, and OPENMX_CROSS_OFFLINE=1 (WEB_FAST=1 builds without it)" >&2
+                exit 1
+            fi
+            echo "# fetching binaryen $bv into $scratch/binaryen-$bv" >&2
+            f=binaryen-$bv-$(uname -m)-linux.tar.gz
+            curl -fsSL -o "$scratch/$f.part" "https://github.com/WebAssembly/binaryen/releases/download/$bv/$f"
+            tar xzf "$scratch/$f.part" -C "$scratch"
+            rm -f "$scratch/$f.part"
+        fi
+        exec 9>&-
+    fi
+    # The features the module is built with (Rust's wasm32 defaults), which wasm-opt must be told it may keep.
+    "$wo" -O2 --strip-debug --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+        --enable-mutable-globals --enable-reference-types --enable-multivalue \
+        "$repo/web/pkg/openmx_web_bg.wasm" -o "$repo/web/pkg/openmx_web_bg.wasm"
+fi
 # The build the page was made from (web/index.html reads it to offer a reload once the site has a newer one):
 # OPENMX_VERSION (a release's tag, tools/release.sh) and the commit, OPENMX_COMMIT when the caller stamps it (Actions,
 # tools/release.sh), else this checkout's, with a + when it has uncommitted changes.
@@ -131,4 +161,4 @@ if [ -z "$commit" ]; then
     [ -z "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ] || commit=$commit+
 fi
 echo "${OPENMX_VERSION:+$OPENMX_VERSION }${commit:-unknown}" >"$repo/web/version.txt"
-echo "$repo/web/pkg ($(wc -c <"$out/pkg/openmx_web_bg.wasm") bytes of module): serve $repo/web on localhost"
+echo "$repo/web/pkg ($(wc -c <"$repo/web/pkg/openmx_web_bg.wasm") bytes of module): serve $repo/web on localhost"
