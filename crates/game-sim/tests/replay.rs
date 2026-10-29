@@ -7696,28 +7696,29 @@ const S89_RIDER: [u32; 6] = [0x34, 0x34, 0x8, 0x8, 0x8, 0x0];
 /// S107 had both parting at their first compared tick (2). S123 Ee-stepped the along image's ground
 /// step: the original's swept contacts on the bed are the wheel probe record's points as the port's
 /// search finds them, word for word, in both substeps of tick 1, and so are the load points and
-/// compressions. Both now part in the air, on the angular history's z (the first lane to go): along at
-/// 237, four ticks after it leaves the bed's shoulder (233), by an ulp; across at 142, 24 ticks into its
-/// flight off the bed (118). Up to there every lane is the original's on every tick (S124: the pads go on
-/// the ticks, [`save_state_inputs`], and no longer on the rows).
-const S89_AGREES_THROUGH: [u64; 2] = [236, 141];
+/// compressions. S124 then had both parting in the air, on the angular history's z: along at 237, four
+/// ticks after it leaves the bed's shoulder (233), by an ulp; across at 142, 24 ticks into its flight off
+/// the bed (118). Since S179/S180 (the euler angles measured once a frame, after the physics) both agree
+/// on every lane of every tick (S183: all 599 of along's, all 299 of across's), the engine's first drive
+/// of the rear wheel included (S124: the pads go on the ticks, [`save_state_inputs`], not on the rows).
+const S89_AGREES_THROUGH: [u64; 2] = [u64::MAX, u64::MAX];
 
 /// The tick each wheel's slip and contact lanes agree through on each of [`S89_RIDES`] (`u64::MAX`:
-/// every tick), though the chassis parts in the air ([`S89_AGREES_THROUGH`]). A ratchet: parting
-/// earlier fails. Before S124 the pads went on the rows, so the gas came a tick late and the bed's
+/// every tick), kept beside [`S89_AGREES_THROUGH`] from when the chassis parted in the air (S124: the
+/// locks at 571, the ray hits at 517/518 along). A ratchet: parting earlier fails. Before S124 the pads went on the rows, so the gas came a tick late and the bed's
 /// edge (along 106/108, across 50/53) parted on a ride already off the original's.
 const S89_LANES_AGREE_THROUGH: [(&str, [u64; 2]); 12] = [
     ("rider.ride.front.slip.spinning", [u64::MAX, u64::MAX]),
-    ("rider.ride.front.slip.locked", [571, u64::MAX]),
+    ("rider.ride.front.slip.locked", [u64::MAX, u64::MAX]),
     ("rider.ride.front.slip.sliding", [u64::MAX, u64::MAX]),
     ("rider.ride.rear.slip.spinning", [u64::MAX, u64::MAX]),
-    ("rider.ride.rear.slip.locked", [571, u64::MAX]),
+    ("rider.ride.rear.slip.locked", [u64::MAX, u64::MAX]),
     ("rider.ride.rear.slip.sliding", [u64::MAX, u64::MAX]),
     // Along, the bed is rows 0-107: the contact holds through the wheels dropping off it.
-    ("rider.ride.front.w.ray_hit", [517, u64::MAX]),
+    ("rider.ride.front.w.ray_hit", [u64::MAX, u64::MAX]),
     ("rider.ride.front.w.swept_contact", [u64::MAX, u64::MAX]),
     ("rider.ride.front.surface", [u64::MAX, u64::MAX]),
-    ("rider.ride.rear.w.ray_hit", [518, u64::MAX]),
+    ("rider.ride.rear.w.ray_hit", [u64::MAX, u64::MAX]),
     ("rider.ride.rear.w.swept_contact", [u64::MAX, u64::MAX]),
     ("rider.ride.rear.surface", [u64::MAX, u64::MAX]),
 ];
@@ -7984,7 +7985,7 @@ fn the_dallas_rail_rides_replay_from_their_save_states() {
                     S89_AGREES_THROUGH[k]
                 ),
                 Some(t) if t > S89_AGREES_THROUGH[k] + 1 => println!("{name} now agrees through tick {}: raise S89_AGREES_THROUGH[{k}]", t - 1),
-                None => println!("{name} agrees on every tick: raise S89_AGREES_THROUGH[{k}]"),
+                None if S89_AGREES_THROUGH[k] < u64::MAX => println!("{name} agrees on every tick: raise S89_AGREES_THROUGH[{k}]"),
                 _ => {}
             }
         });
