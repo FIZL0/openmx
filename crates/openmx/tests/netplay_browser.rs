@@ -176,6 +176,8 @@ fn ride(browser: impl FnOnce(&Path, &str, &str) -> Command) {
                     eprintln!("browser at {:.1} s: {s}", started.elapsed().as_secs_f32());
                 }
                 state = s.to_string();
+            } else if line.starts_with("page ") {
+                eprintln!("browser at {:.1} s: {line}", started.elapsed().as_secs_f32());
             }
         }
         if let Ok(Some(status)) = node.0.try_wait() {
@@ -188,10 +190,11 @@ fn ride(browser: impl FnOnce(&Path, &str, &str) -> Command) {
         }
         let Some(r) = &desk.riding else { continue };
         if r.np.tick() % 600 == 0 {
-            eprintln!("at {:.1} s: the desktop at tick {} (settled {}), the browser {state}", started.elapsed().as_secs_f32(), r.np.tick(), r.np.confirmed());
+            eprintln!("at {:.1} s: the desktop at tick {} (confirmed {}, settled {}), the browser {state}", started.elapsed().as_secs_f32(), r.np.tick(), r.np.confirmed(), r.np.settled());
         }
-        // settled can be ahead of the ticks run: both must have run them all
-        if theirs.len() >= TICKS && r.np.confirmed() >= TICKS as i64 && r.np.tick() >= TICKS {
+        // settled, not confirmed (K7): a frame that polls and then sits out (time sync, a hold)
+        // confirms ticks it has not rolled back yet, and their lines are still the prediction
+        if theirs.len() >= TICKS && r.np.settled() >= TICKS as i64 {
             break;
         }
     }

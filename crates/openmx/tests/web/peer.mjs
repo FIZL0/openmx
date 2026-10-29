@@ -38,8 +38,8 @@ setInterval(() => {
     net.ready(true);
     readied = true;
   }
-  // settled can be ahead of the ticks run here: wait for every line
-  const lines = !sent && s.confirmed >= T ? net.ticks(0, T).split('\n').filter(Boolean) : [];
+  // settled, not confirmed: a tick confirmed between runs can still hold its prediction (K7)
+  const lines = !sent && s.settled >= T ? net.ticks(0, T).split('\n').filter(Boolean) : [];
   if (lines.length === T) {
     process.stdout.write(lines.map(l => `tick ${l}\n`).join(''));
     state(s);

@@ -428,6 +428,12 @@ impl<S: Clone + 'static> Netplay<S> {
         self.rb.base as i64 + self.rb.sess.confirmed_frame() as i64
     }
 
+    /// The last tick run on every seat's own pads, its re-runs done: `hashes` and `log` are final up
+    /// to here, where up to [`confirmed`](Self::confirmed) they may still be a prediction.
+    pub fn settled(&self) -> i64 {
+        self.rb.settled
+    }
+
     fn say(&mut self, s: String) {
         self.said.push(s);
     }
