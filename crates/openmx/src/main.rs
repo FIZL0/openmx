@@ -1666,6 +1666,10 @@ struct Args {
     headless: bool,
     /// `--frames N`: quit after N frames, which unlike `--seconds` is the same run on any machine.
     frames: Option<u32>,
+    /// `--steady-clock`: the ride's clock moves on by each picture's floor (`--draw-fps`', a headless
+    /// ride's 60 a second) and not with the wall's, so an offline ride is the same ride on a busy
+    /// machine as on an idle one (`pace::Clock`). For the tests; online peers keep the wall's.
+    steady_clock: bool,
     /// `--draw-fps N`: draw at most N pictures a second. Unset, a window draws as fast as its
     /// display takes them and a headless ride draws 60. The ride's ticks are 30 a second either way
     /// (P52).
@@ -5538,6 +5542,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
 
     let mut shot = args.shot.clone();
     let started = Instant::now();
+    // The ride's clock: the wall's, or `--steady-clock`'s, which only the pictures move.
+    let mut clock = if args.steady_clock { pace::Clock::steady(started) } else { pace::Clock::wall(started) };
     let mut window_of_frames = (Instant::now(), 0u32, 0usize);
     // Each view's triangles over the session, for the line a split session ends on.
     let mut view_triangles = vec![0usize; args.players];
@@ -5577,7 +5583,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // shown, and both the ticks owed and the blend are taken at it. Read again after the ticks, the
     // blend came a tick's cost later on the frames that ran one than on those that did not, though
     // each went up at the display's next refresh, and the faster the ride the more that showed.
-    let mut moment = Instant::now();
+    let mut moment = clock.now();
     // What the last tick left for the picture: whether it simulated, and each player's ride for the
     // camera and the overlay.
     let mut simulated = false;
@@ -7643,7 +7649,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             Some(art) => (0..world.seats.len())
                 .map(|v| {
                     let in_machine = world.seats[v].garage.up != Kind::Bike;
-                    let seconds = started.elapsed().as_secs_f32();
+                    let seconds = clock.elapsed().as_secs_f32();
                     cameras.get(v).map_or_else(Vec::new, |c| portal_glows(art, &zone_portals, &marked_portals[v], in_machine, c, seconds))
                 })
                 .collect(),
@@ -7928,7 +7934,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
                     r.finish();
                     let took = warm_at.elapsed();
-                    pacer.hold(took);
+                    // The steady clock never ran on for it.
+                    if !clock.is_steady() {
+                        pacer.hold(took);
+                    }
                     stages.skip();
                     draw_at += took;
                     println!("warm frame: {:.2} ms behind the loading screen", took.as_secs_f64() * 1000.0);
@@ -8294,7 +8303,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let (since, frames, triangles) = window_of_frames;
             println!(
                 "{:>3.0}s {:>4.1} fps, {:>6} triangles a frame, {:>5.1} mph{}{}",
-                started.elapsed().as_secs_f32(),
+                clock.elapsed().as_secs_f32(),
                 frames as f32 / since.elapsed().as_secs_f32(),
                 triangles / frames.max(1) as usize,
                 // Feet a second to miles an hour, for a number a rider can read.
@@ -8342,7 +8351,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         stages.mark(stages::Stage::Log);
 
         if let Some(limit) = args.seconds {
-            if started.elapsed().as_secs_f32() >= limit {
+            if clock.elapsed().as_secs_f32() >= limit {
                 break;
             }
         }
@@ -8360,7 +8369,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             Some(w) => picture_floor(w, args.pacing(front.as_ref().map_or(&ride_settings, |f| &f.menu.settings))),
             None => None,
         };
-        limiter.wait(args.draw_frame().or(floor));
+        clock.picture(&mut limiter, args.draw_frame().or(floor));
         stages.mark(stages::Stage::Pace);
         stages.frame();
         loaded.get_or_insert_with(|| (game_render::tally::Tally::now(), stages::bytes_read_mark()));
@@ -8372,7 +8381,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             stages_since = Instant::now();
         }
         top = Instant::now();
-        moment = top;
+        moment = clock.now();
         perf.begin();
     }
 
@@ -8509,7 +8518,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let at = world.seats[0].sim.rider.ride.position();
     println!(
         "ridden for {:.1}s over {} frames, ending at {:.2}, {:.2}, {:.2}",
-        started.elapsed().as_secs_f32(),
+        clock.elapsed().as_secs_f32(),
         engine.frame,
         at.x(),
         at.y(),
@@ -9562,6 +9571,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         original_wheels: false,
         headless: false,
         frames: None,
+        steady_clock: false,
         draw_fps: None,
         vsync: None,
         fps_limit: None,
@@ -9916,6 +9926,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                     next("a number of frames")?.parse().map_err(|_| "--frames: not a number of frames")?,
                 )
             }
+            "--steady-clock" => args.steady_clock = true,
             "--draw-fps" => {
                 let fps: f32 = next("pictures a second")?.parse().map_err(|_| "--draw-fps: not a number")?;
                 if !(fps > 0.0) {
@@ -10005,7 +10016,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
                             [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off] [--warm on|off]\n\
-                            [--draw-fps N] [--vsync on|off] [--fps-limit off|N|refresh]\n\
+                            [--draw-fps N] [--steady-clock] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
@@ -10072,7 +10083,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                      where each drawn frame put the first player's bike, rider and camera.\n\
                      The ride runs 30 ticks a second, as the original does, however fast it is\n\
                      drawn: a window draws as fast as its display takes pictures, a headless\n\
-                     ride 60 a second, and --draw-fps N at most N.\n\
+                     ride 60 a second, and --draw-fps N at most N. --steady-clock times the ride\n\
+                     by its pictures alone, each one exactly its floor, so a busy machine rides\n\
+                     the same ride as an idle one (offline; for the tests).\n\
                      The window opens at the screen's size and the frame fills it, re-made when\n\
                      the window is resized, wider or taller as the original's own 16:9 mode\n\
                      would draw it; --aspect 4:3, 16:9, 16:10 or 21:9 draws the largest frame of\n\

@@ -17,7 +17,7 @@ tracked rather than in `kit.toml` because every worktree has to agree on it, and
     test = "-p game-sim --test camera"
     paths = ["crates/game-sim/src/camera.rs", "crates/ps2-float/*"]
 
-    [flaky]                        # failures rerun alone once before they count: load, not the change
+    [flaky]                        # failures rerun once, every slot held, before they count: load, not the change
     tests = ["-p openmx --test lobby::", "::two_builds_since_the_id"]
 
     [alone]                        # binaries that time themselves: one by one after the pool; a failure
@@ -162,7 +162,7 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
     """The whole gate. Returns cargo's exit code shape (0 passed, 101 a test failed, else the build's) and
     the notes `./kit check` adds to its one line: slow binaries left out, flakes that passed alone.
 
-    `alone` is a context manager a failed `[alone]` binary's rerun runs inside: `./kit check` passes one
+    `alone` is a context manager a failed `[alone]` binary's rerun, and a `[flaky]` one's, runs inside: `./kit check` passes one
     that holds every check slot on the machine (checks.alone). Only a failure takes the machine — a budget
     test that passes beside the other worktrees' gates has no reason to stop them."""
     gc = gate_config(cwd)
@@ -225,7 +225,9 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
                     notes.append(f'passed on a rerun with the machine to itself (time budget, gate.toml): '
                                  f'{", ".join(n.rsplit("::", 1)[-1] for n in names)}')
 
-        # A failure that is load and not the change gets one more go, alone, now the pool is quiet.
+        # A failure that is load and not the change gets one more go, now the pool is quiet, holding
+        # every check slot on the machine as an [alone] rerun does: rerun beside the other worktrees'
+        # gates it failed again (fixed_rate at load 70-100 parked V111 and S216, 10-29).
         flaky = [re.compile(p) for p in (gc.get('flaky') or {}).get('tests', [])]
         reran = []
         for b in bins:
@@ -234,7 +236,8 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
             names = failed_tests(b.out)
             if names and all(any(f.search(f'{b.args}::{n}') for f in flaky) for n in names):
                 again = Binary(b.exe, b.pkg, b.kind, b.name, str(Path(b.dir) / 'Cargo.toml'))
-                _run_one(again, benv, names)
+                with alone():
+                    _run_one(again, benv, names)
                 b.out += f'\n(kit: {len(names)} known load flake(s) failed; rerun alone: ' \
                          f'{"passed" if not again.rc else "failed again"})\n' + again.out
                 if not again.rc:

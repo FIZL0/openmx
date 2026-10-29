@@ -4,7 +4,7 @@
     python3 tests/test_gate.py          (needs cargo; no kit.toml, no network, about ten seconds)
 
 What it holds the gate to: the binaries really run at the same time (an `[alone]` one after them, a failed one rerun holding the machine), a `[[slow]]` binary is left out
-until the work touches its paths (or `--all`), a `[flaky]` failure gets one lone rerun and counts as a
+until the work touches its paths (or `--all`), a `[flaky]` failure gets one rerun holding the machine and counts as a
 pass only when that rerun passes, and a real failure still fails, with cargo's own rerun line in the log.
 """
 from __future__ import annotations
@@ -131,6 +131,7 @@ def test_gate() -> None:
         rc, notes = gate()
         check(rc == 0, f'a known flake that passes alone passes the gate (rc {rc})')
         check(any('binds_a_port' in n for n in notes), 'and the verdict names it')
+        check(held == [1], f'and its rerun held the machine (held {held})')
 
         (w / 'gate.toml').write_text('[flaky]\ntests = []\n')
         (w / 'flake').write_text('')

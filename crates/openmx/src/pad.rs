@@ -4527,6 +4527,15 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Start a child under [`FIFOS`]: between its fork and its exec it holds a copy of every open
+    /// file, a [`FakePad`]'s writer too, so a pad test unplugging in that moment in the same binary
+    /// kept its pad in (machines_everywhere at load 100).
+    #[allow(dead_code)]
+    pub(crate) fn spawn(command: &mut std::process::Command) -> std::process::Child {
+        let _fifos = FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+        command.spawn().expect("the child starts")
+    }
+
     /// An empty directory of this test's own.
     pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("openmx-pad-{name}-{}", std::process::id()));

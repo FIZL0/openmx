@@ -117,6 +117,14 @@ fn ride(browser: impl FnOnce(&Path, &str, &str) -> Command) {
     // one call a tick of the ride's clock, as the shell calls it (`pace::TICK`)
     let frame = Duration::from_nanos(1_001_000_000_000 / 30_000);
     let started = Instant::now();
+    // When either side last moved on: a new lobby line, a browser line, a tick. Timed from here
+    // and not from the start, a machine busy with other gates (load 30-80) starting chromium slowly
+    // is not a failure; two minutes with nothing new is one. Ten minutes in all at the most.
+    let progress = std::cell::Cell::new(Instant::now());
+    let stuck = |what: &str| {
+        assert!(progress.get().elapsed() < Duration::from_secs(120), "nothing new for two minutes; {what}");
+        assert!(started.elapsed() < Duration::from_secs(600), "not done after ten minutes; {what}");
+    };
     let mut last = Instant::now();
     // what the desktop's lobby said last, printed when it changes (the log of a failed run)
     let mut was = String::new();
@@ -132,9 +140,10 @@ fn ride(browser: impl FnOnce(&Path, &str, &str) -> Command) {
         if now != was {
             eprintln!("desktop at {:.1} s: {now}", started.elapsed().as_secs_f32());
             was = now;
+            progress.set(Instant::now());
         }
         assert!(desk.failed.is_none(), "the desktop: {:?} ({})", desk.failed, desk.status);
-        assert!(started.elapsed() < Duration::from_secs(120), "not done after two minutes; the desktop: {}", desk.status);
+        stuck(&format!("the desktop: {}", desk.status));
     };
     while desk.ticket.is_empty() || desk.room.is_none() {
         step(&mut desk);
@@ -158,6 +167,7 @@ fn ride(browser: impl FnOnce(&Path, &str, &str) -> Command) {
     loop {
         step(&mut desk);
         for line in rx.try_iter() {
+            progress.set(Instant::now());
             if let Some(t) = line.strip_prefix("tick ") {
                 theirs.push(t.to_string());
             } else if let Some(s) = line.strip_prefix("state ") {
@@ -171,7 +181,7 @@ fn ride(browser: impl FnOnce(&Path, &str, &str) -> Command) {
         if let Ok(Some(status)) = node.0.try_wait() {
             panic!("the browser peer exited ({status}); its last state: {state}");
         }
-        assert!(started.elapsed() < Duration::from_secs(120), "the browser's last state: {state}");
+        stuck(&format!("the browser's last state: {state}"));
         if !said_start && desk.riding.is_none() && desk.room.as_ref().is_some_and(|r| r.taken() == 2 && r.all_ready()) {
             desk.net.send(Cmd::Start);
             said_start = true;

@@ -2114,13 +2114,17 @@ fn a_four_player_session_steps_and_draws_four_views() {
     let shot = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("v22-four-views.png");
     let _ = std::fs::remove_file(&shot);
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_openmx"))
+    let mut shell = std::process::Command::new(env!("CARGO_BIN_EXE_openmx"));
+    shell
         .current_dir(&root)
         .args(["--headless", "--players", "4", "--size", "320x224", "--frames", "60", "--shot-frame", "59"])
         .arg("--shot")
         .arg(&shot)
-        .output()
-        .expect("the shell runs");
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // Under the pad tests' lock: this binary mounts pad.rs (pad::tests::spawn).
+    let out = pad::tests::spawn(&mut shell).wait_with_output().expect("the shell runs");
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
     assert!(said.contains("views: 4 players, quarters"), "{said}");

@@ -362,11 +362,15 @@ fn the_same_switch_online_on_a_race_track() {
 
 // ---- through the shell -------------------------------------------------------------------------
 
-/// Ride the binary headless with these arguments, or `None` with no disc to ride.
+/// Ride the binary headless with these arguments, or `None` with no disc to ride. On the steady
+/// clock: a busy machine's late frames dropped ticks off the wall clock's `--seconds`, so the
+/// switching tape's last switch (tick 180 of a 9 s ride) never came.
 fn shell(args: &[&str]) -> Option<String> {
     disc()?;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = Command::new(env!("CARGO_BIN_EXE_openmx")).current_dir(&root).arg("--headless").args(args).output().expect("the shell runs");
+    let mut shell = Command::new(env!("CARGO_BIN_EXE_openmx"));
+    shell.current_dir(&root).args(["--headless", "--steady-clock"]).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let out = pad::tests::spawn(&mut shell).wait_with_output().expect("the shell runs");
     let said = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
     Some(said)
@@ -414,17 +418,24 @@ fn two_online_machines_start_their_seats_in_the_plane_on_a_race_track() {
     if disc().is_none() {
         return;
     }
-    // Ports of this test's own, two apart from any other test's.
-    let (h, g) = ("host@127.0.0.1:47613", "g@127.0.0.1:47614");
+    // Two ports the system has free now: fixed ones (47613/47614) were taken by the same test in
+    // another slot's gate running at the same moment.
+    let port = || std::net::UdpSocket::bind("127.0.0.1:0").and_then(|s| s.local_addr()).expect("a free port").port();
+    let (hp, mut gp) = (port(), port());
+    while gp == hp {
+        gp = port();
+    }
+    let (h, g) = (format!("host@127.0.0.1:{hp}"), format!("g@127.0.0.1:{gp}"));
+    let (h, g) = (h.as_str(), g.as_str());
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let ride = |me: &str, peer: &str| {
-        Command::new(env!("CARGO_BIN_EXE_openmx"))
+        let mut shell = Command::new(env!("CARGO_BIN_EXE_openmx"));
+        shell
             .current_dir(&root)
             .args(["--headless", "--track", "nat19", "--vehicle", "biplane", "--frames", "400", "--seats", "host,g"])
             .args(["--online", me, "--peer", peer])
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("the shell runs")
+            .stdout(std::process::Stdio::piped());
+        pad::tests::spawn(&mut shell)
     };
     let (host, guest) = (ride(h, g), ride(g, h));
     let said: Vec<String> = [host, guest]

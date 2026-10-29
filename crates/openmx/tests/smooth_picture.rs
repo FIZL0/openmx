@@ -13,6 +13,10 @@
 //! - off free09's south edge into the shootoff and on to its put-back: every frame draws the bike and
 //!   the thrown rider on the line between their two ticks' spots, and the put-back's jump is drawn
 //!   once, where it lands, with no frame between the wreck and the put-back's spot.
+//!
+//! Both ride on `--steady-clock`, each picture exactly its floor: on the wall clock a busy machine
+//! stalled pictures, the ride dropped the ticks behind them, and the shootoff's 600 ticks drew too
+//! few frames down to call it one ("the rider was down for 76 frames of 346", load ~35).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,7 +54,7 @@ fn ride(fps: u32, at: &str, ticks: usize) -> Option<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
-        .args(["--headless", "--no-sound", "--track", "free09", "--trace-at", at, "--trace-picture"])
+        .args(["--headless", "--steady-clock", "--no-sound", "--track", "free09", "--trace-at", at, "--trace-picture"])
         .args(["--draw-fps", &fps.to_string(), "--frames", &ticks.to_string()])
         .args(["--play", tape.to_str().expect("a path")])
         .output()

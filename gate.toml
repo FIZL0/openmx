@@ -18,7 +18,9 @@ paths = ["crates/game-sim/src/tick.rs", "crates/game-sim/src/rng.rs", "crates/ga
 [flaky]
 # Wall-clock and loopback-port tests that red under the other slots' load and pass alone (memory of 10-21
 # to 10-23: lobby's mDNS seating, udp's dropped-and-rebound ports, pace's frame timing). Each is a regex on
-# `<rerun args>::<test>`; one lone rerun each, and only when nothing else in that binary failed.
+# `<rerun args>::<test>`; one rerun each, holding every check slot on the machine so no other gate loads it
+# (10-29: a rerun beside them failed fixed_rate again at load 70-100), and only when nothing else in that
+# binary failed.
 tests = [
     "--test lobby::",
     "::(.*::)?two_builds_since_the_id_both_say_why$",
@@ -27,6 +29,8 @@ tests = [
     "::(.*::)?two_online_machines_start_their_seats_in_the_plane_on_a_race_track$",
     # rides for so many seconds of wall clock and counts the ticks: at load 30+ a frame overruns and they part (S122, 10-27)
     "--test fixed_rate::",
+    # a desktop peer and headless chromium over a loopback relay: chromium starts slowly under load (P213, 10-29)
+    "--test netplay_browser::",
 ]
 
 [alone]

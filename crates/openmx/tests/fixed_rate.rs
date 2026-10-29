@@ -10,6 +10,12 @@
 //! - an untouched ride's engine hands the simulation the same `dt` tick for tick at both rates —
 //!   the tape `--record` writes holds it — climbing from the load's 0.033 to the 30 Hz cap and
 //!   staying there.
+//!
+//! They ride on `--steady-clock`, each picture exactly its 1/5 or 1/60 s: on the wall clock a busy
+//! machine (the other slots' gates, load 30–100) stalled a picture past `pace::CATCH_UP`, the ride
+//! forgot a tick and the two rates parted, 89 ticks to 90. The steady clock still owes the ticks by
+//! time and not by pictures, which is what P52 broke; `pace`'s own tests hold the wall clock's
+//! schedule.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,7 +33,7 @@ fn ride(fps: u32, args: &[&str]) -> Option<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
-        .args(["--headless", "--track", "free06", "--seconds", "3", "--draw-fps", &fps.to_string()])
+        .args(["--headless", "--steady-clock", "--track", "free06", "--seconds", "3", "--draw-fps", &fps.to_string()])
         .args(args)
         .output()
         .expect("the shell runs");

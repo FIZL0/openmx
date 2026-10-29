@@ -71,6 +71,55 @@ pub fn after_load(engine: &mut Engine) {
 /// the PS2's own frame, which here never comes late: only the picture does.
 pub const CATCH_UP: Duration = Duration::from_millis(500);
 
+/// The ride's clock: the wall's, or with `--steady-clock` one that each picture moves on by exactly
+/// its floor and nothing else. A test that rides the shell headless and counts its ticks or frames
+/// read the wall clock, which a machine busy with other builds stalls past [`CATCH_UP`], and the ride
+/// dropped a tick and parted from the one it was compared with (fixed_rate's 89 of 90, smooth
+/// picture's shootoff never reached, at load 30–100). On the steady clock a ride is the same ride
+/// however long its pictures really took, and no picture sleeps.
+#[derive(Clone, Copy)]
+pub struct Clock {
+    start: Instant,
+    /// The steady clock's time since the start; `None` on the wall's.
+    steady: Option<Duration>,
+}
+
+impl Clock {
+    pub fn wall(start: Instant) -> Clock {
+        Clock { start, steady: None }
+    }
+
+    pub fn steady(start: Instant) -> Clock {
+        Clock { start, steady: Some(Duration::ZERO) }
+    }
+
+    pub fn is_steady(&self) -> bool {
+        self.steady.is_some()
+    }
+
+    /// The time since the start.
+    pub fn elapsed(&self) -> Duration {
+        self.steady.unwrap_or_else(|| self.start.elapsed())
+    }
+
+    /// Now, on this clock.
+    pub fn now(&self) -> Instant {
+        self.start + self.elapsed()
+    }
+
+    /// The end of a picture whose least time is `floor`: the wall clock sleeps the rest of it out
+    /// (`limiter`), the steady one moves on by it.
+    pub fn picture(&mut self, limiter: &mut Limiter, floor: Option<Duration>) {
+        match &mut self.steady {
+            Some(t) => *t += floor.unwrap_or(STEADY_PICTURE),
+            None => limiter.wait(floor),
+        }
+    }
+}
+
+/// A steady clock's picture with no floor: a headless ride's 60 a second.
+const STEADY_PICTURE: Duration = Duration::from_nanos(1_000_000_000 / 60);
+
 /// The fixed schedule: when each tick is due, and how many have run.
 pub struct Pacer {
     /// What one tick stands for in wall time.
@@ -499,6 +548,36 @@ mod tests {
         assert!(p.owed(start + Duration::from_secs(10) + TICK));
     }
 
+    /// `--steady-clock`: the pictures alone move it, by their floor, however long they really take,
+    /// so a ride at 5 pictures a second owes the ticks one at 60 does.
+    #[test]
+    fn the_steady_clock_moves_by_the_pictures_alone() {
+        let start = Instant::now();
+        let run = |fps: u32| {
+            let mut clock = Clock::steady(start);
+            let mut limiter = Limiter::default();
+            let mut p = Pacer::new(TICK, start).until(Some(3.0));
+            // As the ride's loop: the ticks owed now, then `--seconds`' test, then the picture's end.
+            loop {
+                while p.owed(clock.now()) {
+                    p.ran();
+                }
+                if clock.elapsed() >= Duration::from_secs(3) {
+                    break (p.ticks(), clock.elapsed());
+                }
+                clock.picture(&mut limiter, Some(Duration::from_secs(1) / fps));
+            }
+        };
+        let (slow, fast) = (run(5), run(60));
+        assert_eq!(slow.0, 90);
+        assert_eq!(fast.0, 90);
+        assert_eq!(slow.1, Duration::from_millis(200) * 15);
+        let mut clock = Clock::steady(start);
+        clock.picture(&mut Limiter::default(), None);
+        assert_eq!(clock.elapsed(), STEADY_PICTURE, "no floor is a headless ride's 60 a second");
+        assert!(!Clock::wall(start).is_steady());
+    }
+
     /// P90: the VSync and frame limit settings, as a floor on the picture's time.
     #[test]
     fn the_settings_make_the_pictures_floor() {
@@ -526,17 +605,29 @@ mod tests {
         let mut limiter = Limiter::default();
         limiter.wait(floor);
         let start = Instant::now();
-        let mut frames = Vec::new();
+        let (mut frames, mut ends) = (Vec::new(), Vec::new());
         for _ in 0..30 {
             let top = Instant::now();
             // A frame's work, well under the floor.
             std::thread::sleep(Duration::from_millis(2));
             limiter.wait(floor);
             frames.push(top.elapsed());
+            ends.push(start.elapsed());
         }
-        let mean = start.elapsed().as_secs_f64() * 1000.0 / 30.0;
-        assert!((16.6..17.5).contains(&mean), "a frame took {mean:.2} ms on average");
-        assert!(frames.iter().all(|f| *f >= Duration::from_micros(16_000)), "a frame ended early: {frames:?}");
+        // No frame ends before it is due, a floor after the one before was: the n-th no sooner than
+        // n floors in. One frame each on its own may be short — the one after a sleep that woke late
+        // is, by design, so the late one is not piled onto every frame after — and under a busy
+        // machine's late wakes a per-frame floor failed (10-29).
+        let floor_d = floor.unwrap();
+        for (n, end) in ends.iter().enumerate() {
+            assert!(*end + Duration::from_micros(50) >= floor_d * (n as u32 + 1), "frame {n} ended early at {end:?}: {frames:?}");
+        }
+        // And the floor takes the work in, not on top of it: the middle frame is a floor long, where a
+        // limiter that slept the whole floor after the work would make it 18.7 ms.
+        let mut sorted = frames.clone();
+        sorted.sort();
+        let median = sorted[sorted.len() / 2].as_secs_f64() * 1000.0;
+        assert!((16.0..18.0).contains(&median), "the middle frame took {median:.2} ms: {frames:?}");
 
         // The ticks over three seconds of wall clock, drawn at each limit (and uncapped, at 1 ms a
         // picture): the same ticks, and the engine's dt for each the same bits.

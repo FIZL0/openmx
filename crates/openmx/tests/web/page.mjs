@@ -56,7 +56,7 @@ process.stdin.on('end', () => quit(0));
 process.stdin.resume();
 const wsUrl = await new Promise(resolve => {
   let buf = '';
-  const late = setTimeout(() => fail(`chromium gave no DevTools address:\n${buf}`), 20000);
+  const late = setTimeout(() => fail(`chromium gave no DevTools address:\n${buf}`), 90000); // 20 s ran out starting chromium under a busy gate
   chrome.stderr.on('data', d => {
     buf += d;
     const m = buf.match(/DevTools listening on (ws:\S+)/);
