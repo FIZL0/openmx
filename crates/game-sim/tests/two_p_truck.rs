@@ -284,6 +284,82 @@ fn the_truck_drives_from_each_image_into_the_next() {
     assert!(pairs >= 5, "only {pairs} image pairs a tick apart");
 }
 
+/// S181: the same drive with nothing of the path out of the image: the shell's specs of free09_ss's
+/// cars (measured on the clips' keys, their stale tangents the measure's), presampled by the port on
+/// free09_ss's ground. Every presampled key's position and normal is the image's, and every car
+/// steps from each image into the next as the original's does.
+#[test]
+fn the_shells_presampled_paths_drive_as_the_originals() {
+    let Some(first) = image(IMAGES[0]) else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(disc) => disc,
+        Err(why) => return skip(&why),
+    };
+    let parts = ["Tracks\\free09_ss.res", "Tracks\\free09_ss_2.res"].map(|n| disc.res(n).unwrap_or_else(|e| panic!("{n}: {e}")));
+    let mut flat = |p: game_render::mat::V3| (p, game_render::mat::v3(0.0, 1.0, 0.0));
+    let shell = game_render::toy::Traffic::load(&parts, "free09_ss", &mut flat).sim(&parts).specs.as_ref().clone();
+    let specs: Vec<Spec> = CARS
+        .iter()
+        .enumerate()
+        .map(|(c, &car)| {
+            let theirs = keys_of(&first, car);
+            let f = |o| first.u32_at(car + o);
+            shell
+                .iter()
+                .find(|s| {
+                    (s.lag.to_bits(), s.time_scale.to_bits()) == (f(at::LAG), f(at::TIME_SCALE))
+                        && s.keys.len() == theirs.len()
+                        && s.keys.iter().zip(&theirs).all(|(a, b)| a.t.to_bits() == b.t.to_bits() && a.pos.x().to_bits() == b.pos.x().to_bits() && a.pos.z().to_bits() == b.pos.z().to_bits())
+                })
+                .unwrap_or_else(|| panic!("car {c}: no car of free09_ss's .toy drives this path"))
+                .clone()
+        })
+        .collect();
+    let (mut pairs, mut keys, mut wrong) = (0, 0, Vec::new());
+    let Some(()) = on_free09_ss(|ground| {
+        for (c, (spec, &car)) in specs.iter().zip(&CARS).enumerate() {
+            assert!(spec.presample && !spec.level, "car {c}: the shell's spec has the wrong switches");
+            spec.presample(ground);
+            for (k, (ours, theirs)) in spec.keys().iter().zip(&keys_of(&first, car)).enumerate() {
+                keys += 1;
+                if (bits(ours.pos), bits(ours.normal), ours.len.to_bits()) != (bits(theirs.pos), bits(theirs.normal), theirs.len.to_bits()) {
+                    wrong.push(format!("car {c} key {k}: {ours:?} against {theirs:?}"));
+                }
+            }
+        }
+        for w in IMAGES.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if b != a + 1 {
+                continue;
+            }
+            let (Some(ea), Some(eb)) = (image(a), image(b)) else { return };
+            let dt = F(eb.f32_at(app(&eb) + at::DT));
+            for (k, (spec, &car)) in specs.iter().zip(&CARS).enumerate() {
+                // The image's clean tangents are the ones its curve made on the presampled keys of
+                // the segment it is on, which the port makes again: only a cursor still on the
+                // segment the measuring left it on rides the measure's.
+                let kept = |mut c: Car| {
+                    c.stale &= c.seg == spec.cursor;
+                    c
+                };
+                let mut ours = kept(car_of(&ea, car));
+                spec.step(&mut ours, dt, ground);
+                let theirs = kept(car_of(&eb, car));
+                let same = |c: &Car| (c.clock.to_bits(), c.seg, bits(c.point), bits(c.head), bits(c.normal), mat_bits(&c.pose), c.stale);
+                if same(&ours) != same(&theirs) {
+                    wrong.push(format!("{a} -> {b}: car {k}: {ours:?} against {theirs:?}"));
+                }
+            }
+            pairs += 1;
+        }
+    }) else {
+        return;
+    };
+    assert!(wrong.is_empty(), "{} keys and steps differ:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(keys > 100, "only {keys} keys");
+    assert!(pairs >= 5, "only {pairs} image pairs a tick apart");
+}
+
 /// What the original's contact-velocity step writes on one of P1's wheels in the image, run again
 /// on the image's own wheel, chassis and car, and what the port makes of the same: the car's motion
 /// from its matrix before its step and its node's now, at the application's `1/dt`
