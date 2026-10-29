@@ -2606,7 +2606,8 @@ bone_collision_solve boot 0x001f7550 (vt +0x18; this, first) ground (only strict
 #                                    x/z box, +0x78 +0x30/+0x40), then the sphere collider, then the sweep
 #   the collision's fields: +4 on, +0x14 touched (set by every push-out), +0x18 ground, +0x1c scene,
 #   +0x20 swept (cleared each solve), +0x24 sweep on, +0x28 sweep back, +0x2c UnpenetrationScale,
-#   +0x30 RotationScale, +0x34 Restitution, +0x38 Friction, +0x3c ground record, +0x40 point,
+#   +0x30 RotationScale, +0x34 Restitution, +0x38 Friction, +0x3c the ground query's surface byte
+#   (t0 of the query; the rider particles' sphere zone, P186), +0x40 point,
 #   +0x50 normal, +0x60 dv, +0x70/+0x74 the contact's other side, +0x84 the actor's search pool,
 #   +0x90 the impulse's scratch (x = inv mass; w, always 0, starts every sum). Body +0x14 is Radius
 bone_collision_push_out boot 0x001f6c40 (this, point*, normal*) the static path is other == 0, or an

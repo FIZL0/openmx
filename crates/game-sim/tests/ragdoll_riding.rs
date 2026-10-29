@@ -666,6 +666,7 @@ fn contact_of(ee: &Ee, c: u32) -> Contact {
         point: quad(ee, c + POINT),
         normal: quad(ee, c + NORMAL),
         dv: quad(ee, c + DV),
+        surface: ee.u8_at(c + 0x3c),
     }
 }
 

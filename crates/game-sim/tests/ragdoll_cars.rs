@@ -434,6 +434,7 @@ fn the_push_out_against_a_car_is_the_originals() {
             point,
             normal,
             dv: vf(&ee, c + coll::DV),
+            surface: 0,
         };
         let against = moving(point, Against::Mover(&cars[k].mover));
         contact.push_out_against(&sphere, &mut body, point, normal, against, &table);
@@ -836,7 +837,7 @@ fn the_bones_sweep_through_the_cars_as_the_originals() {
             rates: vf(&ee, b + coll::RATES),
             ..Body::default()
         };
-        let mut contact = Contact { touched: false, ground: false, scene: false, swept: false, point: pos, normal: Vf::new(0.0, 1.0, 0.0, 1.0), dv: vf(&ee, c + coll::DV) };
+        let mut contact = Contact { touched: false, ground: false, scene: false, swept: false, point: pos, normal: Vf::new(0.0, 1.0, 0.0, 1.0), dv: vf(&ee, c + coll::DV), surface: 0 };
         let candidates = order
             .iter()
             .zip(&distances)

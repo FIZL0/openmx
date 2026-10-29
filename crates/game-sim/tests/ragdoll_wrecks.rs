@@ -940,6 +940,7 @@ fn contact_of(ee: &Ee, c: u32) -> Contact {
         point: quad(ee, c + POINT),
         normal: quad(ee, c + NORMAL),
         dv: quad(ee, c + DV),
+        surface: ee.u8_at(c + 0x3c),
     }
 }
 
@@ -3415,7 +3416,7 @@ fn the_bones_sweep_against_the_wreck_bike_as_the_originals() {
             rates: raw_quad(&ee, body + body_at::RATES),
             ..Body::default()
         };
-        let mut contact = Contact { touched: false, ground: false, scene: false, swept: false, point: pos, normal: pos, dv: raw_quad(&ee, c + coll_at::DV) };
+        let mut contact = Contact { touched: false, ground: false, scene: false, swept: false, point: pos, normal: pos, dv: raw_quad(&ee, c + coll_at::DV), surface: 0 };
         let candidate = Candidate { distance: F(distance), class: class::WRECK_BIKE, centre, radius, mesh: &bike.mesh, frame: &frame };
         contact.solve(true, &sphere, &mut port_body, None, &mut SweptList(includes, vec![candidate]), &table);
         ee.call(sweep, &[u64::from(c)], &[], 50_000_000);

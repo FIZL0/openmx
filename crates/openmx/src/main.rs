@@ -7385,7 +7385,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let place = &mut world.place;
             for ((seat, rig), fx) in world.seats.iter().zip(&rigs).zip(&mut bike_fx) {
                 let frame = match seat.garage.up {
-                    Kind::Bike => bike_fx_frame(fx, &seat.sim.rider, rig, &assets, place),
+                    Kind::Bike => bike_fx_frame(fx, &seat.sim.rider, rig, &assets),
                     _ => particles::PlaneFrame::default(),
                 };
                 fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
@@ -9319,14 +9319,8 @@ fn load_sun_flares(archives: &[Res], track: &str) -> Vec<(game_render::sun_flare
 /// object contacts, surface, spin and side force; while down, the wreck body's contacts and their
 /// relative velocity; and the
 /// rider's collision spheres, the ragdoll's while down and the riding body's while up (P152), each with
-/// the surface the ride's terrain query has under it.
-fn bike_fx_frame(
-    fx: &particles::PlaneFx,
-    rider: &Rider,
-    rig: &Rig,
-    assets: &Assets,
-    place: &mut impl sim_world::World,
-) -> particles::PlaneFrame {
+/// the surface its own ground query last wrote (P186).
+fn bike_fx_frame(fx: &particles::PlaneFx, rider: &Rider, rig: &Rig, assets: &Assets) -> particles::PlaneFrame {
     let ride = &rider.ride;
     let bike_at = match &rider.crash {
         Some(crash) => chassis_wrecked(crash),
@@ -9384,8 +9378,8 @@ fn bike_fx_frame(
     // while down, and while up the riding body's (P152), whose feet (collisions 0 and 1) raise Foot
     // Dust when they touch the ground. The riding body runs only where the shell hands it the grips.
     match (&rider.ragdoll, rider.riding.as_deref(), &rider.ragdoll_kit) {
-        (Some(down), _, Some(kit)) => frame.constraints = constraint_frames(&down.contacts, &down.ragdoll, kit, place),
-        (None, Some(riding), Some(kit)) => frame.constraints = constraint_frames(&riding.actor.contacts, &riding.actor.ragdoll, kit, place),
+        (Some(down), _, Some(kit)) => frame.constraints = constraint_frames(&down.contacts, &down.ragdoll, kit),
+        (None, Some(riding), Some(kit)) => frame.constraints = constraint_frames(&riding.actor.contacts, &riding.actor.ragdoll, kit),
         _ => {}
     }
     frame
@@ -9394,25 +9388,23 @@ fn bike_fx_frame(
 /// The rider's bone collisions as the ParticleCollisionConstraint entries read them (P74, P152): each
 /// one's ground and scene flags (the manager sets the two on their own, so a sphere on both is an
 /// object contact too, which every rider entry's Disable turns off), the point it was pushed from,
-/// its bone's velocity, and the surface the ride's terrain query has under a touching one.
+/// its bone's velocity, and the surface byte its own ground query last wrote (P186), which the
+/// original's entries read as the sphere's zone.
 fn constraint_frames(
     contacts: &[game_sim::ragdoll_contact::Contact],
     ragdoll: &game_sim::ragdoll::Ragdoll,
     kit: &game_sim::ragdoll_ride::Kit,
-    place: &mut impl sim_world::World,
 ) -> Vec<particles::ConstraintFrame> {
     contacts
         .iter()
         .zip(&kit.spheres)
         .map(|(c, sphere)| {
-            let at = vector(c.point);
-            let touching = c.ground || c.scene;
             particles::ConstraintFrame {
                 ground: c.ground,
                 object: c.scene,
-                at,
+                at: vector(c.point),
                 vel: ragdoll.bones.get(sphere.bone).map_or(V3::default(), |b| vector(b.body.velocity)),
-                zone: if touching { plane_fx_ground(place, at).map_or(0, |(_, z)| z) } else { 0 },
+                zone: c.surface,
             }
         })
         .collect()
