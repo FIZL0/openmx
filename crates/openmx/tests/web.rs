@@ -329,6 +329,7 @@ fn the_touch_pad_rides_on_a_phone() {
     assert_eq!(field("buttons"), "10", "{text}");
     assert_eq!(field("inside"), "true", "a control off the screen: {text}");
     assert_eq!(field("overlaps"), "0", "controls on top of each other: {text}");
+    assert_eq!(field("clear"), "true", "CLUTCH on the score bar, or MODIFIER on the camera's name: {text}");
     assert_eq!(field("small"), "0", "a control smaller than a fingertip: {text}");
     let axes = |key: &str| -> Vec<f64> {
         let f = field(key);
