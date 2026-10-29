@@ -15,6 +15,9 @@ const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds th
      extra stunts on Cross and Square (the bike layout's free buttons), and with R1 held a sideways flick off a lip \
      for a 360 and a forward one for a front flip. The front flip is the port's own, in neither game, and shows the \
      backflip's pose. Online rides are always Original.";
+/// The Handling row's help (MD40).
+const HANDLING_HELP: &str = "Original is MX Unleashed's bikes. MX vs. ATV rides that game's own bike files from the trick pack in \
+     the mods folder, and its backflip, which only arms with R1 held as you pull back on the lip. Online rides are always Original.";
 /// The Air Wrecks row's help (P138).
 const AIR_WRECKS_HELP: &str = "Whether the bike's angle in the air throws the rider off: upside down, nosed over or rolled too far. \
      Off, you ride every jump out, and only the landing is judged. On is the original game.";
@@ -151,6 +154,8 @@ pub enum Key {
     /// A music pack by its place in [`Menu::music_packs`] (P122).
     MusicPack(usize),
     Tricks,
+    /// How the bikes handle (MD40).
+    Handling,
     /// The Original switch (P126), and each departure's under it.
     Original,
     /// The Ride tab's row into the Original Game page (P179).
@@ -384,6 +389,14 @@ impl Menu {
             mods,
             Row::choice(Key::Tricks, "Tricks", &Tricks::ALL.map(Tricks::label), Tricks::ALL.iter().position(|t| *t == self.settings.tricks).unwrap_or(0), TRICKS_HELP)
                 .off_if(!self.settings.mods, "Needs a trick pack in the mods folder"),
+            Row::choice(
+                Key::Handling,
+                "Handling",
+                &game_sim::handling::Handling::ALL.map(game_sim::handling::Handling::label),
+                game_sim::handling::Handling::ALL.iter().position(|h| *h == self.settings.handling).unwrap_or(0),
+                HANDLING_HELP,
+            )
+            .off_if(!self.settings.mods, "Needs a trick pack in the mods folder"),
             original,
         ]
     }
@@ -1182,6 +1195,7 @@ impl Menu {
             Key::BackwardsBail => s.backwards_bail = !s.backwards_bail,
             Key::Bays => s.bays = !s.bays,
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],
+            Key::Handling => s.handling = game_sim::handling::Handling::ALL[next(row)],
             Key::Modifiers if p.ok => {
                 self.open_modifiers();
                 return;

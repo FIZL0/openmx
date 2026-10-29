@@ -1727,6 +1727,10 @@ struct Args {
     /// row says, and a ride outside it has the original's. `--online` is always the original's; a
     /// ride from the lobby is its room's ([`Args::room_tricks`]).
     tricks: Option<menu::Tricks>,
+    /// `--handling original|mxvatv` (MD40): how the bikes handle. Unset, the front end's Handling row
+    /// says, and a ride outside it has the original's. `--online` and the lobby are always the
+    /// original's: no handshake holds the seats to it yet.
+    handling: Option<game_sim::handling::Handling>,
     /// The trick pack a lobby's ride rides (MD19): this machine's mods folder and the pack's id, as
     /// the room names it and the handshake held every seat to. `None` outside the lobby.
     room_tricks: Option<(std::path::PathBuf, String)>,
@@ -2200,6 +2204,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.tricks = Some(args.tricks.unwrap_or(shell.front.menu.settings.tricks));
+                a.handling = Some(args.handling.unwrap_or(shell.front.menu.settings.handling));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
@@ -2287,6 +2292,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 // seat to the same files of, read from this machine's mods folder.
                 a.tricks = Some(if room.tricks.is_empty() { menu::Tricks::Original } else { menu::Tricks::MxVsAtv });
                 a.room_tricks = (!room.tricks.is_empty()).then(|| (shell.front.dir.join(track_mods::MODS_DIR), room.tricks.clone()));
+                // The original's handling (MD40): the room does not carry it, so the seats could not agree.
+                a.handling = Some(game_sim::handling::Handling::Original);
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
@@ -3259,7 +3266,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             (bytes, member)
         }
     };
-    let mut stock_phy = Phy::read_bytes(&phy_bytes, &tables.ride.curve);
+    // MX vs. ATV's handling (MD40): its own bike file from the trick pack, in place of the disc's.
+    let handling_pack = ride_handling_pack(&args, trick_pack.as_ref())?;
+    let mut stock_phy = handling_phy(handling_pack.as_ref(), &phy_member, &tables.ride.curve, "")
+        .unwrap_or_else(|| Phy::read_bytes(&phy_bytes, &tables.ride.curve));
     if let Some(pack) = &trick_pack {
         println!("{}", pack.lay(&mut stock_phy, &phy_member));
     }
@@ -3289,7 +3299,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("player {}: phy: {note}", i + 1);
                 }
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
-                let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+                let mut phy = handling_phy(handling_pack.as_ref(), &member, &tables.ride.curve, &format!("player {}: ", i + 1))
+                    .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
                 if let Some(pack) = &trick_pack {
                     println!("player {}: {}", i + 1, pack.lay(&mut phy, &member));
                 }
@@ -8885,6 +8896,50 @@ fn ride_trick_pack(args: &Args) -> Result<Option<trick_packs::Pack>, String> {
     }
 }
 
+/// The trick pack whose `mx_*.phy` the bikes ride on MX vs. ATV's handling (MD40): only with
+/// `--handling mxvatv` or the Handling row's MX vs. ATV, never on `--online` or from the lobby (which
+/// set the original's), and only when the mods folder has one; the line says why not. The tricks'
+/// pack if the ride has one already.
+fn ride_handling_pack(args: &Args, tricks: Option<&trick_packs::Pack>) -> Result<Option<trick_packs::Pack>, String> {
+    if args.handling != Some(game_sim::handling::Handling::MxVsAtv) {
+        return Ok(None);
+    }
+    if args.online.is_some() {
+        println!("handling: the original's on --online, which has no handshake to hold every seat to it");
+        return Ok(None);
+    }
+    let Some(dir) = mods_dir(args) else {
+        println!("handling: the mods folder is off, so the original's");
+        return Ok(None);
+    };
+    let found = match tricks {
+        Some(pack) => trick_packs::by_id(&dir, &pack.id),
+        None => trick_packs::find(&dir),
+    };
+    match found {
+        Ok(pack) => Ok(Some(pack)),
+        Err(e) => {
+            println!("handling: {e}; the original's");
+            Ok(None)
+        }
+    }
+}
+
+/// A bike read for MX vs. ATV's handling (MD40) from `pack`'s file for `member`, saying so after
+/// `who`; `None`, with the reason said, rides the disc's file.
+fn handling_phy(pack: Option<&trick_packs::Pack>, member: &str, curve: &game_sim::camera::CurveTable, who: &str) -> Option<Phy> {
+    match pack?.handling(member, curve) {
+        Ok((phy, line)) => {
+            println!("{who}{line}");
+            Some(phy)
+        }
+        Err(line) => {
+            println!("{who}{line}");
+            None
+        }
+    }
+}
+
 /// Lay a lobby ride's trick pack (MD19) over a seat's bike file, read for the bike set `set`
 /// (`race125p`) as the handshake hashed it: what every machine lays over that seat.
 fn lay_room_tricks(pack: Option<&trick_packs::Pack>, phy: &mut Phy, set: &str) {
@@ -9615,6 +9670,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         mods: None,
         mods_asked: false,
         tricks: None,
+        handling: None,
         room_tricks: None,
         markers: None,
     };
@@ -9715,6 +9771,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--markers" => {
                 let v = next("on, off, or one per seat (on,off)")?;
                 args.markers = Some(menu::markers_seats(&v).ok_or_else(|| format!("--markers: {v:?} is not on or off, one per seat"))?);
+            }
+            "--handling" => {
+                let word = next("original or mxvatv")?;
+                let h = game_sim::handling::Handling::from_word(&word).ok_or_else(|| format!("--handling: {word:?} is not original or mxvatv"))?;
+                args.handling = Some(h);
             }
             "--tricks" => {
                 let word = next("original or mxvatv")?;
@@ -10023,7 +10084,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--handling original|mxvatv] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
