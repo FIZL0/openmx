@@ -23,6 +23,13 @@
 //! mode the other body's own list still has its say: another ghost's list rejects this one, so two
 //! ghosts inside each other do not hold each other's clocks. What the query finds the port asks of
 //! [`Rival`]'s bodies — see [`overlaps`] for the shape.
+//!
+//! **And the path cars** (S215). The vehicle category the put-back adds is in the cars' meshes'
+//! category too (`0x48`), so the original's ghost gathers no train, truck or scraper either: for a
+//! ghost's frame the port takes the cars out of the world ([`crate::traffic::Hidden`]) — the body
+//! rays, the sweep, the wheels, the wreck test's sweeps, and (the port's own: the original's lists
+//! for them are not the ghost's) the wreck bike and the ragdoll. Its clock holds inside a car as
+//! inside a rider ([`inside_cars`]), so it drives out a ghost and only then turns solid.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::hash::{State, Walk};
@@ -109,6 +116,25 @@ pub fn overlaps(me: &Rival, others: &[Rival]) -> bool {
         let apart = Acc::mula(d.x(), d.x()).madda(d.y(), d.y()).madd(d.z(), d.z());
         let reach = me.radius + o.radius;
         apart < reach * reach
+    })
+}
+
+/// Whether the body `me` is inside any path car of `props` at `span` ([`crate::traffic::Traffic::span`]):
+/// the ghost's overlap query against the traffic (S215).
+///
+/// The original's include-mode query sees the vehicle category, which the cars' meshes (`0x48`)
+/// hold, so a ghost inside a car holds its clock as it does inside a rider. **The shape is the
+/// port's own**: [`Rival`]'s sphere against the car's root box, in the mesh's own space (the box the
+/// mesh's tree starts from, so the whole car), where the original asks the bike's collidables of the
+/// car's mesh. The sphere is inside when the squared distance from its centre to the box, axis by
+/// axis, is under its radius squared; one that only touches does not hold the clock.
+pub fn inside_cars(me: &Rival, props: &[crate::world::Prop], span: [usize; 2]) -> bool {
+    props.iter().take(span[1]).skip(span[0]).any(|car| {
+        let Some(root) = car.mesh.nodes.first() else { return false };
+        let at = crate::math::transform_point(&car.from_world, me.centre);
+        let out = |k: usize| ((F(at.0[k]) - root.centre[k]).abs() - root.half_extent[k]).max(F::ZERO);
+        let (x, y, z) = (out(0), out(1), out(2));
+        Acc::mula(x, x).madda(y, y).madd(z, z) < me.radius * me.radius
     })
 }
 
