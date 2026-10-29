@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "game-render"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "game-sim",
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "game-sim"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "game-render",
  "ps2-float",
@@ -3383,7 +3383,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openmx"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "bincode",
@@ -3417,7 +3417,7 @@ dependencies = [
 
 [[package]]
 name = "openmx-ios"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
  "winit",
@@ -3425,7 +3425,7 @@ dependencies = [
 
 [[package]]
 name = "openmx-net"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "iroh",
  "iroh-mainline-address-lookup",
@@ -3799,14 +3799,14 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "ps2-float"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "ps2-oracle",
 ]
 
 [[package]]
 name = "ps2-oracle"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "ps2-float",
 ]

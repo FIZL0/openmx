@@ -299,7 +299,8 @@ website on https://openmx.dev. What only you can do:
    PUBLIC_KEY, and builds from before it can't update past it.
 4. **The first release**: write the bullets in RELEASE_NOTES.md, then `tools/release.sh 0.1.0` (a draft: check it on
    GitHub, then publish) or `tools/release.sh 0.1.0 publish`. Needs docker (the Linux build runs in Valve's Steam
-   Runtime container).
+   Runtime container). Done 2026-10-29 (P195): v0.1.0 is published and Latest, and https://openmx.dev serves it.
+   Later releases: `tools/release.sh X.Y.Z publish` the same way.
 5. **The page's links**: web/index.html's `SITE` (Discord, the dump guide, donate) are still empty and show as
    "Coming soon".
 6. **Search engines and link previews for openmx.dev (P194)**, once the first release has put the site on
@@ -311,8 +312,7 @@ website on https://openmx.dev. What only you can do:
    (bing.com/webmasters) → *Import from Google Search Console* (or add the site with the same DNS TXT), submit the
    same sitemap (this covers DuckDuckGo and Yahoo too). (c) Check a link preview: paste https://openmx.dev into
    Discord or https://www.opengraph.xyz → the railway picture with "openMX: a remaster of MX Unleashed". (d) The
-   repo's homepage still says https://beta.openmx.dev/: switch it with `gh repo edit FIZL0/openmx --homepage
-   https://openmx.dev/` (filed as a task too, so an agent may already have done it), and optionally add topics
+   repo's homepage is https://openmx.dev/ (done by P195, 2026-10-29); optionally add topics
    `mx-unleashed`, `mx-vs-atv`, `motocross`, `ps2`, `remaster`, `decompilation`. Don't add beta.openmx.dev as a
    property: its page says noindex and its canonical points to openmx.dev.
 
