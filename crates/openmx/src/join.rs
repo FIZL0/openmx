@@ -298,7 +298,8 @@ pub const FLASH_TICKS: u32 = 30;
 ///
 /// A device's place is a column: 0 is "no seat", `k` is seat `k - 1`. **Left** and **Right** step it
 /// a column, and a device already in the column it steps into swaps with it — takes its place, and
-/// it takes the mover's. **Cross** lights its card (press-to-find, the way opentennis's cards flash)
+/// it takes the mover's. A seat whose device is unplugged is stepped over: it waits for that device, which
+/// comes back to it. **Cross** lights its card (press-to-find, the way opentennis's cards flash)
 /// and, from no seat, joins the first open one. **Square** takes it off its seat. Unlike the join
 /// screen, a seat here is not a rider: these are the seats `pad.rs`'s `Seats` hands out, which the
 /// next ride (or this one, from the pause) reads.
@@ -359,6 +360,12 @@ impl<D: Clone + PartialEq> Assign<D> {
         self.flash.retain(|(d, _)| present.contains(d));
     }
 
+    /// Whether a device may step into column `c`: not a seat kept for a device that is unplugged
+    /// (P38: a pad that drops comes back to its own seat, so nobody swaps it off it meanwhile).
+    fn free_to(&self, c: usize) -> bool {
+        c == 0 || self.seats[c - 1].as_ref().is_none_or(|o| self.plugged(o))
+    }
+
     /// `d` to column `to`, whoever is there to `d`'s column.
     fn move_to(&mut self, d: &D, to: usize) {
         let from = self.column(d);
@@ -397,8 +404,18 @@ impl<D: Clone + PartialEq> Assign<D> {
         }
         let at = self.column(d);
         match p {
-            Press::Left if at > 0 => self.move_to(d, at - 1),
-            Press::Right => self.move_to(d, at + 1),
+            Press::Left if at > 0 => {
+                let to = (0..at).rev().find(|&c| self.free_to(c));
+                if let Some(to) = to {
+                    self.move_to(d, to);
+                }
+            }
+            Press::Right => {
+                let to = (at + 1..=self.open).find(|&c| self.free_to(c));
+                if let Some(to) = to {
+                    self.move_to(d, to);
+                }
+            }
             Press::Join => {
                 if at == 0
                     && let Some(i) = self.seats[..self.open].iter().position(Option::is_none)

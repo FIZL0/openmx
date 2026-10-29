@@ -1,4 +1,4 @@
-# 1 — p38 join and leave (PART)
+# 1 — p38 join and leave (FINAL)
 
 Task P38. 2026-10-20.
 
