@@ -107,10 +107,14 @@ pub fn documents() -> PathBuf {
 /// stdout and stderr into `path`, fresh each launch (opentennis M105): the shell's own lines,
 /// panics, and the crash reports below. iOS shows nothing else without a Mac, and writing a file
 /// also makes iOS list the app's folder in Files, which it only does once there is one in it.
+///
+/// The launch before's log is kept beside it as [`crate::previous_log`] (P212): a player who saw something
+/// wrong and opened the app again to fetch the log would otherwise find only the new launch's.
 pub fn log_to(path: &std::path::Path) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    crate::keep_previous_log(path);
     if let Ok(f) = std::fs::File::create(path) {
         // SAFETY: dup2 of an open file over fds 1 and 2; `f` closes its own fd after
         unsafe {

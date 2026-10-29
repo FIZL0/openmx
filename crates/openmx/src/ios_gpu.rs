@@ -220,6 +220,20 @@ pub struct GpuWindow {
 }
 
 /// As `gpuwin.rs`'s.
+/// How many of the device's uncaptured errors [`log_gpu_error`] writes before it stops: the same
+/// error comes back every frame, and the log is for reading.
+const GPU_ERRORS_LOGGED: usize = 8;
+
+/// The device's uncaptured errors into the log (P212), as `web_gpu.rs` keeps them for the page.
+fn log_gpu_error(e: wgpu::Error) {
+    static SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    match SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) {
+        n if n < GPU_ERRORS_LOGGED => println!("gpu error: {e}"),
+        GPU_ERRORS_LOGGED => println!("gpu error: more than {GPU_ERRORS_LOGGED}; the rest are not logged"),
+        _ => {}
+    }
+}
+
 fn present_mode(vsync: bool, modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     let off = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate];
     match vsync {
@@ -272,6 +286,9 @@ impl GpuWindow {
                 .or_else(|| caps.formats.first().copied())
                 .ok_or("the surface takes no format")?;
             let renderer = Renderer::new(&adapter, format)?;
+            // A validation or pipeline error Metal raises lands here rather than in a panic (P212):
+            // without this, a model wgpu refuses to draw is only missing from the picture.
+            renderer.device.on_uncaptured_error(Arc::new(log_gpu_error));
             Ok::<_, String>((caps, format, renderer))
         })();
         let (caps, format, renderer) = match built {
