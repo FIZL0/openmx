@@ -2348,6 +2348,56 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
     assert!(views.iter().all(|v| (v.w, v.h) == (320, 224)), "{views:?}");
 }
 
+/// P38: on the join screen, by pad input alone, a pad joins, moves and leaves; a pad unplugged keeps
+/// its seat, shown gone, which nobody joins or steps into, and plugged back in it is in that seat.
+#[test]
+fn pads_join_move_and_leave_and_an_unplugged_one_keeps_its_seat() {
+    let all = [0, 1, 2, 3];
+    let (mut m, mut rd) = fresh_with(4);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Join));
+    // Join: Cross takes the first open seat.
+    tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
+    tap_device(&mut m, &mut rd, &all, 2, Control::Cross);
+    assert_eq!(m.join.riders()[..4], [Some(0), Some(1), Some(2), None]);
+    // Move: Right to the nearest open seat that way, past a taken one and never swapping it; Left back.
+    tap_device(&mut m, &mut rd, &all, 1, Control::Right);
+    assert_eq!(m.join.riders()[..4], [Some(0), None, Some(2), Some(1)], "2P went past 3P to 4P");
+    tap_device(&mut m, &mut rd, &all, 2, Control::Right);
+    assert_eq!(m.join.riders()[..4], [Some(0), None, Some(2), Some(1)], "no open seat right of 3P");
+    tap_device(&mut m, &mut rd, &all, 1, Control::Left);
+    assert_eq!(m.join.riders()[..4], [Some(0), Some(1), Some(2), None]);
+    // Leave: Circle from a seated pad frees its seat, and the screen stays.
+    tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
+    assert_eq!(m.join.riders()[..4], [Some(0), None, Some(2), None]);
+    assert_eq!(m.join.views(), vec![0, 2]);
+    assert_eq!(m.screen(), Some(Screen::Join));
+
+    // Pad 2 unplugged: its seat is gone, not open, and still a view.
+    let three = [0, 1, 3];
+    front_frame(&mut m, &mut rd, &three, &vec![Report::idle(); 4]);
+    assert!(matches!(m.join.seats[2], join::Seat::Gone(2)), "{:?}", m.join.seats);
+    assert_eq!(m.join.views(), vec![0, 2]);
+    assert_eq!(m.join.label(2, |d| format!("Pad {}", d + 1)), "Pad 3 - gone");
+    // Pad 1 rejoins and pad 3 joins: neither takes the gone seat; Right from 2P steps past it.
+    tap_device(&mut m, &mut rd, &three, 1, Control::Cross);
+    tap_device(&mut m, &mut rd, &three, 3, Control::Cross);
+    assert_eq!(m.join.riders()[..4], [Some(0), Some(1), Some(2), Some(3)]);
+    assert!(matches!(m.join.seats[2], join::Seat::Gone(2)));
+    tap_device(&mut m, &mut rd, &three, 3, Control::Circle);
+    tap_device(&mut m, &mut rd, &three, 1, Control::Right);
+    assert_eq!(m.join.riders()[..4], [Some(0), None, Some(2), Some(1)], "2P stepped past the gone seat");
+    // Back in: the same seat, taken again.
+    front_frame(&mut m, &mut rd, &all, &vec![Report::idle(); 4]);
+    assert_eq!(m.join.seats[2], join::Seat::Taken(2));
+    assert_eq!(m.join.views(), vec![0, 2, 3]);
+    // And Start rides the three where they sit.
+    tap_device(&mut m, &mut rd, &all, 0, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Split));
+    assert_eq!(m.riders, 3);
+}
+
 /// Pad input alone, from the main menu to the ride: Local Game by pad seat 0 (the host), Cross from
 /// each of `joiners`, Start from the host, the split screen's first row, a track. The local game it
 /// starts, if it does.
@@ -6954,6 +7004,56 @@ fn the_controllers_screen_moves_and_swaps_the_seats_the_next_ride_reads() {
         rig.ride(&|_| false);
     }
     assert_eq!(rig.seats.assigned()[..3], [Some(b), Some(pad::Device::Keys), Some(a)]);
+}
+
+/// P38: a pad pulled out mid-ride keeps its seat. The Controllers screen (the pause's, or the main
+/// menu's after the ride) shows it on that seat, unplugged; another pad stepping that way goes past
+/// it rather than swapping it off; plugged back in, it is on its own seat and rides it.
+#[test]
+fn a_pad_that_drops_mid_ride_is_shown_gone_and_comes_back_to_its_own_seat() {
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Controllers::new("menu-controllers-drop");
+    let (a, b) = (rig.device(0), rig.device(1));
+    assert_eq!(rig.seats.assigned()[..3], [Some(pad::Device::Keys), Some(a.clone()), Some(b.clone())]);
+    rig.ride(&|_| false);
+    // Out mid-ride: 3P waits for it, and the seats still say it is 3P's.
+    let aside = rig.root.join("aside");
+    std::fs::create_dir_all(&aside).unwrap();
+    std::mem::replace(&mut rig.b, pad::tests::FakePad::plug(&aside, "js1")).unplug();
+    let now = rig.ride(&|_| false);
+    assert_eq!(now[2], pad::SeatInput::Waiting);
+    assert_eq!(rig.seats.assigned()[2], Some(b.clone()));
+
+    rig.open();
+    assert_eq!(rig.m.assign.seats[..3], [Some(Dev::Keys), Some(rig.dev(0)), Some(rig.dev(1))]);
+    assert!(!rig.m.assign.plugged(&rig.dev(1)), "shown gone");
+    assert!(!rig.m.assign.loose().contains(&rig.dev(1)), "not a loose card");
+    // The first pad steps right: past the gone pad's 3P, onto 4P.
+    rig.hat(0, false);
+    assert_eq!(rig.m.assign.seats[..4], [Some(Dev::Keys), None, Some(rig.dev(1)), Some(rig.dev(0))]);
+    assert_eq!(rig.seats.assigned()[..4], [Some(pad::Device::Keys), None, Some(b.clone()), Some(a.clone())]);
+    // And back left: past it again, onto the open 2P.
+    rig.hat(0, true);
+    assert_eq!(rig.m.assign.seats[..3], [Some(Dev::Keys), Some(rig.dev(0)), Some(rig.dev(1))]);
+
+    // Back in: on its own seat, plugged.
+    let (dev, sys) = (rig.root.join("dev"), rig.root.join("sys"));
+    rig.b = pro_controller(&dev, &sys, "js1");
+    for _ in 0..30 {
+        rig.frame(&|_| false);
+        if rig.m.assign.plugged(&rig.dev(1)) {
+            break;
+        }
+    }
+    assert!(rig.m.assign.plugged(&rig.dev(1)), "it came back");
+    assert_eq!(rig.m.assign.seats[..3], [Some(Dev::Keys), Some(rig.dev(0)), Some(rig.dev(1))]);
+    rig.close();
+    rig.ride(&|_| false);
+    rig.b.button(0, true);
+    let now = rig.ride(&|_| false);
+    let has = |s: &pad::SeatInput, c: Control| matches!(s, pad::SeatInput::Playing(r) if r.buttons() & c.mask() != 0);
+    assert!(has(&now[2], Control::Cross), "3P rides it again: {:?}", now[2]);
+    rig.b.button(0, false);
 }
 
 /// P210: with the keyboard on 1P and the first pad taken off every seat on the Controllers screen,
