@@ -1,4 +1,4 @@
-# 1 — mxvatv handling (PART)
+# 1 — mxvatv handling
 
 Task MD40. 2026-10-29.
 
