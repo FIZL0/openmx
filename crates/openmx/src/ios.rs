@@ -23,6 +23,9 @@ pub static TOUCH: LazyLock<Mutex<TouchPad>> = LazyLock::new(Default::default);
 /// The touch pad's place among the pads: after any sixteen controllers.
 const TOUCH_INDEX: u32 = 16;
 
+/// The touch pad's name, which is also what the pad layer knows it by (P212).
+pub const TOUCH_NAME: &str = "Touch pad";
+
 /// The log, in Documents.
 const LOG: &str = "openmx-log.txt";
 
@@ -161,8 +164,27 @@ struct Pad {
     axes: [f32; 4],
 }
 
+/// What the pad layer last said of the touch pad's player (P212): whether it holds a seat (or is
+/// 1P's device), whether that was in a ride, and whether a controller joined it in one.
+struct TouchSeat {
+    in_use: bool,
+    riding: bool,
+    kept: bool,
+}
+
+static SEAT: Mutex<TouchSeat> = Mutex::new(TouchSeat { in_use: false, riding: false, kept: false });
+
+/// The pad layer, each frame: whether the touch pad's player has a seat, and whether this is a ride.
+/// A controller connecting mid-ride is a second player, and the touch pad stays to keep riding; one
+/// connecting in the menus is most likely 1P picking it up, and the touch pad goes.
+pub fn touch_seat(in_use: bool, riding: bool) {
+    let mut seat = SEAT.lock().unwrap_or_else(|e| e.into_inner());
+    seat.in_use = in_use;
+    seat.riding = riding;
+}
+
 /// Every pad now, by its place: the controllers, then the touch pad while it is shown — which is
-/// whenever no controller is connected. The touch pad is read (its taps let go) only with `read`.
+/// whenever no controller is connected, or one joined the touch player mid-ride ([`touch_seat`]). The touch pad is read (its taps let go) only with `read`.
 fn snapshot(read: bool) -> Vec<(u32, Pad)> {
     let pads = openmx_ios::pads();
     let mut places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
@@ -180,7 +202,13 @@ fn snapshot(read: bool) -> Vec<(u32, Pad)> {
         out.push((at as u32, Pad { buttons: p.buttons, axes: p.axes }));
     }
     let mut touch = TOUCH.lock().unwrap_or_else(|e| e.into_inner());
-    let shown = pads.is_empty();
+    let mut seat = SEAT.lock().unwrap_or_else(|e| e.into_inner());
+    if pads.is_empty() || !seat.in_use {
+        seat.kept = false;
+    } else if touch.shown && seat.riding {
+        seat.kept = true;
+    }
+    let shown = pads.is_empty() || seat.kept;
     if shown != touch.shown {
         touch.shown = shown;
         touch.reset();
@@ -205,7 +233,7 @@ fn index_of(path: &Path) -> Option<u32> {
 pub fn pad_name(node: &str) -> String {
     let Ok(i) = node.parse::<u32>() else { return String::new() };
     if i == TOUCH_INDEX {
-        return "Touch pad".into();
+        return TOUCH_NAME.into();
     }
     let places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
     let id = places.get(i as usize).copied();

@@ -1778,6 +1778,27 @@ impl<P: Clone + PartialEq> PadSlots<P> {
         }
     }
 
+    /// Pad `from` is gone and `to` stands in for it (P212): the phone's touch pad is listed only
+    /// while no controller is, so a controller connecting takes the touch pad away, and the last
+    /// controller going brings it back. That is one player changing how they hold the game, not a
+    /// pad pulled out, so the seats `from` held or waited for, and 1P's device, are `to`'s now,
+    /// instead of 1P pausing for a pad that will not come back while `to` joins as 2P.
+    pub fn hand_over(&mut self, from: &P, to: &P) {
+        for p in self.held.iter_mut().chain(&mut self.last).flatten() {
+            if p == from {
+                *p = to.clone();
+            }
+        }
+        if self.first == Some(Device::Pad(from.clone())) {
+            self.first = Some(Device::Pad(to.clone()));
+        }
+    }
+
+    /// Whether `p` holds a seat, waits in one, or is 1P's device.
+    pub fn in_use(&self, p: &P) -> bool {
+        self.claimed(p) || self.first == Some(Device::Pad(p.clone()))
+    }
+
     /// Whether a pad already has a seat, or is the pad a waiting seat is waiting for.
     fn claimed(&self, p: &P) -> bool {
         self.held.iter().chain(&self.last).any(|q| q.as_ref() == Some(p))
@@ -2549,7 +2570,7 @@ impl Seats {
     }
 
     /// Read every pad, and notice the ones that went and the ones that came.
-    fn poll(&mut self) {
+    fn poll(&mut self, riding: bool) {
         for j in &mut self.joined {
             j.pads.drain();
         }
@@ -2558,7 +2579,36 @@ impl Seats {
             self.scan();
         }
         let present: Vec<String> = self.joined.iter().map(|j| j.id.clone()).collect();
+        #[cfg(target_os = "ios")]
+        self.touch_hand_over(&present, riding);
+        #[cfg(not(target_os = "ios"))]
+        let _ = riding;
         self.slots.update(&present);
+    }
+
+    /// The touch pad and the first controller hand the touch player's seat to each other (P212,
+    /// [`PadSlots::hand_over`]): a controller connecting in the menus takes the seats the touch pad
+    /// had, and the touch pad, back once every controller is gone, takes the seats they were
+    /// waiting in. A controller connecting mid-ride is a second player instead: the touch pad stays
+    /// listed ([`crate::ios::touch_seat`]) and keeps its seat, and the controller joins beside it.
+    #[cfg(target_os = "ios")]
+    fn touch_hand_over(&mut self, present: &[String], riding: bool) {
+        let touch = DeviceInfo { name: crate::ios::TOUCH_NAME.into(), ..DeviceInfo::default() }.identity(std::path::Path::new(""));
+        crate::ios::touch_seat(self.slots.in_use(&touch), riding);
+        let new = present.iter().find(|p| !self.slots.in_use(p)).cloned();
+        if !present.contains(&touch) && self.slots.in_use(&touch) {
+            if let Some(pad) = new {
+                self.slots.hand_over(&touch, &pad);
+            }
+        } else if new.as_ref() == Some(&touch) {
+            let mut gone = self.slots.held.iter().chain(&self.slots.last).flatten().chain(match self.slots.first() {
+                Some(Device::Pad(p)) => Some(p),
+                _ => None,
+            });
+            if let Some(pad) = gone.find(|p| !present.contains(p)).cloned() {
+                self.slots.hand_over(&pad, &touch);
+            }
+        }
     }
 
     /// A menu frame (P46): every device's own report, the keyboard's first and then each pad
@@ -2568,7 +2618,7 @@ impl Seats {
     /// Each comes with its presses since the last frame ([`Pads::taps`]), which the report also
     /// holds down: a press and release inside one slow frame still reaches the menus (P53).
     pub fn devices(&mut self, held: &dyn Fn(u8) -> bool) -> Vec<(Device<String>, Report, u16)> {
-        self.poll();
+        self.poll(false);
         self.keyboard_alone = None;
         self.keys.scheme = self.keys_scheme();
         let keys = self.keys.report(held);
@@ -2751,7 +2801,7 @@ impl Seats {
     /// This frame: read every pad, notice the ones that went and the ones that came, and build each
     /// seat's report. `held` is the keyboard.
     pub fn frame(&mut self, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
-        self.poll();
+        self.poll(true);
 
         // The keyboard can take a waiting seat over: Start on its keys lets the seat's pad go and
         // rides on, as opentennis's keyboard plays on for a 1P whose pad is out.
@@ -3613,6 +3663,29 @@ pub(crate) mod tests {
         assert_eq!(s.held, std::array::from_fn(|i| Some(i as u32)));
         // Without --pads the keyboard rides with 1P.
         assert_eq!(s.keys(), Some(0));
+    }
+
+    #[test]
+    fn a_handed_over_seat_does_not_wait() {
+        // The phone's touch pad (16) is 1P; a controller (0) connecting takes it off the list (P212).
+        let (touch, pad) = (16u32, 0);
+        let mut s = PadSlots::<u32>::default();
+        s.set_first(Some(Device::Pad(touch)));
+        s.update(&[touch]);
+        assert!(s.in_use(&touch) && !s.in_use(&pad));
+        s.hand_over(&touch, &pad);
+        s.update(&[pad]);
+        assert_eq!(s.held[..2], [Some(pad), None]);
+        assert!(!s.waiting(0));
+        assert_eq!(s.first(), Some(&Device::Pad(pad)));
+        // The controller goes and the touch pad comes back: a poll later, 1P is waiting for the
+        // controller, and the hand-back ends that.
+        s.update(&[]);
+        assert!(s.waiting(0));
+        s.hand_over(&pad, &touch);
+        s.update(&[touch]);
+        assert_eq!(s.held[..2], [Some(touch), None]);
+        assert_eq!(s.first(), Some(&Device::Pad(touch)));
     }
 
     #[test]

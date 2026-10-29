@@ -2351,6 +2351,18 @@ async fn front_end(args: Args) -> Result<(), String> {
                 Device::Keys => None,
             })
             .collect();
+        // The touch pad handed 1P to a controller, or took it back (P212, PadSlots::hand_over): the
+        // menus follow, rather than lose 1P and bring the splash back.
+        #[cfg(target_os = "ios")]
+        if let (Some(Dev::Pad(was)), Some(Device::Pad(to))) = (shell.front.menu.p1().cloned(), seats.first().cloned())
+            && was != to
+        {
+            let dev = Dev::Pad(to);
+            let name = dev_name(seats, &dev);
+            println!("1P: {name} — handed over from the touch pad, or back to it");
+            shell.front.menu.p1_name = name;
+            shell.front.menu.set_p1(dev);
+        }
         if shell.front.menu.lost(&plugged) {
             println!("1P: the pad is gone — the splash is back for a new Player 1");
             shell.front.menu.note = Some("Player 1's controller was unplugged".to_string());
