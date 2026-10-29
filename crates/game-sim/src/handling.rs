@@ -68,9 +68,10 @@ pub const R1_ALONE: u8 = 4;
 pub struct FlipIn {
     /// The trick buttons' nibble ([`trick_nibble`]).
     pub buttons: u8,
-    /// The bike frame's `[0].y`, the nose's height: the clip starts and plays on with it at or under
-    /// zero, and stops with it over.
-    pub nose_y: F,
+    /// The bike frame's `[0].y`, its right axis' height (the node's world rows are x, y, z, and the
+    /// original reads `+0x4` of the first): the clip starts and plays on with it at or under zero, and
+    /// stops with it over.
+    pub right_y: F,
     /// The bike frame's `[1].y`, its up axis' height.
     pub up_y: F,
     /// The rider's current stunt id: a flip that ends clears one over 40 (to 255).
@@ -173,7 +174,7 @@ pub fn backflip(
         chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(air.flip_torque));
         air.flip_torque_applied = true;
         air.flipping = true;
-        if inp.nose_y <= 0.0 {
+        if inp.right_y <= 0.0 {
             if inp.up_y > 0.0 && clip.0 == 0 {
                 out.stunt_started = start_stunt();
                 if out.stunt_started {
@@ -199,4 +200,116 @@ pub fn backflip(
         }
     }
     out
+}
+
+/// **The port's own:** the ride's state for MX vs. ATV's steps, on [`crate::ride::Ride::mxvatv`] —
+/// made on the first frame of a bike on [`Handling::MxVsAtv`], `None` on every other, so their hashes
+/// and snapshots do not move.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Flip {
+    /// The backflip's clip ([`FlipClip`]).
+    pub clip: i32,
+    /// Latches the rider reads and clears, as [`crate::air::Spin`]'s: the flip ended with its clip
+    /// running (the wreck), and that was in the air rather than on a touch.
+    pub wrecked: bool,
+    pub cut: bool,
+    /// The backflip stunt came round (its clip 2 to 0).
+    pub came_round: bool,
+}
+
+impl crate::hash::State for Flip {
+    fn walk(&self, w: &mut crate::hash::Walk<'_>) {
+        w.i32("clip", self.clip);
+        w.bool("wrecked", self.wrecked);
+        w.bool("cut", self.cut);
+        w.bool("came_round", self.came_round);
+    }
+}
+
+/// [`backflip`] on a ride: the trick buttons and the bike's frame read off the ride, the rider's
+/// stunt taken as started whenever it is asked (the port's rider has no stunt to refuse it with), and
+/// the wreck latched on `flip` for the rider, as the 360's is.
+pub fn ride_backflip(p: &crate::air::Params, air: &mut Air, chassis: &mut Chassis, step: &Step, trick: [bool; 3],
+                     frame: &crate::chassis::Mat3, flip: &mut Flip) {
+    let inp = FlipIn { buttons: trick_nibble(trick), right_y: F(frame.rows[0].y()), up_y: F(frame.rows[1].y()), stunt_id: 0 };
+    let mut clip = FlipClip(flip.clip);
+    let aloft = !air.on_ground && !step.touching;
+    let out = backflip(p, air, chassis, step, &inp, &mut clip, || true, || false);
+    flip.clip = clip.0;
+    if out.wreck.is_some() {
+        flip.wrecked = true;
+        flip.cut = aloft;
+    }
+    if out.stunt_ended {
+        flip.came_round = true;
+    }
+}
+
+/// MX vs. ATV's `[Mass Properties]` keys that MX Unleashed reads in `[Collisions]`, as
+/// `(MX vs. ATV's name, MX Unleashed's)`: the collision springs renamed, the rest moved as they are.
+const MOVED_TO_COLLISIONS: [(&str, &str); 17] = [
+    ("SpringStiffness", "Spring"),
+    ("SpringDamping", "Damping"),
+    ("MaxPenetration", "MaxCompression"),
+    ("BodySpringStiffness", "BodySpring"),
+    ("BodySpringDamping", "BodyDamping"),
+    ("BodyMaxPenetration", "BodyMaxCompression"),
+    ("Friction", "Friction"),
+    ("FrictionMomentScale", "FrictionMomentScale"),
+    ("SpringMomentScale", "SpringMomentScale"),
+    ("Restitution", "Restitution"),
+    ("BodyFriction", "BodyFriction"),
+    ("BodyFrictionMomentScale", "BodyFrictionMomentScale"),
+    ("BodyRestitution", "BodyRestitution"),
+    ("BodySpringMomentScale", "BodySpringMomentScale"),
+    ("CheckForHighSpeedCollisions", "CheckForHighSpeedCollisions"),
+    ("HighSpeedMinCollisionAngle", "HighSpeedMinCollisionAngle"),
+    ("HighSpeedRayOffset", "HighSpeedRayOffset"),
+];
+
+/// The rest of the moves: `(MX vs. ATV's section, key, MX Unleashed's section, key)`.
+const MOVED: [(&str, &str, &str, &str); 6] = [
+    ("Mass Properties", "HighSpeedRaySpeedScale", "Collisions", "HighSpeedRaySpeedScale"),
+    ("Mass Properties", "HighSpeedUnpenetrationDistance", "Collisions", "HighSpeedUnpenetrationDistance"),
+    // Its sixteen friction zones are one value each on every bike it ships; the first stands for the
+    // terrain friction MX Unleashed has one of.
+    ("Mass Properties", "FrictionZone1", "Collisions", "TerrainFriction"),
+    ("Mass Properties", "GravityScale", "Mass Properties", "Gravity"),
+    ("Camera", "Left1stPerShoulderOffset", "FirstPersonCamera", "Left1stPerShoulderOffset"),
+    ("Camera", "Right1stPerShoulderOffset", "FirstPersonCamera", "Right1stPerShoulderOffset"),
+];
+
+/// An MX vs. ATV bike file (`mx_*.phy`) with its keys where MX Unleashed's reader looks for them
+/// ([`crate::phy::Phy::read`]): the collision keys it moved into `[Mass Properties]` back in
+/// `[Collisions]` under their old names, `GravityScale` as `Gravity`, the first-person shoulders in
+/// `[FirstPersonCamera]`. Every other key is kept where it is — its new ones (`GasGyroTorque`,
+/// `[Joystick]`'s input ramp, `ResetTime`, …) are read by nothing yet.
+pub fn mxvatv_ini(ini: &crate::phy::Ini) -> crate::phy::Ini {
+    let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    let mut sections: Vec<(String, String)> = Vec::new();
+    for (sec, key, value) in ini.entries() {
+        let to_collisions = eq(sec, "Mass Properties").then(|| MOVED_TO_COLLISIONS.iter().find(|(k, _)| eq(k, key))).flatten();
+        let (sec, key) = match to_collisions {
+            Some((_, old)) => ("Collisions", *old),
+            None => match MOVED.iter().find(|(s, k, _, _)| eq(s, sec) && eq(k, key)) {
+                Some((_, _, s, k)) => (*s, *k),
+                None => (sec, key),
+            },
+        };
+        let line = format!("{key} = {value}\n");
+        match sections.iter_mut().find(|(s, _)| eq(s, sec)) {
+            Some((_, text)) => text.push_str(&line),
+            None => sections.push((sec.to_string(), line)),
+        }
+    }
+    let text: String = sections.iter().map(|(s, body)| format!("[{s}]\n{body}")).collect();
+    crate::phy::Ini::parse(&text)
+}
+
+/// An MX vs. ATV bike file read for the ride: [`mxvatv_ini`] through MX Unleashed's reader, the bike
+/// set on [`Handling::MxVsAtv`].
+pub fn mxvatv_phy(bytes: &[u8], curve: &crate::camera::CurveTable) -> crate::phy::Phy {
+    let mut phy = crate::phy::Phy::read(&mxvatv_ini(&crate::phy::Ini::parse_bytes(bytes)), curve);
+    phy.handling = Handling::MxVsAtv;
+    phy
 }

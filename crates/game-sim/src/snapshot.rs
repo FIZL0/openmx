@@ -879,10 +879,11 @@ wire!(crate::broad_phase::Search { nearby, centre, bound, least, extra, no_group
 wire!(crate::world_search::Nearby { found, prepare });
 wire!(crate::world_search::Candidate { object, distance });
 wire!(crate::contact_search::Record { search_ground, search, sweep_back, touching, touching_other, on_ground, on_object, damp, rest_linear, rest_angular, offset, lead, push_out, facing, swept_from, swept_to, node, contacts, capacity, nearby, rays, sweeps, struck });
-wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved, riding_speed_sq, tricks, back_search }
+wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved, riding_speed_sq, tricks, mxvatv, back_search }
     // The rear wheel's material is the drive-on sound's, set again in every substep's contacts.
     skip { rear_material });
 wire!(crate::back_search::Cache { at, moved, list, world });
+wire!(crate::handling::Flip { clip, wrecked, cut, came_round });
 wire!(crate::trick_pack::State { spin, flip_row, side, side_flick, front_watch });
 wire!(crate::air::Spin { applied, ramp, active, armed, grace, dir, start, torque, clip, came_round, wrecked, forward, cut });
 wire!(crate::ride::Back { at, facing, up });

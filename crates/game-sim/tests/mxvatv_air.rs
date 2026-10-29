@@ -206,7 +206,7 @@ fn poke(ee: &mut Ee, s: &State) {
     put_b(ee, COLL + 0x34, st.touching);
 
     ee.set_u32(OBJ + 0x14ec, u32::from(inp.buttons | s.high << 4));
-    put_f(ee, XF + 0x84, inp.nose_y);
+    put_f(ee, XF + 0x84, inp.right_y);
     put_f(ee, XF + 0x94, inp.up_y);
     ee.set_u32(OBJ + 0x1528, inp.stunt_id as u32);
     ee.set_u32(OBJ + 0x1754, s.clip.0 as u32);
@@ -335,7 +335,7 @@ impl Gen {
         }
         s.inp = FlipIn {
             buttons: if self.b() { handling::R1_ALONE } else if self.b() { 0 } else { (self.bits() & 0xf) as u8 },
-            nose_y: if self.one_in(8) { F::ZERO } else { self.f(-1.0, 1.0) },
+            right_y: if self.one_in(8) { F::ZERO } else { self.f(-1.0, 1.0) },
             up_y: if self.one_in(8) { F::ZERO } else if self.one_in(6) { F(-0.79) } else { self.f(-1.0, 1.0) },
             stunt_id: (self.bits() % 80) as i32,
         };
@@ -366,10 +366,10 @@ fn path(s: &State) -> &'static str {
         if a.on_ground { "in the grace" } else { "off the lip in time" }
     } else if a.on_ground || s.st.touching || F(a.flip_torque.x()).abs() < s.p.min_backflip_torque {
         if s.clip.0 != 0 { "ended mid-clip" } else { "ended" }
-    } else if s.inp.nose_y <= 0.0 {
-        "turning, nose down"
+    } else if s.inp.right_y <= 0.0 {
+        "turning, right side down"
     } else {
-        "turning, nose up"
+        "turning, right side up"
     }
 }
 
@@ -436,8 +436,34 @@ fn mxvatv_backflip_is_the_originals() {
         assert_eq!(orig.steep, u32::from(steeped), "state {k}: the steep test");
         assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k}: the wreck");
     }
-    for want in ["off the lip", "arming", "triggered", "waiting", "in the grace", "off the lip in time", "ended", "ended mid-clip", "turning, nose down", "turning, nose up"] {
+    for want in ["off the lip", "arming", "triggered", "waiting", "in the grace", "off the lip in time", "ended", "ended mid-clip", "turning, right side down", "turning, right side up"] {
         let n = tally.get(want).copied().unwrap_or(0);
         assert!(n >= 50, "only {n} state(s) went down {want:?}: {tally:?}");
     }
+}
+
+/// MX vs. ATV's file layout read where MX Unleashed's reader looks: the moved collision keys, the
+/// gravity scale, and a key left where it was.
+#[test]
+fn an_mx_phy_reads_its_moved_keys() {
+    // The reader's own number parse, which is the original's and not the nearest float.
+    use game_sim::phy::{Ini, number};
+    let ini = handling::mxvatv_ini(&Ini::parse(
+        "[Mass Properties]\nWeight = 420\nGravityScale = 1.03\nSpringStiffness = 6\nSpringDamping = 0.1\n\
+         MaxPenetration = 0.5\nBodySpringStiffness = 3\nFriction = 0.5\nFrictionZone1 = 0.25\n\
+         [Airborne Control]\nGasGyroTorque = 175\n[Camera]\nLeft1stPerShoulderOffset = -0.872, 3.4931, -1.119\n",
+    ));
+    let m = ini.section("Mass Properties");
+    assert_eq!(m.float("Weight"), Some(number("420")));
+    assert_eq!(m.float("Gravity"), Some(number("1.03")));
+    assert_eq!(m.float("SpringStiffness"), None);
+    let c = ini.section("Collisions");
+    assert_eq!(c.float("Spring"), Some(number("6")));
+    assert_eq!(c.float("Damping"), Some(number("0.1")));
+    assert_eq!(c.float("MaxCompression"), Some(number("0.5")));
+    assert_eq!(c.float("BodySpring"), Some(number("3")));
+    assert_eq!(c.float("Friction"), Some(number("0.5")));
+    assert_eq!(c.float("TerrainFriction"), Some(number("0.25")));
+    assert_eq!(ini.section("Airborne Control").float("GasGyroTorque"), Some(number("175")));
+    assert!(ini.section("FirstPersonCamera").text("Left1stPerShoulderOffset").is_some());
 }
