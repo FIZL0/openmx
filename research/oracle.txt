@@ -6654,3 +6654,31 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 #   clears to 0 and is blurred once (filterTexture 1, filterPasses 1); the receivers blend
 #   (Cs-Cd)*As+Cd, clamp, alpha test ref 1, no z write. In PCSX2 the shadow's core leaves 0.63 of the
 #   dirt, as the intensity squared does (0.7 x 0.7): not read in the code.
+
+# ---------------------------------------------------------------------------------------------------
+# S148 — the Kiowa (Helicopter, with MXHelicopter on top), research/journal/*-s148-kiowa. All boot.
+# The PC twin is MXVehicleHelicopter (89 slots, research/mxvatv-pc.md); its .phy reader is vf12
+# 0x005ef470 and has the same keys in the same order.
+#   vehicle_factory kind 2 = 0x00390340 (MXHelicopter, 0xe90 bytes), skins Kiowa / Kiowa2 / Kiowa_ss /
+#   Kiowa2_ss for event +0x124 = 0..3 (4 hangs the load). Base ctor 0x0038c270 ("Helicopter").
+#   Base vtable +0x48 0x0045c690, MX 0x0045c980. Slots (base / MX): +0x190 init 0x0038c670 (MX init
+#   0x00390c70 adds "%sWreckBlade.phy"); +0x194 phy 0x0038cb70 / 0x00391990; +0x198 reset 0x0038cb30 /
+#   0x00392230; +0x1a0 the flight controller 0x0038dbc0; +0x1a4 frame 0x0038e2b0 (world step
+#   0x0015b050); +0x1a8 preforce 0x0038e300 (0x0015af40, rotor 0x00390100, aero 0x0038fa00); +0x1ac
+#   0x0038e380 / 0x003922e0; +0x1b0 0x0038e900 / measure 0x00392340; +0x1b4 0x0038e910.
+#   Sub-objects: +0x450 rotor model (0x150, ctor 0x0038feb0, vt 0x0045c900; 0x00390030 binds the
+#   controller outputs +0x350/+0x354/+0x34c/+0x358; main rotor 0x00390060, tail 0x003900b0, altitudes
+#   0x003900f0, MaxRotorMoment R+0xc0); +0x454 aero model (0x150, ctor 0x0038f760, vt 0x0045c880,
+#   LowSpeedAero +0x100); +0x458 the rotor's wreck collision (8 spheres from WreckRotorRadius/Height);
+#   +0x46c the collective filter {value 0.5, time 1, step, FLT_MAX, -FLT_MAX}; +0x160 the body.
+#   Controller fields: pad +0x334 climb, +0x338 descend, +0x340 lateral, +0x344 longitudinal, +0x348
+#   pedal; out +0x34c collective, +0x350 lat cyclic, +0x354 long cyclic, +0x358 pedal, +0x35c filtered,
+#   +0x33c height / MaxAltitude; state +0x360 last stick, +0x378 hold height, +0x37c hold timer, +0x394
+#   integral, +0x3b0 speed command; flown +0x364; pilot flag *(+0x170)+0x40; file +0x368..+0x3d0 and
+#   +0x430/+0x440 MinRateCommand/MaxRateCommand (key order in tests/kiowa.rs); hold delay +0x380;
+#   gravity scale +0x190; airspeed +0x498, pitch +0x4c0, roll +0x4c8.
+#   The live state: context/states/s148-kiowa.ee.bin (s3 only), MXHelicopter at 0x007ccae0, body
+#   0x00606f30, free09 with the event's machine1 kind = 2, switched into from the pause menu.
+#   Pause "Switch To Machine": 0x0028ff30 lists world+0x90's undriven machines when unlocked or the
+#   cheat flag read32(0x004e2778)+0x5c is set; 0x0028fcf0 swaps through 0x00210b90.
+kiowa_flight_controller boot 0x0038dbc0 (self, dt in f12): the pad into cyclic, pedal and collective
