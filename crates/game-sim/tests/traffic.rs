@@ -1442,3 +1442,134 @@ fn the_put_back_gathers_the_cars_from_the_moving_list() {
     assert!(listed.iter().all(|o| !cars.contains(o)), "a static gather listed a car: {listed:?}");
     assert!(!found.hit[0], "a static gather met the roof");
 }
+
+// --- S215: a put-back ghost passes through the cars ------------------------------------------------
+
+/// How far ahead of the train's engine, along its heading, [`on_the_rail`] stands the bike.
+const AHEAD: f32 = 40.0;
+/// The ticks [`on_the_rail`] runs: long enough for the whole train (13 cars, about 650 ft at 55 ft/s)
+/// to pass a bike it does not strike.
+const THROUGH: usize = 420;
+
+/// What [`on_the_rail`] measured.
+#[derive(Debug, Default)]
+struct Rail {
+    /// The first wreck, and its tick.
+    wreck: Option<(usize, game_sim::trick::Wreck)>,
+    /// The most the bike moved over the ground from where it settled, feet.
+    pushed: f32,
+    /// The ticks a car's box held the ghost's clock, and the ticks its clock stood still.
+    inside: usize,
+    held: usize,
+    /// The tick the ghost ended, if it did.
+    solid: Option<usize>,
+}
+
+/// free06 with s89-along's cars and the disc's bike collision files: the world, the traffic in a
+/// riding Sim, and the Sim. Like [`beside`].
+fn rail_world() -> Option<(Place<'static>, game_sim::Sim)> {
+    let (world, traffic) = free06_with_cars()?;
+    let parts = archives()?;
+    let file = |name: String| member(&parts, &name).unwrap_or_else(|| panic!("{name} is not in free06's archives"));
+    let col = game_sim::bike_col::BikeCol::load(&file(game_sim::bike_col::rays_file(game_sim::bike_col::MODEL)), &file(game_sim::bike_col::shape_file(game_sim::bike_col::MODEL)))
+        .expect("the bike's collision files");
+    let mut sim = game_sim::Sim::new(0x5215);
+    sim.traffic = traffic;
+    sim.rider.bike_col = Some(std::sync::Arc::new(col));
+    Some((world, sim))
+}
+
+/// Stand the bike `AHEAD` feet in front of the train's engine, on the ground there and broadside to
+/// the rail, a ghost if `ghost` (as a put-back leaves it, [`game_sim::ghost::Ghost::start`]).
+fn stand(world: &mut Place<'static>, sim: &mut game_sim::Sim, ghost: bool) {
+    let engine = sim.traffic.cars[0].pose.0;
+    let ahead = engine[2];
+    let probe = Vf::new(engine[3].x() + ahead.x() * AHEAD, engine[3].y() + 20.0, engine[3].z() + ahead.z() * AHEAD, 1.0);
+    let (ground, _) = game_sim::world::World::ground(world, probe);
+    let at = Vf::new(ground.x(), ground.y() + game_sim::stock::SPAWN.y(), ground.z(), 1.0);
+    sim.rider.ride.place(at, Vf::new(engine[0].x(), 0.0, engine[0].z(), 0.0));
+    if ghost {
+        sim.rider.ghost.start();
+    }
+}
+
+/// Hold both brakes for `ticks` (or until the ghost ends, `until_solid`) while the train comes.
+fn hold(world: &mut Place<'static>, sim: &mut game_sim::Sim, ticks: usize, until_solid: bool) -> Rail {
+    let span = sim.traffic.span().expect("attached");
+    let held = ride::Controls { brake: F::ONE, front_brake: F::ONE, rear_brake: F::ONE, ..Default::default() };
+    let mut rail = Rail::default();
+    let mut settled = None;
+    for tick in 0..ticks {
+        let was = sim.rider.ghost;
+        let inside = game_sim::ghost::inside_cars(&sim.rider.ride.rival(), &world.props.props, span);
+        let frame = sim.step(DT, &held, world);
+        let now = sim.rider.ghost;
+        if was.on && inside {
+            rail.inside += 1;
+        }
+        if was.on && was.clock == now.clock {
+            rail.held += 1;
+        }
+        if rail.wreck.is_none() {
+            rail.wreck = frame.wreck.map(|w| (tick, w));
+        }
+        let p = sim.rider.ride.position();
+        if tick == 15 {
+            settled = Some(p);
+        }
+        if let Some(s) = settled {
+            rail.pushed = rail.pushed.max(((p.x() - s.x()).powi(2) + (p.z() - s.z()).powi(2)).sqrt());
+        }
+        if was.on && !now.on {
+            rail.solid = Some(tick);
+            if until_solid {
+                break;
+            }
+        }
+    }
+    rail
+}
+
+/// S215: a bike put back on the rail in the train's path is a ghost the train passes through. The
+/// original's put-back puts the vehicle category on the body rays' and sweep's ignore lists, which
+/// drops the cars' meshes (category `0x48`, `research/oracle.txt` S129) from the bike's search; the
+/// port leaves the cars out of the ghost's whole frame ([`game_sim::traffic::Hidden`]). Its clock
+/// holds while it is inside a car, so it is a ghost until the last wagon has gone by, and solid
+/// after: stood in front of the engine again, the train strikes it as it strikes a bike that was
+/// never a ghost.
+#[test]
+fn a_ghost_on_the_rail_lets_the_train_through() {
+    // The control: a solid bike stood on the rail is shoved down it by the engine.
+    let Some((mut world, mut sim)) = rail_world() else { return };
+    stand(&mut world, &mut sim, false);
+    let solid = hold(&mut world, &mut sim, THROUGH, false);
+    eprintln!("solid: {solid:?}");
+    assert!(solid.pushed > 50.0, "the train did not shove the solid bike: {solid:?}");
+
+    // The ghost, in the same place: the whole train runs through it, and its clock stands still
+    // on every tick a car is round it.
+    let (mut world, mut sim) = rail_world().expect("the same state");
+    stand(&mut world, &mut sim, true);
+    let ghost = hold(&mut world, &mut sim, THROUGH, false);
+    eprintln!("ghost: {ghost:?}");
+    assert_eq!(ghost.wreck, None, "the train wrecked the ghost");
+    assert!(ghost.pushed < 1.0, "the train shoved the ghost {} ft", ghost.pushed);
+    // Inside from the engine's nose to the last wagon's tail: more than the clock's 90 ticks.
+    assert!(ghost.inside > 300, "the ghost was inside a car on only {} ticks", ghost.inside);
+    assert_eq!(ghost.held, ghost.inside, "the clock stood still on other ticks than inside a car");
+    assert_eq!(ghost.solid, None, "the ghost ran out while the train was still on it");
+    assert!(sim.rider.ghost.on, "the ghost ended inside the train");
+
+    // Out of the train, its clock runs out at a tick's 1/30 s a tick.
+    let left = sim.rider.ghost.clock;
+    let out = hold(&mut world, &mut sim, 120, true);
+    assert!(!sim.rider.ghost.on, "the ghost never ended: {out:?}");
+    let ran = out.solid.expect("it ended") + 1;
+    assert_eq!(ran, (left.0 * 30.0).ceil() as usize, "the clock ran out {ran} ticks after the train left, with {} s left", left.0);
+
+    // Solid, stood in the next train's path: struck as the control was.
+    stand(&mut world, &mut sim, false);
+    let again = hold(&mut world, &mut sim, THROUGH, false);
+    eprintln!("again: {again:?}");
+    assert!(again.pushed > 50.0, "the train did not shove the bike after its ghost ended: {again:?}");
+}

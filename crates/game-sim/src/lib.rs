@@ -315,6 +315,7 @@ impl Sim {
             return self.step_all(dt, &all, world).swap_remove(0);
         }
         self.traffic.frame(dt, world);
+        self.lend_cars();
         self.event_frame(dt);
         if self.plane.is_some() {
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
@@ -438,6 +439,7 @@ impl Sim {
             return vec![self.step(dt, &controls[0], world)];
         }
         self.traffic.frame(dt, world);
+        self.lend_cars();
         self.event_frame(dt);
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.

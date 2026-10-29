@@ -273,6 +273,16 @@ pub fn merged(mut list: Vec<Contact>, cars: Vec<Contact>) -> Vec<Contact> {
 }
 
 impl crate::Sim {
+    /// Tell every rider where the cars' meshes lie in the world's props ([`crate::rider::Rider::cars`]),
+    /// for a ghost's frame to pass through them (S215).
+    pub fn lend_cars(&mut self) {
+        let span = self.traffic.span();
+        self.rider.cars = span;
+        for p in &mut self.others {
+            p.rider.cars = span;
+        }
+    }
+
     /// Player `i`'s contacts with the traffic's cars this tick ([`struck`]): none for a rider who is
     /// down (the wreck bike's object is not the riding one), a bike the shell gave no collision files,
     /// or a world with no cars in it.
@@ -280,7 +290,8 @@ impl crate::Sim {
         let Some(first) = self.traffic.first else { return Vec::new() };
         let r = self.rider_of(i);
         let Some(col) = r.bike_col.as_deref() else { return Vec::new() };
-        if r.state.wreck.is_some() {
+        // A ghost's body rays ignore the cars' category (S215, [`crate::traffic::Hidden`]).
+        if r.state.wreck.is_some() || r.ghost.on {
             return Vec::new();
         }
         let Some(props) = world.moving() else { return Vec::new() };

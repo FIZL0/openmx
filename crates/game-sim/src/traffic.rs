@@ -529,6 +529,13 @@ impl Traffic {
         }
     }
 
+    /// Where the cars' meshes lie in the world's props, `[first, end)`: [`Traffic::first`] and one
+    /// prop a car with a mesh. `None` before [`Traffic::attach`].
+    pub fn span(&self) -> Option<[usize; 2]> {
+        let first = self.first?;
+        Some([first, first + self.specs.iter().filter(|s| s.mesh.is_some()).count()])
+    }
+
     /// Stand the cars' meshes where the cars are: after a step, and after a state is put back.
     pub fn place(&self, world: &mut dyn World) {
         let (Some(first), Some(props)) = (self.first, world.moving()) else {
@@ -543,6 +550,52 @@ impl Traffic {
                 k += 1;
             }
         }
+    }
+}
+
+/// **The cars a ghost's frame does not see** (S215): their meshes, taken out of the world's props by
+/// [`hide`] and put back by [`show`].
+///
+/// The original's put-back adds the vehicle category to the ignore lists of the bike's body rays and
+/// sweep (S63), and the pair filter drops every candidate whose category holds it: the path cars'
+/// meshes are category `0x48` (`research/oracle.txt` S129), so a ghost's search gathers no car and its
+/// rays, sweep and wheels never meet one. The port's searches read the cars off the world's props,
+/// so for the ghost's frame each car's prop is left standing where it is with no mesh in it, no
+/// reach and no motion: every sweep, ray probe, broad phase and the bones' search finds nothing
+/// there, and the props after them keep their places. The wreck bike and the ragdoll miss them too,
+/// which the original's do not (their lists are not the ghost's): the port's own, as the user asked.
+pub struct Hidden {
+    first: usize,
+    cars: Vec<(Mesh, F, Option<Moving>)>,
+}
+
+/// Take the cars at `span` ([`Traffic::span`]) out of the world's props for one rider's frame.
+pub fn hide(world: &mut dyn World, span: [usize; 2]) -> Hidden {
+    let mut hidden = Hidden { first: span[0], cars: Vec::new() };
+    let Some(props) = world.moving() else { return hidden };
+    for prop in props.props.iter_mut().take(span[1]).skip(span[0]) {
+        let empty = Mesh {
+            version: prop.mesh.version,
+            surface: prop.mesh.surface,
+            transform: prop.mesh.transform,
+            vertices: crate::track::Points::Wide(Vec::new()),
+            normals: None,
+            nodes: Vec::new(),
+            triangles: Vec::new(),
+        };
+        let mesh = std::mem::replace(&mut prop.mesh, empty);
+        hidden.cars.push((mesh, std::mem::replace(&mut prop.radius, F::ZERO), prop.moving.take()));
+    }
+    hidden
+}
+
+/// Put back what [`hide`] took, as it was.
+pub fn show(world: &mut dyn World, hidden: Hidden) {
+    let Some(props) = world.moving() else { return };
+    for (prop, (mesh, radius, moving)) in props.props.iter_mut().skip(hidden.first).zip(hidden.cars) {
+        prop.mesh = mesh;
+        prop.radius = radius;
+        prop.moving = moving;
     }
 }
 

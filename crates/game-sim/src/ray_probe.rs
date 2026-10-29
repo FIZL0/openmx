@@ -269,6 +269,10 @@ pub fn group_reaches(probe: &RayProbe, group: &Hierarchy) -> bool {
 
 /// The tree against the tree: the two frames related, then the descent from both roots.
 fn tree(probe: &RayProbe, mesh: &Mesh, rec: &mut Record) -> bool {
+    // A mesh with no tree strikes nothing: a path car a ghost passes through (S215).
+    if mesh.nodes.is_empty() {
+        return false;
+    }
     Descent::new(probe, mesh, rec).run(probe.root, mesh.root)
 }
 

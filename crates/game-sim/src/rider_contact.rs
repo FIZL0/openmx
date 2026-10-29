@@ -587,6 +587,7 @@ impl crate::Sim {
             return self.step(dt, controls, world);
         }
         self.traffic.frame(dt, world);
+        self.lend_cars();
         let mut bump = bump;
         let cars = self.car_contacts(0, world, dt);
         if let Some(b) = bump.as_deref_mut() {

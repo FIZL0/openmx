@@ -332,6 +332,11 @@ pub struct Rider {
     /// The bike's ghost after a put-back (P57, S63): see-through for three seconds, passing through
     /// the other riders, its clock held while it is inside one.
     pub ghost: Ghost,
+    /// Where the track's path cars' meshes lie in the world's props, `[first, end)`
+    /// ([`crate::traffic::Traffic::span`]): what a ghost's frame takes out of the world and what its
+    /// clock holds inside (S215). The Sim's to set before each frame, from its traffic; a constant
+    /// of the track, not sent with a snapshot and not hashed. `None`, no cars.
+    pub cars: Option<[usize; 2]>,
     /// The map edge is armed on this bike (S73): [`off_map::armed`] of who the bike was built for and
     /// the event's league, which the bike's builder decides once and nothing changes afterwards. A
     /// constant of the session, like the stunt set: not sent with a snapshot, and not hashed.
@@ -472,6 +477,7 @@ impl Rider {
             flight: Trick::NONE,
             airborne: false,
             ghost: Ghost::default(),
+            cars: None,
             // A player's bike on a free-ride area, the only event the port has.
             edge_armed: off_map::armed(off_map::Built::Player, off_map::League::FreeRide),
             page: wreck_page::Page::default(),
@@ -668,7 +674,7 @@ impl Rider {
         let Rider {
             ride, tricks, state, motion, packed_pose, packed_fore_aft, set, clips, sense, racing, wreckage, crash, animation,
             flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, riding, wreck_sounds, wreck_kit, wreck_clocks, idles, ghost, edge_armed, page,
-            put_back, ragdoll_shown, score, bike_col, fifty, ..
+            put_back, ragdoll_shown, score, bike_col, fifty, cars, ..
         } = self;
         *ragdoll_shown = None;
         let mut sense = *sense;
@@ -676,8 +682,13 @@ impl Rider {
         wreck_clocks.age(dt);
 
         // 0 — the ghost's tick, the first thing in the bike's update: its clock holds while the
-        // body is inside another rider's (`rivals` holds no ghosts, whose lists reject this one).
-        ghost.step(dt, || crate::ghost::overlaps(&ride.rival(), rivals));
+        // body is inside another rider's (`rivals` holds no ghosts, whose lists reject this one), or
+        // inside a path car (S215).
+        let cars = *cars;
+        ghost.step(dt, || {
+            crate::ghost::overlaps(&ride.rival(), rivals)
+                || cars.is_some_and(|span| world.moving().is_some_and(|props| crate::ghost::inside_cars(&ride.rival(), &props.props, span)))
+        });
 
         // 1 — the top of the player's update: the hand-reset latch is dropped.
         state.frame_start();
@@ -705,6 +716,22 @@ impl Rider {
                 score.aborted();
             }
         }
+
+        // 1d — a ghost's frame passes through the path cars (S215): the put-back's vehicle category
+        // on the body rays' and sweep's lists drops the cars' meshes from every search, so they are
+        // out of the world until the frame's end ([`crate::traffic::Hidden`]). A put-back this tick
+        // drops the cars' entries the bike's rays found where it was (the only contacts with no
+        // other side yet on the list): its lists ignore them from here on.
+        let hidden = match cars {
+            Some(span) if ghost.on => Some(crate::traffic::hide(world, span)),
+            _ => None,
+        };
+        let bump = bump.map(|b| {
+            if hidden.is_some() {
+                b.contacts.retain(|c| c.other.is_some());
+            }
+            b
+        });
 
         // 1c — the skeleton's nodes on the bike where the last tick left it, and the drawn matrices
         // they were at the tick before (S70): a wreck entered this tick poses its bones from both, as
@@ -1200,6 +1227,9 @@ impl Rider {
             _ => score.frame(dt, &sensed),
         }
         score.grow(dt);
+        if let Some(h) = hidden {
+            crate::traffic::show(world, h);
+        }
         out
     }
 
