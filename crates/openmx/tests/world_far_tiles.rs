@@ -14,6 +14,10 @@
 //! changes the picture by at most [`MOST_A_FRAME`] of its pixels a frame over its whole fade (and as
 //! little fading out), ending on the piece drawn whole, where a swap changes all of them in one
 //! frame. The rides skip without the disc and the GPU half without an adapter.
+//!
+//! V93: a shown piece that shares a stand-in cell with one not shown yet is drawn to its own edge,
+//! the stand-in above it neither poking through it (the cell's whole stand-in did) nor leaving the
+//! edge open (the stand-in only cut at the piece's rectangle did).
 
 use game_render::gpu::{GroundChunk, GroundPaint, GroundPiece, GroundVertex, Renderer, Scene3, StandIn, Target, View};
 use game_render::mat::v3;
@@ -370,6 +374,87 @@ fn a_piece_shown_at_once_changes_every_pixel_in_one_frame() {
     let whole = frame(&mut gpu);
     let d = differ(&stand_in, &whole) as f32;
     assert!(d > 5000.0 && d * MOST_A_FRAME > 200.0, "a swap changes {d} pixels in one frame");
+}
+
+/// V93: the frame [`frame`] draws, from the shown piece's side, so nothing over the piece not shown
+/// stands between the eye and the shown one.
+fn frame_from_the_left(gpu: &mut Renderer) -> Vec<u8> {
+    let scene = game_render::scene::Scene::parse("[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=5000.00\nMaximumFogDistance=9000.00\n");
+    let light = Lighting::of(&scene);
+    gpu.set_scene(&scene);
+    gpu.set_sky(None);
+    let camera = Camera { eye: v3(150.0, 400.0, -300.0), at: v3(500.0, 40.0, 250.0), fov: 1.0, near: 0.5, far: 4000.0 };
+    let (w, h) = (320u32, 180u32);
+    let texture = gpu.offscreen(w, h);
+    let view = texture.create_view(&Default::default());
+    let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }];
+    gpu.render(&Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 }, &Assets::default(), &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+    gpu.read(&texture)
+}
+
+/// V93: two pieces meeting at x = 500 ft, inside a stand-in cell (18 ft cells, the 28th spans
+/// 486-504 ft), the stand-in 5 ft above them but at the world's edges; piece 1 shown whole or not added, piece 2 never.
+fn shared_cell(gpu: &mut Renderer, stand_in: bool, shown: bool) {
+    gpu.set_ground_streamed(64, GroundPaint::Bare, [150.0, 118.0, 86.0], 4000.0).expect("a streamed ground");
+    if stand_in {
+        let mut coarse = flat([0.0, 0.0], 18.0, 28, [0.0, 1.0, 0.0]);
+        // Above the pieces, but below them on the world's edges seen from beyond (left and far), so
+        // those are not open.
+        for (n, v) in coarse.vertices.iter_mut().enumerate() {
+            let (i, j) = (n % 65, n / 65);
+            v.pos[1] = if i == 0 || i == 64 || j >= 28 { 35.0 } else { 45.0 };
+        }
+        let s = StandIn {
+            piece: GroundPiece::of(vec![coarse]),
+            step: 18.0,
+            origin: [0.0, 0.0],
+            cells: [64, 28],
+            rects: vec![(1, [0.0, 0.0, 500.0, 500.0]), (2, [500.0, 0.0, 1152.0, 500.0])],
+        };
+        gpu.set_ground_stand_in(s).expect("the stand-in");
+    }
+    if shown {
+        gpu.add_ground_piece_of(1, GroundPiece::of(vec![flat([0.0, 0.0], 500.0 / 64.0, 64, [0.6, 0.8, 0.0])])).expect("the piece");
+        gpu.show_ground_piece(1, 0.0);
+    }
+}
+
+/// V93: a shown piece that shares a stand-in cell with a piece not shown yet is drawn to its own
+/// edge, the stand-in above it cut there rather than at the cell's edge; and the stand-in still
+/// draws over the piece not shown, up to the same line.
+#[test]
+fn the_stand_in_stops_at_a_shown_pieces_edge_inside_a_cell() {
+    let mut gpu = match Renderer::headless() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let mut shot = |stand_in: bool, shown: bool| {
+        shared_cell(&mut gpu, stand_in, shown);
+        frame_from_the_left(&mut gpu)
+    };
+    let empty = shot(false, false);
+    let piece = shot(false, true);
+    let coarse = shot(true, false);
+    let both = shot(true, true);
+    let px = |f: &[u8], i: usize| [f[3 * i], f[3 * i + 1], f[3 * i + 2]];
+    let same = |a: [u8; 3], b: [u8; 3]| a.iter().zip(&b).all(|(x, y)| x.abs_diff(*y) <= 2);
+    let n = empty.len() / 3;
+    let of_piece: Vec<usize> = (0..n).filter(|&i| !same(px(&piece, i), px(&empty, i))).collect();
+    // Every pixel the piece draws alone, it draws with the stand-in held over it.
+    let poked = of_piece.iter().filter(|&&i| !same(px(&both, i), px(&piece, i))).count();
+    // And the stand-in draws the rest of the ground the stand-in alone does.
+    let of_coarse: Vec<usize> = (0..n).filter(|&i| !same(px(&coarse, i), px(&empty, i))).collect();
+    let stand_in_drawn = of_coarse.iter().filter(|&&i| same(px(&both, i), px(&coarse, i))).count();
+    // And nothing is left open between them: a pixel ground alone, of either, is ground together.
+    let open = (0..n).filter(|&i| same(px(&both, i), px(&empty, i)) && !(same(px(&piece, i), px(&empty, i)) && same(px(&coarse, i), px(&empty, i)))).count();
+    eprintln!("piece {} px, poked {poked}; stand-in {} px, drawn with the piece {stand_in_drawn}; open {open}", of_piece.len(), of_coarse.len());
+    assert!(of_piece.len() > 5000 && !same(px(&coarse, of_piece[0]), px(&piece, of_piece[0])), "the piece and the stand-in look alike");
+    assert_eq!(poked, 0, "the stand-in pokes through the shown piece on {poked} of its {} pixels", of_piece.len());
+    assert!(stand_in_drawn * 4 > of_coarse.len(), "the stand-in drew only {stand_in_drawn} of its {} pixels beside the piece", of_coarse.len());
+    assert_eq!(open, 0, "{open} pixels are ground in one alone and in neither together");
 }
 
 /// Full throttle and nothing else, `frames` long: Cross down, at full pressure.
