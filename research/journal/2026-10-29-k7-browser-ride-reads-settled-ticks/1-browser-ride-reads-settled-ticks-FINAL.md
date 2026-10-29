@@ -1,4 +1,4 @@
-# 1 — browser ride reads settled ticks (PART)
+# 1 — browser ride reads settled ticks (FINAL)
 
 Task K7. 2026-10-29.
 
