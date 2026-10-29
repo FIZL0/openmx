@@ -13,6 +13,10 @@ untested = ["*.md", ".github/*"]
 # or loses its port under the other slots' load and passes alone. Each name is cargo's "to rerun pass" args.
 failures = 'to rerun pass `([^`]+)`'
 retest = "./kit check --rerun {names}"
+# A load flake the gate's own [flaky] rerun let through (checks.py prints it under the PASSED line) is still a
+# test to fix: agent-runner files a critical K task to make it robust, unless an open task names it.
+flaky = '^\s*\(passed on a lone rerun \(load flakes, gate\.toml\): (.+)\)$'
+flaky_kind = "K"
 # What a fix or repair session builds before it commits a merge: every test target, so a clash git merged
 # without a conflict (two sides adding one name) shows here and not in the gate after it. The gate reuses it.
 build = "cargo test -q --no-run --message-format=short"
