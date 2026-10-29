@@ -52,7 +52,8 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       # tools/build.sh's linux build and packaging, without its docker step; the commit from Actions (the container's
-      # checkout may have no usable git)
+      # checkout may have no usable git). GITHUB_SHA in the build's environment makes it a beta to the updater (P191,
+      # crates/openmx/src/update.rs): its main menu asks which commit the `beta` release is at
       - run: |
           export OPENMX_COMMIT=$(echo "$GITHUB_SHA" | cut -c1-7)
           cargo build --locked --release -p openmx --bin openmx

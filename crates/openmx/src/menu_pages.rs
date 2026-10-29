@@ -103,6 +103,8 @@ pub enum Key {
     TextureFiltering,
     /// The sun's shadows (V108): the Shadows departure's row, with Off a third choice.
     Shadows,
+    /// The Ride tab's Updates (P191), on the desktop alone.
+    Updates,
     /// The Display tab's Aspect Ratio (P176): the Picture departure's row, as Draw Distance is the fog's.
     AspectRatio,
     RenderScale,
@@ -388,7 +390,11 @@ impl Menu {
             "The game as it shipped, or openmx's enhancements: the master switch and the controls, cameras and markers' own switches. Cross opens them.",
         );
         original.value = self.original().label().into();
-        vec![
+        // P191: only where there is an updater (the desktop's)
+        let updates = UPDATER.get().map(|_| {
+            Row::choice(Key::Updates, "Updates", &Updates::ALL.map(Updates::label), Updates::ALL.iter().position(|u| *u == self.settings.updates).unwrap_or(0), UPDATES_HELP)
+        });
+        let mut rows = vec![
             Row::on_off(Key::Bays, "Machines at Bays", self.settings.bays, "The lot's bikes and the biplane stand at their bays, see-through, and the original's pop-up offers them when you stop beside one."),
             mods,
             Row::choice(Key::Tricks, "Tricks", &Tricks::ALL.map(Tricks::label), Tricks::ALL.iter().position(|t| *t == self.settings.tricks).unwrap_or(0), TRICKS_HELP)
@@ -402,7 +408,9 @@ impl Menu {
             )
             .off_if(!self.settings.mods, "Needs a trick pack in the mods folder"),
             original,
-        ]
+        ];
+        rows.extend(updates);
+        rows
     }
 
     /// How many of Wrecks and Air Wrecks are off the original's on (P175), for the Game Modifiers
@@ -1227,6 +1235,7 @@ impl Menu {
             Key::WorldSky => s.world_sky = WorldSky::ALL[next(row)],
             Key::TextureFiltering => s.filtering = Filtering::ALL[next(row)],
             Key::Shadows => s.shadows = Shadows::ALL[next(row)],
+            Key::Updates => s.updates = Updates::ALL[next(row)],
             Key::AspectRatio => s.picture = Picture::ALL[next(row)],
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,

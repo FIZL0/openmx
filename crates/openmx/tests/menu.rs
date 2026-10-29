@@ -448,6 +448,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         texture_packs_off: vec!["old".into()],
         // 2P with their markers off (P129).
         markers: [true, false, true, true, true, true, true, true],
+        // P191: the updater never asks.
+        updates: menu::Updates::Never,
     };
     let controls = Controls {
         throttle: Gas::R2,
@@ -7087,4 +7089,24 @@ fn a_newer_build_is_another_commit() {
     assert!(!menu::first_start("0123456", "0123456"));
     // a first visit has no last build: nothing to say
     assert!(!menu::first_start("", "0123456"));
+}
+
+/// P191: Settings → Updates round-trips settings.txt, Ask writing no line; a word it cannot read
+/// keeps Ask. A menu without the desktop's updater (this one, the browser's) has no Updates row, and
+/// its main menu's Square is the page's Reload.
+#[test]
+fn updates_setting_round_trips_and_needs_the_updater() {
+    use menu::Updates;
+    for u in Updates::ALL {
+        let mut s = Settings::default();
+        s.updates = u;
+        assert_eq!(Settings::parse(&s.text()).updates, u, "{}", s.text());
+        assert_eq!(s.text().contains("updates ="), u != Updates::Ask);
+    }
+    assert_eq!(Settings::parse("updates = always\n").updates, Updates::Always);
+    assert_eq!(Settings::parse("updates = sometimes\n"), Settings::default());
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    m.open(Screen::Settings);
+    assert!(m.page().iter().all(|r| r.key != menu::Key::Updates));
+    assert_eq!(menu::update_button(), "Reload");
 }

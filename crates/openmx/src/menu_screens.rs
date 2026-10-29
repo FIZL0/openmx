@@ -998,7 +998,7 @@ impl Pen<'_> {
         let size = 1.0;
         let x = STAGE.0.min(self.right()) - 1.5;
         let mut y = self.top().max(0.0) + 1.2 + CAP * size;
-        let newer = menu.newer.as_ref().map(|n| (format!("New version out: {n}"), PEACH));
+        let newer = menu.newer.as_ref().map(|n| (update_line(n), PEACH));
         let updated = menu.updated.as_ref().map(|(s, _)| (s.clone(), CHALK));
         for (line, colour) in [newer, updated].into_iter().flatten() {
             y += 1.6 * size;
@@ -1059,7 +1059,7 @@ impl Pen<'_> {
             self.chips(&chips, x, y + 1.0, w);
         }
         if menu.newer.is_some() {
-            self.hints(&[(Btn::Square, "Reload"), (Btn::Cross, "Select")]);
+            self.hints(&[(Btn::Square, update_button()), (Btn::Cross, "Select")]);
         } else {
             self.hints(&[(Btn::Cross, "Select")]);
         }
