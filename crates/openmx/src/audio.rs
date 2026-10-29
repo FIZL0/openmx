@@ -3458,8 +3458,27 @@ pub struct Output {
 }
 
 impl Output {
-    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(unreachable_code))]
     pub fn start(mixer: Arc<Mutex<Mixer>>) -> Result<Output, String> {
+        // The iPhone (P200): no players to pipe to; an AudioQueue pulls the mix as it plays, kept
+        // by a thread that only waits for the stop, so dropping this stops it as on the desktop.
+        #[cfg(target_os = "ios")]
+        {
+            let fill = Box::new(move |out: &mut [i16]| match mixer.lock() {
+                Ok(mut m) => m.render(out),
+                Err(_) => out.fill(0),
+            });
+            let sound = openmx_ios::Sound::start(RATE, fill)?;
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let quit = stop.clone();
+            let thread = std::thread::spawn(move || {
+                while !quit.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::park_timeout(std::time::Duration::from_millis(50));
+                }
+                drop(sound);
+            });
+            return Ok(Output { stop, thread: Some(thread), player: "an AudioQueue".into() });
+        }
         // The browser (P196): no players and no thread; the page's WebAudio, kept fed a frame at a
         // time ([`crate::web_host::next_frame`]) for as long as the mixer lives.
         #[cfg(target_arch = "wasm32")]

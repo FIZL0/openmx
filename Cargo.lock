@@ -3370,6 +3370,7 @@ dependencies = [
  "ggrs",
  "iroh-relay",
  "js-sys",
+ "openmx-ios",
  "openmx-net",
  "png",
  "pollster",
@@ -3380,6 +3381,14 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
+ "winit",
+]
+
+[[package]]
+name = "openmx-ios"
+version = "1.0.0"
+dependencies = [
+ "libc",
  "winit",
 ]
 

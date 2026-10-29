@@ -1,0 +1,11 @@
+[package]
+name = "openmx-ios"
+description = "The iPhone's side of the shell (P200): Objective-C and C calls behind a safe face, so the shell keeps forbidding unsafe code"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+libc = "0.2"
+# The window the safe area and the orientation hold are read off and put on: the workspace's patched copy.
+winit = "0.30"
