@@ -978,6 +978,16 @@ impl Pen<'_> {
             }
         }
         self.ticker(menu, screen);
+        if screen == Screen::Main {
+            self.corner();
+        }
+    }
+
+    /// Which build this is (P189), small in the frame's top right corner, or the stage's when the frame is wider.
+    fn corner(&mut self) {
+        let size = 1.0;
+        let (x, y) = (STAGE.0.min(self.right()) - 1.5, self.top().max(0.0) + 1.2 + CAP * size);
+        self.shadowed(Weight::Bold, BUILD_CORNER, x, y, size, 0.0, DUST, Align::Right, [0.07, 0.09], [0, 0, 0, 89]);
     }
 
     /// The band's line: a note, the lobby's word online, whose ride it is otherwise.

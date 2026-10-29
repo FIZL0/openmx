@@ -87,6 +87,9 @@ fi
 # Its own build directory, beside the native one: a different compiler's artifacts in the same
 # directory would rebuild both every time.
 out=${CARGO_TARGET_DIR:-$repo/target}/web
+# --check's module is the tests' (a release build only for speed): stamped "dev" as their own desktop builds are
+# (crates/openmx/build.rs, P189), so the two meet online and a commit does not rebuild it.
+[ "$check" = 0 ] || export OPENMX_COMMIT=${OPENMX_COMMIT:-dev}
 RUSTC=$RUSTC CARGO_TARGET_DIR=$out "$CARGO" build -q --manifest-path "$repo/Cargo.toml" \
     -p openmx --lib --release --target "$target"
 wasm=$out/$target/release/openmx_web.wasm

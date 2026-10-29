@@ -7057,3 +7057,13 @@ fn the_keyboard_takes_1p_back_and_a_real_pad_takes_it_from_the_touch_pad() {
     m.set_p1(Dev::Pad("Touch controls".into()));
     assert!(!m.lost(&["pad".to_string()]));
 }
+
+/// P189: the main menu's corner names the build, `v<version> · <commit>`; a test build is a dev one.
+#[test]
+fn the_main_menus_corner_names_the_build() {
+    let commit = env!("OPENMX_COMMIT");
+    assert_eq!(menu::BUILD_CORNER, format!("v{} · {commit}", env!("OPENMX_VERSION")));
+    if commit == "dev" {
+        assert_eq!(menu::BUILD_CORNER, concat!("v", env!("CARGO_PKG_VERSION"), " · dev"));
+    }
+}

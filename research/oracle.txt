@@ -6682,3 +6682,39 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 #   Pause "Switch To Machine": 0x0028ff30 lists world+0x90's undriven machines when unlocked or the
 #   cheat flag read32(0x004e2778)+0x5c is set; 0x0028fcf0 swaps through 0x00210b90.
 kiowa_flight_controller boot 0x0038dbc0 (self, dt in f12): the pad into cyclic, pedal and collective
+# S149 — the car machines' .phy loader (MXCar.cpp), research/journal/*-s149-car-machines. All boot.
+# Ported as game_sim::car::Car::read; tests/car_phy.rs proves it word for word against the monster
+# truck parked in first_recording's RAM image (object 0x00e1e210, vtable word at +0x48 = 0x0045ed50,
+# kind +0xd50 = 4).
+car_phy_load                boot 0x00394450 the shared loader (car, ini): part, tires, engine, aero,
+#                                           preload, wrecks, joystick, then 0x003942d0 (the tire
+#                                           collision volume, not from the file). Called by the truck's
+#                                           0x003e0200 ([Animation] PelvisBox* -> +0x1010/+0x1020,
+#                                           RearTireSteerScale default 1 -> +0xfd4) and the buggy/baja's
+#                                           0x0039e7d0 (PelvisBox* -> +0xf20/+0xf30).
+# The getters: ini_bool 0x0014b6f0 (an int with a default, always writes), ini_float 0x0014b520 and
+# ini_int 0x0014b3f0 (leave a missing key alone), ini_quadword 0x0014b810.
+# Car fields: +0x50 the rigid-body part (body ptr +0x160, collision +0x170); +0x230/+0x250 CofG (the
+#   live truck's +0x250 has moved to CofGAI); +0x240 CofGAI; +0x260/+0x264 travel fwd/back; +0x2d4
+#   MaxWreckTime (default 5); +0x408 MaxAnalogThrottle; +0x40c DigitalThrottleSpeed*MPH; +0x410
+#   DigitalSideSlipAngle*DEG; +0x41c/+0x420/+0x424 handbrake friction/brake/fade; +0x434/+0x438/+0x43c
+#   clutch time/scale/speed; +0x44c/+0x454/+0x458/+0x45c preload; +0x470 AeroSurfaceArea; +0x474
+#   AirborneDamping; +0x478..+0x484 unroll/unyaw; +0x490 AirborneControlMoment; +0x4a0
+#   BrakeGyroTorque; +0x4a4/+0x4a8 wing count/array (0x20 each: slope, AoA*DEG, drag, induced, pos);
+#   +0x4b0 SquareSteeringInput; +0x4c4..+0x4d4 rate limits; +0x4d8.. steer, wheel, dpad tables (speed,
+#   scale)x3 each, +0x520.. rear steer; +0x538/+0x53c yaw limits; +0x544 engine; +0x548..+0x554 tires.
+# Tire (ctor 0x0039a790, 0x9d0 bytes; +0x1bc the body): setter 0x0039ad80 +0x3c..+0x50 (spring
+#   |32.2*(k*m)|, dampers (2r)*sqrt(m*k)); 0x0039ae00 +0x1f8 radius, +0x200 r*r, +0x204 1/r (r > 0),
+#   +0x1fc width (and +0x80 anchor += width - old), +0x54 1/inertia, +0x58 gyro; 0x0039aea0 +0x5c steer;
+#   0x0039af60 +0xa8 ABS, +0xac/+0xb0 slips; +0x60 MaxTireScale; +0xa4 MaxTireAngleRate (FLT_MAX);
+#   +0x9c0 CamberRollRatio; +0xa0 the driven top wheel speed. Surfaces (index < 16): 0x0039aeb0 C1..C4
+#   +0x634/+0x674/+0x6b4/+0x6f4, A0 +0x734, A1 +0x774, A3 +0x7b4, 1/A2 +0x7f4, 1/A4 +0x834, MomentScale
+#   +0x874, CorneringStiffness +0x8b4, MaxNormalLoad +0x8f4, FrictionPeak +0x934, FrictionEndPoint
+#   +0x974; 0x0039af30 MaxBrakingTorque +0x5b4, WheelFriction +0x5f4.
+# Engine (ctor 0x00399530, 0x140 bytes): 0x00399730 drive slots +0x30..+0x3c; 0x00399750 +0x50
+#   EngineBraking*1e-6, +0xd0 n, +0xd4 rpm[], +0xd8 torque[] = 5252*hp/rpm + (k*rpm)*rpm, +0x130 last
+#   rpm; 0x003998e0 +0xdc/+0xe0 gears, +0x54 final, then 0x00399a60 (box into gear 1: +0xcc, +0xe4
+#   ratio, +0xe8 1/ratio, driven tires' +0xa0 = rpm_max*0.1047198*(1/ratio)); 0x003999f0 +0x5c/+0x60
+#   inertia; 0x003999e0 +0x58 loss*0.01; 0x00399980 +0x68 maxK, +0x64 0.001*pump, +0xf0; 0x003999a0
+#   shift points +0x90..+0xc0; 0x00399a50 NOX +0x84..+0x8c; 0x00399a40 TCS +0x74..+0x7c; +0x70 MinRPM,
+#   +0x4c IdleThrottle.
