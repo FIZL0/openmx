@@ -154,7 +154,12 @@ struct Capture {
 
 impl Capture {
     fn load(name: &str) -> Option<Capture> {
-        let text = std::fs::read_to_string(ctx(&format!("capture/s62/{name}.csv"))?).expect("read the capture");
+        Capture::read(&format!("capture/s62/{name}.csv"))
+    }
+
+    /// A capture by its path under `context/`.
+    fn read(rel: &str) -> Option<Capture> {
+        let text = std::fs::read_to_string(ctx(rel)?).expect("read the capture");
         let mut lines = text.lines();
         let cols: HashMap<String, usize> =
             lines.next().expect("a header").split(',').enumerate().map(|(i, c)| (c.to_string(), i)).collect();
@@ -387,6 +392,11 @@ fn node_of(ee: &Ee, n: u32) -> Node {
 /// everything that moves.
 fn bike_from(ee: &Ee, part: &Part) -> WreckBike {
     let (b, c) = bike_in(ee);
+    bike_at(ee, part, b, c)
+}
+
+/// [`bike_from`] with the body and the collision object found already.
+fn bike_at(ee: &Ee, part: &Part, b: u32, c: u32) -> WreckBike {
     let body = ee_body(ee, b);
     let mut bike = WreckBike::new(part, WRECK_INERTIA, body.position, body.quat);
     bike.body = body;
@@ -776,4 +786,97 @@ fn the_wreck_bikes_probes_search_the_scenery() {
     // rays'), is down in every s62 state and in the garage's first, and up where its second starts:
     // the respawned bike already against the garage's side.
     assert_eq!(hits, [false, false, false, false, false, false, true], "the ray probe's hit bits");
+}
+
+/// P186: the crash body's velocity the shell feeds `Vehicle Dust` and `Vehicle Chunks` is
+/// [`wreck_bike::WreckBike`]'s `collider.relative`, the relative velocity at the last resolved contact,
+/// which `CollisionModel` reads at the collision object's `+0x1e0`. P153's capture of animandpump's
+/// wreck (`context/capture/p153/wreck.csv`, journal `wreck-particle-contacts`) has the original's
+/// `+0x1e0` on every row, and its state at 3790 (`wreck-3790.p2s`, its RAM image and scratchpad taken
+/// out as `wreck-3790.ee.bin`/`.spr.bin`) the whole wreck bike: the port's bike from that state,
+/// ticked over free09's ground and props, has the row's relative velocity to the bit on every tick
+/// until the respawn.
+#[test]
+fn the_wreck_bike_feeds_the_dust_the_originals_contact_velocity() {
+    /// The state's frame, and the last before the respawn (3918, journal P153).
+    const FROM: u32 = 3790;
+    const LAST: u32 = 3917;
+    let Some(mut disc) = Disc::open() else { return };
+    let Some(cap) = Capture::read("capture/p153/wreck.csv") else { return };
+    let Some(path) = ctx(&format!("capture/p153/wreck-{FROM}.ee.bin")) else { return };
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    if let Some(spr) = ctx(&format!("capture/p153/wreck-{FROM}.spr.bin")) {
+        ee.spr = std::fs::read(spr).expect("the scratchpad");
+    }
+    assert_eq!(ee.u32_at(addr("frame_counter").unwrap()), FROM, "the state is not frame {FROM}");
+    // The collision object as the capture reached it: the human's rider (the game manager's first
+    // actor), its particle manager's Vehicle Dust entry, and the entry's object; and the object's own
+    // body (its `+0xf4`).
+    let head = ee.u32_at(ee.u32_at(ee.u32_at(addr("game_manager").unwrap()) + 0x34) + 0x34);
+    let rider = ee.u32_at(ee.u32_at(head + 0x8));
+    let dust = ee.u32_at(ee.u32_at(ee.u32_at(rider + 0x1490) + 0x3c));
+    let c = ee.u32_at(ee.u32_at(dust + 0x28));
+    let b = ee.u32_at(c + 0xf4);
+    let (part, _) = wreck_files(&mut disc);
+    same_f("the body's inverse mass", F(ee.f32_at(b + body_at::INV_MASS)), WreckBike::new(&part, WRECK_INERTIA, Vf::default(), Vf::new(0.0, 0.0, 0.0, 1.0)).body.inv_mass);
+    let props = free09_props(&mut disc);
+    let (bytes, scene) = free09(&mut disc);
+    let terrain = Terrain::parse(&bytes).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let field = ground.field();
+
+    let row = |f: u32| Vf([0, 1, 2, 3].map(|k| cap.get(f, &format!("body_vel.{}", ["x", "y", "z", "w"][k]))));
+    let mut bike = bike_at(&ee, &part, b, c);
+    same(&format!("{FROM}: the state's relative velocity against its row"), bike.collider.relative, row(FROM));
+    let mut moved = 0;
+    for f in FROM + 1..=LAST {
+        let before = bike.collider.relative;
+        bike.tick_among(F(cap.get(f, "dt")), Some(&field), Some(&props), None);
+        same(&format!("{f}: the relative velocity"), bike.collider.relative, row(f));
+        moved += usize::from((0..4).any(|k| before[k].to_bits() != bike.collider.relative[k].to_bits()));
+    }
+    eprintln!("{} ticks, the relative velocity moved on {moved}", LAST - FROM);
+    assert!(moved > 20, "the bike's contact velocity moved on only {moved} ticks");
+}
+
+/// P186: the zone byte the rider's dust and chunks read off each of the ragdoll's spheres
+/// (`ParticleCollisionConstraint`, sphere `+0x3c`) is the one the sphere's own ground query writes:
+/// [`World::wheel_surface`] at the sphere's centre, which `ragdoll_contact::Contact::solve` keeps as
+/// `surface`. P153's capture holds every sphere's byte and point on every row; with no scene contact
+/// in it, the point is the query's own (its `x` and `z` the bone's centre), so free09's terrain at the
+/// point has to answer the byte. A sphere never solved (the ragdoll's seven before the wreck) holds 0
+/// and no ground and is not asked.
+#[test]
+fn the_ragdolls_sphere_zone_is_its_own_ground_querys() {
+    use game_sim::world::{Place, World};
+    let Some(mut disc) = Disc::open() else { return };
+    let Some(cap) = Capture::read("capture/p153/wreck.csv") else { return };
+    let (bytes, scene) = free09(&mut disc);
+    let terrain = Terrain::parse(&bytes).expect("free09's terrain");
+    let mut place = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let (mut asked, mut touching, mut by_ground_at) = (0, 0, 0);
+    let mut frames: Vec<u32> = cap.rows.keys().copied().collect();
+    frames.sort();
+    for f in frames {
+        for s in 0..9 {
+            let word = |k: &str| cap.text(f, &format!("r{s}_{k}")).parse::<u32>().expect("a word");
+            let (zone, ground) = (word("zone"), word("ground") != 0);
+            assert_eq!(word("object"), 0, "{f} sphere {s}: a scene contact moves the point off the query's");
+            if zone == 0 && !ground {
+                continue;
+            }
+            let at = Vf([0, 1, 2, 3].map(|k| cap.get(f, &format!("r{s}_at.{}", ["x", "y", "z", "w"][k]))));
+            assert_eq!(place.wheel_surface(at), Some(zone as u8), "{f} sphere {s} at {at:?}: the sphere's zone byte");
+            asked += 1;
+            if ground {
+                touching += 1;
+                // What the shell fed before P186: the terrain's surface under the point, on a touching
+                // sphere only.
+                by_ground_at += usize::from(u32::from(place.surface(at)) != zone);
+            }
+        }
+    }
+    eprintln!("{asked} sphere rows asked, {touching} touching; the ground's own surface differs on {by_ground_at}");
+    assert!(asked > 1500 && touching > 400, "{asked} asked, {touching} touching");
 }

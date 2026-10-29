@@ -605,6 +605,7 @@ fn the_push_out_against_a_prop_is_the_originals() {
             point,
             normal,
             dv: vf(&ee, c + coll::DV),
+            surface: 0,
         };
         contact.push_out_against(&sphere, &mut body, point, normal, moving(point, Against::Still), &table);
         ee.call(push_out, &[u64::from(c), u64::from(point_at), u64::from(normal_at)], &[], BUDGET);

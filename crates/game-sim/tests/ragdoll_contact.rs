@@ -54,6 +54,7 @@ mod at {
     pub const ROTATION: u32 = 0x30;
     pub const RESTITUTION: u32 = 0x34;
     pub const FRICTION: u32 = 0x38;
+    pub const SURFACE: u32 = 0x3c;
     pub const POINT: u32 = 0x40;
     pub const NORMAL: u32 = 0x50;
     pub const DV: u32 = 0x60;
@@ -248,6 +249,9 @@ struct Answers {
     sweep: Option<(Vf, Vf)>,
     /// The collidable each touching contact is with (S62), 0 for none.
     others: Vec<u32>,
+    /// The surface byte the ground query writes (P186), or `None` where it finds no cell and writes
+    /// nothing.
+    surface: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -266,6 +270,9 @@ impl World for Fake {
     fn ground(&mut self, at: Vf) -> (Vf, Vf) {
         self.asked.ground.push(bits(at));
         self.answers.ground
+    }
+    fn wheel_surface(&mut self, _at: Vf) -> Option<u8> {
+        self.answers.surface
     }
     fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
         false
@@ -293,6 +300,9 @@ impl World for WorldRef<'_> {
     fn ground(&mut self, at: Vf) -> (Vf, Vf) {
         self.0.borrow_mut().ground(at)
     }
+    fn wheel_surface(&mut self, at: Vf) -> Option<u8> {
+        self.0.borrow_mut().wheel_surface(at)
+    }
     fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
         false
     }
@@ -315,6 +325,9 @@ fn hook(ee: &mut Ee, shared: &Rc<RefCell<(Answers, Asked)>>, segments: Vec<u32>)
             s.1.ground.push(bits(quad(ee, point)));
             set_quad(ee, point, s.0.ground.0);
             set_quad(ee, normal, s.0.ground.1);
+            if let Some(surface) = s.0.surface {
+                ee.write(ee.r(8) as u32, 1, u128::from(surface));
+            }
         }),
     );
     let s = Rc::clone(shared);
@@ -388,6 +401,7 @@ fn contact_of(ee: &Ee, c: u32) -> Contact {
         point: quad(ee, c + at::POINT),
         normal: quad(ee, c + at::NORMAL),
         dv: quad(ee, c + at::DV),
+        surface: ee.u8_at(c + at::SURFACE),
     }
 }
 
@@ -411,6 +425,8 @@ struct Seen {
     scene: usize,
     swept: usize,
     off: usize,
+    /// Cases whose surface byte the query rewrote.
+    surface: usize,
 }
 
 #[test]
@@ -441,6 +457,8 @@ fn the_solve_matches_the_original() {
     assert_ne!(terrain, 0);
 
     let mut pick = Pick(0x52_c0_11_15_10_4e);
+    // The surface bytes (P186) come off a stream of their own, so the other draws stay as they were.
+    let mut zones = Pick(0x186_5_0e);
     let mut seen = Seen::default();
     for case in 0..CASES {
         let i = pick.upto(9) as usize;
@@ -482,6 +500,8 @@ fn the_solve_matches_the_original() {
         set_quad(&mut ee, c + at::POINT, pick.vector(9.0));
         set_quad(&mut ee, c + at::NORMAL, pick.vector(1.0));
         set_quad(&mut ee, c + at::DV, pick.vector(9.0));
+        let before = zones.upto(256) as u8;
+        ee.write(c + at::SURFACE, 1, u128::from(before));
 
         // The terrain: none, over it, off it or on its edge.
         let on_terrain = !pick.chance(6);
@@ -510,7 +530,8 @@ fn the_solve_matches_the_original() {
         };
         let sweep = if pick.chance(3) { Some(pick.contact(pos, radius)) } else { None };
         let contacts = touching.as_ref().map_or(0, Vec::len);
-        let answers = Answers { ground, touching, sweep, others: Vec::new() };
+        let surface = (!zones.chance(4)).then(|| zones.upto(256) as u8);
+        let answers = Answers { ground, touching, sweep, others: Vec::new(), surface };
 
         // The port first, off the case as written.
         let sphere = sphere_of(&ee, c, bone);
@@ -548,6 +569,8 @@ fn the_solve_matches_the_original() {
         }
         let flags = |k: &Contact| (k.touched, k.ground, k.scene, k.swept);
         assert_eq!(flags(&contact), flags(&game.1), "{}: touched, ground, scene, swept", ctx());
+        assert_eq!(contact.surface, game.1.surface, "{}: the surface byte", ctx());
+        seen.surface += usize::from(game.1.surface != before);
 
         if !on || !body.enabled {
             seen.off += 1;
@@ -558,7 +581,7 @@ fn the_solve_matches_the_original() {
         }
     }
     eprintln!("{seen:?}");
-    assert!(seen.ground > 2000 && seen.scene > 1000 && seen.swept > 1000 && seen.off > 300, "{seen:?}");
+    assert!(seen.ground > 2000 && seen.scene > 1000 && seen.swept > 1000 && seen.off > 300 && seen.surface > 2000, "{seen:?}");
 }
 
 /// The bike box's fields (research/oracle.txt, S52).
@@ -1418,7 +1441,7 @@ fn the_solve_against_moving_things_matches_the_original() {
         let sweep = if pick.chance(2) { Some(pick.contact(pos, radius)) } else { None };
         moving_contacts += with.iter().flatten().count();
         swept_moving += usize::from(sweep.is_some() && with.last().copied().flatten().is_some());
-        let answers = Answers { ground, touching, sweep, others: with.iter().map(|w| w.map_or(0, |k| o.collidables[k])).collect() };
+        let answers = Answers { ground, touching, sweep, others: with.iter().map(|w| w.map_or(0, |k| o.collidables[k])).collect(), surface: None };
 
         let sphere = sphere_of(&ee, c, bone);
         let mut body = body_of(&ee, b);

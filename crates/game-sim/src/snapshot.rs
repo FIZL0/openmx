@@ -784,7 +784,9 @@ impl Wire for crate::prop_world::Listener {
         })
     }
 }
-wire!(crate::ragdoll_contact::Contact { touched, ground, scene, swept, point, normal, dv });
+// The surface byte is the particles' alone, and every solve over the terrain writes it before they
+// read it.
+wire!(crate::ragdoll_contact::Contact { touched, ground, scene, swept, point, normal, dv } skip { surface });
 wire!(crate::rider_anim::Thrown { throw, touching, vel, clearance, launch });
 wire!(crate::wreck_sound::Emitter { crash, fall });
 wire!(crate::wreck_sound::List { count, last });

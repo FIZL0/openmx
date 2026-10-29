@@ -115,6 +115,10 @@ pub struct Contact {
     pub normal: Vf,
     /// The last push-out's change of velocity.
     pub dv: Vf,
+    /// The surface the ground query last wrote (P186): the terrain's nearest cell corner under the
+    /// bone's centre ([`World::wheel_surface`]), written by every query, touching or not, and kept
+    /// where the query writes nothing. The rider's dust and chunks read it as their sphere's zone.
+    pub surface: u8,
 }
 
 /// The terrain the ground half asks, and its box. The query is only made for a bone strictly inside
@@ -239,6 +243,9 @@ impl Contact {
             let p = self.point;
             if p.x() < t.max.x() && !(p.x() <= t.min.x()) && p.z() < t.max.z() && !(p.z() <= t.min.z()) {
                 let (point, normal) = t.world.ground(p);
+                if let Some(surface) = t.world.wheel_surface(p) {
+                    self.surface = surface;
+                }
                 self.point = point;
                 self.normal = normal;
                 if F(body.position.y()) < F(point.y()) + s.radius {
