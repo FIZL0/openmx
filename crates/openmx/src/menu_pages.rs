@@ -114,6 +114,8 @@ pub enum Key {
     HoldMusic,
     /// A seat's one Controls choice (P81): New, or Original on one of its controller presets.
     BikeLayout,
+    /// The new layout's keyboard (P207): modern MX games' or P80's home row, the host's.
+    Keyboard,
     PlaneLayout,
     /// A seat's session markers (P129), on or off.
     Markers,
@@ -630,6 +632,17 @@ impl Menu {
             "New: R2 the gas and L2 the brake, by how far they are pulled. Original: the disc's own buttons, on any of its four controller presets.",
         )
         .tips(&tips);
+        // The new layout's keyboard (P207): which keys, not which buttons, so the original's layout,
+        // which keeps the keyboard it always had, has no say in it.
+        let keyboard = Row::choice(
+            Key::Keyboard,
+            "Keyboard",
+            &["Modern", "Home Row"],
+            usize::from(c.home_row_keys),
+            "Modern: W the gas, S the brake, A and D steer, I and K lean, Shift the clutch, F G and E the tricks, R the reset, as modern MX games have it. Home Row: J the gas and K the brake, WASD and YUIO the sticks.",
+        )
+        .tips(&["W gas, S brake", "J gas, K brake"])
+        .off_if(c.layouts[p] == Layout::Original, "The original layout keeps its own keyboard");
         // The plane's stick (P50, P69): the hint under the cursor says what the choice it is on does.
         let planes = Layout::ALL.map(Layout::plane_label);
         let plane_now = usize::from(c.planes[p] == Layout::Original);
@@ -653,6 +666,7 @@ impl Menu {
         }
         rows.extend([
             bike,
+            keyboard,
             plane,
             markers,
             Row::choice(
@@ -1194,6 +1208,7 @@ impl Menu {
                 self.controls.layouts[i] = layout;
                 self.controls.presets[i] = preset;
             }
+            Key::Keyboard => self.controls.home_row_keys = !self.controls.home_row_keys,
             Key::PlaneLayout => {
                 let i = self.control_seat();
                 self.controls.planes[i] = Layout::ALL[next(row)];

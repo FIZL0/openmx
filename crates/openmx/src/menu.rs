@@ -1848,11 +1848,12 @@ pub fn load_preset_onto(mods: &mut Mods, preset: &Mods, seat: usize) {
     }
 }
 
-/// Where [`Menu::keyboard`] keeps the keyboard of a layout on a controller preset (P79).
-pub fn keyboard_at(layout: Layout, preset: usize) -> usize {
+/// Where [`Menu::keyboard`] keeps the keyboard of a layout on a controller preset (P79), the new
+/// layout's on P80's home row or not (P207).
+pub fn keyboard_at(layout: Layout, preset: usize, home_row: bool) -> usize {
     match layout {
-        Layout::New => 0,
-        Layout::Original => 1 + preset.min(PRESETS - 1),
+        Layout::New => home_row as usize,
+        Layout::Original => 2 + preset.min(PRESETS - 1),
     }
 }
 
@@ -1883,6 +1884,10 @@ pub struct Controls {
     /// Switch (P53). P53's default wrote `labels` into every file, so that word reads as positions:
     /// labels are only honoured once picked on the Controls page, which writes `by-label`.
     pub nintendo_positions: bool,
+    /// The new layout's keyboard (P207): modern MX games' (`keys = modern`, the default — W the gas,
+    /// S the brake, A and D the steer, `IJKL` the lean) or P80's home row (`keys = home-row`, J the
+    /// gas and K the brake). The original's layout keeps its own keyboard either way.
+    pub home_row_keys: bool,
 }
 
 impl Default for Controls {
@@ -1895,6 +1900,7 @@ impl Default for Controls {
             planes: [Layout::default(); SEATS],
             presets: [0; SEATS],
             nintendo_positions: true,
+            home_row_keys: false,
         }
     }
 }
@@ -1913,6 +1919,7 @@ impl Controls {
                 "pressure" => c.pressure = if v == "none" { String::new() } else { v.to_string() },
                 // `labels` is P53's default, written whether or not anyone chose it (P64).
                 "nintendo" => c.nintendo_positions = v != "by-label",
+                "keys" => c.home_row_keys = v == "home-row",
                 // One word for every seat, or one per seat with the last carried on.
                 "layout" => {
                     let words: Vec<Option<Layout>> = v
@@ -1953,8 +1960,10 @@ impl Controls {
              # always pulling the nose toward its belly; original is the disc's (P50, P69); nintendo is\n\
              # positions (a Switch pad's B, the bottom one, confirms) or by-label (A confirms and B\n\
              # goes back) (P53, P64); preset is the original's controller preset, 0 to 3, or one per seat,\n\
-             # read under the original layout only — 0 is the shipped one (P79)\n\
-             throttle = {}\npad = {}\npressure = {}\nlayout = {}\nbiplane = {}\nnintendo = {}\npreset = {}\n",
+             # read under the original layout only — 0 is the shipped one (P79); keys is the new\n\
+             # layout's keyboard, modern (W gas, S brake, A D steer, IJKL lean) or home-row (P80's\n\
+             # J gas, K brake) (P207)\n\
+             throttle = {}\npad = {}\npressure = {}\nlayout = {}\nbiplane = {}\nnintendo = {}\npreset = {}\nkeys = {}\n",
             self.throttle.word(),
             self.pad.as_deref().unwrap_or("auto"),
             if self.pressure.is_empty() { "none" } else { &self.pressure },
@@ -1962,6 +1971,7 @@ impl Controls {
             seat_text(&self.planes),
             if self.nintendo_positions { "positions" } else { "by-label" },
             preset_text(&self.presets),
+            if self.home_row_keys { "home-row" } else { "modern" },
         )
     }
 
@@ -2588,9 +2598,10 @@ pub struct Menu {
     pub heard: Vec<String>,
     pub skipped: Vec<String>,
     /// The keyboard under each layout, as the shell's bindings have it (P54): what each key does in
-    /// a ride, for the Controls screen. The new layout first, then the original's on each of its
-    /// controller presets, 0 to 3 (P79) — [`keyboard_at`]'s order. Empty without a shell.
-    pub keyboard: [Vec<(String, String)>; 1 + PRESETS],
+    /// a ride, for the Controls screen. The new layout first, on the modern keyboard then on P80's
+    /// home row (P207), then the original's on each of its controller presets, 0 to 3 (P79) —
+    /// [`keyboard_at`]'s order. Empty without a shell.
+    pub keyboard: [Vec<(String, String)>; 2 + PRESETS],
     /// The local game the ride setup is for, once the join screen is done; none for a Free Ride.
     party: Option<Party>,
     /// How many ride a Free Ride, which is `--players`: the shell says, and a Free Ride after a
