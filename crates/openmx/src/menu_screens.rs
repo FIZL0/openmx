@@ -980,6 +980,7 @@ impl Pen<'_> {
         self.ticker(menu, screen);
         if screen == Screen::Main {
             self.corner();
+            self.builds(menu);
         }
     }
 
@@ -988,6 +989,20 @@ impl Pen<'_> {
         let size = 1.0;
         let (x, y) = (STAGE.0.min(self.right()) - 1.5, self.top().max(0.0) + 1.2 + CAP * size);
         self.shadowed(Weight::Bold, BUILD_CORNER, x, y, size, 0.0, DUST, Align::Right, [0.07, 0.09], [0, 0, 0, 89]);
+    }
+
+    /// The main menu's word on builds (P193), under the corner: the newer build the site has, which
+    /// Square reloads into, and for a while on a new build's first start "Updated to …".
+    fn builds(&mut self, menu: &Menu) {
+        let size = 1.0;
+        let x = STAGE.0.min(self.right()) - 1.5;
+        let mut y = self.top().max(0.0) + 1.2 + CAP * size;
+        let newer = menu.newer.as_ref().map(|n| (format!("New version out: {n}"), PEACH));
+        let updated = menu.updated.as_ref().map(|(s, _)| (s.clone(), CHALK));
+        for (line, colour) in [newer, updated].into_iter().flatten() {
+            y += 1.6 * size;
+            self.shadowed(Weight::Bold, &line, x, y, size, 0.0, colour, Align::Right, [0.07, 0.09], [0, 0, 0, 89]);
+        }
     }
 
     /// The band's line: a note, the lobby's word online, whose ride it is otherwise.
@@ -1042,7 +1057,11 @@ impl Pen<'_> {
             let y = self.heading("openMX", h, &p, x, 10.0, w, 2.6);
             self.chips(&chips, x, y + 1.0, w);
         }
-        self.hints(&[(Btn::Cross, "Select")]);
+        if menu.newer.is_some() {
+            self.hints(&[(Btn::Square, "Reload"), (Btn::Cross, "Select")]);
+        } else {
+            self.hints(&[(Btn::Cross, "Select")]);
+        }
     }
 
     /// The pick's track `at`'s picture in a chalk frame with its tag, turning through a disc

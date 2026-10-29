@@ -579,6 +579,14 @@ footer a { color: var(--bone); }
   const screen = $('#screen');
   const status = $('#status');
   const worker = new Worker('worker.js', { type: 'module' });
+  // P193: the build this browser last started, which the game says "Updated to …" against; it sends back the one it starts.
+  {
+    let lastBuild = null;
+    try {
+      lastBuild = localStorage.getItem('openmx.build');
+    } catch {}
+    worker.postMessage({ lastBuild });
+  }
 
   for (const a of document.querySelectorAll('[data-link]')) {
     const url = SITE[a.dataset.link];
@@ -741,6 +749,13 @@ footer a { color: var(--bone); }
     } else if (data.started) {
       state('started');
       screen.focus?.();
+      fresh();
+    } else if (data.build) {
+      try {
+        localStorage.setItem('openmx.build', data.build);
+      } catch {}
+    } else if (data.reload) {
+      location.reload();
     } else if (data.play) {
       queue.push(data.play);
     } else if (data.gpu) {
@@ -947,7 +962,9 @@ footer a { color: var(--bone); }
   // ---- the build ----
   // beta.openmx.dev is every push to main (the rolling `beta` release); openmx.dev is the latest release (.github/workflows/pages.yml).
   // version.txt is the build tools/web.sh made; read again every few minutes and when the tab comes back, a different one means
-  // the site has moved on, and the page offers a reload (a ride in progress is never cut short).
+  // the site has moved on, and the page offers a reload (a ride in progress is never cut short). With the game on the
+  // canvas the offer is the game's (P193, opentennis's hstLatest): the newer build goes to it, and its main menu shows it
+  // with a reload, never the ride; the page's banner is for the site page alone. `openmxRecheck()` reads it at once.
   const BETA = location.hostname.startsWith('beta.');
   const RELEASES = 'https://github.com/FIZL0/openmx/releases';
   // FIZL0's shared sideloading source (github.com/FIZL0/apps), which openMX's iPhone build joins (P200/P201).
@@ -972,10 +989,18 @@ footer a { color: var(--bone); }
     ours = v;
     if (v) $('#build').textContent = `${BETA ? 'Beta build' : 'Build'} ${v}.`;
   });
+  let newer = '';
+  const fresh = () => {
+    if (!newer) return;
+    if (started()) worker.postMessage({ latest: newer });
+    $('#fresh').classList.toggle('up', !started());
+  };
   const recheck = async () => {
     const v = await built();
-    if (ours && v && v !== ours) $('#fresh').classList.add('up');
+    if (ours && v && v !== ours) newer = v;
+    fresh();
   };
+  window.openmxRecheck = recheck;
   setInterval(recheck, 5 * 60e3);
   document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && recheck());
   $('#reload').onclick = () => location.reload();

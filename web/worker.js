@@ -29,11 +29,15 @@
 //               { online: { name, relay, codes?, join?, host?, bike, ticks? } }
 //               { key: code << 1 | down } | { blur } | { click: [x, y] } | { view: [w, h] } | { pads, names? }
 //               { played: frames }
+//               { latest: String } (P193: the newer build the site has) | { lastBuild: String? } (the build the page
+//               last started, from its local storage, sent before any start)
 // Messages out: { progress: [done, total] } | { started: true } | { error: String } | { missing: true }
 //               { gpu: api } (what the module draws with) | { drawn: [api, w, h] } (its first GPU frame)
 //               { fps: number } (pictures in the last second)
 //               { play: Float32Array } (the mixer's next stereo frames) | { quit: String } (the shell ended)
 //               { online: state } (Online.state(), a few times a second) | { ticks: String } (once `ticks` settled)
+//               { build: commit } (P193: the build starting, for the page's local storage) | { reload: true } (the
+//               main menu's reload into the newer build)
 
 const DISC = 'disc.iso';
 // What one read of the picked file asks for when it is being copied: big enough that a 2 GB image is a few hundred
@@ -55,6 +59,9 @@ let clicks = [];
 let view = [640, 448];
 let pads = [];
 let padNames = {};
+// P193: the newer build the page found on the site, and the build the page last started.
+let latest = '';
+let lastBuild = null;
 // Stereo frames handed to the page and not played yet.
 let queued = 0;
 // The shell's files, by path ("settings.txt", "markers/…"), read before it starts; each change goes back to OPFS in turn.
@@ -93,6 +100,14 @@ globalThis.openmx = {
     postMessage({ play: copy }, [copy.buffer]);
   },
   queued: () => queued,
+  latest: () => latest,
+  last_build: ours => {
+    const before = lastBuild;
+    lastBuild = ours;
+    postMessage({ build: ours });
+    return before ?? undefined;
+  },
+  reload: () => postMessage({ reload: true }),
   file_read: path => files.get(fileKey(path)),
   file_write: (path, bytes) => {
     const key = fileKey(path);
@@ -316,6 +331,10 @@ onmessage = async ({ data }) => {
     } else if (data.pads) {
       pads = data.pads;
       if (data.names) padNames = data.names;
+    } else if (data.latest !== undefined) {
+      latest = data.latest;
+    } else if ('lastBuild' in data) {
+      lastBuild = data.lastBuild;
     } else if (data.played) {
       queued = Math.max(0, queued - data.played);
     } else if (data.start) {

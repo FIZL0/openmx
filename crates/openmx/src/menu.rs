@@ -1228,6 +1228,63 @@ impl Default for Settings {
     }
 }
 
+/// How long the main menu's "Updated to …" stays up (P193), in the menu's ticks: five seconds.
+pub const UPDATED_TICKS: u32 = 5 * TICK_HZ as u32;
+
+/// The newer build the site has (P193), as the page says it: `web/index.html` reads the site's
+/// `version.txt` ("<version> <commit>", `tools/web.sh`) as it loads and every few minutes after, and
+/// once it differs hands the new one to the game, which offers it here rather than over a ride
+/// (opentennis's `hstLatest`, B317). Never this build itself: a stale `version.txt` read around a
+/// deploy can name the build already running. `OPENMX_LATEST=<build>` fakes one anywhere (a `--shot`).
+pub fn newer_build() -> Option<String> {
+    let page = std::env::var("OPENMX_LATEST").ok();
+    #[cfg(target_arch = "wasm32")]
+    let page = page.or_else(crate::host_latest);
+    newer_than(page?.trim(), env!("OPENMX_COMMIT"))
+}
+
+/// `latest` ("<version> <commit>" or a bare commit) when it is a build other than `commit`'s.
+pub fn newer_than(latest: &str, commit: &str) -> Option<String> {
+    let ours = commit.trim_end_matches('+');
+    let theirs = latest.split_whitespace().last()?.trim_end_matches('+');
+    let same = !ours.is_empty() && (theirs.starts_with(ours) || ours.starts_with(theirs));
+    (!same).then(|| latest.to_string())
+}
+
+/// "Updated to …" (P193, opentennis's B625) when this is the first start of a new build: the page keeps
+/// the last build it started (`openmx.build` in local storage, which only the page can reach: the game
+/// runs in a worker), and a different one there means the page picked up a newer build since. A first
+/// visit says nothing. `OPENMX_UPDATED=1` fakes one anywhere.
+pub fn updated_build() -> Option<String> {
+    let says = || format!("Updated to {BUILD_CORNER}");
+    if std::env::var("OPENMX_UPDATED").is_ok_and(|s| !s.is_empty()) {
+        return Some(says());
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(before) = crate::host_last_build(env!("OPENMX_COMMIT")) {
+        return first_start(&before, env!("OPENMX_COMMIT")).then(says);
+    }
+    None
+}
+
+/// Whether a page whose last started build was `before` starts a new one in `commit`'s.
+pub fn first_start(before: &str, commit: &str) -> bool {
+    !before.is_empty() && before != commit
+}
+
+/// A line to the page's console (P193: what the main menu showed, which the page's test reads); the
+/// desktop's menu says nothing.
+fn page_says(_line: &str) {
+    #[cfg(target_arch = "wasm32")]
+    crate::host_say(_line);
+}
+
+/// Reload the page into the newer build (P193); the desktop has nothing to reload.
+fn reload_page() {
+    #[cfg(target_arch = "wasm32")]
+    crate::host_reload();
+}
+
 /// The Shadows a rider has before choosing (P205): ours, but the original's on a phone's page,
 /// whose GPU the two shadow maps cost most (opentennis's B413: low shadows by default on phones).
 fn shadows_default() -> Shadows {
@@ -2590,6 +2647,13 @@ pub struct Menu {
     changed: bool,
     /// A line for the ticker, which is how a ride that could not start says why.
     pub note: Option<String>,
+    /// P193: the newer build the site has (the page's `version.txt`, [`newer_build`]), which the main
+    /// menu offers to reload into; never over a ride.
+    pub newer: Option<String>,
+    /// P193: the main menu's "Updated to …" ([`updated_build`]) and the tick it went up on.
+    pub updated: Option<(String, u32)>,
+    /// Whether the main menu has asked [`updated_build`] yet: once a run.
+    updated_asked: bool,
     /// The ride being loaded (P127), which the loading screen shows over everything while it is.
     pub loading: Option<Loading>,
     /// The screens the pick's ride was started from, which a cancelled load goes back to.
@@ -2885,6 +2949,9 @@ impl Menu {
             tick: 0,
             changed: false,
             note: None,
+            newer: None,
+            updated: None,
+            updated_asked: false,
             loading: None,
             ride_stack: Vec::new(),
             riders: 1,
@@ -3963,6 +4030,26 @@ impl Menu {
         if self.pace.timed { std::mem::take(&mut self.pace.due) } else { 1 }
     }
 
+    /// The main menu's word on builds (P193), each frame it is up: the newer build the site has, and
+    /// the first time it shows in a run, "Updated to …" when this is a new build's first start.
+    fn builds(&mut self) {
+        let newer = newer_build();
+        if newer.is_some() && newer != self.newer {
+            page_says(&format!("openmx: the main menu offers {}", newer.as_deref().unwrap_or_default()));
+        }
+        self.newer = newer;
+        if !self.updated_asked {
+            self.updated_asked = true;
+            self.updated = updated_build().map(|s| (s, self.tick));
+            if let Some((s, _)) = &self.updated {
+                page_says(&format!("openmx: the main menu says {s}"));
+            }
+        }
+        if self.updated.as_ref().is_some_and(|(_, at)| self.tick.wrapping_sub(*at) >= UPDATED_TICKS) {
+            self.updated = None;
+        }
+    }
+
     /// [`Menu::step`]'s frame.
     fn walk(&mut self, p: Press) -> Act {
         if self.screen() == Some(Screen::Splash) {
@@ -3976,6 +4063,9 @@ impl Menu {
             }
             return Act::Stay;
         };
+        if screen == Screen::Main {
+            self.builds();
+        }
         if screen == Screen::Keyboard {
             return self.keyboard(p);
         }
@@ -4036,6 +4126,8 @@ impl Menu {
             // Back on the main menu is the splash again, 1P free for the next press (opentennis's
             // B533); Quit is a row, and Back on the splash asks.
             Screen::Main if p.back => self.splash(),
+            // P193: Square reloads the page into the newer build the main menu offers.
+            Screen::Main if p.delete && self.newer.is_some() => reload_page(),
             Screen::Main => match (p.ok || p.start, p.back, at) {
                 (true, _, MAIN_FREE) => {
                     if self.party.take().is_some() {

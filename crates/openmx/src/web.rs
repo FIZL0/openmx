@@ -90,6 +90,8 @@ pub(crate) use host::page_args;
 pub(crate) use host::say as host_say;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use host::phone as host_phone;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use host::{last_build as host_last_build, latest_build as host_latest, reload as host_reload};
 
 /// This build's online id (P189, `build.rs`): its version and commit, as the desktop's `run` stamps it. The page's
 /// lobbies stamp it themselves before they start.
@@ -203,6 +205,26 @@ mod host {
         pub(crate) fn present(rgba: &[u8], width: u32, height: u32);
         #[wasm_bindgen(js_namespace = openmx, js_name = log)]
         fn host_log(line: &str);
+        /// The newer build the page has seen on the site (P193), empty while there is none.
+        #[wasm_bindgen(js_namespace = openmx)]
+        pub(crate) fn latest() -> String;
+        /// The build the page last started, from its local storage, which keeps `ours` from now on;
+        /// `None` on a first visit (P193).
+        #[wasm_bindgen(js_namespace = openmx, js_name = last_build)]
+        fn host_last_build(ours: &str) -> Option<String>;
+        /// The page reloads, into the newer build (P193).
+        #[wasm_bindgen(js_namespace = openmx)]
+        pub(crate) fn reload();
+    }
+
+    /// [`latest`], `None` while there is no newer build.
+    pub fn latest_build() -> Option<String> {
+        Some(latest()).filter(|s| !s.trim().is_empty())
+    }
+
+    /// [`host_last_build`].
+    pub fn last_build(ours: &str) -> Option<String> {
+        host_last_build(ours)
     }
 
     /// One line to the page's console.
