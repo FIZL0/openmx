@@ -6,7 +6,8 @@
 //! (`game_render::gpu`'s [`Shape::Round`] and [`Shape::Text`]) and [`raster`] draws into a software
 //! [`Frame`] by the same rules, so the two paths are one layout.
 //!
-//! - **Type** is M PLUS Rounded 1c, ExtraBold and Bold (`assets/fonts`, under the OFL beside them).
+//! - **Type** is Saira (`assets/fonts`, under the OFL beside it), the open face nearest the disc's
+//!   Yearling: its variable font set to ExtraBold and Bold a little wide, and tracked out as Yearling is.
 //!   At load every glyph's outline is turned into a distance field, [`ATLAS_EM`] texels to the em,
 //!   with the glyphs packed into one picture ([`Type::atlas`]). A glyph is drawn as a quad of its
 //!   cell at any size, its edge found from the distance at the frame pixel, so a label is a pixel's
@@ -14,15 +15,20 @@
 //! - **Shapes** — the pills, tabs, boxes, the hint tab, the pad's buttons — are rounded boxes and
 //!   needles measured in frame pixels: nothing is a stretched texture.
 
-use ab_glyph::{Font as _, FontRef, GlyphId, OutlineCurve};
+use ab_glyph::{Font as _, FontRef, GlyphId, OutlineCurve, VariableFont as _};
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Frame, Texture};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// The fonts, in the crate (OFL: `assets/fonts/OFL.txt`).
-pub const HEAVY_TTF: &[u8] = include_bytes!("../assets/fonts/MPLUSRounded1c-ExtraBold.ttf");
-pub const BOLD_TTF: &[u8] = include_bytes!("../assets/fonts/MPLUSRounded1c-Bold.ttf");
+/// The menus' face, in the crate (OFL: `assets/fonts/OFL.txt`): Saira's variable font, weight and
+/// width axes.
+pub const SAIRA_TTF: &[u8] = include_bytes!("../assets/fonts/Saira.ttf");
+/// Saira's axes for [`Weight::Heavy`] and [`Weight::Bold`]: `wght` ExtraBold and Bold, `wdth` a
+/// little past normal, as Yearling sits.
+const SAIRA_AXES: [[(&[u8; 4], f32); 2]; 2] = [[(b"wght", 800.0), (b"wdth", 105.0)], [(b"wght", 700.0), (b"wdth", 105.0)]];
+/// The space Yearling leaves between letters beyond Saira's own, in ems.
+const SAIRA_TRACK: f32 = 0.05;
 /// The ride HUD's digital speedometer face (P121): DSEG7 Classic Bold Italic, a seven-segment
 /// display's lit segments only (OFL: `assets/fonts/DSEG-OFL.txt`).
 pub const DSEG_TTF: &[u8] = include_bytes!("../assets/fonts/DSEG7Classic-BoldItalic.ttf");
@@ -87,17 +93,23 @@ pub fn ink() -> &'static Type {
 /// only what a speedometer says.
 pub fn digits() -> &'static Type {
     static TYPE: OnceLock<Type> = OnceLock::new();
-    TYPE.get_or_init(|| Type::of([DSEG_TTF, DSEG_TTF], "0123456789.-: ".chars()))
+    TYPE.get_or_init(|| Type::of([DSEG_TTF, DSEG_TTF], [&[], &[]], 0.0, "0123456789.-: ".chars()))
 }
 
 impl Type {
     fn new() -> Type {
-        Type::of([HEAVY_TTF, BOLD_TTF], charset())
+        Type::of([SAIRA_TTF, SAIRA_TTF], SAIRA_AXES.each_ref().map(|a| a.as_slice()), SAIRA_TRACK, charset())
     }
 
-    /// The type of the two faces `ttfs` (ExtraBold's place, then Bold's), holding `chars`.
-    fn of(ttfs: [&'static [u8]; 2], chars: impl Iterator<Item = char> + Clone) -> Type {
-        let fonts = ttfs.map(|t| FontRef::try_from_slice(t).expect("the font reads"));
+    /// The type of the two faces `ttfs` (ExtraBold's place, then Bold's), each set to its `axes` if
+    /// variable, spaced `track` ems wider than its own advances, holding `chars`.
+    fn of(ttfs: [&'static [u8]; 2], axes: [&[(&[u8; 4], f32)]; 2], track: f32, chars: impl Iterator<Item = char> + Clone) -> Type {
+        let mut fonts = ttfs.map(|t| FontRef::try_from_slice(t).expect("the font reads"));
+        for (font, axes) in fonts.iter_mut().zip(axes) {
+            for &(tag, value) in axes {
+                assert!(font.set_variation(tag, value), "the font has a {} axis", String::from_utf8_lossy(tag));
+            }
+        }
         let unit = fonts.clone().map(|f| ATLAS_EM / f.units_per_em().unwrap_or(1000.0));
         let mut fields: Vec<(usize, char, GlyphId, Field, f32)> = Vec::new();
         for (w, font) in fonts.iter().enumerate() {
@@ -106,7 +118,7 @@ impl Type {
                 if id.0 == 0 && c != ' ' {
                     continue;
                 }
-                let advance = font.h_advance_unscaled(id) * unit[w];
+                let advance = font.h_advance_unscaled(id) * unit[w] + track * ATLAS_EM;
                 fields.push((w, c, id, field(font, id, unit[w]), advance));
             }
         }

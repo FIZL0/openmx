@@ -4,7 +4,7 @@
   it (P181): with no disc stored it is a scrolling page that asks for one, and once a disc is in OPFS its first card is
   Play, with a switch that opens straight to the game on later visits (`?site` shows the page again), as opentennis's. Its look is docs/menu-concept.html's: the ember
   backdrop with the ghosted MX and streaks, maroon pills with chalk rims, oblique ExtraBold titles, the ink band with
-  the button hints, in M PLUS Rounded 1c (web/fonts, copies of crates/openmx/assets/fonts). Build the module with
+  the button hints, in Saira (web/fonts, a copy of crates/openmx/assets/fonts). Build the module with
   tools/web.sh and serve this folder on localhost (or https: OPFS needs a secure context).
 
   `body[data-state]` says where the page is: asking (no disc), menu (a disc is stored, nothing started yet), copying,
@@ -102,21 +102,20 @@ if (location.hostname.startsWith('beta.')) {
 <!-- P197: the on-screen pad, audio unlock and phone bits; before the page's module so its AudioContext is resumable -->
 <script src="touch.js"></script>
 <style>
-@font-face { font-family: "OMX"; font-weight: 800; font-display: swap; src: url(fonts/MPLUSRounded1c-ExtraBold.ttf) format("truetype"); }
-@font-face { font-family: "OMX"; font-weight: 700; font-display: swap; src: url(fonts/MPLUSRounded1c-Bold.ttf) format("truetype"); }
+@font-face { font-family: "OMX"; font-weight: 100 900; font-stretch: 50% 125%; font-display: swap; src: url(fonts/Saira.ttf) format("truetype"); }
 :root {
   color-scheme: dark;
   /* docs/menu-concept.html's colours */
   --ember: #f0954a; --rust: #8a4420; --umber: #2a1408; --strip: rgba(18, 9, 4, .74);
   --maroon: #8e0f17; --maroon-lo: #5a070c; --chalk: #f5f0e8; --bone: #d8cfc2; --dust: #9c8f80; --ink: #050302;
   --x: #4a7be0; --o: #e0473f; --sq: #d872b8; --tri: #3cbf93;
-  --face: "OMX", "M PLUS Rounded 1c", "Arial Rounded MT Bold", system-ui, sans-serif;
+  --face: "OMX", "Saira", system-ui, sans-serif;
   --pad: max(16px, env(safe-area-inset-left, 0px));
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--umber); color: var(--bone); font: 700 16px/1.45 var(--face); }
+html, body { margin: 0; background: var(--umber); color: var(--bone); font: 700 16px/1.45 var(--face); font-stretch: 105%; letter-spacing: .05em; }
 a { color: #ffcf9e; }
-button, input { font: inherit; }
+button, input { font: inherit; font-stretch: inherit; letter-spacing: inherit; }
 
 /* ---- the game's canvas: only once something started ---- */
 canvas { display: none; }
@@ -536,7 +535,7 @@ footer a { color: var(--bone); }
       <div class="grid2">
         <div class="card">
           <h3>openMX</h3>
-          <p>Written by FIZL0 with AI agents, in Rust. Type: M PLUS Rounded 1c.</p>
+          <p>Written by FIZL0 with AI agents, in Rust. Type: Saira.</p>
           <ul class="links">
             <li><a href="https://github.com/FIZL0/openmx" target="_blank" rel="noopener">Source code on GitHub</a></li>
             <li><a href="https://github.com/FIZL0/openmx/releases" target="_blank" rel="noopener">Releases and release notes</a></li>

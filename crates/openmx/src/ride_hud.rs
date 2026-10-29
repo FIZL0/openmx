@@ -6,7 +6,7 @@
 //! same places of the disc's layouts — the score bar where `stuntscoreoverlays.lyt` has it, the
 //! trick pop-up where the Stunt movies play, the speedometer and the preload meter at
 //! `speedometer.lyt`'s, the radar where `freestyleradar` sits — but as [`Sprite`]s of
-//! [`crate::menu::ink`]'s shapes and type: M PLUS Rounded 1c for the words, DSEG7 for the digital
+//! [`crate::menu::ink`]'s shapes and type: Saira for the words, DSEG7 for the digital
 //! speed. The GPU draws the sprites as they are; the software path rasters them into the view's
 //! frame by the same rules ([`crate::menu::ink::raster`]), so the two are one picture.
 //!

@@ -7,7 +7,7 @@
 //
 // Writes <state>-<width>.png (the whole page) into <out dir> and prints one JSON line:
 // { shots: [{ state, width, scroll, fonts, lit, file }...] }, `scroll` the page's scrollWidth (wider than `width` is a
-// page that pans sideways), `fonts` whether M PLUS Rounded 1c loaded, `lit` the Play button's text while it shows (the menu only).
+// page that pans sideways), `fonts` whether Saira loaded, `lit` the Play button's text while it shows (the menu only).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';

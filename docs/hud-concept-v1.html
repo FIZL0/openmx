@@ -2,8 +2,7 @@
 <meta name="claude:viewport-fit-sides" content="cover">
 <style>
 /* Layout: a 16:9 ride view (em = view height / 45, so split screen shrinks with it); demo controls under it, notes below. */
-@font-face { font-family: "OMX"; font-weight: 800; src: url(../crates/openmx/assets/fonts/MPLUSRounded1c-ExtraBold.ttf) format("truetype"); }
-@font-face { font-family: "OMX"; font-weight: 700; src: url(../crates/openmx/assets/fonts/MPLUSRounded1c-Bold.ttf) format("truetype"); }
+@font-face { font-family: "OMX"; font-weight: 100 900; font-stretch: 50% 125%; src: url(../crates/openmx/assets/fonts/Saira.ttf) format("truetype"); }
 :root {
   color-scheme: dark;
   --ember: #f0954a; --rust: #8a4420; --umber: #2a1408;
@@ -17,7 +16,7 @@
   --hit: #f0954a; --run: #4aa8e0; --race: #e0473f; --stunt: #d872b8;
   --land: #7fe0a0; --bail: #ff5a4e;
   --slot1: #00dcff; --slot2: #ff3cc8; --slot3: #b4ff3c; --slot4: #ff7850; --slot5: #9682ff;  /* overlay::MARKER_COLOURS (P94) */
-  --face: "OMX", "M PLUS Rounded 1c", "Arial Rounded MT Bold", system-ui, sans-serif;
+  --face: "OMX", "Saira", system-ui, sans-serif;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -240,7 +239,7 @@ body { margin: 0; background: var(--umber); color: var(--bone); font-family: var
       <li>The biplane keeps the speed only, as the original does.</li>
     </ul></div>
     <div class="card"><h3>Build notes</h3><ul>
-      <li>This uses the same M PLUS Rounded 1c subsets and vector pill as the menu concept (P118), so the two ship together.</li>
+      <li>This uses the same Saira face and vector pill as the menu concept (P118), so the two ship together.</li>
       <li>It's drawn on both paths, the GPU one and the software one, as vector quads with no fstyleui.res bitmaps. The disc's icons stay as an "Original art" fallback.</li>
       <li>The debug overlay (H) stays the port's own and draws on top.</li>
     </ul></div>

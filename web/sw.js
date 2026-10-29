@@ -3,8 +3,7 @@
 // this cache: nothing from the disc is hosted or fetched. The game module is not fetched ahead (P194: a first visit
 // loads the page alone, the module only on Ride); the fetch below keeps it once a ride has loaded it.
 const CACHE = 'openmx';
-const SHELL = ['./', 'worker.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'touch.js', 'fonts/MPLUSRounded1c-Bold.ttf',
-  'fonts/MPLUSRounded1c-ExtraBold.ttf'];
+const SHELL = ['./', 'worker.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'touch.js', 'fonts/Saira.ttf'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

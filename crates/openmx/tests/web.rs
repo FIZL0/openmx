@@ -285,7 +285,7 @@ fn the_launcher_fits_a_phone_and_a_desktop() {
         assert_eq!(field(shot, "width"), width.to_string());
         let scroll: u32 = field(shot, "scroll").parse().expect("scrollWidth");
         assert!(scroll <= width, "{state} at {width} pans sideways: {scroll} wide");
-        assert_eq!(field(shot, "fonts"), "true", "{state} at {width}: M PLUS Rounded 1c did not load");
+        assert_eq!(field(shot, "fonts"), "true", "{state} at {width}: Saira did not load");
         let lit = field(shot, "lit");
         assert_eq!(lit, if state == "menu" { "Play" } else { "null" }, "{state} at {width}: the Play button");
     }

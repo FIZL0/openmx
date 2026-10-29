@@ -40,7 +40,7 @@ openmx-net = { path = "../openmx-net" }
 game-render = { path = "../game-render", features = ["gpu"] }
 winit = "0.30"
 pollster = "1"
-# The menus' own type (P118): M PLUS Rounded 1c (assets/fonts, OFL), read and outlined at load into
+# The menus' own type (P118): Saira (assets/fonts, OFL), read and outlined at load into
 # the distance atlas both draw paths share; opentennis's menus (B136) take the same crate.
 ab_glyph = "0.2"
 # Replaced textures (V84): the key-named PNGs of texture packs, mods/texture-replacements and mods'
