@@ -384,7 +384,8 @@ fn throttle_tape(frames: usize) -> String {
 
 /// The user's world_ultra ridden 30 s on the gas from its start, headless at 1920x1080 with
 /// `--timings` as MD28 measured it: no frame's streaming (the `stream` stage, the tiles' and the
-/// ground's and the dressing's) takes a 60 Hz frame. Ignored: it needs the user's mods (`V92_MODS`,
+/// ground's and the dressing's) takes a 60 Hz frame, and it never waits for the piece underfoot
+/// (V94). Ignored: it needs the user's mods (`V92_MODS`,
 /// or `~/repos/openmx/mods`) and a quiet machine, since a frame's stages are wall-clock time.
 #[test]
 #[ignore]
@@ -413,4 +414,10 @@ fn world_ultras_gas_ride_streams_inside_a_frame() {
     let slow: Vec<&str> = said.lines().filter(|l| l.contains("slow frame") && stream(l).is_some_and(|s| s > 16.7)).collect();
     eprintln!("{}", said.lines().filter(|l| l.starts_with("session") || l.starts_with("world stand-in")).collect::<Vec<_>>().join("\n"));
     assert!(slow.is_empty(), "{} frames streamed for more than 16.7 ms:\n{}", slow.len(), slow.join("\n"));
+    // V94: the piece the rider rides onto was built before it got there, the one ahead first. A
+    // wait is the stream holding the frame for the piece underfoot.
+    let built = said.lines().filter(|l| l.starts_with("world ground:") && l.contains(" built, ")).count();
+    let waited: Vec<&str> = said.lines().filter(|l| l.starts_with("world ground: waited")).collect();
+    eprintln!("{built} pieces built, {} waits", waited.len());
+    assert!(waited.is_empty(), "the ride waited for the piece underfoot:\n{}", waited.join("\n"));
 }
