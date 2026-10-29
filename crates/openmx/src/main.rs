@@ -6018,36 +6018,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         }
                     }
                 }
-                // The pausing player's markers on this track (P99): offline the ride's slots and the
-                // file, and a tape being written clears there too; online only the file — the
-                // ride's slots are the session's, and stay until it ends.
-                Act::ClearMarkers(i) if head.is_none() => {
-                    // The seat's own profile as it was kept: a player may have moved up a seat (P76).
-                    let profile = kept_markers.get(i).and_then(Option::as_ref).map_or_else(|| profile_of(i), |k| k.profile.clone());
-                    let bike = bike_words.get(i).unwrap_or(&bike_words[0]);
-                    match saved_markers::save(&markers_dir, &args.track, &profile, bike, &Default::default()) {
-                        Err(e) => front.menu.note = Some(format!("Could not clear the markers: {e}")),
-                        Ok(()) if online.is_some() => {
-                            if let (Some(Some(kept)), Some(seat)) = (kept_markers.get_mut(i), world.seats.get(i)) {
-                                kept.last = saved_markers::signature(&seat.sim.markers);
-                            }
-                            front.menu.note = Some(format!("{profile}'s saved markers on this track cleared; the ride keeps its own until it ends."));
-                        }
-                        Ok(()) => {
-                            if let Some(seat) = world.seats.get_mut(i) {
-                                seat.sim.markers.clear();
-                                if let Some(Some(kept)) = kept_markers.get_mut(i) {
-                                    kept.last = saved_markers::signature(&seat.sim.markers);
-                                }
-                            }
-                            if let Some(tape) = world.tape.as_mut().filter(|_| i == 0) {
-                                tape.markers_cleared();
-                            }
-                            front.menu.note = Some(format!("{profile}'s markers on this track cleared."));
-                        }
-                    }
-                    println!("markers: {profile} on {} cleared", args.track);
-                }
                 // A player on a free pad joining an online ride (N20): the host seats them at a tick
                 // every machine takes, and the views are laid out again once the session has it.
                 Act::Join(d) if online.is_some() => {
@@ -6071,7 +6041,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 | Act::Switch(..)
                 | Act::Online
                 | Act::OpenOnline
-                | Act::ClearMarkers(_)
                 | Act::Join(_)
                 | Act::Leave(_) => {}
             }
