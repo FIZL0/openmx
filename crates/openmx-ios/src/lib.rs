@@ -4,11 +4,13 @@
 //! the GameController framework's pads and the rotation lock's landscape hold.
 //!
 //! Every Objective-C and C call is here, behind safe functions, so `crates/openmx` goes on forbidding
-//! unsafe code. Only [`Hold`]'s decision is built everywhere: it is plain logic, and the desktop's
-//! tests prove it.
+//! unsafe code. Only [`Hold`]'s decision and the log's keeping ([`keep_previous_log`]) are built
+//! everywhere: they are plain logic, and the desktop's tests prove them.
 
 mod hold;
 pub use hold::{Hold, Holder};
+mod log;
+pub use log::{keep_previous_log, previous_log};
 
 #[cfg(target_os = "ios")]
 mod sys;
