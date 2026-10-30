@@ -716,6 +716,14 @@ impl Plane {
     /// body. A plane with no flight stands where it is. Whether the chord or a wreck's recovery put it
     /// back at its spawn this frame: both are the original's plane reset, which snaps its camera (V29).
     pub fn step(&mut self, sim: &Sim, dt: F, world: &mut dyn World) -> bool {
+        self.step_among(sim, dt, world, &[])
+    }
+
+    /// [`Plane::step`] with the other players' `bikes` in the plane's world (S225,
+    /// [`Flight::frame_among`]): it strikes them as it strikes any vehicle. What their struck
+    /// listeners keep goes no further, as in [`Sim::step`]: a plane's probe never wrecks a bike
+    /// ([`game_sim::flight_search::struck_wreck`]).
+    pub fn step_among(&mut self, sim: &Sim, dt: F, world: &mut dyn World, bikes: &[game_sim::flight_search::Bike]) -> bool {
         let Some(f) = &mut self.flight else { return false };
         if !self.placed {
             // At its file bay the original's spot: the body on the ground under the spot, lifted by
@@ -764,7 +772,7 @@ impl Plane {
             f.autopilot.feed_forward = feed_forward * held;
             f.autopilot.max_pitch_rate = max_pitch_rate * F(ROUND_STICK_PITCH_RATE);
         }
-        f.frame(dt, pad, world, &sim.tables.ride);
+        let _struck = f.frame_among(dt, pad, world, &sim.tables.ride, bikes);
         f.joystick.min_elevator = min_elevator;
         (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate) =
             (dead_zone, feed_forward, max_pitch_rate);
@@ -1159,7 +1167,23 @@ impl Garage {
         world: &mut dyn World,
         markers: bool,
     ) -> (rider::Frame, Option<Did>) {
-        let said = self.step(sim, dt, controls, world);
+        self.pass_among(sim, dt, controls, me, spots, world, markers, Among::default())
+    }
+
+    /// [`Garage::pass_marked`] among the other seats (N22): their contacts, rivals and bikes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pass_among(
+        &mut self,
+        sim: &mut Sim,
+        dt: F,
+        controls: &Controls,
+        me: usize,
+        spots: &[Spot],
+        world: &mut dyn World,
+        markers: bool,
+        among: Among<'_>,
+    ) -> (rider::Frame, Option<Did>) {
+        let said = self.step_among(sim, dt, controls, world, among);
         if !markers {
             return (said, None);
         }
@@ -1252,18 +1276,36 @@ impl Garage {
     /// shell it was before P19. With the plane up the bike is not stepped at all, the plane flies on
     /// the pad `sim` polled, and the frame the rider reports is empty.
     pub fn step(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World) -> rider::Frame {
+        self.step_among(sim, dt, controls, world, Among::default())
+    }
+
+    /// [`Garage::step`] among the other seats (N22): the bike with their contacts and rivals
+    /// ([`Sim::step_among`]), the plane with their bikes ([`Plane::step_among`]). Alone, it is
+    /// [`Garage::step`] exactly.
+    pub fn step_among(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World, among: Among<'_>) -> rider::Frame {
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
                 // The track's path cars run on whichever machine is up (S81).
                 sim.traffic.frame(dt, world);
-                let respawned = plane.step(sim, dt, world);
+                let respawned = plane.step_among(sim, dt, world, among.bikes);
                 rider::Frame { respawned, ..rider::Frame::default() }
             }
             // The bike's ghost ticks inside its update (`Rider::frame`), so a bike the plane has the
             // controller from does not count its ghost down either.
-            _ => sim.step(dt, controls, world),
+            _ => sim.step_among(dt, controls, world, among.bump, among.rivals),
         }
     }
+}
+
+/// **The other seats, as one seat's step meets them** (N22, S224, S225): what split screen hands
+/// each seat's pass, as the online ride does each seat's step — this seat's share of the tick's
+/// rider-against-rider contacts ([`game_sim::rider_contact::Bump`]), the riders it can joust, and the
+/// bikes in its plane's world. Empty, a seat steps as it does alone.
+#[derive(Default)]
+pub struct Among<'a> {
+    pub bump: Option<&'a mut game_sim::rider_contact::Bump>,
+    pub rivals: &'a [game_sim::ride::Rival],
+    pub bikes: &'a [game_sim::flight_search::Bike],
 }
 
 /// **The switch online** (N17): a seat's machine is a rollback input, and its plane is session state.
@@ -1378,11 +1420,16 @@ pub fn start_lane(template: &Flight, bay: Spawn, sim: &mut Sim) {
 /// seat's pad and its biplane scheme, the bike not stepped. Whether the reset chord or a wreck's
 /// recovery put the plane back this tick. A seat on the bike does nothing.
 pub fn fly_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> bool {
+    fly_lane_among(sim, dt, wanted, world, &[])
+}
+
+/// [`fly_lane`] with the other seats' `bikes` in the plane's world (S225, [`Plane::step_among`]).
+pub fn fly_lane_among(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World, bikes: &[game_sim::flight_search::Bike]) -> bool {
     let Some(f) = sim.plane.take() else { return false };
     sim.traffic.frame(dt, world);
     let mut plane =
         Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
-    let respawned = plane.step(sim, dt, world);
+    let respawned = plane.step_among(sim, dt, world, bikes);
     sim.plane = plane.flight.take();
     respawned
 }

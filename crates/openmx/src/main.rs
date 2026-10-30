@@ -542,8 +542,10 @@ mod page_shade {
 
 impl Seat {
     /// One player's pass: the pad, then the bike, then the d-pad's markers (P88) — `me` is this
-    /// seat and `spots` where every seat's rider was before the pass.
-    fn pass(&mut self, dt: F, place: &mut dyn sim_world::World, me: usize, spots: &[Spot]) {
+    /// seat and `spots` where every seat's rider was before the pass. `among` is the other seats as
+    /// this one meets them (N22): its contacts, the riders it can joust and the bikes its plane can
+    /// strike.
+    fn pass(&mut self, dt: F, place: &mut dyn sim_world::World, me: usize, spots: &[Spot], among: vehicle::Among<'_>) {
         // Nobody's hands on the bars: the pad is not polled either, so the input manager's timers
         // and held buttons are where the pull left them, and the ride goes on from there when the
         // pad comes back.
@@ -571,7 +573,7 @@ impl Seat {
         self.teleported = false;
         if self.riding {
             let did;
-            (self.said, did) = self.garage.pass_marked(&mut self.sim, dt, &controls, me, spots, place, self.markers);
+            (self.said, did) = self.garage.pass_among(&mut self.sim, dt, &controls, me, spots, place, self.markers, among);
             if let Some(did) = did {
                 self.teleported = matches!(did, markers::Did::Teleported(_));
                 self.clears += u32::from(did == markers::Did::Cleared);
@@ -1459,8 +1461,12 @@ impl<P: sim_world::World> Game for World<P> {
     /// `input` is the engine's own sampled pad, which this shell does not use — the full 32-byte
     /// reports are in each seat and the port's manager is what reads them. Nothing here draws
     /// from `rng`: the only thing that moves is the bikes, and the riders decide where they go.
-    /// The riders do not touch each other (the original's rider-on-rider wreck is not ported), so
-    /// the order the seats run in does not reach any of them.
+    ///
+    /// The riders meet as online's seats do (N22, `net::rides`): every bike's contacts from where
+    /// the last pass left them (S78), each seat's pass resolving its own and pushing the others,
+    /// the riders it can joust head-on (S224), and the bikes in its plane's world (S225). The last
+    /// seat first, as the original walks its riders (S88). A seat waiting for its pad, frozen on
+    /// Start, or on the plane has no bike in the others' world; a ghost is in none (P57).
     fn simulate(&mut self, dt: F, _input: Input, _rng: &mut Rng) -> bool {
         // Riding a tape: the frame is as long as the tape says it was, not as long as this machine
         // took to draw the last one. Everything below reads this `dt` and nothing reads the engine's.
@@ -1475,10 +1481,153 @@ impl<P: sim_world::World> Game for World<P> {
             tape.frame(dt, &self.seats[0].reports);
         }
         let spots: Vec<Spot> = self.seats.iter().map(|s| s.garage.spot(&s.sim, &mut self.place)).collect();
-        for (me, seat) in self.seats.iter_mut().enumerate() {
-            seat.pass(dt, &mut self.place, me, &spots);
+        let on: Vec<bool> = self.seats.iter().map(|s| !s.waiting && s.riding && s.garage.up == Kind::Bike).collect();
+        fn riders<'a>(seats: &'a [Seat], on: &[bool]) -> Vec<(&'a rider::Rider, bool)> {
+            seats.iter().zip(on).map(|(s, &o)| (&s.sim.rider, o)).collect()
+        }
+        let mut lists = game_sim::rider_contact::contacts_among(&riders(&self.seats, &on), dt, &self.place);
+        for me in (0..self.seats.len()).rev() {
+            let mut bump = lists.as_mut().map(|l| std::mem::take(&mut l[me])).filter(|l| !l.is_empty()).map(|l| {
+                let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
+                game_sim::rider_contact::bump_riders(&phys, me, l, &self.place)
+            });
+            let near = riders(&self.seats, &on);
+            let rivals = game_sim::rider_contact::rivals_among(&near, me, &self.place);
+            let bikes = self.seats[me]
+                .garage
+                .plane_flown()
+                .map(|p| game_sim::rider_contact::plane_bikes(&near, me, p.at, &self.place))
+                .unwrap_or_default();
+            drop(near);
+            let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes };
+            self.seats[me].pass(dt, &mut self.place, me, &spots, among);
+            if let Some(b) = &bump {
+                let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
+                game_sim::rider_contact::bumped_riders(&mut all, b);
+            }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod split_contact {
+    //! N22, S224: split screen's seats meet as online's do — their bikes push apart, and a rider
+    //! under another jousts.
+    use super::{Controls, Garage, Kind, PADS, PageShade, Report, Seat, World};
+    use game_sim::tick::Game;
+    use game_sim::rider::Rider;
+    use game_sim::world::Flat;
+    use game_sim::{Input, Sim};
+    use ps2_float::{F, Vf};
+
+    const DT: F = F(game_sim::tick::DeltaTime::CAP_30);
+
+    fn seat(sim: Sim) -> Seat {
+        Seat {
+            reports: [Report::idle(); PADS],
+            sim,
+            garage: Garage::new(Kind::Bike, None).unwrap(),
+            riding: true,
+            start_freezes: false,
+            waiting: false,
+            paused: false,
+            said: Default::default(),
+            inverted: false,
+            hands: Controls::default(),
+            teleported: false,
+            clears: 0,
+            markers: false,
+            together: false,
+            shade: PageShade::default(),
+        }
+    }
+
+    /// A rider on the stock bike at `at`, moving at `vel`, wrecks on.
+    fn rider_at(at: Vf, vel: Vf) -> Sim {
+        let mut sim = Sim::new(0x5354);
+        let mounts = game_sim::stock::mounts(&sim.phy);
+        sim.rider = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Default::default());
+        sim.rider.sense.wrecks_enabled = true;
+        sim.rider.ride.chassis.vel = vel;
+        sim
+    }
+
+    fn split(sims: Vec<Sim>) -> World<Flat> {
+        World { place: Flat::default(), seats: sims.into_iter().map(seat).collect(), tape: None, played_dt: None }
+    }
+
+    /// `game-sim/tests/ride.rs`'s stack, one seat each: the lower rider's head ray strikes the body
+    /// of the one above, who is higher by more than `JoustWreckHeight`, and it comes off with the
+    /// original's joust (reason 7) on the first pass. With the upper seat waiting for its pad, its
+    /// bike is in nobody's world and the lower rider rides on.
+    #[test]
+    fn a_split_rider_under_another_jousts() {
+        let s = game_sim::stock::SPAWN;
+        let joust = Some(game_sim::trick::Wreck::from(game_sim::air::Wreck::Joust));
+        let two = || {
+            split(vec![
+                rider_at(Vf::new(s.x(), s.y() + 3.0, s.z(), 1.0), Vf::new(0.0, 0.0, 0.0, 0.0)),
+                rider_at(s, Vf::new(1.0, 0.0, 2.0, 0.0)),
+            ])
+        };
+        let mut world = two();
+        world.simulate(DT, Input::default(), &mut Default::default());
+        assert_eq!(world.seats[1].said.wreck, joust, "the lower seat");
+        assert_ne!(world.seats[0].said.wreck, joust, "the upper seat has nobody above");
+        let mut world = two();
+        world.seats[0].waiting = true;
+        world.simulate(DT, Input::default(), &mut Default::default());
+        assert_ne!(world.seats[1].said.wreck, joust, "nobody above a seat whose pad is out");
+    }
+
+    /// `netplay.rs`'s pair: two seats 1.5 ft apart with the disc's bike collision files push apart
+    /// in split screen as online, where the same two without the files stay where they stood.
+    #[test]
+    fn split_riders_push_apart() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let bikes: Vec<String> =
+            disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+        let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let s = game_sim::stock::SPAWN;
+        let ride = |files: bool| {
+            let sims = (0..2)
+                .map(|i| {
+                    let mut sim = Sim::new(0x5378);
+                    std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+                    let mounts = game_sim::stock::mounts(&sim.phy);
+                    let at = Vf::new(s.x() + 1.5 * i as f32, s.y(), s.z(), 1.0);
+                    sim.rider = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Default::default());
+                    sim.rider.sense.wrecks_enabled = false;
+                    if files {
+                        sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+                    }
+                    sim
+                })
+                .collect();
+            let mut world = split(sims);
+            for _ in 0..30 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+            }
+            let gap = world.seats[1].sim.rider.ride.position().x() - world.seats[0].sim.rider.ride.position().x();
+            (world.seats[1].sim.rider.ride.chassis.clone(), gap)
+        };
+        let ((pushed, gap), (alone, still)) = (ride(true), ride(false));
+        assert_ne!(pushed, alone, "side by side with the files, the riders push apart");
+        assert!(gap > still, "the gap {gap} is no wider than {still} without the files");
     }
 }
 

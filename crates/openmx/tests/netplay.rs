@@ -1370,7 +1370,15 @@ struct Ghosted {
 
 impl Ghosted {
     fn new(seats: usize) -> Ghosted {
-        Ghosted { ride: Ride::new(seats), seen: vec![Vec::new(); seats] }
+        let mut ride = Ride::new(seats);
+        // The other seats well clear of the host's put-back spot: a ghost's clock holds while it is
+        // inside another rider (S63), which the seats meet each other as since S224, and this is the
+        // lone ghost's fade.
+        for (k, sim) in ride.sims.iter_mut().enumerate().skip(1) {
+            let s = sim.rider.ride.position();
+            sim.rider.ride.place(Vf::new(s.x() + 40.0 * k as f32, s.y(), s.z(), 1.0), game_sim::stock::FACING);
+        }
+        Ghosted { ride, seen: vec![Vec::new(); seats] }
     }
 }
 
@@ -2431,4 +2439,59 @@ fn a_stopped_remote_riders_feet_come_down_on_the_local_ones_tick() {
     let host_down = (fast..n).find(|&t| host[1][t].unwrap().feet.down());
     assert_eq!(host_down, Some(down), "the host had the guest's feet down on {host_down:?}, the guest on {down}");
     eprintln!("the guest got going on tick {fast} and its feet came down on {down}, on both machines, of {n} settled");
+}
+
+/// S225: an online seat's plane has the other seats' bikes in its world. Seat 1 flies level at
+/// seat 2's bike, high in the air before it: its probes strike the bike, its record keeps it, and
+/// the contact holds the plane short of it (`game-sim/tests/flight_bikes.rs`'s wall, through the
+/// ride). With nobody on seat 2 its bike is in nobody's world, and the plane flies on through.
+#[test]
+fn an_online_plane_strikes_another_seats_bike() {
+    use game_render::disc::Disc;
+    use game_sim::flight_search::{self, BIKES, Rays};
+    let Ok(mut disc) = Disc::open_configured() else {
+        eprintln!("skipped: no disc configured");
+        return;
+    };
+    let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+    let res = disc.res(&name).expect("machine.res");
+    let plane = game_sim::phy::Plane::read_bytes(&res.read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy"));
+    let rays = game_sim::track::Rays::parse(&res.read_suffix(flight_search::BIPLANE_RAYS).expect("biplanem.col")).expect("its rays");
+    let names: Vec<String> =
+        disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let mesh = names
+        .iter()
+        .find_map(|n| disc.res(n).ok()?.read(flight_search::BIKE_COLLISION).ok())
+        .map(|b| game_sim::track::Mesh::parse(&b).expect("bikef.col parses"))
+        .expect("an archive carries bikef.col");
+    let flight = game_sim::flight::Flight::new(&plane).with_rays(Rays::of(&rays)).with_bike(mesh);
+
+    let fly = |seat_two: bool| {
+        let tables = game_sim::ride::Tables::build();
+        let mut pilot = Sim::new(0x5225);
+        let mut f = flight.clone();
+        f.place(Vf::new(0.0, 200.0, 40.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &tables.acos);
+        f.body.velocity = Vf::new(0.0, 0.0, 120.0, 1.0);
+        pilot.plane = Some(f);
+        let mut rider = Sim::new(0x5225);
+        let mounts = game_sim::stock::mounts(&rider.phy);
+        let side_on = Vf::new(1.0, 0.0, 0.0, 0.0);
+        rider.rider = game_sim::rider::Rider::new(&rider.phy, mounts, Vf::new(0.0, 200.0, 60.0, 1.0), side_on, Default::default());
+        rider.rider.sense.wrecks_enabled = false;
+        let mut sims = vec![pilot, rider];
+        let mut world = Flat::default();
+        let pads = [Report::idle(), if seat_two { Report::idle() } else { Report::missing() }];
+        let mut struck = None;
+        for tick in 0..12 {
+            Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None }.step(tick, &pads);
+            struck = struck.or(sims[0].plane.as_ref().unwrap().record.struck);
+        }
+        (sims[0].plane.as_ref().unwrap().body.position.z(), struck)
+    };
+    let (z, struck) = fly(true);
+    assert!(struck.is_some_and(|s| s >= BIKES), "the plane's record struck {struck:?}, not the bike");
+    assert!(z < 60.0, "the plane flew through seat 2's bike to z {z}");
+    let (z, struck) = fly(false);
+    assert_eq!(struck, None, "nobody's bike was struck");
+    assert!(z > 70.0, "the plane stopped at z {z} with no bike in its way");
 }
