@@ -633,6 +633,12 @@ pub struct Phy {
     /// reader writes [`crate::handling::Handling::Original`]; the shell sets MX vs. ATV's beside its
     /// own `mx_*.phy`.
     pub handling: crate::handling::Handling,
+    /// **MD62:** MX vs. ATV's `[Airborne Control] GasGyroTorque`, the gas gyro's pitch torque
+    /// ([`crate::handling::airborne_control`]). MX Unleashed's files have none: zero.
+    pub gas_gyro_torque: F,
+    /// **MD62:** MX vs. ATV's Brake Gyro / Gas Gyro options, the game's defaults (brake on, gas off).
+    /// Read only on [`crate::handling::Handling::MxVsAtv`].
+    pub gyro: crate::handling::Gyro,
 }
 
 impl Phy {
@@ -783,6 +789,7 @@ impl Phy {
         // --- [Airborne Control], [Preload], [Backflip], [Wrecks] ---
         let s = ini.section("Airborne Control");
         let max_crossup = s.float("MaxCrossupAngle").unwrap_or(F::ZERO) * DEG;
+        let gas_gyro_torque = s.float("GasGyroTorque").unwrap_or(F::ZERO);
         let pre = ini.section("Preload");
         let flip = ini.section("Backflip");
         let wrecks = ini.section("Wrecks");
@@ -957,6 +964,8 @@ impl Phy {
             max_crossup,
             tricks: None,
             handling: crate::handling::Handling::Original,
+            gas_gyro_torque,
+            gyro: crate::handling::Gyro::default(),
         }
     }
 

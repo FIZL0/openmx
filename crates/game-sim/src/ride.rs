@@ -2316,7 +2316,14 @@ impl Ride {
 
             calls.push(mv::Call::AirborneControl(h));
             let mut ac = air_chassis!();
-            air::airborne_control(&p.air, air, &mut ac, &astep);
+            match mxvatv.as_deref() {
+                // MX vs. ATV's own air control (MD62) on its handling.
+                Some(f) => {
+                    let spin_clip = tricks.as_deref().is_some_and(|t| t.spin.clip != 0);
+                    crate::handling::ride_airborne_control(p, air, &mut ac, &astep, s.gas_rate_limited, f, spin_clip)
+                }
+                None => air::airborne_control(&p.air, air, &mut ac, &astep),
+            }
             mvc.force = ac.force;
             mvc.torque = ac.moment;
 
