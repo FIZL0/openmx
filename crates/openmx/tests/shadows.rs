@@ -52,6 +52,10 @@ fn ride(args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
         .args(["--headless", "--track", "free06", "--size", "640x448", "--overlay", "none", "--controls", "original"])
+        // The steady clock (K17): on the wall's, a loaded machine ran one tick or two before the shot's
+        // picture and blended the rider between them by the time it took, so Off's and Original's
+        // riders stood apart and a few of their pixels made the "deepest" shadow (a core of 2).
+        .args(["--steady-clock"])
         .args(args)
         .output()
         .expect("the shell runs");
@@ -160,7 +164,7 @@ fn a_high_jump_s_long_shadow_still_reaches_the_ground() {
         let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
             .current_dir(&root)
             .args(["--headless", "--track", "free09", "--size", "640x360", "--overlay", "none", "--controls", "original"])
-            .args(["--trace-at", "3864.2,1592.5,-132", "--play", tape.to_str().unwrap(), "--frames", "132"])
+            .args(["--trace-at", "3864.2,1592.5,-132", "--play", tape.to_str().unwrap(), "--frames", "132", "--steady-clock"])
             .args(if quality == "off" { ["--shadows", "off", "--shadow-quality", "high"] } else { ["--shadows", "on", "--shadow-quality", quality] })
             .args(["--shot", path.to_str().unwrap(), "--shot-frame", "130"])
             .output()
