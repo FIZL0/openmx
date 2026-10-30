@@ -251,13 +251,25 @@ async function loadFiles() {
   }
 }
 
-// The module, once: wasm-bindgen's glue fetches pkg/openmx_web_bg.wasm beside itself.
+// The module, once: wasm-bindgen's glue fetches pkg/openmx_web_bg.wasm beside itself. A fetch cut off mid-load (a
+// dropped connection; K12, an extension installing in the test's chromium) is tried again twice before the page hears
+// of it. A failed import stays failed for that address, so a retry asks for the glue under a new one; the glue only
+// keeps its module once it has instantiated it, so its own fetch is simply asked again.
 let loaded;
 function game() {
-  loaded ??= import('./pkg/openmx_web.js').then(async glue => {
-    await glue.default();
-    return glue;
-  });
+  loaded ??= (async () => {
+    for (let tries = 0; ; tries++) {
+      try {
+        const glue = await import(`./pkg/openmx_web.js${tries ? `?retry=${tries}` : ''}`);
+        await glue.default();
+        return glue;
+      } catch (e) {
+        if (tries >= 2) throw e;
+        console.log(`openmx: the game module did not load (${e}); asking again`);
+        await new Promise(go => setTimeout(go, 1000));
+      }
+    }
+  })();
   return loaded;
 }
 
