@@ -448,8 +448,10 @@ const RIDERS_DIGEST: u64 = 0x1d4ac8eeb11bb86c;
 /// the tick before (sixteen bytes, four riders), all idle.
 /// 13567 since MD40: each ride's MX vs. ATV backflip clip (`Ride::mxvatv`), `None` (one byte, four
 /// riders).
-const RIDERS_WIRE_DIGEST: u64 = 0xae3197f1c7beaebb;
-const RIDERS_WIRE_LEN: usize = 13567;
+/// 13603 since P243: each rider's card's crash lockout, its waiting bank and the window's seconds
+/// (nine bytes, four riders), all clear.
+const RIDERS_WIRE_DIGEST: u64 = 0x40c6dcd8a91b4967;
+const RIDERS_WIRE_LEN: usize = 13603;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed

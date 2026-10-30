@@ -684,7 +684,7 @@ wire!(crate::rider::PutBack { placed, filled, held, wreck });
 wire!(crate::event::Seat { left, ridden, taking_part, out, paused, reached, warning, saved });
 wire!(crate::event::Competition { target, seats, limit, length, interval, elapsed, tally, counting, running, over, timed_out, ended, clock, leader, tie, heard });
 wire_enum!(crate::event::Verdict { Win, Lose, Tie });
-wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out, gate_penalty });
+wire!(crate::score::Score { nodes, combo, scoring, growing, combo_time, total, combo_points, wheelie, stoppie, flip, shut, out, gate_penalty, lockout, pending, settling });
 wire!(crate::score::Node { flags, id, points, base, rate, mult, extra, held, granularity });
 wire!(crate::ragdoll_ride::Down { reason, ragdoll, contacts, held_at, sensed, fade, touching, search, statics });
 wire!(crate::ragdoll_scene::BikeSearch { stood, centre, bound, built, listed, distance });

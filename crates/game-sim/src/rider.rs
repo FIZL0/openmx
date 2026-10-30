@@ -1127,8 +1127,9 @@ impl Rider {
             // its drop velocity, the wheel loads zeroed, the camera and the rumble — is not ported.
             tricks.reset();
             *flight = Trick::NONE;
-            // The rider's own wreck entry: the trick and the combo both lost (S79).
-            score.wrecked();
+            // The rider's own wreck entry: the trick and the combo both lost (S79), and with the
+            // lockout a landing's bank still waiting (P243).
+            score.crashed();
             if let Some(t) = ride.tricks.as_deref_mut() {
                 t.spin = air::Spin::default();
                 t.front_watch = 0;
@@ -1484,7 +1485,7 @@ impl State for Rider {
         }
         // The points (S79), once anything has scored or started to: a rider who never has hashes as
         // before, as a rider who is up hashes as one who has never been down.
-        if self.score != Score::default() {
+        if (Score { lockout: false, ..self.score.clone() }) != Score::default() {
             w.group("score", |w| hash::State::walk(&self.score, w));
         }
     }
