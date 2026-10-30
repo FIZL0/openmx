@@ -898,7 +898,8 @@ fn main_panel(menu: &Menu, at: usize) -> (&'static str, String, Vec<String>) {
             "Which pad, keyboard or touch pad drives which seat. Every one moves itself with left and right, and lights up when pressed.".into(),
             Vec::new(),
         ),
-        _ => ("Quit", "Back to the desktop. Everything is already saved.".into(), Vec::new()),
+        _ if cfg!(target_arch = "wasm32") => (QUIT, "Back to the launcher page. Everything is already saved.".into(), Vec::new()),
+        _ => (QUIT, "Back to the desktop. Everything is already saved.".into(), Vec::new()),
     }
 }
 
@@ -911,7 +912,8 @@ fn pause_panel(row: &str) -> (String, &'static str) {
         "Controllers" => "Which pad, keyboard or touch pad drives which seat. The riders swap when their pads do.",
         "Main Menu" => "Ends the ride.",
         "Leave Session" => "Gives up your seat: your bike goes and the others ride on. The last one out ends the ride.",
-        "Quit" => "Ends the ride and closes the game.",
+        QUIT if cfg!(target_arch = "wasm32") => "Ends the ride and goes back to the launcher page.",
+        QUIT => "Ends the ride and closes the game.",
         "Leave Session" => "Takes you out of the online ride. The others ride on without you.",
         r if r.starts_with("Switch") => "The original pause's machine switch. Your bike waits where you left it.",
         r if r.starts_with("Seats") => "How many seats the online ride has. Left and right change it.",
@@ -1030,7 +1032,7 @@ impl Pen<'_> {
         let at = menu.cursor(Screen::Main);
         self.strip(10.0, 18.0);
         self.logo(false);
-        let rows: Vec<(String, bool)> = MAIN.iter().map(|s| (s.to_string(), false)).collect();
+        let rows: Vec<(String, bool)> = main_rows().iter().map(|s| (s.to_string(), false)).collect();
         self.list(&rows, at, 19.0, 10.4, 18.0);
         let (h, p, chips) = main_panel(menu, at);
         let (x, w) = (34.0, 40.0);
@@ -2135,10 +2137,14 @@ impl Pen<'_> {
             }
         }
         if menu.p1.is_none() {
-            self.hints(&[(Btn::Circle, "Quit"), (Btn::Cross, "Start")]);
+            if HAS_QUIT {
+                self.hints(&[(Btn::Circle, if cfg!(target_arch = "wasm32") { "Launcher" } else { "Quit" }), (Btn::Cross, "Start")]);
+            } else {
+                self.hints(&[(Btn::Cross, "Start")]);
+            }
         }
         if let Some(row) = menu.quitting() {
-            self.popup("Quit the game?", &QUIT_ROWS, row);
+            self.popup(QUIT_ASK, &QUIT_ROWS, row);
         }
     }
 

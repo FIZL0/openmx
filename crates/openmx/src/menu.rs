@@ -2510,7 +2510,19 @@ impl Screen {
 /// The main menu's corner (P189): which build this is, `v<version> · <commit>` from `build.rs`'s stamp.
 pub const BUILD_CORNER: &str = concat!("v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT"));
 
-pub const MAIN: [&str; 8] = ["Free Ride", "Local Game", "Online", "Garage", "Mods", "Settings", "Controllers", "Quit"];
+pub const MAIN: [&str; 8] = ["Free Ride", "Local Game", "Online", "Garage", "Mods", "Settings", "Controllers", QUIT];
+/// The way out, last on the main menu and the pause: the desktop's Quit closes the game; the web's
+/// goes back to the site's launcher page (the page reloads into it on the shell's quit). The iPhone
+/// has none, as an iOS app is closed from the app switcher, so neither list has the row there and
+/// Back on the splash asks nothing.
+pub const QUIT: &str = if cfg!(target_arch = "wasm32") { "Back to Launcher" } else { "Quit" };
+pub const HAS_QUIT: bool = !cfg!(target_os = "ios");
+/// [`QUIT`]'s confirm, on the splash and the pause.
+pub const QUIT_ASK: &str = if cfg!(target_arch = "wasm32") { "Back to the launcher?" } else { "Quit the game?" };
+/// The main menu's rows as shown: [`MAIN`], less Quit where there is none ([`HAS_QUIT`]).
+pub fn main_rows() -> &'static [&'static str] {
+    if HAS_QUIT { &MAIN } else { &MAIN[..MAIN.len() - 1] }
+}
 const MAIN_FREE: usize = 0;
 const MAIN_LOCAL: usize = 1;
 const MAIN_ONLINE: usize = 2;
@@ -2526,7 +2538,7 @@ const MAIN_CONTROLLERS: usize = 6;
 /// spawn's Down (P135). The online rows go in above Main Menu, which stays right above Quit
 /// ([`Menu::pause_layout`]).
 pub const PAUSE: [&str; 8] =
-    ["Resume", "Restart", "Switch To Machine", "Settings", "Controllers", "Game Modifiers", "Main Menu", "Quit"];
+    ["Resume", "Restart", "Switch To Machine", "Settings", "Controllers", "Game Modifiers", "Main Menu", QUIT];
 const PAUSE_SWITCH: usize = 2;
 const PAUSE_SETTINGS: usize = 3;
 const PAUSE_CONTROLLERS: usize = 4;
@@ -2714,7 +2726,7 @@ fn names_line(names: &[String]) -> String {
 pub const CLAIMED_FRAMES: u32 = 72;
 
 /// The splash's Quit popup's rows.
-const QUIT_ROWS: [&str; 2] = ["Quit", "Stay"];
+const QUIT_ROWS: [&str; 2] = [QUIT, "Stay"];
 
 /// Where the pause's Main Menu row takes this machine (P110), as the shell says, which its confirm
 /// is worded for.
@@ -3644,7 +3656,7 @@ impl Menu {
         if let Some((dev, _)) = presses.iter().find(|(_, p)| p.ok || p.start) {
             self.p1 = Some(dev.clone());
             self.claimed = Some(0);
-        } else if let Some((dev, _)) = presses.iter().find(|(_, p)| p.back) {
+        } else if let Some((dev, _)) = presses.iter().find(|(_, p)| p.back).filter(|_| HAS_QUIT) {
             self.quit = Some((dev.clone(), 1));
         }
         Act::Stay
@@ -3820,7 +3832,7 @@ impl Menu {
     pub fn confirming(&self) -> Option<(&'static str, [&'static str; 2], usize)> {
         let (what, row) = self.leaving.filter(|_| self.screen() == Some(Screen::Pause))?;
         let (ask, go) = match (what, self.leave_to) {
-            (Leaving::Quit, _) => ("Quit the game?", QUIT_ROWS[0]),
+            (Leaving::Quit, _) => (QUIT_ASK, QUIT_ROWS[0]),
             (Leaving::Main, LeaveTo::Main) => ("Main menu?", "Main Menu"),
             (Leaving::Main, LeaveTo::Lobby) => ("Return to lobby?", "Return to Lobby"),
             (Leaving::Main, LeaveTo::Online) => ("Leave the online game?", "Leave Game"),
@@ -3923,7 +3935,7 @@ impl Menu {
         if self.session || self.seats_open {
             rows.push(PauseRow::Leave);
         }
-        rows.extend((PAUSE_MAIN..PAUSE.len()).map(PauseRow::Fixed));
+        rows.extend((PAUSE_MAIN..PAUSE.len() - usize::from(!HAS_QUIT)).map(PauseRow::Fixed));
         rows
     }
 
@@ -4134,7 +4146,7 @@ impl Menu {
     fn rows(&self, screen: Screen) -> usize {
         match screen {
             Screen::Splash => 1,
-            Screen::Main => MAIN.len(),
+            Screen::Main => main_rows().len(),
             Screen::Tracks => self.track_count(),
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page_of(screen).len().max(1),
             Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => 1,
