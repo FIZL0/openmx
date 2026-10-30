@@ -1,7 +1,7 @@
 //! P198: the mod store's screen as a pad walks it — the grid's arrows, the kind tabs on L1/R1,
 //! Cross installing (or updating) only what it can, Square removing only the store's own, Triangle
-//! reporting without leaving, Start reading the store again, Circle out; and no store to ask under
-//! `--mods off`. The shell's side (the store itself) is `src/modstore_tests.rs`'s. P199: the Upload
+//! reporting without leaving, Start reading the store again, Select downloading the tab, Circle
+//! out; and no store to ask under `--mods off`. The shell's side (the store itself) is `src/modstore_tests.rs`'s. P199: the Upload
 //! page's rules first, sign-in, Upload and Upload all, and My Mods' take-down asked twice
 //! (`src/modstore_up_tests.rs` has the uploads themselves).
 
@@ -162,6 +162,13 @@ fn the_store_screen_walks_and_asks() {
     assert_eq!(m.take_store_asks(), [StoreAsk::List { fresh: true }]);
     assert_eq!(m.store.listed, Listed::Asking);
 
+    // Select downloads the tab's mods not installed, past the one installing and the user's own
+    tap(&mut m, &mut reader, Control::Select);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Install("a/t0".into()), StoreAsk::Install("a/t4".into())]);
+    assert!(m.store.cards[4].progress.is_some());
+    tap(&mut m, &mut reader, Control::Select);
+    assert_eq!(m.take_store_asks(), [], "not twice while they go");
+
     tap(&mut m, &mut reader, Control::Circle);
     assert_ne!(m.screen(), Some(Screen::Store));
 }
@@ -196,6 +203,14 @@ fn the_upload_and_my_mods_pages_ask_only_when_they_may() {
     tap(&mut m, &mut reader, Control::Cross);
     assert!(m.store.agreed);
     assert_eq!(m.take_store_asks(), [], "agreeing asks nothing");
+    // and is kept in settings.txt, once ever: a fresh menu from it skips the rules
+    assert!(m.take_changed() && m.settings.store_rules);
+    let kept = Settings::parse(&m.settings.text());
+    assert!(kept.store_rules && kept.text().contains("store_rules = agreed"));
+    assert!(!Settings::default().text().contains("store_rules"), "an older file is written as it was");
+    let mut fresh = Menu::new(kept, Controls::default());
+    fresh.store_tab(UPLOAD_TAB);
+    assert!(fresh.store.agreed && !fresh.store.upload_rows().is_empty());
 
     // signed out: the token page, then Paste (once while it is checked)
     tap(&mut m, &mut reader, Control::Cross);

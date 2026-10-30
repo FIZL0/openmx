@@ -1,7 +1,8 @@
 //! The mod store's screen (P198): Mods' Browse the Store, a picture grid of the store's mods under a
 //! tab a kind (B372/B373), each card its name, author, source game, size, Verified, and Installed or
 //! Update. Cross installs (or updates) the lit card, Square removes it, Triangle reports it, Start
-//! reads the store again, L1/R1 change the tab.
+//! reads the store again, Select downloads every mod on the tab not installed (or out of date), L1/R1
+//! change the tab.
 //!
 //! The menu knows the store only as this plain view, which the shell fills from `modstore.rs` and
 //! whose asks it takes ([`Menu::take_store_asks`]), so the menu's tests mount nothing of the store.
@@ -17,7 +18,8 @@ pub const STORE_PAGES: [&str; 2] = ["Upload", "My Mods"];
 /// Their tabs.
 pub const UPLOAD_TAB: usize = STORE_TABS.len();
 pub const MINE_TAB: usize = STORE_TABS.len() + 1;
-/// What a player agrees to before they upload (`plan/P198.md` § P199): shown first, once a session.
+/// What a player agrees to before they upload (`plan/P198.md` § P199): shown until agreed to, once ever
+/// ([`Settings::store_rules`]).
 pub const STORE_RULES: [&str; 4] = [
     "Uploads go on the public openMX mod store, for anyone to download.",
     "You are responsible for what you share: only mods you made or may give away.",
@@ -151,7 +153,7 @@ pub struct Shop {
     pub account: Option<String>,
     /// A pasted token being checked.
     pub signing: bool,
-    /// The rules were agreed to this session.
+    /// The rules were agreed to ([`Settings::store_rules`], kept in `settings.txt`).
     pub agreed: bool,
     /// The player's own mods, for Upload.
     pub locals: Vec<Upload>,
@@ -162,13 +164,18 @@ pub struct Shop {
     pub mine_listed: Listed,
     /// A take-down asked once, by key: Cross again takes it down.
     pub arm: Option<String>,
-    asks: Vec<StoreAsk>,
+    pub(super) asks: Vec<StoreAsk>,
 }
 
 impl Shop {
     /// The cards on the tab, as indices into [`Shop::cards`].
     pub fn shown(&self) -> Vec<usize> {
         (0..self.cards.len()).filter(|&i| self.cards[i].tab == self.tab).collect()
+    }
+
+    /// The cards on the tab Download All installs: not installed or out of date, and not going now.
+    pub fn downloadable(&self) -> Vec<usize> {
+        self.shown().into_iter().filter(|&i| self.cards[i].progress.is_none() && matches!(self.cards[i].got, Got::No | Got::Update)).collect()
     }
 
     /// The Upload page's rows (none until the rules are agreed to).
@@ -281,6 +288,19 @@ impl Menu {
             self.store.asks.push(StoreAsk::List { fresh: true });
             return;
         }
+        if p.select && !self.store.off {
+            let all = self.store.downloadable();
+            self.store.note = Some(match all.len() {
+                0 => format!("Every one of the {} is installed already", STORE_TABS[self.store.tab].to_lowercase()),
+                n => format!("Downloading {n} of the {}", STORE_TABS[self.store.tab].to_lowercase()),
+            });
+            for i in all {
+                let card = &mut self.store.cards[i];
+                card.progress = Some((0.0, "Waiting to download".into()));
+                self.store.asks.push(StoreAsk::Install(card.key.clone()));
+            }
+            return;
+        }
         let n = self.store.shown().len();
         if n > 0 {
             let c = self.cursor[at].min(n - 1);
@@ -325,6 +345,8 @@ impl Menu {
             if !shop.agreed {
                 if p.ok {
                     shop.agreed = true;
+                    self.settings.store_rules = true;
+                    self.changed = true;
                     self.cursor[at] = 0;
                 }
                 return;

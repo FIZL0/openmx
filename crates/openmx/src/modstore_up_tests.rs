@@ -471,9 +471,15 @@ fn an_upload_is_listed_installed_re_uploaded_and_taken_down() {
     assert_eq!(upload(&s, &a), Up::Failed("Sign in first".into()));
     assert_eq!(sign_in(&s, TOKEN_OK), Ok("tester".into()));
 
-    // the first upload opens a pull request, its zip in parts
+    // the first upload opens a pull request, its zip in parts; the kept listing goes stale, and the
+    // line says others see it once their Browse reads the store again (it keeps its listing an hour)
+    s.list(true);
+    until(&s, |e| matches!(e, Event::Listing(_)));
+    let kept_at = || serde_json::from_slice::<serde_json::Value>(&std::fs::read(dir.join(CACHE)).unwrap()).unwrap()["at"].as_u64();
+    assert_ne!(kept_at(), Some(0));
     let up = upload(&s, &a);
-    assert!(matches!(&up, Up::Done(l) if l.contains("pull request #1")), "{up:?}");
+    assert!(matches!(&up, Up::Done(l) if l.contains("pull request #1") && l.contains("after Start on Browse")), "{up:?}");
+    assert_eq!(kept_at(), Some(0), "an upload done marks Browse's listing stale");
     {
         let hub = fake.hub.lock().unwrap();
         let pr = &hub.prs[&1];

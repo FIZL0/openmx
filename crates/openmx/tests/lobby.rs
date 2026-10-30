@@ -76,7 +76,7 @@ fn fresh(name: &str, rider: &str) -> (Menu, Reader) {
 }
 
 /// The on-screen keyboard's letters, as `menu.rs` lays them out.
-const KEYS: [&str; 4] = ["abcdefghij", "klmnopqrst", "uvwxyz0123", "456789-'.&"];
+const KEYS: [&str; 4] = ["1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm-.&"];
 
 /// Types `text` on the keyboard from its first key, then Start to finish.
 fn type_text(menu: &mut Menu, reader: &mut Reader, text: &str) {
@@ -959,8 +959,7 @@ fn the_lobby_gathers_every_seats_own_modifiers() {
     }
     tap(&mut h, &mut hr, Control::Cross);
     assert_eq!(h.screen(), Some(Screen::Modifiers));
-    tap(&mut h, &mut hr, Control::Left);
-    assert_eq!(h.mods_whose(), "All");
+    assert_eq!(h.mods_whose(), "All", "the page opens on All Players");
     while h.page()[h.cursor(Screen::Modifiers)].label != Knob::Grip.label() {
         tap(&mut h, &mut hr, Control::Down);
     }

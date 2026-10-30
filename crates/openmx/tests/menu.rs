@@ -444,6 +444,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         video_auto: false,
         casters: menu::video::Casters::Fewer,
         detail: menu::video::Detail::Reduced,
+        // The mod store's rules agreed to once (P199).
+        store_rules: true,
         // A world's sky taken from the map below (MD9).
         world_sky: menu::WorldSky::PerMap,
         // The disc's textures, and two texture packs ordered and one off (V84).
@@ -2932,8 +2934,9 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     assert_eq!(m.settings.modifiers.get(3, Knob::Gravity), 80);
     assert!(m.take_changed());
 
-    // Bike top speed for 2P alone: the player row to 2P, then the speed row right once.
+    // Bike top speed for 2P alone: the player row from All Players to 2P, then the speed row right once.
     down_to(&mut m, &mut r, Key::Player);
+    tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.page()[0].value, "2P");
     down_to(&mut m, &mut r, Key::Knob(Knob::BikeSpeed));
@@ -2991,6 +2994,8 @@ fn the_biplane_max_height_tops_out_uncapped() {
     down_to(&mut m, &mut r, Key::Modifiers);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
+    // 1P's, off the All Players the page opens on
+    tap(&mut m, &mut r, Control::Right);
     m.settings.modifiers.set(0, Knob::PlaneCeiling, 490);
     down_to(&mut m, &mut r, Key::Knob(Knob::PlaneCeiling));
     let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Knob(Knob::PlaneCeiling)).unwrap();
@@ -3070,6 +3075,8 @@ fn a_modifier_preset_is_one_players_set() {
     down_to(&mut m, &mut r, Key::Modifiers);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
+    assert_eq!(m.page()[0].value, "All Players", "the page opens on every player's");
+    tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.page()[0].value, "1P");
     let save = |m: &mut Menu, r: &mut Reader, name: &str| {
         down_to(m, r, Key::SavePreset);
@@ -3174,6 +3181,8 @@ fn the_hosts_all_players_sets_every_seats_knob() {
     tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers");
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
+    assert_eq!(m.page()[0].value, "All Players", "the page opens on every player's");
+    tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.page()[0].value, "1P");
     assert_eq!(m.page()[0].choices[0], "All Players");
     // Left from 1P is All Players.
@@ -3396,8 +3405,7 @@ fn wrecks_are_game_modifiers() {
     m.settings.wrecks = false;
     m.settings.air_wrecks = false;
     down_to(&mut m, &mut r, Key::Player);
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.mods_whose(), "2P");
+    tap_until(&mut m, &mut r, Control::Right, |m| m.mods_whose() == "2P");
     down_to(&mut m, &mut r, Key::ResetMods);
     tap(&mut m, &mut r, Control::Cross);
     assert!(!m.settings.wrecks && !m.settings.air_wrecks, "2P's reset moved the world's wrecks");

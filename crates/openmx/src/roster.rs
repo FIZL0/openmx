@@ -903,7 +903,7 @@ impl Presets {
 }
 
 /// The keys a name is typed on in a seat's column: the front end's keyboard's (P36).
-pub const NAME_KEYS: [&str; 4] = ["abcdefghij", "klmnopqrst", "uvwxyz0123", "456789-'.&"];
+pub const NAME_KEYS: [&str; 4] = ["1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm-.&"];
 pub const NAME_COMMANDS: [&str; 3] = ["Space", "Delete", "Done"];
 /// And a number's, as the original's number pad (`mxfrontendnumentry.lyr`).
 pub const NUMBER_KEYS: [&str; 2] = ["12345", "67890"];
@@ -1454,15 +1454,17 @@ mod tests {
         assert_eq!(g.value(&c, Row::Piece(Piece::Helmet)), "Fox 2");
         g.row = row(Row::Name);
         assert_eq!(g.cross(&mut presets), Cross::Stay);
-        // b, e, then Done on the command row.
-        g.entry.as_mut().unwrap().walk(0, 1);
+        // b, e on the QWERTY rows, then Done on the command row.
+        g.entry.as_mut().unwrap().walk(3, 0);
+        g.entry.as_mut().unwrap().walk(0, 4);
         g.cross(&mut presets);
-        g.entry.as_mut().unwrap().walk(0, 3);
+        g.entry.as_mut().unwrap().walk(-2, 0);
+        g.entry.as_mut().unwrap().walk(0, -2);
         g.cross(&mut presets);
         assert_eq!(g.value(&c, Row::Name), "Be_");
         let e = g.entry.as_mut().unwrap();
-        e.walk(-1, 0);
-        e.walk(0, 1);
+        e.walk(3, 0);
+        e.walk(0, 2);
         assert_eq!(e.key, (4, 2));
         g.cross(&mut presets);
         assert_eq!((g.entry.is_none(), g.pick.look.name.as_str()), (true, "Be"));

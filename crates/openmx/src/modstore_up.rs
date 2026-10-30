@@ -741,10 +741,12 @@ impl Store {
                     Ok(up) => up,
                     Err(e) => Up::Failed(format!("{} not uploaded: {e}", l.name)),
                 };
+                // the next Browse reads the store again, this one included
+                if matches!(up, Up::Done(_)) {
+                    s.stale_without(None);
+                }
                 s.send(Event::Upload(id, up));
             }
-            // the next Browse reads the store again, these included
-            s.stale_without(None);
         });
     }
 
@@ -777,10 +779,11 @@ impl Store {
         mine.retain(|e| !(e.meta.id == l.id && e.rev == rev));
         mine.insert(0, Entry { meta: p.meta.clone(), rev, verified: false });
         let mb = p.meta.size.div_ceil(1 << 20);
+        // Browse keeps its listing an hour: other devices see it once they read the store again
         Ok(Up::Done(match (to, verb) {
-            (To::NewPr, _) => format!("{} is up ({mb} MB) as your pull request #{n}: in everyone's Browse now", l.name),
-            (_, "Update") => format!("{} updated ({mb} MB) on your pull request #{n}", l.name),
-            _ => format!("{} is up ({mb} MB) on your pull request #{n}", l.name),
+            (To::NewPr, _) => format!("{} is up ({mb} MB) as your pull request #{n}: others see it after Start on Browse", l.name),
+            (_, "Update") => format!("{} updated ({mb} MB) on your pull request #{n}: others see it after Start on Browse", l.name),
+            _ => format!("{} is up ({mb} MB) on your pull request #{n}: others see it after Start on Browse", l.name),
         }))
     }
 

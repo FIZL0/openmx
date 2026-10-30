@@ -93,6 +93,8 @@ pub struct Press {
     pub r1: bool,
     /// Triangle alone, which is also [`Press::back`]: the Free Ride strip's Wrecks (P118).
     pub triangle: bool,
+    /// Select (Tab on the keyboard): the mod store's Download All.
+    pub select: bool,
 }
 
 impl Press {
@@ -110,6 +112,7 @@ impl Press {
             l1: self.l1 || o.l1,
             r1: self.r1 || o.r1,
             triangle: self.triangle || o.triangle,
+            select: self.select || o.select,
         }
     }
 }
@@ -222,6 +225,7 @@ fn press_of(edge: u16) -> Press {
         l1: on(Control::L1),
         r1: on(Control::R1),
         triangle: on(Control::Triangle),
+        select: on(Control::Select),
     }
 }
 
@@ -531,6 +535,9 @@ pub struct Settings {
     pub casters: video::Casters,
     /// How detailed the models are drawn (P223, [`video::Detail`]).
     pub detail: video::Detail,
+    /// Whether the player agreed to the mod store's rules ([`STORE_RULES`]) once, ever: the Upload
+    /// page shows them until then. Signing out keeps it.
+    pub store_rules: bool,
 }
 
 /// The Updates setting (P191, opentennis's M140): the main menu offers a newer build with Square
@@ -1313,6 +1320,7 @@ impl Default for Settings {
             video_auto: true,
             casters: video::Casters::default(),
             detail: video::Detail::default(),
+            store_rules: false,
         }
     }
 }
@@ -1460,6 +1468,7 @@ impl Settings {
                 "air_wrecks" => s.air_wrecks = v != "off",
                 "backwards_bail" => s.backwards_bail = v == "on",
                 "vibration" => s.vibration = v != "off",
+                "store_rules" => s.store_rules = v == "agreed",
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // The ride setup's machine a seat (P41), gone with Start On (P177): every ride starts
                 // on the bike, so an old file's line loads and is dropped.
@@ -1595,6 +1604,7 @@ impl Settings {
             + &self.air_wrecks_text()
             + &self.backwards_bail_text()
             + &self.vibration_text()
+            + if self.store_rules { "store_rules = agreed\n" } else { "" }
             + &self.hud_text()
             + &self.original_text()
             + &self.filtering_text()
@@ -2508,8 +2518,9 @@ pub enum Opening {
     Open,
 }
 
-/// The on-screen keyboard: opentennis's four rows of ten, then a row of four commands.
-pub const KEY_ROWS: [&str; 4] = ["abcdefghij", "klmnopqrst", "uvwxyz0123", "456789-'.&"];
+/// The on-screen keyboard: four rows of ten laid out as a QWERTY keyboard (the digits over the
+/// letters), then a row of four commands.
+pub const KEY_ROWS: [&str; 4] = ["1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm-.&"];
 const KEY_COMMANDS: [&str; 4] = ["Space", "Delete", "Clear", "Done"];
 
 /// What the browser calls web/touch.js's on-screen pad, as `pad.rs`'s `TOUCH_PAD` (P210).
@@ -2896,7 +2907,7 @@ pub struct Menu {
     /// Whose rows the pages' Player rows show, 0 for 1P (P118).
     player: usize,
     /// The modifiers page's Player row is on All Players (P134), the host's head of the row: a
-    /// modifier set there is every seat's.
+    /// modifier set there is every seat's. Where the page opens: every player's, unless a player is picked.
     mods_all: bool,
     /// The modifiers the host set through All Players since the shell last took them
     /// ([`Menu::take_mods_all`]): online every seat's, not only this machine's (P134).
@@ -3088,6 +3099,7 @@ impl Menu {
     pub fn new(settings: Settings, controls: Controls) -> Menu {
         let mut cursor = [0; Screen::ALL.len()];
         cursor[Screen::Tracks.index()] = settings.track_index();
+        let store_rules = settings.store_rules;
         Menu {
             settings,
             controls,
@@ -3145,7 +3157,7 @@ impl Menu {
             mod_preset: 0,
             tab: [0; Screen::ALL.len()],
             player: 0,
-            mods_all: false,
+            mods_all: true,
             mods_all_set: Vec::new(),
             guest: false,
             pad_kept: None,
@@ -3159,7 +3171,7 @@ impl Menu {
             music_held: false,
             music_at: 0,
             tunes: Vec::new(),
-            store: Shop::default(),
+            store: Shop { agreed: store_rules, ..Shop::default() },
             cues: Cues::default(),
             pace: Pace::default(),
             sides: Vec::new(),

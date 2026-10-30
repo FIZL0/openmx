@@ -69,6 +69,7 @@ enum Btn {
     Square,
     Triangle,
     Start,
+    Select,
     L1R1,
     /// The d-pad's left and right.
     LeftRight,
@@ -366,12 +367,16 @@ impl<'a> Pen<'a> {
             Btn::Circle => ([0xe0, 0x47, 0x3f, 255], d * 0.07),
             Btn::Square => ([0xd8, 0x72, 0xb8, 255], d * 0.07),
             Btn::Triangle => ([0x3c, 0xbf, 0x93, 255], d * 0.07),
-            Btn::Start | Btn::L1R1 => {
-                let word = if b == Btn::Start { "START" } else { "L1" };
+            Btn::Start | Btn::Select | Btn::L1R1 => {
+                let word = match b {
+                    Btn::Start => "START",
+                    Btn::Select => "SELECT",
+                    _ => "L1",
+                };
                 let size = d * 0.5;
                 let w = self.wide(Weight::Heavy, word, size) + d * 0.6;
                 match b {
-                    Btn::Start => {
+                    Btn::Start | Btn::Select => {
                         self.round([x - w / 2.0, y - r * 0.8, w, d * 0.8], d * 0.25, SHOULDER, SHOULDER);
                         self.text(Weight::Heavy, word, x, Pen::mid(y, size), size, 0.0, CHALK, Align::Centre);
                     }
@@ -417,6 +422,7 @@ impl<'a> Pen<'a> {
     fn button_wide(&self, b: Btn, d: f32) -> f32 {
         match b {
             Btn::Start => self.wide(Weight::Heavy, "START", d * 0.5) + d * 0.6,
+            Btn::Select => self.wide(Weight::Heavy, "SELECT", d * 0.5) + d * 0.6,
             Btn::L1R1 => 2.0 * (self.wide(Weight::Heavy, "L1", d * 0.5) + d * 0.6) + d * 0.15,
             Btn::LeftRight => 2.0 * d * 0.8 + d * 0.15,
             _ => d,
@@ -1535,6 +1541,9 @@ impl Pen<'_> {
         }
         self.title(Screen::Store.title());
         let mut hints = vec![(Btn::Circle, "Back"), (Btn::L1R1, "Tabs"), (Btn::Start, "Refresh")];
+        if !shop.downloadable().is_empty() {
+            hints.push((Btn::Select, "Download All"));
+        }
         if let Some(c) = lit.map(|i| &shop.cards[i]) {
             hints.push((Btn::Triangle, "Report"));
             if c.progress.is_none() && matches!(c.got, Got::Installed | Got::Update) {
@@ -1584,7 +1593,7 @@ impl Pen<'_> {
                             Some((Phase::Busy, s)) => ("Uploading".to_string(), s.clone()),
                             Some((Phase::Done, s)) => ("Done".into(), s.clone()),
                             Some((Phase::Failed, s)) => ("Failed".into(), s.clone()),
-                            None => ("Upload".into(), format!("{} · {}", l.kind, l.id)),
+                            None => ("Not uploaded".into(), format!("{} · {}", l.kind, l.id)),
                         };
                         (l.name.clone(), state, under)
                     }
@@ -1596,7 +1605,7 @@ impl Pen<'_> {
             }
             hints.push((Btn::Start, "Rescan"));
             if !rows.is_empty() {
-                hints.push((Btn::Cross, "Select"));
+                hints.push((Btn::Cross, if matches!(shop.upload_rows().get(c.min(rows.len() - 1)), Some(UpRow::Mod(_) | UpRow::All)) { "Upload" } else { "Select" }));
             }
         } else if shop.account.is_none() {
             line(self, "Sign in on the Upload tab to see your mods on the store", top + 2.0, 1.4, BONE);
