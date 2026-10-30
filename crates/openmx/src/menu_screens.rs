@@ -1285,7 +1285,13 @@ impl Pen<'_> {
             hints.push((Btn::L1R1, "Tabs"));
         }
         hints.push((Btn::Cross, ok));
-        self.hints(&hints);
+        // A Save Over's question (P229), over the page.
+        if let Some((ask, rows, row)) = menu.overwriting() {
+            self.hints(&[(Btn::Circle, "Cancel"), (Btn::Cross, "Select")]);
+            self.popup(&ask, &rows, row);
+        } else {
+            self.hints(&hints);
+        }
     }
 
     /// The tabs between L1 and R1, the one on lit, their words made smaller where they would run

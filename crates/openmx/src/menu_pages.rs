@@ -150,6 +150,8 @@ pub enum Key {
     /// A disc preset back on every preset's numbers.
     CameraFollow,
     CameraSave,
+    /// One of the player's own presets framed over by what Save as New Preset copies (P229).
+    CameraSaveOver,
     CameraDelete,
     /// What the camera button cycles through.
     CameraCycle,
@@ -157,6 +159,8 @@ pub enum Key {
     Knob(Knob),
     LoadPreset,
     SavePreset,
+    /// The preset Load Preset is on, kept over with the set now (P229).
+    SaveOverPreset,
     DeletePreset,
     ResetMods,
     ModsFolder,
@@ -812,6 +816,16 @@ impl Menu {
             )
             .off_if(self.camera_to_save().is_none(), "The disc's camera presets were not read, and you have none of your own."),
         );
+        let overs: Vec<String> = self.camera_over_choices().iter().map(cameras::Pick::label).collect();
+        let about = "What Save as New Preset would keep, written over a preset of your own in its place and under its name. Left and right pick which; Cross asks first.";
+        let over = match overs.is_empty() {
+            true => Row::choice(Key::CameraSaveOver, "Save Over", &["None of Yours"], 0, about),
+            false => {
+                let names: Vec<&str> = overs.iter().map(String::as_str).collect();
+                Row::choice(Key::CameraSaveOver, "Save Over", &names, self.camera_over, about)
+            }
+        };
+        rows.push(over.off_if(overs.is_empty(), "You have no preset of your own on this machine to save over."));
         let cycles: Vec<&str> = cameras::Cycle::ALL.iter().map(|c| c.label()).collect();
         rows.push(
             Row::choice(Key::CameraCycle, "Camera Button", &cycles, at(&cameras::Cycle::ALL, set.cycle), "What the camera button steps through: the disc's presets, the disc's and then yours, or yours in place of the disc's.")
@@ -1009,6 +1023,15 @@ impl Menu {
         };
         rows.push(load.off_if(none, "No presets saved yet").off_if(held.is_some(), held.as_deref().unwrap_or("")));
         rows.push(Row::action(Key::SavePreset, "Save Preset", &format!("Name and keep {whose} set, with the world's. Any player can load it.")));
+        let over = match names.get(self.mod_preset.min(names.len().saturating_sub(1))) {
+            Some(name) => format!("Save Over {name}"),
+            None => "Save Over".into(),
+        };
+        rows.push(
+            Row::action(Key::SaveOverPreset, &over, &format!("Keep {whose} set, with the world's, over the preset Load Preset is on, under its name. Asks first."))
+                .off_if(none, "No presets saved yet")
+                .off_if(held.is_some(), held.as_deref().unwrap_or("")),
+        );
         rows.push(Row::action(Key::DeletePreset, "Delete Preset", "Forgets the preset Load Preset is on.").off_if(none, "No presets saved yet"));
         let reset = match self.mods_seat() {
             None => "Every modifier back to the original game, Wrecks and Air Wrecks on.",
@@ -1172,6 +1195,10 @@ impl Menu {
     /// A press on an option page: Circle leaves, L1 and R1 step the tabs round, up and down walk the
     /// rows over the headings, and left, right and Cross change the row in place.
     pub(super) fn walk_page(&mut self, screen: Screen, p: Press) {
+        if self.over.as_ref().is_some_and(|o| o.0 == screen) {
+            self.answer_over(p);
+            return;
+        }
         if p.back || (screen == Screen::Garage && p.start) {
             match screen {
                 Screen::Garage => self.close_garage(),
@@ -1371,6 +1398,17 @@ impl Menu {
                 self.type_for(Typing::Camera);
                 return;
             }
+            Key::CameraSaveOver => {
+                let overs = self.camera_over_choices();
+                let n = overs.len();
+                if side {
+                    self.camera_over = cycle(self.camera_over, d, n);
+                    return;
+                }
+                let (Some(page), Some(over)) = (self.screen(), overs.get(self.camera_over.min(n.saturating_sub(1)))) else { return };
+                self.over = Some((page, super::Over::Camera(over.clone()), 1));
+                return;
+            }
             Key::CameraCycle => {
                 let seat = self.camera_seat();
                 self.settings.camera_sets[seat].cycle = cameras::Cycle::ALL[next(row)];
@@ -1401,6 +1439,11 @@ impl Menu {
             }
             Key::SavePreset if p.ok => {
                 self.type_for(Typing::Preset);
+                return;
+            }
+            Key::SaveOverPreset if p.ok => {
+                let (Some(page), n) = (self.screen(), self.settings.presets.len()) else { return };
+                self.over = Some((page, super::Over::Mods(self.mod_preset.min(n - 1)), 1));
                 return;
             }
             Key::DeletePreset if p.ok => {

@@ -2741,6 +2741,15 @@ pub enum LeaveTo {
     Online,
 }
 
+/// The preset a page's Save Over would write over (P229), asked about first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Over {
+    /// The modifier preset at this place in the list.
+    Mods(usize),
+    /// One of the Camera page's seat's own presets.
+    Camera(cameras::Pick),
+}
+
 /// What the pause's confirm (P110) is asking about: its Main Menu row, its Quit row, or its Leave
 /// Session row (N11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2862,6 +2871,11 @@ pub struct Menu {
     pub camera_names: [Vec<String>; 2],
     /// The Camera page's Preset row: 0 for every preset, then [`Menu::camera_choices`]' order.
     camera_pick: usize,
+    /// The Camera page's Save Over row (P229): its place in [`Menu::camera_over_choices`].
+    camera_over: usize,
+    /// A page's Save Over question (P229), while it is up: its page, the preset it would write
+    /// over, and its row, 1 being Cancel.
+    over: Option<(Screen, Over, usize)>,
     /// Frames shown, for the track stills' slideshow.
     pub tick: u32,
     /// The settings changed since [`Menu::take_changed`] last said so.
@@ -3172,6 +3186,8 @@ impl Menu {
             key: (0, 0),
             camera_names: Default::default(),
             camera_pick: 0,
+            camera_over: 0,
+            over: None,
             tick: 0,
             changed: false,
             note: None,
@@ -3922,6 +3938,46 @@ impl Menu {
         self.changed = true;
     }
 
+    /// Keep the modifiers now set over preset `i`, under its own name, and put Load Preset on it
+    /// (P229).
+    fn save_over_preset(&mut self, i: usize) {
+        let mods = self.preset_now();
+        let Some(preset) = self.settings.presets.get_mut(i) else { return };
+        preset.1 = mods;
+        self.mod_preset = i;
+        self.changed = true;
+    }
+
+    /// A page's Save Over question, if it is up (P229): its question, its two rows, Save Over
+    /// first and Cancel second, and the row it is on.
+    pub fn overwriting(&self) -> Option<(String, [&'static str; 2], usize)> {
+        let (screen, what, row) = self.over.as_ref()?;
+        if self.screen() != Some(*screen) {
+            return None;
+        }
+        let name = match what {
+            Over::Mods(i) => self.settings.presets.get(*i).map_or("", |p| p.0.as_str()),
+            Over::Camera(pick) => pick.name.as_str(),
+        };
+        Some((format!("Save over {name}?"), ["Save Over", "Cancel"], *row))
+    }
+
+    /// One press on a page's Save Over question: any direction moves between its two rows, Cross
+    /// on the first writes over the preset, and Cross on Cancel, Circle or Start leave it as it was.
+    pub(super) fn answer_over(&mut self, p: Press) {
+        let Some((screen, what, row)) = self.over.take() else { return };
+        if p.up || p.down || p.left || p.right {
+            self.over = Some((screen, what, 1 - row));
+        } else if p.ok && row == 0 {
+            match what {
+                Over::Mods(i) => self.save_over_preset(i),
+                Over::Camera(pick) => self.save_camera_over(&pick),
+            }
+        } else if !(p.ok || p.back || p.start) {
+            self.over = Some((screen, what, row));
+        }
+    }
+
     /// The pause's rows in order (P211): [`PAUSE`]'s up to Game Modifiers, then the online row, its
     /// Seats once opened and Leave Session, then Main Menu and Quit, always the last two.
     fn pause_layout(&self) -> Vec<PauseRow> {
@@ -4164,6 +4220,8 @@ impl Menu {
 
     fn push(&mut self, screen: Screen) {
         self.stack.push(screen);
+        // A page's Save Over question (P229) is not there to come back to.
+        self.over = None;
     }
 
     fn pop(&mut self) {
