@@ -219,6 +219,23 @@ pub fn frame_floor(vsync: bool, limit: Option<f32>, refresh: f32, waits: bool) -
     fps.map(|fps| Duration::from_secs_f64(1.0 / f64::from(fps)))
 }
 
+/// The rate to run a phone's screen at for a frame limit (P248), where its screen can be told: the
+/// limit when it divides `top`, the screen's top rate, at least twice — 60 or 30 on 120 Hz, 30 on
+/// 60 Hz — else None, the screen left at its top. A limit kept by a sleep against a faster screen
+/// shows each picture after one, two or three refreshes; at the screen's own rate it is one each.
+pub fn screen_rate(top: f32, limit: Option<f32>) -> Option<f32> {
+    let fps = limit.filter(|fps| *fps > 0.0 && *fps < top)?;
+    let n = top / fps;
+    (n >= 1.5 && (n - n.round()).abs() < 0.01).then_some(fps)
+}
+
+/// The floor once the screen runs at the limit ([`screen_rate`]): a little under its refresh, so
+/// the present's wait for the refresh paces the pictures and not the sleep, which would land each
+/// near a refresh's edge and miss some. It still keeps near the limit if the screen does not listen.
+pub fn screen_floor(fps: f32) -> Duration {
+    Duration::from_secs_f64(0.9 / f64::from(fps))
+}
+
 /// Holds the pictures to a floor (P90): each frame ends no sooner than the floor after the last
 /// one's end was due, so a frame limit of 60 is sixty pictures a second on average, the sleep's own
 /// lateness not piling up. Behind, it starts again from now rather than hurrying to catch up.
@@ -579,6 +596,20 @@ mod tests {
     }
 
     /// P90: the VSync and frame limit settings, as a floor on the picture's time.
+    #[test]
+    fn a_phone_screen_runs_at_a_limit_that_divides_it() {
+        assert_eq!(screen_rate(120.0, Some(60.0)), Some(60.0));
+        assert_eq!(screen_rate(120.0, Some(30.0)), Some(30.0));
+        assert_eq!(screen_rate(60.0, Some(30.0)), Some(30.0));
+        assert_eq!(screen_rate(120.0, Some(90.0)), None);
+        assert_eq!(screen_rate(120.0, Some(120.0)), None);
+        assert_eq!(screen_rate(120.0, Some(240.0)), None);
+        assert_eq!(screen_rate(120.0, None), None);
+        assert_eq!(screen_rate(60.0, Some(60.0)), None);
+        assert!(screen_floor(60.0) < Duration::from_secs_f64(1.0 / 60.0));
+        assert!(screen_floor(60.0) > Duration::from_secs_f64(1.0 / 120.0));
+    }
+
     #[test]
     fn the_settings_make_the_pictures_floor() {
         let ms = |d: Option<Duration>| d.map(|d| (d.as_secs_f64() * 1000.0 * 10.0).round() / 10.0);

@@ -50,6 +50,8 @@ struct Shared {
     clicks: Vec<(i32, i32)>,
     /// A finger came down since the last poll (P233's "Tap screen to resume controller").
     touched: bool,
+    /// The rate the shell wants the screen at (P248, [`GpuWindow::screen_rate`]); None, its top.
+    rate: Option<f32>,
 }
 
 static SHARED: Mutex<Shared> = Mutex::new(Shared {
@@ -63,6 +65,7 @@ static SHARED: Mutex<Shared> = Mutex::new(Shared {
     focused: true,
     clicks: Vec::new(),
     touched: false,
+    rate: None,
 });
 
 fn shared() -> MutexGuard<'static, Shared> {
@@ -78,6 +81,8 @@ struct Host {
     holder: openmx_ios::Holder,
     started: Instant,
     next_look: Instant,
+    /// The rate the screen was last asked for.
+    rate: Option<f32>,
 }
 
 impl Host {
@@ -90,8 +95,13 @@ impl Host {
             s.safe = safe;
             s.resized = true;
         }
-        let (size, safe) = (s.size, kept_insets(s.safe, stretched()));
+        let (size, safe, rate) = (s.size, kept_insets(s.safe, stretched()), s.rate);
         drop(s);
+        if rate != self.rate {
+            self.rate = rate;
+            println!("ios: the screen at {}", rate.map_or("its top rate".into(), |fps| format!("{fps} fps")));
+            openmx_ios::set_frame_rate(rate);
+        }
         TOUCH
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -206,7 +216,7 @@ pub fn run_on_main(game: impl FnOnce() + Send + 'static) {
         }
     };
     let now = Instant::now();
-    let mut host = Host { game: Some(Box::new(game)), holder: Default::default(), started: now, next_look: now };
+    let mut host = Host { game: Some(Box::new(game)), holder: Default::default(), started: now, next_look: now, rate: None };
     if let Err(e) = events.run_app(&mut host) {
         println!("ios: the event loop ended: {e}");
     }
@@ -380,6 +390,15 @@ impl GpuWindow {
 
     pub fn waits(&self) -> bool {
         self.config.present_mode == wgpu::PresentMode::Fifo
+    }
+
+    /// The screen asked to run at the frame limit `fps` where that divides its refresh (P248,
+    /// [`crate::pace::screen_rate`]), and the floor the pictures then keep; None, the screen at its
+    /// top and the limit the loop's own to keep. Only a present that waits for the refresh is paced by it.
+    pub fn screen_rate(&mut self, fps: Option<f32>) -> Option<Duration> {
+        let rate = self.refresh.and_then(|top| crate::pace::screen_rate(top, fps)).filter(|_| self.waits());
+        shared().rate = rate;
+        rate.map(crate::pace::screen_floor)
     }
 
     /// Take in what the main thread has put by.

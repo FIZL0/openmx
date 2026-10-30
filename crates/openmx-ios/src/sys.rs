@@ -298,7 +298,8 @@ unsafe extern "C" {
 /// Ask the screen for its top rate (P238): a ProMotion iPhone otherwise picks its own refresh for a
 /// Metal layer, and held the ride at a dead 30 fps. A CADisplayLink on the main run loop, for the
 /// life of the process, with `preferredFrameRateRange` up to `maximumFramesPerSecond`, is how iOS
-/// is told; it calls `[NSObject self]`, which does nothing. The frame limit stays the shell's own.
+/// is told; it calls `[NSObject self]`, which does nothing. A frame limit that divides the top rate
+/// asks for itself instead ([`set_frame_rate`]).
 /// The screen's top rate, for the log. Call once, on the main thread.
 pub fn ask_frame_rate() -> f32 {
     pool(|| {
@@ -318,9 +319,37 @@ pub fn ask_frame_rate() -> f32 {
             let add: extern "C" fn(Id, Id, Id, Id) = std::mem::transmute(objc_msgSend as *const ());
             add(link, sel(c"addToRunLoop:forMode:"), get(class(c"NSRunLoop"), c"mainRunLoop"), NSRunLoopCommonModes);
             retain(link);
+            LINK.store(link as usize, Ordering::Relaxed);
+            TOP.store(most as usize, Ordering::Relaxed);
         }
         most
     })
+}
+
+/// [`ask_frame_rate`]'s display link, retained for the process, and the screen's top rate.
+static LINK: AtomicUsize = AtomicUsize::new(0);
+static TOP: AtomicUsize = AtomicUsize::new(0);
+
+/// Ask the screen for `fps` exactly (P248): a frame limit of 60 on a 120 Hz iPhone, kept by a sleep,
+/// put its pictures on every one, two or three refreshes and juddered at a flat 60 a second; with the
+/// screen itself at 60, each present waits one refresh. None asks for the top rate again. Main
+/// thread only, after [`ask_frame_rate`].
+pub fn set_frame_rate(fps: Option<f32>) {
+    let link = LINK.load(Ordering::Relaxed) as Id;
+    if link.is_null() || !main_thread() {
+        return;
+    }
+    let most = TOP.load(Ordering::Relaxed) as f32;
+    let rates = match fps {
+        Some(fps) => FrameRates { minimum: fps, maximum: fps, preferred: fps },
+        None => FrameRates { minimum: most.min(60.0), maximum: most, preferred: most },
+    };
+    // SAFETY: objc_msgSend cast to `void (id, SEL, CAFrameRateRange)`, as CADisplayLink declares it;
+    // the link is retained for the process
+    unsafe {
+        let range: extern "C" fn(Id, Id, FrameRates) = std::mem::transmute(objc_msgSend as *const ());
+        range(link, sel(c"setPreferredFrameRateRange:"), rates);
+    }
 }
 
 unsafe extern "C" {

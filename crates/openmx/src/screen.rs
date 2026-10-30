@@ -191,6 +191,16 @@ impl Screen {
         }
     }
 
+    /// The phone's screen asked to run at the frame limit (P248, `ios_gpu.rs`), and the floor that
+    /// leaves the pictures.
+    #[cfg(target_os = "ios")]
+    pub fn screen_rate(&mut self, fps: Option<f32>) -> Option<std::time::Duration> {
+        match &mut self.inner {
+            Inner::X(_) => None,
+            Inner::Gpu(w) => w.screen_rate(fps),
+        }
+    }
+
     /// The display's refresh in hertz, where the window can tell.
     pub fn refresh(&self) -> Option<f32> {
         match &self.inner {

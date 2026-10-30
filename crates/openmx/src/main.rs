@@ -2000,6 +2000,11 @@ impl Args {
 fn picture_floor(window: &mut Screen, (vsync, limit): (bool, menu::FrameLimit)) -> Option<Duration> {
     window.set_vsync(vsync);
     let refresh = window.refresh().unwrap_or(60.0);
+    // A phone's screen runs at a limit that divides its refresh, and each present waits one (P248).
+    #[cfg(target_os = "ios")]
+    if let Some(floor) = window.screen_rate(limit.fps(refresh).filter(|_| vsync)) {
+        return Some(floor);
+    }
     pace::frame_floor(vsync, limit.fps(refresh), refresh, window.waits())
 }
 
