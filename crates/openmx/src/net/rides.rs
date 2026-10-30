@@ -2,8 +2,9 @@
 //!
 //! A seat is a whole [`Sim`] of its own — its own input manager, bike and rider. The bikes push each
 //! other apart (S78, [`rider_contact::among`]): every seat's contacts are found from the tick's start
-//! and each seat's step resolves its own, pushing the others' chassis. S54's one Sim of N riders (its
-//! head-on joust's wreck) is not what the shell rides online yet. Each reads its seat's pad as pad 0, the shape every one-player capture of
+//! and each seat's step resolves its own, pushing the others' chassis, and meets the others as rivals,
+//! whose head-on joust wrecks as S54's one Sim of N riders does (S224); a seat's plane has the
+//! others' bikes in its world (S225). Split screen steps its seats the same (N22). Each reads its seat's pad as pad 0, the shape every one-player capture of
 //! the original has. In bytes (a resync, a restart) each seat is [`game_sim::snapshot`]'s codec.
 //!
 //! The frame length is the tick's own: every machine must hand every tick the same `dt`, and a wall
@@ -72,17 +73,27 @@ impl Game for Rides<'_> {
         let paused: Vec<bool> = (0..self.sims.len()).map(|s| pads.get(s).is_some_and(|p| Wanted::of(p.0[super::SWITCH]).paused)).collect();
         let touching: Vec<bool> = riding.iter().zip(&paused).map(|(&r, &p)| r && !p).collect();
         // Rider against rider (S78): every seat's contacts, from where the last tick left every bike.
-        let mut lists = rider_contact::among(self.sims, &touching, dt);
+        // On a world that wraps (MD44), each bike against every other's nearest copy.
+        let mut lists = rider_contact::among_in(self.sims, &touching, dt, &*self.world);
         // The last seat first, as the original walks its riders (S88, `Sim::step_all`).
         for seat in (0..self.sims.len()).rev() {
             let mut bump = lists
                 .as_mut()
                 .map(|l| std::mem::take(&mut l[seat]))
                 .filter(|l| !l.is_empty())
-                .map(|l| rider_contact::bump_among(self.sims, seat, l));
+                .map(|l| rider_contact::bump_among_in(self.sims, seat, l, &*self.world));
             if paused[seat] {
                 continue;
             }
+            // The other seats where they stand now, the ones after this one already stepped, as the
+            // original's walk meets them (S88): the riders this one can joust (S224), and the bikes
+            // in its plane's world if it flies (S225). A seat on the plane has left its bike.
+            let on: Vec<(&game_sim::rider::Rider, bool)> =
+                self.sims.iter().zip(&touching).map(|(s, &t)| (&s.rider, t && s.plane.is_none())).collect();
+            let rivals = rider_contact::rivals_among(&on, seat, &*self.world);
+            let flying = self.sims[seat].plane.as_ref().map(|f| f.body.position);
+            let bikes = flying.map(|at| rider_contact::plane_bikes(&on, seat, at, &*self.world)).unwrap_or_default();
+            drop(on);
             let sim = &mut self.sims[seat];
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
@@ -103,13 +114,13 @@ impl Game for Rides<'_> {
             // On the plane the bike is not stepped, its markers do not run and its rider's body
             // does not move, as offline (`Seat::pass`); the plane's own markers do (P107).
             if sim.plane.is_some() {
-                vehicle::fly_lane(sim, dt, wanted, self.world);
+                vehicle::fly_lane_among(sim, dt, wanted, self.world, &bikes);
                 if !wanted.dpad_rides {
                     vehicle::lane_markers(sim, seat, &spots, &riding, self.world);
                 }
                 continue;
             }
-            sim.step_bumped(dt, &hands, self.world, bump.as_mut());
+            sim.step_among(dt, &hands, self.world, bump.as_mut(), &rivals);
             if !wanted.dpad_rides {
                 markers::frame_among(sim, seat, &spots, &riding, &hands);
             }

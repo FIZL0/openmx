@@ -642,3 +642,100 @@ pub fn bumped_among(sims: &mut [Sim], bump: &Bump) {
         }
     }
 }
+
+/// **Riders as the shell holds them** (N22): split screen's seats are one-player Sims of their own,
+/// as online's are, but each inside its seat, so these take the riders themselves rather than a
+/// slice of Sims — each with whether it is in the others' world this tick (on its bike, its pad in,
+/// not frozen). [`among_in`] on them.
+pub fn contacts_among(riders: &[(&Rider, bool)], dt: F, world: &dyn World) -> Option<Vec<Vec<Contact>>> {
+    contacts_of(riders, dt, &|from, at| crate::nearest_copy(world, from, at))
+}
+
+/// [`bump_among_in`] on riders as the shell holds them (N22).
+pub fn bump_riders(riders: &[(&Rider, &Phy)], me: usize, contacts: Vec<Contact>, world: &dyn World) -> Bump {
+    bump_of(riders, me, contacts, &|from, at| crate::nearest_copy(world, from, at))
+}
+
+/// [`bumped_among`] on riders as the shell holds them (N22).
+pub fn bumped_riders(riders: &mut [&mut Rider], bump: &Bump) {
+    for (i, (r, v)) in riders.iter_mut().zip(&bump.vehicles).enumerate() {
+        if i != bump.me {
+            bumped_one(r, v);
+        }
+    }
+}
+
+/// **The riders `me` can joust** (S224): every other rider in the world, unwrecked and no ghost,
+/// where they stand now — what [`crate::Sim::step_all`] hands each rider's frame, built for seats
+/// that are Sims of their own (online, split screen). On a world that wraps, each where it is
+/// nearest `me`. A pure function of the riders' states, so every machine and every rollback's
+/// re-run builds the same.
+pub fn rivals_among(riders: &[(&Rider, bool)], me: usize, world: &dyn World) -> Vec<crate::ride::Rival> {
+    let from = riders[me].0.ride.chassis.cofg_world;
+    riders
+        .iter()
+        .enumerate()
+        .filter(|&(j, &(r, on))| j != me && on && r.state.wreck.is_none() && !r.ghost.on)
+        .map(|(_, &(r, _))| {
+            let mut rival = r.ride.rival();
+            rival.centre = crate::nearest_copy(world, from, rival.centre);
+            rival
+        })
+        .collect()
+}
+
+/// **The other riders' bikes in seat `me`'s plane's world** (S225), as [`crate::Sim::step`] builds
+/// them for player 1's plane (S95): every other seat's chassis, in the world while it is on its bike
+/// (`on`), unwrecked and no ghost, and where it is nearest the plane (`flying`) on a world that
+/// wraps. `me`'s own bike is out: the original takes it out of the world when its rider switches.
+pub fn plane_bikes(riders: &[(&Rider, bool)], me: usize, flying: Vf, world: &dyn World) -> Vec<crate::flight_search::Bike> {
+    riders
+        .iter()
+        .enumerate()
+        .filter(|&(j, _)| j != me)
+        .map(|(_, &(r, on))| {
+            let mut transform = r.ride.transform();
+            transform.0[3] = crate::nearest_copy(world, flying, transform.0[3]);
+            crate::flight_search::Bike { transform, in_world: on && r.state.wreck.is_none() && !r.ghost.on }
+        })
+        .collect()
+}
+
+impl Sim {
+    /// [`Sim::step_bumped`] with the riders `me` can joust as well (S224, [`rivals_among`]): a
+    /// one-player Sim's bike step as [`Sim::step`]'s — its cars, the event, the seam — with the
+    /// other seats' contacts and head-on rivals in its frame, as [`Sim::step_all`] gives each of its
+    /// riders. With neither, and on the plane, it is [`Sim::step`].
+    pub fn step_among(
+        &mut self,
+        dt: F,
+        controls: &Controls,
+        world: &mut dyn World,
+        bump: Option<&mut Bump>,
+        rivals: &[crate::ride::Rival],
+    ) -> Frame {
+        if (bump.is_none() && rivals.is_empty()) || !self.others.is_empty() || self.plane.is_some() {
+            return self.step(dt, controls, world);
+        }
+        self.traffic.frame(dt, world);
+        self.lend_cars();
+        self.event_frame(dt);
+        let cars = self.car_contacts(0, world, dt);
+        let mut own;
+        let bump = match bump {
+            Some(b) => {
+                b.contacts = crate::mover_contact::merged(std::mem::take(&mut b.contacts), cars);
+                Some(b)
+            }
+            None if cars.is_empty() => None,
+            None => {
+                own = self.bump(0, cars);
+                Some(&mut own)
+            }
+        };
+        let mut said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, rivals, bump);
+        said.seam = self.rider.wrap_round(&*world);
+        self.ticks += 1;
+        said
+    }
+}
