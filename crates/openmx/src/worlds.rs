@@ -210,8 +210,8 @@ fn shape_of_file(path: &Path) -> Result<(F, u32, u32, u32), String> {
 }
 
 /// A terrain's spacing, tree levels and the root cells its tree has, across and along, out of the
-/// whole file: what [`shape_of_file`] reads from its header and root alone.
-#[cfg(test)]
+/// whole file: what [`shape_of_file`] reads from its header and root alone. A disc tile's (P232),
+/// whose file is in an archive.
 fn shape(bytes: &[u8]) -> Result<(F, u32, u32, u32), String> {
     let t = Terrain::parse(bytes)?;
     let root = t.root().ok_or("no tree")?;
@@ -238,6 +238,19 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
     }
     let text = std::fs::read_to_string(dir.join("mod.json")).map_err(|e| format!("{id}: mod.json: {e}"))?;
     let json = Json::parse(&text).map_err(|e| format!("{id}: mod.json: {e}"))?;
+    read(&dir, id, &json, None)
+}
+
+/// Where a world's tile's archives are when they are not its folder's (P232, `crate::disc_worlds`):
+/// for a tile's name, its own archive opened, its disc member (`Tracks\free06.res`) and the second
+/// one the track is ridden with.
+pub type DiscTile<'a> = &'a mut dyn FnMut(&str) -> Result<(Res, String, Option<String>), String>;
+
+/// [`find`]'s reading of a world's `mod.json` (`json`, in `dir`): its tiles from `dir/tiles/<tile>/`,
+/// or, given `disc`, each from the disc's own archives as [`Origin::Disc`] (P232); its joins from
+/// `dir/joins/<join>/` either way.
+pub fn read(dir: &Path, id: &str, json: &Json, mut disc: Option<DiscTile>) -> Result<WorldMod, String> {
+    let dir = dir.to_path_buf();
     let string = |key: &str| json.get(key).and_then(Json::str).ok_or_else(|| format!("{id}: mod.json has no {key}"));
     if string("kind")? != "world" {
         return Err(format!("{id}: not a world"));
@@ -264,8 +277,16 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
             }
             _ => return Err(format!("{id}: {tile}'s keep is not four numbers")),
         };
-        let folder = dir.join("tiles").join(&tile);
-        let res = Res::folder(&folder).map_err(|e| format!("{id}: {tile}: {e}"))?;
+        let (res, folder, origin) = match disc.as_mut() {
+            None => {
+                let folder = dir.join("tiles").join(&tile);
+                (Res::folder(&folder).map_err(|e| format!("{id}: {tile}: {e}"))?, folder, Origin::Folder)
+            }
+            Some(open) => {
+                let (res, track, second) = open(&tile).map_err(|e| format!("{id}: {tile}: {e}"))?;
+                (res, PathBuf::from(&track), Origin::Disc { track, second })
+            }
+        };
         let (scn, stem, bytes) = scene_of(&res).map_err(|e| format!("{id}: {tile}: {e}"))?;
         let sections: Vec<String> = drop
             .iter()
@@ -274,8 +295,14 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
             .collect();
         let text = String::from_utf8_lossy(&bytes);
         let mut scene = track::Scene::parse(without_sections(&text, &sections).as_bytes()).map_err(|e| format!("{id}: {tile}: {scn}: {e}"))?;
-        let terrain = track_mods::terrain_path(&res, &folder, &scene.terrain_file).map_err(|e| format!("{id}: {tile}: {e}"))?;
-        let (spacing, levels, _, _) = shape_of_file(&terrain).map_err(|e| format!("{id}: {tile}: {e}"))?;
+        let (spacing, levels, _, _) = match origin {
+            Origin::Folder => {
+                let terrain = track_mods::terrain_path(&res, &folder, &scene.terrain_file).map_err(|e| format!("{id}: {tile}: {e}"))?;
+                shape_of_file(&terrain)
+            }
+            _ => track_mods::terrain_bytes(&res, &scene.terrain_file).and_then(|b| shape(&b)),
+        }
+        .map_err(|e| format!("{id}: {tile}: {e}"))?;
         // What stands outside the keep stands on ground the tile no longer owns (MD27): a shape
         // there is an invisible wall on a join or a neighbour, so neither it nor a model is kept.
         let kept = keep_feet(keep, spacing);
@@ -291,7 +318,7 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
             first_owner,
         };
         first_owner = first_owner.saturating_add(scene.collision.len() as i32);
-        pieces.push(WorldPiece { tile: t, dir: folder, scene: Some(scene), stem, dropped: sections, scene_bytes: Some(bytes.into()), origin: Origin::Folder });
+        pieces.push(WorldPiece { tile: t, dir: folder, scene: Some(scene), stem, dropped: sections, scene_bytes: Some(bytes.into()), origin });
     }
     let tile_count = pieces.len();
     if tile_count == 0 {

@@ -397,12 +397,24 @@ pub const TRACKS: [(&str, &str); 5] = [
     ("free11", "Cleveland"),
 ];
 
-/// Every free-ride map spliced into one (P71, `crate::spliced`), `(id, name)`: the pick's row after
-/// the five maps, ridden as `--track free_all` is.
-pub const SPLICED: (&str, &str) = ("free_all", "Every free ride");
+/// MX Unleashed's worlds, built off the disc (P232, `crate::disc_worlds`), `(id, name)`: the pick's
+/// rows after the five maps. The browser lists none until it can build them (P203's OPFS view).
+pub const DISC_WORLDS: &[(&str, &str)] = if cfg!(target_arch = "wasm32") {
+    &[]
+} else {
+    &[("world_mxu_free", "MX Unleashed: the freeride maps"), ("world_mxu", "MX Unleashed: every freeride and national")]
+};
 
-/// The pick's rows the disc gives: its five towns, then [`SPLICED`]. The mods' come after.
-pub const DISC_PICK: usize = TRACKS.len() + 1;
+/// P71's "Every free ride", which a saved setting may still name: it is `world_mxu_free` now (P232).
+pub const OLD_SPLICED: &str = "free_all";
+
+/// The pick's rows the disc gives: its five towns, then [`DISC_WORLDS`]. The mods' come after.
+pub const DISC_PICK: usize = TRACKS.len() + DISC_WORLDS.len();
+
+/// The pick's place of a disc track or disc world, `None` for a mod's.
+fn disc_place(track: &str) -> Option<usize> {
+    TRACKS.iter().map(|t| t.0).chain(DISC_WORLDS.iter().map(|w| w.0)).position(|id| id == track)
+}
 
 /// `settings.txt`: the rider and the ride.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1495,6 +1507,7 @@ impl Settings {
                 "backwards_bail" => s.backwards_bail = v == "on",
                 "vibration" => s.vibration = v != "off",
                 "store_rules" => s.store_rules = v == "agreed",
+                "track" if v == OLD_SPLICED => s.track = "world_mxu_free".to_string(),
                 "track" if TRACKS.iter().any(|t| t.0 == v) || mod_id(v) => s.track = v.to_string(),
                 // The ride setup's machine a seat (P41), gone with Start On (P177): every ride starts
                 // on the bike, so an old file's line loads and is dropped.
@@ -1832,13 +1845,9 @@ impl Settings {
         out
     }
 
-    /// The track pick's index of [`Settings::track`]: a town's, or [`SPLICED`]'s after them.
+    /// The track pick's index of [`Settings::track`]: a town's, or a disc world's after them.
     pub fn track_index(&self) -> usize {
-        match TRACKS.iter().position(|t| t.0 == self.track) {
-            Some(i) => i,
-            None if self.track == SPLICED.0 => TRACKS.len(),
-            None => 0,
-        }
+        disc_place(&self.track).unwrap_or(0)
     }
 }
 
@@ -2803,7 +2812,7 @@ impl Act {
 /// load has got.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Loading {
-    /// The track's place in the pick for its still: a disc town's in [`TRACKS`], [`SPLICED`]'s after
+    /// The track's place in the pick for its still: a disc town's in [`TRACKS`], a disc world's after
     /// them, or `usize::MAX` for a mod's, which has none.
     pub still: usize,
     pub name: String,
@@ -3751,9 +3760,9 @@ impl Menu {
     /// A ride on `track` is loading (P127): the loading screen, with the track's name and its pack
     /// as the pick shows them, and nothing done yet.
     pub fn start_loading(&mut self, track: &str) {
-        let disc = TRACKS.iter().position(|(id, _)| *id == track).or((track == SPLICED.0).then_some(TRACKS.len()));
+        let disc = disc_place(track);
         let name = match disc {
-            Some(i) if i == TRACKS.len() => SPLICED.1.to_string(),
+            Some(i) if i >= TRACKS.len() => DISC_WORLDS[i - TRACKS.len()].1.to_string(),
             Some(i) => TRACKS[i].1.to_string(),
             None => self.mod_tracks.iter().find(|(id, _)| id == track).map_or_else(|| track.to_string(), |(_, n)| n.clone()),
         };
@@ -5302,22 +5311,25 @@ const TEXTURES: [&str; 4] = ["background", "frontend_background_radial", "mainme
 // ---- the track mods' place in the pick (MD2) -------------------------------------------------------
 
 impl Menu {
-    /// The tracks the pick lists: the disc's [`TRACKS`] and [`SPLICED`], then the mods'.
+    /// The tracks the pick lists: the disc's [`TRACKS`] and [`DISC_WORLDS`], then the mods'.
     pub fn track_count(&self) -> usize {
         DISC_PICK + self.shown_mods().count()
     }
 
-    /// The mod tracks the pick lists: the mods' less the packs switched off (P118).
+    /// The mod tracks the pick lists: the mods' less the packs switched off (P118), and less a world
+    /// installed under a disc world's id, which the disc world's row rides (P232).
     fn shown_mods(&self) -> impl Iterator<Item = &(String, String)> {
-        self.mod_tracks.iter().filter(|(id, _)| !self.settings.mods_off.iter().any(|p| p == pack_of(id)))
+        self.mod_tracks
+            .iter()
+            .filter(|(id, _)| !self.settings.mods_off.iter().any(|p| p == pack_of(id)) && !DISC_WORLDS.iter().any(|w| w.0 == id))
     }
 
-    /// The pick's track `at`, `(id, name)`: a disc track's archive and town, the spliced maps', or a
+    /// The pick's track `at`, `(id, name)`: a disc track's archive and town, a disc world's, or a
     /// mod's id and name.
     pub fn track_at(&self, at: usize) -> (&str, &str) {
         match TRACKS.get(at) {
             Some(&(id, name)) => (id, name),
-            None if at == TRACKS.len() => SPLICED,
+            None if at < DISC_PICK => DISC_WORLDS[at - TRACKS.len()],
             None => self
                 .shown_mods()
                 .nth(at - DISC_PICK)
@@ -5371,11 +5383,11 @@ impl Menu {
         self.track_groups().iter().position(|(name, _)| name == want).unwrap_or(0)
     }
 
-    /// The game a track of the pick is from (MD11): MX Unleashed for the disc's and their splice,
+    /// The game a track of the pick is from (MD11): MX Unleashed for the disc's and its worlds,
     /// Worlds for a combined map, else its `mod.json`'s source game, or its pack's name where the
     /// shell gave none.
     pub fn track_game(&self, id: &str) -> String {
-        if TRACKS.iter().any(|t| t.0 == id) || id == SPLICED.0 {
+        if disc_place(id).is_some() {
             return DISC_GAME.into();
         }
         if pack_of(id) == WORLDS {
@@ -5515,11 +5527,11 @@ impl Art {
     }
 
     /// Which of [`Art::images`] a track's card shows as its `i`th picture: a disc track's still
-    /// (turning through its five), the spliced maps' (each map's in turn, west to east), or a mod's
+    /// (turning through its five), a disc world's (each free-ride map's in turn), or a mod's
     /// picture; `None` where there is none.
     pub fn track_image(&self, id: &str, i: usize) -> Option<usize> {
         let first = TEXTURES.len() + 1;
-        if id == SPLICED.0 {
+        if DISC_WORLDS.iter().any(|w| w.0 == id) {
             let n = TRACKS.len();
             return (0..n).find_map(|k| self.track_image(TRACKS[(i + k) % n].0, (i + k) / n));
         }

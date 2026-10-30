@@ -1,0 +1,15 @@
+[package]
+name = "trnwrite"
+description = "Writes PLN v7 terrains (.ps2.trn) and their scenes (.scn), proved by reading them back with game-sim's reader (P232: moved from openmx-mods tools/trnwrite)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The terrain reader and the game's floats: game-sim's, not a second copy.
+game-sim = { path = "../game-sim" }
+ps2-float = { path = "../ps2-float" }
+
+[dev-dependencies]
+# The disc round trip (`--ignored`) reads the configured MX Unleashed disc's track archives.
+game-render = { path = "../game-render", default-features = false }

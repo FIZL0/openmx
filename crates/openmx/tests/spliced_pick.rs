@@ -3,6 +3,9 @@
 //! run as a user runs it, from a settings file of its own whose track is the splice, the front end
 //! opened on the pause: that starts the settings' track through the same ride the pick's Cross
 //! starts, and the ride has to be the spliced world. Skips without the disc.
+//!
+//! P232: the splice is world_mxu_free now, built off the disc into the settings' own (empty) mods
+//! folder, and a file that saved `free_all` rides it.
 
 // the browser's own clock, threads and files, which are std's here (P196)
 #[allow(unused)]
@@ -45,8 +48,8 @@ fn the_front_end_rides_the_spliced_world() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("kit.toml"), "[game]\niso = \"disc.iso\"\n").unwrap();
     std::os::unix::fs::symlink(&iso, dir.join("disc.iso")).unwrap();
-    let settings = Settings { track: menu::SPLICED.0.into(), ..Settings::default() };
-    assert_eq!(Settings::parse(&settings.text()).track, "free_all", "the settings keep the splice");
+    let settings = Settings { track: menu::OLD_SPLICED.into(), ..Settings::default() };
+    assert_eq!(Settings::parse(&settings.text()).track, "world_mxu_free", "the settings' splice is world_mxu_free");
     menu::save(&dir, &settings, &Controls::default()).unwrap();
 
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
@@ -57,7 +60,7 @@ fn the_front_end_rides_the_spliced_world() {
     let said = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
     let line = |p: &str| said.lines().find(|l| l.starts_with(p)).unwrap_or_else(|| panic!("no {p:?} line in:\n{said}"));
-    let world = line("world: free_all");
+    let world = line("world: world_mxu_free");
     assert!(world.contains("5 tiles"), "{world}");
     assert_eq!(line("world holes:"), "world holes: none, so only the outer edge throws");
     line("ride hash");

@@ -28,6 +28,9 @@ game-sim = { path = "../game-sim" }
 # Without its GPU half here: the desktop's and the browser's builds each turn it on below.
 game-render = { path = "../game-render", default-features = false }
 ps2-float = { path = "../ps2-float" }
+# The stitcher (P232): the joins of MX Unleashed's worlds, built off the player's disc, and mod.json's
+# JSON, which the shell reads as the stitcher writes it.
+stitch = { path = "../stitch" }
 # Online play (N2, `src/net`): ggrs' rollback core as opentennis vendors it (third_party/ggrs, with its
 # thread-drivable clock), its messages as bincode, and serde for the session's own messages. The
 # shell's only dependencies from outside the workspace: the simulation takes none. N3's transport

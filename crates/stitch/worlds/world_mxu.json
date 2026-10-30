@@ -1,0 +1,13 @@
+{
+  "id": "world_mxu",
+  "name": "MX Unleashed: every freeride and national",
+  "wrap": "xz",
+  "tiles": [
+    "mxu_free06", "mxu_free07", "mxu_free09", "mxu_free10", "mxu_free11",
+    "mxu_nat01", "mxu_nat02", "mxu_nat03", "mxu_nat04", "mxu_nat05", "mxu_nat06", "mxu_nat07",
+    "mxu_nat08", "mxu_nat09", "mxu_nat10", "mxu_nat11", "mxu_nat12", "mxu_nat13", "mxu_nat14",
+    "mxu_nat15", "mxu_nat16", "mxu_nat17", "mxu_nat18", "mxu_nat19", "mxu_nat20", "mxu_nat21",
+    "mxu_nat22"
+  ],
+  "sky": "mxu_free06"
+}

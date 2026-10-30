@@ -1,0 +1,15 @@
+[package]
+name = "stitch"
+description = "Joins track maps into one world (openmx-mods standard §3): each map whole, new ground between them (P232: moved from openmx-mods tools/stitch)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Scene and terrain: game-sim's readers, not a second copy.
+game-sim = { path = "../game-sim" }
+ps2-float = { path = "../ps2-float" }
+# A built world's tiles read as the shell reads a mod folder (`src/openmx.rs`), without the GPU half.
+game-render = { path = "../game-render", default-features = false }
+# The join terrains are written with trnwrite; a tile's pages are read through its MD1 view.
+trnwrite = { path = "../trnwrite" }

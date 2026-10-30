@@ -338,10 +338,14 @@ fn a_held_direction_repeats_and_the_stick_counts_as_one() {
     // The stick leaned down, held for a second: one step, then the repeats.
     let mut down = Report::idle();
     down.set_axis(3, 0xff);
+    // Counted step by step: the pick's rows wrap round (seven since P232's two worlds).
+    let (mut moved, mut at) = (0, m.cursor(Screen::Tracks));
     for _ in 0..60 {
         m.step(r.read(&down));
+        if m.cursor(Screen::Tracks) != at {
+            (moved, at) = (moved + 1, m.cursor(Screen::Tracks));
+        }
     }
-    let moved = m.cursor(Screen::Tracks);
     assert!(moved >= 3, "a second of stick moved the pick {moved} times");
     // And a centred stick moves nothing.
     let mut centre = Report::idle();
@@ -349,7 +353,7 @@ fn a_held_direction_repeats_and_the_stick_counts_as_one() {
     for _ in 0..60 {
         m.step(r.read(&centre));
     }
-    assert_eq!(m.cursor(Screen::Tracks), moved);
+    assert_eq!(m.cursor(Screen::Tracks), at);
     // The first report a fresh reader sees is a hold, not a press: the Cross that opened a screen
     // does not press on it too.
     let mut fresh_reader = Reader::new();
@@ -3911,7 +3915,7 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
         ("mxvatv_nat01".into(), "Nat 01".into()),
         ("mxvatv_nat02".into(), "Nat 02".into()),
         ("untamed_nat_az".into(), "Arizona".into()),
-        ("world_mxu".into(), "MX Unleashed: every map".into()),
+        ("world_mxvatv".into(), "MX vs. ATV Unleashed: every map".into()),
         ("world_ultra".into(), "Ultra".into()),
     ]);
     let names: Vec<String> = m.track_groups().into_iter().map(|(n, _)| n).collect();
@@ -3922,11 +3926,11 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
     // Two presses to the worlds (MD11's All Games first).
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.track_at(m.cursor(Screen::Tracks)), ("world_mxu", "MX Unleashed: every map"));
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)), ("world_mxvatv", "MX vs. ATV Unleashed: every map"));
     tap(&mut m, &mut r, Control::Down);
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_ultra");
     tap(&mut m, &mut r, Control::Down);
-    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_mxu", "down wraps inside the worlds");
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_mxvatv", "down wraps inside the worlds");
     tap(&mut m, &mut r, Control::Up);
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_ultra");
     // Left from the first category wraps to the last.
@@ -3939,56 +3943,64 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
     }
     assert_eq!(m.track_filter_group(), 2);
     let acts = tap(&mut m, &mut r, Control::Cross);
-    assert!(acts.contains(&Act::Ride("world_mxu".into())), "{acts:?}");
+    assert!(acts.contains(&Act::Ride("world_mxvatv".into())), "{acts:?}");
     // Back on the pick it opens on the world, and a category comes back to the ride's track.
     let mut next = Menu::new(Settings::parse(&m.settings.text()), Controls::default());
     next.set_mod_tracks(m.mod_tracks.clone());
-    assert_eq!(next.track_at(next.cursor(Screen::Tracks)).0, "world_mxu");
+    assert_eq!(next.track_at(next.cursor(Screen::Tracks)).0, "world_mxvatv");
     // A pack switched off takes its category with it.
     m.settings.mods_off = vec!["world".into()];
     let names: Vec<String> = m.track_groups().into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, ["All Games", "MX Unleashed", "MX vs. ATV Unleashed", "MX vs. ATV Untamed"]);
 }
 
-/// P149: every free-ride map spliced into one (P71) is the pick's row after the five maps, in the
-/// disc's own filter: Cross on it rides `free_all`, the settings open on it next time, the loading
-/// screen names it with its picture, and a mod still comes after it. Online keeps to the towns.
+/// P232: MX Unleashed's worlds off the disc are the pick's rows after the five maps, in the disc's
+/// own filter: Cross on one rides it, the settings open on it next time, the loading screen names it
+/// with its picture, and a mod still comes after them. An installed world of the same id is not a
+/// row of its own (the disc world's row rides it). P149's `free_all` is `world_mxu_free` now.
 #[test]
-fn the_pick_lists_the_spliced_maps_after_the_five_and_rides_them() {
-    let (mut m, mut r) = fresh();
-    tap(&mut m, &mut r, Control::Cross);
-    assert_eq!(m.screen(), Some(Screen::Tracks));
-    assert_eq!(m.cursor(Screen::Tracks), 0);
-    for _ in 0..menu::TRACKS.len() {
-        tap(&mut m, &mut r, Control::Down);
+fn the_pick_lists_the_disc_worlds_after_the_five_and_rides_them() {
+    assert_eq!(menu::DISC_WORLDS.iter().map(|w| w.0).collect::<Vec<_>>(), ["world_mxu_free", "world_mxu"]);
+    for (k, &(id, name)) in menu::DISC_WORLDS.iter().enumerate() {
+        let (mut m, mut r) = fresh();
+        tap(&mut m, &mut r, Control::Cross);
+        assert_eq!(m.screen(), Some(Screen::Tracks));
+        assert_eq!(m.cursor(Screen::Tracks), 0);
+        for _ in 0..menu::TRACKS.len() + k {
+            tap(&mut m, &mut r, Control::Down);
+        }
+        assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len() + k);
+        assert_eq!(m.track_at(m.cursor(Screen::Tracks)), (id, name));
+        assert_eq!(m.track_game(id), menu::DISC_GAME);
+        let acts = tap(&mut m, &mut r, Control::Cross);
+        assert!(acts.contains(&Act::Ride(id.into())), "{acts:?}");
+        assert_eq!(m.settings.track, id);
+        m.start_loading(id);
+        let l = m.loading.as_ref().expect("the loading screen");
+        assert_eq!((l.name.as_str(), l.pack.as_str(), l.still), (name, "MX Unleashed", menu::TRACKS.len() + k));
+        // Kept: the next start's pick is on it.
+        let again = Settings::parse(&m.settings.text());
+        assert_eq!(again.track, id);
+        let mut next = Menu::new(again, Controls::default());
+        assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len() + k);
+        assert_eq!(next.online_tracks(), menu::TRACKS.map(|t| t.0), "the worlds are not ridden online");
+        // With a mod, the mod is after them and they stay in MX Unleashed's filter; an installed
+        // world of their id is theirs.
+        next.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into()), (id.into(), "Installed".into())]);
+        assert_eq!(next.track_count(), menu::DISC_PICK + 1);
+        assert_eq!(next.track_at(menu::DISC_PICK), ("md2_flat", "MD2 Flat"));
+        let groups = next.track_groups();
+        let disc = groups.iter().find(|(n, _)| n == menu::DISC_GAME).expect("the disc's filter");
+        assert_eq!(disc.1, 0..menu::DISC_PICK);
+        assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len() + k);
     }
-    assert_eq!(m.cursor(Screen::Tracks), menu::TRACKS.len());
-    assert_eq!(m.track_at(m.cursor(Screen::Tracks)), ("free_all", "Every free ride"));
-    assert_eq!(m.track_game("free_all"), menu::DISC_GAME);
-    let acts = tap(&mut m, &mut r, Control::Cross);
-    assert!(acts.contains(&Act::Ride("free_all".into())), "{acts:?}");
-    assert_eq!(m.settings.track, "free_all");
-    m.start_loading("free_all");
-    let l = m.loading.as_ref().expect("the loading screen");
-    assert_eq!((l.name.as_str(), l.pack.as_str(), l.still), ("Every free ride", "MX Unleashed", menu::TRACKS.len()));
-    // Kept: the next start's pick is on it.
-    let again = Settings::parse(&m.settings.text());
-    assert_eq!(again.track, "free_all");
-    let mut next = Menu::new(again, Controls::default());
-    assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len());
-    assert_eq!(next.online_tracks(), menu::TRACKS.map(|t| t.0), "the splice is not ridden online");
-    // With a mod, the mod is after it and the splice stays in MX Unleashed's filter.
-    next.set_mod_tracks(vec![("md2_flat".into(), "MD2 Flat".into())]);
-    assert_eq!(next.track_at(menu::DISC_PICK), ("md2_flat", "MD2 Flat"));
-    let groups = next.track_groups();
-    let disc = groups.iter().find(|(n, _)| n == menu::DISC_GAME).expect("the disc's filter");
-    assert_eq!(disc.1, 0..menu::DISC_PICK);
-    assert_eq!(next.cursor(Screen::Tracks), menu::TRACKS.len());
+    // P149's splice, saved as `free_all`, opens on world_mxu_free.
+    assert_eq!(Settings::parse("track = free_all\n").track, "world_mxu_free");
 }
 
 /// MD2: the track pick lists the mods folder's tracks after the disc's, a mod rides by its id, and
 /// the Mods page turns the folder, or one pack of it, off and is saved. With no mods the pick is the
-/// disc's five and their splice (P149).
+/// disc's five and its worlds (P232).
 #[test]
 fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     use menu::Key;
@@ -3997,7 +4009,9 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     for (i, t) in menu::TRACKS.iter().enumerate() {
         assert_eq!(m.track_at(i), *t);
     }
-    assert_eq!(m.track_at(menu::TRACKS.len()), menu::SPLICED);
+    for (k, w) in menu::DISC_WORLDS.iter().enumerate() {
+        assert_eq!(m.track_at(menu::TRACKS.len() + k), *w);
+    }
     assert!(m.settings.mods, "the folder is read unless asked");
     assert!(!m.settings.text().contains("mods"), "a file without mods says nothing of them");
 
@@ -4010,7 +4024,7 @@ fn the_pick_lists_mod_tracks_after_the_discs_and_the_mods_row_is_saved() {
     assert_eq!(m.cursor(Screen::Tracks), menu::DISC_PICK, "up from the first wraps inside All Games");
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Up);
-    assert_eq!(m.cursor(Screen::Tracks), menu::DISC_PICK - 1, "up from the first wraps inside the disc's own, to the splice");
+    assert_eq!(m.cursor(Screen::Tracks), menu::DISC_PICK - 1, "up from the first wraps inside the disc's own, to its last world");
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.cursor(Screen::Tracks), menu::DISC_PICK, "right is the mods' game");
     let acts = tap(&mut m, &mut r, Control::Cross);
@@ -5634,14 +5648,15 @@ fn the_pick_is_a_card_a_track_with_its_own_picture() {
         let shown = cards(&art, &m, w, h);
         let ids: Vec<&str> = shown.iter().map(|c| c.0.as_str()).collect();
         let mut want: Vec<&str> = menu::TRACKS.map(|t| t.0).to_vec();
-        want.push(menu::SPLICED.0);
-        assert_eq!(ids, want, "a card for every disc track, then the splice (P149), at {w}x{h}");
+        want.extend(menu::DISC_WORLDS.iter().map(|w| w.0));
+        // As many as the screen has room for: a short one's last world is below it (P232).
+        assert!(ids.len() > menu::TRACKS.len() && want.starts_with(&ids), "a card for every disc track, then its worlds (P232), at {w}x{h}: {ids:?}");
         let images = art.images();
         for (i, (id, card, pic, image, lit)) in shown.iter().enumerate() {
             assert_eq!(*lit, i == m.cursor(Screen::Tracks), "{id}");
             let image = image.unwrap_or_else(|| panic!("{id} has no picture"));
-            // The splice's first picture is its first map's.
-            let first = if id == menu::SPLICED.0 { "free06" } else { id.as_str() };
+            // A disc world's first picture is its first map's.
+            let first = if menu::DISC_WORLDS.iter().any(|w| w.0 == id) { "free06" } else { id.as_str() };
             assert_eq!(images[image].rgba, still(first, 1).rgba, "{id}'s card shows its first still");
             // The picture on its card, 16:9, and the cards one under the other.
             assert!(pic[0] >= card[0] && pic[1] >= card[1] && pic[0] + pic[2] <= card[0] + card[2] + 0.5 && pic[1] + pic[3] <= card[1] + card[3] + 0.5, "{id} at {w}x{h}");
@@ -5659,11 +5674,13 @@ fn the_pick_is_a_card_a_track_with_its_own_picture() {
         assert_eq!(images[turned[lit].3.unwrap()].rgba, still(menu::TRACKS[lit].0, 2).rgba);
         assert_eq!(images[turned[(lit + 1) % 5].3.unwrap()].rgba, still(menu::TRACKS[(lit + 1) % 5].0, 1).rgba, "an unlit card stays");
     }
-    // The splice's card (P149) turns through each map's stills in turn, west to east.
+    // A disc world's card (P232) turns through each free-ride map's stills in turn.
     let images = art.images();
-    for i in 0..10 {
-        let map = menu::TRACKS[i % 5].0;
-        assert_eq!(images[art.track_image("free_all", i).unwrap()].rgba, still(map, i / 5 + 1).rgba, "picture {i}: {map}");
+    for (id, _) in menu::DISC_WORLDS {
+        for i in 0..10 {
+            let map = menu::TRACKS[i % 5].0;
+            assert_eq!(images[art.track_image(id, i).unwrap()].rgba, still(map, i / 5 + 1).rgba, "{id} picture {i}: {map}");
+        }
     }
     // The mods, in a category of their own: the pictured one shows its picture, the other none.
     let (mut m, mut r) = fresh();
@@ -5736,7 +5753,7 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
     };
     let towns: Vec<String> = menu::TRACKS.iter().map(|t| t.0.to_string()).collect();
     let mut disc = towns.clone();
-    disc.push(menu::SPLICED.0.to_string());
+    disc.extend(menu::DISC_WORLDS.iter().map(|w| w.0.to_string()));
     let mut every = disc.clone();
     every.extend(["world_gen", "gen_a1", "gen_a2", "beta_a3", "gen_b1", "gen_b2"].map(String::from));
     let mut all = walk(&mut m, &mut r);
