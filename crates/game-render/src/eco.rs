@@ -791,6 +791,26 @@ impl Grove {
         if f.z == 0.0 || l == 0.0 { (1.0, 0.0) } else { (f.z / l, -f.x / l) }
     }
 
+    /// What casts our shadows of the grove (V108; user 2026-10-29, "pop in and fade in from
+    /// shadows"): every plant within `reach` of `eye`, whichever way the camera looks and however far
+    /// its picture has taken over, each as its model. V108 cast what the view drew, so a tree behind
+    /// the camera or over the top of the picture threw no shadow into it until it came into view,
+    /// and one far enough to be its picture threw the picture's card, which turns with the camera.
+    /// A plant keeps the turn its drawn model has; one never yet drawn as its model stands unturned.
+    pub fn casters<'a>(&'a self, eye: V3, reach: f32, out: &mut Vec<Draw<'a>>) {
+        let turned = self.turned.lock().unwrap_or_else(|e| e.into_inner());
+        let cut = self.foliage == Foliage::Cutout;
+        for (i, plant) in self.ecosystem.plants.iter().enumerate() {
+            let size = plant.height.max(plant.width * 2.0);
+            if plant.pos.sub(eye).len() > reach + size {
+                continue;
+            }
+            let turn = turned.get(i).copied().flatten().unwrap_or((1.0, 0.0));
+            let model = if cut { &self.cut[plant.species] } else { &self.models[plant.species] };
+            out.push(Draw { model, at: self.model_at(plant, turn), alpha: 1.0, cover: 1.0, species: plant.species, part: Part::Model, cut });
+        }
+    }
+
     /// What one view draws of the grove from `camera` (`fov` its horizontal degrees), nearest
     /// first, out to `reach`, by [`Grove::lod`]'s rule. A plant whose model comes into view turns it
     /// to the camera's heading and keeps it turned that way while it stays near, as the original

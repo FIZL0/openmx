@@ -3704,8 +3704,18 @@ impl Renderer {
                     let key = ((p as u64) << 48) | ((m as u64) << 16);
                     let inst = InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes], cover: d.cover * share };
                     self.scratch.push((key, ghost, inst));
-                    if casting && ghost == 0 && !few_casters {
-                        self.sun.cast(p, None, centre, radius, m, 0, inst);
+                }
+                // Every plant near casts, seen or not, as its model ([`crate::eco::Grove::casters`]).
+                if casting && !few_casters {
+                    plants.clear();
+                    grove.casters(camera.eye, crate::shadow::CASCADES[1], &mut plants);
+                    for d in &plants {
+                        let Some(m) = ids[d.part_index(species)] else { continue };
+                        let model = &self.models[m];
+                        let row = |r: usize| v3(d.at.0[r][0], d.at.0[r][1], d.at.0[r][2]);
+                        let radius = model.radius * row(0).len().max(row(1).len()).max(row(2).len());
+                        let inst = InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes], cover: 1.0 };
+                        self.sun.cast(p, None, row(3), radius, m, 0, inst);
                     }
                 }
             }
