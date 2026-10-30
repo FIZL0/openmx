@@ -75,7 +75,9 @@ fn the_original_switch_rides_the_originals_fog_layout_plants_and_picture() {
     let Some(dir) = store("on", &on) else { return };
     let said = ride(&dir);
     assert!(line(&said, "graphics:").starts_with("graphics: original (fog"), "{said}");
-    assert_eq!(line(&said, "plants:"), "plants: original");
+    // Not its plants since 2026-10-29: the original's distance fade read as bushes that were not
+    // there, so plant detail is ours on or off.
+    assert_eq!(line(&said, "plants:"), "plants: smooth");
     // V56's leaves are a switch of their own since V57.
     assert_eq!(line(&said, "foliage:"), "foliage: original");
     // V83: no anisotropic filtering.

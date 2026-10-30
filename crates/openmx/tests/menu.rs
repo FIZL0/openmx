@@ -432,9 +432,12 @@ fn the_settings_file_reads_back_as_it_was_written() {
         tricks: menu::Tricks::MxVsAtv,
         // MX vs. ATV's handling (MD40).
         handling: game_sim::handling::Handling::MxVsAtv,
-        // The Original tab's own two at the original's (P126).
-        plants: game_render::eco::Lod::Original,
+        // The Original tab's picture at the original's (P126); the plants are always ours since
+        // 2026-10-29.
+        plants: game_render::eco::Lod::Smooth,
         picture: menu::Picture::Television,
+        // The frame-rate counter on (2026-10-29).
+        show_fps: true,
         // The original's blended leaves (V57).
         foliage: game_render::eco::Foliage::Original,
         // Textures filtered 4x (V83).
@@ -686,15 +689,15 @@ fn the_render_scale_row_cycles_and_is_saved() {
     settings_at(&mut m, &mut r, "Graphics");
     down_to(&mut m, &mut r, menu::Key::RenderScale);
     let mut seen = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..5 {
         tap(&mut m, &mut r, Control::Right);
         assert!(m.take_changed());
         seen.push(m.settings.render_scale);
     }
-    assert_eq!(seen, [RenderScale::Full, RenderScale::ThreeQuarters, RenderScale::Half, RenderScale::Auto]);
+    assert_eq!(seen, [RenderScale::Full, RenderScale::ThreeQuarters, RenderScale::Half, RenderScale::Forty, RenderScale::Auto]);
     assert_eq!(m.settings.graphics, Graphics::Full, "the graphics row is untouched");
     tap(&mut m, &mut r, Control::Left);
-    assert_eq!(m.settings.render_scale, RenderScale::Half);
+    assert_eq!(m.settings.render_scale, RenderScale::Forty);
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.render_scale, RenderScale::Auto);
     tap(&mut m, &mut r, Control::Cross);
@@ -710,7 +713,7 @@ fn the_render_scale_row_cycles_and_is_saved() {
         assert!(s.text().contains(&format!("render_scale = {}\n", scale.word())));
         assert_eq!(Settings::parse(&s.text()).render_scale, scale);
     }
-    assert_eq!(RenderScale::ALL.map(RenderScale::fraction), [None, Some(1.0), Some(0.75), Some(0.5)]);
+    assert_eq!(RenderScale::ALL.map(RenderScale::fraction), [None, Some(1.0), Some(0.75), Some(0.5), Some(0.4)]);
     // Auto when the file has no key, or one it cannot read; a hand-written `%` reads too.
     assert_eq!(Settings::parse("graphics = original\n").render_scale, RenderScale::Auto);
     assert_eq!(Settings::parse("render_scale = 33\n").render_scale, RenderScale::Auto);
@@ -789,6 +792,35 @@ fn the_vsync_and_frame_limit_rows_change_by_pad_and_are_saved() {
     assert_eq!(FrameLimit::Refresh.fps(165.0), Some(165.0));
     assert_eq!(FrameLimit::Fps(60).fps(165.0), Some(60.0));
     assert_eq!(FrameLimit::Off.fps(165.0), None);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// 2026-10-29: the Graphics tab's Show FPS, after Frame Limit, is off in a fresh file and in one
+/// from before it; the pad turns it on, and `show_fps = on` is saved and read back. Off writes no
+/// line, so an older file is written as it was.
+#[test]
+fn the_show_fps_row_changes_by_pad_and_is_saved() {
+    let (mut m, mut r) = fresh();
+    assert!(!m.settings.show_fps, "Show FPS off unless turned on");
+    let dir = scratch("show-fps");
+    assert!(!menu::load(&dir).0.show_fps, "no file is Show FPS off");
+    std::fs::write(dir.join(menu::SETTINGS_FILE), "name = Rider\nminimap = off\n").unwrap();
+    assert!(!menu::load(&dir).0.show_fps, "a file from before it is Show FPS off");
+
+    settings_at(&mut m, &mut r, "Graphics");
+    down_to(&mut m, &mut r, menu::Key::ShowFps);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.take_changed());
+    assert!(m.settings.show_fps);
+    let text = m.settings.text();
+    assert!(text.contains("show_fps = on\n"), "{text}");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    assert!(menu::load(&dir).0.show_fps, "saved and read back");
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(!m.settings.show_fps);
+    assert!(!m.settings.text().contains("show_fps"), "off writes no line");
+    assert!(Settings::parse("show_fps = on\n").show_fps);
+    assert!(!Settings::parse("show_fps = off\n").show_fps);
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -1804,15 +1836,15 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     tab_to(&mut m, r, "Rider");
     down_to(&mut m, r, Key::Garage(G::Rider));
     tap(&mut m, r, Control::Right);
-    // 2P: class left (125 to 50), Tuning to A, and the rider two along in its second colours.
+    // 2P: class left (125 to 50), and the rider two along in its second colours. There is no Tuning
+    // row: a player always rides the P files, the AI riders' A ones never.
     tab_to(&mut m, r, "Bike");
     down_to(&mut m, r, Key::Player);
     tap(&mut m, r, Control::Right);
     assert_eq!(m.page()[0].value, "2P");
+    assert!(!m.page().iter().any(|row| row.label == "Tuning"), "the Bike tab has no Tuning row");
     down_to(&mut m, r, Key::Garage(G::Class));
     tap(&mut m, r, Control::Left);
-    down_to(&mut m, r, Key::Garage(G::Tuning));
-    tap(&mut m, r, Control::Right);
     tab_to(&mut m, r, "Rider");
     assert_eq!(m.page()[0].value, "2P", "the Player row is every tab's");
     down_to(&mut m, r, Key::Garage(G::Rider));
@@ -1832,7 +1864,7 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     assert_eq!(m.picks.0[2], roster::Pick::default());
 
     assert_eq!((one.set.engine, one.set.pro, one.set.tuning), (Engine::Cc250, true, Tuning::P));
-    assert_eq!((two.set.engine, two.set.pro, two.set.tuning), (Engine::Cc50, false, Tuning::A));
+    assert_eq!((two.set.engine, two.set.pro, two.set.tuning), (Engine::Cc50, false, Tuning::P));
     assert_ne!(one.rider, two.rider);
     assert_ne!(one.rider, "thq1");
 
@@ -4133,9 +4165,9 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
 fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     use menu::{Departure, Key};
     let groups = [
-        ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::Departure(Departure::Foliage), Key::Departure(Departure::Textures), Key::WorldSky]),
+        ("World", vec![Key::DrawDistance, Key::Departure(Departure::Foliage), Key::Departure(Departure::Textures), Key::WorldSky]),
         ("Picture", vec![Key::TextureFiltering, Key::Shadows, Key::Casters, Key::Detail]),
-        ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit]),
+        ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit, Key::ShowFps]),
     ];
     let graphics: Vec<Key> = groups.iter().flat_map(|(_, keys)| keys.clone()).collect();
     let (mut m, mut r) = fresh();
@@ -4184,11 +4216,11 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::VideoPreset);
     tap(&mut m, &mut r, Control::Down);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
-    for _ in 0..5 {
+    for _ in 0..4 {
         tap(&mut m, &mut r, Control::Down);
     }
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::TextureFiltering);
-    for _ in 0..5 {
+    for _ in 0..4 {
         tap(&mut m, &mut r, Control::Up);
     }
     // Draw Distance changed by the pad is the setting, and is saved.
@@ -5049,7 +5081,8 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
     assert_eq!(c.planes, [Layout::Original; menu::SEATS]);
     assert_eq!(s.cameras, [menu::CameraView::ORIGINAL; menu::SEATS_MAX]);
     assert_eq!(s.graphics, Graphics::Original);
-    assert_eq!(s.plants, game_render::eco::Lod::Original);
+    // Not the plants (2026-10-29): there is no original plant detail to switch to.
+    assert_eq!(s.plants, game_render::eco::Lod::Smooth);
     assert_eq!(s.picture, menu::Picture::Television);
     assert_eq!((s.minimap, s.hud_scale, s.overlay), (false, 120, Overlay::None), "the HUD is left as it was");
     // The sim is none of them (P55).
@@ -5210,7 +5243,9 @@ fn the_original_switches_round_trip_through_the_files() {
     menu::save(&dir, &m.settings, &m.controls).unwrap();
     let (s, c) = menu::load(&dir);
     assert_eq!(Menu::new(s, c).original(), Original::On);
-    assert_eq!(Settings::parse("plants = original\n").plants, game_render::eco::Lod::Original);
+    // An older file's original plants read as ours, and are not written back (2026-10-29).
+    assert_eq!(Settings::parse("plants = original\n").plants, game_render::eco::Lod::Smooth);
+    assert!(!Settings::parse("plants = original\n").text().contains("plants"));
     assert_eq!(Settings::parse("plants = fancy\npicture = 3:2\n"), Settings::default());
     std::fs::remove_dir_all(dir).ok();
 }

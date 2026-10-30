@@ -1350,6 +1350,70 @@ pub fn join_draw(frame: &mut Frame, scale: f32) -> Line {
     line
 }
 
+/// The Settings' Show FPS counter (2026-10-29): the pictures a second the ride has drawn, averaged
+/// over each [`FpsMeter::EVERY`] and shown until the next, so the number holds still enough to read.
+/// Before the first half second has gone it reads `-- FPS`.
+#[derive(Clone, Debug, Default)]
+pub struct FpsMeter {
+    since: Option<Instant>,
+    frames: u32,
+    shown: Option<u32>,
+}
+
+impl FpsMeter {
+    /// How long each average runs: the counter changes about twice a second.
+    pub const EVERY: Duration = Duration::from_millis(500);
+
+    /// One picture drawn at `now`.
+    pub fn frame(&mut self, now: Instant) {
+        let Some(since) = self.since else {
+            self.since = Some(now);
+            return;
+        };
+        self.frames += 1;
+        let spent = now.duration_since(since);
+        if spent >= FpsMeter::EVERY {
+            self.shown = Some((self.frames as f32 / spent.as_secs_f32()).round() as u32);
+            self.since = Some(now);
+            self.frames = 0;
+        }
+    }
+
+    /// What the counter says.
+    pub fn text(&self) -> String {
+        match self.shown {
+            Some(n) => format!("{n} FPS"),
+            None => "-- FPS".into(),
+        }
+    }
+}
+
+/// Where the counter's right edge and baseline are, in the disc's 640x448 held to the top right:
+/// above [`TOP_RIGHT`]'s pieces, small, in the frame's own corner and not a split view's.
+const FPS_AT: (f32, f32) = (640.0 - 0.9 * EM, 2.0 * EM);
+
+/// The Show FPS counter `text` (a [`FpsMeter::text`]) in frame `view`'s top right, as sprites into
+/// `out`, [`images`] counted from `base`, at the HUD scale `scale`: once over the whole frame, after
+/// every view's HUD, on the GPU and (by [`fps_draw`]) the software path alike.
+pub fn fps_sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], scale: f32, text: &str) -> Line {
+    let s = scale_of(view[2], view[3], scale);
+    let mut pen = Pen { out, view, s, base, corner: Corner::TopRight, alpha: 1.0 };
+    let size = 1.1 * EM;
+    let (right, base_y) = FPS_AT;
+    let w = Pen::measure(Face::Words, Weight::Heavy, text, size);
+    let rect = pen.edged(Face::Words, Weight::Heavy, text, (right - w, base_y), size, 0.0, CHALK, shade(200), 0.08 * EM);
+    Line { text: text.to_string(), rect, colour: CHALK }
+}
+
+/// [`fps_sprites`] drawn into `frame`, the whole window's picture, on the CPU.
+pub fn fps_draw(frame: &mut Frame, scale: f32, text: &str) -> Line {
+    let mut out = Vec::new();
+    let view = [0.0, 0.0, frame.width as f32, frame.height as f32];
+    let line = fps_sprites(&mut out, 0, view, scale, text);
+    ink::raster(frame, &out, &images());
+    line
+}
+
 struct PanelOut {
     drawn: PanelDrawn,
     rect_layout_bottom: f32,

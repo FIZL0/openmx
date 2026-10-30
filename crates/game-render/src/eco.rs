@@ -355,6 +355,10 @@ fn fade_alpha(f: u8) -> f32 {
 pub enum Lod {
     /// The original's ([`look`]): every plant at the same two distances, the picture as the atlas
     /// paints it faded in over the model, and the model dropped at the far one.
+    ///
+    /// No longer a player's choice (2026-10-29): the shell's settings, presets and Auto ladder
+    /// ride [`Lod::Smooth`] alone, as the original's hand-over fades in bushes that are not there.
+    /// Kept for the research tests that compare against the original and `--plants original`.
     Original,
     /// Ours (V55, presentation only): the model dissolves into the picture over a wider band, by
     /// a fixed screen pattern so neither has to be sorted, the band's middle moved per plant

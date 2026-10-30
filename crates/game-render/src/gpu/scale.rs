@@ -9,8 +9,13 @@ use super::{DEPTH, depth_state, sampler_entry, texture_entry, uniform_entry};
 use bytemuck::{Pod, Zeroable};
 use std::time::Duration;
 
-/// The smallest fraction the scale goes to: below half the picture is mush.
-pub const MIN_SCALE: f32 = 0.5;
+/// The smallest fraction a fixed scale goes to: the settings' 40%, the last rung of the Auto
+/// preset's ladder on a weak phone, which gives up pixels rather than its shadows and fog
+/// (`openmx`'s `video::cheaper`). Not a sixteenth: [`quantise`] clamps up to it.
+pub const MIN_SCALE: f32 = 0.4;
+/// The smallest [`AutoScale`] picks on its own: below half the picture is mush, so only a scale the
+/// player (or the Auto preset's ladder) fixes goes lower.
+pub const AUTO_MIN: f32 = 0.5;
 /// The fractions are kept to sixteenths, so a scale that hovers does not remake its texture each
 /// time it moves.
 const STEP: f32 = 1.0 / 16.0;
@@ -63,7 +68,7 @@ impl AutoScale {
         if mean > budget {
             // To the scale whose pixels fit the budget, a little under.
             let to = self.scale * (budget / mean).sqrt() * 0.95;
-            self.scale = quantise(to.min(self.scale - STEP));
+            self.scale = quantise(to.min(self.scale - STEP)).max(AUTO_MIN);
         } else if mean < budget * 0.5 && self.scale < 1.0 {
             self.scale = quantise(self.scale + STEP);
         }
@@ -229,6 +234,8 @@ mod tests {
     fn the_scale_keeps_to_sixteenths_between_half_and_whole() {
         assert_eq!(quantise(1.3), 1.0);
         assert_eq!(quantise(0.1), MIN_SCALE);
+        // The settings' 40% is kept whole, not rounded to 6/16 under the floor.
+        assert_eq!(quantise(0.4), 0.4);
         assert_eq!(quantise(0.74), 0.75);
         assert_eq!(quantise(f32::NAN), 1.0);
         assert_eq!(scaled((3840, 2160), 0.5), (1920, 1080));
@@ -243,7 +250,7 @@ mod tests {
         for _ in 0..WINDOW {
             auto.frame(budget * 4);
         }
-        assert_eq!(auto.scale, MIN_SCALE);
+        assert_eq!(auto.scale, AUTO_MIN);
         // Just over: one step down at least, and never below the floor.
         let mut auto = AutoScale::new(budget);
         for _ in 0..WINDOW {

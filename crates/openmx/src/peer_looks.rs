@@ -29,7 +29,8 @@ pub fn drawn(seats: usize, mine: usize) -> Vec<usize> {
 pub fn garage_pick(pick: &Pick, own: &roster::Pick) -> roster::Pick {
     roster::Pick {
         bike: if pick.model.trim().is_empty() { own.bike.clone() } else { pick.model.trim().to_ascii_lowercase() },
-        set: roster::Set::from_word(&pick.bike).unwrap_or(own.set),
+        // A peer is a person: P, whatever its pick says ([`roster::Set::ridden`]).
+        set: roster::Set::from_player_word(&pick.bike).unwrap_or(own.set.ridden()),
         rider: if pick.rider.trim().is_empty() { own.rider.clone() } else { pick.rider.trim().to_ascii_lowercase() },
         look: roster::Look::parse(&pick.look),
         preset: String::new(),

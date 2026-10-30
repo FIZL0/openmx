@@ -100,6 +100,25 @@ impl Set {
         Set::all().into_iter().find(|s| s.word() == w)
     }
 
+    /// The set as a player rides it: always on its P files. The original gives the human rider the
+    /// P tuning and its AI riders the A one (S14's freeride opponent), so a seat a person rides — the
+    /// garage's, `--set`'s, an online peer's — never rides A, whatever a saved `garage.txt`, a word on
+    /// the command line or another machine's pick says. [`Set::all`] and [`Set::from_word`] still list
+    /// the A files, for the AI riders that ride them.
+    pub fn ridden(self) -> Set {
+        Set { tuning: Tuning::P, ..self }
+    }
+
+    /// [`Set::from_word`] as a player rides it ([`Set::ridden`]).
+    pub fn from_player_word(w: &str) -> Option<Set> {
+        Set::from_word(w).map(Set::ridden)
+    }
+
+    /// The eight sets a player can ride, class by class, Race before Pro: [`Set::all`]'s P half.
+    pub fn players() -> Vec<Set> {
+        Set::all().into_iter().filter(|s| s.tuning == Tuning::P).collect()
+    }
+
     /// The set's three halves as a rider reads them: `125 Race P`.
     pub fn label(self) -> String {
         let tier = if self.pro { "Pro" } else { "Race" };
@@ -391,7 +410,8 @@ impl Catalogue {
             .rider(&pick.rider)
             .or_else(|| self.rider(&stock.rider))
             .or(self.riders.first());
-        let mut set = pick.set;
+        // A player's seat rides P, never the AI riders' A ([`Set::ridden`]).
+        let mut set = pick.set.ridden();
         if let Some(b) = bike {
             set.engine = b.engine;
         }
@@ -494,7 +514,8 @@ impl Picks {
             if let Some(bike) = words.next().and_then(clean) {
                 pick.bike = bike;
             }
-            if let Some(set) = words.next().and_then(Set::from_word) {
+            // A file from before the garage lost its Tuning row may say an A set: it reads as P.
+            if let Some(set) = words.next().and_then(Set::from_player_word) {
                 pick.set = set;
             }
             if let Some(rider) = words.next().and_then(clean) {
@@ -1009,10 +1030,8 @@ pub enum Row {
     Model,
     /// The model's paints.
     Livery,
-    /// Race or Pro.
+    /// Race or Pro. (No Tuning row: a player always rides the P files, [`Set::ridden`].)
     Tier,
-    /// A or P.
-    Tuning,
     /// Whose gear.
     Rider,
     /// Its colourway.
@@ -1027,12 +1046,11 @@ pub enum Row {
     Preset,
 }
 
-pub const ROWS: [Row; 15] = [
+pub const ROWS: [Row; 14] = [
     Row::Class,
     Row::Model,
     Row::Livery,
     Row::Tier,
-    Row::Tuning,
     Row::Rider,
     Row::Colours,
     Row::Outfit,
@@ -1102,12 +1120,6 @@ impl Garage {
                 p.bike = paints[wrap(at, by, paints.len())].archive.clone();
             }
             Row::Tier => p.set.pro = !p.set.pro,
-            Row::Tuning => {
-                p.set.tuning = match p.set.tuning {
-                    Tuning::A => Tuning::P,
-                    Tuning::P => Tuning::A,
-                }
-            }
             Row::Rider => {
                 let names = c.names();
                 let Some(r) = c.rider(&p.rider) else { return };
@@ -1243,11 +1255,6 @@ impl Garage {
             },
             // The original's Driving Model's two (P213).
             Row::Tier => (if p.set.pro { "Pro Physics" } else { "Race Physics" }).into(),
-            Row::Tuning => (match p.set.tuning {
-                Tuning::A => "A",
-                Tuning::P => "P",
-            })
-            .into(),
             Row::Rider => rider.map_or(p.rider.clone(), |r| rider_label(&r.name)),
             Row::Colours => rider.map_or(String::new(), |r| r.colours.to_string()),
             Row::Outfit => {
@@ -1341,9 +1348,7 @@ mod tests {
         assert_eq!(g.value(&c, Row::Livery), "motoxxx");
         g.down(); // tier
         g.turn(&c, 1);
-        g.down(); // tuning
-        g.turn(&c, 1);
-        assert_eq!(g.pick.set.word(), "pro125a");
+        assert_eq!(g.pick.set.word(), "pro125p", "a player rides P: there is no Tuning row");
         g.down(); // rider
         g.turn(&c, 1);
         assert_eq!(g.pick.rider, "fox1");

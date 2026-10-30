@@ -110,6 +110,8 @@ pub enum Key {
     RenderScale,
     VSync,
     FrameLimit,
+    /// The Graphics tab's Show FPS (2026-10-29): the ride's frame rate in the top right.
+    ShowFps,
     /// The Graphics tab's Preset row (P223): Auto, a preset, or Custom.
     VideoPreset,
     /// Shadow Casters (P223): all, or fewer under Better.
@@ -487,7 +489,8 @@ impl Menu {
 
     /// The Graphics tab (P128): each graphics setting once, under the group it is in. The Original
     /// tab's graphics sub-switches (P126) are here and not there: Draw Distance is its fog, and
-    /// Plant Detail its own row. Picture Shape went to the Display tab as Aspect Ratio (P176).
+    /// Leaves its own row (Plant Detail left on 2026-10-29: ours alone). Picture Shape went to the
+    /// Display tab as Aspect Ratio (P176).
     fn graphics_rows(&self) -> Vec<Row> {
         let s = &self.settings;
         let scales = RenderScale::ALL.map(RenderScale::label);
@@ -516,7 +519,6 @@ impl Menu {
                 at(&Graphics::ALL, s.graphics),
                 "Original Fog is the game's haze and far clip. Far Fog is the same haze four times as far out. Whole Map draws everything, with only a light haze far off.",
             ),
-            self.departure_row(Departure::Plants),
             self.departure_row(Departure::Foliage),
             self.departure_row(Departure::Textures),
             // MD9: a combined world's sky and light, one for all of it or each map its own.
@@ -558,6 +560,7 @@ impl Menu {
             Row::choice(Key::RenderScale, "Render Scale", &scales, at(&RenderScale::ALL, s.render_scale), "How much of the window's resolution the 3D is drawn at. Auto drops it when frames run long and climbs back when there's room."),
             Row::on_off(Key::VSync, "VSync", s.vsync, "Waits for the display before showing a frame. No tearing. Off draws as fast as it can."),
             Row::choice(Key::FrameLimit, "Frame Limit", &limits, at(&FrameLimit::ALL, s.frame_limit), "The most frames a second. Only the picture's rate; the ride itself always ticks at the game's 30 Hz."),
+            Row::on_off(Key::ShowFps, "Show FPS", s.show_fps, "The frame rate in the top right corner while you ride, updated twice a second."),
         ]
     }
 
@@ -569,7 +572,7 @@ impl Menu {
             "Original Game",
             &["Off", "On"],
             0,
-            "On puts everything back to the original game: its controls, cameras, fog, plants, leaves, aspect ratio, texture filtering and shadows; the HUD stays openmx's. Each switch below can be set on its own, the fog, plants, leaves, texture filtering and shadows on the Graphics tab, and the aspect ratio on the Display tab. The ride itself is the original's either way; Game Modifiers change it.",
+            "On puts everything back to the original game: its controls, cameras, fog, leaves, aspect ratio, texture filtering and shadows; the HUD stays openmx's. Each switch below can be set on its own, the fog, leaves, texture filtering and shadows on the Graphics tab, and the aspect ratio on the Display tab. The ride itself is the original's either way; Game Modifiers change it.",
         )
         .tips(&["Every enhancement on", "The game as it shipped"]);
         match self.original() {
@@ -863,7 +866,6 @@ impl Menu {
                 rows.push(row(G::Model, "Bike", "The bike in this class."));
                 rows.push(row(G::Livery, "Paint", "The bike's livery."));
                 rows.push(row(G::Tier, "Driving Model", "Race Physics, or Pro Physics: faster bikes."));
-                rows.push(row(G::Tuning, "Tuning", "Suspension and gearing set-up."));
             }
             _ => {
                 rows.push(row(G::Piece(Piece::Helmet), "Helmet", "The helmet, in the rider's colours."));
@@ -1276,6 +1278,7 @@ impl Menu {
             Key::AspectRatio => s.picture = Picture::ALL[next(row)],
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
+            Key::ShowFps => s.show_fps = !s.show_fps,
             Key::FrameLimit => s.frame_limit = s.frame_limit.step(p.left),
             Key::VideoPreset => {
                 // Custom is shown, never stepped onto: past it is Auto again.
@@ -1542,7 +1545,7 @@ impl Departure {
     /// the Original Game page's master switch, which the Ride tab opens (P179).
     pub fn tab(self) -> usize {
         match self {
-            Departure::Fog | Departure::Plants | Departure::Foliage | Departure::Textures | Departure::Filtering | Departure::Shadows => TAB_GRAPHICS,
+            Departure::Fog | Departure::Foliage | Departure::Textures | Departure::Filtering | Departure::Shadows => TAB_GRAPHICS,
             // P176: Aspect Ratio, on Display.
             Departure::Picture => TAB_DISPLAY,
             Departure::Controls | Departure::Cameras | Departure::Markers => TAB_RIDE,

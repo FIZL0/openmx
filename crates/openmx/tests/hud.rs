@@ -131,6 +131,21 @@ fn a_plain_launch_starts_on_the_ride_hud() {
     assert!(same * 20 < apart_none, "a plain launch is {same} pixels off --overlay hud's frame");
 }
 
+/// 2026-10-29: `--show-fps on` (the Settings' Show FPS) draws the frame rate in the frame's top
+/// right on either renderer, and leaves the rest of the HUD where it was.
+#[test]
+fn show_fps_draws_the_frame_rate_in_the_top_right() {
+    let corner = (560, 0, 640, 24);
+    for renderer in ["gpu", "software"] {
+        let Some(on) = first_frame(&format!("fps-{renderer}"), &["--renderer", renderer, "--overlay", "hud", "--show-fps", "on"]) else { return };
+        let off = first_frame(&format!("fps-{renderer}-off"), &["--renderer", renderer, "--overlay", "hud", "--show-fps", "off"]).unwrap();
+        let n = apart(&on, &off, corner);
+        assert!(n > 40, "{renderer}: only {n} pixels of the top right were drawn on");
+        let speedo = apart(&on, &off, READOUT);
+        assert!(speedo * 50 < (READOUT.2 - READOUT.0) * (READOUT.3 - READOUT.1), "{renderer}: the speedometer moved, {speedo} pixels apart");
+    }
+}
+
 /// P170: the debug HUD and the original's are gone, and a launch asking for either is refused with
 /// a message saying so, before it opens a disc or a window.
 #[test]

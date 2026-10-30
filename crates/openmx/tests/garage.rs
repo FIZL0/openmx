@@ -98,8 +98,10 @@ fn a_pick_without_the_disc() {
     let picks = Picks::parse("seat2 = cr250_faisst pro250a fox2\nseat9 = x race50a y\nseat3 = 125sx nonsense\n");
     assert_eq!(picks.0[0], Pick::default());
     assert_eq!(picks.0[1].bike, "cr250_faisst");
-    assert_eq!(picks.0[1].set.word(), "pro250a");
+    // A player rides P: an A set in an old file (the AI riders' tuning) reads as its P twin.
+    assert_eq!(picks.0[1].set.word(), "pro250p");
     assert_eq!(picks.0[1].rider, "fox2");
+    assert!(!picks.text().contains("pro250a"));
     assert_eq!(picks.0[2].set, Set::FREERIDE, "a set it cannot read keeps the stock one");
     assert_eq!(Picks::parse(&picks.text()), picks);
 }
@@ -130,18 +132,23 @@ fn the_disc_offers_every_set_and_the_rider_set() {
         for _ in 0..2 {
             g.row = row(Row::Tier);
             g.turn(&c, 1);
-            for _ in 0..2 {
-                g.row = row(Row::Tuning);
-                g.turn(&c, 1);
-                let (_, member) = ride_bytes(&mut disc, &g.pick);
-                assert_eq!(format!("bike\\{}.phy", g.pick.set.word()), member.to_ascii_lowercase());
-                reached.push(g.pick.set);
-            }
+            let (_, member) = ride_bytes(&mut disc, &g.pick);
+            assert_eq!(format!("bike\\{}.phy", g.pick.set.word()), member.to_ascii_lowercase());
+            reached.push(g.pick.set);
         }
     }
     reached.sort_by_key(|s| s.word());
     reached.dedup();
-    assert_eq!(reached.len(), 16, "{reached:?}");
+    // The player's eight: every class and tier on its P files, never the AI riders' A ones.
+    assert_eq!(reached.len(), 8, "{reached:?}");
+    assert!(reached.iter().all(|s| s.tuning == game_sim::track::Tuning::P), "{reached:?}");
+    // A pick that says A (an old `garage.txt`, `--set`) is fitted onto its P twin.
+    for s in Set::all() {
+        let bike = c.bikes.iter().find(|b| b.engine == s.engine).unwrap().archive.clone();
+        let fit = c.fit(&Pick { bike, set: s, ..Pick::default() });
+        assert_eq!(fit.set, s.ridden(), "{s:?}");
+        assert_eq!(ride_bytes(&mut disc, &fit).1.to_ascii_lowercase(), format!("bike\\{}.phy", s.ridden().word()));
+    }
 }
 
 #[test]
@@ -153,9 +160,9 @@ fn a_picked_bike_and_rider_reach_the_ride_per_seat() {
     };
     let wanted = Picks([
         Pick::default(),
-        seat("fast50_01", "race50a", "fox2"),
+        seat("fast50_01", "race50p", "fox2"),
         seat("cr250_faisst", "pro250p", "reed1"),
-        seat("500_01", "pro500a", "thor2"),
+        seat("500_01", "pro500p", "thor2"),
     ]);
     assert_eq!(SEATS, 4);
 
@@ -196,7 +203,7 @@ fn a_picked_bike_and_rider_reach_the_ride_per_seat() {
     // And it rides differently: three seconds flat out on the stock seat's file and on the 50's.
     let (small, _) = ride_bytes(&mut disc, &picks.0[1]);
     let (a, b) = (flat_out(&stock_bytes, 180), flat_out(&small, 180));
-    println!("flat out for 3 s: Race125P {a:.2} ft/s, Race50A {b:.2} ft/s");
+    println!("flat out for 3 s: Race125P {a:.2} ft/s, Race50P {b:.2} ft/s");
     assert!(a > 1.0 && b > 1.0, "a bike did not move: {a} {b}");
     assert_ne!(a, b, "the 125 and the 50 came out of three seconds at the same speed");
 }
