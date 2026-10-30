@@ -104,6 +104,39 @@ const FEW_CASTERS_RADIUS: f32 = 12.0;
 /// How much an actor's bounding sphere is grown by before it is culled against a view (P223): a
 /// posed rider reaches past the bind pose's sphere, an arm or a leg thrown out in a wreck.
 const ACTOR_CULL_GROWTH: f32 = 1.5;
+/// **The sphere an actor is culled by** (P223's cull; the user, 2026-10-29: "on mobile my ragdoll is
+/// disappearing after a bit on ground"): its model's bind sphere round `at`'s origin, unless it is
+/// posed, and then round every posed node, each node's origin reaching the model's radius.
+///
+/// A posed actor's `at` need not be anywhere near what it draws: the wreck ragdoll's body is drawn
+/// with the tumbling bike's `at` and a palette that carries each bone to where it lies (openmx's
+/// `Shown::of`), so a body thrown 25–40 ft from the bike was culled with the bike's
+/// sphere whenever the wreck camera, which frames the body, left the bike out of view — on every
+/// preset alike (High at 1280×720 and Phone at 852×393 lost it on the same 47 of the run's frames).
+pub fn actor_sphere(at: &M4, pose: &[M4], radius: f32) -> (V3, f32) {
+    let row = |m: &M4, r: usize| v3(m.0[r][0], m.0[r][1], m.0[r][2]);
+    let scale = |m: &M4| row(m, 0).len().max(row(m, 1).len()).max(row(m, 2).len());
+    if pose.is_empty() {
+        return (row(at, 3), radius * scale(at));
+    }
+    let (mut lo, mut hi) = (v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN));
+    let mut reach = 0.0f32;
+    for node in pose {
+        let m = node.mul(*at);
+        let o = row(&m, 3);
+        lo = v3(lo.x.min(o.x), lo.y.min(o.y), lo.z.min(o.z));
+        hi = v3(hi.x.max(o.x), hi.y.max(o.y), hi.z.max(o.z));
+        reach = reach.max(radius * scale(&m));
+    }
+    let centre = lo.add(hi).scale(0.5);
+    let r = hi.sub(lo).len() * 0.5 + reach;
+    if centre.x.is_finite() && centre.y.is_finite() && centre.z.is_finite() && r.is_finite() {
+        (centre, r)
+    } else {
+        (row(at, 3), radius * scale(at))
+    }
+}
+
 /// Node matrices a palette row holds (four texels each).
 const PALETTE_ROW: u32 = 256;
 /// A view's uniforms, padded to the alignment a dynamic offset needs.
@@ -3696,17 +3729,17 @@ impl Renderer {
                     None => [model.bind_palette, model.nodes],
                 };
                 let key = ((p as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
-                let row = |r: usize| v3(a.at.0[r][0], a.at.0[r][1], a.at.0[r][2]);
-                let radius = model.radius * row(0).len().max(row(1).len()).max(row(2).len());
+                let pose = a.pose.and_then(|p| frame.poses.get(p)).map_or(&[][..], |p| p.as_slice());
+                let (centre, radius) = actor_sphere(&a.at, pose, model.radius);
                 // Out of this view, an actor is not drawn but still casts into it (P223, opentennis's
                 // B345: the riders and machines behind the camera were drawn every frame).
-                if cull.sees(row(3), radius * ACTOR_CULL_GROWTH) {
+                if cull.sees(centre, radius * ACTOR_CULL_GROWTH) {
                     self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette, cover: 1.0 }));
                     // Every run of its group is drawn once, solid or see-through, as the passes below do.
                     drawn.actors[v][i] += model.group(group).iter().map(|r| (r.count / 3) as usize).sum::<usize>();
                 }
                 if ghost == 0 {
-                    self.sun.cast(p, Some(i), row(3), radius, m, group, InstanceRaw { m: a.at.0, palette, cover: 1.0 });
+                    self.sun.cast(p, Some(i), centre, radius, m, group, InstanceRaw { m: a.at.0, palette, cover: 1.0 });
                 }
             }
             // The trees and bushes: each a model near, a picture far and both between (V48). Under
@@ -5766,6 +5799,49 @@ mod tests {
         assert_eq!(drawn.actors, vec![vec![board_tris, 0, 0]]);
         assert_eq!((drawn.actor(0, 0), drawn.actor(0, 3), drawn.actor(1, 0)), (board_tris, 0, 0));
         assert!(board_tris > 0 && drawn.triangles[0] >= board_tris);
+    }
+
+    /// The user, 2026-10-29: "on mobile my ragdoll is disappearing after a bit on ground". A posed
+    /// actor is culled where its pose puts it, not where its `at` is: the wreck body is drawn with the
+    /// bike's `at`, and its bones lie 25–40 ft off. The board here has its `at` 60 ft behind the
+    /// camera and a pose that carries it back to 8 ft in front; it is drawn whole, and so is the plain
+    /// board beside it, while the same `at` unposed is culled.
+    #[test]
+    fn a_posed_actor_is_culled_where_its_pose_puts_it() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (mut scene, assets, camera) = known_scene();
+        let board_tris = assets.models["board"].model.triangles(0).len();
+        let board = scene.models.remove(0);
+        scene.models.clear();
+        let at = M4::placement(board.pos, board.look, board.up);
+        // The bike's place, behind the camera, and the bone that undoes it.
+        let behind = M4::placement(v3(0.0, 0.0, -60.0), v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0));
+        let back = M4::placement(v3(0.0, 0.0, 68.0), v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0));
+        let bone = assets.models["board"].model.world(0).mul(back);
+        let poses = vec![vec![bone]];
+        let (centre, _) = actor_sphere(&behind, &poses[0], 6.0);
+        assert!(centre.sub(board.pos).len() < 2.0, "the posed sphere is at {centre:?}, not the board's {:?}", board.pos);
+        let (w, h) = (64u32, 48u32);
+        let light = Lighting::of(&scene);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let actors = [
+            Actor { model: "board", at: behind, pose: Some(0), lod_from: None, alpha: 1.0 },
+            Actor { model: "board", at, pose: None, lod_from: None, alpha: 1.0 },
+            Actor { model: "board", at: behind, pose: None, lod_from: None, alpha: 1.0 },
+        ];
+        let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
+        let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+        let drawn = gpu.render(&target, &assets, &Scene3 { views: &views, poses: &poses, overlay: &[], sprites: &[], light: &light });
+        assert_eq!(drawn.actors, vec![vec![board_tris, board_tris, 0]], "the posed board was culled at its at");
     }
 
     /// The backdrop crossfades between two skies by the second's share (MD26), a missing one is the
