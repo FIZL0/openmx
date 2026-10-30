@@ -29,6 +29,8 @@
 //               { online: { name, relay, codes?, join?, host?, bike, ticks? } }
 //               { key: code << 1 | down } | { blur } | { click: [x, y] } | { view: [w, h] } | { pads, names? }
 //               { played: frames }
+//               { device: [css narrow, css wide, dpr, cores, memory MB] } | { hz: number } (P223: the Auto video
+//               preset's pick, and the display's rate as the page's animation frames come)
 //               { latest: String } (P193: the newer build the site has) | { lastBuild: String? } (the build the page
 //               last started, from its local storage, sent before any start)
 // Messages out: { progress: [done, total] } | { started: true } | { error: String } | { missing: true }
@@ -62,6 +64,9 @@ let padNames = {};
 // P193: the newer build the page found on the site, and the build the page last started.
 let latest = '';
 let lastBuild = null;
+// P223: the device as the page sees it, and the display's measured rate (0 until measured).
+let device = [];
+let hz = 0;
 // the mod store's token as the page keeps it, and the last text pasted into the page (P199)
 let token = '';
 let pasted = '';
@@ -104,6 +109,8 @@ globalThis.openmx = {
   },
   queued: () => queued,
   latest: () => latest,
+  device: () => Float64Array.from(device),
+  refresh: () => hz,
   last_build: ours => {
     const before = lastBuild;
     lastBuild = ours;
@@ -429,6 +436,10 @@ onmessage = async ({ data }) => {
     } else if (data.pads) {
       pads = data.pads;
       if (data.names) padNames = data.names;
+    } else if (data.device) {
+      device = data.device;
+    } else if (data.hz) {
+      hz = data.hz;
     } else if (data.latest !== undefined) {
       latest = data.latest;
     } else if ('lastBuild' in data) {

@@ -91,6 +91,8 @@ pub(crate) use host::say as host_say;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use host::phone as host_phone;
 #[cfg(target_arch = "wasm32")]
+pub(crate) use host::{device as host_device, refresh as host_refresh};
+#[cfg(target_arch = "wasm32")]
 pub(crate) use host::{last_build as host_last_build, latest_build as host_latest, reload as host_reload};
 
 /// This build's online id (P189, `build.rs`): its version and commit, as the desktop's `run` stamps it. The page's
@@ -215,6 +217,30 @@ mod host {
         /// The page reloads, into the newer build (P193).
         #[wasm_bindgen(js_namespace = openmx)]
         pub(crate) fn reload();
+        /// What the page knows of the device (P223): the screen's narrow and wide sides in CSS px,
+        /// the device pixels per CSS px, the cores and Chromium's `deviceMemory` in MB (0 unknown).
+        #[wasm_bindgen(js_namespace = openmx, js_name = device)]
+        fn host_device_info() -> Vec<f64>;
+        /// The display's rate as the page's animation frames come (P223): 30 in a phone's Low Power
+        /// Mode; 0 while it has not measured one.
+        #[wasm_bindgen(js_namespace = openmx, js_name = refresh)]
+        fn host_refresh() -> f64;
+    }
+
+    /// The device as the page says it, for the Auto video preset's pick (P223).
+    pub fn device(d: &mut crate::menu::video::Device) {
+        d.touch |= phone();
+        let i = host_device_info();
+        let at = |n: usize| i.get(n).copied().filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0);
+        d.css = [at(0) as u32, at(1) as u32];
+        d.dpr = at(2) as f32;
+        d.cores = at(3) as u32;
+        d.ram_mb = at(4) as u32;
+    }
+
+    /// [`host_refresh`], `None` until measured.
+    pub fn refresh() -> Option<f32> {
+        Some(host_refresh() as f32).filter(|&r| r.is_finite() && r > 1.0)
     }
 
     /// [`latest`], `None` while there is no newer build.

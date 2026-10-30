@@ -625,6 +625,27 @@ footer a { color: var(--bone); }
   const args = asked.get('args') ?? '';
   // A phone (P205): a touch screen for its pointer, or `?phone`. The game's defaults are a phone's on one (low shadows).
   const phone = matchMedia('(pointer: coarse)').matches || asked.has('phone');
+  // P223 (opentennis's P53, B547): what the Auto video preset picks by — the screen in CSS px, the device pixels to
+  // one, the cores, Chromium's memory — and the display's rate as animation frames come (30 in a phone's Low Power
+  // Mode); a phone's canvas has no more than 2 device px to a CSS px.
+  const ratio = () => (phone ? Math.min(devicePixelRatio || 1, 2) : devicePixelRatio || 1);
+  {
+    const [w, h] = [window.screen.width, window.screen.height];
+    worker.postMessage({ device: [Math.min(w, h), Math.max(w, h), devicePixelRatio || 1, navigator.hardwareConcurrency || 0, (navigator.deviceMemory || 0) * 1024] });
+    let last = 0;
+    let gaps = [];
+    const measure = t => {
+      if (last) gaps.push(t - last);
+      last = t;
+      if (gaps.length >= 60) {
+        gaps.sort((a, b) => a - b);
+        worker.postMessage({ hz: Math.round(1000 / Math.max(gaps[30], 1)) });
+        gaps = [];
+      }
+      requestAnimationFrame(measure);
+    };
+    requestAnimationFrame(measure);
+  }
   let sent = false;
   const canvas = () => {
     if (sent) return {};
@@ -683,12 +704,12 @@ footer a { color: var(--bone); }
   screen.addEventListener('pointerdown', e => {
     if (!started()) return;
     const r = screen.getBoundingClientRect();
-    const k = devicePixelRatio || 1;
+    const k = ratio();
     worker.postMessage({ click: [Math.round((e.clientX - r.left) * k), Math.round((e.clientY - r.top) * k)] });
   });
   // The canvas's size in device pixels, which the shell draws at: the whole window, no bars.
   const view = () => {
-    const k = devicePixelRatio || 1;
+    const k = ratio();
     worker.postMessage({ view: [Math.round(innerWidth * k), Math.round(innerHeight * k)] });
   };
   addEventListener('resize', view);

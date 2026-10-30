@@ -440,6 +440,10 @@ fn the_settings_file_reads_back_as_it_was_written() {
         // Textures filtered 4x (V83).
         filtering: menu::Filtering::X4,
         shadows: game_render::shadow::Shadows::Original,
+        // Rows set by hand, fewer shadow casters and coarser models (P223).
+        video_auto: false,
+        casters: menu::video::Casters::Fewer,
+        detail: menu::video::Detail::Reduced,
         // A world's sky taken from the map below (MD9).
         world_sky: menu::WorldSky::PerMap,
         // The disc's textures, and two texture packs ordered and one off (V84).
@@ -4082,8 +4086,8 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     assert_eq!(m.tabs(Screen::Settings), menu::SETTINGS_TABS);
     assert_eq!(menu::SETTINGS_TABS, ["Ride", "Display", "Graphics", "Audio", "Controls", "Camera"]);
     tab_to(&mut m, &mut r, "Ride");
-    // Controls has no Player row with one seat (P81); Graphics opens past its World heading.
-    let first = [Key::Bays, Key::Hud, Key::DrawDistance, Key::Mix, Key::BikeLayout, Key::Player];
+    // Controls has no Player row with one seat (P81); Graphics opens on its Preset row (P223).
+    let first = [Key::Bays, Key::Hud, Key::VideoPreset, Key::Mix, Key::BikeLayout, Key::Player];
     let here = |m: &Menu, s: Screen| (m.tab(s), m.page()[m.cursor(s)].key);
     for (i, key) in first.iter().enumerate() {
         assert_eq!(here(&m, Screen::Settings), (i, *key));
@@ -4122,7 +4126,7 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     use menu::{Departure, Key};
     let groups = [
         ("World", vec![Key::DrawDistance, Key::Departure(Departure::Plants), Key::Departure(Departure::Foliage), Key::Departure(Departure::Textures), Key::WorldSky]),
-        ("Picture", vec![Key::TextureFiltering, Key::Shadows]),
+        ("Picture", vec![Key::TextureFiltering, Key::Shadows, Key::Casters, Key::Detail]),
         ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit]),
     ];
     let graphics: Vec<Key> = groups.iter().flat_map(|(_, keys)| keys.clone()).collect();
@@ -4141,7 +4145,9 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     let page = m.page();
     let mut under = None;
     let mut seen = Vec::new();
-    for row in &page {
+    // The Preset row over them all (P223), before any heading.
+    assert_eq!(page[0].key, Key::VideoPreset);
+    for row in &page[1..] {
         if row.kind == menu::Kind::Heading {
             under = Some(row.label.clone());
             continue;
@@ -4165,8 +4171,10 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
             assert!(!graphics.contains(&row.key), "{other} has {} too", row.label);
         }
     }
-    // The cursor opens on Draw Distance, past the heading, and the d-pad steps over the next one.
+    // The cursor opens on the Preset row (P223), and the d-pad steps over the headings.
     tab_to(&mut m, &mut r, "Graphics");
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::VideoPreset);
+    tap(&mut m, &mut r, Control::Down);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
     for _ in 0..5 {
         tap(&mut m, &mut r, Control::Down);
@@ -4191,7 +4199,7 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     m.open(Screen::Graphics);
     assert_eq!(m.screen(), Some(Screen::Settings));
     assert_eq!(tab(&m), "Graphics");
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::VideoPreset);
 }
 
 /// P176: the Display tab's Aspect Ratio row has opentennis's six choices, steps through them by the
@@ -4368,6 +4376,8 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
         },
         modifiers: Mods::parse("gravity=50 bike_speed.2=200").unwrap(),
         presets: vec![("Moon".into(), Mods::parse("gravity=20").unwrap())],
+        // Its Draw Distance and Render Scale set by hand: the rows stay as they are (P223).
+        video_auto: false,
         ..Settings::default()
     };
     assert_eq!(Settings::parse(&old), want);
@@ -7209,4 +7219,51 @@ fn updates_setting_round_trips_and_needs_the_updater() {
     m.open(Screen::Settings);
     assert!(m.page().iter().all(|r| r.key != menu::Key::Updates));
     assert_eq!(menu::update_button(), "Reload");
+}
+
+/// P223: the Graphics tab's Preset row sets every row it covers, a row changed by hand turns Auto off
+/// (the row reads Custom), a press on Custom goes back to Auto, and the choice is saved.
+#[test]
+fn the_preset_row_sets_the_graphics_rows() {
+    use menu::video::{Look, Preset};
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    assert!(m.settings.video_auto, "a fresh front end is on Auto");
+    main_to(&mut m, &mut r, "Settings");
+    tab_to(&mut m, &mut r, "Graphics");
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::VideoPreset).unwrap();
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::VideoPreset);
+    assert_eq!(row(&m).value, "Auto");
+    // Right steps through the presets: each sets its rows and Auto is off.
+    for p in Preset::ALL {
+        tap(&mut m, &mut r, Control::Right);
+        assert!(m.take_changed());
+        assert!(!m.settings.video_auto);
+        assert_eq!(Look::of(&m.settings), p.look(), "{p:?}");
+        assert_eq!(row(&m).value, p.label());
+    }
+    // Low's rows, saved and read back as Low.
+    for _ in 0..2 {
+        tap(&mut m, &mut r, Control::Left);
+    }
+    assert_eq!(Look::of(&m.settings), Preset::Low.look());
+    let dir = scratch("video-preset");
+    menu::save(&dir, &m.settings, &Controls::default()).unwrap();
+    let back = menu::load(&dir).0;
+    assert!(!back.video_auto);
+    assert_eq!(Look::of(&back), Preset::Low.look());
+    std::fs::remove_dir_all(&dir).ok();
+    // A row of its own: Custom, Auto off.
+    tap(&mut m, &mut r, Control::Down);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].key, Key::DrawDistance);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(!m.settings.video_auto);
+    assert_eq!(row(&m).value, "Custom");
+    assert!(row(&m).note.is_some());
+    // A press on Custom: Auto again, with this device's pick.
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Right);
+    assert!(m.settings.video_auto);
+    assert_eq!(row(&m).value, "Auto");
+    assert_eq!(Look::of(&m.settings), menu::video::pick(&menu::video::Device::here()));
 }
