@@ -41,8 +41,12 @@ const server = http.createServer((req, res) => {
 await new Promise(r => server.on('listening', r));
 const url = `http://127.0.0.1:${server.address().port}/?args=--ride${query ? `&${query}` : ''}`;
 
+// No extensions, as page.mjs (K7, K12): this machine's chromium brings its own into every profile, the policy's
+// force-installed one fetched from the web store a few seconds in, and one arriving mid-load can abort the worker's
+// module fetch; under a busy gate the WebGPU ride failed before it chose a GPU ('{"disc":"no","state":"failed"}').
 const chrome = spawn('chromium', ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-  '--no-first-run', '--no-default-browser-check', '--window-size=1280,720', ...flags, 'about:blank'],
+  '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-extensions-with-background-pages',
+  '--disable-background-networking', '--window-size=1280,720', ...flags, 'about:blank'],
   { stdio: ['ignore', 'ignore', 'pipe'] });
 const fail = why => {
   console.error(why);
@@ -113,7 +117,9 @@ for (let picks = 0; picks < 3; picks++) {
   await send('DOM.setFileInputFiles', { files: [iso], nodeId: pick.result.nodeId });
   await until(d => d.state !== 'asking', 20000);
 }
-if (d.state === 'failed' || !(d.drawn || d.gpu === 'software')) fail(`the page did not start drawing: ${JSON.stringify(d)}`);
+// with what the page said (its #status holds the worker's error), so a red run says why
+if (d.state === 'failed' || !(d.drawn || d.gpu === 'software'))
+  fail(`the page did not start drawing: ${JSON.stringify(d)} (${await evaluate("document.querySelector('#status')?.textContent")})`);
 
 // the ride: its pictures a second, as the worker counts them, each second for SECONDS
 const fps = [];
