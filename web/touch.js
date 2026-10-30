@@ -111,10 +111,13 @@ html.riding, html.riding body { overscroll-behavior: none; overflow: hidden; tou
 `;
 // right(x, y): a control's right and bottom edges, x and y `u` in from the safe area's corner
 const right = (x, y) => `right: calc(var(--r) + var(--u) * ${x}); bottom: calc(var(--b) + var(--u) * ${y})`;
-// [button, where, class, text]: the pedals under the right thumb, the faces in a diamond over them, the rest along the top
+// [button, where, class, text]: the pedals and the modifier under the right thumb, the faces in a diamond over them, the
+// rest along the top
 const layout = [
   ['r2', `${right(0.35, 0.35)}; width: calc(var(--u) * 1.9); height: calc(var(--u) * 2.5)`, 'pedal', 'GAS'],
   ['l2', `${right(2.5, 0.35)}; width: calc(var(--u) * 1.6); height: calc(var(--u) * 1.7)`, 'pedal', 'BRAKE'],
+  // left of BRAKE, for the same thumb
+  ['r1', `${right(4.35, 0.35)}; width: calc(var(--u) * 2.1); height: calc(var(--u) * 1.2)`, 'pedal', 'MODIFIER'],
   ['cross', right(1.6, 3.1), 'face', '✕'],
   ['circle', right(0.35, 4.2), 'face', '○'],
   ['square', right(2.85, 4.2), 'face', '□'],
@@ -123,8 +126,6 @@ const layout = [
   ['l1', `left: calc(var(--l) + var(--u) * .4); top: calc(var(--t) + 12vh)`, 'small', 'CLUTCH'],
   ['select', `left: calc(50% - var(--u) * 2.6); top: calc(var(--t) + var(--u) * .3)`, 'small', 'CAMERA'],
   ['start', `left: calc(50% - var(--u) * .8); top: calc(var(--t) + var(--u) * .3)`, 'small', 'PAUSE'],
-  // beside PAUSE, clear of the top-right column where the camera's name comes up
-  ['r1', `left: calc(50% + var(--u) * 1.0); top: calc(var(--t) + var(--u) * .3); width: calc(var(--u) * 2.1)`, 'small', 'MODIFIER'],
 ];
 const style = document.createElement('style');
 style.textContent = css;

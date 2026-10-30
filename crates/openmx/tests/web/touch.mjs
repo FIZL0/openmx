@@ -119,11 +119,11 @@ Object.assign(found, await evaluate(`(() => {
     const a = rs[i], b = rs[j];
     if (a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) overlaps++;
   }
-  // clear of the HUD (ride_hud.rs, in its 448-high layout): the clutch under the score bar's foot (45.5), the modifier
-  // left of the top-right column where the camera's name comes up (its right 3.2 EM in, a long name ~12 EM wide)
-  const hud = innerHeight / 448, em = 448 / 45;
+  // the clutch clear of the HUD (ride_hud.rs, in its 448-high layout), under the score bar's foot (45.5); the modifier
+  // left of BRAKE, along its foot
+  const hud = innerHeight / 448;
   const at = k => document.querySelector('#touch [data-b="' + k + '"]').getBoundingClientRect();
-  const clear = at('l1').top > 45.5 * hud && at('r1').right < innerWidth - 15.2 * em * hud
+  const clear = at('l1').top > 45.5 * hud && at('r1').right <= at('l2').left && at('r1').bottom === at('l2').bottom
     && document.querySelector('#touch [data-b="r1"]').textContent === 'MODIFIER';
   return { inside, overlaps, clear, small: rs.filter(r => Math.min(r.width, r.height) < 33).length, buttons: rs.length };
 })()`));
