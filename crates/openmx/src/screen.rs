@@ -191,13 +191,12 @@ impl Screen {
         }
     }
 
-    /// The phone's screen asked to run at the frame limit (P248, `ios_gpu.rs`), and the floor that
-    /// leaves the pictures.
+    /// The phone's screen asked to run at the frame limit (P248, `ios_gpu.rs`), which
+    /// [`Screen::refresh`] then says.
     #[cfg(target_os = "ios")]
-    pub fn screen_rate(&mut self, fps: Option<f32>) -> Option<std::time::Duration> {
-        match &mut self.inner {
-            Inner::X(_) => None,
-            Inner::Gpu(w) => w.screen_rate(fps),
+    pub fn screen_rate(&mut self, limit: crate::menu::FrameLimit, vsync: bool) {
+        if let Inner::Gpu(w) = &mut self.inner {
+            w.screen_rate(limit, vsync);
         }
     }
 

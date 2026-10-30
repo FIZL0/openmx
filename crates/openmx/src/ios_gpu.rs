@@ -235,8 +235,11 @@ pub struct GpuWindow {
     pub screen: (usize, usize),
     /// How long the last [`GpuWindow::draw`] waited on the surface.
     pub waited: Duration,
-    /// The display's refresh in hertz, where it says.
+    /// The display's refresh in hertz, where it says: the rate the screen was asked for
+    /// ([`GpuWindow::screen_rate`]), else its top.
     pub refresh: Option<f32>,
+    /// The screen's top rate.
+    top: Option<f32>,
     modes: Vec<wgpu::PresentMode>,
     /// The whole window's size and the insets kept clear of ([`kept_insets`]), as of the last poll.
     size: (u32, u32),
@@ -359,6 +362,7 @@ impl GpuWindow {
             screen,
             waited: Duration::ZERO,
             refresh,
+            top: refresh,
             modes: caps.present_modes,
             size,
             safe: [0; 4],
@@ -392,13 +396,17 @@ impl GpuWindow {
         self.config.present_mode == wgpu::PresentMode::Fifo
     }
 
-    /// The screen asked to run at the frame limit `fps` where that divides its refresh (P248,
-    /// [`crate::pace::screen_rate`]), and the floor the pictures then keep; None, the screen at its
-    /// top and the limit the loop's own to keep. Only a present that waits for the refresh is paced by it.
-    pub fn screen_rate(&mut self, fps: Option<f32>) -> Option<Duration> {
-        let rate = self.refresh.and_then(|top| crate::pace::screen_rate(top, fps)).filter(|_| self.waits());
+    /// The screen asked to run at the frame limit where that divides its top rate (P248,
+    /// [`crate::pace::screen_rate`]), and [`GpuWindow::refresh`] the rate it then runs at: the
+    /// limit is then the present's to keep, not the loop's. Only a present that waits for the
+    /// refresh is paced by it; VSync off leaves the screen at its top.
+    pub fn screen_rate(&mut self, limit: crate::menu::FrameLimit, vsync: bool) {
+        let rate = self
+            .top
+            .and_then(|top| crate::pace::screen_rate(top, limit.fps(top)))
+            .filter(|_| vsync && self.waits());
+        self.refresh = rate.or(self.top);
         shared().rate = rate;
-        rate.map(crate::pace::screen_floor)
     }
 
     /// Take in what the main thread has put by.

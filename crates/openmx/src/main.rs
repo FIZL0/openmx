@@ -1999,12 +1999,10 @@ impl Args {
 /// frame limit (P90, [`pace::frame_floor`]). A display that does not say its refresh is taken as 60.
 fn picture_floor(window: &mut Screen, (vsync, limit): (bool, menu::FrameLimit)) -> Option<Duration> {
     window.set_vsync(vsync);
-    let refresh = window.refresh().unwrap_or(60.0);
-    // A phone's screen runs at a limit that divides its refresh, and each present waits one (P248).
+    // A phone's screen runs at a limit that divides its refresh, which then reads as the refresh (P248).
     #[cfg(target_os = "ios")]
-    if let Some(floor) = window.screen_rate(limit.fps(refresh).filter(|_| vsync)) {
-        return Some(floor);
-    }
+    window.screen_rate(limit, vsync);
+    let refresh = window.refresh().unwrap_or(60.0);
     pace::frame_floor(vsync, limit.fps(refresh), refresh, window.waits())
 }
 
