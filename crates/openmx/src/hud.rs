@@ -292,6 +292,93 @@ fn moved(r: &[f32; 4], by: [f32; 2]) -> [f32; 4] {
     [r[0] + by[0], r[1] + by[1], r[2] + by[0], r[3] + by[1]]
 }
 
+/// What the iPhone's overlay says while [`NeedsTap`] is up (P233).
+pub const NEEDS_TAP_TEXT: &str = "Tap screen to resume controller";
+
+/// **"Tap screen to resume controller"** (P233), opentennis's `needs_tap.rs`: after a screenshot (or
+/// a trip out of the app) iOS keeps event focus, and GameController reports every button up and the
+/// sticks centred until a touch gives it back; the app can't take it back itself. With a controller
+/// in, the overlay (`ios_gpu.rs`) shows over everything until the first touch, or the first pad
+/// press that comes through (iOS gave focus back by itself). Draw only: no input or game state
+/// changes. Up or not, never a count: a screenshot sends its notice twice.
+#[derive(Default, Debug, PartialEq)]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub struct NeedsTap(pub bool);
+
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+impl NeedsTap {
+    /// A screenshot or a resign/become-active notice with `controllers` connected: up only with a
+    /// controller to resume.
+    pub fn notice(&mut self, controllers: usize) {
+        if controllers > 0 {
+            self.0 = true;
+        }
+    }
+
+    /// A touch or a pad press came through: focus is back.
+    pub fn input(&mut self, touched: bool, pressed: bool) {
+        if touched || pressed {
+            self.0 = false;
+        }
+    }
+
+    /// A frame's worth, in opentennis's order: input first, so this frame's notice outlasts a
+    /// press from before it.
+    pub fn frame(&mut self, touched: bool, pressed: bool, notice: Option<usize>) {
+        self.input(touched, pressed);
+        if let Some(n) = notice {
+            self.notice(n);
+        }
+    }
+}
+
+#[cfg(test)]
+mod needs_tap_tests {
+    use super::NeedsTap;
+
+    #[test]
+    fn up_after_a_notice_with_a_controller_until_input() {
+        let mut t = NeedsTap::default();
+        t.notice(0);
+        assert!(!t.0, "no controller: nothing to resume");
+        t.notice(1);
+        assert!(t.0, "a screenshot with a controller in");
+        t.input(false, false);
+        assert!(t.0, "released buttons and centred sticks aren't input");
+        t.input(true, false);
+        assert!(!t.0, "a touch");
+        t.notice(2);
+        t.input(false, true);
+        assert!(!t.0, "a pad press that came through");
+    }
+
+    #[test]
+    fn a_screenshots_double_notice_is_one_tap() {
+        let mut t = NeedsTap::default();
+        t.notice(1);
+        t.notice(1);
+        assert!(t.0, "set twice is still up, never toggled off");
+        t.input(true, false);
+        assert!(!t.0, "one tap clears it");
+    }
+
+    #[test]
+    fn launchs_become_active_with_no_controller_does_nothing() {
+        let mut t = NeedsTap::default();
+        t.frame(false, false, Some(0));
+        assert!(!t.0);
+    }
+
+    #[test]
+    fn a_notice_outlasts_a_press_in_the_same_frame() {
+        let mut t = NeedsTap::default();
+        t.frame(false, true, Some(1));
+        assert!(t.0, "the press came before the notice");
+        t.frame(false, true, None);
+        assert!(!t.0, "the next press clears it");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
