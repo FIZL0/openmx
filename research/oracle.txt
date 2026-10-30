@@ -6893,3 +6893,13 @@ car_force                   boot 0x003a02f0 (dt, car): measure, then vtable +0x2
 #                                           0x0039edb0, truck 0x003e07b0), 0x0039ed00, 0x0039e9c0,
 #                                           0x0039e850.
 car_preload                 boot 0x00397c60 (dt, car): the held jump; reads |+0x3e8| and the lean.
+# MD63 — MX vs. ATV's clutch and preload, ported under Handling::MxVsAtv (crates/game-sim/src/handling/step.rs;
+# tests/mxvatv_step.rs runs both off state04.ee.bin). Journal: research/journal/2026-10-29-md63-mxvatv-step.
+# Clutch fields, bike-relative: +0x12c0 clutch lever, +0x314 gas lever, +0xc38 speed, +0x1348 ramp timer,
+# +0x134c start multiplier, +0x1350 ClutchTorqueScaleTime, +0x1354 cofg weight (written, never read),
+# +0x1358 MaxClutchTorqueScaleSpeed, +0x135c MaxClutchTorqueScale; engine (+0x142c) +0x7c multiplier.
+# Preload fields: +0xc50 ready, +0xc54 firing, +0xc58 armed, +0xc5c PreloadTime, +0xc60 timer, +0xc64/+0xc68
+# Min/MaxPreloadTime, +0xc6c MaxPreload, +0xc70 force (only y), +0x1160/+0x1164 the d-pad times, +0x12a4 d-pad
+# y, +0x12ac stick y, +0x12b0 stick hold, +0x310 brake, +0x700 the cue latch, +0xd20 the cue's tag.
+# Input ramp ([Joystick], read at 0x004df7cc): +0x12f4 InputRampAmount (x pi/180), +0x12f8 InputRampTime.
+atv_post_event              atv 0x00272300 = the preload cue's post (a0 *0x00442eb0, a1 bike +0x674, a2 8, a3 14, t0 bike +0xd20, t1 0)
