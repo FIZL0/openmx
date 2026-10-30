@@ -177,6 +177,12 @@ impl Progress {
         self.held.load(Ordering::Relaxed)
     }
 
+    /// Whether the [`CANCEL`] hook may press Back yet: at once with no hold, else only once the build
+    /// is held or past its hold, so a build slowed by a busy machine is cancelled where it was held.
+    pub fn may_cancel(&self) -> bool {
+        self.hold.is_none_or(|(at, _)| self.held() || self.stage().index() > at.index())
+    }
+
     pub fn stage(&self) -> Stage {
         Stage::ALL[(self.stage.load(Ordering::Relaxed) as usize).min(Stage::ALL.len() - 1)]
     }

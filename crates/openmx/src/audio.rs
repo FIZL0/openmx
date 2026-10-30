@@ -2339,12 +2339,44 @@ pub const EDGE_RAMP: f32 = 200.0;
 
 /// The map-edge query the shootoff's sound asks: `None` while `at` is [`EDGE_WARNING`] or more inside
 /// every edge of a `width` × `depth` map, else the distance to the nearest edge (negative past it).
-pub fn edge_distance(width: f32, depth: f32, at: [f32; 3]) -> Option<f32> {
+/// An axis the world wraps on (`wrap` `[x, z]`, MD29) has seams there and no edge, as the throw has
+/// it (`off_map::outside_wrapped`): it is left out, and a world wrapped on both has no edge at all.
+pub fn edge_distance(width: f32, depth: f32, wrap: [bool; 2], at: [f32; 3]) -> Option<f32> {
     let m = EDGE_WARNING;
-    if m <= at[0] && at[0] <= width - m && m <= at[2] && at[2] <= depth - m {
+    let near = |v: f32, extent: f32| !(m <= v && v <= extent - m);
+    let (near_x, near_z) = (!wrap[0] && near(at[0], width), !wrap[1] && near(at[2], depth));
+    if !near_x && !near_z {
         return None;
     }
-    Some(at[0].min(width - at[0]).min(at[2]).min(depth - at[2]))
+    let x = if wrap[0] { f32::INFINITY } else { at[0].min(width - at[0]) };
+    let z = if wrap[1] { f32::INFINITY } else { at[2].min(depth - at[2]) };
+    Some(x.min(z))
+}
+
+/// Feet a step of [`hole_distance`]'s search.
+pub const HOLE_STEP: f32 = 5.0;
+
+/// The same query of a world's holes (MD8), the throw's second half: `off(m)` is
+/// `World::off_world` of the chassis at margin `m`, which asks the point and the four `m` feet from
+/// it along the axes. `None` while no margin up to [`EDGE_WARNING`] reaches a hole, else the least
+/// that does, searched every [`HOLE_STEP`] feet out from the point: so the music is out and the
+/// rumble full at the throw's own margin, as at the outer edge.
+pub fn hole_distance(mut off: impl FnMut(f32) -> bool) -> Option<f32> {
+    let steps = (EDGE_WARNING / HOLE_STEP) as i32;
+    (0..steps).map(|k| k as f32 * HOLE_STEP).find(|&m| off(m))
+}
+
+/// **The shootoff's whole query** of a world (P231), what each seat's sound asks of its chassis'
+/// centre of gravity: [`edge_distance`] of the world's `area` with the world's wrap, and
+/// [`hole_distance`] of its holes, the nearer of the two. The throw asks the same two
+/// (`off_map::outside_wrapped`, `off_map::off_world`), so the fade ends where it throws.
+pub fn world_edge(area: game_sim::biplane::Area, land: &dyn game_sim::world::World, at: ps2_float::Vf) -> Option<f32> {
+    let outer = edge_distance(area.width.0, area.depth.0, land.wrap(), [at.x(), at.y(), at.z()]);
+    let hole = hole_distance(|m| land.off_world(at, F(m)));
+    match (outer, hole) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// The rumble's volume, `0..=100`, at `d` feet from the edge: 25 at the warning's start, 100 at the
