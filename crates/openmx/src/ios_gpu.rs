@@ -153,6 +153,9 @@ impl ApplicationHandler for Host {
                     TouchPhase::Ended => Phase::Up,
                     TouchPhase::Cancelled => Phase::Cancel,
                 };
+                if phase == Phase::Down {
+                    openmx_ios::touched();
+                }
                 let touch = Touch { id: t.id, phase, at: (t.location.x as f32, t.location.y as f32) };
                 let mut clicks = Vec::new();
                 let now = self.started.elapsed().as_secs_f32();
@@ -445,10 +448,13 @@ impl GpuWindow {
             scale: self.scale as u32,
         };
         let out = draw(&mut self.renderer, &target);
-        let sprites = {
+        let mut sprites = {
             let touch = TOUCH.lock().unwrap_or_else(|e| e.into_inner());
             touch.sprites(0)
         };
+        if openmx_ios::tap_needed() {
+            tap_to_resume(&mut sprites, size);
+        }
         if !sprites.is_empty() {
             let layer = self.layer.get_or_insert_with(|| self.renderer.layer(&[&crate::menu::ink::ink().atlas]));
             let whole = Target { view: &view, size, frame: [0, 0, size.0, size.1], scale: 1 };
@@ -468,6 +474,21 @@ impl GpuWindow {
     pub fn present_again(&mut self, width: usize, height: usize) -> Result<(), String> {
         self.draw(width, height, |r, target| r.blit_again(target)).map(|_| ())
     }
+}
+
+/// "Tap screen to resume controller" over a dimmed window, `size` its pixels: after a screenshot
+/// GameController hears nothing until a touch gives it focus back ([`openmx_ios::Resume`]). Drawn
+/// only; the game goes on under it.
+fn tap_to_resume(out: &mut Vec<game_render::gpu::Sprite>, size: (u32, u32)) {
+    use crate::menu::ink as art;
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    art::fill(out, [0.0, 0.0, w, h], [0, 0, 0, 140]);
+    let ink = art::ink();
+    let s = (w.min(h * 2.0) / 22.0).max(12.0);
+    let text = "Tap screen to resume controller";
+    let tw = ink.measure(art::Weight::Heavy, text, s);
+    let baseline = h / 2.0 + s * (ink.ascent - ink.descent.abs()) / 2.0;
+    ink.text(out, 0, art::Weight::Heavy, text, (w - tw) / 2.0, baseline, s, 0.0, [255, 255, 255, 255]);
 }
 
 impl Drop for GpuWindow {

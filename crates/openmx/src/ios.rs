@@ -45,6 +45,8 @@ pub fn main() {
     if let Err(e) = std::env::set_current_dir(&docs) {
         println!("openmx: no Documents folder ({e})");
     }
+    // After a screenshot a controller needs a tap on the screen to be heard again: ask for it.
+    openmx_ios::watch_focus();
     crate::gpuwin::run_on_main(move || {
         let code = match pollster::block_on(Box::pin(game(&docs))) {
             Ok(()) => 0,
@@ -188,6 +190,7 @@ pub fn touch_seat(in_use: bool, riding: bool) {
 /// whenever no controller is connected, or one joined the touch player mid-ride ([`touch_seat`]). The touch pad is read (its taps let go) only with `read`.
 fn snapshot(read: bool) -> Vec<(u32, Pad)> {
     let pads = openmx_ios::pads();
+    openmx_ios::pads_read(pads.iter().any(|p| p.buttons.iter().any(|b| *b > 0.5)));
     let mut places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
     places.retain(|id| pads.iter().any(|p| p.id == *id));
     let mut out = Vec::new();

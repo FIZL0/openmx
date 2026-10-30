@@ -5,6 +5,7 @@
 use std::ffi::{CStr, c_void};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Id = *mut c_void;
@@ -377,6 +378,102 @@ pub fn pads() -> Vec<PadState> {
         }
         out
     })
+}
+
+// ---- the tap a controller waits for -------------------------------------------------------------
+
+/// Whether the screen asks for a tap to give the controllers back their input ([`crate::Resume`]).
+static RESUME: Mutex<crate::Resume> = Mutex::new(crate::Resume::new());
+
+fn resume() -> std::sync::MutexGuard<'static, crate::Resume> {
+    RESUME.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether to draw "Tap screen to resume controller". Any thread.
+pub fn tap_needed() -> bool {
+    resume().needed()
+}
+
+/// A finger on the screen, which gives GameController its focus back.
+pub fn touched() {
+    resume().touch();
+}
+
+/// The controllers as read, whether any button is down: a press that comes through answers the tap.
+pub fn pads_read(any_down: bool) {
+    resume().pads(any_down);
+}
+
+/// How many controllers GameController has connected.
+fn controllers() -> usize {
+    if class(c"GCController").is_null() {
+        return 0;
+    }
+    pool(|| int(get(class(c"GCController"), c"controllers"), c"count").max(0) as usize)
+}
+
+/// A global block (the Blocks ABI's literal): one that is never copied or freed, so it needs no
+/// helpers, only its class, its flags and what it calls.
+#[repr(C)]
+struct Block {
+    isa: *const c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: extern "C" fn(*const Block, Id),
+    descriptor: *const BlockDescriptor,
+}
+
+#[repr(C)]
+struct BlockDescriptor {
+    reserved: usize,
+    size: usize,
+}
+
+const BLOCK_IS_GLOBAL: i32 = 1 << 28;
+
+unsafe extern "C" {
+    static _NSConcreteGlobalBlock: c_void;
+    static UIApplicationUserDidTakeScreenshotNotification: Id;
+    static UIApplicationWillResignActiveNotification: Id;
+    static UIApplicationDidBecomeActiveNotification: Id;
+}
+
+/// A notice arrived (on the main queue): its name into the log, and with a controller connected
+/// the tap asked for — which of them a screenshot actually sends is for a device's log to say.
+extern "C" fn on_notice(_block: *const Block, notice: Id) {
+    let n = controllers();
+    println!("ios: {} ({n} controller{})", text(get(notice, c"name")), if n == 1 { "" } else { "s" });
+    resume().notice(n);
+}
+
+/// Watch for the notices after which GameController may have lost its focus: the screenshot, and
+/// the app resigning and becoming active. Once, on the main thread, before UIKit's loop runs.
+pub fn watch_focus() {
+    static DESCRIPTOR: BlockDescriptor = BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() };
+    pool(|| {
+        // SAFETY: the block is leaked, so it lives for the process as a global block must; the
+        // names are UIKit's NSString constants; addObserverForName:object:queue:usingBlock: is
+        // `id (id, SEL, NSString *, id, NSOperationQueue *, block)`, and its token is kept by the centre
+        unsafe {
+            let block: &'static Block = Box::leak(Box::new(Block {
+                isa: &raw const _NSConcreteGlobalBlock,
+                flags: BLOCK_IS_GLOBAL,
+                reserved: 0,
+                invoke: on_notice,
+                descriptor: &DESCRIPTOR,
+            }));
+            let centre = get(class(c"NSNotificationCenter"), c"defaultCenter");
+            let queue = get(class(c"NSOperationQueue"), c"mainQueue");
+            let add: extern "C" fn(Id, Id, Id, Id, Id, *const Block) -> Id = std::mem::transmute(objc_msgSend as *const ());
+            for name in [
+                UIApplicationUserDidTakeScreenshotNotification,
+                UIApplicationWillResignActiveNotification,
+                UIApplicationDidBecomeActiveNotification,
+            ] {
+                add(centre, sel(c"addObserverForName:object:queue:usingBlock:"), name, std::ptr::null_mut(), queue, block);
+            }
+        }
+    });
 }
 
 // ---- sound ---------------------------------------------------------------------------------------
