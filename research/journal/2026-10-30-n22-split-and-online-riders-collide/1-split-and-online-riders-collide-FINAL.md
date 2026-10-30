@@ -1,4 +1,4 @@
-# 1 — split and online riders collide (PART)
+# 1 — split and online riders collide
 
 Task N22 (with S224 and S225's shell half folded in; S226 and S225's struck-bike push split off as
 N22a and N22b). 2026-10-30.
