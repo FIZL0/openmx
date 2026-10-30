@@ -1746,8 +1746,9 @@ mod tests {
         // In the gap between the two, riding east meets neither: the map past them it does meet.
         assert_eq!(names.around([50.0, 104.0]).1[1], Some("far"));
         assert_eq!(names.around([200.0, 40.0]), (Some("low"), [Some("high"), Some("far"), None, Some("tall")]));
-        let alone = crate::hud::MapNames::alone(&map_title("free09"));
-        assert_eq!(alone.around([-1.0e6, 3.0e6]), (Some("Bridgeport"), [None; 4]));
+        // A lone track names no map (P234): it rides on no world's maps.
+        assert_eq!(crate::hud::MapNames::default().around([-1.0e6, 3.0e6]), (None, [None; 4]));
+        assert_eq!(map_title("free09"), "Bridgeport");
         // A national goes by its disc name, another game's track by its own.
         assert_eq!(map_title("nat17"), "Waimea");
         assert_eq!(map_title(" NAT03 "), "Racine: Long");

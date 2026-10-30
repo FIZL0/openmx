@@ -158,7 +158,7 @@ pub const COMPASS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 0.0], [0.0, -1.0], [-1.0, 
 
 /// **The maps the radar names** (MD42): each map of the ride, the world rectangle it owns
 /// (`[x0, z0, x1, z1]` in feet) and the name the HUD gives it. A world's are its tiles (its joins
-/// are no map); a lone track is one map covering everything, with no neighbours. The port's own:
+/// are no map); a lone track, a disc one or a mod, has none, so its radar names nothing (P234). The port's own:
 /// the original rides one map and its radar names nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MapNames {
@@ -166,11 +166,6 @@ pub struct MapNames {
 }
 
 impl MapNames {
-    /// One map, the whole ride: a lone track's.
-    pub fn alone(name: &str) -> MapNames {
-        MapNames { maps: vec![([f32::NEG_INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY], name.to_string())] }
-    }
-
     /// The map a rider at `at` (`x`, `z`) is on: the one whose rectangle holds it, or — on a join,
     /// between maps — the nearest, the one just left or about to be met. `None` with no maps.
     pub fn on(&self, at: [f32; 2]) -> Option<usize> {
