@@ -2,7 +2,9 @@
 //! tab a kind (B372/B373), each card its name, author, source game, size, Verified, and Installed or
 //! Update. Cross installs (or updates) the lit card, Square removes it, Triangle reports it, Start
 //! reads the store again, Select downloads every mod on the tab not installed (or out of date), L1/R1
-//! change the tab.
+//! change the tab. P230: Texture Packs is a kind tab too, and its Pack Order page lists every pack in
+//! the mods folder top first: Cross turns the lit one on or off, Left and Right move it up and down,
+//! written at once to settings.txt's `texture_packs` / `texture_packs_off`.
 //!
 //! The menu knows the store only as this plain view, which the shell fills from `modstore.rs` and
 //! whose asks it takes ([`Menu::take_store_asks`]), so the menu's tests mount nothing of the store.
@@ -10,14 +12,20 @@
 use super::*;
 
 /// The grid's tabs: `modstore::TABS`.
-pub const STORE_TABS: [&str; 3] = ["Tracks", "Trick Packs", "Music"];
+pub const STORE_TABS: [&str; 4] = ["Tracks", "Trick Packs", "Music", "Texture Packs"];
+/// P230: the Texture Packs tab.
+pub const TEXTURES_TAB: usize = 3;
 /// The grid's columns.
 pub const STORE_COLUMNS: usize = 4;
-/// P199: the store's own pages after the kind tabs: Upload my mod (and Upload all), and My public mods.
-pub const STORE_PAGES: [&str; 2] = ["Upload", "My Mods"];
+/// P199: the store's own pages after the kind tabs: Upload my mod (and Upload all), and My public mods;
+/// P230: first, the texture packs' order and switches.
+pub const STORE_PAGES: [&str; 3] = ["Pack Order", "Upload", "My Mods"];
 /// Their tabs.
-pub const UPLOAD_TAB: usize = STORE_TABS.len();
-pub const MINE_TAB: usize = STORE_TABS.len() + 1;
+pub const PACKS_TAB: usize = STORE_TABS.len();
+pub const UPLOAD_TAB: usize = STORE_TABS.len() + 1;
+pub const MINE_TAB: usize = STORE_TABS.len() + 2;
+/// P230: what a texture pack is online, said on its tabs.
+pub const PACKS_ONLINE: &str = "Online: only you see a texture pack; the lobby doesn't share it";
 /// What a player agrees to before they upload (`plan/P198.md` § P199): shown until agreed to, once ever
 /// ([`Settings::store_rules`]).
 pub const STORE_RULES: [&str; 4] = [
@@ -89,6 +97,8 @@ pub enum StoreAsk {
     Mine,
     /// Take the player's own mod down (by key).
     TakeDown(String),
+    /// P230: the texture packs in the mods folder, read again (Pack Order opened).
+    Packs,
 }
 
 /// How an upload or take-down stands.
@@ -124,6 +134,16 @@ pub struct Posted {
     pub pr: Option<u32>,
     /// A take-down under way.
     pub busy: bool,
+}
+
+/// P230: one texture pack on Pack Order (`textures::Listed`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PackRow {
+    /// Its folder under `mods/`, as `texture_packs` names it.
+    pub folder: String,
+    pub name: String,
+    pub textures: usize,
+    pub on: bool,
 }
 
 /// A row of the Upload page.
@@ -164,6 +184,8 @@ pub struct Shop {
     pub mine_listed: Listed,
     /// A take-down asked once, by key: Cross again takes it down.
     pub arm: Option<String>,
+    /// P230: the texture packs, top first, as the shell read them for Pack Order.
+    pub packs: Vec<PackRow>,
     pub(super) asks: Vec<StoreAsk>,
 }
 
@@ -238,7 +260,9 @@ impl Menu {
         if self.store.off {
             return;
         }
-        if tab == UPLOAD_TAB {
+        if tab == PACKS_TAB {
+            self.store.asks.push(StoreAsk::Packs);
+        } else if tab == UPLOAD_TAB {
             self.store.asks.push(StoreAsk::Locals);
         } else if tab == MINE_TAB && self.store.account.is_some() {
             self.store.mine_listed = Listed::Asking;
@@ -266,7 +290,7 @@ impl Menu {
             self.store_tab(tab);
             return;
         }
-        if self.store.tab >= UPLOAD_TAB {
+        if self.store.tab >= PACKS_TAB {
             self.walk_store_page(p);
             return;
         }
@@ -338,6 +362,10 @@ impl Menu {
             return;
         }
         if self.store.off {
+            return;
+        }
+        if self.store.tab == PACKS_TAB {
+            self.walk_packs(p);
             return;
         }
         let shop = &mut self.store;
@@ -431,6 +459,47 @@ impl Menu {
             shop.arm = Some(m.key.clone());
             shop.note = Some(format!("Press Cross again to take {} off the store", m.name));
         }
+    }
+}
+
+impl Menu {
+    /// P230: Pack Order: Up and Down light a pack, Cross turns it on or off, Left and Right move it up
+    /// and down the stack (the cursor with it), Start reads the folder again. A change is written to
+    /// the settings at once ([`Menu::save_packs`]) and drawn from the next ride.
+    fn walk_packs(&mut self, p: Press) {
+        let at = Screen::Store.index();
+        if p.start {
+            self.store.asks.push(StoreAsk::Packs);
+            return;
+        }
+        let n = self.store.packs.len();
+        let c = step_row(self.cursor[at], n, p);
+        self.cursor[at] = c;
+        if n == 0 {
+            return;
+        }
+        let packs = &mut self.store.packs;
+        if p.ok {
+            packs[c].on = !packs[c].on;
+            self.store.note = Some(format!("{} is {}: from the next ride", packs[c].name, if packs[c].on { "on" } else { "off" }));
+        } else if p.left && c > 0 {
+            packs.swap(c, c - 1);
+            self.cursor[at] = c - 1;
+        } else if p.right && c + 1 < n {
+            packs.swap(c, c + 1);
+            self.cursor[at] = c + 1;
+        } else {
+            return;
+        }
+        self.save_packs();
+    }
+
+    /// P230: Pack Order's list as settings.txt's lines: every pack in `texture_packs`, top first (so a
+    /// pack installed later, in neither, goes on top), and the ones off in `texture_packs_off`.
+    pub fn save_packs(&mut self) {
+        self.settings.texture_packs = self.store.packs.iter().map(|r| r.folder.clone()).collect();
+        self.settings.texture_packs_off = self.store.packs.iter().filter(|r| !r.on).map(|r| r.folder.clone()).collect();
+        self.changed = true;
     }
 }
 

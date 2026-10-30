@@ -675,3 +675,71 @@ fn installs_run_a_few_at_a_time() {
     assert_eq!(track_mods::music_packs(&mods).len(), all.len());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A 2×2 PNG, its first pixel `r`.
+fn png_of(r: u8) -> Vec<u8> {
+    let at = std::env::temp_dir().join(format!("openmx-modstore-png-{r}-{}.png", std::process::id()));
+    let t = game_render::pst::Texture { width: 2, height: 2, rgba: [r, 2, 3, 255].into_iter().chain([9; 12]).collect() };
+    crate::textures::write_png(&at, &t).unwrap();
+    let b = std::fs::read(&at).unwrap();
+    let _ = std::fs::remove_file(&at);
+    b
+}
+
+/// P230: a texture pack off the store: listed on its own tab, staged, read through `textures`' pack
+/// reader, installed into `mods/textures/<id>/`, and then found by a ride's lookup at its keys, on top
+/// until Pack Order's lines say otherwise; a pack with no key-named texture, or a picture that isn't a
+/// PNG, refused and leaving nothing.
+#[test]
+fn a_texture_pack_round_trips() {
+    assert_eq!((Kind::Textures.word(), Kind::Textures.folder(), Kind::Textures.tab().map(|t| TABS[t])), ("textures", Some("textures"), Some("Texture Packs")));
+    let fake = Fake::start();
+    let (dir, mods) = scratch("textures");
+    let (a, b) = ("00000000000000aa", "0123456789abcdef");
+    let pack = zip(&[put("mod.json", &mod_json("hd_pack", "textures")), put(&format!("textures/bikes/frame-{a}.png"), &png_of(1)), put(&format!("textures/{b}.png"), &png_of(2)), put(&format!("textures/ground/dirt-{b}.png"), &png_of(3))]);
+    let m = meta("hd_pack", Kind::Textures, &pack);
+    assert_eq!(meta_of(&serde_json::to_vec(&m).unwrap(), "hd_pack").map(|m| m.kind), Some(Kind::Textures));
+    fake.tree("main", &["hd_pack"]);
+    fake.publish("main", &m, &pack, None);
+    fake.pulls(&[]);
+    let s = Store::new(&fake.base, &dir, &mods);
+    let l = listing(&s, false);
+    assert_eq!(l.iter().map(|e| (e.meta.kind, e.meta.kind.tab())).collect::<Vec<_>>(), [(Kind::Textures, Some(3))]);
+    assert_eq!(install(&s, &l[0]), Ok("Test hd_pack".into()));
+    assert_eq!(s.stamps().iter().map(|st| (st.id.as_str(), st.kind)).collect::<Vec<_>>(), [("hd_pack", Kind::Textures)]);
+    assert_eq!(Store::have(&l[0], &s.stamps(), &s.own_ids()), Have::Installed);
+    assert!(mods.join("textures/hd_pack/store.json").is_file());
+
+    // the ride's lookup: both keys from the pack (the bare `<key>.png` has no `-`, so isn't key-named)
+    let found = crate::textures::scan(&mods, &[], &[]);
+    assert_eq!((found.packs, found.from_packs), (1, 2));
+    assert!(found.files[a].ends_with(format!("textures/hd_pack/textures/bikes/frame-{a}.png")));
+    assert!(found.files[b].ends_with(format!("textures/hd_pack/textures/ground/dirt-{b}.png")));
+    // Pack Order's listing, and its off line
+    let rows = crate::textures::listed(&mods, &[], &[]);
+    assert_eq!(rows, [crate::textures::Listed { folder: "textures/hd_pack".into(), name: "Test hd_pack".into(), textures: 2, on: true }]);
+    let off = ["textures/hd_pack".to_string()];
+    assert!(!crate::textures::listed(&mods, &off, &off)[0].on);
+    assert_eq!(crate::textures::scan(&mods, &off, &off).packs, 0);
+
+    // what the pack reader refuses, at install, leaving the installed copy alone
+    let bad = [
+        ("no key-named texture", zip(&[put("mod.json", &mod_json("bad_pack", "textures")), put(&format!("textures/{a}.png"), &png_of(1))])),
+        ("not a png", zip(&[put("mod.json", &mod_json("bad_pack", "textures")), put(&format!("textures/x-{a}.png"), b"not a png at all")])),
+        ("a track's mod.json", zip(&[put("mod.json", &mod_json("bad_pack", "track")), put(&format!("textures/x-{a}.png"), &png_of(1))])),
+    ];
+    for (what, z) in bad {
+        let m = meta("bad_pack", Kind::Textures, &z);
+        fake.publish("main", &m, &z, None);
+        let got = install(&s, &entry(m, "main", None));
+        assert!(got.is_err(), "{what}: installed");
+        assert!(!mods.join("textures/bad_pack").exists() && !mods.join(".store-bad_pack").exists(), "{what}: left {:?}", tree_of(&mods));
+    }
+    assert_eq!(crate::textures::scan(&mods, &[], &[]).packs, 1);
+
+    s.remove(&l[0].key(), Kind::Textures, "hd_pack");
+    let got = until(&s, |ev| matches!(ev, Event::Removed(..)));
+    assert!(got.iter().any(|ev| matches!(ev, Event::Removed(_, Ok(_)))), "{got:?}");
+    assert_eq!(crate::textures::scan(&mods, &[], &[]).packs, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -9236,6 +9236,7 @@ impl StoreFront {
     /// The menu's cards from the listing, against what is installed; an install's bar kept.
     fn cards(&self, menu: &mut menu::Menu) {
         let (stamps, own) = (self.store.stamps(), self.store.own_ids());
+        menu.store.web = cfg!(target_arch = "wasm32");
         let old = std::mem::take(&mut menu.store.cards);
         menu.store.cards = self
             .listing
@@ -9299,9 +9300,17 @@ impl StoreFront {
             .collect();
     }
 
-    /// P199's asks: the sign-in, uploads, My Mods and take-downs.
+    /// P230: Pack Order's texture packs from the mods folder, in settings.txt's order and switches.
+    fn packs(&self, menu: &mut menu::Menu) {
+        let s = &menu.settings;
+        let listed = textures::listed(self.store.mods(), &s.texture_packs, &s.texture_packs_off);
+        menu.store.packs = listed.into_iter().map(|l| menu::PackRow { folder: l.folder, name: l.name, textures: l.textures, on: l.on }).collect();
+    }
+
+    /// P199's asks: the sign-in, uploads, My Mods and take-downs; P230's Pack Order.
     fn upload_ask(&mut self, ask: menu::StoreAsk, menu: &mut menu::Menu) {
         match ask {
+            menu::StoreAsk::Packs => self.packs(menu),
             menu::StoreAsk::Locals => self.locals(menu),
             menu::StoreAsk::Tokens => {
                 if let Err(why) = modstore::open(modstore::up::TOKENS) {

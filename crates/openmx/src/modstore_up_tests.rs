@@ -592,3 +592,37 @@ fn the_maintainers_index_and_card_go_on_main() {
     drop(hub);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P230: a texture pack of the player's own in `mods/textures/<id>/` is one of their mods, packs into a
+/// zip Install's checks (and `textures`' pack reader) take, and goes up with its biggest texture as its
+/// picture; a pack with no key-named texture doesn't pack.
+#[test]
+fn a_texture_pack_uploads() {
+    let (dir, mods) = scratch("textures");
+    let pack = mods.join("textures/my_pack");
+    std::fs::create_dir_all(pack.join("textures/bikes")).unwrap();
+    std::fs::write(pack.join("mod.json"), r#"{"standard": 1, "kind": "textures", "id": "my_pack", "name": "My Pack", "version": "1.0.0", "source": {"game": "MX Unleashed"}}"#).unwrap();
+    let png = |w: u32, h: u32| {
+        let mut b = Vec::new();
+        let mut e = png::Encoder::new(&mut b, w, h);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&vec![90; (w * h * 4) as usize]).unwrap();
+        b
+    };
+    std::fs::write(pack.join("textures/bikes/frame-00000000000000aa.png"), png(64, 32)).unwrap();
+    std::fs::write(pack.join("textures/small-00000000000000bb.png"), png(4, 4)).unwrap();
+    let l = locals(&mods).into_iter().find(|l| l.id == "my_pack").expect("the pack is one of the player's mods");
+    assert_eq!((l.kind, l.name.as_str(), l.source.as_str()), (Kind::Textures, "My Pack", "MX Unleashed"));
+    let p = package(&mods, &l, "tester").unwrap();
+    assert_eq!((p.meta.kind, p.meta.id.as_str()), (Kind::Textures, "my_pack"));
+    let w = p.preview.as_deref().expect("a pack's picture");
+    assert_eq!(decode_preview(w).map(|p| (p.width, p.height)), Some((64, 32)), "its biggest texture");
+    drop(p);
+
+    std::fs::remove_file(pack.join("textures/bikes/frame-00000000000000aa.png")).unwrap();
+    std::fs::rename(pack.join("textures/small-00000000000000bb.png"), pack.join("textures/00000000000000bb.png")).unwrap();
+    let why = package(&mods, &l, "tester").err().unwrap();
+    assert!(why.contains("no textures"), "{why}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

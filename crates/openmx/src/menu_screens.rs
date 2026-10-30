@@ -1456,7 +1456,7 @@ impl Pen<'_> {
             let line = self.fit(Weight::Bold, note, 1.0, 34.0);
             self.text(Weight::Bold, &line, 76.0, Pen::mid(7.6 + 1.17, 1.0), 1.0, 0.0, NOTE, Align::Right);
         }
-        if shop.tab >= UPLOAD_TAB {
+        if shop.tab >= PACKS_TAB {
             self.store_page(menu);
             return;
         }
@@ -1539,6 +1539,12 @@ impl Pen<'_> {
         if first_row + 2 < rows {
             self.arrow(STAGE.0 / 2.0, top + 2.0 * (ch + gap) - gap + 0.4, [0.0, 1.0], 0.7, BONE);
         }
+        // P230: what a pack does online, under the grid
+        if shop.tab == TEXTURES_TAB && !shop.off {
+            let say = if shop.web { "Texture packs draw in the desktop game; in the browser they are only kept" } else { PACKS_ONLINE };
+            let say = self.fit(Weight::Bold, say, 0.9, w);
+            self.text(Weight::Bold, &say, x0, Pen::mid(top + 2.0 * (ch + gap) + 1.4, 0.9), 0.9, 0.0, DUST, Align::Left);
+        }
         self.title(Screen::Store.title());
         let mut hints = vec![(Btn::Circle, "Back"), (Btn::L1R1, "Tabs"), (Btn::Start, "Refresh")];
         if !shop.downloadable().is_empty() {
@@ -1558,7 +1564,7 @@ impl Pen<'_> {
         self.hints(&hints);
     }
 
-    /// P199: the store's Upload and My Mods pages, under its tabs: the rules first, then the sign-in
+    /// P230: Pack Order's list of texture packs, each On or Off. P199: the store's Upload and My Mods pages, under its tabs: the rules first, then the sign-in
     /// (Hugging Face's token page, Paste token), then the account, Upload all and each of the player's
     /// own mods with its state; My Mods their mods on the store, each Verified or its pull request.
     fn store_page(&mut self, menu: &Menu) {
@@ -1574,6 +1580,22 @@ impl Pen<'_> {
         let c = menu.cursor(Screen::Store);
         if shop.off {
             line(self, "The mods folder is off (--mods off): nothing to upload or take down", top + 2.0, 1.4, BONE);
+        } else if shop.tab == PACKS_TAB {
+            // P230: every pack in the mods folder, top first: the top one's texture is drawn where two
+            // replace the same one
+            for (k, r) in shop.packs.iter().enumerate() {
+                let place = if k == 0 { "on top".to_string() } else { format!("{} from the top", k + 1) };
+                rows.push((r.name.clone(), if r.on { "On".into() } else { "Off".into() }, format!("{place} · {} textures · mods/{}", r.textures, r.folder)));
+            }
+            if shop.packs.is_empty() {
+                line(self, "No texture packs in your mods folder: install one from Texture Packs", top + 2.0, 1.4, BONE);
+            }
+            line(self, PACKS_ONLINE, top + 6.0 * (ROW_H + 1.4 + ROW_GAP) + 1.2, 0.9, DUST);
+            hints.push((Btn::Start, "Rescan"));
+            if !shop.packs.is_empty() {
+                hints.push((Btn::LeftRight, "Move"));
+                hints.push((Btn::Cross, "On / Off"));
+            }
         } else if shop.tab == UPLOAD_TAB && !shop.agreed {
             self.text(Weight::Heavy, "Before you upload", x, Pen::mid(top + 1.0, 1.6), 1.6, SLANT, HEADING, Align::Left);
             for (i, r) in STORE_RULES.iter().enumerate() {
