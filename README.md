@@ -46,6 +46,20 @@ iPhone → openMX. Each release also carries the unsigned `openmx-ios.ipa`.
 MX vs. ATV and Untamed, gameplay modifiers, markers you can drop and return to, camera and FOV
 settings. With them off the ride is the original's, and the replay tests say so.
 
+## Not in it yet
+
+The big pieces still missing, for anyone who wants to pick one up (each is a Stretch task in
+`plan/TODO.md`):
+
+- **The campaign, and races against AI riders.** Free Ride is the game today: no career, no
+  Supercross or Nationals races, no AI opponents, start gate or results.
+- **Machines other than the biplanes.** The trucks, baja and buggy, and the Kiowa helicopter, are
+  read from the disc but can't be ridden yet.
+- **Events and things in the maps.** The freestyle stunt event is in; the free-ride maps' other
+  events and challenges, and most of what moves or can be used in them, are not.
+- **Custom rider models.** Bikes and riders come from the disc's sets; there is no way yet to bring
+  your own rider model.
+
 ## Controls
 
 The default layout is new: **R2** gas, **L2** brake (both analogue), left stick to steer and lean,
