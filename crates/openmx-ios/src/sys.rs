@@ -14,6 +14,7 @@ type Id = *mut c_void;
 #[link(name = "GameController", kind = "framework")]
 #[link(name = "CoreMotion", kind = "framework")]
 #[link(name = "AudioToolbox", kind = "framework")]
+#[link(name = "CoreHaptics", kind = "framework")]
 unsafe extern "C" {
     fn objc_msgSend();
     fn objc_getClass(name: *const std::ffi::c_char) -> Id;
@@ -377,6 +378,259 @@ pub fn pads() -> Vec<PadState> {
         }
         out
     })
+}
+
+// ---- rumble -------------------------------------------------------------------------------------
+
+unsafe extern "C" {
+    static GCHapticsLocalityDefault: Id;
+    static CHHapticEventTypeHapticContinuous: Id;
+    static CHHapticEventParameterIDHapticIntensity: Id;
+    fn AudioServicesPlaySystemSound(sound: u32);
+}
+
+/// AudioToolbox's `kSystemSoundID_Vibrate`: the phone's one buzz, for a phone CoreHaptics cannot drive.
+const SYSTEM_SOUND_VIBRATE: u32 = 4095;
+
+/// What a rumble shakes (P183 on the phone): a controller's own haptics, by its [`PadState::id`], or
+/// the phone's (the touch pad's seat, which has no controller to shake).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Haptics {
+    Controller(usize),
+    Phone,
+}
+
+/// One ask: a continuous haptic event at `intensity` (0..=1) for `seconds`.
+struct Ask {
+    to: Haptics,
+    intensity: f32,
+    seconds: f64,
+}
+
+static ASKS: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Ask>>> = std::sync::OnceLock::new();
+
+/// Rumble `to` at `intensity` (0..=1) for `seconds`. Any thread, and never waits: the ask goes to a
+/// thread of its own, which makes, starts and keeps one CHHapticEngine per controller and one for
+/// the phone — an engine's start can take a while, and a frame must not wait for it. A controller
+/// with no haptics (or gone) shakes nothing; a phone CoreHaptics cannot drive buzzes the system's
+/// vibrate, which has no level and no length.
+pub fn rumble(to: Haptics, intensity: f32, seconds: f32) {
+    if seconds <= 0.0 || intensity <= 0.0 {
+        return;
+    }
+    let asks = ASKS.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Ask>();
+        let _ = std::thread::Builder::new().name("haptics".into()).spawn(move || {
+            let mut engines = Engines::default();
+            for ask in rx {
+                pool(|| engines.play(ask));
+            }
+        });
+        std::sync::Mutex::new(tx)
+    });
+    let ask = Ask { to, intensity: intensity.min(1.0), seconds: seconds as f64 };
+    let _ = asks.lock().unwrap_or_else(|e| e.into_inner()).send(ask);
+}
+
+/// `[o retain]` / `[o release]`, nil-safe.
+fn retain(o: Id) -> Id {
+    get(o, c"retain")
+}
+
+fn release(o: Id) {
+    get(o, c"release");
+}
+
+/// A BOOL message whose one argument is an `NSError **` (`startAndReturnError:`): nil for the
+/// error, which nothing reads.
+fn ok(o: Id, name: &CStr) -> bool {
+    if o.is_null() {
+        return false;
+    }
+    // SAFETY: objc_msgSend cast to `BOOL (id, SEL, NSError **)`
+    unsafe {
+        let f: extern "C" fn(Id, Id, *mut Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
+        f(o, sel(name), std::ptr::null_mut())
+    }
+}
+
+/// `[list objectAtIndex:i]` for each of an NSArray's objects.
+fn objects(list: Id) -> Vec<Id> {
+    let n = int(list, c"count").max(0) as usize;
+    (0..n)
+        .map(|i| {
+            // SAFETY: objc_msgSend cast to `id (id, SEL, NSUInteger)`, `i` below the array's count
+            unsafe {
+                let f: extern "C" fn(Id, Id, usize) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                f(list, sel(c"objectAtIndex:"), i)
+            }
+        })
+        .collect()
+}
+
+/// One CHHapticEngine and the player it last started, both retained.
+struct Engine {
+    engine: Id,
+    player: Id,
+}
+
+impl Engine {
+    /// Start the engine — again: one stopped or reset (the app sent to the background, the haptic
+    /// server restarted; its `stoppedHandler` / `resetHandler` would say so) plays nothing until it is
+    /// started, and a start of a running one costs little — then one continuous event on it, at
+    /// CHHapticTimeImmediate. The last ask's player is stopped first, so a new ask starts the count
+    /// again as the original's does. Whether it played.
+    fn play(&mut self, intensity: f32, seconds: f64) -> bool {
+        if !ok(self.engine, c"startAndReturnError:") {
+            return false;
+        }
+        // SAFETY: objc_msgSend cast to each message's signature as CoreHaptics' headers have it (the
+        // parameter's value a float, the times NSTimeIntervals); each alloc'd object is released once
+        // the next holds it, the arrays are autoreleased into the caller's pool, and the player is
+        // kept until the next ask
+        unsafe {
+            let at: extern "C" fn(Id, Id, f64, *mut Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
+            if !self.player.is_null() {
+                at(self.player, sel(c"stopAtTime:error:"), 0.0, std::ptr::null_mut());
+                release(self.player);
+                self.player = std::ptr::null_mut();
+            }
+            let array: extern "C" fn(Id, Id, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+            let new_param: extern "C" fn(Id, Id, Id, f32) -> Id = std::mem::transmute(objc_msgSend as *const ());
+            let param = new_param(
+                get(class(c"CHHapticEventParameter"), c"alloc"),
+                sel(c"initWithParameterID:value:"),
+                CHHapticEventParameterIDHapticIntensity,
+                intensity,
+            );
+            let new_event: extern "C" fn(Id, Id, Id, Id, f64, f64) -> Id = std::mem::transmute(objc_msgSend as *const ());
+            let event = new_event(
+                get(class(c"CHHapticEvent"), c"alloc"),
+                sel(c"initWithEventType:parameters:relativeTime:duration:"),
+                CHHapticEventTypeHapticContinuous,
+                array(class(c"NSArray"), sel(c"arrayWithObject:"), param),
+                0.0,
+                seconds,
+            );
+            release(param);
+            let new_pattern: extern "C" fn(Id, Id, Id, Id, *mut Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+            let pattern = new_pattern(
+                get(class(c"CHHapticPattern"), c"alloc"),
+                sel(c"initWithEvents:parameters:error:"),
+                array(class(c"NSArray"), sel(c"arrayWithObject:"), event),
+                get(class(c"NSArray"), c"array"),
+                std::ptr::null_mut(),
+            );
+            release(event);
+            if pattern.is_null() {
+                return false;
+            }
+            let create: extern "C" fn(Id, Id, Id, *mut Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+            self.player = retain(create(self.engine, sel(c"createPlayerWithPattern:error:"), pattern, std::ptr::null_mut()));
+            release(pattern);
+            !self.player.is_null() && at(self.player, sel(c"startAtTime:error:"), 0.0, std::ptr::null_mut())
+        }
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        release(self.player);
+        release(self.engine);
+    }
+}
+
+/// The haptics thread's engines: the controllers' by id, and the phone's, which the phone may not
+/// have (asked once).
+#[derive(Default)]
+struct Engines {
+    controllers: Vec<(usize, Engine)>,
+    phone: Option<Engine>,
+    phone_cannot: bool,
+}
+
+impl Engines {
+    /// One ask, on the engine kept for it; an engine that will not start or play is made again and
+    /// tried once more, the next ask's restart for one the system stopped.
+    fn play(&mut self, ask: Ask) {
+        match ask.to {
+            Haptics::Controller(id) => {
+                // The controller object itself while it is connected; the engines of those that
+                // are not are let go.
+                let connected = objects(get(class(c"GCController"), c"controllers"));
+                self.controllers.retain(|(c, _)| connected.iter().any(|o| *o as usize == *c));
+                let Some(ctrl) = connected.into_iter().find(|o| *o as usize == id) else { return };
+                for again in [false, true] {
+                    if again {
+                        self.controllers.retain(|(c, _)| *c != id);
+                    }
+                    if !self.controllers.iter().any(|(c, _)| *c == id) {
+                        // GCDeviceHaptics (iOS 14): nil for a controller with no motors.
+                        let haptics = get(ctrl, c"haptics");
+                        if haptics.is_null() {
+                            return;
+                        }
+                        // SAFETY: objc_msgSend cast to `id (id, SEL, GCHapticsLocality)`, the locality
+                        // GameController's NSString constant; the engine comes back autoreleased
+                        let engine = unsafe {
+                            let f: extern "C" fn(Id, Id, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                            f(haptics, sel(c"createEngineWithLocality:"), GCHapticsLocalityDefault)
+                        };
+                        if engine.is_null() {
+                            return;
+                        }
+                        self.controllers.push((id, Engine { engine: retain(engine), player: std::ptr::null_mut() }));
+                    }
+                    let engine = &mut self.controllers.iter_mut().find(|(c, _)| *c == id).expect("kept").1;
+                    if engine.play(ask.intensity, ask.seconds) {
+                        return;
+                    }
+                }
+            }
+            Haptics::Phone => {
+                for again in [false, true] {
+                    if again {
+                        self.phone = None;
+                    }
+                    if self.phone.is_none() && !self.phone_cannot {
+                        self.phone = phone_engine();
+                        self.phone_cannot = self.phone.is_none();
+                    }
+                    let Some(engine) = &mut self.phone else { break };
+                    if engine.play(ask.intensity, ask.seconds) {
+                        return;
+                    }
+                }
+                // SAFETY: a plain C call, with AudioToolbox's vibrate id
+                unsafe { AudioServicesPlaySystemSound(SYSTEM_SOUND_VIBRATE) };
+            }
+        }
+    }
+}
+
+/// The phone's own CHHapticEngine, if its hardware has haptics (`capabilitiesForHardware`), playing
+/// haptics only so it leaves the app's sound (its AudioQueue) be.
+fn phone_engine() -> Option<Engine> {
+    let caps = get(class(c"CHHapticEngine"), c"capabilitiesForHardware");
+    if caps.is_null() {
+        return None;
+    }
+    // SAFETY: objc_msgSend cast to `BOOL (id, SEL)`, then `id (id, SEL, NSError **)` for the
+    // alloc/init (an engine already ours), then `void (id, SEL, BOOL)`
+    unsafe {
+        let supports: extern "C" fn(Id, Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
+        if !supports(caps, sel(c"supportsHaptics")) {
+            return None;
+        }
+        let init: extern "C" fn(Id, Id, *mut Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        let engine = init(get(class(c"CHHapticEngine"), c"alloc"), sel(c"initAndReturnError:"), std::ptr::null_mut());
+        if engine.is_null() {
+            return None;
+        }
+        let set: extern "C" fn(Id, Id, bool) = std::mem::transmute(objc_msgSend as *const ());
+        set(engine, sel(c"setPlaysHapticsOnly:"), true);
+        Some(Engine { engine, player: std::ptr::null_mut() })
+    }
 }
 
 // ---- sound ---------------------------------------------------------------------------------------

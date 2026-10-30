@@ -897,6 +897,13 @@ impl Rumble {
     pub fn magnitude(self) -> u16 {
         u16::from(self.level) * 257
     }
+
+    /// The level as CoreHaptics' intensity, `0..=1` (the iPhone's [`Motor`]): its haptic event runs
+    /// for [`Rumble::seconds`] as it is.
+    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+    pub fn intensity(self) -> f32 {
+        f32::from(self.level) / 255.0
+    }
 }
 
 /// Which frames of a seat rumble its pad (P183): the frame the rider's wreck entry ran, and the
@@ -957,11 +964,32 @@ impl Motor {
     }
 }
 
-/// No force feedback off Linux: the asks are kept and nothing turns.
-#[cfg(not(target_os = "linux"))]
+/// The iPhone's pads' motors: a controller's haptics, or the phone's own for the touch pad
+/// ([`crate::ios::rumble`], a CHHapticEngine's continuous event at [`Rumble::intensity`] for the
+/// ask's seconds). Every pad node gets one; a controller with no haptics shakes nothing.
+#[cfg(target_os = "ios")]
+struct Motor {
+    /// The pad's place, its node's name (`gamepad/<place>`).
+    place: u32,
+}
+
+#[cfg(target_os = "ios")]
+impl Motor {
+    fn open(_: &std::path::Path, _: &std::path::Path, node: &str) -> Option<Motor> {
+        Some(Motor { place: node.parse().ok()? })
+    }
+
+    fn play(&mut self, r: Rumble) -> std::io::Result<()> {
+        crate::ios::rumble(self.place, r);
+        Ok(())
+    }
+}
+
+/// No force feedback off Linux and the iPhone: the asks are kept and nothing turns.
+#[cfg(not(any(target_os = "linux", target_os = "ios")))]
 struct Motor;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "ios")))]
 impl Motor {
     fn open(_: &std::path::Path, _: &std::path::Path, _: &str) -> Option<Motor> {
         None
@@ -5617,6 +5645,9 @@ pub(crate) mod tests {
         assert_eq!(Rumble::new(-1.0, -4), Rumble { seconds: 0.0, level: 0 });
         assert_eq!(Rumble::new(1.0, 200), Rumble::WRECK);
         assert_eq!((Rumble::WRECK.millis(), Rumble::WRECK.magnitude()), (1000, 51400));
+        // The iPhone's haptic event: level / 255, for the ask's seconds.
+        assert_eq!((Rumble::WRECK.intensity(), Rumble::WRECK.seconds), (200.0 / 255.0, 1.0));
+        assert_eq!((Rumble::new(1.0, 255).intensity(), Rumble::new(1.0, 0).intensity()), (1.0, 0.0));
     }
 
     /// **A rumble turns a real motor** (P183): a uinput pad that says it can rumble, opened as the

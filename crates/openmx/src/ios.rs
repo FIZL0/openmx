@@ -242,6 +242,20 @@ pub fn pad_name(node: &str) -> String {
     openmx_ios::pads().into_iter().find(|p| Some(p.id) == id).map(|p| p.name).unwrap_or_default()
 }
 
+/// Rumble the pad at place `node` (P183, `pad::Motor`): a controller through its own haptics, the
+/// touch pad through the phone's — the touch pad's player holds the phone. Never waits
+/// ([`openmx_ios::rumble`] plays it on a thread of its own).
+pub fn rumble(node: u32, r: crate::pad::Rumble) {
+    let to = if node == TOUCH_INDEX {
+        openmx_ios::Haptics::Phone
+    } else {
+        let places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&id) = places.get(node as usize) else { return };
+        openmx_ios::Haptics::Controller(id)
+    };
+    openmx_ios::rumble(to, r.intensity(), r.seconds);
+}
+
 /// The js numbers of the standard mapping's buttons, as `web_host.rs` has them.
 const JS_BUTTON: [(usize, u8); 11] = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (8, 6), (9, 7), (16, 8), (10, 9), (11, 10)];
 
