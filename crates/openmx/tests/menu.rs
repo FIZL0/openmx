@@ -383,6 +383,7 @@ fn the_settings_file_reads_back_as_it_was_written() {
         vibration: false,
         track: "free11".into(),
         track_filter: "MX vs. ATV Untamed".into(),
+        track_category: "Freestyle".into(),
         split: split::Split::SideBySide,
         music: "disc:headstrong".into(),
         music_volume: 35,
@@ -5803,6 +5804,116 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
     assert_eq!(next.settings.track_filter, "Game Beta", "a game gone from the folder is kept for when it is back");
     // A name the file cannot keep is All Games.
     assert_eq!(Settings::parse("track_filter = a\u{7}b\n").track_filter, "");
+    std::fs::remove_dir_all(&mods).unwrap();
+}
+
+/// MD66: each mod's `mod.json` `category` is the pick's second filter, L1 and R1 within the lit
+/// game: Freestyle lists only the Freestyle maps (a generated `fs` map of each game, not the
+/// Supercross one), the disc's towns are Free Roam and the worlds World, a mod.json with no category
+/// is listed under Other, the filter is kept in the settings, and a game it is not in shows All.
+#[test]
+fn the_pick_filters_by_each_mods_category() {
+    let mods = scratch("md66").join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    let listed: Vec<(String, String)> = [
+        ("gen_fs01", "Alpha FMX", "Game Alpha", Some("Freestyle")),
+        ("gen_sx01", "Alpha Stadium", "Game Alpha", Some("Supercross")),
+        ("beta_fs01", "Beta FMX", "Game Beta", Some(" Freestyle ")),
+        ("beta_x01", "Beta Unsorted", "Game Beta", None),
+        ("world_gen", "Generated World", "Combined", None),
+    ]
+    .iter()
+    .map(|&(id, name, game, category)| {
+        let category = category.map_or(String::new(), |c| format!(r#""category": "{c}","#));
+        let dir = mods.join("tracks").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mod.json"), format!(r#"{{"kind": "track", "id": "{id}", "source": {{"game": "{game}"}}, {category} "name": "{name}"}}"#)).unwrap();
+        (id.to_string(), name.to_string())
+    })
+    .collect();
+    let ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
+    let categories = track_mods::categories(&mods, &ids);
+    assert_eq!(
+        categories,
+        [("gen_fs01", "Freestyle"), ("gen_sx01", "Supercross"), ("beta_fs01", "Freestyle")].map(|(i, c)| (i.to_string(), c.to_string())),
+        "a mod.json with no category is left out, and the word is trimmed"
+    );
+
+    let (mut m, mut r) = fresh();
+    m.set_mod_tracks(listed.clone());
+    m.set_mod_games(track_mods::source_games(&mods, &ids));
+    m.set_mod_categories(categories.clone());
+    assert_eq!(m.track_category("beta_x01"), menu::OTHER);
+    assert_eq!(m.track_category("free06"), menu::FREE_ROAM);
+    assert_eq!(m.track_category("world_gen"), menu::WORLD);
+    let names = |m: &Menu| m.track_categories();
+    assert_eq!(names(&m), ["All Categories", "Free Roam", "Freestyle", "Supercross", "World", "Other"]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    let walk = |m: &mut Menu, r: &mut Reader| -> Vec<String> {
+        let mut seen = vec![m.track_at(m.cursor(Screen::Tracks)).0.to_string()];
+        loop {
+            tap(m, r, Control::Down);
+            let id = m.track_at(m.cursor(Screen::Tracks)).0.to_string();
+            if id == seen[0] {
+                seen.sort();
+                return seen;
+            }
+            seen.push(id);
+        }
+    };
+    let sorted = |v: &[&str]| {
+        let mut v: Vec<String> = v.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    };
+    let mut worlds: Vec<&str> = menu::DISC_WORLDS.iter().map(|w| w.0).collect();
+    worlds.push("world_gen");
+    let towns: Vec<&str> = menu::TRACKS.iter().map(|t| t.0).collect();
+    let own: [(&str, Vec<&str>); 5] = [
+        ("Free Roam", towns.clone()),
+        ("Freestyle", vec!["gen_fs01", "beta_fs01"]),
+        ("Supercross", vec!["gen_sx01"]),
+        ("World", worlds.clone()),
+        ("Other", vec!["beta_x01"]),
+    ];
+    for (name, tracks) in &own {
+        tap(&mut m, &mut r, Control::R1);
+        assert_eq!(names(&m)[m.track_category_group()], *name);
+        assert_eq!(m.settings.track_category, *name);
+        assert_eq!(walk(&mut m, &mut r), sorted(tracks), "{name} lists only its own");
+    }
+    tap(&mut m, &mut r, Control::R1);
+    assert_eq!(m.track_category_group(), 0, "R1 from the last is All Categories");
+    assert!(!m.settings.text().contains("track_category"));
+    // L1 back round to Other, then to Freestyle, which the file keeps.
+    for _ in 0..4 {
+        tap(&mut m, &mut r, Control::L1);
+    }
+    assert_eq!(m.settings.track_category, "Freestyle");
+    assert!(m.settings.text().contains("track_category = Freestyle\n"), "{}", m.settings.text());
+    // Within a game: Game Alpha's Freestyle is its fs map alone, and its categories its own two.
+    while m.track_groups()[m.track_filter_group()].0 != "Game Alpha" {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    assert_eq!(names(&m), ["All Categories", "Freestyle", "Supercross"]);
+    assert_eq!(walk(&mut m, &mut r), sorted(&["gen_fs01"]));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.track_groups()[m.track_filter_group()].0, "Game Beta");
+    assert_eq!(walk(&mut m, &mut r), sorted(&["beta_fs01"]));
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("beta_fs01".into())), "{acts:?}");
+    // The worlds' game has no Freestyle: it shows All, and the setting is kept for the next.
+    let mut next = Menu::new(Settings::parse(&m.settings.text()), Controls::default());
+    next.set_mod_tracks(listed.clone());
+    next.set_mod_games(track_mods::source_games(&mods, &ids));
+    next.set_mod_categories(categories);
+    assert_eq!(next.track_at(next.cursor(Screen::Tracks)).0, "beta_fs01");
+    next.settings.track_filter = "Worlds".into();
+    assert_eq!(next.track_category_group(), 0);
+    assert_eq!(next.track_categories(), ["All Categories"], "every world is World: no second filter");
+    assert_eq!(next.settings.track_category, "Freestyle");
+    assert_eq!(Settings::parse("track_category = a\u{7}b\n").track_category, "");
     std::fs::remove_dir_all(&mods).unwrap();
 }
 

@@ -1295,6 +1295,8 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
         ("kind", s("world")),
         ("id", s(&p.id)),
         ("name", s(&p.name)),
+        // MD66: the pick's and the store's category for every world (standard §1).
+        ("category", s("World")),
         ("source", o(vec![("game", s("Combined")), ("games", J::A(games.into_iter().map(J::S).collect()))])),
         ("version", s(&p.version)),
         ("author", s(AUTHOR)),

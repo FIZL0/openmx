@@ -1339,34 +1339,45 @@ impl Pen<'_> {
         self.text(Weight::Heavy, &nm, x + w / 2.0, y + h - 1.4, 1.3, 0.0, [0x14, 0x14, 0x14, 255], Align::Centre);
     }
 
-    /// Free Ride's pick: the lit filter's tracks as cards under its name (P70), each with its
+    /// Free Ride's pick: the lit filters' tracks as cards under their names (P70), each with its
     /// picture, Left and Right between the filters by source game (MD11: All Games, the disc's, the
-    /// worlds, each other game),
-    /// the lit track's still large, and the ride's setup.
+    /// worlds, each other game), L1 and R1 between the categories in it (MD66: Freestyle,
+    /// Supercross, …), the lit track's still large, and the ride's setup.
     fn tracks(&mut self, menu: &Menu) {
         let at = menu.cursor(Screen::Tracks).min(menu.track_count().saturating_sub(1));
         self.strip(3.0, 22.0);
         self.logo(true);
         let groups = menu.track_groups();
-        // The lit filter (MD11), the cursor on its first track where it is not on one of its own.
-        let (group, range) = groups[menu.track_filter_group()].clone();
-        let at = if range.contains(&at) { at } else { range.start };
-        let top = if groups.len() > 1 {
+        let cats = menu.track_categories();
+        // The lit filters (MD11, MD66), the cursor on their first track where it is not on one of
+        // their own.
+        let group = groups[menu.track_filter_group()].0.clone();
+        let list = menu.track_list();
+        let at = if list.contains(&at) { at } else { list[0] };
+        let mut top = if groups.len() > 1 {
             self.category(&group, 3.8, 7.6, 20.4);
             11.4
+        } else if cats.len() > 1 {
+            7.6
         } else {
             let base = Pen::mid(8.2 + HEAD_H / 2.0 + 0.2, 1.0);
             self.text(Weight::Bold, &group.to_uppercase(), 4.2, base, 1.0, 0.0, HEADING, Align::Left);
             8.2 + HEAD_H + ROW_GAP + 0.2
         };
+        if cats.len() > 1 {
+            let lit = &cats[menu.track_category_group()];
+            let pill_top = if groups.len() > 1 { top - 0.9 } else { top };
+            self.filter_pill(lit, 3.8, pill_top, 20.4, true, Some(("L1", "R1")));
+            top = pill_top + 3.8;
+        }
         let tag_of = |id: &str| menu.track_game(id);
-        self.cards(menu, range.clone(), at, 3.8, 20.4, top, &tag_of);
+        self.cards(menu, &list, at, 3.8, 20.4, top, &tag_of);
         let (id, name) = menu.track_at(at);
         let (x, w) = (28.5, 47.0);
         let tag = tag_of(id);
         let b = [x, 6.0, 36.0, 20.25];
         self.framed_still(menu, at, b, &tag);
-        let count = format!("{} of {}", at - range.start + 1, range.len());
+        let count = format!("{} of {}", list.iter().position(|&i| i == at).unwrap_or(0) + 1, list.len());
         // A long name stops short of the count beside it.
         let room = w - self.wide(Weight::Bold, &count, 1.2) - 2.0;
         let y = self.heading("", name, "", x, b[1] + b[3] + 1.0, room, 2.6);
@@ -1380,29 +1391,32 @@ impl Pen<'_> {
         if groups.len() > 1 {
             hints.push((Btn::LeftRight, "Game"));
         }
+        if cats.len() > 1 {
+            hints.push((Btn::L1R1, "Category"));
+        }
         hints.push((Btn::Cross, "Ride"));
         self.hints(&hints);
     }
 
-    /// The pick's tracks in `range` as cards (P70), in P39's pills' look: a lit card in the red
+    /// The pick's tracks in `list` as cards (P70), in P39's pills' look: a lit card in the red
     /// pill's gradient, rim and shadow, the others glass; each the track's picture (the lit one
     /// turning through a disc track's stills), its name, and the line under it — Last ridden, or
     /// where the track is from. As many as fit from `top`, the lit one kept in view.
     #[allow(clippy::too_many_arguments)]
-    fn cards(&mut self, menu: &Menu, range: Range<usize>, at: usize, x: f32, w: f32, top: f32, tag_of: &dyn Fn(&str) -> String) {
+    fn cards(&mut self, menu: &Menu, list: &[usize], at: usize, x: f32, w: f32, top: f32, tag_of: &dyn Fn(&str) -> String) {
         const CARD_H: f32 = 4.4;
         const CARD_GAP: f32 = 0.5;
         let bottom = STAGE.1 - BAND - 0.4;
         let shown = (((bottom - top + CARD_GAP) / (CARD_H + CARD_GAP)) as usize).max(1);
-        let n = range.len();
-        let lit_at = at - range.start;
+        let n = list.len();
+        let lit_at = list.iter().position(|&i| i == at).unwrap_or(0);
         let first = lit_at.saturating_sub(shown / 2).min(n.saturating_sub(shown));
         if first > 0 {
             self.arrow(x + w / 2.0, top - 0.6, [0.0, -1.0], 0.7, BONE);
         }
         let mut y = top;
         for k in first..(first + shown).min(n) {
-            let i = range.start + k;
+            let i = list[k];
             let lit = i == at;
             let (id, name) = menu.track_at(i);
             let b = [x, y, w, CARD_H];
@@ -1454,9 +1468,19 @@ impl Pen<'_> {
         let shop = &menu.store;
         let tabs: Vec<&str> = STORE_TABS.iter().chain(STORE_PAGES.iter()).copied().collect();
         self.tabs(&tabs, shop.tab, 4.0, 7.6);
+        // MD66: the Tracks tab's category filter, at the tab row's end, lit while the cursor is on it;
+        // the note then stops short of it.
+        let filtered = shop.filtered() && shop.tab < PACKS_TAB;
+        let note_end = if filtered {
+            let cats = shop.categories();
+            self.filter_pill(&cats[shop.category_group()], 55.8, 7.6, 20.4, shop.filtering, None);
+            55.0
+        } else {
+            76.0
+        };
         if let Some(note) = &shop.note {
-            let line = self.fit(Weight::Bold, note, 1.0, 34.0);
-            self.text(Weight::Bold, &line, 76.0, Pen::mid(7.6 + 1.17, 1.0), 1.0, 0.0, NOTE, Align::Right);
+            let line = self.fit(Weight::Bold, note, 1.0, note_end - 42.0);
+            self.text(Weight::Bold, &line, note_end, Pen::mid(7.6 + 1.17, 1.0), 1.0, 0.0, NOTE, Align::Right);
         }
         if shop.tab >= PACKS_TAB {
             self.store_page(menu);
@@ -1551,6 +1575,9 @@ impl Pen<'_> {
         let mut hints = vec![(Btn::Circle, "Back"), (Btn::L1R1, "Tabs"), (Btn::Start, "Refresh")];
         if !shop.downloadable().is_empty() {
             hints.push((Btn::Select, "Download All"));
+        }
+        if filtered && shop.filtering {
+            hints.push((Btn::LeftRight, "Category"));
         }
         if let Some(c) = lit.map(|i| &shop.cards[i]) {
             hints.push((Btn::Triangle, "Report"));
@@ -1716,17 +1743,43 @@ impl Pen<'_> {
 
     /// The pick's category, lit between the arrows Left and Right step it by.
     fn category(&mut self, name: &str, x: f32, top: f32, w: f32) {
+        self.filter_pill(name, x, top, w, true, None);
+    }
+
+    /// A filter's pill (MD11, MD66): its lit choice between the marks that step it, the d-pad's
+    /// arrows or, with `shoulders`, those two buttons; in the lit pill's look when `lit`, else glass.
+    fn filter_pill(&mut self, name: &str, x: f32, top: f32, w: f32, lit: bool, shoulders: Option<(&str, &str)>) {
         let size = 1.3;
         let h = size * 1.8;
         let (mid, r) = (top + h / 2.0, h / 2.0);
-        let (bx, bw) = (x + 1.6, w - 3.2);
-        self.round([bx + 0.26, top + 0.29, bw, h], r, SHADOW, SHADOW);
-        self.round([bx, top, bw, h], r, LIT_TOP, LIT_BOTTOM);
-        self.ring([bx, top, bw, h], r, 0.13, CHALK);
+        let chip = 0.9;
+        let ends = shoulders.map_or(1.6, |(a, b)| self.wide(Weight::Heavy, a, chip).max(self.wide(Weight::Heavy, b, chip)) + 1.1 * chip + 0.3);
+        let (bx, bw) = (x + ends, w - 2.0 * ends);
+        let ink = if lit { CHALK } else { BONE };
+        if lit {
+            self.round([bx + 0.26, top + 0.29, bw, h], r, SHADOW, SHADOW);
+            self.round([bx, top, bw, h], r, LIT_TOP, LIT_BOTTOM);
+            self.ring([bx, top, bw, h], r, 0.13, CHALK);
+        } else {
+            self.round([bx, top, bw, h], r, GLASS, GLASS);
+            self.ring([bx, top, bw, h], r, 0.08, RIM);
+        }
         let label = self.fit(Weight::Heavy, name, size, bw - 2.0);
-        self.text(Weight::Heavy, &label, bx + bw / 2.0, Pen::mid(mid, size), size, SLANT, CHALK, Align::Centre);
-        self.arrow(x + 0.6, mid, [-1.0, 0.0], 0.9, CHALK);
-        self.arrow(x + w - 0.6, mid, [1.0, 0.0], 0.9, CHALK);
+        self.text(Weight::Heavy, &label, bx + bw / 2.0, Pen::mid(mid, size), size, if lit { SLANT } else { 0.0 }, ink, Align::Centre);
+        match shoulders {
+            None => {
+                self.arrow(x + 0.6, mid, [-1.0, 0.0], 0.9, ink);
+                self.arrow(x + w - 0.6, mid, [1.0, 0.0], 0.9, ink);
+            }
+            Some((a, b)) => {
+                let ch = chip * 1.5;
+                for (word, at) in [(a, x), (b, x + w - ends + 0.3)] {
+                    let cw = ends - 0.3;
+                    self.round([at, mid - ch / 2.0, cw, ch], 0.45 * chip, SHOULDER, SHOULDER);
+                    self.text(Weight::Heavy, word, at + cw / 2.0, Pen::mid(mid, chip), chip, 0.0, CHALK, Align::Centre);
+                }
+            }
+        }
     }
 
     /// The local game's seats: a card each, dashed and open or lit with the pad on it.

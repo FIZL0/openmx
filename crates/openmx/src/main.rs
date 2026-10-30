@@ -2229,6 +2229,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     // And each one's picture on its card (P70), the stills that are missing taken off this thread.
     let mut stills = mod_pictures(&mut front.art, mods_folder(&args, &front.dir, mods_on).as_deref(), &listed);
     front.menu.set_mod_games(mod_games(&args, &front.dir, mods_on, &listed));
+    front.menu.set_mod_categories(mod_categories(&args, &front.dir, mods_on, &listed));
     front.menu.set_mod_tracks(listed);
     front.menu.set_music_packs(music_packs(&args, &front.dir, mods_on));
     // The mod store (P198): into the mods folder beside the settings, or `--mods DIR`'s; none under
@@ -2647,6 +2648,7 @@ async fn front_end(args: Args) -> Result<(), String> {
             let listed = mod_tracks(&args, &shell.front.dir, mods_on);
             stills = mod_pictures(&mut shell.front.art, mods_folder(&args, &shell.front.dir, mods_on).as_deref(), &listed);
             shell.front.menu.set_mod_games(mod_games(&args, &shell.front.dir, mods_on, &listed));
+            shell.front.menu.set_mod_categories(mod_categories(&args, &shell.front.dir, mods_on, &listed));
             shell.front.menu.set_mod_tracks(listed);
             shell.front.menu.set_music_packs(music_packs(&args, &shell.front.dir, mods_on));
             (shown_look, menu_images) = (None, false);
@@ -9274,6 +9276,7 @@ impl StoreFront {
                     name: e.meta.name.clone(),
                     author: e.meta.author.clone(),
                     source: e.meta.source.clone(),
+                    category: e.meta.category_word(),
                     size: e.meta.size,
                     verified: e.verified,
                     got,
@@ -9494,6 +9497,13 @@ fn mod_games(args: &Args, dir: &std::path::Path, on: bool, listed: &[(String, St
     let Some(folder) = mods_folder(args, dir, on) else { return Vec::new() };
     let ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
     track_mods::source_games(&folder, &ids)
+}
+
+/// The listed mod tracks' categories (MD66), which the pick's second filter is by.
+fn mod_categories(args: &Args, dir: &std::path::Path, on: bool, listed: &[(String, String)]) -> Vec<(String, String)> {
+    let Some(folder) = mods_folder(args, dir, on) else { return Vec::new() };
+    let ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
+    track_mods::categories(&folder, &ids)
 }
 
 /// The mods folder a front end reads, as [`mod_tracks`] says: `--mods`' if it was given, else the

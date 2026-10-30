@@ -2,7 +2,9 @@
 //! tab a kind (B372/B373), each card its name, author, source game, size, Verified, and Installed or
 //! Update. Cross installs (or updates) the lit card, Square removes it, Triangle reports it, Start
 //! reads the store again, Select downloads every mod on the tab not installed (or out of date), L1/R1
-//! change the tab. P230: Texture Packs is a kind tab too, and its Pack Order page lists every pack in
+//! change the tab. MD66: on the Tracks tab, Up from the grid's top row lights its category filter
+//! (Freestyle, Supercross, …, Other, from each mod's `meta.json`), which Left and Right step and Down
+//! leaves. P230: Texture Packs is a kind tab too, and its Pack Order page lists every pack in
 //! the mods folder top first: Cross turns the lit one on or off, Left and Right move it up and down,
 //! written at once to settings.txt's `texture_packs` / `texture_packs_off`.
 //!
@@ -57,6 +59,9 @@ pub struct Card {
     pub name: String,
     pub author: String,
     pub source: String,
+    /// MD66: its category (`modstore::Meta::category_word`: Other where its `meta.json` names
+    /// none), which the Tracks tab filters by.
+    pub category: String,
     /// Its download's bytes.
     pub size: u64,
     pub verified: bool,
@@ -167,6 +172,11 @@ pub struct Shop {
     /// A line over the grid: the store was busy, or what the last install or removal did.
     pub note: Option<String>,
     pub tab: usize,
+    /// MD66: the Tracks tab's category filter, a [`Shop::categories`] name; empty for All
+    /// Categories.
+    pub category: String,
+    /// MD66: the cursor is on that filter, above the grid.
+    pub filtering: bool,
     /// Whether there is a store at all: `--mods off` has no folder to install into.
     pub off: bool,
     /// P199: the signed-in Hugging Face account.
@@ -190,9 +200,49 @@ pub struct Shop {
 }
 
 impl Shop {
-    /// The cards on the tab, as indices into [`Shop::cards`].
+    /// The cards on the tab, as indices into [`Shop::cards`]: on Tracks, only the lit category's
+    /// (MD66).
     pub fn shown(&self) -> Vec<usize> {
-        (0..self.cards.len()).filter(|&i| self.cards[i].tab == self.tab).collect()
+        let want = (self.tab == 0 && self.category_group() > 0).then_some(self.category.as_str());
+        (0..self.cards.len()).filter(|&i| self.cards[i].tab == self.tab && want.is_none_or(|w| self.card_category(i) == w)).collect()
+    }
+
+    /// MD66: a card's category, Other where it has none.
+    fn card_category(&self, i: usize) -> &str {
+        let c = self.cards[i].category.trim();
+        if c.is_empty() { OTHER } else { c }
+    }
+
+    /// MD66: the Tracks tab's category filters: All Categories, then each category a track card is
+    /// in, in the pick's order ([`CATEGORIES`], any other by name, Other last). All Categories alone
+    /// where they are all one.
+    pub fn categories(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for i in (0..self.cards.len()).filter(|&i| self.cards[i].tab == 0) {
+            let c = self.card_category(i).to_string();
+            if !seen.contains(&c) {
+                seen.push(c);
+            }
+        }
+        seen.sort_by_cached_key(|c| (c == OTHER, CATEGORIES.iter().position(|k| k == c).unwrap_or(CATEGORIES.len()), c.clone()));
+        if seen.len() < 2 {
+            return vec![ALL_CATEGORIES.to_string()];
+        }
+        seen.insert(0, ALL_CATEGORIES.to_string());
+        seen
+    }
+
+    /// MD66: which of [`Shop::categories`] the filter is, All Categories where no card is in it.
+    pub fn category_group(&self) -> usize {
+        if self.category.is_empty() {
+            return 0;
+        }
+        self.categories().iter().position(|c| *c == self.category).unwrap_or(0)
+    }
+
+    /// MD66: whether the tab has the category filter: Tracks, with cards of two categories or more.
+    pub fn filtered(&self) -> bool {
+        self.tab == 0 && self.categories().len() > 1
     }
 
     /// The cards on the tab Download All installs: not installed or out of date, and not going now.
@@ -256,6 +306,7 @@ impl Menu {
     pub fn store_tab(&mut self, tab: usize) {
         self.store.tab = tab;
         self.store.arm = None;
+        self.store.filtering = false;
         self.cursor[Screen::Store.index()] = 0;
         if self.store.off {
             return;
@@ -277,6 +328,9 @@ impl Menu {
 
     /// The lit card, as an index into [`Shop::cards`].
     pub fn store_lit(&self) -> Option<usize> {
+        if self.store.filtering && self.store.filtered() {
+            return None;
+        }
         let shown = self.store.shown();
         shown.get(self.cursor[Screen::Store.index()].min(shown.len().saturating_sub(1))).copied()
     }
@@ -325,7 +379,26 @@ impl Menu {
             }
             return;
         }
+        // MD66: the category filter, above the grid: Left and Right step it, Down goes back to the
+        // grid's first card.
+        if self.store.filtering && self.store.filtered() {
+            if p.left || p.right {
+                let cats = self.store.categories();
+                let (n, c) = (cats.len(), self.store.category_group());
+                let name = &cats[if p.left { (c + n - 1) % n } else { (c + 1) % n }];
+                self.store.category = if name == ALL_CATEGORIES { String::new() } else { name.clone() };
+                self.cursor[at] = 0;
+            } else if p.down {
+                self.store.filtering = false;
+            }
+            return;
+        }
+        self.store.filtering = false;
         let n = self.store.shown().len();
+        if (p.up && self.cursor[at].min(n.saturating_sub(1)) < STORE_COLUMNS || n == 0 && p.up) && self.store.filtered() {
+            self.store.filtering = true;
+            return;
+        }
         if n > 0 {
             let c = self.cursor[at].min(n - 1);
             self.cursor[at] = if p.left {
