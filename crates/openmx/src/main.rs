@@ -4012,8 +4012,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             println!("wreck sounds: {e} — the sim's emitters count every clip as lasting nothing");
             game_sim::wreck_sound::Kit::default()
         });
+    // A mod's stadium (P242): its source game arms no map edge there (`track_mods::in_stadium`), so no
+    // bike is shot off its edge and no edge sound plays. A world's tiles and the disc's tracks keep it.
+    let stadium = modded.is_some()
+        && world_mod.is_none()
+        && archives.iter().find_map(|a| a.read_suffix(&format!("{stem}.toy")).ok()).is_some_and(|toy| track_mods::in_stadium(&toy));
+    if stadium {
+        println!("stadium: {} has no map edge", args.track);
+    }
     let new_rider = |phy: &Phy, at: Vf, heading: Vf| -> Rider {
         let mut rider = Rider::new(phy, mounts, at, heading, stunts.clone());
+        rider.edge_armed &= !stadium;
         // The fork the front wheel steers about, from the model's shocks to its handlebars, which is the
         // axis the bike's loader gives the front wheel (P33). Left straight up with no such nodes.
         if let (Some(h), Some(s)) = (node_at("Handlebars"), node_at("Shocks")) {

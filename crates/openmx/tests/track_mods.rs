@@ -708,3 +708,33 @@ fn music_packs_list_from_the_music_folder() {
     assert!(track_mods::scan(&mods).tracks.is_empty());
     assert!(track_mods::music_packs(&mods.join("nothing")).is_empty());
 }
+
+/// P242: a mod whose source game calls it a stadium (its `.toy`'s `[InStadium] InStadium=TRUE`, as MX
+/// vs. ATV's FMX arenas and supercross stadiums all write it) has no map edge: ridden at full throttle
+/// off its floor's edge, no shootoff warning starts and nobody is thrown. The same mod without the key
+/// warns and throws, as free06 does.
+#[test]
+fn a_stadium_mod_has_no_shootoff_and_a_free_ride_mod_keeps_it() {
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("p242").join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    let tracks = mods.join("tracks");
+    good(&tracks, "p242_open");
+    good(&tracks, "p242_stadium");
+    write(&tracks.join("p242_stadium"), "Env/MDFLAT/MDFLAT.toy", "[Crowd]\r\nCrowdPresent=TRUE\r\n\r\n[InStadium]\r\nInStadium=TRUE\r\n");
+    // 300 feet in from the west edge, facing it: the 150-foot margin is reached in about two seconds.
+    let ride = |id: &str| {
+        shell(&["--track", id, "--mods", mods.to_str().unwrap(), "--trace", "200", "--trace-gas", "--trace-feel", "--trace-at", "300,512,270"])
+    };
+    let Some((ok, open)) = ride("p242_open") else { return };
+    assert!(ok, "\n{open}");
+    assert!(!open.contains("stadium: "), "\n{open}");
+    assert!(open.contains("shootoff warning: ") && open.contains("thrown: tick "), "the open mod kept no edge:\n{open}");
+    let (ok, stadium) = ride("p242_stadium").unwrap();
+    assert!(ok, "\n{stadium}");
+    assert_eq!(line(&stadium, "stadium: "), "stadium: p242_stadium has no map edge");
+    assert!(!stadium.contains("shootoff warning: ") && !stadium.contains("thrown: "), "the stadium has an edge:\n{stadium}");
+    // And it did ride past where the open one threw.
+    let x = |l: &str| l.split_whitespace().nth(5).and_then(|v| v.parse::<f32>().ok());
+    let west = stadium.lines().filter_map(x).fold(f32::MAX, f32::min);
+    assert!(west < 150.0, "the stadium ride never reached the margin (west-most x {west}):\n{stadium}");
+}

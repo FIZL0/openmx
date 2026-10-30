@@ -295,6 +295,19 @@ pub fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
     res.read_suffix(&tagged).map_err(|_| format!("no file ending in {named} or {tagged}"))
 }
 
+/// **Whether a mod's track is a stadium** (P242), as its source game decides it: the track's `.toy`
+/// has `[InStadium] InStadium=` true. MX vs. ATV Unleashed's toy loader reads the key (missing: false)
+/// onto the loaded world, and the game arms the map edge on a player's bike only where it is false —
+/// so in its FMX arenas and supercross stadiums a rider at the edge is never shot off, and no edge
+/// sound plays. MX Unleashed's own tracks never come here: its bike builder goes off the event's
+/// league ([`game_sim::off_map::armed`]), and the port rides those as free rides.
+///
+/// The value is the bool the original's reader reads (`TRUE`/`FALSE`, `ON`/`OFF`, `Y`/`N`, else a
+/// number), through the port's copy of MX Unleashed's ([`game_sim::phy::Section::flag`]).
+pub fn in_stadium(toy: &[u8]) -> bool {
+    game_sim::phy::Ini::parse_bytes(toy).section("InStadium").flag("InStadium", false)
+}
+
 // ---- mod.json ------------------------------------------------------------------------------------
 
 /// Just enough JSON for `mod.json` (P232: the stitcher's, `stitch::json`, so the world it builds
@@ -315,6 +328,23 @@ mod tests {
             assert!(Json::parse(bad).is_err(), "{bad:?}");
         }
         assert!(Json::parse(&"[".repeat(1000)).is_err());
+    }
+
+    #[test]
+    fn a_stadium_is_the_toys_in_stadium_key() {
+        // As MX vs. ATV's FS01.toy and Nat01.toy write it, with CRLF.
+        assert!(in_stadium(b"[Crowd]\r\nCrowdPresent=TRUE\r\n\r\n[InStadium]\r\nInStadium=TRUE\r\n"));
+        assert!(!in_stadium(b"[InStadium]\r\nInStadium=FALSE\r\n"));
+        for yes in ["true", "On", "y", "1", "  TRUE  "] {
+            assert!(in_stadium(format!("[instadium]\ninstadium={yes}\n").as_bytes()), "{yes}");
+        }
+        for no in ["off", "N", "0", "x"] {
+            assert!(!in_stadium(format!("[InStadium]\nInStadium={no}\n").as_bytes()), "{no}");
+        }
+        // No section, no key, or the key in another section: not a stadium.
+        for none in ["", "[Crowd]\nInStadium=TRUE\n", "[InStadium]\nStadium=TRUE\n"].map(str::as_bytes) {
+            assert!(!in_stadium(none), "{:?}", String::from_utf8_lossy(none));
+        }
     }
 
     #[test]
