@@ -274,6 +274,24 @@ impl Res {
             .or_else(|| entries.iter().find(|e| normalise(&e.name).ends_with(&want)))
     }
 
+    /// The member `suffix` names whole, at a folder boundary: `tire.psm` finds `bike\tex\tire.psm`
+    /// and never `tex\red_tire.psm` (MD67). [`Res::find_suffix`] falls back to the bare ending.
+    pub fn find_whole(&self, suffix: &str) -> Option<&Entry> {
+        let want = normalise(suffix);
+        self.entries().iter().find(|e| {
+            let n = normalise(&e.name);
+            n == want || n.strip_suffix(want.as_str()).is_some_and(|d| d.ends_with('/'))
+        })
+    }
+
+    /// `find_whole` and `read` in one step.
+    pub fn read_whole(&self, suffix: &str) -> Result<Vec<u8>, String> {
+        let e = self
+            .find_whole(suffix)
+            .ok_or_else(|| format!("the archive has no member named {suffix}"))?;
+        self.members.bytes(e)
+    }
+
     /// `find_suffix` and `read` in one step.
     pub fn read_suffix(&self, suffix: &str) -> Result<Vec<u8>, String> {
         let e = self
