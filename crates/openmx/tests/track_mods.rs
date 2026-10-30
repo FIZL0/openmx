@@ -346,14 +346,16 @@ fn line<'a>(said: &'a str, prefix: &str) -> &'a str {
     said.lines().find(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("no `{prefix}` line:\n{said}"))
 }
 
-/// Full throttle for `frames` ticks at the engine's capped `dt`.
-fn throttle_tape(frames: usize) -> PathBuf {
+/// Full throttle for `frames` ticks at the engine's capped `dt`, in a file of the test's own `name`:
+/// the tests run side by side, and one rewriting a shared tape truncated it under another's shell,
+/// which rode an empty tape and never left the start (K17, at load ~50).
+fn throttle_tape(name: &str, frames: usize) -> PathBuf {
     let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape throttle\n");
     let report = format!("0079ff{:02x}7f7f7f7f000000000000{:02x}{}", 0xbf, 0xff, "00".repeat(17));
     for _ in 0..frames {
         text += &format!("frame 0x3d08850a 0x{report} -\n");
     }
-    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md2").join("throttle.tape");
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md2").join(format!("throttle-{name}.tape"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, text).unwrap();
     path
@@ -362,7 +364,7 @@ fn throttle_tape(frames: usize) -> PathBuf {
 #[test]
 fn a_track_mod_loads_and_rides_and_a_broken_one_does_not_crash() {
     let mods = mods_folder("ride");
-    let tape = throttle_tape(150);
+    let tape = throttle_tape("ride", 150);
     let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
     let Some((ok, said)) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--frames", "600", "--steady-clock"]) else { return };
     assert!(ok, "the mod did not ride:\n{said}");
@@ -417,7 +419,7 @@ fn mods_with_terrains_cut_to_their_headers_all_list_and_a_ride_says_why_not() {
 #[test]
 fn a_disc_ride_is_the_same_with_or_without_mods() {
     let mods = mods_folder("disc");
-    let tape = throttle_tape(150);
+    let tape = throttle_tape("second", 150);
     let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
     let empty = mods.parent().unwrap().join("empty");
     let ride = |m: &str| shell(&["--track", "free06", "--mods", m, "--play", tape, "--frames", "600", "--steady-clock"]);
@@ -461,7 +463,7 @@ fn a_one_level_terrain_is_256_samples_a_side() {
     let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md12").join("mods");
     let _ = std::fs::remove_dir_all(&mods);
     good_of(&mods.join("tracks"), "md12_onelevel", 1);
-    let tape = throttle_tape(150);
+    let tape = throttle_tape("onelevel", 150);
     let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
     let Some((ok, said)) = shell(&["--track", "md12_onelevel", "--mods", mods_arg, "--play", tape, "--frames", "600", "--steady-clock"]) else { return };
     assert!(ok, "the one-level mod did not ride:\n{said}");

@@ -6,8 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Ride headless for `seconds` with these arguments, or `None` with no disc to ride.
-fn ride(seconds: u32, args: &[&str]) -> Option<String> {
+/// Ride headless for at most `frames` ticks on the steady clock, with these arguments, or `None` with
+/// no disc to ride. Not `--seconds` (K18): that is wall time, and at load ~40 one play ran out of it
+/// between the switch back (tick 180) and the tape's end (240), so the planes agreed and the bikes not.
+fn ride(frames: u32, args: &[&str]) -> Option<String> {
     if let Err(e) = game_render::disc::Disc::open_configured() {
         eprintln!("skipped: {e}");
         return None;
@@ -15,7 +17,7 @@ fn ride(seconds: u32, args: &[&str]) -> Option<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
-        .args(["--headless", "--track", "free06", "--seconds", &seconds.to_string()])
+        .args(["--headless", "--track", "free06", "--frames", &frames.to_string(), "--steady-clock"])
         .args(args)
         .output()
         .expect("the shell runs");
@@ -52,13 +54,17 @@ fn a_played_tape_takes_its_switches_and_replays_bit_for_bit() {
     let tape = scratch("switching.tape");
     std::fs::write(&tape, switching_tape(240, 60, 180)).expect("the tape is written");
     let tape = tape.to_str().expect("a path");
-    let Some(first) = ride(9, &["--play", tape]) else { return };
-    let again = ride(9, &["--play", tape]).expect("the disc was there a moment ago");
+    let Some(first) = ride(300, &["--play", tape]) else { return };
+    let again = ride(300, &["--play", tape]).expect("the disc was there a moment ago");
     println!("{first}");
 
     // Both switches were taken, in order, and the ride ended on the bike.
     let said: Vec<&str> = first.lines().filter(|l| l.starts_with("vehicle: ")).collect();
     assert_eq!(said, ["vehicle: bike", "vehicle: biplane", "vehicle: bike"], "\n{first}");
+    // Both rode the whole tape: neither stopped short of its end.
+    for said in [&first, &again] {
+        assert!(said.contains("the tape ran out after 240 frames"), "\n{said}");
+    }
     // Exactly the same bike and the same plane, not nearly.
     assert_eq!(line(&first, "ride hash"), line(&again, "ride hash"));
     assert_eq!(line(&first, "plane hash"), line(&again, "plane hash"));
