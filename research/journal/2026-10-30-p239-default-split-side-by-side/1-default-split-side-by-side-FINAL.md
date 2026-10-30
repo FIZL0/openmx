@@ -1,4 +1,4 @@
-# 1 — default split side by side (PART)
+# 1 — default split side by side (FINAL)
 
 Task P239. 2026-10-30.
 
