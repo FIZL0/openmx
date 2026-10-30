@@ -5,7 +5,7 @@
 //!   the stick       axes 0/1    steer and lean (and the menus' cursor)
 //!   GAS / BRAKE     R2 / L2     the throttle and the brake, full travel while held
 //!   ✕ ○ □ △         0 1 2 3     OK and back in the menus; ○ △ tricks in a ride
-//!   CLUTCH / R1     L1 / R1     the clutch, the third trick button
+//!   CLUTCH / MODIFIER  L1 / R1  the clutch, the third trick button
 //!   CAMERA / PAUSE  Select / Start
 //!
 //! The pad is read as one more controller ([`crate::ios`] lists it while it is shown), so the shell
@@ -63,13 +63,13 @@ enum Look {
 }
 
 /// Where a button sits, in `u`: its right and bottom edges `x`, `y` in from the safe area's
-/// bottom-right corner, or along the top from the left or right edge or the middle.
+/// bottom-right corner, along the top from the middle, or `x` in from the left under the HUD's
+/// score bar (12% of the height down).
 #[derive(Clone, Copy, Debug)]
 enum Place {
     Right { x: f32, y: f32 },
-    TopLeft(f32),
-    TopRight(f32),
     TopMiddle(f32),
+    UnderScore(f32),
 }
 
 /// The buttons: which, where, how big (`u`), what they look like. touch.js's `layout`.
@@ -80,10 +80,10 @@ const LAYOUT: [(usize, Place, [f32; 2], Look); BUTTONS] = [
     (CIRCLE, Place::Right { x: 0.35, y: 4.2 }, [1.15, 1.15], Look::Face),
     (SQUARE, Place::Right { x: 2.85, y: 4.2 }, [1.15, 1.15], Look::Face),
     (TRIANGLE, Place::Right { x: 1.6, y: 5.3 }, [1.15, 1.15], Look::Face),
-    (L1, Place::TopLeft(0.4), [1.6, 0.7], Look::Small("CLUTCH")),
-    (R1, Place::TopRight(0.4), [1.6, 0.7], Look::Small("R1")),
-    (SELECT, Place::TopMiddle(-1.8), [1.6, 0.7], Look::Small("CAMERA")),
-    (START, Place::TopMiddle(0.2), [1.6, 0.7], Look::Small("PAUSE")),
+    (R1, Place::Right { x: 4.35, y: 0.35 }, [2.1, 1.2], Look::Pedal("MODIFIER")),
+    (L1, Place::UnderScore(0.4), [1.6, 0.7], Look::Small("CLUTCH")),
+    (SELECT, Place::TopMiddle(-2.6), [1.6, 0.7], Look::Small("CAMERA")),
+    (START, Place::TopMiddle(-0.8), [1.6, 0.7], Look::Small("PAUSE")),
 ];
 
 /// How far past a button's edge a touch still hits it, in `u`.
@@ -154,9 +154,8 @@ impl TouchPad {
         let top = t + 0.3 * u;
         let (x, y) = match place {
             Place::Right { x, y } => (self.size.0 - r - x * u - w, self.size.1 - b - y * u - h),
-            Place::TopLeft(x) => (l + x * u, top),
-            Place::TopRight(x) => (self.size.0 - r - x * u - w, top),
             Place::TopMiddle(x) => (self.size.0 / 2.0 + x * u, top),
+            Place::UnderScore(x) => (l + x * u, t + 0.12 * self.size.1),
         };
         [x, y, w, h]
     }
@@ -377,6 +376,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_modifier_sits_left_of_the_brake() {
+        let p = phone();
+        let at = |b: usize| {
+            let &(_, place, size, _) = LAYOUT.iter().find(|l| l.0 == b).unwrap();
+            p.rect(place, size)
+        };
+        let (modifier, brake) = (at(R1), at(L2));
+        assert!(modifier[0] + modifier[2] < brake[0], "left of it, a gap between");
+        assert_eq!(modifier[1] + modifier[3], brake[1] + brake[3], "along its foot");
     }
 
     #[test]
