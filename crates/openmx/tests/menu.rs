@@ -207,6 +207,11 @@ fn press_every_row(m: &mut Menu, r: &mut Reader, upward: bool) -> Vec<menu::Key>
             tap(m, r, Control::Circle);
             assert_eq!(m.screen(), Some(screen), "{screen:?} {:?}: Circle is not back on the page", row.key);
             changed.push(row.key);
+        } else if m.overwriting().is_some() {
+            // A row that asks first (P229): its question is up, and Circle puts it away.
+            tap(m, r, Control::Circle);
+            assert_eq!((m.overwriting(), m.screen()), (None, Some(screen)), "{screen:?} {:?}: Circle did not put its question away", row.key);
+            changed.push(row.key);
         } else if key(m) != before {
             changed.push(row.key);
         }
@@ -862,6 +867,7 @@ fn the_camera_rows_change_by_pad_and_are_saved() {
             Key::CameraDefault,
             Key::CameraOriginal,
             Key::CameraSave,
+            Key::CameraSaveOver,
             Key::CameraCycle
         ]
     );
@@ -2960,7 +2966,7 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     let rows = m.page();
-    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 4 + 1 + 4, "{rows:?}");
+    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 4 + 1 + 5, "{rows:?}");
     assert_eq!(rows.last().unwrap().label, "Reset to Original");
     assert!(rows.iter().filter(|r| r.world).all(|r| !matches!(r.key, Key::Knob(k) if k.per_seat())));
 
@@ -3097,7 +3103,7 @@ fn the_pauses_modifiers_take_when_it_closes_unless_held() {
     m.main();
     m.open(Screen::Modifiers);
     assert!(note(&m).contains("next"), "{}", note(&m));
-    assert!(m.page().iter().all(|r| r.off.is_none() || matches!(r.key, Key::LoadPreset | Key::DeletePreset)), "{:?}", m.page());
+    assert!(m.page().iter().all(|r| r.off.is_none() || matches!(r.key, Key::LoadPreset | Key::SaveOverPreset | Key::DeletePreset)), "{:?}", m.page());
 }
 
 /// P143: a modifier preset is one player's set. Saved, it keeps the Player row's player's own
@@ -4315,6 +4321,10 @@ fn every_row_of_every_settings_tab_and_page_changes_by_pad() {
         m.set_music_packs(vec![("mxvatv_music".into(), "Unleashed music".into(), 30)]);
         // The disc's camera presets, which the Camera tab's Preset row lists (P163).
         m.camera_names = [vec!["Race Cam 1".into(), "Freestyle Cam".into()], vec!["Flight Cam 1".into()]];
+        // Two bike presets of 1P's own, so Save Over has one to write over wherever the page is (P229).
+        for name in ["Low", "High"] {
+            m.settings.camera_sets[0].save_custom(Machine::Bike, "Race Cam 1", name, menu::cameras::Look::ORIGINAL, &[]);
+        }
         (m, r)
     };
     for tab in menu::SETTINGS_TABS {
@@ -7500,4 +7510,155 @@ fn a_pair_with_no_split_chosen_rides_side_by_side() {
     let (m, acts) = local_game(2, &[1]);
     assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
     assert_eq!(m.party().map(|p| p.layout()), Some(split::Layout::SideBySide));
+}
+
+/// P229: Save Over on Game Modifiers keeps the set now over the preset Load Preset is on, under its
+/// name and in its place, after a yes/no; Cancel leaves it be. Off with none saved and under the
+/// pause's hold, and what it wrote survives a settings save and load.
+#[test]
+fn save_over_replaces_the_picked_modifier_preset() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::SaveOverPreset).unwrap();
+    assert_eq!(row(&m).off.as_deref(), Some("No presets saved yet"));
+    let save = |m: &mut Menu, r: &mut Reader, name: &str| {
+        down_to(m, r, Key::SavePreset);
+        tap(m, r, Control::Cross);
+        type_keys(m, r, name);
+        tap(m, r, Control::Start);
+        assert_eq!(m.screen(), Some(Screen::Modifiers));
+    };
+    let gravity = |m: &mut Menu, r: &mut Reader, c: Control| {
+        down_to(m, r, Key::Knob(Knob::Gravity));
+        tap(m, r, c);
+    };
+    gravity(&mut m, &mut r, Control::Left);
+    save(&mut m, &mut r, "low");
+    gravity(&mut m, &mut r, Control::Left);
+    save(&mut m, &mut r, "lower");
+    let names = |m: &Menu| m.settings.presets.iter().map(|p| p.0.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&m), ["Low", "Lower"]);
+    let (low, lower) = (m.settings.presets[0].1, m.settings.presets[1].1);
+    assert_ne!(low, lower);
+
+    // Load Preset back on Low: the row names it.
+    down_to(&mut m, &mut r, Key::LoadPreset);
+    tap_until(&mut m, &mut r, Control::Right, |m| m.page()[m.cursor(Screen::Modifiers)].value == "Low");
+    assert_eq!((row(&m).label.as_str(), row(&m).off), ("Save Over Low", None));
+    gravity(&mut m, &mut r, Control::Right);
+    gravity(&mut m, &mut r, Control::Right);
+    gravity(&mut m, &mut r, Control::Right);
+    m.take_changed();
+
+    // Asked first, on Cancel: Cross there writes nothing.
+    down_to(&mut m, &mut r, Key::SaveOverPreset);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.overwriting(), Some(("Save over Low?".to_string(), ["Save Over", "Cancel"], 1)));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.overwriting(), None);
+    assert_eq!(m.settings.presets[0].1, low);
+    assert!(!m.take_changed());
+    // Circle closes the question and stays on the page.
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!((m.overwriting(), m.screen()), (None, Some(Screen::Modifiers)));
+    assert_eq!(m.settings.presets[0].1, low);
+
+    // Yes: Low has the set now, the same name in the same place, and no new preset.
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.overwriting(), None);
+    assert_eq!(names(&m), ["Low", "Lower"]);
+    assert_eq!(m.settings.presets[0].1, menu::preset_of(&m.settings.modifiers, 0));
+    assert_ne!(m.settings.presets[0].1, low);
+    assert_eq!(m.settings.presets[1].1, lower, "the other preset is untouched");
+    assert!(m.take_changed());
+    assert_eq!(m.page().into_iter().find(|r| r.key == Key::LoadPreset).unwrap().value, "Low", "the pick stays on it");
+
+    // Kept through a settings save and load.
+    let dir = scratch("modifiers-save-over");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    assert_eq!(menu::load(&dir).0.presets, m.settings.presets);
+    std::fs::remove_dir_all(dir).ok();
+
+    // Under the pause's hold it is off, as Load Preset is.
+    let mut p = m.clone();
+    p.main();
+    p.pause();
+    tap_until(&mut p, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
+    tap(&mut p, &mut r, Control::Cross);
+    tab_to(&mut p, &mut r, "Ride");
+    down_to(&mut p, &mut r, Key::Modifiers);
+    tap(&mut p, &mut r, Control::Cross);
+    assert_eq!(row(&p).off, None);
+    let held = "Online the ride keeps its modifiers";
+    p.mods_lock = Some(held.into());
+    assert_eq!(row(&p).off.as_deref(), Some(held));
+}
+
+/// P229: Save Over on the Camera page keeps what Save as New Preset would, as framed now, over one
+/// of the player's own presets on that machine, in its place and under its name, after a yes/no;
+/// the Preset row goes onto it. Off with none of the player's own to write over, and what it wrote
+/// survives a settings save and load.
+#[test]
+fn save_over_replaces_a_custom_camera_in_place() {
+    use menu::Key;
+    use menu::cameras::Look;
+    let (mut m, mut r) = fresh();
+    m.camera_names = [vec!["Race Cam 1".into(), "Freestyle Cam".into()], vec!["Flight Cam 1".into()]];
+    settings_at(&mut m, &mut r, "Camera");
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::CameraSaveOver).unwrap();
+    assert!(row(&m).off.is_some(), "none of 1P's own yet");
+
+    // Two of 1P's own on the bike, and a biplane one Save Over never offers for a bike copy.
+    let set = &mut m.settings.camera_sets[0];
+    set.save_custom(Machine::Bike, "Race Cam 1", "Low", Look::ORIGINAL, &[]);
+    set.save_custom(Machine::Bike, "Race Cam 1", "High", Look::ORIGINAL, &[]);
+    set.save_custom(Machine::Biplane, "Flight Cam 1", "Wing", Look::ORIGINAL, &[]);
+    let labels = |m: &Menu| m.camera_over_choices().iter().map(|p| p.label()).collect::<Vec<_>>();
+    assert_eq!(labels(&m), ["Low (Mine)", "High (Mine)"], "on All Presets, the start preset's machine");
+    assert_eq!(row(&m).off, None);
+
+    // Freestyle Cam framed a notch out, then saved over High.
+    down_to(&mut m, &mut r, Key::CameraPreset);
+    tap_until(&mut m, &mut r, Control::Right, |m| m.camera_picked().is_some_and(|p| p.name == "Freestyle Cam"));
+    down_to(&mut m, &mut r, Key::CameraOwn(1));
+    tap(&mut m, &mut r, Control::Right);
+    let framed = m.camera_look(&m.camera_picked().unwrap());
+    assert_ne!(framed, Look::ORIGINAL);
+    down_to(&mut m, &mut r, Key::CameraSaveOver);
+    tap_until(&mut m, &mut r, Control::Right, |m| row(m).value == "High (Mine)");
+    m.take_changed();
+    let before = m.settings.camera_sets[0].own.clone();
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.overwriting(), Some(("Save over High?".to_string(), ["Save Over", "Cancel"], 1)));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.camera_sets[0].own, before, "Cancel writes nothing");
+    assert!(!m.take_changed());
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.overwriting(), None);
+    let own = &m.settings.camera_sets[0].own;
+    assert_eq!(own.len(), before.len(), "no new entry");
+    let at = before.iter().position(|o| o.name == "High").unwrap();
+    assert_eq!((own[at].name.as_str(), own[at].base.as_str(), own[at].look), ("High", "Freestyle Cam", framed));
+    for (i, o) in before.iter().enumerate().filter(|&(i, _)| i != at) {
+        assert_eq!(own[i], *o, "{} untouched", o.name);
+    }
+    assert!(m.take_changed());
+    assert_eq!(m.camera_picked().map(|p| p.label()), Some("High (Mine)".to_string()), "the pick goes onto it");
+    // On High itself, Save Over offers Low alone: copying High over High is nothing.
+    assert_eq!(labels(&m), ["Low (Mine)"]);
+
+    // Kept through a settings save and load.
+    let dir = scratch("camera-save-over");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    assert_eq!(menu::load(&dir).0.camera_sets, m.settings.camera_sets);
+    std::fs::remove_dir_all(dir).ok();
 }

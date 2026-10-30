@@ -205,6 +205,19 @@ impl Seat {
         name
     }
 
+    /// Keep `look` over `base` as the player's own preset `name` on `machine`, in its place and
+    /// under its name (P229). Whether there was one to keep it over.
+    pub fn save_over(&mut self, machine: Machine, name: &str, base: &str, look: Look) -> bool {
+        match self.own.iter_mut().find(|o| o.machine == machine && o.custom() && o.name.eq_ignore_ascii_case(name)) {
+            Some(o) => {
+                o.base = base.to_string();
+                o.look = look;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Forget a preset's own numbers or a preset of the player's.
     pub fn remove(&mut self, machine: Machine, name: &str) {
         self.own.retain(|o| !(o.machine == machine && o.name.eq_ignore_ascii_case(name)));
@@ -376,6 +389,36 @@ impl super::Menu {
         };
         let kept = self.settings.camera_sets[seat].save_custom(pick.machine, &base, name, look, disc);
         if let Some(i) = self.camera_choices().iter().position(|p| p.custom && p.machine == pick.machine && p.name == kept) {
+            self.camera_pick = i + 1;
+        }
+        self.changed = true;
+    }
+
+    /// The player's own presets Save Over can write over (P229): the seat's on the machine of the
+    /// preset [`Menu::camera_to_save`] copies, less that one itself.
+    pub fn camera_over_choices(&self) -> Vec<Pick> {
+        let Some(from) = self.camera_to_save() else { return Vec::new() };
+        self.camera_choices().into_iter().filter(|p| p.custom && p.machine == from.machine && *p != from).collect()
+    }
+
+    /// The preset [`Menu::camera_to_save`] copies, framed as it is now, kept over `over`, one of the
+    /// player's own, which keeps its name and its place; the Preset row goes on it (P229).
+    pub(super) fn save_camera_over(&mut self, over: &Pick) {
+        let Some(from) = self.camera_to_save() else { return };
+        if from.machine != over.machine || !over.custom {
+            return;
+        }
+        let seat = self.camera_seat();
+        let set = &self.settings.camera_sets[seat];
+        let base = match from.custom {
+            true => set.customs(from.machine).find(|o| o.name == from.name).map_or(from.name.clone(), |o| o.base.clone()),
+            false => from.name.clone(),
+        };
+        let look = self.camera_look(&from);
+        if !self.settings.camera_sets[seat].save_over(over.machine, &over.name, &base, look) {
+            return;
+        }
+        if let Some(i) = self.camera_choices().iter().position(|p| p == over) {
             self.camera_pick = i + 1;
         }
         self.changed = true;
