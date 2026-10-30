@@ -1076,7 +1076,7 @@ fn a_second_player_on_an_online_machine_sits_down_and_leaves_again() {
     go.sit(2).unwrap();
     assert!(both(&mut ho, &mut go, 300, &|go| go.my_seats().len() == 2), "the guest's second player never sat");
     // the host has the seat too by now (it made the restart)
-    assert_eq!(ho.names()[2].as_deref(), Some(gme.as_str()), "the host sees the guest's second player");
+    assert_eq!(ho.names()[2].as_deref(), Some("Guesty"), "the host sees the guest's second player, by the guest's name");
     assert_eq!(go.my_seats(), [1, 2]);
     assert_eq!(go.drawn()[..2], [1, 2], "the guest's players lead its shell seats");
     assert!(ho.can_sit() && go.can_sit());
@@ -1172,4 +1172,17 @@ fn a_peer_who_drops_in_is_drawn_in_their_own_look() {
     assert_eq!(ho.seat_pick(1).unwrap().pick.look, guest_look);
     assert_eq!(go.seat_pick(1).unwrap().pick.look, host_look);
     let _ = go.leave();
+}
+
+/// The teleport's player pills name each seat by the room's name for its peer, not the peer's id: a
+/// joiner's id is a long hex string, which once filled the pill.
+#[test]
+fn a_ride_names_its_players_not_their_peer_ids() {
+    let id = "cb20b207d9bab2a665e005aa5ab684935:8f085ea4c22b39249c7c241";
+    let mut room = openmx_net::Room { name: "Hosting Hank".into(), ..Default::default() };
+    room.names.insert(id.into(), "Rider With A Long Name".into());
+    assert_eq!(online::name_of(Some(&room), openmx_net::HOST), "Hosting Hank");
+    assert_eq!(online::name_of(Some(&room), id), "Rider With A");
+    assert_eq!(online::name_of(Some(&room), "someone_else"), "", "unknown: the display's P2");
+    assert_eq!(online::name_of(None, id), "");
 }

@@ -765,9 +765,11 @@ impl Online {
     }
 
     /// Every seat's player by name, `None` for an empty seat: what the markers' slot display calls
-    /// the other players (P88).
+    /// the other players (P88). The lineup knows a seat only by its peer's id, a long hex string, so
+    /// the name is the room's for that peer (the host's is the room's own), cut to the menu's
+    /// [`crate::menu::NAME_MAX`]; empty when the room has none, which the display shows as `P2`…
     pub fn names(&self) -> Vec<Option<String>> {
-        (0..self.sims.len()).map(|s| self.net.lineup.seats.get(s).cloned().flatten()).collect()
+        (0..self.sims.len()).map(|s| self.net.lineup.seats.get(s).cloned().flatten().map(|peer| name_of(self.room.as_ref(), &peer))).collect()
     }
 
     /// Shell seat `d`'s room seat as the network last said it (N16): who sits in it and their pick,
@@ -922,4 +924,11 @@ pub fn unaddressed(d: &[u8]) -> Option<(String, &[u8])> {
     let (&n, rest) = d.split_first()?;
     let (to, data) = rest.split_at_checked(n as usize)?;
     Some((String::from_utf8(to.to_vec()).ok()?, data))
+}
+
+/// What the ride calls `peer` ([`Online::names`]): the room's name for it, the room's own for the
+/// host, cut to [`crate::menu::NAME_MAX`]; empty when the room names it nothing.
+pub fn name_of(room: Option<&openmx_net::Room>, peer: &str) -> String {
+    let name = room.and_then(|r| r.names.get(peer).or((peer == openmx_net::HOST).then_some(&r.name)));
+    name.map_or_else(String::new, |n| n.trim().chars().take(crate::menu::NAME_MAX).collect())
 }
