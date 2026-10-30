@@ -74,6 +74,37 @@ impl Sprite {
     }
 }
 
+/// How near a frame's edge a sprite's edge is still on it, in frame pixels: the menus round theirs.
+const ON_EDGE: f32 = 0.5;
+
+/// P240: `sprites` with each plain, axis-aligned one that spans a `frame` (width and height, frame
+/// pixels) from side to side or from top to bottom run on past it by `bleed` (left, top, right,
+/// bottom, frame pixels): each of its edges on the frame's edge moves out that far, its picture
+/// stretched with it. So a phone's menu walls, bars, dimmers and fades reach the window's edges under
+/// the notch and the Dynamic Island, while text and buttons, which never span the frame, stay inside
+/// it (opentennis's `Bleed`, B623). Those that do not span it come back as they are.
+pub fn bleed_out(sprites: &[Sprite], (fw, fh): (f32, f32), [l, t, r, b]: [f32; 4]) -> Vec<Sprite> {
+    sprites
+        .iter()
+        .map(|s| {
+            let [[x0, y0], [x1, y0b], [x1b, y1], [x0b, y1b]] = s.corners;
+            let square = (x0, x1, y0, y1) == (x0b, x1b, y0b, y1b) && x0 < x1 && y0 < y1;
+            if s.shape != Shape::Plain || !square {
+                return *s;
+            }
+            let across = x0 <= ON_EDGE && x1 >= fw - ON_EDGE;
+            let down = y0 <= ON_EDGE && y1 >= fh - ON_EDGE;
+            if !across && !down {
+                return *s;
+            }
+            let out = |a: f32, on: bool, to: f32| if on { to } else { a };
+            let (x0, x1) = (out(x0, x0 <= ON_EDGE, x0.min(-l)), out(x1, x1 >= fw - ON_EDGE, x1.max(fw + r)));
+            let (y0, y1) = (out(y0, y0 <= ON_EDGE, y0.min(-t)), out(y1, y1 >= fh - ON_EDGE, y1.max(fh + b)));
+            Sprite { corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], ..*s }
+        })
+        .collect()
+}
+
 /// The texel centres `bilinear` keeps a read of `src` between: the same rule as the CPU's.
 pub fn clamp_of(t: &Texture, src: [f32; 4]) -> [f32; 4] {
     let lo_x = src[0].min(src[2]).max(0.0);

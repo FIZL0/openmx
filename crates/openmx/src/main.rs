@@ -2992,7 +2992,10 @@ async fn loading_frame(
             back |= more.iter().any(|(_, p)| p.back);
         }
     }
-    back |= std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n);
+    // With a hold asked for, not before the load is held there: a busy machine can draw the frames
+    // before the load gets that far, and Back then cancels a stage earlier than the test meant.
+    let holding = std::env::var(loading::HOLD).is_err() || progress.held();
+    back |= std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n && holding);
     if let Some(l) = &mut front.menu.loading {
         l.done = progress.done();
         l.stage = progress.line();

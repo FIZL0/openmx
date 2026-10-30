@@ -72,7 +72,7 @@ pub const HOLD: &str = "OPENMX_LOAD_HOLD";
 /// build's.
 pub const THREADED: &str = "OPENMX_THREADED_LOAD";
 /// The other test hook: `<frames>` presses Back on the loading screen once it has drawn that many,
-/// as Circle or Escape would.
+/// as Circle or Escape would — and, with [`HOLD`] set, once the load is held there too.
 pub const CANCEL: &str = "OPENMX_LOAD_CANCEL";
 /// What a cancelled build fails with.
 pub const CANCELLED: &str = "the load was cancelled";

@@ -16,7 +16,8 @@
 //! while the pad is hidden.
 //!
 //! Sizes are touch.js's in its `u`: `min(7vw, 12.5vh)`, in window pixels here, laid out from the
-//! safe area's edges.
+//! safe area's edges — the ones the HUD keeps (P240, [`crate::aspect::kept_insets`]): the island's
+//! side, not the home indicator's foot.
 #![cfg_attr(not(target_os = "ios"), allow(dead_code))]
 
 use crate::menu::ink as menu_art;
@@ -358,6 +359,24 @@ mod tests {
 
     fn up(id: u64, at: (f32, f32)) -> Touch {
         Touch { id, phase: Phase::Up, at }
+    }
+
+    /// P240: laid out from the insets the HUD keeps, the pad comes down over the home bar by its
+    /// inset and stays clear of the island's sides.
+    #[test]
+    fn the_pad_sits_over_the_home_bar() {
+        let mut p = TouchPad::default();
+        p.layout((2556.0, 1179.0), crate::aspect::kept_insets([177, 0, 177, 63], false).map(|v| v as f32));
+        let q = phone();
+        let mut down = 0;
+        for &(b, place, size, _) in &LAYOUT {
+            let ([x, y, w, h], [_, was, ..]) = (p.rect(place, size), q.rect(place, size));
+            assert!(x >= 177.0 && x + w <= 2556.0 - 177.0 && y + h <= 1179.0, "button {b} clear of the island");
+            // those placed from the foot come down; the shoulders, from the top, stay
+            assert!(y == was || y == was + 63.0, "button {b} at {y}, was {was}");
+            down += (y == was + 63.0) as usize;
+        }
+        assert!(down * 2 > LAYOUT.len(), "only {down} of the buttons came down");
     }
 
     #[test]

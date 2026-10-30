@@ -8,13 +8,19 @@
 //! the main thread once (Metal's layer is added to the view there, and a second would be a second
 //! layer) and lent to whichever [`GpuWindow`] is open.
 //!
-//! The picture keeps to the safe area (M106): the window's `width` and `height` are the safe area's,
-//! the frame is centred in it, and the notch, the Dynamic Island and the home indicator get black.
+//! Edge to edge (P240, after opentennis's B608/B623): the window's `width` and `height` are the room
+//! left inside the island's or notch's safe inset — not the home indicator's, which the HUD and the
+//! menus may sit over ([`crate::aspect::kept_insets`]) — and the shell's frame is laid out in it,
+//! centred: the HUD's and the menus' text and buttons stay there. The picture runs on past it to the
+//! window's edges ([`crate::aspect::phone_frame`], [`Renderer::bleed`]): the views under the island,
+//! and the menus' walls, bars, dimmers and fades. Stretch keeps nothing clear. The home indicator
+//! fades out while the game is played, and a swipe from an edge takes a second to reach the system.
 //! The touch pad ([`crate::ios::TOUCH`]) is drawn over the whole window, laid out from the same edges.
 //!
 //! The view controller is held the way [`openmx_ios::Holder`] says (M144, B694): either way up with
 //! the device, and landscape with the camera on the left while rotation lock is on.
 
+use crate::aspect::{kept_insets, phone_frame, stretched};
 use crate::hud::{NEEDS_TAP_TEXT, NeedsTap};
 use crate::ios::TOUCH;
 use crate::touch_pad::{Phase, Touch};
@@ -24,6 +30,7 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::platform::ios::{ScreenEdge, WindowAttributesExtIOS};
 use winit::window::{Window, WindowId};
 
 /// What the main thread hands the shell's.
@@ -83,7 +90,7 @@ impl Host {
             s.safe = safe;
             s.resized = true;
         }
-        let (size, safe) = (s.size, s.safe);
+        let (size, safe) = (s.size, kept_insets(s.safe, stretched()));
         drop(s);
         TOUCH
             .lock()
@@ -103,7 +110,13 @@ impl ApplicationHandler for Host {
         let mut s = shared();
         s.focused = true;
         if s.window.is_none() {
-            match event_loop.create_window(Window::default_attributes().with_title("openMX")) {
+            // As opentennis's B623: the home indicator fades while the game is played, and a swipe
+            // from an edge is the game's first, the system's only when made again.
+            let attributes = Window::default_attributes()
+                .with_title("openMX")
+                .with_prefers_home_indicator_hidden(true)
+                .with_preferred_screen_edges_deferring_system_gestures(ScreenEdge::ALL);
+            match event_loop.create_window(attributes) {
                 Ok(w) => {
                     let w = Arc::new(w);
                     let size = w.inner_size();
@@ -204,7 +217,7 @@ pub struct GpuWindow {
     surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     pub renderer: Renderer,
-    /// The safe area's size in pixels.
+    /// The room inside the kept insets ([`kept_insets`]), in pixels.
     pub width: usize,
     pub height: usize,
     /// How many window pixels one frame pixel becomes.
@@ -215,9 +228,11 @@ pub struct GpuWindow {
     /// The display's refresh in hertz, where it says.
     pub refresh: Option<f32>,
     modes: Vec<wgpu::PresentMode>,
-    /// The whole window's size and its safe insets, as of the last poll.
+    /// The whole window's size and the insets kept clear of ([`kept_insets`]), as of the last poll.
     size: (u32, u32),
     safe: [u32; 4],
+    /// Stretch's, as of the last poll: the insets go with it.
+    stretch: bool,
     resized: bool,
     closed: bool,
     focused: bool,
@@ -337,6 +352,7 @@ impl GpuWindow {
             modes: caps.present_modes,
             size,
             safe: [0; 4],
+            stretch: stretched(),
             resized: false,
             closed: false,
             focused: true,
@@ -368,10 +384,12 @@ impl GpuWindow {
 
     /// Take in what the main thread has put by.
     pub fn poll(&mut self) {
+        let stretch = stretched();
         let mut s = shared();
         self.size = s.size;
-        self.safe = s.safe;
-        self.resized |= std::mem::take(&mut s.resized);
+        self.safe = kept_insets(s.safe, stretch);
+        self.resized |= std::mem::take(&mut s.resized) || stretch != self.stretch;
+        self.stretch = stretch;
         self.closed = s.closed;
         self.focused = s.focused;
         let [l, t, ..] = self.safe;
@@ -396,7 +414,7 @@ impl GpuWindow {
         self.focused
     }
 
-    /// The menus' taps since the last poll, in the safe area's pixels.
+    /// The menus' taps since the last poll, in pixels of the room inside the kept insets.
     pub fn clicks(&self) -> &[(i32, i32)] {
         &self.clicks
     }
@@ -421,8 +439,9 @@ impl GpuWindow {
         std::mem::take(&mut self.resized)
     }
 
-    /// Draw one frame of `width` by `height` frame pixels, centred in the safe area at its scale,
-    /// then the touch pad over it, and show it. `None` while the app is in the background, or the
+    /// Draw one frame of `width` by `height` frame pixels, centred in the room inside the kept insets
+    /// at its scale and running on past it to the window's edges ([`phone_frame`]), then the touch
+    /// pad over it, and show it. `None` while the app is in the background, or the
     /// display slow to hand a frame back.
     pub fn draw<T>(
         &mut self,
@@ -453,23 +472,17 @@ impl GpuWindow {
         };
         self.waited = acquire.elapsed();
         let view = texture.texture.create_view(&Default::default());
-        let [l, t, ..] = self.safe;
-        let (room_w, room_h) = (self.width as u32, self.height as u32);
-        let (across, down) = ((width * self.scale) as u32, (height * self.scale) as u32);
-        let (left, top) = (l + room_w.saturating_sub(across) / 2, t + room_h.saturating_sub(down) / 2);
-        let target = Target {
-            view: &view,
-            size,
-            frame: [left, top, across.min(room_w), down.min(room_h)],
-            scale: self.scale as u32,
-        };
+        let (frame, bleed) = phone_frame(size, self.safe, (width, height), self.scale);
+        let target = Target { view: &view, size, frame, scale: self.scale as u32 };
+        self.renderer.bleed = bleed;
         let out = draw(&mut self.renderer, &target);
+        self.renderer.bleed = [0; 4];
         let mut sprites = {
             let touch = TOUCH.lock().unwrap_or_else(|e| e.into_inner());
             touch.sprites(0)
         };
         if self.needs_tap.up {
-            needs_tap_sprites(&mut sprites, size);
+            needs_tap_sprites(&mut sprites, size, frame);
         }
         if !sprites.is_empty() {
             let layer = self.layer.get_or_insert_with(|| self.renderer.layer(&[&crate::menu::ink::ink().atlas]));
@@ -492,16 +505,17 @@ impl GpuWindow {
     }
 }
 
-/// "Tap screen to resume controller" (P233) over the whole window, notch and home-bar strips too:
-/// the menus' popup dimmer and their heavy slanted chalk type with its shadow, centred.
-fn needs_tap_sprites(out: &mut Vec<game_render::gpu::Sprite>, (w, h): (u32, u32)) {
+/// "Tap screen to resume controller" (P233): the menus' popup dimmer over the whole window, notch
+/// and home-bar strips too, and their heavy slanted chalk type with its shadow centred in the HUD's
+/// `frame` (x, y, width, height), clear of the island (P240).
+fn needs_tap_sprites(out: &mut Vec<game_render::gpu::Sprite>, (w, h): (u32, u32), frame: [u32; 4]) {
     use crate::menu::ink as art;
-    let (w, h) = (w as f32, h as f32);
-    art::fill(out, [0.0, 0.0, w, h], [0, 0, 0, 150]);
+    art::fill(out, [0.0, 0.0, w as f32, h as f32], [0, 0, 0, 150]);
+    let [fx, fy, fw, fh] = frame.map(|v| v as f32);
     let ink = art::ink();
-    let size = w.min(h) * 0.06;
+    let size = fw.min(fh) * 0.06;
     let across = ink.measure(art::Weight::Heavy, NEEDS_TAP_TEXT, size);
-    let (x, y) = ((w - across) / 2.0, h / 2.0 + size * (ink.ascent - ink.descent.abs()) / 2.0);
+    let (x, y) = (fx + (fw - across) / 2.0, fy + fh / 2.0 + size * (ink.ascent - ink.descent.abs()) / 2.0);
     let drop = size * 0.06;
     ink.text(out, 0, art::Weight::Heavy, NEEDS_TAP_TEXT, x + drop, y + drop, size, art::SLANT, [0, 0, 0, 150]);
     ink.text(out, 0, art::Weight::Heavy, NEEDS_TAP_TEXT, x, y, size, art::SLANT, [0xf5, 0xf0, 0xe8, 255]);
