@@ -344,3 +344,16 @@ The 2026-10-28 launch that drew a bike with nobody on it lost its log. A build w
 and P212 logs the GPU's own errors (`gpu error: …`). Next time it happens: quit, launch once more (the app
 keeps the launch before's log as Documents/openmx-log-previous.txt), and send that file and openmx-log.txt
 back — LocalSend into the repo's context/ is fine — then name the files in P223 (`./kit plan P223`).
+
+## Weston for the gate's private display (K16)
+
+Since K16 every `./kit check` puts its test windows on a private headless weston + Xwayland instead of
+Hyprland, which held 105 GiB of GPU memory after ten days of runs and got the runner OOM-killed (10-30).
+Weston is not installed from pacman here (no sudo in a run): K16 unpacked Arch's weston 15.0.1-3 into
+`~/.local/opt/weston-15.0.1-3` behind a `~/.local/bin/weston` wrapper. `sudo pacman -S weston`, then delete
+both, makes it an ordinary package that updates with the system. Without any weston the check still runs,
+on the desktop's display, and says so under its verdict.
+
+`~/.local/state/gtt-watch.log` now logs, every 10 minutes, which suspects were running (monitors on, PCSX2
+copies, openmx shells, chromium, weston). If Hyprland's GTT still climbs with the gate off it, read the lines
+around the climb, and note what you were doing at the desk then (a video, a game, the browser).

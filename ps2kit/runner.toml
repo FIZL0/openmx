@@ -23,6 +23,9 @@ build = "cargo test -q --no-run --message-format=short"
 slot_env = ["KIT_PCSX2={n}", "KIT_RUN=1"]
 pass_env = ["KIT_CONFIG", "KIT_CHECK_SLOTS", "AGENT_RUNNER_IDLE_BG"]
 on_exit = "./kit pcsx2 stop"
+# No new slot while MemAvailable is under 16 GiB: a slot's gate builds and tests in several GiB, and on 10-30
+# a desktop compositor's leak had taken all but 1 GiB of 124 when the kernel OOM-killed the runner (K16).
+before_start = "python3 -m ps2kit.platform_ room 16"
 suspect = "BLOCKED:.*(pcsx2|pine|capture|record|screenshot|save state|unattended)"
 prompt_extra = """
 You have your own emulator copy: KIT_PCSX2={n} is set, so `./kit pcsx2 start`, `./kit pine`, `./kit pad` and \
