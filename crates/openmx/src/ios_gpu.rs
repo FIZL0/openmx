@@ -314,7 +314,10 @@ impl GpuWindow {
             width: size.0,
             height: size.1,
             present_mode,
-            desired_maximum_frame_latency: 1,
+            // Three drawables, not the desktop's two (P238): with one always on screen, two left the
+            // CPU waiting on the GPU and the GPU on the display, and a ~20 ms frame took every other
+            // refresh — a dead 30 fps on a 120 Hz iPhone whatever the frame limit.
+            desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto),
             view_formats: vec![],
             color_space: wgpu::SurfaceColorSpace::Auto,

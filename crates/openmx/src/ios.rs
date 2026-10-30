@@ -43,6 +43,7 @@ pub fn main() {
         option_env!("OPENMX_BUILD").unwrap_or("?"),
         openmx_ios::memory()
     );
+    println!("ios: the screen up to {} fps, {}", openmx_ios::ask_frame_rate(), openmx_ios::power());
     if let Err(e) = std::env::set_current_dir(&docs) {
         println!("openmx: no Documents folder ({e})");
     }

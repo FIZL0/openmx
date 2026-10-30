@@ -15,6 +15,7 @@ type Id = *mut c_void;
 #[link(name = "CoreMotion", kind = "framework")]
 #[link(name = "AudioToolbox", kind = "framework")]
 #[link(name = "CoreHaptics", kind = "framework")]
+#[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {
     fn objc_msgSend();
     fn objc_getClass(name: *const std::ffi::c_char) -> Id;
@@ -67,6 +68,18 @@ fn float(o: Id, name: &CStr) -> f32 {
     // SAFETY: objc_msgSend cast to `float (id, SEL)`
     unsafe {
         let f: extern "C" fn(Id, Id) -> f32 = std::mem::transmute(objc_msgSend as *const ());
+        f(o, sel(name))
+    }
+}
+
+/// `[o name]` for a `BOOL` getter; false for nil.
+fn flag(o: Id, name: &CStr) -> bool {
+    if o.is_null() {
+        return false;
+    }
+    // SAFETY: objc_msgSend cast to `BOOL (id, SEL)`
+    unsafe {
+        let f: extern "C" fn(Id, Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
         f(o, sel(name))
     }
 }
@@ -200,6 +213,9 @@ extern "C" fn on_focus(_: *const Block, note: Id) {
         let pads = int(get(class(c"GCController"), c"controllers"), c"count").max(0) as usize;
         let name = text(get(note, c"name"));
         eprintln!("iOS {name} ({pads} controllers)");
+        if name.starts_with("NSProcessInfo") {
+            eprintln!("iOS {}", power());
+        }
         if name == SCREENSHOT {
             NOTICE.fetch_max(pads + 1, Ordering::Relaxed);
         }
@@ -209,7 +225,8 @@ extern "C" fn on_focus(_: *const Block, note: Id) {
 /// As opentennis's `watch_focus`: a screenshot can leave the controllers silent until a touch (the
 /// shell's "Tap screen to resume controller"). Observes UIApplicationUserDidTakeScreenshotNotification,
 /// WillResignActive and DidBecomeActive on the main queue, for the life of the process; only the
-/// screenshot one reaches [`focus_notice`], the other two are logged. Call once.
+/// screenshot one reaches [`focus_notice`], the other two are logged. Low Power Mode and thermal
+/// changes are logged with [`power`] too (P238). Call once.
 pub fn watch_focus() {
     let descriptor = Box::leak(Box::new(BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() }));
     let block: &'static Block = Box::leak(Box::new(Block {
@@ -227,6 +244,8 @@ pub fn watch_focus() {
             c"UIApplicationUserDidTakeScreenshotNotification",
             c"UIApplicationWillResignActiveNotification",
             c"UIApplicationDidBecomeActiveNotification",
+            c"NSProcessInfoPowerStateDidChangeNotification",
+            c"NSProcessInfoThermalStateDidChangeNotification",
         ] {
             // SAFETY: objc_msgSend cast to `id (id, SEL, const char *)` and to
             // `id (id, SEL, NSString *, id, NSOperationQueue *, block)`, as NSString and
@@ -246,6 +265,62 @@ pub fn watch_focus() {
 /// Any thread.
 pub fn focus_notice() -> Option<usize> {
     NOTICE.swap(0, Ordering::Relaxed).checked_sub(1)
+}
+
+/// Low Power Mode and the thermal state, for the log (P238): either can hold the picture down.
+pub fn power() -> String {
+    pool(|| {
+        let info = get(class(c"NSProcessInfo"), c"processInfo");
+        let thermal = match int(info, c"thermalState") {
+            0 => "nominal",
+            1 => "fair",
+            2 => "serious",
+            3 => "critical",
+            _ => "unknown",
+        };
+        format!("low power mode {}, thermal state {thermal}", if flag(info, c"isLowPowerModeEnabled") { "on" } else { "off" })
+    })
+}
+
+/// QuartzCore's `CAFrameRateRange`.
+#[repr(C)]
+struct FrameRates {
+    minimum: f32,
+    maximum: f32,
+    preferred: f32,
+}
+
+#[link(name = "Foundation", kind = "framework")]
+unsafe extern "C" {
+    static NSRunLoopCommonModes: Id;
+}
+
+/// Ask the screen for its top rate (P238): a ProMotion iPhone otherwise picks its own refresh for a
+/// Metal layer, and held the ride at a dead 30 fps. A CADisplayLink on the main run loop, for the
+/// life of the process, with `preferredFrameRateRange` up to `maximumFramesPerSecond`, is how iOS
+/// is told; it calls `[NSObject self]`, which does nothing. The frame limit stays the shell's own.
+/// The screen's top rate, for the log. Call once, on the main thread.
+pub fn ask_frame_rate() -> f32 {
+    pool(|| {
+        let most = int(get(class(c"UIScreen"), c"mainScreen"), c"maximumFramesPerSecond").max(60) as f32;
+        let target = get(get(class(c"NSObject"), c"alloc"), c"init");
+        // SAFETY: objc_msgSend cast to `id (id, SEL, id, SEL)`, `void (id, SEL, CAFrameRateRange)` and
+        // `void (id, SEL, NSRunLoop *, NSRunLoopMode)`, as CADisplayLink declares them (iOS 15+);
+        // the link is retained for the process and retains its target
+        unsafe {
+            let make: extern "C" fn(Id, Id, Id, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+            let link = make(class(c"CADisplayLink"), sel(c"displayLinkWithTarget:selector:"), target, sel(c"self"));
+            if link.is_null() {
+                return most;
+            }
+            let range: extern "C" fn(Id, Id, FrameRates) = std::mem::transmute(objc_msgSend as *const ());
+            range(link, sel(c"setPreferredFrameRateRange:"), FrameRates { minimum: most.min(60.0), maximum: most, preferred: most });
+            let add: extern "C" fn(Id, Id, Id, Id) = std::mem::transmute(objc_msgSend as *const ());
+            add(link, sel(c"addToRunLoop:forMode:"), get(class(c"NSRunLoop"), c"mainRunLoop"), NSRunLoopCommonModes);
+            retain(link);
+        }
+        most
+    })
 }
 
 unsafe extern "C" {
