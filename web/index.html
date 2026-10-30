@@ -767,7 +767,8 @@ footer a { color: var(--bone); }
     if (going) return;
     going = true;
     view();
-    requestAnimationFrame(pads);
+    // now, not on the next frame: the shell opens its seats as it starts, and a pad it finds there is 1P (P236)
+    pads();
   };
 
   worker.onmessage = ({ data }) => {

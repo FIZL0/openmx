@@ -2601,6 +2601,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 Some(dev) => {
                     let name = dev_name(seats, dev);
                     println!("1P: {name} — the menus and the first seat are its");
+                    #[cfg(target_arch = "wasm32")]
+                    crate::web_host::say(&format!("pads: 1P: {name} — the menus and the first seat are its"));
                     shell.front.menu.p1_name = name;
                     shell.front.menu.note = None;
                     let first = Some(match dev {

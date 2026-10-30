@@ -2494,6 +2494,23 @@ struct Joined {
     /// When it was last pressed or pushed, on the shell's clock (P210): a 1P pad idle for
     /// [`IDLE_US`] lets the keyboard take 1P back.
     active_at: u64,
+    /// Shown by a press this frame (P236, [`crate::web_host::PadNode::shown_by_a_press`]).
+    fresh: bool,
+}
+
+impl Joined {
+    /// Its report this frame. A pad the page showed by a press is read let go in the frame it
+    /// joins in, its device left unread: the menus take a device's first report as what it holds,
+    /// and the press that showed the pad comes in the next one, as a press.
+    fn report(&mut self, held: &dyn Fn(u8) -> bool) -> Report {
+        if !std::mem::take(&mut self.fresh) {
+            return self.pads.report(held);
+        }
+        let device = self.pads.device.take();
+        let report = self.pads.report(held);
+        self.pads.device = device;
+        report
+    }
 }
 
 /// What the browser calls web/touch.js's on-screen pad (P197): a stand-in a real pad takes 1P
@@ -2516,7 +2533,12 @@ fn active(r: &Report, taps: u16) -> bool {
 
 /// How often the shell looks for pads it has not opened yet. A frame's worth of `read_dir` is
 /// cheap, but nobody notices half a second either way when they plug a pad in.
+#[cfg(not(target_arch = "wasm32"))]
 const RESCAN_SECONDS: f32 = 0.5;
+/// The page's pads are a list it already sent, not a directory, and a browser shows a pad only on
+/// its first press: looked at every frame, so that press is still down when the pad is opened (P236).
+#[cfg(target_arch = "wasm32")]
+const RESCAN_SECONDS: f32 = 0.0;
 
 /// Every seat, and every pad plugged in: the hot-plug half of opentennis's controls over the
 /// kernel's `/dev/input/js*`.
@@ -2632,6 +2654,8 @@ impl Seats {
 
     /// Open every js node not open yet, in `js` number order.
     fn scan(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        let started = self.since_scan.is_some();
         self.since_scan = Some(crate::clock::Instant::now());
         #[cfg(target_arch = "wasm32")]
         let mut found = crate::web_host::pads();
@@ -2674,7 +2698,16 @@ impl Seats {
                 continue;
             };
             #[cfg(any(target_arch = "wasm32", target_os = "ios"))]
-            let Ok(file) = Node::open(&path) else { continue };
+            #[cfg_attr(target_os = "ios", allow(unused_mut))]
+            let Ok(mut file) = Node::open(&path) else { continue };
+            #[cfg(target_arch = "wasm32")]
+            let fresh = started;
+            #[cfg(not(target_arch = "wasm32"))]
+            let fresh = false;
+            #[cfg(target_arch = "wasm32")]
+            if fresh {
+                file.shown_by_a_press();
+            }
             // Two of the same pad on one hub port must still be two: the first free of `id`,
             // `id #2`, `id #3`…, so a pad that comes back gets the name it had if it is free.
             let base = info.identity(&path);
@@ -2694,8 +2727,11 @@ impl Seats {
             pads.fake_now = self.fake_now;
             // Its greeting now, as it opens: the stamps read soonest after they were made, which
             // sets its clock against the shell's (P165).
-            pads.drain();
-            self.joined.push(Joined { path, id, pads, active_at: 0 });
+            // Not one a press showed: that press is the next frame's ([`Joined::report`]).
+            if !fresh {
+                pads.drain();
+            }
+            self.joined.push(Joined { path, id, pads, active_at: 0, fresh });
         }
     }
 
@@ -2748,6 +2784,11 @@ impl Seats {
 
     /// What changed since the last time this was asked: one line per pad joining, going or back.
     pub fn said(&mut self) -> Vec<String> {
+        // The page has no stdout: its console is where a pad joining shows (P236).
+        #[cfg(target_arch = "wasm32")]
+        for line in &self.said {
+            crate::web_host::say(&format!("pads: {line}"));
+        }
         std::mem::take(&mut self.said)
     }
 
@@ -2807,7 +2848,7 @@ impl Seats {
         self.keys_settle(held);
         let mut out = vec![(Device::Keys, keys, self.keys.taps())];
         for j in &mut self.joined {
-            let report = j.pads.report(&no_keys);
+            let report = j.report(&no_keys);
             out.push((Device::Pad(j.id.clone()), report, j.pads.taps()));
         }
         let pressed: Vec<String> = out
@@ -3105,7 +3146,7 @@ impl Seats {
                 Some(id) => {
                     let j = self.joined.iter_mut().find(|j| &j.id == id).expect("a held pad is joined");
                     j.pads.scheme = scheme;
-                    let report = j.pads.report(keys);
+                    let report = j.report(keys);
                     self.taps[i] = j.pads.taps();
                     SeatInput::Playing(report)
                 }
@@ -3122,7 +3163,7 @@ impl Seats {
         self.loose.clear();
         for j in &mut self.joined {
             if !self.slots.held.contains(&Some(j.id.clone())) {
-                let report = j.pads.report(&no_keys);
+                let report = j.report(&no_keys);
                 self.loose.push((j.id.clone(), report, j.pads.taps()));
                 j.pads.clear_queue();
             }
