@@ -176,7 +176,8 @@ static SEAT: Mutex<TouchSeat> = Mutex::new(TouchSeat { in_use: false, riding: fa
 
 /// The pad layer, each frame: whether the touch pad's player has a seat, and whether this is a ride.
 /// A controller connecting mid-ride is a second player, and the touch pad stays to keep riding; one
-/// connecting in the menus is most likely 1P picking it up, and the touch pad goes.
+/// connecting in the menus is most likely 1P picking it up, and the touch pad goes — as it does
+/// when the Controllers screen takes it off every seat ([`crate::pad::PadSlots::wanted`]).
 pub fn touch_seat(in_use: bool, riding: bool) {
     let mut seat = SEAT.lock().unwrap_or_else(|e| e.into_inner());
     seat.in_use = in_use;

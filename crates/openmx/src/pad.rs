@@ -1818,6 +1818,12 @@ impl<P: Clone + PartialEq> PadSlots<P> {
         self.claimed(p) || self.first == Some(Device::Pad(p.clone()))
     }
 
+    /// Whether `p` is in use and not taken off every seat by the Controllers screen: the touch pad's
+    /// test for staying on the screen ([`crate::ios::touch_seat`]).
+    pub fn wanted(&self, p: &P) -> bool {
+        self.in_use(p) && !self.off.contains(p)
+    }
+
     /// Whether a pad already has a seat, or is the pad a waiting seat is waiting for, or was taken
     /// off every seat (P210).
     fn claimed(&self, p: &P) -> bool {
@@ -2742,7 +2748,7 @@ impl Seats {
     #[cfg(target_os = "ios")]
     fn touch_hand_over(&mut self, present: &[String], riding: bool) {
         let touch = DeviceInfo { name: crate::ios::TOUCH_NAME.into(), ..DeviceInfo::default() }.identity(std::path::Path::new(""));
-        crate::ios::touch_seat(self.slots.in_use(&touch), riding);
+        crate::ios::touch_seat(self.slots.wanted(&touch), riding);
         let new = present.iter().find(|p| !self.slots.in_use(p)).cloned();
         if !present.contains(&touch) && self.slots.in_use(&touch) {
             if let Some(pad) = new {
@@ -3935,6 +3941,22 @@ pub(crate) mod tests {
         s.update(&[touch]);
         assert_eq!(s.held[..2], [Some(touch), None]);
         assert_eq!(s.first(), Some(&Device::Pad(touch)));
+    }
+
+    #[test]
+    fn a_touch_pad_taken_off_every_seat_is_not_wanted() {
+        // The touch pad (16) kept for 1P beside a controller (0) that joined mid-ride; the
+        // Controllers screen gives 1P the controller and the touch pad no seat, so it hides.
+        let (touch, pad) = (16u32, 0);
+        let mut s = PadSlots::<u32>::default();
+        s.set_first(Some(Device::Pad(touch)));
+        s.update(&[touch, pad]);
+        assert!(s.wanted(&touch));
+        let mut seats = std::array::from_fn(|_| None);
+        seats[0] = Some(Device::Pad(pad));
+        s.assign(&seats, &[touch, pad]);
+        assert!(s.in_use(&touch) && !s.wanted(&touch), "off every seat");
+        assert!(s.wanted(&pad));
     }
 
     #[test]
