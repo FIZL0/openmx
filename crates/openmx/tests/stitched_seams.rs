@@ -404,3 +404,50 @@ fn the_stitched_worlds_have_no_gap_along_a_seam() {
     }
     assert!(failed.is_empty(), "gaps along the seams of {failed:?}");
 }
+
+/// The traced ride's `x` each tick, and the shootoff warning's line if the shell printed one (P231).
+fn warned_ride(mods: &Path, track: &str, x: f32, z: f32, frames: usize) -> Option<(Vec<f32>, Option<String>)> {
+    let at = format!("{x},{z},90");
+    let said = shell(mods, track, &["--trace", &frames.to_string(), "--trace-gas", "--trace-feel", "--trace-at", &at])?;
+    let xs: Vec<f32> = said
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|w| w.len() == 12 && w[0].parse::<usize>().is_ok())
+        .map(|w| w[5].parse().unwrap())
+        .collect();
+    assert!(!xs.is_empty(), "no trace rows:\n{said}");
+    Some((xs, said.lines().find(|l| l.starts_with("shootoff warning:")).map(str::to_string)))
+}
+
+/// **Over a wrap's seam the shootoff stays quiet** (P231): the ride east over the wrap asks the
+/// shootoff's sound no edge on any tick, so the music is not faded and no rumble plays; the same
+/// world without the switch warns at once, its start 270 ft from its edge in `z`.
+#[test]
+fn a_ride_over_the_wrap_never_warns_of_an_edge() {
+    let mods = mods_folder("warn");
+    let Some((xs, warned)) = warned_ride(&mods, "md47_round", 200.0, 270.0, 900) else { return };
+    assert!(xs.windows(2).any(|w| w[1] < w[0] - SIDE / 2.0) || xs.iter().any(|&x| x > ROUND), "never over the wrap: {:?}", xs.last());
+    assert_eq!(warned, None, "md47_round");
+    let (_, warned) = warned_ride(&mods, "md47_open", 200.0, 270.0, 30).unwrap();
+    let warned = warned.expect("md47_open: no warning 270 ft from its edge");
+    assert!(warned.starts_with("shootoff warning: tick 0 "), "{warned}");
+}
+
+/// world_mxu_free as stitch built it off the user's disc (`$OPENMX_WORLDS`, or `~/repos/openmx/mods`):
+/// a ride east over its `x` seam from the last map into the first never warns of an edge.
+#[test]
+#[ignore = "needs openmx-mods' world_mxu_free in $OPENMX_WORLDS/tracks (or ~/repos/openmx/mods), and the disc"]
+fn world_mxu_free_over_its_x_seam_never_warns() {
+    let mods = std::env::var_os("OPENMX_WORLDS").map(PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join("repos/openmx/mods"));
+    let said = shell(&mods, "world_mxu_free", &["--trace", "1"]).expect("the disc");
+    let size: Vec<f32> = line(&said, "world: world_mxu_free").split(", ").nth(2).unwrap().split(' ').filter_map(|w| w.parse().ok()).collect();
+    let (width, depth) = (size[0], size[1]);
+    let mut report = Vec::new();
+    for z in [depth * 0.25, depth * 0.5, depth * 0.75] {
+        let (xs, warned) = warned_ride(&mods, "world_mxu_free", width - 300.0, z, 600).unwrap();
+        let over = xs.windows(2).any(|w| w[1] < w[0] - width / 2.0) || xs.iter().any(|&x| x > width);
+        report.push(format!("z {z:.0}: from x {:.0} to {:.0}, over the seam {over}, {}", xs[0], xs.last().unwrap(), warned.as_deref().unwrap_or("no warning")));
+        assert!(over && warned.is_none(), "{}", report.join("\n"));
+    }
+    println!("{}", report.join("\n"));
+}
