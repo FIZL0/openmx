@@ -1,1 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#000"/><text x="32" y="42" font-family="Arial Black,Arial,sans-serif" font-weight="900" font-size="26" fill="#f2b600" text-anchor="middle">MX</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<!-- P225: a rider on a dirt bike in the attack stance; tools/icons.sh renders the PNGs and favicon.ico from this -->
+<rect width="64" height="64" rx="13" fill="#8e0f17"/>
+<g fill="none" stroke="#fff3dc" stroke-linecap="round" stroke-linejoin="round">
+<circle cx="15" cy="45" r="9" stroke-width="4.5"/>
+<circle cx="49" cy="45" r="9" stroke-width="4.5"/>
+<path d="M15 45 L29 39" stroke-width="4"/>
+<path d="M49 45 L41 22" stroke-width="4"/>
+<path d="M37 19 L44 17" stroke-width="3"/>
+<path d="M33 16 L24 25" stroke-width="7"/>
+<path d="M33 17 L36 23 L41 20" stroke-width="3.5"/>
+<path d="M24 26 L33 31 L29 39" stroke-width="4.5"/>
+</g>
+<g fill="#fff3dc">
+<path d="M3 27 L20 30 L31 27 L41 23 L42 30 L36 40 L26 41 L20 35 L8 32 Z"/>
+<path d="M43 27 L57 31 L44 31 Z"/>
+<path d="M31.5 10 A5.5 5.5 0 0 1 42 8.5 L45 10 L41.5 11 A5.5 5.5 0 0 1 31.5 10 Z"/>
+<circle cx="15" cy="45" r="2"/><circle cx="49" cy="45" r="2"/>
+</g>
+</svg>
