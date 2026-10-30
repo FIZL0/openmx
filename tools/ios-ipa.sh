@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unsigned IPA of the shell for the user to sign (P200, as opentennis's M91): release build
-# (tools/ios-build.sh), stripped, in a Payload/openMX.app with Info.plist + the P194 icon, zipped.
+# (tools/ios-build.sh), stripped, in a Payload/openMX.app with Info.plist + the icon (P225, tools/icons.sh), zipped.
 # Usage: tools/ios-ipa.sh [OUT.ipa]  (default target/openmx-ios.ipa)
 # On the phone: the app's folder in the Files app ("On My iPhone → openMX") takes the ISO, settings.txt and mods/.
 set -euo pipefail
@@ -17,6 +17,8 @@ rm -rf "$stage"
 mkdir -p "$app"
 $(command -v llvm-strip || echo strip) -o "$app/openmx" "$target/release/openmx"
 cp web/icon-180.png "$app/AppIcon60x60@3x.png"
+# the 1024 px App Store size: iTunesArtwork@2x beside Payload, where sideloaders (AltStore, Sideloadly) look for the artwork
+cp web/icon-1024.png "$stage/iTunesArtwork@2x"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)  # [workspace.package]
 cat > "$app/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -67,5 +69,5 @@ cat > "$app/Info.plist" <<EOF
 </plist>
 EOF
 rm -f "$out"
-(cd "$stage" && zip -qr -X "$out" Payload)
+(cd "$stage" && zip -qr -X "$out" Payload iTunesArtwork@2x)
 echo "$out ($(du -h "$out" | cut -f1))"
