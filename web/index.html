@@ -367,7 +367,7 @@ footer a { color: var(--bone); }
       <div class="side" data-new>
         <label class="pill" tabindex="0" role="button">Pick disc image<input id="pick" type="file" accept=".iso,application/x-iso9660-image"></label>
         <small>or drop it anywhere on this page</small>
-        <a data-link="guide" target="_blank" rel="noopener">How to dump your disc</a>
+        <small>Needs MX Unleashed, US release, <b>SLUS-20767</b>, as an <b>.iso</b>.</small>
       </div>
     </section>
 
@@ -419,7 +419,7 @@ footer a { color: var(--bone); }
     <section id="steps">
       <h2 class="head"><span class="skew">Three steps</span></h2>
       <div class="grid3">
-        <div class="card step"><span class="n">1</span><h3>Dump your disc</h3><p>Make an .iso of your own MX Unleashed disc with a PC drive or a PS2. <a data-link="guide" target="_blank" rel="noopener">The guide</a> walks through it.</p></div>
+        <div class="card step"><span class="n">1</span><h3>Dump your disc</h3><p>Make an .iso of an MX Unleashed disc you own (ImgBurn, dd, or your PS2 tools).</p></div>
         <div class="card step"><span class="n">2</span><h3>Pick it here</h3><p>It is copied once into this browser. Nothing is uploaded, and nothing from the disc is on this site.</p></div>
         <div class="card step"><span class="n">3</span><h3>Ride</h3><p>Next time Play is the first thing on the page, or the game itself with the switch on. Ride alone, or join a friend with their code.</p></div>
       </div>
@@ -571,7 +571,6 @@ footer a { color: var(--bone); }
   // What the user fills in (P181): an empty link stays on the page, dimmed and inert, until it has an address.
   const SITE = {
     discord: 'https://discord.gg/PYyXvWWC7N',
-    guide: '',
     donate: 'https://ko-fi.com/fizlo',
     pays: '',
     counts: { prompts: '', tokens: '', commits: '' },
