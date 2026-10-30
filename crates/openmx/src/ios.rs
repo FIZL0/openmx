@@ -257,13 +257,16 @@ pub fn rumble(node: u32, r: crate::pad::Rumble) {
     openmx_ios::rumble(to, r.intensity(), r.seconds);
 }
 
-/// A controller's button went down since the last [`take_pressed`] (P233): focus is back.
-static PRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A controller read live since the last [`take_live`] (P233, P235): focus is back, or never went.
+static LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether a controller's button went down (one that came through) since the last call.
-pub fn take_pressed() -> bool {
-    PRESSED.swap(false, std::sync::atomic::Ordering::Relaxed)
+/// Whether a controller read live (a button held, a stick or trigger off centre) since the last call.
+pub fn take_live() -> bool {
+    LIVE.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
+
+/// A stick past this off centre is a player's, not drift: what a focus-less pad never reports.
+const LIVE_STICK: f32 = 0.25;
 
 /// The js numbers of the standard mapping's buttons, as `web_host.rs` has them.
 const JS_BUTTON: [(usize, u8); 11] = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (8, 6), (9, 7), (16, 8), (10, 9), (11, 10)];
@@ -302,9 +305,11 @@ impl PadNode {
         let was = self.last.unwrap_or(now);
         let axis = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
         let trigger = |v: f32| (v.clamp(0.0, 1.0) * 65534.0 - 32767.0) as i16;
-        // Any of the seventeen (triggers and d-pad too), as a pad press ends "Tap screen to resume controller".
-        if !init && self.index != TOUCH_INDEX && (0..17).any(|b| now.buttons[b] > 0.5 && was.buttons[b] <= 0.5) {
-            PRESSED.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Any of the seventeen held (triggers and d-pad too) or a stick off centre: without focus iOS
+        // reports all up and centred, so this is a pad that works ("Tap screen to resume controller").
+        let held = (0..17).any(|b| now.buttons[b] > 0.5) || now.axes.iter().any(|a| a.abs() > LIVE_STICK);
+        if !init && self.index != TOUCH_INDEX && held {
+            LIVE.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         for (from, js) in JS_BUTTON {
             let down = now.buttons[from] > 0.5;

@@ -295,37 +295,55 @@ fn moved(r: &[f32; 4], by: [f32; 2]) -> [f32; 4] {
 /// What the iPhone's overlay says while [`NeedsTap`] is up (P233).
 pub const NEEDS_TAP_TEXT: &str = "Tap screen to resume controller";
 
-/// **"Tap screen to resume controller"** (P233), opentennis's `needs_tap.rs`: after a screenshot (or
-/// a trip out of the app) iOS keeps event focus, and GameController reports every button up and the
-/// sticks centred until a touch gives it back; the app can't take it back itself. With a controller
-/// in, the overlay (`ios_gpu.rs`) shows over everything until the first touch, or the first pad
-/// press that comes through (iOS gave focus back by itself). Draw only: no input or game state
-/// changes. Up or not, never a count: a screenshot sends its notice twice.
+/// **"Tap screen to resume controller"** (P233), opentennis's `needs_tap.rs`: after a screenshot iOS
+/// keeps event focus, and GameController reports every button up and the sticks centred until a
+/// touch gives it back; the app can't take it back itself. With a controller in, the overlay
+/// (`ios_gpu.rs`) shows over everything until the first touch, or until the pad is live again.
+/// Not while the pad is still live (P235, user 2026-10-30: 'we dont have to show the overlay for tap
+/// if the controller still doing inputs'): a notice only arms it, and it goes up after
+/// [`NeedsTap::QUIET`] frames with no live pad input; live input cancels it. Draw only: no input or
+/// game state changes. Armed or not, never a count: a screenshot sends its notice twice.
 #[derive(Default, Debug, PartialEq)]
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-pub struct NeedsTap(pub bool);
+pub struct NeedsTap {
+    /// The overlay is up.
+    pub up: bool,
+    /// Frames since a notice with no live pad input, while it waits to go up.
+    armed: Option<u32>,
+}
 
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 impl NeedsTap {
-    /// A screenshot or a resign/become-active notice with `controllers` connected: up only with a
-    /// controller to resume.
+    /// Frames of a silent pad after a notice before the overlay shows: a third of a second at 60.
+    pub const QUIET: u32 = 20;
+
+    /// A screenshot notice with `controllers` connected: armed only with a controller to resume.
     pub fn notice(&mut self, controllers: usize) {
-        if controllers > 0 {
-            self.0 = true;
+        if controllers > 0 && !self.up {
+            self.armed.get_or_insert(0);
         }
     }
 
-    /// A touch or a pad press came through: focus is back.
-    pub fn input(&mut self, touched: bool, pressed: bool) {
-        if touched || pressed {
-            self.0 = false;
+    /// A touch, or pad input that came through (a button held or a stick off centre): focus is
+    /// back, or was never lost.
+    pub fn input(&mut self, touched: bool, live: bool) {
+        if touched || live {
+            self.up = false;
+            self.armed = None;
         }
     }
 
-    /// A frame's worth, in opentennis's order: input first, so this frame's notice outlasts a
-    /// press from before it.
-    pub fn frame(&mut self, touched: bool, pressed: bool, notice: Option<usize>) {
-        self.input(touched, pressed);
+    /// A frame's worth: input first, then the wait, then this frame's notice, so a notice outlasts
+    /// input from before it.
+    pub fn frame(&mut self, touched: bool, live: bool, notice: Option<usize>) {
+        self.input(touched, live);
+        if let Some(n) = self.armed.as_mut() {
+            *n += 1;
+            if *n >= Self::QUIET {
+                self.up = true;
+                self.armed = None;
+            }
+        }
         if let Some(n) = notice {
             self.notice(n);
         }
@@ -336,46 +354,67 @@ impl NeedsTap {
 mod needs_tap_tests {
     use super::NeedsTap;
 
+    /// `frames` frames with nothing happening.
+    fn quiet(t: &mut NeedsTap, frames: u32) {
+        for _ in 0..frames {
+            t.frame(false, false, None);
+        }
+    }
+
     #[test]
-    fn up_after_a_notice_with_a_controller_until_input() {
+    fn up_after_a_screenshot_with_a_silent_controller_until_input() {
         let mut t = NeedsTap::default();
-        t.notice(0);
-        assert!(!t.0, "no controller: nothing to resume");
-        t.notice(1);
-        assert!(t.0, "a screenshot with a controller in");
-        t.input(false, false);
-        assert!(t.0, "released buttons and centred sticks aren't input");
-        t.input(true, false);
-        assert!(!t.0, "a touch");
-        t.notice(2);
-        t.input(false, true);
-        assert!(!t.0, "a pad press that came through");
+        t.frame(false, false, Some(0));
+        quiet(&mut t, NeedsTap::QUIET);
+        assert!(!t.up, "no controller: nothing to resume");
+        t.frame(false, false, Some(1));
+        quiet(&mut t, NeedsTap::QUIET - 1);
+        assert!(!t.up, "not before the pad has been quiet a while");
+        quiet(&mut t, 1);
+        assert!(t.up, "a screenshot with a controller in, and the pad gone silent");
+        quiet(&mut t, 100);
+        assert!(t.up, "released buttons and centred sticks aren't input");
+        t.frame(true, false, None);
+        assert!(!t.up, "a touch");
+        t.frame(false, false, Some(2));
+        quiet(&mut t, NeedsTap::QUIET);
+        t.frame(false, true, None);
+        assert!(!t.up, "pad input that came through");
+    }
+
+    #[test]
+    fn a_live_controller_never_shows_it() {
+        let mut t = NeedsTap::default();
+        t.frame(false, true, Some(1));
+        for _ in 0..3 * NeedsTap::QUIET {
+            t.frame(false, true, None);
+            assert!(!t.up, "the pad still riding: no overlay");
+        }
+        quiet(&mut t, 3 * NeedsTap::QUIET);
+        assert!(!t.up, "live input cancelled the notice; silence later doesn't bring it back");
     }
 
     #[test]
     fn a_screenshots_double_notice_is_one_tap() {
         let mut t = NeedsTap::default();
-        t.notice(1);
-        t.notice(1);
-        assert!(t.0, "set twice is still up, never toggled off");
-        t.input(true, false);
-        assert!(!t.0, "one tap clears it");
+        t.frame(false, false, Some(1));
+        t.frame(false, false, Some(1));
+        quiet(&mut t, NeedsTap::QUIET);
+        assert!(t.up, "set twice is still up, never toggled off");
+        t.frame(false, false, Some(1));
+        assert!(t.up);
+        t.frame(true, false, None);
+        assert!(!t.up, "one tap clears it");
     }
 
     #[test]
-    fn launchs_become_active_with_no_controller_does_nothing() {
-        let mut t = NeedsTap::default();
-        t.frame(false, false, Some(0));
-        assert!(!t.0);
-    }
-
-    #[test]
-    fn a_notice_outlasts_a_press_in_the_same_frame() {
+    fn a_notice_outlasts_input_in_the_same_frame() {
         let mut t = NeedsTap::default();
         t.frame(false, true, Some(1));
-        assert!(t.0, "the press came before the notice");
+        quiet(&mut t, NeedsTap::QUIET);
+        assert!(t.up, "the input came before the notice");
         t.frame(false, true, None);
-        assert!(!t.0, "the next press clears it");
+        assert!(!t.up, "the next input clears it");
     }
 }
 

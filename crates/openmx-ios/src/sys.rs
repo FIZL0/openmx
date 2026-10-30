@@ -189,20 +189,27 @@ unsafe extern "C" {
     static _NSConcreteGlobalBlock: c_void;
 }
 
-/// The focus block's body, on the main queue: the notice into the log (which ones a screenshot
-/// sends), and kept with the controllers in for [`focus_notice`].
+/// The screenshot notice, the only one that raises "Tap screen to resume controller": the user's
+/// iPhone run (2026-10-30) showed a trip out of the app and back leaves the controllers working.
+const SCREENSHOT: &str = "UIApplicationUserDidTakeScreenshotNotification";
+
+/// The focus block's body, on the main queue: every notice into the log, and a screenshot's kept
+/// with the controllers in for [`focus_notice`]. WillResignActive and DidBecomeActive only log.
 extern "C" fn on_focus(_: *const Block, note: Id) {
     pool(|| {
         let pads = int(get(class(c"GCController"), c"controllers"), c"count").max(0) as usize;
-        eprintln!("iOS {} ({pads} controllers)", text(get(note, c"name")));
-        NOTICE.fetch_max(pads + 1, Ordering::Relaxed);
+        let name = text(get(note, c"name"));
+        eprintln!("iOS {name} ({pads} controllers)");
+        if name == SCREENSHOT {
+            NOTICE.fetch_max(pads + 1, Ordering::Relaxed);
+        }
     });
 }
 
-/// As opentennis's `watch_focus`: a screenshot, or a trip out of the app and back, can leave the
-/// controllers silent until a touch (the shell's "Tap screen to resume controller"). Observes
-/// UIApplicationUserDidTakeScreenshotNotification, WillResignActive and DidBecomeActive on the main
-/// queue, for the life of the process. Call once.
+/// As opentennis's `watch_focus`: a screenshot can leave the controllers silent until a touch (the
+/// shell's "Tap screen to resume controller"). Observes UIApplicationUserDidTakeScreenshotNotification,
+/// WillResignActive and DidBecomeActive on the main queue, for the life of the process; only the
+/// screenshot one reaches [`focus_notice`], the other two are logged. Call once.
 pub fn watch_focus() {
     let descriptor = Box::leak(Box::new(BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() }));
     let block: &'static Block = Box::leak(Box::new(Block {
@@ -235,7 +242,7 @@ pub fn watch_focus() {
     });
 }
 
-/// The focus notice since the last call, if one came: how many controllers were connected then.
+/// The screenshot notice since the last call, if one came: how many controllers were connected then.
 /// Any thread.
 pub fn focus_notice() -> Option<usize> {
     NOTICE.swap(0, Ordering::Relaxed).checked_sub(1)

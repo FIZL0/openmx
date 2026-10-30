@@ -375,10 +375,10 @@ impl GpuWindow {
         self.clicks = s.clicks.drain(..).map(|(x, y)| (x - l as i32, y - t as i32)).collect();
         let touched = std::mem::take(&mut s.touched);
         drop(s);
-        let was = self.needs_tap.0;
-        self.needs_tap.frame(touched, crate::ios::take_pressed(), openmx_ios::focus_notice());
-        if self.needs_tap.0 != was {
-            println!("controller needs a tap: {}", self.needs_tap.0);
+        let was = self.needs_tap.up;
+        self.needs_tap.frame(touched, crate::ios::take_live(), openmx_ios::focus_notice());
+        if self.needs_tap.up != was {
+            println!("controller needs a tap: {}", self.needs_tap.up);
         }
         let [l, t, r, b] = self.safe;
         self.width = self.size.0.saturating_sub(l + r).max(1) as usize;
@@ -465,7 +465,7 @@ impl GpuWindow {
             let touch = TOUCH.lock().unwrap_or_else(|e| e.into_inner());
             touch.sprites(0)
         };
-        if self.needs_tap.0 {
+        if self.needs_tap.up {
             needs_tap_sprites(&mut sprites, size);
         }
         if !sprites.is_empty() {
