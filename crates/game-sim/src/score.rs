@@ -126,6 +126,17 @@ pub struct Score {
     /// The original's race sets it to 1 + a random fraction when a rider crosses its closed start
     /// gate; nothing in the port sets it yet, and the card's join sets it to 0.
     pub gate_penalty: F,
+    /// **The port's own (P243): a crash locks the trick out.** The original banks a combo the frame
+    /// both wheels touch, and a wreck a few ticks later on the same landing — the body slamming down,
+    /// a tip, a fling — finds nothing open and keeps the points. With this up, a landing's bank waits
+    /// [`LOCKOUT`] seconds in [`Score::pending`] first: a wreck in that time takes it away
+    /// ([`Score::crashed`]), riding it out or opening the next combo banks it ([`Score::settle`]).
+    /// Down, every call is the original's. Not hashed: it is the ride's setting, like the wreck switches.
+    pub lockout: bool,
+    /// A landed combo's points waiting out [`Score::settling`] before they go on the total (P243).
+    pub pending: F,
+    /// Seconds left before [`Score::pending`] is banked; zero when nothing waits.
+    pub settling: F,
 }
 
 /// What the rider's tick reads to score: the bike's words as the frame left them.
@@ -167,10 +178,17 @@ pub const SLOW: F = F(5.0);
 pub const ONE_WHEEL: F = F(1.0);
 /// The nodes the manager has to hand out.
 pub const POOL: usize = 100;
+/// **The port's own (P243):** how long a landed combo waits before it banks, with
+/// [`Score::lockout`] up — a wreck in that time loses it. A second (30 ticks) covers a landing's
+/// own wreck — the body coming down onto the ground after the wheels, a tip or a fling off the
+/// landing — which comes within a few ticks of the touch.
+pub const LOCKOUT: F = F(1.0);
 
 impl Score {
     /// Open a combo: the manager's start, on a card with none open.
     pub fn open(&mut self) {
+        // Riding into the next combo: the last landing was clean (P243).
+        self.settle();
         self.combo = true;
         self.combo_time = F::ZERO;
         self.nodes.clear();
@@ -237,12 +255,39 @@ impl Score {
         for n in &self.nodes {
             sum = sum + n.points;
         }
-        if ok {
+        if ok && self.lockout {
+            // Held back until the landing is ridden out (P243). The total is whole already, so its
+            // rounding below changes nothing and [`Score::settle`] rounds the sum as this would have.
+            self.pending = self.pending + sum * scale;
+            self.settling = LOCKOUT;
+        } else if ok {
             self.total = self.total + sum * scale;
         }
         self.combo_points = F::ZERO;
         self.total = F(fpu::from_i32((self.total / TOTAL_GRANULARITY).to_i32())) * TOTAL_GRANULARITY;
         self.nodes.clear();
+    }
+
+    /// **The landing was clean** (P243): the points [`Score::lockout`] held back go on the total,
+    /// rounded down to the manager's granularity as [`Score::close`] rounds. Nothing when none wait.
+    pub fn settle(&mut self) {
+        if self.settling == F::ZERO && self.pending == F::ZERO {
+            return;
+        }
+        self.total = self.total + self.pending;
+        self.total = F(fpu::from_i32((self.total / TOTAL_GRANULARITY).to_i32())) * TOTAL_GRANULARITY;
+        self.pending = F::ZERO;
+        self.settling = F::ZERO;
+    }
+
+    /// **The rider crashed** (P243, the wreck entry): the combo is lost as [`Score::wrecked`] loses
+    /// it, and with [`Score::lockout`] up so is a landing's bank still waiting — the crash came on
+    /// the landing, and the trick does not count. Without the lockout nothing waits and this is
+    /// [`Score::wrecked`].
+    pub fn crashed(&mut self) {
+        self.wrecked();
+        self.pending = F::ZERO;
+        self.settling = F::ZERO;
     }
 
     /// **A trick's clock started** (the rider's trick-start hook), `id` 0–23 or the backflip.
@@ -328,6 +373,14 @@ impl Score {
     /// again (2), then the right way up with the nose not past 0.79 up (3), which scores as a backflip
     /// round does: at once in the air when nothing is being scored, or on the landing.
     pub fn frame_with(&mut self, dt: F, s: &Sense, mut front_flip: Option<(&mut u8, F)>) {
+        // A landing's bank waiting out the lockout (P243): the wreck entry before this tick took it
+        // away if the rider came off, so one still here banks once its time is up.
+        if F::ZERO < self.settling {
+            self.settling = self.settling - dt;
+            if self.settling <= F::ZERO {
+                self.settle();
+            }
+        }
         if !s.wrecked {
             let (front, rear) = (s.front, s.rear);
             if !front && rear && !s.slow {
@@ -517,6 +570,11 @@ impl State for Score {
         }
         if self.out {
             w.bool("out", self.out);
+        }
+        // Only the lockout (P243) holds a bank back, so a ride without it hashes as before.
+        if self.pending != F::ZERO || self.settling != F::ZERO {
+            w.f("pending", self.pending);
+            w.f("settling", self.settling);
         }
     }
 }

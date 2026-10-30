@@ -914,3 +914,22 @@ fn a_wrecked_rides_hud_speed_is_0() {
     assert_eq!(ride_hud::speed_shown(20.0, false), 20.0);
     assert_eq!(overlay::speed_text(ride_hud::speed_shown(20.0, false)), overlay::speed_text(20.0));
 }
+
+/// P243: a chain whose bank is waiting out the crash lockout is neither landed nor bailed yet — it
+/// stays up as it was — and plays out bailed when a crash takes the bank, landed when it goes on.
+#[test]
+fn a_chain_waiting_out_the_crash_lockout_plays_out_as_the_crash_decides() {
+    for crashed in [false, true] {
+        let t0 = Instant::now();
+        let mut t = combo_up(t0);
+        let end = t0 + Duration::from_millis(800);
+        let waiting = Score { pending: F(500.0), settling: F(0.5), lockout: true, ..card(&[], false, 0.0) };
+        t.update(end, &waiting, name);
+        let p = t.popup(end).expect("the pop-up is up while the bank waits");
+        assert_eq!(p.outcome, None, "{crashed}: decided before the lockout was out");
+        let after = end + Duration::from_millis(500);
+        t.update(after, &Score { lockout: true, ..card(&[], false, if crashed { 0.0 } else { 500.0 }) }, name);
+        let p = t.popup(after).expect("the pop-up plays out");
+        assert_eq!(p.outcome, Some(!crashed), "{crashed}: the crash is not what the pop-up shows");
+    }
+}

@@ -152,6 +152,8 @@ impl Competition {
     /// **A human rider joins** with their card: the card's flags start again and its total is put
     /// aside. Returns the seat.
     pub fn join(&mut self, card: &mut Score) -> usize {
+        // A freeride landing still waiting out the lockout (P243) is freeride points: banked first.
+        card.settle();
         let saved = card.total.to_i32();
         card.combo = false;
         card.scoring = false;
@@ -205,6 +207,9 @@ impl Competition {
     /// total put back. Returns the verdict and the points the profile adds (the event's, cut to a
     /// whole number, on the saved total).
     pub fn finish(&mut self, seat: usize, card: &mut Score) -> (Verdict, i32) {
+        // A landing that came in before the card went out and is still waiting out the lockout (P243)
+        // counts: nothing can wreck it any more once the rider's event is over.
+        card.settle();
         let target = F(fpu::from_i32(self.target));
         let count = self.seats.len();
         let lead = self.leader == Some(seat);

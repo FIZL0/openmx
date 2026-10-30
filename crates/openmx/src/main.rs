@@ -4031,6 +4031,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         rider.sense.wrecks_enabled = args.wrecks;
         rider.sense.air_wrecks = args.air_wrecks;
         rider.sense.backwards_bail = args.backwards_bail;
+        // A crash on a landing loses its trick (P243, the user's ask): the bank waits out the landing.
+        rider.score.lockout = true;
         // The eight numbers the body's *step* reads, which `Rider::new` leaves at zero and says a shell
         // is expected to fill: the five fade rates, the stunt cross-fade's cap and the pose grid's three
         // speed thresholds, as V12 measured them off the body's own object in the running original. With
