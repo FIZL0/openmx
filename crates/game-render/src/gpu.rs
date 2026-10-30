@@ -93,7 +93,8 @@ const PROP_PIXELS: f32 = 0.5;
 
 /// The biggest side, in texels, a model's texture is uploaded at from now on, 0 for no cap (P223,
 /// opentennis's B538: 512 on a phone, whose memory a texture pack's 2048s fill). Set before the
-/// textures load; the disc's own are at most this already.
+/// textures load; the disc's own are at most this already. Models' alone ([`upload_model_mips`]):
+/// a sprite's picture is read by its texels, and a font page halved showed other glyphs' pieces.
 pub static TEXTURE_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Under [`Renderer::few_casters`], the props smaller than this, in feet of radius, cast no sun
@@ -1290,19 +1291,31 @@ impl Mips {
             }
             false => t,
         };
-        let mut levels = mips_keeping(t, cutoff);
-        // A phone's cap (P223): the levels over it are not uploaded, the next one down is the top.
-        let cap = TEXTURE_CAP.load(std::sync::atomic::Ordering::Relaxed);
-        if cap > 0 {
-            let over = levels.iter().take_while(|l| l.0.max(l.1) > cap).count().min(levels.len() - 1);
-            levels.drain(..over);
-        }
-        Mips(levels)
+        Mips(mips_keeping(t, cutoff))
+    }
+}
+
+/// A model's texture: `mips` under a phone's [`TEXTURE_CAP`] (P223), the levels over it not
+/// uploaded and the next one down the top. Its texture coordinates are a share of the whole, so
+/// any level can be the top.
+fn upload_model_mips(device: &wgpu::Device, queue: &wgpu::Queue, mips: &Mips) -> wgpu::TextureView {
+    let over = levels_over(&mips.0, TEXTURE_CAP.load(std::sync::atomic::Ordering::Relaxed));
+    upload_levels(device, queue, &mips.0[over..])
+}
+
+/// How many of `levels`' biggest are over `cap` texels a side (0: none), the smallest always kept.
+fn levels_over(levels: &[(u32, u32, Vec<u8>)], cap: u32) -> usize {
+    match cap {
+        0 => 0,
+        _ => levels.iter().take_while(|l| l.0.max(l.1) > cap).count().min(levels.len() - 1),
     }
 }
 
 fn upload_mips(device: &wgpu::Device, queue: &wgpu::Queue, mips: &Mips) -> wgpu::TextureView {
-    let levels = &mips.0;
+    upload_levels(device, queue, &mips.0)
+}
+
+fn upload_levels(device: &wgpu::Device, queue: &wgpu::Queue, levels: &[(u32, u32, Vec<u8>)]) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d {
@@ -3069,7 +3082,7 @@ impl Renderer {
     /// Texture `texture` of the assets at cutoff `keep`, its levels made already ([`Mips::of`]).
     pub fn put_mips(&mut self, texture: usize, keep: u8, mips: &Mips) {
         if !self.textures.contains_key(&(texture, keep)) {
-            let view = upload_mips(&self.device, &self.queue, mips);
+            let view = upload_model_mips(&self.device, &self.queue, mips);
             self.textures.insert((texture, keep), view);
         }
     }
@@ -3149,7 +3162,7 @@ impl Renderer {
             Some(t) => self
                 .textures
                 .entry((t, keep))
-                .or_insert_with(|| upload_texture_keeping(&self.device, &self.queue, &assets.textures[t], keep))
+                .or_insert_with(|| upload_model_mips(&self.device, &self.queue, &Mips::of(&assets.textures[t], keep)))
                 .clone(),
             None => self.white.clone(),
         };
@@ -5262,6 +5275,18 @@ fn texel(t: texture_2d<f32>, pos: vec4f) -> vec4f {
 
 #[cfg(test)]
 mod tests {
+    /// A phone's cap drops a model texture's levels over it and never its last (P223), and a
+    /// picture's levels are made whole whatever the cap: a sprite reads its texels.
+    #[test]
+    fn the_phone_cap_is_for_model_textures() {
+        let t = Texture { width: 1024, height: 256, rgba: vec![255; 1024 * 256 * 4] };
+        let mips = Mips::of(&t, 0);
+        assert_eq!((mips.0[0].0, mips.0[0].1), (1024, 256), "Mips::of keeps the full size");
+        assert_eq!(levels_over(&mips.0, 512), 1);
+        assert_eq!(levels_over(&mips.0, 0), 0);
+        assert_eq!(levels_over(&mips.0[mips.0.len() - 1..], 1), 0, "the smallest level stays");
+    }
+
     use super::*;
 
     /// A sparse cut-out (one solid texel in eight, scattered, as twigs are) and a solid block beside it in one
