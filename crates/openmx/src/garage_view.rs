@@ -216,7 +216,7 @@ impl Stage {
                     }
                     _ => None,
                 };
-                Actor { model, at, pose, lod_from: None, alpha: 1.0 }
+                Actor { model, at, pose, lod_from: None, alpha: 1.0, casts: false }
             })
             .collect();
         let light = Stage::light();

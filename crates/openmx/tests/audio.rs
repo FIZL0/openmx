@@ -455,6 +455,28 @@ fn ride(sounds: &BikeSounds) -> Vec<Heard> {
     out
 }
 
+/// A wreck lets go of the throttle (user 2026-10-30): the pad still holding the gas, the wrecked
+/// rider's engine leaves the throttle samples for the decel and the idle, and never comes back on.
+#[test]
+fn a_wreck_lets_go_of_the_throttle() {
+    let sounds = tone_bike();
+    let mut mixer = Mixer::new(Music::new(Vec::new(), 1));
+    let mut engine = Engine::new(7);
+    let gas = Hands { grounded: true, gas: 1.0, clutch: 0.0, speed: 30.0, at: [0.0; 3], vel: [0.0, 0.0, 30.0] };
+    let pulling = [Note::LowAccel, Note::HighAccel, Note::Power, Note::Sputter];
+    for _ in 0..60 {
+        engine.update(&gas, 1.0 / 60.0, &mut mixer, &sounds);
+    }
+    assert!(pulling.contains(&engine.note()), "on the gas: {:?}", engine.note());
+    assert_eq!(gas.wrecked(false).gas, 1.0, "riding: the hands as they are");
+    let mut notes = Vec::new();
+    for _ in 0..120 {
+        engine.update(&gas.wrecked(true), 1.0 / 60.0, &mut mixer, &sounds);
+        notes.push(engine.note());
+    }
+    assert!(notes[30..].iter().all(|n| !pulling.contains(n)), "wrecked with the gas held: {notes:?}");
+}
+
 fn assert_it_follows_the_throttle(heard: &[Heard], loudness: Option<f32>) {
     let line: Vec<String> = heard
         .iter()

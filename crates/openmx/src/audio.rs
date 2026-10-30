@@ -1462,6 +1462,18 @@ pub struct Hands {
     pub vel: [f32; 3],
 }
 
+impl Hands {
+    /// The hands while the rider is wrecked: off the bike, so off the throttle and the clutch lever
+    /// whatever the pad still holds (user 2026-10-30: 'when wrecking im still hearing the bike motor
+    /// drive, it should not'). The note falls to the decel and the idle; the rest is the bike's own.
+    pub fn wrecked(self, wrecked: bool) -> Hands {
+        match wrecked {
+            true => Hands { gas: 0.0, clutch: 0.0, ..self },
+            false => self,
+        }
+    }
+}
+
 /// One of a bike's engine samples: the list it is in (as [`BikeSounds::list`] names them) and its
 /// place there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

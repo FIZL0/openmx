@@ -7980,12 +7980,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     gpu_poses.len() - 1
                 });
                 // See-through for a while after a put-back, the bike, its parts and the rider alike (P57).
-                // And while the player's own pause is open (P84).
+                // And while the player's own pause is open (P84). Their shadow stays whole all the while
+                // (user 2026-10-30: 'when respawning the shadow isnt present for a few seconds, make it
+                // always there'): `casts`.
                 let alpha = vehicle::shown_alpha(seat.sim.rider.ghost.shown(), seat.paused);
                 if p == 0 {
                     bike_actor = Some(actors.len());
                 }
-                actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha });
+                actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha, casts: true });
                 // A wheel spinning fast is drawn blurred (V59): see-through copies of it trailing
                 // behind, the chassis' own model with every other node shrunk away. Not on a put-back
                 // ghost, which is see-through already.
@@ -7993,7 +7995,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     for copy in chassis.blur_copies(&shown.chassis) {
                         gpu_poses.push(copy.pose);
                         let pose = Some(gpu_poses.len() - 1);
-                        actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha: copy.alpha });
+                        actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha: copy.alpha, casts: false });
                     }
                 }
                 let node_now = |name: &str| -> Option<M4> {
@@ -8009,7 +8011,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         Some(node) => node.mul(bike_at),
                         None => bike_at,
                     };
-                    actors.push(Actor { model: part.model.as_str(), at, pose: None, lod_from: None, alpha });
+                    actors.push(Actor { model: part.model.as_str(), at, pose: None, lod_from: None, alpha, casts: true });
                 }
                 // The body, thrown by the ragdoll's bones while the rider is down (S53) and on the
                 // bike otherwise ([`Shown::of`]).
@@ -8026,6 +8028,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         // the camera falls far enough behind to earn the coarsest group.
                         lod_from: None,
                         alpha,
+                        casts: true,
                     });
                 }
             }
@@ -8042,7 +8045,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // And its pilot in the seat (V39), the rider's own body posed by the plane's clips.
                 if let (Some(Some(pilot)), Some(model)) = (pilots.get(p), &rigs[p].body_model) {
                     gpu_poses.push(pilot.palette.clone());
-                    actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha });
+                    actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha, casts: false });
                     if args.trace_picture {
                         let nodes: Vec<V3> = pilot.palette.iter().map(|m| m.mul(pilot.at)).map(|m| V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] }).collect();
                         trace_pilot(p, "gpu", model, pilot, &nodes);
@@ -8060,15 +8063,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     gpu_poses.push(p.clone());
                     gpu_poses.len() - 1
                 });
-                actors.push(Actor { model: model.as_str(), at: *at, pose, lod_from: None, alpha: 1.0 });
+                actors.push(Actor { model: model.as_str(), at: *at, pose, lod_from: None, alpha: 1.0, casts: false });
             }
             for c in &creatures_at {
                 gpu_poses.push(c.palette.clone());
-                actors.push(Actor { model: c.model.as_str(), at: c.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha: 1.0 });
+                actors.push(Actor { model: c.model.as_str(), at: c.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha: 1.0, casts: false });
             }
             for (model, at, pose) in &toys_at {
                 gpu_poses.push(pose.clone());
-                actors.push(Actor { model, at: *at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha: 1.0 });
+                actors.push(Actor { model, at: *at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha: 1.0, casts: false });
             }
             // A view's own player's markers (P88), faint bikes where each was put down: in that
             // player's view and nobody else's, so a view with any has the shared list and them.
@@ -8085,7 +8088,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         .clone()
                         .filter_map(|m| m.ride())
                         .filter(|_| seat.garage.up == Kind::Bike)
-                        .map(|ride| Actor { model: rig.bike_model.as_str(), at: chassis_at(ride), pose: None, lod_from: None, alpha: MARKER_ALPHA })
+                        .map(|ride| Actor { model: rig.bike_model.as_str(), at: chassis_at(ride), pose: None, lod_from: None, alpha: MARKER_ALPHA, casts: false })
                         .collect();
                     let livery = seat.garage.plane.as_ref().map_or(0, |p| p.livery);
                     for f in marks.filter_map(|m| m.flight()).filter(|_| seat.garage.up == Kind::Biplane) {
@@ -8825,7 +8828,8 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
             speed: r.chassis.speed.0,
             at: [p.x(), p.y(), p.z()],
             vel: [v.x(), v.y(), v.z()],
-        },
+        }
+        .wrecked(seat.sim.rider.state.wreck.is_some()),
         wreck: seat.said.wreck.map(|w| w.0 as i32),
         landed_trick: seat.said.landed.is_some(),
         plane,

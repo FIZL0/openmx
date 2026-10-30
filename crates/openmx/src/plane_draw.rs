@@ -39,7 +39,7 @@ pub fn actors_with<'a>(drawn: &'a Biplane, assets: &Assets, surfaces: Surfaces, 
     parts
         .into_iter()
         .enumerate()
-        .map(|(i, (model, at))| Actor { model, at, pose: posed.filter(|_| i == 0), lod_from: None, alpha })
+        .map(|(i, (model, at))| Actor { model, at, pose: posed.filter(|_| i == 0), lod_from: None, alpha, casts: false })
         .collect()
 }
 
