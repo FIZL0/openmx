@@ -269,3 +269,82 @@ fn a_corner_is_the_views_own_corner() {
     // A view too small to hold it keeps it at the top left and clips the far side.
     assert_eq!(aspect::corner((100, 50), size, Corner::BottomRight, 4), (4, 4));
 }
+
+/// P240: an iPhone 15 Pro on its side at 3x — 852×393 pt, its safe area 59/0/59/21 pt (the Dynamic
+/// Island's side either way, the home indicator below) — in pixels.
+const PHONE: (u32, u32) = (2556, 1179);
+const PHONE_SAFE: [u32; 4] = [177, 0, 177, 63];
+
+#[test]
+fn a_phone_keeps_the_island_clear_not_the_home_bar() {
+    // Auto: the island's sides only, the home indicator's foot dropped; Stretch: nothing.
+    let kept = aspect::kept_insets(PHONE_SAFE, false);
+    assert_eq!(kept, [177, 0, 177, 0]);
+    assert_eq!(aspect::kept_insets(PHONE_SAFE, true), [0; 4]);
+    // the shell's frame is the room inside them, the HUD's rect 59 pt in at the island and 0 at the foot
+    let room = (2556 - 177 - 177, 1179);
+    let frame = Aspect::Fill.frame(room, 1);
+    let (hud, bleed) = aspect::phone_frame(PHONE, kept, frame, 1);
+    assert_eq!(hud, [177, 0, 2202, 1179]);
+    assert_eq!((hud[0] / 3, PHONE.1 - hud[1] - hud[3]), (59, 0), "59 pt at the island, 0 at the bottom");
+    // and the picture runs on past it to the whole window
+    let picture = [hud[0] - bleed[0], hud[1] - bleed[1], hud[2] + bleed[0] + bleed[2], hud[3] + bleed[1] + bleed[3]];
+    assert_eq!(picture, [0, 0, 2556, 1179]);
+    // at scale 2 the half pixel a frame leaves over still runs on to the edges
+    let frame = Aspect::Fill.frame((2203, 1179), 2);
+    let (hud, bleed) = aspect::phone_frame(PHONE, [177, 0, 176, 0], frame, 2);
+    assert_eq!((hud[0] - bleed[0], hud[2] + bleed[0] + bleed[2], hud[3] + bleed[1] + bleed[3]), (0, 2556, 1179));
+    // upright: the island's top kept, the home bar's 34 pt foot not
+    let (hud, bleed) = aspect::phone_frame((1179, 2556), aspect::kept_insets([0, 177, 0, 102], false), (1179, 2556 - 177), 1);
+    assert_eq!((hud, bleed), ([0, 177, 1179, 2379], [0, 177, 0, 0]));
+}
+
+#[test]
+fn stretch_on_a_phone_is_the_whole_window() {
+    // (`aspect::stretched` is the shell's global: other tests here ask `Aspect::frame` at once)
+    let frame = Aspect::Stretch.frame((PHONE.0 as usize, PHONE.1 as usize), 1);
+    let (hud, bleed) = aspect::phone_frame(PHONE, aspect::kept_insets(PHONE_SAFE, true), frame, 1);
+    assert_eq!((hud, bleed), ([0, 0, 2556, 1179], [0; 4]));
+}
+
+#[test]
+fn a_fixed_shape_on_a_phone_keeps_its_bars() {
+    // 4:3 in the room: centred in it, the picture runs on nowhere across the bars.
+    let kept = aspect::kept_insets(PHONE_SAFE, false);
+    let frame = Aspect::Television.frame((2202, 1179), 1);
+    let (hud, bleed) = aspect::phone_frame(PHONE, kept, frame, 1);
+    assert_eq!(hud, [177 + (2202 - 1572) / 2, 0, 1572, 1179]);
+    assert_eq!(bleed, [0; 4]);
+}
+
+#[test]
+fn a_menu_background_reaches_the_window_edge() {
+    use game_render::gpu::{Shape, Sprite, bleed_out};
+    let plain = |[x0, y0, x1, y1]: [f32; 4]| Sprite {
+        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        uv: [[0.0; 2]; 4],
+        local: [[0.0; 2]; 4],
+        clamp: [0.0; 4],
+        image: None,
+        tint: [0, 0, 0, 150],
+        shape: Shape::Plain,
+    };
+    let (hud, bleed) = aspect::phone_frame(PHONE, aspect::kept_insets(PHONE_SAFE, false), (2202, 1179), 1);
+    let frame = (hud[2] as f32, hud[3] as f32);
+    let bleed = bleed.map(|b| b as f32);
+    // the wall (a hair inside the frame, as the menus round it), a band across the foot, a side card
+    // on the left edge, a button in the middle
+    let sprites = [
+        plain([0.2, -0.1, 2201.8, 1179.2]),
+        plain([0.0, 1000.0, 2202.0, 1179.0]),
+        plain([0.0, 100.0, 400.0, 900.0]),
+        plain([1000.0, 500.0, 1200.0, 560.0]),
+    ];
+    let out = bleed_out(&sprites, frame, bleed);
+    // frame pixels to the window's: the frame's origin is its left inset
+    let window = |s: &Sprite| [s.corners[0][0] + hud[0] as f32, s.corners[0][1], s.corners[2][0] + hud[0] as f32, s.corners[2][1]];
+    assert_eq!(window(&out[0]), [0.0, -0.1, 2556.0, 1179.2], "the wall runs out to the window's edges");
+    assert_eq!(window(&out[1]), [0.0, 1000.0, 2556.0, 1179.0], "the band runs out sideways");
+    assert_eq!(out[2], sprites[2], "a card on one edge stays");
+    assert_eq!(out[3], sprites[3], "a button stays");
+}

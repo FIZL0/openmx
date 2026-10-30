@@ -48,7 +48,7 @@ mod scale;
 mod sprite;
 mod ground_mesh;
 pub use scale::{AutoScale, MIN_SCALE};
-pub use sprite::{Shape, Sprite, clamp_of};
+pub use sprite::{Shape, Sprite, bleed_out, clamp_of};
 
 use crate::mat::{M4, V3, v3};
 use crate::psg::Model;
@@ -950,6 +950,11 @@ pub struct Renderer {
     upscale: scale::Upscale,
     /// The fraction of the frame's size the views are drawn at, [`MIN_SCALE`] to 1 (V30).
     pub render_scale: f32,
+    /// How far past the target's frame the picture runs on, in the target's pixels (left, top,
+    /// right, bottom; P240): a phone's window under its notch or Dynamic Island, where the HUD and
+    /// the menus' text stay out. A view on the frame's edge is drawn out to it, wider and no more
+    /// stretched, and a sprite spanning the frame runs on into it ([`bleed_out`]). None by default.
+    pub bleed: [u32; 4],
     /// The particle sheet and this frame's particles (P58).
     particles: Option<sprites::Sprites>,
     /// The glow textures and this frame's glows (V51).
@@ -1871,6 +1876,37 @@ fn sides(mask: usize) -> [bool; 4] {
     [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0, mask & 8 != 0]
 }
 
+/// The rect a frame's picture fills in its target (P240): the frame, and past it as far as `bleed`
+/// (left, top, right, bottom) reaches, kept inside the target.
+fn picture_rect(target: &Target, [l, t, r, b]: [u32; 4]) -> [u32; 4] {
+    let [fx, fy, fw, fh] = target.frame;
+    let (x0, y0) = (fx.saturating_sub(l), fy.saturating_sub(t));
+    let (x1, y1) = ((fx + fw + r).min(target.size.0), (fy + fh + b).min(target.size.1));
+    [x0.min(x1), y0.min(y1), x1.saturating_sub(x0), y1.saturating_sub(y0)]
+}
+
+/// A view's rect, in the frame's pixels, in the target's (P240): each of its edges on the frame's
+/// edge moved out to [`picture_rect`]'s, so a full-screen view, or a split's outer edges, run on
+/// into the bleed.
+fn view_rect(target: &Target, bleed: [u32; 4], [x, y, w, h]: [u32; 4]) -> [u32; 4] {
+    let ([fx, fy, fw, fh], s) = (target.frame, target.scale.max(1));
+    let [px, py, pw, ph] = picture_rect(target, bleed);
+    let (mut x0, mut y0, mut x1, mut y1) = (fx + x * s, fy + y * s, fx + (x + w) * s, fy + (y + h) * s);
+    if x == 0 {
+        x0 = x0.min(px);
+    }
+    if y == 0 {
+        y0 = y0.min(py);
+    }
+    if (x + w) * s >= fw {
+        x1 = x1.max(px + pw);
+    }
+    if (y + h) * s >= fh {
+        y1 = y1.max(py + ph);
+    }
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
 /// World to clip for a view of this shape, with its far plane at `far`, depth running 0 to 1 from
 /// near to far.
 fn view_projection(camera: &Camera, width: u32, height: u32, far: f32) -> M4 {
@@ -2271,6 +2307,7 @@ impl Renderer {
             sprites,
             upscale,
             render_scale: 1.0,
+            bleed: [0; 4],
             particles: None,
             glows: None,
             sun,
@@ -3645,8 +3682,7 @@ impl Renderer {
                 Some(Some(s)) => s.has[0] || s.has[1],
                 _ => self.has_sky,
             };
-            let [_, _, w, h] = view.rect;
-            let (w, h) = (w * target.scale, h * target.scale);
+            let [_, _, w, h] = view_rect(target, self.bleed(), view.rect);
             let moved = copy.zip(self.wrap).map(|(k, wrap)| wrap.moved(view.camera, k));
             let camera = moved.as_ref().unwrap_or(view.camera);
             let vp = view_projection(camera, w, h, far);
@@ -3871,7 +3907,8 @@ impl Renderer {
             scale: target.scale.max(1) as f32,
             _pad: 0.0,
         };
-        let sprites = self.sprites.prepare(&self.device, &self.queue, place, target.size, frame.sprites);
+        let bled = self.bled_sprites(target, frame.sprites);
+        let sprites = self.sprites.prepare(&self.device, &self.queue, place, target.size, bled.as_deref().unwrap_or(frame.sprites));
         let mut encoder = self.device.create_command_encoder(&Default::default());
         drawn.draws += self.draw_sun_maps(&mut encoder, passes.len());
         // The roads and ruts under each view, drawn sharp again round any that has moved (V67, V89).
@@ -3880,27 +3917,31 @@ impl Renderer {
             m.follow(&self.device, &self.queue, &mut encoder, &eyes);
         }
         let scale = scale::quantise(self.render_scale);
-        let [fx, fy, fw, fh] = target.frame;
-        if scale < 1.0 && fw > 0 && fh > 0 && !over {
+        let bleed = self.bleed();
+        let picture = picture_rect(target, bleed);
+        let [px, py, pw, ph] = picture;
+        if scale < 1.0 && pw > 0 && ph > 0 && !over {
             // The views into the low texture, each view's edges scaled and rounded so they still meet;
-            // then the low texture stretched over the frame, and the overlay over that at full size.
-            let size = scale::scaled((fw, fh), scale);
+            // then the low texture stretched over the picture (the frame and its bleed), and the
+            // overlay over that at full size.
+            let size = scale::scaled((pw, ph), scale);
             let (low, low_depth) = self.upscale.low(&self.device, self.format, &self.clamp_sampler, size);
             {
                 let mut pass = begin_pass(&mut encoder, &low, &low_depth, "views");
-                let (kx, ky) = (size.0 as f32 / fw as f32, size.1 as f32 / fh as f32);
-                let s = target.scale;
-                let rect = |[x, y, w, h]: [u32; 4]| {
-                    let (x0, y0) = (((x * s) as f32 * kx).round() as u32, ((y * s) as f32 * ky).round() as u32);
-                    let (x1, y1) = ((((x + w) * s) as f32 * kx).round() as u32, (((y + h) * s) as f32 * ky).round() as u32);
+                let (kx, ky) = (size.0 as f32 / pw as f32, size.1 as f32 / ph as f32);
+                let rect = |r: [u32; 4]| {
+                    let [x, y, w, h] = view_rect(target, bleed, r);
+                    let (x, y) = (x - px, y - py);
+                    let (x0, y0) = ((x as f32 * kx).round() as u32, (y as f32 * ky).round() as u32);
+                    let (x1, y1) = (((x + w) as f32 * kx).round() as u32, ((y + h) as f32 * ky).round() as u32);
                     [x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)]
                 };
                 self.draw_views(&mut pass, views, &passes, &ground_counts, rect, size, &mut drawn);
             }
             let depth = self.depth_for(target.size);
             let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame");
-            pass.set_scissor_rect(fx, fy, fw.min(target.size.0.saturating_sub(fx)), fh.min(target.size.1.saturating_sub(fy)));
-            self.upscale.draw(&self.queue, &mut pass, target.frame);
+            pass.set_scissor_rect(px, py, pw, ph);
+            self.upscale.draw(&self.queue, &mut pass, picture);
             drawn.draws += 1;
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         } else {
@@ -3909,8 +3950,7 @@ impl Renderer {
                 true => begin_pass_over(&mut encoder, target.view, &depth),
                 false => begin_pass(&mut encoder, target.view, &depth, "frame"),
             };
-            let s = target.scale;
-            let rect = |[x, y, w, h]: [u32; 4]| [fx + x * s, fy + y * s, w * s, h * s];
+            let rect = |r: [u32; 4]| view_rect(target, bleed, r);
             self.draw_views(&mut pass, views, &passes, &ground_counts, rect, target.size, &mut drawn);
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         }
@@ -4228,8 +4268,26 @@ impl Renderer {
             }
         }
         if sprites {
+            let [x, y, w, h] = picture_rect(target, self.bleed());
+            pass.set_scissor_rect(x, y, w, h);
             drawn.draws += self.sprites.draw(pass);
         }
+    }
+
+    /// [`Renderer::bleed`], while it is drawing a frame of its own (not an actor laid over a menu).
+    fn bleed(&self) -> [u32; 4] {
+        if self.over { [0; 4] } else { self.bleed }
+    }
+
+    /// `sprites` run on into [`Renderer::bleed`] ([`bleed_out`]); none when there is none.
+    fn bled_sprites(&self, target: &Target, sprites: &[Sprite]) -> Option<Vec<Sprite>> {
+        let bleed = self.bleed();
+        if bleed == [0; 4] || sprites.is_empty() {
+            return None;
+        }
+        let s = target.scale.max(1) as f32;
+        let frame = (target.frame[2] as f32 / s, target.frame[3] as f32 / s);
+        Some(bleed_out(sprites, frame, bleed.map(|b| b as f32 / s)))
     }
 
     /// Sprites alone on `target`, black round and under them (V30): the front end's menus, which
@@ -4240,13 +4298,14 @@ impl Renderer {
             scale: target.scale.max(1) as f32,
             _pad: 0.0,
         };
-        let any = self.sprites.prepare(&self.device, &self.queue, place, target.size, sprites);
+        let bled = self.bled_sprites(target, sprites);
+        let any = self.sprites.prepare(&self.device, &self.queue, place, target.size, bled.as_deref().unwrap_or(sprites));
         let depth = self.depth_for(target.size);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = begin_pass(&mut encoder, target.view, &depth, "sprites");
-            let [x, y, w, h] = target.frame;
-            pass.set_scissor_rect(x, y, w.min(target.size.0.saturating_sub(x)), h.min(target.size.1.saturating_sub(y)));
+            let [x, y, w, h] = picture_rect(target, self.bleed());
+            pass.set_scissor_rect(x, y, w, h);
             if any {
                 self.sprites.draw(&mut pass);
             }
@@ -5827,6 +5886,63 @@ mod tests {
         assert_eq!(drawn.actors, vec![vec![board_tris, 0, 0]]);
         assert_eq!((drawn.actor(0, 0), drawn.actor(0, 3), drawn.actor(1, 0)), (board_tris, 0, 0));
         assert!(board_tris > 0 && drawn.triangles[0] >= board_tris);
+    }
+
+    /// P240: a phone's picture runs on past the frame: with a bleed, the view on the frame's edges
+    /// and a sprite spanning the frame are drawn out to the target's edges, a sprite that does not
+    /// span it is not, and without one nothing is drawn past the frame.
+    #[test]
+    fn a_bleed_runs_the_picture_past_the_frame() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (scene, assets, camera) = known_scene();
+        let (w, h) = (64u32, 48u32);
+        let light = Lighting::of(&scene);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        // the frame 8 px in from each side, as an iPhone's from its island
+        let frame = [8, 0, 48, 48];
+        let target = Target { view: &view, size: (w, h), frame, scale: 1 };
+        let views = [View { rect: [0, 0, 48, 48], camera: &camera, actors: &[] }];
+        let px = |rgb: &[u8], x: u32, y: u32| rgb[((y * w + x) * 3) as usize..][..3].to_vec();
+        let mut drawn = |gpu: &mut Renderer, bleed: [u32; 4], sprites: &[Sprite]| {
+            gpu.bleed = bleed;
+            gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites, light: &light });
+            gpu.read(&texture)
+        };
+        let plain = drawn(&mut gpu, [0; 4], &[]);
+        let bled = drawn(&mut gpu, [8, 0, 8, 0], &[]);
+        let bled_view = bled.clone();
+        assert_ne!(px(&bled, 32, 2), [0; 3], "the backdrop is drawn");
+        assert_eq!((px(&plain, 2, 2), px(&plain, 61, 2)), (vec![0; 3], vec![0; 3]), "nothing past the frame without a bleed");
+        assert_eq!((px(&bled, 2, 2), px(&bled, 61, 2)), (px(&bled, 32, 2), px(&bled, 32, 2)), "the view runs on to the edges");
+        // a dimmer over the whole frame runs on with it; a box at its left edge alone does not
+        let fill = |[x0, y0, x1, y1]: [f32; 4], tint| Sprite {
+            corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+            uv: [[0.0; 2]; 4],
+            local: [[0.0; 2]; 4],
+            clamp: [0.0; 4],
+            image: None,
+            tint,
+            shape: Shape::Plain,
+        };
+        let sprites = [fill([0.0, 0.0, 48.0, 48.0], [255, 0, 0, 255]), fill([0.0, 40.0, 10.0, 48.0], [0, 255, 0, 255])];
+        let bled = drawn(&mut gpu, [8, 0, 8, 0], &sprites);
+        assert_eq!((px(&bled, 2, 2), px(&bled, 61, 2)), (vec![255, 0, 0], vec![255, 0, 0]), "the dimmer reaches the edges");
+        assert_eq!((px(&bled, 9, 44), px(&bled, 2, 44)), (vec![0, 255, 0], vec![255, 0, 0]), "the box stays in the frame");
+        // drawn small and scaled up (an iPhone's auto render scale), the views still reach the edges
+        gpu.render_scale = 0.5;
+        let low = drawn(&mut gpu, [8, 0, 8, 0], &[]);
+        assert_eq!((px(&low, 0, 2), px(&low, 63, 2)), (px(&bled_view, 32, 2), px(&bled_view, 32, 2)), "scaled, it runs on too");
+        gpu.render_scale = 1.0;
+        gpu.bleed = [0; 4];
     }
 
     /// The user, 2026-10-29: "on mobile my ragdoll is disappearing after a bit on ground". A posed

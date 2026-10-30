@@ -27,9 +27,23 @@
 //! of that shape inside the window, centred, bars round it — and since the 3D, the HUD, the menus and
 //! every split view are all drawn into that frame, all of them take its shape. `4:3` is the shell as
 //! it was before V24, and the television's display. `stretch` is opentennis's whole window, safe area
-//! and all; the shell has no safe area to keep clear of, so here it is the window's shape, as `auto`.
+//! and all: on a desktop, with no safe area to keep clear of, it is the window's shape, as `auto`.
+//!
+//! # A phone's safe area (P240)
+//!
+//! An iPhone's window runs under its notch or Dynamic Island and its home indicator. As opentennis's
+//! B608/B623 have it, the picture is drawn to the window's edges and only the HUD and the menus' text
+//! and buttons are kept in from them ([`phone_frame`]); the user's rule on top of opentennis's is
+//! that only the island's side is kept clear, never the home indicator's foot ([`kept_insets`]). The
+//! frame the shell lays out is that inset rect, and the renderer runs the views and the spanning
+//! backdrops on past it ([`game_render::gpu::Renderer::bleed`]). Stretch keeps nothing clear.
 
 use crate::split::Layout;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether the shell's frame is Stretch's, as the last [`Aspect::frame`] was asked: the phone's
+/// window reads it to stop keeping its safe area clear ([`kept_insets`]).
+static STRETCHED: AtomicBool = AtomicBool::new(false);
 
 /// What shape of frame a window is drawn at: `--aspect`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -91,7 +105,10 @@ impl Aspect {
 
     /// The frame a window of `window` pixels is drawn with at `scale` window pixels to a frame pixel.
     /// Never smaller than a pixel each way, so a window shrunk to nothing still has a frame to draw.
+    /// Asking it says which aspect the shell draws at to the phone's window ([`stretched`]), which
+    /// then gives the whole window, safe area and all, to Stretch.
     pub fn frame(self, window: (usize, usize), scale: usize) -> (usize, usize) {
+        STRETCHED.store(self == Aspect::Stretch, Ordering::Relaxed);
         match self.ratio() {
             None => ((window.0 / scale.max(1)).max(1), (window.1 / scale.max(1)).max(1)),
             Some(ratio) => fit_ratio(window, scale, ratio),
@@ -117,6 +134,44 @@ pub fn fit_ratio(window: (usize, usize), scale: usize, (across, down): (usize, u
         (w, w * down / across)
     };
     (w.max(1), h.max(1))
+}
+
+/// Whether the shell's frame is Stretch's, as of the last [`Aspect::frame`] (P240).
+#[allow(dead_code)]
+pub fn stretched() -> bool {
+    STRETCHED.load(Ordering::Relaxed)
+}
+
+/// The insets a phone's HUD and menus keep clear of (left, top, right, bottom, pixels), of the
+/// window's safe-area ones `safe` (P240): only the notch's or the Dynamic Island's side — the user's
+/// "cut off the island, not the home bar" — so the bottom's home indicator inset is dropped and the
+/// HUD and menus may sit over the home bar; none at all at Stretch.
+#[allow(dead_code)]
+pub fn kept_insets(safe: [u32; 4], stretch: bool) -> [u32; 4] {
+    match stretch {
+        true => [0; 4],
+        false => [safe[0], safe[1], safe[2], 0],
+    }
+}
+
+/// Where a phone's window of `size` pixels keeping `insets` clear (left, top, right, bottom) puts
+/// a `frame` of frame pixels at `scale` window pixels each (P240): the frame's rect (x, y, width,
+/// height), centred in what the insets leave — where the HUD and the menus' text and buttons go —
+/// and how far past it the picture runs on (left, top, right, bottom), to the window's edges along
+/// each axis the frame fills that room on: all round at Auto, under the island too, and not across
+/// the bars a fixed shape leaves.
+#[allow(dead_code)]
+pub fn phone_frame(size: (u32, u32), insets: [u32; 4], frame: (usize, usize), scale: usize) -> ([u32; 4], [u32; 4]) {
+    let [l, t, r, b] = insets;
+    let scale = scale.max(1) as u32;
+    let room = (size.0.saturating_sub(l + r).max(1), size.1.saturating_sub(t + b).max(1));
+    let (across, down) = ((frame.0 as u32 * scale).min(room.0), (frame.1 as u32 * scale).min(room.1));
+    let (x, y) = (l + (room.0 - across) / 2, t + (room.1 - down) / 2);
+    // Filled, but for the part of a frame pixel a scale leaves over.
+    let fills = |a: u32, room: u32| a + scale > room;
+    let bleed_x = if fills(across, room.0) { [x, size.0.saturating_sub(x + across)] } else { [0; 2] };
+    let bleed_y = if fills(down, room.1) { [y, size.1.saturating_sub(y + down)] } else { [0; 2] };
+    ([x, y, across, down], [bleed_x[0], bleed_y[0], bleed_x[1], bleed_y[1]])
 }
 
 /// Which of the original's two display aspects a frame stands for.
