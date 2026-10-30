@@ -1754,3 +1754,644 @@ pub fn travel_cofg(car: &Car, body: &mut crate::biplane::Body, last: &mut Vf, hu
     body.last_position = body.last_position.merge(Dest::XYZ, body.last_position.add(moved));
     *last = cofg;
 }
+
+// --- the car step (S149d) --------------------------------------------------------------------------
+
+/// The angle (rad, 5°) whose cosine two of the probe's normals must agree past before it stops asking
+/// the ground again.
+const PROBE_AGREE: f32 = f32::from_bits(0x3db2_b8c1);
+/// The most times the probe asks.
+const PROBE_TRIES: i32 = 5;
+/// Below this forward speed, off the gas, gravity's pull along the ground is held off.
+const ANTI_SLIDE_SPEED: f32 = 10.0;
+/// The preload winds up only climbing faster than this and going faster than [`PRELOAD_SPEED`].
+const PRELOAD_RISE: f32 = 5.0;
+const PRELOAD_SPEED: f32 = 30.0;
+/// The lean that arms the preload (forward of it) and fires it (back past its negative).
+const PRELOAD_LEAN: f32 = f32::from_bits(0x3f4c_cccd);
+/// Half the air's density: the wings' dynamic pressure per (ft/s)².
+const AIR: f32 = f32::from_bits(0x3a9b_c5c4);
+/// The air control works only faster than this.
+const AIR_CONTROL_SPEED: f32 = 10.0;
+/// The unroll and unyaw work with the stick inside this, and the car's up `y` above [`UPRIGHT`].
+const UNROLL_STICK: f32 = f32::from_bits(0x3dcc_cccd);
+const UPRIGHT: f32 = f32::from_bits(0x3eae_147b);
+/// Slower than this on the gas, touching something, the car counts as stuck.
+const STUCK_SPEED: f32 = 10.0;
+/// How near the map's edge throws the car.
+const EDGE_MARGIN: f32 = 150.0;
+
+/// One corner of the car: the tire's own state and the words its probe and suspension keep.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wheel {
+    pub s: TireState,
+    /// Where the axle's top hangs, in the car's frame.
+    pub mount: Vf,
+    /// The spin the engine (or the constructor) holds the wheel to.
+    pub top_wheel_speed: F,
+    /// The last ground normal the probe found (world), and it in the car's frame.
+    pub probe_normal: Vf,
+    pub car_normal: Vf,
+    /// The axle's drop from the mount to the bottom of the wheel, in the car's frame: the radius
+    /// down the normal's `yz`.
+    pub drop: Vf,
+    /// The axle's bottom against the centre of mass, in the car's frame (the hand-off's without it).
+    pub lever: Vf,
+    /// The axle's top and bottom in the world.
+    pub upper: Vf,
+    pub lower: Vf,
+    /// How many times this frame's probe asked the ground.
+    pub probes: i32,
+    /// The probe met the ground: the point and the unit normal it found.
+    pub solid: bool,
+    pub ground_point: Vf,
+    pub ground_normal: Vf,
+    /// The contact point's world velocity, the body's, and the body's in the car's frame.
+    pub point_velocity: Vf,
+    pub body_velocity: Vf,
+    pub local_velocity: Vf,
+    /// The tire's frame on the ground: right, up (the normal), forward along the steer.
+    pub frame: crate::math::Mat4,
+    /// A front tire of a car only its fronts touch: its force puts no moment on the body.
+    pub lone_front: bool,
+}
+
+/// What the car's step asks of whatever owns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CarEvent {
+    /// Near the map's edge: the edge throw, wreck reason 13.
+    Thrown,
+    /// Stuck on the gas for `MaxWreckTime`: the car is reset.
+    Reset,
+    /// A wrecked car that left the ground has come back down on it.
+    Unwreck,
+}
+
+/// The launch: the clutch's torque scale after a clutch drop, from the file's
+/// `MaxClutchTorqueScale` (less with speed up to `MaxClutchTorqueScaleSpeed`) back to 1 over
+/// `ClutchTorqueScaleTime`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Launch {
+    pub timer: F,
+    /// The scale the launch started at.
+    pub start: F,
+    pub time: F,
+    pub max_scale: F,
+    pub max_scale_speed: F,
+}
+
+/// The preload: a forward lean arms it, the time to a back lean winds it, and the back lean pushes
+/// the car up for `PreloadTime`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PreloadState {
+    /// It may wind up this frame.
+    pub ready: bool,
+    /// Pushing now, and armed by a forward lean.
+    pub active: bool,
+    pub armed: bool,
+    pub time: F,
+    /// The wind-up while armed; the push's time left while active.
+    pub timer: F,
+    pub min_time: F,
+    pub max_time: F,
+    pub max_preload: F,
+    /// The push (world), its `y` set by the pad word when it fires.
+    pub force: Vf,
+}
+
+/// A whole car on the ground: its body, controls, engine and four corners, and what its measure
+/// reads off them once a frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Machine {
+    pub body: crate::biplane::Body,
+    /// The body's weight (world).
+    pub gravity: Vf,
+    pub controls: Controls,
+    pub drivetrain: Drivetrain,
+    pub wheels: [Wheel; 4],
+    /// The centre of mass the last frame left ([`travel_cofg`]).
+    pub last_cofg: Vf,
+    /// A person drives (the class's `CofG`, not the AI's).
+    pub human: bool,
+    /// The driver's controller is a steering wheel.
+    pub steering_wheel: bool,
+    /// Wrecked, and (since) off the ground and clear of everything.
+    pub wrecked: bool,
+    pub wreck_lifted: bool,
+    /// The collision object touches something this frame.
+    pub touching: bool,
+    /// Touching something and none of the tires down.
+    pub airborne_touch: bool,
+    /// Time stuck on the gas.
+    pub stuck_time: F,
+    pub launch: Launch,
+    pub preload: PreloadState,
+    /// Two flags the measure passes along, the first cleared once the second has seen it.
+    pub latch: bool,
+    pub latched: bool,
+    /// Any tire down, and last frame's.
+    pub grounded: bool,
+    pub was_grounded: bool,
+    /// The body's speed, its velocity in the car's frame, and a grounded tire's view of it.
+    pub ground_speed: F,
+    pub velocity: Vf,
+    pub ground_velocity: Vf,
+    /// The rates in the world, the angle of attack and the side slip.
+    pub world_rates: Vf,
+    pub alpha: F,
+    pub side_slip: F,
+    pub euler: Vf,
+    /// The car's frame at its origin (the body's position less the centre of mass), and its
+    /// forward and up rows.
+    pub matrix: crate::math::Mat4,
+    pub forward: Vf,
+    pub up: Vf,
+    /// What the last measure asked for.
+    pub event: Option<CarEvent>,
+}
+
+impl Wheel {
+    /// The axle's top in the world: the mount against the centre of mass.
+    fn upper_point(&self, body: &crate::biplane::Body) -> Vf {
+        use crate::contact::{minus, plus};
+        plus(crate::chassis::turn(body.quat, minus(self.mount, body.cofg)), body.position)
+    }
+
+    /// The axle's bottom: the mount and drop against the centre of mass, in the world.
+    fn lower_point(&mut self, body: &crate::biplane::Body) {
+        use crate::contact::{minus, plus};
+        self.lever = minus(plus(self.mount, self.drop), body.cofg);
+        self.lower = plus(crate::chassis::turn(body.quat, self.lever), body.position);
+    }
+
+    /// The probe, once a frame: the axle's bottom along last frame's normal, and the ground under it,
+    /// asked again from the new normal until two agree within 5° or it has asked five times. The
+    /// wheel is solid on ground at or above its bottom.
+    pub fn probe(&mut self, tire: &Tire, body: &crate::biplane::Body, world: &mut impl crate::world::World, curve: &CurveTable) {
+        use crate::contact::{dot, scaled, unit};
+        let agree = curve.coarse(F(PROBE_AGREE)).0;
+        self.solid = false;
+        self.upper = self.upper_point(body);
+        self.probes = 0;
+        let mut d = F::ZERO;
+        let (mut point, mut normal) = (self.lower, self.probe_normal);
+        while d < agree && self.probes < PROBE_TRIES {
+            self.car_normal = crate::biplane::unturn(body.quat, self.probe_normal);
+            let dir = unit(Vf::new(0.0, self.car_normal.y(), self.car_normal.z(), 1.0));
+            self.drop = scaled(dir, -tire.radius);
+            self.lower_point(body);
+            (point, normal) = world.ground(self.lower);
+            if let Some(surface) = world.wheel_surface(self.lower) {
+                self.s.surface = usize::from(surface);
+            }
+            normal = unit(normal);
+            d = dot(normal, self.probe_normal);
+            self.probe_normal = normal;
+            self.probes += 1;
+        }
+        if !(point.y() < self.lower.y()) {
+            self.solid = true;
+            self.ground_point = point;
+            self.ground_normal = normal;
+        }
+    }
+
+    /// The contact point's velocity: the body's plus the spin's about the centre, and the body's in
+    /// its own frame.
+    fn contact_velocity(&mut self, body: &crate::biplane::Body) {
+        use crate::contact::{minus, plus};
+        let q = body.quat;
+        let local = crate::biplane::unturn(q, minus(self.s.contact, body.position));
+        let r = body.rates;
+        let spin = r.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(r, local), local, r));
+        let pv = plus(body.velocity, crate::chassis::turn(q, spin));
+        self.point_velocity = minus(pv, UNIT_W);
+        self.body_velocity = minus(body.velocity, UNIT_W);
+        self.local_velocity = crate::biplane::unturn(q, self.body_velocity);
+    }
+
+    /// The suspension, each substep: the contact on the probe's ground, the body pushed out of it
+    /// when the tire bottoms out, and the spring's load at the contact. A wheel in the air carries the
+    /// load handed it, its velocity from the axle's bottom without the centre of mass.
+    pub fn suspension(&mut self, tire: &Tire, body: &mut crate::biplane::Body, h: F) {
+        use crate::contact::{dot, plus, scaled};
+        self.s.compression = F::ZERO;
+        self.s.grounded = false;
+        if self.solid {
+            self.upper = self.upper_point(body);
+            self.lower_point(body);
+            let ground = Ground { point: self.ground_point, normal: self.ground_normal, solid: true };
+            let push = tire.contact(&mut self.s, (self.upper, self.lower), Some(&ground));
+            if self.s.grounded {
+                self.contact_velocity(body);
+            }
+            let n = self.ground_normal;
+            if let Some(push) = push {
+                body.position = plus(body.position, scaled(n, push));
+                let into = dot(self.body_velocity, n).min(F::ZERO);
+                body.add_velocity(scaled(n, -into));
+                self.contact_velocity(body);
+            }
+            if self.s.grounded {
+                let load = tire.spring(&mut self.s, self.point_velocity, n);
+                body.add_force_at(scaled(n, load), self.s.contact, Vf::splat(1.0));
+            }
+        }
+        if !self.s.grounded {
+            if let Some(load) = self.s.handoff {
+                self.s.load = load;
+                self.lever = plus(self.mount, self.drop);
+                self.lower = crate::chassis::turn(body.quat, self.lever);
+                self.contact_velocity(body);
+            } else {
+                self.s.load = F::ZERO;
+                self.point_velocity = UNIT_W;
+            }
+        }
+        tire.settle(&mut self.s, h);
+    }
+
+    /// The tire's forces, each substep after the roll: a grounded tire's frame along its steer on
+    /// the ground, the contact's velocity in it, [`Tire::forces`], and the force back into the world
+    /// on the body (with its moment, unless only the fronts touch).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forces(
+        &mut self,
+        tire: &Tire,
+        body: &mut crate::biplane::Body,
+        h: F,
+        steer: F,
+        brake: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+    ) {
+        use crate::contact::minus;
+        use ps2_float::Field;
+        let q = body.quat;
+        let mut velocity = UNIT_W;
+        if self.s.grounded {
+            let angle = steer * tire.max_steer_angle;
+            let forward = if angle.abs() > 0.0 {
+                let (cos, sin) = curve.coarse(angle);
+                crate::chassis::turn(q, Vf::new(sin.0, 0.0, cos.0, 0.0))
+            } else {
+                crate::chassis::turn(q, Vf::new(0.0, 0.0, 1.0, 1.0))
+            };
+            self.frame = crate::math::basis(UNIT_W, forward, self.ground_normal, true, false);
+            let m = &self.frame.0;
+            let col = |k: usize| Vf::new(m[0][k], m[1][k], m[2][k], 0.0);
+            let v = self.point_velocity;
+            let acc = Vf::madd(col(0).mul(v.bc(Field::X)), col(1), v.bc(Field::Y));
+            velocity = v.merge(Dest::XYZ, Vf::madd(acc, col(2), v.bc(Field::Z)));
+        }
+        let normal = (F(self.car_normal.x()), F(self.car_normal.y()));
+        tire.forces(&mut self.s, h, Some(brake), Some(steer), self.top_wheel_speed, velocity, normal, acos, curve);
+        if !self.s.grounded {
+            return;
+        }
+        let m = &self.frame.0;
+        let f = self.s.force;
+        let acc = Vf::madd(m[0].mul(f.bc(Field::X)), m[1], f.bc(Field::Y));
+        let world = f.merge(Dest::XYZ, Vf::madd(acc, m[2], f.bc(Field::Z)));
+        body.add_force(world);
+        if !self.lone_front {
+            let lever = minus(self.s.contact, body.position);
+            let arm = Vf::opmsub(Vf::opmula(lever, world), world, lever);
+            body.add_moment_local(crate::biplane::unturn(q, arm));
+        }
+    }
+}
+
+impl Machine {
+    /// The engine's four drive slots' tires, as the drivetrain reads them.
+    fn drive_tires(&self, car: &Car) -> [DriveTire; 4] {
+        car.engine.driven.map(|slot| match slot {
+            Some(k) => {
+                let w = &self.wheels[k];
+                DriveTire {
+                    contact: w.s.grounded,
+                    spin: w.s.spin,
+                    slip_ratio: w.s.slip_ratio,
+                    compression: w.s.compression,
+                    max_compression: car.tires[k].max_compression,
+                    drive_torque: w.s.torque,
+                    top_wheel_speed: w.top_wheel_speed,
+                }
+            }
+            None => DriveTire::default(),
+        })
+    }
+
+    /// What the drivetrain wrote back: each driven tire's torque and top speed.
+    fn put_drive_tires(&mut self, car: &Car, tires: &[DriveTire; 4]) {
+        for (slot, t) in car.engine.driven.iter().zip(tires) {
+            if let Some(k) = *slot {
+                self.wheels[k].s.torque = t.drive_torque;
+                self.wheels[k].top_wheel_speed = t.top_wheel_speed;
+            }
+        }
+    }
+
+    /// One frame of the car: the physics world's step on its one body, with the car's three listeners.
+    /// The controls' input (the pedals, stick and pad word) is set before.
+    pub fn step(
+        &mut self,
+        car: &Car,
+        world: &mut impl crate::world::World,
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+    ) {
+        let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
+        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise });
+    }
+
+    /// Once a frame before the substeps: the controls, the centre of mass's travel, and the probes.
+    pub fn preforce(&mut self, car: &Car, world: &mut impl crate::world::World, dt: F, curve: &CurveTable) {
+        self.body.clear_shock_peak();
+        let reversing = self.drivetrain.reverse;
+        let speed = F(self.velocity.z());
+        if let Some(r) = self.controls.step(car, dt, self.steering_wheel, speed, self.ground_speed, reversing) {
+            let mut tires = self.drive_tires(car);
+            self.drivetrain.set_reverse(r == Reverse::In, &mut tires);
+            self.put_drive_tires(car, &tires);
+        }
+        for w in &mut self.wheels[REAR_LEFT..] {
+            w.s.friction_scale = self.controls.rear_friction;
+        }
+        travel_cofg(car, &mut self.body, &mut self.last_cofg, self.human, self.controls.lean);
+        for w in &mut self.wheels {
+            w.solid = false;
+        }
+        for (w, tire) in self.wheels.iter_mut().zip(&car.tires) {
+            w.probe(tire, &self.body, world, curve);
+        }
+        let front = self.wheels[FRONT_LEFT].solid || self.wheels[FRONT_RIGHT].solid;
+        let rear = self.wheels[REAR_LEFT].solid || self.wheels[REAR_RIGHT].solid;
+        for w in &mut self.wheels[..REAR_LEFT] {
+            w.lone_front = front && !rear;
+        }
+    }
+
+    /// Each substep: gravity, the anti-slide, the preload, the launch, the engine, the four tires
+    /// (the rears handed the fronts' load) and the air.
+    pub fn force(&mut self, car: &Car, h: F, acos: &AcosTable, curve: &CurveTable, noise: &mut impl FnMut(F) -> F) {
+        self.body.push_gravity(self.gravity);
+        self.anti_slide();
+        self.preload_step(h);
+        self.launch_step(h);
+        let mut tires = self.drive_tires(car);
+        let c = &self.controls;
+        let pedals = Pedals { throttle: c.throttle, clutch: c.engaged_clutch, brake: c.rear_brake };
+        self.drivetrain.step(pedals, &mut tires, h, curve, noise);
+        self.put_drive_tires(car, &tires);
+        for k in [FRONT_LEFT, FRONT_RIGHT] {
+            self.tire_step(car, k, h, acos, curve);
+        }
+        let handoff = hand_off(&self.wheels[FRONT_LEFT].s, &self.wheels[FRONT_RIGHT].s);
+        for k in [REAR_LEFT, REAR_RIGHT] {
+            self.wheels[k].s.handoff = handoff;
+            self.tire_step(car, k, h, acos, curve);
+        }
+        self.aero(car);
+    }
+
+    /// One tire's substep: the suspension, the roll and brake, the forces.
+    fn tire_step(&mut self, car: &Car, k: usize, h: F, acos: &AcosTable, curve: &CurveTable) {
+        let tire = &car.tires[k];
+        let c = &self.controls;
+        let (steer, brake) = if k < REAR_LEFT { (c.steer, c.front_brake) } else { (c.rear_steer, c.rear_brake) };
+        let w = &mut self.wheels[k];
+        w.suspension(tire, &mut self.body, h);
+        tire.roll(&mut w.s, Some(brake));
+        w.forces(tire, &mut self.body, h, steer, brake, acos, curve);
+    }
+
+    /// Slow and off the gas on the ground, gravity's pull along the ground is pushed back against,
+    /// the share along the car's heading too while braking.
+    fn anti_slide(&mut self) {
+        use crate::contact::{dot, minus, scaled};
+        let speed = F(self.velocity.z());
+        if !self.grounded || self.controls.throttle != 0.0 || !(speed.abs() < ANTI_SLIDE_SPEED) {
+            return;
+        }
+        let n = self.wheels[FRONT_LEFT].ground_normal;
+        let g = self.gravity;
+        let along = minus(g, scaled(n, dot(n, g)));
+        let v = self.forward;
+        let mut heading = minus(v, scaled(n, dot(v, n)));
+        let len2 = dot(heading, heading);
+        if len2 == 0.0 {
+            heading = UNIT_W;
+        } else {
+            let r = F::ONE.rsqrt(len2);
+            heading = Vf::new(
+                (F(heading.x()) * r).0,
+                (F(heading.y()) * r).0,
+                (F(heading.z()) * r).0,
+                heading.w(),
+            );
+        }
+        let ahead = scaled(heading, dot(heading, along));
+        let rest = minus(along, ahead);
+        let s = crate::motion::remap(speed, F::ZERO, F(ANTI_SLIDE_SPEED), F::ONE, F::ONE);
+        let mut force = scaled(rest, -s);
+        if self.controls.brake != 0.0 || self.controls.hand_brake != 0.0 {
+            force = minus(force, ahead);
+        }
+        self.body.add_force(force);
+    }
+
+    /// The preload, each substep.
+    fn preload_step(&mut self, h: F) {
+        if self.wrecked {
+            return;
+        }
+        let p = &mut self.preload;
+        if p.active {
+            p.timer = p.timer - h;
+            if !(p.timer <= 0.0) {
+                self.body.add_force(p.force);
+            } else {
+                p.active = false;
+            }
+            return;
+        }
+        if !self.grounded
+            || F(self.body.velocity.y()) <= PRELOAD_RISE
+            || F(self.velocity.z()) <= PRELOAD_SPEED
+            || self.controls.brake != 0.0
+        {
+            p.ready = false;
+            return;
+        }
+        p.ready = true;
+        let lean = self.controls.lean;
+        if !(lean <= PRELOAD_LEAN) {
+            p.armed = true;
+            p.timer = F::ZERO;
+        } else if !(lean < -PRELOAD_LEAN) {
+            if p.armed {
+                p.timer = p.timer + h;
+            }
+        } else if p.armed {
+            let f = self.controls.pad_word.abs();
+            p.force.0[1] = crate::motion::remap(f, p.min_time, p.max_time, F::ZERO, p.max_preload).0;
+            p.timer = p.time;
+            p.armed = false;
+            p.active = true;
+        }
+    }
+
+    /// The launch, each substep: the clutch let out from standing, the converter's boost eases from
+    /// the launch's start back to 1.
+    fn launch_step(&mut self, h: F) {
+        let l = &mut self.launch;
+        let clutch = self.controls.clutch;
+        if clutch == 1.0 {
+            l.timer = F::ZERO;
+            return;
+        }
+        if clutch != 0.0 || !(l.timer <= l.time) {
+            return;
+        }
+        if l.timer == 0.0 {
+            l.start = crate::motion::remap(F(self.velocity.z()), F::ZERO, l.max_scale_speed, l.max_scale, F::ONE);
+        }
+        l.timer = l.timer + h;
+        self.drivetrain.launch_boost = crate::motion::remap(l.timer, F::ZERO, l.time, l.start, F::ONE);
+    }
+
+    /// The air, each substep: the wings' lift and drag, and off the ground the air control —
+    /// the stick's moment, the damping, the unroll and unyaw, and the brakes' gyro.
+    fn aero(&mut self, car: &Car) {
+        use crate::contact::scaled;
+        if self.wrecked {
+            return;
+        }
+        let a = &car.aero;
+        let gs = self.ground_speed;
+        if !(F(self.velocity.z()) <= 0.0) {
+            let q = F(AIR) * gs * gs;
+            for wing in a.wings.iter().take(a.number_of_wings.max(0) as usize) {
+                let cl = wing.lift_slope * (self.alpha + wing.angle_of_attack);
+                let cd = wing.basic_drag + cl * (cl * wing.induced_drag);
+                let force = Vf::new(0.0, (a.aero_surface_area * (q * cl)).0, (a.aero_surface_area * (-q * cd)).0, 1.0);
+                let p = wing.position;
+                let m = p.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(p, force), force, p));
+                self.body.add_moment_local(m);
+                self.body.add_force(crate::chassis::turn(self.body.quat, force));
+            }
+        }
+        if self.grounded || self.touching || gs <= AIR_CONTROL_SPEED {
+            return;
+        }
+        let c = &self.controls;
+        let cm = a.airborne_control_moment;
+        let r = self.body.rates;
+        let m = Vf::new((F(cm.x()) * c.lean).0, (F(cm.y()) * c.stick).0, (F(cm.z()) * c.stick).0, 1.0);
+        let mut m = m.merge(Dest::XYZ, m.sub(scaled(r, a.airborne_damping)));
+        if c.stick.abs() < UNROLL_STICK && !(F(self.up.y()) <= UPRIGHT) {
+            m.0[2] = (F(m.z()) + a.unroll_torque * (a.unroll_gain * F(self.euler.z()) - F(r.z()))).0;
+            m.0[1] = (F(m.y()) + a.unyaw_torque * (a.unyaw_gain * self.side_slip - F(r.y()))).0;
+        }
+        if c.front_brake != 0.0 || c.rear_brake != 0.0 {
+            m.0[0] = (F(m.x()) + a.brake_gyro_torque).0;
+        }
+        self.body.add_moment_local(m);
+    }
+
+    /// Once a frame after the substeps: the yaw-rate hold, the gear change, the wreck and stuck
+    /// timer, and the car's speeds, angles and frame.
+    pub fn measure(&mut self, car: &Car, world: &impl crate::world::World, dt: F, acos: &AcosTable) {
+        use crate::contact::{dot, minus};
+        hold_yaw_rate(&mut self.body.rates, self.controls.yaw_rate_limit);
+        let mut tires = self.drive_tires(car);
+        self.drivetrain.shift(self.controls.engaged_clutch, dt, &mut tires);
+        self.put_drive_tires(car, &tires);
+        self.event = self.wreck_timer(car, world, dt);
+        self.was_grounded = self.grounded;
+        self.grounded = self.wheels.iter().any(|w| w.s.grounded);
+        let b = &self.body;
+        let q = b.quat;
+        self.ground_speed = dot(b.velocity, b.velocity).sqrt();
+        self.velocity = crate::biplane::unturn(q, b.velocity);
+        self.ground_velocity = self.wheels.iter().find(|w| w.s.grounded).map_or(self.velocity, |w| w.local_velocity);
+        self.world_rates = crate::chassis::turn(q, b.rates);
+        let v = self.velocity;
+        self.alpha = crate::biplane::flow_angle(F(v.z()), F(v.y()), acos);
+        self.side_slip = crate::biplane::flow_angle(F(v.z()), F(v.x()), acos);
+        self.euler = crate::math::quat_to_euler(q, acos);
+        let origin = minus(b.position, crate::chassis::turn(q, b.cofg));
+        self.matrix = crate::math::quat_to_mat4(q, origin);
+        self.forward = self.forward.merge(Dest::XYZ, self.matrix.0[2]);
+        self.up = self.up.merge(Dest::XYZ, self.matrix.0[1]);
+        self.airborne_touch = self.touching && !self.grounded;
+        if self.latch && self.latched {
+            self.latch = false;
+        }
+        self.latched = self.latch;
+    }
+
+    /// A wrecked car waits to leave the ground and come back; a whole one near the map's edge is
+    /// thrown, and one stuck on the gas against something for `MaxWreckTime` is reset.
+    fn wreck_timer(&mut self, car: &Car, world: &impl crate::world::World, dt: F) -> Option<CarEvent> {
+        use crate::contact::dot;
+        if self.wrecked {
+            if !self.grounded && !self.touching {
+                self.wreck_lifted = true;
+            }
+            return (self.wreck_lifted && (self.grounded || self.touching)).then_some(CarEvent::Unwreck);
+        }
+        if world.area().is_some_and(|a| a.outside(self.body.position, F(EDGE_MARGIN))) {
+            return Some(CarEvent::Thrown);
+        }
+        let v = self.ground_velocity;
+        if self.controls.gas <= 0.0 || !(dot(v, v).sqrt() < STUCK_SPEED) || !self.touching {
+            self.stuck_time = F::ZERO;
+            return None;
+        }
+        self.stuck_time = self.stuck_time + dt;
+        if !(self.stuck_time <= car.max_wreck_time) {
+            self.stuck_time = F::ZERO;
+            return Some(CarEvent::Reset);
+        }
+        None
+    }
+}
+
+/// The car's listeners on the physics world: one body, and one of each list but the constraints.
+struct Stepping<'a, W, N> {
+    m: &'a mut Machine,
+    car: &'a Car,
+    world: &'a mut W,
+    acos: &'a AcosTable,
+    curve: &'a CurveTable,
+    noise: &'a mut N,
+}
+
+impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Stepping<'_, W, N> {
+    fn count(&self, list: crate::biplane::List) -> i32 {
+        i32::from(list != crate::biplane::List::Constraints)
+    }
+    fn preforce(&mut self, _: i32, dt: F) {
+        self.m.preforce(self.car, self.world, dt, self.curve);
+    }
+    fn force(&mut self, _: i32, h: F) {
+        self.m.force(self.car, h, self.acos, self.curve, self.noise);
+    }
+    fn enabled(&self, _: i32) -> bool {
+        self.m.body.enabled
+    }
+    fn integrate(&mut self, _: i32, h: F) {
+        self.m.body.integrate(h);
+    }
+    fn end_substep(&mut self, _: i32) {
+        self.m.body.end_substep();
+    }
+    fn constrain(&mut self, _: i32, _: bool) {}
+    fn post(&mut self, _: i32, dt: F) {
+        self.m.measure(self.car, self.world, dt, self.acos);
+    }
+}
