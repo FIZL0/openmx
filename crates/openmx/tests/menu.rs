@@ -2331,11 +2331,11 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
     }
     assert_eq!(m.join.views(), vec![0, 2]);
     assert_eq!(m.screen(), Some(Screen::Join));
-    // Start from the joined pad: the split layout, the original's two for a pair. Side by side.
+    // Start from the joined pad: the split layout, the original's two for a pair. Side by side, which
+    // it opens on with nothing chosen (P239).
     tap_device(&mut m, &mut rd, &all, 2, Control::Start);
     assert_eq!(m.screen(), Some(Screen::Split));
     assert_eq!(menu::layouts(2), vec![split::Layout::Stacked, split::Layout::SideBySide]);
-    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
     // The ride setup lists a machine for each of the two.
@@ -2353,7 +2353,7 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
     assert!(views.iter().all(|v| (v.w, v.h) == (320, 448)), "{views:?}");
     // The pick is the file's, so the next local game of two opens on it.
     assert_eq!(m.settings.split, split::Split::SideBySide);
-    assert!(m.settings.text().contains("split = v"));
+    assert!(m.settings.text().contains("split_screen = v"));
     assert_eq!(Settings::parse(&m.settings.text()), m.settings);
     assert!(m.riding());
 
@@ -4440,7 +4440,10 @@ fn a_settings_file_from_before_the_redo_reads_as_the_same_settings() {
     // Every line but the ride setup's machines, which went with Start On (P177).
     let machines = "machines = biplane bike biplane bike bike bike bike biplane\n";
     assert!(old.contains(machines));
-    assert_eq!(want.text(), old.replace(machines, ""), "the redo writes an old file's settings as they were");
+    // And its `split`, which P239 writes as `split_screen`: the old line could not tell a choice from
+    // the old default, so it is dropped and the default, side by side, written in its place.
+    let old = old.replace(machines, "").replace("split = v\n", "split_screen = v\n");
+    assert_eq!(want.text(), old, "the redo writes an old file's settings as they were");
     // The original's few keys from P36 alone.
     let p36 = Settings::parse("name = Rider\noverlay = on\nwrecks = on\n");
     assert_eq!(p36, Settings { name: "Rider".into(), ..Settings::default() });
@@ -6209,7 +6212,7 @@ fn players_drop_into_a_running_freeride_and_leave_it_and_the_others_ride_on() {
     assert_eq!(r.ids(), vec![0, 1]);
     assert_eq!(r.m.riders, 2);
     assert!(r.rides[1].1.rider.ghost.shown() < 1.0, "the joiner is not see-through");
-    assert_eq!(r.views(), (split::Layout::Stacked, 2));
+    assert_eq!(r.views(), (split::Layout::SideBySide, 2), "no split chosen: side by side (P239)");
     assert!(r.garages[1].plane.is_some(), "the lot parks the joiner no plane");
     assert_eq!(parked(&r.lot, 0), first_bay, "the first player's plane moved");
     // The same controller again joins nobody: it is riding.
@@ -6247,7 +6250,7 @@ fn players_drop_into_a_running_freeride_and_leave_it_and_the_others_ride_on() {
     assert!(r.m.riding(), "the ride goes on for the others");
     assert_eq!(r.ids(), vec![0, 2]);
     assert_eq!(r.m.party().map(|p| p.devices.clone()), Some(vec![0, 2]));
-    assert_eq!(r.views(), (split::Layout::Stacked, 2));
+    assert_eq!(r.views(), (split::Layout::SideBySide, 2));
     assert_eq!(r.m.note.as_deref(), Some("Player 2 left the ride."));
     for _ in 0..30 {
         r.frame(&[]);
@@ -6351,7 +6354,7 @@ fn a_lone_rider_on_any_pad_seat_is_joined_by_another_and_the_cue_says_how() {
     let acts = r.tap(1, Control::Cross);
     assert!(acts.contains(&Act::Join(1)), "{acts:?}");
     assert_eq!(r.ids(), vec![0, 1]);
-    assert_eq!(r.views(), (split::Layout::Stacked, 2), "the split lays out again for two");
+    assert_eq!(r.views(), (split::Layout::SideBySide, 2), "the split lays out again for two, side by side (P239)");
     assert!(!r.m.join_cue(&[]), "seated, the cue is gone");
     assert!(r.m.join_cue(&[2]), "a third pad in: the cue again");
     r.tap(2, Control::Cross);
@@ -6386,7 +6389,7 @@ fn a_lone_rider_on_any_pad_seat_is_joined_by_another_and_the_cue_says_how() {
     assert!(acts.contains(&Act::Join(0)), "{acts:?}");
     assert_eq!(r.ids(), vec![1, 0], "1P stays on pad seat 1, the joiner rides pad seat 0");
     assert_eq!(r.m.ride_devices(), [1, 0]);
-    assert_eq!(r.views(), (split::Layout::Stacked, 2));
+    assert_eq!(r.views(), (split::Layout::SideBySide, 2));
     for _ in 0..10 {
         r.frame(&[]);
     }
@@ -7478,4 +7481,23 @@ fn the_preset_row_sets_the_graphics_rows() {
     assert!(m.settings.video_auto);
     assert_eq!(row(&m).value, "Auto");
     assert_eq!(Look::of(&m.settings), menu::video::pick(&menu::video::Device::here()));
+}
+
+#[test]
+fn a_pair_with_no_split_chosen_rides_side_by_side() {
+    // P239: no choice made is the original's v, one view beside the other, and so is what is written.
+    let fresh = Settings::default();
+    assert_eq!(fresh.split, split::Split::SideBySide);
+    assert!(fresh.text().contains("split_screen = v"), "{}", fresh.text());
+    assert!(!fresh.text().contains("split = h"));
+    // A file from before P239 wrote the old default `split = h` whether or not it was chosen: dropped.
+    assert_eq!(Settings::parse("split = h\n").split, split::Split::SideBySide);
+    // A choice of h written since stays h, and is written back as h.
+    let chosen = Settings::parse("split_screen = h\n");
+    assert_eq!(chosen.split, split::Split::Stacked);
+    assert_eq!(Settings::parse(&chosen.text()).split, split::Split::Stacked);
+    // A mid-ride join or a local game of two with nothing chosen lays the two out side by side.
+    let (m, acts) = local_game(2, &[1]);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    assert_eq!(m.party().map(|p| p.layout()), Some(split::Layout::SideBySide));
 }

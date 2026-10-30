@@ -1517,7 +1517,11 @@ impl Settings {
                 // The ride setup's machine a seat (P41), gone with Start On (P177): every ride starts
                 // on the bike, so an old file's line loads and is dropped.
                 "machines" => {}
-                "split" => s.split = Split::parse(v).unwrap_or(s.split),
+                // A file from before P239 always wrote `split`, the old default `h` too, so its line
+                // cannot tell a choice from the default: it loads and is dropped, and the pair rides
+                // side by side until a choice is written as `split_screen`.
+                "split" => {}
+                "split_screen" => s.split = Split::parse(v).unwrap_or(s.split),
                 "music" if !v.is_empty() => s.music = v.to_string(),
                 "music_volume" => s.music_volume = level(v, s.music_volume),
                 "effects_volume" => s.effects_volume = level(v, s.effects_volume),
@@ -1637,7 +1641,7 @@ impl Settings {
 
     pub fn text(&self) -> String {
         format!(
-            "# openmx's front end (P36)\nname = {}\noverlay = {}\nspeedometer = {}\nwrecks = {}\ntrack = {}\nsplit = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\nfolder_volume = {}\ncrowd_volume = {}\nengine_volume = {}\nmenu_volume = {}\nmix = {}\ncustom = {}\ngraphics = {}\nrender_scale = {}\n",
+            "# openmx's front end (P36)\nname = {}\noverlay = {}\nspeedometer = {}\nwrecks = {}\ntrack = {}\nsplit_screen = {}\nmusic = {}\nmusic_volume = {}\neffects_volume = {}\nfolder_volume = {}\ncrowd_volume = {}\nengine_volume = {}\nmenu_volume = {}\nmix = {}\ncustom = {}\ngraphics = {}\nrender_scale = {}\n",
             self.name,
             self.overlay.word(),
             self.speedometer.word(),

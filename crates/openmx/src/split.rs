@@ -30,13 +30,14 @@
 
 use game_render::raster::Frame;
 
-/// How two players share the screen, which the original lets the player choose: `--split`.
+/// How two players share the screen, which the original lets the player choose: `--split`. With no
+/// choice made, a pair rides side by side (user, 2026-10-30, P239).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Split {
     /// The original's layout 1: one view above the other.
-    #[default]
     Stacked,
     /// The original's layout 2: one view beside the other.
+    #[default]
     SideBySide,
 }
 
@@ -182,6 +183,14 @@ mod tests {
 
     /// The original's two splits, on its own frame: halves by the shift, the first on top or on the
     /// left — exactly the four calls its setup makes to place them.
+    #[test]
+    fn a_pair_with_no_split_chosen_is_side_by_side() {
+        // P239: nothing chosen is the original's v; `--split h` still stacks the two.
+        assert_eq!(Layout::for_players(2, Split::default()), Ok(Layout::SideBySide));
+        assert_eq!(Layout::for_players(2, Split::parse("h").unwrap()), Ok(Layout::Stacked));
+        assert_eq!(Layout::for_players(2, Split::parse("v").unwrap()), Ok(Layout::SideBySide));
+    }
+
     #[test]
     fn the_two_splits_are_the_originals_halves() {
         assert_eq!(
