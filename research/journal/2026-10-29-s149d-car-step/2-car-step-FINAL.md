@@ -1,4 +1,4 @@
-# 2 — the whole car step (PART)
+# 2 — the whole car step (FINAL)
 
 Task S149d. 2026-10-29. Builds on part 1 (controls, CofG travel, yaw hold) and S149c's drivetrain,
 now on main.
