@@ -154,6 +154,37 @@ pub(super) fn apply_wgsl() -> String {
     )
 }
 
+/// A world's ground shader's function that lays the meshes over `frame` at the world point `p` (V115),
+/// [`apply_wgsl`]'s mix of the three targets read with the gradients `gx` and `gy` of `p` across the
+/// screen, since a world's map's block runs in non-uniform control flow.
+pub(super) fn over_wgsl() -> String {
+    let f = |v: f32| format!("{v:?}");
+    format!(
+        "fn mesh_over(p: vec2f, gx: vec2f, gy: vec2f, frame: vec4f) -> vec4f {{
+  let un = (p - mesh_at.near.xy) * mesh_at.near.z;
+  let um = (p - mesh_at.mid.xy) * mesh_at.mid.z;
+  let uf = (p - mesh_at.far.xy) * mesh_at.far.z;
+  let n = textureSampleGrad(mesh_near, mesh_smp, un, gx * mesh_at.near.z, gy * mesh_at.near.z);
+  let m = textureSampleGrad(mesh_mid, mesh_smp, um, gx * mesh_at.mid.z, gy * mesh_at.mid.z);
+  let fa = textureSampleGrad(mesh_far, mesh_smp, uf, gx * mesh_at.far.z, gy * mesh_at.far.z);
+  let in_near = all(un > vec2f(0.001)) && all(un < vec2f(0.999));
+  let in_mid = all(um > vec2f(0.001)) && all(um < vec2f(0.999));
+  let in_far = all(uf >= vec2f(0.0)) && all(uf <= vec2f(1.0));
+  let d = length(p - view.eye.xz);
+  let to_mid = select(1.0, smoothstep({n0}, {n1}, d), in_near);
+  let to_far = select(1.0, smoothstep({m0}, {m1}, d), in_mid);
+  let rest = mix(m, select(vec4f(0.0, 0.0, 0.0, 1.0), fa, in_far), to_far);
+  let mesh = mix(n, rest, to_mid);
+  return vec4f(frame.rgb * mesh.a + mesh.rgb * 255.0, frame.a);
+}}
+",
+        n0 = f(NEAR_FADE[0]),
+        n1 = f(NEAR_FADE[1]),
+        m0 = f(MID_FADE[0]),
+        m1 = f(MID_FADE[1]),
+    )
+}
+
 /// The bind group layout entries of the ground's group 2, [`WGSL_BINDINGS`].
 fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 5] {
     [

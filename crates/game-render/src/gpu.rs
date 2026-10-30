@@ -1664,6 +1664,31 @@ fn world_splat_layers<'a>(w: &'a WorldPaint, packed: &[Option<Packed>]) -> (Vec<
     (layers, firsts)
 }
 
+/// The maps of a world whose roads and ruts [`world_meshes`] joins (V115): each packed disc map with
+/// a sharp splat (MD35) and screen-space meshes, by its index in the world.
+pub fn world_mesh_tiles(w: &WorldPaint, packed: &[Option<Packed>]) -> Vec<usize> {
+    w.tiles
+        .iter()
+        .zip(packed)
+        .enumerate()
+        .filter(|(_, (t, at))| at.is_some() && t.sharp().is_some_and(|s| s.splat.meshes.is_some()))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Every disc map's screen-space meshes in a world as one set (V115), each moved by its map's offset,
+/// as [`Renderer::set_ground_streamed`] draws them round each eye; `None` for a world with none.
+pub fn world_meshes(w: &WorldPaint, packed: &[Option<Packed>]) -> Option<crate::ground_mesh::GroundMeshes> {
+    let tiles = world_mesh_tiles(w, packed);
+    crate::ground_mesh::GroundMeshes::joined(tiles.iter().filter_map(|&i| Some((w.tiles[i].sharp()?.splat.meshes.as_ref()?, w.tiles[i].at))))
+}
+
+/// How many textures a world's ground binds in its group 1: the light map, the first page array, the
+/// leaves, the details, the other page arrays and the splat layers.
+fn world_textures(w: &WorldPaint, packed: &[Option<Packed>]) -> usize {
+    3 + w.array_sizes(packed).len().max(1) + usize::from(world_splat_array(w, packed).is_some())
+}
+
 /// The array of a world's disc maps' splat layers as [`Renderer::set_ground_streamed`] uploads it
 /// (MD35), or `None` for a world with no disc map on the GPU.
 pub fn world_splat_array(w: &WorldPaint, packed: &[Option<Packed>]) -> Option<ArrayShape> {
@@ -2580,7 +2605,9 @@ impl Renderer {
         let layers: &[Texture] = paint.map_or(&[], |p| &p.textures);
         let max = self.device.limits().max_sampled_textures_per_shader_stage as usize;
         // The roads and ruts painted in after the passes (V67) are two more.
-        let meshes = paint.and_then(|p| p.meshes.as_ref()).filter(|_| pages.is_none() && world.is_none());
+        // A world's: every disc map's in one (V115), when the device samples their three targets too.
+        let joined = world.as_ref().filter(|(w, packed)| world_textures(w, packed) + 2 + 3 <= max).and_then(|(w, packed)| world_meshes(w, packed));
+        let meshes = paint.and_then(|p| p.meshes.as_ref()).filter(|_| pages.is_none() && world.is_none()).or(joined.as_ref());
         if meshes.is_some() {
             let anisotropy = self.anisotropy;
             self.samplers.entry(CLAMPED).or_insert_with(|| texture_sampler(&self.device, CLAMPED, anisotropy));
@@ -2601,7 +2628,7 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(
                 faded_ground(match (pages, &world) {
                     (Some(p), _) => ground_pages_wgsl(p, dirt),
-                    (None, Some((w, packed))) => ground_world_wgsl(w, packed),
+                    (None, Some((w, packed))) => ground_world_meshed_wgsl(w, packed, meshes.is_some()),
                     (None, None) => ground_wgsl(paint, dirt),
                 })
                 .into(),
@@ -2684,6 +2711,11 @@ impl Renderer {
             meshes,
         });
         Ok(())
+    }
+
+    /// Whether the ground draws roads and ruts round each eye (V67, and a world's disc maps' V115).
+    pub fn ground_meshed(&self) -> bool {
+        self.ground.as_ref().is_some_and(|g| g.meshes.is_some())
     }
 
     /// Piece `piece` of the ground (MD17): its chunks, numbered across and along within the piece,
@@ -4818,6 +4850,12 @@ fn splat_passes_wgsl(paint: &Splat, first: u32) -> String {
 /// inside it and blended by [`crate::terrain::Regions::weights`]. Each map's numbers are written
 /// into the shader, one block of code a map.
 fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
+    ground_world_meshed_wgsl(w, packed, false)
+}
+
+/// [`ground_world_wgsl`], and with `meshed` each disc map's roads and ruts (V115, [`world_meshes`])
+/// laid over its splat's passes per pixel, before what its baked pages do to them, as alone (V67).
+fn ground_world_meshed_wgsl(w: &WorldPaint, packed: &[Option<Packed>], meshed: bool) -> String {
     let f = |v: f32| format!("{v:?}");
     let mut s = String::from(VIEW_WGSL);
     s.push_str(
@@ -4836,7 +4874,13 @@ fn ground_world_wgsl(w: &WorldPaint, packed: &[Option<Packed>]) -> String {
     if splat_first.iter().any(Option::is_some) {
         s.push_str(&format!("@group(1) @binding({}) var splat_layers: texture_2d_array<f32>;\n", splat_binding(w, packed)));
     }
+    if meshed {
+        s.push_str(ground_mesh::WGSL_BINDINGS);
+    }
     s.push_str(GROUND_VS_WGSL);
+    if meshed {
+        s.push_str(&ground_mesh::over_wgsl());
+    }
     s.push_str(&crate::splat::paint_depth_wgsl());
     s.push_str("// log2 of the pixel's depth from the original's paint camera, for the splat passes' mips (V97).\nvar<private> paint_level: f32;\n// One paint-target texel's width on the ground there, in feet (V101).\nvar<private> paint_texel_ft: f32;\n");
     s.push_str(&format!(
@@ -4899,8 +4943,12 @@ fn mirror(xz: vec2f, r: vec4f) -> vec2f {{ let p = near(xz, r); return vec2f(mir
   var frame = vec4f(0.0);
   var src = vec4f(0.0);
   var s = vec4f(0.0);
-{passes}  let sharp = floor(clamp(frame.rgb, vec3f(0.0), vec3f(255.0)));
+{passes}{meshes}  let sharp = floor(clamp(frame.rgb, vec3f(0.0), vec3f(255.0)));
   let painted = sharp * modulate;",
+                        meshes = match meshed && sharp.splat.meshes.is_some() {
+                            true => format!("  frame = mesh_over(q + vec2f({}, {}), gx, gy, frame);\n", f(t.at[0]), f(t.at[1])),
+                            false => String::new(),
+                        },
                         one = f(f32::from(crate::terrain::MODULATE_ONE)),
                         steps = f(crate::terrain::MODULATE_STEPS),
                         array = if at.array == 0 { "pages".to_string() } else { format!("pages{}", at.array) },
@@ -6237,6 +6285,33 @@ mod tests {
                 let packed = world.pack(256, 2048);
                 assert_eq!(world.array_sizes(&packed).len(), 2, "{packed:?}");
                 faded_ground(ground_world_wgsl(&world, &packed))
+            }),
+            // A disc map's sharp splat with its roads and ruts laid over it (V115).
+            ("ground, world with roads", {
+                let pass = paint.passes[1].clone();
+                let flat = crate::ground_mesh::Flat::new([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], [[0.0; 2]; 3], [[128.0; 4]; 3], pass.clone());
+                let splat = Splat {
+                    textures: vec![layer()],
+                    passes: vec![crate::splat::Pass { texture: 0, ..pass }],
+                    shadow: None,
+                    meshes: crate::ground_mesh::GroundMeshes::of(vec![layer()], vec![flat]),
+                };
+                let sharp = crate::terrain::SharpSplat { splat: std::sync::Arc::new(splat), modulate: vec![layer()] };
+                let world = WorldPaint {
+                    regions: crate::terrain::Regions { owned: vec![[0.0, 0.0, 16.0, 16.0], [40.0, 0.0, 56.0, 16.0]], period: [0.0; 2] },
+                    tiles: vec![
+                        crate::terrain::PaintTile { at: [0.0, 0.0], pages: Some(pages.clone()), sharp: Some(sharp.clone()) },
+                        crate::terrain::PaintTile { at: [40.0, 0.0], pages: Some(pages.clone()), sharp: Some(sharp) },
+                    ],
+                    dirt: [200.0, 180.0, 150.0],
+                };
+                let packed = world.pack(256, 2048);
+                assert_eq!(world_mesh_tiles(&world, &packed), vec![0, 1]);
+                let joined = world_meshes(&world, &packed).unwrap();
+                assert_eq!((joined.tris.len(), joined.bounds().1[0] >= 41.0), (2, true));
+                let wgsl = faded_ground(ground_world_meshed_wgsl(&world, &packed, true));
+                assert_eq!(wgsl.matches("frame = mesh_over(").count(), 2);
+                wgsl
             }),
         ];
         let mut written = 0;

@@ -185,6 +185,23 @@ impl GroundMeshes {
         Some(GroundMeshes { textures, tris, origin, across, along, cells })
     }
 
+    /// Several maps' meshes as one, each moved by its map's offset in the world (V115: a world's disc
+    /// maps, every one's roads and ruts in a single set the GPU draws round each eye): the maps' own
+    /// textures one after another, each triangle's pass pointed at its map's copy, the maps in order.
+    pub fn joined<'a>(parts: impl IntoIterator<Item = (&'a GroundMeshes, [f32; 2])>) -> Option<GroundMeshes> {
+        let (mut textures, mut tris) = (Vec::new(), Vec::new());
+        for (m, [ax, az]) in parts {
+            let first = textures.len();
+            textures.extend(m.textures.iter().cloned());
+            tris.extend(m.tris.iter().map(|t| {
+                let mut pass = t.pass.clone();
+                pass.texture += first;
+                Flat::new(t.xz.map(|[x, z]| [x + ax, z + az]), t.uv, t.color, pass)
+            }));
+        }
+        GroundMeshes::of(textures, tris)
+    }
+
     /// The world rectangle the meshes lie in, `x` and `z` from the first corner to the second.
     pub fn bounds(&self) -> ([f32; 2], [f32; 2]) {
         let o = self.origin;
@@ -335,6 +352,21 @@ mod tests {
         let m = GroundMeshes::of(vec![flat([255, 0, 0, 255]), flat([0, 0, 255, 255])], tris).unwrap();
         let c = m.paint(3.0, 6.0, [0.0, 255.0, 0.0, 0.0]);
         assert!(c[2] > 250.0 && c[0] < 5.0, "the second mesh is on top: {c:?}");
+    }
+
+    #[test]
+    fn joined_maps_keep_their_own_textures_where_they_were_moved() {
+        let red = GroundMeshes::of(vec![flat([255, 0, 0, 255])], square(0.0, 0.0, 10.0, 128.0, 0)).unwrap();
+        let blue = GroundMeshes::of(vec![flat([0, 0, 255, 255])], square(0.0, 0.0, 10.0, 128.0, 0)).unwrap();
+        let w = GroundMeshes::joined([(&red, [0.0, 0.0]), (&blue, [1000.0, 500.0])]).unwrap();
+        let under = [0.0, 255.0, 0.0, 0.0];
+        assert_eq!(w.textures.len(), 2);
+        assert_eq!(w.paint(5.0, 5.0, under), red.paint(5.0, 5.0, under));
+        assert_eq!(w.paint(1005.0, 505.0, under), blue.paint(5.0, 5.0, under));
+        assert_eq!(w.paint(505.0, 255.0, under), under);
+        let hi = w.bounds().1;
+        assert!(hi[0] >= 1010.0 && hi[1] >= 510.0, "{hi:?}");
+        assert!(GroundMeshes::joined([]).is_none());
     }
 
     #[test]
