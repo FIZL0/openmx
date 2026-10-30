@@ -209,7 +209,7 @@ replay hash is unchanged.
 - [ ] **P222** (follow-up, low) the mod store's Upload in the browser (after P199): the page's OPFS mods/ has only the store's installs today, so Upload says 'uploads run in the desktop game'; once P217 lets the browser hold mods of the player's own, pack and commit them from the worker (zip in OPFS, LFS PUTs streamed from it) and check HF's CORS for whoami-v2, preupload, commit and the LFS batch
 - [ ] **P221** (follow-up, low) the mod store upload's single-part LFS PUT (modstore_up.rs lfs_put, basic action) reads the whole mod.zip into memory: stream it from the file instead (HF gives multipart for big files today, so only mods under its multipart cutoff go this way)
 - [ ] **P226** (follow-up, low) MX vs. ATV's Brake Gyro / Gas Gyro options (MD62 follow-up): settings.txt keys and a menu row on Handling MX vs. ATV that set Phy::gyro (now always the game's default, brake on / gas off, so GasGyroTorque never acts in a ride)
-- [ ] **P244** (follow-up, low) Delete Preset on Game Modifiers and Cameras asks first, with the yes/no P229's Save Over uses (Menu::over / overwriting): today one Cross forgets a preset
+- [ ] **P246** (follow-up, low) Delete Preset on Game Modifiers and Cameras asks first, with the yes/no P229's Save Over uses (Menu::over / overwriting): today one Cross forgets a preset
 
 
 ### Stretch
