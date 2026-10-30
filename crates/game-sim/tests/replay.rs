@@ -2566,6 +2566,30 @@ fn the_pressure_bytes_of_a_recording_prove_the_byte_mapping() {
     let e = movie.check_pressures().expect_err("no pressures is no input");
     assert!(e.message.contains("cross"), "named by control: {e}");
     assert!(PadTape::from_p2m2(&p2m2_file("rycs", &[flat; 2]), replay::TickPhase::First).is_err());
+
+    // A host pad's analogue trigger sets its bit before its pressure leaves 0 (fly_and_collide.p2m2's
+    // R2: five fields down by the bit at pressure 0, then 0x0b). That light edge is accepted for a
+    // control whose pressures in the file are graded, and counted, and only for that control.
+    let r2 = Control::R2.binding().pressure as usize - 2;
+    let mut light = p2m2_entry(Control::R2.mask(), 0x7f, 0x7f);
+    light[r2] = 0;
+    let mut firm = light;
+    firm[r2] = 0x0b;
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &[light, light, firm, flat])).unwrap();
+    assert!(movie.check_pressures().is_err(), "cross in the last field is still a pad with no pressures");
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &[light, light, firm])).unwrap();
+    assert_eq!(movie.check_pressures().expect("a light edge of a graded control"), 3 * 12);
+    assert_eq!(movie.light_presses(), vec![(0, Control::R2, 2)]);
+    // Without the graded field the same light edge is a control with no pressure at all.
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &[light, light])).unwrap();
+    let e = movie.check_pressures().expect_err("no graded pressure, no light edge");
+    assert!(e.message.contains("r2"), "named by control: {e}");
+    assert!(movie.light_presses().is_empty());
+    // And a pressure under a bit that is up is never a light edge.
+    let mut ghost = p2m2_entry(0, 0x7f, 0x7f);
+    ghost[r2] = 0x0b;
+    let movie = replay::P2m2::parse(&p2m2_file("rycs", &[firm, ghost])).unwrap();
+    assert!(movie.check_pressures().is_err(), "up by its bit, down by its pressure");
 }
 
 /// Five ways a file can look like a recording and not be one, each refused by the byte it is at.
@@ -2750,7 +2774,23 @@ fn the_human_recording_in_context_drives_the_port() {
         let agreements = movie
             .check_pressures()
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        assert_eq!(agreements, movie.fields() * 12, "twelve controls recorded twice, every frame");
+        // Twelve controls recorded twice, every frame, for every port PCSX2 wrote: one pad on the
+        // older recordings, both on fly_and_collide.p2m2 (its second pad is plugged in and untouched).
+        let written: usize = (0..movie.fields())
+            .map(|field| (0..replay::P2M2_PADS).filter(|&pad| movie.field(field, pad).status() == 0).count())
+            .sum();
+        assert_eq!(agreements, written * 12, "twelve controls recorded twice, every written frame");
+        assert!(written >= movie.fields(), "{}: pad 0 is written on every frame", path.display());
+        // The light edges of analogue presses the check let through: a handful of fields, never a
+        // control's whole life (fly_and_collide.p2m2 has five, all R2).
+        let light = movie.light_presses();
+        let light_fields: usize = light.iter().map(|&(_, _, n)| n).sum();
+        assert!(
+            light_fields * 100 < movie.fields(),
+            "{}: {light_fields} fields down by a bit with no pressure ({light:?}) — that is a pad \
+             without pressures, not a light press",
+            path.display(),
+        );
 
         let tape = PadTape::from_p2m2(&bytes, replay::TickPhase::First)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -2794,7 +2834,7 @@ fn the_human_recording_in_context_drives_the_port() {
         println!(
             "{}: {} fields by {} on {}, savestate {} → {} ticks, {transitions} transitions, \
              controls {seen:#06x}, {agreements} pressure/bit agreements, phase moves {moved} ticks \
-             ({buttons_moved} of them a button)",
+             ({buttons_moved} of them a button), light presses {light:?}",
             path.display(),
             movie.total_frames,
             movie.author,
