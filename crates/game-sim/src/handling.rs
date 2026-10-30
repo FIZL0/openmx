@@ -22,6 +22,8 @@ use crate::air::{Air, Chassis, Step};
 use ps2_float::vu::Dest;
 use ps2_float::{F, Vf, fpu};
 
+pub mod step;
+
 /// How the bikes handle (MD40), as `settings.txt`'s `handling` and `--handling` spell it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Handling {
@@ -215,6 +217,8 @@ pub struct Flip {
     pub cut: bool,
     /// The backflip stunt came round (its clip 2 to 0).
     pub came_round: bool,
+    /// The preload's cue latch ([`step::preload`]), MD63.
+    pub preload_cue: bool,
 }
 
 impl crate::hash::State for Flip {
@@ -223,6 +227,7 @@ impl crate::hash::State for Flip {
         w.bool("wrecked", self.wrecked);
         w.bool("cut", self.cut);
         w.bool("came_round", self.came_round);
+        w.bool("preload_cue", self.preload_cue);
     }
 }
 

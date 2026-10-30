@@ -2267,7 +2267,11 @@ impl Ride {
         ride.clutch_in = held.clutch;
         let rpm = mv::road_rpm(engine, &rear.mv, s.speed);
         mv::shift(mvp, engine, rpm);
-        mv::clutch(mvp, ride, &mut mvc, engine, s);
+        // MX vs. ATV's clutch (MD63) on its handling: no centre-of-gravity travel on a launch.
+        match mxvatv.as_deref() {
+            Some(_) => crate::handling::step::clutch(mvp, ride, engine, s),
+            None => mv::clutch(mvp, ride, &mut mvc, engine, s),
+        }
 
         let (n, h) = mv::substeps(s.dt);
         for k in 0..n {
@@ -2286,7 +2290,14 @@ impl Ride {
             astep.rear_vel = chassis::unrotate(&out.mat3(Frame::Chassis), rear.w.contact_velocity);
             astep.touching = *touching;
             let mut ac = air_chassis!();
-            air::preload(&p.air, air, &mut ac, &astep);
+            match mxvatv.as_deref_mut() {
+                // MX vs. ATV's preload (MD63): its equal-times force and its cue. The cue's event is
+                // the presentation's, and nothing here plays it.
+                Some(f) => {
+                    crate::handling::step::preload(&p.air, air, &mut ac, &astep, &mut f.preload_cue);
+                }
+                None => air::preload(&p.air, air, &mut ac, &astep),
+            }
             mvc.force = ac.force;
             mvc.torque = ac.moment;
 

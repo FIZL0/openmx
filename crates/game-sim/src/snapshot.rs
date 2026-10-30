@@ -883,7 +883,7 @@ wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, h
     // The rear wheel's material is the drive-on sound's, set again in every substep's contacts.
     skip { rear_material });
 wire!(crate::back_search::Cache { at, moved, list, world });
-wire!(crate::handling::Flip { clip, wrecked, cut, came_round });
+wire!(crate::handling::Flip { clip, wrecked, cut, came_round, preload_cue });
 wire!(crate::trick_pack::State { spin, flip_row, side, side_flick, front_watch });
 wire!(crate::air::Spin { applied, ramp, active, armed, grace, dir, start, torque, clip, came_round, wrecked, forward, cut });
 wire!(crate::ride::Back { at, facing, up });
