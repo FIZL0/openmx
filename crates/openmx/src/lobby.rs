@@ -70,8 +70,10 @@ impl DiscFiles {
     }
 }
 
+/// Every seat online is a person's, so a set word reads as the P files whatever its tuning says
+/// ([`roster::Set::ridden`]): what is hashed for the handshake is what the ride rides.
 fn read_phy(set: &str) -> Option<Vec<u8>> {
-    let set = roster::Set::from_word(set)?;
+    let set = roster::Set::from_player_word(set)?;
     let mut disc = Disc::open_configured().ok()?;
     let bikes: Vec<String> = disc
         .entries()
@@ -159,9 +161,10 @@ pub fn name_tricks(out: &mut [openmx_net::Cmd], tricks: crate::menu::Tricks, mod
     }
 }
 
-/// The bike sets the lobby offers, as the menu shows them.
+/// The bike sets the lobby offers, as the menu shows them: the eight a player rides, P every one
+/// ([`roster::Set::ridden`]).
 pub fn bikes() -> Vec<(String, String)> {
-    roster::Set::all().into_iter().map(|s| (s.word(), s.label())).collect()
+    roster::Set::players().into_iter().map(|s| (s.word(), s.label())).collect()
 }
 
 /// The network under the front end: none until the online screens first ask for something.

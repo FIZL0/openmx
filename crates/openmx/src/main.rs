@@ -1521,6 +1521,9 @@ struct Args {
     /// `--minimap on|off` (V52): whether the original's HUD draws its radar. Unset, the front end's
     /// setting decides, and without one it does.
     minimap: Option<bool>,
+    /// `--show-fps on|off` (2026-10-29): whether a ride draws its frame rate in the top right, the
+    /// Settings' Show FPS. Unset, the front end's setting decides, and without one it does not.
+    show_fps: Option<bool>,
     /// `--world-sky global|per-map` (MD9): a combined world's sky and light, one for all of it or the
     /// map under the camera's. Unset, the front end's setting decides, and without one global.
     world_sky: Option<menu::WorldSky>,
@@ -1865,7 +1868,7 @@ fn apply_picks(args: &mut Args, picks: &[roster::Pick]) {
     let Some((first, rest)) = picks.split_first() else { return };
     args.bike = first.bike.clone();
     args.rider = first.rider.clone();
-    args.set = Some(first.set);
+    args.set = Some(first.set.ridden());
     args.look = first.look.clone();
     args.others = rest.to_vec();
 }
@@ -2317,6 +2320,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.overlay = Some(overlay);
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
+                a.show_fps = Some(args.show_fps.unwrap_or(shell.front.menu.settings.show_fps));
                 a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.tricks = Some(args.tricks.unwrap_or(shell.front.menu.settings.tricks));
@@ -2416,6 +2420,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.overlay = Some(overlay);
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
                 a.minimap = Some(args.minimap.unwrap_or(shell.front.menu.settings.minimap));
+                a.show_fps = Some(args.show_fps.unwrap_or(shell.front.menu.settings.show_fps));
                 a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
@@ -5310,6 +5315,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut overlay_mode = args.overlay.unwrap_or_default();
     let mut speedometer = args.speedometer.unwrap_or_default();
     let mut minimap = args.minimap.unwrap_or(true);
+    let mut show_fps = args.show_fps.unwrap_or(false);
+    let mut fps_meter = ride_hud::FpsMeter::default();
     let mut world_sky = args.world_sky.unwrap_or_default();
     let mut hud_scale = args.hud_scale.unwrap_or(menu::HUD_SCALE_DEFAULT);
     let mut graphics = args.graphics.unwrap_or_default();
@@ -6203,6 +6210,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 overlay_mode = front.menu.settings.overlay;
                 speedometer = front.menu.settings.speedometer;
                 minimap = front.menu.settings.minimap;
+                show_fps = front.menu.settings.show_fps;
                 world_sky = front.menu.settings.world_sky;
                 hud_scale = front.menu.settings.hud_scale;
                 graphics = front.menu.settings.graphics;
@@ -7921,6 +7929,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     });
                 }
             }
+            // The Show FPS counter (2026-10-29), once over the whole frame, under the pause.
+            if show_fps {
+                let whole = [0.0, 0.0, frame.width as f32, frame.height as f32];
+                ride_hud::fps_sprites(&mut gpu_sprites, hud_base, whole, f32::from(hud_scale) / 100.0, &fps_meter.text());
+            }
             if let Some(front) = front.as_deref_mut() {
                 // As sprites (V30), after the HUDs' and so over them; the patches go under both. Over a
                 // split each player's own pause in their own view (P84), the whole frame's otherwise.
@@ -8490,6 +8503,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             perf.add(Stage::Draw, draw_at.elapsed());
             stages.mark(stages::Stage::Hud);
         }
+        // The Show FPS counter (2026-10-29) on the software path, over every view and under the pause.
+        if show_fps && !gpu_on {
+            ride_hud::fps_draw(&mut frame, f32::from(hud_scale) / 100.0, &fps_meter.text());
+        }
+        fps_meter.frame(Instant::now());
         if let Some(front) = front.as_ref().filter(|_| !gpu_on && view_frames.is_empty()) {
             perf.time(Stage::Draw, || front.art.draw(&front.menu, &mut frame));
         }
@@ -9159,7 +9177,8 @@ fn handling_phy(pack: Option<&trick_packs::Pack>, member: &str, curve: &game_sim
 /// Lay a lobby ride's trick pack (MD19) over a seat's bike file, read for the bike set `set`
 /// (`race125p`) as the handshake hashed it: what every machine lays over that seat.
 fn lay_room_tricks(pack: Option<&trick_packs::Pack>, phy: &mut Phy, set: &str) {
-    if let (Some(pack), Some(set)) = (pack, roster::Set::from_word(set)) {
+    // A person's seat, so the P file the ride loads (`Set::ridden`), whatever the word's tuning.
+    if let (Some(pack), Some(set)) = (pack, roster::Set::from_player_word(set)) {
         println!("{set}: {}", pack.lay(phy, &set.file()), set = set.word());
     }
 }
@@ -10056,6 +10075,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         overlay: None,
         speedometer: None,
         minimap: None,
+        show_fps: None,
         world_sky: None,
         hud_scale: None,
         camera: START_CAMERA.to_string(),
@@ -10279,6 +10299,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                     word => return Err(format!("--minimap: {word:?} is not on or off")),
                 });
             }
+            "--show-fps" => {
+                args.show_fps = Some(match next("on or off")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    word => return Err(format!("--show-fps: {word:?} is not on or off")),
+                });
+            }
             "--hud-scale" => {
                 let word = next("a HUD scale from 50 to 150 in tens")?;
                 let n = menu::hud_scale_word(&word).ok_or_else(|| format!("--hud-scale: {word:?} is not 50 to 150 in steps of 10"))?;
@@ -10445,7 +10472,6 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .ok_or_else(|| format!("--video-preset: {word:?} is not high, medium, low, deck or phone"))?;
                 let l = p.look();
                 args.graphics = Some(l.draw);
-                args.plants = Some(l.plants);
                 args.filtering = Some(l.filtering);
                 args.shadows = Some(l.shadows);
                 args.casters = Some(l.casters);
@@ -10534,8 +10560,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--seats" => args.seats = Some(next("who sits where, like host,g,g")?),
             "--phy" => args.phy = Some(next("a .phy on the disc, like race125p.phy")?),
             "--set" => {
-                let w = next("one of the sixteen sets, like race250a")?;
-                args.set = Some(roster::Set::from_word(&w).ok_or(format!("--set: like race125p or pro500a, not {w}"))?);
+                let w = next("one of the bike sets, like race250p")?;
+                // The player rides P: an A word (the AI riders' files) rides its P twin (Set::ridden).
+                args.set = Some(roster::Set::from_player_word(&w).ok_or(format!("--set: like race125p or pro500p, not {w}"))?);
             }
             "--garage" => args.garage = true,
             "--trace-stick" => {
@@ -10596,7 +10623,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
                             [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--handling original|mxvatv] [--markers on|off] [--camera NAME]\n\
-                            [--minimap on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
+                            [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--overview] [--vehicle bike|biplane]\n\
@@ -10715,7 +10742,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --fly-at X,Z,DEG,FT starts the plane flying FT feet over the ground there;\n\
                      --trace-at X,Z,DEG starts the bike there instead of the start line, and\n\
                      --phy NAME rides the bike archive's NAME (pro125a.phy) instead of Race125P.phy,\n\
-                     --set WORD the bike's own file of that set (race250a, pro500p) on its class,\n\
+                     --set WORD the bike's own file of that set (race250p, pro500p) on its class,\n\
                      and --garage rides every seat on what the front end's garage picked for it.\n\
                      --record writes every simulated frame's pad to a tape (under context/,\n\
                      it is game data); --play rides one instead of the pad, at the tape's own\n\

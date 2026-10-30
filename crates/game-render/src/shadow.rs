@@ -83,6 +83,54 @@ pub fn original_fade(distance: f32, views: usize) -> f32 {
     }
 }
 
+/// How far from the camera the port draws the original's shadow (user 2026-10-29): to `.0` feet,
+/// fading from `.1`. The original's own 100 ft ([`original_range`]) let another racer's shadow fade
+/// in and out a few lengths away; a 128x128 map per racer costs next to nothing, so the port keeps
+/// them to Better's reach ([`CASCADES`]) whatever the number of views, and fades them smoothly.
+pub const PORTED_RANGE: (f32, f32) = (300.0, 210.0);
+
+/// How much of the original's shadow the port draws with the camera `distance` feet from its
+/// caster ([`PORTED_RANGE`]): all of it to the fade's start, none past the end, smoothly between.
+pub fn ported_fade(distance: f32) -> f32 {
+    let (end, start) = PORTED_RANGE;
+    if !(distance < end) { 0.0 } else { 1.0 - smoothstep(start, end, distance) }
+}
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// How far under its caster the original's shadow is drawn whole, and where it is gone, in feet
+/// straight down from the caster's centre to the ground. Ours, not read (V108's journal): V108 cut
+/// the box 40 ft along the sun past the caster's sphere and faded it over the last 40% of that, so a
+/// bike 10 ft up under a 15° sun (57 ft along the sun to the dirt) or 25 ft up under a 40° one lost
+/// its shadow mid-jump (user 2026-10-29: "when my shadow gets long enough it just disappears").
+pub const ORIGINAL_WHOLE: f32 = 120.0;
+pub const ORIGINAL_DROP: f32 = 200.0;
+
+/// The lowest sun the original's box is stretched for, as the sine of its height over the horizon
+/// (about 6°): below it a high caster's shadow is cut rather than the box made miles deep.
+pub const ORIGINAL_LOW_SUN: f32 = 0.1;
+
+/// The original's box for one racer of radius `r`, along `sun` (the way the light goes): across, its
+/// sphere, as the original fits it (across the light the shadow is the caster's own outline, however
+/// long it lies on the ground); along the light, from just short of the sphere on the sun's side to
+/// past where the ground [`ORIGINAL_DROP`] feet under the caster meets the sun's rays through the
+/// sphere — the whole of the shadow's footprint, the far tip of a long one too. `.3` is the share of
+/// the depth, from the far end, the shadow fades over: whole down to [`ORIGINAL_WHOLE`] feet.
+pub fn original_box(sun: V3, r: f32) -> (f32, f32, f32, f32) {
+    let dir = sun.norm();
+    let s = (-dir.y).max(ORIGINAL_LOW_SUN);
+    let c = (1.0 - s * s).max(0.0).sqrt();
+    // A ground point under the caster at drop `y`, inside the sphere's outline across the light, lies
+    // (y ± r cos) / sin along the light from the centre.
+    let along = |y: f32| (y + r * c) / s;
+    let (back, ahead) = (r + 10.0, along(ORIGINAL_DROP) + r);
+    let fade = (ahead - along(ORIGINAL_WHOLE)) / (back + ahead);
+    (r, back, ahead, fade)
+}
+
 /// The original's blend of the shadow: the sun's `ShadowRGB` (0..255), and its share of the colour
 /// under it (`ShadowIntensity`, or 85 of 128 where the scene gives none).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,8 +219,28 @@ pub fn slice_sphere(eye: V3, forward: V3, fov: f32, aspect: f32, near: f32, far:
 }
 
 /// Our shadows' two maps: everything to `CASCADES[0]` feet from the eye in the sharp one, to
-/// `CASCADES[1]` in the wide one, fading out over the last fifth.
+/// `CASCADES[1]` in the wide one, fading out over the last [`REACH_FADE`] of it.
 pub const CASCADES: [f32; 2] = [45.0, 300.0];
+
+/// The share of a map, out to its edge across the light, over which it hands over to the next one:
+/// V108 switched maps at the sharp one's edge, and a shadow crossing it popped from one map's
+/// texels, bias and filter to the other's (user 2026-10-29, "pop in"). The shader has the same rule.
+pub const CASCADE_BLEND: f32 = 0.2;
+
+/// The share of our shadows' reach over which they fade out, smoothly (V108 faded the last fifth,
+/// linearly).
+pub const REACH_FADE: f32 = 0.3;
+
+/// How much of the sharp map a point `edge` across it takes (the larger of its |x| and |y| in the
+/// map, 0 mid-map, 1 at the edge), the next map taking the rest; the last map takes all of it.
+pub fn cascade_share(edge: f32, last: bool) -> f32 {
+    if last { 1.0 } else { 1.0 - ((edge - (1.0 - CASCADE_BLEND)) / CASCADE_BLEND).clamp(0.0, 1.0) }
+}
+
+/// How much of our shadow is drawn `distance` feet from the eye, our maps reaching `reach`.
+pub fn reach_fade(distance: f32, reach: f32) -> f32 {
+    1.0 - smoothstep(reach * (1.0 - REACH_FADE), reach, distance)
+}
 
 /// How far toward the sun a map takes casters in from beyond its own sphere: a hill or a tall tree
 /// standing between the sun and what is seen.
@@ -345,6 +413,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The sun `elevation` degrees over the horizon, its light going `heading` degrees round.
+    fn sun_at(elevation: f32, heading: f32) -> V3 {
+        let (e, h) = (elevation.to_radians(), heading.to_radians());
+        v3(e.cos() * h.sin(), -e.sin(), e.cos() * h.cos())
+    }
+
+    #[test]
+    fn a_long_shadows_footprint_lies_inside_the_originals_box() {
+        // A racer's sphere `height` feet over flat ground, the sun low or high: every ground point
+        // whose ray to the sun passes through the sphere is inside the box, and whole (past the fade)
+        // while the drop is no more than ORIGINAL_WHOLE.
+        let r = 5.0;
+        for elevation in [6.0, 10.0, 15.0, 30.0, 45.0, 70.0, 89.0] {
+            for height in [3.0, 10.0, 30.0, 60.0, 100.0, 115.0] {
+                let sun = sun_at(elevation, 40.0);
+                let centre = v3(100.0, height, -50.0);
+                let (half, back, ahead, fade) = original_box(sun, r);
+                let m = light_box(sun, centre, half, back, ahead, v3(0.0, 0.0, 0.0));
+                let (right, up, dir) = light_axes(sun);
+                for k in 0..64 {
+                    // A point of the sphere's outline across the light, cast along it to y = 0.
+                    let a = k as f32 / 64.0 * std::f32::consts::TAU;
+                    let q = centre.add(right.scale(0.98 * r * a.cos())).add(up.scale(0.98 * r * a.sin()));
+                    // Ground on the sun's side of a sphere that dips under it is lit: nothing of the
+                    // caster stands between it and the sun.
+                    if q.y <= 0.0 {
+                        continue;
+                    }
+                    let p = q.add(dir.scale(-q.y / dir.y));
+                    assert!(p.y.abs() < 1e-2);
+                    let c = m.clip(p);
+                    assert!(c[0].abs() < 1.0 && c[1].abs() < 1.0, "{elevation}° {height} ft: {c:?} off the map");
+                    assert!(c[2] > fade && c[2] < 1.0, "{elevation}° {height} ft: depth {} not past the fade {fade}", c[2]);
+                }
+            }
+        }
+        // V108's box, 40 ft past the sphere: the far tip of a bike's shadow 10 ft up under a 15° sun
+        // lay outside it.
+        let sun = sun_at(15.0, 0.0);
+        let e = 15.0f32.to_radians();
+        assert!((10.0 + r * e.cos()) / e.sin() > r + 40.0);
+        // Gone by ORIGINAL_DROP, and no deeper than the lowest sun allows.
+        let (_, back, ahead, _) = original_box(sun_at(1.0, 0.0), r);
+        assert!(back + ahead < (ORIGINAL_DROP + r) / ORIGINAL_LOW_SUN + 3.0 * r + 10.0);
+        let _ = sun;
+    }
+
+    #[test]
+    fn a_caster_high_over_the_ground_still_casts_into_our_maps() {
+        // The camera over the dirt looking along it; a bike 60 ft up over a point 30 ft ahead, under
+        // a 12° sun: its shadow lands some 280 ft further along, and the map whose box holds that
+        // point holds the bike too.
+        let (eye, fwd) = (v3(0.0, 6.0, 0.0), v3(0.0, -0.1, 1.0).norm());
+        let sun = sun_at(12.0, 0.0);
+        let bike = v3(0.0, 50.0, 30.0);
+        let ground = bike.add(sun.scale(-bike.y / sun.y));
+        assert!(ground.z > 250.0 && ground.z < CASCADES[1], "{ground:?}");
+        let mut held = 0;
+        for (near, far) in [(0.0, CASCADES[0]), (CASCADES[0] * 0.8, CASCADES[1])] {
+            let (c, r) = slice_sphere(eye, fwd, 1.2, 16.0 / 9.0, near, far);
+            let (back, ahead) = (r + REACH_BACK, r);
+            if in_box(sun, c, r, back, ahead, ground, 0.0) {
+                held += 1;
+                assert!(in_box(sun, c, r, back, ahead, bike, 3.0), "{near}..{far} holds the shadow but not the bike");
+            }
+        }
+        assert!(held > 0, "no map holds the shadow at {ground:?}");
+    }
+
+    #[test]
+    fn the_maps_hand_over_and_fade_without_a_step() {
+        // Across the sharp map's last fifth its share falls from 1 to 0 with no jump; the last map
+        // takes all; the reach fades smoothly to nothing.
+        assert_eq!(cascade_share(0.0, false), 1.0);
+        assert!(cascade_share(1.0, false) < 1e-6);
+        assert_eq!(cascade_share(0.99, true), 1.0);
+        let steps: Vec<f32> = (0..=100).map(|i| cascade_share(i as f32 / 100.0, false)).collect();
+        assert!(steps.windows(2).all(|w| w[1] <= w[0] && w[0] - w[1] < 0.06), "{steps:?}");
+        assert_eq!(reach_fade(0.0, 300.0), 1.0);
+        assert!(reach_fade(300.0, 300.0) < 1e-6);
+        let fades: Vec<f32> = (0..=300).map(|d| reach_fade(d as f32, 300.0)).collect();
+        assert!(fades.windows(2).all(|w| w[1] <= w[0] && w[0] - w[1] < 0.02));
+        // The port draws the original's shadow to 300 ft, smoothly, not the original's 100.
+        assert_eq!(ported_fade(100.0), 1.0);
+        assert!(ported_fade(255.0) > 0.0 && ported_fade(255.0) < 1.0);
+        assert_eq!(ported_fade(300.0), 0.0);
+        assert_eq!(ported_fade(f32::NAN), 0.0);
     }
 
     #[test]

@@ -19,11 +19,6 @@ pub(super) const MAPS: usize = 8;
 /// machine, not the train.
 const ORIGINAL_MOST: f32 = 20.0;
 
-/// How far under its caster the original's shadow reaches, in feet past the caster's sphere: it
-/// fades out over the last [`ORIGINAL_FADE`] of that.
-const ORIGINAL_DROP: f32 = 40.0;
-const ORIGINAL_FADE: f32 = 0.4;
-
 /// One map this frame: the pass that reads it, and its box along the sun ([`shadow::light_box`]).
 #[derive(Clone)]
 pub(super) struct Map {
@@ -35,7 +30,8 @@ pub(super) struct Map {
     back: f32,
     ahead: f32,
     /// What the shader reads per map: how much of it is drawn, the depth bias, the step between the
-    /// texels it filters over, and 1 for a map that fades with depth (the original's).
+    /// texels it filters over, and for the original's the share of its depth it fades over
+    /// ([`shadow::original_box`]; ours keep their reach there).
     layer: [f32; 4],
     /// The actors that cast into it (the original's, one racer), or `None` for everything near.
     actors: Option<Vec<usize>>,
@@ -368,24 +364,30 @@ impl Renderer {
                         spheres.push((row(3), r));
                         who.push(i);
                     }
-                    for (c, r, held) in shadow::groups(&spheres).into_iter().take(MAPS) {
-                        let fade = shadow::original_fade(c.sub(camera.eye).len(), views.len());
+                    // The nearest racers first: with more than [`MAPS`] in reach, which got a map was
+                    // the list's order, and a racer's shadow came and went as others joined.
+                    let mut racers = shadow::groups(&spheres);
+                    racers.sort_by(|a, b| a.0.sub(camera.eye).len().total_cmp(&b.0.sub(camera.eye).len()));
+                    for (c, r, held) in racers.into_iter().take(MAPS) {
+                        // The port's reach, not the original's 100 ft ([`shadow::PORTED_RANGE`]).
+                        let fade = shadow::ported_fade(c.sub(camera.eye).len());
                         if fade <= 0.0 {
                             continue;
                         }
-                        let (back, ahead) = (r + 10.0, r + ORIGINAL_DROP);
-                        let texel = 2.0 * r / size as f32;
+                        // Deep enough along the sun for the whole of a long shadow's footprint.
+                        let (half, back, ahead, depth_fade) = shadow::original_box(sun, r);
+                        let texel = 2.0 * half / size as f32;
                         maps.push(Map {
                             pass: p,
                             origin,
                             sun,
                             centre: c,
-                            half: r,
+                            half,
                             back,
                             ahead,
                             // The filter steps two texels: the original blurs its 128x128 shadow, and in PCSX2
                             // its edge is that soft, not one texel's.
-                            layer: [fade, 2.0 * texel / (back + ahead), 2.0 / size as f32, 1.0],
+                            layer: [fade, 2.0 * texel / (back + ahead), 2.0 / size as f32, depth_fade],
                             actors: Some(held.into_iter().map(|k| who[k]).collect()),
                         });
                     }
@@ -543,8 +545,10 @@ impl Renderer {
 /// What the ground's and the models' shaders read the maps with: how hidden from the sun a point
 /// is, relative to the view's origin, 0 to 1. Each map is read over the 3x3 texels about the point,
 /// compared (soft edges; the original blurs its map once). Ours take the first map that holds the
-/// point and fade out over the last fifth of their reach; the original's take the darkest, and
-/// fade with how far under the caster the point is.
+/// point, handing over to the next across the last [`shadow::CASCADE_BLEND`] of it
+/// ([`shadow::cascade_share`]), and fade out smoothly over the last [`shadow::REACH_FADE`] of their
+/// reach ([`shadow::reach_fade`]); the original's take the darkest, and fade with how far under the
+/// caster the point is ([`shadow::original_box`]).
 pub(super) const SHADOW_WGSL: &str = r#"
 @group(0) @binding(2) var sun_map: texture_depth_2d_array;
 @group(0) @binding(3) var sun_cmp: sampler_comparison;
@@ -552,7 +556,9 @@ pub(super) const SHADOW_WGSL: &str = r#"
 fn sun_hidden(p: vec3f) -> f32 {
   let count = u32(view.sun_maps.y);
   let first = i32(view.sun_maps.z);
+  let ours = view.sun_maps.x > 1.5;
   var hidden = 0.0;
+  var left = 1.0;
   for (var k = 0u; k < count; k = k + 1u) {
     let layer = view.sun_layer[k];
     let c = rows(view.sun_m[k], p);
@@ -567,14 +573,26 @@ fn sun_hidden(p: vec3f) -> f32 {
       }
     }
     var h = (1.0 - lit / 9.0) * layer.x;
-    if (view.sun_maps.x > 1.5) {
-      let far = max(view.sun_maps.w, 1.0);
-      return h * clamp((far - length(p - (view.eye.xyz - view.origin.xyz))) / (0.2 * far), 0.0, 1.0);
+    if (ours) {
+      var w = 1.0;
+      if (k + 1u < count) {
+        w = 1.0 - clamp((max(abs(c.x), abs(c.y)) - (1.0 - CASCADE_BLEND)) / CASCADE_BLEND, 0.0, 1.0);
+      }
+      hidden = hidden + left * w * h;
+      left = left * (1.0 - w);
+      if (left <= 0.0) {
+        break;
+      }
+      continue;
     }
-    if (layer.w > 0.5) {
-      h = h * clamp(c.z / ORIGINAL_FADE, 0.0, 1.0);
+    if (layer.w > 0.0) {
+      h = h * clamp(c.z / layer.w, 0.0, 1.0);
     }
     hidden = max(hidden, h);
+  }
+  if (ours) {
+    let far = max(view.sun_maps.w, 1.0);
+    return hidden * (1.0 - smoothstep(far * (1.0 - REACH_FADE), far, length(p - (view.eye.xyz - view.origin.xyz))));
   }
   return hidden;
 }
@@ -582,5 +600,7 @@ fn sun_hidden(p: vec3f) -> f32 {
 
 /// [`SHADOW_WGSL`] with its constants written in.
 pub(super) fn shadow_wgsl() -> String {
-    SHADOW_WGSL.replace("ORIGINAL_FADE", &format!("{ORIGINAL_FADE:?}"))
+    SHADOW_WGSL
+        .replace("CASCADE_BLEND", &format!("{:?}", shadow::CASCADE_BLEND))
+        .replace("REACH_FADE", &format!("{:?}", shadow::REACH_FADE))
 }

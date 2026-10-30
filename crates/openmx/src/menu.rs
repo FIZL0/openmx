@@ -416,6 +416,10 @@ pub struct Settings {
     /// Whether the HUD draws its free-ride radar (V52): off, the speedometer stays and
     /// the radar, its icons and the other riders' marks go from every view. On unless turned off.
     pub minimap: bool,
+    /// Whether a ride draws its frame rate, `NN FPS`, in the window's top right (2026-10-29, the
+    /// Graphics tab's Show FPS): [`crate::ride_hud::FpsMeter`]'s average, on either renderer. Off
+    /// unless turned on.
+    pub show_fps: bool,
     /// The whole HUD's size, in percent of the original's (V52): [`HUD_SCALE_MIN`] to
     /// [`HUD_SCALE_MAX`] in steps of [`HUD_SCALE_STEP`], each part about its own corner.
     pub hud_scale: u8,
@@ -497,8 +501,11 @@ pub struct Settings {
     /// How the bikes handle (MD40): MX Unleashed's, or MX vs. ATV's bikes and steps read from the
     /// trick pack's `mx_*.phy`. The original's unless changed.
     pub handling: game_sim::handling::Handling,
-    /// How the plants change from model to picture (V55): ours, smoothed, unless the Original
-    /// switch's Plants (P126) is on.
+    /// How the plants change from model to picture (V55): always ours, [`Lod::Smooth`]. The
+    /// Original switch's Plant Detail (P126) and the presets' original plants were taken out
+    /// (2026-10-29: the original's plant LOD fades in bushes that are not there), and an older
+    /// `settings.txt`'s `plants = original` reads as Smooth; [`Lod::Original`] is left to the
+    /// renderer's research tests and `--plants original`.
     pub plants: Lod,
     /// How the plants' leaves lie over what is behind them (V56): ours, cut out, unless the
     /// Original switch's Leaves (V57) is on.
@@ -751,8 +758,6 @@ pub enum Departure {
     Cameras,
     /// The fog and far clip (V32): the whole map, or the original's.
     Fog,
-    /// The plants' model-to-picture change (V55): the smooth one, or the original's.
-    Plants,
     /// The plants' leaves (V56): cut out, so a tree shows through another's gaps, or the original's
     /// blended ones.
     Foliage,
@@ -769,11 +774,10 @@ pub enum Departure {
 }
 
 impl Departure {
-    pub const ALL: [Departure; 10] = [
+    pub const ALL: [Departure; 9] = [
         Departure::Controls,
         Departure::Cameras,
         Departure::Fog,
-        Departure::Plants,
         Departure::Foliage,
         Departure::Picture,
         Departure::Filtering,
@@ -788,7 +792,6 @@ impl Departure {
             Departure::Controls => "Controls",
             Departure::Cameras => "Cameras",
             Departure::Fog => "Fog and Draw Distance",
-            Departure::Plants => "Plant Detail",
             Departure::Foliage => "Leaves",
             Departure::Picture => "Aspect Ratio",
             Departure::Filtering => "Texture Filtering",
@@ -804,7 +807,6 @@ impl Departure {
             Departure::Controls => ["New", "Original"],
             Departure::Cameras => ["Further Out", "Original"],
             Departure::Fog => ["Whole Map", "Original Fog"],
-            Departure::Plants => ["Smooth", "Original"],
             Departure::Foliage => ["Crisp", "Original"],
             Departure::Picture => ["Auto", "4:3"],
             Departure::Filtering => ["16x", "Off"],
@@ -820,7 +822,6 @@ impl Departure {
             Departure::Controls => "Every player's bike buttons and plane stick. Original is the disc's own layout, on each player's controller preset.",
             Departure::Cameras => "Every player's follow cameras. Further Out sits a little back and higher; Original is the disc's.",
             Departure::Fog => "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
-            Departure::Plants => "How bushes and trees turn into flat pictures far off. Smooth dissolves them over a wide band; Original swaps them as the game did.",
             Departure::Foliage => "How leaves lie over what is behind them. Crisp cuts each leaf out, so trees show through each other's gaps; Original blends them as the game did, and a near tree's soft edges can hide the trees behind it.",
             Departure::Picture => ASPECT_HELP,
             Departure::Filtering => FILTERING_HELP,
@@ -839,7 +840,6 @@ impl Menu {
             Departure::Controls => c.layouts.iter().chain(&c.planes).all(|l| *l == Layout::Original),
             Departure::Cameras => s.cameras.iter().all(|v| *v == CameraView::ORIGINAL) && s.camera_sets.iter().all(cameras::Seat::is_disc),
             Departure::Fog => s.graphics == Graphics::Original,
-            Departure::Plants => s.plants == Lod::Original,
             Departure::Foliage => s.foliage == Foliage::Original,
             Departure::Picture => s.picture == Picture::Television,
             Departure::Filtering => s.filtering == Filtering::Off,
@@ -885,7 +885,6 @@ impl Menu {
                 }
             }
             Departure::Fog => s.graphics = if original { Graphics::Original } else { Graphics::Full },
-            Departure::Plants => s.plants = if original { Lod::Original } else { Lod::Smooth },
             Departure::Foliage => s.foliage = if original { Foliage::Original } else { Foliage::Cutout },
             Departure::Picture => s.picture = if original { Picture::Television } else { Picture::Fill },
             Departure::Filtering => s.filtering = if original { Filtering::Off } else { Filtering::X16 },
@@ -935,10 +934,13 @@ pub enum RenderScale {
     Full,
     ThreeQuarters,
     Half,
+    /// The last rung of the Auto preset's ladder on a weak phone (2026-10-29): fewer pixels rather than
+    /// no shadows and the original's near fog (`video::cheaper`).
+    Forty,
 }
 
 impl RenderScale {
-    pub const ALL: [RenderScale; 4] = [RenderScale::Auto, RenderScale::Full, RenderScale::ThreeQuarters, RenderScale::Half];
+    pub const ALL: [RenderScale; 5] = [RenderScale::Auto, RenderScale::Full, RenderScale::ThreeQuarters, RenderScale::Half, RenderScale::Forty];
 
     /// The settings file's word: `auto`, or the percentage.
     pub fn word(self) -> &'static str {
@@ -947,6 +949,7 @@ impl RenderScale {
             RenderScale::Full => "100",
             RenderScale::ThreeQuarters => "75",
             RenderScale::Half => "50",
+            RenderScale::Forty => "40",
         }
     }
 
@@ -962,6 +965,7 @@ impl RenderScale {
             RenderScale::Full => "100%",
             RenderScale::ThreeQuarters => "75%",
             RenderScale::Half => "50%",
+            RenderScale::Forty => "40%",
         }
     }
 
@@ -972,6 +976,7 @@ impl RenderScale {
             RenderScale::Full => Some(1.0),
             RenderScale::ThreeQuarters => Some(0.75),
             RenderScale::Half => Some(0.5),
+            RenderScale::Forty => Some(0.4),
         }
     }
 }
@@ -1275,6 +1280,7 @@ impl Default for Settings {
             overlay: Overlay::default(),
             speedometer: Speedometer::default(),
             minimap: true,
+            show_fps: false,
             hud_scale: HUD_SCALE_DEFAULT,
             world_sky: WorldSky::Global,
             wrecks: true,
@@ -1462,6 +1468,7 @@ impl Settings {
                 "overlay" => s.overlay = Overlay::from_word(v).unwrap_or(s.overlay),
                 "speedometer" => s.speedometer = Speedometer::from_word(v).unwrap_or(s.speedometer),
                 "minimap" => s.minimap = v != "off",
+                "show_fps" => s.show_fps = v == "on",
                 "hud_scale" => s.hud_scale = hud_scale_word(v).unwrap_or(s.hud_scale),
                 "world_sky" => s.world_sky = WorldSky::from_word(v).unwrap_or(s.world_sky),
                 "wrecks" => s.wrecks = v != "off",
@@ -1499,7 +1506,9 @@ impl Settings {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
                 "track_filter" => s.track_filter = clean_filter(v),
-                "plants" => s.plants = Lod::from_word(v).unwrap_or(s.plants),
+                // The original's plant detail is no longer offered (2026-10-29: it fades in bushes
+                // that are not there): an older file's `plants = original` reads as ours.
+                "plants" => s.plants = Lod::Smooth,
                 "foliage" => s.foliage = Foliage::from_word(v).unwrap_or(s.foliage),
                 "picture" => s.picture = Picture::from_word(v).unwrap_or(s.picture),
                 "textures" => s.textures = v != "original",
@@ -1653,25 +1662,26 @@ impl Settings {
         if self.vibration { String::new() } else { "vibration = off\n".into() }
     }
 
-    /// The minimap and the HUD's scale (V52), only where they are not the defaults, so a file from
-    /// before them is written as it was.
+    /// The minimap, the HUD's scale (V52) and the Show FPS counter, only where they are not the
+    /// defaults, so a file from before them is written as it was.
     fn hud_text(&self) -> String {
         let minimap = if self.minimap { String::new() } else { "minimap = off\n".into() };
+        let fps = if self.show_fps { "show_fps = on\n" } else { "" };
         let scale = match self.hud_scale {
             HUD_SCALE_DEFAULT => String::new(),
             n => format!("hud_scale = {n}\n"),
         };
-        minimap + &scale
+        minimap + fps + &scale
     }
 
     /// The Original switch's own settings (P126), only where they are not ours, so a file from
     /// before them is written as it was.
     fn original_text(&self) -> String {
-        let plants = if self.plants == Lod::default() { String::new() } else { format!("plants = {}\n", self.plants.word()) };
+        // No `plants` line: the plants are always ours, Smooth (see [`Settings::plants`]).
         let foliage = if self.foliage == Foliage::default() { String::new() } else { format!("foliage = {}\n", self.foliage.word()) };
         let picture = if self.picture == Picture::default() { String::new() } else { format!("picture = {}\n", self.picture.word()) };
         let textures = if self.textures { String::new() } else { "textures = original\n".into() };
-        plants + &foliage + &picture + &textures + &self.texture_packs_text()
+        foliage + &picture + &textures + &self.texture_packs_text()
     }
 
     /// The texture packs' order (V84), opentennis's two lines, none while nothing is ordered or off.

@@ -121,3 +121,55 @@ fn the_bike_s_shadow_darkens_the_ground_under_original_and_better_and_not_off() 
     let left = core.iter().map(|&i| grey(&original, i) / grey(&off, i).max(1.0)).sum::<f32>() / core.len() as f32;
     assert!((left - 0.63).abs() < 0.07, "original's shadow leaves {left} of the dirt, PCSX2's about 0.63");
 }
+
+/// A tape of `n` frames at 30 Hz with the gas held (Cross on the original's controls).
+fn gas_tape(n: usize) -> String {
+    let mut pad = [0u8; 32];
+    pad[..8].copy_from_slice(&[0x00, 0x79, 0xff, 0xbf, 0x7f, 0x7f, 0x7f, 0x7f]);
+    pad[14] = 0xff;
+    let hex: String = pad.iter().map(|b| format!("{b:02x}")).collect();
+    let mut tape = format!("# game-sim pad tape: {n} frames\nformat 1\ntape gas\n");
+    for _ in 0..n {
+        tape += &format!("frame 0x3d08850a 0x{hex} -\n");
+    }
+    tape
+}
+
+/// The user's "when my shadow gets long enough it just disappears" (V108's follow-up): free09's big
+/// jump, ridden flat out from 3864, 1592 heading -132, has the bike still well up off the dirt
+/// at tick 130 (some 55 ft up at its top, tick 102) under a low sun, its shadow far off in the
+/// bottom right of the ride camera's picture. Original's box reached only 40 ft along the sun past the bike, so the
+/// shadow was gone there (no pixel darker than Off's in that corner); now it reaches the ground.
+#[test]
+fn a_high_jump_s_long_shadow_still_reaches_the_ground() {
+    if let Err(e) = game_render::disc::Disc::open_configured() {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    let tape = scratch("gas.tape");
+    std::fs::write(&tape, gas_tape(140)).expect("the tape");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let shot = |mode: &str| {
+        let path = scratch(&format!("jump-{mode}.png"));
+        let _ = std::fs::remove_file(&path);
+        let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
+            .current_dir(&root)
+            .args(["--headless", "--track", "free09", "--size", "640x360", "--overlay", "none", "--controls", "original"])
+            .args(["--trace-at", "3864.2,1592.5,-132", "--play", tape.to_str().unwrap(), "--frames", "132"])
+            .args(["--shadows", mode, "--shot", path.to_str().unwrap(), "--shot-frame", "130"])
+            .output()
+            .expect("the shell runs");
+        assert!(out.status.success(), "the shell failed: {}", String::from_utf8_lossy(&out.stderr));
+        let (w, h, rgb) = read_png(&path);
+        assert_eq!((w, h), (640, 360));
+        rgb
+    };
+    let off = shot("off");
+    for mode in ["original", "better"] {
+        let rgb = shot(mode);
+        let corner = (240..360).flat_map(|y| (400..640).map(move |x| y * 640 + x));
+        let darker = corner.filter(|&i| grey(&off, i) - grey(&rgb, i) > 20.0).count();
+        // About 550-600 pixels of shadow either way; none at all when it fell out of the box.
+        assert!(darker > 300, "{mode}: the jump's shadow is gone, only {darker} pixels darker than off's");
+    }
+}
