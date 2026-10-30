@@ -1699,7 +1699,8 @@ struct Args {
     /// `--headless`: no window and no host pad — every seat rides an idle pad, or the first rides
     /// `--play`'s tape — and the frame is drawn all the same, for `--shot` and for the tests.
     headless: bool,
-    /// `--frames N`: quit after N frames, which unlike `--seconds` is the same run on any machine.
+    /// `--frames N`: quit after N frames, which unlike `--seconds` is the same run on any machine;
+    /// `--online`, after the session's Nth tick, however long the peers took to load (K10).
     frames: Option<u32>,
     /// `--steady-clock`: the ride's clock moves on by each picture's floor (`--draw-fps`', a headless
     /// ride's 60 a second) and not with the wall's, so an offline ride is the same ride on a busy
@@ -5696,7 +5697,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // `net::rollback::gate` counts every call as a tick of real time, and each tick's `dt` is the
     // one this schedule gives offline), whatever the picture's rate. Each pass of the loop either
     // runs one tick the wall clock owes, or — owing none — draws, blended between the last two ticks.
-    let mut pacer = pace::Pacer::new(pace::TICK, started).most(args.frames).until(args.seconds);
+    // `--online`'s `--frames` counts the session's ticks, below, and not the loop's frames (K10).
+    let mut pacer = pace::Pacer::new(pace::TICK, started).most(args.frames.filter(|_| args.online.is_none())).until(args.seconds);
     // What the tick before the last one showed, for the picture to blend from: each seat's pose,
     // each view's camera and the plane.
     let mut before: Vec<Shown> = Vec::new();
@@ -8507,7 +8509,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 break;
             }
         }
-        if args.frames.is_some_and(|n| pacer.ticks() >= u64::from(n)) {
+        // Online, the session's ticks: the loop's frames go on the wall clock, waiting for a peer
+        // still loading or stalled for its pads, so N of them were a shorter ride the busier the
+        // machine (K10), and `--frames` is the same run on any machine.
+        let ridden = online.as_ref().filter(|_| args.online.is_some()).map_or(pacer.ticks(), online::Online::ticks);
+        if args.frames.is_some_and(|n| ridden >= u64::from(n)) {
             break;
         }
         perf.end(rects.len().min(world.seats.len()));

@@ -437,16 +437,36 @@ fn two_online_machines_start_their_seats_in_the_plane_on_a_race_track() {
             .stdout(std::process::Stdio::piped());
         pad::tests::spawn(&mut shell)
     };
-    let (host, guest) = (ride(h, g), ride(g, h));
-    let said: Vec<String> = [host, guest]
-        .into_iter()
-        .map(|c| {
-            let out = c.wait_with_output().expect("the shell ends");
-            let said = String::from_utf8_lossy(&out.stdout).to_string();
-            assert!(out.status.success(), "an online shell failed:\n{said}");
+    // Each rides 400 of the session's ticks (K10), not 400 of its own frames on the wall clock, which
+    // the one that loaded first spent waiting for the other on a busy machine. So a shell that
+    // fails takes its peer down with it: the peer would wait for its pads for ever.
+    let mut kids = [ride(h, g), ride(g, h)];
+    // each one's stdout read as it comes, so neither blocks on a full pipe meanwhile
+    let readers = kids.each_mut().map(|c| {
+        let mut out = c.stdout.take().expect("piped stdout");
+        std::thread::spawn(move || {
+            let mut said = String::new();
+            std::io::Read::read_to_string(&mut out, &mut said).ok();
             said
         })
-        .collect();
+    });
+    let mut ended = [false; 2];
+    while !ended.iter().all(|&e| e) {
+        for i in 0..2 {
+            match kids[i].try_wait().expect("the shell's status") {
+                Some(status) if !status.success() => {
+                    let _ = kids[1 - i].kill();
+                    let _ = kids[1 - i].wait();
+                    let [a, b] = readers.map(|r| r.join().unwrap_or_default());
+                    panic!("an online shell failed:\n{}", if i == 0 { a } else { b });
+                }
+                Some(_) => ended[i] = true,
+                None => {}
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let said: Vec<String> = readers.into_iter().map(|r| r.join().expect("the shell's output")).collect();
     for s in &said {
         assert_eq!(line(s, "online: 2 seats"), "online: 2 seats start in the biplane", "\n{s}");
         assert!(line_with(s, "desyncs").contains(" 0 desyncs"), "\n{s}");
