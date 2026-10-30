@@ -849,6 +849,30 @@ fn a_wrapped_edge_names_the_map_across_the_seam() {
 }
 
 
+/// P234: a lone track, a disc one or a mod, names no map: its MapNames are empty, so the radar
+/// draws no name under the arrow and none at the rim, wherever the rider is.
+#[test]
+fn a_lone_track_names_no_map_under_the_arrow() {
+    let t0 = Instant::now();
+    let tracker = Tracker::default();
+    let g = gauges(Speedometer::Digital);
+    let mut out = Vec::new();
+    let lone = hud::MapNames::default();
+    for own in [[0.0, 0.0], [-1.0e6, 3.0e6], [2500.0, -800.0]] {
+        let (map, around) = lone.around(own);
+        assert_eq!((map, around), (None, [None; 4]));
+        let mut s = shown(&g, &[], &[], None);
+        s.own = own;
+        s.map = map;
+        s.around = around;
+        let d = ride_hud::sprites(&mut out, 0, [0.0, 0.0, 1920.0, 1080.0], &s, &tracker, t0);
+        assert!(d.radar.is_some(), "the radar is still drawn");
+        assert!(d.map.is_none(), "{own:?}: {:?} named under the arrow", d.map.map(|l| l.text));
+        assert!(d.around.is_empty(), "{own:?}: rim names {:?}", d.around.iter().map(|(_, l)| l.text.clone()).collect::<Vec<_>>());
+    }
+}
+
+
 /// P182: a wrecked ride's HUD speed is 0. The original's readout drops to 0 on the wreck and stays
 /// there until the put-back (S109's run2.mp4, 29.6–33.6 s); the camera's target block follows the
 /// tumbling wreck body at 30 ft/s, and the speedometer must not read it.

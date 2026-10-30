@@ -5229,13 +5229,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The radar's world is the scene's terrain scales' (MD3): the original reads the larger of the
     // two the map edge measures with, which on the disc is the terrain file's own spacing.
     let radar_span = overlay::radar_span(place.terrain.width_scale.0.max(place.terrain.breadth_scale.0));
-    // The maps the radar names (MD42): a world's tiles, or the one track — a mod's by its name, a
-    // disc track's by its town.
-    let map_names = match (&world_mod, &modded) {
-        (Some(w), _) => w.map_names(),
-        (None, Some(t)) => hud::MapNames::alone(&t.name),
-        (None, None) => hud::MapNames::alone(&worlds::map_title(&args.track)),
-    };
+    // The maps the radar names (MD42): a world's tiles. A lone track, a disc one or a mod, names
+    // none under the rider's arrow (P234).
+    let map_names = world_mod.as_ref().map(|w| w.map_names()).unwrap_or_default();
     // And on a world that wraps (MD43), across its seams.
     let hud_wrap = match &sim {
         Land::Tiles(t) => drawn_wrap(t),
