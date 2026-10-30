@@ -2097,7 +2097,21 @@ impl P2m2 {
     /// It is also the check that a recording can drive the port *at all*: a `.p2m2` of a host pad that
     /// reported no pressures would leave those twelve controls released however much its button word
     /// says, and the error names the first frame and control where the two disagree.
+    ///
+    /// **One disagreement is allowed, per control: the light edge of an analogue press.** A host pad
+    /// with analogue triggers (fly_and_collide.p2m2, PCSX2 2.9) sets a control's bit before its
+    /// pressure byte leaves 0 — R2 there is down by its bit for seven frames and reads 0, 0, 0, 0, 0,
+    /// 0x0b, 0x0b by its pressure. So a field whose bit is down and whose pressure is 0 is accepted
+    /// for a control whose pressures *in this file* are graded (some byte strictly between 0 and
+    /// 0xff), and only for that control; [`P2m2::light_presses`] counts them. A bit that is up under a
+    /// non-zero pressure is never accepted, nor is a down bit with no pressure on a control whose
+    /// pressures are all 0 or 0xff — a wrong pairing or a pad with no pressures still fails. The game
+    /// reads these twelve controls from the pressure byte only, so a light field is a released
+    /// control to the original and to the port alike.
+    ///
+    /// Returns how many bit/pressure pairs it checked, light fields included.
     pub fn check_pressures(&self) -> Result<usize, P2m2Error> {
+        let graded = self.graded_pressures();
         let mut agreements = 0;
         for field in 0..self.fields() {
             for pad in 0..P2M2_PADS {
@@ -2113,7 +2127,8 @@ impl P2m2 {
                     }
                     let down = buttons & binding.mask != 0;
                     let pressed = report.pressure(binding.pressure) != 0;
-                    if down != pressed {
+                    let light = down && !pressed && graded[pad][control as usize];
+                    if down != pressed && !light {
                         return p2m2_err(
                             P2M2_HEADER_BYTES + (field + 1) * P2M2_FRAME_BYTES + pad * P2M2_PAD_BYTES,
                             format!(
@@ -2134,6 +2149,56 @@ impl P2m2 {
             }
         }
         Ok(agreements)
+    }
+
+    /// The fields [`P2m2::check_pressures`] accepts as the light edge of an analogue press: per pad
+    /// and control, how many fields hold the control down by its bit with a pressure byte of 0. Only
+    /// controls with graded pressures in this file appear, and every one is a field the game reads
+    /// as released.
+    pub fn light_presses(&self) -> Vec<(usize, input::Control, usize)> {
+        let graded = self.graded_pressures();
+        let mut light = Vec::new();
+        for pad in 0..P2M2_PADS {
+            for control in input::Control::ALL {
+                if !graded[pad][control as usize] {
+                    continue;
+                }
+                let binding = control.binding();
+                let fields = (0..self.fields())
+                    .map(|field| self.field(field, pad))
+                    .filter(|report| report.status() == 0)
+                    .filter(|report| {
+                        report.buttons() & binding.mask != 0 && report.pressure(binding.pressure) == 0
+                    })
+                    .count();
+                if fields > 0 {
+                    light.push((pad, control, fields));
+                }
+            }
+        }
+        light
+    }
+
+    /// Per pad and control, whether any written field of this file has a pressure byte strictly
+    /// between 0 and 0xff — a host pad that reports this control as analogue, rather than as a
+    /// button PCSX2 writes as all or nothing.
+    fn graded_pressures(&self) -> [[bool; input::CONTROLS]; P2M2_PADS] {
+        let mut graded = [[false; input::CONTROLS]; P2M2_PADS];
+        for field in 0..self.fields() {
+            for (pad, graded) in graded.iter_mut().enumerate() {
+                let report = self.field(field, pad);
+                if report.status() != 0 {
+                    continue;
+                }
+                for control in input::Control::ALL {
+                    let binding = control.binding();
+                    if binding.is_analogue() && !matches!(report.pressure(binding.pressure), 0 | 0xff) {
+                        graded[control as usize] = true;
+                    }
+                }
+            }
+        }
+        graded
     }
 }
 
