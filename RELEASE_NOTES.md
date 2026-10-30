@@ -1,3 +1,13 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
 - A wrecked rider lets go of the throttle: the engine drops to idle instead of driving on
 - The bike and rider keep their shadow while respawning
+- Players collide with each other in split screen and online: bike into bike, bike into a plane, plane into plane
+- A crash no longer scores the trick you were doing
+- FMX freestyle maps no longer throw you off or play the shootoff sound
+- Two-player split screen starts side by side
+- Game modifier and camera presets can be saved over
+- Modded maps have categories (freestyle and others), with a filter in the mod store's Browse and in the map pick
+- With Shadows on All, hills and terrain cast shadows
+- The bike's tyre no longer turns yellow on some modded maps, such as West Junction
+- The web build picks up USB and Bluetooth controllers
+- No Quit on the iPhone (close it from the app switcher); the web says "Back to Launcher"
