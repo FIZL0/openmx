@@ -781,7 +781,9 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
                     .iter()
                     .map(|part| {
                         let name = format!("{}{tag}", part.model);
+                        p.assets.own(1);
                         p.assets.load_repainted(p.archives, &part.model, &name, &p.vehicle.materials);
+                        p.assets.own(0);
                         made.push(name.clone());
                         game_render::scene::Part { model: name, placement: part.placement.clone() }
                     })
@@ -3356,10 +3358,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     // Kept as `CHASSIS` whichever file the bike's set draws it from: `bike50` under a fast50 (V37).
     let chassis_file = game_render::vehicle::chassis_model(&archives[1..2], &vehicle);
+    // The bike is MX Unleashed's whatever the map (MD67): its own archives first, the track's last.
+    assets.own(1);
     let has_bike = assets.load_as(&archives, &chassis_file, CHASSIS);
     for part in &vehicle.parts {
         assets.load(&archives, &part.model);
     }
+    assets.own(0);
     println!(
         "loaded: {} of {} models, {} textures{}",
         assets.models.len(),
@@ -3506,7 +3511,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if let Some(k) = &kit {
             assets.rename_materials(&k.repaint(&body.rider.suit, &args.look));
         }
+        assets.own(1);
         let drawn = assets.load(&archives, body.geometry());
+        assets.own(0);
         let bound = body.rig.set.clips.len();
         let slots = body.rig.lib.stunt.iter().filter(|c| c.is_some()).count();
         println!(
@@ -4760,7 +4767,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         .iter()
                         .map(|part| {
                             let name = format!("{}@{}", part.model, i + 1);
+                            assets.own(1);
                             assets.load_repainted(&archives, &part.model, &name, &vehicle.materials);
+                            assets.own(0);
                             game_render::scene::Part { model: name, placement: part.placement.clone() }
                         })
                         .collect(),

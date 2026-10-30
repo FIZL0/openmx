@@ -186,6 +186,17 @@ pub fn vertex_light(shading: Shading, light: &Lighting, normal: V3, color: [u8; 
     lit
 }
 
+/// The member `file` names, from the first archive that has it by its whole name, and failing that
+/// from the first with a member merely ending in it; the first `map` archives are tried last
+/// ([`Assets::own`]).
+pub fn read_member(archives: &[Res], map: usize, file: &str) -> Option<Vec<u8>> {
+    let (map, own) = archives.split_at(map.min(archives.len()));
+    let order = || own.iter().chain(map);
+    order()
+        .find_map(|a| a.read_whole(file).ok())
+        .or_else(|| order().find_map(|a| a.read_suffix(file).ok()))
+}
+
 /// Every model, material and texture a scene needs, loaded from the archives it is spread across.
 #[derive(Default)]
 pub struct Assets {
@@ -202,6 +213,9 @@ pub struct Assets {
     /// Each texture's disc key, by its index, where it was decoded with replacements on (V86): what
     /// [`Assets::replace_keyed`] swaps when a replacement changes mid-ride.
     keys: HashMap<usize, String>,
+    /// While the ride's own models load ([`Assets::own`]), how many of the archives at the front are
+    /// the map's: they are searched last, and their answers are not these. 0 the rest of the time.
+    map: usize,
 }
 
 impl Assets {
@@ -223,6 +237,23 @@ impl Assets {
         };
     }
 
+    /// Load the bike's and the rider's models from their own archives first (MD67), with `map` the
+    /// number of archives at the front of the list that are the track's; `own(0)` ends it. A map's
+    /// `tex\red_tire.psm` painted the bike's `tire` yellow on West Junction, and a map with a
+    /// material or texture of the very name of one of the bike's no longer stands in for it either:
+    /// the materials and textures loaded meanwhile are remembered apart from the map's props'.
+    pub fn own(&mut self, map: usize) {
+        self.map = map;
+    }
+
+    /// What a material or texture file is remembered by: the map's and the ride's own apart.
+    fn answer_key(&self, name: &str) -> String {
+        match self.map {
+            0 => name.to_string(),
+            _ => format!("own:{name}"),
+        }
+    }
+
     /// Load one model by the name a scene uses for it, from the first archive that has it. Returns
     /// false if the model is not on the disc or does not parse; the caller draws what it got.
     pub fn load(&mut self, archives: &[Res], name: &str) -> bool {
@@ -230,7 +261,7 @@ impl Assets {
             return true;
         }
         let file = format!("{name}.psg");
-        let Some(bytes) = archives.iter().find_map(|a| a.read_suffix(&file).ok()) else {
+        let Some(bytes) = read_member(archives, self.map, &file) else {
             self.missing.push(file);
             return false;
         };
@@ -329,10 +360,8 @@ impl Assets {
     /// The texture a material paints with, loading it if this is the first mesh to ask, and how the
     /// material is drawn.
     fn texture_of(&mut self, archives: &[Res], material: &str) -> (Option<usize>, Surface) {
-        self.resolve(
-            &|file: &str| archives.iter().find_map(|a| a.read_suffix(file).ok()),
-            material,
-        )
+        let map = self.map;
+        self.resolve(&|file: &str| read_member(archives, map, file), material)
     }
 
     /// [`Assets::texture_of`] against any reader of archive members, so it can be tried on bytes
@@ -355,17 +384,18 @@ impl Assets {
             None => (material.to_string(), read(&format!("{material}.psm"))),
         };
         let material = material.as_str();
+        let asked_key = self.answer_key(asked);
         let Some(psm) = psm else {
-            return (self.by_name.get(asked).copied(), Surface::default());
+            return (self.by_name.get(&asked_key).copied(), Surface::default());
         };
         let m = Material::parse(&crate::ini::text(&psm));
         let surface = Surface::of(&m);
-        if let Some(&i) = self.by_name.get(asked) {
+        if let Some(&i) = self.by_name.get(&asked_key) {
             return (Some(i), surface);
         }
         for file in texture_files(material, &m) {
-            if let Some(&i) = self.by_name.get(&file) {
-                self.by_name.insert(asked.to_string(), i);
+            if let Some(&i) = self.by_name.get(&self.answer_key(&file)) {
+                self.by_name.insert(asked_key, i);
                 return (Some(i), surface);
             }
             let made = self.made.get(&file.to_ascii_lowercase()).cloned();
@@ -377,8 +407,8 @@ impl Assets {
             if let Some(key) = key {
                 self.keys.insert(i, key);
             }
-            self.by_name.insert(file, i);
-            self.by_name.insert(asked.to_string(), i);
+            self.by_name.insert(self.answer_key(&file), i);
+            self.by_name.insert(asked_key, i);
             return (Some(i), surface);
         }
         (None, surface)
@@ -998,6 +1028,51 @@ mod tests {
         // Asked again, the same texture comes back rather than a second copy.
         assert_eq!(assets.resolve(&read, "seats_red").0, texture);
         assert_eq!(assets.textures.len(), 1);
+    }
+
+    /// MD67: a track mod's textures never paint the bike's tyre. West Junction's `tex\red_tire.psm`
+    /// merely ends in the bike's `tire.psm` and its archive is searched first, which painted the tyre
+    /// yellow; and a map whose own material and texture are named `tire`, loaded for a prop before
+    /// the bike, still leaves the bike its own while the prop keeps the map's.
+    #[test]
+    fn a_track_mods_tyre_texture_leaves_the_bikes_own() {
+        let root = std::env::temp_dir().join(format!("openmx-md67-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let put = |path: &str, bytes: &[u8]| {
+            let at = root.join(path);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, bytes).unwrap();
+        };
+        let yellow = [220, 200, 20, 0x80];
+        let black = [20, 20, 20, 0x80];
+        put("loose/tex/red_tire.psm", b"[ShaderPass_1]\nTextureMap_1 = tex\\red_tire\n");
+        put("loose/tex/red_tire.pst", &one_texel(yellow));
+        put("named/tex/tire.psm", b"[ShaderPass_1]\nTextureMap_1 = tex\\tire\n");
+        put("named/tex/tire.pst", &one_texel(yellow));
+        put("bike/bike/tex/tire.psm", b"[ShaderPass_1]\nTextureMap_1 = bike\\tex\\tire\n");
+        put("bike/bike/tex/tire.pst", &one_texel(black));
+        let colour = |assets: &Assets, i: Option<usize>| assets.textures[i.expect("a texture")].rgba[0..3].to_vec();
+
+        for map in ["loose", "named"] {
+            let archives = [Res::folder(&root.join(map)).unwrap(), Res::folder(&root.join("bike")).unwrap()];
+            let mut assets = Assets::default();
+            // The map's own prop, where the map has a `tire` of its own.
+            let prop = (map == "named").then(|| assets.texture_of(&archives, "tire").0);
+            assets.own(1);
+            let (tyre, _) = assets.texture_of(&archives, "tire");
+            assets.own(0);
+            assert_eq!(colour(&assets, tyre), black[..3], "{map}: the bike's tyre is its own");
+            if let Some(prop) = prop {
+                assert_eq!(colour(&assets, prop), yellow[..3], "{map}: the map's prop keeps the map's");
+                assert_eq!(assets.texture_of(&archives, "tire").0, prop, "{map}: and is asked again as the map's");
+            }
+        }
+        // A name that is only a member's ending is still found when nothing has it whole.
+        let archives = [Res::folder(&root.join("loose")).unwrap()];
+        let mut assets = Assets::default();
+        let (only, _) = assets.texture_of(&archives, "tire");
+        assert_eq!(colour(&assets, only), yellow[..3], "the bare ending is the last resort");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn light() -> Lighting {
