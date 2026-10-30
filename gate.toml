@@ -41,3 +41,13 @@ tests = [
 # red in the first parallel merge gate (P128, 10-23 16:16) and are the original's frame-budget and the smooth
 # rule's no-slower checks.
 tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem"]
+
+[display]
+# Every window a check's tests open goes to a private headless weston + Xwayland that ends with the check
+# (ps2kit/platform_.py PrivateDisplay), not to the desktop's compositor: Hyprland 0.56.2 held 105 GiB of GPU
+# memory after ten days of runs and the kernel OOM-killed the runner (K16, 2026-10-30). Without weston the
+# windows go to the caller's display, and the check says so under its verdict. `grew_mib`: the check also notes
+# when the desktop compositor's GTT grew more than this over the run.
+private = true
+size = "1920x1080"
+grew_mib = 1024

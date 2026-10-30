@@ -329,3 +329,189 @@ def pad_available() -> tuple[bool, str]:
             return False, 'install the ViGEmBus driver and `pip install vgamepad`'
         return True, ''
     return False, f'no virtual-pad backend for {sys.platform}'
+
+
+# --- memory, and windows kept off the desktop --------------------------------
+# K16 (2026-10-30): the desktop's compositor (Hyprland 0.56.2) grew to 105 GiB of GPU memory over ten days of
+# runs and the kernel OOM-killed the runner. A run must not lean on the compositor the user sits at.
+
+def mem_available_gib() -> float | None:
+    """MemAvailable in GiB, or None where there is no /proc/meminfo (Windows, macOS)."""
+    try:
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            if line.startswith('MemAvailable:'):
+                return int(line.split()[1]) / 1048576
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def gtt_mib(pid: int) -> float | None:
+    """GPU memory in GTT (system RAM the GPU maps) that a process holds, in MiB, from its DRM fdinfo.
+
+    One DRM client shows on several of a process's fds, so each `drm-client-id` counts once. `free` shows this
+    memory as used with no process's RSS to account for it, which is how a compositor leak hides."""
+    if not LINUX:
+        return None
+    seen: dict[str, int] = {}
+    try:
+        fds = list(Path(f'/proc/{pid}/fdinfo').iterdir())
+    except OSError:
+        return None
+    for f in fds:
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        client = kib = None
+        for line in text.splitlines():
+            k, _, v = line.partition(':')
+            if k == 'drm-client-id':
+                client = v.strip()
+            elif k == 'drm-memory-gtt':
+                kib = int(v.split()[0])
+        if client is not None and kib is not None:
+            seen[client] = kib
+    return sum(seen.values()) / 1024
+
+
+DISPLAY_FIRST = 200  # private X displays from here up
+COMPOSITORS = ('Hyprland', 'sway', 'kwin_wayland', 'gnome-shell', 'Xwayland')
+
+
+def compositor_gtt_mib() -> dict[str, float]:
+    """GTT MiB of each desktop compositor (and its Xwayland) running for this user, by program name."""
+    out = {}
+    for name in COMPOSITORS:
+        for pid in pids_named(name) if LINUX else []:
+            if pid != os.getpid() and (g := gtt_mib(pid)) is not None:
+                out[name] = out.get(name, 0.0) + g
+    return out
+
+
+class PrivateDisplay:
+    """A headless weston with a rootful Xwayland in it: test windows land here, not on the desktop.
+
+        with PrivateDisplay() as env:    # {'DISPLAY': ':N', 'WAYLAND_DISPLAY': None}, or {} if it cannot start
+            subprocess.run(cmd, env={**os.environ, **env})
+
+    Every window then draws into GPU memory weston and this Xwayland own, both of which end with the block, so
+    nothing a run opens can pile up in the compositor the user sits at. X11 only (WAYLAND_DISPLAY is dropped),
+    as the shell's software window speaks X11 and its GPU window takes X11 when there is no Wayland. `why`
+    says what went wrong when the env is empty; the caller falls back to whatever display it had.
+    """
+
+    def __init__(self, size: str = '1920x1080', name: str = ''):
+        self.size = size
+        self.name = name or f'kit-display-{os.getpid()}'
+        self.why = ''
+        self.procs: list[subprocess.Popen] = []
+        self.log = rt(f'{self.name}.log')
+
+    def __enter__(self) -> dict:
+        try:
+            return self._start()
+        except Exception as e:  # never fail the caller's run for want of a private display
+            self.why = f'{type(e).__name__}: {e}'
+            self.__exit__()
+            return {}
+
+    def _start(self) -> dict:
+        if not LINUX:
+            self.why = 'not Linux'
+            return {}
+        weston = shutil.which('weston')
+        if not weston or not shutil.which('Xwayland'):
+            self.why = 'weston or Xwayland is not installed (pacman -S weston xorg-xwayland)'
+            return {}
+        w, h = self.size.split('x')
+        bare = {k: v for k, v in os.environ.items() if k not in ('DISPLAY', 'WAYLAND_DISPLAY', 'WAYLAND_SOCKET')}
+        logf = open(self.log, 'wb')
+        # --idle-time=0: an idle headless output stops repainting, and then no window's frame ever comes back
+        self.procs.append(subprocess.Popen(
+            [weston, '--backend=headless', '--renderer=gl', '--shell=kiosk', f'--socket={self.name}',
+             f'--width={w}', f'--height={h}', '--idle-time=0'],
+            env=bare, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True))
+        sock = runtime_dir() / self.name
+        deadline = time.monotonic() + 15
+        while not sock.exists():
+            if self.procs[0].poll() is not None or time.monotonic() > deadline:
+                self.why = f'weston did not come up (log {self.log})'
+                self.__exit__()
+                return {}
+            time.sleep(0.05)
+        # Never -displayfd: it walks up from :0, and on a display the desktop already serves Xtrans unlinks the
+        # desktop's socket file before it gives up on that number, so every later client of :0 is refused
+        # (K16 took the desktop's /tmp/.X11-unix/X0 that way, 10-30). A number with neither a lock nor a
+        # socket, well above the desktop's, and Xwayland's own lock file settles two gates picking the same one.
+        for n in range(DISPLAY_FIRST, DISPLAY_FIRST + 200):
+            lock, sock_x = Path(f'/tmp/.X{n}-lock'), Path(f'/tmp/.X11-unix/X{n}')
+            try:  # a private display a killed run left behind: its server is gone, so the number is free
+                if not alive(int(lock.read_text().strip())):
+                    lock.unlink()
+                    sock_x.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
+            if lock.exists() or sock_x.exists():
+                continue
+            x = subprocess.Popen(
+                ['Xwayland', f':{n}', '-geometry', self.size, '-noreset', '-nolisten', 'tcp'],
+                env={**bare, 'WAYLAND_DISPLAY': self.name}, stdin=subprocess.DEVNULL, stdout=logf,
+                stderr=subprocess.STDOUT, start_new_session=True)
+            self.procs.append(x)
+            while not Path(f'/tmp/.X11-unix/X{n}').exists() and x.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if x.poll() is None and Path(f'/tmp/.X11-unix/X{n}').exists():
+                break
+            self.procs.remove(x)
+            if x.poll() is None:
+                x.kill()
+                x.wait()
+            if time.monotonic() > deadline:
+                n = None
+                break
+        else:
+            n = None
+        if n is None:
+            self.why = f'Xwayland did not come up (log {self.log})'
+            self.__exit__()
+            return {}
+        return {'DISPLAY': f':{n}', 'WAYLAND_DISPLAY': None}
+
+    def __exit__(self, *_) -> None:
+        for p in reversed(self.procs):
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(10)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+        self.procs.clear()
+
+
+def with_env(base: dict, extra: dict) -> dict:
+    """`base` with `extra` laid over it, where a None in `extra` removes that variable."""
+    out = {**base, **{k: v for k, v in extra.items() if v is not None}}
+    for k, v in extra.items():
+        if v is None:
+            out.pop(k, None)
+    return out
+
+
+def main(argv: list[str]) -> int:
+    """`python3 -m ps2kit.platform_ room GIB`: exit 1 while MemAvailable is under GIB (agent-runner's
+    `[run] before_start` holds every new slot on it); exit 0 where it cannot be read."""
+    if argv[:1] == ['room'] and len(argv) == 2:
+        have, need = mem_available_gib(), float(argv[1])
+        if have is not None and have < need:
+            print(f'MemAvailable {have:.1f} GiB < {need:g} GiB: no new slot (compositor GTT '
+                  f'{ {k: round(v) for k, v in compositor_gtt_mib().items()} } MiB)', file=sys.stderr)
+            return 1
+        return 0
+    print('usage: python3 -m ps2kit.platform_ room GIB', file=sys.stderr)
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
