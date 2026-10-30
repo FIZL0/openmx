@@ -1,0 +1,8 @@
+{
+  "id": "world_mxu_free",
+  "name": "MX Unleashed: the freeride maps",
+  "wrap": "xz",
+  "tiles": ["mxu_free06", "mxu_free07", "mxu_free09", "mxu_free10", "mxu_free11"],
+  "sky": "mxu_free06",
+  "min_gap": 120
+}

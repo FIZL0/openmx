@@ -232,7 +232,7 @@ mod saved_markers;
 // MD10: `--shot-pose`, the first view's camera held where the accuracy harness asks.
 mod shot_pose;
 mod split;
-mod spliced;
+mod disc_worlds;
 mod stages;
 mod tire_tracks;
 mod weather;
@@ -3067,16 +3067,19 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut disc = Disc::open_configured()?;
     // A track the disc does not have is a track mod's (MD2), looked for in the mods folder only
     // then, so a disc track's ride reads nothing from it.
-    // Every free-ride map spliced into one (P71) is a world of the disc's own tracks: the ride is
-    // the first map's, dressed and lit from its archives, and the simulation asks every map.
-    let spliced = args.track == spliced::ID;
-    let track_member = member_ending(&disc, &format!("{}.res", if spliced { spliced::MAPS[0] } else { args.track.as_str() }));
+    // MX Unleashed's worlds (P232, `disc_worlds`) are the disc's own tracks as one ground: the ride is
+    // the home map's, dressed and lit from its archives, and the simulation asks every map and the
+    // stitcher's joins. An installed world mod of the same id is ridden instead.
+    let disc_world =
+        disc_worlds::is_disc_world(&args.track) && !mods_dir(&args).is_some_and(|d| worlds::is_world(&d, &args.track));
+    let home = if disc_world { disc_worlds::home_track(&args.track).unwrap_or(track_mods::FREERIDE) } else { args.track.as_str() };
+    let track_member = member_ending(&disc, &format!("{home}.res"));
     // A world mod (MD8) is several track mods as one ground: the ride is dressed and lit from its
     // home tile's folder, as a track mod's is, and the simulation asks every tile.
     let mut world_mod: Option<worlds::WorldMod> = None;
     let modded = match &track_member {
-        Ok(_) if spliced => {
-            world_mod = Some(spliced::world(&mut disc)?);
+        Ok(_) if disc_world => {
+            world_mod = Some(disc_worlds::world(&mut disc, &disc_worlds_cache(&args), &args.track, &mut |l| println!("{l}"))?);
             None
         }
         Ok(_) => None,
@@ -3094,8 +3097,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The name the track's other files are built from: a disc track's own, a mod's scene's stem.
     let stem = match &modded {
         Some(t) => t.stem.clone(),
-        None if spliced => spliced::MAPS[0].to_string(),
-        None => args.track.clone(),
+        None => home.to_string(),
     };
     let bike_member = member_ending(&disc, &format!("{}.res", args.bike))?;
     // A track is two archives: the props and the terrain in one, the bike's animation set, its
@@ -3230,11 +3232,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             println!("{}", w.line(&t));
             if let Some(line) = w.wrap_line(&t) {
                 println!("{line}");
-            }
-            if spliced {
-                for line in spliced::layout(w) {
-                    println!("{line}");
-                }
             }
             println!("{}", worlds::WorldMod::holes_line(&t));
             let mut t = t;
@@ -8996,6 +8993,15 @@ fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
 
 /// The `mods/` folder a ride may look for a track in (MD2): `--mods`' or the front end's, else beside
 /// `settings.txt` when its Mods row is on. `None` reads nothing.
+/// Where MX Unleashed's worlds keep their built joins (P232): under `--mods DIR`, else the mods folder
+/// beside the settings — with mods off too, as the joins are the disc's, not a mod.
+fn disc_worlds_cache(args: &Args) -> std::path::PathBuf {
+    match (&args.mods, args.mods_asked) {
+        (Some(dir), true) => dir.clone(),
+        _ => menu::store_dir(Disc::configured_path().ok().as_deref()).join(track_mods::MODS_DIR),
+    }
+}
+
 fn mods_dir(args: &Args) -> Option<std::path::PathBuf> {
     if args.mods_asked {
         return args.mods.clone();
@@ -10174,7 +10180,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
                 args.menu = true;
             }
-            "--track" => args.track = next("a track name, like free06")?,
+            "--track" => args.track = disc_worlds::id_of(&next("a track name, like free06")?).to_string(),
             "--mods" => {
                 let v = next("a mods folder, or off")?;
                 args.mods_asked = true;
