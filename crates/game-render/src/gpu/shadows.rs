@@ -404,43 +404,7 @@ impl Renderer {
     /// What casts the sun's shadows and how they are drawn, from the next frame (V108, user
     /// 2026-10-30).
     pub fn set_shadows(&mut self, shadows: Shadows, quality: ShadowQuality) {
-        let was = self.sun.mode;
         (self.sun.mode, self.sun.quality) = (shadows, quality);
-        // Our baked hills (V117) come and go with All.
-        if (was == Shadows::All) != (shadows == Shadows::All) {
-            self.rebind_ground_light();
-        }
-    }
-
-    /// Our own baked shadows of the hills (V117, [`crate::terrain_shadow`]) for the ground drawn now,
-    /// over the same rectangle as its light map: read in the light map's place under
-    /// [`Shadows::All`], from the next frame. `None` forgets them. A ground set after this has none.
-    pub fn set_ground_baked(&mut self, baked: Option<&crate::splat::Shadow>) {
-        let Some(g) = &mut self.ground else { return };
-        g.baked = baked.map(|s| super::upload_shadow(&self.device, &self.queue, s));
-        self.rebind_ground_light();
-    }
-
-    /// Whether the ground reads our baked hills now (V117): it has them, under [`Shadows::All`].
-    pub fn ground_reads_baked(&self) -> bool {
-        self.sun.mode == Shadows::All && self.ground.as_ref().is_some_and(|g| g.baked.is_some())
-    }
-
-    /// The light the ground reads: our baked hills under [`Shadows::All`] where it has them, else
-    /// its light map.
-    pub(super) fn ground_light<'a>(&self, g: &'a super::GpuGround) -> &'a wgpu::TextureView {
-        match &g.baked {
-            Some(b) if self.sun.mode == Shadows::All => b,
-            _ => &g.shadow,
-        }
-    }
-
-    fn rebind_ground_light(&mut self) {
-        let Some(g) = &self.ground else { return };
-        let bind = self.ground_bind(&g.layout, self.ground_light(g), &g.textures);
-        if let Some(g) = &mut self.ground {
-            g.bind = bind;
-        }
     }
 
     /// The shadows set, as [`Renderer::set_shadows`] took them.

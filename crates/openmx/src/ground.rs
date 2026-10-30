@@ -71,9 +71,6 @@ pub struct Ground<'a> {
     pub paint: Option<Splat>,
     /// A mod track's own terrain pages and detail map (MD4), where it has them and no splat.
     pub pages: Option<Pages>,
-    /// Our own baked shadows of the hills (V117, [`game_render::terrain_shadow`]), read in the
-    /// light map's place under Shadows All where it is set.
-    pub hills: Option<game_render::splat::Shadow>,
 }
 
 impl<'a> Ground<'a> {
@@ -97,7 +94,6 @@ impl<'a> Ground<'a> {
             terrain,
             paint: None,
             pages: None,
-            hills: None,
         }
     }
 
@@ -123,40 +119,6 @@ impl<'a> Ground<'a> {
         let leaves = (self.samples_x / LEAF_SAMPLES, self.samples_z / LEAF_SAMPLES);
         self.pages = Pages::of(&self.terrain, self.spacing, leaves).map(|p| p.with_detail(detail, multiplier));
         self
-    }
-
-    /// The field's heights in feet, every sample, for [`game_render::terrain_shadow`] (V117): NaN
-    /// where the tree has no cell.
-    pub fn field(&self) -> game_render::terrain_shadow::Field {
-        let (nx, nz) = (self.samples_x as usize, self.samples_z as usize);
-        let mut heights = vec![f32::NAN; nx * nz];
-        let (leaves_x, leaf_map) = self.leaf_map();
-        for sz in 0..self.samples_z.saturating_sub(1) {
-            for sx in 0..self.samples_x.saturating_sub(1) {
-                let (lx, lz) = (sx / LEAF_SAMPLES, sz / LEAF_SAMPLES);
-                if !(lx < leaves_x && leaf_map.get((lz * leaves_x + lx) as usize).copied().unwrap_or(false)) {
-                    continue;
-                }
-                let Some(quad) = self.terrain.cell(sx, sz, 1) else { continue };
-                for (k, dx, dz) in [(0, 0, 0), (1, 1, 0), (2, 0, 1), (3, 1, 1)] {
-                    let at = (sz + dz) as usize * nx + (sx + dx) as usize;
-                    if heights[at].is_nan() {
-                        heights[at] = self.spacing * quad.height[k].0;
-                    }
-                }
-            }
-        }
-        game_render::terrain_shadow::Field { heights, nx, nz, spacing: self.spacing }
-    }
-
-    /// Our own shadows of the hills for a sun along `sun` (V117), over the light map's rectangle,
-    /// kept in `cache` by `track`: `None` without a light map. The flag says whether it came from
-    /// the cache.
-    pub fn bake_hills(&self, sun: V3, cache: Option<&std::path::Path>, track: &str) -> Option<(game_render::splat::Shadow, bool)> {
-        let disc = self.paint.as_ref()?.shadow.as_ref()?;
-        let shade = game_render::shadow::light_map_levels(&disc.tiles).map_or(game_render::shadow::SHADE_DEFAULT, |l| l.0);
-        let threads = game_render::raster::threads();
-        Some(game_render::terrain_shadow::load_or_bake(cache, track, disc, &self.field(), sun, game_render::terrain_shadow::SIZE, shade, threads))
     }
 
     /// How big the field is in world units.
@@ -407,8 +369,7 @@ impl<'a> Ground<'a> {
             Some(splat) if tag != UNPAINTED => {
                 let depth = game_render::splat::paint_depth(camera.eye, eye_forward, v3(x, camera.eye.y, z));
                 let c = splat.paint_at(x, z, depth);
-                let hills = self.hills.as_ref().and_then(|h| h.at(x, z));
-                let l = if tag == BAKED { hills.or_else(|| splat.light(x, z)).unwrap_or(1.0) } else { 1.0 };
+                let l = if tag == BAKED { splat.light(x, z).unwrap_or(1.0) } else { 1.0 };
                 let lit = c.map(|c| (c as f32 * l).min(255.0) as u8);
                 [lit[0], lit[1], lit[2], 255]
             }

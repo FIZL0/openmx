@@ -13,7 +13,6 @@
 //!   terrain.rs   `.trn` ground: a patched height field, its palette and its ground texture
 //!   sky.rs       `.cub` skies: a cube of vertex-coloured strips around the camera
 //!   splat.rs     the freeride ground's paint: masked layers, a detail map and a baked light map
-//!   terrain_shadow.rs  our own baked shadows of the hills (V117), read under Shadows All
 //!   ground_tree.rs  a ground piece's chunks in a quadtree, culled and coarsened a branch at a time
 //!   ground_mesh.rs  the roads, ruts and runways a freeride scene paints into that ground
 //!   skin.rs      `.mot` motion clips: the channels, the quaternion blend, and the joints on a model
@@ -69,7 +68,6 @@ pub mod splat;
 pub mod sun_flare;
 pub mod tally;
 pub mod terrain;
-pub mod terrain_shadow;
 pub mod texhash;
 pub mod toy;
 pub mod vehicle;
