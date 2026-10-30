@@ -64,6 +64,8 @@ mod store;
 pub use store::{Card, Got, Listed, Phase, Posted, STORE_COLUMNS, STORE_PAGES, STORE_RULES, STORE_TABS, Shop, StoreAsk, UPLOAD_TAB, UpRow, Upload, size_words};
 #[path = "menu_player.rs"]
 mod player;
+#[path = "video.rs"]
+pub mod video;
 #[allow(unused_imports)]
 pub use player::{Deck, deck_point};
 #[allow(unused_imports)] // the tests' and the shell's, not every includer's
@@ -521,6 +523,14 @@ pub struct Settings {
     pub markers: [bool; SEATS_MAX],
     /// Settings → Updates (P191): what the desktop does about a newer build. Ask unless set.
     pub updates: Updates,
+    /// The Graphics tab's Preset row on Auto (P223, [`video`]): the rows picked for this device and
+    /// stepped down by the first seconds of each ride until its frames hold. Any row changed by hand
+    /// turns it off. On unless turned off.
+    pub video_auto: bool,
+    /// Which things cast the sun's shadows under Better (P223, [`video::Casters`]).
+    pub casters: video::Casters,
+    /// How detailed the models are drawn (P223, [`video::Detail`]).
+    pub detail: video::Detail,
 }
 
 /// The Updates setting (P191, opentennis's M140): the main menu offers a newer build with Square
@@ -1300,6 +1310,9 @@ impl Default for Settings {
             shadows: shadows_default(),
             markers: [true; SEATS_MAX],
             updates: Updates::default(),
+            video_auto: true,
+            casters: video::Casters::default(),
+            detail: video::Detail::default(),
         }
     }
 }
@@ -1486,6 +1499,9 @@ impl Settings {
                 "texture_filtering" => s.filtering = Filtering::from_word(v).unwrap_or(s.filtering),
                 "shadows" => s.shadows = Shadows::from_word(v).unwrap_or(s.shadows),
                 "updates" => s.updates = Updates::from_word(v).unwrap_or(s.updates),
+                "video" => s.video_auto = v == "auto",
+                "shadow_casters" => s.casters = video::Casters::from_word(v).unwrap_or(s.casters),
+                "model_detail" => s.detail = video::Detail::from_word(v).unwrap_or(s.detail),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "camera_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
@@ -1511,6 +1527,14 @@ impl Settings {
         if tens && text.contains("_volume") {
             s.mix = Mix::Custom;
             s.custom = s.levels();
+        }
+        // No file, or one from before P223: Auto where its graphics rows were never changed, and
+        // then the rows this device's pick (on the desktop, the same rows).
+        if !pairs(text).any(|(k, _)| k == "video") {
+            s.video_auto = video::Look::of(&s) == video::Look::of(&Settings::default());
+            if s.video_auto {
+                video::pick(&video::Device::here()).apply(&mut s);
+            }
         }
         s
     }
@@ -1576,6 +1600,7 @@ impl Settings {
             + &self.filtering_text()
             + &self.updates_text()
             + &self.shadows_text()
+            + &self.video_text()
             + &self.world_sky_text()
             + &self.mods_text()
             + &self.tricks_text()
@@ -1659,6 +1684,22 @@ impl Settings {
     /// from before it is written as it was.
     fn shadows_text(&self) -> String {
         if self.shadows == shadows_default() { String::new() } else { format!("shadows = {}\n", self.shadows.word()) }
+    }
+
+    /// The Preset row's Auto (P223) where the rows do not imply it; the casters and the model detail
+    /// only when they are not the defaults.
+    fn video_text(&self) -> String {
+        // Only where the rows do not say it: a file without the line is on Auto when its rows are
+        // the defaults, so a file from before P223 is written as it was.
+        let implied = video::Look::of(self) == video::Look::of(&Settings::default());
+        let auto = match (self.video_auto, implied) {
+            (true, false) => "video = auto\n".into(),
+            (false, true) => "video = custom\n".into(),
+            _ => String::new(),
+        };
+        let casters = if self.casters == video::Casters::default() { String::new() } else { format!("shadow_casters = {}\n", self.casters.word()) };
+        let detail = if self.detail == video::Detail::default() { String::new() } else { format!("model_detail = {}\n", self.detail.word()) };
+        auto + &casters + &detail
     }
 
     /// A world's sky (MD9), only when it is not the default, so a file from before it is written as
@@ -4013,6 +4054,12 @@ impl Menu {
     /// writes them.
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
+    }
+
+    /// The settings changed by something else than a page (P223's Auto preset stepping a row down):
+    /// applied and saved as a page's change is.
+    pub fn mark_changed(&mut self) {
+        self.changed = true;
     }
 
     /// Whether they changed, without forgetting it.

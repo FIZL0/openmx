@@ -180,6 +180,25 @@ pub fn memory() -> String {
     format!("memory {} MB, {} MB left before iOS closes the app", if ok { info[18] >> 20 } else { 0 }, left >> 20)
 }
 
+/// The device's model identifier (`iPhone16,1`), which the Auto video preset picks by (P223,
+/// opentennis's P53).
+pub fn model() -> Option<String> {
+    let mut buf = [0u8; 64];
+    let mut len = buf.len();
+    // SAFETY: `buf` holds `len` bytes; sysctlbyname writes at most that and sets `len`
+    let r = unsafe { libc::sysctlbyname(c"hw.machine".as_ptr(), buf.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) };
+    (r == 0).then(|| String::from_utf8_lossy(&buf[..len.min(buf.len())]).trim_end_matches('\0').to_string())
+}
+
+/// The device's memory in MB, 0 when it will not say.
+pub fn memory_mb() -> u32 {
+    let mut v = 0u64;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: as `model`, into a u64
+    let r = unsafe { libc::sysctlbyname(c"hw.memsize".as_ptr(), (&mut v as *mut u64).cast(), &mut len, std::ptr::null_mut(), 0) };
+    if r == 0 { (v >> 20) as u32 } else { 0 }
+}
+
 // ---- the window ----------------------------------------------------------------------------------
 
 /// UIKit's `UIEdgeInsets`.

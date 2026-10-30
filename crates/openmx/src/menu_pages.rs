@@ -110,6 +110,12 @@ pub enum Key {
     RenderScale,
     VSync,
     FrameLimit,
+    /// The Graphics tab's Preset row (P223): Auto, a preset, or Custom.
+    VideoPreset,
+    /// Shadow Casters (P223): all, or fewer under Better.
+    Casters,
+    /// Model Detail (P223).
+    Detail,
     Mix,
     /// A slider by its index in [`Mix::levels`].
     Level(usize),
@@ -487,7 +493,21 @@ impl Menu {
         let scales = RenderScale::ALL.map(RenderScale::label);
         let limits: Vec<String> = FrameLimit::ALL.iter().map(|f| f.label()).collect();
         let limits: Vec<&str> = limits.iter().map(String::as_str).collect();
+        // P223: the preset over every row it sets; Custom is only ever shown.
+        let presets = super::video::row_labels();
+        let preset_at = super::video::row_at(s);
+        let mut preset = Row::choice(
+            Key::VideoPreset,
+            "Preset",
+            &presets,
+            preset_at,
+            "Sets every row below that costs frames. Auto picks for this device and, in the first seconds of each ride, steps them down until the frames keep up with the display. Changing a row yourself turns Auto off.",
+        );
+        if preset_at == presets.len() - 1 {
+            preset.note = Some("Rows set by hand. A press goes back to Auto.".into());
+        }
         vec![
+            preset,
             Row::heading("World"),
             Row::choice(
                 Key::DrawDistance,
@@ -519,6 +539,21 @@ impl Menu {
             ),
             // V108: the Original switch's too, with Off a third choice.
             Row::choice(Key::Shadows, "Shadows", &Shadows::ALL.map(Shadows::label), at(&Shadows::ALL, s.shadows), SHADOWS_HELP),
+            Row::choice(
+                Key::Casters,
+                "Shadow Casters",
+                &super::video::Casters::ALL.map(super::video::Casters::label),
+                at(&super::video::Casters::ALL, s.casters),
+                "Under Better shadows: All has everything near cast one. Fewer leaves the plants and small props to their baked light, which is faster.",
+            )
+            .off_if(s.shadows != Shadows::Better, "Only Better shadows have casters to choose"),
+            Row::choice(
+                Key::Detail,
+                "Model Detail",
+                &super::video::Detail::ALL.map(super::video::Detail::label),
+                at(&super::video::Detail::ALL, s.detail),
+                "Full draws each model as detailed as the game picks for its distance. Reduced switches to the simpler ones at half the distance, which is faster.",
+            ),
             Row::heading("Performance"),
             Row::choice(Key::RenderScale, "Render Scale", &scales, at(&RenderScale::ALL, s.render_scale), "How much of the window's resolution the 3D is drawn at. Auto drops it when frames run long and climbs back when there's room."),
             Row::on_off(Key::VSync, "VSync", s.vsync, "Waits for the display before showing a frame. No tearing. Off draws as fast as it can."),
@@ -1183,6 +1218,8 @@ impl Menu {
         let next = |row: &Row| cycle(row.now.unwrap_or(0), d, row.choices.len());
         // the modifiers page's Player row, and whether it is the host's with All Players (P134)
         let mods_players = (self.screen() == Some(Screen::Modifiers)).then(|| self.mods_own().is_none());
+        // P223: a row the presets set, changed by hand (here or by the Original switch), ends Auto.
+        let look = super::video::Look::of(&self.settings);
         let s = &mut self.settings;
         match row.key {
             Key::Heading => return,
@@ -1240,6 +1277,18 @@ impl Menu {
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
             Key::FrameLimit => s.frame_limit = s.frame_limit.step(p.left),
+            Key::VideoPreset => {
+                // Custom is shown, never stepped onto: past it is Auto again.
+                let (n, from) = (row.choices.len() - 1, row.now.unwrap_or(0));
+                let to = match from >= n {
+                    true if d < 0 => n - 1,
+                    true => 0,
+                    false => cycle(from, d, n),
+                };
+                super::video::set_row(s, to);
+            }
+            Key::Casters => s.casters = super::video::Casters::ALL[next(row)],
+            Key::Detail => s.detail = super::video::Detail::ALL[next(row)],
             Key::Mix => s.set_mix(Mix::ALL[next(row)]),
             // Cross steps a slider up and round from the top, as the original's page does.
             Key::Level(i) => s.nudge(i, p.left, p.right),
@@ -1389,6 +1438,9 @@ impl Menu {
                 }
             }
             _ => return,
+        }
+        if row.key != Key::VideoPreset && super::video::Look::of(&self.settings) != look {
+            self.settings.video_auto = false;
         }
         self.changed = true;
     }

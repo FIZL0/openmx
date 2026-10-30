@@ -34,10 +34,12 @@ use openmx_web::{TRACK, rgba, start_line};
 /// store's downloads into OPFS, its unpacking and a page opened for Report (P198, `src/modstore.rs`); and the
 /// newer build the page saw, the last one started and a reload (P193); and its Hugging Face token kept by
 /// the page and what is pasted into it (P199, `src/modstore_up.rs`).
-const HOST_CALLS: [&str; 29] = [
+const HOST_CALLS: [&str; 31] = [
     "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame", "gpu", "drawn",
     "store_fetch", "store_got", "store_read", "store_close", "store_put", "store_drop", "open_url", "latest", "last_build", "reload",
     "token", "token_keep", "pasted",
+    // P223: the device as the page sees it, and the display's measured rate.
+    "device", "refresh",
 ];
 
 /// The module wasm-bindgen's glue answers the imports under (`--target web`).
@@ -388,8 +390,9 @@ fn the_browser_rides_on_the_gpu() {
     let field = |text: &str, key: &str| -> String {
         text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string()
     };
-    // And a phone's page (P205): an iPhone's 844×390 at 3 device pixels to one, drawn at its whole
-    // 2532×1170 — not the software picture's 640×448 cap — with the phone's defaults.
+    // And a phone's page (P205): an iPhone's 844×390 at 3 device pixels to one, drawn at 2 device
+    // pixels to one (P223, opentennis's B547: 1688×780) — not the software picture's 640×448 cap —
+    // with the phone's defaults.
     let phone = "844,390,3";
     for (query, api, viewport) in [("", "webgpu", ""), ("webgl2", "webgl2", ""), ("", "webgpu", phone)] {
         let api_seen = if viewport.is_empty() { api.to_string() } else { format!("{api} on a phone") };
@@ -414,7 +417,7 @@ fn the_browser_rides_on_the_gpu() {
         assert_eq!(field(&text, "gpu"), api, "the page did not draw on {api}:\n{text}");
         assert!(field(&text, "drawn").starts_with(api), "no first {api} frame:\n{text}");
         if !viewport.is_empty() {
-            assert_eq!(field(&text, "drawn"), format!("{api} 2532 1170"), "the phone's frame is not its canvas's whole size:\n{text}");
+            assert_eq!(field(&text, "drawn"), format!("{api} 1688 780"), "the phone's frame is not its canvas's size at 2 pixels to one:\n{text}");
         }
         let lit: f64 = field(&text, "lit").parse().expect("lit");
         let pixels: f64 = field(&text, "pixels").parse().expect("pixels");

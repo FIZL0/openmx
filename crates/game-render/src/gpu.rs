@@ -90,6 +90,19 @@ const GROUND_PIXELS: f32 = 0.75;
 const GROUND_BLOCK: u32 = 8;
 /// How few pixels across a prop may be before it is not drawn at all: less than one can show.
 const PROP_PIXELS: f32 = 0.5;
+
+/// The biggest side, in texels, a model's texture is uploaded at from now on, 0 for no cap (P223,
+/// opentennis's B538: 512 on a phone, whose memory a texture pack's 2048s fill). Set before the
+/// textures load; the disc's own are at most this already.
+pub static TEXTURE_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Under [`Renderer::few_casters`], the props smaller than this, in feet of radius, cast no sun
+/// shadow (P223, opentennis's B343): the fences, signs and bales, not the buildings and ramps.
+const FEW_CASTERS_RADIUS: f32 = 12.0;
+
+/// How much an actor's bounding sphere is grown by before it is culled against a view (P223): a
+/// posed rider reaches past the bind pose's sphere, an arm or a leg thrown out in a wreck.
+const ACTOR_CULL_GROWTH: f32 = 1.5;
 /// Node matrices a palette row holds (four texels each).
 const PALETTE_ROW: u32 = 256;
 /// A view's uniforms, padded to the alignment a dynamic offset needs.
@@ -908,6 +921,14 @@ pub struct Renderer {
     /// [`Renderer::render_over`] is drawing (P213): the views' actors alone, over what the target
     /// already shows.
     over: bool,
+    /// Under [`Shadows::Better`], only the actors and the big props cast (P223, opentennis's B343):
+    /// the plants and the small props' shadows left to the light maps. Off, everything near casts.
+    pub few_casters: bool,
+    /// How far away the props and actors are taken to be when their level of detail is picked, as a
+    /// multiple of how far they are (P223, opentennis's B364 mesh detail): 1 is the disc's own
+    /// choice, 2 the coarser models at half the distance. The ground's levels and the smallest props'
+    /// cut-off take it too: a level's error and a prop's size may be that many times the pixels.
+    pub lod_bias: f32,
 }
 
 /// A prop the scene places, as culling needs it.
@@ -1269,7 +1290,14 @@ impl Mips {
             }
             false => t,
         };
-        Mips(mips_keeping(t, cutoff))
+        let mut levels = mips_keeping(t, cutoff);
+        // A phone's cap (P223): the levels over it are not uploaded, the next one down is the top.
+        let cap = TEXTURE_CAP.load(std::sync::atomic::Ordering::Relaxed);
+        if cap > 0 {
+            let over = levels.iter().take_while(|l| l.0.max(l.1) > cap).count().min(levels.len() - 1);
+            levels.drain(..over);
+        }
+        Mips(levels)
     }
 }
 
@@ -2167,6 +2195,8 @@ impl Renderer {
             glows: None,
             sun,
             over: false,
+            few_casters: false,
+            lod_bias: 1.0,
         })
     }
 
@@ -3568,17 +3598,18 @@ impl Renderer {
             // them, or the whole map), and each at the level of detail the disc's own test picks.
             let fade = self.prop_fade.filter(|_| self.graphics != Graphics::Original);
             let casting = self.sun.takes_all(p);
+            let (few_casters, bias) = (self.few_casters, self.lod_bias.max(1.0));
             for prop in self.props.iter().filter(|_| !over) {
                 let Some(Some(m)) = prop.model else { continue };
                 let model = &self.models[m];
                 let centre = v3(prop.at.0[3][0], prop.at.0[3][1], prop.at.0[3][2]);
                 // A prop out of sight still casts into the view (V108).
-                if casting {
-                    let group = crate::psg::group_at(&model.group_distance, centre.sub(camera.eye).len(), model.radius, focal);
+                if casting && !(few_casters && model.radius < FEW_CASTERS_RADIUS) {
+                    let group = crate::psg::group_at(&model.group_distance, centre.sub(camera.eye).len() * bias, model.radius, focal);
                     let inst = InstanceRaw { m: prop.at.0, palette: [model.bind_palette, model.nodes], cover: 1.0 };
                     self.sun.cast(p, None, centre, model.radius, m, group, inst);
                 }
-                if !cull.sees(centre, model.radius) || !cull.big_enough(centre, model.radius, PROP_PIXELS) {
+                if !cull.sees(centre, model.radius) || !cull.big_enough(centre, model.radius, PROP_PIXELS * bias) {
                     continue;
                 }
                 let cover = faded_by(fade, centre.sub(camera.eye).len());
@@ -3586,7 +3617,7 @@ impl Renderer {
                     continue;
                 }
                 drawn.props += 1;
-                let group = crate::psg::group_at(&model.group_distance, centre.sub(camera.eye).len(), model.radius, focal);
+                let group = crate::psg::group_at(&model.group_distance, centre.sub(camera.eye).len() * bias, model.radius, focal);
                 let key = ((p as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((
                     key,
@@ -3609,7 +3640,7 @@ impl Renderer {
                 let model = &self.models[m];
                 let group = match a.lod_from {
                     Some(at) => {
-                        let away = at.sub(camera.eye).len();
+                        let away = at.sub(camera.eye).len() * bias;
                         let loaded = assets.models.get(a.model).map(|l| &l.model);
                         loaded.map_or(0, |l| l.group_for(away, model.radius, focal))
                     }
@@ -3620,12 +3651,16 @@ impl Renderer {
                     None => [model.bind_palette, model.nodes],
                 };
                 let key = ((p as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
-                self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette, cover: 1.0 }));
-                // Every run of its group is drawn once, solid or see-through, as the passes below do.
-                drawn.actors[v][i] += model.group(group).iter().map(|r| (r.count / 3) as usize).sum::<usize>();
+                let row = |r: usize| v3(a.at.0[r][0], a.at.0[r][1], a.at.0[r][2]);
+                let radius = model.radius * row(0).len().max(row(1).len()).max(row(2).len());
+                // Out of this view, an actor is not drawn but still casts into it (P223, opentennis's
+                // B345: the riders and machines behind the camera were drawn every frame).
+                if cull.sees(row(3), radius * ACTOR_CULL_GROWTH) {
+                    self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette, cover: 1.0 }));
+                    // Every run of its group is drawn once, solid or see-through, as the passes below do.
+                    drawn.actors[v][i] += model.group(group).iter().map(|r| (r.count / 3) as usize).sum::<usize>();
+                }
                 if ghost == 0 {
-                    let row = |r: usize| v3(a.at.0[r][0], a.at.0[r][1], a.at.0[r][2]);
-                    let radius = model.radius * row(0).len().max(row(1).len()).max(row(2).len());
                     self.sun.cast(p, Some(i), row(3), radius, m, group, InstanceRaw { m: a.at.0, palette, cover: 1.0 });
                 }
             }
@@ -3645,7 +3680,7 @@ impl Renderer {
                     let row = |r: usize| v3(d.at.0[r][0], d.at.0[r][1], d.at.0[r][2]);
                     let centre = row(3);
                     let radius = model.radius * row(0).len().max(row(1).len()).max(row(2).len());
-                    if !cull.sees(centre, radius) || !cull.big_enough(centre, radius, PROP_PIXELS) {
+                    if !cull.sees(centre, radius) || !cull.big_enough(centre, radius, PROP_PIXELS * bias) {
                         continue;
                     }
                     let share = faded_by(fade, centre.sub(camera.eye).len());
@@ -3656,7 +3691,7 @@ impl Renderer {
                     let key = ((p as u64) << 48) | ((m as u64) << 16);
                     let inst = InstanceRaw { m: d.at.0, palette: [model.bind_palette, model.nodes], cover: d.cover * share };
                     self.scratch.push((key, ghost, inst));
-                    if casting && ghost == 0 {
+                    if casting && ghost == 0 && !few_casters {
                         self.sun.cast(p, None, centre, radius, m, 0, inst);
                     }
                 }
@@ -3777,6 +3812,7 @@ impl Renderer {
     /// [`GROUND_BLOCK`] chunks a side and one for each bigger node drawn whole — a part only when its
     /// picks changed since its last frame. How many indices it holds.
     fn ground_for(&mut self, v: usize, cull: &Cull, focal: f32, drawn: &mut Drawn) -> u32 {
+        let pixels = GROUND_PIXELS * self.lod_bias.max(1.0);
         let Some(g) = &mut self.ground else { return 0 };
         let top = lod_levels(g.cells);
         while g.views.len() <= v {
@@ -3786,7 +3822,7 @@ impl Renderer {
             drawn.ground_levels.resize(top as usize + 1, 0);
         }
         let see = |c: V3, r: f32| cull.sees(c, r).then(|| cull.distance(c, r));
-        let level = |e: &[f32], d: f32| lod_level(e, d, focal, GROUND_PIXELS);
+        let level = |e: &[f32], d: f32| lod_level(e, d, focal, pixels);
         let holds = |c: V3, r: f32| cull.holds(c, r);
         let look = Look { look: &see, level: &level, holds: &holds };
         let hidden: HashSet<u32> = g.fades.iter().filter(|f| f.1 .0 <= 0.0).map(|f| *f.0).collect();

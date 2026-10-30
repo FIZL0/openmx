@@ -1753,6 +1753,14 @@ struct Args {
     render_scale: Option<f32>,
     /// Whether `--render-scale` was given, `auto` included (V34): if so it wins over the settings'.
     render_scale_asked: bool,
+    /// `--casters all|fewer` (P223): what casts the sun's shadows under Better; the front end's
+    /// Shadow Casters row when not given.
+    casters: Option<menu::video::Casters>,
+    /// `--detail full|reduced` (P223): the models' level of detail; the front end's Model Detail row
+    /// when not given.
+    detail: Option<menu::video::Detail>,
+    /// Whether any graphics row's flag was given (P223): no Auto preset stepping them then.
+    video_asked: bool,
     /// The `mods/` folder a track not on the disc is looked for in (MD2), or `None` to read none.
     /// Unless `mods_asked`, the settings' Mods row says, and the folder is beside `settings.txt`.
     mods: Option<std::path::PathBuf>,
@@ -1808,6 +1816,19 @@ impl Args {
     }
 
     /// VSync and the frame limit (P90): `--vsync` and `--fps-limit` where given, else `settings`'.
+    /// Whether a graphics row was given on the command line (P223), before the front end fills the
+    /// ride's from its settings: the Auto preset then leaves the rows be.
+    fn video_flags(&self) -> bool {
+        self.graphics.is_some()
+            || self.plants.is_some()
+            || self.filtering.is_some()
+            || self.shadows.is_some()
+            || self.casters.is_some()
+            || self.detail.is_some()
+            || self.render_scale_asked
+            || self.fps_limit.is_some()
+    }
+
     fn pacing(&self, settings: &menu::Settings) -> (bool, menu::FrameLimit) {
         (self.vsync.unwrap_or(settings.vsync), self.fps_limit.unwrap_or(settings.frame_limit))
     }
@@ -1906,6 +1927,12 @@ pub(crate) async fn run() -> Result<(), String> {
     let Some(args) = parse_args()? else {
         return Ok(());
     };
+    // P223: a phone's textures no wider than 512 (opentennis's B547), before any is loaded.
+    let cap = menu::video::texture_cap(&menu::video::Device::here());
+    game_render::gpu::TEXTURE_CAP.store(cap, std::sync::atomic::Ordering::Relaxed);
+    if cap > 0 {
+        println!("textures: {cap} px at most (a phone's)");
+    }
     // the disc and where the settings are (P190), once the command line is known to be one
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -2301,6 +2328,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
                 a.filtering = Some(args.filtering.unwrap_or(shell.front.menu.settings.filtering));
                 a.shadows = Some(args.shadows.unwrap_or(shell.front.menu.settings.shadows));
+                a.casters = Some(args.casters.unwrap_or(shell.front.menu.settings.casters));
+                a.detail = Some(args.detail.unwrap_or(shell.front.menu.settings.detail));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -2396,6 +2425,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
                 a.filtering = Some(args.filtering.unwrap_or(shell.front.menu.settings.filtering));
                 a.shadows = Some(args.shadows.unwrap_or(shell.front.menu.settings.shadows));
+                a.casters = Some(args.casters.unwrap_or(shell.front.menu.settings.casters));
+                a.detail = Some(args.detail.unwrap_or(shell.front.menu.settings.detail));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
                 }
@@ -5024,6 +5055,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let tint = r.shadow_tint();
         let [tr, tg, tb] = tint.rgb;
         println!("shadows: {} (the original's in {tr},{tg},{tb} at {:.3})", shadows.word(), tint.alpha);
+        // Shadow Casters and Model Detail (P223), from the first frame.
+        let (casters, detail) = (args.casters.unwrap_or_default(), args.detail.unwrap_or_default());
+        r.few_casters = casters == menu::video::Casters::Fewer;
+        r.lod_bias = detail.lod_bias();
+        println!("shadow casters: {}, model detail: {}", casters.word(), detail.word());
         let lit = Lighting::of(&look);
         let (fog, far) = r.fog(&lit);
         println!(
@@ -5086,6 +5122,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut auto_scale = game_render::gpu::AutoScale::new(Duration::from_secs_f32(0.8 / refresh));
     // The settings' row changes it mid-ride (V34), unless `--render-scale` was given.
     let mut render_scale = args.render_scale;
+    // The Auto preset (P223): the ride's first seconds timed against the display's rate (the page's
+    // measured one in a browser) and the Graphics rows stepped down until it holds. Only in a window,
+    // under the front end, with no graphics flag given.
+    #[cfg(target_arch = "wasm32")]
+    let tune_target = menu::video::target(crate::host_refresh());
+    #[cfg(not(target_arch = "wasm32"))]
+    let tune_target = menu::video::target(Some(refresh));
+    let mut tune = menu::video::Tune::default();
+    let tuning = offscreen.is_none() && window.is_some() && !args.video_asked;
+    let mut tune_at: Option<Instant> = None;
     if let Some(r) = renderer_of(&mut offscreen, window) {
         r.render_scale = render_scale.unwrap_or(1.0);
         println!(
@@ -6177,6 +6223,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if let Some(r) = renderer_of(&mut offscreen, window) {
                         r.set_anisotropy(filtering.anisotropy());
                     }
+                }
+                // Shadow Casters and Model Detail (P223), from the next frame.
+                if let Some(r) = renderer_of(&mut offscreen, window) {
+                    r.few_casters = front.menu.settings.casters == menu::video::Casters::Fewer;
+                    r.lod_bias = front.menu.settings.detail.lod_bias();
                 }
                 // Shadows (V108), from the next frame.
                 if shadows != front.menu.settings.shadows {
@@ -8130,6 +8181,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             };
             perf.add(Stage::Draw, draw_at.elapsed().saturating_sub(waited));
             perf.add(Stage::Present, waited);
+            if let Some(front) = front.as_deref_mut().filter(|f| tuning && f.menu.settings.video_auto) {
+                let now = Instant::now();
+                let dt = tune_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+                tune_at = Some(now);
+                if let Some(next) = tune.frame_time(menu::video::Look::of(&front.menu.settings), dt, tune_target) {
+                    next.apply(&mut front.menu.settings);
+                    front.menu.mark_changed();
+                }
+            }
             // The GPU's whole frame, its ground's choosing and drawing among it, is its present.
             stages.mark(stages::Stage::Present);
             if let Some(d) = out {
@@ -10067,6 +10127,9 @@ fn parse_args() -> Result<Option<Args>, String> {
         graphics: None,
         render_scale: None,
         render_scale_asked: false,
+        casters: None,
+        detail: None,
+        video_asked: false,
         mods: None,
         mods_asked: false,
         mod_store: None,
@@ -10356,6 +10419,32 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let word = next("off, 2, 4, 8 or 16")?;
                 args.filtering = Some(menu::Filtering::from_word(&word).ok_or_else(|| format!("--texture-filtering: {word:?} is not off, 2, 4, 8 or 16"))?);
             }
+            "--casters" => {
+                let word = next("all or fewer")?;
+                args.casters = Some(menu::video::Casters::from_word(&word).ok_or_else(|| format!("--casters: {word:?} is not all or fewer"))?);
+            }
+            "--detail" => {
+                let word = next("full or reduced")?;
+                args.detail = Some(menu::video::Detail::from_word(&word).ok_or_else(|| format!("--detail: {word:?} is not full or reduced"))?);
+            }
+            // P223: every row a preset sets, as the Graphics tab's Preset row sets them; a row's own
+            // flag given after it wins.
+            "--video-preset" => {
+                let word = next("high, medium, low, deck or phone")?;
+                let p = menu::video::Preset::ALL
+                    .into_iter()
+                    .find(|p| p.label().split_whitespace().last().is_some_and(|w| w.eq_ignore_ascii_case(&word)))
+                    .ok_or_else(|| format!("--video-preset: {word:?} is not high, medium, low, deck or phone"))?;
+                let l = p.look();
+                args.graphics = Some(l.draw);
+                args.plants = Some(l.plants);
+                args.filtering = Some(l.filtering);
+                args.shadows = Some(l.shadows);
+                args.casters = Some(l.casters);
+                args.detail = Some(l.detail);
+                (args.render_scale, args.render_scale_asked) = (l.scale.fraction(), true);
+                args.fps_limit = Some(l.limit);
+            }
             "--shadows" => {
                 let word = next("better, original or off")?;
                 args.shadows = Some(game_render::shadow::Shadows::from_word(&word).ok_or_else(|| format!("--shadows: {word:?} is not better, original or off"))?);
@@ -10514,6 +10603,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--preset 0..3|0,2,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--graphics full|farther|far|original] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
+                            [--video-preset high|medium|low|deck|phone] [--casters all|fewer] [--detail full|reduced]\n\
                             [--no-sound] [--mods DIR|off] [--mod-store URL]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
@@ -10586,6 +10676,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      still sharp; auto, the default, lowers it while the GPU misses the\n\
                      display's refresh and raises it again when there is room. Without it,\n\
                      the front end's Settings row (Auto, 100%, 75%, 50%) says.\n\
+                     --video-preset sets every graphics row as the Graphics tab's Preset row\n\
+                     does; --casters fewer leaves plants and small props out of Better's\n\
+                     shadows, --detail reduced swaps models to their coarser levels nearer.\n\
+                     Any graphics flag keeps the Auto preset from stepping the rows down.\n\
                      --vsync off draws without waiting for the display (it may tear), and\n\
                      --fps-limit draws at most N pictures a second, or the display's refresh;\n\
                      a limit under the refresh holds with VSync on too. Without them the\n\
@@ -10649,6 +10743,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
+    args.video_asked = args.video_flags();
     if args.world_sweep.is_some() && args.frames.is_none() {
         return Err("--world-sweep goes over the ride's --frames: give --frames too".into());
     }
