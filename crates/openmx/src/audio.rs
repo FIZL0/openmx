@@ -1228,12 +1228,20 @@ impl Music {
         if let Some((id, rx)) = self.opening.take() {
             match rx.try_recv() {
                 Ok(Ok(stream)) => {
+                    // The page's console hears each song start (it has no stdout to say it fails on):
+                    // what `tests/web.rs` reads for the page's music.
+                    #[cfg(target_arch = "wasm32")]
+                    crate::web_host::say(&format!("music: playing {id}"));
                     self.playing = Some((id, stream));
                     self.buf_frames = 0;
                     self.pos = 0.0;
                 }
                 Ok(Err(e)) => {
                     println!("music: {e}");
+                    // The page's console too: the browser has no stdout, and a song that will not open is
+                    // otherwise only silence there.
+                    #[cfg(target_arch = "wasm32")]
+                    crate::web_host::say(&format!("music: {e}"));
                     // A song that will not open is not asked for again until the pick changes.
                     if matches!(self.pick, Pick::Track(_)) {
                         self.pick = Pick::Off;

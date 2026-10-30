@@ -34,6 +34,13 @@ pub struct Disc {
 impl Disc {
     /// Open an ISO 9660 image and find `MX.PSR` in its root directory.
     pub fn open(path: &Path) -> Result<Disc, String> {
+        // The page's disc is not a file (the browser has no file system to open one from): its path is
+        // only the name [`Disc::configured_path`] gives it, so opening that path again — as the
+        // disc's music does for each song — opens the page's copy.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(open) = PAGE_DISC.get().filter(|_| path == Path::new(PAGE_DISC_PATH)) {
+            return Disc::read_from(open()?);
+        }
         let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         Disc::read_from(Box::new(file)).map_err(|e| format!("{}: {e}", path.display()))
     }

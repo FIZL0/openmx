@@ -366,7 +366,8 @@ fn the_touch_pad_rides_on_a_phone() {
 /// WebGPU at the phone's whole canvas (P205), each on this machine's GPU
 /// (chromium's own Vulkan, not SwiftShader). Each must draw on the API asked for — not fall back to
 /// the software picture — show a frame that is not black, and ride at 30 pictures a second or more,
-/// as the worker counts them; what each rode at is printed. The module is `tools/web.sh --check`'s,
+/// as the worker counts them; what each rode at is printed. Each must also start one of the disc's
+/// songs, which the page's console says. The module is `tools/web.sh --check`'s,
 /// served as the page's pkg/. Skips without the disc, node or chromium.
 #[test]
 fn the_browser_rides_on_the_gpu() {
@@ -414,6 +415,11 @@ fn the_browser_rides_on_the_gpu() {
         let _ = std::fs::remove_dir_all(&scratch);
         let text = String::from_utf8_lossy(&run.stdout).into_owned();
         assert!(run.status.success(), "gpu.mjs ({api}) failed:\n{}{text}", String::from_utf8_lossy(&run.stderr));
+        // The disc's music plays in the page: a song is opened again from the page's disc when it
+        // starts, which a disc path the browser cannot open as a file left silent (no songs, the menus'
+        // sounds still playing).
+        let log = String::from_utf8_lossy(&run.stderr);
+        assert!(log.contains("music: playing disc:"), "{api_seen}: no song of the disc's started:\n{log}");
         assert_eq!(field(&text, "gpu"), api, "the page did not draw on {api}:\n{text}");
         assert!(field(&text, "drawn").starts_with(api), "no first {api} frame:\n{text}");
         if !viewport.is_empty() {
