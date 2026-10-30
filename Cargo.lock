@@ -4649,7 +4649,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stitch"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "game-render",
  "game-sim",
@@ -5196,7 +5196,7 @@ dependencies = [
 
 [[package]]
 name = "trnwrite"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "game-render",
  "game-sim",
