@@ -6240,6 +6240,17 @@ atv_bike_end_stunt          atv 0x004e4db0 = vt +0x4ac (a0 bike, a1 stunt id)
 atv_bike_set_flip_clip      atv 0x004e7a30 = vt +0x53c (sw a1, +0x1754)
 atv_bike_flip_wreck_steep   atv 0x004e8370 = the backflip's mid-clip wreck's reason test (v0: 0xf, else 0xb)
 atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into body +0x1b0, then its +0xe8 listeners)
+# MD62 — atv_bike_airborne_control's fields, bike-relative (tests/mxvatv_air.rs runs it off state04 too):
+# +0x1170..+0x117c AirborneControlMoment, +0x1180 damping, +0x1184 control force, +0x1188/+0x118c
+# authority and its time, +0x1194 the backflip's torque in, +0x1198 its ramp (flipping), +0x11d0 the
+# 360's torque in, +0x11d4 its ramp, +0x324 on the ground, +0x32c speed, +0x330 crossup, +0x368 roll,
+# +0xbe4 heading y (steep: |y| >= 0x3f708fb2, cos 20 deg, a literal here, not MX Unleashed's table entry),
+# +0x12a8/+0x12ac stick, +0x12e8 lean, +0x12cc/+0x12d0 front/rear brake, +0x318 gas, +0x1524 the rider's
+# stunt id (< 41 a trick: stick x0.5 / x0.4; >= 46 idle: gyros and lean force; the backflip's is 41),
+# +0x1290/+0x1294 the Brake Gyro / Gas Gyro options (str "Brake Gyro Value"/"Gas Gyro Value" on the PC;
+# copied from the player's settings +0x134/+0x138 when the bike is made; state04: 1, 0),
+# +0x1330 BrakeGyroTorque, +0x1334 GasGyroTorque, +0x1338/+0x133c unroll gain/torque, +0x1340/+0x1344
+# unyaw gain/torque. Moment through body vt +0x78, the lean force through vt +0x80 (atv_body_add_force).
 # ---------------------------------------------------------------------------------------------------
 # S150 — crooked landings. Journal: research/journal/2026-10-26-s150-trick-landing-spin.
 # No new function. bike_wreck_test (0x002522c0)'s landing crossup clause decides a crooked landing, and

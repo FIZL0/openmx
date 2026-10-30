@@ -54,20 +54,20 @@ const HALF_PI: f32 = 1.5707964;
 pub const STEEP: f32 = 1.2217305;
 /// Below this the stick is not asking for anything: the dead zone on the lean axis and on each
 /// angular velocity the auto-levelling damps.
-const DEAD: f32 = 0.1;
+pub(crate) const DEAD: f32 = 0.1;
 /// How far the stick has to go before it counts as held for a preload or a backflip.
 const HELD: f32 = 0.8;
 /// The speed, in the chassis' own units, below which the bike is too slow to measure a crossup angle
 /// or to be pushed sideways by the rider's lean.
-const SLOW: f32 = 10.0;
+pub(crate) const SLOW: f32 = 10.0;
 /// What a preload or a backflip needs: this much upward velocity and this much forward speed.
 const LIP_RISE: f32 = 5.0;
 const LIP_SPEED: f32 = 30.0;
 /// How long a backflip has to get the wheels off the ground before it gives up — 0.6 s.
 const FLIP_GRACE: f32 = 0.6;
 /// The two vector constants the original's rodata holds for this code: nothing, and up.
-const NOTHING: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
-const UP: Vf = Vf::new(0.0, 1.0, 0.0, 1.0);
+pub(crate) const NOTHING: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
+pub(crate) const UP: Vf = Vf::new(0.0, 1.0, 0.0, 1.0);
 
 /// The bike's own tuning, as its `.phy` file names it. One of these per bike, never changed by the
 /// simulation.
@@ -308,7 +308,7 @@ pub enum Wreck {
 /// operations (two subtractions, a divide, the `adda`/`madd` lerp, a `max` then a `min`) is what makes
 /// the last bit come out right. Callers test `a != b` themselves, because what they do when the input
 /// range is empty differs from one to the next.
-fn map_clamp(x: F, a: F, b: F, out0: F, out1: F) -> F {
+pub(crate) fn map_clamp(x: F, a: F, b: F, out0: F, out1: F) -> F {
     let u = (x - a) / (b - a);
     let v = out0.lerp(out1, u);
     v.max(out0.min(out1)).min(out0.max(out1))
@@ -317,7 +317,7 @@ fn map_clamp(x: F, a: F, b: F, out0: F, out1: F) -> F {
 /// Normalise `xyz` the way this code's VU0 does: the sum of squares with `vmul`/`vadday`/`vmaddz`,
 /// then `vrsqrt` — an *approximate* reciprocal square root, not a square root and a divide, so it is
 /// not the same number as [`vu::normalize`]'s. `w` comes through untouched.
-fn normalize(v: Vf) -> Vf {
+pub(crate) fn normalize(v: Vf) -> Vf {
     let sq = v.mul(v);
     let len2 = vu::madd(vu::add(sq.x(), sq.y()), 1.0, sq.z());
     v.merge(Dest::XYZ, v.mul_q(vu::rsqrt(1.0, len2)))
@@ -326,7 +326,7 @@ fn normalize(v: Vf) -> Vf {
 /// `a x b`, as the original's `vopmula`/`vopmsub` pair with its operands swapped between the two
 /// instructions. `w` is the *first* operand's, which is what the hardware leaves in the destination
 /// register, and which nothing here ever reads.
-fn cross(a: Vf, b: Vf) -> Vf {
+pub(crate) fn cross(a: Vf, b: Vf) -> Vf {
     Vf::opmsub(Vf::opmula(a, b), b, a)
 }
 

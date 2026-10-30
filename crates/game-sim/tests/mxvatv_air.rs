@@ -467,3 +467,192 @@ fn an_mx_phy_reads_its_moved_keys() {
     assert_eq!(ini.section("Airborne Control").float("GasGyroTorque"), Some(number("175")));
     assert!(ini.section("FirstPersonCamera").text("Left1stPerShoulderOffset").is_some());
 }
+
+// --- MD62: the airborne control ---------------------------------------------------------------------
+
+const AIR_CONTROL: u32 = 0x004e_65d0;
+
+#[derive(Clone, Debug)]
+struct AirState {
+    p: Params,
+    gas_gyro_torque: F,
+    air: Air,
+    ch: Chassis,
+    st: Step,
+    inp: handling::AirIn,
+}
+
+fn poke_air(ee: &mut Ee, s: &AirState) {
+    ee.set_u32(OBJ + 0x4, BIKE_VTABLE);
+    ee.set_u32(OBJ + 0xb8, BODY);
+    ee.set_u32(BODY + 0x110, BODY_VTABLE);
+    ee.set_u32(BODY + 0xe8, 0); // no force listeners on the body
+
+    let (p, air, ch, st, inp) = (&s.p, &s.air, &s.ch, &s.st, &s.inp);
+    put_v(ee, OBJ + 0x1170, p.airborne_control_moment);
+    put_f(ee, OBJ + 0x1180, p.airborne_damping);
+    put_f(ee, OBJ + 0x1184, p.airborne_control_force);
+    put_f(ee, OBJ + 0x118c, p.control_authority_time);
+    put_f(ee, OBJ + 0x1330, p.brake_gyro_torque);
+    put_f(ee, OBJ + 0x1334, s.gas_gyro_torque);
+    put_f(ee, OBJ + 0x1338, p.unroll_gain);
+    put_f(ee, OBJ + 0x133c, p.unroll_torque);
+    put_f(ee, OBJ + 0x1340, p.unyaw_gain);
+    put_f(ee, OBJ + 0x1344, p.unyaw_torque);
+
+    put_b(ee, OBJ + 0x324, air.on_ground);
+    put_f(ee, OBJ + 0x330, air.crossup);
+    put_f(ee, OBJ + 0x1188, air.authority);
+    put_b(ee, OBJ + 0x1194, air.flip_torque_applied);
+    put_b(ee, OBJ + 0x1198, air.flipping);
+
+    put_f(ee, OBJ + 0x32c, ch.speed);
+    put_f(ee, OBJ + 0x368, ch.roll);
+    put_v(ee, BODY + 0x80, ch.vel);
+    put_v(ee, BODY + 0xa0, ch.force);
+    put_v(ee, BODY + 0x1b0, ch.moment);
+    put_v(ee, BODY + 0x1d0, ch.ang_vel);
+
+    put_f(ee, OBJ + 0xbe4, F(st.heading.y()));
+    put_f(ee, OBJ + 0x12a8, st.stick.0);
+    put_f(ee, OBJ + 0x12ac, st.stick.1);
+    put_f(ee, OBJ + 0x12e8, st.lean);
+    put_f(ee, OBJ + 0x12cc, st.front_brake);
+    put_f(ee, OBJ + 0x12d0, st.rear_brake);
+    put_b(ee, OBJ + 0x11d0, st.spinning);
+    put_b(ee, OBJ + 0x11d4, st.spin_ramp);
+
+    ee.set_u32(OBJ + 0x1524, inp.stunt_id as u32);
+    put_f(ee, OBJ + 0x318, inp.gas);
+    put_b(ee, OBJ + 0x1290, inp.gyro.brake);
+    put_b(ee, OBJ + 0x1294, inp.gyro.gas);
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn air_state(&mut self) -> AirState {
+        let mut p = zero_params();
+        p.airborne_control_moment = Vf::new(self.f(-600.0, 0.0).0, self.f(0.0, 800.0).0, self.f(-300.0, 0.0).0, self.f(0.0, 2.0).0);
+        p.airborne_damping = self.f(0.0, 600.0);
+        p.airborne_control_force = self.f(0.0, 300.0);
+        p.control_authority_time = if self.one_in(6) { F::ZERO } else { self.f(0.1, 2.0) };
+        p.brake_gyro_torque = self.f(0.0, 600.0);
+        p.unroll_gain = self.f(0.0, 6.0);
+        p.unroll_torque = self.f(0.0, 100.0);
+        p.unyaw_gain = self.f(0.0, 6.0);
+        p.unyaw_torque = self.f(0.0, 800.0);
+
+        let mut air = Air { on_ground: self.one_in(10), ..Air::default() };
+        air.crossup = self.f(-1.0, 1.0);
+        air.authority = if self.b() { F::ZERO } else if self.b() { self.f(-0.5, 0.0) } else { self.f(0.0, 2.0) };
+        air.flip_torque_applied = self.one_in(4);
+        air.flipping = self.one_in(4);
+
+        let ch = Chassis {
+            speed: self.near(10.0, 0.0, 60.0),
+            pitch: F::ZERO,
+            roll: self.f(-3.2, 3.2),
+            force: self.vec(-500.0, 500.0),
+            moment: self.vec(-500.0, 500.0),
+            vel: self.vec(-40.0, 40.0),
+            local_vel: Vf::ZERO,
+            // Rates around the 0.1 dead band, where the auto-level's two damping clauses switch.
+            ang_vel: Vf::new(self.near(0.1, -0.3, 0.3).0, self.near(-0.1, -0.3, 0.3).0, self.f(-4.0, 4.0).0, self.f(-1.0, 1.0).0),
+        };
+
+        let mut st = Step { dt: self.f(0.005, 0.04), ..Step::default() };
+        // Steep from about 0.94 up: half the states are level enough to auto-level.
+        let hy = if self.one_in(8) { F(0.9396926) } else if self.b() { self.f(-0.9, 0.9) } else { self.f(-1.0, 1.0) };
+        st.heading = Vf::new(0.0, hy.0, 0.0, 0.0);
+        st.stick = (self.f(-1.0, 1.0), self.f(-1.0, 1.0));
+        st.lean = if self.b() { self.near(0.1, -0.1, 0.1) } else { self.f(-1.0, 1.0) };
+        st.front_brake = if self.b() { F::ZERO } else { self.f(0.0, 1.0) };
+        st.rear_brake = if self.b() { F::ZERO } else { self.f(0.0, 1.0) };
+        st.spinning = self.one_in(4);
+        st.spin_ramp = self.one_in(6);
+
+        let stunt_id = match self.bits() % 6 {
+            0 => (self.bits() % 41) as i32,
+            1 => 41 + (self.bits() % 5) as i32,
+            2 => 0x2e,
+            3 => 0xff,
+            4 => if self.b() { 40 } else { 45 },
+            _ => 46 + (self.bits() % 250) as i32,
+        };
+        let inp = handling::AirIn {
+            stunt_id,
+            gas: if self.b() { F::ZERO } else { self.f(0.0, 1.0) },
+            gyro: handling::Gyro { brake: self.bits() % 4 != 0, gas: self.bits() % 4 != 0 },
+        };
+        AirState { p, gas_gyro_torque: self.f(0.0, 400.0), air, ch, st, inp }
+    }
+}
+
+/// Which way a state went through the step, written from the decompile's branches and not from the port.
+fn air_path(s: &AirState) -> Vec<&'static str> {
+    if s.air.on_ground {
+        return vec!["on the ground"];
+    }
+    let mut v = vec![];
+    v.push(if s.air.flip_torque_applied && s.st.spinning {
+        "stick left out"
+    } else if s.inp.stunt_id < 41 {
+        "stick scaled"
+    } else {
+        "stick whole"
+    });
+    let damp = F(s.st.heading.y()).abs() >= 0.9396926 || s.st.lean.abs() >= 0.1 || s.air.flipping || s.st.spin_ramp
+        || s.air.authority - if s.air.authority > 0.0 { s.st.dt } else { F::ZERO } > 0.0;
+    v.push(if damp { "damped" } else { "levelled" });
+    let idle = s.inp.stunt_id >= 46;
+    let brake = s.st.front_brake != 0.0 || s.st.rear_brake != 0.0;
+    v.push(if idle && s.inp.gyro.brake && brake {
+        "brake gyro"
+    } else if idle && s.inp.gyro.gas && s.inp.gas != 0.0 {
+        "gas gyro"
+    } else {
+        "no gyro"
+    });
+    v.push(if idle && !s.air.flip_torque_applied && !s.st.spinning && s.ch.speed > 10.0 { "lean force" } else { "no lean force" });
+    v
+}
+
+#[test]
+fn mxvatv_airborne_control_is_the_originals() {
+    let Some((mut ee, _)) = harness() else { return };
+    let mut g = Gen(0x0d62_0001);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        let s = g.air_state();
+        for p in air_path(&s) {
+            *tally.entry(p).or_insert(0u32) += 1;
+        }
+        reset(&mut ee);
+        poke_air(&mut ee, &s);
+        ee.call(AIR_CONTROL, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
+        let was = snap(&ee);
+
+        let mut t = s.clone();
+        handling::airborne_control(&t.p, t.gas_gyro_torque, &mut t.air, &mut t.ch, &t.st, &t.inp);
+        reset(&mut ee);
+        poke_air(&mut ee, &t);
+        let now = snap(&ee);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            panic!(
+                "state {k} ({:?}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+                air_path(&s),
+                where_is(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+    }
+    for want in ["on the ground", "stick left out", "stick scaled", "stick whole", "damped", "levelled", "brake gyro", "gas gyro", "no gyro", "lean force", "no lean force"] {
+        let n = tally.get(want).copied().unwrap_or(0);
+        assert!(n >= 200, "only {n} state(s) went down {want:?}: {tally:?}");
+    }
+}

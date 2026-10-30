@@ -3,6 +3,8 @@
 //! setting and the steps ported from MX vs. ATV's ELF as they read there, each proved against that
 //! ELF's own code (`tests/mxvatv_air.rs`, a RAM image of a Free Ride in SLUS-21104).
 //!
+//! MD62 adds its airborne control ([`airborne_control`]): the gyro options and `GasGyroTorque`.
+//!
 //! [`Handling::Original`] is the default, and on it nothing here runs: the ride calls
 //! [`crate::air::backflip`] as it always did, so every replay hash is unchanged.
 //!
@@ -245,6 +247,140 @@ pub fn ride_backflip(p: &crate::air::Params, air: &mut Air, chassis: &mut Chassi
     }
 }
 
+/// MX vs. ATV's two gyro options, "Brake Gyro" and "Gas Gyro" in its options (the bike's `+0x1290` /
+/// `+0x1294`, copied in from the player's settings when the bike is made). With brake gyro on, a brake
+/// held in the air spins the bike nose-up by `BrakeGyroTorque`; with gas gyro on, the throttle spins
+/// it nose-down by `GasGyroTorque`. The game ships with brake on and gas off, which is what
+/// [`Gyro::default`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Gyro {
+    pub brake: bool,
+    pub gas: bool,
+}
+
+impl Default for Gyro {
+    fn default() -> Gyro {
+        Gyro { brake: true, gas: false }
+    }
+}
+
+/// The rider's stunt id at or past which MX vs. ATV's air control takes the stick unscaled: under it a
+/// trick is held (the stick's moment is halved and less).
+pub const FIRST_FLIP_STUNT: i32 = 41;
+/// The rider's stunt id from which the bike is idle (`0x2e` in the air, `0xff` on the ground): only
+/// then do the gyros and the lean force act. The five between are the backflip's and the 360's
+/// stunts (the backflip's is 41): no scaling, and no gyro or lean force.
+pub const IDLE_STUNT: i32 = 46;
+
+/// What MX vs. ATV's air control reads beyond MX Unleashed's [`Step`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AirIn {
+    /// The rider's current stunt id (`+0x1524`; see [`FIRST_FLIP_STUNT`] and [`IDLE_STUNT`]).
+    pub stunt_id: i32,
+    /// The rate-limited throttle (`+0x318`): the gas gyro acts while it is not zero.
+    pub gas: F,
+    pub gyro: Gyro,
+}
+
+/// One substep of MX vs. ATV's airborne control (SLUS-21104's, after its air drag), over MX
+/// Unleashed's state: the moment the stick commands, damped or auto-levelled, the two gyros, and the
+/// lean force. `gas_gyro_torque` is the bike file's `[Airborne Control] GasGyroTorque`.
+///
+/// What it does differently from MX Unleashed's ([`crate::air::airborne_control`]):
+///
+/// - the stick is left out only while the backflip's and the 360's torques both went in; under a
+///   backflip turning alone the stick still pitches (yaw and roll silenced, as MX Unleashed's);
+/// - a held trick is the rider's stunt id under 41, not the trick clocks' flag, and the gyros and lean
+///   force wait for an idle id (46 or more), so a backflip's stunt between has neither;
+/// - "steep" is the literal cos 20° (0.9396926), not the sine table's entry MX Unleashed reads;
+/// - the auto-level's sums are the FPU's `adda`/`madd` and `msub`, not a multiply then an add;
+/// - the brake gyro only on [`Gyro::brake`]; otherwise, on [`Gyro::gas`] with the throttle open, the
+///   gas gyro takes `GasGyroTorque` off the pitch.
+pub fn airborne_control(p: &crate::air::Params, gas_gyro_torque: F, air: &mut Air, chassis: &mut Chassis, step: &Step,
+                        inp: &AirIn) {
+    use crate::air::{DEAD, NOTHING, SLOW, UP, cross, map_clamp, normalize};
+    let mut ramp = F::ONE;
+    if air.authority > 0.0 {
+        ramp = if p.control_authority_time == F::ZERO {
+            F::ZERO
+        } else {
+            map_clamp(air.authority, p.control_authority_time, F::ZERO, F::ZERO, F::ONE)
+        };
+        air.authority = air.authority - step.dt;
+    }
+    if air.on_ground {
+        return;
+    }
+    let acm = p.airborne_control_moment;
+    let mut m = NOTHING;
+    if !(air.flip_torque_applied && step.spinning) {
+        m = if inp.stunt_id < FIRST_FLIP_STUNT {
+            Vf::new(
+                (step.stick.1 * (F(0.5) * F(acm.x()))).0,
+                (step.stick.0 * (F(0.4) * F(acm.y()))).0,
+                (step.stick.0 * (F(0.4) * F(acm.z()))).0,
+                m.w(),
+            )
+        } else {
+            Vf::new((F(acm.x()) * step.stick.1).0, (F(acm.y()) * step.stick.0).0, (F(acm.z()) * step.stick.0).0, m.w())
+        };
+        if air.flipping {
+            m = Vf::new(m.x(), 0.0, 0.0, m.w());
+        }
+        m = m.merge(Dest::XYZ, m.mul_q(ramp.0));
+    }
+    let level = F(step.heading.y()).abs() < F::from_bits(0x3f70_8fb2)
+        && step.lean.abs() < DEAD
+        && !air.flipping
+        && !step.spin_ramp
+        && air.authority <= 0.0;
+    if !level {
+        let damped = chassis.ang_vel.merge(Dest::XYZ, chassis.ang_vel.mul_q(p.airborne_damping.0));
+        m = m.merge(Dest::XYZ, m.sub(damped));
+    } else {
+        let w = chassis.ang_vel;
+        let z = fpu::madd(fpu::adda(0.0, m.z()), p.unroll_torque.0, (p.unroll_gain * chassis.roll - F(w.z())).0);
+        let y = fpu::madd(fpu::adda(0.0, m.y()), p.unyaw_torque.0, (p.unyaw_gain * air.crossup - F(w.y())).0);
+        m = Vf::new(m.x(), y, z, m.w());
+        if F(w.x()).abs() > DEAD {
+            m = Vf::new(fpu::msub(fpu::adda(0.0, m.x()), p.airborne_damping.0, w.x()), m.y(), m.z(), m.w());
+        }
+        if F(w.y()).abs() > DEAD {
+            m = Vf::new(m.x(), fpu::msub(fpu::adda(0.0, m.y()), p.airborne_damping.0, w.y()), m.z(), m.w());
+        }
+    }
+    let idle = inp.stunt_id >= IDLE_STUNT;
+    if idle && inp.gyro.brake && (step.front_brake != 0.0 || step.rear_brake != 0.0) {
+        m = Vf::new((F(m.x()) + p.brake_gyro_torque).0, m.y(), m.z(), m.w());
+    } else if idle && inp.gyro.gas && inp.gas != 0.0 {
+        m = Vf::new((F(m.x()) - gas_gyro_torque).0, m.y(), m.z(), m.w());
+    }
+    chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(m));
+
+    if idle && !air.flip_torque_applied && !step.spinning && chassis.speed > SLOW {
+        let side = normalize(cross(UP, chassis.vel));
+        let push = side.mul_q((p.airborne_control_force * step.lean).0);
+        chassis.force = chassis.force.merge(Dest::XYZ, chassis.force.add(push));
+    }
+}
+
+/// [`airborne_control`] on a ride. The port's rider keeps no stunt id, so one stands in for it by
+/// range, which is all the step reads: a trick held ([`crate::air::Step::stunt`]) is a trick's id, a
+/// backflip's clip running ([`Flip::clip`]) or the 360's (`spin_clip`) is the flip's stunt (41, the
+/// backflip's in the image), and anything else is the idle air id `0x2e`.
+pub fn ride_airborne_control(phy: &crate::phy::Phy, air: &mut Air, chassis: &mut Chassis, step: &Step, gas: F,
+                             flip: &Flip, spin_clip: bool) {
+    let stunt_id = if step.stunt {
+        0
+    } else if flip.clip != 0 || spin_clip {
+        FIRST_FLIP_STUNT
+    } else {
+        0x2e
+    };
+    let inp = AirIn { stunt_id, gas, gyro: phy.gyro };
+    airborne_control(&phy.air, phy.gas_gyro_torque, air, chassis, step, &inp);
+}
+
 /// MX vs. ATV's `[Mass Properties]` keys that MX Unleashed reads in `[Collisions]`, as
 /// `(MX vs. ATV's name, MX Unleashed's)`: the collision springs renamed, the rest moved as they are.
 const MOVED_TO_COLLISIONS: [(&str, &str); 17] = [
@@ -282,8 +418,9 @@ const MOVED: [(&str, &str, &str, &str); 6] = [
 /// An MX vs. ATV bike file (`mx_*.phy`) with its keys where MX Unleashed's reader looks for them
 /// ([`crate::phy::Phy::read`]): the collision keys it moved into `[Mass Properties]` back in
 /// `[Collisions]` under their old names, `GravityScale` as `Gravity`, the first-person shoulders in
-/// `[FirstPersonCamera]`. Every other key is kept where it is — its new ones (`GasGyroTorque`,
-/// `[Joystick]`'s input ramp, `ResetTime`, …) are read by nothing yet.
+/// `[FirstPersonCamera]`. Every other key is kept where it is — its new ones (`GasGyroTorque`, which
+/// [`crate::phy::Phy::gas_gyro_torque`] reads, `[Joystick]`'s input ramp, `ResetTime`, …) stay where
+/// they are; only the first is read yet.
 pub fn mxvatv_ini(ini: &crate::phy::Ini) -> crate::phy::Ini {
     let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
     let mut sections: Vec<(String, String)> = Vec::new();
