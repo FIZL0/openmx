@@ -687,7 +687,7 @@ pub const ASPECT_HELP: &str = "The shape of the picture, the HUD and the menus o
 pub const FILTERING_HELP: &str = "How sharp textures stay when seen at a glance, like the ground down a straight. 16x keeps them sharp into the distance; Off blurs them as the original did. The software renderer draws without it either way.";
 
 /// Shadows' row's help, on the Graphics tab (V108, user 2026-10-30).
-pub const SHADOWS_HELP: &str = "What casts shadows in the sun. On, the bikes, riders, machines and planes; All, the buildings, props and trees too, the whole world's baked when the track loads, so none come and go. The ground's own shadows are always there. The software renderer draws none.";
+pub const SHADOWS_HELP: &str = "What casts shadows in the sun. On, the bikes, riders, machines and planes; All, the buildings, props and trees too, the whole world's baked when the track loads, so none come and go, and the hills' shadows baked sharper by the sun. The ground's own shadows are always there. The software renderer draws only the hills' under All.";
 
 /// Shadow Quality's row's help, on the Graphics tab and in the Original switch's reach.
 pub const SHADOW_QUALITY_HELP: &str = "How shadows are drawn. Original is the game's soft patch under each rider, on the ground alone; Low and High cast onto everything, as dark as the ground's own shadows, High sharper near and softer where the shadow lies far from what casts it.";

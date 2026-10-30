@@ -3236,6 +3236,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         _ => ground,
     };
+    // Our own shadows of the hills under Shadows All (V117): baked once a map and sun, and kept in
+    // the mods folder's cache. A world's pieces keep their light maps.
+    let mut ground = ground;
+    if world_mod.is_none() && args.shadows == Some(game_render::shadow::Shadows::All) {
+        ground.hills = bake_hills(&ground, &args, &look, &stem);
+    }
     let sim_terrain = track::Terrain::parse(terrain_bytes)?;
     let sim_terrain: &track::Terrain = keep_terrain.get_or_init(|| sim_terrain);
     // A world's ground (MD8): every tile and join, each asked in its own coordinates.
@@ -4993,6 +4999,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         r.set_sky(sky.as_ref());
         r.set_ground_painted(&chunks, paint, ground::DIRT)?;
+        r.set_ground_baked(ground.hills.as_ref());
         r.set_wrap(None);
         r.set_prop_fade(None);
         if let (Some(w), Land::Tiles(t)) = (&world_mod, &sim) {
@@ -5353,6 +5360,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut foliage = args.foliage.unwrap_or_default();
     let mut filtering = args.filtering.unwrap_or_default();
     let mut shadows = (args.shadows.unwrap_or_default(), args.shadow_quality.unwrap_or_default());
+    // Whether the ground has our baked hills (V117) on the GPU, or has asked for them once.
+    let mut hills_set = ground.hills.is_some();
     // Set when the pause's settings change the picture's shape: the frame is re-made as for a resize.
     let mut reshaped = false;
     let mut frame = Frame::new(width, height, look.fog_color);
@@ -6279,6 +6288,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if let Some(r) = renderer_of(&mut offscreen, window) {
                         let (s, q) = game_render::shadow::drawn(shadows.0, shadows.1, true);
                         r.set_shadows(s, q);
+                        // All for the first time this ride: our hills (V117) baked now, or read from
+                        // the cache. A world's pieces keep their light maps.
+                        if s == game_render::shadow::Shadows::All && !hills_set && world_mod.is_none() {
+                            hills_set = true;
+                            if let Some(h) = bake_hills(&ground, &args, &look, &stem) {
+                                r.set_ground_baked(Some(&h));
+                            }
+                        }
                     }
                 }
                 if !args.aspect_asked && aspect != aspect_of(front.menu.settings.picture) {
@@ -9056,6 +9073,18 @@ fn terrain_bytes(res: &Res, named: &str) -> Result<Vec<u8>, String> {
 /// `settings.txt` when its Mods row is on. `None` reads nothing.
 /// Where MX Unleashed's worlds keep their built joins (P232): under `--mods DIR`, else the mods folder
 /// beside the settings — with mods off too, as the joins are the disc's, not a mod.
+/// Our own shadows of the hills for `ground` (V117) under the scene's sun, from the mods folder's
+/// cache or baked now, with a line saying which; `None` for a ground without a light map.
+fn bake_hills(ground: &Ground, args: &Args, look: &view::Scene, stem: &str) -> Option<game_render::splat::Shadow> {
+    let at = Instant::now();
+    let cache = game_render::terrain_shadow::cache_dir(&disc_worlds_cache(args));
+    let (hills, cached) = ground.bake_hills(Lighting::of(look).sun, Some(&cache), stem)?;
+    let size = game_render::terrain_shadow::SIZE;
+    let how = if cached { "read from the cache" } else { "baked" };
+    println!("terrain shadows: {stem}'s hills {how}, {size}x{size}, in {:.2} s", at.elapsed().as_secs_f32());
+    Some(hills)
+}
+
 fn disc_worlds_cache(args: &Args) -> std::path::PathBuf {
     match (&args.mods, args.mods_asked) {
         (Some(dir), true) => dir.clone(),
