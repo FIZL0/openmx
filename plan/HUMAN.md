@@ -301,8 +301,8 @@ website on https://openmx.dev. What only you can do:
    GitHub, then publish) or `tools/release.sh 0.1.0 publish`. Needs docker (the Linux build runs in Valve's Steam
    Runtime container). Done 2026-10-29 (P195): v0.1.0 is published and Latest, and https://openmx.dev serves it.
    Later releases: `tools/release.sh X.Y.Z publish` the same way.
-5. **The page's links**: web/index.html's `SITE` (Discord, the dump guide, donate) are still empty and show as
-   "Coming soon".
+5. **The page's links**: web/index.html's `SITE` has the Discord invite and the Ko-fi donate link (2026-10-30); the
+   dump guide is still empty and shows as "Coming soon".
 6. **Search engines and link previews for openmx.dev (P194)**, once the first release has put the site on
    https://openmx.dev (check that `/robots.txt`, `/sitemap.xml` and `/shots/ride-free06.jpg` load). (a) Google Search
    Console (search.google.com/search-console) → Add property → *Domain* `openmx.dev` → add the TXT record it gives
