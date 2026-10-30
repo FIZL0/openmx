@@ -196,6 +196,9 @@ const opfs = top => evaluate(`(async () => {
 
 await send('Runtime.enable');
 await send('Page.enable');
+// No pad of the machine's reaches the page: another slot's `./kit pad` (or a pad in a hand) pressing a button shows
+// itself to every chromium here, and the page then hides the touch pad and reads its presses as the rider's (K13).
+await send('Page.addScriptToEvaluateOnNewDocument', { source: 'navigator.getGamepads = () => [];' });
 await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
 await send('Page.navigate', { url });
 let d = await until(d => ['asking', 'failed'].includes(d.state), 120000);

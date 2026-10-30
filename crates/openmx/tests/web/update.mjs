@@ -116,6 +116,9 @@ const banner = () => evaluate("document.getElementById('fresh').classList.contai
 
 await send('Runtime.enable');
 await send('Page.enable');
+// No pad of the machine's reaches the page: another slot's `./kit pad` (or a pad in a hand) pressing a button shows
+// itself to every chromium here, and the page then hides the touch pad and reads its presses as the rider's (K13).
+await send('Page.addScriptToEvaluateOnNewDocument', { source: 'navigator.getGamepads = () => [];' });
 await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
 
 // One visit at `query` with `last` stored as the build last started: picks the disc, waits for the game, then moves the
