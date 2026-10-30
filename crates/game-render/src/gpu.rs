@@ -725,6 +725,10 @@ pub struct Actor<'a> {
     /// what is behind it, after everything solid and translucent in its view (a bike's put-back
     /// ghost); 0 or less is not drawn.
     pub alpha: f32,
+    /// Casts its whole shadow even while see-through (the put-back ghost and a paused rider: the
+    /// rider is still there). A see-through actor without it casts none — a fast wheel's blur copy,
+    /// a parked plane's marker.
+    pub casts: bool,
 }
 
 /// One view of the frame: where in the frame it goes, and the camera it is drawn from.
@@ -3758,7 +3762,7 @@ impl Renderer {
                     // Every run of its group is drawn once, solid or see-through, as the passes below do.
                     drawn.actors[v][i] += model.group(group).iter().map(|r| (r.count / 3) as usize).sum::<usize>();
                 }
-                if ghost == 0 {
+                if ghost == 0 || a.casts {
                     self.sun.cast(p, Some(i), centre, radius, m, group, InstanceRaw { m: a.at.0, palette, cover: 1.0 });
                 }
             }
@@ -5760,7 +5764,7 @@ mod tests {
         let view = texture.create_view(&Default::default());
         let mut draw = |alpha: Option<f32>| {
             let actors: Vec<Actor> =
-                alpha.map(|alpha| Actor { model: "board", at, pose: None, lod_from: None, alpha }).into_iter().collect();
+                alpha.map(|alpha| Actor { model: "board", at, pose: None, lod_from: None, alpha, casts: false }).into_iter().collect();
             let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
             let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
             gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
@@ -5815,7 +5819,7 @@ mod tests {
         gpu.set_sky(None);
         let texture = gpu.offscreen(w, h);
         let view = texture.create_view(&Default::default());
-        let actor = |model, alpha| Actor { model, at, pose: None, lod_from: None, alpha };
+        let actor = |model, alpha| Actor { model, at, pose: None, lod_from: None, alpha, casts: false };
         let actors = [actor("board", 1.0), actor("no such model", 1.0), actor("board", 0.0)];
         let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
         let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
@@ -5858,9 +5862,9 @@ mod tests {
         let texture = gpu.offscreen(w, h);
         let view = texture.create_view(&Default::default());
         let actors = [
-            Actor { model: "board", at: behind, pose: Some(0), lod_from: None, alpha: 1.0 },
-            Actor { model: "board", at, pose: None, lod_from: None, alpha: 1.0 },
-            Actor { model: "board", at: behind, pose: None, lod_from: None, alpha: 1.0 },
+            Actor { model: "board", at: behind, pose: Some(0), lod_from: None, alpha: 1.0, casts: false },
+            Actor { model: "board", at, pose: None, lod_from: None, alpha: 1.0, casts: false },
+            Actor { model: "board", at: behind, pose: None, lod_from: None, alpha: 1.0, casts: false },
         ];
         let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
         let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
@@ -5897,13 +5901,49 @@ mod tests {
         let view = texture.create_view(&Default::default());
         let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
         for (pose, at) in [(Some(0), board.pos), (None, v3(0.0, 0.0, -60.0))] {
-            let actors = [Actor { model: "board", at: behind, pose, lod_from: None, alpha: 1.0 }];
+            let actors = [Actor { model: "board", at: behind, pose, lod_from: None, alpha: 1.0, casts: false }];
             let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
             gpu.render(&target, &assets, &Scene3 { views: &views, poses: &poses, overlay: &[], sprites: &[], light: &light });
             let maps = gpu.sun_map_centres();
             assert_eq!(maps.len(), 1, "{pose:?}: {maps:?}");
             assert!(maps[0].0.sub(at).len() < 4.0, "{pose:?}: the map is round {:?}, not {at:?}", maps[0].0);
             assert!(maps[0].1 > 0, "{pose:?}: nothing cast into its map");
+        }
+    }
+
+    /// A see-through actor casts only when it says it does (user 2026-10-30: 'when respawning the
+    /// shadow isnt present for a few seconds, make it always there'): the put-back ghost keeps its
+    /// shadow under either quality's caster pass, and a wheel's blur copy still casts none.
+    #[test]
+    fn a_ghost_casts_only_when_it_says_so() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (mut scene, assets, camera) = known_scene();
+        let board = scene.models.remove(0);
+        scene.models.clear();
+        let at = M4::placement(board.pos, board.look, board.up);
+        let (w, h) = (64u32, 48u32);
+        let mut light = Lighting::of(&scene);
+        light.sun = v3(0.3, -0.8, 0.4);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+        for quality in [crate::shadow::ShadowQuality::Original, crate::shadow::ShadowQuality::High] {
+            gpu.set_shadows(crate::shadow::Shadows::On, quality);
+            for (alpha, casts, want) in [(1.0, false, true), (0.5, false, false), (0.5, true, true), (0.3, true, true)] {
+                let actors = [Actor { model: "board", at, pose: None, lod_from: None, alpha, casts }];
+                let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
+                gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+                let cast: usize = gpu.sun_map_centres().iter().map(|m| m.1).sum();
+                assert_eq!(cast > 0, want, "{quality:?}, alpha {alpha}, casts {casts}: {cast} cast");
+            }
         }
     }
 

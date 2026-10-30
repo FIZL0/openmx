@@ -460,7 +460,7 @@ impl Renderer {
                     let mut who = Vec::new();
                     for (i, a) in view.actors.iter().enumerate() {
                         let Some(Some(m)) = self.model_ids.get(a.model).copied() else { continue };
-                        if a.alpha < 1.0 {
+                        if a.alpha < 1.0 && !a.casts {
                             continue;
                         }
                         // Round its `at`, as the original fits it, unless its pose carries it off

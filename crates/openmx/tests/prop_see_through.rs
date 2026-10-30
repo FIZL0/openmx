@@ -124,7 +124,7 @@ fn what_is_behind_the_spinning_prop_shows_through_it() {
         let mut frame = Frame::new(w, h, scene.fog_color);
         game_render::world::draw_scene(&mut frame, &scene, assets, &extra, &camera);
         let hard = gpu.as_mut().map(|g| {
-            let actors: Vec<gpu::Actor> = extra.iter().map(|&(model, at)| gpu::Actor { model, at, pose: None, lod_from: None, alpha: 1.0 }).collect();
+            let actors: Vec<gpu::Actor> = extra.iter().map(|&(model, at)| gpu::Actor { model, at, pose: None, lod_from: None, alpha: 1.0, casts: false }).collect();
             let texture = g.offscreen(w as u32, h as u32);
             let view = texture.create_view(&Default::default());
             let views = [gpu::View { rect: [0, 0, w as u32, h as u32], camera: &camera, actors: &actors }];
