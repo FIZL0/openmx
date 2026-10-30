@@ -6861,8 +6861,10 @@ car_shift_sound             boot 0x003a6070 (sound, 0): what the shift calls wit
 # S149d — the car's controls and its once-a-frame steps (MXCar.cpp), research/journal/*-s149d-car-step.
 # Ported as game_sim::car::{Controls, travel_cofg, hold_yaw_rate}; tests/car_step.rs runs each against the
 # original on the S149a switched images (car 0x00605270) over every captured row and generated inputs.
-# The car's listeners (vtable 0x0045cf80 buggy/baja, 0x0045ed50 truck): preforce +0x90 -> 0x00397500,
-# force +0x94 -> 0x003a02f0 then the tire pass +0x9c -> 0x00397f40 every substep.
+# The car's listeners (vtable 0x0045cf80 buggy/baja, 0x0045ed50 truck): preforce +0x90 -> 0x00397500
+# once a frame, force -> 0x00397f40 every substep, post -> 0x003a02f0 once a frame (S149d corrected
+# this: S149c read 0x003a02f0 as the force). Ported as game_sim::car::Machine::{preforce, force,
+# measure}; tests/car_drive.rs replays the s149b baja/buggy/truck captures bit-exact.
 car_input                   boot 0x00396490 (steer f12, lean f13, car, pad, player): the pad into the car,
 #                                           vtable +0x20. Commands 0xe gas (analog below +0x40c or past
 #                                           +0x410 side slip), 0xf brake, 0x16 hand brake, 0x10 clutch,
@@ -6875,10 +6877,26 @@ car_cofg_travel             boot 0x00397390 (car): vtable +0x1a8, from the prefo
 car_preforce                boot 0x00397500 (dt, car): body preforce, controls, cofg travel, tires'
 #                                           contacts cleared (0x0039af70), contact sort (0x00397120), the
 #                                           four ground probes (0x0039b090), front tires' +0xc4.
-car_measure                 boot 0x00398150 (dt, car): every substep. Yaw rate (body +0x1b4) held to
+car_measure                 boot 0x00398150 (dt, car): once a frame, from the post. Yaw rate (body +0x1b4) held to
 #                                           +0x540, engine shift, landing, speed +0x55c, local velocity
 #                                           +0x580 and rate +0x570, the angles +0x560/+0x564.
-car_force                   boot 0x003a02f0 (dt, car): measure, then vtable +0x2e0 (buggy/baja
+car_post                    boot 0x003a02f0 (dt, car): measure, then vtable +0x2e0 (buggy/baja
 #                                           0x0039edb0, truck 0x003e07b0), 0x0039ed00, 0x0039e9c0,
 #                                           0x0039e850.
 car_preload                 boot 0x00397c60 (dt, car): the held jump; reads |+0x3e8| and the lean.
+car_launch                  boot 0x00397e20 (dt, car): every substep. Clutch let out from standing:
+#                                           the converter boost eases from a speed-scaled start to 1.
+car_anti_slide              boot 0x00397940 (dt, car): every substep. Grounded, no throttle, under
+#                                           10 ft/s: a force against the slide along the ground.
+car_aero                    boot 0x00397650 (dt, car): every substep. Wings' lift and drag moving
+#                                           forward; off the ground over 10 ft/s the control moment,
+#                                           damping, unroll/unyaw (stick under 0.1, up.y over 0.34)
+#                                           and brake gyro.
+car_wreck_step              boot 0x00398820 (dt, car): vtable +0x1cc, from the measure. Wreck lift
+#                                           and unwreck, the edge throw (position_query, 150), the
+#                                           stuck timer against +max wreck time.
+car_tire_probe              boot 0x0039b090 (tire, car): once a frame. Up to 5 ground queries from
+#                                           upper to lower until two normals agree (0x3db2b8c1).
+car_tire_contacts_clear     boot 0x0039af70 (tire): the tire's solid/contact words cleared.
+car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; not ported — no
+#                                           contact is set in the S149b drives, so touching stays false.
