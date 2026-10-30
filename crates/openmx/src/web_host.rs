@@ -417,12 +417,23 @@ pub struct PadNode {
     last: Option<Pad>,
     queue: std::collections::VecDeque<[u8; 8]>,
     gone: bool,
+    /// Found after the shell started ([`PadNode::shown_by_a_press`]).
+    pressed_in: bool,
 }
 
 impl PadNode {
     pub fn open(path: &std::path::Path) -> std::io::Result<PadNode> {
         let index = index_of(path).ok_or_else(|| std::io::Error::other("not a gamepad"))?;
-        Ok(PadNode { index, last: None, queue: Default::default(), gone: false })
+        Ok(PadNode { index, last: None, queue: Default::default(), gone: false, pressed_in: false })
+    }
+
+    /// A pad the page lists only now that the shell is running (P236): a browser keeps a pad from the
+    /// page until one of its buttons is pressed, so what is down as it is first read is that press,
+    /// not a button held through a launch. It is put out as a pad let go and then that press, so the
+    /// press that showed the pad works the screen it was made on rather than only showing it
+    /// ([`crate::pad`]'s scan reads the pad let go for the frame it joins in, too).
+    pub fn shown_by_a_press(&mut self) {
+        self.pressed_in = true;
     }
 
     fn event(&mut self, kind: u8, number: u8, value: i16, init: bool) {
@@ -440,8 +451,20 @@ impl PadNode {
             self.gone = true;
             return;
         };
-        let init = self.last.is_none();
-        let was = self.last.unwrap_or(now);
+        match self.last {
+            Some(was) => self.put(&was, &now, false),
+            None if self.pressed_in => {
+                let rest = Pad { buttons: [0.0; 17], axes: [0.0; 4] };
+                self.put(&rest, &rest, true);
+                self.put(&rest, &now, false);
+            }
+            None => self.put(&now, &now, true),
+        }
+        self.last = Some(now);
+    }
+
+    /// The events from `was` to `now`: each button and axis that changed, or all of them for `init`.
+    fn put(&mut self, was: &Pad, now: &Pad, init: bool) {
         let axis = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
         let trigger = |v: f32| (v.clamp(0.0, 1.0) * 65534.0 - 32767.0) as i16;
         for (from, js) in JS_BUTTON {
@@ -463,12 +486,11 @@ impl PadNode {
             _ => axis((p.buttons[13] - p.buttons[12]).round()),
         };
         for n in 0..8 {
-            let v = value(&now, n);
-            if init || v != value(&was, n) {
+            let v = value(now, n);
+            if init || v != value(was, n) {
                 self.event(0x02, n, v, init);
             }
         }
-        self.last = Some(now);
     }
 }
 

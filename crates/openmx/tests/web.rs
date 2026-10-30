@@ -439,6 +439,57 @@ fn the_browser_rides_on_the_gpu() {
     }
 }
 
+/// A pad in the page (P236, `tests/web/gamepad.mjs`): headless chromium with a pad behind
+/// `navigator.getGamepads()` shaped as chromium's own — not listed until a button is pressed,
+/// `gamepadconnected` then, the standard mapping — not K13's empty stub. The first Cross press on
+/// the splash both shows the pad and makes it 1P (the console says so); Cross alone takes it
+/// through the menus to a ride with it seated; L2 held keeps the speedometer still and R2 moves
+/// it. Not a kernel pad: none can be made on the machine the tests run on (no uinput, and CDP has
+/// no gamepad to send). The module is `tools/web.sh --check`'s. Skips without the disc, node or
+/// chromium.
+#[test]
+fn a_pad_the_browser_shows_on_a_press_rides() {
+    let iso = match Disc::open_configured() {
+        Ok(_) => configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    const FLAGS: [&str; 4] = ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-angle=vulkan", "--ignore-gpu-blocklist"];
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/gamepad.mjs");
+    let scratch = std::env::temp_dir().join(format!("openmx-web-gamepad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let run = Command::new("node")
+        .arg(&drive)
+        .arg(repo().join("web"))
+        .arg(&iso)
+        .arg(scratch.join("profile"))
+        .arg(scratch.join("ride.png"))
+        .args(FLAGS)
+        .env("OPENMX_GPU_PKG", built())
+        .output()
+        .expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    let log = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "gamepad.mjs failed:\n{log}{text}");
+    let field = |key: &str| -> String { text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string() };
+    assert_eq!(field("first"), "true", "the press that showed the pad did not make it 1P:\n{log}{text}");
+    assert_eq!(field("seated"), "true", "the pad never took a seat on a ride:\n{log}{text}");
+    let braked: f64 = field("braked").parse().expect("braked");
+    let gas: f64 = field("gas").parse().expect("gas");
+    println!("speedometer changed {braked} on the brake, {gas} on the gas");
+    assert!(braked < 0.02, "the speedometer moved with L2 held ({braked}):\n{text}");
+    assert!(gas > 0.05, "R2 did not move the speedometer ({gas}):\n{text}");
+}
+
 /// The mod store in the page (P198, `tests/web/store.mjs`): headless chromium opens the page with
 /// `--screen store` pointed at a fake store on the page's own loopback server, the disc picked; one
 /// Space (Cross) on the store's only card downloads its mod.zip through the redirect to the "CDN" into
