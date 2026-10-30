@@ -448,9 +448,9 @@ pub fn bake_splat(
     bake_splat_sharp(splat, terrain, spacing, leaves, light).map(|(pages, _)| pages)
 }
 
-/// [`bake_splat`], and for each page what it does to the splat's passes alone
-/// ([`game_render::splat::Splat::paint_passes`]) — the roads and the light, per channel and not
-/// clipped at 255 — as [`game_render::terrain::modulation_byte`]s, for the GPU to draw the passes
+/// [`bake_splat`], and for each page what it does to the splat's paint, its roads and ruts laid in
+/// ([`game_render::splat::Splat::paint`]) — the light, per channel and not clipped at 255; the GPU
+/// draws the roads per pixel itself (V115) — as [`game_render::terrain::modulation_byte`]s, for the GPU to draw the passes
 /// per pixel and multiply them by it ([`game_render::terrain::SharpSplat`], MD35).
 pub fn bake_splat_sharp(
     splat: &game_render::splat::Splat,
@@ -522,7 +522,9 @@ pub fn bake_splat_sharp(
                     }
                     None => c.map(f32::from),
                 };
-                let p = splat.paint_passes_at(x, z, game_render::splat::PAINT_NEAREST);
+                // The roads and ruts too (V115): the GPU lays a world's disc maps' meshes over the
+                // passes per pixel, so what is left for the page to do is the light alone.
+                let p = c;
                 let m = [0, 1, 2].map(|k| game_render::terrain::modulation_byte(match p[k] {
                     0 if lit[k] < 0.5 => 1.0,
                     p => lit[k] / f32::from(p.max(1)),

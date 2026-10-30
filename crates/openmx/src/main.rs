@@ -4985,6 +4985,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     detail.layers,
                     l.paint.tiles.iter().zip(&packed).filter(|(t, at)| at.is_some() && t.sharp().is_some()).count(),
                 );
+                // And the roads and ruts laid over them round each eye (V115).
+                let meshed = game_render::gpu::world_mesh_tiles(&l.paint, &packed);
+                let names: Vec<&str> = meshed.iter().filter_map(|&i| l.names.get(i).map(String::as_str)).collect();
+                match (r.ground_meshed(), game_render::gpu::world_meshes(&l.paint, &packed)) {
+                    (true, Some(m)) => println!("world paint: roads and ruts of {} ({} triangles, {} textures)", names.join(", "), m.tris.len(), m.textures.len()),
+                    (false, Some(_)) => println!("world paint: roads and ruts of {} left out: the device samples too few textures", names.join(", ")),
+                    (_, None) => println!("world paint: no map has roads or ruts"),
+                }
             }
             // The whole world at its coarsest under it, where a piece is not loaded yet, and its
             // props and plants faded out by the reach they come in at (V92).
