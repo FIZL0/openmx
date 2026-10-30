@@ -273,6 +273,7 @@ pub struct Splat {
 }
 
 /// The baked light map, assembled, and the part of the world it covers.
+#[derive(Clone)]
 pub struct Shadow {
     /// The tiles in the order they are laid out, row by row from the image's top.
     pub tiles: Vec<Texture>,

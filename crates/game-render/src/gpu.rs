@@ -482,6 +482,9 @@ struct GpuGround {
     /// anisotropy it was made with.
     layout: wgpu::BindGroupLayout,
     shadow: wgpu::TextureView,
+    /// Our own baked shadows of the hills over the same rectangle (V117), read in `shadow`'s place
+    /// under [`crate::shadow::Shadows::All`] ([`Renderer::set_ground_baked`]).
+    baked: Option<wgpu::TextureView>,
     textures: Vec<wgpu::TextureView>,
     anisotropy: u16,
     pipeline: wgpu::RenderPipeline,
@@ -2430,7 +2433,7 @@ impl Renderer {
             }
         }
         if let Some(g) = &self.ground {
-            let bind = self.ground_bind(&g.layout, &g.shadow, &g.textures);
+            let bind = self.ground_bind(&g.layout, self.ground_light(g), &g.textures);
             let g = self.ground.as_mut().expect("just read");
             g.bind = bind;
             g.anisotropy = anisotropy;
@@ -2751,6 +2754,7 @@ impl Renderer {
             bind,
             layout,
             shadow,
+            baked: None,
             textures: views,
             anisotropy: self.anisotropy,
             meshes,
@@ -6168,6 +6172,46 @@ mod tests {
         assert_eq!(drawn(&mut gpu, Graphics::Original), 1, "the chunk ahead only");
         // And back: the per-view index list follows the setting.
         assert_eq!(drawn(&mut gpu, Graphics::Full), 2);
+    }
+
+    /// V117: the ground reads our baked hills in its light map's place under All only, and a
+    /// change of setting either way swaps them without a new ground.
+    #[test]
+    fn the_ground_reads_the_baked_hills_under_all_only() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let grey = |g: u8| Texture { width: 2, height: 2, rgba: [g, g, g, 255].repeat(4) };
+        let lit = crate::splat::Shadow { tiles: vec![grey(140)], across: 1, x0: 0.0, x1: 200.0, z0: 0.0, z1: 200.0 };
+        let pass = crate::splat::Pass {
+            texture: 0,
+            scale: [0.5, 0.5],
+            angle: 0.0,
+            turn: (0.0, 1.0),
+            reads: (true, true),
+            mip: None,
+            rgba: [128.0; 4],
+            blend: None,
+            fixed: 0.0,
+        };
+        let paint = Splat { textures: vec![grey(200)], passes: vec![pass], shadow: Some(lit.clone()), meshes: None };
+        gpu.set_ground(&[flat_chunk(8, 25.0, 0, 0)], Some(&paint), [150.0, 118.0, 86.0]).unwrap();
+        let baked = crate::splat::Shadow { tiles: vec![grey(80)], ..lit };
+        gpu.set_shadows(crate::shadow::Shadows::All, crate::shadow::ShadowQuality::High);
+        assert!(!gpu.ground_reads_baked(), "nothing baked yet");
+        gpu.set_ground_baked(Some(&baked));
+        assert!(gpu.ground_reads_baked());
+        gpu.set_shadows(crate::shadow::Shadows::On, crate::shadow::ShadowQuality::High);
+        assert!(!gpu.ground_reads_baked(), "On keeps the light map");
+        gpu.set_shadows(crate::shadow::Shadows::All, crate::shadow::ShadowQuality::Low);
+        assert!(gpu.ground_reads_baked());
+        // A new ground has none of the old one's.
+        gpu.set_ground(&[flat_chunk(8, 25.0, 0, 0)], Some(&paint), [150.0, 118.0, 86.0]).unwrap();
+        assert!(!gpu.ground_reads_baked());
     }
 
     #[test]
