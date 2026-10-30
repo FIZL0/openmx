@@ -39,7 +39,7 @@ use crate::join::{self, Join, Opened, Outcome};
 use crate::roster::{self, Catalogue, Garage, Pick, Picks};
 use crate::split::{self, Split};
 use game_render::eco::{Foliage, Lod};
-use game_render::shadow::Shadows;
+use game_render::shadow::{ShadowQuality, Shadows};
 use game_render::world::Graphics;
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Disc, Frame, Texture};
@@ -524,9 +524,12 @@ pub struct Settings {
     /// How far the GPU filters every texture anisotropically (V83): 16x unless turned down, or Off
     /// under the Original switch's Texture Filtering.
     pub filtering: Filtering,
-    /// The sun's shadows of what moves and stands (V108): ours, the original's under each racer, or
-    /// none. Ours unless turned to another; Original under the Original switch.
+    /// What casts the sun's shadows (V108, user 2026-10-30): nothing, the movers (On, unless turned
+    /// to another), or the movers and the static world (All).
     pub shadows: Shadows,
+    /// How the shadows are drawn (user 2026-10-30): the original's under each racer (under the
+    /// Original switch), or ours at Low or High (unless turned to another).
+    pub shadow_quality: ShadowQuality,
     /// Each seat's session markers (P129), the Controls tab's Markers row, 1P's first: on, the d-pad
     /// is the markers' and the left stick alone rides; off, the d-pad fires no marker, the marker
     /// bar hides, and the d-pad rides as the original's — steering, leaning and the trick gestures.
@@ -538,8 +541,7 @@ pub struct Settings {
     /// stepped down by the first seconds of each ride until its frames hold. Any row changed by hand
     /// turns it off. On unless turned off.
     pub video_auto: bool,
-    /// Which things cast the sun's shadows under Better (P223, [`video::Casters`]).
-    pub casters: video::Casters,
+
     /// How detailed the models are drawn (P223, [`video::Detail`]).
     pub detail: video::Detail,
     /// Whether the player agreed to the mod store's rules ([`STORE_RULES`]) once, ever: the Upload
@@ -668,8 +670,11 @@ pub const ASPECT_HELP: &str = "The shape of the picture, the HUD and the menus o
 /// Texture Filtering's row's help, on the Graphics tab and in the Original switch's reach (V83).
 pub const FILTERING_HELP: &str = "How sharp textures stay when seen at a glance, like the ground down a straight. 16x keeps them sharp into the distance; Off blurs them as the original did. The software renderer draws without it either way.";
 
-/// Shadows' row's help, on the Graphics tab and in the Original switch's reach (V108).
-pub const SHADOWS_HELP: &str = "Shadows of the bikes, riders, machines and the world's models in the sun. Better casts everything near onto the ground and onto each other, softly, as dark as the ground's own shadows; Original is the game's soft patch under each rider. The software renderer draws none.";
+/// Shadows' row's help, on the Graphics tab (V108, user 2026-10-30).
+pub const SHADOWS_HELP: &str = "What casts shadows in the sun. On, the bikes, riders, machines and planes; All, the buildings, props and trees too, the whole world's baked when the track loads, so none come and go. The ground's own shadows are always there. The software renderer draws none.";
+
+/// Shadow Quality's row's help, on the Graphics tab and in the Original switch's reach.
+pub const SHADOW_QUALITY_HELP: &str = "How shadows are drawn. Original is the game's soft patch under each rider, on the ground alone; Low and High cast onto everything, as dark as the ground's own shadows, High sharper near and softer where the shadow lies far from what casts it.";
 
 /// The Texture Filtering setting (V83): how far the GPU filters textures anisotropically, so a
 /// texture seen edge-on (the ground down a straight) stays sharp along it. Off is the original's
@@ -769,7 +774,8 @@ pub enum Departure {
     Markers,
     /// The world's textures (V84): texture packs' and upscales over the disc's, or the disc's alone.
     Textures,
-    /// The sun's shadows (V108): ours of everything near, or the original's under each racer.
+    /// The sun's shadows' quality (V108, user 2026-10-30): ours at High, or the original's under
+    /// each racer.
     Shadows,
 }
 
@@ -797,7 +803,7 @@ impl Departure {
             Departure::Filtering => "Texture Filtering",
             Departure::Markers => "Markers",
             Departure::Textures => "Upscaled Textures",
-            Departure::Shadows => "Shadows",
+            Departure::Shadows => "Shadow Quality",
         }
     }
 
@@ -812,7 +818,7 @@ impl Departure {
             Departure::Filtering => ["16x", "Off"],
             Departure::Markers => ["On", "Off"],
             Departure::Textures => ["Upscaled", "Original"],
-            Departure::Shadows => ["Better", "Original"],
+            Departure::Shadows => ["High", "Original"],
         }
     }
 
@@ -827,7 +833,7 @@ impl Departure {
             Departure::Filtering => FILTERING_HELP,
             Departure::Markers => "Every player's session markers on the d-pad. Off, the d-pad steers, leans and does tricks as in the original.",
             Departure::Textures => "The world's textures from texture packs, mods/texture-replacements and mods' own upscales, where there are any. Original is the disc's alone. From the next ride; the software renderer draws them too, slower.",
-            Departure::Shadows => SHADOWS_HELP,
+            Departure::Shadows => SHADOW_QUALITY_HELP,
         }
     }
 }
@@ -845,7 +851,7 @@ impl Menu {
             Departure::Filtering => s.filtering == Filtering::Off,
             Departure::Markers => s.markers.iter().all(|m| !*m),
             Departure::Textures => !s.textures,
-            Departure::Shadows => s.shadows == Shadows::Original,
+            Departure::Shadows => s.shadow_quality == ShadowQuality::Original,
         }
     }
 
@@ -890,7 +896,7 @@ impl Menu {
             Departure::Filtering => s.filtering = if original { Filtering::Off } else { Filtering::X16 },
             Departure::Markers => s.markers = [!original; SEATS_MAX],
             Departure::Textures => s.textures = !original,
-            Departure::Shadows => s.shadows = if original { Shadows::Original } else { Shadows::Better },
+            Departure::Shadows => s.shadow_quality = if original { ShadowQuality::Original } else { ShadowQuality::High },
         }
     }
 
@@ -1321,10 +1327,11 @@ impl Default for Settings {
             texture_packs_off: Vec::new(),
             filtering: Filtering::default(),
             shadows: shadows_default(),
+            shadow_quality: shadow_quality_default(),
             markers: [true; SEATS_MAX],
             updates: Updates::default(),
             video_auto: true,
-            casters: video::Casters::default(),
+
             detail: video::Detail::default(),
             store_rules: false,
         }
@@ -1388,14 +1395,26 @@ fn reload_page() {
     crate::host_reload();
 }
 
-/// The Shadows a rider has before choosing (P205): ours, but the original's on a phone's page,
-/// whose GPU the two shadow maps cost most (opentennis's B413: low shadows by default on phones).
+/// The Shadows a rider has before choosing: the High preset's All, which a desktop GPU draws at no
+/// cost to the frame rate (free09 at 1920x1080: 0.5 ms more a frame than On, the bake once on load,
+/// user 2026-10-30), but the movers' alone on a phone's page, as its Phone preset has them (P205).
 fn shadows_default() -> Shadows {
     #[cfg(target_arch = "wasm32")]
     if crate::host_phone() {
-        return Shadows::Original;
+        return Shadows::On;
     }
-    Shadows::default()
+    Shadows::All
+}
+
+/// The Shadow Quality a rider has before choosing (P205): High, but Low on a phone's page, whose GPU
+/// the shadow maps cost most (opentennis's B413: low shadows by default on phones), as its Phone
+/// preset has it.
+fn shadow_quality_default() -> ShadowQuality {
+    #[cfg(target_arch = "wasm32")]
+    if crate::host_phone() {
+        return ShadowQuality::Low;
+    }
+    ShadowQuality::default()
 }
 
 /// A `texture_packs` line's folder names (V84): comma-separated, each part of a path under `mods/`
@@ -1515,10 +1534,19 @@ impl Settings {
                 "texture_packs" => s.texture_packs = pack_names(v),
                 "texture_packs_off" => s.texture_packs_off = pack_names(v),
                 "texture_filtering" => s.filtering = Filtering::from_word(v).unwrap_or(s.filtering),
-                "shadows" => s.shadows = Shadows::from_word(v).unwrap_or(s.shadows),
+                // V108's one Shadows setting (better, original, off) is the two now: Better was ours
+                // at its sharpest, Original the original's (user 2026-10-30).
+                "shadows" => {
+                    if let Some((shadows, quality)) = Shadows::from_old_word(v) {
+                        s.shadows = shadows;
+                        s.shadow_quality = quality.unwrap_or(s.shadow_quality);
+                    }
+                }
+                "shadow_quality" => s.shadow_quality = ShadowQuality::from_word(v).unwrap_or(s.shadow_quality),
                 "updates" => s.updates = Updates::from_word(v).unwrap_or(s.updates),
                 "video" => s.video_auto = v == "auto",
-                "shadow_casters" => s.casters = video::Casters::from_word(v).unwrap_or(s.casters),
+                // P223's Shadow Casters row is gone: under On only the movers cast (user 2026-10-30).
+                "shadow_casters" => {}
                 "model_detail" => s.detail = video::Detail::from_word(v).unwrap_or(s.detail),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
                 "camera_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
@@ -1700,14 +1728,16 @@ impl Settings {
         if self.updates == Updates::default() { String::new() } else { format!("updates = {}\n", self.updates.word()) }
     }
 
-    /// Shadows (V108), only when not the default (ours, or the original's on a phone: P205), so a file
-    /// from before it is written as it was.
+    /// Shadows and Shadow Quality (V108, user 2026-10-30), each only when not the default (All at
+    /// High, or On at Low on a phone: P205), so a file from before them is written as it was.
     fn shadows_text(&self) -> String {
-        if self.shadows == shadows_default() { String::new() } else { format!("shadows = {}\n", self.shadows.word()) }
+        let shadows = if self.shadows == shadows_default() { String::new() } else { format!("shadows = {}\n", self.shadows.word()) };
+        let quality = if self.shadow_quality == shadow_quality_default() { String::new() } else { format!("shadow_quality = {}\n", self.shadow_quality.word()) };
+        shadows + &quality
     }
 
-    /// The Preset row's Auto (P223) where the rows do not imply it; the casters and the model detail
-    /// only when they are not the defaults.
+    /// The Preset row's Auto (P223) where the rows do not imply it; the model detail only when it is
+    /// not the default.
     fn video_text(&self) -> String {
         // Only where the rows do not say it: a file without the line is on Auto when its rows are
         // the defaults, so a file from before P223 is written as it was.
@@ -1717,9 +1747,8 @@ impl Settings {
             (false, true) => "video = custom\n".into(),
             _ => String::new(),
         };
-        let casters = if self.casters == video::Casters::default() { String::new() } else { format!("shadow_casters = {}\n", self.casters.word()) };
         let detail = if self.detail == video::Detail::default() { String::new() } else { format!("model_detail = {}\n", self.detail.word()) };
-        auto + &casters + &detail
+        auto + &detail
     }
 
     /// A world's sky (MD9), only when it is not the default, so a file from before it is written as

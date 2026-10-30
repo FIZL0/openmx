@@ -101,8 +101,10 @@ pub enum Key {
     DrawDistance,
     WorldSky,
     TextureFiltering,
-    /// The sun's shadows (V108): the Shadows departure's row, with Off a third choice.
+    /// What casts the sun's shadows (V108, user 2026-10-30): Off, On or All.
     Shadows,
+    /// How they are drawn: the Shadows departure's row (the original's), with Low a third choice.
+    ShadowQuality,
     /// The Ride tab's Updates (P191), on the desktop alone.
     Updates,
     /// The Display tab's Aspect Ratio (P176): the Picture departure's row, as Draw Distance is the fog's.
@@ -114,8 +116,7 @@ pub enum Key {
     ShowFps,
     /// The Graphics tab's Preset row (P223): Auto, a preset, or Custom.
     VideoPreset,
-    /// Shadow Casters (P223): all, or fewer under Better.
-    Casters,
+
     /// Model Detail (P223).
     Detail,
     Mix,
@@ -539,16 +540,16 @@ impl Menu {
                 at(&Filtering::ALL, s.filtering),
                 FILTERING_HELP,
             ),
-            // V108: the Original switch's too, with Off a third choice.
+            // V108 (user 2026-10-30): what casts, and how it is drawn, the Original switch's.
             Row::choice(Key::Shadows, "Shadows", &Shadows::ALL.map(Shadows::label), at(&Shadows::ALL, s.shadows), SHADOWS_HELP),
             Row::choice(
-                Key::Casters,
-                "Shadow Casters",
-                &super::video::Casters::ALL.map(super::video::Casters::label),
-                at(&super::video::Casters::ALL, s.casters),
-                "Under Better shadows: All has everything near cast one. Fewer leaves the plants and small props to their baked light, which is faster.",
+                Key::ShadowQuality,
+                "Shadow Quality",
+                &ShadowQuality::ALL.map(ShadowQuality::label),
+                at(&ShadowQuality::ALL, s.shadow_quality),
+                SHADOW_QUALITY_HELP,
             )
-            .off_if(s.shadows != Shadows::Better, "Only Better shadows have casters to choose"),
+            .off_if(s.shadows == Shadows::Off, "Shadows are off"),
             Row::choice(
                 Key::Detail,
                 "Model Detail",
@@ -1274,6 +1275,7 @@ impl Menu {
             Key::WorldSky => s.world_sky = WorldSky::ALL[next(row)],
             Key::TextureFiltering => s.filtering = Filtering::ALL[next(row)],
             Key::Shadows => s.shadows = Shadows::ALL[next(row)],
+            Key::ShadowQuality => s.shadow_quality = ShadowQuality::ALL[next(row)],
             Key::Updates => s.updates = Updates::ALL[next(row)],
             Key::AspectRatio => s.picture = Picture::ALL[next(row)],
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
@@ -1290,7 +1292,7 @@ impl Menu {
                 };
                 super::video::set_row(s, to);
             }
-            Key::Casters => s.casters = super::video::Casters::ALL[next(row)],
+
             Key::Detail => s.detail = super::video::Detail::ALL[next(row)],
             Key::Mix => s.set_mix(Mix::ALL[next(row)]),
             // Cross steps a slider up and round from the top, as the original's page does.
@@ -1557,7 +1559,7 @@ impl Departure {
         match self {
             Departure::Fog => Key::DrawDistance,
             Departure::Filtering => Key::TextureFiltering,
-            Departure::Shadows => Key::Shadows,
+            Departure::Shadows => Key::ShadowQuality,
             Departure::Picture => Key::AspectRatio,
             d => Key::Departure(d),
         }

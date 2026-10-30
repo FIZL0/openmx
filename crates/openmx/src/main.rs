@@ -1693,9 +1693,13 @@ struct Args {
     /// `--texture-filtering off|2|4|8|16` (V83): how far the GPU filters textures anisotropically;
     /// the front end's setting when not given, 16x without one.
     filtering: Option<menu::Filtering>,
-    /// `--shadows better|original|off` (V108): our sun shadows, the original's under each racer, or
-    /// none; the front end's setting when not given, Better without one.
+    /// `--shadows off|on|all` (V108, user 2026-10-30): what casts the sun's shadows, the movers or
+    /// the whole world too; V108's `better` and `original` still taken, each setting the quality it
+    /// meant too. The front end's setting when not given, On without one.
     shadows: Option<game_render::shadow::Shadows>,
+    /// `--shadow-quality original|low|high` (user 2026-10-30): the original's patch under each
+    /// racer, or our maps at Low or High; the front end's setting when not given, High without one.
+    shadow_quality: Option<game_render::shadow::ShadowQuality>,
     /// `--wheels original` (V59): the bike's wheels drawn turning at the original's own angle and
     /// never blurred, rather than held under the wagon-wheel alias and blurred when they spin fast.
     original_wheels: bool,
@@ -1756,9 +1760,7 @@ struct Args {
     render_scale: Option<f32>,
     /// Whether `--render-scale` was given, `auto` included (V34): if so it wins over the settings'.
     render_scale_asked: bool,
-    /// `--casters all|fewer` (P223): what casts the sun's shadows under Better; the front end's
-    /// Shadow Casters row when not given.
-    casters: Option<menu::video::Casters>,
+
     /// `--detail full|reduced` (P223): the models' level of detail; the front end's Model Detail row
     /// when not given.
     detail: Option<menu::video::Detail>,
@@ -1826,7 +1828,7 @@ impl Args {
             || self.plants.is_some()
             || self.filtering.is_some()
             || self.shadows.is_some()
-            || self.casters.is_some()
+            || self.shadow_quality.is_some()
             || self.detail.is_some()
             || self.render_scale_asked
             || self.fps_limit.is_some()
@@ -2332,7 +2334,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
                 a.filtering = Some(args.filtering.unwrap_or(shell.front.menu.settings.filtering));
                 a.shadows = Some(args.shadows.unwrap_or(shell.front.menu.settings.shadows));
-                a.casters = Some(args.casters.unwrap_or(shell.front.menu.settings.casters));
+                a.shadow_quality = Some(args.shadow_quality.unwrap_or(shell.front.menu.settings.shadow_quality));
                 a.detail = Some(args.detail.unwrap_or(shell.front.menu.settings.detail));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
@@ -2430,7 +2432,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.textures = Some(args.textures.unwrap_or(shell.front.menu.settings.textures));
                 a.filtering = Some(args.filtering.unwrap_or(shell.front.menu.settings.filtering));
                 a.shadows = Some(args.shadows.unwrap_or(shell.front.menu.settings.shadows));
-                a.casters = Some(args.casters.unwrap_or(shell.front.menu.settings.casters));
+                a.shadow_quality = Some(args.shadow_quality.unwrap_or(shell.front.menu.settings.shadow_quality));
                 a.detail = Some(args.detail.unwrap_or(shell.front.menu.settings.detail));
                 if !args.aspect_asked {
                     a.aspect = aspect_of(shell.front.menu.settings.picture);
@@ -5062,17 +5064,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         r.set_anisotropy(filtering.anisotropy());
         let (aniso, most) = r.anisotropy();
         println!("texture filtering: {} (anisotropy {aniso}, this device {most} at most)", filtering.label());
-        // Shadows (V108), from the first frame.
-        let shadows = args.shadows.unwrap_or_default();
-        r.set_shadows(shadows);
+        // Shadows and Shadow Quality (V108, user 2026-10-30), from the first frame.
+        let (shadows, quality) = game_render::shadow::drawn(args.shadows.unwrap_or_default(), args.shadow_quality.unwrap_or_default(), true);
+        r.set_shadows(shadows, quality);
         let tint = r.shadow_tint();
         let [tr, tg, tb] = tint.rgb;
-        println!("shadows: {} (the original's in {tr},{tg},{tb} at {:.3})", shadows.word(), tint.alpha);
-        // Shadow Casters and Model Detail (P223), from the first frame.
-        let (casters, detail) = (args.casters.unwrap_or_default(), args.detail.unwrap_or_default());
-        r.few_casters = casters == menu::video::Casters::Fewer;
+        println!("shadows: {}, quality {} (the original's in {tr},{tg},{tb} at {:.3})", shadows.word(), quality.word(), tint.alpha);
+        // Model Detail (P223), from the first frame.
+        let detail = args.detail.unwrap_or_default();
         r.lod_bias = detail.lod_bias();
-        println!("shadow casters: {}, model detail: {}", casters.word(), detail.word());
+        println!("model detail: {}", detail.word());
         let lit = Lighting::of(&look);
         let (fog, far) = r.fog(&lit);
         println!(
@@ -5089,6 +5090,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     } else if args.graphics.is_some_and(|g| g != Graphics::Original) {
         println!("graphics: the software renderer draws the original's fog and far clip only");
     }
+    // The software renderer draws no shadows (game_render::shadow::drawn): Off, the setting kept.
     if !(gpu_on && renderer_of(&mut offscreen, window).is_some()) && args.shadows.is_some_and(|s| s != game_render::shadow::Shadows::Off) {
         println!("shadows: the software renderer draws none");
     }
@@ -5323,7 +5325,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut plants = args.plants.unwrap_or_default();
     let mut foliage = args.foliage.unwrap_or_default();
     let mut filtering = args.filtering.unwrap_or_default();
-    let mut shadows = args.shadows.unwrap_or_default();
+    let mut shadows = (args.shadows.unwrap_or_default(), args.shadow_quality.unwrap_or_default());
     // Set when the pause's settings change the picture's shape: the frame is re-made as for a resize.
     let mut reshaped = false;
     let mut frame = Frame::new(width, height, look.fog_color);
@@ -6240,16 +6242,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         r.set_anisotropy(filtering.anisotropy());
                     }
                 }
-                // Shadow Casters and Model Detail (P223), from the next frame.
+                // Model Detail (P223), from the next frame.
                 if let Some(r) = renderer_of(&mut offscreen, window) {
-                    r.few_casters = front.menu.settings.casters == menu::video::Casters::Fewer;
                     r.lod_bias = front.menu.settings.detail.lod_bias();
                 }
-                // Shadows (V108), from the next frame.
-                if shadows != front.menu.settings.shadows {
-                    shadows = front.menu.settings.shadows;
+                // Shadows and Shadow Quality (V108, user 2026-10-30), from the next frame.
+                if shadows != (front.menu.settings.shadows, front.menu.settings.shadow_quality) {
+                    shadows = (front.menu.settings.shadows, front.menu.settings.shadow_quality);
                     if let Some(r) = renderer_of(&mut offscreen, window) {
-                        r.set_shadows(shadows);
+                        let (s, q) = game_render::shadow::drawn(shadows.0, shadows.1, true);
+                        r.set_shadows(s, q);
                     }
                 }
                 if !args.aspect_asked && aspect != aspect_of(front.menu.settings.picture) {
@@ -10126,6 +10128,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         textures: None,
         filtering: None,
         shadows: None,
+        shadow_quality: None,
         original_wheels: false,
         headless: false,
         frames: None,
@@ -10155,7 +10158,6 @@ fn parse_args() -> Result<Option<Args>, String> {
         graphics: None,
         render_scale: None,
         render_scale_asked: false,
-        casters: None,
         detail: None,
         video_asked: false,
         mods: None,
@@ -10454,10 +10456,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let word = next("off, 2, 4, 8 or 16")?;
                 args.filtering = Some(menu::Filtering::from_word(&word).ok_or_else(|| format!("--texture-filtering: {word:?} is not off, 2, 4, 8 or 16"))?);
             }
-            "--casters" => {
-                let word = next("all or fewer")?;
-                args.casters = Some(menu::video::Casters::from_word(&word).ok_or_else(|| format!("--casters: {word:?} is not all or fewer"))?);
-            }
+
             "--detail" => {
                 let word = next("full or reduced")?;
                 args.detail = Some(menu::video::Detail::from_word(&word).ok_or_else(|| format!("--detail: {word:?} is not full or reduced"))?);
@@ -10474,14 +10473,20 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.graphics = Some(l.draw);
                 args.filtering = Some(l.filtering);
                 args.shadows = Some(l.shadows);
-                args.casters = Some(l.casters);
+                args.shadow_quality = Some(l.shadow_quality);
                 args.detail = Some(l.detail);
                 (args.render_scale, args.render_scale_asked) = (l.scale.fraction(), true);
                 args.fps_limit = Some(l.limit);
             }
             "--shadows" => {
-                let word = next("better, original or off")?;
-                args.shadows = Some(game_render::shadow::Shadows::from_word(&word).ok_or_else(|| format!("--shadows: {word:?} is not better, original or off"))?);
+                let word = next("off, on or all")?;
+                let (shadows, quality) = game_render::shadow::Shadows::from_old_word(&word).ok_or_else(|| format!("--shadows: {word:?} is not off, on or all"))?;
+                args.shadows = Some(shadows);
+                args.shadow_quality = quality.or(args.shadow_quality);
+            }
+            "--shadow-quality" => {
+                let word = next("original, low or high")?;
+                args.shadow_quality = Some(game_render::shadow::ShadowQuality::from_word(&word).ok_or_else(|| format!("--shadow-quality: {word:?} is not original, low or high"))?);
             }
             "--headless" => args.headless = true,
             "--no-sound" => args.sound = false,
@@ -10638,7 +10643,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--preset 0..3|0,2,...]\n\
                             [--bindings FILE] [--renderer gpu|software] [--graphics full|farther|far|original] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
-                            [--video-preset high|medium|low|deck|phone] [--casters all|fewer] [--detail full|reduced]\n\
+                            [--video-preset high|medium|low|deck|phone] [--shadows off|on|all]\n\
+                            [--shadow-quality original|low|high] [--detail full|reduced]\n\
                             [--no-sound] [--mods DIR|off] [--mod-store URL]\n\
                      \n\
                      Opens the front end, or with --track (or --ride, --play, --record, --trace...)\n\
@@ -10712,8 +10718,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      display's refresh and raises it again when there is room. Without it,\n\
                      the front end's Settings row (Auto, 100%, 75%, 50%) says.\n\
                      --video-preset sets every graphics row as the Graphics tab's Preset row\n\
-                     does; --casters fewer leaves plants and small props out of Better's\n\
-                     shadows, --detail reduced swaps models to their coarser levels nearer.\n\
+                     does; --shadows on casts the movers' shadows alone, all the props' and\n\
+                     trees' too (baked once), and --shadow-quality original draws the game's\n\
+                     patch under each rider, low and high our maps; --detail reduced swaps\n\
+                     models to their coarser levels nearer.\n\
                      Any graphics flag keeps the Auto preset from stepping the rows down.\n\
                      --vsync off draws without waiting for the display (it may tear), and\n\
                      --fps-limit draws at most N pictures a second, or the display's refresh;\n\

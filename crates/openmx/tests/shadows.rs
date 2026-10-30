@@ -1,7 +1,8 @@
-//! V108: `--shadows better|original|off`. The shell stands on free06's start line and is shot from
-//! straight over it with each setting. The sun is low there, so the bike's shadow lies beside it on
-//! the flat dirt: Original's and Better's pictures have a bike-sized patch darker than Off's, and
-//! nothing brighter. Original's patch is the original's blend, the sun's `ShadowRGB` over the dirt at
+//! V108: `--shadows`, and `--shadow-quality` (user 2026-10-30). The shell stands on free06's start
+//! line and is shot from straight over it with each setting. The sun is low there, so the bike's
+//! shadow lies beside it on the flat dirt: Original's, Low's and High's pictures have a bike-sized
+//! patch darker than Off's, and nothing brighter. V108's words `better` and `original` are still
+//! taken, as On at High and On at Original. Original's patch is the original's blend, the sun's `ShadowRGB` over the dirt at
 //! its `ShadowIntensity` squared, so its core is that blend of Off's pixels; and it leaves the share
 //! of the dirt PCSX2's picture of free06's start does.
 
@@ -87,20 +88,24 @@ fn the_bike_s_shadow_darkens_the_ground_under_original_and_better_and_not_off() 
     let [x, y, z] = start(&ride(&["--frames", "1"]));
     // Thirty-four feet over the bike, looking down: the bike in the middle, its shadow beside it.
     let pose = format!("{x},{},{},0,-85,60", y + 34.0, z + 2.0);
-    let shot = |mode: &str| {
-        let path = scratch(&format!("{mode}.png"));
+    let shot = |name: &str, flags: &[&str], taken: &str| {
+        let path = scratch(&format!("{name}.png"));
         let _ = std::fs::remove_file(&path);
-        let said = ride(&["--shadows", mode, "--shot-pose", &pose, "--frames", "2", "--shot", path.to_str().unwrap()]);
-        assert!(said.contains(&format!("shadows: {mode}")), "the shell did not take --shadows {mode}:\n{said}");
+        let mut args = flags.to_vec();
+        args.extend(["--shot-pose", &pose, "--frames", "2", "--shot", path.to_str().unwrap()]);
+        let said = ride(&args);
+        assert!(said.contains(&format!("shadows: {taken} (")), "the shell did not take {flags:?} as {taken}:\n{said}");
         let (w, h, rgb) = read_png(&path);
         assert_eq!((w, h), (640, 448));
         (said, rgb)
     };
-    let (_, off) = shot("off");
-    let (said, original) = shot("original");
-    let (_, better) = shot("better");
+    let (_, off) = shot("off", &["--shadows", "off"], "off, quality high");
+    // V108's old words: Original is On at the original's quality, Better On at High.
+    let (said, original) = shot("original", &["--shadows", "original"], "on, quality original");
+    let (_, better) = shot("better", &["--shadows", "better"], "on, quality high");
+    let (_, low) = shot("low", &["--shadows", "on", "--shadow-quality", "low"], "on, quality low");
 
-    for (mode, rgb) in [("original", &original), ("better", &better)] {
+    for (mode, rgb) in [("original", &original), ("high", &better), ("low", &low)] {
         let darker = (0..640 * 448).filter(|&i| grey(&off, i) - grey(rgb, i) > 20.0).count();
         let brighter = (0..640 * 448).filter(|&i| grey(rgb, i) - grey(&off, i) > 20.0).count();
         // The bike's shadow from 34 ft at 60° is some 8,000 pixels; the bike alone over 1,000.
@@ -149,14 +154,15 @@ fn a_high_jump_s_long_shadow_still_reaches_the_ground() {
     let tape = scratch("gas.tape");
     std::fs::write(&tape, gas_tape(140)).expect("the tape");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let shot = |mode: &str| {
-        let path = scratch(&format!("jump-{mode}.png"));
+    let shot = |quality: &str| {
+        let path = scratch(&format!("jump-{quality}.png"));
         let _ = std::fs::remove_file(&path);
         let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
             .current_dir(&root)
             .args(["--headless", "--track", "free09", "--size", "640x360", "--overlay", "none", "--controls", "original"])
             .args(["--trace-at", "3864.2,1592.5,-132", "--play", tape.to_str().unwrap(), "--frames", "132"])
-            .args(["--shadows", mode, "--shot", path.to_str().unwrap(), "--shot-frame", "130"])
+            .args(if quality == "off" { ["--shadows", "off", "--shadow-quality", "high"] } else { ["--shadows", "on", "--shadow-quality", quality] })
+            .args(["--shot", path.to_str().unwrap(), "--shot-frame", "130"])
             .output()
             .expect("the shell runs");
         assert!(out.status.success(), "the shell failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -165,7 +171,7 @@ fn a_high_jump_s_long_shadow_still_reaches_the_ground() {
         rgb
     };
     let off = shot("off");
-    for mode in ["original", "better"] {
+    for mode in ["original", "high"] {
         let rgb = shot(mode);
         let corner = (240..360).flat_map(|y| (400..640).map(move |x| y * 640 + x));
         let darker = corner.filter(|&i| grey(&off, i) - grey(&rgb, i) > 20.0).count();

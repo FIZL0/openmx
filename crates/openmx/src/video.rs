@@ -9,39 +9,8 @@
 //! (actors out of view are always culled now, `game_render::gpu`, as nothing is lost by it).
 
 use super::{Filtering, FrameLimit, RenderScale, Settings};
-use game_render::shadow::Shadows;
+use game_render::shadow::{ShadowQuality, Shadows};
 use game_render::world::Graphics;
-
-/// Which shadows the sun casts under [`Shadows::Better`] (P223, opentennis's Fewer Shadows, B343):
-/// everything near, or only the riders, the machines and the big props.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Casters {
-    #[default]
-    All,
-    Fewer,
-}
-
-impl Casters {
-    pub const ALL: [Casters; 2] = [Casters::All, Casters::Fewer];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Casters::All => "All",
-            Casters::Fewer => "Fewer",
-        }
-    }
-
-    pub fn word(self) -> &'static str {
-        match self {
-            Casters::All => "all",
-            Casters::Fewer => "fewer",
-        }
-    }
-
-    pub fn from_word(w: &str) -> Option<Casters> {
-        Casters::ALL.into_iter().find(|c| c.word() == w)
-    }
-}
 
 /// How detailed the models are drawn (P223, opentennis's Mesh, B364): the disc's own level-of-detail
 /// pick, or its coarser models at half the distance.
@@ -91,7 +60,7 @@ pub struct Look {
     pub draw: Graphics,
     pub filtering: Filtering,
     pub shadows: Shadows,
-    pub casters: Casters,
+    pub shadow_quality: ShadowQuality,
     pub detail: Detail,
     pub scale: RenderScale,
     pub limit: FrameLimit,
@@ -104,7 +73,7 @@ impl Look {
             draw: s.graphics,
             filtering: s.filtering,
             shadows: s.shadows,
-            casters: s.casters,
+            shadow_quality: s.shadow_quality,
             detail: s.detail,
             scale: s.render_scale,
             limit: s.frame_limit,
@@ -116,7 +85,7 @@ impl Look {
         s.graphics = self.draw;
         s.filtering = self.filtering;
         s.shadows = self.shadows;
-        s.casters = self.casters;
+        s.shadow_quality = self.shadow_quality;
         s.detail = self.detail;
         s.render_scale = self.scale;
         s.frame_limit = self.limit;
@@ -126,20 +95,25 @@ impl Look {
 /// The presets, best looking first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
-    /// Everything as openmx draws it at its best: the whole map, every shadow, 16x filtering, the
-    /// resolution only dropped when frames run long (Render Scale Auto). What a desktop GPU gets.
+    /// Everything as openmx draws it at its best: the whole map, every shadow (Shadows All, the
+    /// baked world's too, at High quality: free09 at 1920x1080, 0.5 ms a frame over On, the frame
+    /// rate held, 2026-10-30), 16x filtering, the resolution only dropped when frames
+    /// run long (Render Scale Auto). What a desktop GPU gets.
     High,
-    /// High's look with the speed-ups on (Fewer casters) and the fog eight times the original's.
+    /// High's look with the speed-ups on (the movers' shadows alone, Shadows On) and the fog eight
+    /// times the original's.
     Medium,
     /// The cheapest that still looks like the game: Far fog (four times the original's) and the
-    /// original's shadow under each racer, at half scale, 2x filtering and coarser models. Not the
+    /// movers' shadows at Low quality, at half scale, 2x filtering and coarser models. Not the
     /// original's near fog nor no shadows (2026-10-29): a weak device loses pixels instead.
     Low,
-    /// The Steam Deck's: its native 1280×800 drawn whole, Far fog, fewer casters, 8x.
+    /// The Steam Deck's: its native 1280×800 drawn whole, Far fog, the movers' shadows at High, 8x.
     Deck,
-    /// A phone's (P215, opentennis's B351/B413): the original's shadow under each racer, 75% scale,
-    /// the fog four times the original's, 4x filtering, coarser models and 60 frames a second at
-    /// most (a 120 Hz screen's battery).
+    /// A phone's (P215, opentennis's B351/B413): the movers' shadows at Low quality (two 1024 maps
+    /// of a few models, about what the original's per racer cost: free09 at 1920x1080 on the
+    /// desktop, 0.2 ms a frame over Original, 2026-10-30), 75% scale, the fog four times
+    /// the original's, 4x filtering, coarser models and 60 frames a second at most (a 120 Hz
+    /// screen's battery).
     Phone,
 }
 
@@ -160,30 +134,30 @@ impl Preset {
         let high = Look {
             draw: Graphics::Full,
             filtering: Filtering::X16,
-            shadows: Shadows::Better,
-            casters: Casters::All,
+            shadows: Shadows::All,
+            shadow_quality: ShadowQuality::High,
             detail: Detail::Full,
             scale: RenderScale::Auto,
             limit: FrameLimit::Off,
         };
         match self {
             Preset::High => high,
-            Preset::Medium => Look { draw: Graphics::Farther, casters: Casters::Fewer, ..high },
+            Preset::Medium => Look { draw: Graphics::Farther, shadows: Shadows::On, ..high },
             Preset::Low => Look {
                 draw: Graphics::Far,
                 filtering: Filtering::X2,
-                shadows: Shadows::Original,
-                casters: Casters::Fewer,
+                shadows: Shadows::On,
+                shadow_quality: ShadowQuality::Low,
                 detail: Detail::Reduced,
                 scale: RenderScale::Half,
                 limit: FrameLimit::Off,
             },
-            Preset::Deck => Look { draw: Graphics::Far, filtering: Filtering::X8, casters: Casters::Fewer, scale: RenderScale::Full, ..high },
+            Preset::Deck => Look { draw: Graphics::Far, filtering: Filtering::X8, shadows: Shadows::On, scale: RenderScale::Full, ..high },
             Preset::Phone => Look {
                 draw: Graphics::Far,
                 filtering: Filtering::X4,
-                shadows: Shadows::Original,
-                casters: Casters::Fewer,
+                shadows: Shadows::On,
+                shadow_quality: ShadowQuality::Low,
                 detail: Detail::Reduced,
                 scale: RenderScale::ThreeQuarters,
                 limit: FrameLimit::Fps(60),
@@ -350,24 +324,24 @@ pub fn texture_cap(d: &Device) -> u32 {
     if d.touch { 512 } else { 0 }
 }
 
-/// One step cheaper, or `None` at the bottom: the speed-ups first (fewer casters), then the fog in
-/// to Far, a fixed scale down to 75%, the original's shadow, filtering down to 4x, coarser models,
-/// half scale, 2x (Phone to Low), 40% scale, filtering off. A frame limit under 60 is lifted to 60:
-/// a step is never a 30 cap.
+/// One step cheaper, or `None` at the bottom: the speed-ups first (Shadows All to On, the movers'
+/// alone), then the fog in to Far, a fixed scale down to 75%, Shadow Quality High to Low, filtering
+/// down to 4x, coarser models, half scale, 2x (Phone to Low), Shadow Quality Low to the original's,
+/// 40% scale, filtering off. A frame limit under 60 is lifted to 60: a step is never a 30 cap.
 ///
 /// The ladder never goes below Far fog or the original's shadow (2026-10-29): the original's near
 /// fog and no shadows at all were what made a phone look bad, so a weak device gives up pixels and
 /// filtering instead. A look already below them (picked by hand) is left there.
 pub fn cheaper(l: Look) -> Option<Look> {
     let mut c = l;
-    if l.casters == Casters::All && l.shadows == Shadows::Better {
-        c.casters = Casters::Fewer;
+    if l.shadows == Shadows::All {
+        c.shadows = Shadows::On;
     } else if matches!(l.draw, Graphics::Full | Graphics::Farther) {
         c.draw = if l.draw == Graphics::Full { Graphics::Farther } else { Graphics::Far };
     } else if l.scale == RenderScale::Full {
         c.scale = RenderScale::ThreeQuarters;
-    } else if l.shadows == Shadows::Better {
-        c.shadows = Shadows::Original;
+    } else if l.shadows != Shadows::Off && l.shadow_quality == ShadowQuality::High {
+        c.shadow_quality = ShadowQuality::Low;
     } else if matches!(l.filtering, Filtering::X16 | Filtering::X8) {
         c.filtering = Filtering::X4;
     } else if l.detail == Detail::Full {
@@ -376,6 +350,8 @@ pub fn cheaper(l: Look) -> Option<Look> {
         c.scale = RenderScale::Half;
     } else if l.filtering == Filtering::X4 {
         c.filtering = Filtering::X2;
+    } else if l.shadows != Shadows::Off && l.shadow_quality == ShadowQuality::Low {
+        c.shadow_quality = ShadowQuality::Original;
     } else if l.scale == RenderScale::Half {
         c.scale = RenderScale::Forty;
     } else if l.filtering != Filtering::Off {
@@ -483,12 +459,12 @@ impl Tune {
 /// A look as a log line says it.
 pub fn name(l: Look) -> String {
     format!(
-        "{} (draw {}, filtering {}, shadows {}, casters {}, detail {}, scale {}, limit {})",
+        "{} (draw {}, filtering {}, shadows {}, shadow quality {}, detail {}, scale {}, limit {})",
         Preset::of(l).map_or("Custom", Preset::label),
         l.draw.word(),
         l.filtering.word(),
         l.shadows.word(),
-        l.casters.word(),
+        l.shadow_quality.word(),
         l.detail.word(),
         l.scale.word(),
         l.limit.word()
@@ -546,13 +522,52 @@ mod tests {
         }
         assert!(rungs.len() <= 16, "{}", rungs.len());
         assert!(rungs.contains(&Preset::Medium.look()));
-        assert_eq!(l, Look { draw: Graphics::Far, filtering: Filtering::Off, shadows: Shadows::Original, casters: Casters::Fewer, detail: Detail::Reduced, scale: RenderScale::Forty, limit: FrameLimit::Off });
-        // The bottom's last three rungs: 2x, then 40%, then no filtering.
+        assert_eq!(
+            l,
+            Look {
+                draw: Graphics::Far,
+                filtering: Filtering::Off,
+                shadows: Shadows::On,
+                shadow_quality: ShadowQuality::Original,
+                detail: Detail::Reduced,
+                scale: RenderScale::Forty,
+                limit: FrameLimit::Off
+            }
+        );
+        // The shadows step down All to On first, then High to Low to the original's, each once
+        // (user 2026-10-30), and never to Off.
+        let shadows: Vec<_> = rungs.iter().map(|r| (r.shadows, r.shadow_quality)).collect();
+        let mut kept = shadows.clone();
+        kept.dedup();
+        assert_eq!(
+            kept,
+            [
+                (Shadows::All, ShadowQuality::High),
+                (Shadows::On, ShadowQuality::High),
+                (Shadows::On, ShadowQuality::Low),
+                (Shadows::On, ShadowQuality::Original)
+            ]
+        );
+        assert_eq!(shadows[1], (Shadows::On, ShadowQuality::High));
+        // The bottom's last rungs: 2x, the original's shadow, then 40%, then no filtering.
         let n = rungs.len();
         assert_eq!(
-            rungs[n - 4..].iter().map(|r| (r.filtering, r.scale)).collect::<Vec<_>>(),
-            [(Filtering::X4, RenderScale::Half), (Filtering::X2, RenderScale::Half), (Filtering::X2, RenderScale::Forty), (Filtering::Off, RenderScale::Forty)]
+            rungs[n - 5..].iter().map(|r| (r.filtering, r.shadow_quality, r.scale)).collect::<Vec<_>>(),
+            [
+                (Filtering::X4, ShadowQuality::Low, RenderScale::Half),
+                (Filtering::X2, ShadowQuality::Low, RenderScale::Half),
+                (Filtering::X2, ShadowQuality::Original, RenderScale::Half),
+                (Filtering::X2, ShadowQuality::Original, RenderScale::Forty),
+                (Filtering::Off, ShadowQuality::Original, RenderScale::Forty)
+            ]
         );
+        // A look whose shadows are off by hand stays off.
+        let off = Look { shadows: Shadows::Off, ..Preset::High.look() };
+        let mut l = off;
+        while let Some(c) = cheaper(l) {
+            assert_eq!(c.shadows, Shadows::Off, "{c:?}");
+            l = c;
+        }
         // Every preset keeps Far fog or further and a shadow.
         for p in Preset::ALL {
             assert!(p.look().draw != Graphics::Original && p.look().shadows != Shadows::Off, "{p:?}");
@@ -561,7 +576,7 @@ mod tests {
         let mut l = Preset::Phone.look();
         let mut lows = 0;
         while let Some(c) = cheaper(l) {
-            assert!(c.shadows == Shadows::Original && c.draw == Graphics::Far, "{c:?}");
+            assert!(c.shadows == Shadows::On && c.shadow_quality != ShadowQuality::High && c.draw == Graphics::Far, "{c:?}");
             l = c;
             lows +=usize::from(Look { limit: FrameLimit::Off, ..l } == Preset::Low.look());
         }
@@ -582,7 +597,7 @@ mod tests {
         assert_eq!(row_at(&s), 0);
         set_row(&mut s, 5);
         assert_eq!((Look::of(&s), s.video_auto, row_at(&s)), (Preset::Phone.look(), false, 5));
-        s.shadows = Shadows::Better;
+        s.shadow_quality = ShadowQuality::High;
         assert_eq!(row_at(&s), row_labels().len() - 1);
         set_row(&mut s, 0);
         assert!(s.video_auto);

@@ -442,10 +442,11 @@ fn the_settings_file_reads_back_as_it_was_written() {
         foliage: game_render::eco::Foliage::Original,
         // Textures filtered 4x (V83).
         filtering: menu::Filtering::X4,
-        shadows: game_render::shadow::Shadows::Original,
-        // Rows set by hand, fewer shadow casters and coarser models (P223).
+        // The whole world's shadows, at Low (V108, user 2026-10-30).
+        shadows: game_render::shadow::Shadows::All,
+        shadow_quality: game_render::shadow::ShadowQuality::Low,
+        // Rows set by hand and coarser models (P223).
         video_auto: false,
-        casters: menu::video::Casters::Fewer,
         detail: menu::video::Detail::Reduced,
         // The mod store's rules agreed to once (P199).
         store_rules: true,
@@ -4166,7 +4167,7 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     use menu::{Departure, Key};
     let groups = [
         ("World", vec![Key::DrawDistance, Key::Departure(Departure::Foliage), Key::Departure(Departure::Textures), Key::WorldSky]),
-        ("Picture", vec![Key::TextureFiltering, Key::Shadows, Key::Casters, Key::Detail]),
+        ("Picture", vec![Key::TextureFiltering, Key::Shadows, Key::ShadowQuality, Key::Detail]),
         ("Performance", vec![Key::RenderScale, Key::VSync, Key::FrameLimit, Key::ShowFps]),
     ];
     let graphics: Vec<Key> = groups.iter().flat_map(|(_, keys)| keys.clone()).collect();
@@ -5106,11 +5107,11 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
         down_to(&mut m, &mut r, d.key());
         tap(&mut m, &mut r, Control::Right);
         assert!(!m.some_original(d), "{d:?} back to ours");
-        // Aspect Ratio's six (P176) step on from 4:3 to 16:9, another of ours, and Shadows (V108)
-        // from Original to Off.
+        // Aspect Ratio's six (P176) step on from 4:3 to 16:9, another of ours, and Shadow Quality
+        // (V108, user 2026-10-30) from Original to Low.
         let ours = match d {
             Departure::Picture => "16:9",
-            Departure::Shadows => "Off",
+            Departure::Shadows => "Low",
             _ => d.choices()[0],
         };
         assert_eq!(value(&m, d.key()), ours, "{d:?}");
@@ -5357,42 +5358,82 @@ fn texture_filtering_defaults_to_16x_and_the_original_switch_turns_it_off() {
     assert_eq!(m.settings.filtering, Filtering::X16);
 }
 
-/// V108: Shadows is a departure with three choices on the Graphics tab: Better by default and not in
-/// a fresh settings.txt; the Original switch on sets it Original, stepping it leaves every other
-/// departure at the original's, and every choice but Better is written and reads back.
+/// V108 (user 2026-10-30): Shadows (Off, On, All) and Shadow Quality (Original, Low, High) are two
+/// rows on the Graphics tab, All at High by default (the High preset's) and not in a fresh settings.txt. Shadow Quality is
+/// the departure: the Original switch on sets it Original and leaves Shadows be; stepping it leaves
+/// every other departure at the original's. Each row cycles through its three, wrapping; Quality is
+/// greyed under Off; every pair is written and reads back, and V108's one `shadows` word reads as
+/// the pair it meant (better is On at High, original On at Original, off Off).
 #[test]
-fn shadows_default_to_better_and_the_original_switch_sets_the_originals() {
-    use game_render::shadow::Shadows;
+fn shadows_and_their_quality_cycle_and_the_original_switch_sets_the_originals() {
+    use game_render::shadow::{ShadowQuality, Shadows};
     use menu::{Departure, Key, Original};
     let (mut m, mut r) = fresh();
-    assert_eq!(m.settings.shadows, Shadows::Better);
-    assert!(!m.settings.text().contains("shadows"), "Better writes no line");
+    assert_eq!((m.settings.shadows, m.settings.shadow_quality), (Shadows::All, ShadowQuality::High));
+    assert!(!m.settings.text().contains("shadow"), "All at High writes no line");
     settings_at(&mut m, &mut r, "Original");
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.original(), Original::On);
-    assert_eq!(m.settings.shadows, Shadows::Original);
-    assert!(m.settings.text().contains("shadows = original\n"), "{}", m.settings.text());
+    assert_eq!((m.settings.shadows, m.settings.shadow_quality), (Shadows::All, ShadowQuality::Original));
+    assert!(m.settings.text().contains("shadow_quality = original\n"), "{}", m.settings.text());
     let value = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap().value;
     tab_to(&mut m, &mut r, "Graphics");
-    assert_eq!(value(&m, Key::Shadows), "Original");
+    assert_eq!(value(&m, Key::Shadows), "All");
+    assert_eq!(value(&m, Key::ShadowQuality), "Original");
+    // Shadows cycles All, Off, On and round to All, leaving every departure at the original's.
     down_to(&mut m, &mut r, Key::Shadows);
-    tap(&mut m, &mut r, Control::Right);
-    assert!(m.take_changed());
-    assert_eq!(m.settings.shadows, Shadows::Off);
-    assert_eq!(value(&m, Key::Shadows), "Off");
+    for (sh, label) in [(Shadows::Off, "Off"), (Shadows::On, "On"), (Shadows::All, "All")] {
+        tap(&mut m, &mut r, Control::Right);
+        assert!(m.take_changed());
+        assert_eq!(m.settings.shadows, sh);
+        assert_eq!(value(&m, Key::Shadows), label);
+        for o in Departure::ALL {
+            assert!(m.is_original(o), "Shadows stepped moved {o:?}");
+        }
+    }
+    // Shadow Quality cycles Original, Low, High and round, the departure moving with it.
+    down_to(&mut m, &mut r, Key::ShadowQuality);
+    for (q, label) in [(ShadowQuality::Low, "Low"), (ShadowQuality::High, "High"), (ShadowQuality::Original, "Original")] {
+        tap(&mut m, &mut r, Control::Right);
+        assert!(m.take_changed());
+        assert_eq!(m.settings.shadow_quality, q);
+        assert_eq!(value(&m, Key::ShadowQuality), label);
+        assert_eq!(m.is_original(Departure::Shadows), q == ShadowQuality::Original);
+    }
     for o in Departure::ALL.into_iter().filter(|o| *o != Departure::Shadows) {
-        assert!(m.is_original(o), "Shadows stepped moved {o:?}");
+        assert!(m.is_original(o), "Shadow Quality stepped moved {o:?}");
     }
+    tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.original(), Original::Mixed);
+    // Off greys the quality, kept for when they come back on.
+    let mut off = m.settings.clone();
+    off.shadows = Shadows::Off;
+    m.settings = off;
+    assert!(m.page().into_iter().find(|row| row.key == Key::ShadowQuality).unwrap().off.is_some());
     for sh in Shadows::ALL {
-        let mut s = Settings::default();
-        s.shadows = sh;
-        assert_eq!(Settings::parse(&s.text()).shadows, sh, "{}", s.text());
-        assert_eq!(s.text().contains("shadows"), sh != Shadows::Better);
+        for q in ShadowQuality::ALL {
+            let mut s = Settings::default();
+            (s.shadows, s.shadow_quality) = (sh, q);
+            let back = Settings::parse(&s.text());
+            assert_eq!((back.shadows, back.shadow_quality), (sh, q), "{}", s.text());
+            assert_eq!(s.text().contains("shadows ="), sh != Shadows::All);
+            assert_eq!(s.text().contains("shadow_quality"), q != ShadowQuality::High);
+        }
     }
-    assert_eq!(Settings::parse("shadows = fuzzy\n"), Settings::default());
+    for (old, sh, q) in [
+        ("better", Shadows::On, ShadowQuality::High),
+        ("original", Shadows::On, ShadowQuality::Original),
+        ("off", Shadows::Off, ShadowQuality::High),
+        ("all", Shadows::All, ShadowQuality::High),
+    ] {
+        let s = Settings::parse(&format!("shadows = {old}\n"));
+        assert_eq!((s.shadows, s.shadow_quality), (sh, q), "{old}");
+    }
+    // P223's Shadow Casters line is read and dropped: only the movers cast under On now.
+    assert_eq!(Settings::parse("shadow_casters = fewer\n"), Settings::default());
+    assert_eq!(Settings::parse("shadows = fuzzy\nshadow_quality = fuzzy\n"), Settings::default());
     m.set_departure(Departure::Shadows, false);
-    assert_eq!(m.settings.shadows, Shadows::Better);
+    assert_eq!(m.settings.shadow_quality, ShadowQuality::High);
 }
 
 /// V83: the renderer's samplers are made again under each Texture Filtering choice, and every

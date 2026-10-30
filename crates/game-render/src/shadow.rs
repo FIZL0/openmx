@@ -12,9 +12,10 @@
 //! casters' bounding sphere. The shadow is drawn only while the camera is within 100 feet of the
 //! caster, fading out from 60 (65 fading from 55 with two views or more).
 //!
-//! **Ours** ([`Shadows::Better`]): the sun's shadows of everything near the camera, the world's
-//! models among them, in two nested shadow maps along the sun, filtered soft, onto the ground and
-//! onto everything else. Darkened to what the ground's light map is in its own shadows, so a moving
+//! **Ours** ([`ShadowQuality::Low`], [`ShadowQuality::High`]): the sun's shadows of what casts
+//! ([`casts`]) near the camera, in two or three nested shadow maps along the sun, filtered soft,
+//! onto the ground and onto everything else; under [`Shadows::All`] the static world's beyond them
+//! from a map of the whole world baked at load. Darkened to what the ground's light map is in its own shadows, so a moving
 //! shadow and a baked one meet at the same darkness and a baked one is not darkened twice.
 //!
 //! The GPU half is `gpu`'s; this is the arithmetic both halves agree on, which the tests check
@@ -22,43 +23,140 @@
 
 use crate::mat::{M4, V3, v3};
 
-/// The Shadows setting (V108): ours, the original's, or none.
+/// The Shadows setting (V108, user 2026-10-30): what casts the sun's shadows. None but the ground's
+/// baked light; the things that move — the bikes, the riders, the machines, the biplane — alone; or
+/// those and the whole static world, its props and plants, through a map of it baked once at load
+/// ([`WORLD_SIZE`]). Under On a prop casts nothing, as the light maps under it have no shadow of it
+/// either (the user: "the antenna in dallas", whose ground has no shadow); under All every prop
+/// casts, everywhere, so none comes and goes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Shadows {
-    /// Sun shadows of everything near, soft, matched to the light maps.
-    #[default]
-    Better,
-    /// The original's projected shadow under each racer.
-    Original,
     /// No shadows but the ground's baked light.
     Off,
+    /// The movers' shadows.
+    #[default]
+    On,
+    /// The movers' and the static world's.
+    All,
 }
 
 impl Shadows {
-    /// Ours first and the original's after, as Draw Distance's and Texture Filtering's.
-    pub const ALL: [Shadows; 3] = [Shadows::Better, Shadows::Original, Shadows::Off];
+    pub const ALL: [Shadows; 3] = [Shadows::Off, Shadows::On, Shadows::All];
 
     /// Its row's name for it.
     pub fn label(self) -> &'static str {
         match self {
-            Shadows::Better => "Better",
-            Shadows::Original => "Original",
             Shadows::Off => "Off",
+            Shadows::On => "On",
+            Shadows::All => "All",
         }
     }
 
     /// The settings file's word, which is also `--shadows`'.
     pub fn word(self) -> &'static str {
         match self {
-            Shadows::Better => "better",
-            Shadows::Original => "original",
             Shadows::Off => "off",
+            Shadows::On => "on",
+            Shadows::All => "all",
         }
     }
 
     pub fn from_word(w: &str) -> Option<Shadows> {
         Shadows::ALL.into_iter().find(|s| s.word() == w.trim().to_ascii_lowercase())
     }
+
+    /// A Shadows word, the new ones or V108's (`better`, `original`, `off`, one setting then): what
+    /// casts, and the quality an old word meant. Better was ours, sharp, with everything near
+    /// casting; it is On at High now, as props cast only under All. Original is On at Original.
+    pub fn from_old_word(w: &str) -> Option<(Shadows, Option<ShadowQuality>)> {
+        match w.trim().to_ascii_lowercase().as_str() {
+            "better" => Some((Shadows::On, Some(ShadowQuality::High))),
+            "original" => Some((Shadows::On, Some(ShadowQuality::Original))),
+            w => Shadows::from_word(w).map(|s| (s, None)),
+        }
+    }
+}
+
+/// The Shadow Quality setting (user 2026-10-30): how the shadows are drawn. The original's projected
+/// shadow under each racer (a 128x128 map each, [`original_box`]), onto the ground alone; or ours,
+/// sun shadow maps along the view onto everything — Low's two of [`LOW_SIZE`] filtered over 3x3
+/// texels, High's three of [`HIGH_SIZE`] whose edges harden where the caster meets what it
+/// shadows ([`PENUMBRA`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ShadowQuality {
+    Original,
+    Low,
+    #[default]
+    High,
+}
+
+impl ShadowQuality {
+    pub const ALL: [ShadowQuality; 3] = [ShadowQuality::Original, ShadowQuality::Low, ShadowQuality::High];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ShadowQuality::Original => "Original",
+            ShadowQuality::Low => "Low",
+            ShadowQuality::High => "High",
+        }
+    }
+
+    /// The settings file's `shadow_quality` word, which is also `--shadow-quality`'.
+    pub fn word(self) -> &'static str {
+        match self {
+            ShadowQuality::Original => "original",
+            ShadowQuality::Low => "low",
+            ShadowQuality::High => "high",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<ShadowQuality> {
+        ShadowQuality::ALL.into_iter().find(|q| q.word() == w.trim().to_ascii_lowercase())
+    }
+
+    /// Ours, not the original's.
+    pub fn ours(self) -> bool {
+        self != ShadowQuality::Original
+    }
+
+    /// How far from the eye each of our maps reaches, nearest first.
+    pub fn cascades(self) -> &'static [f32] {
+        match self {
+            ShadowQuality::High => &HIGH_CASCADES,
+            _ => &CASCADES,
+        }
+    }
+
+    /// Our maps' side in texels, with `views` views at once and `most` the device's biggest
+    /// texture: a split screen's maps, and a browser's, a step smaller.
+    pub fn size(self, views: usize, browser: bool, most: u32) -> u32 {
+        let size = match self {
+            ShadowQuality::Original => ORIGINAL_SIZE,
+            ShadowQuality::Low => LOW_SIZE,
+            ShadowQuality::High if views > 2 || browser => HIGH_SIZE / 2,
+            ShadowQuality::High => HIGH_SIZE,
+        };
+        size.min(most.max(1))
+    }
+
+    /// The baked world map's side ([`Shadows::All`]): a coarse one beside the original's and Low's.
+    pub fn world_size(self, most: u32) -> u32 {
+        let size = match self {
+            ShadowQuality::Original => WORLD_SIZE / 4,
+            ShadowQuality::Low => WORLD_SIZE / 2,
+            ShadowQuality::High => WORLD_SIZE,
+        };
+        size.min(most.max(1))
+    }
+}
+
+/// What a renderer draws of a Shadows and Shadow Quality pair (user 2026-10-30): the GPU draws every
+/// pair, so the pair itself. The software renderer draws no shadows at all, so Off whatever was
+/// asked; the setting is kept, so the GPU draws it again. A browser's WebGL2 draws every pair too:
+/// its smaller textures only make the maps smaller ([`ShadowQuality::size`],
+/// [`ShadowQuality::world_size`]), and High's harder edges read the maps by comparison alone.
+pub fn drawn(shadows: Shadows, quality: ShadowQuality, gpu: bool) -> (Shadows, ShadowQuality) {
+    if gpu { (shadows, quality) } else { (Shadows::Off, quality) }
 }
 
 /// The original's shadow texture's side, in texels.
@@ -86,7 +184,7 @@ pub fn original_fade(distance: f32, views: usize) -> f32 {
 /// How far from the camera the port draws the original's shadow (user 2026-10-29): to `.0` feet,
 /// fading from `.1`. The original's own 100 ft ([`original_range`]) let another racer's shadow fade
 /// in and out a few lengths away; a 128x128 map per racer costs next to nothing, so the port keeps
-/// them to Better's reach ([`CASCADES`]) whatever the number of views, and fades them smoothly.
+/// them to our maps' reach ([`CASCADES`]) whatever the number of views, and fades them smoothly.
 pub const PORTED_RANGE: (f32, f32) = (300.0, 210.0);
 
 /// How much of the original's shadow the port draws with the camera `distance` feet from its
@@ -222,6 +320,85 @@ pub fn slice_sphere(eye: V3, forward: V3, fov: f32, aspect: f32, near: f32, far:
 /// `CASCADES[1]` in the wide one, fading out over the last [`REACH_FADE`] of it.
 pub const CASCADES: [f32; 2] = [45.0, 300.0];
 
+/// High's three maps (user 2026-10-30, "a higher shadow option that looks even better"): a sharper
+/// one about the bike, a middle one, and the wide one to Low's reach.
+pub const HIGH_CASCADES: [f32; 3] = [30.0, 110.0, 300.0];
+
+/// Our maps' sides, in texels: Low's (V108's own 2048 halved) and High's (V108's; a browser's and a
+/// split screen's are half that, [`ShadowQuality::size`]).
+pub const LOW_SIZE: u32 = 1024;
+pub const HIGH_SIZE: u32 = 2048;
+
+/// The baked world map's side at High ([`Shadows::All`]): over a track some 3,000 ft across a texel
+/// is about a foot and a half, beyond our maps' reach, where it alone is read.
+pub const WORLD_SIZE: u32 = 4096;
+
+/// The most the baked world map reaches across the light from its middle, in feet: a bigger world
+/// (a free ride's tiles) is baked about the camera and baked again when it rides half that away.
+pub const WORLD_HALF_MOST: f32 = 4096.0;
+
+/// Each map's stretch of the view, nearest first, out to `reach` feet (the fog's end, or the last
+/// cascade): each but the first starting a fifth short of where the one before ends, so that they
+/// overlap by [`CASCADE_BLEND`] of the inner's sphere and hand over without a step.
+pub fn slices(cascades: &[f32], reach: f32) -> Vec<(f32, f32)> {
+    let reach = reach.min(cascades.last().copied().unwrap_or(0.0));
+    let mut out = Vec::new();
+    let mut near = 0.0;
+    for &c in cascades {
+        let far = c.min(reach);
+        out.push((near, far));
+        if far >= reach {
+            break;
+        }
+        near = c * 0.8;
+    }
+    out
+}
+
+/// What casts into our maps and the original's: a mover (a bike, a rider, a machine, the biplane, a
+/// train), a prop (a building, a fence, Dallas's antenna), or a plant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Caster {
+    Mover,
+    Prop,
+    Plant,
+}
+
+/// Whether `caster` casts under `shadows` (user 2026-10-30): On's movers alone, as the ground's
+/// light maps hold none of the props' and plants' shadows and a shadow of a prop on ground with no
+/// shadow of it looked wrong; All's everything.
+pub fn casts(shadows: Shadows, caster: Caster) -> bool {
+    match shadows {
+        Shadows::Off => false,
+        Shadows::On => caster == Caster::Mover,
+        Shadows::All => true,
+    }
+}
+
+/// High's soft edges (PCSS-like): the shadow's edge spreads this many feet each way per foot the
+/// caster stands over what it shadows, from a texel's width where they touch to [`PENUMBRA_MOST`].
+/// The sun's own disc (half a degree) would spread it 0.0045 ft per foot; this is softer, as the
+/// sky's light round the sun softens a real one.
+pub const PENUMBRA: f32 = 0.02;
+pub const PENUMBRA_MOST: f32 = 1.5;
+
+/// How far over what it shadows High's blocker search takes a caster to be, in feet, from the
+/// share `near` of its taps blocked at all, `mid` blocked by casters at least [`BLOCKER_STEPS`]`[0]`
+/// feet over, and `far` at least `[1]` over: each band taken at its typical height.
+pub const BLOCKER_STEPS: [f32; 2] = [3.0, 15.0];
+pub fn blocker_height(near: f32, mid: f32, far: f32) -> f32 {
+    if !(near > 0.0) {
+        return 0.0;
+    }
+    ((near - mid).max(0.0) * 1.0 + (mid - far).max(0.0) * 8.0 + far.max(0.0) * 30.0) / near
+}
+
+/// High's edge half-width in feet for a caster `height` feet over what it shadows, in a map whose
+/// texels are `texel` feet.
+pub fn penumbra(height: f32, texel: f32) -> f32 {
+    (height * PENUMBRA).clamp(texel, PENUMBRA_MOST.max(texel))
+}
+
 /// The share of a map, out to its edge across the light, over which it hands over to the next one:
 /// V108 switched maps at the sharp one's edge, and a shadow crossing it popped from one map's
 /// texels, bias and filter to the other's (user 2026-10-29, "pop in"). The shader has the same rule.
@@ -328,9 +505,70 @@ mod tests {
     fn the_settings_words_go_round() {
         for s in Shadows::ALL {
             assert_eq!(Shadows::from_word(s.word()), Some(s));
+            assert_eq!(Shadows::from_old_word(s.word()), Some((s, None)));
         }
-        assert_eq!(Shadows::default(), Shadows::Better);
+        for q in ShadowQuality::ALL {
+            assert_eq!(ShadowQuality::from_word(q.word()), Some(q));
+        }
+        assert_eq!((Shadows::default(), ShadowQuality::default()), (Shadows::On, ShadowQuality::High));
         assert_eq!(Shadows::from_word("soft"), None);
+        assert_eq!(ShadowQuality::from_word("better"), None);
+        // V108's one setting: Better was ours, Original the original's, Off none.
+        assert_eq!(Shadows::from_old_word("Better"), Some((Shadows::On, Some(ShadowQuality::High))));
+        assert_eq!(Shadows::from_old_word("original"), Some((Shadows::On, Some(ShadowQuality::Original))));
+        assert_eq!(Shadows::from_old_word("off"), Some((Shadows::Off, None)));
+        assert_eq!(Shadows::from_word("better"), None);
+    }
+
+    #[test]
+    fn on_casts_the_movers_alone_and_all_the_world_too() {
+        use Caster::*;
+        let set = |s| [Mover, Prop, Plant].into_iter().filter(|&c| casts(s, c)).collect::<Vec<_>>();
+        assert_eq!(set(Shadows::Off), vec![]);
+        assert_eq!(set(Shadows::On), vec![Mover]);
+        assert_eq!(set(Shadows::All), vec![Mover, Prop, Plant]);
+    }
+
+    #[test]
+    fn the_software_renderer_draws_none_and_small_devices_smaller_maps() {
+        for s in Shadows::ALL {
+            for q in ShadowQuality::ALL {
+                assert_eq!(drawn(s, q, true), (s, q));
+                assert_eq!(drawn(s, q, false).0, Shadows::Off);
+            }
+        }
+        use ShadowQuality::*;
+        assert_eq!([Original, Low, High].map(|q| q.size(1, false, 16384)), [ORIGINAL_SIZE, LOW_SIZE, HIGH_SIZE]);
+        // A browser's, and four views', a step smaller; a device's limit caps all of them.
+        assert_eq!(High.size(1, true, 16384), HIGH_SIZE / 2);
+        assert_eq!(High.size(4, false, 16384), HIGH_SIZE / 2);
+        assert_eq!(High.world_size(16384), WORLD_SIZE);
+        assert_eq!(High.world_size(2048), 2048);
+        assert_eq!(High.size(1, false, 512), 512);
+        assert!(Original.world_size(16384) < Low.world_size(16384));
+        assert_eq!(High.cascades().len(), 3);
+        assert_eq!(Low.cascades().len(), 2);
+    }
+
+    #[test]
+    fn the_slices_overlap_and_stop_at_the_reach() {
+        assert_eq!(slices(&CASCADES, 1000.0), vec![(0.0, 45.0), (36.0, 300.0)]);
+        assert_eq!(slices(&CASCADES, 200.0), vec![(0.0, 45.0), (36.0, 200.0)]);
+        assert_eq!(slices(&CASCADES, 40.0), vec![(0.0, 40.0)]);
+        assert_eq!(slices(&HIGH_CASCADES, 1000.0), vec![(0.0, 30.0), (24.0, 110.0), (88.0, 300.0)]);
+        assert_eq!(slices(&HIGH_CASCADES, 100.0), vec![(0.0, 30.0), (24.0, 100.0)]);
+    }
+
+    #[test]
+    fn highs_edges_harden_where_the_caster_meets_its_shadow() {
+        assert_eq!(blocker_height(0.0, 0.0, 0.0), 0.0);
+        let touching = blocker_height(1.0, 0.0, 0.0);
+        let tall = blocker_height(1.0, 1.0, 1.0);
+        assert!(touching < BLOCKER_STEPS[0] && tall > BLOCKER_STEPS[1], "{touching} {tall}");
+        let texel = 0.05;
+        assert_eq!(penumbra(touching, texel), texel);
+        assert!(penumbra(tall, texel) > 10.0 * texel);
+        assert_eq!(penumbra(1e6, texel), PENUMBRA_MOST);
     }
 
     #[test]

@@ -97,10 +97,6 @@ const PROP_PIXELS: f32 = 0.5;
 /// a sprite's picture is read by its texels, and a font page halved showed other glyphs' pieces.
 pub static TEXTURE_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Under [`Renderer::few_casters`], the props smaller than this, in feet of radius, cast no sun
-/// shadow (P223, opentennis's B343): the fences, signs and bales, not the buildings and ramps.
-const FEW_CASTERS_RADIUS: f32 = 12.0;
-
 /// How much an actor's bounding sphere is grown by before it is culled against a view (P223): a
 /// posed rider reaches past the bind pose's sphere, an arm or a leg thrown out in a wreck.
 const ACTOR_CULL_GROWTH: f32 = 1.5;
@@ -199,6 +195,10 @@ struct ViewUniform {
     sun_tint: [f32; 4],
     sun_layer: [[f32; 4]; shadows::MAPS],
     sun_m: [[[f32; 4]; 4]; shadows::MAPS],
+    /// The baked world map's ([`crate::shadow::Shadows::All`]): whether it is read, its bias
+    /// and texel, and its matrix.
+    sun_world: [f32; 4],
+    sun_world_m: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -955,9 +955,6 @@ pub struct Renderer {
     /// [`Renderer::render_over`] is drawing (P213): the views' actors alone, over what the target
     /// already shows.
     over: bool,
-    /// Under [`Shadows::Better`], only the actors and the big props cast (P223, opentennis's B343):
-    /// the plants and the small props' shadows left to the light maps. Off, everything near casts.
-    pub few_casters: bool,
     /// How far away the props and actors are taken to be when their level of detail is picked, as a
     /// multiple of how far they are (P223, opentennis's B364 mesh detail): 1 is the disc's own
     /// choice, 2 the coarser models at half the distance. The ground's levels and the smallest props'
@@ -972,6 +969,9 @@ struct Prop {
     at: M4,
     /// Whose it is: [`SCENE`] for the scene's, or what [`Renderer::add_props`] was told (MD15).
     owner: u32,
+    /// Moved since it was placed (S131's knocked props): a mover's shadow now, not the baked
+    /// world map's ([`crate::shadow::Shadows::All`]).
+    moved: bool,
 }
 
 /// The owner of the scene's own props and grove ([`Renderer::set_scene`]).
@@ -1439,6 +1439,10 @@ fn view_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: wgpu::BindingResource::Sampler(&sun.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&sun.world.view),
             },
         ],
     })
@@ -2014,6 +2018,7 @@ impl Renderer {
                 },
                 shadows::layout_entries()[0].clone(),
                 shadows::layout_entries()[1].clone(),
+                shadows::layout_entries()[2].clone(),
             ],
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2266,7 +2271,6 @@ impl Renderer {
             glows: None,
             sun,
             over: false,
-            few_casters: false,
             lod_bias: 1.0,
         })
     }
@@ -2281,10 +2285,12 @@ impl Renderer {
                 model: None,
                 at: p.transform(),
                 owner: SCENE,
+                moved: false,
             })
             .collect();
         self.grove = scene.ecosystem.clone();
         self.groves.clear();
+        self.sun.world.generation += 1;
         self.sun.tint = scene.shadow_tint();
     }
 
@@ -2293,6 +2299,10 @@ impl Renderer {
     pub fn move_scene_prop(&mut self, k: usize, at: M4) {
         if let Some(p) = self.props.get_mut(k).filter(|p| p.owner == SCENE) {
             p.at = at;
+            if !p.moved {
+                p.moved = true;
+                self.sun.world.generation += 1;
+            }
         }
     }
 
@@ -2300,7 +2310,8 @@ impl Renderer {
     /// already moved to where the tile is), until [`Renderer::drop_owner`] lets them go.
     pub fn add_props(&mut self, owner: u32, props: &[crate::scene::Placement], grove: Option<crate::eco::Grove>) {
         let lod = self.grove.as_ref().or(self.groves.first().map(|(_, g)| g)).map(|g| (g.lod, g.foliage));
-        self.props.extend(props.iter().map(|p| Prop { name: p.model.clone(), model: None, at: p.transform(), owner }));
+        self.props.extend(props.iter().map(|p| Prop { name: p.model.clone(), model: None, at: p.transform(), owner, moved: false }));
+        self.sun.world.generation += 1;
         if let Some(mut g) = grove {
             if let Some((lod, foliage)) = lod {
                 (g.lod, g.foliage) = (lod, foliage);
@@ -2315,6 +2326,7 @@ impl Renderer {
     pub fn drop_owner(&mut self, owner: u32, models: &[String], textures: std::ops::Range<usize>) {
         self.props.retain(|p| p.owner != owner);
         self.groves.retain(|(o, _)| *o != owner);
+        self.sun.world.generation += 1;
         for name in models {
             if let Some(Some(id)) = self.model_ids.remove(name) {
                 // Its place stays, so every later model keeps its index; its vertices go.
@@ -3091,6 +3103,7 @@ impl Renderer {
         self.props.clear();
         self.grove = None;
         self.groves.clear();
+        self.sun.world.generation += 1;
         self.view_skies.clear();
         self.sky_cubes.clear();
         self.view_lights.clear();
@@ -3562,21 +3575,6 @@ impl Renderer {
                 }
             }
         }
-        // The sun's shadow maps (V108), each with uniforms of its own after the passes'.
-        self.plan_sun_maps(views, &passes, frame.light);
-        let slots = passes.len() + self.sun.count();
-        // Everything a view needs to know before the pass: its uniforms, and its batches.
-        if slots as u64 > self.view_capacity {
-            self.view_capacity = slots as u64;
-            self.view_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("views"),
-                size: VIEW_STRIDE * self.view_capacity,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.view_bind = view_bind_group(&self.device, &self.view_layout, &self.view_buffer, &self.palette, &self.sun);
-            self.sun.rebind(&self.device, &self.view_buffer, &self.palette);
-        }
         // Resolve what the frame names before the palette is written, so a model seen for the first
         // time has its bind pose in this frame's palette.
         for p in 0..self.props.len() {
@@ -3601,6 +3599,23 @@ impl Renderer {
             .collect();
         for name in names {
             self.model(assets, &name);
+        }
+        // The sun's shadow maps (V108), each with uniforms of its own after the passes': planned once
+        // the frame's models are resolved, so an actor seen for the first time casts from its first
+        // frame (the original's maps skipped it, unknown, for one).
+        self.plan_sun_maps(views, &passes, frame.light, frame.poses);
+        let slots = passes.len() + self.sun.count();
+        // Everything a view needs to know before the pass: its uniforms, and its batches.
+        if slots as u64 > self.view_capacity {
+            self.view_capacity = slots as u64;
+            self.view_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("views"),
+                size: VIEW_STRIDE * self.view_capacity,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.view_bind = view_bind_group(&self.device, &self.view_layout, &self.view_buffer, &self.palette, &self.sun);
+            self.sun.rebind(&self.device, &self.view_buffer, &self.palette);
         }
         let pose_starts = self.write_palette(frame.poses);
 
@@ -3651,7 +3666,7 @@ impl Renderer {
             // and copy is moved by the eye before it, so far from the map's origin nothing jitters.
             let from_origin = Camera { eye: v3(0.0, 0.0, 0.0), at: camera.at.sub(camera.eye), ..*camera };
             origins.push(camera.eye);
-            let (sun_maps, sun_tint, sun_layer, sun_m) = self.sun.fields(p);
+            let sun_fields = self.sun.fields(p, camera.eye);
             let u = ViewUniform {
                 vp: reversed(view_projection(&from_origin, w, h, far)).0,
                 eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
@@ -3664,10 +3679,12 @@ impl Renderer {
                 right: [right.x * half_w, right.y * half_w, right.z * half_w, 0.0],
                 up: [up.x * half_h, up.y * half_h, up.z * half_h, 0.0],
                 origin: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
-                sun_maps,
-                sun_tint,
-                sun_layer,
-                sun_m,
+                sun_maps: sun_fields.maps,
+                sun_tint: sun_fields.tint,
+                sun_layer: sun_fields.layer,
+                sun_m: sun_fields.m,
+                sun_world: sun_fields.world,
+                sun_world_m: sun_fields.world_m,
             };
             let at = p * VIEW_STRIDE as usize;
             uniforms[at..at + std::mem::size_of::<ViewUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
@@ -3675,14 +3692,17 @@ impl Renderer {
             // The props: culled against the frustum and the reach (the fog's end, as `draw_scene` culls
             // them, or the whole map), and each at the level of detail the disc's own test picks.
             let fade = self.prop_fade.filter(|_| self.graphics != Graphics::Original);
-            let casting = self.sun.takes_all(p);
-            let (few_casters, bias) = (self.few_casters, self.lod_bias.max(1.0));
+            // What casts into the view's maps (user 2026-10-30): the movers under On, and the props
+            // and plants too under All. A knocked prop is a mover.
+            use crate::shadow::Caster;
+            let casting = [Caster::Prop, Caster::Mover, Caster::Plant].map(|c| self.sun.takes(p, c));
+            let bias = self.lod_bias.max(1.0);
             for prop in self.props.iter().filter(|_| !over) {
                 let Some(Some(m)) = prop.model else { continue };
                 let model = &self.models[m];
                 let centre = v3(prop.at.0[3][0], prop.at.0[3][1], prop.at.0[3][2]);
                 // A prop out of sight still casts into the view (V108).
-                if casting && !(few_casters && model.radius < FEW_CASTERS_RADIUS) {
+                if casting[usize::from(prop.moved)] {
                     let group = crate::psg::group_at(&model.group_distance, centre.sub(camera.eye).len() * bias, model.radius, focal);
                     let inst = InstanceRaw { m: prop.at.0, palette: [model.bind_palette, model.nodes], cover: 1.0 };
                     self.sun.cast(p, None, centre, model.radius, m, group, inst);
@@ -3771,7 +3791,7 @@ impl Renderer {
                     self.scratch.push((key, ghost, inst));
                 }
                 // Every plant near casts, seen or not, as its model ([`crate::eco::Grove::casters`]).
-                if casting && !few_casters {
+                if casting[2] {
                     plants.clear();
                     grove.casters(camera.eye, crate::shadow::CASCADES[1], &mut plants);
                     for d in &plants {
@@ -5073,6 +5093,8 @@ struct View {
   sun_tint: vec4f,
   sun_layer: array<vec4f, 8>,
   sun_m: array<mat4x4f, 8>,
+  sun_world: vec4f,
+  sun_world_m: mat4x4f,
 }
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var palette: texture_2d<f32>;
@@ -5107,6 +5129,8 @@ struct View {
   sun_tint: vec4f,
   sun_layer: array<vec4f, 8>,
   sun_m: array<mat4x4f, 8>,
+  sun_world: vec4f,
+  sun_world_m: mat4x4f,
 }
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var palette: texture_2d<f32>;
@@ -5842,6 +5866,45 @@ mod tests {
         let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
         let drawn = gpu.render(&target, &assets, &Scene3 { views: &views, poses: &poses, overlay: &[], sprites: &[], light: &light });
         assert_eq!(drawn.actors, vec![vec![board_tris, board_tris, 0]], "the posed board was culled at its at");
+    }
+
+    /// The same posed board under Shadow Quality Original (the coordinator's 2026-10-30 check on
+    /// 365f8e9e): the original's map for one racer was boxed round its `at`, so the wreck body thrown
+    /// off the bike cast nothing (its posed sphere fell outside the box). Its map is round the pose now,
+    /// and the board casts into it; an unposed actor's is round its `at` still.
+    #[test]
+    fn the_originals_shadow_of_a_posed_actor_is_round_its_pose() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (mut scene, assets, camera) = known_scene();
+        let board = scene.models.remove(0);
+        scene.models.clear();
+        let behind = M4::placement(v3(0.0, 0.0, -60.0), v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0));
+        let back = M4::placement(v3(0.0, 0.0, 68.0), v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0));
+        let poses = vec![vec![assets.models["board"].model.world(0).mul(back)]];
+        let (w, h) = (64u32, 48u32);
+        let mut light = Lighting::of(&scene);
+        light.sun = v3(0.3, -0.8, 0.4);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        gpu.set_shadows(crate::shadow::Shadows::On, crate::shadow::ShadowQuality::Original);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+        for (pose, at) in [(Some(0), board.pos), (None, v3(0.0, 0.0, -60.0))] {
+            let actors = [Actor { model: "board", at: behind, pose, lod_from: None, alpha: 1.0 }];
+            let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
+            gpu.render(&target, &assets, &Scene3 { views: &views, poses: &poses, overlay: &[], sprites: &[], light: &light });
+            let maps = gpu.sun_map_centres();
+            assert_eq!(maps.len(), 1, "{pose:?}: {maps:?}");
+            assert!(maps[0].0.sub(at).len() < 4.0, "{pose:?}: the map is round {:?}, not {at:?}", maps[0].0);
+            assert!(maps[0].1 > 0, "{pose:?}: nothing cast into its map");
+        }
     }
 
     /// The backdrop crossfades between two skies by the second's share (MD26), a missing one is the
