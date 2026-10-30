@@ -161,6 +161,93 @@ extern "C" fn on_exception(e: Id) {
     eprintln!("Objective-C exception {}: {}", text(get(e, c"name")), text(get(e, c"reason")));
 }
 
+// ---- focus (P233) ---------------------------------------------------------------------------------
+
+/// A focus notice not yet taken by [`focus_notice`]: the controllers connected then, plus one (0: none).
+static NOTICE: AtomicUsize = AtomicUsize::new(0);
+
+/// A block literal as clang lays one out: a global one, which nothing copies or frees.
+#[repr(C)]
+struct Block {
+    isa: *const c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: extern "C" fn(*const Block, Id),
+    descriptor: *const BlockDescriptor,
+}
+
+#[repr(C)]
+struct BlockDescriptor {
+    reserved: usize,
+    size: usize,
+}
+
+/// `BLOCK_IS_GLOBAL`.
+const BLOCK_IS_GLOBAL: i32 = 1 << 28;
+
+unsafe extern "C" {
+    static _NSConcreteGlobalBlock: c_void;
+}
+
+/// The screenshot notice, the only one that raises "Tap screen to resume controller": the user's
+/// iPhone run (2026-10-30) showed a trip out of the app and back leaves the controllers working.
+const SCREENSHOT: &str = "UIApplicationUserDidTakeScreenshotNotification";
+
+/// The focus block's body, on the main queue: every notice into the log, and a screenshot's kept
+/// with the controllers in for [`focus_notice`]. WillResignActive and DidBecomeActive only log.
+extern "C" fn on_focus(_: *const Block, note: Id) {
+    pool(|| {
+        let pads = int(get(class(c"GCController"), c"controllers"), c"count").max(0) as usize;
+        let name = text(get(note, c"name"));
+        eprintln!("iOS {name} ({pads} controllers)");
+        if name == SCREENSHOT {
+            NOTICE.fetch_max(pads + 1, Ordering::Relaxed);
+        }
+    });
+}
+
+/// As opentennis's `watch_focus`: a screenshot can leave the controllers silent until a touch (the
+/// shell's "Tap screen to resume controller"). Observes UIApplicationUserDidTakeScreenshotNotification,
+/// WillResignActive and DidBecomeActive on the main queue, for the life of the process; only the
+/// screenshot one reaches [`focus_notice`], the other two are logged. Call once.
+pub fn watch_focus() {
+    let descriptor = Box::leak(Box::new(BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() }));
+    let block: &'static Block = Box::leak(Box::new(Block {
+        // only the address of the runtime's global block class
+        isa: &raw const _NSConcreteGlobalBlock,
+        flags: BLOCK_IS_GLOBAL,
+        reserved: 0,
+        invoke: on_focus,
+        descriptor,
+    }));
+    pool(|| {
+        let center = get(class(c"NSNotificationCenter"), c"defaultCenter");
+        let main = get(class(c"NSOperationQueue"), c"mainQueue");
+        for name in [
+            c"UIApplicationUserDidTakeScreenshotNotification",
+            c"UIApplicationWillResignActiveNotification",
+            c"UIApplicationDidBecomeActiveNotification",
+        ] {
+            // SAFETY: objc_msgSend cast to `id (id, SEL, const char *)` and to
+            // `id (id, SEL, NSString *, id, NSOperationQueue *, block)`, as NSString and
+            // NSNotificationCenter declare them; the block lives for the process
+            let observer = unsafe {
+                let string: extern "C" fn(Id, Id, *const std::ffi::c_char) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                let ns = string(class(c"NSString"), sel(c"stringWithUTF8String:"), name.as_ptr());
+                let add: extern "C" fn(Id, Id, Id, Id, Id, *const Block) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                add(center, sel(c"addObserverForName:object:queue:usingBlock:"), ns, std::ptr::null_mut(), main, block)
+            };
+            retain(observer);
+        }
+    });
+}
+
+/// The screenshot notice since the last call, if one came: how many controllers were connected then.
+/// Any thread.
+pub fn focus_notice() -> Option<usize> {
+    NOTICE.swap(0, Ordering::Relaxed).checked_sub(1)
+}
+
 unsafe extern "C" {
     static mach_task_self_: u32;
     fn task_info(task: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
