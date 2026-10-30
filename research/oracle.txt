@@ -6226,6 +6226,35 @@ atv_body_add_force          atv 0x00494000 = rigid body vt +0x48 (and +0x80's st
 atv_body_local_moment       atv 0x0049c1a0 = rigid body vt +0x88: rotate by the conjugate of body +0x190 (world to local), then vt +0x78
 atv_body_local_force        atv 0x0049c050 = rigid body vt +0x74: rotate by body +0x190 (local to world), then vt +0x48
 atv_quat_axes               atv 0x001351d0 = math::quat_axes (forward a1, up a2 from a quaternion)
+# MD64 — the quad's three listeners (quad::ground_head / ground_step / wheel_contacts / air_state;
+# tests/atv_quad.rs off MD37a's atv-r-spawn.ee.bin). Journal: research/journal/2026-10-29-md64-atv-force.
+# All three return at once unless quad +0xbc4 (the vehicle state) is set and its +0x28 is not 3 or 4.
+# More ATV-relative fields: +0xc80 control off, +0x32c speed (velocity length), +0x330 crossup, +0x350
+# velocity in the quad's frame, +0xbe0/+0xbf0 forward / up axes, +0xc30 contact velocity (its z is
+# +0xc38 speed), +0xbd0 the node's position and +0xc40 its copy, +0xde0/+0xde4 airborne / was, +0x1190
+# hang time, +0x1188/+0x118c authority / its time (1 at the spawn), +0x1198 flipping, +0x11d4 spinning,
+# +0x122c max donut speed (44), +0x1230/+0x1234 the donut angles (-0.5236, -2.618), +0x1250 the peak-rates
+# vector (reset to (0,0,0,1) each PreProcess, as body +0xc0), +0x12b8/+0x12bc stick angle / deflection,
+# +0x12c8 the steering command, +0x12f0 the full-lock option (0), +0x12f4/+0x12f8/+0x12fc its angle /
+# time / timer (0.2094, 0.5), +0x1300..+0x130c the steering fade (speed, scale, speed, scale: 0 0.9 110
+# 0.2), +0x137c/+0x1380 and +0x1384/+0x1388 front / rear spring stopped / moving (315 382.2, 525 554.4),
+# +0x1430 the collision search, +0x143c the last rear contact's node, +0xc8 the collision record (+0x24
+# set while up.y <= 0.25), +0xe4 the scene node. Wheel: +0x30 held up for the balance, +0x38 donut, +0x48
+# spring, +0x70 steering lock (0.5236), +0x190 contact velocity, +0x838 one over the radius, +0x8ac the
+# steering command, +0xd4/+0x120/+0x1f0/+0x1f4 set by the distributor (touching, point, owner, vehicle).
+# The distributor's record (search +0x7c, read while search byte +0x126 has bit 0x20): +0x8c count, +0x90
+# place (stride 0x20; z > 0 a front, x > 0 a right), +0x94 normal, +0x98 point, +0x9c node; node +0x90
+# owner (+0x208 its listener list), node +0x8c vehicle (kept only when its +0x1a0 is 2).
+# The PostProcess's crossup reads the arc cosine table through 0x003ea9c0 (scale at 0x003ea9d8, 14999.5);
+# the table is MX Unleashed's, entry for entry. The PC's reads an arc sine of the cross length instead.
+atv_vehicle_force           atv 0x00493f60 = the vehicle's own Force (gravity into the body; the quad's Force body's first, through a thunk at 0x004a4ef0)
+atv_vehicle_post            atv 0x004940b0 = the vehicle's own PostProcess (the quad's PostProcess's last but one, through a thunk at 0x004a4f00)
+atv_node_position           atv 0x00194c20 = scene node position (a0 node, a1 0, a2 out quadword)
+atv_quat_to_euler           atv 0x001358d0 = math::quat_to_euler (a0 out, a1 quaternion)
+atv_wheel_set_contact       atv 0x004a0c80 = chassis::set_contact (a0 wheel, a1 point, a2 normal, a3 owner, a4 vehicle)
+atv_list_at                 atv 0x004bf960 = a listener list's element j (a0 list +0x104, a1 j)
+atv_collide_against_search  atv 0x001151c0 = collide_against_search (a0 search, a1 actor list, a2 1)
+atv_bike_head_tail          atv 0x004e4190 = quad/bike vt +0x4d0, the PreProcess's last
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the
