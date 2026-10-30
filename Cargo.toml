@@ -14,7 +14,7 @@ exclude = ["third_party"]
 
 [workspace.package]
 edition = "2024"
-version = "0.2.3"
+version = "0.2.4"
 publish = false
 
 # Small, release-speed tests: an oracle run is tens of thousands of interpreted calls, which is
