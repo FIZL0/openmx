@@ -432,7 +432,7 @@ fn a_track_preview_goes_up_as_webp() {
         e.write_header().unwrap().write_image_data(&vec![200; 960 * 540 * 4]).unwrap();
     }
     std::fs::write(&still, &png).unwrap();
-    let l = Local { id: "my_track".into(), kind: Kind::Track, name: "Mine".into(), version: String::new(), source: String::new(), dir: mods.join("tracks/my_track") };
+    let l = Local { id: "my_track".into(), kind: Kind::Track, name: "Mine".into(), version: String::new(), source: String::new(), category: String::new(), dir: mods.join("tracks/my_track") };
     let w = preview_of(&mods, &l).unwrap();
     assert!(w.starts_with(b"RIFF") && &w[8..12] == b"WEBP");
     let p = decode_preview(&w).unwrap();

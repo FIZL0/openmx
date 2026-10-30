@@ -93,7 +93,7 @@ fn sha(b: &[u8]) -> String {
 }
 
 fn meta(id: &str, kind: Kind, z: &[u8]) -> Meta {
-    Meta { id: id.into(), kind, name: format!("Test {id}"), author: "someone".into(), source: "MX vs. ATV Unleashed".into(), version: "1.0.0".into(), size: z.len() as u64, sha256: sha(z), standard: 1 }
+    Meta { id: id.into(), kind, name: format!("Test {id}"), author: "someone".into(), source: "MX vs. ATV Unleashed".into(), version: "1.0.0".into(), size: z.len() as u64, sha256: sha(z), standard: 1, category: String::new() }
 }
 
 fn reader(z: &[u8]) -> impl FnMut(u64, usize) -> Result<Vec<u8>, String> + '_ {
@@ -228,6 +228,30 @@ fn meta_json_is_checked() {
     assert_eq!(long.name.len(), 48);
     let upper = edit(&|v| v["sha256"] = v["sha256"].as_str().unwrap().to_uppercase().into()).unwrap();
     assert_eq!(upper.sha256, m.sha256);
+}
+
+/// MD66: `meta.json`'s `category`, which Browse filters the Tracks tab by: kept as plain text of at
+/// most 24 characters, and a meta.json without one (every upload before it) still reads, Other or,
+/// for a world, World; one with none is written without the key.
+#[test]
+fn meta_json_carries_the_category() {
+    let z = zip(&track("mxvatv_fs01", b"scene"));
+    let good = serde_json::to_vec(&meta("mxvatv_fs01", Kind::Track, &z)).unwrap();
+    assert!(!String::from_utf8_lossy(&good).contains("category"), "none written where there is none");
+    let m = meta_of(&good, "mxvatv_fs01").unwrap();
+    assert_eq!((m.category.as_str(), m.category_word().as_str()), ("", "Other"));
+    assert_eq!(Meta { kind: Kind::World, ..m.clone() }.category_word(), "World");
+    let with = |c: &str| {
+        let mut v: serde_json::Value = serde_json::from_slice(&good).unwrap();
+        v["category"] = c.into();
+        meta_of(&serde_json::to_vec(&v).unwrap(), "mxvatv_fs01").unwrap()
+    };
+    let fs = with(" Freestyle ");
+    assert_eq!((fs.category.as_str(), fs.category_word().as_str()), ("Freestyle", "Freestyle"));
+    assert_eq!(with("\u{1b}\u{7}").category_word(), "Other", "control characters alone are none");
+    assert_eq!(with(&"c".repeat(100)).category.len(), 24);
+    let back = meta_of(&serde_json::to_vec(&fs).unwrap(), "mxvatv_fs01").unwrap();
+    assert_eq!(back, fs, "written and read back");
 }
 
 /// xorshift64*: the fuzz's seeded randomness.

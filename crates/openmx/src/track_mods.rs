@@ -153,6 +153,28 @@ pub fn source_games(mods: &Path, ids: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Each listed mod's category (MD66), `(id, category)`: its `mod.json`'s `category` (openmx-mods'
+/// standard §1: the source game's own kind of event, `Freestyle`, `Supercross`, …), as
+/// [`category_word`] keeps it. A mod whose file has none is left out, and the pick lists it under
+/// Other.
+pub fn categories(mods: &Path, ids: &[String]) -> Vec<(String, String)> {
+    ids.iter()
+        .filter(|id| valid_id(id))
+        .filter_map(|id| {
+            let text = std::fs::read_to_string(mods.join("tracks").join(id).join("mod.json")).ok()?;
+            let json = Json::parse(&text).ok()?;
+            Some((id.clone(), category_word(json.get("category")?.str()?)?))
+        })
+        .collect()
+}
+
+/// A `category` as the pick and the store show it (MD66): plain text, at most 24 characters, `None`
+/// when that leaves nothing.
+pub fn category_word(s: &str) -> Option<String> {
+    let s: String = s.chars().filter(|c| !c.is_control()).take(24).collect::<String>().trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 /// Whether `id` is spelled as a mod's id may be: `[a-z0-9_]`, 1 to 40 of them, `<prefix>_<map>`.
 /// No disc track's name has the underscore, so a mod can never take one's place.
 pub fn valid_id(id: &str) -> bool {

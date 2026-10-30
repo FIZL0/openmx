@@ -156,6 +156,8 @@ pub struct Local {
     pub version: String,
     /// `mod.json`'s `source.game`.
     pub source: String,
+    /// MD66: `mod.json`'s `category`, empty where it has none.
+    pub category: String,
     pub dir: PathBuf,
 }
 
@@ -171,7 +173,8 @@ pub fn local_of(dir: &Path, folder: &str) -> Option<Local> {
     }
     let source = json.get("source").and_then(|j| j.get("game").or(Some(j))).and_then(Json::str).map(|v| plain_text(v, 40)).unwrap_or_default();
     let name = Some(s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone());
-    Some(Local { id, kind, name, version: s("version"), source, dir: dir.to_path_buf() })
+    let category = json.get("category").and_then(Json::str).and_then(track_mods::category_word).unwrap_or_default();
+    Some(Local { id, kind, name, version: s("version"), source, category, dir: dir.to_path_buf() })
 }
 
 /// The player's own mods in `mods`, by name: every folder of a kind the store takes that is not a
@@ -386,7 +389,7 @@ pub fn package(mods: &Path, l: &Local, author: &str) -> Result<Packed, String> {
     let (size, sha256) = got.inspect_err(|_| {
         let _ = std::fs::remove_file(&to);
     })?;
-    let meta = Meta { id: l.id.clone(), kind: l.kind, name: l.name.clone(), author: plain_text(author, 40), source: l.source.clone(), version: l.version.clone(), size, sha256, standard: track_mods::STANDARD };
+    let meta = Meta { id: l.id.clone(), kind: l.kind, name: l.name.clone(), author: plain_text(author, 40), source: l.source.clone(), version: l.version.clone(), size, sha256, standard: track_mods::STANDARD, category: l.category.clone() };
     // the guard first: a refused zip goes too
     let mut p = Packed { meta, zip: Blob::File(to.clone(), size, String::new()), preview: None };
     let mut f = std::fs::File::open(&to).map_err(|e| format!("can't read the zip: {e}"))?;

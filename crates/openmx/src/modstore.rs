@@ -144,6 +144,22 @@ pub struct Meta {
     /// The standard's version its `mod.json` is written to.
     #[serde(default)]
     pub standard: u64,
+    /// MD66: `mod.json`'s `category`, the kind of track (Freestyle, Supercross, …), which Browse's
+    /// Tracks tab filters by; empty where it names none ([`Meta::category_word`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category: String,
+}
+
+impl Meta {
+    /// MD66: the category Browse files this mod under: its own, World for a world that names none,
+    /// and Other for any other.
+    pub fn category_word(&self) -> String {
+        match (self.category.is_empty(), self.kind) {
+            (false, _) => self.category.clone(),
+            (true, Kind::World) => crate::menu::WORLD.into(),
+            (true, _) => crate::menu::OTHER.into(),
+        }
+    }
 }
 
 /// One mod in the store.
@@ -239,6 +255,7 @@ pub fn meta_of(b: &[u8], id: &str) -> Option<Meta> {
     m.author = plain_text(&m.author, 40);
     m.source = plain_text(&m.source, 40);
     m.version = plain_text(&m.version, 16);
+    m.category = track_mods::category_word(&m.category).unwrap_or_default();
     (!m.name.is_empty()).then_some(m)
 }
 

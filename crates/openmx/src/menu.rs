@@ -507,6 +507,10 @@ pub struct Settings {
     /// The track pick's filter (MD11), the source game whose tracks it lists: a [`Menu::track_groups`]
     /// name, empty for All Games. A game the pick does not list now shows All and is kept.
     pub track_filter: String,
+    /// The track pick's second filter (MD66), the category whose tracks it lists within the game's
+    /// (Freestyle, Supercross, …, Other): a [`Menu::track_categories`] name, empty for All
+    /// Categories. One the lit game does not list now shows All and is kept.
+    pub track_category: String,
     /// Whose tricks a ride has (MD16): the original's, or MX vs. ATV's read from a trick pack in the
     /// mods folder. The original's unless changed.
     pub tricks: Tricks,
@@ -1329,6 +1333,7 @@ impl Default for Settings {
             mods: true,
             mods_off: Vec::new(),
             track_filter: String::new(),
+            track_category: String::new(),
             tricks: Tricks::default(),
             handling: game_sim::handling::Handling::default(),
             plants: Lod::default(),
@@ -1538,6 +1543,7 @@ impl Settings {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
                 "track_filter" => s.track_filter = clean_filter(v),
+                "track_category" => s.track_category = clean_filter(v),
                 // The original's plant detail is no longer offered (2026-10-29: it fades in bushes
                 // that are not there): an older file's `plants = original` reads as ours.
                 "plants" => s.plants = Lod::Smooth,
@@ -1783,6 +1789,10 @@ impl Settings {
         // The pick's filter (MD11), only when it is not All Games.
         if !self.track_filter.is_empty() {
             out += &format!("track_filter = {}\n", self.track_filter);
+        }
+        // Its category (MD66), only when it is not All Categories.
+        if !self.track_category.is_empty() {
+            out += &format!("track_category = {}\n", self.track_category);
         }
         out
     }
@@ -2848,6 +2858,10 @@ pub struct Menu {
     /// pick's filters are by. A mod not in it is its pack's ([`pack_name`]). Set with
     /// [`Menu::set_mod_games`].
     mod_games: Vec<(String, String)>,
+    /// Each mod track's category (MD66), `(id, category)`, its `mod.json`'s `category`, which the
+    /// pick's second filter is by. A mod not in it is Other ([`Menu::track_category`]). Set with
+    /// [`Menu::set_mod_categories`].
+    mod_categories: Vec<(String, String)>,
     /// Open screens, the one shown last. Empty is a ride with nothing over it.
     stack: Vec<Screen>,
     /// Each screen's row, in [`Screen::ALL`]'s order.
@@ -3165,6 +3179,7 @@ impl Menu {
             controls,
             mod_tracks: Vec::new(),
             mod_games: Vec::new(),
+            mod_categories: Vec::new(),
             stack: vec![Screen::Main],
             cursor,
             typing: String::new(),
@@ -4338,16 +4353,28 @@ impl Menu {
         let at = self.cursor(screen).min(rows - 1);
         self.cursor[screen.index()] = at;
         // Up and down walk the rows, wrapping; on Free Ride they walk the lit category's tracks, and
-        // left and right step the categories (user, 2026-10-23).
+        // left and right step the categories (user, 2026-10-23): the games, and L1 and R1 the kinds of
+        // track within them (MD66).
         let (prev, next) = (p.up, p.down);
-        if screen == Screen::Tracks && (prev || next || p.left || p.right) {
+        if screen == Screen::Tracks && (prev || next || p.left || p.right || p.l1 || p.r1) {
             let groups = self.track_groups();
             let g = self.track_filter_group();
             let to = if prev || next {
-                let r = &groups[g].1;
-                let n = r.len();
-                let at = if r.contains(&at) { at } else { r.start };
-                r.start + (at - r.start + if prev { n - 1 } else { 1 }) % n
+                let list = self.track_list();
+                let n = list.len();
+                let k = list.iter().position(|&i| i == at).unwrap_or(0);
+                list[(k + if prev { n - 1 } else { 1 }) % n]
+            } else if p.l1 || p.r1 {
+                // The next category (MD66), kept in the settings as the game is.
+                let cats = self.track_categories();
+                let (n, c) = (cats.len(), self.track_category_group());
+                let name = &cats[if p.l1 { (c + n - 1) % n } else { (c + 1) % n }];
+                let filter = if name == ALL_CATEGORIES { String::new() } else { name.clone() };
+                if self.settings.track_category != filter {
+                    self.settings.track_category = filter;
+                    self.changed = true;
+                }
+                self.track_index()
             } else {
                 // The next filter (MD11), kept in the settings, onto the ride's track where it has
                 // it, else its first.
@@ -5349,11 +5376,82 @@ impl Menu {
         }
     }
 
-    /// The pick's index of [`Settings::track`] in the lit filter, the filter's first track where it
-    /// does not list it.
+    /// The pick's index of [`Settings::track`] in the lit filters, their first track where they do
+    /// not list it.
     pub fn track_index(&self) -> usize {
+        let list = self.track_list();
+        list.iter().copied().find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(list[0])
+    }
+
+    /// The tracks the pick lists now (MD66), in its order: the lit game filter's, less those not
+    /// in the lit category. Never empty, since a category the game has none of is All Categories.
+    pub fn track_list(&self) -> Vec<usize> {
         let r = self.track_groups()[self.track_filter_group()].1.clone();
-        r.clone().find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(r.start)
+        let cats = self.track_categories();
+        match self.track_category_group() {
+            0 => r.collect(),
+            lit => r.filter(|&i| self.track_category(self.track_at(i).0) == cats[lit]).collect(),
+        }
+    }
+
+    /// The pick's filters by category (MD66) within the lit game's tracks, which L1 and R1 step
+    /// between: All Categories first, then each category one of them is in, in [`CATEGORIES`]'
+    /// order, any other a mod names after them by name, and Other last. All Categories alone where
+    /// the game's tracks are all of one, or where no mod is listed (the disc's pick has no
+    /// filters, as it has no game filter).
+    pub fn track_categories(&self) -> Vec<String> {
+        if self.track_count() <= DISC_PICK {
+            return vec![ALL_CATEGORIES.to_string()];
+        }
+        let r = self.track_groups()[self.track_filter_group()].1.clone();
+        let mut seen: Vec<String> = Vec::new();
+        for i in r {
+            let c = self.track_category(self.track_at(i).0);
+            if !seen.contains(&c) {
+                seen.push(c);
+            }
+        }
+        seen.sort_by_cached_key(|c| {
+            let known = CATEGORIES.iter().position(|k| k == c).unwrap_or(CATEGORIES.len());
+            (c == OTHER, known, c.clone())
+        });
+        if seen.len() < 2 {
+            return vec![ALL_CATEGORIES.to_string()];
+        }
+        seen.insert(0, ALL_CATEGORIES.to_string());
+        seen
+    }
+
+    /// Which of [`Menu::track_categories`] [`Settings::track_category`] is, All Categories (the
+    /// first) where the lit game has none of it.
+    pub fn track_category_group(&self) -> usize {
+        let want = &self.settings.track_category;
+        if want.is_empty() {
+            return 0;
+        }
+        self.track_categories().iter().position(|c| c == want).unwrap_or(0)
+    }
+
+    /// The category a track of the pick is in (MD66): the disc's towns are Free Roam (MX
+    /// Unleashed's free rides) and every world World; a mod's is its `mod.json`'s `category`, and
+    /// Other where it has none.
+    pub fn track_category(&self, id: &str) -> String {
+        if TRACKS.iter().any(|t| t.0 == id) {
+            return FREE_ROAM.into();
+        }
+        if disc_place(id).is_some() || pack_of(id) == WORLDS {
+            return WORLD.into();
+        }
+        match self.mod_categories.iter().find(|(i, _)| i == id) {
+            Some((_, c)) if !c.trim().is_empty() && c != ALL_CATEGORIES => c.trim().to_string(),
+            _ => OTHER.into(),
+        }
+    }
+
+    /// Each mod track's category (MD66), `(id, category)`, as its `mod.json` says.
+    pub fn set_mod_categories(&mut self, categories: Vec<(String, String)>) {
+        self.mod_categories = categories;
+        self.cursor[Screen::Tracks.index()] = self.track_index();
     }
 
     /// The pick's filters by source game (MD11), which Left and Right step between, each its name
@@ -5414,8 +5512,8 @@ impl Menu {
     /// The tracks an online room's pick steps through (MD11): the lit filter's disc tracks, since a
     /// mod is not ridden online until MD6, or every disc track where the filter has none.
     pub fn online_tracks(&self) -> Vec<&'static str> {
-        let r = self.track_groups()[self.track_filter_group()].1.clone();
-        let disc: Vec<&'static str> = TRACKS.iter().enumerate().filter(|(i, _)| r.contains(i)).map(|(_, t)| t.0).collect();
+        let list = self.track_list();
+        let disc: Vec<&'static str> = TRACKS.iter().enumerate().filter(|(i, _)| list.contains(i)).map(|(_, t)| t.0).collect();
         if disc.is_empty() { TRACKS.iter().map(|t| t.0).collect() } else { disc }
     }
 
@@ -5460,6 +5558,20 @@ impl Menu {
 pub const ALL_GAMES: &str = "All Games";
 /// The track pick's filter of the disc's own tracks (MD11).
 pub const DISC_GAME: &str = "MX Unleashed";
+
+/// The track pick's category filter of every track (MD66), which an empty
+/// [`Settings::track_category`] is.
+pub const ALL_CATEGORIES: &str = "All Categories";
+/// The category of a mod whose `mod.json` names none (MD66).
+pub const OTHER: &str = "Other";
+/// The category of the open maps ridden for themselves (MD66): MX Unleashed's free rides, the
+/// generated elevation maps, MX vs. ATV Untamed's free-ride areas.
+pub const FREE_ROAM: &str = "Free Roam";
+/// The category of every world, the disc's and the mods' (MD66).
+pub const WORLD: &str = "World";
+/// The categories openmx-mods' importers write (its standard §1), in the order the pick steps
+/// them (MD66); a mod naming another comes after them, and [`OTHER`] last.
+pub const CATEGORIES: [&str; 8] = [FREE_ROAM, "Freestyle", "Supercross", "National", "Supermoto", "Machine Challenge", "Opencross", WORLD];
 
 /// The pack prefix of the world mods (MD8), whose category the pick lists right after the disc's.
 pub const WORLDS: &str = "world";

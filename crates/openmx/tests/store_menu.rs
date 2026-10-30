@@ -337,3 +337,69 @@ fn pack_order_switches_and_moves_packs() {
     off.store_tab(PACKS_TAB);
     assert_eq!(off.take_store_asks(), [], "no mods folder, no packs to read");
 }
+
+/// MD66: Browse's Tracks tab filters its cards by category, each card's from its `meta.json`: Up
+/// from the grid's top row lights the filter, Left and Right step it (All Categories, then the
+/// pick's order, Other last), Freestyle shows only the Freestyle cards, a card with no category is
+/// under Other, and Down goes back to the grid; another tab has no filter.
+#[test]
+fn browse_filters_the_tracks_by_category() {
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    m.step(reader.read(&Report::idle()));
+    m.open(Screen::Store);
+    let with = |key: &str, tab: usize, category: &str| Card { category: category.into(), ..card(key, tab, Got::No) };
+    m.store.cards = vec![
+        with("a/fs01", 0, "Freestyle"),
+        with("a/sx01", 0, "Supercross"),
+        with("a/none", 0, ""),
+        with("b/fs02", 0, "Freestyle"),
+        with("a/sx02", 0, "Supercross"),
+        with("c/m0", 2, "Freestyle"),
+    ];
+    m.store.listed = Listed::Shown;
+    assert_eq!(m.store.categories(), ["All Categories", "Freestyle", "Supercross", "Other"]);
+    assert!(m.store.filtered());
+    let keys = |m: &Menu| -> Vec<String> { m.store.shown().iter().map(|&i| m.store.cards[i].key.clone()).collect() };
+    assert_eq!(keys(&m).len(), 5, "All Categories: every track");
+    // Up from the top row is the filter: no card lit, so Cross installs nothing.
+    tap(&mut m, &mut reader, Control::Right);
+    tap(&mut m, &mut reader, Control::Up);
+    assert!(m.store.filtering);
+    assert_eq!(lit(&m), None);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), []);
+    tap(&mut m, &mut reader, Control::Right);
+    assert_eq!(m.store.category, "Freestyle");
+    assert_eq!(keys(&m), ["a/fs01", "b/fs02"], "Freestyle lists only its own");
+    tap(&mut m, &mut reader, Control::Right);
+    assert_eq!(keys(&m), ["a/sx01", "a/sx02"]);
+    tap(&mut m, &mut reader, Control::Right);
+    assert_eq!(m.store.category, "Other");
+    assert_eq!(keys(&m), ["a/none"], "no category reads as Other, and is still listed");
+    tap(&mut m, &mut reader, Control::Right);
+    assert_eq!(m.store.category, "", "round to All Categories");
+    tap(&mut m, &mut reader, Control::Left);
+    tap(&mut m, &mut reader, Control::Left);
+    tap(&mut m, &mut reader, Control::Left);
+    assert_eq!(m.store.category, "Freestyle");
+    // Down: the grid again, on the filter's first card, which Cross installs.
+    tap(&mut m, &mut reader, Control::Down);
+    assert!(!m.store.filtering);
+    assert_eq!(lit(&m).as_deref(), Some("a/fs01"));
+    tap(&mut m, &mut reader, Control::Right);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Install("b/fs02".into())]);
+    // Select downloads the filter's cards alone.
+    tap(&mut m, &mut reader, Control::Select);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Install("a/fs01".into())], "b/fs02 is going already");
+    // Music has no filter: every card on it, and Up stays on the grid.
+    tap(&mut m, &mut reader, Control::R1);
+    tap(&mut m, &mut reader, Control::R1);
+    assert_eq!(m.store.tab, 2);
+    assert!(!m.store.filtered());
+    assert_eq!(keys(&m), ["c/m0"]);
+    tap(&mut m, &mut reader, Control::Up);
+    assert!(!m.store.filtering);
+    assert_eq!(lit(&m).as_deref(), Some("c/m0"));
+}
