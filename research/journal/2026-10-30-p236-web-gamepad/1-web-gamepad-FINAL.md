@@ -1,4 +1,4 @@
-# 1 — web gamepad (PART)
+# 1 — web gamepad (FINAL)
 
 Task P236. 2026-10-30.
 
