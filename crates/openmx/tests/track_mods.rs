@@ -364,7 +364,7 @@ fn a_track_mod_loads_and_rides_and_a_broken_one_does_not_crash() {
     let mods = mods_folder("ride");
     let tape = throttle_tape(150);
     let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
-    let Some((ok, said)) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--seconds", "20"]) else { return };
+    let Some((ok, said)) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--frames", "600", "--steady-clock"]) else { return };
     assert!(ok, "the mod did not ride:\n{said}");
     println!("{said}");
     assert!(line(&said, "mods: md2_flat (MD2 Flat) from ").ends_with("md2_flat"));
@@ -375,7 +375,7 @@ fn a_track_mod_loads_and_rides_and_a_broken_one_does_not_crash() {
     let end: Vec<f32> = line(&said, "end: ")[5..].split(", ").map(|v| v.trim().parse().unwrap()).collect();
     assert!(end[2] > 400.0 && end[1].abs() < 20.0 && (end[0] - 512.0).abs() < 100.0, "{end:?}\n{said}");
     // And the same tape on the mod is the same ride.
-    let (_, again) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--seconds", "20"]).unwrap();
+    let (_, again) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--frames", "600", "--steady-clock"]).unwrap();
     assert_eq!(line(&said, "ride hash"), line(&again, "ride hash"));
 
     // A broken mod asked for by name is an error, not a crash; so is a mod with the mods off.
@@ -420,7 +420,7 @@ fn a_disc_ride_is_the_same_with_or_without_mods() {
     let tape = throttle_tape(150);
     let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
     let empty = mods.parent().unwrap().join("empty");
-    let ride = |m: &str| shell(&["--track", "free06", "--mods", m, "--play", tape, "--seconds", "20"]);
+    let ride = |m: &str| shell(&["--track", "free06", "--mods", m, "--play", tape, "--frames", "600", "--steady-clock"]);
     let Some((ok, with)) = ride(mods_arg) else { return };
     assert!(ok, "\n{with}");
     assert!(!with.contains("mods: "), "a disc ride read the mods:\n{with}");
@@ -463,7 +463,7 @@ fn a_one_level_terrain_is_256_samples_a_side() {
     good_of(&mods.join("tracks"), "md12_onelevel", 1);
     let tape = throttle_tape(150);
     let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
-    let Some((ok, said)) = shell(&["--track", "md12_onelevel", "--mods", mods_arg, "--play", tape, "--seconds", "20"]) else { return };
+    let Some((ok, said)) = shell(&["--track", "md12_onelevel", "--mods", mods_arg, "--play", tape, "--frames", "600", "--steady-clock"]) else { return };
     assert!(ok, "the one-level mod did not ride:\n{said}");
     println!("{said}");
     assert!(line(&said, "MD2 Flat: 0 props, 1 collision shapes").contains("ground 1020 x 1020 feet in 256 x 256 samples"), "\n{said}");
@@ -632,7 +632,7 @@ fn a_mod_maps_spawn_is_its_start() {
     let mods = mods_folder("spawn");
     let tape = spawn_tape("spawn", 150, 60);
     let (mods_arg, tape) = (mods.to_str().unwrap(), tape.to_str().unwrap());
-    let Some((ok, said)) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--seconds", "20"]) else { return };
+    let Some((ok, said)) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape, "--frames", "600", "--steady-clock"]) else { return };
     assert!(ok, "the mod did not ride:\n{said}");
     let (start, end) = (spot(line(&said, "start: ")), spot(line(&said, "end: ")));
     // Across the ground: the start line gives the placement's height, and the bike settles onto the
@@ -643,7 +643,7 @@ fn a_mod_maps_spawn_is_its_start() {
     assert!(off < 3.0, "Up on the spawn did not go back to the mod's start:\n{said}");
     // And without the Up the same throttle is far off up the map.
     let gone = spawn_tape("spawn-gone", 150, 0);
-    let (_, said) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", gone.to_str().unwrap(), "--seconds", "20"]).unwrap();
+    let (_, said) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", gone.to_str().unwrap(), "--frames", "600", "--steady-clock"]).unwrap();
     assert!(spot(line(&said, "end: "))[2] - start[2] > 100.0, "\n{said}");
 }
 
@@ -675,7 +675,7 @@ fn a_mod_map_has_the_biplane_with_no_machine_txt() {
     text += "switch 60 biplane\nswitch 180 bike\n";
     let tape = mods.parent().unwrap().join("switching.tape");
     std::fs::write(&tape, text).unwrap();
-    let (ok, said) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape.to_str().unwrap(), "--seconds", "9"]).unwrap();
+    let (ok, said) = shell(&["--track", "md2_flat", "--mods", mods_arg, "--play", tape.to_str().unwrap(), "--frames", "270", "--steady-clock"]).unwrap();
     assert!(ok, "\n{said}");
     let switched: Vec<&str> = said.lines().filter(|l| l.starts_with("vehicle: ")).collect();
     assert_eq!(switched, ["vehicle: bike", "vehicle: biplane", "vehicle: bike"], "\n{said}");
