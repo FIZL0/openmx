@@ -434,6 +434,12 @@ impl Online {
         self.net.host()
     }
 
+    /// How many ticks the session has run: what `--frames` counts online, where a frame spent
+    /// waiting for a peer (still loading, or a stall for its pads) runs none.
+    pub fn ticks(&self) -> u64 {
+        self.net.tick() as u64
+    }
+
     /// The set this ride rides `m` as: each seat its own row from the lobby (P134), 1P's for every
     /// seat otherwise.
     pub fn set_of(&self, m: &game_sim::modifiers::Mods) -> game_sim::modifiers::Mods {
