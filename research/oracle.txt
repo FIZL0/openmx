@@ -6857,3 +6857,28 @@ car_tire_add_drive          boot 0x0039b660 (tire, torque in f12): tire +0x1f0 +
 #   its bottom one smooth_noise. (S149a's journal calls +0x104 throttle and +0x108 a gear word: they are
 #   the cursor's index and weight.)
 car_shift_sound             boot 0x003a6070 (sound, 0): what the shift calls with the engine's +0x13c on a shift
+
+# S149d — the car's controls and its once-a-frame steps (MXCar.cpp), research/journal/*-s149d-car-step.
+# Ported as game_sim::car::{Controls, travel_cofg, hold_yaw_rate}; tests/car_step.rs runs each against the
+# original on the S149a switched images (car 0x00605270) over every captured row and generated inputs.
+# The car's listeners (vtable 0x0045cf80 buggy/baja, 0x0045ed50 truck): preforce +0x90 -> 0x00397500,
+# force +0x94 -> 0x003a02f0 then the tire pass +0x9c -> 0x00397f40 every substep.
+car_input                   boot 0x00396490 (steer f12, lean f13, car, pad, player): the pad into the car,
+#                                           vtable +0x20. Commands 0xe gas (analog below +0x40c or past
+#                                           +0x410 side slip), 0xf brake, 0x16 hand brake, 0x10 clutch,
+#                                           0/1 d-pad steer (+0x4b4), 2/3 lean; +0x3e8 = pad +0x31c.
+car_controls                boot 0x00396870 (dt f12, car): vtable +0x1a0, from the preforce. Steer rate
+#                                           limits and tables, rear steer, brake/gas limits, both pedals
+#                                           = reverse, hand brake friction/fade/yaw limit.
+car_cofg_travel             boot 0x00397390 (car): vtable +0x1a8, from the preforce. Lean slides body
+#                                           +0x180's z; body +0x50/+0x60 move by the turned change.
+car_preforce                boot 0x00397500 (dt, car): body preforce, controls, cofg travel, tires'
+#                                           contacts cleared (0x0039af70), contact sort (0x00397120), the
+#                                           four ground probes (0x0039b090), front tires' +0xc4.
+car_measure                 boot 0x00398150 (dt, car): every substep. Yaw rate (body +0x1b4) held to
+#                                           +0x540, engine shift, landing, speed +0x55c, local velocity
+#                                           +0x580 and rate +0x570, the angles +0x560/+0x564.
+car_force                   boot 0x003a02f0 (dt, car): measure, then vtable +0x2e0 (buggy/baja
+#                                           0x0039edb0, truck 0x003e07b0), 0x0039ed00, 0x0039e9c0,
+#                                           0x0039e850.
+car_preload                 boot 0x00397c60 (dt, car): the held jump; reads |+0x3e8| and the lean.

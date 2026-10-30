@@ -778,6 +778,17 @@ pub struct Drawn {
     /// What choosing the ground's chunks and writing their indices took on the CPU, over every view
     /// (MD28): the share of a frame's draw that is the ground's.
     pub ground_time: std::time::Duration,
+    /// Triangles sent for each of a view's actors, in [`View::actors`]' order (P212a): 0 for one
+    /// whose model never reached the GPU or that is wholly see-through, so a shell can say a rider
+    /// was left out of the picture.
+    pub actors: Vec<Vec<usize>>,
+}
+
+impl Drawn {
+    /// The triangles view `v`'s actor `i` drew, 0 for one it does not have.
+    pub fn actor(&self, v: usize, i: usize) -> usize {
+        self.actors.get(v).and_then(|a| a.get(i)).copied().unwrap_or(0)
+    }
 }
 
 /// Where a frame goes: a texture view, how big that texture is, and where in it the frame sits.
@@ -3494,6 +3505,7 @@ impl Renderer {
             ground_visits: 0,
             props: 0,
             ground_time: std::time::Duration::ZERO,
+            actors: views.iter().map(|v| vec![0; v.actors.len()]).collect(),
         };
         self.scratch.clear();
         let mut origins = Vec::with_capacity(passes.len());
@@ -3609,6 +3621,8 @@ impl Renderer {
                 };
                 let key = ((p as u64) << 48) | ((m as u64) << 16) | group.min(0xffff) as u64;
                 self.scratch.push((key, ghost, InstanceRaw { m: a.at.0, palette, cover: 1.0 }));
+                // Every run of its group is drawn once, solid or see-through, as the passes below do.
+                drawn.actors[v][i] += model.group(group).iter().map(|r| (r.count / 3) as usize).sum::<usize>();
                 if ghost == 0 {
                     let row = |r: usize| v3(a.at.0[r][0], a.at.0[r][1], a.at.0[r][2]);
                     let radius = model.radius * row(0).len().max(row(1).len()).max(row(2).len());
@@ -5600,6 +5614,39 @@ mod tests {
         }
         assert!(changed > 500, "the board covered {changed} pixels");
         assert!(halfway as f32 > 0.95 * changed as f32, "only {halfway} of {changed} pixels are halfway");
+    }
+
+    /// P212a: each actor's own triangles, in the view's order — the board's every triangle drawn, and
+    /// 0 for one whose model was never loaded and for one at alpha 0 — and the view's total counts the
+    /// solid board alone.
+    #[test]
+    fn each_actor_counts_its_own_triangles() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        let (mut scene, assets, camera) = known_scene();
+        let board_tris = assets.models["board"].model.triangles(0).len();
+        let board = scene.models.remove(0);
+        scene.models.clear();
+        let at = M4::placement(board.pos, board.look, board.up);
+        let (w, h) = (64u32, 48u32);
+        let light = Lighting::of(&scene);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        let texture = gpu.offscreen(w, h);
+        let view = texture.create_view(&Default::default());
+        let actor = |model, alpha| Actor { model, at, pose: None, lod_from: None, alpha };
+        let actors = [actor("board", 1.0), actor("no such model", 1.0), actor("board", 0.0)];
+        let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &actors }];
+        let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+        let drawn = gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+        assert_eq!(drawn.actors, vec![vec![board_tris, 0, 0]]);
+        assert_eq!((drawn.actor(0, 0), drawn.actor(0, 3), drawn.actor(1, 0)), (board_tris, 0, 0));
+        assert!(board_tris > 0 && drawn.triangles[0] >= board_tris);
     }
 
     /// The backdrop crossfades between two skies by the second's share (MD26), a missing one is the

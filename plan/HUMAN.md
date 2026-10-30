@@ -336,3 +336,11 @@ The store's dataset card is up (https://huggingface.co/datasets/FIZL0/openmx-mod
    Optionally write the listing's index afterwards: `cargo run --release -p openmx -- --mod-store-admin index`.
 
 If an upload says "not uploaded: …", the line names the file or check that failed (the same checks Install runs).
+
+## A bike but no rider on the iPhone (P212a, P223)
+
+The 2026-10-28 launch that drew a bike with nobody on it lost its log. A build with P212a now says
+` (no rider drawn)` at the end of the ride's line a second while seat 0's bike is drawn and its rider is not,
+and P212 logs the GPU's own errors (`gpu error: …`). Next time it happens: quit, launch once more (the app
+keeps the launch before's log as Documents/openmx-log-previous.txt), and send that file and openmx-log.txt
+back — LocalSend into the repo's context/ is fine — then name the files in P223 (`./kit plan P223`).

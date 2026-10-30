@@ -1477,3 +1477,280 @@ impl Drivetrain {
         self.pitch = Acc::adda(F::ZERO, lo).madd(t, hi - lo).max(lo.min(hi)).min(lo.max(hi));
     }
 }
+
+// --- the controls ------------------------------------------------------------------------------------
+//
+// Once a frame, in the vehicle's input step, the pad's commands land in the car as plain values
+// ([`Controls::input`]). Then the dynamics world's preforce listener runs the controls step
+// ([`Controls::step`]) on the frame's `dt`: the steer through its rate limit and the speed's steer
+// table, the rear steer, the brakes and gas through theirs, the clutch, the hand brake's friction and
+// its fade, and the yaw rate limit the measure holds the body to ([`hold_yaw_rate`]). Both pedals held
+// at once is the original's reverse: the step hands the gearbox the request ([`Reverse`]) and the
+// caller puts the box in or out of it.
+
+/// The car's pad state and what its controls make of it. The offsets are the car object's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Controls {
+    /// +0x4ac: someone is driving. Without a driver the step clears every control.
+    pub driven: bool,
+    /// +0x4b0: the file's `SquareSteeringInput`, as the car keeps it.
+    pub square_steering: bool,
+    /// +0x4b8, +0x4bc: the stick's steer and lean as the input step was handed them, the d-pad's ±1
+    /// written over them. Squared steering squares the steer in place, in the step.
+    pub stick: F,
+    pub lean: F,
+    /// +0x4b4: the d-pad steered last. Set by a d-pad press; only a stick to the right clears it.
+    pub dpad: bool,
+    /// +0x3e8: a word of the pad record (+0x31c) the input step copies in; the preload reads its size.
+    pub pad_word: F,
+    /// +0x3e0 gas, +0x3dc brake, +0x3e4 clutch, +0x3fc hand brake: the pedals as pressed.
+    pub gas: F,
+    pub brake: F,
+    pub clutch: F,
+    pub hand_brake: F,
+    /// +0x4c0: the steer after its rate limit.
+    pub steer_input: F,
+    /// +0x400, +0x404: the steer angles the front and the rear tires read.
+    pub steer: F,
+    pub rear_steer: F,
+    /// +0x3f4, +0x3f8: the brakes the front and the rear tires read.
+    pub front_brake: F,
+    pub rear_brake: F,
+    /// +0x3ec: the gas after its rate limit, the engine's throttle.
+    pub throttle: F,
+    /// +0x3f0: the clutch as the engine reads it.
+    pub engaged_clutch: F,
+    /// +0x428: what is left of the hand brake's fade.
+    pub hand_brake_fade: F,
+    /// +0x540: the yaw rate the measure holds the body to.
+    pub yaw_rate_limit: F,
+    /// The rear tires' friction scale (each rear's +0x9b4), which the hand brake lowers.
+    pub rear_friction: F,
+}
+
+/// The gearbox move the controls ask for on their way through: the original calls the engine's
+/// reverse switch from the middle of the step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reverse {
+    /// Both pedals down: into reverse, first gear's ratio negated.
+    In,
+    /// Out of reverse, into first.
+    Out,
+}
+
+/// The throttle both pedals together hold the car to while it reverses.
+const REVERSE_THROTTLE: f32 = f32::from_bits(0x3ecc_cccd);
+/// The speed over which the hand brake's brake scale comes in, feet per second.
+const HAND_BRAKE_SPEED: f32 = 10.0;
+/// The hand brake's command (Circle by default), which the bindings have no name for.
+const HAND_BRAKE: crate::bindings::Command = crate::bindings::Command(0x16);
+
+/// `now` moved toward `want` by at most `rate`: the original's max/min pair, then the add.
+fn rate_limit(now: F, want: F, rate: F) -> F {
+    now + (want - now).max(-rate).min(rate)
+}
+
+/// A pedal through its rate limit: it rises no faster than `rate`, and drops at once.
+fn pedal(now: F, want: F, rate: F) -> F {
+    if want <= now { want } else { rate_limit(now, want, rate) }
+}
+
+/// A three-point `(speed, scale)` table at `speed`: the first segment below the second point's
+/// speed, the second at or above it, each clamped to its ends; a segment with no length is its
+/// first scale.
+fn steer_scale(table: &[[F; 2]; 3], speed: F) -> F {
+    let [a, b, c] = *table;
+    if speed < b[0] {
+        crate::motion::remap(speed, a[0], b[0], a[1], b[1])
+    } else {
+        crate::motion::remap(speed, b[0], c[0], b[1], c[1])
+    }
+}
+
+impl Controls {
+    /// The car as built: no pedals, the brakes released (1 is "no brake" only until the first step
+    /// writes them), the yaw limit the file's.
+    pub fn new(car: &Car) -> Controls {
+        Controls {
+            driven: false,
+            square_steering: car.joystick.square_steering_input != 0,
+            stick: F::ZERO,
+            lean: F::ZERO,
+            dpad: false,
+            pad_word: F::ZERO,
+            gas: F::ZERO,
+            brake: F::ZERO,
+            clutch: F::ZERO,
+            hand_brake: F::ZERO,
+            steer_input: F::ZERO,
+            steer: F::ZERO,
+            rear_steer: F::ZERO,
+            front_brake: F::ONE,
+            rear_brake: F::ONE,
+            throttle: F::ZERO,
+            engaged_clutch: F::ZERO,
+            hand_brake_fade: F::ZERO,
+            yaw_rate_limit: car.yaw_rate_limit,
+            rear_friction: F::ONE,
+        }
+    }
+
+    /// The vehicle's input step: the stick, the pad word, and each pedal's command. `speed` is the
+    /// measure's speed (+0x55c) and `side_slip` its sideways angle (+0x564): slow, or sliding past
+    /// `DigitalSideSlipAngle`, the gas is the button's pressure over `MaxAnalogThrottle`; otherwise
+    /// any press is the whole pedal. `value` is a command's strength on the player's pad
+    /// ([`crate::bindings::Table::value`]).
+    pub fn input(
+        &mut self,
+        car: &Car,
+        stick: (F, F),
+        pad_word: F,
+        speed: F,
+        side_slip: F,
+        value: impl Fn(crate::bindings::Command) -> F,
+    ) {
+        use crate::bindings::Command;
+        let j = &car.joystick;
+        (self.stick, self.lean) = stick;
+        self.pad_word = pad_word;
+        let gas = value(Command::GAS);
+        self.gas = if speed <= j.digital_throttle_speed || j.digital_side_slip_angle <= side_slip.abs() {
+            let max = j.max_analog_throttle;
+            if max != 0.0 { crate::motion::remap(gas, F::ZERO, max, F::ZERO, F::ONE) } else { F::ZERO }
+        } else if gas > 0.0 {
+            F::ONE
+        } else {
+            F::ZERO
+        };
+        self.brake = if value(Command::BRAKE) > 0.0 { F::ONE } else { F::ZERO };
+        self.hand_brake = if value(HAND_BRAKE) > 0.0 { F::ONE } else { F::ZERO };
+        self.clutch = if value(Command::CLUTCH) == 0.0 { F::ZERO } else { F::ONE };
+        if value(Command::LEFT) != 0.0 {
+            self.stick = F(-1.0);
+            self.dpad = true;
+        } else if value(Command::RIGHT) != 0.0 {
+            self.stick = F::ONE;
+            self.dpad = true;
+        } else if self.stick > 0.0 {
+            self.dpad = false;
+        }
+        if value(Command::UP) != 0.0 {
+            self.lean = F(-1.0);
+        } else if value(Command::DOWN) != 0.0 {
+            self.lean = F::ONE;
+        }
+    }
+
+    /// The controls step, once a frame. `wheel` is a steering wheel on the driver's controller (the
+    /// wheel's table, no rate limit); `speed` the car's forward speed in its own frame (+0x588) and
+    /// `ground_speed` the measure's speed (+0x55c); `reversing` the gearbox's reverse flag.
+    pub fn step(&mut self, car: &Car, dt: F, wheel: bool, speed: F, ground_speed: F, reversing: bool) -> Option<Reverse> {
+        let j = &car.joystick;
+        if !self.driven {
+            self.stick = F::ZERO;
+            self.lean = F::ZERO;
+            self.pad_word = F::ZERO;
+            self.gas = F::ZERO;
+            self.brake = F::ZERO;
+            self.clutch = F::ZERO;
+            self.steer_input = F::ZERO;
+            self.throttle = F::ZERO;
+            self.steer = F::ZERO;
+            self.hand_brake = F::ZERO;
+            self.front_brake = F::ONE;
+            self.rear_brake = F::ONE;
+            self.yaw_rate_limit = car.yaw_rate_limit;
+            return Some(Reverse::Out);
+        }
+
+        let scale = if self.dpad {
+            let rate = if self.stick.abs() == 0.0 { j.x_dpad_rate_limit_off } else { j.x_dpad_rate_limit_on };
+            self.steer_input = rate_limit(self.steer_input, self.stick, rate * dt);
+            steer_scale(&j.dpad_steer, speed)
+        } else if wheel {
+            self.steer_input = self.stick;
+            steer_scale(&j.wheel_steer, speed)
+        } else {
+            if self.square_steering {
+                let sign = if self.stick < 0.0 { -1 } else { 1 };
+                self.stick = self.stick * (self.stick * F::from(sign));
+            }
+            self.steer_input = rate_limit(self.steer_input, self.stick, j.x_axis_rate_limit * dt);
+            steer_scale(&j.steer, speed)
+        };
+        self.steer = scale * self.steer_input;
+        let [r1, r2] = j.rear_steer;
+        self.rear_steer = crate::motion::remap(speed, r1[0], r2[0], r1[1], r2[1]) * self.steer;
+
+        let mut reverse = None;
+        if self.gas == 0.0 || self.brake == 0.0 {
+            if reversing {
+                reverse = Some(Reverse::Out);
+            }
+            self.front_brake = pedal(self.front_brake, self.brake, j.brake_rate_limit * dt);
+            self.rear_brake = self.front_brake;
+        } else {
+            reverse = Some(Reverse::In);
+            self.front_brake = F::ZERO;
+            self.rear_brake = F::ZERO;
+            self.gas = F(REVERSE_THROTTLE);
+        }
+        self.throttle = pedal(self.throttle, self.gas, j.gas_rate_limit * dt);
+        self.engaged_clutch = self.clutch;
+
+        if self.hand_brake == 0.0 {
+            if self.hand_brake_fade > 0.0 {
+                self.rear_friction = crate::motion::remap(
+                    self.hand_brake_fade,
+                    F::ZERO,
+                    car.hand_brake_fade_time,
+                    F::ONE,
+                    car.hand_brake_friction_scale,
+                );
+                self.hand_brake_fade = self.hand_brake_fade - dt;
+            } else {
+                self.rear_friction = F::ONE;
+                self.yaw_rate_limit = car.yaw_rate_limit;
+            }
+        } else {
+            self.rear_friction = car.hand_brake_friction_scale;
+            self.yaw_rate_limit = car.hand_brake_yaw_rate_limit;
+            self.rear_brake = crate::motion::remap(
+                ground_speed,
+                F::ZERO,
+                F(HAND_BRAKE_SPEED),
+                F::ONE,
+                car.hand_brake_brake_scale,
+            );
+            self.hand_brake_fade = car.hand_brake_fade_time;
+        }
+        reverse
+    }
+}
+
+/// The measure's first act each substep: the body's yaw rate (its body-frame `y`) held to the
+/// controls' limit, keeping its sign.
+pub fn hold_yaw_rate(rates: &mut Vf, limit: F) {
+    let y = F(rates.y());
+    if limit < y.abs() {
+        let sign = if y < 0.0 { -1 } else { 1 };
+        rates.0[1] = (limit * F::from(sign)).0;
+    }
+}
+
+/// The centre of mass moved by the lean, once a frame before the world steps: the class's `CofG`
+/// (the AI's `CofGAI` for a car no human drives) slid back along `z` by `CofGTravelForward` times a
+/// forward lean or `CofGTravelBack` times a back one; the body's position (and its last position)
+/// then moves by the change, turned into the world, so the car itself stays put. `last` is the
+/// centre the last frame left (car +0x250), and comes back as this frame's.
+pub fn travel_cofg(car: &Car, body: &mut crate::biplane::Body, last: &mut Vf, human: bool, lean: F) {
+    let mut cofg = if human { car.mass_properties.cofg } else { car.cofg_ai };
+    let travel = if lean < 0.0 { car.cofg_travel_forward } else { car.cofg_travel_back };
+    cofg.0[2] = (F(cofg.z()) + (-travel) * lean).0;
+    body.cofg = cofg;
+    let delta = cofg.merge(Dest::XYZ, cofg.sub(*last));
+    let moved = crate::chassis::turn(body.quat, delta);
+    body.position = body.position.merge(Dest::XYZ, body.position.add(moved));
+    body.last_position = body.last_position.merge(Dest::XYZ, body.last_position.add(moved));
+    *last = cofg;
+}
