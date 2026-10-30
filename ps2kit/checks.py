@@ -32,7 +32,7 @@ import shlex
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from ps2kit.config import cfg, ROOT
@@ -217,13 +217,34 @@ NOTES: list[str] = []
 
 
 def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False) -> int:
+    """`_run_shown`, with every window the tests open on a private headless display (gate.toml `[display]`)
+    instead of the desktop's compositor, and a note when that compositor's GPU memory grew over the run.
+
+    K16 (2026-10-30): Hyprland held 105 GiB of GTT after ten days of runs and the kernel OOM-killed the runner.
+    The note reads the whole desktop, so other slots' work beside this run counts in it too."""
+    from ps2kit import cargo_gate
+    d = cargo_gate.gate_config(cwd).get('display') or {}
+    before = plat.compositor_gtt_mib()
+    shown = plat.PrivateDisplay(str(d.get('size', '1920x1080'))) if d.get('private') else None
+    with shown or nullcontext({}) as denv:
+        rc = _run_shown(cmd, extra, cwd, log, {**(env or {}), **denv}, all_slow)
+    if shown and not denv:
+        NOTES.append(f'test windows went to the desktop\'s display: no private one ({shown.why})')
+    grew = {k: v - before.get(k, 0.0) for k, v in plat.compositor_gtt_mib().items()}
+    if big := {k: g for k, g in grew.items() if g > float(d.get('grew_mib', 1024))}:
+        NOTES.append('the desktop compositor\'s GPU memory grew over this run: ' +
+                     ', '.join(f'{k} +{g:.0f} MiB' for k, g in big.items()) + ' (K16; ~/.local/state/gtt-watch.log)')
+    return rc
+
+
+def _run_shown(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False) -> int:
     """Run a configured command with the extra args appended, everything into `log`."""
     jobs = _jobs()
     if '{jobs}' in cmd:
         cmd = cmd.replace('{jobs}', str(jobs))
     full = cmd + (' ' + ' '.join(shlex.quote(a) for a in extra) if extra else '')
-    e = {**os.environ, 'KIT_JOBS': str(jobs), 'RUST_TEST_THREADS': os.environ.get('RUST_TEST_THREADS', str(jobs)),
-         'CARGO_BUILD_JOBS': os.environ.get('CARGO_BUILD_JOBS', str(jobs)), **(env or {})}
+    e = plat.with_env({**os.environ, 'KIT_JOBS': str(jobs), 'RUST_TEST_THREADS': os.environ.get('RUST_TEST_THREADS', str(jobs)),
+         'CARGO_BUILD_JOBS': os.environ.get('CARGO_BUILD_JOBS', str(jobs))}, env or {})
     from ps2kit import cargo_gate
     NOTES.clear()
     if cargo_gate.applies(cmd, extra):

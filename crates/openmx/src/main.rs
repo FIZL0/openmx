@@ -2992,7 +2992,10 @@ async fn loading_frame(
             back |= more.iter().any(|(_, p)| p.back);
         }
     }
-    back |= std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n);
+    // Only once a [`loading::HOLD`] holds the load: under a busy machine's load ten frames went by before the
+    // build reached the stage it holds at, and the press cancelled it short of there (K16).
+    let held = progress.held() || std::env::var(loading::HOLD).is_err();
+    back |= held && std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n);
     if let Some(l) = &mut front.menu.loading {
         l.done = progress.done();
         l.stage = progress.line();
