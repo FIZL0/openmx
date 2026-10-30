@@ -10,7 +10,7 @@
 //! checks: every entry a plain path inside the mod with a data extension ([`EXTENSIONS`]), no link,
 //! no duplicate, the counts and sizes measured while inflating ([`MAX_ENTRIES`], [`MAX_FILE`],
 //! [`MAX_TOTAL`]), its `mod.json` the store's id and kind, and on the desktop the staged copy read by
-//! the shell's own parsers for its kind (`track_mods`, `worlds`, `trick_packs`). Only then does it go
+//! the shell's own parsers for its kind (`track_mods`, `worlds`, `trick_packs`, `textures`). Only then does it go
 //! into `mods/<kind>/<id>/`, with `store.json` beside it ([`Stamp`]). A refused mod leaves nothing.
 //!
 //! Network work runs off the frame — a thread a job on the desktop, the page's event loop in the
@@ -75,13 +75,18 @@ pub enum Kind {
     World,
     Tricks,
     Music,
+    /// P230: a texture pack (`textures.rs`): key-named PNGs under its `textures/`, drawn over the
+    /// disc's on this machine only.
+    Textures,
     /// One this build does not know: listed on no tab, never installed.
     #[serde(other)]
     Other,
 }
 
 /// Browse's tabs, by [`Kind::tab`].
-pub const TABS: [&str; 3] = ["Tracks", "Trick Packs", "Music"];
+pub const TABS: [&str; 4] = ["Tracks", "Trick Packs", "Music", "Texture Packs"];
+/// The kinds' folders under `mods/`, by [`Kind::folder`].
+pub const FOLDERS: [&str; 4] = ["tracks", "tricks", "music", "textures"];
 
 impl Kind {
     /// Its folder under `mods/`.
@@ -90,6 +95,7 @@ impl Kind {
             Kind::Track | Kind::World => Some("tracks"),
             Kind::Tricks => Some("tricks"),
             Kind::Music => Some("music"),
+            Kind::Textures => Some("textures"),
             Kind::Other => None,
         }
     }
@@ -101,6 +107,7 @@ impl Kind {
             Kind::World => "world",
             Kind::Tricks => "tricks",
             Kind::Music => "music",
+            Kind::Textures => "textures",
             Kind::Other => "",
         }
     }
@@ -111,6 +118,7 @@ impl Kind {
             Kind::Track | Kind::World => Some(0),
             Kind::Tricks => Some(1),
             Kind::Music => Some(2),
+            Kind::Textures => Some(3),
             Kind::Other => None,
         }
     }
@@ -586,7 +594,7 @@ pub fn check_mod_json(b: &[u8], meta: &Meta) -> Result<(), String> {
 
 /// The staged copy in `stage` (its `<kind folder>/<id>/`) read the way the shell reads its kind, as
 /// hostile input: a track's mod.json and its one scene, a world's pieces, a trick pack's tables, a
-/// music pack's listing. The browser's build has none of the shell's mods readers, and checks the zip
+/// music pack's listing, a texture pack's key-named PNGs. The browser's build has none of the shell's mods readers, and checks the zip
 /// and `mod.json` alone.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_check(stage: &Path, kind: Kind, id: &str) -> Result<(), String> {
@@ -595,6 +603,7 @@ pub fn parse_check(stage: &Path, kind: Kind, id: &str) -> Result<(), String> {
         Kind::World => crate::worlds::find(stage, id).map(|_| ()),
         Kind::Tricks => crate::trick_packs::by_id(stage, id).map(|_| ()),
         Kind::Music => track_mods::music_packs(stage).iter().any(|p| p.0 == id).then_some(()).ok_or_else(|| "not a music pack the shell reads".into()),
+        Kind::Textures => crate::textures::pack_at(&stage.join("textures").join(id), &format!("textures/{id}")).map(|_| ()),
         Kind::Other => Err("a kind this build does not know".into()),
     }
 }
@@ -925,7 +934,7 @@ impl Store {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut out = Vec::new();
-            for folder in ["tracks", "tricks", "music"] {
+            for folder in FOLDERS {
                 let Ok(list) = std::fs::read_dir(self.mods.join(folder)) else { continue };
                 for e in list.flatten() {
                     if let Some(s) = std::fs::read(e.path().join(STAMP)).ok().and_then(|b| serde_json::from_slice::<Stamp>(&b).ok()) {
@@ -970,7 +979,7 @@ impl Store {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut out = Vec::new();
-            for folder in ["tracks", "tricks", "music"] {
+            for folder in FOLDERS {
                 let Ok(list) = std::fs::read_dir(self.mods.join(folder)) else { continue };
                 for e in list.flatten() {
                     if !e.path().join(STAMP).exists() && let Ok(id) = e.file_name().into_string() {

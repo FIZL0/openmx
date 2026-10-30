@@ -53,7 +53,7 @@ mod track_mods;
 
 
 use game_sim::input::{Control, Report};
-use menu::{Card, Controls, Got, Listed, Menu, Phase, Posted, Reader, STORE_PAGES, STORE_TABS, Screen, Settings, StoreAsk, UPLOAD_TAB, Upload};
+use menu::{Card, Controls, Got, Listed, Menu, PACKS_TAB, PackRow, Phase, Posted, Reader, STORE_PAGES, STORE_TABS, Screen, Settings, StoreAsk, TEXTURES_TAB, UPLOAD_TAB, Upload};
 
 /// One press and release of `control`, at a hand's pace (P109).
 fn tap(menu: &mut Menu, reader: &mut Reader, control: Control) {
@@ -143,7 +143,12 @@ fn the_store_screen_walks_and_asks() {
     assert_eq!(m.take_store_asks(), [], "nothing lit, nothing asked");
     tap(&mut m, &mut reader, Control::R1);
     assert_eq!((m.store.tab, lit(&m).as_deref()), (2, Some("b/m0")));
-    // past Music, P199's Upload and My Mods pages, then round to Tracks
+    // past Music, P230's Texture Packs and Pack Order, P199's Upload and My Mods pages, then round to Tracks
+    tap(&mut m, &mut reader, Control::R1);
+    assert_eq!((m.store.tab, STORE_TABS[m.store.tab], lit(&m)), (TEXTURES_TAB, "Texture Packs", None));
+    tap(&mut m, &mut reader, Control::R1);
+    assert_eq!(m.store.tab, PACKS_TAB);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Packs], "Pack Order reads the mods folder's packs");
     tap(&mut m, &mut reader, Control::R1);
     assert_eq!(m.store.tab, UPLOAD_TAB);
     assert_eq!(m.take_store_asks(), [StoreAsk::Locals], "Upload reads the player's mods");
@@ -280,4 +285,55 @@ fn the_upload_and_my_mods_pages_ask_only_when_they_may() {
     assert_eq!(m.take_store_asks(), []);
     tap(&mut m, &mut reader, Control::Circle);
     assert_ne!(m.screen(), Some(Screen::Store));
+}
+
+/// P230: Pack Order: Cross turns the lit pack off and on, Left and Right move it up and down the stack
+/// with the cursor, each written at once as settings.txt's lines (every pack in `texture_packs`, top
+/// first; the off ones in `texture_packs_off`), and saved; Start reads the folder again; nothing under
+/// `--mods off`.
+#[test]
+fn pack_order_switches_and_moves_packs() {
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    m.step(reader.read(&Report::idle()));
+    m.open(Screen::Store);
+    m.store_tab(PACKS_TAB);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Packs]);
+    let row = |f: &str| PackRow { folder: f.into(), name: f.into(), textures: 3, on: true };
+    m.store.packs = vec![row("textures/a"), row("textures/b"), row("c")];
+    let lines = |m: &Menu| (m.settings.texture_packs.join(","), m.settings.texture_packs_off.join(","));
+    let _ = m.take_changed();
+
+    tap(&mut m, &mut reader, Control::Down);
+    tap(&mut m, &mut reader, Control::Cross);
+    assert!(!m.store.packs[1].on);
+    assert_eq!(lines(&m), ("textures/a,textures/b,c".into(), "textures/b".into()));
+    assert!(m.take_changed(), "saved at once");
+    // Left: up the stack, the cursor with it; Left on top stays
+    tap(&mut m, &mut reader, Control::Left);
+    assert_eq!(lines(&m), ("textures/b,textures/a,c".into(), "textures/b".into()));
+    tap(&mut m, &mut reader, Control::Left);
+    assert_eq!(lines(&m).0, "textures/b,textures/a,c");
+    tap(&mut m, &mut reader, Control::Cross);
+    assert_eq!(lines(&m), ("textures/b,textures/a,c".into(), String::new()), "the lit one, on top, back on");
+    // Right: down to the bottom, and no further
+    for _ in 0..3 {
+        tap(&mut m, &mut reader, Control::Right);
+    }
+    assert_eq!(lines(&m).0, "textures/a,c,textures/b");
+    assert_eq!(m.cursor(Screen::Store), 2);
+    // Start reads them again; Square, Triangle and Select do nothing here
+    tap(&mut m, &mut reader, Control::Start);
+    for c in [Control::Square, Control::Select] {
+        tap(&mut m, &mut reader, c);
+    }
+    assert_eq!(m.take_store_asks(), [StoreAsk::Packs]);
+    // the settings file carries both lines back
+    let back = Settings::parse(&m.settings.text());
+    assert_eq!((back.texture_packs, back.texture_packs_off), (m.settings.texture_packs.clone(), m.settings.texture_packs_off.clone()));
+
+    let mut off = Menu::new(Settings::default(), Controls::default());
+    off.store.off = true;
+    off.store_tab(PACKS_TAB);
+    assert_eq!(off.take_store_asks(), [], "no mods folder, no packs to read");
 }

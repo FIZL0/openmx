@@ -6,7 +6,8 @@
 //! 0. **Texture packs**: mod folders under `mods/` whose `mod.json` says `"kind": "textures"`, with
 //!    key-named files (`<anything>-<key>.png`) anywhere under their `textures/`. They stack: a pack
 //!    nobody ordered is on top, then settings.txt's `texture_packs = a, b` (top first);
-//!    `texture_packs_off = c` turns one off. Named by their folder under `mods/`.
+//!    `texture_packs_off = c` turns one off. Named by their folder under `mods/`; the mod store installs
+//!    one into `mods/textures/<id>/` and its Pack Order page writes both lines (P230).
 //! 1. **Key-named files** in `mods/texture-replacements/` (any subfolder, or flat), matched by the part
 //!    of the name after the last `-`: your own, edited or upscaled, at any size, straight alpha.
 //! 2. **A PCSX2 texture pack** (V87): hash-named PNGs (`<tex>-<clut>-<bits>.png`, PCSX2's Dump
@@ -133,6 +134,55 @@ fn packs_saying(mods: &Path, order: &[String], off: &[String], say: bool) -> Vec
         .collect();
     all.sort_by_key(|p| order.iter().position(|n| *n == p.folder).map_or(0, |i| i + 1));
     all
+}
+
+/// P230: the texture pack in `dir`, named `folder`, read as [`packs`] reads one and checked as the mod
+/// store installs one (hostile input): its `mod.json` says textures, it holds a key-named file under
+/// `textures/`, and every such file is a PNG whose header reads. The pictures themselves decode when a
+/// ride first asks for them, as any pack's do.
+pub fn pack_at(dir: &Path, folder: &str) -> Result<Pack, String> {
+    if !is_pack(dir) {
+        return Err("its mod.json does not say \"kind\": \"textures\"".into());
+    }
+    let mut textures = HashMap::new();
+    walk(&dir.join("textures"), &mut textures);
+    if textures.is_empty() {
+        return Err("no textures: a pack holds textures/**/<name>-<key>.png files (--dump-textures names)".into());
+    }
+    let mut files: Vec<&PathBuf> = textures.values().collect();
+    files.sort();
+    for f in files {
+        let read = std::fs::File::open(f).map_err(|e| e.to_string()).and_then(|r| png::Decoder::new(std::io::BufReader::new(r)).read_info().map(|_| ()).map_err(|e| e.to_string()));
+        if let Err(why) = read {
+            let rel = f.strip_prefix(dir).unwrap_or(f).to_string_lossy().replace('\\', "/");
+            return Err(format!("{rel} is not a PNG that reads: {why}"));
+        }
+    }
+    Ok(Pack { folder: folder.to_string(), textures })
+}
+
+/// P230: one texture pack as the mod store's Pack Order page lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed {
+    /// Its folder under `mods/`, as `texture_packs` names it.
+    pub folder: String,
+    /// `mod.json`'s `name`, else the folder's.
+    pub name: String,
+    pub textures: usize,
+    pub on: bool,
+}
+
+/// P230: every texture pack under `mods` with a texture in it, top first as [`packs`] stacks them, the
+/// ones `off` turns off in their places too.
+pub fn listed(mods: &Path, order: &[String], off: &[String]) -> Vec<Listed> {
+    packs_saying(mods, order, &[], false)
+        .into_iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(mods.join(&p.folder).join("mod.json")).unwrap_or_default();
+            let name = Json::parse(&text).ok().and_then(|j| j.get("name").and_then(Json::str).map(|n| n.chars().filter(|c| !c.is_control()).take(48).collect::<String>()));
+            Listed { name: name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| p.folder.clone()), on: !off.contains(&p.folder), textures: p.textures.len(), folder: p.folder }
+        })
+        .collect()
 }
 
 /// What a ride's lookup found: each key's file from the packs and your own files (`files`), the PCSX2

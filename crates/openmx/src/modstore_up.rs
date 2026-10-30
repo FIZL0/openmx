@@ -179,7 +179,7 @@ pub fn local_of(dir: &Path, folder: &str) -> Option<Local> {
 pub fn locals(mods: &Path) -> Vec<Local> {
     let mut out: Vec<Local> = Vec::new();
     #[cfg(not(target_arch = "wasm32"))]
-    for folder in ["tracks", "tricks", "music"] {
+    for folder in super::FOLDERS {
         let Ok(list) = std::fs::read_dir(mods.join(folder)) else { continue };
         for e in list.flatten() {
             if e.path().is_dir() && !e.path().join(STAMP).exists() && let Some(l) = local_of(&e.path(), folder) {
@@ -414,14 +414,31 @@ pub fn package(_: &Path, _: &Local, _: &str) -> Result<Packed, String> {
 }
 
 /// A track's or world's picture as `preview.webp`: its own `previews/track.png`, else the shell's
-/// still of it, made at most [`super::PREVIEW_W`] wide; None for anything else, or past the cap.
+/// still of it (P230: a texture pack's [`pack_preview`]), made at most [`super::PREVIEW_W`] wide; None
+/// for anything else, or past the cap.
 #[cfg(not(target_arch = "wasm32"))]
 fn preview_of(mods: &Path, l: &Local) -> Option<Vec<u8>> {
+    if l.kind == Kind::Textures {
+        return pack_preview(&l.dir);
+    }
     if !matches!(l.kind, Kind::Track | Kind::World) {
         return None;
     }
     let png = std::fs::read(crate::track_previews::own(mods, &l.id)).or_else(|_| std::fs::read(crate::track_previews::still(mods, &l.id))).ok()?;
     webp_of(&png)
+}
+
+/// P230: a texture pack's picture: its own `preview.png`, else its biggest texture file.
+#[cfg(not(target_arch = "wasm32"))]
+fn pack_preview(dir: &Path) -> Option<Vec<u8>> {
+    let own = dir.join("preview.png");
+    let file = if own.is_file() {
+        own
+    } else {
+        let pack = crate::textures::pack_at(dir, "").ok()?;
+        pack.textures.into_values().max_by_key(|f| (std::fs::metadata(f).map_or(0, |m| m.len()), std::cmp::Reverse(f.clone())))?
+    };
+    webp_of(&std::fs::read(file).ok()?)
 }
 
 /// A picture (PNG or WebP) as a lossless WebP at most [`super::PREVIEW_W`] wide, within the cap.
