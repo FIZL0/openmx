@@ -1235,7 +1235,7 @@ fn replay_row(
 ) {
     let (frame, reason, x, z, rumbling, volume, song) = row;
     let before = edge.cannon();
-    let f = audio::EdgeFrame { armed: true, reason, edge: audio::edge_distance(FREE09, FREE09, [x, 0.0, z]) };
+    let f = audio::EdgeFrame { armed: true, reason, edge: audio::edge_distance(FREE09, FREE09, [false, false], [x, 0.0, z]) };
     edge.tick(m, sounds, &f);
     assert_eq!(edge.rumble().is_some_and(|id| m.playing(id)), rumbling, "the rumble at {frame}");
     if rumbling {
@@ -1274,7 +1274,7 @@ fn a_replayed_shootoff_booms_and_fades_the_music_as_the_original() {
     let mut m = Mixer::new(Music::new(Vec::new(), 1));
     m.music_volume = 0.7;
     for (x, rumbling) in [(300.0, true), (360.0, false)] {
-        let f = audio::EdgeFrame { armed: true, reason: 0, edge: audio::edge_distance(FREE09, FREE09, [x, 0.0, 3000.0]) };
+        let f = audio::EdgeFrame { armed: true, reason: 0, edge: audio::edge_distance(FREE09, FREE09, [false, false], [x, 0.0, 3000.0]) };
         edge.tick(&mut m, &sounds, &f);
         assert_eq!(edge.rumble().is_some(), rumbling, "at {x}");
         assert_eq!(m.music_gain().to_bits(), 0.52f32.to_bits(), "at {x}");
@@ -1291,12 +1291,73 @@ fn a_replayed_shootoff_booms_and_fades_the_music_as_the_original() {
 /// The query: nothing inside 350 ft of every edge, else the nearest edge of four.
 #[test]
 fn the_edge_is_asked_as_the_original_asks() {
-    assert_eq!(audio::edge_distance(FREE09, FREE09, [3456.0, 0.0, 3456.0]), None);
-    assert_eq!(audio::edge_distance(FREE09, FREE09, [350.0, 0.0, 6562.0]), None);
-    assert_eq!(audio::edge_distance(FREE09, FREE09, [349.0, 0.0, 3456.0]), Some(349.0));
-    assert_eq!(audio::edge_distance(FREE09, FREE09, [3000.0, 0.0, 6800.0]), Some(112.0));
-    assert_eq!(audio::edge_distance(FREE09, FREE09, [-10.0, 0.0, 200.0]), Some(-10.0));
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, false], [3456.0, 0.0, 3456.0]), None);
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, false], [350.0, 0.0, 6562.0]), None);
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, false], [349.0, 0.0, 3456.0]), Some(349.0));
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, false], [3000.0, 0.0, 6800.0]), Some(112.0));
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, false], [-10.0, 0.0, 200.0]), Some(-10.0));
     assert_eq!((audio::rumble_volume(350.0), audio::rumble_volume(150.0), audio::rumble_volume(-500.0)), (25, 100, 100));
+}
+
+/// **A wrapped world has seams, not an edge** (P231), as the throw has it: on a world wrapped on
+/// both axes the query is `None` at every seam, at the corners and past them; wrapped on one, the
+/// other's edges are asked alone; on an unwrapped map it is the four-edge query above.
+#[test]
+fn a_wrapped_world_asks_no_edge_at_its_seams() {
+    let xz = [true, true];
+    for x in [-400.0, -10.0, 0.0, 1.0, 149.0, 150.0, 349.0, 3456.0, 6563.0, 6762.0, 6911.0, 6912.0, 6920.0, 7300.0] {
+        for z in [-400.0, -10.0, 0.0, 1.0, 150.0, 349.0, 3456.0, 6600.0, 6912.0, 7300.0] {
+            assert_eq!(audio::edge_distance(FREE09, FREE09, xz, [x, 0.0, z]), None, "at ({x}, {z})");
+        }
+    }
+    // Wrapped on x alone: the x seams ask nothing, the z edges as before.
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [true, false], [0.0, 0.0, 3456.0]), None);
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [true, false], [6912.0, 0.0, 3456.0]), None);
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [true, false], [0.0, 0.0, 200.0]), Some(200.0));
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [true, false], [-30.0, 0.0, 6800.0]), Some(112.0));
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, true], [3456.0, 0.0, -30.0]), None);
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, true], [100.0, 0.0, -30.0]), Some(100.0));
+    // Unwrapped, every edge as the original asks it, the corners too.
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, false], [0.0, 0.0, 0.0]), Some(0.0));
+    assert_eq!(audio::edge_distance(FREE09, FREE09, [false, false], [6912.0, 0.0, 3456.0]), Some(0.0));
+
+    // Ridden on the gas along x over the seam and round again, 60 ft a tick: the music is never
+    // touched and no rumble starts. The same ride on the unwrapped map fades both ways.
+    let sounds = shootoff();
+    for (wrap, fades) in [(xz, false), ([false, false], true)] {
+        let mut m = Mixer::new(Music::new(Vec::new(), 1));
+        let mut edge = audio::EdgeSound::default();
+        let mut faded = false;
+        let mut x: f32 = 6000.0;
+        while x < 6912.0 + 1000.0 {
+            let at = if wrap[0] { x.rem_euclid(FREE09) } else { x.min(6900.0) };
+            let f = audio::EdgeFrame { armed: true, reason: 0, edge: audio::edge_distance(FREE09, FREE09, wrap, [at, 0.0, 3456.0]) };
+            edge.tick(&mut m, &sounds, &f);
+            faded |= m.music_edge.is_some() || edge.rumble().is_some();
+            if !fades {
+                assert_eq!((m.music_edge, edge.rumble()), (None, None), "at x {x}");
+            }
+            x += 60.0;
+        }
+        assert_eq!(faded, fades, "wrap {wrap:?}");
+    }
+}
+
+/// A world's holes (MD8) as the throw asks them: the least margin, in [`audio::HOLE_STEP`]s, at which
+/// `off_world` reaches one; none within [`audio::EDGE_WARNING`].
+#[test]
+fn a_hole_is_asked_by_the_margin_that_reaches_it() {
+    // A hole from x = 5000 on, as `off_world` asks the point and the four `m` from it.
+    let off = |x: f32| move |m: f32| x + m >= 5000.0;
+    assert_eq!(audio::hole_distance(off(4000.0)), None);
+    assert_eq!(audio::hole_distance(off(4650.0)), None);
+    assert_eq!(audio::hole_distance(off(4655.0)), Some(345.0));
+    assert_eq!(audio::hole_distance(off(4800.0)), Some(200.0));
+    assert_eq!(audio::hole_distance(off(4850.0)), Some(150.0));
+    assert_eq!(audio::hole_distance(off(5100.0)), Some(0.0));
+    assert_eq!(audio::hole_distance(|_| false), None);
+    // At the throw's margin the music is out and the rumble full, as at the outer edge.
+    assert_eq!((audio::music_scale(150.0), audio::rumble_volume(150.0)), (0.0, 100));
 }
 
 /// The whole of each capture of the original riding off an edge, when this checkout has them: every

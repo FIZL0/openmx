@@ -2992,7 +2992,7 @@ async fn loading_frame(
             back |= more.iter().any(|(_, p)| p.back);
         }
     }
-    back |= std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n);
+    back |= std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n && progress.may_cancel());
     if let Some(l) = &mut front.menu.loading {
         l.done = progress.done();
         l.stage = progress.line();
@@ -4175,6 +4175,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 );
             }
             let throttle = Controls { gas: F::ONE, ..Controls::default() };
+            let mut warned = false;
             for i in 0..frames {
                 let mut now = match args.trace_switch {
                     Some(n) if i < n => throttle.clone(),
@@ -4245,6 +4246,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // in a world it was shot off and a crash on the way is not mistaken for one.
                 if f.wreck == Some(game_sim::trick::Wreck::CANNONBALL) {
                     println!("thrown: tick {i} at {:.1}, {:.1}", p.x(), p.z());
+                }
+                // The shootoff's warning as the seat's sound asks it (P231): the first tick the
+                // music would start to fade and the rumble to rise.
+                if !warned && rider.edge_armed && f.wreck.is_none() {
+                    let c = rider.ride.chassis.cofg_world;
+                    if let Some(d) = sim_world::World::area(&sim).and_then(|a| audio::world_edge(a, &sim, c)) {
+                        println!("shootoff warning: tick {i} at {:.1}, {:.1}, {d:.1} ft from the edge", c.x(), c.z());
+                        warned = true;
+                    }
                 }
             }
             return Ok(Err(Leave::Quit));
@@ -7573,7 +7583,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let ears: Vec<audio::Listener> = cameras.iter().map(listener).collect();
                 sound.listen(&ears);
                 let area = sim_world::World::area(&world.place);
-                let frames: Vec<audio::SeatFrame> = world.seats.iter().map(|s| seat_sound(s, area)).collect();
+                let frames: Vec<audio::SeatFrame> = world.seats.iter().map(|s| seat_sound(s, area, &world.place)).collect();
                 // By the first seat's cars, which are the `.toy`'s as long as none was left out.
                 if !sound.toys.is_empty() && world.seats[0].sim.traffic.cars.len() == sound.toys.len() {
                     let cars: Vec<[f32; 3]> = world.seats[0].sim.traffic.cars.iter().map(|c| {
@@ -8775,15 +8785,14 @@ fn listener(c: &Camera) -> audio::Listener {
 
 /// What one seat's frame sounds like (P42): the hands and the engine on the bike, the rider's fall
 /// and landing, or the plane's engine note when the plane is up.
-fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>) -> audio::SeatFrame {
+fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim_world::World) -> audio::SeatFrame {
     let r = &seat.sim.rider.ride;
-    // The shootoff's (P85): the edge asked of the chassis' centre, as the throw asks it.
+    // The shootoff's (P85): the edge asked of the chassis' centre, as the throw asks it — none on a
+    // wrapped axis, whose edge is a seam (P231), and a world's holes as well as its rectangle (MD8).
     let c = r.chassis.cofg_world;
-    let edge = audio::EdgeFrame {
-        armed: area.is_some() && seat.sim.rider.edge_armed,
-        reason: seat.sim.rider.state.wreck.map_or(0, |w| w.0 as i32),
-        edge: area.and_then(|a| audio::edge_distance(a.width.0, a.depth.0, [c.x(), c.y(), c.z()])),
-    };
+    let armed = area.is_some() && seat.sim.rider.edge_armed;
+    let edge = area.filter(|_| armed).and_then(|a| audio::world_edge(a, land, c));
+    let edge = audio::EdgeFrame { armed, reason: seat.sim.rider.state.wreck.map_or(0, |w| w.0 as i32), edge };
     let p = r.position();
     let v = r.chassis.vel;
     let plane = match (seat.garage.up, &seat.garage.plane) {
