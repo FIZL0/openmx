@@ -10720,7 +10720,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      alone: Cross opens the throttle and Square closes it.\n\
                      --players N splits the screen between N local players (up to 8), each on\n\
                      a pad of their own with a camera and an overlay of their own: two one above\n\
-                     the other (--split h, the default) or side by side (--split v), the\n\
+                     the other (--split h) or side by side (--split v, the default), the\n\
                      original's two layouts, and three to eight in quarters or eighths. The first\n\
                      player has the keyboard, the plane and the tape. --headless draws with no\n\
                      window and no pad, and --frames N quits after N frames. --timings prints\n\

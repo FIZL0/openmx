@@ -441,7 +441,7 @@ fn two_views(test: &str, mods: &Path, args: &[&str]) -> Option<(String, [Vec<[u8
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
         .args(["--headless", "--track", "md9_world", "--mods", mods.to_str().unwrap(), "--size", "640x448", "--overlay", "none"])
-        .args(["--players", "2", "--frames", "3", "--shot", path.to_str().unwrap()])
+        .args(["--players", "2", "--split", "h", "--frames", "3", "--shot", path.to_str().unwrap()])
         .args(args)
         .output()
         .expect("the shell runs");
