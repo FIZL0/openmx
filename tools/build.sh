@@ -29,6 +29,8 @@ export OPENMX_COMMIT
 # and remembers it, its settings in the per-user data folder (P190). $1 is the folder.
 extras() {
     cp web/icon-512.png "$1/openmx.png"
+    # add-to-steam.sh: a Steam shortcut with its artwork (Steam takes art for non-Steam games only from its own grid folder)
+    cp tools/steam/add-to-steam.sh "$1/" && mkdir -p "$1/steam" && cp tools/steam/*.png "$1/steam/"
     cat >"$1/README.txt" <<'EOF'
 openMX — MX Unleashed (PS2) rewritten. https://openmx.dev/
 
@@ -42,6 +44,9 @@ No game data is included. You need your own disc image of MX Unleashed (USA, SLU
 Settings, controls and the mods/ folder live in ~/.local/share/openmx ($XDG_DATA_HOME/openmx),
 beside disc.txt, the disc it remembers. ./openmx --where says which disc and which folder;
 ./openmx --help lists the options.
+
+Steam / Steam Deck: run ./add-to-steam.sh (Deck: in Desktop Mode, double-click it) to add openMX
+to Steam with its artwork. It closes Steam while it writes and starts it again.
 EOF
 }
 

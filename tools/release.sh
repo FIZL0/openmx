@@ -99,7 +99,7 @@ body=$out/notes.md
     echo "| Platform | File | How to play |"
     echo "|---|---|---|"
     echo "| **Windows** 10/11 | [\`openmx-windows-x86_64.zip\`](https://github.com/$repo/releases/download/$tag/openmx-windows-x86_64.zip) | Unzip, then drop your ISO on \`openmx.exe\` once; start \`openmx.exe\` after |"
-    echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, run \`./openmx your.iso\` (or drop the ISO on it) once; \`./openmx\` after |"
+    echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, run \`./openmx your.iso\` (or drop the ISO on it) once; \`./openmx\` after. For Steam (with artwork): run \`add-to-steam.sh\` |"
     echo "| **iPhone** / **iPad** (iOS 15+) | [add the source in one tap](https://openmx.dev/ios.html) | Easiest: add the source in one tap (Feather, AltStore, SideStore), or add \`https://fizl0.github.io/apps/source.json\` under Sources by hand; install openMX from it and updates arrive there. Then put your ISO in Files → On My iPhone → openMX. Touch controls or a controller. Signing it yourself instead: [\`openmx-ios.ipa\`](https://github.com/$repo/releases/download/$tag/openmx-ios.ipa) (unsigned; Sideloadly, AltStore…) |"
     echo "| **Browser** | [openmx.dev](https://openmx.dev/) | Nothing to install |"
     echo
