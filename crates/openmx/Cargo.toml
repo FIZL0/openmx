@@ -74,6 +74,8 @@ minisign-verify = "0.3"
 # (unsafe-free) leaves to the evdev crate.
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
+# the sound, pulled by the device (ALSA, PipeWire's) instead of piped to pw-cat
+cpal = "0.16"
 
 # The Windows build's pads and sound (WASAPI), P192. Pads through XInput, not gilrs' default Windows.Gaming.Input,
 # which Wine and Proton pass no pad to. A PlayStation pad, which has no XInput driver, read through

@@ -3492,9 +3492,9 @@ impl Reading<'_> {
 
 /// The desktop's own players, tried in order; each takes raw 48 kHz 16-bit stereo on its stdin.
 const PLAYERS: [(&str, &[&str]); 3] = [
-    ("pw-cat", &["--playback", "--raw", "--format", "s16", "--rate", "48000", "--channels", "2", "-"]),
-    ("pacat", &["--raw", "--format=s16le", "--rate=48000", "--channels=2"]),
-    ("aplay", &["-q", "-f", "S16_LE", "-r", "48000", "-c", "2", "-t", "raw"]),
+    ("pw-cat", &["--playback", "--latency", "20ms", "--raw", "--format", "s16", "--rate", "48000", "--channels", "2", "-"]),
+    ("pacat", &["--latency-msec=20", "--raw", "--format=s16le", "--rate=48000", "--channels=2"]),
+    ("aplay", &["-q", "--buffer-time=40000", "-f", "S16_LE", "-r", "48000", "-c", "2", "-t", "raw"]),
 ];
 
 /// How far ahead of the wall clock the mix is written: the pipe and the player's own buffer hold
@@ -3531,29 +3531,42 @@ impl Output {
             });
             return Ok(Output { stop, thread: Some(thread), player: "an AudioQueue".into() });
         }
-        // Windows (P192): WASAPI through cpal pulls the mix, as the iPhone's AudioQueue does. Its
-        // stream is opened and kept on the thread, which a stream need not be able to leave.
-        #[cfg(windows)]
+        // Windows (P192) and Linux: cpal pulls the mix as the device plays it, as the iPhone's
+        // AudioQueue does. Linux used to pipe to a player paced by the wall clock, which piled up
+        // in the pipe (up to ~340 ms) whenever the sound card's clock ran slower; the players stay
+        // as the fallback when cpal can't open a device. The stream is opened and kept on the
+        // thread, which a stream need not be able to leave.
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let quit = stop.clone();
             let (said, opened) = std::sync::mpsc::channel();
+            let m = mixer.clone();
             let thread = std::thread::spawn(move || {
-                let fill = Box::new(move |out: &mut [i16]| match mixer.lock() {
+                let fill = Box::new(move |out: &mut [i16]| match m.lock() {
                     Ok(mut m) => m.render(out),
                     Err(_) => out.fill(0),
                 });
-                let sound = crate::win::Sound::start(RATE, fill);
-                let ok = sound.is_ok();
-                let _ = said.send(sound.err());
-                while ok && !quit.load(std::sync::atomic::Ordering::Relaxed) {
+                // the stream lives as long as this thread holds it (`.err()` on it would drop it at once)
+                let _sound = match DeviceSound::start(RATE, fill) {
+                    Ok(s) => s,
+                    Err(why) => return drop(said.send(Some(why))),
+                };
+                let _ = said.send(None);
+                while !quit.load(std::sync::atomic::Ordering::Relaxed) {
                     std::thread::park_timeout(std::time::Duration::from_millis(50));
                 }
             });
-            if let Some(why) = opened.recv().map_err(|e| e.to_string())? {
-                return Err(why);
+            match opened.recv().map_err(|e| e.to_string())? {
+                None => return Ok(Output { stop, thread: Some(thread), player: "cpal".into() }),
+                #[cfg(windows)]
+                Some(why) => return Err(why),
+                #[cfg(not(windows))]
+                Some(why) => {
+                    let _ = thread.join();
+                    println!("sound: cpal: {why}; piping to a player instead");
+                }
             }
-            return Ok(Output { stop, thread: Some(thread), player: "WASAPI".into() });
         }
         // The browser (P196): no players and no thread; the page's WebAudio, kept fed a frame at a
         // time ([`crate::web_host::next_frame`]) for as long as the mixer lives.
@@ -3614,6 +3627,61 @@ impl Output {
             let _ = child.wait();
         });
         Ok(Output { stop, thread: Some(thread), player })
+    }
+}
+
+/// The sound out of the default device, cpal pulling the mix as it plays (WASAPI on Windows, ALSA
+/// (PipeWire's) on Linux). The device's own mix format is taken (float, its rate, its channels), so
+/// the mix is rendered at `rate` stereo and resampled to it. A small fixed buffer keeps the
+/// effects' latency low; a device that won't take it gets its default.
+#[cfg(any(windows, target_os = "linux"))]
+pub struct DeviceSound(#[allow(dead_code)] cpal::Stream);
+
+#[cfg(any(windows, target_os = "linux"))]
+impl DeviceSound {
+    /// Frames per period asked for: ~11 ms at 48 kHz (ALSA keeps two periods).
+    // ponytail: fixed 512; make it a setting if a device crackles at this size
+    const PERIOD: u32 = 512;
+
+    pub fn start(rate: u32, fill: Box<dyn FnMut(&mut [i16]) + Send>) -> Result<DeviceSound, String> {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        let device = cpal::default_host().default_output_device().ok_or("no sound device")?;
+        let config = device.default_output_config().map_err(|e| e.to_string())?;
+        if config.sample_format() != cpal::SampleFormat::F32 {
+            return Err(format!("the sound device mixes in {}, not float", config.sample_format()));
+        }
+        let mut config = config.config();
+        let channels = config.channels as usize;
+        let fill = Arc::new(Mutex::new(fill));
+        let build = |config: &cpal::StreamConfig| {
+            let mut resample = Resample::new(rate, config.sample_rate.0);
+            let fill = fill.clone();
+            device.build_output_stream(
+                config,
+                move |out: &mut [f32], _| {
+                    let mut fill = fill.lock().unwrap();
+                    for frame in out.chunks_mut(channels) {
+                        let [l, r] = resample.next(&mut *fill);
+                        frame[0] = l;
+                        if channels > 1 {
+                            frame[1] = r;
+                        }
+                        frame.iter_mut().skip(2).for_each(|s| *s = 0.0);
+                    }
+                },
+                |e| eprintln!("sound: {e}"),
+                None,
+            )
+        };
+        config.buffer_size = cpal::BufferSize::Fixed(Self::PERIOD);
+        let stream = build(&config)
+            .or_else(|_| {
+                config.buffer_size = cpal::BufferSize::Default;
+                build(&config)
+            })
+            .map_err(|e| e.to_string())?;
+        stream.play().map_err(|e| e.to_string())?;
+        Ok(DeviceSound(stream))
     }
 }
 
@@ -3977,8 +4045,8 @@ pub fn stereo(l: &Clip, r: &Clip) -> Clip {
     Clip { rate: l.rate, channels: 2, pcm }
 }
 
-/// The mix at one rate read out at another, by straight lines between its frames (Windows' sound, P192).
-#[cfg(any(windows, test))]
+/// The mix at one rate read out at another, by straight lines between its frames (the cpal sound, P192).
+#[cfg(any(windows, target_os = "linux", test))]
 pub struct Resample {
     /// The mix's frames per device frame.
     step: f64,
@@ -3990,7 +4058,7 @@ pub struct Resample {
     used: usize,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 impl Resample {
     pub fn new(from: u32, to: u32) -> Resample {
         Resample { step: from as f64 / to as f64, at: 1.0, prev: [0.0; 2], next: [0.0; 2], buf: vec![0; 512 * 2], used: 512 }

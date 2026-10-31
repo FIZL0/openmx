@@ -133,7 +133,23 @@ pub fn start_with(disc: Option<PathBuf>, kit: bool, data: PathBuf, ask: impl FnO
 /// per-user data folder and a dialog.
 pub fn start(argv: &mut Vec<String>) -> Result<Start, String> {
     let disc = take_disc(argv);
-    start_with(disc, game_render::disc::kit_toml().is_some(), data_dir(), ask)
+    let start = start_with(disc, game_render::disc::kit_toml().is_some(), data_dir(), ask)?;
+    // the picker's window came and went before ours: on the Steam Deck's Gaming Mode (gamescope) the
+    // game's window then stayed black, so start over as a fresh process, which finds the disc remembered
+    if start.from == Source::Picked && start.data.is_some() {
+        restart();
+    }
+    Ok(start)
+}
+
+/// Runs openMX again in this process's place, with the same arguments (Unix); elsewhere carries on.
+fn restart() {
+    #[cfg(all(unix, not(target_os = "ios"), not(target_os = "android")))]
+    if let Ok(exe) = std::env::current_exe() {
+        use std::os::unix::process::CommandExt;
+        let err = Command::new(exe).args(std::env::args_os().skip(1)).exec();
+        eprintln!("couldn't restart after the pick: {err}");
+    }
 }
 
 /// The disc from a file dialog, if there is one to show and a file was picked; else from the
