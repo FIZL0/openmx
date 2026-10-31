@@ -229,7 +229,7 @@ mod ride_hud;
 #[cfg(test)]
 mod same_ride;
 // The desktop updater (P191): a newer release found, downloaded, checked and swapped in.
-#[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+#[cfg(not(target_arch = "wasm32"))]
 mod update;
 mod saved_markers;
 // MD10: `--shot-pose`, the first view's camera held where the accuracy harness asks.
@@ -2099,12 +2099,10 @@ pub(crate) async fn run() -> Result<(), String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let start = player::start(&mut std::env::args().skip(1).collect())?;
-        // P191: the main menu's updater, and an update's leftover (Windows' .old) gone
-        #[cfg(not(target_os = "ios"))]
-        {
-            update::cleanup();
-            let _ = menu::UPDATER.set(update::updater());
-        }
+        // P191: the main menu's updater, and an update's leftover (Windows' .old) gone. iOS has no
+        // binary to swap: its newer release offers Download, the release page.
+        update::cleanup();
+        let _ = menu::UPDATER.set(update::updater());
         if args.where_only {
             let disc = Disc::configured_path()?;
             let dir = menu::store_dir(Some(&disc));
@@ -10396,9 +10394,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--ride" => {}
             "--menu" => args.menu = true,
             "--where" => args.where_only = true,
-            // P191: the updater asks nothing this run (a flag the browser's and the iPhone's builds take and ignore)
+            // P191: the updater asks nothing this run (a flag the browser's build takes and ignores)
             "--no-update-check" => {
-                #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+                #[cfg(not(target_arch = "wasm32"))]
                 update::NO_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             "--screen" => {

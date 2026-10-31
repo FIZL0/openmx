@@ -634,4 +634,14 @@ Hs5KaCqvNkJ1Vjp/bntiFqm0CkKzxeGJhK9L+76A3G/wL+xeLy8au+kcLCnYzhku/rp99xxUM9X1p8bb
         let j = serde_json::json!({ "tag_name": "v2.0.0", "html_url": "p", "assets": [{ "name": "SHA256SUMS", "browser_download_url": "s" }] });
         assert_eq!(found(&j, "v1.0.0", Some("openmx-linux-x86_64")), Some(Found { tag: "v2.0.0".into(), page: "p".into(), files: None }));
     }
+
+    /// P247: a platform with no binary of its own (iOS) still sees a newer release, as its page.
+    #[test]
+    fn an_iphone_finds_a_newer_release_as_its_page() {
+        let all = ["openmx-linux-x86_64", "SHA256SUMS", "SHA256SUMS.sig"].map(|n| serde_json::json!({ "name": n, "browser_download_url": n }));
+        let j = serde_json::json!({ "tag_name": "v2.0.0", "html_url": "p", "assets": all });
+        let f = found(&j, "v1.0.0", None).unwrap();
+        assert_eq!((f.tag.as_str(), f.files), ("v2.0.0", None));
+        assert_eq!(target(&found(&j, "v1.0.0", None).unwrap()), None);
+    }
 }

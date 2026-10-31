@@ -945,3 +945,37 @@ impl Drop for Sound {
         }
     }
 }
+
+unsafe extern "C" {
+    static _dispatch_main_q: c_void;
+    fn dispatch_async_f(queue: *const c_void, ctx: *mut c_void, work: extern "C" fn(*mut c_void));
+}
+
+/// Opens `url` in Safari, or the app its scheme names (`UIApplication.openURL`, on the main queue: an
+/// iPhone has no `xdg-open`), as opentennis's `open_url` (B501). Any thread.
+pub fn open_url(url: &str) -> Result<(), String> {
+    let url = std::ffi::CString::new(url).map_err(|e| e.to_string())?;
+    let ctx = Box::into_raw(Box::new(url)).cast();
+    // SAFETY: the main queue lives for the process; `open_on_main` takes the box back
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, ctx, open_on_main) };
+    Ok(())
+}
+
+extern "C" fn open_on_main(ctx: *mut c_void) {
+    // SAFETY: `ctx` is the `Box<CString>` `open_url` leaked; objc_msgSend cast to the signatures
+    // NSString, NSURL and UIApplication declare
+    let url = unsafe { Box::from_raw(ctx.cast::<std::ffi::CString>()) };
+    pool(|| unsafe {
+        let with: extern "C" fn(Id, Id, *const std::ffi::c_char) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        let with_id: extern "C" fn(Id, Id, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        let open: extern "C" fn(Id, Id, Id, Id, Id) = std::mem::transmute(objc_msgSend as *const ());
+        let s = with(class(c"NSString"), sel(c"stringWithUTF8String:"), url.as_ptr());
+        let u = with_id(class(c"NSURL"), sel(c"URLWithString:"), s);
+        if u.is_null() {
+            return eprintln!("opening {url:?}: not a URL");
+        }
+        let app = get(class(c"UIApplication"), c"sharedApplication");
+        let options = get(class(c"NSDictionary"), c"dictionary");
+        open(app, sel(c"openURL:options:completionHandler:"), u, options, std::ptr::null_mut());
+    });
+}
