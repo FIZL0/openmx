@@ -3510,7 +3510,7 @@ pub struct Output {
 }
 
 impl Output {
-    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(unreachable_code))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios", windows), allow(unreachable_code))]
     pub fn start(mixer: Arc<Mutex<Mixer>>) -> Result<Output, String> {
         // The iPhone (P200): no players to pipe to; an AudioQueue pulls the mix as it plays, kept
         // by a thread that only waits for the stop, so dropping this stops it as on the desktop.
@@ -3530,6 +3530,30 @@ impl Output {
                 drop(sound);
             });
             return Ok(Output { stop, thread: Some(thread), player: "an AudioQueue".into() });
+        }
+        // Windows (P192): WASAPI through cpal pulls the mix, as the iPhone's AudioQueue does. Its
+        // stream is opened and kept on the thread, which a stream need not be able to leave.
+        #[cfg(windows)]
+        {
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let quit = stop.clone();
+            let (said, opened) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let fill = Box::new(move |out: &mut [i16]| match mixer.lock() {
+                    Ok(mut m) => m.render(out),
+                    Err(_) => out.fill(0),
+                });
+                let sound = crate::win::Sound::start(RATE, fill);
+                let ok = sound.is_ok();
+                let _ = said.send(sound.err());
+                while ok && !quit.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::park_timeout(std::time::Duration::from_millis(50));
+                }
+            });
+            if let Some(why) = opened.recv().map_err(|e| e.to_string())? {
+                return Err(why);
+            }
+            return Ok(Output { stop, thread: Some(thread), player: "WASAPI".into() });
         }
         // The browser (P196): no players and no thread; the page's WebAudio, kept fed a frame at a
         // time ([`crate::web_host::next_frame`]) for as long as the mixer lives.
@@ -3951,4 +3975,67 @@ pub fn stereo(l: &Clip, r: &Clip) -> Clip {
         pcm.push(at(r, i));
     }
     Clip { rate: l.rate, channels: 2, pcm }
+}
+
+/// The mix at one rate read out at another, by straight lines between its frames (Windows' sound, P192).
+#[cfg(any(windows, test))]
+pub struct Resample {
+    /// The mix's frames per device frame.
+    step: f64,
+    /// How far past `prev` the next device frame is, in mix frames.
+    at: f64,
+    prev: [f32; 2],
+    next: [f32; 2],
+    buf: Vec<i16>,
+    used: usize,
+}
+
+#[cfg(any(windows, test))]
+impl Resample {
+    pub fn new(from: u32, to: u32) -> Resample {
+        Resample { step: from as f64 / to as f64, at: 1.0, prev: [0.0; 2], next: [0.0; 2], buf: vec![0; 512 * 2], used: 512 }
+    }
+
+    /// The next device frame, rendering the mix with `fill` as it runs out.
+    pub fn next(&mut self, fill: &mut dyn FnMut(&mut [i16])) -> [f32; 2] {
+        while self.at >= 1.0 {
+            if self.used == self.buf.len() / 2 {
+                fill(&mut self.buf);
+                self.used = 0;
+            }
+            self.prev = self.next;
+            let f = &self.buf[self.used * 2..self.used * 2 + 2];
+            self.next = [f[0] as f32 / 32768.0, f[1] as f32 / 32768.0];
+            self.used += 1;
+            self.at -= 1.0;
+        }
+        let t = self.at as f32;
+        self.at += self.step;
+        [0, 1].map(|c| self.prev[c] + (self.next[c] - self.prev[c]) * t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// 48 kHz read out at 48 kHz is the mix a frame late; at 96 kHz every frame twice, halfway between.
+    #[test]
+    fn the_resample_reads_the_mix_out() {
+        let ramp = || {
+            let mut n = 0i16;
+            move |out: &mut [i16]| {
+                for f in out.chunks_mut(2) {
+                    n += 1;
+                    f.fill(n);
+                }
+            }
+        };
+        let mut same = super::Resample::new(48000, 48000);
+        let mut fill = ramp();
+        let got: Vec<f32> = (0..4).map(|_| same.next(&mut fill)[0] * 32768.0).collect();
+        assert_eq!(got, [0.0, 1.0, 2.0, 3.0]);
+        let mut double = super::Resample::new(48000, 96000);
+        let mut fill = ramp();
+        let got: Vec<f32> = (0..4).map(|_| double.next(&mut fill)[1] * 32768.0).collect();
+        assert_eq!(got, [0.0, 0.5, 1.0, 1.5]);
+    }
 }

@@ -4,6 +4,7 @@
 #   web/icon-192.png, -512.png the web manifest's icons, rounded corners as the SVG
 #   web/icon-180.png, -1024.png full-bleed and opaque (iOS rounds them itself): the apple-touch-icon, the iPhone app's
 #                              (tools/ios-ipa.sh) and its App Store / AltStore artwork (tools/ios-source.sh)
+#   crates/openmx/icon/openmx.ico  16–256 px, openmx.exe's icon (crates/openmx/build.rs)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 for t in rsvg-convert magick; do command -v $t >/dev/null || { echo "$t missing: sudo pacman -S librsvg imagemagick" >&2; exit 1; }; done
@@ -17,4 +18,6 @@ for s in 180 1024; do
 done
 for s in 16 32 48; do rsvg-convert -w $s -h $s web/icon.svg -o "$tmp/f$s.png"; done
 magick "$tmp/f16.png" "$tmp/f32.png" "$tmp/f48.png" web/favicon.ico
-for f in web/favicon.ico web/icon-{180,192,512,1024}.png; do echo "$f $(magick identify -format '%wx%h ' "$f")"; done
+for s in 16 24 32 48 64 128 256; do rsvg-convert -w $s -h $s web/icon.svg -o "$tmp/e$s.png"; done
+magick "$tmp"/e{16,24,32,48,64,128,256}.png crates/openmx/icon/openmx.ico
+for f in web/favicon.ico crates/openmx/icon/openmx.ico web/icon-{180,192,512,1024}.png; do echo "$f $(magick identify -format '%wx%h ' "$f")"; done

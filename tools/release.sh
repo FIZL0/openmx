@@ -1,12 +1,14 @@
 #!/bin/bash
 # tools/release.sh VERSION [notes.md] [publish] — a full release (v1.0.0, "openMX 1.0.0"), as opentennis's tools/release.sh:
 # set the workspace's version to VERSION (a "Release vVERSION" commit if it changes), build every platform tools/build.sh
-# builds today (Linux; Windows once its port lands) and the website (tools/web.sh), sign SHA256SUMS with the minisign key
+# builds (Linux, Windows) and the website (tools/web.sh), sign SHA256SUMS with the minisign key
 # (~/.config/openmx/release.key, asks its password unless ~/.config/openmx/release.pass holds it) and upload to GitHub:
 #   openmx-linux-x86_64.tar.gz   what players download: openmx and README.txt. ./openmx "disc.iso" (or drop the .iso on
 #                                it) the first time, ./openmx after: it remembers the disc, and keeps settings, controls and
 #                                mods/ in ~/.local/share/openmx (P190)
+#   openmx-windows-x86_64.zip    openmx.exe (P192, its icon built in): drop the .iso on it the first time; %APPDATA%\openmx
 #   openmx-linux-x86_64          the bare binary, for the in-game updater (P191, crates/openmx/src/update.rs) to fetch
+#   openmx-windows-x86_64.exe    the same for Windows
 #   openmx-ios.ipa               P201: the unsigned iPhone / iPad app (tools/ios-ipa.sh; needs the iOS SDK, tools/ios-sdk.py)
 #   altstore-source.json         P201: that app as an AltStore / SideStore / Feather source (tools/ios-source.sh). FIZL0's
 #                                shared source (github.com/FIZL0/apps) merges it; players add https://fizl0.github.io/apps/source.json
@@ -41,6 +43,7 @@ pre=
 last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
 [ -n "$notes" ] || [ -n "$last" ] || { echo "the first release needs a notes.md or bullets in RELEASE_NOTES.md (no earlier v* tag to list commits from)" >&2; exit 1; }
 [ -z "$notes" ] || [ -f "$notes" ] || { echo "no such notes file: $notes" >&2; exit 1; }
+command -v zip >/dev/null || { echo "zip missing: sudo pacman -S zip" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq missing: sudo pacman -S jq" >&2; exit 1; }
 sdk=${OPENMX_IOS_SDK:-$HOME/.local/share/hst-ios/iPhoneOS.sdk}
 [ -d "$sdk" ] || { echo "no iOS SDK at $sdk (the release carries openmx-ios.ipa): run tools/ios-sdk.py Xcode.xip" >&2; exit 1; }
@@ -70,6 +73,8 @@ out=dist/release
 rm -rf "$out" && mkdir -p "$out"
 tar -czf "$out/openmx-linux-x86_64.tar.gz" -C dist/linux .
 cp dist/linux/openmx "$out/openmx-linux-x86_64"
+(cd dist/windows && zip -q "../release/openmx-windows-x86_64.zip" openmx.exe)
+cp dist/windows/openmx.exe "$out/openmx-windows-x86_64.exe"
 tools/ios-ipa.sh "$out/openmx-ios.ipa"
 # P201: the sideloading source, at a URL that always serves the latest release's copy (FIZL0/apps reads it there)
 tools/ios-source.sh "$version" "$out/openmx-ios.ipa" >/dev/null
@@ -93,6 +98,7 @@ body=$out/notes.md
     echo
     echo "| Platform | File | How to play |"
     echo "|---|---|---|"
+    echo "| **Windows** 10/11 | [\`openmx-windows-x86_64.zip\`](https://github.com/$repo/releases/download/$tag/openmx-windows-x86_64.zip) | Unzip, then drop your ISO on \`openmx.exe\` once; start \`openmx.exe\` after |"
     echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, run \`./openmx your.iso\` (or drop the ISO on it) once; \`./openmx\` after |"
     echo "| **iPhone** / **iPad** (iOS 15+) | [add the source in one tap](https://openmx.dev/ios.html) | Easiest: add the source in one tap (Feather, AltStore, SideStore), or add \`https://fizl0.github.io/apps/source.json\` under Sources by hand; install openMX from it and updates arrive there. Then put your ISO in Files → On My iPhone → openMX. Touch controls or a controller. Signing it yourself instead: [\`openmx-ios.ipa\`](https://github.com/$repo/releases/download/$tag/openmx-ios.ipa) (unsigned; Sideloadly, AltStore…) |"
     echo "| **Browser** | [openmx.dev](https://openmx.dev/) | Nothing to install |"

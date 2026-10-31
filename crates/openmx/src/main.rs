@@ -191,6 +191,9 @@ mod gpuwin;
 // The iPhone app (P200).
 #[cfg(target_os = "ios")]
 mod ios;
+// The Windows build's pads and sound (P192).
+#[cfg(windows)]
+mod win;
 mod ground;
 mod hud;
 // What the CPU still draws over the GPU's picture (P44), as patches.

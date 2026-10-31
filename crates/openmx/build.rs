@@ -10,6 +10,9 @@
 // Emits OPENMX_COMMIT, OPENMX_VERSION and OPENMX_BUILD_ID (and OPENMX_TAG for a release, P191), the id: "<crate version> <commit>, 30 Hz" — an unstamped
 // dev build's is then handshake.rs's own default, so dev builds of one version still meet each other.
 // `crates/openmx/tests/build_stamp.rs` mounts this file for its functions.
+//
+// Windows (P192): openmx.exe's icon (icon/openmx.ico, tools/icons.sh from web/icon.svg) as a resource, compiled with
+// MinGW's windres, as opentennis's crates/hst/build.rs does.
 
 /// The commit stamp: `env` (OPENMX_COMMIT) when set, else in a `release` build `head` (git's full HEAD hash) cut to
 /// 7 characters with + when `dirty`, "unknown" with no git; "dev" otherwise.
@@ -63,5 +66,18 @@ fn main() {
     // P191: a release's tag only when it is one, for the updater (`src/update.rs`) to ask for newer releases
     if let Some(v) = std::env::var("OPENMX_VERSION").ok().filter(|v| !v.trim().is_empty()) {
         println!("cargo:rustc-env=OPENMX_TAG=v{}", version(Some(&v), &crate_version));
+    }
+    println!("cargo:rerun-if-changed=icon/openmx.ico");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let out = format!("{}/openmx-icon.o", std::env::var("OUT_DIR").unwrap_or_default());
+        let ok = std::process::Command::new("x86_64-w64-mingw32-windres")
+            .args(["--include-dir", "icon", "icon/openmx.rc", "-O", "coff", "-o", &out])
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            println!("cargo:rustc-link-arg-bins={out}");
+        } else {
+            println!("cargo:warning=no x86_64-w64-mingw32-windres: openmx.exe has no icon");
+        }
     }
 }

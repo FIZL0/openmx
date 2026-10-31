@@ -59,8 +59,8 @@
     "https://openmx.dev/shots/biplane.jpg", "https://openmx.dev/shots/rain-nat01.jpg", "https://openmx.dev/shots/split-4p.jpg",
     "https://openmx.dev/shots/menu-main.jpg"],
   "genre": ["Racing", "Sports", "Motocross"],
-  "gamePlatform": ["Web browser", "PC", "Linux", "Steam Deck"],
-  "operatingSystem": "Linux, SteamOS, any browser with WebGPU or WebGL2",
+  "gamePlatform": ["Web browser", "PC", "Windows", "Linux", "Steam Deck"],
+  "operatingSystem": "Windows, Linux, SteamOS, any browser with WebGPU or WebGL2",
   "applicationCategory": "GameApplication",
   "playMode": ["SinglePlayer", "MultiPlayer"],
   "numberOfPlayers": { "@type": "QuantitativeValue", "minValue": 1, "maxValue": 16 },
@@ -400,7 +400,7 @@ footer a { color: var(--bone); }
       <h2 class="head"><span class="skew">What is in it</span></h2>
       <div class="grid3 feat">
         <div class="card"><h3>Browser, PC and Steam Deck</h3><p>Plays in a web browser with nothing to install, or as a native
-          build for Linux and the Steam Deck. A Windows build is on the way. Pads, keyboard, any resolution, widescreen, and a
+          build for Windows, Linux and the Steam Deck. Pads, keyboard, any resolution, widescreen, and a
           frame rate as high as your screen's.</p></div>
         <div class="card"><h3>Online</h3><p>Ride with friends over the internet or your LAN: send a room code, or quickplay into an
           open lobby. Rollback netcode keeps every rider in step, up to sixteen seats, browser and desktop together.</p></div>
@@ -455,8 +455,10 @@ footer a { color: var(--bone); }
         </div>
         <div class="card">
           <h3>Windows</h3>
-          <p>Coming soon. Every build, its release notes and its signed checksums are on GitHub.</p>
-          <div class="row" style="margin-top:14px"><a class="pill ghost" id="builds" target="_blank" rel="noopener">All builds</a></div>
+          <p>Windows 10 and 11. Unzip it and drop your disc image on <code>openmx.exe</code> the first time; it remembers the disc
+            after that. Settings and mods live in <code>%APPDATA%\openmx</code>. Every build, its release notes and its signed
+            checksums are on GitHub.</p>
+          <div class="row" style="margin-top:14px"><a class="pill" data-file="openmx-windows-x86_64.zip">Download for Windows</a><a class="pill ghost" id="builds" target="_blank" rel="noopener">All builds</a></div>
         </div>
         <div class="card">
           <h3>iPhone &amp; iPad</h3>
@@ -476,7 +478,7 @@ footer a { color: var(--bone); }
           reads the tracks, bikes, rider, textures, menus and sound from an .iso you make of your own PlayStation 2 disc
           (the US release, SLUS-20767), on your own machine. Nothing from the disc is on this site or uploaded anywhere.</p></details>
         <details><summary>Can I play MX Unleashed on PC?</summary><p>Yes. openMX is a remaster of MX Unleashed that runs in a web
-          browser and natively on Linux and the Steam Deck, with Windows coming. It isn't an emulator: the game is rewritten,
+          browser and natively on Windows, Linux and the Steam Deck. It isn't an emulator: the game is rewritten,
           so it runs at any resolution, in widescreen and at a high frame rate, with a pad or the keyboard.</p></details>
         <details><summary>Is it the same game as the original?</summary><p>On the bike, yes. The physics, tricks, wrecks, biplane
           and timing are ported from MX Unleashed and proved against it in an emulator, so the same inputs ride out the same

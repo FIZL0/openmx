@@ -15,8 +15,12 @@
 //! document's, in its own order, which is why the request builders read as a list of pushes.
 
 use std::io::{ErrorKind, Read, Write};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+// ponytail: Windows has no display socket either; X11 over TCP, which `--renderer software` would need
+// an X server for. The GPU window is the one that rides there (P192).
+#[cfg(windows)]
+use std::net::TcpStream as UnixStream;
 // A browser has no display socket (P196): one that never connects, so this compiles there.
 #[cfg(target_arch = "wasm32")]
 use crate::web_host::NoSocket as UnixStream;

@@ -110,7 +110,6 @@ online play, with a front end where you pick and change your rider and bike and 
 half already: take it from there (AGENT.md, "Take it from opentennis first"). The menus are in MX Unleashed's
 style rather than 1:1, the way AGENT.md lets the front end be. Everything here is an addition: one player, offline,
 with nothing switched on must ride bit for bit as it does today, acceptance runs included.
-- [ ] **P192** the Windows build: the shell builds and rides on x86_64-pc-windows-gnu (MinGW, cross-compiled from Linux as opentennis's tools/build.sh does, crt-static): pads through XInput/Windows.Gaming.Input or gilrs instead of /dev/input/js*, sound through WASAPI (or cpal) instead of piping to pw-cat, the GPU window only (window.rs's X11 software window is Unix), an icon resource; then tools/build.sh windows, a windows job in .github/workflows/pages.yml's beta, openmx-windows-x86_64.zip/.exe in tools/release.sh, and the Windows card on web/index.html → crates/openmx/src/pad.rs · crates/openmx/src/audio.rs · crates/openmx/src/window.rs · crates/openmx/src/main.rs · tools/build.sh · tools/release.sh · .github/workflows/pages.yml · web/index.html | t: cargo build --target x86_64-pc-windows-gnu in CI; the shell rides under wine with --headless --frames | j: windows-build
 
 ### Phase 13 — how it looks, sounds and plays
 

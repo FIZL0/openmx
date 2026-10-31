@@ -1,9 +1,11 @@
 #!/bin/bash
 # tools/build.sh [linux|windows|all] — the optimised builds players download, into dist/ (as opentennis's tools/build.sh):
-#   dist/linux/         openmx, README.txt: unpack, ./openmx "your disc.iso" (or drop the .iso on it) the first time,
-#                       ./openmx after that; settings, controls and mods/ in ~/.local/share/openmx (P190)
-#   dist/windows/       openmx.exe — not yet: the shell's pads (/dev/input/js*), sound (pw-cat) and software window (X11)
-#                       are Linux-only until the Windows port lands (plan/TODO.md), so `windows` says so and stops
+#   dist/linux/         openmx, openmx.png (the icon, for a launcher or Steam shortcut), README.txt: unpack,
+#                       ./openmx "your disc.iso" (or drop the .iso on it) the first time, ./openmx after that;
+#                       settings, controls and mods/ in ~/.local/share/openmx (P190)
+#   dist/windows/       openmx.exe (P192), its icon built in: drop the .iso on it the first time; settings, controls
+#                       and mods\ in %APPDATA%\openmx. Cross-compiled with MinGW, once (Arch):
+#                         sudo pacman -S mingw-w64-gcc && rustup target add x86_64-pc-windows-gnu
 # No game data goes into dist/. OPENMX_COMMIT / OPENMX_VERSION in the environment are passed into the build
 # (tools/release.sh and the Actions jobs set them).
 #
@@ -26,6 +28,7 @@ export OPENMX_COMMIT
 # what goes beside the binary: how to start it. With no kit.toml the shell takes its disc from its first argument
 # and remembers it, its settings in the per-user data folder (P190). $1 is the folder.
 extras() {
+    cp web/icon-512.png "$1/openmx.png"
     cat >"$1/README.txt" <<'EOF'
 openMX — MX Unleashed (PS2) rewritten. https://openmx.dev/
 
@@ -67,13 +70,22 @@ linux() {
 }
 
 windows() {
-    echo "no Windows build yet: the shell's pads, sound and software window are Linux-only (plan/TODO.md, the Windows port)" >&2
-    exit 1
+    local t=x86_64-pc-windows-gnu
+    if ! command -v x86_64-w64-mingw32-gcc >/dev/null || ! rustc --print target-libdir --target $t 2>/dev/null | xargs test -d; then
+        echo "windows build needs (once): sudo pacman -S mingw-w64-gcc; rustup target add $t" >&2
+        exit 1
+    fi
+    # crt-static: no MinGW runtime DLLs to ship beside the .exe
+    CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc RUSTFLAGS="-C target-feature=+crt-static" \
+        cargo build --locked --release -p openmx --bin openmx --target $t
+    rm -rf dist/windows && mkdir -p dist/windows
+    x86_64-w64-mingw32-strip -o dist/windows/openmx.exe target/$t/release/openmx.exe
+    echo "dist/windows/openmx.exe"
 }
 
 case $what in
     linux) linux ;;
     windows) windows ;;
-    all) linux ;;  # every platform that builds today; add windows here when it does
+    all) linux; windows ;;
     *) echo "usage: tools/build.sh [linux|windows|all]" >&2; exit 2 ;;
 esac

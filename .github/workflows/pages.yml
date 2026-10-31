@@ -1,6 +1,6 @@
 # The beta and the website, as opentennis's pages.yml (no game data anywhere: players pick their own ISO).
 # - Every push to main is a beta once ci passes: the rolling "Beta" release (tag `beta`, a pre-release, never Latest) is
-#   replaced with that commit's Linux build, website (web.tar.gz) and unsigned iPhone app (openmx-ios.ipa, P201), and FIZL0/openmx-beta (one workflow,
+#   replaced with that commit's Linux and Windows builds, website (web.tar.gz) and unsigned iPhone app (openmx-ios.ipa, P201), and FIZL0/openmx-beta (one workflow,
 #   tools/beta-site.yml) is asked to put the website on https://beta.openmx.dev. The ask needs the secret
 #   BETA_DISPATCH_TOKEN (a fine-grained token with Contents read/write on FIZL0/openmx-beta); without it the beta site
 #   still catches up, from that repo's own half-hourly check.
@@ -66,6 +66,23 @@ jobs:
         with:
           name: linux
           path: openmx-linux-x86_64.tar.gz
+  # P192: openmx.exe, cross-compiled with MinGW as tools/build.sh windows does (the icon from crates/openmx/build.rs's windres)
+  windows:
+    if: ${{ github.event_name != 'release' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - run: rustup update --no-self-update stable && rustup default stable && rustup target add x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+      - run: |
+          sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+          export OPENMX_COMMIT=${GITHUB_SHA::7}
+          tools/build.sh windows
+          (cd dist/windows && zip -q ../../openmx-windows-x86_64.zip openmx.exe)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: windows
+          path: openmx-windows-x86_64.zip
   # P201: the beta's unsigned iPhone app, tools/ios-ipa.sh on a Mac (the Linux cross-build needs Xcode's SDK, which a
   # runner can't fetch). Never holds the beta back: if it fails the beta goes up without the .ipa.
   ios:
@@ -86,7 +103,7 @@ jobs:
           name: ios
           path: openmx-ios.ipa
   beta:
-    needs: [ci, web, linux, ios]
+    needs: [ci, web, linux, windows, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -112,7 +129,7 @@ jobs:
           gh release delete beta --cleanup-tag -y || true
           printf '%s\n\n%s\n\n%s\n' \
             "**Beta: rebuilt on every change to main (${GITHUB_SHA::7}). Newer than the latest release, less tested.**" \
-            "No game data is included: you need your own *MX Unleashed (USA)* (SLUS-20767) ISO. Linux: unpack, run \`./openmx your.iso\` (or drop the ISO on it) once, \`./openmx\` after." \
+            "No game data is included: you need your own *MX Unleashed (USA)* (SLUS-20767) ISO. Linux: unpack, run \`./openmx your.iso\` (or drop the ISO on it) once, \`./openmx\` after. Windows: unzip, drop the ISO on \`openmx.exe\` once, start it after." \
             "Beta in the browser: https://beta.openmx.dev/" > notes.md
           ipa=
           if [ -f openmx-ios.ipa ]; then
@@ -122,7 +139,7 @@ jobs:
             echo "::warning::no openmx-ios.ipa (the ios job failed): the beta goes up without it"
           fi
           gh release create beta --prerelease --latest=false --target "$GITHUB_SHA" --title "Beta (${GITHUB_SHA::7})" \
-            --notes-file notes.md openmx-linux-x86_64.tar.gz web.tar.gz $ipa
+            --notes-file notes.md openmx-linux-x86_64.tar.gz openmx-windows-x86_64.zip web.tar.gz $ipa
           if [ -n "$DISPATCH" ]; then
             # a bad or expired token only costs the instant deploy: the beta release is already up
             GH_TOKEN=$DISPATCH gh api repos/FIZL0/openmx-beta/dispatches -f event_type=beta ||
