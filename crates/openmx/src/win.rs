@@ -1,4 +1,4 @@
-//! The Windows build's pads (P192): gilrs (XInput and Windows.Gaming.Input) read into the standard
+//! The Windows build's pads (P192): gilrs' XInput backend read into the standard
 //! mapping and put out as js events, as `ios.rs` and `web_host.rs` put theirs out, so the pad layer
 //! reads them like `/dev/input/js*`.
 
