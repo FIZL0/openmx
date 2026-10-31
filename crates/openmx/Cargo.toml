@@ -76,9 +76,11 @@ minisign-verify = "0.3"
 evdev = "0.13"
 
 # The Windows build's pads and sound (WASAPI), P192. Pads through XInput, not gilrs' default Windows.Gaming.Input,
-# which Wine and Proton pass no pad to; a pad with no XInput driver (a DualShock without Steam) is unseen.
+# which Wine and Proton pass no pad to. A PlayStation pad, which has no XInput driver, read through
+# Windows.Gaming.Input's raw controllers on the side (the `windows` crate wgpu already pulls in).
 [target.'cfg(windows)'.dependencies]
 gilrs = { version = "0.11", default-features = false, features = ["xinput"] }
+windows = { version = "0.62", features = ["Gaming_Input"] }
 cpal = "0.16"
 
 # The browser's build (N4), as opentennis's is: wasm-bindgen for the page's calls, and ggrs' clock and

@@ -1,4 +1,5 @@
-//! The Windows build's pads (P192): gilrs' XInput backend read into the standard
+//! The Windows build's pads (P192): gilrs' XInput backend (Xbox pads, and every pad Steam Input
+//! drives) and Windows.Gaming.Input's raw controllers for PlayStation pads, read into the standard
 //! mapping and put out as js events, as `ios.rs` and `web_host.rs` put theirs out, so the pad layer
 //! reads them like `/dev/input/js*`.
 
@@ -57,8 +58,47 @@ fn snapshot() -> Vec<(u32, String, Pad)> {
                 let axes = [p.value(Axis::LeftStickX), -p.value(Axis::LeftStickY), p.value(Axis::RightStickX), -p.value(Axis::RightStickY)];
                 (usize::from(id) as u32, p.name().to_string(), Pad { buttons, axes })
             })
+            .chain(sony())
             .collect()
     })
+}
+
+/// Sony's USB vendor id: the DualShock 4 and the DualSense.
+const SONY: u16 = 0x054c;
+
+/// The PlayStation pads connected now, by 100 + their place in Windows.Gaming.Input's list. Both
+/// pads report buttons square, cross, circle, triangle, L1, R1, L2, R2, share, options, L3, R3, PS;
+/// the d-pad as switch 0; axes 0..1 as LX, LY, RX, L2, R2, RY.
+// ponytail: only Sony's; a Steam Controller or Deck without Steam running is still unseen, add its HID here if asked.
+fn sony() -> Vec<(u32, String, Pad)> {
+    use windows::Gaming::Input::{GameControllerSwitchPosition as S, RawGameController};
+    let Ok(all) = RawGameController::RawGameControllers() else { return Vec::new() };
+    (0..all.Size().unwrap_or(0))
+        .filter_map(|i| {
+            let c = all.GetAt(i).ok()?;
+            if c.HardwareVendorId().ok()? != SONY {
+                return None;
+            }
+            let mut b = vec![false; c.ButtonCount().ok()?.max(13) as usize];
+            let mut s = vec![S::Center; c.SwitchCount().ok()?.max(1) as usize];
+            let mut a = vec![0.5; c.AxisCount().ok()?.max(6) as usize];
+            c.GetCurrentReading(&mut b, &mut s, &mut a).ok()?;
+            let hat = s[0];
+            let up = matches!(hat, S::Up | S::UpLeft | S::UpRight);
+            let down = matches!(hat, S::Down | S::DownLeft | S::DownRight);
+            let left = matches!(hat, S::Left | S::UpLeft | S::DownLeft);
+            let right = matches!(hat, S::Right | S::UpRight | S::DownRight);
+            let on = |x: bool| x as u8 as f32;
+            // square cross circle triangle → south (cross), east (circle), west (square), north (triangle)
+            let buttons = [
+                on(b[1]), on(b[2]), on(b[0]), on(b[3]), on(b[4]), on(b[5]), a[3] as f32, a[4] as f32,
+                on(b[8]), on(b[9]), on(b[10]), on(b[11]), on(up), on(down), on(left), on(right), on(b[12]),
+            ];
+            let axes = [a[0], a[1], a[2], a[5]].map(|v| (v * 2.0 - 1.0) as f32);
+            let name = c.DisplayName().map(|n| n.to_string()).unwrap_or_default();
+            Some((100 + i, if name.is_empty() { "PlayStation pad".into() } else { name }, Pad { buttons, axes }))
+        })
+        .collect()
 }
 
 /// The pads as the pad layer's device nodes: `gamepad/<id>`.
