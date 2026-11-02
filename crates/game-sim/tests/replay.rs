@@ -10210,7 +10210,10 @@ mod s129_car {
     pub const HEAD: u32 = 0x480;
     pub const UP: u32 = 0x4a0;
     pub const FIRST: u32 = 0x4e4;
+    pub const SAMPLED: u32 = 0x4dc;
+    pub const PRESAMPLE: u32 = 0x4ec;
     pub const CURSOR: u32 = 0x4f4;
+    pub const DIRTY: u32 = 0x4fc;
     pub const TANGENTS: u32 = 0x510;
     pub const TIME_SCALE: u32 = 0x534;
     pub const LAG: u32 = 0x558;
@@ -10295,7 +10298,7 @@ impl SaveState {
     }
 
     fn traffic_of(&self, cars: &[u32], meshes: impl Fn(&str) -> Option<Vec<u8>>) -> game_sim::traffic::Traffic {
-        use game_sim::traffic::{Car, Spec, Traffic};
+        use game_sim::traffic::{Car, Key, Spec, Traffic};
         use s129_car as at;
         let specs = cars
             .iter()
@@ -10308,11 +10311,32 @@ impl SaveState {
                 let col = self.c_string(car + at::NAME).to_ascii_lowercase().replace(".psg", ".col");
                 let mesh = meshes(&col).map(|b| game_sim::track::Mesh::parse(&b).unwrap_or_else(|e| panic!("{col}: {e}")));
                 assert!(mesh.is_some(), "no {col} in the track's archives");
-                Spec::new(&points, f(at::TIME_SCALE), f(at::HEADING_FILTER), f(at::NORMAL_FILTER), f(at::LAG), mesh).expect("a path")
+                let mut spec =
+                    Spec::new(&points, f(at::TIME_SCALE), f(at::HEADING_FILTER), f(at::NORMAL_FILTER), f(at::LAG), mesh).expect("a path");
+                if self.word(car + at::PRESAMPLE).unwrap() == 0 {
+                    return spec;
+                }
+                if self.word(car + at::SAMPLED).unwrap() == 0 {
+                    spec.presample = true;
+                    return spec;
+                }
+                // A `PresampleTerrain` car past its first frame (free09's trailers, S128;
+                // tests/presample.rs's `spec_of`): the image's keys are on the ground with their
+                // normals, their lengths the clip's, and the curve's tangents the ones it kept.
+                let keys: Vec<Key> = (0..n)
+                    .map(|k| keys + k * at::KEY)
+                    .map(|k| Key { t: self.float(k).unwrap(), len: self.float(k + 4).unwrap(), pos: self.vf(k + 0x10).unwrap(), normal: self.vf(k + 0x20).unwrap() })
+                    .collect();
+                for (ours, theirs) in spec.keys.iter_mut().zip(&keys) {
+                    ours.len = theirs.len;
+                }
+                spec.measured = [self.vf(car + at::TANGENTS).unwrap(), self.vf(car + at::TANGENTS + 0x10).unwrap()];
+                spec.presampled(keys)
             })
             .collect();
         let mut traffic = Traffic::new(specs);
         let measured: Vec<[Vf; 2]> = traffic.specs.iter().map(|s| s.measured).collect();
+        let sampled = |car: u32| self.word(car + at::PRESAMPLE).unwrap() != 0 && self.word(car + at::SAMPLED).unwrap() != 0;
         traffic.cars = cars
             .iter()
             .zip(measured)
@@ -10326,11 +10350,16 @@ impl SaveState {
                 pose: self.mat(self.word(car + at::NODE).unwrap() + at::WORLD).unwrap(),
                 // Still on the measuring's tangents only while the cached ones are those, bit for
                 // bit: the dirty word is clear on a car that has moved since as well (S146,
-                // tests/traffic.rs `the_cars_drive_on_from_a_rides_state`).
-                stale: [at::TANGENTS, at::TANGENTS + 0x10]
-                    .iter()
-                    .zip(measured)
-                    .all(|(&o, m)| self.vf(car + o).unwrap().to_bits()[..3] == m.to_bits()[..3]),
+                // tests/traffic.rs `the_cars_drive_on_from_a_rides_state`). A presampled car's
+                // measured tangents are the kept ones, so its dirty word says (tests/presample.rs).
+                stale: if sampled(car) {
+                    self.word(car + at::DIRTY).unwrap() == 0
+                } else {
+                    [at::TANGENTS, at::TANGENTS + 0x10]
+                        .iter()
+                        .zip(measured)
+                        .all(|(&o, m)| self.vf(car + o).unwrap().to_bits()[..3] == m.to_bits()[..3])
+                },
                 level: Default::default(),
             })
             .collect();
@@ -11614,7 +11643,12 @@ fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
 //
 // - **truck**: first_recording's state (free09, the 125), the bike at 2800.1, 103.4, 4299.6 facing
 //   -20°, 8.8 ft off the line of free09's north-east trailer truck (`free_trailercab` + `free_trailerA`,
-//   45 ft/s), whose cab comes past it 106 ticks later.
+//   45 ft/s), whose cab comes past it 106 ticks later. Its cab strikes the bike on tick 105 and
+//   throws it over (2) at the original's velocity to the bit: every lane agrees on that tick but the
+//   transform's origin, an ulp off in x (as rails' on its wreck tick, S162's bump, S191's headon). The
+//   thrown bike parts on 106. Until B7 the strike's velocity was (8.32, −1.86, 11.38) against
+//   (8.38, −1.53, 11.77): the cab's motion was off because the state's free09 cars were ridden as
+//   though they queried the ground, and they are `PresampleTerrain` cars (B7, [`SaveState::traffic_of`]).
 //
 //   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 30 01263570 121.83 2800 105 4300 7 3 32
 //   ./kit pcsx2 with -- ./kit record watch/s207-free09.toml --state 32 -n 450 -o context/capture/s207/truck.csv
@@ -11782,6 +11816,13 @@ fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
                 }
                 if ours.is_none() && let Some(w) = port.rider.state.wreck {
                     ours = Some((t as u64, w.0));
+                    // The wreck's own tick, where every row that wrecks parts by the origin's ulp: the
+                    // velocity the strike leaves is the original's to the bit (B7).
+                    if let Some(r) = r.filter(|_| theirs.is_some_and(|w| w.0 == t as u64)) {
+                        let want = ["x", "y", "z"].map(|x| num(r, &format!("ch_vel.{x}")).to_bits());
+                        let got = port.rider.ride.chassis.vel.to_bits();
+                        assert_eq!(&got[..3], &want[..], "{name}: the wreck tick's velocity {:?}", port.rider.ride.chassis.vel);
+                    }
                 }
             }
             println!("{name}: the original's first wreck {theirs:?}, the port's {ours:?}");
@@ -11837,14 +11878,15 @@ fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
 ///   `Traffic::frame_late`), where the path cars of flank and trailer update before them. The push
 ///   parts on 42 (vel.z 15.48 against 24.73): the woken truck's f.col is not in the port's bike frame
 ///   (S251).
-/// - trailer: every lane agrees up to the strike on tick 45, where the chassis' velocity parts in the
-///   third digit (0.985 against 0.989 ft/s across); it stays within a hundredth after, no wreck in either.
+/// - trailer: every lane agrees over the whole capture, the strike on tick 45 included, no wreck in
+///   either. Until B7 it parted on that strike, the chassis' velocity in the third digit (0.985 against
+///   0.989 ft/s across): the trailer rode the ground's normal, not its presampled keys'.
 #[allow(clippy::type_complexity)]
 const S219_RIDES: [(&str, &str, &[u32], &str, &str, u64, Option<(u64, u8)>, Option<(u64, u8)>); 4] = [
     ("flank", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 20, Some((20, 6)), Some((20, 6))),
     ("slow", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", u64::MAX, None, None),
     ("rear", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 42, Some((42, 4)), Some((42, 4))),
-    ("trailer", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, 45, None, None),
+    ("trailer", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, u64::MAX, None, None),
 ];
 
 /// **S219: a bike meets a moving truck as the original's does**: each of [`S219_RIDES`] ridden by the
