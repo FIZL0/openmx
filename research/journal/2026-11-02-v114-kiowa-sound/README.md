@@ -9,3 +9,7 @@ setup out of the ELF and ported it as `audio::HeliEngine` / `audio::HeliNote`, p
 loader. On the particle side it read the disc's `helicopterparticles.dat` and taught the plane's particle
 manager the `AttachedToCollisionModel` index the Kiowa's list needs. Both are tested. The shell hookup
 and the by-ear and by-eye match against PCSX2 are blocked until P216 lands. Details in 1-kiowa-sound-PART.md.
+
+Part 2 (2-kiowa-sound-hooked-FINAL.md), after P216: the loop, wreck clank and particles are hooked into the
+shell. They were checked against C14's flight in PCSX2 under Video Capture: wash seen low, loop pitch
+held/raised/lowered as the rule says.

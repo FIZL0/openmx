@@ -2420,6 +2420,45 @@ fn a_plane_thrown_off_the_edge_has_no_engine_until_it_respawns() {
     engine_stops_through_the_wreck(&rows, game_sim::biplane::THROWN, &f);
 }
 
+/// **V114: a flown Kiowa's engine loop** rides its filtered collective, as the original's ranged
+/// loop sets the rate: holding plays the sample at its own rate, climbing `PitchVariance` hertz above
+/// it. Its wreck stops the loop and the put-back starts it again (the helicopter's wreck calls the
+/// loop's stop slot and its unwreck the start slot, as the plane's); leaving it for the bike stops it.
+#[test]
+fn a_flown_kiowas_loop_rides_the_collective_and_stops_on_the_wreck() {
+    let mut s = plane_sound(1);
+    let clip = tone(8000.0, 1.0);
+    s.heli = audio::HeliEngine { clip: Some(clip.clone()), variance: 400, near: 100.0, far: 300.0, doppler: 0.25 };
+    s.listen(&[audio::Listener { at: [0.0; 3], right: [1.0, 0.0, 0.0] }]);
+    let heli = |collective: f32, wrecked: bool| audio::HeliFrame {
+        collective,
+        at: [0.0, 0.0, 10.0],
+        vel: [0.0; 3],
+        crash: audio::PlaneCrash { wrecked, ..Default::default() },
+    };
+    let tick = |s: &mut audio::Sound, h: Option<audio::HeliFrame>| -> Vec<(f32, f32)> {
+        s.frame(&[audio::SeatFrame { heli: h, ..Default::default() }], 1.0 / 30.0);
+        let m = s.mixer.lock().unwrap();
+        s.seats[0].voices().into_iter().filter_map(|v| Some((m.gain_of(v)?, m.pitch_of(v)?))).collect()
+    };
+    let own = clip.rate as f32;
+    let holding = tick(&mut s, Some(heli(0.5, false)));
+    assert_eq!(holding.len(), 1, "one loop: {holding:?}");
+    assert_eq!(holding[0].1, 1.0, "holding plays the sample at its own rate");
+    let climbing = tick(&mut s, Some(heli(1.0, false)));
+    assert_eq!(climbing.len(), 1, "the same loop, moved: {climbing:?}");
+    assert_eq!(climbing[0].1, (own + 400.0) / own, "climbing, PitchVariance above");
+    let descending = tick(&mut s, Some(heli(0.0, false)));
+    assert_eq!(descending[0].1, (own - 400.0) / own, "descending, PitchVariance below");
+    assert!(tick(&mut s, Some(heli(0.5, true))).is_empty(), "the wreck stops the loop");
+    assert!(tick(&mut s, Some(heli(0.5, true))).is_empty(), "and it stays stopped while wrecked");
+    assert_eq!(tick(&mut s, Some(heli(0.5, false))).len(), 1, "the put-back starts it again");
+    tick(&mut s, None);
+    // On the bike, no voice of the seat's plays the helicopter's clip.
+    let m = s.mixer.lock().unwrap();
+    assert!(!s.seats[0].voices().into_iter().any(|v| m.clip_of(v).is_some_and(|c| Arc::ptr_eq(&c, &clip))), "leaving the Kiowa stops its loop");
+}
+
 // ---------------------------------------------------------------------------------------------------
 // the path cars' loops (V74)
 // ---------------------------------------------------------------------------------------------------

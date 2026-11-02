@@ -4835,6 +4835,25 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         (Some(_), _) => (None, soft_sheet),
     };
+    // The Kiowa's (V114): the track's `helicopterparticles.dat`, the wash under its rotor and its
+    // wreck's dust, one manager a seat stepped off it as the bikes' are, and the track's sheet where
+    // nothing above loaded it. Only where the disc has a Kiowa to fly.
+    let (heli_fx_list, soft_sheet) = match (garage.heli.is_some(), kiowa_drawn.first()) {
+        (true, Some(drawn)) => match load_heli_fx(&archives, &stem, drawn, &assets) {
+            Ok((fx, binds, sheet)) => {
+                if fx_sheet.is_none() {
+                    fx_sheet = Some(sheet.clone());
+                }
+                (Some((fx, binds)), soft_sheet.or(Some(sheet)))
+            }
+            Err(why) => {
+                println!("kiowa: no particles: {why}");
+                (None, soft_sheet)
+            }
+        },
+        _ => (None, soft_sheet),
+    };
+    let mut heli_fx: Vec<particles::PlaneFx> = Vec::new();
     // nat01's rain (V73): the `.toy`'s weather box and the triggers that turn it up and down, drawn as
     // glows of the box's texture. A world's tiles have none.
     let (mut rain, rain_art) = match world_mod {
@@ -7958,6 +7977,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
             }
         }
+        // The Kiowas' (V114): a frame for each seat flying one, off its flight after the tick. A seat
+        // not in one has its emitters off, and what is in the air runs out.
+        if simulated && !args.overview && let Some((list, binds)) = &heli_fx_list {
+            heli_fx.resize_with(world.seats.len(), || list.clone());
+            let place = &mut world.place;
+            for (seat, fx) in world.seats.iter().zip(&mut heli_fx) {
+                let frame = seat.garage.heli_up().map_or_else(particles::PlaneFrame::default, |h| heli_fx_frame(h, binds));
+                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
+            }
+        }
         perf.lap(Stage::Scene, scene_at, spent);
 
         // The frame's sound (P42), off what the ride just did, heard from every view's camera. A
@@ -8543,6 +8572,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let mut sprites = plane_fx.as_ref().map_or_else(Vec::new, |(fx, _)| plane_sprites(fx, blend.0));
             sprites.extend(bike_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
             sprites.extend(track_fx.iter().flat_map(|t| plane_sprites(&t.fx, blend.0)));
+            sprites.extend(heli_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -8883,6 +8913,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 for fx in track_fx.iter().map(|t| &t.fx) {
                     tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, blend.0), &light);
                 }
+                for (p, fx) in heli_fx.iter().enumerate() {
+                    tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, fx_blend(blend.0, &cut, p)), &light);
+                }
             }
             // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
             if let Some(glows) = glows.get(v) {
@@ -9133,9 +9166,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if let Some(said) = world.seats[0].garage.car_up().and_then(vehicle::CarRide::report) {
             println!("{said}");
         }
-        // Or the helicopter (P216).
+        // Or the helicopter (P216), and its particles in the air (V114).
         if let Some(said) = world.seats[0].garage.heli_up().and_then(vehicle::KiowaRide::report) {
             println!("{said}");
+            if let Some(fx) = heli_fx.first() {
+                let counts: Vec<String> = fx.counts().iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect();
+                println!("kiowa: particles: {}", counts.join(", "));
+            }
         }
     }
 
@@ -9249,6 +9286,8 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
         landed_trick: seat.said.landed.is_some(),
         plane,
         crash,
+        // The Kiowa's loop and clank (V114), while it is up and out.
+        heli: seat.garage.heli_up().and_then(|k| k.flown.as_ref()).map(|h| audio::HeliFrame::of(&h.kiowa, &h.ride, h.touching)),
         bike: audio::BikeCrash::of(&seat.sim.rider),
         touchdown,
         edge,
@@ -10169,6 +10208,63 @@ fn plane_fx_frame(plane: &Plane, binds: &[(String, M4)]) -> particles::PlaneFram
         frame.touch(&f.record, f.collider.relative);
     }
     frame
+}
+
+/// The Kiowa's particles (V114): `helicopterparticles.dat` out of the track's archives (a `_ss`
+/// track's own copy, or the freeride one in its second archive) and each `.emt` it names, the
+/// track's particle sheet, and where each entry's node is on the helicopter's model. Says what it
+/// found, and what it skips.
+fn load_heli_fx(
+    archives: &[Res],
+    track: &str,
+    drawn: &Kiowa,
+    assets: &Assets,
+) -> Result<(particles::PlaneFx, Vec<(String, M4)>, game_render::pst::Texture), String> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let list = read(particles::KIOWA_PARTICLES).ok_or(format!("no {}", particles::KIOWA_PARTICLES))?;
+    let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
+    let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
+    let texture = game_render::pst::Texture::parse(&texture)?;
+    let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
+    let fx = particles::PlaneFx::new(&biplane::emitters(&ini::text(&list)), atlas, read);
+    let model = assets.models.get(&drawn.model).map(|l| &l.model);
+    let mut binds: Vec<(String, M4)> = Vec::new();
+    for e in &fx.entries {
+        if let Some(name) = e.node.as_deref() {
+            let at = model.and_then(|m| m.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name)).map(|i| m.world(i)));
+            match at {
+                Some(m) if !binds.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) => binds.push((name.to_string(), m)),
+                Some(_) => {}
+                None => println!("kiowa: particles: {} rides {name}, which the model does not have", e.name),
+            }
+        }
+        println!("kiowa: particles: {} ({:?}) from {:?}", e.name, e.kind, e.emt.group);
+    }
+    for (name, why) in &fx.skipped {
+        println!("kiowa: particles: {name} ({why}) not ported");
+    }
+    Ok((fx, binds, texture))
+}
+
+/// What the Kiowa's particles read off it this frame (V114): its nodes where the measure's matrix
+/// puts the model, the wreck, the body's velocity, and the body's contacts. The shell's ground
+/// stand-in for its collision record ([`vehicle::KiowaRide::skids`]) touches at one point, under the
+/// skids; the thrown blades are not bodies here, so their models (1 to 4) touch nothing.
+fn heli_fx_frame(heli: &vehicle::KiowaRide, binds: &[(String, M4)]) -> particles::PlaneFrame {
+    let Some(m) = heli.matrix() else { return particles::PlaneFrame::default() };
+    let Some(h) = heli.flown.as_ref() else { return particles::PlaneFrame::default() };
+    let row = |r: Vf, w: f32| [r.x(), r.y(), r.z(), w];
+    let at = M4([row(m.0[0], 0.0), row(m.0[1], 0.0), row(m.0[2], 0.0), row(m.0[3], 1.0)]);
+    let vel = vector(h.ride.body.velocity);
+    particles::PlaneFrame {
+        nodes: binds.iter().map(|(n, b)| (n.clone(), b.mul(at))).collect(),
+        wrecked: h.ride.crash.reason != 0,
+        vel,
+        airspeed: h.ride.measure.speed.0,
+        ground_contacts: heli.skids().filter(|_| h.touching).map(|p| vec![vector(p)]).unwrap_or_default(),
+        contact_vel: Some(vel),
+        ..Default::default()
+    }
 }
 
 /// The ground under a point for the plane's particles (P60): its height and its surface, from the
