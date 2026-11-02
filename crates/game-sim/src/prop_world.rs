@@ -882,6 +882,17 @@ pub struct BoundsNode {
 /// rows and this node's inverse, its half the absolute rows times the half, summed), as the
 /// `(centre, half extent)` of the span. A node with no box anywhere spans `(0, 0, 0, 1)` to itself.
 pub fn node_bounds(node: &BoundsNode) -> NodeBox {
+    let (lo, hi) = node_span(node);
+    let half = Vf::splat(0.5);
+    // `.xyz` sums: the centre keeps the low corner's `w`, the half extent the high corner's.
+    NodeBox {
+        centre: lo.merge(Dest::XYZ, lo.add(hi).mul(half)),
+        half_extent: hi.merge(Dest::XYZ, hi.sub(lo).mul(half)),
+    }
+}
+
+/// [`node_bounds`]' span before it is made a centre and a half extent: the low and high corners.
+pub fn node_span(node: &BoundsNode) -> (Vf, Vf) {
     let (mut lo, mut hi) = (Vf::VF0, Vf::VF0);
     let mut any = false;
     if let Some(b) = node.own {
@@ -893,12 +904,7 @@ pub fn node_bounds(node: &BoundsNode) -> NodeBox {
     for child in &node.children {
         merge(child, &inverse, &mut any, &mut lo, &mut hi);
     }
-    let half = Vf::splat(0.5);
-    // `.xyz` sums: the centre keeps the low corner's `w`, the half extent the high corner's.
-    NodeBox {
-        centre: lo.merge(Dest::XYZ, lo.add(hi).mul(half)),
-        half_extent: hi.merge(Dest::XYZ, hi.sub(lo).mul(half)),
-    }
+    (lo, hi)
 }
 
 /// The world rows' inverse as the bounds query takes it: the rotation transposed (each moved lane

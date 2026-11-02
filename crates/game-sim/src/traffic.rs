@@ -42,9 +42,10 @@
 //!
 //! The `HasPhysics` cars (S127) are a subclass of the path car with a rigid body beside it. Until
 //! something strikes the car, the subclass's update is the path car's own and nothing else, so they
-//! are cars here like the rest, in the `.toy`'s order. What the original does once one is struck
-//! (the body wakes with the car's motion, the car's own meshes stand down, and it goes back on its
-//! path a `ResetTime` after it comes to rest) is not here.
+//! are cars here like the rest, in the `.toy`'s order. Once one is struck ([`Traffic::strike`],
+//! S186) its body wakes with the car's motion and the car stands where the body is, its clock running
+//! on, until it is put back on its path a `ResetTime` after it comes to rest
+//! ([`crate::physics_car`]). Which searches strike a car is not wired yet.
 
 #![deny(clippy::float_arithmetic)] // every sum below is the PS2's, through ps2-float
 
@@ -52,6 +53,7 @@ use std::sync::{Arc, OnceLock};
 
 use ps2_float::{Acc, Dest, F, Vf, libm, vu};
 
+use crate::physics_car::PhysicsCar;
 use crate::hash::{State, Walk};
 use crate::math::{self, Mat4};
 use crate::track::Mesh;
@@ -377,6 +379,19 @@ impl Spec {
         self.keys[i].t + (rest / len) * (self.keys[next].t - self.keys[i].t)
     }
 
+    /// The clock alone, as a struck `HasPhysics` car's update runs it while the car is a rigid body
+    /// (S186): [`Spec::step`]'s first step, and nothing moved.
+    pub fn advance(&self, car: &mut Car, dt: F) {
+        if dt <= F::ZERO {
+            return;
+        }
+        let last = self.last();
+        car.clock = F(libm::fmodf((car.clock + dt * self.time_scale).0, last.0));
+        if !(car.clock <= last) {
+            car.clock = F(libm::fmodf(car.clock.0, last.0));
+        }
+    }
+
     /// One update of a car (the path car's update, `research/oracle.txt` S81): the module's five
     /// steps. A `dt` that is not positive moves nothing.
     pub fn step(&self, car: &mut Car, dt: F, world: &mut dyn World) {
@@ -465,13 +480,16 @@ pub struct Traffic {
     pub toys: crate::toys::Toys,
     /// The track's knockable props (S131), ticked with the cars.
     pub props: crate::prop_set::PropSet,
+    /// The `HasPhysics` cars' physics objects (S186), one a car in the `.toy`'s order (`None` for a
+    /// car without), or none at all ([`Traffic::with_physics`]).
+    pub physics: Vec<Option<PhysicsCar>>,
 }
 
 impl Traffic {
     /// The cars of a track, as its load leaves them.
     pub fn new(specs: Vec<Spec>) -> Traffic {
         let cars = specs.iter().map(Car::new).collect();
-        Traffic { specs: Arc::new(specs), cars, first: None, toys: Default::default(), props: Default::default() }
+        Traffic { specs: Arc::new(specs), cars, first: None, toys: Default::default(), props: Default::default(), physics: Vec::new() }
     }
 
     /// Put the cars' meshes at the end of the world's props, each where its car stands now, and
@@ -505,13 +523,81 @@ impl Traffic {
             return movers;
         }
         let specs = Arc::clone(&self.specs);
-        let before: Vec<Mat4> = self.cars.iter().map(|car| car.pose).collect();
-        for (spec, car) in specs.iter().zip(&mut self.cars) {
-            spec.step(car, dt, world);
+        let mut before: Vec<Mat4> = self.cars.iter().map(|car| car.pose).collect();
+        self.physics_frame(dt, world);
+        for (k, (spec, car)) in specs.iter().zip(&mut self.cars).enumerate() {
+            let Some(p) = self.physics.get_mut(k).and_then(Option::as_mut) else {
+                spec.step(car, dt, world);
+                continue;
+            };
+            p.last = car.pose;
+            if p.physical {
+                spec.advance(car, dt);
+                car.pose = p.pose();
+            } else {
+                spec.step(car, dt, world);
+                if p.was_physical {
+                    // The first update back on the path makes its last pose its new one: no motion.
+                    p.last = car.pose;
+                    before[k] = car.pose;
+                }
+            }
+            p.was_physical = p.physical;
         }
         self.place(world);
         self.mark(&before, dt, world);
         movers
+    }
+
+    /// Give the `HasPhysics` cars their physics objects (S186), one a car in the `.toy`'s order,
+    /// `None` for a car without ([`PhysicsCar::load`]).
+    pub fn with_physics(mut self, physics: Vec<Option<PhysicsCar>>) -> Traffic {
+        self.physics = physics;
+        self
+    }
+
+    /// **Car `k` struck** (S186, the car's struck listener): a `HasPhysics` car not physical already
+    /// wakes ([`PhysicsCar::wake`]) with the motion from its last update's top to where the wake
+    /// stands it, at the frame's `1/dt`, and its mesh is stood there. Says whether it woke.
+    ///
+    /// The original wakes the car from every search that hits its path mesh; which of the port's
+    /// searches call this is not wired yet: this is the entry they call.
+    pub fn strike(&mut self, k: usize, dt: F, world: &mut dyn World) -> bool {
+        let inv_dt = if dt > F::ZERO { F::ONE / dt } else { F::ZERO };
+        let (Some(Some(p)), Some(car)) = (self.physics.get_mut(k), self.cars.get_mut(k)) else {
+            return false;
+        };
+        let last = p.last;
+        let woke = p.wake(car, &last, inv_dt);
+        if woke {
+            self.place(world);
+        }
+        woke
+    }
+
+    /// The physics world node's update for every physical car (S186): its collision object's search
+    /// of the world, its own mesh out of it ([`hide`]), the step and the settle. Runs before the
+    /// cars' updates, so a car put back takes its path update the same frame.
+    fn physics_frame(&mut self, dt: F, world: &mut dyn World) {
+        let mut slot = self.first;
+        for (spec, p) in self.specs.iter().zip(&mut self.physics) {
+            let own = match (slot, &spec.mesh) {
+                (Some(k), Some(_)) => {
+                    slot = Some(k + 1);
+                    Some(k)
+                }
+                _ => None,
+            };
+            let Some(p) = p.as_mut().filter(|p| p.physical) else { continue };
+            let hidden = own.map(|k| hide(world, [k, k + 1]));
+            {
+                let (field, props, trees) = world.wooded();
+                p.tick(dt, field.as_deref(), props, trees);
+            }
+            if let Some(h) = hidden {
+                show(world, h);
+            }
+        }
     }
 
     /// Tell each car's mesh how its car moved this tick ([`Moving`]), for a wheel on it to ride with

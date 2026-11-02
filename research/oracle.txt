@@ -5547,6 +5547,24 @@ physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: b
 #                                    (vt+0x120), +0x588 = 0, the meshes stood up (vt+0x20), answers 1
 #   Interface thunks: +0x580 vt+8 0x003e3dd0 (-> vt+0xfc -> wake), vt+0xc 0x003e3dc0 (wake): the
 #   listener calls a search makes on what it struck (collide_against_search). +0x584 vt+8 0x003e3de0.
+# S186 — the struck mode, ported (crates/game-sim/src/physics_car.rs, Traffic::strike/physics_frame;
+#   tests crates/game-sim/tests/physics_car_struck.rs; journal 2026-11-02-s186-struck-trucks).
+#   s89-along, both trucks (0x01cc4440, 0x01cc7630): physics_car_wake then world_node_update 0x0026f800
+#   (node 0x0060b200, dt 1/30, app +0x344/+0x348 set) every frame to the put-back, against the port:
+#   body, model node rows, contact count (record +0x100), countdown, body switch, +0x588, bit for bit.
+#   Truck 0 rests on frame 26 and is back on 326; truck 1 rests on 64 and is back on 364.
+#   - The wake's velocity/rates (vt+0xb8/+0xbc) run AFTER the placement (vt+0xe4), which rewrites the
+#     model node (squared look/up, the body at node_point(cofg)); the virtuals read that node's world
+#     rows against +0x2e0, not +0x2a0. The pose the car had is not what the motion is made from.
+#   - The body's inertia: Part::inertia of the model's span (node_bounds' min/max over Body and its
+#     four tires) as hi - lo, x0.5, x2. The node's cached bounds (+0xe0 centre, +0xf0 half) through
+#     box_size are an ulp short on z (17.77504 against 17.775042) and give inv_inertia 3 ulps off.
+#   - The collision record's mass and 1/mass are at +0x64/+0x68 (77.6..., 0.01288); 47 rays, capacity
+#     47 (+0x104). The edge object's bounds (+0x100 -> +0x30/+0x40, lanes 0/2) are 0..the terrain's max.
+#   - physics_car_settle's two countdown tests are c.ole (<=), not the props' <. Asleep, the body is
+#     off but the collision object stays filed and searching (10 contacts on truck 0) until the put-away.
+#   - Not seen: the scene walk's order between the world node and the car updates (the port runs the
+#     node first); which of the port's searches call the struck listener.
 toy_cars_read         boot 0x00289710 the .toy's [Cars] reader (above)
 # S169 — the .toy's HasPhysics things, and what their collidables name (journal 2026-10-28-s169-physics-props;
 #   tests crates/game-sim/tests/prop_under.rs). On the disc only [CarN] sections carry HasPhysics (free06,

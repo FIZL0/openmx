@@ -118,6 +118,11 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         PROPS.put(&mut out);
         traffic.props.collections.put(&mut out);
     }
+    // The `HasPhysics` cars' physics objects (S186) the same way, behind theirs.
+    if !traffic.physics.is_empty() {
+        PHYSICS.put(&mut out);
+        traffic.physics.put(&mut out);
+    }
     // The freestyle event (P155), once a rider has been in a stunt zone, behind its own tag; the
     // zones and the target are the map's, kept local.
     if !event.fresh() {
@@ -132,6 +137,9 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
 
 /// What begins [`encode`]'s knockable props section.
 const PROPS: u64 = u64::from_le_bytes(*b"S131prop");
+
+/// What begins [`encode`]'s `HasPhysics` cars section.
+const PHYSICS: u64 = u64::from_le_bytes(*b"S186phys");
 
 /// What begins [`encode`]'s freestyle event section.
 const EVENT: u64 = u64::from_le_bytes(*b"P155evnt");
@@ -163,7 +171,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
     // No players' list ahead of any tagged section (S131: the props' tag was read as one; P155: nor
     // the event's).
-    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, EVENT].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
@@ -237,6 +245,40 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         traffic.props.collections = collections;
     } else if !traffic.props.is_empty() {
         return Err(format!("no props in the state, {} here", traffic.props.collections.len()));
+    }
+    if r.bytes.get(r.at..r.at + 8) == Some(&PHYSICS.to_le_bytes()[..]) {
+        r.at += 8;
+        let mut physics: Vec<Option<crate::physics_car::PhysicsCar>> = Wire::take(&mut r)?;
+        let here = &traffic.physics;
+        let shape = |p: &Option<crate::physics_car::PhysicsCar>| {
+            p.as_ref().map(|p| (p.set.objects.len(), p.set.bones.len(), p.set.objects.iter().map(|o| o.collision.is_some()).collect::<Vec<_>>()))
+        };
+        if physics.len() != here.len() || physics.iter().map(shape).ne(here.iter().map(shape)) {
+            return Err(format!("{} physics cars in the state, {} here", physics.len(), here.len()));
+        }
+        for p in physics.iter().flatten() {
+            let c = &p.set;
+            let listed = [&c.bodies, &c.forces, &c.preforce, &c.posts].into_iter().flat_map(|l| l.iter().copied());
+            if listed.into_iter().any(|k| k >= c.objects.len()) {
+                return Err("a physics car names a body it does not have".into());
+            }
+        }
+        // The rays, the shape and the tables are the track's, as read here.
+        for (p, h) in physics.iter_mut().zip(here) {
+            let (Some(p), Some(h)) = (p.as_mut(), h.as_ref()) else { continue };
+            p.rays = Arc::clone(&h.rays);
+            p.shape = Arc::clone(&h.shape);
+            p.tables.clone_from(&h.tables);
+            p.set.springs.clone_from(&h.set.springs);
+            for (o, h) in p.set.objects.iter_mut().zip(&h.set.objects) {
+                if let (Some(c), Some(h)) = (o.collision.as_mut(), h.collision.as_ref()) {
+                    c.record.rays.clone_from(&h.record.rays);
+                }
+            }
+        }
+        traffic.physics = physics;
+    } else if !traffic.physics.is_empty() {
+        return Err(format!("no physics cars in the state, {} here", traffic.physics.len()));
     }
     let mut event = crate::event::Event { zones: Arc::clone(&sim.event.zones), target: sim.event.target, ..Default::default() };
     if r.bytes.get(r.at..r.at + 8) == Some(&EVENT.to_le_bytes()[..]) {
@@ -772,6 +814,7 @@ impl Wire for crate::prop_world::Collision {
     }
 }
 wire!(crate::prop_world::Joint { pin, on, limited });
+wire!(crate::physics_car::PhysicsCar { set, physical, was_physical, last } skip { rays, shape, tables });
 wire!(crate::world_search::Categories { mode, list });
 wire!(crate::prop_world::Edge { min, max });
 
