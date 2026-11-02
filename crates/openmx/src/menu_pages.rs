@@ -877,6 +877,25 @@ impl Menu {
         (self.screen() == Some(Screen::Garage)).then(|| self.garages.get(self.garage_seat()).map(|g| &g.pick)).flatten()
     }
 
+    /// The picks one step left and one right of the Garage row under the cursor (P258), for the
+    /// stage to dress ahead of the press. None off the Garage, or on a row the stage does not show.
+    pub fn garage_neighbours(&self) -> Vec<roster::Pick> {
+        let Some(pick) = self.garage_pick() else { return Vec::new() };
+        let Some(g) = self.garages.get(self.garage_seat()) else { return Vec::new() };
+        let page = self.page_of(Screen::Garage);
+        let Some(Key::Garage(row)) = page.get(self.cursor(Screen::Garage)).map(|r| r.key) else { return Vec::new() };
+        let Some(at) = roster::ROWS.iter().position(|r| *r == row) else { return Vec::new() };
+        [1, -1]
+            .into_iter()
+            .filter_map(|by| {
+                let mut next = g.clone();
+                next.row = at;
+                next.turn(&self.catalogue, by);
+                (next.pick != *pick).then_some(next.pick)
+            })
+            .collect()
+    }
+
     /// Where the Garage stands its pick in a `size` frame, in pixels: x, y, width, height. None off
     /// the Garage.
     pub fn garage_stage(&self, size: (usize, usize)) -> Option<[f32; 4]> {

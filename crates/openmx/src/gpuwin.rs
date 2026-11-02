@@ -32,6 +32,8 @@ struct State {
     /// The keys that went down and up since the last poll (P165). winit gives no event times, so
     /// each is stamped when the pump hands it over: the frame's time, not the key's.
     moments: Vec<crate::window::KeyMoment>,
+    /// The polls' times, to put a stalled frame's keys back where they were made (P258).
+    arrivals: crate::window::Arrivals,
     size: (u32, u32),
     resized: bool,
     closed: bool,
@@ -159,6 +161,7 @@ impl GpuWindow {
             keys: [false; KEYCODES],
             tapped: [false; KEYCODES],
             moments: Vec::new(),
+            arrivals: Default::default(),
             size: (1, 1),
             resized: false,
             closed: false,
@@ -261,9 +264,12 @@ impl GpuWindow {
         self.state.tapped = [false; KEYCODES];
         self.state.moments.clear();
         self.state.clicks.clear();
+        self.state.arrivals.poll();
         if let PumpStatus::Exit(_) = self.events.pump_app_events(Some(Duration::ZERO), &mut self.state) {
             self.state.closed = true;
         }
+        let state = &mut self.state;
+        state.arrivals.restamp(&mut state.moments);
         (self.width, self.height) = (self.state.size.0 as usize, self.state.size.1 as usize);
     }
 

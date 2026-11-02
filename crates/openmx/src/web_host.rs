@@ -224,6 +224,8 @@ pub struct Canvas {
     keys: [bool; KEYCODES],
     tapped: [bool; KEYCODES],
     moments: Vec<KeyMoment>,
+    /// The polls' times, to put a stalled frame's keys back where they were made (P258).
+    arrivals: crate::window::Arrivals,
     clicks: Vec<(i32, i32)>,
     resized: bool,
     rgba: Vec<u8>,
@@ -245,6 +247,7 @@ impl Canvas {
             keys: [false; KEYCODES],
             tapped: [false; KEYCODES],
             moments: Vec::new(),
+            arrivals: Default::default(),
             clicks: Vec::new(),
             resized: false,
             rgba: Vec::new(),
@@ -291,6 +294,8 @@ impl Canvas {
             }
             self.keys[code as usize] = down;
         }
+        self.arrivals.poll_at(now);
+        self.arrivals.restamp(&mut self.moments);
         self.size();
         // the page's touch pad up or not (P208), for the HUD and the hints to stand clear of it
         crate::menu::touch_room::set(touch_pad_shown().then_some((self.width, self.height)));
@@ -427,12 +432,14 @@ pub struct PadNode {
     gone: bool,
     /// Found after the shell started ([`PadNode::shown_by_a_press`]).
     pressed_in: bool,
+    /// The snapshots' times (P258).
+    arrivals: crate::window::Arrivals,
 }
 
 impl PadNode {
     pub fn open(path: &std::path::Path) -> std::io::Result<PadNode> {
         let index = index_of(path).ok_or_else(|| std::io::Error::other("not a gamepad"))?;
-        Ok(PadNode { index, last: None, queue: Default::default(), gone: false, pressed_in: false })
+        Ok(PadNode { index, last: None, queue: Default::default(), gone: false, pressed_in: false, arrivals: Default::default() })
     }
 
     /// A pad the page lists only now that the shell is running (P236): a browser keeps a pad from the
@@ -445,7 +452,8 @@ impl PadNode {
     }
 
     fn event(&mut self, kind: u8, number: u8, value: i16, init: bool) {
-        let ms = (shell_us() / 1000) as u32;
+        // A snapshot's change, put where it was likelier made after a stalled frame (P258).
+        let ms = (self.arrivals.at(!init && crate::window::at_rest(kind, number, value)) / 1000) as u32;
         let mut e = [0u8; 8];
         e[..4].copy_from_slice(&ms.to_le_bytes());
         e[4..6].copy_from_slice(&value.to_le_bytes());
@@ -455,6 +463,7 @@ impl PadNode {
     }
 
     fn take(&mut self) {
+        self.arrivals.poll();
         let Some((_, now)) = snapshot().into_iter().find(|(i, _)| *i == self.index) else {
             self.gone = true;
             return;

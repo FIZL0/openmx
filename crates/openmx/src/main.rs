@@ -2943,8 +2943,17 @@ async fn front_end(args: Args) -> Result<(), String> {
         let shooting = shot.is_some() && shown >= args.shot_frame;
         // The Garage's pick, dressed again when it changes, and how far round its stand is (P213).
         let stage = garage_view::rect(&shell.front.menu, (frame.width, frame.height));
-        if let Some(pick) = garage_view::shown_pick(&shell.front.menu) {
-            garage.dress(pick);
+        match garage_view::shown_pick(&shell.front.menu) {
+            Some(pick) => {
+                // Off the menu's thread (P258): the stage shows the last pick it has until this one
+                // is dressed, and dresses the row's neighbours ahead.
+                garage.dress(pick);
+                garage.ahead(&shell.front.menu.garage_neighbours());
+                if shot.is_some() {
+                    garage.settle();
+                }
+            }
+            None => garage.leave(),
         }
         // A shot stands it where the stand starts, so two shots of two picks compare.
         let turn = garage_view::Stage::turn(if shot.is_some() { 0 } else { shell.front.menu.tick });

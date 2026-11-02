@@ -207,3 +207,65 @@ fn a_picked_bike_and_rider_reach_the_ride_per_seat() {
     assert!(a > 1.0 && b > 1.0, "a bike did not move: {a} {b}");
     assert_ne!(a, b, "the 125 and the 50 came out of three seconds at the same speed");
 }
+
+/// P258: a Paint step on the disc's catalogue never changes the bike — not its model archive, its
+/// class, nor what the Bike row says — and walks every paint of the model and back; no two paints of
+/// one bike read the same. Bike and Bike Class steps land on the next model of the class and the
+/// next class, in order, and wrap.
+#[test]
+fn paint_steps_keep_the_bike_and_bike_steps_land_where_asked() {
+    let Some(mut disc) = disc() else { return };
+    let c = Catalogue::read(&mut disc).unwrap();
+    let row = |r| ROWS.iter().position(|x| *x == r).unwrap();
+    let model_of = |g: &Garage| c.bike(&g.pick.bike).unwrap().model.clone();
+    for b in &c.bikes {
+        let mut g = Garage::new(&c, &Pick { bike: b.archive.clone(), ..Pick::default() });
+        assert_eq!(g.pick.bike, b.archive, "{} is a pick of its own", b.archive);
+        g.row = row(Row::Livery);
+        let (model, class, name) = (model_of(&g), g.value(&c, Row::Class), g.value(&c, Row::Model));
+        let paints: Vec<String> = c.liveries(&model).iter().map(|p| p.archive.clone()).collect();
+        for by in [1, -1] {
+            let mut reached = Vec::new();
+            for _ in 0..paints.len() {
+                g.turn(&c, by);
+                assert_eq!(model_of(&g), model, "a Paint step from {} changed the model", b.archive);
+                assert_eq!(g.value(&c, Row::Class), class);
+                assert_eq!(g.value(&c, Row::Model), name, "a Paint step from {} renamed the bike", b.archive);
+                assert_eq!(c.fit(&g.pick), g.pick, "{} is a pick fit() would change", g.pick.bike);
+                reached.push(g.pick.bike.clone());
+            }
+            assert_eq!(g.pick.bike, b.archive, "{} paints round and back", paints.len());
+            reached.sort();
+            let mut all = paints.clone();
+            all.sort();
+            assert_eq!(reached, all, "every paint of {model}");
+        }
+        let mut names: Vec<String> = paints.iter().map(|p| c.paint_name(p)).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), paints.len(), "{model}'s paints read {names:?}");
+    }
+    let mut g = Garage::new(&c, &Pick::default());
+    for engine in roster::ENGINES {
+        g.row = row(Row::Class);
+        while g.pick.set.engine != engine {
+            g.turn(&c, 1);
+        }
+        g.row = row(Row::Model);
+        let models = c.models(engine);
+        let at = models.iter().position(|m| *m == model_of(&g)).unwrap();
+        for k in 1..=models.len() {
+            g.turn(&c, 1);
+            assert_eq!(g.pick.set.engine, engine, "a Bike step left the class");
+            assert_eq!(model_of(&g), models[(at + k) % models.len()], "a Bike step lands on the next model");
+            assert_eq!(c.fit(&g.pick), g.pick);
+        }
+    }
+    let classes: Vec<_> = roster::ENGINES.into_iter().filter(|&e| !c.models(e).is_empty()).collect();
+    g.row = row(Row::Class);
+    let at = classes.iter().position(|&e| e == g.pick.set.engine).unwrap();
+    for k in 1..=classes.len() {
+        g.turn(&c, -1);
+        assert_eq!(g.pick.set.engine, classes[(at + classes.len() * 2 - k) % classes.len()], "a Class step lands on the class before");
+    }
+}
