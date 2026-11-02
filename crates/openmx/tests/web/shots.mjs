@@ -34,8 +34,10 @@ await new Promise(r => server.on('listening', r));
 const url = `http://127.0.0.1:${server.address().port}/`;
 fs.mkdirSync(out, { recursive: true });
 
+// No extensions nor background networking, as page.mjs (K7, K9).
 const chrome = spawn('chromium', ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-  '--no-first-run', '--no-default-browser-check', '--hide-scrollbars', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  '--no-first-run', '--no-default-browser-check', '--disable-extensions',
+  '--disable-component-extensions-with-background-pages', '--disable-background-networking', '--hide-scrollbars', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
 const fail = why => {
   console.error(why);
   chrome.kill();
