@@ -19,6 +19,7 @@
 
 use crate::menu::Speedometer;
 use crate::menu::ink::{self, Box4, Type, Weight};
+use crate::menu::touch_room::Room;
 use crate::overlay::{self, Activity, Blip, Gauges, Icon};
 use crate::vehicle::Machine;
 use game_render::gpu::{Shape, Sprite};
@@ -738,14 +739,30 @@ pub fn scale_of(w: f32, h: f32, scale: f32) -> f32 {
 /// View `view`'s HUD (left, top, width, height in the frame) as sprites into `out`, [`images`]
 /// counted from `base`, at `now`.
 pub fn sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], shown: &Shown, tracker: &Tracker, now: Instant) -> Drawn {
+    sprites_clear_of(out, base, view, None, shown, tracker, now)
+}
+
+/// [`sprites`], with the page's touch pad over the frame (P208) where `pad` says it is: the radar
+/// right of the stick's resting base and the speedometer over the pedals, in a view at those
+/// corners of the frame.
+#[allow(clippy::too_many_arguments)]
+pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad: Option<Room>, shown: &Shown, tracker: &Tracker, now: Instant) -> Drawn {
     let s = scale_of(view[2], view[3], shown.scale);
     let mut pen = Pen { out, view, s, base, corner: Corner::TopLeft, alpha: 1.0 };
     let mut drawn = Drawn { scale: s, ..Drawn::default() };
     if shown.minimap {
+        if let Some(room) = pad {
+            pen.view = right_of_the_stick(view, extent(&pen, |p, d| radar(p, shown, d)), room);
+        }
         radar(&mut pen, shown, &mut drawn);
+        pen.view = view;
     }
     score(&mut pen, shown, tracker, now, &mut drawn);
+    if let Some(room) = pad {
+        pen.view = over_the_pedals(view, extent(&pen, |p, d| speedometer(p, shown, d)), room);
+    }
     speedometer(&mut pen, shown, &mut drawn);
+    pen.view = view;
     prompts(&mut pen, shown, &mut drawn);
     top_right(&mut pen, shown, tracker, now, &mut drawn);
     if let Some(e) = &shown.event {
@@ -765,6 +782,44 @@ pub fn draw(frame: &mut Frame, shown: &Shown, tracker: &Tracker, now: Instant) -
     let drawn = sprites(&mut out, 0, view, shown, tracker, now);
     ink::raster(frame, &out, &images());
     drawn
+}
+
+/// Where `part` draws with `pen` as it stands: the frame box (left, top, right, bottom) of its
+/// sprites, drawn aside and thrown away.
+fn extent(pen: &Pen, part: impl FnOnce(&mut Pen, &mut Drawn)) -> Option<[f32; 4]> {
+    let mut aside = Vec::new();
+    let mut p = Pen { out: &mut aside, view: pen.view, s: pen.s, base: pen.base, corner: pen.corner, alpha: pen.alpha };
+    part(&mut p, &mut Drawn::default());
+    let corners = aside.iter().flat_map(|s| s.corners);
+    corners.fold(None, |b, [x, y]| match b {
+        None => Some([x, y, x, y]),
+        Some([l, t, r, bt]) => Some([l.min(x), t.min(y), r.max(x), bt.max(y)]),
+    })
+}
+
+/// `view`, moved for what draws at `drawn` in its bottom right corner to stand over the touch pad's
+/// pedals and left of its faces (P208), in a view whose corner is the frame's.
+fn over_the_pedals(view: [f32; 4], drawn: Option<[f32; 4]>, room: Room) -> [f32; 4] {
+    let [vx, vy, w, h] = view;
+    let (fw, fh) = room.frame;
+    let Some(b) = drawn.filter(|_| (vx + w - fw).abs() < 1.0 && (vy + h - fh).abs() < 1.0) else { return view };
+    let (right, up) = room.over_the_pedals();
+    let (dx, dy) = ((right - (fw - b[2])).max(0.0), (up - (fh - b[3])).max(0.0));
+    [vx, vy, w - dx, h - dy]
+}
+
+/// `view`, moved for what draws at `drawn` in its bottom left corner to stand right of the touch
+/// pad's stick at rest (P208), in a view whose corner is the frame's.
+fn right_of_the_stick(view: [f32; 4], drawn: Option<[f32; 4]>, room: Room) -> [f32; 4] {
+    let [vx, vy, w, h] = view;
+    let (_, fh) = room.frame;
+    let Some(b) = drawn.filter(|_| vx.abs() < 1.0 && (vy + h - fh).abs() < 1.0) else { return view };
+    let (right, up) = room.right_of_the_stick();
+    if fh - b[3] >= up {
+        return view;
+    }
+    let dx = (right - b[0]).max(0.0);
+    [vx + dx, vy, w - dx, h]
 }
 
 /// The score, top left: the two-tone capsule, SCORE and the banked points, ringed orange a moment

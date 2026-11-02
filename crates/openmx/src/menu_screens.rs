@@ -9,6 +9,7 @@
 //! the column and the band reach the frame's edges whatever its shape.
 
 use super::ink::{self, Box4, SLANT, Weight};
+use super::touch_room::Room;
 use super::*;
 
 const CHALK: [u8; 4] = [0xf5, 0xf0, 0xe8, 255];
@@ -356,13 +357,18 @@ impl<'a> Pen<'a> {
         let (l, r, b) = (self.left(), self.right(), self.bottom());
         self.fill([l, STAGE.1 - BAND, r - l, b - STAGE.1 + BAND], INK);
         let base = Pen::mid(STAGE.1 - BAND / 2.0, 1.5);
-        let mut x = 5.0;
+        let start = self.clear_of_the_stick(5.0);
+        let mut x = start;
+        let mut height = 0.0;
         for (s, bold) in line {
             let (w, c) = if *bold { (Weight::Heavy, CHALK) } else { (Weight::Bold, BONE) };
             let s = self.fit(w, s, 1.5, (STAGE.0 - 6.0 - x).max(0.0));
-            self.text(w, &s, x, base, 1.5, 0.0, c, Align::Left);
+            let b = self.text(w, &s, x, base, 1.5, 0.0, c, Align::Left);
+            height = b[3];
             x += self.wide(w, &s, 1.5);
         }
+        let [lx, ly, _, _] = self.b([start, base, 0.0, 0.0]);
+        self.parts.push(Part::Line([lx, ly - height, (x - start) * self.em, height]));
     }
 
     /// A button `d` ems across centred on `(x, y)`.
@@ -444,7 +450,7 @@ impl<'a> Pen<'a> {
             let (d, gap) = (1.15 * size, 0.45 * size);
             hints.iter().map(|(b, s)| pen.button_wide(*b, d) + gap + pen.wide(Weight::Bold, s, size)).collect()
         };
-        let right = STAGE.0.min(self.right());
+        let right = self.clear_of_the_pedals(STAGE.0.min(self.right()));
         // The tab's slanted end leans 3 ems over its foot, and the hints sit 4 in from it.
         let room = right - 2.0 - 4.0 - 3.0 - self.left().max(0.0) - spacing;
         let mut size = 1.55;
@@ -469,6 +475,24 @@ impl<'a> Pen<'a> {
             self.text(Weight::Bold, s, x + bw + gap, Pen::mid(mid, size), size, 0.0, CHALK, Align::Left);
             x += w + 1.6;
         }
+        let hb = self.b([x0 + 4.0, mid - d / 2.0, content, d]);
+        self.parts.push(Part::Hints(hb));
+    }
+
+    /// `right` (stage ems), or left of the page's touch pad's pedals while the pad is up (P208): the
+    /// hint tab is low enough to be under them on any frame the pad fits.
+    fn clear_of_the_pedals(&self, right: f32) -> f32 {
+        let Some(room) = Room::of((self.size[0] as usize, self.size[1] as usize)) else { return right };
+        let (left, _) = room.left_of_the_pedals();
+        right.min((self.size[0] - left - self.o[0]) / self.em)
+    }
+
+    /// `left` (stage ems), or right of the page's touch pad's stick at rest while the pad is up
+    /// (P208), for the band's line.
+    fn clear_of_the_stick(&self, left: f32) -> f32 {
+        let Some(room) = Room::of((self.size[0] as usize, self.size[1] as usize)) else { return left };
+        let (right, _) = room.right_of_the_stick();
+        left.max((right - self.o[0]) / self.em)
     }
 
     /// A chip: its words, the starred ones bold and peach.
