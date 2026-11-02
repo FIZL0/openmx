@@ -1015,6 +1015,25 @@ pub struct Scene<'a> {
     facets: std::collections::HashMap<usize, Vec<Facet>>,
     ray: ray_probe::Record,
     sweep: SweepProbe,
+    /// A prop's ray probe's ([`Scene::probed`]): its body asleep, and what its listeners heard.
+    asleep: bool,
+    heard: Heard,
+}
+
+/// A prop's ray probe's listeners (S200), in the order the prop's init puts them on it: the prop's
+/// **hit listener**, which wakes the body (its enable) when the struck one's category is in the game's
+/// global mask ([`WAKE_MASK`]) — the body's object asks for it (`+0x58`) from its making on, and no key
+/// turns it off — and the prop's collection's, which activates the collection whatever was struck.
+pub const HIT_LISTENER: usize = 0;
+pub const COLLECTION_LISTENER: usize = 1;
+
+/// What a prop's ray probe's listeners heard ([`Scene::probed`]): `woke`, the hit listener woke the
+/// asleep body (and so the probe's category list is every category from that hit on); `struck`, the
+/// collection's listener heard a hit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Heard {
+    pub woke: bool,
+    pub struck: bool,
 }
 
 /// The plane's nearby `search` refilled ([`broad_phase::gather`], both kinds of structure) around
@@ -1183,7 +1202,7 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
-        Scene::of(props, trees, bikes, field, rays, node, search, false)
+        Scene::of(props, trees, bikes, field, rays, node, search, false, None)
     }
 
     /// [`Scene::wooded`] in the plane's own world (S141, [`world_flown`]): the path cars are toys,
@@ -1199,7 +1218,33 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
-        Scene::of(props, trees, bikes, field, rays, node, search, true)
+        Scene::of(props, trees, bikes, field, rays, node, search, true, None)
+    }
+
+    /// **A prop's search** (S200): [`Scene::flown`] for a prop's ray probe, which carries the prop's
+    /// category list `categories` (the gather's and the search's pair filter read it) and the prop's two
+    /// listeners ([`HIT_LISTENER`], [`COLLECTION_LISTENER`]). `asleep` is whether the prop's body is
+    /// asleep: the hit listener's wake is the body's enable, which does nothing to an awake one. What
+    /// they heard is [`Scene::heard`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn probed(
+        props: Option<&'a Props>,
+        trees: Option<&'a Trees>,
+        field: Option<([F; 2], [F; 2])>,
+        rays: &'a Rays,
+        node: &Frame,
+        search: &mut broad_phase::Search,
+        categories: &Categories,
+        asleep: bool,
+    ) -> Scene<'a> {
+        let mut scene = Scene::of(props, trees, None, field, rays, node, search, true, Some(categories));
+        scene.asleep = asleep;
+        scene
+    }
+
+    /// What a prop's ray probe's listeners heard in the searches so far ([`Scene::probed`]).
+    pub fn heard(&self) -> Heard {
+        self.heard
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1212,12 +1257,17 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
         toys: bool,
+        categories: Option<&Categories>,
     ) -> Scene<'a> {
         let props = props.map_or(&[][..], |p| &p.props[..]);
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
         let objects = kept_world(props, trees, bikes.as_ref(), field, centre, radius, toys, |broad, built, generation| {
             let mut objects = lend(generation, built);
+            if let Some(categories) = categories {
+                objects[RAY].categories = categories.clone();
+                objects[RAY].listeners = vec![HIT_LISTENER, COLLECTION_LISTENER];
+            }
             if !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
                 refill(&mut objects, broad, search);
             }
@@ -1250,6 +1300,8 @@ impl<'a> Scene<'a> {
             facets: std::collections::HashMap::new(),
             ray,
             sweep,
+            asleep: false,
+            heard: Heard::default(),
         }
     }
 
@@ -1289,6 +1341,12 @@ struct Lent {
 
 impl Drop for Lent {
     fn drop(&mut self) {
+        // A prop's ray probe ([`Scene::probed`]) back to the world's own, which [`lend`] does not put
+        // back.
+        if let Some(ray) = self.objects.get_mut(RAY) {
+            ray.categories = any_category();
+            ray.listeners.clear();
+        }
         give_back(self.generation, std::mem::take(&mut self.objects));
     }
 }
@@ -1424,9 +1482,22 @@ impl Narrow for Scene<'_> {
         trees.groups()[group - self.groups].parts[i].map(|j| self.trunks + j)
     }
 
-    /// The ray probe's two listeners: the hit listener's wake is a no-op on the plane's awake body,
-    /// and the sound listener is not simulation.
-    fn heard_hit(&mut self, _objects: &mut [Collidable], _listener: usize, _probe: usize, _other: usize) {}
+    /// The ray probe's listeners. The plane's two are not here: the hit listener's wake is a no-op on
+    /// the plane's awake body, and the sound listener is not simulation. A prop's two
+    /// ([`Scene::probed`]): the hit listener wakes an asleep body when `other`'s category is in the
+    /// global mask, and the wake's enable puts the probe's category list back to every category,
+    /// which the rest of this search's pair filter reads; the collection's listener hears every hit.
+    fn heard_hit(&mut self, objects: &mut [Collidable], listener: usize, probe: usize, other: usize) {
+        match listener {
+            HIT_LISTENER if self.asleep && objects[other].category & WAKE_MASK != 0 => {
+                self.asleep = false;
+                self.heard.woke = true;
+                objects[probe].categories = any_category();
+            }
+            COLLECTION_LISTENER => self.heard.struck = true,
+            _ => {}
+        }
+    }
 
     /// A bike's one listener, the struck listener: what struck it is the probe's collidable.
     fn heard_struck(&mut self, objects: &mut [Collidable], listener: usize, struck: usize, probe: usize) {

@@ -279,6 +279,9 @@ impl State for Collision {
         w.vf("swept_to", r.swept_to);
         w.u32("contacts", r.contacts.len() as u32);
         w.u32("struck", r.struck.map_or(u32::MAX, |s| s as u32));
+        w.u32("category_mode", self.categories.mode);
+        w.u32("categories", self.categories.list.len() as u32);
+        self.categories.list.iter().for_each(|&m| w.u32("category", m));
     }
 }
 

@@ -737,6 +737,7 @@ impl Wire for crate::prop_world::Collision {
         nearby.put(out);
         sweeps.put(out);
         struck.put(out);
+        self.categories.put(out);
     }
     fn take(r: &mut Reader<'_>) -> Result<Self, String> {
         let collider = Wire::take(r)?;
@@ -765,10 +766,11 @@ impl Wire for crate::prop_world::Collision {
             sweeps: Wire::take(r)?,
             struck: Wire::take(r)?,
         };
-        Ok(crate::prop_world::Collision { collider, record })
+        Ok(crate::prop_world::Collision { collider, record, categories: Wire::take(r)? })
     }
 }
 wire!(crate::prop_world::Joint { pin, on, limited });
+wire!(crate::world_search::Categories { mode, list });
 wire!(crate::prop_world::Edge { min, max });
 
 impl Wire for crate::prop_world::Listener {
