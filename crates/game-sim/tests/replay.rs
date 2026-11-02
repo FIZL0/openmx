@@ -11644,3 +11644,158 @@ fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
         });
     }
 }
+
+// --- S219: the bike meets free06's construction trucks and a free09 trailer, in the original ----------
+//
+// S216 kept the port's wreck reasons for a bike meeting a moving vehicle (1 into a flank at ~30 ft/s, 4
+// for a rear-end at 28 ft/s, 6 for a head into the body) with no capture of the original to hold them
+// to. Each state here puts the human's bike in a path car's way (`research/s219/launch.py`, S76's
+// teleport), rolling square at a car's flank or standing on its line, and is recorded at copy 2's
+// quarter speed with no pad from its first frame (`research/s219/record.sh`: `./kit record --state`
+// cannot unpause without the pad):
+//
+// - **flank**: S129's across state (free06, the 250; copy 2's slot 10), the bike at 30 ft/s square
+//   (0.7° off) into dump truck 15's flank (`dumptruck.psg`, 23.6 ft/s), reaching it as the truck's
+//   centre does. The original's bike goes in under the body and wrecks on its head (6) on tick 20.
+// - **slow**: the same at 6 ft/s. The truck knocks the bike back and it rolls off down the bank: no
+//   wreck.
+// - **rear**: the bike standing on the line of the company truck at 0x1cc4440 (`ctruck.psg`, a
+//   `HasPhysics` car, 27.9 ft/s) facing along it; the truck runs into its tail and it wrecks (4) on tick
+//   42, the truck stopping dead.
+// - **trailer**: first_recording's state (free09, the 125; copy 2's slot 30), the bike at 30 ft/s square
+//   into trailer A's flank (`free_trailerA`, 50 ft behind its cab at 45 ft/s). It climbs the bank to the
+//   road and meets the trailer at 18 ft/s on tick 44: knocked to a stop, no wreck.
+//
+//   ./kit pcsx2 with -- python3 -B research/s219/launch.py PID 10 01cc9300 147.3 30 8 0.6 3 23
+//   ./kit pcsx2 with -- python3 -B research/s219/launch.py PID 10 01cc9300 147.3 6 8 1.5 3 24
+//   ./kit pcsx2 with -- python3 -B research/s219/launch.py PID 10 01cc4440 34.5 0 0 2.0 3 25
+//   ./kit pcsx2 with -- python3 -B research/s219/launch.py PID 30 01263570 10.5 30 5 1.4 3 26 1.5 50
+//   ./kit pcsx2 with -- research/s219/record.sh PID 23 200 context/capture/s219/flank.csv
+//   ./kit pcsx2 with -- research/s219/record.sh PID 26 200 context/capture/s219/trailer.csv watch/s219-trailer.toml
+//
+// (slow 200 rows from 24, rear 300 from 25.) The RAM images are `context/states/s219-<name>.eeMemory.bin`
+// (`./kit state ram <slot> --out …`).
+
+/// S219's rides, as [`S207_RIDES`]: the name, the track, the human rider's chain in the image, the `.phy`
+/// and the bike model, the tick to which every lane agrees, and the original's first wreck (tick,
+/// reason) and the port's.
+///
+/// - flank: every lane agrees up to the wreck's tick, where the origin parts by an ulp; both enter the
+///   head hit (6) on tick 20. S216's reason 1 for a flank at ~30 ft/s is not what happens here: the
+///   bike's front runs in under the dump truck's body and the head ray meets it.
+/// - slow: every lane agrees over the whole capture.
+/// - rear: the truck (the port's and the original's) is at the same point to the digit on every tick to
+///   41, and the bike too to 40. On 41 the port's bike is struck by the truck where it stands that tick
+///   and wrecks (4, as the original's); the original's is struck on 42, its truck stopped dead at that
+///   same tick-41 point. The `HasPhysics` truck strikes a tick later than its path point in the
+///   original, as S207's ctruck does (B8); the path cars of flank and trailer strike on the same tick.
+/// - trailer: every lane agrees up to the strike on tick 45, where the chassis' velocity parts in the
+///   third digit (0.985 against 0.989 ft/s across); it stays within a hundredth after, no wreck in either.
+#[allow(clippy::type_complexity)]
+const S219_RIDES: [(&str, &str, &[u32], &str, &str, u64, Option<(u64, u8)>, Option<(u64, u8)>); 4] = [
+    ("flank", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 20, Some((20, 6)), Some((20, 6))),
+    ("slow", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", u64::MAX, None, None),
+    ("rear", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 41, Some((42, 4)), Some((41, 4))),
+    ("trailer", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, 45, None, None),
+];
+
+/// **S219: a bike meets a moving truck as the original's does**: each of [`S219_RIDES`] ridden by the
+/// port from the original's save state among the state's path cars, as
+/// [`a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does`], the first wreck of each held to the
+/// table. Skipped with a line where a capture or state is missing.
+#[test]
+fn a_bike_meets_a_moving_truck_as_the_original_does() {
+    for (name, track, hops, phy, model, agrees, their_wreck, our_wreck) in S219_RIDES {
+        let path = private_dir("capture").join("s219").join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("no {} — S219's comment above says how it is recorded", path.display());
+            continue;
+        };
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let image = private_dir("states").join(format!("s219-{name}.eeMemory.bin"));
+        let Some(st) = SaveState::open_image(&image, hops) else { continue };
+        let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+        let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        println!("{name}: saved at {saved}, the search holds the cars: {}", st.bike_search_holds_cars());
+        in_the_track_with_cars(&st, track, phy, model, |world, named, bike, traffic, col| {
+            println!("{name}: {} path cars", traffic.cars.len());
+            let mut sim = acceptance_start(&cap, 0, bike).unwrap();
+            sim.traffic = traffic;
+            sim.rider.sense.wrecks_enabled = true;
+            sim.rider.carries_bike_col(Arc::new(col.expect("the bike's collision files")));
+            let ride = &mut sim.rider.ride;
+            st.seed_chassis(ride).expect("the chassis");
+            st.seed_wheels(ride).expect("both wheels");
+            st.seed_balance(ride).expect("the balance");
+            st.seed_engine_outputs(ride).expect("the engine");
+            st.seed_air(ride).expect("the air state");
+            if let Some(d) = st.drivetrain() {
+                d.seed(ride);
+            }
+            st.seed_levers(ride).expect("the levers");
+            st.seed_engine_state(ride).expect("the engine's state");
+            seed_bike_search(&st, &mut sim, world);
+
+            let mut watches = Vec::new();
+            for (col, path) in chassis_lanes() {
+                let Ok(w) = cap.float(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, path) in slip_lanes() {
+                let Ok(w) = cap.bool(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, wheel) in [("f", "front"), ("r", "rear")] {
+                for (c, p) in [("ray_hit", "w.ray_hit"), ("swept", "w.swept_contact")] {
+                    if let Ok(w) = cap.int(&format!("{col}_{c}"), &format!("rider.ride.{wheel}.{p}")) {
+                        watches.push(retick(w, &ticks, 0));
+                    }
+                }
+            }
+            let last = *ticks.last().unwrap() as usize + 1;
+            let mut pads = inputs.clone();
+            pads.resize(last.max(pads.len()), Input::default());
+            let f = Fixture {
+                name: format!("s219 {name} from its save state"),
+                seed: 0,
+                start: Some(sim.clone()),
+                inputs: pads.clone(),
+                watches,
+                world: Some(named.clone()),
+                ..Default::default()
+            };
+            let whole = match replay::verify_in(&f, world) {
+                Ok(_) => None,
+                Err(d) => {
+                    println!("{}: {d}", f.name);
+                    Some(d.tick)
+                }
+            };
+            println!("{name}: parts on {whole:?}");
+            let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+            let num = |r: usize, c: &str| -> f32 { cell(&cap, r, col(c)).parse().unwrap_or(f32::NAN) };
+            let theirs = (0..ticks.len()).find(|&r| num(r, "wreck_reason") != 0.0).map(|r| (ticks[r], num(r, "wreck_reason") as u8));
+            let mut port = sim.clone();
+            let mut ours = None;
+            for t in 1..last {
+                port.tick_in(pads[t - 1], world);
+                if let Some(r) = ticks.iter().position(|&k| k == t as u64).filter(|_| t as u64 + 4 >= agrees && t as u64 <= agrees + 2) {
+                    let (c, v) = (port.rider.ride.chassis.cofg_world, port.rider.ride.chassis.vel);
+                    println!(
+                        "{name} tick {t}: original cofg ({:.2}, {:.2}, {:.2}) vel ({:.2}, {:.2}, {:.2}) wreck {} | port ({:.2}, {:.2}, {:.2}) vel ({:.2}, {:.2}, {:.2}) wreck {:?}",
+                        num(r, "ch_cofg.x"), num(r, "ch_cofg.y"), num(r, "ch_cofg.z"), num(r, "ch_vel.x"), num(r, "ch_vel.y"), num(r, "ch_vel.z"),
+                        num(r, "wreck_reason"), c.x(), c.y(), c.z(), v.x(), v.y(), v.z(), port.rider.state.wreck.map(|w| w.0)
+                    );
+                }
+                if ours.is_none() && let Some(w) = port.rider.state.wreck {
+                    ours = Some((t as u64, w.0));
+                }
+            }
+            println!("{name}: the original's first wreck {theirs:?}, the port's {ours:?}");
+            assert!(whole.unwrap_or(u64::MAX) >= agrees, "{name}: parts on {whole:?}, before tick {agrees}");
+            assert_eq!(theirs, their_wreck, "{name}: the capture's wreck");
+            assert_eq!(ours, our_wreck, "{name}: the port's wreck");
+        });
+    }
+}
