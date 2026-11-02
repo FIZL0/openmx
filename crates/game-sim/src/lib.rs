@@ -785,6 +785,10 @@ pub mod motion;
 /// where the ground step's and the air step's parameters come from, instead of from a test.
 pub mod phy;
 
+/// MX vs. ATV Untamed's binary INI (BPB, MD69): every text INI of the earlier games compiled to a
+/// table, read into the same [`phy::Ini`] the text reader gives.
+pub mod bpb;
+
 /// The acceptance test for the whole port: a fixture of recorded inputs plus the state it starts from,
 /// replayed through the simulation and compared tick by tick against the recording's hashes or its
 /// watched fields. A failure is one line — `tick 413: bike.vel[1] -58.94952 vs -58.949516` — not a diff of two

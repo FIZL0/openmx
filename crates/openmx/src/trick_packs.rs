@@ -85,7 +85,7 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
     let table = first.and_then(|r| r.get("table")).and_then(Json::str).ok_or("mod.json has no riders[0].table")?;
     // The motocross rider's when the pack does not say: every pack import-tricks writes says `MX`.
     let rider = first.and_then(|r| r.get("rider")).and_then(Json::str).unwrap_or("MX").to_owned();
-    let table = file(folder, table);
+    let table = with_bpb(file(folder, table));
     let bytes = std::fs::read(&table).map_err(|e| format!("{}: {e}", table.display()))?;
     let rows = trick_pack::table(&bytes).map_err(|e| format!("{}: {e}", table.display()))?;
     let mut phys = Vec::new();
@@ -98,6 +98,15 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
         }
     }
     Ok(Some(Pack { id, folder: folder.to_owned(), table, rows, rider, phys }))
+}
+
+/// The table's `<name>.bpb` when the pack has one, else the name: SLUS_217.01's loader (`0x001425c0`)
+/// opens `%s.bpb` first and the text only when there is none (MD69).
+fn with_bpb(path: PathBuf) -> PathBuf {
+    let mut bpb = path.clone().into_os_string();
+    bpb.push(".bpb");
+    let bpb = PathBuf::from(bpb);
+    if bpb.is_file() { bpb } else { path }
 }
 
 /// A pack's file by its `/`-separated name, kept inside the pack's folder.
