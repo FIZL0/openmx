@@ -7163,6 +7163,10 @@ kiowa_preforce boot 0x0038e2b0 (heli, dt in f12): 0x0015b050(heli+0x50), vt +0x1
 #   +0x150 world (ground queries); +0x54c touchdown sound; +0x470 speed, +0x474 alpha, +0x478 beta,
 #   +0x480 world rates, +0x490 body velocity, +0x4a0 forward, +0x4b0 up, +0x4c0 Euler, +0x4d0 matrix.
 #   MX: +0xd1c rotor node (byte 3 bit 6 hidden), +0xd40 wrecked-blade node, +0xe58 rotor angle.
+# C14a — the collision object *(heli+0x170): the plane's class; ray probe from helicopter\col\kiowam.col
+#   (22 rays, capacity +0x104 22), collidable +0x1f8 categories 0x202058, actors +0x110 8, collides
+#   +0x114 0xffffffff; +0x460 = 0x2000 (vehicles), +0x464 = 0x40000. Ported as kiowa::Collision /
+#   kiowa::Grounded. *(heli+0x54c)+0x200 (touchdown clip count) is 0 in C14's image: no rand() at touchdown.
 kiowa_measure boot 0x0038e380 (heli, dt in f12): 0x0015b070(heli+0x50), the figures, vt +0x1b4,
 #                                 then the touchdown sound (0x001b30e0, 0x003dd0a0)
 kiowa_wreck_check boot 0x0038e910 (heli, dt in f12): edge throw, rotor in ground / struck / speed,

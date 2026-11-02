@@ -1038,6 +1038,12 @@ pub struct Ride {
 /// collision object, and what a crash test's answer does to the machine. None of it is the
 /// helicopter's own flight.
 pub trait Surroundings {
+    /// The body wrapper's post, first in the post listener, with the body just stepped: the
+    /// collision object gathers its nearby list where the body now stands ([`Grounded`]). Nothing for
+    /// surroundings with no collision object.
+    fn post(&mut self, body: &Body) {
+        let _ = body;
+    }
     /// The body wrapper's collision response, every substep after gravity.
     fn resolve(&mut self, body: &mut Body);
     /// The collision record's touching flag.
@@ -1096,6 +1102,7 @@ impl<S: Surroundings> crate::biplane::Dynamics for Lists<'_, S> {
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
         let ride = &mut *self.ride;
+        self.around.post(&ride.body);
         ride.measure.flight(&ride.body, self.acos);
         let touching = self.around.touching();
         let c = CrashContact { touching, ignored: self.around.ignored(), speed: ride.measure.speed };
@@ -1534,4 +1541,153 @@ pub fn wing_chord(chord: F, span: F, aspect_ratio: F) -> F {
 /// reads into each of its four blades the same.
 pub fn wreck_blade(bytes: &[u8]) -> Part {
     Part::read_bytes(bytes, "PhysicsPart1")
+}
+
+// --- the helicopter's collision object ---------------------------------------------------------------
+
+/// The helicopter's ray probe: the rigid-body part's `%sm.col` for the skin, the Kiowa's here.
+pub const KIOWA_RAYS: &str = "helicopter\\col\\kiowam.col";
+
+/// The helicopter's collidable's categories (the collision object's `+0x1f8`, its `+0x84`) and the
+/// object's actor and collides-with masks (`+0x110`, `+0x114`), off C14's save state: not keys of the
+/// file. The plane's are the same but for the collidable's one bit ([`crate::flight::COLLIDABLE`]).
+pub const COLLIDABLE: u32 = 0x0020_2058;
+pub const ACTORS: u32 = 8;
+pub const COLLIDES_WITH: u32 = 0xffff_ffff;
+
+/// The crash test's surface mask (`+0x460`): a record whose world rays last struck an object of one of
+/// these categories is spared the speed test. The vehicles' bit, as the plane's.
+pub const CRASH_MASK: u32 = crate::flight_search::VEHICLE;
+
+/// **The helicopter's collision object** (C14a): the rigid-body part's, the same class the plane's is
+/// ([`crate::flight::Flight`]'s `collider` and `record`) — its response's tuning off `[Mass
+/// Properties]` and the body's inertia ([`crate::wreck_bike::collider`]), its search's record with the
+/// ray probe out of [`KIOWA_RAYS`] (one contact a ray), and the near-field search its nearby list is
+/// kept in.
+///
+/// Its frame is the plane's: [`Collision::search`] before the world steps (the level's collision node
+/// searches every object before any dynamics world runs), the response inside the force listener's
+/// gravity step every substep, and the nearby list gathered again in the body wrapper's post
+/// ([`Surroundings::post`]). [`Grounded`] is it as the helicopter's [`Surroundings`].
+#[derive(Clone, Debug)]
+pub struct Collision {
+    pub collider: crate::contact::Collider,
+    pub record: crate::contact_search::Record,
+    pub rays: std::sync::Arc<crate::flight_search::Rays>,
+    pub nearby: crate::broad_phase::Search,
+    /// The part's mass: what the response pushes the body with.
+    pub mass: F,
+}
+
+impl Collision {
+    /// The collision object as the part's loader builds it for a helicopter whose body is `body` and
+    /// whose body's inertia tensor (the body's `+0x110`, worked out from the model's box) is `inertia`.
+    pub fn new(part: &crate::phy::Part, body: &Body, inertia: Vf, rays: crate::flight_search::Rays) -> Collision {
+        use crate::wreck_bike;
+        let collider = crate::contact::Collider {
+            collidable: Some(COLLIDABLE),
+            actors: ACTORS,
+            collides_with: COLLIDES_WITH,
+            ..wreck_bike::collider(part, part.mass, body.inv_mass, inertia)
+        };
+        let mut record = wreck_bike::record(part, wreck_bike::node_of(body));
+        record.rays = Some(rays.pairs());
+        record.capacity = rays.segments.len();
+        Collision { collider, record, rays: std::sync::Arc::new(rays), nearby: crate::flight_search::search(), mass: part.mass }
+    }
+
+    /// **The search**, before the world steps: the record emptied, then the sweep back, the rays against
+    /// the terrain and against the world's meshes and plants ([`crate::contact_search::collide`] over
+    /// [`crate::flight_search::Scene::flown`]), the transform where the last post left the body. Gives
+    /// the movers the contacts name, for the response.
+    pub fn search(&mut self, body: &mut Body, world: &mut dyn crate::world::World, dt: F) -> Vec<crate::contact::Mover> {
+        use crate::contact_search::{self, Search};
+        use crate::flight_search::{self, Scene};
+        let rays = self.rays.clone();
+        self.record.node = crate::wreck_bike::node_of(body);
+        contact_search::clear(&mut self.record, Some(&mut *body));
+        let (field, props, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
+        let bounds = field.as_deref().map(field_box);
+        let mut scene = Scene::flown(props, trees, None, bounds, &rays, &self.record.node, &mut self.nearby);
+        let mut records = [std::mem::take(&mut self.record)];
+        contact_search::collide(&mut records, 0, Some(body), field.as_deref(), &mut scene, dt);
+        let movers = Search::movers(&scene);
+        let [record] = records;
+        self.record = record;
+        movers
+    }
+
+    /// The body wrapper's post: the nearby list gathered again round the ray probe placed where the body
+    /// now stands ([`crate::flight_search::refresh_flown`]).
+    pub fn refresh(&mut self, body: &Body, world: &mut dyn crate::world::World) {
+        let node = crate::wreck_bike::node_of(body);
+        let (field, props, trees) = crate::flight_search::near_world(world, &self.rays, &node, &mut self.nearby);
+        let bounds = field.as_deref().map(field_box);
+        crate::flight_search::refresh_flown(props, trees, None, bounds, &self.rays, &node, &mut self.nearby);
+    }
+
+    /// The record's entries as the touchdown reads them.
+    pub fn entries(&self) -> Vec<Touch> {
+        self.record.contacts.iter().map(|c| Touch { kind: c.kind, t: F(c.on_body.y()) }).collect()
+    }
+
+    /// Whether what the record's world rays last struck is in the crash test's [`CRASH_MASK`].
+    pub fn ignored(&self) -> bool {
+        self.record.struck.is_some_and(|o| crate::flight_search::category(o) & CRASH_MASK != 0)
+    }
+}
+
+/// A heightfield's box on the ground plane, (x, z) low and high.
+fn field_box(f: &(dyn crate::contact_search::Heightfield + '_)) -> ([F; 2], [F; 2]) {
+    let (lo, hi) = (f.min(), f.max());
+    ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+}
+
+/// **The helicopter in a world** (C14a): its [`Collision`] object, searched already this frame
+/// ([`Collision::search`], whose `movers` it carries), as the frame's [`Surroundings`] — the response
+/// is [`crate::contact::resolve`] on the record's contacts with impulses, the touching flag and the
+/// entries are the record's, the post refreshes the nearby list in `world`, and the rotor's strike
+/// asks `world`'s ground under the rotor's wreck rays' ends ([`rotor_in_ground`], `rotor` being
+/// [`WreckRotor::rays`]).
+///
+/// What a crash test asks for is left in [`Grounded::asked`] for the caller to carry out (the wreck,
+/// the blades, the put-back).
+///
+/// Not here: the rotor's own contact search (the probe searched against the collision node, whose
+/// struck object wrecks the helicopter unless its category is in the struck mask): `strike` answers
+/// only the rotor in the ground.
+pub struct Grounded<'a> {
+    pub collision: &'a mut Collision,
+    pub world: &'a mut dyn crate::world::World,
+    pub movers: &'a [crate::contact::Mover],
+    pub rotor: &'a [[Vf; 2]],
+    pub asked: Vec<Crashed>,
+}
+
+impl Surroundings for Grounded<'_> {
+    fn post(&mut self, body: &Body) {
+        self.collision.refresh(body, self.world);
+    }
+    fn resolve(&mut self, body: &mut Body) {
+        let c = &mut *self.collision;
+        let mut weighed = crate::contact::Weighed { body, mass: c.mass };
+        crate::contact::resolve(&mut c.collider, &mut weighed, &mut c.record.contacts, &mut [], self.movers, true);
+    }
+    fn touching(&self) -> bool {
+        self.collision.record.touching
+    }
+    fn ignored(&self) -> bool {
+        self.collision.ignored()
+    }
+    fn entries(&self) -> Vec<Touch> {
+        self.collision.entries()
+    }
+    fn strike(&mut self, matrix: &Mat4) -> Strike {
+        let ends: Vec<Vf> = self.rotor.iter().map(|r| r[1]).collect();
+        let world = &mut *self.world;
+        Strike { in_ground: rotor_in_ground(matrix, &ends, |p| world.ground(p).0), struck: false }
+    }
+    fn crashed(&mut self, asked: &Crashed, _: &mut Ride, _: &mut Rng) {
+        self.asked.push(*asked);
+    }
 }
