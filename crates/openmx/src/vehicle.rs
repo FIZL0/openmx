@@ -1917,43 +1917,28 @@ const KIOWA_FILTER: game_sim::kiowa::Filter = game_sim::kiowa::Filter { value: F
 /// The engine's dynamics world the helicopter is stepped in: the plane's, 115 substeps a second.
 const KIOWA_WORLD: game_sim::biplane::World = game_sim::biplane::World { iterations: 1, rate: F(115.0) };
 
+/// The helicopter's body's inertia tensor as the built helicopter holds it (the body's `+0x110` in
+/// C14's start state), which its collision object's response is tuned by
+/// ([`game_sim::kiowa::Collision::new`]); the inverse is [`KIOWA_INV_INERTIA`].
+const KIOWA_INERTIA: Vf = Vf([f32::from_bits(0x4628_adfa), f32::from_bits(0x461f_901b), f32::from_bits(0x44a2_ae40), 1.0]);
+
 /// How far over the ground a helicopter taken is stood, feet: it settles onto its skids from there.
 /// The port's own number.
 const KIOWA_DROP: f32 = 0.25;
 
-/// **The ground under the skids**, the port's stand-in for the collision record's response (C14a
-/// ports the original's): one contact at the model's origin, the skids' middle. Under the ground it
-/// pushes the body up on a stiff damped spring ([`KIOWA_SPRING`], [`KIOWA_SPRING_DAMPING`]), times
-/// the body's mass, so it is the same on any helicopter; while touching, the skids drag along the
-/// ground ([`KIOWA_SKID_DRAG`]) and the body's rates are damped ([`KIOWA_TIP_DAMPING`]), which keeps
-/// a helicopter standing on its skids from tipping over on them. Touching is within
-/// [`KIOWA_TOUCH`] of the ground. None of these numbers is the original's.
-const KIOWA_SPRING: f32 = 400.0;
-const KIOWA_SPRING_DAMPING: f32 = 32.0;
-const KIOWA_SKID_DRAG: f32 = 3.0;
-const KIOWA_TIP_DAMPING: f32 = 12.0;
-const KIOWA_TOUCH: f32 = 0.1;
-/// Past this far under the ground (a fall faster than the spring holds) the body is put back on it
-/// and its fall stopped.
-const KIOWA_SINK: f32 = 1.5;
-
-/// What [`KiowaAround::strike`] answers off the map: well under anything.
-const NO_GROUND_BELOW: f32 = -1.0e6;
-
-/// The world round a flown helicopter for [`game_sim::kiowa::Kiowa::tick`]: the ground under the
-/// skids (see [`KIOWA_SPRING`]), the rotor's eight wreck rays' ends in the ground for the strike
-/// ([`game_sim::kiowa::rotor_in_ground`]), and the wreck and put-back as the port's own (S220a1
-/// ports the original's): a wreck throws the blades (they go, the tail rotor shows bent) and the
-/// put-back stands the helicopter back on the ground where it is, whole and at rest.
+/// The world round a flown helicopter for [`game_sim::kiowa::Kiowa::tick`]: the original's ground
+/// (C14a's [`game_sim::kiowa::Grounded`]: [`game_sim::contact::resolve`] on the collision record,
+/// its touching flag and entries, the rotor's wreck rays' ends in the ground for the strike), and the
+/// wreck and put-back as the port's own until S220a1 ports the original's: a wreck hides the blades
+/// (they go, the tail rotor shows bent) and the put-back stands the helicopter back on the ground
+/// where it is, whole and at rest.
 struct KiowaAround<'a> {
-    world: &'a mut dyn World,
-    rays: [Vf; 8],
-    touching: bool,
+    ground: game_sim::kiowa::Grounded<'a>,
     /// The put-back asked for, done after the tick (it builds the helicopter again).
     recover: bool,
 }
 
-/// `v` (`xyz`) turned by the unit quaternion `q` (`x, y, z, w`), in plain arithmetic: the stand-in's.
+/// `v` (`xyz`) turned by the unit quaternion `q` (`x, y, z, w`), in plain arithmetic.
 fn rotate(q: Vf, v: Vf) -> [f32; 3] {
     let (qx, qy, qz, qw) = (q.x(), q.y(), q.z(), q.w());
     let (vx, vy, vz) = (v.x(), v.y(), v.z());
@@ -1961,57 +1946,29 @@ fn rotate(q: Vf, v: Vf) -> [f32; 3] {
     [vx + qw * tx + (qy * tz - qz * ty), vy + qw * ty + (qz * tx - qx * tz), vz + qw * tz + (qx * ty - qy * tx)]
 }
 
+use game_sim::kiowa::Surroundings as _;
+
 impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
+    fn post(&mut self, body: &game_sim::biplane::Body) {
+        self.ground.post(body);
+    }
     fn resolve(&mut self, body: &mut game_sim::biplane::Body) {
-        let c = rotate(body.quat, body.cofg);
-        let p = body.position;
-        let skids = Vf::new(p.x() - c[0], p.y() - c[1], p.z() - c[2], 1.0);
-        let Some(ground) = ground_under(self.world, skids) else {
-            self.touching = false;
-            return;
-        };
-        let under = ground - skids.y();
-        self.touching = under > -KIOWA_TOUCH;
-        if !self.touching {
-            return;
-        }
-        let mass = if body.inv_mass.0 > 0.0 { 1.0 / body.inv_mass.0 } else { 0.0 };
-        let v = body.velocity;
-        if under > KIOWA_SINK {
-            body.position = Vf::new(p.x(), p.y() + under, p.z(), p.w());
-            if v.y() < 0.0 {
-                body.velocity = Vf::new(v.x(), 0.0, v.z(), v.w());
-            }
-        }
-        let v = body.velocity;
-        let up = if under > 0.0 { (KIOWA_SPRING * under - KIOWA_SPRING_DAMPING * v.y()).max(0.0) } else { 0.0 };
-        body.add_force(Vf::new(-KIOWA_SKID_DRAG * v.x() * mass, up * mass, -KIOWA_SKID_DRAG * v.z() * mass, 0.0));
-        let r = body.rates;
-        let k = KIOWA_INV_INERTIA;
-        let damp = |rate: f32, inv: f32| if inv > 0.0 { -KIOWA_TIP_DAMPING * rate / inv } else { 0.0 };
-        body.add_moment_local(Vf::new(damp(r.x(), k.x()), damp(r.y(), k.y()), damp(r.z(), k.z()), 0.0));
+        self.ground.resolve(body);
     }
     fn touching(&self) -> bool {
-        self.touching
+        self.ground.touching()
     }
     fn ignored(&self) -> bool {
-        false
+        self.ground.ignored()
     }
     fn entries(&self) -> Vec<game_sim::kiowa::Touch> {
-        match self.touching {
-            true => vec![game_sim::kiowa::Touch { kind: 0, t: F::ZERO }],
-            false => Vec::new(),
-        }
+        self.ground.entries()
     }
     fn strike(&mut self, matrix: &game_sim::math::Mat4) -> game_sim::kiowa::Strike {
-        let world = &mut *self.world;
-        let in_ground = game_sim::kiowa::rotor_in_ground(matrix, &self.rays, |at| {
-            let g = ground_under(world, at).unwrap_or(NO_GROUND_BELOW);
-            Vf::new(at.x(), g, at.z(), at.w())
-        });
-        game_sim::kiowa::Strike { in_ground, struck: false }
+        self.ground.strike(matrix)
     }
-    fn crashed(&mut self, asked: &game_sim::kiowa::Crashed, ride: &mut game_sim::kiowa::Ride, _: &mut game_sim::rng::Rng) {
+    fn crashed(&mut self, asked: &game_sim::kiowa::Crashed, ride: &mut game_sim::kiowa::Ride, rng: &mut game_sim::rng::Rng) {
+        self.ground.crashed(asked, ride, rng);
         if asked.wreck.is_some() {
             ride.rotor_hidden = true;
         }
@@ -2019,15 +1976,21 @@ impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
     }
 }
 
-/// A flown helicopter: its flight ([`game_sim::kiowa::Kiowa`]), the frame's state round it, and the
-/// `rand()` its wreck and touchdown draw from.
+/// A flown helicopter: its flight ([`game_sim::kiowa::Kiowa`]), the frame's state round it, its
+/// collision object, and the `rand()` its wreck and touchdown draw from.
 #[derive(Clone, Debug)]
 pub struct Heli {
     pub kiowa: game_sim::kiowa::Kiowa,
     pub ride: game_sim::kiowa::Ride,
+    pub collision: game_sim::kiowa::Collision,
     pub rng: game_sim::rng::Rng,
-    /// The ground stand-in's touching flag after the last tick.
-    pub touching: bool,
+}
+
+impl Heli {
+    /// Its collision record's touching flag, as the last tick left it.
+    pub fn touching(&self) -> bool {
+        self.collision.record.touching
+    }
 }
 
 /// **A player's helicopter** (P216): `kiowa.phy`, the bay `machine.txt` parks their copy in and its
@@ -2046,12 +2009,28 @@ pub struct KiowaRide {
     pub flown: Option<Heli>,
     /// Where it was last taken (its model's origin).
     pub taken_at: Vf,
+    /// Its collision object's ray probe, `kiowam.col` ([`KiowaRide::with_rays`]): without it the
+    /// helicopter meets nothing, ground or wall.
+    pub rays: game_sim::flight_search::Rays,
+    /// How many times it has wrecked since it was last taken.
+    pub wrecks: u32,
 }
 
 impl KiowaRide {
     /// The helicopter off `kiowa.phy`'s bytes, in `livery`, parked at `bay`.
     pub fn new(phy: &[u8], livery: usize, bay: Option<Spawn>) -> KiowaRide {
-        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default() }
+        let rays = game_sim::flight_search::Rays::default();
+        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0 }
+    }
+
+    /// It with its collision object's ray probe off `kiowam.col`'s bytes
+    /// ([`game_sim::kiowa::KIOWA_RAYS`]); as it was where they do not parse.
+    pub fn with_rays(mut self, col: &[u8]) -> KiowaRide {
+        match game_sim::track::Rays::parse(col) {
+            Ok(r) => self.rays = game_sim::flight_search::Rays::of(&r),
+            Err(e) => eprintln!("kiowa: {}: {e}", game_sim::kiowa::KIOWA_RAYS),
+        }
+        self
     }
 
     /// The helicopter taken at `spot`: a fresh one built off the file ([`KiowaRide::built`]) on the
@@ -2061,8 +2040,9 @@ impl KiowaRide {
         let ground = ground_under(world, spot.at)?;
         let facing = level(spot.forward).or_else(|| self.bay.and_then(|b| level(b.facing))).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
         let at = Vf::new(spot.at.x(), ground + KIOWA_DROP, spot.at.z(), 1.0);
-        self.flown = Some(self.built(at, facing, world.area()));
+        self.flown = Some(self.built(at, facing, world));
         self.taken_at = at;
+        self.wrecks = 0;
         Some(())
     }
 
@@ -2072,8 +2052,10 @@ impl KiowaRide {
     /// stands); the body off `[Mass Properties]` (its mass, centre of gravity, gravity scale and
     /// gravity force; undamped, as C14's state holds it) with the built inertia
     /// ([`KIOWA_INV_INERTIA`]); the file's wreck figures; the throw's scale 0, as C14's state holds
-    /// it; the rotor at angle 0.
-    pub fn built(&self, origin: Vf, facing: Vf, area: Option<game_sim::biplane::Area>) -> Heli {
+    /// it; the rotor at angle 0; its collision object off `[Mass Properties]`, the body, the built
+    /// inertia ([`KIOWA_INERTIA`]) and the ray probe ([`KiowaRide::rays`]), its nearby list gathered
+    /// where it stands, its record empty.
+    pub fn built(&self, origin: Vf, facing: Vf, world: &mut dyn World) -> Heli {
         use game_sim::kiowa::{Kiowa, Loop, Measure, Ride};
         let p = &self.phy;
         let part = &p.mass_properties;
@@ -2122,34 +2104,39 @@ impl KiowaRide {
             gravity_scale: part.gravity_scale,
             throw_scale: F::ZERO,
             gravity: part.gravity,
-            area,
+            area: world.area(),
             // Its sound is V114's: no clips, no draw.
             touchdown_sound: false,
             rotor_angle: F::ZERO,
             rotor_hidden: false,
         };
-        Heli { kiowa, ride, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), touching: true }
+        let mut collision = game_sim::kiowa::Collision::new(part, &ride.body, KIOWA_INERTIA, self.rays.clone());
+        collision.refresh(&ride.body, world);
+        Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69) }
     }
 
     /// One frame of the helicopter on `pad` through `table`: the input step
     /// ([`game_sim::kiowa::Pad::from_sticks`], the left stick through the player's range), then its
-    /// frame over `world` ([`game_sim::kiowa::Kiowa::tick`], [`KiowaAround`]). A put-back asked for
-    /// builds it again on the ground where it is, along its heading. Nothing for a helicopter not out.
+    /// frame over `world` ([`game_sim::kiowa::Kiowa::tick`], [`KiowaAround`]), its collision object
+    /// searched first ([`game_sim::kiowa::Collision::search`]), as the level's collision node searches
+    /// every object before any dynamics world runs. A put-back asked for builds it again on the ground
+    /// where it is, along its heading. Nothing for a helicopter not out.
     pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
         use game_sim::input::{Axis, AxisRange};
-        let rays = self.phy.wreck_rotor.rays.map(|[_, end]| end);
         let Some(h) = self.flown.as_mut() else { return };
         let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
         let input = game_sim::kiowa::Pad::from_sticks(stick, |c| table.value(pad, c));
-        let mut around = KiowaAround { world: &mut *world, rays, touching: h.touching, recover: false };
-        h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
-        h.touching = around.touching;
+        let movers = h.collision.search(&mut h.ride.body, world, dt);
+        let ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
+        let mut around = KiowaAround { ground, recover: false };
+        let asked = h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
+        self.wrecks += u32::from(asked.wreck.is_some());
         if around.recover {
             let rng = h.rng;
             let (at, forward) = self.place().expect("a flown helicopter has a place");
             let ground = ground_under(world, at).unwrap_or(at.y());
             let facing = level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
-            let mut fresh = self.built(Vf::new(at.x(), ground + KIOWA_DROP, at.z(), 1.0), facing, world.area());
+            let mut fresh = self.built(Vf::new(at.x(), ground + KIOWA_DROP, at.z(), 1.0), facing, world);
             fresh.rng = rng;
             self.flown = Some(fresh);
         }
@@ -2178,23 +2165,25 @@ impl KiowaRide {
     }
 
     /// What the shell says of it while it is out: how far it went from where it was taken, how high
-    /// it is over that, how fast, and whether it is on the ground or wrecked.
+    /// it is over that, how fast, whether it is on the ground or wrecked, and how many times it
+    /// wrecked since it was taken.
     pub fn report(&self) -> Option<String> {
         let h = self.flown.as_ref()?;
         let (at, _) = self.place()?;
         let gone = (at.x() - self.taken_at.x()).hypot(at.z() - self.taken_at.z());
-        let state = match (h.ride.crash.reason, h.touching) {
+        let state = match (h.ride.crash.reason, h.touching()) {
             (0, true) => "on its skids",
             (0, false) => "flying",
             _ => "wrecked",
         };
         Some(format!(
-            "kiowa: {gone:.1} ft from where it was taken, {:.1} ft over it, at {:.1}, {:.1}, {:.1}, {:.1} ft/s, {state}",
+            "kiowa: {gone:.1} ft from where it was taken, {:.1} ft over it, at {:.1}, {:.1}, {:.1}, {:.1} ft/s, {state}, wrecked {} times",
             at.y() - self.taken_at.y(),
             at.x(),
             at.y(),
             at.z(),
             h.ride.measure.speed.0,
+            self.wrecks,
         ))
     }
 
