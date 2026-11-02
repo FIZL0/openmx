@@ -5,9 +5,13 @@
 //! portrait the accelerometer does not agree with is the lock going on, not a turn. Once the device
 //! has said portrait for a second while the accelerometer says the phone is sideways, that is the
 //! lock, and the game turns to landscape with the camera / Dynamic Island on the left
-//! ([`Hold::Locked`], UIKit's `LandscapeRight`) and stays there, held upright included, until the
-//! device reports a turn the accelerometer agrees with (the lock off). With the lock off the game
-//! follows the device.
+//! ([`Hold::Locked`], UIKit's `LandscapeRight`) and stays there, held upright or put down and
+//! picked up included, until the device reports a landscape turn the accelerometer agrees with (the
+//! lock off). With the lock off the game follows the device.
+//!
+//! The next launch starts that way too (opentennis 013ae90e): iOS cannot say whether the lock is
+//! still on, so a lock held last run ([`Holder::remembering`], a `rotation-lock` marker file) starts
+//! [`Hold::Locked`]; with the lock off since, until the phone is turned sideways once.
 
 /// What the window's view controller is held to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,9 +37,16 @@ pub struct Holder {
     device: isize,
     since: f32,
     across: Option<f32>,
+    /// The lock was held when the last run ended.
+    was_locked: bool,
 }
 
 impl Holder {
+    /// A holder for a launch after one that ended with the lock held (`was_locked`) or not.
+    pub fn remembering(was_locked: bool) -> Self {
+        Holder { was_locked, ..Default::default() }
+    }
+
     /// One look, `now` seconds into the run: UIDevice's `orientation` (its raw number), whether the
     /// accelerometer has the phone sideways (`None` lying flat or with no accelerometer), and whether
     /// the window is wider than tall. A new hold when it changes.
@@ -55,10 +66,14 @@ impl Holder {
         }
         let locked = self.across.is_some_and(|t| now - t >= 1.0);
         // The accelerometer has a moment to agree with a new orientation: turning the phone past
-        // 45° fires it.
+        // 45° fires it. Under the lock the device only ever says portrait (or face up/down: put
+        // down and picked up again), so only a landscape report, the lock off, lets go of `Locked`.
         let want = match (self.held, turned) {
             (held, _) if locked => (held != Some(Hold::Locked)).then_some(Hold::Locked),
+            // The lock was on last time: iOS can't say whether it still is, so start as it was.
+            (None, _) if self.was_locked => Some(Hold::Locked),
             (None, _) => Some(hold(window_landscape)),
+            (Some(Hold::Locked), Some(false)) => None,
             (Some(held), Some(to)) if hold(to) != held && now - self.since < 0.5 && gravity.is_none_or(|g| g == to) => {
                 Some(hold(to))
             }
@@ -118,6 +133,37 @@ mod tests {
         assert_eq!(h.step(4.0, PORTRAIT, Some(true), true), None);
         // The lock off: the device reports a turn the accelerometer agrees with.
         assert_eq!(h.step(6.0, LEFT, Some(true), true), Some(Hold::Landscape));
+    }
+
+    #[test]
+    fn face_up_then_picked_up_keeps_landscape() {
+        let mut h = Holder::default();
+        h.step(0.0, PORTRAIT, Some(true), false);
+        assert_eq!(h.step(1.0, PORTRAIT, Some(true), false), Some(Hold::Locked));
+        // Put down face up, then picked up and held upright: the device says portrait again, fresh,
+        // and the accelerometer agrees, but under the lock that is no turn.
+        assert_eq!(h.step(3.0, FLAT, None, true), None);
+        assert_eq!(h.step(5.0, PORTRAIT, Some(false), true), None);
+        assert_eq!(h.step(5.2, PORTRAIT, Some(false), true), None);
+        // Sideways again: still held.
+        assert_eq!(h.step(6.0, PORTRAIT, Some(true), true), None);
+        // The lock off: a landscape turn lets go.
+        assert_eq!(h.step(8.0, RIGHT, Some(true), true), Some(Hold::Landscape));
+    }
+
+    #[test]
+    fn a_lock_from_the_last_run_starts_landscape() {
+        // Launched held upright in portrait, the lock remembered: landscape from the first look,
+        // before the accelerometer could tell.
+        let mut h = Holder::remembering(true);
+        assert_eq!(h.step(0.0, PORTRAIT, Some(false), false), Some(Hold::Locked));
+        assert_eq!(h.step(0.2, PORTRAIT, Some(false), false), None);
+        assert_eq!(h.step(2.0, PORTRAIT, Some(true), true), None);
+        // The lock was turned off since: the first sideways turn lets go, and then it follows.
+        assert_eq!(h.step(4.0, LEFT, Some(true), true), Some(Hold::Landscape));
+        assert_eq!(h.step(6.0, PORTRAIT, Some(false), true), Some(Hold::Portrait));
+        // Not remembered: as the window is.
+        assert_eq!(Holder::remembering(false).step(0.0, PORTRAIT, Some(false), false), Some(Hold::Portrait));
     }
 
     #[test]

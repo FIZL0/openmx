@@ -18,7 +18,8 @@
 //! The touch pad ([`crate::ios::TOUCH`]) is drawn over the whole window, laid out from the same edges.
 //!
 //! The view controller is held the way [`openmx_ios::Holder`] says (M144, B694): either way up with
-//! the device, and landscape with the camera on the left while rotation lock is on.
+//! the device, and landscape with the camera on the left while rotation lock is on, from the first
+//! frame of a launch after one that ended with the lock held (the `rotation-lock` marker).
 
 use crate::aspect::{kept_insets, phone_frame, stretched};
 use crate::hud::{NEEDS_TAP_TEXT, NeedsTap};
@@ -110,6 +111,9 @@ impl Host {
         let now = self.started.elapsed().as_secs_f32();
         if let Some(hold) = self.holder.step(now, device, gravity, size.0 > size.1) {
             println!("ios: holding {hold:?}");
+            // The next launch starts as this one ends (opentennis 013ae90e).
+            let mark = openmx_ios::rotation_lock_mark();
+            let _ = if hold == openmx_ios::Hold::Locked { std::fs::write(mark, "") } else { std::fs::remove_file(mark) };
             openmx_ios::hold(&window, hold);
         }
     }
@@ -216,7 +220,9 @@ pub fn run_on_main(game: impl FnOnce() + Send + 'static) {
         }
     };
     let now = Instant::now();
-    let mut host = Host { game: Some(Box::new(game)), holder: Default::default(), started: now, next_look: now, rate: None };
+    let was_locked = std::fs::exists(openmx_ios::rotation_lock_mark()).unwrap_or(false);
+    let holder = openmx_ios::Holder::remembering(was_locked);
+    let mut host = Host { game: Some(Box::new(game)), holder, started: now, next_look: now, rate: None };
     if let Err(e) = events.run_app(&mut host) {
         println!("ios: the event loop ended: {e}");
     }

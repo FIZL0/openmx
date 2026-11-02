@@ -118,6 +118,12 @@ pub fn documents() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/")).join("Documents")
 }
 
+/// The marker that rotation lock was held when the app last ran (opentennis 013ae90e): there while
+/// [`crate::Hold::Locked`] is held, so the next launch starts in landscape ([`crate::Holder::remembering`]).
+pub fn rotation_lock_mark() -> PathBuf {
+    documents().join("rotation-lock")
+}
+
 /// stdout and stderr into `path`, fresh each launch (opentennis M105): the shell's own lines,
 /// panics, and the crash reports below. iOS shows nothing else without a Mac, and writing a file
 /// also makes iOS list the app's folder in Files, which it only does once there is one in it.
