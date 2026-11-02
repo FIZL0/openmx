@@ -410,6 +410,7 @@ impl Gen {
             tipped: self.b(),
             node_pos: self.vec(-1000.0, 1000.0),
             node_pos_kept: self.vec(-1000.0, 1000.0),
+            node_local: Vf::new(0.0, 0.0, 0.0, 1.0),
         };
         // The stick hard over, now and then, for the full lock.
         if self.one_in(4) {
@@ -2274,4 +2275,391 @@ fn first_difference(a: &quad::TireSetup, b: &quad::TireSetup) -> String {
         }
     }
     format!("quad: springs {:?} {:?} vs {:?} {:?}", a.front_spring, a.rear_spring, b.front_spring, b.rear_spring)
+}
+
+// --- MD65: the put-back and the net unpack ---------------------------------------------------------
+
+/// The quad's put-back and net unpack, and what they call.
+const PUT_BACK: u32 = 0x004b_8e30;
+const WHEEL_RESET: u32 = 0x004a_04c0;
+const DETACH: u32 = 0x0018_d540;
+const VEHICLE_PUT_BACK: u32 = 0x004a_6f70;
+const REATTACH: u32 = 0x0026_6c90;
+const READ_FRAME: u32 = 0x0019_4e00;
+const SET_FRAME: u32 = 0x0019_4da0;
+const NET_PACK: u32 = 0x004e_2f50;
+const ACTOR_MOVED: u32 = 0x004f_7590;
+const NET_UNPACK: u32 = 0x004b_dd20;
+const NODE_ORIENTATION: u32 = 0x0019_4650;
+const NODE_LOCAL: u32 = 0x0019_5320;
+const NET_POST: u32 = 0x004a_8c40;
+
+/// What the put-back only hands on or reads: its attachment and what that hangs on, the two frame
+/// nodes, and the hung list's nodes and kinds.
+const ATTACH: u32 = 0x01c0_d300;
+const HANG: u32 = 0x01c0_d340;
+const FRAME_NODE: [u32; 2] = [0x01c0_d380, 0x01c0_d3c0];
+const HUNG_NODES: u32 = 0x01c0_d400;
+const HUNG_KINDS: u32 = 0x01c0_d500;
+/// A hung node's own (made-up) address, by its place in the list.
+fn hung_node(i: usize) -> u32 {
+    0x0fa0_0000 + 0x40 * i as u32
+}
+/// The marker matrix the hooked frame read writes for frame node `f`.
+fn frame_word(f: usize, k: u32) -> u32 {
+    0x3f80_0000 + 0x100 * f as u32 + k
+}
+
+#[derive(Clone, Debug)]
+struct PutBackCase {
+    s: State,
+    pb: quad::PutBack,
+    place: bool,
+    keep: bool,
+}
+
+fn poke_put_back(ee: &mut Ee, c: &PutBackCase) {
+    poke(ee, &c.s);
+    let pb = &c.pb;
+    tire_set_byte(ee, OBJ + 0x45, pb.flags);
+    ee.set_u32(OBJ + 0x1480, ATTACH);
+    ee.set_u32(OBJ + 0x1284, HANG);
+    ee.set_u32(OBJ + 0x1104, FRAME_NODE[0]);
+    ee.set_u32(OBJ + 0x1108, FRAME_NODE[1]);
+    ee.set_u32(OBJ + 0x1470, pb.hung.len() as u32);
+    ee.set_u32(OBJ + 0x1474, HUNG_NODES);
+    ee.set_u32(OBJ + 0x1478, HUNG_KINDS);
+    for (i, &kind) in pb.hung.iter().enumerate() {
+        ee.set_u32(HUNG_NODES + 4 * i as u32, hung_node(i));
+        ee.set_u32(HUNG_KINDS + 4 * i as u32, kind as u32);
+    }
+    for (k, &w) in pb.respawn.iter().enumerate() {
+        ee.set_u32(OBJ + 0x1738 + 4 * k as u32, w);
+    }
+    match pb.player_respawn {
+        Some(p) => {
+            ee.set_u32(OBJ + 0x680, PLAYER);
+            for (k, &w) in p.iter().enumerate() {
+                ee.set_u32(PLAYER + 0x94 + 4 * k as u32, w);
+            }
+        }
+        None => ee.set_u32(OBJ + 0x680, 0),
+    }
+    put_f(ee, OBJ + 0x141c, pb.settle);
+    ee.set_u32(OBJ + 0x31c, pb.request);
+}
+
+impl Gen {
+    fn put_back_case(&mut self) -> PutBackCase {
+        let s = self.state();
+        let n = match self.bits() % 6 {
+            0 => 0,
+            1 => 7,
+            _ => self.bits() % 12,
+        };
+        let hung = (0..n).map(|_| if self.one_in(5) { (self.bits() % 5) as i32 - 2 } else { (self.bits() % 2) as i32 }).collect();
+        // The float word goes through the FPU's registers: a NaN or denormal there would only test the
+        // copy, so it is an ordinary float.
+        let respawn = [if self.one_in(3) { 0 } else { self.bits() | 1 }, self.bits(), self.f(-2000.0, 2000.0).0.to_bits()];
+        let player_respawn = self.b().then(|| [self.bits(), self.bits(), self.f(-2000.0, 2000.0).0.to_bits()]);
+        PutBackCase {
+            s,
+            pb: quad::PutBack {
+                flags: (self.bits() & 0xff) as u8,
+                hung,
+                respawn,
+                player_respawn,
+                settle: self.f(-1.0, 1.0),
+                request: self.bits() % 3,
+            },
+            place: self.b(),
+            keep: self.b(),
+        }
+    }
+}
+
+fn frame_of(ee: &Ee, a: u32) -> usize {
+    let f = (0..2).find(|&f| (0..16).all(|k| ee.u32_at(a + 4 * k) == frame_word(f, k)));
+    f.unwrap_or_else(|| panic!("a node was handed a frame neither frame node wrote ({a:#x})"))
+}
+
+#[test]
+fn the_quads_put_back_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x378), NET_PACK, "the quad's snapshot-pack slot");
+    let log = hook_calls(
+        &mut ee,
+        &[
+            (WHEEL_RESET, |ee| Call::WheelReset(wheel_of(ee))),
+            (DETACH, |ee| {
+                assert_eq!(ee.r(4) as u32, ATTACH, "the detach's attachment");
+                Call::Detach
+            }),
+            (VEHICLE_PUT_BACK, |ee| {
+                let (place, keep) = (ee.r(5), ee.r(6));
+                assert!(place <= 1 && keep <= 1, "the vehicle's put-back was handed {place:#x}, {keep:#x}");
+                on_quad(ee, Call::VehiclePutBack { place: place != 0, keep: keep != 0, flags: ee.u8_at(OBJ + 0x45) })
+            }),
+            (REATTACH, |ee| {
+                assert_eq!((ee.r(4) as u32, ee.r(5) as u32, ee.r(6), ee.r(7)), (ATTACH, HANG, 1, 1), "the reattach's arguments");
+                Call::Reattach
+            }),
+            (SET_FRAME, |ee| {
+                let a = ee.r(4) as u32;
+                let hung = (0..16).position(|i| hung_node(i) == a).unwrap_or_else(|| panic!("a frame set on {a:#x}"));
+                Call::SetFrame { hung, frame: frame_of(ee, ee.r(5) as u32) }
+            }),
+            (NET_PACK, |ee| on_quad(ee, Call::NetPack)),
+            (ACTOR_MOVED, |ee| {
+                assert_eq!(ee.r(4) as u32, OBJ + 0x43c, "the actor-moved notify's actor");
+                Call::ActorMoved
+            }),
+        ],
+    );
+    // The frame read writes its node's marker matrix where it is asked to.
+    let l = log.clone();
+    ee.hooks.insert(
+        READ_FRAME,
+        Box::new(move |ee| {
+            let a = ee.r(4) as u32;
+            let f = FRAME_NODE.iter().position(|&n| n == a).unwrap_or_else(|| panic!("a frame read from {a:#x}"));
+            assert_eq!(ee.r(5), 0, "the frame read's second argument");
+            let out = ee.r(6) as u32;
+            for k in 0..16 {
+                ee.set_u32(out + 4 * k, frame_word(f, k));
+            }
+            l.borrow_mut().push(Call::ReadFrame(f));
+        }),
+    );
+    let mut g = Gen(0x0065_0001);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        let c = g.put_back_case();
+        let pb = &c.pb;
+        tally(&mut t, if pb.flags & quad::HIDDEN_BIT != 0 { "hidden" } else { "shown" });
+        tally(&mut t, match pb.player_respawn {
+            None => "no player",
+            Some(_) if pb.respawn[0] == 0 => "player, no respawn point",
+            Some(_) => "player respawned",
+        });
+        for &kind in &pb.hung {
+            tally(&mut t, match kind {
+                0 => "hung on the first frame",
+                1 => "hung on the second frame",
+                _ => "hung on neither",
+            });
+        }
+        if pb.hung.is_empty() {
+            tally(&mut t, "nothing hung");
+        }
+
+        log.borrow_mut().clear();
+        reset(&mut ee);
+        poke_put_back(&mut ee, &c);
+        ee.call(PUT_BACK, &[u64::from(OBJ), u64::from(c.place), u64::from(c.keep)], &[], 50_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{c:#?}"));
+        let was = snap(&ee);
+        let mut d = c.clone();
+        let mut calls = Vec::new();
+        quad::put_back(&mut d.pb, &mut d.s.q, &mut d.s.body, d.place, d.keep, &mut calls);
+        reset(&mut ee);
+        poke_put_back(&mut ee, &d);
+        let now = snap(&ee);
+        if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
+            panic!("state {k}: {} is {:#010x} in the original and {:#010x} in the port\n{c:#?}", where_is(i), was[i], now[i]);
+        }
+        assert_eq!(*log.borrow(), calls, "state {k}: the calls\n{c:#?}");
+    }
+    each_path_seen(
+        &t,
+        &[
+            "hidden",
+            "shown",
+            "no player",
+            "player, no respawn point",
+            "player respawned",
+            "hung on the first frame",
+            "hung on the second frame",
+            "hung on neither",
+            "nothing hung",
+        ],
+        100,
+    );
+}
+
+/// Where the net unpack's snapshot and its three quadwords are laid out (only read), and the steering
+/// filter it writes (laid in the player region, which nothing else here pokes).
+const SNAPSHOT: u32 = 0x01c0_d600;
+const STEER_FILTER: u32 = PLAYER + 0x100;
+
+#[derive(Clone, Debug)]
+struct NetCase {
+    s: State,
+    r: quad::Remote,
+    /// What the hooked node hands back for the body's quadword in its frame.
+    node_says: Vf,
+}
+
+fn poke_net(ee: &mut Ee, c: &NetCase) {
+    poke(ee, &c.s);
+    let r = &c.r;
+    ee.set_u32(OBJ + 0xbcc, SNAPSHOT);
+    for (k, v) in [r.position, r.orientation, r.velocity].into_iter().enumerate() {
+        let at = SNAPSHOT + 0x10 + 0x10 * k as u32;
+        ee.set_u32(SNAPSHOT + 4 * k as u32, at);
+        put_v(ee, at, v);
+    }
+    put_v(ee, BODY + 0x1a0, r.com_offset);
+    put_v(ee, BODY + 0x70, r.com);
+    ee.set_u32(OBJ + 0xd1c, STEER_FILTER);
+    put_f(ee, STEER_FILTER, r.steer);
+    put_f(ee, STEER_FILTER + 4, r.steer_time);
+    put_f(ee, STEER_FILTER + 8, r.steer_fraction);
+    put_f(ee, WHEEL[LF] + 0x74, r.min_steer_angle);
+    for (w, &a) in WHEEL.iter().enumerate() {
+        put_f(ee, a + 0x1d0, r.spin[w]);
+        put_f(ee, a + 0x1d4, r.spin_rate[w]);
+    }
+}
+
+impl Gen {
+    fn angle(&mut self) -> F {
+        match self.bits() % 8 {
+            0 => self.f(-60.0, 60.0),
+            1 => F(if self.b() { PI } else { -PI }),
+            2 => self.f(PI, 2.0 * PI),
+            3 => self.f(-2.0 * PI, -PI),
+            _ => self.f(-PI, PI),
+        }
+    }
+
+    fn net_case(&mut self) -> NetCase {
+        let mut s = self.state();
+        // Still, now and then, so the angles stay where they were.
+        if self.one_in(10) {
+            s.body.velocity = Vf::new(0.0, 0.0, 0.0, self.f(-1.0, 1.0).0);
+        }
+        let r = quad::Remote {
+            position: self.vec(-2000.0, 2000.0),
+            orientation: self.quaternion(),
+            velocity: if self.one_in(10) { Vf::new(0.0, 0.0, 0.0, 1.0) } else { self.vec(-60.0, 60.0) },
+            com_offset: self.vec(-3.0, 3.0),
+            com: self.vec(-2000.0, 2000.0),
+            steer: self.f(-0.8, 0.8),
+            steer_time: self.near(0.1, 0.005, 0.5),
+            steer_fraction: self.f(0.0, 1.0),
+            min_steer_angle: self.f(-0.7, -0.3),
+            spin: [self.angle(), self.angle(), self.angle(), self.angle()],
+            spin_rate: [self.f(-90.0, 90.0), self.f(-90.0, 90.0), self.f(-90.0, 90.0), self.f(-90.0, 90.0)],
+        };
+        let node_says = Vf::new(self.f(-3.0, 3.0).0, self.f(-3.0, 3.0).0, self.f(-3.0, 3.0).0, self.f(-1.0, 1.0).0);
+        NetCase { s, r, node_says }
+    }
+}
+
+/// The net unpack's callees as the port's: logged, and the node's answer written where it asks.
+struct Net(Vec<Call>, Vf);
+
+impl quad::Moto for Net {
+    fn call(&mut self, c: Call, q: &mut Quad, _body: &mut Body) {
+        if c == Call::NodeLocal {
+            q.node_local = self.1;
+        }
+        self.0.push(c);
+    }
+}
+
+#[test]
+fn the_quads_net_unpack_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let log = hook_calls(
+        &mut ee,
+        &[
+            (NODE_ORIENTATION, |ee| {
+                assert_eq!((ee.r(4) as u32, ee.r(5), ee.r(6) as u32), (NODE, 0, BODY + 0x190), "the node orientation's arguments");
+                Call::NodeOrientation
+            }),
+            (WHEEL_CLEAR, |ee| Call::WheelClear(wheel_of(ee))),
+            (WHEEL_CONTACTS, |ee| on_quad(ee, Call::Contacts)),
+            (SUSPENSION, |ee| Call::Suspension(wheel_of(ee), F(ee.f(12)))),
+            (TIRE_FORCES, |ee| Call::TireForces(wheel_of(ee), F(ee.f(12)))),
+            (NET_POST, |ee| on_quad(ee, Call::NetPost(F(ee.f(12))))),
+        ],
+    );
+    // The node-local transform writes this state's answer where it is asked to.
+    let says = Rc::new(Cell::new(Vf::new(0.0, 0.0, 0.0, 0.0)));
+    let (l, a) = (log.clone(), says.clone());
+    ee.hooks.insert(
+        NODE_LOCAL,
+        Box::new(move |ee| {
+            assert_eq!((ee.r(5) as u32, ee.r(6) as u32), (NODE, BODY + 0xb0), "the node-local transform's arguments");
+            put_v(ee, ee.r(4) as u32, a.get());
+            l.borrow_mut().push(Call::NodeLocal);
+        }),
+    );
+    let mut g = Gen(0x0065_0002);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        let c = g.net_case();
+        says.set(c.node_says);
+        log.borrow_mut().clear();
+        reset(&mut ee);
+        poke_net(&mut ee, &c);
+        ee.call(NET_UNPACK, &[u64::from(OBJ)], &[c.s.dt.0], 100_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{c:#?}"));
+        let was = snap(&ee);
+        let mut d = c.clone();
+        let mut net = Net(Vec::new(), c.node_says);
+        quad::net_unpack(&mut d.r, &mut d.s.q, &mut d.s.body, d.s.dt, &mut net);
+        reset(&mut ee);
+        poke_net(&mut ee, &d);
+        let now = snap(&ee);
+        if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
+            panic!(
+                "state {k}: {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{c:#?}",
+                where_is(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i])
+            );
+        }
+        assert_eq!(*log.borrow(), net.0, "state {k}: the calls\n{c:#?}");
+
+        // The paths, from the port's own steps (it matched the original's above).
+        #[allow(clippy::float_arithmetic)]
+        for w in 0..4 {
+            let pre = c.r.spin[w].0 + d.r.spin_rate[w].0 * c.s.dt.0;
+            let less = pre - (pre / (2.0 * PI)).trunc() * 2.0 * PI;
+            tally(&mut t, if pre.abs() > 2.0 * PI { "whole turns" } else if less > PI { "wrapped down" } else if less < -PI { "wrapped up" } else { "inside" });
+        }
+        let target = F(0.5) * F(c.node_says.x());
+        let lock = c.s.q.wheels[LF].max_steer_angle;
+        tally(&mut t, if target < c.r.min_steer_angle { "steer at the left lock" } else if target > lock { "steer at the right lock" } else { "steer inside" });
+        tally(&mut t, if c.s.dt < c.r.steer_time { "filter part way" } else { "filter all the way" });
+        let touching = c.s.q.wheels.iter().filter(|w| w.touching).count();
+        tally(&mut t, match touching {
+            0 => "airborne",
+            4 => "all down",
+            _ => "some down",
+        });
+    }
+    each_path_seen(
+        &t,
+        &[
+            "whole turns",
+            "wrapped down",
+            "wrapped up",
+            "inside",
+            "steer at the left lock",
+            "steer at the right lock",
+            "steer inside",
+            "filter part way",
+            "filter all the way",
+            "airborne",
+            "all down",
+            "some down",
+        ],
+        100,
+    );
 }

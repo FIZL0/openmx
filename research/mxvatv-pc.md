@@ -227,6 +227,11 @@ Not paired: PC slots 33, 35, 38, 39, 67, 70, 80, 86 against SLUS-21104's 0x004b8
 0x004bb360, 0x004bb370, 0x004bb400, 0x004bb710, 0x004be3b0, 0x004be3c0, 0x004be8d0 (slot 111?), 0x004ba510
 (slot 86?). The tables are not one slot per entry on both sides, so the place alone does not pair them.
 
+MD65 paired slot 70: it is the net unpack (`pc_quad_net_unpack`, PS2 `atv_quad_net_unpack`; it calls
+`pc_wheel_suspension`, as `Motocross::vf70` does), not vf104 as MD37 had it. vf104 (0x005d8bb0) places the
+wheels' rest points from the chassis and is now the unpaired one, with 33, 35, 38, 39, 67, 80, 86 (MD65b).
+By the same xref `Motocross::vf70` may be the bike's network-state unpack 0x00259150 above (not checked).
+
 The ATV's step leans on every shared MotoShared step as SLUS-21104 runs it, and on its frame driver (the
 physics world's substeps, not MX Unleashed's 55 Hz loop). Those are MD40's work for the bikes, so the ATV's
 port (MD37b) comes after MD40.

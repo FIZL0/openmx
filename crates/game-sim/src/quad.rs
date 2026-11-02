@@ -27,14 +27,17 @@
 //!
 //! What they call of SLUS-21104's bike steps (engine, preload, backflip, air drag, airborne control,
 //! the wheels' suspension, tire forces and integration, the input limiter, the gearbox and clutch) is
-//! not ported here: each is a [`Call`] handed to a [`Moto`], in the original's order. The wreck,
-//! put-back and net unpack are filed (MD65).
+//! not ported here: each is a [`Call`] handed to a [`Moto`], in the original's order.
+//!
+//! The quad's [`put_back`] and [`net_unpack`] (MD65): the bike's put-back on four wheels, and a remote
+//! quad set from its network snapshot. The wreck body and the PC slots not yet paired are filed
+//! (MD65a, MD65b).
 //!
 //! And the quad's tire reader, [`tire_phy`] (MD64b): `[Front Tire]` and `[Rear Tire]` into the four
 //! wheels ([`TireSetup`]), with the original's left-to-right copies and their quirks.
 //!
 //! The quad is described by what the steps read, [`Quad`] and [`Body`], not by its layout: the field
-//! map is research/oracle.txt's (`# MD37`, `# MD37a`, `# MD37b`, `# MD64b`).
+//! map is research/oracle.txt's (`# MD37`, `# MD37a`, `# MD37b`, `# MD64b`, `# MD65`).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -173,6 +176,9 @@ pub struct Quad {
     /// Where the quad's scene node is, as the node asked it, and the copy kept beside it.
     pub node_pos: Vf,
     pub node_pos_kept: Vf,
+    /// What the scene node answers the net unpack's [`Call::NodeLocal`] with: the body's quadword
+    /// at `+0xb0` brought into the node's frame (what that quadword is was not traced).
+    pub node_local: Vf,
 }
 
 /// The quad's wheelie and stoppie keys (the bike's, from the same `.phy` sections).
@@ -561,6 +567,26 @@ pub enum Call {
     CountdownListener(u32),
     CountdownWatcher(u32),
     Post(u32),
+    /// The put-back's ([`put_back`], MD65): each wheel's contact and suspension state reset; the
+    /// quad's attachment taken off what it hangs on; the vehicle's own put-back (`place` and `keep`
+    /// handed on as they came, `flags` the quad's flag byte as the vehicle's put-back sees it); the
+    /// attachment hung back on; the two frame nodes asked for their world frames, and each hung node
+    /// given one (`hung` its place in the list, `frame` 0 or 1); the network snapshot packed; the
+    /// actor's listeners told it moved.
+    WheelReset(usize),
+    Detach,
+    VehiclePutBack { place: bool, keep: bool, flags: u8 },
+    Reattach,
+    ReadFrame(usize),
+    SetFrame { hung: usize, frame: usize },
+    NetPack,
+    ActorMoved,
+    /// The net unpack's ([`net_unpack`], MD65): the scene node turned to the snapshot's orientation;
+    /// the node asked for a quadword of the body's in its own frame (into [`Quad::node_local`]); and,
+    /// after the wheel rounds, the vehicle's own end of the unpack.
+    NodeOrientation,
+    NodeLocal,
+    NetPost(F),
 }
 
 /// Whoever runs the calls the quad's listeners make. A `Vec<Call>` just lists them.
@@ -1413,4 +1439,174 @@ pub fn tire_phy(t: &mut TireSetup, ini: &crate::phy::Ini, mass: F) -> [Option<[V
     set_steering(rr, steer_damping, steer_inertia, steer_torque);
     sweeps[RIGHT_REAR] = set_derived(rr);
     sweeps
+}
+
+// --- MD65: the put-back and the net unpack ----------------------------------------------------------
+
+/// What the put-back reads and writes beyond [`Quad`]. The field map is research/oracle.txt's `# MD65`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PutBack {
+    /// The quad's flag byte: its [`HIDDEN_BIT`] is cleared across the vehicle's put-back and set
+    /// again after, if it was set.
+    pub flags: u8,
+    /// The nodes hung on the quad, by which frame each takes: 0 the first frame node's, 1 the
+    /// second's, anything else neither.
+    pub hung: Vec<i32>,
+    /// Where the player is put back to, as three words; the first one zero is none.
+    pub respawn: [u32; 3],
+    /// The player's own copy of it, written only with a player and a respawn point; `None`, no
+    /// player.
+    pub player_respawn: Option<[u32; 3]>,
+    /// A word the put-back sets to a half (what reads it was not traced).
+    pub settle: F,
+    /// The update's one-frame request word ([`Tail::request`]), set by the put-back.
+    pub request: u32,
+}
+
+/// The flag-byte bit the vehicle's put-back must not see set.
+pub const HIDDEN_BIT: u8 = 0x2;
+/// What the put-back leaves in [`PutBack::settle`].
+const SETTLE: f32 = 0.5;
+
+/// **The quad's put-back**: the bike's own put-back override, word for word, on four wheels.
+///
+/// The four wheels reset, the attachment taken off, then the vehicle's put-back (with the flag
+/// byte's [`HIDDEN_BIT`] cleared for it, and set again after if it was set), the attachment hung back
+/// on, the two frame nodes' world frames read and handed to each hung node by its kind. The quad is
+/// then on the ground, not airborne, with no crossup, [`PutBack::settle`] a half and the request
+/// word set; the network snapshot is packed, the player given the respawn point (when there is a
+/// player and a point), and the actor's listeners told.
+pub fn put_back(pb: &mut PutBack, q: &mut Quad, body: &mut Body, place: bool, keep: bool, m: &mut impl Moto) {
+    for w in 0..4 {
+        m.call(Call::WheelReset(w), q, body);
+    }
+    m.call(Call::Detach, q, body);
+    let hidden = pb.flags & HIDDEN_BIT != 0;
+    if hidden {
+        pb.flags &= !HIDDEN_BIT;
+    }
+    m.call(Call::VehiclePutBack { place, keep, flags: pb.flags }, q, body);
+    if hidden {
+        pb.flags = pb.flags & !HIDDEN_BIT | HIDDEN_BIT;
+    }
+    m.call(Call::Reattach, q, body);
+    m.call(Call::ReadFrame(0), q, body);
+    m.call(Call::ReadFrame(1), q, body);
+    for (i, &kind) in pb.hung.iter().enumerate() {
+        if kind == 0 || kind == 1 {
+            m.call(Call::SetFrame { hung: i, frame: kind as usize }, q, body);
+        }
+    }
+    q.on_ground = true;
+    q.airborne = false;
+    pb.settle = F(SETTLE);
+    q.crossup = F::ZERO;
+    pb.request = 1;
+    m.call(Call::NetPack, q, body);
+    if pb.player_respawn.is_some() && pb.respawn[0] != 0 {
+        pb.player_respawn = Some(pb.respawn);
+    }
+    m.call(Call::ActorMoved, q, body);
+}
+
+/// What the net unpack reads and writes beyond [`Quad`] and [`Body`]. The field map is
+/// research/oracle.txt's `# MD65`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Remote {
+    /// The network snapshot: where the quad is, its orientation and its velocity.
+    pub position: Vf,
+    pub orientation: Vf,
+    pub velocity: Vf,
+    /// The body's centre of mass in its own frame, and where the unpack puts it in the world.
+    pub com_offset: Vf,
+    pub com: Vf,
+    /// The steering's lag filter: its value, its time constant and the fraction it last moved by.
+    pub steer: F,
+    pub steer_time: F,
+    pub steer_fraction: F,
+    /// The left front's negative steering lock (the tire reader's −MaxSteerAngle).
+    pub min_steer_angle: F,
+    /// Each wheel's spin angle (kept within ±π) and rate.
+    pub spin: [F; 4],
+    pub spin_rate: [F; 4],
+}
+
+/// The steering the snapshot's node quadword asks for, per unit of its `x`.
+const NET_STEER: f32 = 0.5;
+const ONE_OVER_TWO_PI: f32 = 0.15915494;
+const TWO_PI: f32 = 6.2831855;
+
+/// A spin angle back within ±π: less the whole turns in it (truncated), then one turn more either
+/// way if it is still past π.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn wrap_angle(a: F) -> F {
+    let turns = F(fpu::from_i32((F(ONE_OVER_TWO_PI) * a).to_i32()));
+    let w = Acc::adda(F::ZERO, a).msub(F(TWO_PI), turns);
+    if !(w <= F(PI)) {
+        w - F(TWO_PI)
+    } else if w < -F(PI) {
+        F(TWO_PI) + w
+    } else {
+        w
+    }
+}
+
+/// **The quad's net unpack**: a remote quad put where its network snapshot says, its wheels spun
+/// and steered to match, and the four wheels run against the ground.
+///
+/// The body takes the snapshot's velocity and orientation, the node's position (and its kept copy)
+/// the snapshot's position, and the centre of mass that position plus the body's offset turned into
+/// the world. The body's own angular velocity is zeroed and the speed is the velocity's length. The
+/// scene node is turned to the orientation; each wheel spins at the velocity's forward part (in the
+/// quad's frame) over its radius, its angle integrated and wrapped to ±π. The steering is half the
+/// node's answer's `x` within the left front's lock, lagged by the filter (the fraction `dt` over
+/// its time, at most one) into the left front's command and the quad's, which the right front
+/// copies. Then the Force body's wheel rounds without the integrate (clear, [`wheel_contacts`],
+/// suspension, tire forces), the ground flags off the four wheels, and the vehicle's end of the
+/// unpack.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn net_unpack(r: &mut Remote, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Moto) {
+    body.velocity = r.velocity;
+    body.orientation = r.orientation;
+    q.node_pos_kept = r.position;
+    r.com = add_xyz(r.position, body.to_world(r.com_offset));
+    q.node_pos = q.node_pos_kept;
+    body.ang_vel = NOTHING;
+    let v = body.velocity;
+    q.speed_len = F(fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(v.x(), v.x()), v.y(), v.y()), v.z(), v.z())));
+    m.call(Call::NodeOrientation, q, body);
+    let forward = F(body.to_local(body.velocity).z());
+    let spin = |r: &mut Remote, q: &Quad, w: usize| {
+        r.spin_rate[w] = forward * q.wheels[w].inv_radius;
+        r.spin[w] = wrap_angle(Acc::adda(F::ZERO, r.spin[w]).madd(r.spin_rate[w], dt));
+    };
+    spin(r, q, LEFT_FRONT);
+    m.call(Call::NodeLocal, q, body);
+    let target = (F(NET_STEER) * F(q.node_local.x())).max(r.min_steer_angle).min(q.wheels[LEFT_FRONT].max_steer_angle);
+    r.steer_fraction = dt.min(r.steer_time) / r.steer_time;
+    r.steer = Acc::adda(F::ZERO, r.steer).madd(r.steer_fraction, target - r.steer);
+    q.wheels[LEFT_FRONT].steer_command = r.steer;
+    q.steer_command = q.wheels[LEFT_FRONT].steer_command;
+    spin(r, q, RIGHT_FRONT);
+    q.wheels[RIGHT_FRONT].steer_command = q.steer_command;
+    spin(r, q, LEFT_REAR);
+    spin(r, q, RIGHT_REAR);
+    for w in 0..4 {
+        m.call(Call::WheelClear(w), q, body);
+    }
+    m.call(Call::Contacts, q, body);
+    for w in 0..4 {
+        m.call(Call::Suspension(w, dt), q, body);
+    }
+    for w in 0..4 {
+        m.call(Call::TireForces(w, dt), q, body);
+    }
+    q.was_airborne = q.airborne;
+    let t = q.wheels.map(|w| w.touching);
+    q.on_ground = t.iter().any(|&b| b);
+    q.all_down = t.iter().all(|&b| b);
+    q.front_down = t[LEFT_FRONT] || t[RIGHT_FRONT];
+    q.rear_down = t[LEFT_REAR] || t[RIGHT_REAR];
+    q.airborne = !q.on_ground;
+    m.call(Call::NetPost(dt), q, body);
 }
