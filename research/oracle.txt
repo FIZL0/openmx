@@ -1777,6 +1777,13 @@ rider_load_clips boot 0x00258790 the same function the S6 block names stunt_spec
 #   (stride 0x60, the node at +0x34), +0x248 one quaternion per joint, +0x24c one translation per
 #   joint, +0x250 the tag buffer and +0x254 whether it has one. All five call sites of anim_rewind
 #   pass a null tag array, so the tag path is dead code in this image
+#   V109: what +0x248 copies is each joint's *node* (+0x34 -> local matrix rows at node+0x40..+0x70),
+#   not the joint record's blended q (+0x50). In 2p (context/capture/v109/snap.csv, frames
+#   139950..140420) at all 8 restarts of both riders, the new +0x248 = mat4_to_quat of the nodes as
+#   the row before left them (dot > 1 - 1e-6), and 0.1-0.9 rad off the records' +0x50, because the
+#   riding ragdoll writes its bones back into the nodes after the blend. +0x24c is *not* rewritten at a
+#   riding restart (the same rest-like translations at every one); at the wreck entry (P2 140365) it is,
+#   equal to the nodes' row 3. Riding fades don't read it: the rotations alone pose them to ~1e-6
 
 # ---------------------------------------------------------------------------------------------------
 # S17 — the rider's four controllers. The three the ground step drives every substep and the
