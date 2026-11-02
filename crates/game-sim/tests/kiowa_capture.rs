@@ -7,7 +7,7 @@
 //! collective filter and the measure's figures (+0x460..+0x4d0), the rotor and aero models' states
 //! and the body's 0x200 bytes. The helicopter's constants (the controller's, rotor's and aero's file
 //! values, the curve table, the terrain's area, gravity) are read off the tape's start state,
-//! `context/states/c14-kiowa.ee.bin`, the tick before the first row.
+//! `context/states/c14-kiowa.ee.bin`, whose helicopter and body bytes are the first row's (1204).
 //!
 //! [`the_flight_replays_bit_exact`] seeds the port's [`Kiowa`] and [`Ride`] from the last row on the
 //! ground's take-off (the collision record's touching flag, captured as `pilot_flag`, has just
@@ -18,9 +18,19 @@
 //! body with its two flags.
 //!
 //! In the air the collision record has no entries, so its response adds nothing and the crash
-//! test's strike answers no: the capture's wreck word stays 0 on every row. The ground at each end
-//! (the record's response against free09's terrain) is not in this replay. The capture and the
-//! image are game data, git-ignored: absent, the test skips.
+//! test's strike answers no: the capture's wreck word stays 0 on every row.
+//!
+//! C14a: [`the_ground_at_both_ends_replays_bit_exact`] takes the ground at both ends too. It seeds
+//! everything from the image alone and runs every row from 1205 to 2057, through the take-off,
+//! the flight, the touchdown at 1816 and its bounces. Its surroundings are [`Grounded`]: the
+//! helicopter's [`Collision`] (built from `kiowam.col` and the disc's `.phy`, checked against the
+//! image's record) searches free09's terrain, trees and props before each world step, and
+//! `contact::resolve` answers on it each substep. The crash test's rotor-in-ground and
+//! MinWreckSpeed tests run on every tick and ask nothing. The touchdown's sound draws no `rand()`
+//! because the image's touchdown sound has no clips. The disc (`context/iso/MX.PSR`) is needed as
+//! well; without it the test skips.
+//!
+//! The capture and the image are game data, git-ignored: absent, the test skips.
 
 use game_sim::air::AcosTable;
 use game_sim::biplane::{Area, Body, World};
@@ -28,6 +38,11 @@ use game_sim::camera::{CURVE_ENTRIES, CurveTable};
 use game_sim::input::{EventQueue, REPORT_BYTES, Report};
 use game_sim::kiowa::{Aero, AeroState, Commands, Controller, Crash, Crashed, Filter, Kiowa, Loop, Measure, Pad, Ride};
 use game_sim::kiowa::{Rotor, RotorState, Strike, Surroundings, Touch};
+use game_sim::kiowa::{CRASH_MASK, Collision, Grounded, KIOWA_PHY, KIOWA_RAYS, Phy};
+use game_sim::eco::{Trees, Wooded};
+use game_sim::flight_search::Rays;
+use game_sim::track::{self, Terrain};
+use game_sim::world::{Ground, Place, Props};
 use game_sim::rng::Rng;
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
@@ -387,6 +402,67 @@ fn same(what: &str, frame: u32, got: F, want: F) {
     assert_eq!(got.to_bits(), want.to_bits(), "tick {frame}: {what} is {:e} in the game, {:e} in the port", want.to_f32(), got.to_f32());
 }
 
+/// Which of the five pad words a row has seen off zero.
+fn moved_by(moved: &mut [bool; 5], want: &Pad) {
+    for (k, v) in [want.climb, want.descend, want.lateral, want.longitudinal, want.pedal].into_iter().enumerate() {
+        moved[k] |= v != F::ZERO;
+    }
+}
+
+/// **A row against the port**, bit for bit: every word the capture holds that the frame writes — the
+/// five pad words, the commands, the controller's loop, the rotor's and the aerodynamics' states, the
+/// measure's figures, the wreck word and all 21 quadwords of the body with its two flags.
+fn compare(cap: &Capture, row: usize, kiowa: &Kiowa, ride: &Ride, filter: Filter) {
+    let frame = cap.u32(row, "frame_counter");
+    let (wa, wb) = (cap.block(row, "heli_a", at::BLOCK_A), cap.block(row, "heli_b", at::BLOCK_B));
+    assert_eq!(wa.u32(at::WRECKED), 0, "tick {frame}: the helicopter wrecked");
+    let want = pad_of(&wa);
+    for (name, got, want) in [
+        ("climb", kiowa.pad.climb, want.climb),
+        ("descend", kiowa.pad.descend, want.descend),
+        ("the lateral", kiowa.pad.lateral, want.lateral),
+        ("the longitudinal", kiowa.pad.longitudinal, want.longitudinal),
+        ("the pedal", kiowa.pad.pedal, want.pedal),
+    ] {
+        same(name, frame, got, want);
+    }
+    let want = commands_of(&wa);
+    for (name, got, want) in [
+        ("the collective", kiowa.commands.collective, want.collective),
+        ("the lateral cyclic", kiowa.commands.lateral, want.lateral),
+        ("the longitudinal cyclic", kiowa.commands.longitudinal, want.longitudinal),
+        ("the pedal command", kiowa.commands.pedal, want.pedal),
+        ("the filtered collective", kiowa.commands.filtered, want.filtered),
+        ("the altitude fraction", kiowa.commands.altitude_fraction, want.altitude_fraction),
+    ] {
+        same(name, frame, got, want);
+    }
+    let want = loop_of(&wa, filter);
+    for (name, got, want) in [
+        ("the speed command", kiowa.control.speed_command, want.speed_command),
+        ("the last longitudinal", kiowa.control.last_longitudinal, want.last_longitudinal),
+        ("the hold altitude", kiowa.control.hold_altitude, want.hold_altitude),
+        ("the hold timer", kiowa.control.hold_timer, want.hold_timer),
+        ("the integral", kiowa.control.integral, want.integral),
+        ("the filter's value", kiowa.control.filter.value, want.filter.value),
+    ] {
+        same(name, frame, got, want);
+    }
+    assert_eq!(kiowa.rotor_state, rotor_state_of(&cap.block(row, "rotor_state", ROTOR_STATE)), "tick {frame}: the rotor's state");
+    assert_eq!(kiowa.aero_state, aero_state_of(&cap.block(row, "aero_state", AERO_OUT)), "tick {frame}: the aerodynamics' state");
+    for ((name, got), want) in measure_words(&ride.measure).into_iter().zip(captured_measure(&wb)) {
+        same(name, frame, got, want);
+    }
+    let want = body_of(&cap.block(row, "body_raw", 0));
+    assert_eq!(ride.body.enabled, want.enabled, "tick {frame}: enabled");
+    same("the inverse mass", frame, ride.body.inv_mass, want.inv_mass);
+    for ((name, _, lanes), (got, want)) in QUADS.iter().zip(body_quads(&ride.body).into_iter().zip(body_quads(&want))) {
+        for k in 0..*lanes {
+            same(&format!("{name}[{k}]"), frame, F(got[k]), F(want[k]));
+        }
+    }
+}
+
 /// **The capture's flight, tick by tick through the port's frame**: see the module's docs.
 #[test]
 fn the_flight_replays_bit_exact() {
@@ -483,57 +559,9 @@ fn the_flight_replays_bit_exact() {
         pad.poll(dt, &report_of(&cap, row - 1), &mut events);
         kiowa.pad = Pad::from_pad(&pad);
 
-        let (wa, wb) = (block_a(row), block_b(row));
         assert_eq!(cap.u32(row, "pilot_flag"), 0, "tick {frame}: the helicopter touches something");
-        assert_eq!(wa.u32(at::WRECKED), 0, "tick {frame}: the helicopter wrecked");
-        let want = pad_of(&wa);
-        for (name, got, want) in [
-            ("climb", kiowa.pad.climb, want.climb),
-            ("descend", kiowa.pad.descend, want.descend),
-            ("the lateral", kiowa.pad.lateral, want.lateral),
-            ("the longitudinal", kiowa.pad.longitudinal, want.longitudinal),
-            ("the pedal", kiowa.pad.pedal, want.pedal),
-        ] {
-            same(name, frame, got, want);
-        }
-        for (k, v) in [want.climb, want.descend, want.lateral, want.longitudinal, want.pedal].into_iter().enumerate() {
-            moved[k] |= v != F::ZERO;
-        }
-        let want = commands_of(&wa);
-        for (name, got, want) in [
-            ("the collective", kiowa.commands.collective, want.collective),
-            ("the lateral cyclic", kiowa.commands.lateral, want.lateral),
-            ("the longitudinal cyclic", kiowa.commands.longitudinal, want.longitudinal),
-            ("the pedal command", kiowa.commands.pedal, want.pedal),
-            ("the filtered collective", kiowa.commands.filtered, want.filtered),
-            ("the altitude fraction", kiowa.commands.altitude_fraction, want.altitude_fraction),
-        ] {
-            same(name, frame, got, want);
-        }
-        let want = loop_of(&wa, filter);
-        for (name, got, want) in [
-            ("the speed command", kiowa.control.speed_command, want.speed_command),
-            ("the last longitudinal", kiowa.control.last_longitudinal, want.last_longitudinal),
-            ("the hold altitude", kiowa.control.hold_altitude, want.hold_altitude),
-            ("the hold timer", kiowa.control.hold_timer, want.hold_timer),
-            ("the integral", kiowa.control.integral, want.integral),
-            ("the filter's value", kiowa.control.filter.value, want.filter.value),
-        ] {
-            same(name, frame, got, want);
-        }
-        assert_eq!(kiowa.rotor_state, rotor_state_of(&rotor_block(row)), "tick {frame}: the rotor's state");
-        assert_eq!(kiowa.aero_state, aero_state_of(&aero_block(row)), "tick {frame}: the aerodynamics' state");
-        for ((name, got), want) in measure_words(&ride.measure).into_iter().zip(captured_measure(&wb)) {
-            same(name, frame, got, want);
-        }
-        let want = body_of(&body_block(row));
-        assert_eq!(ride.body.enabled, want.enabled, "tick {frame}: enabled");
-        same("the inverse mass", frame, ride.body.inv_mass, want.inv_mass);
-        for ((name, _, lanes), (got, want)) in QUADS.iter().zip(body_quads(&ride.body).into_iter().zip(body_quads(&want))) {
-            for k in 0..*lanes {
-                same(&format!("{name}[{k}]"), frame, F(got[k]), F(want[k]));
-            }
-        }
+        moved_by(&mut moved, &pad_of(&block_a(row)));
+        compare(&cap, row, &kiowa, &ride, filter);
         ticks += 1;
     }
     // The helicopter's own frame draws nothing in the air: the capture's generator moves for others.
@@ -543,4 +571,311 @@ fn the_flight_replays_bit_exact() {
     let (top, last) = (cap.row_at(1394), cap.row_at(LAST));
     println!("the Kiowa's flight: {ticks} ticks ({FIRST}..={LAST}) bit-exact, every pad word used; up to y {} at {}, down to {} at {}",
              cap.f32(top, "body_pos.y"), 1394, cap.f32(last, "body_pos.y"), LAST);
+}
+
+// --- the ground at both ends (C14a) ------------------------------------------------------------------
+
+/// The collision object's fields (`tests/flight_collision.rs`'s, the same class as the plane's).
+mod rec {
+    pub const TOUCHING: u32 = 0x40;
+    pub const CAPACITY: u32 = 0x104;
+    pub const RAY_PROBE: u32 = 0x1f0;
+    pub const COLLIDABLE: u32 = 0x1f8;
+    pub const STRUCK: u32 = 0x1fc;
+    /// The ray probe's count and rays (from, to; 0x20 apart).
+    pub const RAY_COUNT: u32 = 0x168;
+    pub const RAYS: u32 = 0x170;
+    pub const CATEGORY: u32 = 0x84;
+}
+
+/// More of the helicopter's fields (research/oracle.txt, S220a).
+mod heli_at {
+    pub const BODY: u32 = 0x160;
+    pub const COLLISION: u32 = 0x170;
+    pub const LAST_TOUCHING: u32 = 0x420;
+    pub const CRASH_MASK: u32 = 0x460;
+    pub const TOUCHDOWN_SOUND: u32 = 0x54c;
+    /// The touchdown sound's clip count: its pick draws a `rand()` only when it is not 0.
+    pub const CLIPS: u32 = 0x200;
+    /// The body's inertia tensor.
+    pub const INERTIA: u32 = 0x110;
+}
+
+/// A file out of MX.PSR, and a member of a `.res` in it by its name's end.
+struct Disc {
+    file: std::fs::File,
+    psr: game_sim::archive::Psr,
+}
+
+impl Disc {
+    fn open() -> Option<Disc> {
+        let path = ctx("iso/MX.PSR")?;
+        let mut file = std::fs::File::open(&path).expect("open MX.PSR");
+        let mut front = vec![0u8; 64 << 10];
+        std::io::Read::read_exact(&mut file, &mut front).expect("the front of MX.PSR");
+        let psr = game_sim::archive::Psr::parse(&front).expect("MX.PSR's directory");
+        Some(Disc { file, psr })
+    }
+    fn member(&mut self, name: &str) -> Option<Vec<u8>> {
+        let e = self.psr.find(name)?;
+        std::io::Seek::seek(&mut self.file, std::io::SeekFrom::Start(e.at)).expect("seek");
+        let mut bytes = vec![0u8; e.size as usize];
+        std::io::Read::read_exact(&mut self.file, &mut bytes).expect("read");
+        Some(bytes)
+    }
+}
+
+fn entry(res: &game_sim::archive::Res, bytes: &[u8], suffix: &str) -> Option<Vec<u8>> {
+    let want = suffix.to_ascii_lowercase();
+    let e = res.entries.iter().find(|e| {
+        let n = e.name.to_ascii_lowercase();
+        n == want || n.ends_with(&format!("\\{want}"))
+    })?;
+    res.read(bytes, e).ok()
+}
+
+/// What the disc gives the replay: `helicopter\kiowa.phy`, the ray probe's `kiowam.col`, and
+/// free09's archives (its terrain bytes, scene and props, and its ecosystem).
+struct Free09 {
+    phy: Phy,
+    rays: track::Rays,
+    terrain: Vec<u8>,
+    scene: track::Scene,
+    props: Props,
+    esb: Vec<u8>,
+}
+
+fn the_disc() -> Option<Free09> {
+    use game_sim::archive::Res;
+    let mut disc = Disc::open()?;
+    let machine = disc.member("machine.res").expect("machine.res is in MX.PSR");
+    let res = Res::parse(&machine).expect("machine.res");
+    let phy = Phy::read_bytes(&entry(&res, &machine, KIOWA_PHY).expect("kiowa.phy"));
+    let rays = track::Rays::parse(&entry(&res, &machine, KIOWA_RAYS).expect("kiowam.col")).expect("kiowam.col's rays");
+    let bytes = disc.member("Tracks\\free09.res").expect("free09.res");
+    let res = Res::parse(&bytes).expect("free09.res");
+    let by_end = |end: &str| {
+        let e = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(end)).unwrap_or_else(|| panic!("free09 has no {end}"));
+        res.read(&bytes, e).expect("a free09 member")
+    };
+    let scene = track::Scene::parse(&by_end(".scn")).expect("free09's scene");
+    let terrain = by_end(&scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn"));
+    let esb = by_end(".esb");
+    let mut parts = vec![(bytes.clone(), res.clone())];
+    if let Some(b) = disc.member("Tracks\\free09_2.res")
+        && let Ok(r) = Res::parse(&b)
+    {
+        parts.push((b, r));
+    }
+    let (props, missing) = Props::load(&scene, |want| {
+        parts.iter().find_map(|(b, r)| entry(r, b, want)).ok_or_else(|| "no archive of this track has it".to_string())
+    });
+    // free09's utility shack is a hierarchy, which the port's world does not build (S66's
+    // `tests/back_search.rs` says the same); the ground replay matches without it, so the
+    // helicopter's searches never reach it.
+    assert!(missing.iter().all(|m| m.starts_with("UTILITYSHACK1.col")), "free09's props the archives lack: {missing:?}");
+    Some(Free09 { phy, rays, terrain, scene, props, esb })
+}
+
+/// `len` bytes of the image from `base`, readable by their own addresses.
+fn image_block(ee: &Ee, base: u32, len: u32) -> Block {
+    Block { base, bytes: (0..len).map(|k| ee.u8_at(base + k)).collect() }
+}
+
+/// The helicopter's collision object in the image: the port's built off the disc, against the
+/// original's — every field of its response's tuning, its search's capacity, its collidable's
+/// categories and the ray probe's 22 rays.
+fn check_collision(ee: &Ee, c: &Collision) {
+    let r = ee.u32_at(HELI + heli_at::COLLISION);
+    let q = |a: u32| quad(ee, a);
+    let k = &c.collider;
+    let fl = |a: u32| F(ee.f32_at(r + a));
+    for (what, got, want) in [
+        ("the mass", k.mass, fl(0x64)),
+        ("the inverse mass", k.inv_mass, fl(0x68)),
+        ("the max depth", k.max_depth, fl(0x118)),
+        ("the scenery stiffness", k.scenery.stiffness, fl(0x124)),
+        ("the scenery damping", k.scenery.damping, fl(0x128)),
+        ("the scenery restitution", k.scenery.restitution, fl(0x12c)),
+        ("the actor stiffness", k.actor.stiffness, fl(0x13c)),
+        ("the actor damping", k.actor.damping, fl(0x140)),
+        ("the actor restitution", k.actor.restitution, fl(0x144)),
+        ("the friction", k.scenery.friction, fl(0x190)),
+        ("the actor friction", k.actor.friction, fl(0x194)),
+    ] {
+        assert_eq!(got.to_bits(), want.to_bits(), "the collision object's {what}: the game {want:?}, the port {got:?}");
+    }
+    for (what, got, want) in [
+        ("inverse inertia", k.inv_inertia, q(r + 0x80)),
+        ("centre of gravity", k.cofg, q(r + 0x90)),
+        ("spring mask", k.scenery.spring_mask, q(r + 0x150)),
+        ("friction mask", k.scenery.friction_mask, q(r + 0x160)),
+        ("actor spring mask", k.actor.spring_mask, q(r + 0x170)),
+        ("actor friction mask", k.actor.friction_mask, q(r + 0x180)),
+    ] {
+        assert_eq!(got.to_bits(), want.to_bits(), "the collision object's {what}: the game {want:?}, the port {got:?}");
+    }
+    assert_eq!((k.actors, k.collides_with), (ee.u32_at(r + 0x110), ee.u32_at(r + 0x114)), "the actor masks");
+    assert_eq!(k.collidable, Some(ee.u32_at(ee.u32_at(r + rec::COLLIDABLE) + rec::CATEGORY)), "the collidable's categories");
+    assert_eq!(c.record.capacity as u32, ee.u32_at(r + rec::CAPACITY), "the contact capacity");
+    let probe = ee.u32_at(r + rec::RAY_PROBE);
+    let (n, at) = (ee.u32_at(probe + rec::RAY_COUNT), ee.u32_at(probe + rec::RAYS));
+    assert_eq!(c.rays.segments.len() as u32, n, "the ray count");
+    for (i, s) in c.rays.segments.iter().enumerate() {
+        let a = at + 0x20 * i as u32;
+        assert_eq!((s.from.to_bits(), s.to.to_bits()), (q(a).to_bits(), q(a + 0x10).to_bits()), "ray {i}");
+    }
+    assert_eq!(ee.u32_at(HELI + heli_at::CRASH_MASK), CRASH_MASK, "the crash test's surface mask");
+}
+
+/// **The capture's whole flight, the ground at both ends too**: the port seeded from the tape's start
+/// state (the tick before the first row, the helicopter at rest on free09) and stepped through every
+/// row, 1204..=2057 — the take-off on the collision record's contacts, the flight, the touchdown and
+/// the bounces and the slide on the slope — with the helicopter's own collision object
+/// ([`Collision`], built off the disc and checked against the image's) searched against free09's
+/// terrain, props and plants before each world step, and resolved in the force listener
+/// ([`Grounded`]). Every row is compared as [`the_flight_replays_bit_exact`] compares it, and the
+/// record's touching flag against the capture's.
+///
+/// The crash test runs on the record (its speed test against `MinWreckSpeed` while touching, with the
+/// struck surface's mask) and asks nothing, as the capture's wreck word says; the touchdown runs on the
+/// record's entries and comes on each tick the flag comes back, and the helicopter's touchdown sound has
+/// no clips in the image, so the frame draws no `rand()`.
+#[test]
+fn the_ground_at_both_ends_replays_bit_exact() {
+    let (Some(cap_path), Some(image)) = (ctx(CAPTURE), ctx(STATE)) else { return };
+    let Some(disc) = the_disc() else { return };
+    let cap = Capture::load(&cap_path);
+    let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(ee.u32_at(HELI + at::FLOWN), 1, "no flown helicopter at {HELI:#x} in {}", image.display());
+
+    // The helicopter as the image holds it: its constants, and its state at the tick before row 0.
+    let (r, a) = (ee.u32_at(HELI + at::ROTOR), ee.u32_at(HELI + at::AERO));
+    let pf = ee.u32_at(HELI + at::FILTER);
+    let filter = Filter { value: f(&ee, pf), time: f(&ee, pf + 4), step: f(&ee, pf + 8) };
+    let terrain_at = ee.u32_at(ee.u32_at(HELI + at::SCENE) + at::TERRAIN);
+    let e: Vec<F> = (0..4).map(|k| f(&ee, terrain_at + at::EXTENT + 4 * k)).collect();
+    let curve = the_curve_table(&ee);
+    let acos = AcosTable::build();
+    let world_step = World { iterations: 1, rate: F(115.0) };
+    let ha = image_block(&ee, at::BLOCK_A + HELI, 0xb0);
+    let ha = Block { base: at::BLOCK_A, bytes: ha.bytes };
+    let b_at = ee.u32_at(HELI + heli_at::BODY);
+    let body = body_of(&Block { base: 0, bytes: image_block(&ee, b_at, 0x200).bytes });
+    let mut kiowa = Kiowa {
+        controller: controller_of(&ee),
+        rotor: rotor_of(&ee, r),
+        aero: aero_of(&ee, a),
+        pad: pad_of(&ha),
+        commands: commands_of(&ha),
+        control: loop_of(&ha, filter),
+        rotor_state: rotor_state_of(&Block { base: ROTOR_STATE, bytes: image_block(&ee, r + ROTOR_STATE, 0x50).bytes }),
+        aero_state: aero_state_of(&Block { base: AERO_OUT, bytes: image_block(&ee, a + AERO_OUT, 0x1c).bytes }),
+        wrecked: false,
+    };
+    let rows = |o: u32| quad(&ee, HELI + at::ROWS + o);
+    let m = |o: u32| quad(&ee, HELI + 0x4d0 + o);
+    let measure = Measure {
+        speed: f(&ee, HELI + at::SPEED),
+        alpha: f(&ee, HELI + at::SPEED + 4),
+        beta: f(&ee, HELI + at::SPEED + 8),
+        world_rates: rows(0),
+        velocity: rows(0x10),
+        forward: rows(0x20),
+        up: rows(0x30),
+        euler: rows(0x40),
+        matrix: game_sim::math::Mat4([m(0), m(0x10), m(0x20), m(0x30)]),
+        was_touching: ee.u32_at(HELI + heli_at::LAST_TOUCHING) != 0,
+    };
+    let clips = ee.u32_at(ee.u32_at(HELI + heli_at::TOUCHDOWN_SOUND) + heli_at::CLIPS);
+    let mut ride = Ride {
+        body,
+        measure,
+        crash: Crash {
+            reason: ha.u32(at::WRECKED),
+            down: ha.u32(at::DOWN) != 0,
+            min_wreck_speed: f(&ee, HELI + at::MIN_WRECK_SPEED),
+            wreck_time: f(&ee, HELI + at::WRECK_TIME),
+            clock: f(&ee, HELI + at::CLOCK),
+        },
+        flown: ha.u32(at::FLOWN) != 0,
+        gravity_scale: f(&ee, HELI + at::GRAVITY_SCALE),
+        throw_scale: f(&ee, HELI + at::THROW_SCALE),
+        gravity: quad(&ee, HELI + at::GRAVITY),
+        area: Some(Area::new(e[0], e[1], e[2], e[3])),
+        touchdown_sound: clips != 0,
+        rotor_angle: F::ZERO,
+        rotor_hidden: false,
+    };
+    assert_eq!(ride.crash.reason, 0, "the helicopter is wrecked in the image");
+    assert!(ride.measure.was_touching, "the helicopter is not on the ground in the image");
+    assert_eq!(ee.u32_at(ee.u32_at(HELI + heli_at::COLLISION) + rec::TOUCHING), 1, "the image's record is not touching");
+    same("the image's MinWreckSpeed", 1203, ride.crash.min_wreck_speed, disc.phy.wrecks.min_wreck_speed);
+
+    // Its collision object, off the disc and the image's body, against the image's; the struck
+    // object empty, as the image's is; the nearby list as the last post left it.
+    let inertia = quad(&ee, b_at + heli_at::INERTIA);
+    let mut collision = Collision::new(&disc.phy.mass_properties, &ride.body, inertia, Rays::of(&disc.rays));
+    check_collision(&ee, &collision);
+    let r_at = ee.u32_at(HELI + heli_at::COLLISION);
+    assert_eq!(ee.u32_at(r_at + rec::STRUCK), 0, "the image's record has struck something");
+
+    // free09, as the shell builds it.
+    let terrain = Terrain::parse(&disc.terrain).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &disc.scene.terrain);
+    let (trees, missed) = Trees::on_ground(&disc.esb, &ground, &curve).expect("free09's ecosystem");
+    assert!(missed.is_empty(), "free09's trees missing: {missed:?}");
+    let mut place = Wooded { world: Place { ground, props: disc.props }, trees };
+    collision.refresh(&ride.body, &mut place);
+
+    // The image is row 0's state (its blocks are row 0's byte for byte): the replay ticks from row 1.
+    compare(&cap, 0, &kiowa, &ride, filter);
+
+    // The player's pad: the first tick flies the image's words; a row's input step reads the row
+    // before's buffer.
+    let mut pad = game_sim::input::Pad::new(0);
+    pad.connected = true;
+    let mut events = EventQueue::new();
+
+    let mut rng = Rng::from_state(0x0c14_0c14_0c14_0c14);
+    let start_rng = rng.state();
+    let (mut ticks, mut touched, mut downs, mut cleared) = (0, 0, Vec::new(), Vec::new());
+    let mut moved = [false; 5];
+    for row in 1..cap.rows.len() {
+        let frame = cap.u32(row, "frame_counter");
+        let dt = F(cap.f32(row, "dt"));
+        let movers = collision.search(&mut ride.body, &mut place, dt);
+        let was = ride.measure.was_touching;
+        let mut around = Grounded { collision: &mut collision, world: &mut place, movers: &movers, rotor: &disc.phy.wreck_rotor.rays, asked: Vec::new() };
+        let out = kiowa.tick(&mut ride, &world_step, None, &curve, &acos, &mut rng, dt, &mut around);
+        assert_eq!(out, Crashed::default(), "tick {frame}: the port's crash test asked for something");
+        assert_eq!(around.asked, vec![Crashed::default()], "tick {frame}: the crash test ran other than once");
+        events.clear();
+        pad.poll(dt, &report_of(&cap, row - 1), &mut events);
+        kiowa.pad = Pad::from_pad(&pad);
+
+        // The row's flag is the record's, but a row read after the next frame's search has cleared
+        // it shows 0: those reads fall on the same ticks in both runs, and on each the port's
+        // contact is needed for the body to match (taking it out puts the body off at once).
+        let touching = collision.record.touching;
+        if touching != (cap.u32(row, "pilot_flag") != 0) {
+            assert!(touching, "tick {frame}: the game's record touches, the port's does not");
+            cleared.push(frame);
+        }
+        touched += usize::from(touching);
+        if touching && !was {
+            downs.push(frame);
+        }
+        moved_by(&mut moved, &pad_of(&cap.block(row, "heli_a", at::BLOCK_A)));
+        compare(&cap, row, &kiowa, &ride, filter);
+        ticks += 1;
+    }
+    assert_eq!(cap.u32(0, "frame_counter"), 1204, "the capture does not start on the image's tick");
+    assert_eq!(cap.u32(cap.rows.len() - 1, "frame_counter"), 2057, "the capture does not end on 2057");
+    assert_eq!(clips, 0, "the helicopter's touchdown sound has clips: its pick draws");
+    assert_eq!(rng.state(), start_rng, "the port's frame drew from the generator");
+    assert!(moved.iter().all(|&m| m), "the flight does not use every pad word: {moved:?}");
+    assert_eq!(downs.first(), Some(&1816), "the first touchdown is not 1816's");
+    assert_eq!(cleared, [1838, 1843, 1862, 1874, 1876, 1877, 1881, 1893], "the rows read after the next search's clear");
+    println!("the Kiowa's whole capture: {ticks} ticks (1205..=2057) bit-exact, {touched} of them touching (the flag read cleared on {cleared:?}); touchdowns at {downs:?}");
 }
