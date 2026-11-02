@@ -22,6 +22,9 @@
 //! 9. **the wreck bike's world** (S171) — the original's wreck bike searches the plane's world, the
 //!    cars toys in its moving list; the port's thrown wreck bike rides the wagon's roof, and the
 //!    put-back's query gathers the cars from the moving list.
+//! 10. **the riding bike's world** (S213) — every riding bike's probes are in that one table too,
+//!    leaving no toy out, and a solid bike's kept list holds every toy; the port's bike ridden onto
+//!    the wagon's roof lists the cars as toys and its wheels name the wagon as their vehicle.
 
 use game_sim::archive::{Psr, Res};
 use game_sim::math::Mat4;
@@ -1572,4 +1575,199 @@ fn a_ghost_on_the_rail_lets_the_train_through() {
     let again = hold(&mut world, &mut sim, THROUGH, false);
     eprintln!("again: {again:?}");
     assert!(again.pushed > 50.0, "the train did not shove the bike after its ghost ended: {again:?}");
+}
+
+// --- S213: the riding bike's probes meet the cars as toys ------------------------------------------
+
+/// S146's state of free06: the human's 250 braked on a wagon's roof, the train running.
+const ROOF_STATE: &str = "s146-roof.eeMemory.bin";
+/// The rider's kept nearby search (S189) and its collision object, whose probes (ray `+0x1f0`,
+/// sweep `+0x1f4`) and collidable (`+0x1f8`) are laid out as the wreck bike's.
+const RIDER_SEARCH: u32 = 0x7bc;
+const RIDER_RECORD: u32 = 0x7d0;
+
+/// The riders (actor type 2) in the game manager's actor list, every one with a collision object.
+fn riders_of(ee: &Ee) -> Vec<u32> {
+    let mut riders = Vec::new();
+    let mut a = ee.u32_at(ee.u32_at(ee.u32_at(addr("game_manager").unwrap()) + 0x34) + 0x34);
+    while a != 0 && riders.len() < 16 {
+        let actor = ee.u32_at(a);
+        if actor != 0 && ee.u32_at(actor) == 2 && ee.u32_at(actor + RIDER_RECORD) != 0 {
+            riders.push(actor);
+        }
+        a = ee.u32_at(a + 0x8);
+    }
+    riders
+}
+
+/// **The riding bike's probes are in the plane's world** (S213). In S171's and S146's free06 states,
+/// every riding bike's (the human's and the three AI riders') ray and sweep probe is placed in the one
+/// table whose moving list holds the wreck bike's and biplane.p2m2's plane's: the path cars and the
+/// two driving toys at its head, each a toy of category 0x48. Neither probe leaves a toy out (its
+/// leave-out list is three of the bike's own collidables', its body's among them), and the category list is empty, or a lone
+/// 0, or a ghost's 0x40 (S129): so a solid bike's kept nearby list holds every toy, which the moving
+/// list hands out wherever the bike is, and a ghost's none. That is the world the port's riding bike
+/// searches ([`game_sim::flight_search::refresh_ridden`], [`game_sim::flight_search::Scene::flown`],
+/// S189).
+#[test]
+fn the_riding_bikes_probes_search_the_planes_world() {
+    use game_sim::flight_search::{GHOST, TOY};
+    let Some(kit) = Kit::load().map_err(|w| skip(&w)).ok() else { return };
+    let paths = [WRECK_STATE, ROOF_STATE, PLANE_STATE].map(|f| kit.ctx("states").join(f));
+    if let Some(p) = paths.iter().find(|p| !p.exists()) {
+        skip(&format!("{} is not there (S171's, S146's and S141's free06 states)", p.display()));
+        return;
+    }
+    let flown = Ee::from_ram(&paths[2]).unwrap_or_else(|e| panic!("{e}"));
+    let plane_ray = flown.u32_at(flown.u32_at(PLANE + PLANE_COLLISION) + RAY_PROBE);
+    let (plane_list, plane_slots) = moving_of(&flown, plane_ray);
+    let plane_toys = toys_of(&flown, &plane_slots);
+    for path in &paths[..2] {
+        let ee = Ee::from_ram(path).unwrap_or_else(|e| panic!("{e}"));
+        let name = path.file_name().unwrap().to_string_lossy();
+        let riders = riders_of(&ee);
+        assert_eq!(riders.len(), 4, "{name}: the human and three AI riders");
+        let (mut solid, mut ghosts) = (0, 0);
+        for rider in riders {
+            let record = ee.u32_at(rider + RIDER_RECORD);
+            let collidable = ee.u32_at(record + WRECK_COLLIDABLE);
+            let own = ee.u32_at(collidable + col_at::CATEGORY);
+            let (ray, sweep) = (ee.u32_at(record + WRECK_RAY), ee.u32_at(record + WRECK_SWEEP));
+            let mut ghost = false;
+            for probe in [ray, sweep] {
+                let (list, slots) = moving_of(&ee, probe);
+                assert_eq!(list, plane_list, "{name} {rider:x}: the bike's moving list is the plane's");
+                assert_eq!(toys_of(&ee, &slots), plane_toys, "{name} {rider:x}: the plane's toys, in its order");
+                let (mode, array, count) = (ee.u32_at(probe + LEAVE_OUT), ee.u32_at(probe + LEAVE_OUT + 4), ee.u32_at(probe + LEAVE_OUT + 8));
+                assert_eq!(mode, 1, "the leave-out list is on");
+                let left: Vec<u32> = (0..count).map(|k| ee.u32_at(ee.u32_at(array + 4 * k) + col_at::CATEGORY)).collect();
+                assert!(left.len() == 3 && left.contains(&own), "{name} {rider:x}: the leave-out list {left:x?}");
+                assert!(!left.contains(&TOY), "{name} {rider:x}: a probe leaves out a toy: {left:x?}");
+                let (array, count) = (ee.u32_at(probe + CATEGORY_LIST + 4), ee.u32_at(probe + CATEGORY_LIST + 8));
+                let listed: Vec<u32> = (0..count).map(|k| ee.u32_at(array + 4 * k)).collect();
+                assert!(listed.iter().all(|&c| c == 0 || c == GHOST), "{name} {rider:x}: the category list {listed:x?}");
+                ghost |= listed.contains(&GHOST);
+            }
+            let search = ee.u32_at(rider + RIDER_SEARCH);
+            let (list, count) = (ee.u32_at(search), ee.u32_at(search + 4));
+            let toys = (0..count).filter(|&k| ee.u32_at(ee.u32_at(list + 8 * k) + col_at::CATEGORY) == TOY).count();
+            if ghost {
+                assert_eq!(toys, 0, "{name} {rider:x}: a ghost's list holds a toy");
+                ghosts += 1;
+            } else {
+                assert_eq!(toys, plane_toys.len(), "{name} {rider:x}: a solid bike's list holds every toy");
+                solid += 1;
+            }
+        }
+        eprintln!("{name}: {solid} solid bikes, {ghosts} ghosts");
+    }
+}
+
+/// What [`ridden_onto`] measured.
+#[derive(Debug)]
+struct RodeOn {
+    /// Ticks a wheel's contact named the wagon as a vehicle of kind 2 (S136).
+    on_wagon: usize,
+    /// Ticks a wheel touched anything.
+    touching: usize,
+    /// Whether the bike's kept list held every car, each a toy of the flown world, on every tick.
+    cars_listed: bool,
+    /// The ticks before it left the deck (or [`RIDDEN`]), and its speed and the wagon's at the end.
+    on: usize,
+    speed: f32,
+    car: f32,
+}
+
+/// How long [`ridden_onto`] rides: 1.5 seconds, the bike landing on the roof at tick 12 and rolling
+/// (the fresh stock bike gains about 1.2 ft/s a tick, coasting) to within a few feet of the front.
+const RIDDEN: usize = 45;
+
+/// A stock bike let go two feet over the back of [`WAGON`]'s roof, rolling forward over it 4 ft/s
+/// faster than the wagon runs, coasting (no drag, so that only the contacts carry it), and
+/// stepped as `Sim::step` steps it among the moving cars for [`RIDDEN`] ticks. `still` takes the
+/// cars' motion away (the control: the roof is then a still mesh, no vehicle).
+fn ridden_onto(still: bool) -> Option<RodeOn> {
+    use game_sim::flight_search::{FIRST, TOY};
+    let ee = state()?;
+    let parts = archives()?;
+    let scn = member(&parts, "free06.scn").expect("free06.scn");
+    let scene = Scene::parse(&scn).expect("free06's scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_bytes = member(&parts, &leaf).expect("free06's terrain");
+    let terrain = Terrain::parse(&terrain_bytes).expect("free06's terrain");
+    let mut world = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let mut traffic = traffic_of(&ee, &parts, &mut world.props);
+    let first = traffic.first.expect("attached");
+    traffic.frame(DT, &mut world);
+    let moving = world.props.props[first + WAGON].moving.expect("the wagon moves");
+    let wagon = (FIRST + first + WAGON) as u32;
+    let cars: Vec<usize> = (0..CARS.len()).map(|k| FIRST + first + k).collect();
+
+    let mut sim = game_sim::Sim::new(0x5213);
+    std::sync::Arc::make_mut(&mut sim.phy).mv.drag = F::ZERO;
+    let (pose, ahead) = (moving.pose.0[3], moving.pose.0[2]);
+    let back = Vf::new(pose.x() - 18.0 * ahead.x(), ROOF + 2.0 + game_sim::stock::SPAWN.y(), pose.z() - 18.0 * ahead.z(), 1.0);
+    sim.rider.ride.place(back, ahead);
+    let v = moving.velocity;
+    sim.rider.ride.chassis.vel = Vf::new(v.x() + 4.0 * ahead.x(), v.y(), v.z() + 4.0 * ahead.z(), 0.0);
+    let off = |sim: &game_sim::Sim, car: &Mat4| {
+        let at = sim.rider.ride.position();
+        let d = Vf::new(at.x() - car.0[3].x(), at.y() - car.0[3].y(), at.z() - car.0[3].z(), 0.0);
+        chassis::unrotate(&Mat3::new(car.0[0], car.0[1], car.0[2]), d)
+    };
+    let coast = ride::Controls::default();
+    let (mut on_wagon, mut touching, mut cars_listed, mut on) = (0, 0, true, RIDDEN);
+    for tick in 0..RIDDEN {
+        traffic.frame(DT, &mut world);
+        if still {
+            world.props.props.iter_mut().for_each(|p| p.moving = None);
+        }
+        sim.step(DT, &coast, &mut world);
+        let ride = &sim.rider.ride;
+        let wheels = [&ride.front, &ride.rear];
+        touching += usize::from(wheels.iter().any(|w| w.w.swept_contact != 0));
+        on_wagon += usize::from(wheels.iter().any(|w| w.w.swept_contact != 0 && w.mv.fresh.scalars[3] == wagon));
+        // The kept list as the tick's gather left it, against the world it was gathered in.
+        let list = ride.nearby.as_deref().expect("free06 hands its props over");
+        let found: Vec<usize> = list.nearby.found.iter().map(|c| c.object).collect();
+        let at = ride.position();
+        let (_, objects) = game_sim::flight_search::world_flown(&world.props.props, None, None, None, at, F(10.0));
+        cars_listed &= cars.iter().all(|c| found.contains(c) && objects[*c].category == TOY);
+        let now = off(&sim, &traffic.cars[WAGON].pose);
+        if on == RIDDEN && (now.x().abs().max(now.z().abs()) > DECK || now.y() < 0.0) {
+            on = tick;
+        }
+    }
+    let v = sim.rider.ride.chassis.vel;
+    let car = moving.velocity;
+    Some(RodeOn {
+        on_wagon,
+        touching,
+        cars_listed,
+        on,
+        speed: (v.x() * v.x() + v.z() * v.z()).sqrt(),
+        car: (car.x() * car.x() + car.z() * car.z()).sqrt(),
+    })
+}
+
+/// **S213: a bike ridden onto the moving train's roof meets it as a toy.** The port's riding bike
+/// searches the plane's world (S189): its kept list holds every path car, each a toy (0x48) of the
+/// moving list rather than scenery in the tree, and the wheels' contacts on the roof name the wagon
+/// as their vehicle of kind 2, which carries the bike: it lands, rolls along the deck at the wagon's
+/// speed plus its own and stays on. The control, the cars' motion taken away, meets the same roof as
+/// still scenery: no vehicle in a contact.
+#[test]
+fn a_bike_ridden_onto_the_trains_roof_meets_it_as_a_toy() {
+    let Some(rode) = ridden_onto(false) else { return };
+    eprintln!("rode {rode:?}");
+    assert!(rode.cars_listed, "the bike's list did not hold every car as a toy: {rode:?}");
+    assert!(rode.touching > RIDDEN / 2, "the bike hardly touched the roof: {rode:?}");
+    assert_eq!(rode.on_wagon, rode.touching, "a wheel's contact on the roof did not name the wagon: {rode:?}");
+    assert_eq!(rode.on, RIDDEN, "the bike left the deck: {rode:?}");
+    assert!(rode.speed > rode.car, "the bike at {} ft/s rolls slower than its wagon at {}", rode.speed, rode.car);
+
+    let still = ridden_onto(true).expect("the same state");
+    eprintln!("still {still:?}");
+    assert!(still.touching > 0, "the still roof was not met: {still:?}");
+    assert_eq!(still.on_wagon, 0, "a still car is no vehicle: {still:?}");
 }
