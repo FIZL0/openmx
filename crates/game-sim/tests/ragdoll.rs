@@ -1732,7 +1732,7 @@ fn the_riders_bones_lose_the_wreck_bike_on_the_put_back_tick() {
 
 /// **The wreck enters from the riding bodies** (S110): a rider handed its holds steps the riding
 /// ragdoll each tick it is up, and its wreck's bones start where those bodies are on the verdict's
-/// tick; a rider with no holds (a fixture, a session online) has no riding ragdoll and enters from the
+/// tick (as the tick before left them, since S90 steps them at the frame's end); a rider with no holds (a fixture, a session online) has no riding ragdoll and enters from the
 /// skeleton as before. Thrown upside down at the top of a jump, it wrecks in the air.
 #[test]
 fn the_wreck_enters_from_the_riding_bodies() {
@@ -1764,20 +1764,21 @@ fn the_wreck_enters_from_the_riding_bodies() {
     };
     let (mut held, mut bare) = (rider(true), rider(false));
     for tick in 1..60 {
-        // The verdict's riding tick, off a twin that cannot wreck: the riding step is the frame's first.
-        let mut up = held.clone();
-        up.sense.wrecks_enabled = false;
-        up.frame(&p, &tables, &idle, dt, &mut world);
+        // The bodies the verdict reads: last tick's, as the riding step is the frame's last (S90), so
+        // neither may wreck before the first one is up.
+        let arm = tick > 2;
+        (held.sense.wrecks_enabled, bare.sense.wrecks_enabled) = (arm, arm);
+        let up = held.clone();
         let out = held.frame(&p, &tables, &idle, dt, &mut world);
         let bare_out = bare.frame(&p, &tables, &idle, dt, &mut world);
         assert!(bare.riding.is_none(), "tick {tick}: a rider with no holds has no riding ragdoll");
         assert_eq!(out.wreck, bare_out.wreck, "tick {tick}: the riding ragdoll does not ride the bike");
-        let riding = up.riding.as_deref().expect("a rider up with holds rides its ragdoll");
-        assert!(riding.placed(), "tick {tick}: the riding bodies are placed");
         if out.wreck.is_none() {
             assert!(held.riding.is_some(), "tick {tick}: riding on");
             continue;
         }
+        let riding = up.riding.as_deref().expect("a rider up with holds rides its ragdoll");
+        assert!(riding.placed(), "tick {tick}: the riding bodies are placed");
         assert!(held.riding.is_none(), "the wreck ends the riding ragdoll");
         let doll = held.ragdoll.as_ref().expect("the wreck's bones");
         let skeleton = bare.ragdoll.as_ref().expect("the bare rider's wreck bones");
