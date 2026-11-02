@@ -610,7 +610,7 @@ impl Updates {
 }
 
 /// Updates' row's help (P191).
-pub const UPDATES_HELP: &str = "When a newer openMX is out it shows on the main menu. Ask: Square updates the game and starts it again. Always: it updates by itself. Never: the game never asks GitHub for one.";
+pub const UPDATES_HELP: &str = "When a newer openMX is out it shows on the splash and the main menu. Ask: Square updates the game and starts it again. Always: it updates by itself. Never: the game never asks GitHub for one.";
 
 /// The desktop updater's hooks (P191, `update.rs`), which the shell hands the menu at start: a menu
 /// without them (the browser's, the tests') has no updater.
@@ -628,9 +628,9 @@ pub struct Updater {
 /// The shell's [`Updater`], set once at start on the desktop.
 pub static UPDATER: std::sync::OnceLock<Updater> = std::sync::OnceLock::new();
 
-/// The notice's Square: the updater's Update or Download, the page's Reload.
+/// The notice's Square: the updater's Update or Download, the page's Refresh (F14: opentennis's word).
 pub fn update_button() -> &'static str {
-    UPDATER.get().map_or("Reload", |u| if (u.installs)() { "Update" } else { "Download" })
+    UPDATER.get().map_or("Refresh", |u| if (u.installs)() { "Update" } else { "Download" })
 }
 
 /// The main menu's line for the newer build `n`: the install's words while one runs.
@@ -2546,6 +2546,18 @@ impl Screen {
 /// The main menu's corner (P189): which build this is, `v<version> · <commit>` from `build.rs`'s stamp.
 pub const BUILD_CORNER: &str = concat!("v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT"));
 
+/// The splash's corner (F14, opentennis's B660): a release build's tag (`v0.9.5`), else the commit a
+/// beta or local build was made from.
+pub fn build_label() -> &'static str {
+    option_env!("OPENMX_TAG").unwrap_or(env!("OPENMX_COMMIT"))
+}
+
+/// The splash's New version card (F14): the newer build, and under it the install's words while one
+/// runs or why it failed, else what Square does.
+pub fn update_card(n: &str) -> (String, Option<String>) {
+    (n.to_string(), UPDATER.get().and_then(|u| (u.progress)()))
+}
+
 pub const MAIN: [&str; 8] = ["Free Ride", "Local Game", "Online", "Garage", "Mods", "Settings", "Controllers", QUIT];
 /// The way out, last on the main menu and the pause: the desktop's Quit closes the game; the web's
 /// goes back to the site's launcher page (the page reloads into it on the shell's quit). The iPhone
@@ -2934,6 +2946,8 @@ pub struct Menu {
     updated_asked: bool,
     /// P191: the newer build Updates on Always last installed by itself, so it starts once.
     update_started: Option<String>,
+    /// F14: the screen whose newer build the page's console last heard of, and that build.
+    newer_told: Option<(&'static str, String)>,
     /// The ride being loaded (P127), which the loading screen shows over everything while it is.
     pub loading: Option<Loading>,
     /// The screens the pick's ride was started from, which a cancelled load goes back to.
@@ -3242,6 +3256,7 @@ impl Menu {
             updated: None,
             updated_asked: false,
             update_started: None,
+            newer_told: None,
             loading: None,
             ride_stack: Vec::new(),
             riders: 1,
@@ -3716,6 +3731,12 @@ impl Menu {
             } else if p.ok || p.back || p.start {
                 self.quit = None;
             }
+            return Act::Stay;
+        }
+        // F14 (opentennis's B581): the New version card, and Square on it before 1P is taken
+        self.find_newer("the splash");
+        if self.newer.is_some() && presses.iter().any(|(_, p)| p.delete) {
+            self.update_now();
             return Act::Stay;
         }
         if let Some((dev, _)) = presses.iter().find(|(_, p)| p.ok || p.start) {
@@ -4383,9 +4404,11 @@ impl Menu {
         if self.pace.timed { std::mem::take(&mut self.pace.due) } else { 1 }
     }
 
-    /// The main menu's word on builds (P193), each frame it is up: the newer build the site has, and
-    /// the first time it shows in a run, "Updated to …" when this is a new build's first start.
-    fn builds(&mut self) {
+    /// The newer build out (P193, P191), for the main menu and the splash (F14, opentennis's B581), each
+    /// frame they are up: the site's, else the desktop updater's, which Updates on Always installs as
+    /// soon as it is found. `on` names the screen in the page's console line, said when the build or
+    /// the screen is another than last said.
+    fn find_newer(&mut self, on: &'static str) {
         let mut newer = newer_build();
         // P191: the desktop's updater, unless Settings → Updates is Never
         if let Some(u) = UPDATER.get().filter(|_| self.settings.updates != Updates::Never) {
@@ -4395,10 +4418,26 @@ impl Menu {
                 (u.act)();
             }
         }
-        if newer.is_some() && newer != self.newer {
-            page_says(&format!("openmx: the main menu offers {}", newer.as_deref().unwrap_or_default()));
+        if let Some(n) = newer.as_ref().filter(|n| self.newer_told.as_ref() != Some(&(on, n.to_string()))) {
+            page_says(&format!("openmx: {on} offers {n}"));
+            self.newer_told = Some((on, n.clone()));
         }
         self.newer = newer;
+    }
+
+    /// Square on the newer build's notice: the desktop updater installs it or opens its release page
+    /// (P191), the page reloads into it (P193).
+    fn update_now(&mut self) {
+        match UPDATER.get() {
+            Some(u) => (u.act)(),
+            None => reload_page(),
+        }
+    }
+
+    /// The main menu's word on builds (P193), each frame it is up: the newer build the site has, and
+    /// the first time it shows in a run, "Updated to …" when this is a new build's first start.
+    fn builds(&mut self) {
+        self.find_newer("the main menu");
         if !self.updated_asked {
             self.updated_asked = true;
             self.updated = updated_build().map(|s| (s, self.tick));
@@ -4505,10 +4544,7 @@ impl Menu {
             Screen::Main if p.back => self.splash(),
             // P193: Square reloads the page into the newer build the main menu offers; P191: the
             // desktop's installs it, or opens its release page.
-            Screen::Main if p.delete && self.newer.is_some() => match UPDATER.get() {
-                Some(u) => (u.act)(),
-                None => reload_page(),
-            },
+            Screen::Main if p.delete && self.newer.is_some() => self.update_now(),
             Screen::Main => match (p.ok || p.start, p.back, at) {
                 (true, _, MAIN_FREE) => {
                     if self.party.take().is_some() {

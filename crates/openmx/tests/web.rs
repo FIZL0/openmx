@@ -62,7 +62,9 @@ pub fn built() -> &'static PathBuf {
     static WASM: OnceLock<PathBuf> = OnceLock::new();
     WASM.get_or_init(|| {
         let script = repo().join("tools/web.sh");
-        let out = Command::new("sh").arg(&script).arg("--check").output().expect("tools/web.sh must be runnable");
+        // cargo hands a test the build script's rustc-env, OPENMX_VERSION among them, which would stamp the module a
+        // release (OPENMX_TAG, its splash's corner a tag, F14): it is a dev build, as the tests' own
+        let out = Command::new("sh").arg(&script).arg("--check").env_remove("OPENMX_VERSION").output().expect("tools/web.sh must be runnable");
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success(), "{} --check failed:\n{text}", script.display());
         let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).lines().last().unwrap_or("").trim());
@@ -652,7 +654,7 @@ fn the_browser_installs_from_the_store() {
 /// The in-game update notice (P193, `tests/web/update.mjs`): with a ride on the canvas a changed
 /// `version.txt` puts up neither the page's Reload banner nor anything of the game's; on the next
 /// visit, with another build stored as the last one started, the game's main menu offers the newer
-/// build and says "Updated to …", the page then stores this build as the last one, and Square
+/// build (and the splash before it, F14) and says "Updated to …", the page then stores this build as the last one, and Square
 /// reloads the page into the newer build. On the
 /// software renderer, the disc read in place. Skips without the disc, node or chromium.
 #[test]
@@ -690,6 +692,7 @@ fn a_new_build_shows_on_the_menu_not_the_ride() {
     assert!(ride.contains("\"banner\":false"), "the page's banner went up over the ride: {text}");
     assert!(ride.contains("\"said\":[]"), "the game showed something about builds during the ride: {text}");
     assert!(menu.contains("\"banner\":false"), "the page's banner went up over the game: {text}");
+    assert!(menu.contains("the splash offers v0.0.2 2222222"), "the splash did not offer the newer build: {text}");
     assert!(menu.contains("the main menu offers v0.0.2 2222222"), "the main menu did not offer the newer build: {text}");
     assert!(menu.contains(&format!("the main menu says Updated to {}", concat!("v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT")))), "no \"Updated to\" on a new build's first start: {text}");
     assert!(menu.contains(&format!("\"stored\":\"{}\"", env!("OPENMX_COMMIT"))), "the page did not keep this build as the last started: {text}");

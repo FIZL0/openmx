@@ -7551,6 +7551,22 @@ fn the_main_menus_corner_names_the_build() {
     }
 }
 
+/// F14 (opentennis's B660): the splash's corner is a release's tag, else the commit; with no newer
+/// build out its Square does nothing, and the splash waits for its 1P.
+#[test]
+fn the_splash_names_the_build_and_its_square_needs_a_newer_one() {
+    assert_eq!(menu::build_label(), option_env!("OPENMX_TAG").unwrap_or(env!("OPENMX_COMMIT")));
+    if std::env::var("OPENMX_LATEST").is_ok() {
+        return;
+    }
+    let (mut m, mut r) = on_the_splash();
+    let rest = [(Dev::Keys, Report::idle())];
+    devices(&mut m, &mut r, &rest);
+    devices(&mut m, &mut r, &[(Dev::Keys, Report::from_buttons(Control::Square.mask()))]);
+    devices(&mut m, &mut r, &rest);
+    assert_eq!((m.screen(), m.p1(), m.newer.as_deref()), (Some(Screen::Splash), None, None));
+}
+
 /// P193: the build the site's `version.txt` names is offered when it is not this one, whether the file
 /// says a version and a commit or a bare commit, and a dirty build's + or a longer hash is still the
 /// same build; "Updated to …" only on a start whose last started build was another.
@@ -7572,7 +7588,7 @@ fn a_newer_build_is_another_commit() {
 
 /// P191: Settings → Updates round-trips settings.txt, Ask writing no line; a word it cannot read
 /// keeps Ask. A menu without the desktop's updater (this one, the browser's) has no Updates row, and
-/// its main menu's Square is the page's Reload.
+/// its main menu's Square is the page's Refresh.
 #[test]
 fn updates_setting_round_trips_and_needs_the_updater() {
     use menu::Updates;
@@ -7587,7 +7603,7 @@ fn updates_setting_round_trips_and_needs_the_updater() {
     let mut m = Menu::new(Settings::default(), Controls::default());
     m.open(Screen::Settings);
     assert!(m.page().iter().all(|r| r.key != menu::Key::Updates));
-    assert_eq!(menu::update_button(), "Reload");
+    assert_eq!(menu::update_button(), "Refresh");
 }
 
 /// P223: the Graphics tab's Preset row sets every row it covers, a row changed by hand turns Auto off

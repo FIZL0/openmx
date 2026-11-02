@@ -377,6 +377,9 @@ footer a { color: var(--bone); }
 #fresh { position: fixed; left: 50%; bottom: calc(1em + env(safe-area-inset-bottom, 0px)); transform: translate(-50%, 2em); opacity: 0; pointer-events: none;
   z-index: 30; display: flex; gap: .8em; align-items: center; padding: .5em .6em .5em 1.2em; border-radius: 999px; background: var(--ink); color: var(--chalk);
   box-shadow: 0 6px 24px rgba(0,0,0,.5); transition: opacity .2s, transform .2s; white-space: nowrap; max-width: calc(100vw - 32px); }
+/* F14: the build in the hero's corner, as the splash has it */
+.hero .corner { position: absolute; right: .9em; top: .6em; z-index: 2; font-size: 11px; color: #ffffffa8; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+#fresh b { color: var(--peach, #ffcf9e); margin-right: .5em; }
 #fresh.up { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
 
 @media (max-width: 640px) {
@@ -409,6 +412,8 @@ footer a { color: var(--bone); }
 
   <!-- the landing hero; with a disc stored its first buttons play -->
   <header class="hero backdrop">
+    <!-- F14 (opentennis's B660): the build small in the corner, a release's version or a beta's commit -->
+    <span class="corner" id="corner" hidden></span>
     <div class="wrap">
       <div class="htext">
       <div class="logo" aria-label="openMX"><span class="open">open</span><span class="mx">MX</span></div>
@@ -661,7 +666,7 @@ footer a { color: var(--bone); }
       MX Unleashed is their trademark. This site hosts no game data: you bring your own disc. <span id="build"></span></p>
   </div></footer>
 </div>
-<div id="fresh" role="status"><span>A new version of openMX is out.</span><button class="pill small" id="reload">Reload</button></div>
+<div id="fresh" role="status"><span><b>New version</b>A newer openMX is out<span id="fresh-tag"></span>. Your disc, settings and mods stay.</span><button class="pill small" id="reload">Refresh</button></div>
 
 <script type="module">
   // What the user fills in (P181): an empty link stays on the page, dimmed and inert, until it has an address.
@@ -1118,7 +1123,7 @@ footer a { color: var(--bone); }
 
   // ---- the build ----
   // beta.openmx.dev is every push to main (the rolling `beta` release); openmx.dev is the latest release (.github/workflows/pages.yml).
-  // version.txt is the build tools/web.sh made; read again every few minutes and when the tab comes back, a different one means
+  // version.txt is the build tools/web.sh made; read again every minute and when the tab comes back, a different one means
   // the site has moved on, and the page offers a reload (a ride in progress is never cut short). With the game on the
   // canvas the offer is the game's (P193, opentennis's hstLatest): the newer build goes to it, and its main menu shows it
   // with a reload, never the ride; the page's banner is for the site page alone. `openmxRecheck()` reads it at once.
@@ -1142,13 +1147,17 @@ footer a { color: var(--bone); }
       .then(t => t.trim())
       .catch(() => '');
   let ours = '';
+  // F14: the corner's label, as the game's splash has it: a release's tag ("v0.9.5 abc1234"), else the commit
+  const label = v => { const w = v.split(/\s+/); return w.length > 1 && /^v\d/.test(w[0]) ? w[0] : w[w.length - 1]; };
   built().then(v => {
     ours = v;
     if (v) $('#build').textContent = `${BETA ? 'Beta build' : 'Build'} ${v}.`;
+    if (v && v.length < 60 && !v.includes('<')) { $('#corner').textContent = label(v); $('#corner').hidden = false; }
   });
   let newer = '';
   const fresh = () => {
     if (!newer) return;
+    $('#fresh-tag').textContent = ` (${label(newer)})`;
     if (started()) worker.postMessage({ latest: newer });
     $('#fresh').classList.toggle('up', !started());
   };
@@ -1158,7 +1167,10 @@ footer a { color: var(--bone); }
     fresh();
   };
   window.openmxRecheck = recheck;
-  setInterval(recheck, 5 * 60e3);
+  // every minute and 5 s after load (opentennis's 651af09b: a phone's short visit never saw a 5-minute one); the game's
+  // splash and main menu show what it finds (F14)
+  setInterval(recheck, 60e3);
+  setTimeout(recheck, 5000);
   document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && recheck());
   $('#reload').onclick = () => location.reload();
 

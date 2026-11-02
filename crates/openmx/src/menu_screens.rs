@@ -2294,15 +2294,62 @@ impl Pen<'_> {
                 self.text(Weight::Bold, &line, 40.0, 38.4, 1.2, 0.0, DUST, Align::Centre);
             }
         }
+        self.splash_build();
         if menu.p1.is_none() {
+            let mut hints = Vec::new();
             if HAS_QUIT {
-                self.hints(&[(Btn::Circle, if cfg!(target_arch = "wasm32") { "Launcher" } else { "Quit" }), (Btn::Cross, "Start")]);
-            } else {
-                self.hints(&[(Btn::Cross, "Start")]);
+                hints.push((Btn::Circle, if cfg!(target_arch = "wasm32") { "Launcher" } else { "Quit" }));
             }
+            // F14: Square for the New version card's button
+            if let Some(n) = &menu.newer {
+                self.new_version(n);
+                hints.push((Btn::Square, update_button()));
+            }
+            hints.push((Btn::Cross, "Start"));
+            self.hints(&hints);
         }
         if let Some(row) = menu.quitting() {
             self.popup(QUIT_ASK, &QUIT_ROWS, row);
+        }
+    }
+
+    /// The build's version or commit, small in the splash's top left (F14, opentennis's B660; the
+    /// main menu has it top right, where the splash's New version card goes).
+    fn splash_build(&mut self) {
+        let size = 1.0;
+        let (x, y) = (self.left().max(0.0) + 1.5, self.top().max(0.0) + 1.2 + CAP * size);
+        self.shadowed(Weight::Bold, build_label(), x, y, size, 0.0, DUST, Align::Left, [0.07, 0.09], [0, 0, 0, 89]);
+    }
+
+    /// The splash's New version card (F14, opentennis's B581), pinned to the top right: the newer
+    /// build `n`, then Square and what it does (Update, Download, Refresh), or once an install runs its
+    /// words.
+    fn new_version(&mut self, n: &str) {
+        let (w, h) = (18.0, 9.6);
+        let (x, y) = (STAGE.0.min(self.right()) - 1.5 - w, self.top().max(0.0) + 1.2);
+        let cx = x + w / 2.0;
+        self.round([x + 0.35, y + 0.4, w, h], 1.0, SHADOW, SHADOW);
+        self.round([x, y, w, h], 1.0, [0x2a, 0x14, 0x08, 240], [0x12, 0x09, 0x04, 240]);
+        self.ring([x, y, w, h], 1.0, 0.1, [255, 255, 255, 60]);
+        self.text(Weight::Bold, "NEW VERSION", cx, y + 1.0 + CAP, 1.0, 0.0, EYEBROW, Align::Centre);
+        let (name, says) = update_card(n);
+        let name = self.fit(Weight::Heavy, &name, 1.8, w - 2.0);
+        self.shadowed(Weight::Heavy, &name, cx, y + 2.6 + CAP * 1.8, 1.8, SLANT, PEACH, Align::Centre, [0.07, 0.09], [0, 0, 0, 89]);
+        match says {
+            Some(says) => {
+                self.para(&says, x + 1.0, y + 5.4, w - 2.0, 1.0, 1.3, PAPER);
+            }
+            None => {
+                let (word, size, d) = (update_button(), 1.5, 1.8);
+                let (bw, ww) = (self.button_wide(Btn::Square, d), self.wide(Weight::Heavy, word, size));
+                let pw = bw + 0.6 + ww + 2.0 * PILL_PAD;
+                let pb = [cx - pw / 2.0, y + 5.0, pw, 2.6];
+                self.pill(pb, 0.28 * size, 0.1 * size);
+                let mid = pb[1] + pb[3] / 2.0;
+                self.button(Btn::Square, pb[0] + PILL_PAD + bw / 2.0, mid, d);
+                self.text(Weight::Heavy, word, pb[0] + PILL_PAD + bw + 0.6, Pen::mid(mid, size), size, SLANT, CHALK, Align::Left);
+                self.text(Weight::Bold, "Settings and mods stay", cx, y + 8.4 + CAP * 0.8, 0.8, 0.0, DUST, Align::Centre);
+            }
         }
     }
 

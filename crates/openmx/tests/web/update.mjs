@@ -10,7 +10,8 @@
 // changes again once the game is up, and Start (Enter) is pressed past the splash to the main menu, which must offer
 // the newer build and say "Updated to …". What the game's main menu shows it also says on the console (menu.rs's
 // `builds`), which is what is read here. With OPENMX_GPU_PKG set to a directory, pkg/ is served from there; with
-// OPENMX_UPDATE_SHOT set to a file, the main menu's screenshot is written there.
+// OPENMX_UPDATE_SHOT set to a file, the main menu's screenshot is written there, and with OPENMX_SPLASH_SHOT the
+// splash's, which must show the newer build before Start is pressed (F14).
 //
 // Prints one JSON line: { ride: { state, banner, said: [...] }, menu: { state, banner, said: [...], stored } } —
 // `banner` whether the page's own Reload banner is up, `said` the game's console lines about builds, `stored` what local
@@ -82,6 +83,8 @@ let id = 0;
 const pending = new Map();
 // the game's console lines about builds, since the visit began
 let said = [];
+// F14: the splash's console lines about the newer build
+let splash = [];
 ws.addEventListener('message', ({ data }) => {
   const m = JSON.parse(data);
   if (m.id && pending.has(m.id)) {
@@ -93,6 +96,7 @@ ws.addEventListener('message', ({ data }) => {
     const line = m.params.args.map(a => a.value ?? a.description).join(' ');
     console.error('console:', line);
     if (/the main menu (offers|says)/.test(line)) said.push(line);
+    if (/the splash offers/.test(line)) splash.push(line);
   }
 });
 const send = (method, params = {}, sessionId) => new Promise(r => {
@@ -140,6 +144,7 @@ const visit = async (query, last) => {
   }
   if (d.state !== 'started') fail(`the game did not start (${query}): ${JSON.stringify(d)}`);
   said = [];
+  splash = [];
   version = NEW;
   await evaluate('openmxRecheck()');
   return d;
@@ -159,6 +164,13 @@ const ride = { state: (await data()).state, banner: await banner(), said: [...sa
 
 // The menu: past the splash to the main menu, where the newer build shows, and the first start of this build says so.
 d = await visit('software', 'old0000');
+// F14: the splash shows the newer build before anyone presses Start
+for (let t = Date.now(); Date.now() - t < 20000 && !splash.length; ) await rest(200);
+if (process.env.OPENMX_SPLASH_SHOT) {
+  await rest(1000);
+  fs.writeFileSync(process.env.OPENMX_SPLASH_SHOT, Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
+}
+const splashSaid = [...splash];
 for (let t = Date.now(); Date.now() - t < 30000 && said.length < 2; ) {
   await key('Enter', 'Enter', 13);
   await rest(1500);
@@ -167,7 +179,7 @@ if (process.env.OPENMX_UPDATE_SHOT) {
   await rest(500);
   fs.writeFileSync(process.env.OPENMX_UPDATE_SHOT, Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
 }
-const menu = { state: (await data()).state, banner: await banner(), said: [...said], stored: await evaluate("localStorage.getItem('openmx.build')") };
+const menu = { state: (await data()).state, banner: await banner(), said: [...said], splash: splashSaid, stored: await evaluate("localStorage.getItem('openmx.build')") };
 // Square (V on the default keyboard, the modern layout's delete) on the main menu reloads the page into the newer build: a new document, whose footer names it.
 await evaluate('window.openmxBefore = 1');
 await key('KeyV', 'v', 86);
