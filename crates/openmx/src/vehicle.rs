@@ -992,6 +992,25 @@ impl PilotLean {
         self.stick = Some(plane.flight.as_ref().map_or((F::ZERO, F::ZERO), |f| (f.pad.elevator, f.pad.aileron)));
     }
 
+    /// [`PilotLean::step`] for a seat flying the helicopter (P216b), whose pilot is posed by the
+    /// plane's two clips too (the original loads them for both kinds): its stick's forward and back
+    /// stand in for the elevator and its left and right for the aileron, both signed as the plane's
+    /// are. Which of the helicopter's numbers the original's pilot reads was not traced.
+    pub fn step_heli(&mut self, dt: F, heli: &KiowaRide, put_back: bool) {
+        let Some(h) = &heli.flown else {
+            *self = PilotLean::default();
+            return;
+        };
+        if self.stick.is_none() || put_back {
+            self.reset.reset();
+        }
+        let (elevator, aileron) = self.stick.unwrap_or((F::ZERO, F::ZERO));
+        let pilot = biplane_anim::Pilot { elevator, aileron, held: self.reset.just, ..Default::default() };
+        self.lean.step(dt, &pilot);
+        self.reset.frame();
+        self.stick = Some((h.kiowa.pad.longitudinal, h.kiowa.pad.lateral));
+    }
+
     /// The two weights the pilot's clips are drawn at, `(phase, mix)` ([`game_render::biplane::seat`]).
     pub fn weights(&self) -> (f32, f32) {
         let (phase, mix) = self.lean.weights();

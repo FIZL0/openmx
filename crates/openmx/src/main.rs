@@ -1275,6 +1275,7 @@ fn trace_picture(
     blend: &pace::Blend,
     tick: u64,
     before_planes: &[Option<M4>],
+    before_helis: &[Option<(M4, Rotor)>],
 ) {
     let (Some(seat), Some(rig), Some(camera)) = (seats.first(), rigs.first(), cameras.first()) else { return };
     let now = Shown::of(seat, rig, assets, ragdolled, true);
@@ -1323,14 +1324,33 @@ fn trace_picture(
             p3(camera.at),
         );
     }
+    // And the helicopter's the same (P216b).
+    if let Some(heli) = seat.garage.heli_up()
+        && let Some(now) = heli_at(heli)
+    {
+        let was = before_helis.first().copied().flatten();
+        let drawn = heli_drawn(heli, was.filter(|_| !cut), blend).map_or(now, |(m, _)| m);
+        println!(
+            "picture heli: tick {tick} blend {:.4} cut {} from {} to {} drawn {} eye {} at {}",
+            blend.0,
+            cut as u8,
+            was.as_ref().map_or_else(|| "none".to_string(), |(m, _)| spot(m)),
+            spot(&now),
+            spot(&drawn),
+            p3(camera.eye),
+            p3(camera.at),
+        );
+    }
 }
 
 /// The spots a seat's [`pace::Cut`] measures a tick's move by: where its machine is — the plane
 /// while it is flown, the bike (or its wreck) otherwise — and where its camera is and looks.
 fn cut_spots(seat: &Seat, bike: M4, camera: Option<&Camera>) -> [V3; 3] {
-    let machine = match seat.garage.plane_flown() {
-        Some(plane) => vector(plane.at),
-        None => V3 { x: bike.0[3][0], y: bike.0[3][1], z: bike.0[3][2] },
+    let heli = seat.garage.heli_up().and_then(heli_at);
+    let machine = match (seat.garage.plane_flown(), heli) {
+        (Some(plane), _) => vector(plane.at),
+        (None, Some(m)) => V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] },
+        (None, None) => V3 { x: bike.0[3][0], y: bike.0[3][1], z: bike.0[3][2] },
     };
     match camera {
         Some(c) => [machine, c.eye, c.at],
@@ -1357,11 +1377,13 @@ fn seam_moved((wrap, side): ([bool; 2], [f32; 2]), was: Option<M4>, now: Vf) -> 
 }
 
 /// The whole widths a seat's machine moved over a seam this tick (MD29, MD44): the plane's while it
-/// is flown, from its spot `plane` before the tick, else the bike's from `bike` ([`seam_moved`]).
+/// is flown, from its spot `plane` before the tick, else the bike's from `bike` ([`seam_moved`]). The
+/// helicopter's, flown, is the plane's: `plane` is then its spot before the tick (P216b).
 fn seat_seam(seams: ([bool; 2], [f32; 2]), seat: &Seat, bike: Option<M4>, plane: Option<M4>) -> Option<[f32; 3]> {
-    match seat.garage.plane_flown() {
-        Some(p) => seam_moved(seams, plane, p.at),
-        None => seam_moved(seams, bike, seat.sim.bike_pos()),
+    match (seat.garage.plane_flown(), seat.garage.heli_up().and_then(|h| h.matrix())) {
+        (Some(p), _) => seam_moved(seams, plane, p.at),
+        (None, Some(m)) => seam_moved(seams, plane, m.0[3]),
+        (None, None) => seam_moved(seams, bike, seat.sim.bike_pos()),
     }
 }
 
@@ -1430,6 +1452,39 @@ fn plane_at(plane: &Plane) -> M4 {
     M4::placement(vector(plane.at), vector(plane.facing), vector(plane.up))
 }
 
+/// Where the flown helicopter is drawn (P216, P216b): at its measure's matrix, which is where the
+/// original draws it. `None` while it is not out.
+fn heli_at(heli: &vehicle::KiowaRide) -> Option<M4> {
+    let m = heli.matrix()?;
+    let row = |r: Vf, w: f32| [r.x(), r.y(), r.z(), w];
+    Some(M4([row(m.0[0], 0.0), row(m.0[1], 0.0), row(m.0[2], 0.0), row(m.0[3], 1.0)]))
+}
+
+/// The flown helicopter's rotor as a tick leaves it ([`vehicle::KiowaRide::rotor`]).
+fn heli_rotor(heli: &vehicle::KiowaRide) -> Rotor {
+    let (angle, blades, wrecked) = heli.rotor();
+    Rotor { angle, blades, wrecked }
+}
+
+/// The helicopter a frame draws for a seat flying one (P216b), as the plane is drawn: slid from
+/// where the tick before left it (`before`, `None` on a cut) to where this one does, its rotor turned
+/// on between the two ([`Rotor::between`]).
+fn heli_drawn(heli: &vehicle::KiowaRide, before: Option<(M4, Rotor)>, blend: &pace::Blend) -> Option<(M4, Rotor)> {
+    let (now, rotor) = (heli_at(heli)?, heli_rotor(heli));
+    Some(match before {
+        Some((b, was)) => (blend.slide(b, now), Rotor::between(&was, &rotor, blend.0)),
+        None => (now, rotor),
+    })
+}
+
+/// How far the flown helicopter jumped over the last tick, as [`plane_jumped`] (P216b): a put-back
+/// or a marker's Up, which takes its camera with it.
+fn heli_jumped(before: Option<M4>, heli: &vehicle::KiowaRide, dt: F) -> Option<V3> {
+    let (b, now) = (before?, heli_at(heli)?);
+    let speed = heli.flown.as_ref()?.ride.measure.speed;
+    pace::jump(V3 { x: b.0[3][0], y: b.0[3][1], z: b.0[3][2] }, V3 { x: now.0[3][0], y: now.0[3][1], z: now.0[3][2] }, speed.0 * dt.0)
+}
+
 /// A flying seat's pilot as a frame draws them (V39): the rider's own body, its root in the plane's
 /// seat ([`Biplane::pilot`]) and its nodes posed by the plane's clips ([`biplane::pilot_palette`]).
 struct Pilot {
@@ -1457,6 +1512,32 @@ fn pilots(seats: &[Seat], rigs: &mut [Rig], plane_drawn: &[Biplane], before: &[O
             let at = was.map_or(plane_at(plane), |b| blend.slide(b, plane_at(plane)));
             let palette = biplane::pilot_palette(body, &drawn.anchors, rig.pilot_lean.weights())?;
             Some(Pilot { plane: at, at: drawn.pilot(at), palette })
+        })
+        .collect()
+}
+
+/// Every seat's helicopter [`Pilot`] (P216b), as [`pilots`] the plane's: the rider's own body posed
+/// by the plane's clips (which the original loads for the helicopter's pilot too), its root at
+/// [`game_render::kiowa::PILOT_SEAT`] and its limbs held to the model's seat nodes
+/// ([`game_render::kiowa::SEAT`]). `None` for a seat not flying one.
+fn heli_pilots(seats: &[Seat], rigs: &mut [Rig], kiowa_drawn: &[Kiowa], assets: &Assets, before: &[Option<(M4, Rotor)>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
+    seats
+        .iter()
+        .zip(rigs.iter_mut())
+        .enumerate()
+        .map(|(p, (seat, rig))| {
+            let heli = seat.garage.heli_up()?;
+            let drawn = kiowa_drawn.get(heli.livery).or(kiowa_drawn.first())?;
+            let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
+            let (at, _) = heli_drawn(heli, was, blend)?;
+            let pelvis = game_render::kiowa::PILOT_SEAT;
+            let loaded = &assets.models.get(&drawn.model)?.model;
+            let anchors = game_render::kiowa::SEAT.map(|n| game_render::kiowa::node_at(loaded, n).map(|v| v.sub(pelvis)));
+            let body = rig.body.as_mut()?;
+            let palette = biplane::pilot_palette(body, &anchors, rig.pilot_lean.weights())?;
+            let mut root = M4::IDENTITY;
+            root.0[3] = [pelvis.x, pelvis.y, pelvis.z, 1.0];
+            Some(Pilot { plane: at, at: root.mul(at), palette })
         })
         .collect()
 }
@@ -2433,6 +2514,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     println!("front end: settings in {}", dir.display());
     let mut sound = start_sound(&args, &mut disc, &dir, &settings, true);
     let camera_names = camera_names(&mut disc);
+    let heli_camera_names = heli_camera_names(&mut disc);
     drop(disc);
     // The front end's music and clicks (P65), when anything plays them.
     if sound.live().is_some() {
@@ -2470,6 +2552,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     };
     front.menu.music_choices = front.sound.choices();
     front.menu.camera_names = camera_names;
+    front.menu.heli_camera_names = heli_camera_names;
     // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
     let mut mods_on = front.menu.settings.mods;
     let listed = mod_tracks(&args, &front.dir, mods_on);
@@ -4757,15 +4840,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let kiowa_drawn: Vec<Kiowa> = (0..vehicle::LIVERIES).map_while(|l| Kiowa::found(&assets, l)).collect();
     // The helicopter's own camera (P216), built as the plane's is, on `HeloCPresets.ini` (in a
     // freeride track's second archive, or free06's) and starting on its first preset.
-    let heli_camera: Option<Race> = garage.heli.as_ref().and_then(|_| {
+    // The file's bytes are kept, as the plane's are, for a split's copy of its presets and the
+    // seat's own laid over them (P216b).
+    let heli_presets: Option<Vec<u8>> = garage.heli.as_ref().and_then(|_| {
         let kit = match archives.iter().any(|a| a.find_suffix(game_render::kiowa::PRESETS).is_some()) {
             true => None,
             false => member_ending(&disc, PLANE_KIT_ARCHIVE).ok().and_then(|name| disc.res(&name).ok()),
         };
-        let bytes = archives.iter().chain(&kit).find_map(|a| a.read_suffix(game_render::kiowa::PRESETS).ok())?;
-        let presets = layout_presets(&bytes, layout, Display::Television, game_render::kiowa::PRESETS);
+        archives.iter().chain(&kit).find_map(|a| a.read_suffix(game_render::kiowa::PRESETS).ok())
+    });
+    let heli_camera: Option<Race> = heli_presets.as_ref().map(|bytes| {
+        let presets = layout_presets(bytes, layout, Display::Television, game_render::kiowa::PRESETS);
         let mut cam = Race::new(presets, F(REVERSE_SPEED));
-        cam.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
+        // The fog's ceiling, unless the first player's flying has none (P136, P216b).
+        cam.cam.ceiling = mods.plane_eye_ceiling(0, Race::ceiling_for_fog(F(look.fog_far)));
         if let Some(start) = Preset::find(&cam.cam.presets, HELI_CAMERA) {
             cam.cam.set_preset(start);
         }
@@ -4774,7 +4862,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         cam.cam.snap = true;
         cam.cam.speed_reference = F(SPEED_REFERENCE);
-        Some(cam)
+        cam
     });
     // Where the first seat's path cars stood before the last tick (S81), which the picture blends from.
     let mut cars_before: Vec<game_sim::math::Mat4> = Vec::new();
@@ -5193,7 +5281,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 cam.cam.ceiling = mods.plane_eye_ceiling(i, Race::ceiling_for_fog(F(look.fog_far)));
                 cam
             }),
-            heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
+            // Their own helicopter's the same (P216b).
+            heli_camera: heli_camera.as_ref().map(|c| {
+                let mut cam = Race { cam: c.cam.clone() };
+                cam.cam.ceiling = mods.plane_eye_ceiling(i, Race::ceiling_for_fog(F(look.fog_far)));
+                cam
+            }),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             camera_presets: Default::default(),
@@ -5601,6 +5694,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     if display != Display::Television {
         set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
+        set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
     }
     // The original's HUD (V26): its art off the disc, the world its radar covers, and which overlay is
     // up. Art that does not load stops the ride with the reason (V28) — it used to say so on stderr
@@ -6184,6 +6278,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Each view's markers' slot display (P88).
     let mut banners: Vec<hud::MarkerBanner> = Vec::new();
     let mut before_planes: Vec<Option<M4>> = Vec::new();
+    // And each seat's flown helicopter, with its rotor (P216b).
+    let mut before_helis: Vec<Option<(M4, Rotor)>> = Vec::new();
     // Each plane's moving parts before the tick, which the picture blends them from (V79).
     let mut before_surfaces: Vec<Option<game_sim::biplane_anim::Surfaces>> = Vec::new();
     // Each seat's cut test (P120): whether the last tick's picture is a jump from the one before.
@@ -6265,6 +6361,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     display = now;
                     println!("display: {}", display.name());
                     set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
+                    set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
                 }
             }
         }
@@ -6992,6 +7089,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 layout = Layout::for_players(n, front.menu.party().map_or(args.split, |p| p.split))?;
                 (rects, view_frames) = views_of(frame.width, frame.height, layout, n);
                 set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
+                set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
                 front.menu.opening = match opens_alone && n == 1 {
                     true => menu::Opening::Can,
                     false => menu::Opening::No,
@@ -7088,6 +7186,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         before = world.seats.iter().zip(&rigs).map(|(seat, rig)| Shown::of(seat, rig, &assets, ragdolled.as_ref(), gpu_on)).collect();
         before_cameras.clone_from(&cameras);
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
+        before_helis = world.seats.iter().map(|seat| seat.garage.heli_up().and_then(|h| Some((heli_at(h)?, heli_rotor(h))))).collect();
         before_surfaces = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(Plane::surfaces)).collect();
         cuts.resize_with(world.seats.len(), pace::Cut::default);
         pause_holds.resize_with(world.seats.len(), chase::PauseHold::default);
@@ -7298,6 +7397,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 (rects, view_frames) = views_of(frame.width, frame.height, layout, n);
                 set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
+                set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
                 if let join::Change::Join(_) = change {
                     let (seat, rig) = (&world.seats[n - 1], &mut rigs[n - 1]);
                     rig.follow(seat.garage.up);
@@ -7349,6 +7449,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 for (i, rig) in rigs.iter_mut().enumerate() {
                     rig.modified = !to.seat_is_original(i);
                     if let Some(cam) = &mut rig.plane_camera {
+                        cam.cam.ceiling = to.plane_eye_ceiling(i, Race::ceiling_for_fog(F(look.fog_far)));
+                    }
+                    if let Some(cam) = &mut rig.heli_camera {
                         cam.cam.ceiling = to.plane_eye_ceiling(i, Race::ceiling_for_fog(F(look.fog_far)));
                     }
                 }
@@ -7448,7 +7551,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if simulated {
             for (seat, rig) in world.seats.iter().zip(&mut rigs) {
                 rig.preload_meter.step(preload_sense(seat));
-                rig.pilot_lean.step(dt, seat.garage.plane_flown(), seat.said.respawned);
+                match seat.garage.heli_up() {
+                    // The helicopter's pilot leans with its stick (P216b).
+                    Some(heli) => rig.pilot_lean.step_heli(dt, heli, seat.said.respawned),
+                    None => rig.pilot_lean.step(dt, seat.garage.plane_flown(), seat.said.respawned),
+                }
             }
         }
         // A world loads the tiles ahead of the riders and lets the far ones go (MD8): a plane only
@@ -7587,8 +7694,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let seamed: Vec<Option<[f32; 3]>> = (0..world.seats.len())
             .map(|i| {
                 let seat = &world.seats[i];
-                let by = seams.and_then(|s| seat_seam(s, seat, before.get(i).map(|b| b.bike), before_planes.get(i).copied().flatten()))?;
-                seam_carry(by, seat.garage.plane_flown().is_some(), before.get_mut(i), before_planes.get_mut(i), before_cameras.get_mut(i), cuts.get_mut(i));
+                // The flown helicopter's spot stands in the plane's (P216b).
+                let heli = seat.garage.heli_up().is_some();
+                let flown_before = match heli {
+                    true => before_helis.get(i).copied().flatten().map(|(m, _)| m),
+                    false => before_planes.get(i).copied().flatten(),
+                };
+                let by = seams.and_then(|s| seat_seam(s, seat, before.get(i).map(|b| b.bike), flown_before))?;
+                let mut heli_slot = flown_before.filter(|_| heli);
+                let slot = match heli {
+                    true => Some(&mut heli_slot),
+                    false => before_planes.get_mut(i),
+                };
+                seam_carry(by, seat.garage.plane_flown().is_some() || heli, before.get_mut(i), slot, before_cameras.get_mut(i), cuts.get_mut(i));
+                if let (Some(Some((m, _))), Some(carried)) = (before_helis.get_mut(i), heli_slot) {
+                    *m = carried;
+                }
                 Some(by)
             })
             .collect();
@@ -7723,6 +7844,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 rig.camera_presets = laid;
                 frame_rig(rig, &bike, &plane, framings(view));
+                let heli = heli_presets.as_deref().map(|b| layout_presets(b, layout, display, game_render::kiowa::PRESETS)).unwrap_or_default();
+                frame_heli(rig, &heli);
             }
             // The seat's first frame (P163): each camera on the preset the seat's camera button last
             // left it on, unless the command line named one; under Mine Only, a camera on a preset
@@ -7734,6 +7857,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if chase::start_on(cam, start, mine_only) {
                         println!("{who}camera: starts on {}, where it was left", cam.cam.preset().name);
                     }
+                }
+                // The helicopter's on its own (P216b).
+                let heli_start = seat_sets.map(|s| s.heli_start.as_str()).unwrap_or_default();
+                if let Some(cam) = rig.heli_camera.as_mut()
+                    && chase::start_on(cam, heli_start, mine_only)
+                {
+                    println!("{who}camera: the helicopter's starts on {}, where it was left", cam.cam.preset().name);
                 }
             }
             rig.wreck_camera.frame(rig.framing.0);
@@ -7781,6 +7911,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             {
                 chase::follow_jump(&mut follow.cam, [by.x, by.y, by.z], plane.speed());
             }
+            // The helicopter's the same (P216b): a put-back after a wreck, or a marker's Up.
+            else if simulated
+                && let Some((heli, by)) = seat.garage.heli_up().and_then(|h| Some((h, heli_jumped(before_helis.get(i).copied().flatten().map(|(m, _)| m), h, dt)?)))
+            {
+                let speed = heli.flown.as_ref().map_or(F::ZERO, |h| h.ride.measure.speed);
+                chase::follow_jump(&mut follow.cam, [by.x, by.y, by.z], speed);
+            }
             // A marker's Up at speed (P112) snaps the bike's camera onto where it lands, riding out
             // at the bike's speed (`chase::ride_out`, after the frame) — taken once, so a frame the
             // engine skips does not snap again.
@@ -7819,8 +7956,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("{who}camera: {}", follow.cam.preset().name);
                     rig.ride_hud.note_camera(Instant::now(), &follow.cam.preset().name);
                     // The seat's next ride on this machine starts on it (P163).
-                    let machine = if flying { menu::Machine::Biplane } else { menu::Machine::Bike };
-                    if let Some(f) = front.as_deref_mut().filter(|_| seat.garage.up != Kind::Kiowa)
+                    let machine = match seat.garage.up {
+                        Kind::Kiowa => menu::Machine::Helicopter,
+                        _ if flying => menu::Machine::Biplane,
+                        _ => menu::Machine::Bike,
+                    };
+                    if let Some(f) = front.as_deref_mut()
                         && f.menu.camera_left_on(i.min(menu::SEATS_MAX - 1), machine, &follow.cam.preset().name)
                     {
                         f.save();
@@ -8213,7 +8354,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             })
             .collect();
         if args.trace_picture {
-            trace_picture(&world.seats, &rigs, &assets, ragdolled.as_ref(), &before, &cameras, &cut, &blend, pacer.ticks(), &before_planes);
+            trace_picture(&world.seats, &rigs, &assets, ragdolled.as_ref(), &before, &cameras, &cut, &blend, pacer.ticks(), &before_planes, &before_helis);
         }
         // `--shot-pose` (MD10): the first view looks from the pose instead, whatever the ride does.
         let mut cameras = cameras;
@@ -8349,6 +8490,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let mut drawn = 0;
         // Each flying player's pilot (V39), posed once for every view and both renderers.
         let pilots = pilots(&world.seats, &mut rigs, &plane_drawn, &before_planes, &cut, &blend);
+        // And each flying the helicopter's (P216b).
+        let heli_pilots = heli_pilots(&world.seats, &mut rigs, &kiowa_drawn, &assets, &before_helis, &cut, &blend);
         if gpu_on {
             // The overlay first: each view's HUD, and the pause over the whole frame.
             let draw_at = Instant::now();
@@ -8505,16 +8648,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 actors.extend(kiowa_draw::actors(drawn, &assets, &Rotor::WHOLE, at, vehicle::BAY_ALPHA, &mut gpu_poses));
             }
             // And every player's helicopter while it is flown (P216), solid, in its own livery, at
-            // the measure's matrix (where the original draws it), its rotor at the flight's angle.
-            for seat in world.seats.iter().filter(|_| !args.overview) {
+            // the measure's matrix (where the original draws it), its rotor at the flight's angle;
+            // slid between the last two ticks as the plane is unless the seat cuts (P216b).
+            for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
                 let Some(heli) = seat.garage.heli_up() else { continue };
-                let Some(m) = heli.matrix() else { continue };
                 let Some(drawn) = kiowa_drawn.get(heli.livery).or(kiowa_drawn.first()) else { continue };
-                let (angle, blades, wrecked) = heli.rotor();
-                let row = |r: Vf, w: f32| [r.x(), r.y(), r.z(), w];
-                let at = M4([row(m.0[0], 0.0), row(m.0[1], 0.0), row(m.0[2], 0.0), row(m.0[3], 1.0)]);
+                let before = before_helis.get(p).copied().flatten().filter(|_| !cut[p]);
+                let Some((at, rotor)) = heli_drawn(heli, before, &blend) else { continue };
                 let alpha = vehicle::shown_alpha(1.0, seat.paused);
-                actors.extend(kiowa_draw::actors(drawn, &assets, &Rotor { angle, blades, wrecked }, at, alpha, &mut gpu_poses));
+                actors.extend(kiowa_draw::actors(drawn, &assets, &rotor, at, alpha, &mut gpu_poses));
+                // And its pilot in the seat, as the plane's (P216b).
+                if let (Some(Some(pilot)), Some(model)) = (heli_pilots.get(p), &rigs[p].body_model) {
+                    gpu_poses.push(pilot.palette.clone());
+                    actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha, casts: false });
+                    if args.trace_picture {
+                        let nodes: Vec<V3> = pilot.palette.iter().map(|m| m.mul(pilot.at)).map(|m| V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] }).collect();
+                        trace_pilot(p, "gpu", model, pilot, &nodes);
+                    }
+                }
             }
             for (k, (model, at)) in traffic_at.iter().enumerate() {
                 let pose = traffic_pose.get(k).and_then(|p| p.as_ref()).map(|(p, _)| {
@@ -8741,6 +8892,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 plane_copies.push(plane_drawn.iter().map(|d| format!("{}@seat{p}", d.model)).collect());
             }
             let traffic_copies: Vec<String> = traffic_at.iter().enumerate().map(|(k, (m, _))| format!("{m}#car{k}")).collect();
+            // Each seat's own copy of its flown helicopter's model, which its rotor's pose is skinned
+            // into (P216b).
+            let heli_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("kiowa@seat{p}")).collect();
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
@@ -8837,6 +8991,25 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // finest level of detail; the bike's rider is not drawn while the plane is up, so
                 // the body's mesh is the pilot's for this seat.
                 if let (Some(Some(pilot)), Some(model)) = (pilots.get(p), &rigs[p].body_model) {
+                    if let Some(loaded) = assets.models.get_mut(model.as_str()) {
+                        loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
+                        skinned[p] = None;
+                        if args.trace_picture {
+                            let corners: Vec<V3> = loaded.tris.iter().flat_map(|t| t.v.iter().map(|v| pilot.at.point(v.pos))).collect();
+                            trace_pilot(p, "software", model, pilot, &corners);
+                        }
+                    }
+                    actor.push((model.as_str(), pilot.at));
+                }
+            }
+            // And the flown helicopter (P216b), solid, slid as the GPU's is, with its pilot.
+            for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
+                let Some(heli) = seat.garage.heli_up() else { continue };
+                let Some(drawn) = kiowa_drawn.get(heli.livery).or(kiowa_drawn.first()) else { continue };
+                let before = before_helis.get(p).copied().flatten().filter(|_| !cut[p]);
+                let Some((at, rotor)) = heli_drawn(heli, before, &blend) else { continue };
+                actor.extend(kiowa_draw::skinned(drawn, &heli_copies[p], &mut assets, &rotor, at));
+                if let (Some(Some(pilot)), Some(model)) = (heli_pilots.get(p), &rigs[p].body_model) {
                     if let Some(loaded) = assets.models.get_mut(model.as_str()) {
                         loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
                         skinned[p] = None;
@@ -9309,7 +9482,7 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
         plane,
         crash,
         // The Kiowa's loop and clank (V114), while it is up and out.
-        heli: seat.garage.heli_up().and_then(|k| k.flown.as_ref()).map(|h| audio::HeliFrame::of(&h.kiowa, &h.ride, h.touching)),
+        heli: seat.garage.heli_up().and_then(|k| k.flown.as_ref()).map(|h| audio::HeliFrame::of(&h.kiowa, &h.ride, h.touching())),
         bike: audio::BikeCrash::of(&seat.sim.rider),
         touchdown,
         edge,
@@ -9418,6 +9591,17 @@ fn camera_names(disc: &mut Disc) -> [Vec<String>; 2] {
     out
 }
 
+/// The helicopter's presets the camera button cycles through (P216b), by name, for the Camera page:
+/// free06's `HeloCPresets.ini`, as [`camera_names`] reads the bike's and the plane's. Empty where it
+/// cannot be read.
+fn heli_camera_names(disc: &mut Disc) -> Vec<String> {
+    let Some(kit) = member_ending(disc, PLANE_KIT_ARCHIVE).ok().and_then(|name| disc.res(&name).ok()) else { return Vec::new() };
+    let presets = kit.read_suffix(game_render::kiowa::PRESETS).map(|b| Preset::read_bytes(&b, "")).unwrap_or_default();
+    let out: Vec<String> = presets.into_iter().filter(|p| p.cycle_thru_this_preset).map(|p| p.name).collect();
+    println!("camera: the Camera page lists the helicopter's {out:?}");
+    out
+}
+
 /// Every player's cameras onto `display`'s copy of their presets (V24): the file read again for it,
 /// and the preset each camera is on re-set from the new copy — the original's own reload when a
 /// camera's split changes, which keeps the preset and clears the player's nudges.
@@ -9452,6 +9636,32 @@ fn frame_rig(rig: &mut Rig, bike: &[Preset], plane: &[Preset], framing: (chase::
         chase::reframe(cam, &chase::seat_presets(plane, framing.1, &laid(menu::Machine::Biplane), mine_only), &mut rig.fov_ease.1);
     }
     rig.framing = framing;
+}
+
+/// [`frame_rig`] for the helicopter's camera (P216b): `heli` its presets for the seat's display,
+/// with the seat's own on the helicopter laid over them, framed by the Camera page's one set as the
+/// bike's camera is ([`menu::cameras::Look::of`]), easing over on the flying cameras' slot as its
+/// follow does.
+fn frame_heli(rig: &mut Rig, heli: &[Preset]) {
+    let Some(cam) = &mut rig.heli_camera else { return };
+    let (own, cycle) = (&rig.camera_presets.0, rig.camera_presets.1);
+    let laid: Vec<chase::Own> = menu::cameras::laid(own, cycle, menu::Machine::Helicopter)
+        .map(|o| {
+            let (fov, distance, height) = o.look.framing();
+            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
+        })
+        .collect();
+    let mine_only = cycle == menu::cameras::Cycle::Mine;
+    chase::reframe(cam, &chase::seat_presets(heli, rig.framing.0, &laid, mine_only), &mut rig.fov_ease.1);
+}
+
+/// Every player's helicopter camera onto `display`'s copy of its presets, as [`set_display`] puts
+/// the bike's and the plane's (P216b).
+fn set_heli_display(rigs: &mut [Rig], layout: Layout, display: Display, heli: Option<&[u8]>) {
+    let heli = heli.map(|b| layout_presets(b, layout, display, game_render::kiowa::PRESETS)).unwrap_or_default();
+    for rig in rigs {
+        frame_heli(rig, &heli);
+    }
 }
 
 /// A player's Camera page (P82) as the shell frames their bike's camera and their plane's with it.
@@ -10104,6 +10314,9 @@ fn remodify(
         if let Some(cam) = &mut rig.plane_camera {
             cam.cam.ceiling = to.plane_eye_ceiling(i, fog);
         }
+        if let Some(cam) = &mut rig.heli_camera {
+            cam.cam.ceiling = to.plane_eye_ceiling(i, fog);
+        }
     }
 }
 
@@ -10296,7 +10509,7 @@ fn heli_fx_frame(heli: &vehicle::KiowaRide, binds: &[(String, M4)]) -> particles
         wrecked: h.ride.crash.reason != 0,
         vel,
         airspeed: h.ride.measure.speed.0,
-        ground_contacts: heli.skids().filter(|_| h.touching).map(|p| vec![vector(p)]).unwrap_or_default(),
+        ground_contacts: heli.skids().filter(|_| h.touching()).map(|p| vec![vector(p)]).unwrap_or_default(),
         contact_vel: Some(vel),
         ..Default::default()
     }

@@ -7958,3 +7958,61 @@ fn the_picks_look_steps_with_a_scrolling_name() {
     assert_eq!(first, look_at(&mut m, menu::MARQUEE_FRAMES - 1));
     assert_ne!(first, look_at(&mut m, menu::MARQUEE_FRAMES));
 }
+
+/// P216b: the helicopter's camera is the seat's like the bike's and the biplane's. The preset its
+/// camera button was last left on is kept for the next ride, written after the other two on the
+/// same `camera_start` line, and only when there is one, so a file without it is written as before;
+/// the Camera page lists its disc presets after the biplane's; and a preset of the seat's own on it
+/// is laid over the helicopter's camera, framed by the page's one set as the bike's is.
+#[test]
+fn the_helicopter_camera_is_kept_and_framed_per_seat() {
+    use menu::cameras::Look;
+    let (mut m, _) = fresh();
+    let heli = camera_file("helocpresets.ini");
+    m.heli_camera_names = cycling(&heli);
+    let (first, second) = (m.heli_camera_names[0].clone(), m.heli_camera_names[1].clone());
+
+    // Left on its second preset: one change to save, then nothing; the bike's and plane's untouched.
+    assert!(m.camera_left_on(2, Machine::Helicopter, &second));
+    assert!(m.take_changed());
+    assert!(!m.camera_left_on(2, Machine::Helicopter, &second));
+    assert_eq!(m.settings.camera_sets[2].start, [String::new(), String::new()]);
+    let dir = scratch("camera-start-heli");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let text = std::fs::read_to_string(dir.join("settings.txt")).unwrap();
+    assert!(text.contains(&format!("camera_start = 3 |  |  | {second}\n")), "{text}");
+    let back = menu::load(&dir).0;
+    assert_eq!(back.camera_sets, m.settings.camera_sets);
+    // With the bike's too, one line; and a line from before has none for the helicopter.
+    m.camera_left_on(2, Machine::Bike, "Freestyle Cam");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let text = std::fs::read_to_string(dir.join("settings.txt")).unwrap();
+    assert!(text.contains(&format!("camera_start = 3 | Freestyle Cam |  | {second}\n")), "{text}");
+    let old = Settings::parse("camera_start = 2 | Freestyle Cam | Flight Cam 2\n");
+    assert_eq!((old.camera_sets[1].start[1].as_str(), old.camera_sets[1].heli_start.as_str()), ("Flight Cam 2", ""));
+    std::fs::remove_dir_all(dir).ok();
+
+    // The next ride's helicopter camera starts on it.
+    let mut flown = follow_on(heli.clone(), &first);
+    assert!(chase::start_on(&mut flown, &back.camera_sets[2].heli_start, false));
+    assert_eq!(flown.cam.preset().name, second);
+
+    // The Camera page: the helicopter's presets after the bike's and the plane's, named so.
+    let labels: Vec<String> = m.camera_choices().iter().map(|p| p.label()).collect();
+    assert_eq!(labels.last(), Some(&format!("Helicopter: {}", m.heli_camera_names.last().unwrap())), "{labels:?}");
+
+    // A preset of the seat's own on it joins the helicopter's camera button, and the bike's does not
+    // see it.
+    let kept = m.settings.camera_sets[2].save_custom(Machine::Helicopter, &first, "High", Look { fov: 5, distance: 150, height: 160 }, &m.heli_camera_names.clone());
+    let set = &m.settings.camera_sets[2];
+    let own: Vec<chase::Own> = menu::cameras::laid(&set.own, set.cycle, Machine::Helicopter)
+        .map(|o| {
+            let (fov, distance, height) = o.look.framing();
+            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
+        })
+        .collect();
+    let (fov, distance, height) = m.settings.cameras[2].bike();
+    let mut cam = follow_on(chase::seat_presets(&heli, chase::Framing { fov, distance, height }, &own, false), &first);
+    assert!(walk(&mut cam).contains(&kept), "{kept}");
+    assert!(menu::cameras::laid(&set.own, set.cycle, Machine::Bike).next().is_none());
+}
