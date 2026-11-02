@@ -183,3 +183,49 @@ fn every_bird_trigger_is_a_square_box() {
     assert!(v.holds(along(0.99)) && v.holds(along(-0.99)));
     assert!(!v.holds(along(1.01)) && !v.holds(along(-1.01)));
 }
+
+/// V102: a trigger under 100 percent rolls only on a tick nobody was in it the tick before, as the
+/// toy trigger's contact does; a rider held in it rolls once, however long it stays.
+#[test]
+fn a_chance_trigger_rolls_on_entry_only() {
+    let mut c = Creatures::default();
+    c.triggers.push(creature::Trigger {
+        name: "t".into(),
+        at: V3::default(),
+        half: v3(10.0, 10.0, 10.0),
+        radius: None,
+        right: v3(1.0, 0.0, 0.0),
+        up: v3(0.0, 1.0, 0.0),
+        look: v3(0.0, 0.0, 1.0),
+        enabled: true,
+        one_time: false,
+        percent: 50,
+        fired: false,
+        inside: Vec::new(),
+        scares: Vec::new(),
+    });
+    let (inside, outside) = (creature::Rays::at(V3::default()), creature::Rays::at(v3(1e6, 0.0, 0.0)));
+    let rolled = |c: &mut Creatures, riders: &[creature::Rays]| {
+        let before = c.rng;
+        c.step(TICK, riders);
+        let mut r = before;
+        if r == c.rng {
+            return 0;
+        }
+        (1..10).find(|_| {
+            r.rand();
+            r == c.rng
+        })
+        .expect("the trigger draws a few numbers at most")
+    };
+    assert_eq!(rolled(&mut c, &[outside.clone()]), 0);
+    assert_eq!(rolled(&mut c, &[inside.clone()]), 1, "entry rolls");
+    for _ in 0..20 {
+        assert_eq!(rolled(&mut c, &[inside.clone()]), 0, "staying in rolls nothing");
+    }
+    // A second rider coming in while the first stays: still in contact, no roll.
+    assert_eq!(rolled(&mut c, &[inside.clone(), inside.clone()]), 0);
+    assert_eq!(rolled(&mut c, &[outside.clone(), outside.clone()]), 0);
+    // Two coming in on one tick roll once each.
+    assert_eq!(rolled(&mut c, &[inside.clone(), inside.clone()]), 2);
+}

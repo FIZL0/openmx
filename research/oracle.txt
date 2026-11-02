@@ -5826,6 +5826,8 @@ node_bounds_merge     boot 0x001b42a0 (child, &any, lo, hi, parent rows, 1): row
 #   toy trigger reader 0x001c69b0 (from 0x00213550): Radius > 0 a sphere, else Box via 0x001e7b10
 #   placed by 0x0013e330; contact 0x001c6190 (OneTimeOnly, RandomTriggerPercent), actions 0x001c7560 /
 #   0x001c6f60. Keys IgnoreTrigger 0x0042c658, RandomTriggerPercent 0x0042c6e0, OneTimeOnly 0x0042c750.
+#   V102: the bird triggers run that contact as § V71 reads it (creature.rs step): the percent roll only on
+#   a tick no rider was in the trigger the tick before, and no scare for a rider already in it.
 #   sequence toys: list 0x003b50c0 (0x170 bytes, ctor 0x003b51c0, vtable 0x0045dcf0), section 0x003b52c0
 #   (base 0x002144d0, motion by name 0x001426a0), next motion 0x003b5630 (int(rand x 2^-31 x 100) <=
 #   chance - 1, or past count tries), update 0x003b5480 (only while 0x00215050 says visible).
