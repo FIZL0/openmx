@@ -1263,6 +1263,8 @@ bike_ground_step boot 0x00257a00 (dt in f12, bike) -> the whole ground frame: th
 #                                gravity, steering, chassis flags), the donut scale, both spring
 #                                rates, the gearbox, the clutch, and then (int)(dt*55)+1 substeps of
 #                                gravity, drag, the reverse push and twenty-one calls each
+#                                The donut reads +0x634/+0x638 as stick_direction left them (S228b):
+#                                acos(x/|s|), negated for y < 0, and the reach unclamped
 bike_clutch boot 0x002572f0 (dt in f12, bike) -> the clutch's launch ramp: engine+0x88's torque
 #                           multiplier and the centre-of-gravity travel that goes with it
 bike_set_gear boot 0x00246f70 (engine, gear) -> engine+0x68/+0x80/+0x84: the gear, its overall ratio

@@ -1156,6 +1156,9 @@ impl Ride {
 pub struct Tables {
     pub acos: AcosTable,
     pub curve: CurveTable,
+    /// The stick's own arc cosine, which the donut's angle comes off ([`trick::look`], S228b): the
+    /// trick decoder's grid, not [`Tables::acos`]'s.
+    pub angles: trick::AngleTable,
 }
 
 /// One arc cosine table for the code outside a frame that has no [`Tables`] to hand: a bike set
@@ -1167,7 +1170,7 @@ fn acos_table() -> &'static AcosTable {
 
 impl Tables {
     pub fn build() -> Tables {
-        Tables { acos: AcosTable::build(), curve: CurveTable::build() }
+        Tables { acos: AcosTable::build(), curve: CurveTable::build(), angles: trick::AngleTable::build() }
     }
 
     fn mv(&self) -> mv::Tables<'_> {
@@ -1949,19 +1952,6 @@ fn surface(t: &phy::Tire, i: u8) -> phy::Surface {
     t.surfaces.get(i as usize).copied().unwrap_or_default()
 }
 
-/// The stick's angle and deflection, which [`mv::donut_roll`] reads.
-///
-/// **The port's own reading.** Both are the input layer's, which is not ported; the donut's own
-/// ramps (S3's proof) say what the angle has to mean — nothing at straight ahead, all of it by
-/// `DonutAngle`, held to `-pi/2`, and back down to nothing at `-pi` — so the angle here runs from 0
-/// with the stick pushed forward through `-pi/2` at full lock to `-pi` pulled right back, and the two
-/// sides of the stick are folded onto one, because a donut goes either way.
-fn stick(s: (F, F)) -> (F, F) {
-    let deflection = length(Vf::new(s.0.0, s.1.0, 0.0, 0.0)).min(F::ONE);
-    let angle = F(libm::atan2f(fpu::neg(s.0.abs().0), s.1.0));
-    (angle, deflection)
-}
-
 // --- the wheel module's two steps, driven ----------------------------------------------------------
 
 /// One wheel's tire forces, with the four questions [`wheel::tire_forces`] asks answered.
@@ -2299,9 +2289,10 @@ impl Ride {
         // S58's turn showed in the steering's speed fade (S58).
         let forward_speed = F(air.contact_vel.z());
         let reverse_force = chassis::rotate(&rot, mv::reverse_push(&p.mv, forward_speed));
-        // The donut's angle and deflection are the pad read's, off the stick before the squaring.
+        // The donut's angle and deflection are the pad read's, off the stick before the squaring:
+        // the trick decoder's look (`+0x634`, `+0x638`), which the ground step reads (S228b).
         let raw = trick::stick(c.stick.0, c.stick.1, c.dpad);
-        let (stick_angle, deflection) = stick((raw.x, raw.y));
+        let trick::Look { angle: stick_angle, reach: deflection, .. } = trick::look(&tables.angles, raw);
 
         let step = mv::Step {
             dt,

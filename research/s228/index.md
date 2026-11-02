@@ -66,23 +66,36 @@ events above. Every tick matches the capture's chassis velocity and centre bit f
 fore-aft request axes match on every riding tick. All four wrecks match, with the original's reason
 in the original's frame. The 139063 nose-first landing rides out as the original's does.
 
-`p1_rides_the_tape_as_the_original` rides each 100-frame stretch from its image. Seventeen of the 35 stretches
-hold to their end. The rest are pinned in `HELD`:
+`p1_rides_the_tape_as_the_original` rides each 100-frame stretch from its image. Twenty-five of the 35
+stretches hold to their end. The rest are pinned in `HELD`:
 
 - **A wreck under way at the image** (137310, 138510, 139510, 139910). The seeder builds a riding
   rider, but the original's rider is a ragdoll at that point. These are not partings.
 - **The rider's own put-back** (138610 at 138684, 139110 at 139141, 139710 at 139746). Select puts the
-  bike back on a respawn spot, and the port does not place it the same.
-- **A preload's force** (138810 at 138907, 139310 at 139384). The stick is thrown forward on a lip.
-  The force is the flick's speed, and the port samples the flick its own way (`ride::Flick`), because
-  the original samples it from DMA waits on a hardware timer. Not reproducible tick for tick.
-- **Unexplained, on the ground at speed with the stick moving**: 136610 at 136624, 137410 at 137462,
-  137610 at 137637, 137910 at 137943, 138010 at its first tick, 138110 at 138179, 138210 at 138212,
-  138310 at 138311, 138710 at 138729. Many fall in the wheelie stretch 137860..138351. Not chased
-  here; the follow-up is filed in the plan.
+  bike back on a respawn spot, and the port does not place it the same. Not looked at in S228b.
+- **A preload's force** (138810 at 138907). The stick is thrown forward on a lip. The force is the
+  flick's speed, and the port samples the flick its own way (`ride::Flick`), because the original
+  samples it from DMA waits on a hardware timer. Not reproducible tick for tick.
+- **A chassis contact the port does not make** (137410 at 137462, the stick full left with no gas;
+  137610 at 137637, gas on and the stick just coming off centre). On the row after the last held
+  tick the capture's `p1_ch_force`/`p1_ch_moment` go non-zero while the bike is on the ground, and
+  the port's stay zero. Something the original touches (a body ray, or a contact the port does not
+  find) pushes the chassis there. Not chased; follow-up filed.
 
-Images just around these partings were started (research/s228/parting_ticks.txt) but not finished.
-Each one replays the tape from the state at NominalScalar 0.05, which takes hours.
+**Fixed in S228b: the ground step's donut.** Nine of the old "unexplained" partings (136610, 137910,
+138010, 138110, 138210, 138310, 138710, and the 139310 one blamed on the preload) were one cause. The
+ground step asks for a donut off the stick's angle and deflection (`+0x634`, `+0x638`), which the
+original's pad read writes: the trick decoder's look, `acos(x/|s|)` off its table, negated when
+`y < 0`, with the reach not clamped. The port worked its own angle out (`atan2(-|x|, y)`) and
+clamped the reach to 1. At 138010 the image holds angle 1.4564 and deflection 1.0066, which gives no
+donut, but the port's angle came out near 0 and it scaled the rear tire's side force by 0.218 (side
+force −52.25 against the original's −63.95). The original's ground step, run in the oracle from the
+image with the port's levers written in, gives the capture row's velocity and centre bit for bit
+at 138010, 138210 and 138310. `ride::frame_searched` now takes the look (`trick::look`, on
+`Tables::angles`).
+
+No new images were made at the parting ticks (research/s228/parting_ticks.txt); the 100-frame ones
+were enough for the donut.
 
 The original's whole frame (S176's `judge_whole` in ragdoll_wrecks.rs), run from these images, stalls
 in a hardware wait (call 0x133500 at pc 0x198bf0). C10's images do not. So the wrecks here are judged
