@@ -768,3 +768,66 @@ fn a_full_whip_keeps_the_hands_on_the_bars() {
     assert!(d.doll_off.iter().all(|&o| o < 0.1), "the ragdoll's hands {:?} ft off the grips", d.doll_off);
     assert!(cos > 0.75 && doll.len() > ours.len(), "the drawn rider leans {ours:?}, the ragdoll {doll:?}");
 }
+
+/// **MD78:** MX vs. ATV's 360 throws the rider off the bike and back. `MX_ThreeSixtyR` swings the
+/// pelvis 1.2 ft out to the side and a foot down, the legs off the pegs, while `Bike_ThreeSixtyR`
+/// turns the bars; the original's film (V69) shows exactly that. The cross into the clip is a quarter
+/// second, so the swing is drawn at full weight: rider and bike play their 360 together, the body
+/// leaves the seat and the pegs mid-clip, the hands stay held, and the feet are back on the pegs once
+/// the airborne row has them again.
+#[test]
+fn a_360_throws_the_rider_off_the_pegs() {
+    use game_render::rider::FOOT_ANCHORS;
+    use game_sim::vehicle_anim::{AIR, SPIN_RIGHT};
+    let Some(mut kit) = kit() else { return };
+    let r1 = hands([false, false, true], [false; 2], (0.0, 0.0));
+    let left = hands([false, false, true], [false; 2], (-1.0, 0.0));
+    let right = hands([false, false, true], [false; 2], (1.0, 0.0));
+    let script = [(130, r1.clone()), (150, left), (158, right), (166, r1), (180, Controls::default())];
+    let p = kit.phy.clone();
+    let node = |name: &str| kit.chassis.node_rest(name).map(|v| Vf::new(v.x, v.y, v.z, 1.0));
+    let mounts = (node(FRONT).unwrap(), node(REAR).unwrap());
+    let mut r = rider::Rider::new(&p, mounts, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), kit.set.clone());
+    r.sense.wrecks_enabled = false;
+    r.body_rates = params();
+    let mut world = Ramp;
+    let mut now = Controls::default();
+    let skel = kit.body.rig.set.skeleton.clone();
+    let feet = FOOT_ANCHORS.map(|n| skel.find(n).unwrap());
+    let pelvis = skel.find("Pelvis").unwrap();
+    let root = kit.chassis.nodes.root.unwrap();
+    // Per frame: the body's state, the bike's, the drawn pelvis and feet against the bike, the hands'
+    // hold.
+    let mut seen = Vec::new();
+    for k in 0..FRAMES {
+        if let Some((_, c)) = script.iter().find(|(at, _)| *at == k) {
+            now = c.clone();
+        }
+        let c = Controls { gas: F::ONE, ..now.clone() };
+        r.frame(&p, &kit.tables, &c, FRAME, &mut world);
+        kit.body.ride(FRAME, &mut r, &c, rider::Gate::default());
+        let want = kit.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
+        let request = kit.chassis.riding_under(&r, want);
+        kit.chassis.frame(FRAME, want, &request, Drive::of(&r.ride));
+        kit.body.bare = kit.chassis.bare_under(&r.body.veh);
+        let g = grips(&kit.chassis);
+        let (drawn, _) = kit.body.palette(Some(&g));
+        let bike = kit.chassis.world[root];
+        let off = |i: usize| into(&bike, at(&drawn[feet[i]])).sub(into(&bike, g[i].unwrap())).len();
+        let holds = kit.body.holds();
+        seen.push((r.body.veh.state, kit.chassis.stance.driver.state, into(&bike, at(&drawn[pelvis])), off(0).max(off(1)), [holds[2], holds[3]]));
+    }
+    let spin: Vec<usize> = (0..FRAMES).filter(|&k| seen[k].0 == SPIN_RIGHT).collect();
+    let (first, _) = (spin[0], spin[spin.len() - 1]);
+    assert!(spin.len() > 60, "threesixtyR plays {} frames", spin.len());
+    assert!(spin.iter().all(|&k| seen[k].1 == SPIN_RIGHT), "the bike plays Bike_ThreeSixtyR with the rider");
+    let seat = seen[first - 1].2;
+    let out = spin.iter().map(|&k| seen[k].2.sub(seat)).fold(v3(0.0, 0.0, 0.0), |a, d| if d.x.abs() > a.x.abs() { d } else { a });
+    let lifted = spin.iter().map(|&k| seen[k].3).fold(0.0, f32::max);
+    assert!(out.x.abs() > 0.8 && out.y < -0.5, "the pelvis swings {out:?} ft off the seat");
+    assert!(lifted > 1.5, "the feet come {lifted} ft off the pegs");
+    assert!(spin.iter().all(|&k| seen[k].4 == [1.0, 1.0]), "the hands hold the bars all through it");
+    let back = (first..FRAMES).find(|&k| seen[k].0 == AIR).expect("the 360 hands back to the airborne row");
+    let settled = (back..FRAMES).take(30).map(|k| seen[k].3).last().unwrap();
+    assert!(settled < 0.05, "the feet {settled} ft off the pegs half a second after the 360");
+}

@@ -925,9 +925,19 @@ impl Driver {
                 s if (HOLD..=59).contains(&s) || pack_state(lib, s, SPIN_LEFT..=SPIN_RIGHT) => {
                     if restart {
                         let clip = lib.clip(self.state);
+                        // MD78: the 360 restarts at the gesture slots' fade *rate*, 4 a second, and a
+                        // play's length is seconds — taken as it stands the cross was 4 s over a
+                        // 1.47 s clip, and the throw never got past a third of its weight. The cross
+                        // is the gesture rows' own quarter second instead. A held request's zero rate
+                        // is still the hard cut.
+                        let cross = if pack_state(lib, s, SPIN_LEFT..=SPIN_RIGHT) && self.rate > F::ZERO {
+                            F::ONE / self.rate
+                        } else {
+                            self.rate
+                        };
                         play = Some(Play {
                             clip,
-                            length: self.rate,
+                            length: cross,
                             duration: clip.map_or(F::ZERO, &length),
                         });
                     }
