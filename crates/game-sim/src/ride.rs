@@ -1571,8 +1571,8 @@ pub fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> V
 /// [`crate::contact::other_at`]'s (S145, proved). The wheel ray probe ignores the bike's own actor
 /// category, which every bike's frame and wreck part carry (S168), so the owners a riding bike's
 /// wheel meets are the knockable props' `f.col` meshes (S210, [`crate::prop_wheel`]), which [`under`]
-/// answers, and a HasPhysics truck's physics mesh, which a woken truck stands up into the wheel's
-/// nearby search (S208) and the port does not simulate yet (S186).
+/// answers, and a woken HasPhysics truck's physics mesh, which the wake stands up into the wheel's
+/// nearby search (S208, [`crate::truck_wheel`]), which [`under`] answers too.
 pub fn wheel_contact_velocity(own: Vf, vel: Vf, under: Option<(Vf, Vf)>) -> (Vf, Vf) {
     match under {
         Some((velocity, at)) => (sub_xyz(own, at), sub_xyz(vel, velocity)),
@@ -1587,12 +1587,17 @@ pub fn wheel_contact_velocity(own: Vf, vel: Vf, under: Option<(Vf, Vf)>) -> (Vf,
 ///
 /// The owner its contact names (`+0x1f0`) is asked first, as the original does: a knockable prop's
 /// collision object (S210, [`crate::prop_wheel::under`]), read off the lent props, or off the bump's
-/// pushed copy of a body the body rays struck this tick (`pushed`).
-fn under(wh: &Wheel, movers: &[(u32, crate::traffic::Moving)], props: Option<&mut crate::prop_set::PropSet>,
+/// pushed copy of a body the body rays struck this tick (`pushed`), or a woken truck's body (S208,
+/// [`crate::truck_wheel::under`]).
+fn under(wh: &Wheel, movers: &[(u32, crate::traffic::Moving)], lent: Option<&mut crate::prop_wheel::Lent>,
          pushed: &mut [crate::prop_contact::Pushed]) -> Option<(Vf, Vf)> {
     let owner = wh.mv.fresh.scalars[2];
     if owner != 0 {
-        return props.and_then(|set| crate::prop_wheel::under(set, pushed, owner, wh.w.contact_point));
+        let crate::prop_wheel::Lent(set, trucks) = lent?;
+        if crate::truck_wheel::named(owner).is_some() {
+            return crate::truck_wheel::under(trucks, owner, wh.w.contact_point);
+        }
+        return crate::prop_wheel::under(set, pushed, owner, wh.w.contact_point);
     }
     let vehicle = wh.mv.fresh.scalars[3];
     if vehicle == 0 {
@@ -1833,9 +1838,26 @@ impl crate::contact_search::Search for SolidSweep<'_> {
 /// The knockable props lent for the frame (`props`, S210) are searched after the scene, on the same
 /// record ([`crate::prop_wheel::search`]): a contact on one names the prop as its owner, and the
 /// props struck are woken. In a world that answers only [`World::solid`] they are searched on a record
-/// of their own and merged a segment at a time.
+/// of their own and merged a segment at a time. The woken trucks lent with them (S208,
+/// [`crate::truck_wheel`]) are searched after the props, on the same record, their path meshes stood
+/// down for the scene's search; a contact on one names the truck as its owner.
 fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broad_phase::Search>>, world: &mut dyn World,
-              props: Option<&mut crate::prop_set::PropSet>) -> (Vec<WheelHit>, F) {
+              lent: Option<&mut crate::prop_wheel::Lent>) -> (Vec<WheelHit>, F) {
+    let (props, trucks) = match lent {
+        Some(crate::prop_wheel::Lent(set, trucks)) => (Some(set), Some(&*trucks)),
+        None => (None, None),
+    };
+    let stood_down = trucks.map(|t| t.stand_down(world)).unwrap_or_default();
+    let (hits, near) = wheel_hits_in(rays, m, nearby, world, props, trucks);
+    for h in stood_down {
+        crate::traffic::show(world, h);
+    }
+    (hits, near)
+}
+
+/// [`wheel_hits`], with the trucks' path meshes out of `world`.
+fn wheel_hits_in(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broad_phase::Search>>, world: &mut dyn World,
+                 props: Option<&mut crate::prop_set::PropSet>, trucks: Option<&crate::truck_wheel::Trucks>) -> (Vec<WheelHit>, F) {
     let node = rider_contact::node(m);
     let found = nearby_scene(nearby, world, rays, &node, |scene| {
         let hits = crate::contact_search::Search::rays(scene, true);
@@ -1847,18 +1869,19 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broa
         (hits, scene.ray_record().clone())
     });
     if let Some((hits, mut record)) = found {
-        let Some(set) = props else {
+        if props.is_none() && trucks.is_none() {
             let near = if hits.is_empty() { F::ONE } else { record.nearest };
             return (hits, near);
-        };
-        let on = crate::prop_wheel::search(rays, m, set, &mut record);
-        // The record's contacts as they stand after the props: a prop's in place of the scene's one
-        // on its segment when nearer, or after them on a segment the scene left free.
+        }
+        let on = props.map(|set| crate::prop_wheel::search(rays, m, set, &mut record)).unwrap_or_default();
+        let on = on_after(on.on, trucks.map(|t| crate::truck_wheel::search(rays, m, t, &mut record)));
+        // The record's contacts as they stand after the props and the trucks: one of theirs in place
+        // of the scene's one on its segment when nearer, or after them on a segment the scene left free.
         let hits: Vec<WheelHit> = record
             .contacts
             .iter()
             .enumerate()
-            .map(|(i, c)| match on.on.iter().find(|&&(k, _, _)| k == i) {
+            .map(|(i, c)| match on.iter().find(|&&(k, _, _)| k == i) {
                 Some(&(_, owner, material)) => (c.from, c.point, c.normal, None, material, owner),
                 None => hits[i],
             })
@@ -1880,18 +1903,20 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broa
     world.groups(&b, &mut record);
     let near = if record.hits > 0 { record.nearest } else { F::ONE };
     let scene = |i: usize| (rays.segments[i].from, record.point[i], record.normal[i], None, 0, 0);
-    let Some(set) = props else {
+    if props.is_none() && trucks.is_none() {
         return ((0..b.count).filter(|&i| record.hit[i]).map(scene).collect(), near);
-    };
-    // The knockable props (S210) on a record of their own, a segment's contact on one taken in place
-    // of the world's when strictly nearer, as the probe's own record keeps the nearer of two.
+    }
+    // The knockable props (S210) and the woken trucks (S208) on a record of their own, a segment's
+    // contact on one taken in place of the world's when strictly nearer, as the probe's own record
+    // keeps the nearer of two.
     let mut ray = crate::ray_probe::Record { listed: true, capacity: rays.segments.len(), one_per_ray: true, ..Default::default() };
     crate::ray_probe::clear(&mut 0, &mut ray);
-    let found = crate::prop_wheel::search(rays, m, set, &mut ray);
+    let found = props.map(|set| crate::prop_wheel::search(rays, m, set, &mut ray)).unwrap_or_default();
+    let found = on_after(found.on, trucks.map(|t| crate::truck_wheel::search(rays, m, t, &mut ray)));
     let hits = (0..b.count)
         .filter_map(|i| {
             let from = rays.segments[i].from.to_bits();
-            let prop = found.on.iter().map(|&(k, owner, material)| (&ray.contacts[k], owner, material)).find(|(c, _, _)| c.from.to_bits() == from);
+            let prop = found.iter().map(|&(k, owner, material)| (&ray.contacts[k], owner, material)).find(|(c, _, _)| c.from.to_bits() == from);
             match prop {
                 Some((c, owner, material)) if !record.hit[i] || c.fraction < record.fraction[i] => {
                     Some((c.from, c.point, c.normal, None, material, owner))
@@ -1901,6 +1926,15 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broa
         })
         .collect();
     (hits, near.min(ray.nearest))
+}
+
+/// The record's contacts the props' search left on a prop (`props`), with the trucks' searched after
+/// them (`trucks`): a truck's contact that took a prop's segment is the truck's.
+fn on_after(props: Vec<(usize, u32, u8)>, trucks: Option<Vec<(usize, u32, u8)>>) -> Vec<(usize, u32, u8)> {
+    let Some(trucks) = trucks else { return props };
+    let mut on: Vec<_> = props.into_iter().filter(|&(k, _, _)| !trucks.iter().any(|&(t, _, _)| t == k)).collect();
+    on.extend(trucks);
+    on
 }
 
 /// One of [`wheel_hits`]' contacts: the segment's from, the point, the normal, the moving thing it is
@@ -2043,7 +2077,7 @@ const SHARE_SCALE: f32 = 1.0;
 /// hanging rear's velocity taken relative to the wagon (S191). The measure is returned, and is the
 /// one the wheel's own integration goes on with.
 fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf,
-              movers: &[(u32, crate::traffic::Moving)], props: Option<&mut crate::prop_set::PropSet>,
+              movers: &[(u32, crate::traffic::Moving)], props: Option<&mut crate::prop_wheel::Lent>,
               pushed: &mut [crate::prop_contact::Pushed]) -> Option<(Vf, Vf)> {
     wh.w.load_point = wh.w.probe_end_world;
     wh.w.spring_force = F(SHARE_SCALE) * other.w.spring_force;
@@ -2524,7 +2558,7 @@ impl Ride {
 
             calls.push(mv::Call::Contacts(s.dt));
             let movers = contacts(&out.chassis, front, rear, near, touching, rear_material, nearby, scenery, s.dt, world,
-                                  props.as_deref_mut().map(|l| &mut l.0));
+                                  props.as_deref_mut());
 
             for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
                 calls.push(mv::Call::Suspension(side, h));
@@ -2545,8 +2579,8 @@ impl Ride {
             let mut under = {
                 let mut none = Vec::new();
                 let pushed = bump.as_deref_mut().map_or(&mut none[..], |b| &mut b.props[..]);
-                let front = under(front, &movers, props.as_deref_mut().map(|l| &mut l.0), pushed);
-                [front, under(rear, &movers, props.as_deref_mut().map(|l| &mut l.0), pushed)]
+                let front = under(front, &movers, props.as_deref_mut(), pushed);
+                [front, under(rear, &movers, props.as_deref_mut(), pushed)]
             };
             for ((side, wh), under) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)].into_iter().zip(under) {
                 calls.push(mv::Call::TireForces(side, h));
@@ -2563,7 +2597,7 @@ impl Ride {
             if rear.mv.other_tire_down && !rear.w.contact {
                 let mut none = Vec::new();
                 let pushed = bump.as_deref_mut().map_or(&mut none[..], |b| &mut b.props[..]);
-                under[1] = share_load(rear, front, &mvc, chassis.cofg_world, &movers, props.as_deref_mut().map(|l| &mut l.0), pushed);
+                under[1] = share_load(rear, front, &mvc, chassis.cofg_world, &movers, props.as_deref_mut(), pushed);
             }
             wheel_integrate(rear, &p.rear, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
                             &tables.curve, h, under[1], mxvatv.is_some());
@@ -2711,7 +2745,7 @@ impl Ride {
 #[allow(clippy::too_many_arguments)] // the substep's state, and the bike's kept search
 fn contacts(m: &Mat4, front: &mut Wheel, rear: &mut Wheel, near: &mut F, touching: &mut bool, rear_material: &mut u8,
             nearby: &mut Option<Box<broad_phase::Search>>, scenery: bool, dt: F, world: &mut dyn World,
-            props: Option<&mut crate::prop_set::PropSet>) -> Vec<(u32, crate::traffic::Moving)> {
+            props: Option<&mut crate::prop_wheel::Lent>) -> Vec<(u32, crate::traffic::Moving)> {
     let rays = wheel_rays(&front.w, &rear.w);
     let (hits, wheel_near) = wheel_hits(&rays, m, nearby, world, props);
     let look = !hits.is_empty();
@@ -2723,7 +2757,8 @@ fn contacts(m: &Mat4, front: &mut Wheel, rear: &mut Wheel, near: &mut F, touchin
             normal,
             point,
             // The collision node is the scene's, and the port has no handle to put here. The owner is
-            // a knockable prop's collision object (S210, [`crate::prop_wheel::handle`]); a still prop
+            // a knockable prop's collision object (S210, [`crate::prop_wheel::handle`]) or a woken
+            // truck's (S208, [`crate::truck_wheel::handle`]); a still prop
             // of the scene is the world, which is what a zero owner means. A path car's mesh is a
             // vehicle of kind 2, as every one of the original's path cars is (S136). Other riders'
             // bikes are not searched: the wheel probe's category list refuses every bike (S168).

@@ -46,8 +46,9 @@
 //! ([`Traffic::frame_late`], S186a: the toy world's list). Once one is struck ([`Traffic::strike`],
 //! S186; by a riding bike's body rays, S186a) its body wakes with the car's motion and the car stands
 //! where the body is, its clock running on, until it is put back on its path a `ResetTime` after it
-//! comes to rest ([`crate::physics_car`]). The other searches do not strike one yet (S252), and the
-//! woken car's f.col is not in the bike's frame (S251).
+//! comes to rest ([`crate::physics_car`]). The other searches do not strike one yet (S252). A riding
+//! bike's wheels stand on the woken car's f.col ([`crate::truck_wheel`], S208); its body rays and
+//! sweep do not meet it yet (S251).
 
 #![deny(clippy::float_arithmetic)] // every sum below is the PS2's, through ps2-float
 
