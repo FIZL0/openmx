@@ -66,6 +66,9 @@ pub use store::{Card, Got, Listed, PACKS_ONLINE, PACKS_TAB, PackRow, Phase, Post
 mod player;
 #[path = "video.rs"]
 pub mod video;
+// Where the page's touch pad stands over the frame (P208), for the HUD's and the hints' room.
+#[path = "touch_room.rs"]
+pub mod touch_room;
 #[allow(unused_imports)]
 pub use player::{Deck, deck_point};
 #[allow(unused_imports)] // the tests' and the shell's, not every includer's
@@ -5811,6 +5814,10 @@ pub enum Part {
     /// A track pick's card (P70): its box, its picture's box, and which of [`Art::images`] the
     /// picture is, `None` for a track with no picture yet.
     Card { id: String, card: Bounds, picture: Bounds, image: Option<usize>, lit: bool },
+    /// The hints' buttons and words over the band's right end (P208).
+    Hints(Bounds),
+    /// The band's line: whose ride this is, a note, or the lobby's word (P208).
+    Line(Bounds),
 }
 
 impl Art {

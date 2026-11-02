@@ -1561,6 +1561,82 @@ fn overlap(a: menu::Bounds, b: menu::Bounds) -> bool {
     a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
 }
 
+/// web/touch.js's controls along the bottom (P197) over a `window`, from its own numbers: GAS,
+/// BRAKE, MODIFIER and the four faces (the right thumb's), and the stick's base at rest (the left's),
+/// each with the 0.15 `u` a touch past its edge still hits, as boxes (left, top, width, height).
+fn touch_controls((w, h): (f32, f32)) -> (Vec<menu::Bounds>, menu::Bounds) {
+    let u = (0.07 * w).min(0.125 * h);
+    let slop = 0.15 * u;
+    let right = |x: f32, y: f32, bw: f32, bh: f32| [w - (x + bw) * u - slop, h - (y + bh) * u - slop, bw * u + 2.0 * slop, bh * u + 2.0 * slop];
+    let face = 1.15;
+    let thumb = vec![
+        right(0.35, 0.35, 1.9, 2.5),
+        right(2.5, 0.35, 1.6, 1.7),
+        right(4.35, 0.35, 2.1, 1.2),
+        right(1.6, 3.1, face, face),
+        right(0.35, 4.2, face, face),
+        right(2.85, 4.2, face, face),
+        right(1.6, 5.3, face, face),
+    ];
+    let (c, r) = (1.8 * u, 1.3 * u);
+    (thumb, [c - r, h - c - r, 2.0 * r, 2.0 * r])
+}
+
+/// P208: with the page's touch pad up, at a phone's 844x390 (where BRAKE and GAS covered them), a
+/// bigger phone's and a tablet's, every screen's hints stand left of the pad's right-hand controls
+/// and its band's line right of the stick's resting base, both still in the frame; with the pad
+/// down they are where they were.
+#[test]
+fn the_hints_and_the_band_stand_clear_of_the_touch_pad() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    let (mut hints, mut lines, mut covered) = (0, 0, 0);
+    for (w, h) in [(844, 390), (932, 430), (1180, 820)] {
+        let (thumb, stick) = touch_controls((w as f32, h as f32));
+        for screen in Screen::ALL {
+            let (mut m, _) = fresh();
+            m.open(screen);
+            let draw = |pad: bool| {
+                menu::touch_room::set(pad.then_some((w, h)));
+                let parts = art.parts(&m, &mut game_render::Frame::new(w, h, [90, 90, 90]));
+                menu::touch_room::set(None);
+                parts
+            };
+            for p in draw(false) {
+                if let menu::Part::Hints(b) | menu::Part::Line(b) = p {
+                    covered += thumb.iter().chain([&stick]).filter(|c| overlap(b, **c)).count();
+                }
+            }
+            for p in draw(true) {
+                let at = format!("{screen:?} at {w}x{h}");
+                match p {
+                    menu::Part::Hints(b) => {
+                        hints += 1;
+                        assert!(b[0] >= 0.0 && b[2] > 0.0, "{at}: the hints {b:?} are off the frame");
+                        for c in &thumb {
+                            assert!(!overlap(b, *c), "{at}: the hints {b:?} under the pad's {c:?}");
+                        }
+                    }
+                    menu::Part::Line(b) if b[2] > 0.0 => {
+                        lines += 1;
+                        assert!(b[0] + b[2] <= w as f32, "{at}: the band's line {b:?} runs off the frame");
+                        assert!(!overlap(b, stick), "{at}: the band's line {b:?} under the stick {stick:?}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(hints > 0 && lines > 0, "no hints ({hints}) or no band line ({lines}) drawn");
+    assert!(covered > 0, "the pad covered nothing with no room made for it, so this proves nothing");
+}
+
 /// V111: on the Online screen every row's words, and the cursor's pill, sit inside the list's
 /// plate, with the network on LAN Only and on Internet + LAN, and the four rows above it do not move
 /// when the last one's word changes.
@@ -1666,7 +1742,7 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                                 assert!(!overlap(*logo, *b), "{screen:?} at {w}x{h}: an item on the logo");
                             }
                         }
-                        menu::Part::Plate(_) => {}
+                        menu::Part::Plate(_) | menu::Part::Hints(_) | menu::Part::Line(_) => {}
                         // Unstretched: 512x64 at any shape.
                         menu::Part::Logo(b) => assert!((b[2] / b[3] - 8.0).abs() < 0.01, "{screen:?} at {w}x{h}"),
                         menu::Part::Card { card, .. } => {

@@ -292,6 +292,8 @@ impl Canvas {
             self.keys[code as usize] = down;
         }
         self.size();
+        // the page's touch pad up or not (P208), for the HUD and the hints to stand clear of it
+        crate::menu::touch_room::set(touch_pad_shown().then_some((self.width, self.height)));
         let (sx, sy) = (self.width as f64 / self.view.0 as f64, self.height as f64 / self.view.1 as f64);
         self.clicks = clicks().chunks_exact(2).map(|p| ((p[0] as f64 * sx) as i32, (p[1] as f64 * sy) as i32)).collect();
     }
@@ -398,6 +400,12 @@ pub fn pads() -> Vec<(u32, std::path::PathBuf)> {
 
 fn index_of(path: &std::path::Path) -> Option<u32> {
     path.to_str()?.strip_prefix("gamepad/")?.parse().ok()
+}
+
+/// Whether the page lists web/touch.js's on-screen pad among its gamepads, which it does while the
+/// pad is shown (P208).
+fn touch_pad_shown() -> bool {
+    snapshot().iter().any(|&(i, _)| crate::pad::is_touch(&gamepad_name(i)))
 }
 
 /// What the pad layer knows of a device ([`crate::pad::DeviceInfo`]): its name. No sysfs, so the

@@ -217,6 +217,81 @@ fn a_split_view_draws_its_own_hud() {
     }
 }
 
+/// web/touch.js's controls along the bottom (P197) in a `window`'s pixels, laid out here from its
+/// own numbers rather than from `touch_room.rs`'s: GAS, BRAKE and MODIFIER, the four faces, and the
+/// stick's base at rest, each with the 0.15 `u` a touch past its edge still hits. Left, top, right,
+/// bottom.
+fn touch_controls((w, h): (f32, f32)) -> Vec<[f32; 4]> {
+    let u = (0.07 * w).min(0.125 * h);
+    let slop = 0.15 * u;
+    // right(x, y) with a width and height, all in u: the control's box from the bottom right
+    let right = |x: f32, y: f32, bw: f32, bh: f32| [w - (x + bw) * u - slop, h - (y + bh) * u - slop, w - x * u + slop, h - y * u + slop];
+    let face = 1.15;
+    let mut boxes = vec![
+        right(0.35, 0.35, 1.9, 2.5),
+        right(2.5, 0.35, 1.6, 1.7),
+        right(4.35, 0.35, 2.1, 1.2),
+        right(1.6, 3.1, face, face),
+        right(0.35, 4.2, face, face),
+        right(2.85, 4.2, face, face),
+        right(1.6, 5.3, face, face),
+    ];
+    let (c, r) = (1.8 * u, 1.3 * u);
+    boxes.push([c - r, h - c - r, c + r, h - c + r]);
+    boxes
+}
+
+/// With the page's touch pad up (P208), at a phone's 844x390 (the task's), a big phone's and a
+/// tablet's, no part of the HUD's speedometer, either style, or of its radar is under a control
+/// of the pad's along the bottom; the pieces it moves stay in the frame, and with no pad the HUD
+/// is drawn where it always was.
+#[test]
+fn the_speedometer_and_the_radar_stand_clear_of_the_touch_pad() {
+    let t = Tracker::default();
+    let now = Instant::now();
+    let riders = [Dot { at: [10.0, 30.0], ai: false }];
+    for (w, h) in [(844.0, 390.0), (932.0, 430.0), (1180.0, 820.0), (1024.0, 768.0)] {
+        for style in [Speedometer::Digital, Speedometer::Analog] {
+            let g = gauges(style);
+            let mut sh = shown(&g, &riders, &[], None);
+            sh.offer = None;
+            let view = [0.0, 0.0, w, h];
+            let (mut plain, mut padded) = (Vec::new(), Vec::new());
+            let before = ride_hud::sprites(&mut plain, 0, view, &sh, &t, now);
+            let none = ride_hud::sprites_clear_of(&mut Vec::new(), 0, view, None, &sh, &t, now);
+            assert_eq!(format!("{before:?}"), format!("{none:?}"), "{w}x{h}: no pad moved the HUD");
+            let room = menu::touch_room::Room { window: (w, h), frame: (w, h) };
+            let d = ride_hud::sprites_clear_of(&mut padded, 0, view, Some(room), &sh, &t, now);
+            let at = format!("{w}x{h} {style:?}");
+            // only the speedometer and the radar move
+            assert_eq!(d.score_bar, before.score_bar, "{at}");
+            let hits = |b: [f32; 4]| touch_controls((w, h)).into_iter().filter(move |c| b[0] < c[2] && c[0] < b[2] && b[1] < c[3] && c[1] < b[3]);
+            let mut covered = 0;
+            for s in &padded {
+                let b = bounds(std::iter::once(s));
+                assert!(b[0] >= -1.0 && b[1] >= -1.0 && b[2] <= w + 1.0 && b[3] <= h + 1.0, "{at}: drawn at {b:?}, off the frame");
+                if let Some(c) = hits(b).next() {
+                    panic!("{at}: a sprite at {b:?} is under the pad's control at {c:?}");
+                }
+            }
+            for s in &plain {
+                covered += hits(bounds(std::iter::once(s))).count();
+            }
+            assert!(covered > 0, "{at}: the pad covered nothing to start with, so this proves nothing");
+            let (c, _) = d.radar.unwrap();
+            assert!(c[0] > before.radar.unwrap().0[0] && near(c[1], before.radar.unwrap().0[1], 0.01), "{at}: the radar went right, not up: {c:?}");
+        }
+    }
+    // a view that is not at the frame's corners keeps its places
+    let g = gauges(Speedometer::Digital);
+    let sh = shown(&g, &[], &[], None);
+    let room = menu::touch_room::Room { window: (1920.0, 1080.0), frame: (1920.0, 1080.0) };
+    let view = [0.0, 0.0, 1920.0, 540.0];
+    let a = ride_hud::sprites(&mut Vec::new(), 0, view, &sh, &t, now);
+    let b = ride_hud::sprites_clear_of(&mut Vec::new(), 0, view, Some(room), &sh, &t, now);
+    assert_eq!(format!("{a:?}"), format!("{b:?}"), "the top view moved");
+}
+
 /// How many of `frame`'s pixels in `r` are `colour`'s, near enough.
 fn count(frame: &Frame, r: [f32; 4], colour: [u8; 4]) -> usize {
     let (x0, y0) = (r[0].max(0.0) as usize, r[1].max(0.0) as usize);

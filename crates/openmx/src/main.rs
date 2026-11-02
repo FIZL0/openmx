@@ -8220,7 +8220,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let join = join_view == Some(v);
                     let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join };
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
-                        ride_hud::sprites(&mut gpu_sprites, hud_base, view, shown, tracker, now);
+                        // clear of the page's touch pad while it is up (P208)
+                        let pad = menu::touch_room::Room::of((frame.width, frame.height));
+                        ride_hud::sprites_clear_of(&mut gpu_sprites, hud_base, view, pad, shown, tracker, now);
                     });
                 }
             }
