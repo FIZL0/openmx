@@ -1,0 +1,164 @@
+# b7-truck-strike.toml — free09's trailer cab striking a parked bike (S207's truck state), with the
+# bike's collision record as the frame left it (B7): the contact list the substeps resolved, each
+# entry's other side and mover, the record's last relative velocity, and the cab car's pose before and
+# after its update and the motion its two virtuals cached. The chassis lanes are s207-free09.toml's.
+#
+# The state is S207's truck (context/s207/truck.p2s), loaded into a scratch slot and recorded at a
+# quarter speed, nothing on the pad:
+#
+#   ./kit pcsx2 with -- ./kit record watch/b7-truck-strike.toml --state 40 -n 120 -o context/capture/b7/strike.csv
+
+[watch]
+name        = "b7-truck-strike"
+description = "S207's truck strike: the bike's contact record and the cab's motion"
+every       = 1
+frames      = 900
+
+[setup]
+state   = 9
+warmup  = 0
+settle_ms = 240
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"      # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "wreck_reason"    # +0x748
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "g_peak"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x550"
+type = "f32x4"
+
+[[field]]
+name = "ch_cofg"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "ch_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "ch_rates"        # +0x290: the rates in the chassis' frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x290"
+type = "f32x4"
+
+[[field]]
+name = "ch_impact"       # +0x170: the frame's shock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "ch_ang_impact"   # +0x180: the frame's twist
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x180"
+type = "f32x4"
+
+[[field]]
+name = "ch_xform"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x254 -> 0x40"
+type = "mat4"
+
+# --- the bike's collision record (rider +0x7d0) -----------------------------------------------------
+[[field]]
+name = "rec_count"       # +0x100: contacts in the list
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "rec_relative"    # +0x1e0: the last entry's relative velocity, +0x1d8 its normal speed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x1e0"
+type = "f32x4"
+
+[[field]]
+name = "rec_normal_speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x1d8"
+type = "f32"
+
+[[array]]
+name   = "c"             # the record's contact list: *(record+0x108), 0x80-byte entries
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x108 -> 0x0"
+count  = 8
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "from"            # +0x10: where the ray starts, model space
+off  = 0x10
+type = "f32x3"
+
+[[array.field]]
+name = "end"             # +0x20: the contact on the bike, model space
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"          # +0x30
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"           # +0x40
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "arm"             # +0x50
+off  = 0x50
+type = "f32x3"
+
+[[array.field]]
+name = "other_arm"       # +0x60
+off  = 0x60
+type = "f32x3"
+
+[[array.field]]
+name = "surface"         # +0x70
+off  = 0x70
+type = "u32"
+
+[[array.field]]
+name = "other"           # +0x74
+off  = 0x74
+type = "u32"
+
+[[array.field]]
+name = "mover"           # +0x78
+off  = 0x78
+type = "u32"
+
+# --- the cab: the north-east trailer truck S207 parked against (its car, from research/s207/cars.py)
+[[field]]
+name = "cab_pose"        # its node's world matrix (node +0x80)
+addr = "0x01263570 + 0x254 -> 0x80"
+type = "mat4"
+
+[[field]]
+name = "cab_before"      # +0x2e0: the matrix as the update's top copied it
+addr = "0x01263570 + 0x2e0"
+type = "mat4"
+
+[[field]]
+name = "cab_vel"         # +0x260: what the velocity virtual last answered
+addr = "0x01263570 + 0x260"
+type = "f32x4"
+
+[[field]]
+name = "cab_spin"        # +0x290: what the spin virtual last answered
+addr = "0x01263570 + 0x290"
+type = "f32x4"
