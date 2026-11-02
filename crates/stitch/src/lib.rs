@@ -63,7 +63,7 @@ pub const ROCK: f64 = 3.0;
 /// The stitcher's own version, bumped whenever a build of the same tiles writes other joins (P232):
 /// the shell's cache of the disc's worlds (`crates/openmx/src/disc_worlds.rs`) is keyed by it, so a
 /// changed stitcher builds them again. Not [`build::AUTHOR`], which mod.json carries as it was.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Where a tile is cut ([`Tile::trim_cut`]): its interior, and per side (x0, z0, x1, z1) whether it
 /// was cut at a ridge, the samples it was cut farther in past a rock face, and by the trim.
