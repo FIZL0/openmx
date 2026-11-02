@@ -244,6 +244,7 @@ mod track_mods;
 mod track_previews;
 mod trick_packs;
 mod machine_packs;
+mod music_packs;
 mod worlds;
 mod world_dress;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
@@ -2167,6 +2168,8 @@ struct Front {
     network: lobby::Network,
     /// The sound and the music (P42), which play on across the menus and the rides.
     sound: audio::Speakers,
+    /// `--mods` was given (MD7): the music packs are its folder's whatever the Mods row says.
+    mods_asked: bool,
 }
 
 impl Front {
@@ -2214,6 +2217,10 @@ impl Front {
     fn hear(&mut self) {
         let s = &self.menu.settings;
         self.sound.apply(&s.music, levels(s));
+        // The music packs the Mods page has on (MD7), and the song lists again when that changed them.
+        if self.sound.music_packs(s.mods || self.mods_asked, &s.mods_off) {
+            self.menu.music_choices = self.sound.choices();
+        }
         for tune in self.menu.take_tunes() {
             match tune {
                 menu::Tune::Play(id) => self.sound.play_now(&id),
@@ -2281,12 +2288,15 @@ fn headless_gpu() -> Result<Renderer, String> {
 }
 
 /// The sound (P42): the music sources — the disc's songs, then the user's own folder beside the
-/// settings — and the player it all goes out through, set as `settings` says. Silent with
+/// settings, then the music packs in the mods folder (MD7) — and the player it all goes out through,
+/// set as `settings` says. Silent with
 /// `--no-sound` or `--headless`, and where the desktop has no player.
 /// `front_end` when the menus come first: no song until a ride.
 fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &menu::Settings, front_end: bool) -> audio::Speakers {
     let image = Disc::configured_path().ok();
-    let sources = audio::sources(image.map(|path| (disc, path)), dir);
+    let mut sources = audio::sources(image.map(|path| (disc, path)), dir);
+    // The packs are read whatever the Mods row says, and only play while it is on.
+    sources.push(std::sync::Arc::new(read_music_packs(mods_folder(args, dir, true).as_deref())));
     // Which song a shuffle starts on is the host's business and nothing of the game's: the clock.
     let seed = clock::SystemTime::now().duration_since(clock::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     let music = audio::Music::new(sources, seed);
@@ -2301,7 +2311,20 @@ fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &m
         speakers.open_on_front_end();
     }
     speakers.apply(&settings.music, levels(settings));
+    speakers.music_packs(settings.mods || args.mods_asked, &settings.mods_off);
     speakers
+}
+
+/// The music packs in `mods` (MD7), saying how many songs and what was left out.
+fn read_music_packs(mods: Option<&std::path::Path>) -> music_packs::PackMusic {
+    let (packs, log) = music_packs::PackMusic::read(mods);
+    for line in log {
+        println!("{line}");
+    }
+    if packs.len() > 0 {
+        println!("music: {} songs from music packs", packs.len());
+    }
+    packs
 }
 
 /// The settings' sliders as the sound takes them (P56).
@@ -2375,6 +2398,7 @@ async fn front_end(args: Args) -> Result<(), String> {
         preset_flag: args.preset_flag,
         network,
         sound,
+        mods_asked: args.mods_asked,
     };
     front.menu.music_choices = front.sound.choices();
     front.menu.camera_names = camera_names;
@@ -2806,6 +2830,11 @@ async fn front_end(args: Args) -> Result<(), String> {
             shell.front.menu.set_mod_categories(mod_categories(&args, &shell.front.dir, mods_on, &listed));
             shell.front.menu.set_mod_tracks(listed);
             shell.front.menu.set_music_packs(music_packs(&args, &shell.front.dir, mods_on));
+            // And their songs (MD7): a pack the store installed plays at once.
+            if rescan {
+                shell.front.sound.set_source(std::sync::Arc::new(read_music_packs(mods_folder(&args, &shell.front.dir, true).as_deref())));
+                shell.front.menu.music_choices = shell.front.sound.choices();
+            }
             (shown_look, menu_images) = (None, false);
         }
         // A still the job took is the card's picture from the next frame on.
@@ -10970,6 +10999,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Sound plays through pw-cat, pacat or aplay, whichever is found: every\n\
                      rider's engine, wrecks and landings, the track's own sounds, and music —\n\
                      the disc's songs, then any .wav in the music folder beside the settings,\n\
+                     then the music packs in mods/music/<id>/ (Settings, Audio: Music From),\n\
                      picked in Settings. --no-sound turns it off; a headless ride has none.\n\
                      \n\
                      Track mods: a --track not on the disc is looked for in mods/tracks/<id>/\n\

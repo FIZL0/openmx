@@ -632,7 +632,8 @@ impl Mixer {
     /// ripped music's volume and the rest the music's.
     pub fn music_gain(&self) -> f32 {
         let base = match self.music.now() {
-            Some(id) if id.starts_with(FOLDER) => self.folder_volume,
+            // A music pack's songs are other games' (MD7), the User Soundtracks' as well.
+            Some(id) if id.starts_with(FOLDER) || id.starts_with(MOD) => self.folder_volume,
             _ => self.music_volume,
         };
         match self.music_edge {
@@ -808,6 +809,22 @@ pub trait MusicSource: Send + Sync {
     fn tracks(&self) -> Vec<Track>;
     /// Start a song by its id. May read a disc or a file, so the player calls it off the mixer.
     fn open(&self, id: &str) -> Result<Box<dyn Stream>, String>;
+    /// The game a song is from (MD7), which the song lists show beside its title once more than one
+    /// game's songs are there. None for the user's own files.
+    fn game(&self, _id: &str) -> Option<String> {
+        None
+    }
+}
+
+/// The game the disc's songs are from (MD7), as a music pack's `source.game` names its own.
+pub const DISC_GAME: &str = "MX Unleashed";
+
+/// The prefix of a music pack's songs' ids (MD7): `mod:<pack id>/<file stem>`, openmx-mods' standard §4.
+pub const MOD: &str = "mod:";
+
+/// The music pack a song's id is from (MD7), or none for the disc's and the folder's songs.
+pub fn pack_of_song(id: &str) -> Option<&str> {
+    id.strip_prefix(MOD)?.split('/').next()
 }
 
 /// A whole song in memory, decoded block by block as it plays.
@@ -950,6 +967,10 @@ impl MusicSource for DiscMusic {
         let bytes = disc.member_part(BANK, e.at, e.size as usize)?;
         Ok(Box::new(Adpcm::vig(bytes)))
     }
+
+    fn game(&self, _id: &str) -> Option<String> {
+        Some(DISC_GAME.to_string())
+    }
 }
 
 /// **The user's own songs**: every 16-bit PCM `.wav` in one folder, by file name.
@@ -1086,6 +1107,9 @@ pub struct Music {
     going_back: bool,
     /// The pause's player has the music held (P174): the song stays where it is, silent.
     held: bool,
+    /// The music packs whose songs are left out (MD7): the Mods page's packs switched off, or every
+    /// pack with the mods folder off. `None` is every pack. A song of one already playing plays on.
+    packs_off: Option<Vec<String>>,
     playing: Option<(String, Box<dyn Stream>)>,
     opening: Option<(String, Receiver<Result<Box<dyn Stream>, String>>)>,
     /// Open songs on the mixer's own thread (tests) rather than a helper's.
@@ -1107,6 +1131,7 @@ impl Music {
             played: Vec::new(),
             going_back: false,
             held: false,
+            packs_off: Some(Vec::new()),
             playing: None,
             opening: None,
             wait: false,
@@ -1116,9 +1141,63 @@ impl Music {
         }
     }
 
-    /// Every song every source has, sources in order.
+    /// Every song every source has, sources in order, but the music packs' switched off (MD7).
     pub fn tracks(&self) -> Vec<Track> {
-        self.sources.iter().flat_map(|s| s.tracks()).collect()
+        self.sources.iter().flat_map(|s| s.tracks()).filter(|t| self.pack_on(&t.id)).collect()
+    }
+
+    /// Whether a song's pack plays (MD7): always for a song of no pack.
+    fn pack_on(&self, id: &str) -> bool {
+        match (pack_of_song(id), &self.packs_off) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(p), Some(off)) => !off.iter().any(|o| o == p),
+        }
+    }
+
+    /// Which music packs play (MD7): with `folder` off none, else all but `off`'s (pack ids; other
+    /// words in it are passed over). Whether that changed the songs listed.
+    pub fn set_packs(&mut self, folder: bool, off: &[String]) -> bool {
+        let want = folder.then(|| off.to_vec());
+        if want == self.packs_off {
+            return false;
+        }
+        let before = self.tracks();
+        self.packs_off = want;
+        before != self.tracks()
+    }
+
+    /// Put `source` in place of the one of its name, or after the rest (MD7: the mods folder read
+    /// again after the store installed a pack). The song playing plays on.
+    pub fn set_source(&mut self, source: Arc<dyn MusicSource>) {
+        match self.sources.iter_mut().find(|s| s.name() == source.name()) {
+            Some(s) => *s = source,
+            None => self.sources.push(source),
+        }
+    }
+
+    /// The game a song is from (MD7), as its source says.
+    pub fn game(&self, id: &str) -> Option<String> {
+        self.source(id)?.game(id)
+    }
+
+    /// The songs as the lists show them, `(id, label)` (MD7): with more than one game's songs among
+    /// them, each label says its game; with the disc's alone, the labels are the titles as before.
+    pub fn labels(&self) -> Vec<(String, String)> {
+        let tracks = self.tracks();
+        let games: Vec<Option<String>> = tracks.iter().map(|t| self.game(&t.id)).collect();
+        let mut named: Vec<&String> = games.iter().flatten().collect();
+        named.sort();
+        named.dedup();
+        let many = named.len() > 1;
+        tracks
+            .iter()
+            .zip(games.iter())
+            .map(|(t, g)| match (many, g) {
+                (true, Some(g)) => (t.id.clone(), format!("{} ({g})", t.label())),
+                _ => (t.id.clone(), t.label()),
+            })
+            .collect()
     }
 
     pub fn sources(&self) -> Vec<String> {
@@ -3863,11 +3942,24 @@ impl Speakers {
         self.mixer.lock().ok()?.music.now().map(str::to_string)
     }
 
-    /// Every track the sources have, as the settings' choices: `(id, label)`.
+    /// Every track the sources have, as the settings' choices: `(id, label)`, each with its game
+    /// once there is more than one (MD7).
     pub fn choices(&self) -> Vec<(String, String)> {
         match self.mixer.lock() {
-            Ok(m) => m.music.tracks().iter().map(|t| (t.id.clone(), t.label())).collect(),
+            Ok(m) => m.music.labels(),
             Err(_) => Vec::new(),
+        }
+    }
+
+    /// Which music packs play (MD7, [`Music::set_packs`]); whether the songs listed changed.
+    pub fn music_packs(&self, folder: bool, off: &[String]) -> bool {
+        self.mixer.lock().is_ok_and(|mut m| m.music.set_packs(folder, off))
+    }
+
+    /// A music source read again (MD7, [`Music::set_source`]).
+    pub fn set_source(&self, source: Arc<dyn MusicSource>) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.music.set_source(source);
         }
     }
 }
