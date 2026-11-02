@@ -45,6 +45,7 @@ pub const BUSY: &str = "The mod store is busy, try again in a minute.";
 
 /// P241: what the browser says of a world, which it lists and does not download: its mods folder is
 /// not read by its Free Ride yet, and a world is hundreds of MB.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const WEB_WORLDS: &str = "Worlds ride in the desktop and iPhone games; the browser can't ride one yet, so it doesn't download it";
 
 /// B339: installs at once — fewer in the browser, which a phone runs.

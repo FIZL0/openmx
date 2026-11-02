@@ -6,7 +6,7 @@
 //! settings.txt, made owner-only (0600) before the token goes in, or the page's localStorage in the
 //! browser (`web/index.html`, never in an Export).
 //!
-//! Upload my mod: the rules first (`menu::STORE_RULES`), then the mod's folder zipped ([`pack`]) and put through
+//! Upload my mod: the rules first (`menu::STORE_RULES`), then the mod's folder zipped ([`pack_telling`]) and put through
 //! the same checks Install puts a download through (the zip's directory, `mod.json` against its meta,
 //! every entry inflated and CRC-checked, the shell's parsers for its kind), `meta.json` and
 //! `preview.webp` made, and `mods/<id>/` committed as a pull request on [`REPO`] under the player's
@@ -265,14 +265,8 @@ pub fn files_of(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
 }
 
 /// Writes `files` as a zip to `to` (deflated, but for pictures and sound already packed), streaming:
-/// one file in memory at a time. Its size and sha256.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn pack(files: &[(String, PathBuf)], to: &Path) -> Result<(u64, String), String> {
-    pack_telling(files, to, &|_| {})
-}
-
-/// [`pack`], telling how far it is (P241: a world is hundreds of MB): `tell` gets the MB read and
-/// the MB there are, each [`STEP_MB`].
+/// one file in memory at a time. Its size and sha256. P241: telling how far it is (a world is
+/// hundreds of MB): `tell` gets the MB read and the MB there are, each [`STEP_MB`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn pack_telling(files: &[(String, PathBuf)], to: &Path, tell: &dyn Fn((u64, u64))) -> Result<(u64, String), String> {
     use std::io::Write;

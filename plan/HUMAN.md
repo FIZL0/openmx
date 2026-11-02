@@ -337,6 +337,26 @@ The store's dataset card is up (https://huggingface.co/datasets/FIZL0/openmx-mod
 
 If an upload says "not uploaded: …", the line names the file or check that failed (the same checks Install runs).
 
+## A world on the store (P241)
+
+World uploads and downloads work end to end against a fake Hub. The real world_untamed went up as a 316 MB
+zip, came back into a fresh mods folder, and rode headless (research/journal/2026-11-02-p241-world-uploads).
+No world is on the real store yet: putting 316 MB of disc files on a public dataset can't be undone (the LFS
+objects outlive a closed PR), and openmx-mods' standard still says own-disc is "never shared". So that step
+is yours. If you want it (about 10 minutes):
+
+1. Upload: in the game, Mods → Upload to the Store → World · MX vs. ATV Untamed: every open map; or, with the
+   token in `~/.config/openmx/hf-token.txt`,
+   `cargo run --release -p openmx -- --mod-store-admin upload ~/repos/openmx/mods world_untamed`. It
+   packs for about half a minute, then sends 316 MB. The line ends "is up (317 MB) as your pull request #N".
+2. Back: run `cargo run --release -p openmx -- --mods ~/scratch-fresh-mods`. Mods → Browse the Store →
+   Start (refresh) → Tracks: the card says "World · 316 MB". Install it, then Free Ride → World · MX vs. ATV
+   Untamed.
+3. Write the PR link into the journal file above, and rename it to -FINAL.
+
+If the upload stops partway, Upload again: the zip is the same, so what the Hub has already is skipped. If an
+install stops, Install again: it carries on from where it stopped.
+
 ## A bike but no rider on the iPhone (P212a, P223)
 
 The 2026-10-28 launch that drew a bike with nobody on it lost its log. A build with P212a now says
