@@ -282,6 +282,12 @@ impl<'a> Pen<'a> {
         format!("{}…", t.trim_end())
     }
 
+    /// `s` as a marquee at `step` (P252): all of it where it fits `max` ems, else the run of it
+    /// [`marquee`] shows then.
+    fn scroll(&self, w: Weight, s: &str, size: f32, max: f32, step: u32) -> String {
+        marquee(s, |t| self.wide(w, t, size) <= max, step)
+    }
+
     /// `s` broken into lines at most `max` ems wide.
     fn wrap(&self, w: Weight, s: &str, size: f32, max: f32) -> Vec<String> {
         let mut lines = Vec::new();
@@ -951,6 +957,52 @@ fn modifiers_word(menu: &Menu) -> String {
     if n == 0 { "Original".into() } else { format!("{n} changed") }
 }
 
+/// A track card's height on the pick (P70).
+const CARD_H: f32 = 4.4;
+/// The track pick's column of cards, its left and width; and the lit track's side, under its
+/// still, its left and width.
+const PICK_COLUMN: (f32, f32) = (3.8, 20.4);
+const PICK_SIDE: (f32, f32) = (28.5, 47.0);
+/// The type of a card's name and of the line under it, and of the lit track's title and the
+/// text under the title (P252).
+const CARD_NAME: f32 = 1.35;
+const CARD_UNDER: f32 = 0.95;
+const PICK_TITLE: f32 = 2.6;
+const PICK_TEXT: f32 = 1.5;
+
+/// The ems a card `w` wide leaves its name and the line under it, right of its picture.
+fn card_room(w: f32) -> f32 {
+    w - 0.35 - (CARD_H - 0.7) * 16.0 / 9.0 - 1.6
+}
+
+/// The pick's lit track: the cursor, or the lit filters' first track where it is not on one of
+/// theirs.
+fn lit_track(menu: &Menu, list: &[usize]) -> usize {
+    let at = menu.cursor(Screen::Tracks).min(menu.track_count().saturating_sub(1));
+    if list.contains(&at) { at } else { list[0] }
+}
+
+/// The ems the lit track's title has beside its `count`; a long one stops short of it.
+fn title_room(count: &str) -> f32 {
+    PICK_SIDE.1 - ink::ink().measure(Weight::Bold, count, 1.2) - 2.0
+}
+
+/// Whether anything the pick says of its lit track is too long for its place and scrolls
+/// (P252): the card's name or the line under it, the title, or the text under the title.
+pub(super) fn track_name_scrolls(menu: &Menu) -> bool {
+    let lists = menu.lists();
+    let at = lit_track(menu, &lists.list);
+    let (_, name) = menu.track_at(at);
+    let (title, text) = title_and_text(name);
+    let wide = |w: Weight, s: &str, size: f32| ink::ink().measure(w, s, size);
+    let count = format!("{} of {}", lists.list.iter().position(|&i| i == at).unwrap_or(0) + 1, lists.list.len());
+    let card = card_room(PICK_COLUMN.1);
+    wide(Weight::Heavy, title, CARD_NAME) > card
+        || wide(Weight::Bold, text, CARD_UNDER) > card
+        || wide(Weight::Heavy, title, PICK_TITLE) > title_room(&count)
+        || wide(Weight::Bold, text, PICK_TEXT) > PICK_SIDE.1 - 1.0
+}
+
 impl Pen<'_> {
     pub(super) fn screen(&mut self, menu: &Menu) {
         // A ride loading (P127) is the one thing on the screen until it starts or is cancelled.
@@ -1350,7 +1402,6 @@ impl Pen<'_> {
     /// worlds, each other game), L1 and R1 between the categories in it (MD66: Freestyle,
     /// Supercross, …), the lit track's still large, and the ride's setup.
     fn tracks(&mut self, menu: &Menu) {
-        let at = menu.cursor(Screen::Tracks).min(menu.track_count().saturating_sub(1));
         self.strip(3.0, 22.0);
         self.logo(true);
         // Kept from frame to frame (P254), not made again.
@@ -1359,7 +1410,7 @@ impl Pen<'_> {
         // The lit filters (MD11, MD66), the cursor on their first track where it is not on one of
         // their own.
         let group = groups[lists.filter_group].0.clone();
-        let at = if list.contains(&at) { at } else { list[0] };
+        let at = lit_track(menu, list);
         let mut top = if groups.len() > 1 {
             self.category(&group, 3.8, 7.6, 20.4);
             11.4
@@ -1377,16 +1428,25 @@ impl Pen<'_> {
             top = pill_top + 3.8;
         }
         let tag_of = |id: &str| menu.track_game(id);
-        self.cards(menu, list, at, 3.8, 20.4, top, &tag_of);
+        self.cards(menu, list, at, PICK_COLUMN.0, PICK_COLUMN.1, top, &tag_of);
         let (id, name) = menu.track_at(at);
-        let (x, w) = (28.5, 47.0);
+        let (x, w) = PICK_SIDE;
         let tag = tag_of(id);
         let b = [x, 6.0, 36.0, 20.25];
         self.framed_still(menu, at, b, &tag);
         let count = format!("{} of {}", list.iter().position(|&i| i == at).unwrap_or(0) + 1, list.len());
-        // A long name stops short of the count beside it.
-        let room = w - self.wide(Weight::Bold, &count, 1.2) - 2.0;
-        let y = self.heading("", name, "", x, b[1] + b[3] + 1.0, room, 2.6);
+        // P252: the name as a title card and the text after its colon under it, each scrolling
+        // where it is too long. The title stops short of the count beside it.
+        let step = menu.tick / MARQUEE_FRAMES;
+        let (title, text) = title_and_text(name);
+        let room = title_room(&count);
+        let title = self.scroll(Weight::Heavy, title, PICK_TITLE, room, step);
+        let mut y = self.heading("", &title, "", x, b[1] + b[3] + 1.0, room, PICK_TITLE);
+        if !text.is_empty() {
+            let text = self.scroll(Weight::Bold, text, PICK_TEXT, w - 1.0, step);
+            self.text(Weight::Bold, &text, x, y + 0.35 + CAP * PICK_TEXT, PICK_TEXT, 0.0, PEACH, Align::Left);
+            y += 0.35 + PICK_TEXT * 1.05;
+        }
         self.text(Weight::Bold, &count, x + w - 1.0, b[1] + b[3] + 1.0 + CAP * 1.2, 1.2, 0.0, EYEBROW, Align::Right);
         // The setup strip: the wrecks and the modifiers. Every ride starts on the bike (P177); the
         // machine is switched from the pause or at a bay.
@@ -1407,10 +1467,11 @@ impl Pen<'_> {
     /// The pick's tracks in `list` as cards (P70), in P39's pills' look: a lit card in the red
     /// pill's gradient, rim and shadow, the others glass; each the track's picture (the lit one
     /// turning through a disc track's stills), its name, and the line under it — Last ridden, or
-    /// where the track is from. As many as fit from `top`, the lit one kept in view.
+    /// where the track is from, or the text after its name's colon (P252: the name's title on the
+    /// card, its text under it). As many as fit from `top`, the lit one kept in view, its name and
+    /// line scrolling where they are too long.
     #[allow(clippy::too_many_arguments)]
     fn cards(&mut self, menu: &Menu, list: &[usize], at: usize, x: f32, w: f32, top: f32, tag_of: &dyn Fn(&str) -> String) {
-        const CARD_H: f32 = 4.4;
         const CARD_GAP: f32 = 0.5;
         let bottom = STAGE.1 - BAND - 0.4;
         let shown = (((bottom - top + CARD_GAP) / (CARD_H + CARD_GAP)) as usize).max(1);
@@ -1445,18 +1506,27 @@ impl Pen<'_> {
             }
             self.ring(pb, 0.35, if lit { 0.1 } else { 0.06 }, if lit { CHALK } else { RIM });
             let tx = pb[0] + pb[2] + 0.8;
-            let room = x + w - 0.8 - tx;
-            let k_size = 1.35;
+            let room = card_room(w);
+            let k_size = CARD_NAME;
             let (kw, kc, ks) = if lit { (Weight::Heavy, CHALK, SLANT) } else { (Weight::Bold, BONE, 0.0) };
-            let label = self.fit(kw, name, k_size, room);
+            let step = menu.tick / MARQUEE_FRAMES;
+            let (title, text) = title_and_text(name);
+            let line = |pen: &Self, w: Weight, s: &str, size: f32| if lit { pen.scroll(w, s, size, room, step) } else { pen.fit(w, s, size, room) };
+            let label = line(self, kw, title, k_size);
             let base = y + CARD_H * 0.47;
             if !lit {
                 self.text(kw, &label, tx, base + 0.06 * k_size, k_size, ks, TEXT_SHADOW, Align::Left);
             }
             self.text(kw, &label, tx, base, k_size, ks, kc, Align::Left);
-            let under = if menu.settings.track == id { "Last ridden".to_string() } else { tag_of(id) };
-            let under = self.fit(Weight::Bold, &under, 0.95, room);
-            self.text(Weight::Bold, &under, tx, y + CARD_H * 0.78, 0.95, 0.0, if lit { PEACH } else { DUST }, Align::Left);
+            let under = if !text.is_empty() {
+                text.to_string()
+            } else if menu.settings.track == id {
+                "Last ridden".to_string()
+            } else {
+                tag_of(id)
+            };
+            let under = line(self, Weight::Bold, &under, CARD_UNDER);
+            self.text(Weight::Bold, &under, tx, y + CARD_H * 0.78, CARD_UNDER, 0.0, if lit { PEACH } else { DUST }, Align::Left);
             let image = picture.map(|(image, _)| image - self.base);
             self.parts.push(Part::Card { id: id.to_string(), card: self.b(b), picture: self.b(pb), image, lit });
             y += CARD_H + CARD_GAP;

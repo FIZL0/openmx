@@ -3713,12 +3713,14 @@ impl Menu {
 
     /// The menu as [`Art::draw`] shows it (V30): itself, but with `tick` only as far as the screen
     /// reads it — the splash's prompt breathes each frame, the track stills turn every
-    /// [`STILL_FRAMES`], the rest stand still — so two equal looks draw the same picture, and a menu
+    /// [`STILL_FRAMES`] (a scrolling name steps every [`MARQUEE_FRAMES`]), the rest stand still — so two equal looks draw the same picture, and a menu
     /// standing still is drawn once and kept.
     pub fn look(&self) -> Menu {
         let mut look = self.clone();
         look.tick = match self.screen() {
             Some(Screen::Splash) => self.tick,
+            // A lit name too long for its place scrolls (P252), and the look steps with it.
+            Some(Screen::Tracks) if screens::track_name_scrolls(self) => self.tick / MARQUEE_FRAMES,
             Some(Screen::Tracks) => self.tick / STILL_FRAMES,
             _ => 0,
         };
@@ -5740,6 +5742,42 @@ pub const WORLDS: &str = "world";
 const STILLS: usize = 5;
 /// Frames each still shows for on the track pick.
 const STILL_FRAMES: u32 = 150;
+/// Frames a scrolling name (P252) shows each of its places for: six characters a second. It
+/// divides [`STILL_FRAMES`], so a look that steps with the name steps with the stills too.
+pub const MARQUEE_FRAMES: u32 = 10;
+/// The steps a scrolling name stands still at its start and at its end, two seconds.
+pub const MARQUEE_HOLD: u32 = 12;
+
+/// A track's name as the pick shows it (P252): the title before its first colon, and the text
+/// after it, `""` where there is no colon — "MX Unleashed: every national" is the title card
+/// "MX Unleashed" over "every national".
+pub fn title_and_text(name: &str) -> (&str, &str) {
+    match name.split_once(':') {
+        Some((title, text)) if !title.trim().is_empty() && !text.trim().is_empty() => (title.trim(), text.trim()),
+        _ => (name.trim(), ""),
+    }
+}
+
+/// `s` as a marquee (P252) at its `step`: all of it where it `fits`, else the longest run of its
+/// characters that fits from a start that holds at the first character for [`MARQUEE_HOLD`]
+/// steps, moves one character a step till the rest fits, holds there, and starts over — so over
+/// a turn every character is shown.
+pub fn marquee(s: &str, fits: impl Fn(&str) -> bool, step: u32) -> String {
+    if fits(s) {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let from = |k: usize| chars[k..].iter().collect::<String>();
+    // The last start: the first whose rest fits.
+    let last = (0..chars.len()).find(|&k| fits(&from(k))).unwrap_or(chars.len() - 1);
+    let turn = last as u32 + 2 * MARQUEE_HOLD;
+    let at = (step % turn).saturating_sub(MARQUEE_HOLD).min(last as u32) as usize;
+    let mut end = chars.len();
+    while end > at + 1 && !fits(&chars[at..end].iter().collect::<String>()) {
+        end -= 1;
+    }
+    chars[at..end].iter().collect()
+}
 
 /// Everything the menus draw with: the disc's backdrop, logo and stills; the type and the shapes
 /// are our own ([`ink`]).
