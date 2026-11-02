@@ -1491,11 +1491,37 @@ impl<P: sim_world::World> Game for World<P> {
         fn riders<'a>(seats: &'a [Seat], on: &[bool]) -> Vec<(&'a rider::Rider, bool)> {
             seats.iter().zip(on).map(|(s, &o)| (&s.sim.rider, o)).collect()
         }
-        let mut lists = game_sim::rider_contact::contacts_among(&riders(&self.seats, &on), dt, &self.place);
-        for me in (0..self.seats.len()).rev() {
+        // A flown plane is in the riders' world too (N22a): its hull struck by their bikes, and the
+        // planes stepped before the bikes, as the original's dynamics world steps before its riders.
+        let flying: Vec<bool> = self.seats.iter().map(|s| !s.waiting && s.riding && s.garage.flight_flown().is_some()).collect();
+        let hulls: Vec<game_sim::rider_contact::Hull<'_>> = (self.seats.iter().enumerate())
+            .filter(|&(i, _)| flying[i])
+            .filter_map(|(i, s)| s.garage.flight_flown()?.hull(i))
+            .collect();
+        let met = game_sim::rider_contact::contacts_met(&riders(&self.seats, &on), &hulls, dt, &self.place);
+        let flown: Vec<usize> = hulls.iter().map(|h| h.seat).collect();
+        drop(hulls);
+        let (mut lists, mut mirrors) = match met {
+            Some((l, m)) => (Some(l), m),
+            None => (None, Vec::new()),
+        };
+        let n = self.seats.len();
+        let order: Vec<usize> = (0..n).rev().filter(|&i| flying[i]).chain((0..n).rev().filter(|&i| !flying[i])).collect();
+        for me in order {
             let mut bump = lists.as_mut().map(|l| std::mem::take(&mut l[me])).filter(|l| !l.is_empty()).map(|l| {
                 let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
-                game_sim::rider_contact::bump_riders(&phys, me, l, &self.place)
+                let mut b = game_sim::rider_contact::bump_riders(&phys, me, l, &self.place);
+                let from = self.seats[me].sim.rider.ride.transform().0[3];
+                b.planes = flown
+                    .iter()
+                    .filter_map(|&j| Some(self.seats[j].garage.flight_flown()?.flown(j, from, &self.place)))
+                    .collect();
+                b
+            });
+            let mut met = flown.iter().position(|&j| j == me).map(|k| std::mem::take(&mut mirrors[k])).filter(|m| !m.is_empty()).and_then(|m| {
+                let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
+                let at = self.seats[me].garage.flight_flown()?.body.position;
+                Some(game_sim::rider_contact::met_riders(&phys, m, at, &self.place))
             });
             let near = riders(&self.seats, &on);
             let rivals = game_sim::rider_contact::rivals_among(&near, me, &self.place);
@@ -1505,11 +1531,14 @@ impl<P: sim_world::World> Game for World<P> {
                 .map(|p| game_sim::rider_contact::plane_bikes(&near, me, p.at, &self.place))
                 .unwrap_or_default();
             drop(near);
-            let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes };
+            let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut() };
             self.seats[me].pass(dt, &mut self.place, me, &spots, among);
             if let Some(b) = &bump {
                 let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
                 game_sim::rider_contact::bumped_riders(&mut all, b);
+                for f in &b.planes {
+                    self.seats[f.seat].garage.plane_pushed(f);
+                }
             }
         }
         true
@@ -3919,6 +3948,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             .map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight_search::BIKE_COLLISION))
             .ok()
     });
+    // And the plane's own hull (N22a), which the riders' bikes strike while a player flies it.
+    let plane_hull = machine_res.as_ref().and_then(|res| {
+        let e = res.find_suffix(game_sim::flight::HULL)?;
+        let bytes = res.read(&e.name).ok()?;
+        game_sim::track::Mesh::parse(&bytes).map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight::HULL)).ok()
+    });
     // One of each machine per player (P87): the file's two spots for the first two, beside them for
     // the rest, every second copy in the alternate livery. Only the plane is ported, so the lot's
     // other machines are counted and not stood up.
@@ -3954,6 +3989,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // What it reads its own (P127): it outlives the load's thread.
     let flight_for = {
         let (plane_phy, plane_rays, bike_box, t) = (plane_phy.clone(), plane_rays.clone(), bike_box.clone(), place.terrain.clone());
+        let plane_hull = plane_hull.clone();
         move |seat: usize| {
             plane_phy.as_ref().map(|bytes| {
                 let mut plane = phy::Plane::read_bytes(bytes);
@@ -3964,6 +4000,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 if let Some(mesh) = &bike_box {
                     flight = flight.with_bike(mesh.clone());
+                }
+                if let Some(mesh) = &plane_hull {
+                    flight = flight.with_hull(mesh.clone());
                 }
                 flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
                 if let Some(area) = world_area {

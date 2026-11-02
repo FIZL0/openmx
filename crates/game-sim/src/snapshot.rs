@@ -247,13 +247,14 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         event.shown = Wire::take(&mut r)?;
     }
     // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
-    let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone()));
-    if let Some((rays, bike)) = &probe {
+    let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone(), here.hull.clone()));
+    if let Some((rays, bike, hull)) = &probe {
         let sets = std::iter::once(&mut markers.slots).chain(markers.away.iter_mut().map(|s| &mut s.slots));
         for slot in sets.flatten().flatten() {
             if let crate::markers::Mark::Plane(f) = &mut **slot {
                 f.rays = rays.clone();
                 f.bike = bike.clone();
+                f.hull = hull.clone();
             }
         }
     }
@@ -263,6 +264,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     if let (Some(p), Some(here)) = (plane.as_mut(), sim.plane.as_ref()) {
         p.rays = here.rays.clone();
         p.bike = here.bike.clone();
+        p.hull = here.hull.clone();
     }
     let here = &sim.rider;
     rider.set = here.set.clone();
@@ -801,7 +803,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// rider's set; [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _, nearby, bike: _ } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _ } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -863,6 +865,7 @@ impl Wire for crate::flight::Flight {
             rays: None,
             nearby: Wire::take(r)?,
             bike: None,
+            hull: None,
         })
     }
 }

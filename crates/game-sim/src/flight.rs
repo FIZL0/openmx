@@ -172,6 +172,26 @@ pub struct Flight {
     /// The ride's bikes' collision mesh (S95, `bike\col\bikef.col`): with it the other riders' bikes
     /// are in the plane's world ([`Flight::frame_among`]). Geometry off the disc, like the rays.
     pub bike: Option<Arc<track::Mesh>>,
+    /// The plane's own collision mesh (N22a, [`HULL`]): with it a flown plane is in the riders'
+    /// world, its hull struck by their bikes' body rays ([`crate::rider_contact::gather_met`]).
+    /// Geometry off the disc, like the rays.
+    pub hull: Option<Arc<track::Mesh>>,
+}
+
+/// The plane's collision mesh in the machines' archive (N22a): its collidable's, kind 0, which the
+/// riders' bikes strike.
+pub const HULL: &str = "Biplane\\col\\biplanef.col";
+
+/// **The riders' bikes as a flown plane meets them** (N22a): the mirrors the bikes' body rays put on
+/// the plane's list when they struck its hull ([`crate::rider_contact::gather_met`]), each naming
+/// its bike by player, and every player's collision object and chassis — the other sides of the
+/// plane's resolve. A mirror is kind 1: it takes no impulse, and its spring is anchored on the
+/// bike, which it does not move.
+#[derive(Clone, Debug, Default)]
+pub struct Met {
+    pub mirrors: Vec<contact::Contact>,
+    pub colliders: Vec<Collider>,
+    pub vehicles: Vec<contact::Vehicle>,
 }
 
 impl Flight {
@@ -422,6 +442,48 @@ impl Flight {
         self
     }
 
+    /// The plane with its own collision mesh ([`HULL`]), so the riders' bikes meet it (N22a).
+    pub fn with_hull(mut self, mesh: track::Mesh) -> Flight {
+        self.hull = Some(Arc::new(mesh));
+        self
+    }
+
+    /// Its hull as the riders' bikes meet it (N22a): where its collision node stands it, the
+    /// model's origin as its search last placed it, and the room its record has. `None` for a plane
+    /// with no hull or no ray probe, whose collision object is in no list.
+    pub fn hull(&self, seat: usize) -> Option<crate::rider_contact::Hull<'_>> {
+        let mesh = self.hull.as_deref().filter(|_| self.rays.is_some())?;
+        let node = node_of(&self.body);
+        let at = crate::math::Mat4([node.rows[0], node.rows[1], node.rows[2], node.origin]);
+        Some(crate::rider_contact::Hull { seat, mesh, at, capacity: self.record.capacity })
+    }
+
+    /// Its body as a bike's resolve pushes it (N22a, [`crate::rider_contact::Bump::planes`]): the copy
+    /// nearest `from` (the bike) on a world that wraps.
+    pub fn flown(&self, seat: usize, from: Vf, world: &dyn world::World) -> crate::rider_contact::Flown {
+        let mut body = self.body;
+        let near = crate::nearest_copy(world, from, body.position);
+        if near != body.position {
+            let by = near.sub(body.position);
+            body.position = near;
+            body.last_position = body.last_position.add(by);
+        }
+        crate::rider_contact::Flown { seat, collider: self.collider, body, mass: self.mass }
+    }
+
+    /// The body a bike's resolve pushed, written back (N22a): its speeds, spins and what its resolve
+    /// wrote, where the plane really is.
+    pub fn pushed(&mut self, p: &crate::rider_contact::Flown) {
+        let (position, last_position) = (self.body.position, self.body.last_position);
+        let by = p.body.position.sub(position);
+        self.body = p.body;
+        (self.body.position, self.body.last_position) = (position, last_position);
+        self.collider = p.collider;
+        if p.body.position != position {
+            self.collider.cofg_world = self.collider.cofg_world.sub(by);
+        }
+    }
+
     /// The plane stood with its model's origin at `origin` (the port's own spots: a switch's landing,
     /// a start line) with its nose along `facing` and its wings level, at rest; then measured, so that
     /// the first frame's wheels are placed by where it now is. Also where a recovered wreck is put
@@ -569,10 +631,33 @@ impl Flight {
         tables: &ride::Tables,
         bikes: &[flight_search::Bike],
     ) -> (Vec<Option<u32>>, [i8; 2]) {
+        self.frame_met(dt, pad, ground, tables, bikes, None)
+    }
+
+    /// [`Flight::frame_seamed`] with the riders' bikes meeting the plane (N22a, [`Met`]): after its
+    /// own search the mirrors the bikes' rays put on its list follow its own entries, as the
+    /// original's node lists the plane's object ahead of the bikes', with the record's flags set as
+    /// a struck object's are; its force listener resolves them against the bikes. `None` is
+    /// [`Flight::frame_seamed`].
+    pub fn frame_met(
+        &mut self,
+        dt: F,
+        pad: Pad,
+        ground: &mut dyn world::World,
+        tables: &ride::Tables,
+        bikes: &[flight_search::Bike],
+        met: Option<&mut Met>,
+    ) -> (Vec<Option<u32>>, [i8; 2]) {
         let mesh = self.bike.clone();
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
         let (struck, movers) = self.search(dt, ground, bikes);
-        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, seam: [0, 0] };
+        if let Some(m) = met.as_deref().filter(|m| !m.mirrors.is_empty() && self.rays.is_some()) {
+            let r = &mut self.record;
+            (r.touching, r.on_object, r.touching_other) = (true, true, true);
+            let room = r.capacity.saturating_sub(r.contacts.len());
+            r.contacts.extend(m.mirrors.iter().copied().take(room));
+        }
+        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0] };
         WORLD.step(dt, &mut listeners);
         let seam = listeners.seam;
         if self.attitude.flown {
@@ -645,10 +730,18 @@ impl Flight {
     }
 
     /// The force listener, one substep of `h`.
-    fn forces(&mut self, h: F, ground: &mut Ground<'_>, curve: &CurveTable, acos: &AcosTable, movers: &[contact::Mover]) {
+    fn forces(
+        &mut self,
+        h: F,
+        ground: &mut Ground<'_>,
+        curve: &CurveTable,
+        acos: &AcosTable,
+        movers: &[contact::Mover],
+        others: &mut [contact::Other<'_>],
+    ) {
         let (collider, contacts, mass) = (&mut self.collider, &mut self.record.contacts, self.mass);
         collision_force(&mut self.body, self.gravity, |body| {
-            contact::resolve(collider, &mut Weighed { body, mass }, contacts, &mut [], movers, true);
+            contact::resolve(collider, &mut Weighed { body, mass }, contacts, others, movers, true);
         });
         if self.crash.reason == 0 {
             self.attitude = self.measure.attitude(self.attitude.flown, &self.body);
@@ -950,6 +1043,8 @@ struct Listeners<'a> {
     bikes: Option<Bikes<'a>>,
     /// The movers the search's contacts name (S145).
     movers: &'a [contact::Mover],
+    /// The riders' bikes the mirrors on its list name (N22a).
+    met: Option<&'a mut Met>,
     /// The widths the post moved the plane over a seam (MD44).
     seam: [i8; 2],
 }
@@ -965,7 +1060,16 @@ impl Dynamics for Listeners<'_> {
         self.plane.preforce(dt);
     }
     fn force(&mut self, _: i32, h: F) {
-        self.plane.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos, self.movers);
+        let mut others: Vec<contact::Other<'_>> = match self.met.as_deref_mut() {
+            Some(m) => m
+                .colliders
+                .iter_mut()
+                .zip(m.vehicles.iter_mut())
+                .map(|(collider, v)| contact::Other { collider, side: contact::Side::Vehicle(v) })
+                .collect(),
+            None => Vec::new(),
+        };
+        self.plane.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos, self.movers, &mut others);
     }
     fn enabled(&self, _: i32) -> bool {
         self.plane.body.enabled

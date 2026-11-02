@@ -7078,3 +7078,19 @@ car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; n
 # bike's resolve pushes both bodies (the ball weighed by its mass); the ball's force listener 0x0015af40
 # then resolves its kind-1 entry (no impulse; a spring on its own side only when slow). The struck
 # listener 0x0015ad40 wakes: enable 0x0015b790 (the object's listener) before the collection's settle.
+
+# --- N22a: a riding bike into a player's flown plane (crates/game-sim/src/rider_contact.rs gather_met/Flown,
+#   flight.rs frame_met/Met; tests/plane_contact_capture.rs; journal 2026-11-02-n22a-bikes-meet-flown-planes)
+# Splitscreen s93 images 4661, 5074, 5505: the level's collision node 0x0061e720 lists
+#   [plane0 record, plane1 record, P2 record, P1 record]. collision_node_update 0x0026f800 clears every
+#   record (vt+0x74), collides each (vt+0x7c) in list order, then resolves: plane0 and plane1 alternate
+#   0x00270dc0(record, 1) for 4 substeps inside their own dynamics step, then P2 (rec, 0), then P1 (rec, 0) —
+#   in all three images, P2 first even when P1 is the striker (5505).
+# The plane's record: capacity 36 (its ray segments), body at record+0xf4, node at +0xf8, collidable
+#   category 0x42058 (S87's line above), hull mesh Biplane\col\biplanef.col out of machine.res.
+# A strike: the bike's body rays hit the hull -> kind-0 entry on the bike's list naming the plane's record,
+#   kind-1 mirror on the plane's list naming the bike (normal negated). The bike's resolve pushes the
+#   plane's body weighed by its mass; the plane's resolve of its kind-1 entries gives no impulse and springs
+#   only its own side. The rider wrecks reason 1 (4661 P1, 5074/5505 P2), the wreck row of the capture.
+# 5074: the plane's own rays also strike P2 (kind-0 on the plane naming the bike) — the plane-pushes-bike
+#   side, left to N22b.
