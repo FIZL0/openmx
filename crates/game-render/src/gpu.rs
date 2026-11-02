@@ -45,6 +45,7 @@
 pub use wgpu;
 
 mod scale;
+mod timer;
 mod sprite;
 mod ground_mesh;
 pub use scale::{AutoScale, MIN_SCALE};
@@ -951,6 +952,8 @@ pub struct Renderer {
     upscale: scale::Upscale,
     /// The fraction of the frame's size the views are drawn at, [`MIN_SCALE`] to 1 (V30).
     pub render_scale: f32,
+    /// The GPU's time for each frame's views, where the adapter can say (V122).
+    timer: Option<timer::Timer>,
     /// How far past the target's frame the picture runs on, in the target's pixels (left, top,
     /// right, bottom; P240): a phone's window under its notch or Dynamic Island, where the HUD and
     /// the menus' text stay out. A view on the frame's edge is drawn out to it, wider and no more
@@ -2054,7 +2057,8 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("openmx"),
-                required_features: wgpu::Features::empty(),
+                // Timestamps where the adapter has them, for the render scale's judging (V122).
+                required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
                 required_limits: limits,
                 ..Default::default()
             })
@@ -2276,6 +2280,7 @@ impl Renderer {
         });
         let sprites = sprite::Sprites::new(&device, &queue, format, &clamp_sampler);
         let upscale = scale::Upscale::new(&device, format);
+        let timer = timer::Timer::new(&device, &queue);
         Ok(Renderer {
             device,
             queue,
@@ -2341,6 +2346,7 @@ impl Renderer {
             sprites,
             upscale,
             render_scale: 1.0,
+            timer,
             bleed: [0; 4],
             particles: None,
             glows: None,
@@ -3963,6 +3969,8 @@ impl Renderer {
         let bleed = self.bleed();
         let picture = picture_rect(target, bleed);
         let [px, py, pw, ph] = picture;
+        let drawn_at = if pw > 0 && ph > 0 && !over { scale } else { 1.0 };
+        let timed = self.timer.as_mut().and_then(|t| t.begin(&mut encoder, drawn_at));
         if scale < 1.0 && pw > 0 && ph > 0 && !over {
             // The views into the low texture, each view's edges scaled and rounded so they still meet;
             // then the low texture stretched over the picture (the frame and its bleed), and the
@@ -3997,8 +4005,29 @@ impl Renderer {
             self.draw_views(&mut pass, views, &passes, &ground_counts, rect, target.size, &mut drawn);
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         }
+        if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
+            t.end(&mut encoder, k);
+        }
         self.queue.submit([encoder.finish()]);
+        if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
+            t.submitted(k);
+        }
         drawn
+    }
+
+    /// Whether [`Renderer::gpu_times`] has anything to say on this adapter (V122).
+    pub fn timed(&self) -> bool {
+        self.timer.is_some()
+    }
+
+    /// The GPU's time for the views and overlay of each [`Renderer::render`] it has finished since the
+    /// last call, with the render scale each was drawn at: a frame or few behind, and empty where the
+    /// adapter has no timestamps.
+    pub fn gpu_times(&mut self) -> Vec<(std::time::Duration, f32)> {
+        match self.timer.as_mut() {
+            Some(t) => t.take(&self.device),
+            None => Vec::new(),
+        }
     }
 
     /// View `v`'s ground for this frame: what each piece's quadtree picks from this view's camera
@@ -6500,6 +6529,40 @@ mod tests {
 
     /// The views drawn at half size and stretched over the frame (V30's render scale) come out as the
     /// full-size frame does but for the softness of the stretch, with the HUD at full size over both.
+    /// V122: where the adapter has timestamps, each drawn frame's views come back timed, at the
+    /// scale they were drawn at.
+    #[test]
+    fn the_gpu_times_its_frames_where_it_can() {
+        let mut gpu = match Renderer::headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        if !gpu.timed() {
+            eprintln!("skipped: {} has no timestamps", gpu.adapter);
+            return;
+        }
+        let (scene, assets, camera) = known_scene();
+        let (w, h) = (640u32, 360u32);
+        gpu.set_scene(&scene);
+        gpu.set_sky(None);
+        let mut times = Vec::new();
+        for scale in [1.0, 0.5, 1.0] {
+            gpu.render_scale = scale;
+            let texture = gpu.offscreen(w, h);
+            let view = texture.create_view(&Default::default());
+            let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+            known_frame(&mut gpu, &target, &assets, &scene, &camera);
+            gpu.finish();
+            times.extend(gpu.gpu_times());
+        }
+        eprintln!("{}: {times:?}", gpu.adapter);
+        assert_eq!(times.iter().map(|t| t.1).collect::<Vec<_>>(), [1.0, 0.5, 1.0]);
+        assert!(times.iter().all(|t| t.0 > std::time::Duration::ZERO && t.0 < std::time::Duration::from_secs(1)));
+    }
+
     #[test]
     fn a_frame_at_half_scale_looks_like_the_full_frame() {
         let mut gpu = match Renderer::headless() {
