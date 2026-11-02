@@ -1129,6 +1129,9 @@ impl Kiowa {
     ///    pick draws one `rand()`), then the rotor's spin ([`spin_blades`]).
     ///
     /// Returns what the crash test asked for.
+    ///
+    /// Against the original's frames (C14's capture), the world step flies the pad the last input
+    /// step left: a replay passes `None` and sets [`Kiowa::pad`] after the step.
     #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
