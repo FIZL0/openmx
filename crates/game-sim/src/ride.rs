@@ -2510,9 +2510,17 @@ impl Ride {
                     astep.spin_ramp = t.spin.ramp;
                 }
                 // MX vs. ATV's own backflip (MD40) on its handling. Under a trick pack the rows above
-                // are MX vs. ATV's moves already and stay as MD16 laid them.
+                // are MX vs. ATV's moves already and stay as MD16 laid them. A mid-clip end asks the
+                // reason-15 test (S223) on the frame's g loads so far, as the original's `+0x1250`
+                // stands before its peak rates run; the port's world has no struck class (MD63c).
                 _ => match mxvatv.as_deref_mut() {
-                    Some(f) => crate::handling::ride_backflip(&p.air, air, &mut ac, &astep, c.trick, &out.mat3(Frame::Chassis), f),
+                    Some(f) => {
+                        let g = ride.g_peak;
+                        let loads = air::Loads { side: F(g.x()), vertical: F(g.y()), fore_aft: F(g.z()), ..air::Loads::default() };
+                        let airborne = air.airborne;
+                        let steep = || crate::handling::step::flip_wreck_steep(&p.air, false, airborne, &loads);
+                        crate::handling::ride_backflip(&p.air, air, &mut ac, &astep, c.trick, &out.mat3(Frame::Chassis), f, steep)
+                    }
                     None => air::backflip(&p.air, air, &mut ac, &astep),
                 },
             }

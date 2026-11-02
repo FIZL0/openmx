@@ -86,3 +86,37 @@ fn the_steer_ramp_and_the_unsquared_stick_reach_an_mxvatv_bike_only() {
     let (b, _) = hard_over(&tables, &orig);
     assert_eq!(a.0.to_bits(), b.0.to_bits(), "the original's handling read the steer ramp");
 }
+
+/// S223 — the backflip's rider side on a ride: the stunt id the clip's start takes (not over a trick
+/// held), cleared as the flip ends, and a mid-clip end's reason from the steep test.
+#[test]
+fn the_backflips_stunt_and_its_mid_clip_reason() {
+    use game_sim::air::{Air, Chassis, Step};
+    use game_sim::chassis::Mat3;
+    use game_sim::handling::{Flip, ride_backflip};
+    let tables = Tables::build();
+    let p = bike(&tables, Handling::MxVsAtv, Gyro::default()).air;
+    // Over on its back with the torque in: the clip's start.
+    let flipping = || {
+        let mut air = Air::default();
+        air.flip_active = true;
+        air.flip_armed = true;
+        air.flip_torque = Vf::new(-1000.0, 0.0, 0.0, 0.0);
+        air
+    };
+    let over = Mat3::new(Vf::new(1.0, -0.1, 0.0, 0.0), Vf::new(0.0, 0.5, 0.0, 0.0), Vf::ZERO);
+    for trick_held in [false, true] {
+        let (mut air, mut ch, mut f) = (flipping(), Chassis::default(), Flip::default());
+        let st = Step { stunt: trick_held, ..Step::default() };
+        ride_backflip(&p, &mut air, &mut ch, &st, [false; 3], &over, &mut f, || panic!("asked the steep test"));
+        assert_eq!(f.clip, 1, "the clip starts, trick held {trick_held}");
+        assert_eq!(f.stunt, !trick_held, "the stunt id is the backflip's only with no trick held");
+        // Down on the ground with the clip still running: the mid-clip wreck, and the id cleared.
+        for steep in [false, true] {
+            let (mut air, mut ch, mut f) = (air, ch, f);
+            air.on_ground = true;
+            ride_backflip(&p, &mut air, &mut ch, &Step::default(), [false; 3], &over, &mut f, || steep);
+            assert!(f.wrecked && f.struck == steep && f.clip == 0 && !f.stunt, "{f:?}");
+        }
+    }
+}

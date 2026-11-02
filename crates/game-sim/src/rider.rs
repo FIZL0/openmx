@@ -1030,13 +1030,15 @@ impl Rider {
         let (spun, spun_aloft) = ride.tricks.as_deref_mut().map_or((None, false), |t| {
             (std::mem::take(&mut t.spin.wrecked).then_some(air::Wreck::Tail), std::mem::take(&mut t.spin.cut))
         });
-        // MX vs. ATV's backflip landed or cut short mid-clip (MD40), the same wreck off the back.
-        // Its stunt coming round is the rider's clip and not scored here: the latch is only cleared.
-        let (flipped, flipped_aloft) = ride.mxvatv.as_deref_mut().map_or((false, false), |f| {
+        // MX vs. ATV's backflip landed or cut short mid-clip (MD40): off the back, or reason 15 where
+        // its steep test said so (S223). Its stunt coming round stops the rider's clip and scores
+        // nothing (the original's end-stunt call only stops the clip): the latch is only cleared.
+        let (flipped, flipped_aloft) = ride.mxvatv.as_deref_mut().map_or((None, false), |f| {
             f.came_round = false;
-            (std::mem::take(&mut f.wrecked), std::mem::take(&mut f.cut))
+            let reason = if std::mem::take(&mut f.struck) { air::Wreck::Struck } else { air::Wreck::Tail };
+            (std::mem::take(&mut f.wrecked).then_some(reason), std::mem::take(&mut f.cut))
         });
-        let (spun, spun_aloft) = if flipped { (spun.or(Some(air::Wreck::Tail)), spun_aloft || flipped_aloft) } else { (spun, spun_aloft) };
+        let (spun, spun_aloft) = match flipped { Some(w) => (spun.or(Some(w)), spun_aloft || flipped_aloft), None => (spun, spun_aloft) };
         // MX vs. ATV's own wreck test and hits (MD63c), on its rides: the 360's torque as its `+0x11d0`
         // (the last substep's). Its reason 15 asks an object class the port's world has none of.
         let mxvatv = ride.mxvatv.is_some().then(|| crate::handling::step::WreckIn {

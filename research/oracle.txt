@@ -6523,6 +6523,11 @@ atv_bike_start_stunt        atv 0x004e6370 = vt +0x4b8 (a0 bike, a1 stunt id, a2
 atv_bike_end_stunt          atv 0x004e4db0 = vt +0x4ac (a0 bike, a1 stunt id)
 atv_bike_set_flip_clip      atv 0x004e7a30 = vt +0x53c (sw a1, +0x1754)
 atv_bike_flip_wreck_steep   atv 0x004e8370 = the backflip's mid-clip wreck's reason test (v0: 0xf, else 0xb)
+# S223 (journal 2026-11-02-s223-backflip-rider-side): atv_bike_start_stunt returns 1 on every path; a flip id
+# (+0x13b8..+0x13c8) is written to +0x1528 only from a current id >= 41 and not for the 360's pair (+0x13c4,
+# +0x13c8); a non-flip id always, and on the ground or with +0xc80 it returns at once. atv_bike_end_stunt only
+# stops the clip on the rider's animation objects (+0x680/+0x684). +0x1524 copies +0x1528 once a frame
+# (0x004dd9cc's function). atv_bike_flip_wreck_steep = the wreck test's reason 15 (handling::step::flip_wreck_steep).
 atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into body +0x1b0, then its +0xe8 listeners)
 # MD62 — atv_bike_airborne_control's fields, bike-relative (tests/mxvatv_air.rs runs it off state04 too):
 # +0x1170..+0x117c AirborneControlMoment, +0x1180 damping, +0x1184 control force, +0x1188/+0x118c

@@ -401,6 +401,15 @@ fn loads_within(p: &AirParams, l: &Loads) -> bool {
         && -p.side_wreck_speed_limit <= l.side
 }
 
+/// **`atv_bike_flip_wreck_steep`** (S223): reason 15 ([`Wreck::Struck`]) or not, the test the wreck
+/// test asks first and the backflip asks of a flip that ends mid-clip (yes `0xf`, no `0xb`). Yes when
+/// the collision record is touching an object of the struck class (`struck_class`, see
+/// [`WreckIn::struck_class`]; a missing record or object is no) and the bike is airborne (`+0xde0`)
+/// or its g loads (`+0x1250` side, `+0x1258` fore and aft) are past the back, front or side limits.
+pub fn flip_wreck_steep(p: &AirParams, struck_class: bool, airborne: bool, loads: &Loads) -> bool {
+    struck_class && (airborne || !loads_within(p, loads))
+}
+
 /// **MX vs. ATV's wreck test** (SLUS-21104's `atv_bike_wreck_test`, the clauses it runs
 /// for a driven bike not yet down; the hits after them are [`hit_wreck`]). It is MX Unleashed's
 /// state machine and wreck test in one function, and its clauses are [`crate::air::wreck_test_in`]'s
@@ -424,7 +433,7 @@ fn loads_within(p: &AirParams, l: &Loads) -> bool {
 /// the same clauses; true is the original.
 pub fn wreck_test(p: &AirParams, air: &mut Air, chassis: &Chassis, step: &AirStep, loads: &Loads, w: &WreckIn,
                   in_air: bool) -> Option<Wreck> {
-    if w.struck_class && (air.airborne || !loads_within(p, loads)) {
+    if flip_wreck_steep(p, w.struck_class, air.airborne, loads) {
         return Some(Wreck::Struck);
     }
     if p.back_wreck_speed_limit < loads.fore_aft {
