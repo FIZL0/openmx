@@ -22,6 +22,9 @@ use crate::vehicle::{Garage, Kind};
 
 /// The camera's target for whichever machine is up: the bike's ride, or the parked plane.
 pub fn ridden(garage: &Garage, ride: &Ride) -> Ridden {
+    if let Some(m) = garage.car_up().and_then(|c| c.driven.as_ref()) {
+        return driven(m);
+    }
     match (garage.up, &garage.plane) {
         // The plane: its flight's block (V29), or a parked plane's origin when there is no flight.
         (Kind::Biplane, Some(plane)) => match &plane.flight {
@@ -61,6 +64,25 @@ pub fn flown(f: &Flight) -> Ridden {
         },
         airborne: !m.grounded,
         speed: if m.airspeed < F::ZERO { F::ZERO } else { m.airspeed },
+    }
+}
+
+/// A car's target block (S149e), filled the way the plane's is: the body's centre of mass where the
+/// frame's last substep began, the measure's rows, the body's velocity, the world yaw rate, "no tire
+/// down" and the measure's speed floored at zero. Which words the original's car writes there was
+/// not read; the camera following it is the bike's, until the cars' own presets are.
+pub fn driven(m: &game_sim::car::Machine) -> Ridden {
+    let one = |v: Vf| Vf::new(v.x(), v.y(), v.z(), 1.0);
+    Ridden {
+        target: Target {
+            body_point: one(m.body.last_position),
+            forward: one(m.forward),
+            up: one(m.up),
+            vel: one(m.body.velocity),
+            lean: F(m.world_rates.y()),
+        },
+        airborne: !m.grounded,
+        speed: if m.ground_speed < F::ZERO { F::ZERO } else { m.ground_speed },
     }
 }
 

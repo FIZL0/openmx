@@ -6499,6 +6499,13 @@ atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into 
 #   sets bit 0 over a list (+0xb0 -> +0x300/+0x304) and 0x00215b30 clears it (data xrefs only, vtables
 #   0x004528f0/0x0045dd10). Which of them the wake's body-on reaches was not traced; the interpreter run
 #   is the proof.
+# S149e — a fresh car (test crates/game-sim/tests/car_spawn.rs; journal
+#   research/journal/2026-11-02-s149e-car-machines-app). Car ctor 0x00393cc0 builds the part through
+#   0x00159430 (inertia from the model bounds, full extents); per tire it looks the tire node up by name
+#   (0x001b37b0), takes its world position with the model placed at the spawn (0x001b2870) and brings it
+#   back through the inverse (0x001b3180); tire init 0x0039ac10, width setter 0x0039ae00 adds (width,0,0).
+#   Parked cars read: truck first_recording @0x00e1e210, baja s149a-free07 @0x00605270, buggy
+#   s149a-free11 @0x00611ba0; launch timer full, cofg = CofGAI, undriven tires at the undriven top speed.
 # S133 — the hierarchy toys' parts (crates/game-render/tests/toy_parts.rs, states s133-free10/-nat11
 #   from R7's scripted boot). The parts list is the motion object's +0x300 (count +0x304); a part's
 #   +0x230 is by then a node of the toy's skeleton (one of its joints' +0x34; a mesh .col's single part

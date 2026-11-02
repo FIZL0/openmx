@@ -630,6 +630,10 @@ fn marker_line(did: markers::Did) -> String {
 /// goes, and the machine taken gets its own camera, which starts where it is rather than lagging in
 /// from wherever it was last. The machine now up, or `None` (and no switch) where it cannot be had.
 fn switch_machine(seat: &mut Seat, rig: &mut Rig, to: Kind, place: &mut dyn sim_world::World) -> Option<Kind> {
+    // The car left, as it is left (S149e).
+    if let Some(said) = seat.garage.car_up().and_then(vehicle::CarRide::report) {
+        println!("{said}");
+    }
     match seat.garage.switch(to, &mut seat.sim, place) {
         Ok(up) => {
             took(rig, up);
@@ -3988,6 +3992,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     });
     // And whether each file bay is put on the ground there (S205).
     lot.ground_heights = machines.as_ref().map_or_else(Vec::new, |(_, b)| vehicle::ground_heights(b, Machine::Biplane));
+    // And the cars' files (S149e): each car's `.phy` and its two liveries' models, which every
+    // player's garage builds its cars from ([`vehicle::cars_of`]).
+    let car_files: Vec<(String, Vec<u8>)> = machine_res.as_ref().map_or_else(Vec::new, |res| {
+        let mut names = Vec::new();
+        for m in [Machine::Buggy, Machine::Monster, Machine::Baja] {
+            names.extend(m.car_physics().map(|k| k.phy().to_string()));
+            names.extend(m.models()[..vehicle::LIVERIES].iter().map(|n| format!("{}\\anim\\{n}.psg", m.dir())));
+        }
+        names.into_iter().filter_map(|n| Some((n.clone(), res.read(&res.find_suffix(&n)?.name).ok()?))).collect()
+    });
+    lot.cars = vehicle::car_kit(&mut |name: &str| car_files.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()));
     // What it reads its own (P127): it outlives the load's thread.
     let flight_for = {
         let (plane_phy, plane_rays, bike_box, t) = (plane_phy.clone(), plane_rays.clone(), bike_box.clone(), place.terrain.clone());
@@ -4058,6 +4073,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         println!("biplane: no parked copy here; it spawns on the player, and starts on the start line");
     }
     let mut garage = Garage::new(args.vehicle, plane)?;
+    garage.cars = lot.cars_for(0);
+    if !garage.cars.is_empty() {
+        let names: Vec<&str> = garage.cars.iter().map(|c| c.machine.section()).collect();
+        println!("cars: {} (switch from the pause; not drawn yet)", names.join(", ").to_ascii_lowercase());
+    }
     // The plane's own camera, which the swap hands the player with it: one camera-preset object per
     // machine kind, and the plane's reads `AppStart\BiplaneCPresets.ini` rather than the track's
     // bike presets (R8). The same derived camera and the same two constants the bike's has, because
@@ -5657,7 +5677,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         seats.push(Seat {
             reports: [Report::missing(); PADS],
             sim: Sim::with_rider(0, tables.clone(), phy, rider),
-            garage: Garage::new(up, plane)?,
+            garage: {
+                let mut garage = Garage::new(up, plane)?;
+                garage.cars = lot.cars_for(i + 1);
+                garage
+            },
             riding: front.as_ref().is_none_or(|f| !f.menu.paused(i + 1)),
             start_freezes: front.is_none(),
             waiting: false,
@@ -5758,7 +5782,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         front.menu.switchable = [false; menu::SEATS_MAX];
         for (i, seat) in world.seats.iter().enumerate().take(menu::SEATS_MAX) {
             front.menu.up[i] = menu::Machine::from_word(seat.garage.up.name()).unwrap_or_default();
-            front.menu.switchable[i] = seat.garage.machines().len() > 1;
+            front.menu.switchable[i] = seat.garage.plane.is_some();
+            for (k, kind) in [Kind::Buggy, Kind::Monster, Kind::Baja].into_iter().enumerate() {
+                front.menu.cars[i][k] = seat.garage.machines().contains(&kind);
+            }
         }
     }
     let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::at(RIDE_HZ)).collect();
@@ -6692,7 +6719,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         sim.markers = saved_markers::load(&markers_dir, &args.track, &profile, bike);
                         sim.markers.up(vehicle::markers_of(Kind::Bike));
                         let kept = saved_markers::Kept::new(&args.track, &profile, bike, &sim.markers);
-                        let garage = Garage::new(Kind::Bike, lot.plane(i, flight_for(i)))?;
+                        let mut garage = Garage::new(Kind::Bike, lot.plane(i, flight_for(i)))?;
+                        garage.cars = lot.cars_for(i);
                         let body = match &rider_member {
                             Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
                             None => None,
@@ -8985,6 +9013,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And the first player's plane, flown or not, for a tape that switched into it (P102).
         if let Some(flight) = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.as_ref()) {
             println!("plane hash {:#018x} ({})", game_sim::hash::of(flight), world.seats[0].garage.up.name());
+        }
+        // And the first player's car, if they end the ride in one (S149e).
+        if let Some(said) = world.seats[0].garage.car_up().and_then(vehicle::CarRide::report) {
+            println!("{said}");
         }
     }
 

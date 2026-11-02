@@ -70,6 +70,11 @@ pub enum Kind {
     Bike,
     /// The freeride's biplane: the original's machine kind 1.
     Biplane,
+    /// The cars (S149e): the dune buggy, the monster truck and the baja truck, kinds 3, 4 and 5
+    /// ([`CarRide`]).
+    Buggy,
+    Monster,
+    Baja,
 }
 
 impl Kind {
@@ -78,7 +83,10 @@ impl Kind {
         match word.to_ascii_lowercase().as_str() {
             "bike" => Ok(Kind::Bike),
             "biplane" | "plane" => Ok(Kind::Biplane),
-            _ => Err(format!("--vehicle: {word:?} is not a vehicle; it is bike or biplane")),
+            "buggy" => Ok(Kind::Buggy),
+            "monster" | "truck" | "monstertruck" => Ok(Kind::Monster),
+            "baja" => Ok(Kind::Baja),
+            _ => Err(format!("--vehicle: {word:?} is not a vehicle; it is bike, biplane, buggy, monster or baja")),
         }
     }
 
@@ -87,14 +95,27 @@ impl Kind {
         match self {
             Kind::Bike => "bike",
             Kind::Biplane => "biplane",
+            Kind::Buggy => "buggy",
+            Kind::Monster => "monster",
+            Kind::Baja => "baja",
         }
     }
 
-    /// The machine a swap goes to from this one: there are two.
+    /// The machine a swap goes to from this one: the bike and the plane each other's, a car the bike.
     pub fn other(self) -> Kind {
         match self {
             Kind::Bike => Kind::Biplane,
-            Kind::Biplane => Kind::Bike,
+            Kind::Biplane | Kind::Buggy | Kind::Monster | Kind::Baja => Kind::Bike,
+        }
+    }
+
+    /// The car it is, for a car.
+    pub fn car(self) -> Option<Machine> {
+        match self {
+            Kind::Buggy => Some(Machine::Buggy),
+            Kind::Monster => Some(Machine::Monster),
+            Kind::Baja => Some(Machine::Baja),
+            Kind::Bike | Kind::Biplane => None,
         }
     }
 }
@@ -216,6 +237,27 @@ impl Machine {
         match self {
             Machine::Biplane => Some(Kind::Biplane),
             _ => None,
+        }
+    }
+
+    /// The shell's machine for a car (S149e). Apart from [`Machine::kind`], which is what the bays
+    /// draw and offer, because a car's bay has nothing to draw it with yet.
+    pub fn car_kind(self) -> Option<Kind> {
+        match self {
+            Machine::Buggy => Some(Kind::Buggy),
+            Machine::Monster => Some(Kind::Monster),
+            Machine::Baja => Some(Kind::Baja),
+            Machine::Biplane | Machine::Helicopter => None,
+        }
+    }
+
+    /// The car's own physics in `game_sim`, for a car.
+    pub fn car_physics(self) -> Option<game_sim::car::Kind> {
+        match self {
+            Machine::Buggy => Some(game_sim::car::Kind::Buggy),
+            Machine::Monster => Some(game_sim::car::Kind::MonsterTruck),
+            Machine::Baja => Some(game_sim::car::Kind::Baja),
+            Machine::Biplane | Machine::Helicopter => None,
         }
     }
 
@@ -386,6 +428,9 @@ pub struct Lot {
     /// The file's planes' `SetGroundHeight`s, in copy order ([`ground_heights`]); a copy past them is
     /// put on the ground.
     pub ground_heights: Vec<bool>,
+    /// Every car the disc has in each of its liveries, built once off `machine.res` ([`car_kit`]),
+    /// which each player's garage takes its cars from ([`Lot::cars_for`]). Empty without the files.
+    pub cars: Vec<CarRide>,
 }
 
 impl Lot {
@@ -399,7 +444,7 @@ impl Lot {
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new() };
+        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new(), cars: Vec::new() };
         lot.resize(players, ground);
         lot
     }
@@ -955,6 +1000,8 @@ pub struct Garage {
     /// and is drawn there; once they have, it goes wherever they take it and is nowhere while they
     /// are on the bike.
     pub taken: bool,
+    /// This player's cars (S149e), one of each the disc has ([`CarRide`]).
+    pub cars: Vec<CarRide>,
 }
 
 /// How far above a machine's origin the ground under it is looked for when the other is spawned
@@ -1060,6 +1107,8 @@ pub fn markers_of(kind: Kind) -> markers::Vehicle {
     match kind {
         Kind::Bike => markers::Vehicle::Bike,
         Kind::Biplane => markers::Vehicle::Plane,
+        // A car keeps the bike's set; its pass runs no markers (S149e).
+        Kind::Buggy | Kind::Monster | Kind::Baja => markers::Vehicle::Bike,
     }
 }
 
@@ -1088,7 +1137,10 @@ impl Garage {
         if up == Kind::Biplane && plane.is_none() {
             return Err("--vehicle biplane: this ride has no biplane (the disc's machine.res has no biplane.phy)".into());
         }
-        Ok(Garage { up, plane, taken: up == Kind::Biplane })
+        if up.car().is_some() {
+            return Err(format!("--vehicle {}: a ride starts on the bike or the plane; switch to a car from the pause", up.name()));
+        }
+        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new() })
     }
 
     /// **The plane put in the air** (V96's `--fly-at`, a measurement start): stood at `at` along
@@ -1109,6 +1161,7 @@ impl Garage {
         if self.plane.is_some() {
             out.push(Kind::Biplane);
         }
+        out.extend(self.cars.iter().filter_map(|c| c.machine.car_kind()));
         out
     }
 
@@ -1129,6 +1182,9 @@ impl Garage {
         if to == self.up {
             return Ok(to);
         }
+        if to.car().is_some() || self.up.car().is_some() {
+            return self.switch_car(to, sim, world);
+        }
         match to {
             Kind::Biplane => {
                 let plane = self.plane.as_mut().ok_or("this ride has no biplane")?;
@@ -1141,6 +1197,7 @@ impl Garage {
                 let spot = under(plane, sim, world).ok_or("there is no ground under the plane to stand the bike on")?;
                 sim.rider.teleport_to(spot);
             }
+            Kind::Buggy | Kind::Monster | Kind::Baja => return self.switch_car(to, sim, world),
         }
         // A trick or combo in progress fails as a bail fails it (P161): the trick stopped, the
         // chain's points lost and not banked, so the HUD plays the pop-up out as a bail's and the
@@ -1226,6 +1283,8 @@ impl Garage {
             Kind::Bike => markers::frame(sim, me, spots, controls),
             // The plane's own set (P107), on the d-pad the plane no longer reads.
             Kind::Biplane => self.markers(sim, me, spots, &[], world),
+            // A car has no markers yet (S149e): the d-pad steers it.
+            Kind::Buggy | Kind::Monster | Kind::Baja => None,
         };
         (said, did)
     }
@@ -1239,6 +1298,9 @@ impl Garage {
     /// switch back to the bike would stand it — on the ground under the plane, upright, along its
     /// flattened heading, stopped — and with no ground under it, the plane's own spot.
     pub fn spot(&self, sim: &Sim, world: &mut dyn World) -> Spot {
+        if let Some(car) = self.car_up() {
+            return car.spot(world);
+        }
         match (self.up, &self.plane) {
             (Kind::Biplane, Some(plane)) => {
                 if let Some(f) = plane.flight.as_ref().filter(|f| f.crash.reason == 0 && !f.measure.grounded) {
@@ -1334,6 +1396,9 @@ impl Garage {
     /// ([`Sim::step_among`]), the plane with their bikes ([`Plane::step_among`]). Alone, it is
     /// [`Garage::step`] exactly.
     pub fn step_among(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World, among: Among<'_>) -> rider::Frame {
+        if self.up.car().is_some() {
+            return self.drive(sim, dt, world);
+        }
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
                 // The track's path cars run on whichever machine is up (S81).
@@ -1405,6 +1470,8 @@ impl Wanted {
             None => 0,
             Some(Kind::Bike) => 1,
             Some(Kind::Biplane) => 2,
+            // Online rides no car (S149e): a car pick is no pick.
+            Some(Kind::Buggy | Kind::Monster | Kind::Baja) => 0,
         };
         to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.together as u8) << 5 | (self.paused as u8) << 6
     }
@@ -1443,7 +1510,7 @@ pub fn switch_lane(to: Kind, template: Option<&Flight>, sim: &mut Sim, world: &m
             Plane::flying(Spawn { at: f.spawn_origin(), facing: f.spawn.1 }, f)
         }
     };
-    let mut garage = Garage { up, plane: Some(plane), taken: true };
+    let mut garage = Garage { up, plane: Some(plane), taken: true, cars: Vec::new() };
     let result = garage.switch(to, sim, world);
     let mut plane = garage.plane.take().expect("the switch keeps the plane");
     if garage.up == Kind::Biplane {
@@ -1504,7 +1571,7 @@ pub fn fly_lane_met(
 /// it while it is on or near the ground, the bike's spot on the bike.
 pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
     match &sim.plane {
-        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true }.spot(sim, world),
+        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new() }.spot(sim, world),
         None => Spot::of(&sim.rider),
     }
 }
@@ -1551,6 +1618,253 @@ impl Garage {
         }
         let was = std::mem::replace(&mut self.up, up);
         (was != up).then_some(up)
+    }
+}
+
+// ---- the cars (S149e) ----------------------------------------------------------------------------
+
+/// **One of a player's cars** (S149e): the buggy, the monster truck or the baja, its `.phy` and its
+/// model off `machine.res`, the bay `machine.txt` parks this player's copy in, and the car itself
+/// once the player has taken it ([`game_sim::car::Machine`]).
+///
+/// The switch spawns it on the player as it spawns the plane (P102): stood on the ground where the
+/// player is, along their heading, at rest, a fresh car ([`game_sim::car::Machine::new`]). The car
+/// left goes, as the plane left does. Until it is taken a car stands in its bay only on paper: the
+/// port draws no car yet, so neither the bays nor the offer show one.
+#[derive(Clone, Debug)]
+pub struct CarRide {
+    pub machine: Machine,
+    pub car: game_sim::car::Car,
+    pub model: game_sim::car::CarModel,
+    pub bay: Option<Spawn>,
+    /// The car while it is out: from the switch onto it until the switch off.
+    pub driven: Option<game_sim::car::Machine>,
+    /// Where it was last taken (its origin).
+    pub taken_at: Vf,
+}
+
+/// How far over the ground a car taken is stood, past where its tires' bottoms hang, feet: it drops
+/// onto its springs from there. The port's own number.
+const CAR_DROP: f32 = 0.5;
+
+impl CarRide {
+    /// Copy `copy` of `machine`, in its livery ([`livery`]), out of `machine.res` (`read` answers a
+    /// member's bytes by name), parked at `bay`. An error for a machine that is no car, or a disc
+    /// without the car's files.
+    pub fn new(machine: Machine, copy: usize, bay: Option<Spawn>, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<CarRide, String> {
+        let kind = machine.car_physics().ok_or_else(|| format!("{machine:?} is not a car"))?;
+        let phy = read(kind.phy()).ok_or_else(|| format!("machine.res has no {}", kind.phy()))?;
+        let name = format!("{}\\anim\\{}.psg", machine.dir(), machine.models()[livery(copy)]);
+        let psg = read(&name).ok_or_else(|| format!("machine.res has no {name}"))?;
+        let model = game_sim::car::CarModel::read(&psg).map_err(|e| format!("{name}: {e}"))?;
+        Ok(CarRide { machine, car: game_sim::car::Car::read_bytes(&phy, kind), model, bay, driven: None, taken_at: Vf::default() })
+    }
+
+    /// How high the car's origin stands over the ground with its tires' bottoms on it and its springs
+    /// unloaded, and [`CAR_DROP`] more.
+    pub fn rest_height(&self) -> f32 {
+        let lowest = (0..4).map(|k| self.model.tire_nodes[k].y() - 2.0 * self.car.tires[k].radius.0).fold(f32::MAX, f32::min);
+        CAR_DROP - lowest
+    }
+
+    /// The car taken at `spot`: a fresh one, on the ground there along the spot's heading flattened
+    /// (its bay's, or +z, where that points straight up or down), driven. `None`, and nothing
+    /// changes, with no ground there.
+    pub fn take(&mut self, spot: &Spot, world: &mut dyn World) -> Option<()> {
+        let ground = ground_under(world, spot.at)?;
+        let facing = level(spot.forward).or_else(|| self.bay.and_then(|b| level(b.facing))).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        let at = Vf::new(spot.at.x(), ground + self.rest_height(), spot.at.z(), 1.0);
+        let mut m = game_sim::car::Machine::new(&self.car, &self.model, at, facing, Vf::new(0.0, 1.0, 0.0, 0.0));
+        m.drive(true);
+        self.driven = Some(m);
+        self.taken_at = at;
+        Some(())
+    }
+
+    /// Where the car's origin is and which way it points: its frame's, once it has stepped.
+    pub fn place(&self) -> Option<(Vf, Vf)> {
+        let m = self.driven.as_ref()?;
+        let at = m.matrix.0[3];
+        let forward = m.matrix.0[2];
+        Some((Vf::new(at.x(), at.y(), at.z(), 1.0), Vf::new(forward.x(), forward.y(), forward.z(), 0.0)))
+    }
+
+    /// What the shell says of it while it is out: how far it has gone from where it was taken, how
+    /// fast, whether a tire is down and how upright it is.
+    pub fn report(&self) -> Option<String> {
+        let m = self.driven.as_ref()?;
+        let (at, _) = self.place()?;
+        let gone = (at.x() - self.taken_at.x()).hypot(at.z() - self.taken_at.z());
+        let down = if m.grounded { "on its tires" } else { "off the ground" };
+        Some(format!(
+            "car: {} {gone:.1} ft from where it was taken, at {:.1}, {:.1}, {:.1}, {:.1} ft/s, {down}, up {:.3}",
+            self.machine.section().to_ascii_lowercase(),
+            at.x(),
+            at.y(),
+            at.z(),
+            m.ground_speed.0,
+            m.up.y()
+        ))
+    }
+
+    /// The player in it, for whatever is put where they are: on the ground under the car, upright,
+    /// along its heading flattened, stopped; the car's own place with no ground under it.
+    pub fn spot(&self, world: &mut dyn World) -> Spot {
+        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+        let Some((at, forward)) = self.place() else {
+            let bay = self.bay.unwrap_or(Spawn { at: Vf::new(0.0, 0.0, 0.0, 1.0), facing: Vf::new(0.0, 0.0, 1.0, 0.0) });
+            return Spot::still(bay.at, bay.facing, up);
+        };
+        let forward = level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        match ground_under(world, at) {
+            Some(g) => Spot::still(Vf::new(at.x(), g, at.z(), 1.0), forward, up),
+            None => Spot::still(at, forward, up),
+        }
+    }
+
+    /// One frame of the car on `pad` through `table` (the ride's bindings): the stick steers and
+    /// leans, the commands are the pedals ([`game_sim::car::Controls::input`]), then the car's step
+    /// over `world`. The engine's noise is off. Nothing for a car not out.
+    pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
+        use game_sim::input::{Axis, AxisRange};
+        let Some(m) = self.driven.as_mut() else { return };
+        let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
+        m.controls.input(&self.car, stick, F::ZERO, m.ground_speed, m.side_slip, |c| table.value(pad, c));
+        m.step(&self.car, &mut Through(world), dt, &tables.acos, &tables.curve, &mut |_| F::ZERO);
+    }
+}
+
+/// A `dyn World` for the car's step, which takes its world by type: every query passed through.
+struct Through<'a>(&'a mut dyn World);
+
+impl World for Through<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.0.ground(at)
+    }
+    fn surface(&mut self, at: Vf) -> u8 {
+        self.0.surface(at)
+    }
+    fn wheel_surface(&mut self, at: Vf) -> Option<u8> {
+        self.0.wheel_surface(at)
+    }
+    fn solid(&mut self, bundle: &game_sim::collide::Bundle, record: &mut game_sim::collide::Record) -> bool {
+        self.0.solid(bundle, record)
+    }
+    fn groups(&mut self, bundle: &game_sim::collide::Bundle, record: &mut game_sim::collide::Record) -> bool {
+        self.0.groups(bundle, record)
+    }
+    fn crowded(&mut self, centre: Vf, radius: F) -> bool {
+        self.0.crowded(centre, radius)
+    }
+    fn area(&self) -> Option<game_sim::biplane::Area> {
+        self.0.area()
+    }
+    fn wrap(&self) -> [bool; 2] {
+        self.0.wrap()
+    }
+    fn off_world(&self, at: Vf, margin: F) -> bool {
+        self.0.off_world(at, margin)
+    }
+    fn keeps(&mut self, at: Vf) -> bool {
+        self.0.keeps(at)
+    }
+    fn heightfield(&mut self) -> Option<Box<dyn game_sim::contact_search::Heightfield + '_>> {
+        self.0.heightfield()
+    }
+    fn collision(&mut self) -> (Option<Box<dyn game_sim::contact_search::Heightfield + '_>>, Option<&game_sim::world::Props>) {
+        self.0.collision()
+    }
+    fn wooded(
+        &mut self,
+    ) -> (Option<Box<dyn game_sim::contact_search::Heightfield + '_>>, Option<&game_sim::world::Props>, Option<&game_sim::eco::Trees>) {
+        self.0.wooded()
+    }
+    fn wooded_near(
+        &mut self,
+        at: Vf,
+    ) -> (Option<Box<dyn game_sim::contact_search::Heightfield + '_>>, Option<&game_sim::world::Props>, Option<&game_sim::eco::Trees>) {
+        self.0.wooded_near(at)
+    }
+    fn near_set(&self, at: Vf) -> Option<[i32; 2]> {
+        self.0.near_set(at)
+    }
+    fn moving(&mut self) -> Option<&mut game_sim::world::Props> {
+        self.0.moving()
+    }
+}
+
+/// The cars the disc has, the buggy, the monster truck and the baja, each in every livery (copy `n`
+/// is livery `n`'s), those whose files `read` finds: what a [`Lot`] keeps ([`Lot::cars`]).
+pub fn car_kit(read: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Vec<CarRide> {
+    let mut out = Vec::new();
+    for m in [Machine::Buggy, Machine::Monster, Machine::Baja] {
+        for copy in 0..LIVERIES {
+            match CarRide::new(m, copy, None, read) {
+                Ok(c) => out.push(c),
+                Err(e) => eprintln!("cars: {e}"),
+            }
+        }
+    }
+    out
+}
+
+impl Lot {
+    /// Player `copy`'s cars: one of each car [`Lot::cars`] has, in their livery, parked in their bay.
+    pub fn cars_for(&self, copy: usize) -> Vec<CarRide> {
+        [Machine::Buggy, Machine::Monster, Machine::Baja]
+            .into_iter()
+            .filter_map(|m| {
+                let mut car = self.cars.iter().filter(|c| c.machine == m).nth(livery(copy))?.clone();
+                car.bay = self.bay(m, copy).map(|b| b.spawn);
+                Some(car)
+            })
+            .collect()
+    }
+}
+
+impl Garage {
+    /// The car up, if one is.
+    pub fn car_up(&self) -> Option<&CarRide> {
+        let m = self.up.car()?;
+        self.cars.iter().find(|c| c.machine == m)
+    }
+
+    /// [`Garage::switch`] onto or off a car (S149e): the machine taken spawned where the player is
+    /// ([`Garage::spot`]), the car left gone. Onto the bike from a car, the bike stands on the ground
+    /// under it; onto the plane, the plane is landed there.
+    fn switch_car(&mut self, to: Kind, sim: &mut Sim, world: &mut dyn World) -> Result<Kind, String> {
+        let from = self.spot(sim, world);
+        match to.car() {
+            Some(m) => {
+                let car = self.cars.iter_mut().find(|c| c.machine == m).ok_or_else(|| format!("this ride has no {}", to.name()))?;
+                car.take(&from, world).ok_or("there is no ground here to stand the car on")?;
+            }
+            None if to == Kind::Biplane => {
+                let plane = self.plane.as_mut().ok_or("this ride has no biplane")?;
+                land(plane, from, world).ok_or("there is no ground under the car to land the plane on")?;
+                self.taken = true;
+            }
+            None => sim.rider.teleport_to(from),
+        }
+        let left = self.up.car();
+        if let Some(c) = self.cars.iter_mut().find(|c| Some(c.machine) == left) {
+            c.driven = None;
+        }
+        sim.rider.trick_lost();
+        self.up = to;
+        sim.markers.up(markers_of(to));
+        Ok(to)
+    }
+
+    /// One pass of the car up: the track's path cars, then the car on the seat's pad. The bike is
+    /// not stepped, and the frame the rider reports is empty.
+    fn drive(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) -> rider::Frame {
+        sim.traffic.frame(dt, world);
+        let m = self.up.car();
+        if let Some(car) = self.cars.iter_mut().find(|c| Some(c.machine) == m) {
+            car.step(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world);
+        }
+        rider::Frame::default()
     }
 }
 
