@@ -1242,3 +1242,572 @@ fn mxvatv_roll_pitch_is_the_originals() {
     }
     enough(&tally, &["airborne", "wheelie", "neither", "stoppie starts", "stoppie held", "stoppie, no top speed"], 100);
 }
+
+// --- MD63c: the steering hinge -------------------------------------------------------------------------
+
+/// SLUS-21104's wheel integrate (its dispatch, which calls the steering hinge on a
+/// balanced wheel), and the surface drag and the spin it calls first.
+const WHEEL_INTEGRATE: u32 = 0x004a_1680;
+const SURFACE_DRAG: u32 = 0x004a_1ec0;
+const SPIN_INTEGRATE: u32 = 0x004a_2040;
+/// How much of a wheel the steering touches: up to its angle and rate at `+0x8ac`/`+0x8b0`.
+const WHEEL_LEN: u32 = 0x900;
+
+/// A zero with a random sign, or a value from `lo..hi`.
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn or_zero(&mut self, lo: f32, hi: f32) -> F {
+        if self.one_in(4) { F(if self.b() { -0.0 } else { 0.0 }) } else { self.f(lo, hi) }
+    }
+    fn hinge(&mut self) -> (game_sim::wheel::Wheel, F) {
+        let mut w = game_sim::wheel::Wheel {
+            steered: !self.one_in(8),
+            balancing: !self.one_in(4),
+            steer_torque: self.or_zero(-60.0, 60.0),
+            steer_damping: self.or_zero(0.0, 12.0),
+            steer_inv_inertia: self.or_zero(0.0, 6.0),
+            max_steer_angle: self.f(0.2, 0.7),
+            min_steer_angle: -self.f(0.2, 0.7),
+            steer_angle: self.or_zero(-0.75, 0.75),
+            steer_rate: self.or_zero(-12.0, 12.0),
+            ..Default::default()
+        };
+        if self.one_in(6) {
+            w.steer_angle = if self.b() { w.max_steer_angle } else { w.min_steer_angle };
+        }
+        let dt = if self.one_in(10) { F::ZERO } else { self.f(0.002, 0.02) };
+        (w, dt)
+    }
+}
+
+fn poke_hinge(ee: &mut Ee, w: &game_sim::wheel::Wheel) {
+    put_b(ee, FRONT + 0x2c, w.steered);
+    put_b(ee, FRONT + 0x30, w.balancing);
+    put_f(ee, FRONT + 0x60, w.steer_torque);
+    put_f(ee, FRONT + 0x64, w.steer_damping);
+    put_f(ee, FRONT + 0x6c, w.steer_inv_inertia);
+    put_f(ee, FRONT + 0x70, w.max_steer_angle);
+    put_f(ee, FRONT + 0x74, w.min_steer_angle);
+    put_f(ee, FRONT + 0x8ac, w.steer_angle);
+    put_f(ee, FRONT + 0x8b0, w.steer_rate);
+}
+
+fn hinge_snap(ee: &Ee) -> Vec<u32> {
+    (0..WHEEL_LEN).step_by(4).map(|o| ee.u32_at(FRONT + o)).collect()
+}
+
+fn hinge_reset(ee: &mut Ee) {
+    for o in (0..WHEEL_LEN).step_by(4) {
+        ee.set_u32(FRONT + o, 0);
+    }
+}
+
+fn hinge_path(w: &game_sim::wheel::Wheel, after: &game_sim::wheel::Wheel) -> &'static str {
+    if !w.steered {
+        "not steered"
+    } else if !w.balancing {
+        "held"
+    } else if after.steer_angle == after.max_steer_angle && after.steer_rate == F::ZERO {
+        "top of the lock"
+    } else if after.steer_angle == after.min_steer_angle && after.steer_rate == F::ZERO {
+        "bottom of the lock"
+    } else {
+        "free"
+    }
+}
+
+/// SLUS-21104's wheel integrate on its steering, the port's [`step::wheel_integrate`] and
+/// [`step::steer_integrate`]: 10,000 wheels (a quarter of each input a signed zero), the surface drag
+/// and the spin hooked and logged, the wheel compared word for word.
+#[test]
+fn mxvatv_steer_integrate_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let log = Rc::new(RefCell::new(Vec::new()));
+    for at in [SURFACE_DRAG, SPIN_INTEGRATE] {
+        let log = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, FRONT, "the wheel");
+            log.borrow_mut().push((at, ee.f(12)));
+        }));
+    }
+    let mut g = Gen(0x0d63_c001);
+    let mut tally = BTreeMap::new();
+    let (mut signs, mut mxu_differs) = (0, 0);
+    for k in 0..10_000 {
+        let (w, dt) = g.hinge();
+        hinge_reset(&mut ee);
+        poke_hinge(&mut ee, &w);
+        log.borrow_mut().clear();
+        ee.call(WHEEL_INTEGRATE, &[u64::from(FRONT)], &[dt.0], 10_000);
+        for (a, b) in ee.written_ranges() {
+            let stack = a >= ee.stack - 0x100 && b <= ee.stack + 0x40;
+            assert!(stack || (a >= FRONT && b <= FRONT + WHEEL_LEN), "state {k}: the original wrote {a:#010x}..{b:#010x}");
+        }
+        let was = hinge_snap(&ee);
+
+        let mut port = w;
+        let calls = step::wheel_integrate(&mut port, dt);
+        let want: Vec<(u32, f32)> = calls
+            .iter()
+            .map(|c| match c {
+                game_sim::wheel::Call::SurfaceDrag(t) => (SURFACE_DRAG, t.0),
+                game_sim::wheel::Call::SpinIntegrate(t) => (SPIN_INTEGRATE, t.0),
+                c => panic!("{c:?}"),
+            })
+            .collect();
+        let got: Vec<(u32, u32)> = log.borrow().iter().map(|&(a, t)| (a, t.to_bits())).collect();
+        assert_eq!(got, want.iter().map(|&(a, t)| (a, t.to_bits())).collect::<Vec<_>>(), "state {k}: the calls");
+        hinge_reset(&mut ee);
+        poke_hinge(&mut ee, &port);
+        let now = hinge_snap(&ee);
+        let path = hinge_path(&w, &port);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            panic!(
+                "state {k} ({path}): wheel + {:#x} is {:#010x} in the original and {:#010x} in the port\n{w:#?}",
+                4 * i,
+                was[i],
+                now[i]
+            );
+        }
+        *tally.entry(path).or_insert(0u32) += 1;
+        if w.steered && w.balancing {
+            let mut mxu = w;
+            game_sim::wheel::integrate(&mut mxu, dt);
+            let bits = |w: &game_sim::wheel::Wheel| [w.steer_angle.0.to_bits(), w.steer_rate.0.to_bits(), w.steer_torque.0.to_bits()];
+            if bits(&mxu) != bits(&port) {
+                mxu_differs += 1;
+            }
+            if [port.steer_angle, port.steer_rate].iter().any(|v| v.0 == 0.0) {
+                signs += 1;
+            }
+        }
+    }
+    enough(&tally, &["not steered", "held", "top of the lock", "bottom of the lock", "free"], 500);
+    assert!(signs >= 300, "only {signs} balanced wheels came out with a zero angle or rate");
+    // MX Unleashed's hinge keeps a −0 where the original's `0 + x` makes it +0: the oracle has to see it.
+    assert!(mxu_differs >= 100, "only {mxu_differs} wheels tell MX Unleashed's hinge from MX vs. ATV's");
+}
+
+// --- MD63c: the wreck test -----------------------------------------------------------------------------
+
+/// SLUS-21104's wreck test (the bike's update calls it last, `f12` the frame's time), and what the
+/// harness lays out for it: the driver (the AI's `+0xe4`), the collision record and the empty one the
+/// wreck entry swaps in, the record's contact list, its object, and the other riders' bikes.
+const WRECK_TEST: u32 = 0x004e_24a0;
+const DRIVER: u32 = 0x01c0_6000;
+const RECORD: u32 = 0x01c0_6100;
+const WRECK_RECORD: u32 = 0x01c0_6400;
+const CONTACTS: u32 = 0x01c0_6600;
+const STRUCK: u32 = 0x01c0_6c00;
+const OTHERS: u32 = 0x01c0_7000;
+/// The class word reason 15 masks the record's object with, and the "wrecks on" word.
+const STRUCK_MASK: u32 = 0x0054_2db0;
+const WRECKS_ON: u32 = 0x0052_5350;
+
+#[derive(Clone, Debug)]
+struct WreckState {
+    p: Params,
+    air: Air,
+    chassis: Chassis,
+    step: air::Step,
+    loads: air::Loads,
+    w: step::WreckIn,
+    /// The rider's stunt id, the balance stunt's, the one wanted.
+    id: i32,
+    balance: i32,
+    wanted: i32,
+    /// The record's object and its class bits (0: none).
+    struck: u32,
+    small: bool,
+    height: F,
+    contacts: Vec<air::Contact>,
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn wreck(&mut self) -> WreckState {
+        let mut p = zero_params();
+        // About the Free Ride image's limits, sometimes off them.
+        p.front_wreck_speed_limit = self.near(18.333, 10.0, 30.0);
+        p.back_wreck_speed_limit = self.near(22.0, 10.0, 30.0);
+        p.side_wreck_speed_limit = self.near(19.067, 10.0, 30.0);
+        p.racing_down_wreck_speed_limit = self.near(70.4, 40.0, 90.0);
+        p.freestyle_down_wreck_speed_limit = self.near(70.4, 40.0, 90.0);
+        p.ground_pitch_down_wreck_angle = self.near(1.309, 0.8, 1.6);
+        p.ground_pitch_up_wreck_angle = self.near(1.309, 0.8, 1.6);
+        p.airborne_pitch_down_wreck_angle = self.near(1.484, 1.0, 1.7);
+        p.airborne_pitch_up_wreck_angle = self.near(1.553, 1.0, 1.7);
+        p.airborne_roll_wreck_angle = self.near(1.553, 1.0, 1.7);
+        p.no_hander_wreck_speed_limit = self.near(29.333, 20.0, 40.0);
+        p.no_hander_max_roll_angle = self.near(0.5, 0.2, 0.9);
+        p.joust_wreck_height = self.near(2.0, 0.5, 3.0);
+        p.crossup_wreck = self.near(0.99, 0.8, 1.0);
+        p.crossup_wreck_time = self.near(0.75, 0.3, 1.2);
+        // A load past a limit one time in six each, mostly inside them.
+        let load = |g: &mut Self, lo: F, hi: F| {
+            if g.one_in(14) {
+                hi + g.f(0.0, 10.0)
+            } else if g.one_in(13) {
+                -lo - g.f(0.0, 10.0)
+            } else if g.one_in(12) {
+                if g.b() { hi } else { -lo }
+            } else {
+                g.f(-lo.0, hi.0)
+            }
+        };
+        let fore_aft = load(self, p.front_wreck_speed_limit, p.back_wreck_speed_limit);
+        let side = load(self, p.side_wreck_speed_limit, p.side_wreck_speed_limit);
+        let vertical = if self.one_in(4) { self.f(20.0, 100.0) } else { self.f(-20.0, 20.0) };
+        let on_ground = self.b();
+        let airborne = !on_ground && !self.one_in(4);
+        let air = Air {
+            on_ground,
+            airborne,
+            was_airborne: if airborne { self.one_in(3) } else { !self.one_in(3) },
+            hang_time: self.near(p.crossup_wreck_time.0, 0.0, 2.0),
+            flip_torque_applied: self.one_in(6),
+            wreck_impact: Vf::new(self.f(-1.0, 1.0).0, self.f(-1.0, 1.0).0, self.f(-1.0, 1.0).0, self.f(-1.0, 1.0).0),
+            ..Default::default()
+        };
+        let angle = |g: &mut Self, lim: F| if g.one_in(8) { lim } else if g.one_in(3) { g.f(-2.0, 2.0) } else { g.f(-0.8, 0.8) };
+        let pitch = if self.b() { angle(self, p.airborne_pitch_up_wreck_angle) } else { -angle(self, p.ground_pitch_down_wreck_angle) };
+        let chassis = Chassis {
+            pitch,
+            roll: angle(self, p.airborne_roll_wreck_angle),
+            vel: if self.one_in(10) {
+                Vf::ZERO
+            } else {
+                Vf::new(self.f(-40.0, 40.0).0, self.f(-20.0, 20.0).0, self.f(-40.0, 40.0).0, self.f(-1.0, 1.0).0)
+            },
+            ..Default::default()
+        };
+        let balance = 4;
+        let id = match self.bits() % 6 {
+            0 => balance,
+            1 => 41,
+            2 => 255,
+            3 => 40,
+            _ => (self.bits() % 60) as i32,
+        };
+        let wanted = if self.one_in(2) { id } else if self.b() { 0xfe } else { (self.bits() % 60) as i32 };
+        let touching = self.b();
+        let up_y = self.near(p.no_hander_max_roll_angle.0, -1.0, 1.0);
+        let step = air::Step {
+            up: Vf::new(0.0, up_y.0, 0.0, 0.0),
+            stunt: id <= 40,
+            touching,
+            ..Default::default()
+        };
+        let loads = air::Loads {
+            side,
+            vertical,
+            fore_aft,
+            landing_crossup: if self.one_in(3) { self.f(0.0, 1.0) } else { self.near(0.5, 0.0, 0.02) },
+            no_hander: id == balance,
+            racing: self.b(),
+            pose: id,
+            pose_wanted: wanted,
+            pose_blend: self.near(0.95, 0.5, 1.0),
+            trick_wrecked: self.one_in(4),
+        };
+        let struck = if self.one_in(3) { [0x20, 0x10, 0x21, 0][(self.bits() % 4) as usize] } else { 0 };
+        let w = step::WreckIn { spin_applied: self.one_in(6), struck_class: touching && struck & 0x20 != 0 };
+        let height = self.f(-5.0, 5.0);
+        let n = if touching { self.bits() % 5 } else { 0 };
+        let small = self.b();
+        let contacts = (0..n)
+            .map(|_| air::Contact {
+                mirrored: self.one_in(4),
+                reach: if self.one_in(5) { if small { step::HIT_REACH_SMALL } else { step::HIT_REACH } } else { self.f(0.0, 7.0) },
+                other: if self.one_in(2) {
+                    air::Other::Scenery
+                } else {
+                    air::Other::Rider {
+                        height: if self.one_in(5) { height + p.joust_wreck_height } else { height + self.f(-4.0, 6.0) },
+                        vel: Vf::new(self.f(-30.0, 30.0).0, self.f(-9.0, 9.0).0, self.f(-30.0, 30.0).0, self.f(-1.0, 1.0).0),
+                    }
+                },
+            })
+            .collect();
+        let mut s = WreckState { p, air, chassis, step, loads, w, id, balance, wanted, struck, small, height, contacts };
+        if self.one_in(3) {
+            // A third ride along calmly, so that the hits are what is asked.
+            s.loads.fore_aft = self.f(-5.0, 5.0);
+            s.loads.side = self.f(-5.0, 5.0);
+            s.loads.vertical = self.f(-5.0, 5.0);
+            s.chassis.pitch = self.f(-0.5, 0.5);
+            s.chassis.roll = self.f(-0.5, 0.5);
+            s.air.flip_torque_applied = false;
+            s.w.spin_applied = false;
+            s.air.was_airborne = s.air.airborne;
+            (s.id, s.wanted) = (255, 0xfe);
+            s.step.stunt = false;
+            s.loads.no_hander = false;
+            (s.loads.pose, s.loads.pose_wanted) = (255, 0xfe);
+        }
+        s
+    }
+}
+
+fn poke_wreck(ee: &mut Ee, s: &WreckState) {
+    for o in (0..0x1000).step_by(4) {
+        ee.set_u32(DRIVER + o, 0);
+    }
+    for o in (0..0x1000).step_by(4) {
+        ee.set_u32(OTHERS + o, 0);
+    }
+    ee.set_u32(WRECKS_ON, 1);
+    ee.set_u32(STRUCK_MASK, 0x20);
+    // Driven by the AI, wrecks on for the bike, inside the world, not down, no striker, no node.
+    ee.set_u32(OBJ + 0x48c, DRIVER);
+    ee.set_u32(DRIVER + 0xe4, 1);
+    ee.set_u32(OBJ + 0xc1c, 1);
+    ee.set_u32(OBJ + 0x308, 0);
+    ee.set_u32(OBJ + 0xc80, 0);
+    put_f(ee, OBJ + 0xc88, F(100.0));
+    let p = &s.p;
+    for (o, v) in [
+        (0x13e8, p.front_wreck_speed_limit),
+        (0x13ec, p.back_wreck_speed_limit),
+        (0x13f0, p.side_wreck_speed_limit),
+        (0x13f4, p.racing_down_wreck_speed_limit),
+        (0x13f8, p.freestyle_down_wreck_speed_limit),
+        (0x13fc, p.ground_pitch_down_wreck_angle),
+        (0x1400, p.ground_pitch_up_wreck_angle),
+        (0x1404, p.airborne_pitch_down_wreck_angle),
+        (0x1408, p.airborne_pitch_up_wreck_angle),
+        (0x140c, p.airborne_roll_wreck_angle),
+        (0x1410, p.no_hander_wreck_speed_limit),
+        (0x1414, p.no_hander_max_roll_angle),
+        (0x1418, p.joust_wreck_height),
+        (0x141c, s.loads.landing_crossup),
+        (0x1420, p.crossup_wreck),
+        (0x1424, p.crossup_wreck_time),
+        (0x1250, s.loads.side),
+        (0x1254, s.loads.vertical),
+        (0x1258, s.loads.fore_aft),
+        (0x14e4, s.loads.pose_blend),
+        (0x360, s.chassis.pitch),
+        (0x368, s.chassis.roll),
+        (0x1190, s.air.hang_time),
+    ] {
+        put_f(ee, OBJ + o, v);
+    }
+    put_b(ee, OBJ + 0x14cc, s.loads.trick_wrecked);
+    put_b(ee, OBJ + 0x146c, s.loads.racing);
+    put_b(ee, OBJ + 0x324, s.air.on_ground);
+    put_b(ee, OBJ + 0xde0, s.air.airborne);
+    put_b(ee, OBJ + 0xde4, s.air.was_airborne);
+    put_b(ee, OBJ + 0x1194, s.air.flip_torque_applied);
+    put_b(ee, OBJ + 0x11d0, s.w.spin_applied);
+    ee.set_u32(OBJ + 0x1524, s.id as u32);
+    ee.set_u32(OBJ + 0x152c, s.balance as u32);
+    ee.set_u32(OBJ + 0x1530, s.wanted as u32);
+    put_v(ee, OBJ + 0xbf0, s.step.up);
+    put_v(ee, OBJ + 0x1260, s.air.wreck_impact);
+    put_v(ee, BODY + 0x80, s.chassis.vel);
+    put_f(ee, BODY + 0x74, s.height);
+    ee.set_u32(OBJ + 0xbc0, if s.small { 0 } else { 2 });
+    // The record, and the empty one the wreck entry puts in its place.
+    ee.set_u32(OBJ + 0xc8, RECORD);
+    ee.set_u32(OBJ + 0x1434, WRECK_RECORD);
+    put_b(ee, RECORD + 0x34, s.step.touching);
+    ee.set_u32(RECORD + 0x20c, if s.struck != 0 { STRUCK } else { 0 });
+    ee.set_u32(STRUCK + 0x94, s.struck);
+    ee.set_u32(RECORD + 0xf0, s.contacts.len() as u32);
+    ee.set_u32(RECORD + 0xf8, CONTACTS);
+    for (i, c) in s.contacts.iter().enumerate() {
+        let at = CONTACTS + 0x90 * i as u32;
+        for o in (0..0x90).step_by(4) {
+            ee.set_u32(at + o, 0);
+        }
+        put_b(ee, at, c.mirrored);
+        put_f(ee, at + 0x24, c.reach);
+        if let air::Other::Rider { height, vel } = c.other {
+            let (bike, body) = (OTHERS + 0x200 * i as u32, OTHERS + 0x200 * i as u32 + 0x100);
+            ee.set_u32(at + 0x84, bike);
+            ee.set_u32(bike + 0xe4, body);
+            put_f(ee, body + 0x74, height);
+            put_v(ee, body + 0x80, vel);
+        }
+    }
+}
+
+fn wreck_path(s: &WreckState, landed: Option<air::Wreck>, hit: Option<air::Wreck>) -> &'static str {
+    use air::Wreck as W;
+    match (landed, hit) {
+        (Some(W::Struck), _) if s.air.airborne => "15 in the air",
+        (Some(W::Struck), _) => "15 on the loads",
+        (Some(W::Back), _) => "back",
+        (Some(W::Front), _) if s.air.on_ground && s.chassis.pitch < -s.p.ground_pitch_down_wreck_angle => "ground pitch down",
+        (Some(W::Front), _) => "front",
+        (Some(W::Left | W::Right), _) if s.air.was_airborne && !s.air.airborne => "crossup",
+        (Some(W::Left | W::Right), _) => "side",
+        (Some(W::Flat), _) => "flat",
+        (Some(W::NoseDive), _) => "nose dive",
+        (Some(W::Tail), _) if s.air.on_ground && s.chassis.pitch > s.p.ground_pitch_up_wreck_angle => "ground pitch up",
+        (Some(W::Tail), _) if s.step.touching && (s.air.flip_torque_applied || s.w.spin_applied) => "torqued touch",
+        (Some(W::Tail), _) => "airborne pitch up",
+        (Some(W::Joust), _) => "landed onto",
+        (Some(W::NoHander), _) if s.id == s.balance && s.step.up.y() < s.p.no_hander_max_roll_angle.0 => "no-hander roll",
+        (Some(W::NoHander), _) => "mid trick",
+        (Some(w), _) => panic!("{w:?}"),
+        (None, Some(W::Joust)) if s.small => "hit from above, small",
+        (None, Some(W::Joust)) => "hit from above",
+        (None, Some(w)) => panic!("{w:?} from the hits"),
+        (None, None) if s.step.touching && !s.contacts.is_empty() => "touched, rides on",
+        (None, None) => "rides on",
+    }
+}
+
+/// SLUS-21104's wreck test on a driven bike not yet down, the port's [`step::wreck_test`] then
+/// [`step::hit_wreck`]: 10,000 states through the original with its own vtable, the wreck entry
+/// hooked to log the reason and do the record swap its collision call does (the riding record out,
+/// the wreck record, empty, in). The reasons entered, in order, and the throw at `+0x1260` must be the
+/// port's.
+#[test]
+fn mxvatv_wreck_test_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let log = Rc::new(RefCell::new(Vec::new()));
+    {
+        let log = log.clone();
+        ee.hooks.insert(WRECK_ENTRY, Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, OBJ, "the bike");
+            let reason = ee.r(5) as u32;
+            log.borrow_mut().push(reason);
+            ee.set_u32(OBJ + 0xc80, reason);
+            ee.set_u32(OBJ + 0xc84, 0);
+            ee.set_u32(OBJ + 0xc8c, 0);
+            let swap = ee.u32_at(OBJ + 0x1434);
+            ee.set_u32(OBJ + 0xc8, swap);
+        }));
+    }
+    let mut g = Gen(0x0d63_c002);
+    let mut tally = BTreeMap::new();
+    let mut mxu_differs = BTreeMap::new();
+    for k in 0..10_000 {
+        let s = g.wreck();
+        reset(&mut ee);
+        poke_wreck(&mut ee, &s);
+        log.borrow_mut().clear();
+        ee.call(WRECK_TEST, &[u64::from(OBJ)], &[0.0], 20_000);
+        let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+        for (a, b) in ee.written_ranges() {
+            let ok = (a >= OBJ && b <= OBJ + 0x1800) || (a >= frame.0 && b <= frame.1) || a == WRECKS_ON || a == STRUCK_MASK
+                || (a >= DRIVER && b <= OTHERS + 0x1000);
+            assert!(ok, "state {k}: the original wrote {a:#010x}..{b:#010x}");
+        }
+        let got = log.borrow().clone();
+        let impact: Vec<u32> = (0..4).map(|i| ee.u32_at(OBJ + 0x1260 + 4 * i)).collect();
+
+        let mut air = s.air.clone();
+        let landed = step::wreck_test(&s.p, &mut air, &s.chassis, &s.step, &s.loads, &s.w, true);
+        let hit = if landed.is_some() {
+            None
+        } else {
+            step::hit_wreck(&s.p, &mut air, s.step.touching, s.small, s.height, &s.loads, &s.contacts)
+        };
+        let path = wreck_path(&s, landed, hit);
+        let want: Vec<u32> = landed.or(hit).map(|w| w as u32).into_iter().collect();
+        assert_eq!(got, want, "state {k} ({path}): the reasons\n{s:#?}");
+        let port: Vec<u32> = air.wreck_impact.0.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(impact, port, "state {k} ({path}): the throw\n{s:#?}");
+        *tally.entry(path).or_insert(0u32) += 1;
+        // MX Unleashed's test on the same state, its 360 the applied one: how often it answers otherwise.
+        let mut mxu = s.air.clone();
+        let st = air::Step { spinning: s.w.spin_applied, ..s.step.clone() };
+        let landed = air::wreck_test_in(&s.p, &mut mxu, &s.chassis, &st, &s.loads, true);
+        let hit = if landed.is_some() {
+            None
+        } else {
+            air::hit_wreck(&s.p, &mut mxu, s.step.touching, s.small, F::ONE, s.height, &s.contacts)
+        };
+        if landed.or(hit).map(|w| w as u32).into_iter().collect::<Vec<_>>() != want {
+            *mxu_differs.entry(path).or_insert(0u32) += 1;
+        }
+    }
+    eprintln!("{tally:?}\nMX Unleashed's answers otherwise: {mxu_differs:?}");
+    enough(
+        &tally,
+        &[
+            "15 in the air", "15 on the loads", "back", "front", "side", "flat", "ground pitch down", "ground pitch up",
+            "nose dive", "airborne pitch up", "torqued touch", "crossup", "landed onto", "no-hander roll", "mid trick",
+            "hit from above", "hit from above, small", "touched, rides on", "rides on",
+        ],
+        50,
+    );
+    // What SLUS-21104 changed is in the states: reason 15, the 360's torque, the trick endings' gate
+    // and the hits' reach.
+    enough(&mxu_differs, &["15 in the air", "15 on the loads", "torqued touch", "mid trick", "touched, rides on"], 50);
+    enough(&mxu_differs, &["hit from above", "hit from above, small"], 10);
+}
+
+/// Reason 14, the bike with no driver (no AI driving it, `+0x48c`'s `+0xe4`, and no vehicle state of
+/// kind 1, `+0xbc4`'s `+0x28`): SLUS-21104's branch is MX Unleashed's machine
+/// ([`game_sim::state::Ride::step`]'s `NO_CONTROL`) — entered only on a bike not already down, the
+/// clock preloaded to `MaxWreckTime` (`+0xc88`) and counting, the wreck count up one. 2,000 states.
+#[test]
+fn mxvatv_no_control_is_the_machines() {
+    use game_sim::state;
+    let Some(mut ee) = image() else { return };
+    let log = Rc::new(RefCell::new(Vec::new()));
+    {
+        let log = log.clone();
+        ee.hooks.insert(WRECK_ENTRY, Box::new(move |ee| {
+            let reason = ee.r(5) as u32;
+            log.borrow_mut().push(reason);
+            ee.set_u32(OBJ + 0xc80, reason);
+            ee.set_u32(OBJ + 0xc84, 0);
+            ee.set_u32(OBJ + 0xc8c, 0);
+        }));
+    }
+    let mut g = Gen(0x0d63_c003);
+    let mut entered = 0;
+    for k in 0..2_000 {
+        let prior = if g.b() { 0 } else { 1 + g.bits() % 15 };
+        let (elapsed, counting, max) = (g.f(0.0, 5.0), g.b(), g.f(0.5, 5.0));
+        reset(&mut ee);
+        for o in (0..0x100).step_by(4) {
+            ee.set_u32(DRIVER + o, 0);
+        }
+        // No driver, either way the original asks it.
+        match g.bits() % 4 {
+            0 => ee.set_u32(OBJ + 0x48c, 0),
+            1 => ee.set_u32(OBJ + 0x48c, DRIVER),
+            2 => {
+                ee.set_u32(OBJ + 0xbc4, DRIVER);
+                ee.set_u32(DRIVER + 0x28, 2);
+            }
+            _ => {
+                ee.set_u32(OBJ + 0x48c, DRIVER);
+                ee.set_u32(OBJ + 0xbc4, DRIVER);
+                ee.set_u32(DRIVER + 0x28, 3);
+            }
+        }
+        ee.set_u32(OBJ + 0xc80, prior);
+        put_f(&mut ee, OBJ + 0xc84, elapsed);
+        put_b(&mut ee, OBJ + 0xc8c, counting);
+        put_f(&mut ee, OBJ + 0xc88, max);
+        log.borrow_mut().clear();
+        ee.call(WRECK_TEST, &[u64::from(OBJ)], &[g.f(0.0, 0.05).0], 20_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}"));
+
+        let mut ride = state::Ride {
+            wreck: (prior != 0).then_some(game_sim::trick::Wreck(prior as u8)),
+            elapsed,
+            counting,
+            ..Default::default()
+        };
+        let p = state::Params { max_wreck_time: max, cannonball_wreck_time: F::ZERO };
+        let out = ride.step(F::ZERO, state::Sense::default(), p, |_| panic!("no test without a driver"), || false);
+        let want: Vec<u32> = out.wreck.map(|w| u32::from(w.0)).into_iter().collect();
+        assert_eq!(*log.borrow(), want, "state {k}: the reasons");
+        assert_eq!(ee.u32_at(OBJ + 0xc80), ride.wreck.map_or(0, |w| u32::from(w.0)), "state {k}: the reason");
+        assert_eq!(ee.u32_at(OBJ + 0xc84), ride.elapsed.0.to_bits(), "state {k}: the clock");
+        assert_eq!(ee.u32_at(OBJ + 0xc8c), u32::from(ride.counting), "state {k}: the latch");
+        assert_eq!(ee.u32_at(OBJ + 0x6c4) as i32, ride.wrecks, "state {k}: the wreck count");
+        entered += want.len();
+    }
+    assert!(entered >= 500, "only {entered} states entered reason 14");
+}

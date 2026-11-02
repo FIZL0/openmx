@@ -299,6 +299,10 @@ pub enum Wreck {
     Tail = 0xb,
     /// Landed with no hands on the bars.
     NoHander = 0xc,
+    /// MX vs. ATV's only (reason 15): the collision record's object is of the class the game keeps at
+    /// `0x00542db0`, met in the air or with the g loads past their limits
+    /// ([`crate::handling::step::wreck_test`]).
+    Struck = 0xf,
 }
 
 /// The original's inlined "map and clamp": `x` from the range `a..b` onto `out0..out1`, clamped to

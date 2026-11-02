@@ -15,9 +15,14 @@
 //!   lock in over a time while the stick is held hard over, when its option is on.
 //! - The rider's controllers ([`stand_upright`], [`balance`], [`roll_pitch`], MD63b): MX Unleashed's
 //!   arithmetic, with the frames off the body's quaternion and the yaw moments on every bike.
+//! - The steering hinge ([`steer_integrate`], MD63c): each sum starts from `0 + x`, so a `−0` rate or
+//!   angle comes out `+0`.
+//! - The wreck test ([`wreck_test`], [`hit_wreck`], MD63c): reason 15 first, the 360's torque beside the
+//!   backflip's, no no-hander term in the trick endings' gate, and the hits' own reach (2.9 / 4.5),
+//!   rider-only throws and a scenery hit that needs the g loads past their limits.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
-use crate::air::{Air, Chassis, Params as AirParams, Step as AirStep};
+use crate::air::{Air, Chassis, Contact, Loads, Other, Params as AirParams, Step as AirStep, Wreck};
 use crate::phy::Joystick;
 use crate::math::quat_axes;
 use crate::r#move::{Bike, Engine, Frame, Outside, Params, Ride, Step, Tables};
@@ -331,5 +336,188 @@ impl Outside for Unasked {
     }
     fn set_axes(&mut self, _forward: Vf, _up: Vf) {
         unreachable!("the wheelie and stoppie do not point the node")
+    }
+}
+
+/// The tail of MX vs. ATV's wheel step (SLUS-21104's `atv_wheel_integrate`): the surface drag and
+/// the spin (the two calls, run by the caller before this as in [`crate::wheel::integrate`]), then
+/// the steering hinge on the same three cases — a wheel that does not steer is left alone, a steered
+/// wheel that is not balanced on has its rate and torque thrown away, and a balanced one turns under
+/// its own torque ([`steer_integrate`]).
+pub fn wheel_integrate(w: &mut crate::wheel::Wheel, dt: F) -> Vec<crate::wheel::Call> {
+    let calls = vec![crate::wheel::Call::SurfaceDrag(dt), crate::wheel::Call::SpinIntegrate(dt)];
+    if w.steered {
+        if w.balancing {
+            steer_integrate(w, dt);
+        } else {
+            w.steer_rate = F::ZERO;
+            w.steer_torque = F::ZERO;
+        }
+    }
+    calls
+}
+
+/// MX vs. ATV's steering hinge (`atv_wheel_steer_integrate`): MX Unleashed's, with its
+/// fields where the PC's are, the same clamp order (`c.ole` against the top of the lock, so a NaN
+/// angle clamps there, then `c.olt` against the bottom) and the same products. What differs is that
+/// each of the three sums starts from the accumulator's `0 + x` (`adda.s $f0`): the damped torque,
+/// the rate and the angle are `0 + x ± a·b`, so a `−0` torque, rate or angle comes out `+0` where
+/// MX Unleashed keeps its sign.
+pub fn steer_integrate(w: &mut crate::wheel::Wheel, dt: F) {
+    let torque = (F::ZERO + w.steer_torque) - w.steer_damping * w.steer_rate;
+    let mut rate = (F::ZERO + w.steer_rate) + dt * (torque * w.steer_inv_inertia);
+    let mut angle = (F::ZERO + w.steer_angle) + rate * dt;
+    if !(angle <= w.max_steer_angle) {
+        angle = w.max_steer_angle;
+        rate = F::ZERO;
+    } else if angle < w.min_steer_angle {
+        angle = w.min_steer_angle;
+        rate = F::ZERO;
+    }
+    w.steer_angle = angle;
+    w.steer_rate = rate;
+    w.steer_torque = F::ZERO;
+}
+
+/// What MX vs. ATV's wreck test reads that MX Unleashed's did not (SLUS-21104's `atv_bike_wreck_test`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WreckIn {
+    /// The 360's torque went into the chassis (`+0x11d0`, [`crate::air::Spin::applied`]): it holds the
+    /// airborne attitude limits off as the backflip's does, and a touch with it in is a wreck off the
+    /// back.
+    pub spin_applied: bool,
+    /// The collision record is touching and its object (record `+0x20c`) is of the class the game
+    /// keeps at `0x00542db0` (`0x20` in the Free Ride image): the reason-15 test's own gate
+    /// ([`Wreck::Struck`]).
+    pub struck_class: bool,
+}
+
+/// The g loads within their limits, as the reason-15 test and the scenery hit ask it: fore and aft
+/// against the back and front limits, then sideways both ways (`<=`, so a load on its limit is in).
+fn loads_within(p: &AirParams, l: &Loads) -> bool {
+    l.fore_aft <= p.back_wreck_speed_limit
+        && -p.front_wreck_speed_limit <= l.fore_aft
+        && l.side <= p.side_wreck_speed_limit
+        && -p.side_wreck_speed_limit <= l.side
+}
+
+/// **MX vs. ATV's wreck test** (SLUS-21104's `atv_bike_wreck_test`, the clauses it runs
+/// for a driven bike not yet down; the hits after them are [`hit_wreck`]). It is MX Unleashed's
+/// state machine and wreck test in one function, and its clauses are [`crate::air::wreck_test_in`]'s
+/// in the same order on the same fields and limits, with these differences:
+///
+/// - First, before any of them, reason 15 ([`Wreck::Struck`]; `atv_bike_flip_wreck_steep`, the test
+///   the backflip's mid-clip wreck also asks): [`WreckIn::struck_class`] and the bike airborne or its
+///   g loads past the back, front or side limits.
+/// - The airborne pitch and roll limits are held off by the backflip's torque being in
+///   ([`Air::flip_torque_applied`], `+0x1194`, where MX Unleashed reads `flipping`) or the 360's
+///   ([`WreckIn::spin_applied`], `+0x11d0`); and a touch with either in is the wreck off the back.
+/// - The trick endings' gate has no "no-hander" term: aloft, or not in a trick (the rider's stunt id
+///   over 40), or the trick already a wreck.
+///
+/// The fields read as the port's: [`AirStep::stunt`] is the rider's stunt id at most 40 (a trick),
+/// [`Loads::no_hander`] the id being the bike's balance stunt (`+0x1524 == +0x152c`, also the
+/// vertical load's first limit), [`Loads::pose`] and [`Loads::pose_wanted`] the id and the one
+/// wanted (`+0x1530`), [`Loads::pose_blend`] its blend (`+0x14e4`), [`Loads::trick_wrecked`]
+/// `+0x14cc`, [`Loads::racing`] `+0x146c`, [`AirStep::touching`] the record's `+0x34`.
+/// [`AirStep::spinning`] is not read. `in_air` is [`crate::air::wreck_test_in`]'s switch (P138), on
+/// the same clauses; true is the original.
+pub fn wreck_test(p: &AirParams, air: &mut Air, chassis: &Chassis, step: &AirStep, loads: &Loads, w: &WreckIn,
+                  in_air: bool) -> Option<Wreck> {
+    if w.struck_class && (air.airborne || !loads_within(p, loads)) {
+        return Some(Wreck::Struck);
+    }
+    if p.back_wreck_speed_limit < loads.fore_aft {
+        return Some(Wreck::Back);
+    }
+    if loads.fore_aft < -p.front_wreck_speed_limit {
+        return Some(Wreck::Front);
+    }
+    if p.side_wreck_speed_limit < loads.side {
+        return Some(Wreck::Left);
+    }
+    if loads.side < -p.side_wreck_speed_limit {
+        return Some(Wreck::Right);
+    }
+    let v = loads.vertical;
+    if (p.no_hander_wreck_speed_limit < v && loads.no_hander)
+        || (p.racing_down_wreck_speed_limit < v && loads.racing)
+        || (p.freestyle_down_wreck_speed_limit < v && !loads.racing)
+    {
+        return Some(Wreck::Flat);
+    }
+    if air.on_ground && chassis.pitch < -p.ground_pitch_down_wreck_angle {
+        return Some(Wreck::Front);
+    }
+    if air.on_ground && p.ground_pitch_up_wreck_angle < chassis.pitch {
+        return Some(Wreck::Tail);
+    }
+    let torqued = air.flip_torque_applied || w.spin_applied;
+    if in_air && air.airborne && !torqued {
+        if chassis.pitch < -p.airborne_pitch_down_wreck_angle || p.airborne_roll_wreck_angle < chassis.roll.abs() {
+            return Some(Wreck::NoseDive);
+        }
+        if p.airborne_pitch_up_wreck_angle < chassis.pitch {
+            return Some(Wreck::Tail);
+        }
+    }
+    if torqued && step.touching {
+        return Some(Wreck::Tail);
+    }
+    if air.was_airborne && !air.airborne && p.crossup_wreck_time < air.hang_time {
+        let c = loads.landing_crossup;
+        if p.crossup_wreck < c || c < F::ONE - p.crossup_wreck {
+            return Some(if F(0.5) < c { Wreck::Left } else { Wreck::Right });
+        }
+    }
+    let aloft = !air.on_ground && !step.touching;
+    if aloft || !step.stunt || loads.trick_wrecked {
+        if loads.pose != loads.pose_wanted || loads.pose_blend <= F(0.95) {
+            if loads.no_hander && F(step.up.y()) < p.no_hander_max_roll_angle && (in_air || !aloft) {
+                return Some(Wreck::NoHander);
+            }
+            return None;
+        }
+        let v = chassis.vel;
+        air.wreck_impact = v.merge(Dest::XYZ, v.sub(crate::air::normalize(v).mul_q(crate::air::SLOW)));
+        return Some(Wreck::Joust);
+    }
+    Some(Wreck::NoHander)
+}
+
+/// How far up the bike a body ray has to reach for what it hits to count, on MX vs. ATV: a literal in
+/// the wreck test, by the bike's size word (`+0xbc0`, set once from the spawn record): 2.9 where it is
+/// 0, 4.5 otherwise. MX Unleashed's are [`crate::air::HIT_REACH`] (6) and
+/// [`crate::air::HIT_REACH_FIFTY`] (4).
+pub const HIT_REACH_SMALL: F = F(2.9);
+pub const HIT_REACH: F = F(4.5);
+
+/// **MX vs. ATV's hits** (the wreck test's loop over the collision record's contacts, after
+/// [`wreck_test`] and asked by the caller only when that let the bike go, as
+/// [`crate::air::hit_wreck`]): the first of the bike's own contacts with a ray reaching above
+/// [`HIT_REACH`] ([`HIT_REACH_SMALL`] when `small`, the size word 0) decides, and ends the search:
+///
+/// - another rider is a [`Wreck::Joust`] if their body stands higher than this one's by more than
+///   [`AirParams::joust_wreck_height`], their velocity the throw;
+/// - scenery is a [`Wreck::Scenery`] only with the g loads past the back, front or side limits — which
+///   the clauses before it have already wrecked on, so it answers nothing in the ride;
+/// - there is no heavier-object case: an actor is asked by height only, so an
+///   [`Other::Object`] (no height here; the port never makes one) answers nothing.
+///
+/// `touched` is the record's `+0x34`; `height` this bike's.
+pub fn hit_wreck(p: &AirParams, air: &mut Air, touched: bool, small: bool, height: F, loads: &Loads,
+                 contacts: &[Contact]) -> Option<Wreck> {
+    if !touched {
+        return None;
+    }
+    let limit = if small { HIT_REACH_SMALL } else { HIT_REACH };
+    let c = contacts.iter().find(|c| !c.mirrored && limit < c.reach)?;
+    match c.other {
+        Other::Rider { height: theirs, vel } if p.joust_wreck_height < theirs - height => {
+            air.wreck_impact = vel;
+            Some(Wreck::Joust)
+        }
+        Other::Scenery if !loads_within(p, loads) => Some(Wreck::Scenery),
+        _ => None,
     }
 }
