@@ -1566,7 +1566,8 @@ pub fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> V
 /// ray probe ignores the bike's own actor category, which every bike's frame and wreck part carry,
 /// and every owned collidable in the original's searches carries it too, so [`under`] answers only a
 /// vehicle. The one owner the probe is not barred from is a HasPhysics truck's physics mesh, which a
-/// woken truck stands up and the port does not simulate (S169).
+/// woken truck stands up into the wheel's nearby search (S208), and the port does not simulate a
+/// woken truck yet (S186).
 pub fn wheel_contact_velocity(own: Vf, vel: Vf, under: Option<(Vf, Vf)>) -> (Vf, Vf) {
     match under {
         Some((velocity, at)) => (sub_xyz(own, at), sub_xyz(vel, velocity)),

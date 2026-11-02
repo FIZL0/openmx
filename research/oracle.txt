@@ -6489,6 +6489,16 @@ atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into 
 #   object with +0xf0 0 and +0xf4 a body, flags 0x04/0x44, nearby bit clear; the filter accepts the
 #   four bikes' wheel probes against them with nearby 0 and refuses with nearby 1. A woken truck is
 #   the one owner seen that the wheel's owner branch could read (body side). Not run live.
+# S208 — a woken truck's mesh (test crates/game-sim/tests/bike_col.rs a_woken_trucks_mesh_is_in_the_wheels_reach;
+#   journal research/journal/2026-11-02-s208-woken-truck-wheel). physics_car_wake run in the interpreter on
+#   each of s89-along's two trucks: +0x588 0 -> 1; the f.col mesh's +0x31 gains bits 0 and 1 (0x00 -> 0x03,
+#   0xd0 -> 0xd3) and its +0x116 bit 0x10; the car's own mesh +0x428 loses +0x31 bits 0/1 (0xc3 -> 0xc0,
+#   0x33 -> 0x30). After it the filter accepts all four bikes' wheel probes against the mesh with nearby
+#   1 as well as 0. The mesh's +0x80 object has +0xf4 = the physics object's +0x110 body, +0xf0 0. So a
+#   wheel on a woken truck reads the owner branch, body side. The ELF has six sb +0x31 stores; 0x00215a90
+#   sets bit 0 over a list (+0xb0 -> +0x300/+0x304) and 0x00215b30 clears it (data xrefs only, vtables
+#   0x004528f0/0x0045dd10). Which of them the wake's body-on reaches was not traced; the interpreter run
+#   is the proof.
 # S133 — the hierarchy toys' parts (crates/game-render/tests/toy_parts.rs, states s133-free10/-nat11
 #   from R7's scripted boot). The parts list is the motion object's +0x300 (count +0x304); a part's
 #   +0x230 is by then a node of the toy's skeleton (one of its joints' +0x34; a mesh .col's single part
