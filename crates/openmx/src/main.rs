@@ -5923,6 +5923,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     let mut online_want: Option<Kind> = None;
     let mut online_frames = 0u32;
+    // In the browser (P204): the last ten seconds of the ride settled here that the page's console
+    // was told of (`Online::settled_line`).
+    #[cfg(target_arch = "wasm32")]
+    let mut online_told = 0usize;
     // The online peers' rigs dressed mid-ride (N16), each under model names of its own, and the
     // first player's pick, which a peer whose pick does not say is drawn as.
     let mut peers_dressed = 0usize;
@@ -6995,6 +6999,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     leave = Leave::Menu;
                 }
                 break;
+            }
+            #[cfg(target_arch = "wasm32")]
+            if let Some((at, line)) = on.settled_line()
+                && at > online_told
+            {
+                online_told = at;
+                crate::host_say(&line);
             }
             // The pause's leave rows as this machine stands in the ride now (N11): a guest the room
             // was handed to hosts it, and one on its way out has nothing more to leave.

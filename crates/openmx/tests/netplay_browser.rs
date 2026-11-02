@@ -12,6 +12,10 @@
 //! What "agree" means: the first [`TICKS`] ticks, settled on both, have the same line on both
 //! ([`peer::ticks`]: the state's hash before the tick and every seat's pad bytes it ran on), and
 //! neither saw a desync.
+//!
+//! And two browsers through the game's own Online menu (P204, tests/web/online.mjs): Host on one
+//! page, Join by Code on the other, both the shell's front end driven by keys, until their settled
+//! hashes agree.
 
 #[allow(dead_code)]
 #[path = "../src/net/mod.rs"]
@@ -213,4 +217,75 @@ fn ride(browser: impl FnOnce(&Path, &str, &str) -> Command) {
     assert_eq!(desk.too_big, 0, "the desktop dropped datagrams the transport cannot carry");
     assert!(state.contains("\"too_big\":0"), "the browser dropped datagrams the transport cannot carry: {state}");
     eprintln!("{TICKS} ticks alike in {:.1} s; the browser: {state}", started.elapsed().as_secs_f32());
+}
+
+/// Online from the game's own menu in the browser (P204, tests/web/online.mjs): two pages in one
+/// headless chromium, each in a browser context of its own, the disc picked in both and the shell's
+/// front end on the canvas. Keys alone: the host page's Online → Host, the guest's Join by Code
+/// with the host's room code typed on the on-screen keyboard, the guest's Ready and the host's
+/// Start; then both ride on held gas through this process's relay, the room code through the
+/// page server's stand-in pkarr relay (chromium resolves no name but loopback's). The two pages
+/// must say the same hash for the state before ticks 300 and 600, settled, and no desync. On the
+/// GPU, as tests/web.rs's pad test. Skips without the disc, node or chromium.
+#[test]
+fn two_pages_host_and_join_from_the_online_menu() {
+    let iso = match game_render::disc::Disc::open_configured() {
+        Ok(_) => game_render::disc::configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    let pkg = built();
+    let (relay, _rt) = local_relay();
+    let scratch = std::env::temp_dir().join(format!("openmx-p204-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    const FLAGS: [&str; 4] = ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-angle=vulkan", "--ignore-gpu-blocklist"];
+    let child = Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/online.mjs"))
+        .arg(repo().join("web"))
+        .arg(&pkg)
+        .arg(&iso)
+        .arg(&relay)
+        .arg(&scratch)
+        .args(FLAGS)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("node must be on PATH");
+    // stdin kept open while it runs (it quits on its end), closed by Node's drop on a panic
+    let mut node = Node(child);
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut node.0.stdout.take().unwrap(), &mut out).unwrap();
+    let status = node.0.wait().unwrap();
+    drop(node);
+    let _ = std::fs::remove_dir_all(&scratch);
+    assert!(status.success(), "online.mjs failed ({status}):\n{out}");
+
+    let lines = |who: &str| -> Vec<String> {
+        let list = out.split(&format!("\"{who}\":[")).nth(1).unwrap_or("").split(']').next().unwrap_or("");
+        list.split("\",\"").map(|l| l.trim_matches('"').to_string()).filter(|l| !l.is_empty()).collect()
+    };
+    let (host, guest) = (lines("host"), lines("guest"));
+    // the hash each page said for the state before `tick`, and its desyncs then
+    let at = |page: &[String], tick: usize| -> (String, String) {
+        let l = page.iter().find(|l| l.contains(&format!("state before tick {tick} "))).unwrap_or_else(|| panic!("no tick {tick} in {page:?}"));
+        let rest = l.split(&format!("state before tick {tick} ")).nth(1).unwrap();
+        let (hash, desyncs) = rest.split_once(", ").unwrap();
+        (hash.to_string(), desyncs.to_string())
+    };
+    for tick in [300, 600] {
+        let (h, g) = (at(&host, tick), at(&guest, tick));
+        assert_eq!(h.0, g.0, "the state before tick {tick}: the host {host:?}, the guest {guest:?}");
+        assert_eq!((h.1.as_str(), g.1.as_str()), ("0 desyncs", "0 desyncs"), "{host:?} {guest:?}");
+    }
+    // the ride moved on between them: the agreement is about something
+    assert_ne!(at(&host, 300).0, at(&host, 600).0, "{host:?}");
+    eprintln!("{out}");
 }

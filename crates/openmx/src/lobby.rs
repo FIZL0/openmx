@@ -326,6 +326,10 @@ impl Network {
         let mut act = Act::Stay;
         if let Some(net) = &self.net {
             for e in net.poll() {
+                #[cfg(target_arch = "wasm32")]
+                if let Some(line) = page_line(&e) {
+                    crate::host_say(&line);
+                }
                 if menu.heard(e) == Act::Online {
                     act = Act::Online;
                 }
@@ -333,4 +337,22 @@ impl Network {
         }
         act
     }
+}
+
+/// What the front end's lobby heard, as a line for the page's console (P204): the browser has no
+/// standard output, and a test driving the game's own Online menu in headless chromium reads the
+/// room's code, its seats and the start from these. `None` for what says nothing of the lobby.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn page_line(e: &openmx_net::Event) -> Option<String> {
+    use openmx_net::Event;
+    Some(match e {
+        Event::Status(s) => format!("lobby: status {s}"),
+        Event::Short(code) => format!("lobby: code {code}"),
+        Event::Me(me) => format!("lobby: me {me}"),
+        Event::Room(r) => format!("lobby: room {} {} seated, ready {}", r.short, r.taken(), r.all_ready()),
+        Event::Start(r, me) => format!("lobby: start {} on {} as {me}", r.taken(), r.track),
+        Event::Failed(why) => format!("lobby: failed {why}"),
+        Event::Dropped(why) => format!("lobby: dropped {why}"),
+        _ => return None,
+    })
 }

@@ -745,6 +745,17 @@ impl Online {
         format!("online: {} ticks, {settled} settled, {} desyncs{hash}", self.net.tick(), self.net.desyncs.len())
     }
 
+    /// The page's line (P204) for the last ten seconds of the ride that are settled here (run on
+    /// every seat's own pads, re-runs done, so the hash is final): `online: settled <tick>, state
+    /// before tick <t> <hash>, <n> desyncs`, `t` that tick's last multiple of 300; `None` before 300.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn settled_line(&self) -> Option<(usize, String)> {
+        let settled = self.net.settled();
+        let at = (settled.max(1) as usize - 1) / 300 * 300;
+        let h = self.net.hashes.get(at).filter(|_| at > 0)?;
+        Some((at, format!("online: settled {settled}, state before tick {at} {h:#018x}, {} desyncs", self.net.desyncs.len())))
+    }
+
     /// The hash of the state before each tick every machine has every pad for, from the first, and
     /// how many desyncs were caught: what two machines' rides are held against each other by.
     pub fn settled(&self) -> (&[u64], usize) {
