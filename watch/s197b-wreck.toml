@@ -1,0 +1,385 @@
+# s197b-wreck.toml — free09's five beach balls, the human's bike and its wreck bike, one row a tick (S197b).
+#
+# watch/s195-knock.toml's fields (the balls' bodies, node origins, record flags and countdowns, the
+# bike's chassis) and the wreck bike's, at the addresses it has in every state made from
+# first_recording's: its body 0x00dc8980 (+0x00 enabled, +0x60 position, +0x70 velocity, +0x170 quat,
+# +0x1b0 rates) and its collision object 0x00dc98f0 (+0x40.. touching, touching another, on the ground,
+# on an object), filed on free09's props node 0x00e17ef0 with the balls'. research/s197b/drop.py drops the bike hard beside a ball; research/s197b/wreck.py records
+# this from its state and saves states around the strike:
+#
+#   KIT_PCSX2=2 ./kit pcsx2 with -- python3 -B research/s197b/wreck.py NAME SLOT BALL
+
+[watch]
+name        = "s197b-wreck"
+description = "free09's beach balls, the human's bike and its wreck bike, a row a tick"
+every       = 1
+frames      = 600
+
+[setup]
+warmup    = 0
+settle_ms = 240
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rider_ctl_src"  # 1 = the local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "ch_cofg"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "ch_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "ch_ang_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x280"
+type = "f32x4"
+
+[[field]]
+name = "b0_active"
+addr = "0x11bafb0 + 0x20"
+type = "u32"
+
+[[field]]
+name = "b0_en"
+addr = "0x11b6030"
+type = "u32"
+
+[[field]]
+name = "b0_last_pos"
+addr = "0x11b6030 + 0x50"
+type = "f32x4"
+
+[[field]]
+name = "b0_pos"
+addr = "0x11b6030 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "b0_vel"
+addr = "0x11b6030 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "b0_last_quat"
+addr = "0x11b6030 + 0x150"
+type = "f32x4"
+
+[[field]]
+name = "b0_quat"
+addr = "0x11b6030 + 0x170"
+type = "f32x4"
+
+[[field]]
+name = "b0_rates"
+addr = "0x11b6030 + 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "b0_fresh"
+addr = "0x11b6f90 + 0x1b0"
+type = "u32"
+
+[[field]]
+name = "b0_countdown"
+addr = "0x11b6f90 + 0x1bc"
+type = "f32"
+
+[[field]]
+name = "b0_touch"
+addr = "0x11b6f90 + 0x120 -> 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "b0_origin"
+addr = "0x11b6f90 + 0x13c -> 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "b1_active"
+addr = "0x11b6630 + 0x20"
+type = "u32"
+
+[[field]]
+name = "b1_en"
+addr = "0x11b6a90"
+type = "u32"
+
+[[field]]
+name = "b1_last_pos"
+addr = "0x11b6a90 + 0x50"
+type = "f32x4"
+
+[[field]]
+name = "b1_pos"
+addr = "0x11b6a90 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "b1_vel"
+addr = "0x11b6a90 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "b1_last_quat"
+addr = "0x11b6a90 + 0x150"
+type = "f32x4"
+
+[[field]]
+name = "b1_quat"
+addr = "0x11b6a90 + 0x170"
+type = "f32x4"
+
+[[field]]
+name = "b1_rates"
+addr = "0x11b6a90 + 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "b1_fresh"
+addr = "0x11bed70 + 0x1b0"
+type = "u32"
+
+[[field]]
+name = "b1_countdown"
+addr = "0x11bed70 + 0x1bc"
+type = "f32"
+
+[[field]]
+name = "b1_touch"
+addr = "0x11bed70 + 0x120 -> 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "b1_origin"
+addr = "0x11bed70 + 0x13c -> 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "b2_active"
+addr = "0x11bf000 + 0x20"
+type = "u32"
+
+[[field]]
+name = "b2_en"
+addr = "0x11bf460"
+type = "u32"
+
+[[field]]
+name = "b2_last_pos"
+addr = "0x11bf460 + 0x50"
+type = "f32x4"
+
+[[field]]
+name = "b2_pos"
+addr = "0x11bf460 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "b2_vel"
+addr = "0x11bf460 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "b2_last_quat"
+addr = "0x11bf460 + 0x150"
+type = "f32x4"
+
+[[field]]
+name = "b2_quat"
+addr = "0x11bf460 + 0x170"
+type = "f32x4"
+
+[[field]]
+name = "b2_rates"
+addr = "0x11bf460 + 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "b2_fresh"
+addr = "0x11c1860 + 0x1b0"
+type = "u32"
+
+[[field]]
+name = "b2_countdown"
+addr = "0x11c1860 + 0x1bc"
+type = "f32"
+
+[[field]]
+name = "b2_touch"
+addr = "0x11c1860 + 0x120 -> 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "b2_origin"
+addr = "0x11c1860 + 0x13c -> 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "b3_active"
+addr = "0x11c1af0 + 0x20"
+type = "u32"
+
+[[field]]
+name = "b3_en"
+addr = "0x11c1f50"
+type = "u32"
+
+[[field]]
+name = "b3_last_pos"
+addr = "0x11c1f50 + 0x50"
+type = "f32x4"
+
+[[field]]
+name = "b3_pos"
+addr = "0x11c1f50 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "b3_vel"
+addr = "0x11c1f50 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "b3_last_quat"
+addr = "0x11c1f50 + 0x150"
+type = "f32x4"
+
+[[field]]
+name = "b3_quat"
+addr = "0x11c1f50 + 0x170"
+type = "f32x4"
+
+[[field]]
+name = "b3_rates"
+addr = "0x11c1f50 + 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "b3_fresh"
+addr = "0x11c4350 + 0x1b0"
+type = "u32"
+
+[[field]]
+name = "b3_countdown"
+addr = "0x11c4350 + 0x1bc"
+type = "f32"
+
+[[field]]
+name = "b3_touch"
+addr = "0x11c4350 + 0x120 -> 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "b3_origin"
+addr = "0x11c4350 + 0x13c -> 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "b4_active"
+addr = "0x11c45e0 + 0x20"
+type = "u32"
+
+[[field]]
+name = "b4_en"
+addr = "0x11c4a40"
+type = "u32"
+
+[[field]]
+name = "b4_last_pos"
+addr = "0x11c4a40 + 0x50"
+type = "f32x4"
+
+[[field]]
+name = "b4_pos"
+addr = "0x11c4a40 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "b4_vel"
+addr = "0x11c4a40 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "b4_last_quat"
+addr = "0x11c4a40 + 0x150"
+type = "f32x4"
+
+[[field]]
+name = "b4_quat"
+addr = "0x11c4a40 + 0x170"
+type = "f32x4"
+
+[[field]]
+name = "b4_rates"
+addr = "0x11c4a40 + 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "b4_fresh"
+addr = "0x11c6e40 + 0x1b0"
+type = "u32"
+
+[[field]]
+name = "b4_countdown"
+addr = "0x11c6e40 + 0x1bc"
+type = "f32"
+
+[[field]]
+name = "b4_touch"
+addr = "0x11c6e40 + 0x120 -> 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "b4_origin"
+addr = "0x11c6e40 + 0x13c -> 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "wb_en"
+addr = "0xdc8980"
+type = "u32"
+
+[[field]]
+name = "wb_pos"
+addr = "0xdc8980 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "wb_vel"
+addr = "0xdc8980 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "wb_quat"
+addr = "0xdc8980 + 0x170"
+type = "f32x4"
+
+[[field]]
+name = "wb_rates"
+addr = "0xdc8980 + 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "wb_touch"
+addr = "0xdc98f0 + 0x40"
+type = "bytes:16"

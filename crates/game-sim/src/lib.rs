@@ -353,6 +353,8 @@ impl Sim {
         let cars = self.car_contacts(0, world, dt);
         // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
         let strike = self.prop_strike(0, dt);
+        // And a downed rider's wreck bike against the props' rays (S197b, [`prop_wreck`]).
+        self.wreck_strike(0);
         let said = if cars.is_empty() && strike.contacts.is_empty() {
             self.rider.frame(&self.phy, &self.tables, controls, dt, world)
         } else {
@@ -465,6 +467,7 @@ impl Sim {
             // And its body rays against the knockable props (S197a), where the riders walked before
             // it left them: what it strikes is woken, and pushed in its frame.
             let strike = self.prop_strike(i, dt);
+            self.wreck_strike(i);
             let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
                 .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
                 .filter(|l| !l.is_empty() || !strike.contacts.is_empty())
@@ -969,6 +972,10 @@ pub mod prop_set;
 /// The riding bike's body rays striking the knockable props' meshes (S197): the struck body woken
 /// and pushed, the bike pushed back.
 pub mod prop_contact;
+
+/// The knockable props' rays striking the wreck bike's mesh (S197b): the entries on the props, the
+/// mirrors on the wreck bike, the push both ways.
+pub mod prop_wreck;
 
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.
