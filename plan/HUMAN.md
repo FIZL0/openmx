@@ -392,3 +392,20 @@ log you can save on the phone itself (a minute):
    `openmx-log.txt`: Save to Files, or send it (LocalSend into the repo's `context/` is fine).
 4. Name the file in P257a. The lines that matter start `worker log: gpu: adapter limits` and
    `worker log: gpu: validation error in …`. Switch the log off again afterwards if you like.
+
+## Ride the native-sim concept build (F15)
+
+F15's concept build runs the simulation on plain `f32` instead of the PS2's arithmetic. It is about twice as
+fast, and no longer the original bit for bit. Only a rider can say whether it still feels the same.
+
+1. Build it with `tools/build.sh linux --native-sim`, which takes about 2 min in the sniper container. Copy
+   `dist/linux/` to the device. Slot s1's `dist/linux/` already holds one, `openmx v0.9.5 · a772b5e · native sim`.
+2. Check it is the right build. `./openmx --version` and the main menu's corner end with `native sim`. An
+   ordinary build says nothing there.
+3. Ride free06 and a jump-heavy track for a few minutes each. Compare with a normal build if you can. Write down
+   anything that feels off: landings, wrecks, steering, whips. Put it in F15's journal or ask for it as a task.
+4. Deck numbers, if you want them: on each build, run
+   `./openmx --headless --track free06 --players 2 --frames 1500 --timings` and read `session ms a frame: … sim`.
+   It draws offscreen and leaves your settings alone.
+
+A native build cannot play online with an ordinary one. Each sees the other's lobby as "another version".
