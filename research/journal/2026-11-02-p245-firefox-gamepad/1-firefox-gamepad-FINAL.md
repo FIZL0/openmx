@@ -44,10 +44,12 @@ Not applicable (a browser input path; the PS2 game reads its pad through libpad)
 ## How it was proved
 
 - `./kit check -- -p openmx --test web -- a_firefox_pad_rides a_pad_the_browser_shows`, run three times
-  inside the gate (its private display exported). The first run was red with B13, before `webgl.disabled`;
+  inside the gate (its private display exported). The first run was red on B13, before `webgl.disabled`;
   the next two were green: 2 tests passed each time, P236's chromium test included.
-- By hand, 4 runs of `firefox_gamepad.mjs` (with and without `DISPLAY=:0`): `listed: false`, `first: true`,
-  3 taps to a seat, `braked: 0`, and gas 0.107–0.108 with the 3.5 s reading (0.055 with the old one).
+- By hand, 4 runs of `firefox_gamepad.mjs`. One used the old gas reading (green, gas 0.055). One with
+  `DISPLAY=:0` and no `webgl.disabled` was red on B13. Two were green with the final driver, one with
+  `DISPLAY=:0` and one without: `listed: false`, `first: true`, 3 taps to a seat, `braked: 0`, gas
+  0.107–0.108.
   About 20 s a run once the module is built. Looked at the R2 picture: Dallas, the HUD's speed reads 39.
 
 ## Not verified / not 1:1
