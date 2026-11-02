@@ -33,6 +33,9 @@ pub struct Params {
     pub wrap: Option<String>,
     /// Lines the world spec adds to the world's todo (a gap the spec chose, e.g. a raised `max_slope`).
     pub todo: Vec<String>,
+    /// Tiles laid out in the grid's middle cells, whatever their height ([`plan`]; openmx P253): on a
+    /// wrapped world the ride starts there (MD50). Empty, the height order alone lays the grid out.
+    pub middle: Vec<String>,
     /// Threads for the join ground (0: as many as the machine has).
     pub threads: usize,
     /// Give each point only the tiles that can have a say there (the spatial grid, [`Plan::bins`]).
@@ -53,6 +56,7 @@ impl Params {
             sky: None,
             wrap: None,
             todo: Vec::new(),
+            middle: Vec::new(),
             threads: 0,
             prune: true,
         }
@@ -61,7 +65,7 @@ impl Params {
 
 impl Params {
     /// A world spec's build parameters (`worlds/<id>.json`: `id`, `name`, and optional `sky`, `wrap`,
-    /// `max_slope`, `min_gap`, `fade`, `chunk`, `todo`), as openmx-mods' `stitch --mods --out` reads
+    /// `max_slope`, `min_gap`, `fade`, `chunk`, `todo`, `middle`), as openmx-mods' `stitch --mods --out` reads
     /// them; its `tiles` are the caller's to find.
     pub fn from_spec(j: &Json) -> Result<Params, String> {
         let g = |k: &str| j.get(k).and_then(Json::str).map(str::to_owned);
@@ -69,6 +73,7 @@ impl Params {
         p.sky = g("sky");
         p.wrap = g("wrap");
         p.todo = j.get("todo").and_then(Json::arr).unwrap_or_default().iter().filter_map(Json::str).map(str::to_owned).collect();
+        p.middle = j.get("middle").and_then(Json::arr).unwrap_or_default().iter().filter_map(Json::str).map(str::to_owned).collect();
         if let Some(v) = j.get("max_slope").and_then(Json::f64) {
             p.max_slope = v;
         }
@@ -303,7 +308,8 @@ fn place_axis(want: f64, s: f64, lo: u32, hi: u32, ratio: Option<(i64, i64)>) ->
 }
 
 /// Lay the tiles out in a grid, ordered by the height of their interiors' edges and filled in a snake,
-/// so neighbours are close in height; each gap is as wide as its two facing edges' heights need.
+/// so neighbours are close in height, with [`Params::middle`]'s tiles in the cells nearest the grid's
+/// middle; each gap is as wide as its two facing edges' heights need.
 /// `gates` are each tile's seam gates per edge ([`gates`], measured on its cut).
 pub fn plan(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &Params, widen: f64) -> Result<Plan, String> {
     if tiles.len() < 2 {
@@ -318,11 +324,29 @@ pub fn plan(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &Params, w
     let rows = tiles.len().div_ceil(cols);
     let mut grid = vec![vec![None; cols]; rows];
     let mut cell = vec![(0, 0); tiles.len()];
-    for (i, &t) in order.iter().enumerate() {
-        let (r, mut c) = (i / cols, i % cols);
-        if r % 2 == 1 {
-            c = cols - 1 - c;
-        }
+    let snake: Vec<(usize, usize)> = (0..tiles.len())
+        .map(|i| {
+            let (r, c) = (i / cols, i % cols);
+            (r, if r % 2 == 1 { cols - 1 - c } else { c })
+        })
+        .collect();
+    // The spec's `middle` tiles (P253) take the snake's cells nearest the grid's middle, in height
+    // order among themselves; the rest fill the other cells in the snake's order.
+    let middle: Vec<usize> = p
+        .middle
+        .iter()
+        .map(|m| tiles.iter().position(|t| &t.id == m).ok_or_else(|| format!("middle {m} is not one of the tiles")))
+        .collect::<Result<_, _>>()?;
+    let mut near: Vec<usize> = (0..snake.len()).collect();
+    let mid = [(rows - 1) as f64 / 2.0, (cols - 1) as f64 / 2.0];
+    let d = |i: usize| (snake[i].0 as f64 - mid[0]).powi(2) + (snake[i].1 as f64 - mid[1]).powi(2);
+    near.sort_by(|a, b| d(*a).total_cmp(&d(*b)));
+    let mut middle_cells: Vec<usize> = near[..middle.len()].to_vec();
+    middle_cells.sort();
+    let (inner, outer): (Vec<usize>, Vec<usize>) = order.iter().partition(|t| middle.contains(t));
+    let outer_cells: Vec<usize> = (0..snake.len()).filter(|i| !middle_cells.contains(i)).collect();
+    for (i, t) in middle_cells.into_iter().zip(inner).chain(outer_cells.into_iter().zip(outer)) {
+        let (r, c) = snake[i];
         grid[r][c] = Some(t);
         cell[t] = (c, r);
     }

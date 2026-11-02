@@ -8,7 +8,8 @@
 //!
 //! openmx-mods' worlds are looked for in `$OPENMX_WORLDS` (a mods folder), else in the main
 //! checkout's `mods/`; without them the comparison is skipped and says so. Without the disc it all
-//! skips. world_mxu's build is minutes and 850 MB, so its test is ignored: run it by hand.
+//! skips. world_mxu (P253's WORLD, the freerides in its middle) and world_mxu_nat are built and
+//! ridden once each, a minute or so and some 400 MB apiece, removed after.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -121,8 +122,87 @@ fn world_mxu_free_is_built_off_the_disc_as_openmx_mods_builds_it() {
     rides_off_the_disc("world_mxu_free", 5, 38 + 14);
 }
 
+/// The first ride on `id` off the disc into an empty mods folder: what it said, and the built
+/// world's `mod.json`. `None` without the disc.
+fn first_ride(id: &str) -> Option<(String, String, PathBuf)> {
+    if !disc() {
+        return None;
+    }
+    let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("p253-{id}"));
+    let _ = std::fs::remove_dir_all(&mods);
+    std::fs::create_dir_all(&mods).unwrap();
+    let said = shell(&mods, id);
+    assert!(said.contains(&format!("{id}: building its joins")), "{said}");
+    let keys: Vec<PathBuf> = std::fs::read_dir(mods.join("cache/stitch").join(id)).unwrap().flatten().map(|e| e.path()).collect();
+    assert_eq!(keys.len(), 1, "one build kept: {keys:?}");
+    let json = std::fs::read_to_string(keys[0].join("mod.json")).unwrap();
+    Some((said, json, mods))
+}
+
+/// The line of `said` that starts with `head`, less it.
+fn after<'a>(said: &'a str, head: &str) -> &'a str {
+    said.lines().find_map(|l| l.strip_prefix(head)).unwrap_or_else(|| panic!("no {head:?} line:\n{said}"))
+}
+
+/// Each tile's `at` in the built world's `mod.json`, in its order.
+fn placed(json: &str) -> Vec<(String, [f64; 2])> {
+    json.lines()
+        .filter_map(|l| {
+            let tile = l.split("\"tile\": \"").nth(1)?.split('"').next()?.to_string();
+            let at = l.split("\"at\": [").nth(1)?.split(']').next()?;
+            let mut n = at.split(',').map(|v| v.trim().parse::<f64>().unwrap());
+            Some((tile, [n.next()?, n.next()?]))
+        })
+        .collect()
+}
+
+const FREE: [(&str, &str); 5] =
+    [("mxu_free06", "Dallas"), ("mxu_free07", "Norfolk"), ("mxu_free09", "Bridgeport"), ("mxu_free10", "Rochester"), ("mxu_free11", "Cleveland")];
+
+/// P253: MX Unleashed: WORLD is every freeride and national map. All 27 are placed; the five
+/// freerides are in its middle, so the ride starts on one with the other four drawn around it, and
+/// the radar names all 27 maps. Its joins are no longer openmx-mods' world_mxu (that one has the
+/// freerides along an edge), so there is nothing to compare with.
 #[test]
-#[ignore = "builds world_mxu's 1222 joins (850 MB, minutes): run by hand"]
-fn world_mxu_is_built_off_the_disc_as_openmx_mods_builds_it() {
-    rides_off_the_disc("world_mxu", 27, 1222 + 328);
+fn world_mxu_has_every_freeride_and_national_with_the_freerides_in_its_middle() {
+    let Some((said, json, mods)) = first_ride("world_mxu") else { return };
+    assert!(after(&said, "world: world_mxu ").starts_with("(MX Unleashed: WORLD), 27 tiles and "), "{said}");
+    let tiles = placed(&json);
+    assert_eq!(tiles.len(), 27, "{json}");
+    for (name, _) in FREE {
+        assert!(tiles.iter().any(|(t, _)| t == name), "{name} not placed");
+    }
+    for n in 1..=22 {
+        assert!(tiles.iter().any(|(t, _)| *t == format!("mxu_nat{n:02}")), "nat{n:02} not placed");
+    }
+    // The freerides are in no outer row or column of the grid.
+    for a in 0..2 {
+        let lo = tiles.iter().map(|t| t.1[a]).fold(f64::MAX, f64::min);
+        let hi = tiles.iter().map(|t| t.1[a]).fold(0.0, f64::max);
+        for (t, at) in tiles.iter().filter(|t| t.0.starts_with("mxu_free")) {
+            assert!(at[a] > lo + 1000.0 && at[a] < hi - 1000.0, "{t} at {at:?} is on the world's edge ({lo}..{hi})");
+        }
+    }
+    assert!(after(&said, "world spawn: ").starts_with("mxu_free"), "{said}");
+    let radar = after(&said, "radar maps: ").strip_prefix("27: ").unwrap_or_else(|| panic!("not 27 maps:\n{said}"));
+    for (name, town) in FREE {
+        assert!(said.contains(&format!("world props drawn: {name} ")), "{name} not drawn:\n{said}");
+        assert!(said.contains(&format!("world ground: {name} built")), "{name}'s ground not built");
+        assert!(radar.split(", ").any(|n| n == town), "{town} not among the radar's maps: {radar}");
+    }
+    let _ = std::fs::remove_dir_all(&mods);
+}
+
+/// P253: MX Unleashed: every national is the 22 national tracks, ridden from nat01's archives.
+#[test]
+fn world_mxu_nat_is_the_22_nationals() {
+    let Some((said, json, mods)) = first_ride("world_mxu_nat") else { return };
+    assert!(after(&said, "world: world_mxu_nat ").starts_with("(MX Unleashed: every national), 22 tiles and "), "{said}");
+    assert!(said.lines().any(|l| l.starts_with("world: world_mxu_nat ") && l.ends_with("lit by mxu_nat01")), "{said}");
+    let tiles: Vec<String> = placed(&json).into_iter().map(|t| t.0).collect();
+    assert_eq!(tiles, (1..=22).map(|n| format!("mxu_nat{n:02}")).collect::<Vec<_>>());
+    assert!(after(&said, "world spawn: ").starts_with("mxu_nat"), "{said}");
+    assert!(after(&said, "radar maps: ").starts_with("22: "), "{said}");
+    assert!(said.lines().any(|l| l.starts_with("world seams:") && l.contains("no gaps")), "{said}");
+    let _ = std::fs::remove_dir_all(&mods);
 }
