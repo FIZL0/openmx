@@ -223,6 +223,29 @@ pub fn name_tricks(out: &mut [openmx_net::Cmd], tricks: crate::menu::Tricks, mod
     }
 }
 
+/// The handling a ride on `handling` rides (N21, MD40's setting), as a room names it: the id of the
+/// pack whose `mx_*.phy` the bikes are read from (the first in `mods`, the one `ride_handling_pack`
+/// would read, which is also the trick pack's) for MX vs. ATV's, else empty, the original's.
+pub fn room_handling(handling: game_sim::handling::Handling, mods: Option<&Path>) -> String {
+    match (handling, mods) {
+        (game_sim::handling::Handling::MxVsAtv, Some(mods)) => crate::trick_packs::find(mods).map(|p| p.id).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// A lobby this machine hosts rides its Handling row (N21): MX vs. ATV's names its pack in the room
+/// the commands `out` host, and the handshake holds every seat to it. A ride opened online under
+/// way (N10) already says its own.
+pub fn name_handling(out: &mut [openmx_net::Cmd], handling: game_sim::handling::Handling, mods: Option<&Path>) {
+    for c in out {
+        if let openmx_net::Cmd::Host(room) | openmx_net::Cmd::Quick(room) = c
+            && !room.riding
+        {
+            room.handling = room_handling(handling, mods);
+        }
+    }
+}
+
 /// The bike sets the lobby offers, as the menu shows them: the eight a player rides, P every one
 /// ([`roster::Set::ridden`]).
 pub fn bikes() -> Vec<(String, String)> {
@@ -308,6 +331,7 @@ impl Network {
         self.disc.tricks_from(mods.clone());
         let mut out = std::mem::take(&mut menu.lobby.out);
         name_tricks(&mut out, menu.settings.tricks, mods.as_deref());
+        name_handling(&mut out, menu.settings.handling, mods.as_deref());
         if !out.is_empty() {
             let name = menu.settings.name.clone();
             let lan = menu.lobby.lan;

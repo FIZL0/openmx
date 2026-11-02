@@ -140,6 +140,11 @@ pub struct Room {
     /// build sends. The handshake holds every machine to the same files under it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tricks: String,
+    /// The handling every seat rides (N21, MD40's setting): the id of the host's MX vs. ATV pack whose
+    /// `mx_*.phy` the bikes are read from on MX vs. ATV's handling, empty for the original's, and what
+    /// an older build sends. The handshake holds every machine to the same files under it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub handling: String,
 }
 
 impl Room {

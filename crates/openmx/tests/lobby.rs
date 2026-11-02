@@ -415,6 +415,51 @@ fn every_seat_of_an_online_ride_has_the_hosts_trick_pack() {
     }
 }
 
+/// N21: a host on MX vs. ATV's handling names its pack in the room, apart from the tricks; on the
+/// shell's own [`lobby::DiscFiles`] a guest with the same pack's files passes the handshake, and one
+/// whose `mx_race125p.phy` differs, or with no pack, is refused with the handling named.
+#[test]
+fn every_seat_of_an_online_ride_has_the_hosts_handling() {
+    use game_sim::handling::Handling;
+    use openmx_net::handshake::Handshake;
+    let hm = trick_mods("n21-host", "[Three Sixty]\n");
+    let mut out = vec![Cmd::Host(Room::new("Hosty", "free06", 2)), Cmd::Leave];
+    lobby::name_handling(&mut out, Handling::Original, Some(&hm));
+    let Cmd::Host(room) = &out[0] else { unreachable!() };
+    assert_eq!(room.handling, "", "the original's handling names no pack");
+    lobby::name_handling(&mut out, Handling::MxVsAtv, None);
+    let Cmd::Host(room) = &out[0] else { unreachable!() };
+    assert_eq!(room.handling, "", "with the mods folder off, the original's");
+    lobby::name_handling(&mut out, Handling::MxVsAtv, Some(&hm));
+    let Cmd::Host(room) = &out[0] else { unreachable!() };
+    let mut room = room.clone();
+    assert_eq!((room.handling.as_str(), room.tricks.as_str()), ("mxvatv", ""), "the room names its pack for the handling alone");
+    let mut riding = Room::new("Hosty", "free06", 2);
+    riding.riding = true;
+    let mut out = vec![Cmd::Host(riding)];
+    lobby::name_handling(&mut out, Handling::MxVsAtv, Some(&hm));
+    let Cmd::Host(riding) = &out[0] else { unreachable!() };
+    assert_eq!(riding.handling, "", "a ride opened online under way says its own");
+    room.take(HOST, &[Pick::new("thq1", "race125p")]);
+    let files = |mods: Option<&std::path::Path>| {
+        let f = lobby::DiscFiles::default();
+        f.tricks_from(mods.map(|m| m.to_path_buf()));
+        f
+    };
+    let host = Handshake::of(&room, &files(Some(&hm)));
+    assert!(host.handling_hash.is_some(), "the host hashes its pack");
+    let same = trick_mods("n21-same", "[Three Sixty]\n");
+    assert_eq!(Handshake::of(&room, &files(Some(&same))).check(&host), Ok(()), "the same pack rides");
+    let changed = trick_mods("n21-changed", "[Three Sixty]\nchanged = 1\n");
+    let e = Handshake::of(&room, &files(Some(&changed))).check(&host).unwrap_err();
+    assert_eq!(e, "Can't ride: the host's handling is MX vs. ATV's, and its pack mxvatv isn't the same in your mods folder as in the host's.");
+    let e = Handshake::of(&room, &files(None)).check(&host).unwrap_err();
+    assert_eq!(e, "Can't ride: the host's handling is MX vs. ATV's, and its pack mxvatv isn't in your mods folder.");
+    for m in [hm, same, changed] {
+        let _ = std::fs::remove_dir_all(m.parent().unwrap());
+    }
+}
+
 /// A `mods/` folder in the temp dir holding one track mod, `md6_flat` ("MD6 Flat", `version`),
 /// whose terrain file says `terrain`; `None` for a folder without it.
 fn track_mods_folder(name: &str, held: Option<(&str, &str)>) -> std::path::PathBuf {
