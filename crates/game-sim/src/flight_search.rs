@@ -644,6 +644,31 @@ pub fn refresh_flown(
     refill(&mut objects, &mut broad, search);
 }
 
+/// The ghost's category (S129, S189): what the put-back adds to the riding bike's body rays' category
+/// list, and what the path cars' meshes ([`TOY`]) and the bikes ([`BIKE`]) have in theirs.
+pub const GHOST: u32 = 0x40;
+
+/// **The riding bike's nearby search refilled** (S189): [`refresh_flown`] around the body rays placed
+/// at `node`, with no bikes in the world (the riders meet each other through their own lists), the
+/// path cars toys in it, and the rays' category list `ignore` (exclude mode) in the gather's pair
+/// filter: a ghost's ([`GHOST`]) drops every car and toy, and the list keeps none of them until the
+/// bike next gathers it afresh.
+pub fn refresh_ridden(
+    props: Option<&Props>,
+    trees: Option<&Trees>,
+    field: Option<([F; 2], [F; 2])>,
+    rays: &Rays,
+    node: &Frame,
+    search: &mut broad_phase::Search,
+    ignore: &[u32],
+) {
+    let props = props.map_or(&[][..], |p| &p.props[..]);
+    let (centre, radius) = reach(rays, &matrix(node));
+    let (mut broad, mut objects) = world_flown(props, trees, None, field, centre, radius);
+    objects[RAY].categories = Categories { mode: 1, list: ignore.to_vec() };
+    refill(&mut objects, &mut broad, search);
+}
+
 /// **The world the plane's search takes at `node`** (V96): [`World::wooded_near`] around the ray
 /// probe's reach, which a world of many tiles answers with the shapes near one square of it (MD28)
 /// rather than every tile's, so a tick's two broad phases ([`Scene::flown`], [`refresh_flown`]) do
@@ -980,6 +1005,12 @@ impl Scene<'_> {
     /// Prop `i`, when `object` is one of the props' collidables.
     fn prop(&self, object: usize) -> Option<usize> {
         object.checked_sub(FIRST).filter(|&i| i < self.props.len())
+    }
+
+    /// The prop `object` is, when it is one of the props' collidables (S189: what a riding bike's
+    /// wheel probe struck, for its car and its material).
+    pub fn prop_at(&self, object: usize) -> Option<&Prop> {
+        self.prop(object).map(|i| &self.props[i])
     }
 }
 

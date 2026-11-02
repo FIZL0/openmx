@@ -136,13 +136,15 @@ fn sim_on(height: fn(f64, f64) -> f64, x: f32, z: f32, east: bool) -> Sim {
     Sim::with_rider(0, tables, phy, rider)
 }
 
-/// `s` without the put-back query's broad-phase list. The list's reach is cut to the cells of the
-/// world's broad-phase space, which is laid over the world's extent, and the two worlds' extents
-/// differ (the wide one is twice as wide; the wrapped one's runs a width past each seam). It is a
-/// cache: what it holds within that reach is the same either way, and with no props it holds nothing.
+/// `s` without the put-back query's broad-phase list, nor the bike's nearby search (S189). Each list's
+/// reach is cut to the cells of the world's broad-phase space, which is laid over the world's extent,
+/// and the two worlds' extents differ (the wide one is twice as wide; the wrapped one's runs a width
+/// past each seam). What each holds within that reach is the same either way, and with no props it
+/// holds nothing.
 fn uncached(s: &Sim) -> Sim {
     let mut s = s.clone();
     s.rider.ride.back_search = None;
+    s.rider.ride.nearby = None;
     s
 }
 

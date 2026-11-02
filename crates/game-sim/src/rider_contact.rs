@@ -409,18 +409,28 @@ fn vehicle_on(ride: &crate::ride::Ride, p: &Phy) -> Vehicle {
 /// A prop that moves this tick (a path car's mesh) is struck with its mover (S145,
 /// [`crate::flight_search::Scene`]): the sweep back meets it at its velocity, and the contacts on it
 /// name it in the movers that come back with them, which [`Bump::movers`] carries to the resolve.
+///
+/// This one gathers a list of its own around the rays where they stand; the ride's tick searches the
+/// bike's kept one ([`scenery_in`]).
 pub fn scenery(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>)> {
-    let (field, props, trees) = world.wooded_near(at.0[3]);
+    scenery_in(col, at, &mut None, world, dt)
+}
+
+/// [`scenery`] through the bike's nearby search as last gathered (S189, [`crate::ride::Ride::nearby`]):
+/// the body rays collide only against its list, a candidate only within their reach of where it was
+/// measured from, so a bike whose list was gathered as a ghost meets no path car.
+pub fn scenery_in(
+    col: &BikeCol,
+    at: &Mat4,
+    nearby: &mut Option<Box<crate::broad_phase::Search>>,
+    world: &mut dyn World,
+    dt: F,
+) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>)> {
     let at = node(at);
-    if props.is_none() && trees.is_none() {
-        return None;
-    }
-    let bounds = field.as_ref().map(|f| {
-        let (lo, hi) = (f.min(), f.max());
-        ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
-    });
-    let mut search = crate::ride::bike_search();
-    let mut scene = crate::flight_search::Scene::wooded(props, trees, None, bounds, &col.rays, &at, &mut search);
+    crate::ride::nearby_scene(nearby, world, &col.rays, &at, |scene| scenery_search(at, scene, dt))
+}
+
+fn scenery_search(at: Node, scene: &mut crate::flight_search::Scene<'_>, dt: F) -> (Vec<Contact>, Vec<crate::contact::Mover>) {
     let mut records = [Record {
         search_ground: false,
         search: true,
@@ -433,10 +443,10 @@ pub fn scenery(col: &BikeCol, at: &Mat4, world: &mut dyn World, dt: F) -> Option
         rays: Some(Vec::new()),
         ..Record::default()
     }];
-    contact_search::collide(&mut records, 0, None, None, &mut scene, dt);
-    let movers = contact_search::Search::movers(&scene);
+    contact_search::collide(&mut records, 0, None, None, scene, dt);
+    let movers = contact_search::Search::movers(scene);
     let [record] = records;
-    Some((record.contacts, movers))
+    (record.contacts, movers)
 }
 
 /// The up the ground step's end turns the record's ground search on at or under (P147): the bike's

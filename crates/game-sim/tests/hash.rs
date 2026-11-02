@@ -552,7 +552,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // on, `None` on every original ride.
     // 11968 since P243: the card's crash lockout, its waiting bank and the window (`Score::lockout`,
     // `pending`, `settling`), the two walked only while a bank waits, so the leaves do not move.
+    // 11976 since S189: the bike's kept nearby search (`Ride::nearby`), walked as `nearby` only once
+    // the bike has searched a world with props or plants, so the leaves do not move.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11968, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 11976, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

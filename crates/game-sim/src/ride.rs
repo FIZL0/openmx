@@ -815,6 +815,12 @@ pub struct Ride {
     /// until then, and the hash walk leaves it out then, so a ride with nothing solid about it
     /// hashes as before.
     pub back_search: Option<Box<crate::back_search::Cache>>,
+    /// **The bike's nearby search** (S189, the rider's `+0x7bc`): what the broad phase last gathered
+    /// around the body rays, after the substeps ([`Ride::gather_nearby`]), and the one list the chassis'
+    /// sweep back, the body rays and the wheel probe collide against ([`Ride::nearby_scene`]). Made the
+    /// first time the bike searches a world that hands over its props or plants; `None` until then, and
+    /// the hash walk leaves it out then, so a ride with nothing solid about it hashes as before.
+    pub nearby: Option<Box<broad_phase::Search>>,
 }
 
 impl Ride {
@@ -885,6 +891,7 @@ impl Ride {
             tricks: None,
             mxvatv: None,
             back_search: None,
+            nearby: None,
         };
         ride.place(at, facing);
         ride
@@ -1665,6 +1672,76 @@ const BIKE_SEARCH_LEAST: f32 = 30.0;
 const BIKE_SEARCH_EXTRA: f32 = 50.0;
 const BIKE_SEARCH_CAPACITY: i32 = 256;
 
+/// **The bike's probes against its nearby search** (S189): `f` run over the scene the probe `rays`
+/// placed at `node` searches, which is the world's props and plants ([`World::wooded_near`], the path
+/// cars toys in it) through the bike's one kept list ([`Ride::nearby`]) — never gathered here but on
+/// the first search of a fresh bike, the seed, which the original's spawn does somewhere not found.
+/// The search walks the list as last gathered, a candidate only within the probe's own reach of
+/// where it was measured from ([`crate::world_search::search_nearby`]). `None` in a world that hands
+/// over no props or plants, which leaves `nearby` as it was.
+pub fn nearby_scene<R>(
+    nearby: &mut Option<Box<broad_phase::Search>>,
+    world: &mut dyn World,
+    rays: &flight_search::Rays,
+    node: &crate::contact::Node,
+    f: impl FnOnce(&mut flight_search::Scene<'_>) -> R,
+) -> Option<R> {
+    let made = nearby.is_none();
+    let search = nearby.get_or_insert_with(|| Box::new(bike_search()));
+    let (field, props, trees) = flight_search::near_world(world, rays, node, search);
+    if props.is_none() && trees.is_none() {
+        if made {
+            *nearby = None;
+        }
+        return None;
+    }
+    let bounds = field.as_ref().map(|f| {
+        let (lo, hi) = (f.min(), f.max());
+        ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+    });
+    let mut scene = flight_search::Scene::flown(props, trees, None, bounds, rays, node, search);
+    Some(f(&mut scene))
+}
+
+impl Ride {
+    /// **The bike's nearby search gathered** (S189): what the original's bike update does once a tick
+    /// after its substeps, around the body rays (`rays`, [`crate::bike_col::BikeCol::rays`]; the wheel
+    /// probe, [`wheel_rays`], for a rider with no collision files) where the frame left the chassis
+    /// (`at`: a put-back later in the rider's tick moves the bike after the gather).
+    /// Gathered afresh only once the rays' reach has left the bound of where the list was last
+    /// gathered; till then only its distances are measured again ([`broad_phase::gather`]). The
+    /// gather's pair filter reads the rays' category list, which holds [`flight_search::GHOST`] while
+    /// the bike is a `ghost`: a list gathered then holds no path car, and a bike that stands on where
+    /// it gathered it meets none until it rides out of the bound (S129's braked state). Nothing in a
+    /// world that hands over no props or plants.
+    pub fn gather_nearby(&mut self, at: &Mat4, rays: Option<&flight_search::Rays>, world: &mut dyn World, ghost: bool) {
+        let node = rider_contact::node(at);
+        let wheels;
+        let rays = match rays {
+            Some(r) => r,
+            None => {
+                wheels = wheel_rays(&self.front.w, &self.rear.w);
+                &wheels
+            }
+        };
+        let made = self.nearby.is_none();
+        let search = self.nearby.get_or_insert_with(|| Box::new(bike_search()));
+        let (field, props, trees) = flight_search::near_world(world, rays, &node, search);
+        if props.is_none() && trees.is_none() {
+            if made {
+                self.nearby = None;
+            }
+            return;
+        }
+        let bounds = field.as_ref().map(|f| {
+            let (lo, hi) = (f.min(), f.max());
+            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+        });
+        let ignore: &[u32] = if ghost { &[flight_search::GHOST] } else { &[] };
+        flight_search::refresh_ridden(props, trees, bounds, rays, &node, search, ignore);
+    }
+}
+
 /// The chassis' sweep back's record (S125): the riding bike's collision object (`+0x7d0`) as its
 /// builder leaves it, the sweep's switch, offset, lead, push-out and facing cosine being the bike's
 /// `[Collisions]` high-speed keys ([`phy::Collisions`]), its transform the chassis' node. The bike's
@@ -1718,38 +1795,29 @@ impl crate::contact_search::Search for SolidSweep<'_> {
 
 /// The wheel probe's contacts where the chassis stands at `m`, as `(segment's from, point, normal)`,
 /// and the nearest one's fraction (`1` with none): searched the original's way, through the bike's
-/// nearby search ([`flight_search::Scene::wooded`]), in a world that hands its props over
+/// nearby search ([`flight_search::Scene::flown`]), in a world that hands its props over
 /// ([`World::wooded`]); swept as a bundle of the two segments in one that only answers
-/// [`World::solid`] (the port's, for the worlds tests build). The search is gathered fresh each
-/// substep around the probe itself: the original gathers once a frame, after the substeps, around the
-/// body rays, which hands out the same candidates within reach in its walk's order then.
+/// [`World::solid`] (the port's, for the worlds tests build). The search is the bike's kept list
+/// ([`nearby_scene`], S189), gathered once a frame after the substeps around the body rays: a
+/// candidate is tried only within the wheel probe's reach of where the list measured it from.
 ///
 /// A hit on a prop that moves ([`crate::world::Prop::moving`], a path car's mesh) carries the car:
 /// the collidable's vehicle (`+0x7c`) in the original, a vehicle of kind 2 (S136). The handle is the
 /// struck object's own number, which is never zero.
-fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, world: &mut dyn World) -> (Vec<WheelHit>, F) {
+fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broad_phase::Search>>, world: &mut dyn World) -> (Vec<WheelHit>, F) {
     let node = rider_contact::node(m);
-    {
-        let (field, props, trees) = world.wooded_near(m.0[3]);
-        if props.is_some() || trees.is_some() {
-            let bounds = field.as_ref().map(|f| {
-                let (lo, hi) = (f.min(), f.max());
-                ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
-            });
-            let mut search = bike_search();
-            let mut scene = flight_search::Scene::wooded(props, trees, None, bounds, rays, &node, &mut search);
-            let hits = crate::contact_search::Search::rays(&mut scene, true);
-            let near = if hits.is_empty() { F::ONE } else { scene.ray_record().nearest };
-            let prop = |object: usize| props?.props.get(object.checked_sub(flight_search::FIRST)?);
-            let on = |object: usize| Some((object as u32, prop(object)?.moving?));
-            // A mesh's material is its surface word's low byte (a file too old for one, and a tree's
-            // cylinder, have 0).
-            let material = |object: usize| prop(object).and_then(|p| p.mesh.surface).map_or(0, |s| s as u8);
-            return (
-                hits.iter().map(|h| (h.from, h.point, h.normal, on(h.struck.object), material(h.struck.object))).collect(),
-                near,
-            );
-        }
+    let found = nearby_scene(nearby, world, rays, &node, |scene| {
+        let hits = crate::contact_search::Search::rays(scene, true);
+        let near = if hits.is_empty() { F::ONE } else { scene.ray_record().nearest };
+        let on = |object: usize| Some((object as u32, scene.prop_at(object)?.moving?));
+        // A mesh's material is its surface word's low byte (a file too old for one, and a tree's
+        // cylinder, have 0).
+        let material = |object: usize| scene.prop_at(object).and_then(|p| p.mesh.surface).map_or(0, |s| s as u8);
+        let hits = hits.iter().map(|h| (h.from, h.point, h.normal, on(h.struck.object), material(h.struck.object))).collect();
+        (hits, near)
+    });
+    if let Some(found) = found {
+        return found;
     }
     let mut b = Bundle::default();
     for s in &rays.segments {
@@ -1980,36 +2048,27 @@ impl Ride {
     /// it next integrates, as the original's does. The velocity is left alone, and nothing is touched:
     /// the record's touching flags are the rays'.
     ///
-    /// The search is gathered around `rays` (the body rays, [`crate::bike_col::BikeCol::rays`], in the
-    /// original), or the wheel probe ([`wheel_rays`]) when the rider has no collision files, in a world
-    /// that hands its props over ([`World::wooded_near`]); in one that only answers [`World::solid`] the
-    /// segment is a bundle of one probe ([`SolidSweep`]). `true` when it moved the bike.
+    /// The segment is searched through the bike's kept list ([`nearby_scene`], S189), placed with `rays`
+    /// (the body rays, [`crate::bike_col::BikeCol::rays`], in the original), or the wheel probe
+    /// ([`wheel_rays`]) when the rider has no collision files, in a world that hands its props over
+    /// ([`World::wooded_near`]); in one that only answers [`World::solid`] the segment is a bundle of
+    /// one probe ([`SolidSweep`]). `true` when it moved the bike.
     pub fn sweep_back(&mut self, p: &Phy, rays: Option<&flight_search::Rays>, world: &mut dyn World, dt: F) -> bool {
         let at = self.transform();
         let mut rec = sweep_record(&p.collisions, &at);
         let vel = self.chassis.vel;
-        let moved = {
-            let (field, props, trees) = world.wooded_near(at.0[3]);
-            if props.is_some() || trees.is_some() {
-                let bounds = field.as_ref().map(|f| {
-                    let (lo, hi) = (f.min(), f.max());
-                    ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
-                });
-                let wheels;
-                let rays = match rays {
-                    Some(r) => r,
-                    None => {
-                        wheels = wheel_rays(&self.front.w, &self.rear.w);
-                        &wheels
-                    }
-                };
-                let mut search = bike_search();
-                let mut scene = flight_search::Scene::wooded(props, trees, None, bounds, rays, &rec.node, &mut search);
-                Some(crate::contact_search::sweep_back_chassis(&mut rec, vel, &mut scene, dt))
-            } else {
-                None
+        let wheels;
+        let rays = match rays {
+            Some(r) => r,
+            None => {
+                wheels = wheel_rays(&self.front.w, &self.rear.w);
+                &wheels
             }
         };
+        let node = rec.node;
+        let moved = nearby_scene(&mut self.nearby, world, rays, &node, |scene| {
+            crate::contact_search::sweep_back_chassis(&mut rec, vel, scene, dt)
+        });
         let moved = match moved {
             Some(m) => m,
             None => crate::contact_search::sweep_back_chassis(&mut rec, vel, &mut SolidSweep(world), dt),
@@ -2053,7 +2112,8 @@ impl Ride {
     #[allow(clippy::too_many_arguments)] // frame_bumped's, and what the search found
     pub fn frame_searched(&mut self, p: &Phy, tables: &Tables, c: &Controls, dt: F, world: &mut dyn World,
                           mut bump: Option<&mut crate::rider_contact::Bump>, scenery: Option<bool>) -> Vec<mv::Call> {
-        if scenery.is_none() {
+        let searched = scenery.is_some();
+        if !searched {
             self.sweep_back(p, None, world, dt);
         }
         let scenery = scenery.unwrap_or(false);
@@ -2062,7 +2122,7 @@ impl Ride {
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
-            drag_halved, tricks, mxvatv, rear_material, ..
+            drag_halved, tricks, mxvatv, rear_material, nearby, ..
         } = self;
         *touching = false;
         // MX vs. ATV's moves (MD16), only for a bike a trick pack is laid over.
@@ -2351,7 +2411,7 @@ impl Ride {
             rear.w.swept_contact = 0;
 
             calls.push(mv::Call::Contacts(s.dt));
-            let movers = contacts(&out.chassis, front, rear, near, touching, rear_material, scenery, s.dt, world);
+            let movers = contacts(&out.chassis, front, rear, near, touching, rear_material, nearby, scenery, s.dt, world);
 
             for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
                 calls.push(mv::Call::Suspension(side, h));
@@ -2506,6 +2566,14 @@ impl Ride {
         let heading = node[2];
         self.keep_back(probe, heading, world, &tables.curve);
 
+        // The bike's nearby search, gathered after the substeps around where they left it (S189). A
+        // caller that ran the tick's search gathers it, around the body rays and with the ghost's
+        // category list ([`Ride::gather_nearby`]); with none, the wheel probe stands in for the rays.
+        if !searched {
+            let at = self.transform();
+            self.gather_nearby(&at, None, world, false);
+        }
+
         calls
     }
 }
@@ -2520,10 +2588,11 @@ impl Ride {
 /// ([`crate::rider_contact::scenery`], [`crate::contact::resolve_ridden`]); `scenery` is whether they touched
 /// anything, which is the record's touching flag the air state reads. The chassis' sweep back
 /// ([`Ride::sweep_back`]) ran before them.
+#[allow(clippy::too_many_arguments)] // the substep's state, and the bike's kept search
 fn contacts(m: &Mat4, front: &mut Wheel, rear: &mut Wheel, near: &mut F, touching: &mut bool, rear_material: &mut u8,
-            scenery: bool, dt: F, world: &mut dyn World) -> Vec<(u32, crate::traffic::Moving)> {
+            nearby: &mut Option<Box<broad_phase::Search>>, scenery: bool, dt: F, world: &mut dyn World) -> Vec<(u32, crate::traffic::Moving)> {
     let rays = wheel_rays(&front.w, &rear.w);
-    let (hits, wheel_near) = wheel_hits(&rays, m, world);
+    let (hits, wheel_near) = wheel_hits(&rays, m, nearby, world);
     let look = !hits.is_empty();
     let cs: Vec<chassis::Contact> = hits
         .iter()
@@ -2781,6 +2850,16 @@ impl State for Ride {
                 }
                 w.f("bound", b.list.bound);
                 w.u32("found", b.list.nearby.found.len() as u32);
+            });
+        }
+        if let Some(n) = &self.nearby {
+            w.group("nearby", |w| {
+                w.bool("built", n.built);
+                for (k, name) in ["centre_x", "centre_y", "centre_z", "centre_w"].into_iter().enumerate() {
+                    w.f(name, n.centre[k]);
+                }
+                w.f("bound", n.bound);
+                w.u32("found", n.nearby.found.len() as u32);
             });
         }
     }
