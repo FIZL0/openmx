@@ -8583,6 +8583,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let mut actors: Vec<Actor> = Vec::new();
             // Seat 0's bike and rider in the list (P212a), to ask the frame what each drew.
             let (mut bike_actor, mut rider_actor) = (None, None);
+            // Seat 0's body drawn thrown, where the ragdoll lies and not on the bike (P224).
+            let mut rider_thrown = false;
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 if seat.garage.up != Kind::Bike || !seated[p] {
                     continue;
@@ -8607,6 +8609,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let alpha = vehicle::shown_alpha(seat.sim.rider.ghost.shown(), seat.paused);
                 if p == 0 {
                     bike_actor = Some(actors.len());
+                    rider_thrown = shown.thrown;
                 }
                 actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha, casts: true });
                 // A wheel spinning fast is drawn blurred (V59): see-through copies of it trailing
@@ -8884,8 +8887,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     view_triangles[v] += tris;
                     drawn += tris;
                 }
-                // Seat 0's own view, where its actors keep their places in every list (P212a).
-                if bike_actor.is_some_and(|i| d.actor(0, i) > 0) {
+                // Seat 0's own view, where its actors keep their places in every list (P212a). Not
+                // while the body is drawn thrown (P224): on the put-back's first tick the original still
+                // draws it where the ragdoll lay (S74), often out of the view the bike is in.
+                if !rider_thrown && bike_actor.is_some_and(|i| d.actor(0, i) > 0) {
                     rider_frames.0 += 1;
                     if rider_actor.is_none_or(|i| d.actor(0, i) == 0) {
                         rider_frames.1 += 1;

@@ -363,7 +363,12 @@ The 2026-10-28 launch that drew a bike with nobody on it lost its log. A build w
 ` (no rider drawn)` at the end of the ride's line a second while seat 0's bike is drawn and its rider is not,
 and P212 logs the GPU's own errors (`gpu error: …`). Next time it happens: quit, launch once more (the app
 keeps the launch before's log as Documents/openmx-log-previous.txt), and send that file and openmx-log.txt
-back — LocalSend into the repo's context/ is fine — then name the files in P223 (`./kit plan P223`).
+back — LocalSend into the repo's context/ is fine — then name the files in P224 (`./kit plan P224`).
+
+The 10-30 log (`~/Downloads/openmx-log (3).txt`, build 2366) never showed it: its three
+` (no rider drawn in 3 of 120 frames)` lines were each the tick after a wreck's put-back, where the body
+is still drawn where the ragdoll lay, as the original does (S74). Since P224 those frames are not counted,
+so any ` (no rider drawn …)` line from a newer build is the real thing.
 
 ## Weston for the gate's private display (K16)
 
