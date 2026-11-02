@@ -99,8 +99,8 @@ fn nat02s_vultures_sit_until_the_rider_comes() {
     let rider = t.at;
     assert!(t.holds(rider));
     let near: Vec<usize> =
-        sitting.iter().copied().filter(|&b| t.scares.iter().any(|s| c.birds[b].pos.sub(s.at).len() < s.distance)).collect();
-    println!("trigger {} at {:?}, scares {:?}, near {near:?}", t.name, t.at, t.scares);
+        sitting.iter().copied().filter(|&b| t.scares().any(|s| c.birds[b].pos.sub(s.at).len() < s.distance)).collect();
+    println!("trigger {} at {:?}, scares {:?}, near {near:?}", t.name, t.at, t.scares().collect::<Vec<_>>());
     assert!(!near.is_empty(), "the trigger's scare reaches a vulture");
     c.step(TICK, &[creature::Rays::at(rider)]);
     for &b in &near {
@@ -166,7 +166,7 @@ fn every_bird_trigger_is_a_square_box() {
     for t in &tracks {
         let arch = archives(&mut disc, t);
         let c = Creatures::load(&arch, t);
-        for tr in c.triggers.iter().filter(|tr| !tr.scares.is_empty()) {
+        for tr in c.triggers.iter().filter(|tr| !tr.actions.is_empty()) {
             seen += 1;
             println!("{t} {}: at {:?} box {:?} look {:?} up {:?} percent {} one_time {}", tr.name, tr.at, tr.half, tr.look, tr.up, tr.percent, tr.one_time);
             assert!(tr.radius.is_none(), "{t} {} is a sphere", tr.name);
@@ -184,26 +184,26 @@ fn every_bird_trigger_is_a_square_box() {
     assert!(!v.holds(along(1.01)) && !v.holds(along(-1.01)));
 }
 
+/// A box 20 feet on a side at the origin, square to the world.
+fn cube(percent: i32) -> creature::Trigger {
+    creature::Trigger {
+        name: "t".into(),
+        half: v3(10.0, 10.0, 10.0),
+        right: v3(1.0, 0.0, 0.0),
+        up: v3(0.0, 1.0, 0.0),
+        look: v3(0.0, 0.0, 1.0),
+        enabled: true,
+        percent,
+        ..Default::default()
+    }
+}
+
 /// V102: a trigger under 100 percent rolls only on a tick nobody was in it the tick before, as the
 /// toy trigger's contact does; a rider held in it rolls once, however long it stays.
 #[test]
 fn a_chance_trigger_rolls_on_entry_only() {
     let mut c = Creatures::default();
-    c.triggers.push(creature::Trigger {
-        name: "t".into(),
-        at: V3::default(),
-        half: v3(10.0, 10.0, 10.0),
-        radius: None,
-        right: v3(1.0, 0.0, 0.0),
-        up: v3(0.0, 1.0, 0.0),
-        look: v3(0.0, 0.0, 1.0),
-        enabled: true,
-        one_time: false,
-        percent: 50,
-        fired: false,
-        inside: Vec::new(),
-        scares: Vec::new(),
-    });
+    c.triggers.push(cube(50));
     let (inside, outside) = (creature::Rays::at(V3::default()), creature::Rays::at(v3(1e6, 0.0, 0.0)));
     let rolled = |c: &mut Creatures, riders: &[creature::Rays]| {
         let before = c.rng;
@@ -228,4 +228,52 @@ fn a_chance_trigger_rolls_on_entry_only() {
     assert_eq!(rolled(&mut c, &[outside.clone(), outside.clone()]), 0);
     // Two coming in on one tick roll once each.
     assert_eq!(rolled(&mut c, &[inside.clone(), inside.clone()]), 2);
+}
+
+/// V104: a trigger's keys as the reader takes them. `IgnoreTrigger` is searched for its three words
+/// as written (so `AIANIMATION` is AI only); the tests are kept by name; the counter, delay and
+/// `UponExit` keys go on each action.
+#[test]
+fn trigger_keys_read_as_the_original_reads_them() {
+    let text = "[Triggers]\nNumberOfTriggers=1\n[Trigger1]\nName=t\nPosition=1,2,3\nBox=5,5,5\n\
+                IgnoreTrigger=AIANIMATION\nEnterTest=Nobody\nNumberOfActions=2\n\
+                [Trigger1Action1]\nActionType=ScareBirds\nScarePosition=1,2,3\nScareDistance=40\n\
+                TriggerCounterEquals=2\nTriggerActionDelayTimer=0.5\n\
+                [Trigger1Action2]\nActionType=ScareBirds\nTriggerActionUponExit=TRUE\nActionTest=Nobody\n";
+    let c = Creatures::parse(&[], text);
+    let t = &c.triggers[0];
+    assert_eq!(t.ignore, creature::IGNORE_AI);
+    assert_eq!((t.enter_test.as_deref(), t.exit_test.as_deref()), (Some("Nobody"), None));
+    let [a, b] = &t.actions[..] else { panic!("{:?}", t.actions) };
+    assert_eq!((a.equals, a.greater, a.delay, a.upon_exit, a.scare.distance), (2, -1, 0.5, false, 40.0));
+    assert_eq!((b.equals, b.greater, b.delay, b.upon_exit, b.test.as_deref()), (-1, -1, 0.0, true, Some("Nobody")));
+    let all = "[Triggers]\nNumberOfTriggers=1\n[Trigger1]\nIgnoreTrigger=PLAYER ANIMATIONS AI\nNumberOfActions=1\n\
+               [Trigger1Action1]\nActionType=ScareBirds\n";
+    assert_eq!(Creatures::parse(&[], all).triggers[0].ignore, 7);
+}
+
+/// V104: an actor stays in a trigger until its box is out of the trigger's, however its segments
+/// strike: back in its segments' reach before that, the trigger fires again (it is touched) but runs
+/// no actions for it. Out and back, it runs them again.
+#[test]
+fn an_actor_is_in_until_its_box_leaves() {
+    let mut c = Creatures::default();
+    let mut t = cube(100);
+    t.actions.push(creature::Action { equals: -1, greater: -1, ..Default::default() });
+    c.triggers.push(t);
+    let inside = creature::Rays::at(v3(1.0, 2.0, 3.0));
+    // Past the cube's corner: the segment's box overlaps it, the segment misses.
+    let grazing = creature::Rays(vec![[v3(-15.0, 6.0, 0.0), v3(-5.0, 16.0, 0.0)]]);
+    let out = creature::Rays::at(v3(500.0, 0.0, 0.0));
+    let runs = |c: &Creatures| c.triggers[0].actions[0].ran;
+    c.step(TICK, &[inside.clone()]);
+    assert_eq!((c.triggers[0].count, runs(&c)), (1, [0, 1]));
+    c.step(TICK, &[grazing.clone()]);
+    assert_eq!(c.triggers[0].inside, vec![Some(0)], "kept by its box");
+    c.step(TICK, &[inside.clone()]);
+    assert_eq!((c.triggers[0].count, runs(&c)), (2, [0, 1]), "fired, and no second run");
+    c.step(TICK, &[out.clone()]);
+    assert_eq!(c.triggers[0].inside, vec![None], "the slot is kept, empty");
+    c.step(TICK, &[inside]);
+    assert_eq!((c.triggers[0].count, runs(&c), c.triggers[0].inside.clone()), (3, [0, 2], vec![Some(0)]));
 }
