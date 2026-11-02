@@ -16,6 +16,8 @@
 //!   its nearby search, on S93's images and recording2's three AI bikes; the port's filter agrees.
 //! - `a_physics_trucks_mesh_is_what_a_wheel_could_own` (S168): free06's HasPhysics trucks' physics
 //!   meshes are the owned collidables a wheel probe is not barred from.
+//! - `a_woken_trucks_mesh_is_in_the_wheels_reach` (S208): the original's truck wake sets the physics
+//!   mesh's nearby bit, so the wheel's own search accepts it.
 
 use game_render::disc::Disc;
 use game_sim::bike_col::{self, BikeCol};
@@ -781,5 +783,72 @@ fn a_physics_trucks_mesh_is_what_a_wheel_could_own() {
             ee.u32_at(owner + OBJECT_BODY),
             bikes.len()
         );
+    }
+}
+
+/// The physics car's physical word (`+0x588`, 1 once woken) and its own path-car mesh (`+0x428`).
+const CAR_PHYSICAL: u32 = 0x588;
+const CAR_MESH: u32 = 0x428;
+/// The physics object's body (`+0x110`).
+const PHYSICS_BODY: u32 = 0x110;
+
+/// **S208: a woken truck's mesh is the wheel's to stand on.** On s89-along, the original's struck
+/// listener (`physics_car_wake`, run in the interpreter on each of free06's two HasPhysics trucks)
+/// turns the physics object's body on, and with it sets the `f.col` mesh's nearby bit (`+0x31` bit 0)
+/// and clears the car's own path-car mesh's. Before the wake the pair filter refuses every riding
+/// bike's wheel probe the mesh when asked with the nearby bit, as the wheel's search asks; after it,
+/// it accepts both ways. The mesh's collision object (`+0x80`) names the physics object's body and no
+/// chassis, so a wheel on a woken truck takes the contact-velocity step's owner branch on a dynamics
+/// body (`contact::other_at`, `Side::Body`). The port does not simulate a woken truck yet (S186).
+#[test]
+fn a_woken_trucks_mesh_is_in_the_wheels_reach() {
+    let Some(path) = ctx("states/s89-along.eeMemory.bin") else {
+        skip("s89-along.eeMemory.bin is not there: S89's free06 state");
+        return;
+    };
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let vtable = addr("physics_car_vtable").unwrap();
+    let cars: Vec<u32> = (0x0010_0000u32..0x0200_0000).step_by(16).filter(|&o| ee.u32_at(o + 8) == vtable).collect();
+    let bikes: Vec<u32> = (0x0010_0000u32..0x01ff_f000)
+        .step_by(16)
+        .filter(|&o| ee.u32_at(o + bike::ACTOR) == bike_col::ACTOR && ee.u32_at(o + bike::SHAPE) == bike_col::SHAPE)
+        .filter(|&o| {
+            let f = ee.u32_at(o + bike::COLLIDABLES[bike_col::FRAME]);
+            (0x0010_0000..0x0200_0000).contains(&f) && ee.u32_at(f + at::CATEGORY) == 0x0009_a048
+        })
+        .collect();
+    assert_eq!(cars.len(), 2, "free06 has two HasPhysics trucks (S127)");
+    assert!(!bikes.is_empty(), "no riding bike found");
+    let (filter_at, wake) = (addr("collision_pair_filter").unwrap(), addr("physics_car_wake").unwrap());
+    let answers = |ee: &mut Ee, wheel: u32, mesh: u32| {
+        [0u64, 1].map(|nearby| {
+            ee.call(filter_at, &[u64::from(wheel), u64::from(mesh), nearby], &[], BUDGET);
+            ee.v0() as u32 != 0
+        })
+    };
+    for &car in &cars {
+        let object = ee.u32_at(car + PHYSICS_OBJECT);
+        let mesh = ee.u32_at(object + PHYSICS_MESH);
+        let own = ee.u32_at(car + CAR_MESH);
+        let owner = ee.u32_at(mesh + COLLIDABLE_OBJECT);
+        assert_eq!(ee.u32_at(owner + OBJECT_BODY), ee.u32_at(object + PHYSICS_BODY), "{car:#x}: the mesh's collision object names the physics body");
+        assert_eq!(ee.u32_at(owner + OBJECT_CHASSIS), 0, "{car:#x}: the mesh's collision object has a chassis");
+        assert_eq!(ee.u32_at(car + CAR_PHYSICAL), 0, "{car:#x}: the truck is already woken in the state");
+        assert_eq!(ee.u8_at(mesh + at::NEARBY) & 1, 0, "{car:#x}: the sleeping mesh's nearby bit");
+        assert_eq!(ee.u8_at(own + at::NEARBY) & 1, 1, "{car:#x}: the sleeping car's own mesh's nearby bit");
+        for &b in &bikes {
+            let wheel = ee.u32_at(b + bike::COLLIDABLES[bike_col::SECOND_RAYS]);
+            assert_eq!(answers(&mut ee, wheel, mesh), [true, false], "{car:#x} asleep: bike {b:#x}'s wheel probe");
+        }
+        ee.call(wake, &[u64::from(car)], &[], BUDGET);
+        assert_eq!(ee.u32_at(car + CAR_PHYSICAL), 1, "{car:#x}: the wake did not wake it");
+        assert_eq!(ee.u8_at(mesh + at::NEARBY) & 1, 1, "{car:#x}: the woken mesh's nearby bit");
+        assert_eq!(ee.u8_at(own + at::NEARBY) & 1, 0, "{car:#x}: the woken car's own mesh's nearby bit");
+        for &b in &bikes {
+            let wheel = ee.u32_at(b + bike::COLLIDABLES[bike_col::SECOND_RAYS]);
+            assert_eq!(answers(&mut ee, wheel, mesh), [true, true], "{car:#x} woken: bike {b:#x}'s wheel probe");
+        }
+        eprintln!("truck {car:#x}: woken, mesh {mesh:#x} nearby, accepted by {} wheel probes both ways", bikes.len());
     }
 }
