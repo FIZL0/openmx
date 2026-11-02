@@ -456,8 +456,9 @@ const RIDERS_DIGEST: u64 = 0x36369ee3e695dde3;
 /// riders), all clear.
 /// The hashes and the bytes moved with S230 (K21), the length did not: a wreck zeroes both wheels'
 /// compression, which is hashed, and the riders' run wrecks.
-const RIDERS_WIRE_DIGEST: u64 = 0xb436922da956785f;
-const RIDERS_WIRE_LEN: usize = 13619;
+/// 13607 again since S250: S234's three bytes taken out (flips score as the original does).
+const RIDERS_WIRE_DIGEST: u64 = 0x9bf5470153fea25f;
+const RIDERS_WIRE_LEN: usize = 13607;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed

@@ -15,9 +15,7 @@
 //!   combo** — the second trick of a combo is worth twice its time, the third three times.
 //! - **A backflip** (24) is a flat 10 000, multiplied the same way, scored the frame the rider lands
 //!   (or the frame after the flip completes, if the bike is still in the air and no trick is running).
-//!   The flip is a four-stage watch on the chassis' attitude ([`Score::flip`]). **The port's own
-//!   (S234):** with [`Score::flip_at_start`] up, as the app's riders have it, the flip scores the
-//!   frame the bike starts turning it over instead, and the watch pays nothing more for it.
+//!   The flip is a four-stage watch on the chassis' attitude ([`Score::flip`]).
 //! - **A wheelie or a stoppie** (25, 26) opens a node after a second on the one wheel, growing at 1000
 //!   a second; it is not multiplied.
 //! - **The combo is banked** — every node's points added to [`Score::total`], to the manager's
@@ -139,21 +137,6 @@ pub struct Score {
     pub pending: F,
     /// Seconds left before [`Score::pending`] is banked; zero when nothing waits.
     pub settling: F,
-    /// **The port's own (S234): a flip scores the frame it starts** — the user's ask. The original
-    /// puts a backflip on the line only when its watch ([`Score::flip`]) sees the bike come round the
-    /// right way up again, so a flip landed before that scores nothing. With this up, the frame the
-    /// bike starts turning one over ([`Sense::flipping`] going up) puts it on the line at once, worth
-    /// what the watch would have paid; a crash still loses it with the rest of the combo, and the
-    /// watch coming round pays nothing more for that rotation ([`Score::shown`]). A rotation the
-    /// bike makes without a flip of its own still scores on the watch, as the original's does.
-    /// Down, every call is the original's. Not hashed: it is the ride's setting, like the lockout.
-    pub flip_at_start: bool,
-    /// Which flip the bike was turning last frame ([`Sense::flipping`]'s word), so a start is its
-    /// rising edge (S234).
-    pub turning: u8,
-    /// The flip scored at its start whose rotation the watch has not seen come round yet (S234):
-    /// [`BACKFLIP`] or [`FRONTFLIP`], 0 none. Gone on the landing or the wreck.
-    pub shown: u8,
 }
 
 /// What the rider's tick reads to score: the bike's words as the frame left them.
@@ -176,9 +159,6 @@ pub struct Sense {
     pub up_y: F,
     /// The chassis' forward axis, its height.
     pub forward_y: F,
-    /// Which flip the bike is turning over ([`crate::air::Air::flipping`]): [`BACKFLIP`],
-    /// [`FRONTFLIP`], or 0 none. Only [`Score::flip_at_start`] reads it (S234).
-    pub flipping: u8,
 }
 
 /// What a trick grows at, a second: the rider's per-trick bonus (zero for every trick in the
@@ -346,34 +326,6 @@ impl Score {
         self.finish(count, true);
     }
 
-    /// **The port's own (S234):** a flip put on the line the frame it starts, worth `points` flat
-    /// times the combo's length, as the watch's own score of it would be. A trick still growing
-    /// keeps growing: the flip goes in under it rather than taking the head, which would stop it.
-    fn start_flip(&mut self, id: u8, points: F) {
-        if !self.combo && self.may_open() {
-            self.open();
-        }
-        if !self.combo || self.nodes.len() >= POOL {
-            return;
-        }
-        let count = self.count() + F::ONE;
-        let mut node = Node {
-            flags: flag::FLOOR | flag::TIMED | flag::VALID,
-            id,
-            points,
-            base: points,
-            rate: F::ZERO,
-            mult: F::ONE,
-            extra: F::ZERO,
-            held: F::ZERO,
-            granularity: GRANULARITY,
-        };
-        self.combo_points = self.combo_points + node.points * count;
-        node.points = node.points * count;
-        node.round();
-        self.nodes.insert(usize::from(self.scoring), node);
-    }
-
     /// **A trick's clock ran out** (the rider's trick-stop hook): landed, times the combo's length.
     pub fn finished(&mut self) {
         if self.combo {
@@ -405,7 +357,6 @@ impl Score {
         self.wheelie = F::ZERO;
         self.stoppie = F::ZERO;
         self.flip = 0;
-        self.shown = 0;
     }
 
     /// **The rider's tick**: the one-wheel clocks, the bank, and the backflip watch, after the bike's
@@ -486,11 +437,6 @@ impl Score {
             if F::ZERO < up && F(-0.79) < forward {
                 // Right way up again: a flip that went over is round, any other is forgotten.
                 match self.flip {
-                    // Already paid at its start (S234): come round, and nothing more to score.
-                    2 if self.shown == BACKFLIP => {
-                        self.flip = 0;
-                        self.shown = 0;
-                    }
                     2 => self.flip = 3,
                     0 | 3 => {}
                     _ => self.flip = 0,
@@ -503,7 +449,6 @@ impl Score {
         } else if self.flip != 3 && self.flip != 0 {
             self.flip = 0;
         }
-        let front_points = front_flip.as_ref().map(|(_, points)| *points);
         if let Some((w, points)) = front_flip {
             if *w == 3 && !self.scoring {
                 self.start_flat(FRONTFLIP, points);
@@ -515,10 +460,6 @@ impl Score {
                 let (up, forward) = (s.up_y, s.forward_y);
                 if F::ZERO < up && forward < F(0.79) {
                     match *w {
-                        2 if self.shown == FRONTFLIP => {
-                            *w = 0;
-                            self.shown = 0;
-                        }
                         2 => *w = 3,
                         0 | 3 => {}
                         _ => *w = 0,
@@ -531,24 +472,6 @@ impl Score {
             } else if *w != 3 && *w != 0 {
                 *w = 0;
             }
-        }
-        self.flip_start(s, front_points);
-    }
-
-    /// **The port's own (S234):** with [`Score::flip_at_start`] up, a flip the bike started turning
-    /// this frame is scored now; a landing or a wreck forgets the one waiting for its watch.
-    fn flip_start(&mut self, s: &Sense, front_points: Option<F>) {
-        let now = if s.wrecked { 0 } else { s.flipping };
-        if self.flip_at_start && now != 0 && self.turning == 0 {
-            let points = if now == FRONTFLIP { front_points } else { Some(BACKFLIP_POINTS) };
-            if let Some(points) = points {
-                self.start_flip(now, points);
-                self.shown = now;
-            }
-        }
-        self.turning = if self.flip_at_start { now } else { 0 };
-        if s.wrecked || !s.airborne {
-            self.shown = 0;
         }
     }
 
@@ -652,11 +575,6 @@ impl State for Score {
         if self.pending != F::ZERO || self.settling != F::ZERO {
             w.f("pending", self.pending);
             w.f("settling", self.settling);
-        }
-        // Only a flip scored at its start (S234) sets them, so a ride without it hashes as before.
-        if self.turning != 0 || self.shown != 0 {
-            w.u8("turning", self.turning);
-            w.u8("shown", self.shown);
         }
     }
 }
