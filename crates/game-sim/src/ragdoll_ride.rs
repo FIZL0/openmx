@@ -473,8 +473,16 @@ impl Down {
         // The bones' search, once a frame before the off-bike test, round the first sphere.
         if let (Some(b), Some(s)) = (bike, kit.spheres.first()) {
             // The bike is put in the track's tree where it stands, every frame, among the track's
-            // static props (S165) and its plants (S206), which stand there from the start.
-            let (field, props, trees) = world.wooded();
+            // static props (S165) and its plants (S206), which stand there from the start. A world
+            // of tiles hands the shapes near the probe (V112, [`World::wooded_near`]): a regather's
+            // where the first sphere stood, a kept list's where it was gathered, so the list names
+            // props in the set it was gathered in.
+            let at = match self.search.stood {
+                Some(p) if self.search.regathers(s.radius) => p,
+                Some(_) => self.search.centre,
+                None => b.0,
+            };
+            let (field, props, trees) = world.wooded_near(at);
             let cells = field.and_then(|f| Cells::of(&*f));
             let key = cells.as_ref().zip(kit.bike_mesh.as_deref()).map_or(0, |(c, mesh)| c.key(mesh, &frame));
             let props = props.map_or(&[][..], |p| &p.props[..]);
@@ -546,8 +554,8 @@ impl Down {
             let reach = kit.spheres.iter().fold(F::ZERO, |r, s| r.max(s.radius));
             b.cars = world.moving().map_or_else(Vec::new, |p| crate::ragdoll_scene::PathCar::near(&p.props, probe, reach));
             // And the static props it listed (S165), the plants' trunks among them (S206), measured
-            // again from the same probe.
-            let (_, props, trees) = world.wooded();
+            // again from the same probe, in the set they were gathered in.
+            let (_, props, trees) = world.wooded_near(self.search.centre);
             let props = props.map_or(&[][..], |p| &p.props[..]);
             b.props = crate::ragdoll_scene::StillProp::near_wooded(props, trees, &self.statics, probe, reach);
             b.bike_at = self.statics.bike_at;
