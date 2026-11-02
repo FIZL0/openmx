@@ -6072,6 +6072,9 @@ node_count             boot 0x001b3420 1 + a node's descendants: what a hierarch
 #            wreck 1 row 2571.
 #   Phases: the port's tick N is row N + 1 for the chassis; the sweep lanes are read at the tick's top,
 #   so some rows (sidepost 2474..2476, post 2567) hold the next tick's values.
+#   S202: on a swept tick the body rays search from where the sweep left the bike (the port did
+#   already). Sidepost's early head-ray wreck was the port's frame-end head sweep, which S152 retired:
+#   the port wrecks on row 2481 since, and S139's test holds every wreck to its exact tick.
 
 # ---------------------------------------------------------------------------------------------------
 # R10 — MX vs. ATV Unleashed, PC (program `pc`, [other.pc] in kit.toml; research/mxvatv-pc.md). A

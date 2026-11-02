@@ -9338,7 +9338,8 @@ const SWEPT_TO_THE_ORIGINALS: f32 = 0.05;
 /// opens with) is run on a copy of the port's bike: it must strike on the ticks the original's sweep
 /// probe reads struck, and put the node where the original's record says it put it
 /// ([`SWEPT_TO_THE_ORIGINALS`]); the chassis the rider's own sweep puts back keeps to the
-/// original's path while both ride; and the first wreck is the original's (reason, tick ±1).
+/// original's path while both ride; and the first wreck is the original's, reason and tick (S202:
+/// sidepost's head ray once wrecked the port a tick early; S152's body-ray head test made it exact).
 #[test]
 fn the_sweep_back_puts_a_fast_bike_back_out_of_a_post_as_the_original_does() {
     let dir = private_dir("capture");
@@ -9446,7 +9447,7 @@ fn the_sweep_back_puts_a_fast_bike_back_out_of_a_post_as_the_original_does() {
                      got.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")), theirs_all.len(), ours_all.len());
             let agrees = match (want, got) {
                 (None, None) => true,
-                (Some((wc, wr)), Some((gc, gr))) => gr == wr && gc.abs_diff(wc) <= 1,
+                (Some((wc, wr)), Some((gc, gr))) => gr == wr && gc == wc,
                 _ => false,
             };
             if !agrees {
