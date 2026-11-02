@@ -3986,6 +3986,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let bytes = res.read(&e.name).ok()?;
         game_sim::flight::spawn_lift(&bytes).map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight::BIPLANE_MODEL)).ok()
     });
+    // And whether each file bay is put on the ground there (S205).
+    lot.ground_heights = machines.as_ref().map_or_else(Vec::new, |(_, b)| vehicle::ground_heights(b, Machine::Biplane));
     // What it reads its own (P127): it outlives the load's thread.
     let flight_for = {
         let (plane_phy, plane_rays, bike_box, t) = (plane_phy.clone(), plane_rays.clone(), bike_box.clone(), place.terrain.clone());

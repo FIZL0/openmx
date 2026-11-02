@@ -803,7 +803,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// rider's set; [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _ } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _ } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -826,6 +826,7 @@ impl Wire for crate::flight::Flight {
         edge_scale.put(out);
         wrecks.put(out);
         spawn.put(out);
+        spawn_up.put(out);
         area.put(out);
         noise.put(out);
         rng.put(out);
@@ -857,6 +858,7 @@ impl Wire for crate::flight::Flight {
             edge_scale: Wire::take(r)?,
             wrecks: Wire::take(r)?,
             spawn: Wire::take(r)?,
+            spawn_up: Wire::take(r)?,
             area: Wire::take(r)?,
             noise: Wire::take(r)?,
             rng: Wire::take(r)?,

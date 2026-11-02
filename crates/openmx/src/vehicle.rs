@@ -112,8 +112,7 @@ impl Spawn {
     /// one. `None` for a track whose file has no such section — of the freeride tracks, free06, 07,
     /// 09, 10 and 11 have one (R8).
     ///
-    /// `SetGroundHeight` (on by default) is not applied: what the placement does with it was not
-    /// read past the call it changes, and on free06 the position the file gives is the one used.
+    /// Its `SetGroundHeight` is [`ground_heights`]'s, which the plane's first step reads ([`Plane::step`]).
     pub fn biplane(machine_txt: &[u8], player: usize) -> Option<Spawn> {
         Spawn::machine(machine_txt, Machine::Biplane, player)
     }
@@ -263,6 +262,17 @@ pub fn spots(machine_txt: &[u8], machine: Machine) -> Vec<Spawn> {
     (0..).map_while(|i| Spawn::section(&ini, &format!("{}{}", machine.section(), i + 1))).collect()
 }
 
+/// Whether the original's placement puts each of `machine`'s spots on a track onto the ground, in
+/// [`spots`]' order: the section's `SetGroundHeight`, on unless the file says otherwise (S205). On,
+/// the spot's height is the ground's under it; off, the file's height is kept, and only the ground's
+/// normal there is taken. Every freeride track's `machine.txt` leaves it out.
+pub fn ground_heights(machine_txt: &[u8], machine: Machine) -> Vec<bool> {
+    let ini = Ini::parse_bytes(machine_txt);
+    (0..spots(machine_txt, machine).len())
+        .map(|i| ini.section(&format!("{}{}", machine.section(), i + 1)).flag("SetGroundHeight", true))
+        .collect()
+}
+
 /// `players` copies of `machine`, one a player: the first as many as the file has stand where it
 /// parks them, exactly, and the rest beside those in turn — copy `k` beside the file's spot
 /// `k % spots`, stepped sideways (across its `Direction`) one [`Machine::spacing`] at a time, right
@@ -373,18 +383,23 @@ pub struct Lot {
     /// spot ([`flight::spawn_lift`] off the disc's model, S164), which every plane [`Lot::plane`]
     /// stands in such a bay carries ([`Plane::lift`]); `None` without the model.
     pub lift: Option<F>,
+    /// The file's planes' `SetGroundHeight`s, in copy order ([`ground_heights`]); a copy past them is
+    /// put on the ground.
+    pub ground_heights: Vec<bool>,
 }
 
 impl Lot {
     /// A track's lot for `players`: [`park`] for every machine in [`Machine::ALL`].
     pub fn new(machine_txt: &[u8], players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        Lot::around(Machine::ALL.iter().map(|&m| spots(machine_txt, m)).collect(), players, ground)
+        let mut lot = Lot::around(Machine::ALL.iter().map(|&m| spots(machine_txt, m)).collect(), players, ground);
+        lot.ground_heights = ground_heights(machine_txt, Machine::Biplane);
+        lot
     }
 
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new(), lift: None };
+        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new() };
         lot.resize(players, ground);
         lot
     }
@@ -431,6 +446,7 @@ impl Lot {
         };
         plane.livery = bay.livery;
         plane.lift = self.lift.filter(|_| bay.original);
+        plane.ground_height = self.ground_heights.get(bay.copy).copied().unwrap_or(true);
         Some(plane)
     }
 }
@@ -654,6 +670,9 @@ pub struct Plane {
     /// stands where the original's does ([`flight::bay_spot`]), not with the model's origin on the
     /// spot.
     pub lift: Option<F>,
+    /// Its bay's `SetGroundHeight` ([`ground_heights`]): with a [`Plane::lift`], whether the bay's
+    /// spot is moved onto the ground or keeps the file's height (S205).
+    pub ground_height: bool,
 }
 
 impl Plane {
@@ -674,6 +693,7 @@ impl Plane {
             dpad: false,
             livery: 0,
             lift: None,
+            ground_height: true,
         }
     }
 
@@ -739,16 +759,18 @@ impl Plane {
     ) -> bool {
         let Some(f) = &mut self.flight else { return false };
         if !self.placed {
-            // At its file bay the original's spot: the body on the ground under the spot, lifted by
-            // the model's bounds (S164). Anywhere else, and with no ground under the bay, the
-            // model's origin on the spot.
+            // At its file bay the original's spot: the body on the ground under the spot (or at the
+            // file's height, without `SetGroundHeight`), lifted by the model's bounds (S164), its
+            // up the ground's normal there (S205). Anywhere else, and with no ground under the
+            // bay, the model's origin on the spot.
             let at = self.spawn.at;
             let ground = self.lift.filter(|_| self.spawn == self.bay).and_then(|lift| {
-                let (on, _) = world.ground(Vf::new(at.x(), at.y() + PROBE, at.z(), 1.0));
-                (on.y() > NO_GROUND).then(|| flight::bay_spot(Vf::new(at.x(), on.y(), at.z(), 1.0), lift))
+                let (on, normal) = world.ground(Vf::new(at.x(), at.y() + PROBE, at.z(), 1.0));
+                let y = if self.ground_height { on.y() } else { at.y() };
+                (on.y() > NO_GROUND).then(|| (flight::bay_spot(Vf::new(at.x(), y, at.z(), 1.0), lift), normal))
             });
             match ground {
-                Some(body) => f.reset_body(body, self.spawn.facing, &sim.tables.ride.acos),
+                Some((body, up)) => f.reset_body(body, self.spawn.facing, up, &sim.tables.ride.acos),
                 None => f.reset(at, self.spawn.facing, &sim.tables.ride.acos),
             }
             self.placed = true;
