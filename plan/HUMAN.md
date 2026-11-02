@@ -345,26 +345,6 @@ and P212 logs the GPU's own errors (`gpu error: …`). Next time it happens: qui
 keeps the launch before's log as Documents/openmx-log-previous.txt), and send that file and openmx-log.txt
 back — LocalSend into the repo's context/ is fine — then name the files in P223 (`./kit plan P223`).
 
-## The ride on a real phone (P215)
-
-P205 and P223 measured the browser's ride only at a phone-sized viewport on this desktop's GPU, and a
-desktop chromium cannot slow its game worker to a phone's CPU. Their phone numbers are estimates. About
-5 minutes, on the iPhone (or any phone):
-
-1. Open https://beta.openmx.dev in Safari. If `version.txt` there is old, `gh workflow run deploy.yml -R
-   FIZL0/openmx-beta` first. Give it the disc as usual.
-2. Settings → Graphics: note what **Preset** says on its own (Auto, and the rows it picked). Then turn
-   **Show FPS** on.
-3. Free Ride on free09 (or any big outdoor map) for a minute. Note the `NN FPS` number in the top right,
-   riding and in the trees. With Preset on Auto, note what the rows say after the ride (Auto may have
-   stepped them down).
-4. Set Preset to **Phone**, ride again, and note the FPS.
-5. Optional: do the same in the iOS app, if one is installed.
-
-Write the phone model, the browser, and the numbers into P215 (`./kit plan P215`, or a line in its journal,
-research/journal/2026-11-02-p215-phone-preset). That unblocks P215. If it holds 60 on Phone and Auto
-stepped nothing down, the preset stands as it is.
-
 ## Weston for the gate's private display (K16)
 
 Since K16 every `./kit check` puts its test windows on a private headless weston + Xwayland instead of
