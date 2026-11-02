@@ -6704,10 +6704,30 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # File 0x0026f680 / unfile 0x0026f720 (clear first, off the node's +0x30 list, then vt +0xc listeners).
 # Wrapper: force listener 0x0015af40 = gravity then vt +0x80 resolve; enable 0x0015b790; disable
 # 0x0015b8c0 (DetectCollisionsWhenDisabled +0x6c: probe mode 0 and wake category 0x40); hit listener
-# 0x0015acf0 (not ported); object listener 0x0015b2a0 on countdown expiry: vt +0xdc put back, unfile,
+# 0x0015acf0 (S200); object listener 0x0015b2a0 on countdown expiry: vt +0xdc put back, unfile,
 # then with detect and a probe 0x0011b070(probe, 1) and 0x0011b1b0 (category list emptied).
 # Wrapper flags: +0x54 collision enabled, +0x58 hit listener, +0x60 listens, +0x6c detect.
 # free09's free_trailerA.col / free_trailerb.col are toy meshes, not in the scene collision list.
+
+# --- S200: the props' hit listener and asleep probe (crates/game-sim/src/prop_world.rs, flight_search.rs Scene::probed; journal 2026-11-02-s200-prop-hit-listener)
+# Hit listener 0x0015acf0, reached by thunk 0x0015c290 (wrapper +0x48): with +0x58 set and the struck
+#   collidable's +0x84 & [0x00468f68] (0x40) non-zero, calls wrapper vt +0x124 = enable 0x0015b790.
+#   +0x58 = 1 from the ctor 0x001590e0; no key reads it.
+# The ray probe (wrapper +0x124) holds two listeners, in order: the object's (+0x48), then the
+#   collection's (+0x30, thunk 0x003b2b10 -> 0x003b2420 -> collection vt +0xa8 activate), which fires on
+#   every hit whatever the category.
+# Probe category list: +0xe8 mode (1 excludes the listed, 0 accepts only them; empty matches nothing),
+#   +0xec list, +0xf0 count. Setters 0x0011b070 mode; 0x0011b080 add (deduped, first 0 slot, else
+#   append); 0x0011b1b0 free and empty.
+#   Init 0x001597b0: ray probe mode 1, emptied; the sweep probe (+0x12c) mode 1 with [0x00468f50] and
+#   [0x00468f90] (not ported, S239). Enable with +0x6c and a probe: mode 1, emptied (also files via
+#   0x0026f680 deduped by 0x00273720, adds the object listener 0x0026f7d0, vt +0x110 = 0x0015b210, +0x1b0 = 1).
+#   Disable with +0x6c and a probe: mode 0, add 0x40. Put-back in 0x0015b2a0: mode 1, emptied.
+# first_recording: every asleep prop's probe reads mode 1, empty. The egg (collection 0x011c70d0, object
+#   0x011c9930, record 0x011d4160, probe 0x011ca500, world node 0x00e17ef0) rests on LargeEgg's mesh
+#   0x013b7110 (category 0x220, flags 0x1c, 1.44 ft); trailer toys 0x48 (flags 0x15) at 14 and 38 ft.
+# Relabelling that mesh 0x48 under the asleep egg: woken the next frame; once settled, woken by the
+#   search and slept by its listener each frame, countdown held at ResetTime, never put back.
 
 # --- S195: free09 beach balls knocked by the bike (crates/game-sim/tests/prop_knock.rs; journal 2026-11-02-s195-props-from-a-real-knock)
 # BeachBall collections 0..4 (collection / object / body): 0x011bafb0 0x011b6f90 0x011b6030; 0x011b6630

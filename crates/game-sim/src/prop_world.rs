@@ -36,7 +36,14 @@
 //! ([`crate::contact::resolve`]) after adding gravity, so a loose prop lands, bounces and rolls instead
 //! of falling through the ground. A body put to sleep keeps its collision object filed when the part
 //! says `DetectCollisionsWhenDisabled`: it goes on searching, its rays among the categories that wake
-//! it only ([`crate::flight_search::WAKE_MASK`]).
+//! it only ([`crate::flight_search::WAKE_MASK`]) — the ray probe's category list, which the put to
+//! sleep sets and a wake or the put-back clears ([`Collision::categories`], S200).
+//!
+//! **The hit listener** (S200): each hit of a body's rays on another collidable is heard by the body's
+//! hit listener, which wakes an asleep body when the struck one's category is in the wake mask (the
+//! toys', the path cars', the bikes'), and by the collection's listener, which activates the
+//! collection. A prop asleep on a toy is so woken by every search and put back to sleep by its own
+//! listener in the same frame, and its countdown never runs out.
 //!
 //! A `BodyTorsionSpring` (S196, [`Spring`]: the supercross banners) is a force listener of the
 //! collection world, filed when the collection is made, so it runs before every object's own force
@@ -44,7 +51,7 @@
 //! off the part's inertia.
 //!
 //! What is not here: the props struck (their `f.col` as a collidable others' searches meet, and the
-//! wake that strike or the rays' own hit gives — S197).
+//! wake that strike gives — S197), and the ride's bikes in the props' world.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -52,9 +59,10 @@ use crate::biplane::{self, Body, Dynamics, List, World, unturn};
 use crate::camera::CurveTable;
 use crate::chassis::turn;
 use crate::contact::{self, Collider, Mover, Node, Other, Side, Weighed};
-use crate::contact_search::{self, Heightfield, Hit, Record, Search, Struck, Swept};
+use crate::contact_search::{self, Heightfield, Record, Search};
 use crate::eco::Trees;
 use crate::flight_search::{self, Rays, Scene};
+use crate::world_search::Categories;
 use crate::world::Props;
 use crate::wreck_bike::{self, NoObjects};
 use crate::math::{Mat4, basis, mat4_to_quat};
@@ -124,6 +132,42 @@ pub const CAPACITY: usize = 8;
 pub struct Collision {
     pub collider: Collider,
     pub record: Record,
+    /// The ray probe's category list (S200): every category ([`EVERY_CATEGORY`]) as the init leaves it
+    /// and as a wake puts it back; the wake mask alone ([`asleep_categories`]) once a body that detects
+    /// collisions asleep is put to sleep. Only an object with a ray probe changes it.
+    pub categories: Categories,
+}
+
+/// A ray probe's category list as the prop's init and its enable leave it: none excluded.
+pub const EVERY_CATEGORY: Categories = Categories { mode: 1, list: Vec::new() };
+
+/// A ray probe's category list once its body is put to sleep with `DetectCollisionsWhenDisabled`: only
+/// the categories in the wake mask ([`flight_search::WAKE_MASK`]).
+pub fn asleep_categories() -> Categories {
+    Categories { mode: 0, list: vec![flight_search::WAKE_MASK] }
+}
+
+/// The disable's change to a ray probe's category list: the mode to "only these", and `category` added
+/// unless it is listed already (into the first empty slot, else at the end).
+fn only(categories: &mut Categories, category: u32) {
+    categories.mode = 0;
+    if categories.list.contains(&category) {
+        return;
+    }
+    match categories.list.iter_mut().find(|c| **c == 0) {
+        Some(slot) => *slot = category,
+        None => categories.list.push(category),
+    }
+}
+
+impl Object {
+    /// The probe's category list back to every category, as the enable and the put-back leave it for a
+    /// body that detects collisions asleep (one with a ray probe).
+    fn every_category(&mut self) {
+        if let Some(c) = self.collision.as_mut().filter(|c| c.record.rays.is_some()) {
+            c.categories = EVERY_CATEGORY;
+        }
+    }
 }
 
 impl Collision {
@@ -137,7 +181,7 @@ impl Collision {
         record.nearby = rays.is_some();
         record.sweeps = rays.is_some();
         record.rays = rays;
-        Collision { collider, record }
+        Collision { collider, record, categories: EVERY_CATEGORY }
     }
 }
 
@@ -389,6 +433,9 @@ impl Collection {
         if o.collision_enabled {
             o.filed = true;
         }
+        if o.detect_when_disabled {
+            o.every_category();
+        }
         o.fresh = true;
     }
 
@@ -402,9 +449,14 @@ impl Collection {
         self.forces.retain(|&i| i != k);
         self.posts.retain(|&i| i != k);
         self.bones[k].body.enabled = false;
-        let o = &self.objects[k];
-        if o.filed && !o.detect_when_disabled {
+        let o = &mut self.objects[k];
+        if o.collision.is_none() {
+            return;
+        }
+        if !o.detect_when_disabled {
             self.unfile(k);
+        } else if let Some(c) = o.collision.as_mut().filter(|c| c.record.rays.is_some()) {
+            only(&mut c.categories, flight_search::WAKE_MASK);
         }
     }
 
@@ -462,9 +514,16 @@ impl Collection {
     /// nearby list gathered where the probe stands, as the wreck bike's ([`wreck_bike::WreckBike::tick_among`]).
     /// `rays` is each object's ray probe tree (the model's `m.col`), in object order.
     ///
+    /// The world is the wreck bike's, the plane's ([`Scene::probed`]): the path cars are toys in it.
+    /// The ray probe searches with its category list ([`Collision::categories`]), and its two
+    /// listeners hear each hit on another collidable: the body's hit listener wakes an asleep body
+    /// struck on one of the wake mask's categories (its [`Collection::enable`]), the collection's
+    /// listener activates the collection ([`Collection::activate`]), in that order, before the next
+    /// object searches.
+    ///
     /// A sleeping body's object (filed still, `DetectCollisionsWhenDisabled`) searches too, the body
-    /// standing still; its ray probe's category list is then the wake mask alone, so its rays keep only
-    /// what that meets.
+    /// standing still; its ray probe's category list is then the wake mask alone, so its rays meet
+    /// only what wakes it.
     pub fn search(&mut self, dt: F, rays: &[Option<Rays>], field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
         for k in 0..self.objects.len() {
             let o = &mut self.objects[k];
@@ -473,24 +532,29 @@ impl Collection {
             let asleep = !body.enabled;
             c.record.node = o.node;
             contact_search::clear(&mut c.record, Some(body));
-            let world: &mut dyn Search;
             let mut none = NoObjects;
-            let mut scene;
-            match (rays.get(k).and_then(Option::as_ref), props.is_some() || trees.is_some()) {
-                (Some(tree), true) => {
-                    let bounds = field.map(|f| {
-                        let (lo, hi) = (f.min(), f.max());
-                        ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
-                    });
-                    let mut nearby = flight_search::search();
-                    scene = Scene::wooded(props, trees, None, bounds, tree, &c.record.node, &mut nearby);
-                    world = &mut scene;
-                }
-                _ => world = &mut none,
+            let mut scene = None;
+            if let (Some(tree), true) = (rays.get(k).and_then(Option::as_ref), props.is_some() || trees.is_some()) {
+                let bounds = field.map(|f| {
+                    let (lo, hi) = (f.min(), f.max());
+                    ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+                });
+                let mut nearby = flight_search::search();
+                scene = Some(Scene::probed(props, trees, bounds, tree, &c.record.node, &mut nearby, &c.categories, asleep));
             }
-            let mut waking = Waking { world, asleep };
-            contact_search::collide(std::slice::from_mut(&mut c.record), 0, Some(body), field, &mut waking, dt);
+            let world: &mut dyn Search = match scene.as_mut() {
+                Some(s) => s,
+                None => &mut none,
+            };
+            contact_search::collide(std::slice::from_mut(&mut c.record), 0, Some(body), field, world, dt);
             o.node = std::mem::take(&mut c.record.node);
+            let heard = scene.map(|s| s.heard()).unwrap_or_default();
+            if heard.woke {
+                self.enable(k);
+            }
+            if heard.struck {
+                self.activate();
+            }
         }
     }
 
@@ -510,6 +574,9 @@ impl Collection {
             }
             self.reset(k);
             self.unfile(k);
+            if self.objects[k].detect_when_disabled {
+                self.objects[k].every_category();
+            }
             return true;
         }
         if !self.at_rest(k) {
@@ -796,35 +863,6 @@ impl Dynamics for Lists<'_, '_> {
     fn post(&mut self, i: i32, _dt: F) {
         let k = self.c.posts[i as usize];
         self.c.post(k);
-    }
-}
-
-/// The world as a collision object's search sees it: a sleeping body's ray probe keeps only the hits on
-/// what its category list (the wake mask) meets.
-struct Waking<'a> {
-    world: &'a mut dyn Search,
-    asleep: bool,
-}
-
-impl Search for Waking<'_> {
-    fn rays(&mut self, nearby: bool) -> Vec<Hit> {
-        let mut hits = self.world.rays(nearby);
-        if self.asleep {
-            hits.retain(|h| flight_search::category(h.struck.object) & flight_search::WAKE_MASK != 0);
-        }
-        hits
-    }
-    fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<Swept> {
-        self.world.sweep(from, to, nearby)
-    }
-    fn moved(&mut self, node: &Node) {
-        self.world.moved(node);
-    }
-    fn velocity(&self, struck: &Struck) -> Vf {
-        self.world.velocity(struck)
-    }
-    fn movers(&self) -> Vec<Mover> {
-        self.world.movers()
     }
 }
 
