@@ -1205,3 +1205,565 @@ fn the_mx_rotor_spins_as_the_originals() {
     }
     println!("the MX rotor's spin: {CASES} cases, bit-exact ({hidden_cases} hidden)");
 }
+
+// --- S220b: the input step and the frame -------------------------------------------------------------
+
+/// The player's control table as the input step reads it: sixteen records 0x18 apart, the value at +4.
+const CONTROLS: u32 = SCRATCH + 0x1_0000;
+
+/// A command's value: often 0 or 1, sometimes a pressure, now and then an axis's negative half or -0.
+fn control_value(pick: &mut Pick) -> F {
+    match pick.next() % 10 {
+        0..=3 => F::ZERO,
+        4 | 5 => F::ONE,
+        6 => -F::from((pick.next() % 256) as i32 + 1) * F(0.003_906_25),
+        7 => F(-0.0),
+        _ => F::from((pick.next() % 256) as i32 + 1) * F(0.003_906_25),
+    }
+}
+
+/// A stick value: what a report byte gives through the ride's range, something no pad gives, or a zero.
+fn stick_value(pick: &mut Pick) -> F {
+    use game_sim::input::AxisRange;
+    match pick.next() % 8 {
+        0 => F::ZERO,
+        1 => F(-0.0),
+        2 => F::from_bits(pick.next() as u32 & 0x807f_ffff | 0x3f00_0000), // 0.5..1, either sign
+        3 => F::from_bits(pick.next() as u32 & 0x80ff_ffff | 0x3f00_0000), // 0.5..2, either sign
+        _ => AxisRange::PLAYER.apply(F::from((pick.next() & 0xff) as i32), F(255.0)),
+    }
+}
+
+/// The table written for the original, and the port's view of it on `pad` through the shipped bindings.
+fn write_controls(ee: &mut Ee, table: &[F; 16]) {
+    for (k, v) in table.iter().enumerate() {
+        ee.set_u32(CONTROLS + 0x18 * k as u32 + 4, v.to_bits());
+    }
+}
+
+fn port_input(stick: (F, F), table: &[F; 16], pad: usize) -> Pad {
+    use game_sim::bindings::Table;
+    Pad::from_sticks(stick, |c| Table::SHIPPED.control(pad, c).map_or(F::ZERO, |k| table[k.index()]))
+}
+
+/// S220b: the helicopter's input step against the original's on S148's state, the shipped binding
+/// table in place, on generated sticks and control tables for both pads: the stick past ±1, both of a
+/// pair held, signed zeros, and every d-pad override.
+#[test]
+fn the_input_step_is_the_originals() {
+    let Some(mut ee) = heli() else { return };
+    let func = addr("kiowa_input").unwrap();
+    let vt = ee.u32_at(HELI + VTABLE);
+    assert_eq!(ee.u32_at(vt + 0x20), func, "the helicopter's input slot is not kiowa_input");
+    let mut pick = Pick(0x5220_b000_1a9d_0001);
+    let (mut overridden, mut pedalled) = (0, 0);
+    for case in 0..CASES {
+        let pad = case % 2;
+        let stick = (stick_value(&mut pick), stick_value(&mut pick));
+        let table = [0; 16].map(|_| control_value(&mut pick));
+        write_controls(&mut ee, &table);
+        for k in 0..6 {
+            ee.set_u32(HELI + at::PAD + 4 * k, 0xdead_beef);
+        }
+        ee.call(func, &[u64::from(HELI), u64::from(CONTROLS), pad as u64], &[stick.0.to_f32(), stick.1.to_f32()], BUDGET);
+        let port = port_input(stick, &table, pad);
+        let want = pad_of(&ee);
+        for (name, got, want) in [
+            ("climb", port.climb, want.climb),
+            ("descend", port.descend, want.descend),
+            ("the lateral", port.lateral, want.lateral),
+            ("the longitudinal", port.longitudinal, want.longitudinal),
+            ("the pedal", port.pedal, want.pedal),
+        ] {
+            same(name, case, got, want.to_f32());
+        }
+        assert_eq!(ee.u32_at(HELI + at::ALTITUDE_FRACTION), 0xdead_beef, "case {case}: the input step wrote the height");
+        overridden += usize::from(port.lateral.abs() == F::ONE && stick.0.abs() != F::ONE);
+        pedalled += usize::from(port.pedal != F::ZERO);
+    }
+    assert!(overridden > CASES / 10 && pedalled > CASES / 10, "{overridden} d-pad overrides, {pedalled} pedals");
+    println!("the input step: {CASES} cases, both pads, bit-exact ({overridden} d-pad overrides, {pedalled} pedals)");
+}
+
+/// The rigid body's fields (research/oracle.txt S38's body_integrate and its neighbours).
+mod body_at {
+    pub const ENABLED: u32 = 0x00;
+    pub const INV_MASS: u32 = 0x10;
+    pub const LISTENERS: u32 = 0xd0;
+    /// The quadwords, by name; the two accelerations' `w` is whatever the register held.
+    pub const QUADS: [(&str, u32, usize); 21] = [
+        ("damping", 0x20, 4),
+        ("the last position", 0x50, 4),
+        ("the position", 0x60, 4),
+        ("the velocity", 0x70, 4),
+        ("the last force", 0x80, 4),
+        ("the force", 0x90, 4),
+        ("the acceleration", 0xa0, 3),
+        ("the shock peak", 0xb0, 4),
+        ("the shock", 0xc0, 4),
+        ("the step", 0xf0, 4),
+        ("the inverse inertia", 0x120, 4),
+        ("the angular damping", 0x130, 4),
+        ("the last orientation", 0x150, 4),
+        ("the orientation", 0x170, 4),
+        ("the centre of gravity", 0x180, 4),
+        ("the moment", 0x190, 4),
+        ("the last moment", 0x1a0, 4),
+        ("the rates", 0x1b0, 4),
+        ("the angular acceleration", 0x1c0, 3),
+        ("the twist peak", 0x1d0, 4),
+        ("the twist", 0x1e0, 4),
+    ];
+}
+
+fn body_of(ee: &Ee, b: u32) -> Body {
+    let q = |o: u32| quad(ee, b + o);
+    let [damping, last_position, position, velocity, last_force, force, accel, shock_peak, shock, step, inv_inertia,
+         ang_damping, last_quat, quat, cofg, moment, last_moment, rates, ang_accel, twist_peak, twist] =
+        body_at::QUADS.map(|(_, o, _)| q(o));
+    Body {
+        enabled: ee.u32_at(b + body_at::ENABLED) != 0,
+        inv_mass: f(ee, b + body_at::INV_MASS),
+        damping, last_position, position, velocity, last_force, force, accel, shock_peak, shock, step, inv_inertia,
+        ang_damping, last_quat, quat, cofg, moment, last_moment, rates, ang_accel, twist_peak, twist,
+    }
+}
+
+fn body_quads(b: &Body) -> [Vf; 21] {
+    [b.damping, b.last_position, b.position, b.velocity, b.last_force, b.force, b.accel, b.shock_peak, b.shock, b.step,
+     b.inv_inertia, b.ang_damping, b.last_quat, b.quat, b.cofg, b.moment, b.last_moment, b.rates, b.ang_accel,
+     b.twist_peak, b.twist]
+}
+
+/// The dynamics world's fields (S38): `{count, _, array}` per list, and where each list's element keeps
+/// its virtual table.
+mod world_at {
+    pub const ITERATIONS: u32 = 0x00;
+    pub const RATE: u32 = 0x04;
+    pub const LISTS: [u32; 5] = [0x50, 0x68, 0x80, 0x98, 0xb0];
+}
+
+/// The engine round the helicopter for the port, answering as the hooks answer the original.
+struct Around {
+    touching: bool,
+    ignored: bool,
+    entries: Vec<game_sim::kiowa::Touch>,
+    rotor: bool,
+    contact: bool,
+    centres: Vec<Vf>,
+    height: f32,
+    resolved: usize,
+    asked_ground: Vec<Vf>,
+    crashed: Vec<game_sim::kiowa::Crashed>,
+}
+
+impl game_sim::kiowa::Surroundings for Around {
+    fn resolve(&mut self, _: &mut Body) {
+        self.resolved += 1;
+    }
+    fn touching(&self) -> bool {
+        self.touching
+    }
+    fn ignored(&self) -> bool {
+        self.ignored
+    }
+    fn entries(&self) -> Vec<game_sim::kiowa::Touch> {
+        self.entries.clone()
+    }
+    fn strike(&mut self, matrix: &game_sim::math::Mat4) -> game_sim::kiowa::Strike {
+        let (asked, height) = (&mut self.asked_ground, self.height);
+        game_sim::kiowa::Strike {
+            in_ground: self.rotor && game_sim::kiowa::rotor_in_ground(matrix, &self.centres, |p| {
+                asked.push(p);
+                let mut q = p;
+                q[1] = height;
+                q
+            }),
+            struck: self.contact,
+        }
+    }
+    fn crashed(&mut self, asked: &game_sim::kiowa::Crashed, _: &mut game_sim::kiowa::Ride, _: &mut game_sim::rng::Rng) {
+        self.crashed.push(*asked);
+    }
+}
+
+/// S220b: one whole frame of the helicopter against the original's on S148's state — the input step,
+/// then the engine's world step with the helicopter's own body and listeners in it (the state's
+/// elements: the preforce, the force forwarder, the MX measure) — on generated pads, bodies near
+/// and away from the terrain's edge, controller and crash states, contacts, sounds and seeds.
+///
+/// Hooked in the original, and answered the same for the port ([`Around`]): the collision record's
+/// response (counted), the body wrapper's pose (it moves no figure), the crash test's wreck, blade
+/// and put-back slots (recorded; the wreck's own reason and down are written, as S220a), the ground
+/// (one height a case), the rotor's collision update and contact search (the struck answer written),
+/// the MX presentation copies and the model's nodes. The touchdown sound runs, on one fake clip
+/// whose own slots are no-ops and with the positional mixer hooked, so its `rand()` is the game's.
+#[test]
+fn the_frame_is_the_originals() {
+    use game_sim::air::AcosTable;
+    use game_sim::biplane::{Area, World};
+    use game_sim::kiowa::{Crash, Measure, Ride, Touch};
+    use game_sim::math::Mat4;
+    use game_sim::rng::Rng;
+    let Some(mut ee) = heli() else { return };
+    let (input, step) = (addr("kiowa_input").unwrap(), addr("dynamics_world_step").unwrap());
+    let curve = the_curve_table(&ee);
+    let acos = AcosTable::build();
+    let vt = ee.u32_at(HELI + VTABLE);
+    let (r, a) = (ee.u32_at(HELI + ROTOR), ee.u32_at(HELI + at::AERO));
+    let body = ee.u32_at(HELI + at::BODY);
+    let record = ee.u32_at(HELI + at::PILOT);
+    assert_eq!(ee.u32_at(body + body_at::LISTENERS), 0, "the helicopter's body has force listeners");
+
+    // The helicopter's own elements in the state's world: the body, the force forwarder to heli+0x9c,
+    // the preforce and post listeners at heli+0x90/+0x94.
+    let game = 0x007d_0678;
+    assert_eq!((ee.u32_at(game + world_at::ITERATIONS), ee.f32_at(game + world_at::RATE)), (1, 115.0), "no world at {game:#x}");
+    let list = |ee: &Ee, l: usize| -> Vec<u32> {
+        let (n, arr) = (ee.u32_at(game + world_at::LISTS[l]), ee.u32_at(game + world_at::LISTS[l] + 8));
+        (0..n).map(|k| ee.u32_at(arr + 4 * k)).collect()
+    };
+    let force = *list(&ee, 1).iter().find(|&&e| ee.u32_at(e + 0xc) == HELI + 0x9c).expect("no force element for the helicopter");
+    let elements = [Some(body), Some(force), None, Some(HELI + 0x90), Some(HELI + 0x94)];
+    for (l, e) in elements.iter().enumerate() {
+        if let Some(e) = e {
+            assert!(list(&ee, l).contains(e), "{e:#x} is not in the world's list {l}");
+        }
+    }
+    let world = SCRATCH + 0x2_0000;
+    ee.set_u32(world + world_at::ITERATIONS, 1);
+    ee.set_f32(world + world_at::RATE, 115.0);
+    for (l, e) in elements.iter().enumerate() {
+        let arr = world + 0x100 + 0x10 * l as u32;
+        ee.set_u32(world + world_at::LISTS[l], u32::from(e.is_some()));
+        ee.set_u32(world + world_at::LISTS[l] + 8, arr);
+        ee.set_u32(arr, e.unwrap_or(0));
+    }
+
+    // The engine's parts, as the S220a tests hook them.
+    let resolved = Rc::new(RefCell::new(0usize));
+    let rs = resolved.clone();
+    ee.hooks.insert(ee.u32_at(ee.u32_at(record + 8) + 0x80), Box::new(move |_| *rs.borrow_mut() += 1));
+    ee.hooks.insert(addr("body_wrapper_post").unwrap(), Box::new(|_| {}));
+    for name in ["kiowa_mx_present_a", "kiowa_mx_present_b", "kiowa_mx_present_c", "node_set_rotation", "node_world_matrix",
+                 "node_set_matrix", "transform_touch"] {
+        ee.hooks.insert(addr(name).unwrap(), Box::new(|_| {}));
+    }
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let ak = asked.clone();
+    ee.hooks.insert(ee.u32_at(vt + WRECK_SLOT), Box::new(move |ee| {
+        let (heli, reason) = (ee.r(4) as u32, ee.r(5) as u32);
+        ee.set_u32(heli + WRECKED, reason);
+        ee.set_u32(heli + measure_at::DOWN, 0);
+        ak.borrow_mut().push(Asked::Wreck(reason));
+    }));
+    let ak = asked.clone();
+    ee.hooks.insert(ee.u32_at(vt + DEBRIS_SLOT), Box::new(move |_| ak.borrow_mut().push(Asked::Debris)));
+    let ak = asked.clone();
+    ee.hooks.insert(ee.u32_at(vt + RESET_SLOT), Box::new(move |_| ak.borrow_mut().push(Asked::Reset)));
+    let ground = Rc::new(RefCell::new((0.0f32, Vec::<[f32; 4]>::new())));
+    let g = ground.clone();
+    ee.hooks.insert(addr("ground_query").unwrap(), Box::new(move |ee| {
+        let p = ee.r(5) as u32;
+        let mut g = g.borrow_mut();
+        g.1.push([0, 4, 8, 12].map(|k| ee.f32_at(p + k)));
+        ee.set_f32(p + 4, g.0);
+    }));
+    let collision = ee.u32_at(HELI + measure_at::ROTOR_COLLISION);
+    ee.hooks.insert(ee.u32_at(ee.u32_at(collision + 0x38) + 0xac), Box::new(|_| {}));
+    ee.hooks.insert(addr("collide_against_search").unwrap(), Box::new(|_| {}));
+    let (contacts, struck_list, struck_at, surface_at) = (SCRATCH, SCRATCH + 0x100, SCRATCH + 0x200, SCRATCH + 0x300);
+    ee.set_u32(collision + measure_at::CONTACTS, contacts);
+    ee.set_u32(contacts + 0x9c, struck_list);
+    let entries_at = SCRATCH + 0x400;
+    ee.set_u32(record + measure_at::ENTRY_ARRAY, entries_at);
+    // One clip for the touchdown: its own slots do nothing, the mixer says it is out of earshot.
+    let sound = ee.u32_at(HELI + measure_at::SOUND);
+    let (clips, clip, clip_vt, at_zero, clip_slot) = (SCRATCH + 0x800, SCRATCH + 0x810, SCRATCH + 0x840, SCRATCH + 0x880, 0x0000_2000);
+    ee.set_u32(sound + 0x208, clips);
+    ee.set_u32(sound + 0xd4, at_zero);
+    ee.set_u32(clips, clip);
+    ee.set_u32(clip + 8, clip_vt);
+    ee.set_u32(clip_vt + 0x1c, clip_slot);
+    ee.set_u32(clip_vt + 0x30, clip_slot);
+    assert_eq!(ee.u32_at(sound + 0x22c), 0, "the touchdown sound has a second clip list");
+    ee.hooks.insert(clip_slot, Box::new(|_| {}));
+    ee.hooks.insert(addr("sound_3d").unwrap(), Box::new(|ee| ee.set(2, 0)));
+    let state = addr("rand_state").unwrap();
+
+    let terrain = ee.u32_at(ee.u32_at(HELI + measure_at::SCENE) + measure_at::TERRAIN);
+    let extent: Vec<F> = (0..4).map(|k| f(&ee, terrain + measure_at::EXTENT + 4 * k)).collect();
+    let area = Area::new(extent[0], extent[1], extent[2], extent[3]);
+    let spheres = ee.u32_at(collision + measure_at::SPHERES);
+    let centres: Vec<Vf> = (0..ee.u32_at(collision + measure_at::SPHERE_COUNT)).map(|k| quad(&ee, spheres + 0x20 * k + 0x10)).collect();
+    let (surface_mask, struck_mask) = (ee.u32_at(HELI + measure_at::SURFACE_MASK), ee.u32_at(HELI + measure_at::STRUCK_MASK));
+    let flags = |pick: &mut Pick, mask: u32| if pick.one_in(2) { mask } else { 1u32 << (pick.next() % 32) & !mask };
+    let rotor_node = ee.u32_at(HELI + measure_at::ROTOR_NODE);
+    let world_port = World { iterations: 1, rate: F(115.0) };
+    let start = body_of(&ee, body);
+    let pf = ee.u32_at(HELI + at::FILTER);
+
+    let mut pick = Pick(0x5220_b000_f4a3_0001);
+    let (mut inputs, mut thrown, mut crashed, mut sounded, mut still) = (0, 0, 0, 0, 0);
+    for case in 0..CASES {
+        // the pad, when the player has it
+        let pad = case % 2;
+        let stick = (stick_value(&mut pick), stick_value(&mut pick));
+        let table = [0; 16].map(|_| control_value(&mut pick));
+        let flown = !pick.one_in(20);
+        let given = flown && !pick.one_in(10);
+        write_controls(&mut ee, &table);
+        ee.set_u32(HELI + at::FLOWN, u32::from(flown));
+        for k in [0, 4, 12, 16, 20] {
+            let v = pick.stick(-1.0);
+            ee.set_f32(HELI + at::PAD + k, v);
+        }
+        // the controller's loop
+        let hold = pick.range(0.0, 600.0);
+        ee.set_f32(HELI + at::HOLD, hold);
+        let timer = if pick.one_in(3) { 0.0 } else { pick.range(-0.5, 2.0) };
+        ee.set_f32(HELI + at::HOLD + 4, timer);
+        let fv = pick.range(0.0, 1.0);
+        ee.set_f32(pf, fv);
+        let integral = pick.range(-50.0, 50.0);
+        ee.set_f32(HELI + at::COLLECTIVE + 16, integral);
+        // the body: the state's, moved, turned and set going
+        let mut b = start;
+        b.enabled = !pick.one_in(12);
+        let (w, d) = (area.width.to_f32(), area.depth.to_f32());
+        let coord = |extent: f32, pick: &mut Pick| match pick.next() % 6 {
+            0 => pick.range(-200.0, 400.0),
+            1 => extent + pick.range(-400.0, 200.0),
+            _ => pick.range(0.0, extent),
+        };
+        b.position = Vf::new(coord(w, &mut pick), pick.range(-50.0, 900.0), coord(d, &mut pick), 1.0);
+        let fast = if pick.one_in(2) { 120.0 } else { 10.0 };
+        b.velocity = Vf::new(pick.range(-fast, fast), pick.range(-20.0, 20.0), pick.range(-fast, fast), 1.0);
+        if pick.one_in(10) {
+            b.velocity = Vf::new(0.0, 0.0, 0.0, 1.0);
+            still += 1;
+        }
+        let q = orientation(&mut pick);
+        b.quat = Vf::new(q[0], q[1], q[2], q[3]);
+        b.rates = Vf::new(pick.range(-2.0, 2.0), pick.range(-2.0, 2.0), pick.range(-2.0, 2.0), 1.0);
+        for ((_, o, _), v) in body_at::QUADS.iter().zip(body_quads(&b)) {
+            put(&mut ee, body + o, v);
+        }
+        ee.set_u32(body + body_at::ENABLED, u32::from(b.enabled));
+        // the measure's last figures, the crash state
+        ee.set_f32(HELI + SPEED, pick.range(-0.2 * fast, fast));
+        ee.set_f32(HELI + SPEED + 4, pick.range(-1.6, 1.6));
+        let beta = if pick.one_in(4) { (if pick.one_in(2) { 1.0 } else { -1.0 }) * pick.range(2.9, 3.1415927) } else { pick.range(-0.5, 0.5) };
+        ee.set_f32(HELI + SPEED + 8, beta);
+        ee.set_f32(HELI + at::AIRSPEED, pick.range(0.0, fast));
+        let (pitch, roll) = (angle(&mut pick), angle(&mut pick));
+        ee.set_f32(HELI + at::PITCH, pitch);
+        ee.set_f32(HELI + at::ROLL, roll);
+        let was = pick.one_in(2);
+        ee.set_u32(HELI + measure_at::WAS_TOUCHING, u32::from(was));
+        let reason = match pick.next() % 8 {
+            0..=4 => 0,
+            5 => 1,
+            6 => 13,
+            _ => 2,
+        };
+        ee.set_u32(HELI + WRECKED, reason);
+        let down = pick.one_in(2);
+        ee.set_u32(HELI + measure_at::DOWN, u32::from(down));
+        let wreck_time = if pick.one_in(16) { -1.0 } else { pick.range(0.0, 6.0) };
+        ee.set_f32(HELI + measure_at::WRECK_TIME, wreck_time);
+        let clock = if pick.one_in(8) { 0.0 } else { pick.range(0.0, 7.0) };
+        ee.set_f32(HELI + measure_at::CLOCK, clock);
+        let throw_scale = pick.around(1.0);
+        ee.set_f32(HELI + measure_at::THROW_SCALE, throw_scale);
+        // the record, the rotor's strike, the sound, the generator, the rotor's spin
+        let touching = !pick.one_in(3);
+        ee.set_u32(record + measure_at::TOUCHING, u32::from(touching));
+        let has_surface = pick.one_in(2);
+        let surface_flags = flags(&mut pick, surface_mask);
+        ee.set_u32(record + measure_at::SURFACE, if has_surface { surface_at } else { 0 });
+        ee.set_u32(surface_at + measure_at::FLAGS, surface_flags);
+        let entries: Vec<Touch> = (0..pick.next() % 4)
+            .map(|_| Touch { kind: u32::from(pick.one_in(3)), t: F(if pick.one_in(4) { 1.0 } else { pick.range(0.0, 2.0) }) })
+            .collect();
+        ee.set_u32(record + measure_at::ENTRIES, entries.len() as u32);
+        for (k, e) in entries.iter().enumerate() {
+            ee.set_u32(entries_at + 0x80 * k as u32, e.kind);
+            ee.set_f32(entries_at + 0x80 * k as u32 + 0x24, e.t.to_f32());
+        }
+        // Always the rotor's collision object, as every helicopter is built: without it the original's
+        // crash test reads its rotor-in-the-ground flag from a register it never set (S220b's journal).
+        let has_collision = true;
+        let height = b.position.y() + if pick.one_in(2) { pick.range(-60.0, 0.0) } else { pick.range(-200.0, 60.0) };
+        let contact = pick.one_in(3);
+        set_bit(&mut ee, collision + measure_at::CONTACT_BYTE, 0x20, contact);
+        let has_struck = !pick.one_in(4);
+        let struck_flags = flags(&mut pick, struck_mask);
+        ee.set_u32(struck_list, if has_struck { struck_at } else { 0 });
+        ee.set_u32(struck_at + measure_at::FLAGS, struck_flags);
+        let sound_kind = pick.next() % 3; // none, no clips, one clip
+        ee.set_u32(HELI + measure_at::SOUND, if sound_kind == 0 { 0 } else { sound });
+        ee.set_u32(sound + 0x200, u32::from(sound_kind == 2));
+        let seed = pick.next();
+        ee.set_u32(state, seed as u32);
+        ee.set_u32(state + 4, (seed >> 32) as u32);
+        let hidden = pick.one_in(4);
+        set_bit(&mut ee, rotor_node + 3, 0x40, hidden);
+        let rotor_angle = pick.range(0.0, 5000.0);
+        ee.set_f32(HELI + measure_at::ROTOR_ANGLE, rotor_angle);
+        let dt = match pick.next() % 8 {
+            0 => 0.0,
+            1 => pick.range(0.0, 0.1),
+            2 => 1.0 / 60.0,
+            _ => 1.0 / 30.0,
+        };
+
+        // the port's view of all that
+        let mut kiowa = Kiowa {
+            controller: controller_of(&ee),
+            rotor: rotor_of(&ee, r),
+            aero: aero_of(&ee, a),
+            pad: pad_of(&ee),
+            commands: commands_of(&ee),
+            control: loop_of(&ee),
+            rotor_state: rotor_state_of(&ee, r),
+            aero_state: aero_state_of(&ee, a),
+            // stale: the frame takes it from the crash state
+            wrecked: pick.one_in(2),
+        };
+        let row = |o: u32| quad(&ee, HELI + o);
+        let mut ride = Ride {
+            body: body_of(&ee, body),
+            measure: Measure {
+                speed: f(&ee, HELI + SPEED),
+                alpha: f(&ee, HELI + SPEED + 4),
+                beta: f(&ee, HELI + SPEED + 8),
+                world_rates: row(0x480),
+                velocity: row(0x490),
+                forward: row(0x4a0),
+                up: row(0x4b0),
+                euler: row(0x4c0),
+                matrix: Mat4([row(0x4d0), row(0x4e0), row(0x4f0), row(0x500)]),
+                was_touching: was,
+            },
+            crash: Crash {
+                reason,
+                down,
+                min_wreck_speed: f(&ee, HELI + measure_at::MIN_WRECK_SPEED),
+                wreck_time: F(wreck_time),
+                clock: F(clock),
+            },
+            flown,
+            gravity_scale: f(&ee, HELI + at::GRAVITY_SCALE),
+            throw_scale: F(throw_scale),
+            gravity: row(0x140),
+            area: Some(area),
+            touchdown_sound: sound_kind == 2,
+            rotor_angle: F(rotor_angle),
+            rotor_hidden: hidden,
+        };
+        let mut around = Around {
+            touching,
+            ignored: has_surface && surface_flags & surface_mask != 0,
+            entries,
+            rotor: has_collision,
+            contact: has_collision && contact && has_struck && struck_flags & struck_mask == 0,
+            centres: centres.clone(),
+            height,
+            resolved: 0,
+            asked_ground: Vec::new(),
+            crashed: Vec::new(),
+        };
+        let mut rng = Rng::from_state(seed);
+
+        asked.borrow_mut().clear();
+        *ground.borrow_mut() = (height, Vec::new());
+        *resolved.borrow_mut() = 0;
+        if given {
+            ee.call(input, &[u64::from(HELI), u64::from(CONTROLS), pad as u64], &[stick.0.to_f32(), stick.1.to_f32()], BUDGET);
+        }
+        ee.call(step, &[u64::from(world)], &[dt], 20 * BUDGET);
+        let pad_in = given.then(|| port_input(stick, &table, pad));
+        let out = kiowa.tick(&mut ride, &world_port, pad_in, &curve, &acos, &mut rng, F(dt), &mut around);
+
+        // the helicopter
+        let want = pad_of(&ee);
+        for (name, got, want) in [
+            ("climb", kiowa.pad.climb, want.climb),
+            ("descend", kiowa.pad.descend, want.descend),
+            ("the lateral", kiowa.pad.lateral, want.lateral),
+            ("the longitudinal", kiowa.pad.longitudinal, want.longitudinal),
+            ("the pedal", kiowa.pad.pedal, want.pedal),
+        ] {
+            same(name, case, got, want.to_f32());
+        }
+        let want = commands_of(&ee);
+        for (name, got, want) in [
+            ("the collective", kiowa.commands.collective, want.collective),
+            ("the lateral cyclic", kiowa.commands.lateral, want.lateral),
+            ("the longitudinal cyclic", kiowa.commands.longitudinal, want.longitudinal),
+            ("the pedal command", kiowa.commands.pedal, want.pedal),
+            ("the filtered collective", kiowa.commands.filtered, want.filtered),
+            ("the altitude fraction", kiowa.commands.altitude_fraction, want.altitude_fraction),
+        ] {
+            same(name, case, got, want.to_f32());
+        }
+        assert_eq!(kiowa.control, loop_of(&ee), "case {case}: the controller's loop");
+        assert_eq!(kiowa.rotor_state, rotor_state_of(&ee, r), "case {case}: the rotor's state");
+        assert_eq!(kiowa.aero_state, aero_state_of(&ee, a), "case {case}: the aerodynamics' state");
+        // the body, every word
+        let got = &ride.body;
+        assert_eq!(got.enabled, ee.u32_at(body + body_at::ENABLED) != 0, "case {case}: enabled");
+        same("the inverse mass", case, got.inv_mass, ee.f32_at(body + body_at::INV_MASS));
+        for ((name, o, lanes), v) in body_at::QUADS.iter().zip(body_quads(got)) {
+            same_lanes(name, case, v, [0, 4, 8, 12].map(|k| ee.f32_at(body + o + k)), *lanes);
+        }
+        // the measure
+        let m = &ride.measure;
+        same("the speed", case, m.speed, ee.f32_at(HELI + SPEED));
+        same("alpha", case, m.alpha, ee.f32_at(HELI + SPEED + 4));
+        same("beta", case, m.beta, ee.f32_at(HELI + SPEED + 8));
+        let rows = [m.world_rates, m.velocity, m.forward, m.up, m.euler].into_iter().chain(m.matrix.0);
+        for ((name, o), got) in measure_at::ROWS.into_iter().zip(rows) {
+            same_lanes(name, case, got, [0, 4, 8, 12].map(|k| ee.f32_at(HELI + o + k)), 4);
+        }
+        assert_eq!(ee.u32_at(HELI + measure_at::WAS_TOUCHING), u32::from(m.was_touching), "case {case}: the touching flag");
+        // the crash test and what it asked for
+        let mut want = Vec::new();
+        want.extend(out.wreck.map(Asked::Wreck));
+        if out.debris {
+            want.push(Asked::Debris);
+        }
+        if out.recover {
+            want.push(Asked::Reset);
+        }
+        assert_eq!(*asked.borrow(), want, "case {case}: what the crash test asked for");
+        assert_eq!(around.crashed, vec![out], "case {case}: the crash test's answer handed on");
+        let seen = &ground.borrow().1;
+        assert_eq!(seen.len(), around.asked_ground.len(), "case {case}: the ground queries");
+        for (got, want) in around.asked_ground.iter().zip(seen) {
+            same_lanes("the sphere's centre", case, *got, *want, 4);
+        }
+        assert_eq!(ee.u32_at(HELI + WRECKED), ride.crash.reason, "case {case}: the reason");
+        assert_eq!(ee.u32_at(HELI + measure_at::DOWN), u32::from(ride.crash.down), "case {case}: down");
+        same("the clock", case, ride.crash.clock, ee.f32_at(HELI + measure_at::CLOCK));
+        same("the throw's scale", case, ride.throw_scale, ee.f32_at(HELI + measure_at::THROW_SCALE));
+        let left = u64::from(ee.u32_at(state)) | u64::from(ee.u32_at(state + 4)) << 32;
+        assert_eq!(rng.state(), left, "case {case}: the generator");
+        same("the rotor's angle", case, ride.rotor_angle, ee.f32_at(HELI + measure_at::ROTOR_ANGLE));
+        assert_eq!(around.resolved, *resolved.borrow(), "case {case}: the collision responses");
+
+        inputs += usize::from(given);
+        thrown += usize::from(out.wreck == Some(13));
+        crashed += usize::from(out.wreck == Some(1));
+        // Outside a throw only the touchdown's clip draws.
+        if out.wreck != Some(13) && rng.state() != seed {
+            assert_eq!(sound_kind, 2, "case {case}: a draw with no clip");
+            sounded += 1;
+        }
+    }
+    assert!(inputs > CASES / 2 && thrown > CASES / 50 && crashed > CASES / 50 && sounded > CASES / 50 && still > CASES / 20,
+            "{inputs} pads, {thrown} thrown, {crashed} crashed, {sounded} sounded, {still} still: the cases miss a branch");
+    println!("the frame: {CASES} cases, bit-exact ({inputs} pads read, {thrown} thrown, {crashed} crashed, \
+              {sounded} touchdown sounds drawn, {still} at rest)");
+}

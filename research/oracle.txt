@@ -7129,6 +7129,34 @@ kiowa_blade_spin boot 0x003920b0 (dt in f12, heli): +0xe58 += 27 dt unless the r
 node_set_rotation boot 0x001b2e50 (node, angle in f12, axis*): replaces the rotation, keeps the position
 node_world_matrix boot 0x001b2a50 (node, 0, out*): the node's world matrix, 4 quads
 node_set_matrix boot 0x001b29c0 (node, matrix*): copies the 4 quads into the node
+# S220b — the Kiowa's input step and its frame, research/journal/*-s220b-kiowa-input. Ported as
+# game_sim::kiowa (Pad::from_sticks, Kiowa::tick); tests/kiowa.rs proves both on S148's state.
+#   The writers of +0x334..+0x348 (an ELF-wide store scan over 0x0038c000..0x00394000): the base ctor
+#   0x0038c270 and the base unwreck 0x0038efc0 zero them (+0x33c and +0x378 too); the input slot
+#   below; the controller writes only +0x33c; and three MX functions outside the player's path, an
+#   MX table at 0x0045cc68 (0x003915a0 at +0x0, 0x00393180 at +0x18, 0x00393380 at +0x20, called through
+#   thunks 0x00393700/0x00393780/0x003937e0), which copy the pad from a scripted pilot at +0x99c
+#   (+0xe0/+0xe4/+0xf0/+0xf4/+0xf8) or put lateral/longitudinal/climb/pedal at 0 and descend at 1.
+#   Not ported (no player path reaches them; what drives them is not known).
+#   The world in the state: dynamics world 0x007d0678 (iterations 1, rate 115), bodies {0x00606f30 the
+#   heli's, another}, force {0x007cfea0: 0x001f7770 forwards to its +0xc = heli+0x9c, whose vt +8 is a
+#   thunk to kiowa_forces}, preforce {heli+0x90 -> thunk 0x0038f6c0 -> kiowa_preforce}, post {heli+0x94
+#   -> thunk 0x00393720 -> kiowa_measure_mx}. The body wrapper's gravity is heli+0x140 (wrapper+0xf0).
+#   The touchdown sound's pick (0x003dd0a0 with a1 0) draws one rand() when the sound's list count
+#   +0x200 is not 0, after the crash test's draws.
+#   kiowa_wreck_check with no rotor collision object (+0x458 == 0) branches past `move $20, $zero` and
+#   reads its rotor-in-the-ground flag from s4 as its caller left it (in a frame, dynamics_world_step's
+#   last body pointer or its constraint-pass flag): a wreck out of nothing. The ctor stores the object
+#   unconditionally (0x0038c940; null only if its 0x180-byte allocation fails), so the port keeps "no object, no strike"; S220a's test passed its
+#   no-object cases only because the oracle's call starts with s4 at 0.
+kiowa_input boot 0x0038d8e0 (heli a0, control table a1, pad a2, stick x f12, y f13): vtable +0x20 in
+#                            both tables; +0x334 = command 0x1a's value (Cross), +0x338 = 0x1b
+#                            (Square), +0x340 = -x, +0x344 = -y (neg.s, not cubed), +0x348 = +1 for
+#                            0x1c (L1), else -1 for 0x1d (R1), else 0; then 0 (+1) / 1 (-1) over
+#                            +0x340 and 2 (+1) / 3 (-1) over +0x344. Commands through pad_control_index.
+kiowa_mx_present_a boot 0x00391d50 (heli): the first of kiowa_measure_mx's presentation copies (S220a)
+kiowa_mx_present_b boot 0x00392010 (heli): the second
+kiowa_mx_present_c boot 0x00391f10 (heli): the third
 # S149 — the car machines' .phy loader (MXCar.cpp), research/journal/*-s149-car-machines. All boot.
 # Ported as game_sim::car::Car::read; tests/car_phy.rs proves it word for word against the monster
 # truck parked in first_recording's RAM image (object 0x00e1e210, vtable word at +0x48 = 0x0045ed50,
