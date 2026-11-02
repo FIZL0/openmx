@@ -6950,3 +6950,11 @@ car_tire_probe              boot 0x0039b090 (tire, car): once a frame. Up to 5 g
 car_tire_contacts_clear     boot 0x0039af70 (tire): the tire's solid/contact words cleared.
 car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; not ported — no
 #                                           contact is set in the S149b drives, so touching stays false.
+# S191 — where a wheel's once-a-substep measure is taken (journal
+#   research/journal/2026-11-01-s191-nose-and-roof-recorded). wheel_contact_velocity's callers: 0x0025bf84 and
+#   0x0025c188 in wheel_tire_forces (0x0025bc70), both inside its compression > 0 branch, and 0x0025c5dc in
+#   0x0025c530's +0xc4 branch (a hanging wheel borrowing the other's load), right after it copies the other
+#   wheel's +0x1f0/+0x1f4. wheel_clear empties +0x1a0 per substep (0x002581b8/0x002581c0, in 0x00257a00's
+#   substep loop). So a wheel with no contact first asks in the share branch and measures what the
+#   other wheel's copied objects name: a front-first landing on a wagon gives the hanging rear the wagon's
+#   velocity. Port: ride.rs share_load. Proved through tests/replay.rs S191 (roof: every lane to tick 158).

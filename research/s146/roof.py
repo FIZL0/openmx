@@ -1,7 +1,7 @@
 """S146: park the bike on a Dallas train wagon's roof in the original, and save the state once it has
 ridden there a while — so a capture from the state is a braked bike carried by the train from its first row.
 
-usage: python3 -B research/s146/roof.py PID LOAD_SLOT TARGET_CLOCK RIDE_FRAMES SAVE_SLOT [CAR]
+usage: python3 -B research/s146/roof.py PID LOAD_SLOT TARGET_CLOCK RIDE_FRAMES SAVE_SLOT [CAR [OVER]]
 
 From S129's along state (copy 2's slot 8): hold both brakes (square and r2), let the game run a few frames and
 until the engine's path clock (research/oracle.txt S81) has passed TARGET_CLOCK,
@@ -9,7 +9,8 @@ pause, and move the bike (research/s129/tele.py's teleport: every copy of its po
 to 2.5 ft over the middle of car CAR's roof (S81's tenth car by default, the train's second train_car_06, a boxcar whose roof
 is 16.6 ft over its node), with the chassis' velocity set to the wagon's own (its node's position change
 over the last frame) so the bike does not land at rest under a 55 ft/s wagon. Then run RIDE_FRAMES more
-frames, brakes held, and save into SAVE_SLOT. Run it under `./kit pcsx2 with --`.
+frames, brakes held, and save into SAVE_SLOT. OVER (default 2.5 ft) is the height over the roof; S191 drops
+the bike from higher and saves while it still falls. Run it under `./kit pcsx2 with --`.
 """
 
 import struct
@@ -34,7 +35,7 @@ CARS = [0x00d525f0, 0x00d5cb60, 0x00d63660, 0x00d6c990, 0x00d76440, 0x00d7fd50, 
 CAR = CARS[int(sys.argv[6]) if len(sys.argv) > 6 else 9]
 ENGINE = CARS[0]
 ROOF = 16.6
-OVER = 2.5
+OVER = float(sys.argv[7]) if len(sys.argv) > 7 else 2.5
 SYM = cfg().symbols
 FRAME = SYM['frame_counter']
 MANAGER = SYM['game_manager']

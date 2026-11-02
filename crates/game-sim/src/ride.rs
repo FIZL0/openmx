@@ -1902,16 +1902,22 @@ const SHARE_SCALE: f32 = 1.0;
 /// second tire force behind the centre of mass and takes the pitch kick and the sideways twist out of
 /// the touchdown (`research/journal/2026-10-24-s67-landing-snap-2`).
 ///
-/// The contact velocity is relative to what *this* wheel's first ask found under it (`under`): the
-/// step measures what it stands on once a substep (`+0x1a0`), so the other wheel's hit objects copied
-/// in here are not looked at again.
-fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf, under: Option<(Vf, Vf)>) {
+/// The step measures what a wheel stands on once a substep (`+0x1a0`), at its first ask. A wheel with
+/// no contact of its own never asked in the tire forces (the suspension step asks only once the
+/// compression is above zero), so its first ask is this one, and what it measures is what the other
+/// wheel's hit objects copied in here name: a bike landing front first on a wagon's roof has the
+/// hanging rear's velocity taken relative to the wagon (S191). The measure is returned, and is the
+/// one the wheel's own integration goes on with.
+fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf,
+              movers: &[(u32, crate::traffic::Moving)]) -> Option<(Vf, Vf)> {
     wh.w.load_point = wh.w.probe_end_world;
     wh.w.spring_force = F(SHARE_SCALE) * other.w.spring_force;
     wh.mv.fresh.scalars[2] = other.mv.fresh.scalars[2];
     wh.mv.fresh.scalars[3] = other.mv.fresh.scalars[3];
+    let under = under(wh, movers);
     let own = contact_velocity(mvc.vel, mvc.world_ang_vel, wh.w.load_point, cofg_world);
     wh.w.contact_velocity = wheel_contact_velocity(own, mvc.vel, under).0;
+    under
 }
 
 /// One wheel's own integration: [`tire::surface_drag`], [`tire::spin_integrate`] and then
@@ -2369,7 +2375,7 @@ impl Ride {
 
             // What each wheel stands on, measured once a substep where the wheel's contact is when the
             // tire forces first ask for its velocity ([`under`], S136).
-            let under = [under(front, &movers), under(rear, &movers)];
+            let mut under = [under(front, &movers), under(rear, &movers)];
             for ((side, wh), under) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)].into_iter().zip(under) {
                 calls.push(mv::Call::TireForces(side, h));
                 tire_forces(wh, &mut mvc, chassis.cofg_world, &mut out.chassis, h, under);
@@ -2383,7 +2389,7 @@ impl Ride {
             calls.push(mv::Call::WheelIntegrate(Side::Rear, h));
             let (brake, other, load) = (held.rear_brake, front.w.contact, front.w.spring_force);
             if rear.mv.other_tire_down && !rear.w.contact {
-                share_load(rear, front, &mvc, chassis.cofg_world, under[1]);
+                under[1] = share_load(rear, front, &mvc, chassis.cofg_world, &movers);
             }
             wheel_integrate(rear, &p.rear, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
                             &tables.curve, h, under[1]);

@@ -10977,3 +10977,133 @@ fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
     }
     assert!(parted.is_empty(), "{}", parted.join("\n"));
 }
+
+// --- S191: the train's nose wrecks a bike, and a bike dropped on a wagon's roof, in the original -------
+//
+// Three states, all from S129's across state, whose bike has ridden since its last ghost gather, so its
+// search holds the cars (S170). They are made at full speed and recorded at a quarter speed with
+// `watch/s129-train.toml` and no pad (none could be made on the day; the pad bytes are in the rows
+// whatever they hold):
+//
+// - **headon**: S170's head-on state (`research/s170/nose.py`, copy 2's slot 16), run on with
+//   `research/s191/run_to.py` to frame 18714, 61 frames before the engine's nose reaches the bike
+//   standing on the rails 4° off its line (slot 17).
+// - **stand**: S170's from-behind state (slot 15), the nose arriving 36° off the bike's tail, run on to
+//   frame 16589, 54 frames before the nose (slot 19).
+// - **roof**: `research/s146/roof.py <pid> 10 0 3 18 9 8`: the bike dropped from 8 ft over the tenth
+//   path car's roof, at the wagon's velocity, saved 3 frames into the fall (slot 18).
+//
+//   ./kit pcsx2 with -- ./kit record watch/s129-train.toml --state 17 -n 200 -o context/capture/s191/headon.csv
+//
+// The RAM images are `context/states/s191-<name>.eeMemory.bin` (`./kit state ram <slot>`).
+
+/// S191's rides: the name, the tick to which every lane agrees (the first it parts on; a fix that
+/// moves it later should move this too), the original's first wreck (tick, reason) and the port's.
+///
+/// - headon: bit-exact up to the nose; on the wreck's own tick the origin parts by an ulp and the
+///   thrown chassis goes its own way. The wreck is the original's, over the bars on tick 60.
+/// - stand: the nose carries the bike on, every lane agreeing, until tick 65, when the port's head
+///   ray alone strikes a car and wrecks it (scenery, 6); the original rides on to its own head hit on
+///   93. Followed up in S191a.
+/// - roof: the drop, the landing on the wagon's roof, the slide back along it and the fall off its
+///   end agree on every lane up to tick 158, the wreck's tick in both; the original's is the
+///   nose-dive (8), the port's head ray strikes the car too and its scenery reason (6) stays. S191a.
+const S191_RIDES: [(&str, u64, (u64, u8), (u64, u8)); 3] = [
+    ("headon", 60, (60, 1), (60, 1)),
+    ("stand", 65, (93, 6), (65, 6)),
+    ("roof", 158, (158, 8), (158, 6)),
+];
+
+/// **S191: the train's nose and a wagon's roof, in the original and replayed.**
+#[test]
+fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
+    for (name, agrees, their_wreck, our_wreck) in S191_RIDES {
+        let path = private_dir("capture").join("s191").join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("no {} — S191's comment above says how it is recorded", path.display());
+            continue;
+        };
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let image = private_dir("states").join(format!("s191-{name}.eeMemory.bin"));
+        let Some(st) = SaveState::open_image(&image, &S89_RIDER) else { continue };
+        let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+        let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        println!("{name}: saved at {saved}, the search holds the cars: {}", st.bike_search_holds_cars());
+        in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, named, bike, traffic| {
+            assert_eq!(traffic.cars.len(), 21, "{name}: free06's path cars");
+            let mut sim = acceptance_start(&cap, 0, bike).unwrap();
+            sim.traffic = traffic;
+            sim.rider.sense.wrecks_enabled = true;
+            sim.rider.carries_bike_col(Arc::new(free06_bike_col().expect("the bike's collision files")));
+            let ride = &mut sim.rider.ride;
+            st.seed_chassis(ride).expect("the chassis");
+            st.seed_wheels(ride).expect("both wheels");
+            st.seed_balance(ride).expect("the balance");
+            st.seed_engine_outputs(ride).expect("the engine");
+            st.seed_air(ride).expect("the air state");
+            if let Some(d) = st.drivetrain() {
+                d.seed(ride);
+            }
+            st.seed_levers(ride).expect("the levers");
+            st.seed_engine_state(ride).expect("the engine's state");
+
+            let mut watches = Vec::new();
+            for (col, path) in chassis_lanes() {
+                let Ok(w) = cap.float(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, path) in slip_lanes() {
+                let Ok(w) = cap.bool(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, wheel) in [("f", "front"), ("r", "rear")] {
+                for (c, p) in [("ray_hit", "w.ray_hit"), ("swept", "w.swept_contact")] {
+                    if let Ok(w) = cap.int(&format!("{col}_{c}"), &format!("rider.ride.{wheel}.{p}")) {
+                        watches.push(retick(w, &ticks, 0));
+                    }
+                }
+            }
+            if let Ok(w) = cap.float("train_clock", "cars[0].clock") {
+                watches.push(retick(w, &ticks, 1));
+            }
+            let last = *ticks.last().unwrap() as usize + 1;
+            let mut pads = inputs.clone();
+            pads.resize(last.max(pads.len()), Input::default());
+            let f = Fixture {
+                name: format!("s191 {name} from its save state"),
+                seed: 0,
+                start: Some(sim.clone()),
+                inputs: pads.clone(),
+                watches,
+                world: Some(named.clone()),
+                ..Default::default()
+            };
+            let parts = |f: &Fixture, world: &mut dyn World| match replay::verify_in(f, world) {
+                Ok(_) => None,
+                Err(d) => {
+                    println!("{}: {d}", f.name);
+                    Some(d.tick)
+                }
+            };
+            let whole = parts(&f, world);
+            println!("{name}: parts on {whole:?}");
+            let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+            let reason = |r: usize| cell(&cap, r, col("wreck_reason")).parse::<f64>().unwrap() as u8;
+            let theirs = (0..ticks.len()).find(|&r| reason(r) != 0).map(|r| (ticks[r], reason(r)));
+            let mut port = sim.clone();
+            let mut ours = None;
+            for t in 1..last {
+                port.tick_in(pads[t - 1], world);
+                if let Some(w) = port.rider.state.wreck {
+                    ours = Some((t as u64, w.0));
+                    break;
+                }
+            }
+            println!("{name}: the original's first wreck {theirs:?}, the port's {ours:?}");
+            assert!(whole.unwrap_or(u64::MAX) >= agrees, "{name}: parts on {whole:?}, before tick {agrees}");
+            assert_eq!(theirs, Some(their_wreck), "{name}: the capture's wreck");
+            assert_eq!(ours, Some(our_wreck), "{name}: the port's wreck");
+        });
+    }
+}
