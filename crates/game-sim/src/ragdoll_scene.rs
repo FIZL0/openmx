@@ -22,6 +22,13 @@
 //! bike ([`Statics`]); a sphere is tested against a listed prop's mesh, on the same record, when its
 //! distance is within the sphere's radius, and a prop does not move ([`StillProp`]).
 //!
+//! And the ecosystem's plants (S206): the search lists placed groups too, filed in the tree after
+//! the props and measured on the ground plane ([`group_distance`]), and a sphere is handed a listed
+//! plant's trunks at its place in the list, unfiltered ([`StillProp::near_wooded`]). The rest of what
+//! the track's tree holds meets no bone, though the original lists it: the trigger boxes (category
+//! `0x100`, a shape the sphere's pair has no test for), the knockable props' meshes at rest (`0x18`,
+//! F7), the other riders' wreck bikes, and the hierarchy meshes the port's world lacks.
+//!
 //! **The sweep** (S166): each bone's collision also has a segment probe, one segment from where the
 //! bone was `1/15` s ago to where it is, run through the same search list the spheres are
 //! ([`sweep_through`]). But the probe's pair filter *includes* only the track's scenery
@@ -347,10 +354,15 @@ const SEARCH_CAPACITY: usize = 128;
 /// probe is under the bound (a scenery mesh's flags ask for the bound, the bike's do not), and kept
 /// as listed while the list is kept. The pair filter passes every bone sphere to every scenery mesh
 /// (s89-along, `tests/ragdoll_props.rs`).
+///
+/// And the ecosystem's plants (S206): the bones' search does not keep placed groups off its list, so
+/// every plant whose reach on the ground plane is under the bound is listed with the props, in the
+/// walk's order ([`group_distance`]); a plant is filed in the tree after the props.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Statics {
     /// The listed props, by their index in the world's set ([`crate::world::World::collision`]), in
-    /// the order the tree's walk met them.
+    /// the order the tree's walk met them. An index at or past the set's length is a plant: the
+    /// group that many past it in the world's trees ([`crate::world::World::wooded`]).
     pub props: Vec<usize>,
     /// How many of them the walk met before the bike: where the bike stands in the list.
     pub bike_at: usize,
@@ -368,6 +380,43 @@ impl Statics {
                 (i, broad_build::key(&cells.tree, cells.hi, c, h))
             })
             .collect()
+    }
+
+    /// The keys in `cells`' tree of the plants of `trees` that a gather round `probe` of `reach` can
+    /// list (S206), each by its index `first` (the world's prop count) past the props. A plant whose
+    /// reach is no nearer than the most the bound can be is never listed, and leaving it out of the
+    /// tree moves no other entry in the walk's order, so only the plants near the probe are filed.
+    pub fn group_keys(cells: &Cells, trees: &crate::eco::Trees, first: usize, probe: Vf, reach: F) -> Vec<(usize, u32)> {
+        let most = F(SEARCH_EXTRA).max(reach).max(F(SEARCH_LEAST));
+        trees
+            .groups()
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| group_distance(g, trees.cell(), probe) < most)
+            .map(|(j, g)| {
+                let (c, h) = g.bounds(trees.cell());
+                (first + j, broad_build::key(&cells.tree, cells.hi, c, h))
+            })
+            .collect()
+    }
+}
+
+/// **How far a plant's reach is from `p`**, as the gather measures a placed group (S206): on the ground
+/// plane, from the plant's cell (times the cell size) less its reach (`0 +` it, as it is written), and
+/// 0 when inside.
+pub fn group_distance(g: &crate::eco::Group, cell: F, p: Vf) -> F {
+    let at = |c: u16| F::from(i32::from(c)) * cell;
+    let (dx, dz) = (F(p.x()) - at(g.cell[0]), F(p.z()) - at(g.cell[2]));
+    let d = Acc::mula(dx, dx).madd(dz, dz).sqrt() - (F::ZERO + g.reach);
+    if d <= 0.0 { F::ZERO } else { d }
+}
+
+/// How far listed entry `i` of [`Statics::props`] is from `p`: a prop's reach, or past the props a
+/// plant's.
+fn listed_distance(props: &[crate::world::Prop], trees: Option<&crate::eco::Trees>, i: usize, p: Vf) -> Option<F> {
+    match props.get(i) {
+        Some(prop) => Some(reach_distance(prop_reach(prop), p)),
+        None => trees.and_then(|t| t.groups().get(i - props.len()).map(|g| group_distance(g, t.cell(), p))),
     }
 }
 
@@ -422,6 +471,25 @@ impl BikeSearch {
         keys: &[(usize, u32)],
         statics: &mut Statics,
     ) {
+        self.gather_wooded(cells, reach, bike, key, offered, props, None, keys, statics);
+    }
+
+    /// [`BikeSearch::gather_among`] with the ecosystem's plants in the tree too (S206): `keys` the
+    /// props' [`Statics::keys`] and then the plants' [`Statics::group_keys`], and a plant is listed
+    /// when its reach is under the bound, as a prop is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gather_wooded(
+        &mut self,
+        cells: Option<&Cells>,
+        reach: F,
+        bike: (Vf, F),
+        key: u32,
+        offered: bool,
+        props: &[crate::world::Prop],
+        trees: Option<&crate::eco::Trees>,
+        keys: &[(usize, u32)],
+        statics: &mut Statics,
+    ) {
         let Some(probe) = self.stood else { return };
         if !self.regathers(reach) {
             self.distance = reach_distance(bike, probe);
@@ -445,7 +513,7 @@ impl BikeSearch {
             if statics.props.len() + usize::from(listed) >= SEARCH_CAPACITY {
                 break;
             }
-            if reach_distance(prop_reach(&props[i]), probe) < self.bound {
+            if listed_distance(props, trees, i, probe).is_some_and(|d| d < self.bound) {
                 statics.props.push(i);
             }
         }
@@ -555,14 +623,42 @@ impl StillProp {
     /// from `probe` is within `reach` (the largest sphere's radius), in the list's order, each with
     /// its place in the list. The rest no sphere reaches, so their meshes are not copied.
     pub fn near(props: &[crate::world::Prop], statics: &Statics, probe: Vf, reach: F) -> Vec<(usize, StillProp)> {
-        statics
-            .props
-            .iter()
-            .enumerate()
-            .filter_map(|(n, &i)| props.get(i).map(|p| (n, p)))
-            .filter(|(_, p)| reach_distance(prop_reach(p), probe) <= reach)
-            .map(|(n, p)| (n, StillProp::of(p, probe)))
-            .collect()
+        StillProp::near_wooded(props, None, statics, probe, reach)
+    }
+
+    /// [`StillProp::near`] with the listed plants (S206). The original's search hands a sphere a
+    /// placed group's parts one by one, at the group's place in the list, each made ready under the
+    /// plant and paired with no filter, when the group's own distance is within the sphere's radius.
+    /// A part is a trunk ([`crate::eco::Group::parts`]): a mesh like a prop's, its gate open, no body
+    /// or owner behind it, so a contact on it is with the still scenery. So each trunk of a listed
+    /// plant is a [`StillProp`] at the plant's place, measured as the plant is. A part the port does
+    /// not build (a sphere, MX vs. ATV's) is one the sphere's pair has no test for.
+    pub fn near_wooded(
+        props: &[crate::world::Prop],
+        trees: Option<&crate::eco::Trees>,
+        statics: &Statics,
+        probe: Vf,
+        reach: F,
+    ) -> Vec<(usize, StillProp)> {
+        let mut out = Vec::new();
+        for (n, &i) in statics.props.iter().enumerate() {
+            if let Some(p) = props.get(i) {
+                if reach_distance(prop_reach(p), probe) <= reach {
+                    out.push((n, StillProp::of(p, probe)));
+                }
+                continue;
+            }
+            let Some((t, g)) = trees.and_then(|t| t.groups().get(i - props.len()).map(|g| (t, g))) else { continue };
+            let distance = group_distance(g, t.cell(), probe);
+            if !(distance <= reach) {
+                continue;
+            }
+            for &part in g.parts.iter().flatten() {
+                let Some(trunk) = t.props.props.get(part) else { continue };
+                out.push((n, StillProp { distance, ..StillProp::of(trunk, probe) }));
+            }
+        }
+        out
     }
 
     /// The sphere test against the prop's mesh on a record holding a hit at `held`; `Some` when this
