@@ -7733,3 +7733,72 @@ fn a_steady_track_pick_does_not_make_its_lists_again() {
     m.settings.mods_off = vec!["mxvatv".into()];
     assert_eq!(m.track_count(), menu::DISC_PICK + 1, "the world alone after the disc's");
 }
+
+/// P252: the pick shows a world's name as a title card and the text after its colon under it
+/// (user, 2026-10-31: "(title card) mx unleashed (text) every freeride and national").
+#[test]
+fn a_worlds_name_splits_into_a_title_and_its_text() {
+    assert_eq!(menu::title_and_text("MX Unleashed: every freeride and national"), ("MX Unleashed", "every freeride and national"));
+    assert_eq!(menu::title_and_text("Bridgeport"), ("Bridgeport", ""));
+    // A colon with nothing on one side of it is no split.
+    assert_eq!(menu::title_and_text("Track 2:"), ("Track 2:", ""));
+    for &(_, name) in menu::DISC_WORLDS {
+        let (title, text) = menu::title_and_text(name);
+        assert_eq!((title, text.is_empty()), ("MX Unleashed", false), "{name}");
+    }
+}
+
+/// P252: a name wider than its box scrolls, each place fitting the box, and over a turn of the
+/// marquee shows every one of its characters; a name that fits stands still.
+#[test]
+fn a_name_wider_than_its_box_scrolls_and_shows_every_character() {
+    let name = "MX vs. ATV Unleashed: every national and freeride map, end to end";
+    let (size, room) = (1.35, 11.0);
+    let wide = |s: &str| menu::ink::ink().measure(menu::ink::Weight::Heavy, s, size);
+    let fits = |s: &str| wide(s) <= room;
+    assert!(!fits(name), "the test's name has to be too long for its box");
+    let chars: Vec<char> = name.chars().collect();
+    let mut seen = vec![false; chars.len()];
+    let (mut from, mut places) = (0, HashSet::new());
+    for step in 0..400 {
+        let shown = menu::marquee(name, fits, step);
+        assert!(fits(&shown) && !shown.is_empty(), "step {step}: {shown:?} is {} ems in {room}", wide(&shown));
+        let run: Vec<char> = shown.chars().collect();
+        // Where it is in the name: one on from the place before, or back at the start.
+        let at = (0..chars.len()).find(|&k| (k == 0 || k >= from) && chars[k..].starts_with(&run));
+        let at = at.unwrap_or_else(|| panic!("step {step}: {shown:?} is not a run of the name"));
+        assert!(at == 0 || at <= from + 1, "step {step}: jumped from {from} to {at}");
+        seen[at..at + run.len()].iter_mut().for_each(|s| *s = true);
+        places.insert(at);
+        from = at;
+    }
+    let unseen: String = chars.iter().zip(&seen).filter(|(_, s)| !**s).map(|(c, _)| *c).collect();
+    assert!(seen.iter().all(|s| *s), "never shown: {unseen:?}");
+    assert!(places.len() > 2, "it moves: {places:?}");
+    // It starts on the name's start and holds there.
+    assert!(name.starts_with(&menu::marquee(name, fits, 0)));
+    assert_eq!(menu::marquee(name, fits, 0), menu::marquee(name, fits, menu::MARQUEE_HOLD - 1));
+    assert_eq!(menu::marquee("Dallas", fits, 37), "Dallas");
+}
+
+/// P252: on the pick a lit name too long for its card scrolls, so the menu's look steps with it,
+/// and a short one's look stands still between stills.
+#[test]
+fn the_picks_look_steps_with_a_scrolling_name() {
+    let (mut m, mut r) = fresh();
+    let long = "A Very Long Mod Track Name That Never Fits Its Card";
+    m.set_mod_tracks(vec![("long_mod_track".into(), long.into())]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    let look_at = |m: &mut Menu, tick: u32| {
+        m.tick = tick;
+        m.look()
+    };
+    // Dallas stands still from one marquee step to the next.
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).1, "Dallas");
+    assert_eq!(look_at(&mut m, 0), look_at(&mut m, menu::MARQUEE_FRAMES * 3));
+    tap_until(&mut m, &mut r, Control::Down, |m| m.track_at(m.cursor(Screen::Tracks)).0 == "long_mod_track");
+    let first = look_at(&mut m, 0);
+    assert_eq!(first, look_at(&mut m, menu::MARQUEE_FRAMES - 1));
+    assert_ne!(first, look_at(&mut m, menu::MARQUEE_FRAMES));
+}
