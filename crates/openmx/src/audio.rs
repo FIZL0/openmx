@@ -325,6 +325,11 @@ impl List {
         *last = i;
         self.sounds.get(i as usize).cloned()
     }
+
+    /// The sound at `i`, picked by someone else (the simulation's emitters, P202), if the list has one.
+    pub fn get(&self, i: i32) -> Option<(Arc<Clip>, bool)> {
+        usize::try_from(i).ok().and_then(|i| self.sounds.get(i)).cloned()
+    }
 }
 
 fn truthy(v: &str) -> bool {
@@ -2682,6 +2687,51 @@ impl BikeCrash {
     }
 }
 
+/// **The simulation's two wreck emitters after a tick** (P202): the rider's voice
+/// ([`game_sim::rider::Rider::wreck_sounds`]) and the clocks of it and of the bike's clank
+/// ([`game_sim::rider::Rider::wreck_clocks`]). The sim picks which `[Fall]`, `[IMPACT]` and `[Wreck]`
+/// clip each wreck plays, on the game's own generator and its own busy clocks (S173); the shell plays
+/// those picks rather than rolling its own, so the clip heard is the original's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WreckEmitters {
+    pub sounds: game_sim::wreck_sound::Emitter,
+    pub clocks: game_sim::wreck_sound::Clocks,
+    /// The rider runs a body actor (a ragdoll kit), whose entry and frames are what pick the voice.
+    /// Without one the sim picks no voice, and the shell's own dice do.
+    pub voices: bool,
+}
+
+/// What the sim's emitters picked between two frames: the voice's list and index, the clank's index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WreckPicks {
+    pub voice: Option<(game_sim::wreck_sound::Which, i32)>,
+    pub clank: Option<i32>,
+}
+
+impl WreckEmitters {
+    pub fn of(rider: &game_sim::rider::Rider) -> WreckEmitters {
+        WreckEmitters { sounds: rider.wreck_sounds, clocks: rider.wreck_clocks, voices: rider.ragdoll_kit.is_some() }
+    }
+
+    /// The picks made since `was`. A pick sets its emitter's clock to the clip's length and the
+    /// 0.4 s tail, and an emitter picks only once its clock has run out, so a pick is a clock that
+    /// rose: without one a tick (or the few between two drawn frames, online) only runs a clock
+    /// down, and with one the clock ends past the tail less those few ticks, above where it stood.
+    /// The index is the list's last pick; the voice's list is the one whose last
+    /// moved — `[Fall]` when it did, else `[IMPACT]`. A `[Fall]` of one sound never moves its last
+    /// after the first pick, and reads as `[IMPACT]`; the retail lists are five long.
+    pub fn picked(&self, was: &WreckEmitters) -> WreckPicks {
+        let (now, then) = (&self.clocks, &was.clocks);
+        let voice = (now.voice > then.voice).then(|| {
+            use game_sim::wreck_sound::Which;
+            let fall = self.sounds.fall.last;
+            if fall != was.sounds.fall.last && fall >= 0 { (Which::Fall, fall) } else { (Which::Crash, self.sounds.crash.last) }
+        });
+        let clank = (now.clank > then.clank).then_some(now.clank_last);
+        WreckPicks { voice, clank }
+    }
+}
+
 /// A vector's length as the emitter takes it: `sqrt(z² + y² + x²)`, in that order.
 pub fn length(v: [f32; 3]) -> f32 {
     (v[2] * v[2] + v[1] * v[1] + v[0] * v[0]).sqrt()
@@ -2734,6 +2784,21 @@ impl WreckClank {
             return None;
         }
         self.play(m, w, impulse, at, dice)
+    }
+
+    /// The tick of a clank the simulation picked (P202), in place of [`WreckClank::tick`] and
+    /// [`WreckClank::entry`]: the voice that plays follows `at`, and the pick `i`, if there was one,
+    /// plays at [`wreck_level`] of `impulse` whether or not the shell's own voice still sounds, since
+    /// the simulation's clock is the one that gates it.
+    pub fn picked(&mut self, m: &mut Mixer, w: &MachineWreck, i: Option<i32>, impulse: f32, at: [f32; 3], dt: f32) -> Option<VoiceId> {
+        self.busy(m, at, dt);
+        let i = i?;
+        self.last = Some(i);
+        let (clip, looping) = w.list.get(i)?;
+        let gain = wreck_level(impulse, w.max_impulse) as f32 / 100.0;
+        let id = m.play(clip, Play { gain, looping, at: Some(at), near: w.near, far: w.far, ..Play::default() });
+        self.voice = Some(id);
+        Some(id)
     }
 
     /// Whether anything of the emitter's own still sounds, its tail counted: the voice that plays
@@ -3112,6 +3177,9 @@ pub struct SeatFrame {
     pub edge: EdgeFrame,
     /// What the rider's voice reads of the thrown body (P180).
     pub body: RiderBody,
+    /// The sim's wreck emitters after the tick (P202), whose picks the voice and the clank play.
+    /// `None` (a frame made up without a rider) leaves both to pick on the shell's own dice and gates.
+    pub emitters: Option<WreckEmitters>,
     /// What the wheels' drive-on loop reads (P145).
     pub drive_on: DriveOnFrame,
     /// This seat's own pause is open (P172): everything of its own holds where it is, silent, and
@@ -3142,6 +3210,8 @@ pub struct SeatSound {
     shots: Vec<VoiceId>,
     /// Whether this seat's voices are held for its pause.
     held: bool,
+    /// The sim's wreck emitters at the last frame (P202), which this one's picks are read against.
+    emitters: Option<WreckEmitters>,
 }
 
 impl SeatSound {
@@ -3161,6 +3231,7 @@ impl SeatSound {
             edge: EdgeSound::default(),
             shots: Vec::new(),
             held: false,
+            emitters: None,
         }
     }
 
@@ -3272,6 +3343,12 @@ impl Sound {
             if s.held {
                 s.hold(m, false);
             }
+            // The sim's picks since the last frame (P202); the first frame with emitters only reads them.
+            let picks = f.emitters.map(|now| {
+                let picks = s.emitters.map(|was| now.picked(&was)).unwrap_or_default();
+                s.emitters = Some(now);
+                picks
+            });
             if let Some((note, at)) = f.plane {
                 s.engine.silence(m);
                 s.edge.stop_rumble(m);
@@ -3294,6 +3371,30 @@ impl Sound {
             s.drive_on.tick(m, &self.drive_on, &f.drive_on);
             let near = Play { at: Some(h.at), near: self.rider.near, far: self.rider.far, ..Play::default() };
             let busy = s.voice.busy(m, f.body.at, dt);
+            // The sim's picks (P202), each emitter's where the sim has one: the voice only when the
+            // rider runs a body actor, which is what picks it. The voice's at the entry where the bike
+            // is and after it on the thrown body; the clank's at the entry's impulse and after it at the
+            // wreck body's.
+            let sim_voice = picks.filter(|_| f.emitters.is_some_and(|e| e.voices)).map(|p| p.voice);
+            let sim_clank = picks.map(|p| p.clank);
+            if let Some(Some((which, i))) = sim_voice {
+                let list = match which {
+                    game_sim::wreck_sound::Which::Fall => &self.rider.fall,
+                    game_sim::wreck_sound::Which::Crash => &self.rider.impact,
+                };
+                if let Some((clip, _)) = list.get(i) {
+                    let play = if f.wreck.is_some() { near } else { Play { at: Some(f.body.at), ..near } };
+                    let id = m.play(clip, play);
+                    s.voice.voice = Some(id);
+                    s.shots.push(id);
+                }
+            }
+            if let Some(i) = sim_clank {
+                let impulse = if f.wreck.is_some() { f.bike.entry_impulse } else { f.bike.crash.impulse };
+                if let Some(id) = s.bike_clank.picked(m, &s.bike.wreck, i, impulse, f.bike.at, dt) {
+                    s.shots.push(id);
+                }
+            }
             if let Some(reason) = f.wreck {
                 // The rider's voice by the wreck reason, as `game_sim::wreck_sound` sorts them: a fall
                 // off the front or back is `[Fall]`, the rest `[IMPACT]`.
@@ -3302,7 +3403,7 @@ impl Sound {
                     8..=11 | 14 => Some((&self.rider.fall, 1)),
                     _ => None,
                 };
-                if let Some((list, k)) = list {
+                if let (Some((list, k)), None) = (list, sim_voice) {
                     if let Some((clip, _)) = list.pick(&mut s.dice, &mut s.last[k]) {
                         let id = m.play(clip, near);
                         s.voice.voice = Some(id);
@@ -3310,17 +3411,15 @@ impl Sound {
                     }
                 }
                 // The bike's clank, by the entry's own call (P144): only at `MinImpulse` and over.
-                if let Some(id) = s.bike_clank.entry(m, &s.bike.wreck, f.bike.entry_impulse, f.bike.at, dt, &mut s.dice) {
-                    s.shots.push(id);
-                }
-                s.shots.retain(|&v| m.playing(v));
-                if let Some((clip, _)) = self.world.oh.pick(&mut self.dice, &mut self.last[1]) {
-                    m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
+                if sim_clank.is_none() {
+                    if let Some(id) = s.bike_clank.entry(m, &s.bike.wreck, f.bike.entry_impulse, f.bike.at, dt, &mut s.dice) {
+                        s.shots.push(id);
+                    }
                 }
             }
             // The bike's clank on the wreck body's hits (P144), every tick but the entry's: the
             // reason's copy it gates on is set a tick after the reason.
-            if f.wreck.is_none() {
+            if f.wreck.is_none() && sim_clank.is_none() {
                 if let Some(id) = s.bike_clank.tick(m, &s.bike.wreck, &f.bike.crash, f.bike.at, dt, &mut s.dice) {
                     s.shots.push(id);
                 }
@@ -3330,11 +3429,17 @@ impl Sound {
             let b = &f.body;
             let speed = b.speed.max(s.voice.was);
             s.voice.was = if b.down { b.speed } else { 0.0 };
-            if f.wreck.is_none() && !busy && b.down && b.touching && self.rider.min_impulse < speed {
+            if f.wreck.is_none() && sim_voice.is_none() && !busy && b.down && b.touching && self.rider.min_impulse < speed {
                 if let Some((clip, _)) = self.rider.impact.pick(&mut s.dice, &mut s.last[0]) {
                     let id = m.play(clip, Play { at: Some(b.at), ..near });
                     s.voice.voice = Some(id);
                     s.shots.push(id);
+                }
+            }
+            if f.wreck.is_some() {
+                s.shots.retain(|&v| m.playing(v));
+                if let Some((clip, _)) = self.world.oh.pick(&mut self.dice, &mut self.last[1]) {
+                    m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
                 }
             }
             if h.grounded && !s.was_grounded && f.wreck.is_none() {

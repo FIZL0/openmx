@@ -9117,6 +9117,8 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
         touchdown,
         edge,
         body: audio::RiderBody::of(&seat.sim.rider),
+        // The sim's wreck emitters (P202): the voice and the clank play the clips it picked.
+        emitters: Some(audio::WreckEmitters::of(&seat.sim.rider)),
         // The rear wheel on a prop (P145): its material, where it touches, and the body's velocity.
         drive_on: audio::DriveOnFrame {
             material: r.rear_material,

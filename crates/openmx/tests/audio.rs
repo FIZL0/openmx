@@ -2082,6 +2082,126 @@ fn the_bike_clank_is_gated_on_the_impulse() {
     assert!((38..=50).contains(&k), "the second clank {k} ticks on: past the 0.9..1.18 s clip and its 0.4 s tail");
 }
 
+// --- the sim's wreck picks (P202) ---------------------------------------------------------------------
+
+/// S173's capture of S109's reason-11 fall (context/capture/s173/voices.csv, journal
+/// 2026-10-28-s173-wreck-sound-draws): a row per tick, by column name.
+fn s173_rows() -> Option<Vec<std::collections::HashMap<String, String>>> {
+    use ps2_oracle::{Kit, skip};
+    let kit = Kit::load().map_err(|why| skip(&why)).ok()?;
+    let path = kit.ctx("capture").join("s173").join("voices.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        skip(&format!("no {}: research/journal/2026-10-28-s173-wreck-sound-draws/capture/play.sh", path.display()));
+        return None;
+    };
+    let mut lines = text.lines();
+    let head: Vec<String> = lines.next()?.split(',').map(str::to_string).collect();
+    Some(lines.map(|l| head.iter().cloned().zip(l.split(',').map(str::to_string)).collect()).collect())
+}
+
+/// **S109's wreck plays the sim's picks** (P202): `game_sim`'s two wreck emitters stepped over S173's
+/// capture of S109's fall — the original's gates and generator, the original's clip lengths — and
+/// handed to the sound each tick as the shell hands a rider's. The clips heard are the ones the
+/// emitters picked, on the ticks they picked them: `[Fall]` 2 at the body's entry, then at the thrown
+/// body's touchdown `[Wreck]` 3 and `[IMPACT]` 0, and nothing else, whatever the shell's own dice.
+///
+/// Each emitter's gates and clocks are the sim's own functions; the index each pick lands on is the
+/// original's, as `game_sim`'s `the_s109_wreck_draws_as_the_original` takes it, since where in the
+/// tick the pick draws is not in the capture.
+#[test]
+fn s109s_wreck_plays_the_sims_picks() {
+    use game_sim::wreck_sound::{Clocks, Emitter, Kit, magnitude};
+    use game_sim::rng::Rng;
+    let Some(rows) = s173_rows() else { return };
+    let f = |r: &std::collections::HashMap<String, String>, k: &str| F(r[k].parse::<f32>().unwrap());
+    let i = |r: &std::collections::HashMap<String, String>, k: &str| r[k].parse::<i64>().unwrap();
+    let v = |r: &std::collections::HashMap<String, String>, k: &str| {
+        let [x, y, z] = ["x", "y", "z"].map(|c| f(r, &format!("{k}.{c}")).to_f32());
+        Vf::new(x, y, z, 0.0)
+    };
+    let first = &rows[0];
+    let lengths = |name: &str, n: i64| (0..n).map(|k| f(first, &format!("{name}{k}.len"))).collect::<Vec<_>>();
+    let kit = Kit {
+        fall: lengths("r_fall", i(first, "r_fall_n")),
+        crash: lengths("r_imp", i(first, "r_imp_n")),
+        voice_min: f(first, "r_min"),
+        clank: lengths("b_snd", i(first, "b_n")),
+        clank_min: f(first, "b_min"),
+    };
+    // A tone per clip, as long as the original's, so each heard clip names its list and index.
+    let tones = |l: &[F]| List { sounds: l.iter().map(|s| (tone(5000.0, s.to_f32()), false)).collect() };
+    let rider = audio::RiderSounds { fall: tones(&kit.fall), impact: tones(&kit.crash), near: 30.0, far: 150.0, min_impulse: kit.voice_min.to_f32() };
+    let clank = tones(&kit.clank);
+    let lists: [(&str, &List); 3] = [("Fall", &rider.fall), ("IMPACT", &rider.impact), ("Wreck", &clank)];
+    for seed in 0..8 {
+        let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+        let mut sound = audio::Sound::new(mixer.clone());
+        sound.rider = rider.clone();
+        let wreck = audio::MachineWreck { list: clank.clone(), near: 30.0, far: 150.0, min_impulse: kit.clank_min.to_f32(), max_impulse: 40.0 };
+        sound.seats.push(audio::SeatSound::new(Arc::new(BikeSounds { wreck, ..tone_bike() }), seed));
+        let (mut e, mut c) = (Emitter::retail(), Clocks::default());
+        let mut out = vec![0i16; audio::RATE as usize / 30 * 2];
+        let mut sounding: Vec<Arc<Clip>> = Vec::new();
+        let mut heard = Vec::new();
+        let mut prev = first;
+        for row in &rows[1..] {
+            // The rider's frame: the clocks run down, the player's entry on the reason's rise and the
+            // body actor's on its record's, else the two emitters' frames.
+            let mut rng = Rng::from_state(prev["rng_state"].parse::<u64>().unwrap());
+            c.age(f(row, "dt"));
+            let reason = i(row, "wreck_reason") as i32;
+            let entered = i(prev, "wreck_reason") == 0 && reason != 0;
+            if entered && c.clank_entry(&kit, magnitude(v(row, "b_imp")), &mut rng).is_some() {
+                c.clank_last = i(row, "b_last") as i32;
+            }
+            let body = i(row, "rec_reason") as i32;
+            if i(prev, "rec_reason") == 0 && body != 0 {
+                if c.voice_entry(&mut e, &kit, body, &mut rng).is_some() {
+                    e.fall.last = i(row, "r_fall_last") as i32;
+                }
+            } else {
+                let touched = i(row, "b_gate_b") != 0;
+                if c.clank_frame(&kit, i(row, "b_gate_a") != 0, touched, magnitude(v(row, "b_imp")), &mut rng).is_some() {
+                    c.clank_last = i(row, "b_last") as i32;
+                }
+                let (down, touching) = (body != 0 && body != 13, i(row, "rec_touch") != 0);
+                if c.voice_frame(&mut e, &kit, down, touching, magnitude(v(row, "rec_vel")), &mut rng).is_some() {
+                    e.crash.last = i(row, "r_imp_last") as i32;
+                }
+            }
+            // The shell's half: the wreck said on the reason's rise, the bike's and the body's words
+            // as the shell's own gates would read them (wide open, so only the picks hold them), and
+            // the emitters.
+            let open = audio::PlaneCrash { wrecked: reason != 0, touching: true, impulse: 40.0 };
+            let frame = audio::SeatFrame {
+                wreck: entered.then_some(reason),
+                bike: audio::BikeCrash { crash: open, entry_impulse: 40.0, at: [0.0; 3] },
+                body: audio::RiderBody { down: reason != 0, touching: true, speed: 40.0, at: [0.0; 3] },
+                emitters: Some(audio::WreckEmitters { sounds: e, clocks: c, voices: true }),
+                ..Default::default()
+            };
+            sound.frame(&[frame], 1.0 / 30.0);
+            let mut m = mixer.lock().unwrap();
+            let now: Vec<Arc<Clip>> = m.clips().into_iter().map(|c| c.0).collect();
+            for clip in &now {
+                if sounding.iter().any(|c| Arc::ptr_eq(c, clip)) {
+                    continue;
+                }
+                for (name, list) in &lists {
+                    if let Some(k) = list.sounds.iter().position(|(c, _)| Arc::ptr_eq(c, clip)) {
+                        heard.push((i(row, "frame_counter"), *name, k as i32));
+                    }
+                }
+            }
+            sounding = now;
+            m.render(&mut out);
+            prev = row;
+        }
+        heard.sort();
+        assert_eq!(heard, [(3726, "Fall", 2), (3792, "IMPACT", 0), (3792, "Wreck", 3)], "seed {seed}");
+    }
+}
+
 // --- the plane's wheels (P146) ----------------------------------------------------------------------
 
 /// The disc's `Impact\plane_tire`, in seconds.
