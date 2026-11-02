@@ -511,6 +511,46 @@ impl Traffic {
         game_sim::traffic::Traffic::new(specs)
     }
 
+    /// The `HasPhysics` cars' physics objects (S186), one a car of [`Traffic::sim`]'s in the same order
+    /// (`None` for a car without), off these archives: the model's `.pco`, `.psg`, `m.col` and `f.col`
+    /// ([`game_sim::physics_car::PhysicsCar::load`]), past `edge` put back. Empty when no car has
+    /// physics; a car whose files are missing or do not parse drives without (said once).
+    pub fn physics(&self, archives: &[crate::disc::Res], edge: Option<game_sim::prop_world::Edge>) -> Vec<Option<game_sim::physics_car::PhysicsCar>> {
+        use ps2_float::{F, Vf};
+        if !self.cars.iter().any(|(car, _)| car.has_physics) {
+            return Vec::new();
+        }
+        let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+        self.cars
+            .iter()
+            .filter(|(car, path)| {
+                // The cars [`Traffic::sim`] keeps: a path the simulation can walk.
+                let points: Vec<(F, Vf)> = path.keys.iter().zip(&path.clip).map(|(k, p)| (F(k.t), Vf::new(p.x, p.y, p.z, 1.0))).collect();
+                game_sim::traffic::Spec::new(&points, F(car.time_scale), F(car.heading_filter), F(car.normal_filter), F(car.lag), None).is_some()
+            })
+            .map(|(car, _)| {
+                if !car.has_physics {
+                    return None;
+                }
+                let stem = car.stem();
+                let pco = read(&game_sim::physics_car::pco_file(stem)).ok_or_else(|| format!("no {}", game_sim::physics_car::pco_file(stem)));
+                let psg = read(&game_sim::props::model_file(stem)).ok_or_else(|| format!("no {stem}.psg"));
+                let rays = read(&game_sim::props::rays_file(stem));
+                let shape = read(&game_sim::props::shape_file(stem));
+                let made = pco.and_then(|pco| psg.map(|psg| (pco, psg))).and_then(|(pco, psg)| {
+                    game_sim::physics_car::PhysicsCar::load(&pco, &psg, rays.as_deref(), shape.as_deref(), edge)
+                });
+                match made {
+                    Ok(p) => Some(p),
+                    Err(why) => {
+                        println!("traffic: {} has no physics: {why}", car.model);
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// Every car's model and where it is, `elapsed` seconds of the scene's own clock after the track
     /// loaded, its filters settled at the scene's [`SCENE_STEP`].
     pub fn placed(&self, elapsed: f64, ground: &mut Ground) -> Vec<(String, M4)> {

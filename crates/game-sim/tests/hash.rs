@@ -564,7 +564,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // within a tick, empty between ticks, so not walked and not on the wire.
     // 12072 since S210: the knockable props lent to each ride for its frame (`Ride::props`, in every
     // ride the Sim holds), `None` between frames, so not walked and not on the wire.
+    // 12096 since S186: the `HasPhysics` cars' physics objects (`Traffic::physics`), walked as
+    // `physics_car` only on a track with any, so the leaves do not move.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12072, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12096, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

@@ -517,6 +517,15 @@ impl State for Sim {
         if !self.traffic.props.is_empty() {
             w.list("props", &self.traffic.props.collections);
         }
+        // The `HasPhysics` cars' physics objects (S186), on a track with any.
+        if !self.traffic.physics.is_empty() {
+            for p in &self.traffic.physics {
+                match p {
+                    Some(p) => w.field("physics_car", p),
+                    None => w.bool("physics_car", false),
+                }
+            }
+        }
         // The freestyle event (P155), once a rider has been in a stunt zone: a walk without it is
         // what it was.
         if !self.event.fresh() {

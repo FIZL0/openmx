@@ -999,6 +999,9 @@ pub mod ghost;
 /// The track's path cars (S81): the `.toy`'s cars on a clip's path, moved bit-exact each tick.
 pub mod toys;
 pub mod traffic;
+/// A struck `HasPhysics` path car's rigid body (S186): its wake, its world node's step, its settle
+/// and its put-back.
+pub mod physics_car;
 pub mod mover_contact;
 /// Session markers (P88): five spots a player saves on the d-pad and rides back to, and the other
 /// players to ride to.
