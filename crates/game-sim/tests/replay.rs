@@ -8837,24 +8837,38 @@ const S58_OWN_STATES: [(&str, &str, &[u64]); 2] = [("steep", "s117-steep", &[]),
 const PAD_LEADS: usize = 1;
 
 /// Each tick's input in a save-state capture ridden with a pad: from a row at tick `t`, the report
-/// its pad buffers say was read ([`PadTape::from_capture`]'s half), `PAD_LEADS` on; on an index no
-/// row gives (the ones up to the second row's, and the one a late row skips), the nearest one before
-/// it, or after it before the first. Checked against the control state the same row carries, which
-/// is what the game itself believed was held.
+/// its pad buffers say was read ([`PadTape::from_capture`]'s half, and row 0's read the same way),
+/// `PAD_LEADS` on; on an index no row gives (the ones up to the first row's, and the one a late row
+/// skips), the nearest one before it, or after it before the first. Checked against the control state
+/// the same row carries, which is what the game itself believed was held.
 ///
 /// Except the first tick's buttons, when `own` gives them: the controls the state itself was saved
 /// holding ([`SaveState::held_controls`]). The game's first tick after a load rides on the control
 /// state it was saved with, and only the next one on the pad the kit sends after the load (S117:
 /// steep's state was saved with the brake held, the pad released before the load; with the brake on
 /// tick 1 alone, ticks 2 to 14 are the original's to the bit, with it on ticks 1 and 2 or on neither
-/// they part at the first compared tick).
+/// they part at the first compared tick). Tick 2 rides on row 0's pad, which still holds the saved
+/// controls where the kit did not release the pad before the load (S237: S162's bump and S129's
+/// braked, both saved braking, are the original's on tick 2 only with the brake on it too).
 fn save_state_inputs(cap: &Capture, ticks: &[u64], own: Option<u16>) -> Result<Vec<Input>, String> {
     let tape = PadTape::from_capture(cap).map_err(|e| e.to_string())?;
     let last = *ticks.last().ok_or("no rows")? as usize;
     let mut on = vec![None; last + 1 + PAD_LEADS];
-    // The tape drops row 0 (a full-speed row is the tick before it), so row r is its frame r - 1.
-    for (r, &t) in ticks.iter().enumerate().skip(1) {
-        let input = tape.frames[r - 1].input();
+    // The tape drops row 0 (a full-speed row is the tick before it), so row r is its frame r - 1. A
+    // quarter-speed row 0 is the save state's own tick and its pad is tick 2's (S237), read here as
+    // the tape reads the others: the older of the two pad buffers.
+    let row_zero = || -> Result<Input, String> {
+        let at = |c: &str| column(cap, c).map(|i| cell(cap, 0, i));
+        let older = if at("stamp_a")?.parse::<u64>().ok() <= at("stamp_b")?.parse::<u64>().ok() { "pad_a" } else { "pad_b" };
+        let hex = at(older)?;
+        let mut bytes = [0u8; game_sim::input::REPORT_BYTES];
+        for (b, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
+            *b = u8::from_str_radix(std::str::from_utf8(pair).unwrap_or(""), 16).map_err(|_| format!("row 0: '{hex}' is not hex"))?;
+        }
+        Ok(PadFrame::new(tape.frames[0].dt(), [Report::from_bytes(bytes), Report::missing()]).input())
+    };
+    for (r, &t) in ticks.iter().enumerate() {
+        let input = if r == 0 { row_zero()? } else { tape.frames[r - 1].input() };
         let mut held = 0u16;
         for (i, c) in Control::ALL.iter().enumerate() {
             if cell(cap, r, column(cap, &format!("ctl{i}.held"))?) == "1" {
@@ -10106,8 +10120,10 @@ const S129_RIDES: [&str; 2] = ["braked", "across"];
 
 /// The tick each of [`S129_RIDES`] agrees through on every lane, in that order: a ratchet like
 /// [`S89_AGREES_THROUGH`]. Across agrees on all of its 300 ticks since the bike carries its body rays
-/// (S190): it parted at 148, where they meet the wagon, while the replay rode without them.
-const S129_AGREES_THROUGH: [u64; 2] = [1, u64::MAX];
+/// (S190): it parted at 148, where they meet the wagon, while the replay rode without them. Braked
+/// parted on tick 2 until S237 gave tick 2 the brake the state was saved holding (capture row 0's
+/// pad); on 113 the port's bike is shoved by the train, which the original's runs through.
+const S129_AGREES_THROUGH: [u64; 2] = [112, u64::MAX];
 
 /// The tick across parts at with no body rays on the bike: the first its rays strike the wagon.
 const S129_ACROSS_BARE_PARTS: u64 = 148;
@@ -11246,10 +11262,19 @@ fn a_full_lock_back_up_rides_the_originals_arc() {
 // - **prop**: 2500.6,3099.7 facing 72°, beside a prop; the bike rolls off forwards to 7 ft/s, slows and
 //   stops 32 ft on. The original never wrecks.
 
-/// S162's rides: `context/capture/s162/<name>.csv` and `context/states/s162-<name>.eeMemory.bin`, what
-/// the original does in each — its first wreck's tick and reason, or none — and how far, in feet, the
-/// port's centre of mass may stray from the original's while both ride.
-const S162_RIDES: [(&str, Option<(u64, u8)>, f32); 2] = [("bump", Some((206, 4)), 2.0), ("prop", None, 0.01)];
+/// S162's rides: `context/capture/s162/<name>.csv` and `context/states/s162-<name>.eeMemory.bin`, the
+/// rows the recorder read a tick late that [`quarter_ticks`] cannot tell (a late row it spots is one
+/// the next row repeats; bump's 94 holds tick 95's ride and its 95 tick 96's, which 96 repeats), what
+/// the original does — its first wreck's tick and reason, or none — the tick each agrees through on
+/// every lane (a ratchet), and how far, in feet, the port's centre of mass may stray from the
+/// original's while both ride.
+///
+/// Bump agrees to the bit up to its wreck tick, 206, where the origin parts by an ulp (as S191's
+/// headon) and the port bails Back on the original's tick. Until S237 it parted on tick 2 and bailed
+/// on 205, 1.5 ft off: the state was saved with the brake held, which the original rides on through
+/// tick 2 (capture row 0's pad, [`save_state_inputs`]), and row 94 was compared with tick 94.
+const S162_RIDES: [(&str, &[usize], Option<(u64, u8)>, u64, f32); 2] =
+    [("bump", &[94], Some((206, 4)), 205, 0.0), ("prop", &[], None, u64::MAX, 0.0)];
 
 /// **S162: an idle bike rolls off and wrecks, or does not, as the original's does**: each of
 /// [`S162_RIDES`] ridden by the port from the original's save state (its whole bike, the 250, wrecks
@@ -11259,7 +11284,7 @@ const S162_RIDES: [(&str, Option<(u64, u8)>, f32); 2] = [("bump", Some((206, 4))
 #[test]
 fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
     let mut parted = Vec::new();
-    for (name, recorded, limit) in S162_RIDES {
+    for (name, late, recorded, agrees, limit) in S162_RIDES {
         let path = private_dir("capture").join("s162").join(format!("{name}.csv"));
         let Ok(text) = std::fs::read_to_string(&path) else {
             println!("no {} — `research/s162/turn.py` says how it is recorded", path.display());
@@ -11272,7 +11297,10 @@ fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
             continue;
         };
         let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
-        let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mut ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
+        for &r in late {
+            ticks[r] += 1;
+        }
         let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{name}: {e}"));
         let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
         let num = |r: usize, c: &str| -> f32 { cell(&cap, r, col(c)).parse().unwrap_or(f32::NAN) };
@@ -11282,7 +11310,7 @@ fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
             println!("no bike collision files on this disc");
             continue;
         };
-        in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, _, bike, traffic| {
+        in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, named, bike, traffic| {
             let mut sim = acceptance_start(&cap, 0, bike).unwrap();
             sim.traffic = traffic;
             sim.rider.sense.wrecks_enabled = true;
@@ -11302,6 +11330,26 @@ fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
             let last = *ticks.last().unwrap() as usize + 1;
             let mut pads = inputs.clone();
             pads.resize(last.max(pads.len()), Input::default());
+            let f = Fixture {
+                name: format!("s162 {name}"),
+                seed: 0,
+                start: Some(sim.clone()),
+                inputs: pads.clone(),
+                watches: save_state_watches(&cap, &ticks),
+                world: Some(named.clone()),
+                ..Default::default()
+            };
+            let parts = match replay::verify_in(&f, world) {
+                Ok(_) => None,
+                Err(d) => {
+                    println!("{name}: {d}");
+                    Some(d.tick)
+                }
+            };
+            println!("{name}: every lane agrees through tick {}", parts.map_or(last as u64 - 1, |t| t - 1));
+            if parts.is_some_and(|t| t <= agrees) {
+                parted.push(format!("{name}: parts from the original on tick {parts:?}, at or before {agrees}"));
+            }
             let mut got = None;
             let mut at = Vec::with_capacity(last);
             for t in 1..last {
