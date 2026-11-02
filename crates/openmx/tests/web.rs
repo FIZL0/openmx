@@ -477,6 +477,7 @@ fn a_webgpu_error_on_the_menu_starts_again_on_webgl2() {
         .env("OPENMX_GPU_ARGS", "")
         .env("OPENMX_GPU_FAULT", "30")
         .env("OPENMX_GPU_WANT", "webgl2")
+        .env("OPENMX_GPU_LOG", "1")
         .output()
         .expect("run node");
     let _ = std::fs::remove_dir_all(&scratch);
@@ -495,6 +496,62 @@ fn a_webgpu_error_on_the_menu_starts_again_on_webgl2() {
     let pixels: f64 = field("pixels").parse().expect("pixels");
     assert!(lit > pixels / 4.0, "only {lit} of {pixels} pixels of the menu are lit:\n{text}");
     println!("webgpu's fault on the menu: started again on {}, {lit} of {pixels} pixels lit", field("drawn"));
+    // P257b: the page's log (`?fps`) kept the failed WebGPU run across the restart: the worker's own line naming the
+    // error, then the page that started on webgl2.
+    let kept = text.split("\"log\":\"").nth(1).unwrap_or("");
+    let named = kept.find("worker log: gpu: validation error in ");
+    let again = kept.find("---- the page loaded again ----");
+    assert!(named.is_some() && again.is_some() && named < again, "the log lost the WebGPU run across the restart:\n{kept}");
+    assert!(kept[again.unwrap_or(0)..].contains("&webgl2"), "the log has no page on webgl2 after the restart:\n{kept}");
+}
+
+/// The page log for bug reports (P257b, `tests/web/log.mjs`): a phone has no Web Inspector, so with
+/// `?fps` (or the Settings switch) the page keeps every console line, the worker's too, and a Save
+/// log button downloads them. Headless chromium picks a file that is no disc: the shell ends on it
+/// and the page shows the error on its failed screen; the page is reloaded (as the WebGPU fallback's
+/// restart does), and the new page's Save log must download a file holding the module's own line
+/// from the worker and the failed screen's error, from before the reload. The module is
+/// `tools/web.sh --check`'s. Skips without node or chromium.
+#[test]
+fn the_page_log_keeps_the_worker_and_the_boot_error() {
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    let scratch = std::env::temp_dir().join(format!("openmx-web-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).expect("scratch dir");
+    // a few sectors of nothing: no ISO 9660 volume
+    let junk = scratch.join("junk.iso");
+    std::fs::write(&junk, vec![0x5a; 64 * 2048]).expect("write the junk disc");
+    let run = Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/log.mjs"))
+        .arg(repo().join("web"))
+        .arg(&junk)
+        .arg(scratch.join("profile"))
+        .arg(scratch.join("downloads"))
+        .env("OPENMX_LOG_PKG", built())
+        .output()
+        .expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert!(run.status.success(), "log.mjs failed:\n{}{text}", String::from_utf8_lossy(&run.stderr));
+    let field = |key: &str| -> String {
+        text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string()
+    };
+    assert_eq!(field("state"), "failed", "the page did not fail on a file that is no disc:\n{text}");
+    let error = field("status");
+    assert!(!error.is_empty(), "the failed screen shows no error:\n{text}");
+    assert_eq!(field("button"), "true", "no Save log button after the reload:\n{text}");
+    assert_eq!(field("file"), "openmx-log.txt", "Save log downloaded nothing:\n{text}");
+    let log = text.split("\"log\":\"").nth(1).unwrap_or("");
+    let again = log.find("---- the page loaded again ----").unwrap_or(0);
+    assert!(again > 0, "the log does not span the reload:\n{log}");
+    assert!(log[..again].contains("worker log: renderer: "), "the worker's console line is not in the log:\n{log}");
+    assert!(log[..again].contains(&format!("error: openmx: {error}")), "the failed screen's error is not in the log:\n{log}");
+    println!("saved log: {} lines", log.split("\\n").count());
 }
 
 /// A pad in the page (P236, `tests/web/gamepad.mjs`): headless chromium with a pad behind
