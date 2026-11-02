@@ -4355,13 +4355,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Every online seat's own biplane bay (N18), which a seat that starts the ride in the plane
     // stands in: the lot parked for the most seats a ride has, a copy's place being its own whatever
     // the count, so every machine has the same off the same disc.
-    let mut online_bays: Vec<vehicle::Spawn> = match &machines {
+    // Each file bay's with the body's spot and up the original stands an offline plane at there
+    // (B6): the model's lift, the bay's SetGroundHeight and the ground's normal.
+    let (mut online_bays, online_bodies): (Vec<vehicle::Spawn>, Vec<Option<(Vf, Vf)>>) = match &machines {
         Some((_, b)) => {
             let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
-            let mut ground = |at: Vf| lot_ground(tiled.as_deref_mut(), &mut probe, at);
-            Lot::around(lot_spots(b, &mut ground), net::SEATS, &mut ground).of(Machine::Biplane).map(|bay| bay.spawn).collect()
+            let mut seats = {
+                let mut ground = |at: Vf| lot_ground(tiled.as_deref_mut(), &mut probe, at);
+                Lot::around(lot_spots(b, &mut ground), net::SEATS, &mut ground)
+            };
+            (seats.lift, seats.ground_heights) = (lot.lift, lot.ground_heights.clone());
+            let mut ground = |from: Vf| lot_ground_normal(tiled.as_deref_mut(), &mut probe, from);
+            seats.of(Machine::Biplane).map(|bay| (bay.spawn, seats.body_spot(bay, &mut ground))).unzip()
         }
-        None => Vec::new(),
+        None => (Vec::new(), Vec::new()),
     };
     // And the biplane's, for the same (P98).
     let stock_plane = plane_phy.as_deref().map(phy::Plane::read_bytes);
@@ -5010,7 +5017,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -5019,7 +5026,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, online_bays, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -6330,7 +6337,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         on.planes(stock_plane, plane_like.as_ref());
         // Each seat that starts in the plane stands in its own bay at tick 0 (N18): the lobby's
         // now, from the picks; `--peer`s' once every peer's card has said its own.
-        on.bays(online_bays.clone());
+        on.bays_on(online_bays.clone(), online_bodies.clone());
         if let Some(flies) = &lobby_planes {
             on.start_planes(flies)?;
         }
@@ -7062,7 +7069,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                                 on.modifiers(mods, stock_phys[..1].to_vec());
                                 on.planes(stock_plane, plane_like.as_ref());
                                 // a joiner whose setup picked the plane rides in from its own bay (N19)
-                                on.bays(online_bays.clone());
+                                on.bays_on(online_bays.clone(), online_bodies.clone());
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some((on.host(), on.own_rows())));
                                 front.menu.air_lock = air_lock(head.is_some(), true);
@@ -9885,6 +9892,14 @@ fn lot_ground(tiled: Option<&mut game_sim::tiles::Tiled>, track: &mut sim_world:
     match tiled {
         Some(t) => sim_world::World::ground(t, from).0.y(),
         None => sim_world::World::ground(track, from).0.y(),
+    }
+}
+
+/// The ground under `from` and its normal there, as [`lot_ground`] finds it, asked from `from` itself.
+fn lot_ground_normal(tiled: Option<&mut game_sim::tiles::Tiled>, track: &mut sim_world::Ground, from: Vf) -> (Vf, Vf) {
+    match tiled {
+        Some(t) => sim_world::World::ground(t, from),
+        None => sim_world::World::ground(track, from),
     }
 }
 

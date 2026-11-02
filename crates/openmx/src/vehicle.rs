@@ -491,6 +491,20 @@ impl Lot {
         Some(Plane { livery: livery(player), ..Plane::flying(start, flight?) })
     }
 
+    /// Where the original stands the body of a plane in `bay` (B6), as [`Plane::ready`]'s first
+    /// placement has it: on a file bay with the model's [`Lot::lift`], the body over the ground
+    /// under the spot (or at the file's height, without `SetGroundHeight`) and its up the ground's
+    /// normal there, `ground` answering a query from [`PROBE`] over the spot with the point and the
+    /// normal. `None` for a spot the port found, without the model, or with no ground under it, where
+    /// the model's origin stands on the spot.
+    pub fn body_spot(&self, bay: &Bay, ground: &mut dyn FnMut(Vf) -> (Vf, Vf)) -> Option<(Vf, Vf)> {
+        let lift = self.lift.filter(|_| bay.original)?;
+        let at = bay.spawn.at;
+        let (on, normal) = ground(Vf::new(at.x(), at.y() + PROBE, at.z(), 1.0));
+        let y = if self.ground_heights.get(bay.copy).copied().unwrap_or(true) { on.y() } else { at.y() };
+        (on.y() > NO_GROUND).then(|| (flight::bay_spot(Vf::new(at.x(), y, at.z(), 1.0), lift), normal))
+    }
+
     /// Player `player`'s plane, standing in their bay: parked, or flying when `flight` is given.
     pub fn plane(&self, player: usize, flight: Option<Flight>) -> Option<Plane> {
         let bay = self.bay(Machine::Biplane, player)?;
@@ -1696,9 +1710,19 @@ pub fn switch_lane(to: Kind, template: Option<&Flight>, sim: &mut Sim, world: &m
 /// [`Lot::plane`]), placed there by its first step; here it is placed before the first tick, which
 /// is the same flight before the same first frame ([`switch_lane`] places its plane at once too).
 pub fn start_lane(template: &Flight, bay: Spawn, sim: &mut Sim) {
+    start_lane_on(template, bay, None, sim);
+}
+
+/// [`start_lane`] with the body's spot and up the original gives a file bay (B6, [`Lot::body_spot`]):
+/// with one, the plane stands as an offline plane in the same bay does at its first step; without,
+/// the model's origin on `bay`, world up.
+pub fn start_lane_on(template: &Flight, bay: Spawn, body: Option<(Vf, Vf)>, sim: &mut Sim) {
     let mut plane = Plane::flying(bay, template.clone());
     if let Some(f) = &mut plane.flight {
-        f.reset(bay.at, bay.facing, &sim.tables.ride.acos);
+        match body {
+            Some((at, up)) => f.reset_body(at, bay.facing, up, &sim.tables.ride.acos),
+            None => f.reset(bay.at, bay.facing, &sim.tables.ride.acos),
+        }
     }
     sim.plane = plane.flight.take();
 }

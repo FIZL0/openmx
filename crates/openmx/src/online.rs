@@ -106,6 +106,9 @@ pub struct Online {
     stock_plane: Option<game_sim::phy::Plane>,
     /// Each seat's own bay in the ride's lot (N18), where a seat that starts in the plane stands.
     bays: Vec<Spawn>,
+    /// The body's spot and up the original gives each of [`Online::bays`] that is a file bay (B6,
+    /// [`vehicle::Lot::body_spot`]); `None` (or past the end) for the rest, which keep the port's.
+    bay_bodies: Vec<Option<(ps2_float::Vf, ps2_float::Vf)>>,
     /// `--peer`s (P105): every machine's saved markers, which the session waits on.
     marks: Option<Marks>,
     /// The host left and the lobby handed its room to this machine (N11): it hosts it from here. A
@@ -176,6 +179,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
+            bay_bodies: Vec::new(),
             marks: Some(Marks { track: String::new(), bike: String::new(), owed: true, offered: None }),
             handed: false,
             spare: None,
@@ -239,6 +243,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
+            bay_bodies: Vec::new(),
             marks: None,
             handed: false,
             spare: None,
@@ -275,6 +280,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
+            bay_bodies: Vec::new(),
             marks: None,
             handed: false,
             spare: None,
@@ -311,6 +317,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             bays: Vec::new(),
+            bay_bodies: Vec::new(),
             marks: None,
             handed: false,
             spare,
@@ -348,6 +355,15 @@ impl Online {
             self.sims.iter_mut().for_each(|sim| sim.home = std::sync::Arc::clone(&home));
         }
         self.bays = bays;
+        self.bay_bodies = Vec::new();
+    }
+
+    /// [`Online::bays`] with the body's spot and up the original gives each file bay (B6,
+    /// [`vehicle::Lot::body_spot`]), `bodies[s]` seat `s`'s, which a seat starting in the plane
+    /// stands at as an offline plane in the same bay does.
+    pub fn bays_on(&mut self, bays: Vec<Spawn>, bodies: Vec<Option<(ps2_float::Vf, ps2_float::Vf)>>) {
+        self.bays(bays);
+        self.bay_bodies = bodies;
     }
 
     /// The seats `flies` says start the ride in the biplane (N18): each takes a copy of the ride's
@@ -362,7 +378,7 @@ impl Online {
         }
         for (s, sim) in self.sims.iter_mut().enumerate().filter(|&(s, _)| flies.get(s) == Some(&true)) {
             match (&self.plane, self.bays.get(s)) {
-                (Some(template), Some(&bay)) => vehicle::start_lane(template, bay, sim),
+                (Some(template), Some(&bay)) => vehicle::start_lane_on(template, bay, self.bay_bodies.get(s).copied().flatten(), sim),
                 _ => println!("online: seat {} picked the biplane, but this ride has none for it; the bike", s + 1),
             }
         }
@@ -596,7 +612,7 @@ impl Online {
         let session = &mut self.net;
         let (spawn, arrived, room) = (&self.spawn, &mut self.arrived, &mut self.room);
         let first = self.sims.first();
-        let (template, bays) = (self.plane.as_ref(), &self.bays);
+        let (template, bays, bodies) = (self.plane.as_ref(), &self.bays, &self.bay_bodies);
         match &mut self.wire {
             Wire::Udp(udp) => udp.receive(),
             Wire::Lobby { net, kept } => {
@@ -662,7 +678,7 @@ impl Online {
                             // every machine is sent, as a lobby ride's seat starts in it (N18)
                             let flying = match (seats.as_slice(), seats.first().and_then(|&s| pick(s))) {
                                 ([s], Some(seat)) if seat.pick.machine == vehicle::Kind::Biplane.name() => match (first, template, bays.get(*s)) {
-                                    (Some(f), Some(t), Some(&bay)) => match rides::spawn_flying(f, spawn, t, bay) {
+                                    (Some(f), Some(t), Some(&bay)) => match rides::spawn_flying_on(f, spawn, t, bay, bodies.get(*s).copied().flatten()) {
                                         Ok(b) => {
                                             println!("online: {peer} rides in on the biplane");
                                             Some(b)
