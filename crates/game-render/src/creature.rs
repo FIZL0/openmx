@@ -27,6 +27,17 @@
 //! landing spline is entered from takes that spline if nobody else has, and slows down along it.
 //! A `ScareBirds` sends every bird sitting within `ScareDistance` of `ScarePosition` on.
 //!
+//! **Triggers.** Each tick a trigger first runs its own update (V104): last tick's touch is kept
+//! and this tick's cleared, every actor in it is exit-tested by its box and one that has left is
+//! taken out (its `UponExit` actions offered it), and delayed actions count down. Then each actor
+//! that strikes it is a contact ([`Creatures::contact`]): touched, and unless `OneTimeOnly` has
+//! fired or a chance trigger was touched last tick or loses its roll, fired; a firing counts, and
+//! runs the actions due by their counter keys for an actor not already in it. `IgnoreTrigger`,
+//! `EnterTest`, `ExitTest` and `ActionTest` are read and change nothing, as in the original: nothing
+//! reads the first back, and the game registers no test for a name to find. No path car on the
+//! disc strikes a trigger (every `[CarN]` turns off both of a car's collision passes), so only the
+//! riders are actors.
+//!
 //! **Sequence toys.** `[SequenceAnimatedToyN]` is a model at `Position`, faced along
 //! `LookVector`/`UpVector`, that plays its `MotionToPlay` clips once each, in the order of
 //! `MotionSequence`: at each step a roll of `rand()` against that step's `ProbabilityList` percent
@@ -46,8 +57,9 @@ use crate::psg::Model;
 use crate::rider::MotionSet;
 use crate::skin::{Clip, Pose, Skeleton};
 use crate::toy::upright;
+use game_sim::ray_probe::{self, Hierarchy, Matrix, RayProbe, Segment, abs_rows, compose, invert};
 use game_sim::rng::Rng;
-use ps2_float::{Vf, fpu};
+use ps2_float::{F, Vf, fpu};
 
 /// The original's `rand()` scale, `2⁻³¹` as the single it multiplies by.
 const UNIT: f32 = 4.656_613e-10;
@@ -312,7 +324,7 @@ pub struct Bird {
 }
 
 /// One `ScareBirds` action.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Scare {
     pub at: V3,
     pub distance: f32,
@@ -334,8 +346,46 @@ impl Rays {
     }
 }
 
-/// One `[TriggerN]` with the actions this module answers to.
+/// `IgnoreTrigger` names these, each found anywhere in the value as it is written (`AIANIMATION`
+/// sets [`IGNORE_AI`] only). The trigger keeps them and nothing ever reads them back.
+pub const IGNORE_AI: u8 = 1;
+pub const IGNORE_PLAYER: u8 = 2;
+pub const IGNORE_ANIMATIONS: u8 = 4;
+
+/// Who touches a trigger, as [`Creatures::step_among`] is given them.
 #[derive(Clone, Debug)]
+pub enum Actor<'a> {
+    /// World-space segments, struck one by one; [`Rays::at`] for a bare point.
+    Rays(Rays),
+    /// A ray probe standing in the world, as the collision pass strikes it: the bike's body rays
+    /// (`BikeCol::probe` at the chassis).
+    Probe(RayProbe<'a>),
+}
+
+/// One of a trigger's actions: the keys every action kind reads, the timer of a delayed run, and
+/// what it does (this module answers only to `ScareBirds`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Action {
+    /// `TriggerCounterEquals` (default −1): run when the trigger's count of firings is this.
+    pub equals: i32,
+    /// `TriggerCounterGreaterThan` (default −1): run when the count is past this.
+    pub greater: i32,
+    /// `TriggerActionDelayTimer` (default 0): seconds between the firing and the run.
+    pub delay: f32,
+    /// `TriggerActionUponExit`: run when an actor leaves instead of when it comes in.
+    pub upon_exit: bool,
+    /// `ActionTest`, kept by name; see [`Trigger::enter_test`].
+    pub test: Option<String>,
+    /// The delay left before a pending run, and whom it runs for.
+    pub timer: f32,
+    pub pending: Option<usize>,
+    /// How many times it has run going out, then coming in (a scare each time in).
+    pub ran: [u32; 2],
+    pub scare: Scare,
+}
+
+/// One `[TriggerN]` with the actions this module answers to.
+#[derive(Clone, Debug, Default)]
 pub struct Trigger {
     pub name: String,
     pub at: V3,
@@ -350,9 +400,22 @@ pub struct Trigger {
     pub one_time: bool,
     pub percent: i32,
     pub fired: bool,
-    /// The riders (by their place in [`Creatures::step`]'s list) in it last tick.
-    pub inside: Vec<usize>,
-    pub scares: Vec<Scare>,
+    /// `IgnoreTrigger`, as [`IGNORE_AI`] and the rest: read, and never consulted.
+    pub ignore: u8,
+    /// `EnterTest` and `ExitTest`, kept by name. A test name is looked up among the test kinds the
+    /// game registers, and the retail game registers none, so a name finds nothing and gates
+    /// nothing; no trigger or action on the disc names one. Every test here passes.
+    pub enter_test: Option<String>,
+    pub exit_test: Option<String>,
+    /// Something struck it this tick, and last tick (whatever came of the strike).
+    pub touched: bool,
+    pub touched_last: bool,
+    /// How many times it has fired.
+    pub count: i32,
+    /// The actors in it (by their place in the step's list): a slot each, emptied when one leaves
+    /// and filled again by the next to come in.
+    pub inside: Vec<Option<usize>>,
+    pub actions: Vec<Action>,
 }
 
 impl Trigger {
@@ -379,6 +442,83 @@ impl Trigger {
             }
         }
     }
+
+    /// The box's frame: right, up, look, then its place.
+    pub fn frame(&self) -> Matrix {
+        let row = |v: V3, w: f32| Vf::new(v.x, v.y, v.z, w);
+        [row(self.right, 0.0), row(self.up, 0.0), row(self.look, 0.0), row(self.at, 1.0)]
+    }
+
+    /// What its actions scare.
+    pub fn scares(&self) -> impl Iterator<Item = &Scare> {
+        self.actions.iter().map(|a| &a.scare)
+    }
+
+    /// Whether the actor strikes it, as the collision pass asks: a probe through
+    /// [`probe_strikes_box`], segments one by one through [`Trigger::struck`]. A sphere trigger (none
+    /// on the disc has a scare) takes a probe's segments into the world.
+    pub fn struck_by(&self, actor: &Actor) -> bool {
+        match actor {
+            Actor::Rays(r) => r.0.iter().any(|&[a, b]| self.struck(a, b)),
+            Actor::Probe(p) if self.radius.is_none() => {
+                probe_strikes_box(Vf::ZERO, Vf::new(self.half.x, self.half.y, self.half.z, 0.0), &self.frame(), p)
+            }
+            Actor::Probe(p) => p.segments.iter().any(|s| {
+                let w = |v: Vf| {
+                    let m = &p.transform;
+                    let c = |k: usize| m[3].0[k] + m[0].0[k] * v.x() + m[1].0[k] * v.y() + m[2].0[k] * v.z();
+                    v3(c(0), c(1), c(2))
+                };
+                self.struck(w(s.from), w(s.to))
+            }),
+        }
+    }
+
+    /// Whether an actor in it is in it still, the trigger update's exit test for a ray probe: the
+    /// probe's box (its tree's first node, or with no tree its first segment) against the trigger's
+    /// box, in the trigger's frame ([`ray_probe::group_reaches`]). Looser than the strike, so an
+    /// actor stays in until its whole box is out. Segments are a probe at the origin with no tree.
+    pub fn keeps(&self, actor: &Actor) -> bool {
+        let group = Hierarchy {
+            centre: Vf::ZERO,
+            half: Vf::new(self.half.x, self.half.y, self.half.z, 0.0),
+            frame: self.frame(),
+            parts: &[],
+        };
+        match actor {
+            Actor::Probe(p) => ray_probe::group_reaches(p, &group),
+            Actor::Rays(r) => {
+                let Some(&[a, b]) = r.0.first() else { return false };
+                let segments = [Segment { from: Vf::new(a.x, a.y, a.z, 1.0), to: Vf::new(b.x, b.y, b.z, 1.0) }];
+                let probe = RayProbe { transform: BOX_SPACE, root: 0x8000, nodes: &[], segments: &segments };
+                ray_probe::group_reaches(&probe, &group)
+            }
+        }
+    }
+}
+
+/// The ray class's strike on a box shape (`centre` and `half` in the box's `frame`): the two frames
+/// related as the tree-against-tree descent relates them, then down the probe's tree from its root,
+/// a node through [`ray_probe::boxes`] (its box into the box's frame) and on to its first child,
+/// then its second only if nothing below the first struck; a segment through
+/// [`segment_touches_box`]. It stops at the first segment that touches.
+pub fn probe_strikes_box(centre: Vf, half: Vf, frame: &Matrix, probe: &RayProbe) -> bool {
+    let to_probe = compose(&invert(&probe.transform), frame);
+    let to_box = invert(&to_probe);
+    let to_box_abs = abs_rows(&to_box);
+    fn down(word: u16, centre: Vf, half: Vf, m: &Matrix, m_abs: &[Vf; 3], probe: &RayProbe) -> bool {
+        if word & 0x8000 != 0 {
+            let s = probe.segments[(word & 0x7fff) as usize];
+            return segment_touches_box(centre, half, s.from, s.to, m);
+        }
+        let n = &probe.nodes[word as usize];
+        let point = |v: [F; 3]| Vf::new(v[0].0, v[1].0, v[2].0, 0.0);
+        if !ray_probe::boxes(centre, half, point(n.centre), point(n.half_extent), m, m_abs) {
+            return false;
+        }
+        down(n.children[0], centre, half, m, m_abs, probe) || down(n.children[1], centre, half, m, m_abs, probe)
+    }
+    down(probe.root, centre, half, &to_box, &to_box_abs, probe)
 }
 
 /// The box test's segment transform when the points are already in the box's frame.
@@ -436,7 +576,7 @@ fn trigger(s: &Section, actions: &[Section], n: usize) -> Trigger {
     let up = vec("UpVector", v3(0.0, 1.0, 0.0)).norm();
     let right = up.cross(look);
     let count = s.number("NumberOfActions").unwrap_or(0.0) as usize;
-    let mut scares = Vec::new();
+    let mut out = Vec::new();
     for a in 1..=count {
         let name = format!("Trigger{n}Action{a}");
         let Some(act) = actions.iter().find(|x| x.name.eq_ignore_ascii_case(&name)) else { continue };
@@ -444,12 +584,28 @@ fn trigger(s: &Section, actions: &[Section], n: usize) -> Trigger {
             continue;
         }
         let at = act.numbers("ScarePosition").filter(|v| v.len() >= 3).map_or(V3::default(), |v| v3(v[0], v[1], v[2]));
-        scares.push(Scare {
-            at,
-            distance: act.number("ScareDistance").unwrap_or(0.0),
-            delay: act.number("ScareDelay").unwrap_or(0.0),
+        out.push(Action {
+            equals: act.number("TriggerCounterEquals").map_or(-1, |n| n as i32),
+            greater: act.number("TriggerCounterGreaterThan").map_or(-1, |n| n as i32),
+            delay: act.number("TriggerActionDelayTimer").unwrap_or(0.0),
+            upon_exit: act.get("TriggerActionUponExit").is_some_and(ini::switch),
+            test: test(act, "ActionTest"),
+            timer: 0.0,
+            pending: None,
+            ran: [0; 2],
+            scare: Scare {
+                at,
+                distance: act.number("ScareDistance").unwrap_or(0.0),
+                delay: act.number("ScareDelay").unwrap_or(0.0),
+            },
         });
     }
+    let ignore = s.get("IgnoreTrigger").map_or(0, |v| {
+        [("AI", IGNORE_AI), ("PLAYER", IGNORE_PLAYER), ("ANIMATIONS", IGNORE_ANIMATIONS)]
+            .iter()
+            .filter(|(w, _)| v.contains(w))
+            .fold(0, |b, (_, f)| b | f)
+    });
     Trigger {
         name: s.get("Name").unwrap_or("").to_string(),
         at: vec("Position", V3::default()),
@@ -462,9 +618,25 @@ fn trigger(s: &Section, actions: &[Section], n: usize) -> Trigger {
         one_time: s.get("OneTimeOnly").is_some_and(ini::switch),
         percent: s.number("RandomTriggerPercent").unwrap_or(100.0) as i32,
         fired: false,
+        ignore,
+        enter_test: test(s, "EnterTest"),
+        exit_test: test(s, "ExitTest"),
+        touched: false,
+        touched_last: false,
+        count: 0,
         inside: Vec::new(),
-        scares,
+        actions: out,
     }
+}
+
+/// Whether a test passes: every one does, the retail game having no test kinds to name.
+fn passes(_test: &Option<String>) -> bool {
+    true
+}
+
+/// A test expression's text, where there is one.
+fn test(s: &Section, key: &str) -> Option<String> {
+    s.get(key).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
 }
 
 /// One `[SequenceAnimatedToyN]`.
@@ -616,7 +788,7 @@ impl Creatures {
         for i in 1..=count("Triggers", "NumberOfTriggers") {
             let Some(s) = section(&format!("Trigger{i}")) else { continue };
             let t = trigger(s, &actions, i);
-            if !t.scares.is_empty() {
+            if !t.actions.is_empty() {
                 c.triggers.push(t);
             }
         }
@@ -755,38 +927,26 @@ impl Creatures {
     /// One tick: the triggers the riders' body rays touch (each rider a list of world-space
     /// segments, [`Rays::at`] for a bare point), then every bird, then every toy.
     pub fn step(&mut self, dt: f32, riders: &[Rays]) {
+        let actors: Vec<Actor> = riders.iter().cloned().map(Actor::Rays).collect();
+        self.step_among(dt, &actors);
+    }
+
+    /// [`Creatures::step`] with the actors as they are: a ray probe is struck as the collision pass
+    /// strikes it, and exit-tested by its tree's box.
+    pub fn step_among(&mut self, dt: f32, actors: &[Actor]) {
         self.last_dt = dt;
         for b in &mut self.birds {
             b.before = b.pos;
         }
-        // The toy trigger's contact, as particles.rs's TrackFx::touch runs it: each rider in it
-        // fires it; one under 100 percent rolls only on a tick no rider was in it the tick before,
-        // and a rider already in it last tick runs no actions.
         for t in 0..self.triggers.len() {
-            let tr = &self.triggers[t];
-            let now: Vec<usize> = (0..riders.len()).filter(|&i| riders[i].0.iter().any(|&[a, b]| tr.struck(a, b))).collect();
-            for &i in &now {
-                let tr = &self.triggers[t];
-                if !tr.enabled || tr.one_time && tr.fired {
-                    break;
-                }
-                if tr.percent != 100 {
-                    if !tr.inside.is_empty() {
-                        break;
-                    }
-                    if tr.percent < (self.rng.rand() as f32 * UNIT * 100.0) as i32 + 1 {
-                        continue;
-                    }
-                }
-                self.triggers[t].fired = true;
-                if self.triggers[t].inside.contains(&i) {
-                    continue;
-                }
-                for s in self.triggers[t].scares.clone() {
-                    self.scare(s);
+            self.trigger_update(t, dt, actors);
+        }
+        for t in 0..self.triggers.len() {
+            for (i, actor) in actors.iter().enumerate() {
+                if self.triggers[t].struck_by(actor) {
+                    self.contact(t, i);
                 }
             }
-            self.triggers[t].inside = now;
         }
         for b in 0..self.birds.len() {
             self.update(b, dt);
@@ -797,6 +957,130 @@ impl Creatures {
                 toy.next(&mut self.rng);
             }
             toy.playing.advance(&self.bodies[toy.body], dt);
+        }
+    }
+
+    /// The toy trigger's contact, for actor `i` striking trigger `t`: an enabled trigger whose
+    /// `EnterTest` passes is touched; then unless it is a `OneTimeOnly` one that has fired, and
+    /// unless it is under 100 percent and either was touched last tick or loses the roll
+    /// (`percent < int(rand · 2⁻³¹ · 100) + 1`), it fires: its count goes up and its actions are
+    /// offered the actor ([`Creatures::enter`]).
+    pub fn contact(&mut self, t: usize, i: usize) {
+        let tr = &mut self.triggers[t];
+        if !tr.enabled || !passes(&tr.enter_test) {
+            return;
+        }
+        tr.touched = true;
+        if tr.one_time && tr.fired {
+            return;
+        }
+        if tr.percent != 100 {
+            if tr.touched_last {
+                return;
+            }
+            let roll = fpu::to_i32(fpu::mul(fpu::mul(fpu::from_i32(self.rng.rand()), UNIT), 100.0)) + 1;
+            if self.triggers[t].percent < roll {
+                return;
+            }
+        }
+        let tr = &mut self.triggers[t];
+        tr.fired = true;
+        tr.count += 1;
+        self.enter(t, i);
+    }
+
+    /// A firing's actions, for an actor not already in the trigger: each whose `ActionTest` passes
+    /// runs (or, with a delay, starts its timer) when it has no counter keys and is not an
+    /// `UponExit` one, or when the count equals `TriggerCounterEquals`, or when it is past
+    /// `TriggerCounterGreaterThan`. A delayed one starts its timer whatever its `UponExit`. Then the
+    /// actor goes in the trigger's list.
+    fn enter(&mut self, t: usize, i: usize) {
+        if self.triggers[t].inside.contains(&Some(i)) {
+            return;
+        }
+        let count = self.triggers[t].count;
+        for a in 0..self.triggers[t].actions.len() {
+            let act = &mut self.triggers[t].actions[a];
+            if !passes(&act.test) {
+                continue;
+            }
+            let due = if act.equals == -1 && act.greater == -1 {
+                act.delay > 0.0 || !act.upon_exit
+            } else {
+                count == act.equals || act.greater != -1 && act.greater < count
+            };
+            if !due {
+                continue;
+            }
+            if act.delay > 0.0 {
+                act.pending = Some(i);
+                act.timer = act.delay;
+            } else {
+                self.run(t, a, true);
+            }
+        }
+        let inside = &mut self.triggers[t].inside;
+        match inside.iter().position(Option::is_none) {
+            Some(k) => inside[k] = Some(i),
+            None => inside.push(Some(i)),
+        }
+    }
+
+    /// The trigger's own update, before this tick's strikes: last tick's touch kept and this
+    /// tick's cleared; every actor in it exit-tested ([`Trigger::keeps`]), and one that has left
+    /// taken out of the list and, if the `ExitTest` passes, offered to the `UponExit` actions; then
+    /// every pending timer run down by `dt`, its action run when it reaches zero.
+    ///
+    /// An `UponExit` action with a delay starts its timer with the delay of the action whose place
+    /// in the list is the leaving actor's slot in the trigger's, as the original does (its own
+    /// where there is no such action).
+    fn trigger_update(&mut self, t: usize, dt: f32, actors: &[Actor]) {
+        let tr = &mut self.triggers[t];
+        tr.touched_last = tr.touched;
+        tr.touched = false;
+        for slot in 0..self.triggers[t].inside.len() {
+            let tr = &self.triggers[t];
+            let Some(i) = tr.inside[slot] else { continue };
+            if actors.get(i).is_some_and(|a| tr.keeps(a)) {
+                continue;
+            }
+            self.triggers[t].inside[slot] = None;
+            if !passes(&self.triggers[t].exit_test) {
+                continue;
+            }
+            for a in 0..self.triggers[t].actions.len() {
+                let tr = &mut self.triggers[t];
+                let act = &tr.actions[a];
+                if !act.upon_exit || !passes(&act.test) {
+                    continue;
+                }
+                if act.delay > 0.0 {
+                    let delay = tr.actions.get(slot).map_or(act.delay, |s| s.delay);
+                    tr.actions[a].pending = Some(i);
+                    tr.actions[a].timer = delay;
+                } else {
+                    self.run(t, a, false);
+                }
+            }
+        }
+        for a in 0..self.triggers[t].actions.len() {
+            let act = &mut self.triggers[t].actions[a];
+            if act.timer > 0.0 {
+                act.timer = fpu::sub(act.timer, dt);
+                if act.timer <= 0.0 {
+                    act.timer = 0.0;
+                    self.run(t, a, true);
+                }
+            }
+        }
+    }
+
+    /// An action run, coming in or (`enter` false) going out: a scare acts only coming in.
+    fn run(&mut self, t: usize, a: usize, enter: bool) {
+        self.triggers[t].actions[a].ran[enter as usize] += 1;
+        if enter {
+            let s = self.triggers[t].actions[a].scare;
+            self.scare(s);
         }
     }
 

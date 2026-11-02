@@ -5876,6 +5876,47 @@ torsion_spring_force  boot 0x001f3180 returns unless +0 on and the body enabled;
 segment_box_touch     boot 0x00106590 (centre*, half*, a*, b*, rows*) -> v0 1 touching: a, b through
 #                                    the four rows (origin first), less centre; mid/half-length apart
 #                                    on a box axis, then the three cross axes on the FPU; inclusive.
+#
+# V104 — the toy trigger's contact, actions and update (creature.rs Trigger / Creatures::step_among;
+#   journal 2026-11-02-v104-trigger-contact). Proved by crates/game-render/tests/trigger_contact.rs.
+#   Trigger fields: +0x29 bit 0 enabled (StartEnabled); +0xd8 IgnoreTrigger bits: strstr "AI" 1,
+#   "PLAYER" 2, "ANIMATIONS" 4 (strings 0x0042c6b8/c0/c8; the disc's AIANIMATION sets AI only). Its
+#   only reads are the reader's three ORs: nothing consults it. +0xdc percent, +0xe0 action count,
+#   +0xfc action list, +0x100 firings, +0x314 shape, +0x318 last actor, +0x324 EnterTest, +0x328
+#   ExitTest. +0x31c: bit 0 exit actions on, 1 enter actions on, 2 keep a contact list (ctor sets all
+#   three), 3 OneTimeOnly, 4 fired, 5 touched this frame, 6 touched last frame, 7 an UponExit override
+#   nothing sets. Action base (reader 0x001c6670): +0 pending actor, +4 TriggerCounterEquals (-1), +8
+#   TriggerCounterGreaterThan (-1), +0xc TriggerActionDelayTimer, +0x10 timer, +0x14
+#   TriggerActionUponExit, +0x18 ActionTest, +0x1c vtable (run vt+0x14 (action, actor, trigger,
+#   enter)). ScareBirds' run 0x003aea00 acts only on enter 1.
+#   Contact: shape +0x78 is the trigger. Gate: the global below, enabled, EnterTest null or passing.
+#   Then bit 5; one-time and fired stop; under 100 percent bit 6 stops, else the roll; then fired,
+#   count + 1, actions (a listed actor runs none; the counter/delay/UponExit rules; then each added
+#   to the other's list 0x0011af30, which reuses a zero slot or grows by realloc), zone hook 0x001c6f60.
+#   Update (a0 trigger, f12 dt): bit 6 = bit 5, bit 5 cleared; each listed actor exit-tested by the
+#   shape's kind (5: 0x001f09c0, else the one below); a miss zeroes both lists' slots (0x0011b020) and,
+#   ExitTest passing, runs the UponExit actions (delayed ones take the delay of the action at the
+#   leaving actor's slot index, a listing slip); then timers: t > 0 -> t - dt, at <= 0 t = 0 and run
+#   (pending actor, enter 1); last node_update_children. Exit test of a kind 2 (ray) actor: its tree's
+#   first node (or first segment) box against the trigger box, = ray_probe::group_reaches.
+#   Tests: 0x002131f0 parses "&|!()" into combinators (eval 0x001c6450 calls each child, a null one
+#   through null); a name is looked up in the manager (*0x004e18c0) +0x54 table, count +0x50, which
+#   only the ctor 0x00212900 writes (0): in the free06/free07/kiowa states it is empty, so a name is
+#   null and passes. No trigger or action on the disc names a test or a counter/delay/UponExit key.
+#   Path cars: +0x424 (ray) runs the collision pass only under DriveOnSoultree, +0x42c ("m.col" ray)
+#   exists only under CollidesWithOthers; all 126 [CarN] on the disc set both FALSE, so no retail path
+#   car strikes a trigger (+0x42c null on every car in the s89 free06 state).
+trigger_contact       boot 0x001c6190 (shape, actor) the toy trigger's shape +0x110 callback
+trigger_fire_actions  boot 0x001c7560 (trigger, actor)
+trigger_update        boot 0x001c7110 (trigger, dt in f12)
+trigger_zone_hook     boot 0x001c6f60
+toy_triggers_live     boot 0x004206c0 nonzero while triggers may fire
+shape_exit_test       boot 0x001e7bc0 (shape, actor) -> v0 still in
+ray_tree_box_strike   boot 0x0010a9b0 (centre*, half*, box frame*, probe root word, {nodes, segments}*,
+#                                    probe frame*) -> v0: to_probe = invert(probe) . box, its inverse and
+#                                    abs rows; descent 0x0010a890: node (0x24 bytes, children +8/+10,
+#                                    box +0xc/+0x18) through 0x00106000, first child then the second only
+#                                    on a miss; leaf (0x20-byte segment) through segment_box_touch.
 # ---------------------------------------------------------------------------------------------------
 # P91: the dressed rider's NameDefault painter (crates/openmx/src/dress.rs, draw/Face/uniform)
 nameplate_paint       boot 0x0020baa0 the player: profile = rider +0x6b4; name strcpy'd (13 bytes) from
