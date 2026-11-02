@@ -1,0 +1,301 @@
+# s217.toml: S217's spec. C8's c8.toml (the bike, the trick, the body's machine) plus both posed
+# skeletons: the rider's body and, for the first time, the bike's own animation object.
+#
+# The body's animation object is the vehicle actor - 0x400 (V12's watch/rider-joints.toml). The
+# bike's is a second object of the same base class, read through the rider: rider +0x68 (the same
+# pointer sits at +0x7a0). Found on C8's save state by its content directory: four objects hold
+# "Bike\Anim\" at +0x1e0, one per rider on free09, and the human rider's +0x68 points at one of them.
+# Both share the base layout V12/V15 read: the directory at +0x1e0, the joint count at +0x230 (22),
+# the joint array at +0x234 (0x60 a joint, the blended translation at +0x40 and quaternion at +0x50),
+# the snapshot's rotation and translation buffers at +0x248/+0x24c, and the clock at +0x3c..+0x94.
+# The bike's object is not the body's sixty-state machine past that (its +0x8f0 is not a state).
+[watch]
+name        = "s217-queued-trick-pair"
+description = "S217's tape (flatliner, then a queued Taunt) played back: the bike, the trick, both skeletons"
+every       = 1
+frames      = 380
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "trick_running"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa0c"
+type = "u32"
+
+[[field]]
+name = "trick_id"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa78"
+type = "u32"
+
+[[field]]
+name = "airborne"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x57c"
+type = "u32"
+
+[[field]]
+name = "flip_applied"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f4"
+type = "u32"
+
+[[field]]
+name = "flipping"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4f8"
+type = "u32"
+
+[[field]]
+name = "flip_active"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x4fc"
+type = "u32"
+
+[[field]]
+name = "flip_armed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x500"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "state_prev"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8ec - 0x400"
+type = "u32"
+
+[[field]]
+name = "state"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8f0 - 0x400"
+type = "u32"
+
+[[field]]
+name = "state_want"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8f4 - 0x400"
+type = "u32"
+
+[[field]]
+name = "progress_last"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8f8 - 0x400"
+type = "f32"
+
+[[field]]
+name = "from_table"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x680 - 0x400"
+type = "u32"
+
+[[field]]
+name = "holding"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x684 - 0x400"
+type = "u32"
+
+[[field]]
+name = "ramp"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x68c - 0x400"
+type = "f32"
+
+[[field]]
+name = "ramp_rate"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x690 - 0x400"
+type = "f32"
+
+[[field]]
+name = "placed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x2ac - 0x400"
+type = "u32"
+
+[[field]]
+name = "req_airborne"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0xf8"
+type = "u32"
+
+[[field]]
+name = "req_backflip"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0xfc"
+type = "u32"
+
+[[field]]
+name = "req_no_hander"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "req_wreck"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x104"
+type = "u32"
+
+[[field]]
+name = "req_gesture"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1a0"
+type = "u32"
+
+[[field]]
+name = "dt"                       # the dt the simulation was given; 1/30 in play
+addr = "@frame_dt"
+type = "f32"
+
+[[array]]
+name   = "ctl"
+addr   = "@pad0_control_state"
+count  = 16
+stride = 0x18
+
+[[array.field]]
+name = "held"
+off  = 0
+type = "u32"
+
+[[field]]
+name = "bike_vel"                 # +0x130: velocity, world units per second
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x130"
+type = "f32x4"
+
+[[field]]
+name = "bike_xform"               # +0x180: 4x4 world transform; row 3 (+0x1b0) is the position
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x180"
+type = "mat4"
+
+[[field]]
+name = "on_ground"                # +0x574: either wheel touches
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x574"
+type = "u32"
+
+[[field]]
+name = "trick_group"              # +0x9fc: the button group held, 0..6
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x9fc"
+type = "u32"
+
+[[field]]
+name = "trick_dir"                # +0xa00: the direction, 0 none, 1 up, 2 down, 3 left, 4 right
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa00"
+type = "u32"
+
+[[field]]
+name = "trick_safe"               # +0xa10: past SafeTime, a landing now is not a wreck
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa10"
+type = "u32"
+
+[[field]]
+name = "trick_elapsed"            # +0xa1c: seconds into the running trick
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa1c"
+type = "f32"
+
+[[field]]
+name = "s31_stick"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x620"
+type = "f32x4"
+
+[[field]]
+name = "no_hander"                # +0xa44: the no-hander held with a wheel down (the request's +0x100)
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0xa44"
+type = "u32"
+
+# --- S217: the body's machine and clock (V12's rider-joints.toml names each offset) ------------------
+[[field]]
+name = "m_clock"                  # +0x3c..+0x94: the motion object's clock, the playing clip at +0x48
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x3c - 0x400"
+type = "bytes:92"
+
+[[field]]
+name = "d_flags"                  # +0x680..+0x6a4: from_table, holding, started, ramp, rate, the five rates
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x680 - 0x400"
+type = "bytes:40"
+
+[[field]]
+name = "d_cross"                  # +0x8dc cross, +0x8e0 cross_prev, +0x8e4 cross_start, +0x8e8 cap, +0x8ec..+0x8fc
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x8dc - 0x400"
+type = "bytes:36"
+
+[[field]]
+name = "req_progress"             # request +0x1a4: how far through the gesture
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1a4"
+type = "f32"
+
+[[field]]
+name = "req_seq"                  # request +0x1a8: the request count the restart test compares against
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x488 - 0x400 -> 0x1a8"
+type = "u32"
+
+[[array]]
+name   = "j"                      # the body's 22 posed joints
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x234 - 0x400 -> 0x0"
+count  = 22
+stride = 0x60
+
+[[array.field]]
+name = "t"
+off  = 0x40
+type = "f32x4"
+
+[[array.field]]
+name = "q"
+off  = 0x50
+type = "f32x4"
+
+[[array]]
+name   = "ur"                     # the body's snapshot rotations
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x248 - 0x400 -> 0x0"
+count  = 22
+stride = 0x10
+
+[[array.field]]
+name = "q"
+off  = 0x0
+type = "f32x4"
+
+# --- S217: the bike's own animation object (rider +0x68) ---------------------------------------------
+[[field]]
+name = "bike_anim_dir"            # +0x1e0: "Bike\Anim\"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x68 -> 0x1e0"
+type = "bytes:12"
+
+[[field]]
+name = "bike_joint_count"         # +0x230: 22
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x68 -> 0x230"
+type = "u32"
+
+[[field]]
+name = "bike_clock"               # +0x3c..+0x94, as the body's
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x68 -> 0x3c"
+type = "bytes:92"
+
+[[field]]
+name = "bike_tail"                # +0x240..+0x300: the snapshot pointers and the class's own fields after
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x68 -> 0x240"
+type = "bytes:192"
+
+[[array]]
+name   = "bj"                     # the bike's 22 posed joints
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x68 -> 0x234 -> 0x0"
+count  = 22
+stride = 0x60
+
+[[array.field]]
+name = "t"
+off  = 0x40
+type = "f32x4"
+
+[[array.field]]
+name = "q"
+off  = 0x50
+type = "f32x4"
+
+[[array]]
+name   = "bur"                    # the bike's snapshot rotations
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x68 -> 0x248 -> 0x0"
+count  = 22
+stride = 0x10
+
+[[array.field]]
+name = "q"
+off  = 0x0
+type = "f32x4"
