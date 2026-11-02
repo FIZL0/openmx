@@ -49,15 +49,17 @@ pub const EXTRA_CONTROLS: [crate::input::Control; crate::trick::EXTRA_BUTTONS] =
 /// The rows the extras never take: the moves the port runs as moves, and the two that are not tricks.
 const NOT_EXTRAS: &[&str] = &["backflip", "wheelie", "stoppie", "threesixtyl", "threesixtyr", "taunt", "nothing"];
 
-/// Read a pack's stunt table: every `[StuntNN]` section from 1 up, as many as the file has.
+/// Read a pack's stunt table: every `[StuntNN]` section from 1 up, as many as the file has. The table
+/// is text (MX Unleashed's and MX vs. ATV Unleashed's, `[Stunt01]`) or a BPB (Untamed's, MD69, whose
+/// titles are `[Stunt1]`: [`crate::bpb`]); either spelling is taken in either.
 pub fn table(bytes: &[u8]) -> Result<Vec<Row>, String> {
-    let ini = Ini::parse_bytes(bytes);
+    let ini = crate::bpb::ini(bytes)?;
+    let has = |want: &str| ini.names().iter().any(|n| n.eq_ignore_ascii_case(want));
     let mut rows = Vec::new();
     for i in 1.. {
-        let want = format!("Stunt{i:02}");
-        if !ini.names().iter().any(|n| n.eq_ignore_ascii_case(&want)) {
+        let Some(want) = [format!("Stunt{i:02}"), format!("Stunt{i}")].into_iter().find(|w| has(w)) else {
             break;
-        }
+        };
         let s = ini.section(&want);
         let text = |k: &str| s.text(k).unwrap_or("").to_owned();
         let clock = |k: &str| s.float_or(k, F::ZERO);
@@ -74,14 +76,15 @@ pub fn table(bytes: &[u8]) -> Result<Vec<Row>, String> {
                 for_bike: yes("UsedForBike", true),
                 index: i - 1,
             },
-            mapping: text("DefaultKeyMapping"),
+            // Untamed's table names its gesture `DefaultKeyMappingClassic` (openmx-mods' import-tricks).
+            mapping: s.text("DefaultKeyMapping").or(s.text("DefaultKeyMappingClassic")).unwrap_or("").to_owned(),
             has_animation: yes("HasAnimation", true),
             point_value: clock("PointValue"),
             hold_point_value: clock("HoldPointValue"),
         });
     }
     if rows.is_empty() {
-        return Err("the trick pack's table has no [Stunt01]".to_owned());
+        return Err("the trick pack's table has no [Stunt01] (or [Stunt1])".to_owned());
     }
     Ok(rows)
 }

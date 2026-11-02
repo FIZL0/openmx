@@ -162,6 +162,11 @@ impl Ini {
     pub fn names(&self) -> &[String] {
         &self.names
     }
+
+    /// An `Ini` from sections and `(section, key, value)` pairs another reader found ([`crate::bpb`]).
+    pub(crate) fn from_parts(names: Vec<String>, pairs: Vec<(usize, String, String)>) -> Ini {
+        Ini { names, pairs }
+    }
 }
 
 /// Whitespace out, quotes out — except between `[` and `]`, where the reader keeps spaces so that a
