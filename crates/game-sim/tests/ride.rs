@@ -379,9 +379,10 @@ fn the_walk_names_every_field_once() {
     // plants has been asked — `None` here too. P158 moved the size alone (2440 before it): the held
     // levers' steer/throttle locks and start-line latch, which nothing in the original's ride sets,
     // not walked. MD40 moved it to 2456: MX vs. ATV's backflip clip (`Ride::mxvatv`), boxed and walked
-    // only on its handling — `None` here.
+    // only on its handling — `None` here. S189 moved it to 2464: the bike's kept nearby search
+    // (`Ride::nearby`), boxed and walked only once a world with props or plants has been searched.
     assert_eq!(dump.fields.len(), 631, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2456, "the ride's own size");
+    assert_eq!(std::mem::size_of::<Ride>(), 2464, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");

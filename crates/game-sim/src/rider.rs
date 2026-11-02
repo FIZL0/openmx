@@ -408,6 +408,7 @@ impl Rider {
             ride.back.at = moved(back);
         }
         ride.back_search = None;
+        ride.nearby = None;
         for m in &mut self.drawn {
             m.0[3] = moved(m.0[3]);
         }
@@ -764,6 +765,8 @@ impl Rider {
         // Whether the body rays searched the world's props and plants this tick (S152): then the head
         // ray's sweep through them at the frame's end is not the wreck test's stand-in any more.
         let mut searched = false;
+        // Where the frame left the bike, and whether it was a ghost then, for the gather (S189).
+        let mut gather = None;
         if state.wreck.is_none() {
             // The body rays against the world's props (S138), from where the last tick left the bike,
             // as its collision object searches them before the bikes are updated: what they touch goes
@@ -775,7 +778,7 @@ impl Rider {
             ride.sweep_back(p, bike_col.as_deref().map(|col| &col.rays), world, dt);
             let ground = bike_col.as_deref().map_or_else(Vec::new, |col| crate::rider_contact::ground(col, &ride.transform(), world, dt));
             in_ground = crate::rider_contact::ground_hits(&ground);
-            let (found, movers) = match bike_col.as_deref().and_then(|col| crate::rider_contact::scenery(col, &ride.transform(), world, dt)) {
+            let (found, movers) = match bike_col.as_deref().and_then(|col| crate::rider_contact::scenery_in(col, &ride.transform(), &mut ride.nearby, world, dt)) {
                 Some((f, m)) => (Some(f), m),
                 None => (None, Vec::new()),
             };
@@ -808,6 +811,9 @@ impl Rider {
             // its tick the card's start-gate penalty as the manager's last tick left it (P158).
             let c = Controls { respawn: false, hands_off: tricks.no_hander, gas_cut: F::ZERO < score.gate_penalty, ..*c };
             ride.frame_searched(p, &t.ride, &c, dt, world, bump, scenery);
+            // The bike's nearby search is gathered after the substeps, around the body rays (S189),
+            // once the frame's cars are back in the world: a ghost's category list drops them itself.
+            gather = Some((ride.transform(), ghost.on));
         } else if let (Some(w), Some(down)) = (wreckage.as_ref(), crash.as_mut()) {
             // The physics of a rider who is down: the wreck body tumbling and the rider coming off
             // it. The original's is the same swap — the bike's own step is skipped while the reason
@@ -1237,6 +1243,9 @@ impl Rider {
         score.grow(dt);
         if let Some(h) = hidden {
             crate::traffic::show(world, h);
+        }
+        if let Some((at, ghost)) = gather {
+            ride.gather_nearby(&at, bike_col.as_deref().map(|col| &col.rays), world, ghost);
         }
         out
     }

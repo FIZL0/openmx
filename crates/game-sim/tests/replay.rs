@@ -10213,10 +10213,9 @@ impl SaveState {
 }
 
 /// [`in_the_world_on`] on free06 with the state's path cars in it: the scenery's props, then the cars'
-/// meshes ([`game_sim::traffic::Traffic::attach`]) when the state's bike search holds them
-/// ([`SaveState::bike_search_holds_cars`]; the cars run either way), and the traffic to put in the
-/// sim. Named rather than found from the rows ([`recorded_on`]): a bike that stands still fits every
-/// area's ground.
+/// meshes ([`game_sim::traffic::Traffic::attach`]), and the traffic to put in the sim. Named rather
+/// than found from the rows ([`recorded_on`]): a bike that stands still fits every area's ground.
+/// Whether the bike meets the cars is its nearby search's to say ([`seed_bike_search`]).
 fn in_the_world_with_cars<R>(
     st: &SaveState,
     phy: &str,
@@ -10235,9 +10234,7 @@ fn in_the_world_with_cars<R>(
         }
     }
     let mut traffic = st.traffic(|want| parts.iter().find_map(|(bytes, res)| by_suffix(res, want).and_then(|e| res.read(bytes, e).ok())));
-    if st.bike_search_holds_cars() {
-        traffic.attach(&mut props);
-    }
+    traffic.attach(&mut props);
     let terrain = Terrain::parse(&area.terrain).ok()?;
     let ground = Ground::new(&terrain, &area.scene.terrain);
     let tables = Arc::new(RiderTables::build());
@@ -10264,6 +10261,35 @@ fn free06_bike_col() -> Option<game_sim::bike_col::BikeCol> {
     }
     let file = |want: String| parts.iter().find_map(|(bytes, res)| by_suffix(res, &want).and_then(|e| res.read(bytes, e).ok()));
     BikeCol::load(&file(rays_file(MODEL))?, &file(shape_file(MODEL))?).ok()
+}
+
+/// The bike's nearby search (`rider +0x7bc`) as the image keeps it, for the port's
+/// ([`game_sim::ride::Ride::gather_nearby`], S189): where the image's list holds no path car
+/// ([`SaveState::bike_search_holds_cars`]), it was last gathered while the bike was a ghost, so the
+/// port gathers it so where the bike stands; otherwise as a solid bike. The bike stands within the
+/// list's bound from there on, so it is not gathered afresh.
+fn seed_bike_search(st: &SaveState, sim: &mut game_sim::Sim, world: &mut dyn World) {
+    let ghost = !st.bike_search_holds_cars();
+    let span = cars_as_toys(world, &sim.traffic);
+    let rays = sim.rider.bike_col.clone();
+    let ride = &mut sim.rider.ride;
+    let at = ride.transform();
+    ride.gather_nearby(&at, rays.as_deref().map(|c| &c.rays), world, ghost);
+    let list = ride.nearby.as_deref().expect("free06 hands its props over");
+    let cars = list.nearby.found.iter().filter(|c| (span[0]..span[1]).contains(&c.object.wrapping_sub(game_sim::flight_search::FIRST)));
+    assert_eq!(cars.count() == 0, ghost, "the port's list holds the cars as the image's does");
+}
+
+/// The cars' meshes as a frame of the traffic leaves them, standing where they are: a prop is a path
+/// car's ([`game_sim::traffic::Moving`], the toys' category in the bike's world) from the first frame
+/// the cars run, and a search gathered before it would take them for scenery. Their span of the props.
+fn cars_as_toys(world: &mut dyn World, traffic: &game_sim::traffic::Traffic) -> [usize; 2] {
+    let span = traffic.span().expect("the cars attached");
+    let props = world.moving().expect("free06 hands its props over");
+    for prop in &mut props.props[span[0]..span[1]] {
+        prop.moving = Some(game_sim::traffic::Moving::of(&prop.to_world, &prop.to_world, F::ZERO));
+    }
+    span
 }
 
 /// **S129: the bike meeting the Dallas train, in the original and replayed.**
@@ -10299,6 +10325,7 @@ fn the_bike_meets_the_dallas_train_as_the_original_does() {
             }
             st.seed_levers(ride).expect("the levers");
             st.seed_engine_state(ride).expect("the engine's state");
+            seed_bike_search(&st, &mut sim, world);
 
             let mut watches = Vec::new();
             for (col, path) in chassis_lanes() {
@@ -10447,8 +10474,10 @@ fn the_bike_meets_the_dallas_train_as_the_original_does() {
 /// The bike stands, so the list is never gathered again and the train runs through it. In the across
 /// state the list holds every path car. Then, from the braked image saved at frame 16344 (the front
 /// wheel's ray inside the second wagon's side): the port's wheel probe, built from the image's own
-/// wheels over the scenery alone, records what the original's did — the rail under both rays, its
-/// face's normal bit for bit (with the wagons in the scene it records the wagon's side instead).
+/// wheels among the scenery and the cars, through the bike's list gathered as a ghost where it stands
+/// (S189, [`game_sim::ride::nearby_scene`]), records what the original's did — the rail under both
+/// rays, its face's normal bit for bit (a list gathered by a solid bike holds the wagons, and the
+/// probe records the wagon's side instead).
 #[test]
 fn the_parked_bike_never_gathers_the_train() {
     const GHOST: u32 = 0x40;
@@ -10470,23 +10499,31 @@ fn the_parked_bike_never_gathers_the_train() {
     let cap = Capture::parse(&text).unwrap();
     let original = st.wheel_record();
     assert_eq!(original.len(), 2, "both rays struck in the original");
-    in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, _named, bike, _traffic| {
+    in_the_world_with_cars(&st, "race250p.phy", "250_motoxxx", |world, _named, bike, traffic| {
+        cars_as_toys(world, &traffic);
         let mut sim = acceptance_start(&cap, 0, bike).unwrap();
         let ride = &mut sim.rider.ride;
         st.seed_chassis(ride).unwrap();
         st.seed_wheels(ride).unwrap();
         let rays = game_sim::ride::wheel_rays(&ride.front.w, &ride.rear.w);
         assert_eq!(bits_of_rays(&rays), bits_of_rays(&st.wheel_probe().unwrap()), "the wheel probe");
-        let node = game_sim::rider_contact::node(&ride.transform());
-        let (field, props, trees) = world.wooded();
-        let bounds = field.as_ref().map(|f| {
-            let (lo, hi) = (f.min(), f.max());
-            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
-        });
-        let mut search = game_sim::broad_phase::Search { least: F(30.0), extra: F(50.0), capacity: 256, ..Default::default() };
-        let mut scene = game_sim::flight_search::Scene::wooded(props, trees, None, bounds, &rays, &node, &mut search);
-        let _ = game_sim::contact_search::Search::rays(&mut scene, true);
-        let port = &scene.ray_record().contacts;
+        let at = ride.transform();
+        let node = game_sim::rider_contact::node(&at);
+        let probe = |ride: &mut game_sim::ride::Ride, world: &mut dyn World| {
+            game_sim::ride::nearby_scene(&mut ride.nearby, world, &rays, &node, |scene| {
+                let _ = game_sim::contact_search::Search::rays(scene, true);
+                scene.ray_record().contacts.clone()
+            })
+            .expect("free06 hands its props over")
+        };
+        // A solid bike's list holds the wagons, and its wheel probe meets the wagon's side.
+        let mut solid = ride.clone();
+        solid.gather_nearby(&at, None, world, false);
+        let wagon = probe(&mut solid, world);
+        ride.gather_nearby(&at, None, world, true);
+        let port = &probe(ride, world);
+        let struck = |cs: &[game_sim::ray_probe::Contact]| cs.iter().map(|c| c.object).collect::<Vec<_>>();
+        assert_ne!(struck(&wagon), struck(port), "the wagon in a solid bike's list");
         assert_eq!(port.len(), original.len(), "the wheel probe's contacts at frame 16344");
         for (c, (point, normal, fraction)) in port.iter().zip(&original) {
             println!("ray {}: port {:?} {:?} {:?}, original {point:?} {normal:?} {fraction:?}", c.segment, c.point, c.normal, c.fraction);

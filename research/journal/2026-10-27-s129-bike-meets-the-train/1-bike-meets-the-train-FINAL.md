@@ -69,7 +69,7 @@ Task S129. 2026-10-27.
   144. Source not found.
 - **The parked bike's search is not ported.** The braked replay stands in for it by leaving the cars out
   of the scene. The port's own `ride.rs wheel_hits` still gathers afresh every call over every prop, so a
-  ghost-gathered parked bike in the shell would meet cars the original never does. Filed as S185.
+  ghost-gathered parked bike in the shell would meet cars the original never does. Filed as S185 (landed as S189).
   `bike_search_holds_cars` is a test-side switch, not the original's rule. The distance cut, "a
   candidate only within the wheel probe's reach", is also not ported.
 - **The wheel record at frame 16344 is not bit-exact.** Its points and fractions differ from the port's
