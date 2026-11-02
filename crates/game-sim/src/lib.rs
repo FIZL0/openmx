@@ -319,7 +319,7 @@ impl Sim {
         self.lend_cars();
         self.event_frame(dt);
         if self.plane.is_some() {
-            self.traffic.props.step(dt, &prop_movers, &mut []);
+            self.traffic.props.step_with(dt, &prop_movers, &mut []);
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
             // machine (biplane.p2m2's state). A downed rider's bike and a ghost's are out too. On a

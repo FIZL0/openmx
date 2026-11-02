@@ -343,7 +343,7 @@ impl crate::Sim {
     /// chassis as their frame left it, by player; and after them every player's wreck bike (S197b,
     /// [`crate::prop_wreck`]: a prop's entry on one names it `players + i`), which a prop's impulse
     /// pushes, written back after.
-    pub fn props_step(&mut self, dt: F, movers: &[crate::contact::Mover]) {
+    pub fn props_step(&mut self, dt: F, movers: &crate::prop_set::PropMovers) {
         if self.traffic.props.is_empty() {
             return;
         }
@@ -358,7 +358,7 @@ impl crate::Sim {
             .map(|(collider, v)| Other { collider, side: Side::Vehicle(v) })
             .chain(bodies.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
             .collect();
-        self.traffic.props.step(dt, movers, &mut others);
+        self.traffic.props.step_with(dt, movers, &mut others);
         drop(others);
         drop(bodies);
         let pushed: Vec<_> = sides.iter().zip(wrecks).map(|(s, w)| s.map(|_| w)).collect();

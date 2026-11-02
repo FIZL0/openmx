@@ -489,22 +489,18 @@ impl Traffic {
     /// One tick of every car, in order, and their meshes moved to where they now stand.
     pub fn frame(&mut self, dt: F, world: &mut dyn World) {
         let movers = self.frame_held(dt, world);
-        self.props.step(dt, &movers, &mut []);
+        self.props.step_with(dt, &movers, &mut []);
     }
 
     /// [`Traffic::frame`] with the knockable props' step held back (S197): the toys, the props' collide
     /// pass and the cars. Answers the movers the props' search named, which the caller hands to
-    /// [`crate::prop_set::PropSet::step`] once the riding bikes have struck and pushed the props. The
-    /// props' step reads neither the cars nor the world, so holding it past the cars' step changes
-    /// nothing else.
-    pub fn frame_held(&mut self, dt: F, world: &mut dyn World) -> Vec<crate::contact::Mover> {
+    /// [`crate::prop_set::PropSet::step_with`] once the riding bikes have struck and pushed the props.
+    /// The props' step reads neither the cars nor the world, so holding it past the cars' step changes
+    /// nothing else. Each collection searches the shapes near its bodies (MD58,
+    /// [`crate::prop_set::PropSet::search_in`]).
+    pub fn frame_held(&mut self, dt: F, world: &mut dyn World) -> crate::prop_set::PropMovers {
         self.toys.frame(dt, world);
-        let movers = if self.props.collections.iter().any(|c| c.objects.iter().any(|o| o.filed)) {
-            let (field, props, trees) = world.wooded();
-            self.props.search(dt, field.as_deref(), props, trees)
-        } else {
-            Vec::new()
-        };
+        let movers = self.props.search_in(dt, world);
         if self.cars.is_empty() {
             return movers;
         }
