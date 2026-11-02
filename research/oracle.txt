@@ -5565,6 +5565,16 @@ physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: b
 #     off but the collision object stays filed and searching (10 contacts on truck 0) until the put-away.
 #   - Not seen: the scene walk's order between the world node and the car updates (the port runs the
 #     node first); which of the port's searches call the struck listener.
+# S186a — a riding bike's body rays strike a HasPhysics car (crates/game-sim/src/mover_contact.rs
+#   struck_heard, Sim::car_contacts -> Traffic::strike; Traffic::frame_late; tests/replay.rs S207 ctruck,
+#   S219 rear; journal 2026-11-02-s186-struck-trucks/2). collide_against_search (0x0011a9d0) tells the
+#   struck one's listeners (+0xf4, each its vt+0xc) after the probe's narrow phase (vt+0x94) made the
+#   hit: the car mesh's +0x580 interface vt+0xc is a jump to physics_car_wake (0x003e3dc0), so the
+#   contact is kept and the car wakes after it. Inferred from two captures, not traced: the HasPhysics
+#   car's own update (toy world's list) runs AFTER the bikes in the frame, the path cars' (scene list)
+#   before. With the trucks stepped before the bike the port met them a tick early in both (S219 rear:
+#   port wreck (41,4), original (42,4), the truck frozen at its tick-41 point; S207 ctruck: 35 vs 36);
+#   with them stepped after, both strike on the original's tick and rear wrecks (42,4).
 toy_cars_read         boot 0x00289710 the .toy's [Cars] reader (above)
 # S169 — the .toy's HasPhysics things, and what their collidables name (journal 2026-10-28-s169-physics-props;
 #   tests crates/game-sim/tests/prop_under.rs). On the disc only [CarN] sections carry HasPhysics (free06,

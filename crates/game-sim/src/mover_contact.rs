@@ -47,6 +47,8 @@ struct Strikes<'a> {
     cars: &'a [Prop],
     facets: Vec<Option<Vec<Facet>>>,
     ray: ray_probe::Record,
+    /// The cars the rays struck, in the order the search told their struck listeners (S186a).
+    heard: Vec<usize>,
 }
 
 /// Where the cars start in the search's list: after the bike's four collidables.
@@ -84,7 +86,13 @@ impl Narrow for Strikes<'_> {
 
     fn heard_hit(&mut self, _objects: &mut [Collidable], _listener: usize, _probe: usize, _other: usize) {}
 
-    fn heard_struck(&mut self, _objects: &mut [Collidable], _listener: usize, _struck: usize, _probe: usize) {}
+    /// A car's mesh heard it was struck: its car's struck listener (S186a), which a `HasPhysics` car
+    /// answers by waking ([`crate::traffic::Traffic::strike`]), once the search is done.
+    fn heard_struck(&mut self, _objects: &mut [Collidable], _listener: usize, struck: usize, _probe: usize) {
+        if let Some(k) = struck.checked_sub(CARS) {
+            self.heard.push(k);
+        }
+    }
 
     fn on_hit(&mut self, _objects: &mut [Collidable], _callback: usize, _probe: usize, _other: usize) {}
 
@@ -169,8 +177,14 @@ impl Probe<'_> {
 /// `cars` where they stand. One entry per ray that struck, at most [`CAPACITY`]. `first` is the first
 /// car's index among the world's props, which a contact names its car's mover by (S145).
 pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> Vec<Contact> {
+    struck_heard(col, at, cars, first, dt).0
+}
+
+/// [`struck`], and the cars whose struck listener the search told (S186a): the index of each among
+/// `cars`, once for every hit, in the search's order.
+pub fn struck_heard(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> (Vec<Contact>, Vec<usize>) {
     if cars.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut objects = bike_col::collidables(col, 0).to_vec();
     objects.extend(cars.iter().map(|p| Collidable {
@@ -181,10 +195,13 @@ pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> V
         category: flight_search::SCENERY,
         collides_with: u32::MAX,
         categories: Categories { mode: 1, list: Vec::new() },
+        // The car's struck listener (`+0x580` on a `HasPhysics` car's mesh, S127); a path car's has
+        // none, and the traffic answers it for the cars with a physics object alone.
+        listeners: vec![0],
         ..Collidable::default()
     }));
     let ray = ray_probe::Record { listed: true, capacity: CAPACITY, one_per_ray: true, ..ray_probe::Record::default() };
-    let strikes = Strikes { col, at: *at, cars, facets: vec![None; cars.len()], ray };
+    let strikes = Strikes { col, at: *at, cars, facets: vec![None; cars.len()], ray, heard: Vec::new() };
     let mut probe = Probe { strikes, objects, first };
     let mut records = vec![Record {
         search: true,
@@ -202,7 +219,7 @@ pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> V
     // contact of its own (S137, S216), and the original's record holds no such entry. S191's stand
     // capture has the engine's nose over the head ray's end, inside the mesh too, while the rider
     // rides on for 28 ticks to a head hit of its own rays.
-    records.swap_remove(0).contacts
+    (records.swap_remove(0).contacts, probe.strikes.heard)
 }
 
 /// What of a bike's list the wreck test reads as scenery: its own entries (kind 0) with nothing on
@@ -237,7 +254,13 @@ impl crate::Sim {
     /// Player `i`'s contacts with the traffic's cars this tick ([`struck`]): none for a rider who is
     /// down (the wreck bike's object is not the riding one), a bike the shell gave no collision files,
     /// or a world with no cars in it.
-    pub fn car_contacts(&self, i: usize, world: &mut dyn World, dt: F) -> Vec<Contact> {
+    ///
+    /// Every car the rays struck hears it (S186a): a `HasPhysics` car wakes ([`Traffic::strike`]) once
+    /// the search is done, its contacts kept as the path mesh gave them, as the original's search
+    /// keeps the hit it made before telling the struck one's listeners.
+    ///
+    /// [`Traffic::strike`]: crate::traffic::Traffic::strike
+    pub fn car_contacts(&mut self, i: usize, world: &mut dyn World, dt: F) -> Vec<Contact> {
         let Some(first) = self.traffic.first else { return Vec::new() };
         let r = self.rider_of(i);
         let Some(col) = r.bike_col.as_deref() else { return Vec::new() };
@@ -247,6 +270,12 @@ impl crate::Sim {
         }
         let Some(props) = world.moving() else { return Vec::new() };
         let cars = props.props.get(first..).unwrap_or(&[]);
-        struck(col, &r.ride.transform(), cars, first, dt)
+        let (contacts, heard) = struck_heard(col, &r.ride.transform(), cars, first, dt);
+        for slot in heard {
+            if let Some(k) = self.traffic.car_at(first + slot) {
+                self.traffic.strike(k, dt, world);
+            }
+        }
+        contacts
     }
 }

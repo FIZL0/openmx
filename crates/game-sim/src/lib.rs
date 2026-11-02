@@ -345,6 +345,7 @@ impl Sim {
             // L1+R1 had already put back).
             plane.reset_chord(controls.respawn, &self.tables.ride.acos);
             let (_struck, seam) = plane.frame_seamed(dt, flight::pad(self.input.pad(0)), world, &self.tables.ride, &bikes);
+            self.traffic.frame_late(dt, world);
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };
         }
@@ -372,6 +373,7 @@ impl Sim {
             said
         };
         self.props_step(dt, &prop_movers);
+        self.traffic.frame_late(dt, world);
         let mut said = said;
         said.seam = self.rider.wrap_round(&*world);
         self.ticks += 1;
@@ -468,7 +470,10 @@ impl Sim {
         // On a world that wraps (MD44), each bike against every other's nearest copy.
         let mut lists = self.bike_contacts_in(dt, &*world);
         // And every bike's body rays against the cars (S137), from the same tick's places.
-        let mut cars: Vec<Vec<contact::Contact>> = (0..self.players()).map(|i| self.car_contacts(i, world, dt)).collect();
+        let mut cars: Vec<Vec<contact::Contact>> = Vec::with_capacity(self.players());
+        for i in 0..self.players() {
+            cars.push(self.car_contacts(i, world, dt));
+        }
         for (i, c) in controls.iter().enumerate().rev() {
             // And its body rays against the knockable props (S197a), where the riders walked before
             // it left them: what it strikes is woken, and pushed in its frame.
@@ -513,6 +518,7 @@ impl Sim {
         }
         frames.reverse();
         self.props_step(dt, &prop_movers);
+        self.traffic.frame_late(dt, world);
         // Over a seam (MD29), each rider after every rider has moved.
         for (i, frame) in frames.iter_mut().enumerate() {
             let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };

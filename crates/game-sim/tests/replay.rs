@@ -10184,6 +10184,30 @@ impl SaveState {
         self.traffic_of(&cars, meshes)
     }
 
+    /// The physics objects of [`Self::traffic_with_trucks`]'s cars (S186a): `None` for each path car,
+    /// and each `HasPhysics` car's [`game_sim::physics_car::PhysicsCar`] off its model's `.pco`,
+    /// `.psg`, `m.col` and `f.col` in `files`, at the terrain's `edge`.
+    fn trucks_physics(
+        &self,
+        edge: game_sim::prop_world::Edge,
+        files: impl Fn(&str) -> Option<Vec<u8>>,
+    ) -> Vec<Option<game_sim::physics_car::PhysicsCar>> {
+        use game_sim::physics_car::{PhysicsCar, pco_file};
+        use game_sim::props::{model_file, rays_file, shape_file};
+        let trucks = self.cars_of("physics_car_vtable");
+        let mut physics: Vec<Option<PhysicsCar>> = self.path_cars().iter().map(|_| None).collect();
+        physics.extend(trucks.iter().map(|&car| {
+            let model = self.c_string(car + s129_car::NAME).to_ascii_lowercase();
+            let model = model.rsplit(['\\', '/']).next().unwrap_or(&model).to_string();
+            let stem = model.trim_end_matches(".psg");
+            let pco = files(&pco_file(&model)).unwrap_or_else(|| panic!("no .pco for {model}"));
+            let psg = files(&model_file(stem)).unwrap_or_else(|| panic!("no .psg for {model}"));
+            let car = PhysicsCar::load(&pco, &psg, files(&rays_file(&model)).as_deref(), files(&shape_file(&model)).as_deref(), Some(edge));
+            Some(car.unwrap_or_else(|e| panic!("{model}: {e}")))
+        }));
+        physics
+    }
+
     fn traffic_of(&self, cars: &[u32], meshes: impl Fn(&str) -> Option<Vec<u8>>) -> game_sim::traffic::Traffic {
         use game_sim::traffic::{Car, Spec, Traffic};
         use s129_car as at;
@@ -11483,8 +11507,10 @@ fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
 //   the train comes, which passes it untouched.
 // - **ctruck**: s89-along's state, the bike at 3702.8, 234.6, 3100.2 in the way of the company truck
 //   `.toy` `Car22` (a `HasPhysics` car, S127), which strikes it 36 ticks later. The original's truck
-//   wakes its body and stops dead on the strike; the port's drives on along its path (src/traffic.rs,
-//   "not here"), meets the bike a tick early and pushes it into a wreck the original never has.
+//   wakes its body and stops dead on the strike. The port's (S186a) meets the bike on the same tick
+//   (the truck updates after the bike, `Traffic::frame_late`), is struck by its body rays and wakes:
+//   no wreck in either. The push on tick 36 parts (vel.x 9.53 against the original's 2.97): the
+//   original's bike meets the woken truck's f.col, a body, in the rest of that frame (S251).
 //
 //   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 31 00d525f0 123.5 2447.8 136.5 3991.4 7 3 33
 //   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 31 00d525f0 123.5 2452.8 136.5 3988.1 7 3 34
@@ -11492,7 +11518,8 @@ fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
 //   ./kit pcsx2 with -- ./kit record watch/s129-train.toml --state 33 -n 300 -o context/capture/s207/rails.csv
 //
 // (beside and ctruck the same, slots 34 and 35.) The free06 rides carry the state's two `HasPhysics`
-// trucks after its 21 path cars ([`SaveState::traffic_with_trucks`]).
+// trucks after its 21 path cars ([`SaveState::traffic_with_trucks`]), with their physics objects
+// ([`SaveState::trucks_physics`]).
 // The RAM images are `context/states/s207-<name>.eeMemory.bin` (`./kit state ram <slot> --out …`).
 
 /// S207's rides: the name, the track, the human rider's chain in the image, the `.phy` and the bike
@@ -11503,7 +11530,7 @@ const S207_RIDES: [(&str, &str, &[u32], &str, &str, u64, Option<(u64, u8)>, Opti
     ("truck", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, 105, Some((105, 2)), Some((105, 2))),
     ("rails", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 98, Some((98, 1)), Some((98, 1))),
     ("beside", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", u64::MAX, None, None),
-    ("ctruck", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 35, None, Some((172, 1))),
+    ("ctruck", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 36, None, None),
 ];
 
 /// [`in_the_world_with_cars`] on any track: its props, the state's path cars attached after them, the
@@ -11528,11 +11555,13 @@ fn in_the_track_with_cars<R>(
         }
     }
     let file = |want: &str| parts.iter().find_map(|(bytes, res)| by_suffix(res, want).and_then(|e| res.read(bytes, e).ok()));
-    let mut traffic = st.traffic_with_trucks(|want| file(want));
-    traffic.attach(&mut props);
-    let col = file(&rays_file(MODEL)).zip(file(&shape_file(MODEL))).and_then(|(rays, shape)| BikeCol::load(&rays, &shape).ok());
     let terrain = Terrain::parse(&area.terrain).ok()?;
     let ground = Ground::new(&terrain, &area.scene.terrain);
+    let top = game_sim::contact_search::Heightfield::max(&ground.field());
+    let edge = game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [F(top.x()), F(top.z())] };
+    let mut traffic = st.traffic_with_trucks(|want| file(want)).with_physics(st.trucks_physics(edge, |want| file(want)));
+    traffic.attach(&mut props);
+    let col = file(&rays_file(MODEL)).zip(file(&shape_file(MODEL))).and_then(|(rays, shape)| BikeCol::load(&rays, &shape).ok());
     let tables = Arc::new(RiderTables::build());
     let bike = the_bike_named(&mut disc, &tables, phy).map(|phy| {
         let mounts = the_wheels_of(&mut disc, model).expect("the bike model's tire nodes");
@@ -11685,17 +11714,18 @@ fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
 ///   bike's front runs in under the dump truck's body and the head ray meets it.
 /// - slow: every lane agrees over the whole capture.
 /// - rear: the truck (the port's and the original's) is at the same point to the digit on every tick to
-///   41, and the bike too to 40. On 41 the port's bike is struck by the truck where it stands that tick
-///   and wrecks (4, as the original's); the original's is struck on 42, its truck stopped dead at that
-///   same tick-41 point. The `HasPhysics` truck strikes a tick later than its path point in the
-///   original, as S207's ctruck does (B8); the path cars of flank and trailer strike on the same tick.
+///   41, and the bike every lane to 41. On 42 both bikes are struck by the truck at its tick-41 point
+///   and wreck (4), the truck stopping dead: a `HasPhysics` truck updates after the bikes (S186a,
+///   `Traffic::frame_late`), where the path cars of flank and trailer update before them. The push
+///   parts on 42 (vel.z 15.48 against 24.73): the woken truck's f.col is not in the port's bike frame
+///   (S251).
 /// - trailer: every lane agrees up to the strike on tick 45, where the chassis' velocity parts in the
 ///   third digit (0.985 against 0.989 ft/s across); it stays within a hundredth after, no wreck in either.
 #[allow(clippy::type_complexity)]
 const S219_RIDES: [(&str, &str, &[u32], &str, &str, u64, Option<(u64, u8)>, Option<(u64, u8)>); 4] = [
     ("flank", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 20, Some((20, 6)), Some((20, 6))),
     ("slow", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", u64::MAX, None, None),
-    ("rear", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 41, Some((42, 4)), Some((41, 4))),
+    ("rear", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 42, Some((42, 4)), Some((42, 4))),
     ("trailer", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, 45, None, None),
 ];
 

@@ -729,6 +729,7 @@ impl crate::Sim {
             self.traffic.props.pushed(&b.props);
         }
         self.props_step(dt, &prop_movers);
+        self.traffic.frame_late(dt, world);
         self.ticks += 1;
         said
     }
@@ -983,6 +984,7 @@ impl Sim {
             self.traffic.props.pushed(&b.props);
         }
         self.props_step(dt, &prop_movers);
+        self.traffic.frame_late(dt, world);
         said.seam = self.rider.wrap_round(&*world);
         self.ticks += 1;
         said

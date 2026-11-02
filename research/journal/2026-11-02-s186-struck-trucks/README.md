@@ -9,3 +9,9 @@ puts the truck back on its path `ResetTime` after it comes to rest. `Traffic` dr
 match bit for bit on every frame from the wake to the put-back. Which searches strike a truck is not
 wired yet, and there is no PCSX2 capture; both went to S186a. Details are in the numbered file
 (FINAL).
+
+S186a (file 2): a riding bike's body rays now strike a truck (`Traffic::strike` from
+`Sim::car_contacts`). The `HasPhysics` cars update after the bikes (`Traffic::frame_late`). With
+both, S207's ctruck and S219's rear captures meet the truck on the original's tick, and rear wrecks
+as the original does. The strike tick's push still parts. The f.col's two-way contact is S251, and
+the other searches' strikes are S252.
