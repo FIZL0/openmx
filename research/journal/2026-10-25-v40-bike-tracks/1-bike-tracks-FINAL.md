@@ -141,3 +141,22 @@ draws no tracks in a split.
 
 - Look at the marks beside the original from one pose (free09, a hard launch and a braked stop).
 - Compare `wheel.surface` with the zone byte in a disc or PINE test.
+
+## S222 (2026-11-02): the tape re-ridden at 30 Hz
+
+`research/v40/tape.py` stamped every line 1/60 s (`0x3c888889`) on a 30 Hz schedule, as V70's did
+(S184), so the shell rode it in half the game time: 1.25 s of gas and 1 s of brake, not 2.5 s and 2 s.
+It now stamps `0x3d08850a`. Re-ridden on HEAD 51ea62e4 (`--track free09 --play TAPE --headless
+--frames 195`, defaults gas 75 and steer 200):
+
+| tape | end | at the shot frame 190 |
+|---|---|---|
+| 1/60 s lines (V40's) | 4319, 142, 3455 | 39 mph, in the air off the slope, still going |
+| 30 Hz lines | 4324, 138, 3480 | 2 mph, stopped at the slope's foot |
+
+**The by-eye conclusion changes.** V40's "faint, narrow dark line behind the stopped bike" was behind
+a bike that had not stopped: at frame 190 it was rolling down the slope at 39 mph. On the fixed tape
+the bike does stop, and no mark shows behind it in the shot. Shots at frames 45, 90 and 120 (launch,
+the jump, the brake) show none either. "Faint and thin" next to the original still rests on the old
+shot only. The marks' rules are proved by `tests/tire_tracks.rs`, not by eye. Shots are in
+`context/shots/s222/` (not committed). Journal `2026-11-02-s222-thirty-hz-tapes`.

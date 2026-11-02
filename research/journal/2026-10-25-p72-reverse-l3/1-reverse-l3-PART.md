@@ -119,3 +119,20 @@ through tick 278, was 279"). It is S120, red the same way on bare HEAD 46830197 
 First move: once S120 lands, rerun `./kit done P72 "<msg>"` in a slot with S89's capture, then rename this
 file FINAL. Also filed: S121 (the flat S68 ratchet) and S122 (stock::BIKE ReverseSpeed). P77 owns the
 switches question.
+
+## S222 (2026-11-02): the port tape re-ridden at 30 Hz
+
+`capture/port-tape.py` stamped every line 1/60 s (`0x3c888889`), so the shell rode it at half the game
+time (S184 found the same in V70's tape). It now stamps `0x3d08850a`. Re-ridden on HEAD 51ea62e4 with
+the command in its docstring (`--trace-at 4620,2320,0 … --shot-frame 230 --frames 240`):
+
+| tape | end (frame 240) | the blip's roll | backing speed | at frame 230 |
+|---|---|---|---|---|
+| 1/60 s lines (P72's) | 4620, 135, 2301 | to z 2323 | 14 ft/s (7 ft a 30 lines) | 9 mph, 1.9 s into the back-up |
+| 30 Hz lines | 4620, 135, 2284 | to z 2334 | 14 ft/s (14 ft a 30 lines) | 10 mph, 3.8 s into the back-up |
+
+**The by-eye conclusions stand.** Both shots show the rider with both legs down beside the bike while
+backing up. The settled backing speed is about 13.8 ft/s either way, next to the original's 13.85,
+because a steady speed does not depend on how fast the clock runs. Only the distances double: the blip
+rolls the bike 14 ft forward, not 3, and it backs 50 ft by frame 240, not 22. Journal
+`2026-11-02-s222-thirty-hz-tapes`.
