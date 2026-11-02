@@ -123,8 +123,8 @@ fn entry(res: &Res, bytes: &[u8], suffix: &str) -> Option<Vec<u8>> {
 
 /// The disc's plane with its ray probe, standing where free06's `machine.txt` parks the first
 /// player's (`[Biplane1]`) as the original's placement stands it — its body on the ground query's
-/// answer there raised by the model's bounds ([`flight::bay_spot`]) — which is where a recovered
-/// wreck is put back.
+/// answer there raised by the model's bounds ([`flight::bay_spot`]), its up the ground's normal
+/// there (S205) — which is where a recovered wreck is put back.
 fn the_plane(acos: &game_sim::air::AcosTable) -> Option<Flight> {
     let bytes = psr_member("machine.res")?;
     let res = Res::parse(&bytes).expect("machine.res");
@@ -138,8 +138,8 @@ fn the_plane(acos: &game_sim::air::AcosTable) -> Option<Flight> {
     let lift = flight::spawn_lift(&entry(&res, &bytes, flight::BIPLANE_MODEL).expect("biplane.psg")).expect("biplane.psg's nodes");
     let (terrain, scene, _) = free06()?;
     let terrain = Terrain::parse(&terrain).expect("free06's terrain");
-    let (ground, _) = Ground::new(&terrain, &scene.terrain).ground(Vf::new(at.x(), at.y(), at.z(), 1.0));
-    f.place_body(flight::bay_spot(ground, lift), Vf::new(facing.x(), facing.y(), facing.z(), 0.0), acos);
+    let (ground, up) = Ground::new(&terrain, &scene.terrain).ground(Vf::new(at.x(), at.y(), at.z(), 1.0));
+    f.place_body(flight::bay_spot(ground, lift), Vf::new(facing.x(), facing.y(), facing.z(), 0.0), up, acos);
     f.attitude.flown = true;
     Some(f)
 }

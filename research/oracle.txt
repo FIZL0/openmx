@@ -2991,6 +2991,18 @@ machine_placement boot 0x0020f6e0 "%s%s\machine.txt" [Machines] NumberOfMachines
 #                                 (2304, 138.614, 2281), model origin (2304, 135.114, 2278.5).
 #                                 mxbiplane_reset (0x00355b00) and the chord put the body back there
 #                                 through 0x00351df0 -> 0x0015a030 -> vt +0xe4 on the same three.
+#                                 S205: the normal goes to vehicle_spawn's up untouched (the query's
+#                                 auStack_a40, both branches), and vt +0xe0 stores it raw; the first
+#                                 vt +0xe4 is handed the factory's own copies, every reset the stored
+#                                 three, which physics_object_place squares in place (so the stored nose
+#                                 and up are the squared ones after the first reset). Port:
+#                                 Flight::spawn_up, flight::spawn_axes (proved by game-sim
+#                                 tests/spawn_axes.rs over 10,000 inputs). SetGroundHeight off: the
+#                                 query runs on a copy (x, y, z of the file, w of the factory's), and
+#                                 only the normal is used. Disc: every [Biplane1/2] on free06/07/09/10/
+#                                 11 is on flat ground (normal 0, 0.99999994, 0) and none sets
+#                                 SetGroundHeight; free06's [Machine1] is the one section with it
+#                                 (FALSE). Journal 2026-11-02-s205-biplane-spawn-up.
 freeride_near_machine boot 0x003a8330 the switch trigger, each frame for the HUD's player: for kinds
 #                                     0..5 ("MotocrossVehicle", "Biplane", "Helicopter", "MXBuggy",
 #                                     "MXMonsterTruck", "MXBaja"), unless the kind is locked in the
@@ -5806,6 +5818,11 @@ physics_object_place  boot 0x0015a1b0 vt +0xe4 (wrapper, place, look, up): side 
 #                                    re-crossed, both normalised by rsqrt; start pos/turn, body reset,
 #                                    node pose; physics_object_reset (0x0015a030) calls it on
 #                                    +0x90/+0xa0/+0xb0
+#                                    S205: side = opmsub(opmula(look, up), up, look), up =
+#                                    opmsub(opmula(side, look), look, side) (.xyz: the w lanes are the
+#                                    look's), both rsqrt-normalised and written back through the
+#                                    pointers; pos.w = 1.0; axes_to_quat on them -> sp+128. The nose is
+#                                    kept: a slope along it is taken off the up, one across it rolls it
 physics_object_struck boot 0x0015ad40 like 0x0015acf0: wakes the wrapper through vt +0x124
 # The wrapper's listener (0x0015b2a0, filed at +0x50) counts its own ResetTime down the same way.
 node_bounds_merge     boot 0x001b42a0 (child, &any, lo, hi, parent rows, 1): rows x parent's rigid

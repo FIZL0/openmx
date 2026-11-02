@@ -55,7 +55,7 @@ use crate::ride;
 use crate::rng::Rng;
 use crate::track;
 use crate::world;
-use ps2_float::{Dest, F, Vf};
+use ps2_float::{Dest, F, Vf, vu};
 
 /// The engine's constructor values the file does not set: the rpm the drawn prop turns at, the
 /// power the file's `MaxPower` replaces, and the throttle's idle and top revolutions.
@@ -151,6 +151,11 @@ pub struct Flight {
     /// [`Flight::reset_body`] the body's spot itself, as the original's placement gives one
     /// ([`bay_spot`]).
     pub spawn: (Vf, Vf),
+    /// The spawn's up, the third of the original's spawn transform (S205): the ground's normal under
+    /// a `machine.txt` bay as the original's placement queries it ([`Flight::place_body`]), the
+    /// world's up at the port's own spots. Its reset re-crosses it and the nose against each other
+    /// and keeps the two it made ([`spawn_axes`]).
+    pub spawn_up: Vf,
     /// The terrain's extent, for the map-edge throw; `None` over a world with no terrain, which has
     /// no edge.
     pub area: Option<Area>,
@@ -279,6 +284,7 @@ impl Flight {
                 cn_da: a.cn_da,
                 ..Aero::default()
             },
+            spawn_up: WORLD_UP,
             ..Flight::default()
         };
         let m = &plane.mass_properties;
@@ -401,9 +407,9 @@ impl Flight {
     /// is flown; the modifiers' numbers as [`Flight::put_back`] keeps them. `other` is flying and not
     /// wrecked, so this plane comes out of any wreck it was in.
     pub fn fly_as(&mut self, other: &Flight, beside: F, acos: &AcosTable) {
-        let (throttle, pad, spawn, flown) = (self.surfaces.throttle, self.pad, self.spawn, self.attitude.flown);
+        let (throttle, pad, spawn, spawn_up, flown) = (self.surfaces.throttle, self.pad, self.spawn, self.spawn_up, self.attitude.flown);
         self.put_back(other);
-        (self.surfaces.throttle, self.pad, self.spawn, self.attitude.flown) = (throttle, pad, spawn, flown);
+        (self.surfaces.throttle, self.pad, self.spawn, self.spawn_up, self.attitude.flown) = (throttle, pad, spawn, spawn_up, flown);
         let side = self.measure.matrix.0[0];
         let shift = CLEAR.merge(Dest::XYZ, side.mul(Vf::splat(beside.to_f32())));
         let b = &mut self.body;
@@ -418,9 +424,9 @@ impl Flight {
     /// so it drops until the throttle and the dive give it flying speed. This flight's throttle and
     /// its spawn (where a wreck's recovery puts it back) stay its own.
     pub fn launch(&mut self, origin: Vf, facing: Vf, vel: Vf, acos: &AcosTable) {
-        let (throttle, spawn) = (self.surfaces.throttle, self.spawn);
+        let (throttle, spawn, spawn_up) = (self.surfaces.throttle, self.spawn, self.spawn_up);
         self.reset(origin, facing, acos);
-        (self.surfaces.throttle, self.spawn) = (throttle, spawn);
+        (self.surfaces.throttle, self.spawn, self.spawn_up) = (throttle, spawn, spawn_up);
         self.body.velocity = CLEAR.merge(Dest::XYZ, vel);
         self.remeasure(acos);
     }
@@ -489,29 +495,33 @@ impl Flight {
     /// the first frame's wheels are placed by where it now is. Also where a recovered wreck is put
     /// back: the spawn keeps the body's spot this makes, the origin turned on by the centre of gravity.
     pub fn place(&mut self, origin: Vf, facing: Vf, acos: &AcosTable) {
+        self.spawn_up = WORLD_UP;
         self.spawn = (self.body_at(origin, facing), facing);
-        self.put(acos);
+        self.put(false, acos);
     }
 
     /// [`Flight::place`] with the body's spot given, not the model's: what the original's placement
     /// does with a track's `machine.txt` spot ([`bay_spot`]), the body's centre of gravity put on
-    /// `body` (S164).
-    pub fn place_body(&mut self, body: Vf, facing: Vf, acos: &AcosTable) {
-        self.spawn = (body, facing);
-        self.put(acos);
+    /// `body` (S164), and `up` the ground query's normal there, which tilts the wings to the ground
+    /// across the nose (S205, [`spawn_axes`]).
+    pub fn place_body(&mut self, body: Vf, facing: Vf, up: Vf, acos: &AcosTable) {
+        (self.spawn, self.spawn_up) = ((body, facing), up);
+        self.put(false, acos);
     }
 
     /// The plane unwrecked and put back at a new spawn, its model's origin at `origin` as
     /// [`Flight::place`] stands it: what the original's swap does to the plane it hands the controller
     /// (its unwreck, then its reset), with the throttle and the surfaces at zero.
     pub fn reset(&mut self, origin: Vf, facing: Vf, acos: &AcosTable) {
+        self.spawn_up = WORLD_UP;
         self.spawn = (self.body_at(origin, facing), facing);
         self.unwreck(acos);
     }
 
-    /// [`Flight::reset`] onto the body's spot `body`, as [`Flight::place_body`] stands it.
-    pub fn reset_body(&mut self, body: Vf, facing: Vf, acos: &AcosTable) {
-        self.spawn = (body, facing);
+    /// [`Flight::reset`] onto the body's spot `body` with the ground's normal `up`, as
+    /// [`Flight::place_body`] stands it.
+    pub fn reset_body(&mut self, body: Vf, facing: Vf, up: Vf, acos: &AcosTable) {
+        (self.spawn, self.spawn_up) = ((body, facing), up);
         self.unwreck(acos);
     }
 
@@ -520,7 +530,7 @@ impl Flight {
     /// [`Flight::place`] was handed.
     pub fn spawn_origin(&self) -> Vf {
         let (at, facing) = self.spawn;
-        let q = spawn_turn(at, facing);
+        let q = spawn_turn(facing, self.spawn_up);
         let o = at.merge(Dest::XYZ, at.sub(turn(q, self.body.cofg)));
         Vf::new(o.x(), o.y(), o.z(), 1.0)
     }
@@ -528,7 +538,7 @@ impl Flight {
     /// Where the body goes for the model's origin at `origin` along `facing`: the centre of gravity
     /// turned with the plane and added on.
     fn body_at(&self, origin: Vf, facing: Vf) -> Vf {
-        let q = spawn_turn(origin, facing);
+        let q = spawn_turn(facing, self.spawn_up);
         let at = origin.merge(Dest::XYZ, origin.add(turn(q, self.body.cofg)));
         Vf::new(at.x(), at.y(), at.z(), 1.0)
     }
@@ -563,10 +573,17 @@ impl Flight {
     }
 
     /// The spawn into the body, and the measure after it: the body on the spawn's spot as it is, as
-    /// the original's reset places it (S164), turned along its nose with its wings level.
-    fn put(&mut self, acos: &AcosTable) {
+    /// the original's reset places it (S164), turned along its nose with its wings square to the
+    /// spawn's up ([`spawn_axes`]). `keep`: the nose and the up it made are the spawn's from now on —
+    /// the reset hands the place its spawn transform itself, which it squares in place (S205), where
+    /// the factory's first placement hands it copies.
+    fn put(&mut self, keep: bool, acos: &AcosTable) {
         let (at, facing) = self.spawn;
-        let q = spawn_turn(at, facing);
+        let (facing, up) = spawn_axes(facing, self.spawn_up);
+        if keep {
+            (self.spawn.1, self.spawn_up) = (facing, up);
+        }
+        let q = axes_to_quat(facing, up);
         let b = &mut self.body;
         (b.quat, b.last_quat, b.position, b.last_position) = (q, q, at, at);
         (b.velocity, b.rates, b.force, b.moment) = (CLEAR, CLEAR, CLEAR, CLEAR);
@@ -891,7 +908,7 @@ impl Flight {
         self.gravity = gravity_force(self.gravity_scale, self.mass);
         let s = &mut self.surfaces;
         (s.throttle, s.elevator, s.elevator_command, s.aileron, s.rudder) = (F::ZERO, F::ZERO, F::ZERO, F::ZERO, F::ZERO);
-        self.put(acos);
+        self.put(true, acos);
     }
 
     /// Where the drawn plane is: the model's orientation and origin as the body stood at the start of
@@ -901,9 +918,32 @@ impl Flight {
     }
 }
 
-/// The spawn's orientation: nose along `facing`, wings level under the world's up.
-fn spawn_turn(at: Vf, facing: Vf) -> Vf {
-    mat4_to_quat(&basis(at, facing, Vf::new(0.0, 1.0, 0.0, 0.0), true, false))
+/// The world's up: the spawn's at every spot the port finds itself.
+const WORLD_UP: Vf = Vf([0.0, 1.0, 0.0, 0.0]);
+
+/// The spawn's orientation: nose along `facing`, squared to `up` ([`spawn_axes`]).
+pub fn spawn_turn(facing: Vf, up: Vf) -> Vf {
+    let (facing, up) = spawn_axes(facing, up);
+    axes_to_quat(facing, up)
+}
+
+/// **How the original's place squares a spawn** (S205, the physics object's place): the side is
+/// the nose crossed with the up, the up the side crossed with the nose, and both are normalised by
+/// VU0's reciprocal square root. The nose is kept and the up moves: a bay's ground normal that
+/// leans across the nose rolls the wings onto the slope, one that leans along it is taken off, so
+/// the plane never pitches with the ground. Each cross is the instruction pair with its operands
+/// swapped, and its `w` is the nose's (the `.xyz` writes leave the register's).
+pub fn spawn_axes(facing: Vf, up: Vf) -> (Vf, Vf) {
+    let side = facing.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(facing, up), up, facing));
+    let up = side.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(side, facing), facing, side));
+    let unit = |v: Vf| v.merge(Dest::XYZ, Vf(v.0).mul_q(vu::rsqrt(1.0, vu::dot3(v.0, v.0))));
+    (unit(facing), unit(up))
+}
+
+/// The original's axes to a turn: the matrix of a nose and an up (normalised again, not re-crossed)
+/// into a quaternion.
+fn axes_to_quat(facing: Vf, up: Vf) -> Vf {
+    mat4_to_quat(&basis(Vf::new(0.0, 0.0, 0.0, 1.0), facing, up, false, true))
 }
 
 /// The plane's model in `machine.res` (the factory's livery 0), whose bounds lift a spawn
