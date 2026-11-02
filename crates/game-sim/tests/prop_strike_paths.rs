@@ -220,6 +220,66 @@ fn a_seat_strikes_its_own_props() {
     }
 }
 
+/// [`seats`] with the seats sharing one prop set (S197c, [`game_sim::prop_seats`]): each seat stepped
+/// by [`Sim::step_shared`], the set stepped once after them all.
+fn shared_seats(base: &Sim, col: &Arc<BikeCol>, at: Vf, striker: usize) -> Vec<Sim> {
+    let mut sims: Vec<Sim> = (0..2)
+        .map(|i| {
+            let mut s = base.clone();
+            s.rider = rider(base, col);
+            s.rider.place(if i == striker { at } else { away(at) }, facing());
+            s
+        })
+        .collect();
+    let mut props = game_sim::prop_seats::Shared::take(&mut sims.iter_mut().collect::<Vec<_>>()).expect("two seats on a track with props");
+    let lists = rider_contact::among(&sims, &[true, true], DT).expect("both carry the files");
+    for (i, l) in lists.into_iter().enumerate().rev() {
+        let mut bump = rider_contact::bump_among(&sims, i, l);
+        let on: Vec<(&Rider, bool)> = sims.iter().map(|s| (&s.rider, true)).collect();
+        let rivals = rider_contact::rivals_among(&on, i, &Flat::default());
+        drop(on);
+        sims[i].step_shared(DT, &Controls::default(), &mut Flat::default(), Some(&mut bump), &rivals, &mut props, i);
+        rider_contact::bumped_among(&mut sims, &bump);
+    }
+    props.finish(&mut sims.iter_mut().collect::<Vec<_>>(), DT, &mut Flat::default());
+    sims
+}
+
+/// **A 2p knock** (S197c): two seats sharing one prop set, whichever seat's bike strikes the ball, the
+/// ball is woken in both seats' worlds — seat 0's, which the shell draws, too — its mirror names the
+/// striking seat, and it goes as [`Sim::step_all`]'s session of the same two riders leaves it, bit
+/// for bit. Every seat holds the same set after the tick, and a seat's snapshot carries it.
+#[test]
+fn seats_share_one_prop_set() {
+    let Some((base, col, c, at)) = setup() else { return };
+    for striker in 0..2 {
+        let mut session = base.clone();
+        let r = rider(&session, &col);
+        let p = (*session.phy).clone();
+        session.add_player(p, r);
+        for i in 0..2 {
+            let spot = if i == striker { at } else { away(at) };
+            let r = if i == 0 { &mut session.rider } else { &mut session.others[0].rider };
+            r.place(spot, facing());
+        }
+        session.step_all(DT, &[Controls::default(); 2], &mut Flat::default());
+        let want = ball(&session, c);
+        assert!(want.0 && want.1.iter().all(|&o| o == Some(striker)), "step_all: player {} knocks the ball", striker + 1);
+
+        let sims = shared_seats(&base, &col, at, striker);
+        for (k, sim) in sims.iter().enumerate() {
+            let (woken, mirrors, body) = ball(sim, c);
+            assert!(woken, "seat {} strikes: the ball woken in seat {}'s world", striker + 1, k + 1);
+            assert_eq!(mirrors, want.1, "seat {} strikes: seat {}'s mirror names the striking seat", striker + 1, k + 1);
+            assert_eq!(body, want.2, "seat {} strikes: seat {}'s ball as step_all leaves it", striker + 1, k + 1);
+        }
+        let bytes = game_sim::snapshot::encode(&sims[1]);
+        let mut back = base.clone();
+        game_sim::snapshot::decode(&mut back, &bytes).expect("seat 2's state decodes");
+        assert_eq!(ball(&back, c), ball(&sims[0], c), "seat 2's snapshot carries the shared ball");
+    }
+}
+
 /// [`Sim::step_among`] alone but for a rival far off (no bump: its own list is built for the strike).
 #[test]
 fn a_seat_with_only_rivals_strikes() {

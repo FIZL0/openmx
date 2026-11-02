@@ -1450,7 +1450,10 @@ impl Garage {
             }
             // The bike's ghost ticks inside its update (`Rider::frame`), so a bike the plane has the
             // controller from does not count its ghost down either.
-            _ => sim.step_among(dt, controls, world, among.bump, among.rivals),
+            _ => match among.props {
+                Some((props, seat)) => sim.step_shared(dt, controls, world, among.bump, among.rivals, props, seat),
+                None => sim.step_among(dt, controls, world, among.bump, among.rivals),
+            },
         }
     }
 }
@@ -1466,6 +1469,9 @@ pub struct Among<'a> {
     pub bikes: &'a [game_sim::flight_search::Bike],
     /// The bikes that struck its plane's hull this tick (N22a): their mirrors and chassis.
     pub met: Option<&'a mut flight::Met>,
+    /// The seats' one prop set and this seat's place among them (S197c, [`game_sim::prop_seats`]):
+    /// its bike strikes the set the others do.
+    pub props: Option<(&'a mut game_sim::prop_seats::Shared, usize)>,
 }
 
 /// **The switch online** (N17): a seat's machine is a rollback input, and its plane is session state.

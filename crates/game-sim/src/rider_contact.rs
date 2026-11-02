@@ -758,6 +758,12 @@ pub fn among_in(sims: &[Sim], seated: &[bool], dt: F, world: &dyn World) -> Opti
     contacts_of(&riders, dt, &|from, at| crate::nearest_copy(world, from, at))
 }
 
+/// `riders`' bodies as they stand, `me`'s contacts: what the seats' shared props step strikes
+/// (S197c, [`crate::prop_seats`]), as [`crate::Sim::bump`] is for one Sim's.
+pub(crate) fn bump_here(riders: &[(&Rider, &Phy)], me: usize, contacts: Vec<Contact>) -> Bump {
+    bump_of(riders, me, contacts, &here)
+}
+
 /// Seat `me`'s contacts, for [`Sim::step_bumped`].
 pub fn bump_among(sims: &[Sim], me: usize, contacts: Vec<Contact>) -> Bump {
     let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
@@ -949,16 +955,55 @@ impl Sim {
         bump: Option<&mut Bump>,
         rivals: &[crate::ride::Rival],
     ) -> Frame {
-        if (bump.is_none() && rivals.is_empty()) || !self.others.is_empty() || self.plane.is_some() {
+        self.step_seat(dt, controls, world, bump, rivals, None)
+    }
+
+    /// [`Sim::step_among`] for seat `seat` of seats that share one prop set (S197c,
+    /// [`crate::prop_seats`]): the set is lent to this Sim for its bike's strike and frame, the strike's
+    /// mirrors naming it by its seat, and the props' collide pass (the first seat stepped runs it) and
+    /// step are the set's, once a tick ([`crate::prop_seats::Shared::finish`]). Alone it still strikes
+    /// the shared set. On the plane it is [`Sim::step`], the set untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_shared(
+        &mut self,
+        dt: F,
+        controls: &Controls,
+        world: &mut dyn World,
+        bump: Option<&mut Bump>,
+        rivals: &[crate::ride::Rival],
+        shared: &mut crate::prop_seats::Shared,
+        seat: usize,
+    ) -> Frame {
+        self.step_seat(dt, controls, world, bump, rivals, Some((shared, seat)))
+    }
+
+    fn step_seat(
+        &mut self,
+        dt: F,
+        controls: &Controls,
+        world: &mut dyn World,
+        bump: Option<&mut Bump>,
+        rivals: &[crate::ride::Rival],
+        mut shared: Option<(&mut crate::prop_seats::Shared, usize)>,
+    ) -> Frame {
+        let alone = bump.is_none() && rivals.is_empty() && shared.is_none();
+        if alone || !self.others.is_empty() || self.plane.is_some() {
             return self.step(dt, controls, world);
         }
         // The props' step waits for the bike's strike and push (S197a, [`crate::prop_contact`]).
-        let prop_movers = self.traffic.frame_held(dt, world);
+        // Shared, the first seat stepped this tick runs their collide pass, in its traffic's place.
+        let prop_movers = match shared.as_mut() {
+            Some((s, _)) => s.held(self, dt, world),
+            None => self.traffic.frame_held(dt, world),
+        };
         self.lend_cars();
         self.event_frame(dt);
         let cars = self.car_contacts(0, world, dt);
         let players = bump.as_deref().map_or(1, |b| b.vehicles.len() + b.planes.len());
-        let strike = self.prop_strike_seated(players, dt);
+        let strike = match shared.as_ref() {
+            Some((_, seat)) => self.prop_strike_shared(*seat, players, dt),
+            None => self.prop_strike_seated(players, dt),
+        };
         let mut own;
         let bump = match bump {
             Some(b) => {
@@ -975,13 +1020,20 @@ impl Sim {
         if let Some(b) = bump.as_deref_mut() {
             self.strike_into(b, strike);
         }
-        self.wreck_strike(0);
+        match shared.as_ref() {
+            Some((s, seat)) => self.wreck_strike_as(0, s.seats() + seat),
+            None => self.wreck_strike(0),
+        }
         // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
         self.lend_props(0);
         let mut said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, rivals, bump.as_deref_mut());
         self.props_back(0);
         if let Some(b) = bump.as_deref() {
             self.traffic.props.pushed(&b.props);
+        }
+        // Shared, the set goes back out before the props' step, which is the set's.
+        if let Some((s, _)) = shared.as_mut() {
+            s.back(self);
         }
         self.props_step(dt, &prop_movers);
         self.traffic.frame_late(dt, world);

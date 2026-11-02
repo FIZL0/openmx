@@ -34,7 +34,8 @@
 //! riders, each just before its own frame in the walk's order (the last player first), the props'
 //! step after them all with every player's chassis as a striker; and a seat's one-player Sim
 //! ([`crate::Sim::step_bumped`], [`crate::Sim::step_among`]: online and split screen), whose props are
-//! its own copy, struck by its own bike ([`crate::Sim::prop_strike_seated`]).
+//! its own copy, struck by its own bike ([`crate::Sim::prop_strike_seated`]) — unless the seats share one
+//! set (S197c, [`crate::prop_seats`]), as the shell's and online's seats do.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -319,6 +320,13 @@ impl crate::Sim {
     /// struck by its own bike only, as its cars are.
     pub fn prop_strike_seated(&self, players: usize, dt: F) -> Strike {
         self.prop_strike_by(0, 0, players, dt)
+    }
+
+    /// A one-player Sim's bike as seat `me` of the seats' shared props (S197c, [`crate::prop_seats`]):
+    /// its mirrors name it by its seat, the striker the shared step reads it as, and its entries'
+    /// bodies come after the `first` vehicles of its bump.
+    pub(crate) fn prop_strike_shared(&self, me: usize, first: usize, dt: F) -> Strike {
+        self.prop_strike_by(0, me, first, dt)
     }
 
     /// Player `i`'s strike, its mirrors naming striker `me` and its entries' bodies from `first`.
