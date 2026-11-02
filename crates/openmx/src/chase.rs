@@ -85,7 +85,7 @@ pub fn heli(h: &crate::vehicle::Heli) -> Ridden {
             vel: one(h.ride.body.velocity),
             lean: F(m.world_rates.y()),
         },
-        airborne: !h.touching,
+        airborne: !h.touching(),
         speed: m.speed,
     }
 }

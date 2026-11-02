@@ -4043,7 +4043,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // And the helicopter's (P216): `kiowa.phy`, which every player's garage flies a copy of.
     lot.kiowa = machine_res.as_ref().and_then(|res| {
         let bytes = res.read(&res.find_suffix(game_sim::kiowa::KIOWA_PHY)?.name).ok()?;
-        Some(vehicle::KiowaRide::new(&bytes, 0, None))
+        let heli = vehicle::KiowaRide::new(&bytes, 0, None);
+        // And its collision object's ray probe (P216a), what it stands on the ground and strikes
+        // the world with.
+        Some(match res.find_suffix(game_sim::kiowa::KIOWA_RAYS).and_then(|e| res.read(&e.name).ok()) {
+            Some(col) => heli.with_rays(&col),
+            None => heli,
+        })
     });
     // What it reads its own (P127): it outlives the load's thread.
     let flight_for = {
