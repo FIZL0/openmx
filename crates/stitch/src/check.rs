@@ -52,6 +52,10 @@ pub struct Report {
     pub world_seam_points: usize,
     pub world_seam_height: f64,
     pub world_seam_slope: f64,
+    /// A world that wraps (C12): join samples on its near edge checked against the far edge's on each
+    /// wrapped axis, and the worst height step between them.
+    pub wrap_points: usize,
+    pub wrap_height: f64,
 }
 
 impl Report {
@@ -533,6 +537,7 @@ pub fn check(dir: &Path, mods: Option<&Path>) -> Report {
             }
         }
     }
+    wrap_seams(&meta, &joins, &shared, &mut r);
     // A failure list of thousands helps nobody: keep the first of each kind.
     if r.fail.len() > 50 {
         let n = r.fail.len();
@@ -540,6 +545,53 @@ pub fn check(dir: &Path, mods: Option<&Path>) -> Report {
         r.fail.push(format!("... {} more", n - 50));
     }
     r
+}
+
+/// A wrapped world's seams (C12): on each axis mod.json's `wrap` names, every join sample on the near
+/// edge (0) is the same height, to both joins' quanta, as the sample at the same place on the far edge
+/// (the joins' farthest sample line), so the port's seam strip runs between equal ground. `shared` is
+/// the joins' edge samples by world position in hundredths of a foot, as the joins check keys them.
+fn wrap_seams(meta: &Json, joins: &[Join], shared: &HashMap<(i64, i64), (usize, f64)>, r: &mut Report) {
+    let wrap = meta.get("wrap").and_then(Json::str).unwrap_or("");
+    let far = [0, 1].map(|a| joins.iter().map(|j| j.rect()[a + 2]).fold(0.0, f64::max));
+    for axis in 0..2 {
+        if !wrap.contains(["x", "z"][axis]) {
+            continue;
+        }
+        let end = (far[axis] * 100.0).round() as i64;
+        let (mut points, mut missing) = (0, 0);
+        for (key, &(ji, v)) in shared {
+            let k = [key.0, key.1];
+            if k[axis] != 0 {
+                continue;
+            }
+            let mut o = k;
+            o[axis] = end;
+            let Some(&(oi, ov)) = shared.get(&(o[0], o[1])) else {
+                missing += 1;
+                continue;
+            };
+            points += 1;
+            let dh = (ov - v).abs();
+            r.wrap_height = r.wrap_height.max(dh);
+            if dh > joins[ji].quantum + joins[oi].quantum + 1e-4 {
+                r.fail.push(format!(
+                    "wrap {}: ({:.2}, {:.2}) is {v:.4} ft in {} and {ov:.4} ft a world on in {}",
+                    ["x", "z"][axis],
+                    k[0] as f64 / 100.0,
+                    k[1] as f64 / 100.0,
+                    joins[ji].name,
+                    joins[oi].name
+                ));
+            }
+        }
+        r.wrap_points += points;
+        if points == 0 {
+            r.fail.push(format!("wrap {}: no join sample on the near edge has one on the far edge ({} ft)", ["x", "z"][axis], far[axis]));
+        } else if missing > 0 {
+            r.note.push(format!("wrap {}: {missing} near-edge samples have none on the far edge (a collar's or a tile's line)", ["x", "z"][axis]));
+        }
+    }
 }
 
 /// Who rides a world point: a tile inside its `keep` (`Ok`), else the first join covering it (`Err`).

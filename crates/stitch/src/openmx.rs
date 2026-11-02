@@ -42,6 +42,9 @@ pub struct World {
     /// Tiles, then joins, in the file's order.
     pub pieces: Vec<Piece>,
     pub tile_count: usize,
+    /// mod.json's `wrap`, `[x, z]` (openmx's `wrap_switch`, of its spellings only `"x"`, `"z"` and
+    /// `"xz"`, which stitch writes).
+    pub wrap: [bool; 2],
 }
 
 /// The one `.scn` of a tile folder, as openmx's `scene_of`.
@@ -144,7 +147,12 @@ pub fn load(dir: &Path) -> Result<World, String> {
         tile.keep = tile.every_cell();
         pieces.push(Piece { tile, dir: folder, scene: None, terrain: name });
     }
-    Ok(World { id, dir: dir.to_path_buf(), pieces, tile_count })
+    let wrap = match json.get("wrap").and_then(Json::str) {
+        None => [false, false],
+        Some(w @ ("x" | "z" | "xz")) => [w.contains('x'), w.contains('z')],
+        Some(w) => return Err(format!("wrap \"{w}\" is not \"x\", \"z\" or \"xz\"")),
+    };
+    Ok(World { id, dir: dir.to_path_buf(), pieces, tile_count, wrap })
 }
 
 /// The pieces' terrains off their folders, as openmx's `Files` source (without the shapes: the
@@ -153,12 +161,31 @@ struct Files(Vec<Piece>);
 
 impl Source for Files {
     fn load(&mut self, i: usize) -> Result<SimPiece, String> {
-        let p = self.0.get(i).ok_or("no such piece")?;
-        let terrain = match &p.scene {
-            None => join_terrain(&p.dir, &p.terrain)?,
-            Some(_) => terrain_bytes(&Res::folder(&p.dir)?, &p.terrain)?,
+        if let Some(p) = self.0.get(i) {
+            return piece_terrain(p).map(|terrain| SimPiece { terrain, shapes: Vec::new() });
+        }
+        Err("no such piece".into())
+    }
+}
+
+/// The folders' pieces, then the seam joins made in memory ([`World::closed`]).
+struct Closed(Vec<Piece>, Vec<Vec<u8>>);
+
+impl Source for Closed {
+    fn load(&mut self, i: usize) -> Result<SimPiece, String> {
+        let terrain = match self.0.get(i) {
+            Some(p) => piece_terrain(p)?,
+            None => self.1.get(i - self.0.len()).ok_or("no such piece")?.clone(),
         };
         Ok(SimPiece { terrain, shapes: Vec::new() })
+    }
+}
+
+/// A piece's terrain file off its folder.
+fn piece_terrain(p: &Piece) -> Result<Vec<u8>, String> {
+    match &p.scene {
+        None => join_terrain(&p.dir, &p.terrain),
+        Some(_) => terrain_bytes(&Res::folder(&p.dir)?, &p.terrain),
     }
 }
 
@@ -166,6 +193,47 @@ impl World {
     /// game-sim's world over the pieces, as `WorldMod::tiled` makes it.
     pub fn tiled(&self) -> Result<Tiled, String> {
         Tiled::new(self.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(Files(self.pieces.clone())), Reach::DESKTOP)
+    }
+
+    /// game-sim's world as openmx rides a world whose mod.json wraps (MD29, `WorldMod::close_seams` and
+    /// `tiled`): on each wrapped axis game-sim's seam joins past the far edge, made from the ground
+    /// along the world's edges, and the world wrapped. openmx's steps repeated on the same functions:
+    /// the seams' spacing is the coarsest whole spacing of the pieces that divides each wrapped side
+    /// (its whole feet), or a foot; an edge's ground is asked just inside it, then in toward the middle
+    /// a sixteenth of a cell a step past a hole. The open world for one that does not wrap. Also gives
+    /// the seam joins' count and spacing.
+    pub fn closed(&self) -> Result<(Tiled, usize, u32), String> {
+        use game_sim::tiles::generate;
+        if self.wrap == [false, false] {
+            return Ok((self.tiled()?, 0, 0));
+        }
+        let open = self.tiled()?;
+        let extent = open.extent().map(|v| v.0);
+        let whole = extent.map(|v| v as u32);
+        let mut spacings: Vec<u32> = self.pieces.iter().map(|p| p.tile.spacing.0).filter(|s| s.fract() == 0.0 && *s >= 1.0).map(|s| s as u32).collect();
+        spacings.sort_unstable_by(|a, b| b.cmp(a));
+        let spacing = spacings.into_iter().find(|s| (0..2).all(|a| !self.wrap[a] || whole[a] % s == 0)).unwrap_or(1);
+        let ground = |x: f64, z: f64| {
+            let (x, z) = ((x as f32).clamp(0.0, extent[0] - 0.01), (z as f32).clamp(0.0, extent[1] - 0.01));
+            for k in 0..=16u8 {
+                let t = f32::from(k) * spacing as f32 / 16.0;
+                let step = |v: f32, e: f32| if v < e / 2.0 { v + t } else { v - t };
+                if let Some(h) = open.at(F(step(x, extent[0])), F(step(z, extent[1]))) {
+                    return (f64::from(h.y.0), h.surface);
+                }
+            }
+            (0.0, 0)
+        };
+        let joins = generate::seam_joins(whole, self.wrap, spacing, &ground)?;
+        let n = joins.len();
+        let mut tiles: Vec<Tile> = self.pieces.iter().map(|p| p.tile.clone()).collect();
+        let mut made = Vec::new();
+        for (tile, bytes) in joins {
+            tiles.push(tile);
+            made.push(bytes);
+        }
+        let tiled = Tiled::new(tiles, Box::new(Closed(self.pieces.clone(), made)), Reach::DESKTOP)?.wrapped(self.wrap)?;
+        Ok((tiled, n, spacing))
     }
 
     /// The piece named `name`.
@@ -460,4 +528,42 @@ pub fn strips(world: &World, tiled: &Tiled, step: f32) -> (usize, usize, Vec<Str
         line([x0, z1 + e], [x1, z1 + e]);
     }
     (asked, none, first)
+}
+
+/// Across each wrap seam of a closed world ([`World::closed`]), half a foot a step on lines 40 ft
+/// apart: from 60 ft short of the far edge, over openmx's seam strip (`strip` feet) and 60 ft into the
+/// near edge's ground past the wrap. Returns the points asked, those with no ground, and the largest
+/// height change in one step, with where it was.
+pub fn across_seams(t: &Tiled, strip: f32) -> (usize, usize, f32, [f32; 2]) {
+    let ext = t.extent().map(|v| v.0);
+    let (mut asked, mut none, mut worst, mut at) = (0, 0, 0.0f32, [0.0; 2]);
+    for axis in (0..2).filter(|&a| t.wraps()[a]) {
+        let start = ext[axis] - strip - 60.0;
+        let mut along = 2.0;
+        while along < ext[1 - axis] {
+            let mut last: Option<f32> = None;
+            for k in 0..=((strip + 120.0) * 2.0) as u32 {
+                let a = start + k as f32 * 0.5;
+                let (x, z) = if axis == 0 { (a, along) } else { (along, a) };
+                asked += 1;
+                match t.at(F(x), F(z)) {
+                    None => {
+                        none += 1;
+                        last = None;
+                    }
+                    Some(h) => {
+                        if let Some(l) = last
+                            && (h.y.0 - l).abs() > worst
+                        {
+                            worst = (h.y.0 - l).abs();
+                            at = [x, z];
+                        }
+                        last = Some(h.y.0);
+                    }
+                }
+            }
+            along += 40.0;
+        }
+    }
+    (asked, none, worst, at)
 }
