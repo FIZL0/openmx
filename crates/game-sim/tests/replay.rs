@@ -6174,7 +6174,12 @@ fn nearest_opponent(
 // agrees through tick 691 and parts at 692, the plane's first crash, on `engine.power`. Over the port's own ground ([`Ground::at`], one ulp low under
 // the plane) it parts at tick 1; the run prints both. P187: the original's wreck zeroes the engine's
 // note, not its power; with that, both grounds agree through tick 774 and part at 775 on the body's
-// position, the port's plane already back at its spawn.
+// position: the original's plane already back at its spawn, the human's L1+R1 put it there. S193:
+// [`Sim::step`] ran no chord on a plane (only the shell's did), the fixture had no spawn (now the
+// state's, [`off_the_save_state`]), and the chord leaves the wreck's measure for the first frame back
+// with the aero's true speed on from the body's contacts ([`Flight::reset_chord`](game_sim::flight::Flight::reset_chord)).
+// Both grounds then agree through tick 1526, the second crash, and part at 1527, its first wrecked
+// frame, on the body.
 
 /// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
 const BIPLANE_ACCEPTANCE: &str = "biplane";
@@ -6182,8 +6187,9 @@ const BIPLANE_ACCEPTANCE: &str = "biplane";
 /// **The last tick of the biplane recording the port is known to agree with the original on.** The
 /// same contract as [`ACCEPTANCE_AGREES_THROUGH`]: further prints a line asking for it to be raised,
 /// short of it fails. Tick 0 is the start state: the capture's second row, over the save state stepped
-/// to it. 774 is the last before the chord's respawn parts it (P187; S104 left it at 691, the first crash, on `engine.power`).
-const BIPLANE_AGREES_THROUGH: u64 = 774;
+/// to it. 1526 is the second crash, the frame before its first wrecked frame parts the body (S193;
+/// P187 left it at 774, the chord's respawn, and S104 at 691, the first crash, on `engine.power`).
+const BIPLANE_AGREES_THROUGH: u64 = 1526;
 
 /// The container of the area the plane was flown over. Not found by [`recorded_on`]: that fits a
 /// *bike's* rows, and a plane's minute is mostly air. Named instead, and checked against the plane's own
@@ -6565,6 +6571,9 @@ mod plane_at {
     pub const TIRES: [u32; 3] = [0x408, 0x40c, 0x410];
     pub const ENGINE_CLOCK: u32 = 0x74;
     pub const ENGINE_PROP_ANGLE: u32 = 0x48;
+    /// The spawn its reset and its chord put the body back on (S193): the body's spot, then the
+    /// facing (research/oracle.txt mxbiplane_reset, machine_placement).
+    pub const SPAWN: u32 = 0xe10;
     /// The world a tire asks its ground query of.
     pub const TIRE_WORLD: u32 = 0x134;
 }
@@ -6760,6 +6769,9 @@ fn off_the_save_state(f: &mut game_sim::flight::Flight, ee: &ps2_oracle::Ee) -> 
         tire.frame = [0x190, 0x1a0, 0x1b0].map(|o| quad(t + o));
     }
     f.engine.clock = word(e + plane_at::ENGINE_CLOCK);
+    // Where a respawn puts it (S193): free06's [Biplane1] as the placement stood it, body (2304,
+    // 138.614, 2281) facing -z. Without it the fixture's plane went back to the origin.
+    f.spawn = (quad(BIPLANE_PLANE + plane_at::SPAWN), quad(BIPLANE_PLANE + plane_at::SPAWN + 0x10));
     let table = |name: &str| ps2_oracle::addr(name).map_err(|why| format!("{name}: {why}"));
     let (perm, g1) = (table("smooth_noise_perm")?, table("smooth_noise_g1")?);
     if ee.u32_at(table("smooth_noise_unbuilt")?) != 0 {
