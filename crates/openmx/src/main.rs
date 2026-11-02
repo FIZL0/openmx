@@ -5658,6 +5658,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The render scale (V30): as asked, or picked from the frames' time against the display's refresh.
     let refresh = window.as_mut().and_then(|w| w.gpu()).and_then(|w| w.refresh).unwrap_or(60.0);
     let mut auto_scale = game_render::gpu::AutoScale::new(Duration::from_secs_f32(0.8 / refresh));
+    // When the last window draw began and how long it waited on the surface: the frame since, less
+    // that, is its CPU part, for where the GPU cannot time itself (V122).
+    let mut scale_frame_at: Option<(Instant, Duration)> = None;
     // The settings' row changes it mid-ride (V34), unless `--render-scale` was given.
     let mut render_scale = args.render_scale;
     // The Auto preset (P223): the ride's first seconds timed against the display's rate (the page's
@@ -8836,9 +8839,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let spent = Instant::now();
                     let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
                     waited = w.waited;
+                    // Judged on the GPU's own time where it has timestamps (V122); without, on the
+                    // draw's wall time, leaving out frames the CPU made late.
+                    let gpu_times = w.renderer.gpu_times();
+                    let cpu = scale_frame_at.map_or(Duration::ZERO, |(t, w)| spent.duration_since(t).saturating_sub(w));
+                    scale_frame_at = Some((spent, waited));
                     if render_scale.is_none() {
                         let was = w.renderer.render_scale;
-                        w.renderer.render_scale = auto_scale.frame(spent.elapsed());
+                        w.renderer.render_scale = match w.renderer.timed() {
+                            true => gpu_times.iter().fold(was, |_, &(t, at)| auto_scale.gpu(t, at)),
+                            false => auto_scale.frame(cpu, spent.elapsed()),
+                        };
                         if w.renderer.render_scale != was {
                             println!("render scale: {} (auto)", w.renderer.render_scale);
                         }

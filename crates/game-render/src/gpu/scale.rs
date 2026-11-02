@@ -36,27 +36,54 @@ pub fn scaled(size: (u32, u32), scale: f32) -> (u32, u32) {
 
 /// The render scale picked from the frames' time: down when the GPU's part of a frame overruns its
 /// budget, up again when it has room to spare. The GPU's cost goes with the pixels, the square of the
-/// scale, so one step down is sized to land under the budget, and steps up are one sixteenth at a
-/// time so it does not overshoot and bounce.
+/// scale, so one step down is sized to land under the budget, and a step up is taken, a sixteenth at
+/// a time, only when the next sixteenth's pixels would still fit with room, so it does not bounce.
+///
+/// Judged on the GPU's own time where the adapter has timestamps ([`AutoScale::gpu`], V122). Without
+/// them ([`AutoScale::frame`]) the draw's wall time stands in, which takes in the wait for the
+/// surface: a frame whose CPU part ran past the budget says nothing about the GPU and is left out,
+/// with the one after it, which takes up the queue's backlog. Under VSync that wait is mostly the
+/// display's, so there it seldom finds the room to climb.
 #[derive(Clone, Debug)]
 pub struct AutoScale {
     pub scale: f32,
     budget: Duration,
     sum: Duration,
     frames: u32,
+    /// The last untimed frame's CPU part overran: the next is left out too.
+    late: bool,
 }
 
 /// How many frames make one judgement.
 const WINDOW: u32 = 30;
+/// How full of the budget the next sixteenth up has to leave the GPU to be taken.
+const CLIMB: f32 = 0.85;
 
 impl AutoScale {
     /// A scale that aims to keep the GPU's part of a frame under `budget` (a refresh, say).
     pub fn new(budget: Duration) -> AutoScale {
-        AutoScale { scale: 1.0, budget, sum: Duration::ZERO, frames: 0 }
+        AutoScale { scale: 1.0, budget, sum: Duration::ZERO, frames: 0, late: false }
     }
 
-    /// One frame's GPU time (the draw and the wait for the surface); the scale to draw the next at.
-    pub fn frame(&mut self, spent: Duration) -> f32 {
+    /// One frame's GPU time, timed on the GPU, and the scale it was drawn at (a frame or few back,
+    /// so maybe not this one's); the scale to draw the next at.
+    pub fn gpu(&mut self, spent: Duration, drawn_at: f32) -> f32 {
+        // Read as this scale's pixels would have cost.
+        let k = self.scale / drawn_at.max(MIN_SCALE);
+        self.judge(spent.mul_f32(k * k))
+    }
+
+    /// One frame without GPU timestamps: its CPU part (the frame less the waits for the surface) and
+    /// the draw's wall time (the draw and the wait for the surface); the scale to draw the next at.
+    pub fn frame(&mut self, cpu: Duration, spent: Duration) -> f32 {
+        let late = std::mem::replace(&mut self.late, cpu > self.budget);
+        if late || self.late {
+            return self.scale;
+        }
+        self.judge(spent)
+    }
+
+    fn judge(&mut self, spent: Duration) -> f32 {
         self.sum += spent;
         self.frames += 1;
         if self.frames < WINDOW {
@@ -69,8 +96,11 @@ impl AutoScale {
             // To the scale whose pixels fit the budget, a little under.
             let to = self.scale * (budget / mean).sqrt() * 0.95;
             self.scale = quantise(to.min(self.scale - STEP)).max(AUTO_MIN);
-        } else if mean < budget * 0.5 && self.scale < 1.0 {
-            self.scale = quantise(self.scale + STEP);
+        } else if self.scale < 1.0 {
+            let up = quantise(self.scale + STEP);
+            if mean * (up / self.scale).powi(2) < budget * CLIMB {
+                self.scale = up;
+            }
         }
         self.scale
     }
@@ -248,30 +278,87 @@ mod tests {
         let mut auto = AutoScale::new(budget);
         // A GPU four times over the budget at full size: one judgement takes it to about half.
         for _ in 0..WINDOW {
-            auto.frame(budget * 4);
+            auto.gpu(budget * 4, 1.0);
         }
         assert_eq!(auto.scale, AUTO_MIN);
         // Just over: one step down at least, and never below the floor.
         let mut auto = AutoScale::new(budget);
         for _ in 0..WINDOW {
-            auto.frame(budget.mul_f32(1.1));
+            auto.gpu(budget.mul_f32(1.1), 1.0);
         }
         assert!(auto.scale < 1.0 && auto.scale >= 0.875, "{}", auto.scale);
         // Plenty of room: back up a sixteenth a judgement until whole.
         let was = auto.scale;
         for _ in 0..WINDOW {
-            auto.frame(budget / 4);
+            auto.gpu(budget / 4, auto.scale);
         }
         assert_eq!(auto.scale, was + STEP);
         for _ in 0..WINDOW * 16 {
-            auto.frame(budget / 4);
+            auto.gpu(budget / 4, auto.scale);
         }
         assert_eq!(auto.scale, 1.0);
         // In between it stays put.
         let mut auto = AutoScale::new(budget);
         for _ in 0..WINDOW * 4 {
-            auto.frame(budget.mul_f32(0.7));
+            auto.gpu(budget.mul_f32(0.7), 1.0);
         }
         assert_eq!(auto.scale, 1.0);
+    }
+
+    /// V122: the Steam Deck's split screen at 90 Hz, where the CPU's simulation spikes made frames
+    /// late while the GPU had room, and the scale fell to half and stayed there.
+    #[test]
+    fn late_cpu_frames_do_not_drop_the_scale_and_a_light_gpu_climbs_back() {
+        let refresh = Duration::from_secs_f32(1.0 / 90.0);
+        let budget = refresh.mul_f32(0.8);
+        // Untimed: frames whose simulation took 17-60 ms, their draws' wall times as long (the
+        // surface's queue backed up behind them), and between them frames at refresh.
+        let mut auto = AutoScale::new(budget);
+        for i in 0..WINDOW * 8 {
+            let (cpu, spent) = match i % 3 {
+                0 => (Duration::from_millis(17 + (i as u64 * 7) % 44), Duration::from_millis(20)),
+                // The one after a late frame takes up its backlog.
+                1 => (Duration::from_millis(3), Duration::from_millis(25)),
+                _ => (Duration::from_millis(3), Duration::from_millis(6)),
+            };
+            auto.frame(cpu, spent);
+        }
+        assert_eq!(auto.scale, 1.0);
+        // But a draw that overruns on a frame whose CPU part fit is the GPU's, and drops it.
+        for _ in 0..WINDOW {
+            auto.frame(Duration::from_millis(3), budget * 2);
+        }
+        assert!(auto.scale < 1.0);
+
+        // Timed: the GPU's own time is all it hears, whatever the CPU did. Down at half after a
+        // heavy stretch, a GPU whose views cost a third of the budget at full size, its time going
+        // with the pixels and read back two frames late, at the display's refresh, climbs back.
+        let mut auto = AutoScale::new(budget);
+        for _ in 0..WINDOW {
+            auto.gpu(budget * 4, 1.0);
+        }
+        assert_eq!(auto.scale, AUTO_MIN);
+        let full = budget / 3;
+        let mut drawn = [auto.scale; 3];
+        for f in 0..WINDOW as usize * 40 {
+            let at = drawn[f % 3];
+            drawn[f % 3] = auto.gpu(full.mul_f32(at * at), at);
+        }
+        assert_eq!(auto.scale, 1.0);
+        // A GPU nearer the budget climbs only so far as fits, and does not bounce there.
+        let mut auto = AutoScale::new(budget);
+        for _ in 0..WINDOW {
+            auto.gpu(budget * 4, 1.0);
+        }
+        let full = budget.mul_f32(1.3);
+        let mut seen = Vec::new();
+        for _ in 0..WINDOW * 40 {
+            let at = auto.scale;
+            seen.push(auto.gpu(full.mul_f32(at * at), at));
+        }
+        let settled = auto.scale;
+        assert!(settled > AUTO_MIN && settled < 1.0, "{settled}");
+        assert!(full.mul_f32(settled * settled) <= budget, "{settled}");
+        assert!(seen[seen.len() - WINDOW as usize * 10..].iter().all(|&s| s == settled), "{seen:?}");
     }
 }
