@@ -1,0 +1,237 @@
+# recon.toml — S228: what fly_and_collide.p2m2 does, cheaply: the actor list each tick (who flies what),
+# both biplanes' body, speed and wreck words, both riders' chassis centre, speed and wreck reason.
+# Played by research/c10/play_capture.sh with SPEC=research/s228/recon.toml.
+
+[watch]
+name        = "s228-recon"
+description = "fly_and_collide: who is in what, where, wrecked or not"
+every       = 1
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:8"
+
+[[field]]
+name = "e0_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e0_actor"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e0_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "e1_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e1_actor"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e1_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "e2_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e2_actor"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e2_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "e3_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e3_actor"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e3_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "e4_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e4_actor"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e4_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "e5_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e5_actor"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e5_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "e6_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e6_actor"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e6_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "e7_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e7_actor"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "e7_player"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20"
+type = "u32"
+
+[[field]]
+name = "pl0_pos"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "pl0_speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x598"
+type = "f32"
+
+[[field]]
+name = "pl0_wreck"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x3b0"
+type = "bytes:16"
+
+[[field]]
+name = "pl0_flown"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x334"
+type = "u32"
+
+[[field]]
+name = "pl1_pos"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "pl1_speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x598"
+type = "f32"
+
+[[field]]
+name = "pl1_wreck"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x3b0"
+type = "bytes:16"
+
+[[field]]
+name = "pl1_flown"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x0 -> 0x334"
+type = "u32"
+
+[[field]]
+name = "p1_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p1_index"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p1_wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p2_type"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+
+[[field]]
+name = "p2_index"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x30"
+type = "u32"
+
+[[field]]
+name = "p2_wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "p1_centre"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "p1_speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x34"
+type = "f32"
+
+[[field]]
+name = "p2_centre"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x3"
+
+[[field]]
+name = "p2_speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x34"
+type = "f32"
+
