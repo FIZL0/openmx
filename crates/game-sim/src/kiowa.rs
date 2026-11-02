@@ -84,12 +84,77 @@ pub struct Pad {
     pub climb: F,
     /// The descend button.
     pub descend: F,
-    /// The stick left (-) and right (+): bank.
+    /// The stick left (+) and right (-): bank.
     pub lateral: F,
-    /// The stick forward and back: ground speed.
+    /// The stick forward (+) and back (-): ground speed.
     pub longitudinal: F,
     /// The rudder buttons: yaw rate.
     pub pedal: F,
+}
+
+/// The helicopter's commands in the binding table, numbered as the table numbers them. The d-pad's
+/// four are the bike's and the biplane's ([`crate::bindings::Command::LEFT`] and on).
+pub mod command {
+    use crate::bindings::Command;
+    /// Cross as shipped.
+    pub const CLIMB: Command = Command(0x1a);
+    /// Square as shipped.
+    pub const DESCEND: Command = Command(0x1b);
+    /// L1 as shipped: the pedal +1.
+    pub const PEDAL_LEFT: Command = Command(0x1c);
+    /// R1 as shipped: the pedal -1.
+    pub const PEDAL_RIGHT: Command = Command(0x1d);
+}
+
+impl Pad {
+    /// **The input step**, the helicopter's slot the player's per-tick input calls, given the player's
+    /// two stick values and a command's value ([`crate::bindings::Table::value`]).
+    ///
+    /// In the original's order: climb and descend are their commands' values as they are (so a
+    /// pressure, not a switch); the stick's `x` and `y`, negated and not shaped (the biplane cubes
+    /// them), are the lateral and the longitudinal, so a centred stick is `-0.0`; the pedal is +1 while
+    /// [`command::PEDAL_LEFT`] is held, else -1 while [`command::PEDAL_RIGHT`] is, else 0; then the
+    /// d-pad overrides the stick, Left +1 / Right -1 on the lateral and Up +1 / Down -1 on the
+    /// longitudinal, the first of each pair winning. "Held" is the original's test, a value not 0.0.
+    pub fn from_sticks(stick: (F, F), value: impl Fn(crate::bindings::Command) -> F) -> Pad {
+        use crate::bindings::Command;
+        let held = |c: Command| value(c) != F::ZERO;
+        let (x, y) = stick;
+        let mut pad = Pad {
+            climb: value(command::CLIMB),
+            descend: value(command::DESCEND),
+            lateral: -x,
+            longitudinal: -y,
+            pedal: F::ZERO,
+        };
+        if held(command::PEDAL_LEFT) {
+            pad.pedal = F::ONE;
+        } else if held(command::PEDAL_RIGHT) {
+            pad.pedal = -F::ONE;
+        }
+        if held(Command::LEFT) {
+            pad.lateral = F::ONE;
+        } else if held(Command::RIGHT) {
+            pad.lateral = -F::ONE;
+        }
+        if held(Command::UP) {
+            pad.longitudinal = F::ONE;
+        } else if held(Command::DOWN) {
+            pad.longitudinal = -F::ONE;
+        }
+        pad
+    }
+
+    /// The input step on one pad through the shipped bindings, as the biplane's
+    /// ([`crate::input::PlaneInput::from_pad`]): the left stick through
+    /// [`crate::input::AxisRange::PLAYER`], each command its first binding's strength.
+    pub fn from_pad(pad: &crate::input::Pad) -> Pad {
+        use crate::input::{Axis, AxisRange};
+        let stick =
+            (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
+        let table = &crate::bindings::Table::SHIPPED;
+        Pad::from_sticks(stick, |c| table.value(pad, c))
+    }
 }
 
 /// What the controller leaves for the rotor.
@@ -938,5 +1003,148 @@ const BLADE_RATE: f32 = 27.0;
 pub fn spin_blades(angle: &mut F, hidden: bool, dt: F) {
     if !hidden {
         *angle = *angle + F(BLADE_RATE) * dt;
+    }
+}
+
+// --- the frame ---------------------------------------------------------------------------------------
+
+/// What the helicopter's frame reads and leaves besides [`Kiowa`]'s own: its body, the measure, the
+/// crash state and the few words of the helicopter the listeners read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ride {
+    pub body: Body,
+    pub measure: Measure,
+    pub crash: Crash,
+    /// The player is flying it (the controller's flown flag).
+    pub flown: bool,
+    /// The scale the controller's climb loop reads, and the one the edge throw halves (the put-back
+    /// doubles it back).
+    pub gravity_scale: F,
+    pub throw_scale: F,
+    /// The body wrapper's gravity, the world-frame force it pushes every substep while the body is
+    /// enabled (`(0, -32.2 m gravity_scale, 0)` as the helicopter builds it).
+    pub gravity: Vf,
+    /// The terrain's area the edge throw keeps it inside, if the scene has a terrain.
+    pub area: Option<Area>,
+    /// The helicopter has a touchdown sound with clips in its list: its pick draws one `rand()`.
+    pub touchdown_sound: bool,
+    /// The MX helicopter's rotor angle, and whether its rotor's model node is hidden.
+    pub rotor_angle: F,
+    pub rotor_hidden: bool,
+}
+
+/// What the frame asks of the engine round the helicopter: the collision record, the rotor's own
+/// collision object, and what a crash test's answer does to the machine. None of it is the
+/// helicopter's own flight.
+pub trait Surroundings {
+    /// The body wrapper's collision response, every substep after gravity.
+    fn resolve(&mut self, body: &mut Body);
+    /// The collision record's touching flag.
+    fn touching(&self) -> bool;
+    /// The record's surface is one the helicopter's crash mask ignores for the speed test.
+    fn ignored(&self) -> bool;
+    /// The record's entries, for the touchdown.
+    fn entries(&self) -> Vec<Touch>;
+    /// The rotor's strike test, asked by the crash test of a helicopter still flying, with the
+    /// measure's matrix just made ([`rotor_in_ground`] and the rotor's contact search).
+    fn strike(&mut self, matrix: &Mat4) -> Strike;
+    /// What the crash test asked for, at the point the original does it (the wreck, the blades
+    /// thrown, the put-back): inside the measure, after the crash test and before the touchdown, so
+    /// any `rand()` it draws comes before the touchdown sound's.
+    fn crashed(&mut self, asked: &Crashed, ride: &mut Ride, rng: &mut Rng);
+}
+
+/// The helicopter's lists in the dynamics world: one body, one listener of each kind, no constraints.
+struct Lists<'a, S: Surroundings> {
+    kiowa: &'a mut Kiowa,
+    ride: &'a mut Ride,
+    around: &'a mut S,
+    curve: &'a CurveTable,
+    acos: &'a AcosTable,
+    rng: &'a mut Rng,
+    asked: Crashed,
+}
+
+impl<S: Surroundings> crate::biplane::Dynamics for Lists<'_, S> {
+    fn count(&self, list: crate::biplane::List) -> i32 {
+        match list {
+            crate::biplane::List::Constraints => 0,
+            _ => 1,
+        }
+    }
+    fn preforce(&mut self, _: i32, _: F) {
+        self.kiowa.preforce(&mut self.ride.body);
+    }
+    fn force(&mut self, _: i32, h: F) {
+        let r = self.ride.measure.readings(self.ride.flown, self.around.touching(), self.ride.gravity_scale);
+        self.kiowa.wrecked = self.ride.crash.reason != 0;
+        let (gravity, around) = (self.ride.gravity, &mut *self.around);
+        self.kiowa.force(&r, &mut self.ride.body, self.curve, h, |b| {
+            crate::biplane::collision_force(b, gravity, |b| around.resolve(b));
+        });
+    }
+    fn enabled(&self, _: i32) -> bool {
+        self.ride.body.enabled
+    }
+    fn integrate(&mut self, _: i32, h: F) {
+        self.ride.body.integrate(h);
+    }
+    fn end_substep(&mut self, _: i32) {
+        self.ride.body.end_substep();
+    }
+    fn constrain(&mut self, _: i32, _: bool) {}
+    fn post(&mut self, _: i32, dt: F) {
+        let ride = &mut *self.ride;
+        ride.measure.flight(&ride.body, self.acos);
+        let touching = self.around.touching();
+        let c = CrashContact { touching, ignored: self.around.ignored(), speed: ride.measure.speed };
+        let (around, matrix) = (&mut *self.around, ride.measure.matrix);
+        let b = &mut ride.body;
+        self.asked = ride.crash.step(&c, ride.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut ride.throw_scale, self.rng, dt, || {
+            around.strike(&matrix)
+        });
+        self.around.crashed(&self.asked, ride, self.rng);
+        let entries = self.around.entries();
+        if ride.measure.touchdown(touching, entries) && ride.touchdown_sound {
+            self.rng.rand();
+        }
+        spin_blades(&mut ride.rotor_angle, ride.rotor_hidden, dt);
+    }
+}
+
+impl Kiowa {
+    /// **One frame of the helicopter**, as the original runs it: the input step, when the player has
+    /// the helicopter (`pad`, [`Pad::from_sticks`]), then the engine's dynamics world
+    /// ([`crate::biplane::World::step`]) with the helicopter's three listeners on it —
+    ///
+    /// 1. *preforce*, once: [`Kiowa::preforce`];
+    /// 2. *force*, every substep: [`Kiowa::force`] on the measure's last figures
+    ///    ([`Measure::readings`]), the body wrapper's gravity and collision response between the
+    ///    controller and the rotor, the whole skipped but the wrapper while the crash test has a
+    ///    reason set;
+    /// 3. the body integrated and emptied, every substep while it is enabled;
+    /// 4. *post*, once: the MX measure — [`Measure::flight`], the crash test ([`Crash::step`]) and
+    ///    what it asks for ([`Surroundings::crashed`]), the touchdown ([`Measure::touchdown`]; its sound's
+    ///    pick draws one `rand()`), then the rotor's spin ([`spin_blades`]).
+    ///
+    /// Returns what the crash test asked for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick(
+        &mut self,
+        ride: &mut Ride,
+        world: &crate::biplane::World,
+        pad: Option<Pad>,
+        curve: &CurveTable,
+        acos: &AcosTable,
+        rng: &mut Rng,
+        dt: F,
+        around: &mut impl Surroundings,
+    ) -> Crashed {
+        if let Some(pad) = pad {
+            self.pad = pad;
+        }
+        let mut lists = Lists { kiowa: self, ride, around, curve, acos, rng, asked: Crashed::default() };
+        world.step(dt, &mut lists);
+        lists.asked
     }
 }
