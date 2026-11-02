@@ -1,15 +1,21 @@
 //! The car step (S149d) as a whole: S149's captured drives of the baja, the buggy and the monster
 //! truck (`context/capture/s149b/<car>.csv`) replayed through the port on free07's ground, row by row
 //! from each row's own state, and every word the original wrote by the next row compared to the bit.
+//!
+//! The replay runs on free07 as the shell builds it, its props and plants too, with the car's
+//! collision object (S229): the truck's run into free07's scenery (fc 720–727, 129 ft/s to 21 in a
+//! frame) is stepped like every other row.
 
 use game_render::disc::Disc;
 use game_sim::air::AcosTable;
 use game_sim::biplane::Body;
 use game_sim::camera::CurveTable;
-use game_sim::car::{Car, Controls, Drivetrain, Kind, Launch, Machine, PreloadState, TireState, Wheel};
+use game_sim::car::{COLLIDABLE, Car, Collision, Controls, Drivetrain, Kind, Launch, Machine, PreloadState, TireState, Wheel};
+use game_sim::eco::{Trees, Wooded};
+use game_sim::flight_search::Rays;
 use game_sim::math::Mat4;
 use game_sim::track::{Scene, Terrain};
-use game_sim::world::{Ground, World};
+use game_sim::world::{Ground, Place, Props, World};
 use ps2_float::{F, Vf, fpu};
 use ps2_oracle::{Ee, Kit, skip};
 use std::collections::{BTreeMap, HashMap};
@@ -80,6 +86,44 @@ fn on_free07<R>(then: impl FnOnce(&mut Ground<'_>) -> R) -> Option<R> {
     let terrain = Terrain::parse(&bytes).expect("parse the terrain");
     let mut ground = Ground::new(&terrain, &scene.terrain);
     Some(then(&mut ground))
+}
+
+/// free07 as the shell builds it: the terrain, the scene's collision meshes out of free07's archives,
+/// and the ecosystem's plants.
+fn in_free07<R>(then: impl FnOnce(&mut Wooded<Place<'_>>) -> R) -> Option<R> {
+    use game_sim::archive::Res;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let parts: Vec<(Vec<u8>, Res)> = ["Tracks\\free07.res", "Tracks\\free07_2.res"]
+        .iter()
+        .filter_map(|n| disc.member(n).ok())
+        .filter_map(|b| Res::parse(&b).ok().map(|r| (b, r)))
+        .collect();
+    assert!(!parts.is_empty(), "no free07.res");
+    let by_end = |end: &str| {
+        let want = end.to_ascii_lowercase();
+        parts.iter().find_map(|(b, r)| {
+            let e = r.entries.iter().find(|e| {
+                let n = e.name.to_ascii_lowercase();
+                n == want || n.ends_with(&format!("\\{want}"))
+            })?;
+            r.read(b, e).ok()
+        })
+    };
+    let (bytes, res) = &parts[0];
+    let scn = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(".scn")).expect("free07's scene");
+    let scene = Scene::parse(&res.read(bytes, scn).unwrap()).expect("parse the scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_bytes = by_end(leaf.rsplit('\\').next().unwrap()).expect("free07's terrain");
+    let terrain = Terrain::parse(&terrain_bytes).expect("parse the terrain");
+    let esb = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(".esb")).expect("free07's ecosystem");
+    let esb = res.read(bytes, esb).unwrap();
+    let (props, missing) = Props::load(&scene, |want| by_end(want).ok_or_else(|| "no archive of this track has it".to_string()));
+    assert!(missing.is_empty(), "free07's props the archives lack: {missing:?}");
+    let ground = Ground::new(&terrain, &scene.terrain);
+    let (trees, missed) = Trees::on_ground(&esb, &ground, &CurveTable::build()).expect("free07's ecosystem");
+    assert!(missed.is_empty(), "free07's trees missing: {missed:?}");
+    let mut place = Wooded { world: Place { ground, props }, trees };
+    Some(then(&mut place))
 }
 
 /// The ground under every solid tire's probe is the port's free07 query, point, normal and surface.
@@ -316,6 +360,11 @@ fn load_drive_rows(kit: &Kit, name: &str) -> Option<Vec<DriveRow>> {
 
 /// A car's file, out of `machine.res` in MX.PSR.
 fn car_file(kit: &Kit, kind: Kind) -> Option<Vec<u8>> {
+    machine_file(kit, kind.phy())
+}
+
+/// A member of `machine.res`, by its name.
+fn machine_file(kit: &Kit, name: &str) -> Option<Vec<u8>> {
     use game_sim::archive::{Psr, Res};
     let at = kit.ctx("iso").join("MX.PSR");
     let Ok(mut f) = File::open(&at) else {
@@ -330,7 +379,7 @@ fn car_file(kit: &Kit, kind: Kind) -> Option<Vec<u8>> {
     let mut bytes = vec![0u8; e.size as usize];
     f.read_exact(&mut bytes).expect("read");
     let res = Res::parse(&bytes).expect("machine.res");
-    let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(kind.phy())).expect("the car's file");
+    let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(name)).unwrap_or_else(|| panic!("no {name} in machine.res"));
     Some(res.read(&bytes, e).expect("its bytes"))
 }
 
@@ -709,6 +758,9 @@ struct Tally {
     rows: usize,
     skipped: usize,
     torn: usize,
+    /// Rows whose collision object touched something, and the contacts they had between them.
+    touched: usize,
+    contacts: usize,
     bad: BTreeMap<String, usize>,
     first: Vec<String>,
 }
@@ -729,11 +781,6 @@ impl Tally {
     }
 }
 
-/// The truck's run into free07's scenery: its speed falls from 129 ft/s to 21 in a frame and the
-/// collision object's touch shows at +0x2cc on the last of them. The car's collision object (its
-/// collide step and the contacts' resolve) is not this port's.
-const STRUCK: &[(&str, std::ops::RangeInclusive<u32>)] = &[("truck", 720..=727)];
-
 /// A row whose tire blocks the recorder read apart from its body (car_tire.rs's TORN has it too):
 /// the truck's fc 1105 holds every tire's probe points about a frame's travel behind the body it
 /// was stepped to, beside an exact body. Its body, car and engine words are still compared.
@@ -751,7 +798,10 @@ fn take_input(m: &mut Machine, r: &DriveRow) {
 
 /// One drive replayed against the capture. Row by row (`carry` off), each row's state is stepped
 /// once and compared with the next row; carried, the port runs on from its own state, seeded again
-/// only after a row it cannot follow (paused, two frames in one, or struck).
+/// only after a row it cannot follow (paused, or two frames in one). Either way the car's collision
+/// object is searched against free07's scenery before each step and resolved in its force listener
+/// ([`Machine::step_struck`]); its nearby list is gathered at the seeded row's pose when the machine
+/// is seeded, as the frame before's post left it.
 fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let rows = load_drive_rows(&kit, name)?;
@@ -764,9 +814,14 @@ fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
     let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
     let body = body_of(&ee);
     let (acos, curve) = (AcosTable::build(), CurveTable::build());
-    on_free07(|g| {
+    let rays = game_sim::track::Rays::parse(&machine_file(&kit, kind.rays())?).expect("the car's rays");
+    let inertia = quad(&ee, ee.u32_at(CAR + car_at::BODY) + 0x110);
+    let fresh = collision_of(&car, &body, inertia, Rays::of(&rays));
+    check_collision(&ee, &fresh);
+    in_free07(|g| {
         let mut t = Tally::default();
-        let mut running: Option<Machine> = None;
+        let mut running: Option<(Machine, Collision)> = None;
+        let mut last: Option<(u32, Vf, Vf)> = None;
         for pair in rows.windows(2) {
             let (r0, r1) = (&pair[0], &pair[1]);
             // A row a frame on, not paused, and not two frames in one (the sound clock moved by one
@@ -779,21 +834,36 @@ fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
             for _ in 0..n {
                 clock = clock + h;
             }
-            let struck = STRUCK.iter().any(|(n, fcs)| *n == name && fcs.contains(&r1.frame_counter));
-            if r1.frame_counter != r0.frame_counter + 1 || clock.to_bits() != r1.engine().w(0x134) || struck {
+            if r1.frame_counter != r0.frame_counter + 1 || clock.to_bits() != r1.engine().w(0x134) {
                 t.skipped += 1;
                 running = None;
                 continue;
             }
             t.rows += 1;
-            let mut m = match running.take().filter(|_| carry) {
-                Some(mut m) => {
+            let (mut m, mut collision) = match running.take().filter(|_| carry) {
+                Some((mut m, c)) => {
                     take_input(&mut m, r0);
-                    m
+                    (m, c)
                 }
-                None => machine_of(&car, &ee, &body, r0),
+                None => {
+                    let mut m = machine_of(&car, &ee, &body, r0);
+                    // Where the body was at the start of the frame's last substep: the node the
+                    // post left and the search starts from. The rows don't hold it; the port's own
+                    // step into this row has it (its words are the row's up to here), else the row's.
+                    (m.body.last_position, m.body.last_quat) = match last {
+                        Some((fc, p, q)) if fc == r0.frame_counter => (p, q),
+                        _ => (m.body.position, m.body.quat),
+                    };
+                    let mut c = fresh.clone();
+                    c.refresh(&m.body, g);
+                    c.record.search_ground = m.searches_terrain(g);
+                    (m, c)
+                }
             };
-            m.step(&car, g, r1.dt, &acos, &curve, &mut |_| F::ZERO);
+            m.step_struck(&car, g, &mut collision, r1.dt, &acos, &curve, &mut |_| F::ZERO);
+            last = Some((r1.frame_counter, m.body.last_position, m.body.last_quat));
+            t.touched += m.touching as usize;
+            t.contacts += collision.record.contacts.len();
             let fc = r1.frame_counter;
             for (i, lane) in ["x", "y", "z", "w"].iter().enumerate() {
                 for (what, got, want) in [
@@ -820,7 +890,7 @@ fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
                     t.word(format!("{} {what} +{o:#x}", NAMES[k]), fc, got, r1.tire(k, o));
                 }
             }
-            running = Some(m);
+            running = Some((m, collision));
         }
         t
     })
@@ -829,7 +899,15 @@ fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
 fn check(kind: Kind, name: &str, carry: bool) {
     let Some(t) = replay(kind, name, carry) else { return };
     assert!(t.rows > 100, "{name}: only {} rows replayed", t.rows);
-    let mut report = format!("{name}{}: {} rows ({} skipped, {} torn)\n", if carry { " carried" } else { "" }, t.rows, t.skipped, t.torn);
+    let mut report = format!(
+        "{name}{}: {} rows ({} skipped, {} torn), {} touching with {} contacts\n",
+        if carry { " carried" } else { "" },
+        t.rows,
+        t.skipped,
+        t.torn,
+        t.touched,
+        t.contacts
+    );
     for (what, n) in &t.bad {
         report += &format!("  {what}: {n}\n");
     }
@@ -837,6 +915,7 @@ fn check(kind: Kind, name: &str, carry: bool) {
         report += &format!("  {l}\n");
     }
     assert!(t.bad.is_empty(), "{report}");
+    println!("{report}");
 }
 
 #[test]
@@ -867,4 +946,79 @@ fn the_buggy_drive_runs_on_its_own() {
 #[test]
 fn the_truck_drive_runs_on_its_own() {
     check(Kind::MonsterTruck, "truck", true);
+}
+
+/// The car's collision object as the part's loader builds it ([`game_sim::car::collision`]).
+fn collision_of(car: &Car, body: &Body, inertia: Vf, rays: Rays) -> Collision {
+    game_sim::car::collision(car, body, inertia, rays)
+}
+
+/// The collision object's words the replay reads (the record's at `car + 0x170`).
+mod rec {
+    pub const COLLISION: u32 = 0x170;
+    pub const CAPACITY: u32 = 0x104;
+    pub const RAY_PROBE: u32 = 0x1f0;
+    pub const COLLIDABLE: u32 = 0x1f8;
+    pub const RAY_COUNT: u32 = 0x168;
+    pub const RAYS: u32 = 0x170;
+    pub const CATEGORY: u32 = 0x84;
+}
+
+/// The car's collision object in the image: the port's built off the disc, against the original's —
+/// its response's tuning, its search's capacity, its collidable's categories and the ray probe's rays.
+fn check_collision(ee: &Ee, c: &Collision) {
+    let r = ee.u32_at(CAR + rec::COLLISION);
+    let k = &c.collider;
+    let fl = |a: u32| F(ee.f32_at(r + a));
+    for (what, got, want) in [
+        ("the mass", k.mass, fl(0x64)),
+        ("the inverse mass", k.inv_mass, fl(0x68)),
+        ("the max depth", k.max_depth, fl(0x118)),
+        ("the scenery stiffness", k.scenery.stiffness, fl(0x124)),
+        ("the scenery damping", k.scenery.damping, fl(0x128)),
+        ("the scenery restitution", k.scenery.restitution, fl(0x12c)),
+        ("the actor stiffness", k.actor.stiffness, fl(0x13c)),
+        ("the actor damping", k.actor.damping, fl(0x140)),
+        ("the actor restitution", k.actor.restitution, fl(0x144)),
+        ("the friction", k.scenery.friction, fl(0x190)),
+        ("the actor friction", k.actor.friction, fl(0x194)),
+    ] {
+        assert_eq!(got.to_bits(), want.to_bits(), "the collision object's {what}: the game {want:?}, the port {got:?}");
+    }
+    for (what, got, want) in [
+        ("inverse inertia", k.inv_inertia, quad(ee, r + 0x80)),
+        ("centre of gravity", k.cofg, quad(ee, r + 0x90)),
+        ("spring mask", k.scenery.spring_mask, quad(ee, r + 0x150)),
+        ("friction mask", k.scenery.friction_mask, quad(ee, r + 0x160)),
+        ("actor spring mask", k.actor.spring_mask, quad(ee, r + 0x170)),
+        ("actor friction mask", k.actor.friction_mask, quad(ee, r + 0x180)),
+    ] {
+        assert_eq!(got.to_bits(), want.to_bits(), "the collision object's {what}: the game {want:?}, the port {got:?}");
+    }
+    assert_eq!(k.damp, ee.u32_at(r + 0x50) != 0, "the damping step's switch");
+    assert_eq!((k.actors, k.collides_with), (ee.u32_at(r + 0x110), ee.u32_at(r + 0x114)), "the actor masks");
+    assert_eq!(k.collidable, Some(ee.u32_at(ee.u32_at(r + rec::COLLIDABLE) + rec::CATEGORY)), "the collidable's categories");
+    assert_eq!(k.collidable, Some(COLLIDABLE));
+    assert_eq!(c.record.capacity as u32, ee.u32_at(r + rec::CAPACITY), "the contact capacity");
+    let d = &c.record;
+    for (what, got, want) in [
+        ("terrain search", d.search_ground, 0x30),
+        ("search", d.search, 0x34),
+        ("sweep back", d.sweep_back, 0x3c),
+        ("damping step", d.damp, 0x50),
+        ("near-field search", d.nearby, 0x10c),
+    ] {
+        assert_eq!(got, ee.u32_at(r + want) != 0, "the record's {what}");
+    }
+    for (what, got, want) in [("lead", d.lead, 0xc0), ("push-out", d.push_out, 0xc4), ("facing", d.facing, 0xc8)] {
+        assert_eq!(got.to_bits(), fl(want).to_bits(), "the record's {what}: the game {:?}, the port {got:?}", fl(want));
+    }
+    assert_eq!(d.offset.to_bits(), quad(ee, r + 0xb0).to_bits(), "the sweep's reference point");
+    let probe = ee.u32_at(r + rec::RAY_PROBE);
+    let (n, at) = (ee.u32_at(probe + rec::RAY_COUNT), ee.u32_at(probe + rec::RAYS));
+    assert_eq!(c.rays.segments.len() as u32, n, "the ray count");
+    for (i, s) in c.rays.segments.iter().enumerate() {
+        let a = at + 0x20 * i as u32;
+        assert_eq!((s.from.to_bits(), s.to.to_bits()), (quad(ee, a).to_bits(), quad(ee, a + 0x10).to_bits()), "ray {i}");
+    }
 }

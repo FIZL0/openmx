@@ -1685,6 +1685,10 @@ pub struct CarRide {
     pub driven: Option<game_sim::car::Machine>,
     /// Where it was last taken (its origin).
     pub taken_at: Vf,
+    /// Its collision object's ray probe, the car's `m.col` ([`game_sim::car::Kind::rays`]), and the
+    /// object itself while the car is out (S229). A disc without the file leaves the car to its tires.
+    pub rays: Option<game_sim::flight_search::Rays>,
+    pub struck: Option<game_sim::car::Collision>,
 }
 
 /// How far over the ground a car taken is stood, past where its tires' bottoms hang, feet: it drops
@@ -1701,7 +1705,14 @@ impl CarRide {
         let name = format!("{}\\anim\\{}.psg", machine.dir(), machine.models()[livery(copy)]);
         let psg = read(&name).ok_or_else(|| format!("machine.res has no {name}"))?;
         let model = game_sim::car::CarModel::read(&psg).map_err(|e| format!("{name}: {e}"))?;
-        Ok(CarRide { machine, car: game_sim::car::Car::read_bytes(&phy, kind), model, bay, driven: None, taken_at: Vf::default() })
+        let rays = read(kind.rays()).and_then(|col| match game_sim::track::Rays::parse(&col) {
+            Ok(r) => Some(game_sim::flight_search::Rays::of(&r)),
+            Err(e) => {
+                eprintln!("car: {}: {e}", kind.rays());
+                None
+            }
+        });
+        Ok(CarRide { machine, car: game_sim::car::Car::read_bytes(&phy, kind), model, bay, driven: None, taken_at: Vf::default(), rays, struck: None })
     }
 
     /// How high the car's origin stands over the ground with its tires' bottoms on it and its springs
@@ -1720,6 +1731,11 @@ impl CarRide {
         let at = Vf::new(spot.at.x(), ground + self.rest_height(), spot.at.z(), 1.0);
         let mut m = game_sim::car::Machine::new(&self.car, &self.model, at, facing, Vf::new(0.0, 1.0, 0.0, 0.0));
         m.drive(true);
+        self.struck = self.rays.clone().map(|rays| {
+            let mut c = game_sim::car::collision_of_model(&self.car, &self.model, &m.body, rays);
+            c.refresh(&m.body, world);
+            c
+        });
         self.driven = Some(m);
         self.taken_at = at;
         Some(())
@@ -1768,13 +1784,17 @@ impl CarRide {
 
     /// One frame of the car on `pad` through `table` (the ride's bindings): the stick steers and
     /// leans, the commands are the pedals ([`game_sim::car::Controls::input`]), then the car's step
-    /// over `world`. The engine's noise is off. Nothing for a car not out.
+    /// over `world`, against the world's objects through its collision object where it has one
+    /// ([`game_sim::car::Machine::step_struck`]). The engine's noise is off. Nothing for a car not out.
     pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
         use game_sim::input::{Axis, AxisRange};
         let Some(m) = self.driven.as_mut() else { return };
         let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
         m.controls.input(&self.car, stick, F::ZERO, m.ground_speed, m.side_slip, |c| table.value(pad, c));
-        m.step(&self.car, &mut Through(world), dt, &tables.acos, &tables.curve, &mut |_| F::ZERO);
+        match self.struck.as_mut() {
+            Some(c) => m.step_struck(&self.car, &mut Through(world), c, dt, &tables.acos, &tables.curve, &mut |_| F::ZERO),
+            None => m.step(&self.car, &mut Through(world), dt, &tables.acos, &tables.curve, &mut |_| F::ZERO),
+        }
     }
 }
 
@@ -1897,6 +1917,7 @@ impl Garage {
         let left = self.up.car();
         if let Some(c) = self.cars.iter_mut().find(|c| Some(c.machine) == left) {
             c.driven = None;
+            c.struck = None;
         }
         if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
             heli.flown = None;

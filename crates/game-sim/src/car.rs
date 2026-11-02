@@ -2104,7 +2104,7 @@ impl Machine {
         noise: &mut impl FnMut(F) -> F,
     ) {
         let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
-        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise });
+        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: None });
     }
 
     /// Once a frame before the substeps: the controls, the centre of mass's travel, and the probes.
@@ -2137,7 +2137,22 @@ impl Machine {
     /// Each substep: gravity, the anti-slide, the preload, the launch, the engine, the four tires
     /// (the rears handed the fronts' load) and the air.
     pub fn force(&mut self, car: &Car, h: F, acos: &AcosTable, curve: &CurveTable, noise: &mut impl FnMut(F) -> F) {
+        self.force_with(car, h, acos, curve, noise, |_| {});
+    }
+
+    /// [`Machine::force`] with the collision object's response (`resolve`) right after gravity, as the
+    /// body wrapper's force listener has it ([`Machine::step_struck`]).
+    fn force_with(
+        &mut self,
+        car: &Car,
+        h: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+        resolve: impl FnOnce(&mut crate::biplane::Body),
+    ) {
         self.body.push_gravity(self.gravity);
+        resolve(&mut self.body);
         self.anti_slide();
         self.preload_step(h);
         self.launch_step(h);
@@ -2369,6 +2384,8 @@ struct Stepping<'a, W, N> {
     acos: &'a AcosTable,
     curve: &'a CurveTable,
     noise: &'a mut N,
+    /// The collision object, searched already this frame, and the movers its contacts name.
+    struck: Option<(&'a mut Collision, &'a [crate::contact::Mover])>,
 }
 
 impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Stepping<'_, W, N> {
@@ -2379,7 +2396,13 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
         self.m.preforce(self.car, self.world, dt, self.curve);
     }
     fn force(&mut self, _: i32, h: F) {
-        self.m.force(self.car, h, self.acos, self.curve, self.noise);
+        match &mut self.struck {
+            None => self.m.force(self.car, h, self.acos, self.curve, self.noise),
+            Some((c, movers)) => self.m.force_with(self.car, h, self.acos, self.curve, self.noise, |body| {
+                let mut weighed = crate::contact::Weighed { body, mass: c.mass };
+                crate::contact::resolve(&mut c.collider, &mut weighed, &mut c.record.contacts, &mut [], movers, true);
+            }),
+        }
     }
     fn enabled(&self, _: i32) -> bool {
         self.m.body.enabled
@@ -2392,6 +2415,9 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
+        if let Some((c, _)) = &mut self.struck {
+            c.refresh(&self.m.body, &mut *self.world);
+        }
         self.m.measure(self.car, self.world, dt, self.acos);
     }
 }
@@ -2593,5 +2619,92 @@ impl Machine {
     pub fn drive(&mut self, on: bool) {
         self.human = on;
         self.controls.driven = on;
+    }
+}
+
+// --- the collision object (S229) -------------------------------------------------------------------
+
+/// The cars' ray probe files in `machine.res`: the rigid-body part's `%sm.col` for the stock skin
+/// (S229 checked the truck's 41 rays against its collision object in S149a's switched image).
+pub const MONSTER_TRUCK_RAYS: &str = "MonsterTruck\\col\\monstertruckm.col";
+pub const BUGGY_RAYS: &str = "Buggy\\col\\buggym.col";
+pub const BAJA_RAYS: &str = "Baja\\col\\bajam.col";
+
+impl Kind {
+    /// The machine's ray probe file in `machine.res`.
+    pub fn rays(self) -> &'static str {
+        match self {
+            Kind::MonsterTruck => MONSTER_TRUCK_RAYS,
+            Kind::Buggy => BUGGY_RAYS,
+            Kind::Baja => BAJA_RAYS,
+        }
+    }
+}
+
+/// A car's collidable's categories (the collision object's `+0x1f8`, its `+0x84`), off S149a's
+/// switched truck: not a key of the file. Its actor and collides-with masks are the helicopter's.
+pub const COLLIDABLE: u32 = 0x0005_2058;
+
+/// The car's collision object: the rigid-body part's, the class the helicopter's is
+/// ([`crate::kiowa::Collision`]): its response's tuning off `[Mass Properties]` and the body's inertia
+/// (`inertia`, the body's tensor, not its inverse), its search's record with the ray probe out of the
+/// car's `m.col` ([`Kind::rays`], one contact a ray), and its nearby list.
+pub type Collision = crate::kiowa::Collision;
+
+/// The collision object as the part's loader builds it for a car whose body is `body`.
+pub fn collision(car: &Car, body: &crate::biplane::Body, inertia: Vf, rays: crate::flight_search::Rays) -> Collision {
+    let mut c = Collision::new(&car.mass_properties, body, inertia, rays);
+    c.collider.collidable = Some(COLLIDABLE);
+    // Upright, as the loader leaves it: the measure turns the terrain on ([`Machine::searches_terrain`]).
+    c.record.search_ground = false;
+    c
+}
+
+/// The collision object for a car [`Machine::new`] built off `model`: its response tuned by the body's
+/// inertia worked out as the constructor works it (the model's whole bounds, [`Part::inertia`]).
+pub fn collision_of_model(car: &Car, model: &CarModel, body: &crate::biplane::Body, rays: crate::flight_search::Rays) -> Collision {
+    let h = model.bounds.half_extent;
+    let two = F(2.0);
+    let dims = Vf::new((F(h.x()) * two).0, (F(h.y()) * two).0, (F(h.z()) * two).0, 1.0);
+    collision(car, body, car.mass_properties.inertia(dims), rays)
+}
+
+impl Machine {
+    /// **One frame of the car against the world's objects** (S229): [`Machine::step`] with its
+    /// collision object. Before the world steps, the object's search (cleared, the sweep back, the
+    /// rays against the terrain, the meshes and the plants: [`Collision::search`]), whose touching flag
+    /// is the car's for the frame; every substep, gravity and then the object's response on the
+    /// record's contacts with impulses ([`crate::contact::resolve`]: the body wrapper's force
+    /// listener, ahead of the car's own forces); and in the measure the body wrapper's post, which
+    /// gathers the nearby list again where the body now stands.
+    ///
+    /// Not here: the tire probe's contact sort (the car's second ray probe, four rays down through
+    /// the tires, searched against the same nearby list), whose hits would hand a tire its ground.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_struck(
+        &mut self,
+        car: &Car,
+        world: &mut impl crate::world::World,
+        collision: &mut Collision,
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+    ) {
+        let movers = collision.search(&mut self.body, &mut *world, dt);
+        self.touching = collision.record.touching;
+        let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
+        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)) });
+        collision.record.search_ground = self.searches_terrain(world);
+    }
+
+    /// The measure's last word, on the collision record's terrain switch: the next frame's search
+    /// takes the terrain with the body rays too when the car's up is 45° or more off the terrain's
+    /// normal under its centre of mass (`up · n <= 0.707`, on the accumulator). Upright, the tires
+    /// alone meet the ground.
+    pub fn searches_terrain(&self, world: &mut impl crate::world::World) -> bool {
+        let (_, n) = world.ground(self.body.position);
+        let u = self.up;
+        Acc::mula(u.x(), n.x()).madda(u.y(), n.y()).madd(u.z(), n.z()) <= F(0.707)
     }
 }
