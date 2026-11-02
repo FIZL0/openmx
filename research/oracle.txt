@@ -2552,6 +2552,12 @@ rider_ragdoll_pose boot 0x0030f0c0 the body actor's vt +0xa4 (actor, a1, dt in f
 #                                  forward, up, 0, 1)
 rider_ragdoll_reset boot 0x0030f0b0 the actor's vt +0xa0: the world reset (0x001f28a0), each body's
 #                                  vt +0x2c (0x0015a3d0)
+# S201 -- the riding entry after a put-back (journal 2026-11-02-s201-riding-entry). Held ticks: the
+#   still repose then the reset, so every part +0x60 = mat4_basis(body centre = node + turn(q, cofg)),
+#   placed +0x2ac = 0. T+2's entry pose (moving) reads the nodes T+1 left (the animation has not yet
+#   written this tick's), so each start +0x30 = T+1's position bit for bit and +0x40 = (node - part
+#   +0x90)/dt = -turn(q, cofg)/dt; the reset copies them in before the step. Hand pins at T+2 already
+#   follow this tick's holds (+0x4d0..) and +0x530; the box frame +0x580 is this tick's.
 # S52 -- the reset, ported in crates/game-sim/src/ragdoll_pose.rs (proved in tests/ragdoll_contact.rs)
 world_reset boot 0x001f28a0 (world) every body of the world (count +0x8, array +0x10), in order, through
 #                           its vt (at the body's +0x100) +0x2c
