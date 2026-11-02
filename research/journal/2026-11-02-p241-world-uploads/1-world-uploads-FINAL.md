@@ -105,3 +105,14 @@ For the human: see plan/HUMAN.md, "A world on the store (P241)". If you want a w
 upload world_untamed from the game, or with
 `cargo run --release -p openmx -- --mod-store-admin upload ~/repos/openmx/mods world_untamed`. Then
 install it on a fresh mods folder and paste the PR link here.
+
+## On the real store (2026-11-02)
+
+The user uploaded world_untamed from another machine. The game put it on their open pull request,
+https://huggingface.co/datasets/FIZL0/openmx-mods/discussions/1 (commit "Add mod MX vs. ATV Untamed: every
+open map (world_untamed)", 15:49 UTC), next to world_ultra, world_mxvatv and untamed_tricks. Browse lists
+open PRs, so it is live. Checked from here: `resolve/refs%2Fpr%2F1/mods/world_untamed/mod.zip` downloaded
+331,376,504 bytes with sha256 5ca2a298…6035, equal to its meta.json and LFS oid; the zip's 9,916 entries
+pass their CRCs. Unpacked into a fresh `mods/tracks/world_untamed`, `openmx --track world_untamed --mods
+<fresh> --headless --frames 300` read 23 tiles and 1,104 joins, spawned on untamed_nat_sdca and rode 10 s.
+The in-game Install over the real Hub's CDN (Range resumes) was not run.
