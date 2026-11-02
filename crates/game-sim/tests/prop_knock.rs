@@ -4,12 +4,16 @@
 //! research/s195/aim.py puts the human's bike (first_recording's state, free09) in line with a beach
 //! ball and sets it rolling at it with no pad; research/s195/knock.py records watch/s195-knock.toml (the
 //! five balls' bodies, node origins, record flags and countdowns, a row a tick) and saves states around
-//! the strike. The strike itself goes through the original's struck listener with the contact's push,
-//! which the port does not have yet (S197): the replay starts from a state saved after it, the woken
-//! balls' collections read out of the state's RAM into the port's [`PropSet`], and from there every
-//! tick the port's [`PropSet::frame_among`] over the disc's terrain and scene is compared bit for bit
-//! with the original's rows: the flight, the landing, the bounces and the roll, asleep, the countdown,
-//! and the put-back.
+//! the strike. The replay starts from a state saved after the strike, the woken balls' collections
+//! read out of the state's RAM into the port's [`PropSet`], and from there every tick the port's
+//! [`PropSet::frame_among`] over the disc's terrain and scene is compared bit for bit with the
+//! original's rows: the flight, the landing, the bounces and the roll, asleep, the countdown, and the
+//! put-back.
+//!
+//! S197's strike, the bike's body rays on ball 2's `f.col` ([`prop_contact`]), is proved on the tick
+//! from knock-2882 to knock-2883: the bike's entry and the ball's mirror, the push both ways in the
+//! bike's first substep (the original's props node ticked with its resolve hooked), and the ball's
+//! body after the props' step.
 //!
 //! Skipped with a line where the disc, the kit, the state or the capture is not there (they are in s3's
 //! context only).
@@ -18,15 +22,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use game_render::disc::{Disc, Res};
+use game_sim::bike_col::{self, BikeCol};
 use game_sim::biplane::{Area, Body};
-use game_sim::contact::Node;
+use game_sim::contact::{Contact, Node, Other, Ridden, Side, Vehicle};
+use game_sim::math::Mat4;
+use game_sim::phy::Phy;
+use game_sim::prop_contact;
+use game_sim::ride::Tables;
+use game_sim::rider_contact;
 use game_sim::phy::Ini;
 use game_sim::prop_set::PropSet;
 use game_sim::prop_world::Listener;
 use game_sim::track::{Scene, Terrain};
 use game_sim::world::{Ground, Props};
 use ps2_float::{F, Vf};
-use ps2_oracle::{Ee, Kit, skip};
+use ps2_oracle::{Ee, Kit, addr, skip};
 
 /// The `.toy` actor's collection list (tests/prop_collision.rs).
 const LIST: u32 = 0x011b_43f4;
@@ -571,4 +581,296 @@ fn a_ball_over_the_edge_goes_back_on_the_tick() {
     assert_eq!(run.put_back, Some(row_of(&rows, 2939)), "{run:#?}");
     assert_eq!(rows.f32(row_of(&rows, 2939), "b2_countdown"), -1.0);
     struck_again(run, &rows, 2991);
+}
+
+/// The human bike's ridden vehicle in a free09 state (watch/s195-knock.toml's chain off the game
+/// manager): its collision object is `+0x7d0`, its chassis `+0x7a4`.
+fn the_bike(ee: &Ee) -> u32 {
+    [0x34, 0x34, 0x8, 0x8, 0x0].iter().fold(ee.u32_at(0x004e_1e98), |a, &h| ee.u32_at(a + h))
+}
+
+fn node_at(ee: &Ee, n: u32) -> Node {
+    Node { rows: [0, 1, 2].map(|k| quad(ee, n + 0x80 + 16 * k)), origin: quad(ee, n + 0xb0) }
+}
+
+/// A list entry in the port's terms; the other side only as there or not (99).
+fn entry_at(ee: &Ee, e: u32) -> Contact {
+    Contact {
+        kind: ee.u32_at(e),
+        from: quad(ee, e + 0x10),
+        on_body: quad(ee, e + 0x20),
+        normal: quad(ee, e + 0x30),
+        point: quad(ee, e + 0x40),
+        arm: quad(ee, e + 0x50),
+        other_arm: quad(ee, e + 0x60),
+        surface: ee.u32_at(e + 0x70) as i32,
+        other: (ee.u32_at(e + 0x74) != 0).then_some(99),
+        mover: (ee.u32_at(e + 0x78) != 0).then_some(99),
+    }
+}
+
+fn list_at(ee: &Ee, r: u32) -> Vec<Contact> {
+    let (n, at) = (ee.u32_at(r + 0x100), ee.u32_at(r + 0x108));
+    (0..n).map(|k| entry_at(ee, at + 0x80 * k)).collect()
+}
+
+/// A bike record's chassis as the other side of a contact (`+0xf0` the chassis, `+0xf8` its node).
+fn vehicle_at(ee: &Ee, rec: u32) -> Vehicle {
+    let v = ee.u32_at(rec + 0xf0);
+    Vehicle {
+        node: node_at(ee, ee.u32_at(rec + 0xf8)),
+        cofg: quad(ee, v + 0x190),
+        mass: F(ee.f32_at(v + 0x210)),
+        inv_mass: F(ee.f32_at(v + 0x214)),
+        inv_inertia: [0xf0, 0x104, 0x118].map(|at| F(ee.f32_at(v + at))),
+        velocity: quad(ee, v + 0x260),
+        rates: quad(ee, v + 0x290),
+        shock: quad(ee, v + 0x170),
+        twist: quad(ee, v + 0x180),
+    }
+}
+
+fn ridden_at(ee: &Ee, rec: u32) -> Ridden {
+    let v = ee.u32_at(rec + 0xf0);
+    Ridden { chassis: vehicle_at(ee, rec), position: quad(ee, v + 0x60), force: quad(ee, v + 0x130), torque: quad(ee, v + 0x140) }
+}
+
+/// The contact fields a search writes (the arms are the resolve's), by name, that differ.
+fn searched_differ(port: &Contact, orig: &Contact) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (what, p, o) in [("from", port.from, orig.from), ("on_body", port.on_body, orig.on_body), ("normal", port.normal, orig.normal), ("point", port.point, orig.point)] {
+        if p.to_bits() != o.to_bits() {
+            out.push(what);
+        }
+    }
+    if port.kind != orig.kind {
+        out.push("kind");
+    }
+    if port.surface != orig.surface {
+        out.push("surface");
+    }
+    if port.other.is_some() != orig.other.is_some() {
+        out.push("other");
+    }
+    out
+}
+
+/// The human's bike (`Race125P.phy`) and its two collision files, off the disc.
+fn bike_files(tables: &Tables) -> Option<(Phy, BikeCol)> {
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+        .expect("the bike's collision files");
+    let bikes: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("bike\\") && n.ends_with(".res")
+        })
+        .collect();
+    let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy in a bike archive");
+    Some((Phy::read_bytes(&phy, &tables.curve), col))
+}
+
+/// The bike strikes ball 2 (S197): from knock-2882, one tick into knock-2883 the port's way — the
+/// props' collide pass, the bike's body rays against the balls' `f.col` ([`prop_contact::strike`]),
+/// the bike's resolve pushing the ball ([`rider_contact::Bump::resolve`], first substep), and the
+/// props' step with the bike as the mirror's other side — against the state.
+#[test]
+fn the_bike_strikes_the_ball() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let load = |frame: u32| {
+        let state = context(&kit, &format!("states/s195-knock-{frame}.eeMemory.bin"));
+        Ee::from_ram(&state).map_err(|why| skip(&format!("{why} — research/s195/slots.py ram knock-{frame} writes it"))).ok()
+    };
+    let (Some(before), Some(after)) = (load(2882), load(2883)) else { return };
+    let tables = Tables::build();
+    let Some((phy, col)) = bike_files(&tables) else { return };
+    let Some(mut free) = free09() else { return };
+    let terrain = Terrain::parse(&free.terrain).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &free.scene.terrain);
+    let field = ground.field();
+    let woken = seed(&before, &mut free.set);
+    assert!(woken.contains(&2), "ball 2 woken in knock-2882: {woken:?}");
+    let rec = before.u32_at(the_bike(&before) + 0x7d0);
+    assert_eq!(rec, after.u32_at(the_bike(&after) + 0x7d0));
+    let at = {
+        let n = node_at(&before, before.u32_at(rec + 0xf8));
+        Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin])
+    };
+    let dt = F(after.f32_at(addr("frame_dt").unwrap()));
+    eprintln!("dt {:?} (before's {:?})", dt, before.f32_at(addr("frame_dt").unwrap()));
+
+    let movers = free.set.search(dt, Some(&field), Some(&free.props), None);
+    let strike = prop_contact::strike(&col, &at, &free.set, 0, 1, dt);
+    let ball = |ee: &Ee| {
+        let c = collections(ee)[2];
+        ee.u32_at(ee.u32_at(c + coll::BODIES + 8))
+    };
+    let (want_bike, want_ball) = (list_at(&after, rec), list_at(&after, after.u32_at(ball(&after) + obj::COLLISION)));
+    // The bike's one entry, on ball 2, and the ball's one, its mirror: the search's fields bit for bit.
+    assert_eq!(strike.contacts.len(), want_bike.len(), "the bike's list\nport {:?}\nstate {want_bike:?}", strike.contacts);
+    assert_eq!(strike.contacts.len(), 1);
+    assert_eq!(strike.contacts[0].other, Some(1), "the entry names the first struck body, after the one player");
+    assert_eq!(searched_differ(&strike.contacts[0], &want_bike[0]), Vec::<&str>::new());
+    assert_eq!(strike.struck.len(), 1, "{:?}", strike.struck);
+    let (c, o, mirrors) = &strike.struck[0];
+    assert_eq!((*c, *o), (2, 0), "ball 2 struck");
+    assert_eq!(mirrors.len(), want_ball.len(), "the ball's list");
+    assert_eq!(mirrors[0].other, Some(0), "the mirror names the striker, player 1");
+    assert_eq!(searched_differ(&mirrors[0], &want_ball[0]), Vec::<&str>::new());
+
+    let pushed = free.set.strike(&strike);
+    let collider = rider_contact::collider(&phy.collisions, phy.mass.mass);
+    let mut bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), props: pushed };
+    let mut own = ridden_at(&before, rec);
+    bump.resolve(&mut own, true);
+    free.set.pushed(&bump.props);
+    let (mut bike_collider, mut bike) = (collider, vehicle_at(&after, rec));
+    free.set.step(dt, &movers, &mut [Other { collider: &mut bike_collider, side: Side::Vehicle(&mut bike) }]);
+    let got = &free.set.collections[2].bones[0].body;
+    let want = ee_body(&after, after.u32_at(ball(&after) + obj::BODY));
+    let mut bad = Vec::new();
+    for (what, p, o) in [
+        ("last position", got.last_position, want.last_position),
+        ("position", got.position, want.position),
+        ("velocity", got.velocity, want.velocity),
+        ("last quat", got.last_quat, want.last_quat),
+        ("quat", got.quat, want.quat),
+        ("rates", got.rates, want.rates),
+        ("shock", got.shock, want.shock),
+        ("twist", got.twist, want.twist),
+    ] {
+        if p.to_bits() != o.to_bits() {
+            bad.push(format!("{what}: port {:?} state {:?}", p.0, o.0));
+        }
+    }
+    let r = after.u32_at(ball(&after) + obj::COLLISION);
+    let rc = &free.set.collections[2].objects[0].collision.as_ref().unwrap().record;
+    let flags = [rc.touching, rc.touching_other, rc.on_ground, rc.on_object];
+    let want_flags = [rec::TOUCHING, rec::TOUCHING_OTHER, rec::ON_GROUND, rec::ON_OBJECT].map(|a| after.u32_at(r + a) != 0);
+    if flags != want_flags {
+        bad.push(format!("the record's flags: port {flags:?} state {want_flags:?}"));
+    }
+    // The mirror's arms are the ball's force listener's, its last substep's.
+    let (p, o) = (&rc.contacts[0], &want_ball[0]);
+    if p.arm.to_bits() != o.arm.to_bits() || p.other_arm.to_bits() != o.other_arm.to_bits() {
+        bad.push(format!("the mirror's arms: port {:?} {:?} state {:?} {:?}", p.arm, p.other_arm, o.arm, o.other_arm));
+    }
+    assert!(bad.is_empty(), "ball 2 after the tick: {bad:#?}");
+}
+
+/// A strike wakes a sleeping body the way S195 read off the world node: the object's listener on
+/// first, then the collection's settle ([`PropSet::struck`]); [`PropSet::wake`] files them the other
+/// way round.
+#[test]
+fn a_strike_files_the_objects_listener_first() {
+    let Some(mut free) = free09() else { return };
+    let c = &free.set.collections[0];
+    assert!(!c.active && !c.bones[0].body.enabled, "ball 0 asleep as loaded");
+    free.set.struck(0, 0);
+    let c = &free.set.collections[0];
+    assert!(c.active && c.bones[0].body.enabled && c.objects[0].filed);
+    assert_eq!(c.listeners, vec![Listener::Object(0), Listener::Settle]);
+    free.set.wake(1, 0);
+    assert_eq!(free.set.collections[1].listeners, vec![Listener::Settle, Listener::Object(0)]);
+}
+
+/// free09's props' world node in the knock states: its filed objects are the bikes' and the woken
+/// props' collision objects, the human bike's ahead of the balls (oracle.txt, S197).
+const PROPS_NODE: u32 = 0x00e1_7ef0;
+/// The node's update (node, dt) and a collision object's resolve (object, first substep).
+const NODE_UPDATE: u32 = 0x0026_f800;
+const RESOLVE: u32 = 0x0027_0dc0;
+
+/// Run the original's resolve from inside a hook on it, the hooked call's registers and stack put
+/// back so the hook returns to its caller as the call would have (tests/two_p_world.rs's).
+fn run_original(ee: &mut Ee, r: u32, first: u32) {
+    let (ra, sp, stack) = (ee.r(31), ee.r(29), ee.stack);
+    ee.stack = (sp as u32 - 0x400) & !0xf;
+    ee.call(RESOLVE, &[u64::from(r), u64::from(first)], &[], 50_000_000);
+    ee.stack = stack;
+    ee.set(29, sp);
+    ee.set(31, ra);
+    ee.pc = RESOLVE;
+}
+
+/// The push both ways (S197): knock-2882's image ticked by the original's props node, the bike's
+/// first-substep resolve hooked — the port's [`rider_contact::Bump::resolve`] on the list, the chassis
+/// and ball 2's body as the call finds them, against what the original's resolve leaves: the bike's
+/// chassis (velocity, rates, shock, twist, force, torque), the ball's body, and the entry's arms.
+#[test]
+fn the_bike_and_the_ball_push_each_other_as_the_original() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let state = context(&kit, "states/s195-knock-2882.eeMemory.bin");
+    let Ok(mut ee) = Ee::from_ram(&state).map_err(|why| skip(&format!("{why} — research/s195/slots.py ram knock-2882 writes it"))) else { return };
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let tables = Tables::build();
+    let Some((phy, _)) = bike_files(&tables) else { return };
+    let Some(mut free) = free09() else { return };
+    seed(&ee, &mut free.set);
+    let collider = rider_contact::collider(&phy.collisions, phy.mass.mass);
+    let ball = &free.set.collections[2];
+    let (ball_collider, mass) = (ball.objects[0].collision.as_ref().unwrap().collider, ball.bones[0].mass);
+    let rec = ee.u32_at(the_bike(&ee) + 0x7d0);
+    let o = ee.u32_at(ee.u32_at(collections(&ee)[2] + coll::BODIES + 8));
+    let body = ee.u32_at(o + obj::BODY);
+    let filed: Vec<u32> = (0..ee.u32_at(PROPS_NODE + 0x30)).map(|k| ee.u32_at(ee.u32_at(PROPS_NODE + 0x38) + 4 * k)).collect();
+    assert!(filed.contains(&rec) && filed.contains(&ee.u32_at(o + obj::COLLISION)), "the bike and ball 2 on the node: {filed:x?}");
+
+    let bad: Rc<RefCell<Option<Vec<String>>>> = Rc::default();
+    let seen = Rc::clone(&bad);
+    ee.hooks.insert(
+        RESOLVE,
+        Box::new(move |ee: &mut Ee| {
+            let (r, first) = (ee.r(4) as u32, ee.r(5) as u32);
+            if r != rec || first == 0 || seen.borrow().is_some() {
+                run_original(ee, r, first);
+                return;
+            }
+            let list: Vec<Contact> = list_at(ee, rec).into_iter().map(|c| Contact { other: c.other.map(|_| 1), ..c }).collect();
+            let pushed = prop_contact::Pushed { collection: 2, object: 0, collider: ball_collider, body: ee_body(ee, body), mass };
+            let mut bump = rider_contact::Bump { me: 0, contacts: list, colliders: vec![collider], vehicles: vec![vehicle_at(ee, rec)], movers: Vec::new(), props: vec![pushed] };
+            let mut own = ridden_at(ee, rec);
+            bump.resolve(&mut own, true);
+            run_original(ee, r, first);
+            let got = ridden_at(ee, rec);
+            let ball = ee_body(ee, body);
+            let p = &bump.props[0].body;
+            let mut bad = vec![format!("{} entries", bump.contacts.len())];
+            for (what, port, orig) in [
+                ("chassis velocity", own.chassis.velocity, got.chassis.velocity),
+                ("chassis rates", own.chassis.rates, got.chassis.rates),
+                ("chassis shock", own.chassis.shock, got.chassis.shock),
+                ("chassis twist", own.chassis.twist, got.chassis.twist),
+                ("chassis force", own.force, got.force),
+                ("chassis torque", own.torque, got.torque),
+                ("ball velocity", p.velocity, ball.velocity),
+                ("ball rates", p.rates, ball.rates),
+                ("ball shock", p.shock, ball.shock),
+                ("ball twist", p.twist, ball.twist),
+            ] {
+                if port.to_bits() != orig.to_bits() {
+                    bad.push(format!("{what}: port {:?} original {:?}", port.0, orig.0));
+                }
+            }
+            for (k, (p, o)) in bump.contacts.iter().zip(&list_at(ee, rec)).enumerate() {
+                if p.arm.to_bits() != o.arm.to_bits() || p.other_arm.to_bits() != o.other_arm.to_bits() {
+                    bad.push(format!("entry {k}'s arms: port {:?} {:?} original {:?} {:?}", p.arm, p.other_arm, o.arm, o.other_arm));
+                }
+            }
+            *seen.borrow_mut() = Some(bad);
+        }),
+    );
+    let dt = ee.f32_at(addr("frame_dt").unwrap());
+    ee.call(NODE_UPDATE, &[u64::from(PROPS_NODE)], &[dt], 2_000_000_000);
+    let bad = bad.borrow();
+    let bad = bad.as_ref().expect("the bike's first-substep resolve ran in the node's tick");
+    eprintln!("{bad:#?}");
+    assert_eq!(bad.len(), 1, "{bad:#?}");
 }

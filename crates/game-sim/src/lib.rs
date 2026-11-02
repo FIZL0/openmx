@@ -314,10 +314,12 @@ impl Sim {
             all[0] = *controls;
             return self.step_all(dt, &all, world).swap_remove(0);
         }
-        self.traffic.frame(dt, world);
+        // The props' step waits for the bike's strike and push (S197, [`prop_contact`]).
+        let prop_movers = self.traffic.frame_held(dt, world);
         self.lend_cars();
         self.event_frame(dt);
         if self.plane.is_some() {
+            self.traffic.props.step(dt, &prop_movers, &mut []);
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
             // machine (biplane.p2m2's state). A downed rider's bike and a ghost's are out too. On a
@@ -349,12 +351,19 @@ impl Sim {
         // The bike's body rays against the cars (S137), gathered as the rider-against-rider contacts
         // are, before the bike is stepped.
         let cars = self.car_contacts(0, world, dt);
-        let said = if cars.is_empty() {
+        // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
+        let strike = self.prop_strike(0, dt);
+        let said = if cars.is_empty() && strike.contacts.is_empty() {
             self.rider.frame(&self.phy, &self.tables, controls, dt, world)
         } else {
-            let mut bump = self.bump(0, cars);
-            self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], Some(&mut bump))
+            let props = self.traffic.props.strike(&strike);
+            let mut bump = self.bump(0, mover_contact::merged(cars, strike.contacts));
+            bump.props = props;
+            let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], Some(&mut bump));
+            self.traffic.props.pushed(&bump.props);
+            said
         };
+        self.props_step(dt, &prop_movers);
         let mut said = said;
         said.seam = self.rider.wrap_round(&*world);
         self.ticks += 1;
@@ -943,6 +952,10 @@ pub mod prop_world;
 /// A track's knockable props in a ride (S131): every collection the `.toy` makes, held in the state,
 /// ticked with the track's cars, hashed and sent with a rollback snapshot.
 pub mod prop_set;
+
+/// The riding bike's body rays striking the knockable props' meshes (S197): the struck body woken
+/// and pushed, the bike pushed back.
+pub mod prop_contact;
 
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.

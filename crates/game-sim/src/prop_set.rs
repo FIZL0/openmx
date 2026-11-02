@@ -23,16 +23,18 @@
 //! before). Which scene model each body stands on ([`PropSet::models`]) and the ragdoll's tables the
 //! pins solve with are constants of the track, shared by every clone.
 //!
-//! What is not here yet (filed as its own task, S197): a prop's `f.col` as a collidable the bike, the
-//! rider, the wreck bike, the plane and the other props strike — whose struck listener wakes it — and
-//! the contacts' impulse on its body. Until then nothing in a ride wakes a prop.
+//! Each body's model's `<node>f.col` is its collidable mesh ([`PropSet::shapes`]): the riding bike's
+//! body rays strike it where the body's node stands it, between the node's collide pass and its step
+//! ([`PropSet::search`], [`PropSet::step`]), which wakes the body ([`PropSet::struck`]) and pushes it
+//! (S197, [`crate::prop_contact`]). The rider, the wreck bike, the plane and the other props do not
+//! strike it yet.
 
 #![deny(clippy::float_arithmetic)]
 
 use std::sync::Arc;
 
 use crate::biplane::Area;
-use crate::contact::Node;
+use crate::contact::{Mover, Node, Other};
 use crate::contact_search::Heightfield;
 use crate::eco::Trees;
 use crate::flight_search::{self, Rays};
@@ -42,7 +44,7 @@ use crate::phy::{Ini, Part};
 use crate::prop_world::{Collection, Collision, Edge, Joint, Listener, Object, Unmade};
 use crate::props::{self, Member, NodeBox};
 use crate::ragdoll::{Bone, Tables};
-use crate::track::{self, Placement};
+use crate::track::{self, Mesh, Placement};
 use crate::world::Props;
 use ps2_float::{F, Vf};
 
@@ -59,6 +61,10 @@ pub struct PropSet {
     /// Each body's ray probe tree (its model's `m.col`, `None` for a model with none), collection by
     /// collection in object order. A constant of the track.
     pub rays: Arc<Vec<Vec<Option<Rays>>>>,
+    /// Each body's collidable mesh (its model's `f.col`, `None` for a model with none or one that does
+    /// not parse), collection by collection in object order: what the bike's body rays strike (S197,
+    /// [`crate::prop_contact`]). A constant of the track.
+    pub shapes: Arc<Vec<Vec<Option<Mesh>>>>,
 }
 
 impl PropSet {
@@ -109,6 +115,9 @@ impl PropSet {
         let mut trees = Vec::with_capacity(kept.len());
         // Each model's ray file, read once: `None` where it has none, or it does not parse (said).
         let mut ray_files: std::collections::BTreeMap<String, Option<Rays>> = std::collections::BTreeMap::new();
+        // And its collidable mesh, the same way (S197).
+        let mut shape_files: std::collections::BTreeMap<String, Option<Mesh>> = std::collections::BTreeMap::new();
+        let mut shapes = Vec::with_capacity(kept.len());
         let mut bodies = bodies.into_iter().peekable();
         for (c, coll) in kept.iter().enumerate() {
             let mut parts: Vec<(&Part, &str)> = Vec::new();
@@ -116,6 +125,7 @@ impl PropSet {
             let mut frames: Vec<Mat4> = Vec::new();
             let mut colliders = Vec::new();
             let mut probes = Vec::new();
+            let mut meshes = Vec::new();
             while let Some(made) = bodies.next_if(|p| p.collection == c) {
                 let m = coll.members[made.member];
                 let entry = &coll.pco.parts[m.part];
@@ -135,6 +145,18 @@ impl PropSet {
                     }
                 });
                 probes.push(probe.clone());
+                let file = props::shape_file(&models[m.model].file);
+                let mesh = shape_files.entry(file.clone()).or_insert_with(|| {
+                    let bytes = psg(&file)?;
+                    match Mesh::parse(&bytes) {
+                        Ok(m) => Some(m),
+                        Err(why) => {
+                            said.push(format!("{}: {file}: {why}", coll.name));
+                            None
+                        }
+                    }
+                });
+                meshes.push(mesh.clone());
             }
             let (mut world, unmade) = Collection::new(&coll.pco, &parts, bones, &frames, &tables.curve);
             for u in unmade {
@@ -148,9 +170,10 @@ impl PropSet {
             }
             on.push(coll.members.iter().map(|m| m.model).collect());
             trees.push(probes);
+            shapes.push(meshes);
             collections.push(world);
         }
-        let set = PropSet { collections, models: Arc::new(on), tables: Some(tables), rays: Arc::new(trees) };
+        let set = PropSet { collections, models: Arc::new(on), tables: Some(tables), rays: Arc::new(trees), shapes: Arc::new(shapes) };
         (set, said)
     }
 
@@ -169,21 +192,47 @@ impl PropSet {
     /// ([`Collection::search`]), then every collection's step and listeners ([`Collection::step`]), in
     /// the order they were made.
     pub fn frame_among(&mut self, dt: F, field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
-        let Some(tables) = &self.tables else { return };
+        let movers = self.search(dt, field, props, trees);
+        self.step(dt, &movers, &mut []);
+    }
+
+    /// The first half of [`PropSet::frame_among`], the node's collide pass: every filed collision
+    /// object's search. Answers the movers the hits name, for [`PropSet::step`]: what a riding bike
+    /// strikes goes in between (S197, [`crate::prop_contact`]).
+    pub fn search(&mut self, dt: F, field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) -> Vec<Mover> {
+        if self.tables.is_none() {
+            return Vec::new();
+        }
         for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
             c.search(dt, rays, field, props, trees);
         }
-        let movers = props.map(|p| flight_search::movers(&p.props)).unwrap_or_default();
+        props.map(|p| flight_search::movers(&p.props)).unwrap_or_default()
+    }
+
+    /// The second half of [`PropSet::frame_among`]: every collection's step and listeners, the
+    /// contacts' `movers` the search's, and `strikers` the riding bikes a struck body's mirrored
+    /// contacts name (S197: by player, [`crate::prop_contact`]).
+    pub fn step(&mut self, dt: F, movers: &[Mover], strikers: &mut [Other<'_>]) {
+        let Some(tables) = &self.tables else { return };
         for c in &mut self.collections {
-            c.step(dt, tables, &movers);
+            c.step_among(dt, tables, movers, strikers);
         }
     }
 
-    /// Wake one body, as a strike does: its collection activated and the body enabled.
+    /// Wake one body: its collection activated and the body enabled.
     pub fn wake(&mut self, collection: usize, object: usize) {
         let c = &mut self.collections[collection];
         c.activate();
         c.enable(object);
+    }
+
+    /// Wake one body as a strike does (S195, S197): the body enabled first, then its collection
+    /// activated, so the object's listener goes on the world node ahead of the collection's settle —
+    /// the reverse of [`PropSet::wake`], and the order the sleep tick reads.
+    pub fn struck(&mut self, collection: usize, object: usize) {
+        let c = &mut self.collections[collection];
+        c.enable(object);
+        c.activate();
     }
 
     /// What a wheel standing on a prop's `f.col` reads (S169, [`Collection::under`]): the body's

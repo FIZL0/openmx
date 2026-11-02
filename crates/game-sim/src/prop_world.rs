@@ -430,9 +430,16 @@ impl Collection {
     /// [`Collection::tick`] after a [`Collection::search`]: the contacts' `movers` are what the search's
     /// hits name.
     pub fn step(&mut self, dt: F, tables: &Tables, movers: &[Mover]) {
+        self.step_among(dt, tables, movers, &mut []);
+    }
+
+    /// [`Collection::step`] with the collision objects that struck these bodies (S197): what a mirrored
+    /// contact on a body's list names (its other side, by index into `others`), which the force
+    /// listener's resolve reads.
+    pub fn step_among(&mut self, dt: F, tables: &Tables, movers: &[Mover], others: &mut [Other<'_>]) {
         if self.active {
             let world = self.world;
-            world.step(dt, &mut Lists { c: self, tables, movers });
+            world.step(dt, &mut Lists { c: self, tables, movers, others });
         }
         let mut i = 0;
         while i < self.listeners.len() {
@@ -725,13 +732,14 @@ fn listen(list: &mut Vec<Listener>, l: Listener) {
 }
 
 /// The collection's world as its step sees it.
-struct Lists<'a> {
+struct Lists<'a, 'o> {
     c: &'a mut Collection,
     tables: &'a Tables,
     movers: &'a [Mover],
+    others: &'a mut [Other<'o>],
 }
 
-impl Dynamics for Lists<'_> {
+impl Dynamics for Lists<'_, '_> {
     fn count(&self, list: List) -> i32 {
         let c = &self.c;
         (match list {
@@ -759,10 +767,11 @@ impl Dynamics for Lists<'_> {
         let bone = &mut self.c.bones[k];
         let o = &mut self.c.objects[k];
         let movers = self.movers;
+        let others = &mut *self.others;
         let pushed = biplane::collision_force(&mut bone.body, o.gravity, |body| {
             if let Some(c) = o.collision.as_mut() {
                 let mut rigid = Weighed { body, mass: bone.mass };
-                contact::resolve(&mut c.collider, &mut rigid, &mut c.record.contacts, &mut [], movers, true);
+                contact::resolve(&mut c.collider, &mut rigid, &mut c.record.contacts, others, movers, true);
             }
         });
         if pushed {
