@@ -40,7 +40,7 @@ const TURNING: F = F(1.5);
 /// The bike's up axis is tipped far enough for a foot to come off when its `y` is under this.
 const TIPPED: F = F(0.9);
 
-/// The grid's mix past which the right foot comes off, and under which the left one does.
+/// The request's pitch past which the right foot comes off, and under which the left one does.
 const MIX_RIGHT: F = F(0.7);
 const MIX_LEFT: F = F(0.3);
 
@@ -57,7 +57,7 @@ pub struct Input {
     pub yaw: F,
     /// The vehicle animation's state; only the riding grid lifts one foot.
     pub clip: i32,
-    /// The grid's fore-and-aft mix (the request's `pitch`).
+    /// The request's `pitch`: the rider's sideways pose axis, a half when upright.
     pub mix: F,
     /// The bike's orientation.
     pub quat: Vf,
@@ -65,14 +65,16 @@ pub struct Input {
 
 impl Input {
     /// What the shell's riding request hands the switch ([`crate::ragdoll_riding::request`]): the
-    /// ride's forward speed, its rates and orientation, and the vehicle animation's state and mix.
-    pub fn of(ride: &Ride, veh: &Driver) -> Input {
+    /// ride's forward speed, its rates and orientation, the vehicle animation's state, and the
+    /// request's `pitch` — the rider's sideways pose axis as the state pack latched it
+    /// ([`crate::rider::Rider::packed_pose`]), not the grid's fore-and-aft mix (S235).
+    pub fn of(ride: &Ride, veh: &Driver, pose: F) -> Input {
         let c = &ride.chassis;
         Input {
             speed: F(c.local_vel.z()),
             yaw: F(c.ang_vel.y()),
             clip: veh.state,
-            mix: veh.mix.value,
+            mix: pose,
             quat: c.quat,
             ..Input::default()
         }

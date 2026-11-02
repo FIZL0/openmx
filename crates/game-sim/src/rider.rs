@@ -1419,7 +1419,7 @@ impl Rider {
         // The foot switch runs where the body actor runs it (V36): on every tick that is neither a
         // wreck nor a pose off the clip table, off what the shell's riding request hands the ragdoll.
         if body.machine.mode != rider_anim::Mode::Wrecked && body.machine.mode != rider_anim::Mode::Posed {
-            feet.step(dt, &crate::foot_down::Input::of(ride, &body.veh));
+            feet.step(dt, &crate::foot_down::Input::of(ride, &body.veh, *packed_pose));
         }
         frame
     }

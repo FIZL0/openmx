@@ -2356,3 +2356,101 @@ fn the_2p_riders_eased_poses() {
     }
     assert_eq!(all, TWO_P_EASED_POSES, "the eased axes and joints, P1 then P2");
 }
+
+/// **The rider helps the bike up a slow climb** (S235). The original has no push clip of its own: on
+/// a climb slow enough the body's foot switch lets go of both foot pins, the feet drop off the pegs
+/// to the ground, and the riding grid blends its stand pose in under the same speed. Stepped from
+/// each tick of `context/capture/s235/pulse.csv` (git-ignored; made by
+/// `research/journal/2026-11-01-s235-rider-push-uphill/capture/`: free09's hill north of the first
+/// recording's start, crawled up a ~26° face on pulsed throttle), the port's switch lets go and takes
+/// hold on the original's ticks with its fades to the bit, and on the climb the feet are off exactly
+/// while the bike is under [`STAND_SPEED`] and back on above it — no slope or throttle threshold.
+#[test]
+fn the_rider_puts_its_feet_down_on_a_slow_climb() {
+    use game_sim::foot_down::{Feet, Input};
+    use game_sim::ragdoll_riding::STAND_SPEED;
+    use std::collections::HashMap;
+    let Ok(kit) = ps2_oracle::Kit::load().map_err(|why| skip(&why)) else { return };
+    let rel = "capture/s235/pulse.csv";
+    let local = kit.root.join("context").join(rel);
+    let path = if local.exists() { local } else { kit.ctx(rel) };
+    if !path.exists() {
+        skip(&format!("{} is not there (S235's capture: research/journal/2026-11-01-s235-rider-push-uphill)", path.display()));
+        return;
+    }
+    let text = std::fs::read_to_string(path).expect("read the capture");
+    let mut lines = text.lines();
+    let cols: Vec<String> = lines.next().expect("a header").split(',').map(str::to_string).collect();
+    let cap: Vec<HashMap<String, String>> = lines.map(|l| cols.iter().cloned().zip(l.split(',').map(str::to_string)).collect()).collect();
+    let f = |r: &HashMap<String, String>, c: &str| F(r[c].parse::<f64>().unwrap_or_else(|_| panic!("{c}: {:?}", r[c])) as f32);
+    let on = |r: &HashMap<String, String>, c: &str| r[c] != "0";
+    let first = &cap[0];
+    let mut feet = Feet {
+        held: [on(first, "pin2_on"), on(first, "pin3_on")],
+        fade: [f(first, "foot_fade.x"), f(first, "foot_fade.y")],
+        weight: [f(first, "pin2_gains.z"), f(first, "pin3_gains.z")],
+    };
+    let (mut down, mut up) = (0usize, 0usize);
+    for (i, r) in cap.iter().enumerate().skip(1) {
+        assert_eq!(r["bike_ctl_src"], "1", "row {i} is not the human's bike");
+        let gap = r["frame_counter"].parse::<u32>().unwrap() - cap[i - 1]["frame_counter"].parse::<u32>().unwrap();
+        assert_eq!(gap, 1, "row {i}: a tick is missing");
+        let quat = Vf::new(f(r, "req_quat.x").0, f(r, "req_quat.y").0, f(r, "req_quat.z").0, f(r, "req_quat.w").0);
+        let input = Input {
+            looking: on(r, "req_looking"),
+            tucked: on(r, "req_tucked"),
+            speed: f(r, "req_speed"),
+            yaw: f(r, "req_rates.y"),
+            clip: r["clip"].parse().unwrap(),
+            mix: f(r, "req_pitch"),
+            quat,
+        };
+        // A slow frame runs two ticks under one row (frame 3045: the fade and the speed both move
+        // twice as far), and a row can repeat the last one with no tick run at all (3244); the fade
+        // still counting down, and the request not moving, say which.
+        let was = f(&cap[i - 1], "foot_fade.x").0 - f(r, "foot_fade.x").0;
+        let same = ["req_speed", "req_rates.y", "req_quat.x", "req_quat.y", "foot_fade.x"].iter().all(|c| r[*c] == cap[i - 1][*c]);
+        let ticks = if same { 0 } else if f(r, "foot_fade.x").0 > 0.0 && was > 0.05 { 2 } else { 1 };
+        for _ in 0..ticks {
+            feet.step(F(0.033_33), &input);
+        }
+        assert_eq!(feet.held, [on(r, "pin2_on"), on(r, "pin3_on")], "row {i} (frame {}): {input:?}", r["frame_counter"]);
+        assert_eq!(feet.fade.map(|x| x.0.to_bits()), [f(r, "foot_fade.x").0.to_bits(), f(r, "foot_fade.y").0.to_bits()], "row {i}: fades");
+        // The bike's nose, off its orientation: on the climb it points more than ~15° up.
+        let (x, y, z, w) = (quat.x() as f64, quat.y() as f64, quat.z() as f64, quat.w() as f64);
+        let nose_up = 2.0 * (y * z - w * x);
+        if nose_up > 0.25 && input.yaw.0.abs() < 1.5 && !input.looking && !input.tucked {
+            let slow = input.speed < STAND_SPEED;
+            assert_eq!(feet.held, [!slow, !slow], "row {i}: on the climb at {} ft/s", input.speed.0);
+            if slow { down += 1 } else { up += 1 }
+        }
+    }
+    println!("on the climb: {down} ticks with the feet down, {up} on the pegs");
+    assert!(down > 40 && up > 40, "the capture never crawled the climb ({down} down, {up} up)");
+}
+
+/// **A slow climb leaning forward keeps both feet on**: the one-foot lift reads the request's
+/// `pitch`, the rider's *sideways* pose axis (+0x170, what [`game_sim::ragdoll_riding::request`]
+/// hands the ragdoll), so a rider crawling up a hill tipped past the lift's 0.9 and leaning hard
+/// forward lifts no foot, and the same rider leaning into a turn puts the inside one out. Before
+/// S235 the port read the grid's eased fore-and-aft mix there, and a forward lean lifted the right foot.
+#[test]
+fn a_forward_lean_on_a_slow_climb_lifts_no_foot() {
+    use game_sim::foot_down::{Feet, Input};
+    use game_sim::ride::Ride;
+    let mut ride = Ride::default();
+    ride.chassis.local_vel = Vf::new(0.0, 0.0, 20.0, 0.0);
+    // nose up 30° about the bike's x axis: up.y is cos 30°, under the lift's 0.9
+    let half = 15f32.to_radians();
+    ride.chassis.quat = Vf::new(-half.sin(), 0.0, 0.0, half.cos());
+    let mut veh = vehicle_anim::Driver { state: TURN_RIDING, ..Default::default() };
+    veh.mix.value = F(1.0);
+    let lean = |pose: f32| {
+        let mut feet = Feet::default();
+        feet.step(F(0.033_33), &Input::of(&ride, &veh, F(pose)));
+        feet.held
+    };
+    assert_eq!(lean(0.5), [true, true], "upright, leaning full forward");
+    assert_eq!(lean(0.9), [true, false], "leaning right");
+    assert_eq!(lean(0.1), [false, true], "leaning left");
+}
