@@ -9552,6 +9552,14 @@ fn music_packs(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, Str
     packs
 }
 
+/// A mod kind as the store's pages name it: its tab's name, but World for a world (P241).
+fn store_kind(kind: modstore::Kind) -> &'static str {
+    match kind {
+        modstore::Kind::World => "World",
+        k => k.tab().map_or("Mod", |t| menu::STORE_TABS[t]),
+    }
+}
+
 /// The mod store as the front end runs it (P198): `modstore.rs`'s store, its last listing, and the
 /// previews asked for, by the zip's sha256.
 struct StoreFront {
@@ -9600,6 +9608,7 @@ impl StoreFront {
                     source: e.meta.source.clone(),
                     category: e.meta.category_word(),
                     size: e.meta.size,
+                    world: e.meta.kind == modstore::Kind::World,
                     verified: e.verified,
                     got,
                     picture: format!("store:{}", e.meta.sha256),
@@ -9621,7 +9630,7 @@ impl StoreFront {
             .map(|l| menu::Upload {
                 id: l.id.clone(),
                 name: l.name.clone(),
-                kind: l.kind.tab().map_or("Mod", |t| menu::STORE_TABS[t]).to_string(),
+                kind: store_kind(l.kind).to_string(),
                 status: old.iter().find(|o| o.id == l.id).and_then(|o| o.status.clone()),
             })
             .collect();
@@ -9635,7 +9644,7 @@ impl StoreFront {
             .map(|e| menu::Posted {
                 key: e.key(),
                 name: e.meta.name.clone(),
-                kind: e.meta.kind.tab().map_or("Mod", |t| menu::STORE_TABS[t]).to_string(),
+                kind: store_kind(e.meta.kind).to_string(),
                 size: e.meta.size,
                 verified: e.verified,
                 pr: modstore::up::pr_of(&e.rev),

@@ -403,3 +403,16 @@ fn browse_filters_the_tracks_by_category() {
     assert!(!m.store.filtering);
     assert_eq!(lit(&m).as_deref(), Some("c/m0"));
 }
+
+/// P241: worlds are cards on Tracks like any track, and Download All takes them; in the browser,
+/// which rides no world yet, it passes them by.
+#[test]
+fn download_all_passes_worlds_by_in_the_browser() {
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    m.open(Screen::Store);
+    m.store.cards = vec![card("a/t0", 0, Got::No), Card { world: true, ..card("a/w0", 0, Got::No) }, card("a/t1", 0, Got::Update)];
+    m.store.listed = Listed::Shown;
+    assert_eq!(m.store.downloadable(), [0, 1, 2]);
+    m.store.web = true;
+    assert_eq!(m.store.downloadable(), [0, 2]);
+}

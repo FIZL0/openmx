@@ -1649,7 +1649,7 @@ impl Pen<'_> {
             let by = self.fit(Weight::Bold, &by, 0.85, room);
             let dim = if on { PEACH } else { DUST };
             self.text(Weight::Bold, &by, tx, pb[1] + ph + 2.55, 0.85, 0.0, dim, Align::Left);
-            let left = format!("{}{}", size_words(c.size), if c.verified { " · Verified" } else { " · Not reviewed" });
+            let left = format!("{}{}{}", if c.world { "World · " } else { "" }, size_words(c.size), if c.verified { " · Verified" } else { " · Not reviewed" });
             self.text(Weight::Bold, &left, tx, pb[1] + ph + 3.6, 0.85, 0.0, dim, Align::Left);
             let state = match (&c.progress, c.got) {
                 (Some((share, _)), _) => format!("{:.0}%", share * 100.0),
@@ -1669,6 +1669,11 @@ impl Pen<'_> {
         if shop.tab == TEXTURES_TAB && !shop.off {
             let say = if shop.web { "Texture packs draw in the desktop game; in the browser they are only kept" } else { PACKS_ONLINE };
             let say = self.fit(Weight::Bold, say, 0.9, w);
+            self.text(Weight::Bold, &say, x0, Pen::mid(top + 2.0 * (ch + gap) + 1.4, 0.9), 0.9, 0.0, DUST, Align::Left);
+        }
+        // P241: the browser lists worlds and does not download them
+        if shop.tab == 0 && shop.web && shop.shown().iter().any(|&i| shop.cards[i].world) {
+            let say = self.fit(Weight::Bold, "Worlds ride in the desktop and iPhone games: the browser lists them, and doesn't download them", 0.9, w);
             self.text(Weight::Bold, &say, x0, Pen::mid(top + 2.0 * (ch + gap) + 1.4, 0.9), 0.9, 0.0, DUST, Align::Left);
         }
         self.title(Screen::Store.title());

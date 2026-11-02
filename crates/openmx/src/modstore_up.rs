@@ -29,7 +29,11 @@ use sha2::{Digest, Sha256};
 use super::{decode_preview, hex, meta_of, parts, plain, plain_text, rev_part, Cached, Entry, Event, Kind, Meta, Part, Store, ZipDir, CACHE, EXTENSIONS, MAX_ENTRIES, MAX_FILE, MAX_PREVIEW, MAX_TOTAL, MAX_ZIP, REPO, STAMP};
 #[cfg(not(target_arch = "wasm32"))]
 use super::{parse_check, safe, HF};
+use crate::menu::size_words;
 use crate::track_mods::{self, Json};
+
+/// P241: tries at one part of a multipart upload.
+const PART_TRIES: usize = 3;
 
 /// The kept token's file, beside settings.txt: the account's name, then the token, a line each.
 pub const TOKEN: &str = "hf-token.txt";
@@ -178,7 +182,10 @@ pub fn local_of(dir: &Path, folder: &str) -> Option<Local> {
 }
 
 /// The player's own mods in `mods`, by name: every folder of a kind the store takes that is not a
-/// store install. The browser has none (its mods folder holds only the store's).
+/// store install. P241: not MX Unleashed's worlds (`disc_worlds`), which every player's game builds
+/// off their own disc the first time one is ridden — a copy of one in `tracks/` is no one else's to
+/// download, and their `cache/` is no kind's folder. The browser has none (its mods folder holds
+/// only the store's).
 pub fn locals(mods: &Path) -> Vec<Local> {
     let mut out: Vec<Local> = Vec::new();
     #[cfg(not(target_arch = "wasm32"))]
@@ -186,6 +193,9 @@ pub fn locals(mods: &Path) -> Vec<Local> {
         let Ok(list) = std::fs::read_dir(mods.join(folder)) else { continue };
         for e in list.flatten() {
             if e.path().is_dir() && !e.path().join(STAMP).exists() && let Some(l) = local_of(&e.path(), folder) {
+                if l.kind == Kind::World && crate::disc_worlds::is_disc_world(&l.id) {
+                    continue;
+                }
                 out.push(l);
             }
         }
@@ -199,7 +209,10 @@ pub fn locals(mods: &Path) -> Vec<Local> {
 // ---- packing: a mod folder as the store's mod.zip ------------------------------------------------
 
 /// Every file under `dir`, as (its path in the mod, where it is), sorted; checked as Install checks a
-/// zip's entries: plain paths, data extensions, no links, within the caps.
+/// zip's entries: plain paths, data extensions, no links, within the caps. P241: the caps read off
+/// the files' sizes before a byte is packed, so a world too big for the store is refused up front,
+/// never part way through its upload (and they keep the zip within [`MAX_ZIP`]: deflate never makes
+/// an entry bigger, and the headers of [`MAX_ENTRIES`] files are a few MB).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn files_of(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     fn walk(at: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>, total: &mut u64) -> Result<(), String> {
@@ -230,15 +243,15 @@ pub fn files_of(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
                 return Err(format!("`{path}`: a .{ext} file, and a mod is data only"));
             }
             if meta.len() > MAX_FILE {
-                return Err(format!("`{path}` is more than {} MB", MAX_FILE >> 20));
+                return Err(format!("`{path}` is {}, and one file of a store mod is {} at most", size_words(meta.len()), size_words(MAX_FILE)));
             }
             *total += meta.len();
             if *total > MAX_TOTAL {
-                return Err(format!("more than {} MB of files", MAX_TOTAL >> 20));
+                return Err(format!("too big for the store: its files come to more than {}, the most a store mod may hold", size_words(MAX_TOTAL)));
             }
             out.push((path, e.path()));
             if out.len() > MAX_ENTRIES {
-                return Err(format!("more than {MAX_ENTRIES} files"));
+                return Err(format!("too many files for the store: more than {MAX_ENTRIES}, and a store mod has {MAX_ENTRIES} at most"));
             }
         }
         Ok(())
@@ -255,7 +268,16 @@ pub fn files_of(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
 /// one file in memory at a time. Its size and sha256.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn pack(files: &[(String, PathBuf)], to: &Path) -> Result<(u64, String), String> {
+    pack_telling(files, to, &|_| {})
+}
+
+/// [`pack`], telling how far it is (P241: a world is hundreds of MB): `tell` gets the MB read and
+/// the MB there are, each [`STEP_MB`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn pack_telling(files: &[(String, PathBuf)], to: &Path, tell: &dyn Fn((u64, u64))) -> Result<(u64, String), String> {
     use std::io::Write;
+    let all: u64 = files.iter().map(|f| std::fs::metadata(&f.1).map_or(0, |m| m.len())).sum();
+    let mut read = 0u64;
     let mut out = std::io::BufWriter::new(std::fs::File::create(to).map_err(|e| format!("can't write {}: {e}", to.display()))?);
     let (mut at, mut hash, mut dir) = (0u64, Sha256::new(), Vec::new());
     let mut put = |b: &[u8], at: &mut u64| -> Result<(), String> {
@@ -270,6 +292,10 @@ pub fn pack(files: &[(String, PathBuf)], to: &Path) -> Result<(u64, String), Str
     let le32 = |n: u64| (n as u32).to_le_bytes();
     for (name, path) in files {
         let data = std::fs::read(path).map_err(|e| format!("can't read {name}: {e}"))?;
+        if (read + data.len() as u64) / (STEP_MB << 20) != read / (STEP_MB << 20) {
+            tell(((read + data.len() as u64) >> 20, all >> 20));
+        }
+        read += data.len() as u64;
         let crc = super::crc32(&data);
         let packed_already = matches!(name.rsplit_once('.').map(|x| x.1.to_ascii_lowercase()).as_deref(), Some("ogg" | "png" | "webp"));
         let deflated = (!packed_already).then(|| miniz_oxide::deflate::compress_to_vec(&data, 6)).filter(|d| d.len() < data.len());
@@ -382,10 +408,20 @@ impl Drop for Packed {
 /// parsers for its kind (on the folder it was zipped from: the same bytes, the CRCs say).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn package(mods: &Path, l: &Local, author: &str) -> Result<Packed, String> {
+    package_telling(mods, l, author, &|_| {})
+}
+
+/// How often a long pack or check says how far it is: every this many MB.
+const STEP_MB: u64 = 16;
+
+/// [`package`], with a status line for each [`STEP_MB`] packed and checked (P241: a world's zip is
+/// hundreds of MB, a minute or more of both).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn package_telling(mods: &Path, l: &Local, author: &str, tell: &dyn Fn(String)) -> Result<Packed, String> {
     use std::io::{Read, Seek, SeekFrom};
     let files = files_of(&l.dir)?;
     let to = mods.join(format!(".upload-{}.zip", safe(&l.id)));
-    let got = pack(&files, &to);
+    let got = pack_telling(&files, &to, &|(got, all)| tell(format!("Packing {}: {got} / {all} MB", l.name)));
     let (size, sha256) = got.inspect_err(|_| {
         let _ = std::fs::remove_file(&to);
     })?;
@@ -402,7 +438,14 @@ pub fn package(mods: &Path, l: &Local, author: &str) -> Result<Packed, String> {
     // the store's own meta check, as Browse reads it back
     let meta = meta_of(&serde_json::to_vec(&p.meta).unwrap_or_default(), &l.id).ok_or("its meta.json would not read back (name, id or size)")?;
     dir.check_mod_json(&mut read, &meta)?;
-    dir.each(&mut read, |_, _| Ok(()))?;
+    let (all, mut done) = (dir.files.iter().map(|f| f.size).sum::<u64>(), 0u64);
+    dir.each(&mut read, |_, b| {
+        if (done + b.len() as u64) / (STEP_MB << 20) != done / (STEP_MB << 20) {
+            tell(format!("Checking {}: {} / {} MB", l.name, (done + b.len() as u64) >> 20, all >> 20));
+        }
+        done += b.len() as u64;
+        Ok(())
+    })?;
     parse_check(mods, l.kind, &l.id)?;
     p.zip = Blob::File(to, size, meta.sha256.clone());
     p.meta = meta;
@@ -414,6 +457,11 @@ pub fn package(mods: &Path, l: &Local, author: &str) -> Result<Packed, String> {
 #[cfg(target_arch = "wasm32")]
 pub fn package(_: &Path, _: &Local, _: &str) -> Result<Packed, String> {
     Err("uploads run in the desktop game".into())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn package_telling(mods: &Path, l: &Local, author: &str, _: &dyn Fn(String)) -> Result<Packed, String> {
+    package(mods, l, author)
 }
 
 /// A track's or world's picture as `preview.webp`: its own `previews/track.png`, else the shell's
@@ -646,10 +694,22 @@ impl Store {
                 let mut done = Vec::new();
                 for (i, (n, url)) in parts.iter().enumerate() {
                     tell(format!("Uploading {file}: {} / {mb} MB", (i as u64 * size) >> 20));
-                    let chunk = b.read(i as u64 * size, size as usize)?;
-                    let r = self.client.put(url).body(chunk).send().await.map_err(|e| format!("upload cut short: {e}"))?;
-                    let r = r.error_for_status().map_err(|e| format!("upload refused: {e}"))?;
-                    let etag = r.headers().get("etag").and_then(|v| v.to_str().ok()).ok_or("upload: no ETag back")?.to_string();
+                    // P241: a part cut short (or refused by a busy server) is sent again
+                    let mut tries = 0;
+                    let etag = loop {
+                        tries += 1;
+                        let chunk = b.read(i as u64 * size, size as usize)?;
+                        let why = match self.client.put(url).body(chunk).send().await {
+                            Ok(r) if r.status().is_success() => break r.headers().get("etag").and_then(|v| v.to_str().ok()).ok_or("upload: no ETag back")?.to_string(),
+                            Ok(r) if !r.status().is_server_error() => return Err(format!("upload refused: {}", r.status().as_u16())),
+                            Ok(r) => format!("upload refused: {}", r.status().as_u16()),
+                            Err(e) => format!("upload cut short: {e}"),
+                        };
+                        if tries >= PART_TRIES {
+                            return Err(format!("{why}, {PART_TRIES} times on part {n}: Upload again to retry"));
+                        }
+                        tell(format!("Uploading {file}: part {n} cut short, sending it again"));
+                    };
                     done.push(json!({ "partNumber": n, "etag": etag }));
                 }
                 self.call(self.client.post(href).header("Accept", lfs).header("Content-Type", lfs).body(json!({ "oid": oid, "parts": done }).to_string())).await?;
@@ -775,7 +835,7 @@ impl Store {
     async fn upload_one(&self, l: &Local, name: &str, token: &str, own: &mut Option<Vec<Entry>>) -> Result<Up, String> {
         let tell = |line: String| self.send(Event::Upload(l.id.clone(), Up::Working(line)));
         tell(format!("Checking {}", l.name));
-        let p = package(&self.mods, l, name)?;
+        let p = package_telling(&self.mods, l, name, &tell)?;
         if own.is_none() {
             tell("Reading your mods on the store".into());
             *own = Some(self.uploads_of(name).await?);

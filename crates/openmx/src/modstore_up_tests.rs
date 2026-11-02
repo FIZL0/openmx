@@ -50,6 +50,10 @@ struct Hub {
     parts: HashMap<String, BTreeMap<u32, Vec<u8>>>,
     commits: Vec<(String, String)>,
     multipart: usize,
+    /// P241: this many part PUTs are refused (503), as a cut or a busy store.
+    fail_parts: usize,
+    /// Every request, as `METHOD path`.
+    asked: Vec<String>,
 }
 
 struct Fake {
@@ -114,6 +118,7 @@ impl Fake {
     }
 
     fn route(hub: &mut Hub, base: &str, method: &str, path: &str, body: &[u8], who: Option<&str>) -> (u16, Vec<u8>) {
+        hub.asked.push(format!("{method} {path}"));
         let api = format!("/api/datasets/{REPO}");
         let missing = (404, b"{\"error\":\"not found\"}".to_vec());
         let refused = (401, b"{\"error\":\"Invalid credentials in Authorization header\"}".to_vec());
@@ -173,6 +178,10 @@ impl Fake {
             "PUT" if path.starts_with("/lfs-put/") => {
                 hub.lfs.insert(path["/lfs-put/".len()..].to_string(), body.to_vec());
                 (200, Vec::new())
+            }
+            "PUT" if path.starts_with("/lfs-part/") && hub.fail_parts > 0 => {
+                hub.fail_parts -= 1;
+                (503, b"{\"error\":\"slow down\"}".to_vec())
             }
             "PUT" if path.starts_with("/lfs-part/") => {
                 let (oid, n) = path["/lfs-part/".len()..].split_once('/').unwrap();
@@ -624,5 +633,148 @@ fn a_texture_pack_uploads() {
     std::fs::rename(pack.join("textures/small-00000000000000bb.png"), pack.join("textures/00000000000000bb.png")).unwrap();
     let why = package(&mods, &l, "tester").err().unwrap();
     assert!(why.contains("no textures"), "{why}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- P241: worlds ------------------------------------------------------------------------------
+
+/// P241: a small world of the player's own in `mods/tracks/<id>`, as openmx-mods' stitch lays one
+/// out: two generated tiles, the first named `tile` (as an installed track may be), and a join.
+fn world(mods: &Path, id: &str, tile: &str) -> Local {
+    use game_sim::tiles::generate;
+    let dir = mods.join("tracks").join(id);
+    let write = |rel: &str, b: &[u8]| {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b).unwrap();
+    };
+    let height = |x: u32, z: u32| 40.0 + f64::from((x * 7 + z * 3) % 11);
+    let mut listed = Vec::new();
+    for (i, (name, cells, spacing)) in [(tile, (4u32, 3u32), 9.0f32), ("w_two", (2, 2), 4.5)].into_iter().enumerate() {
+        let stem = format!("T{i}");
+        write(&format!("tiles/{name}/mod.json"), format!(r#"{{"standard": 1, "kind": "track", "id": "{name}", "name": "Tile {name}", "source": {{"game": "Made by me"}}, "version": "1.0.0", "author": "me", "permission": "public-domain", "todo": []}}"#).as_bytes());
+        let scene = format!("[SceneInfo]\r\nSceneName=Tile {name}\r\nDefaultStartPosition=100.00,40.00,100.00\r\nDefaultStartDirection=1.00,0.00,0.00\r\n[Environment]\r\nTerrainFile={stem}.trn\r\nTerrainWidth={}\r\nTerrainBreadth={}\r\nTerrainWidthScale={spacing:.2}\r\nTerrainBreadthScale={spacing:.2}\r\n", cells.0, cells.1);
+        write(&format!("tiles/{name}/Env/{stem}/{stem}.scn"), scene.as_bytes());
+        write(&format!("tiles/{name}/Env/{stem}/{stem}.ps2.trn"), &generate::terrain(name, cells, spacing, height, |_, _| 1));
+        listed.push(format!(r#"{{"tile": "{name}", "at": [{}.0, 0.0], "keep": [0, 0, {}, {}]}}"#, 1000 * i, cells.0 * 16 - 1, cells.1 * 16 - 1));
+    }
+    write("joins/j0/j0.ps2.trn", &generate::terrain("j0", (3, 1), 6.0, height, |_, _| 1));
+    let json = format!(
+        r#"{{"standard": 1, "kind": "world", "id": "{id}", "name": "World {id}", "category": "World", "source": {{"game": "Combined", "games": ["Made by me"]}}, "version": "1.0.0", "author": "me", "permission": "public-domain", "tiles": [{}], "joins": [{{"join": "j0", "at": [600.0, 0.0]}}], "drop": [], "sky": "{tile}", "spawn": {{"tile": "{tile}"}}, "todo": []}}"#,
+        listed.join(", ")
+    );
+    write("mod.json", json.as_bytes());
+    local_of(&dir, "tracks").expect("the world is one of the player's mods")
+}
+
+/// P241: a small made world packs, goes up in LFS parts (one part cut once and sent again), is in the
+/// maintainer's index as a world, and another player's Browse lists it as a world with its size and
+/// installs it into `mods/tracks/<id>`, where the shell's world reader reads it and Free Ride lists it
+/// — beside an installed track of the same id as one of its tiles, each read from its own folder.
+#[test]
+fn a_made_world_goes_up_and_comes_back_a_world() {
+    let fake = Fake::start();
+    let (dir, mods) = scratch("world");
+    let s = Store::new(&fake.base, &dir, &mods);
+    assert_eq!(sign_in(&s, TOKEN_OK), Ok("tester".into()));
+    let l = world(&mods, "my_world", "shared_tile");
+    assert_eq!((l.kind, l.name.as_str(), l.category.as_str()), (Kind::World, "World my_world", "World"));
+    assert_eq!(locals(&mods).iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["my_world"], "a world's tiles are not mods of their own");
+
+    fake.hub.lock().unwrap().fail_parts = 1;
+    s.upload(vec![l.clone()]);
+    let got = until(&s, |e| matches!(e, Event::Upload(id, up) if id == "my_world" && up.over()));
+    let up = got.iter().rev().find_map(|e| if let Event::Upload(_, up) = e { Some(up.clone()) } else { None }).unwrap();
+    assert!(matches!(&up, Up::Done(line) if line.contains("pull request #1")), "{up:?}");
+    let lines: Vec<&str> = got.iter().filter_map(|e| if let Event::Upload(_, Up::Working(l)) = e { Some(l.as_str()) } else { None }).collect();
+    assert!(lines.iter().any(|l| l.contains("cut short, sending it again")), "{lines:?}");
+    let zip = {
+        let hub = fake.hub.lock().unwrap();
+        assert_eq!((hub.multipart, hub.fail_parts), (1, 0), "in parts, the refused one sent again");
+        let meta: Meta = serde_json::from_slice(&hub.prs[&1].files["mods/my_world/meta.json"]).unwrap();
+        assert_eq!((meta.kind, meta.category.as_str()), (Kind::World, "World"));
+        hub.prs[&1].files["mods/my_world/mod.zip"].clone()
+    };
+    assert!(zip.len() > 600, "big enough to go in parts");
+
+    // the maintainer's index lists it as a world
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let ix = rt.block_on(s.index_now()).unwrap();
+    assert_eq!(ix["entries"][0]["meta"]["kind"], "world", "{ix}");
+
+    // another player, who has a track of a tile's id installed already
+    let (dir2, mods2) = scratch("world-other");
+    let other = Store::new(&fake.base, &dir2, &mods2);
+    let theirs = mods2.join("tracks/shared_tile");
+    std::fs::create_dir_all(theirs.join("Env")).unwrap();
+    std::fs::write(theirs.join("mod.json"), r#"{"standard": 1, "kind": "track", "id": "shared_tile", "name": "Their own", "source": {"game": "Made by them"}, "version": "1.0.0", "author": "them", "permission": "public-domain", "todo": []}"#).unwrap();
+    std::fs::write(theirs.join("Env/THEIRS.scn"), "[SceneInfo]\r\nSceneName=Theirs\r\n").unwrap();
+    other.list(true);
+    let listed = match until(&other, |e| matches!(e, Event::Listing(_))).into_iter().find_map(|e| if let Event::Listing(l) = e { Some(l) } else { None }) {
+        Some(Ok(l)) => l,
+        x => panic!("{x:?}"),
+    };
+    assert_eq!(listed.len(), 1);
+    let e = &listed[0];
+    assert_eq!((e.meta.kind, e.meta.kind.tab(), e.meta.size, e.meta.category_word().as_str()), (Kind::World, Some(0), zip.len() as u64, "World"), "on Tracks, as a world, with its size");
+    assert_eq!(Store::have(e, &other.stamps(), &other.own_ids()), crate::modstore::Have::No, "a tile's id is not the world's");
+    other.install(e);
+    let got = until(&other, |ev| matches!(ev, Event::Installed(..)));
+    assert!(got.iter().any(|ev| matches!(ev, Event::Installed(_, Ok(_)))), "{got:?}");
+
+    let w = crate::worlds::find(&mods2, "my_world").expect("the shell reads the installed world");
+    assert_eq!((w.tile_count, w.pieces.len()), (2, 3));
+    assert!(w.pieces.iter().all(|p| p.dir.starts_with(mods2.join("tracks/my_world"))), "every piece from the world's own folder");
+    assert_eq!(crate::worlds::listed(&mods2), [("my_world".to_string(), "World my_world".to_string())], "Free Ride lists it");
+    assert_eq!(crate::track_mods::find(&mods2, "shared_tile").map(|t| t.stem), Ok("THEIRS".into()), "their own track is left as it was");
+    for rel in ["tiles/shared_tile/Env/T0/T0.ps2.trn", "joins/j0/j0.ps2.trn"] {
+        assert_eq!(std::fs::read(mods2.join("tracks/my_world").join(rel)).unwrap(), std::fs::read(l.dir.join(rel)).unwrap(), "{rel}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
+}
+
+/// P241: MX Unleashed's worlds are built off each player's own disc: a copy of one in `tracks/` is
+/// not offered for upload, and nor is the stitcher's `cache/`.
+#[test]
+fn the_disc_built_worlds_are_not_offered_for_upload() {
+    let (dir, mods) = scratch("disc-worlds");
+    world(&mods, "world_mxu", "mxu_free06");
+    world(&mods, "world_mxu_free", "mxu_free07");
+    let cache = crate::disc_worlds::cache_dir(&mods, "world_mxu").join("key");
+    std::fs::create_dir_all(cache.join("joins")).unwrap();
+    std::fs::copy(mods.join("tracks/world_mxu/mod.json"), cache.join("mod.json")).unwrap();
+    world(&mods, "my_world", "my_tile");
+    assert_eq!(locals(&mods).iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["my_world"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P241: a world over the store's caps is refused before a byte is packed or sent, in plain words.
+/// Its files are sparse: their sizes are what the caps read.
+#[test]
+fn a_world_over_the_caps_is_refused_before_upload() {
+    let fake = Fake::start();
+    let (dir, mods) = scratch("world-caps");
+    let s = Store::new(&fake.base, &dir, &mods);
+    assert_eq!(sign_in(&s, TOKEN_OK), Ok("tester".into()));
+    let l = world(&mods, "big_world", "big_tile");
+    for i in 0..4 {
+        std::fs::File::create(l.dir.join(format!("tiles/big_tile/Env/T0/fill{i}.dat"))).unwrap().set_len(MAX_FILE).unwrap();
+    }
+    let asked = fake.hub.lock().unwrap().asked.len();
+    let up = upload(&s, &l);
+    assert!(matches!(&up, Up::Failed(why) if why.contains("too big for the store") && why.contains("3.8 GB")), "{up:?}");
+    let hub = fake.hub.lock().unwrap();
+    assert_eq!(hub.asked.len(), asked, "nothing asked of the store: {:?}", &hub.asked[asked..]);
+    assert!(!mods.join(".upload-big_world.zip").exists(), "nothing packed");
+    drop(hub);
+
+    // one file over the most one may be
+    for i in 0..4 {
+        std::fs::remove_file(l.dir.join(format!("tiles/big_tile/Env/T0/fill{i}.dat"))).unwrap();
+    }
+    std::fs::File::create(l.dir.join("tiles/big_tile/Env/T0/fill.dat")).unwrap().set_len(MAX_FILE + 1).unwrap();
+    let why = files_of(&l.dir).unwrap_err();
+    assert!(why.contains("one file of a store mod is 1.0 GB at most"), "{why}");
     let _ = std::fs::remove_dir_all(&dir);
 }
