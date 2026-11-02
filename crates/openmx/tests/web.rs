@@ -609,6 +609,62 @@ fn a_pad_the_browser_shows_on_a_press_rides() {
     assert!(gas > 0.05, "R2 did not move the speedometer ({gas}):\n{text}");
 }
 
+/// A pad through a browser's own Gamepad API (P245, `tests/web/firefox_gamepad.mjs`): headless
+/// Firefox (`tools/firefox.sh`'s pinned release) with a pad added by Firefox's gamepad test service,
+/// which goes through the browser's gamepad service, listing and events as a USB pad does —
+/// where [`a_pad_the_browser_shows_on_a_press_rides`]'s pad is a script shaped as chromium's. The
+/// pad is plugged in on the splash and must stay out of `getGamepads()` until it is pressed; that
+/// first Cross makes it 1P, Cross alone reaches a ride with it seated, L2 keeps the speedometer
+/// still and R2 moves it. The profile turns WebGL off (Firefox's WebGL2 path fails in the page, a
+/// bug of its own, B13) and Firefox has no WebGPU on Linux, so the page draws in software. Skips
+/// without the disc or node, or when Firefox can't be fetched (offline with nothing cached).
+#[test]
+fn a_firefox_pad_rides() {
+    let iso = match Disc::open_configured() {
+        Ok(_) => configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipped: no node");
+        return;
+    }
+    let fetch = Command::new("sh").arg(repo().join("tools/firefox.sh")).output().expect("tools/firefox.sh must be runnable");
+    if !fetch.status.success() {
+        eprintln!("skipped: no Firefox: {}", String::from_utf8_lossy(&fetch.stderr));
+        return;
+    }
+    let firefox = String::from_utf8_lossy(&fetch.stdout).lines().last().unwrap_or("").trim().to_string();
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/firefox_gamepad.mjs");
+    let scratch = std::env::temp_dir().join(format!("openmx-web-firefox-gamepad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let run = Command::new("node")
+        .arg(&drive)
+        .arg(&firefox)
+        .arg(repo().join("web"))
+        .arg(&iso)
+        .arg(scratch.join("profile"))
+        .arg(scratch.join("ride.png"))
+        .env("OPENMX_GPU_PKG", built())
+        .output()
+        .expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    let log = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "firefox_gamepad.mjs failed:\n{log}{text}");
+    let field = |key: &str| -> String { text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string() };
+    assert_eq!(field("listed"), "false", "Firefox listed the pad before any press:\n{log}{text}");
+    assert_eq!(field("first"), "true", "the press that showed the pad did not make it 1P:\n{log}{text}");
+    assert_eq!(field("seated"), "true", "the pad never took a seat on a ride:\n{log}{text}");
+    let braked: f64 = field("braked").parse().expect("braked");
+    let gas: f64 = field("gas").parse().expect("gas");
+    println!("speedometer changed {braked} on the brake, {gas} on the gas ({} drawing)", field("gpu"));
+    assert!(braked < 0.02, "the speedometer moved with L2 held ({braked}):\n{text}");
+    assert!(gas > 0.05, "R2 did not move the speedometer ({gas}):\n{text}");
+}
+
 /// A pad the browser does not map "standard" (P244, `tests/web/pads.mjs`): web/pads.js reads an
 /// evdev pad's trigger and hat axes (Firefox on Linux), chromium's hat switch and a cheap pad's hat
 /// pair as the standard mapping's L2/R2 and d-pad, its sticks off the axes left, and its buttons
