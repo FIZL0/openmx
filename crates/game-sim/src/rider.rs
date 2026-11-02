@@ -848,7 +848,9 @@ impl Rider {
                     let mut machine = *state;
                     machine.step(dt, s, params, |_| None, || page.up()).reset == Some(state::Reset::Now)
                 };
-                doll.step_posed_with(kit, skeleton.as_deref(), dt, down, world, !unwrecks);
+                // The bones strike the knockable props lent for the frame too (S240).
+                let knockable = ride.props.as_deref_mut().map(|l| &mut l.0);
+                doll.step_posed_among(kit, skeleton.as_deref(), dt, down, world, !unwrecks, knockable);
                 out.separated = held && !(doll.ragdoll.holds[0] || doll.ragdoll.holds[1]);
             }
         }
