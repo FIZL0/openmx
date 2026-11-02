@@ -34,13 +34,15 @@ const JOINTS: usize = 22;
 
 /// How far a part's node may be from the original's in the riding entry (T+2..T+5, the first
 /// [`ENTRY`] riding ticks after a put-back), in feet (position) and in a row of its orientation (each
-/// lane of the three unit rows). The original's bones enter about 0.15 ft further behind the animated
-/// skeleton than the port's and close the gap over three or four ticks; why is not known (journal).
+/// lane of the three unit rows), and on average. Since S201 the entry starts where the original's does
+/// (the nodes the last held tick left, each bone moving by its centre of mass turned back over the
+/// frame): seven entries stay within 0.006 ft, the two off the stick-held `down` runs within 0.045.
 const ENTRY: u32 = 4;
-const ENTRY_AT: f32 = 0.3;
-const ENTRY_TURN: f32 = 0.15;
+const ENTRY_AT: f32 = 0.06;
+const ENTRY_TURN: f32 = 0.1;
+const ENTRY_MEAN_AT: f32 = 0.01;
 /// The same once settled, on every later tick of the ghost and the plain riding. The worst of both are
-/// the arms after the two put-backs that come straight off a wreck (about 0.16 ft and 0.21), which
+/// the arms after the two put-backs that come straight off a wreck (about 0.15 ft and 0.2), which
 /// start here from a fresh body; the other seven and the openings stay within 0.08 ft and 0.1.
 const NEAR_AT: f32 = 0.2;
 const NEAR_TURN: f32 = 0.25;
@@ -121,11 +123,15 @@ impl Row {
 
 /// A capture's rows, or `None` when this checkout has not got it.
 fn capture(name: &str) -> Option<Vec<Row>> {
+    capture_in("s74", name)
+}
+
+fn capture_in(task: &str, name: &str) -> Option<Vec<Row>> {
     let kit = ps2_oracle::Kit::load().map_err(|why| skip(&why)).ok()?;
-    let local = kit.root.join("context").join("s74");
-    let dir = if local.exists() { local } else { kit.ctx("s74") };
+    let local = kit.root.join("context").join(task);
+    let dir = if local.exists() { local } else { kit.ctx(task) };
     let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.txt"))) else {
-        println!("no context/s74/{name}.txt: no riding-spring verdict for it");
+        println!("no context/{task}/{name}.txt: no riding-spring verdict for it");
         return None;
     };
     let hex = |s: &str| -> Vec<u8> { (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect() };
@@ -330,6 +336,11 @@ impl Tally {
 /// any other mode, or at a gap.
 fn ride(name: &str, ground: &mut dyn game_sim::world::World, kit: &Kit, nodes: &[usize], skel: &Skeleton, rows: &[Row], from: usize, compare: u32, entry: &mut Tally, settled: &mut Tally) -> usize {
     let mut riding = Riding::new(kit);
+    if rows[from].mode() == 0 {
+        // A put-back follows a wreck: the held entry clears the placement, as the original's does
+        // (its placed word reads 0 on every held tick), so T+2 runs the riding entry's pose (S201).
+        riding.actor.prev = game_sim::rider_anim::Mode::Wrecked;
+    }
     let mut stepped = 0;
     for k in from..rows.len() {
         let (row, before) = (&rows[k], &rows[k - 1]);
@@ -349,7 +360,10 @@ fn ride(name: &str, ground: &mut dyn game_sim::world::World, kit: &Kit, nodes: &
         riding.actor.posed = before.word("body.680", 0) != 0;
         riding.actor.latched = before.word("body.680", 0x684 - 0x680) != 0;
         let clip = before.word("body.8dc", 0x8f0 - 0x8dc) as i32;
-        riding.step(kit, Some(&posed), &r, clip, F(row.float("dt", 0)), ground);
+        // The held body is put back under the bike's node as this tick leaves it (S201).
+        let after = skel.world(row);
+        let moved = Posed { bones: nodes.iter().map(|&j| under(&after[j], &r.frame)).collect(), rests: posed.rests.clone() };
+        riding.step_moved(kit, Some(&posed), Some(&moved), &r, clip, F(row.float("dt", 0)), ground);
         stepped += 1;
         let mode = match riding.actor.mode {
             game_sim::rider_anim::Mode::Held => 0,
@@ -436,10 +450,77 @@ fn the_riding_spring_follows_the_original_after_each_put_back() {
     }
     assert_eq!(put_backs, 9, "S74's nine put-backs");
     for (what, t, near_at, near_turn, mean_at) in [
-        ("the riding entries", &entry, ENTRY_AT, ENTRY_TURN, f32::INFINITY),
+        ("the riding entries", &entry, ENTRY_AT, ENTRY_TURN, ENTRY_MEAN_AT),
         ("settled riding", &settled, NEAR_AT, NEAR_TURN, MEAN_AT),
     ] {
         println!("{what}: {} part nodes; {}", t.parts, t.line());
+        assert!(t.worst_at.0 <= near_at, "{what}: a node {} ft from the original's at {}", t.worst_at.0, t.worst_at.1);
+        assert!(t.worst_turn.0 <= near_turn, "{what}: a node turned {} off the original's at {}", t.worst_turn.0, t.worst_turn.1);
+        assert!(t.mean_at() <= mean_at, "{what}: the nodes are {} ft off the original's on average", t.mean_at());
+    }
+}
+
+/// **Where the riding entry starts the bones** (S201), on `context/s201/free09-ride3.txt`: S74's ride
+/// script on free09 with each part body's start (the position and velocity the entry's pose writes)
+/// captured too. On both put-backs, at T+2 every bone starts at the node the last held tick (T+1)
+/// left, not at this tick's animation, and with the velocity the pose measures from the drawn
+/// matrices that tick's still repose wrote: those stand at the body's centre of mass, so the bone
+/// moves by its centre of mass turned back over the frame. The port's pose from T+1's nodes gives both
+/// bit for bit, and its riding body from the put-back on stays with the original's.
+#[test]
+fn the_riding_entry_starts_from_the_last_held_tick() {
+    let Some((kit, nodes)) = ride_kit() else { return };
+    let Some(rows) = capture_in("s201", "free09-ride3") else { return };
+    let Some((scene, terrain)) = terrain_bytes("free09") else { return };
+    let terrain = game_sim::track::Terrain::parse(&terrain).expect("free09's terrain parses");
+    let held = rows.iter().find(|r| r.mode() == 0).expect("a held tick");
+    let skel = Skeleton::read(held);
+    let (t, c) = (&kit.tables.acos, &kit.tables.curve);
+    let mut entries = 0;
+    for k in 3..rows.len() {
+        if !(rows[k].mode() == 1 && rows[k - 1].mode() == 0) {
+            continue;
+        }
+        entries += 1;
+        let (row, last) = (&rows[k], &rows[k - 1]);
+        let inv_dt = F(1.0 / row.float("dt", 0));
+        let (mut at, mut moving) = (0f32, 0f32);
+        for (i, &j) in nodes.iter().enumerate() {
+            let m = last.world(j);
+            let bone = game_sim::ragdoll_pose::Bone { at: m.0[3], forward: m.0[2], up: m.0[1] };
+            let cofg = kit.rig.parts[i].cofg;
+            let (mut drawn, mut start) = (Mat4([Vf::ZERO; 4]), game_sim::ragdoll_pose::Start::default());
+            game_sim::ragdoll_pose::pose(&bone, cofg, &mut drawn, &mut start, None, t, c);
+            game_sim::ragdoll_pose::pose(&bone, cofg, &mut drawn, &mut start, Some(inv_dt), t, c);
+            let (p, v) = (row.quad(&format!("start{i}"), 0), row.quad(&format!("start{i}"), 0x10));
+            for l in 0..3 {
+                at = at.max((start.position[l] - p[l]).abs());
+                moving = moving.max((start.velocity[l] - v[l]).abs());
+            }
+        }
+        println!("free09-ride3 entry {}: starts {at} ft, {moving} ft/s off the original's", row.frame);
+        assert_eq!(at, 0.0, "frame {}: a bone starts {at} ft off the original's", row.frame);
+        assert_eq!(moving, 0.0, "frame {}: a bone starts moving {moving} ft/s off the original's", row.frame);
+    }
+    assert_eq!(entries, 2, "the ride script's two put-backs");
+    let mut ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
+    let (mut entry, mut settled) = (Tally::default(), Tally::default());
+    let mut k = 1;
+    while k < rows.len() {
+        if rows[k].mode() == 0 && rows[k - 1].mode() != 0 {
+            let (mut e, mut s) = (Tally::default(), Tally::default());
+            k += ride("free09-ride3", &mut ground, &kit, &nodes, &skel, &rows, k, rows[k + 2].frame, &mut e, &mut s).max(1);
+            entry.merge(e);
+            settled.merge(s);
+            continue;
+        }
+        k += 1;
+    }
+    for (what, t, near_at, near_turn, mean_at) in [
+        ("the riding entries", &entry, ENTRY_AT, ENTRY_TURN, ENTRY_MEAN_AT),
+        ("settled riding", &settled, NEAR_AT, NEAR_TURN, MEAN_AT),
+    ] {
+        println!("free09-ride3 {what}: {}", t.line());
         assert!(t.worst_at.0 <= near_at, "{what}: a node {} ft from the original's at {}", t.worst_at.0, t.worst_at.1);
         assert!(t.worst_turn.0 <= near_turn, "{what}: a node turned {} off the original's at {}", t.worst_turn.0, t.worst_turn.1);
         assert!(t.mean_at() <= mean_at, "{what}: the nodes are {} ft off the original's on average", t.mean_at());
