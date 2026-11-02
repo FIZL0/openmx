@@ -101,9 +101,25 @@
 //!
 //! It also models no exception flags, no FPU status/condition bits beyond the compare flag an
 //! interpreter needs, and no timing.
+//!
+//! # The `native` feature: none of the above
+//!
+//! Off by default, and everything above describes the crate with it off. With it on (F15's concept
+//! build, `openmx --features native-sim`) the arithmetic is the host's plain IEEE `f32`: `add`, `sub`,
+//! `mul` and their accumulator and multiply-add forms in [`fpu`] and [`vu`] are the one host
+//! instruction each, inlined, and `madd` is a product then a sum, two roundings to nearest; `sqrt` is
+//! the host's. What it keeps is what stops a ride from going to NaN, which the original cannot do:
+//! a divide (or `rsqrt`) by zero still gives `±max`, and a square root still takes `|x|`. No rounding
+//! toward zero, no short adder, no denormal flush. It runs the simulation about twice as fast on a
+//! Steam Deck; it is *not* the original's arithmetic, so no replay or oracle proof holds with it on,
+//! and a build with it must not meet an exact build online ([`NATIVE`] says which this is).
 
-#![no_std]
+#![cfg_attr(not(feature = "native"), no_std)]
 #![forbid(unsafe_code)]
+
+/// Whether this build's arithmetic is the host's plain `f32` (the `native` feature) rather than the
+/// PS2's. A shell shows it, and its online build id carries it, so the two never share a ride.
+pub const NATIVE: bool = cfg!(feature = "native");
 
 pub mod fpu;
 pub mod libm;

@@ -37,10 +37,11 @@ pub fn main() {
     openmx_ios::log_to(&docs.join(LOG));
     openmx_ios::watch_focus();
     println!(
-        "openmx {} ({} build {}) on iOS, {}",
+        "openmx {} ({} build {}{}) on iOS, {}",
         env!("CARGO_PKG_VERSION"),
         option_env!("OPENMX_COMMIT").unwrap_or("?"),
         option_env!("OPENMX_BUILD").unwrap_or("?"),
+        env!("OPENMX_SIM_TAG"),
         openmx_ios::memory()
     );
     println!("ios: the screen up to {} fps, {}", openmx_ios::ask_frame_rate(), openmx_ios::power());

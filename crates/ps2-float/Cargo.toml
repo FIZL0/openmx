@@ -10,6 +10,11 @@ publish.workspace = true
 # might. Everything here is integer ops plus the four basic IEEE operations, which are exact by spec.
 [dependencies]
 
+# F15: the host's plain IEEE f32 for every op instead of the PS2's (lib.rs, "The `native` feature").
+# Off by default: the exact model, and every proof against it, is what the main build runs.
+[features]
+native = []
+
 # Test-only, and a deliberate cycle: `tests/oracle.rs` checks these models against the game's own code,
 # which means running it, which is what the oracle crate does. Cargo allows a dev-dependency cycle
 # precisely for this case — the models themselves still have no dependencies at all.
