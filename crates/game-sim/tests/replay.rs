@@ -10092,8 +10092,12 @@ fn a_free09_trunk_wrecks_as_the_original_does() {
 const S129_RIDES: [&str; 2] = ["braked", "across"];
 
 /// The tick each of [`S129_RIDES`] agrees through on every lane, in that order: a ratchet like
-/// [`S89_AGREES_THROUGH`].
-const S129_AGREES_THROUGH: [u64; 2] = [1, 147];
+/// [`S89_AGREES_THROUGH`]. Across agrees on all of its 300 ticks since the bike carries its body rays
+/// (S190): it parted at 148, where they meet the wagon, while the replay rode without them.
+const S129_AGREES_THROUGH: [u64; 2] = [1, u64::MAX];
+
+/// The tick across parts at with no body rays on the bike: the first its rays strike the wagon.
+const S129_ACROSS_BARE_PARTS: u64 = 148;
 
 /// The path car's fields (`research/oracle.txt` S81; `tests/traffic.rs` has the rest).
 mod s129_car {
@@ -10245,6 +10249,23 @@ fn in_the_world_with_cars<R>(
     Some(then(&mut place, &area.named, bike, traffic))
 }
 
+/// The disc's bike collision files on free06 (S137's body rays), out of the track's archives.
+fn free06_bike_col() -> Option<game_sim::bike_col::BikeCol> {
+    use game_sim::bike_col::{BikeCol, MODEL, rays_file, shape_file};
+    let mut disc = Disc::open()?;
+    let area = Area::all_of(&mut disc, "Tracks\\free06.res").into_iter().next()?;
+    let mut parts = Vec::new();
+    for name in [area.named.track.clone(), area.named.track.replace(".res", "_2.res")] {
+        if let Some(bytes) = disc.member(&name) {
+            if let Ok(res) = Res::parse(&bytes) {
+                parts.push((bytes, res));
+            }
+        }
+    }
+    let file = |want: String| parts.iter().find_map(|(bytes, res)| by_suffix(res, &want).and_then(|e| res.read(bytes, e).ok()));
+    BikeCol::load(&file(rays_file(MODEL))?, &file(shape_file(MODEL))?).ok()
+}
+
 /// **S129: the bike meeting the Dallas train, in the original and replayed.**
 #[test]
 fn the_bike_meets_the_dallas_train_as_the_original_does() {
@@ -10264,6 +10285,9 @@ fn the_bike_meets_the_dallas_train_as_the_original_does() {
             assert_eq!(traffic.cars.len(), 21, "{name}: free06's path cars");
             let mut sim = acceptance_start(&cap, 0, bike).unwrap();
             sim.traffic = traffic;
+            // The bike's eleven body rays (S137), which strike the wagon's side (S190): the original's
+            // riding bike always carries them.
+            sim.rider.bike_col = Some(Arc::new(free06_bike_col().expect("the bike's collision files")));
             let ride = &mut sim.rider.ride;
             st.seed_chassis(ride).expect("the chassis");
             st.seed_wheels(ride).expect("both wheels");
@@ -10350,6 +10374,17 @@ fn the_bike_meets_the_dallas_train_as_the_original_does() {
                 assert!(f.watches.iter().any(|w| w.path == *path), "{name}: no {path} lane");
                 assert!(!apart.iter().any(|p| p == path), "{name}: {path} parts from the original");
             }
+            if *name == "across" {
+                // Into the wagon and out again (S190): every lane of every tick, the wagon's push
+                // included. The wheels' swept contacts stay on the rail bed (the probe ends under the
+                // deck); what meets the wagon's side is the body rays, through S137's car search with
+                // the car as the entry's mover (S151). Without them the bike rides on into the car.
+                assert!(apart.is_empty(), "across: {apart:?} part from the original");
+                let mut bare = f.clone();
+                bare.name = format!("{} with no body rays", f.name);
+                bare.start.as_mut().unwrap().rider.bike_col = None;
+                assert_eq!(parts(&bare, world), Some(S129_ACROSS_BARE_PARTS), "across with no body rays");
+            }
 
             // Where each was, every ten ticks.
             let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
@@ -10376,6 +10411,14 @@ fn the_bike_meets_the_dallas_train_as_the_original_does() {
                 at.push((t as u64, [c.x(), c.y(), c.z()], wrecked.is_some(), port.traffic.cars[0].pose.0[3].x()));
             }
             println!("{name}: the port's first wreck {wrecked:?}");
+            if *name == "across" {
+                // The original's bike is pushed back out to -z off the wagon's side and rides off along
+                // it, never down; the port's with it.
+                let vz = |r: usize| num(r, "ch_vel.z");
+                assert!((0..cap.rows.len()).all(|r| num(r, "wreck_reason") == 0.0), "across: the original's bike went down");
+                assert!(vz(145) > 40.0 && (150..170).any(|r| vz(r) < -15.0), "across: the original's bike was not pushed back");
+                assert!(wrecked.is_none(), "across: the port's bike went down at {wrecked:?}");
+            }
             for (r, &t) in ticks.iter().enumerate().step_by(10) {
                 if let Some((_, p, wrecked, engine)) = at.iter().find(|(pt, ..)| *pt == t) {
                     println!(
@@ -10390,7 +10433,7 @@ fn the_bike_meets_the_dallas_train_as_the_original_does() {
                     S129_AGREES_THROUGH[k]
                 ),
                 Some(t) if t > S129_AGREES_THROUGH[k] + 1 => println!("{name} now agrees through tick {}: raise S129_AGREES_THROUGH[{k}]", t - 1),
-                None => println!("{name} agrees on every tick: raise S129_AGREES_THROUGH[{k}]"),
+                None if S129_AGREES_THROUGH[k] < u64::MAX => println!("{name} agrees on every tick: raise S129_AGREES_THROUGH[{k}]"),
                 _ => {}
             }
         });
