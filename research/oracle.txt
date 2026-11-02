@@ -6275,7 +6275,7 @@ pc_quad_wheel_contacts      pc 0x005dab70 = bike_wheel_contacts for four (seq; c
 pc_quad_init                pc 0x005d6750 = MXVehicleAtv::vf84 (str: WreckATVm.col, PHYSICSBODY, TRIGGER)
 pc_quad_attach_nodes        pc 0x005d7980 = MXVehicleAtv::vf85 (str: WheelLeftFront ... AarmUpperLeft, SwingArm, LeftHub, RightHub)
 pc_quad_tire_phy            pc 0x005d91e0 = MXVehicleAtv::vf110: [Front Tire]/[Rear Tire] read into the four wheels (str: the tire keys, %d per surface)
-pc_quad_net_unpack          pc 0x005d8bb0 = MXVehicleAtv::vf104: the remote quad's wheels from the chassis, spin integrated, wrapped to +-pi
+pc_quad_net_unpack          pc 0x005dad30 = MXVehicleAtv::vf70 (xref: calls pc_wheel_suspension, as Motocross::vf70 does; MD65 — MD37 had vf104, which is not it)
 pc_quad_put_back            pc 0x005d65d0 = MXVehicleAtv::vf55 (table: the Motocross override's place)
 pc_quad_stunt_specials      pc 0x005d6dd0 = MXVehicleAtv::vf87 (table)
 pc_quad_stunt_state_pack    pc 0x005d7e00 = MXVehicleAtv::vf47 (table; weak, as the bike's is)
@@ -6421,6 +6421,47 @@ atv_ini_vector              atv 0x00144df0 = (ini, key, dst): strtok " ," / " ,"
 atv_snprintf                atv 0x0026cb20 = snprintf
 atv_strtod                  atv 0x0034ffa8 = strtod
 atv_strtok                  atv 0x003590a0 = strtok (cursor in the reent at +0x5c)
+# MD65 — the quad's put-back and net unpack (quad::put_back and quad::PutBack, quad::net_unpack and
+# quad::Remote; tests/atv_quad.rs the_quads_put_back_is_the_originals and
+# the_quads_net_unpack_is_the_originals off MD37a's atv-r-spawn.ee.bin). Journal:
+# research/journal/2026-11-02-md65-atv-wreck. The PC twins: put-back pc_quad_put_back (vf55, the same
+# clauses), net unpack pc_quad_net_unpack (vf70). pc 0x005d8bb0 (vf104) is not the net unpack: it turns
+# each wheel's rest point (+0x80 + +0x90) by the body's +0x180 and adds +0xbf0, then calls
+# 0x004cdff0 and copies +0x140 to +0x120 (unpaired, MD65b).
+# Put-back (a0 quad, a1/a2 handed to atv_bike_put_back as they came): the four wheels reset, the
+# attachment +0x1480 detached; quad byte +0x45 bit 0x2 cleared (sb) across atv_bike_put_back and set
+# again after (the byte read again, & 0xfd | 2) when it was set; atv_reattach(+0x1480, +0x1284, 1, 1);
+# the two frame nodes +0x1104/+0x1108 read (a1 0, a2 a 64-byte frame on the stack); the hung list: count
+# +0x1470 (signed), nodes +0x1474, kinds +0x1478 (0: the first frame, 1: the second, else none, through
+# atv_node_set_frame: a0 node, a1 frame -> node +0x30..+0x6c). Then +0x324 = 1, +0xde0 = 0, +0x141c =
+# 0.5, +0x330 = 0, +0x31c = 1, vt +0x378 (atv_net_pack); with a player (+0x680) and +0x1738 non-zero,
+# player +0x94/+0x98/+0x9c = +0x1738/+0x173c/+0x1740 (the last through lwc1/swc1); then
+# atv_actor_moved(quad + 0x43c). The bike's put-back (the table's 0x004d8940) is the same but resets
+# two wheels. Spawn image: +0x45 = 5, +0x1470 = 7 with kinds 0 0 0 0 1 1 1, +0x1738 = 0.
+# Net unpack (a0 quad, f12 dt; no vehicle-state guard): the snapshot +0xbcc -> [0] position,
+# [1] quaternion, [2] velocity (pointers). body +0x80 = velocity (lq), body +0x190 = quaternion,
+# quad +0xc40 = position; body +0x70 = position + body +0x1a0 turned by body +0x190 (vadd.xyz, w the
+# position's); +0xbd0 = +0xc40; body +0x1d0 = 0x00396fc0 (0,0,0,1); +0x32c = |velocity| (mula/madda/
+# madd, sqrt); atv_node_orientation(+0xe4, 0, body +0x190); forward = the velocity turned into the body
+# (z). Per wheel, in the order LF, RF, LR, RR: +0x1d4 = forward * +0x838, +0x1d0 = adda(0, +0x1d0)
+# madd(+0x1d4, dt), wrapped: less cvt.w(0.15915494 * a) whole turns (adda/msub 2pi), then > pi (c.ole
+# false) less 2pi, else < -pi plus 2pi. After LF: atv_node_local(out, +0xe4, body +0xb0); the target
+# 0.5 * out.x, max LF +0x74, min LF +0x70; the filter *(+0xd1c): [2] = min(dt, [1]) / [1], [0] =
+# adda(0, [0]) madd([2], target - [0]); LF +0x8ac = [0], +0x12c8 = LF +0x8ac; after RF: RF +0x8ac =
+# +0x12c8; LR/RR not steered. Then wheel_clear x4, atv_quad_wheel_contacts (dt), suspension x4, tire
+# forces x4 (the Force body's without the integrate), +0xde4 = +0xde0, +0x324 any wheel +0xdc, +0x1270
+# all, +0x1274 LF or RF, +0x1278 LR or RR, +0xde0 = !+0x324, then atv_vehicle_net_post.
+atv_wheel_reset             atv 0x004a04c0 = a wheel's contact and suspension state reset (a0 wheel; zeroes +0xd0 +0xd4 +0xf0 +0xf8 +0x1d4 +0x210 +0x224 +0x228, (0,0,0,1) into +0x140 +0x170 +0x180 +0x190 ...)
+atv_detach                  atv 0x0018d540 = an attachment taken off what it hangs on (a0 the attachment; only when its +8 is set)
+atv_bike_put_back           atv 0x004a6f70 = the vehicle's put-back (a0 vehicle, a1 with the +0x3b4 ground snap, a2 picks +0xdec or 0 and vt +0x3a0 or +0x39c)
+atv_reattach                atv 0x00266c90 = an attachment hung back on (a0 attachment, a1 what it hangs on, a2 1, a3 1)
+atv_node_frame              atv 0x00194e00 = a scene node's world frame (a0 node, a1 0, a2 64 bytes out)
+atv_node_set_frame          atv 0x00194da0 = a scene node's frame set (a0 node, a1 64 bytes -> node +0x30..+0x6c)
+atv_net_pack                atv 0x004e2f50 = MotoShared's network snapshot pack (quad vt +0x378; pc MotoShared::vf46)
+atv_actor_moved             atv 0x004f7590 = an actor's listeners told it moved (a0 the actor, quad + 0x43c; pc Actor::vf8)
+atv_node_orientation        atv 0x00194650 = a scene node turned to a quaternion (a0 node, a1 0, a2 the quaternion)
+atv_node_local              atv 0x00195320 = a quadword in a scene node's frame (a0 out, a1 node, a2 in; updates the node's world frame first, 0x00193b30)
+atv_vehicle_net_post        atv 0x004a8c40 = the vehicle's end of the net unpack (a0 vehicle, f12 dt; vt +0xe4, 0x00196e80 on the node, vt +0x124)
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the
