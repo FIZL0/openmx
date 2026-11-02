@@ -200,6 +200,34 @@ const TREE_FLAGS: u8 = flags::ENABLED;
 /// ([`crate::eco::Trees::props`]): `TREES + j`.
 pub const TREES: usize = 1 << 17;
 
+/// What the plane's collision record keeps as struck when it is the ride's other plane `j`
+/// ([`Scene::among_planes`]): `PLANES + j`.
+pub const PLANES: usize = 1 << 18;
+
+/// Another plane in the plane's world (N22a1): its hull (the plane's [`crate::flight::HULL`]) where
+/// its collision node stands it, and its body's velocity, which the sweep reads of it when struck.
+#[derive(Clone, Copy)]
+pub struct Plane<'a> {
+    pub mesh: &'a track::Mesh,
+    pub at: Mat4,
+    pub velocity: Vf,
+}
+
+/// A plane's hull's collidable as another plane's world holds it: the riders' world's
+/// ([`crate::rider_contact::gather_met`]).
+fn plane_collidable(radius: F) -> Collidable {
+    Collidable {
+        class: Class::Object,
+        flags: flags::ENABLED,
+        nearby: true,
+        radius,
+        category: crate::flight::COLLIDABLE,
+        collides_with: crate::flight::COLLIDES_WITH,
+        categories: any_category(),
+        ..Collidable::default()
+    }
+}
+
 /// The bike's struck listener (its collidable's one listener, `vt +0xc`): it keeps what struck the
 /// bike — the category of the collidable that did — for the bike's next wreck test, over whatever
 /// struck it before.
@@ -340,7 +368,7 @@ fn world_of(
     radius: F,
     toys: bool,
 ) -> (Broad, Vec<Collidable>) {
-    let (mut broad, objects, filing) = world_unfiled(props, bikes, field, centre, radius, toys);
+    let (mut broad, objects, filing) = world_unfiled(props, bikes, &[], field, centre, radius, toys);
     filing.file(&mut broad);
     (broad, objects)
 }
@@ -402,6 +430,7 @@ impl Filing {
 fn world_unfiled(
     props: &[Prop],
     bikes: Option<&Bikes<'_>>,
+    planes: &[Plane<'_>],
     field: Option<([F; 2], [F; 2])>,
     centre: Vf,
     radius: F,
@@ -466,6 +495,13 @@ fn world_unfiled(
         *slot = Some(o);
     }
     let mut last = moving.len().min(block.len()) as i32;
+    let first_plane = FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len());
+    for j in 0..planes.len() {
+        if (last as usize) < block.len() {
+            block[last as usize] = Some(first_plane + j);
+            last += 1;
+        }
+    }
     for (k, b) in bikes.map_or(&[][..], |b| b.bikes).iter().enumerate() {
         let mesh = bikes.map(|b| b.mesh).expect("bikes come with their mesh");
         let (_, radius) = bike_sphere(mesh, &b.transform);
@@ -487,6 +523,11 @@ fn world_unfiled(
             block[last as usize] = Some(object);
             last += 1;
         }
+    }
+    for p in planes {
+        let (_, centre, radius) = Prop::posed(p.mesh, &p.at);
+        objects.push(plane_collidable(radius));
+        places.push(Placement { centre: four(centre), ..Placement::default() });
     }
     let list = Blocks { size: MOVING_BLOCK, last, blocks: Some(vec![block]), ..Blocks::default() };
     let broad = Broad {
@@ -537,7 +578,7 @@ fn wooded_of(
     radius: F,
     toys: bool,
 ) -> (Broad, Vec<Collidable>) {
-    let (mut broad, objects, filing) = wooded_unfiled(props, trees, bikes, field, centre, radius, toys);
+    let (mut broad, objects, filing) = wooded_unfiled(props, trees, bikes, &[], field, centre, radius, toys);
     filing.file(&mut broad);
     (broad, objects)
 }
@@ -547,12 +588,13 @@ fn wooded_unfiled(
     props: &[Prop],
     trees: Option<&Trees>,
     bikes: Option<&Bikes<'_>>,
+    planes: &[Plane<'_>],
     field: Option<([F; 2], [F; 2])>,
     centre: Vf,
     radius: F,
     toys: bool,
 ) -> (Broad, Vec<Collidable>, Filing) {
-    let Some(trees) = trees else { return world_unfiled(props, bikes, field, centre, radius, toys) };
+    let Some(trees) = trees else { return world_unfiled(props, bikes, planes, field, centre, radius, toys) };
     // With no terrain to lay the tree over (none, or one with no edge), it spans the trunks as well
     // as the props.
     let bare = tree_box(props, None);
@@ -564,7 +606,7 @@ fn wooded_unfiled(
         }
     };
     // The plants are filed after the props, in the same tree over the same box.
-    let (mut broad, mut objects, mut filing) = world_unfiled(props, bikes, field, centre, radius, toys);
+    let (mut broad, mut objects, mut filing) = world_unfiled(props, bikes, planes, field, centre, radius, toys);
     for g in trees.groups() {
         let (c, h) = g.bounds(trees.cell());
         let o = objects.len();
@@ -614,6 +656,8 @@ struct Kept {
     /// collidable.
     moving: i32,
     bikes: usize,
+    /// The first other plane's collidable (N22a1), after the bikes'.
+    planes: usize,
     /// Each prop's box ([`prop_box`]); the trunks' boxes together ([`boxes_box`]), with plants; and
     /// the box the tree is laid over.
     boxes: Vec<([F; 4], [F; 4])>,
@@ -671,7 +715,7 @@ pub fn kept(
     radius: F,
     toys: bool,
 ) -> (Broad, Vec<Collidable>) {
-    kept_world(props, trees, bikes, field, centre, radius, toys, |broad, built, _| (broad.clone(), built.to_vec()))
+    kept_world(props, trees, bikes, &[], field, centre, radius, toys, |broad, built, _| (broad.clone(), built.to_vec()))
 }
 
 fn generation() -> u64 {
@@ -716,6 +760,7 @@ fn stamp_world(
     props: &[Prop],
     trees: Option<&Trees>,
     bikes: usize,
+    planes: usize,
     field: Option<([F; 2], [F; 2])>,
     toys: bool,
 ) -> std::ops::Range<usize> {
@@ -729,6 +774,7 @@ fn stamp_world(
         None => stamp.push(0),
     }
     stamp.push(bikes as u32);
+    stamp.push(planes as u32);
     let at = stamp_props(stamp, props);
     let Some(trees) = trees else {
         stamp.push(0);
@@ -774,6 +820,7 @@ impl Kept {
         props: &[Prop],
         trees: Option<&Trees>,
         bikes: Option<&Bikes<'_>>,
+        planes: &[Plane<'_>],
         field: Option<([F; 2], [F; 2])>,
         centre: Vf,
         radius: F,
@@ -781,7 +828,7 @@ impl Kept {
         stamp: &[u32],
         props_at: std::ops::Range<usize>,
     ) -> Kept {
-        let (mut broad, objects, filing) = wooded_unfiled(props, trees, bikes, field, centre, radius, toys);
+        let (mut broad, objects, filing) = wooded_unfiled(props, trees, bikes, planes, field, centre, radius, toys);
         let Structure::Tree(tree) = &mut broad.structures[0] else { unreachable!("the table's first structure is its tree") };
         let mut log = broad_build::Log::default();
         let mut filed = Vec::with_capacity(filing.items.len());
@@ -799,6 +846,7 @@ impl Kept {
             objects,
             moving: (moving + 2).min(MOVING_BLOCK as usize) as i32,
             bikes: FIRST + props.len(),
+            planes: FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len()),
             boxes: props.iter().map(prop_box).collect(),
             trunks: trees.map(|t| boxes_box(t.props.props.iter().map(prop_box))),
             lo: filing.lo,
@@ -863,7 +911,7 @@ impl Kept {
 
     /// The two probes at the ray probe's reach, and the bikes on their transforms and, those in the
     /// world, in the moving list after the probes: what [`world_unfiled`] gives them.
-    fn place(&mut self, bikes: Option<&Bikes<'_>>, centre: Vf, radius: F) {
+    fn place(&mut self, bikes: Option<&Bikes<'_>>, planes: &[Plane<'_>], centre: Vf, radius: F) {
         self.objects[RAY].radius = radius;
         for p in [RAY, SWEEP] {
             self.broad.places[p].centre = four(centre);
@@ -874,6 +922,16 @@ impl Kept {
             *slot = None;
         }
         let mut last = self.moving;
+        for (j, p) in planes.iter().enumerate() {
+            let o = self.planes + j;
+            let (_, centre, radius) = Prop::posed(p.mesh, &p.at);
+            self.objects[o].radius = radius;
+            self.broad.places[o].centre = four(centre);
+            if (last as usize) < block.len() {
+                block[last as usize] = Some(o);
+                last += 1;
+            }
+        }
         for (k, b) in bikes.map_or(&[][..], |b| b.bikes).iter().enumerate() {
             let mesh = bikes.map(|b| b.mesh).expect("bikes come with their mesh");
             let o = self.bikes + k;
@@ -920,6 +978,7 @@ fn kept_world<R>(
     props: &[Prop],
     trees: Option<&Trees>,
     bikes: Option<&Bikes<'_>>,
+    planes: &[Plane<'_>],
     field: Option<([F; 2], [F; 2])>,
     centre: Vf,
     radius: F,
@@ -929,7 +988,7 @@ fn kept_world<R>(
     let count = bikes.map_or(0, |b| b.bikes.len());
     KEPT.with(|kept| {
         let (kept, stamp) = &mut *kept.borrow_mut();
-        let at = stamp_world(stamp, props, trees, count, field, toys);
+        let at = stamp_world(stamp, props, trees, count, planes.len(), field, toys);
         let k = match kept.iter().position(|w| w.stamp == *stamp) {
             Some(k) => k,
             None => {
@@ -943,7 +1002,7 @@ fn kept_world<R>(
                         k
                     }
                     _ => {
-                        kept.insert(0, Kept::build(props, trees, bikes, field, centre, radius, toys, stamp, at));
+                        kept.insert(0, Kept::build(props, trees, bikes, planes, field, centre, radius, toys, stamp, at));
                         kept.truncate(WORLDS_KEPT);
                         0
                     }
@@ -955,7 +1014,7 @@ fn kept_world<R>(
             kept.insert(0, w);
         }
         let w = &mut kept[0];
-        w.place(bikes, centre, radius);
+        w.place(bikes, planes, centre, radius);
         w.rewind();
         f(&mut w.broad, &w.objects, w.generation)
     })
@@ -1006,6 +1065,12 @@ pub struct Scene<'a> {
     trunk_facets: std::collections::HashMap<usize, Vec<Facet>>,
     bikes: Option<Bikes<'a>>,
     bike_facets: Option<Vec<Facet>>,
+    /// The ride's other planes (N22a1, [`Scene::among_planes`]): their first collidable, and the first
+    /// of their collision records among the search's.
+    planes: &'a [Plane<'a>],
+    planes_at: usize,
+    first_plane: usize,
+    plane_facets: std::collections::HashMap<usize, Vec<Facet>>,
     /// What the bike's struck listener ([`bike_struck`]) kept on each of the ride's bikes this frame.
     pub struck: Vec<Option<u32>>,
     /// The bikes' chassis velocities when their collision records are in the search ([`Scene::owned`]).
@@ -1068,7 +1133,7 @@ pub fn refresh_wooded(
     node: &Frame,
     search: &mut broad_phase::Search,
 ) {
-    refresh_of(props, trees, bikes, field, rays, node, search, false);
+    refresh_of(props, trees, bikes, &[], field, rays, node, search, false);
 }
 
 /// [`refresh_wooded`] in the plane's world, the path cars toys in it ([`world_flown`]).
@@ -1081,7 +1146,22 @@ pub fn refresh_flown(
     node: &Frame,
     search: &mut broad_phase::Search,
 ) {
-    refresh_of(props, trees, bikes, field, rays, node, search, true);
+    refresh_of(props, trees, bikes, &[], field, rays, node, search, true);
+}
+
+/// [`refresh_flown`] with the ride's other planes in the world (N22a1, [`Plane`]).
+#[allow(clippy::too_many_arguments)]
+pub fn refresh_planes(
+    props: Option<&Props>,
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    planes: &[Plane<'_>],
+    field: Option<([F; 2], [F; 2])>,
+    rays: &Rays,
+    node: &Frame,
+    search: &mut broad_phase::Search,
+) {
+    refresh_of(props, trees, bikes, planes, field, rays, node, search, true);
 }
 
 /// The gather in the world [`wooded_of`] builds around the ray probe placed at `node`, kept between
@@ -1091,6 +1171,7 @@ fn refresh_of(
     props: Option<&Props>,
     trees: Option<&Trees>,
     bikes: Option<&Bikes<'_>>,
+    planes: &[Plane<'_>],
     field: Option<([F; 2], [F; 2])>,
     rays: &Rays,
     node: &Frame,
@@ -1099,7 +1180,7 @@ fn refresh_of(
 ) {
     let props = props.map_or(&[][..], |p| &p.props[..]);
     let (centre, radius) = reach(rays, &matrix(node));
-    kept_world(props, trees, bikes, field, centre, radius, toys, |broad, built, generation| {
+    kept_world(props, trees, bikes, planes, field, centre, radius, toys, |broad, built, generation| {
         let mut objects = lend(generation, built);
         refill(&mut objects, broad, search);
         give_back(generation, objects);
@@ -1204,7 +1285,7 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
-        Scene::of(props, trees, bikes, field, rays, node, search, false, None)
+        Scene::of(props, trees, bikes, &[], field, rays, node, search, false, None)
     }
 
     /// [`Scene::wooded`] in the plane's own world (S141, [`world_flown`]): the path cars are toys,
@@ -1220,7 +1301,30 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
-        Scene::of(props, trees, bikes, field, rays, node, search, true, None)
+        Scene::of(props, trees, bikes, &[], field, rays, node, search, true, None)
+    }
+
+    /// [`Scene::flown`] with the ride's other planes in the world (N22a1, [`Plane`]): each one's hull
+    /// a collidable after the bikes', category [`crate::flight::COLLIDABLE`], in the moving list after
+    /// the probes and ahead of the bikes, as the original's node lists the planes' objects ahead of
+    /// the riders'. A probe's hit on plane `j` names its collision record as the struck one's other,
+    /// `first + j` among the records the search is handed ([`Scene::owned`]'s bikes' come first), so
+    /// [`crate::contact_search::collide`] files the mirror on it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn among_planes(
+        props: Option<&'a Props>,
+        trees: Option<&'a Trees>,
+        bikes: Option<Bikes<'a>>,
+        planes: &'a [Plane<'a>],
+        first: usize,
+        field: Option<([F; 2], [F; 2])>,
+        rays: &'a Rays,
+        node: &Frame,
+        search: &mut broad_phase::Search,
+    ) -> Scene<'a> {
+        let mut scene = Scene::of(props, trees, bikes, planes, field, rays, node, search, true, None);
+        scene.first_plane = first;
+        scene
     }
 
     /// **A prop's search** (S200): [`Scene::flown`] for a prop's ray probe, which carries the prop's
@@ -1239,7 +1343,7 @@ impl<'a> Scene<'a> {
         categories: &Categories,
         asleep: bool,
     ) -> Scene<'a> {
-        let mut scene = Scene::of(props, trees, None, field, rays, node, search, true, Some(categories));
+        let mut scene = Scene::of(props, trees, None, &[], field, rays, node, search, true, Some(categories));
         scene.asleep = asleep;
         scene
     }
@@ -1254,6 +1358,7 @@ impl<'a> Scene<'a> {
         props: Option<&'a Props>,
         trees: Option<&'a Trees>,
         bikes: Option<Bikes<'a>>,
+        planes: &'a [Plane<'a>],
         field: Option<([F; 2], [F; 2])>,
         rays: &'a Rays,
         node: &Frame,
@@ -1264,7 +1369,7 @@ impl<'a> Scene<'a> {
         let props = props.map_or(&[][..], |p| &p.props[..]);
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
-        let objects = kept_world(props, trees, bikes.as_ref(), field, centre, radius, toys, |broad, built, generation| {
+        let objects = kept_world(props, trees, bikes.as_ref(), planes, field, centre, radius, toys, |broad, built, generation| {
             let mut objects = lend(generation, built);
             if let Some(categories) = categories {
                 objects[RAY].categories = categories.clone();
@@ -1284,7 +1389,8 @@ impl<'a> Scene<'a> {
         let sweep = SweepProbe::default();
         let nearby = search.nearby.clone();
         let struck = vec![None; bikes.map_or(0, |b| b.bikes.len())];
-        let groups = FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len());
+        let planes_at = FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len());
+        let groups = planes_at + planes.len();
         let trunks = groups + trees.map_or(0, |t| t.groups().len());
         Scene {
             props,
@@ -1294,6 +1400,10 @@ impl<'a> Scene<'a> {
             trunk_facets: std::collections::HashMap::new(),
             bikes,
             bike_facets: None,
+            planes,
+            planes_at,
+            first_plane: 1,
+            plane_facets: std::collections::HashMap::new(),
             struck,
             owned: None,
             rays,
@@ -1330,6 +1440,12 @@ impl<'a> Scene<'a> {
         self
     }
 
+    /// The ride's other plane `j`, when `other` is one of [`Scene::among_planes`]' hulls.
+    fn plane(&self, other: usize) -> Option<usize> {
+        let j = other.checked_sub(self.planes_at)?;
+        (j < self.planes.len()).then_some(j)
+    }
+
     /// The ride's bike `k`, when `other` is one of [`world_among`]'s bikes.
     fn bike(&self, other: usize) -> Option<usize> {
         let k = other.checked_sub(FIRST + self.props.len())?;
@@ -1340,6 +1456,9 @@ impl<'a> Scene<'a> {
     fn id(&self, other: usize) -> usize {
         if let Some(j) = self.trunk(other) {
             return TREES + j;
+        }
+        if let Some(j) = self.plane(other) {
+            return PLANES + j;
         }
         self.bike(other).map_or(other, |k| BIKES + k)
     }
@@ -1392,6 +1511,37 @@ impl Scene<'_> {
                 centre,
                 radius,
                 shape: sweep_probe::Shape::Mesh(sweep_probe::Placed { transform: t.0, mesh: MeshRef::of(mesh), object: other }),
+            };
+            sweep_probe::pair(&mut self.sweep, Some(&target))
+        }
+    }
+}
+
+impl Scene<'_> {
+    /// A probe's narrow phase against the ride's other plane `j`, collidable `other`: its hull where
+    /// its node stands it, as a knockable prop's mesh on its node ([`Prop::posed`]).
+    fn pair_plane(&mut self, probe: usize, other: usize, j: usize) -> bool {
+        let p = self.planes[j];
+        let (to_world, centre, radius) = Prop::posed(p.mesh, &p.at);
+        if probe == RAY {
+            let facets = self.plane_facets.entry(j).or_insert_with(|| facets(p.mesh));
+            let target = ray_probe::Mesh {
+                id: other as u32,
+                transform: to_world.0,
+                root: 0,
+                nodes: &p.mesh.nodes,
+                facets,
+                vertices: &p.mesh.vertices,
+            };
+            let rays = self.rays;
+            let probe = RayProbe { transform: self.transform, root: rays.root, nodes: &rays.nodes, segments: &rays.segments };
+            ray_probe::pair(&probe, &ray_probe::Shape::Mesh(target), &mut self.ray)
+        } else {
+            let target = sweep_probe::Target {
+                nearby: true,
+                centre,
+                radius,
+                shape: sweep_probe::Shape::Mesh(sweep_probe::Placed { transform: to_world.0, mesh: MeshRef::of(p.mesh), object: other }),
             };
             sweep_probe::pair(&mut self.sweep, Some(&target))
         }
@@ -1452,6 +1602,9 @@ impl Narrow for Scene<'_> {
         }
         if let Some(k) = self.bike(other) {
             return self.pair_bike(probe, other, k);
+        }
+        if let Some(j) = self.plane(other) {
+            return self.pair_plane(probe, other, j);
         }
         let i = other - FIRST;
         let props = self.props;
@@ -1536,6 +1689,9 @@ impl Scene<'_> {
     /// mover of kind 2, so it is struck with its mover — by the prop's index, the order
     /// [`Search::movers`] lists them in. Anything else is only itself ([`struck`]).
     fn struck_of(&self, object: usize) -> Struck {
+        if let Some(j) = object.checked_sub(PLANES).filter(|&j| j < self.planes.len()) {
+            return Struck { other: Some(self.first_plane + j), ..struck(object) };
+        }
         if let Some(k) = object.checked_sub(BIKES).filter(|&k| object < TREES && self.owned.is_some_and(|v| k < v.len())) {
             return Struck { other: Some(1 + k), ..struck(object) };
         }
@@ -1587,6 +1743,9 @@ impl Search for Scene<'_> {
     /// A struck prop that moves answers its car's velocity, the mover's `vt+0xb8` (S145), and a struck
     /// bike with its record in the search its chassis' (N22b, [`Scene::owned`]); the rest stand still.
     fn velocity(&self, struck: &Struck) -> Vf {
+        if let Some(j) = struck.object.checked_sub(PLANES).filter(|&j| j < self.planes.len()) {
+            return self.planes[j].velocity;
+        }
         if let (Some(k), Some(v)) = (struck.other, self.owned) {
             return v[k - 1];
         }
@@ -1611,10 +1770,13 @@ pub fn movers(props: &[Prop]) -> Vec<crate::contact::Mover> {
     props.iter().map(|p| p.moving.map(|m| m.mover()).unwrap_or_default()).collect()
 }
 
-/// The category of what [`Scene`] reports as struck: a trunk's ([`TREES`]) is [`TREE`], a bike's
-/// ([`BIKES`]) is [`BIKE`], every prop's is scenery.
+/// The category of what [`Scene`] reports as struck: another plane's ([`PLANES`]) is
+/// [`crate::flight::COLLIDABLE`], a trunk's ([`TREES`]) is [`TREE`], a bike's ([`BIKES`]) is
+/// [`BIKE`], every prop's is scenery.
 pub fn category(object: usize) -> u32 {
-    if object >= TREES {
+    if object >= PLANES {
+        crate::flight::COLLIDABLE
+    } else if object >= TREES {
         TREE
     } else if object >= BIKES {
         BIKE

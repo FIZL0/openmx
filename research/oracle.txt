@@ -7593,6 +7593,26 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 #   (S95's 1p state's bikes were not checked for this).
 # The plane's 4 resolve substeps in 5074 leave P2's chassis velocity unchanged (spring path); P2's own
 #   first-substep resolve moves it. Every call bit-exact with the port's contact::resolve fed RAM's lists.
+# --- N22a1: two players' flown planes meet (crates/game-sim/src/flight.rs frames_together/Fly,
+#   flight_search.rs Scene::among_planes/refresh_planes/PLANES; tests/plane_meets_plane.rs;
+#   journal 2026-11-02-n22a1-planes-meet-planes)
+# No tape flies two planes into each other: the reference is the original's own code run on s93's
+#   splitscreen.ram (both planes parked) with plane0's body velocity.x poked to 40, 80 ticks of
+#   collision_node_update 0x0026f800 then the riders. First touch tick 39 (plane0's rays strike
+#   plane1's hull alone); later ticks both strike, some plane1 alone; parted well before tick 80.
+# List order on node 0x0061e720 [plane0, plane1, P2, P1]: a strike files kind 0 on the striker after
+#   its own entries and the kind-1 mirror on the struck record after whatever it holds. So plane1's
+#   mirrors on plane0's list follow plane0's own entries; plane0's mirrors on plane1's list lead
+#   plane1's own (it collides second). The bikes' mirrors come last. The struck plane's collidable is
+#   its hull (category 0x42058, includes VEHICLE: the crash test spares it).
+# The planes' dynamics step: 4 substeps of 0x00270dc0(plane0, 1) then (plane1, 1) — each resolves its
+#   list against the other plane's body weighed by its mass (kind 0 pushes both; kind 1 springs its own
+#   side), so a substep's second resolve reads the first's push. All 8 calls a tick bit-exact with the
+#   port's contact::resolve (Side::Body) fed RAM's lists; the port's own search gives RAM's lists every
+#   field on every touch tick; the port's resolves standing in for all 80 ticks keep both bodies equal.
+# Not proven: which seat owns plane0 (the port keeps its walk's order, last seat first); the post's
+#   refill reading the other plane's hull where it stood after its own post (a model).
+
 # S229 — the car's collision object (car +0x170), journal research/journal/2026-11-02-s229-car-collision.
 # Ported as game_sim::car::{collision, Collision, Machine::step_struck, Machine::searches_terrain};
 # tests/car_drive.rs replays the s149b drives with it on free07's terrain, props and plants, the truck's

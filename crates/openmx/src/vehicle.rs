@@ -814,7 +814,17 @@ impl Plane {
         bikes: &[game_sim::flight_search::Bike],
         met: Option<&mut flight::Met>,
     ) -> bool {
-        let Some(f) = &mut self.flight else { return false };
+        let Some(ready) = self.ready(sim, world) else { return false };
+        let f = self.flight.as_mut().expect("a readied plane has its flight");
+        let _struck = f.frame_met(dt, ready.pad, world, &sim.tables.ride, bikes, met);
+        self.settle(ready)
+    }
+
+    /// [`Plane::step_met`] up to the frame (N22a1): the plane placed, the chord read, the seat's
+    /// scheme put on the flight for the frame and the pad it flies it with. What
+    /// [`Plane::settle`] needs after the frame, `None` with no flight.
+    pub fn ready(&mut self, sim: &Sim, world: &mut dyn World) -> Option<Readied> {
+        let f = self.flight.as_mut()?;
         if !self.placed {
             // At its file bay the original's spot: the body on the ground under the spot (or at the
             // file's height, without `SetGroundHeight`), lifted by the model's bounds (S164), its
@@ -864,7 +874,14 @@ impl Plane {
             f.autopilot.feed_forward = feed_forward * held;
             f.autopilot.max_pitch_rate = max_pitch_rate * F(ROUND_STICK_PITCH_RATE);
         }
-        let _struck = f.frame_met(dt, pad, world, &sim.tables.ride, bikes, met);
+        Some(Readied { chord, wrecked, min_elevator, dead_zone, feed_forward, max_pitch_rate, pad })
+    }
+
+    /// [`Plane::step_met`] after the frame (N22a1): the flight's own scheme put back, the plane
+    /// posed, and whether it was put back on its spawn (the chord, or a wreck recovered).
+    pub fn settle(&mut self, ready: Readied) -> bool {
+        let Some(f) = self.flight.as_mut() else { return false };
+        let Readied { chord, wrecked, min_elevator, dead_zone, feed_forward, max_pitch_rate, .. } = ready;
         f.joystick.min_elevator = min_elevator;
         (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate) =
             (dead_zone, feed_forward, max_pitch_rate);
@@ -1453,6 +1470,68 @@ impl Garage {
             _ => sim.step_among(dt, controls, world, among.bump, among.rivals),
         }
     }
+
+    /// [`Garage::step_among`] on the plane up to its frame (N22a1): the track's path cars, then
+    /// [`Plane::ready`]. `None` but with the plane up, and then nothing ran.
+    pub fn ready_plane(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) -> Option<Readied> {
+        if detour(self.up) || self.up != Kind::Biplane {
+            return None;
+        }
+        let plane = self.plane.as_mut()?;
+        sim.traffic.frame(dt, world);
+        plane.ready(sim, world)
+    }
+
+    /// The flight [`Garage::ready_plane`] readied, for [`fly_together`] to fly.
+    pub fn readied_flight(&mut self) -> Option<&mut Flight> {
+        self.plane.as_mut()?.flight.as_mut()
+    }
+
+    /// [`Garage::pass_among`] on the plane after its frame (N22a1): [`Plane::settle`], then the
+    /// plane's markers if the seat has them on.
+    pub fn settle_plane(
+        &mut self,
+        sim: &mut Sim,
+        me: usize,
+        spots: &[Spot],
+        world: &mut dyn World,
+        markers: bool,
+        ready: Readied,
+    ) -> (rider::Frame, Option<Did>) {
+        let respawned = self.plane.as_mut().is_some_and(|p| p.settle(ready));
+        let said = rider::Frame { respawned, ..rider::Frame::default() };
+        let did = if markers { self.markers(sim, me, spots, &[], world) } else { None };
+        (said, did)
+    }
+}
+
+/// **The ride's flown planes' frames, together** (N22a1): every [`Plane::ready`]'d plane in one
+/// [`flight::frames_together`], so they strike each other as the original's level node has its
+/// planes meet — one dynamics step, their resolves interleaved substep by substep. One plane alone
+/// flies its own [`Flight::frame_met`], as [`Plane::step_met`] does.
+pub fn fly_together(dt: F, fleet: &mut [flight::Fly<'_>], world: &mut dyn World, tables: &game_sim::ride::Tables) {
+    match fleet {
+        [] => {}
+        [one] => {
+            let _ = one.flight.frame_met(dt, one.pad, world, tables, one.bikes, one.met.as_deref_mut());
+        }
+        _ => {
+            let _ = flight::frames_together(dt, fleet, world, tables);
+        }
+    }
+}
+
+/// **A plane readied for its frame** (N22a1, [`Plane::ready`]): the pad it flies, whether the chord
+/// put it back, whether it was wrecked going in, and the flight's own values the seat's scheme
+/// stands in for during the frame ([`Plane::settle`] puts them back).
+pub struct Readied {
+    pub pad: game_sim::biplane::Pad,
+    chord: bool,
+    wrecked: bool,
+    min_elevator: F,
+    dead_zone: F,
+    feed_forward: F,
+    max_pitch_rate: F,
 }
 
 /// **The other seats, as one seat's step meets them** (N22, S224, S225): what split screen hands
@@ -1606,6 +1685,29 @@ pub fn fly_lane_met(
     let mut plane =
         Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
     let respawned = plane.step_met(sim, dt, world, bikes, met);
+    sim.plane = plane.flight.take();
+    respawned
+}
+
+/// [`fly_lane_met`] up to the frame (N22a1): the track's path cars, then [`Plane::ready`] on the
+/// seat's flight, which the plane holds until [`settle_lane`]. `None` on the bike.
+pub fn ready_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> Option<(Plane, Readied)> {
+    let f = sim.plane.take()?;
+    sim.traffic.frame(dt, world);
+    let mut plane =
+        Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
+    match plane.ready(sim, world) {
+        Some(ready) => Some((plane, ready)),
+        None => {
+            sim.plane = plane.flight.take();
+            None
+        }
+    }
+}
+
+/// [`fly_lane_met`] after the frame (N22a1): [`Plane::settle`], the flight back in the seat's lane.
+pub fn settle_lane(sim: &mut Sim, mut plane: Plane, ready: Readied) -> bool {
+    let respawned = plane.settle(ready);
     sim.plane = plane.flight.take();
     respawned
 }
