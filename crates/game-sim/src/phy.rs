@@ -639,6 +639,11 @@ pub struct Phy {
     /// **MD62:** MX vs. ATV's Brake Gyro / Gas Gyro options, the game's defaults (brake on, gas off).
     /// Read only on [`crate::handling::Handling::MxVsAtv`].
     pub gyro: crate::handling::Gyro,
+    /// **The port's own (P255):** the throttle held in the air pitches the bike back (nose up),
+    /// the brake gyro's turn the other way at [`crate::air::GAS_GYRO_SHARE`] of its torque ([`crate::air::gas_gyro`]). The reader
+    /// leaves it off, which is the original's air control to the bit; the app turns it on. Read only
+    /// on [`crate::handling::Handling::Original`] (MX vs. ATV's bikes have their own gas gyro).
+    pub air_gas_gyro: bool,
 }
 
 impl Phy {
@@ -966,6 +971,7 @@ impl Phy {
             handling: crate::handling::Handling::Original,
             gas_gyro_torque,
             gyro: crate::handling::Gyro::default(),
+            air_gas_gyro: false,
         }
     }
 

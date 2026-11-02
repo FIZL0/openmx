@@ -2399,7 +2399,14 @@ impl Ride {
                     let spin_clip = tricks.as_deref().is_some_and(|t| t.spin.clip != 0);
                     crate::handling::ride_airborne_control(p, air, &mut ac, &astep, s.gas_rate_limited, f, spin_clip)
                 }
-                None => air::airborne_control(&p.air, air, &mut ac, &astep),
+                None => {
+                    air::airborne_control(&p.air, air, &mut ac, &astep);
+                    // The port's own (P255): the gas pulls the nose up, a little less hard than the brake
+                    // pushes it down.
+                    if p.air_gas_gyro {
+                        air::gas_gyro(&p.air, air, &mut ac, &astep, s.gas_rate_limited);
+                    }
+                }
             }
             mvc.force = ac.force;
             mvc.torque = ac.moment;
