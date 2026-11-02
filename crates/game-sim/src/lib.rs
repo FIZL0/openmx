@@ -319,7 +319,6 @@ impl Sim {
         self.lend_cars();
         self.event_frame(dt);
         if self.plane.is_some() {
-            self.traffic.props.step_with(dt, &prop_movers, &mut []);
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
             // machine (biplane.p2m2's state). A downed rider's bike and a ghost's are out too. On a
@@ -344,7 +343,17 @@ impl Sim {
             // `Plane::step` ran it, this lane did not, so a replay waited out a wreck the original's
             // L1+R1 had already put back).
             plane.reset_chord(controls.respawn, &self.tables.ride.acos);
-            let (_struck, seam) = plane.frame_seamed(dt, flight::pad(self.input.pad(0)), world, &self.tables.ride, &bikes);
+            let pad = flight::pad(self.input.pad(0));
+            let (_struck, seam) = if self.traffic.props.is_empty() {
+                plane.frame_seamed(dt, pad, world, &self.tables.ride, &bikes)
+            } else {
+                // The plane's rays strike the knockable props, and theirs its hull; its world steps
+                // ahead of theirs, which resolve their mirrors against it as their striker 0 (S241).
+                plane.frame_props(dt, pad, world, &self.tables.ride, &bikes, None, &mut self.traffic.props, 0)
+            };
+            let mut weighed = contact::Weighed { body: &mut plane.body, mass: plane.mass };
+            let mut strikers = [contact::Other { collider: &mut plane.collider, side: contact::Side::Body(&mut weighed) }];
+            self.traffic.props.step_with(dt, &prop_movers, &mut strikers);
             self.traffic.frame_late(dt, world);
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };

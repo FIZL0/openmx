@@ -44,6 +44,7 @@ use crate::contact::{self, Collider, Weighed};
 use crate::broad_phase;
 use crate::contact_search;
 use crate::flight_search::{self, Bikes, Rays, Scene, VEHICLE};
+use crate::prop_set::PropSet;
 use crate::wreck_bike::{self, node_of};
 use std::sync::Arc;
 use crate::hash::{State, Walk};
@@ -685,9 +686,61 @@ impl Flight {
         bikes: &[flight_search::Bike],
         met: Option<&mut Met>,
     ) -> (Vec<Option<u32>>, [i8; 2]) {
+        self.frame_struck(dt, pad, ground, tables, bikes, met, None)
+    }
+
+    /// **[`Flight::frame_met`] among the knockable props** (S241): the plane's rays strike a prop's
+    /// `f.col` as they strike a bike's frame, and the props' rays strike its hull as they strike a
+    /// wreck bike's ([`crate::prop_wreck::struck_on`]), as the original's world node files the plane's
+    /// collision object ahead of the props' and searches them in that order.
+    ///
+    /// 1. its search ([`Flight::search`]) has every prop with a collidable mesh in it after the world
+    ///    ([`Scene::knocking`]): its entries (kind 0) name the prop's record, and the mirrors (kind 1,
+    ///    naming the plane as `me`, its place among the props' step's strikers) go on the prop's list;
+    /// 2. each struck prop woken and its mirrors filed at the head of its list ([`PropSet::strike`]);
+    /// 3. the props' rays against the hull where the plane's node stands ([`Flight::hull`]): their
+    ///    entries after their own, naming the plane as `me`, the mirrors after the plane's own entries
+    ///    and the bikes' mirrors;
+    /// 4. the plane's world steps, its resolve pushing the props its list names (their bodies after
+    ///    [`Met::vehicles`] among its other sides, as a wreck bike's body: [`contact::Side::Body`]);
+    ///    the pushed bodies are written back ([`PropSet::pushed`]).
+    ///
+    /// The props' own step, which resolves the mirrors against the plane, is the caller's, after this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame_props(
+        &mut self,
+        dt: F,
+        pad: Pad,
+        ground: &mut dyn world::World,
+        tables: &ride::Tables,
+        bikes: &[flight_search::Bike],
+        met: Option<&mut Met>,
+        props: &mut PropSet,
+        me: usize,
+    ) -> (Vec<Option<u32>>, [i8; 2]) {
+        self.frame_struck(dt, pad, ground, tables, bikes, met, Some((props, me)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn frame_struck(
+        &mut self,
+        dt: F,
+        pad: Pad,
+        ground: &mut dyn world::World,
+        tables: &ride::Tables,
+        bikes: &[flight_search::Bike],
+        met: Option<&mut Met>,
+        props: Option<(&mut PropSet, usize)>,
+    ) -> (Vec<Option<u32>>, [i8; 2]) {
         let mut met = met;
-        let (struck, movers) = self.search_met(dt, ground, bikes, met.as_deref_mut());
+        let shapes = props.as_ref().map(|(set, _)| Arc::clone(&set.shapes));
+        let posed = match (&props, &shapes) {
+            (Some((set, _)), Some(shapes)) => knocks(set, shapes),
+            _ => Vec::new(),
+        };
+        let knocks: Vec<flight_search::Knock<'_>> = posed.iter().map(|p| p.knock).collect();
         let mesh = self.bike.clone();
+        let (struck, movers, knocked) = self.search(dt, ground, mesh.as_deref().map(|mesh| Bikes { mesh, bikes }), met.as_deref_mut(), &knocks);
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
         if let Some(m) = met.as_deref().filter(|m| !m.mirrors.is_empty() && self.rays.is_some()) {
             let r = &mut self.record;
@@ -695,13 +748,79 @@ impl Flight {
             let room = r.capacity.saturating_sub(r.contacts.len());
             r.contacts.extend(m.mirrors.iter().copied().take(room));
         }
-        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0] };
+        let mut bodies: Vec<crate::prop_contact::Pushed> = Vec::new();
+        let mut props = props;
+        if let Some((set, me)) = props.as_mut() {
+            let first = met.as_deref().map_or(0, |m| m.vehicles.len());
+            bodies = self.knocked(set, *me, first, &posed, knocked);
+        }
+        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0], props: &mut bodies };
         WORLD.step(dt, &mut listeners);
         let seam = listeners.seam;
+        if let Some((set, _)) = props {
+            set.pushed(&bodies);
+        }
         if self.attitude.flown {
             self.pad = pad;
         }
         (struck, seam)
+    }
+
+    /// Steps 2 and 3 of [`Flight::frame_props`]: the props the search struck (`knocked`, the mirrors
+    /// on each of `posed`) woken and their mirrors filed, the props' rays on the hull, and the plane's
+    /// entries and the mirrors renamed to the struck bodies' places after the `first` vehicles of
+    /// its resolve. Answers the bodies, in that order.
+    fn knocked(&mut self, set: &mut PropSet, me: usize, first: usize, posed: &[Posed<'_>], knocked: Vec<Vec<contact::Contact>>) -> Vec<crate::prop_contact::Pushed> {
+        let from = self.record.contacts.iter().filter_map(|e| e.other).filter(|&o| o >= KNOCK_FROM).collect::<Vec<_>>();
+        // The struck props in the order the plane's entries first name them.
+        let mut order: Vec<usize> = Vec::new();
+        for o in from {
+            let k = o - KNOCK_FROM;
+            if !order.contains(&k) {
+                order.push(k);
+            }
+        }
+        for (k, m) in knocked.iter().enumerate() {
+            if !m.is_empty() && !order.contains(&k) {
+                order.push(k);
+            }
+        }
+        let struck = order
+            .iter()
+            .map(|&k| {
+                let mirrors = knocked[k].iter().map(|e| contact::Contact { other: Some(me), ..*e }).collect();
+                (posed[k].collection, posed[k].object, mirrors)
+            })
+            .collect();
+        let mut bodies = set.strike(&crate::prop_contact::Strike { contacts: Vec::new(), struck });
+        for e in &mut self.record.contacts {
+            if let Some(k) = e.other.and_then(|o| o.checked_sub(KNOCK_FROM)) {
+                e.other = order.iter().position(|&j| j == k).map(|i| first + i);
+            }
+        }
+        let Some(hull) = self.hull.clone().filter(|_| self.rays.is_some()) else { return bodies };
+        let node = node_of(&self.body);
+        let at = [node.rows[0], node.rows[1], node.rows[2], node.origin];
+        let on = crate::prop_wreck::struck_on(set, &hull, at, COLLIDABLE, COLLIDES_WITH, me);
+        if on.is_empty() {
+            return bodies;
+        }
+        let places: Vec<usize> = on
+            .struck
+            .iter()
+            .map(|p| match bodies.iter().position(|b| (b.collection, b.object) == (p.collection, p.object)) {
+                Some(i) => i,
+                None => {
+                    bodies.push(p.clone());
+                    bodies.len() - 1
+                }
+            })
+            .collect();
+        let r = &mut self.record;
+        (r.touching, r.on_object, r.touching_other) = (true, true, true);
+        let room = r.capacity.saturating_sub(r.contacts.len());
+        r.contacts.extend(on.mirrors.iter().map(|e| contact::Contact { other: e.other.map(|i| first + places[i]), ..*e }).take(room));
+        bodies
     }
 
     /// **Over a seam** (MD44, the port's own; [`crate::rider::Rider::wrap_round`]'s for the plane): on
@@ -737,9 +856,21 @@ impl Flight {
     /// after the plane's, empty, as the original's node empties every list before any searches and
     /// searches the planes first: the plane's entry on a bike names it by player, and the mirrors
     /// the bikes' records took are left in [`Met::struck`] naming the plane as [`Met::named`].
-    fn search(&mut self, dt: F, world: &mut dyn world::World, bikes: Option<Bikes<'_>>, met: Option<&mut Met>) -> (Vec<Option<u32>>, Vec<contact::Mover>) {
+    ///
+    /// With `knocks` (S241, [`Scene::knocking`]) the knockable props' meshes are in the search after
+    /// the world, each prop's record after the bikes': the plane's entry on prop `k` names
+    /// [`KNOCK_FROM`]` + k`, and the answer's third list is the mirrors each prop's record took.
+    #[allow(clippy::type_complexity)]
+    fn search(
+        &mut self,
+        dt: F,
+        world: &mut dyn world::World,
+        bikes: Option<Bikes<'_>>,
+        met: Option<&mut Met>,
+        knocks: &[flight_search::Knock<'_>],
+    ) -> (Vec<Option<u32>>, Vec<contact::Mover>, Vec<Vec<contact::Contact>>) {
         let none = vec![None; bikes.map_or(0, |b| b.bikes.len())];
-        let Some(rays) = self.rays.clone() else { return (none, Vec::new()) };
+        let Some(rays) = self.rays.clone() else { return (none, Vec::new(), Vec::new()) };
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
@@ -750,28 +881,39 @@ impl Flight {
         if met.is_some() {
             scene = scene.owned(&velocities);
         }
+        if !knocks.is_empty() {
+            scene = scene.knocking(knocks, 1 + velocities.len());
+        }
         let mut records = vec![std::mem::take(&mut self.record)];
         records.extend(velocities.iter().map(|_| contact_search::Record { capacity: crate::rider_contact::CAPACITY, ..contact_search::Record::default() }));
+        records.extend(knocks.iter().map(|k| contact_search::Record { capacity: k.capacity, ..contact_search::Record::default() }));
         contact_search::collide(&mut records, 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
         let movers = contact_search::Search::movers(&scene);
         let mut records = records.into_iter();
         self.record = records.next().unwrap_or_default();
+        let owned = velocities.len();
+        for e in &mut self.record.contacts {
+            if let Some(k) = e.other.filter(|&o| o > owned && !knocks.is_empty()) {
+                e.other = Some(KNOCK_FROM + k - 1 - owned);
+            }
+        }
         if let Some(m) = met {
             let n = m.vehicles.len();
             m.struck = vec![Vec::new(); n];
             m.pushed = vec![false; n];
             for e in &mut self.record.contacts {
-                if let Some(k) = e.other {
+                if let Some(k) = e.other.filter(|&o| o < KNOCK_FROM) {
                     let p = m.bikes[k - 1];
                     e.other = Some(p);
                     m.pushed[p] = true;
                 }
             }
-            for (bike, &p) in records.zip(&m.bikes) {
+            for (bike, &p) in records.by_ref().take(owned).zip(&m.bikes) {
                 m.struck[p] = bike.contacts.into_iter().map(|e| contact::Contact { other: m.named, ..e }).collect();
             }
         }
-        (scene.struck, movers)
+        let knocked = records.map(|r| r.contacts).collect();
+        (scene.struck, movers, knocked)
     }
 
     /// The collision object's search alone ([`Flight::search`], what [`Flight::frame_met`] runs before
@@ -784,13 +926,19 @@ impl Flight {
         bikes: &[flight_search::Bike],
         met: Option<&mut Met>,
     ) -> Vec<Option<u32>> {
-        self.search(dt, world, Some(Bikes { mesh, bikes }), met).0
+        self.search(dt, world, Some(Bikes { mesh, bikes }), met, &[]).0
     }
 
-    /// [`Flight::search`] on the bikes this plane carries the mesh of ([`Flight::with_bike`]).
-    fn search_met(&mut self, dt: F, world: &mut dyn world::World, bikes: &[flight_search::Bike], met: Option<&mut Met>) -> (Vec<Option<u32>>, Vec<contact::Mover>) {
-        let mesh = self.bike.clone();
-        self.search(dt, world, mesh.as_deref().map(|mesh| Bikes { mesh, bikes }), met)
+    /// The collision object's search alone among the knockable props `set` (S241, what
+    /// [`Flight::frame_props`] runs before the world steps), for a test to set against the original's:
+    /// the plane's entries on a prop name [`KNOCK_FROM`] plus its place in the answer, which is each
+    /// struck prop's collection and object and the mirrors its record took (naming the plane as
+    /// nothing), in the props' order.
+    pub fn search_props(&mut self, dt: F, world: &mut dyn world::World, set: &PropSet) -> Vec<(usize, usize, Vec<contact::Contact>)> {
+        let posed = knocks(set, &set.shapes);
+        let knocks: Vec<flight_search::Knock<'_>> = posed.iter().map(|p| p.knock).collect();
+        let (_, _, knocked) = self.search(dt, world, None, None, &knocks);
+        posed.iter().zip(knocked).map(|(p, m)| (p.collection, p.object, m)).collect()
     }
 
     /// The search's refill (S99), first in the post listener: the original's body post sets the
@@ -1099,6 +1247,34 @@ pub fn spawn_lift(psg: &[u8]) -> Result<F, String> {
     Ok(F(crate::prop_world::node_bounds(&root).centre.y()))
 }
 
+/// Where the plane's entries on the knockable props are named from between its search and the
+/// struck bodies' places ([`Flight::frame_props`]): above any vehicle's index.
+pub const KNOCK_FROM: usize = 1 << 20;
+
+/// A knockable prop in the plane's search (S241): its collection and object, and its mesh where its
+/// node stands it.
+struct Posed<'a> {
+    collection: usize,
+    object: usize,
+    knock: flight_search::Knock<'a>,
+}
+
+/// Every prop of `set` with a collidable mesh (`shapes`, the set's) and a collision object, in
+/// collection and object order, as [`crate::prop_contact::strike`] poses them.
+fn knocks<'a>(set: &PropSet, shapes: &'a [Vec<Option<track::Mesh>>]) -> Vec<Posed<'a>> {
+    let mut out = Vec::new();
+    for (c, (coll, meshes)) in set.collections.iter().zip(shapes).enumerate() {
+        for (o, (object, mesh)) in coll.objects.iter().zip(meshes).enumerate() {
+            let (Some(mesh), Some(col)) = (mesh.as_ref(), object.collision.as_ref()) else { continue };
+            let (to_world, centre, radius) = world::Prop::posed(mesh, &PropSet::matrix(&object.node));
+            let velocity = coll.bones[o].body.velocity;
+            let capacity = col.record.capacity;
+            out.push(Posed { collection: c, object: o, knock: flight_search::Knock { mesh, to_world, centre, radius, velocity, capacity } });
+        }
+    }
+    out
+}
+
 /// One wheel off its `biplane.phy` section, at rest.
 fn tire(g: &phy::Gear, braked: bool, steered: bool) -> Tire {
     Tire {
@@ -1156,6 +1332,8 @@ struct Listeners<'a> {
     met: Option<&'a mut Met>,
     /// The widths the post moved the plane over a seam (MD44).
     seam: [i8; 2],
+    /// The knockable props' bodies its list names (S241), after the vehicles among its other sides.
+    props: &'a mut [crate::prop_contact::Pushed],
 }
 
 impl Dynamics for Listeners<'_> {
@@ -1169,6 +1347,7 @@ impl Dynamics for Listeners<'_> {
         self.plane.preforce(dt);
     }
     fn force(&mut self, _: i32, h: F) {
+        let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = self.props.iter_mut().map(|p| p.weighed()).collect();
         let mut others: Vec<contact::Other<'_>> = match self.met.as_deref_mut() {
             Some(m) => m
                 .colliders
@@ -1178,6 +1357,7 @@ impl Dynamics for Listeners<'_> {
                 .collect(),
             None => Vec::new(),
         };
+        others.extend(bodies.iter_mut().map(|(collider, body)| contact::Other { collider: &mut **collider, side: contact::Side::Body(body) }));
         self.plane.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos, self.movers, &mut others);
     }
     fn enabled(&self, _: i32) -> bool {

@@ -814,6 +814,51 @@ impl Plane {
         bikes: &[game_sim::flight_search::Bike],
         met: Option<&mut flight::Met>,
     ) -> bool {
+        self.step_struck(sim, dt, world, bikes, met, None)
+    }
+
+    /// **The track's traffic and the plane, among the knockable props** (S241): the traffic's
+    /// held frame ([`game_sim::traffic::Traffic::frame_held`]), the plane's ([`Plane::step_met`],
+    /// its frame [`Flight::frame_props`]: its rays strike the props, theirs its hull), then the
+    /// props' step with the plane as their striker 0, and the traffic's late frame. With no props
+    /// on the track, [`game_sim::traffic::Traffic::frame`] then [`Plane::step_met`], as before.
+    pub fn step_traffic(
+        &mut self,
+        sim: &mut Sim,
+        dt: F,
+        world: &mut dyn World,
+        bikes: &[game_sim::flight_search::Bike],
+        met: Option<&mut flight::Met>,
+    ) -> bool {
+        if sim.traffic.props.is_empty() || self.flight.is_none() {
+            sim.traffic.frame(dt, world);
+            return self.step_met(sim, dt, world, bikes, met);
+        }
+        let movers = sim.traffic.frame_held(dt, world);
+        let mut props = std::mem::take(&mut sim.traffic.props);
+        let respawned = self.step_struck(sim, dt, world, bikes, met, Some(&mut props));
+        if let Some(f) = &mut self.flight {
+            let mut weighed = game_sim::contact::Weighed { body: &mut f.body, mass: f.mass };
+            let mut strikers =
+                [game_sim::contact::Other { collider: &mut f.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
+            props.step_with(dt, &movers, &mut strikers);
+        }
+        sim.traffic.props = props;
+        sim.traffic.frame_late(dt, world);
+        self.pose();
+        respawned
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_struck(
+        &mut self,
+        sim: &Sim,
+        dt: F,
+        world: &mut dyn World,
+        bikes: &[game_sim::flight_search::Bike],
+        met: Option<&mut flight::Met>,
+        props: Option<&mut game_sim::prop_set::PropSet>,
+    ) -> bool {
         let Some(f) = &mut self.flight else { return false };
         if !self.placed {
             // At its file bay the original's spot: the body on the ground under the spot (or at the
@@ -864,7 +909,10 @@ impl Plane {
             f.autopilot.feed_forward = feed_forward * held;
             f.autopilot.max_pitch_rate = max_pitch_rate * F(ROUND_STICK_PITCH_RATE);
         }
-        let _struck = f.frame_met(dt, pad, world, &sim.tables.ride, bikes, met);
+        let _struck = match props {
+            Some(props) => f.frame_props(dt, pad, world, &sim.tables.ride, bikes, met, props, 0),
+            None => f.frame_met(dt, pad, world, &sim.tables.ride, bikes, met),
+        };
         f.joystick.min_elevator = min_elevator;
         (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate) =
             (dead_zone, feed_forward, max_pitch_rate);
@@ -1444,8 +1492,7 @@ impl Garage {
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
                 // The track's path cars run on whichever machine is up (S81).
-                sim.traffic.frame(dt, world);
-                let respawned = plane.step_met(sim, dt, world, among.bikes, among.met);
+                let respawned = plane.step_traffic(sim, dt, world, among.bikes, among.met);
                 rider::Frame { respawned, ..rider::Frame::default() }
             }
             // The bike's ghost ticks inside its update (`Rider::frame`), so a bike the plane has the
@@ -1608,10 +1655,9 @@ pub fn fly_lane_met(
     met: Option<&mut flight::Met>,
 ) -> bool {
     let Some(f) = sim.plane.take() else { return false };
-    sim.traffic.frame(dt, world);
     let mut plane =
         Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
-    let respawned = plane.step_met(sim, dt, world, bikes, met);
+    let respawned = plane.step_traffic(sim, dt, world, bikes, met);
     sim.plane = plane.flight.take();
     respawned
 }

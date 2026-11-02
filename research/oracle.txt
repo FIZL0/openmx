@@ -7647,3 +7647,31 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 #   released when the sorted point is not over 0.1 above the terrain. Held: solid, terrain point and
 #   normal, sorted cleared.
 # car_tire_suspension: the contact path runs on solid || sorted; its bottom-out push reads solid (+0xb4), not sorted.
+# --- S241: the plane strikes the knockable props (crates/game-sim/src/flight.rs frame_props/knocked/search,
+#   flight_search.rs Scene::knocking/Knock, prop_wreck.rs struck_on; tests/prop_plane.rs;
+#   journal 2026-11-02-s241-the-plane-strikes-a-prop)
+# biplane.p2m2's state (free06): MXBiplane 0x00c44a40: +0x160 body, +0x170 collision record (0x01e73b00 in
+#   the hit0 states; its node +0xf8), +0x3b0 crash word, +0x3bc crash clock, +0x3c0 WreckTime.
+#   mxbiplane_reset reads its placement from +0xe0 (position) / +0xf0 (nose) / +0x100 (up) and then copies
+#   the spawn (+0xe10 / +0xe20 / +0xe30) over it: writing only the spawn puts it back at the bay
+#   (research/s241/aim.py writes both).
+# free06's six EyeBalls (collection list order): physics objects 0x00d3f510 0x00d477a0 0x00d4a290
+#   0x00d4cd80 0x00d4f870 0x00d52360 (+0x110 body, +0x120 collision record, +0x13c node); bodies 0x00d3ce80
+#   0x00d3d670 0x00d47e90 0x00d4a980 0x00d4d470 0x00d4ff60; records 0x00d46ac0 0x00d496a0 0x00d4c190
+#   0x00d4ec80 0x00d51770 0x00d54260.
+# free06's world node 0x0060b200 (update 0x0026f800, resolve 0x0027_0dc0): filed objects (+0x30/+0x38)
+#   [plane, 0x018c1bd0, 0x019a9790, 0x01970060, 0x007ffdf0] then the woken balls in wake order.
+# hit0 (context/capture/s241/hit0.csv, the plane rolling ~19 ft/s into ball 0, throttle shut): the ball
+#   wakes on 11046 (vel 15.0,-11.7,-7.2; the plane 19.38 -> 18.92 ft/s), no crash. A state asked at
+#   frame N holds row N+1 (hit0-11042's plane body is row 11043's).
+#   hit0-11046 lists: plane flags [1,1,0,1] list [kind 0 other ball0's record]; ball0 [kind 1 other the
+#   plane (same point), kind 0 ground]. The plane's own rays hit the asleep ball's f.col (category 0x18),
+#   the mirror leads the ball's list, the ball is woken and filed.
+#   Node update on hit0-11046: the plane's resolve (first 1) x4 substeps, then the other objects, then
+#   ball0 (first 1, then 0): the plane's world steps before the props.
+#   hit0-11061 (all six balls filed): the plane's list [kind 1 ball0, kind 1 ball4] - balls 0's and 4's
+#   own rays hit the plane's hull (biplanef.col, category 0x42058, which has the wake mask 0x40); their
+#   kind-0 entries name the plane after their own. Ball-ball entries are there too.
+# Bit-exact in the port: the plane's entries and the ball's mirrors from hit0-11046 and -11047 (none from
+#   -11048), the plane's and ball 0's first-substep resolves on hit0-11046 (both bodies, the arms), the
+#   balls' hull entries and the plane's mirrors on hit0-11061.

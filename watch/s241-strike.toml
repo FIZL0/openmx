@@ -1,0 +1,220 @@
+# s241-strike.toml — the biplane and free06's six EyeBalls, one row a tick (S241).
+#
+# The plane (MXBiplane 0x00c44a40, every state made from biplane.p2m2's): its body (+0x160 ->: +0x00
+# enabled, +0x60 position, +0x70 velocity, +0x170 quat, +0x1b0 rates), its crash word +0x3b0 and clock
+# +0x3bc, its collision record (+0x170 -> +0x40 touching flags, +0x100 contact count). The balls: each
+# body (+0x00 enabled, +0x60 position, +0x70 velocity, +0x1b0 rates) and its collision record's count.
+# research/s241/aim.py rolls the plane at a ball; research/s241/strike.py records this from its state
+# and saves states around the strike:
+#
+#   KIT_PCSX2=2 ./kit pcsx2 with -- python3 -B research/s241/strike.py NAME SLOT BALL
+
+[watch]
+name        = "s241-strike"
+description = "the biplane and free06's EyeBalls, a row a tick"
+every       = 1
+frames      = 600
+
+[setup]
+warmup    = 0
+settle_ms = 240
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "crash"
+addr = "0xc44a40 + 0x3b0"
+type = "u32"
+
+[[field]]
+name = "crash_time"
+addr = "0xc44a40 + 0x3bc"
+type = "f32"
+
+[[field]]
+name = "plane_touch"
+addr = "0xc44a40 + 0x170 -> 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "plane_contacts"
+addr = "0xc44a40 + 0x170 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "body_pos"
+addr = "0xc44a40 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "body_vel"
+addr = "0xc44a40 + 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "body_quat"
+addr = "0xc44a40 + 0x160 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "body_rates"
+addr = "0xc44a40 + 0x160 -> 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "b0_en"
+addr = "0xd3ce80"
+type = "u32"
+
+[[field]]
+name = "b0_pos"
+addr = "0xd3cee0"
+type = "f32x4"
+
+[[field]]
+name = "b0_vel"
+addr = "0xd3cef0"
+type = "f32x4"
+
+[[field]]
+name = "b0_rates"
+addr = "0xd3d030"
+type = "f32x4"
+
+[[field]]
+name = "b0_contacts"
+addr = "0xd46bc0"
+type = "u32"
+
+[[field]]
+name = "b1_en"
+addr = "0xd3d670"
+type = "u32"
+
+[[field]]
+name = "b1_pos"
+addr = "0xd3d6d0"
+type = "f32x4"
+
+[[field]]
+name = "b1_vel"
+addr = "0xd3d6e0"
+type = "f32x4"
+
+[[field]]
+name = "b1_rates"
+addr = "0xd3d820"
+type = "f32x4"
+
+[[field]]
+name = "b1_contacts"
+addr = "0xd497a0"
+type = "u32"
+
+[[field]]
+name = "b2_en"
+addr = "0xd47e90"
+type = "u32"
+
+[[field]]
+name = "b2_pos"
+addr = "0xd47ef0"
+type = "f32x4"
+
+[[field]]
+name = "b2_vel"
+addr = "0xd47f00"
+type = "f32x4"
+
+[[field]]
+name = "b2_rates"
+addr = "0xd48040"
+type = "f32x4"
+
+[[field]]
+name = "b2_contacts"
+addr = "0xd4c290"
+type = "u32"
+
+[[field]]
+name = "b3_en"
+addr = "0xd4a980"
+type = "u32"
+
+[[field]]
+name = "b3_pos"
+addr = "0xd4a9e0"
+type = "f32x4"
+
+[[field]]
+name = "b3_vel"
+addr = "0xd4a9f0"
+type = "f32x4"
+
+[[field]]
+name = "b3_rates"
+addr = "0xd4ab30"
+type = "f32x4"
+
+[[field]]
+name = "b3_contacts"
+addr = "0xd4ed80"
+type = "u32"
+
+[[field]]
+name = "b4_en"
+addr = "0xd4d470"
+type = "u32"
+
+[[field]]
+name = "b4_pos"
+addr = "0xd4d4d0"
+type = "f32x4"
+
+[[field]]
+name = "b4_vel"
+addr = "0xd4d4e0"
+type = "f32x4"
+
+[[field]]
+name = "b4_rates"
+addr = "0xd4d620"
+type = "f32x4"
+
+[[field]]
+name = "b4_contacts"
+addr = "0xd51870"
+type = "u32"
+
+[[field]]
+name = "b5_en"
+addr = "0xd4ff60"
+type = "u32"
+
+[[field]]
+name = "b5_pos"
+addr = "0xd4ffc0"
+type = "f32x4"
+
+[[field]]
+name = "b5_vel"
+addr = "0xd4ffd0"
+type = "f32x4"
+
+[[field]]
+name = "b5_rates"
+addr = "0xd50110"
+type = "f32x4"
+
+[[field]]
+name = "b5_contacts"
+addr = "0xd54360"
+type = "u32"
