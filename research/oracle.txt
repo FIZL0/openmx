@@ -7089,6 +7089,21 @@ car_preload                 boot 0x00397c60 (dt, car): the held jump; reads |+0x
 # Min/MaxPreloadTime, +0xc6c MaxPreload, +0xc70 force (only y), +0x1160/+0x1164 the d-pad times, +0x12a4 d-pad
 # y, +0x12ac stick y, +0x12b0 stick hold, +0x310 brake, +0x700 the cue latch, +0xd20 the cue's tag.
 # Input ramp ([Joystick], read at 0x004df7cc): +0x12f4 InputRampAmount (x pi/180), +0x12f8 InputRampTime.
+# MD63a — MX vs. ATV's input limiter and steer ramp, ported under Handling::MxVsAtv (step.rs input_limiter,
+# steer_command; tests/mxvatv_step.rs runs both off state04.ee.bin). Journal:
+# research/journal/2026-11-02-md63a-limiter-and-steer-ramp.
+# atv_bike_input_limiter (0x004e3ea0, bike vt +0x34c), bike-relative: +0xdd0/+0xdd4 steer/throttle enabled
+# (+0xdd4 cleared by 0x004a6b90, set by 0x004a6c00), +0x1298 steer was, +0x129c start-line latch,
+# +0x12a0/+0x12a4 d-pad, +0x12a8/+0x12ac stick (not squared), +0x314/+0x310/+0x12c0 gas/brake/clutch in,
+# +0x12c4 reverse, +0x318 gas out, +0x12cc/+0x12d0 front/rear brake, +0x12d4 clutch out, +0x12d8..+0x12e4
+# axis and d-pad rates, +0x12e8/+0x12ec lean, +0x1310/+0x1314/+0x1318/+0x131c lever rates, +0xde0 airborne,
+# +0x1524 == +0x152c (rider stunt is the balance stunt) gates gas off in place of MXU's hands-off.
+# Gas cut: +0x1764 latch (set while the throttle is off), +0x1768 timer, +0x176c its time (only ever zeroed,
+# at 0x004de754 in the bike reset 0x004de420), so the gas stays 0 two frames after the throttle comes on.
+# 0x004a7990 first: gas 0 when *(bike+0x680) +0x1d0 > 0 (read as the start-gate penalty; state04: 0).
+# atv_bike_ground_head (0x004d8b20) steer ramp: +0x12f0 on (0 in both images; no writer found), +0x12f4
+# amount, +0x12f8 time, +0x12fc timer (0 under |lean| 0.987 = 0x3f7cac08, else + dt); command
+# lean*amount*min(1, timer/time) + lean*fade*(lock - amount) into +0x12c8 and front wheel +0x8ac.
 atv_post_event              atv 0x00272300 = the preload cue's post (a0 *0x00442eb0, a1 bike +0x674, a2 8, a3 14, t0 bike +0xd20, t1 0)
 car_launch                  boot 0x00397e20 (dt, car): every substep. Clutch let out from standing:
 #                                           the converter boost eases from a speed-scaled start to 1.
