@@ -350,6 +350,8 @@ pub struct Trigger {
     pub one_time: bool,
     pub percent: i32,
     pub fired: bool,
+    /// The riders (by their place in [`Creatures::step`]'s list) in it last tick.
+    pub inside: Vec<usize>,
     pub scares: Vec<Scare>,
 }
 
@@ -460,6 +462,7 @@ fn trigger(s: &Section, actions: &[Section], n: usize) -> Trigger {
         one_time: s.get("OneTimeOnly").is_some_and(ini::switch),
         percent: s.number("RandomTriggerPercent").unwrap_or(100.0) as i32,
         fired: false,
+        inside: Vec::new(),
         scares,
     }
 }
@@ -756,18 +759,34 @@ impl Creatures {
         for b in &mut self.birds {
             b.before = b.pos;
         }
+        // The toy trigger's contact, as particles.rs's TrackFx::touch runs it: each rider in it
+        // fires it; one under 100 percent rolls only on a tick no rider was in it the tick before,
+        // and a rider already in it last tick runs no actions.
         for t in 0..self.triggers.len() {
             let tr = &self.triggers[t];
-            if !tr.enabled || tr.one_time && tr.fired || !riders.iter().any(|r| r.0.iter().any(|&[a, b]| tr.struck(a, b))) {
-                continue;
+            let now: Vec<usize> = (0..riders.len()).filter(|&i| riders[i].0.iter().any(|&[a, b]| tr.struck(a, b))).collect();
+            for &i in &now {
+                let tr = &self.triggers[t];
+                if !tr.enabled || tr.one_time && tr.fired {
+                    break;
+                }
+                if tr.percent != 100 {
+                    if !tr.inside.is_empty() {
+                        break;
+                    }
+                    if tr.percent < (self.rng.rand() as f32 * UNIT * 100.0) as i32 + 1 {
+                        continue;
+                    }
+                }
+                self.triggers[t].fired = true;
+                if self.triggers[t].inside.contains(&i) {
+                    continue;
+                }
+                for s in self.triggers[t].scares.clone() {
+                    self.scare(s);
+                }
             }
-            if tr.percent != 100 && tr.percent < (self.rng.rand() as f32 * UNIT * 100.0) as i32 + 1 {
-                continue;
-            }
-            self.triggers[t].fired = true;
-            for s in self.triggers[t].scares.clone() {
-                self.scare(s);
-            }
+            self.triggers[t].inside = now;
         }
         for b in 0..self.birds.len() {
             self.update(b, dt);
