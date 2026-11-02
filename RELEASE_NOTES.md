@@ -1,15 +1,1 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
-- iPhone: with rotation lock on, the game now opens in landscape, and stays landscape after the phone is put down and picked up again.
-- MX Unleashed's worlds: WORLD (every map at once, the freerides in its middle), the freeride maps and every national. The maps sit much closer together, with smoother ground where they meet, and the track list shows each world's full name.
-- free09's beach balls and other props get knocked around by your bike, and by a tumbling bike after a wreck. The bike's wheels can ride on them.
-- Drive the three cars: switch into one from the pause menu.
-- Split screen and online: a flown biplane and a riding bike now hit each other.
-- Online: put-backs and trick starts now show for the other riders, and a room on a mod track seats only riders with the same mod.
-- Mods: music packs in mods/music/ play alongside the disc's songs, MX vs. ATV Untamed's trick pack loads, and the mod store takes world mods.
-- Flips score the moment they start.
-- Wrecks: the wreck sounds play as in the original, a wrecked bike's suspension springs back, and a thrown rider hits the trees.
-- Geysers and rain start when the bike, not just the rider, rides through them.
-- Biplane: L1+R1 puts it back on its spawn as the original does.
-- The menus no longer slow down by rebuilding their lists every frame.
-- Phones: the speedometer, radar and menu hints stay clear of the touch controls.
-- Browser: if WebGPU fails, the page restarts on WebGL2 instead of stopping, and Settings has a log for bug reports with a Save log button.
