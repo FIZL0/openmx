@@ -10323,6 +10323,292 @@ fn cars_as_toys(world: &mut dyn World, traffic: &game_sim::traffic::Traffic) -> 
     span
 }
 
+// S211: S167's windmill captures, replayed. research/s167_windmill.py teleports recording2's bike next
+// to free09's rustic windmill in copy 1's slot 5 and logs the vehicle, the chassis' velocity and the
+// windmill's kinematic body a frame, at full speed, with no pad; `dump` writes the RAM image the
+// resume starts from:
+//
+//   ./kit pcsx2 with -- python3 -B research/s167_windmill.py PID 5 2439 140 4067.5 6 context/capture/s167/south3.csv dump
+//
+// The image is `context/capture/s167/south3-before.ram` (s1's context only).
+
+/// Where free09's rustic windmill stands: the one toy whose collision S167 measured.
+const S211_WINDMILL: [f32; 3] = [2439.25, 133.697, 4059.95];
+
+/// [`in_the_track_with_cars`] with the track's animated toys in the cars' traffic, attached after
+/// them as the shell attaches them ([`game_sim::traffic::Traffic::attach`]): `None` when the disc or
+/// its archives are not in this worktree.
+fn in_the_track_with_toys<R>(
+    st: &SaveState,
+    track: &str,
+    phy: &str,
+    model: &str,
+    then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>, game_sim::traffic::Traffic, Option<game_sim::bike_col::BikeCol>, Vec<String>) -> R,
+) -> Option<R> {
+    use game_sim::bike_col::{BikeCol, MODEL, rays_file, shape_file};
+    let stem = track.trim_start_matches("Tracks\\").trim_end_matches(".res").to_string();
+    let mut shelf = {
+        let mut disc = game_render::disc::Disc::open_configured().ok()?;
+        let names: Vec<String> = disc
+            .entries()
+            .iter()
+            .map(|e| e.name.clone())
+            .filter(|n| {
+                let n = n.to_ascii_lowercase();
+                n.ends_with(&format!("\\{stem}.res")) || n.ends_with(&format!("\\{stem}_2.res"))
+            })
+            .collect();
+        names.iter().filter_map(|n| disc.res(n).ok()).collect::<Vec<_>>()
+    };
+    let animated = game_render::animated_toy::Animated::load(&mut shelf, &stem);
+    let mut disc = Disc::open()?;
+    let area = Area::all_of(&mut disc, track).into_iter().next()?;
+    let (mut props, _) = area.props(&mut disc);
+    let mut parts = Vec::new();
+    for name in [area.named.track.clone(), area.named.track.replace(".res", "_2.res")] {
+        if let Some(bytes) = disc.member(&name) {
+            if let Ok(res) = Res::parse(&bytes) {
+                parts.push((bytes, res));
+            }
+        }
+    }
+    let file = |want: &str| parts.iter().find_map(|(bytes, res)| by_suffix(res, want).and_then(|e| res.read(bytes, e).ok()));
+    let mut traffic = st.traffic(|want| file(want));
+    traffic.toys = animated.sim;
+    traffic.attach(&mut props);
+    let col = file(&rays_file(MODEL)).zip(file(&shape_file(MODEL))).and_then(|(rays, shape)| BikeCol::load(&rays, &shape).ok());
+    let terrain = Terrain::parse(&area.terrain).ok()?;
+    let ground = Ground::new(&terrain, &area.scene.terrain);
+    let tables = Arc::new(RiderTables::build());
+    let bike = the_bike_named(&mut disc, &tables, phy).map(|phy| {
+        let mounts = the_wheels_of(&mut disc, model).expect("the bike model's tire nodes");
+        Ridden { tables: Arc::clone(&tables), phy, mounts }
+    });
+    let mut place = Place { ground, props };
+    Some(then(&mut place, &area.named, bike, traffic, col, animated.names))
+}
+
+/// The ragdoll's kit as the shell builds it (`tests/ragdoll_cars.rs`'s `ride_kit`): the rider's body
+/// and model off the disc, the rider file's parts and pins, and the wreck bike's sphere and mesh; with
+/// them the wreck bike's part and the rider's wreck set. `None`, with a line, without the disc.
+fn the_ragdoll_kit() -> Option<(game_sim::ragdoll_ride::Kit, game_sim::phy::Part, game_sim::phy::Wrecks)> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().map_err(|why| println!("no ragdoll kit: {why}")).ok()?;
+    let names: Vec<String> =
+        disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let rider_name = names.iter().filter(|n| n.to_ascii_lowercase().ends_with("thq1.res")).min_by_key(|n| n.len())?.clone();
+    let res = disc.res(&rider_name).expect("the rider archive opens");
+    let rider_file = res.read_suffix("mrider.phy").expect("the rider's archive carries mrider.phy");
+    let mut body = game_render::rider::Body::load(
+        vec![disc.res(&rider_name).expect("the rider archive opens")],
+        "thq1",
+        game_render::rider::Sex::Male,
+        "",
+        &[],
+        game_sim::motion::Params::default(),
+    )
+    .expect("the rider's body loads");
+    let model = game_render::psg::Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model"))
+        .expect("the model parses");
+    let doll = body.ragdoll_rig(&model, &rider_file).expect("every part names a node");
+    let wreck_bike = names
+        .iter()
+        .find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok()))
+        .expect("an archive carries wreckbike.phy");
+    let mut kit = game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig);
+    let col = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbikef.col").ok()));
+    kit.bike = col.as_deref().and_then(game_sim::ragdoll_ride::bike_sphere);
+    kit.bike_mesh = col.as_deref().and_then(game_sim::ragdoll_scene::Bike::parse).map(Arc::new);
+    Some((kit, game_sim::phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"), game_sim::phy::Wrecks::read_bytes(&rider_file)))
+}
+
+/// One tick of an S211 ride, the port's: the chassis' velocity, where the bike is (the wreck body's
+/// origin while the rider is down, the transform's otherwise), the wreck's reason, and the rider's
+/// main bone, the point the map edge asks of (S59).
+#[derive(Clone, Copy, Debug)]
+struct S211Tick {
+    vel: Vf,
+    at: Vf,
+    wreck: Option<u8>,
+    bone: Vf,
+}
+
+/// The port's ride from S167's south image, its bike moved by `by` (every place on the bike, as
+/// research/s167_windmill.py moves the original's), among free09's toys and path cars, with the wreck
+/// files, the ragdoll and the body rays carried. The windmill's toy starts undrawn and unstepped, as
+/// the original's was before the first contact (S167); without `toys` its body stands far below the
+/// world (the control). `None` where the image, the disc or the kit is not in this worktree.
+fn s211_ride(by: [f32; 3], ticks: usize, toys: bool) -> Option<Vec<S211Tick>> {
+    let image = private_dir("capture").join("s167").join("south3-before.ram");
+    let Some(st) = SaveState::open_either(&image) else {
+        println!("no {} — S211's comment above says how it is written", image.display());
+        return None;
+    };
+    let ran = in_the_track_with_toys(&st, "Tracks\\free09.res", FREERIDE_PHY, FREERIDE_MODEL, |world, _named, bike, traffic, col, names| {
+        let Ridden { tables, phy, mounts } = bike?;
+        let (kit, part, wrecks) = the_ragdoll_kit()?;
+        let c = st.rider_at(0x7a4)?;
+        let node = st.word(c + 0x254)?;
+        let (origin, forward) = (st.vf(node + 0xb0)?, st.vf(node + 0xa0)?);
+        let mut rider = Rider::new(&phy, mounts, origin, forward, Set::default());
+        rider.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+        rider.carries_ragdoll(Arc::new(kit));
+        rider.carries_bike_col(Arc::new(col?));
+        let mut sim = Sim::with_rider(0, tables, phy, rider);
+        sim.traffic = traffic;
+        let ride = &mut sim.rider.ride;
+        ride.place(origin, forward);
+        st.seed_ride(ride).expect("the bike");
+        st.seed_engine_state(ride).expect("the engine's state");
+        st.seed_levers(ride).expect("the levers");
+        // The teleport's one delta, on every place the ride keeps.
+        let moved = |v: Vf| Vf::new((F(v.x()) + F(by[0])).0, (F(v.y()) + F(by[1])).0, (F(v.z()) + F(by[2])).0, v.w());
+        ride.chassis.cofg_world = moved(ride.chassis.cofg_world);
+        ride.origin = moved(ride.origin);
+        for wheel in [&mut ride.front, &mut ride.rear] {
+            let w = &mut wheel.w;
+            w.mount_world = moved(w.mount_world);
+            w.probe_end_world = moved(w.probe_end_world);
+            w.contact_point = moved(w.contact_point);
+            w.load_point = moved(w.load_point);
+        }
+        ride.back.at = moved(ride.back.at);
+        let toy = &mut sim.traffic.toys;
+        let near = |p: &Mat4| (0..3).all(|i| (p.0[3].0[i] - S211_WINDMILL[i]).abs() < 0.5);
+        let mill = toy.specs.iter().position(|s| near(&s.place)).expect("the rustic windmill");
+        assert!(toy.specs[mill].mesh.is_some(), "{}: the windmill's .col mesh", names[mill]);
+        assert!(!toy.specs[mill].unseen, "the windmill steps only drawn");
+        toy.seen[mill] = false;
+        toy.bodies[mill] = game_sim::toys::Bodies(0);
+        if !toys {
+            if let Some(props) = world.moving() {
+                let at = toy.first.unwrap() + toy.specs[..mill].iter().map(|s| usize::from(s.mesh.is_some()) + s.parts.len()).sum::<usize>();
+                let mut away = props.props[at].to_world;
+                away.0[3] = Vf::new(0.0, -1.0e5, 0.0, 1.0);
+                props.props[at].stand(&away);
+            }
+        }
+        seed_bike_search(&st, &mut sim, world);
+        let mut out = Vec::new();
+        for _ in 0..ticks {
+            sim.tick_in(Input::default(), world);
+            let r = &sim.rider;
+            out.push(S211Tick {
+                vel: r.ride.chassis.vel,
+                at: r.crash.as_ref().map_or(r.ride.origin, |c| c.bike.origin()),
+                wreck: r.state.wreck.map(|w| w.0),
+                bone: Rider::main_bone(&r.ride, r.ragdoll_kit.as_deref(), r.ragdoll.as_ref(), r.crash.as_ref()),
+            });
+        }
+        Some(out)
+    });
+    match ran {
+        None => println!("no disc in this worktree: S211's windmill is unchecked"),
+        Some(None) => println!("the disc lacks the bike, its collision or the ragdoll: S211's windmill is unchecked"),
+        Some(Some(_)) => {}
+    }
+    ran.flatten()
+}
+
+/// S167's capture `name`: per row the frame, the vehicle's position and the chassis' velocity.
+fn s211_capture(name: &str) -> Option<Vec<[f32; 7]>> {
+    let path = private_dir("capture").join("s167").join(format!("{name}.csv"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no {} — S211's comment above says how it is recorded", path.display());
+        return None;
+    };
+    Some(text.lines().skip(1).map(|l| {
+        let v: Vec<f32> = l.split(',').map(|c| c.parse().unwrap()).collect();
+        [v[0], v[1], v[2], v[3], v[4], v[5], v[6]]
+    }).collect())
+}
+
+/// Whether the port's `got` is the capture's `want`, which is printed to six figures (`%g`).
+fn s211_close(got: f32, want: f32, rel: f32) -> bool {
+    (got - want).abs() <= rel * want.abs().max(1.0)
+}
+
+/// The first tick (from 1) the off-map cannonball (S59) throws the chassis: its lift is the throw's
+/// fixed 100.312 ft/s, which no other velocity in these rides comes near.
+fn s211_cannonball(vel: impl Iterator<Item = [f32; 3]>) -> Option<(usize, [f32; 3])> {
+    vel.enumerate().find(|(_, v)| (v[1] - 100.312).abs() < 1e-3).map(|(t, v)| (t + 1, v))
+}
+
+/// **S211: free09's rustic windmill throws a bike at rest as the original's does.**
+///
+/// S167's captures, replayed from their image with free09's toys in the world (port tick `t` is the
+/// csv's row `t + 1`, row 0 the image's frame). south3: the bike at rest beside the windmill, which
+/// the original first draws, and so first steps, on the image's next frame: its body has no "before"
+/// yet, so its mover is its place × 30 and the first contact (tick 3) throws the bike at
+/// (7.8, 18.6, 133.4) ft/s and wrecks it. apex: the same image moved by (0.25, 36, −7.6), the delta
+/// the script's apex run teleports by; the bike falls onto the windmill's top, wrecks on tick 24, and
+/// the windmill's mover throws the wreck body ~59,000 ft/s for 17 ticks. In both the 300.45/100.312
+/// put-back is the off-map cannonball (S59) once the rider's main bone is past the map's margin; the
+/// port's bone gets there sooner (8 against 14, 42 against 85), filed for the ragdoll.
+#[test]
+fn the_rustic_windmill_throws_a_bike_as_the_original_does() {
+    let Some(south) = s211_capture("south3") else { return };
+    let Some(apex) = s211_capture("apex") else { return };
+    let Some(port) = s211_ride([0.0; 3], 20, true) else { return };
+    let vel = |p: &S211Tick| [p.vel.x(), p.vel.y(), p.vel.z()];
+    let at = |p: &S211Tick| [p.at.x(), p.at.y(), p.at.z()];
+    let lanes = |what: &str, t: usize, got: [f32; 3], want: &[f32], rel: f32| {
+        for i in 0..3 {
+            assert!(s211_close(got[i], want[i], rel), "{what} tick {t} lane {i}: port {got:?}, original {want:?}");
+        }
+    };
+
+    // South: the fall onto the ground, then the first contact's throw.
+    for t in 1..=3 {
+        lanes("south vel", t, vel(&port[t - 1]), &south[t + 1][4..7], 1e-4);
+        assert_eq!(port[t - 1].wreck.is_some(), t == 3, "south tick {t}: the wreck is the throw's");
+    }
+    println!("south's throw: port {:?}, original {:?}", vel(&port[2]), &south[4][4..7]);
+    // The wreck body flies where the original's vehicle does until the put-back.
+    for t in 4..=7 {
+        lanes("south body", t, at(&port[t - 1]), &south[t + 1][1..4], 1e-3);
+    }
+    let theirs = s211_cannonball(south.iter().skip(2).map(|r| [r[4], r[5], r[6]])).expect("the original's put-back");
+    let ours = s211_cannonball(port.iter().map(vel)).expect("the port's put-back");
+    lanes("south put-back", ours.0, ours.1, &theirs.1, 1e-4);
+    let bone = port[ours.0 - 1].bone;
+    println!("south's put-back: port tick {} {:?} (main bone at {bone:?}), original tick {} {:?}", ours.0, ours.1, theirs.0, theirs.1);
+    assert_eq!((ours.0, theirs.0), (8, 14), "the main bone's map-edge tick, the port's and the original's");
+
+    // The control: without the windmill the bike stays where it stands.
+    let still = s211_ride([0.0; 3], 20, false).expect("the same ride");
+    for (t, p) in still.iter().enumerate() {
+        assert!(p.wreck.is_none() && p.vel.z().abs() < 1.0, "control tick {}: {p:?}", t + 1);
+    }
+
+    // Apex: the fall onto the windmill's top, the wreck, and the wreck body's flight.
+    let port = s211_ride([0.25, 36.0, -7.6], 90, true).expect("the same ride");
+    for t in 1..=24 {
+        lanes("apex vel", t, vel(&port[t - 1]), &apex[t + 1][4..7], 1e-3);
+        assert_eq!(port[t - 1].wreck.is_some(), t == 24, "apex tick {t}: the wreck is the landing's");
+    }
+    // The capture's vehicle is the drawn bike, ~2 ft off the wreck body's origin (the same before the
+    // wreck); each tick's step is the flight's speed, ~1,967 ft a tick from tick 29.
+    let mut fastest = 0.0f32;
+    for t in 25..=41 {
+        let (got, want) = (at(&port[t - 1]), &apex[t + 1][1..4]);
+        assert!((0..3).all(|i| (got[i] - want[i]).abs() < 2.0), "apex flight tick {t}: port {got:?}, original {want:?}");
+        let (was, then) = (at(&port[t - 2]), &apex[t][1..4]);
+        let step = |a: [f32; 3], b: &[f32]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let (ours, theirs) = (step(got, &[was[0], was[1], was[2]]), step([want[0], want[1], want[2]], then));
+        assert!(t < 29 || s211_close(ours, theirs, 1e-3), "apex flight tick {t}: the port's step {ours}, the original's {theirs}");
+        fastest = fastest.max(30.0 * theirs);
+    }
+    println!("apex flight: the original's vehicle at up to {fastest:.0} ft/s, the port's body's step within 1e-3 of it");
+    assert!(fastest > 50_000.0, "the ~59,000 ft/s flight: {fastest}");
+    let theirs = s211_cannonball(apex.iter().skip(2).map(|r| [r[4], r[5], r[6]])).expect("the original's put-back");
+    let ours = s211_cannonball(port.iter().map(vel)).expect("the port's put-back");
+    lanes("apex put-back", ours.0, ours.1, &theirs.1, 1e-4);
+    let bone = port[ours.0 - 1].bone;
+    println!("apex's put-back: port tick {} {:?} (main bone at {bone:?}), original tick {} {:?}", ours.0, ours.1, theirs.0, theirs.1);
+    assert_eq!((ours.0, theirs.0), (42, 85), "the main bone's map-edge tick, the port's and the original's");
+}
+
 /// **S129: the bike meeting the Dallas train, in the original and replayed.**
 #[test]
 fn the_bike_meets_the_dallas_train_as_the_original_does() {
