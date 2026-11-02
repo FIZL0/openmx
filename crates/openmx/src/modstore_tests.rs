@@ -896,3 +896,79 @@ fn a_cut_download_carries_on_from_where_it_stopped() {
     assert_eq!(partials(), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Events until `done` says one is the last, or `secs`.
+fn until_for(s: &Store, secs: u64, done: impl Fn(&Event) -> bool) -> Vec<Event> {
+    let (end, mut out) = (Instant::now() + Duration::from_secs(secs), Vec::new());
+    while Instant::now() < end {
+        let got = s.take();
+        let last = got.iter().any(&done);
+        out.extend(got);
+        if last {
+            return out;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("no last event in {secs} s: {out:?}");
+}
+
+/// P218: the store on huggingface.co itself, not a fake — ignored (it needs the network, and the
+/// store's mods): `cargo test -p openmx --bin openmx live_store -- --ignored`. Lists `main` and the
+/// open PRs, installs the smallest track off them through the CDN redirect, updates it (its stamp
+/// made stale, so Install swaps the copy), removes it, and prints Report's URL to open.
+#[test]
+#[ignore]
+fn live_store_lists_installs_updates_and_removes() {
+    let (dir, mods) = scratch("live");
+    let s = Store::new(HF, &dir, &mods);
+    s.list(true);
+    let got = until_for(&s, 600, |e| matches!(e, Event::Listing(_)));
+    let l = match got.into_iter().find_map(|e| if let Event::Listing(l) = e { Some(l) } else { None }) {
+        Some(Ok(l)) => l,
+        other => panic!("{other:?}"),
+    };
+    eprintln!("live: {} mods listed, {} verified", l.len(), l.iter().filter(|e| e.verified).count());
+    assert!(!l.is_empty(), "the store lists nothing");
+    for e in &l {
+        assert!(e.verified == (e.rev == "main") && (e.rev == "main" || e.rev.starts_with("refs/pr/")), "{e:?}");
+    }
+    // the smallest track that this build reads
+    let mut tracks: Vec<&Entry> = l.iter().filter(|e| e.meta.kind == Kind::Track).collect();
+    tracks.sort_by_key(|e| e.meta.size);
+    let e = (*tracks.first().expect("no track on the store")).clone();
+    eprintln!("live: installing {} ({}, {} bytes, {})", e.key(), e.meta.name, e.meta.size, e.rev);
+
+    // the preview, off the CDN
+    s.preview(&e);
+    let got = until_for(&s, 120, |ev| matches!(ev, Event::Preview(..)));
+    assert!(got.iter().any(|ev| matches!(ev, Event::Preview(sha, Some(p)) if *sha == e.meta.sha256 && p.width > 0)), "{got:?}");
+
+    let installed = |s: &Store| {
+        s.install(&e);
+        let got = until_for(s, 600, |ev| matches!(ev, Event::Installed(..)));
+        got.into_iter().find_map(|ev| if let Event::Installed(_, r) = ev { Some(r) } else { None }).unwrap()
+    };
+    assert_eq!(installed(&s), Ok(e.meta.name.clone()));
+    assert!(track_mods::find(&mods, &e.meta.id).is_ok(), "{:?}", tree_of(&mods));
+    assert_eq!(Store::have(&e, &s.stamps(), &s.own_ids()), Have::Installed);
+    let files = tree_of(&mods.join("tracks"));
+
+    // an update: the stamp says an older zip, so the store's is newer
+    let stamp = mods.join("tracks").join(&e.meta.id).join(STAMP);
+    let mut st: Stamp = serde_json::from_slice(&std::fs::read(&stamp).unwrap()).unwrap();
+    st.sha256 = "0".repeat(64);
+    std::fs::write(&stamp, serde_json::to_vec(&st).unwrap()).unwrap();
+    assert_eq!(Store::have(&e, &s.stamps(), &s.own_ids()), Have::Update);
+    assert_eq!(installed(&s), Ok(e.meta.name.clone()));
+    assert_eq!(Store::have(&e, &s.stamps(), &s.own_ids()), Have::Installed);
+    assert_eq!(tree_of(&mods.join("tracks")), files);
+    assert!(tree_of(&mods).iter().all(|f| !f.starts_with('.')), "{:?}", tree_of(&mods));
+
+    s.remove(&e.key(), Kind::Track, &e.meta.id);
+    let got = until_for(&s, 30, |ev| matches!(ev, Event::Removed(..)));
+    assert!(got.iter().any(|ev| matches!(ev, Event::Removed(_, Ok(_)))), "{got:?}");
+    assert_eq!(tree_of(&mods.join("tracks")), Vec::<String>::new());
+
+    eprintln!("live: Report {}", report_url(&e));
+    let _ = std::fs::remove_dir_all(&dir);
+}

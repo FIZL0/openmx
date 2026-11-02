@@ -707,3 +707,40 @@ fn a_new_build_shows_on_the_menu_not_the_ride() {
     assert!(menu.contains(&format!("\"stored\":\"{}\"", env!("OPENMX_COMMIT"))), "the page did not keep this build as the last started: {text}");
     assert!(menu.contains("\"reloaded\":\"Build v0.0.2 2222222.\""), "Square on the main menu did not reload into the newer build: {text}");
 }
+
+/// The mod store in the page against huggingface.co itself (P218, `tests/web/store_live.mjs`): no
+/// fake, the store is FIZL0/openmx-mods. Cross installs the listing's first card into OPFS through the
+/// worker's cross-origin fetches (API, resolve, CDN redirect), Triangle opens Report's
+/// discussions/new in a new tab, Square removes the mod. Ignored: it needs the network and a mod on
+/// the store — `cargo test -p openmx --test web the_browser_uses_the_live_store -- --ignored`.
+#[test]
+#[ignore]
+fn the_browser_uses_the_live_store() {
+    let iso = match Disc::open_configured() {
+        Ok(_) => configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let scratch = std::env::temp_dir().join(format!("openmx-web-store-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/store_live.mjs");
+    let run = Command::new("node").arg(&drive).arg(repo().join("web")).arg(built()).arg(&iso).arg(scratch.join("profile")).output().expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert!(run.status.success(), "store_live.mjs failed:\n{}", String::from_utf8_lossy(&run.stderr));
+    let field = |key: &str| -> String { text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string() };
+    let list = |key: &str| -> String { text.split(&format!("\"{key}\":[")).nth(1).unwrap_or("").split(']').next().unwrap_or("").to_string() };
+    assert_eq!(field("state"), "started", "{text}");
+    assert!(list("files").contains("/store.json\""), "nothing installed into OPFS mods/: {text}");
+    assert_eq!(field("stamp").len(), 64, "{text}");
+    assert_eq!(list("left"), "", "the download is still in OPFS store/: {text}");
+    // signed out, Hugging Face sends Report's tab to its sign-in, the prefilled page its next=
+    assert!(field("report").starts_with("https://huggingface.co/") && field("report").contains("discussions%2Fnew%3Ftitle%3DReport"), "Report opened no prefilled tab: {text}");
+    assert_eq!(list("removed"), "", "Remove left files in OPFS mods/: {text}");
+    // the only failed requests the store's own 404s: no index.json yet, no mods/ on main
+    for f in list("failed").split("\",\"").filter(|f| !f.is_empty()) {
+        assert!(f.contains("index.json") || f.contains("/tree/main/mods"), "a store request failed: {f}\n{text}");
+    }
+}
