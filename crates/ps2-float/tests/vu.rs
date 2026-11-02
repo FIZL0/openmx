@@ -360,3 +360,75 @@ fn the_q_register_is_written_by_the_divider_and_read_by_the_dot_q_forms() {
     assert_eq!(vu.rsqrt(Vf::splat(-1.0), Field::X, Vf::ZERO, Field::X), -vu::MAX);
     assert!(vu.status.div_by_zero());
 }
+
+/// F15a: [`Vf`]'s four-lane add, sub, mul, madd and msub (and the `Q` and cross-product forms built on
+/// them) give the scalar lane functions' bits, every lane, on every class of input: random patterns
+/// (NaN, infinity and denormal ones too), near cancellations, exponents far apart, and the ends of the
+/// range. The lanes are drawn independently, so a lane mask that leaked into its neighbour would show.
+#[test]
+#[cfg(not(feature = "native"))] // native's lanes are the host's own ops, and a NaN's payload may differ
+fn the_four_lane_ops_are_the_lane_functions_bit_for_bit() {
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 32) as u32
+        }
+        /// A pattern from one of the classes the chop and the step back care about.
+        fn lane(&mut self, near: f32) -> f32 {
+            const EDGE: [u32; 12] = [
+                0, 0x8000_0000, 0x0000_0001, 0x807f_ffff, 0x0080_0000, 0x8080_0000, 0x7f7f_ffff, 0xff7f_ffff,
+                0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0x3f80_0000,
+            ];
+            let r = self.next();
+            match r % 8 {
+                0 => f32::from_bits(self.next()),
+                1 => f32::from_bits(EDGE[(self.next() % 12) as usize]),
+                // a few ulps from minus `near`: the sum cancels to almost nothing
+                2 => f32::from_bits((near.to_bits() ^ 0x8000_0000).wrapping_add(self.next() % 9).wrapping_sub(4)),
+                // `near` scaled by 2^k: the exponents up to 60 apart either way
+                3 => {
+                    let e = ((near.to_bits() >> 23) & 0xff) as i32 + (self.next() % 121) as i32 - 60;
+                    let bits = (near.to_bits() & 0x807f_ffff) | ((e.clamp(1, 254) as u32) << 23);
+                    f32::from_bits(bits ^ (self.next() & 0x8000_0000))
+                }
+                // near the overflow and the underflow ends
+                4 => f32::from_bits((self.next() & 0x80ff_ffff) | 0x7e00_0000),
+                5 => f32::from_bits(self.next() & 0x81ff_ffff),
+                // ordinary game-sized values
+                _ => f32::from_bits((self.next() & 0x83ff_ffff) | 0x3c00_0000),
+            }
+        }
+        fn vf(&mut self, near: Vf) -> Vf {
+            Vf(std::array::from_fn(|i| self.lane(near.0[i])))
+        }
+    }
+    let bits = |v: Vf| v.to_bits();
+    let lanes2 = |a: Vf, b: Vf, op: fn(f32, f32) -> f32| Vf(std::array::from_fn(|i| op(a.0[i], b.0[i])));
+    let lanes3 = |c: Vf, a: Vf, b: Vf, op: fn(f32, f32, f32) -> f32| {
+        Vf(std::array::from_fn(|i| op(c.0[i], a.0[i], b.0[i])))
+    };
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let n = 400_000;
+    for _ in 0..n {
+        let a = rng.vf(Vf::splat(1.0));
+        let b = rng.vf(a);
+        let c = rng.vf(vu::mul4(a.0, b.0).into());
+        let q = rng.lane(a.x());
+        assert_eq!(bits(a.add(b)), bits(lanes2(a, b, vu::add)), "add {a:?} {b:?}");
+        assert_eq!(bits(a.sub(b)), bits(lanes2(a, b, vu::sub)), "sub {a:?} {b:?}");
+        assert_eq!(bits(a.mul(b)), bits(lanes2(a, b, vu::mul)), "mul {a:?} {b:?}");
+        assert_eq!(bits(Vf::madd(c, a, b)), bits(lanes3(c, a, b, vu::madd)), "madd {c:?} {a:?} {b:?}");
+        assert_eq!(bits(Vf::msub(c, a, b)), bits(lanes3(c, a, b, vu::msub)), "msub {c:?} {a:?} {b:?}");
+        assert_eq!(bits(a.mul_q(q)), bits(lanes2(a, Vf::splat(q), vu::mul)), "mul_q {a:?} {q:?}");
+        assert_eq!(bits(a.add_q(q)), bits(lanes2(a, Vf::splat(q), vu::add)), "add_q {a:?} {q:?}");
+        let (x, y) = (a.0, b.0);
+        let op = [vu::mul(x[1], y[2]), vu::mul(x[2], y[0]), vu::mul(x[0], y[1]), 0.0];
+        assert_eq!(bits(Vf::opmula(a, b)), op.map(f32::to_bits), "opmula {a:?} {b:?}");
+        let c = c.0;
+        let om = [vu::msub(c[0], x[1], y[2]), vu::msub(c[1], x[2], y[0]), vu::msub(c[2], x[0], y[1]), c[3]];
+        assert_eq!(bits(Vf::opmsub(Vf(c), a, b)), om.map(f32::to_bits), "opmsub {c:?} {a:?} {b:?}");
+    }
+}

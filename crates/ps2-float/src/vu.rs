@@ -164,6 +164,103 @@ pub fn rsqrt(a: f32, b: f32) -> f32 {
     div(a, sqrt(b))
 }
 
+// --- four lanes at once (F15a) ---------------------------------------------------------------------
+//
+// [`Vf`]'s add, sub, mul, madd and msub are the functions above, lane by lane, rewritten without a
+// branch so the compiler can run the four lanes as vector ops: f64 two-sum and product, a narrowing
+// convert, and the chop's step back as a lane mask subtracted from the bits. Every step is the same
+// IEEE operation the scalar function does, so the result is the same bit for bit (the tests check
+// that, lane against lane, over every class of input). What the branches did:
+//
+// * `vu(x)`: one integer clamp and one mask. A magnitude at or above infinity's pattern clamps to
+//   `max`'s, and one below the smallest normal's is zero.
+// * `add`'s overflow test: never taken. Two clamped operands sum to at most `2·max` in f64. When that
+//   sum rounds past `max` in the convert, the result is infinity's pattern, the step back turns it into
+//   `max`'s, and that is the clamp.
+// * `chop`'s non-finite test: never taken for a product, because `max²` is finite in f64.
+
+/// [`operand`]'s bits, per lane: exponent 255 clamps to `±max`, a denormal is `±0`.
+#[inline(always)]
+fn vu_bits4(v: V4) -> [u32; 4] {
+    core::array::from_fn(|i| {
+        let b = v[i].to_bits();
+        let mag = (b & 0x7fff_ffff).min(0x7f7f_ffff);
+        let mag = mag & (((mag >= 0x0080_0000) as u32).wrapping_neg());
+        (b & 0x8000_0000) | mag
+    })
+}
+
+/// `daz` on a result's bits: no exponent means `±0`.
+#[inline(always)]
+fn daz_bits(b: u32) -> u32 {
+    let keep = (((b & 0x7f80_0000) != 0) as u32).wrapping_neg();
+    b & (keep | 0x8000_0000)
+}
+
+/// [`add`] on four lanes whose operands are already as a VU reads them.
+#[allow(clippy::float_arithmetic)] // the model itself, in host arithmetic
+#[inline(always)]
+fn add4_bits(a: [u32; 4], b: [u32; 4]) -> V4 {
+    core::array::from_fn(|i| {
+        let (a, b) = (f32::from_bits(a[i]) as f64, f32::from_bits(b[i]) as f64);
+        let s = a + b;
+        let bb = s - a;
+        let e = (a - (s - bb)) + (b - bb); // exact: s + e is the true sum
+        let r = s as f32;
+        let over = (r as f64 - s) - e; // r minus the true sum
+        let back = (over != 0.0) & (r != 0.0) & ((over > 0.0) == (r > 0.0));
+        f32::from_bits(daz_bits(r.to_bits().wrapping_sub(back as u32)))
+    })
+}
+
+/// [`mul`] on four lanes whose operands are already as a VU reads them, as bits ready for an adder.
+#[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
+#[inline(always)]
+fn mul4_bits(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    core::array::from_fn(|i| {
+        let x = f32::from_bits(a[i]) as f64 * f32::from_bits(b[i]) as f64;
+        let r = x as f32;
+        let back = (r as f64).abs() > x.abs();
+        daz_bits(r.to_bits().wrapping_sub(back as u32))
+    })
+}
+
+#[inline(always)]
+fn neg4(v: [u32; 4]) -> [u32; 4] {
+    v.map(|b| b ^ 0x8000_0000)
+}
+
+/// [`add`] on four lanes.
+#[inline]
+pub fn add4(a: V4, b: V4) -> V4 {
+    add4_bits(vu_bits4(a), vu_bits4(b))
+}
+
+/// [`sub`] on four lanes.
+#[inline]
+pub fn sub4(a: V4, b: V4) -> V4 {
+    add4_bits(vu_bits4(a), neg4(vu_bits4(b)))
+}
+
+/// [`mul`] on four lanes.
+#[inline]
+pub fn mul4(a: V4, b: V4) -> V4 {
+    mul4_bits(vu_bits4(a), vu_bits4(b)).map(f32::from_bits)
+}
+
+/// [`madd`] on four lanes. The product is finite and normal or zero already, so it goes into the adder
+/// as it is.
+#[inline]
+pub fn madd4(acc: V4, a: V4, b: V4) -> V4 {
+    add4_bits(vu_bits4(acc), mul4_bits(vu_bits4(a), vu_bits4(b)))
+}
+
+/// [`msub`] on four lanes.
+#[inline]
+pub fn msub4(acc: V4, a: V4, b: V4) -> V4 {
+    add4_bits(vu_bits4(acc), neg4(mul4_bits(vu_bits4(a), vu_bits4(b))))
+}
+
 /// Which lane a broadcast op reads (`vaddx`, `vmuly`, `vmaddw`, …).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
@@ -261,43 +358,68 @@ impl Vf {
     /// `vadd` / `vsub` / `vmul`, lane by lane. Pair them with [`Vf::bc`] for the broadcast forms:
     /// `a.mul(b.bc(Field::X))` is `vmulx`.
     #[allow(clippy::should_implement_trait)] // named after the instruction; the operators live on `Lane`
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn add(self, o: Vf) -> Vf {
+        if !crate::NATIVE {
+            return Vf(add4(self.0, o.0));
+        }
         Vf(core::array::from_fn(|i| add(self.0[i], o.0[i])))
     }
     #[allow(clippy::should_implement_trait)] // named after the instruction, not after `std::ops`
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn sub(self, o: Vf) -> Vf {
+        if !crate::NATIVE {
+            return Vf(sub4(self.0, o.0));
+        }
         Vf(core::array::from_fn(|i| sub(self.0[i], o.0[i])))
     }
     #[allow(clippy::should_implement_trait)] // named after the instruction, not after `std::ops`
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn mul(self, o: Vf) -> Vf {
+        if !crate::NATIVE {
+            return Vf(mul4(self.0, o.0));
+        }
         Vf(core::array::from_fn(|i| mul(self.0[i], o.0[i])))
     }
     /// `vmadd` / `vmsub`: `acc ± a·b`, lane by lane.
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn madd(acc: Vf, a: Vf, b: Vf) -> Vf {
+        if !crate::NATIVE {
+            return Vf(madd4(acc.0, a.0, b.0));
+        }
         Vf(core::array::from_fn(|i| madd(acc.0[i], a.0[i], b.0[i])))
     }
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn msub(acc: Vf, a: Vf, b: Vf) -> Vf {
+        if !crate::NATIVE {
+            return Vf(msub4(acc.0, a.0, b.0));
+        }
         Vf(core::array::from_fn(|i| msub(acc.0[i], a.0[i], b.0[i])))
     }
     /// `vmulq` / `vaddq` / `vsubq`: every lane against the `Q` register.
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn mul_q(self, q: f32) -> Vf {
+        if !crate::NATIVE {
+            return Vf(mul4(self.0, [q; 4]));
+        }
         Vf(core::array::from_fn(|i| mul(self.0[i], q)))
     }
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn add_q(self, q: f32) -> Vf {
+        if !crate::NATIVE {
+            return Vf(add4(self.0, [q; 4]));
+        }
         Vf(core::array::from_fn(|i| add(self.0[i], q)))
     }
 
     /// `vopmula`: the first half of a cross product, into the accumulator —
     /// `acc.x = a.y·b.z`, `acc.y = a.z·b.x`, `acc.z = a.x·b.y` (`w` untouched).
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn opmula(a: Vf, b: Vf) -> Vf {
+        if !crate::NATIVE {
+            let (a, b) = (a.0, b.0);
+            return Vf(mul4([a[1], a[2], a[0], 0.0], [b[2], b[0], b[1], 0.0]));
+        }
         Vf([mul(a.0[1], b.0[2]), mul(a.0[2], b.0[0]), mul(a.0[0], b.0[1]), 0.0])
     }
     /// `vopmsub`: the second half — the same lane pattern as [`Vf::opmula`], subtracted from the
@@ -310,8 +432,14 @@ impl Vf {
     /// ```
     ///
     /// so port the pair as the original writes it, operands and all, rather than reaching for [`cross`].
-    #[cfg_attr(feature = "native", inline)]
+    #[inline] // F15a: inlined, the four lanes stay in vector registers across a chain of ops
     pub fn opmsub(acc: Vf, a: Vf, b: Vf) -> Vf {
+        if !crate::NATIVE {
+            let (a, b) = (a.0, b.0);
+            let mut r = msub4(acc.0, [a[1], a[2], a[0], 0.0], [b[2], b[0], b[1], 0.0]);
+            r[3] = acc.0[3];
+            return Vf(r);
+        }
         Vf([msub(acc.0[0], a.0[1], b.0[2]), msub(acc.0[1], a.0[2], b.0[0]), msub(acc.0[2], a.0[0], b.0[1]), acc.0[3]])
     }
 
