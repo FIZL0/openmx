@@ -244,9 +244,10 @@ pub fn under(set: &mut PropSet, pushed: &mut [Pushed], owner: u32, point: Vf) ->
 }
 
 /// The props as a ride holds them for its frame: the set, and its pushed copies' place is the frame's
-/// bump. A newtype so the ride can print itself without printing every prop.
+/// bump; and the traffic's physics objects, whose woken trucks the wheels stand on too (S208,
+/// [`crate::truck_wheel`]). A newtype so the ride can print itself without printing every prop.
 #[derive(Clone, Default)]
-pub struct Lent(pub PropSet);
+pub struct Lent(pub PropSet, pub crate::truck_wheel::Trucks);
 
 impl std::fmt::Debug for Lent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -256,22 +257,29 @@ impl std::fmt::Debug for Lent {
 
 impl crate::Sim {
     /// Lend the props to player `i`'s bike for its frame (S210, [`crate::ride::Ride::props`]): its
-    /// wheel probe searches them, wakes what it strikes and reads what it stands on. Nothing is lent
-    /// on a track with no props. [`crate::Sim::props_back`] takes them back.
+    /// wheel probe searches them, wakes what it strikes and reads what it stands on. The traffic's
+    /// physics objects go with them while a truck is woken (S208, [`crate::truck_wheel`]). Nothing is
+    /// lent on a track with no props and no woken truck. [`crate::Sim::props_back`] takes them back.
     pub fn lend_props(&mut self, i: usize) {
-        if self.traffic.props.is_empty() {
+        let trucks = crate::truck_wheel::Trucks::any(&self.traffic);
+        if self.traffic.props.is_empty() && !trucks {
             return;
         }
         let set = std::mem::take(&mut self.traffic.props);
+        let trucks = if trucks { crate::truck_wheel::Trucks::take(&mut self.traffic) } else { Default::default() };
         let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
-        rider.ride.props = Some(Box::new(Lent(set)));
+        rider.ride.props = Some(Box::new(Lent(set, trucks)));
     }
 
     /// The props player `i`'s bike was lent ([`crate::Sim::lend_props`]), back where they are kept.
     pub fn props_back(&mut self, i: usize) {
         let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
         if let Some(set) = rider.ride.props.take() {
-            self.traffic.props = set.0;
+            let Lent(props, trucks) = *set;
+            self.traffic.props = props;
+            if !trucks.cars.is_empty() {
+                self.traffic.physics = trucks.cars;
+            }
         }
     }
 }

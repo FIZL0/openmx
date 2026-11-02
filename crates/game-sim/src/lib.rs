@@ -997,6 +997,9 @@ pub mod prop_wreck;
 /// The riding bike's wheels on the knockable props (S210): the wheel probe searches them, wakes what
 /// it strikes, and a wheel on one rides its motion.
 pub mod prop_wheel;
+/// The riding bike's wheels on a woken `HasPhysics` truck (S208): its `f.col` in the wheel probe's
+/// search while it is physical, and a wheel on it rides the truck's body.
+pub mod truck_wheel;
 
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.
