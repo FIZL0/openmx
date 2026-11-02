@@ -1549,12 +1549,15 @@ mod split_contact {
         }
     }
 
-    /// A rider on the stock bike at `at`, moving at `vel`, wrecks on.
+    /// A rider on the stock bike at `at`, moving at `vel`, wrecks on but for the airborne clause:
+    /// placed in the air, the stand-in bike's answers `NoseDive` on its first frame (`Sim::new` says
+    /// why), and a landing clause's wreck is asked before the hit (S191a).
     fn rider_at(at: Vf, vel: Vf) -> Sim {
         let mut sim = Sim::new(0x5354);
         let mounts = game_sim::stock::mounts(&sim.phy);
         sim.rider = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Default::default());
         sim.rider.sense.wrecks_enabled = true;
+        sim.rider.sense.air_wrecks = false;
         sim.rider.ride.chassis.vel = vel;
         sim
     }

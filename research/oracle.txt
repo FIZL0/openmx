@@ -2797,7 +2797,9 @@ bike_build boot 0x00252ff0 the bike's setup: the chassis via 0x0015c2c0 into bik
 # at +0x260) enters 7 if that chassis is over bike+0x784 higher; one without (+0xf4 its rigid body,
 # mass +0xc, velocity +0x70) enters 7 if heavier than the bike's chassis (+0x210). Either 7 copies the
 # velocity to bike+0x560 first. The loop runs after the landing clauses and is not gated by bike+0x748,
-# so it can enter a second wreck on the same call; the entry stores its reason without looking.
+# but it never enters a second wreck on the same call: the entry (bike_wreck_entry) unfiles the record
+# (0x0026f720 -> its vt+0x74, collision_record_clear: +0x100 and +0x40..+0x4c zeroed), and the loop
+# re-reads +0x7d0 and asks +0x40 first (S191a; the Ee harnesses that hook vt+0xfc never saw it).
 # bike+0x588 is set by the bike constructor when its name contains "Race50" or "Pro50" (strstr).
 # The bike's eleven body rays: record+0x1f0's object, +0x168 count, +0x170 (start, end) pairs, all
 # from one hub at (0, 4.0637, -0.0968); ray 8 ends at (0, 6.6743, 0.1712), the only end above 6, and
@@ -6960,3 +6962,13 @@ car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; n
 #   substep loop). So a wheel with no contact first asks in the share branch and measures what the
 #   other wheel's copied objects name: a front-first landing on a wagon gives the hanging rear the wagon's
 #   velocity. Port: ride.rs share_load. Proved through tests/replay.rs S191 (roof: every lane to tick 158).
+# S191a — the two wreck verdicts S191 left differing (journal research/journal/2026-11-01-s191a-*).
+#   roof, tick 158: the head ray does strike the tenth car's rear end face in both, but bike_wreck_test's
+#   nose-dive (8) entry runs first, and player_wreck_entry 0x0027b810 -> bike_wreck_entry 0x00252ca0 ->
+#   0x0026f720(bike+0x60c, bike+0x7d0) clears the record (S37's line corrected), so the hit loop
+#   never runs. Run live in the Ee on s191-roof (gp boot_gp): +0x40 and +0x100 are 0 after the entry.
+#   Port: rider.rs asks hit_wreck only when no landing clause answered (tests/ride.rs
+#   a_wreck_entry_clears_the_riding_record_before_the_hit_loop).
+#   stand, tick 65: the port's entry was its own (mover_contact `inside`, S137/S216: the head ray's end
+#   inside a car's root box, under the nose or enclosed by the mesh). The original rides on to its own
+#   rays' head hit on 93; the stand-in is removed, and stand agrees to 93 and wrecks 6 there.

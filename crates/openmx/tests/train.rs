@@ -2,14 +2,13 @@
 //! were in the world and moving, but the ride's only body probe, one ray from the centre of mass
 //! along the velocity, passes under a car's deck, and a ray that starts inside a car meets only back
 //! faces. `game_sim::mover_contact` now runs the bike's eleven body rays against the cars once a
-//! tick, as the rider-against-rider contacts are run, and the head ray inside a car is a contact too.
+//! tick, as the rider-against-rider contacts are run.
 //!
 //! These ride the shell's own binary, headless on free06, so the cars are the ones the shell loads
 //! and steps and the ride is the one `vehicle.rs` steps through `Sim::step`:
 //!
 //! - the user's path: full gas square at the line from the east, into the train's side;
-//! - a bike standing on the rails, which the train's nose runs into, head-on and from behind (S170);
-//! - a bike the train already holds (stood where car 0 is at the first tick).
+//! - a bike standing on the rails, which the train's nose runs into, head-on and from behind (S170).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -105,21 +104,25 @@ fn a_bike_standing_on_the_rails_is_thrown_by_the_trains_nose() {
 }
 
 #[test]
-fn a_bike_the_nose_meets_from_behind_is_carried_into_a_scenery_wreck() {
+fn a_bike_the_nose_meets_from_behind_is_carried_without_a_fore_and_aft_wreck() {
     // S170's other capture: the original's bike standing on the rails with the train coming from 36
     // degrees off its tail (the train runs at 190 degrees here, so the bike faces 154). The nose
-    // carries it up towards the train's speed over seven ticks with no fore-and-aft wreck, and then
-    // the head ray meets the car: reason 6.
+    // carries it up towards the train's speed with no fore-and-aft wreck. When its own head ray
+    // strikes the car is the ride's: seven ticks on in S170's braked capture, forty in S191's stand,
+    // which tests/replay.rs replays to that wreck bit for bit. Until S191a the port's own head-inside-
+    // a-car contact wrecked it here within a few ticks of the nose; this spot is neither capture, so
+    // only the carrying is asked: the nose meets it at about tick 50 and moves it on.
     let Some(said) = ride("2385.8,3779.9,154", &tape("behind", 100, false), 100) else { return };
-    assert_eq!(wrecks(&said).first(), Some(&SCENERY), "the nose from behind did not end in a scenery wreck:\n{said}");
+    assert!(!wrecks(&said).contains(&FRONT), "the nose from behind threw the rider over the bars:\n{said}");
+    let at = end(&said);
+    let moved = ((at[0] - 2385.8).powi(2) + (at[2] - 3779.9).powi(2)).sqrt();
+    assert!(moved > 20.0, "the nose carried the bike only {moved:.1} ft, to {at:?}:\n{said}");
 }
 
-#[test]
-fn a_bike_inside_a_car_comes_off_at_once() {
-    // Stood on the rails where car 0 is at the first tick: every ray starts inside the car.
-    let Some(said) = ride("2407,3902,190", &tape("still", 5, false), 5) else { return };
-    assert_eq!(wrecks(&said), [SCENERY], "a bike inside the train rode on:\n{said}");
-}
+// S137's "a bike inside a car comes off at once" (stood where car 0 is at the first tick) asked for the
+// port's own head-inside-a-car contact, which S191a removed: the original's record holds no such entry
+// (S191's stand capture rides on with the head ray's end inside the engine). What the original does
+// with a bike the train already holds is not recorded.
 
 /// A pad tape of `frames` frames: full throttle for the first `gas`, then nothing held.
 fn burst(name: &str, frames: usize, gas: usize) -> PathBuf {

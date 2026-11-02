@@ -2,7 +2,8 @@
 //!
 //! The riding bike's body rays strike the path cars where they stand (S137, `mover_contact`), and a
 //! head ray whose end is inside a car with nothing struck — the train running into a bike beside the
-//! line, every face a back face to it — came off as scenery struck. That fallback read the car's
+//! line, every face a back face to it — came off as scenery struck (until S191a, which removed the
+//! fallback: the original's record holds no such entry). That fallback read the car's
 //! root box alone, and free06's dump truck's box is 28 ft wide round a body that narrows under its
 //! bed and between its wheels: a bike riding up beside it, its head inside the box and no face of the
 //! truck near it, came off at once with nothing struck, which is what the user rode into on Dallas.
@@ -11,7 +12,7 @@
 //! speed, as the traffic hands it to the bike's rays (its pose and its [`Moving`] each tick), and the
 //! bike meets its side slowly: free06's dump truck passing a bike beside it, a train wagon's side, and
 //! free09's trailer's. None throws the rider; each is pushed or carried. The train's own wrecks, its
-//! nose into a bike on the rails and a rider found inside a car, are `crates/openmx/tests/train.rs`'s.
+//! nose into a bike on the rails, are `crates/openmx/tests/train.rs`'s.
 
 use game_render::disc::Disc;
 use game_sim::bike_col::{self, BikeCol};

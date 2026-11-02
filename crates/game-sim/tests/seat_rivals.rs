@@ -16,16 +16,18 @@ use ps2_float::{F, Vf};
 const SPAWN: Vf = game_sim::stock::SPAWN;
 
 /// `tests/ride.rs`'s stack: `n` riders `rise` feet over one another, player 1 on top, each lower one
-/// moving, wrecks on.
+/// moving, wrecks on but for the airborne clause, as that stack has it (S191a).
 fn stacked(n: usize, rise: f32) -> Sim {
     let mut sim = Sim::new(0x5354);
     sim.rider.sense.wrecks_enabled = true;
+    sim.rider.sense.air_wrecks = false;
     let top = Vf::new(SPAWN.x(), SPAWN.y() + rise * (n - 1) as f32, SPAWN.z(), 1.0);
     sim.rider.ride.place(top, game_sim::stock::FACING);
     let mounts = game_sim::stock::mounts(&sim.phy);
     for i in 1..n {
         let at = Vf::new(SPAWN.x(), SPAWN.y() + rise * (n - 1 - i) as f32, SPAWN.z(), 1.0);
         let mut r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Set::default());
+        r.sense.air_wrecks = false;
         r.ride.chassis.vel = Vf::new(i as f32, 0.0, 2.0 * i as f32, 0.0);
         let phy = (*sim.phy).clone();
         sim.add_player(phy, r);
