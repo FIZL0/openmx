@@ -7647,3 +7647,32 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 #   released when the sorted point is not over 0.1 above the terrain. Held: solid, terrain point and
 #   normal, sorted cleared.
 # car_tire_suspension: the contact path runs on solid || sorted; its bottom-out push reads solid (+0xb4), not sorted.
+# --- S240: the ragdoll's bones strike an awake knockable prop's f.col (crates/game-sim/src/ragdoll_scene.rs
+#   KnockedProp, WreckBikeScene::knocked; ragdoll_ride.rs Down::step_posed_among; rider.rs Down branch;
+#   tests/ragdoll_ball.rs; journal 2026-11-02-s240-bones-strike-a-ball)
+# drop2 states (free09, s3's context only: research/s240/put_ball.py drops ball 1 three feet over the human's
+#   lying rider off s197b hit2-2828, strike.py drop2 saves 2840..2845). Human rider body actor 0x01797980:
+#   collisions array +0x624 = 0x017ea790, bones' search +0x628 = 0x017e9dc0.
+# Ball 1's mesh collidable 0x011c0080: vtable 0x00451b50 (mesh), category 0x18, +0x116 0x14 while awake
+#   (in the moving structure, listed wherever the gather walk meets it), +0x31 0x3, +0x7c 0, +0x80 its
+#   collision object 0x011c0c70, reach (+0x60) 10.663.
+# Bones' search at 2840: 27 entries, no statics: balls 1, 2, 4 (0x18, 0x14), the wreck bike 0x00dc9030
+#   (0x9a058, 0x14), path cars (0x48, 0x15), the other riders' bikes, 0x200020 hierarchy meshes. Each
+#   entry's distance is max(0, |centre - probe| - reach), re-measured on a kept list.
+# collide_against_search 0x0011a9d0: per listed candidate with distance <= the sphere's radius: pair
+#   filter, then sphere_collider_pair (vt+0x94); when the pair answers 1 (this candidate took the
+#   record) the sphere's listeners' slot +8 fire, then the other's listeners' slot +0xc, then the
+#   +0x10c/+0x110 callbacks (0 for ball and bone).
+# The ball collidable's listeners (array at *(collidable+0xf4+8)): 0x011bedb8 (the object's, vt 0x0044e7f8,
+#   slot +0xc -> physics_object_struck 0x0015ad40, waking through vt+0x124) and 0x011b6660 (the
+#   collection's, vt 0x0045db04, slot +0xc -> 0x003b2430): PropSet::struck's enable then activate.
+# Bone 2's collision (other +0x70) is ball 1's collidable at 2840 and 2841, the ground from 2842.
+#   2841: point (5020.648, 122.427, 3537.443), normal (-0.292, -0.912, -0.287): the port's sphere test on
+#   the ball as 2840 left it, with the sphere where 2841 stood it, gives both bit for bit.
+# The push-out's other is the collidable with +0x80 set: the moving path against the ball's collision
+#   object and body (as the wreck bike's, S105); only the bone is pushed.
+# The ball's own rays never strike a bone: in drop2 its contact list holds terrain entries only with a
+#   bone inside its ray reach - the bone collisions are not filed on the props node.
+# Proved (tests/ragdoll_ball.rs): 500 gathers at random probes round the ball list the 3 awake balls at the
+#   port's distances bit for bit; 20,000 spheres near ball vertices through sphere_collider_clear/pair
+#   (once or twice) match KnockedProp::touch (count, with, held, point, normal; 11,322 hits).

@@ -1,0 +1,205 @@
+# s240-ragdoll.toml — free09's beach ball 1 and the human rider's nine ragdoll bone bodies, one row a tick (S240).
+#
+# Ball 1's fields as watch/s197b-wreck.toml has them, the human's chassis, and each bone collision's body
+# (+0x60 position, +0x70 velocity) of the human's rider body actor (0x01797980, collisions +0x624), at the
+# addresses they have in every state made from first_recording's. research/s240/put_ball.py puts ball 1 in
+# the thrown rider's way; research/s240/strike.py records this from its state and saves states round the
+# strike:
+#
+#   KIT_PCSX2=3 ./kit pcsx2 with -- python3 -B research/s240/strike.py NAME SLOT
+
+[watch]
+name        = "s240-ragdoll"
+description = "free09's beach ball 1, the human's chassis and its rider's nine bone bodies, a row a tick (S240)"
+every       = 1
+frames      = 600
+
+[setup]
+warmup    = 0
+settle_ms = 240
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rider_ctl_src"  # 1 = the local human
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x20 -> 0x34"
+type = "u32"
+
+[[field]]
+name = "wreck_reason"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "ch_cofg"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "ch_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "ch_ang_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x280"
+type = "f32x4"
+
+[[field]]
+name = "b1_active"
+addr = "0x11b6630 + 0x20"
+type = "u32"
+
+[[field]]
+name = "b1_en"
+addr = "0x11b6a90"
+type = "u32"
+
+[[field]]
+name = "b1_last_pos"
+addr = "0x11b6a90 + 0x50"
+type = "f32x4"
+
+[[field]]
+name = "b1_pos"
+addr = "0x11b6a90 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "b1_vel"
+addr = "0x11b6a90 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "b1_last_quat"
+addr = "0x11b6a90 + 0x150"
+type = "f32x4"
+
+[[field]]
+name = "b1_quat"
+addr = "0x11b6a90 + 0x170"
+type = "f32x4"
+
+[[field]]
+name = "b1_rates"
+addr = "0x11b6a90 + 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "b1_fresh"
+addr = "0x11bed70 + 0x1b0"
+type = "u32"
+
+[[field]]
+name = "b1_countdown"
+addr = "0x11bed70 + 0x1bc"
+type = "f32"
+
+[[field]]
+name = "b1_touch"
+addr = "0x11bed70 + 0x120 -> 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "b1_origin"
+addr = "0x11bed70 + 0x13c -> 0xb0"
+type = "f32x4"
+
+
+[[field]]
+name = "bone0_pos"
+addr = "0x17dc720 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone0_vel"
+addr = "0x17dc720 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone1_pos"
+addr = "0x17dcd80 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone1_vel"
+addr = "0x17dcd80 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone2_pos"
+addr = "0x17dab00 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone2_vel"
+addr = "0x17dab00 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone3_pos"
+addr = "0x17daf00 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone3_vel"
+addr = "0x17daf00 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone4_pos"
+addr = "0x17db100 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone4_vel"
+addr = "0x17db100 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone5_pos"
+addr = "0x17db700 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone5_vel"
+addr = "0x17db700 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone6_pos"
+addr = "0x17dbf00 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone6_vel"
+addr = "0x17dbf00 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone7_pos"
+addr = "0x17dc500 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone7_vel"
+addr = "0x17dc500 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone8_pos"
+addr = "0x17dcb60 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone8_vel"
+addr = "0x17dcb60 + 0x70"
+type = "f32x4"

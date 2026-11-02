@@ -29,6 +29,10 @@
 //! `0x100`, a shape the sphere's pair has no test for), the knockable props' meshes at rest (`0x18`,
 //! F7), the other riders' wreck bikes, and the hierarchy meshes the port's world lacks.
 //!
+//! And the knockable props while they are awake (S240): the moving structure holds their meshes, the
+//! search lists every one, a sphere is paired with each one within its reach, the push-out measures
+//! the bone against the prop's body, and a prop a sphere's record took is woken ([`KnockedProp`]).
+//!
 //! **The sweep** (S166): each bone's collision also has a segment probe, one segment from where the
 //! bone was `1/15` s ago to where it is, run through the same search list the spheres are
 //! ([`sweep_through`]). But the probe's pair filter *includes* only the track's scenery
@@ -669,6 +673,72 @@ impl StillProp {
     }
 }
 
+/// **A knockable prop as the bones' search lists it** (S240): an awake prop's collidable mesh (its
+/// model's `f.col`, [`crate::prop_set::PropSet::shapes`]) where its body node stands it, measured from
+/// where the first collision's sphere last stood. The original files a woken prop's collidable in the
+/// space's moving structure (category `0x18`, `+0x116` `0x14`: listed wherever the walk meets it, as a
+/// path car is), and a sphere within its reach is paired with its mesh on the same record. A contact on
+/// it is with the prop's collision object (`+0x80`), so the push-out measures the bone against the
+/// prop's body ([`Against::Other`], a copy: the bone is pushed, the prop is not). A sphere whose record
+/// the prop took fires the prop's listeners, the struck one waking the prop as a strike does
+/// ([`crate::prop_set::PropSet::struck`]); [`KnockedProp::struck`] says the caller should.
+///
+/// A prop at rest is in the track's static tree instead, listed only inside the bound (F7), so only an
+/// awake body (`enabled`) is listed here. The prop's own rays never meet a bone: the bones' collisions
+/// are not filed on the props' world node, so the prop's search does not find them.
+#[derive(Clone, Debug)]
+pub struct KnockedProp {
+    pub shapes: std::sync::Arc<Vec<Vec<Option<track::Mesh>>>>,
+    pub frame: Node,
+    pub distance: F,
+    /// Its collection, its object, and its body and collision object, copied.
+    pub pushed: crate::prop_contact::Pushed,
+    /// A sphere's record took it this frame: its struck listener runs.
+    pub struck: bool,
+}
+
+impl KnockedProp {
+    /// **The knockable props a frame's spheres can be paired with**: every awake body with a collision
+    /// object and a mesh whose distance from `probe` is within `reach` (the largest sphere's radius),
+    /// in collection and object order.
+    pub fn near(set: &crate::prop_set::PropSet, probe: Vf, reach: F) -> Vec<KnockedProp> {
+        let mut out = Vec::new();
+        for (c, (coll, shapes)) in set.collections.iter().zip(set.shapes.iter()).enumerate() {
+            for (o, (object, mesh)) in coll.objects.iter().zip(shapes).enumerate() {
+                let (Some(mesh), Some(col), Some(bone)) = (mesh, object.collision.as_ref(), coll.bones.get(o)) else { continue };
+                if !bone.body.enabled {
+                    continue;
+                }
+                let (to_world, centre, radius) = crate::world::Prop::posed(mesh, &crate::prop_set::PropSet::matrix(&object.node));
+                let distance = reach_distance((centre, radius), probe);
+                if !(distance <= reach) {
+                    continue;
+                }
+                let [x, y, z, at] = to_world.0;
+                out.push(KnockedProp {
+                    shapes: set.shapes.clone(),
+                    frame: Node { rows: [x, y, z], origin: at },
+                    distance,
+                    pushed: crate::prop_contact::Pushed { collection: c, object: o, collider: col.collider, body: bone.body, mass: bone.mass },
+                    struck: false,
+                });
+            }
+        }
+        out
+    }
+
+    /// The prop's collidable mesh.
+    pub fn mesh(&self) -> Option<&track::Mesh> {
+        self.shapes.get(self.pushed.collection)?.get(self.pushed.object)?.as_ref()
+    }
+
+    /// The sphere test against the prop's mesh on a record holding a hit at `held`; `Some` when this
+    /// prop took the record.
+    pub fn touch(&self, centre: Vf, radius: F, held: Option<F>) -> Option<Touch> {
+        touch_mesh(self.mesh()?, Normals::Unpacked, &self.frame, centre, radius, held)
+    }
+}
+
 /// **The collidables' class words** (`+0x84`), which the pair filter matches against a probe's
 /// include or exclude list (S166).
 pub mod class {
@@ -750,12 +820,17 @@ pub struct WreckBikeScene<'a> {
     /// the list, and where the bike stands among them ([`Statics::bike_at`]).
     pub props: Vec<(usize, StillProp)>,
     pub bike_at: usize,
-    /// What the last sphere's contact is with: 0 the bike, `k + 1` the car `k`; `None` for nothing
+    /// What the last sphere's contact is with: 0 the bike, `k + 1` the car `k` (and past the cars the
+    /// knockable props, S240); `None` for nothing
     /// or a static prop, which is the scenery.
     pub with: Option<usize>,
     /// The bike collidable's sphere (`B+0x40`, `B+0x60`), which a segment probe's pair test rejects
     /// on (S166); `None` leaves the bike out of the sweep.
     pub sphere: Option<(Vf, F)>,
+    /// The awake knockable props the search lists near the bones this frame (S240), after the static
+    /// props and before the cars; empty before the search is built. Contact `k + 1 + cars` is with
+    /// prop `k`.
+    pub knocked: Vec<KnockedProp>,
 }
 
 impl<'a> WreckBikeScene<'a> {
@@ -775,6 +850,7 @@ impl<'a> WreckBikeScene<'a> {
             bike_at: 0,
             with: None,
             sphere: None,
+            knocked: Vec::new(),
         }
     }
 }
@@ -811,6 +887,17 @@ impl Scene for WreckBikeScene<'_> {
             }
         }
         if self.search.built {
+            let first = 1 + self.cars.len();
+            for (k, prop) in self.knocked.iter_mut().enumerate() {
+                if !(prop.distance <= radius) {
+                    continue;
+                }
+                if let Some(t) = prop.touch(centre, radius, best.map(|b| b.distance)) {
+                    best = Some(t);
+                    self.with = Some(first + k);
+                    prop.struck = true;
+                }
+            }
             for (k, car) in self.cars.iter().enumerate() {
                 if !(car.distance <= radius) {
                     continue;
@@ -852,6 +939,10 @@ impl Scene for WreckBikeScene<'_> {
     }
 
     fn velocity(&mut self, other: usize, at: Vf) -> Vf {
+        if let Some(p) = other.checked_sub(1 + self.cars.len()).and_then(|k| self.knocked.get_mut(k)) {
+            let (collider, mut w) = p.pushed.weighed();
+            return moving(at, Against::Other(&mut Other { collider, side: Side::Body(&mut w) }));
+        }
         if let Some(car) = other.checked_sub(1).and_then(|k| self.cars.get(k)) {
             return moving(at, Against::Mover(&car.mover));
         }

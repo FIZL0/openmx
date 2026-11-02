@@ -468,6 +468,23 @@ impl Down {
     /// more with the bike gone. A list gathered anew does not hold it, and a list kept from before
     /// still does, but no sphere is paired with it.
     pub fn step_posed_with(&mut self, kit: &Kit, posed: Option<&Posed>, dt: F, crash: &crate::ride::Crash, world: &mut dyn World, bike_in: bool) {
+        self.step_posed_among(kit, posed, dt, crash, world, bike_in, None);
+    }
+
+    /// [`Down::step_posed_with`] among the knockable props (S240, the set the ride is lent for the
+    /// frame): the search lists the awake ones near the bones, a sphere is paired with their meshes,
+    /// and each one a sphere's record took is struck after the step ([`KnockedProp`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_posed_among(
+        &mut self,
+        kit: &Kit,
+        posed: Option<&Posed>,
+        dt: F,
+        crash: &crate::ride::Crash,
+        world: &mut dyn World,
+        bike_in: bool,
+        mut knockable: Option<&mut crate::prop_set::PropSet>,
+    ) {
         let frame = math::quat_to_mat4(crash.bike.body.quat, crash.origin);
         let bike = kit.bike.map(|(centre, radius)| (bike_centre(&frame, centre), radius));
         // The bones' search, once a frame before the off-bike test, round the first sphere.
@@ -559,6 +576,10 @@ impl Down {
             let props = props.map_or(&[][..], |p| &p.props[..]);
             b.props = crate::ragdoll_scene::StillProp::near_wooded(props, trees, &self.statics, probe, reach);
             b.bike_at = self.statics.bike_at;
+            // And the awake knockable props (S240), every one listed, measured from the same probe.
+            if let Some(set) = knockable.as_deref() {
+                b.knocked = crate::ragdoll_scene::KnockedProp::near(set, probe, reach);
+            }
         }
         // The bones' segments are offered the bike through its collidable's sphere (S166).
         if let Some(b) = &mut bike_scene {
@@ -574,6 +595,12 @@ impl Down {
             &kit.tables,
             Among { spheres: &kit.spheres, contacts: &mut self.contacts, terrain: Some((&mut *world, TERRAIN_MIN, TERRAIN_MAX)), scene, bike_box: None },
         );
+        // The props a sphere's record took hear it struck: woken, as a strike wakes them (S240).
+        if let (Some(b), Some(set)) = (&bike_scene, knockable.as_deref_mut()) {
+            for p in b.knocked.iter().filter(|p| p.struck) {
+                set.struck(p.pushed.collection, p.pushed.object);
+            }
+        }
         // Where the first sphere stood, if it stood: its collision on and its bone enabled.
         if let (Some(b), Some(s), Some(c)) = (&bike_scene, kit.spheres.first(), self.ragdoll.collisions.first())
             && c.enabled
