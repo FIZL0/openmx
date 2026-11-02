@@ -555,13 +555,24 @@ impl Seat {
     /// this one meets them (N22): its contacts, the riders it can joust and the bikes its plane can
     /// strike.
     fn pass(&mut self, dt: F, place: &mut dyn sim_world::World, me: usize, spots: &[Spot], among: vehicle::Among<'_>) {
+        let Some(controls) = self.pass_front(dt) else { return };
+        let mut did = None;
+        if self.riding {
+            (self.said, did) = self.garage.pass_among(&mut self.sim, dt, &controls, me, spots, place, self.markers, among);
+        }
+        self.pass_back(dt, me, controls, did);
+    }
+
+    /// [`Seat::pass`] up to the machine's step: the pad polled and the hands off it, `None` while
+    /// the seat waits for its pad (and then the pass is over).
+    fn pass_front(&mut self, dt: F) -> Option<Controls> {
         // Nobody's hands on the bars: the pad is not polled either, so the input manager's timers
         // and held buttons are where the pull left them, and the ride goes on from there when the
         // pad comes back.
         if self.waiting {
             self.said = rider::Frame::default();
             self.teleported = false;
-            return;
+            return None;
         }
         // The game's poll, with the frame's dt: this is what turns report bytes into held controls,
         // press and release edges, and stick axes with the game's own dead zone — and then the
@@ -580,14 +591,15 @@ impl Seat {
 
         self.said = rider::Frame::default();
         self.teleported = false;
-        if self.riding {
-            let did;
-            (self.said, did) = self.garage.pass_among(&mut self.sim, dt, &controls, me, spots, place, self.markers, among);
-            if let Some(did) = did {
-                self.teleported = matches!(did, markers::Did::Teleported(_));
-                self.clears += u32::from(did == markers::Did::Cleared);
-                println!("marker: {}", marker_line(did));
-            }
+        Some(controls)
+    }
+
+    /// [`Seat::pass`] after the machine's step: what its markers did, then the page's fader.
+    fn pass_back(&mut self, dt: F, me: usize, controls: Controls, did: Option<markers::Did>) {
+        if let Some(did) = did {
+            self.teleported = matches!(did, markers::Did::Teleported(_));
+            self.clears += u32::from(did == markers::Did::Cleared);
+            println!("marker: {}", marker_line(did));
         }
         // The page's fader, after the bike's update as the original's (S85).
         let was = self.shade.alpha();
@@ -1611,7 +1623,12 @@ impl<P: sim_world::World> Game for World<P> {
         // The seats' one prop set for the pass (S197c): every seat's bike strikes it, it steps once
         // after them all, and seat 0's, which is drawn, is every seat's.
         let mut props = game_sim::prop_seats::Shared::take(&mut self.seats.iter_mut().map(|s| &mut s.sim).collect::<Vec<_>>());
-        for me in order {
+        // Two planes or more fly their frames together (N22a1), as the original's level node steps
+        // its planes in one dynamics world: every flying seat's pad first, then one step of all
+        // their planes, then each seat's markers, in the walk's order.
+        let together = flown.len() > 1;
+        let mut held: Vec<Held> = Vec::new();
+        for (step, &me) in order.iter().enumerate() {
             let at = self.seats[me].sim.rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(me).map(std::mem::take).unwrap_or_default()).collect();
             let own = lists.as_mut().map(|l| std::mem::take(&mut l[me]));
@@ -1642,25 +1659,94 @@ impl<P: sim_world::World> Game for World<P> {
                 .map(|p| game_sim::rider_contact::plane_bikes(&near, me, p.at, &self.place))
                 .unwrap_or_default();
             drop(near);
+            if together && flying[me] {
+                let seat = &mut self.seats[me];
+                let controls = seat.pass_front(dt);
+                let ready = controls.as_ref().filter(|_| seat.riding).and_then(|_| seat.garage.ready_plane(&mut seat.sim, dt, &mut self.place));
+                held.push(Held { me, plane, controls, ready, met, bikes, bump });
+                if order.get(step + 1).is_none_or(|&j| !flying[j]) {
+                    self.fly_held(dt, &spots, std::mem::take(&mut held), &mut struck);
+                }
+                continue;
+            }
             let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut(), props: props.as_mut().map(|p| (p, me)) };
             self.seats[me].pass(dt, &mut self.place, me, &spots, among);
-            if let (Some(k), Some(m)) = (plane, met.take()) {
-                let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
-                game_sim::rider_contact::pushed_riders(&mut all, &m);
-                struck[k] = m.struck;
-            }
-            if let Some(b) = &bump {
-                let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
-                game_sim::rider_contact::bumped_riders(&mut all, b);
-                for f in &b.planes {
-                    self.seats[f.seat].garage.plane_pushed(f);
-                }
-            }
+            self.met_after(plane, met, bump.as_ref(), &mut struck);
         }
         if let Some(p) = props {
             p.finish(&mut self.seats.iter_mut().map(|s| &mut s.sim).collect::<Vec<_>>(), dt, &mut self.place);
         }
         true
+    }
+}
+
+/// **A flying seat's pass, held at its plane's frame** (N22a1): what [`World::fly_held`] needs to
+/// fly it with the other planes and finish the seat's pass.
+struct Held {
+    me: usize,
+    /// Its place among the flown planes.
+    plane: Option<usize>,
+    controls: Option<Controls>,
+    ready: Option<vehicle::Readied>,
+    met: Option<game_sim::flight::Met>,
+    bikes: Vec<game_sim::flight_search::Bike>,
+    bump: Option<game_sim::rider_contact::Bump>,
+}
+
+impl<P: sim_world::World> World<P> {
+    /// What a seat's pass leaves for the others (N22a, N22b): its plane's pushes on the riders'
+    /// bikes and the mirrors of its strikes for their lists, and its bike's bumps.
+    fn met_after(
+        &mut self,
+        plane: Option<usize>,
+        met: Option<game_sim::flight::Met>,
+        bump: Option<&game_sim::rider_contact::Bump>,
+        struck: &mut [Vec<Vec<game_sim::contact::Contact>>],
+    ) {
+        if let (Some(k), Some(m)) = (plane, met) {
+            let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
+            game_sim::rider_contact::pushed_riders(&mut all, &m);
+            struck[k] = m.struck;
+        }
+        if let Some(b) = bump {
+            let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
+            game_sim::rider_contact::bumped_riders(&mut all, b);
+            for f in &b.planes {
+                self.seats[f.seat].garage.plane_pushed(f);
+            }
+        }
+    }
+
+    /// The flying seats' held passes finished (N22a1): their readied planes flown in one
+    /// [`vehicle::fly_together`], in the walk's order, then each seat's settle, markers and fader,
+    /// and what its plane met handed on ([`World::met_after`]).
+    fn fly_held(&mut self, dt: F, spots: &[Spot], mut held: Vec<Held>, struck: &mut [Vec<Vec<game_sim::contact::Contact>>]) {
+        {
+            let mut seats: Vec<Option<&mut Seat>> = self.seats.iter_mut().map(Some).collect();
+            let mut tables = None;
+            let mut fleet = Vec::new();
+            for h in held.iter_mut().filter(|h| h.ready.is_some()) {
+                let Some(seat) = seats[h.me].take() else { continue };
+                let Some(flight) = seat.garage.readied_flight() else { continue };
+                tables.get_or_insert_with(|| seat.sim.tables.clone());
+                let pad = h.ready.as_ref().expect("filtered on ready").pad;
+                fleet.push(game_sim::flight::Fly { flight, pad, met: h.met.as_mut(), bikes: &h.bikes });
+            }
+            if let Some(tables) = tables {
+                vehicle::fly_together(dt, &mut fleet, &mut self.place, &tables.ride);
+            }
+        }
+        for h in held {
+            let Held { me, plane, controls, ready, met, bump, .. } = h;
+            let Some(controls) = controls else { continue };
+            let seat = &mut self.seats[me];
+            let mut did = None;
+            if let Some(ready) = ready {
+                (seat.said, did) = seat.garage.settle_plane(&mut seat.sim, me, spots, &mut self.place, seat.markers, ready);
+            }
+            seat.pass_back(dt, me, controls, did);
+            self.met_after(plane, met, bump.as_ref(), struck);
+        }
     }
 }
 
@@ -1785,6 +1871,58 @@ mod split_contact {
         let ((pushed, gap), (alone, still)) = (ride(true), ride(false));
         assert_ne!(pushed, alone, "side by side with the files, the riders push apart");
         assert!(gap > still, "the gap {gap} is no wider than {still} without the files");
+    }
+
+    /// N22a1: split screen's planes meet as online's do (`netplay.rs`'s
+    /// `two_online_planes_strike_each_other`): seat 1 flies level at seat 2's plane, which flies back
+    /// at it, high over the ground, and the two strike each other's hulls and are held apart. With
+    /// seat 2 waiting for its pad, its plane is in nobody's world and seat 1's flies on past where
+    /// it was held.
+    #[test]
+    fn split_planes_strike_each_other() {
+        use game_render::disc::Disc;
+        use game_sim::flight_search::{self, PLANES, Rays};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let res = disc.res(&name).expect("machine.res");
+        let plane = game_sim::phy::Plane::read_bytes(&res.read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy"));
+        let rays = game_sim::track::Rays::parse(&res.read_suffix(flight_search::BIPLANE_RAYS).expect("biplanem.col")).expect("its rays");
+        let hull = game_sim::track::Mesh::parse(&res.read_suffix(game_sim::flight::HULL).expect("biplanef.col")).expect("its hull");
+        let flight = game_sim::flight::Flight::new(&plane).with_rays(Rays::of(&rays)).with_hull(hull);
+        let fly = |seat_two: bool| {
+            let tables = game_sim::ride::Tables::build();
+            let at = |z: f32, v: f32| {
+                let mut f = flight.clone();
+                f.place(Vf::new(0.0, 200.0, z, 1.0), Vf::new(0.0, 0.0, v.signum(), 0.0), &tables.acos);
+                f.body.velocity = Vf::new(0.0, 0.0, v, 1.0);
+                let mut s = seat(Sim::new(0x2a1));
+                // the garage takes the flight as online's follows a seat's (N17)
+                s.sim.plane = Some(f);
+                s.garage.follow(&s.sim);
+                s.sim.plane = None;
+                s
+            };
+            let mut world = World { place: Flat::default(), seats: vec![at(0.0, 120.0), at(80.0, -120.0)], tape: None, played_dt: None };
+            world.seats[1].waiting = !seat_two;
+            let mut struck = [None, None];
+            for _ in 0..20 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+                for (s, seat) in world.seats.iter().enumerate() {
+                    struck[s] = struck[s].or(seat.garage.flight_flown().unwrap().record.struck);
+                }
+            }
+            let z: Vec<f32> = world.seats.iter().map(|s| s.garage.flight_flown().unwrap().body.position.z()).collect();
+            (z, struck)
+        };
+        let (z, struck) = fly(true);
+        assert!(struck.iter().all(|s| s.is_some_and(|s| s >= PLANES)), "the planes' records struck {struck:?}, not each other");
+        assert!(z[0] < z[1], "the planes flew through each other: z {z:?}");
+        let (away, struck) = fly(false);
+        assert_eq!(struck[0], None, "nothing was struck");
+        assert!(away[0] > z[0] + 30.0, "seat 1's plane stopped at z {} with no plane in its way (held at {})", away[0], z[0]);
     }
 }
 

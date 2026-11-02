@@ -1518,3 +1518,301 @@ impl State for Flight {
         }
     }
 }
+
+/// **One of the ride's planes in a joint frame** (N22a1, [`frames_together`]): the plane, the pad
+/// its input step stores after the step, and the riders' bikes it meets ([`Met`]).
+pub struct Fly<'a> {
+    pub flight: &'a mut Flight,
+    pub pad: Pad,
+    pub met: Option<&'a mut Met>,
+    /// The other players' bikes in its world ([`Flight::frame_among`]): its own seat's not among them.
+    pub bikes: &'a [flight_search::Bike],
+}
+
+/// **The ride's planes stepped together** (N22a1): what the original's level node does with both
+/// players' planes, whose collision objects are records on it and whose bodies are in one dynamics
+/// world. Every plane's record is emptied first; then each plane searches in `fleet`'s order with
+/// the others' hulls in its world ([`flight_search::Scene::among_planes`]), so a hit on another plane
+/// names it and files the mirror on its record — after its own entries if it searched already, ahead
+/// of them if it has yet to; then the bikes' mirrors follow on each ([`Met::mirrors`], as
+/// [`Flight::frame_met`] puts them). One world step steps every body: each substep each plane's
+/// force listener resolves its list against the bikes and against the other planes' bodies, which
+/// it pushes ([`contact::Side::Body`]), in turn, so their resolves interleave substep by substep;
+/// then each plane's post in turn. An entry on plane `i`'s list names plane `j` as its met's
+/// vehicles' count plus `j`'s place among the planes but `i`.
+///
+/// With one plane it is [`Flight::frame_met`]. Answers each plane's [`Flight::frame_seamed`].
+pub fn frames_together(
+    dt: F,
+    fleet: &mut [Fly<'_>],
+    ground: &mut dyn world::World,
+    tables: &ride::Tables,
+) -> Vec<(Vec<Option<u32>>, [i8; 2])> {
+    let searched = search_together(dt, fleet, ground);
+    for f in fleet.iter_mut() {
+        let p = &mut *f.flight;
+        if let Some(m) = f.met.as_deref().filter(|m| !m.mirrors.is_empty() && p.rays.is_some()) {
+            let r = &mut p.record;
+            (r.touching, r.on_object, r.touching_other) = (true, true, true);
+            let room = r.capacity.saturating_sub(r.contacts.len());
+            r.contacts.extend(m.mirrors.iter().copied().take(room));
+        }
+    }
+    let (struck, movers): (Vec<_>, Vec<_>) = searched.into_iter().unzip();
+    let hulls = fleet.iter().map(|f| f.flight.hull.as_ref().filter(|_| f.flight.rays.is_some()).map(|_| hull_at(f.flight))).collect();
+    let mut listeners = Together { fleet: &mut *fleet, ground: Ground(ground), tables, movers: &movers, hulls, seams: Vec::new() };
+    listeners.seams = vec![[0, 0]; listeners.fleet.len()];
+    WORLD.step(dt, &mut listeners);
+    let seams = listeners.seams;
+    for f in fleet.iter_mut() {
+        if f.flight.attitude.flown {
+            f.flight.pad = f.pad;
+        }
+    }
+    struck.into_iter().zip(seams).collect()
+}
+
+/// [`frames_together`]' searches alone, for a test to set against the original's: each plane's list
+/// as its force listener would resolve it, but for the bikes' mirrors ([`Met::mirrors`]). Answers
+/// what each plane's bikes' struck listeners kept.
+pub fn searches_together(
+    dt: F,
+    fleet: &mut [Fly<'_>],
+    world: &mut dyn world::World,
+) -> Vec<Vec<Option<u32>>> {
+    search_together(dt, fleet, world).into_iter().map(|(struck, _)| struck).collect()
+}
+
+/// Where a plane's hull stands: its collision node's matrix ([`Flight::hull`]).
+fn hull_at(p: &Flight) -> crate::math::Mat4 {
+    let node = node_of(&p.body);
+    crate::math::Mat4([node.rows[0], node.rows[1], node.rows[2], node.origin])
+}
+
+/// What plane `i`'s list calls plane `j` among its resolve's other planes: its place among the
+/// planes but `i`.
+fn rank(i: usize, j: usize) -> usize {
+    if j < i { j } else { j - 1 }
+}
+
+/// [`frames_together`]' searches ([`Flight::search`] for each plane, the others' hulls in its world).
+fn search_together(
+    dt: F,
+    fleet: &mut [Fly<'_>],
+    world: &mut dyn world::World,
+) -> Vec<(Vec<Option<u32>>, Vec<contact::Mover>)> {
+    let n = fleet.len();
+    for f in fleet.iter_mut() {
+        let p = &mut *f.flight;
+        if p.rays.is_some() {
+            p.record.node = node_of(&p.body);
+            contact_search::clear(&mut p.record, Some(&mut p.body));
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mesh = fleet[i].flight.bike.clone();
+        let bikes = fleet[i].bikes;
+        let near_bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
+        let none = vec![None; near_bikes.map_or(0, |b| b.bikes.len())];
+        let Some(rays) = fleet[i].flight.rays.clone() else {
+            out.push((none, Vec::new()));
+            continue;
+        };
+        let from = fleet[i].flight.body.position;
+        let seen: Vec<usize> = (0..n).filter(|&j| j != i && fleet[j].flight.rays.is_some() && fleet[j].flight.hull.is_some()).collect();
+        let hulls: Vec<(Arc<track::Mesh>, crate::math::Mat4, Vf)> = seen
+            .iter()
+            .map(|&j| {
+                let p = &*fleet[j].flight;
+                let mut at = hull_at(p);
+                at.0[3] = crate::nearest_copy(&*world, from, at.0[3]);
+                (p.hull.clone().expect("seen planes have hulls"), at, p.body.velocity)
+            })
+            .collect();
+        let planes: Vec<flight_search::Plane<'_>> = hulls.iter().map(|(mesh, at, velocity)| flight_search::Plane { mesh, at: *at, velocity: *velocity }).collect();
+        let bases: Vec<usize> = (0..n).map(|j| fleet[j].met.as_deref().map_or(0, |m| m.vehicles.len())).collect();
+        let mut theirs: Vec<contact_search::Record> = seen.iter().map(|&j| std::mem::take(&mut fleet[j].flight.record)).collect();
+        let Fly { flight: me, met, .. } = &mut fleet[i];
+        let me = &mut **me;
+        let (field, props, trees) = flight_search::near_world(world, &rays, &me.record.node, &mut me.nearby);
+        let bounds = field.as_deref().map(field_box);
+        let met = met.as_deref_mut().filter(|m| m.named.is_some() && near_bikes.is_some_and(|b| b.bikes.len() == m.bikes.len()));
+        let velocities: Vec<Vf> = met.as_deref().map_or(Vec::new(), |m| m.bikes.iter().map(|&p| m.vehicles[p].velocity).collect());
+        let first = 1 + velocities.len();
+        let mut scene = Scene::among_planes(props, trees, near_bikes, &planes, first, bounds, &rays, &me.record.node, &mut me.nearby);
+        if met.is_some() {
+            scene = scene.owned(&velocities);
+        }
+        let mine = me.record.contacts.len();
+        let mut records = vec![std::mem::take(&mut me.record)];
+        records.extend(velocities.iter().map(|_| contact_search::Record { capacity: crate::rider_contact::CAPACITY, ..contact_search::Record::default() }));
+        let before: Vec<usize> = theirs.iter().map(|r| r.contacts.len()).collect();
+        records.append(&mut theirs);
+        contact_search::collide(&mut records, 0, Some(&mut me.body), field.as_deref(), &mut scene, dt);
+        let movers = contact_search::Search::movers(&scene);
+        let struck = std::mem::take(&mut scene.struck);
+        drop(scene);
+        let mut theirs = records.split_off(first);
+        let mut records = records.into_iter();
+        me.record = records.next().unwrap_or_default();
+        let mut met = met;
+        if let Some(m) = met.as_deref_mut() {
+            let k = m.vehicles.len();
+            m.struck = vec![Vec::new(); k];
+            m.pushed = vec![false; k];
+        }
+        // The plane's own entries (after the mirrors the planes searched before it left) name the
+        // bikes by player and the planes after them; its mirrors on the others name it as their
+        // lists do.
+        for e in &mut me.record.contacts[mine..] {
+            match e.other {
+                Some(o) if o >= first => e.other = Some(bases[i] + rank(i, seen[o - first])),
+                Some(o) => {
+                    if let Some(m) = met.as_deref_mut() {
+                        let p = m.bikes[o - 1];
+                        e.other = Some(p);
+                        m.pushed[p] = true;
+                    }
+                }
+                None => {}
+            }
+        }
+        if let Some(m) = met {
+            for (bike, &p) in records.zip(&m.bikes) {
+                m.struck[p] = bike.contacts.into_iter().map(|e| contact::Contact { other: m.named, ..e }).collect();
+            }
+        }
+        for ((r, &j), &b) in theirs.iter_mut().zip(&seen).zip(&before) {
+            for e in &mut r.contacts[b..] {
+                e.other = Some(bases[j] + rank(j, i));
+            }
+        }
+        for (r, &j) in theirs.drain(..).zip(&seen) {
+            fleet[j].flight.record = r;
+        }
+        out.push((struck, movers));
+    }
+    out
+}
+
+/// [`frames_together`]' planes in one dynamics world: a body and a listener of each kind apiece.
+struct Together<'a, 'b> {
+    fleet: &'a mut [Fly<'b>],
+    ground: Ground<'a>,
+    tables: &'a ride::Tables,
+    movers: &'a [Vec<contact::Mover>],
+    /// Where each plane's hull stands for the others' refills: as the frame's search placed it, until
+    /// its own post moves it.
+    hulls: Vec<Option<crate::math::Mat4>>,
+    seams: Vec<[i8; 2]>,
+}
+
+impl Dynamics for Together<'_, '_> {
+    fn count(&self, list: List) -> i32 {
+        match list {
+            List::Constraints => 0,
+            _ => self.fleet.len() as i32,
+        }
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        self.fleet[i as usize].flight.preforce(dt);
+    }
+    fn force(&mut self, i: i32, h: F) {
+        let i = i as usize;
+        let (before, rest) = self.fleet.split_at_mut(i);
+        let (me, after) = rest.split_first_mut().expect("a plane of the fleet");
+        let from = me.flight.body.position;
+        // Another plane's body where the copy nearest this one is, on a world that wraps; put back
+        // where it is after the resolve.
+        let mut kept = Vec::new();
+        for f in before.iter_mut().chain(after.iter_mut()) {
+            let b = &mut f.flight.body;
+            kept.push((b.position, b.last_position, f.flight.collider.cofg_world));
+            let near = crate::nearest_copy(&*self.ground.0, from, b.position);
+            if near != b.position {
+                let by = near.sub(b.position);
+                b.position = near;
+                b.last_position = b.last_position.add(by);
+                f.flight.collider.cofg_world = f.flight.collider.cofg_world.add(by);
+            }
+        }
+        let mut planes: Vec<(&mut Collider, Weighed<'_>)> = before
+            .iter_mut()
+            .chain(after.iter_mut())
+            .map(|f| {
+                let p = &mut *f.flight;
+                (&mut p.collider, Weighed { body: &mut p.body, mass: p.mass })
+            })
+            .collect();
+        let Fly { flight, met, .. } = me;
+        let mut others: Vec<contact::Other<'_>> = match met.as_deref_mut() {
+            Some(m) => m
+                .colliders
+                .iter_mut()
+                .zip(m.vehicles.iter_mut())
+                .map(|(collider, v)| contact::Other { collider, side: contact::Side::Vehicle(v) })
+                .collect(),
+            None => Vec::new(),
+        };
+        others.extend(planes.iter_mut().map(|(collider, body)| contact::Other { collider: &mut **collider, side: contact::Side::Body(body) }));
+        flight.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos, &self.movers[i], &mut others);
+        drop(others);
+        drop(planes);
+        for (f, (position, last, cofg)) in before.iter_mut().chain(after.iter_mut()).zip(kept) {
+            let b = &mut f.flight.body;
+            if b.position != position {
+                (b.position, b.last_position) = (position, last);
+                f.flight.collider.cofg_world = cofg;
+            }
+        }
+    }
+    fn enabled(&self, i: i32) -> bool {
+        self.fleet[i as usize].flight.body.enabled
+    }
+    fn integrate(&mut self, i: i32, h: F) {
+        self.fleet[i as usize].flight.body.integrate(h);
+    }
+    fn end_substep(&mut self, i: i32) {
+        self.fleet[i as usize].flight.body.end_substep();
+    }
+    fn constrain(&mut self, _: i32, _: bool) {}
+    fn post(&mut self, i: i32, dt: F) {
+        let i = i as usize;
+        let plane = &mut *self.fleet[i].flight;
+        let seam = plane.wrap_round(&*self.ground.0, &self.tables.acos);
+        self.seams[i] = [self.seams[i][0] + seam[0], self.seams[i][1] + seam[1]];
+        // The refill, with the other planes' hulls where they stand now.
+        let fleet = &*self.fleet;
+        let from = fleet[i].flight.body.position;
+        let world = &*self.ground.0;
+        let hulls: Vec<(Arc<track::Mesh>, crate::math::Mat4, Vf)> = (0..fleet.len())
+            .filter(|&j| j != i)
+            .filter_map(|j| {
+                let p = &*fleet[j].flight;
+                let mut at = self.hulls[j]?;
+                at.0[3] = crate::nearest_copy(world, from, at.0[3]);
+                Some((p.hull.clone()?, at, p.body.velocity))
+            })
+            .collect();
+        let planes: Vec<flight_search::Plane<'_>> = hulls.iter().map(|(mesh, at, velocity)| flight_search::Plane { mesh, at: *at, velocity: *velocity }).collect();
+        let fly = &mut self.fleet[i];
+        let plane = &mut *fly.flight;
+        if let Some(rays) = plane.rays.clone() {
+            let mesh = plane.bike.clone();
+            let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes: fly.bikes });
+            let node = node_of(&plane.body);
+            let (field, props, trees) = flight_search::near_world(&mut *self.ground.0, &rays, &node, &mut plane.nearby);
+            let bounds = field.as_deref().map(field_box);
+            flight_search::refresh_planes(props, trees, bikes.as_ref(), &planes, bounds, &rays, &node, &mut plane.nearby);
+        }
+        let at = plane.body.position;
+        let holed = plane.area.is_some() && self.ground.0.off_world(at, F(crate::biplane::EDGE));
+        let bare = !self.ground.0.keeps(at) && at.y() < 0.0;
+        let wrap = self.ground.0.wrap();
+        plane.post(dt, &self.tables.acos, holed, bare, wrap);
+        if self.hulls[i].is_some() {
+            self.hulls[i] = Some(hull_at(plane));
+        }
+    }
+}

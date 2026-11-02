@@ -47,6 +47,55 @@ pub struct Rides<'a> {
     pub plane: Option<&'a mut Flight>,
 }
 
+/// **A flying seat's step, held at its plane's frame** (N22a1): its plane readied
+/// ([`vehicle::ready_lane`]), and what [`fly_held`] needs to fly it with the others and finish it.
+struct Held {
+    seat: usize,
+    /// Its place among the flown planes.
+    k: Option<usize>,
+    plane: vehicle::Plane,
+    ready: vehicle::Readied,
+    met: Option<game_sim::flight::Met>,
+    bikes: Vec<game_sim::flight_search::Bike>,
+    wanted: Wanted,
+}
+
+/// The held flying seats' steps finished (N22a1): their planes in one [`vehicle::fly_together`], in
+/// the walk's order, then each seat's flight back in its lane, its markers, and its plane's pushes
+/// on the bikes and the mirrors for their lists, as [`Rides::step`] has a lone plane's.
+fn fly_held(
+    sims: &mut [Sim],
+    world: &mut dyn World,
+    dt: F,
+    spots: &[Spot],
+    riding: &[bool],
+    mut held: Vec<Held>,
+    struck: &mut [Vec<Vec<game_sim::contact::Contact>>],
+) {
+    if let Some(first) = held.first() {
+        let tables = sims[first.seat].tables.clone();
+        let mut fleet: Vec<game_sim::flight::Fly<'_>> = held
+            .iter_mut()
+            .filter_map(|h| {
+                let pad = h.ready.pad;
+                Some(game_sim::flight::Fly { flight: h.plane.flight.as_mut()?, pad, met: h.met.as_mut(), bikes: &h.bikes })
+            })
+            .collect();
+        vehicle::fly_together(dt, &mut fleet, world, &tables.ride);
+    }
+    for Held { seat, k, plane, ready, met, wanted, .. } in held {
+        let sim = &mut sims[seat];
+        vehicle::settle_lane(sim, plane, ready);
+        if !wanted.dpad_rides {
+            vehicle::lane_markers(sim, seat, spots, riding, world);
+        }
+        if let (Some(k), Some(m)) = (k, met) {
+            rider_contact::pushed_among(sims, &m);
+            struck[k] = m.struck;
+        }
+    }
+}
+
 impl Game for Rides<'_> {
     type State = State;
 
@@ -92,7 +141,15 @@ impl Game for Rides<'_> {
         // The seats' one prop set for the tick (S197c): every seat's bike strikes it, and it steps
         // once after them all.
         let mut props = game_sim::prop_seats::Shared::take(&mut self.sims.iter_mut().collect::<Vec<_>>());
+        // Two planes or more fly their frames together (N22a1), as the original's level node steps
+        // its planes in one dynamics world: every flying seat's pad first, then one step of all
+        // their planes, then each seat's markers, before the first seat on its bike.
+        let together = flown.len() > 1;
+        let mut held: Vec<Held> = Vec::new();
         for seat in order {
+            if !aloft[seat] && !held.is_empty() {
+                fly_held(self.sims, &mut *self.world, dt, &spots, &riding, std::mem::take(&mut held), &mut struck);
+            }
             let at = self.sims[seat].rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(seat).map(std::mem::take).unwrap_or_default()).collect();
             let own = lists.as_mut().map(|l| std::mem::take(&mut l[seat]));
@@ -141,6 +198,12 @@ impl Game for Rides<'_> {
             }
             // On the plane the bike is not stepped, its markers do not run and its rider's body
             // does not move, as offline (`Seat::pass`); the plane's own markers do (P107).
+            if together && aloft[seat]
+                && let Some((readied, ready)) = vehicle::ready_lane(sim, dt, wanted, self.world)
+            {
+                held.push(Held { seat, k: plane, plane: readied, ready, met, bikes, wanted });
+                continue;
+            }
             if sim.plane.is_some() {
                 vehicle::fly_lane_met(sim, dt, wanted, self.world, &bikes, met.as_mut());
                 if !wanted.dpad_rides {
@@ -170,6 +233,9 @@ impl Game for Rides<'_> {
                     }
                 }
             }
+        }
+        if !held.is_empty() {
+            fly_held(self.sims, &mut *self.world, dt, &spots, &riding, held, &mut struck);
         }
         if let Some(p) = props {
             p.finish(&mut self.sims.iter_mut().collect::<Vec<_>>(), dt, self.world);

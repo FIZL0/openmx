@@ -2495,3 +2495,55 @@ fn an_online_plane_strikes_another_seats_bike() {
     assert_eq!(struck, None, "nobody's bike was struck");
     assert!(z > 70.0, "the plane stopped at z {z} with no bike in its way");
 }
+
+/// N22a1: two online seats' planes meet as the original's do, stepped together. Seat 1 flies level
+/// at seat 2's plane, which flies back at it, high in the air: each strikes the other's hull, names
+/// it ([`game_sim::flight_search::PLANES`]), and the contact holds them apart. With nobody on seat 2
+/// its plane still flies, but in nobody's world, and the two pass through each other.
+#[test]
+fn two_online_planes_strike_each_other() {
+    use game_render::disc::Disc;
+    use game_sim::flight_search::{self, PLANES, Rays};
+    let Ok(mut disc) = Disc::open_configured() else {
+        eprintln!("skipped: no disc configured");
+        return;
+    };
+    let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+    let res = disc.res(&name).expect("machine.res");
+    let plane = game_sim::phy::Plane::read_bytes(&res.read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy"));
+    let rays = game_sim::track::Rays::parse(&res.read_suffix(flight_search::BIPLANE_RAYS).expect("biplanem.col")).expect("its rays");
+    let hull = game_sim::track::Mesh::parse(&res.read_suffix(game_sim::flight::HULL).expect("biplanef.col")).expect("its hull");
+    let flight = game_sim::flight::Flight::new(&plane).with_rays(Rays::of(&rays)).with_hull(hull);
+
+    let fly = |seat_two: bool| {
+        let tables = game_sim::ride::Tables::build();
+        let at = |z: f32, v: f32| {
+            let mut sim = Sim::new(0x2a1);
+            let mut f = flight.clone();
+            f.place(Vf::new(0.0, 200.0, z, 1.0), Vf::new(0.0, 0.0, v.signum(), 0.0), &tables.acos);
+            f.body.velocity = Vf::new(0.0, 0.0, v, 1.0);
+            sim.plane = Some(f);
+            sim
+        };
+        let mut sims = vec![at(0.0, 120.0), at(80.0, -120.0)];
+        let mut world = Flat::default();
+        let pads = [Report::idle(), if seat_two { Report::idle() } else { Report::missing() }];
+        let mut struck = [None, None];
+        for tick in 0..20 {
+            Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None }.step(tick, &pads);
+            for (s, sim) in sims.iter().enumerate() {
+                struck[s] = struck[s].or(sim.plane.as_ref().unwrap().record.struck);
+            }
+        }
+        let z = sims.iter().map(|s| s.plane.as_ref().unwrap().body.position.z()).collect::<Vec<_>>();
+        (z, struck)
+    };
+    let (z, struck) = fly(true);
+    eprintln!("together: z {z:?}, struck {struck:?}");
+    assert!(struck.iter().all(|s| s.is_some_and(|s| s >= PLANES)), "the planes' records struck {struck:?}, not each other");
+    assert!(z[0] < z[1], "the planes flew through each other: z {z:?}");
+    let (z, struck) = fly(false);
+    eprintln!("seat 2 away: z {z:?}, struck {struck:?}");
+    assert_eq!(struck[0], None, "nothing was struck");
+    assert!(z[0] > z[1] + 40.0, "with seat 2 away the planes still met: z {z:?}");
+}
