@@ -720,7 +720,10 @@ impl crate::Sim {
             self.strike_into(b, strike);
         }
         self.wreck_strike(0);
+        // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
+        self.lend_props(0);
         let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], bump.as_deref_mut());
+        self.props_back(0);
         if let Some(b) = bump.as_deref() {
             self.traffic.props.pushed(&b.props);
         }
@@ -971,7 +974,10 @@ impl Sim {
             self.strike_into(b, strike);
         }
         self.wreck_strike(0);
+        // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
+        self.lend_props(0);
         let mut said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, rivals, bump.as_deref_mut());
+        self.props_back(0);
         if let Some(b) = bump.as_deref() {
             self.traffic.props.pushed(&b.props);
         }

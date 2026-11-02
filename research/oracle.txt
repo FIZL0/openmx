@@ -6499,6 +6499,21 @@ atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into 
 #   sets bit 0 over a list (+0xb0 -> +0x300/+0x304) and 0x00215b30 clears it (data xrefs only, vtables
 #   0x004528f0/0x0045dd10). Which of them the wake's body-on reaches was not traced; the interpreter run
 #   is the proof.
+# S210 — wheels on the knockable props (tests crates/game-sim/tests/prop_knock.rs
+#   the_wheel_probe_takes_every_props_mesh and the_wheel_probe_stands_on_the_props_as_the_originals,
+#   prop_strike_paths.rs a_wheel_stands_on_the_ball_in_every_path; journal
+#   research/journal/2026-11-02-s210-wheels-on-props). In S195's knock states every free09 prop's f.col
+#   (physics object +0x128) is category 0x18, +0x31 bit 0 set asleep and awake, +0x7c 0, +0x80 = the
+#   object's collision object (*(o+0x120)); collision_pair_filter(bike+0x7c8, mesh, 0|1) accepts all 62.
+#   The wheel probe's +0x6c is a pointer to its record (S114's +0x88.. offsets are the record's); the
+#   probe keeps its world matrix at +0x120..+0x15c, which probe_object_moved copies from its node
+#   (+0x164, = bike+0x18) and its reach after. Run in the interpreter on knock-2897: the bike's node
+#   stood so a wheel segment passes near a prop (62 props x 24 placings, the state's turn or none), the
+#   bike's search (+0x7bc) holding all 62 meshes at distance 0, collide_against_search(probe, search):
+#   the record's contacts (object +0x9c, point +0x98, normal +0x94, fraction +0xa8) match the port's
+#   prop_wheel::search bit for bit on all 1,488 (290 with a contact, 15 on both segments), and the
+#   enabled/active words after each match the port's PropSet::struck (40 of 60 asleep woken): the f.col's
+#   listener is the object's struck listener (physics_object_struck, enable then activate).
 # S133 — the hierarchy toys' parts (crates/game-render/tests/toy_parts.rs, states s133-free10/-nat11
 #   from R7's scripted boot). The parts list is the motion object's +0x300 (count +0x304); a part's
 #   +0x230 is by then a node of the toy's skeleton (one of its joints' +0x34; a mesh .col's single part

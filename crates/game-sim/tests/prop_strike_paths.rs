@@ -238,3 +238,106 @@ fn a_seat_with_only_rivals_strikes() {
     assert_eq!(mirrors, want.1);
     assert_eq!(body, want.2);
 }
+
+// --- S210: a wheel on the ball ----------------------------------------------------------------------
+
+/// The owner words a bike's two wheels' contacts left, front then rear.
+fn owners(r: &Rider) -> [u32; 2] {
+    [r.ride.front.mv.fresh.scalars[2], r.ride.rear.mv.fresh.scalars[2]]
+}
+
+/// Where a bike stands with a wheel on a ball and its body rays striking nothing: the first ball and
+/// spot about it where one [`Sim::step`] leaves the ball's owner word ([`prop_wheel::handle`]) on a
+/// wheel. Answers the collection, the spot, and the word.
+fn on_a_ball(sim: &Sim) -> Option<(usize, Vf, u32)> {
+    for (c, coll) in sim.traffic.props.collections.iter().enumerate() {
+        let Some(o) = coll.objects.first().filter(|o| o.collision.is_some()) else { continue };
+        let ball = o.node.origin;
+        let handle = game_sim::prop_wheel::handle(&sim.traffic.props, c, 0);
+        for dx in (-12..=12).map(|k| k as f32 * 0.25) {
+            for dy in (2..=14).map(|k| k as f32 * 0.25) {
+                let at = Vf::new(ball.x() + dx, ball.y() + dy, ball.z(), 1.0);
+                let mut probe = sim.clone();
+                probe.rider.place(at, facing());
+                if !probe.prop_strike(0, DT).contacts.is_empty() {
+                    continue;
+                }
+                probe.step(DT, &Controls::default(), &mut Flat::default());
+                if owners(&probe.rider).contains(&handle) {
+                    return Some((c, at, handle));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// **A wheel stands on a ball, in every step path** (S210): a bike stood over a free09 prop (the first
+/// collection [`on_a_ball`] finds one on), its body rays clear of it, has a wheel's contact on the ball's `f.col` — the wheel's owner word the
+/// ball's ([`prop_wheel::handle`]) — and the ball, asleep as loaded, is woken by the wheel's hit, in
+/// [`Sim::step`], [`Sim::step_all`] (whichever player is over it) and a seat's
+/// [`Sim::step_bumped`] and [`Sim::step_among`]. With no props in the Sim the same spot has no such
+/// owner (the wheel went through the ball before S210). And the ball's motion is what the wheel
+/// stands on: the same tick with the ball rolling under it leaves the bike going differently.
+#[test]
+fn a_wheel_stands_on_the_ball_in_every_path() {
+    let Some((set, phy, col)) = disc() else { return };
+    let base = one(&set, &phy, &col);
+    let (c, at, handle) = on_a_ball(&base).expect("some spot over some ball where a wheel stands on it");
+    eprintln!("collection {c}, the bike at {at:?}, handle {handle}");
+    assert!(!ball(&base, c).0, "the ball asleep as loaded");
+
+    let mut sim = base.clone();
+    sim.rider.place(at, facing());
+    sim.step(DT, &Controls::default(), &mut Flat::default());
+    assert!(owners(&sim.rider).contains(&handle), "Sim::step: a wheel on the ball");
+    assert!(ball(&sim, c).0, "Sim::step: the wheel's hit wakes the ball");
+    assert!(sim.rider.ride.props.is_none() && !sim.traffic.props.is_empty(), "the props are back in the traffic");
+
+    let mut none = base.clone();
+    none.traffic.props = PropSet::default();
+    none.rider.place(at, facing());
+    none.step(DT, &Controls::default(), &mut Flat::default());
+    assert_eq!(owners(&none.rider), [0, 0], "no props, no owner");
+
+    // The ball woken and rolling across under the wheel, against woken and still.
+    let rolled = |v: Vf| {
+        let mut sim = base.clone();
+        sim.traffic.props.struck(c, 0);
+        sim.traffic.props.collections[c].bones[0].body.velocity = v;
+        sim.rider.place(at, facing());
+        sim.step(DT, &Controls::default(), &mut Flat::default());
+        assert!(owners(&sim.rider).contains(&handle), "a wheel on the ball going {v:?}");
+        sim.rider.ride.chassis.vel
+    };
+    let (still, rolling) = (rolled(Vf::new(0.0, 0.0, 0.0, 0.0)), rolled(Vf::new(0.0, 0.0, 8.0, 0.0)));
+    assert_ne!(still.to_bits(), rolling.to_bits(), "the ball's motion reaches the bike: {still:?} both ways");
+
+    for over in 0..2 {
+        let mut sim = base.clone();
+        let r = rider(&sim, &col);
+        let p = (*sim.phy).clone();
+        sim.add_player(p, r);
+        for i in 0..2 {
+            let spot = if i == over { at } else { away(at) };
+            let r = if i == 0 { &mut sim.rider } else { &mut sim.others[0].rider };
+            r.place(spot, facing());
+        }
+        sim.step_all(DT, &[Controls::default(); 2], &mut Flat::default());
+        let (on, off) = if over == 0 { (&sim.rider, &sim.others[0].rider) } else { (&sim.others[0].rider, &sim.rider) };
+        assert!(owners(on).contains(&handle), "step_all, player {} over the ball: a wheel on it", over + 1);
+        assert_eq!(owners(off), [0, 0], "step_all: the other player on nothing");
+        assert!(ball(&sim, c).0, "step_all, player {} over the ball: woken", over + 1);
+        assert!(sim.rider.ride.props.is_none() && sim.others[0].rider.ride.props.is_none() && !sim.traffic.props.is_empty());
+    }
+
+    for among in [false, true] {
+        let path = if among { "step_among" } else { "step_bumped" };
+        for over in 0..2 {
+            let sims = seats(&base, &col, at, over, among);
+            assert!(owners(&sims[over].rider).contains(&handle), "{path}, seat {} over the ball: a wheel on it", over + 1);
+            assert!(ball(&sims[over], c).0, "{path}, seat {} over the ball: woken", over + 1);
+            assert!(!ball(&sims[1 - over], c).0, "{path}: the other seat's ball sleeps on");
+        }
+    }
+}

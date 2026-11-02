@@ -821,6 +821,11 @@ pub struct Ride {
     /// first time the bike searches a world that hands over its props or plants; `None` until then, and
     /// the hash walk leaves it out then, so a ride with nothing solid about it hashes as before.
     pub nearby: Option<Box<broad_phase::Search>>,
+    /// **The knockable props, lent for the frame** (S210, [`crate::prop_wheel`]): the wheel probe
+    /// searches them after the scene, wakes what it strikes, and a wheel on one reads the prop's
+    /// motion. The [`crate::Sim`] lends them before the bike's frame and takes them back after it, so
+    /// between frames this is `None`, and the hash walk and the snapshot never see it.
+    pub props: Option<Box<crate::prop_wheel::Lent>>,
 }
 
 impl Ride {
@@ -892,6 +897,7 @@ impl Ride {
             mxvatv: None,
             back_search: None,
             nearby: None,
+            props: None,
         };
         ride.place(at, facing);
         ride
@@ -1562,12 +1568,11 @@ pub fn contact_velocity(vel: Vf, world_ang_vel: Vf, at: Vf, cofg_world: Vf) -> V
 ///
 /// Each is a `vsub.xyz`, so `w` is the first operand's. On another collision object (`+0x1f0`, a
 /// body or a vehicle's chassis), which the original asks before the vehicle, `under` is
-/// [`crate::contact::other_at`]'s (S145, proved). No riding bike's wheel meets one (S168): the wheel
-/// ray probe ignores the bike's own actor category, which every bike's frame and wreck part carry,
-/// and every owned collidable in the original's searches carries it too, so [`under`] answers only a
-/// vehicle. The one owner the probe is not barred from is a HasPhysics truck's physics mesh, which a
-/// woken truck stands up into the wheel's nearby search (S208), and the port does not simulate a
-/// woken truck yet (S186).
+/// [`crate::contact::other_at`]'s (S145, proved). The wheel ray probe ignores the bike's own actor
+/// category, which every bike's frame and wreck part carry (S168), so the owners a riding bike's
+/// wheel meets are the knockable props' `f.col` meshes (S210, [`crate::prop_wheel`]), which [`under`]
+/// answers, and a HasPhysics truck's physics mesh, which a woken truck stands up into the wheel's
+/// nearby search (S208) and the port does not simulate yet (S186).
 pub fn wheel_contact_velocity(own: Vf, vel: Vf, under: Option<(Vf, Vf)>) -> (Vf, Vf) {
     match under {
         Some((velocity, at)) => (sub_xyz(own, at), sub_xyz(vel, velocity)),
@@ -1579,7 +1584,16 @@ pub fn wheel_contact_velocity(own: Vf, vel: Vf, under: Option<(Vf, Vf)>) -> (Vf,
 /// (`+0x1f4`, which only the contact distributor writes and the substep's clear empties) looked up in
 /// the substep's movers, and measured where the wheel's contact point (`+0x120`) is now — the
 /// original measures it at the first ask and keeps it for the substep (`+0x1a0`).
-fn under(wh: &Wheel, movers: &[(u32, crate::traffic::Moving)]) -> Option<(Vf, Vf)> {
+///
+/// The owner its contact names (`+0x1f0`) is asked first, as the original does: a knockable prop's
+/// collision object (S210, [`crate::prop_wheel::under`]), read off the lent props, or off the bump's
+/// pushed copy of a body the body rays struck this tick (`pushed`).
+fn under(wh: &Wheel, movers: &[(u32, crate::traffic::Moving)], props: Option<&mut crate::prop_set::PropSet>,
+         pushed: &mut [crate::prop_contact::Pushed]) -> Option<(Vf, Vf)> {
+    let owner = wh.mv.fresh.scalars[2];
+    if owner != 0 {
+        return props.and_then(|set| crate::prop_wheel::under(set, pushed, owner, wh.w.contact_point));
+    }
     let vehicle = wh.mv.fresh.scalars[3];
     if vehicle == 0 {
         return None;
@@ -1815,20 +1829,42 @@ impl crate::contact_search::Search for SolidSweep<'_> {
 /// A hit on a prop that moves ([`crate::world::Prop::moving`], a path car's mesh) carries the car:
 /// the collidable's vehicle (`+0x7c`) in the original, a vehicle of kind 2 (S136). The handle is the
 /// struck object's own number, which is never zero.
-fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broad_phase::Search>>, world: &mut dyn World) -> (Vec<WheelHit>, F) {
+///
+/// The knockable props lent for the frame (`props`, S210) are searched after the scene, on the same
+/// record ([`crate::prop_wheel::search`]): a contact on one names the prop as its owner, and the
+/// props struck are woken. In a world that answers only [`World::solid`] they are searched on a record
+/// of their own and merged a segment at a time.
+fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broad_phase::Search>>, world: &mut dyn World,
+              props: Option<&mut crate::prop_set::PropSet>) -> (Vec<WheelHit>, F) {
     let node = rider_contact::node(m);
     let found = nearby_scene(nearby, world, rays, &node, |scene| {
         let hits = crate::contact_search::Search::rays(scene, true);
-        let near = if hits.is_empty() { F::ONE } else { scene.ray_record().nearest };
         let on = |object: usize| Some((object as u32, scene.prop_at(object)?.moving?));
         // A mesh's material is its surface word's low byte (a file too old for one, and a tree's
         // cylinder, have 0).
         let material = |object: usize| scene.prop_at(object).and_then(|p| p.mesh.surface).map_or(0, |s| s as u8);
-        let hits = hits.iter().map(|h| (h.from, h.point, h.normal, on(h.struck.object), material(h.struck.object))).collect();
-        (hits, near)
+        let hits: Vec<WheelHit> = hits.iter().map(|h| (h.from, h.point, h.normal, on(h.struck.object), material(h.struck.object), 0)).collect();
+        (hits, scene.ray_record().clone())
     });
-    if let Some(found) = found {
-        return found;
+    if let Some((hits, mut record)) = found {
+        let Some(set) = props else {
+            let near = if hits.is_empty() { F::ONE } else { record.nearest };
+            return (hits, near);
+        };
+        let on = crate::prop_wheel::search(rays, m, set, &mut record);
+        // The record's contacts as they stand after the props: a prop's in place of the scene's one
+        // on its segment when nearer, or after them on a segment the scene left free.
+        let hits: Vec<WheelHit> = record
+            .contacts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match on.on.iter().find(|&&(k, _, _)| k == i) {
+                Some(&(_, owner, material)) => (c.from, c.point, c.normal, None, material, owner),
+                None => hits[i],
+            })
+            .collect();
+        let near = if hits.is_empty() { F::ONE } else { record.nearest };
+        return (hits, near);
     }
     let mut b = Bundle::default();
     for s in &rays.segments {
@@ -1842,16 +1878,35 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broa
     let mut record = Record::new();
     world.solid(&b, &mut record);
     world.groups(&b, &mut record);
+    let near = if record.hits > 0 { record.nearest } else { F::ONE };
+    let scene = |i: usize| (rays.segments[i].from, record.point[i], record.normal[i], None, 0, 0);
+    let Some(set) = props else {
+        return ((0..b.count).filter(|&i| record.hit[i]).map(scene).collect(), near);
+    };
+    // The knockable props (S210) on a record of their own, a segment's contact on one taken in place
+    // of the world's when strictly nearer, as the probe's own record keeps the nearer of two.
+    let mut ray = crate::ray_probe::Record { listed: true, capacity: rays.segments.len(), one_per_ray: true, ..Default::default() };
+    crate::ray_probe::clear(&mut 0, &mut ray);
+    let found = crate::prop_wheel::search(rays, m, set, &mut ray);
     let hits = (0..b.count)
-        .filter(|&i| record.hit[i])
-        .map(|i| (rays.segments[i].from, record.point[i], record.normal[i], None, 0))
+        .filter_map(|i| {
+            let from = rays.segments[i].from.to_bits();
+            let prop = found.on.iter().map(|&(k, owner, material)| (&ray.contacts[k], owner, material)).find(|(c, _, _)| c.from.to_bits() == from);
+            match prop {
+                Some((c, owner, material)) if !record.hit[i] || c.fraction < record.fraction[i] => {
+                    Some((c.from, c.point, c.normal, None, material, owner))
+                }
+                _ => record.hit[i].then(|| scene(i)),
+            }
+        })
         .collect();
-    (hits, if record.hits > 0 { record.nearest } else { F::ONE })
+    (hits, near.min(ray.nearest))
 }
 
 /// One of [`wheel_hits`]' contacts: the segment's from, the point, the normal, the moving thing it is
-/// on, with its handle, when it is on one, and the struck prop's material ([`Ride::rear_material`]).
-type WheelHit = (Vf, Vf, Vf, Option<(u32, crate::traffic::Moving)>, u8);
+/// on, with its handle, when it is on one, the struck prop's material ([`Ride::rear_material`]), and
+/// the knockable prop it is on ([`crate::prop_wheel::handle`], S210), 0 for none.
+type WheelHit = (Vf, Vf, Vf, Option<(u32, crate::traffic::Moving)>, u8, u32);
 
 /// One surface out of a tire's table, by the index the ground query answered with. A tire with no
 /// table at all — or an index past its end — gets a surface of all zeroes, which is a tire with no
@@ -1988,12 +2043,13 @@ const SHARE_SCALE: f32 = 1.0;
 /// hanging rear's velocity taken relative to the wagon (S191). The measure is returned, and is the
 /// one the wheel's own integration goes on with.
 fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf,
-              movers: &[(u32, crate::traffic::Moving)]) -> Option<(Vf, Vf)> {
+              movers: &[(u32, crate::traffic::Moving)], props: Option<&mut crate::prop_set::PropSet>,
+              pushed: &mut [crate::prop_contact::Pushed]) -> Option<(Vf, Vf)> {
     wh.w.load_point = wh.w.probe_end_world;
     wh.w.spring_force = F(SHARE_SCALE) * other.w.spring_force;
     wh.mv.fresh.scalars[2] = other.mv.fresh.scalars[2];
     wh.mv.fresh.scalars[3] = other.mv.fresh.scalars[3];
-    let under = under(wh, movers);
+    let under = under(wh, movers, props, pushed);
     let own = contact_velocity(mvc.vel, mvc.world_ang_vel, wh.w.load_point, cofg_world);
     wh.w.contact_velocity = wheel_contact_velocity(own, mvc.vel, under).0;
     under
@@ -2139,7 +2195,7 @@ impl Ride {
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
-            drag_halved, tricks, mxvatv, rear_material, nearby, ..
+            drag_halved, tricks, mxvatv, rear_material, nearby, props, ..
         } = self;
         *touching = false;
         // MX vs. ATV's moves (MD16), only for a bike a trick pack is laid over.
@@ -2428,7 +2484,8 @@ impl Ride {
             rear.w.swept_contact = 0;
 
             calls.push(mv::Call::Contacts(s.dt));
-            let movers = contacts(&out.chassis, front, rear, near, touching, rear_material, nearby, scenery, s.dt, world);
+            let movers = contacts(&out.chassis, front, rear, near, touching, rear_material, nearby, scenery, s.dt, world,
+                                  props.as_deref_mut().map(|l| &mut l.0));
 
             for (side, wh) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)] {
                 calls.push(mv::Call::Suspension(side, h));
@@ -2446,7 +2503,12 @@ impl Ride {
 
             // What each wheel stands on, measured once a substep where the wheel's contact is when the
             // tire forces first ask for its velocity ([`under`], S136).
-            let mut under = [under(front, &movers), under(rear, &movers)];
+            let mut under = {
+                let mut none = Vec::new();
+                let pushed = bump.as_deref_mut().map_or(&mut none[..], |b| &mut b.props[..]);
+                let front = under(front, &movers, props.as_deref_mut().map(|l| &mut l.0), pushed);
+                [front, under(rear, &movers, props.as_deref_mut().map(|l| &mut l.0), pushed)]
+            };
             for ((side, wh), under) in [(Side::Front, &mut *front), (Side::Rear, &mut *rear)].into_iter().zip(under) {
                 calls.push(mv::Call::TireForces(side, h));
                 tire_forces(wh, &mut mvc, chassis.cofg_world, &mut out.chassis, h, under);
@@ -2460,7 +2522,9 @@ impl Ride {
             calls.push(mv::Call::WheelIntegrate(Side::Rear, h));
             let (brake, other, load) = (held.rear_brake, front.w.contact, front.w.spring_force);
             if rear.mv.other_tire_down && !rear.w.contact {
-                under[1] = share_load(rear, front, &mvc, chassis.cofg_world, &movers);
+                let mut none = Vec::new();
+                let pushed = bump.as_deref_mut().map_or(&mut none[..], |b| &mut b.props[..]);
+                under[1] = share_load(rear, front, &mvc, chassis.cofg_world, &movers, props.as_deref_mut().map(|l| &mut l.0), pushed);
             }
             wheel_integrate(rear, &p.rear, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
                             &tables.curve, h, under[1]);
@@ -2607,23 +2671,25 @@ impl Ride {
 /// ([`Ride::sweep_back`]) ran before them.
 #[allow(clippy::too_many_arguments)] // the substep's state, and the bike's kept search
 fn contacts(m: &Mat4, front: &mut Wheel, rear: &mut Wheel, near: &mut F, touching: &mut bool, rear_material: &mut u8,
-            nearby: &mut Option<Box<broad_phase::Search>>, scenery: bool, dt: F, world: &mut dyn World) -> Vec<(u32, crate::traffic::Moving)> {
+            nearby: &mut Option<Box<broad_phase::Search>>, scenery: bool, dt: F, world: &mut dyn World,
+            props: Option<&mut crate::prop_set::PropSet>) -> Vec<(u32, crate::traffic::Moving)> {
     let rays = wheel_rays(&front.w, &rear.w);
-    let (hits, wheel_near) = wheel_hits(&rays, m, nearby, world);
+    let (hits, wheel_near) = wheel_hits(&rays, m, nearby, world, props);
     let look = !hits.is_empty();
     let cs: Vec<chassis::Contact> = hits
         .iter()
-        .map(|&(from, point, normal, on, _)| chassis::Contact {
+        .map(|&(from, point, normal, on, _, owner)| chassis::Contact {
             // `select` is the segment's own start, along the bike: the front wheel's is forward.
             select: F(from.z()),
             normal,
             point,
-            // The collision node and the owner are the scene's, and the port has no handle to put
-            // here: a prop is the world, which is what a zero owner means. A path car's mesh is a
+            // The collision node is the scene's, and the port has no handle to put here. The owner is
+            // a knockable prop's collision object (S210, [`crate::prop_wheel::handle`]); a still prop
+            // of the scene is the world, which is what a zero owner means. A path car's mesh is a
             // vehicle of kind 2, as every one of the original's path cars is (S136). Other riders'
             // bikes are not searched: the wheel probe's category list refuses every bike (S168).
             node: 0,
-            owner: 0,
+            owner,
             vehicle: on.map_or(0, |(k, _)| k),
             vehicle_kind: if on.is_some() { 2 } else { 0 },
             listeners: 0,
