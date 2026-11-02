@@ -481,14 +481,18 @@ fn the_vu_lane_arithmetic_matches_lane_by_lane() {
         let a: [f32; 3] = std::array::from_fn(|k| vu::operand(ee.u32_at(pa + 4 * k as u32)));
         let b: [f32; 3] = std::array::from_fn(|k| vu::operand(ee.u32_at(pb + 4 * k as u32)));
 
-        for (name, carrier, model) in
-            [("vsub", sub, vu::sub as fn(f32, f32) -> f32), ("vmul", mul, vu::mul)]
-        {
+        // F15a: the four-lane `Vf` forms too, the path the port's vector code takes
+        let (va, vb) = (vu::Vf([a[0], a[1], a[2], aw]), vu::Vf([b[0], b[1], b[2], bw]));
+        for (name, carrier, model, four) in [
+            ("vsub", sub, vu::sub as fn(f32, f32) -> f32, va.sub(vb)),
+            ("vmul", mul, vu::mul, va.mul(vb)),
+        ] {
             put_vec(&mut ee, out, [f32::NAN; 3], f32::NAN);
             ee.call(carrier, &[out as u64, pa as u64, pb as u64], &[], BUDGET);
             for k in 0..3 {
                 same(ee.u32_at(out + 4 * k), model(a[k as usize], b[k as usize]),
                      format_args!("{name}({a:?}, {b:?})[{k}]"));
+                same(ee.u32_at(out + 4 * k), four.0[k as usize], format_args!("Vf {name}({a:?}, {b:?})[{k}]"));
             }
             assert_eq!(ee.u32_at(out + 12), aw.to_bits(),
                        "{name}: the masked w lane must come back as it was loaded");
@@ -509,6 +513,7 @@ fn the_vu_lane_arithmetic_matches_lane_by_lane() {
         for k in 0..3u32 {
             same(ee.u32_at(out + 0x30 + 4 * k), vu::add(a[k as usize], b[k as usize]),
                  format_args!("vadd({a:?}, {b:?})[{k}]"));
+            same(ee.u32_at(out + 0x30 + 4 * k), va.add(vb).0[k as usize], format_args!("Vf vadd({a:?}, {b:?})[{k}]"));
         }
         assert_eq!(ee.u32_at(out + 0x3c), aw.to_bits(), "vadd.xyz must leave row three's w alone");
     }
