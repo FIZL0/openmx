@@ -1229,6 +1229,7 @@ impl Rider {
         // 8 — the points (S79): the rider's tick, on the frame's wheels and wreck, and then the
         // manager's, which in the original runs after every rider's and touches only this one's card.
         let sensed = Self::score_sense(ride, slow, state.wreck.is_some());
+        let shown = score.shown;
         match (p.tricks.as_ref(), ride.tricks.as_deref_mut()) {
             (Some(moves), Some(t)) => {
                 let was = t.front_watch;
@@ -1239,6 +1240,10 @@ impl Rider {
                 }
             }
             _ => score.frame(dt, &sensed),
+        }
+        // A flip scored the frame it starts (S234), told as a start then.
+        if score.shown != 0 && score.shown != shown {
+            out.started = out.started.or(Some(Trick(score.shown)));
         }
         score.grow(dt);
         if let Some(h) = hidden {
@@ -1263,6 +1268,11 @@ impl Rider {
             wrecked,
             up_y: F(m.0[1].y()),
             forward_y: F(m.0[2].y()),
+            flipping: match ride.air.flipping {
+                false => 0,
+                true if ride.tricks.as_ref().is_some_and(|t| air::front_flipping(&ride.air, t.flip_row)) => score::FRONTFLIP,
+                true => score::BACKFLIP,
+            },
         }
     }
 
@@ -1494,7 +1504,7 @@ impl State for Rider {
         }
         // The points (S79), once anything has scored or started to: a rider who never has hashes as
         // before, as a rider who is up hashes as one who has never been down.
-        if (Score { lockout: false, ..self.score.clone() }) != Score::default() {
+        if (Score { lockout: false, flip_at_start: false, ..self.score.clone() }) != Score::default() {
             w.group("score", |w| hash::State::walk(&self.score, w));
         }
     }

@@ -573,6 +573,7 @@ fn recording2s_points() {
             wrecked,
             up_y: F(float(k, up)),
             forward_y: F(float(k, fwd)),
+            ..Sense::default()
         };
         let (was, now) = (int(k - 1, wreck) != 0, int(k, wreck) != 0);
         // The clocks.

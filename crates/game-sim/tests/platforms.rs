@@ -452,8 +452,10 @@ const RIDERS_DIGEST: u64 = 0x1d4ac8eeb11bb86c;
 /// (nine bytes, four riders), all clear.
 /// 13607 since S189: each ride's kept nearby search (`Ride::nearby`), `None` on a world with no props
 /// or plants (one byte, four riders).
-const RIDERS_WIRE_DIGEST: u64 = 0x4e1004a2c535a161;
-const RIDERS_WIRE_LEN: usize = 13607;
+/// 13619 since S234: each rider's card's flip-at-start switch and its two words (three bytes, four
+/// riders), all clear.
+const RIDERS_WIRE_DIGEST: u64 = 0x814fccb6a95896e9;
+const RIDERS_WIRE_LEN: usize = 13619;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
 /// every 50 ticks — rider 1's pad (one of the `Sim`'s own) and rider 3's (one with no pad here) guessed
