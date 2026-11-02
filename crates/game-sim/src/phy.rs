@@ -1038,40 +1038,48 @@ impl Tire {
         // whatever was on its stack, so a missing count here means no surfaces at all.
         let n = s.int("NumberOfSurfaces").unwrap_or(0).clamp(0, MAX_SURFACES as i32);
         for i in 1..=n {
-            tire.surfaces.push(Surface {
-                side_force: s.float_or(&format!("SideForce{i}"), F::ZERO),
-                slipping_side_force: s.float_or(&format!("SlippingSideForce{i}"), F::ZERO),
-                max_drive_force: s.float_or(&format!("MaxDriveForce{i}"), F::ZERO),
-                max_side_force: s.float_or(&format!("MaxSideForce{i}"), F::ZERO),
-                max_slipping_side_force: s.float_or(&format!("MaxSlippingSideForce{i}"), F::ZERO),
-                skid_drive_force: s.float_or(&format!("SkidDriveForce{i}"), F::ZERO),
-                skid_side_force: s.float_or(&format!("SkidSideForce{i}"), F::ZERO),
-                skid_slipping_side_force: s.float_or(&format!("SkidSlippingSideForce{i}"), F::ZERO),
-                slipping_side_force_round_off: s.float_or(&format!("SlippingSideForceRoundOff{i}"), F::ZERO),
-                slipping_side_force_drop_off: s.float_or(&format!("SlippingSideForceDropOff{i}"), F::ZERO),
-                slipping_side_force_scale: s.float_or(&format!("SlippingSideForceScale{i}"), F::ZERO),
-                slipping_side_force_speed_scale: s.float_or(&format!("SlippingSideForceSpeedScale{i}"), F::ZERO),
-                braking_side_force_round_off: s.float_or(&format!("BrakingSideForceRoundOff{i}"), F::ZERO),
-                braking_side_force_drop_off: s.float_or(&format!("BrakingSideForceDropOff{i}"), F::ZERO),
-                braking_side_force_scale: s.float_or(&format!("BrakingSideForceScale{i}"), F::ZERO),
-                braking_side_force_speed_scale: s.float_or(&format!("BrakingSideForceSpeedScale{i}"), F::ZERO),
-                side_force_round_off: s.float_or(&format!("SideForceRoundOff{i}"), F::ZERO),
-                side_force_drop_off: s.float_or(&format!("SideForceDropOff{i}"), F::ZERO),
-                side_force_scale: s.float_or(&format!("SideForceScale{i}"), F::ZERO),
-                side_force_speed_scale: s.float_or(&format!("SideForceSpeedScale{i}"), F::ZERO),
-                max_braking_torque: s.float_or(&format!("MaxBrakingTorque{i}"), F::ZERO),
-                wheel_friction: s.float_or(&format!("WheelFriction{i}"), F::ZERO),
-                wheel_drag: s.float_or(&format!("WheelDrag{i}"), F::ZERO),
-                donuts_side_force_speed_scale: if front {
-                    F::ZERO
-                } else {
-                    s.float_or(&format!("DonutsSideForceSpeedScale{i}"), F::ZERO)
-                },
-                mud_time: if front { s.float_or(&format!("MudTime{i}"), F::ZERO) } else { F::ZERO },
-                mud_amount: if front { s.float_or(&format!("MudAmount{i}"), F::ZERO) } else { F::ZERO },
-            });
+            tire.surfaces.push(Surface::read(s, i, front));
         }
         tire
+    }
+}
+
+impl Surface {
+    /// Surface `i` (from 1) of a `[Front Tire]` or `[Rear Tire]`: the `%d` keys, each 0 when missing.
+    /// The mud pair is the front's only and the donut scale the rear's only; the other side keeps zero.
+    pub fn read(s: Section<'_>, i: i32, front: bool) -> Surface {
+        Surface {
+            side_force: s.float_or(&format!("SideForce{i}"), F::ZERO),
+            slipping_side_force: s.float_or(&format!("SlippingSideForce{i}"), F::ZERO),
+            max_drive_force: s.float_or(&format!("MaxDriveForce{i}"), F::ZERO),
+            max_side_force: s.float_or(&format!("MaxSideForce{i}"), F::ZERO),
+            max_slipping_side_force: s.float_or(&format!("MaxSlippingSideForce{i}"), F::ZERO),
+            skid_drive_force: s.float_or(&format!("SkidDriveForce{i}"), F::ZERO),
+            skid_side_force: s.float_or(&format!("SkidSideForce{i}"), F::ZERO),
+            skid_slipping_side_force: s.float_or(&format!("SkidSlippingSideForce{i}"), F::ZERO),
+            slipping_side_force_round_off: s.float_or(&format!("SlippingSideForceRoundOff{i}"), F::ZERO),
+            slipping_side_force_drop_off: s.float_or(&format!("SlippingSideForceDropOff{i}"), F::ZERO),
+            slipping_side_force_scale: s.float_or(&format!("SlippingSideForceScale{i}"), F::ZERO),
+            slipping_side_force_speed_scale: s.float_or(&format!("SlippingSideForceSpeedScale{i}"), F::ZERO),
+            braking_side_force_round_off: s.float_or(&format!("BrakingSideForceRoundOff{i}"), F::ZERO),
+            braking_side_force_drop_off: s.float_or(&format!("BrakingSideForceDropOff{i}"), F::ZERO),
+            braking_side_force_scale: s.float_or(&format!("BrakingSideForceScale{i}"), F::ZERO),
+            braking_side_force_speed_scale: s.float_or(&format!("BrakingSideForceSpeedScale{i}"), F::ZERO),
+            side_force_round_off: s.float_or(&format!("SideForceRoundOff{i}"), F::ZERO),
+            side_force_drop_off: s.float_or(&format!("SideForceDropOff{i}"), F::ZERO),
+            side_force_scale: s.float_or(&format!("SideForceScale{i}"), F::ZERO),
+            side_force_speed_scale: s.float_or(&format!("SideForceSpeedScale{i}"), F::ZERO),
+            max_braking_torque: s.float_or(&format!("MaxBrakingTorque{i}"), F::ZERO),
+            wheel_friction: s.float_or(&format!("WheelFriction{i}"), F::ZERO),
+            wheel_drag: s.float_or(&format!("WheelDrag{i}"), F::ZERO),
+            donuts_side_force_speed_scale: if front {
+                F::ZERO
+            } else {
+                s.float_or(&format!("DonutsSideForceSpeedScale{i}"), F::ZERO)
+            },
+            mud_time: if front { s.float_or(&format!("MudTime{i}"), F::ZERO) } else { F::ZERO },
+            mud_amount: if front { s.float_or(&format!("MudAmount{i}"), F::ZERO) } else { F::ZERO },
+        }
     }
 }
 

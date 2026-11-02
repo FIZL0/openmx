@@ -12,6 +12,7 @@
 
 use game_sim::air::AcosTable;
 use game_sim::chassis::{ContactCall, WheelContact};
+use game_sim::phy::Ini;
 use game_sim::quad::{self, Body, Call, Contact, Params, Player, Quad, Race, Surface, Tail, Wheel};
 use ps2_float::{F, Vf};
 use ps2_oracle::{DONE, Ee, Kit, skip};
@@ -1648,4 +1649,629 @@ fn the_quads_update_is_the_originals() {
         30,
     );
     eprintln!("{tally_of:?}");
+}
+
+// --- MD64b: the tire reader ------------------------------------------------------------------------
+
+/// The quad's `[Front Tire]`/`[Rear Tire]` reader, the ini's section select and string lookup (the
+/// flag, int, float and vector reads all come down to it), the kernel's syscall stubs, and the sweep
+/// shape rebuild the wheels' derived setter calls.
+const TIRE_PHY: u32 = 0x004b_b880;
+const INI_SECTION: u32 = 0x0014_4140;
+const INI_STRING: u32 = 0x0014_2ce0;
+const SYSCALLS: (u32, u32) = (0x0033_e800, 0x0033_f400);
+const SWEEP_REBUILD: u32 = 0x001b_b3f0;
+/// The C library's reent pointer: the vector read's `strtok` keeps its place at `+0x5c` of it, and
+/// `strtod`'s freelist is at `+0x4c`.
+const IMPURE_PTR: u32 = 0x0039_3a90;
+/// The ini the reader is handed (the hooks never read it) and the object the wheels' mass is read
+/// off.
+const INI: u32 = 0x01c0_d000;
+const MASS_OBJ: u32 = 0x01c0_d100;
+/// The reader's reach: the quad's tire words and the four wheels up to their steering torque.
+const TIRE_REGIONS: [(&str, u32, u32); 5] = [
+    ("quad", OBJ, 0x17c0),
+    ("left front", 0x01c0_8000, 0x8b8),
+    ("right front", 0x01c0_9000, 0x8b8),
+    ("left rear", 0x01c0_a000, 0x8b8),
+    ("right rear", 0x01c0_b000, 0x8b8),
+];
+/// The wheels' pointers in the quad, in [`quad::LEFT_FRONT`]'s order.
+const QUAD_WHEELS: u32 = 0x17b0;
+
+fn tire_cstr(ee: &Ee, mut a: u32) -> String {
+    let mut s = String::new();
+    loop {
+        let c = ee.u8_at(a);
+        if c == 0 {
+            return s;
+        }
+        s.push(char::from(c));
+        a += 1;
+    }
+}
+
+fn tire_set_byte(ee: &mut Ee, a: u32, b: u8) {
+    let (at, shift) = (a & !3, 8 * (a & 3));
+    ee.set_u32(at, ee.u32_at(at) & !(0xff << shift) | u32::from(b) << shift);
+}
+
+/// A generated tire file: each section's keys and their text.
+type TireFile = BTreeMap<&'static str, BTreeMap<String, String>>;
+
+/// One sweep rebuild call: the shape, the 1, the segment's two ends, and the two zeros.
+type SweepCall = (u32, u32, Vf, Vf, u32, u32);
+
+/// The ini's lookups answered from `file`: the section select remembers the section, the string
+/// lookup copies the value's text into the caller's buffer as the game's line reader keeps it (with
+/// the whitespace squeezed out, which [`Ini::parse`] does as the original's does).
+fn hook_tire_ini(ee: &mut Ee, file: &Rc<RefCell<Ini>>, sweeps: &Rc<RefCell<Vec<SweepCall>>>) {
+    let section = Rc::new(RefCell::new(String::new()));
+    let at = section.clone();
+    ee.hooks.insert(INI_SECTION, Box::new(move |ee| {
+        assert_eq!(ee.r(4) as u32, INI, "the section select is not handed the ini");
+        *at.borrow_mut() = tire_cstr(ee, ee.r(5) as u32);
+        ee.set(2, 1);
+    }));
+    let f = file.clone();
+    ee.hooks.insert(INI_STRING, Box::new(move |ee| {
+        assert_eq!(ee.r(4) as u32, INI + 0x44, "the lookup is not handed the ini's table");
+        let key = tire_cstr(ee, ee.r(5) as u32);
+        let (buf, len) = (ee.r(6) as u32, ee.r(7) as u32);
+        let found = match f.borrow().section(section.borrow().as_str()).text(&key) {
+            Some(text) => {
+                assert!((text.len() as u32) < len, "{key}'s text does not fit");
+                for (i, b) in text.bytes().chain([0]).enumerate() {
+                    tire_set_byte(ee, buf + i as u32, b);
+                }
+                1
+            }
+            None => 0,
+        };
+        ee.set(2, found);
+    }));
+    for a in (SYSCALLS.0..SYSCALLS.1).step_by(4) {
+        if ee.u32_at(a) >> 16 == 0x2403 && ee.u32_at(a + 4) == 0x0000_000c {
+            ee.hooks.insert(a, Box::new(|ee| ee.set(2, 0)));
+        }
+    }
+    let s = sweeps.clone();
+    ee.hooks.insert(SWEEP_REBUILD, Box::new(move |ee| {
+        let v = |a: u32| Vf::new(ee.f32_at(a), ee.f32_at(a + 4), ee.f32_at(a + 8), ee.f32_at(a + 12));
+        let ends = ee.r(6) as u32;
+        s.borrow_mut().push((ee.r(4) as u32, ee.r(5) as u32, v(ends), v(ends + 16), ee.r(7) as u32, ee.r(8) as u32));
+    }));
+}
+
+/// The wheel words the port's [`quad::WheelTire`] holds, as `(offset, field)`.
+fn wheel_words(w: &mut quad::WheelTire) -> Vec<(u32, &mut F)> {
+    vec![
+        (0x3c, &mut w.strut_compression),
+        (0x40, &mut w.max_compression_rate),
+        (0x44, &mut w.max_decompression_rate),
+        (0x48, &mut w.spring),
+        (0x4c, &mut w.damping_in),
+        (0x50, &mut w.damping_out),
+        (0x54, &mut w.spin_inertia),
+        (0x58, &mut w.inv_spin_inertia),
+        (0x5c, &mut w.tire_inertia),
+        (0x64, &mut w.steer_damping),
+        (0x68, &mut w.steer_inertia),
+        (0x6c, &mut w.inv_steer_inertia),
+        (0x70, &mut w.max_steer_angle),
+        (0x74, &mut w.min_steer_angle),
+        (0xb8, &mut w.other_load_scale),
+        (0x214, &mut w.radius),
+        (0x218, &mut w.ply),
+        (0x21c, &mut w.width),
+        (0x220, &mut w.tire_mass),
+        (0x838, &mut w.inv_radius),
+        (0x8a8, &mut w.ply_scale),
+        (0x8b4, &mut w.steer_torque),
+    ]
+}
+
+fn wheel_vectors(w: &mut quad::WheelTire) -> [(u32, &mut Vf); 3] {
+    [(0x90, &mut w.mount), (0xa0, &mut w.force_position), (0x100, &mut w.rest)]
+}
+
+/// A wheel's surface table `t` (the drive setter's eight, the side setter's thirteen, the drag
+/// setter's three), surface `i`.
+fn table_word(w: &mut quad::WheelTire, t: usize, i: usize) -> &mut F {
+    let s = &mut w.surfaces[i];
+    match t {
+        0..8 => &mut s.drive[t],
+        8..21 => &mut s.side[t - 8],
+        _ => &mut s.drag[t - 21],
+    }
+}
+
+fn get_v(ee: &Ee, a: u32) -> Vf {
+    Vf::new(ee.f32_at(a), ee.f32_at(a + 4), ee.f32_at(a + 8), ee.f32_at(a + 12))
+}
+
+/// What the RAM holds at the port's fields, for the quad at `obj`.
+fn read_tire(ee: &Ee, obj: u32) -> quad::TireSetup {
+    let mut t = quad::TireSetup::default();
+    for (k, w) in t.wheels.iter_mut().enumerate() {
+        let base = ee.u32_at(obj + QUAD_WHEELS + 4 * k as u32);
+        w.parametric = ee.u32_at(base + 0x34) as i32;
+        w.sweep = ee.u32_at(base + 0x1dc) != 0;
+        for (o, f) in wheel_words(w) {
+            *f = F(ee.f32_at(base + o));
+        }
+        for (o, v) in wheel_vectors(w) {
+            *v = get_v(ee, base + o);
+        }
+        for tb in 0..24 {
+            for i in 0..16 {
+                *table_word(w, tb, i) = F(ee.f32_at(base + 0x238 + 0x40 * tb as u32 + 4 * i as u32));
+            }
+        }
+    }
+    t.front_spring = (F(ee.f32_at(obj + 0x137c)), F(ee.f32_at(obj + 0x1380)));
+    t.rear_spring = (F(ee.f32_at(obj + 0x1384)), F(ee.f32_at(obj + 0x1388)));
+    for i in 0..16 {
+        t.mud_time[i] = F(ee.f32_at(obj + 0x1654 + 4 * i as u32));
+        t.mud_amount[i] = F(ee.f32_at(obj + 0x1694 + 4 * i as u32));
+    }
+    t
+}
+
+/// The port's fields written back over the RAM.
+fn write_tire(ee: &mut Ee, t: &quad::TireSetup) {
+    let mut t = *t;
+    for (k, w) in t.wheels.iter_mut().enumerate() {
+        let base = ee.u32_at(OBJ + QUAD_WHEELS + 4 * k as u32);
+        ee.set_u32(base + 0x34, w.parametric as u32);
+        for (o, f) in wheel_words(w) {
+            ee.set_f32(base + o, f.0);
+        }
+        for (o, v) in wheel_vectors(w) {
+            put_v(ee, base + o, *v);
+        }
+        for tb in 0..24 {
+            for i in 0..16 {
+                ee.set_f32(base + 0x238 + 0x40 * tb as u32 + 4 * i as u32, table_word(w, tb, i).0);
+            }
+        }
+    }
+    put_f(ee, OBJ + 0x137c, t.front_spring.0);
+    put_f(ee, OBJ + 0x1380, t.front_spring.1);
+    put_f(ee, OBJ + 0x1384, t.rear_spring.0);
+    put_f(ee, OBJ + 0x1388, t.rear_spring.1);
+    for i in 0..16 {
+        put_f(ee, OBJ + 0x1654 + 4 * i as u32, t.mud_time[i]);
+        put_f(ee, OBJ + 0x1694 + 4 * i as u32, t.mud_amount[i]);
+    }
+}
+
+/// The quad and its wheels as a generated case lays them out: every word a finite number in a few
+/// hundred, then the wheel pointers, the mass, the shapes and the mounts.
+struct TireLayout {
+    words: Vec<u32>,
+    mass: F,
+    shapes: [u32; 4],
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    /// A value as a file writes one: whole, a few places, many, signed, sometimes on 0 or 1.
+    fn number(&mut self, lo: f32, hi: f32) -> String {
+        let v = lo + (hi - lo) * self.unit();
+        match self.bits() % 8 {
+            0 => "0".into(),
+            1 => "1".into(),
+            2 => format!("{}", v.round() as i32),
+            3 => format!("{v:.1}"),
+            4 => format!("{v:.2}"),
+            5 => format!("{v:.4}"),
+            6 => format!("{v:.7}"),
+            _ => format!("{v}"),
+        }
+    }
+    fn surface_count(&mut self) -> String {
+        match self.bits() % 12 {
+            0 => "16".into(),
+            1 => "0".into(),
+            2 => "-2".into(),
+            3 => "1".into(),
+            4 => format!("{}", 2 + self.bits() % 14),
+            _ => format!("{}", 1 + self.bits() % 3),
+        }
+    }
+    /// One section of a tire file, each key the reader asks for present four times in five.
+    fn tire_section(&mut self, front: bool) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        let put = |g: &mut Gen, m: &mut BTreeMap<String, String>, k: &str, v: String| {
+            if !g.one_in(5) {
+                m.insert(k.to_string(), v);
+            }
+        };
+        let flag = ["1", "0", "2", "-3", "0x10", "True", "false", "Yes", "n", "On", "OFF", "T", "F"];
+        let word = flag[self.bits() as usize % flag.len()].to_string();
+        put(self, &mut m, "UseParametricCurve", word);
+        for (k, lo, hi) in [
+            ("StrutCompression", 0.0, 2.0),
+            ("MaxCompressionRate", 0.0, 40.0),
+            ("MaxDecompressionRate", 0.0, 40.0),
+            ("TireRadius", -0.5, 1.5),
+            ("TireInertia", -1.0, 3.0),
+            ("Spring", -10.0, 60.0),
+            ("SpringWhenStopped", -10.0, 60.0),
+            ("BounceDampingRatio", 0.0, 2.0),
+            ("ReboundDampingRatio", 0.0, 2.0),
+        ] {
+            let v = self.number(lo, hi);
+            put(self, &mut m, k, v);
+        }
+        let v = if self.b() {
+            format!("{}, {}, {}", self.number(-2.0, 2.0), self.number(-2.0, 2.0), self.number(-2.0, 2.0))
+        } else {
+            format!("{},{}, {} ,{}", self.number(-2.0, 2.0), self.number(-2.0, 2.0), self.number(-2.0, 2.0), self.number(-1.0, 2.0))
+        };
+        put(self, &mut m, "BodyTireForcePosition", v);
+        if front {
+            for (k, lo, hi) in [
+                ("SteeringTorque", -50.0, 400.0),
+                ("SteeringDamping", -5.0, 40.0),
+                ("SteeringInertia", -1.0, 2.0),
+                ("MaxSteerAngle", -10.0, 60.0),
+            ] {
+                let v = self.number(lo, hi);
+                put(self, &mut m, k, v);
+            }
+            m.insert("NumberOfSurfaces".into(), self.surface_count());
+        } else {
+            let v = self.number(0.0, 2.0);
+            put(self, &mut m, "OtherTireNormalLoadScale", v);
+            if !self.one_in(4) {
+                m.insert("NumberOfSurfaces".into(), self.surface_count());
+            }
+        }
+        let mut keys = vec![
+            "SideForce", "SlippingSideForce", "MaxDriveForce", "MaxSideForce", "MaxSlippingSideForce",
+            "SkidDriveForce", "SkidSideForce", "SkidSlippingSideForce", "SlippingSideForceRoundOff",
+            "SlippingSideForceDropOff", "SlippingSideForceScale", "SlippingSideForceSpeedScale",
+            "BrakingSideForceRoundOff", "BrakingSideForceDropOff", "BrakingSideForceScale",
+            "BrakingSideForceSpeedScale", "SideForceRoundOff", "SideForceDropOff", "SideForceScale",
+            "SideForceSpeedScale", "MaxBrakingTorque", "WheelFriction", "WheelDrag",
+        ];
+        // Each side's own: the reader asks the front for mud and the rear for the donut scale; the
+        // other key is written too, to show it is not read.
+        keys.extend(["MudTime", "MudAmount", "DonutsSideForceSpeedScale"]);
+        for i in 1..=16 {
+            for k in &keys {
+                let v = self.number(-20.0, 200.0);
+                put(self, &mut m, &format!("{k}{i}"), v);
+            }
+        }
+        m
+    }
+    fn tire_file(&mut self) -> TireFile {
+        let mut f = TireFile::new();
+        if !self.one_in(50) {
+            f.insert("Front Tire", self.tire_section(true));
+        } else {
+            // No front section: only its count is asked for (the missing int leaves a stack word).
+            f.insert("Front Tire", BTreeMap::from([("NumberOfSurfaces".to_string(), self.surface_count())]));
+        }
+        if !self.one_in(50) {
+            f.insert("Rear Tire", self.tire_section(false));
+        }
+        f
+    }
+    fn tire_layout(&mut self) -> TireLayout {
+        let mut words = vec![];
+        for &(_, _, len) in &TIRE_REGIONS {
+            for _ in (0..len).step_by(4) {
+                words.push(self.f(-300.0, 300.0).0.to_bits());
+            }
+        }
+        let shapes = std::array::from_fn(|_| if self.b() { 0 } else { 0x01c0_e000 + (self.bits() & 0xff0) });
+        TireLayout { words, mass: self.f(5.0, 40.0), shapes }
+    }
+}
+
+fn tire_text(file: &TireFile) -> String {
+    let mut t = String::new();
+    for (name, keys) in file {
+        t.push_str(&format!("[{name}]\n"));
+        for (k, v) in keys {
+            t.push_str(&format!("{k} = {v}\n"));
+        }
+    }
+    t
+}
+
+fn lay_out_tires(ee: &mut Ee, l: &TireLayout) {
+    let mut words = l.words.iter();
+    for &(_, base, len) in &TIRE_REGIONS {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, *words.next().unwrap());
+        }
+    }
+    ee.set_u32(OBJ + 0x4, QUAD_VTABLE);
+    for (k, &w) in WHEEL.iter().enumerate() {
+        ee.set_u32(OBJ + QUAD_WHEELS + 4 * k as u32, w);
+        ee.set_u32(w + 0x1dc, l.shapes[k]);
+        ee.set_u32(w + 0x1e4, MASS_OBJ);
+    }
+    put_f(ee, MASS_OBJ + 0x18, l.mass);
+}
+
+fn tire_snap(ee: &Ee) -> Vec<u32> {
+    TIRE_REGIONS.iter().flat_map(|&(_, base, len)| (0..len).step_by(4).map(move |o| base + o)).map(|a| ee.u32_at(a)).collect()
+}
+
+fn tire_where(i: usize) -> String {
+    let mut i = i as u32 * 4;
+    for (name, _, len) in TIRE_REGIONS {
+        if i < len {
+            return format!("{name} + {i:#x}");
+        }
+        i -= len;
+    }
+    "past the end".into()
+}
+
+fn tire_paths(file: &TireFile, l: &TireLayout, t: &quad::TireSetup) -> Vec<&'static str> {
+    let front = &file["Front Tire"];
+    let rear = file.get("Rear Tire");
+    fn count(s: Option<&BTreeMap<String, String>>) -> Option<&str> {
+        s.and_then(|s| s.get("NumberOfSurfaces")).map(String::as_str)
+    }
+    let mut p = vec![];
+    p.push(match count(Some(front)) {
+        Some("16") => "front 16 surfaces",
+        Some("0") => "front no surfaces",
+        Some("-2") => "front negative count",
+        _ => "front some surfaces",
+    });
+    p.push(match count(rear) {
+        None => "rear count is the front's",
+        Some("16") => "rear 16 surfaces",
+        _ => "rear own count",
+    });
+    if rear.is_none() {
+        p.push("no rear section");
+    }
+    if !front.contains_key("TireRadius") {
+        p.push("no front radius");
+    }
+    for (k, w) in t.wheels.iter().enumerate() {
+        p.push(if w.radius.0 > 0.0 { "radius > 0" } else { "radius <= 0" });
+        if k == 0 {
+            p.push(if w.steer_inertia.0 > 0.0 && front.contains_key("SteeringInertia") {
+                "steering inertia > 0"
+            } else {
+                "steering inertia kept"
+            });
+        }
+        p.push(if l.shapes[k] != 0 { "sweep rebuilt" } else { "no sweep" });
+    }
+    p.push(match front.get("UseParametricCurve").map(String::as_str) {
+        None => "flag missing",
+        Some("True" | "T" | "Yes" | "On") => "flag word true",
+        Some("false" | "F" | "n" | "OFF") => "flag word false",
+        Some(_) => "flag number",
+    });
+    p
+}
+
+/// SLUS-21104's quad tire reader, [`quad::tire_phy`]: 10,000 generated `[Front Tire]`/`[Rear Tire]`
+/// files over quads and wheels filled with noise. Every word of the quad and the four wheels is
+/// compared (what the reader does not reach must be left alone), the sweep rebuilds must match, and
+/// the original may write nothing but them and its stack.
+#[test]
+fn the_quads_tire_reader_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let file = Rc::new(RefCell::new(Ini::default()));
+    let sweeps = Rc::new(RefCell::new(vec![]));
+    hook_tire_ini(&mut ee, &file, &sweeps);
+    let mut g = Gen(0x64b0_0001);
+    let mut tally = BTreeMap::new();
+    let strtok_last = ee.u32_at(IMPURE_PTR) + 0x5c;
+    // `strtod`'s big numbers come out of a pool the image has already allocated: its freelist and the
+    // blocks after it.
+    let pool = ee.u32_at(ee.u32_at(IMPURE_PTR) + 0x4c);
+    for k in 0..10_000 {
+        let f = g.tire_file();
+        let l = g.tire_layout();
+        let ini = Ini::parse(&tire_text(&f));
+        *file.borrow_mut() = ini.clone();
+        sweeps.borrow_mut().clear();
+        lay_out_tires(&mut ee, &l);
+        // A missing front count leaves the reader's stack word: make it a known zero.
+        let frame = ee.stack - 0x2000;
+        for o in (0..0x2000).step_by(4) {
+            ee.set_u32(frame + o, 0);
+        }
+        ee.call(TIRE_PHY, &[u64::from(OBJ), u64::from(INI)], &[], 20_000_000);
+        for (a, b) in ee.written_ranges() {
+            let inside = TIRE_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len)
+                || (a >= frame && b <= ee.stack + 0x40)
+                || (a, b) == (strtok_last, strtok_last + 4)
+                || (a >= pool && b <= pool + 0x400);
+            assert!(inside, "file {k}: the original wrote {a:#010x}..{b:#010x}\n{}", tire_text(&f));
+        }
+        let was = tire_snap(&ee);
+        let original_sweeps = sweeps.borrow().clone();
+
+        lay_out_tires(&mut ee, &l);
+        let mut t = read_tire(&ee, OBJ);
+        let rebuilt = quad::tire_phy(&mut t, &ini, l.mass);
+        write_tire(&mut ee, &t);
+        let now = tire_snap(&ee);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            panic!(
+                "file {k}: {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{}",
+                tire_where(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+                tire_text(&f),
+            );
+        }
+        let port_sweeps: Vec<SweepCall> = rebuilt
+            .iter()
+            .zip(l.shapes)
+            .filter_map(|(r, shape)| r.map(|[a, b]| (shape, 1, a, b, 0, 0)))
+            .collect();
+        let bits = |c: &[SweepCall]| c.iter().map(|&(s, o, a, b, x, y)| (s, o, a.0.map(f32::to_bits), b.0.map(f32::to_bits), x, y)).collect::<Vec<_>>();
+        assert_eq!(bits(&original_sweeps), bits(&port_sweeps), "file {k}: the sweep rebuilds differ\n{}", tire_text(&f));
+        for p in tire_paths(&f, &l, &t) {
+            *tally.entry(p).or_insert(0u32) += 1;
+        }
+    }
+    each_path_seen(
+        &tally,
+        &[
+            "front 16 surfaces",
+            "front no surfaces",
+            "front negative count",
+            "front some surfaces",
+            "rear count is the front's",
+            "rear 16 surfaces",
+            "rear own count",
+            "no rear section",
+            "no front radius",
+            "radius > 0",
+            "radius <= 0",
+            "steering inertia > 0",
+            "steering inertia kept",
+            "sweep rebuilt",
+            "no sweep",
+            "flag missing",
+            "flag word true",
+            "flag word false",
+            "flag number",
+        ],
+        50,
+    );
+    eprintln!("{tally:?}");
+}
+
+/// The quad in each of MD37a's RAM images, and the files its `.phy` may be: the `r` images ride the
+/// `atv_` quad, the `s` ones the `atv_s_` (MD37a's poke), each a Race or a Pro, A or P.
+const QUAD_IMAGES: [(&str, u32, &str); 6] = [
+    ("atv-r-spawn", 0x015e_0690, "atv_"),
+    ("atv-r-air", 0x015e_0690, "atv_"),
+    ("atv-r-spawn-late", 0x015e_0690, "atv_"),
+    ("atv-s-spawn", 0x015e_0b90, "atv_s_"),
+    ("atv-s-air", 0x015e_0b90, "atv_s_"),
+    ("atv-s-spawn-late", 0x015e_0b90, "atv_s_"),
+];
+const QUAD_FILES: [&str; 4] = ["race250a", "race250p", "pro250a", "pro250p"];
+
+/// The reader's words a ride moves on: the spring the ground step swaps between stopped and moving,
+/// and the rest point.
+fn settled(mut t: quad::TireSetup) -> quad::TireSetup {
+    for w in &mut t.wheels {
+        w.spring = F::ZERO;
+        w.rest = Vf::ZERO;
+    }
+    t
+}
+
+/// The image's setup with every scalar word the reader writes made a NaN, so that a word the port
+/// fails to write cannot pass on the image's own value. Kept: what the reader reads (mount, sweep
+/// shape), the rears' steering lock (their constructor's, which the right rear copies), the left
+/// rear's steering (the reader never sets it) and the fronts' `OtherTireNormalLoadScale` (likewise).
+fn poisoned(image: &quad::TireSetup) -> quad::TireSetup {
+    let mut t = *image;
+    let nan = F(f32::NAN);
+    for (k, w) in t.wheels.iter_mut().enumerate() {
+        let keep = *w;
+        for (_, f) in wheel_words(w) {
+            *f = nan;
+        }
+        w.parametric = -7;
+        w.force_position = Vf::splat(f32::NAN);
+        if k >= quad::LEFT_REAR {
+            (w.max_steer_angle, w.min_steer_angle) = (keep.max_steer_angle, keep.min_steer_angle);
+        } else {
+            w.other_load_scale = keep.other_load_scale;
+        }
+        if k == quad::LEFT_REAR {
+            (w.steer_damping, w.steer_inertia, w.inv_steer_inertia) = (keep.steer_damping, keep.steer_inertia, keep.inv_steer_inertia);
+            w.steer_torque = keep.steer_torque;
+        }
+    }
+    (t.front_spring, t.rear_spring) = ((nan, nan), (nan, nan));
+    t
+}
+
+/// The tire reader on the quad files themselves: in each of MD37a's six RAM images the four wheels'
+/// tire words, the two pairs' springs and the mud are what [`quad::tire_phy`] reads out of one of the
+/// candidate `.phy` files (with the image's own mass, and from [`poisoned`] words), but for the spring
+/// and rest point a ride moves. Every image must match exactly one file.
+#[test]
+fn the_quad_images_wheels_are_their_phy_files() {
+    let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+    let dir = kit.ctx("mxvatv-ps2/md37a");
+    let phy = dir.join("phy");
+    if !phy.exists() {
+        skip(&format!(
+            "{} is not there: it is MX vs. ATV's Veh\\atv_*250*.phy out of MXVSATV.PSR's vehicletype_1.res \
+             (research/journal/2026-11-02-md64b-atv-tire-phy)",
+            phy.display()
+        ));
+        return;
+    }
+    let mut seen = 0;
+    for (name, obj, prefix) in QUAD_IMAGES {
+        let path = dir.join(format!("{name}.ee{}", ".bin"));
+        if !path.exists() {
+            skip(&format!("{} is not there (MD37a's; memory: md37a ATV states live in s2)", path.display()));
+            continue;
+        }
+        let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(ee.u32_at(obj + 4), QUAD_VTABLE, "{name}: no quad at {obj:#x}");
+        let image = read_tire(&ee, obj);
+        let mass = F(ee.f32_at(ee.u32_at(ee.u32_at(obj + QUAD_WHEELS) + 0x1e4) + 0x18));
+        let mut matched = vec![];
+        let mut first_miss = String::new();
+        for file in QUAD_FILES {
+            let at = phy.join(format!("{prefix}{file}.phy"));
+            let bytes = std::fs::read(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+            let mut t = poisoned(&image);
+            quad::tire_phy(&mut t, &Ini::parse_bytes(&bytes), mass);
+            if format!("{:?}", settled(t)) == format!("{:?}", settled(image)) {
+                matched.push(file);
+            } else if first_miss.is_empty() {
+                first_miss = format!("{prefix}{file}: {:?}", first_difference(&settled(image), &settled(t)));
+            }
+        }
+        assert!(matched.len() == 1, "{name}: matched {matched:?} (first miss {first_miss})");
+        println!("{name}: {prefix}{} (mass {})", matched[0], mass.0);
+        seen += 1;
+    }
+    assert!(seen > 0 || QUAD_IMAGES.is_empty());
+}
+
+/// Where two setups first differ, for the failure message.
+fn first_difference(a: &quad::TireSetup, b: &quad::TireSetup) -> String {
+    for k in 0..4 {
+        let (mut x, mut y) = (a.wheels[k], b.wheels[k]);
+        for ((o, p), (_, q)) in wheel_words(&mut x).into_iter().zip(wheel_words(&mut y)) {
+            if p.0.to_bits() != q.0.to_bits() {
+                return format!("wheel {k} + {o:#x}: image {} port {}", p.0, q.0);
+            }
+        }
+        for tb in 0..24 {
+            for i in 0..16 {
+                let (p, q) = (table_word(&mut x, tb, i).0, table_word(&mut y, tb, i).0);
+                if p.to_bits() != q.to_bits() {
+                    return format!("wheel {k} table {tb} surface {i}: image {p} port {q}");
+                }
+            }
+        }
+        if x != y {
+            return format!("wheel {k}: {x:?} vs {y:?}");
+        }
+    }
+    format!("quad: springs {:?} {:?} vs {:?} {:?}", a.front_spring, a.rear_spring, b.front_spring, b.rear_spring)
 }

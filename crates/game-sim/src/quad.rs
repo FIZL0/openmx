@@ -27,11 +27,14 @@
 //!
 //! What they call of SLUS-21104's bike steps (engine, preload, backflip, air drag, airborne control,
 //! the wheels' suspension, tire forces and integration, the input limiter, the gearbox and clutch) is
-//! not ported here: each is a [`Call`] handed to a [`Moto`], in the original's order. The tire `.phy`
-//! reader, the wreck, put-back and net unpack are filed (MD64b, MD65).
+//! not ported here: each is a [`Call`] handed to a [`Moto`], in the original's order. The wreck,
+//! put-back and net unpack are filed (MD65).
+//!
+//! And the quad's tire reader, [`tire_phy`] (MD64b): `[Front Tire]` and `[Rear Tire]` into the four
+//! wheels ([`TireSetup`]), with the original's left-to-right copies and their quirks.
 //!
 //! The quad is described by what the steps read, [`Quad`] and [`Body`], not by its layout: the field
-//! map is research/oracle.txt's (`# MD37`, `# MD37a`, `# MD37b`).
+//! map is research/oracle.txt's (`# MD37`, `# MD37a`, `# MD37b`, `# MD64b`).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -1138,4 +1141,276 @@ fn one_pair(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Mot
             *best_dist = *dist;
         }
     }
+}
+
+// --- the tire reader (MD64b) ----------------------------------------------------------------------
+
+/// One surface's row of a wheel's tables, in the three setters' argument order: the drive setter's
+/// eight (`SideForce`, `SlippingSideForce`, `MaxDriveForce`, `MaxSideForce`, `MaxSlippingSideForce`,
+/// `SkidDriveForce`, `SkidSideForce`, `SkidSlippingSideForce`), the side setter's thirteen
+/// (`SlippingSideForce`, `BrakingSideForce` and `SideForce` `RoundOff`/`DropOff`/`Scale`/`SpeedScale`,
+/// then `DonutsSideForceSpeedScale`) and the drag setter's three (`MaxBrakingTorque`, `WheelFriction`,
+/// `WheelDrag`). The wheel keeps each as a table of sixteen surfaces.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TireSurface {
+    pub drive: [F; 8],
+    pub side: [F; 13],
+    pub drag: [F; 3],
+}
+
+impl TireSurface {
+    fn of(s: &crate::phy::Surface) -> TireSurface {
+        TireSurface {
+            drive: [
+                s.side_force,
+                s.slipping_side_force,
+                s.max_drive_force,
+                s.max_side_force,
+                s.max_slipping_side_force,
+                s.skid_drive_force,
+                s.skid_side_force,
+                s.skid_slipping_side_force,
+            ],
+            side: [
+                s.slipping_side_force_round_off,
+                s.slipping_side_force_drop_off,
+                s.slipping_side_force_scale,
+                s.slipping_side_force_speed_scale,
+                s.braking_side_force_round_off,
+                s.braking_side_force_drop_off,
+                s.braking_side_force_scale,
+                s.braking_side_force_speed_scale,
+                s.side_force_round_off,
+                s.side_force_drop_off,
+                s.side_force_scale,
+                s.side_force_speed_scale,
+                s.donuts_side_force_speed_scale,
+            ],
+            drag: [s.max_braking_torque, s.wheel_friction, s.wheel_drag],
+        }
+    }
+}
+
+/// What the tire reader sets on one of the four wheels (and the two things of the wheel it reads:
+/// where the wheel is mounted, and whether it has a sweep shape). Whatever the reader does not reach
+/// keeps what it had: the wheel's constructor's, or the last read's.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WheelTire {
+    /// `UseParametricCurve` as the ini's integer read gives it (any number, not only 0 or 1).
+    pub parametric: i32,
+    /// The suspension setter's: travel, the two rate limits, the spring rate (the file's rate times
+    /// the quad's weight) and the two damping rates against it.
+    pub strut_compression: F,
+    pub max_compression_rate: F,
+    pub max_decompression_rate: F,
+    pub spring: F,
+    pub damping_in: F,
+    pub damping_out: F,
+    /// The tire setter's: the spin inertia and its inverse (positive radius only), `TireInertia`, the
+    /// radius, the two widths it is handed (24 and 6), the tire's mass, one over the radius (positive
+    /// radius only) and a scale nothing reads.
+    pub spin_inertia: F,
+    pub inv_spin_inertia: F,
+    pub tire_inertia: F,
+    pub radius: F,
+    pub ply: F,
+    pub width: F,
+    pub tire_mass: F,
+    pub inv_radius: F,
+    pub ply_scale: F,
+    /// The steering setter's: damping, inertia and its inverse (a positive inertia only), torque.
+    pub steer_damping: F,
+    pub steer_inertia: F,
+    pub inv_steer_inertia: F,
+    pub steer_torque: F,
+    /// The steering lock, radians, and its negative.
+    pub max_steer_angle: F,
+    pub min_steer_angle: F,
+    /// `BodyTireForcePosition`, and the rear's `OtherTireNormalLoadScale`.
+    pub force_position: Vf,
+    pub other_load_scale: F,
+    /// Where the wheel is mounted (read), and the derived setter's rest point: the mount, a radius
+    /// lower.
+    pub mount: Vf,
+    pub rest: Vf,
+    /// The wheel has a sweep shape (read): the derived setter rebuilds it.
+    pub sweep: bool,
+    pub surfaces: [TireSurface; crate::phy::MAX_SURFACES],
+}
+
+/// What the tire reader sets: the four wheels, each pair's spring rate stopped and moving (as
+/// [`Params::front_spring`] and [`Params::rear_spring`]), and the front's mud per surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TireSetup {
+    pub wheels: [WheelTire; 4],
+    pub front_spring: (F, F),
+    pub rear_spring: (F, F),
+    pub mud_time: [F; crate::phy::MAX_SURFACES],
+    pub mud_amount: [F; crate::phy::MAX_SURFACES],
+}
+
+/// The suspension setter: the rates follow the spring it is handed, so the last call wins.
+fn set_suspension(w: &mut WheelTire, t: &Keys, spring: F, mass: F) {
+    w.strut_compression = t.strut;
+    w.max_compression_rate = t.max_compression;
+    w.max_decompression_rate = t.max_decompression;
+    w.spring = crate::phy::spring_rate(spring, mass);
+    w.damping_in = crate::phy::damping(t.bounce, mass, w.spring);
+    w.damping_out = crate::phy::damping(t.rebound, mass, w.spring);
+}
+
+/// The tire setter, with the 6 and 24 the reader always hands it.
+fn set_tire(w: &mut WheelTire, radius: F, inertia: F) {
+    w.radius = radius;
+    w.width = F(6.0);
+    w.ply = F(24.0);
+    w.tire_inertia = inertia;
+    w.ply_scale = crate::tire::tire_ply_scale();
+    w.tire_mass = crate::tire::tire_mass(radius);
+    if let Some((inv_radius, spin, inv_spin)) = crate::tire::spin_inertia(radius) {
+        w.inv_radius = inv_radius;
+        w.spin_inertia = spin;
+        w.inv_spin_inertia = inv_spin;
+    }
+}
+
+/// The steering setter: damping, inertia (only a positive one), torque.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compare
+fn set_steering(w: &mut WheelTire, damping: F, inertia: F, torque: F) {
+    w.steer_damping = damping;
+    w.steer_torque = torque;
+    if F::ZERO < inertia {
+        w.steer_inertia = inertia;
+        w.inv_steer_inertia = F::ONE / inertia;
+    }
+}
+
+/// The derived setter: the sweep shape (if any) rebuilt as the segment from the strut's top down to a
+/// radius below the mount, and the rest point a radius under the mount.
+fn set_derived(w: &mut WheelTire) -> Option<[Vf; 2]> {
+    w.rest = w.mount;
+    w.rest.0[1] = (F(w.mount.y()) - w.radius).0;
+    w.sweep.then(|| [Vf::new(0.0, w.strut_compression.0, 0.0, 1.0), Vf::new(0.0, (-w.radius).0, 0.0, 1.0)])
+}
+
+/// One section's scalar keys, with the reader's defaults.
+struct Keys {
+    parametric: i32,
+    strut: F,
+    max_compression: F,
+    max_decompression: F,
+    radius: F,
+    inertia: F,
+    spring: F,
+    spring_stopped: F,
+    bounce: F,
+    rebound: F,
+}
+
+impl Keys {
+    fn read(s: crate::phy::Section<'_>) -> Keys {
+        Keys {
+            parametric: s.int("UseParametricCurve").unwrap_or(0),
+            strut: s.float_or("StrutCompression", F::ONE),
+            max_compression: s.float_or("MaxCompressionRate", F(20.0)),
+            max_decompression: s.float_or("MaxDecompressionRate", F::ONE),
+            radius: s.float_or("TireRadius", F::ONE),
+            inertia: s.float_or("TireInertia", F::ONE),
+            spring: s.float_or("Spring", F::ZERO),
+            spring_stopped: s.float_or("SpringWhenStopped", F::ZERO),
+            bounce: s.float_or("BounceDampingRatio", F::ZERO),
+            rebound: s.float_or("ReboundDampingRatio", F::ZERO),
+        }
+    }
+}
+
+/// **The quad's tire reader**: `[Front Tire]` into the two front wheels and `[Rear Tire]` into the two
+/// rear ones. `mass` is the quad's (its weight over 32.2), which the spring rates are scaled by. It
+/// returns the segment each wheel's sweep shape was rebuilt to, for the wheels that have one.
+///
+/// The left wheel of each pair is read into and the right one copies it, with these quirks of the
+/// original kept:
+/// - the stopped spring is set first and read back, then the moving one, so the damping rates are the
+///   moving spring's;
+/// - `MaxSteerAngle` (degrees) is the front's only; the rears keep their own lock, the right rear
+///   taking the left rear's;
+/// - the left rear gets no steering at all, and the right rear gets **the front's** steering keys;
+/// - the front's mud keys go to the quad, one pair per surface, and the front's donut scale is zero;
+/// - a `[Rear Tire]` with no `NumberOfSurfaces` reads the front's count (the same stack word).
+pub fn tire_phy(t: &mut TireSetup, ini: &crate::phy::Ini, mass: F) -> [Option<[Vf; 2]>; 4] {
+    use crate::phy::{DEG, MAX_SURFACES, Surface};
+    const UNIT_W: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
+    let mut sweeps = [None; 4];
+
+    let s = ini.section("Front Tire");
+    let k = Keys::read(s);
+    let (steer_torque, steer_damping, steer_inertia) = (
+        s.float_or("SteeringTorque", F::ZERO),
+        s.float_or("SteeringDamping", F::ZERO),
+        s.float_or("SteeringInertia", F::ZERO),
+    );
+    let lf = &mut t.wheels[LEFT_FRONT];
+    lf.parametric = k.parametric;
+    lf.max_steer_angle = s.float_or("MaxSteerAngle", F::ZERO);
+    lf.force_position = s.vector("BodyTireForcePosition", UNIT_W);
+    set_suspension(lf, &k, k.spring_stopped, mass);
+    let stopped = lf.spring;
+    set_suspension(lf, &k, k.spring, mass);
+    t.front_spring = (stopped, lf.spring);
+    set_tire(lf, k.radius, k.inertia);
+    set_steering(lf, steer_damping, steer_inertia, steer_torque);
+    sweeps[LEFT_FRONT] = set_derived(lf);
+    lf.max_steer_angle = lf.max_steer_angle * F(DEG);
+    lf.min_steer_angle = -lf.max_steer_angle;
+    let count = s.int("NumberOfSurfaces");
+    for i in 1..=count.unwrap_or(0).min(MAX_SURFACES as i32) {
+        let row = Surface::read(s, i, true);
+        let j = (i - 1) as usize;
+        t.mud_time[j] = row.mud_time;
+        t.mud_amount[j] = row.mud_amount;
+        for w in [LEFT_FRONT, RIGHT_FRONT] {
+            t.wheels[w].surfaces[j] = TireSurface::of(&row);
+        }
+    }
+    let lf = t.wheels[LEFT_FRONT];
+    let rf = &mut t.wheels[RIGHT_FRONT];
+    rf.parametric = lf.parametric;
+    rf.force_position = lf.force_position;
+    rf.max_steer_angle = lf.max_steer_angle;
+    rf.min_steer_angle = lf.min_steer_angle;
+    set_suspension(rf, &k, k.spring, mass);
+    set_tire(rf, k.radius, k.inertia);
+    set_steering(rf, steer_damping, steer_inertia, steer_torque);
+    sweeps[RIGHT_FRONT] = set_derived(rf);
+
+    let s = ini.section("Rear Tire");
+    let k = Keys::read(s);
+    let lr = &mut t.wheels[LEFT_REAR];
+    lr.parametric = k.parametric;
+    lr.force_position = s.vector("BodyTireForcePosition", UNIT_W);
+    lr.other_load_scale = s.float_or("OtherTireNormalLoadScale", F::ONE);
+    set_suspension(lr, &k, k.spring_stopped, mass);
+    let stopped = lr.spring;
+    set_suspension(lr, &k, k.spring, mass);
+    t.rear_spring = (stopped, lr.spring);
+    set_tire(lr, k.radius, k.inertia);
+    sweeps[LEFT_REAR] = set_derived(lr);
+    for i in 1..=s.int("NumberOfSurfaces").or(count).unwrap_or(0).min(MAX_SURFACES as i32) {
+        let row = TireSurface::of(&Surface::read(s, i, false));
+        for w in [LEFT_REAR, RIGHT_REAR] {
+            t.wheels[w].surfaces[(i - 1) as usize] = row;
+        }
+    }
+    let lr = t.wheels[LEFT_REAR];
+    let rr = &mut t.wheels[RIGHT_REAR];
+    rr.parametric = lr.parametric;
+    rr.force_position = lr.force_position;
+    rr.max_steer_angle = lr.max_steer_angle;
+    rr.min_steer_angle = lr.min_steer_angle;
+    rr.other_load_scale = lr.other_load_scale;
+    set_suspension(rr, &k, k.spring, mass);
+    set_tire(rr, k.radius, k.inertia);
+    set_steering(rr, steer_damping, steer_inertia, steer_torque);
+    sweeps[RIGHT_REAR] = set_derived(rr);
+    sweeps
 }

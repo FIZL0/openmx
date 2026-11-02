@@ -6381,6 +6381,46 @@ atv_bike_head_tail          atv 0x004e4190 = quad/bike vt +0x4d0, the PreProcess
 atv_vehicle_hazard_clock    atv 0x004aad60 = quad vt +0x45c (a0 quad, f12 dt, f13 the longest surface time, a1 sunk; +0xc10/+0xc14/+0xdf0, vt +0x3a8 on time out)
 atv_name_bit                atv 0x00214b30 = a name's bit, as the PC's pc_name_bit("MotocrossRider", 0) (a0 0x005423e0, a1 0x005274f3, a2 0; strings not read)
 atv_rumble_on               atv 0x0051a250 = whether rumble is on (a0 the vehicle state's +0x6ac)
+# MD64b — the quad's tire reader (atv_quad_tire_phy; quad::tire_phy, quad::TireSetup and quad::WheelTire;
+# tests/atv_quad.rs the_quads_tire_reader_is_the_originals and the_quad_images_wheels_are_their_phy_files).
+# Journal: research/journal/2026-11-02-md64b-atv-tire-phy. a0 the quad, a1 the ini. Wheels at quad
+# +0x17b0 LF, +0x17b4 RF, +0x17b8 LR, +0x17bc RR. Quad +0x137c/+0x1380 the front's stopped/moving spring
+# rate (the stopped key is stored raw first, then the setter's +0x48 over it), +0x1384/+0x1388 the rear's;
+# +0x1654 MudTime%d and +0x1694 MudAmount%d (front only, 4 per surface, no guard: a count past 16 runs
+# MudTime into MudAmount). Wheel-relative: +0x34 UseParametricCurve (the flag read: default 0 written),
+# +0x3c..+0x50 the suspension setter's six, +0x54/+0x58 spin inertia and 1/I, +0x5c TireInertia, +0x64
+# steer damping, +0x68/+0x6c steer inertia and 1/I (only a positive one), +0x70 MaxSteerAngle (deg, then
+# * 0.01745329), +0x74 its negative, +0x90 the mount, +0xa0 BodyTireForcePosition (default (0,0,0,1)),
+# +0xb8 OtherTireNormalLoadScale (rear, default 1), +0x100 the rest point (mount, y less the radius),
+# +0x1dc the sweep shape (rebuilt as (0,strut,0,1)..(0,-radius,0,1) when set), +0x1e4 the body (+0x18
+# mass), +0x214 radius, +0x218 24, +0x21c 6, +0x220 tire mass, +0x238 the 24 surface tables (0x40 each,
+# 4 per surface: drive 8, side 13, drag 3), +0x838 1/r, +0x8a8 the ply scale, +0x8b4 steer torque.
+# Order: LF gets everything; RF copies LF +0x34/+0x70/+0x74/+0xa0 and gets suspension (moving), tire,
+# steering, derived. LR gets no steering and no MaxSteerAngle; RR copies LR's +0x34/+0x70/+0x74/+0xa0/
+# +0xb8 and gets steering from the front's locals (RAM images: LR +0x64/+0x68/+0x6c/+0x8b4 = 0, RR = the
+# front's 20/0.8/1.25/200). [Rear Tire]'s NumberOfSurfaces reads into the front's stack word: missing,
+# it is the front's count; the front's own missing count is an unset stack word. Donut scale: rear only
+# (the front passes 0). The C library's reent (*0x00393a90): strtok keeps its cursor at +0x5c, strtod's
+# Bigint freelist is +0x4c. MD37a's six RAM images hold atv_race250p.phy (atv-r-*) and
+# atv_s_race250p.phy (atv-s-*), mass 13.043477 / 13.975154.
+atv_wheel_set_suspension    atv 0x004a0560 = wheel_set_suspension (f12..f17, a0 wheel)
+atv_wheel_set_tire          atv 0x004a05f0 = wheel_set_tire (radius, inertia, 6.0, 24.0 in f12..f15, a0 wheel)
+atv_wheel_set_surface_drive atv 0x004a06c0 = wheel_set_surface_drive (a1 surface, f12..f19)
+atv_wheel_set_surface_side  atv 0x004a0710 = wheel_set_surface_side (a1 surface, f12..f19 and five stacked: round-off, drop-off, scale, speed scale, donuts)
+atv_wheel_set_surface_drag  atv 0x004a0880 = wheel_set_surface_drag (a1 surface, f12..f14)
+atv_wheel_set_steering      atv 0x004a08b0 = wheel_set_steering (damping, inertia, torque in f12..f14)
+atv_wheel_set_tire_derived  atv 0x004a0b90 = wheel_set_tire_derived, plus the sweep shape rebuild when +0x1dc is set
+atv_shape_set_segment       atv 0x001bb3f0 = (a0 shape, a1 1, a2 two quadword ends, a3 0, t0 0): the wheel's sweep shape rebuilt
+atv_ini_section             atv 0x00144140 = ini_section (a0 ini, a1 name)
+atv_ini_string              atv 0x00142ce0 = (a0 ini+0x44, a1 key, a2 buf, a3 len) -> v0 found; under every getter
+atv_ini_int_raw             atv 0x00142ed0 = (table, key, dst): T/ON/Y 1, F/OFF/N 0, else strtol base 0; nothing written when missing
+atv_ini_int                 atv 0x00144ae0 = atv_ini_int_raw on ini+0x44
+atv_ini_flag                atv 0x00144cb0 = (ini, key, default, dst): the default written when missing
+atv_ini_float_default       atv 0x00144d70 = ini_float_default (strtod, then the truncating double-to-float)
+atv_ini_vector              atv 0x00144df0 = (ini, key, dst): strtok " ," / " ," / " ,\n" / " \n", the default 0x00396fc0 copied first
+atv_snprintf                atv 0x0026cb20 = snprintf
+atv_strtod                  atv 0x0034ffa8 = strtod
+atv_strtok                  atv 0x003590a0 = strtok (cursor in the reent at +0x5c)
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the
