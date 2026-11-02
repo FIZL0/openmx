@@ -51,6 +51,7 @@ pub mod gpu;
 pub mod ground_mesh;
 pub mod ground_tree;
 pub mod ini;
+pub mod kiowa;
 pub mod mat;
 pub mod particle;
 pub mod png;

@@ -222,6 +222,7 @@ mod pad;
 mod player;
 mod particles;
 mod plane_draw;
+mod kiowa_draw;
 mod perf;
 mod portal;
 mod ride_hud;
@@ -263,6 +264,7 @@ use std::time::Duration;
 use clock::Instant;
 
 use game_render::biplane::{self, Biplane};
+use game_render::kiowa::{Kiowa, Rotor};
 use game_render::chassis::{grips as chassis_grips, placed as chassis_at, wrecked as chassis_wrecked};
 use game_render::disc::{Disc, Res};
 use game_render::mat::{M4, V3, v3};
@@ -4127,6 +4129,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             Some(cam)
         }
     };
+    // The Kiowa's skins and rotor parts (V113), where the lot parks one: one skin a livery, as the
+    // plane's, out of the machines' archive. The frame finds them in `assets` ([`Kiowa::found`]).
+    if let (Some(res), true) = (machine_res.as_ref(), lot.of(Machine::Helicopter).next().is_some()) {
+        let liveries = args.players.clamp(1, vehicle::LIVERIES);
+        let loaded = (0..liveries).filter(|&l| Kiowa::load(&mut assets, std::slice::from_ref(res), l).is_some()).count();
+        let presets = archives.iter().find_map(|a| a.read_suffix(game_render::kiowa::PRESETS).ok());
+        let cameras = presets.map_or(0, |b| Preset::read_bytes(&b, "").len());
+        println!("kiowa: {loaded} of {liveries} skins loaded, parked and not flown; {cameras} camera presets in {}", game_render::kiowa::PRESETS);
+    }
     // Its model and both prop cones, out of the machines' archive, where its textures are too (V21):
     // one model a livery the lot parks (P87), the first copy's plain and the second's the disc's
     // alternate, so a plane is drawn in `plane_drawn[plane.livery]`.
@@ -4703,6 +4714,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
+    // The Kiowa's skins the load put in `assets` (V113), one a livery.
+    let kiowa_drawn: Vec<Kiowa> = (0..vehicle::LIVERIES).map_while(|l| Kiowa::found(&assets, l)).collect();
     // Where the first seat's path cars stood before the last tick (S81), which the picture blends from.
     let mut cars_before: Vec<game_sim::math::Mat4> = Vec::new();
     // The knockable props' bodies (S131), each by its scene model's place in the picture's list (found
@@ -8062,6 +8075,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             .collect();
         // The bays shown (P103), drawn below and marked on the radar.
         let bays = vehicle::bays_shown(&lot, front.as_deref().is_none_or(|f| f.menu.settings.bays));
+        // And the Kiowas parked (V113), drawn as bays are though nothing takes one yet (P216).
+        let kiowa_bays: Vec<vehicle::Bay> = match front.as_deref().is_none_or(|f| f.menu.settings.bays) {
+            true => lot.of(Machine::Helicopter).copied().collect(),
+            false => Vec::new(),
+        };
         // The radar's other icons, each view its own (P92).
         hud_art.radar = (0..world.seats.len()).map(|v| radar_blips(&world.seats, &bays, v, &radar_zones, picks[v])).collect();
         // And the switch pop-up, each view its own player's (P103), as the input stage's take reads it.
@@ -8377,6 +8395,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let plane = vehicle::bay_plane(bay);
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 actors.extend(plane_draw::actors(drawn, &assets, &plane, plane_at(&plane), vehicle::BAY_ALPHA, &mut gpu_poses));
+            }
+            // And every Kiowa's, the same, its rotor at rest (V113).
+            for bay in kiowa_bays.iter().filter(|_| !args.overview) {
+                let Some(drawn) = kiowa_drawn.get(bay.livery).or(kiowa_drawn.first()) else { continue };
+                let at = M4::placement(vector(bay.spawn.at), vector(bay.spawn.facing), v3(0.0, 1.0, 0.0));
+                actors.extend(kiowa_draw::actors(drawn, &assets, &Rotor::WHOLE, at, vehicle::BAY_ALPHA, &mut gpu_poses));
             }
             for (k, (model, at)) in traffic_at.iter().enumerate() {
                 let pose = traffic_pose.get(k).and_then(|p| p.as_ref()).map(|(p, _)| {
