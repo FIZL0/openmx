@@ -2929,6 +2929,8 @@ pub struct Menu {
     /// biplane's, by the names their files give them: the Camera page's Preset row lists them. The
     /// shell reads them off the disc; empty, the row has the player's own presets alone.
     pub camera_names: [Vec<String>; 2],
+    /// The helicopter's, the same off `HeloCPresets.ini` (P216b), after them on the row.
+    pub heli_camera_names: Vec<String>,
     /// The Camera page's Preset row: 0 for every preset, then [`Menu::camera_choices`]' order.
     camera_pick: usize,
     /// The Camera page's Save Over row (P229): its place in [`Menu::camera_over_choices`].
@@ -3253,6 +3255,7 @@ impl Menu {
             typing_for: Typing::Name,
             key: (0, 0),
             camera_names: Default::default(),
+            heli_camera_names: Vec::new(),
             camera_pick: 0,
             camera_over: 0,
             over: None,

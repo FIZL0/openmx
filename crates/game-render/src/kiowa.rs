@@ -74,6 +74,15 @@ pub const ARCHIVE: &str = "machine.res";
 /// the plane's ([`crate::biplane::SEAT`]).
 pub const SEAT: [&str; 4] = ["Dummy_Foot_L_pos", "Dummy_Foot_R_pos", "Dummy_Hand_L_pos", "Dummy_Hand_R_pos"];
 
+/// Where the pilot's root sits in the helicopter's own space (P216b), as
+/// [`crate::biplane::PILOT_SEAT`] does in the plane's, the body turned with it. The original loads
+/// the plane's two clips for the helicopter's pilot too. Not read off the original: the root is put
+/// where it stands to the middle of the four [`SEAT`] nodes as the plane's measured root stands to
+/// the middle of the plane's. The feet nodes are at one height in both models, 2.9 ft. `kiowa.phy`'s
+/// `[Animation]` `PelvisBoxPosition` (1.25, -2, 3, with no size) is not the seat: the plane's is
+/// (0, 0, -0.5), a box about the pelvis and not the plane's seat.
+pub const PILOT_SEAT: V3 = v3(-0.107, 3.522, 0.937);
+
 /// What the rotors are showing: the angle they are turned by and which of the parts are up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rotor {
