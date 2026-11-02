@@ -874,7 +874,7 @@ wire!(crate::trick::Tricks { gesture, queue, requested, current, restart, seq, p
 wire!(crate::motion::Driver { action, ramp, faded, fore_aft, pose, shown_crossup });
 wire!(crate::motion::Frame { blend, restart });
 wire!(crate::ride::Crash { reason, hit, throw, clock, holding, throwing, bike, origin, rider, rider_vel, landed, ground, resting, facing });
-wire!(crate::wreck_bike::WreckBike { body, mass, gravity, collider, record });
+wire!(crate::wreck_bike::WreckBike { body, mass, gravity, collider, record } skip { struck });
 wire!(crate::contact::Collider { damp, damp_linear, damp_angular, mass, inv_mass, inv_inertia, cofg, cofg_world, actors, collides_with, collidable, max_depth, scenery, actor, surfaces, normal_speed, relative });
 wire!(crate::contact::Response { stiffness, damping, restitution, angular, friction, spring_mask, friction_mask });
 wire!(crate::contact::Contact { kind, from, on_body, normal, point, arm, other_arm, surface, other, mover });

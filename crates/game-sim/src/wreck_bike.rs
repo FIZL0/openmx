@@ -265,13 +265,17 @@ pub struct WreckBike {
     pub gravity: Vf,
     pub collider: Collider,
     pub record: Record,
+    /// What the props' rays struck on the bike this tick, for its frame (S197b,
+    /// [`crate::prop_wreck::struck_by_props`]): spent by [`WreckBike::tick`]. Not on the wire: it is
+    /// made and spent within one tick.
+    pub struck: crate::prop_wreck::WreckStrike,
 }
 
 /// The node's dynamics world as the wreck bike sees it: one body, the part's force listener, its
 /// preforce and post listeners, and the movers the search's contacts name (S145).
-struct Lists<'a>(&'a mut WreckBike, &'a [contact::Mover]);
+struct Lists<'a, 'o>(&'a mut WreckBike, &'a [contact::Mover], &'a mut [contact::Other<'o>]);
 
-impl Dynamics for Lists<'_> {
+impl Dynamics for Lists<'_, '_> {
     fn count(&self, list: List) -> i32 {
         match list {
             List::Constraints => 0,
@@ -282,11 +286,12 @@ impl Dynamics for Lists<'_> {
         self.0.body.clear_shock_peak();
     }
     fn force(&mut self, _i: i32, _h: F) {
-        let WreckBike { body, mass, gravity, collider, record } = &mut *self.0;
+        let WreckBike { body, mass, gravity, collider, record, .. } = &mut *self.0;
         let movers = self.1;
+        let others = &mut *self.2;
         biplane::collision_force(body, *gravity, |body| {
             let mut rigid = Weighed { body, mass: *mass };
-            contact::resolve(collider, &mut rigid, &mut record.contacts, &mut [], movers, true);
+            contact::resolve(collider, &mut rigid, &mut record.contacts, others, movers, true);
         });
     }
     fn enabled(&self, _body: i32) -> bool {
@@ -337,16 +342,44 @@ impl WreckBike {
         };
         let collider = collider(part, part.mass, inv_mass, inertia);
         let record = record(part, node_of(&body));
-        WreckBike { body, mass: part.mass, gravity: part.gravity, collider, record }
+        WreckBike { body, mass: part.mass, gravity: part.gravity, collider, record, struck: Default::default() }
     }
 
     /// **One frame**, as the original's world node runs it: the contact list emptied, the search,
-    /// and the world stepped.
+    /// and the world stepped — with what the props struck on it this tick, if anything
+    /// ([`WreckBike::struck`], [`WreckBike::tick_struck`]).
     pub fn tick(&mut self, dt: F, ground: Option<&dyn Heightfield>, objects: &mut dyn Search) {
+        let mut struck = std::mem::take(&mut self.struck);
+        self.tick_struck(dt, ground, objects, &mut struck);
+    }
+
+    /// [`WreckBike::tick`] with what the props' rays struck on it this tick ([`crate::prop_wreck::struck_by_props`]):
+    /// the list emptied and searched, the mirrors put after its own entries (at most its capacity, the
+    /// flags as a struck object's), then the world stepped, the mirrors' other sides the struck
+    /// bodies as the frame found them.
+    pub fn tick_struck(&mut self, dt: F, ground: Option<&dyn Heightfield>, objects: &mut dyn Search, struck: &mut crate::prop_wreck::WreckStrike) {
         contact_search::clear(&mut self.record, Some(&mut self.body));
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), ground, objects, dt);
+        let r = &mut self.record;
+        for m in &struck.mirrors {
+            r.touching = true;
+            r.on_object = true;
+            r.touching_other = true;
+            if r.contacts.len() < r.capacity {
+                r.contacts.push(*m);
+            }
+        }
         let movers = objects.movers();
-        WORLD.step(dt, &mut Lists(self, &movers));
+        self.step_among(dt, &movers, &mut struck.struck);
+    }
+
+    /// The world stepped (S197b): the contacts' `movers` and `struck`, the props a mirror on the list
+    /// names (by its place among them), each as the other side of its resolve.
+    pub fn step_among(&mut self, dt: F, movers: &[contact::Mover], struck: &mut [crate::prop_contact::Pushed]) {
+        let mut bodies: Vec<_> = struck.iter_mut().map(crate::prop_contact::Pushed::weighed).collect();
+        let mut others: Vec<contact::Other<'_>> =
+            bodies.iter_mut().map(|(collider, body)| contact::Other { collider: &mut **collider, side: contact::Side::Body(body) }).collect();
+        WORLD.step(dt, &mut Lists(self, movers, &mut others));
     }
 
     /// [`WreckBike::tick`] in a world with the ecosystem's plants in it: [`WreckBike::tick_among`]

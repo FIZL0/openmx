@@ -612,6 +612,7 @@ impl crate::Sim {
             let strike = self.prop_strike_seated(b.vehicles.len(), dt);
             self.strike_into(b, strike);
         }
+        self.wreck_strike(0);
         let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], bump.as_deref_mut());
         if let Some(b) = bump.as_deref() {
             self.traffic.props.pushed(&b.props);
@@ -763,6 +764,7 @@ impl Sim {
         if let Some(b) = bump.as_deref_mut() {
             self.strike_into(b, strike);
         }
+        self.wreck_strike(0);
         let mut said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, rivals, bump.as_deref_mut());
         if let Some(b) = bump.as_deref() {
             self.traffic.props.pushed(&b.props);

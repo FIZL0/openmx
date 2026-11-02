@@ -7077,3 +7077,15 @@ car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; n
 # bike's resolve pushes both bodies (the ball weighed by its mass); the ball's force listener 0x0015af40
 # then resolves its kind-1 entry (no impulse; a spring on its own side only when slow). The struck
 # listener 0x0015ad40 wakes: enable 0x0015b790 (the object's listener) before the collection's settle.
+
+# --- S197b: props' rays strike the wreck bike (crates/game-sim/src/prop_wreck.rs; tests/prop_wreck.rs; journal 2026-11-02-s197b-ball-strikes-the-wreck)
+# hit2 states (free09, a ball put in the tumbling wreck bike's way): the wreck bike's body 0x00dc8980, its
+# collision object 0x00dc98f0 (its f.col = wreckbikef.col of Tracks\free09_ss_2.res). The props node's own
+# world (node +0x78 = 0x00e17f68) holds the wreck body alone (world +0x50 -> array 0x00e180b0); the balls'
+# collections step their own worlds after it. Filed list (+0x30/+0x38): the bikes' records, the wreck's
+# 0x00dc98f0, then the balls (ball 2, ball 1, ball 4) - node update 0x0026f800 collides them in that order.
+# The ball's own rays search the wreck's f.col: an asleep ball's probe categories are its wake mask 0x40 and
+# the wreck's categories have 0x40 set. Each hit: a kind-0 entry on the ball's list after its terrain
+# entries (other = the wreck), a kind-1 mirror on the wreck's after its own (normal negated). The wreck's
+# rays never strike a ball: its ray leave-out holds 0x8 and the props' category is 0x18.
+# hit2-2828 -> 2831: 4, 2, 2 mirrors on the wreck; ball and wreck lists and bodies bit-exact in the port.

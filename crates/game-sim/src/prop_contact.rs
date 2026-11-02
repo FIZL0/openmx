@@ -340,18 +340,28 @@ impl crate::Sim {
     }
 
     /// The props' step after the riders' frames (S197): the struck bodies' mirrors read every player's
-    /// chassis as their frame left it, by player.
+    /// chassis as their frame left it, by player; and after them every player's wreck bike (S197b,
+    /// [`crate::prop_wreck`]: a prop's entry on one names it `players + i`), which a prop's impulse
+    /// pushes, written back after.
     pub fn props_step(&mut self, dt: F, movers: &[crate::contact::Mover]) {
         if self.traffic.props.is_empty() {
             return;
         }
         let mut bump = self.bump(0, Vec::new());
+        let sides = self.wreck_sides();
+        let mut wrecks: Vec<(Collider, Body, F)> = sides.iter().map(|s| s.unwrap_or_default()).collect();
+        let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = wrecks.iter_mut().map(|(c, body, mass)| (c, Weighed { body, mass: *mass })).collect();
         let mut others: Vec<Other<'_>> = bump
             .colliders
             .iter_mut()
             .zip(bump.vehicles.iter_mut())
             .map(|(collider, v)| Other { collider, side: Side::Vehicle(v) })
+            .chain(bodies.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
             .collect();
         self.traffic.props.step(dt, movers, &mut others);
+        drop(others);
+        drop(bodies);
+        let pushed: Vec<_> = sides.iter().zip(wrecks).map(|(s, w)| s.map(|_| w)).collect();
+        self.wrecks_pushed(&pushed);
     }
 }
