@@ -545,3 +545,260 @@ fn p1_rides_the_tape_as_the_original() {
     assert_eq!(got, HELD);
 }
 
+
+// ---------------------------------------------------------------------------------------------------
+// S228a: the drawn rider's lean through the tape's turns
+// ---------------------------------------------------------------------------------------------------
+
+/// The drawn rider as the shell builds it beside a ride: the rider's body (its clip table and the
+/// riding ragdoll's rig, off `thq1`, the one rider body on the disc), the bike's chassis out of the
+/// archive `Race500P.phy` came from, and the riding ragdoll's kit.
+struct Drawn {
+    body: game_render::rider::Body,
+    doll: game_render::rider::Ragdolled,
+    chassis: game_render::vehicle::Chassis,
+    kit: Arc<game_sim::ragdoll_ride::Kit>,
+}
+
+fn drawn(disc: &mut Disc, phy: &Phy) -> Drawn {
+    use game_render::rider::{Body, Sex};
+    let name = |disc: &Disc, want: &dyn Fn(&str) -> bool| {
+        disc.entries().iter().map(|e| e.name.clone()).filter(|n| want(&n.to_ascii_lowercase())).min_by_key(String::len)
+    };
+    let stunts = {
+        let app = name(disc, &|n| n.ends_with("appstart.res")).expect("the app archive");
+        let bytes = disc.res(&app).unwrap().read_suffix("rider\\anim\\stunts.ini").expect("the stunt table");
+        Set::new(game_sim::trick::Stunts::parse(&bytes).expect("the stunt table parses").selection(0))
+    };
+    let rider = name(disc, &|n| n.ends_with("thq1.res")).expect("the rider archive");
+    let res = disc.res(&rider).unwrap();
+    let rider_file = res.read_suffix("anim\\mrider.phy").expect("mrider.phy");
+    let mut body = Body::load(vec![disc.res(&rider).unwrap()], "thq1", Sex::Male, "", &stunts.stunts, phy.motion()).expect("the body");
+    let model = game_render::psg::Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model")).expect("the model");
+    let doll = body.ragdoll_rig(&model, &rider_file).expect("every part names a node");
+    let kit = Arc::new(game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig.clone()));
+    let bikes: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| n.to_ascii_lowercase().starts_with("bike\\") && n.to_ascii_lowercase().ends_with(".res"))
+        .collect();
+    let bike = bikes
+        .into_iter()
+        .find(|b| disc.res(b).ok().is_some_and(|r| r.read_suffix("race500p.phy").is_ok()))
+        .expect("race500p.phy's bike archive");
+    let bike = disc.res(&bike).unwrap();
+    let sub = bike.find_suffix(".sub").expect("the bike's .sub").name.clone();
+    let sub = game_render::scene::Vehicle::parse(&game_render::ini::text(&bike.read(&sub).unwrap()));
+    let chassis = game_render::vehicle::Chassis::load(vec![bike], &sub.mcf, "bike_", &stunts.stunts, game_render::vehicle::params())
+        .expect("the chassis");
+    Drawn { body, doll, chassis, kit }
+}
+
+/// One riding tick of [`ride_drawn`]: the frame stepped, and in the bike's frame (the shell's
+/// [`placed`](game_render::chassis::placed)) the riding ragdoll's 18 part centres, as drawn.
+struct Leaned {
+    t: u32,
+    parts: Vec<[f32; 3]>,
+    bike: [[f32; 4]; 4],
+    ride: [[f32; 4]; 4],
+}
+
+/// [`ride`] with the drawn rider beside it, every frame as the shell does it (crates/openmx
+/// main.rs: the body posed off the ride, its skeleton handed to the riding ragdoll, the chassis
+/// posed and its grips made the ragdoll's holds), stopping at the first wreck. Each tick the riding
+/// ragdoll the frame's end stepped (S90, the drawn rider) is read off once it is placed.
+fn ride_drawn(from: u32, to: u32) -> Option<(Vec<Tick>, Vec<Leaned>)> {
+    use game_render::chassis::{grips, placed};
+    let ee = image(from)?;
+    let cap = capture()?;
+    let tape = tape()?;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let tables = Arc::new(Tables::build());
+    let (phy, col) = bike(&mut disc, &tables);
+    let mut d = drawn(&mut disc, &phy);
+    let col = Arc::new(col);
+    let mut rider = seeded_rider(&ee, &phy, &col);
+    rider.body_rates = game_render::vehicle::params();
+    rider.ragdoll_kit = Some(Arc::clone(&d.kit));
+    let mut sim = Sim::with_rider(0x5228, tables, phy, rider);
+    let root = d.chassis.nodes.root.expect("a chassis root");
+    in_free09_ss(&mut disc, |world| {
+        let dt_of = |t: u32| F(cap.f(t + 1, "dt"));
+        sim.poll(dt_of(from - 1), &[tape_pad(&tape, from - 1), Report::missing()]);
+        let three = |v: Vf| [0, 1, 2].map(|k| v.0[k].to_bits());
+        let (mut ticks, mut leaned) = (Vec::new(), Vec::new());
+        for t in from..to {
+            let dt = dt_of(t);
+            let controls = sim.poll(dt, &[tape_pad(&tape, t), Report::missing()]);
+            let frame = sim.step(dt, &controls, world);
+            let r = &mut sim.rider;
+            let ch = &r.ride.chassis;
+            ticks.push(Tick {
+                t,
+                vel: three(ch.vel),
+                centre: three(ch.cofg_world),
+                wreck: frame.wreck.map(|w| w.0),
+                axes: [r.packed_pose.0, r.packed_fore_aft.0],
+            });
+            if frame.wreck.is_some() || r.state.wreck.is_some() {
+                break;
+            }
+            d.body.ride(dt, r, &controls, game_sim::rider::Gate::default());
+            r.skeleton = Some(Arc::new(d.body.ragdoll_posed(&d.doll)));
+            let want = d.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
+            let request = d.chassis.riding_under(r, want);
+            d.chassis.frame(dt, want, &request, game_render::vehicle::Drive::of(&r.ride));
+            d.body.bare = d.chassis.bare_under(&r.body.veh);
+            let drawn_root = d.chassis.world[root].mul(placed(&r.ride));
+            if let Some(rd) = r.riding.as_ref().filter(|rd| rd.placed()) {
+                let bike = drawn_root;
+                let into = |p: Vf| {
+                    let o = bike.0[3];
+                    let v = [p.x() - o[0], p.y() - o[1], p.z() - o[2]];
+                    [0, 1, 2].map(|a| v[0] * bike.0[a][0] + v[1] * bike.0[a][1] + v[2] * bike.0[a][2])
+                };
+                leaned.push(Leaned { t, parts: rd.actor.ragdoll.bones.iter().map(|b| into(b.body.position)).collect(), bike: bike.0, ride: placed(&r.ride).0 });
+            }
+            let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = grips(&d.chassis) else { panic!("the chassis lacks a hold") };
+            let point = |a: game_render::mat::V3| Vf::new(a.x, a.y, a.z, 1.0);
+            r.holds = Some(Arc::new(game_sim::ragdoll_riding::Holds {
+                root: game_sim::math::Mat4(d.chassis.world[root].0.map(Vf)),
+                hands: [point(hand_l), point(hand_r)],
+                feet: [point(foot_l), point(foot_r)],
+            }));
+        }
+        Some((ticks, leaned))
+    })
+}
+
+/// The ragdoll parts the lean is read off: the pelvis and the head (the original's part order,
+/// which the port's rig keeps; S109).
+const PELVIS: usize = 0;
+const HEAD: usize = 3;
+
+/// The ticks after an image the port's riding ragdoll, built fresh where the original's has a
+/// history, is not compared on.
+const SETTLE: u32 = 30;
+
+/// The riding ticks [`the_drawn_rider_leans_as_the_original_through_the_turns`] compares, and of
+/// those the hard-turn ones (the original's head 0.5 ft or more to a side of its pelvis).
+const DRAWN_TICKS: (usize, usize) = (1201, 213);
+
+/// **S228a — the drawn rider's lean through the tape's turns, as drawn.** Every stretch of [`HELD`]
+/// that holds past [`SETTLE`] is ridden by [`ride_drawn`], the drawn rider beside it as the shell
+/// builds it (the riding ragdoll since S90), and on each tick both riders are riding the lean is read
+/// off the ragdoll: the head's centre less the pelvis's, in the frame of the drawn bike's root (the
+/// capture's `p1_bike_xform` is that node, not the chassis: S8), against the original's
+/// `p1_bone<n>.pos` of rows t+1..t+3, the closest. Two things are held, each to a stated tolerance:
+///
+/// - **the lean**: to a side within 0.05 ft on the median tick, 0.25 ft on nine in ten and 0.7 ft on
+///   every one; as a vector within 0.95 ft on every one.
+/// - **the drawn bike's root** (which the lean is measured in, and which the ragdoll's holds hang
+///   off): its up within 0.1 rad of the original's on nine ticks in ten and 0.25 rad on every one.
+///
+/// Where it parts, the port leans *less*: in the hard turns its lean to a side is 0.80 of the
+/// original's on the mean (pinned; may only go up), and its drawn root rolls 0.90 of the original's
+/// off the ride. S253 is to find which.
+#[test]
+fn the_drawn_rider_leans_as_the_original_through_the_turns() {
+    let Some(bones) = bones() else { return };
+    let lean = |p: &[[f32; 3]]| [0, 1, 2].map(|k| p[HEAD][k] - p[PELVIS][k]);
+    // Per tick: (side, whole, up angle, ours to a side, theirs to a side, our root's roll, theirs).
+    let mut rows: Vec<(u32, u32, [f32; 7])> = Vec::new();
+    for (from, held_ticks) in HELD.iter().copied().filter(|&(_, h)| h > SETTLE as usize) {
+        let Some((_, leaned)) = ride_drawn(from, from + held_ticks as u32) else { return };
+        for l in leaned.iter().filter(|l| l.t >= from + SETTLE) {
+            let best = (l.t + 1..=l.t + 3)
+                .filter(|&r| bones.riding(r))
+                .map(|r| {
+                    let (ours, theirs) = (lean(&l.parts), lean(&bones.parts(r)));
+                    let m = &bones.bikes[(r - bones.first) as usize];
+                    let up = (0..3).map(|k| l.bike[1][k] * m[1][k]).sum::<f32>().clamp(-1.0, 1.0).acos();
+                    let whole = (0..3).map(|k| (ours[k] - theirs[k]).powi(2)).sum::<f32>().sqrt();
+                    // The drawn root's roll off the ride's own frame: its up along the ride's right.
+                    let roll = |d: &[[f32; 4]; 4]| (0..3).map(|k| d[1][k] * l.ride[0][k]).sum::<f32>();
+                    [(ours[0] - theirs[0]).abs(), whole, up, ours[0], theirs[0], roll(&l.bike), roll(m)]
+                })
+                .min_by(|a, b| a[1].total_cmp(&b[1]));
+            if let Some(b) = best {
+                rows.push((from, l.t, b));
+            }
+        }
+    }
+    let n = rows.len();
+    let sorted = |k: usize, of: &[&(u32, u32, [f32; 7])]| {
+        let mut v: Vec<f32> = of.iter().map(|r| r.2[k]).collect();
+        v.sort_by(f32::total_cmp);
+        v
+    };
+    let all: Vec<_> = rows.iter().collect();
+    let (side, whole, up) = (sorted(0, &all), sorted(1, &all), sorted(2, &all));
+    for (name, v) in [("to a side", &side), ("as a vector", &whole), ("root up (rad)", &up)] {
+        println!("{name}: median {:.3} p90 {:.3} p99 {:.3} worst {:.3}", v[n / 2], v[n * 9 / 10], v[n * 99 / 100], v[n - 1]);
+    }
+    let mut worst = rows.clone();
+    worst.sort_by(|a, b| b.2[1].total_cmp(&a.2[1]));
+    for w in worst.iter().take(5) {
+        println!("worst: from {} tick {} {:?}", w.0, w.1, w.2);
+    }
+    let hard: Vec<_> = rows.iter().filter(|r| r.2[4].abs() >= 0.5).collect();
+    let mean = |k: usize| hard.iter().map(|r| r.2[k].abs()).sum::<f32>() / hard.len() as f32;
+    let (leans, rolls) = (mean(3) / mean(4), mean(5) / mean(6));
+    println!("{} hard-turn ticks: lean to a side ours {:.3} theirs {:.3} ({leans:.3}); root roll ours {:.3} theirs {:.3} ({rolls:.3})", hard.len(), mean(3), mean(4), mean(5), mean(6));
+    assert_eq!((n, hard.len()), DRAWN_TICKS, "the ticks compared, and the hard-turn ones");
+    assert!(side[n / 2] <= 0.05 && side[n * 9 / 10] <= 0.25 && side[n - 1] <= 0.7, "the lean to a side");
+    assert!(whole[n - 1] <= 0.95, "the lean as a vector: {}", whole[n - 1]);
+    assert!(up[n * 9 / 10] <= 0.1 && up[n - 1] <= 0.25, "the drawn bike's root");
+    assert!(leans >= 0.80, "the hard turns' lean is {leans} of the original's, down from 0.80");
+}
+
+/// The original's 18 riding ragdoll part centres (`p1_bone<n>.pos`) off the capture, in the bike's
+/// frame of the same row (`p1_bike_xform`).
+struct Bones {
+    first: u32,
+    rows: Vec<Vec<[f32; 3]>>,
+    bikes: Vec<[[f32; 4]; 4]>,
+    modes: Vec<u32>,
+}
+
+impl Bones {
+    fn parts(&self, frame: u32) -> Vec<[f32; 3]> {
+        self.rows[(frame - self.first) as usize].clone()
+    }
+    fn riding(&self, frame: u32) -> bool {
+        self.modes[(frame - self.first) as usize] == 1
+    }
+}
+
+fn bones() -> Option<Bones> {
+    let path = ctx(CAPTURE)?;
+    let file = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+    let keep = |c: &str| c.starts_with("p1_bone") && c.contains(".pos.") || c.starts_with("p1_bike_xform.") || c == "p1_mode";
+    let cap = game_sim::replay::two_p::read(file, keep).unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
+    let at = |name: &str| cap.columns.iter().position(|c| c == name).unwrap_or_else(|| panic!("no {name}"));
+    let m: Vec<Vec<usize>> = (0..4).map(|i| (0..4).map(|j| at(&format!("p1_bike_xform.m{i}{j}"))).collect()).collect();
+    let p: Vec<[usize; 3]> = (0..18).map(|b| ["x", "y", "z"].map(|a| at(&format!("p1_bone{b}.pos.{a}")))).collect();
+    let mode = at("p1_mode");
+    let modes = cap.rows.iter().map(|row| row[mode].parse::<f64>().unwrap() as u32).collect();
+    let bikes = cap
+        .rows
+        .iter()
+        .map(|row| [0, 1, 2, 3].map(|i| [0, 1, 2, 3].map(|j| row[m[i][j]].parse::<f64>().unwrap() as f32)))
+        .collect();
+    let rows = cap
+        .rows
+        .iter()
+        .map(|row| {
+            let g = |k: usize| row[k].parse::<f64>().unwrap() as f32;
+            let o = [g(m[3][0]), g(m[3][1]), g(m[3][2])];
+            p.iter()
+                .map(|q| {
+                    let v = [g(q[0]) - o[0], g(q[1]) - o[1], g(q[2]) - o[2]];
+                    [0, 1, 2].map(|a| v[0] * g(m[a][0]) + v[1] * g(m[a][1]) + v[2] * g(m[a][2]))
+                })
+                .collect()
+        })
+        .collect();
+    Some(Bones { first: cap.frames[0] as u32, rows, bikes, modes })
+}

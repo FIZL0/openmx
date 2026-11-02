@@ -1775,6 +1775,11 @@ mod two_p_poses {
         read_at(two_p::CAPTURE, joints)
     }
 
+    /// S228's capture of fly_and_collide (the same spec) with the 22 posed joints.
+    pub fn read_fly() -> Option<game_sim::replay::Capture> {
+        read_at(super::FLY, true)
+    }
+
     /// C11's second playback of the same tape, the spec with the body's two lag records added
     /// (`lag_mix`, `lag_phase`: `{value, tau, ratio}` each). Its rows are a playback of their own,
     /// not the capture of record's rows with columns added: they part from it in the low bits.
@@ -1866,6 +1871,8 @@ mod two_p_poses {
         pub eased: Option<[(u32, u32); 2]>,
         /// The reverse pair's own phase clock after the tick, the original's and the port's, as bits.
         pub reverse: (u32, u32),
+        /// The drawn rider's pose after the tick, when the replay was asked to pose it (S228a).
+        pub pose: Option<game_render::skin::Pose>,
     }
 
     fn mode_number(m: Mode) -> i32 {
@@ -2099,6 +2106,7 @@ mod two_p_poses {
                     ramp: (c.word(row, &n("d_flags"), 0xc), body.veh.ramp.to_f32().to_bits()),
                     joints,
                     reverse: (c.f(row, &n("d_reverse")).to_bits(), body.veh.reverse.to_f32().to_bits()),
+                    pose: posed.then(|| drawn.rig.set.pose.clone()),
                     eased: has_eased.then(|| {
                         let theirs = |col: &str| c.f(row, &n(col)).to_bits();
                         [
@@ -2608,4 +2616,79 @@ fn the_2p_fades_start_from_the_ragdolls_nodes() {
         assert!(worst_own > 0.1, "P{}: the port's own snapshot should part on these ticks", k + 1);
     }
     assert_eq!(fading, [14, 50], "fading ticks with the ramp bit for bit, P1 then P2");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// S228a: the drawn rider's lean through fly_and_collide's turns
+// ---------------------------------------------------------------------------------------------------
+
+/// S228's capture of the user's fly_and_collide tape (watch/2p.toml, so V90's columns and the 22
+/// posed joints of both riders).
+const FLY: &str = "capture/s228/fly.csv";
+
+/// P1's leaning ticks on [`FLY`] (riding, on the original's state, the eased lean axis a sixth or more
+/// off its middle), and of those the ones whose drawn head-over-pelvis is the original's within 0.01 ft.
+const FLY_LEANING: (usize, usize) = (1153, 937);
+
+/// **S228a — the drawn rider's lean through fly_and_collide's turns, the clip layer.** V90's replay of
+/// P1's body off [`FLY`]'s request words, posed each tick ([`posed_by`](game_render::rider::Body::posed_by)),
+/// and on every leaning tick the head's place over the pelvis (model space, FK of the 22 joints) held
+/// against the original's posed joints of this row or either side. The eased axes are the original's
+/// bit for bit on all of them; the median is exact, and the ticks within 0.01 ft are pinned and may only go
+/// up. What parts (216 ticks, up to 0.77 ft, in seventeen spans — 138164..138232 and 139630..139655 the
+/// worst) parts on the whole body with the ramp at 0 and the eased axes and clip time the original's,
+/// so it is not the lean request (V121).
+#[test]
+fn the_fly_riders_drawn_lean_is_the_originals() {
+    use game_render::skin::Pose;
+    let Some(drawn) = two_p_poses::drawn() else { return };
+    let Some(cap) = two_p_poses::read_fly() else { return };
+    let skel = drawn.rig.set.skeleton.clone();
+    let c = two_p_poses::Col(&cap);
+    let Some(riders) = two_p_poses::run_with(two_p_poses::read_fly().unwrap(), true, false) else { return };
+    let theirs = |row: usize, like: &Pose| {
+        let mut p = like.clone();
+        for j in 0..p.rot.len() {
+            for (lane, axis) in ["x", "y", "z", "w"].iter().enumerate() {
+                p.rot[j][lane] = c.f(row, &format!("p1_j{j}.q.{axis}"));
+                p.pos[j][lane] = c.f(row, &format!("p1_j{j}.t.{axis}"));
+            }
+        }
+        p
+    };
+    let (pelvis, head) = (skel.find("Pelvis").expect("a pelvis"), skel.find("Head").expect("a head"));
+    let lean = |w: &[game_render::mat::M4]| [0, 1, 2].map(|k| w[head].0[3][k] - w[pelvis].0[3][k]);
+    let mut misses = Vec::new();
+    for (i, t) in riders[0].iter().enumerate() {
+        let row = i + 1;
+        if t.theirs != t.ours || t.theirs.1 != 1 || (c.f(row, "p1_lag_phase.x") - 0.5).abs() < 0.15 {
+            continue;
+        }
+        let ours = t.pose.as_ref().expect("posed");
+        let at = lean(&skel.world(ours));
+        let miss = (row.saturating_sub(1)..(row + 2).min(cap.rows.len()))
+            .map(|r| {
+                let them = lean(&skel.world(&theirs(r, ours)));
+                (0..3).map(|k| (at[k] - them[k]).powi(2)).sum::<f32>().sqrt()
+            })
+            .fold(f32::INFINITY, f32::min);
+        misses.push((t.frame, miss));
+    }
+    let mut spans: Vec<(u32, u32, f32)> = Vec::new();
+    for &(f, m) in misses.iter().filter(|m| m.1 > 0.01) {
+        match spans.last_mut() {
+            Some(s) if f <= s.1 + 3 => (s.1, s.2) = (f, s.2.max(m)),
+            _ => spans.push((f, f, m)),
+        }
+    }
+    let mut by: Vec<f32> = misses.iter().map(|m| m.1).collect();
+    by.sort_by(f32::total_cmp);
+    let n = by.len();
+    let within = by.iter().filter(|&&m| m <= 0.01).count();
+    println!("{n} leaning ticks, {within} within 0.01 ft; median {:.5} p90 {:.4} worst {:.4}", by[n / 2], by[n * 9 / 10], by[n - 1]);
+    println!("parting spans (first, last, worst): {spans:?}");
+    assert_eq!(n, FLY_LEANING.0, "P1's leaning ticks on the original's state");
+    assert!(within >= FLY_LEANING.1, "{within} leaning ticks within 0.01 ft, down from {}", FLY_LEANING.1);
+    assert!(by[n / 2] <= 1e-3, "the median leaning tick is {} off the original's", by[n / 2]);
+    assert!(by[n - 1] <= 0.8, "a leaning tick {} off the original's", by[n - 1]);
 }
