@@ -912,6 +912,9 @@ pub mod handling;
 /// push, rear-pair flag — ported from its ELF.
 pub mod quad;
 
+/// The ATV's wheels (MD37b): MX vs. ATV's wheel suspension and tire forces on its rigid body.
+pub mod atv_wheel;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground
