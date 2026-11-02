@@ -24,7 +24,7 @@ impl Look {
     pub fn of(view: &CameraView, machine: Machine) -> Look {
         match machine {
             // A car frames as the bike does until it has camera settings of its own (S149e).
-            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja => Look { fov: view.fov, distance: view.distance, height: view.height },
+            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter => Look { fov: view.fov, distance: view.distance, height: view.height },
             Machine::Biplane => Look { fov: view.fov, distance: view.plane_distance, height: view.plane_height },
         }
     }
@@ -385,7 +385,7 @@ impl super::Menu {
         };
         let look = self.camera_look(&pick);
         let disc = match pick.machine {
-            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja => &self.camera_names[0],
+            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter => &self.camera_names[0],
             Machine::Biplane => &self.camera_names[1],
         };
         let kept = self.settings.camera_sets[seat].save_custom(pick.machine, &base, name, look, disc);

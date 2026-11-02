@@ -63,18 +63,21 @@ fn at(x: f32, y: f32, z: f32) -> Vf {
     Vf::new(x, y, z, 1.0)
 }
 
-/// The bays are the lot's machines the port has — the planes, one a player — drawn see-through at
-/// the put-back ghost's own alpha; with the setting off there are none, so nothing is drawn there,
-/// marked or offered.
+/// The bays are the lot's machines the port has — the planes and (since P216) the helicopters, one
+/// of each a player — drawn see-through at the put-back ghost's own alpha; with the setting off there
+/// are none, so nothing is drawn there, marked or offered.
 #[test]
 fn a_bay_is_a_see_through_plane_and_off_is_nothing() {
     for players in [1, 2, 4] {
         let lot = lot(players);
         let shown = vehicle::bays_shown(&lot, true);
-        assert_eq!(shown.len(), players, "one plane a player: {shown:?}");
-        assert!(shown.iter().all(|b| b.machine == Machine::Biplane));
-        assert_eq!(shown, lot.of(Machine::Biplane).copied().collect::<Vec<Bay>>());
-        for bay in &shown {
+        assert_eq!(shown.len(), 2 * players, "one plane and one helicopter a player: {shown:?}");
+        assert!(shown.iter().all(|b| matches!(b.machine, Machine::Biplane | Machine::Helicopter)));
+        let planes: Vec<Bay> = shown.iter().filter(|b| b.machine == Machine::Biplane).copied().collect();
+        assert_eq!(planes, lot.of(Machine::Biplane).copied().collect::<Vec<Bay>>());
+        let helis: Vec<Bay> = shown.iter().filter(|b| b.machine == Machine::Helicopter).copied().collect();
+        assert_eq!(helis, lot.of(Machine::Helicopter).copied().collect::<Vec<Bay>>());
+        for bay in &planes {
             let plane = vehicle::bay_plane(bay);
             assert_eq!((plane.at, plane.facing, plane.livery), (bay.spawn.at, bay.spawn.facing, bay.livery));
             assert!(plane.flight.is_none(), "a bay's plane is never flown");
@@ -143,8 +146,12 @@ fn the_pop_up_offers_as_the_originals_trigger_does() {
     assert_eq!(offer(at(100.0, 0.0, 10.0), -58.6, false), Some(Machine::Biplane));
     assert_eq!(offer(at(100.0, 0.0, 10.0), 58.7, false), None);
     assert_eq!(offer(at(100.0, 0.0, 10.0), 0.0, true), None);
+    // The helicopter is (P216): player 1's stands at 0, 0, 20.
+    assert_eq!(offer(at(0.0, 0.0, 35.0), 0.0, false), Some(Machine::Helicopter));
+    assert_eq!(vehicle::offer(&bays, Kind::Kiowa, at(0.0, 0.0, 35.0), 0.0, false), None, "not to its own pilot");
+    assert_eq!(Answer::default().take(true, false, Some(Machine::Helicopter)), Some(Kind::Kiowa));
     // The other machines are not ported, so standing beside them offers nothing.
-    assert_eq!(offer(at(-20.0, 0.0, 5.0), 0.0, false), None, "a monster truck's bay");
+    assert_eq!(offer(at(-30.0, 0.0, 0.0), 0.0, false), None, "between the monster trucks' bays");
     // And the plane is not offered to its own pilot.
     assert_eq!(vehicle::offer(&bays, Kind::Biplane, at(100.0, 0.0, 10.0), 0.0, false), None);
     assert_eq!(vehicle::offer_text(Machine::Biplane), "Would you like to switch to the Biplane?");
@@ -184,7 +191,7 @@ fn circle_takes_the_offered_plane_onto_the_player() {
     let plane = garage.plane_flown().expect("the plane is up");
     assert_eq!((plane.at.x(), plane.at.z()), (here.x(), here.z()), "spawned on the player, not at the bay");
     assert_eq!(plane.bay, bay, "the bay stays where it is, and is drawn there still");
-    assert_eq!(vehicle::bays_shown(&lot, true).len(), 1);
+    assert_eq!(vehicle::bays_shown(&lot, true).len(), 2, "the plane's bay and the helicopter's");
     // In the plane the bay offers nothing.
     assert_eq!(vehicle::offer(&bays, garage.up, plane.at, 0.0, false), None);
     // Back on the bike the plane flown is drawn nowhere; the bay's is.
