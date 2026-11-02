@@ -75,6 +75,8 @@ pub enum Kind {
     Buggy,
     Monster,
     Baja,
+    /// The Kiowa helicopter (P216), the original's machine kind 2 ([`KiowaRide`]).
+    Kiowa,
 }
 
 impl Kind {
@@ -86,7 +88,8 @@ impl Kind {
             "buggy" => Ok(Kind::Buggy),
             "monster" | "truck" | "monstertruck" => Ok(Kind::Monster),
             "baja" => Ok(Kind::Baja),
-            _ => Err(format!("--vehicle: {word:?} is not a vehicle; it is bike, biplane, buggy, monster or baja")),
+            "helicopter" | "kiowa" | "heli" => Ok(Kind::Kiowa),
+            _ => Err(format!("--vehicle: {word:?} is not a vehicle; it is bike, biplane, helicopter, buggy, monster or baja")),
         }
     }
 
@@ -98,14 +101,16 @@ impl Kind {
             Kind::Buggy => "buggy",
             Kind::Monster => "monster",
             Kind::Baja => "baja",
+            Kind::Kiowa => "helicopter",
         }
     }
 
-    /// The machine a swap goes to from this one: the bike and the plane each other's, a car the bike.
+    /// The machine a swap goes to from this one: the bike and the plane each other's, a car or the
+    /// helicopter the bike.
     pub fn other(self) -> Kind {
         match self {
             Kind::Bike => Kind::Biplane,
-            Kind::Biplane | Kind::Buggy | Kind::Monster | Kind::Baja => Kind::Bike,
+            Kind::Biplane | Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa => Kind::Bike,
         }
     }
 
@@ -115,7 +120,7 @@ impl Kind {
             Kind::Buggy => Some(Machine::Buggy),
             Kind::Monster => Some(Machine::Monster),
             Kind::Baja => Some(Machine::Baja),
-            Kind::Bike | Kind::Biplane => None,
+            Kind::Bike | Kind::Biplane | Kind::Kiowa => None,
         }
     }
 }
@@ -236,6 +241,7 @@ impl Machine {
     pub fn kind(self) -> Option<Kind> {
         match self {
             Machine::Biplane => Some(Kind::Biplane),
+            Machine::Helicopter => Some(Kind::Kiowa),
             _ => None,
         }
     }
@@ -431,6 +437,9 @@ pub struct Lot {
     /// Every car the disc has in each of its liveries, built once off `machine.res` ([`car_kit`]),
     /// which each player's garage takes its cars from ([`Lot::cars_for`]). Empty without the files.
     pub cars: Vec<CarRide>,
+    /// The helicopter as the disc builds it (P216), off `machine.res`'s `kiowa.phy`, which each
+    /// player's garage takes a copy of ([`Lot::heli_for`]). `None` without the file.
+    pub kiowa: Option<KiowaRide>,
 }
 
 impl Lot {
@@ -444,7 +453,7 @@ impl Lot {
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new(), cars: Vec::new() };
+        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new(), cars: Vec::new(), kiowa: None };
         lot.resize(players, ground);
         lot
     }
@@ -1005,6 +1014,8 @@ pub struct Garage {
     pub taken: bool,
     /// This player's cars (S149e), one of each the disc has ([`CarRide`]).
     pub cars: Vec<CarRide>,
+    /// This player's helicopter (P216), where the disc has its `kiowa.phy` ([`KiowaRide`]).
+    pub heli: Option<KiowaRide>,
 }
 
 /// How far above a machine's origin the ground under it is looked for when the other is spawned
@@ -1112,6 +1123,8 @@ pub fn markers_of(kind: Kind) -> markers::Vehicle {
         Kind::Biplane => markers::Vehicle::Plane,
         // A car keeps the bike's set; its pass runs no markers (S149e).
         Kind::Buggy | Kind::Monster | Kind::Baja => markers::Vehicle::Bike,
+        // So does the helicopter (P216).
+        Kind::Kiowa => markers::Vehicle::Bike,
     }
 }
 
@@ -1140,10 +1153,10 @@ impl Garage {
         if up == Kind::Biplane && plane.is_none() {
             return Err("--vehicle biplane: this ride has no biplane (the disc's machine.res has no biplane.phy)".into());
         }
-        if up.car().is_some() {
-            return Err(format!("--vehicle {}: a ride starts on the bike or the plane; switch to a car from the pause", up.name()));
+        if up.car().is_some() || up == Kind::Kiowa {
+            return Err(format!("--vehicle {}: a ride starts on the bike or the plane; switch to it from the pause", up.name()));
         }
-        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new() })
+        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new(), heli: None })
     }
 
     /// **The plane put in the air** (V96's `--fly-at`, a measurement start): stood at `at` along
@@ -1163,6 +1176,9 @@ impl Garage {
         let mut out = vec![Kind::Bike];
         if self.plane.is_some() {
             out.push(Kind::Biplane);
+        }
+        if self.heli.is_some() {
+            out.push(Kind::Kiowa);
         }
         out.extend(self.cars.iter().filter_map(|c| c.machine.car_kind()));
         out
@@ -1185,7 +1201,7 @@ impl Garage {
         if to == self.up {
             return Ok(to);
         }
-        if to.car().is_some() || self.up.car().is_some() {
+        if detour(to) || detour(self.up) {
             return self.switch_car(to, sim, world);
         }
         match to {
@@ -1200,7 +1216,7 @@ impl Garage {
                 let spot = under(plane, sim, world).ok_or("there is no ground under the plane to stand the bike on")?;
                 sim.rider.teleport_to(spot);
             }
-            Kind::Buggy | Kind::Monster | Kind::Baja => return self.switch_car(to, sim, world),
+            Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa => return self.switch_car(to, sim, world),
         }
         // A trick or combo in progress fails as a bail fails it (P161): the trick stopped, the
         // chain's points lost and not banked, so the HUD plays the pop-up out as a bail's and the
@@ -1286,8 +1302,9 @@ impl Garage {
             Kind::Bike => markers::frame(sim, me, spots, controls),
             // The plane's own set (P107), on the d-pad the plane no longer reads.
             Kind::Biplane => self.markers(sim, me, spots, &[], world),
-            // A car has no markers yet (S149e): the d-pad steers it.
-            Kind::Buggy | Kind::Monster | Kind::Baja => None,
+            // A car has no markers yet (S149e): the d-pad steers it. Nor the helicopter (P216),
+            // whose d-pad is its stick's.
+            Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa => None,
         };
         (said, did)
     }
@@ -1303,6 +1320,9 @@ impl Garage {
     pub fn spot(&self, sim: &Sim, world: &mut dyn World) -> Spot {
         if let Some(car) = self.car_up() {
             return car.spot(world);
+        }
+        if let (Kind::Kiowa, Some(heli)) = (self.up, &self.heli) {
+            return heli.spot(world);
         }
         match (self.up, &self.plane) {
             (Kind::Biplane, Some(plane)) => {
@@ -1399,7 +1419,7 @@ impl Garage {
     /// ([`Sim::step_among`]), the plane with their bikes ([`Plane::step_among`]). Alone, it is
     /// [`Garage::step`] exactly.
     pub fn step_among(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World, among: Among<'_>) -> rider::Frame {
-        if self.up.car().is_some() {
+        if detour(self.up) {
             return self.drive(sim, dt, world);
         }
         match (self.up, &mut self.plane) {
@@ -1475,6 +1495,8 @@ impl Wanted {
             Some(Kind::Biplane) => 2,
             // Online rides no car (S149e): a car pick is no pick.
             Some(Kind::Buggy | Kind::Monster | Kind::Baja) => 0,
+            // Nor the helicopter (P216).
+            Some(Kind::Kiowa) => 0,
         };
         to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.together as u8) << 5 | (self.paused as u8) << 6
     }
@@ -1513,7 +1535,7 @@ pub fn switch_lane(to: Kind, template: Option<&Flight>, sim: &mut Sim, world: &m
             Plane::flying(Spawn { at: f.spawn_origin(), facing: f.spawn.1 }, f)
         }
     };
-    let mut garage = Garage { up, plane: Some(plane), taken: true, cars: Vec::new() };
+    let mut garage = Garage { up, plane: Some(plane), taken: true, cars: Vec::new(), heli: None };
     let result = garage.switch(to, sim, world);
     let mut plane = garage.plane.take().expect("the switch keeps the plane");
     if garage.up == Kind::Biplane {
@@ -1574,7 +1596,7 @@ pub fn fly_lane_met(
 /// it while it is on or near the ground, the bike's spot on the bike.
 pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
     match &sim.plane {
-        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new() }.spot(sim, world),
+        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new(), heli: None }.spot(sim, world),
         None => Spot::of(&sim.rider),
     }
 }
@@ -1847,11 +1869,18 @@ impl Garage {
                 land(plane, from, world).ok_or("there is no ground under the car to land the plane on")?;
                 self.taken = true;
             }
+            None if to == Kind::Kiowa => {
+                let heli = self.heli.as_mut().ok_or("this ride has no helicopter")?;
+                heli.take(&from, world).ok_or("there is no ground here to stand the helicopter on")?;
+            }
             None => sim.rider.teleport_to(from),
         }
         let left = self.up.car();
         if let Some(c) = self.cars.iter_mut().find(|c| Some(c.machine) == left) {
             c.driven = None;
+        }
+        if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
+            heli.flown = None;
         }
         sim.rider.trick_lost();
         self.up = to;
@@ -1867,7 +1896,343 @@ impl Garage {
         if let Some(car) = self.cars.iter_mut().find(|c| Some(c.machine) == m) {
             car.step(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world);
         }
+        if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
+            heli.step(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world);
+        }
         rider::Frame::default()
+    }
+}
+
+// ---- the Kiowa (P216) ----------------------------------------------------------------------------
+
+/// The helicopter's body's inverse inertia, as the original holds it once the helicopter is built
+/// (C14's start state, `c14-kiowa` in `context/states/`): the
+/// original works it out of the model's box, which `game_sim` does not read, so the built value is
+/// carried, as [`flight`]'s plane carries its own.
+const KIOWA_INV_INERTIA: Vf = Vf([f32::from_bits(0x38c2_4305), f32::from_bits(0x38cd_5c6b), f32::from_bits(0x3a49_6ce0), 1.0]);
+
+/// The collective's filter as the constructor builds it (value 0.5, time 1).
+const KIOWA_FILTER: game_sim::kiowa::Filter = game_sim::kiowa::Filter { value: F(0.5), time: F(1.0), step: F(0.0) };
+
+/// The engine's dynamics world the helicopter is stepped in: the plane's, 115 substeps a second.
+const KIOWA_WORLD: game_sim::biplane::World = game_sim::biplane::World { iterations: 1, rate: F(115.0) };
+
+/// How far over the ground a helicopter taken is stood, feet: it settles onto its skids from there.
+/// The port's own number.
+const KIOWA_DROP: f32 = 0.25;
+
+/// **The ground under the skids**, the port's stand-in for the collision record's response (C14a
+/// ports the original's): one contact at the model's origin, the skids' middle. Under the ground it
+/// pushes the body up on a stiff damped spring ([`KIOWA_SPRING`], [`KIOWA_SPRING_DAMPING`]), times
+/// the body's mass, so it is the same on any helicopter; while touching, the skids drag along the
+/// ground ([`KIOWA_SKID_DRAG`]) and the body's rates are damped ([`KIOWA_TIP_DAMPING`]), which keeps
+/// a helicopter standing on its skids from tipping over on them. Touching is within
+/// [`KIOWA_TOUCH`] of the ground. None of these numbers is the original's.
+const KIOWA_SPRING: f32 = 400.0;
+const KIOWA_SPRING_DAMPING: f32 = 32.0;
+const KIOWA_SKID_DRAG: f32 = 3.0;
+const KIOWA_TIP_DAMPING: f32 = 12.0;
+const KIOWA_TOUCH: f32 = 0.1;
+/// Past this far under the ground (a fall faster than the spring holds) the body is put back on it
+/// and its fall stopped.
+const KIOWA_SINK: f32 = 1.5;
+
+/// What [`KiowaAround::strike`] answers off the map: well under anything.
+const NO_GROUND_BELOW: f32 = -1.0e6;
+
+/// The world round a flown helicopter for [`game_sim::kiowa::Kiowa::tick`]: the ground under the
+/// skids (see [`KIOWA_SPRING`]), the rotor's eight wreck rays' ends in the ground for the strike
+/// ([`game_sim::kiowa::rotor_in_ground`]), and the wreck and put-back as the port's own (S220a1
+/// ports the original's): a wreck throws the blades (they go, the tail rotor shows bent) and the
+/// put-back stands the helicopter back on the ground where it is, whole and at rest.
+struct KiowaAround<'a> {
+    world: &'a mut dyn World,
+    rays: [Vf; 8],
+    touching: bool,
+    /// The put-back asked for, done after the tick (it builds the helicopter again).
+    recover: bool,
+}
+
+/// `v` (`xyz`) turned by the unit quaternion `q` (`x, y, z, w`), in plain arithmetic: the stand-in's.
+fn rotate(q: Vf, v: Vf) -> [f32; 3] {
+    let (qx, qy, qz, qw) = (q.x(), q.y(), q.z(), q.w());
+    let (vx, vy, vz) = (v.x(), v.y(), v.z());
+    let (tx, ty, tz) = (2.0 * (qy * vz - qz * vy), 2.0 * (qz * vx - qx * vz), 2.0 * (qx * vy - qy * vx));
+    [vx + qw * tx + (qy * tz - qz * ty), vy + qw * ty + (qz * tx - qx * tz), vz + qw * tz + (qx * ty - qy * tx)]
+}
+
+impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
+    fn resolve(&mut self, body: &mut game_sim::biplane::Body) {
+        let c = rotate(body.quat, body.cofg);
+        let p = body.position;
+        let skids = Vf::new(p.x() - c[0], p.y() - c[1], p.z() - c[2], 1.0);
+        let Some(ground) = ground_under(self.world, skids) else {
+            self.touching = false;
+            return;
+        };
+        let under = ground - skids.y();
+        self.touching = under > -KIOWA_TOUCH;
+        if !self.touching {
+            return;
+        }
+        let mass = if body.inv_mass.0 > 0.0 { 1.0 / body.inv_mass.0 } else { 0.0 };
+        let v = body.velocity;
+        if under > KIOWA_SINK {
+            body.position = Vf::new(p.x(), p.y() + under, p.z(), p.w());
+            if v.y() < 0.0 {
+                body.velocity = Vf::new(v.x(), 0.0, v.z(), v.w());
+            }
+        }
+        let v = body.velocity;
+        let up = if under > 0.0 { (KIOWA_SPRING * under - KIOWA_SPRING_DAMPING * v.y()).max(0.0) } else { 0.0 };
+        body.add_force(Vf::new(-KIOWA_SKID_DRAG * v.x() * mass, up * mass, -KIOWA_SKID_DRAG * v.z() * mass, 0.0));
+        let r = body.rates;
+        let k = KIOWA_INV_INERTIA;
+        let damp = |rate: f32, inv: f32| if inv > 0.0 { -KIOWA_TIP_DAMPING * rate / inv } else { 0.0 };
+        body.add_moment_local(Vf::new(damp(r.x(), k.x()), damp(r.y(), k.y()), damp(r.z(), k.z()), 0.0));
+    }
+    fn touching(&self) -> bool {
+        self.touching
+    }
+    fn ignored(&self) -> bool {
+        false
+    }
+    fn entries(&self) -> Vec<game_sim::kiowa::Touch> {
+        match self.touching {
+            true => vec![game_sim::kiowa::Touch { kind: 0, t: F::ZERO }],
+            false => Vec::new(),
+        }
+    }
+    fn strike(&mut self, matrix: &game_sim::math::Mat4) -> game_sim::kiowa::Strike {
+        let world = &mut *self.world;
+        let in_ground = game_sim::kiowa::rotor_in_ground(matrix, &self.rays, |at| {
+            let g = ground_under(world, at).unwrap_or(NO_GROUND_BELOW);
+            Vf::new(at.x(), g, at.z(), at.w())
+        });
+        game_sim::kiowa::Strike { in_ground, struck: false }
+    }
+    fn crashed(&mut self, asked: &game_sim::kiowa::Crashed, ride: &mut game_sim::kiowa::Ride, _: &mut game_sim::rng::Rng) {
+        if asked.wreck.is_some() {
+            ride.rotor_hidden = true;
+        }
+        self.recover |= asked.recover;
+    }
+}
+
+/// A flown helicopter: its flight ([`game_sim::kiowa::Kiowa`]), the frame's state round it, and the
+/// `rand()` its wreck and touchdown draw from.
+#[derive(Clone, Debug)]
+pub struct Heli {
+    pub kiowa: game_sim::kiowa::Kiowa,
+    pub ride: game_sim::kiowa::Ride,
+    pub rng: game_sim::rng::Rng,
+    /// The ground stand-in's touching flag after the last tick.
+    pub touching: bool,
+}
+
+/// **A player's helicopter** (P216): `kiowa.phy`, the bay `machine.txt` parks their copy in and its
+/// livery, and the helicopter itself while the player has it.
+///
+/// The switch spawns it on the player as it spawns a car (S149e): stood on the ground where they
+/// are, nose along their heading, level, at rest, its rotor turning, a fresh helicopter. It flies on
+/// the seat's pad through the ride's bindings ([`game_sim::kiowa::Pad::from_sticks`]): Cross climbs,
+/// Square descends, L1 and R1 are the rudder, the left stick (or the d-pad) asks for ground speed
+/// forward and back and a bank left and right. The helicopter left goes, as the plane left does.
+#[derive(Clone, Debug)]
+pub struct KiowaRide {
+    pub phy: game_sim::kiowa::Phy,
+    pub livery: usize,
+    pub bay: Option<Spawn>,
+    pub flown: Option<Heli>,
+    /// Where it was last taken (its model's origin).
+    pub taken_at: Vf,
+}
+
+impl KiowaRide {
+    /// The helicopter off `kiowa.phy`'s bytes, in `livery`, parked at `bay`.
+    pub fn new(phy: &[u8], livery: usize, bay: Option<Spawn>) -> KiowaRide {
+        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default() }
+    }
+
+    /// The helicopter taken at `spot`: a fresh one built off the file ([`KiowaRide::built`]) on the
+    /// ground there along the spot's heading flattened (its bay's, or +z, where that points straight
+    /// up or down), flown. `None`, and nothing changes, with no ground there.
+    pub fn take(&mut self, spot: &Spot, world: &mut dyn World) -> Option<()> {
+        let ground = ground_under(world, spot.at)?;
+        let facing = level(spot.forward).or_else(|| self.bay.and_then(|b| level(b.facing))).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        let at = Vf::new(spot.at.x(), ground + KIOWA_DROP, spot.at.z(), 1.0);
+        self.flown = Some(self.built(at, facing, world.area()));
+        self.taken_at = at;
+        Some(())
+    }
+
+    /// The helicopter as the constructor leaves it, its model's origin at `origin` along `facing`,
+    /// upright and at rest, being flown: the file's controller, rotor and aerodynamics with their
+    /// states zero but the collective's filter ([`KIOWA_FILTER`]) and the held height (where it
+    /// stands); the body off `[Mass Properties]` (its mass, centre of gravity, gravity scale and
+    /// gravity force; undamped, as C14's state holds it) with the built inertia
+    /// ([`KIOWA_INV_INERTIA`]); the file's wreck figures; the throw's scale 0, as C14's state holds
+    /// it; the rotor at angle 0.
+    pub fn built(&self, origin: Vf, facing: Vf, area: Option<game_sim::biplane::Area>) -> Heli {
+        use game_sim::kiowa::{Kiowa, Loop, Measure, Ride};
+        let p = &self.phy;
+        let part = &p.mass_properties;
+        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+        let quat = game_sim::math::mat4_to_quat(&game_sim::math::basis(origin, facing, up, true, false));
+        let c = rotate(quat, part.cofg);
+        let position = Vf::new(origin.x() + c[0], origin.y() + c[1], origin.z() + c[2], 1.0);
+        let clear = Vf::new(0.0, 0.0, 0.0, 1.0);
+        let body = game_sim::biplane::Body {
+            enabled: true,
+            inv_mass: if part.mass.0 > 0.0 { F(1.0 / part.mass.0) } else { F::ZERO },
+            damping: Vf::new(1.0, 1.0, 1.0, 1.0),
+            last_position: position,
+            position,
+            velocity: clear,
+            last_force: clear,
+            force: clear,
+            shock_peak: clear,
+            shock: clear,
+            inv_inertia: KIOWA_INV_INERTIA,
+            ang_damping: Vf::new(1.0, 1.0, 1.0, 1.0),
+            last_quat: quat,
+            quat,
+            cofg: part.cofg,
+            moment: clear,
+            last_moment: clear,
+            rates: clear,
+            twist_peak: clear,
+            twist: clear,
+            ..Default::default()
+        };
+        let mut measure = Measure::default();
+        measure.flight(&body, &game_sim::air::AcosTable::build());
+        let kiowa = Kiowa {
+            controller: p.controller,
+            rotor: p.rotor,
+            aero: p.aero,
+            control: Loop { filter: KIOWA_FILTER, hold_altitude: F(position.y()), ..Loop::default() },
+            ..Kiowa::default()
+        };
+        let ride = Ride {
+            body,
+            measure,
+            crash: p.crash(),
+            flown: true,
+            gravity_scale: part.gravity_scale,
+            throw_scale: F::ZERO,
+            gravity: part.gravity,
+            area,
+            // Its sound is V114's: no clips, no draw.
+            touchdown_sound: false,
+            rotor_angle: F::ZERO,
+            rotor_hidden: false,
+        };
+        Heli { kiowa, ride, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), touching: true }
+    }
+
+    /// One frame of the helicopter on `pad` through `table`: the input step
+    /// ([`game_sim::kiowa::Pad::from_sticks`], the left stick through the player's range), then its
+    /// frame over `world` ([`game_sim::kiowa::Kiowa::tick`], [`KiowaAround`]). A put-back asked for
+    /// builds it again on the ground where it is, along its heading. Nothing for a helicopter not out.
+    pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
+        use game_sim::input::{Axis, AxisRange};
+        let rays = self.phy.wreck_rotor.rays.map(|[_, end]| end);
+        let Some(h) = self.flown.as_mut() else { return };
+        let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
+        let input = game_sim::kiowa::Pad::from_sticks(stick, |c| table.value(pad, c));
+        let mut around = KiowaAround { world: &mut *world, rays, touching: h.touching, recover: false };
+        h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
+        h.touching = around.touching;
+        if around.recover {
+            let rng = h.rng;
+            let (at, forward) = self.place().expect("a flown helicopter has a place");
+            let ground = ground_under(world, at).unwrap_or(at.y());
+            let facing = level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+            let mut fresh = self.built(Vf::new(at.x(), ground + KIOWA_DROP, at.z(), 1.0), facing, world.area());
+            fresh.rng = rng;
+            self.flown = Some(fresh);
+        }
+    }
+
+    /// Where the helicopter's model's origin is and which way its nose points: the measure's matrix,
+    /// which is where the original draws it.
+    pub fn place(&self) -> Option<(Vf, Vf)> {
+        let m = &self.flown.as_ref()?.ride.measure.matrix;
+        let (at, forward) = (m.0[3], m.0[2]);
+        Some((Vf::new(at.x(), at.y(), at.z(), 1.0), Vf::new(forward.x(), forward.y(), forward.z(), 0.0)))
+    }
+
+    /// The matrix it is drawn by (rows `x`, `y`, `z` and the origin), while it is out.
+    pub fn matrix(&self) -> Option<game_sim::math::Mat4> {
+        Some(self.flown.as_ref()?.ride.measure.matrix)
+    }
+
+    /// Its rotor as the drawing wants it: the angle, whether the main blades are on, whether it is
+    /// wrecked (the tail rotor bent). A parked one's is at rest and whole.
+    pub fn rotor(&self) -> (f32, bool, bool) {
+        match &self.flown {
+            Some(h) => (h.ride.rotor_angle.0, !h.ride.rotor_hidden, h.ride.crash.reason != 0),
+            None => (0.0, true, false),
+        }
+    }
+
+    /// What the shell says of it while it is out: how far it went from where it was taken, how high
+    /// it is over that, how fast, and whether it is on the ground or wrecked.
+    pub fn report(&self) -> Option<String> {
+        let h = self.flown.as_ref()?;
+        let (at, _) = self.place()?;
+        let gone = (at.x() - self.taken_at.x()).hypot(at.z() - self.taken_at.z());
+        let state = match (h.ride.crash.reason, h.touching) {
+            (0, true) => "on its skids",
+            (0, false) => "flying",
+            _ => "wrecked",
+        };
+        Some(format!(
+            "kiowa: {gone:.1} ft from where it was taken, {:.1} ft over it, at {:.1}, {:.1}, {:.1}, {:.1} ft/s, {state}",
+            at.y() - self.taken_at.y(),
+            at.x(),
+            at.y(),
+            at.z(),
+            h.ride.measure.speed.0,
+        ))
+    }
+
+    /// The player in it, for whatever is put where they are: on the ground under the helicopter,
+    /// upright, along its heading flattened, stopped; its own place with no ground under it.
+    pub fn spot(&self, world: &mut dyn World) -> Spot {
+        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+        let Some((at, forward)) = self.place() else {
+            let bay = self.bay.unwrap_or(Spawn { at: Vf::new(0.0, 0.0, 0.0, 1.0), facing: Vf::new(0.0, 0.0, 1.0, 0.0) });
+            return Spot::still(bay.at, bay.facing, up);
+        };
+        let forward = level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        match ground_under(world, at) {
+            Some(g) => Spot::still(Vf::new(at.x(), g, at.z(), 1.0), forward, up),
+            None => Spot::still(at, forward, up),
+        }
+    }
+}
+
+/// A machine the switch spawns on the player and takes away again: a car or the helicopter.
+fn detour(kind: Kind) -> bool {
+    kind.car().is_some() || kind == Kind::Kiowa
+}
+
+impl Lot {
+    /// Player `copy`'s helicopter: the disc's ([`Lot::kiowa`]) in their livery, parked in their bay.
+    pub fn heli_for(&self, copy: usize) -> Option<KiowaRide> {
+        let mut heli = self.kiowa.clone()?;
+        heli.livery = livery(copy);
+        heli.bay = self.bay(Machine::Helicopter, copy).map(|b| b.spawn);
+        Some(heli)
+    }
+}
+
+impl Garage {
+    /// The helicopter up, if it is.
+    pub fn heli_up(&self) -> Option<&KiowaRide> {
+        self.heli.as_ref().filter(|_| self.up == Kind::Kiowa)
     }
 }
 
@@ -2098,6 +2463,7 @@ mod tests {
     fn the_words() {
         assert_eq!(Kind::parse("bike"), Ok(Kind::Bike));
         assert_eq!(Kind::parse("Biplane"), Ok(Kind::Biplane));
-        assert!(Kind::parse("helicopter").is_err());
+        assert_eq!(Kind::parse("helicopter"), Ok(Kind::Kiowa));
+        assert!(Kind::parse("tank").is_err());
     }
 }

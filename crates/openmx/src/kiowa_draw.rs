@@ -3,9 +3,10 @@
 //! once wrecked) hung on the posed blade nodes, for the GPU. The pose and the parts are
 //! `game_render::kiowa`'s; this is where they meet the draw.
 //!
-//! Nothing flies the Kiowa yet (P216, with S220b's tick): what is drawn is the helicopter standing
-//! where the track's `machine.txt` parks it, see-through like every bay ([`crate::vehicle::BAY_ALPHA`])
-//! and on the GPU alone, as the plane's bays are, its rotor at rest.
+//! It is drawn standing where the track's `machine.txt` parks it, see-through like every bay
+//! ([`crate::vehicle::BAY_ALPHA`]), its rotor at rest; and since P216, solid while a player flies it,
+//! at its measure's matrix with the flight's rotor angle, the blades gone and the tail bent once it
+//! is wrecked. Both on the GPU alone.
 
 use game_render::gpu::Actor;
 use game_render::kiowa::{Kiowa, Rotor};

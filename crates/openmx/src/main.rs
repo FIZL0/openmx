@@ -351,6 +351,9 @@ const PLANE_CAMERA: &str = "Flight Cam 1";
 /// in each freeride track's second archive (`free06_2.res`'s `appstart\biplanecpresets.ini`), not in
 /// `appstart.res`.
 const PLANE_PRESETS: &str = "biplanecpresets.ini";
+/// The helicopter's camera preset a flight starts on (P216): the first of
+/// [`game_render::kiowa::PRESETS`]'s four, as [`PLANE_CAMERA`] is the plane's first.
+const HELI_CAMERA: &str = "Aero Cam 1";
 
 /// The archive a ride on a track without the plane's own camera presets and particle list reads them
 /// from (P113): a freeride track's second archive carries both. The particle sheet stays the track's.
@@ -636,6 +639,10 @@ fn switch_machine(seat: &mut Seat, rig: &mut Rig, to: Kind, place: &mut dyn sim_
     if let Some(said) = seat.garage.car_up().and_then(vehicle::CarRide::report) {
         println!("{said}");
     }
+    // And the helicopter (P216).
+    if let Some(said) = seat.garage.heli_up().and_then(vehicle::KiowaRide::report) {
+        println!("{said}");
+    }
     match seat.garage.switch(to, &mut seat.sim, place) {
         Ok(up) => {
             took(rig, up);
@@ -838,6 +845,8 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
         chassis,
         camera: Race { cam: p.cameras.0.clone() },
         plane_camera: p.cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
+        // Online rides no helicopter (P216).
+        heli_camera: None,
         wreck_camera: chase::WreckCamera::new(false),
         framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
         camera_presets: Default::default(),
@@ -1068,6 +1077,9 @@ struct Rig {
     chassis: Option<Chassis>,
     camera: Race,
     plane_camera: Option<Race>,
+    /// The helicopter's own camera (P216), on `HeloCPresets.ini`, while this player has one. It
+    /// shares the plane's framing, field-of-view ease and look-back slots.
+    heli_camera: Option<Race>,
     /// The camera the screen switches to while this player's rider is down (V31).
     wreck_camera: chase::WreckCamera,
     /// How this player's two follow cameras' presets are framed now (P82), the bike's and the
@@ -1107,15 +1119,15 @@ impl Rig {
     /// The camera the machine `up` is followed by: the plane's own, if this player has one, or the
     /// bike's.
     fn follow(&self, up: Kind) -> &Race {
-        match (up, &self.plane_camera) {
-            (Kind::Biplane, Some(cam)) => cam,
+        match (up, &self.plane_camera, &self.heli_camera) {
+            (Kind::Biplane, Some(cam), _) | (Kind::Kiowa, _, Some(cam)) => cam,
             _ => &self.camera,
         }
     }
 
     fn follow_mut(&mut self, up: Kind) -> &mut Race {
-        match (up, &mut self.plane_camera) {
-            (Kind::Biplane, Some(cam)) => cam,
+        match (up, &mut self.plane_camera, &mut self.heli_camera) {
+            (Kind::Biplane, Some(cam), _) | (Kind::Kiowa, _, Some(cam)) => cam,
             _ => &mut self.camera,
         }
     }
@@ -4028,6 +4040,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         names.into_iter().filter_map(|n| Some((n.clone(), res.read(&res.find_suffix(&n)?.name).ok()?))).collect()
     });
     lot.cars = vehicle::car_kit(&mut |name: &str| car_files.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()));
+    // And the helicopter's (P216): `kiowa.phy`, which every player's garage flies a copy of.
+    lot.kiowa = machine_res.as_ref().and_then(|res| {
+        let bytes = res.read(&res.find_suffix(game_sim::kiowa::KIOWA_PHY)?.name).ok()?;
+        Some(vehicle::KiowaRide::new(&bytes, 0, None))
+    });
     // What it reads its own (P127): it outlives the load's thread.
     let flight_for = {
         let (plane_phy, plane_rays, bike_box, t) = (plane_phy.clone(), plane_rays.clone(), bike_box.clone(), place.terrain.clone());
@@ -4099,6 +4116,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     let mut garage = Garage::new(args.vehicle, plane)?;
     garage.cars = lot.cars_for(0);
+    garage.heli = lot.heli_for(0);
     if !garage.cars.is_empty() {
         let names: Vec<&str> = garage.cars.iter().map(|c| c.machine.section()).collect();
         println!("cars: {} (switch from the pause; not drawn yet)", names.join(", ").to_ascii_lowercase());
@@ -4139,12 +4157,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     // The Kiowa's skins and rotor parts (V113), where the lot parks one: one skin a livery, as the
     // plane's, out of the machines' archive. The frame finds them in `assets` ([`Kiowa::found`]).
-    if let (Some(res), true) = (machine_res.as_ref(), lot.of(Machine::Helicopter).next().is_some()) {
+    if let (Some(res), true) = (machine_res.as_ref(), lot.of(Machine::Helicopter).next().is_some() || garage.heli.is_some()) {
         let liveries = args.players.clamp(1, vehicle::LIVERIES);
         let loaded = (0..liveries).filter(|&l| Kiowa::load(&mut assets, std::slice::from_ref(res), l).is_some()).count();
         let presets = archives.iter().find_map(|a| a.read_suffix(game_render::kiowa::PRESETS).ok());
         let cameras = presets.map_or(0, |b| Preset::read_bytes(&b, "").len());
-        println!("kiowa: {loaded} of {liveries} skins loaded, parked and not flown; {cameras} camera presets in {}", game_render::kiowa::PRESETS);
+        let flown = if garage.heli.is_some() { "flown from the pause or its bay" } else { "parked, no kiowa.phy to fly" };
+        println!("kiowa: {loaded} of {liveries} skins loaded, {flown}; {cameras} camera presets in {}", game_render::kiowa::PRESETS);
     }
     // Its model and both prop cones, out of the machines' archive, where its textures are too (V21):
     // one model a livery the lot parks (P87), the first copy's plain and the second's the disc's
@@ -4724,6 +4743,27 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     // The Kiowa's skins the load put in `assets` (V113), one a livery.
     let kiowa_drawn: Vec<Kiowa> = (0..vehicle::LIVERIES).map_while(|l| Kiowa::found(&assets, l)).collect();
+    // The helicopter's own camera (P216), built as the plane's is, on `HeloCPresets.ini` (in a
+    // freeride track's second archive, or free06's) and starting on its first preset.
+    let heli_camera: Option<Race> = garage.heli.as_ref().and_then(|_| {
+        let kit = match archives.iter().any(|a| a.find_suffix(game_render::kiowa::PRESETS).is_some()) {
+            true => None,
+            false => member_ending(&disc, PLANE_KIT_ARCHIVE).ok().and_then(|name| disc.res(&name).ok()),
+        };
+        let bytes = archives.iter().chain(&kit).find_map(|a| a.read_suffix(game_render::kiowa::PRESETS).ok())?;
+        let presets = layout_presets(&bytes, layout, Display::Television, game_render::kiowa::PRESETS);
+        let mut cam = Race::new(presets, F(REVERSE_SPEED));
+        cam.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
+        if let Some(start) = Preset::find(&cam.cam.presets, HELI_CAMERA) {
+            cam.cam.set_preset(start);
+        }
+        if !cam.cam.presets.is_empty() {
+            println!("kiowa: its camera starts on {}", cam.cam.preset().name);
+        }
+        cam.cam.snap = true;
+        cam.cam.speed_reference = F(SPEED_REFERENCE);
+        Some(cam)
+    });
     // Where the first seat's path cars stood before the last tick (S81), which the picture blends from.
     let mut cars_before: Vec<game_sim::math::Mat4> = Vec::new();
     // The knockable props' bodies (S131), each by its scene model's place in the picture's list (found
@@ -5122,6 +5162,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 cam.cam.ceiling = mods.plane_eye_ceiling(i, Race::ceiling_for_fog(F(look.fog_far)));
                 cam
             }),
+            heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             camera_presets: Default::default(),
@@ -5155,6 +5196,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             chassis,
             camera,
             plane_camera,
+            heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             camera_presets: Default::default(),
@@ -5716,6 +5758,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             garage: {
                 let mut garage = Garage::new(up, plane)?;
                 garage.cars = lot.cars_for(i + 1);
+                garage.heli = lot.heli_for(i + 1);
                 garage
             },
             riding: front.as_ref().is_none_or(|f| !f.menu.paused(i + 1)),
@@ -5822,6 +5865,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             for (k, kind) in [Kind::Buggy, Kind::Monster, Kind::Baja].into_iter().enumerate() {
                 front.menu.cars[i][k] = seat.garage.machines().contains(&kind);
             }
+            front.menu.heli[i] = seat.garage.heli.is_some();
         }
     }
     let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::at(RIDE_HZ)).collect();
@@ -6761,6 +6805,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         let kept = saved_markers::Kept::new(&args.track, &profile, bike, &sim.markers);
                         let mut garage = Garage::new(Kind::Bike, lot.plane(i, flight_for(i)))?;
                         garage.cars = lot.cars_for(i);
+                        garage.heli = lot.heli_for(i);
                         let body = match &rider_member {
                             Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
                             None => None,
@@ -6801,6 +6846,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             chassis,
                             camera: Race { cam: join_cameras.0.clone() },
                             plane_camera: join_cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
+                            heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
                             wreck_camera: chase::WreckCamera::new(false),
                             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
                             camera_presets: Default::default(),
@@ -7675,8 +7721,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // the plane's, on its own file's.
             // With the field of view's ease over a framing change (P119), which is the camera's own.
             let flying = seat.garage.up == Kind::Biplane && rig.plane_camera.is_some();
-            let (follow, fov_ease, look_back) = match (seat.garage.up, &mut rig.plane_camera) {
-                (Kind::Biplane, Some(cam)) => (cam, &mut rig.fov_ease.1, &mut rig.look_back.1),
+            let (follow, fov_ease, look_back) = match (seat.garage.up, &mut rig.plane_camera, &mut rig.heli_camera) {
+                (Kind::Biplane, Some(cam), _) | (Kind::Kiowa, _, Some(cam)) => (cam, &mut rig.fov_ease.1, &mut rig.look_back.1),
                 _ => (&mut rig.camera, &mut rig.fov_ease.0, &mut rig.look_back.0),
             };
             // The original's plane reset (the chord, a wreck's recovery) snaps the plane's camera onto
@@ -7733,7 +7779,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     rig.ride_hud.note_camera(Instant::now(), &follow.cam.preset().name);
                     // The seat's next ride on this machine starts on it (P163).
                     let machine = if flying { menu::Machine::Biplane } else { menu::Machine::Bike };
-                    if let Some(f) = front.as_deref_mut()
+                    if let Some(f) = front.as_deref_mut().filter(|_| seat.garage.up != Kind::Kiowa)
                         && f.menu.camera_left_on(i.min(menu::SEATS_MAX - 1), machine, &follow.cam.preset().name)
                     {
                         f.save();
@@ -8083,11 +8129,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             .collect();
         // The bays shown (P103), drawn below and marked on the radar.
         let bays = vehicle::bays_shown(&lot, front.as_deref().is_none_or(|f| f.menu.settings.bays));
-        // And the Kiowas parked (V113), drawn as bays are though nothing takes one yet (P216).
-        let kiowa_bays: Vec<vehicle::Bay> = match front.as_deref().is_none_or(|f| f.menu.settings.bays) {
-            true => lot.of(Machine::Helicopter).copied().collect(),
-            false => Vec::new(),
-        };
+        // And the Kiowas parked (V113), bays since P216.
+        let kiowa_bays: Vec<vehicle::Bay> = bays.iter().filter(|b| b.machine == Machine::Helicopter).copied().collect();
         // The radar's other icons, each view its own (P92).
         hud_art.radar = (0..world.seats.len()).map(|v| radar_blips(&world.seats, &bays, v, &radar_zones, picks[v])).collect();
         // And the switch pop-up, each view its own player's (P103), as the input stage's take reads it.
@@ -8399,7 +8442,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
             }
             // And every bay's, see-through where it is parked (P103), the put-back ghost's path.
-            for bay in bays.iter().filter(|_| !args.overview) {
+            for bay in bays.iter().filter(|b| !args.overview && b.machine == Machine::Biplane) {
                 let plane = vehicle::bay_plane(bay);
                 let Some(drawn) = plane_drawn.get(plane.livery).or(plane_drawn.first()) else { continue };
                 actors.extend(plane_draw::actors(drawn, &assets, &plane, plane_at(&plane), vehicle::BAY_ALPHA, &mut gpu_poses));
@@ -8409,6 +8452,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let Some(drawn) = kiowa_drawn.get(bay.livery).or(kiowa_drawn.first()) else { continue };
                 let at = M4::placement(vector(bay.spawn.at), vector(bay.spawn.facing), v3(0.0, 1.0, 0.0));
                 actors.extend(kiowa_draw::actors(drawn, &assets, &Rotor::WHOLE, at, vehicle::BAY_ALPHA, &mut gpu_poses));
+            }
+            // And every player's helicopter while it is flown (P216), solid, in its own livery, at
+            // the measure's matrix (where the original draws it), its rotor at the flight's angle.
+            for seat in world.seats.iter().filter(|_| !args.overview) {
+                let Some(heli) = seat.garage.heli_up() else { continue };
+                let Some(m) = heli.matrix() else { continue };
+                let Some(drawn) = kiowa_drawn.get(heli.livery).or(kiowa_drawn.first()) else { continue };
+                let (angle, blades, wrecked) = heli.rotor();
+                let row = |r: Vf, w: f32| [r.x(), r.y(), r.z(), w];
+                let at = M4([row(m.0[0], 0.0), row(m.0[1], 0.0), row(m.0[2], 0.0), row(m.0[3], 1.0)]);
+                let alpha = vehicle::shown_alpha(1.0, seat.paused);
+                actors.extend(kiowa_draw::actors(drawn, &assets, &Rotor { angle, blades, wrecked }, at, alpha, &mut gpu_poses));
             }
             for (k, (model, at)) in traffic_at.iter().enumerate() {
                 let pose = traffic_pose.get(k).and_then(|p| p.as_ref()).map(|(p, _)| {
@@ -9076,6 +9131,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         // And the first player's car, if they end the ride in one (S149e).
         if let Some(said) = world.seats[0].garage.car_up().and_then(vehicle::CarRide::report) {
+            println!("{said}");
+        }
+        // Or the helicopter (P216).
+        if let Some(said) = world.seats[0].garage.heli_up().and_then(vehicle::KiowaRide::report) {
             println!("{said}");
         }
     }

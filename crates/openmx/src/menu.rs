@@ -1275,6 +1275,9 @@ pub enum Machine {
     Buggy,
     Monster,
     Baja,
+    /// The Kiowa (P216), which the switch row offers past the cars. It has no camera settings of its
+    /// own in the cameras' screens, so it frames as the bike there.
+    Helicopter,
 }
 
 impl Machine {
@@ -1282,7 +1285,7 @@ impl Machine {
 
     /// Every machine the pause can switch to, in the switch row's order: [`Machine::ALL`], then the
     /// cars.
-    pub const SWITCH: [Machine; 5] = [Machine::Bike, Machine::Biplane, Machine::Buggy, Machine::Monster, Machine::Baja];
+    pub const SWITCH: [Machine; 6] = [Machine::Bike, Machine::Biplane, Machine::Buggy, Machine::Monster, Machine::Baja, Machine::Helicopter];
 
     /// The file's word, which is also `--vehicle`'s.
     pub fn word(self) -> &'static str {
@@ -1292,6 +1295,7 @@ impl Machine {
             Machine::Buggy => "buggy",
             Machine::Monster => "monster",
             Machine::Baja => "baja",
+            Machine::Helicopter => "helicopter",
         }
     }
 
@@ -1306,13 +1310,14 @@ impl Machine {
             Machine::Buggy => "Buggy",
             Machine::Monster => "Monster Truck",
             Machine::Baja => "Baja",
+            Machine::Helicopter => "Helicopter",
         }
     }
 
     pub fn other(self) -> Machine {
         match self {
             Machine::Bike => Machine::Biplane,
-            Machine::Biplane | Machine::Buggy | Machine::Monster | Machine::Baja => Machine::Bike,
+            Machine::Biplane | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter => Machine::Bike,
         }
     }
 }
@@ -2959,6 +2964,8 @@ pub struct Menu {
     pub switchable: [bool; SEATS_MAX],
     /// The cars each player has (S149e): the switch row offers these past the bike and the plane.
     pub cars: [[bool; 3]; SEATS_MAX],
+    /// Each player has a helicopter (P216): the switch row offers it past the cars.
+    pub heli: [bool; SEATS_MAX],
     /// The seat whose Start opened the pause, whose machine its switch row is.
     pauser: usize,
     /// The machine the pause's switch row has picked (P102): left and right step it through the
@@ -3263,6 +3270,7 @@ impl Menu {
             up: [Machine::Bike; SEATS_MAX],
             switchable: [false; SEATS_MAX],
             cars: [[false; 3]; SEATS_MAX],
+            heli: [false; SEATS_MAX],
             pauser: 0,
             switch_pick: None,
             catalogue: Default::default(),
@@ -3969,6 +3977,9 @@ impl Menu {
             false => Machine::ALL.into_iter().filter(|&m| m == Machine::Bike || has).collect(),
         };
         out.extend([Machine::Buggy, Machine::Monster, Machine::Baja].into_iter().zip(cars).filter(|&(m, on)| on && m != up).map(|(m, _)| m));
+        if self.heli.get(seat).copied().unwrap_or(false) && up != Machine::Helicopter {
+            out.push(Machine::Helicopter);
+        }
         out
     }
 
@@ -4143,6 +4154,7 @@ impl Menu {
                     self.up[i] = Machine::Bike;
                     self.switchable[i] = false;
                     self.cars[i] = [false; 3];
+                    self.heli[i] = false;
                 }
                 self.note = Some(format!("Player {} joined the ride.", i + 1));
             }
@@ -4151,6 +4163,7 @@ impl Menu {
                     self.up[k] = self.up.get(k + 1).copied().unwrap_or_default();
                     self.switchable[k] = self.switchable.get(k + 1).copied().unwrap_or(false);
                     self.cars[k] = self.cars.get(k + 1).copied().unwrap_or_default();
+                    self.heli[k] = self.heli.get(k + 1).copied().unwrap_or(false);
                 }
                 // each later rider's own pause (P84) moves up a seat with them
                 let gone = i.max(1);

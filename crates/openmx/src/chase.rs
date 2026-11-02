@@ -25,6 +25,9 @@ pub fn ridden(garage: &Garage, ride: &Ride) -> Ridden {
     if let Some(m) = garage.car_up().and_then(|c| c.driven.as_ref()) {
         return driven(m);
     }
+    if let Some(h) = garage.heli_up().and_then(|k| k.flown.as_ref()) {
+        return heli(h);
+    }
     match (garage.up, &garage.plane) {
         // The plane: its flight's block (V29), or a parked plane's origin when there is no flight.
         (Kind::Biplane, Some(plane)) => match &plane.flight {
@@ -64,6 +67,26 @@ pub fn flown(f: &Flight) -> Ridden {
         },
         airborne: !m.grounded,
         speed: if m.airspeed < F::ZERO { F::ZERO } else { m.airspeed },
+    }
+}
+
+/// The helicopter's target block (P216), filled the way the plane's is: the body's centre of mass
+/// where the frame's last substep began, the measure's rows, the body's velocity, the world yaw rate,
+/// "off the ground" and the measure's speed. Which words the original's helicopter writes there was
+/// not read.
+pub fn heli(h: &crate::vehicle::Heli) -> Ridden {
+    let one = |v: Vf| Vf::new(v.x(), v.y(), v.z(), 1.0);
+    let m = &h.ride.measure;
+    Ridden {
+        target: Target {
+            body_point: one(h.ride.body.last_position),
+            forward: one(m.forward),
+            up: one(m.up),
+            vel: one(h.ride.body.velocity),
+            lean: F(m.world_rates.y()),
+        },
+        airborne: !h.touching,
+        speed: m.speed,
     }
 }
 
