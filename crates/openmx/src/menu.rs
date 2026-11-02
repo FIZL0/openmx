@@ -2875,6 +2875,9 @@ pub struct Menu {
     /// pick's second filter is by. A mod not in it is Other ([`Menu::track_category`]). Set with
     /// [`Menu::set_mod_categories`].
     mod_categories: Vec<(String, String)>,
+    /// The track pick's lists made from the three above and the filters (P254), kept until they
+    /// change: [`Menu::lists`].
+    lists: ListCache,
     /// Open screens, the one shown last. Empty is a ride with nothing over it.
     stack: Vec<Screen>,
     /// Each screen's row, in [`Screen::ALL`]'s order.
@@ -2923,8 +2926,9 @@ pub struct Menu {
     /// The machine the pause's switch row has picked (P102): left and right step it through the
     /// pauser's [`Menu::choices`], and OK switches to it. `None` until a step, which is the first.
     switch_pick: Option<Machine>,
-    /// What the garage offers, off the disc; empty until [`Menu::with_garage`] gives it one.
-    pub catalogue: Catalogue,
+    /// What the garage offers, off the disc; empty until [`Menu::with_garage`] gives it one. Shared,
+    /// so a copy of the menu ([`Menu::look`], each frame) does not copy every rider (P254).
+    pub catalogue: std::sync::Arc<Catalogue>,
     /// Every seat's pick, as `garage.txt` keeps them.
     pub picks: Picks,
     /// The garage's seats while it is open, one [`Garage`] each.
@@ -3221,7 +3225,8 @@ impl Menu {
             switchable: [false; SEATS_MAX],
             pauser: 0,
             switch_pick: None,
-            catalogue: Catalogue::default(),
+            catalogue: Default::default(),
+            lists: ListCache::default(),
             picks: Picks::default(),
             garages: Vec::new(),
             seated: 1,
@@ -3421,7 +3426,7 @@ impl Menu {
 
     /// The garage's catalogue and the picks it starts from.
     pub fn with_garage(mut self, catalogue: Catalogue, picks: Picks) -> Menu {
-        self.catalogue = catalogue;
+        self.catalogue = std::sync::Arc::new(catalogue);
         self.picks = picks;
         self
     }
@@ -5411,49 +5416,170 @@ const TEXTURES: [&str; 4] = ["background", "frontend_background_radial", "mainme
 
 // ---- the track mods' place in the pick (MD2) -------------------------------------------------------
 
+/// The track pick's lists (P254): which mods it shows, each track's game and category, the filters
+/// and the lit filters' tracks. Made from [`Menu`]'s mod lists and the settings in [`ListsKey`], and
+/// kept until one of them changes, so a menu frame reads them instead of making them again (on the
+/// Deck that was most of the front end's CPU).
+#[derive(Debug, PartialEq)]
+pub(crate) struct Lists {
+    key: ListsKey,
+    /// The shown mods' places in [`Menu::mod_tracks`], in the pick's order after [`DISC_PICK`].
+    shown: Vec<usize>,
+    /// Each track's category ([`Menu::track_category`]), by its place in the pick.
+    categories_of: Vec<String>,
+    groups: Vec<(String, Range<usize>)>,
+    filter_group: usize,
+    categories: Vec<String>,
+    category_group: usize,
+    list: Vec<usize>,
+}
+
+/// The settings [`Lists`] read besides the mod lists, whose setters drop the lists themselves.
+#[derive(Clone, Debug, PartialEq)]
+struct ListsKey {
+    mods_off: Vec<String>,
+    track_filter: String,
+    track_category: String,
+}
+
+/// [`Lists`] kept, and how many times they were made (P254). Equal to any other, as it is only
+/// what the rest of the menu says, and cloned with it.
+#[derive(Debug, Default)]
+struct ListCache {
+    lists: std::sync::Mutex<Option<std::sync::Arc<Lists>>>,
+    builds: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for ListCache {
+    fn clone(&self) -> ListCache {
+        let lists = self.lists.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        ListCache { lists: std::sync::Mutex::new(lists), builds: std::sync::atomic::AtomicU64::new(self.builds.load(std::sync::atomic::Ordering::Relaxed)) }
+    }
+}
+
+impl PartialEq for ListCache {
+    fn eq(&self, _: &ListCache) -> bool {
+        true
+    }
+}
+
+impl ListCache {
+    fn clear(&mut self) {
+        *self.lists.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 impl Menu {
-    /// The tracks the pick lists: the disc's [`TRACKS`] and [`DISC_WORLDS`], then the mods'.
-    pub fn track_count(&self) -> usize {
-        DISC_PICK + self.shown_mods().count()
+    /// The track pick's [`Lists`], made again only where the mods or the filters changed since.
+    pub(crate) fn lists(&self) -> std::sync::Arc<Lists> {
+        let mut kept = self.lists.lists.lock().unwrap_or_else(|e| e.into_inner());
+        let s = &self.settings;
+        if let Some(l) = kept.as_ref().filter(|l| l.key.mods_off == s.mods_off && l.key.track_filter == s.track_filter && l.key.track_category == s.track_category) {
+            return l.clone();
+        }
+        let made = std::sync::Arc::new(self.make_lists());
+        self.lists.builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *kept = Some(made.clone());
+        made
     }
 
-    /// The mod tracks the pick lists: the mods' less the packs switched off (P118), and less a world
-    /// installed under a disc world's id, which the disc world's row rides (P232).
-    fn shown_mods(&self) -> impl Iterator<Item = &(String, String)> {
-        self.mod_tracks
-            .iter()
-            .filter(|(id, _)| !self.settings.mods_off.iter().any(|p| p == pack_of(id)) && !DISC_WORLDS.iter().any(|w| w.0 == id))
+    /// How many times the track pick's lists were made (P254): a menu standing still makes none.
+    /// The tests' count.
+    #[allow(dead_code)]
+    pub fn list_builds(&self) -> u64 {
+        self.lists.builds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn make_lists(&self) -> Lists {
+        let s = &self.settings;
+        let key = ListsKey { mods_off: s.mods_off.clone(), track_filter: s.track_filter.clone(), track_category: s.track_category.clone() };
+        let shown: Vec<usize> = (self.mod_tracks.iter().enumerate())
+            .filter(|(_, (id, _))| !s.mods_off.iter().any(|p| p == pack_of(id)) && !DISC_WORLDS.iter().any(|w| w.0 == id))
+            .map(|(i, _)| i)
+            .collect();
+        let count = DISC_PICK + shown.len();
+        let id_at = |at: usize| match TRACKS.get(at) {
+            Some(&(id, _)) => id,
+            None if at < DISC_PICK => DISC_WORLDS[at - TRACKS.len()].0,
+            None => self.mod_tracks[shown[at - DISC_PICK]].0.as_str(),
+        };
+        let games: Vec<String> = (0..count).map(|at| self.track_game(id_at(at))).collect();
+        let categories_of: Vec<String> = (0..count).map(|at| self.track_category(id_at(at))).collect();
+        // The filters by source game (MD11).
+        let mut groups = vec![(DISC_GAME.to_string(), 0..DISC_PICK)];
+        for at in DISC_PICK..count {
+            match groups.last_mut() {
+                Some((name, r)) if *name == games[at] => r.end = at + 1,
+                _ => groups.push((games[at].clone(), at..at + 1)),
+            }
+        }
+        if count > DISC_PICK {
+            groups.insert(0, (ALL_GAMES.to_string(), 0..count));
+        }
+        let want = if s.track_filter.is_empty() { ALL_GAMES } else { s.track_filter.as_str() };
+        let filter_group = groups.iter().position(|(name, _)| name == want).unwrap_or(0);
+        // The categories within the lit game's tracks (MD66).
+        let r = groups[filter_group].1.clone();
+        let categories = if count <= DISC_PICK {
+            vec![ALL_CATEGORIES.to_string()]
+        } else {
+            let mut seen: Vec<String> = Vec::new();
+            for i in r.clone() {
+                if !seen.contains(&categories_of[i]) {
+                    seen.push(categories_of[i].clone());
+                }
+            }
+            seen.sort_by_cached_key(|c| {
+                let known = CATEGORIES.iter().position(|k| k == c).unwrap_or(CATEGORIES.len());
+                (c == OTHER, known, c.clone())
+            });
+            if seen.len() < 2 {
+                vec![ALL_CATEGORIES.to_string()]
+            } else {
+                seen.insert(0, ALL_CATEGORIES.to_string());
+                seen
+            }
+        };
+        let category_group = if s.track_category.is_empty() { 0 } else { categories.iter().position(|c| *c == s.track_category).unwrap_or(0) };
+        let list = match category_group {
+            0 => r.collect(),
+            lit => r.filter(|&i| categories_of[i] == categories[lit]).collect(),
+        };
+        Lists { key, shown, categories_of, groups, filter_group, categories, category_group, list }
+    }
+
+    /// The tracks the pick lists: the disc's [`TRACKS`] and [`DISC_WORLDS`], then the mods'.
+    pub fn track_count(&self) -> usize {
+        DISC_PICK + self.lists().shown.len()
     }
 
     /// The pick's track `at`, `(id, name)`: a disc track's archive and town, a disc world's, or a
-    /// mod's id and name.
+    /// mod's id and name. The mod tracks the pick lists are the mods' less the packs switched off
+    /// (P118), and less a world installed under a disc world's id, which the disc world's row rides
+    /// (P232).
     pub fn track_at(&self, at: usize) -> (&str, &str) {
         match TRACKS.get(at) {
             Some(&(id, name)) => (id, name),
             None if at < DISC_PICK => DISC_WORLDS[at - TRACKS.len()],
             None => self
-                .shown_mods()
-                .nth(at - DISC_PICK)
-                .map_or(TRACKS[0], |(id, name)| (id.as_str(), name.as_str())),
+                .lists()
+                .shown
+                .get(at - DISC_PICK)
+                .map_or(TRACKS[0], |&i| (self.mod_tracks[i].0.as_str(), self.mod_tracks[i].1.as_str())),
         }
     }
 
     /// The pick's index of [`Settings::track`] in the lit filters, their first track where they do
     /// not list it.
     pub fn track_index(&self) -> usize {
-        let list = self.track_list();
-        list.iter().copied().find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(list[0])
+        let lists = self.lists();
+        lists.list.iter().copied().find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(lists.list[0])
     }
 
     /// The tracks the pick lists now (MD66), in its order: the lit game filter's, less those not
     /// in the lit category. Never empty, since a category the game has none of is All Categories.
     pub fn track_list(&self) -> Vec<usize> {
-        let r = self.track_groups()[self.track_filter_group()].1.clone();
-        let cats = self.track_categories();
-        match self.track_category_group() {
-            0 => r.collect(),
-            lit => r.filter(|&i| self.track_category(self.track_at(i).0) == cats[lit]).collect(),
-        }
+        self.lists().list.clone()
     }
 
     /// The pick's filters by category (MD66) within the lit game's tracks, which L1 and R1 step
@@ -5462,36 +5588,13 @@ impl Menu {
     /// the game's tracks are all of one, or where no mod is listed (the disc's pick has no
     /// filters, as it has no game filter).
     pub fn track_categories(&self) -> Vec<String> {
-        if self.track_count() <= DISC_PICK {
-            return vec![ALL_CATEGORIES.to_string()];
-        }
-        let r = self.track_groups()[self.track_filter_group()].1.clone();
-        let mut seen: Vec<String> = Vec::new();
-        for i in r {
-            let c = self.track_category(self.track_at(i).0);
-            if !seen.contains(&c) {
-                seen.push(c);
-            }
-        }
-        seen.sort_by_cached_key(|c| {
-            let known = CATEGORIES.iter().position(|k| k == c).unwrap_or(CATEGORIES.len());
-            (c == OTHER, known, c.clone())
-        });
-        if seen.len() < 2 {
-            return vec![ALL_CATEGORIES.to_string()];
-        }
-        seen.insert(0, ALL_CATEGORIES.to_string());
-        seen
+        self.lists().categories.clone()
     }
 
     /// Which of [`Menu::track_categories`] [`Settings::track_category`] is, All Categories (the
     /// first) where the lit game has none of it.
     pub fn track_category_group(&self) -> usize {
-        let want = &self.settings.track_category;
-        if want.is_empty() {
-            return 0;
-        }
-        self.track_categories().iter().position(|c| c == want).unwrap_or(0)
+        self.lists().category_group
     }
 
     /// The category a track of the pick is in (MD66): the disc's towns are Free Roam (MX
@@ -5513,6 +5616,7 @@ impl Menu {
     /// Each mod track's category (MD66), `(id, category)`, as its `mod.json` says.
     pub fn set_mod_categories(&mut self, categories: Vec<(String, String)>) {
         self.mod_categories = categories;
+        self.lists.clear();
         self.cursor[Screen::Tracks.index()] = self.track_index();
     }
 
@@ -5522,37 +5626,24 @@ impl Menu {
     /// maps) right after (user, 2026-10-23), then each other source game that has a track, by name.
     /// With none, the disc's alone.
     pub fn track_groups(&self) -> Vec<(String, Range<usize>)> {
-        let mut out = vec![(DISC_GAME.to_string(), 0..DISC_PICK)];
-        for (i, (id, _)) in self.shown_mods().enumerate() {
-            let at = DISC_PICK + i;
-            let game = self.track_game(id);
-            match out.last_mut() {
-                Some((name, r)) if *name == game => r.end = at + 1,
-                _ => out.push((game, at..at + 1)),
-            }
-        }
-        if self.track_count() > DISC_PICK {
-            out.insert(0, (ALL_GAMES.to_string(), 0..self.track_count()));
-        }
-        out
+        self.lists().groups.clone()
     }
 
     /// Which of [`Menu::track_groups`] the pick's track `at` is in: the lit filter where it has it,
     /// else the first that does.
     pub fn track_group(&self, at: usize) -> usize {
-        let groups = self.track_groups();
-        let lit = self.track_filter_group();
-        if groups[lit].1.contains(&at) {
+        let lists = self.lists();
+        let lit = lists.filter_group;
+        if lists.groups[lit].1.contains(&at) {
             return lit;
         }
-        groups.iter().position(|(_, r)| r.contains(&at)).unwrap_or(0)
+        lists.groups.iter().position(|(_, r)| r.contains(&at)).unwrap_or(0)
     }
 
     /// Which of [`Menu::track_groups`] [`Settings::track_filter`] is, All Games (the first) where the
     /// pick does not list its game.
     pub fn track_filter_group(&self) -> usize {
-        let want = if self.settings.track_filter.is_empty() { ALL_GAMES } else { self.settings.track_filter.as_str() };
-        self.track_groups().iter().position(|(name, _)| name == want).unwrap_or(0)
+        self.lists().filter_group
     }
 
     /// The game a track of the pick is from (MD11): MX Unleashed for the disc's and its worlds,
@@ -5614,6 +5705,7 @@ impl Menu {
             (if game == DISC_GAME { 0 } else if pack_of(id) == WORLDS { 1 } else { 2 }, game)
         });
         self.mod_tracks = tracks;
+        self.lists.clear();
         self.cursor[Screen::Tracks.index()] = self.track_index();
     }
 }

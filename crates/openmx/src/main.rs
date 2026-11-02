@@ -2888,7 +2888,6 @@ async fn front_end(args: Args) -> Result<(), String> {
         // On the GPU the menu is sprites over its pictures, uploaded once (V30); the CPU draws it
         // for the X window, and for a shot.
         let shooting = shot.is_some() && shown >= args.shot_frame;
-        let look = (shell.front.menu.look(), frame.width, frame.height);
         // The Garage's pick, dressed again when it changes, and how far round its stand is (P213).
         let stage = garage_view::rect(&shell.front.menu, (frame.width, frame.height));
         if let Some(pick) = garage_view::shown_pick(&shell.front.menu) {
@@ -2912,7 +2911,9 @@ async fn front_end(args: Args) -> Result<(), String> {
             shown_look = None;
         } else {
             // Drawn again only when it looks different (V30): at 4K a menu is most of a tenth of a
-            // second to draw and send. The Garage's stand turns under it every frame.
+            // second to draw and send. The Garage's stand turns under it every frame. The GPU's path
+            // never compares, so it never makes the copy (P254).
+            let look = (shell.front.menu.look(), frame.width, frame.height);
             let fresh = shown_look.as_ref() != Some(&look);
             if fresh {
                 frame.color.fill(0);

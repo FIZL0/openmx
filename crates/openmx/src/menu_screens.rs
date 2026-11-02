@@ -1353,12 +1353,12 @@ impl Pen<'_> {
         let at = menu.cursor(Screen::Tracks).min(menu.track_count().saturating_sub(1));
         self.strip(3.0, 22.0);
         self.logo(true);
-        let groups = menu.track_groups();
-        let cats = menu.track_categories();
+        // Kept from frame to frame (P254), not made again.
+        let lists = menu.lists();
+        let (groups, cats, list) = (&lists.groups, &lists.categories, &lists.list);
         // The lit filters (MD11, MD66), the cursor on their first track where it is not on one of
         // their own.
-        let group = groups[menu.track_filter_group()].0.clone();
-        let list = menu.track_list();
+        let group = groups[lists.filter_group].0.clone();
         let at = if list.contains(&at) { at } else { list[0] };
         let mut top = if groups.len() > 1 {
             self.category(&group, 3.8, 7.6, 20.4);
@@ -1371,13 +1371,13 @@ impl Pen<'_> {
             8.2 + HEAD_H + ROW_GAP + 0.2
         };
         if cats.len() > 1 {
-            let lit = &cats[menu.track_category_group()];
+            let lit = &cats[lists.category_group];
             let pill_top = if groups.len() > 1 { top - 0.9 } else { top };
             self.filter_pill(lit, 3.8, pill_top, 20.4, true, Some(("L1", "R1")));
             top = pill_top + 3.8;
         }
         let tag_of = |id: &str| menu.track_game(id);
-        self.cards(menu, &list, at, 3.8, 20.4, top, &tag_of);
+        self.cards(menu, list, at, 3.8, 20.4, top, &tag_of);
         let (id, name) = menu.track_at(at);
         let (x, w) = (28.5, 47.0);
         let tag = tag_of(id);

@@ -7666,3 +7666,70 @@ fn save_over_replaces_a_custom_camera_in_place() {
     assert_eq!(menu::load(&dir).0.camera_sets, m.settings.camera_sets);
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// A menu standing still on the track pick makes its lists once (P254): on the Deck the front end
+/// spent most of its CPU making the pick's games, categories and filters again every frame. A mod
+/// installed, or a filter stepped, makes them again, and the pick lists what it should.
+#[test]
+fn a_steady_track_pick_does_not_make_its_lists_again() {
+    let (mut m, mut r) = fresh();
+    m.set_mod_tracks(vec![
+        ("mxvatv_nat01".into(), "Nat 01".into()),
+        ("mxvatv_nat02".into(), "Nat 02".into()),
+        ("world_ultra".into(), "Ultra".into()),
+    ]);
+    m.set_mod_categories(vec![("mxvatv_nat01".into(), "National".into()), ("mxvatv_nat02".into(), "Supercross".into())]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    // The frame the shell draws: the GPU's sprites where the disc is here, else what they read.
+    let art = game_render::Disc::open_configured().ok().and_then(|mut d| menu::Art::load(&mut d).ok());
+    let mut sprites = Vec::new();
+    let mut frame = |m: &mut Menu, r: &mut Reader| {
+        m.step(r.read(&Report::idle()));
+        match &art {
+            Some(art) => {
+                sprites.clear();
+                art.sprites(m, (1280, 800), 0, &mut sprites);
+            }
+            None => {
+                let at = m.cursor(Screen::Tracks);
+                let _ = (m.track_count(), m.track_groups(), m.track_categories(), m.track_list(), m.track_at(at), m.track_index());
+            }
+        }
+    };
+    frame(&mut m, &mut r);
+    let made = m.list_builds();
+    for _ in 0..120 {
+        frame(&mut m, &mut r);
+    }
+    assert_eq!(m.list_builds(), made, "120 frames standing still made the lists again");
+    // A copy of the menu (the CPU path's look) shares them.
+    let look = m.look();
+    let _ = look.track_list();
+    assert_eq!(look.list_builds(), made);
+    // A mod installed is in the pick at once.
+    let n = m.track_count();
+    m.set_mod_tracks(vec![
+        ("mxvatv_nat01".into(), "Nat 01".into()),
+        ("mxvatv_nat02".into(), "Nat 02".into()),
+        ("mxvatv_nat03".into(), "Nat 03".into()),
+        ("world_ultra".into(), "Ultra".into()),
+    ]);
+    frame(&mut m, &mut r);
+    assert_eq!(m.track_count(), n + 1);
+    assert!(m.track_list().iter().any(|&i| m.track_at(i) == ("mxvatv_nat03", "Nat 03")), "{:?}", m.track_list());
+    assert!(m.list_builds() > made);
+    let made = m.list_builds();
+    for _ in 0..30 {
+        frame(&mut m, &mut r);
+    }
+    assert_eq!(m.list_builds(), made);
+    // A category stepped (R1) lists its tracks alone; a pack switched off leaves.
+    m.settings.track_filter = "MX vs. ATV Unleashed".into();
+    assert_eq!(m.track_categories(), ["All Categories", "Supercross", "National", "Other"]);
+    m.settings.track_category = "National".into();
+    let ids: Vec<&str> = m.track_list().into_iter().map(|i| m.track_at(i).0).collect();
+    assert_eq!(ids, ["mxvatv_nat01"]);
+    m.settings.mods_off = vec!["mxvatv".into()];
+    assert_eq!(m.track_count(), menu::DISC_PICK + 1, "the world alone after the disc's");
+}

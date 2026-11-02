@@ -19,7 +19,7 @@ use ab_glyph::{Font as _, FontRef, GlyphId, OutlineCurve, VariableFont as _};
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Frame, Texture};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The menus' face, in the crate (OFL: `assets/fonts/OFL.txt`): Saira's variable font, weight and
 /// width axes.
@@ -75,7 +75,20 @@ pub struct Type {
     /// The ascent and descent, in ems, ExtraBold's (both faces share them).
     pub ascent: f32,
     pub descent: f32,
+    /// Each face's strings laid out once (P254): a menu says the same labels every frame.
+    lines: [Mutex<HashMap<String, Arc<Line>>>; 2],
 }
+
+/// A string laid out in one face: each glyph and where its pen is, in atlas texels, and how far
+/// the pen got.
+struct Line {
+    glyphs: Vec<(f32, Glyph)>,
+    width: f32,
+}
+
+/// How many strings a face keeps laid out before it forgets them all: past what the menus say, so a
+/// clock or a counter ticking cannot grow it without end.
+const LINES_KEPT: usize = 4096;
 
 /// The characters the atlas holds: printable ASCII, and the few others the menus say, where the
 /// fonts have them.
@@ -158,6 +171,7 @@ impl Type {
             glyphs,
             ascent: fonts[0].ascent_unscaled() / em,
             descent: -fonts[0].descent_unscaled() / em,
+            lines: Default::default(),
             fonts,
             unit,
         }
@@ -174,20 +188,35 @@ impl Type {
         self.glyph(w, c).map_or(self.ascent, |g| -(g.at[1] + SPREAD) / ATLAS_EM)
     }
 
-    /// How wide `text` is at `size` frame pixels to the em.
-    pub fn measure(&self, w: Weight, text: &str, size: f32) -> f32 {
-        let k = size / ATLAS_EM;
-        let mut x = 0.0;
+    /// `text` laid out in `w`, kept for the next time it is asked (P254).
+    fn line(&self, w: Weight, text: &str) -> Arc<Line> {
+        let mut lines = self.lines[w as usize].lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(l) = lines.get(text) {
+            return l.clone();
+        }
+        let mut glyphs = Vec::with_capacity(text.len());
+        let mut pen = 0.0;
         let mut last: Option<GlyphId> = None;
         for c in text.chars() {
             let Some(g) = self.glyph(w, c) else { continue };
             if let Some(prev) = last {
-                x += self.fonts[w as usize].kern_unscaled(prev, g.id) * self.unit[w as usize];
+                pen += self.fonts[w as usize].kern_unscaled(prev, g.id) * self.unit[w as usize];
             }
-            x += g.advance;
+            glyphs.push((pen, *g));
+            pen += g.advance;
             last = Some(g.id);
         }
-        x * k
+        let line = Arc::new(Line { glyphs, width: pen });
+        if lines.len() >= LINES_KEPT {
+            lines.clear();
+        }
+        lines.insert(text.to_string(), line.clone());
+        line
+    }
+
+    /// How wide `text` is at `size` frame pixels to the em.
+    pub fn measure(&self, w: Weight, text: &str, size: f32) -> f32 {
+        self.line(w, text).width * (size / ATLAS_EM)
     }
 
     /// `text` as sprites into `out`, its pen starting at `x` on the baseline `y`, `size` frame pixels
@@ -197,13 +226,9 @@ impl Type {
     pub fn text(&self, out: &mut Vec<Sprite>, image: usize, w: Weight, text: &str, x: f32, y: f32, size: f32, slant: f32, colour: [u8; 4]) {
         let k = size / ATLAS_EM;
         let range = SPREAD * k;
-        let mut pen = 0.0;
-        let mut last: Option<GlyphId> = None;
-        for c in text.chars() {
-            let Some(g) = self.glyph(w, c) else { continue };
-            if let Some(prev) = last {
-                pen += self.fonts[w as usize].kern_unscaled(prev, g.id) * self.unit[w as usize];
-            }
+        let line = self.line(w, text);
+        out.reserve(line.glyphs.len());
+        for &(pen, ref g) in &line.glyphs {
             let [l, t, r, b] = g.cell;
             if r > l {
                 let x0 = x + (pen + g.at[0]) * k;
@@ -221,8 +246,6 @@ impl Type {
                     shape: Shape::Text { range },
                 });
             }
-            pen += g.advance;
-            last = Some(g.id);
         }
     }
 }
