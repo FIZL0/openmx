@@ -81,7 +81,13 @@ Task F18. 2026-11-02. Built on main at 408b131e.
 - Exact: `each_captured_landing_rides_like_the_original` and the three `native_tolerance_*` tests pass in the exact
   build. That was a two-binary `--rerun`, which also exercised the new one-run-each path.
 - `python3 tests/test_gate.py`: 25 passed, 0 failed.
-- The full gate runs in `agent-runner done`.
+- **The whole gate** (`./kit check`, after the commit; `agent-runner done` has no gate in this setup):
+  - The variant ran in the pool as `-p game-sim --features ps2-float/native --target-dir target/native
+    --test replay native_tolerance`, in 7.8 s, and passed.
+  - Three openmx binaries were red: `disc_worlds`, `web` and `biplane_particles`.
+  - Rerun alone, `disc_worlds` and `web` passed, so those were load.
+  - `biplane_particles`' `a_plane_flown_into_the_ground_puffs_where_it_hits` fails on every run. It is the
+    already-open F9 (red on main before F18). I noted the sighting there. F18 touches no openmx code.
 
 ## Not verified / not 1:1
 
