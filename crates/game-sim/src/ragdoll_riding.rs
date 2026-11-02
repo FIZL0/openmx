@@ -16,8 +16,8 @@
 //!
 //! Since S110 it is the rider's ([`crate::rider::Rider::riding`]), stepped at the top of each frame for
 //! the tick the shell last drew, and a wreck enters from its bodies rather than from the animated
-//! skeleton ([`Riding::hand_over`]). The bike's ride reads nothing else of it, and the shell draws it
-//! only when asked to (`OPENMX_RIDING_RAGDOLL=1`).
+//! skeleton ([`Riding::hand_over`]). The bike's ride reads nothing else of it. Since S90 the shell draws
+//! the riding rider from it by default (`OPENMX_RIDING_RAGDOLL=0` draws the clip pose instead).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -129,7 +129,25 @@ impl Riding {
         dt: F,
         world: &mut dyn World,
     ) -> Tail {
-        let now = ragdoll_ride::nodes(kit, posed, &r.frame);
+        self.step_under(kit, posed, &r.frame, moved, r, clip, dt, world)
+    }
+
+    /// [`Riding::step_moved`] with `posed` hung under `under` rather than the request's frame (S90):
+    /// the original's part sync and animation pose the skeleton under the bike's node before this tick
+    /// moves it, while the request carries the moved one.
+    #[allow(clippy::too_many_arguments)]
+    fn step_under(
+        &mut self,
+        kit: &Kit,
+        posed: Option<&Posed>,
+        under: &Mat4,
+        moved: Option<&Posed>,
+        r: &Request,
+        clip: i32,
+        dt: F,
+        world: &mut dyn World,
+    ) -> Tail {
+        let now = ragdoll_ride::nodes(kit, posed, under);
         let after = moved.map(|m| ragdoll_ride::nodes(kit, Some(m), &r.frame));
         let mut points = [UNIT_W; PARTS];
         for ((p, b), part) in points.iter_mut().zip(&now).zip(&kit.rig.parts) {
@@ -164,16 +182,25 @@ impl Riding {
         tail
     }
 
-    /// **One tick on a rider** (S110): the request off the ride and `holds` (carried by the ride's
-    /// transform, as the shell carried the drawn chassis' grips), the clip-table switch and the clip
-    /// off the body's machine, then [`Riding::step`] with the skeleton the shell last posed.
-    pub fn ride(&mut self, kit: &Kit, rider: &crate::rider::Rider, holds: &Holds, dt: F, world: &mut dyn World) -> Tail {
+    /// **One tick on a rider** (S110), run after the rider's own update as the original's body actor is
+    /// (S90): the request off the ride as this tick left it and `holds` (carried by the ride's
+    /// transform, as the shell carried the drawn chassis' grips), the clip-table switch `posed` and the
+    /// clip `clip` as the body's machine had them before this tick (the original's animation runs
+    /// after the body reads them), then the step with the skeleton the shell last posed, hung under
+    /// `before` — the bike's transform before this tick moved it — for the spring to pull to, and
+    /// under the moved bike for a held body's repose (S201). The spring's target trails the moved bike
+    /// by the tick's travel, as the original's does: that trail is most of how far the riding body hangs
+    /// back off the clip at speed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ride(&mut self, kit: &Kit, rider: &crate::rider::Rider, holds: &Holds, before: &Mat4, posed: bool, clip: i32, dt: F, world: &mut dyn World) -> Tail {
         let m = rider.ride.transform();
         let world_of = |p: Vf| math::transform_point(&m, p);
         let frame = math::mul(&holds.root, &m);
+        let under = math::mul(&holds.root, before);
         let r = request(&rider.ride, rider.packed_pose, frame, holds.hands.map(world_of), holds.feet.map(world_of), kit.bike);
-        self.posed_off_the_table(rider.body.machine.mode == crate::rider_anim::Mode::Posed);
-        self.step(kit, rider.skeleton.as_deref(), &r, rider.body.veh.state, dt, world)
+        self.posed_off_the_table(posed);
+        let skeleton = rider.skeleton.as_deref();
+        self.step_under(kit, skeleton, &under, skeleton, &r, clip, dt, world)
     }
 
     /// **One tick of the actor by another hand** (S110): `tick` runs it, and the bodies' nodes as they

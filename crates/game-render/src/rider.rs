@@ -322,9 +322,9 @@ pub fn anchors_of(chassis: &Skeleton, world: &[M4]) -> Anchors {
 /// that bone's inverse mass — the pin's own solve, ported and proved as
 /// `game_sim::ragdoll::Pin::one_body`. While riding, the rider is drawn from that ragdoll
 /// (`game_sim::ragdoll_riding`), whose pins pull the hand and foot bodies onto the grips and pegs.
-/// The shell draws the clip pose by default (the user's call, 2026-10-24; the ragdoll only with
-/// `OPENMX_RIDING_RAGDOLL=1`), so this is what holds the drawn rider on the bike: keep it while that
-/// default stands (V63 is blocked on it).
+/// Since S90 (2026-11-02) the shell draws that ragdoll by default, so this holds the drawn rider only
+/// where it is not drawn: before the riding body is placed, online, and with
+/// `OPENMX_RIDING_RAGDOLL=0` (V63 takes the stand-in out).
 ///
 /// **When it holds is the original's**: `strength` is [`Body::hold`], 1 while the body's mode
 /// machine is riding and 0 otherwise. The original's ragdoll is not placed, so not stepped and not

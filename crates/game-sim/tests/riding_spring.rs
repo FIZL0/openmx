@@ -15,8 +15,9 @@
 //! bike's node as it stood last tick: the part sync and the animation run before this tick's bike
 //! moves its node), which is what the original's part sync and animation put in the nodes before the
 //! step. The ground is free09's terrain from the disc — S66's states are all free09, the ones named
-//! free06 too — with no props or scene meshes. Test only — the drawn rider stays the clip pose
-//! (user, 2026-10-24).
+//! free06 too — with no props or scene meshes. Since S90 this body is the drawn riding rider, and
+//! [`the_riding_body_gives_as_the_originals`] holds its springiness — how far it hangs off the clip
+//! and how long it takes to settle — to the original's.
 //!
 //! The captures are `context/s74/*.txt` (git-ignored, S74's journal); without them the test says so
 //! and passes.
@@ -335,6 +336,24 @@ impl Tally {
 /// rest in `settled`. Stops at the first tick the original is in
 /// any other mode, or at a gap.
 fn ride(name: &str, ground: &mut dyn game_sim::world::World, kit: &Kit, nodes: &[usize], skel: &Skeleton, rows: &[Row], from: usize, compare: u32, entry: &mut Tally, settled: &mut Tally) -> usize {
+    ride_watched(name, ground, kit, nodes, skel, rows, from, compare, entry, settled, &mut |_, _| {})
+}
+
+/// [`ride`], showing `watch` each riding tick's row and the port's part nodes (S90).
+#[allow(clippy::too_many_arguments)]
+fn ride_watched(
+    name: &str,
+    ground: &mut dyn game_sim::world::World,
+    kit: &Kit,
+    nodes: &[usize],
+    skel: &Skeleton,
+    rows: &[Row],
+    from: usize,
+    compare: u32,
+    entry: &mut Tally,
+    settled: &mut Tally,
+    watch: &mut dyn FnMut(&Row, &[Mat4]),
+) -> usize {
     let mut riding = Riding::new(kit);
     if rows[from].mode() == 0 {
         // A put-back follows a wreck: the held entry clears the placement, as the original's does
@@ -377,7 +396,9 @@ fn ride(name: &str, ground: &mut dyn game_sim::world::World, kit: &Kit, nodes: &
         assert!(riding.placed(), "{name} frame {}: the riding body is not placed", row.frame);
         let tally = if row.frame < compare + ENTRY { &mut *entry } else { &mut *settled };
         tally.ticks += 1;
-        for (i, (m, &j)) in riding.nodes(kit).iter().zip(nodes).enumerate() {
+        let port = riding.nodes(kit);
+        watch(row, &port);
+        for (i, (m, &j)) in port.iter().zip(nodes).enumerate() {
             let theirs = row.world(j);
             let at = off(m, &theirs, 3..4, 3);
             let turn = off(m, &theirs, 0..3, 3);
@@ -525,4 +546,184 @@ fn the_riding_entry_starts_from_the_last_held_tick() {
         assert!(t.worst_turn.0 <= near_turn, "{what}: a node turned {} off the original's at {}", t.worst_turn.0, t.worst_turn.1);
         assert!(t.mean_at() <= mean_at, "{what}: the nodes are {} ft off the original's on average", t.mean_at());
     }
+}
+
+// --- S90: the riding body's give, as the original's ---------------------------------------------------
+
+/// One riding tick's give: how far each part's node hangs off the animated skeleton's, the
+/// original's and the port's, in feet, and the bike's height.
+struct Give {
+    frame: u32,
+    bike_y: f32,
+    dt: f32,
+    theirs: Vec<f32>,
+    ours: Vec<f32>,
+}
+
+impl Give {
+    fn mean(v: &[f32]) -> f32 {
+        v.iter().sum::<f32>() / v.len() as f32
+    }
+}
+
+/// Every stretch of S74's and S201's captures carried as [`the_riding_spring_follows_the_original_after_each_put_back`]
+/// carries them, as each riding tick's [`Give`]: the put-backs from T+2, and each opening after its
+/// second's settle. Each stretch is named and says whether it starts at a put-back.
+fn gives(kit: &Kit, nodes: &[usize]) -> Option<Vec<(String, bool, Vec<Give>)>> {
+    let (scene, terrain) = terrain_bytes("free09")?;
+    let terrain = game_sim::track::Terrain::parse(&terrain).expect("free09's terrain parses");
+    let mut out = Vec::new();
+    for (task, name) in [
+        ("s74", "free06-ride"),
+        ("s74", "free06-down"),
+        ("s74", "free06-downchord"),
+        ("s74", "free09-ride"),
+        ("s74", "free09-down"),
+        ("s201", "free09-ride"),
+        ("s201", "free09-ride2"),
+        ("s201", "free09-ride3"),
+    ] {
+        let Some(rows) = capture_in(task, name) else { continue };
+        let mut ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
+        // S201's first two captures carry no node rows: nothing to read the skeleton from.
+        let Some(held) = rows.iter().find(|r| r.mode() == 0) else { continue };
+        let skel = Skeleton::read(held);
+        let mut stretches: Vec<(usize, u32, bool)> = vec![(1, rows[0].frame + 1 + 30 - ENTRY, false)];
+        for k in 1..rows.len().saturating_sub(2) {
+            if rows[k].mode() == 0 && rows[k - 1].mode() != 0 {
+                stretches.push((k, rows[k + 2].frame, true));
+            }
+        }
+        for (from, compare, put_back) in stretches {
+            let mut g = Vec::new();
+            let (mut e, mut s) = (Tally::default(), Tally::default());
+            ride_watched(name, &mut ground, kit, nodes, &skel, &rows, from, compare, &mut e, &mut s, &mut |row, port| {
+                let anim = skel.world(row);
+                let give = |m: &Mat4, j: usize| off(m, &anim[j], 3..4, 3);
+                g.push(Give {
+                    frame: row.frame,
+                    bike_y: row.bike().0[3][1],
+                    dt: row.float("dt", 0),
+                    theirs: nodes.iter().map(|&j| give(&row.world(j), j)).collect(),
+                    ours: port.iter().zip(nodes).map(|(m, &j)| give(m, j)).collect(),
+                });
+            });
+            out.push((format!("{task}/{name} {}", rows[from].frame), put_back, g));
+        }
+    }
+    Some(out)
+}
+
+/// **The riding body gives as the original's does** (S90): not only node by node (the test above), but
+/// in the two numbers the eye reads as springiness — how far the body hangs off the clip, and how long it
+/// takes to settle. Over every stretch of S74's and S201's captures, carried free from the put-back (or
+/// the opening's settle), each part's give (its node's distance from the animated skeleton's) is
+/// measured for the original and the port:
+///
+/// - the give's root mean square over each stretch, per part: the port's within [`GIVE_RMS`] (as a
+///   share) of the original's, or [`GIVE_FLOOR`] ft where both are smaller than that;
+/// - its peak per part per stretch, within [`GIVE_PEAK`] ft;
+/// - after each put-back, the tick the body's mean give last stands above half its ghost peak (its
+///   settle), within [`SETTLE_TICKS`] of the original's;
+/// - at each jolt (the bike's vertical speed changing by more than [`JOLT`] ft/s in a tick: a bump or a
+///   landing), the body's peak give in the [`AFTER_JOLT`] ticks that follow within [`GIVE_PEAK`] ft,
+///   and its settle (the tick it last stands above half that peak) within [`SETTLE_TICKS`].
+#[test]
+fn the_riding_body_gives_as_the_originals() {
+    let Some((kit, nodes)) = ride_kit() else { return };
+    let Some(stretches) = gives(&kit, &nodes) else { return };
+    let mut lines = Vec::new();
+    let mut bad = Vec::new();
+    let (mut put_backs, mut jolts) = (0, 0);
+    for (name, put_back, g) in &stretches {
+        if g.is_empty() {
+            continue;
+        }
+        let parts = g[0].theirs.len();
+        let rms = |pick: &dyn Fn(&Give) -> f32| (g.iter().map(|t| f64::from(pick(t)).powi(2)).sum::<f64>() / g.len() as f64).sqrt() as f32;
+        let mut worst_rms = (0f32, 0f32, 0usize);
+        let mut worst_peak = (0f32, 0usize);
+        for i in 0..parts {
+            let (a, b) = (rms(&|t| t.theirs[i]), rms(&|t| t.ours[i]));
+            let off = (b - a).abs();
+            if off > GIVE_FLOOR && off > GIVE_RMS * a {
+                bad.push(format!("{name} part {i}: give rms {b:.4} ft, the original's {a:.4}"));
+            }
+            if off > (worst_rms.1 - worst_rms.0).abs() {
+                worst_rms = (a, b, i);
+            }
+            let peak = |pick: &dyn Fn(&Give) -> f32| g.iter().map(pick).fold(0f32, f32::max);
+            let (pa, pb) = (peak(&|t| t.theirs[i]), peak(&|t| t.ours[i]));
+            if (pb - pa).abs() > GIVE_PEAK {
+                bad.push(format!("{name} part {i}: give peak {pb:.4} ft, the original's {pa:.4}"));
+            }
+            if (pb - pa).abs() > worst_peak.0 {
+                worst_peak = ((pb - pa).abs(), i);
+            }
+        }
+        let body = |v: &dyn Fn(&Give) -> f32| g.iter().map(v).collect::<Vec<f32>>();
+        let (theirs, ours) = (body(&|t| Give::mean(&t.theirs)), body(&|t| Give::mean(&t.ours)));
+        lines.push(format!(
+            "{name}: {} ticks, body give rms {:.4} ft (original {:.4}), worst part {} rms {:.4} vs {:.4}, worst peak off {:.4} ft (part {})",
+            g.len(),
+            rms(&|t| Give::mean(&t.ours)),
+            rms(&|t| Give::mean(&t.theirs)),
+            worst_rms.2,
+            worst_rms.1,
+            worst_rms.0,
+            worst_peak.0,
+            worst_peak.1
+        ));
+        if *put_back {
+            put_backs += 1;
+            let ghost = g.len().min(GHOST);
+            let (st, so) = (settle(&theirs[..ghost]), settle(&ours[..ghost]));
+            lines.push(format!("  put-back settle: tick {} (original {}), peak {:.4} ft (original {:.4})", so.0, st.0, so.1, st.1));
+            if so.0.abs_diff(st.0) > SETTLE_TICKS {
+                bad.push(format!("{name}: the put-back settles at T+2+{}, the original's at T+2+{}", so.0, st.0));
+            }
+        }
+        for k in 2..g.len() {
+            let v = |a: &Give, b: &Give| (b.bike_y - a.bike_y) / b.dt;
+            let jolt = v(&g[k - 1], &g[k]) - v(&g[k - 2], &g[k - 1]);
+            if jolt.abs() <= JOLT || g[k].frame != g[k - 2].frame + 2 || k + AFTER_JOLT > g.len() {
+                continue;
+            }
+            jolts += 1;
+            let (st, so) = (settle(&theirs[k..k + AFTER_JOLT]), settle(&ours[k..k + AFTER_JOLT]));
+            lines.push(format!(
+                "  jolt at {} ({:+.2} ft/s): peak {:.4} ft (original {:.4}), settle {} (original {})",
+                g[k].frame, jolt, so.1, st.1, so.0, st.0
+            ));
+            if (so.1 - st.1).abs() > GIVE_PEAK || so.0.abs_diff(st.0) > SETTLE_TICKS {
+                bad.push(format!("{name}: the jolt at {} gives {:.4} ft and settles in {}, the original {:.4} in {}", g[k].frame, so.1, so.0, st.1, st.0));
+            }
+        }
+    }
+    for l in &lines {
+        println!("{l}");
+    }
+    println!("{put_backs} put-backs, {jolts} jolts");
+    assert!(bad.is_empty(), "{} gives off the original's:\n{}", bad.len(), bad.join("\n"));
+}
+
+/// How far, as a share of the original's, a part's give may be off over a stretch (root mean square).
+const GIVE_RMS: f32 = 0.1;
+/// ...unless it is within this many feet anyway.
+const GIVE_FLOOR: f32 = 0.005;
+/// How far a part's (or the body's, at a jolt) peak give may be off the original's, in feet.
+const GIVE_PEAK: f32 = 0.07;
+/// How many ticks a settle may be off the original's.
+const SETTLE_TICKS: usize = 3;
+/// The ghost's ticks: 3 s at 30 Hz.
+const GHOST: usize = 90;
+/// A change in the bike's vertical speed in one tick, in ft/s, counted as a bump or a landing.
+const JOLT: f32 = 4.0;
+/// How many ticks after a jolt its give is read over.
+const AFTER_JOLT: usize = 30;
+
+/// A run of the body's mean give: the last tick it stands above half its peak, and the peak.
+fn settle(v: &[f32]) -> (usize, f32) {
+    let peak = v.iter().copied().fold(0f32, f32::max);
+    (v.iter().rposition(|&x| x > peak / 2.0).unwrap_or(0), peak)
 }

@@ -76,7 +76,7 @@ pub fn actor(a: &mut Actor, by: [F; 2]) {
     matrix(&mut a.bike_frame, by);
 }
 
-/// **The riding ragdoll** (OPENMX_RIDING_RAGDOLL=1): its actor, and the skeleton's drawn matrices
+/// **The riding ragdoll** (the drawn riding rider since S90): its actor, and the skeleton's drawn matrices
 /// from its last pose and the one before, which the next pose and a wreck's entry measure the
 /// bones' move from.
 pub fn riding(r: &mut Riding, by: [F; 2]) {

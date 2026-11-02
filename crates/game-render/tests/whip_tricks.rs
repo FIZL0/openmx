@@ -658,9 +658,10 @@ fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
     let mut out: Vec<Doll> = Vec::new();
     for k in 0..FRAMES {
         let c = Controls { gas: F::ONE, ..if k >= WHIP { whip.clone() } else { Controls::default() } };
-        let placed = game_render::chassis::placed(&r.ride);
         r.frame(p, &kit.tables, &c, FRAME, &mut world);
-        // Last frame's ragdoll, against last frame's pose, grips and root, which are all still here.
+        // The ragdoll the frame's end stepped (S90) towards last frame's pose, grips and root, which are
+        // all still here, under the ride it just moved, which is where the shell draws it.
+        let placed = game_render::chassis::placed(&r.ride);
         if let (Some(last), Some(rd), Some(h)) = (out.last_mut(), &r.riding, &r.holds) {
             if rd.placed() {
                 let bones = kit.body.ragdoll_palette(&doll, &rd.nodes(&dk), placed);
@@ -762,5 +763,8 @@ fn a_full_whip_keeps_the_hands_on_the_bars() {
              full[0], clips.0, clips.1, drawn.0, drawn.1, moved.0, moved.1, doll.len(), ours.len(), d.doll_off[0], d.doll_off[1]);
     assert!(clips.0 > 0.3 && full.contains(&clips.1), "the clips' worst is no longer the full whip: {:.3} ft at {}", clips.0, clips.1);
     assert!(drawn.0 <= SPIN_HELD, "the full whip drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
-    assert!(cos > 0.9 && doll.len() > ours.len(), "the drawn rider leans {ours:?}, the ragdoll {doll:?}");
+    // Placed by the ride it was stepped under (S90), the ragdoll's hands are on the grips, and it leans
+    // the stand-in's way within ~40° (it also rises off the seat, which the stand-in does not).
+    assert!(d.doll_off.iter().all(|&o| o < 0.1), "the ragdoll's hands {:?} ft off the grips", d.doll_off);
+    assert!(cos > 0.75 && doll.len() > ours.len(), "the drawn rider leans {ours:?}, the ragdoll {doll:?}");
 }

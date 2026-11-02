@@ -1203,19 +1203,19 @@ fn ride_holds(rig: &Rig) -> Option<game_sim::ragdoll_riding::Holds> {
     Some(game_sim::ragdoll_riding::Holds { root, hands: [point(hand_l), point(hand_r)], feet: [point(foot_l), point(foot_r)] })
 }
 
-/// Whether the riding rider is drawn from the riding ragdoll (`OPENMX_RIDING_RAGDOLL=1`) rather than the
-/// clip pose. **Off by default, and it stays off until the user says otherwise.** It was turned off on
-/// 2026-10-23 (user: "our guy is super floppy"), turned back on by S111 once its request was bit-exact,
-/// and turned off again on 2026-10-24 (user: "we're back on ragdoll model when riding the bike, fix it
-/// and make sure we dont regress"): a request that matches the original does not make the ride look
-/// right. Do not flip this default from a task; `riding_ragdoll_is_off_by_default` guards it.
+/// Whether the riding rider is drawn from the riding ragdoll, as the original's is (S90): **on by
+/// default** since the user lifted the 10-24 ruling on 2026-11-02 ("make sure we match or close to
+/// match the original springyness"). `OPENMX_RIDING_RAGDOLL=0` draws the clip pose plus hand IK
+/// instead. It was off from 2026-10-23 ("our guy is super floppy") while the put-back entry was wrong;
+/// S201 matched the entry, and game-sim's `riding_spring` tests hold the body's give and settle to the
+/// original's over S74's and S201's put-backs, plain riding and landings.
 fn riding_ragdoll_on() -> bool {
     riding_ragdoll_asked(std::env::var_os("OPENMX_RIDING_RAGDOLL").as_deref())
 }
 
-/// [`riding_ragdoll_on`] on the variable's value: only an explicit `1` turns the riding ragdoll on.
+/// [`riding_ragdoll_on`] on the variable's value: only an explicit `0` turns the riding ragdoll off.
 fn riding_ragdoll_asked(var: Option<&std::ffi::OsStr>) -> bool {
-    var.is_some_and(|v| v == "1")
+    var.is_none_or(|v| v != "0")
 }
 
 #[cfg(test)]
@@ -1223,16 +1223,15 @@ mod riding_ragdoll_default {
     use super::riding_ragdoll_asked;
     use std::ffi::OsStr;
 
-    /// The user's call (2026-10-23, again 2026-10-24): the riding rider is the clip pose unless
-    /// `OPENMX_RIDING_RAGDOLL=1` asks for the ragdoll. A task that wants it on by default asks the
-    /// user first; it does not change this test.
+    /// The user's call (2026-11-02): the riding rider is the riding ragdoll, as the original's is,
+    /// unless `OPENMX_RIDING_RAGDOLL=0` asks for the clip pose.
     #[test]
-    fn riding_ragdoll_is_off_by_default() {
-        assert!(!riding_ragdoll_asked(None), "the riding ragdoll is drawn with no variable set");
-        for off in ["", "0", "true", "yes", "on"] {
-            assert!(!riding_ragdoll_asked(Some(OsStr::new(off))), "OPENMX_RIDING_RAGDOLL={off} draws the ragdoll");
+    fn riding_ragdoll_is_on_by_default() {
+        assert!(riding_ragdoll_asked(None), "the riding ragdoll is not drawn with no variable set");
+        for on in ["", "1", "true", "yes", "on"] {
+            assert!(riding_ragdoll_asked(Some(OsStr::new(on))), "OPENMX_RIDING_RAGDOLL={on} draws the clip");
         }
-        assert!(riding_ragdoll_asked(Some(OsStr::new("1"))));
+        assert!(!riding_ragdoll_asked(Some(OsStr::new("0"))));
     }
 }
 
@@ -7578,7 +7577,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             // The grips just drawn, which the rider's riding ragdoll is held to on its next frame
             // (S110): the bones a wreck is thrown from. Offline only, like the skeleton. Drawing the
-            // body from it is another matter: only when asked for (see riding_ragdoll_on).
+            // body from it is riding_ragdoll_on's (S90).
             if moving && bike_up && online.is_none() && seat.sim.rider.ragdoll_kit.is_some() {
                 seat.sim.rider.holds = ride_holds(rig).map(Arc::new);
             }
