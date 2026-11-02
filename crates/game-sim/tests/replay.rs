@@ -6179,7 +6179,10 @@ fn nearest_opponent(
 // state's, [`off_the_save_state`]), and the chord leaves the wreck's measure for the first frame back
 // with the aero's true speed on from the body's contacts ([`Flight::reset_chord`](game_sim::flight::Flight::reset_chord)).
 // Both grounds then agree through tick 1526, the second crash, and part at 1527, its first wrecked
-// frame, on the body.
+// frame, on the body. S238: that crash comes down between two wagons of free06's train, which throws
+// the original's wreck off sideways, and the run had no cars at all. With the state's path cars and
+// trucks in it ([`biplane_traffic`]), as toys in the plane's world (S141), over both grounds every
+// lane agrees on every tick of the capture.
 
 /// The capture's file name in [`acceptance_dirs`] — C7's playback of `biplane.p2m2`.
 const BIPLANE_ACCEPTANCE: &str = "biplane";
@@ -6187,9 +6190,10 @@ const BIPLANE_ACCEPTANCE: &str = "biplane";
 /// **The last tick of the biplane recording the port is known to agree with the original on.** The
 /// same contract as [`ACCEPTANCE_AGREES_THROUGH`]: further prints a line asking for it to be raised,
 /// short of it fails. Tick 0 is the start state: the capture's second row, over the save state stepped
-/// to it. 1526 is the second crash, the frame before its first wrecked frame parts the body (S193;
-/// P187 left it at 774, the chord's respawn, and S104 at 691, the first crash, on `engine.power`).
-const BIPLANE_AGREES_THROUGH: u64 = 1526;
+/// to it. `u64::MAX`: every tick, since the run carries free06's cars (S238; S193 left it at 1526, the
+/// second crash, which strikes the train; P187 at 774, the chord's respawn, and S104 at 691, the
+/// first crash, on `engine.power`).
+const BIPLANE_AGREES_THROUGH: u64 = u64::MAX;
 
 /// The container of the area the plane was flown over. Not found by [`recorded_on`]: that fits a
 /// *bike's* rows, and a plane's minute is mostly air. Named instead, and checked against the plane's own
@@ -6463,11 +6467,12 @@ fn unstepped_rows(cap: &Capture) -> Result<Vec<usize>, String> {
 
 /// Free06's world, and the plane's first row checked against it: the run is replayed over the area
 /// only if the plane the capture starts with, which says it is on the ground, is standing on this
-/// area's dirt. `None`, with a line, where the disc or the area is not to be had.
+/// area's dirt. Its props carry the state's cars, which `then` is handed to put in the sim
+/// ([`biplane_traffic`]). `None`, with a line, where the disc, the area or the state is not to be had.
 fn over_free06<R>(
     cap: &Capture,
     disc: &mut Disc,
-    then: impl FnOnce(&mut dyn World, &Where) -> R,
+    then: impl FnOnce(&mut dyn World, &Where, game_sim::traffic::Traffic) -> R,
 ) -> Option<R> {
     let mut areas = Area::all_of(disc, BIPLANE_TRACK);
     if areas.len() != 1 {
@@ -6495,9 +6500,39 @@ fn over_free06<R>(
          the area it was flown over",
         area.named,
     );
-    let (props, _) = area.props(disc);
+    let (mut props, _) = area.props(disc);
+    let mut traffic = biplane_traffic(disc, &area, &ground)?;
+    traffic.attach(&mut props);
     let mut place = Place { ground, props };
-    Some(then(&mut place, &area.named))
+    Some(then(&mut place, &area.named, traffic))
+}
+
+/// **Free06's cars as C7's save state holds them** (S238): its 21 path cars — the train among them —
+/// and its two `HasPhysics` trucks with their physics objects, as the S207 rides carry them
+/// ([`SaveState::traffic_with_trucks`], [`SaveState::trucks_physics`]), not yet attached. The plane's
+/// world holds them as toys (S141), and its second crash comes down between two of the train's
+/// wagons: without them the port's wreck flew on through the train the original's was thrown off.
+/// `None`, with a line, where the state is not in this worktree.
+fn biplane_traffic(disc: &mut Disc, area: &Area, ground: &Ground) -> Option<game_sim::traffic::Traffic> {
+    let image = private_dir("states").join(BIPLANE_STATE);
+    let Ok(ram) = std::fs::read(&image) else {
+        println!("no {}: the biplane run's cars are the state's, so there is no biplane verdict here", image.display());
+        return None;
+    };
+    // The plane's state: no rider chain to follow, and nothing here reads one.
+    let st = SaveState { ram, rider: 0 };
+    let mut parts = Vec::new();
+    for name in [area.named.track.clone(), area.named.track.replace(".res", "_2.res")] {
+        if let Some(bytes) = disc.member(&name) {
+            if let Ok(res) = Res::parse(&bytes) {
+                parts.push((bytes, res));
+            }
+        }
+    }
+    let file = |want: &str| parts.iter().find_map(|(bytes, res)| by_suffix(res, want).and_then(|e| res.read(bytes, e).ok()));
+    let top = game_sim::contact_search::Heightfield::max(&ground.field());
+    let edge = game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [F(top.x()), F(top.z())] };
+    Some(st.traffic_with_trucks(|want| file(want)).with_physics(st.trucks_physics(edge, |want| file(want))))
 }
 
 /// C7's capture without its first row, which is one plane frame behind the rest (S41).
@@ -6682,6 +6717,10 @@ impl World for WithTheTrack<'_> {
     fn collision(&mut self) -> (Option<Box<dyn game_sim::contact_search::Heightfield + '_>>, Option<&Props>) {
         self.track.collision()
     }
+    // The cars' meshes are the track's props (S238): the traffic moves them there.
+    fn moving(&mut self) -> Option<&mut Props> {
+        self.track.moving()
+    }
 }
 
 /// The plane's ray probe off the disc's `biplanem.col` (S48).
@@ -6837,8 +6876,9 @@ fn the_biplane_acceptance_run() {
     let first = inputs_from_capture(&full).unwrap_or_else(|e| panic!("{}: {e}", capture.display()))[0];
     let cap = past_the_first_row(full.clone());
     let f = biplane_fixture(&cap, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
-    let taken = over_free06(&full, &mut disc, |free06, named| {
+    let taken = over_free06(&full, &mut disc, |free06, named, traffic| {
         let mut start = biplane_start(&full, f.seed, &plane).unwrap_or_else(|e| panic!("{}: {e}", capture.display()));
+        start.traffic = traffic;
         let flight = start.plane.as_mut().expect("biplane_start puts a plane in the ride");
         *flight = std::mem::take(flight).with_rays(rays.clone());
         off_the_save_state(flight, &state).unwrap_or_else(|e| panic!("{BIPLANE_STATE}: {e}"));
