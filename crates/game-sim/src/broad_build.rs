@@ -122,9 +122,69 @@ pub fn key(tree: &Quadtree, hi: [F; 2], centre: [F; 4], half: [F; 4]) -> u32 {
 /// key's level (a node made wherever one is missing), into that node's first empty slot, or a new chunk
 /// of four at the end of its chunks. Nothing for a key of 0.
 pub fn insert(tree: &mut Quadtree, o: usize, key: u32) {
+    insert_into(tree, o, key, None);
+}
+
+/// One change [`insert_logged`] made to a tree, which [`undo`] takes back (S236).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Undo {
+    /// A node pushed at the end of the tree's nodes.
+    Node,
+    /// A node's child `i` set.
+    Child(usize, usize),
+    /// A node's chunk's slot filled.
+    Slot(usize, usize, usize),
+    /// A chunk pushed at the end of a node's chunks.
+    Chunk(usize),
+}
+
+/// What an [`insert_logged`] tree keeps beside it: its changes in order, and nodes [`undo`] took off,
+/// emptied, for the next insert to make its nodes from without allocating.
+#[derive(Clone, Debug, Default)]
+pub struct Log {
+    pub changes: Vec<Undo>,
+    spare: Vec<Node>,
+}
+
+/// [`insert`], each change it makes written to `log`, so a tree filed item by item can be taken back
+/// to how it was before any one of them ([`undo`]) and the rest filed again: the tree is the same as
+/// one filed afresh, node for node and slot for slot.
+pub fn insert_logged(tree: &mut Quadtree, o: usize, key: u32, log: &mut Log) {
+    insert_into(tree, o, key, Some(log));
+}
+
+/// `tree` as it was when `log` had `to` changes: the later ones taken back, newest first.
+pub fn undo(tree: &mut Quadtree, log: &mut Log, to: usize) {
+    while to < log.changes.len() {
+        match log.changes.pop().expect("a change past `to`") {
+            Undo::Node => {
+                let mut node = tree.nodes.pop().expect("a node to take back");
+                node.chunks.clear();
+                node.children = [None; 4];
+                log.spare.push(node);
+            }
+            Undo::Child(n, i) => tree.nodes[n].children[i] = None,
+            Undo::Slot(n, c, j) => tree.nodes[n].chunks[c][j] = None,
+            Undo::Chunk(n) => drop(tree.nodes[n].chunks.pop()),
+        }
+    }
+}
+
+fn insert_into(tree: &mut Quadtree, o: usize, key: u32, mut log: Option<&mut Log>) {
     if key == 0 {
         return;
     }
+    let new_node = |tree: &mut Quadtree, log: &mut Option<&mut Log>| {
+        let node = match log {
+            Some(log) => {
+                log.changes.push(Undo::Node);
+                log.spare.pop().unwrap_or_default()
+            }
+            None => Node::default(),
+        };
+        tree.nodes.push(node);
+        tree.nodes.len() - 1
+    };
     let level = key & 0xf;
     let size = side(level);
     let x = ((key & 0xfff0_0000) >> 17) as i32;
@@ -138,9 +198,10 @@ pub fn insert(tree: &mut Quadtree, o: usize, key: u32) {
         let mut node = match tree.root {
             Some(r) => r,
             None => {
-                tree.nodes.push(Node::default());
-                tree.root = Some(tree.nodes.len() - 1);
-                tree.nodes.len() - 1
+                assert!(log.is_none(), "a logged tree has its root");
+                let r = new_node(tree, &mut log);
+                tree.root = Some(r);
+                r
             }
         };
         let mut bit = FIRST;
@@ -149,18 +210,30 @@ pub fn insert(tree: &mut Quadtree, o: usize, key: u32) {
             node = match tree.nodes[node].children[i] {
                 Some(c) => c,
                 None => {
-                    tree.nodes.push(Node::default());
-                    let c = tree.nodes.len() - 1;
+                    let c = new_node(tree, &mut log);
                     tree.nodes[node].children[i] = Some(c);
+                    if let Some(log) = &mut log {
+                        log.changes.push(Undo::Child(node, i));
+                    }
                     c
                 }
             };
             bit >>= 1;
         }
         let chunks = &mut tree.nodes[node].chunks;
-        match chunks.iter_mut().flat_map(|c| c.iter_mut()).find(|s| s.is_none()) {
-            Some(slot) => *slot = Some(o),
-            None => chunks.push([Some(o), None, None, None]),
+        let free = chunks.iter().enumerate().find_map(|(c, k)| Some((c, k.iter().position(Option::is_none)?)));
+        let change = match free {
+            Some((c, j)) => {
+                chunks[c][j] = Some(o);
+                Undo::Slot(node, c, j)
+            }
+            None => {
+                chunks.push([Some(o), None, None, None]);
+                Undo::Chunk(node)
+            }
+        };
+        if let Some(log) = &mut log {
+            log.changes.push(change);
         }
     }
 }
