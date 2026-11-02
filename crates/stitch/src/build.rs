@@ -1958,15 +1958,47 @@ pub fn layout(tiles: &[Tile], p: &Params) -> Result<Plan, String> {
 }
 
 pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> Result<Built, String> {
+    build_watched(tiles, out, p, copy_tiles, &|_| Ok(()))
+}
+
+/// How far a build has got, for [`build_watched`]'s watcher: a world's build plans, passes and solves
+/// again until its join ground holds, so it has no count of its own to the end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Step {
+    /// The tiles' edges and relief measured, before the first plan.
+    Measuring,
+    /// Plan `pass` (from 1) laid out and its coarse lattice checked.
+    Planning { pass: usize },
+    /// Plan `pass`'s join pieces solved and written, `done` of `of`.
+    Solving { pass: usize, done: usize, of: usize },
+}
+
+/// [`build_tiles`], telling `watch` each step (P260): a shell's loading line, and its cancel, which is
+/// `watch`'s error. The build stops at the next step with that error, every thread of it ended.
+pub fn build_watched(
+    tiles: &[Tile],
+    out: &Path,
+    p: &Params,
+    copy_tiles: bool,
+    watch: &(dyn Fn(Step) -> Result<(), String> + Sync),
+) -> Result<Built, String> {
+    watch(Step::Measuring)?;
     let mut seen = std::collections::HashSet::new();
     for t in tiles {
         if !seen.insert(t.id.clone()) {
             return Err(format!("{} is given twice", t.id));
         }
     }
-    let cut: Vec<crate::Cut> = tiles.iter().map(|t| t.trim_cut(p.trim)).collect();
+    let t0 = std::time::Instant::now();
+    // Each tile's own, so side by side (P260: 15 s of world_mxu's cold build on one thread).
+    let cut: Vec<crate::Cut> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = tiles.iter().map(|t| sc.spawn(move || watch(Step::Measuring).map(|()| t.trim_cut(p.trim)))).collect();
+        jobs.into_iter().map(|j| j.join().expect("cut")).collect::<Result<_, _>>()
+    })?;
     let (cuts, ridged): (Vec<[u32; 4]>, Vec<[bool; 4]>) = cut.iter().map(|c| (c.keep, c.ridged)).unzip();
+    eprintln!("stitch: tiles cut in {:.1} s", t0.elapsed().as_secs_f64());
     for (t, k) in tiles.iter().zip(&cuts) {
+        watch(Step::Measuring)?;
         let ring = t.ring(*k);
         let steep = ring.edges.iter().flatten().map(|e| e.gx.hypot(e.gz)).fold(0.0, f64::max);
         eprintln!(
@@ -1978,7 +2010,11 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
     let t0 = std::time::Instant::now();
     let step = lattice_spacing(&tiles);
     let base = 2.0 * step + 3.0 * p.fade;
-    let gates: Vec<[f64; 4]> = tiles.iter().zip(&cuts).map(|(t, k)| cut_source(t, *k, step, p).gates).collect();
+    let gates: Vec<[f64; 4]> = tiles
+        .iter()
+        .zip(&cuts)
+        .map(|(t, k)| watch(Step::Measuring).map(|()| cut_source(t, *k, step, p).gates))
+        .collect::<Result<_, _>>()?;
     for (t, g) in tiles.iter().zip(&gates) {
         if g.iter().any(|v| *v > base) {
             eprintln!("stitch: {}: seam gates {:?} ft (C1's {base:.0}): its edges stay steep that far out", t.id, g.map(|v| v.round()));
@@ -2008,7 +2044,10 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
     let mut relief_scale = 1.0f64;
     // Where the relief has been lowered ([`Room::dent`]), kept over a rebuild of the same plan.
     let mut dented: Vec<[f64; 2]> = Vec::new();
+    let mut pass = 0;
     let (plan, results) = loop {
+        pass += 1;
+        watch(Step::Planning { pass })?;
         let t0 = std::time::Instant::now();
         let mut plan = plan_widened(tiles, &cuts, &gates, p, &widen)?;
         let (rmin, rmax) = plan.radii.iter().fold((f64::INFINITY, 0.0f64), |(a, b), r| (a.min(*r), b.max(*r)));
@@ -2048,6 +2087,7 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
                 if relief_scale <= 0.0 {
                     break;
                 }
+                watch(Step::Planning { pass })?;
                 let t0 = std::time::Instant::now();
                 let (c, at) = plan.coarse_slope(&tiles, 4);
                 eprintln!("stitch: coarse pass with the relief at {relief_scale:.3}: {c:.3} steepest, {:.1} s", t0.elapsed().as_secs_f64());
@@ -2068,6 +2108,8 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
             }
             let results: Mutex<Vec<Done>> = Mutex::new(Vec::new());
             let t0 = std::time::Instant::now();
+            let of = plan.pieces(p.chunk).len();
+            watch(Step::Solving { pass, done: 0, of })?;
             solve(&plan, &tiles, p.chunk, p.threads, &|pc: Piece| {
                 let jd = joins.join(&pc.name);
                 std::fs::create_dir_all(&jd).map_err(|e| format!("{}: {e}", jd.display()))?;
@@ -2084,7 +2126,8 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
                     far_at: pc.far_at,
                     clamped: pc.clamped,
                 });
-                Ok(())
+                let done = results.lock().expect("lock").len();
+                watch(Step::Solving { pass, done, of })
             })?;
             let mut results = results.into_inner().expect("lock");
             results.sort_by(|a, b| a.name.cmp(&b.name));

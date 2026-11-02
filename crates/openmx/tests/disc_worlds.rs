@@ -14,6 +14,29 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+/// The most a first ride on a world off the disc may take, its joins built from cold (P260): the user's
+/// MX WORLD that "is not loading". world_mxu was 92 s in a release build on 2026-11-02 (132 s before
+/// its tiles were cut side by side), world_mxu_free some 10 s; the room is for a test build on a
+/// machine that runs three gates at once.
+const COLD: Duration = Duration::from_secs(480);
+/// The most a ride on a built or installed world may take, its joins read back and nothing built, with
+/// `--seams` walking every piece's edges (installed world_mxu's 790 joins: 88 s beside the cold builds).
+const WARM: Duration = Duration::from_secs(240);
+/// The most a plain ride on an installed world may take to start (P260): its 27 tiles and every join
+/// read. world_mxu was some 5 s in a release build.
+const INSTALLED: Duration = Duration::from_secs(60);
+
+/// [`shell`], held to `most`.
+fn shell_within(mods: &Path, track: &str, most: Duration) -> String {
+    let at = Instant::now();
+    let said = shell(mods, track);
+    let took = at.elapsed();
+    eprintln!("{track} from {}: {:.1} s", mods.display(), took.as_secs_f32());
+    assert!(took <= most, "{track} took {:.0} s to ride, at most {:.0}", took.as_secs_f32(), most.as_secs_f32());
+    said
+}
 
 fn disc() -> bool {
     match game_render::disc::Disc::open_configured() {
@@ -37,10 +60,15 @@ fn reference() -> Option<PathBuf> {
 }
 
 fn shell(mods: &Path, track: &str) -> String {
+    shell_with(mods, track, &["--seams"])
+}
+
+fn shell_with(mods: &Path, track: &str, more: &[&str]) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
-        .args(["--headless", "--no-sound", "--frames", "2", "--seams", "--track", track, "--mods"])
+        .args(more)
+        .args(["--headless", "--no-sound", "--frames", "2", "--track", track, "--mods"])
         .arg(mods)
         .output()
         .expect("the shell runs");
@@ -83,7 +111,7 @@ fn rides_off_the_disc(id: &str, tiles: usize, joins: usize) {
     std::fs::create_dir_all(&mods).unwrap();
 
     // The first ride builds it.
-    let first = shell(&mods, id);
+    let first = shell_within(&mods, id, COLD);
     assert!(first.contains(&format!("{id}: building its joins")), "{first}");
     let lines = world_lines(&first, id);
     let world = lines.iter().find(|l| l.starts_with("world: ")).unwrap_or_else(|| panic!("no world line:\n{first}"));
@@ -95,7 +123,7 @@ fn rides_off_the_disc(id: &str, tiles: usize, joins: usize) {
     let built = &keys[0];
 
     // The second reads it back.
-    let second = shell(&mods, id);
+    let second = shell_within(&mods, id, WARM);
     assert!(!second.contains("building its joins"), "{second}");
     assert_eq!(world_lines(&second, id), lines);
 
@@ -112,10 +140,35 @@ fn rides_off_the_disc(id: &str, tiles: usize, joins: usize) {
         assert_eq!(p, q);
         assert!(b == c, "{} differs from openmx-mods' {id}", p.display());
     }
-    let theirs = shell(&installed, id);
+    let theirs = shell_within(&installed, id, WARM);
     assert!(!theirs.contains("building its joins"), "the installed world is ridden:\n{theirs}");
     assert_eq!(world_lines(&theirs, id), lines, "the installed {id}'s ride");
     let _ = std::fs::remove_dir_all(&mods);
+}
+
+/// P260: the worlds the user has installed (the main checkout's mods/, where openmx-mods puts them)
+/// ride, and within [`INSTALLED`]: an installed world of a disc world's id is ridden in its place, its 27
+/// tiles and every join read. Skips what is not installed.
+#[test]
+fn the_installed_mx_unleashed_worlds_ride_promptly() {
+    if !disc() {
+        return;
+    }
+    let Some(installed) = reference() else { return };
+    for id in ["world_mxu", "world_mxu_free"] {
+        if !installed.join("tracks").join(id).join("mod.json").is_file() {
+            eprintln!("skipped {id}: not in $OPENMX_WORLDS or the main checkout's mods/");
+            continue;
+        }
+        let at = Instant::now();
+        let said = shell_with(&installed, id, &[]);
+        let took = at.elapsed();
+        eprintln!("{id} installed: {:.1} s", took.as_secs_f32());
+        assert!(took <= INSTALLED, "the installed {id} took {:.0} s to ride, at most {:.0}", took.as_secs_f32(), INSTALLED.as_secs_f32());
+        assert!(!said.contains("building its joins"), "the installed world is ridden:\n{said}");
+        assert!(said.lines().any(|l| l.starts_with(&format!("world: {id} ("))), "{said}");
+        assert!(said.lines().any(|l| l.starts_with("ridden for")), "{said}");
+    }
 }
 
 #[test]
@@ -132,7 +185,7 @@ fn first_ride(id: &str) -> Option<(String, String, PathBuf)> {
     let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("p253-{id}"));
     let _ = std::fs::remove_dir_all(&mods);
     std::fs::create_dir_all(&mods).unwrap();
-    let said = shell(&mods, id);
+    let said = shell_within(&mods, id, COLD);
     assert!(said.contains(&format!("{id}: building its joins")), "{said}");
     let keys: Vec<PathBuf> = std::fs::read_dir(mods.join("cache/stitch").join(id)).unwrap().flatten().map(|e| e.path()).collect();
     assert_eq!(keys.len(), 1, "one build kept: {keys:?}");

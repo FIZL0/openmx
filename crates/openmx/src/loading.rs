@@ -11,6 +11,7 @@
 //! The build is the same code on either thread and reads nothing the thread could change, so the
 //! ride it makes is the same ride: tests/loading.rs rides one both ways and compares the hashes.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -73,9 +74,26 @@ pub const HOLD: &str = "OPENMX_LOAD_HOLD";
 pub const THREADED: &str = "OPENMX_THREADED_LOAD";
 /// The other test hook: `<frames>` presses Back on the loading screen once it has drawn that many,
 /// as Circle or Escape would; with a [`HOLD`] set, not before the load is held there.
+/// `<frames>:<line>` waits besides for the line under the bar to start with `<line>` (P260:
+/// `5:Joining` presses it while a world's joins are built).
 pub const CANCEL: &str = "OPENMX_LOAD_CANCEL";
+/// [`CANCEL`]'s twin for the window's close button (P260), read the same way.
+pub const CLOSE: &str = "OPENMX_LOAD_CLOSE";
 /// What a cancelled build fails with.
 pub const CANCELLED: &str = "the load was cancelled";
+
+/// Whether the [`CANCEL`] or [`CLOSE`] hook named `var` fires on a loading screen that has drawn
+/// `frames`.
+pub fn hook_fires(var: &str, frames: u32, progress: &Progress) -> bool {
+    let Ok(value) = std::env::var(var) else { return false };
+    let (n, line) = match value.split_once(':') {
+        Some((n, line)) => (n, Some(line)),
+        None => (value.as_str(), None),
+    };
+    n.parse::<u32>().is_ok_and(|n| frames >= n)
+        && progress.may_cancel()
+        && line.is_none_or(|l| progress.line().starts_with(l))
+}
 
 /// A stage to hold at and for how long, `None` until cancelled: [`HOLD`]'s value read.
 pub type Hold = Option<(Stage, Option<Duration>)>;
@@ -99,6 +117,12 @@ pub struct Progress {
     cancel: AtomicBool,
     hold: Hold,
     held: AtomicBool,
+    /// What the stage is doing, when it says (P260): "Joining the maps, pass 3", in place of the
+    /// stage's own word until the next stage.
+    doing: Mutex<Option<String>>,
+    /// The most of the bar shown yet, as `f32` bits: a world's joins count their pieces again each
+    /// pass, and the bar never goes back for it.
+    shown: AtomicU32,
 }
 
 impl Progress {
@@ -122,6 +146,8 @@ impl Progress {
             cancel: AtomicBool::new(false),
             hold,
             held: AtomicBool::new(false),
+            doing: Mutex::new(None),
+            shown: AtomicU32::new(0),
         }
     }
 
@@ -130,6 +156,7 @@ impl Progress {
         self.stage.store(stage.index() as u32, Ordering::Relaxed);
         self.n.store(0, Ordering::Relaxed);
         self.of.store(0, Ordering::Relaxed);
+        *self.doing.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.check()?;
         if let Some((at, long)) = self.hold
             && at == stage
@@ -154,6 +181,19 @@ impl Progress {
         self.of.store(of as u32, Ordering::Relaxed);
         self.n.store(n.min(of) as u32, Ordering::Relaxed);
         self.check()
+    }
+
+    /// What the stage is at, said on the line under the bar in place of the stage's word (a world's
+    /// joins built, its tiles read: P260), `n` of `of` of it done, or no count at `of` 0; a cancelled
+    /// load's error.
+    pub fn doing(&self, what: &str, n: usize, of: usize) -> Result<(), String> {
+        {
+            let mut doing = self.doing.lock().unwrap_or_else(|e| e.into_inner());
+            if doing.as_deref() != Some(what) {
+                *doing = Some(what.to_string());
+            }
+        }
+        self.count(n, of)
     }
 
     /// A cancelled load's error, between two steps of a stage.
@@ -191,15 +231,19 @@ impl Progress {
     pub fn done(&self) -> f32 {
         let (n, of) = (self.n.load(Ordering::Relaxed), self.of.load(Ordering::Relaxed));
         let within = if of == 0 { 0.0 } else { n as f32 / of as f32 };
-        (self.stage().index() as f32 + within) / Stage::ALL.len() as f32
+        let now = (self.stage().index() as f32 + within) / Stage::ALL.len() as f32;
+        // Non-negative floats order as their bits do.
+        f32::from_bits(self.shown.fetch_max(now.to_bits(), Ordering::Relaxed).max(now.to_bits()))
     }
 
     /// The line under the bar: "Ground 12 of 55", "Props".
     pub fn line(&self) -> String {
         let (n, of) = (self.n.load(Ordering::Relaxed), self.of.load(Ordering::Relaxed));
+        let doing = self.doing.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let what = doing.as_deref().unwrap_or(self.stage().label());
         match of {
-            0 => self.stage().label().to_string(),
-            _ => format!("{} {n} of {of}", self.stage().label()),
+            0 => what.to_string(),
+            _ => format!("{what} {n} of {of}"),
         }
     }
 }
@@ -243,6 +287,24 @@ pub fn on_worker<'env, T: Send + 'env, L>(
     build: impl FnOnce() -> Result<T, String> + Send + 'env,
     mut wait: impl FnMut() -> Result<Option<L>, String>,
 ) -> Result<Result<T, L>, String> {
+    on_worker_winding(progress, build, |stopping: Option<&mut L>| match stopping {
+        None => wait(),
+        Some(_) => {
+            std::thread::sleep(Duration::from_millis(1));
+            Ok(None)
+        }
+    })
+}
+
+/// [`on_worker`], with `wait` called on after it stopped the build, given what it stopped for, until
+/// the build has seen the cancel and ended (P260): so the window goes on answering — drawing the
+/// pick it went back to, hearing its close, which `wait` may turn the stop into — however long the
+/// build's step takes to end, and never sits frozen in a join. What `wait` returns then is not read.
+pub fn on_worker_winding<'env, T: Send + 'env, L>(
+    progress: &Progress,
+    build: impl FnOnce() -> Result<T, String> + Send + 'env,
+    mut wait: impl FnMut(Option<&mut L>) -> Result<Option<L>, String>,
+) -> Result<Result<T, L>, String> {
     // The browser has no second thread (P196): the build runs here, whole, and `wait` never does.
     #[cfg(target_arch = "wasm32")]
     {
@@ -260,12 +322,20 @@ pub fn on_worker<'env, T: Send + 'env, L>(
             })
             .map_err(|e| format!("the ride's load could not start a thread: {e}"))?;
         while !handle.is_finished() {
-            let stop = match wait() {
+            let mut stop = match wait(None) {
                 Ok(None) => continue,
                 Ok(Some(leave)) => Ok(Err(leave)),
                 Err(e) => Err(e),
             };
             progress.cancel();
+            while !handle.is_finished() {
+                match &mut stop {
+                    Ok(Err(leave)) => {
+                        let _ = wait(Some(leave));
+                    }
+                    _ => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
             let _ = handle.join();
             return stop;
         }
