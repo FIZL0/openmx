@@ -1608,6 +1608,9 @@ impl<P: sim_world::World> Game for World<P> {
         // ahead of the bike's own entries, as the original searches its planes first.
         let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len()];
         let order: Vec<usize> = (0..n).rev().filter(|&i| flying[i]).chain((0..n).rev().filter(|&i| !flying[i])).collect();
+        // The seats' one prop set for the pass (S197c): every seat's bike strikes it, it steps once
+        // after them all, and seat 0's, which is drawn, is every seat's.
+        let mut props = game_sim::prop_seats::Shared::take(&mut self.seats.iter_mut().map(|s| &mut s.sim).collect::<Vec<_>>());
         for me in order {
             let at = self.seats[me].sim.rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(me).map(std::mem::take).unwrap_or_default()).collect();
@@ -1639,7 +1642,7 @@ impl<P: sim_world::World> Game for World<P> {
                 .map(|p| game_sim::rider_contact::plane_bikes(&near, me, p.at, &self.place))
                 .unwrap_or_default();
             drop(near);
-            let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut() };
+            let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut(), props: props.as_mut().map(|p| (p, me)) };
             self.seats[me].pass(dt, &mut self.place, me, &spots, among);
             if let (Some(k), Some(m)) = (plane, met.take()) {
                 let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
@@ -1653,6 +1656,9 @@ impl<P: sim_world::World> Game for World<P> {
                     self.seats[f.seat].garage.plane_pushed(f);
                 }
             }
+        }
+        if let Some(p) = props {
+            p.finish(&mut self.seats.iter_mut().map(|s| &mut s.sim).collect::<Vec<_>>(), dt, &mut self.place);
         }
         true
     }

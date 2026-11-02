@@ -89,6 +89,9 @@ impl Game for Rides<'_> {
         // What each flown plane's own rays put on each bike's list (N22b), by plane, then by seat:
         // ahead of the bike's own entries, as the original searches its planes first.
         let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len()];
+        // The seats' one prop set for the tick (S197c): every seat's bike strikes it, and it steps
+        // once after them all.
+        let mut props = game_sim::prop_seats::Shared::take(&mut self.sims.iter_mut().collect::<Vec<_>>());
         for seat in order {
             let at = self.sims[seat].rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(seat).map(std::mem::take).unwrap_or_default()).collect();
@@ -149,7 +152,10 @@ impl Game for Rides<'_> {
                 }
                 continue;
             }
-            sim.step_among(dt, &hands, self.world, bump.as_mut(), &rivals);
+            match props.as_mut() {
+                Some(p) => sim.step_shared(dt, &hands, self.world, bump.as_mut(), &rivals, p, seat),
+                None => sim.step_among(dt, &hands, self.world, bump.as_mut(), &rivals),
+            };
             if !wanted.dpad_rides {
                 markers::frame_among(sim, seat, &spots, &riding, &hands);
             }
@@ -164,6 +170,9 @@ impl Game for Rides<'_> {
                     }
                 }
             }
+        }
+        if let Some(p) = props {
+            p.finish(&mut self.sims.iter_mut().collect::<Vec<_>>(), dt, self.world);
         }
     }
 

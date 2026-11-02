@@ -997,6 +997,9 @@ pub mod prop_wreck;
 /// The riding bike's wheels on the knockable props (S210): the wheel probe searches them, wakes what
 /// it strikes, and a wheel on one rides its motion.
 pub mod prop_wheel;
+/// The seats' one prop set (S197c): online's and split screen's one-player Sims strike and step the
+/// same props, and every seat holds them between ticks.
+pub mod prop_seats;
 /// The riding bike's wheels on a woken `HasPhysics` truck (S208): its `f.col` in the wheel probe's
 /// search while it is physical, and a wheel on it rides the truck's body.
 pub mod truck_wheel;

@@ -243,7 +243,12 @@ impl crate::Sim {
     /// for a rider who is up, a part whose collision is off, a ride with no ragdoll kit (the mesh is
     /// the kit's) or no props.
     pub fn wreck_strike(&mut self, i: usize) {
-        let players = self.players();
+        self.wreck_strike_as(i, self.players() + i);
+    }
+
+    /// [`crate::Sim::wreck_strike`] with the wreck bike named `side` on the props' entries: a seat's
+    /// on the seats' shared props is `seats + seat` (S197c, [`crate::prop_seats`]).
+    pub(crate) fn wreck_strike_as(&mut self, i: usize, side: usize) {
         let props = &mut self.traffic.props;
         if props.is_empty() {
             return;
@@ -254,7 +259,7 @@ impl crate::Sim {
         }
         let (Some(crash), Some(kit)) = (rider.crash.as_mut(), rider.ragdoll_kit.as_ref()) else { return };
         let Some(mesh) = kit.bike_mesh.as_deref() else { return };
-        crash.bike.struck = struck_by_props(props, &mesh.mesh, &crash.bike, players + i);
+        crash.bike.struck = struck_by_props(props, &mesh.mesh, &crash.bike, side);
     }
 
     /// Every player's wreck bike as the props' step reads it, in player order (`None` for a rider
