@@ -1660,7 +1660,7 @@ pub fn wheel_rays(front: &wheel::Wheel, rear: &wheel::Wheel) -> flight_search::R
 /// their difference on the vector unit, and the volume the product of the three full extents, each at
 /// least a hundredth, on the FPU (`z` by `x` times `y`). The radius the original also writes is the
 /// probe's reach, which [`flight_search::reach`] takes off the half extent itself.
-fn ray_node(points: &[Vf]) -> track::Node {
+pub(crate) fn ray_node(points: &[Vf]) -> track::Node {
     let (mut lo, mut hi) = ([F(points[0].x()), F(points[0].y()), F(points[0].z())], [F(points[0].x()), F(points[0].y()), F(points[0].z())]);
     for p in points {
         let p = [F(p.x()), F(p.y()), F(p.z())];
