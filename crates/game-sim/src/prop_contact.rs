@@ -25,8 +25,8 @@
 //! the props' step last ([`crate::Sim::step`]). S195's knock is the proof: `tests/prop_knock.rs`
 //! `the_bike_strikes_the_ball`.
 //!
-//! What is not here: the rider's ragdoll, the wreck bike, the plane and the other props striking a
-//! prop's `f.col`; the prop's own rays striking the bike's frame (an entry on the prop's list naming
+//! What is not here: the rider's ragdoll, the wreck bike and the plane striking a prop's `f.col` (the
+//! other props' rays do: S242, [`crate::prop_props`]); the prop's own rays striking the bike's frame (an entry on the prop's list naming
 //! the bike, and its mirror on the bike's); the broad phase's gather, which is every prop with a mesh
 //! in collection and object order, each by its distance from the rays' centre.
 //!

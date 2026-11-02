@@ -288,6 +288,8 @@ fn a_woken_prop_ticks_with_the_ride_and_rolls_back() {
         let before = hash::of(&sim);
         sim.step(dt, &Default::default(), &mut world);
         alone.tick(dt, &tables);
+        // The object's place on the node's list is the set's to give (S242).
+        alone.objects[0].filed_at = sim.traffic.props.collections[0].objects[0].filed_at;
         assert_eq!(sim.traffic.props.collections[0], alone, "tick {t}: the ride's prop and the collection alone");
         if t < 5 {
             assert_ne!(hash::of(&sim), before, "tick {t}: a swinging prop moves the hash");
