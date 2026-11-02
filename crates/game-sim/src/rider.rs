@@ -1090,6 +1090,9 @@ impl Rider {
             *crash = wreckage
                 .as_ref()
                 .map(|w| Crash::begin(ride, reason, &w.part, w.inertia, &w.wrecks, spin));
+            // After the body's copies the vehicle's entry zeroes both wheels' compression (S230),
+            // with or without a wreck body: a bike down is drawn on its free length.
+            ride.wreck_wheels();
             // The player's wreck entry asks the bike's `[Wreck]` emitter for a clank on the riding
             // bike's impulse (S173), before the body actor's entry below.
             if crash.is_some() {
@@ -1131,7 +1134,7 @@ impl Rider {
             // The caller's half of the entry, as far as this port goes: the running trick stops and
             // the queue is emptied, so a trick asked for on the way down does not fire on the way
             // out. The rest of the original's entry — the rider placed at the bike's rider point with
-            // its drop velocity, the wheel loads zeroed, the camera and the rumble — is not ported.
+            // its drop velocity, the camera and the rumble — is not ported.
             tricks.reset();
             *flight = Trick::NONE;
             // The rider's own wreck entry: the trick and the combo both lost (S79), and with the

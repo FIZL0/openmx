@@ -925,7 +925,8 @@ bike_vehicle_update         boot 0x002520d0 (dt in f12, bike) the base vehicle u
 bike_wreck_entry            boot 0x00252ca0 (bike, reason) slot +0xfc on the base vehicle: +0x748 =
 #                                           reason, +0x794 = 0, +0x74c = 0 and then the rider is placed
 #                                           — a running trick stopped, three rand() draws for the drop
-#                                           when the reason is 13, the wheel loads zeroed
+#                                           when the reason is 13, the wheel loads zeroed (both
+#                                           wheels' +0xf0 compression, not +0xf4; S230)
 player_wreck_entry          boot 0x0027b810 (bike, reason) the player's override: the jump record is
 #                                           ended, the base entry runs, the camera/rumble/announcer are
 #                                           told, then +0x14b4 = (reason != 0) and +0x12f8 += 1

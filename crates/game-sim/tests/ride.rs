@@ -971,6 +971,90 @@ fn the_two_captured_wrecks_match_their_lengths() {
     );
 }
 
+/// **S230.** A wrecked bike stands on its free length: the wreck entry zeroes both wheels'
+/// compression, and nothing writes it again while the rider is down, so the drawn fork and swingarm
+/// (`game_render::vehicle::Drive::of`) are not left in the squat the bike had under its rider.
+///
+/// The same drop as S26's, which lands the bike hard on both wheels: on the tick before the wreck
+/// the suspension is loaded, and from the wreck's own tick to the put-back both wheels read nothing.
+/// `last_compression` is the entry's to leave alone: it keeps the wreck tick's value until the
+/// put-back.
+#[test]
+fn a_wrecked_bike_springs_back_to_its_free_length() {
+    let tables = rider::Tables::build();
+    let p = Phy::read_bytes(format!("{BIKE}{WRECK_LIMITS}").as_bytes(), &tables.ride.curve);
+    let at = Vf::new(0.0, DROP, 0.0, 1.0);
+    let mut r = Rider::new(&p, mounts(&p), at, Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let part = phy::Part::read_bytes(WRECK_PART.as_bytes(), "PhysicsPart1");
+    let wrecks = phy::Wrecks::read_bytes(RIDER_WRECKS.as_bytes());
+    r.carries_wreck(part, wrecks, part.inertia(WRECK_BOX));
+    let mut world = floor();
+    let (mut before, mut down, mut lasts) = ((F::ZERO, F::ZERO), 0, None);
+    for k in 0..1200 {
+        let f = r.frame(&p, &tables, &Controls::default(), WRECK_CAPTURE_DT, &mut world);
+        if f.respawned {
+            break;
+        }
+        let (front, rear) = (r.ride.front.w.compression, r.ride.rear.w.compression);
+        if f.wreck.is_some() {
+            assert_eq!(f.wreck, Some(FLAT), "the drop's wreck");
+            assert!(before.0 > 0.0 || before.1 > 0.0, "the landing loads the suspension before the wreck: {before:?}");
+            lasts = Some((r.ride.front.w.last_compression, r.ride.rear.w.last_compression));
+            assert!(lasts.is_some_and(|(a, b)| a > 0.0 || b > 0.0), "tick {k}: the entry zeroed the last compression: {lasts:?}");
+        }
+        if r.crash.is_some() {
+            assert_eq!(Some((r.ride.front.w.last_compression, r.ride.rear.w.last_compression)), lasts, "tick {k}: the last compression while down");
+            assert_eq!((front.0.to_bits(), rear.0.to_bits()), (0, 0), "tick {k}, {down} down: the wrecked bike's compression");
+            down += 1;
+        } else {
+            before = (front, rear);
+        }
+    }
+    assert!(down > 30, "the rider was down {down} ticks");
+}
+
+/// **S230.** The original's own wreck entry, run on the human's bike in `first_recording`'s RAM:
+/// with both wheels' compression and last compression set, the entry (the vehicle's `+0xfc` slot,
+/// here with reason 11, the one P153's captured wreck rode out, thrown as a fall off the back)
+/// writes zero to the compression of both and leaves the last compression as it was —
+/// which is [`Ride::wreck_wheels`].
+#[test]
+fn the_originals_wreck_entry_zeroes_both_wheels_compression() {
+    use ps2_oracle::{Ee, Kit, addr, skip};
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let image = "first_recording.p2m2_SaveState.eeMemory.bin";
+    let path = [kit.root.join("context/states").join(image), kit.ctx("states").join(image)]
+        .into_iter()
+        .find(|p| p.exists());
+    let Some(path) = path else {
+        skip(&format!("no {image}"));
+        return;
+    };
+    let mut ee = Ee::from_ram(path).expect("the RAM image");
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let mut bike = ee.u32_at(addr("game_manager").unwrap());
+    for off in [0x34, 0x34, 0x8, 0x8, 0x8, 0x0] {
+        bike = ee.u32_at(bike + off);
+    }
+    assert_eq!(ee.u32_at(bike), 2, "the rider at {bike:#x}");
+    assert_eq!(ee.u32_at(bike + 0x748), 0, "the image's bike is riding");
+    // The two wheels, front then rear, as the vehicle holds them; `+0xf0` compression and `+0xf4`
+    // the last.
+    let wheels = [ee.u32_at(bike + 0x7b0), ee.u32_at(bike + 0x7b4)];
+    assert_eq!(wheels[1].wrapping_sub(wheels[0]), 0x920, "the two wheels at {wheels:x?}");
+    for (i, w) in wheels.into_iter().enumerate() {
+        ee.set_u32(w + 0xf0, (0.37f32 + i as f32 * 0.1).to_bits());
+        ee.set_u32(w + 0xf4, (0.41f32 + i as f32 * 0.1).to_bits());
+    }
+    let entry = ee.u32_at(ee.u32_at(bike + 0x48) + 0xfc);
+    ee.call(entry, &[bike as u64, u64::from(game_sim::trick::Wreck::ATTITUDE.0)], &[], 50_000_000);
+    assert_eq!(ee.u32_at(bike + 0x748), 11, "the entry stores its reason");
+    for (i, w) in wheels.into_iter().enumerate() {
+        assert_eq!(ee.u32_at(w + 0xf0), 0, "wheel {i}: the compression after the entry");
+        assert_eq!(ee.f32_at(w + 0xf4), 0.41 + i as f32 * 0.1, "wheel {i}: the last compression after the entry");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // (7) a minute you can ride
 // ---------------------------------------------------------------------------------------------------
@@ -5989,7 +6073,9 @@ fn md20_one_short_of_either_wrecks() {
 /// measured again after the substeps (the attachment walk's measure, which the wreck test reads), and
 /// with S115's centre of gravity put into the world origin first (an ulp, as the original rounds it), and
 /// with S118's crossup measured from the heading the substeps left (the auto-level's yaw a tick sooner), and
-/// with S140's speed measured again after the substeps (the same walk's measure; the ride does not move).
+/// with S140's speed measured again after the substeps (the same walk's measure; the ride does not move),
+/// and the gesture's with S230's wreck entry, which zeroes both wheels' compression (hashed, and the
+/// gesture's 360 ends in a wreck; the ride up to it does not move).
 #[test]
 fn md25_mx_vs_atv_rides_as_before() {
     let tables = rider::Tables::build();
@@ -6001,7 +6087,7 @@ fn md25_mx_vs_atv_rides_as_before() {
     let (flip, _) = ride_md16(&q, wheels, &tables, set, &md20_hands(true, true, (220, 40), (220, 40)), 400);
     assert_eq!((fold(&spin), fold(&flip)), (MD25_GESTURE_FOLD, MD25_DIAGONAL_FOLD));
 }
-const MD25_GESTURE_FOLD: u64 = 0xf7529726e979e7cf;
+const MD25_GESTURE_FOLD: u64 = 0xe4d29850faf9e8b9;
 const MD25_DIAGONAL_FOLD: u64 = 0xd10571ecd9dc0e29;
 
 /// MD30: a lip that gives MX vs. ATV's 360 about the air M21's captures had on that game's first
