@@ -15,6 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - run: rustup update --no-self-update stable && rustup default stable
+      # cpal's ALSA backend (alsa-sys) needs alsa.pc to build openmx on Linux
+      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends libasound2-dev
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       - run: cargo test --locked -p ps2-float -p game-sim --lib
       - run: cargo build --locked --workspace
