@@ -356,12 +356,18 @@ impl Sim {
         // And a downed rider's wreck bike against the props' rays (S197b, [`prop_wreck`]).
         self.wreck_strike(0);
         let said = if cars.is_empty() && strike.contacts.is_empty() {
-            self.rider.frame(&self.phy, &self.tables, controls, dt, world)
+            // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
+            self.lend_props(0);
+            let said = self.rider.frame(&self.phy, &self.tables, controls, dt, world);
+            self.props_back(0);
+            said
         } else {
             let props = self.traffic.props.strike(&strike);
             let mut bump = self.bump(0, mover_contact::merged(cars, strike.contacts));
             bump.props = props;
+            self.lend_props(0);
             let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], Some(&mut bump));
+            self.props_back(0);
             self.traffic.props.pushed(&bump.props);
             said
         };
@@ -489,6 +495,8 @@ impl Sim {
                     r
                 })
                 .collect();
+            // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
+            self.lend_props(i);
             let tables = &self.tables;
             let frame = if i == 0 {
                 self.rider.frame_bumped(&self.phy, tables, c, dt, world, &rivals, bump.as_mut())
@@ -496,6 +504,7 @@ impl Sim {
                 let p = &mut self.others[i - 1];
                 p.rider.frame_bumped(&p.phy, tables, c, dt, world, &rivals, bump.as_mut())
             };
+            self.props_back(i);
             if let Some(b) = &bump {
                 self.bumped(b);
                 self.traffic.props.pushed(&b.props);
@@ -976,6 +985,9 @@ pub mod prop_contact;
 /// The knockable props' rays striking the wreck bike's mesh (S197b): the entries on the props, the
 /// mirrors on the wreck bike, the push both ways.
 pub mod prop_wreck;
+/// The riding bike's wheels on the knockable props (S210): the wheel probe searches them, wakes what
+/// it strikes, and a wheel on one rides its motion.
+pub mod prop_wheel;
 
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.

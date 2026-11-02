@@ -381,8 +381,10 @@ fn the_walk_names_every_field_once() {
     // not walked. MD40 moved it to 2456: MX vs. ATV's backflip clip (`Ride::mxvatv`), boxed and walked
     // only on its handling — `None` here. S189 moved it to 2464: the bike's kept nearby search
     // (`Ride::nearby`), boxed and walked only once a world with props or plants has been searched.
+    // S210 moved it to 2472: the knockable props lent for a frame (`Ride::props`), `None` between
+    // frames and never walked.
     assert_eq!(dump.fields.len(), 631, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2464, "the ride's own size");
+    assert_eq!(std::mem::size_of::<Ride>(), 2472, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");

@@ -874,3 +874,224 @@ fn the_bike_and_the_ball_push_each_other_as_the_original() {
     eprintln!("{bad:#?}");
     assert_eq!(bad.len(), 1, "{bad:#?}");
 }
+
+// --- S210: the wheels on the props ------------------------------------------------------------------
+
+/// A knock state, its gp set; `None` with a skip line where it is not there.
+fn knock_state(kit: &Kit, name: &str) -> Option<Ee> {
+    let state = context(kit, &format!("states/s195-{name}.eeMemory.bin"));
+    let mut ee = Ee::from_ram(&state).map_err(|why| skip(&format!("{why} — research/s195/slots.py ram {name} writes it"))).ok()?;
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    Some(ee)
+}
+
+/// Every prop's physics object in the state, collection by collection, the port's order.
+fn objects(ee: &Ee) -> Vec<Vec<u32>> {
+    collections(ee)
+        .iter()
+        .map(|&c| (0..ee.u32_at(c + coll::BODIES)).map(|k| ee.u32_at(ee.u32_at(c + coll::BODIES + 8) + 4 * k)).collect())
+        .collect()
+}
+
+/// The physics object's `f.col` collidable.
+const MESH: u32 = 0x128;
+
+/// **The wheel probe takes every prop's mesh, asleep or awake** (S210): in each of S195's knock
+/// states (balls woken and asleep), every free09 prop's `f.col` is the port's collidable — category
+/// [`prop_world::COLLIDABLE`], the nearby bit up, no mover, its owner the prop's collision object —
+/// and the bike's wheel probe (`+0x7c8`) passes the pair filter against it both ways. (What its
+/// listeners do on a hit is [`the_wheel_probe_stands_on_the_props_as_the_originals`]' to prove.)
+#[test]
+fn the_wheel_probe_takes_every_props_mesh() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let filter = addr("collision_pair_filter").unwrap();
+    let mut seen = 0;
+    for name in ["knock-2881", "knock-2882", "knock-2883", "knock-2897"] {
+        let Some(mut ee) = knock_state(&kit, name) else { return };
+        let wheel = ee.u32_at(the_bike(&ee) + 0x7c8);
+        for (c, objects) in objects(&ee).iter().enumerate() {
+            for (k, &o) in objects.iter().enumerate() {
+                let mesh = ee.u32_at(o + MESH);
+                assert_ne!(mesh, 0, "{name} {c}/{k}: an f.col");
+                let what = format!("{name} {c}/{k}");
+                assert_eq!(ee.u32_at(mesh + 0x84), game_sim::prop_world::COLLIDABLE, "{what}: the category");
+                assert_eq!(ee.u8_at(mesh + 0x31) & 1, 1, "{what}: the nearby bit");
+                assert_eq!(ee.u32_at(mesh + 0x7c), 0, "{what}: no mover");
+                assert_eq!(ee.u32_at(mesh + 0x80), ee.u32_at(o + obj::COLLISION), "{what}: the owner is the collision object");
+                for nearby in [0u64, 1] {
+                    ee.call(filter, &[u64::from(wheel), u64::from(mesh), nearby], &[], 50_000_000);
+                    assert_ne!(ee.v0(), 0, "{what}: the wheel probe's filter, nearby {nearby}");
+                }
+                seen += 1;
+            }
+        }
+    }
+    eprintln!("{seen} meshes");
+    assert!(seen >= 4 * 60, "{seen} meshes");
+}
+
+/// The bike's wheel probe (`+0x7c8`) as the state holds it: its tree and its two segments.
+fn wheel_probe(ee: &Ee, p: u32) -> game_sim::flight_search::Rays {
+    let count = ee.u32_at(p + 0x168);
+    let (nodes, segs) = (ee.u32_at(p + 0x16c), ee.u32_at(p + 0x170));
+    let three = |a: u32| [0, 4, 8].map(|k| F(ee.f32_at(a + k)));
+    let mut rays = game_sim::flight_search::Rays { root: ee.u32_at(p + 0x160) as u16, ..Default::default() };
+    for i in 0..count.saturating_sub(1).max(1) {
+        let n = nodes + 0x24 * i;
+        let ch = ee.u32_at(n + 8);
+        rays.nodes.push(game_sim::track::Node {
+            volume: F(ee.f32_at(n)),
+            centre: three(n + 0xc),
+            half_extent: three(n + 0x18),
+            children: [ch as u16, (ch >> 16) as u16],
+        });
+    }
+    for i in 0..count {
+        let s = segs + 0x20 * i;
+        rays.segments.push(game_sim::ray_probe::Segment { from: quad(ee, s), to: quad(ee, s + 0x10) });
+    }
+    rays
+}
+
+/// How many placements [`the_wheel_probe_stands_on_the_props_as_the_originals`] tries a prop.
+const PLACINGS: usize = 24;
+
+/// **The wheel probe on the props answers as the original's** (S210): from knock-2897 (three balls
+/// awake, the rest asleep), the bike's node stood so one of its wheel segments passes near a prop —
+/// every prop of free09, [`PLACINGS`] times, at a random point about it and the state's turn or none —
+/// and the wheel probe searched against a list of every prop's mesh, through the original's
+/// `collide_against_search` and the port's [`prop_wheel::search`]. The record's contacts — their
+/// count, mesh, point, normal and fraction — bit for bit, and after each, which bodies are awake and
+/// which collections active (the struck listener's wake, [`PropSet::struck`]).
+#[test]
+fn the_wheel_probe_stands_on_the_props_as_the_originals() {
+    use game_sim::prop_wheel;
+    use game_sim::ray_probe;
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some(mut ee) = knock_state(&kit, "knock-2897") else { return };
+    let Some(mut free) = free09() else { return };
+    let woken = seed(&ee, &mut free.set);
+    let set = &mut free.set;
+    let bike = the_bike(&ee);
+    let wheel = ee.u32_at(bike + 0x7c8);
+    let node = ee.u32_at(bike + 0x18);
+    let search = ee.u32_at(bike + 0x7bc);
+    let rays = wheel_probe(&ee, wheel);
+    assert_eq!(rays.segments.len(), 2, "the wheel probe's two segments");
+    let objects = objects(&ee);
+    let pass = addr("collide_against_search").unwrap();
+    let moved = addr("probe_object_moved").unwrap();
+
+    // The props whose node the port has as the state does: the woken ones seeded, the rest where
+    // they were made.
+    let at_rest = |ee: &Ee, set: &PropSet, c: usize, k: usize| {
+        let n = ee.u32_at(objects[c][k] + obj::NODE);
+        let ob = &set.collections[c].objects[k];
+        (0..3).all(|r| ob.node.rows[r].to_bits() == quad(ee, n + 0x80 + 16 * r as u32).to_bits())
+            && ob.node.origin.to_bits() == quad(ee, n + 0xb0).to_bits()
+    };
+    let props: Vec<(usize, usize)> =
+        (0..objects.len()).flat_map(|c| (0..objects[c].len()).map(move |k| (c, k))).filter(|&(c, k)| at_rest(&ee, set, c, k)).collect();
+    let all = objects.iter().map(Vec::len).sum::<usize>();
+    eprintln!("woken {woken:?}; {} of {all} props placed alike", props.len());
+    assert!(props.len() + 4 >= all, "the port's props stand where the state's do");
+    // The list every search is handed: every prop's mesh, in the port's order, each within reach.
+    let list = ee.u32_at(search);
+    let meshes: Vec<u32> = objects.iter().flatten().map(|&o| ee.u32_at(o + MESH)).collect();
+    for (i, &m) in meshes.iter().enumerate() {
+        ee.set_u32(list + 8 * i as u32, m);
+        ee.set_u32(list + 8 * i as u32 + 4, 0);
+    }
+    ee.set_u32(search + 4, meshes.len() as u32);
+    let mesh_of = |ee: &Ee, owner: u32, set: &PropSet| {
+        let (c, k) = prop_wheel::named(set, owner).expect("a prop's owner word");
+        ee.u32_at(objects[c][k] + MESH)
+    };
+    let awake = |ee: &Ee, set: &PropSet| -> Vec<String> {
+        let mut bad = Vec::new();
+        for (c, objs) in objects.iter().enumerate() {
+            let flags = ee.u32_at(collections(ee)[c] + coll::FLAGS);
+            if (flags & coll::ACTIVE != 0) != set.collections[c].active {
+                bad.push(format!("collection {c} active: port {}", set.collections[c].active));
+            }
+            for (k, &o) in objs.iter().enumerate() {
+                let on = ee.u32_at(ee.u32_at(o + obj::BODY) + body_at::ENABLED) != 0;
+                if on != set.collections[c].bones[k].body.enabled {
+                    bad.push(format!("{c}/{k} enabled: port {}", set.collections[c].bones[k].body.enabled));
+                }
+            }
+        }
+        bad
+    };
+    assert_eq!(awake(&ee, set), Vec::<String>::new(), "before");
+    let enabled = |set: &PropSet| set.collections.iter().flat_map(|c| &c.bones).filter(|b| b.body.enabled).count();
+    let asleep = all - enabled(set);
+
+    let turn = [0, 1, 2].map(|r| quad(&ee, node + 0x80 + 16 * r));
+    let mut pick = 0x5210_0000_b1e5_5ed5u64;
+    let mut next = || {
+        pick ^= pick << 13;
+        pick ^= pick >> 7;
+        pick ^= pick << 17;
+        (pick >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let (mut tried, mut hit, mut both) = (0, 0, 0);
+    for &(c, k) in &props {
+        let ob = &set.collections[c].objects[k];
+        let centre = ob.node.origin;
+        for n in 0..PLACINGS {
+            let rows = if n % 2 == 0 { turn } else { [Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0)] };
+            let s = &rays.segments[n % 4 / 2];
+            let t = next();
+            let along = [0, 1, 2].map(|i| s.from.0[i] + t * (s.to.0[i] - s.from.0[i]));
+            let off = [0, 1, 2].map(|_| 3.0 * (next() - 0.5));
+            let target = [0, 1, 2].map(|i| centre.0[i] + off[i]);
+            let origin = [0, 1, 2].map(|i| target[i] - (along[0] * rows[0].0[i] + along[1] * rows[1].0[i] + along[2] * rows[2].0[i]));
+            let origin = Vf::new(origin[0], origin[1], origin[2], 1.0);
+            for (r, row) in rows.iter().chain([&origin]).enumerate() {
+                for i in 0..4 {
+                    ee.set_u32(node + 0x80 + 16 * r as u32 + 4 * i as u32, row.0[i].to_bits());
+                }
+            }
+            ee.call(moved, &[u64::from(wheel)], &[], 50_000_000);
+            ee.call(pass, &[u64::from(wheel), u64::from(search)], &[], 50_000_000);
+            let r = ee.u32_at(wheel + 0x6c);
+            let count = ee.u32_at(r + 0x8c);
+            let arr = |o: u32| ee.u32_at(r + o);
+            let original: Vec<(u32, [u32; 4], [u32; 4], u32)> = (0..count)
+                .map(|i| {
+                    (
+                        ee.u32_at(arr(0x9c) + 4 * i),
+                        quad(&ee, arr(0x98) + 16 * i).to_bits(),
+                        quad(&ee, arr(0x94) + 16 * i).to_bits(),
+                        ee.u32_at(arr(0xa8) + 4 * i),
+                    )
+                })
+                .collect();
+
+            let at = Mat4([rows[0], rows[1], rows[2], origin]);
+            let mut record =
+                ray_probe::Record { listed: true, capacity: rays.segments.len(), one_per_ray: true, ..ray_probe::Record::default() };
+            ray_probe::clear(&mut 0, &mut record);
+            let found = prop_wheel::search(&rays, &at, set, &mut record);
+            assert_eq!(found.on.len(), record.contacts.len(), "every contact is a prop's");
+            let port: Vec<(u32, [u32; 4], [u32; 4], u32)> = record
+                .contacts
+                .iter()
+                .zip(&found.on)
+                .map(|(x, &(_, owner, _))| (mesh_of(&ee, owner, set), x.point.to_bits(), x.normal.to_bits(), x.fraction.to_bits()))
+                .collect();
+            let what = format!("prop {c}/{k} placing {n}: segment at {t}, {off:?} off its origin");
+            assert_eq!(port, original, "{what}: the wheel probe's record");
+            let bad = awake(&ee, set);
+            assert_eq!(bad, Vec::<String>::new(), "{what}: who is awake after");
+            tried += 1;
+            hit += usize::from(count > 0);
+            both += usize::from(count > 1);
+        }
+    }
+    let woke = asleep - (all - enabled(set));
+    eprintln!("{tried} placings, {hit} hit a prop ({both} on both segments); {woke} of {asleep} asleep woken");
+    assert!(hit > tried / 6 && both > 10, "{hit} hits, {both} on both, of {tried}");
+    assert!(woke > asleep / 2, "{woke} of {asleep} woken");
+}
