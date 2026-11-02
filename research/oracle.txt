@@ -7487,8 +7487,11 @@ car_wreck_step              boot 0x00398820 (dt, car): vtable +0x1cc, from the m
 car_tire_probe              boot 0x0039b090 (tire, car): once a frame. Up to 5 ground queries from
 #                                           upper to lower until two normals agree (0x3db2b8c1).
 car_tire_contacts_clear     boot 0x0039af70 (tire): the tire's solid/contact words cleared.
-car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; not ported — no
-#                                           contact is set in the S149b drives, so touching stays false.
+car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted: the sort probe's hits
+#                                           on the nearby list handed to tires by quadrant (S229a,
+#                                           ported as game_sim::car::Machine::sort_contacts).
+car_tire_set_contact        boot 0x0039af90 (tire, point, normal, object, mover, hit): a sorted contact.
+car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire rays and their tree.
 # S191 — where a wheel's once-a-substep measure is taken (journal
 #   research/journal/2026-11-01-s191-nose-and-roof-recorded). wheel_contact_velocity's callers: 0x0025bf84 and
 #   0x0025c188 in wheel_tire_forces (0x0025bc70), both inside its compression > 0 branch, and 0x0025c5dc in
@@ -7613,8 +7616,34 @@ car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; n
 #   with the normal, c.ole.s against 0.707 (0x3f34fdf4): up.n <= 0.707 -> record +0x30 = 1 (the body
 #   rays search the terrain on the next frame), else 0. Then +0x2cc = record +0x40 && !+0x530.
 #   The truck needs it at fc 723: tipped past 45 deg off the struck prop, its body rays meet the terrain.
-# car_contact_sort 0x00397120 (above, still not ported — S229a): a second ray probe at car +0x558
+# car_contact_sort 0x00397120 (above, ported in S229a — below): a second ray probe at car +0x558
 #   (4 vertical rays at the tires, y 7.312 down to 0.512, category 0, flags 0x92), searched through
 #   collide_against_search 0x0011a9d0 against car +0x16c; hits handed to tires by quadrant through
 #   0x0039af90 (tire +0x110, +0x120, +0x130, +0x1ac, +0x1b0, +0x1c8). Tire +0x1ac/+0x1b0 are never
 #   set in any s149b row (truck, baja, buggy), so nothing yet proves it.
+# S229a — the tire contact sort, journal research/journal/2026-11-02-s229a-tire-contact-sort.
+# Ported as game_sim::car::{sort_rays, sorted_tire, Machine::sort_contacts, Wheel::set_contact} and the
+# sorted / terrain-held branches of Wheel::probe; tests/car_drive.rs replays S229a's baja-garage drive
+# (free07's garage slab, all four tires on it, 355 tire-rows sorted): every row bit-exact, row by row
+# and carried; the_sort_rays_are_the_bajas checks the built rays and tree word for word.
+# car_preforce order: controls, the tires' clear (0x0039af70 x4: +0xb4 solid, +0xb8 sorted, +0x1ac,
+#   +0x1b0 = 0; +0xbc terrain-held is kept frame to frame), the sort, the four probes, then +0xc4.
+# car_sort_rays_build, called last in car_phy_load: per tire FL, FR, RL, RR a ray from mount (+0x80) +
+#   (0, MaxCompression +0x3c) down to mount - (0, radius +0x1f8), through 0x001eab40 (probe, 4, rays, 0,
+#   0). Its tree (0x00111160 build, 0x001104c0 split, 0x0010f780 a stable partition, greater first)
+#   leaves the rays in the image as FR, FL, RR, RL at probe +0x170 (0x20 each), count +0x168, three
+#   nodes of 0x24 at +0x16c (volume, radius, child half-words, centre, half extent): root [1, 2],
+#   fronts [0x8000, 0x8001], rears [0x8002, 0x8003]. The probe is made in the car ctor (class 0x451a90,
+#   ignore lists of car +0x174/+0x178/+0x17c).
+# The sort: probe vt +0xac with car +0x5c0 (the machine matrix), collide_against_search on car +0x16c;
+#   per hit the ray's from.z > 0 picks a front tire, from.x > 0 the right one (FR +0x54c, FL +0x548,
+#   RR +0x554, RL +0x550); 0x0039af90 sets point +0x110, normal +0x120, +0x1ac object, +0x1b0 mover,
+#   +0x1c8 hit and +0xb8 = 1 (its +0x130/+0x70 are rewritten by the probe). The struck object's
+#   listeners (hit +0x80 -> +0x1f8 -> +0xf4 list, vt +0xc) are not ported.
+# car_tire_probe after its loop: a sorted tire whose normal faces the car's up (+0x5a0) under 0.707
+#   (mula/madda/madd) loses it. If the terrain is not below the lower end: an unsorted tire takes the
+#   terrain (solid); a sorted one sets +0xbc when its axle (unit upper - lower) faces the sorted normal
+#   under 0.707, or when unheld and the terrain stands over 0.1 above the sorted point; a held one is
+#   released when the sorted point is not over 0.1 above the terrain. Held: solid, terrain point and
+#   normal, sorted cleared.
+# car_tire_suspension: the contact path runs on solid || sorted; its bottom-out push reads solid (+0xb4), not sorted.

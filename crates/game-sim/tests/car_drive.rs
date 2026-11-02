@@ -227,6 +227,8 @@ mod wheel_at {
     pub const MOUNT: usize = 0x80;
     pub const TOP_WHEEL_SPEED: usize = 0xa0;
     pub const SOLID: usize = 0xb4;
+    pub const SORTED: usize = 0xb8;
+    pub const TERRAIN_HELD: usize = 0xbc;
     pub const GROUNDED: usize = 0xc0;
     pub const LONE_FRONT: usize = 0xc4;
     pub const HANDED: usize = 0xc8;
@@ -328,10 +330,11 @@ impl DriveRow {
     }
 }
 
-fn load_drive_rows(kit: &Kit, name: &str) -> Option<Vec<DriveRow>> {
-    let path = kit.ctx("capture").join("s149b").join(format!("{name}.csv"));
+/// A captured drive, `context/capture/<task>/<name>` + `.csv`.
+fn load_drive_rows_in(kit: &Kit, task: &str, name: &str) -> Option<Vec<DriveRow>> {
+    let path = kit.ctx("capture").join(task).join(format!("{name}.csv"));
     let Ok(text) = std::fs::read_to_string(&path) else {
-        skip(&format!("no {} — S149b's capture.sh records it", path.display()));
+        skip(&format!("no {} — {}'s capture.sh records it", path.display(), task.to_uppercase()));
         return None;
     };
     let mut lines = text.lines();
@@ -553,6 +556,8 @@ fn wheel_of(r: &DriveRow, k: usize) -> Wheel {
         local_velocity: v(LOCAL_VELOCITY),
         frame: Mat4([0, 16, 32, 48].map(|i| v(FRAME + i))),
         lone_front: flag(LONE_FRONT),
+        sorted: flag(SORTED),
+        terrain_held: flag(TERRAIN_HELD),
     }
 }
 
@@ -562,6 +567,8 @@ fn wheel_words(w: &Wheel) -> Vec<(&'static str, usize, u32)> {
     let b = |x: F| x.to_bits();
     let mut out = vec![
         ("solid", SOLID, w.solid as u32),
+        ("sorted", SORTED, w.sorted as u32),
+        ("terrain held", TERRAIN_HELD, w.terrain_held as u32),
         ("grounded", GROUNDED, w.s.grounded as u32),
         ("lone front", LONE_FRONT, w.lone_front as u32),
         ("handed", HANDED, w.s.handoff.is_some() as u32),
@@ -761,6 +768,8 @@ struct Tally {
     /// Rows whose collision object touched something, and the contacts they had between them.
     touched: usize,
     contacts: usize,
+    /// Tires the original's contact sort left on a scenery mesh (S229a), over the rows compared.
+    sorted: usize,
     bad: BTreeMap<String, usize>,
     first: Vec<String>,
 }
@@ -803,10 +812,16 @@ fn take_input(m: &mut Machine, r: &DriveRow) {
 /// ([`Machine::step_struck`]); its nearby list is gathered at the seeded row's pose when the machine
 /// is seeded, as the frame before's post left it.
 fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
+    replay_in(kind, "s149b", name, name, carry)
+}
+
+/// [`replay`] of `context/capture/<task>/<name>.csv`, the car's constants out of S149a's switched
+/// image of the `car` drive.
+fn replay_in(kind: Kind, task: &str, name: &str, car_image: &str, carry: bool) -> Option<Tally> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
-    let rows = load_drive_rows(&kit, name)?;
+    let rows = load_drive_rows_in(&kit, task, name)?;
     let car = Car::read_bytes(&car_file(&kit, kind)?, kind);
-    let image = kit.ctx("states").join(format!("s149a-{name}-switched.ee.bin"));
+    let image = kit.ctx("states").join(format!("s149a-{car_image}-switched.ee.bin"));
     if !image.exists() {
         skip(&format!("no {} — S149a's switch recipe makes it", image.display()));
         return None;
@@ -883,6 +898,7 @@ fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
             for (what, o, got) in engine_words(&m.drivetrain) {
                 t.word(what.to_string(), fc, got, e.w(o));
             }
+            t.sorted += (0..4).filter(|&k| r1.tire(k, wheel_at::SORTED) != 0).count();
             let torn = TORN.contains(&(name, fc));
             t.torn += torn as usize;
             for (k, w) in m.wheels.iter().enumerate().filter(|_| !torn) {
@@ -898,15 +914,20 @@ fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
 
 fn check(kind: Kind, name: &str, carry: bool) {
     let Some(t) = replay(kind, name, carry) else { return };
+    report(name, carry, t);
+}
+
+fn report(name: &str, carry: bool, t: Tally) {
     assert!(t.rows > 100, "{name}: only {} rows replayed", t.rows);
     let mut report = format!(
-        "{name}{}: {} rows ({} skipped, {} torn), {} touching with {} contacts\n",
+        "{name}{}: {} rows ({} skipped, {} torn), {} touching with {} contacts, {} tires sorted\n",
         if carry { " carried" } else { "" },
         t.rows,
         t.skipped,
         t.torn,
         t.touched,
-        t.contacts
+        t.contacts,
+        t.sorted
     );
     for (what, n) in &t.bad {
         report += &format!("  {what}: {n}\n");
@@ -946,6 +967,66 @@ fn the_buggy_drive_runs_on_its_own() {
 #[test]
 fn the_truck_drive_runs_on_its_own() {
     check(Kind::MonsterTruck, "truck", true);
+}
+
+// --- the tire contact sort (S229a) -----------------------------------------------------------------
+
+/// S229a's drive: the baja backed into free07's garage, a walled slab 0.7 ft above the ground, braked
+/// to a stop with all four tires on it, and driven out (`context/capture/s229a/baja-garage` + `.csv`,
+/// research/journal/2026-11-02-s229a-tire-contact-sort). The tires ride the slab on the contact
+/// sort's hits; the terrain takes them back as they roll off.
+fn check_garage(carry: bool) {
+    let Some(t) = replay_in(Kind::Baja, "s229a", "baja-garage", "baja", carry) else { return };
+    assert!(t.sorted > 100, "baja-garage: only {} tires sorted", t.sorted);
+    report("baja-garage", carry, t);
+}
+
+#[test]
+fn the_garage_drive_replays() {
+    check_garage(false);
+}
+
+#[test]
+fn the_garage_drive_runs_on_its_own() {
+    check_garage(true);
+}
+
+/// The contact sort's ray probe as the port builds it ([`game_sim::car::sort_rays`]) against the
+/// baja's in S229a's image taken after the garage drive: its four rays and its tree's three nodes
+/// (`+0x168` count, `+0x16c` nodes of 0x24 bytes: volume, radius, two child half-words, centre,
+/// half extent), every word.
+#[test]
+fn the_sort_rays_are_the_bajas() {
+    let Some(kit) = Kit::load().map_err(|w| skip(&w)).ok() else { return };
+    let image = kit.ctx("states").join("s229a-garage-end.ee.bin");
+    if !image.exists() {
+        skip(&format!("no {} — saved at the end of S229a's capture", image.display()));
+        return;
+    }
+    let Some(bytes) = car_file(&kit, Kind::Baja) else { return };
+    let car = Car::read_bytes(&bytes, Kind::Baja);
+    let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+    let mounts: [Vf; 4] = [0, 1, 2, 3].map(|k| quad(&ee, ee.u32_at(CAR + 0x548 + 4 * k) + wheel_at::MOUNT as u32));
+    let rays = game_sim::car::sort_rays(mounts, &car.tires);
+    let probe = ee.u32_at(CAR + 0x558);
+    assert_eq!(ee.u32_at(probe + 0x168), 4, "the ray count");
+    let at = ee.u32_at(probe + 0x170);
+    for (i, s) in rays.segments.iter().enumerate() {
+        let a = at + 0x20 * i as u32;
+        assert_eq!((s.from.to_bits(), s.to.to_bits()), (quad(&ee, a).to_bits(), quad(&ee, a + 0x10).to_bits()), "ray {i}");
+    }
+    let nodes = ee.u32_at(probe + 0x16c);
+    assert_eq!(rays.nodes.len(), 3);
+    for (i, n) in rays.nodes.iter().enumerate() {
+        let a = nodes + 0x24 * i as u32;
+        let f = |o: u32| ee.u32_at(a + o);
+        assert_eq!(n.volume.to_bits(), f(0), "node {i}'s volume");
+        assert_eq!(n.children.map(u32::from), [f(8) & 0xffff, f(8) >> 16], "node {i}'s children");
+        for k in 0..3 {
+            assert_eq!(n.centre[k].to_bits(), f(0xc + 4 * k as u32), "node {i}'s centre {k}");
+            assert_eq!(n.half_extent[k].to_bits(), f(0x18 + 4 * k as u32), "node {i}'s half extent {k}");
+        }
+    }
 }
 
 /// The car's collision object as the part's loader builds it ([`game_sim::car::collision`]).

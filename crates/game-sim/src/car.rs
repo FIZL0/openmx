@@ -1762,6 +1762,12 @@ pub fn travel_cofg(car: &Car, body: &mut crate::biplane::Body, last: &mut Vf, hu
 const PROBE_AGREE: f32 = f32::from_bits(0x3db2_b8c1);
 /// The most times the probe asks.
 const PROBE_TRIES: i32 = 5;
+/// The cosine (45°) a sorted contact's normal must stand within of the car's up, and of the axle,
+/// to stay the tire's: `0x3f34fdf4`.
+const SORTED_FACING: f32 = 0.707;
+/// How far (ft) the terrain must rise past a sorted contact to hold the tire, and fall below it to
+/// let go.
+const TERRAIN_HOLD: f32 = 0.1;
 /// Below this forward speed, off the gas, gravity's pull along the ground is held off.
 const ANTI_SLIDE_SPEED: f32 = 10.0;
 /// The preload winds up only climbing faster than this and going faster than [`PRELOAD_SPEED`].
@@ -1814,6 +1820,13 @@ pub struct Wheel {
     pub frame: crate::math::Mat4,
     /// A front tire of a car only its fronts touch: its force puts no moment on the body.
     pub lone_front: bool,
+    /// The contact sort handed the tire this frame's ground (S229a, [`Machine::sort_contacts`]):
+    /// `ground_point` and `ground_normal` are a scenery mesh's, where the tire's sort ray met it.
+    pub sorted: bool,
+    /// The terrain holds the tire over its sorted contact: taken once the terrain under the axle
+    /// stands 0.1 ft above the sorted point (or at once when the sorted normal leans 45° or more off
+    /// the axle), let go once it is 0.1 ft below. Kept from frame to frame.
+    pub terrain_held: bool,
 }
 
 /// What the car's step asks of whatever owns it.
@@ -1927,8 +1940,12 @@ impl Wheel {
     /// The probe, once a frame: the axle's bottom along last frame's normal, and the ground under it,
     /// asked again from the new normal until two agree within 5° or it has asked five times. The
     /// wheel is solid on ground at or above its bottom.
-    pub fn probe(&mut self, tire: &Tire, body: &crate::biplane::Body, world: &mut impl crate::world::World, curve: &CurveTable) {
-        use crate::contact::{dot, scaled, unit};
+    ///
+    /// A tire the contact sort handed a contact ([`Wheel::sorted`]) keeps it unless the sorted normal
+    /// is 45° or more off the car's `up` (`up · n < 0.707`); with ground at or above its bottom, it
+    /// takes the terrain instead only while the terrain holds it ([`Wheel::terrain_held`]).
+    pub fn probe(&mut self, tire: &Tire, body: &crate::biplane::Body, up: Vf, world: &mut impl crate::world::World, curve: &CurveTable) {
+        use crate::contact::{dot, minus, scaled, unit};
         let agree = curve.coarse(F(PROBE_AGREE)).0;
         self.solid = false;
         self.upper = self.upper_point(body);
@@ -1949,11 +1966,44 @@ impl Wheel {
             self.probe_normal = normal;
             self.probes += 1;
         }
-        if !(point.y() < self.lower.y()) {
-            self.solid = true;
-            self.ground_point = point;
-            self.ground_normal = normal;
+        let facing = |a: Vf, b: Vf| Acc::mula(a.x(), b.x()).madda(a.y(), b.y()).madd(a.z(), b.z());
+        if self.sorted && facing(up, self.ground_normal) < F(SORTED_FACING) {
+            self.sorted = false;
         }
+        if point.y() < self.lower.y() {
+            return;
+        }
+        if self.sorted {
+            let (ground, sorted) = (F(point.y()), F(self.ground_point.y()));
+            let axle = unit(minus(self.upper, self.lower));
+            if facing(axle, self.ground_normal) < F(SORTED_FACING) {
+                self.terrain_held = true;
+            } else if !self.terrain_held {
+                if !(ground <= F(TERRAIN_HOLD) + sorted) {
+                    self.terrain_held = true;
+                }
+            } else if !(sorted <= F(TERRAIN_HOLD) + ground) {
+                self.terrain_held = false;
+            }
+            if !self.terrain_held {
+                return;
+            }
+            self.sorted = false;
+        }
+        self.solid = true;
+        self.ground_point = point;
+        self.ground_normal = normal;
+    }
+
+    /// The contact sort's hand-off (S229a): a sort ray's hit on a scenery mesh, its point and unit
+    /// normal, as this frame's ground. The struck object and its mover are not kept: no capture has
+    /// a tire sorted onto anything that moves ([`Machine::sort_contacts`]). The normal in the car's
+    /// frame and the drop along it the original works out here too are worked out again by the
+    /// probe, which always follows.
+    pub fn set_contact(&mut self, point: Vf, normal: Vf) {
+        self.ground_point = point;
+        self.ground_normal = normal;
+        self.sorted = true;
     }
 
     /// The contact point's velocity: the body's plus the spin's about the centre, and the body's in
@@ -1977,10 +2027,12 @@ impl Wheel {
         use crate::contact::{dot, plus, scaled};
         self.s.compression = F::ZERO;
         self.s.grounded = false;
-        if self.solid {
+        if self.solid || self.sorted {
             self.upper = self.upper_point(body);
             self.lower_point(body);
-            let ground = Ground { point: self.ground_point, normal: self.ground_normal, solid: true };
+            // Only the terrain bottoms the tire out whatever the depth; a sorted contact does when
+            // the axle's bottom is not twice through it.
+            let ground = Ground { point: self.ground_point, normal: self.ground_normal, solid: self.solid };
             let push = tire.contact(&mut self.s, (self.upper, self.lower), Some(&ground));
             if self.s.grounded {
                 self.contact_velocity(body);
@@ -2109,6 +2161,19 @@ impl Machine {
 
     /// Once a frame before the substeps: the controls, the centre of mass's travel, and the probes.
     pub fn preforce(&mut self, car: &Car, world: &mut impl crate::world::World, dt: F, curve: &CurveTable) {
+        self.preforce_with(car, world, dt, curve, |_, _| {});
+    }
+
+    /// [`Machine::preforce`] with the contact sort (`sort`) between the tires' clear and their probes,
+    /// as [`Machine::step_struck`] has it.
+    fn preforce_with<W: crate::world::World>(
+        &mut self,
+        car: &Car,
+        world: &mut W,
+        dt: F,
+        curve: &CurveTable,
+        sort: impl FnOnce(&mut Machine, &mut W),
+    ) {
         self.body.clear_shock_peak();
         let reversing = self.drivetrain.reverse;
         let speed = F(self.velocity.z());
@@ -2123,12 +2188,16 @@ impl Machine {
         travel_cofg(car, &mut self.body, &mut self.last_cofg, self.human, self.controls.lean);
         for w in &mut self.wheels {
             w.solid = false;
+            w.sorted = false;
         }
+        sort(self, world);
+        let up = self.up;
         for (w, tire) in self.wheels.iter_mut().zip(&car.tires) {
-            w.probe(tire, &self.body, world, curve);
+            w.probe(tire, &self.body, up, world, curve);
         }
-        let front = self.wheels[FRONT_LEFT].solid || self.wheels[FRONT_RIGHT].solid;
-        let rear = self.wheels[REAR_LEFT].solid || self.wheels[REAR_RIGHT].solid;
+        let down = |w: &Wheel| w.solid || w.sorted;
+        let front = down(&self.wheels[FRONT_LEFT]) || down(&self.wheels[FRONT_RIGHT]);
+        let rear = down(&self.wheels[REAR_LEFT]) || down(&self.wheels[REAR_RIGHT]);
         for w in &mut self.wheels[..REAR_LEFT] {
             w.lone_front = front && !rear;
         }
@@ -2393,7 +2462,10 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
         i32::from(list != crate::biplane::List::Constraints)
     }
     fn preforce(&mut self, _: i32, dt: F) {
-        self.m.preforce(self.car, self.world, dt, self.curve);
+        match &mut self.struck {
+            None => self.m.preforce(self.car, self.world, dt, self.curve),
+            Some((c, _)) => self.m.preforce_with(self.car, self.world, dt, self.curve, |m, world| m.sort_contacts(self.car, c, world)),
+        }
     }
     fn force(&mut self, _: i32, h: F) {
         match &mut self.struck {
@@ -2562,6 +2634,8 @@ impl Machine {
                 local_velocity: Vf::default(),
                 frame: crate::math::Mat4::IDENTITY,
                 lone_front: false,
+                sorted: false,
+                terrain_held: false,
             }
         });
         let launch_time = car.clutch_torque_scale_time.unwrap_or(F::ZERO);
@@ -2676,10 +2750,8 @@ impl Machine {
     /// is the car's for the frame; every substep, gravity and then the object's response on the
     /// record's contacts with impulses ([`crate::contact::resolve`]: the body wrapper's force
     /// listener, ahead of the car's own forces); and in the measure the body wrapper's post, which
-    /// gathers the nearby list again where the body now stands.
-    ///
-    /// Not here: the tire probe's contact sort (the car's second ray probe, four rays down through
-    /// the tires, searched against the same nearby list), whose hits would hand a tire its ground.
+    /// gathers the nearby list again where the body now stands. The preforce's tire contact sort
+    /// ([`Machine::sort_contacts`], S229a) searches the same nearby list.
     #[allow(clippy::too_many_arguments)]
     pub fn step_struck(
         &mut self,
@@ -2706,5 +2778,74 @@ impl Machine {
         let (_, n) = world.ground(self.body.position);
         let u = self.up;
         Acc::mula(u.x(), n.x()).madda(u.y(), n.y()).madd(u.z(), n.z()) <= F(0.707)
+    }
+}
+
+// --- the tire contact sort (S229a) -----------------------------------------------------------------
+
+/// **The contact sort's ray probe** (S229a), off the tires' `mounts` ([`TIRES`] order): the car's second ray probe, which the `.phy` loader
+/// builds once after the tires are read. One ray a tire, in the car's frame, straight down its `y`
+/// from the suspension's fully compressed top (the mount plus `MaxCompression`) to a radius below the
+/// mount; its tree a root over all four and a node over each axle's pair, which the build's stable
+/// partition (the greater half first) leaves front then rear and, within each, right (`+x`) then
+/// left. Checked against the baja's in S229a's image; the build's general split, which a list of
+/// four never reaches past, is not ported.
+pub fn sort_rays(mounts: [Vf; 4], tires: &[Tire; 4]) -> crate::flight_search::Rays {
+    let segment = |k: usize| {
+        let (m, t) = (mounts[k], &tires[k]);
+        let top = F(m.y()) + t.max_compression;
+        let bottom = F(m.y()) - t.radius;
+        crate::ray_probe::Segment { from: Vf::new(m.x(), top.0, m.z(), m.w()), to: Vf::new(m.x(), bottom.0, m.z(), m.w()) }
+    };
+    let segments: Vec<_> = [FRONT_RIGHT, FRONT_LEFT, REAR_RIGHT, REAR_LEFT].map(segment).into();
+    let ends = |s: &[crate::ray_probe::Segment]| s.iter().flat_map(|s| [s.from, s.to]).collect::<Vec<_>>();
+    let mut root = crate::ride::ray_node(&ends(&segments));
+    root.children = [1, 2];
+    let mut front = crate::ride::ray_node(&ends(&segments[..2]));
+    front.children = [0x8000, 0x8001];
+    let mut rear = crate::ride::ray_node(&ends(&segments[2..]));
+    rear.children = [0x8002, 0x8003];
+    crate::flight_search::Rays { root: 0, nodes: vec![root, front, rear], segments }
+}
+
+/// The tire a sort ray's hit goes to, by where the ray hangs (`from`, the car's frame): forward of
+/// the origin a front, right of it (`+x`) the right one; zero is rear and left.
+pub fn sorted_tire(from: Vf) -> usize {
+    match (F(from.z()) > F::ZERO, F(from.x()) > F::ZERO) {
+        (true, true) => FRONT_RIGHT,
+        (true, false) => FRONT_LEFT,
+        (false, true) => REAR_RIGHT,
+        (false, false) => REAR_LEFT,
+    }
+}
+
+impl Machine {
+    /// **The tire contact sort** (S229a), once a frame between the tires' clear and their probes: the
+    /// sort's ray probe ([`sort_rays`]) placed at the car's frame as the last measure left it
+    /// ([`Machine::matrix`]) and searched against the collision object's nearby list as last
+    /// gathered (the scenery's meshes and plants; never the terrain), each ray's hit handed to its
+    /// tire ([`sorted_tire`], [`Wheel::set_contact`]).
+    ///
+    /// Not here: a struck object's own listeners, which the original calls on every hit, and the
+    /// struck object and mover a tire keeps for its contact's velocity — S229a's capture sorts onto a
+    /// still prop only, whose ground velocity is zero as the terrain's is.
+    pub fn sort_contacts(&mut self, car: &Car, collision: &mut Collision, world: &mut impl crate::world::World) {
+        use crate::contact_search::Search;
+        use crate::flight_search::{self, Scene};
+        let rays = sort_rays(self.wheels.each_ref().map(|w| w.mount), &car.tires);
+        let node = crate::rider_contact::node(&self.matrix);
+        let world: &mut dyn crate::world::World = world;
+        let (field, props, trees) = flight_search::near_world(world, &rays, &node, &mut collision.nearby);
+        if props.is_none() && trees.is_none() {
+            return;
+        }
+        let bounds = field.as_deref().map(|f| {
+            let (lo, hi) = (f.min(), f.max());
+            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+        });
+        let mut scene = Scene::flown(props, trees, None, bounds, &rays, &node, &mut collision.nearby);
+        for hit in scene.rays(true) {
+            self.wheels[sorted_tire(hit.from)].set_contact(hit.point, hit.normal);
+        }
     }
 }
