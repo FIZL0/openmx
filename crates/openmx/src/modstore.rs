@@ -61,6 +61,8 @@ pub const MAX_TOTAL: u64 = 0xf000_0000;
 /// The biggest `mod.zip` (no zip64: its offsets are 32 bits).
 pub const MAX_ZIP: u64 = u32::MAX as u64;
 const MAX_META: u64 = 64 << 10;
+/// A zip's `mod.json` (MD68): a world's runs to 476 KB (world_ultra), nearly all of it its joins list.
+const MAX_MOD_JSON: u64 = 1 << 20;
 const MAX_PREVIEW: u64 = 4 << 20;
 const MAX_LISTING: u64 = 32 << 20;
 /// A preview's widest, as the grid shows it.
@@ -586,7 +588,7 @@ impl ZipDir {
     /// build reads, its id and kind the store's.
     pub fn check_mod_json(&self, read: &mut ReadAt, meta: &Meta) -> Result<(), String> {
         let f = self.files.iter().find(|f| f.name == "mod.json").ok_or("no mod.json in the zip")?;
-        check_mod_json(&self.file(f, MAX_META, read)?, meta)
+        check_mod_json(&self.file(f, MAX_MOD_JSON, read)?, meta)
     }
 }
 

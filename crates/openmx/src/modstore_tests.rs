@@ -767,3 +767,55 @@ fn a_texture_pack_round_trips() {
     assert_eq!(crate::textures::scan(&mods, &[], &[]).packs, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A world's `mod.json` padded with `n` joins (one per join piece, as openmx-mods writes them).
+fn world_json(id: &str, n: usize) -> Vec<u8> {
+    let joins: Vec<String> = (0..n).map(|i| format!(r#"{{"piece": "terrain/t{i:05}.trn", "edge": [{i}, {}, 0.25, 0.75], "to": "terrain/t{:05}.trn"}}"#, i + 1, i + 1)).collect();
+    let mut s = String::from_utf8(mod_json(id, "world")).unwrap();
+    s.pop();
+    s.push_str(&format!(r#", "joins": [{}]}}"#, joins.join(", ")));
+    s.into_bytes()
+}
+
+/// MD68: the world mods' `mod.json` (94 KB to 476 KB, nearly all joins) has its own cap of 1 MiB,
+/// not meta.json's 64 KiB.
+#[test]
+fn a_world_mod_json_of_500_kb_is_taken_and_over_1_mib_is_not() {
+    let id = "world_big";
+    let big = world_json(id, 5400);
+    assert!((500_000..MAX_MOD_JSON as usize).contains(&big.len()), "{}", big.len());
+    let z = zip(&[put("mod.json", &big), put("terrain/t00000.trn", b"trn")]);
+    let got = unpack(&z, &meta(id, Kind::World, &z)).unwrap();
+    assert_eq!(got[0].1, big);
+
+    let huge = world_json(id, 11_500);
+    assert!(huge.len() as u64 > MAX_MOD_JSON, "{}", huge.len());
+    let z = zip(&[put("mod.json", &huge), put("terrain/t00000.trn", b"trn")]);
+    assert_eq!(unpack(&z, &meta(id, Kind::World, &z)).unwrap_err(), "`mod.json` is too big");
+}
+
+/// MD68: the store's `meta.json` keeps its 64 KiB cap: one padded past it is not listed, one padded
+/// to just under it is.
+#[test]
+fn a_meta_json_over_64_kib_is_refused() {
+    let fake = Fake::start();
+    let (dir, mods) = scratch("bigmeta");
+    let (za, zb) = (zip(&track("meta_under", b"scene")), zip(&track("meta_over", b"scene")));
+    let (ma, mb) = (meta("meta_under", Kind::Track, &za), meta("meta_over", Kind::Track, &zb));
+    fake.tree("main", &["meta_under", "meta_over"]);
+    fake.publish("main", &ma, &za, None);
+    fake.publish("main", &mb, &zb, None);
+    fake.pulls(&[]);
+    let padded = |m: &Meta, len: usize| {
+        let mut b = serde_json::to_vec(m).unwrap();
+        b.resize(len, b' ');
+        b
+    };
+    fake.set(&Fake::file("main", "mods/meta_under/meta.json"), 200, padded(&ma, MAX_META as usize));
+    fake.set(&Fake::file("main", "mods/meta_over/meta.json"), 200, padded(&mb, MAX_META as usize + 1));
+
+    let s = Store::new(&fake.base, &dir, &mods);
+    let l = listing(&s, true);
+    assert_eq!(l.iter().map(|e| e.meta.id.as_str()).collect::<Vec<_>>(), ["meta_under"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
