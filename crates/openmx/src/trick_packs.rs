@@ -30,10 +30,11 @@ pub struct Pack {
 /// The first trick pack in `mods/tricks/`, by folder name, or why there is none.
 pub fn find(mods: &Path) -> Result<Pack, String> {
     let dir = mods.join(TRICKS_DIR);
-    let mut folders: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let mut folders: Vec<PathBuf> = crate::files::list(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.join("mod.json").is_file())
+        .into_iter()
+        .map(|e| e.path)
+        .filter(|p| crate::files::is_file(p.join("mod.json")))
         .collect();
     folders.sort();
     let mut why = Vec::new();
@@ -52,10 +53,11 @@ pub fn find(mods: &Path) -> Result<Pack, String> {
 /// or why there is none.
 pub fn by_id(mods: &Path, id: &str) -> Result<Pack, String> {
     let dir = mods.join(TRICKS_DIR);
-    let mut folders: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let mut folders: Vec<PathBuf> = crate::files::list(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.join("mod.json").is_file())
+        .into_iter()
+        .map(|e| e.path)
+        .filter(|p| crate::files::is_file(p.join("mod.json")))
         .collect();
     folders.sort();
     let mut why = Vec::new();
@@ -72,7 +74,7 @@ pub fn by_id(mods: &Path, id: &str) -> Result<Pack, String> {
 
 /// `Ok(None)` for a mod that is not a trick pack.
 fn read(folder: &Path) -> Result<Option<Pack>, String> {
-    let text = std::fs::read_to_string(folder.join("mod.json")).map_err(|e| format!("mod.json: {e}"))?;
+    let text = crate::files::read_to_string(folder.join("mod.json")).map_err(|e| format!("mod.json: {e}"))?;
     let json = Json::parse(&text).map_err(|e| format!("mod.json: {e}"))?;
     if json.get("kind").and_then(Json::str) != Some("tricks") {
         return Ok(None);
@@ -86,7 +88,7 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
     // The motocross rider's when the pack does not say: every pack import-tricks writes says `MX`.
     let rider = first.and_then(|r| r.get("rider")).and_then(Json::str).unwrap_or("MX").to_owned();
     let table = with_bpb(file(folder, table));
-    let bytes = std::fs::read(&table).map_err(|e| format!("{}: {e}", table.display()))?;
+    let bytes = crate::files::read(&table).map_err(|e| format!("{}: {e}", table.display()))?;
     let rows = trick_pack::table(&bytes).map_err(|e| format!("{}: {e}", table.display()))?;
     let mut phys = Vec::new();
     if let Some(Json::Arr(list)) = json.get("phy") {
@@ -106,7 +108,7 @@ fn with_bpb(path: PathBuf) -> PathBuf {
     let mut bpb = path.clone().into_os_string();
     bpb.push(".bpb");
     let bpb = PathBuf::from(bpb);
-    if bpb.is_file() { bpb } else { path }
+    if crate::files::is_file(&bpb) { bpb } else { path }
 }
 
 /// A pack's file by its `/`-separated name, kept inside the pack's folder.
@@ -129,7 +131,7 @@ impl Pack {
         let Some((_, path)) = self.phys.iter().find(|(n, _)| *n == want) else {
             return Err(format!("handling: {} has no {want}, so this bike handles as the original's", self.id));
         };
-        let bytes = std::fs::read(path).map_err(|e| format!("handling: {}: {e}; the original's", path.display()))?;
+        let bytes = crate::files::read(path).map_err(|e| format!("handling: {}: {e}; the original's", path.display()))?;
         Ok((game_sim::handling::mxvatv_phy(&bytes, curve), format!("handling: MX vs. ATV's, {want} from {}", self.id)))
     }
 
@@ -141,7 +143,7 @@ impl Pack {
         let Some((_, path)) = self.phys.iter().find(|(n, _)| *n == want) else {
             return format!("tricks: {} has no {want}, so this bike keeps the original's tricks", self.id);
         };
-        let ini = match std::fs::read(path) {
+        let ini = match crate::files::read(path) {
             Ok(bytes) => Ini::parse_bytes(&bytes),
             Err(e) => return format!("tricks: {}: {e}; the original's tricks", path.display()),
         };
@@ -165,14 +167,14 @@ impl Pack {
         for (name, path) in files {
             all.extend(name.as_bytes());
             all.push(0);
-            all.extend(std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
+            all.extend(crate::files::read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
         }
         Ok(openmx_net::handshake::fnv(&all))
     }
 
     /// The pack's clips, for the rider and the bike to bind (MD21).
     pub fn clips(&self) -> Result<game_render::anim::PackClips, String> {
-        game_render::anim::PackClips::open(&self.folder, &self.rider)
+        Ok(game_render::anim::PackClips::of(crate::files::folder(&self.folder)?, &self.rider))
     }
 
     /// What the ride shows of the pack's tricks (MD21): which of its extras and 360s found no clip

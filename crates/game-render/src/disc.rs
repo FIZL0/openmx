@@ -181,7 +181,13 @@ struct Folder {
 enum Files {
     Disk(PathBuf),
     Memory(Vec<Vec<u8>>),
+    /// Read by the caller's function, by the member's path under the folder (`/`-separated): the
+    /// browser's storage, which lists and reads a file without opening a path (P217).
+    Reader(PathReader),
 }
+
+/// [`Res::reader`]'s reads.
+type PathReader = Box<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync>;
 
 impl Members for Folder {
     fn entries(&self) -> &[Entry] {
@@ -198,6 +204,7 @@ impl Members for Folder {
                 .get(e.at as usize)
                 .cloned()
                 .ok_or_else(|| format!("the folder has no file {}", e.name)),
+            Files::Reader(read) => read(&e.name.replace('\\', "/")),
         }
     }
 }
@@ -232,6 +239,19 @@ impl Res {
             bytes.push(data);
         }
         Res::of_folder(Folder { entries, files: Files::Memory(bytes) })
+    }
+
+    /// The same, out of a listing of `(path, size)` whose bytes `read` gives by path when asked
+    /// (P217): the browser's mods folder, read a file at a time as the disk's is.
+    pub fn reader(files: Vec<(String, u32)>, read: impl Fn(&str) -> Result<Vec<u8>, String> + Send + Sync + 'static) -> Result<Res, String> {
+        let mut files = files;
+        files.sort();
+        let entries = files
+            .into_iter()
+            .enumerate()
+            .map(|(i, (path, size))| Entry { name: path.replace('/', "\\"), at: i as u64, size })
+            .collect();
+        Res::of_folder(Folder { entries, files: Files::Reader(Box::new(read)) })
     }
 
     fn of_folder(folder: Folder) -> Result<Res, String> {

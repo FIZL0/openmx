@@ -35,10 +35,10 @@ impl PackMusic {
         let (mut songs, mut log) = (Vec::new(), Vec::new());
         let dir = mods.map(|m| m.join(MUSIC_DIR));
         let mut folders: Vec<PathBuf> = dir
-            .and_then(|d| std::fs::read_dir(d).ok())
+            .and_then(|d| crate::files::list(d).ok())
             .into_iter()
-            .flat_map(|r| r.flatten().map(|e| e.path()))
-            .filter(|p| p.join("mod.json").is_file())
+            .flat_map(|r| r.into_iter().map(|e| e.path))
+            .filter(|p| crate::files::is_file(p.join("mod.json")))
             .collect();
         folders.sort();
         for folder in folders {
@@ -58,7 +58,7 @@ impl PackMusic {
 
 /// One pack's songs onto `songs`; `Ok` too for a mod of another kind, which adds none.
 fn read_pack(folder: &Path, songs: &mut Vec<Song>, log: &mut Vec<String>) -> Result<(), String> {
-    let text = std::fs::read_to_string(folder.join("mod.json")).map_err(|e| format!("mod.json: {e}"))?;
+    let text = crate::files::read_to_string(folder.join("mod.json")).map_err(|e| format!("mod.json: {e}"))?;
     let json = Json::parse(&text).map_err(|e| format!("mod.json: {e}"))?;
     if json.get("kind").and_then(Json::str) != Some("music") {
         return Ok(());
@@ -86,7 +86,7 @@ fn read_pack(folder: &Path, songs: &mut Vec<Song>, log: &mut Vec<String>) -> Res
             continue;
         }
         let path = parts.iter().fold(folder.to_path_buf(), |p, part| p.join(part));
-        if !path.is_file() {
+        if !crate::files::is_file(&path) {
             log.push(format!("music: music/{id} song {}: no {file}", n + 1));
             continue;
         }
@@ -114,7 +114,7 @@ impl MusicSource for PackMusic {
 
     fn open(&self, id: &str) -> Result<Box<dyn Stream>, String> {
         let song = self.songs.iter().find(|s| s.track.id == id).ok_or_else(|| format!("no song {id}"))?;
-        let bytes = std::fs::read(&song.file).map_err(|e| format!("{}: {e}", song.file.display()))?;
+        let bytes = crate::files::read(&song.file).map_err(|e| format!("{}: {e}", song.file.display()))?;
         Ok(Box::new(Adpcm::vig(bytes)))
     }
 

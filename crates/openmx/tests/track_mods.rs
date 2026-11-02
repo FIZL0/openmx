@@ -8,6 +8,9 @@
 //! own binary headless, as `tests/switch_tape.rs`'s do, and skip without the disc, since the bike, its
 //! physics and the rider are the disc's.
 
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/track_mods.rs"]
 #[allow(dead_code)]
 mod track_mods;

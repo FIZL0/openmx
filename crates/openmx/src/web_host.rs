@@ -55,6 +55,13 @@ extern "C" {
     /// A file of the page's storage written, or (`None`) removed.
     #[wasm_bindgen(js_namespace = openmx)]
     fn file_write(path: &str, bytes: Option<Vec<u8>>);
+    /// Every file of the page's storage under the folder `path` (P217: the installed mods too), a line
+    /// each, `<path under it, /-separated>\t<size>`.
+    #[wasm_bindgen(js_namespace = openmx)]
+    fn file_tree(path: &str) -> String;
+    /// A file's size, or -1 for none.
+    #[wasm_bindgen(js_namespace = openmx)]
+    fn file_size(path: &str) -> f64;
     /// A promise of the page's next animation frame.
     #[wasm_bindgen(js_namespace = openmx)]
     fn frame() -> js_sys::Promise;
@@ -539,3 +546,12 @@ pub fn write(path: &std::path::Path, bytes: Option<Vec<u8>>) {
     file_write(&path.to_string_lossy(), bytes)
 }
 
+/// [`crate::files`]' listing of a folder of the page's storage, `file_tree`'s lines.
+pub fn tree(path: &std::path::Path) -> String {
+    file_tree(&path.to_string_lossy())
+}
+
+pub fn size(path: &std::path::Path) -> Option<u64> {
+    let n = file_size(&path.to_string_lossy());
+    (n >= 0.0).then_some(n as u64)
+}

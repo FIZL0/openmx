@@ -14,6 +14,9 @@ mod clock;
 #[allow(unused)]
 #[path = "../src/thread.rs"]
 mod thread;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[path = "../src/track_mods.rs"]
 #[allow(dead_code)]
 mod track_mods;

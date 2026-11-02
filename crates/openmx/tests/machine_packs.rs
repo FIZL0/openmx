@@ -6,6 +6,9 @@
 #[allow(dead_code)]
 #[path = "../src/machine_packs.rs"]
 mod machine_packs;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
 #[allow(dead_code)]
 #[path = "../src/track_mods.rs"]
 mod track_mods;

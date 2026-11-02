@@ -33,13 +33,15 @@ use openmx_web::{TRACK, rgba, start_line};
 /// (P196, `src/web_host.rs`); and which GPU API draws and its first frame (P48, `src/web_gpu.rs`); and the mod
 /// store's downloads into OPFS, its unpacking and a page opened for Report (P198, `src/modstore.rs`); and the
 /// newer build the page saw, the last one started and a reload (P193); and its Hugging Face token kept by
-/// the page and what is pasted into it (P199, `src/modstore_up.rs`).
-const HOST_CALLS: [&str; 31] = [
+/// the page and what is pasted into it (P199, `src/modstore_up.rs`); and a folder of its files listed (P217).
+const HOST_CALLS: [&str; 33] = [
     "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame", "gpu", "drawn",
     "store_fetch", "store_got", "store_read", "store_close", "store_put", "store_drop", "open_url", "latest", "last_build", "reload",
     "token", "token_keep", "pasted",
     // P223: the device as the page sees it, and the display's measured rate.
     "device", "refresh",
+    // P217: the installed mods (OPFS `mods/`) listed for the shell's mods readers.
+    "file_tree", "file_size",
 ];
 
 /// The module wasm-bindgen's glue answers the imports under (`--target web`).
@@ -611,7 +613,8 @@ fn a_pad_the_browser_shows_on_a_press_rides() {
 /// `--screen store` pointed at a fake store on the page's own loopback server, the disc picked; one
 /// Space (Cross) on the store's only card downloads its mod.zip through the redirect to the "CDN" into
 /// OPFS, checks and unpacks it, and the track is in OPFS `mods/tracks/<id>/` with its store.json,
-/// the download gone. The module is `tools/web.sh --check`'s. Skips without the disc, node or
+/// the download gone. Then (P217) the shell lists it, out of OPFS, and the page opened again with
+/// `--track` on it rides it. The module is `tools/web.sh --check`'s. Skips without the disc, node or
 /// chromium.
 #[test]
 fn the_browser_installs_from_the_store() {
@@ -642,13 +645,19 @@ fn the_browser_installs_from_the_store() {
     assert_eq!(field("state"), "started", "{text}");
     assert_eq!(
         list("files"),
-        r#""tracks/web_store_track/MC01.scn","tracks/web_store_track/mod.json","tracks/web_store_track/previews/0.png","tracks/web_store_track/store.json""#,
+        r#""tracks/web_store_track/Col/mdwall.col","tracks/web_store_track/Env/MDFLAT/MDFLAT.ps2.trn","tracks/web_store_track/Env/MDFLAT/MDFLAT.scn","tracks/web_store_track/filler.dat","tracks/web_store_track/mod.json","tracks/web_store_track/previews/0.png","tracks/web_store_track/store.json""#,
         "the mod's files, and its store.json, in OPFS mods/: {text}"
     );
     assert_eq!(field("stamp"), field("sha"), "store.json names the zip it came from: {text}");
     assert_eq!(list("left"), "", "the download is gone from OPFS store/: {text}");
     // one GET at the store and one at the CDN it sends to, neither asking a Range (B242)
     assert_eq!((field("zips").as_str(), field("ranges").as_str()), ("2", "0"), "{text}");
+    // P217: the install read OPFS mods/ again, so Free Ride's list has the track; and the page rides it
+    assert!(field("listed").starts_with("mods: 1 tracks"), "the shell's track list did not see the install: {text}");
+    assert!(field("rode").starts_with("mods: web_store_track (Web Store Track) from"), "the ride did not load the installed track: {text}");
+    assert_eq!(field("ride"), "started", "the ride on the installed track failed: {text}");
+    let frames: f64 = field("frames").parse().unwrap_or(0.0);
+    assert!(frames > 0.0, "the ride on the installed track drew nothing: {text}");
 }
 
 /// The in-game update notice (P193, `tests/web/update.mjs`): with a ride on the canvas a changed

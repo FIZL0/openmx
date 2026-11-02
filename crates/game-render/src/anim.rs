@@ -944,7 +944,11 @@ impl PackClips {
     /// Open a pack's folder for the rider whose prefix is `prefix` (`riders[n].rider` in its
     /// `mod.json`).
     pub fn open(folder: &std::path::Path, prefix: &str) -> Result<PackClips, String> {
-        let res = Res::folder(folder)?;
+        Ok(PackClips::of(Res::folder(folder)?, prefix))
+    }
+
+    /// The same, out of the pack's folder already opened (P217: the browser's, [`Res::reader`]).
+    pub fn of(res: Res, prefix: &str) -> PackClips {
         let mut claimed: Vec<Motion> = Vec::new();
         let mcfs: Vec<String> = res
             .entries()
@@ -963,7 +967,7 @@ impl PackClips {
                 }
             }
         }
-        Ok(PackClips { res, prefix: prefix.to_string(), claimed })
+        PackClips { res, prefix: prefix.to_string(), claimed }
     }
 
     /// The rider clip's name for a stunt: `MX_rider_9oclockindianair`.
