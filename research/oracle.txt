@@ -7100,6 +7100,35 @@ euler_to_quat boot 0x0013f410 (out, angles*): half angles through wrap and the c
 kiowa_forces boot 0x0038e300 (heli, h in f12): unless +0x3d4, vt +0x1a0; 0x0015af40(heli+0x50, h);
 #                                 unless +0x3d4, rotor then aero
 kiowa_preforce boot 0x0038e2b0 (heli, dt in f12): 0x0015b050(heli+0x50), vt +0x19c
+# S220a — the Kiowa's measure listener and crash test, research/journal/*-s220a-kiowa-measure.
+# Ported as game_sim::kiowa (Measure, Crash, rotor_in_ground, spin_blades); tests/kiowa.rs proves
+# each on S148's state. Vtable slots (base +0x45c690 / MX +0x45c980, heli+0x48): +0x198 put-back
+# (0x0038cb30 / 0x00392230), +0x1ac measure, +0x1b0 throw the blades (empty / 0x00392340: three rand
+# draws a blade), +0x1b4 crash test (both), +0x1b8 wreck (0x0038eeb0 / 0x00392b60), +0x1bc unwreck
+# (0x0038efc0 / 0x00392c10).
+# Corrects S148: *(heli+0x170)+0x40, the controller's "pilot flag", is the collision record's
+#   touching flag (the plane's contact word); +0x100 its entry count, +0x108 the entries (0x80 apart:
+#   word 0 the kind, +0x24 a float the touchdown wants below 1), +0x1fc its surface (flags +0x84).
+# Heli: +0x190 gravity scale, +0x194 the scale the throw halves (unwreck doubles it back); +0x3d4
+#   reason (1 crashed, 13 thrown), +0x3d8 wrecked, +0x3dc down, +0x3e0 MinWreckSpeed, +0x3e4 clock,
+#   +0x3e8 WreckTime, +0x3ec WreckGravity; +0x420 last touching flag; +0x458 rotor collision object
+#   (spheres +0x170, 0x20 apart, centre +0x10; count +0x168; contact flags byte +0x116 bit 5, struck
+#   **(+0x6c)+0x9c); +0x45c scene (terrain at +0x3b4); +0x460 surface mask, +0x464 struck mask;
+#   +0x150 world (ground queries); +0x54c touchdown sound; +0x470 speed, +0x474 alpha, +0x478 beta,
+#   +0x480 world rates, +0x490 body velocity, +0x4a0 forward, +0x4b0 up, +0x4c0 Euler, +0x4d0 matrix.
+#   MX: +0xd1c rotor node (byte 3 bit 6 hidden), +0xd40 wrecked-blade node, +0xe58 rotor angle.
+kiowa_measure boot 0x0038e380 (heli, dt in f12): 0x0015b070(heli+0x50), the figures, vt +0x1b4,
+#                                 then the touchdown sound (0x001b30e0, 0x003dd0a0)
+kiowa_wreck_check boot 0x0038e910 (heli, dt in f12): edge throw, rotor in ground / struck / speed,
+#                                 the wrecked clock
+kiowa_measure_mx boot 0x003922e0 (heli, dt in f12): kiowa_measure, then 0x003920b0, 0x00391d50,
+#                                 0x00392010, 0x00391f10
+kiowa_blade_spin boot 0x003920b0 (dt in f12, heli): +0xe58 += 27 dt unless the rotor is hidden; nodes
+# 0x00391d50, 0x00392010 and 0x00391f10 copy body and measure figures into presentation records
+#   (+0x7a4/+0x874/+0x934, a node table +0xc54.. and +0xc90, +0x560..+0x6fc); not ported.
+node_set_rotation boot 0x001b2e50 (node, angle in f12, axis*): replaces the rotation, keeps the position
+node_world_matrix boot 0x001b2a50 (node, 0, out*): the node's world matrix, 4 quads
+node_set_matrix boot 0x001b29c0 (node, matrix*): copies the 4 quads into the node
 # S149 — the car machines' .phy loader (MXCar.cpp), research/journal/*-s149-car-machines. All boot.
 # Ported as game_sim::car::Car::read; tests/car_phy.rs proves it word for word against the monster
 # truck parked in first_recording's RAM image (object 0x00e1e210, vtable word at +0x48 = 0x0045ed50,

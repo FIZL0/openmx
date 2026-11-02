@@ -775,3 +775,433 @@ fn the_preforce_listener_is_the_originals() {
     Kiowa::default().preforce(&mut port);
     same_lanes("the shock peak", 0, port.shock_peak, [0, 4, 8, 12].map(|k| ee.f32_at(body + BODY_SHOCK_PEAK + k)), 4);
 }
+
+// --- S220a: the measure listener, its crash test and the MX rotor's spin --------------------------------
+
+const VTABLE: u32 = 0x48;
+const CRASH_SLOT: u32 = 0x1b4;
+const WRECK_SLOT: u32 = 0x1b8;
+const DEBRIS_SLOT: u32 = 0x1b0;
+const RESET_SLOT: u32 = 0x198;
+const BODY_COFG: u32 = 0x180;
+
+/// The helicopter's measure and crash fields, by offset (research/oracle.txt S220a).
+mod measure_at {
+    pub const WORLD: u32 = 0x150;
+    pub const THROW_SCALE: u32 = 0x194;
+    pub const DOWN: u32 = 0x3dc;
+    pub const MIN_WRECK_SPEED: u32 = 0x3e0;
+    pub const CLOCK: u32 = 0x3e4;
+    pub const WRECK_TIME: u32 = 0x3e8;
+    pub const WAS_TOUCHING: u32 = 0x420;
+    pub const ROTOR_COLLISION: u32 = 0x458;
+    pub const SCENE: u32 = 0x45c;
+    pub const SURFACE_MASK: u32 = 0x460;
+    pub const STRUCK_MASK: u32 = 0x464;
+    pub const SOUND: u32 = 0x54c;
+    pub const ROWS: [(&str, u32); 9] = [
+        ("the world rates", 0x480),
+        ("the body velocity", 0x490),
+        ("the forward row", 0x4a0),
+        ("the up row", 0x4b0),
+        ("the Euler angles", 0x4c0),
+        ("the matrix row 0", 0x4d0),
+        ("the matrix row 1", 0x4e0),
+        ("the matrix row 2", 0x4f0),
+        ("the matrix row 3", 0x500),
+    ];
+    pub const MATRIX: u32 = 0x4d0;
+    /// In the collision record (heli +0x170).
+    pub const TOUCHING: u32 = 0x40;
+    pub const ENTRIES: u32 = 0x100;
+    pub const ENTRY_ARRAY: u32 = 0x108;
+    pub const SURFACE: u32 = 0x1fc;
+    pub const FLAGS: u32 = 0x84;
+    /// In the rotor's collision object.
+    pub const SPHERES: u32 = 0x170;
+    pub const SPHERE_COUNT: u32 = 0x168;
+    pub const CONTACT_BYTE: u32 = 0x116;
+    pub const CONTACTS: u32 = 0x6c;
+    /// The terrain, from the scene; its four extent floats.
+    pub const TERRAIN: u32 = 0x3b4;
+    pub const EXTENT: u32 = 0x530;
+    /// MX: the rotor's node, the wrecked blade's, the rotor's angle.
+    pub const ROTOR_NODE: u32 = 0xd1c;
+    pub const BLADE_NODE: u32 = 0xd40;
+    pub const ROTOR_ANGLE: u32 = 0xe58;
+}
+
+const SCRATCH: u32 = 0x0100_0000;
+
+fn put(ee: &mut Ee, a: u32, v: Vf) {
+    set_quad(ee, a, [v.x(), v.y(), v.z(), v.w()]);
+}
+
+/// One bit of the byte at `a`, through the word it is in.
+fn set_bit(ee: &mut Ee, a: u32, bit: u8, on: bool) {
+    let (word, shift) = (a & !3, 8 * (a & 3));
+    let mask = u32::from(bit) << shift;
+    let v = ee.u32_at(word) & !mask;
+    ee.set_u32(word, v | if on { mask } else { 0 });
+}
+
+/// A vector of the given size, its `w` 1.
+fn vector(pick: &mut Pick, size: f32) -> Vf {
+    Vf::new(pick.range(-size, size), pick.range(-size, size), pick.range(-size, size), 1.0)
+}
+
+/// `v` turned by the unit quaternion `q` in host floats: only to aim a generated velocity.
+fn host_turn(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let [x, y, z, w] = q;
+    let t = [2.0 * (y * v[2] - z * v[1]), 2.0 * (z * v[0] - x * v[2]), 2.0 * (x * v[1] - y * v[0])];
+    [
+        v[0] + w * t[0] + (y * t[2] - z * t[1]),
+        v[1] + w * t[1] + (z * t[0] - x * t[2]),
+        v[2] + w * t[2] + (x * t[1] - y * t[0]),
+    ]
+}
+
+#[test]
+fn the_measure_is_the_originals() {
+    use game_sim::air::AcosTable;
+    use game_sim::kiowa::{Measure, Touch};
+    let Some(mut ee) = heli() else { return };
+    let func = addr("kiowa_measure").unwrap();
+    let table = AcosTable::build();
+    let vt = ee.u32_at(HELI + VTABLE);
+    // The body wrapper's own measure and the crash test are not the measure's figures: they do nothing
+    // here, so the body the measure reads is the one written. The touchdown's sound is counted.
+    for a in [addr("body_wrapper_post").unwrap(), ee.u32_at(vt + CRASH_SLOT), addr("sound_trigger").unwrap()] {
+        ee.hooks.insert(a, Box::new(|_| {}));
+    }
+    let sounded = Rc::new(RefCell::new(0));
+    let s = sounded.clone();
+    ee.hooks.insert(addr("touchdown_sound").unwrap(), Box::new(move |_| *s.borrow_mut() += 1));
+    let body = ee.u32_at(HELI + at::BODY);
+    let record = ee.u32_at(HELI + at::PILOT);
+    let sound = ee.u32_at(HELI + measure_at::SOUND);
+    ee.set_u32(record + measure_at::ENTRY_ARRAY, SCRATCH);
+    let mut pick = Pick(0x5220_a000_3ea5_0001);
+    let (mut kept, mut flipped, mut downs) = (0, 0, 0);
+    for case in 0..CASES {
+        let q = orientation(&mut pick);
+        let tail = pick.one_in(3);
+        let abeam = !tail && pick.one_in(8);
+        let q = if abeam { [0.0, 0.0, 0.0, 1.0] } else { q };
+        let v = if abeam {
+            // straight out to the side: beta exactly at the table's middle, either side
+            Vf::new(if pick.one_in(2) { 30.0 } else { -30.0 }, if pick.one_in(2) { 0.0 } else { pick.range(-5.0, 5.0) }, 0.0, 1.0)
+        } else if tail {
+            // flying backwards, nearly straight: beta about pi, either side
+            let back = [pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), -pick.range(5.0, 80.0)];
+            let w = host_turn(q, back);
+            Vf::new(w[0], w[1], w[2], 1.0)
+        } else {
+            match pick.next() % 6 {
+                0 => Vf::new(0.0, 0.0, 0.0, 1.0),
+                1 => vector(&mut pick, 1e-3),
+                _ => vector(&mut pick, 150.0),
+            }
+        };
+        let port_body = Body {
+            position: vector(&mut pick, 4000.0),
+            velocity: v,
+            quat: Vf::new(q[0], q[1], q[2], q[3]),
+            rates: Vf::new(pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), pick.range(-1.0, 1.0)),
+            cofg: if pick.one_in(3) { Vf::new(0.0, 5.5, 0.0, 1.0) } else { vector(&mut pick, 8.0) },
+            ..Body::default()
+        };
+        put(&mut ee, body + BODY_POS, port_body.position);
+        put(&mut ee, body + BODY_VEL, port_body.velocity);
+        put(&mut ee, body + BODY_QUAT, port_body.quat);
+        put(&mut ee, body + BODY_RATES, port_body.rates);
+        put(&mut ee, body + BODY_COFG, port_body.cofg);
+        let old = match pick.next() % 4 {
+            0 => 0.0,
+            1 => pick.range(-3.1415927, 3.1415927),
+            _ => (if pick.one_in(2) { 1.0 } else { -1.0 }) * pick.range(2.9, 3.1415927),
+        };
+        let old = if abeam { (if pick.one_in(2) { 1.0 } else { -1.0 }) * pick.range(1.5, 1.65) } else { old };
+        ee.set_f32(HELI + SPEED + 8, old);
+        let was = pick.one_in(2);
+        ee.set_u32(HELI + measure_at::WAS_TOUCHING, u32::from(was));
+        let touching = !pick.one_in(3);
+        ee.set_u32(record + measure_at::TOUCHING, u32::from(touching));
+        let entries: Vec<Touch> = (0..pick.next() % 5)
+            .map(|_| Touch {
+                kind: if pick.one_in(3) { 1 } else { 0 },
+                t: F(match pick.next() % 4 {
+                    0 => 1.0,
+                    _ => pick.range(0.0, 2.0),
+                }),
+            })
+            .collect();
+        ee.set_u32(record + measure_at::ENTRIES, entries.len() as u32);
+        for (k, e) in entries.iter().enumerate() {
+            ee.set_u32(SCRATCH + 0x80 * k as u32, e.kind);
+            ee.set_f32(SCRATCH + 0x80 * k as u32 + 0x24, e.t.to_f32());
+        }
+        let has_sound = !pick.one_in(4);
+        ee.set_u32(HELI + measure_at::SOUND, if has_sound { sound } else { 0 });
+        *sounded.borrow_mut() = 0;
+
+        let mut port = Measure {
+            beta: F(old),
+            forward: quad(&ee, HELI + 0x4a0),
+            up: quad(&ee, HELI + 0x4b0),
+            was_touching: was,
+            ..Measure::default()
+        };
+        ee.call(func, &[u64::from(HELI)], &[1.0 / 30.0], BUDGET);
+        port.flight(&port_body, &table);
+        let down = port.touchdown(touching, entries.iter().copied());
+
+        same("the speed", case, port.speed, ee.f32_at(HELI + SPEED));
+        same("alpha", case, port.alpha, ee.f32_at(HELI + SPEED + 4));
+        same("beta", case, port.beta, ee.f32_at(HELI + SPEED + 8));
+        let got = [port.world_rates, port.velocity, port.forward, port.up, port.euler]
+            .into_iter()
+            .chain(port.matrix.0);
+        for ((name, o), got) in measure_at::ROWS.into_iter().zip(got) {
+            same_lanes(name, case, got, [0, 4, 8, 12].map(|k| ee.f32_at(HELI + o + k)), 4);
+        }
+        assert_eq!(ee.u32_at(HELI + measure_at::WAS_TOUCHING), u32::from(port.was_touching), "case {case}: the touching flag");
+        assert_eq!(*sounded.borrow(), u32::from(down && has_sound), "case {case}: the touchdown sound");
+        // and what the force listener reads is what the measure left
+        assert_eq!(port.readings(ee.u32_at(HELI + at::FLOWN) != 0, touching, f(&ee, HELI + at::GRAVITY_SCALE)),
+                   readings_of(&ee), "case {case}: the readings");
+        if port.beta.to_f32() * old < 0.0 {
+            flipped += 1;
+        }
+        if port.beta.to_bits() == old.to_bits() && old != 0.0 && tail {
+            kept += 1;
+        }
+        downs += usize::from(down);
+    }
+    assert!(kept > CASES / 50 && flipped > CASES / 50 && downs > CASES / 50,
+            "{kept} kept betas, {flipped} flipped, {downs} touchdowns: the cases miss a branch");
+    println!("the measure: {CASES} cases, bit-exact ({kept} betas kept, {flipped} flipped, {downs} touchdowns)");
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    Wreck(u32),
+    Debris,
+    Reset,
+}
+
+#[test]
+fn the_crash_test_is_the_originals() {
+    use game_sim::biplane::Area;
+    use game_sim::kiowa::{Crash, CrashContact, Strike, rotor_in_ground};
+    use game_sim::math::Mat4;
+    use game_sim::rng::Rng;
+    let Some(mut ee) = heli() else { return };
+    let func = addr("kiowa_wreck_check").unwrap();
+    let state = addr("rand_state").unwrap();
+    let vt = ee.u32_at(HELI + VTABLE);
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let a = asked.clone();
+    ee.hooks.insert(ee.u32_at(vt + WRECK_SLOT), Box::new(move |ee| {
+        let (heli, reason) = (ee.r(4) as u32, ee.r(5) as u32);
+        ee.set_u32(heli + WRECKED, reason);
+        ee.set_u32(heli + measure_at::DOWN, 0);
+        a.borrow_mut().push(Asked::Wreck(reason));
+    }));
+    let a = asked.clone();
+    ee.hooks.insert(ee.u32_at(vt + DEBRIS_SLOT), Box::new(move |_| a.borrow_mut().push(Asked::Debris)));
+    let a = asked.clone();
+    ee.hooks.insert(ee.u32_at(vt + RESET_SLOT), Box::new(move |_| a.borrow_mut().push(Asked::Reset)));
+    // The ground answers each point with this case's height, and says what it was asked.
+    let ground = Rc::new(RefCell::new((0.0f32, Vec::<[f32; 4]>::new())));
+    let g = ground.clone();
+    ee.hooks.insert(addr("ground_query").unwrap(), Box::new(move |ee| {
+        let p = ee.r(5) as u32;
+        let mut g = g.borrow_mut();
+        g.1.push([0, 4, 8, 12].map(|k| ee.f32_at(p + k)));
+        ee.set_f32(p + 4, g.0);
+    }));
+    // The rotor's contact search is not the test's: its answer is written below.
+    let collision = ee.u32_at(HELI + measure_at::ROTOR_COLLISION);
+    ee.hooks.insert(ee.u32_at(ee.u32_at(collision + 0x38) + 0xac), Box::new(|_| {}));
+    ee.hooks.insert(addr("collide_against_search").unwrap(), Box::new(|_| {}));
+    let (contacts, list, struck_at, surface_at) = (SCRATCH, SCRATCH + 0x100, SCRATCH + 0x200, SCRATCH + 0x300);
+    ee.set_u32(collision + measure_at::CONTACTS, contacts);
+    ee.set_u32(contacts + 0x9c, list);
+    let world = ee.u32_at(HELI + measure_at::WORLD);
+    let record = ee.u32_at(HELI + at::PILOT);
+    let body = ee.u32_at(HELI + at::BODY);
+    let terrain = ee.u32_at(ee.u32_at(HELI + measure_at::SCENE) + measure_at::TERRAIN);
+    let shipped_extent: Vec<f32> = (0..4).map(|k| ee.f32_at(terrain + measure_at::EXTENT + 4 * k)).collect();
+    let spheres = ee.u32_at(collision + measure_at::SPHERES);
+    let centres: Vec<Vf> = (0..ee.u32_at(collision + measure_at::SPHERE_COUNT)).map(|k| quad(&ee, spheres + 0x20 * k + 0x10)).collect();
+    let (surface_mask, struck_mask) = (ee.u32_at(HELI + measure_at::SURFACE_MASK), ee.u32_at(HELI + measure_at::STRUCK_MASK));
+    let flags = |pick: &mut Pick, mask: u32| if pick.one_in(2) { mask } else { 1u32 << (pick.next() % 32) & !mask };
+    let mut pick = Pick(0x5220_a000_c4a5_0001);
+    let (mut thrown, mut crashed, mut grounded, mut recovered, mut debris) = (0, 0, 0, 0, 0);
+    for case in 0..CASES {
+        let extent: Vec<f32> = match pick.next() % 3 {
+            0 => vec![3.0, 3.0, pick.range(5.0, 12.0), pick.range(5.0, 12.0)],
+            _ => shipped_extent.iter().map(|&x| x * pick.range(0.5, 2.0)).collect(),
+        };
+        for (k, x) in extent.iter().enumerate() {
+            ee.set_f32(terrain + measure_at::EXTENT + 4 * k as u32, *x);
+        }
+        let area = Area::new(F(extent[0]), F(extent[1]), F(extent[2]), F(extent[3]));
+        let (w, d) = (area.width.to_f32(), area.depth.to_f32());
+        let coord = |extent: f32, pick: &mut Pick| match pick.next() % 6 {
+            0 => pick.range(-200.0, 400.0),
+            1 => extent + pick.range(-400.0, 200.0),
+            2 => [150.0, extent - 150.0, 0.5 * extent][(pick.next() % 3) as usize],
+            _ => pick.range(0.0, extent),
+        };
+        let pos = Vf::new(coord(w, &mut pick), pick.range(-100.0, 2000.0), coord(d, &mut pick), 1.0);
+        let pos = if pick.one_in(200) { Vf::new(0.5 * w, pos.y(), 0.5 * d, 1.0) } else { pos };
+        let mut vel = vector(&mut pick, 200.0);
+        let mut rates = Vf::new(pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), 0.0);
+        put(&mut ee, body + BODY_POS, pos);
+        put(&mut ee, body + BODY_VEL, vel);
+        put(&mut ee, body + BODY_RATES, rates);
+        // The measure's matrix: some turn, at the body.
+        let mut rows = [0; 3].map(|_| vector(&mut pick, 1.0));
+        for r in &mut rows {
+            r[3] = 0.0;
+        }
+        let matrix = Mat4([rows[0], rows[1], rows[2], pos]);
+        for (k, r) in matrix.0.iter().enumerate() {
+            put(&mut ee, HELI + measure_at::MATRIX + 16 * k as u32, *r);
+        }
+
+        let mut port = Crash {
+            reason: match pick.next() % 8 {
+                0..=3 => 0,
+                4 | 5 => 1,
+                6 => 13,
+                _ => 2,
+            },
+            down: pick.one_in(2),
+            min_wreck_speed: F(pick.around(73.333)),
+            wreck_time: F(if pick.one_in(16) { -1.0 } else { pick.range(0.0, 6.0) }),
+            clock: F(if pick.one_in(8) { 0.0 } else { pick.range(0.0, 7.0) }),
+        };
+        ee.set_u32(HELI + WRECKED, port.reason);
+        ee.set_u32(HELI + measure_at::DOWN, u32::from(port.down));
+        ee.set_f32(HELI + measure_at::MIN_WRECK_SPEED, port.min_wreck_speed.to_f32());
+        ee.set_f32(HELI + measure_at::WRECK_TIME, port.wreck_time.to_f32());
+        ee.set_f32(HELI + measure_at::CLOCK, port.clock.to_f32());
+        let mut throw_scale = F(pick.around(1.0));
+        ee.set_f32(HELI + measure_at::THROW_SCALE, throw_scale.to_f32());
+
+        // The record's contact and surface, the rotor's spheres against the ground, its struck object.
+        let has_surface = pick.one_in(2);
+        let surface_flags = flags(&mut pick, surface_mask);
+        let c = CrashContact {
+            touching: pick.one_in(2),
+            ignored: has_surface && surface_flags & surface_mask != 0,
+            speed: F(if pick.one_in(50) { f32::NAN } else { pick.range(0.0, 150.0) }),
+        };
+        ee.set_u32(record + measure_at::TOUCHING, u32::from(c.touching));
+        ee.set_u32(record + measure_at::SURFACE, if has_surface { surface_at } else { 0 });
+        ee.set_u32(surface_at + measure_at::FLAGS, surface_flags);
+        ee.set_f32(HELI + SPEED, c.speed.to_f32());
+        let has_collision = !pick.one_in(8);
+        let has_world = !pick.one_in(8);
+        ee.set_u32(HELI + measure_at::ROTOR_COLLISION, if has_collision { collision } else { 0 });
+        ee.set_u32(HELI + measure_at::WORLD, if has_world { world } else { 0 });
+        let height = pos.y() + if pick.one_in(2) { pick.range(-60.0, 0.0) } else { pick.range(-200.0, 60.0) };
+        let height = if pick.one_in(50) { f32::NAN } else { height };
+        let contact = pick.one_in(3);
+        set_bit(&mut ee, collision + measure_at::CONTACT_BYTE, 0x20, contact);
+        let has_struck = !pick.one_in(4);
+        let struck_flags = flags(&mut pick, struck_mask);
+        ee.set_u32(list, if has_struck { struck_at } else { 0 });
+        ee.set_u32(struck_at + measure_at::FLAGS, struck_flags);
+
+        let seed = pick.next();
+        ee.set_u32(state, seed as u32);
+        ee.set_u32(state + 4, (seed >> 32) as u32);
+        let mut rng = Rng::from_state(seed);
+        let dt = F(if pick.one_in(16) { 0.0 } else { pick.range(0.01, 0.05) });
+
+        asked.borrow_mut().clear();
+        *ground.borrow_mut() = (height, Vec::new());
+        ee.call(func, &[u64::from(HELI)], &[dt.to_f32()], BUDGET);
+        let mut asked_ground = Vec::new();
+        let strike = || Strike {
+            in_ground: has_collision && has_world && rotor_in_ground(&matrix, &centres, |p| {
+                asked_ground.push(p);
+                let mut q = p;
+                q[1] = height;
+                q
+            }),
+            struck: has_collision && contact && has_struck && struck_flags & struck_mask == 0,
+        };
+        let out = port.step(&c, Some(&area), pos, &mut vel, &mut rates, &mut throw_scale, &mut rng, dt, strike);
+
+        let mut want = Vec::new();
+        want.extend(out.wreck.map(Asked::Wreck));
+        if out.debris {
+            want.push(Asked::Debris);
+        }
+        if out.recover {
+            want.push(Asked::Reset);
+        }
+        assert_eq!(*asked.borrow(), want, "case {case}: what the crash test asked for");
+        let seen = &ground.borrow().1;
+        assert_eq!(seen.len(), asked_ground.len(), "case {case}: the ground queries");
+        for (got, want) in asked_ground.iter().zip(seen) {
+            same_lanes("the sphere's centre", case, *got, *want, 4);
+        }
+        assert_eq!(ee.u32_at(HELI + WRECKED), port.reason, "case {case}: the reason");
+        assert_eq!(ee.u32_at(HELI + measure_at::DOWN), u32::from(port.down), "case {case}: down");
+        same("the clock", case, port.clock, ee.f32_at(HELI + measure_at::CLOCK));
+        same("the throw's scale", case, throw_scale, ee.f32_at(HELI + measure_at::THROW_SCALE));
+        same_lanes("the velocity", case, vel, [0, 4, 8, 12].map(|k| ee.f32_at(body + BODY_VEL + k)), 4);
+        same_lanes("the rates", case, rates, [0, 4, 8, 12].map(|k| ee.f32_at(body + BODY_RATES + k)), 4);
+        let left = u64::from(ee.u32_at(state)) | u64::from(ee.u32_at(state + 4)) << 32;
+        assert_eq!(rng.state(), left, "case {case}: the generator");
+        thrown += usize::from(out.wreck == Some(13));
+        crashed += usize::from(out.wreck == Some(1));
+        grounded += usize::from(out.wreck == Some(1) && asked_ground.iter().any(|p| !(height <= p.y())));
+        recovered += usize::from(out.recover);
+        debris += usize::from(out.debris);
+    }
+    assert!(thrown > CASES / 10 && crashed > CASES / 20 && grounded > CASES / 50 && recovered > CASES / 20 && debris > CASES / 200,
+            "{thrown} thrown, {crashed} crashed ({grounded} rotor in the ground), {recovered} put back, {debris} blades: \
+             the cases miss a branch");
+    println!("the crash test: {CASES} cases, bit-exact ({thrown} thrown, {crashed} crashed ({grounded} rotor in the ground), \
+              {recovered} put back, {debris} blades thrown)");
+}
+
+#[test]
+fn the_mx_rotor_spins_as_the_originals() {
+    use game_sim::kiowa::spin_blades;
+    let Some(mut ee) = heli() else { return };
+    let func = addr("kiowa_blade_spin").unwrap();
+    // The model's nodes are turned and shown by these; none of them is the angle's.
+    for name in ["node_set_rotation", "node_world_matrix", "node_set_matrix", "transform_touch"] {
+        ee.hooks.insert(addr(name).unwrap(), Box::new(|_| {}));
+    }
+    let rotor = ee.u32_at(HELI + measure_at::ROTOR_NODE);
+    let blade = ee.u32_at(HELI + measure_at::BLADE_NODE);
+    let mut pick = Pick(0x5220_a000_b1ad_0001);
+    let mut hidden_cases = 0;
+    for case in 0..CASES {
+        let hidden = pick.one_in(4);
+        set_bit(&mut ee, rotor + 3, 0x40, hidden);
+        let other = pick.one_in(2);
+        set_bit(&mut ee, blade + 3, 0x40, other);
+        let mut angle = F(match pick.next() % 4 {
+            0 => 0.0,
+            1 => pick.range(1e5, 1e7),
+            _ => pick.range(0.0, 5000.0),
+        });
+        ee.set_f32(HELI + measure_at::ROTOR_ANGLE, angle.to_f32());
+        let dt = if pick.one_in(2) { 1.0 / 30.0 } else { pick.range(0.0, 0.1) };
+        ee.call(func, &[u64::from(HELI)], &[dt], BUDGET);
+        spin_blades(&mut angle, hidden, F(dt));
+        same("the rotor's angle", case, angle, ee.f32_at(HELI + measure_at::ROTOR_ANGLE));
+        hidden_cases += usize::from(hidden);
+    }
+    println!("the MX rotor's spin: {CASES} cases, bit-exact ({hidden_cases} hidden)");
+}

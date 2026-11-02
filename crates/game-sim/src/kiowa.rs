@@ -10,6 +10,10 @@
 //!    the rudder buttons for a yaw rate, and the climb and descend buttons for a climb rate. The
 //!    controller turns those into body rates and chases them with the cyclic and the pedal, and holds
 //!    the height it was left at with the collective.
+//! 2. [`Kiowa::force`] — every substep: the controller, the rotor and the aerodynamics onto the body.
+//! 3. [`Measure::flight`] — once a frame after the world step: the speed, alpha, beta and the
+//!    orientation the next frame's force reads ([`Measure::readings`]); then [`Crash::step`], the
+//!    throw back from the map's edge and the wrecks; then [`Measure::touchdown`].
 //!
 //! Every field is named by the `.phy` key it is loaded from, where it has one (the `[Flight
 //! Controller]` section of `helicopter\kiowa.phy`). Until the reader lands, the proofs read the values
@@ -36,10 +40,13 @@
 
 #![deny(clippy::float_arithmetic)]
 
-use crate::biplane::Body;
+use crate::air::AcosTable;
+use crate::biplane::{Area, Body, CRASHED, EDGE, THROWN, flow_angle};
 use crate::camera::CurveTable;
+use crate::math::{Mat4, quat_to_euler, quat_to_mat4};
+use crate::rng::Rng;
 use ps2_float::fpu::{self, Acc};
-use ps2_float::{F, Vf};
+use ps2_float::{Dest, F, Field, Vf};
 
 const PI: f32 = 3.1415927;
 const TWO_PI: f32 = 6.2831855;
@@ -196,8 +203,8 @@ impl Filter {
 pub struct Flight {
     /// The helicopter is being flown. While it is not, every command is zero.
     pub flown: bool,
-    /// The pilot's flag that, while climb is not held, leaves the collective at zero. Its meaning is not
-    /// read; in the live state it is set.
+    /// The collision record's touching flag (S148 took it for a pilot's): while climb is not held and
+    /// the helicopter is on something, the collective is left at zero. In the live state it is set.
     pub pilot_flag: bool,
     /// The body's height.
     pub height: F,
@@ -634,5 +641,302 @@ impl Kiowa {
         let (f, m) = self.aero.step(&self.pad, &air, &mut self.aero_state);
         body.add_force_local(f);
         body.add_moment_local(m);
+    }
+}
+
+// --- the measure ------------------------------------------------------------------------------------
+
+/// Beta is held to `-pi..pi`, and a sideslip that flips sign behind the beam (past `pi/2`) by less
+/// than this keeps last frame's value, so the tail-on wrap from `pi` to `-pi` does not jump.
+const HALF_PI: f32 = f32::from_bits(0x3fc9_0fdb);
+const BETA_FLIP: f32 = f32::from_bits(0x3e32_b8c1);
+
+/// What the measure listener works out off the body once a frame, before the crash test and for the
+/// next frame's force listener ([`Measure::readings`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measure {
+    /// `|velocity|`.
+    pub speed: F,
+    /// The angle of attack and the sideslip, radians, from the body-frame velocity.
+    pub alpha: F,
+    pub beta: F,
+    /// The rates turned into the world.
+    pub world_rates: Vf,
+    /// The velocity in the body's frame: `z` is the speed along the nose.
+    pub velocity: Vf,
+    /// The orientation matrix's forward and up rows (`xyz`; `w` is left as it was).
+    pub forward: Vf,
+    pub up: Vf,
+    /// The orientation as three angles (pitch `x`, roll `z`).
+    pub euler: Vf,
+    /// The orientation and the model's origin as a matrix.
+    pub matrix: Mat4,
+    /// The collision record's touching flag as the last measure left it.
+    pub was_touching: bool,
+}
+
+impl Default for Measure {
+    fn default() -> Measure {
+        let zero = Vf::default();
+        Measure {
+            speed: F::ZERO,
+            alpha: F::ZERO,
+            beta: F::ZERO,
+            world_rates: zero,
+            velocity: zero,
+            forward: zero,
+            up: zero,
+            euler: zero,
+            matrix: Mat4([zero; 4]),
+            was_touching: false,
+        }
+    }
+}
+
+/// One entry of the collision record, as the touchdown reads it: its first word (only a 0 counts) and
+/// the float at `+0x24` (a contact counts below 1).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Touch {
+    pub kind: u32,
+    pub t: F,
+}
+
+impl Measure {
+    /// **The measure listener**'s figures, after the body wrapper's own: the speed, the body-frame
+    /// velocity and the world rates, alpha (the velocity's `y` against `z`) and beta (`x` against `z`)
+    /// as the plane's flow angle, the Euler angles, and the matrix with the forward and up rows
+    /// copied out, its origin the centre of mass less the turned [`Body::cofg`]. All of it is the
+    /// plane's measure but beta, which is clamped to `-pi..pi` and kept at last frame's value when it
+    /// changes sign past `pi/2` by under 10 degrees in size.
+    ///
+    /// The original then runs the crash test ([`Crash::step`]) and the touchdown
+    /// ([`Measure::touchdown`]).
+    pub fn flight(&mut self, body: &Body, table: &AcosTable) {
+        use crate::chassis::turn;
+        use crate::contact::unturn;
+        let v = body.velocity;
+        let (x, y, z) = (F(v.x()), F(v.y()), F(v.z()));
+        self.speed = Acc::mula(x, x).madda(y, y).madd(z, z).sqrt();
+        self.velocity = unturn(body.quat, v);
+        self.world_rates = turn(body.quat, body.rates);
+        let old = self.beta;
+        let along = F(self.velocity.z());
+        self.alpha = flow_angle(along, F(self.velocity.y()), table);
+        let beta = flow_angle(along, F(self.velocity.x()), table).max(F(-PI)).min(F(PI));
+        let sign = |b: F| if b < 0.0 { -1 } else { 1 };
+        let flipped = F::from(sign(old) * sign(beta)) < 0.0;
+        self.beta = if flipped && !(beta.abs() <= HALF_PI) && (beta.abs() - old.abs()).abs() < BETA_FLIP {
+            old
+        } else {
+            beta
+        };
+        self.euler = quat_to_euler(body.quat, table);
+        let p = body.position;
+        let origin = p.merge(Dest::XYZ, p.sub(turn(body.quat, body.cofg)));
+        self.matrix = quat_to_mat4(body.quat, origin);
+        self.forward = self.forward.merge(Dest::XYZ, self.matrix.0[2]);
+        self.up = self.up.merge(Dest::XYZ, self.matrix.0[1]);
+    }
+
+    /// The measure's last step: whether the helicopter has just come down on something — the
+    /// collision record touching now but not at the last measure, with an entry of kind 0 below 1 —
+    /// which is when the original plays its touchdown sound (if the helicopter has one). The flag is
+    /// then remembered.
+    pub fn touchdown(&mut self, touching: bool, entries: impl IntoIterator<Item = Touch>) -> bool {
+        let down = !self.was_touching && touching && entries.into_iter().any(|e| e.kind == 0 && e.t < 1.0);
+        self.was_touching = touching;
+        down
+    }
+
+    /// What the force listener reads ([`Kiowa::force`]): this measure's figures, with the two flags
+    /// and the gravity scale from the helicopter. `touching` is the collision record's flag, the one
+    /// S148 called the pilot's.
+    pub fn readings(&self, flown: bool, touching: bool, gravity_scale: F) -> Readings {
+        Readings {
+            flown,
+            pilot_flag: touching,
+            airspeed: F(self.velocity.z()),
+            pitch: F(self.euler.x()),
+            roll: F(self.euler.z()),
+            gravity_scale,
+            speed: self.speed,
+            alpha: self.alpha,
+            beta: self.beta,
+        }
+    }
+}
+
+// --- the crash test ---------------------------------------------------------------------------------
+
+/// The throw back from the edge: as the plane's, on the helicopter's own constants — a fall of this
+/// many feet sets its time, the speed toward the centre is capped here, and the upward part is
+/// `16.1*k + 150/k` for `k = 2*sqrt(fall)`. The spins are random fractions of these.
+const THROW_FALL: f32 = f32::from_bits(0x4115_117d);
+const THROW_CAP: f32 = f32::from_bits(0x44e6_6667);
+const THROW_UP: f32 = f32::from_bits(0x4180_cccd);
+const THROW_LIFT: f32 = 150.0;
+const THROW_SPIN: [f32; 3] = [0.5, f32::from_bits(0x3ecc_cccd), 0.5];
+/// How long a thrown helicopter flies before it may count as down, and what is left of its velocity
+/// when it is put back.
+const THROWN_FOR: f32 = 2.5;
+const RECOVER_KEEP: f32 = f32::from_bits(0x3e99_999a);
+
+/// What the crash test reads off the helicopter besides the body.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CrashContact {
+    /// The collision record's touching flag.
+    pub touching: bool,
+    /// The record's surface is one the helicopter's crash mask ignores for the speed test.
+    pub ignored: bool,
+    /// The measure's `|velocity|`.
+    pub speed: F,
+}
+
+/// What the rotor's own collision object finds, asked only of a helicopter still flying.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Strike {
+    /// A rotor sphere's centre is under the ground ([`rotor_in_ground`]).
+    pub in_ground: bool,
+    /// The rotor's contact search struck something its mask does not ignore.
+    pub struck: bool,
+}
+
+/// The helicopter's crash state.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Crash {
+    /// 0 flying, [`CRASHED`] or [`THROWN`].
+    pub reason: u32,
+    /// A thrown helicopter has come down.
+    pub down: bool,
+    /// `MinWreckSpeed`, and `WreckTime`.
+    pub min_wreck_speed: F,
+    pub wreck_time: F,
+    /// Time since the crash.
+    pub clock: F,
+}
+
+/// What a crash-test call asked the helicopter to do: wreck itself, throw its blades (on coming down
+/// after a throw), and put itself back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Crashed {
+    pub wreck: Option<u32>,
+    pub debris: bool,
+    pub recover: bool,
+}
+
+impl Crash {
+    /// The wreck's own bookkeeping, the part this module needs: the reason, and not down. The clock
+    /// runs on from where the last put-back left it. The rest (the body's damping, inertia and gravity,
+    /// the sound, the model) is the caller's.
+    fn wreck(&mut self, reason: u32, out: &mut Crashed) {
+        self.reason = reason;
+        self.down = false;
+        out.wreck = Some(reason);
+    }
+
+    /// **The crash test**, the measure's wreck slot, once a frame after the measure's figures.
+    ///
+    /// Within [`EDGE`] of the area's edge, a helicopter not already thrown is thrown back as the plane
+    /// is ([`crate::biplane::Crash::step`]): toward the centre at its own height, up, the scale at
+    /// `throw_scale` halved, three random spins, and the [`THROWN`] wreck. A helicopter still flying
+    /// then asks `strike` and is [`CRASHED`] by a rotor in the ground, a struck rotor, or a contact
+    /// faster than `MinWreckSpeed` on a surface that counts (no upside-down test, unlike the plane).
+    /// A wrecked helicopter's clock runs: a crashed one is put back after `WreckTime`; a thrown one
+    /// first has to have flown 2.5 s and be touching, when it throws its blades and its clock restarts,
+    /// and after `WreckTime` keeps 0.3 of its velocity and is put back.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(
+        &mut self,
+        c: &CrashContact,
+        area: Option<&Area>,
+        position: Vf,
+        velocity: &mut Vf,
+        rates: &mut Vf,
+        throw_scale: &mut F,
+        rng: &mut Rng,
+        dt: F,
+        strike: impl FnOnce() -> Strike,
+    ) -> Crashed {
+        use crate::contact::{dot, minus, scaled};
+        let mut out = Crashed::default();
+        if let Some(area) = area.filter(|a| self.reason != THROWN && a.outside(position, F(EDGE))) {
+            let half_width = F(0.5) * area.width;
+            let target = Vf::new(half_width.to_f32(), position.y(), (F(0.5) * area.depth).to_f32(), 1.0);
+            let mut toward = minus(target, position);
+            let length = dot(toward, toward);
+            if F::ZERO == length {
+                toward = Vf::VF0;
+            } else {
+                let r = F::ONE.rsqrt(length);
+                toward = Vf::new((F(toward.x()) * r).to_f32(), (F(toward.y()) * r).to_f32(), (F(toward.z()) * r).to_f32(), toward.w());
+            }
+            let k = F(2.0) * F(THROW_FALL).sqrt();
+            let speed = F(THROW_CAP).min(half_width) / k;
+            let lift = F(THROW_UP) * k + F(THROW_LIFT) / k;
+            *velocity = scaled(toward, speed);
+            velocity[1] = (F(velocity.y()) + lift).to_f32();
+            *throw_scale = *throw_scale * 0.5;
+            for (lane, spin) in THROW_SPIN.into_iter().enumerate() {
+                rates[lane] = (F(spin) * rng.unit()).to_f32();
+            }
+            rates[3] = 1.0;
+            self.wreck(THROWN, &mut out);
+        }
+        if self.reason == 0 {
+            let s = strike();
+            if s.in_ground || s.struck || (c.touching && !c.ignored && !(c.speed <= self.min_wreck_speed)) {
+                self.wreck(CRASHED, &mut out);
+            }
+            return out;
+        }
+        self.clock = self.clock + dt;
+        if self.reason == THROWN {
+            if !self.down && !(self.clock <= THROWN_FOR) && c.touching {
+                out.debris = true;
+                self.down = true;
+                self.clock = F::ZERO;
+            }
+            if self.down && !(self.clock <= self.wreck_time) {
+                *velocity = scaled(*velocity, F(RECOVER_KEEP));
+                out.recover = true;
+            }
+        } else if self.reason == CRASHED && !(self.clock <= self.wreck_time) {
+            out.recover = true;
+        }
+        out
+    }
+}
+
+/// Whether any of the rotor's collision spheres has its centre under the ground: each centre (in the
+/// model's frame) through `matrix` — the translation row first, then `x`, `y` and `z` accumulated in
+/// that order, `w` the sphere's — handed to `ground`, which gives the point back with the ground's
+/// answer in it; a returned `y` not at or below the centre's is in the ground. Every sphere is asked.
+pub fn rotor_in_ground(matrix: &Mat4, centres: &[Vf], mut ground: impl FnMut(Vf) -> Vf) -> bool {
+    let m = &matrix.0;
+    let mut hit = false;
+    for &c in centres {
+        let acc = m[3].add(Vf::VF0.bc(Field::X));
+        let acc = Vf::madd(acc, m[0], c.bc(Field::X));
+        let acc = Vf::madd(acc, m[1], c.bc(Field::Y));
+        let p = c.merge(Dest::XYZ, Vf::madd(acc, m[2], c.bc(Field::Z)));
+        if !(ground(p).y() <= p.y()) {
+            hit = true;
+        }
+    }
+    hit
+}
+
+// --- the MX helicopter's own measure -----------------------------------------------------------------
+
+/// The main rotor's turn per second, radians.
+const BLADE_RATE: f32 = 27.0;
+
+/// The MX helicopter's first addition to the measure: the rotor's angle (which the main and tail
+/// rotors' model nodes are then turned by) runs on at 27 radians a second, except while the rotor's node is
+/// hidden (after the blades are thrown). Its other three additions only copy figures into the
+/// presentation's records and are not ported.
+pub fn spin_blades(angle: &mut F, hidden: bool, dt: F) {
+    if !hidden {
+        *angle = *angle + F(BLADE_RATE) * dt;
     }
 }
