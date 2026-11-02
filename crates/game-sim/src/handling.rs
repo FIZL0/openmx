@@ -219,6 +219,13 @@ pub struct Flip {
     pub cut: bool,
     /// The backflip stunt came round (its clip 2 to 0).
     pub came_round: bool,
+    /// The flip that wrecked mid-clip was reason `0xf` ([`crate::air::Wreck::Struck`]), what
+    /// [`step::flip_wreck_steep`] answered (S223); `wrecked` without it is `0xb`.
+    pub struck: bool,
+    /// The rider's stunt id is the backflip's (S223): `atv_bike_start_stunt` wrote it (`+0x1528`, 41)
+    /// when the clip started and no trick was held, and it stays until the flip ends (cleared, as
+    /// every id over 40 is) or a trick takes the word.
+    pub stunt: bool,
     /// The preload's cue latch ([`step::preload`]), MD63.
     pub preload_cue: bool,
     /// The limiter's gas cut after the throttle comes on ([`step::input_limiter`]), MD63a.
@@ -234,6 +241,8 @@ impl crate::hash::State for Flip {
         w.bool("wrecked", self.wrecked);
         w.bool("cut", self.cut);
         w.bool("came_round", self.came_round);
+        w.bool("struck", self.struck);
+        w.bool("stunt", self.stunt);
         w.bool("preload_cue", self.preload_cue);
         w.bool("gas_cut", self.gas_cut);
         w.f("gas_cut_timer", self.gas_cut_timer);
@@ -241,22 +250,61 @@ impl crate::hash::State for Flip {
     }
 }
 
-/// [`backflip`] on a ride: the trick buttons and the bike's frame read off the ride, the rider's
-/// stunt taken as started whenever it is asked (the port's rider has no stunt to refuse it with), and
-/// the wreck latched on `flip` for the rider, as the 360's is.
+/// [`backflip`] on a ride: the trick buttons and the bike's frame read off the ride, and the rider's
+/// side of it (S223) as the original's calls leave it:
+///
+/// - `atv_bike_start_stunt` answers yes on every path (it returns 1 whether or not it played
+///   anything), so the clip always starts. What it changes is the rider's stunt id: the backflip's,
+///   unless a trick holds the word (an id under 41) — [`Flip::stunt`].
+/// - The flip's end clears an id over 40 to 255: [`Flip::stunt`] off. A trick held keeps its id.
+/// - `atv_bike_end_stunt` stops the rider's clip and nothing else: [`Flip::came_round`], for the rider.
+/// - A flip ending mid-clip wrecks with `steep`'s reason ([`step::flip_wreck_steep`]): `0xf`
+///   ([`Flip::struck`]) or `0xb`, latched on `flip` for the rider, as the 360's is.
+///
+/// The rider's stunt id is stood in for by range ([`stunt_stand_in`]): `trick_held` is a trick's.
 pub fn ride_backflip(p: &crate::air::Params, air: &mut Air, chassis: &mut Chassis, step: &Step, trick: [bool; 3],
-                     frame: &crate::chassis::Mat3, flip: &mut Flip) {
-    let inp = FlipIn { buttons: trick_nibble(trick), right_y: F(frame.rows[0].y()), up_y: F(frame.rows[1].y()), stunt_id: 0 };
+                     frame: &crate::chassis::Mat3, flip: &mut Flip, steep: impl FnOnce() -> bool) {
+    // A trick started since takes the word over the backflip's: its start writes its own id.
+    if step.stunt {
+        flip.stunt = false;
+    }
+    let stunt_id = stunt_stand_in(step.stunt, flip.stunt, false, air.on_ground);
+    let inp = FlipIn { buttons: trick_nibble(trick), right_y: F(frame.rows[0].y()), up_y: F(frame.rows[1].y()), stunt_id };
     let mut clip = FlipClip(flip.clip);
     let aloft = !air.on_ground && !step.touching;
-    let out = backflip(p, air, chassis, step, &inp, &mut clip, || true, || false);
+    let mut stunt = flip.stunt;
+    let out = backflip(p, air, chassis, step, &inp, &mut clip, || {
+        if stunt_id >= FIRST_FLIP_STUNT {
+            stunt = true;
+        }
+        true
+    }, steep);
+    flip.stunt = stunt && !out.stunt_cleared;
     flip.clip = clip.0;
-    if out.wreck.is_some() {
+    if let Some(reason) = out.wreck {
         flip.wrecked = true;
+        flip.struck = reason == 0xf;
         flip.cut = aloft;
     }
     if out.stunt_ended {
         flip.came_round = true;
+    }
+}
+
+/// **The port's own:** the rider's stunt id (`+0x1528`, which `+0x1524` copies once a frame) by its
+/// range, all MX vs. ATV's steps read of it. The port's rider keeps MX Unleashed's trick machine and
+/// no id, so: a trick held is an id under 41 (0 here); the backflip's stunt ([`Flip::stunt`]) or the
+/// 360's clip running is the flip's (41, the backflip's in the image); otherwise the idle id, `0x2e`
+/// in the air and `0xff` on the ground.
+pub fn stunt_stand_in(trick_held: bool, backflip: bool, spin_clip: bool, on_ground: bool) -> i32 {
+    if trick_held {
+        0
+    } else if backflip || spin_clip {
+        FIRST_FLIP_STUNT
+    } else if on_ground {
+        0xff
+    } else {
+        0x2e
     }
 }
 
@@ -377,19 +425,12 @@ pub fn airborne_control(p: &crate::air::Params, gas_gyro_torque: F, air: &mut Ai
     }
 }
 
-/// [`airborne_control`] on a ride. The port's rider keeps no stunt id, so one stands in for it by
-/// range, which is all the step reads: a trick held ([`crate::air::Step::stunt`]) is a trick's id, a
-/// backflip's clip running ([`Flip::clip`]) or the 360's (`spin_clip`) is the flip's stunt (41, the
-/// backflip's in the image), and anything else is the idle air id `0x2e`.
+/// [`airborne_control`] on a ride, the rider's stunt id stood in for by range ([`stunt_stand_in`]): a
+/// trick held ([`crate::air::Step::stunt`]), the backflip's stunt ([`Flip::stunt`], from its clip's
+/// start to the flip's end, S223) or the 360's clip (`spin_clip`), else idle.
 pub fn ride_airborne_control(phy: &crate::phy::Phy, air: &mut Air, chassis: &mut Chassis, step: &Step, gas: F,
                              flip: &Flip, spin_clip: bool) {
-    let stunt_id = if step.stunt {
-        0
-    } else if flip.clip != 0 || spin_clip {
-        FIRST_FLIP_STUNT
-    } else {
-        0x2e
-    };
+    let stunt_id = stunt_stand_in(step.stunt, flip.stunt, spin_clip, air.on_ground);
     let inp = AirIn { stunt_id, gas, gyro: phy.gyro };
     airborne_control(&phy.air, phy.gas_gyro_torque, air, chassis, step, &inp);
 }

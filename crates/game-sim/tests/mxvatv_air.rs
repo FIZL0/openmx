@@ -658,3 +658,106 @@ fn mxvatv_airborne_control_is_the_originals() {
         assert!(n >= 200, "only {n} state(s) went down {want:?}: {tally:?}");
     }
 }
+
+/// S223 — `atv_bike_flip_wreck_steep`, the reason the backflip's mid-clip wreck takes (and the wreck
+/// test's reason 15), run as the original's own code on 10,000 generated states against
+/// [`handling::step::flip_wreck_steep`]: the collision record, its object and the object's class word
+/// against the game's mask, the airborne word and the g loads against their three limits.
+#[test]
+fn mxvatv_flip_wreck_steep_is_the_originals() {
+    use game_sim::air::Loads;
+    let Some(mut ee) = image() else { return };
+    const REC: u32 = 0x01c0_2800;
+    const THING: u32 = 0x01c0_2c00;
+    let mask = ee.u32_at(0x0054_2db0);
+    assert_ne!(mask, 0, "the struck class mask is 0 in the image");
+    let mut g = Gen(0x0d40_0223);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        reset(&mut ee);
+        for a in (REC..REC + 0x210).step_by(4).chain((THING..THING + 0x98).step_by(4)) {
+            ee.set_u32(a, 0);
+        }
+        let mut p = zero_params();
+        p.front_wreck_speed_limit = g.f(0.5, 8.0);
+        p.back_wreck_speed_limit = g.f(0.5, 8.0);
+        p.side_wreck_speed_limit = g.f(0.5, 8.0);
+        let has_rec = !g.one_in(8);
+        let touching = !g.one_in(4);
+        let has_thing = !g.one_in(8);
+        let class = if g.b() { mask } else if g.b() { !mask } else { g.bits() };
+        let airborne = g.one_in(3);
+        let fore_aft = match g.bits() % 4 {
+            0 => p.back_wreck_speed_limit,
+            1 => -p.front_wreck_speed_limit,
+            _ => g.f(-10.0, 10.0),
+        };
+        let side = match g.bits() % 4 {
+            0 => p.side_wreck_speed_limit,
+            1 => -p.side_wreck_speed_limit,
+            _ => g.f(-10.0, 10.0),
+        };
+        ee.set_u32(OBJ + 0xc8, if has_rec { REC } else { 0 });
+        put_b(&mut ee, REC + 0x34, touching);
+        ee.set_u32(REC + 0x20c, if has_thing { THING } else { 0 });
+        ee.set_u32(THING + 0x94, class);
+        put_b(&mut ee, OBJ + 0xde0, airborne);
+        put_f(&mut ee, OBJ + 0x1250, side);
+        put_f(&mut ee, OBJ + 0x1258, fore_aft);
+        put_f(&mut ee, OBJ + 0x13e8, p.front_wreck_speed_limit);
+        put_f(&mut ee, OBJ + 0x13ec, p.back_wreck_speed_limit);
+        put_f(&mut ee, OBJ + 0x13f0, p.side_wreck_speed_limit);
+        ee.call(STEEP, &[u64::from(OBJ)], &[], 1_000);
+        let orig = ee.r(2) as u32;
+
+        let struck_class = has_rec && touching && has_thing && class & mask != 0;
+        let loads = Loads { side, fore_aft, ..Loads::default() };
+        let port = handling::step::flip_wreck_steep(&p, struck_class, airborne, &loads);
+        assert_eq!(orig, u32::from(port), "state {k}: struck class {struck_class}, airborne {airborne}, {loads:?}, {p:?}");
+        let path = match (struck_class, airborne, port) {
+            (false, ..) => "not the class",
+            (true, true, _) => "airborne",
+            (true, false, true) => "loads past",
+            (true, false, false) => "loads within",
+        };
+        *tally.entry(path).or_insert(0u32) += 1;
+    }
+    for want in ["not the class", "airborne", "loads past", "loads within"] {
+        let n = tally.get(want).copied().unwrap_or(0);
+        assert!(n >= 200, "only {n} state(s) went down {want:?}: {tally:?}");
+    }
+}
+
+/// S223 — `atv_bike_start_stunt` asked for the backflip's stunt, as the original's code runs it on a
+/// bike with no animation objects (`+0x680`/`+0x684` null): it answers yes every time, and writes the
+/// stunt id (`+0x1528`) only where the id it found is 41 or more — what [`handling::ride_backflip`]
+/// keeps as `Flip::stunt`. (With the animation objects it plays the clip and still answers 1.)
+#[test]
+fn mxvatv_start_stunt_always_starts_and_keeps_a_trick() {
+    let Some(mut ee) = image() else { return };
+    let mut g = Gen(0x0d40_0224);
+    let mut kept = 0;
+    for k in 0..2_000 {
+        reset(&mut ee);
+        let ids = [41u32, 42, 43, 44, 45];
+        for (n, id) in ids.iter().enumerate() {
+            ee.set_u32(OBJ + 0x13b8 + 4 * n as u32, *id);
+        }
+        let current = match g.bits() % 4 {
+            0 => 40,
+            1 => 41,
+            2 => 0xff,
+            _ => g.bits() % 60,
+        };
+        ee.set_u32(OBJ + 0x1528, current);
+        put_b(&mut ee, OBJ + 0x324, g.b());
+        ee.set_u32(OBJ + 0xc80, if g.b() { 0 } else { g.bits() % 16 });
+        ee.call(START_STUNT, &[u64::from(OBJ), 41, 1], &[], 10_000);
+        assert_eq!(ee.r(2) as u32, 1, "state {k}: the stunt start answered no");
+        let stand_in = handling::stunt_stand_in(current < 41, false, false, false);
+        let want = if stand_in >= handling::FIRST_FLIP_STUNT { 41 } else { current };
+        assert_eq!(ee.u32_at(OBJ + 0x1528), want, "state {k}: the stunt id, from {current}");
+        kept += u32::from(want == current && current != 41);
+    }
+    assert!(kept >= 200, "only {kept} states kept a trick's id");
+}

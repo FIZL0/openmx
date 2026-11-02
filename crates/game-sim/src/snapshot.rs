@@ -936,7 +936,7 @@ wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, h
     // The props are lent only for the bike's frame (S210) and are the Sim's between frames.
     skip { rear_material, props });
 wire!(crate::back_search::Cache { at, moved, list, world });
-wire!(crate::handling::Flip { clip, wrecked, cut, came_round, preload_cue, gas_cut, gas_cut_timer, steer_ramp_timer });
+wire!(crate::handling::Flip { clip, wrecked, cut, came_round, struck, stunt, preload_cue, gas_cut, gas_cut_timer, steer_ramp_timer });
 wire!(crate::trick_pack::State { spin, flip_row, side, side_flick, front_watch });
 wire!(crate::air::Spin { applied, ramp, active, armed, grace, dir, start, torque, clip, came_round, wrecked, forward, cut });
 wire!(crate::ride::Back { at, facing, up });
