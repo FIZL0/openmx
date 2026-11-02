@@ -1,6 +1,7 @@
-//! MX Unleashed's worlds off the player's own disc (P232): `world_mxu_free`, the five free-ride maps
-//! in one wrapped ground, and `world_mxu`, those and every national track, built the first time one
-//! is picked, with nothing to install.
+//! MX Unleashed's worlds off the player's own disc (P232): `world_mxu`, the WORLD, every free-ride map
+//! and every national track in one wrapped ground with the free-ride maps in its middle (P253);
+//! `world_mxu_free`, the five free-ride maps; and `world_mxu_nat`, the 22 nationals; built the first
+//! time one is picked, with nothing to install.
 //!
 //! **The tiles** are the disc's maps as they are: tile `mxu_<track>` is `Tracks\<track>.res` with its
 //! `Tracks\<track>_2.res`, the two archives a ride on that track reads, so every piece of the world
@@ -24,9 +25,10 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// The worlds and their specs, `(id, spec)`, in the track pick's order.
-pub const SPECS: [(&str, &str); 2] = [
-    ("world_mxu_free", include_str!("../../stitch/worlds/world_mxu_free.json")),
+pub const SPECS: [(&str, &str); 3] = [
     ("world_mxu", include_str!("../../stitch/worlds/world_mxu.json")),
+    ("world_mxu_free", include_str!("../../stitch/worlds/world_mxu_free.json")),
+    ("world_mxu_nat", include_str!("../../stitch/worlds/world_mxu_nat.json")),
 ];
 
 /// `free_all`, P71's "Every free ride", as a word `--track` and a saved setting may still hold: it is
@@ -36,7 +38,7 @@ pub const OLD_ID: &str = crate::menu::OLD_SPLICED;
 /// What `--track` or a saved setting names, with [`OLD_ID`] read as `world_mxu_free`.
 pub fn id_of(track: &str) -> &str {
     if track == OLD_ID {
-        SPECS[0].0
+        "world_mxu_free"
     } else {
         track
     }
@@ -47,13 +49,12 @@ pub fn is_disc_world(id: &str) -> bool {
     SPECS.iter().any(|(w, _)| *w == id)
 }
 
-/// The spec's `sky` tile's track (`free06`): the map the ride is lit and dressed from, and whose saved
-/// markers and setup a ride on the world starts from.
-pub fn home_track(id: &str) -> Option<&'static str> {
+/// The spec's `sky` tile's track (`free06`, `nat01`): the map the ride is lit and dressed from, and
+/// whose saved markers and setup a ride on the world starts from.
+pub fn home_track(id: &str) -> Option<String> {
     let (_, spec) = SPECS.iter().find(|(w, _)| *w == id)?;
     let sky = Json::parse(spec).ok()?.get("sky").and_then(Json::str)?.to_string();
-    let track = sky.strip_prefix("mxu_")?;
-    ["free06", "free07", "free09", "free10", "free11"].into_iter().find(|t| *t == track)
+    sky.strip_prefix("mxu_").map(str::to_string)
 }
 
 /// Where a world's built joins are kept: `<mods>/cache/stitch/<id>/`.
@@ -173,4 +174,55 @@ pub fn world(disc: &mut Disc, mods: &Path, id: &str, say: &mut dyn FnMut(&str)) 
     debug_assert!(w.pieces[..w.tile_count].iter().all(|p| matches!(p.origin, Origin::Disc { .. })));
     w.dir = dir;
     Ok(w)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tiles(id: &str) -> Vec<String> {
+        let (_, spec) = SPECS.iter().find(|(w, _)| *w == id).unwrap();
+        let j = Json::parse(spec).unwrap();
+        j.get("tiles").and_then(Json::arr).unwrap().iter().filter_map(Json::str).map(str::to_string).collect()
+    }
+
+    const FREE: [&str; 5] = ["free06", "free07", "free09", "free10", "free11"];
+
+    fn nationals() -> Vec<String> {
+        (1..=22).map(|n| format!("mxu_nat{n:02}")).collect()
+    }
+
+    /// P253: the pick's worlds are the WORLD first, then the freeride maps, then the nationals, and
+    /// the menu lists them so.
+    #[test]
+    fn the_worlds_are_world_freerides_nationals() {
+        assert_eq!(SPECS.map(|s| s.0), ["world_mxu", "world_mxu_free", "world_mxu_nat"]);
+        assert_eq!(crate::menu::DISC_WORLDS.iter().map(|w| w.0).collect::<Vec<_>>(), SPECS.map(|s| s.0));
+        for ((id, spec), (_, name)) in SPECS.iter().zip(crate::menu::DISC_WORLDS) {
+            let j = Json::parse(spec).unwrap();
+            assert_eq!(j.get("id").and_then(Json::str), Some(*id));
+            assert_eq!(j.get("name").and_then(Json::str), Some(*name), "{id}");
+        }
+        assert_eq!(crate::menu::DISC_WORLDS[0].1, "MX Unleashed: WORLD");
+        assert_eq!(id_of(OLD_ID), "world_mxu_free");
+    }
+
+    /// The WORLD is every freeride and every national, the freerides laid in its middle; the
+    /// nationals' world is the 22 of them, lit from nat01.
+    #[test]
+    fn the_worlds_hold_their_maps() {
+        let free: Vec<String> = FREE.iter().map(|t| format!("mxu_{t}")).collect();
+        let world = tiles("world_mxu");
+        assert_eq!(world.len(), 27);
+        assert_eq!(world[..5], free[..]);
+        assert_eq!(world[5..], nationals()[..]);
+        let (_, spec) = SPECS[0];
+        let middle: Vec<String> = Json::parse(spec).unwrap().get("middle").and_then(Json::arr).unwrap().iter().filter_map(Json::str).map(str::to_string).collect();
+        assert_eq!(middle, free);
+        assert_eq!(tiles("world_mxu_free"), free);
+        assert_eq!(tiles("world_mxu_nat"), nationals());
+        assert_eq!(home_track("world_mxu").as_deref(), Some("free06"));
+        assert_eq!(home_track("world_mxu_free").as_deref(), Some("free06"));
+        assert_eq!(home_track("world_mxu_nat").as_deref(), Some("nat01"));
+    }
 }

@@ -402,7 +402,11 @@ pub const TRACKS: [(&str, &str); 5] = [
 pub const DISC_WORLDS: &[(&str, &str)] = if cfg!(target_arch = "wasm32") {
     &[]
 } else {
-    &[("world_mxu_free", "MX Unleashed: the freeride maps"), ("world_mxu", "MX Unleashed: every freeride and national")]
+    &[
+        ("world_mxu", "MX Unleashed: WORLD"),
+        ("world_mxu_free", "MX Unleashed: the freeride maps"),
+        ("world_mxu_nat", "MX Unleashed: every national"),
+    ]
 };
 
 /// P71's "Every free ride", which a saved setting may still name: it is `world_mxu_free` now (P232).

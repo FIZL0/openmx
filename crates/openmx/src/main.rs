@@ -3270,7 +3270,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // stitcher's joins. An installed world mod of the same id is ridden instead.
     let disc_world =
         disc_worlds::is_disc_world(&args.track) && !mods_dir(&args).is_some_and(|d| worlds::is_world(&d, &args.track));
-    let home = if disc_world { disc_worlds::home_track(&args.track).unwrap_or(track_mods::FREERIDE) } else { args.track.as_str() };
+    let disc_home = if disc_world { disc_worlds::home_track(&args.track) } else { None };
+    let home = if disc_world { disc_home.as_deref().unwrap_or(track_mods::FREERIDE) } else { args.track.as_str() };
     let track_member = member_ending(&disc, &format!("{home}.res"));
     // A world mod (MD8) is several track mods as one ground: the ride is dressed and lit from its
     // home tile's folder, as a track mod's is, and the simulation asks every tile.
@@ -5451,6 +5452,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The maps the radar names (MD42): a world's tiles. A lone track, a disc one or a mod, names
     // none under the rider's arrow (P234).
     let map_names = world_mod.as_ref().map(|w| w.map_names()).unwrap_or_default();
+    if !map_names.maps.is_empty() {
+        let names: Vec<&str> = map_names.maps.iter().map(|(_, n)| n.as_str()).collect();
+        println!("radar maps: {}: {}", names.len(), names.join(", "));
+    }
     // And on a world that wraps (MD43), across its seams.
     let hud_wrap = match &sim {
         Land::Tiles(t) => drawn_wrap(t),

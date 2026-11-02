@@ -78,3 +78,27 @@ fn a_wrapped_world_spawns_on_its_middle_tile() {
         assert_eq!(spawn, want, "wrap {wrap:?}");
     }
 }
+
+/// P253: the spec's `middle` tiles take the grid's middle cells whatever their height, and a wrapped
+/// world starts on one of them. The highest of nine, the snake's last cell by height, is put at (1, 1).
+#[test]
+fn a_middle_tile_is_laid_in_the_grids_middle() {
+    let root = scratch("middle");
+    let mods = root.join("mods");
+    let dirs: Vec<PathBuf> = (0..9).map(|i| tile(&mods, &format!("{i}"), 256, 100.0 + 4.0 * f64::from(i), i as u8 + 1)).collect();
+    let mut p = Params::new("world_middle", "Test world middle");
+    p.threads = 8;
+    p.chunk = 64;
+    p.wrap = Some("xz".into());
+    p.middle = vec!["elev_middle_8".into()];
+    let built = build(&dirs, &root.join("out"), &p).unwrap();
+    assert_eq!(built.plan.placed[8].cell, (1, 1));
+    let meta = Json::parse(&std::fs::read_to_string(built.dir.join("mod.json")).unwrap()).unwrap();
+    assert_eq!(meta.get("spawn").and_then(|s| s.get("tile")).and_then(Json::str), Some("elev_middle_8"));
+    let mut cells: Vec<(usize, usize)> = built.plan.placed.iter().map(|pl| pl.cell).collect();
+    cells.sort();
+    cells.dedup();
+    assert_eq!(cells.len(), 9, "every tile has a cell of its own");
+    p.middle = vec!["elev_middle_9".into()];
+    assert!(build(&dirs, &root.join("bad"), &p).is_err(), "a middle tile the world lacks");
+}
