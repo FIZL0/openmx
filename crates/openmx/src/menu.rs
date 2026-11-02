@@ -4759,7 +4759,7 @@ impl Menu {
             self.lobby.lan = !self.lobby.lan;
             self.lobby.network_changed = true;
         } else if p.ok || p.start {
-            let room = self.lobby.room_for(&self.settings);
+            let room = self.lobby.room_for(&self.settings, &self.online_tracks());
             match at {
                 0 => {
                     self.lobby.begin("Looking for a game...");
@@ -4812,7 +4812,7 @@ impl Menu {
         let side = p.left || p.right;
         let by = if p.left { -1 } else { 1 };
         let Some(&item) = self.lobby.items().get(at) else { return };
-        let list = self.online_tracks();
+        let list: Vec<String> = self.online_tracks().into_iter().map(String::from).collect();
         let l = &mut self.lobby;
         match item {
             Item::Track if p.ok || side => {
@@ -5132,9 +5132,9 @@ impl Lobby {
     }
 
     /// A lobby for this machine's player to open: the last free-ride track, the settings' wrecks.
-    fn room_for(&self, settings: &Settings) -> Room {
-        // A track mod is not ridden online until MD6: a lobby opens on the disc's tracks only.
-        let track = if TRACKS.iter().any(|t| t.0 == settings.track) { settings.track.as_str() } else { TRACKS[0].0 };
+    fn room_for(&self, settings: &Settings, tracks: &[&str]) -> Room {
+        // On a track the room's pick lists ([`Menu::online_tracks`]: a track mod too, MD6), else the first town.
+        let track = if tracks.contains(&settings.track.as_str()) { settings.track.as_str() } else { TRACKS[0].0 };
         let mut room = Room::new(&settings.name, track, settings.lobby_seats);
         room.wrecks = settings.wrecks;
         room.air_wrecks = settings.air_wrecks;
@@ -5571,12 +5571,14 @@ impl Menu {
         }
     }
 
-    /// The tracks an online room's pick steps through (MD11): the lit filter's disc tracks, since a
-    /// mod is not ridden online until MD6, or every disc track where the filter has none.
-    pub fn online_tracks(&self) -> Vec<&'static str> {
+    /// The tracks an online room's pick steps through (MD11): the lit filter's disc towns and track
+    /// mods (MD6: the handshake seats only peers with the same mod's files), or every town where
+    /// the filter has none. Worlds, the disc's and the mods', are not ridden online.
+    pub fn online_tracks(&self) -> Vec<&str> {
         let list = self.track_list();
-        let disc: Vec<&'static str> = TRACKS.iter().enumerate().filter(|(i, _)| list.contains(i)).map(|(_, t)| t.0).collect();
-        if disc.is_empty() { TRACKS.iter().map(|t| t.0).collect() } else { disc }
+        let rides = list.iter().map(|&i| self.track_at(i).0).filter(|id| TRACKS.iter().any(|t| t.0 == *id) || (disc_place(id).is_none() && pack_of(id) != WORLDS));
+        let rides: Vec<&str> = rides.collect();
+        if rides.is_empty() { TRACKS.iter().map(|t| t.0).collect() } else { rides }
     }
 
     /// The mods the pick lists after the disc's (MD2), the pick's cursor kept on its track. They

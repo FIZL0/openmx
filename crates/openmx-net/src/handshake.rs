@@ -8,6 +8,10 @@
 //! for a bike set or a track: two discs (or a modded one) can hold different files under one name, so each peer
 //! also says what its own disc has under it, as a hash ([`Disc`]). The riders' looks (model, gear, colours) are not
 //! in it: they are drawn, not simulated.
+//!
+//! A track mod (MD6) is a track by its id, hashed over its folder's files ([`Disc::track`]), and the host
+//! says its name and version too ([`Disc::track_mod`]), so a peer that lacks it, or holds another
+//! version, is told which mod it needs: nothing is sent, each player installs their own.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +21,11 @@ use crate::room::Room;
 /// (`None`: it has no such file, or this peer doesn't hash, as in the terminal lobby with no disc).
 pub trait Disc: Send + Sync {
     fn track(&self, _name: &str) -> Option<u64> {
+        None
+    }
+    /// The track mod `name` is (MD6), as this machine's mods folder holds it: its name and version
+    /// in words, for a refusal to say which mod. `None` for a disc track, or a mod it does not hold.
+    fn track_mod(&self, _name: &str) -> Option<String> {
         None
     }
     fn bike(&self, _set: &str) -> Option<u64> {
@@ -42,7 +51,13 @@ impl Disc for Names {}
 
 /// 64-bit FNV-1a, the same on every platform: for a [`Disc`] to hash a file's bytes with.
 pub fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+    fnv_on(0xcbf2_9ce4_8422_2325, bytes)
+}
+
+/// [`fnv`] carried on from `h`, the hash of the bytes before these: for hashing a folder of files
+/// one file at a time (`fnv_on(fnv(a), b) == fnv(a ++ b)`).
+pub fn fnv_on(h: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
 }
 
 /// What one peer brings to a ride, made from the lobby's line-up as it stands at the host's Start.
@@ -51,6 +66,10 @@ pub struct Handshake {
     pub build: String,
     pub track: String,
     pub track_hash: Option<u64>,
+    /// The track mod the track is (MD6, [`Disc::track_mod`]): its name and version as this peer's
+    /// mods folder has it, empty for a disc track or a mod it lacks. Not compared: the hash is.
+    #[serde(default)]
+    pub track_mod: String,
     /// Every seated player's bike set in seat order, with this peer's disc's hash of it.
     pub bikes: Vec<(String, Option<u64>)>,
     pub wrecks: bool,
@@ -101,6 +120,7 @@ impl Handshake {
             build: build().into(),
             track: room.track.clone(),
             track_hash: disc.track(&room.track),
+            track_mod: disc.track_mod(&room.track).unwrap_or_default(),
             bikes: room.seats.iter().flatten().map(|s| (s.pick.bike.clone(), disc.bike(&s.pick.bike))).collect(),
             wrecks: room.wrecks,
             air_wrecks: room.air_wrecks,
@@ -122,6 +142,14 @@ impl Handshake {
         }
         if self.track != host.track {
             return differ("the track", self.track.clone(), host.track.clone());
+        }
+        if self.track_hash != host.track_hash && !host.track_mod.is_empty() {
+            let (id, theirs) = (&host.track, &host.track_mod);
+            return Err(match (self.track_hash, self.track_mod.as_str()) {
+                (None, _) | (_, "") => format!("Can't ride: the host's track is the mod {theirs} ({id}), and it isn't in your mods folder."),
+                (_, mine) if mine != theirs => format!("Can't ride: the host's track is the mod {theirs} ({id}), and your mods folder has {mine}."),
+                _ => format!("Can't ride: the host's track is the mod {theirs} ({id}), and yours isn't the same files."),
+            });
         }
         if self.track_hash != host.track_hash {
             return Err(format!("Can't ride: your disc's {} isn't the same as the host's.", self.track));
@@ -178,6 +206,7 @@ mod tests {
             build: build().into(),
             track: "free06".into(),
             track_hash: Some(1),
+            track_mod: String::new(),
             bikes: vec![("race125p".into(), Some(7)), ("pro250a".into(), Some(8))],
             wrecks: true,
             air_wrecks: true,
@@ -244,6 +273,40 @@ mod tests {
         assert_eq!(old.tricks, "", "a room from a build before MD19 rides the original's tricks");
     }
 
+    /// A machine whose mods folder holds one track mod, `md6_flat`, as `(name and version, hash)`.
+    struct Track(Option<(&'static str, u64)>);
+
+    impl Disc for Track {
+        fn track(&self, name: &str) -> Option<u64> {
+            if name == "md6_flat" { self.0.map(|t| t.1) } else { Some(1) }
+        }
+        fn track_mod(&self, name: &str) -> Option<String> {
+            self.0.filter(|_| name == "md6_flat").map(|t| t.0.to_string())
+        }
+    }
+
+    #[test]
+    fn a_mod_track_rides_only_with_the_same_mod_and_a_refusal_names_it() {
+        let mut room = Room::new("h", "md6_flat", 2);
+        room.take(crate::room::HOST, &[Pick::new("thq1", "race125p")]);
+        let host = Handshake::of(&room, &Track(Some(("MD6 Flat 1.0.0", 5))));
+        assert_eq!(host.track_mod, "MD6 Flat 1.0.0");
+        assert_eq!(Handshake::of(&room, &Track(Some(("MD6 Flat 1.0.0", 5)))).check(&host), Ok(()), "the same mod rides");
+        let e = Handshake::of(&room, &Track(None)).check(&host).unwrap_err();
+        assert_eq!(e, "Can't ride: the host's track is the mod MD6 Flat 1.0.0 (md6_flat), and it isn't in your mods folder.");
+        let e = Handshake::of(&room, &Track(Some(("MD6 Flat 1.1.0", 6)))).check(&host).unwrap_err();
+        assert_eq!(e, "Can't ride: the host's track is the mod MD6 Flat 1.0.0 (md6_flat), and your mods folder has MD6 Flat 1.1.0.");
+        let e = Handshake::of(&room, &Track(Some(("MD6 Flat 1.0.0", 6)))).check(&host).unwrap_err();
+        assert_eq!(e, "Can't ride: the host's track is the mod MD6 Flat 1.0.0 (md6_flat), and yours isn't the same files.");
+        // A disc track says no mod, and rides as it did.
+        room.track = "free06".into();
+        let host = Handshake::of(&room, &Track(Some(("MD6 Flat 1.0.0", 5))));
+        assert_eq!(host.track_mod, "");
+        assert_eq!(Handshake::of(&room, &Track(None)).check(&host), Ok(()));
+        let old: Handshake = serde_json::from_str(&serde_json::to_string(&host).unwrap().replace(r#""track_mod":"","#, "")).unwrap();
+        assert_eq!(old, host, "a handshake from a build before MD6 is a disc track's");
+    }
+
     #[test]
     fn every_seats_preset_is_in_it() {
         let mut room = Room::new("h", "free06", 3);
@@ -262,5 +325,6 @@ mod tests {
         assert_eq!(fnv(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv(b"foobar"), 0x8594_4171_f739_67e8);
+        assert_eq!(fnv_on(fnv(b"foo"), b"bar"), fnv(b"foobar"));
     }
 }
