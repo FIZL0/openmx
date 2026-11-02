@@ -9866,42 +9866,58 @@ fn wrecks_as_the_original_does(cases: &[(&str, u64, u64, &str)]) -> Vec<String> 
 /// as the state is, `nowreck` with the original's wrecks switched off.
 const S100_TREE: &str = "s100/tree";
 
+/// The other of S100's rides: [`S100_TREE`]'s state and tape with the original's wrecks off.
+const S100_NOWRECK: &str = "s100/nowreck";
+
 /// Ticks of [`S100_TREE`] ridden: the run-up (61 ticks) and the hit, with room either side.
 const S100_TICKS: u64 = 70;
 
 /// Plant 347's axis on the ground plane (S100): the trunk the ride is aimed at.
 const S100_TRUNK: [f32; 2] = [4968.84, 3087.89];
 
-/// How many ticks before the original's the port's wreck comes. All of it is the launch (P154): from
-/// the same state and pad the port's 125 is 3.3 ft/s quicker by 2920 and reaches the trunk 4 ticks
-/// early, at 57.4 ft/s against the original's 58.2. Zero once the launch is the original's.
-const S100_EARLY: u64 = 4;
+/// How many ticks before the original's the port's wreck comes. It was 4 while the test fed each tick
+/// the pad of the row before its own: the original reads the pad two rows back, so the port gassed
+/// three ticks early and reached the trunk quicker. With the pad read as the original reads it the
+/// launch is the original's (P154 had already ruled the drive out) and the wreck is on its tick (S185).
+const S100_EARLY: u64 = 0;
 
-/// **A free09 trunk wrecks the rider as the original's does** (S126): S100's ride replayed in the
-/// port from its own state — the whole bike seeded, free09's ground, props and every trunk of its
-/// ecosystem standing, the bike's body rays carried, the original's pad — wrecks on the tick the
-/// original does, over the bars (reason 1), on the impact load the resolve of the rays' trunk
-/// contacts leaves in g_peak.
-#[test]
-fn a_free09_trunk_wrecks_as_the_original_does() {
+/// One tick of an S100 ride in the port.
+#[derive(Clone, Copy, Debug)]
+struct S100Tick {
+    counter: u64,
+    cofg: Vf,
+    vel: Vf,
+    g: Vf,
+    /// What the bike's body rays find among the scenery from where the last tick left it, as the
+    /// tick's own search does.
+    found: usize,
+    wreck: Option<u8>,
+}
+
+/// S100's ride `name` replayed in the port from its own state — the whole bike seeded, free09's
+/// ground, props and every trunk of its ecosystem standing, the bike's body rays carried, the
+/// original's pad read two rows back as the original reads it — with wrecks on or off. The capture
+/// (from the state on), the frame the state was saved on, the 125's class and the port's ticks.
+/// `None`, with a line, where the capture, the state or the disc is missing.
+fn s100_ride(name: &str, wrecks: bool) -> Option<(Capture, u64, BikePhy, Vec<S100Tick>)> {
     use game_sim::camera::CurveTable;
     use game_sim::eco::{Trees, Wooded};
     let dir = private_dir("capture");
-    let Ok(text) = std::fs::read_to_string(dir.join(format!("{S100_TREE}.csv"))) else {
-        println!("no {S100_TREE}.csv — S100's journal says how it is recorded");
-        return;
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
+        println!("no {name}.csv — S100's journal says how it is recorded");
+        return None;
     };
-    let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{S100_TREE}.csv: {e}"));
-    let at = dir.join(format!("{S100_TREE}.ee.bin"));
+    let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+    let at = dir.join(format!("{name}.ee.bin"));
     let Some(st) = SaveState::open_either(&at) else {
-        println!("no {} — the eeMemory.bin of S100's tree.p2m2_SaveState.p2s", at.display());
-        return;
+        println!("no {} — the eeMemory.bin of S100's {name}.p2m2_SaveState.p2s", at.display());
+        return None;
     };
-    let Some(mut disc) = Disc::open() else { return };
+    let mut disc = Disc::open()?;
     let track = "Tracks\\free09.res";
     let Some(area) = Area::all_of(&mut disc, track).into_iter().next() else {
         println!("no {track} on this disc");
-        return;
+        return None;
     };
     let (props, _) = area.props(&mut disc);
     let terrain = Terrain::parse(&area.terrain).expect("free09's terrain");
@@ -9915,60 +9931,144 @@ fn a_free09_trunk_wrecks_as_the_original_does() {
     let tables = Arc::new(RiderTables::build());
     let phy = the_bike_named(&mut disc, &tables, FREERIDE_PHY).expect("race125p.phy");
     let mounts = the_wheels_of(&mut disc, FREERIDE_MODEL).expect("the 125's wheels");
-    let col = the_bike_col(&mut disc).expect("the bike's collision files");
+    let col = Arc::new(the_bike_col(&mut disc).expect("the bike's collision files"));
 
     let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
     let cap = dense_run(&whole, saved);
-    let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{S100_TREE}.csv: {e}"));
+    let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
     let rows = rows_by_counter(&cap);
-    // The recorder polls the pad two frames back; the first two rows' are the tape's first, idle
-    // frame (the tape holds Cross from its second row, S100).
-    let pad_of = |counter: u64| rows.get(&counter).map(|&r| tape.frames[r.saturating_sub(2)]);
+    // The game polls the pad two frames back: row r's tick reads row r - 2's bytes, which are the
+    // tape's frame r - 3 (the tape starts at row 1). The first rows' ticks read the frames before the
+    // capture, which held the pad as row 0 does, idle (Cross is in row 1's bytes, and the original's
+    // chassis rolls back until row 3, S185).
+    let mut before = tape.frames[0];
+    let held = cell(&cap, 0, column(&cap, "pad_a").unwrap());
+    for (i, b) in before.reports[0].0.iter_mut().enumerate().take(held.len() / 2) {
+        *b = u8::from_str_radix(&held[2 * i..2 * i + 2], 16).unwrap();
+    }
+    let pad_of = |counter: u64| rows.get(&counter).map(|&r| r.checked_sub(3).map_or(before, |k| tape.frames[k]));
     let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
-    rider.carries_bike_col(Arc::new(col));
+    rider.carries_bike_col(Arc::clone(&col));
     let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
     st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
-    let want = first_wreck(&cap, saved).expect("the original wrecks");
-    let lane = |r: usize, n: &str| -> [f32; 3] {
-        ["x", "y", "z"].map(|l| cell(&cap, r, column(&cap, &format!("{n}.{l}")).unwrap()).parse::<f32>().unwrap())
-    };
-    println!("from the state at frame {saved}: the original wrecks at {}, reason {}", want.0, want.1);
-    let mut got = None;
+    sim.rider.sense.wrecks_enabled = wrecks;
+    let mut ticks = Vec::new();
     for counter in saved + 1..=saved + S100_TICKS {
         let Some(pad) = pad_of(counter) else {
-            println!("  {counter}: no row in the capture");
+            println!("  {counter}: no row in {name}.csv");
             break;
         };
+        let found = game_sim::rider_contact::scenery(&col, &sim.rider.ride.transform(), &mut world, pad.dt())
+            .map_or(0, |(c, _)| c.iter().filter(|c| c.other.is_none()).count());
         sim.frame(pad.dt(), &pad.reports, &mut world);
         let ride = &sim.rider.ride;
-        let (c, v, g) = (ride.chassis.cofg_world, ride.chassis.vel, ride.mv.g_peak);
-        if counter + 8 >= want.0 && counter <= want.0 + 2 {
-            if let Some(&r) = rows.get(&counter) {
-                let (oc, ov, og) = (lane(r, "ch_cofg"), lane(r, "ch_vel"), lane(r, "g_peak"));
-                println!("  {counter} orig cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2}",
-                         oc[0], oc[1], oc[2], ov[0], ov[1], ov[2], og[0], og[1], og[2]);
-            }
-            println!("  {counter} port cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2}{}",
-                     c.x(), c.y(), c.z(), v.x(), v.y(), v.z(), g.x(), g.y(), g.z(),
-                     sim.rider.state.wreck.map_or(String::new(), |w| format!("  wreck {}", w.0)));
-        } else if counter % 10 == 0 {
-            if let Some(&r) = rows.get(&counter) {
-                println!("  {counter} speed: original {:.2}, port {:.2}", lane(r, "ch_vel")[2], v.z());
-            }
-        }
-        if got.is_none() && let Some(w) = sim.rider.state.wreck {
-            got = Some((counter, w.0, g, c));
+        ticks.push(S100Tick {
+            counter,
+            cofg: ride.chassis.cofg_world,
+            vel: ride.chassis.vel,
+            g: ride.mv.g_peak,
+            found,
+            wreck: sim.rider.state.wreck.map(|w| w.0),
+        });
+    }
+    Some((cap, saved, phy, ticks))
+}
+
+/// **A free09 trunk wrecks the rider as the original's does** (S126, S185): S100's ride replayed in the
+/// port from its own state ([`s100_ride`]) wrecks on the tick the original does, over the bars (reason
+/// 1), on the impact load the resolve of the rays' trunk contacts leaves in g_peak, which is the
+/// original's to a few percent, as is the velocity the resolve leaves. With wrecks off (S100's
+/// `nowreck`) the rays find the trunk on the original's tick with the original's 2 front contacts,
+/// and the hit takes the 125 from 58 to 35 ft/s as it does the original's. Rows are read at one of
+/// three phases of a frame (torn rows repeat a tick or skip one), so a port tick is held to the row
+/// of its counter or the one either side of it. Skipped with a line where a capture or state is
+/// missing.
+#[test]
+fn a_free09_trunk_wrecks_as_the_original_does() {
+    let Some((cap, saved, phy, ticks)) = s100_ride(S100_TREE, true) else { return };
+    let rows = rows_by_counter(&cap);
+    let lane = |cap: &Capture, r: usize, n: &str| -> Vf {
+        let [x, y, z] = ["x", "y", "z"].map(|l| cell(cap, r, column(cap, &format!("{n}.{l}")).unwrap()).parse::<f32>().unwrap());
+        Vf::new(x, y, z, 0.0)
+    };
+    let num = |cap: &Capture, r: usize, n: &str| cell(cap, r, column(cap, n).unwrap()).parse::<f32>().unwrap();
+    let want = first_wreck(&cap, saved).expect("the original wrecks");
+    println!("from the state at frame {saved}: the original wrecks at {}, reason {}", want.0, want.1);
+    for t in &ticks {
+        let Some(&r) = rows.get(&t.counter) else { continue };
+        if t.counter + 8 >= want.0 && t.counter <= want.0 + 2 {
+            let (oc, ov, og) = (lane(&cap, r, "ch_cofg"), lane(&cap, r, "ch_vel"), lane(&cap, r, "g_peak"));
+            println!("  {} orig cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2}",
+                     t.counter, oc.x(), oc.y(), oc.z(), ov.x(), ov.y(), ov.z(), og.x(), og.y(), og.z());
+            let (c, v, g) = (t.cofg, t.vel, t.g);
+            println!("  {} port cofg {:9.3} {:8.3} {:9.3} vel {:7.2} {:7.2} {:7.2} g {:6.2} {:6.2} {:6.2} rays {}{}",
+                     t.counter, c.x(), c.y(), c.z(), v.x(), v.y(), v.z(), g.x(), g.y(), g.z(), t.found,
+                     t.wreck.map_or(String::new(), |w| format!("  wreck {w}")));
+        } else if t.counter % 10 == 0 {
+            println!("  {} speed: original {:.2}, port {:.2}", t.counter, lane(&cap, r, "ch_vel").z(), t.vel.z());
         }
     }
-    println!("the port {}", got.map_or("rides it out".to_string(), |(c, r, g, _)| format!("wrecks at {c}, reason {r}, g_peak {g:?}")));
-    let (gc, gr, g, c) = got.expect("the port wrecks on the trunk");
-    let off = |x: f32, z: f32| ((x - S100_TRUNK[0]).powi(2) + (z - S100_TRUNK[1]).powi(2)).sqrt();
-    let theirs = lane(rows[&want.0], "ch_cofg");
-    println!("at the wreck the centre of mass is {:.2} ft off the trunk's axis, the original's {:.2}", off(c.x(), c.z()), off(theirs[0], theirs[2]));
-    assert_eq!(gr, want.1, "over the bars, as the original");
-    assert!(g.z() < -phy.air.front_wreck_speed_limit.0, "on the fore-aft impact load, past the 125's front limit");
-    assert!((2.5..5.0).contains(&off(c.x(), c.z())), "against the trunk, nose first");
-    assert_eq!(want.0.checked_sub(gc), Some(S100_EARLY), "the port's wreck, the original's at {}, comes S100_EARLY ticks before it (P154)", want.0);
+    // The original's row at `counter` against the port's tick of that counter or the one either side
+    // (a torn row runs a tick ahead or repeats one): how far its velocity is off the closest of the three.
+    let dist = |a: Vf, b: Vf| ((a.x() - b.x()).powi(2) + (a.y() - b.y()).powi(2) + (a.z() - b.z()).powi(2)).sqrt();
+    let near = |cap: &Capture, ticks: &[S100Tick], counter: u64| -> f32 {
+        let ours = lane(cap, rows_by_counter(cap)[&counter], "ch_vel");
+        ticks.iter().filter(|t| t.counter.abs_diff(counter) <= 1).map(|t| dist(t.vel, ours)).fold(f32::MAX, f32::min)
+    };
+    // The run-up, row by row: the launch and the ride to the trunk are the original's.
+    let mut worst = (0, 0.0f32);
+    for counter in saved + 2..want.0 {
+        let off = near(&cap, &ticks, counter);
+        if off > worst.1 {
+            worst = (counter, off);
+        }
+    }
+    println!("the run-up's velocity is at most {:.3} ft/s off the original's nearest row, at {}", worst.1, worst.0);
+    assert!(worst.1 < 0.25, "the port's launch and run-up are the original's (P154, S185): {:.3} ft/s off at {}", worst.1, worst.0);
+
+    let hit = ticks.iter().find(|t| t.wreck.is_some()).expect("the port wrecks on the trunk");
+    println!("the port wrecks at {}, reason {}, g_peak {:?}", hit.counter, hit.wreck.unwrap(), hit.g);
+    let off = |c: Vf| ((c.x() - S100_TRUNK[0]).powi(2) + (c.z() - S100_TRUNK[1]).powi(2)).sqrt();
+    let theirs = lane(&cap, rows[&want.0], "ch_cofg");
+    println!("at the wreck the centre of mass is {:.2} ft off the trunk's axis, the original's {:.2}", off(hit.cofg), off(theirs));
+    assert_eq!(hit.wreck, Some(want.1), "over the bars, as the original");
+    assert!(hit.g.z() < -phy.air.front_wreck_speed_limit.0, "on the fore-aft impact load, past the 125's front limit");
+    assert!((2.5..5.0).contains(&off(hit.cofg)), "against the trunk, nose first");
+    assert_eq!(want.0.checked_sub(hit.counter), Some(S100_EARLY), "the port's wreck, the original's at {}, comes S100_EARLY ticks before it", want.0);
+    // The hit tick's load and the velocity it leaves, against the original's wreck row.
+    let r = rows[&want.0];
+    let (og, ov) = (lane(&cap, r, "g_peak"), lane(&cap, r, "ch_vel"));
+    let og_len = (og.x().powi(2) + og.y().powi(2) + og.z().powi(2)).sqrt();
+    let (dg, dv) = (dist(hit.g, og), near(&cap, &ticks, want.0));
+    println!("the hit: g_peak {:?} against the original's {og:?} ({dg:.2} off), velocity {:?} against {ov:?} ({dv:.2} off)", hit.g, hit.vel);
+    assert!(dg < 0.05 * og_len, "the impact load is the original's: {dg:.2} off a {og_len:.2} load");
+    assert!(dv < 1.0, "the velocity the hit leaves is the original's: {dv:.2} ft/s off");
+    // Down and still after: the wreck holds the bike where it hit, as the original's.
+    for counter in want.0 + 1..=want.0 + 3 {
+        let dv = near(&cap, &ticks, counter);
+        assert!(dv < 1.0, "{counter}: after the wreck, the original's velocity ({dv:.2} ft/s off)");
+    }
+
+    // Wrecks off: the rays' contacts and the resolve, with nothing to cut the tick short.
+    let Some((free, saved, _, ticks)) = s100_ride(S100_NOWRECK, false) else { return };
+    let frows = rows_by_counter(&free);
+    let touch = frows.iter().find(|&(&c, &r)| c > saved && num(&free, r, "col_count") > 0.0).map(|(&c, &r)| (c, r)).expect("the original's rays find the trunk");
+    let found = ticks.iter().find(|t| t.found > 0).expect("the port's rays find the trunk");
+    let ov = lane(&free, touch.1, "ch_vel");
+    println!("wrecks off: the original's rays find the trunk at {} ({} contacts, the resolve leaving {ov:?}); the port's at {} ({} contacts){}",
+             touch.0, num(&free, touch.1, "col_count"), found.counter, found.found,
+             ticks.iter().find(|t| t.wreck.is_some()).map_or(String::new(), |t| format!("; it wrecks at {}", t.counter)));
+    assert!(found.counter.abs_diff(touch.0) <= 1, "the port's rays find the trunk on the original's tick");
+    assert_eq!(found.found as f32, num(&free, touch.1, "col_count"), "the original's 2 front contacts");
+    // That row is read part way through the hit tick, between the resolve (58 to 35 ft/s) and the rest
+    // of it, which the port does not stop at; the rows after it are whole ticks again. The bike rears on
+    // the trunk and comes down on it at the fourth (7 contacts), where the two part.
+    for counter in touch.0 + 1..=touch.0 + 3 {
+        let dv = near(&free, &ticks, counter);
+        println!("  {counter}: the original's velocity {:?}, {dv:.2} ft/s off the port's", lane(&free, frows[&counter], "ch_vel"));
+        assert!(dv < 1.0, "{counter}: after the hit, the original's velocity ({dv:.2} ft/s off)");
+    }
+    assert!(ticks.iter().all(|t| t.wreck.is_none()), "no wreck with wrecks off");
 }
 
 // --- S129: the bike meeting free06's train, from S129's own save states -------------------------------
