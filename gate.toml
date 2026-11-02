@@ -51,3 +51,15 @@ tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem"]
 private = true
 size = "1920x1080"
 grew_mib = 1024
+
+[[variant]]
+# F18: the native-sim tolerance suite. Player builds ride ps2-float's `native` floats (F15) while the gate's
+# proofs stay bit-exact; these are replay.rs's `native_tolerance_*` tests (the S67/S115 landings to S67's
+# bound, the crash outcomes on the original's tick, the S58/S106 save-state rides to a path bound) built
+# native into a target directory of their own, so neither build's features rebuild the other's. In the
+# exact build they return at once. Rerun one with `./kit check -- -p game-sim --features ps2-float/native
+# --target-dir target/native --test replay native_tolerance`.
+features = "ps2-float/native"
+target_dir = "target/native"
+filter = "native_tolerance"
+tests = ["-p game-sim --test replay"]

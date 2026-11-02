@@ -8408,7 +8408,13 @@ fn each_captured_landing_rides_like_the_original() {
             let pad_of = |counter: u64| rows.get(&counter).filter(|&&r| r >= 2).map(|&r| tape.frames[r - 2]);
             let held = st.wheels().unwrap();
             let bits = |v: Vf| [v.0[0].to_bits(), v.0[1].to_bits(), v.0[2].to_bits(), v.0[3].to_bits()];
-            assert_eq!([bits(mounts.0), bits(mounts.1)], held, "the state's wheels hang where the 125_faisst's do");
+            // The native build (F18) works the mounts out in the host's floats, an ulp off the state's.
+            let ulps = if ps2_float::NATIVE { NATIVE_MOUNT_ULPS } else { 0 };
+            let ours = [bits(mounts.0), bits(mounts.1)];
+            assert!(
+                ours.iter().flatten().zip(held.iter().flatten()).all(|(&a, &b)| a.abs_diff(b) <= ulps),
+                "the state's wheels hang where the 125_faisst's do: {ours:?} against {held:?}"
+            );
             let curve = st.power_curve().unwrap();
             let ours = phy.engine.curve_rpm.iter().zip(&phy.engine.curve_torque).map(|(r, t)| (r.to_bits(), t.to_bits()));
             assert_eq!(curve, ours.take(curve.len()).collect::<Vec<_>>(), "the state's bike makes {S67_PHY}'s power");
@@ -11916,4 +11922,202 @@ fn a_bike_meets_a_moving_truck_as_the_original_does() {
             assert_eq!(ours, our_wreck, "{name}: the port's wreck");
         });
     }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// F18: the native build's tolerance suite
+// ---------------------------------------------------------------------------------------------------
+//
+// Player builds run the simulation on the host's plain IEEE floats (ps2-float's `native`, F15) and the
+// bit-exact tests above stay the reference for the exact build. These hold the native build to bounds
+// instead: the S67 landings to S67's own bound, the wrecks to the original's outcome on its tick, and
+// the save-state rides to a distance from the original's path. The gate runs them in a native build of
+// their own (gate.toml `[native]`: every test in the binary whose name starts `native_tolerance`); in
+// the exact build they say so and return, the exact tests holding the same rides to the bit.
+
+/// How many ulps a landing's wheel mounts may sit off the state's in the native build: the 125_faisst's
+/// tire nodes are walked to the chassis in host floats, which leaves them one ulp out (F18, measured).
+const NATIVE_MOUNT_ULPS: u32 = 2;
+
+/// The save-state rides and how far, in feet, the native build's path (`rider.ride.origin`, the
+/// capture's `ch_xform` row 3) may be from the original's on any compared tick, and the tick it is
+/// compared through. Those that ride one line with the original creep apart from about tick 60-130 at
+/// a hundredth of a foot a tick or less, a chop against a round in every add; each bound is its worst
+/// (F18, at 408b131e: turn 0.53, launch 0.82, brake 1.04, nose 0.22, side 0.15, roll 0.18 ft) with a
+/// little headroom, so a change that moves the native ride shows as a red number. Four take a line of
+/// their own late in the ride, the ride's own sensitivity rather than an error: `traverse` past 1 ft at
+/// tick 130 (13 ft by its end), `roll2` at 108 (8.5 ft), the held climbs `steep` at 186 (5.9 ft) and
+/// `steep2` at 203 (3.1 ft). Their path is held only up to before that (0.52, 0.14, 0.33, 0.75 ft
+/// there), and past it they are held to their outcome: every tick ridden, and no wreck where the
+/// original rode on.
+const NATIVE_PATHS: [(&str, f32, u64); 10] = [
+    ("turn", 0.6, u64::MAX),
+    ("launch", 0.9, u64::MAX),
+    ("brake", 1.1, u64::MAX),
+    ("traverse", 0.6, 125),
+    ("steep", 0.4, 150),
+    ("steep2", 0.85, 180),
+    ("nose", 0.25, u64::MAX),
+    ("side", 0.2, u64::MAX),
+    ("roll", 0.2, u64::MAX),
+    ("roll2", 0.2, 100),
+];
+
+/// **The native build lands the S67/S115 landings within S67's bound** ([`S67_BOUND`]): the same
+/// test as the exact build's, its wheel mounts taken to [`NATIVE_MOUNT_ULPS`].
+#[test]
+fn native_tolerance_landings() {
+    if !ps2_float::NATIVE {
+        println!("the exact build: each_captured_landing_rides_like_the_original holds these");
+        return;
+    }
+    each_captured_landing_rides_like_the_original();
+}
+
+/// **The native build wrecks, or rides on, where the original does, on its tick**: the crossed-up
+/// landings and their backwards bails (S150), the roof landings (P147), the wall and nose hits (S138),
+/// the tail landings (S144) and the 2P ride's wrecks off C10's states (S175). Each of these already
+/// compares an outcome and a tick rather than bits, so the native build runs them as they are.
+#[test]
+fn native_tolerance_wrecks() {
+    if !ps2_float::NATIVE {
+        println!("the exact build: the wreck tests themselves hold these");
+        return;
+    }
+    crooked_landings_wreck_or_swing_round_as_the_original_does();
+    backwards_landings_bail_when_the_switch_is_on();
+    roof_landings_wreck_as_the_original_does_air_wrecks_on_and_off();
+    walls_and_nose_landings_wreck_as_the_original_does();
+    tail_landings_wreck_as_the_original_does();
+    the_ports_own_2p_ride_wrecks_where_the_original_did();
+}
+
+/// What [`native_path`] measured of one save-state ride: each compared tick and the distance between
+/// the port's path and the original's on it, the ticks ridden, and the tick the port wrecked on.
+struct NativePath {
+    gaps: Vec<(u64, f32)>,
+    ridden: usize,
+    wreck: Option<u64>,
+}
+
+/// One save-state ride of S58's or S106's, set up as [`the_slip_cases_replay_from_the_save_state`]
+/// (`own` false: first_recording's state, its pad from the capture alone) or
+/// [`replay_a_save_state_case`] (`own`: the levers, the engine and the saved controls too) set it up,
+/// ridden through, and its path measured against the capture's every tick but the `late` ones.
+fn native_path(acc: &Capture, st: &SaveState, seed: u32, text: &str, case: &str, late: &[u64], own: bool)
+               -> Option<NativePath> {
+    let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+    let cap = Capture::parse(text).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+    let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+    let held = if own { st.held_controls() } else { None };
+    let inputs = save_state_inputs(&cap, &ticks, held).unwrap_or_else(|e| panic!("{case}.csv: {e}"));
+    let lane = |i: usize| retick(cap.float(&format!("ch_xform.m3{i}"), "").unwrap_or_else(|e| panic!("{case}.csv: {e}")), &ticks, 0);
+    let (x, y, z) = (lane(0), lane(1), lane(2));
+    let want: Vec<(u64, [f32; 3])> = x.samples.iter().zip(&y.samples).zip(&z.samples)
+        .filter(|((s, _), _)| !late.contains(&s.tick))
+        .map(|((a, b), c)| {
+            let f = |v: Value| match v {
+                Value::Float(bits) => f32::from_bits(bits),
+                other => panic!("{case}.csv: ch_xform is not a float: {other:?}"),
+            };
+            (a.tick, [f(a.value), f(b.value), f(c.value)])
+        })
+        .collect();
+    in_the_world_of(acc, |world, _, bike| {
+        let mut sim = acceptance_start(acc, seed, bike).unwrap();
+        let ride = &mut sim.rider.ride;
+        st.seed_chassis(ride).expect("the chassis");
+        st.seed_wheels(ride).expect("both wheels");
+        st.seed_balance(ride).expect("the balance");
+        st.seed_engine_outputs(ride).expect("the engine");
+        st.seed_air(ride).expect("the air state");
+        if own {
+            st.seed_levers(ride).expect("the levers");
+            st.seed_engine_state(ride).expect("the engine's state");
+        }
+        let (mut gaps, mut wreck) = (Vec::new(), None);
+        let mut next = want.iter().peekable();
+        for (k, &input) in inputs.iter().enumerate() {
+            sim.tick_in(input, world);
+            let tick = k as u64 + 1;
+            if wreck.is_none() && sim.rider.state.wreck.is_some() {
+                wreck = Some(tick);
+            }
+            while next.peek().is_some_and(|(t, _)| *t < tick) {
+                next.next();
+            }
+            if let Some((_, o)) = next.next_if(|(t, _)| *t == tick) {
+                let p = sim.rider.ride.origin;
+                let d = ((p.x() - o[0]).powi(2) + (p.y() - o[1]).powi(2) + (p.z() - o[2]).powi(2)).sqrt();
+                gaps.push((tick, d));
+            }
+        }
+        NativePath { gaps, ridden: inputs.len(), wreck }
+    })
+}
+
+/// **The native build rides S58's and S106's save-state cases within [`NATIVE_PATHS`] of the original's
+/// path**, and none of them wrecks: the original rides every one out.
+#[test]
+fn native_tolerance_save_states() {
+    if !ps2_float::NATIVE {
+        println!("the exact build: the slip cases and the braked slopes hold these to the bit");
+        return;
+    }
+    let Some((_, acc)) = acceptance_capture() else { return };
+    let seed = acceptance_fixture(&acc).map(|f| f.seed).unwrap_or(0);
+    let first = || SaveState::open().filter(|s| s.leads(&acc));
+    let mut rides = Vec::new();
+    for (case, ..) in S58_CASES {
+        let own = S58_OWN_STATES.iter().find(|(c, _, _)| *c == case);
+        let st = match own {
+            Some((_, image, _)) => SaveState::open_at(private_dir("states").join(format!("{image}.eeMemory.bin"))),
+            None => first(),
+        };
+        let late = own.map_or(&[][..], |(_, _, late)| late);
+        rides.push((case, "s58-slip", st, late, own.is_some()));
+    }
+    for (case, image, _, late, ..) in S106_CASES {
+        let st = if image.is_empty() {
+            first()
+        } else {
+            SaveState::open_at(private_dir("states").join(format!("{image}.eeMemory.bin")))
+        };
+        rides.push((case, "s106-slope", st, late, true));
+    }
+    let mut failed = Vec::new();
+    let mut compared = 0;
+    for (case, dir, st, late, own) in rides {
+        let Ok(text) = std::fs::read_to_string(private_dir("capture").join(dir).join(format!("{case}.csv"))) else {
+            println!("{case}: no {dir}/{case}.csv");
+            continue;
+        };
+        let Some(st) = st else {
+            println!("{case}: no RAM image of its save state");
+            continue;
+        };
+        let Some(got) = native_path(&acc, &st, seed, &text, case, late, own) else { continue };
+        let &(_, bound, through) = NATIVE_PATHS.iter().find(|(c, ..)| *c == case).unwrap_or_else(|| panic!("{case}: no bound"));
+        let held = got.gaps.iter().filter(|(t, _)| *t <= through);
+        let worst = held.clone().fold((0, 0.0f32), |w, &(t, d)| if d > w.1 { (t, d) } else { w });
+        let end = got.gaps.last().map_or(0.0, |g| g.1);
+        let past = |ft: f32| got.gaps.iter().find(|g| g.1 > ft).map_or("never".to_string(), |g| format!("tick {}", g.0));
+        println!("{case}: {} ticks, {} compared; worst {:.3} ft at tick {} (bound {bound} through {}), {:.3} ft at the end, \
+                  past 0.1 ft at {}, past 1 ft at {}, wreck {:?}",
+                 got.ridden, got.gaps.len(), worst.1, worst.0,
+                 if through == u64::MAX { "the end".to_string() } else { through.to_string() }, end, past(0.1), past(1.0),
+                 got.wreck);
+        if worst.1 > bound || worst.1.is_nan() {
+            failed.push(format!("{case}: the path is {:.3} ft from the original's at tick {}, past {bound}", worst.1, worst.0));
+        }
+        if let Some(t) = got.wreck {
+            failed.push(format!("{case}: the port wrecks at tick {t}; the original rides it out"));
+        }
+        if got.gaps.is_empty() {
+            failed.push(format!("{case}: no tick compared"));
+        }
+        compared += 1;
+    }
+    println!("{compared} save-state rides compared");
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }

@@ -24,11 +24,19 @@ tracked rather than in `kit.toml` because every worktree has to agree on it, and
                                    # reruns once with no other worktree's test run going (every slot held)
     tests = ["-p openmx --test one_fps"]
 
+    [[variant]]                    # binaries built a second time, with features of their own, into a target
+    features = "ps2-float/native"  # directory of their own, and run in the same pool, only the tests whose
+    target_dir = "target/native"   # names hold `filter`
+    filter = "native_tolerance"
+    tests = ["-p game-sim --test replay"]
+
 A slow binary runs anyway under `./kit check --all`, which is what a run's merge check uses, and a filtered
 check names it directly. `paths` are fnmatch globs (`*` crosses `/`) against what this branch changed since
 it left the shared branch, plus what is uncommitted. A flaky entry is a regex against `<rerun args>::<test>`.
 A test only gets its lone rerun when every failure in that binary matches an entry, so a binary that also
-failed for real is left failed.
+failed for real is left failed. A variant binary's rerun line carries its features, target directory and
+filter (`-p game-sim --features ps2-float/native --target-dir target/native --test replay native_tolerance`),
+so `./kit check --rerun` rebuilds and runs just that.
 
 The log keeps cargo's shape: each binary's `running N tests … test result:` block, then cargo's own
 `error: test failed, to rerun pass` lines, which `./kit check`'s summary and the runner's retest both read.
@@ -88,6 +96,7 @@ class Binary:
         flag = {'lib': '--lib', 'bin': f'--bin {name}', 'test': f'--test {name}', 'bench': f'--bench {name}',
                 'example': f'--example {name}'}.get(kind, f'--test {name}')
         self.args = f'-p {pkg} {flag}'
+        self.filter = ''  # a variant's name filter (gate.toml [[variant]])
         self.rc, self.out, self.secs = 0, '', 0.0
 
 
@@ -130,9 +139,30 @@ def build(cmd: str, cwd: Path, env: dict, log) -> tuple[int, list[Binary]]:
     return p.wait(), bins
 
 
+def variants(cmd: str, cwd: Path, env: dict, log, gc: dict) -> tuple[int, list[Binary]]:
+    """gate.toml's `[[variant]]`s: each one's binaries built with its features into its target directory,
+    named by the args that rerun them, filter and all."""
+    out = []
+    for v in gc.get('variant') or []:
+        tests = [' '.join(str(t).split()) for t in v.get('tests', [])]
+        if not tests:
+            continue
+        flags = (f' --features {v["features"]}' if v.get('features') else '') + \
+                (f' --target-dir {shlex.quote(str(v["target_dir"]))}' if v.get('target_dir') else '')
+        rc, bins = build(f'{cmd}{flags} {" ".join(tests)}', cwd, env, log)
+        if rc:
+            return rc, out
+        for b in bins:
+            pkg, flag = b.args.split(' ', 2)[1], b.args.split(' ', 2)[2]
+            b.filter = str(v.get('filter', ''))
+            b.args = f'-p {pkg}{flags} {flag}' + (f' {b.filter}' if b.filter else '')
+            out.append(b)
+    return 0, out
+
+
 def _run_one(b: Binary, env: dict, filters: list[str] | None = None) -> None:
     e = {**env, 'CARGO_MANIFEST_DIR': b.dir, 'CARGO_PKG_NAME': b.pkg, 'CARGO_CRATE_NAME': b.name.replace('-', '_')}
-    args = [b.exe, '-q'] + (['--exact', *filters] if filters else [])
+    args = [b.exe, '-q'] + (['--exact', *filters] if filters else [b.filter] if b.filter else [])
     t = time.monotonic()
     r = subprocess.run(args, cwd=b.dir, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                        errors='replace')
@@ -172,6 +202,9 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
         rc, bins = build(cmd, cwd, env, log)
         if rc:
             return rc, notes
+        rc, more = variants(cmd, cwd, env, log, gc)
+        if rc:
+            return rc, notes
 
         skipped = []
         if not all_slow and gc.get('slow'):
@@ -185,6 +218,7 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
                         skipped.append(want.rsplit(' ', 1)[-1])
         if skipped:
             notes.append(f'not run, untouched: {", ".join(skipped)} (./kit check --all runs them)')
+        bins += more
 
         try:
             last = json.loads(times_path.read_text())

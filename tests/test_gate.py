@@ -47,7 +47,7 @@ fn stamp(what: &str) {
 
 FILES = {
     'Cargo.toml': '[workspace]\nmembers = ["a"]\nresolver = "2"\n',
-    'a/Cargo.toml': '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n',
+    'a/Cargo.toml': '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nnative = []\n',
     'a/src/lib.rs': 'pub fn two() -> u32 { 2 }\n',
     'a/tests/one.rs': STAMP + '#[test]\nfn waits() { stamp("one+"); '
                       'std::thread::sleep(std::time::Duration::from_millis(1500)); stamp("one-"); }\n',
@@ -58,6 +58,11 @@ FILES = {
     'a/tests/net.rs': '#[test]\nfn binds_a_port() {\n    let f = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../flake");\n'
                       '    if f.exists() { std::fs::remove_file(&f).unwrap(); panic!("Address already in use"); }\n}\n'
                       '#[test]\nfn is_fine() {}\n',
+    # The variant's own tests run only where it has its feature; the other one would fail there, so it
+    # failing says the filter let it in. ../perturb makes the variant's test fail, as a changed constant would.
+    'a/tests/var.rs': '#[test]\nfn native_tolerance_bound() {\n    if !cfg!(feature = "native") { return; }\n'
+                      '    assert!(!std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../perturb").exists(), "past the bound");\n}\n'
+                      '#[test]\nfn exact_only() { assert!(!cfg!(feature = "native")); }\n',
     'gate.toml': '[[slow]]\ntest = "-p a --test slow"\npaths = ["a/src/*"]\n\n'
                  '[flaky]\ntests = ["--test net::binds_a_port$"]\n',
 }
@@ -140,6 +145,22 @@ def test_gate() -> None:
         check(rc == 101, f'the same failure, not listed, fails (rc {rc})')
         check('error: test failed, to rerun pass `-p a --test net`' in log, "with cargo's rerun line")
         check('Address already in use' in log, 'and its panic in the log')
+
+        variant = '[[variant]]\nfeatures = "a/native"\ntarget_dir = "target/var"\nfilter = "native_tolerance"\n' \
+                  'tests = ["-p a --test var"]\n'
+        (w / 'gate.toml').write_text(variant)
+        rc, _ = gate()
+        log = (w / 'log').read_text()
+        args = '-p a --features a/native --target-dir target/var --test var native_tolerance'
+        check(rc == 0 and f'({args},' in log, f'a [[variant]] binary runs, filtered, with its features (rc {rc})')
+        check((w / 'target/var').is_dir(), 'built into its own target directory')
+        (w / 'perturb').write_text('')
+        rc, _ = gate()
+        log = (w / 'log').read_text()
+        (w / 'perturb').unlink()
+        check(rc == 101 and f'error: test failed, to rerun pass `{args}`' in log and 'past the bound' in log,
+              'a variant test that fails fails the gate, with a rerun line that rebuilds just it')
+        check('rerun pass `-p a --test var`' not in log, 'and the plain build of the same binary still passes')
 
         (w / 'a/src/lib.rs').write_text('pub fn two() -> u32 { nope }\n')
         rc, _ = gate()

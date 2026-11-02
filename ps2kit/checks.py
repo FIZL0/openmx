@@ -353,7 +353,19 @@ def cmd_check(argv: list[str]) -> int:
         _take_slot()
     try:
         _cap_build_dirs(cwd)
-        rc = _run(c.test_cmd, extra, cwd, log, all_slow=a.all)
+        if len(a.rerun) > 1:
+            # One cargo run each: a gate.toml [[variant]] binary's args carry its features, target directory
+            # and name filter, which in one shared command would reach every other binary too.
+            rc, text, notes = 0, '', []
+            for r in a.rerun:
+                one = _run(c.test_cmd, a.extra + unknown + shlex.split(r), cwd, log, all_slow=a.all)
+                text += log.read_text(encoding='utf-8', errors='replace') if log.exists() else ''
+                notes += NOTES
+                rc = rc or one
+            log.write_text(text, encoding='utf-8')
+            NOTES[:] = notes
+        else:
+            rc = _run(c.test_cmd, extra, cwd, log, all_slow=a.all)
     finally:
         _release_slot()
     for l in summarise(rc, log):
