@@ -439,6 +439,64 @@ fn the_browser_rides_on_the_gpu() {
     }
 }
 
+/// A WebGPU validation error on the menu (P257, `tests/web/gpu.mjs`'s fault): a phone's Safari
+/// stopped on 'gpu: device mismatch' with the menu's sound playing over a dead canvas, the page's
+/// fallback to WebGL2 being for failures before the first frame alone. The page opened to the front
+/// end on WebGPU, and after 30 WebGPU frames a texture past every limit asked for in the worker: the
+/// shell must end saying the front end failed on WebGPU, the page start again on `?webgl2`, and the
+/// menu draw there, lit. The module is `tools/web.sh --check`'s. Skips without the disc, node or
+/// chromium.
+#[test]
+fn a_webgpu_error_on_the_menu_starts_again_on_webgl2() {
+    let iso = match Disc::open_configured() {
+        Ok(_) => configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    const FLAGS: [&str; 4] = ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-angle=vulkan", "--ignore-gpu-blocklist"];
+    let scratch = std::env::temp_dir().join(format!("openmx-web-gpu-fault-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let run = Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/gpu.mjs"))
+        .arg(repo().join("web"))
+        .arg(&iso)
+        .arg(scratch.join("profile"))
+        .arg(scratch.join("menu.png"))
+        .arg("")
+        .args(FLAGS)
+        .env("OPENMX_GPU_PKG", built())
+        .env("OPENMX_GPU_SECONDS", "4")
+        .env("OPENMX_GPU_ARGS", "")
+        .env("OPENMX_GPU_FAULT", "30")
+        .env("OPENMX_GPU_WANT", "webgl2")
+        .output()
+        .expect("run node");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let text = String::from_utf8_lossy(&run.stdout).into_owned();
+    let log = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "gpu.mjs failed:\n{log}{text}");
+    assert!(log.contains("fault: a texture past every limit"), "the fault never ran on WebGPU:\n{log}");
+    assert!(log.contains("gpu: validation error in "), "the worker did not say where the error came from:\n{log}");
+    assert!(log.contains("openmx: webgpu failed in the front end ("), "the page did not start again for the front end's error:\n{log}");
+    let field = |key: &str| -> String {
+        text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string()
+    };
+    assert_eq!(field("gpu"), "webgl2", "the page did not start again on webgl2:\n{text}");
+    assert!(field("drawn").starts_with("webgl2"), "no webgl2 frame:\n{text}");
+    let lit: f64 = field("lit").parse().expect("lit");
+    let pixels: f64 = field("pixels").parse().expect("pixels");
+    assert!(lit > pixels / 4.0, "only {lit} of {pixels} pixels of the menu are lit:\n{text}");
+    println!("webgpu's fault on the menu: started again on {}, {lit} of {pixels} pixels lit", field("drawn"));
+}
+
 /// A pad in the page (P236, `tests/web/gamepad.mjs`): headless chromium with a pad behind
 /// `navigator.getGamepads()` shaped as chromium's own — not listed until a button is pressed,
 /// `gamepadconnected` then, the standard mapping — not K13's empty stub. The first Cross press on

@@ -7,7 +7,10 @@
 // `query` is added to the page's address (`webgl2`, `software`). With OPENMX_GPU_PKG set to a directory, the page's
 // pkg/ is served from there (the test's `tools/web.sh --check` module) instead of web/pkg. With OPENMX_GPU_PHONE set
 // to `width,height,ratio` the page is a phone's (P205): that viewport in CSS pixels at that device-pixel ratio, with
-// touch. Prints one JSON line:
+// touch. OPENMX_GPU_ARGS is the shell's command line in place of `--ride` (empty: the front end, splash and menus).
+// With OPENMX_GPU_FAULT set to a count (P257), worker.js is served with a fault ahead of it: after that many WebGPU
+// frames the device is asked for a texture past any limit, a real WebGPU validation error, once; OPENMX_GPU_WANT then
+// names the API the run waits to see drawn (the page's fallback's). Prints one JSON line:
 // { state, gpu, drawn, fps: [per second...], lit, pixels, png } — `gpu` what the page says draws (worker.js's `gpu`),
 // `drawn` its first GPU frame, `fps` the page's pictures a second as worker.js counts them, and `lit` how many of the
 // last screenshot's `pixels` are not black. The screenshot is written to <out.png>.
@@ -20,6 +23,26 @@ const [webdir, iso, profile, out, query = '', ...flags] = process.argv.slice(2);
 const SECONDS = Number(process.env.OPENMX_GPU_SECONDS ?? 20);
 const PKG = process.env.OPENMX_GPU_PKG;
 const PHONE = process.env.OPENMX_GPU_PHONE;
+const ARGS = process.env.OPENMX_GPU_ARGS ?? '--ride';
+const FAULT = process.env.OPENMX_GPU_FAULT;
+const WANT = process.env.OPENMX_GPU_WANT ?? '';
+// The fault: the device the canvas is configured with, and the frames it gives, counted.
+const fault = frames => `(() => {
+  if (typeof GPUCanvasContext === 'undefined') return;
+  let device = null, shown = 0, done = false;
+  const configure = GPUCanvasContext.prototype.configure;
+  GPUCanvasContext.prototype.configure = function (c) { device = c.device; return configure.call(this, c); };
+  const get = GPUCanvasContext.prototype.getCurrentTexture;
+  GPUCanvasContext.prototype.getCurrentTexture = function () {
+    if (++shown >= ${Number(frames)} && device && !done) {
+      done = true;
+      console.log('fault: a texture past every limit, at WebGPU frame ' + shown);
+      device.createTexture({ size: [1 << 20, 1 << 20], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING });
+    }
+    return get.call(this);
+  };
+})();
+`;
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.svg': 'image/svg+xml',
   '.webmanifest': 'application/manifest+json', '.ttf': 'font/ttf' };
 const server = http.createServer((req, res) => {
@@ -34,12 +57,13 @@ const server = http.createServer((req, res) => {
     }
     // OPFS refused, as chromium.mjs's --no-opfs: the picked file is read where it is, and nothing is copied
     if (p === '/index.html') b = Buffer.from(String(b).replace('opfs = true;', 'opfs = false;'));
+    if (p === '/worker.js' && FAULT) b = Buffer.concat([Buffer.from(fault(FAULT)), b]);
     res.writeHead(200, { 'content-type': types[path.extname(f)] ?? 'application/octet-stream' });
     res.end(b);
   });
 }).listen(0, '127.0.0.1');
 await new Promise(r => server.on('listening', r));
-const url = `http://127.0.0.1:${server.address().port}/?args=--ride${query ? `&${query}` : ''}`;
+const url = `http://127.0.0.1:${server.address().port}/?args=${encodeURIComponent(ARGS)}${query ? `&${query}` : ''}`;
 
 // No extensions, as page.mjs (K7, K12): this machine's chromium brings its own into every profile, the policy's
 // force-installed one fetched from the web store a few seconds in, and one arriving mid-load can abort the worker's
@@ -113,7 +137,7 @@ await send('Page.navigate', { url });
 // a fallback reloads the page with a new query, which asks for the disc again: pick it each time it asks
 let d;
 for (let picks = 0; picks < 3; picks++) {
-  d = await until(d => ['asking', 'failed'].includes(d.state) || d.drawn || (d.state === 'started' && d.gpu === 'software'), 120000);
+  d = await until(d => ['asking', 'failed'].includes(d.state) || d.drawn?.startsWith(WANT) || (d.state === 'started' && d.gpu === 'software'), 120000);
   if (d.state !== 'asking') break;
   const doc = await send('DOM.getDocument');
   const pick = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#pick' });
@@ -121,7 +145,7 @@ for (let picks = 0; picks < 3; picks++) {
   await until(d => d.state !== 'asking', 20000);
 }
 // with what the page said (its #status holds the worker's error), so a red run says why
-if (d.state === 'failed' || !(d.drawn || d.gpu === 'software'))
+if (d.state === 'failed' || !(d.drawn?.startsWith(WANT) || d.gpu === 'software'))
   fail(`the page did not start drawing: ${JSON.stringify(d)} (${await evaluate("document.querySelector('#status')?.textContent")})`);
 
 // the ride: its pictures a second, as the worker counts them, each second for SECONDS

@@ -14,6 +14,7 @@
 //! animation frame, the display's own rate.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -57,6 +58,41 @@ static ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 fn error() -> Option<String> {
     ERROR.lock().ok().and_then(|mut e| e.take())
+}
+
+/// Every validation error to the page's console with what made it, and the first kept for the
+/// next frame (P257): the browser's own words name the call that failed only with its source.
+fn report(source: &str, e: &wgpu::Error) {
+    crate::web_host::say(&format!("gpu: validation error in {source}: {e}"));
+    if let Ok(mut slot) = ERROR.lock() {
+        slot.get_or_insert(format!("gpu: {e} (in {source})"));
+    }
+}
+
+/// The [`game_render::gpu::Watcher`] the renderer hands its error scopes: each popped, and what it
+/// caught reported.
+fn watcher() -> game_render::gpu::Watcher {
+    Arc::new(|what: &'static str, scope: wgpu::ErrorScopeGuard| {
+        let popped = scope.pop();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Some(e) = popped.await {
+                report(what, &e);
+            }
+        });
+    })
+}
+
+/// Whether a ride has started (P257): a WebGPU validation error before one — in the splash, the
+/// menus — tells the page so ([`FRONT`]), and the page starts again on WebGL2.
+static RODE: AtomicBool = AtomicBool::new(false);
+
+/// What starts a WebGPU validation error the front end ends on: web/index.html's `fallBack` reads it.
+pub const FRONT: &str = "webgpu failed in the front end: ";
+
+/// A ride starts: a WebGPU validation error from now on ends the ride, and the page does not start
+/// again.
+pub fn riding() {
+    RODE.store(true, Ordering::Relaxed);
 }
 
 /// Make the surface on `canvas` and the renderer for it: WebGPU first, unless `webgl2` asks for
@@ -157,12 +193,21 @@ async fn finish(
         .or_else(|| caps.formats.first().copied())
         .ok_or("the surface takes no format")?;
     crate::web_host::using(api.name());
-    let renderer = Renderer::request(adapter, format).await?;
-    renderer.device.on_uncaptured_error(Arc::new(|e: wgpu::Error| {
-        if let Ok(mut slot) = ERROR.lock() {
-            slot.get_or_insert(format!("gpu: {e}"));
-        }
-    }));
+    // What the adapter can take, which the renderer's limits are raised to (gpu.rs's
+    // `Renderer::request`): a phone's are the first thing a phone's failure is read against.
+    let l = adapter.limits();
+    crate::web_host::say(&format!(
+        "gpu: adapter limits: 2D {}, layers {}, buffer {}, sampled textures a stage {}, samplers a stage {}, bind groups {}, inter-stage variables {}",
+        l.max_texture_dimension_2d,
+        l.max_texture_array_layers,
+        l.max_buffer_size,
+        l.max_sampled_textures_per_shader_stage,
+        l.max_samplers_per_shader_stage,
+        l.max_bind_groups,
+        l.max_inter_stage_shader_variables,
+    ));
+    let renderer = Renderer::request_watched(adapter, format, Some(watcher())).await?;
+    renderer.device.on_uncaptured_error(Arc::new(|e: wgpu::Error| report("an unwatched call", &e)));
     let (width, height) = (canvas.width().max(1), canvas.height().max(1));
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -205,6 +250,8 @@ pub struct GpuWindow {
     input: Canvas,
     /// Whether a frame has been shown yet: the first one tells the page which API drew it.
     shown: bool,
+    /// Frames drawn, which name the error scope around each (P257).
+    frames: u64,
 }
 
 impl GpuWindow {
@@ -229,6 +276,7 @@ impl GpuWindow {
             config: p.config,
             input,
             shown: false,
+            frames: 0,
         })
     }
 
@@ -277,8 +325,21 @@ impl GpuWindow {
 
     /// Draw one frame of `width` by `height` frame pixels, centred in the canvas, as the desktop's
     /// window does. A WebGPU validation error ends the ride with it, so the page can start again on
-    /// WebGL2 when it came before the first frame.
+    /// WebGL2 when it came before the first frame, or before the first ride ([`FRONT`]).
     pub fn draw<T>(
+        &mut self,
+        width: usize,
+        height: usize,
+        draw: impl FnOnce(&mut Renderer, &Target) -> T,
+    ) -> Result<Option<T>, String> {
+        let r = self.draw_frame(width, height, draw);
+        match r {
+            Err(e) if self.api == Api::WebGpu && !RODE.load(Ordering::Relaxed) && e.starts_with("gpu: ") => Err(format!("{FRONT}{e}")),
+            r => r,
+        }
+    }
+
+    fn draw_frame<T>(
         &mut self,
         width: usize,
         height: usize,
@@ -313,8 +374,18 @@ impl GpuWindow {
             frame: [left, top, across.min(size.0), down.min(size.1)],
             scale: self.scale as u32,
         };
+        // The frame in a scope of its own, so what it made wrong is named by its frame; a create
+        // the renderer watches is named by its own scope inside this one.
+        self.frames += 1;
+        let scope = self.renderer.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let out = draw(&mut self.renderer, &target);
         self.renderer.queue.present(texture);
+        let (frame, popped) = (self.frames, scope.pop());
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Some(e) = popped.await {
+                report(&format!("frame {frame}"), &e);
+            }
+        });
         if let Some(e) = error() {
             return Err(e);
         }

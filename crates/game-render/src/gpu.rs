@@ -65,6 +65,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 mod sprites;
@@ -969,6 +970,32 @@ pub struct Renderer {
     /// choice, 2 the coarser models at half the distance. The ground's levels and the smallest props'
     /// cut-off take it too: a level's error and a prop's size may be that many times the pixels.
     pub lod_bias: f32,
+    /// What hears the device's validation errors by what made them (P257), or nothing.
+    watch: Option<Watcher>,
+}
+
+/// What a [`Renderer`] hands each validation error scope it pushed around a create, with what the
+/// scope covered (P257): the browser's page pops it and says what failed. A browser reports an
+/// uncaptured error later and with no source, and WebKit names an object an earlier failed create
+/// left invalid as a "device mismatch" at its first use.
+pub type Watcher = Arc<dyn Fn(&'static str, wgpu::ErrorScopeGuard) + Send + Sync>;
+
+/// A validation error scope pushed by [`Renderer::watched`], handed to its [`Watcher`] when dropped.
+struct Watch {
+    what: &'static str,
+    scope: Option<(Watcher, wgpu::ErrorScopeGuard)>,
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let Some((watcher, scope)) = self.scope.take() {
+            watcher(self.what, scope);
+        }
+    }
+}
+
+fn watch(device: &wgpu::Device, watcher: Option<&Watcher>, what: &'static str) -> Watch {
+    Watch { what, scope: watcher.map(|w| (Arc::clone(w), device.push_error_scope(wgpu::ErrorFilter::Validation))) }
 }
 
 /// A prop the scene places, as culling needs it.
@@ -2010,6 +2037,12 @@ impl Renderer {
     /// one wait in making a renderer; a browser cannot block on it, so it is a future its page drives
     /// (P48), where the desktop waits on it in [`Renderer::new`].
     pub async fn request(adapter: &wgpu::Adapter, format: wgpu::TextureFormat) -> Result<Renderer, String> {
+        Renderer::request_watched(adapter, format, None).await
+    }
+
+    /// [`Renderer::request`], with `watcher` handed a validation error scope around making the
+    /// renderer and around each create it makes later (P257).
+    pub async fn request_watched(adapter: &wgpu::Adapter, format: wgpu::TextureFormat, watcher: Option<Watcher>) -> Result<Renderer, String> {
         let info = adapter.get_info();
         // WebGL2's limits, raised to the size of texture this adapter can take: what is drawn here can
         // be drawn in a browser.
@@ -2028,6 +2061,7 @@ impl Renderer {
             .await
             .map_err(|e| format!("{}: no device: {e}", info.name))?;
         let adapter_name = format!("{} ({:?})", info.name, info.backend);
+        let made = watch(&device, watcher.as_ref(), "making the renderer");
 
         let mesh_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh"),
@@ -2313,7 +2347,14 @@ impl Renderer {
             sun,
             over: false,
             lod_bias: 1.0,
+            watch: { drop(made); watcher },
         })
+    }
+
+    /// A validation error scope around what follows until the result is dropped, handed to the
+    /// [`Watcher`] then with `what` (P257); nothing without one.
+    fn watched(&self, what: &'static str) -> Watch {
+        watch(&self.device, self.watch.as_ref(), what)
     }
 
     /// The scene's props, drawn in every frame from now on.
@@ -3364,6 +3405,7 @@ impl Renderer {
         if self.pipelines.contains_key(&key) {
             return;
         }
+        let _watch = self.watched("a mesh pipeline");
         // A ghost lays every material at the pass's blend constant: over what is behind it, or added
         // to it at that share for an additive one.
         let constant = |dst_factor| wgpu::BlendState {
@@ -3503,6 +3545,7 @@ impl Renderer {
         {
             return view.clone();
         }
+        let _watch = self.watched("the depth texture");
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
             size: wgpu::Extent3d {
@@ -4315,11 +4358,13 @@ impl Renderer {
 
     /// The pictures [`Sprite::image`] counts into, uploaded now and kept: the HUD's art.
     pub fn set_images(&mut self, images: &[&Texture]) {
+        let _watch = self.watched("the sprites' images");
         self.sprites.set_images(&self.device, &self.queue, &self.clamp_sampler, images);
     }
 
     /// A [`Layer`] of sprites with its own `images`, for [`Renderer::draw_layer`].
     pub fn layer(&self, images: &[&Texture]) -> Layer {
+        let _watch = self.watched("a sprite layer");
         let mut sprites = sprite::Sprites::new(&self.device, &self.queue, self.format, &self.clamp_sampler);
         sprites.set_images(&self.device, &self.queue, &self.clamp_sampler, images);
         Layer { sprites }

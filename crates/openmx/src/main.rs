@@ -3223,6 +3223,9 @@ async fn loading_frame(
 }
 
 async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String> {
+    // In the browser a WebGPU validation error from here on ends the ride, not the front end (P257).
+    #[cfg(target_arch = "wasm32")]
+    gpuwin::riding();
     // The world's replaced textures (V84), set before anything of the ride is decoded and kept while
     // it rides: a world's tiles stream in later and are replaced as they load.
     let mut texture_reload = install_textures(&args);
