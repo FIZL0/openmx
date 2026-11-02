@@ -36,6 +36,11 @@ pub struct Params {
     /// Tiles laid out in the grid's middle cells, whatever their height ([`plan`]; openmx P253): on a
     /// wrapped world the ride starts there (MD50). Empty, the height order alone lays the grid out.
     pub middle: Vec<String>,
+    /// Lay the tiles out by [`units_layout`] (a spec's `"layout": "units"`, P251), not [`plan`]'s grid.
+    pub units: bool,
+    /// Feet of each tile's own ground kept past its scene's placements ([`Tile::trim_cut`], P251).
+    /// None, a tile keeps all its ground inside the berm.
+    pub trim: Option<f64>,
     /// Threads for the join ground (0: as many as the machine has).
     pub threads: usize,
     /// Give each point only the tiles that can have a say there (the spatial grid, [`Plan::bins`]).
@@ -57,6 +62,8 @@ impl Params {
             wrap: None,
             todo: Vec::new(),
             middle: Vec::new(),
+            trim: None,
+            units: false,
             threads: 0,
             prune: true,
         }
@@ -65,7 +72,7 @@ impl Params {
 
 impl Params {
     /// A world spec's build parameters (`worlds/<id>.json`: `id`, `name`, and optional `sky`, `wrap`,
-    /// `max_slope`, `min_gap`, `fade`, `chunk`, `todo`, `middle`), as openmx-mods' `stitch --mods --out` reads
+    /// `max_slope`, `min_gap`, `fade`, `chunk`, `todo`, `middle`, `trim`, `layout`), as openmx-mods' `stitch --mods --out` reads
     /// them; its `tiles` are the caller's to find.
     pub fn from_spec(j: &Json) -> Result<Params, String> {
         let g = |k: &str| j.get(k).and_then(Json::str).map(str::to_owned);
@@ -86,6 +93,12 @@ impl Params {
         if let Some(v) = j.get("chunk").and_then(Json::f64) {
             p.chunk = v as u32;
         }
+        p.trim = j.get("trim").and_then(Json::f64);
+        p.units = match j.get("layout").and_then(Json::str) {
+            None | Some("grid") => false,
+            Some("units") => true,
+            Some(other) => return Err(format!("layout {other:?}: \"grid\" or \"units\"")),
+        };
         Ok(p)
     }
 }
@@ -131,6 +144,22 @@ pub struct Plan {
     pub relief_scale: f64,
     /// How much of the relief the blend has room for, over the world (none: all of it).
     pub room: Option<Room>,
+    /// Laid out by [`units_layout`], whose gaps [`Plan::widen_at`] widens one at a time.
+    pub units: bool,
+}
+
+/// One side of one tile's join ([`Plan::join_widths`]).
+#[derive(Clone, Copy, Debug)]
+pub struct JoinWidth {
+    pub tile: usize,
+    /// 0 −x, 1 −z, 2 +x, 3 +z.
+    pub side: usize,
+    /// Feet of join ground straight out to the facing interior.
+    pub width: f64,
+    /// The tile it faces, if any.
+    pub to: Option<usize>,
+    /// Faced round the wrap.
+    pub wrapped: bool,
 }
 
 /// A band of join ground at one tile's own spacing round its interior, for a tile whose spacing is not
@@ -319,12 +348,24 @@ fn place_axis(want: f64, s: f64, lo: u32, hi: u32, ratio: Option<(i64, i64)>) ->
 /// middle; each gap is as wide as its two facing edges' heights need.
 /// `gates` are each tile's seam gates per edge ([`gates`], measured on its cut).
 pub fn plan(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &Params, widen: f64) -> Result<Plan, String> {
+    plan_widened(tiles, cuts, gates, p, &Widen::all(widen))
+}
+
+/// [`plan`] with each gap's own widening: a spec's `"layout": "units"` lays the tiles out by
+/// [`units_layout`] and widens only the gaps in `widen.lines`; the grid of [`plan`] takes `widen.all`.
+pub fn plan_widened(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &Params, w: &Widen) -> Result<Plan, String> {
     if tiles.len() < 2 {
         return Err("a world needs two tiles or more".into());
     }
+    let widen = w.all;
     let step = lattice_spacing(tiles);
     let ratios: Vec<Option<(i64, i64)>> = tiles.iter().map(|t| ratio(t.spacing, step)).collect();
     let rings: Vec<crate::Ring> = tiles.iter().zip(cuts).map(|(t, k)| t.ring(*k)).collect();
+    let pad = crate::SHOOTOFF + p.min_gap / 2.0;
+    if p.units {
+        let l = units_layout(tiles, cuts, gates, p, w, step, &ratios, &rings, pad)?;
+        return Ok(finish(tiles, gates, p, step, ratios, l.at, l.keep, l.cell, l.tail, true, w.most()));
+    }
     let mut order: Vec<usize> = (0..tiles.len()).collect();
     order.sort_by(|a, b| rings[*a].mean().total_cmp(&rings[*b].mean()));
     let cols = (tiles.len() as f64).sqrt().ceil() as usize;
@@ -357,7 +398,6 @@ pub fn plan(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &Params, w
         grid[r][c] = Some(t);
         cell[t] = (c, r);
     }
-    let pad = crate::SHOOTOFF + p.min_gap / 2.0;
     let mut at = vec![[0.0; 2]; tiles.len()];
     let mut keep = cuts.to_vec();
     // axis 0: columns along x (keep[0], keep[2]; edges 0 and 2); axis 1: rows along z.
@@ -407,6 +447,25 @@ pub fn plan(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &Params, w
             cursor = far + gap;
         }
     }
+    Ok(finish(tiles, gates, p, step, ratios, at, keep, cell, [pad; 2], false, widen))
+}
+
+/// The plan from each tile's place: the sources, the world's size (`tail` feet past the farthest
+/// interior on each axis), the radii, bins and collars.
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    tiles: &[Tile],
+    gates: &[[f64; 4]],
+    p: &Params,
+    step: f64,
+    ratios: Vec<Option<(i64, i64)>>,
+    at: Vec<[f64; 2]>,
+    keep: Vec<[u32; 4]>,
+    cell: Vec<(usize, usize)>,
+    tail: [f64; 2],
+    units: bool,
+    widen: f64,
+) -> Plan {
     let mut far = [0.0f64; 2];
     let sources: Vec<Source> = (0..tiles.len())
         .map(|t| {
@@ -423,13 +482,370 @@ pub fn plan(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &Params, w
             Source { tile: t, rect, at: at[t], spacing: s, keep: k, ring: tiles[t].ring(k), gates: gates[t] }
         })
         .collect();
-    let size = [0, 1].map(|a| whole_samples(((far[a] + pad) / step).ceil() as u32, step));
-    let radii = radii(&sources, size, step);
+    let size = [0, 1].map(|a| whole_samples(((far[a] + tail[a]) / step).ceil() as u32, step));
+    let n = sources.len();
+    let mut sources = sources;
+    if units {
+        sources.extend(wrapped_copies(&sources, size, step, p.wrap.as_deref()));
+    }
+    let mut radii = radii(&sources, size, step);
+    // A tile and its copies round the wrap are one map: each takes the widest radius any of them was
+    // sampled to (each sees its own side of the seam), so the ground is the same either side of it.
+    for c in n..sources.len() {
+        let t = sources[c].tile;
+        radii[t] = radii[t].max(radii[c]);
+    }
+    for c in n..sources.len() {
+        radii[c] = radii[sources[c].tile];
+    }
     let radius = radii.iter().copied().fold(0.0, f64::max);
     let bins = Bins::new(&sources, &radii, size, step);
     let placed = (0..tiles.len()).map(|t| Placed { at: at[t], keep: keep[t], cell: cell[t] }).collect();
-    let (collars, uncollared) = collars(&sources, &ratios, step, size, p.fade);
-    Ok(Plan { spacing: step, size, placed, sources, radius, radii, bins, prune: p.prune, fade: p.fade, ratio: ratios, widen, collars, uncollared, relief: Vec::new(), relief_scale: 1.0, room: None })
+    let (collars, uncollared) = collars(&sources[..n], &ratios, step, size, p.fade);
+    Plan { spacing: step, size, placed, sources, radius, radii, bins, prune: p.prune, fade: p.fade, ratio: ratios, widen, collars, uncollared, relief: Vec::new(), relief_scale: 1.0, room: None, units }
+}
+
+/// Each source again one world over on every axis `wrap` names (and both, diagonally), where it comes
+/// within half the world's longer side of the world (P251): the blend then sees the maps round the wrap
+/// as well as the ones beside it, so the ground at the far edge meets the ground at 0 (the seam openmx
+/// closes, a cell wide) instead of each side going to its own nearest maps. A copy keeps its tile's
+/// index, ground and gates; it is never inside the world.
+fn wrapped_copies(sources: &[Source], size: [u32; 2], step: f64, wrap: Option<&str>) -> Vec<Source> {
+    let extent = size.map(|n| f64::from(n) * step);
+    let wraps = |a: usize| wrap.is_some_and(|w| w.contains(if a == 0 { 'x' } else { 'z' }));
+    let world = [0.0, 0.0, extent[0], extent[1]];
+    let reach = extent[0].max(extent[1]) / 2.0;
+    let shifts = |a: usize| if wraps(a) { vec![0.0, -extent[a], extent[a]] } else { vec![0.0] };
+    let mut out = Vec::new();
+    for sz in shifts(1) {
+        for sx in shifts(0) {
+            if sx == 0.0 && sz == 0.0 {
+                continue;
+            }
+            for s in sources {
+                let rect = [s.rect[0] + sx, s.rect[1] + sz, s.rect[2] + sx, s.rect[3] + sz];
+                if rect_gap(world, rect) < reach {
+                    out.push(Source { rect, at: [s.at[0] + sx, s.at[1] + sz], ..s.clone() });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How much wider than they need [`plan_widened`] makes the gaps: `all` of them, and (the unit layout
+/// only) the gaps past each tile on each axis by their own factor, `after[axis][t]` the gaps from tile
+/// `t`'s far side (missing, 1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Widen {
+    pub all: f64,
+    pub after: [Vec<f64>; 2],
+}
+
+impl Widen {
+    pub fn all(all: f64) -> Widen {
+        Widen { all, after: [Vec::new(), Vec::new()] }
+    }
+
+    /// The gaps past tile `t` on `axis`, all told.
+    pub fn after(&self, axis: usize, t: usize) -> f64 {
+        self.all * self.after[axis].get(t).copied().unwrap_or(1.0)
+    }
+
+    /// The widest any gap is made.
+    pub fn most(&self) -> f64 {
+        self.all * self.after.iter().flatten().copied().fold(1.0, f64::max)
+    }
+}
+
+/// Where [`units_layout`] puts the tiles.
+struct Layout {
+    at: Vec<[f64; 2]>,
+    keep: Vec<[u32; 4]>,
+    cell: Vec<(usize, usize)>,
+    tail: [f64; 2],
+}
+
+/// Each tile's sides in grid units for [`units_layout`], `[x, z]`: a unit is the median tile side plus
+/// a smallest gap, and a tile takes as many along each axis as its own side and a gap fill whole, at
+/// least one (a part unit only widens its line: rounded up it would leave an empty unit beside it).
+/// MX Unleashed's freeride maps, 5337 ft, are 2 × 2 beside nationals trimmed to ~2300 ft; nat10,
+/// 4054 ft along z, is 1 × 1.
+pub fn unit_spans(tiles: &[Tile], cuts: &[[u32; 4]], p: &Params) -> Vec<[usize; 2]> {
+    let side = |t: usize, a: usize| f64::from(cuts[t][a + 2] - cuts[t][a]) * tiles[t].spacing;
+    let mut sorted: Vec<f64> = (0..tiles.len()).flat_map(|t| [side(t, 0), side(t, 1)]).collect();
+    sorted.sort_by(f64::total_cmp);
+    let u = sorted[sorted.len() / 2];
+    (0..tiles.len()).map(|t| [0, 1].map(|a| (((side(t, a) + p.min_gap) / (u + p.min_gap)).floor() as usize).max(1))).collect()
+}
+
+/// The grid's shapes `(cols, rows)` for `units` units with no tile wider than `kmax`: the fewest empty
+/// units first (an empty unit is a tile's worth of join ground, the "no man's land" P251 took out),
+/// then the squarest, the wider on a tie.
+fn unit_shapes(units: usize, kmax: [usize; 2]) -> Vec<(usize, usize)> {
+    let mut v: Vec<(usize, usize)> = (kmax[1]..=units.max(kmax[1]))
+        .flat_map(|rows| {
+            let cols = units.div_ceil(rows).max(kmax[0]);
+            [(cols, rows), (cols + 1, rows)]
+        })
+        .collect();
+    v.sort_by_key(|&(c, r)| (c * r - units, c.abs_diff(r), std::cmp::Reverse(c)));
+    v.dedup();
+    v
+}
+
+/// Pack the tiles into a `cols` × `rows` grid of units, each tile's top-left unit, or None if they do
+/// not fit. [`Params::middle`]'s tiles (one span) go first as a block of their own centred in the grid,
+/// in height order and a snake; other tiles wider than a unit next, at the first units free in a
+/// snake; then the one-unit tiles: with a middle, the units nearest it take the tiles nearest the
+/// middle's height (the nationals next to the freeride maps are the tallest), else the snake takes
+/// them in height order, as [`plan`]'s grid does.
+fn unit_pack(order: &[usize], middle: &[usize], k: &[[usize; 2]], rings: &[crate::Ring], cols: usize, rows: usize) -> Option<Vec<(usize, usize)>> {
+    let n = k.len();
+    let mut occ = vec![vec![false; cols]; rows];
+    let mut cell = vec![None; n];
+    let fits = |occ: &Vec<Vec<bool>>, x: usize, y: usize, s: [usize; 2]| {
+        x + s[0] <= cols && y + s[1] <= rows && (y..y + s[1]).all(|r| (x..x + s[0]).all(|c| !occ[r][c]))
+    };
+    let take = |occ: &mut Vec<Vec<bool>>, x: usize, y: usize, s: [usize; 2]| (y..y + s[1]).for_each(|r| (x..x + s[0]).for_each(|c| occ[r][c] = true));
+    let one = |t: usize| k[t] == [1, 1];
+    let snake: Vec<(usize, usize)> = (0..cols * rows).map(|i| (i / cols, i % cols)).map(|(r, c)| (if r % 2 == 1 { cols - 1 - c } else { c }, r)).collect();
+    let inner: Vec<usize> = order.iter().copied().filter(|t| middle.contains(t)).collect();
+    if let Some(&km) = inner.first().map(|t| &k[*t]) {
+        if inner.iter().any(|t| k[*t] != km) {
+            return None;
+        }
+        let m = inner.len();
+        let (cm, rm) = (1..=m)
+            .map(|rm| (m.div_ceil(rm), rm))
+            .filter(|(cm, rm)| cm * km[0] <= cols && rm * km[1] <= rows)
+            .min_by_key(|&(cm, rm)| (cm * rm - m, cm.abs_diff(rm), std::cmp::Reverse(cm)))?;
+        let (ox, oy) = ((cols - cm * km[0]) / 2, (rows - rm * km[1]) / 2);
+        for (i, &t) in inner.iter().enumerate() {
+            let (r, c) = (i / cm, i % cm);
+            let c = if r % 2 == 1 { cm - 1 - c } else { c };
+            let (x, y) = (ox + c * km[0], oy + r * km[1]);
+            take(&mut occ, x, y, km);
+            cell[t] = Some((x, y));
+        }
+    }
+    for &t in order.iter().filter(|t| !middle.contains(t) && !one(**t)) {
+        let &(x, y) = snake.iter().find(|(x, y)| fits(&occ, *x, *y, k[t]))?;
+        take(&mut occ, x, y, k[t]);
+        cell[t] = Some((x, y));
+    }
+    let mut free: Vec<(usize, usize)> = snake.iter().copied().filter(|(x, y)| !occ[*y][*x]).collect();
+    let mut small: Vec<usize> = order.iter().copied().filter(|t| !middle.contains(t) && one(*t)).collect();
+    if small.len() > free.len() {
+        return None;
+    }
+    if !inner.is_empty() {
+        let placed: Vec<(usize, usize, [usize; 2])> = inner.iter().map(|t| (cell[*t].unwrap().0, cell[*t].unwrap().1, k[*t])).collect();
+        let lo = placed.iter().fold([f64::MAX; 2], |a, p| [a[0].min(p.0 as f64), a[1].min(p.1 as f64)]);
+        let hi = placed.iter().fold([f64::MIN; 2], |a, p| [a[0].max((p.0 + p.2[0]) as f64), a[1].max((p.1 + p.2[1]) as f64)]);
+        let mid = [(lo[0] + hi[0]) / 2.0 - 0.5, (lo[1] + hi[1]) / 2.0 - 0.5];
+        let d = |c: &(usize, usize)| (c.0 as f64 - mid[0]).powi(2) + (c.1 as f64 - mid[1]).powi(2);
+        free.sort_by(|a, b| d(a).total_cmp(&d(b)));
+        let h = inner.iter().map(|t| rings[*t].mean()).sum::<f64>() / inner.len() as f64;
+        small.sort_by(|a, b| (rings[*a].mean() - h).abs().total_cmp(&(rings[*b].mean() - h).abs()));
+    }
+    for (t, c) in small.into_iter().zip(free) {
+        cell[t] = Some(c);
+    }
+    cell.into_iter().collect()
+}
+
+/// The unit layout (P251): every tile takes [`unit_spans`] units a side in a grid that has as few
+/// empty units as the tiles allow ([`unit_shapes`], [`unit_pack`]), so a few big maps among many small
+/// ones neither leave a whole small map's width of join beside each small one in their lines nor
+/// empty cells (both were MX Unleashed: WORLD's thousands of feet of nothing). The units only order
+/// the tiles: along each axis a tile goes past each tile before it that it faces by the gap the two
+/// need ([`gap_for`], times that tile's widening), not past a whole line, so a long map widens only
+/// its own row or column and an empty unit closes up. The world wraps by the same pairs' gaps, at
+/// least [`plan`]'s pad past the farthest interior; a row or column shorter than the longest shares
+/// what it is short by among its gaps.
+#[allow(clippy::too_many_arguments)]
+fn units_layout(
+    tiles: &[Tile],
+    cuts: &[[u32; 4]],
+    gates: &[[f64; 4]],
+    p: &Params,
+    w: &Widen,
+    step: f64,
+    ratios: &[Option<(i64, i64)>],
+    rings: &[crate::Ring],
+    pad: f64,
+) -> Result<Layout, String> {
+    let n = tiles.len();
+    let k = unit_spans(tiles, cuts, p);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|a, b| rings[*a].mean().total_cmp(&rings[*b].mean()));
+    let middle: Vec<usize> = p
+        .middle
+        .iter()
+        .map(|m| tiles.iter().position(|t| &t.id == m).ok_or_else(|| format!("middle {m} is not one of the tiles")))
+        .collect::<Result<_, _>>()?;
+    let units: usize = k.iter().map(|s| s[0] * s[1]).sum();
+    let kmax = [0, 1].map(|a| k.iter().map(|s| s[a]).max().unwrap_or(1));
+    let cell = unit_shapes(units, kmax)
+        .into_iter()
+        .take(64)
+        .find_map(|(c, r)| unit_pack(&order, &middle, &k, rings, c, r))
+        .ok_or("the tiles fit no unit grid")?;
+    let mut at = vec![[0.0; 2]; n];
+    let mut keep = cuts.to_vec();
+    let mut size = [0.0f64; 2];
+    let room = |t: usize, e: usize| gates[t][e] - (step + 2.0 * p.fade);
+    // The gap from `a`'s far side to `b`'s near side along `axis`: the widest of a smallest gap and
+    // what their edges' heights need ([`gap_for`]), times `a`'s widening there.
+    let gap = |axis: usize, a: usize, b: usize| {
+        let wa = w.after(axis, a);
+        let dh = rings[a].edge_mean(axis + 2) - rings[b].edge_mean(axis);
+        gap_for(dh, p, room(a, axis + 2) + room(b, axis), wa).max(p.min_gap * wa)
+    };
+    let span = |at: &[[f64; 2]], keep: &[[u32; 4]], t: usize, a: usize| {
+        let s = tiles[t].spacing;
+        (at[t][a] + f64::from(keep[t][a]) * s, at[t][a] + f64::from(keep[t][a + 2]) * s)
+    };
+    for axis in 0..2 {
+        // The world wraps, so any line no tile runs across can be the first. Each is tried and the
+        // shortest world kept: a tile cannot start before its own ground does (no tile origin is below
+        // 0, game-sim's Tiled::new), so a first line of nationals, whose trimmed ground is ~2000 ft
+        // before their interiors, leaves that much more join over the wrap than a freeride map's ridge.
+        let unit = |t: usize| if axis == 0 { cell[t].0 } else { cell[t].1 };
+        let lines = (0..n).map(|t| unit(t) + k[t][axis]).max().unwrap_or(1);
+        let whole: Vec<usize> = (0..lines).filter(|&r| (0..n).all(|t| !(unit(t) < r && r < unit(t) + k[t][axis]))).collect();
+        let mut best: Option<(f64, Vec<[f64; 2]>, Vec<[u32; 4]>)> = None;
+        for r in whole {
+            let mut at = at.clone();
+            let mut keep = keep.clone();
+            let first = |t: usize| (unit(t) + lines - r) % lines;
+            let last = |t: usize| first(t) + k[t][axis] - 1;
+            // Which pairs face each other along the axis. On x (placed first), those sharing a unit row;
+            // on z, those whose kept x come nearer than the gap they would need side by side, round the
+            // x wrap too, so no two tiles a gap apart on neither axis.
+            let face: Vec<Vec<bool>> = (0..n)
+                .map(|a| {
+                    (0..n)
+                        .map(|b| {
+                            if axis == 0 {
+                                let (r0, r1) = (cell[a].1, cell[a].1 + k[a][1]);
+                                r0 < cell[b].1 + k[b][1] && cell[b].1 < r1
+                            } else {
+                                let (sa, sb) = (span(&at, &keep, a, 0), span(&at, &keep, b, 0));
+                                let d = [0.0, size[0], -size[0]]
+                                    .map(|o| (sb.0 + o - sa.1).max(sa.0 - sb.1 - o).max(0.0))
+                                    .into_iter()
+                                    .fold(f64::MAX, f64::min);
+                                d < gap(0, a, b).max(gap(0, b, a))
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by_key(|&t| first(t));
+            let lowest = |t: usize| pad.max(f64::from(cuts[t][axis]) * tiles[t].spacing);
+            // Place each tile at `want`'s interior start or past every tile before it that it faces.
+            let pass = |want: &dyn Fn(usize) -> f64, at: &mut Vec<[f64; 2]>, keep: &mut Vec<[u32; 4]>| {
+                for &t in &order {
+                    let s = tiles[t].spacing;
+                    let mut lo = want(t).max(lowest(t));
+                    for b in (0..n).filter(|&b| face[b][t] && last(b) < first(t)) {
+                        lo = lo.max(span(at, keep, b, axis).1 + gap(axis, b, t));
+                    }
+                    let (origin, a, z) = place_axis(lo, s, cuts[t][axis], cuts[t][axis + 2], ratios[t]);
+                    at[t][axis] = origin;
+                    keep[t][axis] = a;
+                    keep[t][axis + 2] = z;
+                }
+            };
+            // The world's extent: past every interior by a pad, and round the wrap every facing pair's
+            // gap from the later one's far side to the earlier one's near side (a tile's own included).
+            let extent = |at: &[[f64; 2]], keep: &[[u32; 4]]| {
+                let mut e = (0..n).map(|t| span(at, keep, t, axis).1 + pad).fold(0.0, f64::max);
+                for b in 0..n {
+                    for t in (0..n).filter(|&t| face[b][t] && first(b) <= first(t)) {
+                        e = e.max(span(at, keep, t, axis).1 + gap(axis, t, b) - span(at, keep, b, axis).0);
+                    }
+                }
+                e
+            };
+            // Packed as close as each can go, the shortest world; then each as late as that world lets it
+            // go; then each that share of the way from the one to the other that it lies along the world,
+            // so a row or column shorter than the longest shares out what it is short by among its gaps
+            // instead of leaving it all at the wrap.
+            pass(&|_| 0.0, &mut at, &mut keep);
+            let low: Vec<f64> = (0..n).map(|t| span(&at, &keep, t, axis).0).collect();
+            let width: Vec<f64> = (0..n).map(|t| span(&at, &keep, t, axis).1 - low[t]).collect();
+            let e = extent(&at, &keep);
+            let mut high = vec![0.0f64; n];
+            for &t in order.iter().rev() {
+                let mut hi = e - pad - width[t];
+                for b in (0..n).filter(|&b| face[t][b]) {
+                    if first(b) <= first(t) {
+                        hi = hi.min(low[b] + e - gap(axis, t, b) - width[t]);
+                    }
+                    if last(t) < first(b) {
+                        hi = hi.min(high[b] - gap(axis, t, b) - width[t]);
+                    }
+                }
+                high[t] = hi.max(low[t]);
+            }
+            pass(&|t| low[t] + (high[t] - low[t]) * low[t] / e, &mut at, &mut keep);
+            let e = extent(&at, &keep);
+            if best.as_ref().is_none_or(|b| e < b.0) {
+                best = Some((e, at, keep));
+            }
+        }
+        let (e, a, kp) = best.ok_or("no line to start the world on")?;
+        (size[axis], at, keep) = (e, a, kp);
+    }
+    let tail = [0, 1].map(|a| size[a] - (0..n).map(|t| span(&at, &keep, t, a).1).fold(0.0, f64::max));
+    Ok(Layout { at, keep, cell, tail })
+}
+
+impl Plan {
+    /// The widening that answers ground too steep at `at` in a [`units_layout`] plan: the gaps past the
+    /// tile `at` is nearest past, on the axis it is nearer that on (both on a tie), made 1.25 times as
+    /// wide.
+    /// None for [`plan`]'s grid, which widens all its gaps.
+    pub fn widen_at(&self, w: &Widen, at: [f64; 2]) -> Option<Widen> {
+        if !self.units {
+            return None;
+        }
+        let extent = self.size.map(|n| f64::from(n) * self.spacing);
+        // On each axis, the tile whose far side `at` is past by the least (round the wrap), counting
+        // how far `at` is beside its interior across.
+        let mut best = [(f64::INFINITY, 0usize); 2];
+        for axis in 0..2 {
+            let o = 1 - axis;
+            for (t, src) in self.sources[..self.placed.len()].iter().enumerate() {
+                let past = (at[axis] - src.rect[axis + 2]).rem_euclid(extent[axis]);
+                let c = at[o];
+                let beside = [0.0, extent[o], -extent[o]]
+                    .map(|d| (src.rect[o] - c - d).max(c + d - src.rect[o + 2]).max(0.0))
+                    .into_iter()
+                    .fold(f64::MAX, f64::min);
+                if past + beside < best[axis].0 {
+                    best[axis] = (past + beside, t);
+                }
+            }
+        }
+        let mut out = w.clone();
+        let near = best[0].0.min(best[1].0);
+        for axis in 0..2 {
+            if best[axis].0 <= near {
+                let t = best[axis].1;
+                let v = &mut out.after[axis];
+                if v.len() <= t {
+                    v.resize(t + 1, 1.0);
+                }
+                v[t] *= 1.25;
+            }
+        }
+        Some(out)
+    }
 }
 
 /// The share of `max_slope` a tile's extension alone may take past its seam gate: the rest is left for
@@ -848,7 +1264,7 @@ impl Plan {
                 continue;
             }
             let (fx, fz) = (fold(x, s.rect[0], s.rect[2]), fold(z, s.rect[1], s.rect[3]));
-            sum += w * self.relief[c].at(fx - s.at[0], fz - s.at[1]);
+            sum += w * self.relief[s.tile].at(fx - s.at[0], fz - s.at[1]);
             sq += w * w;
         }
         if sq <= 0.0 {
@@ -1049,6 +1465,42 @@ impl Plan {
                 if !inside {
                     out.push(spec);
                 }
+            }
+        }
+        out
+    }
+
+    /// Each tile side's join width (P251): from each interior's edge straight out (`side` 0 −x, 1 −z,
+    /// 2 +x, 3 +z) to the nearest other interior that faces it (overlaps it across), round a wrapped
+    /// axis, feet. A side nothing faces is out to the world's edge (or `f64::INFINITY` on a wrapped
+    /// axis with nothing round it). This is how much new ground a rider crosses leaving that side.
+    pub fn join_widths(&self, wrap: Option<&str>) -> Vec<JoinWidth> {
+        let extent = self.size.map(|n| f64::from(n) * self.spacing);
+        let wraps = |a: usize| wrap.is_some_and(|w| w.contains(if a == 0 { 'x' } else { 'z' }));
+        let mut out = Vec::new();
+        let real = &self.sources[..self.placed.len()];
+        for a in real {
+            for side in 0..4 {
+                let (ax, up) = (side % 2, side >= 2);
+                let other = 1 - ax;
+                let mut best: (f64, Option<usize>, bool) = (f64::INFINITY, None, false);
+                for b in real {
+                    if b.tile == a.tile || b.rect[other + 2] <= a.rect[other] || b.rect[other] >= a.rect[other + 2] {
+                        continue;
+                    }
+                    let mut d = if up { b.rect[ax] - a.rect[ax + 2] } else { a.rect[ax] - b.rect[ax + 2] };
+                    let wrapped = d < 0.0 && wraps(ax);
+                    if wrapped {
+                        d += extent[ax];
+                    }
+                    if d >= 0.0 && d < best.0 {
+                        best = (d, Some(b.tile), wrapped);
+                    }
+                }
+                if best.1.is_none() && !wraps(ax) {
+                    best.0 = if up { extent[ax] - a.rect[ax + 2] } else { a.rect[ax] };
+                }
+                out.push(JoinWidth { tile: a.tile, side, width: best.0, to: best.1, wrapped: best.2 });
             }
         }
         out
@@ -1325,13 +1777,16 @@ fn piece(plan: &Plan, tiles: &[Tile], terrains: &[Terrain], spec: &Spec) -> Resu
         }
     }
     // The look: the tiles with a share anywhere in the piece, in the world's tile order.
+    // A tile's copies round the wrap ([`wrapped_copies`]) share its look.
     let n = cands.len();
-    let mut used: Vec<usize> = (0..n).filter(|&c| (0..sw * sd).any(|i| shares[i * n + c] * 255.0 >= 0.5)).collect();
-    used.sort_by_key(|&c| plan.sources[cands[c]].tile);
-    let mut between: Vec<usize> = used.iter().map(|&c| plan.sources[cands[c]].tile).collect();
+    let mut between: Vec<usize> = cands.iter().map(|&c| plan.sources[c].tile).collect();
+    between.sort_unstable();
+    between.dedup();
+    let share = |i: usize, t: usize| (0..n).filter(|&c| plan.sources[cands[c]].tile == t).map(|c| shares[i * n + c]).sum::<f64>();
+    between.retain(|&t| (0..sw * sd).any(|i| share(i, t) * 255.0 >= 0.5));
     let mut blend = Vec::with_capacity(sw * sd * between.len().max(2));
     for i in 0..sw * sd {
-        let w: Vec<f64> = used.iter().map(|&c| shares[i * n + c]).collect();
+        let w: Vec<f64> = between.iter().map(|&t| share(i, t)).collect();
         blend.extend(bytes_255(&w));
     }
     if between.len() < 2 {
@@ -1445,6 +1900,27 @@ pub fn build(tile_dirs: &[PathBuf], out: &Path, p: &Params) -> Result<Built, Str
 /// [`build`] from tiles already read ([`Tile::load`] or [`Tile::from_parts`]). With `copy_tiles` off
 /// no `tiles/` folder is written (P232: the shell's disc worlds, whose tiles stay on the disc): the
 /// world is its mod.json and its joins, and every join byte is the same either way.
+/// The layout `build_tiles` starts from (P251): the tiles cut, their gates measured, and the plan
+/// widened until the coarse pass is under `max_slope`, without solving or writing a join. The solve
+/// may widen it further.
+pub fn layout(tiles: &[Tile], p: &Params) -> Result<Plan, String> {
+    let cuts: Vec<[u32; 4]> = tiles.iter().map(|t| t.trim_cut(p.trim).keep).collect();
+    let step = lattice_spacing(tiles);
+    let gates: Vec<[f64; 4]> = tiles.iter().zip(&cuts).map(|(t, k)| cut_source(t, *k, step, p).gates).collect();
+    let mut widen = Widen::all(1.0);
+    loop {
+        let plan = plan_widened(tiles, &cuts, &gates, p, &widen)?;
+        let (coarse, at) = plan.coarse_slope(tiles, 4);
+        if coarse <= p.max_slope {
+            return Ok(plan);
+        }
+        widen = plan.widen_at(&widen, at).unwrap_or_else(|| Widen::all(widen.all * 1.25));
+        if widen.most() > 20.0 {
+            return Err("the join ground stays too steep however wide the gaps".into());
+        }
+    }
+}
+
 pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> Result<Built, String> {
     let mut seen = std::collections::HashSet::new();
     for t in tiles {
@@ -1452,7 +1928,8 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
             return Err(format!("{} is given twice", t.id));
         }
     }
-    let (cuts, ridged): (Vec<[u32; 4]>, Vec<[bool; 4]>) = tiles.iter().map(Tile::find_cut).unzip();
+    let cut: Vec<crate::Cut> = tiles.iter().map(|t| t.trim_cut(p.trim)).collect();
+    let (cuts, ridged): (Vec<[u32; 4]>, Vec<[bool; 4]>) = cut.iter().map(|c| (c.keep, c.ridged)).unzip();
     for (t, k) in tiles.iter().zip(&cuts) {
         let ring = t.ring(*k);
         let steep = ring.edges.iter().flatten().map(|e| e.gx.hypot(e.gz)).fold(0.0, f64::max);
@@ -1491,16 +1968,17 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
         eprintln!("stitch: {}: relief {:.1} ft spread, {:.1} kept (steepest {:.3}, at {:.2})", t.id, r.spread, r.kept, r.slope, r.gain);
     }
     eprintln!("stitch: relief read in {:.1} s", t0.elapsed().as_secs_f64());
-    let mut widen = 1.0;
+    let mut widen = Widen::all(1.0);
     let mut relief_scale = 1.0f64;
     // Where the relief has been lowered ([`Room::dent`]), kept over a rebuild of the same plan.
     let mut dented: Vec<[f64; 2]> = Vec::new();
     let (plan, results) = loop {
         let t0 = std::time::Instant::now();
-        let mut plan = plan(&tiles, &cuts, &gates, p, widen)?;
+        let mut plan = plan_widened(tiles, &cuts, &gates, p, &widen)?;
         let (rmin, rmax) = plan.radii.iter().fold((f64::INFINITY, 0.0f64), |(a, b), r| (a.min(*r), b.max(*r)));
         eprintln!(
-            "stitch: widen {widen:.3}: world {:.0} × {:.0} ft, {} pieces, radius {rmin:.0}–{rmax:.0} ft, planned in {:.1} s",
+            "stitch: widen {:.3}: world {:.0} × {:.0} ft, {} pieces, radius {rmin:.0}–{rmax:.0} ft, planned in {:.1} s",
+            widen.most(),
             f64::from(plan.size[0]) * plan.spacing,
             f64::from(plan.size[1]) * plan.spacing,
             plan.pieces(p.chunk).len(),
@@ -1510,6 +1988,8 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
         let lattice = plan.coarse_lattice(&tiles, 4);
         let (coarse, at) = lattice.worst();
         eprintln!("stitch: coarse pass {coarse:.3} steepest, {:.1} s", t0.elapsed().as_secs_f64());
+        // Where the ground is too steep, for a unit layout's widening of that gap alone.
+        let mut steep = at;
         if coarse > p.max_slope {
             let (d, near) = plan
                 .sources
@@ -1597,6 +2077,7 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
                 continue;
             }
             let worst = results.iter().max_by(|a, b| a.far.total_cmp(&b.far)).expect("a piece");
+            steep = [0, 1].map(|a| worst.at[a] + f64::from(worst.samples[a]) * plan.spacing / 2.0);
             let near = plan
                 .sources
                 .iter()
@@ -1608,9 +2089,9 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
                 worst.name, worst.at[0], worst.at[1], p.max_slope
             );
         }
-        widen *= 1.25;
+        widen = plan.widen_at(&widen, steep).unwrap_or_else(|| Widen::all(widen.all * 1.25));
         dented.clear();
-        if widen > 20.0 {
+        if widen.most() > 20.0 {
             return Err("the join ground stays too steep however wide the gaps".into());
         }
     };
@@ -1719,7 +2200,23 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
                 plan.placed[i].keep
             )));
         }
-        let rock = t.rock_cut();
+        let rock = cut[i].rock;
+        if cut[i].trimmed.iter().any(|r| *r > 0) {
+            let sides: Vec<String> = ["x0", "z0", "x1", "z1"]
+                .iter()
+                .zip(cut[i].trimmed)
+                .filter(|(_, r)| *r > 0)
+                .map(|(n, r)| format!("{n} by {:.0} ft", f64::from(r) * t.spacing))
+                .collect();
+            todo.push(s(format!(
+                "{}: trimmed to {} ft past its placements (P251) on {}, keep {:?}: the map's own empty ground past \
+                 them is not in the world, and a join stands in its place",
+                t.id,
+                p.trim.unwrap_or(0.0),
+                sides.join(" "),
+                plan.placed[i].keep
+            )));
+        }
         if rock.iter().any(|r| *r > 0) {
             let sides: Vec<String> =
                 ["x0", "z0", "x1", "z1"].iter().zip(rock).filter(|(_, r)| *r > 0).map(|(n, r)| format!("{n} by {:.0} ft", f64::from(r) * t.spacing)).collect();
@@ -1757,7 +2254,7 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
         }));
     }
     let base = 2.0 * plan.spacing + 3.0 * plan.fade;
-    let gated: Vec<&Source> = plan.sources.iter().filter(|g| g.gates.iter().any(|v| *v > base)).collect();
+    let gated: Vec<&Source> = plan.sources[..plan.placed.len()].iter().filter(|g| g.gates.iter().any(|v| *v > base)).collect();
     for g in &gated {
         let far = g.gates.iter().copied().fold(0.0, f64::max);
         todo.push(s(format!(
