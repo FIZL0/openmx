@@ -516,6 +516,14 @@ impl Prop {
         Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None }
     }
 
+    /// Where [`Prop::on`] would stand `mesh` at `place`, without making the prop: its mesh's world
+    /// matrix, and the moved sphere's centre and radius (S197: a knockable prop's `f.col` at its node).
+    pub fn posed(mesh: &Mesh, place: &Mat4) -> (Mat4, Vf, F) {
+        let (to_world, _, _) = stood(mesh, place);
+        let (centre, radius) = moved(mesh, place);
+        (to_world, centre, radius)
+    }
+
     /// Move the mesh to a new world matrix, where its car now stands.
     pub fn stand(&mut self, place: &Mat4) {
         let (to_world, _, _) = stood(&self.mesh, place);

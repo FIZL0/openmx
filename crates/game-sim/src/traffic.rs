@@ -488,15 +488,25 @@ impl Traffic {
 
     /// One tick of every car, in order, and their meshes moved to where they now stand.
     pub fn frame(&mut self, dt: F, world: &mut dyn World) {
+        let movers = self.frame_held(dt, world);
+        self.props.step(dt, &movers, &mut []);
+    }
+
+    /// [`Traffic::frame`] with the knockable props' step held back (S197): the toys, the props' collide
+    /// pass and the cars. Answers the movers the props' search named, which the caller hands to
+    /// [`crate::prop_set::PropSet::step`] once the riding bikes have struck and pushed the props. The
+    /// props' step reads neither the cars nor the world, so holding it past the cars' step changes
+    /// nothing else.
+    pub fn frame_held(&mut self, dt: F, world: &mut dyn World) -> Vec<crate::contact::Mover> {
         self.toys.frame(dt, world);
-        if self.props.collections.iter().any(|c| c.objects.iter().any(|o| o.filed)) {
+        let movers = if self.props.collections.iter().any(|c| c.objects.iter().any(|o| o.filed)) {
             let (field, props, trees) = world.wooded();
-            self.props.frame_among(dt, field.as_deref(), props, trees);
+            self.props.search(dt, field.as_deref(), props, trees)
         } else {
-            self.props.frame(dt);
-        }
+            Vec::new()
+        };
         if self.cars.is_empty() {
-            return;
+            return movers;
         }
         let specs = Arc::clone(&self.specs);
         let before: Vec<Mat4> = self.cars.iter().map(|car| car.pose).collect();
@@ -505,6 +515,7 @@ impl Traffic {
         }
         self.place(world);
         self.mark(&before, dt, world);
+        movers
     }
 
     /// Tell each car's mesh how its car moved this tick ([`Moving`]), for a wheel on it to ride with

@@ -7004,3 +7004,15 @@ car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; n
 #   stand, tick 65: the port's entry was its own (mover_contact `inside`, S137/S216: the head ray's end
 #   inside a car's root box, under the nose or enclosed by the mesh). The original rides on to its own
 #   rays' head hit on 93; the stand-in is removed, and stand agrees to 93 and wrecks 6 there.
+
+# --- S197: props struck by the bike (crates/game-sim/src/prop_contact.rs; tests/prop_knock.rs; journal 2026-11-02-s197-props-struck)
+# free09's props node 0x00e17ef0 (the world node at every collection's +0x248): in the knock states its
+# filed list (+0x30) holds the human bike's record (bike +0x7d0 = 0x00da3f00) ahead of the balls' records.
+# Node update 0x0026f800 runs every filed record's collide, then resolve 0x00270dc0 for each — the bike's
+# first-substep resolve runs inside the props node's update (a hook on 0x00270dc0 inside 0x0026f800 fires
+# with the bike's record on knock-2882).
+# A strike, knock-2882 -> 2883: the bike's body rays hit ball 2's f.col; a kind-0 entry on the bike's list
+# (other = the ball's record) and a kind-1 mirror on the ball's (normal negated, other = the bike). The
+# bike's resolve pushes both bodies (the ball weighed by its mass); the ball's force listener 0x0015af40
+# then resolves its kind-1 entry (no impulse; a spring on its own side only when slow). The struck
+# listener 0x0015ad40 wakes: enable 0x0015b790 (the object's listener) before the collection's settle.
