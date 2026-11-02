@@ -1008,6 +1008,8 @@ pub struct Scene<'a> {
     bike_facets: Option<Vec<Facet>>,
     /// What the bike's struck listener ([`bike_struck`]) kept on each of the ride's bikes this frame.
     pub struck: Vec<Option<u32>>,
+    /// The bikes' chassis velocities when their collision records are in the search ([`Scene::owned`]).
+    owned: Option<&'a [Vf]>,
     rays: &'a Rays,
     transform: Matrix,
     objects: Lent,
@@ -1293,6 +1295,7 @@ impl<'a> Scene<'a> {
             bikes,
             bike_facets: None,
             struck,
+            owned: None,
             rays,
             transform,
             objects,
@@ -1314,6 +1317,17 @@ impl<'a> Scene<'a> {
     fn trunk(&self, other: usize) -> Option<usize> {
         let j = other.checked_sub(self.trunks)?;
         self.trees.is_some_and(|t| j < t.props.props.len()).then_some(j)
+    }
+
+    /// **The bikes' own collision objects** (N22b): a riding bike's frame collidable is its collision
+    /// record's (its owner, `+0x80`, is the record), so a hit on bike `k` names that record as the
+    /// struck one's other, `1 + k` among the records the search is handed after the plane's, and
+    /// [`crate::contact_search::collide`] files the mirror on it. `velocities`, each bike's chassis
+    /// velocity in [`Bike`]s' order, is what the sweep reads of a struck bike. Without, a struck bike
+    /// is only itself (S95's world, where the port has no record for it).
+    pub fn owned(mut self, velocities: &'a [Vf]) -> Scene<'a> {
+        self.owned = Some(velocities);
+        self
     }
 
     /// The ride's bike `k`, when `other` is one of [`world_among`]'s bikes.
@@ -1522,6 +1536,9 @@ impl Scene<'_> {
     /// mover of kind 2, so it is struck with its mover — by the prop's index, the order
     /// [`Search::movers`] lists them in. Anything else is only itself ([`struck`]).
     fn struck_of(&self, object: usize) -> Struck {
+        if let Some(k) = object.checked_sub(BIKES).filter(|&k| object < TREES && self.owned.is_some_and(|v| k < v.len())) {
+            return Struck { other: Some(1 + k), ..struck(object) };
+        }
         let mover = self.prop(object).filter(|&i| self.props[i].moving.is_some());
         Struck { mover: mover.map(|i| (i, crate::contact_search::MOVER_KIND)), ..struck(object) }
     }
@@ -1567,9 +1584,12 @@ impl Search for Scene<'_> {
         self.transform = matrix(node);
     }
 
-    /// A struck prop that moves answers its car's velocity, the mover's `vt+0xb8` (S145); the rest
-    /// stand still.
+    /// A struck prop that moves answers its car's velocity, the mover's `vt+0xb8` (S145), and a struck
+    /// bike with its record in the search its chassis' (N22b, [`Scene::owned`]); the rest stand still.
     fn velocity(&self, struck: &Struck) -> Vf {
+        if let (Some(k), Some(v)) = (struck.other, self.owned) {
+            return v[k - 1];
+        }
         match struck.mover.and_then(|(i, _)| self.props[i].moving) {
             Some(m) => m.velocity,
             None => Vf::ZERO,

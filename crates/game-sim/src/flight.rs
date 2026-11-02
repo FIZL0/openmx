@@ -187,11 +187,29 @@ pub const HULL: &str = "Biplane\\col\\biplanef.col";
 /// its bike by player, and every player's collision object and chassis — the other sides of the
 /// plane's resolve. A mirror is kind 1: it takes no impulse, and its spring is anchored on the
 /// bike, which it does not move.
+///
+/// **And the bikes the plane strikes** (N22b): with [`Met::bikes`] and [`Met::named`] the plane's own
+/// rays striking a bike's frame name the bike's collision object, as the original's do (the frame
+/// collidable's owner is the bike's record): the plane's entry (kind 0) names the bike by player,
+/// so its resolve impulses the bike's chassis as the plane's other ([`contact::resolve`]'s vehicle
+/// side), and the mirror (kind 1) goes on the bike's list naming the plane, which the plane's frame
+/// leaves in [`Met::struck`] for the bike's resolve. Which bikes it pushed is [`Met::pushed`].
 #[derive(Clone, Debug, Default)]
 pub struct Met {
     pub mirrors: Vec<contact::Contact>,
     pub colliders: Vec<Collider>,
     pub vehicles: Vec<contact::Vehicle>,
+    /// The player each of the plane's [`flight_search::Bike`]s is, in their order: its index in
+    /// [`Met::vehicles`]. Empty, the plane's rays strike the bikes as S95's static boxes.
+    pub bikes: Vec<usize>,
+    /// What the bikes' lists call this plane: the plane's index among the bikes' resolve's others
+    /// ([`crate::rider_contact::Bump::planes`], after the vehicles).
+    pub named: Option<usize>,
+    /// Out: the mirrors the plane's search put on each player's bike list, by player.
+    pub struck: Vec<Vec<contact::Contact>>,
+    /// Out: the players whose bikes an entry of the plane's own named, whose chassis its resolve may
+    /// have moved.
+    pub pushed: Vec<bool>,
 }
 
 impl Flight {
@@ -637,7 +655,9 @@ impl Flight {
     /// [`Flight::frame_seamed`] with the riders' bikes meeting the plane (N22a, [`Met`]): after its
     /// own search the mirrors the bikes' rays put on its list follow its own entries, as the
     /// original's node lists the plane's object ahead of the bikes', with the record's flags set as
-    /// a struck object's are; its force listener resolves them against the bikes. `None` is
+    /// a struck object's are; its force listener resolves them against the bikes. With the bikes
+    /// named ([`Met::bikes`], N22b) its own rays' hits on them are the bikes' too: its resolve pushes
+    /// their chassis, and their mirrors are left in [`Met::struck`]. `None` is
     /// [`Flight::frame_seamed`].
     pub fn frame_met(
         &mut self,
@@ -648,9 +668,10 @@ impl Flight {
         bikes: &[flight_search::Bike],
         met: Option<&mut Met>,
     ) -> (Vec<Option<u32>>, [i8; 2]) {
+        let mut met = met;
+        let (struck, movers) = self.search_met(dt, ground, bikes, met.as_deref_mut());
         let mesh = self.bike.clone();
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
-        let (struck, movers) = self.search(dt, ground, bikes);
         if let Some(m) = met.as_deref().filter(|m| !m.mirrors.is_empty() && self.rays.is_some()) {
             let r = &mut self.record;
             (r.touching, r.on_object, r.touching_other) = (true, true, true);
@@ -694,17 +715,65 @@ impl Flight {
     /// [`flight_search::Scene`]). The transform is where the body stood after last frame's post
     /// listener, which is where the original's post listener leaves it. With what the bikes' struck
     /// listeners kept, it gives the movers its contacts name ([`Search::movers`], S145).
-    fn search(&mut self, dt: F, world: &mut dyn world::World, bikes: Option<Bikes<'_>>) -> (Vec<Option<u32>>, Vec<contact::Mover>) {
+    ///
+    /// With a [`Met`] that names the bikes (N22b), each bike's collision object is in the search
+    /// after the plane's, empty, as the original's node empties every list before any searches and
+    /// searches the planes first: the plane's entry on a bike names it by player, and the mirrors
+    /// the bikes' records took are left in [`Met::struck`] naming the plane as [`Met::named`].
+    fn search(&mut self, dt: F, world: &mut dyn world::World, bikes: Option<Bikes<'_>>, met: Option<&mut Met>) -> (Vec<Option<u32>>, Vec<contact::Mover>) {
         let none = vec![None; bikes.map_or(0, |b| b.bikes.len())];
         let Some(rays) = self.rays.clone() else { return (none, Vec::new()) };
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
         let bounds = field.as_deref().map(field_box);
+        let met = met.filter(|m| m.named.is_some() && bikes.is_some_and(|b| b.bikes.len() == m.bikes.len()));
+        let velocities: Vec<Vf> = met.as_deref().map_or(Vec::new(), |m| m.bikes.iter().map(|&p| m.vehicles[p].velocity).collect());
         let mut scene = Scene::flown(props, trees, bikes, bounds, &rays, &self.record.node, &mut self.nearby);
-        contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
+        if met.is_some() {
+            scene = scene.owned(&velocities);
+        }
+        let mut records = vec![std::mem::take(&mut self.record)];
+        records.extend(velocities.iter().map(|_| contact_search::Record { capacity: crate::rider_contact::CAPACITY, ..contact_search::Record::default() }));
+        contact_search::collide(&mut records, 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
         let movers = contact_search::Search::movers(&scene);
+        let mut records = records.into_iter();
+        self.record = records.next().unwrap_or_default();
+        if let Some(m) = met {
+            let n = m.vehicles.len();
+            m.struck = vec![Vec::new(); n];
+            m.pushed = vec![false; n];
+            for e in &mut self.record.contacts {
+                if let Some(k) = e.other {
+                    let p = m.bikes[k - 1];
+                    e.other = Some(p);
+                    m.pushed[p] = true;
+                }
+            }
+            for (bike, &p) in records.zip(&m.bikes) {
+                m.struck[p] = bike.contacts.into_iter().map(|e| contact::Contact { other: m.named, ..e }).collect();
+            }
+        }
         (scene.struck, movers)
+    }
+
+    /// The collision object's search alone ([`Flight::search`], what [`Flight::frame_met`] runs before
+    /// the world steps) on the bikes' collision `mesh`, for a test to set against the original's.
+    pub fn search_alone(
+        &mut self,
+        dt: F,
+        world: &mut dyn world::World,
+        mesh: &track::Mesh,
+        bikes: &[flight_search::Bike],
+        met: Option<&mut Met>,
+    ) -> Vec<Option<u32>> {
+        self.search(dt, world, Some(Bikes { mesh, bikes }), met).0
+    }
+
+    /// [`Flight::search`] on the bikes this plane carries the mesh of ([`Flight::with_bike`]).
+    fn search_met(&mut self, dt: F, world: &mut dyn world::World, bikes: &[flight_search::Bike], met: Option<&mut Met>) -> (Vec<Option<u32>>, Vec<contact::Mover>) {
+        let mesh = self.bike.clone();
+        self.search(dt, world, mesh.as_deref().map(|mesh| Bikes { mesh, bikes }), met)
     }
 
     /// The search's refill (S99), first in the post listener: the original's body post sets the

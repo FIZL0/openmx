@@ -258,3 +258,55 @@ fn a_plane_flown_into_a_bike_strikes_it() {
     assert!(z > 70.0, "the plane stopped at z {z:?} with no bike in its way");
 }
 
+
+/// **The plane pushes the bikes it strikes** (N22b): with the wall's bikes named as the riders' collision
+/// objects ([`game_sim::flight::Met::bikes`]), the frame the plane's rays first strike one its entries
+/// name that bike, its resolve impulses the bike's chassis along the plane's way, and the bike's list
+/// takes the mirrors naming the plane. Unnamed (S95's world), nothing moves the bikes.
+#[test]
+fn a_plane_flown_into_named_bikes_pushes_them() {
+    let Some((f, _)) = the_plane() else { return };
+    let tables = game_sim::ride::Tables::build();
+    let bikes = wall(true);
+    let sim = game_sim::Sim::new(0x5354);
+    let met_of = |named: bool| game_sim::flight::Met {
+        colliders: vec![game_sim::rider_contact::collider(&sim.phy.collisions, sim.phy.mass.mass); bikes.len()],
+        vehicles: bikes
+            .iter()
+            .map(|b| game_sim::contact::Vehicle {
+                node: game_sim::contact::Node { rows: [0, 1, 2].map(|r| b.transform.0[r]), origin: b.transform.0[3] },
+                mass: sim.phy.mass.mass,
+                inv_mass: F::ONE / sim.phy.mass.mass,
+                inv_inertia: [F(0.01); 3],
+                ..Default::default()
+            })
+            .collect(),
+        bikes: if named { (0..bikes.len()).collect() } else { Vec::new() },
+        named: named.then_some(bikes.len()),
+        ..Default::default()
+    };
+    let fly = |named: bool| {
+        let mut f = f.clone();
+        let mut ground = Flat::default();
+        f.attitude.flown = true;
+        f.place(Vf::new(0.0, 200.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &tables.acos);
+        f.body.velocity = Vf::new(0.0, 0.0, 120.0, 1.0);
+        let gas = game_sim::biplane::Pad { forward: F::ONE, ..Default::default() };
+        let mut met = met_of(named);
+        for _ in 0..60 {
+            f.frame_met(F(1.0 / 30.0), gas, &mut ground, &tables, &bikes, Some(&mut met));
+            if f.record.touching {
+                return (f, met);
+            }
+        }
+        panic!("the plane never touched the wall");
+    };
+    let (f, met) = fly(true);
+    let k = met.pushed.iter().position(|&p| p).unwrap_or_else(|| panic!("no bike named: {:?}", f.record.contacts));
+    assert!(f.record.contacts.iter().any(|c| c.kind == 0 && c.other == Some(k)), "the plane's entries name bike {k}");
+    assert!(!met.struck[k].is_empty() && met.struck[k].iter().all(|c| c.kind == 1 && c.other == Some(bikes.len())), "bike {k}'s mirrors {:?}", met.struck[k]);
+    assert!(met.vehicles[k].velocity.z() > 0.0, "bike {k} was not pushed the plane's way: {:?}", met.vehicles[k].velocity);
+    let (f, met) = fly(false);
+    assert!(f.record.contacts.iter().all(|c| c.other.is_none()), "unnamed, the plane's entries name no bike");
+    assert!(met.struck.is_empty() && met.pushed.is_empty() && met.vehicles.iter().all(|v| v.velocity == Vf::ZERO), "unnamed bikes moved");
+}

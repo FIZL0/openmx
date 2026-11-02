@@ -7100,3 +7100,15 @@ car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; n
 #   only its own side. The rider wrecks reason 1 (4661 P1, 5074/5505 P2), the wreck row of the capture.
 # 5074: the plane's own rays also strike P2 (kind-0 on the plane naming the bike) — the plane-pushes-bike
 #   side, left to N22b.
+# --- N22b: a flown plane's own rays striking a riding bike (crates/game-sim/src/flight.rs search/Met::bikes,
+#   flight_search.rs Scene::owned, rider_contact.rs met_plane/struck_first/pushed_riders;
+#   tests/plane_contact_capture.rs the_planes_own_rays_strike_the_bike_as_the_originals;
+#   journal 2026-11-02-n22b-a-plane-strikes-a-bike)
+# s93 5074 after every record's collide: plane0 (0x0060b1f0) list = [kind 0 other P2rec, kind 0 other P2rec,
+#   kind 1 other P2rec]; P2 (0x012a3420) list = [kind 1 other plane0, kind 1 other plane0, kind 0 other plane0]
+#   — the plane's search runs first, so its mirrors lead the bike's list. Entry +0x78 (mover) 0 throughout.
+# The bike's frame collidable is record+0x1f8 (P1 0x01330090, P2 0x0131bde0): category 0x9a048 (S95's bike
+#   collidable), flags 0x14, owner +0x80 = the bike's own record. So the plane's ray hit names the record
+#   (S95's 1p state's bikes were not checked for this).
+# The plane's 4 resolve substeps in 5074 leave P2's chassis velocity unchanged (spring path); P2's own
+#   first-substep resolve moves it. Every call bit-exact with the port's contact::resolve fed RAM's lists.

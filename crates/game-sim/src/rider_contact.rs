@@ -821,13 +821,63 @@ pub fn met_riders(riders: &[(&Rider, &Phy)], mirrors: Vec<Contact>, flying: Vf, 
         })
         .collect();
     let colliders = riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect();
-    crate::flight::Met { mirrors, colliders, vehicles }
+    crate::flight::Met { mirrors, colliders, vehicles, ..crate::flight::Met::default() }
 }
 
 /// [`met_riders`] on online's seats.
 pub fn met_among(sims: &[Sim], mirrors: Vec<Contact>, flying: Vf, world: &dyn World) -> crate::flight::Met {
     let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
     met_riders(&riders, mirrors, flying, world)
+}
+
+/// **Seat `me`'s flown plane among the riders' bikes** (N22b): [`met_riders`], with the bikes its
+/// rays strike named ([`crate::flight::Met::bikes`]) — every other player, in [`plane_bikes`]'
+/// order — and the plane as the bikes' lists call it, `named` (the riders' count and its place among
+/// the flown planes, [`Bump::planes`]).
+pub fn met_plane(riders: &[(&Rider, &Phy)], me: usize, named: usize, mirrors: Vec<Contact>, flying: Vf, world: &dyn World) -> crate::flight::Met {
+    let mut met = met_riders(riders, mirrors, flying, world);
+    met.bikes = (0..riders.len()).filter(|&j| j != me).collect();
+    met.named = Some(named);
+    met
+}
+
+/// [`met_plane`] on online's seats.
+pub fn met_plane_among(sims: &[Sim], me: usize, named: usize, mirrors: Vec<Contact>, flying: Vf, world: &dyn World) -> crate::flight::Met {
+    let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
+    met_plane(&riders, me, named, mirrors, flying, world)
+}
+
+/// **A bike's list with the planes' strikes on it** (N22b): the mirrors the flown planes' own
+/// searches put on bike `me`'s record (each plane's [`crate::flight::Met::struck`], in the planes'
+/// order), then the bike's own gather's list, up to the record's [`CAPACITY`] — the original's node
+/// empties every list, then searches the planes before the riders, and a full record takes no more.
+/// Each mirror's point is moved to the copy nearest the bike (`at`) on a world that wraps, as
+/// [`gather_met`]'s are.
+pub fn struck_first(struck: &[Vec<Contact>], own: Vec<Contact>, at: Vf, world: &dyn World) -> Vec<Contact> {
+    let mut list: Vec<Contact> = struck
+        .iter()
+        .flatten()
+        .map(|&c| Contact { point: crate::nearest_copy(world, at, c.point), ..c })
+        .collect();
+    list.extend(own);
+    list.truncate(CAPACITY);
+    list
+}
+
+/// **The bikes a plane pushed** (N22b): each rider an entry of the plane's own named takes its
+/// chassis' speeds back from the plane's resolve ([`crate::flight::Met::pushed`]), as
+/// [`bumped_riders`] takes them from a bike's.
+pub fn pushed_riders(riders: &mut [&mut Rider], met: &crate::flight::Met) {
+    for ((r, v), _) in riders.iter_mut().zip(&met.vehicles).zip(&met.pushed).filter(|(_, p)| **p) {
+        bumped_one(r, v);
+    }
+}
+
+/// [`pushed_riders`] on online's seats.
+pub fn pushed_among(sims: &mut [Sim], met: &crate::flight::Met) {
+    for ((s, v), _) in sims.iter_mut().zip(&met.vehicles).zip(&met.pushed).filter(|(_, p)| **p) {
+        bumped_one(&mut s.rider, v);
+    }
 }
 
 /// [`bump_among_in`] on riders as the shell holds them (N22).
