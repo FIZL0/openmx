@@ -229,10 +229,4 @@ fn a_put_back_and_a_trick_start_are_read_off_the_drawn_ride() {
     let mut queued = tricking.clone();
     queued.rider.tricks.current = Trick::FRONTFLIP;
     assert_eq!(told(&tricking, &queued).started, None, "a queued trick following on is not a start, as offline");
-
-    // a flip's points shown are told as its start, as the rider tells them
-    let mut flip = riding.clone();
-    flip.rider.score.shown = 7;
-    assert_eq!(told(&riding, &flip).started, Some(Trick(7)));
-    assert_eq!(told(&flip, &flip).started, None);
 }

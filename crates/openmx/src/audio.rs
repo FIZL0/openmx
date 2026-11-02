@@ -2329,7 +2329,7 @@ impl RiderBody {
 /// (every put-back of the bike starts it whole, the chord's on a rider still riding too); the
 /// plane's, its crash reason going to none or its body come back to its spawn from away. A trick
 /// started is one coming into progress — the rider's own start, a queued trick that follows on
-/// running is not — or, as the rider tells them, a front flip come round or a flip's points shown.
+/// running is not — or, as the rider tells it, a front flip come round.
 #[derive(Clone, Debug, Default)]
 pub struct Said {
     /// Each room seat's rider at the last drawn frame. `None` until the seat is first drawn, which
@@ -2347,10 +2347,9 @@ struct Seen {
     flight: game_sim::trick::Trick,
     /// The bike's ghost clock.
     ghost: F,
-    /// A trick is running, the pack's front-flip watch, the points' shown trick.
+    /// A trick is running, and the pack's front-flip watch.
     tricking: bool,
     front_watch: u8,
-    shown: u8,
     /// The plane's crash reason, and how far its body is from its spawn, feet: `None` with no plane.
     plane: Option<(u32, f32)>,
 }
@@ -2375,7 +2374,6 @@ impl Said {
             ghost: rider.ghost.clock,
             tricking: rider.tricks.in_progress,
             front_watch: rider.ride.tricks.as_ref().map_or(0, |t| t.front_watch),
-            shown: rider.score.shown,
             plane: plane.map(|f| {
                 let (at, spawn) = (f.body.position, f.spawn.0);
                 let d = [at.x() - spawn.x(), at.y() - spawn.y(), at.z() - spawn.z()];
@@ -2401,8 +2399,6 @@ impl Said {
                 said.started = Some(rider.tricks.current);
             } else if was.front_watch != 3 && now.front_watch == 3 {
                 said.started = Some(game_sim::trick::Trick::FRONTFLIP);
-            } else if now.shown != 0 && now.shown != was.shown {
-                said.started = Some(game_sim::trick::Trick(now.shown));
             }
         }
         said

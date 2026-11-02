@@ -11,9 +11,17 @@
 //!    alone, a backflip out of a trick, a wheelie, a stoppie, and **a trick landed into a wreck that
 //!    scores nothing**.
 
+use game_sim::collide::{Bundle, Record};
+use game_sim::phy::Phy;
 use game_sim::replay;
+use game_sim::ride::Controls;
+use game_sim::rider::{Rider, Tables};
 use game_sim::score::{self, Node, Score, Sense};
-use ps2_float::F;
+use game_sim::trick::{Set, Trick};
+use game_sim::world::World;
+use game_sim::{Sim, stock};
+use ps2_float::{F, Vf};
+use std::sync::Arc;
 use ps2_oracle::{Ee, Kit, addr, skip};
 
 /// The human's RAM, which has the session's score manager and four cards on it, all empty.
@@ -573,7 +581,6 @@ fn recording2s_points() {
             wrecked,
             up_y: F(float(k, up)),
             forward_y: F(float(k, fwd)),
-            ..Sense::default()
         };
         let (was, now) = (int(k - 1, wreck) != 0, int(k, wreck) != 0);
         // The clocks.
@@ -681,4 +688,213 @@ fn a_trick_landed_into_a_wreck_scores_nothing() {
     assert_eq!(crashed.total, F::ZERO, "a trick landed into a wreck kept its points");
     assert_eq!(crashed.combo_points, F::ZERO);
     assert!(crashed.nodes.is_empty() && !crashed.combo);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// S250: a flip scores when the watch comes round, as the original's does
+// ---------------------------------------------------------------------------------------------------
+//
+// S234 put a flip on the line the frame the bike started turning it over; the user had it taken out
+// again (2026-11-02). The original's rider tick (./kit fn 0x27c890) calls the trick-start hook with
+// 0x18 only once the attitude watch (+0x1400, `Score::flip`) reaches 3 — the bike over and back the
+// right way up, no more than 0.79 nose down — so a flip landed before then scores nothing, as C8's
+// film shows. The app's riders have P243's lockout up, so these cards do too.
+
+const DT: F = F(0.03333);
+
+/// In the air at a pitch `deg` turned back (a backflip's way) from level.
+fn aloft(deg: f32) -> Sense {
+    let r = deg.to_radians();
+    Sense { airborne: true, hang_time: F(0.5), up_y: F(r.cos()), forward_y: F(r.sin()), ..Sense::default() }
+}
+
+/// Down on both wheels at a pitch `deg`.
+fn landed_at(deg: f32) -> Sense {
+    let r = deg.to_radians();
+    Sense { front: true, rear: true, up_y: F(r.cos()), forward_y: F(r.sin()), ..Sense::default() }
+}
+
+/// A backflip turned from level through `to` degrees, 10 a tick, landed at `to` and ridden out past
+/// the lockout's window: the card, the tick the flip first showed on the line, and the tick the
+/// watch first read 3 (counted from the first turned tick).
+fn backflip(to: f32) -> (Score, Option<usize>, Option<usize>) {
+    let mut s = Score { lockout: true, ..Score::default() };
+    let (mut shown, mut round) = (None, None);
+    let mut k = 0;
+    let mut deg = 0.0f32;
+    let mut sense = aloft(0.0);
+    loop {
+        s.frame(DT, &sense);
+        s.grow(DT);
+        if shown.is_none() && s.nodes.iter().any(|n| n.id == score::BACKFLIP) {
+            shown = Some(k);
+        }
+        if round.is_none() && s.flip == 3 {
+            round = Some(k);
+        }
+        if deg >= to {
+            break;
+        }
+        k += 1;
+        deg = (deg + 10.0).min(to);
+        sense = aloft(deg);
+    }
+    for _ in 0..90 {
+        s.frame(DT, &landed_at(to));
+        s.grow(DT);
+    }
+    (s, shown, round)
+}
+
+/// Landed at 300° (60° nose down) the watch never came round: nothing on the line, nothing banked —
+/// C8's card. A full 360 shows the flip the tick after the watch reads 3 (the rider's tick asks
+/// before it steps the watch, as the original's does), and banks 10 000 once.
+#[test]
+fn a_flip_scores_when_the_watch_comes_round() {
+    let (s, shown, round) = backflip(300.0);
+    assert_eq!((shown, round), (None, None), "a flip landed at 300° went on the line");
+    assert_eq!(s.total, F::ZERO, "a flip landed at 300° banked {}", s.total.0);
+
+    let (s, shown, round) = backflip(360.0);
+    let round = round.expect("the watch never came round on a full flip");
+    assert_eq!(shown, Some(round + 1), "the flip went on the line before the watch came round");
+    assert!(round > 30, "the watch came round at tick {round}, before the bike had turned over");
+    assert_eq!(s.total, score::BACKFLIP_POINTS, "a full flip banked {}", s.total.0);
+}
+
+/// The air's numbers and wreck limits past a full turn, as `tests/rotation_modifier.rs` has them —
+/// the test's own, not the disc's.
+const AIR: &str = "
+[Airborne Control]
+AirborneDamping = 400
+AirborneControlForce = 40
+AirborneControlMoment = -400.0, 1500.0, -100.0
+BrakeGyroTorque = 300
+UnrollGain = 3
+UnrollTorque = 50
+UnyawGain = 3
+UnyawTorque = 400
+[Backflip]
+MaxBackflipTorque = 1400
+MinBackflipTorque = 800
+BackflipTorqueRateIncrease = 500
+BackflipTorqueRateDecrease = 2000
+MinBackflipTime = 0
+MaxBackflipTime = 0
+[Wrecks]
+MaxWreckTime = 2
+CannonballWreckTime = 5
+FrontWreckSpeedLimit = 400
+BackWreckSpeedLimit = 400
+SideWreckSpeedLimit = 400
+RacingDownWreckSpeedLimit = 40
+FreestyleDownWreckSpeedLimit = 400
+GroundPitchDownWreckAngle = 60
+GroundPitchUpWreckAngle = 60
+AirbornePitchDownWreckAngle = 400
+AirbornePitchUpWreckAngle = 400
+AirborneRollWreckAngle = 400
+NoHanderWreckSpeedLimit = 400
+NoHanderMaxRollAngle = 45
+JoustWreckHeight = 2
+CrossupWreck = 1
+CrossupWreckTime = 0.3
+";
+
+/// Flat ground up to a ramp of slope 1/2, then a drop to flat ground [`DROP`] ft below.
+struct Jump;
+
+const RAMP_AT: f32 = 108.0;
+const RAMP_LONG: f32 = 12.0;
+const DROP: f32 = 60.0;
+
+impl World for Jump {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let t = at.z() - RAMP_AT;
+        if t < 0.0 {
+            (Vf::new(at.x(), 0.0, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 0.0))
+        } else if t <= RAMP_LONG {
+            let n = 1.0 / (1.0f32 + 0.25).sqrt();
+            (Vf::new(at.x(), t * 0.5, at.z(), 1.0), Vf::new(0.0, n, -0.5 * n, 0.0))
+        } else {
+            (Vf::new(at.x(), -DROP, at.z(), 1.0), Vf::new(0.0, 1.0, 0.0, 0.0))
+        }
+    }
+
+    fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
+        false
+    }
+}
+
+/// The stand-in bike with [`AIR`] and a drag low enough to make the lip's 30 ft/s.
+fn sim() -> Sim {
+    let tables = Arc::new(Tables::build());
+    let mut text = stock::BIKE.to_string();
+    assert!(text.contains("Drag = 0.5"), "game_sim::stock::BIKE no longer has `Drag = 0.5`");
+    text = text.replace("Drag = 0.5", "Drag = 0.037");
+    let phy = Phy::read_bytes(format!("{text}{AIR}").as_bytes(), &tables.ride.curve);
+    let geom = Phy::read_bytes(stock::BIKE.as_bytes(), &tables.ride.curve);
+    let rider = Rider::new(&phy, stock::mounts(&geom), stock::SPAWN, stock::FACING, Set::default());
+    let mut sim = Sim::with_rider(0, tables, phy, rider);
+    sim.rider.sense.wrecks_enabled = true;
+    sim
+}
+
+/// One ride off [`Jump`] flat out with the backflip's gesture on the lip, the app's lockout up. The
+/// ticks the bike first turned a flip over, the watch first read 3, the line first had the flip, and
+/// a backflip's start was told; the total ridden out.
+fn flip_ride() -> ([Option<usize>; 4], F) {
+    let mut s = sim();
+    s.rider.score.lockout = true;
+    let (mut started, mut round, mut shown, mut told) = (None, None, None, None);
+    let (mut lip_at, mut aloft, mut landed) = (None, false, false);
+    for tick in 0..1200 {
+        let ride = &s.rider.ride;
+        let lip = ride.air.on_ground && ride.chassis.vel.y() > 5.0 && ride.air.contact_vel.z() > 30.0;
+        if lip_at.is_none() && lip {
+            lip_at = Some(tick);
+        }
+        let y = match lip_at {
+            Some(l) if tick < l + 2 => -1.0,
+            Some(_) if !aloft || s.rider.ride.air.flipping => 1.0,
+            _ => 0.0,
+        };
+        let c = Controls { gas: F::ONE, stick: (F::ZERO, F(y)), ..Controls::default() };
+        let frame = s.step(DT, &c, &mut Jump);
+        assert!(frame.wreck.is_none(), "the flip wrecked at tick {tick}");
+        if frame.started == Some(Trick::BACKFLIP) && told.is_none() {
+            told = Some(tick);
+        }
+        if s.rider.ride.air.flipping && started.is_none() {
+            started = Some(tick);
+        }
+        if s.rider.score.flip == 3 && round.is_none() {
+            round = Some(tick);
+        }
+        if shown.is_none() && s.rider.score.nodes.iter().any(|n| n.id == score::BACKFLIP) {
+            shown = Some(tick);
+        }
+        aloft |= !s.rider.ride.air.on_ground && started.is_some();
+        landed |= aloft && s.rider.ride.air.on_ground;
+        // Ridden out past the landing and its lockout: banked or not by now.
+        if landed && s.rider.ride.air.on_ground && !s.rider.score.combo && tick > lip_at.unwrap_or(0) + 200 {
+            break;
+        }
+    }
+    ([started, round, shown, told], s.rider.score.total)
+}
+
+/// On a whole ride off a ramp the line has no flip while the bike turns it over: it goes on the tick
+/// after the watch comes round, never at the start, and is never told as a start; landed, it banks
+/// 10 000.
+#[test]
+fn a_ridden_flip_shows_only_once_the_watch_comes_round() {
+    let ([started, round, shown, told], total) = flip_ride();
+    println!("started {started:?}, round {round:?}, shown {shown:?}, told {told:?}, total {}", total.0);
+    let started = started.expect("the bike never turned a flip over");
+    let round = round.expect("the watch never came round");
+    assert!(started + 10 < round, "the watch came round at {round}, the flip started at {started}");
+    assert_eq!(shown, Some(round + 1), "the flip went on the line at {shown:?}, not after the watch");
+    assert_eq!(told, None, "a backflip's start was told: the original's rider tells none");
+    assert_eq!(total, score::BACKFLIP_POINTS, "the landed flip banked {}", total.0);
 }
