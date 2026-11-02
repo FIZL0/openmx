@@ -1267,34 +1267,49 @@ pub enum Machine {
     #[default]
     Bike,
     Biplane,
+    /// The cars (S149e), which the pause's switch row offers past the two. They have no camera
+    /// settings of their own yet, so [`Machine::ALL`] (what the cameras' screens walk) leaves them out.
+    Buggy,
+    Monster,
+    Baja,
 }
 
 impl Machine {
     pub const ALL: [Machine; 2] = [Machine::Bike, Machine::Biplane];
+
+    /// Every machine the pause can switch to, in the switch row's order: [`Machine::ALL`], then the
+    /// cars.
+    pub const SWITCH: [Machine; 5] = [Machine::Bike, Machine::Biplane, Machine::Buggy, Machine::Monster, Machine::Baja];
 
     /// The file's word, which is also `--vehicle`'s.
     pub fn word(self) -> &'static str {
         match self {
             Machine::Bike => "bike",
             Machine::Biplane => "biplane",
+            Machine::Buggy => "buggy",
+            Machine::Monster => "monster",
+            Machine::Baja => "baja",
         }
     }
 
     pub fn from_word(w: &str) -> Option<Machine> {
-        Machine::ALL.into_iter().find(|m| m.word() == w)
+        Machine::SWITCH.into_iter().find(|m| m.word() == w)
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Machine::Bike => "Bike",
             Machine::Biplane => "Biplane",
+            Machine::Buggy => "Buggy",
+            Machine::Monster => "Monster Truck",
+            Machine::Baja => "Baja",
         }
     }
 
     pub fn other(self) -> Machine {
         match self {
             Machine::Bike => Machine::Biplane,
-            Machine::Biplane => Machine::Bike,
+            Machine::Biplane | Machine::Buggy | Machine::Monster | Machine::Baja => Machine::Bike,
         }
     }
 }
@@ -2925,6 +2940,8 @@ pub struct Menu {
     pub riders: usize,
     pub up: [Machine; SEATS_MAX],
     pub switchable: [bool; SEATS_MAX],
+    /// The cars each player has (S149e): the switch row offers these past the bike and the plane.
+    pub cars: [[bool; 3]; SEATS_MAX],
     /// The seat whose Start opened the pause, whose machine its switch row is.
     pauser: usize,
     /// The machine the pause's switch row has picked (P102): left and right step it through the
@@ -3227,6 +3244,7 @@ impl Menu {
             riders: 1,
             up: [Machine::Bike; SEATS_MAX],
             switchable: [false; SEATS_MAX],
+            cars: [[false; 3]; SEATS_MAX],
             pauser: 0,
             switch_pick: None,
             catalogue: Default::default(),
@@ -3920,7 +3938,14 @@ impl Menu {
     /// and none for one it says has not.
     pub fn choices(&self, seat: usize) -> Vec<Machine> {
         let (up, has) = (self.up.get(seat).copied().unwrap_or_default(), self.switchable.get(seat).copied().unwrap_or(false));
-        Machine::ALL.into_iter().filter(|&m| has && m != up).collect()
+        let cars = self.cars.get(seat).copied().unwrap_or_default();
+        // From a car, the bike always, and the plane where the shell says the player has one.
+        let mut out: Vec<Machine> = match Machine::ALL.contains(&up) {
+            true => Machine::ALL.into_iter().filter(|&m| has && m != up).collect(),
+            false => Machine::ALL.into_iter().filter(|&m| m == Machine::Bike || has).collect(),
+        };
+        out.extend([Machine::Buggy, Machine::Monster, Machine::Baja].into_iter().zip(cars).filter(|&(m, on)| on && m != up).map(|(m, _)| m));
+        out
     }
 
     /// The machine the pause's switch row would put its player on, if any.
@@ -4093,6 +4118,7 @@ impl Menu {
                 if i < SEATS_MAX {
                     self.up[i] = Machine::Bike;
                     self.switchable[i] = false;
+                    self.cars[i] = [false; 3];
                 }
                 self.note = Some(format!("Player {} joined the ride.", i + 1));
             }
@@ -4100,6 +4126,7 @@ impl Menu {
                 for k in i.min(SEATS_MAX)..SEATS_MAX {
                     self.up[k] = self.up.get(k + 1).copied().unwrap_or_default();
                     self.switchable[k] = self.switchable.get(k + 1).copied().unwrap_or(false);
+                    self.cars[k] = self.cars.get(k + 1).copied().unwrap_or_default();
                 }
                 // each later rider's own pause (P84) moves up a seat with them
                 let gone = i.max(1);
