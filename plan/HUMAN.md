@@ -383,6 +383,13 @@ on the desktop's display, and says so under its verdict.
 copies, openmx shells, chromium, weston). If Hyprland's GTT still climbs with the gate off it, read the lines
 around the climb, and note what you were doing at the desk then (a video, a game, the browser).
 
+K19 (11-02) read the log from 10-30 to 11-02: about 22 hours of runs across two boots (10-30 10:00-16:00 and
+11-01 21:00 to 11-02 13:30). Hyprland stayed between 18 and 40 MiB, where before K16 it grew about 400 MiB an
+hour. Every rise of 4 MiB or more fell in a 10-minute window with a PCSX2 copy up, and fell back to 23-28 MiB
+later, so PCSX2 is not leaking. Chromium (up to 60) and openmx (up to 10) never moved it. The catch: since
+10-31 the monitors were off, so only 10-30's six hours had the display on, and they stayed flat at 18 MiB. If
+the desktop warns about 24 GiB after days with the screen on, that's the case still left to explain.
+
 ## The iPhone's WebGPU log, without Web Inspector (P257a, P257b)
 
 P257a waits on the line that says which WebGPU call the iPhone's Safari refuses. Since P257b the page keeps a
