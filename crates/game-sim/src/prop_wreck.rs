@@ -21,17 +21,24 @@
 //! 4. the ball's collection steps: its force listener resolves its list, the first substep's impulse
 //!    on an entry naming the wreck bike going into both bodies.
 //!
-//! In the port the props' collide pass runs first ([`crate::traffic::Traffic::frame_held`]), then
-//! [`struck_by_props`], which adds the entries to the props' lists and hands the mirrors and the
-//! struck bodies to the wreck bike's frame ([`WreckBike::tick_struck`], through
-//! [`crate::ride::Crash::struck`]); the props' step reads the wreck bike as its other side
-//! ([`crate::Sim::props_step`]). The hit2 states are the proof: `tests/prop_wreck.rs`.
+//! In the port the wreck bike is on the props' node too (S243, [`crate::Sim::frame_held_wrecked`]):
+//! its hull is a collidable in every prop's world ([`crate::prop_world::Wreck`],
+//! [`crate::flight_search::Scene::probed_among`]), gathered into the prop's kept nearby list with the
+//! rest and met by the prop's one ray record, so a ray keeps one contact, the nearer, between the scene
+//! and the bike. The pass hands the mirrors and the struck bodies to the wreck bike's frame
+//! ([`WreckBike::tick_struck`], through [`crate::ride::Crash::struck`]); the props' step reads the
+//! wreck bike as its other side ([`crate::Sim::props_step`]). The hit2 states are the proof:
+//! `tests/prop_wreck.rs`.
 //!
-//! What is not here: the entries are put after everything the prop's own search found, where the
-//! original's one narrow pass would order a scene mesh and the wreck bike by the walk's list and keep
-//! one contact per ray between them; the wreck bike's sweep probe and its rays against other props;
-//! the rider's ragdoll and the plane against a prop; a prop's rays on another prop's mesh or on a
-//! riding bike's.
+//! [`struck_by_props`] is S197b's stand-in, a search of the wreck bike after the pass with the entries
+//! put after everything the prop's own search found; the seats' shared props still take it
+//! ([`crate::prop_seats`]).
+//!
+//! The sweep probes meet neither way: the wreck bike's and a prop's sweep both exclude 0x8 (and
+//! 0x800), which both meshes carry ([`crate::prop_world::sweep_categories`]).
+//!
+//! What is not here: the rider's ragdoll and the plane against a prop; a prop's rays on another prop's
+//! mesh or on a riding bike's.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -40,6 +47,7 @@ use crate::contact_search::{self, NO_SURFACE};
 use crate::flight_search::{self, Rays};
 use crate::prop_contact::Pushed;
 use crate::prop_set::PropSet;
+use crate::prop_world::Wreck;
 use crate::ray_probe::{self, Facet, RayProbe};
 use crate::track::Mesh;
 use crate::world_search::{self, Candidate, Categories, Class, Collidable, Narrow, Nearby, flags};
@@ -260,6 +268,41 @@ impl crate::Sim {
         let (Some(crash), Some(kit)) = (rider.crash.as_mut(), rider.ragdoll_kit.as_ref()) else { return };
         let Some(mesh) = kit.bike_mesh.as_deref() else { return };
         crash.bike.struck = struck_by_props(props, &mesh.mesh, &crash.bike, side);
+    }
+
+    /// **The props' collide pass with the wreck bikes on the node** (S243,
+    /// [`crate::traffic::Traffic::frame_held_among`]): each of `players` — a player and the other side
+    /// its wreck bike is to the props' step — who is down with a ragdoll kit's mesh and a part whose
+    /// collision is on has its wreck bike's hull in every prop's world where its record stands it,
+    /// and what the props' rays struck on it kept on the bike for its frame ([`WreckBike::struck`]),
+    /// in place of [`crate::Sim::wreck_strike`]'s search after the pass.
+    pub(crate) fn frame_held_wrecked(&mut self, dt: F, world: &mut dyn crate::world::World, players: &[(usize, usize)]) -> crate::prop_set::PropMovers {
+        let mut kept = Vec::new();
+        if !self.traffic.props.is_empty() {
+            for &(i, side) in players {
+                let rider = self.rider_of(i);
+                if !rider.wreckage.as_ref().is_some_and(|w| w.part.collision_enabled) {
+                    continue;
+                }
+                let (Some(crash), Some(kit)) = (rider.crash.as_ref(), rider.ragdoll_kit.as_ref()) else { continue };
+                let Some(mesh) = kit.bike_mesh.clone() else { continue };
+                let at = crate::math::Mat4(frame(&crash.bike.record.node));
+                kept.push((i, side, mesh, at, crash.bike.body.velocity));
+            }
+        }
+        let wrecks: Vec<Wreck<'_>> = kept
+            .iter()
+            .map(|(_, side, mesh, at, velocity)| Wreck { hull: flight_search::Plane { mesh: &mesh.mesh, at: *at, velocity: *velocity }, side: *side })
+            .collect();
+        let (movers, strikes) = self.traffic.frame_held_among(dt, world, &wrecks);
+        drop(wrecks);
+        for ((i, ..), strike) in kept.iter().zip(strikes) {
+            let rider = if *i == 0 { &mut self.rider } else { &mut self.others[*i - 1].rider };
+            if let Some(crash) = rider.crash.as_mut() {
+                crash.bike.struck = strike;
+            }
+        }
+        movers
     }
 
     /// Every player's wreck bike as the props' step reads it, in player order (`None` for a rider

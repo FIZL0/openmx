@@ -19,6 +19,9 @@ use game_sim::biplane::Body;
 use game_sim::contact::{Contact, Node, Other, Side, Weighed};
 use game_sim::phy::{Ini, Part};
 use game_sim::prop_set::PropSet;
+use game_sim::flight_search::{self, Plane};
+use game_sim::math::Mat4;
+use game_sim::prop_world::Wreck;
 use game_sim::prop_wreck;
 use game_sim::ragdoll_scene::Bike;
 use game_sim::ride::WRECK_INERTIA;
@@ -302,8 +305,10 @@ fn load(kit: &Kit, frame: u32) -> Option<Ee> {
     Some(ee)
 }
 
-/// One tick from `frame` the port's way, against `frame + 1`: answers what differs.
-fn tick(kit: &Kit, frame: u32) -> Option<Vec<String>> {
+/// One tick from `frame` the port's way, against `frame + 1`: answers what differs. `on_node`, the
+/// wreck bike's hull is in the props' own world for their search (S243, [`PropSet::search_among`]);
+/// else S197b's stand-in searches it after the pass ([`prop_wreck::struck_by_props`]).
+fn tick(kit: &Kit, frame: u32, on_node: bool) -> Option<Vec<String>> {
     let (before, after) = (load(kit, frame)?, load(kit, frame + 1)?);
     let mut free = free09()?;
     let terrain = Terrain::parse(&free.terrain).expect("free09's terrain");
@@ -317,8 +322,27 @@ fn tick(kit: &Kit, frame: u32) -> Option<Vec<String>> {
     let mut bike = wreck_at(&before, &free.part);
     let dt = F(after.f32_at(addr("frame_dt").unwrap()));
 
-    let movers = free.set.search(dt, Some(&field), Some(&free.props), None);
-    let mut strike = prop_wreck::struck_by_props(&mut free.set, &free.mesh.mesh, &bike, 0);
+    let (movers, mut strike) = if on_node {
+        let n = &bike.record.node;
+        let at = Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin]);
+        let hull = Wreck { hull: Plane { mesh: &free.mesh.mesh, at, velocity: bike.body.velocity }, side: 0 };
+        let (movers, mut strikes) = free.set.search_among(dt, Some(&field), Some(&free.props), None, &[hull]);
+        // The ball's kept list holds the hull (after the props' collidables), as the state's holds
+        // the wreck bike's mesh collidable (its owner at +0x80 the wreck bike's object), at the same
+        // distance less its reach.
+        let search = before.u32_at(before.u32_at(object(&before, BALL) + obj::COLLISION) + 0x10c);
+        let (list, n) = (before.u32_at(search), before.u32_at(search + 4));
+        let want = (0..n).map(|i| list + 8 * i).find(|&e| before.u32_at(before.u32_at(e) + 0x80) == WRECK_OBJECT).map(|e| before.f32_at(e + 4));
+        let kept = &free.set.collections[BALL].objects[0].collision.as_ref().unwrap().nearby.nearby.found;
+        let got = kept.iter().find(|c| c.object == flight_search::FIRST + free.props.props.len()).map(|c| c.distance.0);
+        eprintln!("hit2-{frame}: the wreck bike in the ball's list at {got:?}, state {want:?}");
+        assert!(want.is_some(), "the state's ball list holds the wreck bike");
+        assert_eq!(got.map(f32::to_bits), want.map(f32::to_bits), "the wreck bike's distance in the ball's kept list");
+        (movers, strikes.remove(0))
+    } else {
+        let movers = free.set.search(dt, Some(&field), Some(&free.props), None);
+        (movers, prop_wreck::struck_by_props(&mut free.set, &free.mesh.mesh, &bike, 0))
+    };
     let mut bad = Vec::new();
     eprintln!("hit2-{frame}: {} mirrors, struck {:?}", strike.mirrors.len(), strike.struck.iter().map(|p| (p.collection, p.object)).collect::<Vec<_>>());
     if strike.is_empty() {
@@ -375,7 +399,18 @@ fn tick(kit: &Kit, frame: u32) -> Option<Vec<String>> {
 fn the_ball_strikes_the_wreck_bike() {
     let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
     for frame in 2828..2831 {
-        let Some(bad) = tick(&kit, frame) else { return };
+        let Some(bad) = tick(&kit, frame, false) else { return };
+        assert!(bad.is_empty(), "hit2-{frame} -> {}: {bad:#?}", frame + 1);
+    }
+}
+
+/// S243: the same ticks with the wreck bike's hull in the ball's own world, gathered into its kept
+/// nearby list with the scene and searched with one ray record over both.
+#[test]
+fn the_wreck_bike_is_in_the_balls_world() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    for frame in 2828..2831 {
+        let Some(bad) = tick(&kit, frame, true) else { return };
         assert!(bad.is_empty(), "hit2-{frame} -> {}: {bad:#?}", frame + 1);
     }
 }

@@ -1094,6 +1094,20 @@ pub struct Scene<'a> {
 pub const HIT_LISTENER: usize = 0;
 pub const COLLECTION_LISTENER: usize = 1;
 
+/// **A prop's probes as its search sets them** (S200, S243): the ray probe's category list; the sweep
+/// probe's, or `None` for the world's own (every category); the category and the collides-with of the
+/// wreck bikes' hulls in its world ([`Scene::probed_among`]); and whether the prop's kept nearby list
+/// is gathered again before the search ([`broad_phase::gather`], what the original's body wrapper does
+/// at its post, its wake and its asleep check), and with which ray category list: the one the first
+/// of those gathers since the last search read. A later one at the same place only resorts the list.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Probe {
+    pub categories: Categories,
+    pub sweep: Option<Categories>,
+    pub hull: Option<(u32, u32)>,
+    pub regather: Option<Categories>,
+}
+
 /// What a prop's ray probe's listeners heard ([`Scene::probed`]): `woke`, the hit listener woke the
 /// asleep body (and so the probe's category list is every category from that hit on); `struck`, the
 /// collection's listener heard a hit.
@@ -1343,7 +1357,31 @@ impl<'a> Scene<'a> {
         categories: &Categories,
         asleep: bool,
     ) -> Scene<'a> {
-        let mut scene = Scene::of(props, trees, None, &[], field, rays, node, search, true, Some(categories));
+        let probe = Probe { categories: categories.clone(), ..Probe::default() };
+        let mut scene = Scene::of(props, trees, None, &[], field, rays, node, search, true, Some(&probe));
+        scene.asleep = asleep;
+        scene
+    }
+
+    /// **A prop's search with the wreck bikes in its world** (S243): [`Scene::probed`] with `probe`'s
+    /// sweep list and its gather, and each of `wrecks` a hull in the moving list after the probes, its
+    /// collidable of [`Probe::hull`]'s category, as the original files the wreck bike's collision
+    /// object on the props' node. A hit on wreck `j` names the search's record `1 + j` as its other
+    /// side, so [`crate::contact_search::collide`] files the mirror there; one ray record covers the
+    /// scene and the wrecks, so a ray that meets both keeps the nearer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn probed_among(
+        props: Option<&'a Props>,
+        trees: Option<&'a Trees>,
+        wrecks: &'a [Plane<'a>],
+        field: Option<([F; 2], [F; 2])>,
+        rays: &'a Rays,
+        node: &Frame,
+        search: &mut broad_phase::Search,
+        probe: &Probe,
+        asleep: bool,
+    ) -> Scene<'a> {
+        let mut scene = Scene::of(props, trees, None, wrecks, field, rays, node, search, true, Some(probe));
         scene.asleep = asleep;
         scene
     }
@@ -1364,21 +1402,37 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
         toys: bool,
-        categories: Option<&Categories>,
+        probe: Option<&Probe>,
     ) -> Scene<'a> {
         let props = props.map_or(&[][..], |p| &p.props[..]);
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
+        let hulls_at = FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len());
         let objects = kept_world(props, trees, bikes.as_ref(), planes, field, centre, radius, toys, |broad, built, generation| {
             let mut objects = lend(generation, built);
-            if let Some(categories) = categories {
-                objects[RAY].categories = categories.clone();
+            let mut hulls = 0..0;
+            if let Some(probe) = probe {
+                objects[RAY].categories = probe.categories.clone();
                 objects[RAY].listeners = vec![HIT_LISTENER, COLLECTION_LISTENER];
+                if let Some(sweep) = &probe.sweep {
+                    objects[SWEEP].categories = sweep.clone();
+                }
+                if let Some((category, collides_with)) = probe.hull {
+                    hulls = hulls_at..hulls_at + planes.len();
+                    for o in &mut objects[hulls.clone()] {
+                        (o.category, o.collides_with) = (category, collides_with);
+                    }
+                }
             }
-            if !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
+            let gather_with = probe.and_then(|p| p.regather.as_ref());
+            if gather_with.is_some() || !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
+                let own = gather_with.map(|g| std::mem::replace(&mut objects[RAY].categories, g.clone()));
                 refill(&mut objects, broad, search);
+                if let Some(own) = own {
+                    objects[RAY].categories = own;
+                }
             }
-            Lent { generation, objects }
+            Lent { generation, objects, hulls }
         });
         let ray = ray_probe::Record {
             listed: true,
@@ -1470,6 +1524,8 @@ impl<'a> Scene<'a> {
 struct Lent {
     generation: u64,
     objects: Vec<Collidable>,
+    /// The hulls a prop's search gave the wreck bike's category ([`Probe::hull`]).
+    hulls: std::ops::Range<usize>,
 }
 
 impl Drop for Lent {
@@ -1479,6 +1535,12 @@ impl Drop for Lent {
         if let Some(ray) = self.objects.get_mut(RAY) {
             ray.categories = any_category();
             ray.listeners.clear();
+        }
+        if let Some(sweep) = self.objects.get_mut(SWEEP) {
+            sweep.categories = any_category();
+        }
+        for o in self.objects.get_mut(self.hulls.clone()).unwrap_or_default() {
+            (o.category, o.collides_with) = (crate::flight::COLLIDABLE, crate::flight::COLLIDES_WITH);
         }
         give_back(self.generation, std::mem::take(&mut self.objects));
     }

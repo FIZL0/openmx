@@ -710,8 +710,9 @@ impl crate::Sim {
         if bump.is_none() || !self.others.is_empty() || self.plane.is_some() {
             return self.step(dt, controls, world);
         }
-        // The props' step waits for the bike's strike and push (S197a, [`crate::prop_contact`]).
-        let prop_movers = self.traffic.frame_held(dt, world);
+        // The props' step waits for the bike's strike and push (S197a, [`crate::prop_contact`]), the
+        // wreck bike on their node (S243).
+        let prop_movers = self.frame_held_wrecked(dt, world, &[(0, self.players())]);
         self.lend_cars();
         let mut bump = bump;
         let cars = self.car_contacts(0, world, dt);
@@ -720,7 +721,6 @@ impl crate::Sim {
             let strike = self.prop_strike_seated(b.vehicles.len() + b.planes.len(), dt);
             self.strike_into(b, strike);
         }
-        self.wreck_strike(0);
         // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
         self.lend_props(0);
         let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], bump.as_deref_mut());
@@ -994,7 +994,7 @@ impl Sim {
         // Shared, the first seat stepped this tick runs their collide pass, in its traffic's place.
         let prop_movers = match shared.as_mut() {
             Some((s, _)) => s.held(self, dt, world),
-            None => self.traffic.frame_held(dt, world),
+            None => self.frame_held_wrecked(dt, world, &[(0, self.players())]),
         };
         self.lend_cars();
         self.event_frame(dt);
@@ -1020,9 +1020,10 @@ impl Sim {
         if let Some(b) = bump.as_deref_mut() {
             self.strike_into(b, strike);
         }
-        match shared.as_ref() {
-            Some((s, seat)) => self.wreck_strike_as(0, s.seats() + seat),
-            None => self.wreck_strike(0),
+        // Shared, the seats' wreck bikes still meet the props' rays after their pass (S197c's
+        // stand-in); alone, the wreck bike was on the props' node (S243).
+        if let Some((s, seat)) = shared.as_ref() {
+            self.wreck_strike_as(0, s.seats() + seat);
         }
         // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
         self.lend_props(0);

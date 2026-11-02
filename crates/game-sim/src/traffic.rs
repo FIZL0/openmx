@@ -521,10 +521,21 @@ impl Traffic {
     /// nothing else. Each collection searches the shapes near its bodies (MD58,
     /// [`crate::prop_set::PropSet::search_in`]).
     pub fn frame_held(&mut self, dt: F, world: &mut dyn World) -> crate::prop_set::PropMovers {
+        self.frame_held_among(dt, world, &[]).0
+    }
+
+    /// [`Traffic::frame_held`] with the downed riders' wreck bikes on the props' node (S243,
+    /// [`crate::prop_set::PropSet::search_in_among`]): also what the props' rays struck on each.
+    pub fn frame_held_among(
+        &mut self,
+        dt: F,
+        world: &mut dyn World,
+        wrecks: &[crate::prop_world::Wreck<'_>],
+    ) -> (crate::prop_set::PropMovers, Vec<crate::prop_wreck::WreckStrike>) {
         self.toys.frame(dt, world);
-        let movers = self.props.search_in(dt, world);
+        let (movers, strikes) = self.props.search_in_among(dt, world, wrecks);
         if self.cars.is_empty() {
-            return movers;
+            return (movers, strikes);
         }
         let specs = Arc::clone(&self.specs);
         let before: Vec<Mat4> = self.cars.iter().map(|car| car.pose).collect();
@@ -537,7 +548,7 @@ impl Traffic {
         }
         self.place(world);
         self.mark(&before, dt, world, false);
-        movers
+        (movers, strikes)
     }
 
     /// **The `HasPhysics` cars' own updates** (S186a), after every bike's frame: each car's path

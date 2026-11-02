@@ -41,7 +41,8 @@ use crate::flight_search::{self, Rays};
 use crate::hash::{State, Walk};
 use crate::math::Mat4;
 use crate::phy::{Ini, Part};
-use crate::prop_world::{Collection, Collision, Edge, Joint, Listener, Object, Unmade};
+use crate::prop_world::{Collection, Collision, Edge, Joint, Listener, Object, Unmade, Wreck};
+use crate::prop_wreck::WreckStrike;
 use crate::props::{self, Member, NodeBox};
 use crate::ragdoll::{Bone, Tables};
 use crate::track::{self, Mesh, Placement};
@@ -209,6 +210,26 @@ impl PropSet {
         props.map(|p| flight_search::movers(&p.props)).unwrap_or_default()
     }
 
+    /// [`PropSet::search`] with the wreck bikes on the node (S243, [`Collection::search_among`]):
+    /// also what the props' rays struck on each of `wrecks`, in its order.
+    pub fn search_among(
+        &mut self,
+        dt: F,
+        field: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        wrecks: &[Wreck<'_>],
+    ) -> (Vec<Mover>, Vec<WreckStrike>) {
+        let mut strikes = vec![WreckStrike::default(); wrecks.len()];
+        if self.tables.is_none() {
+            return (Vec::new(), strikes);
+        }
+        for (k, (c, rays)) in self.collections.iter_mut().zip(self.rays.iter()).enumerate() {
+            c.search_wrecked(k, dt, rays, field, props, trees, wrecks, &mut strikes);
+        }
+        (props.map(|p| flight_search::movers(&p.props)).unwrap_or_default(), strikes)
+    }
+
     /// [`PropSet::search`] in a `world`, each collection against the shapes near its bodies (MD58):
     /// [`World::wooded_near`] around the middle of its filed bodies, as the plane's and the bike's
     /// searches take a world of many tiles (V96, MD28), so a woken prop's tick does not grow with the
@@ -223,9 +244,18 @@ impl PropSet {
     /// [`World::wooded_near`]: crate::world::World::wooded_near
     /// [`World::wooded`]: crate::world::World::wooded
     pub fn search_in(&mut self, dt: F, world: &mut dyn crate::world::World) -> PropMovers {
+        self.search_in_among(dt, world, &[]).0
+    }
+
+    /// [`PropSet::search_in`] with the wreck bikes on the node ([`PropSet::search_among`]). A kept
+    /// nearby list ([`Collision::nearby`]) names collidables by their place in the set it was gathered
+    /// in, so one gathered in another near set is forgotten first, as the plane's is
+    /// ([`flight_search::near_world`]).
+    pub fn search_in_among(&mut self, dt: F, world: &mut dyn crate::world::World, wrecks: &[Wreck<'_>]) -> (PropMovers, Vec<WreckStrike>) {
         let mut out = PropMovers::default();
+        let mut strikes = vec![WreckStrike::default(); wrecks.len()];
         if self.tables.is_none() {
-            return out;
+            return (out, strikes);
         }
         let mut keys: Vec<Option<[i32; 2]>> = Vec::new();
         for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
@@ -234,8 +264,16 @@ impl PropSet {
                 continue;
             };
             let key = world.near_set(at).filter(|_| filed_within(c, at));
+            for o in &mut c.objects {
+                let Some(n) = o.collision.as_mut().map(|c| &mut c.nearby).filter(|n| n.built) else { continue };
+                let [x, y, z, _] = n.centre;
+                if world.near_set(Vf::new(x.0, y.0, z.0, 1.0)) != key {
+                    n.built = false;
+                    n.nearby.found.clear();
+                }
+            }
             let (field, props, trees) = if key.is_some() { world.wooded_near(at) } else { world.wooded() };
-            c.search(dt, rays, field.as_deref(), props, trees);
+            c.search_wrecked(out.of.len(), dt, rays, field.as_deref(), props, trees, wrecks, &mut strikes);
             let set = match keys.iter().position(|k| *k == key) {
                 Some(i) => i,
                 None => {
@@ -246,7 +284,7 @@ impl PropSet {
             };
             out.of.push(Some(set));
         }
-        out
+        (out, strikes)
     }
 
     /// [`PropSet::step`] with each collection's movers its own search's ([`PropSet::search_in`]).

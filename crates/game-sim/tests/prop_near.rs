@@ -252,7 +252,8 @@ fn free09() -> Option<PropSet> {
 /// shape a record's rays struck last is named by its place among the search's collidables (the set
 /// it was handed, after [`flight_search::FIRST`]), another number in a near set than in the whole
 /// world's, so it is named here by where it stands. Nothing empties it, so the set is the one the
-/// strike was found in: the same near square's all through this ride.
+/// strike was found in: the same near square's all through this ride. The kept nearby lists' entries
+/// (S243) are left out: the tree they are gathered from is the set's.
 /// `sets` is each collection's set this tick, `None` for one that did not search.
 fn ridden(props: &PropSet, sets: &[Option<Vec<[Vf; 4]>>]) -> String {
     let mut out = String::new();
@@ -262,6 +263,10 @@ fn ridden(props: &PropSet, sets: &[Option<Vec<[Vf; 4]>>]) -> String {
         for o in &mut c.objects {
             if let Some(col) = o.collision.as_mut() {
                 struck.push(col.record.struck.take().map(|i| set.as_ref().expect("a set to strike in")[i - flight_search::FIRST]));
+                // The kept nearby list (S243) is the gather's walk of a static tree built over the
+                // set, its bound that tree's cell: another tree, so other entries, another bound and
+                // so other ticks it is asked afresh at, in a near set than in the whole world's.
+                col.nearby = flight_search::search();
             }
         }
         out += &format!("{c:?} struck {struck:?}\n");
