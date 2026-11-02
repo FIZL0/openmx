@@ -473,18 +473,24 @@ impl Down {
         // The bones' search, once a frame before the off-bike test, round the first sphere.
         if let (Some(b), Some(s)) = (bike, kit.spheres.first()) {
             // The bike is put in the track's tree where it stands, every frame, among the track's
-            // static props (S165), which stand there from the start.
-            let (field, props) = world.collision();
+            // static props (S165) and its plants (S206), which stand there from the start.
+            let (field, props, trees) = world.wooded();
             let cells = field.and_then(|f| Cells::of(&*f));
             let key = cells.as_ref().zip(kit.bike_mesh.as_deref()).map_or(0, |(c, mesh)| c.key(mesh, &frame));
             let props = props.map_or(&[][..], |p| &p.props[..]);
-            // The props' keys only for a gather that queries the tree.
-            let keys = match &cells {
-                Some(c) if self.search.regathers(s.radius) && kit.bike_mesh.is_some() => Statics::keys(c, props),
+            // The props' and the plants' keys only for a gather that queries the tree.
+            let keys = match (&cells, self.search.stood) {
+                (Some(c), Some(probe)) if self.search.regathers(s.radius) && kit.bike_mesh.is_some() => {
+                    let mut keys = Statics::keys(c, props);
+                    if let Some(t) = trees {
+                        keys.extend(Statics::group_keys(c, t, props.len(), probe, s.radius));
+                    }
+                    keys
+                }
                 _ => Vec::new(),
             };
             let offered = bike_in && !self.ragdoll.ignores_bike;
-            self.search.gather_among(cells.as_ref(), s.radius, b, key, offered, props, &keys, &mut self.statics);
+            self.search.gather_wooded(cells.as_ref(), s.radius, b, key, offered, props, trees, &keys, &mut self.statics);
         }
         ragdoll_body::wreck_arm(
             &mut self.ragdoll,
@@ -539,9 +545,11 @@ impl Down {
         if let (Some(b), Some(probe), true) = (&mut bike_scene, self.search.stood, self.search.built) {
             let reach = kit.spheres.iter().fold(F::ZERO, |r, s| r.max(s.radius));
             b.cars = world.moving().map_or_else(Vec::new, |p| crate::ragdoll_scene::PathCar::near(&p.props, probe, reach));
-            // And the static props it listed (S165), measured again from the same probe.
-            let (_, props) = world.collision();
-            b.props = props.map_or_else(Vec::new, |p| crate::ragdoll_scene::StillProp::near(&p.props, &self.statics, probe, reach));
+            // And the static props it listed (S165), the plants' trunks among them (S206), measured
+            // again from the same probe.
+            let (_, props, trees) = world.wooded();
+            let props = props.map_or(&[][..], |p| &p.props[..]);
+            b.props = crate::ragdoll_scene::StillProp::near_wooded(props, trees, &self.statics, probe, reach);
             b.bike_at = self.statics.bike_at;
         }
         // The bones' segments are offered the bike through its collidable's sphere (S166).

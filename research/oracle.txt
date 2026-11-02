@@ -7115,3 +7115,34 @@ car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; n
 # entries (other = the wreck), a kind-1 mirror on the wreck's after its own (normal negated). The wreck's
 # rays never strike a ball: its ray leave-out holds 0x8 and the props' category is 0x18.
 # hit2-2828 -> 2831: 4, 2, 2 mirrors on the wreck; ball and wreck lists and bodies bit-exact in the port.
+# S206 — the ragdoll's bones against the placed groups (plants). Journal:
+# research/journal/2026-11-02-s206-ragdoll-trees.
+# Port: ragdoll_scene.rs Statics::group_keys / group_distance / StillProp::near_wooded /
+# BikeSearch::gather_wooded; ragdoll_ride.rs step_posed_with (world.wooded()).
+# The bones' search has no_groups +0x2c 0, and the bone spheres' +0x116 flags are 0x12, 0x52 or 0x92
+# (bit 0x01 clear). So collide_against_search (0x0011a9d0) runs every part of a listed class-3 group
+# (group_part_count 0x00129460 / group_part 0x00129490) through the sphere's vt+0x94
+# (sphere_collider_pair) unfiltered, gated only by the group's list distance <= the sphere's radius.
+# A group's list distance is flat_length(probe - cell*cellsize) - reach, clamped at 0.
+# sphere_collider_pair answers 0 unless the other's +0x31 bit 0 is set, and has tests for class 1
+# (hierarchy parts) and class 0 (mesh) only, with no kind 6 (box) test.
+# s89-along (free06) static tree 0x00d99b10, besides the 161 scene meshes:
+#   5600 class-3 groups, all with 0 parts (bushes): listed, never touched.
+#   612 class-1 entries with vtable 0: the gather skips them.
+#   12 category-0x100 trigger boxes (vtable 0x00451850, kind 6, +0x116 0x4): listed wherever the
+#     query finds them, but the sphere pair has no box test.
+#   6 category-0x18 meshes (vtable 0x00451b50, +0x116 0x4, +0x31 bit 0 set, +0x7c 0, +0x80 a collision
+#     object): the knockable props at rest. The filter passes the bone sphere with nearby 0 and 1, so the
+#     bones test them (F7).
+#   One 0x9a058 mesh, +0x80 0x018c1bd0: another rider's wreck bike.
+# recording2 (free09): 726 groups, 630 with 1 part and 96 with 0. A part is class 2, category 4,
+# vtable 0x00451b50, kind 0, +0x116 0x4, +0x31 0x3, +0x7c 0, +0x80 0: a still trunk mesh, pushed out on
+# the static path. The part collidable is one per species, moved under each plant by group_part.
+# free09 also has one hierarchy mesh (vtable 0x00451c10, kind 1, category 0x220), the utility shack,
+# which the port's Props lack.
+# Proved on recording2 (tests/ragdoll_trees.rs): 6,000 gathers (3,000 fresh round a tree or a prop,
+# 3,000 kept) list the same groups and meshes in the same order at the same distances, round the same
+# centre in the same bound, bit for bit (the original's other entries left out of the comparison).
+# 20,000 spheres near trunk vertices, with lists of plant / plant+nearest / plant twice / prop+plant,
+# go through collide_against_search and match the port's near_wooded and touch loop bit for bit
+# (count, with = group_part(g, 0), held, point, normal; 8,365 hits).
