@@ -124,6 +124,13 @@ pub struct Plan {
     pub collars: Vec<Collar>,
     /// Tiles off the lattice that have no collar, and why.
     pub uncollared: Vec<(usize, String)>,
+    /// Each source's relief for far join ground (MD57), or none: the blend alone.
+    pub relief: Vec<Relief>,
+    /// What every relief is carried at on top of its own gain (the build lowers it where the join
+    /// ground would be steeper than `max_slope` with it).
+    pub relief_scale: f64,
+    /// How much of the relief the blend has room for, over the world (none: all of it).
+    pub room: Option<Room>,
 }
 
 /// A band of join ground at one tile's own spacing round its interior, for a tile whose spacing is not
@@ -422,7 +429,7 @@ pub fn plan(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &Params, w
     let bins = Bins::new(&sources, &radii, size, step);
     let placed = (0..tiles.len()).map(|t| Placed { at: at[t], keep: keep[t], cell: cell[t] }).collect();
     let (collars, uncollared) = collars(&sources, &ratios, step, size, p.fade);
-    Ok(Plan { spacing: step, size, placed, sources, radius, radii, bins, prune: p.prune, fade: p.fade, ratio: ratios, widen, collars, uncollared })
+    Ok(Plan { spacing: step, size, placed, sources, radius, radii, bins, prune: p.prune, fade: p.fade, ratio: ratios, widen, collars, uncollared, relief: Vec::new(), relief_scale: 1.0, room: None })
 }
 
 /// The share of `max_slope` a tile's extension alone may take past its seam gate: the rest is left for
@@ -579,6 +586,179 @@ fn collars(sources: &[Source], ratios: &[Option<(i64, i64)>], step: f64, size: [
     (out, skipped)
 }
 
+// ---- relief on far join ground (MD57) --------------------------------------------------------------
+//
+// The blend alone is the maps' edges carried out and averaged: a few hundred feet from every map it is
+// smooth ground with no hills. Past the seam gates (C9), far join ground takes the nearest maps' own
+// relief, the way the shell paints it with their paint (game-render's `terrain::Regions`, MD48): each
+// map's ground read at the point folded back and forth into its keep, smoothed of what no join could
+// hold to `max_slope` (jumps, ruts), less its mean, and shared among the nearest maps by distance. It
+// rises from nothing at the gates, no higher or deeper than [`RELIEF_RISE`] times its distance past
+// them, so every seam and everything near one is the blend's alone.
+
+/// Feet between a [`Relief`] grid's nodes: each node is the mean of the map's ground over its cell.
+pub const RELIEF_CELL: f64 = 16.0;
+
+/// How far the relief may stand above or below the blend, feet per foot past the nearest seam gate or
+/// the world's edge: it is eased under that (`cap · tanh(r / cap)`), which adds at most a third of
+/// this to its slope however high a map's hills are.
+pub const RELIEF_RISE: f64 = 0.1;
+
+/// Feet over which [`Room`] keeps the relief off steep blend and fades it back.
+pub const RELIEF_RAMP: f64 = 600.0;
+
+/// The radius of a [`Room::dent`], feet.
+pub const RELIEF_DENT: f64 = 1200.0;
+
+/// How many dents a build makes before it lowers the relief over the whole world instead.
+const RELIEF_DENTS: usize = 60;
+
+/// The steepest a map's smoothed relief may be in a join, feet per foot: a map whose own is steeper is
+/// carried at the gain that brings it to this, leaving the rest of `max_slope` to the blend.
+pub const RELIEF_SLOPE: f64 = 0.25;
+
+/// A map's weight in the relief `d` feet from its keep: the inverse square. Not the paint's weights
+/// (game-render `terrain::reach`), which hand a gap's middle from one map to the other within a couple
+/// of hundred feet: fine for a colour, but two maps' hills of opposite sign meeting there would make a
+/// cliff of the swap.
+fn relief_weight(d: f64) -> f64 {
+    1.0 / d.max(1.0).powi(2)
+}
+
+/// `v` folded back and forth into `lo..hi` (game-render `terrain::mirror`): continuous, and the map's
+/// own ground at every distance however wide the join.
+fn fold(v: f64, lo: f64, hi: f64) -> f64 {
+    let span = hi - lo;
+    if span <= 0.0 {
+        return lo;
+    }
+    let t = (v - lo).rem_euclid(2.0 * span);
+    lo + if t > span { 2.0 * span - t } else { t }
+}
+
+/// The highest field at or under `v` (a grid of `n` nodes `cell` feet apart) that is nowhere steeper
+/// than `s` between neighbouring nodes, straight or diagonal: two chamfer passes.
+fn envelope(v: &[f64], n: [usize; 2], cell: [f64; 2], s: f64) -> Vec<f64> {
+    let mut u = v.to_vec();
+    let (wx, wz, wd) = (s * cell[0], s * cell[1], s * cell[0].hypot(cell[1]));
+    let (nx, nz) = (n[0] as isize, n[1] as isize);
+    let at = |i: isize, j: isize| (i + j * nx) as usize;
+    let mut pass = |order: &mut dyn Iterator<Item = (isize, isize)>, back: isize| {
+        for (i, j) in order {
+            let mut best = u[at(i, j)];
+            for (di, dj, w) in [(-1, 0, wx), (-1, -1, wd), (0, -1, wz), (1, -1, wd)] {
+                let (ii, jj) = (i + di * back, j + dj * back);
+                if ii >= 0 && ii < nx && jj >= 0 && jj < nz {
+                    best = best.min(u[at(ii, jj)] + w);
+                }
+            }
+            u[at(i, j)] = best;
+        }
+    };
+    pass(&mut (0..nz).flat_map(|j| (0..nx).map(move |i| (i, j))), 1);
+    pass(&mut (0..nz).rev().flat_map(|j| (0..nx).rev().map(move |i| (i, j))), -1);
+    u
+}
+
+/// One map's relief for far join ground: its ground over its keep, averaged over [`RELIEF_CELL`] cells
+/// and smoothed over two more either way, less its mean, held to [`RELIEF_SLOPE`].
+#[derive(Clone, Debug)]
+pub struct Relief {
+    /// The first node, tile-local feet (the middle of the keep's first cell).
+    origin: [f64; 2],
+    cell: [f64; 2],
+    n: [usize; 2],
+    v: Vec<f64>,
+    /// The smoothed ground's standard deviation over the keep, feet.
+    pub spread: f64,
+    /// What of it the relief keeps, held to [`RELIEF_SLOPE`] and times the gain.
+    pub kept: f64,
+    /// The held field's steepest slope between nodes, before the gain.
+    pub slope: f64,
+    /// `RELIEF_SLOPE / slope`, at most 1.
+    pub gain: f64,
+}
+
+impl Relief {
+    /// Map `t`'s relief over `keep` (samples, half-open).
+    pub fn of(t: &Tile, keep: [u32; 4]) -> Relief {
+        let terrain = t.terrain();
+        let s = t.spacing;
+        let lo = [f64::from(keep[0]) * s, f64::from(keep[1]) * s];
+        let width = [f64::from(keep[2] - keep[0]) * s, f64::from(keep[3] - keep[1]) * s];
+        let n = width.map(|w| ((w / RELIEF_CELL).ceil() as usize).max(2));
+        let cell = [width[0] / n[0] as f64, width[1] / n[1] as f64];
+        let k = ((RELIEF_CELL / s).ceil() as usize).max(1);
+        let mut v = vec![0.0; n[0] * n[1]];
+        for j in 0..n[1] {
+            for i in 0..n[0] {
+                let mut sum = 0.0;
+                for b in 0..k {
+                    for a in 0..k {
+                        let x = lo[0] + (i as f64 + (a as f64 + 0.5) / k as f64) * cell[0];
+                        let z = lo[1] + (j as f64 + (b as f64 + 0.5) / k as f64) * cell[1];
+                        sum += t.ground_in(&terrain, keep, x / s, z / s).map_or(0.0, |g| g.0);
+                    }
+                }
+                v[i + j * n[0]] = sum / (k * k) as f64;
+            }
+        }
+        // Two passes of a three-node box each way: [1 2 3 2 1] / 9 across five cells.
+        for _ in 0..2 {
+            for axis in 0..2 {
+                let old = v.clone();
+                for j in 0..n[1] {
+                    for i in 0..n[0] {
+                        let at = |d: isize| {
+                            let (mut ii, mut jj) = (i as isize, j as isize);
+                            if axis == 0 { ii += d } else { jj += d }
+                            let (ii, jj) = (ii.clamp(0, n[0] as isize - 1) as usize, jj.clamp(0, n[1] as isize - 1) as usize);
+                            old[ii + jj * n[0]]
+                        };
+                        v[i + j * n[0]] = (at(-1) + at(0) + at(1)) / 3.0;
+                    }
+                }
+            }
+        }
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        v.iter_mut().for_each(|h| *h -= mean);
+        let spread = (v.iter().map(|h| h * h).sum::<f64>() / v.len() as f64).sqrt();
+        // Steeper than RELIEF_SLOPE nowhere: the mean of the highest field under it and the lowest over
+        // it that are no steeper than that (a little less, for the cells' diagonals). Where the map's
+        // ground is gentler it is that ground; a peak is cut to a cone and a gully filled to one.
+        let s = RELIEF_SLOPE / 1.1;
+        let under = envelope(&v, n, cell, s);
+        let neg: Vec<f64> = v.iter().map(|h| -h).collect();
+        let over = envelope(&neg, n, cell, s);
+        v = under.iter().zip(&over).map(|(u, o)| (u - o) / 2.0).collect();
+        let mut slope = 0.0f64;
+        for j in 0..n[1] - 1 {
+            for i in 0..n[0] - 1 {
+                let c = [v[i + j * n[0]], v[i + 1 + j * n[0]], v[i + (j + 1) * n[0]], v[i + 1 + (j + 1) * n[0]]];
+                let gx = (c[1] - c[0] + c[3] - c[2]) / (2.0 * cell[0]);
+                let gz = (c[2] - c[0] + c[3] - c[1]) / (2.0 * cell[1]);
+                slope = slope.max(gx.hypot(gz));
+            }
+        }
+        let gain = if slope > RELIEF_SLOPE { RELIEF_SLOPE / slope } else { 1.0 };
+        v.iter_mut().for_each(|h| *h *= gain);
+        let kept = (v.iter().map(|h| h * h).sum::<f64>() / v.len() as f64).sqrt();
+        Relief { origin: [lo[0] + cell[0] / 2.0, lo[1] + cell[1] / 2.0], cell, n, v, spread, kept, slope, gain }
+    }
+
+    /// The relief at a tile-local point, bilinear between the nodes, the edge nodes' past the grid.
+    fn at(&self, x: f64, z: f64) -> f64 {
+        let f = |a: usize, v: f64| {
+            let t = ((v - self.origin[a]) / self.cell[a]).clamp(0.0, (self.n[a] - 1) as f64);
+            let i = (t.floor() as usize).min(self.n[a] - 2);
+            (i, t - i as f64)
+        };
+        let ((i, tx), (j, tz)) = (f(0, x), f(1, z));
+        let v = |i: usize, j: usize| self.v[i + j * self.n[0]];
+        (v(i, j) * (1.0 - tx) + v(i + 1, j) * tx) * (1.0 - tz) + (v(i, j + 1) * (1.0 - tx) + v(i + 1, j + 1) * tx) * tz
+    }
+}
+
 /// The join ground at one world point.
 pub struct Point {
     pub h: f64,
@@ -587,17 +767,117 @@ pub struct Point {
     pub w: Vec<f64>,
     /// Distance to the nearest interior.
     pub near: f64,
+    /// What of `h` is the maps' relief (MD57), not the blend.
+    pub relief: f64,
 }
 
 impl Plan {
     /// The ground at a world point, from the candidate sources `cands` (indices into `sources`): the
     /// blend, pulled straight between the shared samples along every collar edge it is near.
+    /// The maps' relief ([`Plan::relief_at`]) is added before the pull, so a collar's edge is straight
+    /// between its shared samples with it too.
     pub fn at(&self, tiles: &[Tile], terrains: &[Terrain], cands: &[usize], x: f64, z: f64) -> Point {
+        self.at_with(tiles, terrains, cands, None, x, z)
+    }
+
+    /// [`Plan::at`], with the relief taken over `relief_cands` ([`Plan::relief_cands`] of a rectangle
+    /// holding the point; `None`, every source): the same height to the bit either way.
+    pub fn at_with(&self, tiles: &[Tile], terrains: &[Terrain], cands: &[usize], relief_cands: Option<&[usize]>, x: f64, z: f64) -> Point {
         let mut pt = self.blend(tiles, terrains, cands, x, z);
+        if pt.near > 0.0 {
+            pt.relief = self.relief_at(relief_cands, x, z, pt.h);
+            pt.h += pt.relief;
+        }
         if pt.near > 2.0 * self.spacing && !self.collars.is_empty() {
             pt.h += self.pull(tiles, terrains, x, z);
         }
         pt
+    }
+
+    /// The maps' relief at a join point (MD57): 0 within every map's widest seam gate and on the
+    /// world's edge, and past them, eased under [`RELIEF_RISE`] times the distance (and the
+    /// [`Room`]), each near map's [`Relief`] read at the point folded into its keep, weighted by
+    /// [`relief_weight`] and normalised to keep the spread of one (`Σ wᵢ rᵢ / √Σ wᵢ²`). A map more
+    /// than twice as far as the nearest fades out of it by three times as far, so the sum is over a
+    /// handful of maps and the same whichever superset of them `cands` lists. Below the blend it is
+    /// eased under `blend` too, so it takes ground near 0 ft no lower (a raw height is unsigned).
+    pub fn relief_at(&self, cands: Option<&[usize]>, x: f64, z: f64, blend: f64) -> f64 {
+        if self.relief.is_empty() || self.relief_scale <= 0.0 {
+            return 0.0;
+        }
+        let all: Vec<usize>;
+        let cands = match cands {
+            Some(c) => c,
+            None => {
+                all = (0..self.sources.len()).collect();
+                &all
+            }
+        };
+        let (mut dmin, mut clear) = (f64::INFINITY, f64::INFINITY);
+        for &c in cands {
+            let s = &self.sources[c];
+            let d = s.distance(x, z);
+            dmin = dmin.min(d);
+            // The widest of its gates, not the gate of the side the point is past ([`Source::gate_at`]),
+            // which steps where a point comes round a corner: the cap must be continuous.
+            clear = clear.min(d - s.gates.iter().copied().fold(0.0, f64::max));
+        }
+        if clear <= 0.0 || dmin <= 0.0 {
+            return 0.0;
+        }
+        // And from nothing on the world's own edge, where openmx closes a wrapped world with a strip
+        // made from both edges' ground (MD29): that stays the blend's.
+        let world = [f64::from(self.size[0]) * self.spacing, f64::from(self.size[1]) * self.spacing];
+        let edge = x.min(z).min(world[0] - x).min(world[1] - z).max(0.0);
+        // The room lowers the cap with the relief: by a gate or the world's edge the relief stands at
+        // its cap, whose slope a lower relief alone would not lessen.
+        let room = self.room.as_ref().map_or(1.0, |r| r.at(x, z));
+        let cap = RELIEF_RISE * room * clear.min(edge);
+        if cap <= 0.0 {
+            return 0.0;
+        }
+        let (mut sum, mut sq) = (0.0, 0.0);
+        for &c in cands {
+            let s = &self.sources[c];
+            let d = s.distance(x, z);
+            if d >= 3.0 * dmin {
+                continue;
+            }
+            let w = relief_weight(d) * fall(d / dmin - 2.0);
+            if w <= 0.0 {
+                continue;
+            }
+            let (fx, fz) = (fold(x, s.rect[0], s.rect[2]), fold(z, s.rect[1], s.rect[3]));
+            sum += w * self.relief[c].at(fx - s.at[0], fz - s.at[1]);
+            sq += w * w;
+        }
+        if sq <= 0.0 {
+            return 0.0;
+        }
+        let r = self.relief_scale * room * sum / sq.sqrt();
+        let cap = if r < 0.0 { cap.min(blend) } else { cap };
+        if cap <= 0.0 {
+            return 0.0;
+        }
+        cap * (r / cap).tanh()
+    }
+
+    /// The sources [`Plan::relief_at`] can hear anywhere in a world rectangle: every one within three
+    /// times, or its widest gate past, the farthest the nearest can be from a point of it.
+    pub fn relief_cands(&self, rect: [f64; 4]) -> Vec<usize> {
+        if self.relief.is_empty() {
+            return Vec::new();
+        }
+        let corners = [[rect[0], rect[1]], [rect[2], rect[1]], [rect[0], rect[3]], [rect[2], rect[3]]];
+        // A rectangle's farthest point from a convex set is a corner.
+        let far = self.sources.iter().map(|s| corners.iter().map(|c| s.distance(c[0], c[1])).fold(0.0, f64::max)).fold(f64::INFINITY, f64::min);
+        (0..self.sources.len())
+            .filter(|&c| {
+                let s = &self.sources[c];
+                let g = s.gates.iter().copied().fold(0.0, f64::max);
+                rect_gap(rect, s.rect) <= (3.0 * far).max(far + g) + 1e-6
+            })
+            .collect()
     }
 
     /// How far the collar edges near a point pull the blend there: for each edge within its band, the
@@ -606,7 +886,10 @@ impl Plan {
     /// line itself. At a collar corner the other edge's pull is 0, its foot being a shared sample.
     fn pull(&self, tiles: &[Tile], terrains: &[Terrain], x: f64, z: f64) -> f64 {
         let all: Vec<usize> = (0..self.sources.len()).collect();
-        let f = |p: [f64; 2]| self.blend(tiles, terrains, &all, p[0], p[1]).h;
+        let f = |p: [f64; 2]| {
+            let b = self.blend(tiles, terrains, &all, p[0], p[1]);
+            b.h + if b.near > 0.0 { self.relief_at(Some(&all), p[0], p[1], b.h) } else { 0.0 }
+        };
         let p = [x, z];
         let mut out = 0.0;
         for c in &self.collars {
@@ -647,7 +930,7 @@ impl Plan {
                 let (fx, fz) = ((x - src.at[0]) / src.spacing, (z - src.at[1]) / src.spacing);
                 let (h, surface) = tiles[t].ground_in(&terrains[t], src.keep, fx, fz).unwrap_or((0.0, 0));
                 w[i] = 1.0;
-                return Point { h, surface, w, near: 0.0 };
+                return Point { h, surface, w, near: 0.0, relief: 0.0 };
             }
         }
         // The distances first (cheap), then a tile's extension only where its weight is not 0: the
@@ -668,7 +951,7 @@ impl Plan {
         let nearest = reach[ni].expect("the nearest is always extended");
         if nearest.d <= step * (1.0 + 1e-9) {
             w[ni] = 1.0;
-            return Point { h: nearest.h, surface: nearest.surface, w, near: nearest.d };
+            return Point { h: nearest.h, surface: nearest.surface, w, near: nearest.d, relief: 0.0 };
         }
         let mut sum = 0.0;
         for (i, r) in reach.iter().enumerate() {
@@ -688,7 +971,7 @@ impl Plan {
                 h += w[i] * r.h;
             }
         }
-        Point { h, surface: nearest.surface, w, near: nearest.d }
+        Point { h, surface: nearest.surface, w, near: nearest.d, relief: 0.0 }
     }
 
     /// How far a point is past every seam gate (C9): the least, over the sources, of its distance to
@@ -773,6 +1056,11 @@ impl Plan {
 
     /// The steepest join ground on a coarse lattice (every `stride` samples), away from the seams.
     pub fn coarse_slope(&self, tiles: &[Tile], stride: u32) -> (f64, [f64; 2]) {
+        self.coarse_lattice(tiles, stride).worst()
+    }
+
+    /// The world's ground on a lattice `stride` samples apart.
+    fn coarse_lattice(&self, tiles: &[Tile], stride: u32) -> Lattice {
         let all: Vec<usize> = (0..self.sources.len()).collect();
         let near = |x: f64, z: f64| if self.prune { self.bins.at(x, z) } else { &all[..] };
         let step = self.spacing * f64::from(stride);
@@ -789,31 +1077,131 @@ impl Plan {
                 sc.spawn(move || {
                     let terrains: Vec<Terrain> = tiles.iter().map(Tile::terrain).collect();
                     let z0 = (part * rows_each) as f64 * step;
-                    let gated = self.gated([0.0, z0, nx as f64 * step, z0 + rows_each as f64 * step], step);
+                    let band = [0.0, z0, nx as f64 * step, z0 + rows_each as f64 * step];
+                    let gated = self.gated(band, step);
+                    let rc = self.relief_cands(band);
                     for (i, o) in out.iter_mut().enumerate() {
                         let (kx, kz) = (i % row, part * rows_each + i / row);
                         let (x, z) = (kx as f64 * step, kz as f64 * step);
-                        let pt = self.at(tiles, &terrains, near(x, z), x, z);
+                        let pt = self.at_with(tiles, &terrains, near(x, z), Some(&rc), x, z);
                         *o = Coarse { h: pt.h, clear: self.clear(&gated, x, z) };
                     }
                 });
             }
         });
-        let mut worst = (0.0, [0.0; 2]);
-        for kz in 0..nz as usize {
-            for kx in 0..nx as usize {
+        Lattice { h, n: [row, nz as usize + 1], step }
+    }
+}
+
+/// The world's ground on a coarse lattice ([`Plan::coarse_lattice`]), row by row.
+struct Lattice {
+    h: Vec<Coarse>,
+    n: [usize; 2],
+    step: f64,
+}
+
+impl Lattice {
+    /// Each cell's slope, or none for a cell within a lattice step of a seam gate.
+    fn cells(&self) -> impl Iterator<Item = (usize, usize, Option<f64>)> + '_ {
+        let (row, step) = (self.n[0], self.step);
+        (0..self.n[1] - 1).flat_map(move |kz| {
+            (0..row - 1).map(move |kx| {
+                let h = &self.h;
                 let c = [&h[kx + kz * row], &h[kx + 1 + kz * row], &h[kx + (kz + 1) * row], &h[kx + 1 + (kz + 1) * row]];
-                if c.iter().any(|p| p.clear < step) {
-                    continue;
-                }
-                let g = cell_slope([c[0].h, c[1].h, c[2].h, c[3].h], step);
-                if g > worst.0 {
-                    worst = (g, [kx as f64 * step, kz as f64 * step]);
-                }
+                let g = if c.iter().any(|p| p.clear < step) { None } else { Some(cell_slope([c[0].h, c[1].h, c[2].h, c[3].h], step)) };
+                (kx, kz, g)
+            })
+        })
+    }
+
+    /// The steepest cell past the gates and where.
+    fn worst(&self) -> (f64, [f64; 2]) {
+        let mut worst = (0.0, [0.0; 2]);
+        for (kx, kz, g) in self.cells() {
+            if let Some(g) = g.filter(|&g| g > worst.0) {
+                worst = (g, [kx as f64 * self.step, kz as f64 * self.step]);
             }
         }
         worst
     }
+}
+
+/// How much of the maps' relief the blend has room for under `max_slope` (MD57), on a lattice over
+/// the world: 1 where the blend is no steeper than `max_slope` less [`RELIEF_SLOPE`] and a tenth,
+/// falling to 0 where it is within a tenth of `max_slope`; then the least of it within
+/// [`RELIEF_RAMP`] taken and smoothed over as far again either way, so the relief fades out before
+/// steep blend, never on it, and gently.
+pub struct Room {
+    v: Vec<f64>,
+    n: [usize; 2],
+    step: f64,
+}
+
+impl Room {
+    fn of(l: &Lattice, max_slope: f64) -> Room {
+        let (n, step) = (l.n, l.step);
+        let (lo, hi) = (max_slope * 0.9 - RELIEF_SLOPE, max_slope * 0.9);
+        let mut v = vec![1.0f64; n[0] * n[1]];
+        for (kx, kz, g) in l.cells() {
+            // A cell by the gates is the blend's whatever the room: only steep blend past them counts.
+            let Some(g) = g else { continue };
+            let r = ((hi - g) / (hi - lo)).clamp(0.0, 1.0);
+            for i in [kx + kz * n[0], kx + 1 + kz * n[0], kx + (kz + 1) * n[0], kx + 1 + (kz + 1) * n[0]] {
+                v[i] = v[i].min(r);
+            }
+        }
+        let k = (RELIEF_RAMP / step).ceil() as usize;
+        let mut v = sweep(&sweep(&v, n, k, true, false), n, k, false, false);
+        for _ in 0..2 {
+            v = sweep(&sweep(&v, n, k / 2, true, true), n, k / 2, false, true);
+        }
+        Room { v, n, step }
+    }
+
+    /// A quarter less room about a world point, fading to none lost [`RELIEF_DENT`] away: where the
+    /// relief made the ground too steep after all (two maps' hills of opposite sign meeting in a gap),
+    /// it is lowered there, not over the whole world.
+    fn dent(&mut self, x: f64, z: f64) {
+        let k = (RELIEF_DENT / self.step).ceil() as isize;
+        let (ci, cj) = ((x / self.step).round() as isize, (z / self.step).round() as isize);
+        for j in (cj - k).max(0)..=(cj + k).min(self.n[1] as isize - 1) {
+            for i in (ci - k).max(0)..=(ci + k).min(self.n[0] as isize - 1) {
+                let d = (i as f64 * self.step - x).hypot(j as f64 * self.step - z) / RELIEF_DENT;
+                if d < 1.0 {
+                    self.v[i as usize + j as usize * self.n[0]] *= 1.0 - 0.25 * (1.0 - d * d).powi(2);
+                }
+            }
+        }
+    }
+
+    /// The room at a world point, read off the lattice bilinearly.
+    pub fn at(&self, x: f64, z: f64) -> f64 {
+        let fx = (x / self.step).clamp(0.0, (self.n[0] - 1) as f64);
+        let fz = (z / self.step).clamp(0.0, (self.n[1] - 1) as f64);
+        let (i, j) = ((fx as usize).min(self.n[0] - 2), (fz as usize).min(self.n[1] - 2));
+        let (tx, tz) = (fx - i as f64, fz - j as f64);
+        let v = |i: usize, j: usize| self.v[i + j * self.n[0]];
+        (v(i, j) * (1.0 - tx) + v(i + 1, j) * tx) * (1.0 - tz) + (v(i, j + 1) * (1.0 - tx) + v(i + 1, j + 1) * tx) * tz
+    }
+}
+
+/// Each node's window `k` nodes either way along x (`along_x`) or z, cut at the lattice's ends:
+/// its mean (`mean`) or its least.
+fn sweep(v: &[f64], n: [usize; 2], k: usize, along_x: bool, mean: bool) -> Vec<f64> {
+    let (len, lines) = if along_x { (n[0], n[1]) } else { (n[1], n[0]) };
+    let at = |line: usize, i: usize| if along_x { i + line * n[0] } else { line + i * n[0] };
+    let mut out = vec![0.0; v.len()];
+    for line in 0..lines {
+        for i in 0..len {
+            let (a, b) = (i.saturating_sub(k), (i + k).min(len - 1));
+            let mut acc = v[at(line, a)];
+            for j in a + 1..=b {
+                acc = if mean { acc + v[at(line, j)] } else { acc.min(v[at(line, j)]) };
+            }
+            out[at(line, i)] = if mean { acc / (b - a + 1) as f64 } else { acc };
+        }
+    }
+    out
 }
 
 /// A coarse lattice point: the ground's height and how far it is past every seam gate.
@@ -841,6 +1229,10 @@ pub struct Piece {
     /// Steepest cell away from the seams, and anywhere.
     pub far_slope: f64,
     pub near_slope: f64,
+    /// [`Piece::far_slope`] of the ground without the maps' relief (MD57).
+    pub far_base: f64,
+    /// Where its far slope is steepest, world feet.
+    pub far_at: [f64; 2],
     pub clamped: usize,
 }
 
@@ -871,6 +1263,8 @@ fn piece(plan: &Plan, tiles: &[Tile], terrains: &[Terrain], spec: &Spec) -> Resu
     // One sample of margin all round, for the normals.
     let (mw, md) = (sw + 2, sd + 2);
     let mut h = vec![0.0; mw * md];
+    let mut relief = vec![0.0; mw * md];
+    let rc = plan.relief_cands([rect[0] - step, rect[1] - step, rect[2] + step, rect[3] + step]);
     let mut near = vec![0.0; sw * sd];
     let mut clear = vec![0.0; sw * sd];
     let gated = plan.gated(rect, step);
@@ -879,8 +1273,9 @@ fn piece(plan: &Plan, tiles: &[Tile], terrains: &[Terrain], spec: &Spec) -> Resu
     for mz in 0..md {
         for mx in 0..mw {
             let (kx, kz) = (mx as f64 - 1.0, mz as f64 - 1.0);
-            let pt = plan.at(tiles, terrains, &cands, spec.at[0] + kx * step, spec.at[1] + kz * step);
+            let pt = plan.at_with(tiles, terrains, &cands, Some(&rc), spec.at[0] + kx * step, spec.at[1] + kz * step);
             h[mx + mz * mw] = pt.h;
+            relief[mx + mz * mw] = pt.relief;
             if (1..=sw).contains(&mx) && (1..=sd).contains(&mz) {
                 let i = (mx - 1) + (mz - 1) * sw;
                 near[i] = pt.near;
@@ -908,17 +1303,22 @@ fn piece(plan: &Plan, tiles: &[Tile], terrains: &[Terrain], spec: &Spec) -> Resu
     let trn = trnwrite::build(&grid, &trnwrite::Options::new(step as f32, hs))?;
     let (bytes, _) = trnwrite::write(&trn)?;
     // Slopes, away from the seams (past every seam gate) and anywhere.
-    let (mut far_slope, mut near_slope) = (0.0f64, 0.0f64);
+    let (mut far_slope, mut near_slope, mut far_base) = (0.0f64, 0.0f64, 0.0f64);
+    let mut far_at = spec.at;
     for z in 0..sd - 1 {
         for x in 0..sw - 1 {
             let c = [x + z * sw, x + 1 + z * sw, x + (z + 1) * sw, x + 1 + (z + 1) * sw];
             if c.iter().any(|&i| near[i] == 0.0) {
                 continue; // a tile's own cell
             }
-            let hh = c.map(|i| h[(i % sw) + 1 + (i / sw + 1) * mw]);
-            let g = cell_slope(hh, step);
+            let m = c.map(|i| (i % sw) + 1 + (i / sw + 1) * mw);
+            let g = cell_slope(m.map(|i| h[i]), step);
             if c.iter().all(|&i| clear[i] > 0.0) {
+                if g > far_slope {
+                    far_at = [spec.at[0] + (x as f64 + 0.5) * step, spec.at[1] + (z as f64 + 0.5) * step];
+                }
                 far_slope = far_slope.max(g);
+                far_base = far_base.max(cell_slope(m.map(|i| h[i] - relief[i]), step));
             } else {
                 near_slope = near_slope.max(g);
             }
@@ -962,6 +1362,8 @@ fn piece(plan: &Plan, tiles: &[Tile], terrains: &[Terrain], spec: &Spec) -> Resu
         blend,
         far_slope,
         near_slope,
+        far_base,
+        far_at,
         clamped,
     })
 }
@@ -1013,6 +1415,8 @@ struct Done {
     between: Vec<usize>,
     far: f64,
     near: f64,
+    far_base: f64,
+    far_at: [f64; 2],
     clamped: usize,
 }
 
@@ -1024,6 +1428,12 @@ pub struct Built {
     pub far_slope: f64,
     pub near_slope: f64,
     pub plan: Plan,
+}
+
+/// The relief's scale a step lower ([`Plan::relief_scale`]): 0 once it is too small to show.
+fn lower(scale: f64) -> f64 {
+    let s = scale * 0.8;
+    if s < 0.05 { 0.0 } else { s }
 }
 
 /// Build the world `p.id` from the tile folders into `out/<id>/`, replacing a world already there.
@@ -1071,10 +1481,23 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
         std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let joins = dir.join("joins");
+    // Each map's relief for the far joins (MD57), once: it hangs on the map's own ground alone.
+    let t0 = std::time::Instant::now();
+    let reliefs: Vec<Relief> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = tiles.iter().zip(&cuts).map(|(t, k)| sc.spawn(move || Relief::of(t, *k))).collect();
+        jobs.into_iter().map(|j| j.join().expect("relief")).collect()
+    });
+    for (t, r) in tiles.iter().zip(&reliefs) {
+        eprintln!("stitch: {}: relief {:.1} ft spread, {:.1} kept (steepest {:.3}, at {:.2})", t.id, r.spread, r.kept, r.slope, r.gain);
+    }
+    eprintln!("stitch: relief read in {:.1} s", t0.elapsed().as_secs_f64());
     let mut widen = 1.0;
+    let mut relief_scale = 1.0f64;
+    // Where the relief has been lowered ([`Room::dent`]), kept over a rebuild of the same plan.
+    let mut dented: Vec<[f64; 2]> = Vec::new();
     let (plan, results) = loop {
         let t0 = std::time::Instant::now();
-        let plan = plan(&tiles, &cuts, &gates, p, widen)?;
+        let mut plan = plan(&tiles, &cuts, &gates, p, widen)?;
         let (rmin, rmax) = plan.radii.iter().fold((f64::INFINITY, 0.0f64), |(a, b), r| (a.min(*r), b.max(*r)));
         eprintln!(
             "stitch: widen {widen:.3}: world {:.0} × {:.0} ft, {} pieces, radius {rmin:.0}–{rmax:.0} ft, planned in {:.1} s",
@@ -1084,7 +1507,8 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
             t0.elapsed().as_secs_f64()
         );
         let t0 = std::time::Instant::now();
-        let (coarse, at) = plan.coarse_slope(&tiles, 4);
+        let lattice = plan.coarse_lattice(&tiles, 4);
+        let (coarse, at) = lattice.worst();
         eprintln!("stitch: coarse pass {coarse:.3} steepest, {:.1} s", t0.elapsed().as_secs_f64());
         if coarse > p.max_slope {
             let (d, near) = plan
@@ -1098,6 +1522,31 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
                 coarse, at[0], at[1], d, tiles[near].id, p.max_slope
             );
         } else {
+            // The relief on top, lowered (never widened for) until the coarse lattice holds it.
+            plan.relief = reliefs.clone();
+            let mut room = Room::of(&lattice, p.max_slope);
+            dented.iter().for_each(|d| room.dent(d[0], d[1]));
+            plan.room = Some(room);
+            loop {
+                plan.relief_scale = relief_scale;
+                if relief_scale <= 0.0 {
+                    break;
+                }
+                let t0 = std::time::Instant::now();
+                let (c, at) = plan.coarse_slope(&tiles, 4);
+                eprintln!("stitch: coarse pass with the relief at {relief_scale:.3}: {c:.3} steepest, {:.1} s", t0.elapsed().as_secs_f64());
+                if c <= p.max_slope {
+                    break;
+                }
+                if dented.len() < RELIEF_DENTS {
+                    dented.push(at);
+                    eprintln!("stitch: {c:.3} at ({:.0}, {:.0}) with the maps' relief, past {}: lowering it there", at[0], at[1], p.max_slope);
+                    plan.room.as_mut().expect("room").dent(at[0], at[1]);
+                    continue;
+                }
+                eprintln!("stitch: {c:.3} at ({:.0}, {:.0}) with the maps' relief, past {}: lowering it", at[0], at[1], p.max_slope);
+                relief_scale = lower(relief_scale);
+            }
             if joins.exists() {
                 std::fs::remove_dir_all(&joins).map_err(|e| format!("{}: {e}", joins.display()))?;
             }
@@ -1108,7 +1557,17 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
                 std::fs::create_dir_all(&jd).map_err(|e| format!("{}: {e}", jd.display()))?;
                 std::fs::write(jd.join(format!("{}.ps2.trn", pc.name)), &pc.trn).map_err(|e| e.to_string())?;
                 std::fs::write(jd.join(format!("{}.blend", pc.name)), &pc.blend).map_err(|e| e.to_string())?;
-                results.lock().expect("lock").push(Done { name: pc.name, at: pc.at, samples: pc.samples, between: pc.between, far: pc.far_slope, near: pc.near_slope, clamped: pc.clamped });
+                results.lock().expect("lock").push(Done {
+                    name: pc.name,
+                    at: pc.at,
+                    samples: pc.samples,
+                    between: pc.between,
+                    far: pc.far_slope,
+                    near: pc.near_slope,
+                    far_base: pc.far_base,
+                    far_at: pc.far_at,
+                    clamped: pc.clamped,
+                });
                 Ok(())
             })?;
             let mut results = results.into_inner().expect("lock");
@@ -1117,6 +1576,25 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
             let far = results.iter().map(|r| r.far).fold(0.0, f64::max);
             if far <= p.max_slope {
                 break (plan, results);
+            }
+            let base = results.iter().map(|r| r.far_base).fold(0.0, f64::max);
+            if base <= p.max_slope && relief_scale > 0.0 {
+                let worst = results.iter().max_by(|a, b| a.far.total_cmp(&b.far)).expect("a piece");
+                let there = dented.len() < RELIEF_DENTS;
+                eprintln!(
+                    "stitch: join ground {far:.3} steep with the maps' relief in {} (at {:.0}, {:.0}), {base:.3} without, past {}: lowering it{}",
+                    worst.name,
+                    worst.far_at[0],
+                    worst.far_at[1],
+                    p.max_slope,
+                    if there { " there" } else { "" }
+                );
+                if there {
+                    dented.push(worst.far_at);
+                } else {
+                    relief_scale = lower(relief_scale);
+                }
+                continue;
             }
             let worst = results.iter().max_by(|a, b| a.far.total_cmp(&b.far)).expect("a piece");
             let near = plan
@@ -1131,6 +1609,7 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
             );
         }
         widen *= 1.25;
+        dented.clear();
         if widen > 20.0 {
             return Err("the join ground stays too steep however wide the gaps".into());
         }
@@ -1206,6 +1685,14 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
         "joins/*: generated ground (tools/stitch), no source game's: a closed-form blend of the tiles' edges; \
          no texture pages, the look is each <join>.blend over the tiles' own ground (openmx MD9)",
     )];
+    todo.push(s(format!(
+        "joins/*: past the seam gates the ground carries the nearest maps' own relief (MD57): \
+         each map's ground folded back and forth from its keep, smoothed over about {:.0} ft and held to {RELIEF_SLOPE} a foot \
+         (no jumps, ruts or cliffs of its own), rising from nothing at the gates by at most {RELIEF_RISE} ft a foot, \
+         kept off blend too steep to hold it, carried at {:.2} over the world; generated, no source game's",
+        5.0 * RELIEF_CELL,
+        plan.relief_scale
+    )));
     todo.push(s("joins/*: surface bytes are the nearest tile's id with the top bit 0 (the bit's meaning is not known)"));
     todo.push(s(
         "the world's outer edge is flat join ground with no berm; the shootoff there is the world's (openmx MD8)",
@@ -1369,6 +1856,26 @@ pub fn build_tiles(tiles: &[Tile], out: &Path, p: &Params, copy_tiles: bool) -> 
                 ),
                 ("far_slope", J::N((far_slope * 1e4).round() / 1e4)),
                 ("near_slope", J::N((near_slope * 1e4).round() / 1e4)),
+                // The maps' relief on the far joins (MD57): its scale over the whole world, and each
+                // map's own gain and smoothed spread (feet).
+                (
+                    "relief",
+                    o(vec![
+                        ("scale", J::N((plan.relief_scale * 1e4).round() / 1e4)),
+                        (
+                            "tiles",
+                            J::A(
+                                tiles
+                                    .iter()
+                                    .zip(&plan.relief)
+                                    .map(|(t, r)| {
+                                        o(vec![("tile", s(&t.id)), ("gain", J::N((r.gain * 1e4).round() / 1e4)), ("spread", J::N((r.spread * 100.0).round() / 100.0))])
+                                    })
+                                    .collect(),
+                            ),
+                        ),
+                    ]),
+                ),
             ]),
         ),
     ]);
