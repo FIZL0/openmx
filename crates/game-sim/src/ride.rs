@@ -2072,7 +2072,7 @@ fn share_load(wh: &mut Wheel, other: &Wheel, mvc: &mv::Chassis, cofg_world: Vf,
 /// the ground.
 fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, other_contact: bool, other_load: F,
                    cofg_world: Vf, mvc: &mut mv::Chassis, m: &Mat4, curve: &CurveTable, dt: F,
-                   under: Option<(Vf, Vf)>) -> Vec<wheel::Call> {
+                   under: Option<(Vf, Vf)>, mxvatv: bool) -> Vec<wheel::Call> {
     wh.to_wheel();
     if wh.mv.other_tire_down && !wh.w.contact {
         wh.w.load_point = wh.w.probe_end_world;
@@ -2100,7 +2100,7 @@ fn wheel_integrate(wh: &mut Wheel, tire: &phy::Tire, brake: F, other_contact: bo
         ang_vel: mvc.ang_vel,
     };
     tire::spin_integrate(wh, &surf, &step, &mut wc, curve, &mut |call| ask_transform(m, call));
-    let calls = wheel::integrate(&mut wh.w, dt);
+    let calls = if mxvatv { crate::handling::step::wheel_integrate(&mut wh.w, dt) } else { wheel::integrate(&mut wh.w, dt) };
     mvc.force = wc.force;
     mvc.torque = wc.torque;
     wh.from_wheel();
@@ -2557,7 +2557,7 @@ impl Ride {
             calls.push(mv::Call::WheelIntegrate(Side::Front, h));
             let (brake, other, load) = (held.front_brake, rear.w.contact, rear.w.spring_force);
             wheel_integrate(front, &p.front, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
-                            &tables.curve, h, under[0]);
+                            &tables.curve, h, under[0], mxvatv.is_some());
             calls.push(mv::Call::WheelIntegrate(Side::Rear, h));
             let (brake, other, load) = (held.rear_brake, front.w.contact, front.w.spring_force);
             if rear.mv.other_tire_down && !rear.w.contact {
@@ -2566,7 +2566,7 @@ impl Ride {
                 under[1] = share_load(rear, front, &mvc, chassis.cofg_world, &movers, props.as_deref_mut().map(|l| &mut l.0), pushed);
             }
             wheel_integrate(rear, &p.rear, brake, other, load, chassis.cofg_world, &mut mvc, &out.chassis,
-                            &tables.curve, h, under[1]);
+                            &tables.curve, h, under[1], mxvatv.is_some());
 
             mv::engine_post(engine, &mut rear.mv);
 
