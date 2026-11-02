@@ -602,14 +602,21 @@ impl crate::Sim {
         if bump.is_none() || !self.others.is_empty() || self.plane.is_some() {
             return self.step(dt, controls, world);
         }
-        self.traffic.frame(dt, world);
+        // The props' step waits for the bike's strike and push (S197a, [`crate::prop_contact`]).
+        let prop_movers = self.traffic.frame_held(dt, world);
         self.lend_cars();
         let mut bump = bump;
         let cars = self.car_contacts(0, world, dt);
         if let Some(b) = bump.as_deref_mut() {
             b.contacts = crate::mover_contact::merged(std::mem::take(&mut b.contacts), cars);
+            let strike = self.prop_strike_seated(b.vehicles.len(), dt);
+            self.strike_into(b, strike);
         }
-        let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], bump);
+        let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], bump.as_deref_mut());
+        if let Some(b) = bump.as_deref() {
+            self.traffic.props.pushed(&b.props);
+        }
+        self.props_step(dt, &prop_movers);
         self.ticks += 1;
         said
     }
@@ -733,23 +740,34 @@ impl Sim {
         if (bump.is_none() && rivals.is_empty()) || !self.others.is_empty() || self.plane.is_some() {
             return self.step(dt, controls, world);
         }
-        self.traffic.frame(dt, world);
+        // The props' step waits for the bike's strike and push (S197a, [`crate::prop_contact`]).
+        let prop_movers = self.traffic.frame_held(dt, world);
         self.lend_cars();
         self.event_frame(dt);
         let cars = self.car_contacts(0, world, dt);
+        let players = bump.as_deref().map_or(1, |b| b.vehicles.len());
+        let strike = self.prop_strike_seated(players, dt);
         let mut own;
         let bump = match bump {
             Some(b) => {
                 b.contacts = crate::mover_contact::merged(std::mem::take(&mut b.contacts), cars);
                 Some(b)
             }
-            None if cars.is_empty() => None,
+            None if cars.is_empty() && strike.contacts.is_empty() => None,
             None => {
                 own = self.bump(0, cars);
                 Some(&mut own)
             }
         };
-        let mut said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, rivals, bump);
+        let mut bump = bump;
+        if let Some(b) = bump.as_deref_mut() {
+            self.strike_into(b, strike);
+        }
+        let mut said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, rivals, bump.as_deref_mut());
+        if let Some(b) = bump.as_deref() {
+            self.traffic.props.pushed(&b.props);
+        }
+        self.props_step(dt, &prop_movers);
         said.seam = self.rider.wrap_round(&*world);
         self.ticks += 1;
         said

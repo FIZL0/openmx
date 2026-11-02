@@ -451,7 +451,8 @@ impl Sim {
         if self.others.is_empty() || self.plane.is_some() {
             return vec![self.step(dt, &controls[0], world)];
         }
-        self.traffic.frame(dt, world);
+        // The props' step waits for every bike's strike and push (S197a, [`prop_contact`]).
+        let prop_movers = self.traffic.frame_held(dt, world);
         self.lend_cars();
         self.event_frame(dt);
         let mut frames = Vec::with_capacity(controls.len());
@@ -461,10 +462,16 @@ impl Sim {
         // And every bike's body rays against the cars (S137), from the same tick's places.
         let mut cars: Vec<Vec<contact::Contact>> = (0..self.players()).map(|i| self.car_contacts(i, world, dt)).collect();
         for (i, c) in controls.iter().enumerate().rev() {
+            // And its body rays against the knockable props (S197a), where the riders walked before
+            // it left them: what it strikes is woken, and pushed in its frame.
+            let strike = self.prop_strike(i, dt);
             let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
                 .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
-                .filter(|l| !l.is_empty())
+                .filter(|l| !l.is_empty() || !strike.contacts.is_empty())
                 .map(|l| self.bump_in(i, l, &*world));
+            if let Some(b) = bump.as_mut() {
+                self.strike_into(b, strike);
+            }
             let rivals: Vec<ride::Rival> = (0..self.players())
                 .filter(|&j| j != i)
                 .map(|j| self.rider_of(j))
@@ -488,10 +495,12 @@ impl Sim {
             };
             if let Some(b) = &bump {
                 self.bumped(b);
+                self.traffic.props.pushed(&b.props);
             }
             frames.push(frame);
         }
         frames.reverse();
+        self.props_step(dt, &prop_movers);
         // Over a seam (MD29), each rider after every rider has moved.
         for (i, frame) in frames.iter_mut().enumerate() {
             let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };

@@ -40,6 +40,7 @@ research/oracle.txt under S197.
 
 - Only the single-player `Sim::step` bike strikes. `step_all`, `step_among`, `step_bumped` and openmx's
   vehicle loop still call `Traffic::frame` with no strike.
+  (Done in S197a: research/journal/2026-11-02-s197a-props-struck-every-path.)
 - The rider and ragdoll, the wreck bike, the plane and other props do not strike props.
 - A prop's own rays against the bike's f.col (the prop as the searcher) are not ported; the props' step
   sees the bike only through the mirror and the strikers.
