@@ -10139,7 +10139,13 @@ impl SaveState {
     /// Every path car in the image, in address order: an object whose vtable is the path car's
     /// (`path_car_vtable`) with a path and a mesh.
     fn path_cars(&self) -> Vec<u32> {
-        let vtable = ps2_oracle::addr("path_car_vtable").expect("path_car_vtable in research/oracle.txt");
+        self.cars_of("path_car_vtable")
+    }
+
+    /// Every object in the image whose vtable is `vtable`'s (`research/oracle.txt`) with a path and a
+    /// mesh, in address order.
+    fn cars_of(&self, vtable: &str) -> Vec<u32> {
+        let vtable = ps2_oracle::addr(vtable).unwrap_or_else(|e| panic!("{vtable} in research/oracle.txt: {e}"));
         let ok = |a: u32| (0x10_0000..0x200_0000).contains(&a);
         (0x10_0000u32..0x200_0000 - 0x600)
             .step_by(16)
@@ -10166,9 +10172,21 @@ impl SaveState {
     /// The image's path cars as the port's [`game_sim::traffic::Traffic`]: each car's path and numbers
     /// out of RAM, its collision mesh out of `meshes` by the name the car carries.
     fn traffic(&self, meshes: impl Fn(&str) -> Option<Vec<u8>>) -> game_sim::traffic::Traffic {
+        self.traffic_of(&self.path_cars(), meshes)
+    }
+
+    /// [`Self::traffic`] with the `HasPhysics` cars (S127, `physics_car_vtable`) after the path cars,
+    /// as the original's moving list files them (tests/physics_cars.rs). The port drives them as path
+    /// cars, which they are until something strikes one.
+    fn traffic_with_trucks(&self, meshes: impl Fn(&str) -> Option<Vec<u8>>) -> game_sim::traffic::Traffic {
+        let mut cars = self.path_cars();
+        cars.extend(self.cars_of("physics_car_vtable"));
+        self.traffic_of(&cars, meshes)
+    }
+
+    fn traffic_of(&self, cars: &[u32], meshes: impl Fn(&str) -> Option<Vec<u8>>) -> game_sim::traffic::Traffic {
         use game_sim::traffic::{Car, Spec, Traffic};
         use s129_car as at;
-        let cars = self.path_cars();
         let specs = cars
             .iter()
             .map(|&car| {
@@ -11155,6 +11173,188 @@ fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
             assert!(whole.unwrap_or(u64::MAX) >= agrees, "{name}: parts on {whole:?}, before tick {agrees}");
             assert_eq!(theirs, Some(their_wreck), "{name}: the capture's wreck");
             assert_eq!(ours, Some(our_wreck), "{name}: the port's wreck");
+        });
+    }
+}
+
+// --- S207: a path car runs into a parked bike, in the original ----------------------------------------
+//
+// S153's idle sweep found the port's parked bike struck by path cars: free09's trailer trucks at head
+// height, free06's train alongside, and free06's company truck. Each state here parks the human's bike,
+// still and with nothing held, in a car's way a few seconds before the car comes
+// (`research/s207/park.py`, at full speed), and is recorded at a quarter speed with no pad:
+//
+// - **truck**: first_recording's state (free09, the 125), the bike at 2800.1, 103.4, 4299.6 facing
+//   -20°, 8.8 ft off the line of free09's north-east trailer truck (`free_trailercab` + `free_trailerA`,
+//   45 ft/s), whose cab comes past it 106 ticks later.
+//
+//   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 30 01263570 121.83 2800 105 4300 7 3 32
+//   ./kit pcsx2 with -- ./kit record watch/s207-free09.toml --state 32 -n 450 -o context/capture/s207/truck.csv
+//
+// - **rails**: s89-along's state (free06, the 250), the bike at 2447.7, 135.5, 3991.2 across free06's
+//   rails, the train's engine (55 ft/s) meeting it 34° off head-on 97 ticks later.
+// - **beside**: the same, parked 6 ft off the line; it rolls back down the bank to 2453.7, 3971 before
+//   the train comes, which passes it untouched.
+// - **ctruck**: s89-along's state, the bike at 3702.8, 234.6, 3100.2 in the way of the company truck
+//   `.toy` `Car22` (a `HasPhysics` car, S127), which strikes it 36 ticks later. The original's truck
+//   wakes its body and stops dead on the strike; the port's drives on along its path (src/traffic.rs,
+//   "not here"), meets the bike a tick early and pushes it into a wreck the original never has.
+//
+//   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 31 00d525f0 123.5 2447.8 136.5 3991.4 7 3 33
+//   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 31 00d525f0 123.5 2452.8 136.5 3988.1 7 3 34
+//   ./kit pcsx2 with -- python3 -B research/s207/park.py PID 31 01cc7630 26.20 3703.0 236 3098.5 2.5 0.8 35
+//   ./kit pcsx2 with -- ./kit record watch/s129-train.toml --state 33 -n 300 -o context/capture/s207/rails.csv
+//
+// (beside and ctruck the same, slots 34 and 35.) The free06 rides carry the state's two `HasPhysics`
+// trucks after its 21 path cars ([`SaveState::traffic_with_trucks`]).
+// The RAM images are `context/states/s207-<name>.eeMemory.bin` (`./kit state ram <slot> --out …`).
+
+/// S207's rides: the name, the track, the human rider's chain in the image, the `.phy` and the bike
+/// model, the tick to which every lane agrees (the first it parts on; `u64::MAX` for all of the
+/// capture), and the original's first wreck (tick, reason) and the port's (`None`: none in the capture).
+#[allow(clippy::type_complexity)]
+const S207_RIDES: [(&str, &str, &[u32], &str, &str, u64, Option<(u64, u8)>, Option<(u64, u8)>); 4] = [
+    ("truck", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, 105, Some((105, 2)), Some((105, 2))),
+    ("rails", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 98, Some((98, 1)), Some((98, 1))),
+    ("beside", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", u64::MAX, None, None),
+    ("ctruck", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 35, None, Some((172, 1))),
+];
+
+/// [`in_the_world_with_cars`] on any track: its props, the state's path cars attached after them, the
+/// bike, and the disc's bike collision files out of the track's archives (S137's body rays).
+fn in_the_track_with_cars<R>(
+    st: &SaveState,
+    track: &str,
+    phy: &str,
+    model: &str,
+    then: impl FnOnce(&mut dyn World, &Where, Option<Ridden>, game_sim::traffic::Traffic, Option<game_sim::bike_col::BikeCol>) -> R,
+) -> Option<R> {
+    use game_sim::bike_col::{BikeCol, MODEL, rays_file, shape_file};
+    let mut disc = Disc::open()?;
+    let area = Area::all_of(&mut disc, track).into_iter().next()?;
+    let (mut props, _) = area.props(&mut disc);
+    let mut parts = Vec::new();
+    for name in [area.named.track.clone(), area.named.track.replace(".res", "_2.res")] {
+        if let Some(bytes) = disc.member(&name) {
+            if let Ok(res) = Res::parse(&bytes) {
+                parts.push((bytes, res));
+            }
+        }
+    }
+    let file = |want: &str| parts.iter().find_map(|(bytes, res)| by_suffix(res, want).and_then(|e| res.read(bytes, e).ok()));
+    let mut traffic = st.traffic_with_trucks(|want| file(want));
+    traffic.attach(&mut props);
+    let col = file(&rays_file(MODEL)).zip(file(&shape_file(MODEL))).and_then(|(rays, shape)| BikeCol::load(&rays, &shape).ok());
+    let terrain = Terrain::parse(&area.terrain).ok()?;
+    let ground = Ground::new(&terrain, &area.scene.terrain);
+    let tables = Arc::new(RiderTables::build());
+    let bike = the_bike_named(&mut disc, &tables, phy).map(|phy| {
+        let mounts = the_wheels_of(&mut disc, model).expect("the bike model's tire nodes");
+        Ridden { tables: Arc::clone(&tables), phy, mounts }
+    });
+    let mut place = Place { ground, props };
+    Some(then(&mut place, &area.named, bike, traffic, col))
+}
+
+/// **S207: a path car runs into a parked bike as the original's does**: each of [`S207_RIDES`] ridden
+/// by the port from the original's save state (its whole bike, wrecks on, the body rays carried) among
+/// the state's path cars with the original's pad, every lane held to the capture to its agreement tick,
+/// and the first wreck, the original's and the port's, held to the table. Skipped with a line where a
+/// capture or state is missing.
+#[test]
+fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
+    for (name, track, hops, phy, model, agrees, their_wreck, our_wreck) in S207_RIDES {
+        let path = private_dir("capture").join("s207").join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("no {} — S207's comment above says how it is recorded", path.display());
+            continue;
+        };
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let image = private_dir("states").join(format!("s207-{name}.eeMemory.bin"));
+        let Some(st) = SaveState::open_image(&image, hops) else { continue };
+        let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+        let ticks = quarter_ticks(&cap, saved).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let inputs = save_state_inputs(&cap, &ticks, st.held_controls()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        println!("{name}: saved at {saved}, the search holds the cars: {}", st.bike_search_holds_cars());
+        in_the_track_with_cars(&st, track, phy, model, |world, named, bike, traffic, col| {
+            println!("{name}: {} path cars", traffic.cars.len());
+            let mut sim = acceptance_start(&cap, 0, bike).unwrap();
+            sim.traffic = traffic;
+            sim.rider.sense.wrecks_enabled = true;
+            sim.rider.carries_bike_col(Arc::new(col.expect("the bike's collision files")));
+            let ride = &mut sim.rider.ride;
+            st.seed_chassis(ride).expect("the chassis");
+            st.seed_wheels(ride).expect("both wheels");
+            st.seed_balance(ride).expect("the balance");
+            st.seed_engine_outputs(ride).expect("the engine");
+            st.seed_air(ride).expect("the air state");
+            if let Some(d) = st.drivetrain() {
+                d.seed(ride);
+            }
+            st.seed_levers(ride).expect("the levers");
+            st.seed_engine_state(ride).expect("the engine's state");
+            seed_bike_search(&st, &mut sim, world);
+
+            let mut watches = Vec::new();
+            for (col, path) in chassis_lanes() {
+                let Ok(w) = cap.float(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, path) in slip_lanes() {
+                let Ok(w) = cap.bool(&col, &path) else { continue };
+                watches.push(retick(w, &ticks, 0));
+            }
+            for (col, wheel) in [("f", "front"), ("r", "rear")] {
+                for (c, p) in [("ray_hit", "w.ray_hit"), ("swept", "w.swept_contact")] {
+                    if let Ok(w) = cap.int(&format!("{col}_{c}"), &format!("rider.ride.{wheel}.{p}")) {
+                        watches.push(retick(w, &ticks, 0));
+                    }
+                }
+            }
+            let last = *ticks.last().unwrap() as usize + 1;
+            let mut pads = inputs.clone();
+            pads.resize(last.max(pads.len()), Input::default());
+            let f = Fixture {
+                name: format!("s207 {name} from its save state"),
+                seed: 0,
+                start: Some(sim.clone()),
+                inputs: pads.clone(),
+                watches,
+                world: Some(named.clone()),
+                ..Default::default()
+            };
+            let whole = match replay::verify_in(&f, world) {
+                Ok(_) => None,
+                Err(d) => {
+                    println!("{}: {d}", f.name);
+                    Some(d.tick)
+                }
+            };
+            println!("{name}: parts on {whole:?}");
+            let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+            let num = |r: usize, c: &str| -> f32 { cell(&cap, r, col(c)).parse().unwrap_or(f32::NAN) };
+            let theirs = (0..ticks.len()).find(|&r| num(r, "wreck_reason") != 0.0).map(|r| (ticks[r], num(r, "wreck_reason") as u8));
+            let mut port = sim.clone();
+            let mut ours = None;
+            for t in 1..last {
+                port.tick_in(pads[t - 1], world);
+                let r = ticks.iter().position(|&k| k == t as u64);
+                if let Some(r) = r.filter(|_| theirs.is_some_and(|w| t as u64 + 4 >= w.0 && t as u64 <= w.0 + 2)) {
+                    let (c, v) = (port.rider.ride.chassis.cofg_world, port.rider.ride.chassis.vel);
+                    println!(
+                        "{name} tick {t}: original cofg ({:.3}, {:.3}, {:.3}) vel ({:.2}, {:.2}, {:.2}) wreck {} | port ({:.3}, {:.3}, {:.3}) vel ({:.2}, {:.2}, {:.2}) wreck {:?}",
+                        num(r, "ch_cofg.x"), num(r, "ch_cofg.y"), num(r, "ch_cofg.z"), num(r, "ch_vel.x"), num(r, "ch_vel.y"), num(r, "ch_vel.z"),
+                        num(r, "wreck_reason"), c.x(), c.y(), c.z(), v.x(), v.y(), v.z(), port.rider.state.wreck.map(|w| w.0)
+                    );
+                }
+                if ours.is_none() && let Some(w) = port.rider.state.wreck {
+                    ours = Some((t as u64, w.0));
+                }
+            }
+            println!("{name}: the original's first wreck {theirs:?}, the port's {ours:?}");
+            assert!(whole.unwrap_or(u64::MAX) >= agrees, "{name}: parts on {whole:?}, before tick {agrees}");
+            assert_eq!(theirs, their_wreck, "{name}: the capture's wreck");
+            assert_eq!(ours, our_wreck, "{name}: the port's wreck");
         });
     }
 }
