@@ -120,7 +120,7 @@ impl PropSet {
                 let m = coll.members[made.member];
                 let entry = &coll.pco.parts[m.part];
                 parts.push((&entry.part, &entry.name));
-                bones.push(Bone { body: made.body, mass: entry.part.mass, inertia: Vf::ZERO, reference: Vf::VF0 });
+                bones.push(Bone { body: made.body, mass: entry.part.mass, inertia: made.inertia, reference: Vf::VF0 });
                 frames.push(props::frame(&models[m.model]));
                 colliders.push(made.collider);
                 let file = props::rays_file(&models[m.model].file);
@@ -139,7 +139,6 @@ impl PropSet {
             let (mut world, unmade) = Collection::new(&coll.pco, &parts, bones, &frames, &tables.curve);
             for u in unmade {
                 said.push(match u {
-                    Unmade::TorsionSpring(name) => format!("{}: {name}'s BodyTorsionSpring is not ported", coll.name),
                     Unmade::NoPart(name) => format!("{}: a constraint on {name}, which it has no part of", coll.name),
                 });
             }

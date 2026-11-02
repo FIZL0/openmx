@@ -38,13 +38,17 @@
 //! says `DetectCollisionsWhenDisabled`: it goes on searching, its rays among the categories that wake
 //! it only ([`crate::flight_search::WAKE_MASK`]).
 //!
+//! A `BodyTorsionSpring` (S196, [`Spring`]: the supercross banners) is a force listener of the
+//! collection world, filed when the collection is made, so it runs before every object's own force
+//! listener: while its body is awake it turns it back toward the way it was made, stiffness and damping
+//! off the part's inertia.
+//!
 //! What is not here: the props struck (their `f.col` as a collidable others' searches meet, and the
-//! wake that strike or the rays' own hit gives — S197), and `BodyTorsionSpring`, which
-//! [`Collection::new`] reports rather than guesses (no free09 prop has one).
+//! wake that strike or the rays' own hit gives — S197).
 
 #![deny(clippy::float_arithmetic)]
 
-use crate::biplane::{self, Body, Dynamics, List, World};
+use crate::biplane::{self, Body, Dynamics, List, World, unturn};
 use crate::camera::CurveTable;
 use crate::chassis::turn;
 use crate::contact::{self, Collider, Mover, Node, Other, Side, Weighed};
@@ -56,7 +60,7 @@ use crate::wreck_bike::{self, NoObjects};
 use crate::math::{Mat4, basis, mat4_to_quat};
 use crate::phy::Part;
 use crate::props::{Constraint, NodeBox, Pco};
-use crate::ragdoll::{Bone, Pin, Tables};
+use crate::ragdoll::{self, Bone, Pin, Tables};
 use crate::wreck_bike::node_of;
 use ps2_float::fpu::Acc;
 use ps2_float::{Dest, F, Field, Vf, fpu, vu};
@@ -175,6 +179,52 @@ pub struct Joint {
     pub limited: bool,
 }
 
+/// **A `BodyTorsionSpring`** (S196): a pull on one body back toward its start turn, about the axis
+/// the body has turned through since, as a moment in the body's frame. The reader sets it from the
+/// part's `Spring` and `Damping` and the body's inertia ([`Spring::new`]); the collection world runs it
+/// as a force listener ([`Spring::force`]) every substep, ahead of the objects' own.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spring {
+    /// The body it turns.
+    pub body: usize,
+    /// Its switch: on as it is made, and nothing turns it off.
+    pub on: bool,
+    /// `Spring` times the inertia, lane by lane (`w` is `Spring`'s).
+    pub stiffness: Vf,
+    /// `2 · Damping · √(inertia · stiffness)`, lane by lane (`w` one).
+    pub damping: Vf,
+}
+
+impl Spring {
+    /// The reader: `spring` and `zeta` are the constraint's `Spring` and `Damping`, `inertia` the
+    /// body's (the diagonal, `w` one).
+    pub fn new(body: usize, inertia: Vf, spring: Vf, zeta: Vf) -> Spring {
+        let stiffness = spring.merge(Dest::XYZ, spring.mul(inertia));
+        let lane = |k: usize| (F(2.0) * F(zeta[k]) * (F(inertia[k]) * F(stiffness[k])).sqrt()).0;
+        Spring { body, on: true, stiffness, damping: Vf::new(lane(0), lane(1), lane(2), 1.0) }
+    }
+
+    /// **The pull**, once a substep while the body is awake: how far the body has turned from its start
+    /// turn, as an angle about an axis (the turn relative to the start, carried back through the start
+    /// turn), and its spin about that axis; the moment is minus (stiffness · angle + damping · spin)
+    /// along the axis, lane by lane.
+    pub fn force(&self, bone: &mut Bone, tables: &Tables) {
+        if !self.on || !bone.body.enabled {
+            return;
+        }
+        let b = &mut bone.body;
+        let start = bone.reference;
+        let (angle, axis) = ragdoll::axis_angle(unturn(start, ragdoll::rel(b.quat, start)), tables);
+        let r = b.rates;
+        let spin = Acc::mula(F(r.x()), F(axis.x())).madda(F(r.y()), F(axis.y())).madd(F(r.z()), F(axis.z()));
+        let damp = self.damping.merge(Dest::XYZ, self.damping.mul(Vf::splat(spin.0)));
+        let pull = self.stiffness.merge(Dest::XYZ, self.stiffness.mul(Vf::splat(angle.0)));
+        let sum = pull.merge(Dest::XYZ, pull.add(damp));
+        let back = Vf::new((-F(sum.x())).0, (-F(sum.y())).0, (-F(sum.z())).0, sum.w());
+        b.add_moment_local(back.merge(Dest::XYZ, back.mul(axis)));
+    }
+}
+
 /// What a listener on the world node is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Listener {
@@ -199,7 +249,11 @@ pub struct Collection {
     pub bones: Vec<Bone>,
     pub objects: Vec<Object>,
     pub joints: Vec<Joint>,
-    /// The world's lists, by object: bodies, force listeners, preforce listeners, post listeners.
+    /// The torsion springs, the first of the world's force listeners (the track's: not sent or
+    /// hashed).
+    pub springs: Vec<Spring>,
+    /// The world's lists, by object: bodies, force listeners (after the springs), preforce listeners,
+    /// post listeners.
     pub bodies: Vec<usize>,
     pub forces: Vec<usize>,
     pub preforce: Vec<usize>,
@@ -210,7 +264,7 @@ pub struct Collection {
     pub active: bool,
     /// A `PinToBody` was loaded: the bodies wake and sleep together.
     pub pin_to_body: bool,
-    /// The collection's own `ResetTime` (`-1`, as the loader leaves it), and its countdown.
+    /// The collection's own `ResetTime` (`[PhysicsParts]`, `-1` when absent), and its countdown.
     pub reset_time: F,
     pub countdown: F,
     /// The world's bounds, when it has some.
@@ -220,8 +274,6 @@ pub struct Collection {
 /// A constraint [`Collection::new`] does not make.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Unmade {
-    /// A `BodyTorsionSpring` (its force is not ported).
-    TorsionSpring(String),
     /// A constraint naming a part the collection has none of.
     NoPart(String),
 }
@@ -247,6 +299,7 @@ impl Collection {
             bones,
             objects,
             joints: Vec::new(),
+            springs: Vec::new(),
             bodies: Vec::new(),
             forces: Vec::new(),
             preforce: Vec::new(),
@@ -254,7 +307,8 @@ impl Collection {
             listeners: Vec::new(),
             active: false,
             pin_to_body: false,
-            reset_time: F(-1.0),
+            // `[PhysicsParts] ResetTime` (free11's bowling pins and spare tyres have one, S196).
+            reset_time: pco.reset_time,
             countdown: F(-1.0),
             edge: None,
         };
@@ -288,7 +342,13 @@ impl Collection {
                     c.joints.push(Joint { pin, on: true, limited: *constrain_angles });
                     c.pin_to_body = true;
                 }
-                Constraint::BodyTorsionSpring { name, .. } => unmade.push(Unmade::TorsionSpring(name.clone())),
+                Constraint::BodyTorsionSpring { name, spring, damping } => {
+                    let Some(k) = find(name) else {
+                        unmade.push(Unmade::NoPart(name.clone()));
+                        continue;
+                    };
+                    c.springs.push(Spring::new(k, c.bones[k].inertia, *spring, *damping));
+                }
                 Constraint::Other(_) => {}
             }
         }
@@ -676,7 +736,7 @@ impl Dynamics for Lists<'_> {
         let c = &self.c;
         (match list {
             List::Bodies => c.bodies.len(),
-            List::Force => c.forces.len(),
+            List::Force => c.springs.len() + c.forces.len(),
             List::Constraints => c.joints.len(),
             List::Preforce => c.preforce.len(),
             List::Post => c.posts.len(),
@@ -686,9 +746,16 @@ impl Dynamics for Lists<'_> {
         let k = self.c.preforce[i as usize];
         self.c.bones[k].body.clear_shock_peak();
     }
-    /// The object's force listener: gravity, then its collision object's contacts resolved.
+    /// The springs, then each object's force listener: gravity, then its collision object's contacts
+    /// resolved.
     fn force(&mut self, i: i32, _h: F) {
-        let k = self.c.forces[i as usize];
+        let springs = self.c.springs.len();
+        if (i as usize) < springs {
+            let s = self.c.springs[i as usize];
+            s.force(&mut self.c.bones[s.body], self.tables);
+            return;
+        }
+        let k = self.c.forces[i as usize - springs];
         let bone = &mut self.c.bones[k];
         let o = &mut self.c.objects[k];
         let movers = self.movers;

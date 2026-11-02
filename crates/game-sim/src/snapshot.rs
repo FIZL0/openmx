@@ -226,6 +226,8 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         }
         let mut collections = collections;
         for (c, h) in collections.iter_mut().zip(here) {
+            // The torsion springs are the track's, as read here.
+            c.springs.clone_from(&h.springs);
             for (o, h) in c.objects.iter_mut().zip(&h.objects) {
                 if let (Some(c), Some(h)) = (o.collision.as_mut(), h.collision.as_ref()) {
                     c.record.rays.clone_from(&h.record.rays);
@@ -705,7 +707,7 @@ wire!(crate::ragdoll::Collision { bone, enabled, touching });
 wire!(crate::ragdoll::Launch { force, force_time, hand_hold, target, world_frame, other_frame });
 wire!(crate::ragdoll::Pin { first, second, anchors, target, target_velocity, lower, upper, hit, sticky, gains });
 wire!(crate::biplane::World { iterations, rate });
-wire!(crate::prop_world::Collection { world, bones, objects, joints, bodies, forces, preforce, posts, listeners, active, pin_to_body, reset_time, countdown, edge });
+wire!(crate::prop_world::Collection { world, bones, objects, joints, bodies, forces, preforce, posts, listeners, active, pin_to_body, reset_time, countdown, edge } skip { springs });
 wire!(crate::prop_world::Object { place, look, up, gravity, collision_enabled, detect_when_disabled, reset_off_edge, reset_time, countdown, thresholds, fresh, listens, filed, node, collision });
 
 impl Wire for crate::prop_world::Collision {
