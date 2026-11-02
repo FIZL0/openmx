@@ -5,4 +5,4 @@
 S90 asked for the riding rider to be drawn from the original's riding ragdoll spring. The user ruled
 against that on 2026-10-24 (the drawn rider stays the clip pose), so the task is blocked. The sim-only
 proof of the spring is S135. It was handed out a second time on 2026-10-27 because a merge lost its `[~]`,
-and was blocked again with no code changed (entry 2).
+and was blocked again with no code changed (entry 2). Reopened mechanically again by S135 (entry 3) and S201 (entry 4); still blocked, and the sim half is now done.
