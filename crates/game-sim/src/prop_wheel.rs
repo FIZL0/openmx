@@ -18,6 +18,12 @@
 //!    vehicle: the body's velocity and its velocity at the contact point ([`PropSet::under`], S169,
 //!    proved against the original's step). The port's owner word is [`handle`], the prop's place in
 //!    the set, never zero.
+//! 4. **no push on the prop** (R15): the wheel's suspension, tire and spin forces all go into the
+//!    chassis (the wheel's `+0x1e4`), and the only other thing that reads the owner is the
+//!    distributor. For each contact with an owner, it tells the owner's `f.col` listeners (owner `+0x1f8` →
+//!    `+0xf4`, slot `+0xc`) that it was touched. For a prop these are the two struck listeners that
+//!    the search ran already, the body's wake and the collection's activate, so they do nothing new.
+//!    Nothing here moves a prop, and nothing should.
 //!
 //! The props are the [`crate::Sim`]'s ([`crate::traffic::Traffic::props`]): lent to the riding bike
 //! for its frame ([`crate::ride::Ride::props`], [`crate::Sim::lend_props`]) and taken back after it,

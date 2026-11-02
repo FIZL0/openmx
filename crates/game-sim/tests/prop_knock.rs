@@ -1123,3 +1123,122 @@ fn the_wheel_probe_stands_on_the_props_as_the_originals() {
     assert!(hit > tried / 6 && both > 10, "{hit} hits, {both} on both, of {tried}");
     assert!(woke > asleep / 2, "{woke} of {asleep} woken");
 }
+
+
+// --- R15: does a wheel standing on a prop push it ---------------------------------------------------
+
+/// **A wheel standing on a prop does not push it** (R15): from knock-2897, the bike's node stood so a
+/// wheel segment passes through a prop (every prop of free09, [`PLACINGS`] times, as
+/// [`the_wheel_probe_stands_on_the_props_as_the_originals`] places it), the wheel probe searched (the
+/// struck listener's wake), and then the original's own steps that take a wheel's contact on: the
+/// distributor `bike_wheel_contacts` (its search again, then every contact's owner's listeners and
+/// `wheel_set_contact`), and each wheel's `wheel_suspension`, `wheel_tire_forces` and
+/// `wheel_integrate`. Across them, not one word of any prop's physics object, body, collision object,
+/// `f.col` or collection changes: the owner's listeners are the struck pair the search already ran
+/// (the object's wake, the collection's activate), and the forces go to the chassis (`+0x1e4`) alone.
+/// The wheels do take the prop's collision object as their owner (`+0x1f0`), and the chassis' force
+/// words do change, so the steps ran on the contact.
+#[test]
+fn a_wheel_on_a_prop_does_not_push_it() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some(mut ee) = knock_state(&kit, "knock-2897") else { return };
+    let bike = the_bike(&ee);
+    let probe = ee.u32_at(bike + 0x7c8);
+    let node = ee.u32_at(bike + 0x18);
+    let search = ee.u32_at(bike + 0x7bc);
+    let wheels = [ee.u32_at(bike + 0x7b0), ee.u32_at(bike + 0x7b4)];
+    let chassis = ee.u32_at(wheels[0] + 0x1e4);
+    let rays = wheel_probe(&ee, probe);
+    let objects = objects(&ee);
+    let pass = addr("collide_against_search").unwrap();
+    let moved = addr("probe_object_moved").unwrap();
+    let distribute = addr("bike_wheel_contacts").unwrap();
+    let steps = ["wheel_suspension", "wheel_tire_forces", "wheel_integrate"].map(|n| addr(n).unwrap());
+
+    // Every prop's own words: its physics object, body, collision object, mesh and collection.
+    let mut owned: Vec<(u32, u32, String)> = Vec::new();
+    for (c, objs) in objects.iter().enumerate() {
+        owned.push((collections(&ee)[c], 0x340, format!("collection {c}")));
+        for (k, &o) in objs.iter().enumerate() {
+            owned.push((o, 0x1c0, format!("{c}/{k} object")));
+            owned.push((ee.u32_at(o + obj::BODY), 0x200, format!("{c}/{k} body")));
+            owned.push((ee.u32_at(o + obj::COLLISION), 0x200, format!("{c}/{k} collision object")));
+            owned.push((ee.u32_at(o + MESH), 0x250, format!("{c}/{k} f.col")));
+        }
+    }
+    let owners: Vec<u32> = objects.iter().flatten().map(|&o| ee.u32_at(o + obj::COLLISION)).collect();
+    let list = ee.u32_at(search);
+    let meshes: Vec<u32> = objects.iter().flatten().map(|&o| ee.u32_at(o + MESH)).collect();
+    for (i, &m) in meshes.iter().enumerate() {
+        ee.set_u32(list + 8 * i as u32, m);
+        ee.set_u32(list + 8 * i as u32 + 4, 0);
+    }
+    ee.set_u32(search + 4, meshes.len() as u32);
+
+    let turn = [0, 1, 2].map(|r| quad(&ee, node + 0x80 + 16 * r));
+    let mut pick = 0x0015_0000_b1e5_5ed5u64;
+    let mut next = || {
+        pick ^= pick << 13;
+        pick ^= pick >> 7;
+        pick ^= pick << 17;
+        (pick >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let (mut tried, mut stood, mut forced) = (0, 0, 0);
+    for (c, objs) in objects.iter().enumerate() {
+        for (k, &o) in objs.iter().enumerate() {
+            let n_at = ee.u32_at(o + obj::NODE);
+            let centre = quad(&ee, n_at + 0xb0);
+            for n in 0..PLACINGS {
+                let rows = if n % 2 == 0 { turn } else { [Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0)] };
+                let s = &rays.segments[n % 4 / 2];
+                let t = next();
+                let along = [0, 1, 2].map(|i| s.from.0[i] + t * (s.to.0[i] - s.from.0[i]));
+                let off = [0, 1, 2].map(|_| 3.0 * (next() - 0.5));
+                let target = [0, 1, 2].map(|i| centre.0[i] + off[i]);
+                let origin = [0, 1, 2].map(|i| target[i] - (along[0] * rows[0].0[i] + along[1] * rows[1].0[i] + along[2] * rows[2].0[i]));
+                let origin = Vf::new(origin[0], origin[1], origin[2], 1.0);
+                for (r, row) in rows.iter().chain([&origin]).enumerate() {
+                    for i in 0..4 {
+                        ee.set_u32(node + 0x80 + 16 * r as u32 + 4 * i as u32, row.0[i].to_bits());
+                    }
+                }
+                ee.call(moved, &[u64::from(probe)], &[], 50_000_000);
+                ee.call(pass, &[u64::from(probe), u64::from(search)], &[], 50_000_000);
+                let r = ee.u32_at(probe + 0x6c);
+                if ee.u32_at(r + 0x8c) == 0 {
+                    continue;
+                }
+                let what = format!("prop {c}/{k} placing {n}");
+                let before: Vec<Vec<u32>> = owned.iter().map(|&(a, len, _)| (0..len / 4).map(|w| ee.u32_at(a + 4 * w)).collect()).collect();
+                let force = [quad(&ee, chassis + 0x130).to_bits(), quad(&ee, chassis + 0x140).to_bits()];
+                for w in wheels {
+                    ee.set_u32(w + 0xd4, 0);
+                    ee.set_u32(w + 0x1f0, 0);
+                }
+                ee.call(distribute, &[u64::from(bike)], &[1.0 / 30.0], 50_000_000);
+                let on: Vec<u32> = wheels.iter().map(|&w| ee.u32_at(w + 0x1f0)).filter(|o| *o != 0).collect();
+                assert!(!on.is_empty(), "{what}: a wheel takes the contact");
+                assert!(on.iter().all(|o| owners.contains(o)), "{what}: the wheel's owner is a prop's collision object: {on:x?}");
+                for w in wheels {
+                    for &step in &steps {
+                        ee.call(step, &[u64::from(w)], &[1.0 / 60.0], 50_000_000);
+                    }
+                }
+                for ((&(a, _, ref name), was), _) in owned.iter().zip(&before).zip(0..) {
+                    let changed: Vec<String> = was
+                        .iter()
+                        .enumerate()
+                        .filter(|&(w, &v)| ee.u32_at(a + 4 * w as u32) != v)
+                        .map(|(w, &v)| format!("+{:#x} {v:#x} -> {:#x}", 4 * w, ee.u32_at(a + 4 * w as u32)))
+                        .collect();
+                    assert!(changed.is_empty(), "{what}: {name} changed: {changed:?}");
+                }
+                tried += 1;
+                stood += on.len();
+                forced += usize::from([quad(&ee, chassis + 0x130).to_bits(), quad(&ee, chassis + 0x140).to_bits()] != force);
+            }
+        }
+    }
+    eprintln!("{tried} placings on a prop, {stood} wheels stood on one, {forced} moved the chassis' force words");
+    assert!(tried > 200 && forced * 2 > tried, "{tried} placings, {forced} forced");
+}

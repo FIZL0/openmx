@@ -6679,6 +6679,22 @@ atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into 
 #   prop_wheel::search bit for bit on all 1,488 (290 with a contact, 15 on both segments), and the
 #   enabled/active words after each match the port's PropSet::struck (40 of 60 asleep woken): the f.col's
 #   listener is the object's struck listener (physics_object_struck, enable then activate).
+# R15 — does a wheel on a prop push it: no (test prop_knock.rs a_wheel_on_a_prop_does_not_push_it; journal
+#   research/journal/2026-11-02-r15-wheel-pushes-a-prop). Readers of a wheel's +0x1f0/+0x1f4 in the whole
+#   ELF: the wheel ctor 0x0025a730 and wheel_clear (zero), wheel_set_contact (write), the spin step's
+#   hanging-wheel copy, wheel_contact_velocity (reads the other body). The suspension, tire, drag,
+#   drive and hinge forces all go to the chassis (wheel +0x1e4: +0x130 force, +0x140 torque, the
+#   bottom-out transform_sync). The one other touch is bike_wheel_contacts: per record contact with an
+#   owner (collidable +0x80), every element of *(owner+0x1f8)'s +0xf4 list gets slot +0xc with (0, 0).
+#   For each of free09's 62 props in S195's four knock states owner+0x1f8 is the prop's own f.col and
+#   the list is 2 long: the object's listener (object +0x48, vt 0x0044e7f8, +0xc -> 0x0015c280 ->
+#   physics_object_struck) and the collection's (vt 0x0045db04, +0xc -> 0x003b2b00 -> 0x003b2430,
+#   collection vt +0xa8): collide_against_search's struck pair, ignoring their arguments and waking
+#   only what is asleep, so after the search they change nothing. Interpreter on knock-2897, 289
+#   placings with a contact (24 a prop): after the search, bike_wheel_contacts then each wheel's
+#   wheel_suspension/wheel_tire_forces/wheel_integrate change no word of any prop's object, body,
+#   collision object, f.col or collection; the wheels' owner is a prop's collision object on all
+#   304 wheels, and the chassis' +0x130/+0x140 move on 282.
 # S149e — a fresh car (test crates/game-sim/tests/car_spawn.rs; journal
 #   research/journal/2026-11-02-s149e-car-machines-app). Car ctor 0x00393cc0 builds the part through
 #   0x00159430 (inertia from the model bounds, full extents); per tire it looks the tire node up by name
