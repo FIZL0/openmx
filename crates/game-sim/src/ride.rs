@@ -2434,11 +2434,25 @@ impl Ride {
         let (n, h) = mv::substeps(s.dt);
         for k in 0..n {
             mvc.force = add_xyz(mvc.force, mvp.gravity);
-            mv::stand_upright(mvp, &mut bike!(), s, &mut out);
-            if s.balancing {
-                mv::balance(mvp, &mut bike!(), s, &tables.mv(), &mut out, h);
+            match mxvatv.as_deref() {
+                // MX vs. ATV's three rider controllers (MD63b): their frames off the body's
+                // quaternion.
+                Some(_) => {
+                    let q = chassis.quat;
+                    crate::handling::step::stand_upright(mvp, &mut bike!(), s, &mut out, q);
+                    if s.balancing {
+                        crate::handling::step::balance(mvp, &mut bike!(), s, &tables.mv(), &mut out, q, h);
+                    }
+                    crate::handling::step::roll_pitch(mvp, &mut bike!(), s, q, h);
+                }
+                None => {
+                    mv::stand_upright(mvp, &mut bike!(), s, &mut out);
+                    if s.balancing {
+                        mv::balance(mvp, &mut bike!(), s, &tables.mv(), &mut out, h);
+                    }
+                    mv::roll_pitch(mvp, &mut bike!(), s, &mut out, h);
+                }
             }
-            mv::roll_pitch(mvp, &mut bike!(), s, &mut out, h);
 
             calls.push(mv::Call::Preload(h));
             astep.dt = h;

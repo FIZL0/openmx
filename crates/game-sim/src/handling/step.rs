@@ -13,14 +13,17 @@
 //!   frames the throttle is back on, and the gas held at 0 on the rider's balance stunt.
 //! - The steering command ([`steer_command`], MD63a): `[Joystick]`'s input ramp brings part of the
 //!   lock in over a time while the stick is held hard over, when its option is on.
+//! - The rider's controllers ([`stand_upright`], [`balance`], [`roll_pitch`], MD63b): MX Unleashed's
+//!   arithmetic, with the frames off the body's quaternion and the yaw moments on every bike.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::{Air, Chassis, Params as AirParams, Step as AirStep};
 use crate::phy::Joystick;
-use crate::r#move::{Engine, Params, Ride, Step};
+use crate::math::quat_axes;
+use crate::r#move::{Bike, Engine, Frame, Outside, Params, Ride, Step, Tables};
 use crate::ride::{Controls, Held, limit, rise, toward};
 use crate::trick::Stick;
-use ps2_float::{Acc, Dest, F};
+use ps2_float::{Acc, Dest, F, Vf};
 
 /// `x` from `a..b` onto `out0..out1`, clamped to that range: `(x − a) / (b − a)` on the FPU's
 /// accumulator lerp (`adda`, `madd`), then `max` with the low end and `min` with the high end.
@@ -246,4 +249,87 @@ pub fn steer_command(ramp: &SteerRamp, lock: F, lean: F, fade: F, timer: &mut F,
     let t = *timer / ramp.time;
     let t = if F::ONE < t { F::ONE } else { t };
     Acc::mula(lean, ramp.amount * t).madd(lean * fade, lock - ramp.amount)
+}
+
+// --- the rider's controllers (MD63b) -----------------------------------------------------------------
+
+/// The frames SLUS-21104's three rider controllers below ask for, answered off the rigid body's own
+/// orientation quaternion as its body does: a world vector into the body by the conjugate rotation
+/// ([`crate::quad::Body::to_local`], the body's world-moment call and the balance's inline VU0 code
+/// alike), and the forward axis out of the quaternion ([`crate::math::quat_axes`]). MX Unleashed asks
+/// the chassis' and the node's transforms instead. The noise and the node's axes go to `o`.
+struct Oriented<'a> {
+    q: Vf,
+    o: &'a mut dyn Outside,
+}
+
+impl Outside for Oriented<'_> {
+    fn unrotate(&mut self, _frame: Frame, v: Vf) -> Vf {
+        to_local(self.q, v)
+    }
+    fn forward(&mut self, _frame: Frame) -> Vf {
+        let (f, _) = quat_axes(self.q);
+        Vf::new(f[0].0, f[1].0, f[2].0, 0.0)
+    }
+    fn noise(&mut self, t: F) -> F {
+        self.o.noise(t)
+    }
+    fn set_axes(&mut self, forward: Vf, up: Vf) {
+        self.o.set_axes(forward, up);
+    }
+}
+
+/// `v` out of the world into the frame of the orientation `q` (`q* v q` on VU0, `w` from `v`).
+fn to_local(q: Vf, v: Vf) -> Vf {
+    crate::quad::Body { orientation: q, ..Default::default() }.to_local(v)
+}
+
+/// MX vs. ATV's low-speed upright controller: MX Unleashed's ([`crate::r#move::stand_upright`])
+/// instruction for instruction, with the bike's forward axis taken out of the body's quaternion
+/// `orientation` and the force handed to the body's add-force (the same `xyz` add). Its "not
+/// balancing" is the rider's stunt differing from the balance stunt, which is what calls the balance
+/// on this bike: the port's [`Step::balancing`].
+pub fn stand_upright(p: &Params, b: &mut Bike<'_>, s: &Step, o: &mut dyn Outside, orientation: Vf) {
+    crate::r#move::stand_upright(p, b, s, &mut Oriented { q: orientation, o });
+}
+
+/// MX vs. ATV's balance on one wheel: MX Unleashed's ([`crate::r#move::balance`]) clause for clause,
+/// with the front wheel's ground normal brought into the bike by the body's quaternion `orientation`
+/// (VU0 code inline in the function) where MX Unleashed asks the node's transform.
+///
+/// The original spells its integrations `0 + x`, then `madd`, sums the flattened normal's squares
+/// `y·y` first and weighs the arc cosine's upper entry first; each of those is the same one add of
+/// the same rounded product as MX Unleashed's order, so the arithmetic is shared.
+pub fn balance(p: &Params, b: &mut Bike<'_>, s: &Step, t: &Tables<'_>, o: &mut dyn Outside, orientation: Vf, dt: F) {
+    crate::r#move::balance(p, b, s, t, &mut Oriented { q: orientation, o }, dt);
+}
+
+/// MX vs. ATV's wheelie and stoppie: MX Unleashed's ([`crate::r#move::roll_pitch`]) clause for
+/// clause, with the same conditions, targets, fade, latch and arithmetic, and one change: the yaw
+/// moments (the wheelie's zeroed one and the stoppie's) go through the body's world-moment call,
+/// into the body by its quaternion `orientation`, on every bike: there is no "has a transform"
+/// test. The noise and the node's axes are not asked for.
+pub fn roll_pitch(p: &Params, b: &mut Bike<'_>, s: &Step, orientation: Vf, dt: F) {
+    let had = b.chassis.has_transform;
+    b.chassis.has_transform = true;
+    crate::r#move::roll_pitch(p, b, s, &mut Oriented { q: orientation, o: &mut Unasked }, dt);
+    b.chassis.has_transform = had;
+}
+
+/// The outside for a controller that asks only for frames: anything else is a bug.
+struct Unasked;
+
+impl Outside for Unasked {
+    fn unrotate(&mut self, _frame: Frame, _v: Vf) -> Vf {
+        unreachable!("Oriented answers the frames")
+    }
+    fn forward(&mut self, _frame: Frame) -> Vf {
+        unreachable!("Oriented answers the frames")
+    }
+    fn noise(&mut self, _t: F) -> F {
+        unreachable!("the wheelie and stoppie make no noise")
+    }
+    fn set_axes(&mut self, _forward: Vf, _up: Vf) {
+        unreachable!("the wheelie and stoppie do not point the node")
+    }
 }

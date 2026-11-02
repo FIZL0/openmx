@@ -838,3 +838,407 @@ fn mxvatv_steer_ramp_reads_the_file() {
     assert_eq!(r.time, F(0.6));
     assert!(!r.on);
 }
+
+// --- the rider's controllers (MD63b) -----------------------------------------------------------------
+
+const STAND_UPRIGHT: u32 = 0x004d_c970;
+const BALANCE: u32 = 0x004d_c240;
+const ROLL_PITCH: u32 = 0x004d_c4f0;
+/// The engine's smooth noise, which only the balance asks for.
+const SMOOTH_NOISE: u32 = 0x0013_4580;
+/// The physics world the bike's `+0xe8` names; only its gravity (`+0x40`) is read.
+const WORLD: u32 = 0x01c0_5a00;
+/// The arc cosine table's pointer and scale, which the balance reads.
+const ACOS_TABLE: u32 = 0x003e_a9c0;
+const ACOS_SCALE: u32 = 0x003e_a9d8;
+
+/// A stand-in for the smooth noise, both sides alike: `tests/move.rs`' table, reaching `±1` so the
+/// command meets its clamp.
+fn fake_noise(x: f32) -> f32 {
+    const WAVE: [f32; 8] = [0.0, 1.0, -1.0, 0.5, -0.25, 0.937_5, -0.812_5, 0.125];
+    WAVE[(x.to_bits() >> 3) as usize & 7]
+}
+
+/// The port's side of the calls: only the noise reaches it (the frames come off the quaternion).
+struct Noise;
+
+impl mv::Outside for Noise {
+    fn unrotate(&mut self, _: mv::Frame, _: Vf) -> Vf {
+        unreachable!("MX vs. ATV's controllers rotate by the body's quaternion")
+    }
+    fn forward(&mut self, _: mv::Frame) -> Vf {
+        unreachable!("MX vs. ATV's controllers take the forward axis from the body's quaternion")
+    }
+    fn noise(&mut self, t: F) -> F {
+        F(fake_noise(t.0))
+    }
+    fn set_axes(&mut self, _: Vf, _: Vf) {
+        unreachable!("no controller here points the node")
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RiderState {
+    p: mv::Params,
+    r: mv::Ride,
+    ch: mv::Chassis,
+    front: mv::Wheel,
+    rear: mv::Wheel,
+    eng: mv::Engine,
+    s: mv::Step,
+    q: Vf,
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn vec(&mut self, lo: f32, hi: f32) -> Vf {
+        Vf::new(self.f(lo, hi).0, self.f(lo, hi).0, self.f(lo, hi).0, self.f(-2.0, 2.0).0)
+    }
+    /// A unit vector, mostly up: a ground normal.
+    fn normal(&mut self) -> Vf {
+        let (x, y, z) = (self.f(-0.7, 0.7).0, self.f(0.2, 1.0).0, self.f(-0.7, 0.7).0);
+        let k = 1.0 / (x * x + y * y + z * z).sqrt();
+        Vf::new(x * k, y * k, z * k, self.f(-1.0, 1.0).0)
+    }
+    fn quat(&mut self) -> Vf {
+        let v: [f32; 4] = std::array::from_fn(|_| self.f(-1.0, 1.0).0);
+        let k = 1.0 / v.iter().map(|a| a * a).sum::<f32>().sqrt();
+        Vf::new(v[0] * k, v[1] * k, v[2] * k, v[3] * k)
+    }
+
+    fn rider(&mut self) -> RiderState {
+        let mut t = RiderState::default();
+        let p = &mut t.p;
+        p.gravity = self.vec(-500.0, 500.0);
+        p.balance_inertia_rate = self.f(0.0, 8.0);
+        p.min_balance_inertia = self.f(0.0, 1.0);
+        p.max_balance_inertia = if self.one_in(6) { p.min_balance_inertia } else { self.f(1.0, 4.0) };
+        p.input_inertia = self.f(0.0, 5.0);
+        p.max_balance_point = self.f(0.0, 1.5);
+        p.balance_noise_amplitude = if self.one_in(5) { F::ZERO } else { self.f(0.0, 2.0) };
+        p.balance_noise_time_scale = self.f(0.0, 4.0);
+        p.max_roll_rate_disturbance = self.f(0.0, 4.0);
+        p.roll_control_gain = self.f(0.0, 40.0);
+        p.roll_control_rate_gain = if self.one_in(3) { self.f(0.0, 2.0) } else { self.f(0.0, 0.02) };
+        p.roll_control_max_cg = self.f(0.0, 0.6);
+        p.max_pitch_command = self.f(0.0, 0.9);
+        p.pitch_gain = self.f(0.0, 60.0);
+        p.pitch_rate_gain = self.f(0.0, 200.0);
+        p.inv_wheelie_top_speed = self.f(0.02, 0.2);
+        p.max_stoppie_pitch_command = self.f(0.0, 0.9);
+        p.stoppie_pitch_gain = self.f(0.0, 60.0);
+        p.stoppie_yaw_rate_scale = self.f(0.0, 4.0);
+        p.stoppie_top_speed = if self.one_in(5) { F::ZERO } else { self.f(0.0, 40.0) };
+
+        let r = &mut t.r;
+        r.balance_inertia = self.f(-1.0, 5.0);
+        r.balance_command = self.f(-1.2, 1.2);
+        r.balance_point = self.f(-2.0, 2.0);
+        r.balance_noise_time = self.f(0.0, 30.0);
+        r.pitch_integral = self.f(-50.0, 50.0);
+        r.stoppie = self.b();
+        r.clutch_in = if self.one_in(4) { self.f(0.0, 1.0) } else { F::ZERO };
+
+        let c = &mut t.ch;
+        c.force = self.vec(-500.0, 500.0);
+        c.torque = self.vec(-500.0, 500.0);
+        c.cofg = self.vec(-1.0, 1.0);
+        c.euler = self.vec(-1.0, 1.0);
+        c.world_ang_vel = self.vec(-5.0, 5.0);
+        c.ang_vel = self.vec(-5.0, 5.0);
+
+        for w in [&mut t.front, &mut t.rear] {
+            w.contact = self.bits() % 4 != 0;
+            w.contact_normal = self.normal();
+            w.steered = self.b();
+        }
+
+        let s = &mut t.s;
+        s.on_ground = self.bits() % 8 != 0;
+        s.both_wheels = self.bits() % 4 != 0;
+        s.balancing = self.one_in(4);
+        s.gas = if self.one_in(4) { self.f(0.0, 1.0) } else { F::ZERO };
+        s.brake = if self.b() { self.f(0.0, 1.0) } else { F::ZERO };
+        s.speed = match self.bits() % 6 {
+            0 => F(if self.b() { 5.0 } else { 15.0 }),
+            1 => F(if self.b() { 7.0 } else { -10.0 }),
+            2 => self.f(-12.0, 12.0),
+            _ => self.f(-10.0, 50.0),
+        };
+        s.stick_x = self.f(-1.0, 1.0);
+        s.lean = self.f(-1.0, 1.0);
+        s.lean_fore_aft = match self.bits() % 7 {
+            // A full forward lean is the only one that starts a stoppie.
+            5 | 6 => F(-1.0),
+            0 => F(*[0.5, -1.0, -0.1].get((self.bits() % 3) as usize).unwrap()),
+            1 => self.f(0.5, 1.0),
+            2 => self.f(-1.0, -0.1),
+            _ => self.f(-1.0, 1.0),
+        };
+        s.gas_rate_limited = if self.one_in(4) { F::ZERO } else { self.f(0.0, 1.0) };
+        s.rear_brake = if self.one_in(4) { self.f(0.0, 1.0) } else { F::ZERO };
+        s.front_brake = if self.b() { self.f(0.0, 1.0) } else { F::ZERO };
+        s.dt = self.f(0.005, 0.02);
+        t.q = self.quat();
+        t
+    }
+}
+
+fn poke_rider(ee: &mut Ee, t: &RiderState) {
+    let (p, r, c, s) = (&t.p, &t.r, &t.ch, &t.s);
+    ee.set_u32(OBJ + 0xe8, WORLD);
+    put_v(ee, WORLD + 0x40, p.gravity);
+    ee.set_u32(OBJ + 0x17b0, FRONT);
+    ee.set_u32(OBJ + 0x17b4, REAR);
+    for (w, at) in [(&t.front, FRONT), (&t.rear, REAR)] {
+        put_b(ee, at + 0xdc, w.contact);
+        put_v(ee, at + 0x130, w.contact_normal);
+        put_b(ee, at + 0x2c, w.steered);
+    }
+
+    put_f(ee, OBJ + 0x14fc, p.balance_inertia_rate);
+    put_f(ee, OBJ + 0x1500, p.min_balance_inertia);
+    put_f(ee, OBJ + 0x1504, p.max_balance_inertia);
+    put_f(ee, OBJ + 0x1508, p.input_inertia);
+    put_f(ee, OBJ + 0x1514, p.balance_noise_amplitude);
+    put_f(ee, OBJ + 0x151c, p.balance_noise_time_scale);
+    put_f(ee, OBJ + 0x1520, p.max_balance_point);
+    put_f(ee, OBJ + 0x1398, p.max_roll_rate_disturbance);
+    put_f(ee, OBJ + 0x138c, p.roll_control_gain);
+    put_f(ee, OBJ + 0x1390, p.roll_control_rate_gain);
+    put_f(ee, OBJ + 0x1394, p.roll_control_max_cg);
+    put_f(ee, OBJ + 0x139c, p.max_pitch_command);
+    put_f(ee, OBJ + 0x13a0, p.pitch_gain);
+    put_f(ee, OBJ + 0x13a4, p.pitch_rate_gain);
+    put_f(ee, OBJ + 0x13a8, p.inv_wheelie_top_speed);
+    put_f(ee, OBJ + 0x13cc, p.max_stoppie_pitch_command);
+    put_f(ee, OBJ + 0x13d0, p.stoppie_pitch_gain);
+    put_f(ee, OBJ + 0x13d4, p.stoppie_yaw_rate_scale);
+    put_f(ee, OBJ + 0x13d8, p.stoppie_top_speed);
+
+    put_f(ee, OBJ + 0x14f8, r.balance_inertia);
+    put_f(ee, OBJ + 0x150c, r.balance_command);
+    put_f(ee, OBJ + 0x1510, r.balance_point);
+    put_f(ee, OBJ + 0x1518, r.balance_noise_time);
+    put_f(ee, OBJ + 0x13ac, r.pitch_integral);
+    put_b(ee, OBJ + 0x13b0, r.stoppie);
+    put_f(ee, OBJ + 0x12d4, r.clutch_in);
+
+    put_v(ee, BODY + 0xa0, c.force);
+    put_v(ee, BODY + 0x1b0, c.torque);
+    put_v(ee, BODY + 0x1a0, c.cofg);
+    put_v(ee, BODY + 0x1d0, c.ang_vel);
+    put_v(ee, BODY + 0x190, t.q);
+    put_v(ee, OBJ + 0x360, c.euler);
+    put_v(ee, OBJ + 0x340, c.world_ang_vel);
+
+    put_b(ee, OBJ + 0x324, s.on_ground);
+    put_b(ee, OBJ + 0x1270, s.both_wheels);
+    // The rider's stunt against the balance stunt: equal is balancing.
+    ee.set_u32(OBJ + 0x1524, if s.balancing { 4 } else { 0xff });
+    ee.set_u32(OBJ + 0x152c, 4);
+    put_f(ee, OBJ + 0x314, s.gas);
+    put_f(ee, OBJ + 0x310, s.brake);
+    put_f(ee, OBJ + 0xc38, s.speed);
+    put_f(ee, OBJ + 0x12a8, s.stick_x);
+    put_f(ee, OBJ + 0x12e8, s.lean);
+    put_f(ee, OBJ + 0x12ec, s.lean_fore_aft);
+    put_f(ee, OBJ + 0x318, s.gas_rate_limited);
+    put_f(ee, OBJ + 0x12cc, s.front_brake);
+    put_f(ee, OBJ + 0x12d0, s.rear_brake);
+}
+
+/// The image with the noise hooked, its arc cosine table checked against the port's, and the wheels'
+/// words zeroed with the rest before each state.
+fn rider_image() -> Option<(Ee, air::AcosTable)> {
+    let mut ee = image()?;
+    ee.hooks.insert(SMOOTH_NOISE, Box::new(|ee| {
+        let x = ee.f(12);
+        ee.set_f(0, fake_noise(x));
+    }));
+    let table = air::AcosTable::build();
+    assert_eq!(ee.f32_at(ACOS_SCALE), 14999.5, "the arc cosine's scale");
+    let at = ee.u32_at(ACOS_TABLE);
+    for (i, e) in table.entries().iter().enumerate() {
+        assert_eq!(ee.u32_at(at + 4 * i as u32), e.to_bits(), "arc cosine entry {i}");
+    }
+    Some((ee, table))
+}
+
+fn rider_reset(ee: &mut Ee) {
+    reset(ee);
+    for o in (0..0x200).step_by(4) {
+        ee.set_u32(FRONT + o, 0);
+        ee.set_u32(REAR + o, 0);
+    }
+}
+
+/// The bike, its body and engine, and both wheels' first 0x200 bytes.
+fn rider_snap(ee: &Ee) -> Vec<u32> {
+    let mut v = snap(ee);
+    v.extend((0..0x200).step_by(4).map(|o| ee.u32_at(FRONT + o)));
+    v.extend((0..0x200).step_by(4).map(|o| ee.u32_at(REAR + o)));
+    v
+}
+
+fn rider_touched_only_its_own(ee: &Ee) -> Result<(), String> {
+    let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+    let wheels = [(FRONT, 0x200), (REAR, 0x200)];
+    for (a, b) in ee.written_ranges() {
+        let inside = REGIONS.iter().map(|&(_, base, len)| (base, len)).chain(wheels).any(|(base, len)| a >= base && b <= base + len)
+            || (a >= frame.0 && b <= frame.1);
+        if !inside {
+            return Err(format!("the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack"));
+        }
+    }
+    Ok(())
+}
+
+/// Run one controller both ways over 10,000 states and compare everything it can write.
+fn rider_oracle(
+    seed: u64,
+    at: u32,
+    path: impl Fn(&RiderState) -> &'static str,
+    port: impl Fn(&mut RiderState, &air::AcosTable),
+) -> BTreeMap<&'static str, u32> {
+    let mut tally = BTreeMap::new();
+    let Some((mut ee, table)) = rider_image() else { return tally };
+    let mut g = Gen(seed);
+    for k in 0..10_000 {
+        let s = g.rider();
+        let way = path(&s);
+        *tally.entry(way).or_insert(0u32) += 1;
+        rider_reset(&mut ee);
+        poke_rider(&mut ee, &s);
+        ee.call(at, &[u64::from(OBJ)], &[s.s.dt.0], 50_000);
+        rider_touched_only_its_own(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
+        let was = rider_snap(&ee);
+
+        let mut t = s.clone();
+        port(&mut t, &table);
+        rider_reset(&mut ee);
+        poke_rider(&mut ee, &t);
+        let now = rider_snap(&ee);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            let n = snap(&ee).len();
+            let place = if i < n {
+                where_is(i)
+            } else if i < n + 0x80 {
+                format!("front + {:#x}", (i - n) * 4)
+            } else {
+                format!("rear + {:#x}", (i - n - 0x80) * 4)
+            };
+            panic!(
+                "state {k} ({way}): {place} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+    }
+    tally
+}
+
+macro_rules! rider_bike {
+    ($t:expr) => {
+        mv::Bike { ride: &mut $t.r, chassis: &mut $t.ch, front: &mut $t.front, rear: &mut $t.rear, engine: &mut $t.eng }
+    };
+}
+
+/// SLUS-21104's low-speed upright controller, the port's [`step::stand_upright`]: 10,000 states, the
+/// forward axis taken out of the body's quaternion by the original's own code and the force added
+/// through the body's own add-force.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn mxvatv_stand_upright_is_the_originals() {
+    let tally = rider_oracle(
+        0x0d63_b001,
+        STAND_UPRIGHT,
+        |t| {
+            let s = &t.s;
+            if !s.both_wheels || s.balancing || s.gas != 0.0 || !(s.speed.abs() < 10.0) {
+                "left alone"
+            } else if s.brake != 0.0 {
+                "held, braked"
+            } else {
+                "held"
+            }
+        },
+        |t, _| {
+            let (s, q) = (t.s.clone(), t.q);
+            step::stand_upright(&t.p.clone(), &mut rider_bike!(t), &s, &mut Noise, q);
+        },
+    );
+    if tally.is_empty() {
+        return;
+    }
+    enough(&tally, &["left alone", "held", "held, braked"], 500);
+}
+
+/// SLUS-21104's balance, the port's [`step::balance`]: 10,000 states, the noise hooked on both
+/// sides alike and the arc cosine read from the image's own table.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn mxvatv_balance_is_the_originals() {
+    let tally = rider_oracle(
+        0x0d63_b002,
+        BALANCE,
+        |t| {
+            if !t.front.contact {
+                return "no front";
+            }
+            // The roll angle's sign is the normal's x in the bike: the one branch inside.
+            let local = game_sim::quad::Body { orientation: t.q, ..Default::default() }.to_local(t.front.contact_normal);
+            if local.x() < 0.0 { "balanced, ground to one side" } else { "balanced, to the other" }
+        },
+        |t, table| {
+            let (s, q) = (t.s.clone(), t.q);
+            let curve = game_sim::camera::CurveTable::build();
+            let tables = mv::Tables { acos: table, curve: &curve };
+            step::balance(&t.p.clone(), &mut rider_bike!(t), &s, &tables, &mut Noise, q, s.dt);
+        },
+    );
+    if tally.is_empty() {
+        return;
+    }
+    enough(&tally, &["no front", "balanced, ground to one side", "balanced, to the other"], 500);
+}
+
+/// Which way the roll/pitch goes, from the listing's branches.
+#[allow(clippy::float_arithmetic)]
+fn roll_pitch_path(t: &RiderState) -> &'static str {
+    let s = &t.s;
+    if !s.on_ground {
+        return "airborne";
+    }
+    let wheelie = t.rear.contact
+        && s.gas_rate_limited > 0.0
+        && s.speed > 5.0
+        && s.rear_brake == 0.0
+        && t.r.clutch_in == 0.0
+        && s.lean_fore_aft >= 0.5;
+    let starts = t.front.contact && !t.r.stoppie && s.front_brake > 0.0 && s.speed > 15.0 && s.lean_fore_aft <= -1.0;
+    match (wheelie, t.r.stoppie || starts) {
+        (true, _) => "wheelie",
+        (false, false) => "neither",
+        (false, true) if starts => "stoppie starts",
+        (false, true) if t.p.stoppie_top_speed == 0.0 => "stoppie, no top speed",
+        (false, true) => "stoppie held",
+    }
+}
+
+/// SLUS-21104's wheelie and stoppie, the port's [`step::roll_pitch`]: 10,000 states, the moments put
+/// through the body's own add-moment and world-moment calls.
+#[test]
+fn mxvatv_roll_pitch_is_the_originals() {
+    let tally = rider_oracle(0x0d63_b003, ROLL_PITCH, roll_pitch_path, |t, _| {
+        let (s, q) = (t.s.clone(), t.q);
+        step::roll_pitch(&t.p.clone(), &mut rider_bike!(t), &s, q, s.dt);
+    });
+    if tally.is_empty() {
+        return;
+    }
+    enough(&tally, &["airborne", "wheelie", "neither", "stoppie starts", "stoppie held", "stoppie, no top speed"], 100);
+}
