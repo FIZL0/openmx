@@ -363,7 +363,8 @@ impl Tracker {
             self.points = score.nodes.iter().map(|n| n.points.0).sum();
             let head = &score.nodes[0];
             self.newest_points = head.points.0;
-            self.flipping = score.flip != 0 && head.id != game_sim::score::BACKFLIP;
+            // A flip already on the line from its start (S234) is not still coming round under it.
+            self.flipping = score.flip != 0 && score.shown == 0 && head.id != game_sim::score::BACKFLIP;
         } else if !self.ids.is_empty() && self.out.is_none() && score.settling.0 <= 0.0 {
             // A landing's bank waiting out the crash lockout (P243) is neither yet: the chain stays
             // up as it was until the points go on the total, or a crash takes them and it is lost.
