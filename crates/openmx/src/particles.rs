@@ -119,6 +119,14 @@ pub const ZONES: &str = "mxparticlezones.dat";
 /// computer's riders read `mxaiparticles.dat` beside it, which on free09 is the same file.
 pub const BIKE_PARTICLES: &str = "mxparticles.dat";
 
+/// The Kiowa's emitter list (V114): `tracks\helicopterparticles.dat` in a freeride track's second
+/// archive, and a `_ss` track's own `tracks\<track>\helicopterparticles.dat`, which leaves out the
+/// wreck's dirt and chunks and washes with `helicopterdust_ss.emt`, 25 to 50 particles a second against 150 to 250. Its entries
+/// are the body's wreck dust (`CollisionModel` 0), each thrown blade's (1 to 4), and the rotor wash
+/// (`HelicopterDust` on `RotorSpindle`, off while wrecked, fading out from 15 ft up to 40).
+#[allow(dead_code)] // run once a Kiowa is flown (P216)
+pub const KIOWA_PARTICLES: &str = "helicopterparticles.dat";
+
 /// How many surface zones a zone descriptor names.
 pub const ZONE_COUNT: usize = 16;
 
@@ -1039,6 +1047,10 @@ pub struct Entry {
     pub sources: Vec<Source>,
     /// `AttachedToTire`: the tire whose flags it also answers to.
     pub tire: Option<usize>,
+    /// `AttachedToCollisionModel` (0): which of the vehicle's collision models a `CollisionModel`
+    /// entry emits at — 0 the body's, the Kiowa's 1 to 4 its thrown blades' (V114,
+    /// [`PlaneFrame::models`]).
+    pub model: usize,
     /// Its descriptor's zones ([`zones`]), and the `.emt` as the file wrote it, which a tire dust
     /// scales afresh every frame.
     pub zones: Vec<Zone>,
@@ -1127,6 +1139,19 @@ pub struct PlaneFrame {
     pub constraints: Vec<ConstraintFrame>,
     /// The three tires, front left, front right and tail, by `AttachedToTire`'s index.
     pub tires: Vec<TireFrame>,
+    /// The vehicle's further collision models, model `k` at `k − 1` (V114: the Kiowa's four
+    /// wrecked blades). A model missing here touches nothing, so its entries are off.
+    pub models: Vec<ModelFrame>,
+}
+
+/// One further collision model's contacts this frame, as a `CollisionModel` entry with its index
+/// reads them: the same flags and points as the body's, with no surfaces (every contact draws).
+#[derive(Clone, Debug, Default)]
+pub struct ModelFrame {
+    pub ground_contacts: Vec<V3>,
+    pub object_contacts: Vec<V3>,
+    /// The velocity its points come from.
+    pub vel: V3,
 }
 
 impl PlaneFrame {
@@ -1239,6 +1264,7 @@ impl PlaneFx {
                 frames,
                 sources: Vec::new(),
                 tire: e.key("AttachedToTire").and_then(|v| v.trim().parse().ok()),
+                model: e.key("AttachedToCollisionModel").and_then(|v| v.trim().parse().ok()).unwrap_or(0),
                 zones: zones(zone_text.as_deref(), descriptor, &atlas, frames),
                 latched: false,
                 flag: 0,
@@ -1462,11 +1488,20 @@ impl PlaneFx {
                     }
                 }
                 Kind::CollisionModel => {
+                    // The body's model, or a further one's (V114), which has no surfaces.
+                    let none = ModelFrame::default();
+                    let (grounds, objects, zoned, vel) = match entry.model {
+                        0 => (&plane.ground_contacts, &plane.object_contacts, &plane.ground_zones[..], plane.contact_vel.unwrap_or(plane.vel)),
+                        k => {
+                            let m = plane.models.get(k - 1).unwrap_or(&none);
+                            (&m.ground_contacts, &m.object_contacts, &[][..], m.vel)
+                        }
+                    };
                     let mut flags = global;
-                    if !plane.ground_contacts.is_empty() {
+                    if !grounds.is_empty() {
                         flags |= Disable::GROUND_CONTACT;
                     }
-                    if !plane.object_contacts.is_empty() {
+                    if !objects.is_empty() {
                         flags |= Disable::OBJECT_CONTACT;
                     }
                     if flags & (Disable::GROUND_CONTACT | Disable::OBJECT_CONTACT) == 0 {
@@ -1481,11 +1516,10 @@ impl PlaneFx {
                     // One emitter for every contact (P153: the capture's one carry), emitted at each
                     // in turn as if the point had come from the contact's velocity a frame back: its
                     // speed is the contact's, and its particles spread along that path.
-                    let vel = plane.contact_vel.unwrap_or(plane.vel);
                     let source = &mut entry.sources[0];
-                    for (n, &at) in plane.ground_contacts.iter().chain(&plane.object_contacts).enumerate() {
+                    for (n, &at) in grounds.iter().chain(objects).enumerate() {
                         // A ground contact on a surface the zones say `none` to emits nothing (P74).
-                        match plane.ground_zones.get(n).and_then(|&z| entry.zones.get(usize::from(z))) {
+                        match zoned.get(n).and_then(|&z| entry.zones.get(usize::from(z))) {
                             Some(Zone::Off) => continue,
                             Some(Zone::Group(a, b)) => entry.frames = (*a, *b),
                             None => {}

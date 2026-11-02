@@ -2168,6 +2168,93 @@ impl PlaneNote {
     }
 }
 
+// --- the helicopter's engine (V114) -----------------------------------------------------------------
+
+/// **The Kiowa's engine**, `otherengine.aud`'s `[Helicopter]`: one looped sample (`EngineLoop`), not
+/// keyed like the plane's. The helicopter's sound setup reads the section with the keys' own defaults
+/// and starts the loop at once, placed on the body and following it; its rate is read off the
+/// controller's filtered collective every frame ([`HeliEngine::rate`]). Its volume does not move.
+#[allow(dead_code)] // run once a Kiowa is flown (P216)
+#[derive(Clone, Debug, Default)]
+pub struct HeliEngine {
+    pub clip: Option<Arc<Clip>>,
+    /// `PitchVariance` (an integer, 0): how many hertz the rate moves either way of the sample's own.
+    pub variance: i32,
+    /// `MinSoundDistance` (100) and `MaxSoundDistance` (300), feet.
+    pub near: f32,
+    pub far: f32,
+    /// `DopplerFactor` (0.25).
+    pub doppler: f32,
+}
+
+#[allow(dead_code)]
+impl HeliEngine {
+    pub fn read(text: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> HeliEngine {
+        let s = ini::parse(text);
+        let Some(p) = section(&s, "Helicopter") else { return HeliEngine::default() };
+        HeliEngine {
+            clip: p.get("EngineLoop").and_then(&mut *lib),
+            variance: p.number("PitchVariance").unwrap_or(0.0) as i32,
+            near: p.number("MinSoundDistance").unwrap_or(100.0),
+            far: p.number("MaxSoundDistance").unwrap_or(300.0),
+            doppler: p.number("DopplerFactor").unwrap_or(0.25),
+        }
+    }
+
+    /// The loop's rate in hertz at the filtered collective `c` (0 descending, ½ holding, 1 climbing),
+    /// as the original's ranged loop sets it each frame: its input less the range's low end (0), over
+    /// its high end (1), doubled, `f = 2c`, and the rate `own − variance + (variance × f)`, the product truncated to a whole hertz.
+    /// Holding, the sample plays at its own rate; climbing, `variance` above it; descending, below.
+    pub fn rate(own: u32, variance: i32, c: f32) -> i32 {
+        let f = c * 2.0;
+        (variance as f32 * f) as i32 + (own as i32 - variance)
+    }
+
+    /// [`HeliEngine::rate`] as the mixer's pitch, against the sample's own rate.
+    pub fn pitch(&self, c: f32) -> f32 {
+        let Some(clip) = &self.clip else { return 1.0 };
+        let own = clip.rate.max(1);
+        (HeliEngine::rate(own, self.variance, c) as f32 / own as f32).max(0.05)
+    }
+}
+
+/// The Kiowa's engine playing: its one voice, started the first frame and stopped by
+/// [`HeliNote::silence`].
+#[allow(dead_code)] // run once a Kiowa is flown (P216)
+#[derive(Default)]
+pub struct HeliNote {
+    voice: Option<VoiceId>,
+    ear: Option<[f32; 3]>,
+}
+
+#[allow(dead_code)]
+impl HeliNote {
+    /// One frame: `c` is the controller's filtered collective (`game_sim::kiowa::Commands::filtered`),
+    /// `at` and `vel` the body's place and velocity, for the distance and the Doppler shift.
+    pub fn update(&mut self, mixer: &mut Mixer, e: &HeliEngine, c: f32, at: [f32; 3], vel: [f32; 3], dt: f32) {
+        let Some(clip) = &e.clip else { return };
+        let ear = mixer.nearest(at);
+        let ear_vel = match (ear, self.ear) {
+            (Some(n), Some(was)) if dt > 0.0 => [(n[0] - was[0]) / dt, (n[1] - was[1]) / dt, (n[2] - was[2]) / dt],
+            _ => [0.0; 3],
+        };
+        self.ear = ear;
+        let shift = ear.map_or(1.0, |n| doppler(e.doppler, at, vel, n, ear_vel));
+        let voice = *self.voice.get_or_insert_with(|| {
+            let play = Play { gain: 0.0, looping: true, at: Some(at), near: e.near, far: e.far, bus: Bus::Engine, ..Play::default() };
+            mixer.play(clip.clone(), play)
+        });
+        mixer.set(voice, ENGINE_GAIN, e.pitch(c) * shift, Some(at));
+    }
+
+    pub fn silence(&mut self, mixer: &mut Mixer) {
+        if let Some(v) = self.voice.take() {
+            mixer.stop(v);
+        }
+        self.ear = None;
+    }
+}
+
 // --- the rider, the world, and no landing ------------------------------------------------------
 
 /// `rider.aud`: the voice's two wreck lists.
@@ -3679,6 +3766,23 @@ impl Reading<'_> {
         DriveOnTable::read(&text, &mut |n| lib.clip(n))
     }
 
+    /// The Kiowa's engine (V114): `otherengine.aud`'s `[Helicopter]` in the machines' archive.
+    #[allow(dead_code)]
+    pub fn helicopter(&mut self, res: &str) -> HeliEngine {
+        let text = self.text(res, "aud\\otherengine.aud");
+        let lib = &mut *self.lib;
+        HeliEngine::read(&text, &mut |n| lib.clip(n))
+    }
+
+    /// The Kiowa's wreck clank (V114): `machine.aud`'s `[helicopterWreck]`, the plane's emitter on the
+    /// helicopter's own list. `machine.aud` has no `[helicopterTire…]`, so it has no touchdown.
+    #[allow(dead_code)]
+    pub fn helicopter_wreck(&mut self, res: &str) -> MachineWreck {
+        let text = self.text(res, "aud\\machine.aud");
+        let lib = &mut *self.lib;
+        MachineWreck::read(&text, "helicopter", &mut |n| lib.clip(n))
+    }
+
     pub fn plane_wreck(&mut self, res: &str) -> MachineWreck {
         let text = self.text(res, "aud\\machine.aud");
         let lib = &mut *self.lib;
@@ -4337,6 +4441,42 @@ impl Resample {
 
 #[cfg(test)]
 mod tests {
+    use super::{Clip, HeliEngine};
+    use std::sync::Arc;
+
+    /// The Kiowa's loop (V114): holding plays the sample at its own rate, climbing `PitchVariance`
+    /// hertz above it and descending as far below, truncated to whole hertz between.
+    #[test]
+    fn the_helicopter_loop_rides_the_filtered_collective() {
+        assert_eq!(HeliEngine::rate(22050, 400, 0.5), 22050);
+        assert_eq!(HeliEngine::rate(22050, 400, 1.0), 22450);
+        assert_eq!(HeliEngine::rate(22050, 400, 0.0), 21650);
+        // 400 × 2 × 0.3337 is 266.96, truncated to 266.
+        assert_eq!(HeliEngine::rate(22050, 400, 0.3337), 21650 + 266);
+        assert_eq!(HeliEngine::rate(22050, 0, 1.0), 22050);
+    }
+
+    /// `[Helicopter]` as `otherengine.aud` writes it, and the keys' own defaults where it does not.
+    #[test]
+    fn the_helicopter_section_reads_with_its_defaults() {
+        let clip = Arc::new(Clip { rate: 20000, channels: 1, pcm: vec![0; 4] });
+        let mut asked = Vec::new();
+        let mut lib = |n: &str| {
+            asked.push(n.to_string());
+            Some(clip.clone())
+        };
+        let text = "[Helicopter]\nEngineLoop=Engine\\Helicopter\\Engine\nPitchVariance=400\nMaxSoundDistance=700\n\
+                    MinSoundDistance=100\nDopplerFactor=1.3\nAttenuationCurve=Under\nRolloffFactor=2\n";
+        let e = HeliEngine::read(text, &mut lib);
+        assert_eq!((e.variance, e.near, e.far, e.doppler), (400, 100.0, 700.0, 1.3));
+        assert_eq!(e.pitch(1.0), 20400.0 / 20000.0);
+        assert_eq!(e.pitch(0.5), 1.0);
+        let bare = HeliEngine::read("[Helicopter]\nEngineLoop=x\n", &mut lib);
+        assert_eq!((bare.variance, bare.near, bare.far, bare.doppler), (0, 100.0, 300.0, 0.25));
+        assert!(HeliEngine::read("[biplane]\n", &mut lib).clip.is_none());
+        assert_eq!(asked, ["Engine\\Helicopter\\Engine", "x"]);
+    }
+
     /// 48 kHz read out at 48 kHz is the mix a frame late; at 96 kHz every frame twice, halfway between.
     #[test]
     fn the_resample_reads_the_mix_out() {
