@@ -104,6 +104,8 @@ jobs:
           path: openmx-ios.ipa
   beta:
     needs: [ci, web, linux, windows, ios]
+    # ios may fail outright when no macOS runner picks it up (continue-on-error doesn't cover that): go up without it
+    if: ${{ !cancelled() && needs.ci.result == 'success' && needs.web.result == 'success' && needs.linux.result == 'success' && needs.windows.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
