@@ -1,0 +1,30 @@
+# C15 flip ride from state 4 (rolling at 15 ft/s toward the first lip): gas; R1 and the stick forward on
+# the climb, back on the lip (M21's flip.pad timing), R1 held through the air: the flip over-rotates and
+# wrecks (put back), then steer both ways, brake, gas, coast.
+down cross
+sleep 45t
+down r1
+stick l 0 -1
+sleep 20t
+stick l 0 1
+sleep 6t
+stick l 0 0
+sleep 120t
+up r1
+sleep 30t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 20t
+stick l 1 0
+sleep 30t
+stick l 0 0
+sleep 30t
+up cross
+down square
+sleep 45t
+up square
+down cross
+sleep 60t
+release
+sleep 30t

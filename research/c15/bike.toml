@@ -1,0 +1,128 @@
+# C15: MX vs. ATV Unleashed's (SLUS-21104) player bike in save state 4's Free Ride, every tick, for a
+# replay of Handling::MxVsAtv. The bike object is 0x00e714e0 (vptr 0x003d0450 at +4; research/oracle.txt
+# # MD40). Decoded columns first, then the raw blocks the step reads and writes: the object, its rigid
+# body (+0xb8), node (+0xe4), collision record (+0xc8), front/rear wheel (+0x17b0/+0x17b4), engine
+# (+0x142c). play.sh adds the start trigger.
+[watch]
+name        = "c15-mxvatv-ride"
+description = "MX vs. ATV (SLUS-21104) state 4 Free Ride played from a generated tape: the bike per tick, raw"
+every       = 1
+frames      = 900
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x3fa6d8, +2 a tick
+addr = "0x3fa6d8"
+type = "u32"
+
+[[field]]
+name = "vptr"           # 0x003d0450 once the state is in
+addr = "0xe714e4"
+type = "u32"
+
+[[field]]
+name = "euler"          # +0x360 pitch, +0x364 heading, +0x368 roll
+addr = "0xe714e0 + 0x360"
+type = "f32x4"
+
+[[field]]
+name = "speed"          # +0xc38
+addr = "0xe714e0 + 0xc38"
+type = "f32"
+
+[[field]]
+name = "ground"         # +0x324 on the ground
+addr = "0xe714e0 + 0x324"
+type = "u32"
+
+[[field]]
+name = "ctl"            # +0x308..+0x314 (+0x310 brake, +0x314 gas in)
+addr = "0xe714e0 + 0x308"
+type = "f32x4"
+
+[[field]]
+name = "dpad_stick"     # +0x12a0/+0x12a4 d-pad, +0x12a8/+0x12ac stick
+addr = "0xe714e0 + 0x12a0"
+type = "f32x4"
+
+[[field]]
+name = "clutch"         # +0x12c0 clutch in, +0x12c4 reverse, +0x12c8 steer, +0x12cc front brake
+addr = "0xe714e0 + 0x12c0"
+type = "f32x4"
+
+[[field]]
+name = "trick"          # +0x14ec trick buttons (low nibble; 4 = R1 alone)
+addr = "0xe714e0 + 0x14ec"
+type = "u32"
+
+[[field]]
+name = "flip"           # +0x1194 applied, +0x1198 flipping, +0x119c active, +0x11a0 armed
+addr = "0xe714e0 + 0x1194"
+type = "bytes:16"
+
+[[field]]
+name = "wreck"          # +0x6e4 wreck count
+addr = "0xe714e0 + 0x6e4"
+type = "u32"
+
+[[field]]
+name = "pos"            # body +0x60
+addr = "0xe714e0 + 0xb8 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "vel"            # body +0x80
+addr = "0xe714e0 + 0xb8 -> 0x80"
+type = "f32x4"
+
+[[field]]
+name = "quat"           # body +0x170
+addr = "0xe714e0 + 0xb8 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "angvel"         # body +0x1c0
+addr = "0xe714e0 + 0xb8 -> 0x1c0"
+type = "f32x4"
+
+[[field]]
+name = "obj0"           # the bike object, raw, +0x0..+0xc00
+addr = "0xe714e0"
+type = "bytes:3072"
+
+[[field]]
+name = "obj1"           # +0xc00..+0x1800
+addr = "0xe714e0 + 0xc00"
+type = "bytes:3072"
+
+[[field]]
+name = "body"           # the rigid body, raw
+addr = "0xe714e0 + 0xb8 -> 0x0"
+type = "bytes:640"
+
+[[field]]
+name = "node"           # the node (+0x80 world rows)
+addr = "0xe714e0 + 0xe4 -> 0x0"
+type = "bytes:256"
+
+[[field]]
+name = "record"         # the collision record (+0x34 touching)
+addr = "0xe714e0 + 0xc8 -> 0x0"
+type = "bytes:256"
+
+[[field]]
+name = "front"          # front wheel, raw
+addr = "0xe714e0 + 0x17b0 -> 0x0"
+type = "bytes:2336"
+
+[[field]]
+name = "rear"           # rear wheel, raw
+addr = "0xe714e0 + 0x17b4 -> 0x0"
+type = "bytes:2336"
+
+[[field]]
+name = "engine"         # *(+0x142c), raw
+addr = "0xe714e0 + 0x142c -> 0x0"
+type = "bytes:512"

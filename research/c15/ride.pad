@@ -1,0 +1,20 @@
+# C15 clean ride from state 4 (rolling at 15 ft/s toward the first lip): gas over the lip with no trick,
+# then steer left and right, brake, gas, coast.
+down cross
+sleep 200t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 20t
+stick l 1 0
+sleep 30t
+stick l 0 0
+sleep 30t
+up cross
+down square
+sleep 45t
+up square
+down cross
+sleep 60t
+release
+sleep 45t
