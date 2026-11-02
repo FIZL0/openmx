@@ -130,3 +130,36 @@ fn the_discs_biplane_bays_are_flat() {
         }
     }
 }
+
+/// B6: an online seat that starts in the plane in a file bay ([`vehicle::start_lane_on`] with
+/// [`Lot::body_spot`]) stands where an offline plane taken from the same bay does at its first step:
+/// on a slope, and with `SetGroundHeight` off. A seat past the file's two keeps the port's spot, the
+/// model's origin on it, world up.
+#[test]
+fn an_online_seat_starts_where_the_offline_plane_does() {
+    let Some(mut disc) = disc() else { return };
+    let normal = Vf::new(0.5, 0.8660254, 0.0, 1.0);
+    let mut world = Flat { y: F(12.25), normal };
+    let mut lot = Lot::new(MACHINES.as_bytes(), 3, &mut |at| world.ground(at).0.y());
+    lot.lift = Some(F(LIFT));
+    let template = the_flight(&mut disc);
+    let bays: Vec<vehicle::Bay> = lot.of(Machine::Biplane).copied().collect();
+    for (player, bay) in bays.iter().enumerate() {
+        let body = lot.body_spot(bay, &mut |from| world.ground(from));
+        let mut sim = Sim::new(0);
+        vehicle::start_lane_on(&template, bay.spawn, body, &mut sim);
+        let online = sim.plane.expect("the seat's plane");
+        if player < 2 {
+            let offline = taken(template.clone(), player, &mut world);
+            assert_eq!(xyz(online.spawn.0), xyz(offline.spawn.0), "seat {player}'s body spot");
+            assert_eq!(xyz(online.spawn.1), xyz(offline.spawn.1), "seat {player}'s nose");
+            assert_eq!(xyz(online.spawn_up), xyz(offline.spawn_up), "seat {player}'s up");
+            assert_eq!(xyz(online.spawn_origin()), xyz(offline.spawn_origin()), "seat {player}'s origin");
+        } else {
+            assert_eq!(body, None, "a spot the port found has no body spot of the original's");
+            let mut port = template.clone();
+            port.reset(bay.spawn.at, bay.spawn.facing, &sim.tables.ride.acos);
+            assert_eq!((xyz(online.spawn.0), xyz(online.spawn_up)), (xyz(port.spawn.0), xyz(port.spawn_up)));
+        }
+    }
+}

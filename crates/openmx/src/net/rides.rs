@@ -23,7 +23,7 @@ use game_sim::flight::Flight;
 use game_sim::world::World;
 use game_sim::rider_contact;
 use game_sim::{Input, Sim};
-use ps2_float::F;
+use ps2_float::{F, Vf};
 
 use super::Game;
 use crate::vehicle::{self, Wanted};
@@ -406,9 +406,20 @@ pub fn spawn_marked(first: &Sim, spawn: &[u8], markers: markers::Markers) -> Res
 /// start), in [`seat_bytes`] again, for [`spawn_on`]. The state every machine is sent at the join
 /// carries the flight, so every machine seats the joiner flying from the same place.
 pub fn spawn_flying(first: &Sim, spawn: &[u8], template: &Flight, bay: vehicle::Spawn) -> Result<Vec<u8>, String> {
+    spawn_flying_on(first, spawn, template, bay, None)
+}
+
+/// [`spawn_flying`] with the body's spot and up of a file bay (B6, [`vehicle::start_lane_on`]).
+pub fn spawn_flying_on(
+    first: &Sim,
+    spawn: &[u8],
+    template: &Flight,
+    bay: vehicle::Spawn,
+    body: Option<(Vf, Vf)>,
+) -> Result<Vec<u8>, String> {
     let mut sim = first.clone();
     from_seat_bytes(&mut sim, spawn)?;
-    vehicle::start_lane(template, bay, &mut sim);
+    vehicle::start_lane_on(template, bay, body, &mut sim);
     Ok(seat_bytes(&sim))
 }
 
