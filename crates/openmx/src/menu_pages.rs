@@ -540,7 +540,7 @@ impl Menu {
                 "World Sky",
                 &WorldSky::ALL.map(WorldSky::label),
                 at(&WorldSky::ALL, s.world_sky),
-                "For combined worlds of several maps. Global keeps one sky and light everywhere; Per Map gives each map its own, blended where they meet.",
+                "For combined worlds of several maps. Global keeps one sky and fog everywhere, each map still lit by its own sun; Per Map gives each map its own sky too, blended where they meet.",
             )
             .tips(&["One sky for the whole world", "Each map its own"]),
             Row::heading("Picture"),

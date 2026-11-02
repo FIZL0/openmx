@@ -692,6 +692,15 @@ impl Looks {
         Some((crate::world::Lighting::blend(&parts)?, sky))
     }
 
+    /// The light at a world point under one sky for the whole world (V116): the sun and ambient still
+    /// the map's below, as [`Looks::at`] mixes them, since each map's ground is baked by its own sun
+    /// (a disc map's light map, a mod map's pages) and another sun darkens it and turns the shadows
+    /// against it; the fog `whole`'s. With the map whose sun it is.
+    pub fn sunlit_at(&self, x: f32, z: f32, whole: crate::world::Lighting) -> Option<(crate::world::Lighting, usize)> {
+        let (lit, over) = self.at(x, z)?;
+        Some((crate::world::Lighting { fog_color: whole.fog_color, fog_near: whole.fog_near, fog_far: whole.fog_far, ..lit }, over))
+    }
+
     /// The two skies to crossfade between at a world point (MD26), and the second's share of the
     /// two: the maps with the largest shares, the lower-numbered first, so the pair holds still across
     /// a whole join and only the share moves. Inside a map it is that map twice, with no share.
