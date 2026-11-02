@@ -11002,16 +11002,17 @@ fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
 ///
 /// - headon: bit-exact up to the nose; on the wreck's own tick the origin parts by an ulp and the
 ///   thrown chassis goes its own way. The wreck is the original's, over the bars on tick 60.
-/// - stand: the nose carries the bike on, every lane agreeing, until tick 65, when the port's head
-///   ray alone strikes a car and wrecks it (scenery, 6); the original rides on to its own head hit on
-///   93. Followed up in S191a.
+/// - stand: the nose carries the bike on, every lane agreeing, to the original's own head hit
+///   (scenery, 6) on tick 93, which the port enters on the same tick. Until S191a the port's own
+///   head-inside-a-car contact wrecked it on 65 with the head ray's end under the engine's nose.
 /// - roof: the drop, the landing on the wagon's roof, the slide back along it and the fall off its
-///   end agree on every lane up to tick 158, the wreck's tick in both; the original's is the
-///   nose-dive (8), the port's head ray strikes the car too and its scenery reason (6) stays. S191a.
+///   end agree on every lane up to tick 158, the wreck's tick in both, and both enter the nose-dive
+///   (8). The head ray strikes the car on that tick too, but the nose-dive's entry clears the record
+///   before the hit loop reads it (S191a; tests/ride.rs a_wreck_entry_clears_the_riding_record…).
 const S191_RIDES: [(&str, u64, (u64, u8), (u64, u8)); 3] = [
     ("headon", 60, (60, 1), (60, 1)),
-    ("stand", 65, (93, 6), (65, 6)),
-    ("roof", 158, (158, 8), (158, 6)),
+    ("stand", 93, (93, 6), (93, 6)),
+    ("roof", 158, (158, 8), (158, 8)),
 ];
 
 /// **S191: the train's nose and a wagon's roof, in the original and replayed.**

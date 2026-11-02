@@ -1685,9 +1685,10 @@ pub struct Contact {
 /// first is not wrecked by scenery further down the list. `touched` is the record's own "anything at
 /// all", without which the list is not read. `mass` and `height` are the bike's chassis'.
 ///
-/// The original runs this after the rest of [`wreck_test`] and not instead of it: both can enter a
-/// wreck on one substep, and the entry stores its reason unconditionally, so when both answer, this
-/// one's is the reason that stays. [`wreck_test`]'s caller composes them that way.
+/// The original runs this after the rest of [`wreck_test`], and only reads the list when that let the
+/// bike go: a wreck's entry takes the riding bike's collision record out of the world, clearing it
+/// (count and touched flags) as it does, so `touched` is false by the time this is asked (S191a).
+/// [`wreck_test`]'s caller composes them that way: this is not asked once a landing clause answered.
 pub fn hit_wreck(p: &Params, air: &mut Air, touched: bool, fifty: bool, mass: F, height: F,
                  contacts: &[Contact]) -> Option<Wreck> {
     if !touched {

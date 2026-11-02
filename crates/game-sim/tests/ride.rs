@@ -4088,6 +4088,10 @@ fn a_held_turn_rides_like_the_originals() {
 fn stacked(n: usize, rise: f32) -> game_sim::Sim {
     let mut sim = game_sim::Sim::new(0x5354);
     sim.rider.sense.wrecks_enabled = true;
+    // Placed in the air, the stand-in bike's airborne clause answers `NoseDive` on its first frame
+    // (`Sim::new` says why), and a landing clause's wreck is asked before the hit (S191a), so the
+    // stack rides with that clause off: the touch is what these are about.
+    sim.rider.sense.air_wrecks = false;
     if n > 1 {
         let top = Vf::new(SPAWN.x(), SPAWN.y() + rise * (n - 1) as f32, SPAWN.z(), 1.0);
         sim.rider.ride.place(top, game_sim::stock::FACING);
@@ -4096,6 +4100,7 @@ fn stacked(n: usize, rise: f32) -> game_sim::Sim {
     for i in 1..n {
         let at = Vf::new(SPAWN.x(), SPAWN.y() + rise * (n - 1 - i) as f32, SPAWN.z(), 1.0);
         let mut r = Rider::new(&sim.phy, mounts, at, game_sim::stock::FACING, Set::default());
+        r.sense.air_wrecks = false;
         r.ride.chassis.vel = Vf::new(i as f32, 0.0, 2.0 * i as f32, 0.0);
         let phy = (*sim.phy).clone();
         assert_eq!(sim.add_player(phy, r), i);
@@ -6416,3 +6421,41 @@ fn the_125_launches_as_the_original() {
     );
     assert!(fresh[20].speed > 1.4 * ours[20].speed, "the launch ramp is what made S100's port run quick");
 }
+
+/// **A wreck's entry clears the riding bike's collision record** (S191a), so the wreck test's hit loop,
+/// which runs after its landing clauses and only reads the list while the record's "anything touched"
+/// (`+0x40`) is set, finds nothing once a landing clause has entered a wreck. The roof ride of S191's
+/// images, its record given a touched flag and one entry, then the bike's own entry (`vt+0xfc`, the
+/// player's, which runs the base vehicle's) entered with the nose-dive reason, run in the original's
+/// code: the record comes out with no count and no touched flag. So the port asks
+/// [`game_sim::air::hit_wreck`] only when no landing clause answered, and a nose-dive with the head
+/// on a car stays a nose-dive (S191's roof, tick 158).
+#[test]
+fn a_wreck_entry_clears_the_riding_record_before_the_hit_loop() {
+    use ps2_oracle::{Ee, Kit, addr, skip};
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let image = "s191-roof.eeMemory.bin";
+    let path = [kit.root.join("context/states").join(image), kit.ctx("states").join(image)]
+        .into_iter()
+        .find(|p| p.exists());
+    let Some(path) = path else {
+        println!("no {image} — tests/replay.rs's S191 comment says how it is made");
+        return;
+    };
+    let mut ee = Ee::from_ram(path).expect("the RAM image");
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let mut bike = ee.u32_at(addr("game_manager").unwrap());
+    for off in [0x34, 0x34, 0x8, 0x8, 0x8, 0x0] {
+        bike = ee.u32_at(bike + off);
+    }
+    assert_eq!(ee.u32_at(bike), 2, "the rider at {bike:#x}");
+    let record = ee.u32_at(bike + 0x7d0);
+    assert_eq!(ee.u32_at(bike + 0x748), 0, "the image's bike is riding");
+    ee.set_u32(record + 0x40, 1);
+    ee.set_u32(record + 0x100, 1);
+    let entry = ee.u32_at(ee.u32_at(bike + 0x48) + 0xfc);
+    ee.call(entry, &[bike as u64, 8], &[], 50_000_000);
+    assert_eq!(ee.u32_at(bike + 0x748), 8, "the entry stores its reason");
+    assert_eq!((ee.u32_at(record + 0x40), ee.u32_at(record + 0x100)), (0, 0), "the record's touched flag and count after the entry");
+}
+

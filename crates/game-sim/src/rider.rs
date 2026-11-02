@@ -1056,17 +1056,18 @@ impl Rider {
                 if !allowed.landing {
                     return None;
                 }
-                // Both can enter a wreck on one substep, and the entry stores its reason without
-                // looking, so the hit's — asked second — is the one that stays.
+                // The hit is asked second, and only when no landing clause entered a wreck: the
+                // entry takes the riding bike's collision record out of the world, and clears it as
+                // it does, so the hit loop's "anything touched" gate is shut (S191a).
                 let landed = air::wreck_test_in(&p.air, air, &chassis, &step, &loads, allowed.air);
                 // Not the original's (S161), and asked only when the original's own test let the
                 // landing go: a bike landed facing back against its way bails.
                 let landed = landed.or_else(|| allowed.backwards.then(|| air::backwards_landing(&p.air, air, &chassis, forward)).flatten());
                 // A 50cc bike's lower limit when the shell said the file was one (S157): its body
                 // rays' own scenery entries carry the rays that reach above it.
-                let hit = air::hit_wreck(&p.air, air, touched, *fifty, mass, height, &hits);
+                let hit = if landed.is_some() { None } else { air::hit_wreck(&p.air, air, touched, *fifty, mass, height, &hits) };
                 let spun = spun.filter(|_| allowed.air || !spun_aloft);
-                hit.or(landed).or(spun).map(Wreck::from)
+                landed.or(hit).or(spun).map(Wreck::from)
             },
             // The screen's page is up from the request until its fade back in is over.
             || page.up(),
