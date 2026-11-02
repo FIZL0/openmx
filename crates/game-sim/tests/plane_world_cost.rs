@@ -316,6 +316,21 @@ impl World for Whole {
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
         self.0.solid(bundle, record)
     }
+    fn wheel_surface(&mut self, at: Vf) -> Option<u8> {
+        self.0.wheel_surface(at)
+    }
+    fn groups(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
+        self.0.groups(bundle, record)
+    }
+    fn crowded(&mut self, centre: Vf, radius: F) -> bool {
+        self.0.crowded(centre, radius)
+    }
+    fn keeps(&mut self, at: Vf) -> bool {
+        self.0.keeps(at)
+    }
+    fn moving(&mut self) -> Option<&mut Props> {
+        self.0.moving()
+    }
     fn area(&self) -> Option<Area> {
         self.0.area()
     }
@@ -420,5 +435,132 @@ fn a_wrecks_frame_asks_a_world_of_tiles_only_for_the_shapes_near_it() {
         a.bike.body.position, a.resting
     );
     assert!(touched > 10, "the wreck must come down among the posts ({touched} frames touching)");
+    assert!(widest > 0 && widest * 8 < every, "a near set must be a corner of the world: {widest} of {every}");
+}
+
+/// The ragdoll's kit as the shell builds it (`tests/ragdoll_trees.rs`'s `ride_kit`), the wreck bike's
+/// physics part and the rider's wreck limits.
+fn ride_kit() -> Option<(game_sim::ragdoll_ride::Kit, phy::Part, phy::Wrecks)> {
+    use game_render::disc::Disc;
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return None;
+        }
+    };
+    let names: Vec<String> =
+        disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let rider_name = names.iter().filter(|n| n.to_ascii_lowercase().ends_with("thq1.res")).min_by_key(|n| n.len())?.clone();
+    let res = disc.res(&rider_name).expect("the rider archive opens");
+    let rider_file = res.read_suffix("mrider.phy").expect("the rider's archive carries mrider.phy");
+    let mut body = game_render::rider::Body::load(
+        vec![disc.res(&rider_name).expect("the rider archive opens")],
+        "thq1",
+        game_render::rider::Sex::Male,
+        "",
+        &[],
+        game_sim::motion::Params::default(),
+    )
+    .expect("the rider's body loads");
+    let model = game_render::psg::Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model"))
+        .expect("the model parses");
+    let doll = body.ragdoll_rig(&model, &rider_file).expect("every part names a node");
+    let wreck_bike = names
+        .iter()
+        .find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok()))
+        .expect("an archive carries wreckbike.phy");
+    let mut kit = game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig);
+    let col = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbikef.col").ok()));
+    kit.bike = col.as_deref().and_then(game_sim::ragdoll_ride::bike_sphere);
+    kit.bike_mesh = col.as_deref().and_then(game_sim::ragdoll_scene::Bike::parse).map(std::sync::Arc::new);
+    assert!(kit.bike.is_some() && kit.bike_mesh.is_some(), "an archive carries wreckbikef.col");
+    Some((kit, phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"), phy::Wrecks::read_bytes(&rider_file)))
+}
+
+/// What a wrecked rider is, in full (`Debug`'s every digit), but for its search's bookkeeping: the
+/// props its bones' search lists are named by their place in the set they were gathered in
+/// (`search.centre`'s), another number in a near set than in the whole world's, so they are named
+/// here by where they stand.
+fn downed(doll: &game_sim::ragdoll_ride::Down, set: Option<&Props>) -> String {
+    let mut d = doll.clone();
+    let listed: Vec<_> = std::mem::take(&mut d.statics.props).into_iter().map(|i| set.expect("a set to list from").props[i].to_world).collect();
+    format!("{d:?} listed {listed:?}")
+}
+
+/// **A wrecked rider's bones ask a world of tiles only for the shapes near them** (V112): the rider
+/// thrown off a bike wrecked at `speed` ft/s into the posts, as in
+/// [`a_wrecks_frame_asks_a_world_of_tiles_only_for_the_shapes_near_it`], their ragdoll stepped each
+/// frame after the bike over a world of 3 rows of posted tiles and over the same rows handing the
+/// whole world's shapes to every search (the bones' search before this task): the same rider each
+/// frame ([`downed`]) and the same bike, and the whole world's set never asked for; and again 9 rows
+/// deep. (3 rows and 9 do not throw the same rider: the bones' tree is laid over the whole terrain's
+/// box, and its cells bound the search.) Each start puts the throw across a near square's edge
+/// (`z` 640), so a list kept from one square is read on the other side of it.
+#[test]
+fn a_wrecked_riders_bones_ask_a_world_of_tiles_only_for_the_shapes_near_them() {
+    let Some((kit, part, wrecks)) = ride_kit() else { return };
+    let reach = kit.spheres.iter().fold(F::ZERO, |r, s| r.max(s.radius));
+    let (mut listing, mut touching, mut across, mut across_close, mut widest, mut every) = (0, 0, 0, 0, 0, 0);
+    for rows in [3, 9] {
+        // Into the post at z 618 and on to 658; the last five strike the one at 658 with a list kept from
+        // before z 640, so a list read in the wrong square's set parts from the whole world's.
+        for (x, z, speed, spin) in [
+            (207.0f32, ROW + 41.0, 40.0f32, 1.5f32),
+            (205.0, ROW + 60.0, 30.0, -0.8),
+            (211.0, ROW + 35.0, 55.0, 0.4),
+            (207.0, ROW + 69.0, 30.0, 0.0),
+            (207.0, ROW + 71.0, 45.0, 0.0),
+            (208.0, ROW + 72.0, 25.0, 0.5),
+            (206.0, ROW + 68.0, 35.0, -0.5),
+            (207.0, ROW + 66.0, 60.0, 0.0),
+        ] {
+            let y = relief(f64::from(x), f64::from(z)) as f32 + 3.0;
+            let mut ride = game_sim::ride::Ride::default();
+            ride.chassis.quat = Vf::new(0.0, 0.0, 0.0, 1.0);
+            ride.origin = Vf::new(x, y, z, 1.0);
+            ride.chassis.vel = Vf::new(0.0, 0.0, speed, 0.0);
+            ride.chassis.ang_vel = Vf::new(0.0, spin, 0.0, 0.0);
+            let begin = || game_sim::ride::Crash::begin(&ride, game_sim::trick::Wreck(5), &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+            let mut near = Counted { world: world(rows), asked: Asked::default() };
+            let mut whole = Whole(Counted { world: world(rows), asked: Asked::default() });
+            every = every.max(near.world.every_shape().props.len());
+            let (mut ca, mut cc) = (begin(), begin());
+            let enter = |c: &game_sim::ride::Crash, w: &mut dyn World| {
+                game_sim::ragdoll_ride::Down::enter(&kit, &ride.transform(), c, c.throw, 5, &wrecks, &mut game_sim::rng::Rng::default(), w)
+            };
+            let mut a = enter(&ca, &mut near);
+            let mut c = enter(&cc, &mut whole);
+            for frame in 0..150 {
+                near.asked = Asked::default();
+                ca.step(DT, &part, &wrecks, &mut near);
+                cc.step(DT, &part, &wrecks, &mut whole);
+                a.step(&kit, DT, &ca, &mut near);
+                c.step(&kit, DT, &cc, &mut whole);
+                let at = format!("{rows} rows, {x},{z} frame {frame}");
+                let ra = downed(&a, near.world.wooded_near(a.search.centre).1);
+                let rc = downed(&c, whole.0.world.wooded().1);
+                assert_eq!(ra, rc, "{at}: the rider over the near set parted from the rider over the whole world");
+                assert_eq!(wrecked(&ca, near.world.wooded_near(ca.bike.origin()).1), wrecked(&cc, whole.0.world.wooded().1), "{at}: the bike");
+                for whole in ["collision", "wooded", "heightfield"] {
+                    assert!(!near.asked.calls.contains_key(whole), "{at}: the wreck asked for the whole world's `{whole}`");
+                }
+                let stood = a.search.stood.unwrap_or_default();
+                let set = near.world.wooded_near(a.search.centre).1.map_or(&[][..], |p| &p.props[..]);
+                let close = game_sim::ragdoll_scene::StillProp::near(set, &a.statics, stood, reach);
+                listing += usize::from(!a.statics.props.is_empty());
+                touching += usize::from(!close.is_empty() && a.contacts.iter().any(|t| t.scene));
+                let crossed = a.search.built && near.world.near_set(stood) != near.world.near_set(a.search.centre);
+                across += usize::from(crossed);
+                across_close += usize::from(crossed && !close.is_empty());
+                widest = widest.max(near.asked.widest);
+            }
+            println!("{rows} rows, {x},{z}: the main bone ended at {:?}", a.main().position);
+        }
+    }
+    println!("{listing} frames listing posts, {touching} with a post in a sphere's reach and a bone on the scene, {across} kept across a square's edge ({across_close} with a post in reach); the widest near set {widest} of {every} shapes");
+    assert!(listing > 30, "the bones' search must list posts ({listing} frames)");
+    assert!(touching > 0, "a bone must come to a post ({touching} frames)");
+    assert!(across_close > 0, "a kept list must be read across a square's edge with a post in reach ({across_close} frames)");
     assert!(widest > 0 && widest * 8 < every, "a near set must be a corner of the world: {widest} of {every}");
 }

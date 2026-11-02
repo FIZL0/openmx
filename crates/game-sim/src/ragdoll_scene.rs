@@ -360,7 +360,8 @@ const SEARCH_CAPACITY: usize = 128;
 /// walk's order ([`group_distance`]); a plant is filed in the tree after the props.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Statics {
-    /// The listed props, by their index in the world's set ([`crate::world::World::collision`]), in
+    /// The listed props, by their index in the world's set ([`crate::world::World::collision`]); on
+    /// a world of tiles the near set at the search's centre (V112, [`crate::world::World::wooded_near`]), in
     /// the order the tree's walk met them. An index at or past the set's length is a plant: the
     /// group that many past it in the world's trees ([`crate::world::World::wooded`]).
     pub props: Vec<usize>,
