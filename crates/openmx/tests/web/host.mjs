@@ -37,6 +37,8 @@ globalThis.openmx = {
   queued: () => 0,
   file_read: () => undefined,
   file_write: () => {},
+  file_tree: () => '',
+  file_size: () => -1,
   frame: () => new Promise(() => {}),
   // P193's: no newer build, a first visit, nowhere to reload
   latest: () => '',

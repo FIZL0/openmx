@@ -50,7 +50,7 @@ pub struct ModTrack {
 impl ModTrack {
     /// The folder, as an archive every loader reads.
     pub fn open(&self) -> Result<Res, String> {
-        Res::folder(&self.dir)
+        crate::files::folder(&self.dir)
     }
 
     /// Put `mod.json`'s spawn into the scene the simulation reads, converted as the scene converts
@@ -92,8 +92,8 @@ pub struct Listed {
 pub fn scan(mods: &Path) -> Scan {
     let mut out = Scan::default();
     let dir = mods.join("tracks");
-    let Ok(list) = std::fs::read_dir(&dir) else { return out };
-    let mut folders: Vec<PathBuf> = list.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    let Ok(list) = crate::files::list(&dir) else { return out };
+    let mut folders: Vec<PathBuf> = list.into_iter().filter(|l| l.dir).map(|l| l.path).collect();
     folders.sort();
     for folder in folders {
         let label = folder.file_name().map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into_owned());
@@ -109,7 +109,7 @@ pub fn scan(mods: &Path) -> Scan {
 /// One track mod by its id, checked as [`scan`] checks it, and its folder for its one scene.
 pub fn find(mods: &Path, id: &str) -> Result<ModTrack, String> {
     let folder = mods.join("tracks").join(id);
-    if !valid_id(id) || !folder.is_dir() {
+    if !valid_id(id) || !crate::files::is_dir(&folder) {
         return Err(format!("no track mod {id} in {}", mods.join("tracks").display()));
     }
     check(&folder)?.ok_or_else(|| format!("{}: not a track mod", folder.display()))
@@ -119,12 +119,12 @@ pub fn find(mods: &Path, id: &str) -> Result<ModTrack, String> {
 /// kind `music`, its id the folder's and its name not empty, and how many entries its `songs` list
 /// has. Only listed for the Mods page to switch on and off; the songs are MD7's to play.
 pub fn music_packs(mods: &Path) -> Vec<(String, String, usize)> {
-    let Ok(list) = std::fs::read_dir(mods.join("music")) else { return Vec::new() };
+    let Ok(list) = crate::files::list(mods.join("music")) else { return Vec::new() };
     let mut out: Vec<(String, String, usize)> = list
-        .flatten()
+        .into_iter()
         .filter_map(|e| {
-            let id = e.file_name().into_string().ok()?;
-            let text = std::fs::read_to_string(e.path().join("mod.json")).ok()?;
+            let id = e.path.file_name()?.to_str()?.to_string();
+            let text = crate::files::read_to_string(e.path.join("mod.json")).ok()?;
             let json = Json::parse(&text).ok()?;
             let string = |key: &str| json.get(key).and_then(Json::str);
             let name = string("name")?.trim();
@@ -145,7 +145,7 @@ pub fn source_games(mods: &Path, ids: &[String]) -> Vec<(String, String)> {
     ids.iter()
         .filter(|id| valid_id(id))
         .filter_map(|id| {
-            let text = std::fs::read_to_string(mods.join("tracks").join(id).join("mod.json")).ok()?;
+            let text = crate::files::read_to_string(mods.join("tracks").join(id).join("mod.json")).ok()?;
             let json = Json::parse(&text).ok()?;
             let game = json.get("source")?.get("game")?.str()?.trim();
             (!game.is_empty()).then(|| (id.clone(), game.to_string()))
@@ -161,7 +161,7 @@ pub fn categories(mods: &Path, ids: &[String]) -> Vec<(String, String)> {
     ids.iter()
         .filter(|id| valid_id(id))
         .filter_map(|id| {
-            let text = std::fs::read_to_string(mods.join("tracks").join(id).join("mod.json")).ok()?;
+            let text = crate::files::read_to_string(mods.join("tracks").join(id).join("mod.json")).ok()?;
             let json = Json::parse(&text).ok()?;
             Some((id.clone(), category_word(json.get("category")?.str()?)?))
         })
@@ -188,7 +188,7 @@ pub fn valid_id(id: &str) -> bool {
 /// and the folder's listing for its one `.scn` (no file in it is read).
 fn check(folder: &Path) -> Result<Option<ModTrack>, String> {
     let Some(mut t) = listing(folder)? else { return Ok(None) };
-    let res = Res::folder(folder)?;
+    let res = crate::files::folder(folder)?;
     let scenes: Vec<&str> = res
         .entries()
         .iter()
@@ -210,7 +210,7 @@ fn check(folder: &Path) -> Result<Option<ModTrack>, String> {
 fn listing(folder: &Path) -> Result<Option<ModTrack>, String> {
     let name = folder.file_name().and_then(|n| n.to_str()).ok_or("the folder's name is not UTF-8")?;
     let path = folder.join("mod.json");
-    let text = std::fs::read(&path).map_err(|e| format!("mod.json: {e}"))?;
+    let text = crate::files::read(&path).map_err(|e| format!("mod.json: {e}"))?;
     let text = String::from_utf8(text).map_err(|_| "mod.json is not UTF-8".to_string())?;
     let json = Json::parse(&text).map_err(|e| format!("mod.json: {e}"))?;
     let field = |key: &str| json.get(key).ok_or_else(|| format!("mod.json has no {key}"));

@@ -3477,7 +3477,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     let track_res = match (&modded, &track_member) {
         (Some(t), _) => {
-            println!("mods: {} ({}) from {}", t.id, t.name, t.dir.display());
+            mods_line(format!("mods: {} ({}) from {}", t.id, t.name, t.dir.display()));
             t.open()?
         }
         (None, Ok(member)) => disc.res(member)?,
@@ -9908,13 +9908,22 @@ fn mod_tracks(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, Stri
     let Some(folder) = mods_folder(args, dir, on) else { return Vec::new() };
     let scan = track_mods::scan(&folder);
     for line in &scan.log {
-        println!("{line}");
+        mods_line(line.clone());
     }
     let worlds = worlds::listed(&folder);
     if !scan.tracks.is_empty() || !worlds.is_empty() {
-        println!("mods: {} tracks, {} worlds", scan.tracks.len(), worlds.len());
+        mods_line(format!("mods: {} tracks, {} worlds", scan.tracks.len(), worlds.len()));
     }
     scan.tracks.into_iter().map(|t| (t.id, t.name)).chain(worlds).collect()
+}
+
+/// A `mods:` line: standard output on the desktop; in the browser, whose standard output goes
+/// nowhere, the page's console (P217: the installed track listed, and ridden, in headless chromium).
+fn mods_line(line: String) {
+    #[cfg(not(target_arch = "wasm32"))]
+    println!("{line}");
+    #[cfg(target_arch = "wasm32")]
+    crate::host_say(&line);
 }
 
 /// The music packs in the same folder as [`mod_tracks`]' (P122), for the Mods page.

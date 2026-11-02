@@ -9,7 +9,7 @@
 //! comes, and only a zip of the listed size and sha256 is opened. Then the *Mods are data only*
 //! checks: every entry a plain path inside the mod with a data extension ([`EXTENSIONS`]), no link,
 //! no duplicate, the counts and sizes measured while inflating ([`MAX_ENTRIES`], [`MAX_FILE`],
-//! [`MAX_TOTAL`]), its `mod.json` the store's id and kind, and on the desktop the staged copy read by
+//! [`MAX_TOTAL`]), its `mod.json` the store's id and kind, and the staged copy (P217: the browser's too) read by
 //! the shell's own parsers for its kind (`track_mods`, `worlds`, `trick_packs`, `textures`). Only then does it go
 //! into `mods/<kind>/<id>/`, with `store.json` beside it ([`Stamp`]). A refused mod leaves nothing.
 //!
@@ -618,16 +618,19 @@ pub fn check_mod_json(b: &[u8], meta: &Meta) -> Result<(), String> {
 
 /// The staged copy in `stage` (its `<kind folder>/<id>/`) read the way the shell reads its kind, as
 /// hostile input: a track's mod.json and its one scene, a world's pieces, a trick pack's tables, a
-/// music pack's listing, a texture pack's key-named PNGs. The browser's build has none of the shell's mods readers, and checks the zip
-/// and `mod.json` alone.
-#[cfg(not(target_arch = "wasm32"))]
+/// music pack's listing, a texture pack's key-named PNGs. The browser's build (P217) reads its OPFS
+/// stage through [`crate::files`] with the same readers, but for a texture pack, which the page has no
+/// reader of: that is checked by the zip and `mod.json` alone.
 pub fn parse_check(stage: &Path, kind: Kind, id: &str) -> Result<(), String> {
     match kind {
         Kind::Track => track_mods::find(stage, id).map(|_| ()),
         Kind::World => crate::worlds::find(stage, id).map(|_| ()),
         Kind::Tricks => crate::trick_packs::by_id(stage, id).map(|_| ()),
         Kind::Music => track_mods::music_packs(stage).iter().any(|p| p.0 == id).then_some(()).ok_or_else(|| "not a music pack the shell reads".into()),
+        #[cfg(not(target_arch = "wasm32"))]
         Kind::Textures => crate::textures::pack_at(&stage.join("textures").join(id), &format!("textures/{id}")).map(|_| ()),
+        #[cfg(target_arch = "wasm32")]
+        Kind::Textures => Ok(()),
         Kind::Other => Err("a kind this build does not know".into()),
     }
 }
@@ -1381,26 +1384,44 @@ impl Store {
         Ok(d)
     }
 
-    /// The checked zip into OPFS `mods/<folder>/<id>/`, a file at a time; a failure takes the folder
-    /// out again. An update's old copy goes first: OPFS cannot rename a folder into place.
+    /// The checked zip into OPFS `mods/<folder>/<id>/`, a file at a time: unpacked into
+    /// `mods/.store-<id>/` first and read there by the shell's parsers ([`parse_check`], P217), as the
+    /// desktop's is, then copied into place — OPFS cannot rename a folder, so an update's old copy goes
+    /// first. A failure takes the stage, and a half-copied folder, out again.
     async fn unpack(&self, zip: &Download, e: &Entry, folder: &str, stamp: &Stamp) -> Result<(), String> {
         let id = &e.meta.id;
         let mut read = |at: u64, n: usize| crate::web_host::store_read(&zip.0, at, n);
         let dir = ZipDir::read(zip.1, &mut read)?;
         dir.check_mod_json(&mut read, &e.meta)?;
-        let target = format!("mods/{folder}/{id}");
-        let _ = crate::web_host::store_drop(&target).await;
-        self.web_record(None, id, folder);
-        let got = async {
+        let stage = format!("mods/.store-{id}");
+        let staged = format!("{stage}/{folder}/{id}");
+        let _ = crate::web_host::store_drop(&stage).await;
+        let checked = async {
             let mut total = 0;
             for f in &dir.files {
                 let b = dir.file(f, MAX_TOTAL - total, &mut read)?;
                 total += b.len() as u64;
+                crate::web_host::store_put(&format!("{staged}/{}", f.name), &b).await?;
+            }
+            parse_check(Path::new(&stage), e.meta.kind, id)
+        }
+        .await;
+        if let Err(err) = checked {
+            let _ = crate::web_host::store_drop(&stage).await;
+            return Err(err);
+        }
+        let target = format!("mods/{folder}/{id}");
+        let _ = crate::web_host::store_drop(&target).await;
+        self.web_record(None, id, folder);
+        let got = async {
+            for f in &dir.files {
+                let b = crate::files::read(format!("{staged}/{}", f.name)).map_err(|err| format!("{}: {err}", f.name))?;
                 crate::web_host::store_put(&format!("{target}/{}", f.name), &b).await?;
             }
             crate::web_host::store_put(&format!("{target}/{STAMP}"), &serde_json::to_vec_pretty(stamp).unwrap_or_default()).await
         }
         .await;
+        let _ = crate::web_host::store_drop(&stage).await;
         match got {
             Ok(()) => {
                 self.web_record(Some(stamp), id, folder);

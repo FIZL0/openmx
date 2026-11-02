@@ -96,6 +96,28 @@ const files = new Map();
 let saving = Promise.resolve();
 const FILES = 'files';
 const fileKey = path => path.replace(/^\/opfs\//, '').replace(/^\.\//, '');
+// The installed mods (P217): every file of OPFS `mods/`, by path ("mods/tracks/<id>/mod.json"), as a File the shell
+// reads through FileReaderSync when it asks for it — listed before the shell starts, and kept in step as the store puts
+// and drops a mod's files, so its track select, trick packs and music read what the store installed.
+const mods = new Map();
+const isMod = key => key.startsWith('mods/');
+function modBytes(key) {
+  const f = mods.get(key);
+  if (!f) return undefined;
+  try {
+    return new Uint8Array(new FileReaderSync().readAsArrayBuffer(f));
+  } catch {
+    return undefined;
+  }
+}
+// Every file under the folder `path`, `<path under it>\t<size>` a line, of the shell's files and the mods.
+function fileTree(path) {
+  const top = fileKey(path).replace(/\/+$/, '') + '/';
+  const out = [];
+  for (const [key, b] of files) if (key.startsWith(top)) out.push(`${key.slice(top.length)}\t${b.length}`);
+  for (const [key, f] of mods) if (key.startsWith(top)) out.push(`${key.slice(top.length)}\t${f.size}`);
+  return out.join('\n');
+}
 
 globalThis.openmx = {
   disc_size: () => disc.size,
@@ -137,12 +159,20 @@ globalThis.openmx = {
     return before ?? undefined;
   },
   reload: () => postMessage({ reload: true }),
-  file_read: path => files.get(fileKey(path)),
+  file_read: path => {
+    const key = fileKey(path);
+    return isMod(key) ? modBytes(key) : files.get(key);
+  },
   file_write: (path, bytes) => {
     const key = fileKey(path);
     if (bytes) files.set(key, Uint8Array.from(bytes));
     else files.delete(key);
     saving = saving.then(() => store(key, bytes)).catch(e => console.log(`openmx: ${key}: ${e}`));
+  },
+  file_tree: path => fileTree(path),
+  file_size: path => {
+    const key = fileKey(path);
+    return (isMod(key) ? mods.get(key)?.size : files.get(key)?.length) ?? -1;
   },
   // The mod store (P198): a download streamed into OPFS `store/` through a sync access handle (B204, B358) and read
   // back a piece at a time, and an installed mod's files written into OPFS `mods/`.
@@ -252,16 +282,34 @@ async function storePut(path, bytes) {
   } finally {
     h.close();
   }
+  mods.set(path, await file.getFile());
 }
 
 // A folder of OPFS `mods/` out, all of it; one not there is out already.
 async function storeDrop(path) {
   const parts = path.split('/');
   const name = parts.pop();
+  for (const key of [...mods.keys()]) if (key === path || key.startsWith(`${path}/`)) mods.delete(key);
   try {
     await (await folder(parts)).removeEntry(name, { recursive: true });
   } catch (e) {
     if (e?.name !== 'NotFoundError') throw e;
+  }
+}
+
+// Every file of OPFS `mods/` listed (`mods`), before the shell reads any.
+async function loadMods() {
+  mods.clear();
+  const walk = async (dir, at) => {
+    for await (const [name, h] of dir.entries()) {
+      if (h.kind === 'directory') await walk(h, `${at}/${name}`);
+      else mods.set(`${at}/${name}`, await h.getFile());
+    }
+  };
+  try {
+    await walk(await (await opfs()).getDirectoryHandle('mods'), 'mods');
+  } catch {
+    // no mods installed, or no OPFS
   }
 }
 
@@ -391,6 +439,7 @@ async function start(file, api, args, phone) {
   }
   disc = opened;
   await loadFiles();
+  await loadMods();
   const glue = await game();
   glue.openmx_phone(!!phone);
   postMessage({ started: true });
