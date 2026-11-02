@@ -534,6 +534,11 @@ impl Mixer {
         self.voices.iter().find(|v| v.id == id && !v.stopping).map(|v| v.play.gain)
     }
 
+    /// The pitch a playing voice was last set to (V114).
+    pub fn pitch_of(&self, id: VoiceId) -> Option<f32> {
+        self.voices.iter().find(|v| v.id == id && !v.stopping).map(|v| v.play.pitch)
+    }
+
     pub fn playing(&self, id: VoiceId) -> bool {
         self.progress(id).is_some()
     }
@@ -2174,7 +2179,6 @@ impl PlaneNote {
 /// keyed like the plane's. The helicopter's sound setup reads the section with the keys' own defaults
 /// and starts the loop at once, placed on the body and following it; its rate is read off the
 /// controller's filtered collective every frame ([`HeliEngine::rate`]). Its volume does not move.
-#[allow(dead_code)] // run once a Kiowa is flown (P216)
 #[derive(Clone, Debug, Default)]
 pub struct HeliEngine {
     pub clip: Option<Arc<Clip>>,
@@ -2187,7 +2191,6 @@ pub struct HeliEngine {
     pub doppler: f32,
 }
 
-#[allow(dead_code)]
 impl HeliEngine {
     pub fn read(text: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> HeliEngine {
         let s = ini::parse(text);
@@ -2220,14 +2223,12 @@ impl HeliEngine {
 
 /// The Kiowa's engine playing: its one voice, started the first frame and stopped by
 /// [`HeliNote::silence`].
-#[allow(dead_code)] // run once a Kiowa is flown (P216)
 #[derive(Default)]
 pub struct HeliNote {
     voice: Option<VoiceId>,
     ear: Option<[f32; 3]>,
 }
 
-#[allow(dead_code)]
 impl HeliNote {
     /// One frame: `c` is the controller's filtered collective (`game_sim::kiowa::Commands::filtered`),
     /// `at` and `vel` the body's place and velocity, for the distance and the Doppler shift.
@@ -2252,6 +2253,37 @@ impl HeliNote {
             mixer.stop(v);
         }
         self.ear = None;
+    }
+
+    pub fn voice(&self) -> Option<VoiceId> {
+        self.voice
+    }
+}
+
+/// What the Kiowa's sounds read in a tick, after the tick (V114): the controller's filtered
+/// collective, where the body is and how fast it goes, and what its wreck clank reads.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeliFrame {
+    /// `game_sim::kiowa::Commands::filtered`: 1 climbing, ½ holding, 0 descending.
+    pub collective: f32,
+    pub at: [f32; 3],
+    pub vel: [f32; 3],
+    /// The wreck word, the collision record's touching flag and the body's shock peak. The wreck
+    /// stops the loop and the put-back starts it again, as the plane's (the helicopter's wreck calls
+    /// the loop's stop slot, its unwreck the start slot).
+    pub crash: PlaneCrash,
+}
+
+impl HeliFrame {
+    /// The flown helicopter's, off its flight and its ride after the tick.
+    pub fn of(k: &game_sim::kiowa::Kiowa, r: &game_sim::kiowa::Ride, touching: bool) -> HeliFrame {
+        let (p, v, peak) = (r.body.position, r.body.velocity, r.body.shock_peak);
+        HeliFrame {
+            collective: k.commands.filtered.0,
+            at: [p.x(), p.y(), p.z()],
+            vel: [v.x(), v.y(), v.z()],
+            crash: PlaneCrash { wrecked: r.crash.reason != 0, touching, impulse: length([peak.x(), peak.y(), peak.z()]) },
+        }
     }
 }
 
@@ -3307,6 +3339,8 @@ pub struct SeatFrame {
     pub plane: Option<(f32, [f32; 3])>,
     /// What the plane's wreck clank reads (P164), while in the plane.
     pub crash: PlaneCrash,
+    /// In the Kiowa (V114): what its engine loop and its wreck clank read.
+    pub heli: Option<HeliFrame>,
     /// What the bike's wreck clank reads (P144).
     pub bike: BikeCrash,
     /// The plane's wheels touched down this tick (P146): the body's speed then.
@@ -3330,6 +3364,8 @@ pub struct SeatSound {
     pub bike: Arc<BikeSounds>,
     pub engine: Engine,
     plane: PlaneNote,
+    /// The Kiowa's engine loop (V114).
+    heli: HeliNote,
     pub clank: WreckClank,
     /// The bike's `[Wreck]` clank (P144), an emitter of its own.
     pub bike_clank: WreckClank,
@@ -3358,6 +3394,7 @@ impl SeatSound {
             bike,
             engine: Engine::new(seed),
             plane: PlaneNote::default(),
+            heli: HeliNote::default(),
             clank: WreckClank::default(),
             bike_clank: WreckClank::default(),
             tires: TireTouchdown::default(),
@@ -3378,6 +3415,7 @@ impl SeatSound {
     pub fn voices(&self) -> Vec<VoiceId> {
         let mut out: Vec<VoiceId> = self.engine.voices().collect();
         out.extend(&self.plane.voices);
+        out.extend(self.heli.voice());
         out.extend(self.tires.voice());
         out.extend(self.edge.voices());
         out.extend(self.drive_on.voice());
@@ -3403,6 +3441,10 @@ pub struct Sound {
     pub rider: RiderSounds,
     pub world: WorldSounds,
     pub plane: LoopEngine,
+    /// `otherengine.aud`'s `[Helicopter]` (V114).
+    pub heli: HeliEngine,
+    /// `machine.aud`'s `[helicopterWreck]` (V114).
+    pub heli_wreck: MachineWreck,
     /// `machine.aud`'s `[biplaneWreck]` (P164).
     pub plane_wreck: MachineWreck,
     /// `machine.aud`'s `[biplaneTireTouchdown]` (P146).
@@ -3429,6 +3471,8 @@ impl Sound {
             rider: RiderSounds::default(),
             world: WorldSounds::default(),
             plane: LoopEngine::default(),
+            heli: HeliEngine::default(),
+            heli_wreck: MachineWreck::default(),
             plane_wreck: MachineWreck::default(),
             plane_touchdown: MachineTouchdown::default(),
             shootoff: Shootoff::default(),
@@ -3487,6 +3531,22 @@ impl Sound {
                 s.emitters = Some(now);
                 picks
             });
+            // The Kiowa (V114): its one loop on the filtered collective, stopped while wrecked, and
+            // its wreck clank on the plane's emitter with the helicopter's list. It has no touchdown.
+            if let Some(heli) = &f.heli {
+                s.engine.silence(m);
+                s.edge.stop_rumble(m);
+                s.drive_on.stop(m);
+                s.plane.silence(m);
+                if heli.crash.wrecked {
+                    s.heli.silence(m);
+                } else {
+                    s.heli.update(m, &self.heli, heli.collective, heli.at, heli.vel, dt);
+                }
+                s.clank.tick(m, &self.heli_wreck, &heli.crash, heli.at, dt, &mut s.dice);
+                continue;
+            }
+            s.heli.silence(m);
             if let Some((note, at)) = f.plane {
                 s.engine.silence(m);
                 s.edge.stop_rumble(m);
@@ -3631,6 +3691,7 @@ impl Sound {
         if let Ok(mut m) = self.mixer.lock() {
             s.engine.silence(&mut m);
             s.plane.silence(&mut m);
+            s.heli.silence(&mut m);
             for id in s.clank.voice().into_iter().chain(s.bike_clank.voice()) {
                 m.stop(id);
             }
@@ -3656,6 +3717,7 @@ impl Sound {
         for s in &mut self.seats {
             s.engine = Engine::new(s.dice.below(u32::MAX) as u64);
             s.plane = PlaneNote::default();
+            s.heli = HeliNote::default();
             s.shots.clear();
             s.held = false;
             s.clank.hushed();
@@ -3763,7 +3825,6 @@ impl Reading<'_> {
     }
 
     /// The Kiowa's engine (V114): `otherengine.aud`'s `[Helicopter]` in the machines' archive.
-    #[allow(dead_code)]
     pub fn helicopter(&mut self, res: &str) -> HeliEngine {
         let text = self.text(res, "aud\\otherengine.aud");
         let lib = &mut *self.lib;
@@ -3772,7 +3833,6 @@ impl Reading<'_> {
 
     /// The Kiowa's wreck clank (V114): `machine.aud`'s `[helicopterWreck]`, the plane's emitter on the
     /// helicopter's own list. `machine.aud` has no `[helicopterTire…]`, so it has no touchdown.
-    #[allow(dead_code)]
     pub fn helicopter_wreck(&mut self, res: &str) -> MachineWreck {
         let text = self.text(res, "aud\\machine.aud");
         let lib = &mut *self.lib;
@@ -4257,6 +4317,8 @@ impl Sound {
         }
         sound.plane = read.machines(machines);
         sound.plane_wreck = read.plane_wreck(machines);
+        sound.heli = read.helicopter(machines);
+        sound.heli_wreck = read.helicopter_wreck(machines);
         sound.plane_touchdown = read.plane_touchdown(machines);
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));

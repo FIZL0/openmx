@@ -2163,6 +2163,15 @@ impl KiowaRide {
         Some((Vf::new(at.x(), at.y(), at.z(), 1.0), Vf::new(forward.x(), forward.y(), forward.z(), 0.0)))
     }
 
+    /// Where the ground stand-in ([`KiowaAround`]) asks for the ground: under the skids, the body's
+    /// centre less its centre of gravity turned into the world. The particles' body contact (V114).
+    pub fn skids(&self) -> Option<Vf> {
+        let body = &self.flown.as_ref()?.ride.body;
+        let c = rotate(body.quat, body.cofg);
+        let p = body.position;
+        Some(Vf::new(p.x() - c[0], p.y() - c[1], p.z() - c[2], 1.0))
+    }
+
     /// The matrix it is drawn by (rows `x`, `y`, `z` and the origin), while it is out.
     pub fn matrix(&self) -> Option<game_sim::math::Mat4> {
         Some(self.flown.as_ref()?.ride.measure.matrix)

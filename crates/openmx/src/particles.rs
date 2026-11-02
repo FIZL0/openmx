@@ -124,7 +124,6 @@ pub const BIKE_PARTICLES: &str = "mxparticles.dat";
 /// wreck's dirt and chunks and washes with `helicopterdust_ss.emt`, 25 to 50 particles a second against 150 to 250. Its entries
 /// are the body's wreck dust (`CollisionModel` 0), each thrown blade's (1 to 4), and the rotor wash
 /// (`HelicopterDust` on `RotorSpindle`, off while wrecked, fading out from 15 ft up to 40).
-#[allow(dead_code)] // run once a Kiowa is flown (P216)
 pub const KIOWA_PARTICLES: &str = "helicopterparticles.dat";
 
 /// How many surface zones a zone descriptor names.
