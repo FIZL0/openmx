@@ -7754,3 +7754,16 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 #   flags, and both bodies bit for bit; the run from 2868 alone to 2873 keeps both bodies bit for bit.
 #   tests/prop_knock.rs: s195 knock's ball 2 agrees bit for bit from 2885 to 3273 (was 3092) once ball 4
 #   stands where the game's stands: at 3093 ball 4's rays strike ball 2 and ball 2's strike ball 4.
+
+# --- S243: a prop's kept nearby search, the wreck bike in its world (crates/game-sim/src/prop_world.rs
+# Collision::nearby / search_among, flight_search.rs Scene::probed_among / Probe; tests/prop_wreck.rs
+# the_wreck_bike_is_in_the_balls_world; journal 2026-11-02-s243-props-gather-their-own-world)
+# A prop collision object's record +0x10c is a kept nearby search: least 10, extra 30, capacity 128,
+# no_groups 0. It is gathered (kind 3, around the ray probe +0x130 into the search +0x11c) by the wrapper's
+# vt +0x110 0x0015b210, whose callers are post 0x0015b070 (enabled only), asleep check 0x0015b2a0 (asleep and
+# +0x6c set) and wake 0x0015b790 - the plane's wrapper class.
+# hit2-2828: ball 1's list holds 26 moving-list entries: awake balls' meshes (0x18), the wreck mesh
+# collidable 0x00dc9030 (category 0x9a058, flags 0x14, radius 4.303, owner +0x80 = 0x00dc98f0), toys 0x48,
+# 0x20a, 0x52058, AI bikes 0x9a048 and gates 0x200020; no scenery within its bound. Ball 2's list has the wreck at distance 0.
+# Sweep probes (+0x1f4), the props' and the wreck's: exclude list [0x8, 0x800], from globals 0x00468f50 (0x8)
+# and 0x00468f90 (0x800); the wake mask global 0x00468f68 = 0x40.

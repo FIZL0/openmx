@@ -314,8 +314,13 @@ impl Sim {
             all[0] = *controls;
             return self.step_all(dt, &all, world).swap_remove(0);
         }
-        // The props' step waits for the bike's strike and push (S197, [`prop_contact`]).
-        let prop_movers = self.traffic.frame_held(dt, world);
+        // The props' step waits for the bike's strike and push (S197, [`prop_contact`]). A downed
+        // rider's wreck bike is on the props' node, struck by their rays in their pass (S243,
+        // [`prop_wreck`]); a plane ride has none.
+        let prop_movers = match self.plane {
+            Some(_) => self.traffic.frame_held(dt, world),
+            None => self.frame_held_wrecked(dt, world, &[(0, self.players())]),
+        };
         self.lend_cars();
         self.event_frame(dt);
         if self.plane.is_some() {
@@ -363,8 +368,6 @@ impl Sim {
         let cars = self.car_contacts(0, world, dt);
         // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
         let strike = self.prop_strike(0, dt);
-        // And a downed rider's wreck bike against the props' rays (S197b, [`prop_wreck`]).
-        self.wreck_strike(0);
         let said = if cars.is_empty() && strike.contacts.is_empty() {
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(0);
@@ -470,8 +473,10 @@ impl Sim {
         if self.others.is_empty() || self.plane.is_some() {
             return vec![self.step(dt, &controls[0], world)];
         }
-        // The props' step waits for every bike's strike and push (S197a, [`prop_contact`]).
-        let prop_movers = self.traffic.frame_held(dt, world);
+        // The props' step waits for every bike's strike and push (S197a, [`prop_contact`]); every
+        // downed rider's wreck bike is on the props' node (S243, [`prop_wreck`]).
+        let sides: Vec<(usize, usize)> = (0..self.players()).map(|i| (i, self.players() + i)).collect();
+        let prop_movers = self.frame_held_wrecked(dt, world, &sides);
         self.lend_cars();
         self.event_frame(dt);
         let mut frames = Vec::with_capacity(controls.len());
@@ -487,7 +492,6 @@ impl Sim {
             // And its body rays against the knockable props (S197a), where the riders walked before
             // it left them: what it strikes is woken, and pushed in its frame.
             let strike = self.prop_strike(i, dt);
-            self.wreck_strike(i);
             let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
                 .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
                 .filter(|l| !l.is_empty() || !strike.contacts.is_empty())

@@ -139,6 +139,36 @@ pub struct Collision {
     /// and as a wake puts it back; the wake mask alone ([`asleep_categories`]) once a body that detects
     /// collisions asleep is put to sleep. Only an object with a ray probe changes it.
     pub categories: Categories,
+    /// **The object's nearby search** (S243, record `+0x10c`): least 10, extra 30, capacity 128, as the
+    /// plane's ([`flight_search::search`]). It is kept from tick to tick and gathered again
+    /// ([`broad_phase::gather`]: resorted while the probe stays inside the list's bound, else asked
+    /// afresh) only where the original's body wrapper does it — its post while the body is awake, its
+    /// wake, and its asleep check while the body detects collisions asleep — which `regather` marks
+    /// for the next search, with the ray category list the first of them read ([`Collection::search_among`]); a list never gathered is gathered there too.
+    ///
+    /// [`broad_phase::gather`]: crate::broad_phase::gather
+    pub nearby: crate::broad_phase::Search,
+    pub regather: Option<Categories>,
+    /// How many wreck bikes' hulls the world the list was gathered in had ([`Wreck`]): the plants come
+    /// after them, so a list gathered with another count is gathered again.
+    pub wrecks: usize,
+}
+
+/// The sweep probe's category list a prop's init gives it (S243, both the prop's and the wreck bike's
+/// in the hit2 states): every category but the probes' own ([`flight_search::PROBE`]) and 0x800. So a
+/// prop's sweep never meets the wreck bike's hull nor a toy (both carry 0x8), and the wreck bike's
+/// never a prop's mesh.
+pub fn sweep_categories() -> Categories {
+    Categories { mode: 1, list: vec![flight_search::PROBE, 0x800] }
+}
+
+/// **A wreck bike in the props' world** (S243): its hull (its `wreckbikef.col` where its record's node
+/// stands it, its body's velocity) and the other side its prop entries name — `players + i` for player
+/// `i`'s ([`crate::Sim::wreck_sides`]).
+#[derive(Clone, Copy)]
+pub struct Wreck<'a> {
+    pub hull: flight_search::Plane<'a>,
+    pub side: usize,
 }
 
 /// A ray probe's category list as the prop's init and its enable leave it: none excluded.
@@ -184,7 +214,7 @@ impl Collision {
         record.nearby = rays.is_some();
         record.sweeps = rays.is_some();
         record.rays = rays;
-        Collision { collider, record, categories: EVERY_CATEGORY }
+        Collision { collider, record, categories: EVERY_CATEGORY, nearby: flight_search::search(), regather: None, wrecks: 0 }
     }
 }
 
@@ -441,6 +471,10 @@ impl Collection {
             o.every_category();
         }
         o.fresh = true;
+        // The wake gathers the list where the body is.
+        if let Some(c) = o.collision.as_mut() {
+            c.regather.get_or_insert_with(|| c.categories.clone());
+        }
     }
 
     /// Puts one body to sleep: out of the world's lists (but for its preforce listener), and its
@@ -530,13 +564,68 @@ impl Collection {
     /// standing still; its ray probe's category list is then the wake mask alone, so its rays meet
     /// only what wakes it.
     pub fn search(&mut self, dt: F, rays: &[Option<Rays>], field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
+        self.search_among(dt, rays, field, props, trees, &[], &mut []);
+    }
+
+    /// **[`Collection::search`] with the wreck bikes on the node** (S243): each filed object's ray
+    /// probe searches its kept nearby list ([`Collision::nearby`]), gathered in a world that holds the
+    /// wreck bikes' hulls ([`Scene::probed_among`]) — one ray record over the scene and the hulls, so
+    /// a ray keeps one contact, the nearer — and its sweep with the init's list
+    /// ([`sweep_categories`]). An entry on a wreck bike names its [`Wreck::side`]; its mirror goes on
+    /// `strikes[j]` for wreck `j`, naming the object by its place in that strike's `struck`, where the
+    /// object's body is copied as its listeners left it. `collection` is this collection's index in
+    /// its set, for the strike's [`crate::prop_contact::Pushed`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_among(
+        &mut self,
+        dt: F,
+        rays: &[Option<Rays>],
+        field: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        wrecks: &[Wreck<'_>],
+        strikes: &mut [crate::prop_wreck::WreckStrike],
+    ) {
+        self.search_wrecked(usize::MAX, dt, rays, field, props, trees, wrecks, strikes);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_wrecked(
+        &mut self,
+        collection: usize,
+        dt: F,
+        rays: &[Option<Rays>],
+        field: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        wrecks: &[Wreck<'_>],
+        strikes: &mut [crate::prop_wreck::WreckStrike],
+    ) {
         for k in 0..self.objects.len() {
-            self.search_object(k, dt, rays, field, props, trees);
+            self.search_object_wrecked(collection, k, dt, rays, field, props, trees, wrecks, strikes);
         }
     }
 
     /// [`Collection::search`] for object `k` alone: nothing unless it is filed with a collision object.
     pub fn search_object(&mut self, k: usize, dt: F, rays: &[Option<Rays>], field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
+        self.search_object_wrecked(usize::MAX, k, dt, rays, field, props, trees, &[], &mut []);
+    }
+
+    /// [`Collection::search_object`] with the wreck bikes on the node ([`Collection::search_among`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_object_wrecked(
+        &mut self,
+        collection: usize,
+        k: usize,
+        dt: F,
+        rays: &[Option<Rays>],
+        field: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        wrecks: &[Wreck<'_>],
+        strikes: &mut [crate::prop_wreck::WreckStrike],
+    ) {
+        let hulls: Vec<flight_search::Plane<'_>> = wrecks.iter().map(|w| w.hull).collect();
         {
             let o = &mut self.objects[k];
             let (true, Some(c)) = (o.filed, o.collision.as_mut()) else { return };
@@ -551,14 +640,34 @@ impl Collection {
                     let (lo, hi) = (f.min(), f.max());
                     ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
                 });
-                let mut nearby = flight_search::search();
-                scene = Some(Scene::probed(props, trees, bounds, tree, &c.record.node, &mut nearby, &c.categories, asleep));
+                if c.wrecks != hulls.len() {
+                    c.nearby.built = false;
+                    c.nearby.nearby.found.clear();
+                    c.wrecks = hulls.len();
+                }
+                let probe = flight_search::Probe {
+                    categories: c.categories.clone(),
+                    sweep: Some(sweep_categories()),
+                    hull: Some((wreck_bike::COLLIDABLE, wreck_bike::COLLIDES_WITH)),
+                    regather: c.regather.take(),
+                };
+                scene = Some(Scene::probed_among(props, trees, &hulls, bounds, tree, &c.record.node, &mut c.nearby, &probe, asleep));
             }
             let world: &mut dyn Search = match scene.as_mut() {
                 Some(s) => s,
                 None => &mut none,
             };
-            contact_search::collide(std::slice::from_mut(&mut c.record), 0, Some(body), field, world, dt);
+            // The prop's record, then a stand-in for each wreck bike's, which the mirrors go on.
+            let mut records = vec![std::mem::take(&mut c.record)];
+            records.extend(wrecks.iter().map(|_| Record { capacity: usize::MAX, ..Record::default() }));
+            contact_search::collide(&mut records, 0, Some(body), field, world, dt);
+            let mut records = records.into_iter();
+            c.record = records.next().expect("the prop's record");
+            for e in &mut c.record.contacts {
+                if let Some(j) = e.other.and_then(|o| o.checked_sub(1)).filter(|&j| j < wrecks.len()) {
+                    e.other = Some(wrecks[j].side);
+                }
+            }
             o.node = std::mem::take(&mut c.record.node);
             let heard = scene.map(|s| s.heard()).unwrap_or_default();
             if heard.woke {
@@ -566,6 +675,13 @@ impl Collection {
             }
             if heard.struck {
                 self.activate();
+            }
+            for (j, r) in records.enumerate() {
+                let Some(strike) = strikes.get_mut(j).filter(|_| !r.contacts.is_empty()) else { continue };
+                let index = strike.struck.len();
+                strike.mirrors.extend(r.contacts.into_iter().map(|m| contact::Contact { other: Some(index), ..m }));
+                let (bone, collider) = (&self.bones[k], self.objects[k].collision.as_ref().expect("filed above").collider);
+                strike.struck.push(crate::prop_contact::Pushed { collection, object: k, collider, body: bone.body, mass: bone.mass });
             }
         }
     }
@@ -577,6 +693,10 @@ impl Collection {
         }
         if !self.bones[k].body.enabled {
             let o = &mut self.objects[k];
+            // The asleep check gathers the list while the body detects collisions asleep.
+            if let (true, Some(c)) = (o.detect_when_disabled, o.collision.as_mut()) {
+                c.regather.get_or_insert_with(|| c.categories.clone());
+            }
             if o.countdown < F::ZERO {
                 return false;
             }
@@ -725,7 +845,12 @@ impl Collection {
         let b = &self.bones[k].body;
         let origin = b.last_position.sub(turn(b.last_quat, b.cofg));
         if self.inside(k, origin) {
-            self.objects[k].node = node_of(b);
+            let o = &mut self.objects[k];
+            o.node = node_of(b);
+            // The post gathers the list where the step left the body.
+            if let Some(c) = o.collision.as_mut() {
+                c.regather.get_or_insert_with(|| c.categories.clone());
+            }
         } else {
             self.disable(k);
             self.reset(k);
