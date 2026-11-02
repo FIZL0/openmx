@@ -26,8 +26,7 @@
 //! Each body's model's `<node>f.col` is its collidable mesh ([`PropSet::shapes`]): the riding bike's
 //! body rays strike it where the body's node stands it, between the node's collide pass and its step
 //! ([`PropSet::search`], [`PropSet::step`]), which wakes the body ([`PropSet::struck`]) and pushes it
-//! (S197, [`crate::prop_contact`]). The rider, the wreck bike, the plane and the other props do not
-//! strike it yet.
+//! (S197, [`crate::prop_contact`]); the other props' rays strike it too (S242, [`crate::prop_props`]).
 
 #![deny(clippy::float_arithmetic)]
 
@@ -203,9 +202,14 @@ impl PropSet {
         if self.tables.is_none() {
             return Vec::new();
         }
+        self.stamp_filed();
         for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
             c.search(dt, rays, field, props, trees);
         }
+        crate::prop_props::strike_props(self, &mut |set, c, k| {
+            let rays = Arc::clone(&set.rays);
+            set.collections[c].search_object(k, dt, &rays[c], field, props, trees);
+        });
         props.map(|p| flight_search::movers(&p.props)).unwrap_or_default()
     }
 
@@ -227,6 +231,7 @@ impl PropSet {
         if self.tables.is_none() {
             return out;
         }
+        self.stamp_filed();
         let mut keys: Vec<Option<[i32; 2]>> = Vec::new();
         for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
             let Some(at) = filed_middle(c) else {
@@ -241,19 +246,46 @@ impl PropSet {
                 None => {
                     keys.push(key);
                     out.sets.push(props.map(|p| flight_search::movers(&p.props)).unwrap_or_default());
+                    out.near.push(at);
                     out.sets.len() - 1
                 }
             };
             out.of.push(Some(set));
         }
+        // A prop the props' rays file searches against its collection's set, or one near it (S242).
+        crate::prop_props::strike_props(self, &mut |set, c, k| {
+            let at = set.collections[c].objects[k].node.origin;
+            let s = match out.of[c] {
+                Some(s) => s,
+                None => {
+                    let key = world.near_set(at);
+                    let s = match keys.iter().position(|k| *k == key) {
+                        Some(i) => i,
+                        None => {
+                            let (_, props, _) = if key.is_some() { world.wooded_near(at) } else { world.wooded() };
+                            keys.push(key);
+                            out.sets.push(props.map(|p| flight_search::movers(&p.props)).unwrap_or_default());
+                            out.near.push(at);
+                            out.sets.len() - 1
+                        }
+                    };
+                    out.of[c] = Some(s);
+                    s
+                }
+            };
+            let (field, props, trees) = if keys[s].is_some() { world.wooded_near(out.near[s]) } else { world.wooded() };
+            let rays = Arc::clone(&set.rays);
+            set.collections[c].search_object(k, dt, &rays[c], field.as_deref(), props, trees);
+        });
         out
     }
 
     /// [`PropSet::step`] with each collection's movers its own search's ([`PropSet::search_in`]).
     pub fn step_with(&mut self, dt: F, movers: &PropMovers, strikers: &mut [Other<'_>]) {
         let Some(tables) = &self.tables else { return };
-        for (k, c) in self.collections.iter_mut().enumerate() {
-            c.step_among(dt, tables, movers.of(k), strikers);
+        let tables = Arc::clone(tables);
+        for k in 0..self.collections.len() {
+            crate::prop_props::step_named(self, k, dt, &tables, movers.of(k), strikers);
         }
     }
 
@@ -262,8 +294,9 @@ impl PropSet {
     /// contacts name (S197: by player, [`crate::prop_contact`]).
     pub fn step(&mut self, dt: F, movers: &[Mover], strikers: &mut [Other<'_>]) {
         let Some(tables) = &self.tables else { return };
-        for c in &mut self.collections {
-            c.step_among(dt, tables, movers, strikers);
+        let tables = Arc::clone(tables);
+        for k in 0..self.collections.len() {
+            crate::prop_props::step_named(self, k, dt, &tables, movers, strikers);
         }
     }
 
@@ -312,6 +345,8 @@ pub struct PropMovers {
     pub sets: Vec<Vec<Mover>>,
     /// Each collection's set, in collection order: `None` for one that did not search.
     pub of: Vec<Option<usize>>,
+    /// Where each set was asked for (S242: a prop the props' rays file searches its collection's set).
+    pub near: Vec<Vf>,
 }
 
 impl PropMovers {
@@ -400,6 +435,7 @@ impl State for Object {
         w.bool("fresh", self.fresh);
         w.bool("listens", self.listens);
         w.bool("filed", self.filed);
+        w.u32("filed_at", self.filed_at);
         for (k, row) in self.node.rows.iter().enumerate() {
             w.vf(["row0", "row1", "row2"][k], *row);
         }

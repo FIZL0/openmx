@@ -107,6 +107,9 @@ pub struct Object {
     pub listens: bool,
     /// The collision object is filed on the world node (struck, and searching when it is S131's).
     pub filed: bool,
+    /// Where the object stands in the node's filed list (S242, [`crate::prop_props`]): a filing's
+    /// stamp, larger for a later one, `0` while it is not filed. The node walks its list in this order.
+    pub filed_at: u32,
     /// The model's node: the transform the post listener and the placement write.
     pub node: Node,
     /// The collision object (S198), when the loader made one.
@@ -209,6 +212,7 @@ impl Object {
             fresh: false,
             listens: true,
             filed: false,
+            filed_at: 0,
             node: Node { rows: [Vf::ZERO; 3], origin: ORIGIN },
             collision: None,
         }
@@ -468,6 +472,7 @@ impl Collection {
             return;
         }
         o.filed = false;
+        o.filed_at = 0;
         if let Some(c) = o.collision.as_mut() {
             contact_search::clear(&mut c.record, Some(&mut self.bones[k].body));
         }
@@ -526,8 +531,15 @@ impl Collection {
     /// only what wakes it.
     pub fn search(&mut self, dt: F, rays: &[Option<Rays>], field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
         for k in 0..self.objects.len() {
+            self.search_object(k, dt, rays, field, props, trees);
+        }
+    }
+
+    /// [`Collection::search`] for object `k` alone: nothing unless it is filed with a collision object.
+    pub fn search_object(&mut self, k: usize, dt: F, rays: &[Option<Rays>], field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
+        {
             let o = &mut self.objects[k];
-            let (true, Some(c)) = (o.filed, o.collision.as_mut()) else { continue };
+            let (true, Some(c)) = (o.filed, o.collision.as_mut()) else { return };
             let body = &mut self.bones[k].body;
             let asleep = !body.enabled;
             c.record.node = o.node;

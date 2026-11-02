@@ -387,6 +387,22 @@ fn resync(rows: &Rows, r: usize, k: usize, set: &mut PropSet) {
     [rc.touching, rc.touching_other, rc.on_ground, rc.on_object] = rows.flags(r, &p("touch"));
 }
 
+/// Ball `k`'s node set where the capture's row `r` has the game's: what another ball's rays strike.
+fn follow(rows: &Rows, r: usize, k: usize, set: &mut PropSet) {
+    let p = |n: &str| format!("b{k}_{n}");
+    let c = &mut set.collections[k];
+    let b = &mut c.bones[0].body;
+    b.last_position = rows.quad(r, &p("last_pos"));
+    b.position = rows.quad(r, &p("pos"));
+    b.velocity = rows.quad(r, &p("vel"));
+    b.last_quat = rows.quad(r, &p("last_quat"));
+    b.quat = rows.quad(r, &p("quat"));
+    b.rates = rows.quad(r, &p("rates"));
+    c.objects[0].node.origin = rows.quad(r, &p("origin"));
+    let rows_of = game_sim::wreck_bike::node_of(b).rows;
+    c.objects[0].node.rows = rows_of;
+}
+
 /// Whether row `r` holds ball `k` a tick ahead: every one of its columns as the next row has them
 /// (the row read after the next frame had run, as a few frame_counter-stamped rows are).
 fn ahead(rows: &Rows, r: usize, k: usize) -> bool {
@@ -452,6 +468,11 @@ fn replay(name: &str, frame: u32, balls: &[usize], again: &[(usize, u32)]) -> Op
                 let before = std::mem::take(&mut runs[i]);
                 runs[i] = Run { from: r - 1, agreed: r - 1, before: Some(Box::new(before)), ..Run::default() };
             }
+        }
+        // The balls not compared stand where the game's stood (S242: a ball's rays strike another's
+        // mesh, and the bike that knocks them in the game is not in this replay).
+        for k in (0..5).filter(|k| !balls.contains(k)) {
+            follow(&rows, r - 1, k, &mut free.set);
         }
         let dt = F(rows.f32(r, "dt"));
         free.set.frame_among(dt, Some(&field), Some(&free.props), None);
@@ -545,7 +566,12 @@ fn the_strike_puts_the_objects_listener_on_first() {
 }
 
 /// Ball 2, struck at frame 2882, from the state two ticks after: its flight, the landing, the bounces
-/// and the roll down the slope, bit for bit, until the bike touches it again at frame 3093. Ball 1,
+/// and the roll down the slope, bit for bit; at frame 3093 ball 4 (knocked by the bike at 3066, and
+/// standing where the game's stands) strikes it and it strikes ball 4 (S242), and it rolls on and goes
+/// to sleep at 3274, bit for bit, where the port puts its collection to sleep a tick early: on the
+/// game's one listener list, shared by every free09 prop, ball 1's settle coming off at 3010 moved
+/// ball 2's settle ahead of its object's listener (a finished listener's slot takes the list's last,
+/// oracle S242), and the port keeps a list per collection. Ball 1,
 /// nudged by the bike passing at frame 2865: its roll and its sleep at frame 3010 (the countdown
 /// started, the collection put to sleep on the same tick), until the bike wakes it again at 3322; then,
 /// set from the game's row where it sleeps again (frame 3380), the sixty seconds' countdown and the
@@ -555,8 +581,10 @@ fn the_knocked_balls_fly_land_sleep_and_go_back() {
     let Some((rows, runs)) = replay("knock", 2884, &[2, 1], &[(1, 3381)]) else { return };
     let (two, one) = (&runs[0], &runs[1]);
     assert_eq!(two.landed, Some(row_of(&rows, 2912)), "{two:#?}");
-    assert_eq!(two.agreed, row_of(&rows, 3092), "{two:#?}");
-    struck_again(two, &rows, 3093);
+    assert_eq!(two.agreed, row_of(&rows, 3273), "{two:#?}");
+    let parted = two.parted.as_deref().unwrap_or_else(|| panic!("the run never parts: {two:#?}"));
+    assert!(parted.starts_with(&format!("row {} (frame 3274)", row_of(&rows, 3274))), "{two:#?}");
+    assert!(parted.contains("active: the game 2, the port false"), "the collection's sleep: {parted}");
 
     let first = one.before.as_deref().expect("ball 1 set again");
     assert_eq!(first.slept, Some(row_of(&rows, 3010)), "{first:#?}");

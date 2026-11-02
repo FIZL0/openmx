@@ -30,8 +30,8 @@
 //! What is not here: the entries are put after everything the prop's own search found, where the
 //! original's one narrow pass would order a scene mesh and the wreck bike by the walk's list and keep
 //! one contact per ray between them; the wreck bike's sweep probe and its rays against other props;
-//! the rider's ragdoll and the plane against a prop; a prop's rays on another prop's mesh or on a
-//! riding bike's.
+//! the rider's ragdoll and the plane against a prop; a prop's rays on a riding bike's mesh (on
+//! another prop's: S242, [`crate::prop_props`]).
 
 #![deny(clippy::float_arithmetic)]
 

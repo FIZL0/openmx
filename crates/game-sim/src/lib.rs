@@ -1003,6 +1003,8 @@ pub mod prop_contact;
 /// The knockable props' rays striking the wreck bike's mesh (S197b): the entries on the props, the
 /// mirrors on the wreck bike, the push both ways.
 pub mod prop_wreck;
+/// A knockable prop's rays on another prop's mesh (S242): ball on ball, the push both ways.
+pub mod prop_props;
 /// The riding bike's wheels on the knockable props (S210): the wheel probe searches them, wakes what
 /// it strikes, and a wheel on one rides its motion.
 pub mod prop_wheel;

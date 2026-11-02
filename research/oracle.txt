@@ -7724,3 +7724,33 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 # Bit-exact in the port: the plane's entries and the ball's mirrors from hit0-11046 and -11047 (none from
 #   -11048), the plane's and ball 0's first-substep resolves on hit0-11046 (both bodies, the arms), the
 #   balls' hull entries and the plane's mirrors on hit0-11061.
+
+# --- S242: a knockable prop's rays strike another prop's f.col, ball on ball (crates/game-sim/src/prop_props.rs
+#   strike_props, step_named, PropSet::stamp_filed/node_order, prop_world Object::filed_at; tests/prop_props.rs,
+#   tests/prop_knock.rs; journal 2026-11-02-s242-ball-on-ball)
+# drop2 states (free09, s3's context only: research/s242/put_ball.py PID 2 1 0 16 1 puts ball 1, awake, 16 ft
+#   over ball 0 at rest off s197b hit2-2828; strike.py drop2 1 1 0 --frames 40 --at 2868..2873 saves 2868..2873).
+#   Collision objects: ball 0 0x011be090, ball 1 0x011c0c70 (the props node's filed list, node +0x30/+0x38).
+# Ball probe (object +0x124): category 0x8, collides_with 0xffffffff; awake its category list is mode 1 empty
+#   (every category), asleep with DetectCollisionsWhenDisabled mode 0 [0x40]. Ignore list +0xd0 count 1,
+#   +0xd4 array, +0xd8 cap 2: its own mesh collidable only. A ball's mesh collidable is 0x18 wherever it
+#   stands (+0x116 0x14 awake, in the moving structure; 0x4 at rest, the static tree), so an awake ball's
+#   rays meet any other ball's mesh, awake or at rest.
+# 2868 -> 2869: ball 0 at rest, unfiled. Ball 1 (filed 7th of 8) strikes it: a kind-0 entry on ball 1 naming
+#   ball 0's object, the mirror on ball 0's; ball 0 is woken (enable then activate), filed 9th at the end of
+#   the node's list and searched in the same pass (the walk re-reads the count), its terrain entry then its
+#   own rays' kind-0 on ball 1; that mirror goes on ball 1 after its own entries. Ball 0's list:
+#   [k1 ball 1, k0 terrain, k0 ball 1]; ball 1's: [k0 ball 0, k1 ball 0]; flags touching, other, object set.
+# 2869 -> 2870 (both filed): ball 1 [k0 b0, k0 b0, k1 b0], ball 0 [k1 b1, k1 b1, k0 terrain, k0 b1]: a mirror
+#   on a record later in the node's list comes before its own entries (the node cleared every list before
+#   any search), on one earlier after them.
+# Node listeners (node +0x48 count, +0x50 array; one list for every free09 prop): the walk after the step
+#   calls each listener's vt+8 and on done removes it by moving the list's last into its slot (0x002735d0)
+#   without advancing. In s195 knock that put ball 2's settle ahead of its object's listener once ball 1's
+#   settle came off at 3010, so ball 2's collection sleeps a tick after its body at 3274-3275.
+node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count -= 1
+# Proved (tests/prop_props.rs): drop2-2868..2872 each tick from its state, the port's search + step: the
+#   node's ball order, both balls' lists (kind, from, on_body, normal, point, surface, the ball named) and
+#   flags, and both bodies bit for bit; the run from 2868 alone to 2873 keeps both bodies bit for bit.
+#   tests/prop_knock.rs: s195 knock's ball 2 agrees bit for bit from 2885 to 3273 (was 3092) once ball 4
+#   stands where the game's stands: at 3093 ball 4's rays strike ball 2 and ball 2's strike ball 4.
