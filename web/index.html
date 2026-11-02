@@ -89,6 +89,98 @@ if (location.hostname.startsWith('beta.')) {
   document.head.append(m);
 }
 </script>
+<script>
+// P257b (opentennis's B453): the page log for a bug report from a phone, which has no Web Inspector. With `?fps` in the
+// address, or the Settings switch (localStorage `openmx.log`, for the installed app, which has no address bar), every
+// console line is kept with ms since load: the page's, the worker's (worker.js forwards its own: the module's
+// `gpu: adapter limits`, `gpu: validation error in …`, a panic), errors nobody caught, and the page's own view of its
+// thread — `raf gap N ms` (two animation frames that far apart) and `blocked N ms` (a 50 ms timer that late). A Save
+// log button at the top, over the site and the game alike, downloads them as openmx-log.txt (a phone's share sheet
+// where it has one). The lines outlive a reload of the tab (sessionStorage): the WebGPU run a fallback restarted onto
+// `?webgl2`, or the shell's quit back to the page, is in the next page's log.
+window.openmxLog = (() => {
+  const SWITCH = 'openmx.log';
+  const KEPT = 'openmx.log-lines';
+  const log = { on: false, lines: [] };
+  log.start = () => {
+    if (log.on) return;
+    log.on = true;
+    const t0 = performance.now();
+    const lines = log.lines;
+    try {
+      const before = sessionStorage.getItem(KEPT);
+      if (before) lines.push(...before.split('\n'), '---- the page loaded again ----');
+    } catch {}
+    lines.push(`openmx-log ${new Date().toISOString()} ${navigator.userAgent} ${location.search}`);
+    log.keep = (kind, args, from = '') => {
+      const text = [...args].filter(a => !/^(color|font-style|background):/.test(a))
+        .map(a => (typeof a === 'string' ? a.replace(/%c/g, '') : String(a?.stack ?? a))).join(' ');
+      lines.push(`${Math.round(performance.now() - t0)}ms ${from}${kind}: ${text}`);
+      if (lines.length > 20000) lines.splice(0, 5000);
+    };
+    for (const k of ['log', 'info', 'warn', 'error']) {
+      const was = console[k].bind(console);
+      console[k] = (...a) => { log.keep(k, a); was(...a); };
+    }
+    addEventListener('error', e => log.keep('uncaught', [e.error ?? e.message]));
+    addEventListener('unhandledrejection', e => log.keep('unhandled rejection', [e.reason]));
+    let last = performance.now(), beat = last;
+    const raf = t => { if (t - last > 100) console.info(`page: raf gap ${Math.round(t - last)} ms`); last = t; requestAnimationFrame(raf); };
+    requestAnimationFrame(raf);
+    setInterval(() => {
+      const n = performance.now();
+      if (n - beat > 250 && !document.hidden) console.info(`page: blocked ${Math.round(n - beat - 50)} ms`);
+      beat = n;
+    }, 50);
+    document.addEventListener('visibilitychange', () => console.info(`page: ${document.visibilityState}`));
+    // kept for the next page of this tab: the last ~1.5 M characters (sessionStorage holds a few MB)
+    addEventListener('pagehide', () => {
+      try {
+        sessionStorage.setItem(KEPT, lines.join('\n').slice(-1500000));
+      } catch {}
+    });
+    const save = Object.assign(document.createElement('button'), { id: 'savelog', textContent: 'Save log' });
+    save.style.cssText = 'position:fixed;top:max(2px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:2147483647;font:12px system-ui;padding:2px 10px;opacity:.7';
+    save.onclick = async () => {
+      const file = new File([lines.join('\n') + '\n'], 'openmx-log.txt', { type: 'text/plain' });
+      if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file] });
+          return;
+        } catch (e) {
+          if (e?.name === 'AbortError') return;
+        }
+      }
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(file), download: file.name });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    };
+    if (document.body) document.body.append(save);
+    else addEventListener('DOMContentLoaded', () => document.body.append(save));
+  };
+  log.keep = () => {};
+  log.setting = on => {
+    try {
+      localStorage.setItem(SWITCH, on ? '1' : '0');
+    } catch {}
+    if (on) log.start();
+    else {
+      try {
+        sessionStorage.removeItem(KEPT);
+      } catch {}
+    }
+  };
+  let on = new URLSearchParams(location.search).has('fps');
+  try {
+    log.switched = localStorage.getItem(SWITCH) === '1';
+    on ||= log.switched;
+  } catch {}
+  if (on) log.start();
+  return log;
+})();
+</script>
 <link rel="preload" as="image" href="shots/ride-free06.jpg" fetchpriority="high">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -512,6 +604,8 @@ footer a { color: var(--bone); }
           <button class="pill small ghost" id="export">Export settings</button></div>
         <div class="frow"><div><div class="k">Erase everything</div><div class="d">The disc, the settings and the caches: this site forgets you were here.</div></div>
           <button class="pill small danger" id="erase">Erase everything</button></div>
+        <div class="frow"><div><div class="k">Log for bug reports</div><div class="d">Keeps what the page and the game say, and puts a Save log button at the top, over the game too, that saves it as a file to send with a bug report. <code>?fps</code> in the address does the same for one visit.</div></div>
+          <label class="autoplay"><input type="checkbox" id="logbox" aria-label="Log for bug reports"><span class="sw"></span></label></div>
       </div>
     </section>
 
@@ -582,6 +676,8 @@ footer a { color: var(--bone); }
   const screen = $('#screen');
   const status = $('#status');
   const worker = new Worker('worker.js', { type: 'module' });
+  // P257b: the worker's console lines come to the page's log when there is one (first, so none is held back)
+  worker.postMessage({ log: openmxLog.on });
   // P193: the build this browser last started, which the game says "Updated to …" against; it sends back the one it starts.
   {
     let lastBuild = null;
@@ -672,7 +768,10 @@ footer a { color: var(--bone); }
     location.replace(`${location.pathname}?${next.toString().replace(/=(&|$)/g, '$1')}`);
     return true;
   };
-  worker.addEventListener('error', e => fallBack(e.message));
+  worker.addEventListener('error', e => {
+    console.error(`openmx: the worker failed: ${e.message}`);
+    fallBack(e.message);
+  });
   const ride = () => {
     const { msg = {}, move = [] } = canvas();
     playing();
@@ -776,7 +875,9 @@ footer a { color: var(--bone); }
   };
 
   worker.onmessage = ({ data }) => {
-    if (data.missing) {
+    if (data.console) {
+      openmxLog.keep(data.console[0], [data.console[1]], 'worker ');
+    } else if (data.missing) {
       document.body.dataset.disc = 'no';
       state('asking');
     } else if (data.progress) {
@@ -829,6 +930,7 @@ footer a { color: var(--bone); }
     } else if (data.ticks) {
       window.openmxTicks = data.ticks;
     } else if (data.error) {
+      console.error(`openmx: ${data.error}`);
       if (fallBack(data.error)) return;
       status.textContent = data.error;
       toast(data.error);
@@ -920,6 +1022,14 @@ footer a { color: var(--bone); }
     document.body.dataset.disc = 'no';
     state('asking');
     showStorage();
+  };
+
+  // the log for bug reports (P257b): on from here, and on every load after
+  const logBox = $('#logbox');
+  logBox.checked = !!openmxLog.switched;
+  logBox.onchange = () => {
+    openmxLog.setting(logBox.checked);
+    if (logBox.checked) worker.postMessage({ log: true });
   };
 
   // ---- picking a disc: the button, or a drop anywhere ----

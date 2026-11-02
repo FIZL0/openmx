@@ -33,6 +33,7 @@
 //               preset's pick, and the display's rate as the page's animation frames come)
 //               { latest: String } (P193: the newer build the site has) | { lastBuild: String? } (the build the page
 //               last started, from its local storage, sent before any start)
+//               { log: bool } (P257b: whether the page keeps a log, sent first; its console lines go there when on)
 // Messages out: { progress: [done, total] } | { started: true } | { error: String } | { missing: true }
 //               { gpu: api } (what the module draws with) | { drawn: [api, w, h] } (its first GPU frame)
 //               { fps: number } (pictures in the last second)
@@ -40,6 +41,24 @@
 //               { online: state } (Online.state(), a few times a second) | { ticks: String } (once `ticks` settled)
 //               { build: commit } (P193: the build starting, for the page's local storage) | { reload: true } (the
 //               main menu's reload into the newer build)
+//               { console: [kind, text] } (P257b: a console line of this thread's, for the page's log)
+
+// P257b: this thread's console lines (the module's: `gpu: adapter limits`, `gpu: validation error in …`, a panic) go to
+// the page's log when it keeps one (index.html's `?fps`, or the Settings switch), which a phone has no other way to
+// read. The ones said before the page's `{ log }` arrives wait for it, a few hundred at most.
+let logging = null;
+const early = [];
+for (const kind of ['log', 'info', 'warn', 'error']) {
+  const was = console[kind].bind(console);
+  console[kind] = (...args) => {
+    was(...args);
+    if (logging === false) return;
+    const text = args.filter(a => !/^(color|font-style|background):/.test(a))
+      .map(a => (typeof a === 'string' ? a.replace(/%c/g, '') : String(a?.stack ?? a))).join(' ');
+    if (logging) postMessage({ console: [kind, text] });
+    else if (early.length < 500) early.push([kind, text]);
+  };
+}
 
 const DISC = 'disc.iso';
 // What one read of the picked file asks for when it is being copied: big enough that a 2 GB image is a few hundred
@@ -430,7 +449,10 @@ onmessage = async ({ data }) => {
     // Ride is pressed or a disc is picked); a later start (the picked file) draws in the same one.
     const given = data.start?.canvas ?? data.canvas;
     if (given) canvas = given;
-    if (data.token !== undefined) {
+    if (data.log !== undefined) {
+      logging = !!data.log;
+      for (const line of early.splice(0)) if (logging) postMessage({ console: line });
+    } else if (data.token !== undefined) {
       token = data.token;
     } else if (data.pasted !== undefined) {
       pasted = data.pasted;

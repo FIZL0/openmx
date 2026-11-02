@@ -357,3 +357,18 @@ on the desktop's display, and says so under its verdict.
 `~/.local/state/gtt-watch.log` now logs, every 10 minutes, which suspects were running (monitors on, PCSX2
 copies, openmx shells, chromium, weston). If Hyprland's GTT still climbs with the gate off it, read the lines
 around the climb, and note what you were doing at the desk then (a video, a game, the browser).
+
+## The iPhone's WebGPU log, without Web Inspector (P257a, P257b)
+
+P257a waits on the line that says which WebGPU call the iPhone's Safari refuses. Since P257b the page keeps a
+log you can save on the phone itself (a minute):
+
+1. On the dev page (beta.openmx.dev), Settings & files → **Log for bug reports**: switch it on. In the browser
+   `?fps` in the address does the same for one visit; the switch is for the home-screen app, which has no
+   address bar.
+2. Reload, and open the page as usual — **without** `?webgl2` — then Play. Whatever happens (a dead canvas,
+   the page restarting itself onto `?webgl2`, an error on the page), the log keeps it, across that restart too.
+3. Tap **Save log** at the top of the screen (over the game as well). The share sheet opens with
+   `openmx-log.txt`: Save to Files, or send it (LocalSend into the repo's `context/` is fine).
+4. Name the file in P257a. The lines that matter start `worker log: gpu: adapter limits` and
+   `worker log: gpu: validation error in …`. Switch the log off again afterwards if you like.

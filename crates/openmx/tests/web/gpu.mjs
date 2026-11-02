@@ -10,8 +10,9 @@
 // touch. OPENMX_GPU_ARGS is the shell's command line in place of `--ride` (empty: the front end, splash and menus).
 // With OPENMX_GPU_FAULT set to a count (P257), worker.js is served with a fault ahead of it: after that many WebGPU
 // frames the device is asked for a texture past any limit, a real WebGPU validation error, once; OPENMX_GPU_WANT then
-// names the API the run waits to see drawn (the page's fallback's). Prints one JSON line:
-// { state, gpu, drawn, fps: [per second...], lit, pixels, png } — `gpu` what the page says draws (worker.js's `gpu`),
+// names the API the run waits to see drawn (the page's fallback's). With OPENMX_GPU_LOG set (P257b) the page keeps its
+// log (`?fps`), and the JSON's last field, `log`, is what its Save log would download. Prints one JSON line:
+// { state, gpu, drawn, fps: [per second...], lit, pixels, png, log? } — `gpu` what the page says draws (worker.js's `gpu`),
 // `drawn` its first GPU frame, `fps` the page's pictures a second as worker.js counts them, and `lit` how many of the
 // last screenshot's `pixels` are not black. The screenshot is written to <out.png>.
 import http from 'node:http';
@@ -26,6 +27,7 @@ const PHONE = process.env.OPENMX_GPU_PHONE;
 const ARGS = process.env.OPENMX_GPU_ARGS ?? '--ride';
 const FAULT = process.env.OPENMX_GPU_FAULT;
 const WANT = process.env.OPENMX_GPU_WANT ?? '';
+const LOG = !!process.env.OPENMX_GPU_LOG;
 // The fault: the device the canvas is configured with, and the frames it gives, counted.
 const fault = frames => `(() => {
   if (typeof GPUCanvasContext === 'undefined') return;
@@ -63,7 +65,7 @@ const server = http.createServer((req, res) => {
   });
 }).listen(0, '127.0.0.1');
 await new Promise(r => server.on('listening', r));
-const url = `http://127.0.0.1:${server.address().port}/?args=${encodeURIComponent(ARGS)}${query ? `&${query}` : ''}`;
+const url = `http://127.0.0.1:${server.address().port}/?args=${encodeURIComponent(ARGS)}${query ? `&${query}` : ''}${LOG ? '&fps' : ''}`;
 
 // No extensions, as page.mjs (K7, K12): this machine's chromium brings its own into every profile, the policy's
 // force-installed one fetched from the web store a few seconds in, and one arriving mid-load can abort the worker's
@@ -169,7 +171,8 @@ const [lit, pixels] = await evaluate(`(async () => {
   for (let k = 0; k < p.length; k += 4) if (p[k] + p[k + 1] + p[k + 2] > 24) lit++;
   return [lit, i.width * i.height];
 })()`);
-console.log(JSON.stringify({ state: d.state, gpu: d.gpu, drawn: d.drawn, fps, lit, pixels, png: out }));
+const log = LOG ? { log: await evaluate("openmxLog.lines.join('\\n')") } : {};
+console.log(JSON.stringify({ state: d.state, gpu: d.gpu, drawn: d.drawn, fps, lit, pixels, png: out, ...log }));
 chrome.kill();
 await new Promise(r => chrome.on('exit', r));
 server.close();
