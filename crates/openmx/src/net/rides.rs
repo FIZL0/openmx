@@ -86,16 +86,26 @@ impl Game for Rides<'_> {
         // flying seats (N22a).
         let n = self.sims.len();
         let order: Vec<usize> = (0..n).rev().filter(|&i| aloft[i]).chain((0..n).rev().filter(|&i| !aloft[i])).collect();
+        // What each flown plane's own rays put on each bike's list (N22b), by plane, then by seat:
+        // ahead of the bike's own entries, as the original searches its planes first.
+        let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len()];
         for seat in order {
-            let mut bump = lists.as_mut().map(|l| std::mem::take(&mut l[seat])).filter(|l| !l.is_empty()).map(|l| {
+            let at = self.sims[seat].rider.ride.transform().0[3];
+            let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(seat).map(std::mem::take).unwrap_or_default()).collect();
+            let own = lists.as_mut().map(|l| std::mem::take(&mut l[seat]));
+            let mut bump = own.map(|l| rider_contact::struck_first(&firsts, l, at, &*self.world)).filter(|l| !l.is_empty()).map(|l| {
                 let mut b = rider_contact::bump_among_in(self.sims, seat, l, &*self.world);
                 let from = self.sims[seat].rider.ride.transform().0[3];
                 b.planes = flown.iter().filter_map(|&j| Some(self.sims[j].plane.as_ref()?.flown(j, from, &*self.world))).collect();
                 b
             });
-            let mut met = flown.iter().position(|&j| j == seat).map(|k| std::mem::take(&mut mirrors[k])).filter(|m| !m.is_empty()).and_then(|m| {
+            // A flown plane meets the bikes both ways (N22a, N22b): the mirrors of their strikes on
+            // its hull, and the bikes its own rays strike, which it pushes.
+            let plane = flown.iter().position(|&j| j == seat);
+            let mut met = plane.and_then(|k| {
+                let m = mirrors.get_mut(k).map(std::mem::take).unwrap_or_default();
                 let at = self.sims[seat].plane.as_ref()?.body.position;
-                Some(rider_contact::met_among(self.sims, m, at, &*self.world))
+                Some(rider_contact::met_plane_among(self.sims, seat, n + k, m, at, &*self.world))
             });
             if paused[seat] {
                 continue;
@@ -132,6 +142,10 @@ impl Game for Rides<'_> {
                 vehicle::fly_lane_met(sim, dt, wanted, self.world, &bikes, met.as_mut());
                 if !wanted.dpad_rides {
                     vehicle::lane_markers(sim, seat, &spots, &riding, self.world);
+                }
+                if let (Some(k), Some(m)) = (plane, met) {
+                    rider_contact::pushed_among(self.sims, &m);
+                    struck[k] = m.struck;
                 }
                 continue;
             }

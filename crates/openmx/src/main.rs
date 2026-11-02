@@ -1506,9 +1506,15 @@ impl<P: sim_world::World> Game for World<P> {
             None => (None, Vec::new()),
         };
         let n = self.seats.len();
+        // What each flown plane's own rays put on each bike's list (N22b), by plane, then by seat:
+        // ahead of the bike's own entries, as the original searches its planes first.
+        let mut struck: Vec<Vec<Vec<game_sim::contact::Contact>>> = vec![Vec::new(); flown.len()];
         let order: Vec<usize> = (0..n).rev().filter(|&i| flying[i]).chain((0..n).rev().filter(|&i| !flying[i])).collect();
         for me in order {
-            let mut bump = lists.as_mut().map(|l| std::mem::take(&mut l[me])).filter(|l| !l.is_empty()).map(|l| {
+            let at = self.seats[me].sim.rider.ride.transform().0[3];
+            let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(me).map(std::mem::take).unwrap_or_default()).collect();
+            let own = lists.as_mut().map(|l| std::mem::take(&mut l[me]));
+            let mut bump = own.map(|l| game_sim::rider_contact::struck_first(&firsts, l, at, &self.place)).filter(|l| !l.is_empty()).map(|l| {
                 let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
                 let mut b = game_sim::rider_contact::bump_riders(&phys, me, l, &self.place);
                 let from = self.seats[me].sim.rider.ride.transform().0[3];
@@ -1518,10 +1524,14 @@ impl<P: sim_world::World> Game for World<P> {
                     .collect();
                 b
             });
-            let mut met = flown.iter().position(|&j| j == me).map(|k| std::mem::take(&mut mirrors[k])).filter(|m| !m.is_empty()).and_then(|m| {
+            // A flown plane meets the bikes both ways (N22a, N22b): the mirrors of their strikes on
+            // its hull, and the bikes its own rays strike, which it pushes.
+            let plane = flown.iter().position(|&j| j == me);
+            let mut met = plane.and_then(|k| {
+                let m = mirrors.get_mut(k).map(std::mem::take).unwrap_or_default();
                 let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
                 let at = self.seats[me].garage.flight_flown()?.body.position;
-                Some(game_sim::rider_contact::met_riders(&phys, m, at, &self.place))
+                Some(game_sim::rider_contact::met_plane(&phys, me, n + k, m, at, &self.place))
             });
             let near = riders(&self.seats, &on);
             let rivals = game_sim::rider_contact::rivals_among(&near, me, &self.place);
@@ -1533,6 +1543,11 @@ impl<P: sim_world::World> Game for World<P> {
             drop(near);
             let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut() };
             self.seats[me].pass(dt, &mut self.place, me, &spots, among);
+            if let (Some(k), Some(m)) = (plane, met.take()) {
+                let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
+                game_sim::rider_contact::pushed_riders(&mut all, &m);
+                struck[k] = m.struck;
+            }
             if let Some(b) = &bump {
                 let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
                 game_sim::rider_contact::bumped_riders(&mut all, b);

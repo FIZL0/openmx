@@ -748,7 +748,10 @@ impl Plane {
     }
 
     /// [`Plane::step_among`] with the riders' bikes that struck its hull this tick (N22a,
-    /// [`Flight::frame_met`]): their mirrors on its list, resolved against their chassis.
+    /// [`Flight::frame_met`]): their mirrors on its list, resolved against their chassis. A `met`
+    /// that names the bikes ([`flight::Met::bikes`], N22b) has the plane's own strikes on them push
+    /// their chassis too, and leaves the mirrors for their lists in [`flight::Met::struck`]; the
+    /// struck bike's wreck is still only [`game_sim::flight_search::struck_wreck`]'s.
     pub fn step_met(
         &mut self,
         sim: &Sim,

@@ -21,9 +21,13 @@
 //!   original's, the tick still lands on the row, the same rider wrecks, and the plane's body is
 //!   the original's.
 //!
-//! 5075's plane also struck P2's bike with its own rays (N22b's: the plane's own entries on a bike),
-//! so only its bike-side entries and mirrors are compared there. The images and the capture are
-//! game data, git-ignored: absent, the tests skip.
+//! 5075's plane also struck P2's bike with its own rays (N22b): the plane's entries name P2's record
+//! and P2's list takes their mirrors first. [`the_port_finds_the_originals_contacts_with_the_plane`]
+//! compares only the bike-side entries and mirrors there;
+//! [`the_planes_own_rays_strike_the_bike_as_the_originals`] compares the rest, the port's plane
+//! search against the original's; and the two resolve tests take all three images, P2's chassis
+//! after the plane's push and its own resolve against the capture's row. The images and the capture
+//! are game data, git-ignored: absent, the tests skip.
 
 use game_render::disc::Disc;
 use game_sim::biplane::Body;
@@ -450,8 +454,9 @@ fn port_bike(ee: &Ee, kit: &Kit2, recs: [u32; 4], me: usize, first: bool, planes
 }
 
 /// The port's resolve of a plane's call, as its force listener makes it: its list against the
-/// riders' objects and chassis off RAM, impulses on.
-fn port_plane(ee: &Ee, kit: &Kit2, recs: [u32; 4], k: usize, collider: &mut Collider) -> (Body, Vec<Contact>) {
+/// riders' objects and chassis off RAM, impulses on. With the riders' chassis after it (N22b: what
+/// the plane's own entries on a bike push).
+fn port_plane(ee: &Ee, kit: &Kit2, recs: [u32; 4], k: usize, collider: &mut Collider) -> (Body, Vec<Contact>, Vec<Vehicle>) {
     let mut body = body_of(ee, body_at(ee, recs[2 + k]));
     let mut contacts = list_at(ee, recs[2 + k], &recs);
     let mut colliders = kit.colliders();
@@ -462,7 +467,8 @@ fn port_plane(ee: &Ee, kit: &Kit2, recs: [u32; 4], k: usize, collider: &mut Coll
         .map(|(collider, v)| Other { collider, side: Side::Vehicle(v) })
         .collect();
     contact::resolve(collider, &mut Weighed { body: &mut body, mass: kit.plane.mass }, &mut contacts, &mut others, &[], true);
-    (body, contacts)
+    drop(others);
+    (body, contacts, vehicles)
 }
 
 #[test]
@@ -534,7 +540,7 @@ fn the_port_finds_the_originals_contacts_with_the_plane() {
 fn the_port_resolves_every_call_with_the_plane_as_the_original() {
     let Some(kit) = kit() else { return };
     let kit = Rc::new(kit);
-    for named in NAMED.iter().filter(|n| !n.own) {
+    for named in NAMED.iter() {
         let Some(mut ee) = image(named.image) else { return };
         let dt = dt(&ee);
         let recs = records(&ee);
@@ -578,12 +584,21 @@ fn the_port_resolves_every_call_with_the_plane_as_the_original() {
             } else {
                 let k = who - 2;
                 let mut collider = planes.borrow()[k];
-                let (body, contacts) = port_plane(ee, &kit, recs, k, &mut collider);
+                let (body, contacts, vehicles) = port_plane(ee, &kit, recs, k, &mut collider);
                 run_original(ee, r, first);
                 let want = body_of(ee, body_at(ee, r));
                 for ((what, p), (_, o)) in body_fields(&body).iter().zip(body_fields(&want)) {
                     if bits(*p) != bits(o) {
                         bad.push(format!("{what}: port {p:?} original {o:?}"));
+                    }
+                }
+                // the riders' chassis, which the plane's own entries on a bike would push (N22b)
+                for (i, v) in vehicles.iter().enumerate() {
+                    let got = vehicle_at(ee, recs[i]);
+                    for (what, p, o) in [("velocity", v.velocity, got.velocity), ("rates", v.rates, got.rates), ("shock", v.shock, got.shock), ("twist", v.twist, got.twist)] {
+                        if bits(p) != bits(o) {
+                            bad.push(format!("p{}'s {what}: port {p:?} original {o:?}", i + 1));
+                        }
                     }
                 }
                 for (j, (p, o)) in contacts.iter().zip(&list_at(ee, r, &recs)).enumerate() {
@@ -616,7 +631,7 @@ fn the_port_resolves_every_call_with_the_plane_as_the_original() {
 fn the_tick_with_the_ports_resolve_is_the_wreck_row() {
     let Some(kit) = kit() else { return };
     let kit = Rc::new(kit);
-    for named in NAMED.iter().filter(|n| !n.own) {
+    for named in NAMED.iter() {
         let (Some(mut ee), Some(cap)) = (image(named.image), Split::load("splitscreen")) else { return };
         let mut orig = image(named.image).expect("the image again");
         let dt = dt(&ee);
@@ -652,8 +667,15 @@ fn the_tick_with_the_ports_resolve_is_the_wreck_row() {
             } else {
                 let k = who - 2;
                 let mut collider = planes.borrow()[k];
-                let (body, contacts) = port_plane(ee, &kit, recs, k, &mut collider);
+                let (body, contacts, vehicles) = port_plane(ee, &kit, recs, k, &mut collider);
                 put_body(ee, body_at(ee, r), &body);
+                for (&rec, v) in recs[..2].iter().zip(&vehicles) {
+                    let ch = ee.u32_at(rec + 0xf0);
+                    put(ee, ch + 0x260, v.velocity);
+                    put(ee, ch + 0x290, v.rates);
+                    put(ee, ch + 0x170, v.shock);
+                    put(ee, ch + 0x180, v.twist);
+                }
                 planes.borrow_mut()[k] = collider;
                 (collider, contacts)
             };
@@ -679,4 +701,88 @@ fn the_tick_with_the_ports_resolve_is_the_wreck_row() {
             assert_eq!(format!("{got:?}"), format!("{want:?}"), "{}: the plane {p:x}'s body", named.image);
         }
     }
+}
+
+
+/// `bikef.col` as the plane's world places it on each bike (S95's), out of the split track's archive.
+fn bike_frame() -> Option<track::Mesh> {
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let bytes = res.read_suffix(flight_search::BIKE_COLLISION).unwrap_or_else(|e| panic!("{e}"));
+    Some(track::Mesh::parse(&bytes).expect("bikef.col parses"))
+}
+
+/// A bike's frame collidable (its record's `+0x1f8`) and the chassis transform it is placed on.
+fn frame_collidable(ee: &Ee, rec: u32) -> (u32, Mat4) {
+    let c = ee.u32_at(rec + 0x1f8);
+    (c, Mat4([0, 1, 2, 3].map(|r| quad(ee, c + 0x120 + 16 * r))))
+}
+
+/// N22b: 5075's plane strikes P2's bike with its own rays. The bike's frame collidable is its
+/// collision record's (the collidable's owner, `+0x80`, is the record, category [`flight_search::BIKE`]),
+/// so the plane's entries (kind 0) name P2's record and P2's list takes the mirrors (kind 1, naming
+/// the plane) ahead of its own entries. The port's plane search ([`Flight::search_alone`]) with the
+/// bikes named by player ([`flight::Met::bikes`]) gives the same entries on the plane's list and the
+/// same mirrors on P2's, every field; and [`rider_contact::struck_first`] puts them ahead of the
+/// bike's own gather as the original's list has them.
+#[test]
+fn the_planes_own_rays_strike_the_bike_as_the_originals() {
+    let (Some(kit), Some(frame)) = (kit(), bike_frame()) else { return };
+    let named = &NAMED[1];
+    assert!(named.own);
+    let Some(mut ee) = image(named.image) else { return };
+    let dt = dt(&ee);
+    let recs = records(&ee);
+    let bikes: Vec<flight_search::Bike> = recs[..2]
+        .iter()
+        .map(|&r| {
+            let (c, transform) = frame_collidable(&ee, r);
+            assert_eq!((ee.u32_at(c + 0x84), ee.u32_at(c + 0x80)), (flight_search::BIKE, r), "{r:x}'s frame: category and owner");
+            flight_search::Bike { transform, in_world: true }
+        })
+        .collect();
+
+    // the port: plane 0 from its body in RAM, the two bikes named P1 and P2, the plane named 2
+    let mut plane = kit.plane.clone();
+    plane.body = body_of(&ee, body_at(&ee, recs[2]));
+    let mut met = flight::Met {
+        colliders: kit.colliders(),
+        vehicles: recs[..2].iter().map(|&r| vehicle_at(&ee, r)).collect(),
+        bikes: vec![0, 1],
+        named: Some(2),
+        ..flight::Met::default()
+    };
+    let mut ground = game_sim::world::Flat { y: F(-1.0e6), ..Default::default() };
+    plane.search_alone(F(dt), &mut ground, &frame, &bikes, Some(&mut met));
+    let seats: Vec<Seat<'_>> =
+        recs[..2].iter().map(|&r| Seat { col: Some(&kit.col), at: mat_at(&ee, ee.u32_at(r + 0xf8)), ghost: false, riding: true }).collect();
+    let hulls: Vec<Hull<'_>> = (0..2)
+        .map(|k| Hull { seat: k, mesh: &kit.hull, at: mat_at(&ee, ee.u32_at(recs[2 + k] + 0xf8)), capacity: kit.plane.record.capacity })
+        .collect();
+    let (own, _) = rider_contact::gather_met(&seats, &hulls, F(dt), &|_, at| at);
+
+    // the original: every list emptied, then every object's search
+    let objects = objects(&ee);
+    for &o in &objects {
+        ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x74), &[u64::from(o)], &[], 50_000_000);
+    }
+    for &o in &objects {
+        ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x7c), &[u64::from(o)], &[dt], 50_000_000);
+    }
+    let orig: Vec<Contact> = list_at(&ee, recs[2], &recs).into_iter().filter(|c| c.kind == 0).collect();
+    assert!(!orig.is_empty() && orig.iter().all(|c| c.other == Some(1)), "{}: the plane's own entries name P2 {orig:?}", named.image);
+    assert_eq!(plane.record.contacts.len(), orig.len(), "the plane's own entries\nport {:?}\noriginal {orig:?}", plane.record.contacts);
+    for (k, (a, b)) in plane.record.contacts.iter().zip(&orig).enumerate() {
+        assert_eq!(differ(a, b), Vec::<&str>::new(), "plane entry {k}\nport {a:?}\noriginal {b:?}");
+    }
+    assert_eq!(met.pushed, [false, true], "the bikes the plane's entries name");
+    for p in 0..2 {
+        let list = rider_contact::struck_first(&met.struck[p..=p], own[p].clone(), Vf::ZERO, &ground);
+        let orig = list_at(&ee, recs[p], &recs);
+        assert_eq!(list.len(), orig.len(), "p{}'s list\nport {list:?}\noriginal {orig:?}", p + 1);
+        for (k, (a, b)) in list.iter().zip(&orig).enumerate() {
+            assert_eq!(differ(a, b), Vec::<&str>::new(), "p{} entry {k}\nport {a:?}\noriginal {b:?}", p + 1);
+        }
+    }
+    assert!(met.struck[1].len() == 2 && met.struck[0].is_empty(), "the mirrors {:?}", met.struck);
 }
