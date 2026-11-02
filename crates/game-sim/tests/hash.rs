@@ -558,7 +558,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // `turning`, `shown`), the two walked only while a flip is on the line, so the leaves do not move.
     // 11992 since S197: the props' f.col shapes (`PropSet::shapes`), the track's meshes shared like
     // its tables, configuration and not walked.
+    // 12000 since N22a: the plane's own collision mesh (`Flight::hull`), the disc's, left out as the
+    // bikes' mesh is.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 11992, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12000, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

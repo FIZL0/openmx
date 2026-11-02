@@ -724,6 +724,19 @@ impl Plane {
     /// listeners keep goes no further, as in [`Sim::step`]: a plane's probe never wrecks a bike
     /// ([`game_sim::flight_search::struck_wreck`]).
     pub fn step_among(&mut self, sim: &Sim, dt: F, world: &mut dyn World, bikes: &[game_sim::flight_search::Bike]) -> bool {
+        self.step_met(sim, dt, world, bikes, None)
+    }
+
+    /// [`Plane::step_among`] with the riders' bikes that struck its hull this tick (N22a,
+    /// [`Flight::frame_met`]): their mirrors on its list, resolved against their chassis.
+    pub fn step_met(
+        &mut self,
+        sim: &Sim,
+        dt: F,
+        world: &mut dyn World,
+        bikes: &[game_sim::flight_search::Bike],
+        met: Option<&mut flight::Met>,
+    ) -> bool {
         let Some(f) = &mut self.flight else { return false };
         if !self.placed {
             // At its file bay the original's spot: the body on the ground under the spot, lifted by
@@ -772,7 +785,7 @@ impl Plane {
             f.autopilot.feed_forward = feed_forward * held;
             f.autopilot.max_pitch_rate = max_pitch_rate * F(ROUND_STICK_PITCH_RATE);
         }
-        let _struck = f.frame_among(dt, pad, world, &sim.tables.ride, bikes);
+        let _struck = f.frame_met(dt, pad, world, &sim.tables.ride, bikes, met);
         f.joystick.min_elevator = min_elevator;
         (f.autopilot.aileron_dead_zone, f.autopilot.feed_forward, f.autopilot.max_pitch_rate) =
             (dead_zone, feed_forward, max_pitch_rate);
@@ -1235,6 +1248,22 @@ impl Garage {
         self.plane.as_ref().filter(|_| self.up == Kind::Biplane)
     }
 
+    /// The flight of the plane the player flies, once it is placed (N22a): what the riders' bikes
+    /// meet ([`Flight::hull`], [`Flight::flown`]).
+    pub fn flight_flown(&self) -> Option<&Flight> {
+        self.plane_flown().filter(|p| p.placed)?.flight.as_ref()
+    }
+
+    /// Its plane's body as a rider's bike pushed it (N22a, [`Flight::pushed`]), written back.
+    pub fn plane_pushed(&mut self, by: &game_sim::rider_contact::Flown) {
+        if let Some(p) = self.plane.as_mut()
+            && let Some(f) = p.flight.as_mut()
+        {
+            f.pushed(by);
+            p.pose();
+        }
+    }
+
     /// Whether the bike is drawn: only while it is up, since a switch away leaves it nowhere.
     pub fn bike_shown(&self) -> bool {
         self.up == Kind::Bike
@@ -1287,7 +1316,7 @@ impl Garage {
             (Kind::Biplane, Some(plane)) => {
                 // The track's path cars run on whichever machine is up (S81).
                 sim.traffic.frame(dt, world);
-                let respawned = plane.step_among(sim, dt, world, among.bikes);
+                let respawned = plane.step_met(sim, dt, world, among.bikes, among.met);
                 rider::Frame { respawned, ..rider::Frame::default() }
             }
             // The bike's ghost ticks inside its update (`Rider::frame`), so a bike the plane has the
@@ -1306,6 +1335,8 @@ pub struct Among<'a> {
     pub bump: Option<&'a mut game_sim::rider_contact::Bump>,
     pub rivals: &'a [game_sim::ride::Rival],
     pub bikes: &'a [game_sim::flight_search::Bike],
+    /// The bikes that struck its plane's hull this tick (N22a): their mirrors and chassis.
+    pub met: Option<&'a mut flight::Met>,
 }
 
 /// **The switch online** (N17): a seat's machine is a rollback input, and its plane is session state.
@@ -1425,11 +1456,23 @@ pub fn fly_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> 
 
 /// [`fly_lane`] with the other seats' `bikes` in the plane's world (S225, [`Plane::step_among`]).
 pub fn fly_lane_among(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World, bikes: &[game_sim::flight_search::Bike]) -> bool {
+    fly_lane_met(sim, dt, wanted, world, bikes, None)
+}
+
+/// [`fly_lane_among`] with the bikes that struck the seat's plane this tick (N22a, [`Plane::step_met`]).
+pub fn fly_lane_met(
+    sim: &mut Sim,
+    dt: F,
+    wanted: Wanted,
+    world: &mut dyn World,
+    bikes: &[game_sim::flight_search::Bike],
+    met: Option<&mut flight::Met>,
+) -> bool {
     let Some(f) = sim.plane.take() else { return false };
     sim.traffic.frame(dt, world);
     let mut plane =
         Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
-    let respawned = plane.step_among(sim, dt, world, bikes);
+    let respawned = plane.step_met(sim, dt, world, bikes, met);
     sim.plane = plane.flight.take();
     respawned
 }

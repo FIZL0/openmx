@@ -74,14 +74,29 @@ impl Game for Rides<'_> {
         let touching: Vec<bool> = riding.iter().zip(&paused).map(|(&r, &p)| r && !p).collect();
         // Rider against rider (S78): every seat's contacts, from where the last tick left every bike.
         // On a world that wraps (MD44), each bike against every other's nearest copy.
-        let mut lists = rider_contact::among_in(self.sims, &touching, dt, &*self.world);
-        // The last seat first, as the original walks its riders (S88, `Sim::step_all`).
-        for seat in (0..self.sims.len()).rev() {
-            let mut bump = lists
-                .as_mut()
-                .map(|l| std::mem::take(&mut l[seat]))
-                .filter(|l| !l.is_empty())
-                .map(|l| rider_contact::bump_among_in(self.sims, seat, l, &*self.world));
+        // A flying seat's plane is in it too (N22a): its hull struck by the bikes, the mirrors on its
+        // list. The planes step first, as the original's dynamics world steps before its riders.
+        let aloft: Vec<bool> = self.sims.iter().zip(&touching).map(|(s, &t)| t && s.plane.as_ref().is_some_and(|f| f.hull(0).is_some())).collect();
+        let (mut lists, mut mirrors) = match rider_contact::among_met(self.sims, &touching, dt, &*self.world) {
+            Some((l, m)) => (Some(l), m),
+            None => (None, Vec::new()),
+        };
+        let flown: Vec<usize> = (0..self.sims.len()).filter(|&i| aloft[i]).collect();
+        // The last seat first, as the original walks its riders (S88, `Sim::step_all`), after the
+        // flying seats (N22a).
+        let n = self.sims.len();
+        let order: Vec<usize> = (0..n).rev().filter(|&i| aloft[i]).chain((0..n).rev().filter(|&i| !aloft[i])).collect();
+        for seat in order {
+            let mut bump = lists.as_mut().map(|l| std::mem::take(&mut l[seat])).filter(|l| !l.is_empty()).map(|l| {
+                let mut b = rider_contact::bump_among_in(self.sims, seat, l, &*self.world);
+                let from = self.sims[seat].rider.ride.transform().0[3];
+                b.planes = flown.iter().filter_map(|&j| Some(self.sims[j].plane.as_ref()?.flown(j, from, &*self.world))).collect();
+                b
+            });
+            let mut met = flown.iter().position(|&j| j == seat).map(|k| std::mem::take(&mut mirrors[k])).filter(|m| !m.is_empty()).and_then(|m| {
+                let at = self.sims[seat].plane.as_ref()?.body.position;
+                Some(rider_contact::met_among(self.sims, m, at, &*self.world))
+            });
             if paused[seat] {
                 continue;
             }
@@ -114,7 +129,7 @@ impl Game for Rides<'_> {
             // On the plane the bike is not stepped, its markers do not run and its rider's body
             // does not move, as offline (`Seat::pass`); the plane's own markers do (P107).
             if sim.plane.is_some() {
-                vehicle::fly_lane_among(sim, dt, wanted, self.world, &bikes);
+                vehicle::fly_lane_met(sim, dt, wanted, self.world, &bikes, met.as_mut());
                 if !wanted.dpad_rides {
                     vehicle::lane_markers(sim, seat, &spots, &riding, self.world);
                 }
@@ -129,6 +144,11 @@ impl Game for Rides<'_> {
             }
             if let Some(b) = &bump {
                 rider_contact::bumped_among(self.sims, b);
+                for f in &b.planes {
+                    if let Some(p) = self.sims[f.seat].plane.as_mut() {
+                        p.pushed(f);
+                    }
+                }
             }
         }
     }

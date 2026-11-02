@@ -158,9 +158,12 @@ fn distance(a: Vf, b: Vf) -> F {
     F(fpu::sqrt(fpu::madd(acc, d.z(), d.z())))
 }
 
-/// The narrow phase of one bike's body rays: every other bike's frame mesh, struck as its player.
+/// The narrow phase of one bike's body rays: every other bike's frame mesh, struck as its player, and
+/// every flown plane's hull (N22a), collidable `4 · players + k`.
 struct Strikes<'a> {
     seats: &'a [Seat<'a>],
+    hulls: &'a [Posed<'a>],
+    facets: Vec<Option<Vec<ray_probe::Facet>>>,
     ray: ray_probe::Record,
 }
 
@@ -173,6 +176,19 @@ impl Narrow for Strikes<'_> {
 
     fn pair(&mut self, _objects: &mut [Collidable], probe: usize, other: usize) -> bool {
         let (i, j) = (probe / 4, other / 4);
+        if let Some(k) = other.checked_sub(4 * self.seats.len()) {
+            let (Some(mine), Some(h)) = (self.seats[i].col, self.hulls.get(k)) else { return false };
+            let facets = self.facets[k].get_or_insert_with(|| crate::flight_search::facets(h.mesh));
+            let mesh = ray_probe::Mesh {
+                id: other as u32,
+                transform: h.to_world.0,
+                root: 0,
+                nodes: &h.mesh.nodes,
+                facets,
+                vertices: &h.mesh.vertices,
+            };
+            return ray_probe::pair(&mine.probe(self.seats[i].at.0), &ray_probe::Shape::Mesh(mesh), &mut self.ray);
+        }
         if other % 4 != bike_col::FRAME {
             return false;
         }
@@ -205,14 +221,21 @@ struct Probe<'a> {
 }
 
 impl Probe<'_> {
-    /// The other bikes' frames, in player order, with their distance from the rays' centre less the
-    /// frame's reach: a ghost's is not in the broad phase, nor is one off the list.
+    /// The flown planes' hulls (N22a), then the other bikes' frames, in player order, with their
+    /// distance from the rays' centre less the frame's reach: a ghost's is not in the broad phase,
+    /// nor is one off the list. The planes come first, as the original's search lists them.
     fn gathered(&self) -> Nearby {
         let seats = self.strikes.seats;
         let Some(mine) = seats[self.me].col else { return Nearby::default() };
         let (centre, _) = crate::flight_search::reach(&mine.rays, &seats[self.me].at.0);
-        let found = seats
+        let planes = self
+            .strikes
+            .hulls
             .iter()
+            .enumerate()
+            .map(|(k, h)| Candidate { object: 4 * seats.len() + k, distance: distance(centre, h.centre) - h.radius });
+        let found = planes
+            .chain(seats.iter()
             .enumerate()
             .filter(|&(j, s)| j != self.me && s.listed() && !s.ghost)
             .filter_map(|(j, s)| {
@@ -220,7 +243,7 @@ impl Probe<'_> {
                 let root = col.frame.nodes.first()?;
                 let theirs = placed(&s.at.0, root.centre);
                 Some(Candidate { object: 4 * j + bike_col::FRAME, distance: distance(centre, theirs) - col.frame_radius })
-            })
+            }))
             .collect();
         Nearby { found, prepare: false }
     }
@@ -237,7 +260,12 @@ impl Search for Probe<'_> {
             .iter()
             .map(|c| {
                 let j = c.object as usize;
-                let struck = Struck { object: 4 * j + bike_col::FRAME, other: Some(j), mover: None };
+                let n = self.strikes.seats.len();
+                // A plane's hull is struck as its record, after the players' (N22a).
+                let struck = match j.checked_sub(4 * n) {
+                    Some(k) => Struck { object: j, other: Some(n + k), mover: None },
+                    None => Struck { object: 4 * j + bike_col::FRAME, other: Some(j), mover: None },
+                };
                 Hit { from: c.from, to: c.to, point: c.point, normal: c.normal, struck }
             })
             .collect()
@@ -294,6 +322,39 @@ pub type Near<'a> = &'a dyn Fn(Vf, Vf) -> Vf;
 /// point is the copy nearest where it really stands. On a world that does not wrap `near` answers
 /// the point it is given, and this is [`gather`] to the bit.
 pub fn gather_near(seats: &[Seat<'_>], dt: F, near: Near<'_>) -> Vec<Vec<Contact>> {
+    gather_met(seats, &[], dt, near).0
+}
+
+/// **A flown plane's hull as the riders' bikes meet it** (N22a): its collision mesh
+/// (`biplanef.col`, [`crate::flight::Flight::hull`]) where the plane's collision node stands it
+/// (the model's origin, as the plane's own search last placed it), and the room its record has.
+/// Its seat is the plane's player, which the bikes' resolve writes its body back to.
+#[derive(Clone, Copy)]
+pub struct Hull<'a> {
+    pub seat: usize,
+    pub mesh: &'a crate::track::Mesh,
+    pub at: Mat4,
+    pub capacity: usize,
+}
+
+/// A hull where it stands, with the sphere its collidable is gathered by.
+struct Posed<'a> {
+    mesh: &'a crate::track::Mesh,
+    to_world: Mat4,
+    centre: Vf,
+    radius: F,
+}
+
+/// [`gather_near`] with the flown planes' hulls in the riders' world (N22a). The original keeps both
+/// planes' collision objects in the riders' list, ahead of the bikes, and a bike's body rays strike
+/// a plane's hull (category [`crate::flight::COLLIDABLE`], which they do not ignore) as they strike
+/// another bike's frame: the entry on the bike's list names plane `k` as `seats.len() + k`, and the
+/// mirror (kind 1) goes on the plane's list naming the bike. Answers each seat's list, then each
+/// hull's mirrors, in `hulls`' order. The planes' own searches are their frames' ([`crate::flight`]),
+/// so their lists here hold only the mirrors, which the plane's frame puts after its own entries
+/// ([`crate::flight::Met`]), as the original's list order puts them.
+pub fn gather_met(seats: &[Seat<'_>], hulls: &[Hull<'_>], dt: F, near: Near<'_>) -> (Vec<Vec<Contact>>, Vec<Vec<Contact>>) {
+    let n = seats.len();
     let mut records: Vec<Record> = seats
         .iter()
         .map(|s| Record {
@@ -310,7 +371,18 @@ pub fn gather_near(seats: &[Seat<'_>], dt: F, near: Near<'_>) -> Vec<Vec<Contact
             ..Record::default()
         })
         .collect();
-    let objects = collidables(seats);
+    records.extend(hulls.iter().map(|h| Record { capacity: h.capacity, ..Record::default() }));
+    let mut objects = collidables(seats);
+    objects.extend(hulls.iter().map(|h| Collidable {
+        class: world_search::Class::Object,
+        flags: flags::ENABLED,
+        nearby: true,
+        radius: crate::world::Prop::posed(h.mesh, &h.at).2,
+        category: crate::flight::COLLIDABLE,
+        collides_with: crate::flight::COLLIDES_WITH,
+        categories: world_search::Categories { mode: 1, list: Vec::new() },
+        ..Collidable::default()
+    }));
     for me in 0..seats.len() {
         if !seats[me].listed() {
             continue;
@@ -327,17 +399,30 @@ pub fn gather_near(seats: &[Seat<'_>], dt: F, near: Near<'_>) -> Vec<Vec<Contact
                 s
             })
             .collect();
+        let posed: Vec<Posed<'_>> = hulls
+            .iter()
+            .map(|h| {
+                let mut at = h.at;
+                at.0[3] = near(from, at.0[3]);
+                let (to_world, centre, radius) = crate::world::Prop::posed(h.mesh, &at);
+                Posed { mesh: h.mesh, to_world, centre, radius }
+            })
+            .collect();
         let before: Vec<usize> = records.iter().map(|r| r.contacts.len()).collect();
         let ray = ray_probe::Record { listed: true, capacity: CAPACITY, one_per_ray: true, ..ray_probe::Record::default() };
-        let mut probe = Probe { strikes: Strikes { seats: &placed, ray }, objects: objects.clone(), me };
+        let strikes = Strikes { seats: &placed, hulls: &posed, facets: posed.iter().map(|_| None).collect(), ray };
+        let mut probe = Probe { strikes, objects: objects.clone(), me };
         contact_search::collide(&mut records, me, None, None, &mut probe, dt);
         for (o, r) in records.iter_mut().enumerate().filter(|&(o, _)| o != me) {
+            let stands = if o < n { seats[o].at.0[3] } else { hulls[o - n].at.0[3] };
             for c in &mut r.contacts[before[o]..] {
-                c.point = near(seats[o].at.0[3], c.point);
+                c.point = near(stands, c.point);
             }
         }
     }
-    records.into_iter().map(|r| r.contacts).collect()
+    let mut lists = records.into_iter().map(|r| r.contacts);
+    let bikes = lists.by_ref().take(n).collect();
+    (bikes, lists.collect())
 }
 
 /// **One bike's contacts while it is stepped**: its list, every player's object, and every other
@@ -355,6 +440,22 @@ pub struct Bump {
     /// other sides after the players' (an entry's other `players + k` is `props[k]`): pushed by the
     /// resolve, and written back to the props after the frame.
     pub props: Vec<crate::prop_contact::Pushed>,
+    /// The flown planes' bodies the list's entries strike (N22a, [`gather_met`]), the other sides
+    /// after the players' and before the props (an entry's other `players + k` is `planes[k]`):
+    /// pushed by the resolve, and written back to the planes after the frame
+    /// ([`crate::flight::Flight::pushed`]).
+    pub planes: Vec<Flown>,
+}
+
+/// **A flown plane's body as a bike's resolve pushes it** (N22a): a copy of its collision object's
+/// tuning and its body, carried through the bike's frame in its bump and written back after. On a
+/// world that wraps the body is the copy nearest the bike ([`crate::flight::Flight::flown`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flown {
+    pub seat: usize,
+    pub collider: Collider,
+    pub body: crate::biplane::Body,
+    pub mass: F,
 }
 
 impl Bump {
@@ -365,12 +466,18 @@ impl Bump {
             return;
         }
         let mut mine = self.colliders[self.me];
+        let mut planes: Vec<_> = self
+            .planes
+            .iter_mut()
+            .map(|p| (&mut p.collider, contact::Weighed { body: &mut p.body, mass: p.mass }))
+            .collect();
         let mut bodies: Vec<_> = self.props.iter_mut().map(crate::prop_contact::Pushed::weighed).collect();
         let mut others: Vec<Other<'_>> = self
             .colliders
             .iter_mut()
             .zip(self.vehicles.iter_mut())
             .map(|(collider, v)| Other { collider, side: Side::Vehicle(v) })
+            .chain(planes.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
             .chain(bodies.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
             .collect();
         contact::resolve_ridden(&mut mine, own, &mut self.contacts, &mut others, &self.movers, first);
@@ -508,7 +615,7 @@ pub fn ground_hits(contacts: &[Contact]) -> Vec<crate::air::Contact> {
 
 /// A bike alone in its list: `contacts` against its own object and chassis, the one seat there is.
 pub fn alone(ride: &crate::ride::Ride, p: &Phy, contacts: Vec<Contact>) -> Bump {
-    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)], movers: Vec::new(), props: Vec::new() }
+    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)], movers: Vec::new(), props: Vec::new(), planes: Vec::new() }
 }
 
 /// `riders`' contacts, or `None` when none of them carries its collision files.
@@ -536,7 +643,7 @@ fn bump_of(riders: &[(&Rider, &Phy)], me: usize, contacts: Vec<Contact>, near: N
             v
         })
         .collect();
-    Bump { me, contacts, colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(), vehicles, movers: Vec::new(), props: Vec::new() }
+    Bump { me, contacts, colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(), vehicles, movers: Vec::new(), props: Vec::new(), planes: Vec::new() }
 }
 
 /// `at` as it is: the copy of a point on a world that does not wrap.
@@ -609,7 +716,7 @@ impl crate::Sim {
         let cars = self.car_contacts(0, world, dt);
         if let Some(b) = bump.as_deref_mut() {
             b.contacts = crate::mover_contact::merged(std::mem::take(&mut b.contacts), cars);
-            let strike = self.prop_strike_seated(b.vehicles.len(), dt);
+            let strike = self.prop_strike_seated(b.vehicles.len() + b.planes.len(), dt);
             self.strike_into(b, strike);
         }
         let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], bump.as_deref_mut());
@@ -672,6 +779,55 @@ pub fn bumped_among(sims: &mut [Sim], bump: &Bump) {
 /// not frozen). [`among_in`] on them.
 pub fn contacts_among(riders: &[(&Rider, bool)], dt: F, world: &dyn World) -> Option<Vec<Vec<Contact>>> {
     contacts_of(riders, dt, &|from, at| crate::nearest_copy(world, from, at))
+}
+
+/// [`contacts_among`] with the flown planes' `hulls` in the riders' world (N22a, [`gather_met`]):
+/// each rider's list, then each hull's mirrors in `hulls`' order.
+pub fn contacts_met(riders: &[(&Rider, bool)], hulls: &[Hull<'_>], dt: F, world: &dyn World) -> Option<(Vec<Vec<Contact>>, Vec<Vec<Contact>>)> {
+    if riders.iter().all(|(r, _)| r.bike_col.is_none()) {
+        return None;
+    }
+    let seats: Vec<Seat<'_>> = riders.iter().map(|&(r, seated)| seat_of(r, seated)).collect();
+    Some(gather_met(&seats, hulls, dt, &|from, at| crate::nearest_copy(world, from, at)))
+}
+
+/// [`among_in`] with the seats' flown planes in the riders' world (N22a, [`contacts_met`]): every
+/// seat whose [`Sim::plane`] has its hull, in seat order, while `seated`.
+pub fn among_met(sims: &[Sim], seated: &[bool], dt: F, world: &dyn World) -> Option<(Vec<Vec<Contact>>, Vec<Vec<Contact>>)> {
+    let riders: Vec<(&Rider, bool)> = sims
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (&s.rider, seated.get(i).copied().unwrap_or(false) && s.plane.is_none()))
+        .collect();
+    let hulls: Vec<Hull<'_>> = sims
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| seated.get(i).copied().unwrap_or(false))
+        .filter_map(|(i, s)| s.plane.as_ref()?.hull(i))
+        .collect();
+    contacts_met(&riders, &hulls, dt, world)
+}
+
+/// The riders' bikes as a flown plane's mirrors meet them (N22a, [`crate::flight::Met`]): the plane's
+/// share of [`gather_met`], every rider's object and chassis by player, where it is nearest the
+/// plane (`flying`, the plane's body) on a world that wraps.
+pub fn met_riders(riders: &[(&Rider, &Phy)], mirrors: Vec<Contact>, flying: Vf, world: &dyn World) -> crate::flight::Met {
+    let vehicles = riders
+        .iter()
+        .map(|&(r, p)| {
+            let mut v = vehicle_of(r, p);
+            v.node.origin = crate::nearest_copy(world, flying, v.node.origin);
+            v
+        })
+        .collect();
+    let colliders = riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect();
+    crate::flight::Met { mirrors, colliders, vehicles }
+}
+
+/// [`met_riders`] on online's seats.
+pub fn met_among(sims: &[Sim], mirrors: Vec<Contact>, flying: Vf, world: &dyn World) -> crate::flight::Met {
+    let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
+    met_riders(&riders, mirrors, flying, world)
 }
 
 /// [`bump_among_in`] on riders as the shell holds them (N22).
@@ -745,7 +901,7 @@ impl Sim {
         self.lend_cars();
         self.event_frame(dt);
         let cars = self.car_contacts(0, world, dt);
-        let players = bump.as_deref().map_or(1, |b| b.vehicles.len());
+        let players = bump.as_deref().map_or(1, |b| b.vehicles.len() + b.planes.len());
         let strike = self.prop_strike_seated(players, dt);
         let mut own;
         let bump = match bump {
