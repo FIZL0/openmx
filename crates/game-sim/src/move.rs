@@ -57,8 +57,10 @@ use crate::camera::{CurveTable, rotate};
 use ps2_float::{Dest, F, Field, Vf, fpu, fpu::Acc, vu};
 
 /// `-pi/2` and `-pi` as the original's instruction stream holds them. Negative because the stick
-/// angle the donut reads runs clockwise from straight ahead, so a right-hand donut is the whole
-/// range from `0` to `-pi` and the quadrant boundary is at `-pi/2`.
+/// angle the donut reads is the trick decoder's ([`crate::trick::look`]): from straight right,
+/// positive with the stick pulled back, so the stick pushed forward is the whole range from `0`
+/// (right) through `-pi/2` (straight ahead) to `-pi` (left), and a pulled-back stick asks for no
+/// donut at all (S228b).
 const NEG_HALF_PI: f32 = -1.5707964;
 #[allow(clippy::approx_constant)] // the game's own seven digits, not `f32::consts::PI` rounded
 const NEG_PI: f32 = -3.1415927;
