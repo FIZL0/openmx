@@ -341,7 +341,7 @@ impl crate::Sim {
 
     /// The props' step after the riders' frames (S197): the struck bodies' mirrors read every player's
     /// chassis as their frame left it, by player.
-    pub fn props_step(&mut self, dt: F, movers: &[crate::contact::Mover]) {
+    pub fn props_step(&mut self, dt: F, movers: &crate::prop_set::PropMovers) {
         if self.traffic.props.is_empty() {
             return;
         }
@@ -352,6 +352,6 @@ impl crate::Sim {
             .zip(bump.vehicles.iter_mut())
             .map(|(collider, v)| Other { collider, side: Side::Vehicle(v) })
             .collect();
-        self.traffic.props.step(dt, movers, &mut others);
+        self.traffic.props.step_with(dt, movers, &mut others);
     }
 }

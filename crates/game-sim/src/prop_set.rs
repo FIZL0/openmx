@@ -209,6 +209,54 @@ impl PropSet {
         props.map(|p| flight_search::movers(&p.props)).unwrap_or_default()
     }
 
+    /// [`PropSet::search`] in a `world`, each collection against the shapes near its bodies (MD58):
+    /// [`World::wooded_near`] around the middle of its filed bodies, as the plane's and the bike's
+    /// searches take a world of many tiles (V96, MD28), so a woken prop's tick does not grow with the
+    /// world. A collection whose filed bodies lie further apart than a near set reaches for all of
+    /// them searches the whole set ([`World::wooded`]), and one with nothing filed searches nothing
+    /// and asks nothing. A world of one map hands its whole set everywhere, so there it is
+    /// [`PropSet::search`] over [`World::wooded`].
+    ///
+    /// A contact's mover is named by its place in the set its search was handed, so the movers go
+    /// by set ([`PropMovers`]), and [`PropSet::step_with`] hands each collection its own.
+    ///
+    /// [`World::wooded_near`]: crate::world::World::wooded_near
+    /// [`World::wooded`]: crate::world::World::wooded
+    pub fn search_in(&mut self, dt: F, world: &mut dyn crate::world::World) -> PropMovers {
+        let mut out = PropMovers::default();
+        if self.tables.is_none() {
+            return out;
+        }
+        let mut keys: Vec<Option<[i32; 2]>> = Vec::new();
+        for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
+            let Some(at) = filed_middle(c) else {
+                out.of.push(None);
+                continue;
+            };
+            let key = world.near_set(at).filter(|_| filed_within(c, at));
+            let (field, props, trees) = if key.is_some() { world.wooded_near(at) } else { world.wooded() };
+            c.search(dt, rays, field.as_deref(), props, trees);
+            let set = match keys.iter().position(|k| *k == key) {
+                Some(i) => i,
+                None => {
+                    keys.push(key);
+                    out.sets.push(props.map(|p| flight_search::movers(&p.props)).unwrap_or_default());
+                    out.sets.len() - 1
+                }
+            };
+            out.of.push(Some(set));
+        }
+        out
+    }
+
+    /// [`PropSet::step`] with each collection's movers its own search's ([`PropSet::search_in`]).
+    pub fn step_with(&mut self, dt: F, movers: &PropMovers, strikers: &mut [Other<'_>]) {
+        let Some(tables) = &self.tables else { return };
+        for (k, c) in self.collections.iter_mut().enumerate() {
+            c.step_among(dt, tables, movers.of(k), strikers);
+        }
+    }
+
     /// The second half of [`PropSet::frame_among`]: every collection's step and listeners, the
     /// contacts' `movers` the search's, and `strikers` the riding bikes a struck body's mirrored
     /// contacts name (S197: by player, [`crate::prop_contact`]).
@@ -254,6 +302,56 @@ impl PropSet {
     pub fn matrix(node: &Node) -> Mat4 {
         Mat4([node.rows[0], node.rows[1], node.rows[2], node.origin])
     }
+}
+
+/// The movers [`PropSet::search_in`]'s searches named (MD58): one list for each set of shapes a
+/// search was handed, and which list each collection's contacts index.
+#[derive(Clone, Debug, Default)]
+pub struct PropMovers {
+    /// Each set's movers ([`flight_search::movers`]), in the order the sets were first handed.
+    pub sets: Vec<Vec<Mover>>,
+    /// Each collection's set, in collection order: `None` for one that did not search.
+    pub of: Vec<Option<usize>>,
+}
+
+impl PropMovers {
+    /// The movers collection `k`'s contacts index: none where it did not search.
+    pub fn of(&self, k: usize) -> &[Mover] {
+        self.of.get(k).copied().flatten().map_or(&[][..], |s| &self.sets[s][..])
+    }
+}
+
+/// The middle of a collection's filed bodies on the ground plane, at the first one's height: where
+/// [`PropSet::search_in`] asks for its near set. `None` with nothing filed.
+fn filed_middle(c: &Collection) -> Option<Vf> {
+    let mut filed = c.objects.iter().filter(|o| o.filed).map(|o| o.node.origin);
+    let first = filed.next()?;
+    let (mut lo, mut hi) = ([F(first.x()), F(first.z())], [F(first.x()), F(first.z())]);
+    for at in filed {
+        let p = [F(at.x()), F(at.z())];
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let half = F(0.5);
+    Some(Vf::new(((lo[0] + hi[0]) * half).0, first.y(), ((lo[1] + hi[1]) * half).0, 1.0))
+}
+
+/// How far a filed body's search may reach past its own origin, feet, for a near set to serve it
+/// ([`filed_within`]): half of [`crate::world::NEAR_MARGIN`], far more than a prop's rays and its
+/// sweep back over a tick.
+const PROP_REACH: f32 = 128.0;
+
+/// Whether every filed body of `c` lies within [`PROP_REACH`] of the margin of `at`'s near
+/// square, so the near set holds every shape its search can meet. `at` is in its square, so a body
+/// within `NEAR_MARGIN − PROP_REACH` of `at` on each axis is.
+fn filed_within(c: &Collection, at: Vf) -> bool {
+    let room = F(crate::world::NEAR_MARGIN) - F(PROP_REACH);
+    c.objects
+        .iter()
+        .filter(|o| o.filed)
+        .all(|o| (F(o.node.origin.x()) - F(at.x())).abs() <= room && (F(o.node.origin.z()) - F(at.z())).abs() <= room)
 }
 
 impl std::fmt::Debug for PropSet {
