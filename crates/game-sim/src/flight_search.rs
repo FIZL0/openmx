@@ -285,15 +285,19 @@ pub fn prop_box(p: &Prop) -> ([F; 4], [F; 4]) {
 /// props' boxes together (and the unit square). A field without edges — the port's own worlds' — is
 /// no field here.
 fn tree_box(props: &[Prop], field: Option<([F; 2], [F; 2])>) -> ([F; 2], [F; 2]) {
+    edged(field).unwrap_or_else(|| boxes_box(props.iter().map(prop_box)))
+}
+
+/// The field, if it has edges.
+fn edged(field: Option<([F; 2], [F; 2])>) -> Option<([F; 2], [F; 2])> {
     const EDGE: f32 = 16_777_216.0;
-    if let Some((lo, hi)) = field
-        && lo.iter().chain(&hi).all(|&v| -EDGE < v && v < EDGE)
-    {
-        return (lo, hi);
-    }
+    field.filter(|(lo, hi)| lo.iter().chain(hi).all(|&v| -EDGE < v && v < EDGE))
+}
+
+/// The boxes together on the ground plane, and the unit square.
+fn boxes_box(boxes: impl Iterator<Item = ([F; 4], [F; 4])>) -> ([F; 2], [F; 2]) {
     let (mut lo, mut hi) = ([F::ZERO; 2], [F::ONE; 2]);
-    for p in props {
-        let (c, h) = prop_box(p);
+    for (c, h) in boxes {
         for (k, i) in [(0, 0), (1, 2)] {
             lo[k] = lo[k].min(c[i] - h[i]);
             hi[k] = hi[k].max(c[i] + h[i]);
@@ -403,6 +407,8 @@ fn world_unfiled(
     radius: F,
     toys: bool,
 ) -> (Broad, Vec<Collidable>, Filing) {
+    let (b, u, g) = BUILDS.get();
+    BUILDS.set((b + 1, u, g));
     let probe = |flags, radius| Collidable {
         class: Class::Object,
         flags,
@@ -531,7 +537,22 @@ fn wooded_of(
     radius: F,
     toys: bool,
 ) -> (Broad, Vec<Collidable>) {
-    let Some(trees) = trees else { return world_of(props, bikes, field, centre, radius, toys) };
+    let (mut broad, objects, filing) = wooded_unfiled(props, trees, bikes, field, centre, radius, toys);
+    filing.file(&mut broad);
+    (broad, objects)
+}
+
+/// [`wooded_of`] with its tree laid but nothing filed in it yet, and what to file.
+fn wooded_unfiled(
+    props: &[Prop],
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+    toys: bool,
+) -> (Broad, Vec<Collidable>, Filing) {
+    let Some(trees) = trees else { return world_unfiled(props, bikes, field, centre, radius, toys) };
     // With no terrain to lay the tree over (none, or one with no edge), it spans the trunks as well
     // as the props.
     let bare = tree_box(props, None);
@@ -551,7 +572,6 @@ fn wooded_of(
         broad.places.push(Placement { centre: c, cell: [g.cell[0], g.cell[2]], model: g.model, blend: g.blend, ..Placement::default() });
         filing.items.push((o, c, h));
     }
-    filing.file(&mut broad);
     for p in &trees.props.props {
         objects.push(Collidable {
             class: Class::Object,
@@ -567,7 +587,412 @@ fn wooded_of(
     }
     broad.group_cell = trees.cell();
     broad.models = trees.models().to_vec();
-    (broad, objects)
+    (broad, objects, filing)
+}
+
+/// **A world kept between searches** (S236). A tick's searches — the bike's wheels every substep, its
+/// sweep back, the props', the plane's two — each asked [`wooded_of`] for the world afresh, and on the
+/// Steam Deck building it (a collidable, a placement and a box for every prop, plant and trunk, the
+/// tree filed or copied) was most of a tick. The world is a function of the props, the plants, the
+/// field and `toys`; of the ray probe's reach, which only the two probes carry; and of the bikes'
+/// transforms, which only the bikes' own collidables and the moving list's tail carry. So a world is
+/// built once under a stamp of every bit the build reads but those ([`stamp_world`]) and kept; each
+/// search puts the probes and the bikes where they are now ([`Kept::place`]) and the broad phase's
+/// query state back as built ([`Kept::rewind`]). When only some props have moved since — the path
+/// cars, every tick — the kept world is brought up to them ([`Kept::update`]) rather than built again.
+/// Either way it is the `Broad` and the collidables a fresh build gives, field for field
+/// ([`kept_world`]).
+struct Kept {
+    stamp: Vec<u32>,
+    /// Where the props' words are in the stamp ([`PROP_WORDS`] each).
+    props_at: std::ops::Range<usize>,
+    /// Which build or update of a world this is, for the collidable lists searched in it ([`lend`]).
+    generation: u64,
+    broad: Broad,
+    objects: Vec<Collidable>,
+    /// The moving list's slots ahead of the bikes' (the toys and the two probes), and the first bike's
+    /// collidable.
+    moving: i32,
+    bikes: usize,
+    /// Each prop's box ([`prop_box`]); the trunks' boxes together ([`boxes_box`]), with plants; and
+    /// the box the tree is laid over.
+    boxes: Vec<([F; 4], [F; 4])>,
+    trunks: Option<([F; 2], [F; 2])>,
+    lo: [F; 2],
+    hi: [F; 2],
+    /// What the tree is filed with, in order: each item's collidable, its key, and how many changes
+    /// the tree's log had before it ([`broad_build::insert_logged`]).
+    filed: Vec<(usize, u32, usize)>,
+    log: broad_build::Log,
+}
+
+/// How many built worlds each thread keeps: a tick's are the riding one (the bike's searches and the
+/// props'), the flown one (the plane's, the wreck bike's, the put-back's), and another square's set in
+/// a world of many tiles.
+const WORLDS_KEPT: usize = 8;
+
+/// Words a prop puts in a world's stamp ([`stamp_props`]).
+const PROP_WORDS: usize = 25;
+
+thread_local! {
+    /// The worlds kept, newest first, and the stamp being made for the next search.
+    static KEPT: std::cell::RefCell<(Vec<Kept>, Vec<u32>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    /// How many worlds this thread has built and how many kept ones it has brought up to moved props
+    /// ([`world_builds`]), and the last generation handed out ([`Kept::generation`]).
+    static BUILDS: std::cell::Cell<(u64, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
+    /// Collidable lists a search was done with, each under the generation it was copied from.
+    static SPARE: std::cell::RefCell<Vec<(u64, Vec<Collidable>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many worlds the searches on this thread have built since it started, and how many kept ones
+/// they have brought up to props that moved ([`Kept::update`]). A world kept from an earlier search is
+/// neither: a steady ride builds none a search, and updates one a tick while the path cars drive.
+pub fn world_builds() -> (u64, u64) {
+    let (built, updated, _) = BUILDS.get();
+    (built, updated)
+}
+
+/// Drop the worlds this thread keeps, and the collidable lists lent with them: the next search builds
+/// afresh.
+pub fn forget_worlds() {
+    KEPT.with(|k| k.borrow_mut().0.clear());
+    SPARE.with(|s| s.borrow_mut().clear());
+}
+
+/// The world a search with these would be handed ([`world_wooded`], or with `toys` [`world_flown`]),
+/// as the worlds this thread keeps give it: the one to hold up against a fresh build.
+#[allow(clippy::too_many_arguments)]
+pub fn kept(
+    props: &[Prop],
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+    toys: bool,
+) -> (Broad, Vec<Collidable>) {
+    kept_world(props, trees, bikes, field, centre, radius, toys, |broad, built, _| (broad.clone(), built.to_vec()))
+}
+
+fn generation() -> u64 {
+    let (b, u, g) = BUILDS.get();
+    BUILDS.set((b, u, g + 1));
+    g + 1
+}
+
+fn bits(v: &[F]) -> impl Iterator<Item = u32> + '_ {
+    v.iter().map(|f| f.0.to_bits())
+}
+
+/// What each prop gives the build, [`PROP_WORDS`] apiece after their count: whether it moves, its
+/// reach, and what its box comes from — its root node through its frame, or its centre without a tree.
+/// Where the props' words are.
+fn stamp_props(stamp: &mut Vec<u32>, props: &[Prop]) -> std::ops::Range<usize> {
+    stamp.push(props.len() as u32);
+    let start = stamp.len();
+    for p in props {
+        stamp.push(u32::from(p.moving.is_some()));
+        stamp.push(p.radius.0.to_bits());
+        match p.mesh.nodes.first() {
+            Some(n) => {
+                stamp.push(1);
+                stamp.extend(bits(&n.centre).chain(bits(&n.half_extent)));
+            }
+            None => {
+                stamp.push(0);
+                stamp.extend(p.centre.0.iter().map(|f| f.to_bits()).chain([0, 0]));
+            }
+        }
+        stamp.extend(p.to_world.0.iter().flat_map(|r| r.0.map(f32::to_bits)));
+    }
+    debug_assert_eq!(stamp.len() - start, PROP_WORDS * props.len());
+    start..stamp.len()
+}
+
+/// Every bit [`wooded_of`] reads but the probes' reach and the bikes' transforms; where the props'
+/// words are.
+fn stamp_world(
+    stamp: &mut Vec<u32>,
+    props: &[Prop],
+    trees: Option<&Trees>,
+    bikes: usize,
+    field: Option<([F; 2], [F; 2])>,
+    toys: bool,
+) -> std::ops::Range<usize> {
+    stamp.clear();
+    stamp.push(u32::from(toys));
+    match field {
+        Some((lo, hi)) => {
+            stamp.push(1);
+            stamp.extend(bits(&lo).chain(bits(&hi)));
+        }
+        None => stamp.push(0),
+    }
+    stamp.push(bikes as u32);
+    let at = stamp_props(stamp, props);
+    let Some(trees) = trees else {
+        stamp.push(0);
+        return at;
+    };
+    stamp.push(1);
+    stamp.push(trees.cell().0.to_bits());
+    stamp.push(trees.groups().len() as u32);
+    for g in trees.groups() {
+        stamp.extend(g.cell.map(u32::from));
+        stamp.push(u32::from(g.model) | u32::from(g.blend as u8) << 8);
+        stamp.extend([g.reach.0.to_bits(), g.half_height.0.to_bits()]);
+    }
+    stamp.push(trees.models().len() as u32);
+    for m in trees.models() {
+        stamp.extend([m.near.0.to_bits(), m.far.0.to_bits()]);
+    }
+    stamp_props(stamp, &trees.props.props);
+    at
+}
+
+/// The box [`wooded_of`]'s tree is laid over, from the props' boxes together (`bare`) and, with
+/// plants, the trunks': the field if it has edges, else the props'; with plants, the field only where
+/// it is not the props' box, else the props' and the trunks' together, if that has edges.
+fn laid_box(bare: ([F; 2], [F; 2]), trunks: Option<([F; 2], [F; 2])>, field: Option<([F; 2], [F; 2])>) -> ([F; 2], [F; 2]) {
+    let field = match trunks {
+        None => field,
+        Some((c, d)) => match edged(field).unwrap_or(bare) {
+            laid if field.is_some() && laid != bare => Some(laid),
+            _ => {
+                let (a, b) = bare;
+                Some(([a[0].min(c[0]), a[1].min(c[1])], [b[0].max(d[0]), b[1].max(d[1])]))
+            }
+        },
+    };
+    edged(field).unwrap_or(bare)
+}
+
+impl Kept {
+    /// [`wooded_of`]'s world, its tree filed item by item with each change logged.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        props: &[Prop],
+        trees: Option<&Trees>,
+        bikes: Option<&Bikes<'_>>,
+        field: Option<([F; 2], [F; 2])>,
+        centre: Vf,
+        radius: F,
+        toys: bool,
+        stamp: &[u32],
+        props_at: std::ops::Range<usize>,
+    ) -> Kept {
+        let (mut broad, objects, filing) = wooded_unfiled(props, trees, bikes, field, centre, radius, toys);
+        let Structure::Tree(tree) = &mut broad.structures[0] else { unreachable!("the table's first structure is its tree") };
+        let mut log = broad_build::Log::default();
+        let mut filed = Vec::with_capacity(filing.items.len());
+        for &(o, c, h) in &filing.items {
+            let key = broad_build::key(tree, filing.hi, c, h);
+            filed.push((o, key, log.changes.len()));
+            broad_build::insert_logged(tree, o, key, &mut log);
+        }
+        let moving = if toys { props.iter().filter(|p| p.moving.is_some()).count() } else { 0 };
+        Kept {
+            stamp: stamp.to_vec(),
+            props_at,
+            generation: generation(),
+            broad,
+            objects,
+            moving: (moving + 2).min(MOVING_BLOCK as usize) as i32,
+            bikes: FIRST + props.len(),
+            boxes: props.iter().map(prop_box).collect(),
+            trunks: trees.map(|t| boxes_box(t.props.props.iter().map(prop_box))),
+            lo: filing.lo,
+            hi: filing.hi,
+            filed,
+            log,
+        }
+    }
+
+    /// Bring the world up to `props`, which differ from those it was built with only in some props'
+    /// words (`stamp` is theirs): each moved prop's collidable reach, placement and box, and the tree
+    /// taken back to before the first of them was filed and the rest filed again with their keys, the
+    /// moved ones' made anew. Nothing, and `false`, when it cannot be: a prop that has become a toy or
+    /// stopped being one, or a tree laid over another box.
+    fn update(&mut self, props: &[Prop], field: Option<([F; 2], [F; 2])>, toys: bool, stamp: &[u32]) -> bool {
+        let at = self.props_at.start;
+        let words = |i: usize| -> std::ops::Range<usize> { at + i * PROP_WORDS..at + (i + 1) * PROP_WORDS };
+        let mut moved = Vec::new();
+        for i in 0..props.len() {
+            let w = words(i);
+            if self.stamp[w.clone()] != stamp[w.clone()] {
+                if toys && self.stamp[w.start] != stamp[w.start] {
+                    return false;
+                }
+                moved.push((i, prop_box(&props[i])));
+            }
+        }
+        let mut next = moved.iter().peekable();
+        let boxes = self.boxes.iter().enumerate().map(|(i, &b)| match next.next_if(|(j, _)| *j == i) {
+            Some(&(_, b)) => b,
+            None => b,
+        });
+        if laid_box(boxes_box(boxes), self.trunks, field) != (self.lo, self.hi) {
+            return false;
+        }
+        for &(i, b) in &moved {
+            self.boxes[i] = b;
+            self.objects[FIRST + i].radius = props[i].radius;
+            self.broad.places[FIRST + i].centre = b.0;
+        }
+        let Structure::Tree(tree) = &mut self.broad.structures[0] else { unreachable!("the table's first structure is its tree") };
+        let mut first = None;
+        for (k, (o, key, _)) in self.filed.iter_mut().enumerate() {
+            let Some(i) = o.checked_sub(FIRST).filter(|&i| i < props.len()) else { continue };
+            if let Ok(m) = moved.binary_search_by_key(&i, |&(j, _)| j) {
+                let (c, h) = moved[m].1;
+                *key = broad_build::key(tree, self.hi, c, h);
+                first.get_or_insert(k);
+            }
+        }
+        if let Some(first) = first {
+            broad_build::undo(tree, &mut self.log, self.filed[first].2);
+            for (o, key, start) in &mut self.filed[first..] {
+                *start = self.log.changes.len();
+                broad_build::insert_logged(tree, *o, *key, &mut self.log);
+            }
+        }
+        self.stamp.copy_from_slice(stamp);
+        self.generation = generation();
+        true
+    }
+
+    /// The two probes at the ray probe's reach, and the bikes on their transforms and, those in the
+    /// world, in the moving list after the probes: what [`world_unfiled`] gives them.
+    fn place(&mut self, bikes: Option<&Bikes<'_>>, centre: Vf, radius: F) {
+        self.objects[RAY].radius = radius;
+        for p in [RAY, SWEEP] {
+            self.broad.places[p].centre = four(centre);
+        }
+        let Structure::List(list) = &mut self.broad.structures[1] else { unreachable!("the table's second structure is its list") };
+        let block = &mut list.blocks.as_mut().expect("the moving list has its block")[0];
+        for slot in &mut block[self.moving as usize..list.last as usize] {
+            *slot = None;
+        }
+        let mut last = self.moving;
+        for (k, b) in bikes.map_or(&[][..], |b| b.bikes).iter().enumerate() {
+            let mesh = bikes.map(|b| b.mesh).expect("bikes come with their mesh");
+            let o = self.bikes + k;
+            self.objects[o].radius = bike_sphere(mesh, &b.transform).1;
+            self.broad.places[o].centre = bike_box(mesh, &b.transform).0;
+            if b.in_world && (last as usize) < block.len() {
+                block[last as usize] = Some(o);
+                last += 1;
+            }
+        }
+        list.last = last;
+    }
+
+    /// The broad phase's query state as a fresh world has it: what a query writes outside the
+    /// structures (the stamp, the structure last queried, each placement's stamp) and inside them (the
+    /// open query's cells, nodes and place in its walk), which a query's end does not all put back.
+    fn rewind(&mut self) {
+        self.broad.stamp = 0;
+        self.broad.current = None;
+        for p in &mut self.broad.places {
+            p.stamp = 0;
+        }
+        for s in &mut self.broad.structures {
+            match s {
+                Structure::Tree(t) => {
+                    t.flags = 2;
+                    t.busy = 0;
+                    t.cells = [0; 4];
+                    t.list.clear();
+                    (t.head, t.at, t.chunk, t.slot) = (None, None, None, 0);
+                }
+                Structure::List(l) => (l.flags, l.block, l.entry) = (0, 0, 0),
+            }
+        }
+    }
+}
+
+/// [`wooded_of`]'s world, kept from an earlier search ([`Kept`]) — the same, or brought up to the
+/// props that moved since — or built and kept now, with the probes at `centre`, `radius` and the bikes
+/// where they are: `f` is handed its broad phase, which it may query, its collidables as built, and
+/// its generation.
+#[allow(clippy::too_many_arguments)]
+fn kept_world<R>(
+    props: &[Prop],
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+    toys: bool,
+    f: impl FnOnce(&mut Broad, &[Collidable], u64) -> R,
+) -> R {
+    let count = bikes.map_or(0, |b| b.bikes.len());
+    KEPT.with(|kept| {
+        let (kept, stamp) = &mut *kept.borrow_mut();
+        let at = stamp_world(stamp, props, trees, count, field, toys);
+        let k = match kept.iter().position(|w| w.stamp == *stamp) {
+            Some(k) => k,
+            None => {
+                let near = kept.iter().position(|w| {
+                    w.props_at == at && w.stamp[..at.start] == stamp[..at.start] && w.stamp[at.end..] == stamp[at.end..]
+                });
+                match near {
+                    Some(k) if kept[k].update(props, field, toys, stamp) => {
+                        let (b, u, g) = BUILDS.get();
+                        BUILDS.set((b, u + 1, g));
+                        k
+                    }
+                    _ => {
+                        kept.insert(0, Kept::build(props, trees, bikes, field, centre, radius, toys, stamp, at));
+                        kept.truncate(WORLDS_KEPT);
+                        0
+                    }
+                }
+            }
+        };
+        if k != 0 {
+            let w = kept.remove(k);
+            kept.insert(0, w);
+        }
+        let w = &mut kept[0];
+        w.place(bikes, centre, radius);
+        w.rewind();
+        f(&mut w.broad, &w.objects, w.generation)
+    })
+}
+
+/// A collidable list to search a kept world's collidables in, `built` of generation `generation`:
+/// one handed back by an earlier search ([`give_back`]), so nothing is allocated. One searched in
+/// this very generation differs from `built` only where a search writes — the flags, the group a part
+/// was last searched in, a probe's reach — so only those are put back; any other is copied whole.
+fn lend(generation: u64, built: &[Collidable]) -> Vec<Collidable> {
+    let (had, mut objects) = SPARE
+        .with(|s| {
+            let mut s = s.borrow_mut();
+            let k = s.iter().position(|(g, _)| *g == generation).or(s.len().checked_sub(1));
+            k.map(|k| s.swap_remove(k))
+        })
+        .unwrap_or_default();
+    if had == generation && objects.len() == built.len() {
+        for (o, b) in objects.iter_mut().zip(built) {
+            (o.flags, o.group, o.radius) = (b.flags, b.group, b.radius);
+        }
+    } else {
+        objects.truncate(built.len());
+        let n = objects.len();
+        objects.clone_from_slice(&built[..n]);
+        objects.extend_from_slice(&built[n..]);
+    }
+    objects
+}
+
+fn give_back(generation: u64, objects: Vec<Collidable>) {
+    SPARE.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() < 4 {
+            s.push((generation, objects));
+        }
+    });
 }
 
 /// The world the plane searches, for one frame: the track's props as collidables, the candidates
@@ -585,9 +1010,9 @@ pub struct Scene<'a> {
     pub struck: Vec<Option<u32>>,
     rays: &'a Rays,
     transform: Matrix,
-    objects: Vec<Collidable>,
+    objects: Lent,
     nearby: Nearby,
-    facets: Vec<Option<Vec<Facet>>>,
+    facets: std::collections::HashMap<usize, Vec<Facet>>,
     ray: ray_probe::Record,
     sweep: SweepProbe,
 }
@@ -622,10 +1047,7 @@ pub fn refresh_wooded(
     node: &Frame,
     search: &mut broad_phase::Search,
 ) {
-    let props = props.map_or(&[][..], |p| &p.props[..]);
-    let (centre, radius) = reach(rays, &matrix(node));
-    let (mut broad, mut objects) = world_wooded(props, trees, bikes, field, centre, radius);
-    refill(&mut objects, &mut broad, search);
+    refresh_of(props, trees, bikes, field, rays, node, search, false);
 }
 
 /// [`refresh_wooded`] in the plane's world, the path cars toys in it ([`world_flown`]).
@@ -638,10 +1060,29 @@ pub fn refresh_flown(
     node: &Frame,
     search: &mut broad_phase::Search,
 ) {
+    refresh_of(props, trees, bikes, field, rays, node, search, true);
+}
+
+/// The gather in the world [`wooded_of`] builds around the ray probe placed at `node`, kept between
+/// searches ([`kept_world`]).
+#[allow(clippy::too_many_arguments)]
+fn refresh_of(
+    props: Option<&Props>,
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    rays: &Rays,
+    node: &Frame,
+    search: &mut broad_phase::Search,
+    toys: bool,
+) {
     let props = props.map_or(&[][..], |p| &p.props[..]);
     let (centre, radius) = reach(rays, &matrix(node));
-    let (mut broad, mut objects) = world_flown(props, trees, bikes, field, centre, radius);
-    refill(&mut objects, &mut broad, search);
+    kept_world(props, trees, bikes, field, centre, radius, toys, |broad, built, generation| {
+        let mut objects = lend(generation, built);
+        refill(&mut objects, broad, search);
+        give_back(generation, objects);
+    });
 }
 
 /// **The world the plane's search takes at `node`** (V96): [`World::wooded_near`] around the ray
@@ -750,10 +1191,13 @@ impl<'a> Scene<'a> {
         let props = props.map_or(&[][..], |p| &p.props[..]);
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
-        let (mut broad, mut objects) = wooded_of(props, trees, bikes.as_ref(), field, centre, radius, toys);
-        if !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
-            refill(&mut objects, &mut broad, search);
-        }
+        let objects = kept_world(props, trees, bikes.as_ref(), field, centre, radius, toys, |broad, built, generation| {
+            let mut objects = lend(generation, built);
+            if !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
+                refill(&mut objects, broad, search);
+            }
+            Lent { generation, objects }
+        });
         let ray = ray_probe::Record {
             listed: true,
             capacity: rays.segments.len(),
@@ -778,7 +1222,7 @@ impl<'a> Scene<'a> {
             transform,
             objects,
             nearby,
-            facets: vec![None; props.len()],
+            facets: std::collections::HashMap::new(),
             ray,
             sweep,
         }
@@ -809,10 +1253,18 @@ impl<'a> Scene<'a> {
         self.bike(other).map_or(other, |k| BIKES + k)
     }
 
-    /// Prop `i`'s triangles in the ray probe's form, packed once a frame.
-    fn facets_of(&mut self, i: usize) -> &[Facet] {
-        let props = self.props;
-        self.facets[i].get_or_insert_with(|| facets(&props[i].mesh))
+}
+
+/// A scene's collidables, handed back when it is done for the next search to copy its world into
+/// ([`lend`]), with the generation of the world they were copied from.
+struct Lent {
+    generation: u64,
+    objects: Vec<Collidable>,
+}
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        give_back(self.generation, std::mem::take(&mut self.objects));
     }
 }
 
@@ -824,13 +1276,13 @@ impl Scene<'_> {
         let mesh = bikes.mesh;
         let t = bikes.bikes[k].transform;
         if probe == RAY {
-            let facets = self.bike_facets.get_or_insert_with(|| facets(mesh)).clone();
+            let facets = self.bike_facets.get_or_insert_with(|| facets(mesh));
             let target = ray_probe::Mesh {
                 id: other as u32,
                 transform: t.0,
                 root: 0,
                 nodes: &mesh.nodes,
-                facets: &facets,
+                facets,
                 vertices: &mesh.vertices,
             };
             let rays = self.rays;
@@ -905,18 +1357,19 @@ impl Narrow for Scene<'_> {
             return self.pair_bike(probe, other, k);
         }
         let i = other - FIRST;
-        let p = &self.props[i];
+        let props = self.props;
+        let p = &props[i];
         if probe == RAY {
             let rays = self.rays;
             let transform = self.transform;
-            let facets = self.facets_of(i).to_vec();
-            let p = &self.props[i];
+            // Prop `i`'s triangles in the ray probe's form, packed once a frame.
+            let facets = self.facets.entry(i).or_insert_with(|| facets(&p.mesh));
             let mesh = ray_probe::Mesh {
                 id: other as u32,
                 transform: placed(p),
                 root: 0,
                 nodes: &p.mesh.nodes,
-                facets: &facets,
+                facets,
                 vertices: &p.mesh.vertices,
             };
             let probe = RayProbe { transform, root: rays.root, nodes: &rays.nodes, segments: &rays.segments };
@@ -987,10 +1440,10 @@ impl Search for Scene<'_> {
     /// The ray probe's search. The plane's collision object always has a nearby search; without one
     /// the original asks the broad phase directly, which here is the same list.
     fn rays(&mut self, _nearby: bool) -> Vec<Hit> {
-        let mut objects = std::mem::take(&mut self.objects);
+        let mut objects = std::mem::take(&mut self.objects.objects);
         let nearby = std::mem::take(&mut self.nearby);
         world_search::search_nearby(&mut objects, RAY, &nearby, self);
-        (self.objects, self.nearby) = (objects, nearby);
+        (self.objects.objects, self.nearby) = (objects, nearby);
         self.ray
             .contacts
             .iter()
@@ -1000,10 +1453,10 @@ impl Search for Scene<'_> {
 
     fn sweep(&mut self, from: Vf, to: Vf, _nearby: bool) -> Option<Swept> {
         self.sweep.segments = vec![sweep_probe::Segment { ends: [from, to], nodes: [None, None] }];
-        let mut objects = std::mem::take(&mut self.objects);
+        let mut objects = std::mem::take(&mut self.objects.objects);
         let nearby = std::mem::take(&mut self.nearby);
         let hit = world_search::search_nearby(&mut objects, SWEEP, &nearby, self);
-        (self.objects, self.nearby) = (objects, nearby);
+        (self.objects.objects, self.nearby) = (objects, nearby);
         let a = &self.sweep.answer;
         hit.then(|| Swept { push: a.record.nearest_normal, point: a.record.nearest_point, struck: self.struck_of(self.id(a.struck[0].unwrap_or(SWEEP))) })
     }
