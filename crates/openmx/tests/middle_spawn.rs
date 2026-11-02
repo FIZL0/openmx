@@ -10,7 +10,7 @@
 //!   the shell says it starts on the middle tile `e` and a ride's every tick stands on `e`; without
 //!   the switch it starts on `a` (60 feet from the world's outer edge, which throws it at once). The rides skip without the disc, since the bike is the disc's.
 //! * The installed wrapped worlds (`$OPENMX_WORLDS`, or `~/repos/openmx/mods`), ignored: each starts
-//!   on the tile nearest its middle as stitched on 2026-10-27, and its ride's first tick is by that start.
+//!   on its middle tile (world_mxu on a freeride since P253, as restitched with its `middle` key), and its ride's first tick is by that start.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -116,13 +116,13 @@ fn a_wrapped_world_rides_from_its_middle_tile() {
     }
 }
 
-/// openmx-mods' wrapped worlds as installed: each starts on the tile nearest its middle (as stitched
-/// on 2026-10-27; a restitched world may move it), and its ride's first tick stands by that start.
+/// openmx-mods' wrapped worlds as installed: each starts on its middle tile (world_mxu on
+/// mxu_free07 since P253 put the freerides in its middle), and its ride's first tick stands by that start.
 #[test]
 #[ignore = "needs openmx-mods' stitched worlds in $OPENMX_WORLDS/tracks (or ~/repos/openmx/mods), and the disc; release build"]
 fn the_installed_wrapped_worlds_start_on_their_middle_tile() {
     let mods = std::env::var_os("OPENMX_WORLDS").map(PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join("repos/openmx/mods"));
-    for (id, middle) in [("world_mxu_free", "mxu_free10"), ("world_mxu", "mxu_nat17"), ("world_ultra", "mxvatv_nat06")] {
+    for (id, middle) in [("world_mxu_free", "mxu_free10"), ("world_mxu", "mxu_free07"), ("world_ultra", "mxvatv_nat06")] {
         if !mods.join("tracks").join(id).is_dir() {
             eprintln!("{id}: not installed");
             continue;
