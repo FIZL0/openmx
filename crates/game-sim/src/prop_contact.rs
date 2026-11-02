@@ -28,8 +28,13 @@
 //! What is not here: the rider's ragdoll, the wreck bike, the plane and the other props striking a
 //! prop's `f.col`; the prop's own rays striking the bike's frame (an entry on the prop's list naming
 //! the bike, and its mirror on the bike's); the broad phase's gather, which is every prop with a mesh
-//! in collection and object order, each by its distance from the rays' centre; and the riders of a
-//! session of several (only [`crate::Sim::step`]'s one bike strikes).
+//! in collection and object order, each by its distance from the rays' centre.
+//!
+//! Every step path strikes (S197a): [`crate::Sim::step`]'s one bike; [`crate::Sim::step_all`]'s
+//! riders, each just before its own frame in the walk's order (the last player first), the props'
+//! step after them all with every player's chassis as a striker; and a seat's one-player Sim
+//! ([`crate::Sim::step_bumped`], [`crate::Sim::step_among`]: online and split screen), whose props are
+//! its own copy, struck by its own bike ([`crate::Sim::prop_strike_seated`]).
 
 #![deny(clippy::float_arithmetic)]
 
@@ -304,12 +309,34 @@ impl crate::Sim {
     /// (the wreck bike's object is not the riding one), a ghost (its body rays are out of the world),
     /// a bike the shell gave no collision files, or a track with no props.
     pub fn prop_strike(&self, i: usize, dt: F) -> Strike {
+        self.prop_strike_by(i, i, self.players(), dt)
+    }
+
+    /// [`Sim::prop_strike`] for a one-player Sim's bike among `players` seats (online and split
+    /// screen, S197a: [`crate::Sim::step_bumped`], [`crate::Sim::step_among`]): its entries name the
+    /// struck bodies after every seat's vehicle in its bump, and its mirrors name it as player 1, the
+    /// one striker its own props' step reads ([`Sim::props_step`]). A seat's props are its own copy,
+    /// struck by its own bike only, as its cars are.
+    pub fn prop_strike_seated(&self, players: usize, dt: F) -> Strike {
+        self.prop_strike_by(0, 0, players, dt)
+    }
+
+    /// Player `i`'s strike, its mirrors naming striker `me` and its entries' bodies from `first`.
+    fn prop_strike_by(&self, i: usize, me: usize, first: usize, dt: F) -> Strike {
         let r = self.rider_of(i);
         let Some(col) = r.bike_col.as_deref() else { return Strike::default() };
         if r.state.wreck.is_some() || r.ghost.on || self.traffic.props.is_empty() {
             return Strike::default();
         }
-        strike(col, &r.ride.transform(), &self.traffic.props, i, self.players(), dt)
+        strike(col, &r.ride.transform(), &self.traffic.props, me, first, dt)
+    }
+
+    /// `strike` put on the props ([`PropSet::strike`]: the struck woken, the mirrors filed) and in
+    /// `bump`: its entries after the bump's, its struck bodies the bump's to push. [`PropSet::pushed`]
+    /// writes them back after the bike's frame.
+    pub fn strike_into(&mut self, bump: &mut rider_contact::Bump, strike: Strike) {
+        bump.props = self.traffic.props.strike(&strike);
+        bump.contacts = crate::mover_contact::merged(std::mem::take(&mut bump.contacts), strike.contacts);
     }
 
     /// The props' step after the riders' frames (S197): the struck bodies' mirrors read every player's
