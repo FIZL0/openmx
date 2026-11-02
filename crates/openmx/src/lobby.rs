@@ -12,13 +12,18 @@
 //! (`Bike\Race125P.phy` and the other fifteen, D7). Which archive the `.phy` comes from is the same
 //! rule on every disc — the first bike archive in the disc's own order that carries the set's file —
 //! and an online ride rides every seat on exactly those bytes, so what was compared is what is ridden.
+//!
+//! A track mod (MD6, [`mod_track_hash`]) is every file in its folder, by path, and then the disc's
+//! freeride it rides with (its second archive: the bike's animation set, physics and follow camera,
+//! `track_mods::FREERIDE`), so a room on one seats only peers whose mods folder holds the same
+//! files, and the refusal says the mod's name and version ([`openmx_net::Disc::track_mod`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use game_render::disc::Disc;
-use openmx_net::handshake::fnv;
+use openmx_net::handshake::{fnv, fnv_on};
 use openmx_net::{Board, Net, Online, Relay};
 
 use crate::menu::{Act, Menu};
@@ -32,8 +37,8 @@ pub struct DiscFiles {
     /// Whose saved markers a ride this machine drops in on brings (P105): the settings' folder and
     /// 1P's profile (`saved_markers::profile`), as the front end last said them.
     markers: Mutex<Option<(PathBuf, String)>>,
-    /// The mods folder this machine's trick packs are read from (MD19), `None` while the Mods row is
-    /// off, as the front end last said it.
+    /// The mods folder this machine's trick packs (MD19) and track mods (MD6) are read from, `None`
+    /// while the Mods row is off, as the front end last said it.
     mods: Mutex<Option<PathBuf>>,
 }
 
@@ -102,9 +107,66 @@ fn read_track(track: &str) -> Option<u64> {
     Some(fnv(&bytes))
 }
 
+/// A track mod's files (MD6), hashed: every file under its folder in path order, each as its path
+/// (from the folder, `/`-separated, lower case, as the folder archive looks names up) and a zero,
+/// then its bytes.
+pub fn mod_track_hash(dir: &Path) -> Result<u64, String> {
+    fn walk(dir: &Path, under: &str, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+        for e in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = e.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+            let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let name = if under.is_empty() { name } else { format!("{under}/{name}") };
+            if path.is_dir() {
+                walk(&path, &name, out)?;
+            } else {
+                out.push((name, path));
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(dir, "", &mut files)?;
+    files.sort();
+    let mut h = fnv(b"");
+    for (name, path) in files {
+        h = fnv_on(fnv_on(h, name.as_bytes()), &[0]);
+        h = fnv_on(h, &std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?);
+    }
+    Ok(h)
+}
+
+impl DiscFiles {
+    /// The track mod `name` in this machine's mods folder (MD6), as a ride on it finds it: `None`
+    /// with the Mods row off, or with no such track mod.
+    fn mod_track(&self, name: &str) -> Option<crate::track_mods::ModTrack> {
+        let mods = self.mods.lock().unwrap().clone()?;
+        crate::track_mods::find(&mods, name).ok()
+    }
+}
+
 impl openmx_net::Disc for DiscFiles {
+    /// A disc track's archives, else a track mod's files and the disc freeride it rides with, as a
+    /// ride looks for them: the disc first.
     fn track(&self, name: &str) -> Option<u64> {
-        self.track_hash(name)
+        if let Some(h) = self.track_hash(name) {
+            return Some(h);
+        }
+        let h = mod_track_hash(&self.mod_track(name)?.dir).ok()?;
+        Some(match self.track_hash(crate::track_mods::FREERIDE) {
+            Some(disc) => fnv_on(h, &disc.to_le_bytes()),
+            None => h,
+        })
+    }
+
+    /// The mod's name and version (`MC01 Canyon 1.0.0`), as its `mod.json` says them.
+    fn track_mod(&self, name: &str) -> Option<String> {
+        if self.track_hash(name).is_some() {
+            return None;
+        }
+        let t = self.mod_track(name)?;
+        let text = std::fs::read_to_string(t.dir.join("mod.json")).ok()?;
+        let version = crate::track_mods::Json::parse(&text).ok()?.get("version")?.str()?.to_string();
+        Some(format!("{} {version}", t.name))
     }
 
     fn bike(&self, set: &str) -> Option<u64> {
@@ -123,8 +185,8 @@ impl openmx_net::Disc for DiscFiles {
 }
 
 impl DiscFiles {
-    /// The mods folder this machine's trick packs are hashed from (MD19), `None` while the Mods row
-    /// is off. The front end's, every frame.
+    /// The mods folder this machine's trick packs (MD19) and track mods (MD6) are hashed from, `None`
+    /// while the Mods row is off. The front end's, every frame.
     pub fn tricks_from(&self, mods: Option<PathBuf>) {
         *self.mods.lock().unwrap() = mods;
     }
@@ -240,7 +302,7 @@ impl Network {
             // Started again with the new network the next time it is asked for.
             self.net = None;
         }
-        // The mods folder a trick pack is read from (MD19), as the Mods row says now.
+        // The mods folder a trick pack (MD19) or a track mod (MD6) is read from, as the Mods row says now.
         let dir = self.file.parent().unwrap_or(Path::new("."));
         let mods = menu.settings.mods.then(|| dir.join(crate::track_mods::MODS_DIR));
         self.disc.tricks_from(mods.clone());

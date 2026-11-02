@@ -5808,9 +5808,13 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
     next.set_mod_games(games.clone());
     assert_eq!(next.track_groups()[next.track_filter_group()].0, "Game Beta");
     assert_eq!(next.track_at(next.cursor(Screen::Tracks)).0, "gen_b2");
-    // Online the room's pick is the filter's disc tracks: the disc's for a mod game (MD6 not yet),
-    // and with no mods a kept game's filter is All, which is the disc's.
+    // Online the room's pick is the filter's towns and track mods (MD6): a mod game's own mods, the
+    // worlds' filter the towns (no world is ridden online), and with no mods a kept game's filter
+    // is All, which is the disc's.
+    assert_eq!(next.online_tracks(), ["gen_b1", "gen_b2"]);
+    next.settings.track_filter = "Worlds".into();
     assert_eq!(next.online_tracks(), towns.iter().map(String::as_str).collect::<Vec<_>>(), "the splice is not ridden online");
+    next.settings.track_filter = "Game Beta".into();
     next.set_mod_tracks(Vec::new());
     assert_eq!(next.track_groups().len(), 1);
     assert_eq!(next.cursor(Screen::Tracks), 0);

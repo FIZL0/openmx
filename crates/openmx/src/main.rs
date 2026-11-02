@@ -2590,8 +2590,10 @@ async fn front_end(args: Args) -> Result<(), String> {
             if let Some((room, _)) = shell.front.menu.lobby.start.clone() {
                 let mut a = args.clone();
                 a.track = room.track.clone();
-                // Online rides the disc's tracks only, until MD6 says how peers agree on a mod.
-                (a.mods_asked, a.mods) = (true, None);
+                // A track mod (MD6) from this machine's mods folder, whose files the handshake held
+                // every seat to; a disc track's ride reads nothing from the folder.
+                let mods = shell.front.menu.settings.mods.then(|| shell.front.dir.join(track_mods::MODS_DIR));
+                (a.mods_asked, a.mods) = (true, mods.filter(|d| track_mods::find(d, &room.track).is_ok()));
                 // And the room's tricks (MD19): the host's trick pack, which the handshake held every
                 // seat to the same files of, read from this machine's mods folder.
                 a.tricks = Some(if room.tricks.is_empty() { menu::Tricks::Original } else { menu::Tricks::MxVsAtv });

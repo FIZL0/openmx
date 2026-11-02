@@ -4,7 +4,7 @@
 //! server — nothing leaves the machine), where a host's menu opens a lobby, a guest's menu types the
 //! room code on the on-screen keyboard and joins, says ready, and the host's Start gives both menus the
 //! same ride and seed; a guest leaving mid-ride puts the host back in its lobby; a guest whose disc
-//! holds another race125p is refused and told why. Last, what the shell hashes for the handshake,
+//! holds another race125p is refused and told why, as is one without the host's track mod (MD6). Last, what the shell hashes for the handshake,
 //! against the disc when there is one.
 
 // the browser's own clock, threads and files, which are std's here (P196)
@@ -412,6 +412,97 @@ fn every_seat_of_an_online_ride_has_the_hosts_trick_pack() {
         for m in [hm, gm] {
             let _ = std::fs::remove_dir_all(m.parent().unwrap());
         }
+    }
+}
+
+/// A `mods/` folder in the temp dir holding one track mod, `md6_flat` ("MD6 Flat", `version`),
+/// whose terrain file says `terrain`; `None` for a folder without it.
+fn track_mods_folder(name: &str, held: Option<(&str, &str)>) -> std::path::PathBuf {
+    let mods = std::env::temp_dir().join(format!("openmx-md6-{}-{name}", std::process::id())).join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    std::fs::create_dir_all(&mods).unwrap();
+    let Some((version, terrain)) = held else { return mods };
+    let dir = mods.join("tracks").join("md6_flat");
+    std::fs::create_dir_all(dir.join("Col")).unwrap();
+    let json = format!(
+        r#"{{"standard": 1, "kind": "track", "id": "md6_flat", "name": "MD6 Flat", "source": {{"game": "Real elevation"}}, "version": "{version}", "author": "crates/openmx/tests/lobby.rs", "permission": "public-domain", "todo": []}}"#
+    );
+    std::fs::write(dir.join("mod.json"), json).unwrap();
+    std::fs::write(dir.join("MDFLAT.scn"), "[Environment]\r\nTerrainFile=MDFLAT.trn\r\n").unwrap();
+    std::fs::write(dir.join("MDFLAT.ps2.trn"), terrain).unwrap();
+    std::fs::write(dir.join("Col").join("Rock.col"), "rock").unwrap();
+    mods
+}
+
+/// MD6: a host's lobby on a track mod names it in the room; a guest whose mods folder holds the
+/// same files rides it, and one with a changed file, another version or none is refused with the
+/// mod named, and not seated.
+#[test]
+fn a_room_on_a_track_mod_seats_only_peers_with_the_same_mod() {
+    let host_files = Some(("1.0.0", "flat ground"));
+    let cases: [(&str, Option<(&str, &str)>, Option<&str>); 4] = [
+        ("same", host_files, None),
+        ("changed", Some(("1.0.0", "bumpy ground")), Some("the mod MD6 Flat 1.0.0 (md6_flat), and yours isn't the same files")),
+        ("version", Some(("1.1.0", "flat ground")), Some("the mod MD6 Flat 1.0.0 (md6_flat), and your mods folder has MD6 Flat 1.1.0")),
+        ("none", None, Some("the mod MD6 Flat 1.0.0 (md6_flat), and it isn't in your mods folder")),
+    ];
+    for (name, guest_files, refused) in cases {
+        let (hm, gm) = (track_mods_folder(&format!("host-{name}"), host_files), track_mods_folder(&format!("guest-{name}"), guest_files));
+        let (hn, gn) = (lan_with_tricks("Hosty", &hm), lan_with_tricks("Guesty", &gm));
+        let (mut h, mut hr) = fresh("Hosty", "thq1");
+        let (mut g, mut gr) = fresh("Guesty", "thq2");
+        // The host's pick is on the mod, which its track list has (`lobby::Network::pump` lists it).
+        h.settings.track = "md6_flat".into();
+        h.set_mod_tracks(vec![("md6_flat".into(), "MD6 Flat".into())]);
+        host_and_join(&mut h, &mut hr, &hn, &mut g, &mut gr, &gn);
+        assert_eq!(h.lobby.room.as_ref().unwrap().track, "md6_flat", "the host's room is on its mod");
+        taps(&mut g, &mut gr, &[Control::Down, Control::Down, Control::Cross]);
+        until((&mut h, &hn), (&mut g, &gn), "ready", |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.all_ready()));
+        h.lobby.out.push(Cmd::Start);
+        match refused {
+            None => {
+                until((&mut h, &hn), (&mut g, &gn), "the ride", |_, _, ha, ga| ha.contains(&Act::Online) && ga.contains(&Act::Online));
+                assert_eq!(g.lobby.start.as_ref().unwrap().0.track, "md6_flat", "the guest rides the mod");
+            }
+            Some(says) => {
+                until((&mut h, &hn), (&mut g, &gn), "the refusal", |h, g, ha, ga| {
+                    assert!(!ha.contains(&Act::Online) && !ga.contains(&Act::Online), "nobody rides");
+                    g.screen() == Some(Screen::Online) && h.lobby.room.as_ref().is_some_and(|r| r.taken() == 1)
+                });
+                let why = g.note.clone().unwrap_or_default();
+                assert!(why.contains(says), "{name}: {why}");
+                assert!(g.lobby.room.is_none(), "not seated");
+                println!("guest told: {why}");
+            }
+        }
+        for m in [hm, gm] {
+            let _ = std::fs::remove_dir_all(m.parent().unwrap());
+        }
+    }
+}
+
+/// MD6: what the handshake compares for a track mod is every file in its folder, wherever the
+/// folder is; nothing with the Mods row off.
+#[test]
+fn a_track_mod_hashes_its_files() {
+    let (a, b) = (track_mods_folder("hash-a", Some(("1.0.0", "flat"))), track_mods_folder("hash-b", Some(("1.0.0", "flat"))));
+    let files = lobby::DiscFiles::default();
+    assert_eq!(files.track("md6_flat"), None, "the Mods row off");
+    assert_eq!(files.track_mod("md6_flat"), None);
+    files.tricks_from(Some(a.clone()));
+    let mine = files.track("md6_flat").expect("the mod hashes");
+    assert_eq!(files.track_mod("md6_flat").as_deref(), Some("MD6 Flat 1.0.0"));
+    let dir = |m: &std::path::Path| m.join("tracks").join("md6_flat");
+    assert_eq!(lobby::mod_track_hash(&dir(&a)), lobby::mod_track_hash(&dir(&b)), "the same files, elsewhere");
+    std::fs::write(dir(&b).join("Col").join("Rock.col"), "rocks").unwrap();
+    assert_ne!(lobby::mod_track_hash(&dir(&a)), lobby::mod_track_hash(&dir(&b)), "a changed file");
+    std::fs::write(dir(&b).join("Col").join("Rock.col"), "rock").unwrap();
+    std::fs::write(dir(&b).join("Col").join("Tree.col"), "").unwrap();
+    assert_ne!(lobby::mod_track_hash(&dir(&a)), lobby::mod_track_hash(&dir(&b)), "a file more");
+    assert_eq!(files.track("md6_none"), None);
+    println!("md6_flat {mine:#018x}");
+    for m in [a, b] {
+        let _ = std::fs::remove_dir_all(m.parent().unwrap());
     }
 }
 
