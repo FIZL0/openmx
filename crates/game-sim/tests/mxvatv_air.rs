@@ -442,8 +442,8 @@ fn mxvatv_backflip_is_the_originals() {
     }
 }
 
-/// MX vs. ATV's file layout read where MX Unleashed's reader looks: the moved collision keys, the
-/// gravity scale, and a key left where it was.
+/// MX vs. ATV's file layout read where MX Unleashed's reader looks: the moved collision keys, and the
+/// keys left where they were.
 #[test]
 fn an_mx_phy_reads_its_moved_keys() {
     // The reader's own number parse, which is the original's and not the nearest float.
@@ -455,7 +455,9 @@ fn an_mx_phy_reads_its_moved_keys() {
     ));
     let m = ini.section("Mass Properties");
     assert_eq!(m.float("Weight"), Some(number("420")));
-    assert_eq!(m.float("Gravity"), Some(number("1.03")));
+    // MD63d: the gravity scale and the friction zones are not moves (tests/mxvatv_mass.rs).
+    assert_eq!(m.float("Gravity"), None);
+    assert_eq!(m.float("GravityScale"), Some(number("1.03")));
     assert_eq!(m.float("SpringStiffness"), None);
     let c = ini.section("Collisions");
     assert_eq!(c.float("Spring"), Some(number("6")));
@@ -463,7 +465,7 @@ fn an_mx_phy_reads_its_moved_keys() {
     assert_eq!(c.float("MaxCompression"), Some(number("0.5")));
     assert_eq!(c.float("BodySpring"), Some(number("3")));
     assert_eq!(c.float("Friction"), Some(number("0.5")));
-    assert_eq!(c.float("TerrainFriction"), Some(number("0.25")));
+    assert_eq!(c.float("TerrainFriction"), None);
     assert_eq!(ini.section("Airborne Control").float("GasGyroTorque"), Some(number("175")));
     assert!(ini.section("FirstPersonCamera").text("Left1stPerShoulderOffset").is_some());
 }

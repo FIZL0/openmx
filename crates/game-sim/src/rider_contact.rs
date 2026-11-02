@@ -59,7 +59,8 @@ pub const CAPACITY: usize = 11;
 /// * the springs: `|k · m · 32.2|` and `d · 2 · √(m·k)` on the chassis' mass, the body ones copying
 ///   the plain ones where they are -1;
 /// * the moment masks, the body ones copying the plain ones where they are the -1 vector;
-/// * `Friction`, `BodyFriction` (-1 copies), and `TerrainFriction` for all sixteen surfaces.
+/// * `Friction`, `BodyFriction` (-1 copies), and the sixteen surface frictions
+///   ([`Collisions::surface_friction`]: `TerrainFriction` in each on MX Unleashed's files).
 pub fn collider(c: &Collisions, chassis_mass: F) -> Collider {
     let mass = c.collision_mass;
     let inv_mass = if mass > F::ZERO { F::ONE / mass } else { F::ZERO };
@@ -111,7 +112,7 @@ pub fn collider(c: &Collisions, chassis_mass: F) -> Collider {
         max_depth: c.max_compression,
         scenery,
         actor,
-        surfaces: [c.terrain_friction; 16],
+        surfaces: c.surface_friction,
         normal_speed: F::ZERO,
         relative: Vf::ZERO,
     }
