@@ -393,6 +393,12 @@ fn report_prefills_the_id() {
 struct Routes {
     files: HashMap<String, (u16, Vec<u8>)>,
     asked: Vec<String>,
+    /// P241: the `Range: bytes=<n>-` of each `/cdn/` GET, if it had one.
+    ranges: Vec<Option<u64>>,
+    /// P241: the next `/cdn/` GETs send this many bytes of their body and hang up, one each.
+    cuts: Vec<usize>,
+    /// P241: a CDN that sends the whole file for a Range.
+    no_ranges: bool,
 }
 
 struct Fake {
@@ -417,16 +423,29 @@ impl Fake {
                     while !head.ends_with(b"\r\n\r\n") && c.read(&mut b).map_or(false, |n| n == 1) {
                         head.push(b[0]);
                     }
-                    let line = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
+                    let head = String::from_utf8_lossy(&head).into_owned();
+                    let line = head.lines().next().unwrap_or("").to_string();
                     let path = line.split(' ').nth(1).unwrap_or("").to_string();
+                    let range = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=")?.strip_suffix('-')?.parse::<u64>().ok());
                     let mut routes = r.lock().unwrap();
                     routes.asked.push(path.clone());
+                    let mut cut = None;
+                    if path.starts_with("/cdn/") {
+                        routes.ranges.push(range);
+                        if !routes.cuts.is_empty() {
+                            cut = Some(routes.cuts.remove(0));
+                        }
+                    }
                     let reply = if path.ends_with("/mod.zip") && !path.starts_with("/cdn/") {
                         format!("HTTP/1.1 302 Found\r\nLocation: /cdn{path}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
                     } else {
                         let key = path.strip_prefix("/cdn").filter(|_| path.starts_with("/cdn/")).unwrap_or(&path).to_string();
-                        let (status, body) = routes.files.get(&key).cloned().unwrap_or((404, b"{\"error\":\"not found\"}".to_vec()));
+                        let (mut status, mut body) = routes.files.get(&key).cloned().unwrap_or((404, b"{\"error\":\"not found\"}".to_vec()));
+                        if let Some(from) = range.filter(|_| status == 200 && !routes.no_ranges) {
+                            (status, body) = (206, body.get(from as usize..).unwrap_or_default().to_vec());
+                        }
                         let mut out = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                        body.truncate(cut.unwrap_or(body.len()));
                         out.extend(body);
                         out
                     };
@@ -817,5 +836,63 @@ fn a_meta_json_over_64_kib_is_refused() {
     let s = Store::new(&fake.base, &dir, &mods);
     let l = listing(&s, true);
     assert_eq!(l.iter().map(|e| e.meta.id.as_str()).collect::<Vec<_>>(), ["meta_under"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P241: a download cut short (the CDN hanging up partway) is taken up again with a Range from where it
+/// stopped; cut short three times it is kept, and the next Install carries on from it; a CDN that sends
+/// the whole zip to a Range is read from the start. None of it leaves a partial behind once installed.
+#[test]
+fn a_cut_download_carries_on_from_where_it_stopped() {
+    let fake = Fake::start();
+    let (dir, mods) = scratch("resume");
+    let s = Store::new(&fake.base, &dir, &mods);
+    let mut files = track("big_track", b"scene");
+    let mut x = 12345u32;
+    files.push(Put { deflate: false, ..put("big.dat", &(0..4000).map(|_| { x = x.wrapping_mul(1_103_515_245).wrapping_add(12345); (x >> 16) as u8 }).collect::<Vec<_>>()) });
+    let z = zip(&files);
+    let m = meta("big_track", Kind::Track, &z);
+    fake.publish("main", &m, &z, None);
+    let e = entry(m, "main", None);
+    let partials = || tree_of(&mods).into_iter().filter(|p| p.starts_with(".download-")).collect::<Vec<_>>();
+    let ranges = || std::mem::take(&mut fake.routes.lock().unwrap().ranges);
+
+    // cut twice, carried on within the one Install
+    fake.routes.lock().unwrap().cuts = vec![1000, 1000];
+    s.install(&e);
+    let got = until(&s, |ev| matches!(ev, Event::Installed(..)));
+    assert!(got.iter().any(|ev| matches!(ev, Event::Installed(_, Ok(_)))), "{got:?}");
+    assert_eq!(got.iter().filter(|ev| matches!(ev, Event::Progress(_, _, l) if l.contains("carrying on from"))).count(), 2, "{got:?}");
+    assert_eq!(ranges(), [None, Some(1000), Some(2000)], "the first try asks no Range (B242)");
+    assert_eq!(std::fs::read(mods.join("tracks/big_track/big.dat")).unwrap(), files[3].data);
+    assert_eq!(partials(), Vec::<String>::new());
+
+    // cut three times: kept, and the next Install carries on from it
+    s.remove(&e.key(), Kind::Track, "big_track");
+    until(&s, |ev| matches!(ev, Event::Removed(..)));
+    fake.routes.lock().unwrap().cuts = vec![500, 500, 500];
+    let why = install(&s, &e).unwrap_err();
+    assert!(why.contains("3 times: Install again to carry on"), "{why}");
+    let kept = partials();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(std::fs::metadata(mods.join(&kept[0])).unwrap().len(), 1500);
+    assert!(!mods.join("tracks/big_track").exists());
+    assert_eq!(ranges(), [None, Some(500), Some(1000)]);
+    assert_eq!(install(&s, &e), Ok("Test big_track".into()));
+    assert_eq!(ranges(), [Some(1500)]);
+    assert_eq!(std::fs::read(mods.join("tracks/big_track/big.dat")).unwrap(), files[3].data);
+    assert_eq!(partials(), Vec::<String>::new());
+
+    // a CDN that ignores Range: the whole zip again, from the start
+    s.remove(&e.key(), Kind::Track, "big_track");
+    until(&s, |ev| matches!(ev, Event::Removed(..)));
+    {
+        let mut r = fake.routes.lock().unwrap();
+        (r.no_ranges, r.cuts) = (true, vec![700]);
+    }
+    assert_eq!(install(&s, &e), Ok("Test big_track".into()));
+    assert_eq!(ranges(), [None, Some(700)]);
+    assert_eq!(std::fs::read(mods.join("tracks/big_track/big.dat")).unwrap(), files[3].data);
+    assert_eq!(partials(), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&dir);
 }

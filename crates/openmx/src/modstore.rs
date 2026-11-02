@@ -43,6 +43,11 @@ const INSTALLED: &str = "mods-store-installed.json";
 /// M116: what a 429 or 5xx from the store says.
 pub const BUSY: &str = "The mod store is busy, try again in a minute.";
 
+/// P241: what the browser says of a world, which it lists and does not download: its mods folder is
+/// not read by its Free Ride yet, and a world is hundreds of MB.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub const WEB_WORLDS: &str = "Worlds ride in the desktop and iPhone games; the browser can't ride one yet, so it doesn't download it";
+
 /// B339: installs at once — fewer in the browser, which a phone runs.
 pub const PARALLEL: usize = if cfg!(target_arch = "wasm32") { 2 } else { 3 };
 
@@ -1061,6 +1066,10 @@ impl Store {
     /// `e` downloaded, checked and installed: its name, or why not (and nothing kept).
     async fn install_now(&self, e: &Entry) -> Result<String, String> {
         let folder = e.meta.kind.folder().ok_or("a kind this build has no folder for")?;
+        #[cfg(target_arch = "wasm32")]
+        if e.meta.kind == Kind::World {
+            return Err(WEB_WORLDS.into());
+        }
         let id = &e.meta.id;
         if !track_mods::valid_id(id) {
             return Err(format!("`{id}` is not a mod id"));
@@ -1119,16 +1128,33 @@ async fn in_turn<T, F: std::future::Future<Output = T>>(all: Vec<F>) -> Vec<T> {
 
 // ---- the desktop's download and unpack -----------------------------------------------------------
 
-/// A download's zip until it is installed: `mods/.download-<author>-<id>.zip` (one each, as several
-/// download at once), removed when dropped.
+/// A download's zip until it is installed: `mods/.download-<author>-<id>-<sha>.zip` (one each, as
+/// several download at once), removed when dropped — but for one cut short past its tries
+/// ([`Download::keep`]), which the next Install takes up where it stopped (P241).
 #[cfg(not(target_arch = "wasm32"))]
-struct Download(PathBuf);
+struct Download {
+    path: PathBuf,
+    keep: bool,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for Download {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
+}
+
+/// P241: tries at a download cut short, each taking up from where the last stopped.
+#[cfg(not(target_arch = "wasm32"))]
+const TRIES: usize = 3;
+
+/// How a download try went wrong: cut short (worth another try from where it stopped), or for good.
+#[cfg(not(target_arch = "wasm32"))]
+enum Fetch {
+    Cut(String),
+    Bad(String),
 }
 
 /// A file name part made of `s`: letters, digits, `_` and `-` only.
@@ -1140,35 +1166,118 @@ fn safe(s: &str) -> String {
 impl Store {
     /// `e`'s `mod.zip` streamed into its [`Download`] (B204), hashed as it comes: only one of the
     /// listed size and sha256 is kept. A redirect to the store's CDN is followed with the request's
-    /// own headers, and no Range is asked (B242's phones dropped one on the redirect).
+    /// own headers. P241: a download cut short is taken up again from where it stopped, [`TRIES`]
+    /// times, then kept for the next Install to carry on; the first try asks no Range (B242), and a
+    /// store that sends the whole zip to a later one is read from the start.
     async fn download(&self, e: &Entry) -> Result<Download, String> {
-        use std::io::Write;
         std::fs::create_dir_all(&self.mods).map_err(|err| format!("can't make {}: {err}", self.mods.display()))?;
-        let at = Download(self.mods.join(format!(".download-{}-{}.zip", safe(&e.meta.author), e.meta.id)));
-        let mut file = std::io::BufWriter::new(std::fs::File::create(&at.0).map_err(|err| format!("can't write {}: {err}", at.0.display()))?);
-        let cap = e.meta.size;
-        let mut r = self.answer(&self.file_url(&e.rev, &format!("mods/{}/mod.zip", e.meta.id)), cap).await?;
-        let (mut got, mut hash) = (0u64, Sha256::new());
-        while let Some(c) = r.chunk().await.map_err(|err| format!("download cut short: {err}"))? {
-            let mb = got >> 20;
-            got += c.len() as u64;
-            if got > cap {
-                return Err(format!("the download is more than the {cap} bytes the store says"));
-            }
-            hash.update(&c);
-            file.write_all(&c).map_err(|err| format!("can't write {}: {err}", at.0.display()))?;
-            if got >> 20 != mb {
-                self.send(Event::Progress(e.key(), got as f32 / cap as f32 * 0.9, progress_line(got, cap)));
+        let stem = format!(".download-{}-{}-", safe(&e.meta.author), e.meta.id);
+        let name = format!("{stem}{}.zip", &e.meta.sha256[..16.min(e.meta.sha256.len())]);
+        // another zip's download of this mod, cut short, is no use now
+        for old in std::fs::read_dir(&self.mods).into_iter().flatten().flatten() {
+            if old.file_name().to_str().is_some_and(|n| n.starts_with(&stem) && n != name) {
+                let _ = std::fs::remove_file(old.path());
             }
         }
-        file.flush().map_err(|err| format!("can't write {}: {err}", at.0.display()))?;
-        if got != cap {
-            return Err(format!("the download is {got} bytes, the store says {cap}"));
+        let mut at = Download { path: self.mods.join(name), keep: false };
+        let mut tries = 0;
+        loop {
+            match self.fetch(e, &at.path).await {
+                Ok(()) => return Ok(at),
+                Err(Fetch::Cut(why)) if tries + 1 < TRIES => {
+                    tries += 1;
+                    let have = std::fs::metadata(&at.path).map_or(0, |m| m.len());
+                    self.send(Event::Progress(e.key(), have as f32 / e.meta.size.max(1) as f32 * 0.9, format!("{why}: carrying on from {} MB", have >> 20)));
+                }
+                Err(Fetch::Cut(why)) => {
+                    at.keep = true;
+                    let have = std::fs::metadata(&at.path).map_or(0, |m| m.len());
+                    return Err(format!("{why}, {TRIES} times: Install again to carry on from {} MB", have >> 20));
+                }
+                Err(Fetch::Bad(why)) => return Err(why),
+            }
+        }
+    }
+
+    /// One try at `e`'s zip into `path`, from the end of what is there already.
+    async fn fetch(&self, e: &Entry, path: &Path) -> Result<(), Fetch> {
+        use std::io::{Read, Write};
+        let cap = e.meta.size;
+        let bad = |why: String| Fetch::Bad(why);
+        let mut have = std::fs::metadata(path).map_or(0, |m| m.len());
+        if have > cap {
+            have = 0;
+        }
+        // what is there already, hashed again
+        let mut hash = Sha256::new();
+        if have > 0 {
+            let mut f = std::fs::File::open(path).map_err(|err| bad(format!("can't read {}: {err}", path.display())))?;
+            let (mut left, mut b) = (have, vec![0; 4 << 20]);
+            while left > 0 {
+                let n = left.min(b.len() as u64) as usize;
+                f.read_exact(&mut b[..n]).map_err(|err| bad(format!("can't read {}: {err}", path.display())))?;
+                hash.update(&b[..n]);
+                left -= n as u64;
+            }
+        }
+        if have < cap {
+            let url = self.file_url(&e.rev, &format!("mods/{}/mod.zip", e.meta.id));
+            let mut ask = self.client.get(&url);
+            if have > 0 {
+                ask = ask.header("Range", format!("bytes={have}-"));
+            }
+            let mut r = ask.send().await.map_err(|err| Fetch::Cut(format!("can't reach the store: {err}")))?;
+            if r.status().as_u16() == 429 || r.status().is_server_error() {
+                return Err(bad(BUSY.into()));
+            }
+            if !r.status().is_success() {
+                return Err(bad(format!("the store said {}", r.status().as_u16())));
+            }
+            // a store that sends the whole zip for a Range: from the start
+            if have > 0 && r.status().as_u16() != 206 {
+                (have, hash) = (0, Sha256::new());
+            }
+            if r.content_length().is_some_and(|n| n > cap - have) {
+                return Err(bad("too big".into()));
+            }
+            let file = std::fs::OpenOptions::new().create(true).write(true).append(have > 0).truncate(have == 0).open(path);
+            let mut file = std::io::BufWriter::new(file.map_err(|err| bad(format!("can't write {}: {err}", path.display())))?);
+            let mut got = have;
+            let mut cut = None;
+            loop {
+                let c = match r.chunk().await {
+                    Ok(Some(c)) => c,
+                    Ok(None) => break,
+                    Err(err) => {
+                        cut = Some(format!("download cut short: {err}"));
+                        break;
+                    }
+                };
+                let mb = got >> 20;
+                got += c.len() as u64;
+                if got > cap {
+                    return Err(bad(format!("the download is more than the {cap} bytes the store says")));
+                }
+                hash.update(&c);
+                file.write_all(&c).map_err(|err| bad(format!("can't write {}: {err}", path.display())))?;
+                if got >> 20 != mb {
+                    self.send(Event::Progress(e.key(), got as f32 / cap as f32 * 0.9, progress_line(got, cap)));
+                }
+            }
+            file.flush().map_err(|err| bad(format!("can't write {}: {err}", path.display())))?;
+            if let Some(why) = cut {
+                return Err(Fetch::Cut(why));
+            }
+            // a body that ended whole (a cut one is an error above) is all the store has
+            if got < cap {
+                return Err(bad(format!("the download is {got} bytes, less than the {cap} the store says")));
+            }
         }
         if hex(&hash.finalize()) != e.meta.sha256 {
-            return Err("the download doesn't match its sha256 (damaged or changed)".into());
+            // a bad zip is not taken up again: the next Install starts afresh
+            return Err(bad("the download doesn't match its sha256 (damaged or changed)".into()));
         }
-        Ok(at)
+        Ok(())
     }
 
     /// The checked zip at `zip` into `mods/<folder>/<id>/`: unpacked into `mods/.store-<id>/` first,
@@ -1180,7 +1289,7 @@ impl Store {
         let stage = self.mods.join(format!(".store-{id}"));
         let _ = std::fs::remove_dir_all(&stage);
         let got = (|| {
-            let mut f = std::fs::File::open(&zip.0).map_err(|err| format!("can't read the download: {err}"))?;
+            let mut f = std::fs::File::open(&zip.path).map_err(|err| format!("can't read the download: {err}"))?;
             let len = f.metadata().map_err(|err| err.to_string())?.len();
             let mut read = |at: u64, n: usize| -> Result<Vec<u8>, String> {
                 let mut b = vec![0; n];

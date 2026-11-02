@@ -64,6 +64,8 @@ pub struct Card {
     pub category: String,
     /// Its download's bytes.
     pub size: u64,
+    /// P241: a world mod (many maps as one ground), which its card says beside its size.
+    pub world: bool,
     pub verified: bool,
     pub got: Got,
     /// Its preview's name in the menu's art ([`Art::track_image`]), whether or not it is in yet.
@@ -245,9 +247,10 @@ impl Shop {
         self.tab == 0 && self.categories().len() > 1
     }
 
-    /// The cards on the tab Download All installs: not installed or out of date, and not going now.
+    /// The cards on the tab Download All installs: not installed or out of date, and not going now;
+    /// P241: in the browser, no world (`modstore::WEB_WORLDS`).
     pub fn downloadable(&self) -> Vec<usize> {
-        self.shown().into_iter().filter(|&i| self.cards[i].progress.is_none() && matches!(self.cards[i].got, Got::No | Got::Update)).collect()
+        self.shown().into_iter().filter(|&i| self.cards[i].progress.is_none() && matches!(self.cards[i].got, Got::No | Got::Update) && !(self.web && self.cards[i].world)).collect()
     }
 
     /// The Upload page's rows (none until the rules are agreed to).
