@@ -106,6 +106,7 @@
 //! This file is std and `game_render`'s plain half only, so the tests compile it in by path.
 
 use game_render::biplane::Emitter;
+use game_render::creature::{Actor, Rays};
 use game_render::ini;
 use game_render::mat::{M4, V3, v3};
 
@@ -1585,8 +1586,11 @@ pub struct Touch {
     pub trigger: game_render::toy::Trigger,
     /// It has fired (a `OneTimeOnly` one fires once).
     pub fired: bool,
-    /// The riders in it last frame, by their place in [`TrackFx::touch`]'s list.
+    /// The actors in it, by their place in [`TrackFx::touch_among`]'s list: in when it fires for
+    /// them, out when its exit test lets them go.
     pub inside: Vec<usize>,
+    /// Something struck it this frame (whatever came of the strike).
+    pub touched: bool,
 }
 
 impl TrackFx {
@@ -1647,7 +1651,7 @@ impl TrackFx {
 
     /// [`TrackFx::new`] with the `.toy`'s triggers that have `particles` actions.
     pub fn with_triggers(mut self, triggers: Vec<game_render::toy::Trigger>) -> TrackFx {
-        self.triggers = triggers.into_iter().map(|trigger| Touch { trigger, fired: false, inside: Vec::new() }).collect();
+        self.triggers = triggers.into_iter().map(|trigger| Touch { trigger, fired: false, inside: Vec::new(), touched: false }).collect();
         self
     }
 
@@ -1704,22 +1708,39 @@ impl TrackFx {
         }
     }
 
-    /// Who is in the triggers this frame: `riders` are the points the triggers test. A trigger that
-    /// is enabled, and not a `OneTimeOnly` one that has fired, fires for each rider in it; one under
-    /// 100 percent rolls for each only on a frame no rider was in it the frame before, and fires on
-    /// `percent ≥ int(rand · 2⁻³¹ · 100) + 1`. Firing runs its actions for a rider not in it the
-    /// frame before, each now or after its `TriggerActionDelayTimer`.
+    /// [`TrackFx::touch_among`] with each rider a bare point.
     pub fn touch(&mut self, riders: &[V3]) {
+        let actors: Vec<Actor> = riders.iter().map(|&p| Actor::Rays(Rays::at(p))).collect();
+        self.touch_among(&actors);
+    }
+
+    /// Who strikes the triggers this frame (V103): the same toy trigger class as the bird triggers
+    /// (`creature.rs`), struck only through the collision pass, so by the bike's body rays
+    /// (`main.rs` `creature_rays`), not the rider's point. First each trigger's update: last
+    /// frame's touch kept, and an actor in it that its exit test lets go ([`Trigger::keeps`]) taken
+    /// out. Then its contact, for each actor that strikes it: an enabled trigger is touched; unless
+    /// it is a `OneTimeOnly` one that has fired, and unless it is under 100 percent and either was
+    /// touched last frame or loses the roll (`percent < int(rand · 2⁻³¹ · 100) + 1`), it fires, and
+    /// for an actor not in it already runs its actions, each now or after its
+    /// `TriggerActionDelayTimer`, and takes the actor in.
+    ///
+    /// [`Trigger::keeps`]: game_render::toy::Trigger::keeps
+    pub fn touch_among(&mut self, actors: &[Actor]) {
         use ps2_float::fpu::{from_i32, mul, to_i32};
         for t in &mut self.triggers {
-            let now: Vec<usize> = (0..riders.len()).filter(|&i| t.trigger.holds(riders[i])).collect();
-            for &i in &now {
-                if !t.trigger.enabled || (t.trigger.one_time && t.fired) {
-                    break;
+            let touched_last = std::mem::take(&mut t.touched);
+            t.inside.retain(|&i| actors.get(i).is_some_and(|a| t.trigger.keeps(a)));
+            for (i, actor) in actors.iter().enumerate() {
+                if !t.trigger.enabled || !t.trigger.struck_by(actor) {
+                    continue;
+                }
+                t.touched = true;
+                if t.trigger.one_time && t.fired {
+                    continue;
                 }
                 if t.trigger.percent != 100 {
-                    if !t.inside.is_empty() {
-                        break;
+                    if touched_last {
+                        continue;
                     }
                     let roll = to_i32(mul(mul(from_i32(self.rng.rand()), f32::from_bits(0x3000_0000)), 100.0)) + 1;
                     if t.trigger.percent < roll {
@@ -1733,8 +1754,8 @@ impl TrackFx {
                 for a in &t.trigger.actions {
                     self.pending.push((a.delay, a.emitter.clone(), a.on));
                 }
+                t.inside.push(i);
             }
-            t.inside = now;
         }
         self.run_pending(0.0);
     }

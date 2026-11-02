@@ -7211,9 +7211,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // The track's (V45): a frame for each frame simulated, as the bikes' are.
         if simulated && let Some(fx) = &mut track_fx {
             // V71: the riders in the triggers switch theirs on, and the ones on a toy ride its node
-            // where the first seat's simulation has it.
-            let riders: Vec<V3> = world.seats.iter().map(|s| s.sim.rider.ride.position()).map(|p| V3 { x: p.x(), y: p.y(), z: p.z() }).collect();
-            fx.touch(&riders);
+            // where the first seat's simulation has it. The bike's body rays strike them, as they
+            // strike the bird triggers (V103).
+            let riders: Vec<game_render::creature::Actor> = world.seats.iter().map(|s| creature_rays(&s.sim.rider)).collect();
+            fx.touch_among(&riders);
             if fx.on_toys() {
                 let toys = &world.seats[0].sim.traffic.toys;
                 fx.place(&mut |toy, node| toy_node(&animated, toys, toy, node));
@@ -7224,8 +7225,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // The track's rain (V73): who rode into its triggers, then a frame of its box where the
         // camera it follows is.
         if simulated && let Some(rain) = &mut rain {
-            let riders: Vec<V3> = world.seats.iter().map(|s| s.sim.rider.ride.position()).map(|p| V3 { x: p.x(), y: p.y(), z: p.z() }).collect();
-            rain.touch(&riders);
+            let riders: Vec<game_render::creature::Actor> = world.seats.iter().map(|s| creature_rays(&s.sim.rider)).collect();
+            rain.touch_among(&riders);
             rain.update(dt.0);
             rain.emit(cameras.get(rain.weather.camera).map(|c| c.eye));
             rain_dt = dt.0;
@@ -10019,7 +10020,7 @@ fn load_rain(archives: &[Res], track: &str) -> Option<(weather::Rain, game_rende
     };
     let rain = weather::Rain::new(weather, weather::triggers(&toy));
     println!("track: rain: {} ({} packets, density {})", rain.weather.name, rain.packets.len(), rain.density);
-    for (t, actions, _, _) in &rain.triggers {
+    for (t, actions, ..) in &rain.triggers {
         println!("track: rain: trigger {} ({} actions, {}%)", t.name, actions.len(), t.percent);
     }
     Some((rain, texture))
@@ -10051,9 +10052,10 @@ fn load_track_fx(archives: &[Res], track: &str) -> Result<(particles::TrackFx, g
     Ok((fx, texture))
 }
 
-/// What of a rider strikes a creature trigger (V75): the bike's body rays at its chassis, as the
-/// original's collision pass meets the trigger's box (a probe, struck down its tree and exit-tested
-/// by its root box since V104); a bike with no collision files is its rider's position.
+/// What of a rider strikes a creature trigger (V75), and the track's fx and rain triggers (V103):
+/// the bike's body rays at its chassis, as the original's collision pass meets the trigger's box (a
+/// probe, struck down its tree and exit-tested by its root box since V104); a bike with no
+/// collision files is its rider's position.
 fn creature_rays(r: &game_sim::rider::Rider) -> game_render::creature::Actor<'_> {
     let Some(col) = r.bike_col.as_deref() else {
         let p = r.ride.position();

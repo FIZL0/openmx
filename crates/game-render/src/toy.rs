@@ -924,6 +924,23 @@ impl Trigger {
             None => d.dot(self.right).abs() <= self.half.x && d.dot(self.up).abs() <= self.half.y && d.dot(self.look).abs() <= self.half.z,
         }
     }
+
+    /// Its volume as the bird triggers' (V103): the same toy trigger class in the original, whose
+    /// box is struck only through the collision pass ([`crate::creature::Trigger::struck_by`]).
+    pub fn shape(&self) -> crate::creature::Trigger {
+        crate::creature::Trigger { at: self.at, half: self.half, radius: self.radius, right: self.right, up: self.up, look: self.look, ..Default::default() }
+    }
+
+    /// Whether the actor strikes it, as [`crate::creature::Trigger::struck_by`].
+    pub fn struck_by(&self, actor: &crate::creature::Actor) -> bool {
+        self.shape().struck_by(actor)
+    }
+
+    /// Whether an actor in it is in it still, the trigger update's exit test
+    /// ([`crate::creature::Trigger::keeps`]).
+    pub fn keeps(&self, actor: &crate::creature::Actor) -> bool {
+        self.shape().keeps(actor)
+    }
 }
 
 /// The triggers a `.toy` lists, `Trigger1` to the count its `[Triggers]` says, that have a

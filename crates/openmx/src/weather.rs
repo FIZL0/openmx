@@ -28,7 +28,7 @@
 //! **The actions** ([`Rain::act`]): `ChangeDensity` 0 or more sets the target, `ChangeDensityStep`
 //! 0 or more the step, `NewAspectRatio` above 0 the streaks' length, and `NewMinParticleVelocity` or
 //! `NewMaxParticleVelocity` above 0 both speeds. The triggers' contact is V71's (`particles.rs`):
-//! one under 100 percent rolls as a rider comes in.
+//! one under 100 percent rolls as a rider comes in, and the bike's body rays strike it (V103).
 //!
 //! **Its own random numbers.** It is presentation: nothing here reads or draws from the simulation's
 //! `rand`, as the plane's and the track's particles do not.
@@ -38,6 +38,7 @@
 //!
 //! This file is std and `game_render`'s plain half only, so the tests compile it in by path.
 
+use game_render::creature::{Actor, Rays};
 use game_render::glow::{Glow, Vertex};
 use game_render::ini;
 use game_render::mat::{V3, v3};
@@ -224,8 +225,9 @@ pub struct Packet {
 #[derive(Clone, Debug)]
 pub struct Rain {
     pub weather: WeatherBox,
-    /// The `.toy`'s triggers with `Weather` actions on this box, and the riders in each last frame.
-    pub triggers: Vec<(Trigger, Vec<Action>, Vec<usize>, bool)>,
+    /// The `.toy`'s triggers with `Weather` actions on this box, each with the actors in it, whether
+    /// it has fired, and whether something struck it last frame ([`Rain::touch_among`]).
+    pub triggers: Vec<(Trigger, Vec<Action>, Vec<usize>, bool, bool)>,
     /// The box's clock, seconds.
     pub clock: f32,
     pub ramp: Ramp,
@@ -259,7 +261,7 @@ impl Rain {
             .into_iter()
             .filter_map(|(t, actions)| {
                 let mine: Vec<Action> = actions.into_iter().filter(|a| a.weather_box.eq_ignore_ascii_case(&weather.name)).collect();
-                (!mine.is_empty()).then_some((t, mine, Vec::new(), false))
+                (!mine.is_empty()).then_some((t, mine, Vec::new(), false, false))
             })
             .collect();
         let mut rain = Rain {
@@ -342,6 +344,7 @@ impl Rain {
         for t in &mut self.triggers {
             t.2.clear();
             t.3 = false;
+            t.4 = false;
         }
     }
 
@@ -363,21 +366,34 @@ impl Rain {
         }
     }
 
-    /// Who is in the triggers this frame, `riders` the points they test, as `TrackFx::touch`: a
-    /// trigger under 100 percent rolls for a rider only on a frame no rider was in it the frame
-    /// before; firing runs its actions for a rider not in it the frame before.
+    /// [`Rain::touch_among`] with each rider a bare point.
     pub fn touch(&mut self, riders: &[V3]) {
+        let actors: Vec<Actor> = riders.iter().map(|&p| Actor::Rays(Rays::at(p))).collect();
+        self.touch_among(&actors);
+    }
+
+    /// Who strikes the triggers this frame, as `TrackFx::touch_among` (V103): the bike's body rays
+    /// through the collision pass, an actor let go by the trigger's exit test, and one under 100
+    /// percent rolling only when nothing struck it last frame. Firing runs its actions for an actor
+    /// not in it already.
+    pub fn touch_among(&mut self, actors: &[Actor]) {
         let mut fired = Vec::new();
         for k in 0..self.triggers.len() {
-            let now: Vec<usize> = (0..riders.len()).filter(|&i| self.triggers[k].0.holds(riders[i])).collect();
-            for &i in &now {
-                let (t, _, inside, done) = &self.triggers[k];
-                if !t.enabled || (t.one_time && *done) {
-                    break;
+            let touched_last = std::mem::take(&mut self.triggers[k].4);
+            let (t, _, inside, ..) = &mut self.triggers[k];
+            inside.retain(|&i| actors.get(i).is_some_and(|a| t.keeps(a)));
+            for (i, actor) in actors.iter().enumerate() {
+                let t = &self.triggers[k].0;
+                if !t.enabled || !t.struck_by(actor) {
+                    continue;
                 }
-                if t.percent != 100 {
-                    if !inside.is_empty() {
-                        break;
+                self.triggers[k].4 = true;
+                if self.triggers[k].0.one_time && self.triggers[k].3 {
+                    continue;
+                }
+                if self.triggers[k].0.percent != 100 {
+                    if touched_last {
+                        continue;
                     }
                     let roll = (self.unit() * 100.0) as i32 + 1;
                     if self.triggers[k].0.percent < roll {
@@ -389,8 +405,8 @@ impl Rain {
                     continue;
                 }
                 fired.extend(self.triggers[k].1.iter().cloned());
+                self.triggers[k].2.push(i);
             }
-            self.triggers[k].2 = now;
         }
         for a in &fired {
             self.act(a);

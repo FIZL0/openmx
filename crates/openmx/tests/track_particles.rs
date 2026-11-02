@@ -293,3 +293,40 @@ fn the_finish_gate_has_the_fireworks_nodes() {
         assert!(animated.bones[k].iter().any(|b| b.eq_ignore_ascii_case(&name)), "{name} not in {:?}", animated.bones[k]);
     }
 }
+
+/// V103: what strikes a geyser trigger is the bike's body rays. A segment across the box with both
+/// ends outside it sets the geyser off, as the point at either end never would; and an actor that
+/// stays in rolls once, on the frame it is first struck, and not again while it is touched.
+#[test]
+fn a_segment_across_a_geyser_trigger_sets_it_off() {
+    use game_render::creature::{Actor, Rays};
+    let Some(mut disc) = disc() else { return };
+    let (_, mut fx) = track_fx(&mut disc, "nat12");
+    let t = fx.triggers[1].trigger.clone();
+    assert!(t.radius.is_none(), "a box");
+    let out = t.half.z + 1.0;
+    let (from, to) = (t.at.sub(t.look.scale(out)), t.at.add(t.look.scale(out)));
+    assert!(!t.holds(from) && !t.holds(to));
+    let across = || Actor::Rays(Rays(vec![[from, to]]));
+    let away = || Actor::Rays(Rays::at(game_render::mat::v3(0.0, 0.0, 0.0)));
+    assert!(t.struck_by(&across()) && !t.struck_by(&away()));
+    let blast = |fx: &TrackFx| fx.fx.entries.iter().any(|e| e.name == "Geyser_a_blast" && e.gate.is_on());
+    let dt = 1.0 / 30.0;
+    // Held across it: one toss, on the first frame.
+    fx.touch_among(&[across()]);
+    let tossed = format!("{:?}", fx.rng);
+    for _ in 0..30 {
+        fx.touch_among(&[across()]);
+        fx.step_over(dt, &mut |_| None);
+    }
+    assert_eq!(format!("{:?}", fx.rng), tossed, "a toss while it stayed touched");
+    let mut tries = 0;
+    while !blast(&fx) {
+        tries += 1;
+        assert!(tries < 40, "forty passes across and no blast");
+        fx.touch_among(&[away()]);
+        fx.step_over(dt, &mut |_| None);
+        fx.touch_among(&[across()]);
+        fx.step_over(dt, &mut |_| None);
+    }
+}

@@ -201,3 +201,44 @@ fn the_ramp_turns_a_frame_late() {
     rain.act(&weather::Action { weather_box: "w".into(), density: -1.0, step: -1.0, aspect: 0.0, min_velocity: 30.0, max_velocity: 60.0 });
     assert_eq!((rain.speeds[0], rain.speeds[15]), (60.0, 30.0));
 }
+
+/// V103: the bike's body rays strike the triggers, not the rider's point. RainBegins is 2.5 ft
+/// thick: a bike standing across it with its seat a few feet past strikes it through its rays,
+/// where the point misses; the rain comes up for it, and a bike well clear does nothing.
+#[test]
+fn the_bikes_body_rays_strike_the_rain_triggers() {
+    use game_render::creature::Actor;
+    use game_sim::bike_col::{self, BikeCol};
+    use ps2_float::Vf;
+    let Some((toy, _)) = nat01() else { return };
+    let mut disc = Disc::open_configured().unwrap();
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("an archive with the bike's collision files");
+    let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL))).unwrap();
+    let mut rain = Rain::new(weather::boxes(&toy).remove(0), weather::triggers(&toy));
+    let t = rain.triggers[0].0.clone();
+    assert_eq!(t.name, "RainBegins");
+    // The bike faces along the trigger's look, its seat `s` feet out along it.
+    let row = |v: V3, w: f32| Vf::new(v.x, v.y, v.z, w);
+    let at = |s: f32| [row(t.right, 0.0), row(t.up, 0.0), row(t.look, 0.0), row(t.at.add(t.look.scale(s)), 1.0)];
+    let across: Vec<f32> = (-40..=40)
+        .map(|k| k as f32 * 0.5)
+        .filter(|&s| !t.holds(t.at.add(t.look.scale(s))) && t.struck_by(&Actor::Probe(col.probe(at(s)))))
+        .collect();
+    assert!(!across.is_empty(), "no seat outside the slab whose rays cross it");
+    assert!(!t.struck_by(&Actor::Probe(col.probe(at(40.0)))), "rays 40 ft out");
+    let s = across[0];
+    let eye = v3(2800.0, 200.0, 2900.0);
+    let mut fired = false;
+    for _ in 0..50 {
+        rain.touch_among(&[Actor::Probe(col.probe(at(s)))]);
+        frame(&mut rain, eye);
+        rain.touch_among(&[Actor::Probe(col.probe(at(40.0)))]);
+        frame(&mut rain, eye);
+        if rain.target == 1.0 {
+            fired = true;
+            break;
+        }
+    }
+    assert!(fired, "a bike across RainBegins never brought the rain, seat {s} ft out");
+}
