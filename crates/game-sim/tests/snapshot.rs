@@ -214,6 +214,54 @@ fn decode_refuses_broken_bytes_and_leaves_the_state_alone() {
     }
 }
 
+/// A one-player state has no players' list, so the section after the plane is the cars' or the
+/// toys' tag, which decode must not take for the list's length (S199).
+#[test]
+fn a_one_player_state_with_cars_and_toys_round_trips() {
+    use game_sim::toys::{Bodies, Clock, Hint};
+    use game_sim::traffic::{Spec, Traffic};
+    use ps2_float::{F, Vf};
+
+    let traffic = |cars: bool, toys: bool| {
+        let points = [(F(0.0), Vf::new(0.0, 0.0, 0.0, 1.0)), (F(1.0), Vf::new(10.0, 0.0, 0.0, 1.0))];
+        let specs = if cars { vec![Spec::new(&points, F(1.0), F(0.5), F(0.5), F(0.0), None).expect("a two-key path")] } else { Vec::new() };
+        let mut t = Traffic::new(specs);
+        if toys {
+            t.toys.clocks = vec![Clock::default(); 2];
+            t.toys.hints = vec![Hint(0); 3];
+            t.toys.bodies = vec![Bodies(0); 2];
+        }
+        t
+    };
+    for (cars, toys) in [(true, true), (true, false), (false, true)] {
+        let what = format!("cars {cars}, toys {toys}");
+        let mut sim = Sim::new(7);
+        sim.traffic = traffic(cars, toys);
+        if cars {
+            sim.traffic.cars[0].clock = F(0.75);
+            sim.traffic.cars[0].seg = 1;
+        }
+        if toys {
+            sim.traffic.toys.clocks[1] = Clock { time: F(2.5), prev: F(2.25), finished: true };
+            sim.traffic.toys.hints[2] = Hint(5);
+            sim.traffic.toys.bodies[0] = Bodies(2);
+        }
+        assert!(sim.others.is_empty(), "{what}: one player");
+        let bytes = snapshot::encode(&sim);
+
+        let mut there = Sim::new(7);
+        there.traffic = traffic(cars, toys);
+        snapshot::decode(&mut there, &bytes).unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert!(there.others.is_empty(), "{what}: a players' list read from a tag");
+        assert_eq!(there.traffic.cars, sim.traffic.cars, "{what}: the cars");
+        assert_eq!(there.traffic.toys.clocks, sim.traffic.toys.clocks, "{what}: the toys' clocks");
+        assert_eq!(there.traffic.toys.hints, sim.traffic.toys.hints, "{what}: the toys' hints");
+        assert_eq!(there.traffic.toys.bodies, sim.traffic.toys.bodies, "{what}: the toys' bodies");
+        assert_eq!(there.hash(), sim.hash(), "{what}");
+        assert_eq!(snapshot::encode(&there), bytes, "{what}: re-encoded differently");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // ggrs' sync test.
 //
