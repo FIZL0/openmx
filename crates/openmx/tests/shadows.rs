@@ -165,9 +165,6 @@ fn a_high_jump_s_long_shadow_still_reaches_the_ground() {
             .current_dir(&root)
             .args(["--headless", "--track", "free09", "--size", "640x360", "--overlay", "none", "--controls", "original"])
             .args(["--trace-at", "3864.2,1592.5,-132", "--play", tape.to_str().unwrap(), "--frames", "132", "--steady-clock"])
-            // Flat out over the jump on the original's air control: the port's gas gyro (P255) would
-            // stand the bike on its tail and throw the rider before tick 130.
-            .arg("--no-gas-gyro")
             .args(if quality == "off" { ["--shadows", "off", "--shadow-quality", "high"] } else { ["--shadows", "on", "--shadow-quality", quality] })
             .args(["--shot", path.to_str().unwrap(), "--shot-frame", "130"])
             .output()
