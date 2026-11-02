@@ -503,6 +503,9 @@ pub struct Prop {
     pub member: usize,
     /// The body, at rest where its model stands.
     pub body: Body,
+    /// Its inertia (the diagonal, `w` one), which the body holds only the inverse of; a torsion
+    /// spring's reader reads it (S196).
+    pub inertia: Vf,
     /// The part's gravity force (`GravityScale` times the weight, down).
     pub gravity: Vf,
     /// The collision object's tuning, off the part's keys and the body's mass and inertia (S198).
@@ -608,8 +611,9 @@ pub fn bodies(
             let part = &coll.pco.parts[member.part].part;
             let size = box_size(node_box(member));
             let (position, quat) = pose(&models[member.model]);
-            let made = WreckBike::new(part, part.inertia(size), position, quat);
-            out.push(Prop { collection: c, member: m, body: made.body, gravity: made.gravity, collider: made.collider });
+            let inertia = part.inertia(size);
+            let made = WreckBike::new(part, inertia, position, quat);
+            out.push(Prop { collection: c, member: m, body: made.body, inertia, gravity: made.gravity, collider: made.collider });
         }
     }
     out

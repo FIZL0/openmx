@@ -691,7 +691,7 @@ fn prod(a: Vf, b: Vf) -> Vf {
 }
 
 /// `a ⊗ b*`: the turn from `b` to `a`.
-fn rel(a: Vf, b: Vf) -> Vf {
+pub(crate) fn rel(a: Vf, b: Vf) -> Vf {
     let p = a.mul(b);
     let acc = Vf::opmula(b, a);
     let acc = Vf::madd(acc, a, b.bc(Field::W));

@@ -5779,7 +5779,7 @@ physics_collection_settle boot 0x003b2440 the collection's node listener: any bo
 physics_collection_unflag boot 0x003b2860 vt +0xac: clears the +0x20 active bit only
 physics_constraint_attach boot 0x001f3d00 a constraint's anchors (body-local pin points) and bodies
 torsion_spring_ctor   boot 0x001f2f90 BodyTorsionSpring, 0x40 bytes, vtable 0x00451ea0; filed on
-#                                    collection +0x270 / +0x2b8 (pins +0x288 / +0x2d0). Not ported.
+#                                    collection +0x270 / +0x2b8 (pins +0x288 / +0x2d0). Ported by S196.
 torsion_spring_read   boot 0x001f3060 vt +0x14: stiffness = Spring x body +0x110 inertia, damping
 #                                    2 * zeta * sqrt(I * k)
 torsion_spring_force  boot 0x001f3180 the pull back through quat_axis_angle
@@ -5806,6 +5806,29 @@ node_bounds_merge     boot 0x001b42a0 (child, &any, lo, hi, parent rows, 1): row
 #                                    (vmini/vmax xyzw; lo/hi w start from M0.w/M1.w, two zeros order
 #                                    -0 under +0), then its children. node_bounds' own corner and
 #                                    final sums are .xyz: centre.w = lo.w, half.w = hi.w.
+
+# S196 — the props' BodyTorsionSpring and a collection's own ResetTime (prop_world::Spring;
+# tests/prop_spring.rs; journal 2026-11-02-s196-torsion-spring). States (git-ignored, s2's context
+# only): s196-sx01.ee.bin (S133 boot.py sx01 0 1, copy 2 slot 21) and s196-free11.ee.bin (boot.py
+# free11 2 5, slot 22), both 27 collections, every prop asleep.
+# Spring layout: +0 on (1), +4 id, +8 vtable 0x00451ea0, +0x10 stiffness, +0x20 damping (ctor
+# (0,0,0,1)), +0x30 body (0x001f3050). Vtable +0xc = 0x001f3180, the force listener: the reader files
+# the spring itself on the collection world's force list (coll +0x2b8 = world +0x68) at load, so it
+# runs ahead of every object's force listener (filed on enable). Asleep, a banner's force list is just
+# its spring. coll +0x270 is NOT a spring list: sx01's bales hold 5..0x1e there with no spring.
+torsion_spring_force  boot 0x001f3180 returns unless +0 on and the body enabled; e = unturn(start
+#                                    turn +0x160, rel(quat +0x170, start)); (angle, axis) =
+#                                    quat_axis_angle 0x0013f110; spin = rates(+0x1b0).axis by FPU
+#                                    mula/madda/madd; sum.xyz = stiffness*angle + damping*spin
+#                                    (w = stiffness.w); torque = -sum.xyz * axis.xyz into body vt
+#                                    (+0x100) +0x5c = 0x001f3360: +0x190 += v.xyz, then the body's
+#                                    listeners (+0xd0, none on a prop)
+# sx01..sx24 all carry banner.pco: one part, Pin with ConstrainAngles +-70 x, BodyTorsionSpring
+# Spring 15,0,0 Damping 0,0,0 (stiffness x = 63.884674 off the inertia). banner_09 (0x00f2e550 in the
+# sx01 state) swung at 8 rad/s about x reaches 69.9 deg, sleeps at frame 99, put back at 250.
+# PinToBody: no .pco on the disc has one. A [PhysicsParts] ResetTime (coll +0x33c) is only on free11's
+# (and free11_ss's) bowlingpin (one collection, ten bodies, 0x00d08680 in the state),
+# buggysparetirerear and buggysparetirefrnt, all 5.0; every other collection holds -1.
 
 # V44 — the birds and the SequenceAnimatedToys (crates/game-render/src/creature.rs; journal
 #   2026-10-26-v44-creatures). Strings: ToyBirds.cpp 0x00444b00, the bird keys 0x00444b10..0x00444e98
