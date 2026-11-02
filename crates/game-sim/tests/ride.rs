@@ -5928,6 +5928,9 @@ fn md21_a_three_sixty_plays_threesixty_r() {
     assert_eq!(both[first_after].1, none[first_after].1, "once round it asks for what it did without");
     let left_only = ride(&with(&[SPIN_LEFT]));
     assert_eq!(left_only, none, "a right-hand 360 with only threesixtyL plays nothing new");
+    // MD59: the clip state is the turn's, not the library's — a body with no 360 clip still enters
+    // it, so its landing wreck and its score stand (the exe's 0 to 1 waits on the play call).
+    assert!(both.iter().zip(&none).all(|(a, b)| a.0 == b.0), "the clip state runs without the clip");
 }
 
 /// The bike's turn in its own frame, summed tick by tick off the chassis quaternion: (pitch, yaw),

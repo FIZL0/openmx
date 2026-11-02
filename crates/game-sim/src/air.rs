@@ -1391,6 +1391,17 @@ pub fn spin_turned(start: F, h: F) -> F {
 /// once the turn is *under* it. A clip only started and back under the angle stays started — it is
 /// neither stopped nor played, and a landing on it is still the mid-clip wreck. No latch: a clip
 /// that stopped starts again the next time the turn is over the angle.
+///
+/// **The port's own (MD59): the clip state runs whether or not the rider has the clip.** The exe moves
+/// 0 to 1 only when its play call for `threesixtyR`/`threesixtyL` answers non-zero, so a rider without
+/// the clip would never start it — and so never score the 360 ([`Spin::came_round`]), never take the
+/// mid-clip landing wreck ([`Spin::wrecked`]) and never turn MD62's air control to the stunt. Every
+/// MX vs. ATV rider has both clips, so on the disc the gate never closes; here a pack bike may have
+/// neither, and following it would make that bike's 360 a free spin that cannot wreck or score. The
+/// library is also the renderer's asset: the sim's step does not see it (only the body's frame,
+/// `rider.rs` `spin_state`, asks it which clip to play), and a sim that hashed its wrecks off what clips
+/// a pack ships would part riders that differ only in their art. So the turn alone runs the state, and
+/// a bike without the clip wrecks and scores as one with it; only the body's animation goes without.
 pub fn spin_clip(spin: &mut Spin, turned: F) {
     if spin.clip == 0 {
         if turned > SPIN_CLIP {

@@ -1451,7 +1451,8 @@ fn pack_state(lib: &vehicle_anim::Library, trick: Trick) -> i32 {
 
 /// **MD21:** MX vs. ATV's 360 clip, from the frame the bike turns past [`air::SPIN_CLIP`] until it
 /// comes round or lands: `threesixtyR` for a 360 flicked left then right, `threesixtyL` the other way.
-/// `None` when no 360 is past its angle, or the pack has no clip for this one.
+/// `None` when no 360 is past its angle, or the pack has no clip for this one — which only drops the
+/// clip: the 360's clip state, its score and its landing wreck run without it (MD59, [`air::spin_clip`]).
 fn spin_state(lib: &vehicle_anim::Library, ride: &Ride) -> Option<i32> {
     let spin = &ride.tricks.as_ref()?.spin;
     let state = if spin.dir >= 1 { vehicle_anim::SPIN_RIGHT } else { vehicle_anim::SPIN_LEFT };
