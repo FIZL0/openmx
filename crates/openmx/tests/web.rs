@@ -609,6 +609,23 @@ fn a_pad_the_browser_shows_on_a_press_rides() {
     assert!(gas > 0.05, "R2 did not move the speedometer ({gas}):\n{text}");
 }
 
+/// A pad the browser does not map "standard" (P244, `tests/web/pads.mjs`): web/pads.js reads an
+/// evdev pad's trigger and hat axes (Firefox on Linux), chromium's hat switch and a cheap pad's hat
+/// pair as the standard mapping's L2/R2 and d-pad, its sticks off the axes left, and its buttons
+/// from 6 on in their standard places; a standard pad as it is. Skips without node.
+#[test]
+fn a_pad_without_the_standard_mapping_keeps_its_d_pad_and_triggers() {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipped: no node");
+        return;
+    }
+    let drive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/pads.mjs");
+    let run = Command::new("node").arg(&drive).arg(repo().join("web")).output().expect("run node");
+    let text = String::from_utf8_lossy(&run.stdout);
+    print!("{text}");
+    assert!(run.status.success(), "pads.mjs failed:\n{}{text}", String::from_utf8_lossy(&run.stderr));
+}
+
 /// The mod store in the page (P198, `tests/web/store.mjs`): headless chromium opens the page with
 /// `--screen store` pointed at a fake store on the page's own loopback server, the disc picked; one
 /// Space (Cross) on the store's only card downloads its mod.zip through the redirect to the "CDN" into

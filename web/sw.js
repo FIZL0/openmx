@@ -4,7 +4,7 @@
 // not fetched ahead (P194: a first visit loads the page alone, the module only on Ride); the fetch below keeps it
 // once a ride has loaded it.
 const CACHE = 'openmx';
-const SHELL = ['./', 'worker.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'touch.js', 'fonts/Saira.ttf'];
+const SHELL = ['./', 'worker.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'touch.js', 'pads.js', 'fonts/Saira.ttf'];
 // The game module (P205, opentennis's B470): its glue and wasm, kept a build to a cache named for the build
 // (version.txt, tools/web.sh) and served from it first, so a ride after the first starts without fetching the
 // module again — megabytes, on a phone's network — and the glue and the wasm are always one build's. A build

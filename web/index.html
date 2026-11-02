@@ -194,6 +194,7 @@ window.openmxLog = (() => {
 <link rel="apple-touch-icon" href="icon-180.png">
 <!-- P197: the on-screen pad, audio unlock and phone bits; before the page's module so its AudioContext is resumable -->
 <script src="touch.js"></script>
+<script src="pads.js"></script>
 <style>
 @font-face { font-family: "OMX"; font-weight: 100 900; font-stretch: 50% 125%; font-display: swap; src: url(fonts/Saira.ttf) format("truetype"); }
 :root {
@@ -823,14 +824,16 @@ footer a { color: var(--bone); }
   };
   addEventListener('resize', view);
   window.screen.orientation?.addEventListener?.('change', view);
-  // The gamepads, every frame of the page's (only the page's thread can read them): index, the 17 buttons, the 4 axes.
+  // The gamepads, every frame of the page's (only the page's thread can read them): index, the 17 buttons, the 4 axes,
+  // of the standard mapping (a pad without it read as one by pads.js).
   let names = '';
   const pads = () => {
     const out = [];
     const named = {};
     for (const g of navigator.getGamepads?.() ?? []) {
       if (!g || !g.connected) continue;
-      out.push(g.index, ...Array.from({ length: 17 }, (_, i) => g.buttons[i]?.value ?? 0), ...[0, 1, 2, 3].map(i => g.axes[i] ?? 0));
+      const p = openmxPad(g);
+      out.push(g.index, ...p.buttons, ...p.axes);
       named[g.index] = g.id;
     }
     const n = JSON.stringify(named);
