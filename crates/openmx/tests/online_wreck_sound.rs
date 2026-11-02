@@ -197,7 +197,7 @@ fn a_headless_online_wreck_plays_its_voice_and_clank() {
             .map(|(s, sim)| {
                 let r = &sim.rider;
                 let at = r.ride.position();
-                let f = said.of(s, r);
+                let f = said.of(s, r, sim.plane.as_ref());
                 if r.state.wreck.is_some() && drawn_wrecks[s].is_none() {
                     drawn_wrecks[s] = Some(round);
                 }

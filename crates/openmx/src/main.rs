@@ -7227,7 +7227,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // session ran the rider's own frames, re-running some on a rollback, and kept none.
             let drawn = on.drawn();
             for (d, seat) in world.seats.iter_mut().enumerate() {
-                seat.said = drawn.get(d).map_or_else(rider::Frame::default, |&s| online_said.of(s, &seat.sim.rider));
+                seat.said = drawn.get(d).map_or_else(rider::Frame::default, |&s| online_said.of(s, &seat.sim.rider, seat.sim.plane.as_ref()));
             }
             // An opened ride's lobby (N10) is the pause's to show: its code, who is in.
             if let Some(front) = front.as_deref_mut()

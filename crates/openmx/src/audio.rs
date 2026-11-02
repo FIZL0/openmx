@@ -2237,30 +2237,85 @@ impl RiderBody {
 /// same wreck draws the wreck both times, and is heard once; one that runs out differently takes
 /// the wreck back, and the wreck it does have is heard when it comes. Presentation only: it reads
 /// the ride and writes nothing of it.
+///
+/// A put-back (P206) is the wreck reason going from some to none, or the bike's ghost clock going up
+/// (every put-back of the bike starts it whole, the chord's on a rider still riding too); the
+/// plane's, its crash reason going to none or its body come back to its spawn from away. A trick
+/// started is one coming into progress — the rider's own start, a queued trick that follows on
+/// running is not — or, as the rider tells them, a front flip come round or a flip's points shown.
 #[derive(Clone, Debug, Default)]
 pub struct Said {
-    /// Each room seat's rider at the last drawn frame: wrecked, off the ground, the trick in flight.
-    /// `None` until the seat is first drawn, which says nothing. By room seat, not shell seat, so a
-    /// join or a leave that moves the shell's seats round moves nobody's memory onto another rider.
-    was: Vec<Option<(bool, bool, game_sim::trick::Trick)>>,
+    /// Each room seat's rider at the last drawn frame. `None` until the seat is first drawn, which
+    /// says nothing. By room seat, not shell seat, so a join or a leave that moves the shell's seats
+    /// round moves nobody's memory onto another rider.
+    was: Vec<Option<Seen>>,
 }
 
+/// What [`Said`] keeps of a seat's ride at a drawn frame.
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    wrecked: bool,
+    airborne: bool,
+    /// The trick in flight.
+    flight: game_sim::trick::Trick,
+    /// The bike's ghost clock.
+    ghost: F,
+    /// A trick is running, the pack's front-flip watch, the points' shown trick.
+    tricking: bool,
+    front_watch: u8,
+    shown: u8,
+    /// The plane's crash reason, and how far its body is from its spawn, feet: `None` with no plane.
+    plane: Option<(u32, f32)>,
+}
+
+/// A plane's body within this of its spawn, having been beyond [`PLANE_AWAY`] at the last drawn
+/// frame, was put back (P206): the chord's put-back of a plane on the ground and unwrecked changes
+/// nothing else a drawn frame can see. The chord stands it at rest in its bay, on the wheels; a plane
+/// come that close to the bay any other way taxied there.
+const PLANE_BACK: f32 = 3.0;
+const PLANE_AWAY: f32 = 10.0;
+
 impl Said {
-    /// What room seat `d`'s rider did since the last drawn frame: its wreck entry and its landed
-    /// trick, the rest of the frame left at none.
-    pub fn of(&mut self, d: usize, rider: &game_sim::rider::Rider) -> game_sim::rider::Frame {
+    /// What room seat `d`'s rider did since the last drawn frame: its wreck entry, its landed and
+    /// started trick, and its put-back, bike's or plane's (`plane`, the seat's [`game_sim::Sim::plane`]);
+    /// the rest of the frame left at none.
+    pub fn of(&mut self, d: usize, rider: &game_sim::rider::Rider, plane: Option<&game_sim::flight::Flight>) -> game_sim::rider::Frame {
         let (airborne, flight) = rider.in_flight();
-        let now = (rider.state.wreck.is_some(), airborne, flight);
+        let now = Seen {
+            wrecked: rider.state.wreck.is_some(),
+            airborne,
+            flight,
+            ghost: rider.ghost.clock,
+            tricking: rider.tricks.in_progress,
+            front_watch: rider.ride.tricks.as_ref().map_or(0, |t| t.front_watch),
+            shown: rider.score.shown,
+            plane: plane.map(|f| {
+                let (at, spawn) = (f.body.position, f.spawn.0);
+                let d = [at.x() - spawn.x(), at.y() - spawn.y(), at.z() - spawn.z()];
+                (f.crash.reason, (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt())
+            }),
+        };
         if self.was.len() <= d {
             self.was.resize(d + 1, None);
         }
         let mut said = game_sim::rider::Frame::default();
-        if let Some((wrecked, was_airborne, was_flight)) = self.was[d].replace(now) {
-            if !wrecked {
+        if let Some(was) = self.was[d].replace(now) {
+            if !was.wrecked {
                 said.wreck = rider.state.wreck;
             }
-            if said.wreck.is_none() && !now.0 && was_airborne && !airborne && was_flight != game_sim::trick::Trick::NONE {
-                said.landed = Some(was_flight);
+            if said.wreck.is_none() && !now.wrecked && was.airborne && !airborne && was.flight != game_sim::trick::Trick::NONE {
+                said.landed = Some(was.flight);
+            }
+            said.respawned = (was.wrecked && !now.wrecked)
+                || was.ghost < now.ghost
+                || matches!((was.plane, now.plane), (Some((crashed, away)), Some((reason, near)))
+                    if (crashed != 0 && reason == 0) || (away > PLANE_AWAY && near < PLANE_BACK));
+            if now.tricking && !was.tricking {
+                said.started = Some(rider.tricks.current);
+            } else if was.front_watch != 3 && now.front_watch == 3 {
+                said.started = Some(game_sim::trick::Trick::FRONTFLIP);
+            } else if now.shown != 0 && now.shown != was.shown {
+                said.started = Some(game_sim::trick::Trick(now.shown));
             }
         }
         said
