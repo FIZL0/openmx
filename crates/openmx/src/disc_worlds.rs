@@ -142,11 +142,27 @@ pub fn stitch_tiles(disc: &mut Disc, id: &str) -> Result<(Vec<stitch::Tile>, sti
 /// World `id` off `disc`, its joins built under `mods` the first time (`say` hears that it is
 /// building, which takes a while) and read from there after.
 pub fn world(disc: &mut Disc, mods: &Path, id: &str, say: &mut dyn FnMut(&str)) -> Result<WorldMod, String> {
+    world_watched(disc, mods, id, say, &|_, _, _| Ok(()))
+}
+
+/// The line under the loading bar while a world's maps are read off the disc.
+pub const READING_MAPS: &str = "Reading the maps";
+/// The line while its joins are built, before the pass's number.
+pub const JOINING: &str = "Joining the maps";
+
+/// [`world`], saying to `watch` what it is at as it goes (P260): the maps read, each pass of the
+/// joins' build and its pieces, the world read. `watch`'s error — a cancelled load — stops it at
+/// the next step, with nothing half-built left in the cache.
+pub fn world_watched(disc: &mut Disc, mods: &Path, id: &str, say: &mut dyn FnMut(&str), watch: worlds::Watch) -> Result<WorldMod, String> {
     let (_, spec) = SPECS.iter().find(|(w, _)| *w == id).ok_or_else(|| format!("{id}: not a disc world"))?;
     let spec_json = Json::parse(spec).map_err(|e| format!("{id}.json: {e}"))?;
     let tiles: Vec<String> =
         spec_json.get("tiles").and_then(Json::arr).unwrap_or_default().iter().filter_map(Json::str).map(str::to_string).collect();
-    let mut maps: Vec<Map> = tiles.iter().map(|t| read_map(disc, t)).collect::<Result<_, _>>()?;
+    let mut maps: Vec<Map> = Vec::with_capacity(tiles.len());
+    for (n, t) in tiles.iter().enumerate() {
+        watch(READING_MAPS, n, tiles.len())?;
+        maps.push(read_map(disc, t)?);
+    }
     let root = cache_dir(mods, id);
     let key = key(spec, &maps);
     let dir = root.join(&key);
@@ -154,12 +170,26 @@ pub fn world(disc: &mut Disc, mods: &Path, id: &str, say: &mut dyn FnMut(&str)) 
         say(&format!("{id}: building its joins from the disc's maps, once (a minute or two)"));
         let tiles: Vec<stitch::Tile> = maps
             .iter()
-            .map(|m| stitch::Tile::from_parts(&m.tile, meta(&m.tile), &m.scene_file, m.scene.clone(), &m.terrain_file, &m.terrain))
+            .enumerate()
+            .map(|(n, m)| {
+                watch(JOINING, n, maps.len())?;
+                stitch::Tile::from_parts(&m.tile, meta(&m.tile), &m.scene_file, m.scene.clone(), &m.terrain_file, &m.terrain)
+            })
             .collect::<Result<_, _>>()?;
         let params = stitch::build::Params::from_spec(&spec_json).map_err(|e| format!("{id}.json: {e}"))?;
         let part = root.join(format!("{key}.part-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&part);
-        stitch::build::build_tiles(&tiles, &part, &params, false)?;
+        forget_dead_parts(&root);
+        let built = stitch::build::build_watched(&tiles, &part, &params, false, &|step| match step {
+            stitch::build::Step::Measuring => watch(JOINING, 0, 0),
+            stitch::build::Step::Planning { pass } => watch(&format!("{JOINING}, pass {pass}"), 0, 0),
+            stitch::build::Step::Solving { pass, done, of } => watch(&format!("{JOINING}, pass {pass}"), done, of),
+        });
+        // A stopped build's half (a cancel, P260) is nobody's: it goes.
+        if let Err(e) = built {
+            let _ = std::fs::remove_dir_all(&part);
+            return Err(e);
+        }
         // Other keys' joins are another disc's or another stitcher's: they go.
         if let Ok(list) = std::fs::read_dir(&root) {
             for e in list.flatten() {
@@ -188,10 +218,27 @@ pub fn world(disc: &mut Disc, mods: &Path, id: &str, say: &mut dyn FnMut(&str)) 
         };
         Ok((res, m.member.clone(), m.second.clone()))
     };
-    let mut w = worlds::read(&dir, id, &json, Some(&mut open))?;
+    let mut w = worlds::read_watched(&dir, id, &json, Some(&mut open), watch)?;
     debug_assert!(w.pieces[..w.tile_count].iter().all(|p| matches!(p.origin, Origin::Disc { .. })));
     w.dir = dir;
     Ok(w)
+}
+
+/// Take out the half-built joins of shells that are gone (P260): a build killed outright leaves its
+/// `<key>.part-<pid>` folder, a world's worth of terrain, which no later build reads. Where a
+/// process cannot be looked up by its id (no `/proc`), they stay.
+fn forget_dead_parts(root: &Path) {
+    if !Path::new("/proc/self").is_dir() {
+        return;
+    }
+    let Ok(list) = std::fs::read_dir(root) else { return };
+    for e in list.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(pid) = name.rsplit_once(".part-").and_then(|(_, p)| p.parse::<u32>().ok()) else { continue };
+        if pid != std::process::id() && !Path::new("/proc").join(pid.to_string()).exists() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 #[cfg(test)]

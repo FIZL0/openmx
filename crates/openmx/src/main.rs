@@ -3244,7 +3244,8 @@ enum Wait {
 
 /// The ride's build `build` on a thread of its own (P127), the loading screen drawn until it ends:
 /// what it built, or what to leave for if the window was closed or the load cancelled, which stops
-/// the thread before this returns.
+/// the thread before this returns. While the stopped build winds down the window draws the pick it
+/// went back to and hears its close (P260): a load is never a frozen window, cancelled or not.
 fn load_in_front<'env, T: Send + 'env>(
     shell: &mut Shell,
     args: &Args,
@@ -3253,12 +3254,35 @@ fn load_in_front<'env, T: Send + 'env>(
     build: impl FnOnce() -> Result<Result<T, Leave>, String> + Send + 'env,
 ) -> Result<Result<T, Leave>, String> {
     let Shell { window, seats, front } = shell;
+    let mut stopped: Option<Instant> = None;
     // Never called in the browser, whose load runs before the loading screen would draw (`thread`).
-    let wait = || pollster::block_on(load_tick(window, seats, Some(&mut *front), args, progress, screen));
-    match loading::on_worker(progress, build, wait)? {
+    let wait = |stopping: Option<&mut Leave>| match stopping {
+        None => pollster::block_on(load_tick(window, seats, Some(&mut *front), args, progress, screen)),
+        Some(leave) => {
+            stopped.get_or_insert_with(Instant::now);
+            match leave {
+                // A closed window has nothing to draw: its events are still pumped.
+                Leave::Quit => {
+                    if let Some(w) = window.as_mut() {
+                        w.poll();
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => {
+                    if pollster::block_on(loading_frame(window, seats, front, args, progress, screen))? == Wait::Quit {
+                        println!("loading: closed while the cancelled load ended");
+                        *leave = Leave::Quit;
+                    }
+                }
+            }
+            Ok(None)
+        }
+    };
+    match loading::on_worker_winding(progress, build, wait)? {
         Ok(built) => Ok(built),
         Err(leave) => {
-            println!("loading: stopped, the load's thread is gone ({} running)", loading::workers());
+            let took = stopped.map_or(0.0, |at| at.elapsed().as_secs_f32());
+            println!("loading: stopped in {took:.2} s, the load's thread is gone ({} running)", loading::workers());
             Ok(Err(leave))
         }
     }
@@ -3285,7 +3309,10 @@ async fn load_tick(
             println!("loading: cancelled at {}, back on {:?}", progress.line(), front.menu.screen());
             Ok(Some(Leave::Pick))
         }
-        Wait::Quit => Ok(Some(Leave::Quit)),
+        Wait::Quit => {
+            println!("loading: the window was closed at {}", progress.line());
+            Ok(Some(Leave::Quit))
+        }
     }
 }
 
@@ -3345,7 +3372,11 @@ async fn loading_frame(
             back |= more.iter().any(|(_, p)| p.back);
         }
     }
-    back |= std::env::var(loading::CANCEL).ok().and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| screen.frames >= n && progress.may_cancel());
+    back |= loading::hook_fires(loading::CANCEL, screen.frames, progress);
+    if loading::hook_fires(loading::CLOSE, screen.frames, progress) {
+        println!("loading: closed at {} ({})", progress.line(), loading::CLOSE);
+        return Ok(Wait::Quit);
+    }
     if let Some(l) = &mut front.menu.loading {
         l.done = progress.done();
         l.stage = progress.line();
@@ -3443,13 +3474,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut world_mod: Option<worlds::WorldMod> = None;
     let modded = match &track_member {
         Ok(_) if disc_world => {
-            world_mod = Some(disc_worlds::world(&mut disc, &disc_worlds_cache(&args), &args.track, &mut |l| println!("{l}"))?);
+            // Its maps read, its joins built the first time and the world read, each said under
+            // the bar and each answering a cancel (P260).
+            let watch = |what: &str, n, of| progress.doing(what, n, of);
+            world_mod = Some(disc_worlds::world_watched(&mut disc, &disc_worlds_cache(&args), &args.track, &mut |l| println!("{l}"), &watch)?);
             None
         }
         Ok(_) => None,
         Err(e) => match mods_dir(&args) {
             Some(dir) if worlds::is_world(&dir, &args.track) => {
-                let w = worlds::find(&dir, &args.track).map_err(|m| format!("{e}, and {m}"))?;
+                let w = worlds::find_watched(&dir, &args.track, &|what, n, of| progress.doing(what, n, of))
+                    .map_err(|m| format!("{e}, and {m}"))?;
                 let home = w.home_track();
                 world_mod = Some(w);
                 Some(home)

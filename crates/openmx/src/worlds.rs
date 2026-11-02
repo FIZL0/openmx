@@ -241,6 +241,24 @@ pub fn find(mods: &Path, id: &str) -> Result<WorldMod, String> {
     read(&dir, id, &json, None)
 }
 
+/// [`find`], saying to `watch` how many of its tiles and joins are read (P260): a shell's loading
+/// line, and its cancel, which is `watch`'s error.
+pub fn find_watched(mods: &Path, id: &str, watch: Watch) -> Result<WorldMod, String> {
+    let dir = mods.join("tracks").join(id);
+    if !track_mods::valid_id(id) || !dir.is_dir() {
+        return Err(format!("no world mod {id} in {}", mods.join("tracks").display()));
+    }
+    let text = std::fs::read_to_string(dir.join("mod.json")).map_err(|e| format!("{id}: mod.json: {e}"))?;
+    let json = Json::parse(&text).map_err(|e| format!("{id}: mod.json: {e}"))?;
+    read_watched(&dir, id, &json, None, watch)
+}
+
+/// What a world's reading tells as it goes, `(what, n, of)`; its error stops the read.
+pub type Watch<'a> = &'a (dyn Fn(&str, usize, usize) -> Result<(), String> + Sync);
+
+/// The line a world's reading says.
+pub const READING: &str = "Reading the world";
+
 /// Where a world's tile's archives are when they are not its folder's (P232, `crate::disc_worlds`):
 /// for a tile's name, its own archive opened, its disc member (`Tracks\free06.res`) and the second
 /// one the track is ridden with.
@@ -249,7 +267,12 @@ pub type DiscTile<'a> = &'a mut dyn FnMut(&str) -> Result<(Res, String, Option<S
 /// [`find`]'s reading of a world's `mod.json` (`json`, in `dir`): its tiles from `dir/tiles/<tile>/`,
 /// or, given `disc`, each from the disc's own archives as [`Origin::Disc`] (P232); its joins from
 /// `dir/joins/<join>/` either way.
-pub fn read(dir: &Path, id: &str, json: &Json, mut disc: Option<DiscTile>) -> Result<WorldMod, String> {
+pub fn read(dir: &Path, id: &str, json: &Json, disc: Option<DiscTile>) -> Result<WorldMod, String> {
+    read_watched(dir, id, json, disc, &|_, _, _| Ok(()))
+}
+
+/// [`read`], saying to `watch` how many of the tiles and joins are read.
+pub fn read_watched(dir: &Path, id: &str, json: &Json, mut disc: Option<DiscTile>, watch: Watch) -> Result<WorldMod, String> {
     let dir = dir.to_path_buf();
     let string = |key: &str| json.get(key).and_then(Json::str).ok_or_else(|| format!("{id}: mod.json has no {key}"));
     if string("kind")? != "world" {
@@ -267,7 +290,10 @@ pub fn read(dir: &Path, id: &str, json: &Json, mut disc: Option<DiscTile>) -> Re
     let drop = list("drop")?;
     let mut pieces = Vec::new();
     let mut first_owner = 0i32;
-    for t in list("tiles")? {
+    let (tiles, joins) = (list("tiles")?, list("joins")?);
+    let of = tiles.len() + joins.len();
+    for (n, t) in tiles.into_iter().enumerate() {
+        watch(READING, n, of)?;
         let tile = t.get("tile").and_then(Json::str).ok_or_else(|| format!("{id}: a tile with no name"))?.to_string();
         let at = pair(t.get("at"), &format!("{id}: {tile}'s at"))?;
         let keep = match t.get("keep") {
@@ -324,7 +350,10 @@ pub fn read(dir: &Path, id: &str, json: &Json, mut disc: Option<DiscTile>) -> Re
     if tile_count == 0 {
         return Err(format!("{id}: a world with no tiles"));
     }
-    for j in list("joins")? {
+    for (n, j) in joins.into_iter().enumerate() {
+        if n % 32 == 0 {
+            watch(READING, tile_count + n, of)?;
+        }
         let join = j.get("join").and_then(Json::str).ok_or_else(|| format!("{id}: a join with no name"))?.to_string();
         let at = pair(j.get("at"), &format!("{id}: {join}'s at"))?;
         let folder = dir.join("joins").join(&join);

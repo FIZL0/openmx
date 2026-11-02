@@ -266,8 +266,105 @@ fn a_cancelled_load_goes_back_to_the_pick_with_nothing_running() {
     );
     line(&said, "loading: held at models");
     assert_eq!(line(&said, "loading: cancelled"), "loading: cancelled at Models, back on Some(Tracks)");
-    assert_eq!(line(&said, "loading: stopped"), "loading: stopped, the load's thread is gone (0 running)");
+    assert!(line(&said, "loading: stopped").ends_with(", the load's thread is gone (0 running)"), "{said}");
     assert!(!said.contains("ride hash") && !said.contains("ride:"), "no ride ran:\n{said}");
+}
+
+/// The seconds a "loading: stopped in X s" line says the stopped load took to end.
+fn stopped_in(said: &str) -> f32 {
+    let l = line(said, "loading: stopped in ");
+    l["loading: stopped in ".len()..].split(' ').next().and_then(|t| t.parse().ok()).unwrap_or_else(|| panic!("{l}"))
+}
+
+/// A store whose next ride is world `id` off the disc, with an empty mods folder: its joins are
+/// built on the ride, from cold.
+fn world_store(name: &str, id: &str) -> Option<PathBuf> {
+    let dir = store(name)?;
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    m.settings.track = id.to_string();
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    std::fs::create_dir_all(dir.join("mods")).unwrap();
+    Some(dir)
+}
+
+/// What is left in a world's join cache: no key built, and no half of one.
+fn cache_left(dir: &Path, id: &str) -> Vec<String> {
+    let cache = dir.join("mods/cache/stitch").join(id);
+    std::fs::read_dir(cache).map(|l| l.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default()
+}
+
+/// P260: the user's frozen MX WORLD. A world off the disc builds its joins on its first ride, a minute
+/// and more for world_mxu, and the build was one step nobody could stop: the loading screen sat on
+/// "Scene", and Back or the close button froze the window until the joins were done. Now the joins'
+/// build says its pass under the bar and answers Back between its steps: the shell is back on the
+/// pick within moments, nothing of the half-built joins is left, and the half a killed shell left
+/// behind goes too.
+#[test]
+fn back_while_a_worlds_joins_build_returns_to_the_pick_promptly() {
+    let id = "world_mxu_free";
+    let Some(dir) = world_store("world-back", id) else { return };
+    // A half build of a shell that is gone.
+    let mut gone = Command::new("true").spawn().unwrap();
+    gone.wait().unwrap();
+    let stale = dir.join("mods/cache/stitch").join(id).join(format!("0123456789abcdef.part-{}", gone.id()));
+    std::fs::create_dir_all(stale.join(id)).unwrap();
+    let at = Instant::now();
+    // --seconds 1: the front end ends as soon as it is back from the cancelled load.
+    let said = shell(
+        &dir,
+        &[(loading::CANCEL, "5:Joining the maps, pass")],
+        &["--headless", "--menu", "--screen", "pause", "--seconds", "1", "--no-sound"],
+    );
+    let took = at.elapsed().as_secs_f32();
+    let cancelled = line(&said, "loading: cancelled at ");
+    assert!(cancelled.starts_with("loading: cancelled at Joining the maps, pass ") && cancelled.ends_with("back on Some(Tracks)"), "{said}");
+    let stopped = stopped_in(&said);
+    assert!(stopped < 5.0, "the build took {stopped} s to see the cancel");
+    assert!(line(&said, "loading: stopped").ends_with("(0 running)"), "{said}");
+    assert!(!said.contains("ride hash"), "no ride ran:\n{said}");
+    assert_eq!(cache_left(&dir, id), Vec::<String>::new(), "nothing half-built is kept");
+    eprintln!("{id}: back at the pick {stopped:.2} s after Back, {took:.1} s from the start");
+}
+
+/// P260: and the close button, mid-build, ends the shell: the build stops at its next step and the
+/// shell exits, where it sat frozen until the joins were done.
+#[test]
+fn closing_the_window_while_a_worlds_joins_build_ends_the_shell_promptly() {
+    let id = "world_mxu_free";
+    let Some(dir) = world_store("world-close", id) else { return };
+    let at = Instant::now();
+    // No --seconds or --frames: only the close ends this shell.
+    let said = shell(&dir, &[(loading::CLOSE, "5:Joining the maps, pass")], &["--headless", "--menu", "--screen", "pause", "--no-sound"]);
+    let took = at.elapsed().as_secs_f32();
+    assert!(line(&said, "loading: the window was closed at ").starts_with("loading: the window was closed at Joining the maps, pass "), "{said}");
+    let stopped = stopped_in(&said);
+    assert!(stopped < 5.0, "the build took {stopped} s to see the close");
+    assert!(!said.contains("ride hash"), "no ride ran:\n{said}");
+    assert_eq!(cache_left(&dir, id), Vec::<String>::new(), "nothing half-built is kept");
+    eprintln!("{id}: shell gone {stopped:.2} s after the close, {took:.1} s from the start");
+}
+
+/// P260: a stage says what it is at under the bar, a count too, until the next stage; a count that
+/// starts again (a world's joins, pass after pass) never takes the bar back.
+#[test]
+fn a_stage_says_what_it_is_doing_and_the_bar_never_goes_back() {
+    let p = Progress::default();
+    p.reach(Stage::Scene).unwrap();
+    assert_eq!(p.line(), "Scene");
+    p.doing("Joining the maps, pass 1", 0, 0).unwrap();
+    assert_eq!(p.line(), "Joining the maps, pass 1");
+    p.doing("Joining the maps, pass 1", 30, 40).unwrap();
+    assert_eq!(p.line(), "Joining the maps, pass 1 30 of 40");
+    let high = p.done();
+    assert!(high > 0.0);
+    p.doing("Joining the maps, pass 2", 1, 40).unwrap();
+    assert_eq!(p.line(), "Joining the maps, pass 2 1 of 40");
+    assert_eq!(p.done(), high, "the bar held where it was");
+    p.reach(Stage::Tiles).unwrap();
+    assert_eq!(p.line(), "Tiles", "a new stage says its own word");
+    assert!(p.done() > high);
+    p.cancel();
+    assert_eq!(p.doing("Reading the world", 1, 2), Err(loading::CANCELLED.to_string()));
 }
 
 /// Full throttle and nothing else: Cross down at full pressure (tests/fixed_rate.rs's tape).
