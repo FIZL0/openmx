@@ -728,6 +728,7 @@ impl crate::Sim {
         if let Some(b) = bump.as_deref() {
             self.traffic.props.pushed(&b.props);
         }
+        self.wreck_pushed_back(0);
         self.props_step(dt, &prop_movers);
         self.traffic.frame_late(dt, world);
         self.ticks += 1;
@@ -1031,6 +1032,7 @@ impl Sim {
         if let Some(b) = bump.as_deref() {
             self.traffic.props.pushed(&b.props);
         }
+        self.wreck_pushed_back(0);
         // Shared, the set goes back out before the props' step, which is the set's.
         if let Some((s, _)) = shared.as_mut() {
             s.back(self);

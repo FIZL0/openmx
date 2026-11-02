@@ -266,7 +266,8 @@ pub struct WreckBike {
     pub collider: Collider,
     pub record: Record,
     /// What the props' rays struck on the bike this tick, for its frame (S197b,
-    /// [`crate::prop_wreck::struck_by_props`]): spent by [`WreckBike::tick`]. Not on the wire: it is
+    /// [`crate::prop_wreck::struck_by_props`]): spent by [`WreckBike::tick`], which leaves the struck
+    /// bodies as its frame pushed them for [`crate::Sim::wreck_pushed_back`] (S244). Not on the wire: it is
     /// made and spent within one tick.
     pub struck: crate::prop_wreck::WreckStrike,
 }
@@ -351,6 +352,7 @@ impl WreckBike {
     pub fn tick(&mut self, dt: F, ground: Option<&dyn Heightfield>, objects: &mut dyn Search) {
         let mut struck = std::mem::take(&mut self.struck);
         self.tick_struck(dt, ground, objects, &mut struck);
+        self.struck.struck = struck.struck;
     }
 
     /// [`WreckBike::tick`] with what the props' rays struck on it this tick ([`crate::prop_wreck::struck_by_props`]):
@@ -361,6 +363,14 @@ impl WreckBike {
         contact_search::clear(&mut self.record, Some(&mut self.body));
         contact_search::collide(std::slice::from_mut(&mut self.record), 0, Some(&mut self.body), ground, objects, dt);
         let r = &mut self.record;
+        for e in &struck.entries {
+            r.touching = true;
+            r.on_object = true;
+            r.touching_other = true;
+            if r.contacts.len() < r.capacity {
+                r.contacts.push(*e);
+            }
+        }
         for m in &struck.mirrors {
             r.touching = true;
             r.on_object = true;
