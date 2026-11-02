@@ -1,14 +1,1 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
-- **The native sim.** Every download now runs the original's physics on your machine's plain floats instead of copying the PS2's arithmetic: about twice as fast, so split screen on a Steam Deck holds 60 fps. It is no longer bit-for-bit with the original (rides feel the same, but can part by a hair over time). Online games meet only other native builds (0.10.0 and later), not 0.9.x. A recorded tape now names its sim; tapes from older versions still play, but may drift from what was recorded. The menu's corner and `--version` say "native sim"
-- The splash shows a New version notice with its Update, Download or Refresh button, and the build's version (or commit) small in its corner; the website's header shows it too
-- The Kiowa helicopter: park it, switch into it, fly it and wreck it, with its engine, rotor wash and wreck sounds
-- The rider is drawn from the riding ragdoll, with the original's give in the body
-- Knockable props (free06's eyeballs, free09's balls) are knocked by a fallen rider, by the biplane and by each other; the biplanes in split screen and online hit each other
-- Trucks you hit move as physical bodies, and a bike can ride on top of them
-- Flips score as the original's again (the flip-at-the-start scoring is gone)
-- Worlds can be downloaded from the mod store, on the desktop and in the browser, which now sees every mod the store installed; an MX World load can be cancelled
-- The Garage's bike, paint and class pickers answer at once, one step per press
-- MX vs. ATV handling works online: the room carries the Handling setting
-- Under World Sky Global each map keeps its own sunlight
-- Automatic render scale judges by the graphics card's own time, so it no longer drops and stays low
-- Browser: pads the browser does not map keep their d-pad and triggers
