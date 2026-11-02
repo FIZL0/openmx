@@ -384,6 +384,8 @@ impl Sim {
             self.traffic.props.pushed(&bump.props);
             said
         };
+        // What the wreck bike's rays pushed in its frame (S244).
+        self.wreck_pushed_back(0);
         self.props_step(dt, &prop_movers);
         self.traffic.frame_late(dt, world);
         let mut said = said;
@@ -527,6 +529,7 @@ impl Sim {
                 self.bumped(b);
                 self.traffic.props.pushed(&b.props);
             }
+            self.wreck_pushed_back(i);
             frames.push(frame);
         }
         frames.reverse();

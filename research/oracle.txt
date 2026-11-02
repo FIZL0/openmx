@@ -7548,8 +7548,29 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 # The ball's own rays search the wreck's f.col: an asleep ball's probe categories are its wake mask 0x40 and
 # the wreck's categories have 0x40 set. Each hit: a kind-0 entry on the ball's list after its terrain
 # entries (other = the wreck), a kind-1 mirror on the wreck's after its own (normal negated). The wreck's
-# rays never strike a ball: its ray leave-out holds 0x8 and the props' category is 0x18.
+# rays never strike a ball: its ray leave-out holds 0x8 and the props' category is 0x18. [Wrong, S244: the
+# 0x8 leave-out list is the wreck's sweep probe's; its ray probe's list is empty and its rays do strike.]
 # hit2-2828 -> 2831: 4, 2, 2 mirrors on the wreck; ball and wreck lists and bodies bit-exact in the port.
+# --- S244: the wreck bike's rays strike the balls; a ball's impulse throws the wreck bike
+#   (crates/game-sim/src/prop_wreck.rs wreck_rays_on_props/strikes, Sim::wreck_pushed_back;
+#   tests/prop_wreck.rs; journal 2026-11-02-s244-ball-pushes-the-wreck)
+# hit3 (s197b put_ball.py 3 2 4 0.3 2 from drop2-2804, research/s244/strike.py hit3 2) and hit5
+# (research/s244/throw_ball.py PID s244/hit3-put 4 -14 2.5 -55 2: ball 4 thrown at 55 ft/s along the
+# wreck's way from 14 ft behind it, 2.5 ft up; strike.py hit5 2), states in s3's context/states/s244-*.
+# The wreck bike searches first on the props node, and its ray probe (empty category list, flight_search
+# PROBE) strikes the balls' f.col (category 0x18): kind-0 entries on the wreck's list after its scene
+# entries (other = the ball's collision object), their kind-1 mirrors at the head of the ball's list
+# (the ball searches after). hit3 2832: wreck list 5 (1 own + 4 on the ball), ball list 4 mirrors.
+# The colliders are not mutual: the wreck's collidable is 0x9a058 with collides_with 0x40000, the ball's
+# 0x18, so each side resolves its own list against the other's body weighed by its inverse mass (the
+# wreck body's inv_mass 0.1288).
+# hit3 2832 -> 2833: separating (normal speed ~ +30, over HARD), no impulse; the spring and friction on
+# the wreck's entries read the ball's velocity (the wreck ~2.1 ft/s slower), the ball springs off its
+# mirrors (-12.05,39.79,7.37) -> (-21.90,48.73,10.46).
+# hit5 2855 -> 2856: ball 4 catches the wreck from behind at ~35 ft/s; its own kind-0 entries take the
+# first substep's impulse in the balls' collection step and it goes into the wreck body too. The state's
+# wreck body is the props' step's, not its own world step's.
+# strike.py's first saved state lands 2-3 ticks after the put state; csv row f is state f-1.
 # S206 — the ragdoll's bones against the placed groups (plants). Journal:
 # research/journal/2026-11-02-s206-ragdoll-trees.
 # Port: ragdoll_scene.rs Statics::group_keys / group_distance / StillProp::near_wooded /

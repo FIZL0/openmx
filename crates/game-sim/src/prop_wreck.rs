@@ -1,7 +1,8 @@
-//! **The props' rays strike the wreck bike** (S197b): a knockable prop's own ray probe against the
-//! wreck bike's collision mesh (`bike\col\wreckbikef.col`) where the bike's record stands it, as
-//! entries on the prop's collision record — the wreck bike named on the other side — and the mirrors
-//! on the wreck bike's.
+//! **The props' rays strike the wreck bike, and its rays the props** (S197b, S244): a knockable
+//! prop's own ray probe against the wreck bike's collision mesh (`bike\col\wreckbikef.col`) where
+//! the bike's record stands it, as entries on the prop's collision record — the wreck bike named on
+//! the other side — and the mirrors on the wreck bike's; and the wreck bike's rays against the props'
+//! meshes the same way round.
 //!
 //! The original files the wreck bike's collision object on free09's props node with the balls' (the
 //! hit2 states, research/s197b: the node's list holds the bikes' objects, the wreck bike's among them,
@@ -9,26 +10,34 @@
 //! order, then steps the node's world, which holds the wreck bike's body alone; the balls' collection
 //! worlds step after. So in a tick where a ball meets the wreck bike:
 //!
-//! 1. the wreck bike searches first: the terrain, the scene. Its ray probe's category list leaves the
-//!    props out (0x8 is in it, and a prop's mesh is 0x18), so its rays never strike a ball;
+//! 1. the wreck bike searches first: the terrain, the scene, and the props — its ray probe's category
+//!    list is empty, so its rays strike a ball's mesh (0x18) too (S244's hit3 states, research/s244;
+//!    S197b read the leave-out list 0x8 as the rays', where it is the sweep probe's): an entry (kind
+//!    0) on the wreck bike's list naming the ball, its mirror (kind 1) at the head of the ball's;
 //! 2. the ball searches: its terrain rays, then its ray probe meets the wreck bike's mesh (category
 //!    [`wreck_bike::COLLIDABLE`], in any of the prop's category lists, the wake mask's alone too): an
 //!    entry (kind 0) on the ball's list naming the wreck bike, its mirror (kind 1, the normal turned
 //!    round, the ball on its other side) on the wreck bike's, after its own entries;
-//! 3. the wreck bike's world steps: its force listener resolves its list, the mirrors against the
-//!    ball's body as the frame found it — a mirror takes no impulse, so the spring or the friction on
-//!    the bike alone;
+//! 3. the wreck bike's world steps: its force listener resolves its list, its entries against the
+//!    ball's body as the frame found it — the impulse, the spring, the friction going into both — and
+//!    the mirrors, which take no impulse, the spring or the friction on the bike alone;
 //! 4. the ball's collection steps: its force listener resolves its list, the first substep's impulse
-//!    on an entry naming the wreck bike going into both bodies.
+//!    on an entry naming the wreck bike going into both bodies (hit5: a ball's impulse throws the
+//!    wreck bike there, in the props' step, not its frame).
 //!
 //! In the port the wreck bike is on the props' node too (S243, [`crate::Sim::frame_held_wrecked`]):
 //! its hull is a collidable in every prop's world ([`crate::prop_world::Wreck`],
 //! [`crate::flight_search::Scene::probed_among`]), gathered into the prop's kept nearby list with the
 //! rest and met by the prop's one ray record, so a ray keeps one contact, the nearer, between the scene
 //! and the bike. The pass hands the mirrors and the struck bodies to the wreck bike's frame
-//! ([`WreckBike::tick_struck`], through [`crate::ride::Crash::struck`]); the props' step reads the
+//! ([`WreckBike::tick_struck`], through [`crate::ride::Crash::struck`]), and what its frame pushed comes
+//! back to the props ([`crate::Sim::wreck_pushed_back`], S244) before the props' step, which reads the
 //! wreck bike as its other side ([`crate::Sim::props_step`]). The hit2 states are the proof:
 //! `tests/prop_wreck.rs`.
+//!
+//! The other way round (S244), [`strikes`] ([`crate::Sim::wreck_strike`]): [`wreck_rays_on_props`]
+//! and the mirrors it files on the props, then [`struck_by_props`]; both ways' entries, mirrors and
+//! struck bodies go to the wreck bike's frame. The hit3 and hit5 states are the proof.
 //!
 //! [`struck_by_props`] is S197b's stand-in, a search of the wreck bike after the pass with the entries
 //! put after everything the prop's own search found; the seats' shared props still take it
@@ -37,17 +46,22 @@
 //! The sweep probes meet neither way: the wreck bike's and a prop's sweep both exclude 0x8 (and
 //! 0x800), which both meshes carry ([`crate::prop_world::sweep_categories`]).
 //!
-//! What is not here: the rider's ragdoll and the plane against a prop; a prop's rays on a riding
-//! bike's mesh (on another prop's: S242, [`crate::prop_props`]).
+//! What is not here: the wreck bike's rays on the props through the node ([`crate::Sim::frame_held_wrecked`]
+//! does not run [`wreck_rays_on_props`]), and the wreck bike's entries put after its scene's, where the
+//! original's one narrow pass keeps one contact per ray between them; the rider's ragdoll and the plane
+//! against a prop; a prop's rays on a riding bike's mesh (on another prop's: S242,
+//! [`crate::prop_props`]).
 
 #![deny(clippy::float_arithmetic)]
 
 use crate::contact::{Contact, Node};
-use crate::contact_search::{self, NO_SURFACE};
+use crate::contact_search::{self, NO_SURFACE, Record};
 use crate::flight_search::{self, Rays};
-use crate::prop_contact::Pushed;
+use crate::math::Mat4;
+use crate::prop_contact::{Pushed, Strike};
 use crate::prop_set::PropSet;
-use crate::prop_world::Wreck;
+use crate::prop_world::{self, Wreck};
+use crate::world::Prop;
 use crate::ray_probe::{self, Facet, RayProbe};
 use crate::track::Mesh;
 use crate::world_search::{self, Candidate, Categories, Class, Collidable, Narrow, Nearby, flags};
@@ -62,11 +76,15 @@ pub struct WreckStrike {
     pub mirrors: Vec<Contact>,
     /// Each prop whose rays struck the bike, in the order they searched, as the frame found its body.
     pub struck: Vec<Pushed>,
+    /// The wreck bike's own rays on the props' meshes (S244, [`wreck_rays_on_props`]): its entries
+    /// (kind 0), each naming its prop by its place in [`WreckStrike::struck`], for its list after
+    /// what its own search finds and before the mirrors.
+    pub entries: Vec<Contact>,
 }
 
 impl WreckStrike {
     pub fn is_empty(&self) -> bool {
-        self.mirrors.is_empty()
+        self.mirrors.is_empty() && self.entries.is_empty()
     }
 }
 
@@ -235,6 +253,177 @@ pub fn struck_on(set: &mut PropSet, mesh: &Mesh, bike_at: [Vf; 4], category: u32
     out
 }
 
+/// One prop's collidable mesh, where its node stands it.
+struct Posed<'a> {
+    collection: usize,
+    object: usize,
+    mesh: &'a Mesh,
+    to_world: Mat4,
+    centre: Vf,
+    radius: F,
+}
+
+/// Where the props start in [`wreck_rays_on_props`]'s list: after the wreck bike's ray probe.
+const PROPS: usize = 1;
+
+/// The wreck bike's ray probe against the props' meshes: prop `k` is collidable `PROPS + k`.
+struct OnTheProps<'a> {
+    rays: &'a Rays,
+    at: [Vf; 4],
+    posed: &'a [Posed<'a>],
+    facets: Vec<Option<Vec<Facet>>>,
+    ray: ray_probe::Record,
+}
+
+impl Narrow for OnTheProps<'_> {
+    fn clear(&mut self, objects: &mut [Collidable], probe: usize) {
+        ray_probe::clear(&mut objects[probe].flags, &mut self.ray);
+    }
+
+    fn prepare(&mut self, _objects: &mut [Collidable], _probe: usize) {}
+
+    fn pair(&mut self, _objects: &mut [Collidable], _probe: usize, other: usize) -> bool {
+        let Some(k) = other.checked_sub(PROPS) else { return false };
+        let p = &self.posed[k];
+        let facets = self.facets[k].get_or_insert_with(|| flight_search::facets(p.mesh));
+        let target = ray_probe::Mesh {
+            id: other as u32,
+            transform: p.to_world.0,
+            root: 0,
+            nodes: &p.mesh.nodes,
+            facets,
+            vertices: &p.mesh.vertices,
+        };
+        let probe = RayProbe { transform: self.at, root: self.rays.root, nodes: &self.rays.nodes, segments: &self.rays.segments };
+        ray_probe::pair(&probe, &ray_probe::Shape::Mesh(target), &mut self.ray)
+    }
+
+    fn parts(&mut self, _objects: &mut [Collidable], _group: usize) -> usize {
+        0
+    }
+
+    fn part(&mut self, _objects: &mut [Collidable], _group: usize, _i: usize) -> Option<usize> {
+        None
+    }
+
+    fn heard_hit(&mut self, _objects: &mut [Collidable], _listener: usize, _probe: usize, _other: usize) {}
+
+    fn heard_struck(&mut self, _objects: &mut [Collidable], _listener: usize, _struck: usize, _probe: usize) {}
+
+    fn on_hit(&mut self, _objects: &mut [Collidable], _callback: usize, _probe: usize, _other: usize) {}
+
+    fn on_struck(&mut self, _objects: &mut [Collidable], _callback: usize, _struck: usize, _probe: usize) {}
+}
+
+/// **The wreck bike's rays on the props** (S244): its ray probe ([`wreck_bike::ray_tree`]) where its
+/// record's node stands it, against every prop of `set` with a collidable mesh (its `f.col`, category
+/// [`prop_world::COLLIDABLE`]) where its node stands. The original's probe takes a prop's mesh: its
+/// category list is empty, every category met (the hit3 states, research/s244: four of the wreck
+/// bike's rays on ball 2's `f.col`). `me` is the wreck bike as the props' mirrors name it. Answers its
+/// entries (kind 0, at most its record's capacity, one per ray), each naming its prop by its place in
+/// [`Strike::struck`] (`first` 0), and each struck prop's mirrors, for [`PropSet::strike`].
+pub fn wreck_rays_on_props(set: &PropSet, bike: &WreckBike, me: usize) -> Strike {
+    let posed: Vec<Posed<'_>> = set
+        .collections
+        .iter()
+        .zip(set.shapes.iter())
+        .enumerate()
+        .flat_map(|(c, (coll, shapes))| {
+            coll.objects.iter().zip(shapes).enumerate().filter_map(move |(o, (object, mesh))| {
+                let mesh = mesh.as_ref().filter(|_| object.collision.is_some())?;
+                let (to_world, centre, radius) = Prop::posed(mesh, &PropSet::matrix(&object.node));
+                Some(Posed { collection: c, object: o, mesh, to_world, centre, radius })
+            })
+        })
+        .collect();
+    if posed.is_empty() {
+        return Strike::default();
+    }
+    let rays = wreck_bike::ray_tree();
+    let at = frame(&bike.record.node);
+    let (centre, reach) = flight_search::reach(&rays, &at);
+    let mut objects = vec![Collidable {
+        class: Class::Object,
+        flags: flags::ENABLED,
+        nearby: true,
+        radius: reach,
+        category: flight_search::PROBE,
+        collides_with: flight_search::PROBE_COLLIDES_WITH,
+        categories: Categories { mode: 1, list: Vec::new() },
+        ..Collidable::default()
+    }];
+    objects.extend(posed.iter().map(|p| Collidable {
+        class: Class::Object,
+        flags: flags::ENABLED,
+        nearby: true,
+        radius: p.radius,
+        category: prop_world::COLLIDABLE,
+        collides_with: prop_world::COLLIDES_WITH,
+        categories: Categories { mode: 1, list: Vec::new() },
+        ..Collidable::default()
+    }));
+    let ray = ray_probe::Record { listed: true, capacity: bike.record.capacity, one_per_ray: true, ..ray_probe::Record::default() };
+    let mut narrow = OnTheProps { rays: &rays, at, posed: &posed, facets: (0..posed.len()).map(|_| None).collect(), ray };
+    let found = posed
+        .iter()
+        .enumerate()
+        .map(|(k, p)| Candidate { object: PROPS + k, distance: distance(centre, p.centre) - p.radius })
+        .collect();
+    world_search::search_nearby(&mut objects, PROBE, &Nearby { found, prepare: false }, &mut narrow);
+    let mut out = Strike::default();
+    let mut hit: Vec<usize> = Vec::new();
+    for h in &narrow.ray.contacts {
+        let k = h.object as usize - PROPS;
+        let index = hit.iter().position(|&s| s == k).unwrap_or_else(|| {
+            hit.push(k);
+            let p = &posed[k];
+            out.struck.push((p.collection, p.object, Vec::new()));
+            hit.len() - 1
+        });
+        let mut entries = Record { capacity: bike.record.capacity, contacts: std::mem::take(&mut out.contacts), ..Record::default() };
+        contact_search::add(&mut entries, 0, h.from, h.to, h.point, h.normal, NO_SURFACE, Some(index), None);
+        out.contacts = entries.contacts;
+        let p = &posed[k];
+        let capacity = set.collections[p.collection].objects[p.object].collision.as_ref().map_or(0, |c| c.record.capacity);
+        let mut mirrors = Record { capacity, contacts: std::mem::take(&mut out.struck[index].2), ..Record::default() };
+        contact_search::add(&mut mirrors, 1, h.from, h.to, h.point, crate::contact::negated(h.normal), NO_SURFACE, Some(me), None);
+        out.struck[index].2 = mirrors.contacts;
+    }
+    out
+}
+
+/// **Both ways at once** (S244), in the original's order on the props node: the wreck bike's rays on
+/// the props ([`wreck_rays_on_props`]: each struck prop woken, the mirrors at the head of its list,
+/// [`PropSet::strike`]), then the props' rays on the wreck bike ([`struck_by_props`]). Answers the
+/// wreck bike's entries and mirrors and every struck body for its frame; `me` as in
+/// [`struck_by_props`].
+pub fn strikes(set: &mut PropSet, mesh: &Mesh, bike: &WreckBike, me: usize) -> WreckStrike {
+    let strike = wreck_rays_on_props(set, bike, me);
+    let pushed = set.strike(&strike);
+    joined(strike.contacts, pushed, struck_by_props(set, mesh, bike, me))
+}
+
+/// The wreck bike's strike on the props ([`wreck_rays_on_props`], put on the props by
+/// [`PropSet::strike`]) and the props' on it ([`struck_on`]) as one [`WreckStrike`]: the bodies the
+/// bike's rays struck first, in their order, then the others the props' rays name; each mirror's
+/// index moved to its body's place.
+fn joined(entries: Vec<Contact>, mut struck: Vec<Pushed>, by_props: WreckStrike) -> WreckStrike {
+    let WreckStrike { mut mirrors, struck: theirs, .. } = by_props;
+    let places: Vec<usize> = theirs
+        .into_iter()
+        .map(|p| {
+            struck.iter().position(|q| (q.collection, q.object) == (p.collection, p.object)).unwrap_or_else(|| {
+                struck.push(p);
+                struck.len() - 1
+            })
+        })
+        .collect();
+    for m in &mut mirrors {
+        m.other = m.other.map(|o| places[o]);
+    }
+    WreckStrike { mirrors, struck, entries }
+}
+
 impl WreckBike {
     /// [`WreckBike::tick_struck`] in a world with objects in it, as [`WreckBike::tick_among`] searches
     /// it.
@@ -273,7 +462,19 @@ impl crate::Sim {
         }
         let (Some(crash), Some(kit)) = (rider.crash.as_mut(), rider.ragdoll_kit.as_ref()) else { return };
         let Some(mesh) = kit.bike_mesh.as_deref() else { return };
-        crash.bike.struck = struck_by_props(props, &mesh.mesh, &crash.bike, side);
+        crash.bike.struck = strikes(props, &mesh.mesh, &crash.bike, side);
+    }
+
+    /// **What player `i`'s wreck bike pushed in its frame**, written back (S244): the props its rays
+    /// struck ([`wreck_rays_on_props`]) took its impulse in its world's step, which runs before the
+    /// props' (the original's props node steps the wreck bike's world, then the balls' collection
+    /// worlds). Then the bike's strike is spent. Called after the rider's frame, before
+    /// [`crate::Sim::props_step`].
+    pub fn wreck_pushed_back(&mut self, i: usize) {
+        let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
+        let Some(crash) = rider.crash.as_mut() else { return };
+        let struck = std::mem::take(&mut crash.bike.struck);
+        self.traffic.props.pushed(&struck.struck);
     }
 
     /// **The props' collide pass with the wreck bikes on the node** (S243,
