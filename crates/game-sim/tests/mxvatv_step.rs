@@ -6,10 +6,15 @@
 //! state again with the port's answer over it, and compare the regions word for word; the original may
 //! write nothing else. Calls out of the step are hooked and logged, and the port says what it asked for.
 //!
-//! Without the image every test here skips (and says so).
+//! MD63a adds the input limiter and the steering command's input ramp.
+//!
+//! Without the image the oracle tests here skip (and say so).
 
 use game_sim::air::{self, Air, Chassis, Params};
-use game_sim::handling::step;
+use game_sim::handling::step::{self, GasCut, LimiterIn, SteerRamp};
+use game_sim::phy::Joystick;
+use game_sim::ride::{Controls, Held};
+use game_sim::trick::Stick;
 use game_sim::r#move as mv;
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
@@ -459,4 +464,377 @@ fn mxvatv_preload_is_the_originals() {
     }
     enough(&tally, &["firing", "fired out", "off the lip", "armed", "fired", "fired, equal times", "holding", "waiting"], 100);
     assert!(cues >= 500, "only {cues} cue(s) posted");
+}
+
+// --- the input limiter (MD63a) ------------------------------------------------------------------------
+
+const INPUT_LIMITER: u32 = 0x004e_3ea0;
+/// Where the harness puts the object the limiter's first call reads through the bike's `+0x680`: its
+/// `+0x1d0` above zero cuts the gas (the start-gate penalty, [`Controls::gate_cut`]). Read only.
+const GATE: u32 = 0x01c0_5000;
+
+#[derive(Clone, Debug)]
+struct LimiterState {
+    held: Held,
+    cut: GasCut,
+    c: Controls,
+    stick: Stick,
+    j: Joystick,
+    dt: F,
+    inp: LimiterIn,
+    /// The `+0x680` object's `+0x1d0`, or no object.
+    gate: Option<F>,
+}
+
+impl Gen {
+    fn lever(&mut self) -> F {
+        match self.bits() % 4 {
+            0 => F::ZERO,
+            1 => F::ONE,
+            _ => self.f(0.0, 1.0),
+        }
+    }
+    fn rate(&mut self) -> F {
+        self.f(0.5, 20.0)
+    }
+    fn limiter(&mut self) -> LimiterState {
+        let gate = match self.bits() % 4 {
+            0 => None,
+            1 => Some(if self.b() { F::ZERO } else { self.f(-2.0, 0.0) }),
+            2 => Some(self.f(0.01, 2.0)),
+            _ => Some(F::ZERO),
+        };
+        let mut c = Controls { gas: self.lever(), brake: self.lever(), clutch: self.lever(), ..Controls::default() };
+        c.hands_off = self.one_in(6);
+        c.gas_cut = gate.is_some_and(|v| F::ZERO < v);
+        let stick = Stick {
+            x: if self.one_in(4) { F(if self.b() { 1.0 } else { -1.0 }) } else { self.f(-1.0, 1.0) },
+            y: if self.one_in(4) { F(if self.b() { 1.0 } else { -1.0 }) } else { self.f(-1.0, 1.0) },
+            digital: [self.one_in(3), self.one_in(3)],
+        };
+        let mut held = Held::default();
+        held.lean = (self.f(-1.0, 1.0), self.f(-1.0, 1.0));
+        held.gas = self.lever();
+        held.front_brake = self.lever();
+        held.rear_brake = held.front_brake;
+        held.clutch = self.lever();
+        held.reverse = if self.one_in(4) { F::ONE } else { F::ZERO };
+        held.lock.steer = self.one_in(4);
+        held.lock.throttle = self.one_in(4);
+        held.lock.steer_was = self.one_in(4);
+        held.lock.latch = self.one_in(3);
+        let cut = GasCut {
+            latched: self.b(),
+            timer: match self.bits() % 4 {
+                0 => F::ZERO,
+                1 => self.f(-0.05, 0.0),
+                _ => self.f(0.0, 0.2),
+            },
+        };
+        let inp = LimiterIn {
+            airborne: self.one_in(3),
+            cut_time: if self.b() { F::ZERO } else { self.f(-0.05, 0.2) },
+        };
+        // Lean rates of zero never move, in both; the levers' are the port's "no limit" (ride.rs's
+        // `toward`), which no file the games ship has, so they stay above zero here.
+        let j = Joystick {
+            x_axis_rate_limit: if self.one_in(10) { F::ZERO } else { self.rate() },
+            y_axis_rate_limit: self.rate(),
+            x_dpad_rate_limit: self.rate(),
+            y_dpad_rate_limit: if self.one_in(10) { F::ZERO } else { self.rate() },
+            gas_rate_limit: self.rate(),
+            brake_rate_limit: self.rate(),
+            clutch_in_rate_limit: self.rate(),
+            clutch_out_rate_limit: self.rate(),
+        };
+        LimiterState { held, cut, c, stick, j, dt: self.f(0.005, 0.04), inp, gate }
+    }
+}
+
+fn poke_limiter(ee: &mut Ee, s: &LimiterState) {
+    let (h, c, j) = (&s.held, &s.c, &s.j);
+    put_f(ee, OBJ + 0x314, c.gas);
+    put_f(ee, OBJ + 0x310, c.brake);
+    put_f(ee, OBJ + 0x12c0, c.clutch);
+    put_f(ee, OBJ + 0x12c4, h.reverse);
+    put_f(ee, OBJ + 0x318, h.gas);
+    put_f(ee, OBJ + 0x12cc, h.front_brake);
+    put_f(ee, OBJ + 0x12d0, h.rear_brake);
+    put_f(ee, OBJ + 0x12d4, h.clutch);
+    put_f(ee, OBJ + 0x12a8, s.stick.x);
+    put_f(ee, OBJ + 0x12ac, s.stick.y);
+    put_b(ee, OBJ + 0x12a0, s.stick.digital[0]);
+    put_b(ee, OBJ + 0x12a4, s.stick.digital[1]);
+    put_f(ee, OBJ + 0x12e8, h.lean.0);
+    put_f(ee, OBJ + 0x12ec, h.lean.1);
+    put_b(ee, OBJ + 0xdd0, !h.lock.steer);
+    put_b(ee, OBJ + 0xdd4, !h.lock.throttle);
+    put_b(ee, OBJ + 0x1298, !h.lock.steer_was);
+    put_b(ee, OBJ + 0x129c, h.lock.latch);
+    put_b(ee, OBJ + 0x1764, s.cut.latched);
+    put_f(ee, OBJ + 0x1768, s.cut.timer);
+    put_f(ee, OBJ + 0x176c, s.inp.cut_time);
+    // The rider's stunt and the balance stunt: equal is the gas's zero gate.
+    ee.set_u32(OBJ + 0x1524, if c.hands_off { 4 } else { 0xff });
+    ee.set_u32(OBJ + 0x152c, 4);
+    put_b(ee, OBJ + 0xde0, s.inp.airborne);
+    put_f(ee, OBJ + 0x12d8, j.x_axis_rate_limit);
+    put_f(ee, OBJ + 0x12dc, j.y_axis_rate_limit);
+    put_f(ee, OBJ + 0x12e0, j.x_dpad_rate_limit);
+    put_f(ee, OBJ + 0x12e4, j.y_dpad_rate_limit);
+    put_f(ee, OBJ + 0x1310, j.gas_rate_limit);
+    put_f(ee, OBJ + 0x1314, j.brake_rate_limit);
+    put_f(ee, OBJ + 0x1318, j.clutch_in_rate_limit);
+    put_f(ee, OBJ + 0x131c, j.clutch_out_rate_limit);
+    match s.gate {
+        Some(v) => {
+            ee.set_u32(OBJ + 0x680, GATE);
+            put_f(ee, GATE + 0x1d0, v);
+        }
+        None => ee.set_u32(OBJ + 0x680, 0),
+    }
+}
+
+/// Which way the gas went, from the decompile's branches and not the port's.
+fn gas_path(s: &LimiterState) -> &'static str {
+    let gas = if s.c.gas_cut { F::ZERO } else { s.c.gas };
+    if s.held.lock.throttle {
+        "throttle off, cut armed"
+    } else if s.cut.latched {
+        if gas == F::ZERO {
+            "cut let go, no gas"
+        } else if s.inp.cut_time < s.cut.timer {
+            "cut let go, timed out"
+        } else {
+            "cut holding"
+        }
+    } else if s.c.hands_off {
+        "balance stunt"
+    } else if s.held.reverse != F::ZERO && !s.inp.airborne {
+        "reverse on the ground"
+    } else if s.c.gas_cut {
+        "gate cut"
+    } else {
+        "gas walks"
+    }
+}
+
+/// SLUS-21104's input limiter, the port's [`step::input_limiter`]: 10,000 states over every branch,
+/// the bike's region compared word for word.
+#[test]
+fn mxvatv_input_limiter_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut g = Gen(0x0d63_a001);
+    let mut tally = BTreeMap::new();
+    for k in 0..10_000 {
+        let s = g.limiter();
+        let path = gas_path(&s);
+        *tally.entry(path).or_insert(0u32) += 1;
+        let l = &s.held.lock;
+        let latch = if l.latch || (l.steer && !l.steer_was) { "start latch" } else { "no start latch" };
+        *tally.entry(latch).or_insert(0u32) += 1;
+        reset(&mut ee);
+        poke_limiter(&mut ee, &s);
+        ee.call(INPUT_LIMITER, &[u64::from(OBJ)], &[s.dt.0], 10_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
+        let was = snap(&ee);
+
+        let mut t = s.clone();
+        t.c = step::input_limiter(&mut t.held, &mut t.cut, &s.c, s.stick, &s.j, s.dt, &s.inp);
+        t.stick = Stick { x: t.held.stick.0, y: t.held.stick.1, digital: t.held.digital };
+        // The gate cut is in the limiter's first call, on the gas lever it leaves: what the port
+        // answers, so the lever word compares as is.
+        reset(&mut ee);
+        poke_limiter(&mut ee, &t);
+        compare(k, path, &was, &snap(&ee), &s);
+    }
+    enough(
+        &tally,
+        &[
+            "throttle off, cut armed",
+            "cut let go, no gas",
+            "cut let go, timed out",
+            "cut holding",
+            "balance stunt",
+            "reverse on the ground",
+            "gate cut",
+            "gas walks",
+            "start latch",
+            "no start latch",
+        ],
+        100,
+    );
+}
+
+/// MX vs. ATV's limiter leaves the stick as it is, where MX Unleashed's squares it: at 0.85 its lean
+/// walks to 0.85, not 0.7225.
+#[test]
+fn mxvatv_input_limiter_does_not_square_the_stick() {
+    let j = Joystick { x_axis_rate_limit: F(1000.0), y_axis_rate_limit: F(1000.0), ..Joystick::default() };
+    let c = Controls { stick: (F(0.85), F(-0.5)), ..Controls::default() };
+    let stick = game_sim::trick::stick(c.stick.0, c.stick.1, c.dpad);
+    let (mut a, mut b) = (Held::default(), Held::default());
+    a.step(&c, &j, F(0.03));
+    step::input_limiter(&mut b, &mut GasCut::default(), &c, stick, &j, F(0.03), &LimiterIn::default());
+    assert_eq!(a.stick, (F(0.85) * F(0.85), F(-0.5) * F(0.5)));
+    assert_eq!(b.stick, (F(0.85), F(-0.5)));
+    assert_eq!(b.lean, (F(0.85), F(-0.5)));
+}
+
+/// The gas cut on a ride's own cut time: with the throttle back on, two frames of no gas, then the
+/// lever's walk.
+#[test]
+fn mxvatv_gas_cut_holds_two_frames() {
+    let j = Joystick { gas_rate_limit: F(1000.0), ..Joystick::default() };
+    let c = Controls { gas: F::ONE, ..Controls::default() };
+    let stick = game_sim::trick::stick(F::ZERO, F::ZERO, c.dpad);
+    let inp = LimiterIn { airborne: false, cut_time: step::GAS_CUT_TIME };
+    let (mut h, mut cut) = (Held::default(), GasCut::default());
+    h.lock.throttle = true;
+    step::input_limiter(&mut h, &mut cut, &c, stick, &j, F(0.03), &inp);
+    assert!(cut.latched && h.gas == F::ZERO);
+    h.lock.throttle = false;
+    let gas: Vec<F> = (0..3).map(|_| {
+        step::input_limiter(&mut h, &mut cut, &c, stick, &j, F(0.03), &inp);
+        h.gas
+    }).collect();
+    assert_eq!(gas, [F::ZERO, F::ZERO, F::ONE]);
+}
+
+// --- the steer ramp (MD63a) ---------------------------------------------------------------------------
+
+const GROUND_HEAD: u32 = 0x004d_8b20;
+const FRONT: u32 = 0x01c0_3000;
+const REAR: u32 = 0x01c0_4000;
+/// The vehicle state the ground head checks first (`+0xbc4`; its `+0x28` 3 or 4 returns at once).
+const VEHICLE_STATE: u32 = 0x01c0_5800;
+const AUTO_SHIFT: u32 = 0x004e_5fe0;
+const HEAD_TAIL: u32 = 0x004e_4190;
+
+#[derive(Clone, Debug)]
+struct RampState {
+    ramp: SteerRamp,
+    p: mv::Params,
+    lock: F,
+    lean: F,
+    speed: F,
+    timer: F,
+    dt: F,
+}
+
+impl Gen {
+    fn ramp(&mut self) -> RampState {
+        let mut p = mv::Params::default();
+        p.steer_speed_1 = self.f(0.0, 30.0);
+        p.steer_speed_2 = if self.one_in(5) { p.steer_speed_1 } else { self.f(20.0, 180.0) };
+        p.steer_scale_1 = self.f(0.2, 1.2);
+        p.steer_scale_2 = self.f(0.1, 1.0);
+        let lean = match self.bits() % 5 {
+            0 => F(if self.b() { 0.987 } else { -0.987 }),
+            1 | 2 => if self.b() { self.f(0.987, 1.0) } else { self.f(-1.0, -0.987) },
+            _ => self.f(-1.0, 1.0),
+        };
+        RampState {
+            ramp: SteerRamp {
+                on: !self.one_in(4),
+                amount: self.f(0.0, 0.5),
+                time: if self.one_in(10) { self.f(0.0, 0.05) } else { self.f(0.1, 1.5) },
+            },
+            p,
+            lock: self.f(0.2, 0.8),
+            lean,
+            speed: self.f(-10.0, 200.0),
+            timer: match self.bits() % 4 {
+                0 => F::ZERO,
+                1 => self.f(1.0, 3.0),
+                _ => self.f(0.0, 1.0),
+            },
+            dt: self.f(0.005, 0.04),
+        }
+    }
+}
+
+fn poke_ramp(ee: &mut Ee, s: &RampState) {
+    ee.set_u32(OBJ + 0xbc4, VEHICLE_STATE);
+    ee.set_u32(VEHICLE_STATE + 0x28, 0);
+    ee.set_u32(OBJ + 0x17b0, FRONT);
+    ee.set_u32(OBJ + 0x17b4, REAR);
+    // On the ground, steering, not balancing: the command's branch.
+    put_b(ee, OBJ + 0x324, true);
+    ee.set_u32(OBJ + 0x1524, 0xff);
+    ee.set_u32(OBJ + 0x152c, 4);
+    put_b(ee, OBJ + 0xc80, false);
+    put_f(ee, OBJ + 0x1300, s.p.steer_speed_1);
+    put_f(ee, OBJ + 0x1304, s.p.steer_scale_1);
+    put_f(ee, OBJ + 0x1308, s.p.steer_speed_2);
+    put_f(ee, OBJ + 0x130c, s.p.steer_scale_2);
+    put_f(ee, OBJ + 0xc38, s.speed);
+    put_f(ee, FRONT + 0x70, s.lock);
+    put_f(ee, OBJ + 0x12e8, s.lean);
+    put_b(ee, OBJ + 0x12f0, s.ramp.on);
+    put_f(ee, OBJ + 0x12f4, s.ramp.amount);
+    put_f(ee, OBJ + 0x12f8, s.ramp.time);
+    put_f(ee, OBJ + 0x12fc, s.timer);
+}
+
+/// SLUS-21104's ground head, run whole with its calls hooked, against the port's
+/// [`step::steer_command`]: the command it leaves on the bike (`+0x12c8`) and the front wheel
+/// (`+0x8ac`), and the ramp's timer, over 10,000 states.
+#[test]
+fn mxvatv_steer_ramp_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    assert_eq!(ee.u32_at(BIKE_VTABLE + 0x34c), INPUT_LIMITER, "the bike's input-limiter slot");
+    assert_eq!(ee.u32_at(BIKE_VTABLE + 0x4d0), HEAD_TAIL, "the bike's head-tail slot");
+    let body_call = ee.u32_at(BODY_VTABLE + 0x64);
+    for at in [INPUT_LIMITER, HEAD_TAIL, AUTO_SHIFT, CLUTCH, body_call] {
+        ee.hooks.insert(at, Box::new(|_| {}));
+    }
+    let mut g = Gen(0x0d63_a002);
+    let mut tally = BTreeMap::new();
+    for k in 0..10_000 {
+        let s = g.ramp();
+        let path = if !s.ramp.on {
+            "no ramp"
+        } else if s.lean.abs() < F(0.987) {
+            "ramp, let go"
+        } else if s.timer + s.dt < s.ramp.time {
+            "ramp, coming in"
+        } else {
+            "ramp, full"
+        };
+        *tally.entry(path).or_insert(0u32) += 1;
+        if s.p.steer_speed_1 == s.p.steer_speed_2 {
+            *tally.entry("flat fade").or_insert(0u32) += 1;
+        }
+        reset(&mut ee);
+        for o in (0..0x900).step_by(4) {
+            ee.set_u32(FRONT + o, 0);
+            ee.set_u32(REAR + o, 0);
+        }
+        poke_ramp(&mut ee, &s);
+        ee.call(GROUND_HEAD, &[u64::from(OBJ)], &[s.dt.0], 50_000);
+        let was = [ee.u32_at(OBJ + 0x12c8), ee.u32_at(FRONT + 0x8ac), ee.u32_at(OBJ + 0x12fc)];
+
+        let mut timer = s.timer;
+        let fade = mv::steer_scale(&s.p, s.speed);
+        let cmd = step::steer_command(&s.ramp, s.lock, s.lean, fade, &mut timer, s.dt);
+        let now = [cmd.0.to_bits(), cmd.0.to_bits(), timer.0.to_bits()];
+        assert_eq!(
+            was.map(f32::from_bits),
+            now.map(f32::from_bits),
+            "state {k} ({path}): [+0x12c8, front +0x8ac, +0x12fc]\n{s:#?}"
+        );
+        assert_eq!(was, now, "state {k} ({path}): the bits\n{s:#?}");
+    }
+    enough(&tally, &["no ramp", "ramp, let go", "ramp, coming in", "ramp, full", "flat fade"], 100);
+}
+
+/// The file's two keys as the reader makes them: the amount from degrees with the reader's own
+/// constant, the option off.
+#[test]
+fn mxvatv_steer_ramp_reads_the_file() {
+    let r = SteerRamp::of_file(F(12.0), F(0.6));
+    assert_eq!(r.amount.0.to_bits(), (F(12.0) * F(0.01745329)).0.to_bits());
+    assert_eq!(r.time, F(0.6));
+    assert!(!r.on);
 }

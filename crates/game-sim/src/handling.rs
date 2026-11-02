@@ -221,6 +221,11 @@ pub struct Flip {
     pub came_round: bool,
     /// The preload's cue latch ([`step::preload`]), MD63.
     pub preload_cue: bool,
+    /// The limiter's gas cut after the throttle comes on ([`step::input_limiter`]), MD63a.
+    pub gas_cut: bool,
+    pub gas_cut_timer: F,
+    /// How long the stick has been held hard over, for the steer ramp ([`step::steer_command`]), MD63a.
+    pub steer_ramp_timer: F,
 }
 
 impl crate::hash::State for Flip {
@@ -230,6 +235,9 @@ impl crate::hash::State for Flip {
         w.bool("cut", self.cut);
         w.bool("came_round", self.came_round);
         w.bool("preload_cue", self.preload_cue);
+        w.bool("gas_cut", self.gas_cut);
+        w.f("gas_cut_timer", self.gas_cut_timer);
+        w.f("steer_ramp_timer", self.steer_ramp_timer);
     }
 }
 

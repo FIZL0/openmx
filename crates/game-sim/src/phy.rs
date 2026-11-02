@@ -644,6 +644,10 @@ pub struct Phy {
     /// **MD62:** MX vs. ATV's Brake Gyro / Gas Gyro options, the game's defaults (brake on, gas off).
     /// Read only on [`crate::handling::Handling::MxVsAtv`].
     pub gyro: crate::handling::Gyro,
+    /// **MD63a:** MX vs. ATV's `[Joystick]` `InputRampAmount` / `InputRampTime`, the steering
+    /// command's ramp to full lock ([`crate::handling::step::steer_command`]), its option off. MX
+    /// Unleashed's files have neither: zero. Read only on [`crate::handling::Handling::MxVsAtv`].
+    pub steer_ramp: crate::handling::step::SteerRamp,
 }
 
 impl Phy {
@@ -862,6 +866,10 @@ impl Phy {
             clutch_in_rate_limit: s.float("ClutchInRateLimit").unwrap_or(F::ZERO),
             clutch_out_rate_limit: s.float("ClutchOutRateLimit").unwrap_or(F::ZERO),
         };
+        let steer_ramp = crate::handling::step::SteerRamp::of_file(
+            s.float("InputRampAmount").unwrap_or(F::ZERO),
+            s.float("InputRampTime").unwrap_or(F::ZERO),
+        );
         mv.steer_scale_1 = s.float("SteerScale1").unwrap_or(F::ZERO);
         mv.steer_scale_2 = s.float("SteerScale2").unwrap_or(F::ZERO);
         mv.steer_speed_1 = s.float("SteerSpeed1").unwrap_or(F::ZERO) * MPH;
@@ -971,6 +979,7 @@ impl Phy {
             handling: crate::handling::Handling::Original,
             gas_gyro_torque,
             gyro: crate::handling::Gyro::default(),
+            steer_ramp,
         }
     }
 

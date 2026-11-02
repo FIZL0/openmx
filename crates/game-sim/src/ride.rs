@@ -437,7 +437,7 @@ pub fn squared(x: F) -> F {
 }
 
 /// The rate limiter's step, in its own order: the gap clamped below, then above, then added.
-fn limit(now: F, want: F, r: F) -> F {
+pub(crate) fn limit(now: F, want: F, r: F) -> F {
     let gap = want - now;
     let neg = F(fpu::neg(r.0));
     let gap = if neg < gap { gap } else { neg };
@@ -538,7 +538,7 @@ impl State for Slot {
 
 /// One command towards another at a rate, both ways: the original's [`limit`] step, `rate · dt` at
 /// most. A rate of zero is no limit at all.
-fn toward(now: F, want: F, rate: F, dt: F) -> F {
+pub(crate) fn toward(now: F, want: F, rate: F, dt: F) -> F {
     if rate <= F::ZERO {
         return want;
     }
@@ -548,7 +548,7 @@ fn toward(now: F, want: F, rate: F, dt: F) -> F {
 /// A lever the original's limiter only holds back on the way up (`bike_input_limiter`, the gas and
 /// the brake): below the rider's lever it walks up at `rate` ([`limit`]), and at or above it, it *is*
 /// the lever. A rate of zero is no limit at all, as in [`toward`].
-fn rise(now: F, want: F, rate: F, dt: F) -> F {
+pub(crate) fn rise(now: F, want: F, rate: F, dt: F) -> F {
     if now < want {
         toward(now, want, rate, dt)
     } else {
@@ -2212,8 +2212,24 @@ impl Ride {
         let c = &c.pad_read_tail(ride.stoppie, p.pitch.stoppie_brake, F(air.contact_vel.z()), air.airborne).gate_cut();
         held.reverse = c.reverse;
 
-        // 1 — the input layer's rate limit.
-        held.step(c, &p.joystick, dt);
+        // 1 — the input layer's rate limit. MX vs. ATV's (MD63a) leaves the stick unsquared, cuts
+        // the gas as the throttle comes back on, and its lever words are what the frame reads on.
+        let limited;
+        let c = match mxvatv.as_deref_mut() {
+            Some(f) => {
+                use crate::handling::step;
+                let mut cut = step::GasCut { latched: f.gas_cut, timer: f.gas_cut_timer };
+                let stick = trick::stick(c.stick.0, c.stick.1, c.dpad);
+                let inp = step::LimiterIn { airborne: air.airborne, cut_time: step::GAS_CUT_TIME };
+                limited = step::input_limiter(held, &mut cut, c, stick, &p.joystick, dt, &inp);
+                (f.gas_cut, f.gas_cut_timer) = (cut.latched, cut.timer);
+                &limited
+            }
+            None => {
+                held.step(c, &p.joystick, dt);
+                c
+            }
+        };
         if let Some(t) = tricks.as_deref_mut() {
             let raw = trick::stick(c.stick.0, c.stick.1, c.dpad);
             t.side_flick = t.side.sample(raw.x, dt);
@@ -2365,6 +2381,15 @@ impl Ride {
         }
 
         mv::pose(mvp, &mut mvc, &mut front.mv, s);
+        // MX vs. ATV's steering command (MD63a): its input ramp, when the option is on.
+        if let Some(f) = mxvatv.as_deref_mut() {
+            if !s.balancing {
+                let fade = mv::steer_scale(mvp, s.speed);
+                front.mv.steer_command = crate::handling::step::steer_command(
+                    &p.steer_ramp, front.mv.max_steer_angle, s.lean, fade, &mut f.steer_ramp_timer, s.dt,
+                );
+            }
+        }
         // The pose's steering command *is* the hinge's angle — one word on the front wheel. P11
         // bridged it here, once a frame; the bridge now lives where the two views of that word
         // actually cross, in [`Wheel::to_wheel`]/[`Wheel::from_wheel`], which run either side of

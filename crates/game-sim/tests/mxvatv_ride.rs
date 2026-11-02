@@ -54,3 +54,35 @@ fn the_gas_gyro_pitches_an_mxvatv_bike_and_not_the_originals() {
     let orig_on = drop(&tables, &bike(&tables, Handling::Original, on));
     assert_eq!(bits(orig_on), bits(orig_off), "the original's handling read the gyro options");
 }
+
+/// Rolled out on the flat for a second with the stick hard over: the front wheel's steering command
+/// and the held stick after it.
+fn hard_over(tables: &Tables, p: &Phy) -> (F, (F, F)) {
+    let mut r = Ride::new(p, game_sim::stock::MOUNTS, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0));
+    let mut floor = Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let c = Controls { gas: F(0.5), stick: (F::ONE, F(0.85)), ..Controls::default() };
+    for _ in 0..60 {
+        r.frame(p, tables, &c, DT, &mut floor);
+    }
+    (r.front.mv.steer_command, r.held.stick)
+}
+
+/// MD63a on a ride: MX vs. ATV's limiter leaves the stick unsquared, and its steer ramp, with the
+/// option on, changes the command a held lock asks for. On the original's handling neither is read.
+#[test]
+fn the_steer_ramp_and_the_unsquared_stick_reach_an_mxvatv_bike_only() {
+    let tables = Tables::build();
+    let mut atv = bike(&tables, Handling::MxVsAtv, Gyro::default());
+    let (off, stick) = hard_over(&tables, &atv);
+    assert_eq!(stick, (F::ONE, F(0.85)), "MX vs. ATV's stick is not squared");
+    atv.steer_ramp = game_sim::handling::step::SteerRamp { on: true, amount: F(0.2), time: F(0.5) };
+    let (on, _) = hard_over(&tables, &atv);
+    assert_ne!(on.0.to_bits(), off.0.to_bits(), "the ramp did not reach the ride ({on:?})");
+
+    let mut orig = bike(&tables, Handling::Original, Gyro::default());
+    let (a, stick) = hard_over(&tables, &orig);
+    assert_eq!(stick, (F::ONE, F(0.85) * F(0.85)), "the original's stick is squared");
+    orig.steer_ramp = atv.steer_ramp;
+    let (b, _) = hard_over(&tables, &orig);
+    assert_eq!(a.0.to_bits(), b.0.to_bits(), "the original's handling read the steer ramp");
+}
