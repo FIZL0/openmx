@@ -993,6 +993,16 @@ impl Ride {
         self.chassis.max_speed_sq = self.riding_speed_sq;
     }
 
+    /// **The wreck entry's wheels** (S230): both wheels' compression to nothing, as the vehicle's
+    /// own wreck entry leaves them after it has handed the body over. The ground step does not run
+    /// while the rider is down, so this is what the riderless bike is drawn at — its free length —
+    /// rather than the squat it had when the wreck came. `last_compression` is left as it was: the
+    /// entry does not write it.
+    pub fn wreck_wheels(&mut self) {
+        self.front.w.compression = F::ZERO;
+        self.rear.w.compression = F::ZERO;
+    }
+
     /// Put the bike down at a point, pointed a way, stopped: the respawn, less the ride state
     /// machine's own clocks (S5's, and P3's to wire).
     pub fn place(&mut self, at: Vf, facing: Vf) {
