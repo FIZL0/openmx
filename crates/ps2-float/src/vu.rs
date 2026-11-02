@@ -81,7 +81,11 @@ fn chop(x: f64) -> f32 {
 /// The exact rounding error (a TwoSum) decides it: `x` plus a tiny value of the opposite sign truncates
 /// to the next `f32` toward zero, not to `x`.
 #[allow(clippy::float_arithmetic)] // the model itself, in host arithmetic
+#[cfg_attr(feature = "native", inline)]
 pub fn add(a: f32, b: f32) -> f32 {
+    if crate::NATIVE {
+        return a + b; // F15: the host's add (lib.rs, "The `native` feature")
+    }
     let (a, b) = (vu(a) as f64, vu(b) as f64);
     let s = a + b;
     if !s.is_finite() {
@@ -99,22 +103,29 @@ pub fn add(a: f32, b: f32) -> f32 {
 }
 
 /// `vsub` (one lane).
+#[cfg_attr(feature = "native", inline)]
 pub fn sub(a: f32, b: f32) -> f32 {
     add(a, f32::from_bits(b.to_bits() ^ 0x8000_0000))
 }
 
 /// `vmul` (one lane): the 24×24-bit product is exact in `f64`, so the only rounding is the chop.
 #[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
+#[cfg_attr(feature = "native", inline)]
 pub fn mul(a: f32, b: f32) -> f32 {
+    if crate::NATIVE {
+        return a * b;
+    }
     chop(vu(a) as f64 * vu(b) as f64)
 }
 
 /// `vmadd` (one lane): `acc + a·b`, product chopped first, then the add chopped.
+#[cfg_attr(feature = "native", inline)]
 pub fn madd(acc: f32, a: f32, b: f32) -> f32 {
     add(acc, mul(a, b))
 }
 
 /// `vmsub` (one lane): `acc − a·b`.
+#[cfg_attr(feature = "native", inline)]
 pub fn msub(acc: f32, a: f32, b: f32) -> f32 {
     sub(acc, mul(a, b))
 }
@@ -122,6 +133,9 @@ pub fn msub(acc: f32, a: f32, b: f32) -> f32 {
 /// `vdiv` into `Q`, chopped; `x / 0` gives `±max`.
 #[allow(clippy::float_arithmetic)] // the model itself; f32 division is exact per IEEE
 pub fn div(a: f32, b: f32) -> f32 {
+    if crate::NATIVE {
+        return crate::fpu::div(a, b); // F15: the host's divide, x / 0 still ±max
+    }
     let (a, b) = (vu(a), vu(b));
     if b == 0.0 {
         return if a.is_sign_negative() != b.is_sign_negative() { crate::fpu::NEG_MAX } else { MAX };
@@ -137,6 +151,9 @@ pub fn div(a: f32, b: f32) -> f32 {
 /// `vsqrt` into `Q`: the square root of `|x|`, chopped.
 #[allow(clippy::float_arithmetic)] // the model itself; a 24-bit root squares exactly in f64
 pub fn sqrt(x: f32) -> f32 {
+    if crate::NATIVE {
+        return crate::fpu::sqrt(x); // F15: the host's root of |x|
+    }
     let x = f32::from_bits(vu(x).to_bits() & 0x7fff_ffff);
     let r = crate::libm::sqrtf(x); // nearest; step toward zero when it rounded up
     daz(if (r as f64) * (r as f64) > x as f64 { f32::from_bits(r.to_bits() - 1) } else { r })
@@ -244,34 +261,42 @@ impl Vf {
     /// `vadd` / `vsub` / `vmul`, lane by lane. Pair them with [`Vf::bc`] for the broadcast forms:
     /// `a.mul(b.bc(Field::X))` is `vmulx`.
     #[allow(clippy::should_implement_trait)] // named after the instruction; the operators live on `Lane`
+    #[cfg_attr(feature = "native", inline)]
     pub fn add(self, o: Vf) -> Vf {
         Vf(core::array::from_fn(|i| add(self.0[i], o.0[i])))
     }
     #[allow(clippy::should_implement_trait)] // named after the instruction, not after `std::ops`
+    #[cfg_attr(feature = "native", inline)]
     pub fn sub(self, o: Vf) -> Vf {
         Vf(core::array::from_fn(|i| sub(self.0[i], o.0[i])))
     }
     #[allow(clippy::should_implement_trait)] // named after the instruction, not after `std::ops`
+    #[cfg_attr(feature = "native", inline)]
     pub fn mul(self, o: Vf) -> Vf {
         Vf(core::array::from_fn(|i| mul(self.0[i], o.0[i])))
     }
     /// `vmadd` / `vmsub`: `acc ± a·b`, lane by lane.
+    #[cfg_attr(feature = "native", inline)]
     pub fn madd(acc: Vf, a: Vf, b: Vf) -> Vf {
         Vf(core::array::from_fn(|i| madd(acc.0[i], a.0[i], b.0[i])))
     }
+    #[cfg_attr(feature = "native", inline)]
     pub fn msub(acc: Vf, a: Vf, b: Vf) -> Vf {
         Vf(core::array::from_fn(|i| msub(acc.0[i], a.0[i], b.0[i])))
     }
     /// `vmulq` / `vaddq` / `vsubq`: every lane against the `Q` register.
+    #[cfg_attr(feature = "native", inline)]
     pub fn mul_q(self, q: f32) -> Vf {
         Vf(core::array::from_fn(|i| mul(self.0[i], q)))
     }
+    #[cfg_attr(feature = "native", inline)]
     pub fn add_q(self, q: f32) -> Vf {
         Vf(core::array::from_fn(|i| add(self.0[i], q)))
     }
 
     /// `vopmula`: the first half of a cross product, into the accumulator —
     /// `acc.x = a.y·b.z`, `acc.y = a.z·b.x`, `acc.z = a.x·b.y` (`w` untouched).
+    #[cfg_attr(feature = "native", inline)]
     pub fn opmula(a: Vf, b: Vf) -> Vf {
         Vf([mul(a.0[1], b.0[2]), mul(a.0[2], b.0[0]), mul(a.0[0], b.0[1]), 0.0])
     }
@@ -285,6 +310,7 @@ impl Vf {
     /// ```
     ///
     /// so port the pair as the original writes it, operands and all, rather than reaching for [`cross`].
+    #[cfg_attr(feature = "native", inline)]
     pub fn opmsub(acc: Vf, a: Vf, b: Vf) -> Vf {
         Vf([msub(acc.0[0], a.0[1], b.0[2]), msub(acc.0[1], a.0[2], b.0[0]), msub(acc.0[2], a.0[0], b.0[1]), acc.0[3]])
     }
@@ -392,14 +418,17 @@ impl Lane {
         self.0
     }
     /// `vmadd`: `self + a·b`.
+    #[cfg_attr(feature = "native", inline)]
     pub fn madd(self, a: impl Into<Lane>, b: impl Into<Lane>) -> Lane {
         Lane(madd(self.0, a.into().0, b.into().0))
     }
     /// `vmsub`: `self − a·b`.
+    #[cfg_attr(feature = "native", inline)]
     pub fn msub(self, a: impl Into<Lane>, b: impl Into<Lane>) -> Lane {
         Lane(msub(self.0, a.into().0, b.into().0))
     }
     /// `vsqrt` of `|self|`.
+    #[cfg_attr(feature = "native", inline)]
     pub fn sqrt(self) -> Lane {
         Lane(sqrt(self.0))
     }
@@ -436,23 +465,27 @@ macro_rules! vu_op {
     ($tr:ident $m:ident $as_tr:ident $as_m:ident $op:ident) => {
         impl core::ops::$tr<Lane> for Lane {
             type Output = Lane;
+            #[cfg_attr(feature = "native", inline)]
             fn $m(self, o: Lane) -> Lane {
                 Lane($op(self.0, o.0))
             }
         }
         impl core::ops::$tr<f32> for Lane {
             type Output = Lane;
+            #[cfg_attr(feature = "native", inline)]
             fn $m(self, o: f32) -> Lane {
                 Lane($op(self.0, o))
             }
         }
         impl core::ops::$tr<Lane> for f32 {
             type Output = Lane;
+            #[cfg_attr(feature = "native", inline)]
             fn $m(self, o: Lane) -> Lane {
                 Lane($op(self, o.0))
             }
         }
         impl<T: Into<Lane>> core::ops::$as_tr<T> for Lane {
+            #[cfg_attr(feature = "native", inline)]
             fn $as_m(&mut self, o: T) {
                 *self = Lane($op(self.0, o.into().0));
             }

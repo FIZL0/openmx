@@ -2223,6 +2223,10 @@ const BUILD_ID: &str = env!("OPENMX_BUILD_ID");
 pub(crate) async fn run() -> Result<(), String> {
     // before any lobby: the desktop's, the iPhone's and the browser's front ends all come through here
     openmx_net::handshake::set_build(BUILD_ID);
+    // F15: the concept build says so before anything else, for whoever reads its output or a bug report
+    if ps2_float::NATIVE {
+        println!("{}", menu::VERSION_LINE);
+    }
     let argv: Vec<String> = argv();
     if argv.first().is_some_and(|a| a == "--dump-textures") {
         return dump_textures(&argv[1..]);
@@ -11479,9 +11483,16 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
                 args.size = Some((w, h));
             }
+            "--version" | "-V" => {
+                // on the concept build its first line already said it
+                if !ps2_float::NATIVE {
+                    println!("{}", menu::VERSION_LINE);
+                }
+                return Ok(None);
+            }
             "--help" | "-h" => {
                 println!(
-                    "openmx [DISC.iso] [--where] [--no-update-check]\n\
+                    "openmx [DISC.iso] [--where] [--no-update-check] [--version]\n\
                      \x20      (the disc: this, else kit.toml's above the working directory, else the one\n\
                      \x20      remembered in the data folder, else a picker asks; --where says which, and\n\
                      \x20      where settings.txt, controls.txt and mods/ are; --no-update-check: the main\n\

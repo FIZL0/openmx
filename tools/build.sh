@@ -1,11 +1,14 @@
 #!/bin/bash
-# tools/build.sh [linux|windows|all] — the optimised builds players download, into dist/ (as opentennis's tools/build.sh):
+# tools/build.sh [linux|windows|all] [--native-sim] — the optimised builds players download, into dist/ (as opentennis's tools/build.sh):
 #   dist/linux/         openmx, openmx.png (the icon, for a launcher or Steam shortcut), README.txt: unpack,
 #                       ./openmx "your disc.iso" (or drop the .iso on it) the first time, ./openmx after that;
 #                       settings, controls and mods/ in ~/.local/share/openmx (P190)
 #   dist/windows/       openmx.exe (P192), its icon built in: drop the .iso on it the first time; settings, controls
 #                       and mods\ in %APPDATA%\openmx. Cross-compiled with MinGW, once (Arch):
 #                         sudo pacman -S mingw-w64-gcc && rustup target add x86_64-pc-windows-gnu
+# --native-sim (F15, after the target): the concept build, the simulation on the host's plain f32 rather than the
+# PS2's arithmetic (openmx's `native-sim` feature) — faster, not bit-exact, online only with other native builds.
+# It says "native sim" in the menu's corner, in --version and in the first line it prints.
 # No game data goes into dist/. OPENMX_COMMIT / OPENMX_VERSION in the environment are passed into the build
 # (tools/release.sh and the Actions jobs set them).
 #
@@ -16,6 +19,12 @@
 set -e
 cd "$(dirname "$0")/.."
 what=${1:-linux}
+features=
+case $2 in
+    --native-sim) features="--features native-sim" ;;
+    "") ;;
+    *) echo "usage: tools/build.sh [linux|windows|all] [--native-sim]" >&2; exit 2 ;;
+esac
 
 sdk=registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest
 
@@ -57,11 +66,11 @@ linux() {
     fi
     mkdir -p ~/.cache/openmx-steamrt
     docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/src" -v ~/.cache/openmx-steamrt:/cache -w /src \
-        -e OPENMX_VERSION -e OPENMX_COMMIT -e HOME=/cache -e CARGO_HOME=/cache/cargo -e RUSTUP_HOME=/cache/rustup -e CARGO_TARGET_DIR=/src/target/steamrt \
+        -e OPENMX_VERSION -e OPENMX_COMMIT -e FEATURES="$features" -e HOME=/cache -e CARGO_HOME=/cache/cargo -e RUSTUP_HOME=/cache/rustup -e CARGO_TARGET_DIR=/src/target/steamrt \
         $sdk sh -ec '
             [ -x /cache/cargo/bin/cargo ] || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --no-modify-path
             /cache/cargo/bin/rustup update stable >/dev/null 2>&1
-            /cache/cargo/bin/cargo build --locked --release -p openmx --bin openmx'
+            /cache/cargo/bin/cargo build --locked --release -p openmx --bin openmx $FEATURES'
     rm -rf dist/linux && mkdir -p dist/linux  # the tarball is the whole folder: nothing stale in it
     strip -o dist/linux/openmx target/steamrt/release/openmx
     extras dist/linux
@@ -82,7 +91,7 @@ windows() {
     fi
     # crt-static: no MinGW runtime DLLs to ship beside the .exe
     CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc RUSTFLAGS="-C target-feature=+crt-static" \
-        cargo build --locked --release -p openmx --bin openmx --target $t
+        cargo build --locked --release -p openmx --bin openmx --target $t $features
     rm -rf dist/windows && mkdir -p dist/windows
     x86_64-w64-mingw32-strip -o dist/windows/openmx.exe target/$t/release/openmx.exe
     echo "dist/windows/openmx.exe"
@@ -92,5 +101,5 @@ case $what in
     linux) linux ;;
     windows) windows ;;
     all) linux; windows ;;
-    *) echo "usage: tools/build.sh [linux|windows|all]" >&2; exit 2 ;;
+    *) echo "usage: tools/build.sh [linux|windows|all] [--native-sim]" >&2; exit 2 ;;
 esac

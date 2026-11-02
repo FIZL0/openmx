@@ -33,11 +33,25 @@ fn an_unstamped_dev_build_keeps_the_dev_id() {
     assert_eq!(stamp::id(VERSION, "dev"), format!("{VERSION} dev, 30 Hz"));
     // and this build is one: the id the shell stamps, the corner's commit
     let commit = env!("OPENMX_COMMIT");
-    assert_eq!(openmx_web::BUILD_ID, stamp::id(VERSION, commit));
-    if commit == "dev" {
+    assert_eq!(openmx_web::BUILD_ID, stamp::sim_id(stamp::id(VERSION, commit), ps2_float::NATIVE));
+    if commit == "dev" && !ps2_float::NATIVE {
         // handshake.rs's own id when nobody stamps one: dev builds of one version meet each other
         assert_eq!(openmx_web::BUILD_ID, openmx_net::handshake::build());
         openmx_net::handshake::set_build(openmx_web::BUILD_ID);
         assert_eq!(openmx_net::handshake::build(), format!("{VERSION} dev, 30 Hz"));
     }
+}
+
+/// F15: the concept build's simulation (ps2-float's `native`, plain f32) is not the exact one, so its id is another
+/// build's: a native build refuses an exact peer, dev or stamped, and the exact id is unchanged.
+#[test]
+fn a_native_sim_builds_id_is_not_an_exact_ones() {
+    for commit in ["dev", "abc1234"] {
+        let exact = stamp::id(VERSION, commit);
+        assert_eq!(stamp::sim_id(exact.clone(), false), exact);
+        assert_eq!(stamp::sim_id(exact.clone(), true), format!("{exact}, native sim"));
+        assert_ne!(stamp::sim_id(exact.clone(), true), exact);
+    }
+    // and this build's id says which it is
+    assert_eq!(openmx_web::BUILD_ID.ends_with(", native sim"), ps2_float::NATIVE);
 }

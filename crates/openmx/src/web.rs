@@ -99,6 +99,11 @@ pub(crate) use host::{last_build as host_last_build, latest_build as host_latest
 /// lobbies stamp it themselves before they start.
 pub const BUILD_ID: &str = env!("OPENMX_BUILD_ID");
 
+// F15: the label and the online id follow the `native-sim` feature, so the arithmetic must too. ps2-float's
+// `native` turned on by anything else (a feature unified in from another crate) would ride native while the
+// build says, and the handshake checks, exact.
+const _: () = assert!(ps2_float::NATIVE == cfg!(feature = "native-sim"), "ps2-float's `native` is on without openmx's `native-sim`");
+
 use game_render::disc::{Disc, Res};
 use game_render::mat::v3;
 use game_render::raster::Frame;
