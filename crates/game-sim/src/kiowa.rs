@@ -16,8 +16,9 @@
 //!    throw back from the map's edge and the wrecks; then [`Measure::touchdown`].
 //!
 //! Every field is named by the `.phy` key it is loaded from, where it has one (the `[Flight
-//! Controller]` section of `helicopter\kiowa.phy`). Until the reader lands, the proofs read the values
-//! off a save state's live helicopter (`tests/kiowa.rs`).
+//! Controller]` section of `helicopter\kiowa.phy`). [`Phy::read`] is the file's reader: it hands back
+//! the [`Controller`], [`Rotor`] and [`Aero`] the steps take, and the wreck's figures. The steps'
+//! proofs still read their values off a save state's live helicopter (`tests/kiowa.rs`).
 //!
 //! # The controller's three loops
 //!
@@ -1147,4 +1148,387 @@ impl Kiowa {
         world.step(dt, &mut lists);
         lists.asked
     }
+}
+
+// --- the .phy reader ---------------------------------------------------------------------------------
+
+use crate::biplane::Wrecks;
+use crate::phy::{DEG, Ini, MPH, Part, Section};
+
+/// The helicopter's file in `machine.res`.
+pub const KIOWA_PHY: &str = "helicopter\\kiowa.phy";
+/// The thrown blades' file, beside it: one `[PhysicsPart1]`, read into each of the four blades.
+pub const WRECK_BLADE_PHY: &str = "helicopter\\wreckblade.phy";
+
+/// What a quadword key the file leaves out reads as: the origin point.
+const ORIGIN: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
+/// The air's density, slugs per cubic foot: the aerodynamics model's constructor's, not a key.
+const AIR_DENSITY: f32 = f32::from_bits(0x3b1b_c5c4);
+/// The controller's hold delay ([`Controller::hold_delay`]): the helicopter's constructor's, not a key.
+const HOLD_DELAY: f32 = 2.0;
+/// The rotor's wreck rays: `WreckRotorRadius` when the key is missing.
+const WRECK_ROTOR_RADIUS: f32 = 1.0;
+/// The diagonal rays' share of the radius on each axis (0.707, not `sqrt(0.5)`).
+const DIAGONAL: f32 = f32::from_bits(0x3f34_fdf4);
+
+/// `helicopter\kiowa.phy`, as the helicopter's reader leaves it: the base helicopter's sections, then
+/// the MX helicopter's `[Animation]`.
+///
+/// Every float the reader asks for has a default of zero and every quadword the origin point
+/// (`WreckRotorRadius` alone defaults to 1). Angles are written in degrees and kept in radians
+/// ([`DEG`]); speeds are written in miles an hour and kept in feet a second ([`MPH`]):
+///
+/// * `[Main Rotor]` the three cyclic and collective angles, `[Tail Rotor]` `MaxPitchAngle`;
+/// * `[Aerodynamics]` `DefaultAngleOfAttack` in degrees; `DragHighSpeed`, `LowSpeedAero`,
+///   `HighSpeedAero`, `TurbulenceMagnitude` and `SteadyWind`'s `x`, `y` and `z` in miles an hour (not
+///   `LowSpeedDrag`, nor `HighSpeedDrag`);
+/// * `[Flight Controller]` `MaxPitchCommand` and `MaxRollCommand` in degrees; `SpeedCommandRate`, the
+///   two speed commands and the two feed-forward speeds in miles an hour (not the rate commands);
+/// * `[Wrecks]` `MinWreckSpeed` in miles an hour.
+///
+/// `[Mass Properties]` is the shared rigid-body part's ([`Part::read`]): the file's `Inertia` key is
+/// not one that reader takes, and the body's inertia comes from the model's box, as every part's does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Phy {
+    pub mass_properties: Part,
+    /// The two rotors, as the step reads them.
+    pub rotor: Rotor,
+    /// The rest of `[Main Rotor]` and `[Tail Rotor]`.
+    pub main_rotor: MainRotor,
+    pub tail_rotor: TailRotor,
+    /// `[Aerodynamics]`, as the step reads it, and the rest.
+    pub aero: Aero,
+    pub aero_keys: AeroKeys,
+    /// `[Flight Controller]`.
+    pub controller: Controller,
+    /// `[Wrecks]`: the five keys the plane's reader takes too, in the same order and units.
+    pub wrecks: Wrecks,
+    /// The rotor's wreck rays, from `WreckRotorRadius` and `WreckRotorHeight`.
+    pub wreck_rotor: WreckRotor,
+    /// `[Animation]`: the box the pilot's pelvis sits in.
+    pub pelvis_box_position: Vf,
+    pub pelvis_box_size: Vf,
+}
+
+/// The main rotor's keys the step does not read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MainRotor {
+    /// `Inertia`.
+    pub inertia: F,
+    /// `Position`: the hub, in the body's frame.
+    pub position: Vf,
+    /// `MinAltitude`, `MaxAltitude` (the rotor's, not the controller's).
+    pub min_altitude: F,
+    pub max_altitude: F,
+}
+
+/// `[Tail Rotor]` but its `MaxPitchAngle` ([`Rotor::max_tail_pitch`]); the step reads none of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TailRotor {
+    pub lift_curve_slope: F,
+    pub blade_chord: F,
+    pub blades: F,
+    pub radius: F,
+    /// `Radius` squared, as the reader keeps it.
+    pub radius_squared: F,
+    pub gear_ratio: F,
+    pub inertia: F,
+    pub position: Vf,
+}
+
+/// `[Aerodynamics]`' keys the step does not read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AeroKeys {
+    pub aspect_ratio: F,
+    /// `DefaultAngleOfAttack`, radians.
+    pub default_angle_of_attack: F,
+    pub cl_round_off: F,
+    pub cl_drop_off: F,
+    pub cl_scale: F,
+    pub cl_angle_scale: F,
+    pub cl_q: F,
+    pub cd1: F,
+    pub cy_p: F,
+    pub cy_r: F,
+    pub cl_r: F,
+    pub cn_p: F,
+    pub cy_beta_pedal: F,
+    pub cn_beta_pedal: F,
+    pub cn_r_pedal: F,
+    /// `DragHighSpeed`, feet a second.
+    pub drag_high_speed: F,
+    pub high_speed_drag: F,
+    /// `TurbulenceMagnitude` (feet a second), `TurbulenceTimeScale`, `TurbulenceTimeOffset`.
+    pub turbulence_magnitude: F,
+    pub turbulence_time_scale: F,
+    pub turbulence_time_offset: Vf,
+    /// `SteadyWind`, feet a second (`w` as written).
+    pub steady_wind: Vf,
+}
+
+/// The rotor's wreck collision: eight rays in the model's frame, each from the hub at
+/// `(0, WreckRotorHeight, 0)` out to the disc's edge `WreckRotorRadius` away — along `+x`, `-x`, `+z`,
+/// `-z`, then the four diagonals `(+,+)`, `(+,-)`, `(-,+)`, `(-,-)` (x, z) at 0.707 of the radius on
+/// each axis. The crash test asks the ground under each ray's far end ([`rotor_in_ground`]). The
+/// collision object keeps them in its tree's order, not this one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WreckRotor {
+    /// `WreckRotorRadius`, `WreckRotorHeight`.
+    pub radius: F,
+    pub height: F,
+    /// `(from, to)` per ray, in the reader's order.
+    pub rays: [[Vf; 2]; 8],
+}
+
+impl WreckRotor {
+    fn new(radius: F, height: F) -> WreckRotor {
+        let hub = Vf::new(0.0, height.to_f32(), 0.0, 1.0);
+        let at = |x: F, z: F| Vf::new(x.to_f32(), height.to_f32(), z.to_f32(), 1.0);
+        let (zero, out, back) = (F::ZERO, radius, -radius);
+        let (near, far) = (F(DIAGONAL) * radius, -F(DIAGONAL) * radius);
+        let ends = [
+            at(out, zero),
+            at(back, zero),
+            at(zero, out),
+            at(zero, back),
+            at(near, near),
+            at(near, far),
+            at(far, near),
+            at(far, far),
+        ];
+        WreckRotor { radius, height, rays: ends.map(|end| [hub, end]) }
+    }
+}
+
+impl Phy {
+    /// Read the file out of its bytes.
+    pub fn read_bytes(bytes: &[u8]) -> Phy {
+        Phy::read(&Ini::parse_bytes(bytes))
+    }
+
+    /// Load a parsed file, in the reader's order: each section's keys into the reader's own
+    /// temporaries or straight into the models, then the conversions, then the models' setters.
+    pub fn read(ini: &Ini) -> Phy {
+        let zero = |s: &Section, key: &str| s.float_or(key, F::ZERO);
+        let deg = |v: F| v * F(DEG);
+        let mph = |v: F| v * F(MPH);
+
+        let mass_properties = Part::read(ini.section("Mass Properties"));
+
+        let s = ini.section("Main Rotor");
+        let max_lateral_cyclic = deg(zero(&s, "MaxLateralCyclicPitchAngle"));
+        let max_longitudinal_cyclic = deg(zero(&s, "MaxLongitudinalCyclicPitchAngle"));
+        let max_collective = deg(zero(&s, "MaxCollectivePitchAngle"));
+        let lift_curve_slope = zero(&s, "LiftCurveSlope");
+        let blade_chord = zero(&s, "BladeChord");
+        let blades = zero(&s, "NumberOfBlades");
+        let radius = zero(&s, "Radius");
+        let angular_rate = zero(&s, "AngularRate");
+        let inertia = zero(&s, "Inertia");
+        let position = s.vector("Position", ORIGIN);
+        let max_moment = s.vector("MaxRotorMoment", ORIGIN);
+        let main_rotor = MainRotor {
+            inertia,
+            position,
+            min_altitude: zero(&s, "MinAltitude"),
+            max_altitude: zero(&s, "MaxAltitude"),
+        };
+
+        let s = ini.section("Tail Rotor");
+        let max_tail_pitch = deg(zero(&s, "MaxPitchAngle"));
+        let tail_radius = zero(&s, "Radius");
+        let tail_rotor = TailRotor {
+            lift_curve_slope: zero(&s, "LiftCurveSlope"),
+            blade_chord: zero(&s, "BladeChord"),
+            blades: zero(&s, "NumberOfBlades"),
+            radius: tail_radius,
+            radius_squared: tail_radius * tail_radius,
+            gear_ratio: zero(&s, "GearRatio"),
+            inertia: zero(&s, "Inertia"),
+            position: s.vector("Position", ORIGIN),
+        };
+        let rotor = Rotor {
+            max_lateral_cyclic,
+            max_longitudinal_cyclic,
+            max_collective,
+            max_tail_pitch,
+            lift_curve_slope,
+            blade_chord,
+            blades,
+            radius,
+            radius_squared: radius * radius,
+            angular_rate,
+            max_moment: [F(max_moment.x()), F(max_moment.y()), F(max_moment.z())],
+        };
+
+        let s = ini.section("Aerodynamics");
+        let chord = zero(&s, "Chord");
+        let span = zero(&s, "Span");
+        let area = zero(&s, "SurfaceArea");
+        let aspect_ratio = zero(&s, "AspectRatio");
+        let default_angle_of_attack = zero(&s, "DefaultAngleOfAttack");
+        let cl_round_off = zero(&s, "CLRoundOff");
+        let cl_drop_off = zero(&s, "CLDropOff");
+        let cl_scale = zero(&s, "CLScale");
+        let cl_angle_scale = zero(&s, "CLAngleScale");
+        let cl_alpha = zero(&s, "CLalpha");
+        let cl_q = zero(&s, "CLq");
+        let cd0 = zero(&s, "CD0");
+        let cd1 = zero(&s, "CD1");
+        let cy_beta = zero(&s, "CYbeta");
+        let cy_p = zero(&s, "CYp");
+        let cy_r = zero(&s, "CYr");
+        let cl_beta = zero(&s, "Clbeta");
+        let cl_p = zero(&s, "Clp");
+        let cl_r = zero(&s, "Clr");
+        let cl_da = zero(&s, "Clda");
+        let cm0 = zero(&s, "CM0");
+        let cm_alpha = zero(&s, "CMalpha");
+        let cm_q = zero(&s, "CMq");
+        let cm_de = zero(&s, "CMde");
+        let cn_beta = zero(&s, "Cnbeta");
+        let cn_p = zero(&s, "Cnp");
+        let cn_r = zero(&s, "Cnr");
+        let cn_dr = zero(&s, "Cndr");
+        let cy_beta_pedal = zero(&s, "CYbetaPedal");
+        let cn_beta_pedal = zero(&s, "CnbetaPedal");
+        let cn_r_pedal = zero(&s, "CnrPedal");
+        let low_speed_drag = zero(&s, "LowSpeedDrag");
+        let drag_high_speed = mph(zero(&s, "DragHighSpeed"));
+        let high_speed_drag = zero(&s, "HighSpeedDrag");
+        let low_speed_aero = mph(zero(&s, "LowSpeedAero"));
+        let high_speed_aero = mph(zero(&s, "HighSpeedAero"));
+        let turbulence_magnitude = mph(zero(&s, "TurbulenceMagnitude"));
+        let turbulence_time_scale = zero(&s, "TurbulenceTimeScale");
+        let turbulence_time_offset = s.vector("TurbulenceTimeOffset", ORIGIN);
+        // The wind is scaled on the vector unit, `x`, `y` and `z` only.
+        let wind = s.vector("SteadyWind", ORIGIN);
+        let steady_wind = wind.merge(Dest::XYZ, wind.mul(Vf::splat(MPH)));
+        let chord = wing_chord(chord, span, aspect_ratio);
+        let aero = Aero {
+            density: F(AIR_DENSITY),
+            chord,
+            span,
+            area,
+            cl_alpha,
+            cd0,
+            cy_beta,
+            cl_beta,
+            cl_p,
+            cl_da,
+            cm0,
+            cm_alpha,
+            cm_q,
+            cm_de,
+            cn_beta,
+            cn_r,
+            cn_dr,
+            low_speed_drag,
+            low_speed_aero,
+            high_speed_aero,
+        };
+        let aero_keys = AeroKeys {
+            aspect_ratio,
+            default_angle_of_attack: deg(default_angle_of_attack),
+            cl_round_off,
+            cl_drop_off,
+            cl_scale,
+            cl_angle_scale,
+            cl_q,
+            cd1,
+            cy_p,
+            cy_r,
+            cl_r,
+            cn_p,
+            cy_beta_pedal,
+            cn_beta_pedal,
+            cn_r_pedal,
+            drag_high_speed,
+            high_speed_drag,
+            turbulence_magnitude,
+            turbulence_time_scale,
+            turbulence_time_offset,
+            steady_wind,
+        };
+
+        let s = ini.section("Flight Controller");
+        let lanes = |v: Vf| [F(v.x()), F(v.y()), F(v.z())];
+        let max_roll = deg(zero(&s, "MaxRollCommand"));
+        let roll_gain = zero(&s, "RollGain");
+        let speed_command_rate = mph(zero(&s, "SpeedCommandRate"));
+        let min_speed_command = mph(zero(&s, "MinSpeedCommand"));
+        let max_speed_command = mph(zero(&s, "MaxSpeedCommand"));
+        let speed_gain = zero(&s, "SpeedGain");
+        let max_pitch = deg(zero(&s, "MaxPitchCommand"));
+        let pitch_gain = zero(&s, "PitchGain");
+        let min_feed_forward_speed = mph(zero(&s, "MinPitchRateFeedForwardSpeed"));
+        let min_feed_forward_scale = zero(&s, "MinPitchRateFeedForwardScale");
+        let max_feed_forward_speed = mph(zero(&s, "MaxPitchRateFeedForwardSpeed"));
+        let max_feed_forward_scale = zero(&s, "MaxPitchRateFeedForwardScale");
+        let min_rate = lanes(s.vector("MinRateCommand", ORIGIN));
+        let max_rate = lanes(s.vector("MaxRateCommand", ORIGIN));
+        let controller = Controller {
+            lateral_cyclic_gain: zero(&s, "LateralCyclicGain"),
+            longitudinal_cyclic_gain: zero(&s, "LongitudinalCyclicGain"),
+            pedal_gain: zero(&s, "PedalGain"),
+            max_altitude: zero(&s, "MaxAltitude"),
+            hold_delay: F(HOLD_DELAY),
+            collective_gain: zero(&s, "CollectiveGain"),
+            climb_rate: zero(&s, "ClimbRateGain"),
+            descent_rate: zero(&s, "DescentRateGain"),
+            altitude_hold_gain: zero(&s, "AltitudeHoldGain"),
+            integrator_gain: zero(&s, "CollectiveIntegratorGain"),
+            min_collective: zero(&s, "MinCollective"),
+            max_pitch,
+            max_roll,
+            pitch_gain,
+            roll_gain,
+            speed_command_rate,
+            min_speed_command,
+            max_speed_command,
+            speed_gain,
+            min_feed_forward_speed,
+            min_feed_forward_scale,
+            max_feed_forward_speed,
+            max_feed_forward_scale,
+            min_rate,
+            max_rate,
+        };
+
+        let wrecks = Wrecks::read(ini);
+        let s = ini.section("Wrecks");
+        let wreck_rotor = WreckRotor::new(s.float_or("WreckRotorRadius", F(WRECK_ROTOR_RADIUS)), zero(&s, "WreckRotorHeight"));
+
+        let s = ini.section("Animation");
+        Phy {
+            mass_properties,
+            rotor,
+            main_rotor,
+            tail_rotor,
+            aero,
+            aero_keys,
+            controller,
+            wrecks,
+            wreck_rotor,
+            pelvis_box_position: s.vector("PelvisBoxPosition", ORIGIN),
+            pelvis_box_size: s.vector("PelvisBoxSize", ORIGIN),
+        }
+    }
+
+    /// The crash state the file sets up: `MinWreckSpeed` and `WreckTime`, flying.
+    pub fn crash(&self) -> Crash {
+        Crash { min_wreck_speed: self.wrecks.min_wreck_speed, wreck_time: self.wrecks.wreck_time, ..Crash::default() }
+    }
+}
+
+/// The aerodynamics' wing setter's one piece of arithmetic: a file with no `Chord` but a positive
+/// `AspectRatio` gets the chord the span and the ratio make.
+pub fn wing_chord(chord: F, span: F, aspect_ratio: F) -> F {
+    if F::ZERO == chord && !(aspect_ratio <= F::ZERO) { span / aspect_ratio } else { chord }
+}
+
+/// One thrown blade: `helicopter\wreckblade.phy`'s `[PhysicsPart1]`, which the MX helicopter's reader
+/// reads into each of its four blades the same.
+pub fn wreck_blade(bytes: &[u8]) -> Part {
+    Part::read_bytes(bytes, "PhysicsPart1")
 }

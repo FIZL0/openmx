@@ -7203,6 +7203,46 @@ kiowa_input boot 0x0038d8e0 (heli a0, control table a1, pad a2, stick x f12, y f
 kiowa_mx_present_a boot 0x00391d50 (heli): the first of kiowa_measure_mx's presentation copies (S220a)
 kiowa_mx_present_b boot 0x00392010 (heli): the second
 kiowa_mx_present_c boot 0x00391f10 (heli): the third
+# S221 — the Kiowa's .phy reader and its wreck, research/journal/*-s221-kiowa-phy. Ported as
+# game_sim::kiowa::{Phy, WreckRotor, wing_chord, wreck_blade}; tests/kiowa_phy.rs proves every word
+# against S148's live helicopter. Every float getter is ini_float_default with 0 (WreckRotorRadius 1),
+# every quadword ini_quadword with the origin point (0,0,0,1).
+#   [Mass Properties] physics_part_read on heli+0x50. [Main Rotor] the three angles (x DEG),
+#   LiftCurveSlope, BladeChord, NumberOfBlades, Radius, AngularRate, Inertia (on the stack), Position to
+#   kiowa_main_rotor_set; MaxRotorMoment straight to rotor+0xc0; MinAltitude/MaxAltitude to
+#   kiowa_rotor_altitudes. [Tail Rotor] MaxPitchAngle (x DEG), LiftCurveSlope, BladeChord,
+#   NumberOfBlades, Radius, GearRatio, Inertia, Position to kiowa_tail_rotor_set (+0x54, +0x90..+0xa8,
+#   radius^2 +0xa0, position +0xb0). [Aerodynamics] Chord, Span, SurfaceArea, AspectRatio,
+#   DefaultAngleOfAttack (x DEG) to kiowa_wing_geometry (aero +0x34..+0x44); CLRoundOff +0x4c,
+#   CLDropOff +0x50, CLScale +0x54, CLAngleScale +0x58, CLalpha +0x48, CLq +0x5c, CD0 +0x60 .. CnrPedal
+#   +0xac in key order, LowSpeedDrag +0xf4, DragHighSpeed +0xf0 (x MPH), HighSpeedDrag +0xf8,
+#   LowSpeedAero +0xfc / HighSpeedAero +0x100 (x MPH); TurbulenceMagnitude (x MPH), TurbulenceTimeScale,
+#   TurbulenceTimeOffset, SteadyWind (vmulx.xyz by MPH, w kept) to kiowa_turbulence_set (+0xb0, +0xb4,
+#   +0xc0, +0xd0). [Flight Controller] MaxRollCommand +0x3a4 (x DEG), RollGain +0x3ac,
+#   SpeedCommandRate +0x3b4, Min/MaxSpeedCommand +0x3b8/+0x3bc (x MPH), SpeedGain +0x3c0,
+#   MaxPitchCommand +0x3a0 (x DEG), PitchGain +0x3a8, the feed-forward four +0x3c4..+0x3d0 (speeds
+#   x MPH), Min/MaxRateCommand +0x430/+0x440, Lateral/Longitudinal/PedalGain +0x368..+0x370,
+#   MaxAltitude +0x374, CollectiveGain +0x384, ClimbRateGain +0x388, DescentRateGain +0x38c,
+#   AltitudeHoldGain +0x390, CollectiveIntegratorGain +0x398, MinCollective +0x39c. The hold delay +0x380
+#   (2.0) is the ctor's. [Wrecks] WreckTime +0x3e8, MinWreckSpeed +0x3e0 (x MPH, after the rest),
+#   WreckGravity +0x3ec, WreckDamping +0x3f0, WreckInertia +0x400, as the plane's; WreckRotorRadius R
+#   and WreckRotorHeight H build the rotor's probe (heli+0x458) through 0x001eab40(probe, 8, rays, 0, 0):
+#   eight rays from (0,H,0,1) to (R,H,0), (-R,H,0), (0,H,R), (0,H,-R), then (x,z) = (+,+), (+,-), (-,+),
+#   (-,-) times 0.707R (0x3f34fdf4, not sqrt 0.5). The probe keeps them in its tree's order (pointer
+#   +0x170, 0x20 apart: from, to). Between, the body's inertia (body+0x110) is copied to heli+0x410
+#   and two vtable calls are made (body+0x100's vt +0x2c, the collision record's vt +0x74): not ported.
+#   The aero model's density +0x30 (0x3b1bc5c4) is its ctor's.
+#   MX: [Animation] PelvisBoxPosition +0xe60, PelvisBoxSize +0xe70; then "%sWreckBlade.phy" (+0xd44,
+#   formatted by the MX init) is opened and its [PhysicsPart1] read into each of the four blade parts
+#   +0xe48..+0xe54 (vt +0x38 slot +0xe8, physics_part_read on the part itself).
+kiowa_phy_read boot 0x0038cb70 (heli, reader): the base helicopter's .phy reader, vtable +0x194
+mxkiowa_phy_read boot 0x00391990 (heli, reader): kiowa_phy_read, [Animation], wreckblade.phy
+kiowa_main_rotor_set boot 0x00390060 (rotor in a0, position a1, 8 floats f12..f19, Inertia on the stack)
+kiowa_tail_rotor_set boot 0x003900b0 (rotor in a0, position a1, 7 floats f12..f18)
+kiowa_rotor_altitudes boot 0x003900f0 (rotor, MinAltitude f12, MaxAltitude f13) -> +0x30, +0x34
+kiowa_wing_geometry boot 0x0038f960 (aero, chord, span, area, ratio, aoa in f12..f16) -> +0x34..+0x44;
+#                                 a zero chord with a positive ratio becomes span / ratio
+kiowa_turbulence_set boot 0x0038f9d0 (aero, magnitude f12, time scale f13, offset a1, wind a2)
 # S149 — the car machines' .phy loader (MXCar.cpp), research/journal/*-s149-car-machines. All boot.
 # Ported as game_sim::car::Car::read; tests/car_phy.rs proves it word for word against the monster
 # truck parked in first_recording's RAM image (object 0x00e1e210, vtable word at +0x48 = 0x0045ed50,
