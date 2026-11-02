@@ -310,9 +310,9 @@ fn run_asleep<M: Machine>(
 }
 
 impl<M: Machine> Run<M> {
-    /// The ticks every machine in `who` has every seat's pads for.
+    /// The ticks every machine in `who` ran on every seat's own pads, re-runs done (K8).
     fn settled(&self, who: &[usize]) -> usize {
-        who.iter().map(|&i| self.nets[i].confirmed().max(0) as usize).min().unwrap()
+        who.iter().map(|&i| self.nets[i].settled().max(0) as usize).min().unwrap()
     }
 
     /// Every machine in `who` ran the same pads and had the same state before every settled tick
@@ -1290,7 +1290,7 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
             peers[2].net.send(Cmd::Join(short.clone(), vec![on("thq3", "race125p", 1), on("thq4", "race125p", 0)]));
             asked[1] = true;
         }
-        if joins == 2 && h.np.confirmed() > h.np.admit.joins[1].1 as i64 + AFTER as i64 && peers.iter().all(|p| p.riding.as_ref().is_some_and(|r| r.np.confirmed() > h.np.admit.joins[1].1 as i64 + AFTER as i64)) {
+        if joins == 2 && h.np.settled() > h.np.admit.joins[1].1 as i64 + AFTER as i64 && peers.iter().all(|p| p.riding.as_ref().is_some_and(|r| r.np.settled() > h.np.admit.joins[1].1 as i64 + AFTER as i64)) {
             break short;
         }
         if started.elapsed() > Duration::from_secs(150) {
@@ -1326,7 +1326,7 @@ fn a_freeride_opened_on_the_lan_takes_two_peers_mid_ride() {
     }
 
     // from each join on, the machines in the ride ran the same ticks
-    let settled = |nps: &[&net::Netplay<rides::State>]| nps.iter().map(|np| np.confirmed().max(0) as usize).min().unwrap();
+    let settled = |nps: &[&net::Netplay<rides::State>]| nps.iter().map(|np| np.settled().max(0) as usize).min().unwrap();
     for (who, from) in [(vec![h, g], t1), (vec![h, g, k], t2)] {
         let to = settled(&who);
         assert!(to > from + AFTER - 30, "{to} settled from {from}");
@@ -1650,7 +1650,7 @@ fn every_seat_rides_its_own_preset_over_peer_udp() {
         let presets: Vec<Option<usize>> = game.sims.iter().map(rides::preset).collect();
         assert_eq!(presets, [Some(3), Some(2), Some(1), Some(0)], "{}: every seat on its machine's preset", names[i]);
     }
-    let settled = nets.iter().map(|np| (np.confirmed().max(0) as usize).min(np.hashes.len())).min().unwrap();
+    let settled = nets.iter().map(|np| (np.settled().max(0) as usize).min(np.hashes.len())).min().unwrap();
     assert!(settled > 150, "{settled} ticks settled");
     for np in &nets[1..] {
         assert_eq!(np.hashes[..settled], nets[0].hashes[..settled], "{}: the state before every settled tick", np.me);
@@ -1874,7 +1874,7 @@ fn a_peer_that_joins_after_a_change_rides_the_changed_set() {
             assert_eq!(format!("{:?}", *sim.phy), format!("{want:?}"), "{}: every seat on half gravity", names[i]);
         }
     }
-    let settled = (h.confirmed().min(g.confirmed()).max(0)) as usize;
+    let settled = (h.settled().min(g.settled()).max(0)) as usize;
     assert!(settled > joined as usize + 300, "{settled} settled, joined at {joined}");
     for t in joined as usize..settled {
         assert_eq!((h.hashes[t], &h.log[t]), (g.hashes[t], &g.log[t]), "tick {t}, joined at {joined}");

@@ -734,9 +734,10 @@ impl Online {
     }
 
     /// How far the ride went, and a hash to hold up against the other machines': the state before
-    /// the last tick every machine has every pad for that is a multiple of ten seconds (300 ticks).
+    /// the last settled tick (run on every seat's own pads, re-runs done: K8) that is a multiple of
+    /// ten seconds (300 ticks).
     pub fn summary(&self) -> String {
-        let settled = self.net.confirmed().max(0) as usize;
+        let settled = self.net.settled().max(0) as usize;
         let at = settled / 300 * 300;
         let hash = match self.net.hashes.get(at) {
             Some(h) if at > 0 => format!(", state before tick {at} {h:#018x}"),
@@ -756,10 +757,10 @@ impl Online {
         Some((at, format!("online: settled {settled}, state before tick {at} {h:#018x}, {} desyncs", self.net.desyncs.len())))
     }
 
-    /// The hash of the state before each tick every machine has every pad for, from the first, and
-    /// how many desyncs were caught: what two machines' rides are held against each other by.
+    /// The hash of the state before each settled tick (run on every seat's own pads, re-runs done,
+    /// not just confirmed: K8), from the first, and how many desyncs were caught: what two machines' rides are held against each other by.
     pub fn settled(&self) -> (&[u64], usize) {
-        let n = (self.net.confirmed().max(0) as usize).min(self.net.hashes.len());
+        let n = (self.net.settled().max(0) as usize).min(self.net.hashes.len());
         (&self.net.hashes[..n], self.net.desyncs.len())
     }
 

@@ -201,7 +201,7 @@ fn peer_ride(marks: [Vec<u8>; 3], late: u32, rounds: u32) -> PeerRide {
 /// The ticks every machine has every pad for, after checking they all had the same state before
 /// each of them and ran the same pads.
 fn agree(nets: &[&Netplay<rides::State>], from: usize) -> usize {
-    let n = nets.iter().map(|np| (np.confirmed().max(0) as usize).min(np.hashes.len())).min().unwrap();
+    let n = nets.iter().map(|np| (np.settled().max(0) as usize).min(np.hashes.len())).min().unwrap();
     for np in &nets[1..] {
         let at = (from..n).find(|&t| np.hashes[t] != nets[0].hashes[t]);
         assert_eq!(at, None, "{}'s state differs from {}'s before tick {at:?}", np.me, nets[0].me);
