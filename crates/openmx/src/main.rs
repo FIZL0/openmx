@@ -5690,9 +5690,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // A world's views' own lights (P142), each off its own camera; empty on a disc map, whose views
     // all take `light`. `light` is the first view's.
     let mut lights: Vec<Lighting> = Vec::new();
-    // Which tile's sky and light each view of a world's ride shows under Per Map (MD9, P142),
-    // `Some(None)` while it shows the whole world's one; `None` before its first frame.
-    let mut shown_look: Vec<Option<Option<usize>>> = Vec::new();
+    // Which tile's sky and which tile's sun each view of a world's ride shows (MD9, P142, V116), the
+    // sky `None` while it shows the whole world's one; `None` before its first frame.
+    let mut shown_look: Vec<Option<(Option<usize>, Option<usize>)>> = Vec::new();
     // Each view's pair of skies bound for the crossfade (MD26), `Some(None)` while the whole world's
     // one is.
     let mut shown_skies: Vec<Option<Option<[usize; 2]>>> = Vec::new();
@@ -8405,19 +8405,23 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         // A world's sky and light (MD9): under Per Map the tile each view's camera is over sets its
         // own (P142), mixed across a join and its sky the larger share's; under Global the whole
-        // world's for every view.
+        // world's sky and fog for every view, but the sun and ambient still the map's below (V116).
         if let Some(wl) = &world_look {
             let views = cameras.len().min(world.seats.len());
             shown_look.resize(views, None);
             shown_skies.resize(views, None);
             lights.clear();
             for (v, camera) in cameras.iter().enumerate().take(views) {
-                let (lit, over) = match world_sky {
+                // `over` is the map whose sky and fog these are, `sun_of` the one whose sun.
+                let (lit, over, sun_of) = match world_sky {
                     menu::WorldSky::PerMap => match wl.looks.at(camera.eye.x, camera.eye.z) {
-                        Some((lit, over)) => (lit, Some(over)),
-                        None => (Lighting::of(&look), None),
+                        Some((lit, over)) => (lit, Some(over), Some(over)),
+                        None => (Lighting::of(&look), None, None),
                     },
-                    menu::WorldSky::Global => (Lighting::of(&look), None),
+                    menu::WorldSky::Global => match wl.looks.sunlit_at(camera.eye.x, camera.eye.z, Lighting::of(&look)) {
+                        Some((lit, sun_of)) => (lit, None, Some(sun_of)),
+                        None => (Lighting::of(&look), None, None),
+                    },
                 };
                 lights.push(lit);
                 // The skybox crossfades across a join (MD26): the two maps' skies bound while the eye
@@ -8435,11 +8439,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     }
                     r.set_view_sky_mix(v, skies.map_or(0.0, |(_, share)| share));
                 }
-                if shown_look[v] != Some(over) {
-                    shown_look[v] = Some(over);
+                if shown_look[v] != Some((over, sun_of)) {
+                    shown_look[v] = Some((over, sun_of));
                     let name = over.map_or("the whole world", |i| wl.names[i].as_str());
+                    let sun_name = sun_of.map_or("the whole world", |i| wl.names[i].as_str());
                     println!(
-                        "world sky: over {name} at {:.0},{:.0} in view {}: sun {:.3},{:.3},{:.3} ambient {:.3},{:.3},{:.3} fog {},{},{} {:.0}..{:.0}",
+                        "world sky: over {name} at {:.0},{:.0} in view {}: sun of {sun_name} {:.3},{:.3},{:.3} ambient {:.3},{:.3},{:.3} fog {},{},{} {:.0}..{:.0}",
                         camera.eye.x,
                         camera.eye.z,
                         v + 1,

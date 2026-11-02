@@ -2056,7 +2056,8 @@ impl Tricks {
 /// `--world-sky` spell it. A single track has one of each either way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WorldSky {
-    /// One for the whole world: the map the world mod names for its sky, else its first.
+    /// One for the whole world: the map the world mod names for its sky, else its first. The sun and
+    /// ambient are still the map's below (V116): each map's ground is baked by its own sun.
     #[default]
     Global,
     /// The map the camera is over sets them, mixed across a join.

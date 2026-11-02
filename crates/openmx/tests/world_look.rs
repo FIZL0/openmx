@@ -312,8 +312,8 @@ fn sky_line(said: &str) -> &str {
     said.lines().find(|l| l.starts_with("world sky: over")).unwrap_or_else(|| panic!("no `world sky: over` line:\n{said}"))
 }
 
-/// Global lights the whole world with the sky tile's light, even over `b`; Per Map gives `b`'s own
-/// over `b` and `a`'s own over `a`.
+/// Global keeps the sky tile's sky and fog over the whole world, even over `b`, but `b`'s own sun
+/// and ambient there (V116); Per Map gives `b`'s own over `b` and `a`'s own over `a`.
 #[test]
 fn global_keeps_one_sky_and_per_map_takes_the_tile_below() {
     let over_b = "1000,200,288,90,-30,60";
@@ -322,6 +322,7 @@ fn global_keeps_one_sky_and_per_map_takes_the_tile_below() {
     let line = sky_line(&global);
     assert!(line.contains("over the whole world"), "{line}");
     assert_eq!(fog_of(line), SPECS[0].fog, "{line}");
+    assert!(line.contains("sun of b ") && line.contains("ambient 0.157,0.157,0.275"), "b's sun and ambient under Global: {line}");
     let Some(per_map) = shell("per-map-b", &["--frames", "2", "--shot-pose", over_b, "--world-sky", "per-map"]) else { return };
     let line = sky_line(&per_map);
     assert!(line.contains("over b at 1000,288"), "{line}");
@@ -366,6 +367,33 @@ fn per_map_light_is_mixed_across_the_join() {
     assert_eq!(sky, 0, "a's sky while nearer a");
     let (_, sky) = looks.at(680.0, 288.0).unwrap();
     assert_eq!(sky, 1, "b's sky while nearer b");
+}
+
+/// Global's light (V116): the map's below for its sun and ambient, mixed across the join as Per
+/// Map's, and the whole world's fog everywhere.
+#[test]
+fn global_light_takes_the_maps_sun_and_the_worlds_fog() {
+    use game_render::scene::Looks;
+    use game_render::v3;
+    use game_render::world::Lighting;
+    let lit = |s: &Spec, sun| Lighting {
+        sun,
+        sun_color: s.sun.map(|c| f32::from(c) / 255.0),
+        ambient: s.ambient.map(|c| f32::from(c) / 255.0),
+        fog_color: s.fog,
+        fog_near: 100.0,
+        fog_far: 1000.0,
+    };
+    let (sa, sb) = (v3(0.6, -0.8, 0.0), v3(-0.6, -0.8, 0.0));
+    let looks = Looks { regions: paint().regions, lights: vec![lit(&SPECS[0], sa), lit(&SPECS[1], sb)] };
+    let whole = Lighting { fog_near: 300.0, fog_far: 700.0, ..lit(&SPECS[0], sa) };
+    let fogged = |l: Lighting| Lighting { fog_color: whole.fog_color, fog_near: 300.0, fog_far: 700.0, ..l };
+    assert_eq!(looks.sunlit_at(200.0, 288.0, whole), Some((fogged(lit(&SPECS[0], sa)), 0)));
+    assert_eq!(looks.sunlit_at(1000.0, 288.0, whole), Some((fogged(lit(&SPECS[1], sb)), 1)));
+    for x in [504.0, 560.0, 607.0, 680.0, 711.0] {
+        let (mixed, over) = looks.at(x, 288.0).unwrap();
+        assert_eq!(looks.sunlit_at(x, 288.0, whole), Some((fogged(mixed), over)), "at x {x}");
+    }
 }
 
 /// Per Map's skybox across the join (MD26): `a`'s alone at `a`'s edge, `b`'s alone at `b`'s, and
