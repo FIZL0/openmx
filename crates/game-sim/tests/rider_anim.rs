@@ -1909,6 +1909,82 @@ mod two_p_poses {
     /// [`Lag`](game_sim::vehicle_anim::Lag) and clock step from where the original's did and the pose
     /// is sampled off the original's eased values rather than the port's own run of them.
     pub fn run_with(cap: game_sim::replay::Capture, posed: bool, seed: bool) -> Option<Vec<Vec<Tick>>> {
+        run_seeded(cap, posed, Seeds { eased: seed, ..Seeds::default() })
+    }
+
+    /// Which of the original's layers a replay starts each tick from, beside its own (V109).
+    #[derive(Clone, Copy, Default)]
+    pub struct Seeds {
+        /// The two eased axes and the reverse clock, as the row before left them ([`run_with`]'s `seed`).
+        pub eased: bool,
+        /// The clip time the blend samples at: the motion object's last sample time of this row.
+        pub time: bool,
+        /// The snapshot a restart takes, read out of the original's transform nodes as the tick before
+        /// left them ([`node_trees`]), by rider and frame, in place of the port's own rewind.
+        pub nodes: Option<&'static std::collections::HashMap<(usize, u32), game_render::skin::Pose>>,
+    }
+
+    /// V109's capture of the same tape over frames 139950..140420 (`research/v109/snap.toml`): each
+    /// rider's 22 joint records with their transform nodes' local matrices (`jN.n0`..`n3`, the rows) and
+    /// the motion object's snapshot buffers (`sqN`, `stN`).
+    pub const SNAP: &str = "capture/v109/snap.csv";
+
+    /// [`SNAP`]'s rows as (column names, rows of text).
+    pub fn snap_rows() -> Option<(Vec<String>, Vec<Vec<String>>)> {
+        let kit = ps2_oracle::Kit::load().ok()?;
+        let local = kit.root.join("context").join(SNAP);
+        let path = if local.exists() { local } else { kit.ctx(SNAP) };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("SKIPPED: no {}", path.display());
+            return None;
+        };
+        let mut lines = text.lines();
+        let head: Vec<String> = lines.next()?.split(',').map(str::to_owned).collect();
+        Some((head, lines.map(|l| l.split(',').map(str::to_owned).collect()).collect()))
+    }
+
+    /// Each rider's transform-node tree per frame off [`SNAP`], as the pose a snapshot would copy: the
+    /// rotation through the port's own matrix-to-quaternion, the translation the matrix's last row with
+    /// 1 in `w`. Keyed by (rider index, frame).
+    pub fn node_trees() -> Option<&'static std::collections::HashMap<(usize, u32), game_render::skin::Pose>> {
+        static TREES: std::sync::OnceLock<Option<std::collections::HashMap<(usize, u32), game_render::skin::Pose>>> =
+            std::sync::OnceLock::new();
+        TREES
+            .get_or_init(|| {
+                let (head, rows) = snap_rows()?;
+                let at = |name: &str| head.iter().position(|h| h == name).unwrap_or_else(|| panic!("no {name}"));
+                let mut out = std::collections::HashMap::new();
+                for row in &rows {
+                    let frame: u32 = row[at("frame_counter")].parse().ok()?;
+                    for (k, p) in ["p1_", "p2_"].into_iter().enumerate() {
+                        let mut pose = game_render::skin::Pose::new(22);
+                        for j in 0..22 {
+                            let r = |n: usize| -> [f32; 4] {
+                                let g = |a: &str| row[at(&format!("{p}j{j}.n{n}.{a}"))].parse::<f32>().unwrap();
+                                [g("x"), g("y"), g("z"), g("w")]
+                            };
+                            let m = game_sim::math::Mat4([0, 1, 2, 3].map(|n| {
+                                let v = r(n);
+                                ps2_float::Vf::new(v[0], v[1], v[2], v[3])
+                            }));
+                            let q = game_sim::math::mat4_to_quat(&m);
+                            pose.rot[j] = [q.x(), q.y(), q.z(), q.w()];
+                            let t = r(3);
+                            pose.pos[j] = [t[0], t[1], t[2], 1.0];
+                        }
+                        pose.turned.fill(true);
+                        pose.moved.fill(true);
+                        out.insert((k, frame), pose);
+                    }
+                }
+                Some(out)
+            })
+            .as_ref()
+    }
+
+    /// [`run_with`] with any of the original's layers seeded ([`Seeds`]).
+    pub fn run_seeded(cap: game_sim::replay::Capture, posed: bool, seeds: Seeds) -> Option<Vec<Vec<Tick>>> {
+        let seed = seeds.eased;
         let mut drawn = drawn()?;
         let c = Col(&cap);
         // A capture the recorder dropped rows from (C11's) has no tape of its own: its pads are the
@@ -1985,6 +2061,18 @@ mod two_p_poses {
                 let lib = &drawn.pose_lib;
                 let (frame, clocked) =
                     body.frame_clocked(dt, &numbers, &mut rates, &mut r, &ask, lib, &mut pool, clock, true, &|id| drawn.timing(id));
+                if seeds.time {
+                    body.player.prev = F(f32::from_bits(c.word(row, &n("m_clock"), 0xc)));
+                }
+                let mut frame = frame;
+                let mut clocked = clocked;
+                let tree = seeds.nodes.and_then(|t| t.get(&(rider.lag(), c.u(row - 1, "frame_counter") as u32)));
+                if let (true, Some(tree)) = (frame.restart || clocked.snapshot, tree) {
+                    // the restart's snapshot, taken here off the original's nodes rather than by posed_by
+                    drawn.rig.set.under = tree.clone();
+                    frame.restart = false;
+                    clocked.snapshot = false;
+                }
                 let joints = posed.then(|| {
                     drawn.posed_by(frame, &body.player, clocked);
                     let pose = &drawn.rig.set.pose;
@@ -2453,4 +2541,71 @@ fn a_forward_lean_on_a_slow_climb_lifts_no_foot() {
     assert_eq!(lean(0.5), [true, true], "upright, leaning full forward");
     assert_eq!(lean(0.9), [true, false], "leaning right");
     assert_eq!(lean(0.1), [false, true], "leaning left");
+}
+
+
+/// **V109 — the 2p fades start from the riding ragdoll's nodes.** C11 left P1's reverse arms at 3/17
+/// (33) and 10/24 (34) joints within 1e-4, and air at 1550/2200, with the eased axes, the reverse
+/// clock and the ramp all the original's. Off the original's nodes the residue goes, so the layer
+/// that parts is the snapshot a restart's fade starts from:
+///
+/// - In V109's capture of the same tape (`context/capture/v109/snap.csv`, see `research/v109/`), the
+///   rotations each restart snapshots equal the local matrices of the joints' transform nodes as the
+///   tick before left them, to within float rounding, on all eight restarts of both riders. They are
+///   0.1–0.9 rad off the joint records' own blended pose (what the port snapshots), because the riding
+///   ragdoll writes its bones back into the nodes after the blend.
+/// - In the port's replay of C11's capture (eased axes and clip time off the original's), a restart
+///   whose snapshot is read off those nodes (via [`two_p_poses::node_trees`]) poses every fading tick
+///   whose ramp the port has bit for bit within 1e-4 (in fact ~1e-6), where the port's own snapshot
+///   leaves the same ticks up to ~0.75 rad out.
+#[test]
+fn the_2p_fades_start_from_the_ragdolls_nodes() {
+    use two_p_poses::Seeds;
+    let Some((head, rows)) = two_p_poses::snap_rows() else { return };
+    let Some(trees) = two_p_poses::node_trees() else { return };
+    let at = |name: &str| head.iter().position(|h| h == name).unwrap_or_else(|| panic!("no {name}"));
+    let f = |row: &[String], name: &str| row[at(name)].parse::<f32>().unwrap();
+    let mut restarts = [0usize; 2];
+    for (k, p) in ["p1_", "p2_"].into_iter().enumerate() {
+        for w in rows.windows(2) {
+            let (was, now) = (&w[0], &w[1]);
+            let snap = |row: &[String], j: usize| ["x", "y", "z", "w"].map(|a| f(row, &format!("{p}sq{j}.v.{a}")));
+            if (0..22).all(|j| snap(was, j) == snap(now, j)) {
+                continue;
+            }
+            restarts[k] += 1;
+            let frame: u32 = was[at("frame_counter")].parse().unwrap();
+            let tree = &trees[&(k, frame)];
+            for j in 0..22 {
+                let (q, n) = (snap(now, j), tree.rot[j]);
+                let len = |v: [f32; 4]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let dot = (0..4).map(|a| q[a] * n[a]).sum::<f32>().abs() / (len(q) * len(n));
+                assert!(dot > 1.0 - 1e-6, "P{} snapshot at {frame}+1, joint {j}: {q:?} vs the nodes' {n:?}", k + 1);
+            }
+        }
+    }
+    assert_eq!(restarts, [3, 5], "restarts in the capture, P1 then P2");
+
+    let run = |nodes| {
+        two_p_poses::eased(true).and_then(|cap| two_p_poses::run_seeded(cap, true, Seeds { eased: true, time: true, nodes }))
+    };
+    let (Some(own), Some(seeded)) = (run(None), run(Some(trees))) else { return };
+    let first = trees.keys().map(|k| k.1).min().unwrap();
+    let last = trees.keys().map(|k| k.1).max().unwrap();
+    let mut fading = [0usize; 2];
+    for (k, (own, seeded)) in own.iter().zip(&seeded).enumerate() {
+        let mut worst_own = 0f32;
+        for (o, s) in own.iter().zip(seeded) {
+            if !(first + 1..=last + 1).contains(&s.frame) || s.ramp.0 == 0 || s.ramp.0 != s.ramp.1 || s.theirs != s.ours {
+                continue;
+            }
+            fading[k] += 1;
+            let joints = s.joints.expect("posed");
+            assert!(joints <= 1e-4, "P{} at {} {:?}: {joints} off the nodes' snapshot", k + 1, s.frame, s.theirs);
+            worst_own = worst_own.max(o.joints.expect("posed"));
+        }
+        println!("P{}: {} fading ticks within 1e-4; the port's own snapshot is {worst_own} out", k + 1, fading[k]);
+        assert!(worst_own > 0.1, "P{}: the port's own snapshot should part on these ticks", k + 1);
+    }
+    assert_eq!(fading, [14, 50], "fading ticks with the ramp bit for bit, P1 then P2");
 }
