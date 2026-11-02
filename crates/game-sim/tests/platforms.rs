@@ -422,17 +422,17 @@ fn the_canonical_run_hashes_to_its_pinned_vectors() {
 
 /// `(tick, Sim::hash)` every 32 ticks of the riders' run.
 const RIDERS_HASHES: &[(u64, u64)] = &[
-    (32, 0x0d57c5fe94b5c4b0),
-    (64, 0x7c514d6fcfa2d2be),
-    (96, 0xea4cbe1582944617),
-    (128, 0xe0f135b0939a86ce),
-    (160, 0xf343f56bf85bf108),
-    (192, 0xda257fd9728f2acf),
-    (224, 0xeac892cb74301386),
-    (256, 0x8f951bc7ebbf1f77),
+    (32, 0x8dc24cc847ab02ff),
+    (64, 0xcdf5b4f9aa672e90),
+    (96, 0x0e39646d981a366a),
+    (128, 0x82f3e24dfbff68c0),
+    (160, 0xf7fdfb7228e65679),
+    (192, 0x5f042c94a273bd46),
+    (224, 0xec862574944b6a25),
+    (256, 0x31f971cb8c43301d),
 ];
 /// FNV-1a over every tick's hash of the run.
-const RIDERS_DIGEST: u64 = 0x1d4ac8eeb11bb86c;
+const RIDERS_DIGEST: u64 = 0x36369ee3e695dde3;
 /// FNV-1a over the session's `snapshot::encode` bytes at the end, and how many bytes they were.
 /// 13367 since S92: each rider's score card carries the event's two gates (two bytes, four riders).
 /// 13371 since S83: each ride's put-back search list, `None` until a world with props is asked (a
@@ -454,7 +454,9 @@ const RIDERS_DIGEST: u64 = 0x1d4ac8eeb11bb86c;
 /// or plants (one byte, four riders).
 /// 13619 since S234: each rider's card's flip-at-start switch and its two words (three bytes, four
 /// riders), all clear.
-const RIDERS_WIRE_DIGEST: u64 = 0x814fccb6a95896e9;
+/// The hashes and the bytes moved with S230 (K21), the length did not: a wreck zeroes both wheels'
+/// compression, which is hashed, and the riders' run wrecks.
+const RIDERS_WIRE_DIGEST: u64 = 0xb436922da956785f;
 const RIDERS_WIRE_LEN: usize = 13619;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,

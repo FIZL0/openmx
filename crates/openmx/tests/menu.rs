@@ -3967,7 +3967,7 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
 /// row of its own (the disc world's row rides it). P149's `free_all` is `world_mxu_free` now.
 #[test]
 fn the_pick_lists_the_disc_worlds_after_the_five_and_rides_them() {
-    assert_eq!(menu::DISC_WORLDS.iter().map(|w| w.0).collect::<Vec<_>>(), ["world_mxu_free", "world_mxu"]);
+    assert_eq!(menu::DISC_WORLDS.iter().map(|w| w.0).collect::<Vec<_>>(), ["world_mxu", "world_mxu_free", "world_mxu_nat"]);
     for (k, &(id, name)) in menu::DISC_WORLDS.iter().enumerate() {
         let (mut m, mut r) = fresh();
         tap(&mut m, &mut r, Control::Cross);
