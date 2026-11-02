@@ -367,6 +367,55 @@ impl Catalogue {
         BIKE_LOGOS.iter().find(|(l, ..)| l == logo).map(|&(_, maker, model)| (maker, model))
     }
 
+    /// A model as the Bike row names it (P258), the same over every paint of it: a paint's logo is its
+    /// team's, so naming the bike by the paint's own logo — `KTM 125 SX`, then `One Industries 125 SX`
+    /// one Paint step on — read as the step changing the bike. The logo its paints all share, else
+    /// its plain paint's (the archive with no livery), else its archive's name, `CR 125`.
+    pub fn model_name(&self, model: &str) -> String {
+        let paints = self.liveries(model);
+        let named = |b: &&Bike| self.bike_name(&b.archive);
+        let mut logos = paints.iter().filter_map(named);
+        let shared = logos.next().filter(|first| logos.all(|l| l == *first));
+        let plain = || paints.iter().find(|b| b.livery.is_empty()).and_then(named);
+        match shared.or_else(plain) {
+            Some((maker, name)) => format!("{maker} {name}").trim().to_string(),
+            None => {
+                let upper = model.to_ascii_uppercase();
+                match upper.find(|c: char| c.is_ascii_digit()).filter(|&i| i > 0) {
+                    Some(i) => format!("{} {}", &upper[..i], &upper[i..]),
+                    None => upper,
+                }
+            }
+        }
+    }
+
+    /// A paint as the Paint row names it (P213): its logo's maker, so that no two paints of one bike
+    /// read the same (P258) — with the logo's model too where another paint has that maker (`THQ FMX
+    /// 125` beside `THQ 125`), or the archive's livery where another has the whole logo (`Fast50s
+    /// 02`) —, its archive's livery where it has no logo, or `stock`.
+    pub fn paint_name(&self, archive: &str) -> String {
+        let Some(bike) = self.bike(archive) else { return "stock".into() };
+        match self.bike_name(&bike.archive) {
+            Some((maker, name)) => {
+                let others: Vec<_> = self
+                    .liveries(&bike.model)
+                    .into_iter()
+                    .filter(|b| b.archive != bike.archive)
+                    .filter_map(|b| self.bike_name(&b.archive))
+                    .collect();
+                if others.contains(&(maker, name)) {
+                    format!("{maker} {}", bike.livery.replace('_', " ")).trim().to_string()
+                } else if others.iter().any(|(m, _)| *m == maker) {
+                    format!("{maker} {name}").trim().to_string()
+                } else {
+                    maker.into()
+                }
+            }
+            None if !bike.livery.is_empty() => bike.livery.replace('_', " "),
+            None => "stock".into(),
+        }
+    }
+
     pub fn rider(&self, archive: &str) -> Option<&Rider> {
         self.riders.iter().find(|r| r.archive.eq_ignore_ascii_case(archive))
     }
@@ -1112,10 +1161,13 @@ impl Garage {
                 let models = c.models(bike.engine);
                 let at = models.iter().position(|m| *m == bike.model).unwrap_or(0);
                 let model = models[wrap(at, by, models.len())];
-                p.bike = c.liveries(model)[0].archive.clone();
+                // Its first paint in this class: a model's name is only its archives' first word.
+                if let Some(b) = c.liveries(model).into_iter().find(|b| b.engine == bike.engine) {
+                    p.bike = b.archive.clone();
+                }
             }
             Row::Livery => {
-                let paints = c.liveries(&bike.model);
+                let paints: Vec<&Bike> = c.liveries(&bike.model).into_iter().filter(|b| b.engine == bike.engine).collect();
                 let at = paints.iter().position(|b| b.archive == bike.archive).unwrap_or(0);
                 p.bike = paints[wrap(at, by, paints.len())].archive.clone();
             }
@@ -1242,17 +1294,10 @@ impl Garage {
         let rider = c.rider(&p.rider);
         match row {
             Row::Class => format!("{}cc", cc(p.set.engine)),
-            // The original's own names where its logos give one (P213): the bike its maker and
-            // model, the paint its maker.
-            Row::Model => match c.bike_name(&p.bike) {
-                Some((maker, model)) => format!("{maker} {model}").trim().to_string(),
-                None => bike.map_or(p.bike.clone(), |b| b.model.to_ascii_uppercase()),
-            },
-            Row::Livery => match (c.bike_name(&p.bike), bike) {
-                (Some((maker, _)), _) => maker.into(),
-                (None, Some(b)) if !b.livery.is_empty() => b.livery.replace('_', " "),
-                _ => "stock".into(),
-            },
+            // The original's own names where its logos give one (P213): the bike the same over its
+            // paints (P258), the paint its maker.
+            Row::Model => bike.map_or(p.bike.clone(), |b| c.model_name(&b.model)),
+            Row::Livery => c.paint_name(&p.bike),
             // The original's Driving Model's two (P213).
             Row::Tier => (if p.set.pro { "Pro Physics" } else { "Race Physics" }).into(),
             Row::Rider => rider.map_or(p.rider.clone(), |r| rider_label(&r.name)),
@@ -1360,6 +1405,22 @@ mod tests {
         }
         assert_eq!(g.row, 0, "the rows wrap");
         assert_eq!(c.fit(&g.pick), g.pick);
+    }
+
+    /// P258: a Paint step keeps the bike and what the Bike row calls it.
+    #[test]
+    fn a_paint_step_keeps_the_bike_and_its_name() {
+        let c = tiny();
+        let mut g = Garage::new(&c, &Pick { bike: "cr125_faisst".into(), ..Pick::default() });
+        g.row = ROWS.iter().position(|r| *r == Row::Livery).unwrap();
+        assert_eq!(g.value(&c, Row::Model), "CR 125");
+        for (bike, paint) in [("cr125_motoxxx", "motoxxx"), ("cr125_faisst", "faisst")] {
+            g.turn(&c, 1);
+            assert_eq!((g.pick.bike.as_str(), g.value(&c, Row::Livery).as_str()), (bike, paint));
+            assert_eq!(g.value(&c, Row::Model), "CR 125");
+        }
+        assert_eq!(c.model_name("125sx"), "125SX", "no digit after a letter: as it is");
+        assert_eq!(c.model_name("fast50"), "FAST 50");
     }
 
     #[test]

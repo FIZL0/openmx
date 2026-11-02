@@ -94,6 +94,90 @@ pub fn shell_us() -> u64 {
 /// A key going down (`true`) or up, by X keycode, and when on [`shell_us`]'s clock (P165).
 pub type KeyMoment = (u64, u8, bool);
 
+/// A poll this long after the one before is late (P258): a frame the menu stalled, which the
+/// changes it finds fell somewhere inside.
+pub const LATE_POLL_US: u64 = 100_000;
+/// How far apart a late poll's changes are put: past the menus' bounce (35 ms), so a tap stays one
+/// tap and two stay two.
+const LATE_STEP_US: u64 = 40_000;
+
+/// When the changes a poll finds happened, for a device that does not say (P258): the GPU window's
+/// keys (winit's events carry no time), the page's keys, and the browser's, the phone's and
+/// Windows' pads, read as snapshots. They are stamped when the poll sees them, which after a stalled
+/// frame is long after the hand made them: a push let go inside the stall then read as a hold as
+/// long as the stall, and repeated. So after a late poll ([`LATE_POLL_US`]) a let-go is put at the
+/// start of the gap — one step in, then a step apart — and a push still down at the end of the poll
+/// is put at the poll, its hold timed from when it was first seen: a hold read short, rather than a
+/// repeat nobody held for.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Arrivals {
+    /// The poll before this one, and this one.
+    since: Option<u64>,
+    polled: Option<u64>,
+    now: u64,
+}
+
+impl Arrivals {
+    /// A poll starting now, on [`shell_us`]'s clock.
+    pub fn poll(&mut self) {
+        self.poll_at(shell_us());
+    }
+
+    pub fn poll_at(&mut self, now: u64) {
+        self.since = self.polled.replace(now);
+        self.now = now;
+    }
+
+    /// The poll's time, or for a late one the start of its gap, `k` steps in (from 0).
+    fn early(&self, k: u64) -> u64 {
+        match self.since {
+            Some(since) if self.now.saturating_sub(since) > LATE_POLL_US => (since + (k + 1) * LATE_STEP_US).min(self.now),
+            _ => self.now,
+        }
+    }
+
+    /// When a snapshot's change happened: a control come back to rest ([`Arrivals`]'s let-go) early
+    /// in a late poll's gap, any other at the poll. The snapshot pads' (the browser's, the phone's,
+    /// Windows'), none of which this build may have.
+    #[allow(dead_code)]
+    pub fn at(&self, rest: bool) -> u64 {
+        if rest { self.early(0) } else { self.now }
+    }
+
+    /// A poll's key moments, each stamped as it arrived, put where [`Arrivals`] says: in a late poll
+    /// every one early, a step apart in their order, but a push that is its key's last. The phone
+    /// reads no keys.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
+    pub fn restamp(&self, moments: &mut [KeyMoment]) {
+        if self.early(0) == self.now {
+            return;
+        }
+        let mut k = 0;
+        for i in 0..moments.len() {
+            let (_, code, down) = moments[i];
+            let last = !moments[i + 1..].iter().any(|m| m.1 == code);
+            moments[i].0 = if down && last {
+                self.now
+            } else {
+                k += 1;
+                self.early(k - 1)
+            };
+        }
+        moments.sort_by_key(|m| m.0);
+    }
+}
+
+/// Whether a js device's event (`kind` 1 a button, 2 an axis) leaves its control at rest: a button
+/// up, a stick or the d-pad's hat near the middle, a trigger (axes 2 and 5) out (P258).
+#[allow(dead_code)]
+pub fn at_rest(kind: u8, number: u8, value: i16) -> bool {
+    match (kind & 0x7f, number) {
+        (0x01, _) => value == 0,
+        (_, 2 | 5) => value < 0,
+        _ => value.unsigned_abs() < 16_384,
+    }
+}
+
 /// Another clock's milliseconds put on the shell's ([`shell_us`], P165): the joystick interface's
 /// and the X server's stamps, whose zero is their own. A stamp is read at or after the moment it
 /// stands for, so the smallest gap yet between a stamp and the shell's clock when it was read is the

@@ -4938,6 +4938,70 @@ fn a_held_push_repeats_at_the_front_ends_rate() {
     assert_eq!(held_rows(30, 9), 1);
 }
 
+/// P258: one push let go inside a 600 ms frame — the Garage dressing a pick on the menu's thread —
+/// is one press. The GPU window's keys (winit's), the page's and the snapshot pads come with no time
+/// of their own and are stamped when the poll sees them, so the let-go read as a hold as long as
+/// the stall, and repeated: one push stepped the row twice. [`window::Arrivals`] puts a late poll's
+/// let-go back at the start of its gap, and a push still down at its end at the poll; a push held on
+/// through the stall still repeats.
+#[test]
+fn one_push_and_release_across_a_600_ms_read_is_one_press() {
+    const RIGHT: u8 = 114;
+    let right = Control::Right.mask();
+    // Each frame: when it polls, and the Right key's ups and downs that poll hands over.
+    let run = |frames: &[(u64, &[bool])], restamp: bool| -> usize {
+        let (mut r, mut arrivals, mut held, mut presses) = (Reader::new(), window::Arrivals::default(), false, 0);
+        for &(now, events) in frames {
+            arrivals.poll_at(now);
+            let mut moments: Vec<window::KeyMoment> = events.iter().map(|&down| (now, RIGHT, down)).collect();
+            if restamp {
+                arrivals.restamp(&mut moments);
+            }
+            let timed: Vec<menu::Moment> = moments
+                .iter()
+                .map(|&(t, _, down)| {
+                    held = down;
+                    (t, Report::from_buttons(if down { right } else { 0 }))
+                })
+                .collect();
+            let report = Report::from_buttons(if held { right } else { 0 });
+            let mut p = Some(r.read_timed(&[(report, 0, Some(&timed))], now));
+            while let Some(q) = p {
+                presses += usize::from(q.right);
+                p = r.more();
+            }
+        }
+        presses
+    };
+    let frame = 16_667;
+    let stall = 600_000;
+    let t = 1_000_000;
+    // Pushed on a frame, let go inside the 600 ms one that frame made.
+    let tap: &[(u64, &[bool])] = &[(t, &[]), (t + frame, &[true]), (t + frame + stall, &[false]), (t + 2 * frame + stall, &[]), (t + 3 * frame + stall, &[])];
+    assert!(run(tap, false) > 1, "stamped at the poll, the let-go is a 600 ms hold, which repeats");
+    assert_eq!(run(tap, true), 1);
+    // Pushed and let go both inside the stall: one press, not two and not none.
+    let inside: &[(u64, &[bool])] = &[(t, &[]), (t + frame, &[]), (t + frame + stall, &[true, false]), (t + 2 * frame + stall, &[])];
+    assert_eq!(run(inside, true), 1);
+    // Two taps inside it are two.
+    let two: &[(u64, &[bool])] = &[(t, &[]), (t + frame, &[]), (t + frame + stall, &[true, false, true, false]), (t + 2 * frame + stall, &[])];
+    assert_eq!(run(two, true), 2);
+    // Pushed inside the stall and still down after it: its hold starts at the poll, so no repeat
+    // there, and a short hold after it is still one press.
+    let late: &[(u64, &[bool])] = &[(t, &[]), (t + frame, &[]), (t + frame + stall, &[true]), (t + 2 * frame + stall, &[]), (t + 3 * frame + stall, &[false]), (t + 4 * frame + stall, &[])];
+    assert_eq!(run(late, true), 1);
+    // Held on through the stall and a second past it: a hold, which repeats as it always did.
+    let mut hold: Vec<(u64, &[bool])> = vec![(t, &[]), (t + frame, &[true])];
+    let mut now = t + frame + stall;
+    while now < t + frame + 1_600_000 {
+        hold.push((now, &[]));
+        now += frame;
+    }
+    hold.push((now, &[false]));
+    assert!(run(&hold, true) > 10, "a hold through a stall repeats");
+    assert_eq!(run(&hold, true), run(&hold, false), "a let-go after a short frame is where it was");
+}
+
 /// Two devices seeing the one push (P109) — 1P's pad and the keyboard a desktop maps its d-pad and
 /// buttons to, one a frame behind the other — are one press: one row, and a Start that opens the
 /// pause rather than opening and closing it.

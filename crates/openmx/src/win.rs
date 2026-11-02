@@ -121,6 +121,8 @@ pub struct PadNode {
     last: Option<Pad>,
     queue: VecDeque<[u8; 8]>,
     gone: bool,
+    /// The snapshots' times (P258).
+    arrivals: crate::window::Arrivals,
 }
 
 impl PadNode {
@@ -129,11 +131,12 @@ impl PadNode {
             .to_str()
             .and_then(|p| p.strip_prefix("gamepad/")?.parse().ok())
             .ok_or_else(|| std::io::Error::other("not a gamepad"))?;
-        Ok(PadNode { index, last: None, queue: Default::default(), gone: false })
+        Ok(PadNode { index, last: None, queue: Default::default(), gone: false, arrivals: Default::default() })
     }
 
     fn event(&mut self, kind: u8, number: u8, value: i16, init: bool) {
-        let ms = (crate::window::shell_us() / 1000) as u32;
+        // A snapshot's change, put where it was likelier made after a stalled frame (P258).
+        let ms = (self.arrivals.at(!init && crate::window::at_rest(kind, number, value)) / 1000) as u32;
         let mut e = [0u8; 8];
         e[..4].copy_from_slice(&ms.to_le_bytes());
         e[4..6].copy_from_slice(&value.to_le_bytes());
@@ -143,6 +146,7 @@ impl PadNode {
     }
 
     fn take(&mut self) {
+        self.arrivals.poll();
         let Some((_, _, now)) = snapshot().into_iter().find(|(i, _, _)| *i == self.index) else {
             self.gone = true;
             return;
