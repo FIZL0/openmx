@@ -3,9 +3,11 @@
 # Serve web/ over http on localhost, or https anywhere else: OPFS, where the page keeps its copy of
 # the user's disc, needs a secure context.
 #
-#   tools/web.sh                 # build, release
+#   tools/web.sh                 # build, release: the player build, on the native sim (P262)
+#   tools/web.sh --exact-sim     # the same on the PS2-arithmetic sim (the reference, as tools/build.sh --exact-sim)
 #   tools/web.sh --check         # build only, into the build directory's pkg/, and print where
-#                                # (what crates/openmx/tests/web.rs and tests/netplay/browser.rs run)
+#                                # (what crates/openmx/tests/web.rs and tests/netplay/browser.rs run): the exact sim,
+#                                # the gate's, as every other test build
 #
 # What it needs, and what it does about it (the same arrangement as crates/game-sim/tests/cross/platforms.sh,
 # whose scratch toolchain it shares):
@@ -34,7 +36,14 @@ scratch=${OPENMX_CROSS_DIR:-${TMPDIR:-/tmp}/openmx-cross}
 offline=${OPENMX_CROSS_OFFLINE:-0}
 target=wasm32-unknown-unknown
 check=0
-case ${1:-} in --check) check=1;; esac
+# P262: the page players load runs openmx's `native-sim` (tools/build.sh's player builds do); the tests' does not
+features="--features native-sim"
+case ${1:-} in
+    --check) check=1 features= ;;
+    --exact-sim) features= ;;
+    "") ;;
+    *) echo "usage: tools/web.sh [--check | --exact-sim]" >&2; exit 2 ;;
+esac
 
 host=$(rustc -vV | sed -n 's/^host: //p')
 version=$(rustc -vV | sed -n 's/^release: //p')
@@ -87,11 +96,13 @@ fi
 # Its own build directory, beside the native one: a different compiler's artifacts in the same
 # directory would rebuild both every time.
 out=${CARGO_TARGET_DIR:-$repo/target}/web
+# and the native build's its own again (P262), so it never swaps the pkg/ a test is serving for a native one
+[ -z "$features" ] || out=$out-native
 # --check's module is the tests' (a release build only for speed): stamped "dev" as their own desktop builds are
 # (crates/openmx/build.rs, P189), so the two meet online and a commit does not rebuild it.
 [ "$check" = 0 ] || export OPENMX_COMMIT=${OPENMX_COMMIT:-dev}
 RUSTC=$RUSTC CARGO_TARGET_DIR=$out "$CARGO" build -q --manifest-path "$repo/Cargo.toml" \
-    -p openmx --lib --release --target "$target"
+    -p openmx --lib --release --target "$target" $features
 wasm=$out/$target/release/openmx_web.wasm
 [ -f "$wasm" ] || { echo "web.sh: the build left no $wasm" >&2; exit 1; }
 

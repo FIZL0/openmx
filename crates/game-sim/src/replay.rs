@@ -1170,12 +1170,17 @@ pub struct PadTape {
     /// throughout, the original's, which is every tape before S161; a ride started with it on says so
     /// at frame 0.
     pub backwards_bail: Vec<(usize, bool)>,
+    /// P262: whether the ride was simulated on ps2-float's `native` arithmetic (the player builds' plain
+    /// f32) rather than the PS2's. A tape rides the same only on a build of the same sim: played on the
+    /// other it drifts, so the shell warns ([`PadTape::sim_warning`]). False for an exact ride, which is
+    /// every tape before P262 and every `.p2m2` (the original is the exact sim).
+    pub native_sim: bool,
 }
 
 impl PadTape {
     /// An empty recording, named.
     pub fn new(name: impl Into<String>) -> PadTape {
-        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new(), backwards_bail: Vec::new() }
+        PadTape { name: name.into(), frames: Vec::new(), modifiers: Default::default(), changes: Vec::new(), switches: Vec::new(), markers: Vec::new(), cleared: Vec::new(), air_wrecks: Vec::new(), backwards_bail: Vec::new(), native_sim: false }
     }
 
     /// The modifiers frame `k` rides on: the set the ride loaded with, as the changes before it left
@@ -1309,6 +1314,20 @@ impl PadTape {
         Ok(tape)
     }
 
+    /// The sim the tape was ridden on, as its `sim` line says it: `native` or `exact`.
+    pub fn sim(&self) -> &'static str {
+        if self.native_sim { "native" } else { "exact" }
+    }
+
+    /// P262: what to tell a player riding this tape on a build whose sim is `native` (this one's is
+    /// `ps2_float::NATIVE`) when the tape was ridden on the other, which it will not follow tick for tick.
+    pub fn sim_warning(&self, native: bool) -> Option<String> {
+        let build = if native { "native" } else { "exact" };
+        (self.native_sim != native).then(|| {
+            format!("warning: this tape was ridden on the {} sim and this build runs the {build} one: the ride will drift from it", self.sim())
+        })
+    }
+
     /// Read a pad tape file. The format, which is the fixture format's shape:
     ///
     /// ```text
@@ -1318,6 +1337,7 @@ impl PadTape {
     /// modifiers gravity=50 bike_speed.1=200   # P55's game modifiers, only on a modified ride
     /// modifiers_from 600 gravity=100            # P98: frames 600 on ride on these (empty: the original's)
     /// switch 900 biplane                        # P102: the first player is put on this before frame 900
+    /// sim native                                # P262: ridden on the native sim (no line: the exact one)
     /// frame 0x3d0699a3 0x0079fffb7f7f7f7f0000000000000000ff000000  # dt, pad 0, [pad 1]
     /// frame 0x3d0699a3 *0x0040 -                   # … or a bitmask, and "-" for no pad at all
     /// ```
@@ -1351,6 +1371,12 @@ impl PadTape {
                     None => return err(n, "format wants a version number"),
                 },
                 "tape" => tape.name = line["tape".len()..].trim().to_string(),
+                // P262: which sim the ride was simulated on.
+                "sim" => match word.next() {
+                    Some("native") => tape.native_sim = true,
+                    Some("exact") => tape.native_sim = false,
+                    _ => return err(n, "sim wants 'native' or 'exact'"),
+                },
                 // The game modifiers the ride was made with (P55), in their own text form.
                 "modifiers" => {
                     tape.modifiers = crate::modifiers::Mods::parse(&line["modifiers".len()..])
@@ -1461,6 +1487,10 @@ impl PadTape {
         let _ = writeln!(s, "format {FORMAT_VERSION}");
         if !self.name.is_empty() {
             let _ = writeln!(s, "tape {}", self.name);
+        }
+        // Only a native-sim ride says so (P262), so an exact build's tapes are the bytes they always were.
+        if self.native_sim {
+            let _ = writeln!(s, "sim native");
         }
         // Only a modified ride says so, so the original's tapes are the bytes they always were.
         if !self.modifiers.is_original() {
@@ -2262,7 +2292,8 @@ pub struct Recorder {
 impl Recorder {
     /// A recorder writing a tape under this name.
     pub fn new(name: impl Into<String>) -> Recorder {
-        Recorder { tape: PadTape::new(name) }
+        // on the sim this build runs (P262), so a tape says which it rides the same on
+        Recorder { tape: PadTape { native_sim: ps2_float::NATIVE, ..PadTape::new(name) } }
     }
 
     /// Write down the frame the simulation is in the middle of: the `dt` it was handed and the reports

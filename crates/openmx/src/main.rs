@@ -4975,6 +4975,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     false => format!(" of {}", tape.name),
                 }
             );
+            // P262: a tape of the other sim (native vs. exact) plays, but drifts from the ride it was
+            if let Some(warning) = tape.sim_warning(ps2_float::NATIVE) {
+                println!("{warning}");
+            }
             Some(Head::new(tape))
         }
     };

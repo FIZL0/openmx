@@ -56,7 +56,8 @@ jobs:
       # crates/openmx/src/update.rs): its main menu asks which commit the `beta` release is at
       - run: |
           export OPENMX_COMMIT=$(echo "$GITHUB_SHA" | cut -c1-7)
-          cargo build --locked --release -p openmx --bin openmx
+          # the player build's sim (P262: native), as tools/build.sh linux builds it
+          cargo build --locked --release -p openmx --bin openmx $(bash tools/build.sh features)
           mkdir -p dist/linux
           strip -o dist/linux/openmx target/release/openmx
           sed -n '/^extras() {/,/^}/p' tools/build.sh > extras.sh
@@ -129,10 +130,11 @@ jobs:
           fi
           # recreated each time so the tag moves to this commit; the download links stay the same
           gh release delete beta --cleanup-tag -y || true
-          printf '%s\n\n%s\n\n%s\n' \
+          printf '%s\n\n%s\n\n%s\n\n%s\n' \
             "**Beta: rebuilt on every change to main (${GITHUB_SHA::7}). Newer than the latest release, less tested.**" \
             "No game data is included: you need your own *MX Unleashed (USA)* (SLUS-20767) ISO. Linux: unpack, run \`./openmx your.iso\` (or drop the ISO on it) once, \`./openmx\` after. Windows: unzip, drop the ISO on \`openmx.exe\` once, start it after." \
-            "Beta in the browser: https://beta.openmx.dev/" > notes.md
+            "Beta in the browser: https://beta.openmx.dev/" \
+            "Every build here runs the **native sim** (the host's plain floats: faster, not bit-exact with the PS2; the menu's corner and \`--version\` say \"native sim\"). It plays online only with other native builds, and a tape recorded on an exact build warns when played." > notes.md
           ipa=
           if [ -f openmx-ios.ipa ]; then
             ipa=openmx-ios.ipa

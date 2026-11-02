@@ -2045,6 +2045,30 @@ fn a_tape_round_trips_as_a_file() {
     );
 }
 
+/// P262: a tape names the sim it was ridden on. An exact ride's file has no `sim` line (its bytes are
+/// what they always were, and every older tape reads as exact); a native one's says `sim native` and
+/// reads back so. The recorder stamps this build's, and riding a tape on the other sim warns.
+#[test]
+fn a_tape_names_its_sim_and_the_other_sim_warns() {
+    let mut exact = PadTape::new("exact");
+    exact.push(PadFrame::of_buttons(replay::CAPPED_DT, 0));
+    assert!(!exact.to_text().lines().any(|l| l.starts_with("sim ")), "an exact tape's file is as it was");
+    let mut native = exact.clone();
+    native.native_sim = true;
+    let text = native.to_text();
+    assert!(text.lines().any(|l| l == "sim native"));
+    assert_eq!(PadTape::parse(&text).expect("a native tape"), native);
+    assert!(!PadTape::parse("format 1\nsim exact\nframe 0.03333 *0\n").unwrap().native_sim);
+    assert!(PadTape::parse("format 1\nsim f32\n").is_err(), "an unknown sim is an error, not exact");
+
+    assert_eq!(exact.sim_warning(false), None);
+    assert_eq!(native.sim_warning(true), None);
+    assert!(exact.sim_warning(true).is_some_and(|w| w.contains("exact sim") && w.contains("native one")));
+    assert!(native.sim_warning(false).is_some_and(|w| w.contains("native sim") && w.contains("exact one")));
+
+    assert_eq!(replay::Recorder::new("live").tape.native_sim, ps2_float::NATIVE, "the recorder stamps this build's sim");
+}
+
 /// A tape as a human would type one: the mask form, the bytes form, `-` for an absent pad, and a `dt`
 /// written as a decimal.
 #[test]

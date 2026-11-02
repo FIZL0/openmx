@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 # Unsigned IPA of the shell for the user to sign (P200, as opentennis's M91): release build
 # (tools/ios-build.sh), stripped, in a Payload/openMX.app with Info.plist + the icon (P225, tools/icons.sh), zipped.
-# Usage: tools/ios-ipa.sh [OUT.ipa]  (default target/openmx-ios.ipa)
+# Usage: tools/ios-ipa.sh [OUT.ipa] [--exact-sim]  (default target/openmx-ios.ipa)
+# The app is a player build, so on the native sim (P262, as tools/build.sh's); --exact-sim builds the PS2-arithmetic one.
 # On the phone: the app's folder in the Files app ("On My iPhone → openMX") takes the ISO, settings.txt and mods/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-out=${1:-target/openmx-ios.ipa}
+features="--features native-sim" out=target/openmx-ios.ipa
+for a; do
+    case $a in
+        --exact-sim) features= ;;
+        *) out=$a ;;
+    esac
+done
 [[ $out == /* ]] || out=$PWD/$out  # not realpath -m: a Mac's has no -m (pages.yml's beta IPA)
 build=$(git rev-list --count HEAD)
 # the caller's commit stamp when it has one (tools/release.sh, pages.yml), so the online build id is every platform's
-OPENMX_BUILD=$build OPENMX_COMMIT=${OPENMX_COMMIT:-$(git rev-parse --short HEAD)} tools/ios-build.sh build --release -p openmx --bin openmx
+OPENMX_BUILD=$build OPENMX_COMMIT=${OPENMX_COMMIT:-$(git rev-parse --short HEAD)} tools/ios-build.sh build --release -p openmx --bin openmx $features
 target=${CARGO_TARGET_DIR:-$PWD/target/ios}/aarch64-apple-ios
 stage=$target/ipa
 app=$stage/Payload/openMX.app
