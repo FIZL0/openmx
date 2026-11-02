@@ -17,6 +17,10 @@ retest = "./kit check --rerun {names}"
 # test to fix: agent-runner files a critical K task to make it robust, unless an open task names it.
 flaky = '^\s*\(passed on a lone rerun \(load flakes, gate\.toml\): (.+)\)$'
 flaky_kind = "K"
+# main's GitHub Actions: every push there runs pages.yml (ci.yml inside it), and a red run sent an email and
+# nothing else (ci.yml was red on every push for two days to 11-02). agent-runner 0.7.3+ reads the newest
+# finished run while a run is up and files one critical B task for a red one, none again while it is open (K22).
+ci_watch = ["pages.yml"]
 # What a fix or repair session builds before it commits a merge: every test target, so a clash git merged
 # without a conflict (two sides adding one name) shows here and not in the gate after it. The gate reuses it.
 build = "cargo test -q --no-run --message-format=short"
