@@ -97,6 +97,12 @@ pub struct Handshake {
     pub tricks: String,
     #[serde(default)]
     pub tricks_hash: Option<u64>,
+    /// The room's handling (N21, [`Room::handling`]): the pack whose `mx_*.phy` the bikes ride, empty
+    /// for the original's handling, and this peer's hash of its own pack of that id ([`Disc::tricks`]).
+    #[serde(default)]
+    pub handling: String,
+    #[serde(default)]
+    pub handling_hash: Option<u64>,
 }
 
 /// The build: two builds can't be trusted to simulate alike. The crate's version and "dev" unless the shell stamps
@@ -131,6 +137,8 @@ impl Handshake {
             markers: String::new(),
             tricks: room.tricks.clone(),
             tricks_hash: if room.tricks.is_empty() { None } else { disc.tricks(&room.tricks) },
+            handling: room.handling.clone(),
+            handling_hash: if room.handling.is_empty() { None } else { disc.tricks(&room.handling) },
         }
     }
 
@@ -187,6 +195,14 @@ impl Handshake {
             let why = if self.tricks_hash.is_none() { "isn't in your mods folder" } else { "isn't the same in your mods folder as in the host's" };
             return Err(format!("Can't ride: the host's trick pack {} {why}.", host.tricks));
         }
+        let handling = |id: &str| if id.is_empty() { "the original's".to_string() } else { format!("MX vs. ATV's, from {id}") };
+        if self.handling != host.handling {
+            return differ("the handling", handling(&self.handling), handling(&host.handling));
+        }
+        if self.handling_hash != host.handling_hash {
+            let why = if self.handling_hash.is_none() { "isn't in your mods folder" } else { "isn't the same in your mods folder as in the host's" };
+            return Err(format!("Can't ride: the host's handling is MX vs. ATV's, and its pack {} {why}.", host.handling));
+        }
         if self.presets != host.presets {
             let n = (0..self.presets.len().max(host.presets.len())).find(|&n| self.presets.get(n) != host.presets.get(n)).unwrap_or(0);
             let said = |p: Option<&u8>| p.map_or("none".to_string(), |p| p.to_string());
@@ -217,6 +233,8 @@ mod tests {
             markers: String::new(),
             tricks: String::new(),
             tricks_hash: None,
+            handling: String::new(),
+            handling_hash: None,
         }
     }
 
@@ -242,6 +260,7 @@ mod tests {
         refused(Handshake { presets: vec![0, 3], ..h.clone() }, "rider 2's controller preset differs (host: 2, you: 3)");
         refused(Handshake { presets: vec![0], ..h.clone() }, "rider 2's controller preset differs (host: 2, you: none)");
         refused(Handshake { tricks: "mxvatv".into(), tricks_hash: Some(5), ..h.clone() }, "the trick pack differs (host: none, the original's tricks, you: mxvatv)");
+        refused(Handshake { handling: "mxvatv".into(), handling_hash: Some(5), ..h.clone() }, "the handling differs (host: the original's, you: MX vs. ATV's, from mxvatv)");
     }
 
     /// A disc whose mods folder holds one trick pack.
@@ -271,6 +290,32 @@ mod tests {
         assert!(e.contains("trick pack mxvatv isn't in your mods folder"), "{e}");
         let old: Room = serde_json::from_str(&serde_json::to_string(&Room::new("h", "free06", 2)).unwrap()).unwrap();
         assert_eq!(old.tricks, "", "a room from a build before MD19 rides the original's tricks");
+    }
+
+    /// N21: a room on MX vs. ATV's handling names the pack its bikes are read from, and every seat
+    /// needs the same files under it; the tricks and the handling are held apart.
+    #[test]
+    fn every_seat_rides_the_hosts_handling() {
+        let mut room = Room::new("h", "free06", 2);
+        room.take(crate::room::HOST, &[Pick::new("thq1", "race125p")]);
+        assert_eq!(Handshake::of(&room, &Pack("mxvatv", 1)).handling_hash, None, "the original's handling hashes nothing");
+        room.handling = "mxvatv".into();
+        let host = Handshake::of(&room, &Pack("mxvatv", 1));
+        assert_eq!((host.tricks_hash, host.handling_hash), (None, Some(1)), "the handling without the tricks");
+        assert_eq!(Handshake::of(&room, &Pack("mxvatv", 1)).check(&host), Ok(()), "the same pack rides");
+        let e = Handshake::of(&room, &Pack("mxvatv", 2)).check(&host).unwrap_err();
+        assert_eq!(e, "Can't ride: the host's handling is MX vs. ATV's, and its pack mxvatv isn't the same in your mods folder as in the host's.");
+        let e = Handshake::of(&room, &Names).check(&host).unwrap_err();
+        assert_eq!(e, "Can't ride: the host's handling is MX vs. ATV's, and its pack mxvatv isn't in your mods folder.");
+        let mut original = room.clone();
+        original.handling.clear();
+        let e = Handshake::of(&original, &Pack("mxvatv", 1)).check(&host).unwrap_err();
+        assert_eq!(e, "Can't ride: the handling differs (host: MX vs. ATV's, from mxvatv, you: the original's).");
+        let old: Room = serde_json::from_str(&serde_json::to_string(&Room::new("h", "free06", 2)).unwrap()).unwrap();
+        assert_eq!(old.handling, "", "a room from a build before N21 rides the original's handling");
+        let json = serde_json::to_string(&Handshake::of(&original, &Names)).unwrap();
+        let old: Handshake = serde_json::from_str(&json.replace(r#","handling":"","handling_hash":null"#, "")).unwrap();
+        assert_eq!(old, Handshake::of(&original, &Names), "a handshake from a build before N21 is the original's handling");
     }
 
     /// A machine whose mods folder holds one track mod, `md6_flat`, as `(name and version, hash)`.

@@ -17,7 +17,8 @@ const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. MX vs. ATV adds th
      backflip's pose. Online rides are always Original.";
 /// The Handling row's help (MD40).
 const HANDLING_HELP: &str = "Original is MX Unleashed's bikes. MX vs. ATV rides that game's own bike files from the trick pack in \
-     the mods folder, and its backflip, which only arms with R1 held as you pull back on the lip. Online rides are always Original.";
+     the mods folder, and its backflip, which only arms with R1 held as you pull back on the lip. A lobby you host rides \
+     yours, and only players with the same trick pack can join its ride.";
 /// The Air Wrecks row's help (P138).
 const AIR_WRECKS_HELP: &str = "Whether the bike's angle in the air throws the rider off: upside down, nosed over or rolled too far. \
      Off, you ride every jump out, and only the landing is judged. On is the original game.";

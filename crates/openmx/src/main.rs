@@ -1997,9 +1997,13 @@ struct Args {
     /// ride from the lobby is its room's ([`Args::room_tricks`]).
     tricks: Option<menu::Tricks>,
     /// `--handling original|mxvatv` (MD40): how the bikes handle. Unset, the front end's Handling row
-    /// says, and a ride outside it has the original's. `--online` and the lobby are always the
-    /// original's: no handshake holds the seats to it yet.
+    /// says, and a ride outside it has the original's. `--online` is always the original's; a ride
+    /// from the lobby is its room's ([`Args::room_handling`], N21).
     handling: Option<game_sim::handling::Handling>,
+    /// The pack whose `mx_*.phy` a lobby's ride rides on MX vs. ATV's handling (N21): this machine's
+    /// mods folder and the pack's id, as the room names it and the handshake held every seat to.
+    /// `None` outside the lobby and on the original's handling.
+    room_handling: Option<(std::path::PathBuf, String)>,
     /// The trick pack a lobby's ride rides (MD19): this machine's mods folder and the pack's id, as
     /// the room names it and the handshake held every seat to. `None` outside the lobby.
     room_tricks: Option<(std::path::PathBuf, String)>,
@@ -2662,8 +2666,10 @@ async fn front_end(args: Args) -> Result<(), String> {
                 // seat to the same files of, read from this machine's mods folder.
                 a.tricks = Some(if room.tricks.is_empty() { menu::Tricks::Original } else { menu::Tricks::MxVsAtv });
                 a.room_tricks = (!room.tricks.is_empty()).then(|| (shell.front.dir.join(track_mods::MODS_DIR), room.tricks.clone()));
-                // The original's handling (MD40): the room does not carry it, so the seats could not agree.
-                a.handling = Some(game_sim::handling::Handling::Original);
+                // The room's handling (N21), which the handshake held every seat to, read from this
+                // machine's mods folder.
+                a.handling = Some(if room.handling.is_empty() { game_sim::handling::Handling::Original } else { game_sim::handling::Handling::MxVsAtv });
+                a.room_handling = (!room.handling.is_empty()).then(|| (shell.front.dir.join(track_mods::MODS_DIR), room.handling.clone()));
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
@@ -5934,7 +5940,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
             let bytes = disc.phy(&first.pick.bike).ok_or(format!("the disc has no {} bike set", first.pick.bike))?;
-            let mut stock = Phy::read_bytes(&bytes, &tables.ride.curve);
+            // on the room's handling (N21), as the host's machine reads it
+            let handling_pack = args.room_handling.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
+            let mut stock = room_handling_phy(handling_pack.as_ref(), &first.pick.bike, &tables.ride.curve)
+                .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
             // the room's trick pack over it (MD19), as the host's machine has
             let pack = args.room_tricks.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
             lay_room_tricks(pack.as_ref(), &mut stock, &first.pick.bike);
@@ -5962,6 +5971,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let disc = &front.as_deref().expect("from the lobby").network.disc;
             // the room's trick pack (MD19), laid over every seat's bike as on every machine
             let pack = args.room_tricks.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
+            // and the room's handling (N21), every seat's bike read from its pack
+            let handling_pack = args.room_handling.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
             let mut sims = Vec::with_capacity(room.seats.len());
             // each seat's bike file before the modifiers, which a change of them mid-ride is built
             // on again (P100); an open seat rides this machine's first's
@@ -5973,7 +5984,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let bytes = disc.phy(&seat.pick.bike).ok_or(format!("the disc has no {} bike set", seat.pick.bike))?;
                     // The room's modifiers, a row a seat (P134): each seat's player's own, which
                     // the host gathered from the picks, the world's the host's.
-                    let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
+                    // on the room's handling (N21), then its trick pack, as on every machine
+                    let mut phy = room_handling_phy(handling_pack.as_ref(), &seat.pick.bike, &tables.ride.curve)
+                        .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
                     lay_room_tricks(pack.as_ref(), &mut phy, &seat.pick.bike);
                     *stock.last_mut().expect("pushed") = phy.clone();
                     mods.bike(i, &mut phy);
@@ -6740,6 +6753,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         // the trick pack this ride rides (MD19), which every joiner's machine lays
                         // (`ride_trick_pack`'s pick, which this ride was built on)
                         room.tricks = lobby::room_tricks(args.tricks.unwrap_or_default(), mods_dir(&args).as_deref());
+                        // and the handling it rides on (N21): the pack its bikes were read from
+                        // (`ride_handling_pack`'s pick), if any
+                        room.handling = lobby::room_handling(args.handling.unwrap_or_default(), mods_dir(&args).as_deref());
                         let mut pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
                         // the preset this seat rides on now (N13), which the room tells a joiner's machine
                         pick.preset = net::rides::preset(&world.seats[0].sim).unwrap_or(0) as u8;
@@ -9610,10 +9626,15 @@ fn ride_trick_pack(args: &Args) -> Result<Option<trick_packs::Pack>, String> {
 }
 
 /// The trick pack whose `mx_*.phy` the bikes ride on MX vs. ATV's handling (MD40): only with
-/// `--handling mxvatv` or the Handling row's MX vs. ATV, never on `--online` or from the lobby (which
-/// set the original's), and only when the mods folder has one; the line says why not. The tricks'
-/// pack if the ride has one already.
+/// `--handling mxvatv` or the Handling row's MX vs. ATV, never on `--online`, and only when the mods
+/// folder has one; the line says why not. The tricks' pack if the ride has one already. A lobby's
+/// ride rides its room's pack (N21) or the original's handling.
 fn ride_handling_pack(args: &Args, tricks: Option<&trick_packs::Pack>) -> Result<Option<trick_packs::Pack>, String> {
+    if let Some((dir, id)) = &args.room_handling {
+        let pack = trick_packs::by_id(dir, id).map_err(|e| format!("the room's handling: {e}"))?;
+        println!("handling: MX vs. ATV's, from the room's {}", pack.id);
+        return Ok(Some(pack));
+    }
     if args.handling != Some(game_sim::handling::Handling::MxVsAtv) {
         return Ok(None);
     }
@@ -9651,6 +9672,14 @@ fn handling_phy(pack: Option<&trick_packs::Pack>, member: &str, curve: &game_sim
             None
         }
     }
+}
+
+/// A lobby seat's bike on the room's handling (N21): `pack`'s file for the bike set `set`
+/// (`race125p`), read as on every machine; `None`, with the reason said, rides the disc's file.
+fn room_handling_phy(pack: Option<&trick_packs::Pack>, set: &str, curve: &game_sim::camera::CurveTable) -> Option<Phy> {
+    // A person's seat, so the P file the ride loads (`Set::ridden`), as `lay_room_tricks` reads it.
+    let set = roster::Set::from_player_word(set)?;
+    handling_phy(pack, &set.file(), curve, &format!("{}: ", set.word()))
 }
 
 /// Lay a lobby ride's trick pack (MD19) over a seat's bike file, read for the bike set `set`
@@ -10720,6 +10749,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         mod_store: None,
         tricks: None,
         handling: None,
+        room_handling: None,
         room_tricks: None,
         markers: None,
         where_only: false,
