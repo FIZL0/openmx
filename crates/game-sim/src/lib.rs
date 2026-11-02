@@ -338,6 +338,10 @@ impl Sim {
             // What the bikes' struck listeners kept is for their wreck tests, which only run when
             // they are stepped — not while a plane flies — and which never wreck on a plane's probe
             // ([`flight_search::struck_wreck`]), so it goes no further.
+            // The input slot runs before the frame, and the reset chord with it (S193: the shell's
+            // `Plane::step` ran it, this lane did not, so a replay waited out a wreck the original's
+            // L1+R1 had already put back).
+            plane.reset_chord(controls.respawn, &self.tables.ride.acos);
             let (_struck, seam) = plane.frame_seamed(dt, flight::pad(self.input.pad(0)), world, &self.tables.ride, &bikes);
             self.ticks += 1;
             return crate::rider::Frame { seam, ..crate::rider::Frame::default() };

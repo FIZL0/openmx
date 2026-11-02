@@ -2192,9 +2192,13 @@ fn l1_and_r1_put_the_biplane_back_on_the_press_frame() {
         let mut sim = the_minutes_bike();
         let mut garage = Garage::new(Kind::Biplane, Some(Plane::flying(spawn, flight))).unwrap();
         let mut world = Jump::nothing();
+        // The left stick's up-down byte: centred but for the climb.
+        let pitch = std::cell::Cell::new(Report::idle().0[7]);
         // One pass as the shell makes it: the seat's layout over the pad, the poll, the garage.
         let mut pass = |sim: &mut Sim, garage: &mut Garage, buttons: &[Control]| {
-            let report = scheme.ride(Report::from_buttons(game_sim::input::mask_of(buttons)));
+            let mut report = Report::from_buttons(game_sim::input::mask_of(buttons));
+            report.0[7] = pitch.get();
+            let report = scheme.ride(report);
             let controls = sim.poll(DT, &[report, Report::missing()]);
             let said = garage.step(sim, DT, &controls, &mut world);
             (said.respawned, garage.plane.clone().unwrap())
@@ -2239,7 +2243,10 @@ fn l1_and_r1_put_the_biplane_back_on_the_press_frame() {
         let (back, _) = pass(&mut sim, &mut garage, &[Control::L1, Control::R1]);
         assert!(!back, "{scheme:?}: the chord held put the plane back a second time");
 
-        // In the air: nothing.
+        // In the air: nothing. The climb holds the stick back: the first frame after the chord flies on
+        // the last measure, as the original's does (S193), and off the wheels' roll that leaves the
+        // pitch hold's integral where gas alone keeps the plane on its nose wheel.
+        pitch.set(0xff);
         let mut high = None;
         for _ in 0..40 * 60 {
             let (_, plane) = pass(&mut sim, &mut garage, &[gas]);
@@ -2249,6 +2256,7 @@ fn l1_and_r1_put_the_biplane_back_on_the_press_frame() {
             }
         }
         let high = high.unwrap_or_else(|| panic!("{scheme:?}: forty seconds of gas and the plane never climbed"));
+        pitch.set(Report::idle().0[7]);
         pass(&mut sim, &mut garage, &[gas, Control::L1]);
         let (back, plane) = pass(&mut sim, &mut garage, &[gas, Control::L1, Control::R1]);
         assert!(!back, "{scheme:?}: the chord put the plane back in the air");

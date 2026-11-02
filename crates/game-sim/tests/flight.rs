@@ -400,10 +400,17 @@ fn the_reset_chord_puts_the_flown_plane_back() {
     f.frame(dt, Pad::default(), &mut ground, &tables);
     assert!(!f.measure.grounded);
     let mut fresh = f.clone();
+    let last = f.measure;
     assert!(f.reset_chord(true, acos), "the chord in a wreck did nothing");
     fresh.reset(spawn.0, spawn.1, acos);
     assert_eq!(f.crash.reason, 0);
     assert_eq!((f.gravity, f.body.damping, f.body.ang_damping, f.body.inv_inertia), built, "the wreck given back");
+    // Nothing measures between the chord and the frame (S193): the wreck's measure stays, but for the
+    // matrix the reset writes, the spawn's orientation over the body's spot.
+    assert_eq!(f.measure.matrix.0[..3], fresh.measure.matrix.0[..3], "the matrix's orientation is not the spawn's");
+    assert_eq!(f.measure.matrix.0[3], put.0, "the matrix's origin is not the body's spot");
+    assert!(game_sim::biplane::Measure { matrix: last.matrix, ..f.measure } == last, "the chord measured the plane");
+    (f.measure, f.attitude, f.air) = (fresh.measure, fresh.attitude, fresh.air);
     assert!(f == fresh, "the chord's plane is not the reset's");
     let (_, at) = f.pose();
     assert_eq!((at.x(), at.z()), (spawn.0.x(), spawn.0.z()));

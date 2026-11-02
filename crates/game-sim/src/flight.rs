@@ -479,11 +479,24 @@ impl Flight {
     /// or R1 alone is the rudder. The original latches it once a frame because L1's and R1's press
     /// events are two calls; here they are one `respawn` a frame, so there is nothing to latch.
     /// Whether it put the plane back.
+    ///
+    /// Unlike the waited-out wreck's recovery, which the post listener's measure follows, nothing
+    /// measures the plane between the chord and the frame (S193, C7's chord at tick 775): the
+    /// original's reset writes only the measure's matrix, the spawn's orientation over the *body's*
+    /// spot rather than the model's origin, and the rest of the measure is the wreck's last. So the
+    /// first frame back flies on the wreck's speed, angles and Euler, and its tires probe a frame
+    /// lifted by the centre of gravity: they miss, and the plane falls a frame before they take it.
     pub fn reset_chord(&mut self, respawn: bool, acos: &AcosTable) -> bool {
         if !respawn || !(self.measure.grounded || self.crash.reason != 0) {
             return false;
         }
+        let last = self.measure;
         self.unwreck(acos);
+        let mut matrix = self.measure.matrix;
+        matrix.0[3] = self.spawn.0;
+        self.measure = Measure { matrix, ..last };
+        self.attitude = self.measure.attitude(self.attitude.flown, &self.body);
+        self.air = self.measure.air(&self.surfaces, &self.body);
         true
     }
 
@@ -724,7 +737,10 @@ impl Flight {
     /// crosses a seam as the bike does, and the rest of the crash test is the same.
     fn post(&mut self, dt: F, acos: &AcosTable, holed: bool, bare: bool, wrap: [bool; 2]) {
         let wheels = self.tires.map(|t| t.touching);
-        let (touchdown, true_speed) = self.measure.contacts(wheels, false);
+        // The aero model's true speed is on while a wheel is down or the collision record touched
+        // anything (S193: a wreck tumbling on its body rays has it on, which the chord's first frame
+        // back flies on).
+        let (touchdown, true_speed) = self.measure.contacts(wheels, self.record.touching);
         // The touchdown sound's pick (P146) draws one `rand()` even from its list of one, before the
         // crash test's: the plane's draws include it.
         if touchdown {
