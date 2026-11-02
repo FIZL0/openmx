@@ -7590,3 +7590,31 @@ car_contact_sort            boot 0x00397120 (car): the tires' contacts sorted; n
 #   (S95's 1p state's bikes were not checked for this).
 # The plane's 4 resolve substeps in 5074 leave P2's chassis velocity unchanged (spring path); P2's own
 #   first-substep resolve moves it. Every call bit-exact with the port's contact::resolve fed RAM's lists.
+# S229 — the car's collision object (car +0x170), journal research/journal/2026-11-02-s229-car-collision.
+# Ported as game_sim::car::{collision, Collision, Machine::step_struck, Machine::searches_terrain};
+# tests/car_drive.rs replays the s149b drives with it on free07's terrain, props and plants, the truck's
+# run into scenery (fc 720-727) included: every row bit-exact, row by row and carried.
+# The object is the rigid-body part's (crate::kiowa::Collision's class, vt 1). On S149a's switched images:
+#   +0x64 mass 232.919, +0x104 capacity 41 truck / 29 baja and buggy, +0x110 actors 8, +0x114 collides
+#   with 0xffffffff, +0x118 max depth 0.25, stiffness 13000, damping 819.63, restitution 0, friction
+#   0.5/0.5, cofg (0, 2.5, 0), +0x50 damp 0. Record: +0x30 terrain search 0, +0x34 search 1, +0x38 1,
+#   +0x3c sweep back 1, +0xb0 (0, 6, 0, 1), +0xc0 lead 2.0, +0xc4 push-out 4.0, +0xc8 facing -1.0,
+#   +0x10c the nearby search = car +0x16c (least 10, extra 30, capacity 128, no_groups 0).
+#   +0x1f0 ray probe (class 0x451a90, kind 2, category 0x10008, flags 0x12) with machine.res's
+#   MonsterTruck\col\monstertruckm.col (41 rays), Baja\col\bajam.col and Buggy\col\buggym.col (29);
+#   +0x1f4 the sweep probe; +0x1f8 the collidable, a mesh of category 0x52058 on all three cars.
+# Frame order: every record's search (vt +0x7c) before the world steps; the force listener 0x00397f40
+#   calls body_wrapper_force 0x0015af40 on car +0x50 first (gravity, the object's vt +0x80 with 1 —
+#   collision_record_resolve with impulses — then wrapper +0x1b0 = 0), then the car's own forces;
+#   car_measure 0x00398150 calls body_wrapper_post 0x0015b070 early (the nearby list refilled where the
+#   body stands). The car's touching is the record's +0x40, read live (aero 0x00397650, the wreck step).
+# car_measure ends (0x00398738..0x003987ac) with the terrain switch: ground_query 0x001dc960 at the
+#   body's +0x60 (centre of mass) on car +0x2b0's world, then mula/madda/madd of the car's up (+0x5a0)
+#   with the normal, c.ole.s against 0.707 (0x3f34fdf4): up.n <= 0.707 -> record +0x30 = 1 (the body
+#   rays search the terrain on the next frame), else 0. Then +0x2cc = record +0x40 && !+0x530.
+#   The truck needs it at fc 723: tipped past 45 deg off the struck prop, its body rays meet the terrain.
+# car_contact_sort 0x00397120 (above, still not ported — S229a): a second ray probe at car +0x558
+#   (4 vertical rays at the tires, y 7.312 down to 0.512, category 0, flags 0x92), searched through
+#   collide_against_search 0x0011a9d0 against car +0x16c; hits handed to tires by quadrant through
+#   0x0039af90 (tire +0x110, +0x120, +0x130, +0x1ac, +0x1b0, +0x1c8). Tire +0x1ac/+0x1b0 are never
+#   set in any s149b row (truck, baja, buggy), so nothing yet proves it.
