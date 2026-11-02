@@ -65,6 +65,16 @@ pub const ROCK: f64 = 3.0;
 /// changed stitcher builds them again. Not [`build::AUTHOR`], which mod.json carries as it was.
 pub const VERSION: u32 = 1;
 
+/// Where a tile is cut ([`Tile::trim_cut`]): its interior, and per side (x0, z0, x1, z1) whether it
+/// was cut at a ridge, the samples it was cut farther in past a rock face, and by the trim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cut {
+    pub keep: [u32; 4],
+    pub ridged: [bool; 4],
+    pub rock: [u32; 4],
+    pub trimmed: [u32; 4],
+}
+
 /// One track mod folder read for joining.
 pub struct Tile {
     /// The folder's name, which is the mod's id and the tile's name in the world.
@@ -333,6 +343,51 @@ impl Tile {
         let rock = self.past_rock(&self.terrain(), band);
         (0..4).for_each(|side| band[side] += rock[side]);
         ([g[0] + band[0], g[1] + band[1], g[2] - band[2], g[3] - band[3]], ridged)
+    }
+
+    /// The interior [`Tile::find_cut`] keeps, cut farther in by `trim` (P251, a world spec's `trim`):
+    /// each side not cut at a ridge goes in to `trim` feet past the outermost of the scene's placements
+    /// and its spawn on that side (never less than the berm cut), and then past a rock face as
+    /// [`Tile::find_cut`]'s does. MX Unleashed's nationals stand their whole track, every placement,
+    /// in a ~1000 ft square in the middle of ~5450 ft of ground: the ~2200 ft each side of it is empty
+    /// and nearly flat (Manassas Park: 132 to 145 ft all round), which in a world laid every two
+    /// tracks 5000 ft of nothing apart. Without `trim`, [`Tile::find_cut`] itself.
+    pub fn trim_cut(&self, trim: Option<f64>) -> Cut {
+        let g = self.ground;
+        let (mut band, ridged) = self.berm_cut();
+        let mut trimmed = [0u32; 4];
+        if let Some(margin) = trim {
+            let s = self.spacing;
+            let sp = self.spawn();
+            let mut bb = [sp[0], sp[2], sp[0], sp[2]];
+            for (_, q) in self.placements().unwrap_or_default() {
+                let (fx, fz) = (q[0] / s, q[2] / s);
+                // A placement off the ground, or in the berm band, is dropped whatever the trim.
+                let inside = fx >= f64::from(g[0] + band[0])
+                    && fx < f64::from(g[2] - band[2])
+                    && fz >= f64::from(g[1] + band[1])
+                    && fz < f64::from(g[3] - band[3]);
+                if inside {
+                    bb = [bb[0].min(q[0]), bb[1].min(q[2]), bb[2].max(q[0]), bb[3].max(q[2])];
+                }
+            }
+            let far = [
+                (bb[0] - margin) / s - f64::from(g[0]),
+                (bb[1] - margin) / s - f64::from(g[1]),
+                f64::from(g[2]) - (bb[2] + margin) / s,
+                f64::from(g[3]) - (bb[3] + margin) / s,
+            ];
+            for side in 0..4 {
+                let to = far[side].floor().max(0.0) as u32;
+                if !ridged[side] && to > band[side] {
+                    trimmed[side] = to - band[side];
+                    band[side] = to;
+                }
+            }
+        }
+        let rock = self.past_rock(&self.terrain(), band);
+        (0..4).for_each(|side| band[side] += rock[side]);
+        Cut { keep: [g[0] + band[0], g[1] + band[1], g[2] - band[2], g[3] - band[3]], ridged, rock, trimmed }
     }
 
     /// How many samples farther in than its berm (or ridge) [`Tile::find_cut`] cuts each side, past a

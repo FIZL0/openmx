@@ -8,8 +8,9 @@
 //!
 //! openmx-mods' worlds are looked for in `$OPENMX_WORLDS` (a mods folder), else in the main
 //! checkout's `mods/`; without them the comparison is skipped and says so. Without the disc it all
-//! skips. world_mxu (P253's WORLD, the freerides in its middle) and world_mxu_nat are built and
-//! ridden once each, a minute or so and some 400 MB apiece, removed after.
+//! skips. world_mxu (P253's WORLD, the freerides together, its maps close since P251) and
+//! world_mxu_nat are built and ridden once each, a minute or so and some 400 MB apiece, removed
+//! after.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -160,11 +161,17 @@ const FREE: [(&str, &str); 5] =
     [("mxu_free06", "Dallas"), ("mxu_free07", "Norfolk"), ("mxu_free09", "Bridgeport"), ("mxu_free10", "Rochester"), ("mxu_free11", "Cleveland")];
 
 /// P253: MX Unleashed: WORLD is every freeride and national map. All 27 are placed; the five
-/// freerides are in its middle, so the ride starts on one with the other four drawn around it, and
+/// freerides are one cluster, so the ride starts on one with the other four drawn around it, and
 /// the radar names all 27 maps. Its joins are no longer openmx-mods' world_mxu (that one has the
 /// freerides along an edge), so there is nothing to compare with.
+///
+/// P251: its maps sit close: every crossing the seams walk makes is at most 1,800 ft of join, or
+/// 2,900 ft over the wrap (a national's own ground before its interior is in that, MD61), where they
+/// were up to 20,020 ft. The world wraps both ways, so "in its middle" (P253's first test, every
+/// freeride clear of the outer rows) is any cluster; the unit layout puts the seam where the world
+/// is shortest, which can run between two freerides.
 #[test]
-fn world_mxu_has_every_freeride_and_national_with_the_freerides_in_its_middle() {
+fn world_mxu_has_every_freeride_and_national_with_the_freerides_together() {
     let Some((said, json, mods)) = first_ride("world_mxu") else { return };
     assert!(after(&said, "world: world_mxu ").starts_with("(MX Unleashed: WORLD), 27 tiles and "), "{said}");
     let tiles = placed(&json);
@@ -175,14 +182,32 @@ fn world_mxu_has_every_freeride_and_national_with_the_freerides_in_its_middle() 
     for n in 1..=22 {
         assert!(tiles.iter().any(|(t, _)| *t == format!("mxu_nat{n:02}")), "nat{n:02} not placed");
     }
-    // The freerides are in no outer row or column of the grid.
-    for a in 0..2 {
-        let lo = tiles.iter().map(|t| t.1[a]).fold(f64::MAX, f64::min);
-        let hi = tiles.iter().map(|t| t.1[a]).fold(0.0, f64::max);
-        for (t, at) in tiles.iter().filter(|t| t.0.starts_with("mxu_free")) {
-            assert!(at[a] > lo + 1000.0 && at[a] < hi - 1000.0, "{t} at {at:?} is on the world's edge ({lo}..{hi})");
-        }
+    // Each crossing: "world crossing: x A > B[ across the seam], N ft of join, ...".
+    let crossings: Vec<(&str, &str, bool, f64)> = said
+        .lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("world crossing: ")?.get(2..)?;
+            let (pair, rest) = rest.split_once(", ")?;
+            let (a, b) = pair.split_once(" > ")?;
+            let (b, seam) = b.strip_suffix(" across the seam").map_or((b, false), |b| (b, true));
+            Some((a, b, seam, rest.split(" ft").next()?.parse().ok()?))
+        })
+        .collect();
+    assert_eq!(crossings.len(), 2 * 27, "{said}");
+    for (a, b, seam, ft) in &crossings {
+        let most = if *seam { 2900.0 } else { 1800.0 };
+        assert!(*ft <= most, "{a} > {b}: {ft} ft of join (at most {most})");
     }
+    // The freerides are one cluster: each crosses straight to another, the five joined up.
+    let mut together = vec![FREE[0].0];
+    while let Some(next) = crossings.iter().find_map(|(a, b, ..)| match (together.contains(a), together.contains(b)) {
+        (true, false) if b.starts_with("mxu_free") => Some(*b),
+        (false, true) if a.starts_with("mxu_free") => Some(*a),
+        _ => None,
+    }) {
+        together.push(next);
+    }
+    assert_eq!(together.len(), 5, "the freerides are not one cluster: {together:?} of {crossings:?}");
     assert!(after(&said, "world spawn: ").starts_with("mxu_free"), "{said}");
     let radar = after(&said, "radar maps: ").strip_prefix("27: ").unwrap_or_else(|| panic!("not 27 maps:\n{said}"));
     for (name, town) in FREE {

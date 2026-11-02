@@ -121,6 +121,24 @@ fn key(spec: &str, maps: &[Map]) -> String {
     h.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
+/// World `id`'s tiles off `disc` as the stitcher reads them, and its spec's build parameters: what
+/// [`world`] builds from, for a test to lay out without building (P251).
+pub fn stitch_tiles(disc: &mut Disc, id: &str) -> Result<(Vec<stitch::Tile>, stitch::build::Params), String> {
+    let (_, spec) = SPECS.iter().find(|(w, _)| *w == id).ok_or_else(|| format!("{id}: not a disc world"))?;
+    let spec_json = Json::parse(spec).map_err(|e| format!("{id}.json: {e}"))?;
+    let params = stitch::build::Params::from_spec(&spec_json).map_err(|e| format!("{id}.json: {e}"))?;
+    let tiles = spec_json.get("tiles").and_then(Json::arr).unwrap_or_default();
+    let tiles = tiles
+        .iter()
+        .filter_map(Json::str)
+        .map(|t| {
+            let m = read_map(disc, t)?;
+            stitch::Tile::from_parts(&m.tile, meta(&m.tile), &m.scene_file, m.scene, &m.terrain_file, &m.terrain)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((tiles, params))
+}
+
 /// World `id` off `disc`, its joins built under `mods` the first time (`say` hears that it is
 /// building, which takes a while) and read from there after.
 pub fn world(disc: &mut Disc, mods: &Path, id: &str, say: &mut dyn FnMut(&str)) -> Result<WorldMod, String> {
@@ -224,5 +242,33 @@ mod tests {
         assert_eq!(home_track("world_mxu").as_deref(), Some("free06"));
         assert_eq!(home_track("world_mxu_free").as_deref(), Some("free06"));
         assert_eq!(home_track("world_mxu_nat").as_deref(), Some("nat01"));
+    }
+
+    /// P251: MX Unleashed: WORLD's maps sit close. Every side of every map faces another map's
+    /// interior across at most 1,800 ft of join (the widest was 20,020 ft, a row of empty cells, and
+    /// beside every national ~2,200 ft of its own empty ground besides), and at most 2,900 ft round the
+    /// wrap, where a national cannot start before its own trimmed ground does (MD61). Laying it out is
+    /// the build's coarse pass, not the build; without the disc it skips.
+    #[test]
+    fn world_mxus_widest_join_is_narrow() {
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc");
+            return;
+        };
+        let (tiles, p) = stitch_tiles(&mut disc, "world_mxu").unwrap();
+        let plan = stitch::build::layout(&tiles, &p).unwrap();
+        let joins = plan.join_widths(p.wrap.as_deref());
+        assert_eq!(joins.len(), 4 * 27);
+        for wrapped in [false, true] {
+            let w = joins.iter().filter(|j| j.wrapped == wrapped).max_by(|a, b| a.width.total_cmp(&b.width)).unwrap();
+            let over = if wrapped { "over the wrap" } else { "inside" };
+            eprintln!("world_mxu: widest join {over} {:.0} ft, {} side {}", w.width, tiles[w.tile].id, w.side);
+        }
+        for j in &joins {
+            let name = |t: usize| tiles[t].id.as_str();
+            let to = j.to.unwrap_or_else(|| panic!("{} faces no map on side {}", name(j.tile), j.side));
+            let most = if j.wrapped { 2900.0 } else { 1800.0 };
+            assert!(j.width <= most, "{} side {} to {}: {:.0} ft of join (at most {most})", name(j.tile), j.side, name(to), j.width);
+        }
     }
 }
