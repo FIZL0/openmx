@@ -589,10 +589,10 @@ impl Rider {
 
     /// **The riding ragdoll's tick** (S110), at the end of the rider's (S90): its request off the ride
     /// and [`Rider::holds`], its skeleton [`Rider::skeleton`] as the shell last drew it, hung under the
-    /// bike as it stood at the top of the tick (`before`), and the body machine's clip-table switch and
-    /// clip as they were then. Only while the rider is up and has a kit and holds; started afresh
+    /// bike as it stood at the top of the tick (`before`), and the vehicle animation's clip-table words
+    /// (`table`: `from_table`, `holding`) and clip as they were then. Only while the rider is up and has a kit and holds; started afresh
     /// when there is none yet or the bike has gone where the bones did not ([`Riding::strayed`]).
-    fn riding_tick(&mut self, before: &crate::math::Mat4, posed: bool, clip: i32, dt: F, world: &mut dyn World) {
+    fn riding_tick(&mut self, before: &crate::math::Mat4, table: (bool, bool), clip: i32, dt: F, world: &mut dyn World) {
         let up = self.state.wreck.is_none() && self.crash.is_none() && self.ragdoll.is_none();
         let (Some(kit), Some(holds), true) = (self.ragdoll_kit.clone(), self.holds.clone(), up) else {
             self.riding = None;
@@ -600,7 +600,7 @@ impl Rider {
         };
         let at = self.ride.position();
         let mut riding = self.riding.take().filter(|r| !r.strayed(at)).unwrap_or_else(|| Box::new(Riding::new(&kit)));
-        riding.ride(&kit, self, &holds, before, posed, clip, dt, world);
+        riding.ride(&kit, self, &holds, before, table, clip, dt, world);
         self.riding = Some(riding);
     }
 
@@ -670,8 +670,10 @@ impl Rider {
                         rivals: &[ride::Rival], bump: Option<&mut crate::rider_contact::Bump>) -> Frame {
         let mut out = Frame::default();
         // 0a — what the riding ragdoll's tick at the end reads off the top of this one (S90): the
-        // bike's transform before it moves, and the body machine's two words before it steps.
-        let riding_from = (self.ride.transform(), self.body.machine.mode == crate::rider_anim::Mode::Posed, self.body.veh.state);
+        // bike's transform before it moves, and the vehicle animation's clip-table words and clip as
+        // its last step left them (S257: not the machine's mode, which read them a step earlier).
+        let veh = &self.body.veh;
+        let riding_from = (self.ride.transform(), (veh.from_table, veh.holding), veh.state);
         let Rider {
             ride, tricks, state, motion, packed_pose, packed_fore_aft, set, clips, sense, racing, wreckage, crash, animation,
             flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, riding, wreck_sounds, wreck_kit, wreck_clocks, idles, ghost, edge_armed, page,
@@ -1274,9 +1276,9 @@ impl Rider {
         // tick (S90), so the shell draws the bodies this tick left under the bike it left, and a
         // wreck entered next tick starts from them.
         // A tick that put the bike back starts a fresh body off the skeleton where the bike now is.
-        let (before, posed, clip) = riding_from;
+        let (before, table, clip) = riding_from;
         let before = if out.respawned { self.ride.transform() } else { before };
-        self.riding_tick(&before, posed, clip, dt, world);
+        self.riding_tick(&before, table, clip, dt, world);
         out
     }
 

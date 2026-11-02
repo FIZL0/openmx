@@ -2730,6 +2730,14 @@ pin_vtable boot 0x00451df0 the pin's table (at pin +0x10); +0x10 = 0x001f7750 wr
 #   (+0x684, which the body mode sets for a backflip before it tests). recording2: placed == !Posed on
 #   1499 of 1499 riding ticks (+0x2a4 = 1, +0x2a8 = 0, +0x2b0 = 1), 368 of them Posed: every gesture,
 #   no-hander and backflip is drawn as its clip wrote it, nothing held.
+# S257 -- tricks under the riding body (journal 2026-11-02-s257-trick-ragdoll-transitions; tests/trick_ragdoll.rs,
+#   game-render tests/body.rs). recording2 played back, 2374..4073: mode 3 the tick after +0x680 rises (still
+#   mode 1, placed, on the rise tick; a backflip's holding via request +0xfc the same tick), mode 1 the tick
+#   after it drops (+0x8f0 to 35 or 30, ramp +0x68c 0.892). Exit E: rider_body_ride_enter's moving
+#   rider_ragdoll_pose puts each start +0x30 at the node E-1 left, +0x40 = (node - part +0x90)/dt, and
+#   part +0x90 = the node of the tick before on every posed tick (its writer not found). Ramp per tick:
+#   into a gesture 0.1333, out to 30 0.1333, backflip in / out to 35 0.1083, into the wreck (40) 0.0083.
+#   Bailed: 3522..3562 posed, 3563 mode 2 straight from 3 (from_table 0 the same tick).
 throw_force boot 0x001f2e00 (listener) the throw's force listener: on (+0): the force *(+0xc) (the
 #                           actor's +0x6e0; +0x10 inline when null) to the body +0x24 if enabled, else
 #                           to every enabled body of the group +0x20 (null here). Table 0x00451ec0,

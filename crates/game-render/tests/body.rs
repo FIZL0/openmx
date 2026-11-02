@@ -1073,3 +1073,77 @@ fn a_frame_of_the_shells_own_ride_draws_the_bike_where_the_solver_put_it() {
 /// wheel is drawn a little behind where a vertical slide would put it and meets a sloped ground a
 /// little lower. Half an inch covers it on the flat and the rake is what is left.
 const ON_THE_GROUND: f32 = AN_INCH;
+
+/// **S257.** The riding ragdoll lets go of the bones for a gesture, and takes them back, on the
+/// original's tick: the original's body actor reads the vehicle animation's `from_table` and `holding`
+/// as that animation's last step left them (journal 2026-11-02-s257-trick-ragdoll-transitions), so
+/// the riding tick at the top of frame `k + 1` is posed, and unplaced, exactly when frame `k`'s body
+/// left either word set. The body's machine read the same words a step before it wrote them, and a
+/// ragdoll fed its mode instead lets go a frame late and is back a frame late.
+#[test]
+fn a_gesture_unplaces_the_riding_ragdoll_on_the_originals_tick() {
+    let Some(mut disc) = disc() else { return };
+    let bike = member(&disc, &format!("{A_BIKE}.res")).expect("the disc has no bike archive");
+    let chassis = disc.res(&bike).and_then(|r| r.read_suffix("bike.psg")).expect("the chassis");
+    let chassis = Skeleton::of(&Model::parse(&chassis).expect("the chassis parses"));
+    let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = anchors_of(&chassis, &[]) else { panic!("the chassis lacks a hold") };
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let mut body = body(&mut disc, &set, &p);
+    let res = rider_res(&mut disc);
+    let rider_file = res.read_suffix("anim\\mrider.phy").expect("mrider.phy");
+    let model = Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model")).expect("the model parses");
+    let doll = body.ragdoll_rig(&model, &rider_file).expect("every part names a node");
+    let kit = std::sync::Arc::new(game_sim::ragdoll_ride::Kit::new(&rider_file, doll.rig.clone()));
+
+    let (slot, stunt) = shortest_stunt(&set);
+    let gesture = gesture_for(slot);
+    let mounts = (p.front.body_tire_force_position, p.rear.body_tire_force_position);
+    let mut r = rider::Rider::new(&p, mounts, Vf::new(0.0, DROP, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), set.clone());
+    r.sense.wrecks_enabled = false;
+    r.body_rates = game_render::vehicle::params();
+    r.ragdoll_kit = Some(kit);
+    // The holds in the chassis' model frame, its root left at the bike's: where they are does not
+    // move the tick the body lets go on.
+    let pt = |a: game_render::mat::V3| Vf::new(a.x, a.y, a.z, 1.0);
+    r.holds = Some(std::sync::Arc::new(game_sim::ragdoll_riding::Holds {
+        root: game_sim::math::Mat4([Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(0.0, 0.0, 0.0, 1.0)]),
+        hands: [pt(hand_l), pt(hand_r)],
+        feet: [pt(foot_l), pt(foot_r)],
+    }));
+    let mut world = Flat::default();
+
+    let (mut words, mut started, mut posed, mut let_go, mut taken_back) = (None::<bool>, false, 0usize, 0usize, 0usize);
+    let mut was_placed = false;
+    for k in 0..600 {
+        let hands = if k == 10 {
+            Controls { gas: F::ONE, trick: buttons_for(gesture.0), dpad: dpad_for(gesture.1), ..Controls::default() }
+        } else {
+            Controls { gas: F::ONE, ..Controls::default() }
+        };
+        let said = r.frame(&p, &tables, &hands, FRAME, &mut world);
+        started |= said.started == Some(Trick(slot as u8));
+        if let (Some(rd), Some(table)) = (&r.riding, words) {
+            let mode = rd.actor.mode;
+            if matches!(mode, Mode::Riding | Mode::Posed) && !r.ride.air.flip_torque_applied {
+                assert_eq!(mode == Mode::Posed, table, "frame {k}: the riding tick's mode against last frame's clip-table words");
+                assert_eq!(rd.placed(), !table, "frame {k}: placed against last frame's clip-table words");
+                posed += usize::from(table);
+                let_go += usize::from(was_placed && !rd.placed());
+                taken_back += usize::from(!was_placed && rd.placed() && posed > 0);
+            }
+            was_placed = rd.placed();
+        }
+        body.ride(FRAME, &mut r, &hands, rider::Gate::default());
+        r.skeleton = Some(std::sync::Arc::new(body.ragdoll_posed(&doll)));
+        words = Some(r.body.veh.from_table || r.body.veh.holding);
+        if started && !r.tricks.in_progress && taken_back > 0 {
+            break;
+        }
+    }
+    println!("{:?}: {posed} ticks posed, let go {let_go} time(s), taken back {taken_back}", stunt.name);
+    assert!(started, "the gesture never started {:?}", stunt.name);
+    assert!(posed > 5, "the riding ragdoll was hardly posed ({posed} ticks)");
+    assert!(let_go >= 1 && taken_back >= 1, "the ragdoll was never let go of and taken back ({let_go}, {taken_back})");
+}

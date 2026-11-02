@@ -70,7 +70,8 @@ pub struct Riding {
     pub actor: Actor,
     pub(crate) drawn: Option<Vec<Mat4>>,
     /// The bodies' nodes' drawn matrices before the last step (S110): what the wreck entry measures
-    /// the bones' move and turn from. `None` until a placed body has been stepped.
+    /// the bones' move and turn from. `None` until a placed body has been stepped. After a posed tick
+    /// they are the clip's drawn before it (S257), which the riding entry out of a trick moves from.
     pub(crate) was: Option<Vec<Mat4>>,
     pub(crate) rng: Rng,
 }
@@ -162,11 +163,17 @@ impl Riding {
         let skeleton = Skeleton { points, rests, main_rest: rests[MAIN] };
         self.actor.clip = clip;
         let was = self.history(kit);
-        // A held tick's drawn matrices are the nodes it left (below): the bones the entry reads.
-        let entry = (self.actor.mode == Mode::Held)
+        // A posed tick keeps the drawn matrices from before it (S257): out of a trick the entry
+        // measures the bones' move from them.
+        let clip_was = (self.actor.mode == Mode::Posed).then(|| self.drawn.clone()).flatten();
+        let was = was.or(clip_was);
+        // A held or posed tick's drawn matrices are the nodes it left (below): the bones the entry reads.
+        let entry = matches!(self.actor.mode, Mode::Held | Mode::Posed)
             .then(|| self.drawn.as_ref().map(|d| d.iter().map(|m| Bone { at: m.0[3], forward: m.0[2], up: m.0[1] }).collect()))
             .flatten();
-        let mut pose = Pose { kit, now: &now, held: after.as_deref().unwrap_or(&now), entry, before: self.drawn.as_deref() };
+        let before = if self.actor.mode == Mode::Posed { self.was.as_deref() } else { self.drawn.as_deref() };
+        let still_first = self.actor.mode == Mode::Held;
+        let mut pose = Pose { kit, now: &now, held: after.as_deref().unwrap_or(&now), entry, before, still_first };
         let tail = self.actor.tick(
             dt,
             r,
@@ -184,21 +191,22 @@ impl Riding {
 
     /// **One tick on a rider** (S110), run after the rider's own update as the original's body actor is
     /// (S90): the request off the ride as this tick left it and `holds` (carried by the ride's
-    /// transform, as the shell carried the drawn chassis' grips), the clip-table switch `posed` and the
-    /// clip `clip` as the body's machine had them before this tick (the original's animation runs
+    /// transform, as the shell carried the drawn chassis' grips), the vehicle animation's `from_table`
+    /// and `holding` (`table`, [`Riding::off_the_table`]) and the clip `clip` as they stood before this
+    /// tick (the original's animation runs
     /// after the body reads them), then the step with the skeleton the shell last posed, hung under
     /// `before` — the bike's transform before this tick moved it — for the spring to pull to, and
     /// under the moved bike for a held body's repose (S201). The spring's target trails the moved bike
     /// by the tick's travel, as the original's does: that trail is most of how far the riding body hangs
     /// back off the clip at speed.
     #[allow(clippy::too_many_arguments)]
-    pub fn ride(&mut self, kit: &Kit, rider: &crate::rider::Rider, holds: &Holds, before: &Mat4, posed: bool, clip: i32, dt: F, world: &mut dyn World) -> Tail {
+    pub fn ride(&mut self, kit: &Kit, rider: &crate::rider::Rider, holds: &Holds, before: &Mat4, table: (bool, bool), clip: i32, dt: F, world: &mut dyn World) -> Tail {
         let m = rider.ride.transform();
         let world_of = |p: Vf| math::transform_point(&m, p);
         let frame = math::mul(&holds.root, &m);
         let under = math::mul(&holds.root, before);
         let r = request(&rider.ride, rider.packed_pose, frame, holds.hands.map(world_of), holds.feet.map(world_of), kit.bike);
-        self.posed_off_the_table(posed);
+        self.off_the_table(table.0, table.1);
         let skeleton = rider.skeleton.as_deref();
         self.step_under(kit, skeleton, &under, skeleton, &r, clip, dt, world)
     }
@@ -249,6 +257,15 @@ impl Riding {
     pub fn posed_off_the_table(&mut self, posed: bool) {
         self.actor.posed = posed;
         self.actor.latched = false;
+    }
+
+    /// **The two words themselves** (S257): `from_table` and `holding` as the vehicle animation left
+    /// them at the end of last tick, which is what the original's body actor reads. The body's machine
+    /// chose its mode off the same words one step earlier, so a body fed that mode lets go of the bones
+    /// a tick after the original's does and takes them back a tick late.
+    pub fn off_the_table(&mut self, from_table: bool, holding: bool) {
+        self.actor.posed = from_table;
+        self.actor.latched = holding;
     }
 
     /// The bones have been placed and stepped: [`Riding::nodes`] is the rider.
@@ -385,6 +402,11 @@ impl Sources {
 /// original's `a1`, which stills the pose: S110), and still with no last frame. A repose puts the
 /// bones where `held` has them: the skeleton once the bike has moved (S201).
 ///
+/// The riding entry out of a trick (S257) reads `entry` too: the clip's nodes as the last posed tick
+/// drew them, each moving by its node's move over that tick (`before`, the drawn matrices from the
+/// tick before it, which the original's part records keep at the node all through a posed run).
+/// That is how the original starts its bones on recording2's five trick exits.
+///
 /// The riding entry after a put-back (S201) reads `entry` instead: the nodes as the last held tick
 /// left them, since the entry poses before this tick's animation moves them. Its drawn matrices are
 /// the ones that tick's repose wrote, which stand at each body's centre of mass, not at its node: so
@@ -395,6 +417,8 @@ struct Pose<'a> {
     held: &'a [Bone],
     entry: Option<Vec<Bone>>,
     before: Option<&'a [Mat4]>,
+    /// The entry is out of a put-back: the last held tick's repose runs still first.
+    still_first: bool,
 }
 
 impl Outside for Pose<'_> {
@@ -410,7 +434,7 @@ impl Outside for Pose<'_> {
         }
         let entry = self.entry.as_deref().filter(|_| !carried);
         let bones = if carried { self.held } else { entry.unwrap_or(self.now) };
-        if entry.is_some() {
+        if entry.is_some() && self.still_first {
             // The last held tick's repose, still: the drawn matrices it left.
             ragdoll_pose::pose_all(
                 bones.iter().zip(&self.kit.rig.parts).zip(drawn.iter_mut().zip(starts.iter_mut())).map(|((b, p), (d, s))| (b, p.cofg, d, s)),
