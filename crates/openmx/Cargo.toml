@@ -106,10 +106,13 @@ web-time = "1"
 # `src/main.rs` waits on its few futures with it on both builds (P196).
 pollster = "1"
 
-# F15's concept build (`tools/build.sh linux --native-sim`): the simulation on the host's plain f32
-# instead of the PS2's arithmetic (ps2-float's `native`), about twice as fast on a Steam Deck and no
-# longer the original bit for bit. Off by default. The menu's corner, `--version` and the first line
-# printed say so, and the online build id carries it, so a native build refuses an exact peer.
+# F15's native sim: the simulation on the host's plain f32 instead of the PS2's arithmetic (ps2-float's
+# `native`), about twice as fast on a Steam Deck and no longer the original bit for bit. The player
+# builds turn it on (P262: tools/build.sh, tools/web.sh, tools/ios-ipa.sh, so the release, the beta and
+# the Deck); `--exact-sim` there leaves it off. Off by default here, and it must stay so: plain `cargo
+# run` and the ./kit check gate are the exact sim (tests/player_build.rs). The menu's corner, `--version`
+# and the first line printed say so, the online build id carries it, so a native build refuses an exact
+# peer, and its tapes say `sim native`.
 [features]
 native-sim = ["ps2-float/native"]
 

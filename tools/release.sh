@@ -1,7 +1,7 @@
 #!/bin/bash
 # tools/release.sh VERSION [notes.md] [publish] — a full release (v1.0.0, "openMX 1.0.0"), as opentennis's tools/release.sh:
 # set the workspace's version to VERSION (a "Release vVERSION" commit if it changes), build every platform tools/build.sh
-# builds (Linux, Windows) and the website (tools/web.sh), sign SHA256SUMS with the minisign key
+# builds (Linux, Windows) and the website (tools/web.sh), every one on the native sim (P262; the notes say so), sign SHA256SUMS with the minisign key
 # (~/.config/openmx/release.key, asks its password unless ~/.config/openmx/release.pass holds it) and upload to GitHub:
 #   openmx-linux-x86_64.tar.gz   what players download: openmx and README.txt. ./openmx "disc.iso" (or drop the .iso on
 #                                it) the first time, ./openmx after: it remembers the disc, and keeps settings, controls and
@@ -102,6 +102,11 @@ body=$out/notes.md
     echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, run \`./openmx your.iso\` (or drop the ISO on it) once; \`./openmx\` after. For Steam (with artwork): run \`add-to-steam.sh\` |"
     echo "| **iPhone** / **iPad** (iOS 15+) | [add the source in one tap](https://openmx.dev/ios.html) | Easiest: add the source in one tap (Feather, AltStore, SideStore), or add \`https://fizl0.github.io/apps/source.json\` under Sources by hand; install openMX from it and updates arrive there. Then put your ISO in Files → On My iPhone → openMX. Touch controls or a controller. Signing it yourself instead: [\`openmx-ios.ipa\`](https://github.com/$repo/releases/download/$tag/openmx-ios.ipa) (unsigned; Sideloadly, AltStore…) |"
     echo "| **Browser** | [openmx.dev](https://openmx.dev/) | Nothing to install |"
+    echo
+    # P262: which sim the downloads run (tools/build.sh, tools/web.sh and tools/ios-ipa.sh build the player builds native)
+    echo "Every download above runs the **native sim**: the original's physics on your machine's plain floats, faster"
+    echo "than the PS2's arithmetic and not bit-for-bit with it. The menu's corner and \`--version\` say \"native sim\";"
+    echo "online, it meets every other native build of $version. (The exact, PS2-arithmetic build is \`tools/build.sh --exact-sim\`.)"
     echo
     echo "## What you need"
     echo

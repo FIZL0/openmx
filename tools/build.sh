@@ -1,14 +1,18 @@
 #!/bin/bash
-# tools/build.sh [linux|windows|all] [--native-sim] — the optimised builds players download, into dist/ (as opentennis's tools/build.sh):
+# tools/build.sh [linux|windows|all|features] [--exact-sim] — the optimised builds players download, into dist/ (as opentennis's tools/build.sh):
 #   dist/linux/         openmx, openmx.png (the icon, for a launcher or Steam shortcut), README.txt: unpack,
 #                       ./openmx "your disc.iso" (or drop the .iso on it) the first time, ./openmx after that;
 #                       settings, controls and mods/ in ~/.local/share/openmx (P190)
 #   dist/windows/       openmx.exe (P192), its icon built in: drop the .iso on it the first time; settings, controls
 #                       and mods\ in %APPDATA%\openmx. Cross-compiled with MinGW, once (Arch):
 #                         sudo pacman -S mingw-w64-gcc && rustup target add x86_64-pc-windows-gnu
-# --native-sim (F15, after the target): the concept build, the simulation on the host's plain f32 rather than the
-# PS2's arithmetic (openmx's `native-sim` feature) — faster, not bit-exact, online only with other native builds.
-# It says "native sim" in the menu's corner, in --version and in the first line it prints.
+# The sim (P262): player builds run the native sim, the simulation on the host's plain f32 rather than the PS2's
+# arithmetic (openmx's `native-sim` feature, F15) — about twice as fast on a Steam Deck, not bit-exact, online only
+# with other native builds. It says "native sim" in the menu's corner, in --version and in the first line it prints,
+# and its tapes say `sim native`. --exact-sim (after the target) builds the PS2-arithmetic reference instead, the sim
+# plain `cargo run -p openmx` and the ./kit check gate run (native-sim is not a default feature, and must not be).
+# `tools/build.sh features [--exact-sim]` prints the cargo arguments that choice makes, for the Actions jobs and
+# crates/openmx/tests/player_build.rs. (--native-sim, F15's flag, is still taken: it is the default now.)
 # No game data goes into dist/. OPENMX_COMMIT / OPENMX_VERSION in the environment are passed into the build
 # (tools/release.sh and the Actions jobs set them).
 #
@@ -19,12 +23,13 @@
 set -e
 cd "$(dirname "$0")/.."
 what=${1:-linux}
-features=
+features="--features native-sim"
 case $2 in
-    --native-sim) features="--features native-sim" ;;
-    "") ;;
-    *) echo "usage: tools/build.sh [linux|windows|all] [--native-sim]" >&2; exit 2 ;;
+    --exact-sim) features= ;;
+    --native-sim|"") ;;
+    *) echo "usage: tools/build.sh [linux|windows|all|features] [--exact-sim]" >&2; exit 2 ;;
 esac
+[ "$what" != features ] || { echo "$features"; exit 0; }
 
 sdk=registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest
 
@@ -101,5 +106,5 @@ case $what in
     linux) linux ;;
     windows) windows ;;
     all) linux; windows ;;
-    *) echo "usage: tools/build.sh [linux|windows|all] [--native-sim]" >&2; exit 2 ;;
+    *) echo "usage: tools/build.sh [linux|windows|all|features] [--exact-sim]" >&2; exit 2 ;;
 esac
