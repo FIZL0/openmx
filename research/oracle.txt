@@ -7034,6 +7034,31 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 #   Pause "Switch To Machine": 0x0028ff30 lists world+0x90's undriven machines when unlocked or the
 #   cheat flag read32(0x004e2778)+0x5c is set; 0x0028fcf0 swaps through 0x00210b90.
 kiowa_flight_controller boot 0x0038dbc0 (self, dt in f12): the pad into cyclic, pedal and collective
+# S220 — the Kiowa's per-tick flight, research/journal/*-s220-kiowa-rotor. Ported as game_sim::kiowa
+# (euler_quat, Rotor, Aero, Kiowa::{force, preforce}); tests/kiowa.rs proves each on S148's state.
+# Corrects S148 above: +0x1a4 0x0038e2b0 is the preforce (once a frame: 0x0015b050, then vt +0x19c =
+#   MX 0x0038dbb0, empty) and +0x1a8 0x0038e300 the force listener (every substep); the aero's +0x100
+#   is HighSpeedAero (LowSpeedAero is +0xfc).
+# Rotor model (heli+0x450): +0x38/+0x3c/+0x40/+0x44 pointers to the lat/long cyclic, collective, pedal
+#   outputs; +0x30/+0x34 Min/MaxAltitude (no step reads them, PC's neither); +0x48 MaxLateralCyclic,
+#   +0x4c MaxLongitudinalCyclic, +0x50 MaxCollective, +0x54 tail MaxPitchAngle (radians); +0x58
+#   LiftCurveSlope, +0x5c BladeChord, +0x60 NumberOfBlades, +0x64 Radius, +0x68 Radius^2, +0x6c
+#   AngularRate, +0x70 Inertia, +0x80 Position; tail +0x90..+0xb0 (unread); +0xc0 MaxRotorMoment;
+#   state +0xd0 collective pitch, +0xd4 tail pitch, +0xe0/+0xe4/+0xe8 tilt Euler (long, -, lat),
+#   +0xf0 heli, +0xf4 body, +0x100 thrust (0,T,0,1), +0x110 tilted thrust.
+# Aero model (heli+0x454): +0x104/+0x108/+0x10c -> heli+0x470 speed, +0x474 alpha, +0x478 beta;
+#   +0x110/+0x114/+0x118 -> pad +0x340/+0x344/+0x348; +0x11c -> body rates; +0x120 heli, +0x124 body;
+#   +0x30 density, +0x34 Chord, +0x38 Span, +0x3c SurfaceArea, +0x48 CLalpha, +0x60 CD0, +0x68 CYbeta,
+#   +0x74 Clbeta, +0x78 Clp, +0x80 Clda, +0x84 CM0, +0x88 CMalpha, +0x8c CMq, +0x90 CMde, +0x94 Cnbeta,
+#   +0x9c Cnr, +0xa0 Cndr, +0xf4 LowSpeedDrag, +0xfc LowSpeedAero, +0x100 HighSpeedAero; out +0x128
+#   fade, +0x12c lift, +0x130 drag, +0x134 side, +0x138 roll, +0x13c pitch, +0x140 yaw.
+kiowa_rotor_step boot 0x00390100 (rotor, dt in f12): blade pitches and tilt from the outputs, thrust,
+#                                 body vt +0x58 force, vt +0x5c moment (w = stack garbage)
+kiowa_aero_step boot 0x0038fa00 (aero, dt in f12): coefficients, body vt +0x58 force, vt +0x5c moment
+euler_to_quat boot 0x0013f410 (out, angles*): half angles through wrap and the curve table, xyz order
+kiowa_forces boot 0x0038e300 (heli, h in f12): unless +0x3d4, vt +0x1a0; 0x0015af40(heli+0x50, h);
+#                                 unless +0x3d4, rotor then aero
+kiowa_preforce boot 0x0038e2b0 (heli, dt in f12): 0x0015b050(heli+0x50), vt +0x19c
 # S149 — the car machines' .phy loader (MXCar.cpp), research/journal/*-s149-car-machines. All boot.
 # Ported as game_sim::car::Car::read; tests/car_phy.rs proves it word for word against the monster
 # truck parked in first_recording's RAM image (object 0x00e1e210, vtable word at +0x48 = 0x0045ed50,
