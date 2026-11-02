@@ -22,10 +22,13 @@
 //!   four wheels, with [`wheel_contacts`] spreading the frame's contacts onto the four.
 //! - [`air_state`], the PostProcess: the bike's contact step on four wheels, without its no-hander.
 //!
+//! And the quad's once-a-frame [`update`] (MD64a): the bike's vehicle update, then the quad's own
+//! tail on four wheels (hazard surfaces, rumble, the wheelie and stoppie clocks, the ride stats).
+//!
 //! What they call of SLUS-21104's bike steps (engine, preload, backflip, air drag, airborne control,
 //! the wheels' suspension, tire forces and integration, the input limiter, the gearbox and clutch) is
-//! not ported here: each is a [`Call`] handed to a [`Moto`], in the original's order. The update tail,
-//! the tire `.phy` reader, the wreck, put-back and net unpack are filed (MD64a, MD64b, MD65).
+//! not ported here: each is a [`Call`] handed to a [`Moto`], in the original's order. The tire `.phy`
+//! reader, the wreck, put-back and net unpack are filed (MD64b, MD65).
 //!
 //! The quad is described by what the steps read, [`Quad`] and [`Body`], not by its layout: the field
 //! map is research/oracle.txt's (`# MD37`, `# MD37a`, `# MD37b`).
@@ -540,6 +543,21 @@ pub enum Call {
     /// [`Quad::node_pos`]).
     VehiclePost(F),
     NodePosition,
+    /// The update's ([`update`]): the bike's own vehicle update (first); the vehicle's hazard-surface
+    /// clock, handed the longest of the four wheels' surface times and whether a wheel is sunk in one;
+    /// the pad's rumble (`soft` the gentler of the two, `strength` 0..255, for 0.2 s); the rider's
+    /// wheelie or stoppie stunt started (the stunt id) and ended; the player's countdown run out, then
+    /// each of the player's listeners and each of the race's watchers told so; and the message posted
+    /// last (its id).
+    BikeVehicleUpdate(F),
+    HazardSurface { dt: F, time: F, sunk: bool },
+    Rumble { soft: bool, strength: i32 },
+    StartStunt(u32),
+    EndStunt,
+    CountdownOut,
+    CountdownListener(u32),
+    CountdownWatcher(u32),
+    Post(u32),
 }
 
 /// Whoever runs the calls the quad's listeners make. A `Vec<Call>` just lists them.
@@ -837,5 +855,287 @@ fn clamp_unit(c: F) -> F {
         F(-1.0)
     } else {
         c
+    }
+}
+
+// --- MD64a: the update ------------------------------------------------------------------------------
+
+/// The stick's rumble: above this speed, and only past the harder of two suspension squeezes.
+const RUMBLE_SPEED: f32 = 10.0;
+const RUMBLE_HARD: f32 = 0.95;
+const RUMBLE_SOFT: f32 = 0.73;
+/// The rumble's strength off the squeeze (× 255), and the least each kind gives.
+const RUMBLE_HARD_SCALE: f32 = 0.45;
+const RUMBLE_SOFT_SCALE: f32 = 0.5;
+const RUMBLE_FULL: f32 = 255.0;
+const RUMBLE_HARD_LEAST: i32 = 95;
+const RUMBLE_SOFT_LEAST: i32 = 40;
+/// A wheelie or a stoppie is a stunt after this long on the one pair (s).
+const ONE_PAIR: f32 = 1.0;
+/// Off the ground for longer than this, a wheelie or a stoppie is over (s).
+const ONE_PAIR_HANG: f32 = 0.1;
+/// The player flag that stops the ride clock.
+const RIDE_CLOCK_STOPPED: u32 = 0x200;
+
+/// One entry of the quad's surface hazard table, one per surface: whether riding on it is a hazard,
+/// and how long the vehicle's clock lets the quad stay on it (−1: no time at all).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Surface {
+    pub hazard: bool,
+    pub time: F,
+}
+
+/// The player the quad belongs to, as the update reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Player {
+    /// Its flags; [`RIDE_CLOCK_STOPPED`] holds the ride clock.
+    pub flags: u32,
+    /// Its distance this frame, added to a running wheelie or stoppie's.
+    pub step: F,
+    /// A word whose fall to zero the update counts (guessed: not traced to a writer).
+    pub word: u32,
+    /// Its speed, which the quad keeps the top of.
+    pub speed: F,
+    /// A countdown the update runs while the race's clock is at or below zero.
+    pub countdown: F,
+    /// How many listeners it tells when the countdown runs out.
+    pub listeners: u32,
+}
+
+/// The race the player is in, as the update reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Race {
+    /// The countdown only runs while this is at or below zero (guessed: the race's start clock).
+    pub clock: F,
+    /// How many watchers it tells when the player's countdown runs out.
+    pub watchers: u32,
+}
+
+/// What the quad's [`update`] reads and keeps beyond [`Quad`]. The field map is research/oracle.txt's
+/// `# MD64a`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tail {
+    /// The vehicle state's mode, or none (no state: only the bike's update runs). The rumble and the
+    /// second countdown run in mode 1 alone.
+    pub vehicle_state: Option<u32>,
+    /// The rider's hold: set, the update does nothing at all.
+    pub rider_held: bool,
+    /// Below this speed (the contact velocity's `z`), a wheelie or a stoppie neither starts nor runs.
+    pub stunt_speed: F,
+    pub surfaces: [Surface; 16],
+    /// Each wheel's surface (an index into `surfaces`), its sunk flag (guessed from use), and its
+    /// suspension's squeeze.
+    pub wheel_surface: [u8; 4],
+    pub wheel_sunk: [bool; 4],
+    pub wheel_squeeze: [F; 4],
+    /// Some wheel is on a hazard surface.
+    pub on_hazard: bool,
+    /// A request word kept for one frame only: still set with its last-frame copy set, it is cleared.
+    pub request: u32,
+    pub request_was: u32,
+    /// The pad to rumble, and whether rumble is on for it.
+    pub pad: bool,
+    pub rumble_on: bool,
+    /// The wheelie (rear pair only) and stoppie (front pair only) clocks: the stunt starts once one
+    /// passes [`ONE_PAIR`].
+    pub wheelie_clock: F,
+    pub stoppie_clock: F,
+    pub wheelie_stunt: u32,
+    pub stoppie_stunt: u32,
+    /// The running wheelie's and stoppie's time and distance, and the bests of each.
+    pub wheelie_time: F,
+    pub stoppie_time: F,
+    pub wheelie_dist: F,
+    pub stoppie_dist: F,
+    pub best_wheelie_time: F,
+    pub best_stoppie_time: F,
+    pub best_wheelie_dist: F,
+    pub best_stoppie_dist: F,
+    pub player: Option<Player>,
+    pub race: Option<Race>,
+    /// The ride stats: time ridden, top speed, distance forward, and how often the player's word fell
+    /// to zero (with the word as last seen).
+    pub ride_time: F,
+    pub top_speed: F,
+    pub distance: F,
+    pub word_falls: u32,
+    pub word_was: u32,
+    /// The scene node's up and forward rows: the distance is measured along the forward row flattened,
+    /// or the up row when the forward one points straight up or down.
+    pub node_up: Vf,
+    pub node_forward: Vf,
+    /// A second countdown (mode 1 only): on, it counts down until below zero, then turns itself off.
+    pub second_on: u32,
+    pub second_countdown: F,
+    /// A clock that only counts.
+    pub clock: F,
+    /// The message the update posts last.
+    pub post: u32,
+}
+
+/// **The quad's update**, once a frame: the bike's vehicle update, then the quad's own tail.
+///
+/// With no vehicle state it is the bike's update alone, and with the rider held nothing runs. Else,
+/// after the bike's update, in order:
+/// - the hazard surfaces: on one when any wheel's surface is a hazard, sunk when also any wheel is
+///   sunk; the vehicle's hazard clock is handed the longest of the four wheels' surface times;
+/// - the one-frame request cleared once it has been seen;
+/// - the rumble, above 10 ft/s in mode 1 and not wrecked: the four suspensions' biggest squeeze past
+///   0.95 rumbles hard (0.45 × 255 × squeeze, 95 at the least), past 0.73 soft (0.5 × 255, 40);
+/// - unless wrecked (when both clocks are zeroed): on the rear pair alone and not slow, the wheelie
+///   clock runs, and past a second the wheelie stunt starts (when its time is not yet running) and its
+///   time and distance run, keeping their bests; the same for the stoppie on the front pair alone;
+///   down on all four, or slow on the ground, or in the air past 0.1 s, a running stunt is ended and
+///   both clocks, times and distances are zeroed; anything else leaves them as they are;
+/// - with a player: the ride clock (unless the player holds it), the top speed, the distance forward
+///   (the speed with the front pair down, else the body's velocity along the node's flattened forward
+///   row; never backward), the word's falls counted, and the player's countdown, which runs out by
+///   telling the player's listeners and the race's watchers;
+/// - the second countdown in mode 1, the clock, and the message posted.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn update(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Moto) {
+    let Some(mode) = t.vehicle_state else {
+        m.call(Call::BikeVehicleUpdate(dt), q, body);
+        return;
+    };
+    if t.rider_held {
+        return;
+    }
+    let slow = q.speed() < t.stunt_speed;
+    let (node_up, node_forward) = (t.node_up, t.node_forward);
+    m.call(Call::BikeVehicleUpdate(dt), q, body);
+
+    let surface = t.wheel_surface.map(|s| t.surfaces[usize::from(s)]);
+    t.on_hazard = surface.iter().any(|s| s.hazard);
+    let sunk = t.on_hazard && t.wheel_sunk.iter().any(|&s| s);
+    let time = fpu_max(fpu_max(surface[RIGHT_REAR].time, surface[LEFT_REAR].time), surface[RIGHT_FRONT].time);
+    let time = fpu_max(surface[LEFT_FRONT].time, time);
+    m.call(Call::HazardSurface { dt, time, sunk }, q, body);
+
+    if t.request != 0 && t.request_was != 0 {
+        t.request = 0;
+    }
+    t.request_was = t.request;
+
+    if !(q.speed_len <= F(RUMBLE_SPEED)) && mode == 1 && !q.control_off {
+        let sq = t.wheel_squeeze;
+        let squeeze = fpu_max(fpu_max(sq[LEFT_FRONT], sq[RIGHT_FRONT]), fpu_max(sq[LEFT_REAR], sq[RIGHT_REAR]));
+        let (hard, strength) = if !(squeeze <= F(RUMBLE_HARD)) {
+            (true, rumble_strength(squeeze, RUMBLE_HARD_SCALE, RUMBLE_HARD_LEAST))
+        } else if !(squeeze <= F(RUMBLE_SOFT)) {
+            (false, rumble_strength(squeeze, RUMBLE_SOFT_SCALE, RUMBLE_SOFT_LEAST))
+        } else {
+            (false, 0)
+        };
+        if strength > 0 && t.pad && t.rumble_on {
+            m.call(Call::Rumble { soft: !hard, strength }, q, body);
+        }
+    }
+
+    if q.control_off {
+        t.wheelie_clock = F::ZERO;
+        t.stoppie_clock = F::ZERO;
+    } else if !q.front_down && q.rear_down && !slow {
+        one_pair(t, q, body, dt, m, true);
+    } else if q.front_down && !q.rear_down && !slow {
+        one_pair(t, q, body, dt, m, false);
+    } else if (q.front_down && q.rear_down) || (!q.airborne && slow) || (q.airborne && !(q.hang_time <= F(ONE_PAIR_HANG))) {
+        if !(t.wheelie_time <= F::ZERO) || !(t.stoppie_time <= F::ZERO) {
+            m.call(Call::EndStunt, q, body);
+        }
+        t.wheelie_clock = F::ZERO;
+        t.stoppie_clock = F::ZERO;
+        t.wheelie_time = F::ZERO;
+        t.stoppie_time = F::ZERO;
+        t.wheelie_dist = F::ZERO;
+        t.stoppie_dist = F::ZERO;
+    }
+
+    if let Some(mut p) = t.player {
+        if p.flags & RIDE_CLOCK_STOPPED == 0 {
+            t.ride_time = t.ride_time + dt;
+        }
+        if !(p.speed <= t.top_speed) {
+            t.top_speed = p.speed;
+        }
+        let mut forward = if q.front_down {
+            q.speed()
+        } else {
+            let row = if node_forward.y() <= -1.0 || 1.0 <= node_forward.y() { node_up } else { node_forward };
+            let dir = crate::air::normalize(Vf::new(row.x(), 0.0, row.z(), row.w()));
+            let v = body.velocity;
+            Acc::adda(F::ZERO, F(v.z()) * F(dir.z())).madd(v.x(), dir.x())
+        };
+        if forward < F::ZERO {
+            forward = F::ZERO;
+        }
+        t.distance = Acc::adda(F::ZERO, t.distance).madd(forward, dt);
+        if t.word_was != 0 && p.word == 0 {
+            t.word_falls = t.word_falls.wrapping_add(1);
+        }
+        t.word_was = p.word;
+        if let Some(race) = t.race.filter(|r| !(p.countdown <= F::ZERO) && r.clock <= F::ZERO) {
+            p.countdown = p.countdown - dt;
+            if p.countdown <= F::ZERO {
+                m.call(Call::CountdownOut, q, body);
+                for i in 0..p.listeners {
+                    m.call(Call::CountdownListener(i), q, body);
+                }
+                for i in 0..race.watchers {
+                    m.call(Call::CountdownWatcher(i), q, body);
+                }
+            }
+        }
+        t.player = Some(p);
+    }
+
+    if t.second_on != 0 && mode == 1 {
+        if t.second_countdown < F::ZERO {
+            t.second_on = 0;
+        } else {
+            t.second_countdown = t.second_countdown - dt;
+        }
+    }
+    t.clock = t.clock + dt;
+    m.call(Call::Post(t.post), q, body);
+}
+
+/// `max.s`.
+fn fpu_max(a: F, b: F) -> F {
+    a.max(b)
+}
+
+/// The rumble's strength: `255 × (scale × squeeze)` truncated, and `least` when that is under it.
+fn rumble_strength(squeeze: F, scale: f32, least: i32) -> i32 {
+    let s = (F(RUMBLE_FULL) * (F(scale) * squeeze)).to_i32();
+    if s <= least { least } else { s }
+}
+
+/// A wheelie's (`wheelie`) or a stoppie's frame on the one pair: its clock runs, and past a second
+/// the stunt starts if its time is not running yet, and its time and distance run with their bests.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn one_pair(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Moto, wheelie: bool) {
+    let step = t.race.and(t.player).map(|p| p.step);
+    let (clock, stunt, time, best_time, dist, best_dist) = if wheelie {
+        (&mut t.wheelie_clock, t.wheelie_stunt, &mut t.wheelie_time, &mut t.best_wheelie_time, &mut t.wheelie_dist, &mut t.best_wheelie_dist)
+    } else {
+        (&mut t.stoppie_clock, t.stoppie_stunt, &mut t.stoppie_time, &mut t.best_stoppie_time, &mut t.stoppie_dist, &mut t.best_stoppie_dist)
+    };
+    *clock = *clock + dt;
+    if *clock <= F(ONE_PAIR) {
+        return;
+    }
+    if *time <= F::ZERO {
+        m.call(Call::StartStunt(stunt), q, body);
+    }
+    *time = *time + dt;
+    if !(*time <= *best_time) {
+        *best_time = *time;
+    }
+    if let Some(step) = step {
+        *dist = *dist + step;
+        if !(*dist <= *best_dist) {
+            *best_dist = *dist;
+        }
     }
 }
