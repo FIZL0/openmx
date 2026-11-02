@@ -2395,3 +2395,203 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
         self.m.measure(self.car, self.world, dt, self.acos);
     }
 }
+
+/// The model nodes the car's constructor hangs its tires on, in [`TIRES`] order: the model's own
+/// names, the rears' with an underscore.
+pub const TIRE_NODES: [&str; 4] = ["FrontLeftTire", "FrontRightTire", "RearLeft_Tire", "RearRight_Tire"];
+
+/// What the car's constructor reads off its model (`<dir>\anim\<name>.psg`, the livery's): where each
+/// tire's node stands in the model's frame, and the bounds of the whole model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CarModel {
+    /// Each [`TIRE_NODES`] node's origin, its local matrices composed down from the root, `w` 1.
+    pub tire_nodes: [Vf; 4],
+    /// The root's box widened by every node under it ([`crate::prop_world::node_bounds`]).
+    pub bounds: crate::props::NodeBox,
+}
+
+impl CarModel {
+    /// A car's model out of its `.psg` bytes. An error for a file that is no `.psg`, or that lacks
+    /// one of the four tire nodes.
+    pub fn read(psg: &[u8]) -> Result<CarModel, String> {
+        use crate::math::{Mat4, mul};
+        use crate::prop_world::BoundsNode;
+        use crate::props::NodeBox;
+        const NODES: usize = 12;
+        const RECORD: usize = 224;
+        const NAME: usize = 128;
+        const MATRIX: usize = 128;
+        const CENTRE: usize = 192;
+        const HALF: usize = 204;
+        const PARENT: usize = 220;
+        let word = |at: usize| -> Result<u32, String> {
+            psg.get(at..at + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .ok_or_else(|| format!(".psg ends at {} before byte {at}", psg.len()))
+        };
+        if psg.get(..4) != Some(b"psg\0".as_slice()) {
+            return Err("not a .psg: no psg\\0 at the front".into());
+        }
+        let count = word(8)? as usize;
+        let at = |i: usize| NODES + i * RECORD;
+        let mut parents = Vec::with_capacity(count);
+        let mut names = Vec::with_capacity(count);
+        let mut worlds: Vec<Mat4> = Vec::with_capacity(count);
+        for i in 0..count {
+            let parent = word(at(i) + PARENT)? as i32;
+            let name = psg.get(at(i)..at(i) + NAME).ok_or("a .psg cut short in its nodes")?;
+            names.push(name.iter().take_while(|&&c| c != 0).map(|&c| c as char).collect::<String>());
+            let row = |r: usize| -> Result<Vf, String> {
+                let b = at(i) + MATRIX + r * 16;
+                Ok(Vf::from_bits([word(b)?, word(b + 4)?, word(b + 8)?, word(b + 12)?]))
+            };
+            let local = Mat4([row(0)?, row(1)?, row(2)?, row(3)?]);
+            // A node comes after its parent in the file.
+            let world = match usize::try_from(parent) {
+                Ok(p) if p < i => mul(&local, &worlds[p]),
+                Ok(_) => return Err(format!("node {i}'s parent {parent} comes after it")),
+                Err(_) => local,
+            };
+            parents.push(parent);
+            worlds.push(world);
+        }
+        if count == 0 || parents[0] != -1 {
+            return Err("a .psg whose first node is not its root".into());
+        }
+        let three = |at: usize| -> Result<Vf, String> { Ok(Vf::from_bits([word(at)?, word(at + 4)?, word(at + 8)?, 1f32.to_bits()])) };
+        fn tree(i: usize, parents: &[i32], worlds: &[Mat4], own: &dyn Fn(usize) -> Result<NodeBox, String>) -> Result<BoundsNode, String> {
+            let mut children = Vec::new();
+            for (k, &p) in parents.iter().enumerate() {
+                if p == i as i32 && k > i {
+                    children.push(tree(k, parents, worlds, own)?);
+                }
+            }
+            Ok(BoundsNode { own: Some(own(i)?), world: worlds[i], children })
+        }
+        let own = |i: usize| -> Result<NodeBox, String> { Ok(NodeBox { centre: three(at(i) + CENTRE)?, half_extent: three(at(i) + HALF)? }) };
+        let bounds = crate::prop_world::node_bounds(&tree(0, &parents, &worlds, &own)?);
+        let mut tire_nodes = [Vf::default(); 4];
+        for (k, want) in TIRE_NODES.iter().enumerate() {
+            let i = names.iter().position(|n| n == want).ok_or_else(|| format!("the model has no {want} node"))?;
+            let t = worlds[i].0[3];
+            tire_nodes[k] = Vf::new(t.x(), t.y(), t.z(), 1.0);
+        }
+        Ok(CarModel { tire_nodes, bounds })
+    }
+}
+
+impl Machine {
+    /// **A fresh car, as its constructor and loader leave it** (S149e), parked at `at` with its nose
+    /// along `facing`, squared to `up` ([`crate::flight::spawn_turn`]): the body out of
+    /// `[Mass Properties]` (the AI's `CofGAI` until someone drives it), its inertia off the model's
+    /// whole bounds ([`Part::inertia`] of their full extents), each tire hung at its model node moved
+    /// out by the tire's `Width`, the undriven tires spun to the constructor's top wheel speed and the
+    /// driven ones to the engine's, the launch counting down from the start and the preload unarmed.
+    ///
+    /// The original takes each node's place with the model already placed at the spot and turns it
+    /// back into the root's frame; this takes it with the root unplaced, so a mount differs from the
+    /// original's by that round trip's rounding (under 0.002 ft on the three parked cars, the most on the buggy, whose spot leans).
+    pub fn new(car: &Car, model: &CarModel, at: Vf, facing: Vf, up: Vf) -> Machine {
+        let part = &car.mass_properties;
+        let quat = crate::flight::spawn_turn(facing, up);
+        let h = model.bounds.half_extent;
+        let two = F(2.0);
+        let dims = Vf::new((F(h.x()) * two).0, (F(h.y()) * two).0, (F(h.z()) * two).0, 1.0);
+        let inertia = part.inertia(dims);
+        let recip = |v: f32| (F::ONE / F(v)).0;
+        let cofg = car.cofg_ai;
+        let at = Vf::new(at.x(), at.y(), at.z(), 1.0);
+        let position = at.merge(Dest::XYZ, at.add(crate::chassis::turn(quat, cofg)));
+        let body = crate::biplane::Body {
+            enabled: true,
+            inv_mass: F::ONE / part.mass,
+            damping: part.velocity_damping,
+            last_position: position,
+            position,
+            inv_inertia: Vf::new(recip(inertia.x()), recip(inertia.y()), recip(inertia.z()), 1.0),
+            ang_damping: part.angular_rate_damping,
+            last_quat: quat,
+            quat,
+            cofg,
+            ..Default::default()
+        };
+        let wheels = [0, 1, 2, 3].map(|k| {
+            let node = model.tire_nodes[k];
+            Wheel {
+                s: TireState { friction_scale: F::ONE, ..Default::default() },
+                mount: Vf::new((F(node.x()) + car.tires[k].width).0, node.y(), node.z(), 1.0),
+                top_wheel_speed: car.top_wheel_speed(k).unwrap_or(UNDRIVEN_TOP_WHEEL_SPEED),
+                probe_normal: Vf::new(0.0, 1.0, 0.0, 0.0),
+                car_normal: Vf::new(0.0, 1.0, 0.0, 0.0),
+                drop: Vf::default(),
+                lever: Vf::default(),
+                upper: Vf::default(),
+                lower: Vf::default(),
+                probes: 0,
+                solid: false,
+                ground_point: Vf::default(),
+                ground_normal: Vf::new(0.0, 1.0, 0.0, 0.0),
+                point_velocity: Vf::default(),
+                body_velocity: Vf::default(),
+                local_velocity: Vf::default(),
+                frame: crate::math::Mat4::IDENTITY,
+                lone_front: false,
+            }
+        });
+        let launch_time = car.clutch_torque_scale_time.unwrap_or(F::ZERO);
+        let max_scale = car.max_clutch_torque_scale.unwrap_or(F::ONE);
+        let p = car.preload;
+        Machine {
+            body,
+            gravity: part.gravity,
+            controls: Controls::new(car),
+            drivetrain: Drivetrain::new(&car.engine),
+            wheels,
+            last_cofg: cofg,
+            human: false,
+            steering_wheel: false,
+            wrecked: false,
+            wreck_lifted: false,
+            touching: false,
+            airborne_touch: false,
+            stuck_time: F::ZERO,
+            launch: Launch {
+                timer: launch_time,
+                start: max_scale,
+                time: launch_time,
+                max_scale,
+                max_scale_speed: car.max_clutch_torque_scale_speed.unwrap_or(F::ZERO),
+            },
+            preload: PreloadState {
+                time: p.preload_time.unwrap_or(F::ZERO),
+                min_time: p.min_preload_time.unwrap_or(F::ZERO),
+                max_time: p.max_preload_time.unwrap_or(F::ZERO),
+                max_preload: p.max_preload.unwrap_or(F::ZERO),
+                force: Vf::new(0.0, 0.0, 0.0, 1.0),
+                ..Default::default()
+            },
+            latch: false,
+            latched: false,
+            grounded: false,
+            was_grounded: false,
+            ground_speed: F::ZERO,
+            velocity: Vf::default(),
+            ground_velocity: Vf::default(),
+            world_rates: Vf::default(),
+            alpha: F::ZERO,
+            side_slip: F::ZERO,
+            euler: Vf::default(),
+            matrix: crate::math::quat_to_mat4(quat, at),
+            forward: Vf::default(),
+            up: Vf::default(),
+            event: None,
+        }
+    }
+
+    /// Someone takes the wheel (or lets it go): the controls drive, and the centre of mass moves to
+    /// the class's `CofG` on the next frame's travel.
+    pub fn drive(&mut self, on: bool) {
+        self.human = on;
+        self.controls.driven = on;
+    }
+}
