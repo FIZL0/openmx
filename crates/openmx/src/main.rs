@@ -1723,10 +1723,6 @@ struct Args {
     /// ([`game_sim::state::Sense::backwards_bail`], S161): the Settings screen's Backwards Landings
     /// Bail row, which `--backwards-bail` turns on. Off by default, the original's.
     backwards_bail: bool,
-    /// Whether the gas held in the air pulls the bike's nose up (P255, [`ports_own_bike`]):
-    /// `--no-gas-gyro` turns it off, which rides the original's air control, for a test about
-    /// something else that holds the gas through a jump. Every machine of an online ride must agree.
-    gas_gyro: bool,
     /// Whether a wreck rumbles the rider's pad (P183, [`pad::WreckRumble`]): `--no-vibration` turns
     /// it off, and under the front end the Controls tab's Vibration row does, live.
     vibration: bool,
@@ -3602,7 +3598,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let handling_pack = ride_handling_pack(&args, trick_pack.as_ref())?;
     let mut stock_phy = handling_phy(handling_pack.as_ref(), &phy_member, &tables.ride.curve, "")
         .unwrap_or_else(|| Phy::read_bytes(&phy_bytes, &tables.ride.curve));
-    ports_own_bike(&mut stock_phy, args.gas_gyro);
     if let Some(pack) = &trick_pack {
         println!("{}", pack.lay(&mut stock_phy, &phy_member));
     }
@@ -3634,7 +3629,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
                 let mut phy = handling_phy(handling_pack.as_ref(), &member, &tables.ride.curve, &format!("player {}: ", i + 1))
                     .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
-                ports_own_bike(&mut phy, args.gas_gyro);
                 if let Some(pack) = &trick_pack {
                     println!("player {}: {}", i + 1, pack.lay(&mut phy, &member));
                 }
@@ -5765,7 +5759,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let first = room.seats.iter().flatten().next().ok_or("the ride has nobody in it")?;
             let bytes = disc.phy(&first.pick.bike).ok_or(format!("the disc has no {} bike set", first.pick.bike))?;
             let mut stock = Phy::read_bytes(&bytes, &tables.ride.curve);
-            ports_own_bike(&mut stock, args.gas_gyro);
             // the room's trick pack over it (MD19), as the host's machine has
             let pack = args.room_tricks.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
             lay_room_tricks(pack.as_ref(), &mut stock, &first.pick.bike);
@@ -5805,7 +5798,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // The room's modifiers, a row a seat (P134): each seat's player's own, which
                     // the host gathered from the picks, the world's the host's.
                     let mut phy = Phy::read_bytes(&bytes, &tables.ride.curve);
-                    ports_own_bike(&mut phy, args.gas_gyro);
                     lay_room_tricks(pack.as_ref(), &mut phy, &seat.pick.bike);
                     *stock.last_mut().expect("pushed") = phy.clone();
                     mods.bike(i, &mut phy);
@@ -9403,14 +9395,6 @@ fn ride_handling_pack(args: &Args, tricks: Option<&trick_packs::Pack>) -> Result
     }
 }
 
-/// The port's own switches on a bike file the app rides, the same on every machine of an online ride:
-/// the gas held in the air pulls the nose up, a little less hard than the brake pushes it down (P255,
-/// the user's ask; [`game_sim::air::gas_gyro`]), unless `--no-gas-gyro` said not (`on`). The
-/// original's air control reads no throttle.
-fn ports_own_bike(phy: &mut Phy, on: bool) {
-    phy.air_gas_gyro = on;
-}
-
 /// A bike read for MX vs. ATV's handling (MD40) from `pack`'s file for `member`, saying so after
 /// `who`; `None`, with the reason said, rides the disc's file.
 fn handling_phy(pack: Option<&trick_packs::Pack>, member: &str, curve: &game_sim::camera::CurveTable, who: &str) -> Option<Phy> {
@@ -10355,7 +10339,6 @@ fn parse_args() -> Result<Option<Args>, String> {
         wrecks: true,
         air_wrecks: true,
         backwards_bail: false,
-        gas_gyro: true,
         vibration: true,
         modifiers: game_sim::modifiers::Mods::original(),
         trace: None,
@@ -10624,7 +10607,6 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-wrecks" => args.wrecks = false,
             "--no-air-wrecks" => args.air_wrecks = false,
             "--backwards-bail" => args.backwards_bail = true,
-            "--no-gas-gyro" => args.gas_gyro = false,
             "--no-vibration" => args.vibration = false,
             "--modifiers" => {
                 args.modifiers =
@@ -10896,7 +10878,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-gas-gyro] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--handling original|mxvatv] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--handling original|mxvatv] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
@@ -11002,9 +10984,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      the rider on whatever the bike's attitude in the air (a landing is still\n\
                      judged); --backwards-bail throws the rider off a landing\n\
                      with the bike facing back against its way, which the original rides\n\
-                     out (off by default); --no-gas-gyro rides the original's air\n\
-                     control, where the gas held in the air does not pull the nose up;\n\
-                     --no-vibration keeps the pad still\n\
+                     out (off by default); --no-vibration keeps the pad still\n\
                      when its rider wrecks; --modifiers sets the\n\
                      game modifiers, percentages of what the ride loads (a tape keeps its own);\n\
                      --moment draws one frame posed\n\

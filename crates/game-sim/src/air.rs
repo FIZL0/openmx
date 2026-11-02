@@ -1498,35 +1498,6 @@ pub fn airborne_control(p: &Params, air: &mut Air, chassis: &mut Chassis, step: 
     }
 }
 
-/// How hard the port's gas gyro ([`gas_gyro`]) pitches the bike against the brake gyro: the user's "a
-/// little less" than braking (P255).
-pub const GAS_GYRO_SHARE: f32 = 0.7;
-
-/// Not the original's (P255): the throttle held in the air pitches the bike back, the way the brake
-/// gyro in [`airborne_control`] does but a little weaker — the user's ask ("mx gas pulls back like
-/// braking mid air but a little less"). MX Unleashed's air step reads the two brakes and never the
-/// throttle, so this is the port's.
-///
-/// The torque is [`GAS_GYRO_SHARE`] of [`Params::brake_gyro_torque`] on the same pitch lane but the
-/// other way, times `gas`, the rate-limited throttle, so a stab at the gas comes on as the lever does.
-/// The brake gyro's `+x` (every disc bike's `BrakeGyroTorque` is positive) pitches the nose *down*,
-/// as a real bike's does when the spinning wheel is stopped — the backflip's lane is `-x` — so the
-/// gas's `-x` pulls it back, nose up, as MX vs. ATV's own gas gyro does
-/// ([`crate::handling::airborne_control`]). It is asked under the brake gyro's own conditions — in the
-/// air, no trick held — and not while a brake is held, so the two never stack: the brake's whole
-/// torque wins. Run after [`airborne_control`], adding into the same moment.
-///
-/// Only called when the app's switch is on ([`crate::phy::Phy::air_gas_gyro`]); off, the default,
-/// nothing asks it and the ride is the original's.
-pub fn gas_gyro(p: &Params, air: &Air, chassis: &mut Chassis, step: &Step, gas: F) {
-    if air.on_ground || step.stunt || step.front_brake != 0.0 || step.rear_brake != 0.0 || gas == F::ZERO {
-        return;
-    }
-    let torque = F(GAS_GYRO_SHARE) * p.brake_gyro_torque * gas;
-    let m = chassis.moment;
-    chassis.moment = Vf::new((F(m.x()) - torque).0, m.y(), m.z(), m.w());
-}
-
 // --- 5: the landing test ----------------------------------------------------------------------------
 
 /// The wreck test: everything that throws the rider off, in the order the original asks it, which is

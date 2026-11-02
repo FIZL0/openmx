@@ -43,10 +43,6 @@ fn ride(at: &str, tape: &Path, frames: usize) -> Option<String> {
         .current_dir(&root)
         .args(["--headless", "--track", "free06", "--size", "640x448", "--overlay", "none", "--controls", "original"])
         .args(["--trace-at", at, "--play", tape.to_str().unwrap(), "--frames", &frames.to_string()])
-        // The original's air control: these tapes hold the gas through the hops the train throws the
-        // bike into, and the port's gas gyro (P255) pitches the bike back there, which is not what
-        // these paths were laid out on (nor what S170's and S191's captures rode).
-        .arg("--no-gas-gyro")
         .output()
         .expect("the shell runs");
     let said = String::from_utf8_lossy(&out.stdout).to_string();
