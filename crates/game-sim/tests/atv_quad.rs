@@ -12,10 +12,10 @@
 
 use game_sim::air::AcosTable;
 use game_sim::chassis::{ContactCall, WheelContact};
-use game_sim::quad::{self, Body, Call, Contact, Params, Quad, Wheel};
+use game_sim::quad::{self, Body, Call, Contact, Params, Player, Quad, Race, Surface, Tail, Wheel};
 use ps2_float::{F, Vf};
 use ps2_oracle::{DONE, Ee, Kit, skip};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -27,7 +27,9 @@ const WHEEL: [u32; 4] = [0x01c0_8000, 0x01c0_9000, 0x01c0_a000, 0x01c0_b000];
 /// record its PostProcess flags the tip-over in.
 const STATE_OBJ: u32 = 0x01c0_7000;
 const RECORD: u32 = 0x01c0_7100;
-const REGIONS: [(&str, u32, u32); 9] = [
+/// The player the update's ride stats read, whose countdown it runs (MD64a).
+const PLAYER: u32 = 0x01c0_7400;
+const REGIONS: [(&str, u32, u32); 10] = [
     ("quad", OBJ, 0x1800),
     ("body", BODY, 0x200),
     ("world", WORLD, 0x50),
@@ -37,6 +39,7 @@ const REGIONS: [(&str, u32, u32); 9] = [
     ("right front", 0x01c0_9000, 0x8b0),
     ("left rear", 0x01c0_a000, 0x8b0),
     ("right rear", 0x01c0_b000, 0x8b0),
+    ("player", PLAYER, 0x1e0),
 ];
 /// What the quad points at and the steps only hand on: its engine, its scene node, its collision
 /// search and the actor list the sweep is given.
@@ -1178,4 +1181,471 @@ fn up_at_a_quarter() -> Vf {
         }
     }
     panic!("no quaternion near x = ½, z = √⅛ has up.y exactly 0.25");
+}
+
+// --- MD64a: the update ----------------------------------------------------------------------------
+
+/// The update, and what it calls: the bike's vehicle update, the name lookup the rider is found by,
+/// the vehicle's hazard clock (quad vt +0x45c), the rider's stunt start / end (vt +0x4b8 / +0x4ac),
+/// the rumble-on query and the message post.
+const UPDATE: u32 = 0x004b_a9f0;
+const BIKE_UPDATE: u32 = 0x004e_1b90;
+const NAME_BIT: u32 = 0x0021_4b30;
+const HAZARD_CLOCK: u32 = 0x004a_ad60;
+const START_STUNT: u32 = 0x004e_6370;
+const END_STUNT: u32 = 0x004e_4db0;
+const RUMBLE_ON: u32 = 0x0051_a250;
+const POST: u32 = 0x0027_2300;
+/// The post's first argument is read from here.
+const POST_QUEUE: u32 = 0x0044_2eb0;
+/// What the update walks to: the vehicle state's vtable (its rider lookup), the rider and its hold,
+/// the pad and its vtable, the race, the player's countdown vtable, its listeners and the race's
+/// watchers. The virtuals land on addresses with no code, hooked.
+const STATE_VT: u32 = 0x01c0_d000;
+const RIDER: u32 = 0x01c0_d100;
+const RIDER_HOLD: u32 = 0x01c0_d500;
+const PAD: u32 = 0x01c0_d600;
+const PAD_VT: u32 = 0x01c0_d680;
+const COUNTDOWN_VT: u32 = 0x01c0_d700;
+const LISTENER_VT: u32 = 0x01c0_d780;
+const WATCHER_VT: u32 = 0x01c0_d800;
+const LISTENERS: u32 = 0x01c0_e000;
+const WATCHERS: u32 = 0x01c0_e400;
+const RACE: u32 = 0x01c0_e800;
+const RIDER_FN: u32 = 0x01cf_0200;
+const RUMBLE_FN: u32 = 0x01cf_0300;
+const COUNTDOWN_FN: u32 = 0x01cf_0400;
+const LISTENER_FN: u32 = 0x01cf_0500;
+const WATCHER_FN: u32 = 0x01cf_0600;
+/// What the name lookup hands back, and the vehicle state's word the rumble query is handed.
+const RIDER_NAME: u64 = 0x0052_74f3;
+const RUMBLE_TOKEN: u32 = 0x0012_3450;
+
+fn poke_tail(ee: &mut Ee, s: &State, t: &Tail) {
+    poke(ee, s);
+    ee.set_u32(STATE_OBJ + 0x4, STATE_VT);
+    ee.set_u32(STATE_VT + 0xac, RIDER_FN);
+    ee.set_u32(STATE_OBJ + 0x5c, if t.pad { PAD } else { 0 });
+    ee.set_u32(STATE_OBJ + 0x6ac, RUMBLE_TOKEN);
+    ee.set_u32(PAD + 0x1c, PAD_VT);
+    ee.set_u32(PAD_VT + 0x4c, RUMBLE_FN);
+    ee.set_u32(RIDER + 0x378, RIDER_HOLD);
+    put_b(ee, RIDER_HOLD + 0x14, t.rider_held);
+
+    put_f(ee, OBJ + 0x174c, t.stunt_speed);
+    for (i, sf) in t.surfaces.iter().enumerate() {
+        let a = OBJ + 0xdf4 + 0xc * i as u32;
+        put_b(ee, a, sf.hazard);
+        put_f(ee, a + 4, sf.time);
+    }
+    for (k, &w) in WHEEL.iter().enumerate() {
+        ee.write(w + 0x110, 1, u128::from(t.wheel_surface[k]));
+        put_b(ee, w + 0xd0, t.wheel_sunk[k]);
+        put_f(ee, w + 0xf0, t.wheel_squeeze[k]);
+    }
+    put_b(ee, OBJ + 0xc20, t.on_hazard);
+    ee.set_u32(OBJ + 0x31c, t.request);
+    ee.set_u32(OBJ + 0x320, t.request_was);
+    put_f(ee, OBJ + 0x1744, t.wheelie_clock);
+    put_f(ee, OBJ + 0x1748, t.stoppie_clock);
+    ee.set_u32(OBJ + 0x13c4, t.wheelie_stunt);
+    ee.set_u32(OBJ + 0x13c8, t.stoppie_stunt);
+    put_f(ee, OBJ + 0x704, t.wheelie_time);
+    put_f(ee, OBJ + 0x708, t.stoppie_time);
+    put_f(ee, OBJ + 0x70c, t.wheelie_dist);
+    put_f(ee, OBJ + 0x710, t.stoppie_dist);
+    put_f(ee, OBJ + 0x714, t.best_wheelie_time);
+    put_f(ee, OBJ + 0x718, t.best_stoppie_time);
+    put_f(ee, OBJ + 0x71c, t.best_wheelie_dist);
+    put_f(ee, OBJ + 0x720, t.best_stoppie_dist);
+    ee.set_u32(OBJ + 0x6a0, COUNTDOWN_VT);
+    ee.set_u32(COUNTDOWN_VT + 0x68, COUNTDOWN_FN);
+    ee.set_u32(OBJ + 0x680, if t.player.is_some() { PLAYER } else { 0 });
+    if let Some(p) = t.player {
+        ee.set_u32(PLAYER + 0x8, p.flags);
+        put_f(ee, PLAYER + 0x18, p.step);
+        ee.set_u32(PLAYER + 0x40, p.word);
+        put_f(ee, PLAYER + 0x108, p.speed);
+        put_f(ee, PLAYER + 0xc4, p.countdown);
+        // The listeners chain through +0x1c; each has its vtable at +0x20.
+        ee.set_u32(PLAYER + 0x1d4, if p.listeners == 0 { 0 } else { LISTENERS });
+        ee.set_u32(LISTENER_VT + 0x68, LISTENER_FN);
+        for i in 0..p.listeners {
+            let e = LISTENERS + 0x40 * i;
+            ee.set_u32(e + 0x1c, if i + 1 < p.listeners { e + 0x40 } else { 0 });
+            ee.set_u32(e + 0x20, LISTENER_VT);
+        }
+    }
+    ee.set_u32(OBJ + 0x684, if t.race.is_some() { RACE } else { 0 });
+    if let Some(r) = t.race {
+        put_f(ee, RACE + 0x29c, r.clock);
+        // The watchers: the first's next is at +4, every later one's at +0x18 (the other word of each
+        // left zero, so a walk through the wrong one stops short). Each has its vtable at +0x1c.
+        ee.set_u32(RACE + 0x24, if r.watchers == 0 { 0 } else { WATCHERS });
+        ee.set_u32(WATCHER_VT + 0x7c, WATCHER_FN);
+        for i in 0..r.watchers {
+            let e = WATCHERS + 0x40 * i;
+            let next = if i + 1 < r.watchers { e + 0x40 } else { 0 };
+            ee.set_u32(e + 4, if i == 0 { next } else { 0 });
+            ee.set_u32(e + 0x18, if i == 0 { 0 } else { next });
+            ee.set_u32(e + 0x1c, WATCHER_VT);
+        }
+    }
+    put_f(ee, OBJ + 0x6f8, t.ride_time);
+    put_f(ee, OBJ + 0x6fc, t.top_speed);
+    put_f(ee, OBJ + 0x724, t.distance);
+    ee.set_u32(OBJ + 0x6c8, t.word_falls);
+    ee.set_u32(OBJ + 0x6cc, t.word_was);
+    put_v(ee, NODE + 0x80, t.node_up);
+    put_v(ee, NODE + 0x90, t.node_forward);
+    ee.set_u32(OBJ + 0x175c, t.second_on);
+    put_f(ee, OBJ + 0x1760, t.second_countdown);
+    put_f(ee, OBJ + 0x1750, t.clock);
+    ee.set_u32(OBJ + 0xd20, t.post);
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn tail(&mut self, s: &mut State) -> Tail {
+        let vehicle_state = match self.bits() % 12 {
+            0 => None,
+            1 => Some(0),
+            2 => Some(2),
+            3 => Some(3),
+            _ => Some(1),
+        };
+        s.vstate = vehicle_state;
+        let q = &mut s.q;
+        if self.one_in(4) {
+            q.hang_time = if self.one_in(3) { F(0.1) } else { self.f(0.0, 0.2) };
+        }
+        if self.one_in(6) {
+            q.speed_len = F(10.0);
+        }
+        // Each pairing of the two pairs, and wrecked, about equally often.
+        if self.one_in(2) {
+            q.front_down = self.b();
+            q.rear_down = !q.front_down;
+        }
+        let mut surfaces = [Surface::default(); 16];
+        for sf in &mut surfaces {
+            *sf = Surface {
+                hazard: self.one_in(6),
+                time: match self.bits() % 5 {
+                    0 => F(-1.0),
+                    1 => F::ZERO,
+                    _ => self.f(-2.0, 5.0),
+                },
+            };
+        }
+        let squeeze = |g: &mut Gen| match g.bits() % 6 {
+            0 => F(0.95),
+            1 => F(0.73),
+            _ => g.f(0.3, 1.1),
+        };
+        let clock = |g: &mut Gen| if g.one_in(4) { F::ZERO } else { g.f(0.5, 1.1) };
+        let time = |g: &mut Gen| match g.bits() % 4 {
+            0 => F::ZERO,
+            1 => g.f(-0.5, 0.0),
+            _ => g.f(0.0, 5.0),
+        };
+        let word = |g: &mut Gen| if g.one_in(3) { 0 } else { g.bits() | 1 };
+        let player = (!self.one_in(6)).then(|| Player {
+            flags: self.bits(),
+            step: self.f(0.0, 3.0),
+            word: word(self),
+            speed: self.f(0.0, 80.0),
+            countdown: match self.bits() % 4 {
+                0 => F::ZERO,
+                1 => self.f(-1.0, 0.0),
+                _ => self.f(0.0, 0.06),
+            },
+            listeners: self.bits() % 4,
+        });
+        let race = (!self.one_in(5)).then(|| Race {
+            clock: match self.bits() % 4 {
+                0 => F::ZERO,
+                1 => self.f(0.0, 5.0),
+                _ => self.f(-5.0, 0.0),
+            },
+            watchers: self.bits() % 4,
+        });
+        let node_forward = match self.bits() % 8 {
+            0 => Vf::new(self.f(-1.0, 1.0).0, [1.0, -1.0, 1.2, -1.2][(self.bits() % 4) as usize], self.f(-1.0, 1.0).0, 1.0),
+            1 if self.one_in(4) => Vf::new(0.0, 0.5, 0.0, 1.0),
+            _ => self.vec(-1.0, 1.0),
+        };
+        Tail {
+            vehicle_state,
+            rider_held: self.one_in(12),
+            // Exactly the speed, now and then: at it is not slow.
+            stunt_speed: if self.one_in(8) { s.q.speed() } else { self.f(0.0, 15.0) },
+            surfaces,
+            wheel_surface: [0; 4].map(|_: u8| (self.bits() % 16) as u8),
+            wheel_sunk: [0; 4].map(|_: u8| self.one_in(3)),
+            wheel_squeeze: [0; 4].map(|_: u8| squeeze(self)),
+            on_hazard: self.b(),
+            request: word(self),
+            request_was: word(self),
+            pad: !self.one_in(5),
+            rumble_on: !self.one_in(5),
+            wheelie_clock: clock(self),
+            stoppie_clock: clock(self),
+            wheelie_stunt: self.bits() % 64,
+            stoppie_stunt: self.bits() % 64,
+            wheelie_time: time(self),
+            stoppie_time: time(self),
+            wheelie_dist: self.f(0.0, 500.0),
+            stoppie_dist: self.f(0.0, 500.0),
+            best_wheelie_time: self.f(0.0, 6.0),
+            best_stoppie_time: self.f(0.0, 6.0),
+            best_wheelie_dist: self.f(0.0, 600.0),
+            best_stoppie_dist: self.f(0.0, 600.0),
+            player,
+            race,
+            ride_time: self.f(0.0, 1000.0),
+            top_speed: self.f(0.0, 80.0),
+            distance: self.f(0.0, 10000.0),
+            word_falls: self.bits() % 100,
+            word_was: word(self),
+            node_up: self.vec(-1.0, 1.0),
+            node_forward,
+            second_on: word(self),
+            second_countdown: if self.one_in(5) { F::ZERO } else { self.f(-0.1, 0.5) },
+            clock: self.f(0.0, 100.0),
+            post: self.bits(),
+        }
+    }
+}
+
+/// Which way the update went, for the tally (read off the state before either side runs).
+#[allow(clippy::float_arithmetic)]
+fn tail_paths(s: &State, tl: &Tail) -> Vec<&'static str> {
+    let (q, dt) = (&s.q, s.dt);
+    let Some(mode) = tl.vehicle_state else { return vec!["no vehicle state"] };
+    if tl.rider_held {
+        return vec!["rider held"];
+    }
+    let mut p = Vec::new();
+    let surface = tl.wheel_surface.map(|i| tl.surfaces[i as usize]);
+    p.push(match (surface.iter().any(|s| s.hazard), tl.wheel_sunk.iter().any(|&s| s)) {
+        (false, _) => "no hazard",
+        (true, false) => "on a hazard",
+        (true, true) => "sunk in a hazard",
+    });
+    if tl.request != 0 && tl.request_was != 0 {
+        p.push("request cleared");
+    }
+    if q.speed_len.0 > 10.0 && mode == 1 && !q.control_off {
+        let sq = tl.wheel_squeeze.iter().map(|f| f.0).fold(f32::MIN, f32::max);
+        p.push(match (sq > 0.95, sq > 0.73, tl.pad && tl.rumble_on) {
+            (true, _, true) => "rumble hard",
+            (false, true, true) => "rumble soft",
+            (_, true, false) => "rumble, no pad or off",
+            _ => "no rumble",
+        });
+    } else {
+        p.push("rumble gated");
+    }
+    let slow = q.speed().0 < tl.stunt_speed.0;
+    let one = |clock: F, time: F| match (clock.0 + dt.0 > 1.0, time.0 <= 0.0) {
+        (false, _) => "clock",
+        (true, true) => "starts",
+        (true, false) => "runs",
+    };
+    p.push(if q.control_off {
+        "wrecked"
+    } else if !q.front_down && q.rear_down && !slow {
+        match one(tl.wheelie_clock, tl.wheelie_time) {
+            "clock" => "wheelie clock",
+            "starts" => "wheelie starts",
+            _ => "wheelie runs",
+        }
+    } else if q.front_down && !q.rear_down && !slow {
+        match one(tl.stoppie_clock, tl.stoppie_time) {
+            "clock" => "stoppie clock",
+            "starts" => "stoppie starts",
+            _ => "stoppie runs",
+        }
+    } else if (q.front_down && q.rear_down) || (!q.airborne && slow) || (q.airborne && q.hang_time.0 > 0.1) {
+        if tl.wheelie_time.0 > 0.0 || tl.stoppie_time.0 > 0.0 { "down, stunt ended" } else { "down" }
+    } else {
+        "left be"
+    });
+    if q.speed() == tl.stunt_speed {
+        p.push("speed exactly the stunt speed");
+    }
+    if q.airborne && q.hang_time == F(0.1) {
+        p.push("hang exactly 0.1");
+    }
+    match tl.player {
+        None => p.push("no player"),
+        Some(pl) => {
+            p.push(if q.front_down {
+                "distance from the speed"
+            } else if tl.node_forward.y() <= -1.0 || tl.node_forward.y() >= 1.0 {
+                "distance along the up row"
+            } else {
+                "distance along the forward row"
+            });
+            if pl.flags & 0x200 != 0 {
+                p.push("ride clock held");
+            }
+            if tl.word_was != 0 && pl.word == 0 {
+                p.push("word fell");
+            }
+            if let Some(r) = tl.race.filter(|r| pl.countdown.0 > 0.0 && r.clock.0 <= 0.0) {
+                p.push(if pl.countdown.0 - dt.0 <= 0.0 { if pl.listeners > 0 && r.watchers > 1 { "countdown out, told" } else { "countdown out" } } else { "countdown runs" });
+            }
+        }
+    }
+    if tl.second_on != 0 && mode == 1 {
+        p.push(if tl.second_countdown.0 < 0.0 { "second countdown off" } else { "second countdown runs" });
+    }
+    p
+}
+
+#[test]
+fn the_quads_update_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x45c), HAZARD_CLOCK, "the quad's hazard-clock slot");
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x4b8), START_STUNT, "the quad's stunt-start slot");
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x4ac), END_STUNT, "the quad's stunt-end slot");
+    let log: Log<Call> = Rc::default();
+    let hook = |ee: &mut Ee, at: u32, f: fn(&Ee) -> Call| {
+        let l = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee| l.borrow_mut().push(f(ee))));
+    };
+    hook(&mut ee, BIKE_UPDATE, |ee| on_quad(ee, Call::BikeVehicleUpdate(F(ee.f(12)))));
+    hook(&mut ee, HAZARD_CLOCK, |ee| {
+        assert!(ee.r(5) <= 1, "the sunk flag is {:#x}", ee.r(5));
+        on_quad(ee, Call::HazardSurface { dt: F(ee.f(12)), time: F(ee.f(13)), sunk: ee.r(5) == 1 })
+    });
+    hook(&mut ee, START_STUNT, |ee| {
+        assert_eq!(ee.r(6), 1, "the stunt start's last argument");
+        on_quad(ee, Call::StartStunt(ee.r(5) as u32))
+    });
+    hook(&mut ee, END_STUNT, |ee| {
+        assert_eq!(ee.r(5) as i64, -1, "the stunt end's stunt");
+        on_quad(ee, Call::EndStunt)
+    });
+    hook(&mut ee, RUMBLE_FN, |ee| {
+        assert_eq!((ee.r(4) as u32, ee.f(12)), (PAD, 0.2), "the rumble's pad and time");
+        assert!(ee.r(5) <= 1, "the rumble's soft flag is {:#x}", ee.r(5));
+        Call::Rumble { soft: ee.r(5) == 1, strength: ee.r(6) as i32 }
+    });
+    hook(&mut ee, COUNTDOWN_FN, |ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5) as u32), (OBJ + 0x680, RACE), "the countdown's arguments");
+        Call::CountdownOut
+    });
+    hook(&mut ee, LISTENER_FN, |ee| {
+        assert_eq!((ee.r(5) as u32, ee.r(6) as u32), (RACE, PLAYER), "a listener's arguments");
+        Call::CountdownListener((ee.r(4) as u32 - LISTENERS) / 0x40)
+    });
+    hook(&mut ee, WATCHER_FN, |ee| {
+        assert_eq!((ee.r(5) as u32, ee.r(6) as u32), (RACE, PLAYER), "a watcher's arguments");
+        Call::CountdownWatcher((ee.r(4) as u32 - WATCHERS) / 0x40)
+    });
+    hook(&mut ee, POST, |ee| {
+        let want = (u64::from(ee.u32_at(POST_QUEUE)), u64::from(OBJ + 0x674), 8, 4, 0);
+        assert_eq!((ee.r(4), ee.r(5), ee.r(6), ee.r(7), ee.r(9)), want, "the post's arguments");
+        Call::Post(ee.r(8) as u32)
+    });
+    ee.hooks.insert(NAME_BIT, Box::new(|ee| ee.set(2, RIDER_NAME)));
+    ee.hooks.insert(
+        RIDER_FN,
+        Box::new(|ee| {
+            assert_eq!((ee.r(4) as u32, ee.r(5)), (STATE_OBJ, RIDER_NAME), "the rider lookup's arguments");
+            ee.set(2, u64::from(RIDER + 0x2ec));
+        }),
+    );
+    let rumble_on = Rc::new(Cell::new(false));
+    let on = rumble_on.clone();
+    ee.hooks.insert(
+        RUMBLE_ON,
+        Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, RUMBLE_TOKEN, "the rumble query's argument");
+            ee.set(2, u64::from(on.get()));
+        }),
+    );
+
+    let mut g = Gen(0x0064_a001);
+    let mut tally_of = BTreeMap::new();
+    for k in 0..10_000 {
+        let mut s = g.state();
+        let tl = g.tail(&mut s);
+        for path in tail_paths(&s, &tl) {
+            tally(&mut tally_of, path);
+        }
+        rumble_on.set(tl.rumble_on);
+
+        // The original.
+        log.borrow_mut().clear();
+        reset(&mut ee);
+        poke_tail(&mut ee, &s, &tl);
+        ee.call(UPDATE, &[u64::from(OBJ)], &[s.dt.0], 50_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}\n{tl:#?}"));
+        let was = snap(&ee);
+
+        // The port.
+        let (mut t, mut tp) = (s.clone(), tl);
+        let mut calls = Vec::new();
+        quad::update(&mut tp, &mut t.q, &mut t.body, t.dt, &mut calls);
+        reset(&mut ee);
+        poke_tail(&mut ee, &t, &tp);
+        let now = snap(&ee);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            panic!(
+                "state {k}: {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}\n{tl:#?}",
+                where_is(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+        assert_eq!(*log.borrow(), calls, "state {k}: the calls\n{s:#?}\n{tl:#?}");
+    }
+    each_path_seen(
+        &tally_of,
+        &[
+            "no vehicle state",
+            "rider held",
+            "no hazard",
+            "on a hazard",
+            "sunk in a hazard",
+            "request cleared",
+            "rumble hard",
+            "rumble soft",
+            "rumble, no pad or off",
+            "no rumble",
+            "rumble gated",
+            "wrecked",
+            "wheelie clock",
+            "wheelie starts",
+            "wheelie runs",
+            "stoppie clock",
+            "stoppie starts",
+            "stoppie runs",
+            "down, stunt ended",
+            "down",
+            "left be",
+            "hang exactly 0.1",
+            "speed exactly the stunt speed",
+            "no player",
+            "distance from the speed",
+            "distance along the up row",
+            "distance along the forward row",
+            "ride clock held",
+            "word fell",
+            "countdown out",
+            "countdown out, told",
+            "countdown runs",
+            "second countdown off",
+            "second countdown runs",
+        ],
+        30,
+    );
+    eprintln!("{tally_of:?}");
 }

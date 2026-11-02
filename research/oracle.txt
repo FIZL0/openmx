@@ -6357,6 +6357,30 @@ atv_wheel_set_contact       atv 0x004a0c80 = chassis::set_contact (a0 wheel, a1 
 atv_list_at                 atv 0x004bf960 = a listener list's element j (a0 list +0x104, a1 j)
 atv_collide_against_search  atv 0x001151c0 = collide_against_search (a0 search, a1 actor list, a2 1)
 atv_bike_head_tail          atv 0x004e4190 = quad/bike vt +0x4d0, the PreProcess's last
+# MD64a — the quad's update (atv_quad_update after atv_bike_vehicle_update; quad::update and quad::Tail;
+# tests/atv_quad.rs the_quads_update_is_the_originals off MD37a's atv-r-spawn.ee.bin). Journal:
+# research/journal/2026-11-02-md64a-atv-update-tail. Quad-relative: +0xbc4 the vehicle state (none: the
+# bike's update alone; its +0x28 == 1 gates the rumble and the second countdown); the rider (state vt +0xac
+# with the "MotocrossRider" name bit, less 0x2ec) +0x378 -> +0x14 set: return 1 at once, no bike update.
+# +0x174c the stunt speed (contact speed +0xc38 below it is slow; read before the bike update). +0xdf4 the
+# surface hazard table, 0xc per surface by wheel byte +0x110: +0 hazard word, +4 time (-1: at once).
+# +0xc20 = any wheel's hazard word set (0/1); sunk = that and any wheel +0xd0. Wheel +0xf0 the squeeze
+# (MX Unleashed's compression offset). +0x31c/+0x320 a one-frame request and its copy. +0x1744/+0x1748
+# wheelie/stoppie clocks (> 1 s on the one pair), +0x13c4/+0x13c8 their stunt ids, +0x704/+0x708 times,
+# +0x70c/+0x710 distances (+= player +0x18 with player and race both set), +0x714/+0x718/+0x71c/+0x720 the
+# bests. +0x680 the player (+8 flags, 0x200 holds the ride clock; +0x18 step; +0x40 word, its falls to 0
+# counted in +0x6c8, kept in +0x6cc; +0x108 speed, its top in +0x6fc; +0xc4 countdown; +0x1d4 listeners,
+# next +0x1c, vt +0x20 slot +0x68). +0x684 the race (+0x29c clock, the countdown runs at or below 0; +0x24
+# watchers: the first's next +4, the rest's +0x18, vt +0x1c slot +0x7c). +0x6a0 the vtable of the object at
+# +0x680 (slot +0x68: countdown out). +0x6f8 ride time, +0x724 distance (front pair down: +0xc38; else body
+# velocity . the node's row +0x90 flattened, row +0x80 when +0x94 is <= -1 or >= 1; never below 0).
+# +0x175c/+0x1760 a second countdown (off once below 0), +0x1750 a clock, +0xd20 the post's id.
+# Rumble: speed +0x32c > 10, mode 1, +0xc80 clear; max wheel squeeze > 0.95: hard, cvt.w(255*(0.45*s)),
+# 95 at least; > 0.73: soft, cvt.w(255*(0.5*s)), 40 at least; pad = state +0x5c (vt +0x1c slot +0x4c:
+# a1 soft, a2 strength, f12 0.2), only when the query below says rumble is on.
+atv_vehicle_hazard_clock    atv 0x004aad60 = quad vt +0x45c (a0 quad, f12 dt, f13 the longest surface time, a1 sunk; +0xc10/+0xc14/+0xdf0, vt +0x3a8 on time out)
+atv_name_bit                atv 0x00214b30 = a name's bit, as the PC's pc_name_bit("MotocrossRider", 0) (a0 0x005423e0, a1 0x005274f3, a2 0; strings not read)
+atv_rumble_on               atv 0x0051a250 = whether rumble is on (a0 the vehicle state's +0x6ac)
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the
