@@ -63,7 +63,7 @@ pub const ROCK: f64 = 3.0;
 /// The stitcher's own version, bumped whenever a build of the same tiles writes other joins (P232):
 /// the shell's cache of the disc's worlds (`crates/openmx/src/disc_worlds.rs`) is keyed by it, so a
 /// changed stitcher builds them again. Not [`build::AUTHOR`], which mod.json carries as it was.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// One track mod folder read for joining.
 pub struct Tile {
