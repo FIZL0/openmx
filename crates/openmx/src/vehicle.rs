@@ -820,6 +820,45 @@ impl Plane {
         self.settle(ready)
     }
 
+    /// **The track's traffic and the plane, among the knockable props** (S241): the traffic's
+    /// held frame ([`game_sim::traffic::Traffic::frame_held`]), the plane's ([`Plane::step_met`],
+    /// its frame [`Flight::frame_props`]: its rays strike the props, theirs its hull), then the
+    /// props' step with the plane as their striker 0, and the traffic's late frame. With no props
+    /// on the track, [`game_sim::traffic::Traffic::frame`] then [`Plane::step_met`], as before.
+    pub fn step_traffic(
+        &mut self,
+        sim: &mut Sim,
+        dt: F,
+        world: &mut dyn World,
+        bikes: &[game_sim::flight_search::Bike],
+        met: Option<&mut flight::Met>,
+    ) -> bool {
+        if sim.traffic.props.is_empty() || self.flight.is_none() {
+            sim.traffic.frame(dt, world);
+            return self.step_met(sim, dt, world, bikes, met);
+        }
+        let movers = sim.traffic.frame_held(dt, world);
+        let mut props = std::mem::take(&mut sim.traffic.props);
+        let respawned = match self.ready(sim, world) {
+            Some(ready) => {
+                let f = self.flight.as_mut().expect("a readied plane has its flight");
+                let _struck = f.frame_props(dt, ready.pad, world, &sim.tables.ride, bikes, met, &mut props, 0);
+                self.settle(ready)
+            }
+            None => false,
+        };
+        if let Some(f) = &mut self.flight {
+            let mut weighed = game_sim::contact::Weighed { body: &mut f.body, mass: f.mass };
+            let mut strikers =
+                [game_sim::contact::Other { collider: &mut f.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
+            props.step_with(dt, &movers, &mut strikers);
+        }
+        sim.traffic.props = props;
+        sim.traffic.frame_late(dt, world);
+        self.pose();
+        respawned
+    }
+
     /// [`Plane::step_met`] up to the frame (N22a1): the plane placed, the chord read, the seat's
     /// scheme put on the flight for the frame and the pad it flies it with. What
     /// [`Plane::settle`] needs after the frame, `None` with no flight.
@@ -1461,8 +1500,7 @@ impl Garage {
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
                 // The track's path cars run on whichever machine is up (S81).
-                sim.traffic.frame(dt, world);
-                let respawned = plane.step_met(sim, dt, world, among.bikes, among.met);
+                let respawned = plane.step_traffic(sim, dt, world, among.bikes, among.met);
                 rider::Frame { respawned, ..rider::Frame::default() }
             }
             // The bike's ghost ticks inside its update (`Rider::frame`), so a bike the plane has the
@@ -1687,10 +1725,9 @@ pub fn fly_lane_met(
     met: Option<&mut flight::Met>,
 ) -> bool {
     let Some(f) = sim.plane.take() else { return false };
-    sim.traffic.frame(dt, world);
     let mut plane =
         Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
-    let respawned = plane.step_met(sim, dt, world, bikes, met);
+    let respawned = plane.step_traffic(sim, dt, world, bikes, met);
     sim.plane = plane.flight.take();
     respawned
 }

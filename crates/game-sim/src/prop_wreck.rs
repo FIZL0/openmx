@@ -141,11 +141,17 @@ fn sphere(mesh: &Mesh, t: &[Vf; 4]) -> (Vf, F) {
 /// them; its listeners hear the hit as its search's do (an asleep body woken by a category of the wake
 /// mask, the collection activated). Answers the mirrors and the struck bodies for the bike's frame.
 pub fn struck_by_props(set: &mut PropSet, mesh: &Mesh, bike: &WreckBike, me: usize) -> WreckStrike {
+    struck_on(set, mesh, frame(&bike.record.node), wreck_bike::COLLIDABLE, bike.collider.collides_with, me)
+}
+
+/// [`struck_by_props`] on any collision mesh standing at `bike_at` (its node's rows and origin), its
+/// collidable's `category` and `collides_with` mask: the wreck bike's, and the plane's hull (S241,
+/// [`crate::flight::Flight::frame_props`]).
+pub fn struck_on(set: &mut PropSet, mesh: &Mesh, bike_at: [Vf; 4], category: u32, collides_with: u32, me: usize) -> WreckStrike {
     let mut out = WreckStrike::default();
     if set.tables.is_none() || mesh.nodes.is_empty() {
         return out;
     }
-    let bike_at = frame(&bike.record.node);
     let (bike_centre, bike_radius) = sphere(mesh, &bike_at);
     let facets = flight_search::facets(mesh);
     let rays = std::sync::Arc::clone(&set.rays);
@@ -173,8 +179,8 @@ pub fn struck_by_props(set: &mut PropSet, mesh: &Mesh, bike: &WreckBike, me: usi
                     flags: flags::ENABLED,
                     nearby: true,
                     radius: bike_radius,
-                    category: wreck_bike::COLLIDABLE,
-                    collides_with: bike.collider.collides_with,
+                    category,
+                    collides_with,
                     categories: Categories { mode: 1, list: Vec::new() },
                     ..Collidable::default()
                 },
@@ -210,7 +216,7 @@ pub fn struck_by_props(set: &mut PropSet, mesh: &Mesh, bike: &WreckBike, me: usi
             }
             let collider = col.collider;
             // The probe's two listeners, the body's then the collection's.
-            if asleep && wreck_bike::COLLIDABLE & flight_search::WAKE_MASK != 0 {
+            if asleep && category & flight_search::WAKE_MASK != 0 {
                 coll.enable(k);
             }
             coll.activate();

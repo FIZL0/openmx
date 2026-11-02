@@ -1085,6 +1085,30 @@ pub struct Scene<'a> {
     /// A prop's ray probe's ([`Scene::probed`]): its body asleep, and what its listeners heard.
     asleep: bool,
     heard: Heard,
+    /// The knockable props' meshes in the search (S241, [`Scene::knocking`]): where the first one's
+    /// collidable is, and where the first one's record is among the records the search is handed.
+    knocks: &'a [Knock<'a>],
+    knocks_at: usize,
+    knocked_from: usize,
+    knock_facets: std::collections::HashMap<usize, Vec<Facet>>,
+}
+
+/// What the plane's record keeps as struck for a knockable prop's mesh (S241): [`KNOCKED`] and its
+/// place in [`Scene::knocking`]'s list.
+pub const KNOCKED: usize = 1 << 19;
+
+/// **A knockable prop's mesh as the plane's rays meet it** (S241): its model's `f.col` where the prop's
+/// node stands it, the sphere its collidable is reached by, and its body's velocity (what the sweep
+/// reads of a struck one). Its collidable is a prop's (category [`crate::prop_world::COLLIDABLE`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Knock<'a> {
+    pub mesh: &'a track::Mesh,
+    pub to_world: Mat4,
+    pub centre: Vf,
+    pub radius: F,
+    pub velocity: Vf,
+    /// Its collision record's room for contacts.
+    pub capacity: usize,
 }
 
 /// A prop's ray probe's listeners (S200), in the order the prop's init puts them on it: the prop's
@@ -1378,7 +1402,8 @@ impl<'a> Scene<'a> {
             if !search.built || search.nearby.found.iter().any(|c| objects.len() <= c.object) {
                 refill(&mut objects, broad, search);
             }
-            Lent { generation, objects }
+            let own = objects.len();
+            Lent { generation, objects, own }
         });
         let ray = ray_probe::Record {
             listed: true,
@@ -1415,6 +1440,10 @@ impl<'a> Scene<'a> {
             sweep,
             asleep: false,
             heard: Heard::default(),
+            knocks: &[],
+            knocks_at: 0,
+            knocked_from: 0,
+            knock_facets: std::collections::HashMap::new(),
         }
     }
 
@@ -1446,6 +1475,40 @@ impl<'a> Scene<'a> {
         (j < self.planes.len()).then_some(j)
     }
 
+    /// **The knockable props' meshes in the plane's search** (S241): each a collidable after the
+    /// world's, a prop's collidable (category [`crate::prop_world::COLLIDABLE`], enabled), a candidate
+    /// of the nearby list after what the broad phase gathered, by its distance from the ray probe's
+    /// centre less its reach. Its collidable's owner is the prop's collision record, so a hit on prop
+    /// `k` names `first + k` among the records the search is handed, which takes the mirror
+    /// ([`crate::contact_search::collide`]), and is kept as struck as [`KNOCKED`]` + k`.
+    pub fn knocking(mut self, knocks: &'a [Knock<'a>], first: usize) -> Scene<'a> {
+        let (centre, _) = reach(self.rays, &self.transform);
+        self.knocks = knocks;
+        self.knocks_at = self.objects.objects.len();
+        self.knocked_from = first;
+        for (k, n) in knocks.iter().enumerate() {
+            self.objects.objects.push(Collidable {
+                class: Class::Object,
+                flags: flags::ENABLED,
+                nearby: true,
+                radius: n.radius,
+                category: crate::prop_world::COLLIDABLE,
+                collides_with: crate::prop_world::COLLIDES_WITH,
+                categories: any_category(),
+                ..Collidable::default()
+            });
+            let distance = length(centre.sub(n.centre)) - n.radius;
+            self.nearby.found.push(world_search::Candidate { object: self.knocks_at + k, distance });
+        }
+        self
+    }
+
+    /// The knockable prop `k`, when `other` is one of [`Scene::knocking`]'s collidables.
+    fn knock(&self, other: usize) -> Option<usize> {
+        let k = other.checked_sub(self.knocks_at).filter(|_| self.knocks_at != 0)?;
+        (k < self.knocks.len()).then_some(k)
+    }
+
     /// The ride's bike `k`, when `other` is one of [`world_among`]'s bikes.
     fn bike(&self, other: usize) -> Option<usize> {
         let k = other.checked_sub(FIRST + self.props.len())?;
@@ -1454,6 +1517,9 @@ impl<'a> Scene<'a> {
 
     /// What the plane's record keeps as struck for collidable `other` ([`BIKES`]).
     fn id(&self, other: usize) -> usize {
+        if let Some(k) = self.knock(other) {
+            return KNOCKED + k;
+        }
         if let Some(j) = self.trunk(other) {
             return TREES + j;
         }
@@ -1470,6 +1536,8 @@ impl<'a> Scene<'a> {
 struct Lent {
     generation: u64,
     objects: Vec<Collidable>,
+    /// How many are the world's: the knockable props' after them ([`Scene::knocking`]) go.
+    own: usize,
 }
 
 impl Drop for Lent {
@@ -1480,6 +1548,7 @@ impl Drop for Lent {
             ray.categories = any_category();
             ray.listeners.clear();
         }
+        self.objects.truncate(self.own);
         give_back(self.generation, std::mem::take(&mut self.objects));
     }
 }
@@ -1546,6 +1615,34 @@ impl Scene<'_> {
             sweep_probe::pair(&mut self.sweep, Some(&target))
         }
     }
+
+    /// A probe's narrow phase against knockable prop `k`, collidable `other` (S241): its mesh where its
+    /// node stands it, as a scenery prop's.
+    fn pair_knock(&mut self, probe: usize, other: usize, k: usize) -> bool {
+        let n = self.knocks[k];
+        if probe == RAY {
+            let facets = self.knock_facets.entry(k).or_insert_with(|| facets(n.mesh));
+            let mesh = ray_probe::Mesh {
+                id: other as u32,
+                transform: n.to_world.0,
+                root: 0,
+                nodes: &n.mesh.nodes,
+                facets,
+                vertices: &n.mesh.vertices,
+            };
+            let rays = self.rays;
+            let probe = RayProbe { transform: self.transform, root: rays.root, nodes: &rays.nodes, segments: &rays.segments };
+            ray_probe::pair(&probe, &ray_probe::Shape::Mesh(mesh), &mut self.ray)
+        } else {
+            let target = sweep_probe::Target {
+                nearby: true,
+                centre: n.centre,
+                radius: n.radius,
+                shape: sweep_probe::Shape::Mesh(sweep_probe::Placed { transform: n.to_world.0, mesh: MeshRef::of(n.mesh), object: other }),
+            };
+            sweep_probe::pair(&mut self.sweep, Some(&target))
+        }
+    }
 }
 
 impl Scene<'_> {
@@ -1597,6 +1694,9 @@ impl Narrow for Scene<'_> {
     fn prepare(&mut self, _objects: &mut [Collidable], _probe: usize) {}
 
     fn pair(&mut self, _objects: &mut [Collidable], probe: usize, other: usize) -> bool {
+        if let Some(k) = self.knock(other) {
+            return self.pair_knock(probe, other, k);
+        }
         if let Some(j) = self.trunk(other) {
             return self.pair_trunk(probe, other, j);
         }
@@ -1689,6 +1789,9 @@ impl Scene<'_> {
     /// mover of kind 2, so it is struck with its mover — by the prop's index, the order
     /// [`Search::movers`] lists them in. Anything else is only itself ([`struck`]).
     fn struck_of(&self, object: usize) -> Struck {
+        if let Some(k) = object.checked_sub(KNOCKED).filter(|&k| k < self.knocks.len()) {
+            return Struck { other: Some(self.knocked_from + k), ..struck(object) };
+        }
         if let Some(j) = object.checked_sub(PLANES).filter(|&j| j < self.planes.len()) {
             return Struck { other: Some(self.first_plane + j), ..struck(object) };
         }
@@ -1743,6 +1846,9 @@ impl Search for Scene<'_> {
     /// A struck prop that moves answers its car's velocity, the mover's `vt+0xb8` (S145), and a struck
     /// bike with its record in the search its chassis' (N22b, [`Scene::owned`]); the rest stand still.
     fn velocity(&self, struck: &Struck) -> Vf {
+        if let Some(k) = struck.object.checked_sub(KNOCKED).filter(|&k| k < self.knocks.len()) {
+            return self.knocks[k].velocity;
+        }
         if let Some(j) = struck.object.checked_sub(PLANES).filter(|&j| j < self.planes.len()) {
             return self.planes[j].velocity;
         }
@@ -1770,11 +1876,13 @@ pub fn movers(props: &[Prop]) -> Vec<crate::contact::Mover> {
     props.iter().map(|p| p.moving.map(|m| m.mover()).unwrap_or_default()).collect()
 }
 
-/// The category of what [`Scene`] reports as struck: another plane's ([`PLANES`]) is
-/// [`crate::flight::COLLIDABLE`], a trunk's ([`TREES`]) is [`TREE`], a bike's ([`BIKES`]) is
-/// [`BIKE`], every prop's is scenery.
+/// The category of what [`Scene`] reports as struck: a knockable prop's ([`KNOCKED`]) is a prop's
+/// collidable's, another plane's ([`PLANES`]) is [`crate::flight::COLLIDABLE`], a trunk's
+/// ([`TREES`]) is [`TREE`], a bike's ([`BIKES`]) is [`BIKE`], every prop's is scenery.
 pub fn category(object: usize) -> u32 {
-    if object >= PLANES {
+    if object >= KNOCKED {
+        crate::prop_world::COLLIDABLE
+    } else if object >= PLANES {
         crate::flight::COLLIDABLE
     } else if object >= TREES {
         TREE
