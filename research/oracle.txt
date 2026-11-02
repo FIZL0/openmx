@@ -6668,6 +6668,15 @@ weather_action_fire  boot 0x003db600 finds the ToyWeatherBox by name: density >=
 # Wrapper flags: +0x54 collision enabled, +0x58 hit listener, +0x60 listens, +0x6c detect.
 # free09's free_trailerA.col / free_trailerb.col are toy meshes, not in the scene collision list.
 
+# --- S195: free09 beach balls knocked by the bike (crates/game-sim/tests/prop_knock.rs; journal 2026-11-02-s195-props-from-a-real-knock)
+# BeachBall collections 0..4 (collection / object / body): 0x011bafb0 0x011b6f90 0x011b6030; 0x011b6630
+# 0x011bed70 0x011b6a90; 0x011bf000 0x011c1860 0x011bf460; 0x011c1af0 0x011c4350 0x011c1f50; 0x011c45e0
+# 0x011c6e40 0x011c4a40. Collection +0x20 flags (bit 2 active), +0x34 settle listener, +0x144 name,
+# +0x248 world node (shared by every free09 prop: +0x48 listener count, +0x50 array), +0x320 body count,
+# +0x328 list. Object +0x50 listener, +0x110 body, +0x120 record, +0x13c node, +0x1b0 fresh, +0x1bc countdown.
+# A strike files the object's listener before the collection's settle (PropSet::wake does the reverse).
+# Asleep, a ball keeps its record flags; ResetTime 60 runs on the object, put back below zero.
+
 # S134 — the wreck bike's nearby list and free09's AI bikes (blocked: no wreck into a bike captured yet).
 # Journal: research/journal/2026-10-28-s134-wreck-into-a-bike. Wreck bike b = u32(u32(0x017a7700+0x488)+0x1ac):
 # body b-0x780 (position +0x60), collision record b+0x8c0, record+0x10c -> the nearby search (list +0, count
