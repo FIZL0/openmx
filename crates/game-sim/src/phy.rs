@@ -578,6 +578,10 @@ pub struct Collisions {
     pub high_speed_min_collision_angle: F,
     /// One friction, written into all sixteen of the record's surface slots.
     pub terrain_friction: F,
+    /// The record's sixteen surface frictions, by the ground's surface number: `TerrainFriction` in
+    /// each on MX Unleashed's files; MX vs. ATV's reads one key per surface
+    /// ([`crate::handling::mxvatv_phy`]).
+    pub surface_friction: [F; MAX_SURFACES],
     /// Pounds, defaulting to `[Mass Properties]`'s `Weight`, and the mass the record gets.
     pub collision_weight: F,
     pub collision_mass: F,
@@ -939,6 +943,7 @@ impl Phy {
                 curve,
             ),
             terrain_friction: s.float("TerrainFriction").unwrap_or(F::ZERO),
+            surface_friction: [s.float("TerrainFriction").unwrap_or(F::ZERO); MAX_SURFACES],
             collision_weight,
             collision_mass: collision_weight * COLLISION_MASS_PER_POUND,
             collision_cofg_offset: s.vector("CollisionCofGOffset", UNIT_W),

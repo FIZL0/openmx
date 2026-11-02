@@ -417,23 +417,64 @@ const MOVED_TO_COLLISIONS: [(&str, &str); 17] = [
 ];
 
 /// The rest of the moves: `(MX vs. ATV's section, key, MX Unleashed's section, key)`.
-const MOVED: [(&str, &str, &str, &str); 6] = [
+/// `GravityScale` and the sixteen `FrictionZone`s are not moves: [`MassPart`] reads them.
+const MOVED: [(&str, &str, &str, &str); 4] = [
     ("Mass Properties", "HighSpeedRaySpeedScale", "Collisions", "HighSpeedRaySpeedScale"),
     ("Mass Properties", "HighSpeedUnpenetrationDistance", "Collisions", "HighSpeedUnpenetrationDistance"),
-    // Its sixteen friction zones are one value each on every bike it ships; the first stands for the
-    // terrain friction MX Unleashed has one of.
-    ("Mass Properties", "FrictionZone1", "Collisions", "TerrainFriction"),
-    ("Mass Properties", "GravityScale", "Mass Properties", "Gravity"),
     ("Camera", "Left1stPerShoulderOffset", "FirstPersonCamera", "Left1stPerShoulderOffset"),
     ("Camera", "Right1stPerShoulderOffset", "FirstPersonCamera", "Right1stPerShoulderOffset"),
 ];
 
+/// What MX vs. ATV's `[Mass Properties]` reader leaves for the ride from its gravity and friction
+/// keys. MX vs. ATV reads a vehicle's `[Mass Properties]` with the rigid-body part reader its other
+/// physics parts share (MX Unleashed's [`crate::phy::Part`], with a key per surface), not with a
+/// vehicle reader of its own:
+///
+/// * **`GravityScale`** (default 1) is kept, and the gravity force is `(0, -GravityScale * Weight,
+///   0, 1)` on the reader's own `Weight` (default 500): the scale times the pounds, where MX
+///   Unleashed's bike has `-(Weight/32.2) * Gravity * 32.2`, which rounds differently. The bike's
+///   ground step adds that force to the body before anything else, as MX Unleashed's adds its own.
+/// * **`FrictionZone1`..`FrictionZone16`** (each default 1) are the collision record's sixteen
+///   surface frictions, one per ground surface number, where MX Unleashed writes its one
+///   `TerrainFriction` into all sixteen.
+/// * **`Friction`** (default 1) and **`BodyFriction`** (default `Friction`, and a `-1` becomes it
+///   as the record is written) are the record's two others; MX Unleashed's defaults are 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MassPart {
+    pub gravity_scale: F,
+    pub gravity: Vf,
+    pub friction: F,
+    pub body_friction: F,
+    pub surface_friction: [F; crate::phy::MAX_SURFACES],
+}
+
+impl MassPart {
+    /// Read an MX vs. ATV file's `[Mass Properties]`, in the reader's order: `Weight` before the
+    /// force, `Friction` before the `BodyFriction` it is the default of.
+    pub fn read(ini: &crate::phy::Ini) -> MassPart {
+        let s = ini.section("Mass Properties");
+        let weight = s.float_or("Weight", F(500.0));
+        let gravity_scale = s.float_or("GravityScale", F::ONE);
+        let surface_friction = core::array::from_fn(|k| s.float_or(&format!("FrictionZone{}", k + 1), F::ONE));
+        let friction = s.float_or("Friction", F::ONE);
+        let body_friction = s.float_or("BodyFriction", friction);
+        MassPart {
+            gravity_scale,
+            gravity: Vf::new(0.0, (-gravity_scale * weight).0, 0.0, 1.0),
+            friction,
+            body_friction: if body_friction == F(-1.0) { friction } else { body_friction },
+            surface_friction,
+        }
+    }
+}
+
 /// An MX vs. ATV bike file (`mx_*.phy`) with its keys where MX Unleashed's reader looks for them
 /// ([`crate::phy::Phy::read`]): the collision keys it moved into `[Mass Properties]` back in
-/// `[Collisions]` under their old names, `GravityScale` as `Gravity`, the first-person shoulders in
-/// `[FirstPersonCamera]`. Every other key is kept where it is — its new ones (`GasGyroTorque`, which
+/// `[Collisions]` under their old names, the first-person shoulders in `[FirstPersonCamera]`. Every
+/// other key is kept where it is — its new ones (`GasGyroTorque`, which
 /// [`crate::phy::Phy::gas_gyro_torque`] reads, `[Joystick]`'s input ramp, `ResetTime`, …) stay where
-/// they are; only the first is read yet.
+/// they are; only the first is read yet. `GravityScale` and the friction zones have no MX Unleashed
+/// key to go to: [`mxvatv_phy`] reads them with [`MassPart`].
 pub fn mxvatv_ini(ini: &crate::phy::Ini) -> crate::phy::Ini {
     let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
     let mut sections: Vec<(String, String)> = Vec::new();
@@ -456,10 +497,17 @@ pub fn mxvatv_ini(ini: &crate::phy::Ini) -> crate::phy::Ini {
     crate::phy::Ini::parse(&text)
 }
 
-/// An MX vs. ATV bike file read for the ride: [`mxvatv_ini`] through MX Unleashed's reader, the bike
-/// set on [`Handling::MxVsAtv`].
+/// An MX vs. ATV bike file read for the ride: [`mxvatv_ini`] through MX Unleashed's reader, with
+/// [`MassPart`]'s gravity and frictions over it, the bike set on [`Handling::MxVsAtv`].
 pub fn mxvatv_phy(bytes: &[u8], curve: &crate::camera::CurveTable) -> crate::phy::Phy {
-    let mut phy = crate::phy::Phy::read(&mxvatv_ini(&crate::phy::Ini::parse_bytes(bytes)), curve);
+    let ini = crate::phy::Ini::parse_bytes(bytes);
+    let mut phy = crate::phy::Phy::read(&mxvatv_ini(&ini), curve);
+    let part = MassPart::read(&ini);
+    phy.mass.gravity = part.gravity_scale;
+    phy.mv.gravity = part.gravity;
+    phy.collisions.friction = part.friction;
+    phy.collisions.body_friction = part.body_friction;
+    phy.collisions.surface_friction = part.surface_friction;
     phy.handling = Handling::MxVsAtv;
     phy
 }
