@@ -8979,3 +8979,28 @@ atv_heap_free               atv 0x001b76d0 = free
 #   struck mask word +0x1110 -> +0x1100; struck object +0x1440 -> +0x1450, its class +0x94 -> +0xc0.
 #   Contacts: stride 0x90, flag +0 (halfword), reach +0x24, other bike +0x84 -> +0x80 (its body +0xe4, height
 #   +0x74, velocity +0x80 unchanged); record +0x34 touching, +0xf0 count, +0xf8 list, +0x20c object unchanged.
+
+# MD93 — Untamed's (SLUS-21701) reworked preload, wreck entry and put-back, ported as handling::untamed
+# (preload, wreck_entry, put_back) under Handling::Untamed and proved by tests/untamed_reworked.rs off
+# context/untamed/ram/nat_or.bin. Comment rows only, as # MD81a. Journal: research/journal/2026-11-03-md93-untamed-bike-step.
+#   preload 0x004fe360 (a0 bike, f12 dt). Fields: ready +0xc40, firing +0xc44, armed +0xc48, PreloadTime +0xc4c,
+#   timer +0xc50, Min/MaxPreloadTime +0xc54/+0xc58, MaxPreload +0xc5c, force +0xc60, d-pad times +0x1150/+0x1154,
+#   d-pad y +0x1294, stick y +0x129c, hold +0x12a0, brake +0x340, on ground +0x354, contact velocity +0xc20, body
+#   velocity body +0x80 (body +0xe8), cue latch +0x724, event tag +0xd10, receiver bike+0x698. New: +0x12c8 = 1
+#   when action 0x53 is bound (0x00117c10 != -1), +0x12b4 its analogue axis (pad word 0xe5). Bound, not firing on
+#   entry, on the lip and axis > 0.001 (0x3a83126f): firing 1, force.y = map_clamp(axis, 0, 1, 0, MaxPreload),
+#   timer = PreloadTime, armed 0; then the stick's path as SLUS-21104's, only when not firing on entry (so after
+#   an axis fire, in the same call). Cue: latch 0 and firing -> latch 1, post (8, 14, +0xd10, 0); else timer <= 0
+#   -> latch 0. Force through the body's vt +0x80 (0x004ba440, a thunk to vt +0x48: force.xyz into body +0xa0,
+#   then the listener count, halfword body +0xe8). Body vtable 0x003ef6a0.
+#   wreck entry 0x004fa390 (vt +0x368): vt +0x4a0 (0x004fce80, the stunts ended), vt +0x4a8 (0x004fd000, -1:
+#   the clip stopped); reason 13: rand 0x00344360 three times x 2^-31 (0x30000000), one quadword (u1, u2, u3, 0)
+#   to body +0x1d0 (SLUS-21104 stores each lane and keeps w); vt +0x398 (0x004f98b0, 0), vt +0x484; +0xc44 = 0,
+#   +0xc40 = 0, +0xdd8 = 0, +0x1714 = 1; base entry 0x004cbc60 (bike, reason: +0xc70/+0xc74/+0xc7c, rumble and a
+#   new call 0x001c3d70 for a player, post (8, 0xb)); +0x17c4 = reason != 0; +0x708 += 1.
+#   put back 0x004ca900 (a0 vehicle, a1 snap, a2 keep): +0x80 = +0xd30; driver +0x6a4 set and +0xd60, +0xd64 both
+#   non-zero -> driver +0x94/+0x98/+0x9c = +0xd60/+0xd64/+0xd68; snap and ground +0x3e4: ground query 0x004b0910
+#   (ground, bike+0x80 in/out, normal out, 0, 0), +0x80.xyz += normal.xyz x 0.3 (0x3e99999a, vmulx/vadd.xyz),
+#   +0x90 = +0xd40, +0xa0 = the normal; else +0x90 = +0xd40, +0xa0 = +0xd50. Then 0x004c8880 (settle: 0x004b9130,
+#   +0x34c = 1); keep: +0xdd8 = +0xddc, vt +0x3a0; else +0xdd8 = 0, vt +0x39c. +0x10cc set: 0x00512e90 (a0 it).
+#   Post (8, 0x15, +0xd10, 0). SLUS-21104's 0x004a6f70 drops the normal and always restores +0x60/+0x70.

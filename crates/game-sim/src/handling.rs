@@ -25,6 +25,7 @@ use ps2_float::vu::Dest;
 use ps2_float::{F, Vf, fpu};
 
 pub mod step;
+pub mod untamed;
 
 /// How the bikes handle (MD40), as `settings.txt`'s `handling` and `--handling` spell it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -34,15 +35,19 @@ pub enum Handling {
     Original,
     /// MX vs. ATV Unleashed's: its own `mx_*.phy` and the steps it changed, ported from SLUS-21104.
     MxVsAtv,
+    /// MX vs. ATV Untamed's (MD93): MX vs. ATV's, with the steps SLUS-21701 reworked from SLUS-21104
+    /// ported as [`untamed`] has them as far as they are.
+    Untamed,
 }
 
 impl Handling {
-    pub const ALL: [Handling; 2] = [Handling::Original, Handling::MxVsAtv];
+    pub const ALL: [Handling; 3] = [Handling::Original, Handling::MxVsAtv, Handling::Untamed];
 
     pub fn word(self) -> &'static str {
         match self {
             Handling::Original => "original",
             Handling::MxVsAtv => "mxvatv",
+            Handling::Untamed => "untamed",
         }
     }
 
@@ -54,6 +59,7 @@ impl Handling {
         match self {
             Handling::Original => "Original",
             Handling::MxVsAtv => "MX vs. ATV",
+            Handling::Untamed => "Untamed",
         }
     }
 }

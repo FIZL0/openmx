@@ -201,7 +201,27 @@ in the wreck test for a ride.
 through `game_sim::bpb::ini`. Off by default, like all of MD40's handling.
 
 **So an Untamed ride today** is SLUS-21104's step (MD40's blend) on Untamed's files. The wreck test is
-bit-exact. The six reworked functions are not ported yet.
+bit-exact. MD93 has ported three of the six reworked functions (below); the other three are MD93a-c.
+
+## Untamed's reworked functions, ported (MD93)
+
+`--handling untamed`, or the Handling row's Untamed, is MX vs. ATV's handling on the same pack files
+(`Handling::Untamed`, off by default) with SLUS-21701's reworked functions where they are ported, in
+`crates/game-sim/src/handling/untamed.rs`. Each is proved by `crates/game-sim/tests/untamed_reworked.rs`
+off the Untamed image, word for word over the bike and its body, with every call out hooked and compared
+in order. Online, a room names only its pack, so an Untamed host's room rides as MX vs. ATV's.
+
+| function | what changed from SLUS-21104 | port | in the ride |
+|---|---|---|---|
+| preload | an analogue preload: bound and pushed past 0.001 on the lip, it fires at once with the axis mapped onto `0..MaxPreload`, and the stick's path then runs in the same call. The cue is posted while firing (SLUS-21104: while the timer is above 0) | `untamed::preload` | yes, axis unbound (`None`; MD93e binds it) |
+| wreck entry | reason 13's three random spins stored as one quadword, `w` zero; new vtable slots | `untamed::wreck_entry` | no (SLUS-21104's isn't either) |
+| put back | the ground snap lifts the bike 0.3 ft along the normal and keeps the normal as up; the driver's respawn only with both first words set; no `+0x60`/`+0x70` restore; the attachment's put-back; post (8, 0x15) | `untamed::put_back` | no (the ride's put-back is the port's own) |
+| backflip, spin in the air, vehicle update | — | MD93a, MD93b, MD93c | — |
+| air state, no-hander | still unclassified | MD93d | — |
+
+The brief's "every stunt-id bound +8" has nothing to do in these three: none of them reads the stunt id.
+The bounds are in the wreck test (proved by MD81a), start stunt and airborne control (the port reads no id
+there), and the backflip (MD93a).
 
 ## Not checked
 
