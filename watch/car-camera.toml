@@ -1,0 +1,181 @@
+# car-camera.toml — S246: the original's camera behind a driven car. The car, the block its camera reads
+# off it, the car's own camera (the race camera on its kind's AppStart\<Kind>CPresets.ini) and the
+# viewport that camera writes.
+#
+#   research/journal/2026-11-02-s246-car-camera/capture.sh CAR-NAME ...   (it rewrites CAM and VP below)
+#
+# Fixed addresses, measured on S149a's switched states (s149a-<car>-switched.ee.bin) and nothing else:
+# the car is at 0x00605270 in all three, its block at +0x8a0. The camera and its viewport differ per
+# state; these are the baja's (camera 0x14311a0 on FourWheelCPresets.ini's "Race Cam 1", viewport
+# 0x150a6d0, the camera's +0x7c). The buggy's are 0x1411450 / 0x14dd310 and the truck's
+# 0x14514e0 / 0x152bc70. A second race camera in each state also reads the car's block: the bike's,
+# on cpresets.ini (distance 13), never updated (its snap stays 1).
+
+[watch]
+name        = "car-camera"
+description = "a car driven by a generated tape: the car, its camera block, its camera and the eye"
+every       = 1
+frames      = 660
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "pad_a"
+addr = "@pad_buffers"
+type = "bytes:20"
+
+[[field]]
+name = "stamp_a"
+addr = "@pad0_stamp_a"
+type = "u32"
+
+[[field]]
+name = "car_kind"              # +0xd50: 3 buggy, 4 monster truck, 5 baja
+addr = "0x00605270 + 0xd50"
+type = "u32"
+
+# --- the body (+0x160) ---------------------------------------------------------------------------------
+[[field]]
+name = "body_last"             # body +0x50: the centre of mass where the last substep began
+addr = "0x00605270 + 0x160 -> 0x50"
+type = "f32x4"
+
+[[field]]
+name = "body_pos"              # body +0x60
+addr = "0x00605270 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "body_vel"              # body +0x70
+addr = "0x00605270 + 0x160 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "body_quat"             # body +0x170
+addr = "0x00605270 + 0x160 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "body_cofg"             # body +0x180: the centre of mass in the car's frame
+addr = "0x00605270 + 0x160 -> 0x180"
+type = "f32x4"
+
+[[field]]
+name = "body_rate"             # body +0x1b0
+addr = "0x00605270 + 0x160 -> 0x1b0"
+type = "f32x4"
+
+# --- the car's measure ---------------------------------------------------------------------------------
+[[field]]
+name = "car_grounded"          # +0x530: a tire down
+addr = "0x00605270 + 0x530"
+type = "u32"
+
+[[field]]
+name = "car_speed"             # +0x55c
+addr = "0x00605270 + 0x55c"
+type = "f32"
+
+[[field]]
+name = "car_rates"             # +0x570: the world rates
+addr = "0x00605270 + 0x570"
+type = "f32x4"
+
+[[field]]
+name = "car_fwd"               # +0x590
+addr = "0x00605270 + 0x590"
+type = "f32x4"
+
+[[field]]
+name = "car_up"                # +0x5a0
+addr = "0x00605270 + 0x5a0"
+type = "f32x4"
+
+# --- the camera's target block, car +0x8a0 -------------------------------------------------------------
+[[field]]
+name = "tgt_head"              # +0x8a0..: +0x04 the writer's mask word
+addr = "0x00605270 + 0x8a0"
+type = "f32x4"
+
+[[field]]
+name = "tgt_point"
+addr = "0x00605270 + 0x8b0"
+type = "f32x4"
+
+[[field]]
+name = "tgt_fwd"
+addr = "0x00605270 + 0x8d0"
+type = "f32x4"
+
+[[field]]
+name = "tgt_up"
+addr = "0x00605270 + 0x8e0"
+type = "f32x4"
+
+[[field]]
+name = "tgt_vel"
+addr = "0x00605270 + 0x8f0"
+type = "f32x4"
+
+[[field]]
+name = "tgt_tail"              # +0x80: the lean word
+addr = "0x00605270 + 0x920"
+type = "f32x4"
+
+[[field]]
+name = "tgt_flag_speed"        # +0xb0 airborne flag (u32), +0xb4 speed
+addr = "0x00605270 + 0x950"
+type = "f32x4"
+
+# --- the car's camera ----------------------------------------------------------------------------------
+[[field]]
+name = "cam_dyp"               # +0xd0 distance, +0xd4 yaw, +0xd8 pitch, +0xdc fov
+addr = "0x14311a0 + 0xd0"
+type = "f32x4"
+
+[[field]]
+name = "cam_preset"            # +0x158
+addr = "0x14311a0 + 0x158"
+type = "u32"
+
+[[field]]
+name = "cam_snap"              # +0x168
+addr = "0x14311a0 + 0x168"
+type = "u32"
+
+[[field]]
+name = "cam_lift"              # +0x18c
+addr = "0x14311a0 + 0x18c"
+type = "f32"
+
+# --- the viewport the camera writes: +0x140 eye, +0x150 / +0x160 its two axes, +0x170 fov ------------
+[[field]]
+name = "vp_eye"
+addr = "0x150a6d0 + 0x140"
+type = "f32x4"
+
+[[field]]
+name = "vp_dir"
+addr = "0x150a6d0 + 0x150"
+type = "f32x4"
+
+[[field]]
+name = "vp_up"
+addr = "0x150a6d0 + 0x160"
+type = "f32x4"
+
+[[field]]
+name = "vp_fov"
+addr = "0x150a6d0 + 0x170"
+type = "f32"

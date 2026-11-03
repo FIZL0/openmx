@@ -355,6 +355,8 @@ const PLANE_PRESETS: &str = "biplanecpresets.ini";
 /// The helicopter's camera preset a flight starts on (P216): the first of
 /// [`game_render::kiowa::PRESETS`]'s four, as [`PLANE_CAMERA`] is the plane's first.
 const HELI_CAMERA: &str = "Aero Cam 1";
+/// The preset a car's own camera starts on (S246), in each of the three cars' files.
+const CAR_CAMERA: &str = "Race Cam 1";
 
 /// The archive a ride on a track without the plane's own camera presets and particle list reads them
 /// from (P113): a freeride track's second archive carries both. The particle sheet stays the track's.
@@ -858,8 +860,9 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
         chassis,
         camera: Race { cam: p.cameras.0.clone() },
         plane_camera: p.cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
-        // Online rides no helicopter (P216).
+        // Online rides no helicopter (P216), and its cars are followed by the bike's camera (S246).
         heli_camera: None,
+        car_cameras: Vec::new(),
         wreck_camera: chase::WreckCamera::new(false),
         framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
         camera_presets: Default::default(),
@@ -1093,6 +1096,10 @@ struct Rig {
     /// The helicopter's own camera (P216), on `HeloCPresets.ini`, while this player has one. It
     /// shares the plane's framing, field-of-view ease and look-back slots.
     heli_camera: Option<Race>,
+    /// The cars' own cameras (S246), one a car kind this player can drive, each on its kind's presets
+    /// file ([`chase::car_presets`]). They share the bike's framing, field-of-view ease and look-back
+    /// slots; a car without one is followed by the bike's.
+    car_cameras: Vec<(Kind, Race)>,
     /// The camera the screen switches to while this player's rider is down (V31).
     wreck_camera: chase::WreckCamera,
     /// How this player's two follow cameras' presets are framed now (P82), the bike's and the
@@ -1132,15 +1139,15 @@ impl Rig {
     /// The camera the machine `up` is followed by: the plane's own, if this player has one, or the
     /// bike's.
     fn follow(&self, up: Kind) -> &Race {
-        match (up, &self.plane_camera, &self.heli_camera) {
-            (Kind::Biplane, Some(cam), _) | (Kind::Kiowa, _, Some(cam)) => cam,
+        match (up, &self.plane_camera, &self.heli_camera, self.car_cameras.iter().find(|(k, _)| *k == up)) {
+            (Kind::Biplane, Some(cam), _, _) | (Kind::Kiowa, _, Some(cam), _) | (_, _, _, Some((_, cam))) => cam,
             _ => &self.camera,
         }
     }
 
     fn follow_mut(&mut self, up: Kind) -> &mut Race {
-        match (up, &mut self.plane_camera, &mut self.heli_camera) {
-            (Kind::Biplane, Some(cam), _) | (Kind::Kiowa, _, Some(cam)) => cam,
+        match (up, &mut self.plane_camera, &mut self.heli_camera, self.car_cameras.iter_mut().find(|(k, _)| *k == up)) {
+            (Kind::Biplane, Some(cam), _, _) | (Kind::Kiowa, _, Some(cam), _) | (_, _, _, Some((_, cam))) => cam,
             _ => &mut self.camera,
         }
     }
@@ -5122,6 +5129,39 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         cam.cam.speed_reference = F(SPEED_REFERENCE);
         cam
     });
+    // The cars' own cameras (S246), each built as the bike's is (they are ground machines: the fog's
+    // ceiling, no plane's), on its kind's presets file (in a freeride track's second archive, or
+    // free06's) and starting on its first preset, "Race Cam 1", where S149a's states have all three.
+    // The files' bytes are kept, as the helicopter's are, for a display's copy of their presets.
+    let car_presets: Vec<(Kind, Vec<u8>)> = garage
+        .cars
+        .iter()
+        .filter_map(|c| {
+            let (kind, file) = (c.machine.kind()?, chase::car_presets(c.machine.car_physics()?));
+            let kit = match archives.iter().any(|a| a.find_suffix(file).is_some()) {
+                true => None,
+                false => member_ending(&disc, PLANE_KIT_ARCHIVE).ok().and_then(|name| disc.res(&name).ok()),
+            };
+            Some((kind, archives.iter().chain(&kit).find_map(|a| a.read_suffix(file).ok())?))
+        })
+        .collect();
+    let car_cameras: Vec<(Kind, Race)> = car_presets
+        .iter()
+        .map(|(kind, bytes)| {
+            let file = car_presets_file(*kind);
+            let mut cam = Race::new(layout_presets(bytes, layout, Display::Television, file), F(REVERSE_SPEED));
+            cam.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
+            if let Some(start) = Preset::find(&cam.cam.presets, CAR_CAMERA) {
+                cam.cam.set_preset(start);
+            }
+            if !cam.cam.presets.is_empty() {
+                println!("{}: its camera starts on {}, {} presets in {file}", kind.name(), cam.cam.preset().name, cam.cam.presets.len());
+            }
+            cam.cam.snap = true;
+            cam.cam.speed_reference = F(SPEED_REFERENCE);
+            (*kind, cam)
+        })
+        .collect();
     // Where the first seat's path cars stood before the last tick (S81), which the picture blends from.
     let mut cars_before: Vec<game_sim::math::Mat4> = Vec::new();
     // The knockable props' bodies (S131), each by its scene model's place in the picture's list (found
@@ -5545,6 +5585,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 cam.cam.ceiling = mods.plane_eye_ceiling(i, Race::ceiling_for_fog(F(look.fog_far)));
                 cam
             }),
+            // And their own cars' (S246).
+            car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             camera_presets: Default::default(),
@@ -5579,6 +5621,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             camera,
             plane_camera,
             heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
+            car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
             camera_presets: Default::default(),
@@ -5956,6 +5999,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     if display != Display::Television {
         set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
         set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
+        set_car_display(&mut rigs, layout, display, &car_presets);
     }
     // The original's HUD (V26): its art off the disc, the world its radar covers, and which overlay is
     // up. Art that does not load stops the ride with the reason (V28) — it used to say so on stderr
@@ -6625,6 +6669,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("display: {}", display.name());
                     set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
                     set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
+                    set_car_display(&mut rigs, layout, display, &car_presets);
                 }
             }
         }
@@ -7249,6 +7294,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             camera: Race { cam: join_cameras.0.clone() },
                             plane_camera: join_cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
                             heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
+                            car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
                             wreck_camera: chase::WreckCamera::new(false),
                             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
                             camera_presets: Default::default(),
@@ -7354,6 +7400,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 (rects, view_frames) = views_of(frame.width, frame.height, layout, n);
                 set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
                 set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
+                set_car_display(&mut rigs, layout, display, &car_presets);
                 front.menu.opening = match opens_alone && n == 1 {
                     true => menu::Opening::Can,
                     false => menu::Opening::No,
@@ -7663,6 +7710,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 (rects, view_frames) = views_of(frame.width, frame.height, layout, n);
                 set_display(&mut rigs, layout, display, cpresets.as_deref(), plane_presets.as_deref());
                 set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
+                set_car_display(&mut rigs, layout, display, &car_presets);
                 if let join::Change::Join(_) = change {
                     let (seat, rig) = (&world.seats[n - 1], &mut rigs[n - 1]);
                     rig.follow(seat.garage.up);
@@ -8111,6 +8159,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 frame_rig(rig, &bike, &plane, framings(view));
                 let heli = heli_presets.as_deref().map(|b| layout_presets(b, layout, display, game_render::kiowa::PRESETS)).unwrap_or_default();
                 frame_heli(rig, &heli);
+                frame_cars(rig, &cars_for_display(layout, display, &car_presets));
             }
             // The seat's first frame (P163): each camera on the preset the seat's camera button last
             // left it on, unless the command line named one; under Mine Only, a camera on a preset
@@ -8157,8 +8206,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // the plane's, on its own file's.
             // With the field of view's ease over a framing change (P119), which is the camera's own.
             let flying = seat.garage.up == Kind::Biplane && rig.plane_camera.is_some();
-            let (follow, fov_ease, look_back) = match (seat.garage.up, &mut rig.plane_camera, &mut rig.heli_camera) {
-                (Kind::Biplane, Some(cam), _) | (Kind::Kiowa, _, Some(cam)) => (cam, &mut rig.fov_ease.1, &mut rig.look_back.1),
+            // A car has its own (S246), on its kind's presets, sharing the bike's slots.
+            let up = seat.garage.up;
+            let car = rig.car_cameras.iter_mut().find(|(k, _)| *k == up);
+            let (follow, fov_ease, look_back) = match (up, &mut rig.plane_camera, &mut rig.heli_camera, car) {
+                (Kind::Biplane, Some(cam), _, _) | (Kind::Kiowa, _, Some(cam), _) => (cam, &mut rig.fov_ease.1, &mut rig.look_back.1),
+                (_, _, _, Some((_, cam))) => (cam, &mut rig.fov_ease.0, &mut rig.look_back.0),
                 _ => (&mut rig.camera, &mut rig.fov_ease.0, &mut rig.look_back.0),
             };
             // The original's plane reset (the chord, a wreck's recovery) snaps the plane's camera onto
@@ -8226,7 +8279,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         _ if flying => menu::Machine::Biplane,
                         _ => menu::Machine::Bike,
                     };
-                    if let Some(f) = front.as_deref_mut()
+                    // A car's preset is its own file's (S246), which the seat's settings keep no
+                    // start for: it is not the bike's.
+                    if let Some(f) = front.as_deref_mut().filter(|_| seat.garage.up.car().is_none())
                         && f.menu.camera_left_on(i.min(menu::SEATS_MAX - 1), machine, &follow.cam.preset().name)
                     {
                         f.save();
@@ -9990,6 +10045,36 @@ fn frame_heli(rig: &mut Rig, heli: &[Preset]) {
         .collect();
     let mine_only = cycle == menu::cameras::Cycle::Mine;
     chase::reframe(cam, &chase::seat_presets(heli, rig.framing.0, &laid, mine_only), &mut rig.fov_ease.1);
+}
+
+/// A car kind's presets file (S246), [`chase::car_presets`] by the shell's kind.
+fn car_presets_file(kind: Kind) -> &'static str {
+    kind.car().and_then(Machine::car_physics).map_or("", chase::car_presets)
+}
+
+/// The cars' presets (S246) for `display`, each kind's off its file's bytes.
+fn cars_for_display(layout: Layout, display: Display, cars: &[(Kind, Vec<u8>)]) -> Vec<(Kind, Vec<Preset>)> {
+    cars.iter().map(|(kind, bytes)| (*kind, layout_presets(bytes, layout, display, car_presets_file(*kind)))).collect()
+}
+
+/// [`frame_rig`] for the cars' cameras (S246): each onto `cars`' presets for its kind, framed by the
+/// Camera page's one set as the bike's camera is, easing over on the bike's slot as its follow does.
+/// The seat's own presets are the bike's file's and are not laid over a car's.
+fn frame_cars(rig: &mut Rig, cars: &[(Kind, Vec<Preset>)]) {
+    for (kind, cam) in &mut rig.car_cameras {
+        if let Some((_, presets)) = cars.iter().find(|(k, _)| k == kind) {
+            chase::reframe(cam, &chase::seat_presets(presets, rig.framing.0, &[], false), &mut rig.fov_ease.0);
+        }
+    }
+}
+
+/// Every player's car cameras onto `display`'s copy of their presets, as [`set_heli_display`] puts
+/// the helicopter's (S246).
+fn set_car_display(rigs: &mut [Rig], layout: Layout, display: Display, cars: &[(Kind, Vec<u8>)]) {
+    let cars = cars_for_display(layout, display, cars);
+    for rig in rigs {
+        frame_cars(rig, &cars);
+    }
 }
 
 /// Every player's helicopter camera onto `display`'s copy of its presets, as [`set_display`] puts

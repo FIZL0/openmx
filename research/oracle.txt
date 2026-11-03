@@ -7838,3 +7838,23 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 #   in order at the port's distances bit for bit; 20,000 spheres through collide_against_search with lists of a
 #   sleeping prop alone / twice / after the nearest scene mesh / before the nearest sleeping prop match the port's
 #   walk (count, with, held, point, normal); 13 strikes wake as PropSet::struck.
+
+# --- S246: the cars' cameras (crates/openmx/src/chase.rs driven / car_presets, main.rs Rig.car_cameras;
+# game-sim car.rs turned_cofg; tests/car_camera.rs; watch/car-camera.toml; journal 2026-11-02-s246-car-camera)
+# camera_presets_by_kind 0x0020a1c0: one camera-preset object per machine kind, kind 1 BiplaneCPresets.ini,
+#   2 HeloCPresets.ini, 3 BuggyCPresets.ini, 4 MonsterTruckCPresets.ini, 5 FourWheelCPresets.ini (the baja).
+#   A car's camera is the race camera class on its kind's file; S149a's states have it on preset 0 ("Race Cam 1",
+#   distance baja 15, buggy 16, truck 25), speed reference 117.3328, height bias 3.0, all through the drive.
+# S149a switched states (car 0x00605270): car camera / its viewport (camera +0x7c): baja 0x14311a0 / 0x150a6d0,
+#   buggy 0x1411450 / 0x14dd310, truck 0x14514e0 / 0x152bc70. A second race camera (the bike's, cpresets.ini,
+#   distance 13) also points at the car's block and is never updated (snap stays 1).
+# The block is car +0x8a0 (+0x04 the writer's mask word), filled once a frame in the car's post after the measure:
+#   +0x10 point, +0x30 = +0x590 forward, +0x40 = +0x5a0 up, +0x50 = body +0x70 velocity, +0x60 = +0x580 local
+#   velocity, +0x80 = +0x570 world rates (the camera reads +0x84, the yaw, as its lean), +0xb0 = (+0x530 == 0),
+#   +0xb4 = max(+0x55c, 0).
+#   Baja/buggy (vt 0x0045cf80): post 0x003a02f0, writer 0x0039e9c0: point = body +0x50 + turn(body +0x170, body +0x180).
+#   Truck (vt 0x0045ed50): post 0x003e1710 stores car +0xfe0 = body +0x50 - turn(body +0x170, body +0x180), the
+#   origin; its writer 0x003e0410 copies that into the block's point.
+# Proved (tests/car_camera.rs): the port's block is the original's bit for bit on 1910 of 1950 captured ticks
+#   (the other 40 torn polls); replayed through game_sim::camera::Race on the car's file with the original's
+#   ground lift the eye is within 0.0017 ft and the view 2.2e-5 rad on 620 ticks per car.

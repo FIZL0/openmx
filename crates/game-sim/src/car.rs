@@ -1755,6 +1755,12 @@ pub fn travel_cofg(car: &Car, body: &mut crate::biplane::Body, last: &mut Vf, hu
     *last = cofg;
 }
 
+/// The body's centre of mass turned into the world by its orientation (the quaternion's turn of
+/// `+0x180` by `+0x170`): what the car's camera writers move the body point by (S246).
+pub fn turned_cofg(body: &crate::biplane::Body) -> Vf {
+    crate::chassis::turn(body.quat, body.cofg)
+}
+
 // --- the car step (S149d) --------------------------------------------------------------------------
 
 /// The angle (rad, 5°) whose cosine two of the probe's normals must agree past before it stops asking
