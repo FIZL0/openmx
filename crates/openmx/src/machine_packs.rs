@@ -287,6 +287,14 @@ impl Pack {
         Ok(Preset::parse_follow(&self.text(&self.cameras)?, view))
     }
 
+    /// One of the pack's camera files as SLUS-21104 reads it (MD84): `name` as `chase::mod_presets`
+    /// or `chase::mod_race_presets` spells it (`Cam\\FC_ATVDefault.pb`), one layout's presets read
+    /// whole by `game_sim::camera::Preset::read_layout`. `Err` when the pack lacks the file.
+    pub fn mod_presets(&self, name: &str, aspect: game_sim::camera::Aspect, viewport: game_sim::camera::Viewport) -> Result<Vec<game_sim::camera::Preset>, String> {
+        let ini = PhyIni::parse_bytes(&self.files.read(&member(name))?);
+        Ok(game_sim::camera::Preset::read_layout(&ini, aspect, viewport))
+    }
+
     /// The engine's sounds: the `.aud`'s lists with each `.vag` it names read from the pack's `Aud\`.
     /// A sound the pack lacks or openmx cannot decode is left out of its list, and named in the lines.
     pub fn engine_sounds(&self) -> Result<(BikeSounds, Vec<String>), String> {

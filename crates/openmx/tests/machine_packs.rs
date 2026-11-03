@@ -6,6 +6,9 @@
 //! **MD80d:** the same for the biplane and Kiowa pack (`import-atv fliers`): each of the eight skins'
 //! models, garage models, flier nodes, collision pair and textures, and each flier's `.phy`, cameras,
 //! sounds and particles.
+//!
+//! **MD84:** each pack holds its machines' own follow and race camera files, the ones
+//! `chase::mod_presets` and `mod_race_presets` name, and they read with `Preset::read_layout`.
 
 #[allow(dead_code)]
 #[path = "../src/machine_packs.rs"]
@@ -25,6 +28,12 @@ mod thread;
 #[allow(dead_code)]
 #[path = "../src/particles.rs"]
 mod particles;
+#[allow(dead_code)]
+#[path = "../src/vehicle.rs"]
+mod vehicle;
+#[allow(dead_code)]
+#[path = "../src/chase.rs"]
+mod chase;
 
 use game_render::quad;
 use game_render::skin::Skeleton;
@@ -178,5 +187,28 @@ fn the_fliers_phy_cameras_sounds_and_particles_read() {
         assert!(!emitters.is_empty());
         let lacking: Vec<&str> = emitters.iter().filter(|(_, e)| e.is_none()).map(|(e, _)| e.emitter.as_str()).collect();
         assert!(lacking.is_empty(), "{}: emitters without their .emt: {lacking:?}", f.particles);
+    }
+}
+
+#[test]
+fn each_pack_has_its_machines_own_follow_and_race_cameras() {
+    use chase::ModMachine;
+    use game_sim::camera::{Aspect, Viewport};
+    for (machine, of) in [("atv", vec![ModMachine::Atv]), ("fliers", vec![ModMachine::Biplane, ModMachine::Helicopter])] {
+        let Some(pack) = pack_of(machine) else { continue };
+        for m in of {
+            for file in [chase::mod_presets(m).to_owned(), chase::mod_race_presets(m)] {
+                let standard = pack.mod_presets(&file, Aspect::Standard, Viewport::Full).unwrap_or_else(|e| panic!("{machine}: {file}: {e}"));
+                assert_eq!(standard.len(), 8, "{file}: 4x3/1p presets");
+                assert!(standard.iter().all(|p| !p.name.is_empty()), "{file}: a preset with no name");
+                assert!(!pack.mod_presets(&file, Aspect::Wide, Viewport::Full).unwrap().is_empty(), "{file}: no 16x9/1p");
+            }
+        }
+        // The quad's follow file reads the same presets, in the same order, as the scene reader has it.
+        if machine == "atv" {
+            let read = pack.mod_presets(chase::mod_presets(ModMachine::Atv), Aspect::Standard, Viewport::Full).unwrap();
+            let follow = pack.cameras("4x3/1p").unwrap();
+            assert_eq!(read.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), follow.iter().map(|p| p.name.as_str()).collect::<Vec<_>>());
+        }
     }
 }
