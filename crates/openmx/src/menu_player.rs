@@ -103,6 +103,10 @@ impl Menu {
     /// player's control under it, if the player is up, worked as its pad button works it, with the
     /// sound a press makes. Whether it hit one.
     pub fn click(&mut self, at: [f32; 2], size: (usize, usize)) -> bool {
+        // P277: an option page's rows and its open dropdown
+        if self.click_page(at, size) {
+            return true;
+        }
         if !self.player_shown() {
             return false;
         }

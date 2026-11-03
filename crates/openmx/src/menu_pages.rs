@@ -283,6 +283,77 @@ impl Row {
     pub fn selectable(&self) -> bool {
         self.kind != Kind::Heading
     }
+
+    /// Whether the row is a dropdown (P277, opentennis's B498): a choice of [`LIST`] or more. A row
+    /// that picks something for a press to do (Load Preset, Save Over) keeps its left and right.
+    pub fn many(&self) -> bool {
+        self.kind == Kind::Choice && self.choices.len() >= LIST && !matches!(self.key, Key::LoadPreset | Key::CameraSaveOver | Key::Garage(_))
+    }
+
+    /// Whether Cross opens the row's dropdown now: a [`Row::many`] row that is not dimmed.
+    pub fn listed(&self) -> bool {
+        self.many() && self.off.is_none()
+    }
+}
+
+/// P277: rows with this many choices or more open a dropdown list on Cross; an On/Off row and every
+/// other two-way row keeps flipping on it.
+pub const LIST: usize = 3;
+
+/// P277: a dropdown choice's short hint, beside it in the list and the side panel, where the row's
+/// own has none.
+fn hint(key: Key, choice: &str) -> &'static str {
+    match (key, choice) {
+        (Key::Updates, "Ask") => "Square updates",
+        (Key::Updates, "Always") => "updates by itself",
+        (Key::Updates, "Never") => "never asks GitHub",
+        (Key::AspectRatio, "Auto") => "fills the window",
+        (Key::AspectRatio, "4:3") => "the original's television",
+        (Key::AspectRatio, "16:9") => "widescreen",
+        (Key::AspectRatio, "16:10") => "a laptop's shape",
+        (Key::AspectRatio, "21:9") => "ultrawide",
+        (Key::AspectRatio, "Stretch") => "fills, as Auto",
+        (Key::VideoPreset, "Auto") => "picks and tunes itself",
+        (Key::VideoPreset, "High") => "every shadow, far fog",
+        (Key::VideoPreset, "Medium") => "High with speed-ups",
+        (Key::VideoPreset, "Low") => "less detail, more fps",
+        (Key::VideoPreset, "Steam Deck") => "for the Deck's screen",
+        (Key::VideoPreset, "Phone") => "for phones and tablets",
+        (Key::VideoPreset, "Custom") => "your own mix",
+        (Key::DrawDistance, "Whole Map") => "everything, a light haze",
+        (Key::DrawDistance, "Farther Fog") => "eight times as far",
+        (Key::DrawDistance, "Far Fog") => "four times as far",
+        (Key::DrawDistance, "Original Fog") => "the game's haze",
+        (Key::TextureFiltering, "16x") => "sharpest far off",
+        (Key::TextureFiltering, "8x" | "4x") => "sharp, a little faster",
+        (Key::TextureFiltering, "2x") => "softer far off",
+        (Key::TextureFiltering, "Off") => "the original's blur",
+        (Key::Shadows, "Off") => "the ground's alone",
+        (Key::Shadows, "On") => "bikes, riders, machines",
+        (Key::Shadows, "All") => "the whole world too",
+        (Key::ShadowQuality, "Original") => "the game's soft patch",
+        (Key::ShadowQuality, "Low") => "cast onto everything",
+        (Key::ShadowQuality, "High") => "sharper up close",
+        (Key::RenderScale, "Auto") => "drops when frames run long",
+        (Key::RenderScale, "100%") => "the window's resolution",
+        (Key::RenderScale, "75%" | "50%") => "faster, softer",
+        (Key::RenderScale, "40%") => "fastest",
+        (Key::FrameLimit, "Off") => "as fast as it can",
+        (Key::FrameLimit, "30 fps") => "the ride's own rate",
+        (Key::FrameLimit, "Refresh rate") => "the display's",
+        (Key::Mix, "Game Mix") => "the original's",
+        (Key::Mix, "Rock-n-Roll Mix") => "music up, no crowd",
+        (Key::Mix, "Night-time Mix") => "no music, quiet",
+        (Key::Mix, "Engine Mix") => "no music, engines up",
+        (Key::Mix, "Custom Mix") => "your own sliders",
+        (Key::MusicPlays, "Shuffle") => "any song next",
+        (Key::MusicPlays, "In Order") => "down the list",
+        (Key::MusicPlays, "One Song") => "repeats the Song row's",
+        (Key::MusicPlays, "Off") => "no music",
+        (Key::CameraPreset, "All Presets") => "every camera at once",
+        (Key::HandlingPack, FIRST_TRICK_PACK) => "the first switched on",
+        _ => "",
+    }
 }
 
 /// A step `by` through `n` choices from `i`, round from either end.
@@ -368,7 +439,7 @@ impl Menu {
 
     /// A screen's rows, on the tab it is on.
     pub fn page_of(&self, screen: Screen) -> Vec<Row> {
-        match screen {
+        let mut rows = match screen {
             Screen::Settings => match self.tab(screen) {
                 TAB_RIDE => self.ride_rows(),
                 TAB_DISPLAY => self.display_rows(),
@@ -382,7 +453,61 @@ impl Menu {
             Screen::Mods => self.mods_rows(),
             Screen::Original => self.original_rows(),
             _ => Vec::new(),
+        };
+        // P277: each dropdown's choices with their short hints
+        for r in rows.iter_mut().filter(|r| r.many() && r.tips.is_empty()) {
+            let tips: Vec<&str> = r.choices.iter().map(|c| hint(r.key, c)).collect();
+            if tips.iter().any(|t| !t.is_empty()) {
+                r.tips = tips.into_iter().map(str::to_string).collect();
+            }
         }
+        rows
+    }
+
+    /// The open dropdown (P277): its row on the page shown and the choice it is on, while one is.
+    pub fn listing(&self) -> Option<(usize, usize)> {
+        let (screen, at, j) = self.listing?;
+        (self.screen() == Some(screen) && self.cursor(screen) == at).then_some((at, j))
+    }
+
+    /// Open the dropdown of the row the cursor is on, if it is one (P277; `--open-list`'s, for a
+    /// shot of an open list).
+    pub fn open_list(&mut self) {
+        let Some(screen) = self.screen() else { return };
+        let at = self.cursor(screen);
+        if let Some(r) = self.page_of(screen).get(at).filter(|r| r.listed()) {
+            self.listing = Some((screen, at, r.now.unwrap_or(0)));
+        }
+    }
+
+    /// One press while a dropdown is open (P277, opentennis's B498): up and down move round its
+    /// choices, Cross picks the one it is on and closes it, Circle closes it as it was; nothing else.
+    fn walk_list(&mut self, screen: Screen, p: Press) {
+        let Some((at, j)) = self.listing() else {
+            self.listing = None;
+            return;
+        };
+        let Some(row) = self.page_of(screen).into_iter().nth(at).filter(Row::listed) else {
+            self.listing = None;
+            return;
+        };
+        if p.up || p.down {
+            self.listing = Some((screen, at, cycle(j, if p.up { -1 } else { 1 }, row.choices.len())));
+        } else if p.ok {
+            self.listing = None;
+            self.pick(&row, j);
+        } else if p.back {
+            self.listing = None;
+        }
+    }
+
+    /// Choice `j` of a dropdown's `row` picked (P277): set as stepping onto it would set it. A choice
+    /// that is only shown (the Preset's Custom), or One Song with no song to repeat, changes nothing.
+    pub(super) fn pick(&mut self, row: &Row, j: usize) {
+        if row.now == Some(j) || j >= row.choices.len() {
+            return;
+        }
+        self.change_to(row, Press { ok: true, ..Press::default() }, Some(j));
     }
 
     /// Whether a screen is an option page.
@@ -1307,6 +1432,10 @@ impl Menu {
             self.answer_over(p);
             return;
         }
+        if self.listing.is_some() {
+            self.walk_list(screen, p);
+            return;
+        }
         if p.back || (screen == Screen::Garage && p.start) {
             match screen {
                 Screen::Garage => self.close_garage(),
@@ -1346,14 +1475,25 @@ impl Menu {
         if !(p.ok || p.left || p.right) || rows[at].off.is_some() {
             return;
         }
+        // P277: Cross opens a many-choice row's list on the choice it is on; left and right still
+        // step it, unopened.
+        if p.ok && rows[at].listed() {
+            self.listing = Some((screen, at, rows[at].now.unwrap_or(0)));
+            return;
+        }
         self.change(&rows[at], p);
     }
 
     /// Change a row by a press.
     fn change(&mut self, row: &Row, p: Press) {
+        self.change_to(row, p, None);
+    }
+
+    /// Change a row by a press, or to choice `pick` of a dropdown's (P277).
+    fn change_to(&mut self, row: &Row, p: Press, pick: Option<usize>) {
         let side = p.left || p.right;
         let d = by(p);
-        let next = |row: &Row| cycle(row.now.unwrap_or(0), d, row.choices.len());
+        let next = |row: &Row| pick.unwrap_or_else(|| cycle(row.now.unwrap_or(0), d, row.choices.len()));
         // the modifiers page's Player row, and whether it is the host's with All Players (P134)
         let mods_players = (self.screen() == Some(Screen::Modifiers)).then(|| self.mods_own().is_none());
         // P223: a row the presets set, changed by hand (here or by the Original switch), ends Auto.
@@ -1427,7 +1567,14 @@ impl Menu {
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
             Key::ShowFps => s.show_fps = !s.show_fps,
-            Key::FrameLimit => s.frame_limit = s.frame_limit.step(p.left),
+            Key::FrameLimit => s.frame_limit = pick.and_then(|j| FrameLimit::ALL.get(j).copied()).unwrap_or_else(|| s.frame_limit.step(p.left)),
+            Key::VideoPreset if pick.is_some() => {
+                let j = pick.unwrap_or(0);
+                if j + 1 >= row.choices.len() {
+                    return;
+                }
+                super::video::set_row(s, j);
+            }
             Key::VideoPreset => {
                 // Custom is shown, never stepped onto: past it is Auto again.
                 let (n, from) = (row.choices.len() - 1, row.now.unwrap_or(0));
@@ -1443,7 +1590,13 @@ impl Menu {
             Key::Mix => s.set_mix(Mix::ALL[next(row)]),
             // Cross steps a slider up and round from the top, as the original's page does.
             Key::Level(i) => s.nudge(i, p.left, p.right),
+            Key::MusicPlays if pick.is_some() => {
+                if !self.play_choice(pick.unwrap_or(0)) {
+                    return;
+                }
+            }
             Key::MusicPlays => self.music_plays(d),
+            Key::Song if pick.is_some() => self.pick_song(pick.unwrap_or(0)),
             Key::Song if side => self.step_song(d),
             Key::SkipSong if p.ok => {
                 self.music_held = false;
@@ -1498,7 +1651,10 @@ impl Menu {
                 self.settings.camera_sets[seat].clear_disc_looks();
             }
             Key::CameraPreset => {
-                self.step_camera_pick(d);
+                match pick {
+                    Some(j) => self.camera_pick = j,
+                    None => self.step_camera_pick(d),
+                }
                 return;
             }
             Key::CameraOwn(i) => {
@@ -1632,6 +1788,16 @@ impl Menu {
                 break;
             }
         }
+        self.play_choice(at);
+    }
+
+    /// Music Plays set to its choice `at` (P277's pick, and a step's): whether it could be, One Song
+    /// needing a song to repeat.
+    fn play_choice(&mut self, at: usize) -> bool {
+        let one = self.music_now.clone().or_else(|| self.song_at().map(str::to_string));
+        if at == PLAYS_ONE && one.is_none() {
+            return false;
+        }
         self.settings.music = match at {
             0 => "shuffle".into(),
             1 => "order".into(),
@@ -1645,6 +1811,16 @@ impl Menu {
                 id
             }
         };
+        true
+    }
+
+    /// The Song row's song `i` picked from its list (P277): the one repeated, and it plays.
+    fn pick_song(&mut self, i: usize) {
+        let Some((id, _)) = self.music_choices.get(i) else { return };
+        let id = id.clone();
+        self.music_at = i;
+        self.settings.music = id.clone();
+        self.tunes.push(Tune::Play(id));
     }
 
     /// The Song row stepped: the next song is the one repeated, and plays.

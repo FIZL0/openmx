@@ -2252,6 +2252,8 @@ struct Args {
     screen: Option<menu::Screen>,
     /// `--screen`'s tab of Settings or the Garage, when its word names one (P123).
     screen_tab: Option<usize>,
+    /// `--open-list`: the dropdown of the row `--screen` opens on, open (P277's shot).
+    open_list: bool,
     /// Which wiring flags were given, so the front end's `controls.txt` fills in only the others.
     wiring_flags: (bool, bool),
     /// `--online NAME@HOST:PORT`, `--peer NAME@HOST:PORT` (each other machine) and `--seats
@@ -2837,6 +2839,9 @@ async fn front_end(args: Args) -> Result<(), String> {
             None => front.menu.open(screen),
         },
         None => front.menu.splash(),
+    }
+    if args.open_list {
+        front.menu.open_list();
     }
     // `--screen store` (P198's browser check) opens the store without Browse's ask for its listing.
     if front.menu.screen() == Some(menu::Screen::Store) {
@@ -11938,6 +11943,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         ride_flag: false,
         screen: None,
         screen_tab: None,
+        open_list: false,
         wiring_flags: (false, false),
         fps: false,
         renderer: Backend::default(),
@@ -11973,6 +11979,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         match a.as_str() {
             "--ride" => {}
             "--menu" => args.menu = true,
+            "--open-list" => args.open_list = true,
             "--where" => args.where_only = true,
             // P191: the updater asks nothing this run (a flag the browser's build takes and ignores)
             "--no-update-check" => {
@@ -12436,7 +12443,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      \x20      remembered in the data folder, else a picker asks; --where says which, and\n\
                      \x20      where settings.txt, controls.txt and mods/ are; --no-update-check: the main\n\
                      \x20      menu doesn't ask GitHub for a newer build this run)\n\
-                     openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause|TAB]]\n\
+                     openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause|TAB [--open-list]]]\n\
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
