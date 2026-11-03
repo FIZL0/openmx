@@ -42,6 +42,11 @@ the list sub-database's virtuals, the link pool and the overlaps. `atv_spatial::
 12,000 generated databases laid in the image's free RAM, and on the image's own database, run once as it
 is and once with a portal laid in. Everything read back is equal. The quadtree sub-database is not ported.
 
+MD89 (`8-spatial-move.md`, "MD89"): the quadtree sub-database's pick/in/move/out are ported as
+`atv_spatial::Tree`. A third of the 12,000 generated cases now file the mover in trees (nodes made and
+freed, chunks freed, heights widened, queries closed, the entry's halfword cleared). The image's own
+4,264-node tree is moved in by the three vehicles' spheres. Everything read back is equal.
+
 MD75c2 (`9-part-sync.md`): `atv_part_sync` is ported in `atv_sync.rs`, covering the node frame, the ray
 probe's and the mesh's stands, and both boxes. `quad::Steps` answers `Call::PartSync` and sends the box on as
 `Call::PartMove`, which `atv_spatial::Answers` moves. `Oasis` answers `Call::Gather` round the active part.

@@ -117,7 +117,7 @@ pool takes a link in this order: the last chunk's next link, then the free chain
   `Steps` or the `atv_quad.rs` tests. Those tests keep logging the call as the original's callee, as before.
 - **Only list sub-databases are ported.** The first sub-database in the image's cells is the static
   quadtree (vtable `0x003b6700`), which `broad_phase` reads. A moving entry never goes in there in the image.
-  `Sub::list()` panics with a message if one would.
+  `Sub::list()` panics with a message if one would. (MD89 has since ported the quadtree; see below.)
 - **Trees only.** The generator builds trees of cells, because the original's walk does not end on a
   three-cell loop that the segment crosses all the way round.
 - **The image has no portals.** So the walk, the reach and the pool are proved on generated databases. The
@@ -126,7 +126,8 @@ pool takes a link in this order: the last chunk's next link, then the free chain
 ## Not verified / not 1:1
 
 - The quadtree sub-database's virtuals (pick/in/out/move for vtable `0x003b6700`) are not ported. An entry
-  of kind bit 0 in a cell whose first sub-database is the quadtree panics in the port.
+  of kind bit 0 in a cell whose first sub-database is the quadtree panics in the port. (Ported by MD89,
+  below.)
 - The reach's 35 stack slots are not checked by the original. The port's list grows instead, so a database
   that reaches past 35 cells would differ: the original overwrites its stack.
 - Heap failure is not modelled. When the heap fails, the original's chunk call returns 0 and it writes
@@ -139,3 +140,131 @@ pool takes a link in this order: the last chunk's next link, then the free chain
   not ported. `Space` starts empty, and with no cell a move does nothing.
 - The cells and portals of real levels (the image has three cells and no portals) have not been seen. The
   generated portals are squares; the original reads any four corners.
+
+# MD89: the quadtree sub-database's moving-entry virtuals
+
+2026-11-03. Task: `./kit plan MD89`.
+
+The quadtree (vtable `0x003b6700`) is now a sub-database the move can use: `atv_spatial::Sub::Tree`. Its
+pick (vt `+0x20`), in (`+0x24`), move (`+0x28`) and out (`+0x2c`) are ported as `Tree::pick`, `put`, `moved`
+and `take_out`. Only a sub-database the tests do not read is still `Sub::Other`, and a move into one still
+panics. The fields and offsets are in `research/oracle.txt` under "MD89".
+
+## What the original does
+
+- **Pick** ignores the slot it is handed. It takes the box's corners less the tree's origin. If they do not
+  lie wholly in `0..extent` both ways, it answers 0 (no clamp, unlike the static build's key). Otherwise it
+  turns them into cells: `cvt.w` of the corner times the scale, plus 1 on the far side. The level is the
+  first whose node side is more than the box's width and depth, or the deepest. The corners are masked to
+  that side. If they still span more than one node, it goes up one level (corners at twice the side). The
+  key packs the level, the corner nodes the box spills into (0x10, 0x20 in z, 0x40 in x, 0x80 both) and
+  the corner cell. Its x and z are clamped to 0x7fff, and the unpack keeps bits 3..14 of each.
+- **In** does nothing for key 0. It closes an open query, counts the entry in (`+0x888`), marks the tree
+  as the current one, and clears the entry's first halfword. Then, under each corner the key names, the
+  root and every node down to the key's level are widened to the box's height (`cy ± hy`). A node with
+  no children is grown (reallocated to 36 bytes, children after it), and a missing child is made on the
+  way. Each node made counts in `+0x880`. The entry goes in the node's first empty slot, or into a new
+  pool link chained at the end.
+- **Move** only widens: the root, then each node down each corner, stopping at a node with no children.
+  It does nothing if the key is 0 or the box is upside down (`!(lo <= hi)`). It neither closes the query
+  nor counts.
+- **Out** does nothing for key 0. It closes an open query and counts the entry out. Under each corner it
+  walks down, skipping a corner whose walk meets a missing node. At the leaf it clears the entry from the
+  first chunk that holds it (every slot of it), frees that chunk to the pool if it is left empty, and
+  stops. A leaf left with no chunks and no children is freed (`+0x880` less one) and its parent's child
+  cleared. Heights are never narrowed.
+- **The callers** (MD75c1's walk and overlaps) only change where a pick of 0 counts. A newly reached cell
+  whose tree has no key for the box is skipped: no in, no link. The carried kind is still that tree's. A
+  walk into a new cell calls in whatever the key; in returns at once on 0.
+
+## The port
+
+- `Tree` keeps its nodes by index (`Option<Node>`; a freed one is `None`). Trees compare from the root
+  down, so node numbers do not count. Heights are compared bit for bit, and so are the chunks (pool links)
+  and their four entries.
+- A tree record's or extra's place is `Place::Key(key)`; a list's is `Place::Slot(SlotAt)`.
+- `Database::unmarked` is the set of entries whose first halfword a tree's put has cleared. The model keeps
+  nothing else of the entry's own memory.
+- Closing the query is `Pool::reset` on the query pool, plus the walk words and cells set as the original
+  leaves them. What an open query is, is not ported: no query ever runs here.
+
+## Proof
+
+`crates/game-sim/tests/atv_spatial.rs`, against `atv-r-spawn.ee.bin`:
+
+- **`the_spatial_move_is_the_originals`** keeps its 12,000 cases. A third of them now have a tree as every
+  cell's first sub-database (kind 1, sometimes 3), and 30% of those trees are shared with the previous cell,
+  as the image's two cells share theirs.
+  - **The trees.** Origin −6..−10, extent 12–20, so some boxes fall outside. The deepest level is 0–6, and
+    one tree in ten has a scale 1.5 times too fine, so the 0x7fff clamp is reached. A chunk pool has stride
+    0x14/0x18/0x20 and 4–16 links a chunk. The query pool is random, the query is open half the time, and
+    the walk and cells words are random.
+  - **What is in them.** Up to 16 other entries are put in by the port and 30% are taken out again, which
+    leaves freed nodes and a free chain. Then the mover's home and extras are put in: half of the time
+    with the move's own half box, at the last centre or near it. 3% of halves are upside down, and a box's
+    sides are tiny, a few feet, or most of the tree.
+  - **Laying and reading.** Each tree is laid as the original keeps it: 20-byte nodes, 36 bytes with their
+    children after them, the node vtable, chunks as pool links. The heap's file-and-line allocate and free
+    are served too. Each entry's first halfword is laid as 0xa5a5. Read back from the root, the tree must
+    be the port's. The entries whose halfword the original cleared must be the port's `unmarked`. The
+    allowed writes are the area, the stack and the current-tree word.
+  - **Result.** All equal. Tree paths seen:
+    - the mover's home key: 575 same (moved), 916 another key (out and in), 344 out of its cell's tree, 237
+      into another cell's, 808 no key for the box;
+    - extras: 791 cases with an extra in a tree, 355 with the mover twice in one tree;
+    - nodes: 1,503 made, 846 freed;
+    - chunks: 1,129 freed, 143 off the heap;
+    - 728 queries closed, and 299 trees changed only in height.
+
+    The test fails if any of these paths is taken fewer than 10 times. The list paths are as before (9,213
+    stayed, 2,180 walked, 607 no cell, …).
+- **`the_images_tree_moves_as_the_original`** moves the three vehicles' spheres in the image's own tree
+  (4,264 nodes, 7,238 chunks, shared by cells `0x006545c0` and `0x00654680`), with half 40 and reach 40.
+  The whole database is read back each time:
+  - the player's quad (key `0x780900f5`), moved 0.5 ft up: the same key, nodes widened;
+  - the player's quad moved 300 ft along x and −150 ft along z: out of four corners and into key
+    `0x880880f5`, two nodes made;
+  - the player's quad moved 900 ft up: the same key, the root widened from 0 ± 1000 to 31.2 ± 1031.2;
+  - each of the two parked vehicles (key `0x15`, last centre at the origin) moved to the origin: the box
+    has no key, so out and nothing put in (stamp −1);
+  - each of the two parked vehicles moved to the player's sphere: key `0x7c090035`.
+
+  All are equal to the port's.
+- **Mutations**, one at a time on the port, were all caught:
+  - move does not widen the root;
+  - out keeps an emptied node;
+  - pick never goes a level up;
+  - pick clamps to 0x8000;
+  - unfile does not stop after the chunk that held the entry (caught only after shared trees were added to
+    the generator);
+  - the overlaps enter a cell on key 0;
+  - close keeps the query pool;
+  - put marks on key 0;
+  - widen ignores `lo`;
+  - put does not count.
+
+`./kit check -- -p game-sim --test atv_quad --test atv_gather --test atv_search --test atv_spatial`: 69
+passed. Run directly, none of them skip.
+
+## Decisions
+
+- **Empty chunks are never generated.** The original's unfile frees an empty chunk it meets before the
+  entry and walks on from a pointer it just freed. The port frees it and goes on to the next one. The tree
+  itself never leaves an empty chunk (out frees a chunk it empties), so this path is unreachable from the
+  tree's own calls. It is not modelled bit for bit.
+- **A missing child on the move's walk panics.** In a tree the original built, the nodes down a filed key
+  are all there: an emptied node is only freed when it has no children, and the entry under the key holds
+  its leaf. The original would read through address 0.
+- **The current-tree word is not modelled.** It only steers the node count, which the port keeps on its
+  own tree.
+
+## Not verified / not 1:1
+
+- Queries (what makes `+0xc` bit 0 set and fills the walk words) are not ported. Only closing one is.
+- A node free with the tree's `+0x98` bit 0 set (keep chunks) is not generated: a freed node never has
+  chunks on this path.
+- `atv_world`'s own refiling of a vehicle in its tree (`refile`) still simplifies out and in: no chunk or
+  node freeing, no heights. Filed as MD90.
+- No capture of the original in play. The image's spheres were moved by hand, by the original and the
+  port alike.
+
