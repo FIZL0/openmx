@@ -437,9 +437,18 @@ fn held(cap: &Rows, seed: [[u32; 3]; 2], ticks: &[Tick]) -> usize {
             (0..2).all(|v| (0..3).all(|a| pair.iter().any(|s| s[v][a] == row[v][a])))
         };
         // A row read inside integrate carries the centre it rebuilds from the transform before the
-        // final one is written ([torn rows]): its velocity reads a state, its centre none.
+        // final one is written ([torn rows]): its velocity reads a state, its centre none. Failing
+        // that, the velocity can be torn too, between the state and the one before, axis by axis,
+        // with the centre a few thousandths off the one before (S228b1: 137464 and 137638 read the
+        // new x and the old y and z).
         let rebuilt = |j: usize| (0..3).all(|a| states[j][0][a] == row[0][a]);
-        match (at..(at + 3).min(states.len())).find(|&j| reads(j)).or_else(|| (at..(at + 3).min(states.len())).find(|&j| rebuilt(j))) {
+        let torn = |j: usize| {
+            let pair = [states[j.saturating_sub(1)], states[j]];
+            let near = (0..3).all(|a| (f32::from_bits(row[1][a]) - f32::from_bits(pair[0][1][a])).abs() < 0.05);
+            near && (0..3).all(|a| pair.iter().any(|s| s[0][a] == row[0][a]))
+        };
+        let window = at..(at + 3).min(states.len());
+        match window.clone().find(|&j| reads(j)).or_else(|| window.clone().find(|&j| rebuilt(j))).or_else(|| window.clone().find(|&j| torn(j))) {
             Some(j) => at = j,
             None if r <= from + 1 && at == 0 => {} // a row before the image's state reached it
             None => break,
@@ -520,16 +529,15 @@ fn p1_rides_each_event_as_the_original() {
 ///   off a respawn spot the port does not place the same.
 /// - **a preload's force** (138810 at 138907): the stick thrown forward on a lip; the force is the
 ///   flick's speed, whose sampling is the port's own (`ride::Flick`).
-/// - **a chassis contact the port does not make** (137410 at 137462, the stick full left; 137610 at
-///   137637, the stick coming off centre under gas): the capture's chassis force and moment go
-///   non-zero there on the ground, the port's stay zero.
-///
 /// The ground step's donut read its own angle off the stick until S228b, not the trick decoder's
 /// look the original reads: 136610, 137910, 138010, 138110, 138210, 138310, 138710 and 139310 parted
-/// there and hold now.
+/// there and hold now. 137410 and 137610 held to 137462 and 137637 until S228b1. That was not a contact: those
+/// two rows (137464, 137638) were read inside integrate with the velocity torn as well as the centre
+/// rebuilt ([`held`]). From the images at 137462 and 137637 the original's own `bike_ground_step` gives
+/// the port's tick bit for bit, and the rows after confirm it.
 const HELD: [(u32, usize); 35] = [
     (136510, 100), (136610, 100), (136710, 100), (136810, 100), (136910, 100), (137010, 100), (137110, 100),
-    (137210, 100), (137310, 0), (137410, 52), (137510, 100), (137610, 27), (137710, 100), (137810, 100),
+    (137210, 100), (137310, 0), (137410, 100), (137510, 100), (137610, 100), (137710, 100), (137810, 100),
     (137910, 100), (138010, 100), (138110, 100), (138210, 100), (138310, 100), (138410, 100), (138510, 0),
     (138610, 74), (138710, 100), (138810, 97), (138910, 100), (139010, 100), (139110, 31), (139210, 100),
     (139310, 100), (139410, 100), (139510, 0), (139610, 100), (139710, 36), (139810, 100), (139910, 0),
@@ -688,7 +696,7 @@ const SETTLE: u32 = 30;
 
 /// The riding ticks [`the_drawn_rider_leans_as_the_original_through_the_turns`] compares, and of
 /// those the hard-turn ones (the original's head 0.5 ft or more to a side of its pelvis).
-const DRAWN_TICKS: (usize, usize) = (1675, 274);
+const DRAWN_TICKS: (usize, usize) = (1793, 274);
 
 /// **S228a — the drawn rider's lean through the tape's turns, as drawn.** Every stretch of [`HELD`]
 /// that holds past [`SETTLE`] is ridden by [`ride_drawn`], the drawn rider beside it as the shell
