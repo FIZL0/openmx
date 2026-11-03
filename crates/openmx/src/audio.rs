@@ -3526,6 +3526,81 @@ impl DriveOn {
     }
 }
 
+// --- the material table's collision sounds (F27) -----------------------------------------------------
+
+/// One material's collision sound, out of a track's `Col\template.cmt`.
+#[derive(Clone, Debug, Default)]
+pub struct HitMaterial {
+    pub id: u8,
+    /// `CollisionSoundFile`.
+    pub clip: Option<Arc<Clip>>,
+    /// `CollisionMinDistance` / `CollisionMaxDistance`.
+    pub near: f32,
+    pub far: f32,
+    /// `CollisionMinImpulse` (0 when left out) and `CollisionMaxImpulse` (1).
+    pub min_impulse: f32,
+    pub max_impulse: f32,
+}
+
+/// A track's collision materials and its `[Settings]` `SolidFoliageID`. The original's loader keeps
+/// only the IDs the track's meshes use; every one is read here, as a material no mesh has is never
+/// struck.
+#[derive(Clone, Debug, Default)]
+pub struct HitTable {
+    pub materials: Vec<HitMaterial>,
+    pub foliage: u8,
+    /// The materials as [`game_sim::material_hit::play`] reads them, in the same order.
+    pub rule: Vec<game_sim::material_hit::Material>,
+}
+
+impl HitTable {
+    pub fn read(text: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> HitTable {
+        let sections = ini::parse(text);
+        let settings = sections.iter().find(|s| s.name.eq_ignore_ascii_case("Settings"));
+        let foliage = settings
+            .and_then(|s| s.get("SolidFoliageID"))
+            .and_then(|v| u8::try_from(v.trim().parse::<i32>().ok()?).ok())
+            .unwrap_or(0);
+        let materials: Vec<HitMaterial> = sections
+            .iter()
+            .filter(|s| !s.name.eq_ignore_ascii_case("Settings"))
+            .filter_map(|s| {
+                let id = u8::try_from(s.get("ID")?.trim().parse::<i32>().ok()?).ok()?;
+                Some(HitMaterial {
+                    id,
+                    clip: s.get("CollisionSoundFile").and_then(|n| lib(n)),
+                    near: s.number("CollisionMinDistance").unwrap_or(0.0),
+                    far: s.number("CollisionMaxDistance").unwrap_or(0.0),
+                    min_impulse: s.number("CollisionMinImpulse").unwrap_or(0.0),
+                    max_impulse: s.number("CollisionMaxImpulse").unwrap_or(1.0),
+                })
+            })
+            .collect();
+        let rule = materials
+            .iter()
+            .map(|m| game_sim::material_hit::Material {
+                id: m.id,
+                min_impulse: F(m.min_impulse),
+                max_impulse: F(m.max_impulse),
+            })
+            .collect();
+        HitTable { materials, foliage, rule }
+    }
+
+    /// **Plays a frame's hits** ([`game_sim::material_hit::play`]'s sounds): each a new voice at its
+    /// level, where its owner is, heard between the material's distances. A hit does not stop the
+    /// last one of its material, so they sound over each other.
+    pub fn sound(&self, m: &mut Mixer, hits: &[game_sim::material_hit::Sound]) {
+        for h in hits {
+            let Some(mat) = self.materials.get(h.material) else { continue };
+            let Some(clip) = mat.clip.clone() else { continue };
+            let at = [h.at.x(), h.at.y(), h.at.z()];
+            let play = Play { gain: h.level as f32 / 100.0, at: Some(at), near: mat.near, far: mat.far, ..Play::default() };
+            m.play(clip, play);
+        }
+    }
+}
+
 // --- the shell's sound ------------------------------------------------------------------------------
 
 /// What one seat hands the sound each frame.
@@ -4056,6 +4131,13 @@ impl Reading<'_> {
         let text = self.text(track_res, "col\\template.cmt");
         let lib = &mut *self.lib;
         DriveOnTable::read(&text, &mut |n| lib.clip(n))
+    }
+
+    /// A track's collision sounds, out of the same `Col\template.cmt` (F27).
+    pub fn hits(&mut self, track_res: &str) -> HitTable {
+        let text = self.text(track_res, "col\\template.cmt");
+        let lib = &mut *self.lib;
+        HitTable::read(&text, &mut |n| lib.clip(n))
     }
 
     /// The Kiowa's engine (V114): `otherengine.aud`'s `[Helicopter]` in the machines' archive.
