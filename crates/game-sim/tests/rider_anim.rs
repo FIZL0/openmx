@@ -2019,7 +2019,8 @@ mod two_p_poses {
             pad.connected = true;
             let mut events = EventQueue::new();
             let mut ticks = vec![];
-            let mut hands = vec![F::ZERO];
+            // Each row's levers off the pad, for the reverse rule two rows on.
+            let mut levers = vec![Controls::default()];
             for row in 1..cap.rows.len() {
                 // A 2p row's dt is the next frame's: this tick ran on the last row's.
                 let dt = F(c.f(row - 1, "dt"));
@@ -2034,7 +2035,19 @@ mod two_p_poses {
                 }
                 let (speed, up) = (F(c.f(row - 1, &n("req_axes.z"))), c.u(row - 1, &n("airborne")) != 0);
                 let controls = Controls::from_pad(&pad).reverse_rule(speed, up);
-                hands.push(controls.reverse);
+                levers.push(Controls::from_pad(&pad));
+                // The body's reverse command (F13): the rule on the pad and the speed of two rows back,
+                // for both riders. The port's tick reads the row before's pad (PAD_LEADS) and its body
+                // asks with the command the tick before left ([`game_sim::rider::PutBack::reverse`]).
+                // Every one of the capture's 33/34 entries and exits but the speed-led ones comes two
+                // rows after the pad row this loop polls the change on.
+                let reversing = match row.checked_sub(2) {
+                    Some(back) => {
+                        let (speed, up) = (F(c.f(back, &n("req_axes.z"))), c.u(back, &n("airborne")) != 0);
+                        levers[back].reverse_rule(speed, up).reverse
+                    }
+                    None => F::ZERO,
+                };
                 r.held = c.u(row, &n("req_placing")) != 0;
                 r.phase_axis = F(c.f(row, &n("req_axes.x")));
                 r.mix_axis = F(c.f(row, &n("req_axes.y")));
@@ -2053,7 +2066,7 @@ mod two_p_poses {
                     wreck: c.u(row, &n("req_wreck")) != 0,
                     countdown: F::ZERO,
                     throttle: controls.gas,
-                    reversing: hands[hands.len() - 1 - rider.lag()],
+                    reversing,
                     gesture: id.slot().map_or(SLOTS as i32, |s| s as i32),
                     spin: None,
                 };
@@ -2130,8 +2143,9 @@ const TWO_P_PARTS: [&[(u32, (i32, i32), (i32, i32))]; 2] =
     [&[(134857, (30, 1), (35, 1))], &[(140364, (30, 1), (40, 2))]];
 
 /// The ticks of each rider whose machine played the original's state and mode, its ramp as well,
-/// bit for bit (V90).
-const TWO_P_SAME: [(usize, usize); 2] = [(12880, 11864), (12875, 11891)];
+/// bit for bit (V90). F13 put the reverse command a tick behind the pad read, which took every 33/34
+/// entry and exit of both riders onto the original's tick.
+const TWO_P_SAME: [(usize, usize); 2] = [(12884, 11896), (12879, 11951)];
 
 /// **V90 — the 2p riders' poses against the original's.** Each rider's body machine
 /// ([`Body::mode`] and [`Body::frame_clocked`] on the drawn rider's own clip table) is driven by the
@@ -2277,7 +2291,7 @@ fn the_2p_riders_joints() {
 
 /// The ticks of each rider where the port played the original's state and mode, and of those the
 /// ones whose drawn joints are the original's within V12's 1e-4 (this row or either side of it).
-const TWO_P_DRAWN: [(usize, usize); 2] = [(12244, 9959), (12463, 6428)];
+const TWO_P_DRAWN: [(usize, usize); 2] = [(12248, 9971), (12549, 6502)];
 
 /// **V90 — the 2p riders' drawn joints, tick by tick.** The same replay as
 /// [`the_2p_riders_poses`], with the drawn rider posed off each tick's frame
@@ -2408,7 +2422,7 @@ fn the_2p_eased_axes_step_as_the_ports_lag() {
 /// eased mix and phase the port's own run left bit for bit, and the ones whose drawn joints are within
 /// 1e-4 posed off the port's eased axes and off the original's (seeded).
 const TWO_P_EASED_POSES: [(usize, usize, usize, usize, usize); 2] =
-    [(12234, 11526, 11409, 9956, 10156), (12452, 6458, 3823, 6242, 7736)];
+    [(12238, 11526, 11413, 9968, 10158), (12538, 6532, 3866, 6316, 7812)];
 
 /// **C11 — V90's blended arms against the original's eased axes.** V90's replay of both riders'
 /// bodies, on C11's capture: each tick the port's eased mix and phase are held against the original's
@@ -2612,7 +2626,7 @@ fn the_2p_fades_start_from_the_ragdolls_nodes() {
         println!("P{}: {} fading ticks within 1e-4; the port's own snapshot is {worst_own} out", k + 1, fading[k]);
         assert!(worst_own > 0.1, "P{}: the port's own snapshot should part on these ticks", k + 1);
     }
-    assert_eq!(fading, [14, 50], "fading ticks with the ramp bit for bit, P1 then P2");
+    assert_eq!(fading, [42, 50], "fading ticks with the ramp bit for bit, P1 then P2");
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -2689,3 +2703,4 @@ fn the_fly_riders_drawn_lean_is_the_originals() {
     assert!(by[n / 2] <= 1e-3, "the median leaning tick is {} off the original's", by[n / 2]);
     assert!(by[n - 1] <= 0.8, "a leaning tick {} off the original's", by[n - 1]);
 }
+

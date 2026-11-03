@@ -176,6 +176,11 @@ pub struct PutBack {
     /// The rider was down as of the last fill. The body's view of the wreck lags the machine by the
     /// fill, which sits before the machine's verdict.
     pub wreck: bool,
+    /// The reverse command ([`ride::Held::reverse`]) as the bike's update found it at its top: last
+    /// tick's, which is what the body asks with (F13). The original's body runs the reverse pair from
+    /// the row after its pad read raises the command (P72), and in V90's 2p capture every 33/34 entry
+    /// and exit of both riders is the rule on the pad and the speed of two rows back.
+    pub reverse: bool,
 }
 
 impl PutBack {
@@ -680,6 +685,8 @@ impl Rider {
             put_back, ragdoll_shown, score, bike_col, fifty, cars, ..
         } = self;
         *ragdoll_shown = None;
+        // 0b — the reverse command the body asks with this tick is the one the last tick left (F13).
+        put_back.reverse = ride.held.reverse != F::ZERO;
         let mut sense = *sense;
         // The wreck emitters' clips play on through the tick (S173).
         wreck_clocks.age(dt);
@@ -1329,7 +1336,8 @@ impl Rider {
     /// | airborne | the bike's own verdict, [`crate::air::Air::airborne`] |
     /// | the no-hander | [`crate::trick::Tricks::no_hander`] |
     /// | a wreck | the ride state machine had a reason as of the request's fill, a tick behind its verdict ([`PutBack::wreck`], S91) |
-    /// | the throttle, reverse | the controls, unfiltered |
+    /// | the throttle | the controls, unfiltered |
+    /// | reverse | the pad read's reverse command as the last tick left it ([`PutBack::reverse`], F13) |
     /// | the phase axis | [`Rider::packed_pose`]: [`motion::Driver::pose`] as the state pack latched it, in front of this tick's header (S112) |
     /// | the mix axis | [`Rider::packed_fore_aft`], [`motion::Driver::fore_aft`] latched the same way; [`rider_anim::FULL_FORWARD`] through a front flip (P159) |
     /// | the band the grid's rows are cut out of | the contact velocity's forward lane, [`crate::air::Air::contact_vel`]'s z (S112) |
@@ -1397,7 +1405,8 @@ impl Rider {
             wreck: put_back.wreck,
             countdown: gate.countdown,
             throttle: c.gas,
-            reversing: ride.held.reverse,
+            // A tick behind the pad read (F13, [`PutBack::reverse`]).
+            reversing: if put_back.reverse { F::ONE } else { F::ZERO },
             gesture: tricks.requested.slot().map_or_else(|| pack_state(lib, tricks.requested), |s| s as i32),
             spin: spin_state(lib, ride),
         };
