@@ -22,8 +22,10 @@ use crate::vehicle::{Garage, Kind};
 
 /// The camera's target for whichever machine is up: the bike's ride, or the parked plane.
 pub fn ridden(garage: &Garage, ride: &Ride) -> Ridden {
-    if let Some(m) = garage.car_up().and_then(|c| c.driven.as_ref()) {
-        return driven(m);
+    if let Some(c) = garage.car_up()
+        && let (Some(m), Some(kind)) = (&c.driven, c.machine.car_physics())
+    {
+        return driven(m, kind);
     }
     if let Some(h) = garage.heli_up().and_then(|k| k.flown.as_ref()) {
         return heli(h);
@@ -90,18 +92,38 @@ pub fn heli(h: &crate::vehicle::Heli) -> Ridden {
     }
 }
 
-/// A car's target block (S149e), filled the way the plane's is: the body's centre of mass where the
-/// frame's last substep began, the measure's rows, the body's velocity, the world yaw rate, "no tire
-/// down" and the measure's speed floored at zero. Which words the original's car writes there was
-/// not read; the camera following it is the bike's, until the cars' own presets are.
-pub fn driven(m: &game_sim::car::Machine) -> Ridden {
+/// The presets file a car's own camera reads (S246): the original makes one camera-preset object per
+/// machine kind (`camera_presets_by_kind`, `research/oracle.txt` S246) and hands a car's camera its
+/// kind's `AppStart\<Kind>CPresets.ini`. The baja's is the four-wheeler's.
+pub fn car_presets(kind: game_sim::car::Kind) -> &'static str {
+    match kind {
+        game_sim::car::Kind::Baja => "fourwheelcpresets.ini",
+        game_sim::car::Kind::Buggy => "buggycpresets.ini",
+        game_sim::car::Kind::MonsterTruck => "monstertruckcpresets.ini",
+    }
+}
+
+/// A car's target block (S149e, S246), as the original's car fills it once a frame in its post
+/// listener after the measure (`research/oracle.txt`, S246): the rows are the measure's, the velocity
+/// the body's, the lean word the measure's world rates (the camera reads the yaw), the flag "no tire
+/// down" and the speed the measure's floored at zero. The point is the body's centre of mass where
+/// the frame's last substep began, moved by the centre of mass turned into the world: *on* by it for
+/// the buggy and the baja, *back* by it for the monster truck, whose own post takes the car's origin
+/// there. So the truck's camera aims 3.5 ft under its centre of mass, the baja's 0.8 ft over it.
+pub fn driven(m: &game_sim::car::Machine, kind: game_sim::car::Kind) -> Ridden {
     let one = |v: Vf| Vf::new(v.x(), v.y(), v.z(), 1.0);
+    let b = &m.body;
+    let turned = game_sim::car::turned_cofg(b);
+    let point = match kind {
+        game_sim::car::Kind::MonsterTruck => b.last_position.sub(turned),
+        game_sim::car::Kind::Buggy | game_sim::car::Kind::Baja => b.last_position.add(turned),
+    };
     Ridden {
         target: Target {
-            body_point: one(m.body.last_position),
+            body_point: one(point),
             forward: one(m.forward),
             up: one(m.up),
-            vel: one(m.body.velocity),
+            vel: one(b.velocity),
             lean: F(m.world_rates.y()),
         },
         airborne: !m.grounded,
