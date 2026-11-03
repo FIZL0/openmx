@@ -8119,6 +8119,23 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 #   -11048), the plane's and ball 0's first-substep resolves on hit0-11046 (both bodies, the arms), the
 #   balls' hull entries and the plane's mirrors on hit0-11061.
 
+# --- S263: the wreck tick's place writes the bike model's node (crates/game-sim/src/ride.rs
+#   Ride::wreck_axes/place_wreck, Crash::begin; rider.rs after Crash::begin; tests/replay.rs S162/S191/S207/S219
+#   ratchets; journal 2026-11-03-s263-wreck-tick-origin-ulp)
+# The wreck part (bike +0x7a8) keeps the bike's model node at +0x13c: the same node as chassis(bike +0x7a4)
+#   +0x254, whose +0x40 matrix is the capture's ch_xform (origin row 3 at node +0x70).
+# bike_wreck_entry 0x00252ca0, in order: orientation_transform_point 0x001b3060 (P = node . wreck body +0x180,
+#   which is (0, 1.5, 0), on VU0); orientation_axes 0x001b24d0 into bike +0x410/+0x420; wreck part vt +0x11c
+#   (wreck_part_start); vt +0xe4 = physics_object_place 0x0015a1b0.
+# physics_object_place: squares look/up as the spawn does, quat = axes_to_quat 0x0013f9f0; body vt +0x10
+#   0x00159f20 stores the position at +0x30, vt +0x48 0x00159ee0 the quat at +0x160; the reset 0x0015a3d0 copies
+#   them to +0x60/+0x170. Then origin = +0x60 - turn(+0x170, +0x180) goes in a2 to 0x001b2660(node, 0, &origin)
+#   (writes node +0x70) and 0x001b1e20(node, 0, look', up', 0, 1, 0) writes the rows: math::basis(_, look', up',
+#   false, true).
+# Bit-exact in the port: the wreck tick's ch_xform rows (headon, stand, roof) and origin (truck, rails, headon,
+#   stand, roof) once the wreck body's quat is spawn_turn(row 2, row 1) of the bike's transform. The next tick
+#   every one parts on the thrown chassis' quat (not simulated down).
+
 # --- S258: balls strike balls among the plane (crates/game-sim/src/prop_wreck.rs struck_on/own_end;
 #   tests/prop_plane.rs lane_11061, the_balls_rays_strike_each_other_as_the_originals,
 #   the_balls_push_each_other_as_the_originals; journal 2026-11-03-s258-balls-strike-balls-among-the-plane)

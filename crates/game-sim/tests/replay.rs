@@ -10736,11 +10736,13 @@ fn s211_cannonball(vel: impl Iterator<Item = [f32; 3]>) -> Option<(usize, [f32; 
 /// the script's apex run teleports by; the bike falls onto the windmill's top, wrecks on tick 24, and
 /// the windmill's mover throws the wreck body ~59,000 ft/s for 17 ticks. In both the 300.45/100.312
 /// put-back is the off-map cannonball (S59) once the rider's main bone is past the map's margin. The
-/// ticks differ (the port's 8 and 42, the original's 14 and 85), and neither pair is the windmill's:
+/// ticks differ (the port's 9 and 41, the original's 14 and 85), and neither pair is the windmill's:
 /// the script's teleport leaves the original's ragdoll bones behind, and its main bone is dragged
 /// off the map by them (R14, the next test). The port's ragdoll starts on the bike; its own tick-5
 /// strike from this image (bones 0 and 7 touch, the main bone at ~13,000 ft/s) has no original
-/// to compare with (R14's bike, from another state, is not struck so), and is filed.
+/// to compare with (R14's bike, from another state, is not struck so), and is filed. South's was 8 and
+/// apex's 42 (its flight held through 41) until S263 squared the wreck body's turn as the original's
+/// place does: an ulp in the turn, carried through the port's own bones, is a tick at the map's edge.
 #[test]
 fn the_rustic_windmill_throws_a_bike_as_the_original_does() {
     let Some(south) = s211_capture("south3") else { return };
@@ -10770,7 +10772,7 @@ fn the_rustic_windmill_throws_a_bike_as_the_original_does() {
     let bone = port[ours.0 - 1].bone;
     println!("south's put-back: port tick {} {:?} (main bone at {bone:?}), original tick {} {:?}", ours.0, ours.1, theirs.0, theirs.1);
     // The original's is the teleport's (R14); pinned to see either change.
-    assert_eq!((ours.0, theirs.0), (8, 14), "the main bone's map-edge tick, the port's and the original's");
+    assert_eq!((ours.0, theirs.0), (9, 14), "the main bone's map-edge tick, the port's and the original's");
 
     // The control: without the windmill the bike stays where it stands.
     let still = s211_ride([0.0; 3], 20, false).expect("the same ride");
@@ -10787,7 +10789,7 @@ fn the_rustic_windmill_throws_a_bike_as_the_original_does() {
     // The capture's vehicle is the drawn bike, ~2 ft off the wreck body's origin (the same before the
     // wreck); each tick's step is the flight's speed, ~1,967 ft a tick from tick 29.
     let mut fastest = 0.0f32;
-    for t in 25..=41 {
+    for t in 25..=40 {
         let (got, want) = (at(&port[t - 1]), &apex[t + 1][1..4]);
         assert!((0..3).all(|i| (got[i] - want[i]).abs() < 2.0), "apex flight tick {t}: port {got:?}, original {want:?}");
         let (was, then) = (at(&port[t - 2]), &apex[t][1..4]);
@@ -10804,7 +10806,7 @@ fn the_rustic_windmill_throws_a_bike_as_the_original_does() {
     let bone = port[ours.0 - 1].bone;
     println!("apex's put-back: port tick {} {:?} (main bone at {bone:?}), original tick {} {:?}", ours.0, ours.1, theirs.0, theirs.1);
     // The original's is the teleport's (R14), as south's is.
-    assert_eq!((ours.0, theirs.0), (42, 85), "the main bone's map-edge tick, the port's and the original's");
+    assert_eq!((ours.0, theirs.0), (41, 85), "the main bone's map-edge tick, the port's and the original's");
 }
 
 /// R14's capture `name` (research/r14_windmill_bones.py): its rows by column name.
@@ -11520,12 +11522,12 @@ fn a_full_lock_back_up_rides_the_originals_arc() {
 /// every lane (a ratchet), and how far, in feet, the port's centre of mass may stray from the
 /// original's while both ride.
 ///
-/// Bump agrees to the bit up to its wreck tick, 206, where the origin parts by an ulp (as S191's
-/// headon) and the port bails Back on the original's tick. Until S237 it parted on tick 2 and bailed
+/// Bump agrees to the bit through its wreck tick, 206 (until S263 the origin parted there by an ulp,
+/// as S191's headon), and the port bails Back on the original's tick. Until S237 it parted on tick 2 and bailed
 /// on 205, 1.5 ft off: the state was saved with the brake held, which the original rides on through
 /// tick 2 (capture row 0's pad, [`save_state_inputs`]), and row 94 was compared with tick 94.
 const S162_RIDES: [(&str, &[usize], Option<(u64, u8)>, u64, f32); 2] =
-    [("bump", &[94], Some((206, 4)), 205, 0.0), ("prop", &[], None, u64::MAX, 0.0)];
+    [("bump", &[94], Some((206, 4)), 206, 0.0), ("prop", &[], None, u64::MAX, 0.0)];
 
 /// **S162: an idle bike rolls off and wrecks, or does not, as the original's does**: each of
 /// [`S162_RIDES`] ridden by the port from the original's save state (its whole bike, the 250, wrecks
@@ -11566,6 +11568,9 @@ fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
             sim.traffic = traffic;
             sim.rider.sense.wrecks_enabled = true;
             sim.rider.carries_bike_col(Arc::new(bike_col));
+            if let Some((_, part, wrecks)) = the_ragdoll_kit() {
+                sim.rider.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+            }
             let ride = &mut sim.rider.ride;
             st.seed_chassis(ride).expect("the chassis");
             st.seed_wheels(ride).expect("both wheels");
@@ -11677,8 +11682,9 @@ fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
 /// S191's rides: the name, the tick to which every lane agrees (the first it parts on; a fix that
 /// moves it later should move this too), the original's first wreck (tick, reason) and the port's.
 ///
-/// - headon: bit-exact up to the nose; on the wreck's own tick the origin parts by an ulp and the
-///   thrown chassis goes its own way. The wreck is the original's, over the bars on tick 60.
+/// - headon: bit-exact up to the nose and through the wreck's own tick (until S263 the origin parted
+///   there by an ulp); the thrown chassis goes its own way from 61. The wreck is the original's, over
+///   the bars on tick 60.
 /// - stand: the nose carries the bike on, every lane agreeing, to the original's own head hit
 ///   (scenery, 6) on tick 93, which the port enters on the same tick. Until S191a the port's own
 ///   head-inside-a-car contact wrecked it on 65 with the head ray's end under the engine's nose.
@@ -11687,9 +11693,9 @@ fn idle_roll_offs_on_free06_wreck_as_the_original_does() {
 ///   (8). The head ray strikes the car on that tick too, but the nose-dive's entry clears the record
 ///   before the hit loop reads it (S191a; tests/ride.rs a_wreck_entry_clears_the_riding_record…).
 const S191_RIDES: [(&str, u64, (u64, u8), (u64, u8)); 3] = [
-    ("headon", 60, (60, 1), (60, 1)),
-    ("stand", 93, (93, 6), (93, 6)),
-    ("roof", 158, (158, 8), (158, 8)),
+    ("headon", 61, (60, 1), (60, 1)),
+    ("stand", 94, (93, 6), (93, 6)),
+    ("roof", 159, (158, 8), (158, 8)),
 ];
 
 /// **S191: the train's nose and a wagon's roof, in the original and replayed.**
@@ -11714,6 +11720,9 @@ fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
             sim.traffic = traffic;
             sim.rider.sense.wrecks_enabled = true;
             sim.rider.carries_bike_col(Arc::new(free06_bike_col().expect("the bike's collision files")));
+            if let Some((_, part, wrecks)) = the_ragdoll_kit() {
+                sim.rider.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+            }
             let ride = &mut sim.rider.ride;
             st.seed_chassis(ride).expect("the chassis");
             st.seed_wheels(ride).expect("both wheels");
@@ -11796,9 +11805,10 @@ fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
 // - **truck**: first_recording's state (free09, the 125), the bike at 2800.1, 103.4, 4299.6 facing
 //   -20°, 8.8 ft off the line of free09's north-east trailer truck (`free_trailercab` + `free_trailerA`,
 //   45 ft/s), whose cab comes past it 106 ticks later. Its cab strikes the bike on tick 105 and
-//   throws it over (2) at the original's velocity to the bit: every lane agrees on that tick but the
-//   transform's origin, an ulp off in x (as rails' on its wreck tick, S162's bump, S191's headon). The
-//   thrown bike parts on 106. Until B7 the strike's velocity was (8.32, −1.86, 11.38) against
+//   throws it over (2) at the original's velocity to the bit, and every lane agrees on that tick. Until
+//   S263 the transform's origin was an ulp off there (as rails' on its wreck tick, S162's bump, S191's
+//   headon): the wreck body's place writes the bike's node, and the port's did not. The thrown bike
+//   parts on 106. Until B7 the strike's velocity was (8.32, −1.86, 11.38) against
 //   (8.38, −1.53, 11.77): the cab's motion was off because the state's free09 cars were ridden as
 //   though they queried the ground, and they are `PresampleTerrain` cars (B7, [`SaveState::traffic_of`]).
 //
@@ -11831,8 +11841,8 @@ fn the_train_wrecks_and_carries_the_bike_as_the_original_does() {
 /// capture), and the original's first wreck (tick, reason) and the port's (`None`: none in the capture).
 #[allow(clippy::type_complexity)]
 const S207_RIDES: [(&str, &str, &[u32], &str, &str, u64, Option<(u64, u8)>, Option<(u64, u8)>); 4] = [
-    ("truck", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, 105, Some((105, 2)), Some((105, 2))),
-    ("rails", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 98, Some((98, 1)), Some((98, 1))),
+    ("truck", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, 106, Some((105, 2)), Some((105, 2))),
+    ("rails", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 99, Some((98, 1)), Some((98, 1))),
     ("beside", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", u64::MAX, None, None),
     ("ctruck", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 36, None, None),
 ];
@@ -11901,6 +11911,9 @@ fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
             sim.traffic = traffic;
             sim.rider.sense.wrecks_enabled = true;
             sim.rider.carries_bike_col(Arc::new(col.expect("the bike's collision files")));
+            if let Some((_, part, wrecks)) = the_ragdoll_kit() {
+                sim.rider.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+            }
             let ride = &mut sim.rider.ride;
             st.seed_chassis(ride).expect("the chassis");
             st.seed_wheels(ride).expect("both wheels");
@@ -11968,8 +11981,8 @@ fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
                 }
                 if ours.is_none() && let Some(w) = port.rider.state.wreck {
                     ours = Some((t as u64, w.0));
-                    // The wreck's own tick, where every row that wrecks parts by the origin's ulp: the
-                    // velocity the strike leaves is the original's to the bit (B7).
+                    // The wreck's own tick: the velocity the strike leaves is the original's to the bit
+                    // (B7), and so is the origin the wreck body's place writes into the node (S263).
                     if let Some(r) = r.filter(|_| theirs.is_some_and(|w| w.0 == t as u64)) {
                         let want = ["x", "y", "z"].map(|x| num(r, &format!("ch_vel.{x}")).to_bits());
                         let got = port.rider.ride.chassis.vel.to_bits();
@@ -12020,8 +12033,8 @@ fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
 /// and the bike model, the tick to which every lane agrees, and the original's first wreck (tick,
 /// reason) and the port's.
 ///
-/// - flank: every lane agrees up to the wreck's tick, where the origin parts by an ulp; both enter the
-///   head hit (6) on tick 20. S216's reason 1 for a flank at ~30 ft/s is not what happens here: the
+/// - flank: every lane agrees through the wreck's tick (until S263 the origin parted there by an ulp)
+///   and parts on 21, the thrown chassis; both enter the head hit (6) on tick 20. S216's reason 1 for a flank at ~30 ft/s is not what happens here: the
 ///   bike's front runs in under the dump truck's body and the head ray meets it.
 /// - slow: every lane agrees over the whole capture.
 /// - rear: the truck (the port's and the original's) is at the same point to the digit on every tick to
@@ -12035,7 +12048,7 @@ fn a_path_car_into_a_parked_bike_wrecks_it_as_the_original_does() {
 ///   0.989 ft/s across): the trailer rode the ground's normal, not its presampled keys'.
 #[allow(clippy::type_complexity)]
 const S219_RIDES: [(&str, &str, &[u32], &str, &str, u64, Option<(u64, u8)>, Option<(u64, u8)>); 4] = [
-    ("flank", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 20, Some((20, 6)), Some((20, 6))),
+    ("flank", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 21, Some((20, 6)), Some((20, 6))),
     ("slow", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", u64::MAX, None, None),
     ("rear", "Tracks\\free06.res", &S89_RIDER, "race250p.phy", "250_motoxxx", 42, Some((42, 4)), Some((42, 4))),
     ("trailer", "Tracks\\free09.res", &[0x34, 0x34, 0x8, 0x8, 0x0], FREERIDE_PHY, FREERIDE_MODEL, u64::MAX, None, None),
@@ -12066,6 +12079,9 @@ fn a_bike_meets_a_moving_truck_as_the_original_does() {
             sim.traffic = traffic;
             sim.rider.sense.wrecks_enabled = true;
             sim.rider.carries_bike_col(Arc::new(col.expect("the bike's collision files")));
+            if let Some((_, part, wrecks)) = the_ragdoll_kit() {
+                sim.rider.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+            }
             let ride = &mut sim.rider.ride;
             st.seed_chassis(ride).expect("the chassis");
             st.seed_wheels(ride).expect("both wheels");

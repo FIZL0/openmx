@@ -1132,6 +1132,10 @@ impl Rider {
             *crash = wreckage
                 .as_ref()
                 .map(|w| Crash::begin(ride, reason, &w.part, w.inertia, &w.wrecks, spin));
+            // The wreck body's place writes the bike model's node, which is its node too (S263).
+            if let Some(down) = crash.as_ref() {
+                ride.place_wreck(down.bike.origin());
+            }
             // After the body's copies the vehicle's entry zeroes both wheels' compression (S230),
             // with or without a wreck body: a bike down is drawn on its free length.
             ride.wreck_wheels();

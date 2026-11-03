@@ -1200,6 +1200,28 @@ impl Ride {
         held_transform(&self.node, self.chassis.quat, self.origin)
     }
 
+    /// The nose and the up the wreck body's place squares (S263): rows 2 and 1 of the transform as
+    /// the original's `orientation_axes` copies them (`w` 0), the side and the up crossed again and
+    /// both made unit length ([`crate::flight::spawn_axes`]).
+    pub fn wreck_axes(&self) -> (Vf, Vf) {
+        let m = self.transform();
+        let row = |v: Vf| v.merge(Dest::W, Vf::ZERO);
+        crate::flight::spawn_axes(row(m.0[2]), row(m.0[1]))
+    }
+
+    /// **The wreck body's place, on the bike's node** (S263). The wreck body keeps the bike model's
+    /// node as its own, and its place writes the node from where it put the body: the rows are the
+    /// look-at of [`Ride::wreck_axes`] (no re-crossing, the nose kept) and the translate is the body's
+    /// position less its own centre of gravity turned, `origin` ([`WreckBike::origin`]). Both are the
+    /// riding transform again but for the round trip's last bits, which is all the wreck tick's
+    /// transform parted from the original's by.
+    pub fn place_wreck(&mut self, origin: Vf) {
+        let (nose, up) = self.wreck_axes();
+        let m = math::basis(Vf::ZERO, nose, up, false, true);
+        self.node = [m.0[0], m.0[1], m.0[2]];
+        self.origin = origin;
+    }
+
     /// The bike's forward and up axes, as the original's `orientation_axes` reads them off the
     /// transform: rows 2 and 1.
     pub fn axes(&self) -> (Vf, Vf) {
@@ -3447,8 +3469,12 @@ impl Crash {
         let m = ride.transform();
         // The body where the bike's centre of mass is, turned as the bike is, with the entry's two
         // copies: `chassis + 0x260` into the body's velocity and `chassis + 0x290` — the spin in the
-        // bike's own frame — into the body's rates.
-        let mut bike = WreckBike::new(part, inertia, math::transform_point(&m, part.cofg), ride.chassis.quat);
+        // bike's own frame — into the body's rates. The turn is the place's: the transform's nose
+        // and up squared and made a quaternion again ([`Ride::wreck_axes`]), not the chassis' own,
+        // which it is to the last bits (S263).
+        let (nose, up) = ride.wreck_axes();
+        let quat = crate::flight::spawn_turn(nose, up);
+        let mut bike = WreckBike::new(part, inertia, math::transform_point(&m, part.cofg), quat);
         let still = Vf::new(0.0, 0.0, 0.0, 1.0);
         bike.body.velocity = still.merge(Dest::XYZ, ride.chassis.vel);
         bike.body.rates = still.merge(Dest::XYZ, spin.unwrap_or(ride.chassis.ang_vel));
