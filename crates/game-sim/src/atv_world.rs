@@ -32,6 +32,12 @@
 //!   riders' parts ([`rider_sphere`], [`rider_sweep`]) and two category-0 sweeps ([`owned_sweep`]).
 //!   A rider's nine spheres' radii are the rider file's ([`rider_radii`], MD83a).
 //!
+//! MD83b adds the vehicle's own gather round its sphere ([`World::place_vehicle`],
+//! [`World::gather_vehicle`], [`VehicleSphere`]): each time the vehicle puts its sphere it keeps the
+//! point, and it files the sphere there again ([`moving_key`]: nowhere if the box leaves the tree) only
+//! when the last gather found it more than 10 ft from the one before. Its list ([`Nearby::vehicle`])
+//! is gathered afresh, flat and over the static structures, only past those 10 ft.
+//!
 //! The tree's 239 entries of class 7 are scene nodes, not collidables: the gather passes over them.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
@@ -47,7 +53,7 @@ use crate::ragdoll_contact::Sphere;
 use crate::track::{Scene, TerrainLayout};
 use crate::world::Prop;
 use crate::world_search::{Candidate, Categories, Class, Collidable, accepts, flags};
-use ps2_float::{Acc, F, Vf, fpu};
+use ps2_float::{Acc, F, Vf, fpu, vu};
 
 /// A scene mesh's category (`+0x94`), and its flag byte (`+0x126`): enabled, and gathered only
 /// within the bound.
@@ -70,6 +76,9 @@ pub const VEHICLE: u32 = 0;
 pub const VEHICLE_FLAGS: u8 = flags::ENABLED | ACTIVE;
 pub const VEHICLE_HALF: f32 = 40.0;
 pub const VEHICLE_REACH: f32 = 40.0;
+pub const VEHICLE_OFF_REACH: f32 = 5.0;
+/// How far, squared, a vehicle goes from where it last gathered before it gathers again (`+0xd3c`).
+pub const VEHICLE_REGATHER: f32 = 100.0;
 /// The moving list's one block (`+0x28`).
 pub const MOVING_SLOTS: i32 = 0x400;
 /// A rider part's category: every sphere and sweep the riders' bodies are made of.
@@ -222,12 +231,14 @@ impl World {
         self.file(o, c, h, hi);
     }
 
-    /// `n` vehicles' spheres, each at the origin with no reach and filed there, in order.
+    /// `n` vehicles' spheres, each at the origin with no reach and filed there, in order. Each is a
+    /// probe in the one space: its vehicle gathers round it ([`World::gather_vehicle`]).
     pub fn add_vehicles(&mut self, n: usize, hi: [F; 2]) -> std::ops::Range<usize> {
         let first = self.objects.len();
         for _ in 0..n {
             let origin = [F::ZERO, F::ZERO, F::ZERO, F::ONE];
             let o = self.add(vehicle_sphere(), origin);
+            self.broad.places[o].space = Some(0);
             self.file(o, origin, vehicle_half(), hi);
         }
         first..self.objects.len()
@@ -235,20 +246,69 @@ impl World {
 
     /// A vehicle's sphere `o` moved to `centre` with `reach` (`atv_spatial_move`): taken out of every
     /// slot it was in, which stay empty, and filed again with the box `centre` ± [`VEHICLE_HALF`].
-    /// The vehicle files it only where it gathers round it (vehicle `+0xd90`), once it is 10 ft from
-    /// the last place; between, its centre moves on with the vehicle and the tree is left alone.
-    pub fn move_vehicle(&mut self, o: usize, centre: [F; 3], reach: F, hi: [F; 2]) {
+    /// The vehicle files it only when it is put ([`World::place_vehicle`]) after a gather that found
+    /// it 10 ft from the last one; between, its centre moves on with the vehicle and the tree is left
+    /// alone.
+    pub fn move_vehicle(&mut self, o: usize, centre: [F; 3], reach: F) {
         let centre = [centre[0], centre[1], centre[2], F::ONE];
         self.broad.places[o].centre = centre;
         self.objects[o].radius = reach;
-        for node in &mut self.tree().nodes {
+        self.refile(o, centre);
+    }
+
+    /// `o` taken out of every tree slot it was in, which stay empty, and filed again with the box
+    /// `centre` ± [`VEHICLE_HALF`] under its [`moving_key`]: nowhere unless the box is wholly in the
+    /// tree. Its centre and reach are left as they are.
+    fn refile(&mut self, o: usize, centre: [F; 4]) {
+        let tree = self.tree();
+        for node in &mut tree.nodes {
             for slot in node.chunks.iter_mut().flatten() {
                 if *slot == Some(o) {
                     *slot = None;
                 }
             }
         }
-        self.file(o, centre, vehicle_half(), hi);
+        let key = moving_key(tree, centre, vehicle_half());
+        broad_build::insert(tree, o, key);
+    }
+
+    /// **`atv_vehicle_sphere_place`**: the vehicle's sphere put at `at`. It keeps `at` (all four
+    /// lanes) and its sweep's top 10 ft above it, and reaches [`VEHICLE_REACH`], or
+    /// [`VEHICLE_OFF_REACH`] with the rider `off`. If the last gather found it more than
+    /// `sqrt(limit)` from where the one before it gathered, it is filed again at `at`
+    /// (`atv_spatial_move`, reach 40 whatever its own). Then, if asked, the vehicle gathers round it
+    /// ([`World::gather_vehicle`]).
+    ///
+    /// The original goes on to test what the list holds against the vehicle's sweep and plants, which
+    /// can lift the caller's point and its answer says whether the place is clear; that is not ported.
+    pub fn place_vehicle(&mut self, v: &mut VehicleSphere, at: [F; 4], off: bool, gather: bool) {
+        v.at = at;
+        v.top = [at[0], F(10.0) + at[1], at[2]];
+        v.reach = F(if off { VEHICLE_OFF_REACH } else { VEHICLE_REACH });
+        if v.moved > v.limit {
+            self.refile(v.object, at);
+        }
+        if gather {
+            self.gather_vehicle(v);
+        }
+    }
+
+    /// **`atv_vehicle_sphere_gather`**'s gather: the sphere's centre and reach become where it was put
+    /// and its reach; `moved` is its centre's squared distance from where it last gathered (a vector
+    /// unit subtract, then `mula`/`madda`/`madd`), and past `limit` the list is gathered afresh round
+    /// it on the ground plane (static structures only, kind 1) and the place kept.
+    pub fn gather_vehicle(&mut self, v: &mut VehicleSphere) {
+        let o = v.object;
+        self.broad.places[o].centre = v.at;
+        self.objects[o].radius = v.reach;
+        let d: [F; 3] = std::array::from_fn(|i| F(vu::sub(v.at[i].0, v.gathered[i].0)));
+        v.moved = Acc::mula(d[0], d[0]).madda(d[1], d[1]).madd(d[2], d[2]);
+        if v.moved > v.limit {
+            v.list.flat = true;
+            gather(&mut self.objects, &mut self.broad, &mut v.list, o, 1);
+            v.list.flat = false;
+            v.gathered = v.at;
+        }
     }
 
     /// `o` in the moving list's slot `slot`: the list's one block made at its first use, and the
@@ -262,8 +322,58 @@ impl World {
     }
 }
 
+/// The key a moving collidable's box is filed under when it moves (the tree's own pick): 0 unless
+/// the box, less the tree's origin, lies wholly within its extent both ways. A static one's box is
+/// clamped to the tree instead ([`broad_build::key`]), which within it comes to the same.
+pub fn moving_key(tree: &crate::broad_phase::Quadtree, centre: [F; 4], half: [F; 4]) -> u32 {
+    let [ox, oz] = tree.origin;
+    let (x0, x1) = (centre[0] - half[0] - ox, centre[0] + half[0] - ox);
+    let (z0, z1) = (centre[2] - half[2] - oz, centre[2] + half[2] - oz);
+    let within = |lo: F, hi: F, extent: F| !(hi < 0.0) && lo <= extent && hi <= extent && !(lo < 0.0);
+    if !within(x0, x1, tree.extent[0]) || !within(z0, z1, tree.extent[1]) {
+        return 0;
+    }
+    broad_build::key(tree, [F(f32::MAX); 2], centre, half)
+}
+
 fn vehicle_half() -> [F; 4] {
     [F(VEHICLE_HALF), F(VEHICLE_HALF), F(VEHICLE_HALF), F::ONE]
+}
+
+/// A vehicle's own sphere (vehicle `+0xd80`, the world's collidable `object`) and what the vehicle
+/// keeps round it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VehicleSphere {
+    pub object: usize,
+    /// `+0x160`: where it was last put; `+0x148`'s first point, its sweep's top, 10 ft above it.
+    pub at: [F; 4],
+    pub top: [F; 3],
+    /// `+0x170`: how far it reaches when it next gathers.
+    pub reach: F,
+    /// Vehicle `+0xd84`: its list ([`Nearby::vehicle`]).
+    pub list: Nearby,
+    /// Vehicle `+0xd90`: where it last gathered; `+0xd38` how far, squared, the last gather found it
+    /// from there; `+0xd3c` how far that may be before it gathers again.
+    pub gathered: [F; 4],
+    pub moved: F,
+    pub limit: F,
+}
+
+impl VehicleSphere {
+    /// The sphere `object` as a vehicle starts with it: at the origin, never gathered.
+    pub fn new(object: usize) -> VehicleSphere {
+        let origin = [F::ZERO, F::ZERO, F::ZERO, F::ONE];
+        VehicleSphere {
+            object,
+            at: origin,
+            top: [F::ZERO; 3],
+            reach: F::ZERO,
+            list: Nearby::vehicle(),
+            gathered: origin,
+            moved: F::ZERO,
+            limit: F(VEHICLE_REGATHER),
+        }
+    }
 }
 
 /// A vehicle's sphere before it is placed: category [`VEHICLE`], collides with everything, an empty
@@ -450,6 +560,12 @@ impl Nearby {
     /// pair filter, distances in space.
     pub fn quad() -> Nearby {
         Nearby { least: F(10.0), extra: F(30.0), capacity: 0x100, filter: true, ..Nearby::default() }
+    }
+
+    /// A vehicle's list round its own sphere (vehicle `+0xd84`): 10 ft each way, a reach of 30, room
+    /// for 196, the pair filter, distances in space (its gather turns them flat while it runs).
+    pub fn vehicle() -> Nearby {
+        Nearby { least: F(10.0), extra: F(30.0), capacity: 0xc4, filter: true, ..Nearby::default() }
     }
 }
 

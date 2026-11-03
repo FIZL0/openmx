@@ -8586,6 +8586,19 @@ atv_vehicle_sphere_gather   atv 0x004aa980 = a vehicle's +0xd84 list gathered ro
 atv_sweep_box               atv 0x001bad00 = the sweep-class collidable's box (vt +0xc4) over its segments
 atv_zone_sphere_box         atv 0x001c3460 = a sphere zone's box (vt +0xc4)
 atv_zone_box_box            atv 0x001b8a00 = a box zone's box (vt +0xc4)
+# MD83b — the vehicle's own sphere gather (atv_world.rs VehicleSphere / place_vehicle / gather_vehicle / moving_key;
+# tests/atv_gather.rs a_vehicles_sphere_is_placed_and_gathered_as_the_originals). Journal:
+# research/journal/2026-11-02-md76-atv-ground/8-vehicle-sphere-gather-MD83b.md. Place (a0 vehicle, a1 point, a2 toward,
+# a3 out, t0 gather): sphere +0x160 = point (lq); *(+0x148) = (x, 10 + y, z); +0x170 = 5 if +0x684 && +0x684->+0x58 == 2
+# && +0x680 && +0x680->+0x40, else 40; if !(+0xd38 <= +0xd3c) atv_spatial_move(sphere + 0x18, +0x160, 0x00525270, 40);
+# if gather: body put (+0x3b4, point, out, 0, 0), then the gather (a0 vehicle, a3 sphere, t0 out, t1 &point.y, t2 off);
+# toward.y = abs. Gather: clears the sweep's buffers (+0x7c's +0xa8/+0x98/+0x94/+0xa4, count +0x130); +0x50 = +0x160,
+# +0x70 = +0x170; +0xd38 = (vsub.xyz +0x50 - +0xd90) mula/madda/madd; if > +0xd3c: list +0x3c = 1, atv_gather_nearby(list,
+# sphere, kind 1), +0x3c = 0, +0xd90 = +0x50. The list (+0xd84): least 10, extra 30, capacity 0xc4, filter 1. Then a
+# pass over candidates within +0x170 (not ported): objects through the sweep test 0x00116a90 when off, plants' parts
+# not SOFTFOLIAGE within 20 ft; it can raise point.y and write out; answers clear. Quadtree vt (0x003b6700) +0x20
+# pick: the moving box's key, 0 unless (c - h) - origin and (c + h) - origin lie in 0..extent (+0x40/+0x44) both
+# ways (no clamp); +0x2c out frees nodes left empty.
 # MD39 — MX vs. ATV's cars (research/mxvatv-pc.md "The cars (MD39)"; tests/mxvatv_car_phy.rs reads the five
 # files through car::Car::read). Journal: research/journal/2026-11-03-md39-mxvatv-machines. PC factory: kinds
 # 4/6/8 (Buggy/Baja/SandRail.phy) one constructor, 5 MonsterTruck, 7 GolfCart. SLUS-21104 vtables (data):
