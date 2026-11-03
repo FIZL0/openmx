@@ -72,6 +72,8 @@ Run in 100-frame stretches from each image, the whole tape holds except two stre
   reads −0.0535. The original's wrecked bike goes on meeting the hull in a way the port's chassis, frozen
   at −31.82 ft/s, does not. The 137910 stretch is the same thing: the plane bounces on P2's wreck, and
   P2 is seeded standing, with no wreck state.
+  S274 (research/s274): the wreck bike's rays strike the hull, and their mirror on the plane's list
+  is what moves it. Ported in `game_sim::wreck_plane`; closer, not yet bit-exact.
 - **P2 standing from 137810 parts at 137827**, 17 ticks before the plane reaches it. P2 is seeded from
   its chassis only (standing_p2, the way fly_and_collide seeds P1). Its rider and suspension state is
   not read.

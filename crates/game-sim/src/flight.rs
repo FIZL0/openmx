@@ -216,6 +216,10 @@ pub struct Met {
     /// Out: the players whose bikes an entry of the plane's own named, whose chassis its resolve may
     /// have moved.
     pub pushed: Vec<bool>,
+    /// The wreck bikes whose rays struck its hull this tick (S274, [`crate::wreck_plane`]): the bodies
+    /// the mirrors in [`Met::mirrors`] naming [`WRECK_FROM`]` + j` push against, after the vehicles and
+    /// the props among its resolve's other sides; written back as its resolve left them.
+    pub wrecks: Vec<crate::prop_contact::Pushed>,
 }
 
 impl Flight {
@@ -754,9 +758,25 @@ impl Flight {
             let first = met.as_deref().map_or(0, |m| m.vehicles.len());
             self.knocked(set, *me, first, &posed, knocked, &mut bodies);
         }
+        let wrecks = met.as_deref_mut().map(|m| std::mem::take(&mut m.wrecks)).unwrap_or_default();
+        let at = bodies.len();
+        if !wrecks.is_empty() {
+            let first = met.as_deref().map_or(0, |m| m.vehicles.len()) + at;
+            for e in &mut self.record.contacts {
+                if let Some(j) = e.other.filter(|&o| e.kind == 1 && o >= WRECK_FROM).map(|o| o - WRECK_FROM) {
+                    e.other = Some(first + j);
+                }
+            }
+            bodies.extend(wrecks);
+        }
         let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0], props: &mut bodies };
         WORLD.step(dt, &mut listeners);
         let seam = listeners.seam;
+        let pushed = listeners.props[at..].to_vec();
+        if let Some(m) = listeners.met {
+            m.wrecks = pushed;
+        }
+        bodies.truncate(at);
         if let Some((set, _)) = props {
             set.pushed(&bodies);
         }
@@ -1267,6 +1287,10 @@ pub fn spawn_lift(psg: &[u8]) -> Result<F, String> {
 /// Where the plane's entries on the knockable props are named from between its search and the
 /// struck bodies' places ([`Flight::frame_props`]): above any vehicle's index.
 pub const KNOCK_FROM: usize = 1 << 20;
+
+/// What a wreck bike's mirror on the plane's list names until the plane's frame puts the wreck
+/// bike's body among its resolve's other sides (S274, [`Met::wrecks`]): `WRECK_FROM + j`.
+pub const WRECK_FROM: usize = 1 << 21;
 
 /// A knockable prop in the plane's search (S241): its collection and object, and its mesh where its
 /// node stands it.

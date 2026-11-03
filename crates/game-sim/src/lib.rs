@@ -1017,6 +1017,10 @@ pub mod wreck_sound;
 /// moves them.
 pub mod wreck_bike;
 
+/// The wreck bike meets a flown plane (S274): the plane's hull in the wreck bike's search, its body
+/// on the wreck bike's resolve.
+pub mod wreck_plane;
+
 /// Knockable props (S80): the `.toy`'s physics collections, the `.pco` each reads, the scene models
 /// they claim, and each prop's body at rest where its model stands.
 pub mod props;
