@@ -1425,6 +1425,15 @@ impl<'a> Scene<'a> {
         scene
     }
 
+    /// The scene with its ray probe's collidable another object's (C17, the Kiowa's rotor): of
+    /// `category`, and colliding with no category in `spared`. Its reach is still the rays'.
+    pub fn ray_of(mut self, category: u32, spared: &[u32]) -> Scene<'a> {
+        let ray = &mut self.objects.objects[RAY];
+        ray.category = category;
+        ray.categories = Categories { mode: 1, list: spared.to_vec() };
+        self
+    }
+
     /// What a prop's ray probe's listeners heard in the searches so far ([`Scene::probed`]).
     pub fn heard(&self) -> Heard {
         self.heard

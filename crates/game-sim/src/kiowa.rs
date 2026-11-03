@@ -1310,6 +1310,166 @@ impl WreckRotor {
     }
 }
 
+// --- the rotor's collision object (C17) --------------------------------------------------------------
+
+/// The rotor's collision object's category (`+0x84`) and the categories it never collides with (its
+/// category list, mode 1), off C14's save state: not keys of the file.
+pub const ROTOR_CATEGORY: u32 = 0x0008_0000;
+pub const ROTOR_SPARED: [u32; 2] = [0x100, 0x0010_0000];
+/// The crash test's struck mask (`+0x464`): what the rotor may strike and fly on. Off C14's save state.
+pub const STRUCK_MASK: u32 = 0x0004_0000;
+
+impl WreckRotor {
+    /// **The rotor's collision object's ray probe** (C17): the eight rays built into a tree as the
+    /// loader builds them ([`ray_tree`]), which leaves them in the tree's order, not the reader's.
+    pub fn probe(&self) -> crate::flight_search::Rays {
+        let segments: Vec<_> = self.rays.iter().map(|&[from, to]| crate::ray_probe::Segment { from, to }).collect();
+        ray_tree(&segments)
+    }
+}
+
+/// **A ray probe's tree, as the engine builds it off a list of segments** (C17): what the loaders hand
+/// a probe's rays to (the rotor's, the bike's wheels', the car's sort rays). Each ray's centre is the
+/// mean of its ends, on the vector unit. A list of one is a leaf. A longer one is a node boxed round
+/// all its ends ([`crate::ride::ray_node`]), split where [`split`] says, the rays whose centre lies
+/// above the split on its axis kept in order ahead of the rest, the two halves its children, the
+/// first child first. The tree goes out depth first: a node's index is the order it is reached in, a
+/// leaf's the order among leaves, which is the order the segments are kept in.
+///
+/// A split that leaves one side empty (no cut parts the centres: they tie, or lie within a twentieth
+/// of the box of each other on every axis) the original answers with the halves of lists it never
+/// wrote, which is no answer to port: here it is a panic ([`try_ray_tree`] gives `None`).
+pub fn ray_tree(segments: &[crate::ray_probe::Segment]) -> crate::flight_search::Rays {
+    try_ray_tree(segments).expect("a ray tree split that leaves a side empty")
+}
+
+/// [`ray_tree`], or `None` where a split leaves a side empty.
+pub fn try_ray_tree(segments: &[crate::ray_probe::Segment]) -> Option<crate::flight_search::Rays> {
+    enum Built {
+        Leaf(crate::ray_probe::Segment),
+        Node(crate::track::Node, Box<[Built; 2]>),
+    }
+    fn build(segments: &mut [crate::ray_probe::Segment], centres: &mut [Vf]) -> Option<Built> {
+        if segments.len() == 1 {
+            return Some(Built::Leaf(segments[0]));
+        }
+        let node = crate::ride::ray_node(&ends(segments));
+        let (at, axis) = split(segments, centres);
+        let (above, below) = partition(segments, centres, at, axis);
+        if above.is_empty() || below.is_empty() {
+            return None;
+        }
+        let a = above.len();
+        for (k, (s, c)) in above.into_iter().chain(below).enumerate() {
+            (segments[k], centres[k]) = (s, c);
+        }
+        let (first, second) = segments.split_at_mut(a);
+        let (first_c, second_c) = centres.split_at_mut(a);
+        Some(Built::Node(node, Box::new([build(first, first_c)?, build(second, second_c)?])))
+    }
+    fn flatten(b: &Built, nodes: &mut Vec<crate::track::Node>, out: &mut Vec<crate::ray_probe::Segment>) -> u16 {
+        match b {
+            Built::Leaf(s) => {
+                out.push(*s);
+                0x8000 | (out.len() - 1) as u16
+            }
+            Built::Node(node, children) => {
+                let at = nodes.len();
+                nodes.push(*node);
+                let first = flatten(&children[0], nodes, out);
+                let second = flatten(&children[1], nodes, out);
+                nodes[at].children = [first, second];
+                at as u16
+            }
+        }
+    }
+    let mut work = segments.to_vec();
+    let half = Vf([0.5; 4]);
+    let mut centres: Vec<Vf> = work.iter().map(|s| s.from.add(s.to).mul(half)).collect();
+    let (mut nodes, mut out) = (Vec::new(), Vec::new());
+    let root = if work.is_empty() { 0x8000 } else { flatten(&build(&mut work, &mut centres)?, &mut nodes, &mut out) };
+    Some(crate::flight_search::Rays { root, nodes, segments: out })
+}
+
+/// Every ray's two ends, in order.
+fn ends(segments: &[crate::ray_probe::Segment]) -> Vec<Vf> {
+    segments.iter().flat_map(|s| [s.from, s.to]).collect()
+}
+
+/// The stable partition of rays by their centre's `axis` lane: those above `at` (in order), then the
+/// rest (in order).
+#[allow(clippy::type_complexity)]
+fn partition(
+    segments: &[crate::ray_probe::Segment],
+    centres: &[Vf],
+    at: F,
+    axis: usize,
+) -> (Vec<(crate::ray_probe::Segment, Vf)>, Vec<(crate::ray_probe::Segment, Vf)>) {
+    segments.iter().copied().zip(centres.iter().copied()).partition(|(_, c)| at < F(c[axis]))
+}
+
+/// **Where a ray tree node splits** (C17): the box round every end (each end past the greatest raises
+/// it, else one under the least lowers it), cut into twentieths along each axis. The first guess is
+/// the middle of the longest axis (the first of equals; a box with no length the original leaves
+/// unset, `x` here); then the cuts at 1 to 18 twentieths, cut by cut and `x`, `y`, `z` within each,
+/// are tried, and one whose two
+/// sides' boxes' volumes sum under the best so far is taken. A cut that leaves a side empty is not
+/// taken; a first guess that does counts a hundred times the whole box's volume. Gives the cut and its
+/// axis.
+fn split(segments: &[crate::ray_probe::Segment], centres: &[Vf]) -> (F, usize) {
+    let points = ends(segments);
+    let lane = |p: Vf| [F(p.x()), F(p.y()), F(p.z())];
+    let (mut lo, mut hi) = (lane(points[0]), lane(points[0]));
+    for &p in &points[1..] {
+        let p = lane(p);
+        for k in 0..3 {
+            if !(p[k] <= hi[k]) {
+                hi[k] = p[k];
+            } else if p[k] < lo[k] {
+                lo[k] = p[k];
+            }
+        }
+    }
+    let extent = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    let mut axis = 0;
+    let mut longest = F::ZERO;
+    for k in 0..3 {
+        if longest < extent[k] {
+            (axis, longest) = (k, extent[k]);
+        }
+    }
+    let step = |k: usize| extent[k] / F(SPLIT_CUTS);
+    let cost = |at: F, k: usize| {
+        let (above, below) = partition(segments, centres, at, k);
+        let volume = |side: &[(crate::ray_probe::Segment, Vf)]| {
+            let s: Vec<_> = side.iter().map(|&(s, _)| s).collect();
+            crate::ride::ray_node(&ends(&s)).volume
+        };
+        (!above.is_empty() && !below.is_empty()).then(|| volume(&above) + volume(&below))
+    };
+    let mut best = cost(lo[axis] + step(axis) * F(SPLIT_FIRST), axis)
+        .unwrap_or_else(|| crate::ride::ray_node(&points).volume * F(SPLIT_UNSPLIT));
+    let mut cut = SPLIT_FIRST_CUT;
+    for i in 0..SPLIT_TRIED {
+        for k in 0..3 {
+            if let Some(c) = cost(lo[k] + F((i + 1) as f32) * step(k), k) {
+                if !(best <= c) {
+                    (best, cut, axis) = (c, i, k);
+                }
+            }
+        }
+    }
+    (lo[axis] + F((cut + 1) as f32) * step(axis), axis)
+}
+
+/// The split's twentieths, its first guess the tenth of them (cut 9, counted from 0), the 18 cuts
+/// tried after, and the weight on a first guess that leaves a side empty.
+const SPLIT_CUTS: f32 = 20.0;
+const SPLIT_FIRST: f32 = 10.0;
+const SPLIT_FIRST_CUT: usize = 9;
+const SPLIT_TRIED: usize = 18;
+const SPLIT_UNSPLIT: f32 = 100.0;
+
 impl Phy {
     /// Read the file out of its bytes.
     pub fn read_bytes(bytes: &[u8]) -> Phy {
@@ -1626,6 +1786,25 @@ impl Collision {
         crate::flight_search::refresh_flown(props, trees, None, bounds, &self.rays, &node, &mut self.nearby);
     }
 
+    /// **The rotor's contact search** (C17), in the crash test: the rotor's ray probe ([`ray_tree`]
+    /// over `rotor`, the wreck rays) placed at the measure's `matrix` and searched against this
+    /// object's nearby list as the last post gathered it, the probe's collidable the rotor's
+    /// ([`ROTOR_CATEGORY`], [`ROTOR_SPARED`]). Whether its first contact struck an object whose
+    /// category is not in [`STRUCK_MASK`].
+    pub fn rotor_struck(&mut self, rotor: &[[Vf; 2]], matrix: &Mat4, world: &mut dyn crate::world::World) -> bool {
+        use crate::contact_search::Search;
+        use crate::flight_search::{self, Scene};
+        let segments: Vec<_> = rotor.iter().map(|&[from, to]| crate::ray_probe::Segment { from, to }).collect();
+        let rays = ray_tree(&segments);
+        let node = crate::contact::Node { rows: [matrix.0[0], matrix.0[1], matrix.0[2]], origin: matrix.0[3] };
+        let (at, _) = flight_search::reach(&rays, &matrix.0);
+        let (field, props, trees) = world.wooded_near(at);
+        let bounds = field.as_deref().map(field_box);
+        let mut scene = Scene::flown(props, trees, None, bounds, &rays, &node, &mut self.nearby).ray_of(ROTOR_CATEGORY, &ROTOR_SPARED);
+        let hits = scene.rays(true);
+        hits.first().is_some_and(|h| flight_search::category(h.struck.object) & STRUCK_MASK == 0)
+    }
+
     /// The record's entries as the touchdown reads them.
     pub fn entries(&self) -> Vec<Touch> {
         self.record.contacts.iter().map(|c| Touch { kind: c.kind, t: F(c.on_body.y()) }).collect()
@@ -1653,9 +1832,7 @@ fn field_box(f: &(dyn crate::contact_search::Heightfield + '_)) -> ([F; 2], [F; 
 /// What a crash test asks for is left in [`Grounded::asked`] for the caller to carry out (the wreck,
 /// the blades, the put-back).
 ///
-/// Not here: the rotor's own contact search (the probe searched against the collision node, whose
-/// struck object wrecks the helicopter unless its category is in the struck mask): `strike` answers
-/// only the rotor in the ground.
+/// The strike also asks the rotor's own contact search ([`Collision::rotor_struck`], C17).
 pub struct Grounded<'a> {
     pub collision: &'a mut Collision,
     pub world: &'a mut dyn crate::world::World,
@@ -1685,7 +1862,8 @@ impl Surroundings for Grounded<'_> {
     fn strike(&mut self, matrix: &Mat4) -> Strike {
         let ends: Vec<Vf> = self.rotor.iter().map(|r| r[1]).collect();
         let world = &mut *self.world;
-        Strike { in_ground: rotor_in_ground(matrix, &ends, |p| world.ground(p).0), struck: false }
+        let in_ground = rotor_in_ground(matrix, &ends, |p| world.ground(p).0);
+        Strike { in_ground, struck: self.collision.rotor_struck(self.rotor, matrix, &mut *self.world) }
     }
     fn crashed(&mut self, asked: &Crashed, _: &mut Ride, _: &mut Rng) {
         self.asked.push(*asked);

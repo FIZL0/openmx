@@ -7423,6 +7423,28 @@ kiowa_phy_read boot 0x0038cb70 (heli, reader): the base helicopter's .phy reader
 mxkiowa_phy_read boot 0x00391990 (heli, reader): kiowa_phy_read, [Animation], wreckblade.phy
 kiowa_main_rotor_set boot 0x00390060 (rotor in a0, position a1, 8 floats f12..f19, Inertia on the stack)
 kiowa_tail_rotor_set boot 0x003900b0 (rotor in a0, position a1, 7 floats f12..f18)
+# C17 — the rotor's contact search (research/journal/2026-11-03-c17-kiowa-rotor-strike). Ported as
+# game_sim::kiowa::{ray_tree, WreckRotor::probe, Collision::rotor_struck}.
+ray_probe_build boot 0x001eab40 (probe, count, rays, a3, a4): a ray probe's tree off `count` rays
+#   (from, to; 0x20 each). Identity transform at +0x120..+0x150; 0x001115b0 takes each ray's centre
+#   ((from + to) * 0.5 on the VU, before the transform) and runs the recursive build 0x00111160:
+#   one ray is a leaf (volume -1); more, a node boxed by 0x0010f990 over all 2n ends, split where
+#   0x001104c0 says, the stable partition 0x0010f780 (centre[axis] > split first, args on the stack
+#   at sp+0/+8: below count, axis), above copied back ahead of below, children above then below.
+#   An empty side falls back to n/2, n - n/2 copied out of lists never written (never reached when
+#   centres differ). 0x001104c0: box of the ends (start point 0; > max raises, else < min lowers),
+#   longest axis (first strictly > 0, then strictly longer), cuts lo + k * (ext / 20); first guess
+#   k = 10 on that axis, its cost vol(above) + vol(below), or 100 * vol(all) when a side is empty;
+#   then k = 1..18, axis x, y, z within each, taking a strictly smaller cost. Flatten 0x001117f0 is
+#   depth first: node index in visit order, leaf index from -1 counting up (so 0 first), child word
+#   leaf | 0x8000; the radius it writes is vec3_length(half). Probe +0x160 root, +0x168 count.
+# The rotor probe heli+0x458 (C14's image): category +0x84 0x80000, +0xcc 0xffffffff, flags 0x12, no
+#   listeners, object list mode 1 [heli's own collidable], category list mode 1 [0x100, 0x100000].
+#   kiowa_wreck_check, reason 0: rotor-in-ground over the probe's segments, then probe vt +0xac with
+#   heli+0x4d0 (the measure's matrix), collide_against_search (0x0011a9d0) on heli+0x16c (the main
+#   object's nearby list, as last gathered); if probe+0x116 & 0x20, struck = objects[0] of the
+#   probe's ray record (+0x6c -> +0x9c); wreck if struck and (struck+0x84 & heli+0x464) == 0, the
+#   struck mask 0x40000 in C14's image.
 kiowa_rotor_altitudes boot 0x003900f0 (rotor, MinAltitude f12, MaxAltitude f13) -> +0x30, +0x34
 kiowa_wing_geometry boot 0x0038f960 (aero, chord, span, area, ratio, aoa in f12..f16) -> +0x34..+0x44;
 #                                 a zero chord with a positive ratio becomes span / ratio
