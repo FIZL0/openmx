@@ -1717,8 +1717,14 @@ impl<P: sim_world::World> Game for World<P> {
             self.seats[me].pass(dt, &mut self.place, me, &spots, among);
             self.met_after(plane, met, bump.as_ref(), &mut struck);
         }
+        // A flying seat's plane is its striker in the set's step (S259); the garage holds it.
         if let Some(p) = props {
-            p.finish(&mut self.seats.iter_mut().map(|s| &mut s.sim).collect::<Vec<_>>(), dt, &mut self.place);
+            let (mut sims, flights): (Vec<&mut Sim>, Vec<Option<&mut game_sim::flight::Flight>>) =
+                self.seats.iter_mut().map(|s| (&mut s.sim, s.garage.flight_flown_mut())).unzip();
+            p.finish_flying(&mut sims, flights, dt, &mut self.place);
+            for s in &mut self.seats {
+                s.garage.plane_reposed();
+            }
         }
         true
     }

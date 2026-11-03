@@ -9,11 +9,16 @@
 //! the striker by its seat), the first of them runs its collide pass in its traffic's place, and
 //! [`Shared::finish`] steps it once with every seat's chassis and wreck bike as the strikers — by
 //! seat, then each wreck bike `seats + seat`, as `step_all`'s props step reads its players — and puts
-//! it back in every seat. Between ticks every seat holds the same set, so the hash, the snapshot and
+//! it back in every seat. A seat flying the plane (S259) is lent the set as a bike's seat is
+//! ([`Shared::lend`], [`Shared::back`]): its plane's rays strike the set and the set's its hull
+//! ([`crate::flight::Flight::frame_props`] naming the plane by its seat), and in the set's step the
+//! plane, not the bike it left, is that seat's striker, as [`crate::Sim::step`]'s plane lane has it.
+//! Between ticks every seat holds the same set, so the hash, the snapshot and
 //! a rollback's copy carry it as they did, and seat 0's is the one the shell draws.
 
 use crate::Sim;
 use crate::biplane::Body;
+use crate::flight::Flight;
 use crate::contact::{Collider, Other, Side, Weighed};
 use crate::phy::Phy;
 use crate::prop_set::{PropMovers, PropSet};
@@ -64,16 +69,35 @@ impl Shared {
         movers
     }
 
-    /// The set back from the seat [`Shared::held`] lent it to.
-    pub(crate) fn back(&mut self, sim: &mut Sim) {
+    /// The set lent to a seat that flies the plane (S259), in its traffic's props for the plane's
+    /// frame: [`Shared::held`], the seat's own movers dropped, as its own set is empty.
+    pub fn lend(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) {
+        let _ = self.held(sim, dt, world);
+    }
+
+    /// The set back from the seat [`Shared::held`] or [`Shared::lend`] lent it to.
+    pub fn back(&mut self, sim: &mut Sim) {
         std::mem::swap(&mut sim.traffic.props, &mut self.set);
     }
 
     /// **The set's step**, after every seat's: the collide pass if no seat's bike ran it, then the
     /// step with every seat's chassis as it stands, by seat, and every seat's wreck bike after them,
     /// which a prop's impulse pushes, written back ([`crate::Sim::props_step`] over the seats). Then
-    /// the set in every seat.
-    pub fn finish(mut self, sims: &mut [&mut Sim], dt: F, world: &mut dyn World) {
+    /// the set in every seat. A seat whose [`Sim::plane`] flies strikes it with its plane
+    /// ([`Shared::finish_flying`]).
+    pub fn finish(self, sims: &mut [&mut Sim], dt: F, world: &mut dyn World) {
+        let mut lanes: Vec<Option<Flight>> = sims.iter_mut().map(|s| s.plane.take()).collect();
+        self.finish_flying(sims, lanes.iter_mut().map(Option::as_mut).collect(), dt, world);
+        for (s, f) in sims.iter_mut().zip(lanes) {
+            s.plane = f;
+        }
+    }
+
+    /// [`Shared::finish`] with each seat's flown plane, by seat (`None` on its bike): in the set's
+    /// step a flying seat's striker is its plane's hull and body (S259), pushed as a wreck bike's
+    /// body is, in its seat's place, as [`crate::Sim::step`]'s plane lane has the plane striker 0.
+    /// The split-screen shell holds its planes beside its Sims, so it hands them here.
+    pub fn finish_flying(mut self, sims: &mut [&mut Sim], mut flights: Vec<Option<&mut Flight>>, dt: F, world: &mut dyn World) {
         let movers = match self.movers.take() {
             Some(m) => m,
             None => self.set.search_in(dt, world),
@@ -84,15 +108,25 @@ impl Shared {
         let sides: Vec<Option<(Collider, Body, F)>> = sims.iter().map(|s| s.wreck_sides()[0]).collect();
         let mut wrecks: Vec<(Collider, Body, F)> = sides.iter().map(|s| s.unwrap_or_default()).collect();
         let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = wrecks.iter_mut().map(|(c, body, mass)| (c, Weighed { body, mass: *mass })).collect();
+        flights.resize_with(sims.len(), || None);
+        let mut planes: Vec<Option<(&mut Collider, Weighed<'_>)>> = flights
+            .iter_mut()
+            .map(|f| f.as_deref_mut().map(|f| (&mut f.collider, Weighed { body: &mut f.body, mass: f.mass })))
+            .collect();
         let mut others: Vec<Other<'_>> = bump
             .colliders
             .iter_mut()
             .zip(bump.vehicles.iter_mut())
-            .map(|(collider, v)| Other { collider, side: Side::Vehicle(v) })
+            .zip(planes.iter_mut())
+            .map(|((collider, v), plane)| match plane {
+                Some((collider, body)) => Other { collider: &mut **collider, side: Side::Body(body) },
+                None => Other { collider, side: Side::Vehicle(v) },
+            })
             .chain(bodies.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
             .collect();
         self.set.step_with(dt, &movers, &mut others);
         drop(others);
+        drop(planes);
         drop(bodies);
         for ((s, side), w) in sims.iter_mut().zip(&sides).zip(wrecks) {
             s.wrecks_pushed(&[side.map(|_| w)]);

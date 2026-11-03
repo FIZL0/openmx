@@ -216,7 +216,7 @@ impl Game for Rides<'_> {
                 continue;
             }
             if sim.plane.is_some() {
-                vehicle::fly_lane_met(sim, dt, wanted, self.world, &bikes, met.as_mut());
+                vehicle::fly_lane_shared(sim, dt, wanted, self.world, &bikes, met.as_mut(), props.as_mut().map(|p| (p, seat)));
                 if !wanted.dpad_rides {
                     vehicle::lane_markers(sim, seat, &spots, &riding, self.world);
                 }
