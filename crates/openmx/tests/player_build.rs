@@ -1,7 +1,7 @@
 //! P262: the builds players download run the native sim (openmx's `native-sim`, F15), and the gate's do not.
 //! Player builds come out of tools/build.sh (Linux, the Steam Deck's, Windows), tools/web.sh (the page),
-//! tools/ios-ipa.sh (the iPhone app), and .github/workflows/pages.yml (the beta, which builds Linux without
-//! build.sh); tools/release.sh runs the first three. Plain `cargo build`/`cargo run`, the ./kit check gate,
+//! tools/ios-ipa.sh (the iPhone app, the release's alone), and .github/workflows/pages.yml (the beta, which builds
+//! Linux without build.sh); tools/release.sh runs the first three. Plain `cargo build`/`cargo run`, the ./kit check gate,
 //! ci.yml and `tools/web.sh --check` (the tests' page) stay exact.
 
 use std::path::{Path, PathBuf};
@@ -57,7 +57,6 @@ fn the_page_the_app_and_the_beta_are_native() {
     assert!(pages.contains("cargo build --locked --release -p openmx --bin openmx $(bash tools/build.sh features)"), "the beta's Linux build is not build.sh's");
     assert!(pages.contains("tools/build.sh windows\n"), "the beta's Windows build is not build.sh's default");
     assert!(pages.contains("tools/web.sh\n"), "the beta's page is not web.sh's default");
-    assert!(pages.contains("tools/ios-ipa.sh \"$PWD/openmx-ios.ipa\"\n"), "the beta's app is not ios-ipa.sh's default");
     assert!(!pages.contains("--exact-sim"), "a beta build asks for the exact sim");
 
     let release = read("tools/release.sh");
