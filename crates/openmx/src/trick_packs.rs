@@ -248,21 +248,26 @@ impl Pack {
     /// Lay the pack's moves over a bike read from `member` (`race125p.phy`): the pack's own file for
     /// that bike, `mx_` + its name. A bike the pack has no file for, or whose file has no 360, keeps
     /// the original's tricks; the line says so.
+    ///
+    /// Untamed's compiled `mx_<name>.phy.bpb` is taken first (MD91), as [`Pack::handling`] takes it,
+    /// and read through [`game_sim::bpb::ini`].
     pub fn lay(&self, bike: &mut Phy, member: &str) -> String {
         let want = trick_pack::phy_name_for(member);
-        let Some((_, path)) = self.phys.iter().find(|(n, _)| *n == want) else {
+        let bpb = format!("{want}.bpb");
+        let found = self.phys.iter().find(|(n, _)| *n == bpb).or_else(|| self.phys.iter().find(|(n, _)| *n == want));
+        let Some((name, path)) = found else {
             return format!("tricks: {} has no {want}, so this bike keeps the original's tricks", self.id);
         };
-        let ini = match crate::files::read(path) {
-            Ok(bytes) => Ini::parse_bytes(&bytes),
+        let ini: Ini = match crate::files::read(path).map_err(|e| e.to_string()).and_then(|b| game_sim::bpb::ini(&b)) {
+            Ok(ini) => ini,
             Err(e) => return format!("tricks: {}: {e}; the original's tricks", path.display()),
         };
         match trick_pack::moves(&ini, &self.rows) {
             Some(moves) => {
                 trick_pack::apply(bike, &ini, moves);
-                format!("tricks: {}'s 360, front flip and whip from {want}", self.id)
+                format!("tricks: {}'s 360, front flip and whip from {name}", self.id)
             }
-            None => format!("tricks: {want} has no [Three Sixty]; the original's tricks"),
+            None => format!("tricks: {name} has no [Three Sixty]; the original's tricks"),
         }
     }
 
@@ -347,6 +352,45 @@ mod tests {
         for m in [a, b, c] {
             let _ = std::fs::remove_dir_all(m);
         }
+    }
+
+    /// MD91: a pack with `mx_race125p.phy.bpb` lays its tricks from that file, not the text `.phy`
+    /// beside it; without the `.bpb` the text one is laid as before. (`bpb::ini` reads a file without
+    /// the BPB magic as text, so a text `.bpb` stands in for the compiled one here.)
+    #[test]
+    fn lay_takes_the_bpb_first() {
+        let mods = pack("bpb", "untamed", "[Stunt01]\nName=threesixtyL\n");
+        let folder = mods.join(TRICKS_DIR).join("untamed");
+        let json = r#"{"kind": "tricks", "id": "untamed", "riders": [{"rider": "MX", "table": "stunts.ini"}], "phy": ["Bike/mx_race125p.phy", "Bike/mx_race125p.phy.bpb"]}"#;
+        std::fs::write(folder.join("mod.json"), json).unwrap();
+        std::fs::write(folder.join("Bike/mx_race125p.phy"), "[Airborne Control]\n").unwrap();
+        std::fs::write(folder.join("Bike/mx_race125p.phy.bpb"), "[Three Sixty]\n").unwrap();
+        let mut bike = Phy::read_bytes(b"", &game_sim::camera::CurveTable::build());
+        let line = by_id(&mods, "untamed").unwrap().lay(&mut bike, "race125p.phy");
+        assert!(line.contains("from mx_race125p.phy.bpb"), "{line}");
+        assert!(bike.tricks.is_some(), "{line}");
+        std::fs::remove_file(folder.join("Bike/mx_race125p.phy.bpb")).unwrap();
+        std::fs::write(folder.join("mod.json"), json.replace(r#", "Bike/mx_race125p.phy.bpb""#, "")).unwrap();
+        let mut bike = Phy::read_bytes(b"", &game_sim::camera::CurveTable::build());
+        let line = by_id(&mods, "untamed").unwrap().lay(&mut bike, "race125p.phy");
+        assert!(line.contains("mx_race125p.phy has no [Three Sixty]"), "{line}");
+        assert!(bike.tricks.is_none());
+        let _ = std::fs::remove_dir_all(mods);
+    }
+
+    /// MD91: with Untamed's pack installed (this checkout's `mods/tricks`), race125p's tricks come
+    /// from its compiled `mx_race125p.phy.bpb`. Skips without the pack.
+    #[test]
+    fn untamed_s_compiled_bikes_lay_their_tricks() {
+        let mods = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods");
+        let Ok(pack) = by_id(&mods, "untamed_tricks") else {
+            eprintln!("skipped: no untamed_tricks pack in {} (openmx-mods: import-tricks untamed)", mods.display());
+            return;
+        };
+        let mut bike = Phy::read_bytes(b"", &game_sim::camera::CurveTable::build());
+        let line = pack.lay(&mut bike, "race125p.phy");
+        assert_eq!(line, "tricks: untamed_tricks's 360, front flip and whip from mx_race125p.phy.bpb");
+        assert!(bike.tricks.is_some());
     }
 
     /// MD81a: Untamed's pack (`import-tricks untamed`, installed in this checkout's `mods/tricks`) gives
