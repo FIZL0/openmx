@@ -382,9 +382,10 @@ fn the_walk_names_every_field_once() {
     // only on its handling — `None` here. S189 moved it to 2464: the bike's kept nearby search
     // (`Ride::nearby`), boxed and walked only once a world with props or plants has been searched.
     // S210 moved it to 2472: the knockable props lent for a frame (`Ride::props`), `None` between
-    // frames and never walked.
+    // frames and never walked. S276 moved it to 2496: the wreck bike's mark that a flown plane's
+    // lane ticked it (`WreckBike::flown`), made and spent within a tick, not walked.
     assert_eq!(dump.fields.len(), 631, "the walk's leaves");
-    assert_eq!(std::mem::size_of::<Ride>(), 2472, "the ride's own size");
+    assert_eq!(std::mem::size_of::<Ride>(), 2496, "the ride's own size");
 
     // A few paths spelled out, so a reordered walk is a readable failure rather than a number.
     assert_eq!(dump.fields[0].path, "mv.g_peak[0]");

@@ -589,8 +589,8 @@ struct Tick {
     t: u32,
     state: [[u32; 3]; 2],
     crash: u32,
-    /// P2's chassis velocity and centre, and the wreck its frame said ([`fly_two`]; nothing in
-    /// [`fly`], which does not step P2).
+    /// P2's chassis velocity and centre, and the wreck its frame said ([`fly_two`]; in [`fly`], which
+    /// does not step P2's rider, a downed P2's wreck bike's body velocity and position, S276).
     p2: [[u32; 3]; 2],
     p2_wreck: Option<u8>,
 }
@@ -601,11 +601,27 @@ fn three(v: Vf) -> [u32; 3] {
 
 /// **Plane 0's flight by the port from image `from` through frame `to`**, polling the tape's field
 /// `t - zero` on tick `t` and stepping at row `t + 1`'s `dt` (S228's rule). P1's own bike is out of the
-/// plane's world, as the original takes it out at the switch; P2's stands where the image has it.
+/// plane's world, as the original takes it out at the switch; P2's stands where the image has it, or
+/// is down where the capture has P2 wrecked ([`wrecked_p2`], S276), its wreck bike meeting the plane.
 fn fly(from: u32, to: u32, zero: u32) -> Option<([[u32; 3]; 2], Vec<Tick>)> {
-    let ee = image(from)?;
     let cap = capture()?;
     let tape = tape()?;
+    let dt_of = |t: u32| F(cap.f((t + 1).max(cap.first as u32), "dt"));
+    let reason = cap.u(from, "p2_wreck_reason");
+    fly_by(from, to, &dt_of, &|t| tape_pad(&tape, t, zero), &|t| chord(&tape, t + 1, zero), reason)
+}
+
+/// [`fly`] on any pads and steps: tick `t` steps at `dt_of(t)` on pad `pad_of(t)`, its reset chord
+/// `respawn_of(t)`; P2 down with wreck `reason`, or standing for 0.
+fn fly_by(
+    from: u32,
+    to: u32,
+    dt_of: &dyn Fn(u32) -> F,
+    pad_of: &dyn Fn(u32) -> Report,
+    respawn_of: &dyn Fn(u32) -> bool,
+    reason: u32,
+) -> Option<([[u32; 3]; 2], Vec<Tick>)> {
+    let ee = image(from)?;
     let (plane, rays, hull) = machines()?;
     let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
     let tables = Arc::new(Tables::build());
@@ -613,25 +629,30 @@ fn fly(from: u32, to: u32, zero: u32) -> Option<([[u32; 3]; 2], Vec<Tick>)> {
     let col = Arc::new(col);
     let mesh = bike_box(&mut disc);
     assert!(mesh.is_some(), "no {} in the disc", flight_search::BIKE_COLLISION);
-    let other = standing_p2(&ee, &phy, &col);
+    let mut other = standing_p2(&ee, &phy, &col);
+    if reason != 0 {
+        let (part, wrecks) = wreck_files(&mut disc).expect("the rider's wreck files on the disc");
+        other.carries_wreck(part, wrecks, game_sim::ride::WRECK_INERTIA);
+        wrecked_p2(&ee, p2(&ee), reason, &mut other);
+    }
     let me = standing_p2(&ee, &phy, &col);
     let mut sim = Sim::with_rider(0x5272, Arc::clone(&tables), phy.clone(), me);
     sim.add_player(phy, other);
     in_free09_ss(&mut disc, |world, area| {
         sim.plane = Some(seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables));
-        let dt_of = |t: u32| F(cap.f((t + 1).max(cap.first as u32), "dt"));
         // The pad the image's tick read, so the first tick's presses are not edges.
-        sim.poll(dt_of(from - 1), &[tape_pad(&tape, from - 1, zero), Report::missing()]);
+        sim.poll(dt_of(from - 1), &[pad_of(from - 1), Report::missing()]);
         let p = sim.plane.as_ref().unwrap();
         let seed = [three(p.body.velocity), three(p.body.position)];
         let mut out = Vec::new();
         for t in from..to {
             let dt = dt_of(t);
-            let mut controls = sim.poll(dt, &[tape_pad(&tape, t, zero), Report::missing()]);
-            controls.respawn = chord(&tape, t + 1, zero);
+            let mut controls = sim.poll(dt, &[pad_of(t), Report::missing()]);
+            controls.respawn = respawn_of(t);
             sim.step(dt, &controls, world);
             let p = sim.plane.as_ref().unwrap();
-            out.push(Tick { t, state: [three(p.body.velocity), three(p.body.position)], crash: p.crash.reason, p2: [[0; 3]; 2], p2_wreck: None });
+            let p2 = sim.others[0].rider.crash.as_ref().map_or([[0; 3]; 2], |c| [three(c.bike.body.velocity), three(c.bike.body.position)]);
+            out.push(Tick { t, state: [three(p.body.velocity), three(p.body.position)], crash: p.crash.reason, p2, p2_wreck: None });
         }
         Some((seed, out))
     })
@@ -647,10 +668,26 @@ fn fly(from: u32, to: u32, zero: u32) -> Option<([[u32; 3]; 2], Vec<Tick>)> {
 /// others), then [`rider_contact::bumped_among`] and the plane pushed back ([`Flight::pushed`]).
 /// P1's own bike is parked out of the world, as the original's switch leaves it.
 fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tick>)> {
-    use game_sim::rider_contact;
-    let ee = image(from)?;
     let cap = capture()?;
     let tape = tape()?;
+    let dt_of = |t: u32| F(cap.f((t + 1).max(cap.first as u32), "dt"));
+    let p2_pad = |t: u32| tape.field(t.saturating_sub(zero) as usize, 1);
+    let reason = cap.u(from, "p2_wreck_reason");
+    fly_two_by(from, to, &dt_of, &|t| tape_pad(&tape, t, zero), &p2_pad, &|t| chord(&tape, t + 1, zero), reason)
+}
+
+/// [`fly_two`] on any pads and steps, as [`fly_by`] is [`fly`]'s: P2's pad on tick `t` is `p2_pad_of(t)`.
+fn fly_two_by(
+    from: u32,
+    to: u32,
+    dt_of: &dyn Fn(u32) -> F,
+    pad_of: &dyn Fn(u32) -> Report,
+    p2_pad_of: &dyn Fn(u32) -> Report,
+    respawn_of: &dyn Fn(u32) -> bool,
+    reason: u32,
+) -> Option<([[[u32; 3]; 2]; 2], Vec<Tick>)> {
+    use game_sim::rider_contact;
+    let ee = image(from)?;
     let (plane, rays, hull) = machines()?;
     let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
     let tables = Arc::new(Tables::build());
@@ -667,18 +704,13 @@ fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tic
             s.rider.carries_wreck(part.clone(), wrecks.clone(), game_sim::ride::WRECK_INERTIA);
         }
     }
-    let reason = cap.u(from, "p2_wreck_reason");
     if reason != 0 {
         wrecked_p2(&ee, p2(&ee), reason, &mut seats[1].rider);
     }
     in_free09_ss(&mut disc, |world, area| {
         seats[0].plane = Some(seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables));
-        let dt_of = |t: u32| F(cap.f((t + 1).max(cap.first as u32), "dt"));
-        let pads = |t: u32| [tape_pad(&tape, t, zero), Report::missing()];
-        let p2_pads = |t: u32| {
-            let n = t.saturating_sub(zero) as usize;
-            [tape.field(n, 1), Report::missing()]
-        };
+        let pads = |t: u32| [pad_of(t), Report::missing()];
+        let p2_pads = |t: u32| [p2_pad_of(t), Report::missing()];
         seats[0].poll(dt_of(from - 1), &pads(from - 1));
         seats[1].poll(dt_of(from - 1), &p2_pads(from - 1));
         let p = seats[0].plane.as_ref().unwrap();
@@ -693,38 +725,35 @@ fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tic
                 None => (None, Vec::new()),
             };
             // P2's wreck bike's search, plane 0's hull in its world (S274): its mirrors go on the plane's list.
-            let searched = wreck_searches(&mut seats, dt, &mut *world);
-            let mut ticked = None;
-            // The flying seat: its plane among the bikes.
+            // The flying seat: its plane among the bikes, and P2's wreck bike's search with its hull
+            // in the wreck bike's world before the plane's frame, its step after (S274, S276).
             let mut struck = {
                 let m = mirrors.get_mut(0).map(std::mem::take).unwrap_or_default();
                 let at = seats[0].plane.as_ref().unwrap().body.position;
                 let mut met = rider_contact::met_plane_among(&seats, 0, 2, m, at, &*world);
-                if let (Some((_, mirrors)), Some(c)) = (&searched, seats[1].rider.crash.as_ref()) {
-                    met.mirrors.extend(mirrors[0].iter().map(|e| game_sim::contact::Contact { other: Some(flight::WRECK_FROM), ..*e }));
-                    let b = &c.bike;
-                    met.wrecks.push(game_sim::prop_contact::Pushed { collection: 0, object: 1, collider: b.collider, body: b.body, mass: b.mass });
-                }
+                let downed = {
+                    let (me, others) = seats.split_at_mut(1);
+                    let mut riders: Vec<&mut Rider> = others.iter_mut().map(|s| &mut s.rider).collect();
+                    game_sim::wreck_plane::search_downed(&mut riders, me[0].plane.as_ref().unwrap(), dt, &mut *world, &mut met)
+                };
                 let on: Vec<(&Rider, bool)> = seats.iter().map(|s| (&s.rider, s.plane.is_none())).collect();
                 let bikes = rider_contact::plane_bikes(&on, 0, at, &*world);
                 drop(on);
                 let mut controls = seats[0].poll(dt, &pads(t));
-                controls.respawn = chord(&tape, t + 1, zero);
+                controls.respawn = respawn_of(t);
                 let s = &mut seats[0];
                 let pad = flight::pad(s.input.pad(0));
                 let f = s.plane.as_mut().unwrap();
                 f.reset_chord(controls.respawn, &tables.ride.acos);
                 f.frame_met(dt, pad, world, &tables.ride, &bikes, Some(&mut met));
                 rider_contact::pushed_among(&mut seats, &met);
-                if let (Some(w), Some(c)) = (met.wrecks.first(), seats[1].rider.crash.as_mut()) {
-                    (c.bike.collider, c.bike.body) = (w.collider, w.body);
-                }
+                // P2's own step comes after: its crash skips the wreck bike's tick (WreckBike::flown).
+                let (me, others) = seats.split_at_mut(1);
+                let mut riders: Vec<&mut Rider> = others.iter_mut().map(|s| &mut s.rider).collect();
+                game_sim::wreck_plane::step_downed(&mut riders, me[0].plane.as_mut().unwrap(), downed, &mut met, dt, &*world, true);
+                drop(riders);
                 met.struck
             };
-            // Its step, the plane's body on its resolve.
-            if let Some((movers, _)) = &searched {
-                ticked = wreck_steps(&mut seats, dt, &*world, movers);
-            }
             // P2's seat: its rider among the plane.
             let at = seats[1].rider.ride.transform().0[3];
             let firsts = vec![struck.get_mut(1).map(std::mem::take).unwrap_or_default()];
@@ -740,10 +769,6 @@ fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tic
             drop(on);
             let controls = seats[1].poll(dt, &p2_pads(t));
             let said = seats[1].step_among(dt, &controls, world, bump.as_mut(), &rivals);
-            // The rider's step ticks the wreck bike again on its own: it keeps the tick above.
-            if let (Some(c), Some(b)) = (seats[1].rider.crash.as_mut(), ticked.take()) {
-                c.bike = b;
-            }
             if let Some(b) = &bump {
                 rider_contact::bumped_among(&mut seats, b);
                 for f in &b.planes {
@@ -830,28 +855,6 @@ fn wrecked_p2(ee: &Ee, rider: u32, reason: u32, r: &mut Rider) {
     crash.clock = crash.throw.hand_hold_time;
     r.state.wreck = Some(wreck);
     r.crash = Some(crash);
-}
-
-/// P2's wreck bike's search with plane 0's hull in its world: its movers and the mirrors for the plane.
-fn wreck_searches(seats: &mut [Sim], dt: F, world: &mut dyn game_sim::world::World) -> Option<(Vec<game_sim::contact::Mover>, game_sim::wreck_plane::Mirrors)> {
-    let at = seats[1].rider.crash.as_ref()?.bike.origin();
-    let f = seats[0].plane.as_ref()?;
-    let h = f.hull(0)?;
-    let planes = [flight_search::Plane { mesh: h.mesh, at: h.at, velocity: f.body.velocity }];
-    let (ground, props, trees) = world.wooded_near(at);
-    let c = seats[1].rider.crash.as_mut()?;
-    Some(c.bike.search_flown(dt, ground.as_deref(), props, trees, &planes, h.capacity))
-}
-
-/// P2's wreck bike's world stepped with plane 0's body, which is written back; the wreck bike as it left it.
-fn wreck_steps(seats: &mut [Sim], dt: F, world: &dyn game_sim::world::World, movers: &[game_sim::contact::Mover]) -> Option<game_sim::wreck_bike::WreckBike> {
-    let at = seats[1].rider.crash.as_ref()?.bike.origin();
-    let mut flown = [seats[0].plane.as_ref()?.flown(0, at, world)];
-    let c = seats[1].rider.crash.as_mut()?;
-    c.bike.step_flown(dt, movers, &mut flown);
-    let bike = c.bike.clone();
-    seats[0].plane.as_mut()?.pushed(&flown[0]);
-    Some(bike)
 }
 
 /// How many of the port's ticks the capture confirms, bit for bit (tests/fly_and_collide.rs's rule):
@@ -1007,7 +1010,9 @@ const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 46, 17), (137845
 /// The whole tape as images every 100 frames cut it: each stretch from its image to the next, and
 /// how many of its ticks hold (S272's pins). Two part: 137810's on the joust's hit (137853's step), the
 /// Sim's plane lane standing P2 still; and 137910's on its first tick, the plane bouncing on P2's
-/// wreck, which neither this lane nor [`fly_two`] seeds (P2 is seeded standing).
+/// wreck. Since S276 [`fly`] seeds P2 down there and its wreck bike meets the plane in the Sim's lane
+/// ([`the_sim_lane_meets_p2s_wreck_bike`]), but the plane's resolve against the wreck bike's mirror is
+/// not yet the original's (S274), so it still parts on its first tick.
 const STRETCHES: [usize; 29] = [
     8, 100, 100, 100, 100, 43, 0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
     100, 100, 100, 100,
@@ -1033,4 +1038,56 @@ fn the_plane_flies_the_tape_as_the_original() {
         got.push(n);
     }
     assert_eq!(got, STRETCHES, "the ticks each stretch holds");
+}
+
+/// What the tape holds on 137910's ticks, without the tape (research/c16/index.md's segment list,
+/// `150:cross` from field 472, frame [`FIELD_ZERO`]` + 472`): Cross held at full pressure, the sticks
+/// centred. And the 2p state's step, 1/60 s.
+fn cross_held(t: u32) -> Report {
+    assert!((FIELD_ZERO + 472..FIELD_ZERO + 622).contains(&t), "tick {t} is outside the tape's 150 fields of Cross");
+    Report::from_buttons(0x0040)
+}
+
+/// [`cross_held`] to its segment's end, then the 980 idle fields after it.
+fn cross_then_idle(t: u32) -> Report {
+    assert!((FIELD_ZERO + 472..FIELD_ZERO + 1602).contains(&t), "tick {t} is outside the tape's Cross and idle segments");
+    if t < FIELD_ZERO + 622 { Report::from_buttons(0x0040) } else { Report::idle() }
+}
+
+/// **Away from the wreck, the wreck changes nothing** (S276): [`fly`] seeds P2 down on 138010's
+/// stretch too (the capture has P2 wrecked to 138012), and the plane, taxiing away from the wreck bike
+/// and taking off, flies it exactly as with P2 standing, on which [`STRETCHES`] pinned it.
+#[test]
+fn the_wreck_bike_leaves_a_far_plane_alone() {
+    let dt = |_| F(1.0 / 60.0);
+    let Some((_, down)) = fly_by(138010, 138110, &dt, &cross_then_idle, &|_| false, 7) else { return };
+    let Some((_, standing)) = fly_by(138010, 138110, &dt, &cross_then_idle, &|_| false, 0) else { return };
+    let planes = |ks: &[Tick]| ks.iter().map(|k| k.state).collect::<Vec<_>>();
+    assert_eq!(planes(&down), planes(&standing), "the plane with P2 down, as with P2 standing");
+}
+
+/// **The Sim's plane lane meets a downed P2's wreck bike** (S276): from 137910's image, P2 down with
+/// the capture's wreck 7 ([`wrecked_p2`]), [`fly`]'s lane (the Sim's [`game_sim::Sim::step`], which
+/// steps no rider but the plane) flies the plane as [`fly_two`]'s split-screen pass does, bit for bit
+/// over ten ticks: P2's wreck bike's search, its mirror on the plane's list and its step run in the
+/// Sim as in the shell ([`game_sim::wreck_plane::search_downed`], [`game_sim::wreck_plane::step_downed`]).
+/// Needs only the image and the disc: the tape's pad there is Cross held ([`cross_held`]). Its first
+/// tick is S274's to the last bits of z (-24.854322, 8.510814, 2.1630852 against S274's 2.1630855,
+/// which stepped at the capture's dt and not 1/60), short of the original's row 137911, (-24.94349, 8.60006, 2.21980). The wreck bike, which nothing
+/// else steps in this lane, goes on moving.
+#[test]
+fn the_sim_lane_meets_p2s_wreck_bike() {
+    let dt = |_| F(1.0 / 60.0);
+    let Some((_, down)) = fly_by(137910, 137920, &dt, &cross_held, &|_| false, 7) else { return };
+    let f = |b: [u32; 3]| b.map(f32::from_bits);
+    for k in &down {
+        println!("{}: plane vel {:?} pos {:?}; wreck bike vel {:?}", k.t + 1, f(k.state[0]), f(k.state[1]), f(k.p2[0]));
+    }
+    let Some((_, two)) = fly_two_by(137910, 137920, &dt, &cross_held, &|_| Report::idle(), &|_| false, 7) else { return };
+    for k in &two {
+        println!("{}: fly_two plane vel {:?} pos {:?}", k.t + 1, f(k.state[0]), f(k.state[1]));
+    }
+    let planes = |ks: &[Tick]| ks.iter().map(|k| k.state).collect::<Vec<_>>();
+    assert_eq!(planes(&down), planes(&two), "the plane in the Sim's lane, as fly_two's");
+    assert!(down.windows(2).all(|w| w[0].p2[1] != w[1].p2[1]), "the wreck bike steps in the plane's lane");
 }
