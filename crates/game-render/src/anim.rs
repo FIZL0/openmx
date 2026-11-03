@@ -1004,6 +1004,9 @@ pub struct PackClips {
     /// The rider's prefix, `MX` for the motocross rider.
     prefix: String,
     claimed: Vec<Motion>,
+    /// The packs stacked after this one (MD77, [`PackClips::stack`]), tried in order for a clip
+    /// this one does not have.
+    more: Vec<PackClips>,
 }
 
 /// The name a pack clip is bound under in a [`Set`]: the pack's folder is not an archive of the set,
@@ -1039,7 +1042,25 @@ impl PackClips {
                 }
             }
         }
-        PackClips { res, prefix: prefix.to_string(), claimed }
+        PackClips { res, prefix: prefix.to_string(), claimed, more: Vec::new() }
+    }
+
+    /// Several packs' clips as one (MD77): a stunt binds the first of them, in this order, that has a
+    /// member for it, so the pack whose record a stacked ride took for a name is the pack its clip
+    /// is looked for in first. `None` for none.
+    pub fn stack(packs: Vec<PackClips>) -> Option<PackClips> {
+        let mut packs = packs.into_iter();
+        let mut first = packs.next()?;
+        first.more.extend(packs);
+        Some(first)
+    }
+
+    /// Bind `stunt`'s clip out of the first pack of the stack with one of its `members`, or, when
+    /// none has, out of this one, which files why in [`Set::missing`].
+    fn load_stacked(&self, set: &mut Set, stunt: &str, members: &impl Fn(&Self, &str) -> Vec<String>) -> Option<ClipId> {
+        let has = |p: &PackClips| members(p, stunt).iter().any(|m| p.res.entries().iter().any(|e| same(&e.name, m)));
+        let pick = std::iter::once(self).chain(&self.more).find(|p| has(p)).unwrap_or(self);
+        set.load_pack(&pick.res, stunt, &members(pick, stunt))
     }
 
     /// The rider clip's name for a stunt: `MX_rider_9oclockindianair`.
@@ -1109,7 +1130,7 @@ impl PackClips {
         wants.push((spin + 1, "ThreeSixtyR".to_string()));
         let mut missing = Vec::new();
         for (k, stunt) in wants {
-            lib.pack[k] = set.load_pack(&self.res, &stunt, &members(self, &stunt));
+            lib.pack[k] = self.load_stacked(set, &stunt, &members);
             if lib.pack[k].is_none() {
                 missing.push(stunt);
             }
@@ -1148,7 +1169,7 @@ impl PackClips {
             if lib.clip[state].is_some() {
                 continue;
             }
-            lib.clip[state] = set.load_pack(&self.res, &stunt, &members(self, &stunt));
+            lib.clip[state] = self.load_stacked(set, &stunt, &members);
             if lib.clip[state].is_none() {
                 missing.push(stunt);
             }

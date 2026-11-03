@@ -26,7 +26,7 @@ use game_render::vehicle::{Chassis, Drive, params};
 use game_render::{chassis, ini};
 use game_sim::replay::Capture;
 use game_sim::ride::Controls;
-use game_sim::trick::{Dir, Set as Stunts24, Stunts, extra_of, slot_of};
+use game_sim::trick::{Dir, LAST_GROUP, Set as Stunts24, Stunts, extra_of, group_with, slot_of};
 use game_sim::vehicle_anim::PACK_EXTRA;
 use game_sim::world::Flat;
 use game_sim::{phy::Phy, rider, trick_pack};
@@ -89,16 +89,15 @@ fn res(disc: &mut Disc, ends: &str) -> Res {
     disc.res(&name).unwrap()
 }
 
-fn buttons_for(group: u8) -> [bool; 3] {
-    match group {
-        1 => [true, false, false],
-        2 => [false, true, false],
-        3 => [true, true, false],
-        4 => [true, false, true],
-        5 => [false, true, true],
-        6 => [true, true, true],
-        _ => [false; 3],
-    }
+/// The original's three buttons and the two extras that make `group` (MD77's [`group_with`]).
+fn extra_hands(group: u8) -> ([bool; 3], [bool; 2]) {
+    let unders = (0..8u8).map(|b| [b & 1 != 0, b & 2 != 0, b & 4 != 0]);
+    let extras = [[false, false], [true, false], [false, true], [true, true]];
+    extras
+        .into_iter()
+        .flat_map(|e| unders.clone().map(move |t| (t, e)))
+        .find(|&(t, e)| group_with(t, e) == group)
+        .unwrap_or_else(|| panic!("no buttons make group {group}"))
 }
 
 fn dpad_for(dir: Dir) -> [bool; 4] {
@@ -114,7 +113,7 @@ fn dpad_for(dir: Dir) -> [bool; 4] {
 }
 
 /// The button group and direction that make slot `slot`: groups 1..=6 the disc's 24, the two extra
-/// buttons (7, 8) a pack's.
+/// buttons and their combinations (7..=LAST_GROUP, MD77) a pack's.
 fn gesture_for(slot: usize) -> (u8, Dir) {
     let dirs = [Dir::Up, Dir::Down, Dir::Left, Dir::Right];
     for group in 1..=6u8 {
@@ -124,7 +123,7 @@ fn gesture_for(slot: usize) -> (u8, Dir) {
             }
         }
     }
-    for group in 7..=8u8 {
+    for group in 7..=LAST_GROUP {
         for dir in dirs {
             if slot >= 24 && extra_of(group, dir) == Some(slot - 24) {
                 return (group, dir);
@@ -142,8 +141,8 @@ fn hands(gesture: Option<(u8, Dir)>) -> Controls {
     match gesture {
         Some((group, dir)) => Controls {
             gas: F::ONE,
-            trick: buttons_for(group),
-            extra: [group == 7, group == 8],
+            trick: extra_hands(group).0,
+            extra: extra_hands(group).1,
             dpad: dpad_for(dir),
             ..Controls::default()
         },

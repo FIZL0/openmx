@@ -67,7 +67,9 @@ right stick to look around, **Select** for the camera. `--controls original` (or
 puts back the original's: **Cross** throttle, **Square** brake, L2 clutch, R2 front brake.
 
 Tricks are the original's: in the air, hold one, two or three of **Circle**, **Triangle** and **R1**
-and push the **d-pad** — that names one of the 24 stunts. **L1 + R1** puts the bike back. **M**
+and push the **d-pad** — that names one of the 24 stunts. With trick packs on (Settings → Ride, one
+On/Off row a pack; packs on stack), **Cross**, **Square** or both, alone or over those three, give
+96 more. **L1 + R1** puts the bike back. **M**
 switches between the bike and the biplane. **Start** pauses.
 
 A keyboard works too — X/Space, Z, the arrow keys, C/V/D for the trick buttons, A+D for the reset

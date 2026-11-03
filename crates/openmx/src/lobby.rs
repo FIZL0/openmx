@@ -178,9 +178,12 @@ impl openmx_net::Disc for DiscFiles {
         crate::saved_markers::to_pick(&crate::saved_markers::load(&dir, track, &profile, bike), bike, track)
     }
 
+    /// A room's trick packs' hash (MD19), or a list of them stacked (MD77, `a,b`:
+    /// [`crate::trick_packs::hash`]); `None` when this machine lacks one of them.
     fn tricks(&self, id: &str) -> Option<u64> {
         let mods = self.mods.lock().unwrap().clone()?;
-        crate::trick_packs::by_id(&mods, id).ok()?.hash().ok()
+        let packs = crate::trick_packs::on(&mods, &crate::trick_packs::ids_of_room(id)).ok()?;
+        crate::trick_packs::hash(&packs).ok()
     }
 }
 
@@ -201,47 +204,56 @@ impl DiscFiles {
     }
 }
 
-/// The trick pack a ride on `tricks` rides (MD19), as a room names it: the id of the first pack in
-/// `mods` (the one `ride_trick_pack` would lay) for MX vs. ATV's, else empty, the original's.
-pub fn room_tricks(tricks: crate::menu::Tricks, mods: Option<&Path>) -> String {
+/// The trick packs a ride on `tricks` stacks (MD19, MD77), as a room names them: the ids of the
+/// packs `named` that `mods` has, or with none named its first (the ones `ride_trick_packs` would
+/// lay), joined by commas in the folder's order, for MX vs. ATV's; else empty, the original's.
+pub fn room_tricks(tricks: crate::menu::Tricks, named: &[String], mods: Option<&Path>) -> String {
     match (tricks, mods) {
-        (crate::menu::Tricks::MxVsAtv, Some(mods)) => crate::trick_packs::find(mods).map(|p| p.id).unwrap_or_default(),
+        (crate::menu::Tricks::MxVsAtv, Some(mods)) => {
+            let installed: Vec<String> = crate::trick_packs::listed(mods).0.into_iter().map(|p| p.id).collect();
+            crate::trick_packs::room_ids(&crate::trick_packs::chosen(&installed, named))
+        }
         _ => String::new(),
     }
 }
 
-/// A lobby this machine hosts rides its Tricks row (MD19): MX vs. ATV's names, in the room the
-/// commands `out` host, the trick pack a ride of its own would lay over the original's, and the
-/// handshake holds every seat to it. A ride opened online under way (N10) already says its own.
-pub fn name_tricks(out: &mut [openmx_net::Cmd], tricks: crate::menu::Tricks, mods: Option<&Path>) {
+/// A lobby this machine hosts rides its Tricks rows (MD19, MD77): the trick packs on, in the room
+/// the commands `out` host, the packs a ride of its own would stack over the original's, and the
+/// handshake holds every seat to them. A ride opened online under way (N10) already says its own.
+pub fn name_tricks(out: &mut [openmx_net::Cmd], settings: &crate::menu::Settings, mods: Option<&Path>) {
     for c in out {
         if let openmx_net::Cmd::Host(room) | openmx_net::Cmd::Quick(room) = c
             && !room.riding
         {
-            room.tricks = room_tricks(tricks, mods);
+            room.tricks = room_tricks(settings.tricks, &settings.trick_packs, mods);
         }
     }
 }
 
 /// The handling a ride on `handling` rides (N21, MD40's setting), as a room names it: the id of the
-/// pack whose `mx_*.phy` the bikes are read from (the first in `mods`, the one `ride_handling_pack`
-/// would read, which is also the trick pack's) for MX vs. ATV's, else empty, the original's.
-pub fn room_handling(handling: game_sim::handling::Handling, mods: Option<&Path>) -> String {
+/// pack whose `mx_*.phy` the bikes are read from for MX vs. ATV's — `named` when `mods` has it
+/// (MD77), else the first of the room's trick packs `tricks`, else the folder's first, the one
+/// `ride_handling_pack` would read — else empty, the original's.
+pub fn room_handling(handling: game_sim::handling::Handling, named: &str, tricks: &str, mods: Option<&Path>) -> String {
     match (handling, mods) {
-        (game_sim::handling::Handling::MxVsAtv, Some(mods)) => crate::trick_packs::find(mods).map(|p| p.id).unwrap_or_default(),
+        (game_sim::handling::Handling::MxVsAtv, Some(mods)) => {
+            let installed: Vec<String> = crate::trick_packs::listed(mods).0.into_iter().map(|p| p.id).collect();
+            let first_trick = crate::trick_packs::ids_of_room(tricks).into_iter().next();
+            Some(named.to_string()).filter(|n| installed.contains(n)).or(first_trick).or_else(|| installed.first().cloned()).unwrap_or_default()
+        }
         _ => String::new(),
     }
 }
 
-/// A lobby this machine hosts rides its Handling row (N21): MX vs. ATV's names its pack in the room
-/// the commands `out` host, and the handshake holds every seat to it. A ride opened online under
-/// way (N10) already says its own.
-pub fn name_handling(out: &mut [openmx_net::Cmd], handling: game_sim::handling::Handling, mods: Option<&Path>) {
+/// A lobby this machine hosts rides its Handling rows (N21, MD77): MX vs. ATV's names its pack in
+/// the room the commands `out` host, and the handshake holds every seat to it. A ride opened online
+/// under way (N10) already says its own. After [`name_tricks`], whose packs it falls back on.
+pub fn name_handling(out: &mut [openmx_net::Cmd], settings: &crate::menu::Settings, mods: Option<&Path>) {
     for c in out {
         if let openmx_net::Cmd::Host(room) | openmx_net::Cmd::Quick(room) = c
             && !room.riding
         {
-            room.handling = room_handling(handling, mods);
+            room.handling = room_handling(settings.handling, &settings.handling_pack, &room.tricks, mods);
         }
     }
 }
@@ -330,8 +342,8 @@ impl Network {
         let mods = menu.settings.mods.then(|| dir.join(crate::track_mods::MODS_DIR));
         self.disc.tricks_from(mods.clone());
         let mut out = std::mem::take(&mut menu.lobby.out);
-        name_tricks(&mut out, menu.settings.tricks, mods.as_deref());
-        name_handling(&mut out, menu.settings.handling, mods.as_deref());
+        name_tricks(&mut out, &menu.settings, mods.as_deref());
+        name_handling(&mut out, &menu.settings, mods.as_deref());
         if !out.is_empty() {
             let name = menu.settings.name.clone();
             let lan = menu.lobby.lan;

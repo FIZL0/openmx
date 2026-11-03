@@ -16,6 +16,8 @@ pub const TRICKS_DIR: &str = "tricks";
 /// A trick pack, read.
 pub struct Pack {
     pub id: String,
+    /// Its `mod.json` name, the id when it has none.
+    pub name: String,
     folder: PathBuf,
     /// Its stunt table's file (`riders[0].table`).
     table: PathBuf,
@@ -72,6 +74,102 @@ pub fn by_id(mods: &Path, id: &str) -> Result<Pack, String> {
     Err(why.join("; "))
 }
 
+/// Every trick pack in `mods/tricks/` (MD77), in folder-name order — the order the Ride tab lists
+/// them and a stacked ride settles a stunt two packs both have — and what could not be read. A
+/// folder without one is no pack; an id two folders both have is the first's.
+pub fn listed(mods: &Path) -> (Vec<Pack>, Vec<String>) {
+    let dir = mods.join(TRICKS_DIR);
+    let Ok(entries) = crate::files::list(&dir) else { return (Vec::new(), Vec::new()) };
+    let mut folders: Vec<PathBuf> = entries.into_iter().map(|e| e.path).filter(|p| crate::files::is_file(p.join("mod.json"))).collect();
+    folders.sort();
+    let (mut packs, mut why): (Vec<Pack>, Vec<String>) = (Vec::new(), Vec::new());
+    for folder in folders {
+        match read(&folder) {
+            Ok(Some(pack)) if !packs.iter().any(|p| p.id == pack.id) => packs.push(pack),
+            Ok(_) => {}
+            Err(e) => why.push(format!("{}: {e}", folder.display())),
+        }
+    }
+    (packs, why)
+}
+
+/// The packs of `ids` (MD77), in `ids`' order — a room's, which is the host's folder's and may not
+/// be this machine's — or why one of them is not there.
+pub fn on(mods: &Path, ids: &[String]) -> Result<Vec<Pack>, String> {
+    let (packs, why) = listed(mods);
+    if let Some(id) = ids.iter().find(|id| !packs.iter().any(|p| p.id == **id)) {
+        let mut why = why;
+        why.push(format!("no trick pack {id} in {}", mods.join(TRICKS_DIR).display()));
+        return Err(why.join("; "));
+    }
+    let mut packs: Vec<Pack> = packs.into_iter().filter(|p| ids.contains(&p.id)).collect();
+    packs.sort_by_key(|p| ids.iter().position(|i| *i == p.id));
+    Ok(packs)
+}
+
+/// The rider's stunts with the extras of every pack in `packs` stacked (MD77,
+/// [`trick_pack::stacked`]), and how many of them found no gesture.
+pub fn stunts(packs: &[Pack], stunts: Set) -> (Set, usize) {
+    let tables: Vec<&[Row]> = packs.iter().map(|p| p.rows.as_slice()).collect();
+    let (extras, over) = trick_pack::stacked(&tables, &stunts);
+    (stunts.with_extras(extras), over)
+}
+
+/// Lay the stacked packs' moves over a bike (MD77): the first of them, in order, with a file for it
+/// that has a 360 lays its 360, front flip and whip; the line says which, or why none did.
+pub fn lay(packs: &[Pack], bike: &mut Phy, member: &str) -> String {
+    let mut lines = Vec::new();
+    for pack in packs {
+        let line = pack.lay(bike, member);
+        if bike.tricks.is_some() {
+            return line;
+        }
+        lines.push(line);
+    }
+    lines.join("; ")
+}
+
+/// What an online ride's handshake compares for a stack of packs (MD77): one pack's own
+/// [`Pack::hash`], so a room of one pack is what it was before; for more, FNV-1a over each id and
+/// hash in order.
+pub fn hash(packs: &[Pack]) -> Result<u64, String> {
+    if let [one] = packs {
+        return one.hash();
+    }
+    let mut all = Vec::new();
+    for p in packs {
+        all.extend(p.id.as_bytes());
+        all.push(0);
+        all.extend(p.hash()?.to_le_bytes());
+    }
+    Ok(openmx_net::handshake::fnv(&all))
+}
+
+/// The packs a ride stacks out of `installed`'s ids (MD77), in their order: those `named`, or with
+/// none named the first (MD16's choice).
+pub fn chosen(installed: &[String], named: &[String]) -> Vec<String> {
+    match named.is_empty() {
+        true => installed.iter().take(1).cloned().collect(),
+        false => installed.iter().filter(|id| named.contains(id)).cloned().collect(),
+    }
+}
+
+/// A room's list of trick pack ids (MD77): `a,b`, and back.
+pub fn room_ids(ids: &[String]) -> String {
+    ids.join(",")
+}
+
+/// The ids a room's `tricks` names (MD77), in its order; none for the original's.
+pub fn ids_of_room(word: &str) -> Vec<String> {
+    word.split(',').map(str::trim).filter(|w| !w.is_empty()).map(str::to_string).collect()
+}
+
+/// The stacked packs' clips (MD21, MD77), each stunt's looked for in the packs in order.
+pub fn clips(packs: &[Pack]) -> Result<Option<game_render::anim::PackClips>, String> {
+    let clips = packs.iter().map(Pack::clips).collect::<Result<Vec<_>, String>>()?;
+    Ok(game_render::anim::PackClips::stack(clips))
+}
+
 /// `Ok(None)` for a mod that is not a trick pack.
 fn read(folder: &Path) -> Result<Option<Pack>, String> {
     let text = crate::files::read_to_string(folder.join("mod.json")).map_err(|e| format!("mod.json: {e}"))?;
@@ -80,6 +178,7 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
         return Ok(None);
     }
     let id = json.get("id").and_then(Json::str).ok_or("mod.json has no id")?.to_owned();
+    let name = json.get("name").and_then(Json::str).unwrap_or(&id).to_owned();
     let first = match json.get("riders") {
         Some(Json::Arr(riders)) => riders.first(),
         _ => None,
@@ -99,7 +198,7 @@ fn read(folder: &Path) -> Result<Option<Pack>, String> {
             }
         }
     }
-    Ok(Some(Pack { id, folder: folder.to_owned(), table, rows, rider, phys }))
+    Ok(Some(Pack { id, name, folder: folder.to_owned(), table, rows, rider, phys }))
 }
 
 /// The table's `<name>.bpb` when the pack has one, else the name: SLUS_217.01's loader (`0x001425c0`)
@@ -121,6 +220,11 @@ impl Pack {
     pub fn stunts(&self, stunts: Set) -> Set {
         let extras = trick_pack::extras(&self.rows, &stunts);
         stunts.with_extras(extras)
+    }
+
+    /// The names of every stunt the pack could add to `stunts` (MD77), for the Ride tab's count.
+    pub fn extra_names(&self, stunts: &Set) -> Vec<String> {
+        trick_pack::candidates(&self.rows, stunts).into_iter().map(|s| s.name).collect()
     }
 
     /// The bike read from `member` (`race125p.phy`) on MX vs. ATV's handling (MD40): the pack's own
@@ -183,6 +287,13 @@ impl Pack {
     /// clip in either game: the rider leans forward on the airborne row (P159) and the bike, which
     /// follows the body's state (MD41), stays on its own airborne row, not the backflip's clip.
     pub fn missing_clips(&self, stunts: &Set, rider: Option<&[String]>, bike: Option<&[String]>) -> String {
+        missing_clips(std::slice::from_ref(self), stunts, rider, bike)
+    }
+}
+
+/// [`Pack::missing_clips`] for a stack of packs (MD77), whose clips are looked for in each in turn.
+pub fn missing_clips(packs: &[Pack], stunts: &Set, rider: Option<&[String]>, bike: Option<&[String]>) -> String {
+    {
         let extras = stunts.stunts.iter().skip(game_sim::trick::SLOTS).filter(|s| !s.name.is_empty()).count();
         let side = |who: &str, missing: Option<&[String]>| match missing {
             None => format!("no {who} to bind them to"),
@@ -191,7 +302,7 @@ impl Pack {
         };
         format!(
             "tricks: clips from {} for {extras} extras and the two 360s: {}; {}; the front flip has none in either game: the rider leans forward and the bike stays on its airborne row",
-            self.folder.display(),
+            packs.iter().map(|p| p.folder.display().to_string()).collect::<Vec<_>>().join(" and "),
             side("rider", rider),
             side("bike", bike)
         )

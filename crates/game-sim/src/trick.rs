@@ -579,7 +579,7 @@ pub struct Buttons {
     pub trick: [bool; TRICK_BUTTONS],
     pub dpad: [bool; DPAD],
     /// **The port's own (MD16):** Cross and Square, the two buttons the new control scheme freed,
-    /// which a rider on MX vs. ATV's tricks reads as two more groups ([`group_with`]). Both false for
+    /// which a rider on a trick pack's tricks reads as more groups ([`group_with`]). Both false for
     /// every rider on the original's tricks, which is every replay and every acceptance run.
     pub extra: [bool; EXTRA_BUTTONS],
 }
@@ -587,27 +587,75 @@ pub struct Buttons {
 /// How many buttons past the original's three a rider on MX vs. ATV's tricks reads (MD16): Cross
 /// and Square, in that order.
 pub const EXTRA_BUTTONS: usize = 2;
-/// The gesture slots those two make: one group each, by the four stick directions.
-pub const EXTRA_SLOTS: usize = EXTRA_BUTTONS * 4;
+/// How many groups the two extras make (MD77): Cross, Square and both, each alone and over each of
+/// the eight ways the original's three can be held but none — its six groups and R1 alone, which
+/// the original reads as no group at all — `3 × (1 + 7)`.
+pub const EXTRA_GROUPS: usize = 3 * (1 + 7);
+/// The gesture slots those groups make: four each, by the stick's directions.
+pub const EXTRA_SLOTS: usize = EXTRA_GROUPS * 4;
+/// The last group [`group_with`] answers, 6 + [`EXTRA_GROUPS`].
+pub const LAST_GROUP: u8 = 6 + EXTRA_GROUPS as u8;
 
-/// [`group`] with the port's two extra buttons (MD16): the original's group when any of its three
-/// buttons is down, so an original gesture always wins; otherwise 7 for Cross and 8 for Square
-/// (Cross first when both are down), and 0 for nothing. With both extras up it is [`group`].
-pub fn group_with(trick: [bool; TRICK_BUTTONS], extra: [bool; EXTRA_BUTTONS]) -> u8 {
-    match group(trick) {
-        0 if extra[0] => 7,
-        0 if extra[1] => 8,
-        g => g,
+/// What the original's three buttons are under the extras (MD77): [`group`]'s 1..=6, or 7 for R1
+/// alone, which [`group`] makes nothing of (it is the original's modifier, never a group by itself).
+fn under_extras(trick: [bool; TRICK_BUTTONS]) -> u8 {
+    match (group(trick), trick) {
+        (0, [false, false, true]) => 7,
+        (g, _) => g,
     }
 }
 
-/// The extra slot (0..[`EXTRA_SLOTS`]) a group of 7 or 8 and a direction name, in the order
-/// [`slot_of`] numbers the original's: up, down, left, right within a group.
+/// [`group`] with the port's two extra buttons (MD16, MD77): with both extras up it is [`group`], so
+/// a ride on the original's tricks, where they are always up, reads the original's groups. With
+/// either down, the extras combine with each other and with the original's three as those three
+/// combine among themselves: 7 is Cross alone, 8 Square alone, 9 both (MD16's two groups keep their
+/// numbers); then Cross over each of [`under_extras`]' seven (10..=16), Square over each (17..=23)
+/// and both over each (24..=30): Cross + R1 is 16, Cross + Circle 10. No gesture of the original's
+/// changes meaning while both extras are up.
+pub fn group_with(trick: [bool; TRICK_BUTTONS], extra: [bool; EXTRA_BUTTONS]) -> u8 {
+    let e = match extra {
+        [false, false] => return group(trick),
+        [true, false] => 0,
+        [false, true] => 1,
+        [true, true] => 2,
+    };
+    match under_extras(trick) {
+        0 => 7 + e,
+        under => 10 + e * 7 + (under - 1),
+    }
+}
+
+/// The extra slot (0..[`EXTRA_SLOTS`]) a group of 7..=[`LAST_GROUP`] and a direction name, in the
+/// order [`slot_of`] numbers the original's: up, down, left, right within a group, the groups in
+/// [`group_with`]'s order.
 pub fn extra_of(group: u8, dir: Dir) -> Option<usize> {
-    if !(7..=8).contains(&group) || dir == Dir::None {
+    if !(7..=LAST_GROUP).contains(&group) || dir == Dir::None {
         return None;
     }
     Some((group as usize - 7) * 4 + (dir as usize - 1))
+}
+
+/// The buttons a group of 7..=[`LAST_GROUP`] is held on, as the pad names them (`Cross + R1`), for
+/// the menus and the logs (MD77); `None` for the original's groups and nothing.
+pub fn extra_group_name(group: u8) -> Option<String> {
+    if !(7..=LAST_GROUP).contains(&group) {
+        return None;
+    }
+    let (e, under) = if group < 10 { (group - 7, 0) } else { ((group - 10) / 7, (group - 10) % 7 + 1) };
+    let mut names = vec![["Cross", "Square", "Cross + Square"][e as usize]];
+    // The original's three, in [`group`]'s button order: circle, triangle, R1.
+    let held: [bool; TRICK_BUTTONS] = match under {
+        1 => [true, false, false],
+        2 => [false, true, false],
+        3 => [true, true, false],
+        4 => [true, false, true],
+        5 => [false, true, true],
+        6 => [true, true, true],
+        7 => [false, false, true],
+        _ => [false; TRICK_BUTTONS],
+    };
+    names.extend(["Circle", "Triangle", "R1"].into_iter().zip(held).filter(|(_, h)| *h).map(|(n, _)| n));
+    Some(names.join(" + "))
 }
 
 /// The trick id a gesture names: one of the 24 slots, or one of the extra ones (MD16).
@@ -642,7 +690,7 @@ pub fn group(trick: [bool; TRICK_BUTTONS]) -> u8 {
 /// What the rider makes of the controller this frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Gesture {
-    /// The button group, 0..=6.
+    /// The button group, 0..=6, or past it for a rider on a trick pack's extras ([`group_with`]).
     pub group: u8,
     /// The direction, from the stick or the d-pad.
     pub dir: Dir,
@@ -1150,6 +1198,37 @@ mod tests {
         assert_eq!((s.x, s.y, s.digital), (F(-1.0), F(0.5), [true, false]));
         let s = stick(F(0.5), F(0.5), [false, false, true, true]);
         assert_eq!((s.x, s.y, s.digital), (F(0.5), F(-1.0), [false, true]));
+    }
+
+    /// MD77: Cross and Square combine with each other and with every one of the original's groups,
+    /// each combination its own group and every (group, direction) its own extra slot; with both up
+    /// the group is the original's, and MD16's Cross and Square alone keep 7 and 8.
+    #[test]
+    fn the_extras_combine_into_groups_of_their_own() {
+        let held = |bits: u8| [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0];
+        let mut groups = Vec::new();
+        for trick in 0..8u8 {
+            assert_eq!(group_with(held(trick), [false, false]), group(held(trick)), "both extras up is the original's");
+            for extra in [[true, false], [false, true], [true, true]] {
+                groups.push(group_with(held(trick), extra));
+            }
+        }
+        assert_eq!(group_with([false; 3], [true, false]), 7);
+        assert_eq!(group_with([false; 3], [false, true]), 8);
+        assert_eq!(group_with([false; 3], [true, true]), 9);
+        assert_eq!(group([false, false, true]), 0, "R1 alone is no group of the original's");
+        assert_eq!(extra_group_name(group_with([false, false, true], [true, false])).as_deref(), Some("Cross + R1"));
+        assert_eq!(extra_group_name(group_with([true, true, true], [true, true])).as_deref(), Some("Cross + Square + Circle + Triangle + R1"));
+        assert_eq!(extra_group_name(6), None);
+        // R1 alone is no group of the original's but is one under the extras: 3 × 8 groups, each once.
+        groups.sort_unstable();
+        groups.dedup();
+        assert_eq!(groups, (7..=LAST_GROUP).collect::<Vec<_>>());
+        let dirs = [Dir::Up, Dir::Down, Dir::Left, Dir::Right];
+        let slots: Vec<usize> = (7..=LAST_GROUP).flat_map(|g| dirs.map(|d| extra_of(g, d).unwrap())).collect();
+        assert_eq!(slots, (0..EXTRA_SLOTS).collect::<Vec<_>>());
+        assert_eq!(extra_of(LAST_GROUP + 1, Dir::Up), None);
+        assert!(usize::from(Trick::EXTRA) + EXTRA_SLOTS <= usize::from(u8::MAX), "every extra has a trick id");
     }
 
     /// The four quadrants and the dead middle, off a table this test builds.

@@ -521,6 +521,13 @@ pub struct Settings {
     /// Whose tricks a ride has (MD16): the original's, or MX vs. ATV's read from a trick pack in the
     /// mods folder. The original's unless changed.
     pub tricks: Tricks,
+    /// Which trick packs are on (MD77), by their `mod.json` id: with [`Tricks::MxVsAtv`], those of
+    /// them that are installed, stacked in the folder's order ([`Settings::trick_packs_on`]); empty,
+    /// the first installed pack alone, as a file from before MD77 meant.
+    pub trick_packs: Vec<String>,
+    /// The pack whose `mx_*.phy` MX vs. ATV's handling reads (MD77), by id; empty for the first trick
+    /// pack on, or the first installed when none is ([`Settings::handling_pack_on`]).
+    pub handling_pack: String,
     /// How the bikes handle (MD40): MX Unleashed's, or MX vs. ATV's bikes and steps read from the
     /// trick pack's `mx_*.phy`. The original's unless changed.
     pub handling: game_sim::handling::Handling,
@@ -1362,6 +1369,8 @@ impl Default for Settings {
             track_filter: String::new(),
             track_category: String::new(),
             tricks: Tricks::default(),
+            trick_packs: Vec::new(),
+            handling_pack: String::new(),
             handling: game_sim::handling::Handling::default(),
             plants: Lod::default(),
             foliage: Foliage::default(),
@@ -1569,6 +1578,8 @@ impl Settings {
                 "machine_bays" => s.bays = v != "off",
                 "mods" => s.mods = v != "off",
                 "tricks" => s.tricks = Tricks::from_word(v).unwrap_or(s.tricks),
+                "trick_packs" => s.trick_packs = pack_names(v),
+                "handling_pack" => s.handling_pack = pack_names(v).into_iter().next().unwrap_or_default(),
                 "handling" => s.handling = game_sim::handling::Handling::from_word(v).unwrap_or(s.handling),
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
@@ -1831,7 +1842,58 @@ impl Settings {
     /// The tricks' line (MD16), only when they are not the original's, so a file from before it is
     /// written as it was.
     fn tricks_text(&self) -> String {
-        if self.tricks == Tricks::Original { String::new() } else { format!("tricks = {}\n", self.tricks.word()) }
+        let mut out = if self.tricks == Tricks::Original { String::new() } else { format!("tricks = {}\n", self.tricks.word()) };
+        // MD77: which packs, kept while the tricks are the original's so turning them back on finds them
+        if !self.trick_packs.is_empty() {
+            out += &format!("trick_packs = {}\n", self.trick_packs.join(", "));
+        }
+        if !self.handling_pack.is_empty() {
+            out += &format!("handling_pack = {}\n", self.handling_pack);
+        }
+        out
+    }
+
+    /// The trick packs a ride on these settings stacks (MD77), by id, out of `installed`'s ids in
+    /// their order (the folder's, which is the order that settles a stunt two packs both have): none
+    /// on the original's tricks; on MX vs. ATV's, [`Settings::trick_packs`]' that are installed, or,
+    /// with none named, the first installed (MD16's choice, and a file from before MD77's).
+    pub fn trick_packs_on(&self, installed: &[String]) -> Vec<String> {
+        match (self.tricks, self.trick_packs.is_empty()) {
+            (Tricks::Original, _) => Vec::new(),
+            (Tricks::MxVsAtv, true) => installed.iter().take(1).cloned().collect(),
+            (Tricks::MxVsAtv, false) => installed.iter().filter(|id| self.trick_packs.contains(id)).cloned().collect(),
+        }
+    }
+
+    /// Switch the trick pack `id` on or off (MD77), out of `installed`: the others on stay on, and
+    /// the tricks are MX vs. ATV's while any is on, the original's when the last goes off.
+    pub fn toggle_trick_pack(&mut self, id: &str, installed: &[String]) {
+        let mut on = self.trick_packs_on(installed);
+        match on.iter().position(|p| p == id) {
+            Some(at) => {
+                on.remove(at);
+            }
+            None => on.push(id.to_string()),
+        }
+        on.sort_by_key(|p| installed.iter().position(|i| i == p));
+        self.tricks = if on.is_empty() { Tricks::Original } else { Tricks::MxVsAtv };
+        // With the last one off the list is kept, so the Tricks row turns the same ones back on.
+        if !on.is_empty() {
+            self.trick_packs = on;
+        }
+    }
+
+    /// The pack MX vs. ATV's handling reads (MD77), out of `installed`'s ids: [`Settings::handling_pack`]
+    /// when it is installed, else the first trick pack on, else the first installed; `None` on the
+    /// original's handling or with no pack.
+    pub fn handling_pack_on(&self, installed: &[String]) -> Option<String> {
+        if self.handling == game_sim::handling::Handling::Original {
+            return None;
+        }
+        if installed.contains(&self.handling_pack) {
+            return Some(self.handling_pack.clone());
+        }
+        self.trick_packs_on(installed).into_iter().next().or_else(|| installed.first().cloned())
     }
 
     /// The handling's line (MD40), only when it is not the original's, as the tricks' is.
@@ -2019,14 +2081,26 @@ impl Speedometer {
     }
 }
 
+/// A trick pack in the mods folder (MD77), as the Ride tab lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrickPack {
+    /// Its `mod.json` id, which the settings and a room name it by.
+    pub id: String,
+    /// Its `mod.json` name.
+    pub name: String,
+    /// The stunts it adds past the rider's own 24, in the order it gives them gestures.
+    pub extras: Vec<String>,
+}
+
 /// Whose tricks a ride has (MD16), as `settings.txt` and `--tricks` spell it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tricks {
     /// MX Unleashed's, and nothing else: what every replay and acceptance ride is.
     #[default]
     Original,
-    /// MX vs. ATV's laid over them from a trick pack (`mods/tricks/<id>/`): its extra stunts on Cross
-    /// and Square under the new layout, and under R1 its 360s, its whip and the port's own front flip.
+    /// MX vs. ATV's laid over them from the trick packs on (`mods/tricks/<id>/`,
+    /// [`Settings::trick_packs_on`]): their extra stunts on Cross and Square and their combinations
+    /// under the new layout, and under R1 the first pack's 360s, whip and the port's own front flip.
     MxVsAtv,
 }
 
@@ -2047,7 +2121,7 @@ impl Tricks {
     pub fn label(self) -> &'static str {
         match self {
             Tricks::Original => "Original",
-            Tricks::MxVsAtv => "MX vs. ATV",
+            Tricks::MxVsAtv => "Trick Packs",
         }
     }
 }
@@ -3075,6 +3149,9 @@ pub struct Menu {
     /// Every music pack the folder listed this session (P122), `(id, name, songs)`, for the Mods
     /// page, which keeps them listed while the folder is off. Set with [`Menu::set_music_packs`].
     music_seen: Vec<(String, String, usize)>,
+    /// The trick packs in the mods folder (MD77), in the folder's order, for the Ride tab's rows; set
+    /// with [`Menu::set_trick_packs`].
+    trick_seen: Vec<TrickPack>,
     /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
     /// pause says so.
     pub modified: bool,
@@ -3322,6 +3399,7 @@ impl Menu {
             pressure_kept: None,
             mods_seen: Vec::new(),
             music_seen: Vec::new(),
+            trick_seen: Vec::new(),
             modified: false,
             mods_lock: None,
             air_lock: None,
@@ -5783,6 +5861,37 @@ impl Menu {
         if !packs.is_empty() {
             self.music_seen = packs;
         }
+    }
+
+    /// The trick packs in the mods folder (MD77), in the folder's order, for the Ride tab: a row
+    /// each. A store install lists at once, as the shell reads the folder again.
+    pub fn set_trick_packs(&mut self, packs: Vec<TrickPack>) {
+        self.trick_seen = packs;
+    }
+
+    /// The trick packs the Ride tab lists (MD77).
+    pub fn trick_packs(&self) -> &[TrickPack] {
+        &self.trick_seen
+    }
+
+    /// The installed trick packs' ids, in the folder's order.
+    pub fn trick_pack_ids(&self) -> Vec<String> {
+        self.trick_seen.iter().map(|p| p.id.clone()).collect()
+    }
+
+    /// The stunts the trick packs on stack (MD77) that find no gesture: past
+    /// [`game_sim::trick::EXTRA_SLOTS`], the first pack's taking a name both have.
+    pub fn tricks_without_a_button(&self) -> usize {
+        let on = self.settings.trick_packs_on(&self.trick_pack_ids());
+        let mut names: Vec<&str> = Vec::new();
+        for p in self.trick_seen.iter().filter(|p| on.contains(&p.id)) {
+            for n in &p.extras {
+                if !names.iter().any(|m| m.eq_ignore_ascii_case(n)) {
+                    names.push(n);
+                }
+            }
+        }
+        names.len().saturating_sub(game_sim::trick::EXTRA_SLOTS)
     }
 
     /// Each mod track's source game (MD11), `(id, game)`, as its `mod.json` says.

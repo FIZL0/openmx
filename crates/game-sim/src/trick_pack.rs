@@ -3,8 +3,9 @@
 //! table and its bikes' `.phy` files, and this module reads the three things the port takes from it —
 //!
 //! - **the extra stunts**: up to [`EXTRA_SLOTS`] rows of the pack's table that the rider's own 24 do
-//!   not have, started on Cross and Square ([`crate::trick::group_with`]) — rows MX vs. ATV maps to a
-//!   gesture first (`DefaultKeyMapping`), then the rest in file order;
+//!   not have, started on Cross and Square and their combinations ([`crate::trick::group_with`]) —
+//!   rows MX vs. ATV maps to a gesture first (`DefaultKeyMapping`), then the rest in file order; with
+//!   several packs on, their rows one pack after another ([`stacked`], MD77);
 //! - **the 360** (`[Three Sixty]`, [`crate::air::three_sixty`]) and the port's own front flip
 //!   ([`crate::air::FRONT_FLIP`]), with what each scores;
 //! - **the whip**: MX vs. ATV's `UnrollGain` and `UnyawGain`, the air-control auto-level, laid over the
@@ -92,6 +93,11 @@ pub fn table(bytes: &[u8]) -> Result<Vec<Row>, String> {
 /// The extra stunts for a rider: the pack's rows the rider's 24 do not already have, gesture-mapped
 /// ones first, at most [`EXTRA_SLOTS`]. The same pack and the same set always give the same list.
 pub fn extras(rows: &[Row], set: &Set) -> Vec<Stunt> {
+    candidates(rows, set).into_iter().take(EXTRA_SLOTS).collect()
+}
+
+/// Every row of the pack [`extras`] could take, in its order, however many there are (MD77).
+pub fn candidates(rows: &[Row], set: &Set) -> Vec<Stunt> {
     let has = |name: &str| set.stunts.iter().take(crate::trick::SLOTS).any(|s| s.name.eq_ignore_ascii_case(name));
     let free = |r: &&Row| {
         !r.stunt.name.is_empty()
@@ -101,7 +107,25 @@ pub fn extras(rows: &[Row], set: &Set) -> Vec<Stunt> {
     };
     let mapped = rows.iter().filter(free).filter(|r| !r.mapping.is_empty());
     let unmapped = rows.iter().filter(free).filter(|r| r.mapping.is_empty());
-    mapped.chain(unmapped).take(EXTRA_SLOTS).map(|r| r.stunt.clone()).collect()
+    mapped.chain(unmapped).map(|r| r.stunt.clone()).collect()
+}
+
+/// The extras of several packs stacked (MD77): each pack's [`candidates`] in the packs' order, a
+/// name an earlier pack already gave left out (the first pack's record wins, and no stunt is there
+/// twice), the first [`EXTRA_SLOTS`] of them; and how many more there were, which go without a
+/// button. One pack alone is [`extras`].
+pub fn stacked(packs: &[&[Row]], set: &Set) -> (Vec<Stunt>, usize) {
+    let mut all: Vec<Stunt> = Vec::new();
+    for rows in packs {
+        for stunt in candidates(rows, set) {
+            if !all.iter().any(|s| s.name.eq_ignore_ascii_case(&stunt.name)) {
+                all.push(stunt);
+            }
+        }
+    }
+    let over = all.len().saturating_sub(EXTRA_SLOTS);
+    all.truncate(EXTRA_SLOTS);
+    (all, over)
 }
 
 /// The row of that name, case-insensitively.
@@ -196,5 +220,34 @@ impl crate::hash::State for State {
         }
         w.f("side_flick", self.side_flick);
         w.u8("front_watch", self.front_watch);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, mapping: &str, duration: f32) -> Row {
+        Row { stunt: Stunt { name: name.into(), duration: F(duration), ..Stunt::default() }, mapping: mapping.into(), ..Row::default() }
+    }
+
+    /// MD77: two packs' extras stack, the first pack's record wins a name both have, nothing twice,
+    /// the rider's own 24 and the moves left out, and what does not fit is counted.
+    #[test]
+    fn stacked_packs_give_each_stunt_once_and_count_the_rest() {
+        let mut own = vec![Stunt::default(); crate::trick::SLOTS];
+        own[0].name = "nacnac".into();
+        let set = Set::new(own);
+        let a = [row("superman", "", 1.0), row("nacnac", "1U", 1.0), row("cliffhanger", "1D", 1.0), row("backflip", "", 1.0)];
+        let b = [row("Superman", "2U", 2.0), row("lazyboy", "", 1.0), row("nothing", "", 1.0), row("cancan", "", 0.0)];
+        let (got, over) = stacked(&[&a, &b], &set);
+        let names: Vec<&str> = got.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["cliffhanger", "superman", "lazyboy"]);
+        assert_eq!(got[1].duration, F(1.0), "the first pack's superman");
+        assert_eq!(over, 0);
+        assert_eq!(stacked(&[&a], &set).0, extras(&a, &set), "one pack is the pack's extras");
+        let many: Vec<Row> = (0..EXTRA_SLOTS + 5).map(|k| row(&format!("s{k}"), "", 1.0)).collect();
+        let (got, over) = stacked(&[&a, &many], &set);
+        assert_eq!((got.len(), over), (EXTRA_SLOTS, 7), "two of a's and EXTRA_SLOTS + 5 of the other's");
     }
 }
