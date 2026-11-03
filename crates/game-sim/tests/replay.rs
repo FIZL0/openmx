@@ -10213,8 +10213,11 @@ const S129_RIDES: [&str; 2] = ["braked", "across"];
 /// [`S89_AGREES_THROUGH`]. Across agrees on all of its 300 ticks since the bike carries its body rays
 /// (S190): it parted at 148, where they meet the wagon, while the replay rode without them. Braked
 /// parted on tick 2 until S237 gave tick 2 the brake the state was saved holding (capture row 0's
-/// pad); on 113 the port's bike is shoved by the train, which the original's runs through.
-const S129_AGREES_THROUGH: [u64; 2] = [112, u64::MAX];
+/// pad), and on 113 until S256: the port's body rays met every car, and the train shoved the bike
+/// the original's runs through. They now meet only the cars the bike's nearby list holds
+/// ([`game_sim::mover_contact::struck_among`]), none in the braked state's ghost-gathered list. On
+/// 144 the two part by a creep of some 1e-5 ft/s, the bikes still together under the whole train.
+const S129_AGREES_THROUGH: [u64; 2] = [143, u64::MAX];
 
 /// The tick across parts at with no body rays on the bike: the first its rays strike the wagon.
 const S129_ACROSS_BARE_PARTS: u64 = 148;
@@ -10982,6 +10985,15 @@ fn the_bike_meets_the_dallas_train_as_the_original_does() {
                 at.push((t as u64, [c.x(), c.y(), c.z()], wrecked.is_some(), port.traffic.cars[0].pose.0[3].x()));
             }
             println!("{name}: the port's first wreck {wrecked:?}");
+            if *name == "braked" {
+                // The port's bike under the train with the original's (S256): its body rays meet only
+                // the cars its ghost-gathered list holds, none, so it is never shoved and never down.
+                let start = at[0].1;
+                for (t, p, down, _) in &at {
+                    assert!(p.iter().zip(start).all(|(a, b)| (a - b).abs() < 0.25), "braked tick {t}: the port's bike moved to {p:?}");
+                    assert!(!down, "braked tick {t}: the port's bike went down");
+                }
+            }
             if *name == "across" {
                 // The original's bike is pushed back out to -z off the wagon's side and rides off along
                 // it, never down; the port's with it.

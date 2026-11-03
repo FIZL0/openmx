@@ -8,8 +8,8 @@
 //! underside about three feet above the rails, so the centre-of-mass ray rides under it between the
 //! bogies, and the head ray starts inside the car, where every face it meets is a back face. The
 //! original's rays fan out of the hub at the rider's middle ([`crate::air::HEAD`]`.0`) and strike the
-//! car's side, so this runs them, the files' own ([`BikeCol::rays`]), against every car where the
-//! traffic last stood it:
+//! car's side, so this runs them, the files' own ([`BikeCol::rays`]), against every car the bike's
+//! nearby list holds (S256, [`struck_among`]) where the traffic last stood it:
 //!
 //! * once a tick, before the bike is stepped, as the rider-against-rider contacts are gathered
 //!   ([`crate::rider_contact::gather`]): the same record, the same capacity, a car being what a prop
@@ -113,6 +113,8 @@ struct Probe<'a> {
     objects: Vec<Collidable>,
     /// The first car's index among the world's props: what its mover is named by (S145).
     first: usize,
+    /// Each car's place in the bike's nearby list (S256): the rays meet only the cars it holds.
+    listed: Vec<bool>,
 }
 
 impl Probe<'_> {
@@ -125,6 +127,7 @@ impl Probe<'_> {
             .cars
             .iter()
             .enumerate()
+            .filter(|&(k, _)| self.listed[k])
             .map(|(k, p)| Candidate { object: CARS + k, distance: distance(centre, p.centre) - p.radius })
             .collect();
         Nearby { found, prepare: false }
@@ -183,7 +186,27 @@ pub fn struck(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> V
 /// [`struck`], and the cars whose struck listener the search told (S186a): the index of each among
 /// `cars`, once for every hit, in the search's order.
 pub fn struck_heard(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F) -> (Vec<Contact>, Vec<usize>) {
-    if cars.is_empty() {
+    struck_among(col, at, cars, first, dt, None)
+}
+
+/// [`struck_heard`] through the bike's nearby list (S256): the original's body rays collide only
+/// against what the bike's search last gathered ([`crate::ride::Ride::gather_nearby`]), which names a
+/// car by its prop's index after [`flight_search::FIRST`]. A list gathered while the bike was a ghost
+/// holds no car, and a bike that stands where it gathered it meets none (S129's braked state, whose
+/// train runs through it). With no list (`None`, a bike that has not gathered one) every car is met.
+pub fn struck_among(
+    col: &BikeCol,
+    at: &Mat4,
+    cars: &[Prop],
+    first: usize,
+    dt: F,
+    list: Option<&crate::broad_phase::Search>,
+) -> (Vec<Contact>, Vec<usize>) {
+    let listed: Vec<bool> = match list {
+        None => vec![true; cars.len()],
+        Some(s) => (0..cars.len()).map(|k| s.nearby.found.iter().any(|c| c.object == flight_search::FIRST + first + k)).collect(),
+    };
+    if !listed.contains(&true) {
         return (Vec::new(), Vec::new());
     }
     let mut objects = bike_col::collidables(col, 0).to_vec();
@@ -202,7 +225,7 @@ pub fn struck_heard(col: &BikeCol, at: &Mat4, cars: &[Prop], first: usize, dt: F
     }));
     let ray = ray_probe::Record { listed: true, capacity: CAPACITY, one_per_ray: true, ..ray_probe::Record::default() };
     let strikes = Strikes { col, at: *at, cars, facets: vec![None; cars.len()], ray, heard: Vec::new() };
-    let mut probe = Probe { strikes, objects, first };
+    let mut probe = Probe { strikes, objects, first, listed };
     let mut records = vec![Record {
         search: true,
         sweep_back: true,
@@ -270,7 +293,7 @@ impl crate::Sim {
         }
         let Some(props) = world.moving() else { return Vec::new() };
         let cars = props.props.get(first..).unwrap_or(&[]);
-        let (contacts, heard) = struck_heard(col, &r.ride.transform(), cars, first, dt);
+        let (contacts, heard) = struck_among(col, &r.ride.transform(), cars, first, dt, r.ride.nearby.as_deref());
         for slot in heard {
             if let Some(k) = self.traffic.car_at(first + slot) {
                 self.traffic.strike(k, dt, world);
