@@ -553,12 +553,13 @@ fn a_zone_picks_the_dusts_group() {
     assert_eq!(particles::zones(Some("[G]\nZone1=\"Nope\"\n"), "g", &atlas, (2, 3))[0], Zone::Group(0, 1));
     assert!(particles::zones(None, "G", &atlas, (2, 3)).iter().all(|z| *z == Zone::Group(2, 3)));
 
-    // Over the second surface the tire dust draws the puff's frames; over the third ("none") its
-    // own frame turns it on regardless, with the group it had.
+    // Over the second surface the tire dust draws the puff's frames; over the third ("none") it
+    // raises nothing (C18: the original's car tire dusts, zone-off on 228 captured frames grounded,
+    // compressed and moving, never emit; P60 had read the dust's own update as switching it on again).
     let fx = dust_after(&[tire(true, false, 0.3, 1); 30], false);
     assert!(!fx.particles.is_empty() && fx.particles.iter().all(|p| p.frame <= 1));
     let fx = dust_after(&[tire(true, false, 0.3, 2); 30], false);
-    assert!(!fx.particles.is_empty() && fx.particles.iter().all(|p| (2..=3).contains(&p.frame)));
+    assert!(fx.particles.is_empty(), "{} particles", fx.particles.len());
 }
 
 /// The prop at `height` over flat ground at `floor`, frame `f` of flying along x at 30 ft/s, on
