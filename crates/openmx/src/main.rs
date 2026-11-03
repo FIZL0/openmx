@@ -180,6 +180,8 @@ mod chase;
 mod clock;
 mod files;
 mod thread;
+// The fixed update on a thread of its own (N23a).
+mod sim_thread;
 // Whether the mouse cursor is drawn over the window (P167).
 mod cursor;
 // The riders' names and numbers on their jerseys and plates (P86).
@@ -429,6 +431,9 @@ struct World<P> {
 }
 
 /// One local player's half of a simulation pass: their pad, their ride and their machine.
+///
+/// Cloned for the picture drawn while a tick runs on the sim thread (N23a).
+#[derive(Clone)]
 struct Seat {
     /// This frame's reports, written by the app layer before the step the way the original's device
     /// manager fills its buffers before the frame reads them. The player's own pad is the first.
@@ -2202,6 +2207,9 @@ struct Args {
     /// ride's 60 a second) and not with the wall's, so an offline ride is the same ride on a busy
     /// machine as on an idle one (`pace::Clock`). For the tests; online peers keep the wall's.
     steady_clock: bool,
+    /// `--sim-thread auto|on|off` (N23a): whether a tick may run on a thread of its own while the
+    /// picture before it is drawn. Auto when a window's split screen overruns its pictures' time.
+    sim_thread: sim_thread::Mode,
     /// `--draw-fps N`: draw at most N pictures a second. Unset, a window draws as fast as its
     /// display takes them and a headless ride draws 60. The ride's ticks are 30 a second either way
     /// (P52).
@@ -2294,6 +2302,9 @@ struct Args {
     /// `--trace-picture`: a line a drawn frame of where the first player's bike, rider and camera
     /// were drawn, and the blend between the ticks they were drawn at (P120).
     trace_picture: bool,
+    /// `--trace-hash`: a line a tick of every seat's state hash (N23a), which a ride with the sim
+    /// thread and one without hold against each other.
+    trace_hash: bool,
 }
 
 impl Args {
@@ -5104,6 +5115,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
+    // What a picture drawn while a tick runs on the sim thread asks of the place (N23a): the same
+    // ground, and none of the props, which the tick has. A tiled world's ticks stay on the loop.
+    let mut drawn_land = match (&sim, keep_terrain.get()) {
+        (Land::Tiles(_), _) | (_, None) => None,
+        (_, Some(terrain)) => Some(Land::Track(Place { ground: sim_world::Ground::new(terrain, &place.terrain), props: Default::default() })),
+    };
     // The Kiowa's skins the load put in `assets` (V113), one a livery.
     let kiowa_drawn: Vec<Kiowa> = (0..vehicle::LIVERIES).map_while(|l| Kiowa::found(&assets, l)).collect();
     // And the cars' models (S245), each car in each livery the load put there.
@@ -6158,11 +6175,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // always has been.
     // Of the layout and the player count as they are now: a player joining or leaving (P76) lays
     // the views out again.
+    // The fog's colour taken out of the scene's look, which the picture (in a closure since N23a)
+    // borrows whole.
+    let fog_color = look.fog_color;
     let views_of = |width: usize, height: usize, layout: Layout, players: usize| {
         let rects = layout.rects(width, height);
         let frames: Vec<Frame> = match layout {
             Layout::Full => Vec::new(),
-            _ => rects.iter().take(players).map(|r| Frame::new(r.w, r.h, look.fog_color)).collect(),
+            _ => rects.iter().take(players).map(|r| Frame::new(r.w, r.h, fog_color)).collect(),
         };
         (rects, frames)
     };
@@ -6658,6 +6678,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     perf.begin();
     // Whether the last time round ran a tick and drew nothing (P205).
     let mut ticked = false;
+    // The sim thread (N23a), the tick on it if one is, and what the ticks and the pictures have
+    // been taking, which `--sim-thread auto` reads.
+    let sim_worker = match args.sim_thread {
+        sim_thread::Mode::Off => None,
+        sim_thread::Mode::Auto if window.is_none() => None,
+        _ if online.is_some() || drawn_land.is_none() => None,
+        _ => sim_thread::Worker::new(),
+    };
+    let mut flight = None;
+    let mut gauge = sim_thread::Gauge::default();
     loop {
         // The picture before this one is the page's until its next frame (P196). A tick is not a
         // picture: waiting for the page's frame after one as well spent a display frame on every
@@ -6673,7 +6703,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 r.reload_textures(&assets, &at);
             }
         }
-        if pacer.owed(moment) {
+        // A tick that ran on the sim thread while the picture before it was drawn (N23a) lands here,
+        // its first half run before it went: only the simulation and what comes after it are left.
+        if flight.is_some() || pacer.owed(moment) {
+        let landing = flight.take();
+        if landing.is_none() {
         if let Some(window) = &mut *window {
             window.poll();
             if window.closed() || (front.is_none() && window.held(key::ESCAPE)) {
@@ -7543,6 +7577,38 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         traffic_before = traffic_time;
         cars_before = world.seats[0].sim.traffic.cars.iter().map(|c| c.pose).collect();
+        }
+        // Off to the sim thread (N23a): the world and the engine go, and the picture drawn meanwhile
+        // is the one the last tick ended on, from a copy of the seats and a place with its ground.
+        // Only a tick a picture follows goes: a backlog's run here, one after another, as they would
+        // have. So do the tick that ends `--frames`, before the last picture, and the first, whose
+        // second half the first picture is drawn from.
+        let threaded = match args.sim_thread {
+            sim_thread::Mode::Off => false,
+            sim_thread::Mode::On => true,
+            // A player may join a ride that began alone (P76).
+            sim_thread::Mode::Auto => world.seats.len() >= 2 && gauge.wants(),
+        };
+        if args.timings && sim_worker.is_some() && threaded != gauge.engaged {
+            timing(format!("     sim thread {}: {}", if threaded { "on" } else { "off" }, gauge.line()));
+        }
+        gauge.engaged = threaded;
+        if threaded
+            && landing.is_none()
+            && online.is_none()
+            && sim_worker.is_some()
+            && pacer.ticks() > 0
+            && !pacer.backlog(moment)
+            && !args.frames.is_some_and(|n| pacer.ticks() + 1 >= u64::from(n))
+            && let Some(place) = drawn_land.take()
+        {
+            let stand_in = World { place, seats: world.seats.clone(), tape: None, played_dt: world.played_dt };
+            let input = engine_input(&world.seats[0].reports[0]);
+            let now = pace::tick_clock(pacer.ticks());
+            let world = std::mem::replace(&mut world, stand_in);
+            flight = Some(Ticking { world, engine: engine.clone(), now, input, step: None, took: Duration::ZERO });
+        }
+        if flight.is_none() {
         let sim_at = Instant::now();
         let dt: F;
         (dt, simulated) = if let Some(on) = &mut online {
@@ -7860,8 +7926,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // One frame of the game's own fixed update, which calls `World::simulate` inside itself.
         // The clock a steady PS2 reads at this tick, not the host's (P52): every tick is the same
         // length whatever the picture did, and `dt` is the original's.
-        let now = pace::tick_clock(pacer.ticks());
-        let step = engine.step(now, engine_input(&world.seats[0].reports[0]), &mut world);
+        let step = match landing {
+            Some(mut ran) => {
+                if ran.step.is_none() {
+                    ran.run();
+                }
+                drawn_land = Some(std::mem::replace(&mut world, ran.world).place);
+                engine = ran.engine;
+                gauge.ticked(ran.took);
+                ran.step.expect("the sim thread ran its tick")
+            }
+            None => {
+                let now = pace::tick_clock(pacer.ticks());
+                let at = Instant::now();
+                let step = engine.step(now, engine_input(&world.seats[0].reports[0]), &mut world);
+                gauge.ticked(at.elapsed());
+                step
+            }
+        };
         if step.outcome == Outcome::Quit {
             break;
         }
@@ -7876,6 +7958,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         (world.played_dt.unwrap_or(step.dt), step.simulated)
         };
         perf.add(Stage::Sim, sim_at.elapsed());
+        if args.trace_hash {
+            let hashes: Vec<String> = world.seats.iter().map(|s| format!("{:#018x}", game_sim::hash::of(&s.sim))).collect();
+            println!("tick {} hash {}", pacer.ticks() + 1, hashes.join(" "));
+        }
         stages.mark(stages::Stage::Sim);
         // A slot placed or cleared this frame writes its player's file (P99).
         for (kept, seat) in kept_markers.iter_mut().zip(&world.seats) {
@@ -8582,11 +8668,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         ticked = true;
         continue;
         }
+        }
 
         // The picture, owing no tick (P52): every camera, bike, rider and the plane blended from the
         // tick before the last to the last by how far the wall clock is past it. Render-side only:
         // nothing below writes the simulation.
         let blend = pace::Blend(pacer.blend(moment));
+        let drawing_at = Instant::now();
+        // A tick sent off above runs on the sim thread while this picture is drawn (N23a).
+        let drawn = sim_thread::beside(sim_worker.as_ref().zip(flight.as_mut()), Ticking::run, || -> Result<(), String> {
         // A world's pieces fading in over their stand-in (V92), on the picture's own clock.
         if ground_stream.is_some() {
             let shown = (pacer.ticks() as f32 - 1.0 + blend.0).max(0.0) * pace::TICK.as_secs_f32();
@@ -9714,6 +9804,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             rider_frames = (0, 0);
         }
         stages.mark(stages::Stage::Log);
+        Ok(())
+        });
+        drawn?;
 
         if let Some(limit) = args.seconds {
             if clock.elapsed().as_secs_f32() >= limit {
@@ -9738,6 +9831,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             Some(w) => picture_floor(w, args.pacing(front.as_ref().map_or(&ride_settings, |f| &f.menu.settings))),
             None => None,
         };
+        let refresh = window.as_ref().and_then(|w| w.refresh()).map(|hz| Duration::from_secs_f32(1.0 / hz));
+        gauge.drew(drawing_at.elapsed(), args.draw_frame().or(floor).or(refresh).unwrap_or_default());
         clock.picture(&mut limiter, args.draw_frame().or(floor));
         stages.mark(stages::Stage::Pace);
         stages.frame();
@@ -9754,6 +9849,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         perf.begin();
     }
 
+    // A tick still on the sim thread when the ride ended (N23a) is the world's last.
+    if let Some(mut ran) = flight.take() {
+        if ran.step.is_none() {
+            ran.run();
+        }
+        world = ran.world;
+        engine = ran.engine;
+    }
     // A split session's last word on each view: whose it was, how often that player's simulation
     // ran, where they and their camera ended up, and what their view drew — what a run nobody
     // watched says about whether every player rode and every view followed its own rider.
@@ -9995,6 +10098,26 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
         // Not riding — their own pause, a pad pulled out, Start's freeze — their sounds hold where
         // they are while the others ride on (P172).
         paused: !seat.riding,
+    }
+}
+
+/// An offline tick taken whole to the sim thread (N23a): the loop's world and engine, moved there and
+/// back, and the engine step the loop would have run on them, run there instead.
+struct Ticking<P> {
+    world: World<P>,
+    engine: Engine,
+    now: game_sim::tick::Timer0,
+    input: Input,
+    step: Option<game_sim::tick::Step>,
+    /// What the step took, for the gauge.
+    took: Duration,
+}
+
+impl<P: sim_world::World> Ticking<P> {
+    fn run(&mut self) {
+        let at = Instant::now();
+        self.step = Some(self.engine.step(self.now, self.input, &mut self.world));
+        self.took = at.elapsed();
     }
 }
 
@@ -11512,6 +11635,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         headless: false,
         frames: None,
         steady_clock: false,
+        sim_thread: sim_thread::Mode::Auto,
         draw_fps: None,
         vsync: None,
         fps_limit: None,
@@ -11526,6 +11650,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         sound: true,
         timings: false,
         trace_picture: false,
+        trace_hash: false,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         ride_flag: false,
@@ -11925,12 +12050,16 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.world_reach = Some(game_sim::tiles::Reach { load: F(load), drop: F(drop) });
             }
             "--trace-picture" => args.trace_picture = true,
+            "--trace-hash" => args.trace_hash = true,
             "--frames" => {
                 args.frames = Some(
                     next("a number of frames")?.parse().map_err(|_| "--frames: not a number of frames")?,
                 )
             }
             "--steady-clock" => args.steady_clock = true,
+            "--sim-thread" => {
+                args.sim_thread = sim_thread::Mode::parse(&next("auto, on or off")?).ok_or("--sim-thread: auto, on or off")?
+            }
             "--draw-fps" => {
                 let fps: f32 = next("pictures a second")?.parse().map_err(|_| "--draw-fps: not a number")?;
                 if !(fps > 0.0) {
@@ -12033,7 +12162,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
                             [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off] [--warm on|off]\n\
-                            [--draw-fps N] [--steady-clock] [--vsync on|off] [--fps-limit off|N|refresh]\n\
+                            [--draw-fps N] [--steady-clock] [--sim-thread auto|on|off] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
@@ -12100,11 +12229,15 @@ fn parse_args() -> Result<Option<Args>, String> {
                      window and no pad, and --frames N quits after N frames. --timings prints\n\
                      what each stage of a frame cost, a line a second, and --trace-picture\n\
                      where each drawn frame put the first player's bike, rider and camera.\n\
+                     --trace-hash prints every seat's state hash after each tick.\n\
                      The ride runs 30 ticks a second, as the original does, however fast it is\n\
                      drawn: a window draws as fast as its display takes pictures, a headless\n\
                      ride 60 a second, and --draw-fps N at most N. --steady-clock times the ride\n\
                      by its pictures alone, each one exactly its floor, so a busy machine rides\n\
-                     the same ride as an idle one (offline; for the tests).\n\
+                     the same ride as an idle one (offline; for the tests). --sim-thread on\n\
+                     runs each tick on a thread of its own while the picture before it is drawn\n\
+                     (offline, not in a tiled world), the same ride; auto does when a window's\n\
+                     split screen cannot fit a tick and a picture in a picture's time.\n\
                      The window opens at the screen's size and the frame fills it, re-made when\n\
                      the window is resized, wider or taller as the original's own 16:9 mode\n\
                      would draw it; --aspect 4:3, 16:9, 16:10 or 21:9 draws the largest frame of\n\
