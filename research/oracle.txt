@@ -6767,6 +6767,19 @@ atv_node_out_of_date        atv 0x00193d70 = a sibling list's current nodes (and
 atv_node_stale_bounds       atv 0x00195a40 = flag bit 7 on a node and every parent
 atv_quat_frame              atv 0x00134940 = a quaternion and a position into a frame (a0 out, a1 q, a2 position)
 atv_bike_set_spin_clip      atv 0x004e7a40 = vt +0x540 (sw a1, +0x1758)
+# MD75 (part 5) — the wheel integrate's two steps (atv_wheel.rs surface_drag / spin_integrate; tests/atv_wheel.rs
+# runs them alone, tests/atv_quad.rs under atv_quad_ground_step with the wheel integrate, all three unhooked).
+# Wheel: +0x24 -> brake word (image: quad +0x12cc front_brake for wheels 0/1, +0x12d0 rear_brake for 2/3), +0x34
+# parametric, +0x38 donut, +0x58 1/I, +0x5c tire inertia, +0xa0 moment arm, +0xb0 no moment, +0xb4 rear pair,
+# +0xb8 partner load scale, +0xbc -> partner wheel (0<->2, 1<->3; its +0xdc touching, +0xf8 spring force,
+# +0x1f0/+0x1f4 ground), +0xe0/e4/e8 spinning/locked/sliding, +0x1d0 angle (wrapped to (-pi, pi]), +0x1d4 spin,
+# +0x210 torque, +0x224/+0x228 cleared, +0x234 side per load, +0x238 + 0x40 t + 4 s tire table t (drive 8,
+# side 13, drag 3) surface s (the More record byte), +0x838 1/radius, +0x840 local velocity, +0x850 local
+# force (side, 0, forward; w kept), +0x8d0..+0x910 contact frame. Hinge scale 0.25 (0x00525230), gyro scale
+# 1.0, fallback forward (0,0,1,1) at 0x00397010, the axis rotation's curve table -> 0x003eab20 (= camera::
+# CurveTable::build(), step 0x003ea9c8, 1/step 0x003ea9d0).
+atv_wheel_surface_drag      atv 0x004a1ec0 (a0 wheel, f12 dt) = MXU's tire::surface_drag, drag through body vt +0x74
+atv_wheel_spin_integrate    atv 0x004a2040 (a0 wheel, f12 dt) = MXU's tire::spin_integrate on the quad's body
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the

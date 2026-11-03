@@ -13,8 +13,10 @@
 //!
 //! Without the image every test here skips (and says so).
 
-use game_sim::atv_wheel::{self, Body, Chassis, Ground, Holder, More, Mover};
+use game_sim::atv_wheel::{self, Body, Chassis, Ground, Holder, More, Mover, Other, Spin};
+use game_sim::camera::CurveTable;
 use game_sim::contact::Node;
+use game_sim::quad::TireSurface;
 use game_sim::wheel::{Call, Wheel};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
@@ -33,8 +35,13 @@ const OTHER_BODY: u32 = 0x01c0_3400;
 const CHASSIS: u32 = 0x01c0_3800;
 const NODE: u32 = 0x01c0_3c00;
 const MOVER: u32 = 0x01c0_4000;
-const REGIONS: [(&str, u32, u32); 7] = [
-    ("wheel", WHEEL, 0x8d0),
+/// The other wheel of the pair (the wheel's `+0xbc`), and the brake lever the wheel's `+0x24` points
+/// at.
+const OTHER_WHEEL: u32 = 0x01c0_9000;
+const BRAKE: u32 = 0x01c0_4900;
+const REGIONS: [(&str, u32, u32); 8] = [
+    ("wheel", WHEEL, 0x910),
+    ("other wheel", OTHER_WHEEL, 0x200),
     ("body", BODY, 0x200),
     ("object", OBJECT, 0x100),
     ("other body", OTHER_BODY, 0x200),
@@ -57,6 +64,13 @@ const TIRE_FORCES: u32 = 0x004a_16f0;
 const GROUND_QUERY: u32 = 0x0048_33c0;
 const CONTACT_VELOCITY: u32 = 0x004a_1150;
 const HINGE_FORCE: u32 = 0x004a_2aa0;
+const SURFACE_DRAG: u32 = 0x004a_1ec0;
+const SPIN_INTEGRATE: u32 = 0x004a_2040;
+/// The axis rotation's sine and cosine table (a pointer to it) and its step and inverse step, which
+/// the startup code fills in.
+const CURVE_TABLE: u32 = 0x003e_ab20;
+const CURVE_STEP: u32 = 0x003e_a9c8;
+const CURVE_INV_STEP: u32 = 0x003e_a9d0;
 
 fn image() -> Option<Ee> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
@@ -92,6 +106,14 @@ struct State {
     ground_under: Ground,
     /// A collision object is there, and a mover too (which the object hides).
     also_mover: bool,
+    /// What is laid out in RAM when the wheel stands on nothing: a wheel borrowing a load drops its
+    /// own ground for its partner's, and what it stood on stays where it was.
+    lay: Ground,
+    /// The spin step's words, and the other wheel's; `share` is that the other wheel's ground
+    /// pointers are the wheel's own (else they are null).
+    spin: Spin,
+    other: Other,
+    share: bool,
 }
 
 fn put_f(ee: &mut Ee, a: u32, v: F) {
@@ -161,6 +183,15 @@ fn poke(ee: &mut Ee, s: &State) {
     put_v(ee, WHEEL + 0x8c0, x.steer_axis);
     put_v(ee, WHEEL + 0x200, w.ground_normal);
     put_f(ee, WHEEL + 0x214, w.probe_length);
+    put_f(ee, WHEEL + 0x8ac, w.steer_angle);
+    put_f(ee, WHEEL + 0x8b0, w.steer_rate);
+    poke_spin(ee, &s.spin);
+    ee.set_u32(WHEEL + 0xbc, OTHER_WHEEL);
+    put_b(ee, OTHER_WHEEL + 0xdc, s.other.contact);
+    put_f(ee, OTHER_WHEEL + 0xf8, s.other.spring_force);
+    if s.share {
+        point_at(ee, OTHER_WHEEL, &s.ground_under, s.also_mover);
+    }
 
     ee.set_u32(BODY + 0x110, BODY_VTABLE);
     ee.set_u32(BODY + 0xe8, 0); // no force listeners on the body
@@ -181,13 +212,10 @@ fn poke(ee: &mut Ee, s: &State) {
         ee.set_u32(NODE + 0xf0, 0); // no parent
         ee.set_u32(NODE + 0x100, 1); // up to date
     };
-    match &s.ground_under {
+    point_at(ee, WHEEL, &s.ground_under, s.also_mover);
+    match if s.ground_under == Ground::Still { &s.lay } else { &s.ground_under } {
         Ground::Still => {}
         Ground::Object { cofg, cofg_world, on } => {
-            ee.set_u32(WHEEL + 0x1f0, OBJECT);
-            if s.also_mover {
-                ee.set_u32(WHEEL + 0x1f4, MOVER);
-            }
             put_v(ee, OBJECT + 0x80, *cofg);
             put_v(ee, OBJECT + 0x90, *cofg_world);
             match on {
@@ -212,7 +240,6 @@ fn poke(ee: &mut Ee, s: &State) {
             }
         }
         Ground::Mover(m) => {
-            ee.set_u32(WHEEL + 0x1f4, MOVER);
             ee.set_u32(MOVER + 4, MOVER_VTABLE);
             ee.set_u32(MOVER + 0x244, NODE);
             put_v(ee, MOVER + 0x180, m.origin);
@@ -220,6 +247,59 @@ fn poke(ee: &mut Ee, s: &State) {
             ee.set_u32(MOVER_VTABLE + 0xc0, MOVER_VELOCITY);
             ee.set_u32(MOVER_VTABLE + 0xc4, MOVER_SPIN);
         }
+    }
+}
+
+/// A wheel's two ground pointers (`+0x1f0` an object, `+0x1f4` a mover) to what `g` lays out.
+fn point_at(ee: &mut Ee, wheel: u32, g: &Ground, also_mover: bool) {
+    match g {
+        Ground::Still => {}
+        Ground::Object { .. } => {
+            ee.set_u32(wheel + 0x1f0, OBJECT);
+            if also_mover {
+                ee.set_u32(wheel + 0x1f4, MOVER);
+            }
+        }
+        Ground::Mover(_) => ee.set_u32(wheel + 0x1f4, MOVER),
+    }
+}
+
+/// The spin step's words of the wheel (see [`Spin`]'s offsets), and the brake lever.
+fn poke_spin(ee: &mut Ee, p: &Spin) {
+    match p.brake {
+        Some(v) => {
+            ee.set_u32(WHEEL + 0x24, BRAKE);
+            put_f(ee, BRAKE, v);
+        }
+        None => ee.set_u32(WHEEL + 0x24, 0),
+    }
+    put_i(ee, WHEEL + 0x34, p.parametric);
+    put_f(ee, WHEEL + 0x38, p.donut);
+    put_f(ee, WHEEL + 0x58, p.inv_inertia);
+    put_f(ee, WHEEL + 0x5c, p.tire_inertia);
+    put_v(ee, WHEEL + 0xa0, p.arm);
+    put_i(ee, WHEEL + 0xb0, p.no_moment);
+    put_i(ee, WHEEL + 0xb4, p.rear_pair);
+    put_f(ee, WHEEL + 0xb8, p.other_load_scale);
+    put_b(ee, WHEEL + 0xe0, p.slip.spinning);
+    put_b(ee, WHEEL + 0xe4, p.slip.locked);
+    put_b(ee, WHEEL + 0xe8, p.slip.sliding);
+    put_f(ee, WHEEL + 0x1d0, p.angle);
+    put_f(ee, WHEEL + 0x1d4, p.spin);
+    put_f(ee, WHEEL + 0x210, p.torque);
+    put_f(ee, WHEEL + 0x224, p.cleared[0]);
+    put_f(ee, WHEEL + 0x228, p.cleared[1]);
+    put_f(ee, WHEEL + 0x234, p.side_per_load);
+    for (k, r) in p.surfaces.iter().enumerate() {
+        for (t, &v) in r.drive.iter().chain(&r.side).chain(&r.drag).enumerate() {
+            put_f(ee, WHEEL + 0x238 + 0x40 * t as u32 + 4 * k as u32, v);
+        }
+    }
+    put_f(ee, WHEEL + 0x838, p.inv_radius);
+    put_v(ee, WHEEL + 0x840, p.local_velocity);
+    put_v(ee, WHEEL + 0x850, p.local_force);
+    for (k, &r) in p.frame.iter().enumerate() {
+        put_v(ee, WHEEL + 0x8d0 + 0x10 * k as u32, r);
     }
 }
 
@@ -461,7 +541,86 @@ impl Gen {
         };
         w.steer_torque = self.f(-50.0, 50.0);
         let ground_under = self.ground_under(&w);
-        State { w, x, b, dt: self.f(0.001, 0.04), ground, echo: self.one_in(8), ground_under, also_mover: self.b() }
+        State {
+            w,
+            x,
+            b,
+            dt: self.f(0.001, 0.04),
+            ground,
+            echo: self.one_in(8),
+            ground_under,
+            also_mover: self.b(),
+            ..State::default()
+        }
+    }
+
+    /// One surface's row of tables, with its caps sometimes not positive.
+    fn surface(&mut self) -> TireSurface {
+        let mut drive = [F::ZERO; 8];
+        for (k, d) in drive.iter_mut().enumerate() {
+            *d = match k {
+                2 if self.one_in(10) => self.f(-1.0, 0.0),
+                0 | 1 => self.f(0.1, 3.0),
+                _ => self.f(0.05, 2.0),
+            };
+        }
+        let mut side = [F::ZERO; 13];
+        for (k, v) in side.iter_mut().enumerate() {
+            *v = match k % 4 {
+                0 if k < 12 => self.f(0.01, 1.0),
+                1 if k < 12 => self.f(0.3, 3.0),
+                _ => self.f(0.1, 3.0),
+            };
+        }
+        TireSurface { drive, side, drag: [self.f(0.0, 3000.0), self.f(0.0, 300.0), self.f(0.0, 2.0)] }
+    }
+
+    /// A state for the wheel integrate's two steps: the wheel's [`Spin`] words, a surface under
+    /// sixteen, an other wheel, and contact velocities both slow and fast along the tire.
+    fn spin_state(&mut self) -> State {
+        let mut s = self.state();
+        s.lay = s.ground_under;
+        s.x.record = (self.bits() % 16) as u8;
+        s.w.steer_angle = if self.one_in(5) { self.f(-12.0, 12.0) } else { self.f(-1.0, 1.0) };
+        s.w.steer_rate = self.f(-5.0, 5.0);
+        s.w.contact_velocity = if self.b() { self.vec(-12.0, 12.0) } else { self.vec(-60.0, 60.0) };
+        s.w.spring_force = if self.one_in(6) { self.f(-200.0, 0.0) } else { self.f(0.0, 1500.0) };
+        s.x.chassis_velocity_local = if self.b() { self.vec(-6.0, 6.0) } else { self.vec(-60.0, 60.0) };
+        s.other = Other { contact: self.b(), spring_force: self.f(-100.0, 1500.0), ground: Ground::Still };
+        s.share = self.b();
+        let law = s.w.contact || s.other.contact;
+        let mut surfaces = [TireSurface::default(); 16];
+        for r in &mut surfaces {
+            *r = self.surface();
+        }
+        s.spin = Spin {
+            brake: match self.bits() % 5 {
+                0 if !law => None,
+                0..=2 => Some(F::ZERO),
+                3 => Some(self.f(0.0, 1.0)),
+                _ => Some(self.f(-1.0, 0.0)),
+            },
+            parametric: if self.b() { 0 } else { 1 + (self.bits() % 3) as i32 },
+            donut: if self.one_in(3) { F::ZERO } else { self.f(-0.3, 1.3) },
+            inv_inertia: self.f(0.1, 2.0),
+            tire_inertia: self.f(0.1, 5.0),
+            arm: self.vec(-2.0, 2.0),
+            no_moment: i32::from(self.one_in(4)),
+            rear_pair: i32::from(self.b()),
+            other_load_scale: self.f(0.5, 1.5),
+            slip: game_sim::tire::Slip { spinning: self.b(), locked: self.one_in(3), sliding: self.b() },
+            angle: self.f(-3.2, 3.2),
+            spin: if self.b() { self.f(-1.5, 1.5) } else { self.f(-80.0, 80.0) },
+            torque: if self.b() { self.f(-300.0, 300.0) } else { self.f(-4000.0, 4000.0) },
+            cleared: [self.f(-1.0, 1.0), self.f(-1.0, 1.0)],
+            side_per_load: self.f(-1.0, 1.0),
+            surfaces,
+            inv_radius: self.f(0.4, 2.0),
+            local_velocity: self.vec(-5.0, 5.0),
+            local_force: self.vec(-500.0, 500.0),
+            frame: [self.normal(), self.normal(), self.normal(), self.vec(-1.0, 1.0)],
+        };
+        s
     }
 
     fn node(&mut self) -> Node {
@@ -548,7 +707,12 @@ fn compare_with(ee: &mut Ee, k: usize, s: &State, addr: u32, ints: &[u64], float
     let log: Log = Rc::default();
     let ground: Answers = Rc::new(RefCell::new(s.ground.iter().copied().collect()));
     // The tire forces hand the hinge 1.0; called straight, it gets what it is handed.
-    let hinge_f12 = if addr == HINGE_FORCE { floats[0] } else { 1.0 };
+    // The spin step, a quarter.
+    let hinge_f12 = match addr {
+        HINGE_FORCE => floats[0],
+        SPIN_INTEGRATE => 0.25,
+        _ => 1.0,
+    };
     hook(ee, &log, &ground, s.echo, mover_answers(s), hinge_f12);
     reset(ee);
     poke(ee, s);
@@ -940,4 +1104,166 @@ fn point_to_world_of(b: &Body, p: Vf) -> Vf {
     let r = game_sim::quad::Body { orientation: b.orientation, ..Default::default() };
     let v = r.to_world(Vf::new((F(p.x()) - F(b.cofg.x())).0, (F(p.y()) - F(b.cofg.y())).0, (F(p.z()) - F(b.cofg.z())).0, 0.0));
     Vf::new((F(v.x()) + F(b.position.x())).0, (F(v.y()) + F(b.position.y())).0, (F(v.z()) + F(b.position.z())).0, 1.0)
+}
+
+/// MD75 — the image's own sine and cosine table, which must be the one the port builds.
+fn curve(ee: &Ee) -> CurveTable {
+    let built = CurveTable::build();
+    assert_eq!(ee.f32_at(CURVE_STEP).to_bits(), 0.0010473721f32.to_bits(), "the curve table's step");
+    assert_eq!(ee.f32_at(CURVE_INV_STEP).to_bits(), 954.77045f32.to_bits(), "the curve table's inverse step");
+    let at = ee.u32_at(CURVE_TABLE);
+    for (i, e) in built.entries().iter().enumerate().take(game_sim::camera::CURVE_ENTRIES) {
+        let got = [ee.f32_at(at + 8 * i as u32), ee.f32_at(at + 8 * i as u32 + 4)];
+        assert_eq!(got.map(f32::to_bits), e.map(f32::to_bits), "curve table entry {i}");
+    }
+    built
+}
+
+/// MD75 — `atv_wheel_surface_drag`, called straight on generated states.
+#[test]
+fn the_atv_wheel_surface_drag_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut g = Gen(0x0075_d001);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        let s = g.spin_state();
+        tally(&mut t, match (s.w.contact, s.x.chassis_velocity_local.z() < 0.0) {
+            (false, _) => "in the air",
+            (true, true) => "rolling back",
+            (true, false) => "rolling on",
+        });
+        tally(&mut t, match s.spin.brake {
+            None => "no brake",
+            Some(v) if v <= F::ZERO => "brake off",
+            Some(_) => "braking",
+        });
+        compare(&mut ee, k, &s, SURFACE_DRAG, |t| {
+            atv_wheel::surface_drag(&t.w, &t.x, &mut t.spin, &mut t.b);
+            vec![]
+        });
+    }
+    each_path_seen(&t, &["in the air", "rolling back", "rolling on", "no brake", "brake off", "braking"], 500);
+}
+
+/// The paths a spin step takes, read off its state before and after (the port's).
+#[allow(clippy::float_arithmetic)]
+fn spin_paths(s: &State, d: &State) -> Vec<&'static str> {
+    let mut p = Vec::new();
+    let (w, sp) = (&s.w, &s.spin);
+    let law = w.contact || s.other.contact;
+    if !law {
+        p.push("both up");
+    } else {
+        if sp.rear_pair != 0 && !w.contact {
+            p.push(if s.share { "borrowed, shared ground" } else { "borrowed, no ground" });
+        }
+        p.push(if w.contact && w.steered { "frame steered" } else { "frame on the body" });
+        let sl = d.spin.slip;
+        p.push(match (sl.spinning, sl.locked) {
+            (true, _) => "spinning",
+            (_, true) => "locked",
+            _ => "gripping",
+        });
+        if d.spin.local_velocity.z().abs() < F(10.0) {
+            p.push("slow");
+        }
+        let side = match (sp.brake != Some(F::ZERO), sl.spinning || sl.locked) {
+            (true, _) => "braking",
+            (_, true) => "slipping",
+            _ => "plain",
+        };
+        let linear = sp.parametric == 0;
+        p.push(match (side, linear) {
+            ("braking", true) => "braking linear",
+            ("braking", false) => "braking curve",
+            ("slipping", true) => "slipping linear",
+            ("slipping", false) => "slipping curve",
+            (_, true) => "plain linear",
+            _ => "plain curve",
+        });
+        if linear {
+            p.push(if sl.sliding { "sliding" } else { "not sliding" });
+        }
+    }
+    p.push(match (w.balancing && w.steered, sp.no_moment) {
+        (true, _) => "into the hinge",
+        (_, 0) => "with its moment",
+        _ => "without a moment",
+    });
+    let sl = if law { d.spin.slip } else { sp.slip };
+    p.push(match (sl.locked, sl.spinning, w.contact) {
+        (true, _, _) => "spin locked",
+        (_, false, true) => "spin rolling",
+        _ => "spin integrated",
+    });
+    let a = sp.angle.0 + d.spin.spin.0 * s.dt.0;
+    if a.abs() > 3.1415927 {
+        p.push("angle wrapped");
+    }
+    p.push(match (w.balancing, w.steered) {
+        (false, _) => "no gyro",
+        (true, true) => "steered gyro",
+        (true, false) => "gyro",
+    });
+    if d.w.spring_force <= F::ZERO {
+        p.push("no load");
+    }
+    p
+}
+
+/// MD75 — `atv_wheel_spin_integrate` with its contact frame, force law and gyro, called straight on
+/// generated states; the contact velocity and the hinge run as they are.
+#[test]
+fn the_atv_wheel_spin_integrate_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let curve = curve(&ee);
+    let mut g = Gen(0x0075_d002);
+    let mut t = BTreeMap::new();
+    let port = |t: &mut State| {
+        let other = Other { ground: if t.share { t.ground_under } else { Ground::Still }, ..t.other };
+        atv_wheel::spin_integrate(&mut t.w, &mut t.x, &mut t.spin, &mut t.b, t.dt, &other, &mut t.ground_under, &curve)
+    };
+    for k in 0..20_000 {
+        let s = g.spin_state();
+        let mut d = s.clone();
+        port(&mut d);
+        for path in spin_paths(&s, &d) {
+            tally(&mut t, path);
+        }
+        compare(&mut ee, k, &s, SPIN_INTEGRATE, port);
+    }
+    each_path_seen(
+        &t,
+        &[
+            "both up",
+            "borrowed, shared ground",
+            "borrowed, no ground",
+            "frame steered",
+            "frame on the body",
+            "spinning",
+            "locked",
+            "gripping",
+            "slow",
+            "braking linear",
+            "braking curve",
+            "slipping linear",
+            "slipping curve",
+            "plain linear",
+            "plain curve",
+            "sliding",
+            "not sliding",
+            "into the hinge",
+            "with its moment",
+            "without a moment",
+            "spin locked",
+            "spin rolling",
+            "spin integrated",
+            "angle wrapped",
+            "no gyro",
+            "steered gyro",
+            "gyro",
+            "no load",
+        ],
+        100,
+    );
 }

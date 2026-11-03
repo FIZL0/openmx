@@ -26,3 +26,8 @@ MD75b1 (`4-moto-spin-post-node.md`): spin air (the 360), vehicle post (origin, w
 and the post's callees) and node position (the world update over a four-node scene graph) are ported in
 `atv_moto.rs` and answered in `quad::Steps`. Each is unhooked in its own oracle, plus one with both
 PostProcess calls, and every region, the scene included, is equal.
+
+MD75, part 5 (`5-wheel-spin.md`): the wheel integrate's surface drag and spin are ported in `atv_wheel.rs`
+and proved alone in `tests/atv_wheel.rs`. `quad::Steps` runs them inside the wheel integrate.
+`tests/atv_quad.rs` unhooks all three under the Force body: 10,000 states, every region equal. Still
+open: the whole-frame proof, which is filed as follow-ups.
