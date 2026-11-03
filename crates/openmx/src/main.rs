@@ -2274,6 +2274,12 @@ struct Args {
     /// row says, and a ride outside it has the original's. `--online` is always the original's; a
     /// ride from the lobby is its room's ([`Args::room_tricks`]).
     tricks: Option<menu::Tricks>,
+    /// `--tricks ID[,ID…]` (MD77): which trick packs MX vs. ATV's tricks stack, by id; unset or empty,
+    /// the front end's rows say, and a ride outside it has the first pack in the folder alone.
+    trick_packs: Option<Vec<String>>,
+    /// `--handling-pack ID` (MD77): the pack MX vs. ATV's handling reads; unset or empty, the front
+    /// end's Handling From row says, else the first trick pack on, else the first in the folder.
+    handling_pack: Option<String>,
     /// `--handling original|mxvatv` (MD40): how the bikes handle. Unset, the front end's Handling row
     /// says, and a ride outside it has the original's. `--online` is always the original's; a ride
     /// from the lobby is its room's ([`Args::room_handling`], N21).
@@ -2719,6 +2725,8 @@ async fn front_end(args: Args) -> Result<(), String> {
     let mut sound = start_sound(&args, &mut disc, &dir, &settings, true);
     let camera_names = camera_names(&mut disc);
     let heli_camera_names = heli_camera_names(&mut disc);
+    // The rider's own 24 (MD77), which the Ride tab's trick pack rows count each pack's extras past.
+    let rider_stunts = front_rider_stunts(&mut disc);
     drop(disc);
     // The front end's music and clicks (P65), when anything plays them.
     if sound.live().is_some() {
@@ -2766,6 +2774,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     front.menu.set_mod_categories(mod_categories(&args, &front.dir, mods_on, &listed));
     front.menu.set_mod_tracks(listed);
     front.menu.set_music_packs(music_packs(&args, &front.dir, mods_on));
+    front.menu.set_trick_packs(trick_pack_rows(&args, &front.dir, &rider_stunts));
     // The mod store (P198): into the mods folder beside the settings, or `--mods DIR`'s; none under
     // `--mods off`.
     let mut store = StoreFront::new(&args, &front.dir);
@@ -2861,7 +2870,9 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.world_sky = Some(args.world_sky.unwrap_or(shell.front.menu.settings.world_sky));
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.tricks = Some(args.tricks.unwrap_or(shell.front.menu.settings.tricks));
+                a.trick_packs = Some(args.trick_packs.clone().unwrap_or_else(|| shell.front.menu.settings.trick_packs.clone()));
                 a.handling = Some(args.handling.unwrap_or(shell.front.menu.settings.handling));
+                a.handling_pack = Some(args.handling_pack.clone().unwrap_or_else(|| shell.front.menu.settings.handling_pack.clone()));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
@@ -3189,6 +3200,8 @@ async fn front_end(args: Args) -> Result<(), String> {
             shell.front.menu.set_mod_categories(mod_categories(&args, &shell.front.dir, mods_on, &listed));
             shell.front.menu.set_mod_tracks(listed);
             shell.front.menu.set_music_packs(music_packs(&args, &shell.front.dir, mods_on));
+            // and the trick packs (MD77): one the store installed has its row at once
+            shell.front.menu.set_trick_packs(trick_pack_rows(&args, &shell.front.dir, &rider_stunts));
             // And their songs (MD7): a pack the store installed plays at once.
             if rescan {
                 shell.front.sound.set_source(std::sync::Arc::new(read_music_packs(mods_folder(&args, &shell.front.dir, true).as_deref())));
@@ -3751,21 +3764,30 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         table.stunts.len(),
         stunts.stunts.iter().filter(|s| !s.name.is_empty()).count()
     );
-    // MX vs. ATV's tricks (MD16), from the first trick pack in the mods folder: its extra stunts after
-    // the 24, and below its moves laid over every bike. Without a pack the ride has the original's.
-    let trick_pack = ride_trick_pack(&args)?;
-    let stunts = match &trick_pack {
-        Some(pack) => pack.stunts(stunts),
-        None => stunts,
+    // MX vs. ATV's tricks (MD16), from the trick packs on in the mods folder (MD77): their extra
+    // stunts stacked after the 24, and below the first's moves laid over every bike. Without a pack
+    // the ride has the original's.
+    let trick_packs = ride_trick_packs(&args)?;
+    let stunts = match trick_packs.is_empty() {
+        false => {
+            let (stunts, over) = trick_packs::stunts(&trick_packs, stunts);
+            let extras = stunts.stunts.len() - game_sim::trick::SLOTS;
+            match over {
+                0 => println!("tricks: {extras} extra stunts, each on a gesture"),
+                n => println!("tricks: {extras} extra stunts on the {} gestures, {n} more without a button", game_sim::trick::EXTRA_SLOTS),
+            }
+            stunts
+        }
+        true => stunts,
     };
-    // Its clips (MD21), bound below onto every body and chassis the ride loads.
-    let pack_clips = trick_pack.as_ref().and_then(|pack| match pack.clips() {
-        Ok(clips) => Some(clips),
+    // Their clips (MD21), bound below onto every body and chassis the ride loads.
+    let pack_clips = match trick_packs::clips(&trick_packs) {
+        Ok(clips) => clips,
         Err(e) => {
             println!("tricks: no clips: {e}");
             None
         }
-    });
+    };
 
     let scn = archives[0]
         .entries()
@@ -3996,11 +4018,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
     };
     // MX vs. ATV's handling (MD40): its own bike file from the trick pack, in place of the disc's.
-    let handling_pack = ride_handling_pack(&args, trick_pack.as_ref())?;
+    let handling_pack = ride_handling_pack(&args, &trick_packs)?;
     let mut stock_phy = handling_phy(handling_pack.as_ref(), &phy_member, &tables.ride.curve, "")
         .unwrap_or_else(|| Phy::read_bytes(&phy_bytes, &tables.ride.curve));
-    if let Some(pack) = &trick_pack {
-        println!("{}", pack.lay(&mut stock_phy, &phy_member));
+    if !trick_packs.is_empty() {
+        println!("{}", trick_packs::lay(&trick_packs, &mut stock_phy, &phy_member));
     }
     let mut phy = stock_phy.clone();
     mods.bike(0, &mut phy);
@@ -4030,8 +4052,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
                 let mut phy = handling_phy(handling_pack.as_ref(), &member, &tables.ride.curve, &format!("player {}: ", i + 1))
                     .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
-                if let Some(pack) = &trick_pack {
-                    println!("player {}: {}", i + 1, pack.lay(&mut phy, &member));
+                if !trick_packs.is_empty() {
+                    println!("player {}: {}", i + 1, trick_packs::lay(&trick_packs, &mut phy, &member));
                 }
                 stock_phys.push(phy.clone());
                 bike_words.push(saved_markers::bike_word(&member));
@@ -4205,8 +4227,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
         }
     };
-    if let (Some(pack), Some(_)) = (&trick_pack, &pack_clips) {
-        println!("{}", pack.missing_clips(&stunts, pack_missing.0.as_deref(), pack_missing.1.as_deref()));
+    if pack_clips.is_some() {
+        println!("{}", trick_packs::missing_clips(&trick_packs, &stunts, pack_missing.0.as_deref(), pack_missing.1.as_deref()));
     }
     if let Some(chassis) = &chassis {
         let slots = chassis.stance.lib.clip[..game_sim::trick::SLOTS].iter().filter(|c| c.is_some()).count();
@@ -6393,9 +6415,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let handling_pack = args.room_handling.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
             let mut stock = room_handling_phy(handling_pack.as_ref(), &first.pick.bike, &tables.ride.curve)
                 .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
-            // the room's trick pack over it (MD19), as the host's machine has
-            let pack = args.room_tricks.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
-            lay_room_tricks(pack.as_ref(), &mut stock, &first.pick.bike);
+            // the room's trick packs over it (MD19, MD77), as the host's machine has
+            let packs = args.room_tricks.as_ref().map(|(dir, ids)| trick_packs::on(dir, &trick_packs::ids_of_room(ids))).transpose()?.unwrap_or_default();
+            lay_room_tricks(&packs, &mut stock, &first.pick.bike);
             let mut phy = stock.clone();
             mods.bike(0, &mut phy);
             let mut sim = world.seats[0].sim.clone();
@@ -6418,8 +6440,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 return Err("an online ride from the lobby has one local player: drop --players".into());
             }
             let disc = &front.as_deref().expect("from the lobby").network.disc;
-            // the room's trick pack (MD19), laid over every seat's bike as on every machine
-            let pack = args.room_tricks.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
+            // the room's trick packs (MD19, MD77), laid over every seat's bike as on every machine
+            let packs = args.room_tricks.as_ref().map(|(dir, ids)| trick_packs::on(dir, &trick_packs::ids_of_room(ids))).transpose()?.unwrap_or_default();
             // and the room's handling (N21), every seat's bike read from its pack
             let handling_pack = args.room_handling.as_ref().map(|(dir, id)| trick_packs::by_id(dir, id)).transpose()?;
             let mut sims = Vec::with_capacity(room.seats.len());
@@ -6436,7 +6458,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // on the room's handling (N21), then its trick pack, as on every machine
                     let mut phy = room_handling_phy(handling_pack.as_ref(), &seat.pick.bike, &tables.ride.curve)
                         .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
-                    lay_room_tricks(pack.as_ref(), &mut phy, &seat.pick.bike);
+                    lay_room_tricks(&packs, &mut phy, &seat.pick.bike);
                     *stock.last_mut().expect("pushed") = phy.clone();
                     mods.bike(i, &mut phy);
                     sim.phy = Arc::new(phy);
@@ -7225,11 +7247,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         room.backwards_bail = args.backwards_bail || settings.backwards_bail;
                         room.modifiers = mods.text();
                         // the trick pack this ride rides (MD19), which every joiner's machine lays
-                        // (`ride_trick_pack`'s pick, which this ride was built on)
-                        room.tricks = lobby::room_tricks(args.tricks.unwrap_or_default(), mods_dir(&args).as_deref());
+                        // (`ride_trick_packs`' pick, which this ride was built on)
+                        let named = args.trick_packs.clone().unwrap_or_default();
+                        room.tricks = lobby::room_tricks(args.tricks.unwrap_or_default(), &named, mods_dir(&args).as_deref());
                         // and the handling it rides on (N21): the pack its bikes were read from
                         // (`ride_handling_pack`'s pick), if any
-                        room.handling = lobby::room_handling(args.handling.unwrap_or_default(), mods_dir(&args).as_deref());
+                        let named = args.handling_pack.clone().unwrap_or_default();
+                        room.handling = lobby::room_handling(args.handling.unwrap_or_default(), &named, &room.tricks, mods_dir(&args).as_deref());
                         let mut pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
                         // the preset this seat rides on now (N13), which the room tells a joiner's machine
                         pick.preset = net::rides::preset(&world.seats[0].sim).unwrap_or(0) as u8;
@@ -10460,44 +10484,53 @@ fn dump_textures(rest: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The trick pack a ride lays over the original's tricks (MD16): only with `--tricks mxvatv` or the
-/// Tricks row's MX vs. ATV, never on `--online`, and only when the mods folder has one; the line says
-/// why not. A lobby's ride rides its room's pack (MD19) or none at all: without it this machine would
+/// The trick packs a ride stacks over the original's tricks (MD16, MD77): only with `--tricks` or
+/// the Tricks row's Trick Packs, never on `--online`, and only those of [`Args::trick_packs`] the
+/// mods folder has (none named: its first), in the folder's order; the line says which, or why
+/// none. A lobby's ride rides its room's list (MD19) or none at all: without it this machine would
 /// ride other tricks than every other seat, which the handshake should have refused.
-fn ride_trick_pack(args: &Args) -> Result<Option<trick_packs::Pack>, String> {
-    if let Some((dir, id)) = &args.room_tricks {
-        let pack = trick_packs::by_id(dir, id).map_err(|e| format!("the room's tricks: {e}"))?;
-        println!("tricks: MX vs. ATV's, from the room's {}", pack.id);
-        return Ok(Some(pack));
+fn ride_trick_packs(args: &Args) -> Result<Vec<trick_packs::Pack>, String> {
+    if let Some((dir, word)) = &args.room_tricks {
+        let packs = trick_packs::on(dir, &trick_packs::ids_of_room(word)).map_err(|e| format!("the room's tricks: {e}"))?;
+        println!("tricks: MX vs. ATV's, from the room's {word}");
+        return Ok(packs);
     }
     if args.tricks != Some(menu::Tricks::MxVsAtv) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     if args.online.is_some() {
         println!("tricks: the original's on --online, which has no handshake to check every seat's pack");
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let Some(dir) = mods_dir(args) else {
         println!("tricks: the mods folder is off, so the original's");
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    match trick_packs::find(&dir) {
-        Ok(pack) => {
-            println!("tricks: MX vs. ATV's, from {}", pack.id);
-            Ok(Some(pack))
-        }
-        Err(e) => {
-            println!("tricks: {e}; the original's");
-            Ok(None)
-        }
+    let (installed, why) = trick_packs::listed(&dir);
+    for line in why {
+        println!("tricks: {line}");
     }
+    let named = args.trick_packs.clone().unwrap_or_default();
+    let packs: Vec<trick_packs::Pack> = match named.is_empty() {
+        true => installed.into_iter().take(1).collect(),
+        false => installed.into_iter().filter(|p| named.contains(&p.id)).collect(),
+    };
+    if let Some(id) = named.iter().find(|id| !packs.iter().any(|p| p.id == **id)) {
+        println!("tricks: no trick pack {id} in {}", dir.join(trick_packs::TRICKS_DIR).display());
+    }
+    match packs.is_empty() {
+        true => println!("tricks: no trick pack on in {}; the original's", dir.join(trick_packs::TRICKS_DIR).display()),
+        false => println!("tricks: MX vs. ATV's, from {}", packs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(" then ")),
+    }
+    Ok(packs)
 }
 
 /// The trick pack whose `mx_*.phy` the bikes ride on MX vs. ATV's handling (MD40): only with
 /// `--handling mxvatv` or the Handling row's MX vs. ATV, never on `--online`, and only when the mods
-/// folder has one; the line says why not. The tricks' pack if the ride has one already. A lobby's
-/// ride rides its room's pack (N21) or the original's handling.
-fn ride_handling_pack(args: &Args, tricks: Option<&trick_packs::Pack>) -> Result<Option<trick_packs::Pack>, String> {
+/// folder has one; the line says why not. [`Args::handling_pack`] when the folder has it (MD77),
+/// else the first of the ride's trick packs, else the folder's first. A lobby's ride rides its
+/// room's pack (N21) or the original's handling.
+fn ride_handling_pack(args: &Args, tricks: &[trick_packs::Pack]) -> Result<Option<trick_packs::Pack>, String> {
     if let Some((dir, id)) = &args.room_handling {
         let pack = trick_packs::by_id(dir, id).map_err(|e| format!("the room's handling: {e}"))?;
         println!("handling: MX vs. ATV's, from the room's {}", pack.id);
@@ -10514,9 +10547,17 @@ fn ride_handling_pack(args: &Args, tricks: Option<&trick_packs::Pack>) -> Result
         println!("handling: the mods folder is off, so the original's");
         return Ok(None);
     };
-    let found = match tricks {
-        Some(pack) => trick_packs::by_id(&dir, &pack.id),
-        None => trick_packs::find(&dir),
+    let named = args.handling_pack.clone().unwrap_or_default();
+    let found = match (named.is_empty(), tricks.first()) {
+        (false, _) => trick_packs::by_id(&dir, &named).or_else(|e| {
+            println!("handling: {e}");
+            match tricks.first() {
+                Some(pack) => trick_packs::by_id(&dir, &pack.id),
+                None => trick_packs::find(&dir),
+            }
+        }),
+        (true, Some(pack)) => trick_packs::by_id(&dir, &pack.id),
+        (true, None) => trick_packs::find(&dir),
     };
     match found {
         Ok(pack) => Ok(Some(pack)),
@@ -10550,12 +10591,12 @@ fn room_handling_phy(pack: Option<&trick_packs::Pack>, set: &str, curve: &game_s
     handling_phy(pack, &set.file(), curve, &format!("{}: ", set.word()))
 }
 
-/// Lay a lobby ride's trick pack (MD19) over a seat's bike file, read for the bike set `set`
+/// Lay a lobby ride's trick packs (MD19, MD77) over a seat's bike file, read for the bike set `set`
 /// (`race125p`) as the handshake hashed it: what every machine lays over that seat.
-fn lay_room_tricks(pack: Option<&trick_packs::Pack>, phy: &mut Phy, set: &str) {
+fn lay_room_tricks(packs: &[trick_packs::Pack], phy: &mut Phy, set: &str) {
     // A person's seat, so the P file the ride loads (`Set::ridden`), whatever the word's tuning.
-    if let (Some(pack), Some(set)) = (pack, roster::Set::from_player_word(set)) {
-        println!("{set}: {}", pack.lay(phy, &set.file()), set = set.word());
+    if let (false, Some(set)) = (packs.is_empty(), roster::Set::from_player_word(set)) {
+        println!("{set}: {}", trick_packs::lay(packs, phy, &set.file()), set = set.word());
     }
 }
 
@@ -10592,6 +10633,34 @@ fn music_packs(args: &Args, dir: &std::path::Path, on: bool) -> Vec<(String, Str
         println!("mods: {} music packs", packs.len());
     }
     packs
+}
+
+/// The trick packs in the mods folder (MD77), for the Ride tab's rows: listed while the Mods row is
+/// off too, as the rows grey; with the extras each could add past `stunts`, the rider's own 24.
+fn trick_pack_rows(args: &Args, dir: &std::path::Path, stunts: &Set) -> Vec<menu::TrickPack> {
+    let Some(folder) = mods_folder(args, dir, true) else { return Vec::new() };
+    let (packs, why) = trick_packs::listed(&folder);
+    for line in why {
+        println!("tricks: {line}");
+    }
+    packs.iter().map(|p| menu::TrickPack { id: p.id.clone(), name: p.name.clone(), extras: p.extra_names(stunts) }).collect()
+}
+
+/// The first rider's 24 stunts off the disc, as a ride reads them, for the front end's count of
+/// each trick pack's extras (MD77); none when the disc's table cannot be read, which counts every
+/// row of a pack.
+fn front_rider_stunts(disc: &mut Disc) -> Set {
+    let read = member_ending(disc, STUNT_ARCHIVE)
+        .and_then(|name| disc.res(&name))
+        .and_then(|res| res.read_suffix(STUNT_TABLE).map_err(|e| format!("{STUNT_ARCHIVE}: {e}")))
+        .and_then(|bytes| Stunts::parse(&bytes));
+    match read {
+        Ok(table) => Set::new(table.selection(0)),
+        Err(e) => {
+            println!("tricks: the rider's stunts: {e}");
+            Set::default()
+        }
+    }
 }
 
 /// A mod kind as the store's pages name it: its tab's name, but World for a world (P241).
@@ -11671,6 +11740,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         handling: None,
         room_handling: None,
         room_tricks: None,
+        trick_packs: None,
+        handling_pack: None,
         markers: None,
         where_only: false,
     };
@@ -11785,10 +11856,15 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.handling = Some(h);
             }
             "--tricks" => {
-                let word = next("original or mxvatv")?;
-                let tricks = menu::Tricks::from_word(&word).ok_or_else(|| format!("--tricks: {word:?} is not original or mxvatv"))?;
-                args.tricks = Some(tricks);
+                // MD77: original, mxvatv (the first pack in the folder), or the packs to stack by id
+                let word = next("original, mxvatv, or trick pack ids")?;
+                args.tricks = Some(menu::Tricks::from_word(&word).unwrap_or(menu::Tricks::MxVsAtv));
+                args.trick_packs = Some(match menu::Tricks::from_word(&word) {
+                    Some(_) => Vec::new(),
+                    None => trick_packs::ids_of_room(&word),
+                });
             }
+            "--handling-pack" => args.handling_pack = Some(next("a trick pack id")?),
             "--speedometer" => {
                 let word = next("digital or analog")?;
                 let style = menu::Speedometer::from_word(&word)
@@ -12154,7 +12230,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv] [--handling original|mxvatv] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv] [--handling-pack ID] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\

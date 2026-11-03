@@ -358,7 +358,7 @@ fn lan_with_tricks(name: &str, mods: &std::path::Path) -> Net {
 
 /// [`pump`], naming the trick pack in the host's room as `lobby::Network::pump` does (MD19).
 fn pump_tricks(m: &mut Menu, net: &Net, mods: &std::path::Path) -> Vec<Act> {
-    lobby::name_tricks(&mut m.lobby.out, m.settings.tricks, Some(mods));
+    lobby::name_tricks(&mut m.lobby.out, &m.settings, Some(mods));
     pump(m, net)
 }
 
@@ -415,6 +415,62 @@ fn every_seat_of_an_online_ride_has_the_hosts_trick_pack() {
     }
 }
 
+/// A second trick pack, `untamed`, beside [`trick_mods`]' in `mods`, with a stunt the first lacks.
+fn add_untamed(mods: &std::path::Path) {
+    let pack = mods.join(trick_packs::TRICKS_DIR).join("untamed");
+    std::fs::create_dir_all(pack.join("Bike")).unwrap();
+    let json = r#"{"kind": "tricks", "id": "untamed", "name": "Untamed", "riders": [{"rider": "MX", "table": "stunts.ini"}], "phy": ["Bike/mx_race125p.phy"]}"#;
+    std::fs::write(pack.join("mod.json"), json).unwrap();
+    std::fs::write(pack.join("stunts.ini"), "[Stunt01]\nName=pendulum\nDuration=1.0\n").unwrap();
+    std::fs::write(pack.join("Bike/mx_race125p.phy"), "[Three Sixty]\nx = 2\n").unwrap();
+}
+
+/// MD77: a host with two trick packs on names both in the room, in the folder's order, and the
+/// handling's pack defaults to the first of them; a guest needs both, with the same files, to pass
+/// the handshake. One pack alone names and hashes as it did before MD77.
+#[test]
+fn a_room_carries_every_trick_pack_on() {
+    use game_sim::handling::Handling;
+    use openmx_net::handshake::Handshake;
+    let hm = trick_mods("md77-host", "[Three Sixty]\n");
+    add_untamed(&hm);
+    let mut settings = Settings::parse("tricks = mxvatv\ntrick_packs = untamed, mxvatv\nhandling = mxvatv\n");
+    let host = |s: &Settings| {
+        let mut out = vec![Cmd::Host(Room::new("Hosty", "free06", 2))];
+        lobby::name_tricks(&mut out, s, Some(&hm));
+        lobby::name_handling(&mut out, s, Some(&hm));
+        let Cmd::Host(room) = &out[0] else { unreachable!() };
+        room.clone()
+    };
+    let room = host(&settings);
+    assert_eq!((room.tricks.as_str(), room.handling.as_str()), ("mxvatv,untamed", "mxvatv"));
+    settings.handling_pack = "untamed".into();
+    assert_eq!(host(&settings).handling, "untamed", "Handling From names its own");
+    let files = |mods: &std::path::Path| {
+        let f = lobby::DiscFiles::default();
+        f.tricks_from(Some(mods.to_path_buf()));
+        f
+    };
+    let shake = Handshake::of(&room, &files(&hm));
+    assert!(shake.tricks_hash.is_some());
+    let one = trick_mods("md77-one", "[Three Sixty]\n");
+    assert_eq!(Handshake::of(&room, &files(&one)).tricks_hash, None, "a guest without untamed");
+    let e = Handshake::of(&room, &files(&one)).check(&shake).unwrap_err();
+    assert!(e.contains("trick pack mxvatv,untamed"), "{e}");
+    add_untamed(&one);
+    assert_eq!(Handshake::of(&room, &files(&one)).tricks_hash, shake.tricks_hash, "the same two packs");
+    std::fs::write(one.join(trick_packs::TRICKS_DIR).join("untamed").join("stunts.ini"), "[Stunt01]\nName=pendulum\nDuration=2.0\n").unwrap();
+    assert_ne!(Handshake::of(&room, &files(&one)).tricks_hash, shake.tricks_hash, "a changed second pack");
+    // One pack: its own id and hash, as a room before MD77 had.
+    settings.trick_packs = vec!["mxvatv".into()];
+    let single = host(&settings);
+    assert_eq!(single.tricks, "mxvatv");
+    assert_eq!(Handshake::of(&single, &files(&hm)).tricks_hash, trick_packs::by_id(&hm, "mxvatv").unwrap().hash().ok());
+    for m in [hm, one] {
+        let _ = std::fs::remove_dir_all(m.parent().unwrap());
+    }
+}
+
 /// N21: a host on MX vs. ATV's handling names its pack in the room, apart from the tricks; on the
 /// shell's own [`lobby::DiscFiles`] a guest with the same pack's files passes the handshake, and one
 /// whose `mx_race125p.phy` differs, or with no pack, is refused with the handling named.
@@ -423,21 +479,22 @@ fn every_seat_of_an_online_ride_has_the_hosts_handling() {
     use game_sim::handling::Handling;
     use openmx_net::handshake::Handshake;
     let hm = trick_mods("n21-host", "[Three Sixty]\n");
+    let on = |handling: Handling| Settings { handling, ..Settings::parse("") };
     let mut out = vec![Cmd::Host(Room::new("Hosty", "free06", 2)), Cmd::Leave];
-    lobby::name_handling(&mut out, Handling::Original, Some(&hm));
+    lobby::name_handling(&mut out, &on(Handling::Original), Some(&hm));
     let Cmd::Host(room) = &out[0] else { unreachable!() };
     assert_eq!(room.handling, "", "the original's handling names no pack");
-    lobby::name_handling(&mut out, Handling::MxVsAtv, None);
+    lobby::name_handling(&mut out, &on(Handling::MxVsAtv), None);
     let Cmd::Host(room) = &out[0] else { unreachable!() };
     assert_eq!(room.handling, "", "with the mods folder off, the original's");
-    lobby::name_handling(&mut out, Handling::MxVsAtv, Some(&hm));
+    lobby::name_handling(&mut out, &on(Handling::MxVsAtv), Some(&hm));
     let Cmd::Host(room) = &out[0] else { unreachable!() };
     let mut room = room.clone();
     assert_eq!((room.handling.as_str(), room.tricks.as_str()), ("mxvatv", ""), "the room names its pack for the handling alone");
     let mut riding = Room::new("Hosty", "free06", 2);
     riding.riding = true;
     let mut out = vec![Cmd::Host(riding)];
-    lobby::name_handling(&mut out, Handling::MxVsAtv, Some(&hm));
+    lobby::name_handling(&mut out, &on(Handling::MxVsAtv), Some(&hm));
     let Cmd::Host(riding) = &out[0] else { unreachable!() };
     assert_eq!(riding.handling, "", "a ride opened online under way says its own");
     room.take(HOST, &[Pick::new("thq1", "race125p")]);

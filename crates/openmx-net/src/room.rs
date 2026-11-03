@@ -135,9 +135,10 @@ pub struct Room {
     /// the room is handed to when the host goes (N11).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tickets: BTreeMap<String, String>,
-    /// The trick pack every seat rides (MD19): the id of the host's MX vs. ATV pack
-    /// (`mods/tricks/<id>/`'s `mod.json`), empty for the original's tricks alone, and what an older
-    /// build sends. The handshake holds every machine to the same files under it.
+    /// The trick packs every seat rides (MD19): the ids of the host's packs (`mods/tricks/<id>/`'s
+    /// `mod.json`), stacked in this order and joined by commas since MD77 (`a,b`; one pack is its id
+    /// alone, as before), empty for the original's tricks alone, and what an older build sends. The
+    /// handshake holds every machine to the same files under them.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tricks: String,
     /// The handling every seat rides (N21, MD40's setting): the id of the host's MX vs. ATV pack whose

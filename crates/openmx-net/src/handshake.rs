@@ -31,8 +31,8 @@ pub trait Disc: Send + Sync {
     fn bike(&self, _set: &str) -> Option<u64> {
         None
     }
-    /// The trick pack `id` (MD19) as this machine's mods folder holds it, hashed: `None` when it has
-    /// no such pack.
+    /// The trick pack `id` (MD19) as this machine's mods folder holds it, hashed, or a room's list of
+    /// them (MD77, `a,b`) hashed together: `None` when it lacks one.
     fn tricks(&self, _id: &str) -> Option<u64> {
         None
     }

@@ -392,25 +392,20 @@ fn a_360_keeps_the_hands_on_the_bars() {
     assert!(drawn.0 <= SPIN_HELD, "the 360 drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
 }
 
-/// The extras' gesture group: Cross is 7, Square 8 ([`game_sim::trick::group_with`]).
-const EXTRA_GROUPS: [[bool; 2]; 2] = [[true, false], [false, true]];
-
 /// The stick for each of [`game_sim::trick::slot_of`]'s directions: up, down, left, right.
 const DIRS: [(f32, f32); 4] = [(0.0, -1.0), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)];
 
 /// The hands for trick id `t` ([`game_sim::trick::trick_of`]): its group's buttons and its direction.
 fn gesture(t: usize) -> Controls {
     let (group, dir) = if t >= SLOTS { (7 + (t - SLOTS) / 4, (t - SLOTS) % 4) } else { (1 + t / 4, t % 4) };
-    let trick = match group {
-        1 => [true, false, false],
-        2 => [false, true, false],
-        3 => [true, true, false],
-        4 => [true, false, true],
-        5 => [false, true, true],
-        6 => [true, true, true],
-        _ => [false; 3],
-    };
-    let extra = if group >= 7 { EXTRA_GROUPS[group - 7] } else { [false; 2] };
+    // The buttons that make the group: the original's three alone for 1..=6, and with the extras
+    // (Cross, Square, both) over them past it ([`game_sim::trick::group_with`], MD77).
+    let unders = (0..8u8).map(|b| [b & 1 != 0, b & 2 != 0, b & 4 != 0]);
+    let (trick, extra) = [[false, false], [true, false], [false, true], [true, true]]
+        .into_iter()
+        .flat_map(|e| unders.clone().map(move |t| (t, e)))
+        .find(|&(t, e)| usize::from(game_sim::trick::group_with(t, e)) == group)
+        .unwrap_or_else(|| panic!("no buttons make group {group}"));
     hands(trick, extra, DIRS[dir])
 }
 
@@ -429,8 +424,9 @@ const LANDING: usize = 3;
 /// cross over; the Flatliner, with a bike clip of its own, 0.005. Since B10 the Flatliner's is
 /// 0.062, ten frames in: the bike fades in at its own object's rate of 3 and the body at its
 /// machine's 4, both read off the original (S217), so for a while the body is further out of the
-/// whip than the bike it sits on.
-const OVER: f32 = 0.075;
+/// whip than the bike it sits on. Since MD77 every extra of the pack has a gesture, and the Ninjanac,
+/// with none before, comes 0.077 past the whip, seven frames in: hence 0.08.
+const OVER: f32 = 0.08;
 
 /// How much further off its grip a hand of a trick the bike has no clip for may be drawn whipped
 /// than square: the hold's rounding.
@@ -470,7 +466,7 @@ fn assert_whipped(w: &Whipped) {
 }
 
 /// **V98:** every trick a whip can start, the same way as [`a_no_footer_started_whipped_keeps_the_rider_on_the_bike`]:
-/// the 24 gesture slots and the pack's 8 extras, each tapped with the stick held right through it,
+/// the 24 gesture slots and every extra of the pack (8 before MD77), each tapped with the stick held right through it,
 /// whether or not the bike has a clip for it.
 #[test]
 fn every_trick_started_whipped_keeps_the_rider_on_the_bike() {

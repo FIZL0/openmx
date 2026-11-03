@@ -442,6 +442,9 @@ fn the_settings_file_reads_back_as_it_was_written() {
         tricks: menu::Tricks::MxVsAtv,
         // MX vs. ATV's handling (MD40).
         handling: game_sim::handling::Handling::MxVsAtv,
+        // Two trick packs stacked, and the handling from the second (MD77).
+        trick_packs: vec!["mxvatv".into(), "untamed".into()],
+        handling_pack: "untamed".into(),
         // The Original tab's picture at the original's (P126); the plants are always ours since
         // 2026-10-29.
         plants: game_render::eco::Lod::Smooth,
@@ -5180,7 +5183,7 @@ fn the_tricks_row_picks_mx_vs_atv_and_is_saved() {
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
     assert_eq!(m.settings.tricks, Tricks::MxVsAtv);
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "MX vs. ATV");
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Trick Packs", "MD77: no pack installed");
     let text = m.settings.text();
     assert!(text.contains("tricks = mxvatv\n"), "{text}");
     assert_eq!(Settings::parse(&text).tricks, Tricks::MxVsAtv);
@@ -5193,6 +5196,71 @@ fn the_tricks_row_picks_mx_vs_atv_and_is_saved() {
     m.settings.mods = false;
     let row = m.page().into_iter().find(|row| row.key == menu::Key::Tricks).unwrap();
     assert!(row.off.is_some(), "greyed with the mods folder off");
+}
+
+/// MD77: every installed trick pack has an On/Off row by its name; switching packs on stacks them,
+/// saved by id in `trick_packs`, and the Tricks row names what is on. Past the 96 gestures the rows
+/// warn how many stunts go without a button. Handling From names a pack by id, else the first on.
+#[test]
+fn each_trick_pack_has_a_row_and_they_stack() {
+    use menu::{Key, TrickPack, Tricks};
+    let (mut m, mut r) = fresh();
+    let pack = |id: &str, name: &str, extras: Vec<String>| TrickPack { id: id.into(), name: name.into(), extras };
+    let names = |prefix: &str, n: usize| (0..n).map(|i| format!("{prefix}{i}")).collect::<Vec<_>>();
+    m.set_trick_packs(vec![pack("mxvatv", "Unleashed tricks", names("a", 46)), pack("untamed", "Untamed tricks", names("a", 30).into_iter().chain(names("b", 20)).collect())]);
+    settings_at(&mut m, &mut r, "Ride");
+    let row = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap();
+    assert_eq!(row(&m, Key::Tricks).value, "Original");
+    assert_eq!(row(&m, Key::TrickPack(0)).label, "Unleashed tricks");
+    assert_eq!(row(&m, Key::TrickPack(1)).label, "Untamed tricks");
+    assert_eq!(row(&m, Key::TrickPack(1)).value, "Off");
+    // An old file's `tricks = mxvatv` alone is the first pack.
+    down_to(&mut m, &mut r, Key::Tricks);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.tricks, Tricks::MxVsAtv);
+    assert_eq!(row(&m, Key::Tricks).value, "Unleashed tricks");
+    assert_eq!(row(&m, Key::TrickPack(0)).value, "On");
+    assert!(!m.settings.text().contains("trick_packs"), "{}", m.settings.text());
+    // The second on as well: both stack, 46 + 20 stunts, none over.
+    down_to(&mut m, &mut r, Key::TrickPack(1));
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.trick_packs, ["mxvatv", "untamed"]);
+    assert_eq!(row(&m, Key::Tricks).value, "2 Packs");
+    assert_eq!(m.tricks_without_a_button(), 0);
+    assert_eq!(row(&m, Key::TrickPack(1)).note.as_deref(), Some("tricks/untamed in the mods folder"));
+    let text = m.settings.text();
+    assert!(text.contains("tricks = mxvatv\ntrick_packs = mxvatv, untamed\n"), "{text}");
+    assert_eq!(Settings::parse(&text).trick_packs_on(&m.trick_pack_ids()), ["mxvatv", "untamed"]);
+    // The first off leaves the second.
+    down_to(&mut m, &mut r, Key::TrickPack(0));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.trick_packs_on(&m.trick_pack_ids()), ["untamed"]);
+    assert_eq!(row(&m, Key::Tricks).value, "Untamed tricks");
+    // Handling From: the first pack on, until one is named.
+    m.settings.handling = game_sim::handling::Handling::MxVsAtv;
+    assert_eq!(row(&m, Key::HandlingPack).value, "First Pack On");
+    assert_eq!(row(&m, Key::HandlingPack).note.as_deref(), Some("Now Untamed tricks"));
+    down_to(&mut m, &mut r, Key::HandlingPack);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.handling_pack, "mxvatv");
+    assert_eq!(m.settings.handling_pack_on(&m.trick_pack_ids()).as_deref(), Some("mxvatv"));
+    assert!(m.settings.text().contains("handling_pack = mxvatv\n"));
+    // The last off: the original's tricks, and the list is kept for next time.
+    down_to(&mut m, &mut r, Key::TrickPack(1));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.tricks, Tricks::Original);
+    assert_eq!(row(&m, Key::Tricks).value, "Original");
+    // Over the gestures: 120 stunts of their own and one in common go 25 short.
+    m.set_trick_packs(vec![pack("mxvatv", "Unleashed tricks", names("a", 60)), pack("untamed", "Untamed tricks", names("a", 1).into_iter().chain(names("c", 60)).collect())]);
+    m.settings.tricks = Tricks::MxVsAtv;
+    m.settings.trick_packs = vec!["mxvatv".into(), "untamed".into()];
+    assert_eq!(m.tricks_without_a_button(), 120 - game_sim::trick::EXTRA_SLOTS);
+    let warn = format!("{} stunts of the packs on have no button: past the 96 gestures", 120 - game_sim::trick::EXTRA_SLOTS);
+    assert_eq!(row(&m, Key::Tricks).note.as_deref(), Some(warn.as_str()));
+    assert_eq!(row(&m, Key::TrickPack(0)).note.as_deref(), Some(warn.as_str()));
+    m.settings.mods = false;
+    assert!(row(&m, Key::TrickPack(0)).off.is_some(), "greyed with the mods folder off");
 }
 
 /// MD30: MD25's 360 Style row is gone. A settings file that still has its `three_sixty` line reads as
