@@ -1,1 +1,14 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
+- **Smoother split screen.** Two players riding no longer rebuild the world around each bike every tick, the rider's body costs a fifth less, and the game steps on its own thread beside the picture, so a split-screen frame costs the slower of the two instead of both together
+- **Cars you drive are drawn**, on every track and world, with their suspension, steering and spinning tires; each has its own chase camera, its own engine sound and its own dust, dirt and exhaust
+- Cars work online: a player can switch into a buggy, monster truck or baja in an online game
+- Trick packs stack: each installed pack has its own On/Off switch under Settings > Ride, and Cross and Square combine with the other trick buttons as the original's do
+- The High preset keeps a far fog (eight times the original's) instead of drawing the whole map; Whole Map is still a Draw Distance choice
+- The version line and the menu's corner just say the version and build
+- A trick lets the rider's body go and takes it back on the original's tick, and a restart fades from the rider as drawn
+- The bike fades into a trick that follows another as the original's does
+- A truck that drives into a parked plane, a wreck or a prop wakes and is knocked about as in the original; a struck truck's cab is thrown as the original throws it
+- A fallen rider's body meets knockable props at rest, the props see the wreck bike and the wreck bike's tumble is thrown by a ball's hit
+- MX vs. ATV handling: the wreck clock and put-back follow MX vs. ATV's
+- Online seats that start in the biplane stand where the offline plane does
+- A plane flown into the ground puffs dust where it hits again
