@@ -471,6 +471,11 @@ pub struct Lot {
     /// The helicopter as the disc builds it (P216), off `machine.res`'s `kiowa.phy`, which each
     /// player's garage takes a copy of ([`Lot::heli_for`]). `None` without the file.
     pub kiowa: Option<KiowaRide>,
+    /// Every online seat's cars (S249), seat `i`'s [`Lot::cars_for`] of the lot parked for the most
+    /// seats a ride has, as the online biplane bays are: the same on every machine off the same disc.
+    /// What an online seat's car is taken from and stepped with ([`switch_lane_among`],
+    /// [`drive_lane`]). Empty offline and without the files.
+    pub online_cars: Vec<Vec<CarRide>>,
 }
 
 impl Lot {
@@ -484,7 +489,7 @@ impl Lot {
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new(), cars: Vec::new(), kiowa: None };
+        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new(), cars: Vec::new(), kiowa: None, online_cars: Vec::new() };
         lot.resize(players, ground);
         lot
     }
@@ -1673,35 +1678,51 @@ pub struct Wanted {
 }
 
 impl Wanted {
-    /// The byte: the machine in the low two bits (0 none, 1 the bike, 2 the biplane), then the
-    /// two scheme bits, then the markers-off bit, then the together chord's, then the paused bit.
+    /// The byte: the machine in the low two bits and the top one (0 none, 1 the bike, 2 the biplane,
+    /// 3 the buggy, 4 the monster truck, 5 the baja: S249, the cars past the two bits the bike and
+    /// plane had, in the one bit left), then the two scheme bits, then the markers-off bit, then the
+    /// together chord's, then the paused bit.
     pub fn byte(self) -> u8 {
-        let to = match self.to {
+        let to: u8 = match self.to {
             None => 0,
             Some(Kind::Bike) => 1,
             Some(Kind::Biplane) => 2,
-            // Online rides no car (S149e): a car pick is no pick.
-            Some(Kind::Buggy | Kind::Monster | Kind::Baja) => 0,
-            // Nor the helicopter (P216).
+            Some(Kind::Buggy) => 3,
+            Some(Kind::Monster) => 4,
+            Some(Kind::Baja) => 5,
+            // Online flies no helicopter (P216): its pick is no pick.
             Some(Kind::Kiowa) => 0,
         };
-        to | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.together as u8) << 5 | (self.paused as u8) << 6
+        (to & 3) | (to >> 2) << 7 | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.together as u8) << 5 | (self.paused as u8) << 6
     }
 
     /// [`Wanted::byte`] read back; a machine number this build does not know is no pick.
     pub fn of(byte: u8) -> Wanted {
-        let to = match byte & 3 {
+        let to = match (byte & 3) | (byte >> 7) << 2 {
             1 => Some(Kind::Bike),
             2 => Some(Kind::Biplane),
+            3 => Some(Kind::Buggy),
+            4 => Some(Kind::Monster),
+            5 => Some(Kind::Baja),
             _ => None,
         };
         Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0, dpad_rides: byte & 16 != 0, together: byte & 32 != 0, paused: byte & 64 != 0 }
     }
 }
 
-/// The machine a seat's [`Sim`] is on online: the plane while its lane holds one.
+/// The machine a seat's [`Sim`] is on online: the plane while its lane holds one, the car while it
+/// holds a car (S249).
 pub fn lane_up(sim: &Sim) -> Kind {
-    if sim.plane.is_some() { Kind::Biplane } else { Kind::Bike }
+    match (&sim.plane, &sim.car) {
+        (Some(_), _) => Kind::Biplane,
+        (None, Some(car)) => car_of(car.kind).unwrap_or(Kind::Bike),
+        (None, None) => Kind::Bike,
+    }
+}
+
+/// The car [`Kind`] whose physics are `kind` (S249).
+fn car_of(kind: game_sim::car::Kind) -> Option<Kind> {
+    [Machine::Buggy, Machine::Monster, Machine::Baja].into_iter().find(|m| m.car_physics() == Some(kind))?.car_kind()
 }
 
 /// [`Garage::switch`] for a seat whose plane is its [`Sim::plane`] (N17): onto the plane, a copy of
@@ -1711,28 +1732,82 @@ pub fn lane_up(sim: &Sim) -> Kind {
 /// than by the next step, which is the same thing a tick earlier in the same tick. `Err`, and nothing
 /// moves, where offline refuses too, or there is no template to take the plane from.
 pub fn switch_lane(to: Kind, template: Option<&Flight>, sim: &mut Sim, world: &mut dyn World) -> Result<Kind, String> {
+    switch_lane_among(to, template, &[], sim, world)
+}
+
+/// [`switch_lane`] with the seat's `cars` (S249), its [`Lot::cars_for`] copies as built, never
+/// driven: onto a car, the car taken as offline takes it ([`CarRide::take`]: in the seat's bay on its
+/// own track, where the player is off it), into the seat's [`Sim::car`]; off one, the machine taken
+/// spawned where the car is and the lane's car gone. The same [`Garage::switch`] as offline.
+pub fn switch_lane_among(to: Kind, template: Option<&Flight>, cars: &[CarRide], sim: &mut Sim, world: &mut dyn World) -> Result<Kind, String> {
     let up = lane_up(sim);
     if to == up {
         return Ok(to);
     }
     let plane = match sim.plane.take() {
-        Some(f) => Plane::around(f),
-        None => {
-            let f = template.ok_or("this ride has no biplane to take")?.clone();
-            Plane::flying(Spawn { at: f.spawn_origin(), facing: f.spawn.1 }, f)
-        }
+        Some(f) => Some(Plane::around(f)),
+        None => match template {
+            Some(f) => Some(Plane::flying(Spawn { at: f.spawn_origin(), facing: f.spawn.1 }, f.clone())),
+            None if to == Kind::Biplane => return Err("this ride has no biplane to take".into()),
+            None => None,
+        },
     };
-    let mut garage = Garage { up, plane: Some(plane), taken: true, cars: Vec::new(), heli: None };
+    let wanted = |m: Machine| Some(m) == to.car() || Some(m) == up.car();
+    let mut cars: Vec<CarRide> = cars.iter().filter(|c| wanted(c.machine)).cloned().collect();
+    if let Some(lane) = sim.car.take() {
+        if let Some(c) = cars.iter_mut().find(|c| c.machine.car_physics() == Some(lane.kind)) {
+            let lane = *lane;
+            c.driven = Some(lane.machine);
+            c.struck = lane.struck;
+        }
+    }
+    let mut garage = Garage { up, plane, taken: true, cars, heli: None };
     let result = garage.switch(to, sim, world);
-    let mut plane = garage.plane.take().expect("the switch keeps the plane");
-    if garage.up == Kind::Biplane {
+    // Refused, the seat stays on what it was on, the lane as it was.
+    let now = garage.up;
+    if now == Kind::Biplane {
+        let mut plane = garage.plane.take().expect("the switch keeps the plane");
         let spawn = plane.spawn;
         if let Some(f) = &mut plane.flight {
             f.reset(spawn.at, spawn.facing, &sim.tables.ride.acos);
         }
         sim.plane = plane.flight.take();
     }
+    if let Some(m) = now.car() {
+        if let Some(c) = garage.cars.iter_mut().find(|c| c.machine == m) {
+            if let (Some(machine), Some(kind)) = (c.driven.take(), m.car_physics()) {
+                sim.car = Some(Box::new(game_sim::car::Lane { kind, machine, struck: c.struck.take() }));
+            }
+        }
+    }
     result
+}
+
+/// **One tick of a seat's car online** (S249): [`Garage::drive`] on the car in its [`Sim::car`]: the
+/// track's path cars, then the car on the seat's pad, through `cars`' copy of it (the seat's
+/// [`Lot::cars_for`], whose `.phy`, model and probe the car is stepped with). The bike is not
+/// stepped. A seat not in a car does nothing; `false` then.
+pub fn drive_lane(sim: &mut Sim, cars: &[CarRide], dt: F, world: &mut dyn World) -> bool {
+    let Some(lane) = sim.car.take() else { return false };
+    let Some(template) = cars.iter().find(|c| c.machine.car_physics() == Some(lane.kind)) else {
+        sim.car = Some(lane);
+        return false;
+    };
+    let lane = *lane;
+    let mut car = CarRide { driven: Some(lane.machine), struck: lane.struck, ..template.clone() };
+    sim.traffic.frame(dt, world);
+    car.step(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world);
+    let kind = lane.kind;
+    sim.car = car.driven.take().map(|machine| Box::new(game_sim::car::Lane { kind, machine, struck: car.struck.take() }));
+    true
+}
+
+/// A seat's car from its lane (S249), as `cars` (its [`Lot::cars_for`]) has it: the copy of the
+/// car the lane drives, out. `None` on the bike or the plane, or a car the seat has no copy of.
+pub fn lane_car(sim: &Sim, cars: &[CarRide]) -> Option<CarRide> {
+    let lane = sim.car.as_ref()?;
+    let template = cars.iter().find(|c| c.machine.car_physics() == Some(lane.kind))?;
+    Some(CarRide { driven: Some(lane.machine.clone()), struck: lane.struck.clone(), ..template.clone() })
 }
 
 /// **A seat that starts the ride in the plane online** (N18): a copy of `template` (the ride's
@@ -1816,7 +1891,11 @@ pub fn settle_lane(sim: &mut Sim, mut plane: Plane, ready: Readied) -> bool {
 pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
     match &sim.plane {
         Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new(), heli: None }.spot(sim, world),
-        None => Spot::of(&sim.rider),
+        None => match &sim.car {
+            // In a car (S249), [`CarRide::spot`]'s: on the ground under it, upright, stopped.
+            Some(car) => car_spot(&car.machine, world),
+            None => Spot::of(&sim.rider),
+        },
     }
 }
 
@@ -1859,6 +1938,23 @@ impl Garage {
                 self.taken = true;
             }
             (None, _) => {}
+        }
+        // The car the lane drives, drawn where it is (S249); the cars it does not, put away.
+        for c in &mut self.cars {
+            match sim.car.as_ref().filter(|l| c.machine.car_physics() == Some(l.kind)) {
+                Some(l) => {
+                    if c.driven.is_none() {
+                        let at = l.machine.matrix.0[3];
+                        c.taken_at = Vf::new(at.x(), at.y(), at.z(), 1.0);
+                    }
+                    c.driven = Some(l.machine.clone());
+                    c.struck = l.struck.clone();
+                }
+                None => {
+                    c.driven = None;
+                    c.struck = None;
+                }
+            }
         }
         let was = std::mem::replace(&mut self.up, up);
         (was != up).then_some(up)
@@ -2017,6 +2113,21 @@ impl CarRide {
             None => Spot::still(at, forward, up),
         }
     }
+}
+
+/// [`CarRide::spot`] of a car out, `m`.
+fn car_spot(m: &game_sim::car::Machine, world: &mut dyn World) -> Spot {
+    let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+    let (at, forward) = (m.matrix.0[3], m.matrix.0[2]);
+    let at = Vf::new(at.x(), at.y(), at.z(), 1.0);
+    let forward = level(Vf::new(forward.x(), forward.y(), forward.z(), 0.0)).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+    match ground_under(world, at) {
+        Some(g) => Spot::still(Vf::new(at.x(), g, at.z(), 1.0), forward, up),
+        None => Spot::still(at, forward, up),
+    }
+}
+
+impl CarRide {
 
     /// One frame of the car on `pad` through `table` (the ride's bindings): the stick steers and
     /// leans, the commands are the pedals ([`game_sim::car::Controls::input`]), then the car's step

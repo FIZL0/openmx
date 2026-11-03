@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, others, markers, home: _, traffic, event } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, others, markers, home: _, traffic, event } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -132,6 +132,21 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         event.verdicts.put(&mut out);
         event.shown.put(&mut out);
     }
+    // A seat's car while it is out (S249), behind its own tag: a state with none is the bytes it was.
+    if let Some(car) = car {
+        CAR_LANE.put(&mut out);
+        car.put(&mut out);
+    }
+    out
+}
+
+/// What begins [`encode`]'s driven car section.
+const CAR_LANE: u64 = u64::from_le_bytes(*b"S249car\0");
+
+/// A seat's driven car in [`encode`]'s codec, which the state's hash walks as one blob (S249).
+pub(crate) fn car_bytes(car: &crate::car::Lane) -> Vec<u8> {
+    let mut out = Vec::new();
+    car.put(&mut out);
     out
 }
 
@@ -171,7 +186,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
     // No players' list ahead of any tagged section (S131: the props' tag was read as one; P155: nor
     // the event's).
-    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
@@ -288,6 +303,20 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         event.verdicts = Wire::take(&mut r)?;
         event.shown = Wire::take(&mut r)?;
     }
+    let mut car: Option<Box<crate::car::Lane>> = None;
+    if r.bytes.get(r.at..r.at + 8) == Some(&CAR_LANE.to_le_bytes()[..]) {
+        r.at += 8;
+        car = Some(Box::new(Wire::take(&mut r)?));
+    }
+    // The collision's ray probe is the car's `m.col`, a constant of the disc: this machine's, where
+    // this seat drives the same car here; otherwise left empty for the shell to put back.
+    if let (Some(c), Some(here)) = (car.as_mut(), sim.car.as_ref())
+        && c.kind == here.kind
+        && let (Some(s), Some(h)) = (c.struck.as_mut(), here.struck.as_ref())
+    {
+        s.rays = Arc::clone(&h.rays);
+        s.record.rays.clone_from(&h.record.rays);
+    }
     // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
     let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone(), here.hull.clone()));
     if let Some((rays, bike, hull)) = &probe {
@@ -347,6 +376,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         input,
         rider,
         plane,
+        car,
         others,
         markers,
         home: Arc::clone(&sim.home),
@@ -1211,4 +1241,37 @@ fn decode_list<T: Wire>(bytes: &[u8], five: bool) -> Result<Vec<T>, String> {
         return Err(format!("{} bytes left over after the slots", bytes.len() - r.at));
     }
     Ok(slots)
+}
+
+// The driven car (S249).
+wire_enum!(crate::car::Kind { MonsterTruck, Buggy, Baja });
+wire_enum!(crate::car::CarEvent { Thrown, Reset, Unwreck });
+wire!(crate::car::Lane { kind, machine, struck });
+wire!(crate::car::Machine { body, gravity, controls, drivetrain, wheels, last_cofg, human, steering_wheel, wrecked, wreck_lifted, touching, airborne_touch, stuck_time, launch, preload, latch, latched, grounded, was_grounded, ground_speed, velocity, ground_velocity, world_rates, alpha, side_slip, euler, matrix, forward, up, event });
+wire!(crate::car::Controls { driven, square_steering, stick, lean, dpad, pad_word, gas, brake, clutch, hand_brake, steer_input, steer, rear_steer, front_brake, rear_brake, throttle, engaged_clutch, hand_brake_fade, yaw_rate_limit, rear_friction });
+wire!(crate::car::Drivetrain { rpm_points, torque, redline, gear_ratios, final_gear_ratio, four_wheel, idle_throttle, engine_braking, transmission_loss, inv_inertia, min_rpm, pump_torque_scale, max_pump_torque, max_k, launch_boost, tcs, min_traction_slip, max_traction_slip, nox_on, nox_left, nox_burn_rate, nox_hp_boost, shift_points, high_load_rpm, shift_timer, shifting_up, shift_throttle_timer, reverse, gear, ratio, inv_ratio, wheel_rpm, converter_torque, multiplication, output_torque, cursor_index, cursor_frac, engine_torque, braking_torque, drive_torque, rpm, slip_rpm, sound_clock, pitch });
+wire!(crate::car::Shift { low_load_rpm, low_load_up_shift_rpm, low_load_down_shift_rpm, high_load_rpm, high_load_up_shift_rpm, high_load_down_shift_rpm, shift_time, shift_up_duration, shift_up_throttle, shift_down_duration, shift_down_throttle });
+wire!(crate::car::Wheel { s, mount, top_wheel_speed, probe_normal, car_normal, drop, lever, upper, lower, probes, solid, ground_point, ground_normal, point_velocity, body_velocity, local_velocity, frame, lone_front, sorted, terrain_held });
+wire!(crate::car::TireState { surface, grounded, handoff, compression, last_compression, load, contact, angle, spin, torque, last_torque, slip_ratio, slip_angle, slip_tan, velocity, last_velocity, force, last_force, steer, side_ratio, camber, friction_scale, low_speed_grip, slipping, sliding, locked });
+wire!(crate::car::Launch { timer, start, time, max_scale, max_scale_speed });
+wire!(crate::car::PreloadState { ready, active, armed, time, timer, min_time, max_time, max_preload, force });
+
+impl Wire for crate::kiowa::Collision {
+    /// Less its ray probe, the machine's `m.col`: a constant of the disc [`decode`] puts back.
+    fn put(&self, out: &mut Vec<u8>) {
+        let crate::kiowa::Collision { collider, record, rays: _, nearby, mass } = self;
+        collider.put(out);
+        record.put(out);
+        nearby.put(out);
+        mass.put(out);
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(crate::kiowa::Collision {
+            collider: Wire::take(r)?,
+            record: Wire::take(r)?,
+            rays: Arc::new(crate::flight_search::Rays::default()),
+            nearby: Wire::take(r)?,
+            mass: Wire::take(r)?,
+        })
+    }
 }
