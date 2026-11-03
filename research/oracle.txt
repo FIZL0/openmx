@@ -6691,11 +6691,35 @@ atv_attachment_moved        atv 0x00266d30 = an attachment's box moved in the sp
 # older, older = slot i + 1. Slot 1 is read twice (i = 0 reloads it), so the pairs are (1,0), (2,1), (3,2) or
 # (4,3) and slot 4's time is never compared. t = (want - older) / (newer - older), max.s -0.9 (0xbf666666), min.s
 # 1.9 (0x3ff33333); vt +0x3ec (a0 quad, a1 older, a2 newer, f13 t). The quad's vt +0x3ec is its own
-# (atv_quad_net_interpolate, not the biplane's 0x004a87c0): not ported (Call::NetInterpolate).
+# (atv_quad_net_interpolate, not the biplane's 0x004a87c0): ported in MD65c2 (quad::net_interpolate), see # MD65c2.
 atv_biplane_net_check       atv 0x004a86f0 = vt +0x3e8 (a0 vehicle): with five snapshots, the pair round the lagged clock and vt +0x3ec; answers 1
 atv_biplane_net_interpolate atv 0x004a87c0 = the biplane's vt +0x3ec (a0 vehicle, a1 older, a2 newer, f13 t; position and velocity lerped, 0x00134b90 on the orientations, clamped to the world's box less 25)
 atv_quad_net_interpolate    atv 0x004e7bc0 = the quad's vt +0x3ec (a0 quad, a1 older, a2 newer, f13 t; reads a2 +0x40 first)
 atv_net_clock               atv 0x0038f768 = the network clock's pointer (its +0x4cc the time atv_biplane_net_check lags)
+# MD65c2 — the quad's net interpolation (quad::net_interpolate, quad::Snapshot, quad::Lag, quad::NetSmooth,
+# Call::NetPutBack; tests/atv_quad/interpolate.rs, 20,000 generated cases and 2,000 on the spawned quad's own
+# pointers, the biplane's half and the slerp run unhooked). Journal: research/journal/2026-11-03-md65c2-net-interpolate.
+# Snapshot record (a1 older, a2 newer): +0 time, +0x10 position, +0x20 velocity, +0x30 orientation, +0x40 crossup
+#   blend, +0x44 fore-aft blend, +0x48 wreck word, +0x4c stunt id, +0x50 a word (the spawned quad's +0x940).
+# The snapshot the unpack reads, *(+0xbcc), nine pointers: [0] position (spawned: quad +0xc40), [1] orientation,
+#   [2] velocity, [3] the velocity's change, [4] quad +0x14b4, [5] +0x14b8, [6] +0xc80, [7] +0x1528, [8] +0x940.
+# A lag {+0 value, +4 time, +8 fraction}: fraction = min(dt, time) / time, value = adda(0, value)
+#   madd(fraction, target - value). f12 (dt) comes through atv_biplane_net_check untouched.
+# The quad's part (atv_quad_net_interpolate): newer +0x40 and older +0x40 read first; v = older's at t <= 0
+#   (c.ole), newer's at !(t < 1), else adda(0, older) madd(t, newer - older); lag *(+0x1790) -> [4]; the same
+#   with +0x44 and lag *(+0x178c) -> [5]; [7] = newer +0x4c, [8] = newer +0x50, [6] = newer +0x48; then jal the
+#   biplane's (a0..a2, f12, f13 as they came).
+# The biplane's (atv_biplane_net_interpolate): P = older + t (newer - older) on .xyz (vsub, vmulx, vadd; w the
+#   newer's), V the same with the velocities, Q = atv_quat_slerp(older +0x30, newer +0x30, a3 1, f12 t), the slerp
+#   math::slerp ports (shortest). World *(*(+0x3b0) +0x3b4): +0x550/+0x554 x min/max, +0x558/+0x55c z: with
+#   P.x < min + 25 or !(P.x <= max - 25), P.x = min.s(max.s(P.x, min + 25), max - 25); z the same. d = |[0] -
+#   P| (mula/madda/madd, sqrt). !(d <= 8): each of the lags *(+0xd14)[0..3] given P's lane as its value, and
+#   *(+0xd18)[0..3] V's, a lane equal to FLT_MAX (c.eq) skipped; then !(d <= 16): +0xd40 = P (lq/sq, w
+#   newer's) and vt +0x3a8 (atv_quad_put_back, a1 0, a2 0). Then the three position lags run on P (dt the
+#   saved f12) -> [0] = (x, y, z, 1.0); [3] = V - [2] on .xyz (w V's); [2] = (V.xyz, 0); +0x32c = |V|; [1] = Q.
+#   The velocity lags are never run. Spawned image: position lags time 0.05, velocity 0.03, the blends' 0.3,
+#   area 0..5760 both ways (x min -0).
+atv_quat_slerp              atv 0x00134b90 = quat_slerp's twin (a0 out, a1 a, a2 b, a3 shortest, f12 t; the same VU0 code, its table pointer 0x003ea9c0)
 # MD37b (wheels) — atv_wheel_suspension and atv_wheel_tire_forces ported (crates/game-sim/src/
 # atv_wheel.rs; tests/atv_wheel.rs runs both off MD37a's atv-r-spawn.ee.bin). Journal:
 # research/journal/2026-10-29-md37b-atv-step. The wheel against MX Unleashed's: steered +0x2c, balancing

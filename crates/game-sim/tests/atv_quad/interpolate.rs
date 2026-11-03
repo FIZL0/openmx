@@ -1,8 +1,8 @@
 //! MD65c2 — the quad's net interpolation (vt `+0x3ec`), [`quad::net_interpolate`] against the
 //! original's.
 //!
-//! The original runs as it is, the biplane's interpolation it calls last (`0x004a87c0`) and the
-//! slerp (`0x00134b90`, on the image's arc cosine table) unhooked; only the put-back a far snapshot
+//! The original runs as it is, the biplane's interpolation it calls last (atv_biplane_net_interpolate)
+//! and the slerp (atv_quat_slerp, on the image's arc cosine table) unhooked; only the put-back a far snapshot
 //! asks for (vt `+0x3a8`) is hooked, logged as [`Call::NetPutBack`]. Every word the two can write is
 //! read through the quad's own pointers (the snapshot's nine at `*(+0xbcc)`, the eight lags at
 //! `*(+0xd14)`, `*(+0xd18)`, `+0x1790`, `+0x178c`, and `+0xd40`, `+0x32c`) and compared by bits, and
