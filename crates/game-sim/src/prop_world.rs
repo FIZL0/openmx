@@ -483,9 +483,9 @@ impl Collection {
         if !self.bones[k].body.enabled {
             return;
         }
-        self.bodies.retain(|&i| i != k);
-        self.forces.retain(|&i| i != k);
-        self.posts.retain(|&i| i != k);
+        unlist(&mut self.bodies, k);
+        unlist(&mut self.forces, k);
+        unlist(&mut self.posts, k);
         self.bones[k].body.enabled = false;
         let o = &mut self.objects[k];
         if o.collision.is_none() {
@@ -544,6 +544,64 @@ impl Collection {
                 i += 1;
             }
         }
+    }
+
+    /// **[`Collection::step`] up to the post listeners** (S220a1a): the world's preforce, force,
+    /// integrate and constraint passes alone, for bodies that share a world with another's (the
+    /// Kiowa's thrown blades), whose posts run after that other's post
+    /// ([`Collection::step_posts`]). Nothing those passes run files a post. With none of these bodies
+    /// awake the shared world still steps (the other's body is in it): only the preforce listeners
+    /// have anything to do.
+    pub fn step_to_posts(&mut self, dt: F, tables: &Tables, movers: &[Mover]) {
+        if !self.active {
+            return;
+        }
+        let world = self.world;
+        let mut lists = Lists { c: self, tables, movers, others: &mut [] };
+        if lists.c.bodies.is_empty() {
+            for i in 0..lists.c.preforce.len() {
+                lists.preforce(i as i32, dt);
+            }
+            return;
+        }
+        let posts = std::mem::take(&mut lists.c.posts);
+        world.step(dt, &mut lists);
+        self.posts = posts;
+    }
+
+    /// **The rest of [`Collection::step_to_posts`]'s frame**: each post listener, the list's count
+    /// read again each time as the world's loop reads it (a post that puts its body to sleep takes it
+    /// off), then the listeners on the node. The posts run with no body of this collection awake too:
+    /// the world they share has the other's.
+    pub fn step_posts(&mut self, dt: F) {
+        if self.active {
+            let mut i = 0;
+            while i < self.posts.len() {
+                let k = self.posts[i];
+                self.post(k);
+                i += 1;
+            }
+        }
+        let mut i = 0;
+        while i < self.listeners.len() {
+            let done = match self.listeners[i] {
+                Listener::Settle => self.settle(dt),
+                Listener::Object(k) => self.listen_object(k, dt),
+            };
+            if done {
+                self.listeners.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// **One object off the world node** (a wreck part's stop, S220a1a): asleep
+    /// ([`Collection::disable`]), its listener taken off the node, and its collision object unfiled.
+    pub fn take_off(&mut self, k: usize) {
+        self.disable(k);
+        self.listeners.retain(|&l| l != Listener::Object(k));
+        self.unfile(k);
     }
 
     /// **The node's collide pass** for this collection (S198): every filed collision object empties its
@@ -926,6 +984,14 @@ fn limits(pin: &mut Pin, min: Vf, max: Vf, curve: &CurveTable) {
 fn add(list: &mut Vec<usize>, k: usize) {
     if !list.contains(&k) {
         list.push(k);
+    }
+}
+
+/// An entry off one of the world's lists as the world's own remove takes it: the last entry moved
+/// into its hole, so a post loop that takes one off itself next reads the one moved (S220a1a).
+fn unlist(list: &mut Vec<usize>, k: usize) {
+    if let Some(i) = list.iter().position(|&i| i == k) {
+        list.swap_remove(i);
     }
 }
 

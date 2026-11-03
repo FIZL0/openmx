@@ -7318,6 +7318,29 @@ kiowa_unwreck_mx boot 0x00392c10 (heli): kiowa_unwreck; if +0xd1c and +0xe48: ro
 #                               shown, +0xd40 hidden, each blade's vt +0x120(1)
 physics_object_reset boot 0x0015a030 (wrapper): the probes out (broad_phase_leave) and back (0x00119c60),
 #                                   around physics_object_place on +0x90/+0xa0/+0xb0
+# S220a1a — the Kiowa's thrown blades, research/journal/*-s220a1a-kiowa-blades. Ported as
+# game_sim::kiowa::{Blades, Started}; tests/kiowa.rs proves them on S148's state.
+#   The blade wrappers (heli +0xe48..: 0x7ce1c0, 0x61e960, 0x1448c50, 0x144a4a0 in s148) are the props'
+#   generic physics object (vt +0x38 0x0044e760): part read 0x0015a500 (vt +0xe8) of wreckblade.phy,
+#   inertia off node +0x13c "BladeBent" (helicopter\anim\bladebent.psg, box centre (0.0905,0,9.04),
+#   half (0.44,0.133,9.04)) with InertiaScale 2: (84.59, 84.77, 0.219). Rays/mesh +0x124/+0x128 are
+#   helicopter\col\bladebentm.col / bladebentf.col (machine.res); +0x12c the sweep, +0x130 = +0x124.
+#   Place (0,0,0,1), look (0,0,1,0), up (0,1,-0,0); edge +0x100 the terrain's (0..6912 x/z).
+#   They share the heli's world node (+0x134 0x7d0600) and dynamics world (+0x138 0x7d0678: heli
+#   first in each list, then body 0x8ef8a0's object, not known), parent node +0x108 0x7633e0.
+#   wreck_part_start: 0x00132b20(+8) sets +0x31 bits 0,1 and passes it down the children (+0x20
+#   list, 0x00132a70); node shown (0x001b3870); node into the scene under +0x108 (0x001b4940) if +0x74
+#   and unplaced; +0x54: +0x128, then +0x124 and +0x12c into the broad phase (vt +0x20, 0x00119c60)
+#   when unplaced; plane_body_wake (vt +0x124). wreck_part_stop(a1): 0x00132ae0(+8) clears them;
+#   physics_object_disable; listener off node +0x48 (0x0026f7e0), collision unfiled from node +0x30
+#   (0x0026f720: its clear vt +0x74 first); +0x28 &= ~2; a1: node hidden (0x001b3850) and out of the
+#   scene (broad_phase_leave) when +0x74; +0x124/+0x12c/+0x128 out (broad_phase_leave, vt +0x18).
+#   physics_object_place (vt +0xe4) is handed the throw's stack copies: the wrapper's own place stays.
+#   The world's lists drop an entry by moving the last into its hole (seen on list 4: [1,0,2,3] less 1
+#   is [3,0,2]); dynamics_world_step's post loop re-reads the count, so a post that disables itself
+#   has the moved entry skipped this frame. prop_world's disable now does the same (it shifted).
+physics_object_listen boot 0x0015b2a0 (wrapper, dt) the object listener (filed at +0x50): asleep counts
+#                                    ResetTime down, awake and at rest disables; v0 1 = done
 # S221 — the Kiowa's .phy reader and its wreck, research/journal/*-s221-kiowa-phy. Ported as
 # game_sim::kiowa::{Phy, WreckRotor, wing_chord, wreck_blade}; tests/kiowa_phy.rs proves every word
 # against S148's live helicopter. Every float getter is ini_float_default with 0 (WreckRotorRadius 1),
