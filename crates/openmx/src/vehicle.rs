@@ -1858,6 +1858,13 @@ pub fn switch_lane_among(to: Kind, template: Option<&Flight>, cars: &[CarRide], 
 /// [`Lot::cars_for`], whose `.phy`, model and probe the car is stepped with). The bike is not
 /// stepped. A seat not in a car does nothing; `false` then.
 pub fn drive_lane(sim: &mut Sim, cars: &[CarRide], dt: F, world: &mut dyn World) -> bool {
+    drive_lane_met(sim, cars, dt, world, None)
+}
+
+/// [`drive_lane`] among the riders' bikes (F23): `met`, the mirrors of their strikes on the car's
+/// hull, filed after its own search and resolved against their chassis ([`CarRide::step_met`]), as
+/// split screen's [`Garage::drive_met`] has them.
+pub fn drive_lane_met(sim: &mut Sim, cars: &[CarRide], dt: F, world: &mut dyn World, met: Option<&mut flight::Met>) -> bool {
     let Some(lane) = sim.car.take() else { return false };
     let Some(template) = cars.iter().find(|c| c.machine.car_physics() == Some(lane.kind)) else {
         sim.car = Some(lane);
@@ -1866,10 +1873,34 @@ pub fn drive_lane(sim: &mut Sim, cars: &[CarRide], dt: F, world: &mut dyn World)
     let lane = *lane;
     let mut car = CarRide { driven: Some(lane.machine), struck: lane.struck, ..template.clone() };
     sim.traffic.frame(dt, world);
-    car.step(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world);
+    car.step_met(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world, met);
     let kind = lane.kind;
     sim.car = car.driven.take().map(|machine| Box::new(game_sim::car::Lane { kind, machine, struck: car.struck.take() }));
     true
+}
+
+/// **Seat `seat`'s car out among the riders' bikes** (F23): its hull ([`CarRide::hull`]) off its
+/// lane, the mesh `cars`' copy of it (the seat's [`Lot::cars_for`]): `None` on the bike or the
+/// plane, or for a car with no collision object or no hull mesh, which is in no bike's world.
+pub fn lane_hull<'a>(sim: &Sim, cars: &'a [CarRide], seat: usize) -> Option<game_sim::rider_contact::Hull<'a>> {
+    let lane = sim.car.as_ref()?;
+    let template = cars.iter().find(|c| c.machine.car_physics() == Some(lane.kind))?;
+    Some(lane.machine.hull(seat, template.hull.as_deref()?, lane.struck.as_ref()?))
+}
+
+/// Its body as a bike's resolve pushes it (F23, [`CarRide::flown`]), the copy nearest `from`.
+pub fn lane_flown(sim: &Sim, seat: usize, from: Vf, world: &dyn World) -> Option<game_sim::rider_contact::Flown> {
+    let lane = sim.car.as_ref()?;
+    Some(lane.machine.flown(seat, lane.struck.as_ref()?, from, world))
+}
+
+/// The body a bike's resolve pushed, written back to the seat's car (F23, [`CarRide::pushed`]).
+pub fn lane_pushed(sim: &mut Sim, by: &game_sim::rider_contact::Flown) {
+    if let Some(lane) = sim.car.as_deref_mut()
+        && let Some(c) = lane.struck.as_mut()
+    {
+        lane.machine.pushed(c, by);
+    }
 }
 
 /// A seat's car from its lane (S249), as `cars` (its [`Lot::cars_for`]) has it: the copy of the

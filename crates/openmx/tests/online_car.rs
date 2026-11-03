@@ -324,6 +324,8 @@ struct Machine2 {
     world: Flat,
     cars: Vec<Vec<CarRide>>,
     glitch: bool,
+    /// F23: seat, tick and speed its bike is set going at after that tick's step.
+    shove: Option<(usize, u64, ps2_float::Vf)>,
 }
 
 impl Machine2 {
@@ -336,14 +338,20 @@ impl Machine2 {
                 sim
             })
             .collect();
-        Machine2 { sims, world: Flat::default(), cars: vec![cars.to_vec(); net::SEATS], glitch: false }
+        Machine2 { sims, world: Flat::default(), cars: vec![cars.to_vec(); net::SEATS], glitch: false, shove: None }
     }
 
     fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
-        let glitch = self.glitch;
+        let (glitch, shove) = (self.glitch, self.shove);
         let mut after = |seat: usize, _: F, sim: &mut Sim, _: &game_sim::ride::Controls| {
             if glitch && seat == 1 && sim.ticks == GLITCH {
                 sim.rider.ride.chassis.vel = ps2_float::Vf::new(0.5, 0.0, 0.0, 0.0);
+            }
+            if let Some((s, t, vel)) = shove
+                && s == seat
+                && sim.ticks == t
+            {
+                sim.rider.ride.chassis.vel = vel;
             }
         };
         let mut game = Rides { sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None, plane: None, cars: &self.cars };
@@ -390,6 +398,18 @@ fn rounds(
     lag: u32,
     rounds: std::ops::Range<u32>,
     script: &[(usize, usize, Kind)],
+    each: impl FnMut(u32, &mut Vec<Netplay<rides::State>>, &mut Vec<Machine2>),
+) {
+    rounds_on(nets, games, lag, rounds, &|s, t| scripted(s, t, script), each);
+}
+
+/// [`rounds`] with each seat's pad at each tick `pad`'s.
+fn rounds_on(
+    nets: &mut Vec<Netplay<rides::State>>,
+    games: &mut Vec<Machine2>,
+    lag: u32,
+    rounds: std::ops::Range<u32>,
+    pad: &dyn Fn(usize, usize) -> Report,
     mut each: impl FnMut(u32, &mut Vec<Netplay<rides::State>>, &mut Vec<Machine2>),
 ) {
     let mut wire: Vec<(String, u32, String, Vec<u8>)> = Vec::new();
@@ -403,7 +423,7 @@ fn rounds(
             }
         }
         for (np, game) in nets.iter_mut().zip(games.iter_mut()) {
-            let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| scripted(s, np.tick(), script)).collect();
+            let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| pad(s, np.tick())).collect();
             game.frame(np, &local);
             for (to, d) in np.outgoing() {
                 assert!(d.len() <= net::link::DATAGRAM_MAX, "a datagram of {} bytes", d.len());
@@ -513,6 +533,102 @@ fn a_join_with_the_baja_out_takes_it_and_a_second_car_follows() {
         let (baja, buggy) = (g.car_at(0).expect("the baja out"), g.car_at(1).expect("g's buggy out"));
         assert_eq!((baja.0, buggy.0), (Kind::Baja, Kind::Buggy), "{who}");
         assert!(baja.1 > at_join.unwrap().1 + 30.0, "{who}: the baja went from {at_join:?} to {baja:?}");
+    }
+}
+
+/// F23: an online bike meets the other seat's car as split screen's does (F26). g's seat takes the
+/// buggy where its bike stands, 25 ft up the host's way and facing along it, and leaves it parked,
+/// its pad idle; at tick 60 the host's bike is set rolling into its tail at 30 ft/s. On both
+/// machines its body rays strike the car's hull (`buggyf.col`): the bike stops short of the car,
+/// where with no hull it rolls on through, and its resolve pushes the car along its way (faster in
+/// the second after the shove, and further by the end), where the car with no hull only creeps; and
+/// the two machines agree tick for tick throughout.
+#[test]
+fn an_online_bike_is_stopped_by_the_other_seats_parked_car() {
+    use game_sim::bike_col::{self, BikeCol};
+    use ps2_float::Vf;
+    let Some(mut disc) = disc() else { return };
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = std::sync::Arc::new(
+        BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL))).expect("the bike's collision files"),
+    );
+    let bikes: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+    let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+    let tables = game_sim::ride::Tables::build();
+    let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+    let cars = online_cars(&mut disc);
+    assert!(cars.iter().find(|c| c.machine == Machine::Buggy).is_some_and(|c| c.hull.is_some()), "machine.res has no buggyf.col");
+    let machine = |hull: bool| {
+        let mut cars = cars.clone();
+        if !hull {
+            cars.iter_mut().for_each(|c| c.hull = None);
+        }
+        let sims = [0.0, 25.0]
+            .into_iter()
+            .map(|z| {
+                let mut sim = Sim::new(0xf23);
+                std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+                let mounts = game_sim::stock::mounts(&sim.phy);
+                sim.rider = game_sim::rider::Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, z, 1.0), game_sim::stock::FACING, Default::default());
+                sim.rider.sense.wrecks_enabled = false;
+                sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+                sim
+            })
+            .collect();
+        Machine2 { sims, world: Flat::default(), cars: vec![cars; net::SEATS], glitch: false, shove: Some((0, 60, Vf::new(0.0, 0.0, 30.0, 0.0))) }
+    };
+    // g's seat on the buggy from its first tick, never on the gas; the host's pad idle.
+    let pad = |seat: usize, _: usize| {
+        let mut r = Report::from_buttons(0);
+        if seat == 1 {
+            r.0[net::SWITCH] = vehicle::Wanted { to: Some(Kind::Buggy), dpad_rides: true, ..Default::default() }.byte();
+        }
+        r
+    };
+    let ride = |hull: bool| {
+        let lineup = Lineup::parse("host,g").unwrap();
+        driven();
+        let mut nets: Vec<Netplay<rides::State>> =
+            ["host", "g"].iter().map(|me| Netplay::new(lineup.clone(), me, Timing::default(), dumps()).unwrap()).collect();
+        let mut games: Vec<Machine2> = (0..2).map(|_| machine(hull)).collect();
+        // The car where it stood at the shove, and how fast it went in the second after.
+        let mut parked: Vec<Option<f32>> = vec![None; 2];
+        let mut fastest = [0.0f32; 2];
+        rounds_on(&mut nets, &mut games, 3, 0..160, &pad, |_, _, games| {
+            for (i, g) in games.iter().enumerate() {
+                let Some(lane) = g.sims[1].car.as_ref() else { continue };
+                match g.sims[0].ticks {
+                    ..=60 => parked[i] = Some(lane.machine.body.position.z()),
+                    61..=90 => fastest[i] = fastest[i].max(lane.machine.body.velocity.z()),
+                    _ => {}
+                }
+            }
+        });
+        assert!(nets.iter().all(|np| np.desyncs.is_empty() && !np.desynced), "the machines parted");
+        let n = agree(&nets, 0);
+        assert!(n > 120, "only {n} ticks agreed");
+        games
+            .iter()
+            .zip(parked)
+            .zip(fastest)
+            .map(|((g, parked), fastest)| {
+                assert!(g.sims[0].ticks > 100, "the host's bike rode {} ticks", g.sims[0].ticks);
+                let car = g.sims[1].car.as_ref().expect("the buggy is out").machine.body.position.z();
+                (g.sims[0].rider.ride.position().z(), car - parked.expect("the buggy parked before the shove"), fastest)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (met, through) = (ride(true), ride(false));
+    for (who, (&(bike, pushed, fastest), &(past, still, idle))) in ["host", "g"].iter().zip(met.iter().zip(&through)) {
+        println!(
+            "{who}: bike at z {bike}, the car pushed {pushed} ft, at most {fastest} ft/s; with no hull the bike at z {past}, the car moved {still} ft, at most {idle} ft/s"
+        );
+        assert!(past > 30.0, "{who}: with no hull the bike stopped at z {past}, short of the car's far side");
+        assert!(bike < 25.0, "{who}: the bike went on to z {bike}, through the car at z 25");
+        assert!(fastest > idle + 1.0, "{who}: the car was pushed to {fastest} ft/s along the bike's way (with no hull {idle})");
+        // Parked on an idle pad the buggy creeps on along its nose a little either way.
+        assert!(pushed > still + 1.0, "{who}: the car moved {pushed} ft along the bike's way (with no hull {still})");
     }
 }
 
