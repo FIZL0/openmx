@@ -120,6 +120,9 @@ pub struct Sim {
     /// bike where it stands, as the original's Switch To Machine does. `None` is a bike ride, which
     /// walks and hashes exactly as it did before the plane was a lane ([`flight`]).
     pub plane: Option<flight::Flight>,
+    /// The car, while the seat drives one online (S249, [`car::Lane`]): with one here the bike stands
+    /// where it was left and is not stepped. `None`, a walk and the bytes are what they were before.
+    pub car: Option<Box<car::Lane>>,
     /// Players 2 to 8, in player order ([`Sim::add_player`]). Player 1 is [`Sim::rider`], on
     /// [`Sim::phy`], as it always was; an empty list is a one-player session, which steps, walks and
     /// hashes exactly as the simulation did before there could be a second ([`Sim::step_all`]).
@@ -241,6 +244,7 @@ impl Sim {
             input,
             rider,
             plane: None,
+            car: None,
             others: Vec::new(),
             markers: markers::Markers::default(),
             home: Arc::default(),
@@ -630,6 +634,7 @@ impl Clone for Sim {
             input: self.input,
             rider: self.rider.clone(),
             plane: self.plane.clone(),
+            car: self.car.clone(),
             others: self.others.clone(),
             markers: self.markers.clone(),
             home: Arc::clone(&self.home),

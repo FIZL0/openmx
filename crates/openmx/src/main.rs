@@ -2118,6 +2118,11 @@ struct Args {
     /// `--trace-switch N`: under `--trace-feel`, ride the first N frames on the throttle alone and only
     /// then take the controls the other flags ask for — a full brake from top speed, or a turn at speed.
     trace_switch: Option<u32>,
+    /// `--online-script F:WORD,...`: online, from this machine's frame `F` on, its first player picks
+    /// the machine `WORD` names (bike, biplane, buggy, monster, baja) as the M key or the pause's
+    /// switch would, or holds Cross down (`gas`) or lets it go (`lift`) — a played tape's switch and
+    /// throttle for a ride that rides no tape (S249's two-shell test).
+    online_script: Vec<(u32, String)>,
     /// `--trace-stick-y F:Y,F:Y,...`: under `--trace-feel`, the left stick's y from frame `F` on
     /// (positive pulled back), each entry until the next — P30's pump and flip off a jump, ridden
     /// on the shell's own frame. The line then carries the gesture's columns too.
@@ -4417,6 +4422,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             };
             (seats.lift, seats.ground_heights) = (lot.lift, lot.ground_heights.clone());
             let mut ground = |from: Vf| lot_ground_normal(tiled.as_deref_mut(), &mut probe, from);
+            // And every seat's cars in their bays there (S249), stood as the offline lot's are.
+            seats.cars = lot.cars.clone();
+            seats.stand_cars(&mut ground);
+            lot.online_cars = (0..net::SEATS).map(|i| seats.cars_for(i)).collect();
             seats.of(Machine::Biplane).map(|bay| (bay.spawn, seats.body_spot(bay, &mut ground))).unzip()
         }
         None => (Vec::new(), Vec::new()),
@@ -6446,12 +6455,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // Each seat that starts in the plane stands in its own bay at tick 0 (N18): the lobby's
         // now, from the picks; `--peer`s' once every peer's card has said its own.
         on.bays_on(online_bays.clone(), online_bodies.clone());
+        // And every seat's cars (S249), which its switch to a car takes.
+        on.cars_on(lot.online_cars.clone());
         if let Some(flies) = &lobby_planes {
             on.start_planes(flies)?;
         }
     }
     let mut online_want: Option<Kind> = None;
     let mut online_frames = 0u32;
+    let mut online_gas = false;
     // In the browser (P204): the last ten seconds of the ride settled here that the page's console
     // was told of (`Online::settled_line`).
     #[cfg(target_arch = "wasm32")]
@@ -7126,8 +7138,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // this machine's pad (N17), and every machine switches the seat at the tick it lands
                 // on; the garage follows below, once the session has stepped it.
                 Act::Switch(i, to) if online.is_some() => {
+                    // A car is had where this seat's copy of it is (S249).
+                    let car = |to: Kind| online.as_ref().is_some_and(|on| on.cars(on.seat_of().1).iter().any(|c| Some(c.machine) == to.car()));
                     match (i, Kind::parse(to.word())) {
-                        (0, Ok(to)) if world.seats[0].garage.plane.is_some() || to == Kind::Bike => {
+                        (0, Ok(to)) if (to == Kind::Biplane && world.seats[0].garage.plane.is_some()) || to == Kind::Bike || car(to) => {
                             online_want = Some(to);
                             println!("vehicle: {} at the next tick every machine agrees", to.name());
                         }
@@ -7181,6 +7195,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                                 on.planes(stock_plane, plane_like.as_ref());
                                 // a joiner whose setup picked the plane rides in from its own bay (N19)
                                 on.bays_on(online_bays.clone(), online_bodies.clone());
+                                on.cars_on(lot.online_cars.clone());
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some((on.host(), on.own_rows())));
                                 front.menu.air_lock = air_lock(head.is_some(), true);
@@ -7511,6 +7526,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let dt: F;
         (dt, simulated) = if let Some(on) = &mut online {
             online_frames += 1;
+            // `--online-script`'s picks and throttle for this frame (S249).
+            for (_, word) in args.online_script.iter().filter(|(f, _)| *f == online_frames) {
+                match (word.as_str(), Kind::parse(word)) {
+                    ("gas", _) => online_gas = true,
+                    ("lift", _) => online_gas = false,
+                    (_, Ok(to)) => {
+                        online_want = Some(to);
+                        println!("vehicle: {} at the next tick every machine agrees", to.name());
+                    }
+                    _ => {}
+                }
+            }
             // Paused, this machine's rider lets go of the pad and says so in it (P84): from the tick
             // that lands on, every machine freezes this seat where it is, and the others ride on.
             // Each local player's (N20: one a view, this machine's seats first).
@@ -7520,6 +7547,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let paused = front.as_deref().is_some_and(|f| f.menu.paused(k));
                     let mut pad = match paused {
                         true => Report::idle(),
+                        // Cross held down by `--online-script` (S249).
+                        false if k == 0 && online_gas => Report::from_buttons(0x0040),
                         false => world.seats[k].reports[0],
                     };
                     // The machine this player picked and their biplane scheme, which every machine
@@ -7736,6 +7765,19 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // machine.
                 seat.paused = on.paused(d);
                 seat.riding = !seat.paused;
+                // A seat in a car (S249) is drawn in its own copy of it, the one its session seat
+                // drives; the car left says where it was left, as offline's switch does.
+                if let Some(car) = on.drawn().get(d).and_then(|&s| vehicle::lane_car(&seat.sim, on.cars(s)))
+                    && !seat.garage.cars.iter().any(|c| c.machine == car.machine && c.livery == car.livery)
+                {
+                    seat.garage.cars.retain(|c| c.machine != car.machine);
+                    seat.garage.cars.push(vehicle::CarRide { driven: None, struck: None, ..car });
+                }
+                if seat.sim.car.is_none()
+                    && let Some(said) = seat.garage.car_up().and_then(vehicle::CarRide::report)
+                {
+                    println!("{said}");
+                }
                 // Its machine is its `Sim`'s (N17): the garage follows, and a switch the session
                 // made snaps the camera onto the machine taken, as offline. Not before every seat's
                 // starting machine is known (N18), or a seat starting in the plane would flick to
@@ -11353,6 +11395,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         warm: true,
         world_sweep: None,
         trace_switch: None,
+        online_script: Vec::new(),
         trace_stick_y: Vec::new(),
         record: None,
         play: None,
@@ -11637,6 +11680,17 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--seams" => args.seams = true,
             "--trace-camera" => args.trace_camera = true,
             "--trace-air" => args.trace_air = true,
+            "--online-script" => {
+                let bad = || "--online-script: FRAME:WORD,... (a machine, gas or lift)".to_string();
+                for pair in next("frame:word pairs")?.split(',') {
+                    let (f, word) = pair.split_once(':').ok_or_else(bad)?;
+                    let word = word.trim();
+                    if word != "gas" && word != "lift" && Kind::parse(word).is_err() {
+                        return Err(bad());
+                    }
+                    args.online_script.push((f.trim().parse().map_err(|_| bad())?, word.to_string()));
+                }
+            }
             "--trace-switch" => {
                 args.trace_switch = Some(
                     next("a frame to switch at")?
@@ -11996,6 +12050,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      holds the stick over and --trace-feel prints a short line a frame instead;\n\
                      --trace-air prints the chassis' attitude and its rates instead;\n\
                      --trace-switch N rides the throttle alone for N frames first;\n\
+                     --online-script F:WORD,... online, picks a machine (bike, biplane, buggy,\n\
+                     monster, baja) at frame F, or holds Cross (gas) or lets it go (lift);\n\
                      --trace-stick-y F:Y,... sets the stick's y from frame F on, each until\n\
                      the next, and adds the backflip's columns to --trace-feel's line;\n\
                      --trace-camera prints each view's camera a frame (preset, distance, pitch,\n\

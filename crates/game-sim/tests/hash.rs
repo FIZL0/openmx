@@ -570,7 +570,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // ask: score flips as the original does), so the card is P243's.
     // 12112 since S244: the wreck bike's own entries on the props (`WreckStrike::entries`), filed and
     // spent within a tick like the rest of `WreckBike::struck`, so not walked and not on the wire.
+    // 12120 since S249: a seat's car online (`Sim::car`, `car::Lane`), walked as `car` only while a
+    // car is out, so the leaves do not move.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12112, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12120, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

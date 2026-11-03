@@ -488,6 +488,10 @@ impl State for Sim {
         if let Some(plane) = &self.plane {
             w.field("plane", plane);
         }
+        // And the car a seat drives online (S249), as its bytes: only while one is out.
+        if let Some(car) = &self.car {
+            w.blob("car", &crate::snapshot::car_bytes(car));
+        }
         // Players 2 to 8, in player order. Only a session with more than one rider has this group,
         // so a one-player walk — and every hash pinned on one — is what it was before (S54).
         if !self.others.is_empty() {

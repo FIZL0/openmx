@@ -2855,3 +2855,16 @@ impl Machine {
         }
     }
 }
+
+// --- a car in a seat's lane (S249) -----------------------------------------------------------------
+
+/// **A seat's car while it is out** (S249), as [`crate::Sim::car`] holds it: which car, the car
+/// itself, and its collision object. What a tick changes and a rollback puts back, so it lives in
+/// the seat's state as the plane's flight does ([`crate::Sim::plane`]); the car's `.phy` and its
+/// model are constants the shell keeps, the collision's ray probe one the codec leaves out.
+#[derive(Clone, Debug)]
+pub struct Lane {
+    pub kind: Kind,
+    pub machine: Machine,
+    pub struck: Option<Collision>,
+}

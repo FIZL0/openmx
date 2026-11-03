@@ -45,6 +45,10 @@ pub struct Rides<'a> {
     /// the plane takes a copy of into its [`Sim::plane`]: `None` on a track that parks none, or a
     /// ride with no `biplane.phy`, where a seat asking for the plane stays on its bike.
     pub plane: Option<&'a mut Flight>,
+    /// Every seat's cars as built and never driven (S249, [`crate::vehicle::Lot::online_cars`]), by
+    /// seat: what a seat's switch to a car takes its copy from into its [`Sim::car`], and what that
+    /// car is stepped with. A seat with none here stays where it is when it asks for a car.
+    pub cars: &'a [Vec<vehicle::CarRide>],
 }
 
 /// **A flying seat's step, held at its plane's frame** (N22a1): its plane readied
@@ -174,7 +178,7 @@ impl Game for Rides<'_> {
             // original's walk meets them (S88): the riders this one can joust (S224), and the bikes
             // in its plane's world if it flies (S225). A seat on the plane has left its bike.
             let on: Vec<(&game_sim::rider::Rider, bool)> =
-                self.sims.iter().zip(&touching).map(|(s, &t)| (&s.rider, t && s.plane.is_none())).collect();
+                self.sims.iter().zip(&touching).map(|(s, &t)| (&s.rider, t && s.plane.is_none() && s.car.is_none())).collect();
             let rivals = rider_contact::rivals_among(&on, seat, &*self.world);
             let flying = self.sims[seat].plane.as_ref().map(|f| f.body.position);
             let bikes = flying.map(|at| rider_contact::plane_bikes(&on, seat, at, &*self.world)).unwrap_or_default();
@@ -186,8 +190,9 @@ impl Game for Rides<'_> {
             // the shell switches between frames offline (P102). A switch that cannot be had (no
             // plane, no ground) leaves the seat where it is, and is asked again next tick.
             let wanted = Wanted::of(reports[0].0[super::SWITCH]);
+            let cars = self.cars.get(seat).map_or(&[][..], |c| &c[..]);
             if let Some(to) = wanted.to {
-                let _ = vehicle::switch_lane(to, self.plane.as_deref(), sim, self.world);
+                let _ = vehicle::switch_lane_among(to, self.plane.as_deref(), cars, sim, self.world);
             }
             // The shell's hands, the d-pad the markers' and not the ride's (P93) — unless the seat's
             // Markers switch is off (P129, in its byte), and then the d-pad is the original's.
@@ -202,6 +207,12 @@ impl Game for Rides<'_> {
                 && let Some((readied, ready)) = vehicle::ready_lane(sim, dt, wanted, self.world)
             {
                 held.push(Held { seat, k: plane, plane: readied, ready, met, bikes, wanted });
+                continue;
+            }
+            // In a car (S249) the bike is not stepped either, nor are any markers: offline a car has
+            // none yet (S149e).
+            if sim.car.is_some() {
+                vehicle::drive_lane(sim, cars, dt, self.world);
                 continue;
             }
             if sim.plane.is_some() {
@@ -335,6 +346,15 @@ impl Rides<'_> {
             && f.rays.is_none()
         {
             f.rays = t.rays.clone();
+        }
+        // And a seat decoded in a car (S249) whose collision came without its ray probe, the car's
+        // `m.col`, another constant the codec leaves out: any seat's copy's, the file being the car's.
+        if let Some(lane) = sim.car.as_mut()
+            && let Some(struck) = lane.struck.as_mut()
+            && struck.rays.segments.is_empty()
+            && let Some(rays) = self.cars.iter().flatten().find(|c| c.machine.car_physics() == Some(lane.kind)).and_then(|c| c.rays.as_ref())
+        {
+            struck.rays = Arc::new(rays.clone());
         }
     }
 }

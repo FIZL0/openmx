@@ -104,6 +104,8 @@ pub struct Online {
     /// of, and the disc's `biplane.phy` before the modifiers, which a change rebuilds it from.
     plane: Option<Flight>,
     stock_plane: Option<game_sim::phy::Plane>,
+    /// Each seat's cars as built, never driven (S249, [`Online::cars_on`]), by seat.
+    cars: Vec<Vec<crate::vehicle::CarRide>>,
     /// Each seat's own bay in the ride's lot (N18), where a seat that starts in the plane stands.
     bays: Vec<Spawn>,
     /// The body's spot and up the original gives each of [`Online::bays`] that is a file bay (B6,
@@ -178,6 +180,7 @@ impl Online {
             own_rows: false,
             plane: None,
             stock_plane: None,
+            cars: Vec::new(),
             bays: Vec::new(),
             bay_bodies: Vec::new(),
             marks: Some(Marks { track: String::new(), bike: String::new(), owed: true, offered: None }),
@@ -242,6 +245,7 @@ impl Online {
             own_rows: true,
             plane: None,
             stock_plane: None,
+            cars: Vec::new(),
             bays: Vec::new(),
             bay_bodies: Vec::new(),
             marks: None,
@@ -279,6 +283,7 @@ impl Online {
             own_rows: false,
             plane: None,
             stock_plane: None,
+            cars: Vec::new(),
             bays: Vec::new(),
             bay_bodies: Vec::new(),
             marks: None,
@@ -316,6 +321,7 @@ impl Online {
             own_rows: false,
             plane: None,
             stock_plane: None,
+            cars: Vec::new(),
             bays: Vec::new(),
             bay_bodies: Vec::new(),
             marks: None,
@@ -364,6 +370,17 @@ impl Online {
     pub fn bays_on(&mut self, bays: Vec<Spawn>, bodies: Vec<Option<(ps2_float::Vf, ps2_float::Vf)>>) {
         self.bays(bays);
         self.bay_bodies = bodies;
+    }
+
+    /// Every seat's cars as built, never driven (S249, [`vehicle::Lot::online_cars`]): what a
+    /// seat's switch to a car takes it from, the same on every machine off the same disc.
+    pub fn cars_on(&mut self, cars: Vec<Vec<crate::vehicle::CarRide>>) {
+        self.cars = cars;
+    }
+
+    /// Seat `s`'s cars as [`Online::cars_on`] got them.
+    pub fn cars(&self, s: usize) -> &[crate::vehicle::CarRide] {
+        self.cars.get(s).map_or(&[], |c| &c[..])
     }
 
     /// The seats `flies` says start the ride in the biplane (N18): each takes a copy of the ride's
@@ -894,7 +911,7 @@ impl Online {
                     hands = Some(*c);
                 }
             };
-            let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut() };
+            let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut(), cars: &self.cars };
             let mut game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: self.stock_plane.as_ref() };
             self.net.frame(&mut game, &local, real);
         }
