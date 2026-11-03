@@ -8564,6 +8564,9 @@ atv_const_up                atv 0x00397000 = UP
 # atv_follow_target_block     atv target +0x10 point, +0x30 forward, +0x40 up, +0x50 velocity, +0x84 lean, +0xb0 airborne, +0xb4 speed, +0xb8 117.3328
 # atv_camera_still_switch     atv *(0x003eab60) +0x225 bit 3 (u32 at +0x224 mask 0x800) = the still camera; 0 in every MD82b row
 # atv_camera_dt               atv the camera's dt is 0.03333 (0x3d08850a): alpha = dt / tau in every row
+# atv_follow_target_block     atv target +0x10 point, +0x30 forward, +0x40 up, +0x50 velocity, +0x84 lean, +0xb0 airborne, +0xb4 speed, +0xb8 117.3328
+# atv_camera_still_switch     atv *(0x003eab60) +0x225 bit 3 (u32 at +0x224 mask 0x800) = the still camera; 0 in every MD82b row
+# atv_camera_dt               atv the camera's dt is 0.03333 (0x3d08850a): alpha = dt / tau in every row
 
 # P285 -- the ridden bike's non-engine sounds (research/bike-sounds.md, journal bike-ride-sounds).
 # No track sets [Crowd] CrowdPresent (all 54 .aud have it commented out), so the crowd never sounds.
