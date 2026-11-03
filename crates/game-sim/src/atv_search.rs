@@ -229,3 +229,45 @@ pub fn collide(objects: &mut [Collidable], probe: usize, found: &[Candidate], wh
     objects[probe].radius = radius;
     search(objects, probe, found, &|_| false, wheels)
 }
+
+/// **Desert Oasis's sweep** (MD86): what [`crate::quad::Steps`] answers [`crate::quad::Call::Contacts`]
+/// with. `world` holds the trigger probe (`probe`) and, from `first_part`, the plants' parts
+/// ([`part_collidables`]) after its own; `rays` are the probe's.
+///
+/// Stood at the node's frame, the gather probe ([`crate::atv_world::PROBE`]) is put at its position
+/// and the quad's list (`list`) gathered round it ([`crate::atv_world::gather`]), then [`collide`]
+/// over the list into `record`. The original gathers in the PostProcess's collision sync, round the
+/// node as that PostProcess left it, and nothing moves the node or the world between that and the
+/// next frame's sweeps; until the collision sync's gather is answered (MD75c2), the sweep makes it.
+pub struct Oasis<'a> {
+    pub world: World,
+    pub props: &'a [Prop],
+    pub eco: &'a Ecosystem,
+    pub trees: &'a Trees,
+    pub rays: Rays,
+    pub probe: usize,
+    pub first_part: usize,
+    pub list: crate::atv_world::Nearby,
+    pub record: Record,
+}
+
+impl<'a> Oasis<'a> {
+    pub fn new(world: World, props: &'a [Prop], eco: &'a Ecosystem, trees: &'a Trees, rays: Rays, probe: usize, first_part: usize) -> Oasis<'a> {
+        let record = record(rays.segments.len());
+        Oasis { world, props, eco, trees, rays, probe, first_part, list: crate::atv_world::Nearby::quad(), record }
+    }
+}
+
+impl crate::quad::Sweep for Oasis<'_> {
+    fn sweep(&mut self, frame: &Matrix) -> Option<(bool, Vec<crate::quad::Contact>)> {
+        let t = frame[3];
+        self.world.place_probe([t.x(), t.y(), t.z()].map(F));
+        crate::atv_world::gather(&mut self.world.objects, &mut self.world.broad, &mut self.list, crate::atv_world::PROBE, 3);
+        let plants = Plants::new(self.trees, self.eco, &self.world, self.first_part);
+        let mut wheels = Wheels::new(&self.rays, *frame, self.props, self.world.meshes.start, plants);
+        wheels.record = std::mem::take(&mut self.record);
+        let hit = collide(&mut self.world.objects, self.probe, &self.list.found, &mut wheels);
+        self.record = wheels.record;
+        Some((hit, contacts(&self.record)))
+    }
+}

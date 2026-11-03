@@ -503,6 +503,7 @@ pub fn read_ride(ee: &Ee, quad: u32, dt: F) -> Result<(Ride, Image), String> {
             frame: part(ee.u32_at(o + 0xd0), "frame mesh (+0xd0)")?,
             active: part(ee.u32_at(o + 0xd8), "active probe (+0xd8)")?,
         },
+        rear_node: ee.u32_at(o + 0x143c),
     };
 
     // The trick buttons' byte: on the quad, `+0x14ec` is not the bike's buttons word (oracle # MD37a),

@@ -70,6 +70,9 @@ pub struct Parts {
     /// the collidables the collision sync keeps up to date ([`Collidables`]).
     pub spatial: bool,
     pub collidables: Collidables,
+    /// MD86's: the collidable the last rear contact struck (`+0x143c`, [`crate::quad::wheel_contacts`]'s
+    /// `rear_node`; 0 for none).
+    pub rear_node: u32,
 }
 
 impl Default for Parts {
@@ -87,6 +90,7 @@ impl Default for Parts {
             bounds: Bounds::default(),
             spatial: false,
             collidables: Collidables::default(),
+            rear_node: 0,
         }
     }
 }
