@@ -4444,7 +4444,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And the blades it throws (P265), bodies of their own.
         let read = |name: &str| res.find_suffix(name).and_then(|e| res.read(&e.name).ok());
         Some(match (read(game_sim::kiowa::WRECK_BLADE_PHY), read(game_sim::kiowa::BLADE_MODEL)) {
-            (Some(phy), Some(psg)) => heli.with_blades(&phy, &psg, read(game_sim::kiowa::BLADE_RAYS).as_deref()),
+            (Some(phy), Some(psg)) => heli.with_blades(&phy, &psg, read(game_sim::kiowa::BLADE_RAYS).as_deref(), read(game_sim::kiowa::BLADE_SHAPE).as_deref()),
             _ => heli,
         })
     });

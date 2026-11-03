@@ -2585,11 +2585,13 @@ impl KiowaRide {
         self
     }
 
-    /// It with the four blades its wreck throws (P265), off `wreckblade.phy`'s, `bladebent.psg`'s
-    /// and `bladebentm.col`'s bytes ([`game_sim::kiowa::Blades::new`]); with no `.col`, blades that
-    /// meet nothing. As it was where they do not read.
-    pub fn with_blades(mut self, phy: &[u8], psg: &[u8], rays: Option<&[u8]>) -> KiowaRide {
-        match game_sim::kiowa::Blades::new(phy, psg, rays, None) {
+    /// It with the four blades its wreck throws (P265), off `wreckblade.phy`'s, `bladebent.psg`'s,
+    /// `bladebentm.col`'s and `bladebentf.col`'s bytes ([`game_sim::kiowa::Blades::new`]); with no
+    /// `bladebentm.col`, blades that meet nothing, and with no `bladebentf.col`, blades nothing
+    /// meets. The world's edge is the terrain's, put on where it is built. As it was where they do
+    /// not read.
+    pub fn with_blades(mut self, phy: &[u8], psg: &[u8], rays: Option<&[u8]>, shape: Option<&[u8]>) -> KiowaRide {
+        match game_sim::kiowa::Blades::new(phy, psg, rays, shape, None) {
             Ok(b) => self.blades = Some(b),
             Err(e) => eprintln!("kiowa: {}: {e}", game_sim::kiowa::WRECK_BLADE_PHY),
         }
