@@ -2623,14 +2623,12 @@ impl Screen {
 /// The main menu's rows: opentennis's Local and Online beside Free Ride, as `home.rs` lists them.
 /// Mods is P118's: the mods folder's switch and its packs, out of Settings.
 /// Controllers is P210's: which device drives which seat.
-/// The main menu's corner (P189): which build this is, `v<version> · <commit>` from `build.rs`'s stamp, and
-/// ` · native sim` after it on F15's concept build, whose simulation is not the original's arithmetic.
-pub const BUILD_CORNER: &str = concat!("v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT"), env!("OPENMX_SIM_TAG"));
+/// The main menu's corner (P189): which build this is, `v<version> · <commit>` from `build.rs`'s stamp. It does not
+/// name the sim (P267): the player builds are all native (P262), and the online build id keeps them apart.
+pub const BUILD_CORNER: &str = concat!("v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT"));
 
-/// What `--version` prints, and the first line a run prints on F15's concept build: `openmx v<version> · <commit>`,
-/// and ` · native sim` when the simulation is the host's plain f32 rather than the PS2's arithmetic, so a tester can
-/// tell which build they run.
-pub const VERSION_LINE: &str = concat!("openmx v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT"), env!("OPENMX_SIM_TAG"));
+/// What `--version` prints: `openmx v<version> · <commit>`, the corner's build after the name, with no sim (P267).
+pub const VERSION_LINE: &str = concat!("openmx v", env!("OPENMX_VERSION"), " · ", env!("OPENMX_COMMIT"));
 
 /// The splash's corner (F14, opentennis's B660): a release build's tag (`v0.9.5`), else the commit a
 /// beta or local build was made from.

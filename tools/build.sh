@@ -8,7 +8,7 @@
 #                         sudo pacman -S mingw-w64-gcc && rustup target add x86_64-pc-windows-gnu
 # The sim (P262): player builds run the native sim, the simulation on the host's plain f32 rather than the PS2's
 # arithmetic (openmx's `native-sim` feature, F15) — about twice as fast on a Steam Deck, not bit-exact, online only
-# with other native builds. It says "native sim" in the menu's corner, in --version and in the first line it prints,
+# with other native builds (its online build id ends ", native sim"; the corner and --version do not say, P267),
 # and its tapes say `sim native`. --exact-sim (after the target) builds the PS2-arithmetic reference instead, the sim
 # plain `cargo run -p openmx` and the ./kit check gate run (native-sim is not a default feature, and must not be).
 # `tools/build.sh features [--exact-sim]` prints the cargo arguments that choice makes, for the Actions jobs and

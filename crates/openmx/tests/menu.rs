@@ -7613,18 +7613,18 @@ fn the_keyboard_takes_1p_back_and_a_real_pad_takes_it_from_the_touch_pad() {
 #[test]
 fn the_main_menus_corner_names_the_build() {
     let commit = env!("OPENMX_COMMIT");
-    assert_eq!(menu::BUILD_CORNER, format!("v{} · {commit}{}", env!("OPENMX_VERSION"), env!("OPENMX_SIM_TAG")));
+    assert_eq!(menu::BUILD_CORNER, format!("v{} · {commit}", env!("OPENMX_VERSION")));
     if commit == "dev" {
-        assert_eq!(menu::BUILD_CORNER, concat!("v", env!("CARGO_PKG_VERSION"), " · dev", env!("OPENMX_SIM_TAG")));
+        assert_eq!(menu::BUILD_CORNER, concat!("v", env!("CARGO_PKG_VERSION"), " · dev"));
     }
 }
 
-/// F15: `--version` (and the concept build's first line) is the corner's build after the name, and says
-/// "native sim" exactly when the simulation is ps2-float's plain-f32 one.
+/// F15, P267: `--version` is the corner's build after the name, and neither names the sim (the online build id does).
 #[test]
-fn the_version_line_says_which_simulation() {
+fn the_version_line_does_not_name_the_simulation() {
     assert_eq!(menu::VERSION_LINE, format!("openmx {}", menu::BUILD_CORNER));
-    assert_eq!(menu::VERSION_LINE.ends_with(" · native sim"), ps2_float::NATIVE);
+    assert!(!menu::VERSION_LINE.contains("sim"), "{}", menu::VERSION_LINE);
+    assert!(!include_str!("../build.rs").contains("OPENMX_SIM_TAG"), "build.rs stamps a sim tag again");
 }
 
 /// F14 (opentennis's B660): the splash's corner is a release's tag, else the commit; with no newer

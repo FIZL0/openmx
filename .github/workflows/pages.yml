@@ -134,7 +134,7 @@ jobs:
             "**Beta: rebuilt on every change to main (${GITHUB_SHA::7}). Newer than the latest release, less tested.**" \
             "No game data is included: you need your own *MX Unleashed (USA)* (SLUS-20767) ISO. Linux: unpack, run \`./openmx your.iso\` (or drop the ISO on it) once, \`./openmx\` after. Windows: unzip, drop the ISO on \`openmx.exe\` once, start it after." \
             "Beta in the browser: https://beta.openmx.dev/" \
-            "Every build here runs the **native sim** (the host's plain floats: faster, not bit-exact with the PS2; the menu's corner and \`--version\` say \"native sim\"). It plays online only with other native builds, and a tape recorded on an exact build warns when played." > notes.md
+            "Every build here runs the **native sim** (the host's plain floats: faster, not bit-exact with the PS2). It plays online only with other native builds, and a tape recorded on an exact build warns when played." > notes.md
           ipa=
           if [ -f openmx-ios.ipa ]; then
             ipa=openmx-ios.ipa

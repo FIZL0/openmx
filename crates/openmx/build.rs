@@ -7,7 +7,7 @@
 // opentennis: watching .git/logs/HEAD rebuilt the test binaries on every commit in the shared checkout).
 // OPENMX_VERSION (a release's tag, tools/release.sh) is passed through for the corner, the crate's version without it.
 //
-// Emits OPENMX_COMMIT, OPENMX_VERSION, OPENMX_SIM_TAG (F15: " · native sim" or nothing) and OPENMX_BUILD_ID (and OPENMX_TAG for a release, P191), the id: "<crate version> <commit>, 30 Hz" — an unstamped
+// Emits OPENMX_COMMIT, OPENMX_VERSION and OPENMX_BUILD_ID (and OPENMX_TAG for a release, P191), the id: "<crate version> <commit>, 30 Hz" — an unstamped
 // dev build's is then handshake.rs's own default, so dev builds of one version still meet each other.
 // `crates/openmx/tests/build_stamp.rs` mounts this file for its functions.
 //
@@ -71,7 +71,6 @@ fn main() {
     // F15: the openmx feature `native-sim`, which turns on ps2-float's plain-f32 arithmetic
     let native = std::env::var_os("CARGO_FEATURE_NATIVE_SIM").is_some();
     println!("cargo:rustc-env=OPENMX_BUILD_ID={}", sim_id(id(&crate_version, &commit), native));
-    println!("cargo:rustc-env=OPENMX_SIM_TAG={}", if native { " · native sim" } else { "" });
     // P191: a release's tag only when it is one, for the updater (`src/update.rs`) to ask for newer releases
     if let Some(v) = std::env::var("OPENMX_VERSION").ok().filter(|v| !v.trim().is_empty()) {
         println!("cargo:rustc-env=OPENMX_TAG=v{}", version(Some(&v), &crate_version));

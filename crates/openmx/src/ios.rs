@@ -41,7 +41,7 @@ pub fn main() {
         env!("CARGO_PKG_VERSION"),
         option_env!("OPENMX_COMMIT").unwrap_or("?"),
         option_env!("OPENMX_BUILD").unwrap_or("?"),
-        env!("OPENMX_SIM_TAG"),
+        if ps2_float::NATIVE { ", native sim" } else { "" },
         openmx_ios::memory()
     );
     println!("ios: the screen up to {} fps, {}", openmx_ios::ask_frame_rate(), openmx_ios::power());

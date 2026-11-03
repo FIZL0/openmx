@@ -105,7 +105,7 @@ body=$out/notes.md
     echo
     # P262: which sim the downloads run (tools/build.sh, tools/web.sh and tools/ios-ipa.sh build the player builds native)
     echo "Every download above runs the **native sim**: the original's physics on your machine's plain floats, faster"
-    echo "than the PS2's arithmetic and not bit-for-bit with it. The menu's corner and \`--version\` say \"native sim\";"
+    echo "than the PS2's arithmetic and not bit-for-bit with it;"
     echo "online, it meets every other native build of $version. (The exact, PS2-arithmetic build is \`tools/build.sh --exact-sim\`.)"
     echo
     echo "## What you need"
