@@ -225,14 +225,15 @@ bike, and MX Unleashed has no ATV, so the proof can only be against SLUS-21104.
 - **PostProcess** (`pc_quad_air_state`): the bike's air state over four wheels, without the no-hander.
 - **Update** (`pc_quad_update`): `bike_vehicle_update` first, then its own tail (0.95, 0.73, 0.1; not read).
 
-Not paired: PC slots 33, 35, 38, 39, 67, 70, 80, 86 against SLUS-21104's 0x004b89a0, 0x004b8ab0, 0x004b8b80,
-0x004bb360, 0x004bb370, 0x004bb400, 0x004bb710, 0x004be3b0, 0x004be3c0, 0x004be8d0 (slot 111?), 0x004ba510
-(slot 86?). The tables are not one slot per entry on both sides, so the place alone does not pair them.
-
-MD65 paired slot 70: it is the net unpack (`pc_quad_net_unpack`, PS2 `atv_quad_net_unpack`; it calls
-`pc_wheel_suspension`, as `Motocross::vf70` does), not vf104 as MD37 had it. vf104 (0x005d8bb0) places the
-wheels' rest points from the chassis and is now the unpaired one, with 33, 35, 38, 39, 67, 80, 86 (MD65b).
-By the same xref `Motocross::vf70` may be the bike's network-state unpack 0x00259150 above (not checked).
+Paired by MD65b (research/oracle.txt's `# MD65b`, by what each body does and calls on both sides): slot 0
+is the destructor (PS2 vt +0x8), 33 the level's surface remap (+0x340), 35 the listeners (+0x348), 38 the
+wheels' field pointers (+0x354), 39 the left rear's surface (+0x358), 67 the animation driver (+0x3e4), 80
+the left front's strut travel (+0x41c), 86 the trigger probe's segments (+0x474), 104 the wheels settled on
+the ground (+0x4f8), 111 the model's node pose (+0x554) and `vf3_at_1084` the model reload (+0x558). Slot
+70 is the net unpack (MD65: `pc_quad_net_unpack`, PS2 `atv_quad_net_unpack`; it calls
+`pc_wheel_suspension`, as `Motocross::vf70` does), not vf104 as MD37 had it. By the same xref
+`Motocross::vf70` may be the bike's network-state unpack 0x00259150 above (not checked). Ported: 33, 39,
+80, 86, 104 (`quad.rs`); 67 is MD65c; 0, 35, 38, 111 and the reload are not simulation.
 
 The ATV's step leans on every shared MotoShared step as SLUS-21104 runs it, and on its frame driver (the
 physics world's substeps, not MX Unleashed's 55 Hz loop). Those are MD40's work for the bikes, so the ATV's

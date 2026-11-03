@@ -30,11 +30,15 @@
 //! not ported here: each is a [`Call`] handed to a [`Moto`], in the original's order.
 //!
 //! The quad's [`put_back`] and [`net_unpack`] (MD65): the bike's put-back on four wheels, and a remote
-//! quad set from its network snapshot. The PC slots not yet paired are filed (MD65b).
+//! quad set from its network snapshot. The PC slots it had not paired are MD65b's.
 //!
 //! The quad's wreck body (MD65a): the init's last block, [`build_wreck_body`], makes a ray probe off
 //! `WreckATVm.col` that the quad's other collidables ignore, and the wreck entry and the unwreck
 //! [`swap_rays`] the quad's collision between it and the riding rays.
+//!
+//! The quad's small slots (MD65b): the level setup's [`remap_surfaces`], the [`surface_under`] and
+//! [`strut_travel`] answers, the [`trigger_segments`] the trigger probe is shaped to, and the
+//! [`settle_wheels`] onto the ground.
 //!
 //! And the quad's tire reader, [`tire_phy`] (MD64b): `[Front Tire]` and `[Rear Tire]` into the four
 //! wheels ([`TireSetup`]), with the original's left-to-right copies and their quirks.
@@ -617,6 +621,9 @@ pub enum Call {
     PartShow(Part),
     PartOffWorld(Part),
     PartInWorld(Part),
+    /// The quad's level setup's ([`remap_surfaces`], MD65b): a global flag set, then the bike's shared
+    /// level setup, handed the level.
+    LevelSetup,
 }
 
 /// Whoever runs the calls the quad's listeners make. A `Vec<Call>` just lists them.
@@ -2190,5 +2197,101 @@ pub fn swap_rays(r: &mut Rays, wrecked: bool, in_world: bool, q: &mut Quad, body
     if !in_world {
         m.call(Call::PartShow(to_part), q, body);
         m.call(Call::PartInWorld(to_part), q, body);
+    }
+}
+
+// --- MD65b: the quad's small slots --------------------------------------------------------------------
+
+/// **The quad's level setup, its surface remap**: the bike's shared level setup ([`Call::LevelSetup`]),
+/// then each of the sixteen surfaces the level maps (`map[i]` not negative) takes the tire tables of
+/// surface `map[i]`, on all four wheels, in order: surface 0 first, and per surface the left front,
+/// right front, left rear, right rear. A copy is made only with both surfaces under sixteen, and
+/// it copies every table but the last side one (`DonutsSideForceSpeedScale`), which each surface
+/// keeps. Being in place, a later surface mapped to one already remapped takes the remapped tables.
+pub fn remap_surfaces(
+    t: &mut TireSetup,
+    map: &[i32; crate::phy::MAX_SURFACES],
+    q: &mut Quad,
+    body: &mut Body,
+    m: &mut impl Moto,
+) {
+    m.call(Call::LevelSetup, q, body);
+    for (i, &src) in map.iter().enumerate() {
+        if src < 0 {
+            continue;
+        }
+        for w in &mut t.wheels {
+            copy_surface(w, i, src);
+        }
+    }
+}
+
+/// The wheel's surface copy: `dst` takes `src`'s tables but the donut scale, both under sixteen.
+fn copy_surface(w: &mut WheelTire, dst: usize, src: i32) {
+    let n = crate::phy::MAX_SURFACES;
+    if src < 0 || src as usize >= n || dst >= n {
+        return;
+    }
+    let from = w.surfaces[src as usize];
+    let to = &mut w.surfaces[dst];
+    to.drive = from.drive;
+    to.side[..12].copy_from_slice(&from.side[..12]);
+    to.drag = from.drag;
+}
+
+/// What the quad answers for the surface it is on: the left rear wheel's, as the ground query left it
+/// ([`WheelGround::surface`]).
+pub fn surface_under(wheels: &[WheelGround; 4]) -> u8 {
+    wheels[2].surface
+}
+
+/// What the quad answers for its strut travel: the left front wheel's.
+pub fn strut_travel(t: &TireSetup) -> F {
+    t.wheels[0].strut_compression
+}
+
+/// **The trigger probe's segments**: with a trigger probe made ([`build_wreck_body`]), one segment per
+/// wheel (left front, right front, left rear, right rear), from the mount raised by the strut travel
+/// down to the mount lowered by the radius (`y` only; `x`, `z` and `w` are the mount's). The original
+/// hands the eight points to the probe's shape on the quad's scene node; with none it does nothing
+/// (`None`).
+pub fn trigger_segments(t: &TireSetup, has_trigger: bool) -> Option<[[Vf; 2]; 4]> {
+    if !has_trigger {
+        return None;
+    }
+    Some(t.wheels.map(|w| {
+        let top = F(fpu::add(w.mount.y(), w.strut_compression.0));
+        let bottom = F(fpu::sub(w.mount.y(), w.radius.0));
+        [w.mount.merge(Dest::Y, Vf::splat(top.0)), w.mount.merge(Dest::Y, Vf::splat(bottom.0))]
+    }))
+}
+
+/// One wheel as the quad's ground settle reads and leaves it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WheelGround {
+    /// Where the wheel is mounted, and the offset from it the settle probes at (body frame).
+    pub mount: Vf,
+    pub probe: Vf,
+    /// The probe point in the world, as the ground query leaves it, the ground's normal there and
+    /// the surface it is; and the point kept once all four are settled.
+    pub point: Vf,
+    pub normal: Vf,
+    pub surface: u8,
+    pub kept: Vf,
+}
+
+/// **The quad's ground settle**: per wheel (left front, right front, left rear, right rear), the mount
+/// plus the probe (`xyz`; `w` the mount's) turned into the world by the body's orientation and moved
+/// to the quad's scene node (`node_pos`, `xyz`), and the ground queried there: `ground` answers the
+/// point (in place), the normal and the surface, one wheel at a time, in order. Then each wheel keeps
+/// its point.
+pub fn settle_wheels(wheels: &mut [WheelGround; 4], body: &Body, node_pos: Vf, mut ground: impl FnMut(&mut WheelGround)) {
+    for w in wheels.iter_mut() {
+        let p = add_xyz(w.mount, w.probe);
+        w.point = add_xyz(body.to_world(p), node_pos);
+        ground(w);
+    }
+    for w in wheels.iter_mut() {
+        w.kept = w.point;
     }
 }

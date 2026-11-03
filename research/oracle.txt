@@ -6520,7 +6520,7 @@ atv_strtok                  atv 0x003590a0 = strtok (cursor in the reent at +0x5
 # research/journal/2026-11-02-md65-atv-wreck. The PC twins: put-back pc_quad_put_back (vf55, the same
 # clauses), net unpack pc_quad_net_unpack (vf70). pc 0x005d8bb0 (vf104) is not the net unpack: it turns
 # each wheel's rest point (+0x80 + +0x90) by the body's +0x180 and adds +0xbf0, then calls
-# 0x004cdff0 and copies +0x140 to +0x120 (unpaired, MD65b).
+# 0x004cdff0 and copies +0x140 to +0x120 (MD65b: pc_quad_settle_wheels).
 # Put-back (a0 quad, a1/a2 handed to atv_bike_put_back as they came): the four wheels reset, the
 # attachment +0x1480 detached; quad byte +0x45 bit 0x2 cleared (sb) across atv_bike_put_back and set
 # again after (the byte read again, & 0xfd | 2) when it was set; atv_reattach(+0x1480, +0x1284, 1, 1);
@@ -6583,6 +6583,71 @@ atv_ignore_category         atv 0x001158a0 = a category word added to a collidab
 atv_part_in_world           atv 0x001143e0 = a collidable put in a collision world (a0 part, a1 world, a2 class, a3 1)
 atv_swap_to_wreck_rays      atv 0x004e2e10 = the bike's (and quad's) vt +0x48c: the collision onto the wreck rays +0x1434
 atv_swap_to_riding_rays     atv 0x004e2eb0 = the bike's (and quad's) vt +0x490: the collision back onto the riding rays +0x1438
+# MD65b — the quad's last unpaired slots (quad::remap_surfaces, quad::surface_under, quad::strut_travel,
+# quad::trigger_segments, quad::settle_wheels and quad::WheelGround; tests/atv_quad.rs
+# the_quads_md65b_slots_hold_the_paired_functions, the_quads_surface_remap_is_the_originals,
+# the_quads_surface_copy_keeps_the_donut_scale, the_quads_surface_and_strut_answers_are_the_originals,
+# the_quads_trigger_segments_are_the_originals, the_quads_ground_settle_is_the_originals, off MD37a's
+# atv-r-spawn.ee.bin). Journal: research/journal/2026-11-03-md65b-atv-slots. Paired by what each body
+# does and calls on both sides (the PC's fields 0x20 up: wheels +0x17d0.. against +0x17b0..), anchored on
+# the slots already paired (vf46 +0x378, vf55 +0x3a8, vf70 +0x3f0, vf85 +0x470, vf110 +0x550). PS2 slots
+# are offsets in the quad's vtable 0x003ce250.
+# Remap (vt +0x340, a0 quad, a1 level): *(0x003eab60) +0x22c = 1 (the jal's delay slot), MotoShared's level
+# setup atv_moto_level_setup(quad, level); for i 0..16 with level +0x140[i] >= 0: atv_wheel_surface_copy(
+# wheel, i, map[i]) for LF, RF, LR, RR (Ghidra drops LF's third argument; the asm has a2 = map[i] on all
+# four); returns quad + 0xc. The copy (a0 wheel, a1 dst, a2 src; returns unless both 0..15): table k at
+# +0x238 + 0x40k, dst's word = src's, for the 23 tables but k = 20 (+0x738, DonutsSideForceSpeedScale).
+# In place, so a surface mapped to one already remapped takes the remapped tables. The bike's twin
+# (0x004d8720, its table's same slot) does two wheels.
+# vt +0x358: lbu LR(+0x17b8) +0x110 (the surface byte the ground query writes). vt +0x41c: lwc1 LF +0x3c
+# (strut travel) into f0; the bike's 0x004dd8e0 is the same, the PC folds the two into 0x005f6570.
+# Trigger segments (vt +0x474): return unless +0x1430 (the trigger probe, MD65a); per wheel LF, RF, LR, RR
+# two quadwords on the stack: mount +0x90 with y add.s +0x3c, then mount with y sub.s +0x214 (radius);
+# then shape_set_segment 0x001bb3f0(+0x1430, 4, the eight, 0, node +0xe4).
+# Settle (vt +0x4f8; Ghidra stops at the first query, the asm runs to 0x004bb710): per wheel in order
+# p = mount +0x90 vadd.xyz probe +0x80 (w the mount's), +0x140 = p turned by body +0x190 (the to-world
+# opmula/opmsub rounds), +0x140 vadd.xyz quad +0xbd0, atv_ground_query(+0x3b4, +0x140, +0x130, 0,
+# +0x110); then each wheel's +0x120 = +0x140 (lq/sq). The query writes the surface as a byte.
+# The model reload (vt +0x558, through the thunk 0x004bfa90): 0x004e06f0, vt +0x470 (attach nodes),
+# 0x004bd530 (the node finder: "250R_ATV_Chasis", "HandleBars", "WheelLeftFront" ...), vt +0x3a8(1, 0)
+# (put-back), then with +0x3b8: vt +0x164, vt +0x160(5). The PC's: +0x154, 0x005dbde0, +0xdc(1, 0),
+# +0x78/+0x74(5) on -0x84.
+# The node pose (vt +0x554): wheel spin, the squeeze scaled by +0x1920 and the steering onto the model's
+# nodes; render only. The listeners (vt +0x348): sound, particle and effect listeners wired; not
+# simulation. vt +0x354: the four wheels' field pointers and +0x314/+0x12d4/+0x32c/+0xc80 into the block
+# at +0xb94 (PC +0x788); not simulation.
+# The animation driver (vt +0x3e4) is not ported (MD65c): the biplane's base thunk 0x004a8350 (pc
+# MXVehicleBiplane::vf67), +0x14bc decayed 0..1, the reset 0x0013e650(+0x1428) on +0x31c == 0 with
+# +0x1528 != +0x1524 or +0x1650; +0x1524 = +0x1528 (stand_upright's guard word); the stunt id's blend
+# (< 0x2e by 0x00268c90(+0x14f0), == 0x2e off +0x12ec/+0x14b0/+0x330, else +0x12e8), +0x141c = the blend
+# (put-back's settle word); one of 0x00140720 / 0x0013f5e0 / 0x0013eec0 / vt +0x88; vt +0x554; two
+# atv_node_frame reads; the hung-node loop (+0x1470/+0x1474/+0x1478, as the put-back's); 0x00266d30(+0x1480).
+pc_quad_destructor          pc 0x005d7550 = MXVehicleAtv::vf0 (table: the scalar deleting destructor's place)
+pc_quad_remap_surfaces      pc 0x005d61d0 = MXVehicleAtv::vf33 (callees: the level setup, then 0x0046fa30 per surface on four wheels)
+pc_quad_listeners           pc 0x005d9020 = MXVehicleAtv::vf35 (callees: the sound/particle/effect listener setup)
+pc_quad_wire_wheels         pc 0x005d6260 = MXVehicleAtv::vf38 (body: four wheels' field pointers into +0x788)
+pc_quad_surface_under       pc 0x005d6d90 = MXVehicleAtv::vf39 (body: *(+0x17d8) +0x110)
+pc_quad_animate             pc 0x005db3a0 = MXVehicleAtv::vf67 (callees: MXVehicleBiplane::vf67 first, vf111 later; MD65c)
+pc_quad_strut_travel        pc 0x005f6570 = MXVehicleAtv::vf80 (body: LF +0x3c; shared with the bike's)
+pc_quad_trigger_segments    pc 0x005d7bf0 = MXVehicleAtv::vf86 (body: +0x1450 guard, eight points, the shape set)
+pc_quad_settle_wheels       pc 0x005d8bb0 = MXVehicleAtv::vf104 (body: turn by +0x180, add +0xbf0, 0x004cdff0 per wheel, +0x140 -> +0x120)
+pc_quad_pose_nodes          pc 0x005dc4f0 = MXVehicleAtv::vf111 (callers: pc_quad_animate)
+pc_quad_reload_model        pc 0x005dd370 = MXVehicleAtv::vf3_at_1084 (callees: vf85, the node finder, vf55(1, 0))
+pc_wheel_surface_copy       pc 0x0046fa30 = the wheel's surface copy (pc_quad_remap_surfaces' callee; the donut table's skip not checked)
+pc_ground_query             pc 0x004cdff0 = the world's ground query (pc_quad_settle_wheels' callee)
+atv_quad_destructor         atv 0x004b89a0 = pc_quad_destructor (vt +0x8: resets the vptrs, the base destructor 0x004de790)
+atv_quad_remap_surfaces     atv 0x004b8ab0 = pc_quad_remap_surfaces (vt +0x340; callees)
+atv_quad_listeners          atv 0x004bb710 = pc_quad_listeners (vt +0x348; callees)
+atv_quad_wire_wheels        atv 0x004b8b80 = pc_quad_wire_wheels (vt +0x354; body, +0xb94)
+atv_quad_surface_under      atv 0x004bb360 = pc_quad_surface_under (vt +0x358; body)
+atv_quad_animate            atv 0x004be3c0 = pc_quad_animate (vt +0x3e4; callees, call order)
+atv_quad_strut_travel       atv 0x004be3b0 = pc_quad_strut_travel (vt +0x41c; body; the bike's 0x004dd8e0 the same)
+atv_quad_trigger_segments   atv 0x004ba510 = pc_quad_trigger_segments (vt +0x474; body)
+atv_quad_settle_wheels      atv 0x004bb400 = pc_quad_settle_wheels (vt +0x4f8; body, callees)
+atv_quad_pose_nodes         atv 0x004be8d0 = pc_quad_pose_nodes (vt +0x554; callers: atv_quad_animate)
+atv_quad_reload_model       atv 0x004bb370 = pc_quad_reload_model (vt +0x558; callees, call order)
+atv_moto_level_setup        atv 0x004de920 = MotoShared's level setup (a0 vehicle, a1 level)
+atv_wheel_surface_copy      atv 0x004a0780 = a wheel's surface tables copied, all but the donut scale (a0 wheel, a1 dst, a2 src)
 # MD37b (wheels) — atv_wheel_suspension and atv_wheel_tire_forces ported (crates/game-sim/src/
 # atv_wheel.rs; tests/atv_wheel.rs runs both off MD37a's atv-r-spawn.ee.bin). Journal:
 # research/journal/2026-10-29-md37b-atv-step. The wheel against MX Unleashed's: steered +0x2c, balancing
