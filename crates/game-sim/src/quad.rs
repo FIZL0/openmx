@@ -599,6 +599,8 @@ pub enum Call {
     Wreck(u8),
     SurfaceDrag(usize, F),
     SpinIntegrate(usize, F),
+    /// What the gravity [`Steps`] runs calls in turn (MD75b): the collision record's virtual, handed 1.
+    GravityRecord,
 }
 
 /// Whoever runs the calls the quad's listeners make. A `Vec<Call>` just lists them.
@@ -1753,6 +1755,11 @@ pub struct Bike {
     pub more: [crate::atv_wheel::More; 4],
     pub ground: [crate::atv_wheel::Ground; 4],
     pub cofg: Vf,
+    /// MD75b's ([`crate::atv_moto`]): the engine's wheels, the control-off pose, the body's last
+    /// position and enabled word, the quad's flag byte and record. The gearbox's shift points, the
+    /// head and tail's poses and travels and the drag are [`Bike::clutch_keys`]', the engine's state
+    /// and gearbox [`Bike::engine`]'s.
+    pub parts: crate::atv_moto::Parts,
 }
 
 /// **The quad's [`Moto`] with SLUS-21104's bike steps ported**: the input limiter and clutch
@@ -1822,6 +1829,32 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
                 let mut wb = self.wheel_body(body);
                 self.wheel_out(q, body, &mut wb, i);
             }
+            Call::AutoShift { inv_radius, .. } => {
+                let b = &mut self.bike;
+                crate::atv_moto::auto_shift(&b.clutch_keys, &mut b.engine, q, inv_radius);
+            }
+            Call::HeadTail => {
+                let b = &mut self.bike;
+                crate::atv_moto::head_tail(&b.clutch_keys, &mut b.parts, &mut b.cofg, &b.ride, b.stick.y, q, body);
+            }
+            Call::Gravity => {
+                if crate::atv_moto::gravity(&mut self.bike.parts, q, body) {
+                    self.rest.call(Call::GravityRecord, q, body);
+                }
+            }
+            Call::EngineUpdate(dt) => {
+                let b = &mut self.bike;
+                let radius = b.wheels.map(|w| w.probe_length);
+                crate::atv_moto::engine_update(&mut b.engine, &mut b.parts.drive, radius, b.parts.driven, q.gas_limited, q.clutch_in, dt);
+            }
+            Call::AirDrag(_) => crate::atv_moto::air_drag(self.bike.clutch_keys.drag, q, body),
+            Call::WheelClear(i) => {
+                q.wheels[i].touching = false;
+                let Bike { wheels, more, ground, .. } = &mut self.bike;
+                crate::atv_moto::wheel_clear(&mut wheels[i], &mut more[i], &mut ground[i]);
+            }
+            Call::RevLimit => crate::atv_moto::rev_limit(&self.bike.engine, &mut self.bike.parts.drive, self.bike.parts.driven),
+            Call::PeakRates => crate::atv_moto::peak_rates(q, body),
             c => self.rest.call(c, q, body),
         }
     }

@@ -6561,6 +6561,26 @@ atv_world_force_wrapper     atv 0x0049bd50 = the force list's wrapper slot: its 
 atv_quad_pre_process_thunk  atv 0x004bf9e0 = quad +0x30 vt +8: atv_quad_ground_head on quad
 atv_quad_post_process_thunk atv 0x004bf9f0 = quad +0x34 vt +8: atv_quad_air_state on quad
 atv_quad_force_thunk        atv 0x004bfa10 = quad +0x3c vt +8: atv_quad_ground_step on quad
+# MD75b — the quad's own Moto calls ported (atv_moto.rs; tests/atv_quad.rs unhooks each one under
+# atv_quad_ground_head/_step off atv-r-spawn.ee.bin and compares every region and the call log).
+# Engine (quad +0x142c -> it; MX Unleashed's MXU engine plus two driven wheels): +0x24 -> gas
+# word (quad +0x318), +0x28 -> clutch word (quad +0x12d4), +0x2c idle throttle, +0x30 engine braking, +0x34
+# final drive, +0x3c inv inertia, +0x44 clutch static, +0x48 clutch kinetic, +0x54 min rpm, +0x58 locked,
+# +0x5c gear, +0x68 -> torque ys, +0x6c gears, +0x70 -> gear ratios, +0x74 ratio, +0x78 inv ratio, +0x7c
+# clutch torque scale, +0x80 curve cursor {points, index, frac, +0x8c -> rpm xs}, +0x90/+0x94 driven wheels
+# (+0x94 0 = one), +0x98 torque, +0x9c wheel torque, +0xa0 rpm, +0xa4 road rpm, +0xac rev limit, +0xb4
+# torque scale. Wheel: +0x1d4 spin, +0x210 drive torque, +0xe0 forward force from torque, +0x214 radius,
+# +0x858 forward force. Road rpm with two wheels is ratio*(9.549*(0.5*(s1+s1))): the first wheel twice.
+# Quad: +0x13dc up shift, +0x13e0 down shift, +0x1130 cofg, +0x1140 control-off cofg, +0x1150 balance cofg
+# (+0x1524 == +0x152c), +0x1320/+0x1324 cofg travel forward/back (stick y +0x12ac < 0 / else), +0x132c brake
+# travel (brake +0x310, lean +0x12e8), +0x1328 clutch travel back over +0x1350 time (timer +0x1348, weight
+# +0x1354), +0x45 bit 5 cleared by gravity, +0x1250 peak rates; world params (quad +0xe8) +4 drag, +0x40
+# gravity. Body +0x1a0 cofg (set by vt +0x5c: position and last position move by to_world(new - old)).
+atv_engine_curve_seek       atv 0x00134450 = the engine's curve cursor seek (MXU's curve_seek, same code)
+atv_engine_curve_value      atv 0x00134530 = the curve at the cursor: adda(0, hi) msub frac (hi - lo); index 0 = ys[0]
+atv_engine_set_gear         atv 0x0049fb50 = gear, ratio = final * ratios[gear-1], inv ratio (MXU's set_gear, same)
+atv_wheel_add_drive         atv 0x004a1eb0 = wheel +0x210 += f12 (the engine's wheel torque, halved for two wheels)
+atv_body_set_cofg           atv 0x00493b40 = body vt +0x5c: d = new - cofg (+0x1a0), +0x70 and +0x60 += to_world(d), cofg = new
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the
