@@ -10578,7 +10578,12 @@ struct S211Tick {
 /// the original's was before the first contact (S167); without `toys` its body stands far below the
 /// world (the control). `None` where the image, the disc or the kit is not in this worktree.
 fn s211_ride(by: [f32; 3], ticks: usize, toys: bool) -> Option<Vec<S211Tick>> {
-    let image = private_dir("capture").join("s167").join("south3-before.ram");
+    s211_ride_in(&private_dir("capture").join("s167").join("south3-before.ram"), by, ticks, toys)
+}
+
+/// [`s211_ride`] from another image of research/s167_windmill.py's kind (R14's).
+fn s211_ride_in(image: &std::path::Path, by: [f32; 3], ticks: usize, toys: bool) -> Option<Vec<S211Tick>> {
+    let image = image.to_path_buf();
     let Some(st) = SaveState::open_either(&image) else {
         println!("no {} — S211's comment above says how it is written", image.display());
         return None;
@@ -10682,8 +10687,12 @@ fn s211_cannonball(vel: impl Iterator<Item = [f32; 3]>) -> Option<(usize, [f32; 
 /// (7.8, 18.6, 133.4) ft/s and wrecks it. apex: the same image moved by (0.25, 36, −7.6), the delta
 /// the script's apex run teleports by; the bike falls onto the windmill's top, wrecks on tick 24, and
 /// the windmill's mover throws the wreck body ~59,000 ft/s for 17 ticks. In both the 300.45/100.312
-/// put-back is the off-map cannonball (S59) once the rider's main bone is past the map's margin; the
-/// port's bone gets there sooner (8 against 14, 42 against 85), filed for the ragdoll.
+/// put-back is the off-map cannonball (S59) once the rider's main bone is past the map's margin. The
+/// ticks differ (the port's 8 and 42, the original's 14 and 85), and neither pair is the windmill's:
+/// the script's teleport leaves the original's ragdoll bones behind, and its main bone is dragged
+/// off the map by them (R14, the next test). The port's ragdoll starts on the bike; its own tick-5
+/// strike from this image (bones 0 and 7 touch, the main bone at ~13,000 ft/s) has no original
+/// to compare with (R14's bike, from another state, is not struck so), and is filed.
 #[test]
 fn the_rustic_windmill_throws_a_bike_as_the_original_does() {
     let Some(south) = s211_capture("south3") else { return };
@@ -10712,6 +10721,7 @@ fn the_rustic_windmill_throws_a_bike_as_the_original_does() {
     lanes("south put-back", ours.0, ours.1, &theirs.1, 1e-4);
     let bone = port[ours.0 - 1].bone;
     println!("south's put-back: port tick {} {:?} (main bone at {bone:?}), original tick {} {:?}", ours.0, ours.1, theirs.0, theirs.1);
+    // The original's is the teleport's (R14); pinned to see either change.
     assert_eq!((ours.0, theirs.0), (8, 14), "the main bone's map-edge tick, the port's and the original's");
 
     // The control: without the windmill the bike stays where it stands.
@@ -10745,7 +10755,64 @@ fn the_rustic_windmill_throws_a_bike_as_the_original_does() {
     lanes("apex put-back", ours.0, ours.1, &theirs.1, 1e-4);
     let bone = port[ours.0 - 1].bone;
     println!("apex's put-back: port tick {} {:?} (main bone at {bone:?}), original tick {} {:?}", ours.0, ours.1, theirs.0, theirs.1);
+    // The original's is the teleport's (R14), as south's is.
     assert_eq!((ours.0, theirs.0), (42, 85), "the main bone's map-edge tick, the port's and the original's");
+}
+
+/// R14's capture `name` (research/r14_windmill_bones.py): its rows by column name.
+fn r14_capture(name: &str) -> Option<Vec<std::collections::HashMap<String, f32>>> {
+    let path = private_dir("capture").join("r14").join(format!("{name}.csv"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no {} — research/r14_windmill_bones.py says how it is recorded", path.display());
+        return None;
+    };
+    let mut lines = text.lines();
+    let head: Vec<String> = lines.next()?.split(',').map(str::to_owned).collect();
+    Some(lines.map(|l| head.iter().cloned().zip(l.split(',').map(|c| c.parse().unwrap())).collect()).collect())
+}
+
+/// **R14: S211's original put-back ticks are the teleport's, not the windmill's.**
+///
+/// research/r14_windmill_bones.py's runs, from recording2's state (its slot 8) teleported to S211's
+/// south spot after 30 frames of riding. `south`: S167's teleport, which moves the bike but not the
+/// ragdoll's bone bodies. On the first frame the main bone is put on the bike and the rest are left
+/// where the bike was, ~1,166 ft away; the riding pose's joints then drag them across the gap at
+/// ~15,000 ft/s, the main bone with them, and the cannonball (S59) throws as soon as it is past the
+/// map's margin. So the original's 14 and 85 in S211 measure the teleport. `south-bones`: the same
+/// run with every bone moved with the bike. The windmill wrecks the bike as before, the bones go
+/// with the wreck at ~130 ft/s, and nothing throws in 188 frames; the port's ride from that image
+/// throws nothing either, and its main bone stays by the original's. The port wrecks a tick early
+/// from this image (its tick `t` is the csv's row `t + 2`), filed.
+#[test]
+fn the_windmill_wrecks_the_bones_with_the_bike() {
+    let Some(left) = r14_capture("south") else { return };
+    let Some(moved) = r14_capture("south-bones") else { return };
+    let bone = |r: &std::collections::HashMap<String, f32>, i: usize| [r[&format!("b{i}_x")], r[&format!("b{i}_y")], r[&format!("b{i}_z")]];
+    let apart = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    let thrown = |rows: &[std::collections::HashMap<String, f32>]| rows.iter().position(|r| r["reason"] == 13.0);
+
+    // S167's teleport: the bones strung out on the first frame, and the main bone's put-back.
+    let gap = apart(bone(&left[2], 0), bone(&left[2], 1));
+    println!("south: bones 0 and 1 {gap:.0} ft apart on row 2; put-back on row {:?}", thrown(&left));
+    assert!(gap > 1000.0, "the bones left behind: {gap}");
+    assert!(left[4]["b0_vx"].abs() > 10_000.0, "the joints' drag: {}", left[4]["b0_vx"]);
+    assert!(thrown(&left).is_some_and(|r| r < 20), "the teleport's put-back");
+
+    // Bones and all: the same wreck, and no put-back in the original's or the port's.
+    assert_eq!(moved[3]["reason"], 4.0, "the windmill's wreck");
+    assert_eq!(thrown(&moved), None, "the original throws nothing in {} frames", moved.len());
+    let image = private_dir("capture").join("r14").join("south-bones-before.ram");
+    let Some(port) = s211_ride_in(&image, [0.0; 3], 40, true) else { return };
+    assert_eq!(s211_cannonball(port.iter().map(|p| [p.vel.x(), p.vel.y(), p.vel.z()])), None, "the port throws nothing");
+    let mut far = 0.0f32;
+    for (t, p) in port.iter().enumerate().take(30) {
+        let d = apart([p.bone.x(), p.bone.y(), p.bone.z()], bone(&moved[t + 2], 0));
+        println!("tick {}: port main bone {:?}, {d:.2} ft from the original's", t + 1, p.bone);
+        far = far.max(d);
+    }
+    println!("the main bones at most {far:.2} ft apart over 30 ticks");
+    // ~1 ft at the wreck, then ~0.35 ft a tick apart (the wreck bodies' speeds differ by ~10 ft/s).
+    assert!(far < 12.0, "the port's main bone leaves the original's: {far}");
 }
 
 /// **S129: the bike meeting the Dallas train, in the original and replayed.**
