@@ -106,8 +106,13 @@ fn backing_up_the_rider_plays_the_reverse_pair() {
         assert!(r.state.wreck.is_none() && r.body.machine.mode == Mode::Riding, "tick {i}: not riding but {:?}", r.body.machine.mode);
         assert_eq!(r.ride.held.reverse, if seen < REVERSE_BELOW { F::ONE } else { F::ZERO }, "tick {i}");
         slowest = slowest.min(r.ride.chassis.local_vel.z());
-        // Asked for on the tick the command is up; running from the next, as the step latches it.
-        // With the bars centred, the right one: the original's state 34 all the way back (P72's capture).
+        // Asked for on the tick after the command is up (F13: the body asks with last tick's), as P72's
+        // capture runs 34 from the row after the command; running from then on, as the step latches it.
+        // With the bars centred, the right one: the original's state 34 all the way back.
+        if i == 0 {
+            assert_ne!(r.body.veh.want, REVERSE_R, "tick 0: the body asked for the pair with the command just up");
+            continue;
+        }
         assert_eq!(r.body.veh.want, REVERSE_R, "tick {i}: the body asked for state {}", r.body.veh.want);
         if r.body.veh.state != REVERSE_R {
             assert!(i < 2, "tick {i}: backing up, the body runs state {}", r.body.veh.state);

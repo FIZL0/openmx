@@ -756,7 +756,7 @@ wire!(crate::toys::Hint; at);
 wire!(crate::toys::Bodies; n);
 wire!(crate::ghost::Ghost { clock, alpha, on });
 wire!(crate::foot_down::Feet { held, fade, weight });
-wire!(crate::rider::PutBack { placed, filled, held, wreck });
+wire!(crate::rider::PutBack { placed, filled, held, wreck, reverse });
 wire!(crate::event::Seat { left, ridden, taking_part, out, paused, reached, warning, saved });
 wire!(crate::event::Competition { target, seats, limit, length, interval, elapsed, tally, counting, running, over, timed_out, ended, clock, leader, tie, heard });
 wire_enum!(crate::event::Verdict { Win, Lose, Tie });
