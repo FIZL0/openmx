@@ -1,6 +1,6 @@
 """R14: research/s167_windmill.py's run, logging the rider's ragdoll bones as well.
 
-usage: python3 -B research/r14_windmill_bones.py PID STATE_SLOT X Y Z SECONDS OUT.csv [bones]
+usage: python3 -B research/r14_windmill_bones.py PID STATE_SLOT X Y Z SECONDS OUT.csv [bones] [ride=N]
 
 The same teleport, pause and resume as research/s167_windmill.py (its columns come first, so
 tests/replay.rs `s211_capture` reads the csv as it reads S167's), and RAM images OUT-before.ram and
@@ -26,6 +26,9 @@ on the next frames the riding ragdoll's joints drag them across the gap, and the
 at ~15,000 ft/s along it (R14). With `bones` the same delta also moves every triple near the bike
 in the body actor's neighbourhood (actor - 0x2800 .. vehicle + 0x2800), the parts array and the
 bodies after it, and the nine bone collisions.
+
+After the load it rides 30 frames (no pad) before it pauses; `ride=0` teleports on the loaded frame
+itself (B15: a state saved mid-jump, research/b15_recording2_state.py's).
 Run it under `./kit pcsx2 with --`, with PCSX2 started under QT_ACCESSIBILITY=1.
 """
 
@@ -47,7 +50,8 @@ STATE = int(sys.argv[2])
 X, Y, Z = (float(v) for v in sys.argv[3:6])
 SECS = float(sys.argv[6])
 OUT = Path(sys.argv[7])
-BONES = len(sys.argv) > 8 and sys.argv[8] == 'bones'   # move the ragdoll with the bike
+BONES = 'bones' in sys.argv[8:]   # move the ragdoll with the bike
+RIDE = next((int(a[5:]) for a in sys.argv[8:] if a.startswith('ride=')), 30)
 SYM = cfg().symbols
 FRAME = SYM['frame_counter']
 MANAGER = SYM['game_manager']
@@ -91,16 +95,21 @@ def f3(a):
     return struct.unpack('<3f', p.read_block(a, 12))
 
 
-p.load_state(STATE)
-# Run a while past the load: on the loaded frame itself the image is not a ridden tick's (R14 saw
-# the port wreck a tick early from one), and the first tick after a load reads the saved controls.
-wait(1.0)
-if paused():   # a previous run leaves the VM paused, and a load keeps it so
+if RIDE == 0 and not paused():   # a load keeps the VM paused
     A.press(item)
-start = p.read32(FRAME)
-end = time.time() + 30
-while p.read32(FRAME) < start + 30 and time.time() < end:
-    wait(0.1)
+    wait(0.5)
+p.load_state(STATE)
+wait(1.0)
+if RIDE:
+    # Run a while past the load: on the loaded frame itself the image is not a ridden tick's (R14
+    # saw the port wreck a tick early from one, which B16 found was the test's seeding), and the
+    # first tick after a load reads the saved controls.
+    if paused():   # a previous run leaves the VM paused, and a load keeps it so
+        A.press(item)
+    start = p.read32(FRAME)
+    end = time.time() + 30
+    while p.read32(FRAME) < start + RIDE and time.time() < end:
+        wait(0.1)
 if not paused():
     A.press(item)
 wait(0.5)
