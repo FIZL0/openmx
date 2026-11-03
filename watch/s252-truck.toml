@@ -1,0 +1,85 @@
+# s252-truck.toml — the biplane parked in a HasPhysics truck's way on free06, one row a tick (S252).
+#
+# The plane (MXBiplane 0x00c44a40): s241-strike.toml's lanes. The company truck (ctruck, 0x01cc4440,
+# research/oracle.txt S186): its physical flag (+0x588, the struck listener's wake sets it), +0x58c, its
+# position (+0x470) and heading (+0x480), its path clock (+0x430 -> +0xc) and the struck mode's model
+# node's world rows (+0x2e0 is the pose its last update left). research/s252/aim.py parks the plane;
+# research/s252/strike.py records this from its state and saves states around the wake:
+#
+#   KIT_PCSX2=3 ./kit pcsx2 with -- python3 -B research/s252/strike.py NAME SLOT
+
+[watch]
+name        = "s252-truck"
+description = "the biplane parked in free06's company truck's way, a row a tick"
+every       = 1
+frames      = 600
+
+[setup]
+warmup    = 0
+settle_ms = 240
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "crash"
+addr = "0xc44a40 + 0x3b0"
+type = "u32"
+
+[[field]]
+name = "crash_time"
+addr = "0xc44a40 + 0x3bc"
+type = "f32"
+
+[[field]]
+name = "plane_touch"
+addr = "0xc44a40 + 0x170 -> 0x40"
+type = "bytes:16"
+
+[[field]]
+name = "plane_contacts"
+addr = "0xc44a40 + 0x170 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "body_pos"
+addr = "0xc44a40 + 0x160 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "body_vel"
+addr = "0xc44a40 + 0x160 -> 0x70"
+type = "f32x4"
+
+
+[[field]]
+name = "truck_physical"
+addr = "0x1cc4440 + 0x588"
+type = "u32"
+
+[[field]]
+name = "truck_was_physical"
+addr = "0x1cc4440 + 0x58c"
+type = "u32"
+
+[[field]]
+name = "truck_clock"
+addr = "0x1cc4440 + 0x430 -> 0xc"
+type = "f32"
+
+[[field]]
+name = "truck_pos"
+addr = "0x1cc4440 + 0x470"
+type = "f32x4"
+
+[[field]]
+name = "truck_heading"
+addr = "0x1cc4440 + 0x480"
+type = "f32x4"

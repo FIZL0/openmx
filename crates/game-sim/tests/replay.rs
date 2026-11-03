@@ -12057,6 +12057,149 @@ fn a_bike_meets_a_moving_truck_as_the_original_does() {
     }
 }
 
+// --- S252: the parked biplane's search wakes free06's company truck, in the original ------------------
+//
+// S186a woke a `HasPhysics` truck from the riding bike's body rays only; the original's car mesh hears
+// every search that strikes it (its struck listener). Here biplane.p2m2's plane is parked on the company
+// truck's road at a point a first capture showed the truck pass (`research/s252/aim.py`, AT=3933.0,201.6,2609.2,
+// copy 3's slot 21 from the biplane state's slot 8), and the truck drives into it with no pad. The
+// original's plane search strikes the truck's mesh and the truck is physical (+0x588) on 11092, the tick
+// the plane's contacts come on:
+//
+//   ./kit pcsx2 with -- python3 -B research/s252/strike.py plane 21 0 --frames 240 --late 30
+//   python3 -B research/s252/slots.py ram plane-11072
+//
+// (context/capture/s252/plane.csv; the states around it in context/s252/, their RAM in
+// context/states/s252-plane-*.eeMemory.bin.)
+
+/// The state the S252 run starts from, asked for on 11072, and the tick the original's truck wakes.
+const S252_STATE: &str = "s252-plane-11072.eeMemory.bin";
+const S252_WAKE: u64 = 11092;
+
+/// Free06's cars as an S252 state holds them, [`biplane_traffic`]'s way.
+fn s252_traffic(ram: Vec<u8>, disc: &mut Disc, area: &Area, ground: &Ground) -> game_sim::traffic::Traffic {
+    let st = SaveState { ram, rider: 0 };
+    let mut parts = Vec::new();
+    for name in [area.named.track.clone(), area.named.track.replace(".res", "_2.res")] {
+        if let Some(bytes) = disc.member(&name) {
+            if let Ok(res) = Res::parse(&bytes) {
+                parts.push((bytes, res));
+            }
+        }
+    }
+    let file = |want: &str| parts.iter().find_map(|(bytes, res)| by_suffix(res, want).and_then(|e| res.read(bytes, e).ok()));
+    let top = game_sim::contact_search::Heightfield::max(&ground.field());
+    let edge = game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [F(top.x()), F(top.z())] };
+    st.traffic_with_trucks(|want| file(want)).with_physics(st.trucks_physics(edge, |want| file(want)))
+}
+
+/// **S252: a parked plane wakes the truck that drives into it, as the original's does**: the port's
+/// plane, its body, tires and engine the state's ([`off_the_save_state`]), parked in free06 among the
+/// state's cars, ticked with no pad. The truck reaches it and the plane's search strikes the truck's
+/// mesh ([`game_sim::world::Prop::strike_heard`] from [`game_sim::flight_search`]'s prop pair), and the
+/// traffic wakes it ([`game_sim::traffic::Traffic::heard`]) on the original's tick. Without the
+/// strike it drives on through the plane. The state is the capture row whose body it holds (the save
+/// lands a tick after it was asked for). Skipped with a line where the capture, the state or the disc
+/// is not here.
+#[test]
+fn a_parked_plane_wakes_the_truck_driving_into_it_as_the_original_does() {
+    let path = private_dir("capture").join("s252").join("plane.csv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no {} — S252's comment above says how it is recorded", path.display());
+        return;
+    };
+    let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let image = private_dir("states").join(S252_STATE);
+    let (Ok(ram), Ok(ee)) = (std::fs::read(&image), ps2_oracle::Ee::from_ram(&image)) else {
+        println!("no {} — research/s252/slots.py ram plane-11072 writes it", image.display());
+        return;
+    };
+    let Some(mut disc) = Disc::open() else { return };
+    let (Some(plane), Some(rays)) = (the_plane_the_human_flew(&mut disc), the_planes_rays(&mut disc)) else {
+        println!("no plane in this disc's machine.res");
+        return;
+    };
+    let mut areas = Area::all_of(&mut disc, BIPLANE_TRACK);
+    assert_eq!(areas.len(), 1, "{BIPLANE_TRACK} is one area");
+    let area = areas.pop().unwrap();
+    let terrain = Terrain::parse(&area.terrain).expect("free06's terrain");
+    // Two worlds, one a run: the props hold the cars' meshes and the marks a search leaves on them.
+    let mut worlds = Vec::new();
+    let mut traffic = None;
+    for _ in 0..2 {
+        let ground = Ground::new(&terrain, &area.scene.terrain);
+        let (mut props, _) = area.props(&mut disc);
+        let mut t = s252_traffic(ram.clone(), &mut disc, &area, &ground);
+        t.attach(&mut props);
+        traffic = Some(t);
+        worlds.push(Place { ground, props });
+    }
+    let traffic = traffic.unwrap();
+
+    let quad = |at: u32| Vf::new(ee.f32_at(at), ee.f32_at(at + 4), ee.f32_at(at + 8), ee.f32_at(at + 12));
+    let b = ee.u32_at(BIPLANE_PLANE + plane_at::BODY);
+    let mut f = game_sim::flight::Flight::new(&plane).with_rays(rays);
+    (f.body.position, f.body.velocity, f.body.quat, f.body.rates) = (quad(b + 0x60), quad(b + 0x70), quad(b + 0x170), quad(b + 0x1b0));
+    f.engine.prop_angle = F(ee.f32_at(ee.u32_at(BIPLANE_PLANE + plane_at::ENGINE) + plane_at::ENGINE_PROP_ANGLE));
+    off_the_save_state(&mut f, &ee).unwrap_or_else(|e| panic!("{S252_STATE}: {e}"));
+    let mut sim = Sim::new(0x5252);
+    f.remeasure(&sim.tables.ride.acos);
+    sim.plane = Some(f);
+    sim.traffic = traffic;
+
+    let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+    let held = ["x", "y", "z"].map(|c| col(&format!("body_pos.{c}")));
+    let pos = sim.plane.as_ref().unwrap().body.position.to_bits();
+    let row = (0..cap.rows.len())
+        .find(|&r| held.iter().zip(pos).all(|(&at, w)| cell(&cap, r, at).parse::<f32>().map(f32::to_bits) == Ok(w)))
+        .expect("the state's plane is on a capture row");
+    let want = S252_WAKE - cap.frames[row];
+    println!("{S252_STATE} is the capture's {} row; the original's truck wakes {want} ticks on", cap.frames[row]);
+    let woken = |sim: &Sim| sim.traffic.physics.iter().position(|p| p.as_ref().is_some_and(|p| p.physical));
+    assert_eq!(woken(&sim), None, "no truck is physical in the state");
+    let ctruck = sim.traffic.physics.iter().position(Option::is_some).expect("a HasPhysics car");
+    let truck = |r: usize| ["x", "z"].map(|c| cell(&cap, r, col(&format!("truck_pos.{c}"))).parse::<f32>().unwrap());
+    // Each tick up to the wake, the plane's body (position and velocity) put on the capture's row
+    // before it, where `pin`: the port's parked plane creeps on its tires a little short of the
+    // original's (0.25 ft by 11091), which is the plane's ground roll and not this lane.
+    let run = |pin: bool, world: &mut Place| {
+        let mut sim = sim.clone();
+        let mut woke = None;
+        for t in 1..=want + 20 {
+            if let Some(r) = cap.frames.iter().position(|&v| v == cap.frames[row] + t - 1).filter(|_| pin && t <= want) {
+                let n = |c: &str| cell(&cap, r, col(c)).parse::<f32>().unwrap();
+                let b = &mut sim.plane.as_mut().unwrap().body;
+                b.position = Vf::new(n("body_pos.x"), n("body_pos.y"), n("body_pos.z"), 1.0);
+                b.velocity = Vf::new(n("body_vel.x"), n("body_vel.y"), n("body_vel.z"), 0.0);
+            }
+            sim.tick_in(Input::default(), world);
+            let r = cap.frames.iter().position(|&v| v == cap.frames[row] + t).expect("a row a tick");
+            let point = sim.traffic.cars[ctruck].point;
+            if pin && t <= want {
+                // The truck's path is the original's to the capture's digits up to the wake, and
+                // stopped where the original's is on it.
+                let [x, z] = truck(r);
+                assert!((point.x() - x).abs() < 1e-3 && (point.z() - z).abs() < 1e-3, "tick {t}: the truck at {:?}, the original's ({x}, {z})", point.0);
+            }
+            if woke.is_none() && let Some(k) = woken(&sim) {
+                woke = Some((t, k, point));
+            }
+        }
+        woke
+    };
+    let [mut a, mut b] = <[Place; 2]>::try_from(worlds).ok().unwrap();
+    let pinned = run(true, &mut a);
+    let free = run(false, &mut b);
+    println!("the port's truck wakes {pinned:?} with the plane on the capture's rows, {free:?} with the port's own");
+    let wake_row = cap.frames.iter().position(|&v| v == S252_WAKE).expect("the wake's row");
+    let [x, z] = truck(wake_row);
+    let (t, k, at) = pinned.expect("the plane's search wakes the truck");
+    assert_eq!((t, k), (want, ctruck), "the company truck wakes on the original's tick, {S252_WAKE}");
+    assert!((at.x() - x).abs() < 1e-3 && (at.z() - z).abs() < 1e-3, "it stops at the original's point: {:?}, ({x}, {z})", at.0);
+    // The port's own plane, a quarter foot short, is met two path steps later, and wakes it still.
+    assert_eq!(free.map(|w| (w.0, w.1)), Some((want + 2, ctruck)), "the port's own plane wakes the truck");
+}
+
 // ---------------------------------------------------------------------------------------------------
 // F18: the native build's tolerance suite
 // ---------------------------------------------------------------------------------------------------

@@ -763,6 +763,7 @@ impl Tiled {
                     centre: p.centre,
                     radius: p.radius,
                     moving: p.moving,
+                    heard: Default::default(),
                 })
                 .collect();
             if NEAR_KEPT <= self.near.len() {

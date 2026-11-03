@@ -15,3 +15,9 @@ S186a (file 2): a riding bike's body rays now strike a truck (`Traffic::strike` 
 both, S207's ctruck and S219's rear captures meet the truck on the original's tick, and rear wrecks
 as the original does. The strike tick's push still parts. The f.col's two-way contact is S251, and
 the other searches' strikes are S252.
+
+S252 (file 3, FINAL): every search that strikes a truck's path mesh now wakes it. A search marks the
+world's `Prop` (`strike_heard`), and `Traffic::heard` takes the marks at `frame_late`. The ragdoll's
+copied cars carry their prop. A PCSX2 capture of the biplane parked in ctruck's way wakes the truck
+on 11092, and so does the port, with the plane on the capture's rows (two ticks later on the port's
+own creeping plane).

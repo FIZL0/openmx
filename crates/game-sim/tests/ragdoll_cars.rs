@@ -200,6 +200,8 @@ fn path_car(ee: &Ee, mesh: &Mesh, car: u32) -> PathCar {
         distance: F::ZERO,
         centre: vf(ee, collidable + at::CENTRE),
         radius: F(ee.f32_at(collidable + at::REACH)),
+        prop: 0,
+        struck: false,
     }
 }
 

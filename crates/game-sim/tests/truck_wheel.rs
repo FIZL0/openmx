@@ -12,7 +12,8 @@
 //!    the `f.col`'s and not the path mesh's (which the wake stood down);
 //! 2. what the wheel stands on is the body: the same drop onto the truck sliding leaves the bike going
 //!    otherwise than onto it still;
-//! 3. asleep (not struck), a wheel on the truck is on its path mesh: a vehicle and no owner;
+//! 3. asleep (not struck), a wheel on the truck is on its path mesh: a vehicle and no owner, and the
+//!    mesh hears the wheel's search, so the truck wakes (S252);
 //! 4. the physics objects and the path mesh are back where they were after the bike's frame.
 //!
 //! Skipped with a line where the disc is not there.
@@ -195,13 +196,14 @@ fn a_wheel_stands_on_a_woken_truck() {
     assert_ne!(still.to_bits(), going.to_bits(), "the truck's body reaches the bike: {still:?} both ways");
 
     // Asleep (never struck), a wheel on the truck stands on its path mesh: a vehicle and no owner, as
-    // before S208, and nothing is lent.
+    // before S208, and nothing is lent. The mesh hears the wheel's search, so the truck is woken at
+    // the frame's end (S252).
     let car = asleep.traffic.cars[0].pose.0[3];
     let mut found = None;
     'asleep: for dy in (4..=48).map(|k| k as f32 * 0.25) {
         for dz in (-6..=6).map(|k| k as f32) {
             let s = drop(&asleep, Vf::new(car.x(), car.y() + dy, car.z() + dz, 1.0), &mut world, &asleep_moved);
-            if !truck(&s).physical && words(&s.rider).iter().any(|&(_, v)| v != 0) {
+            if words(&s.rider).iter().any(|&(_, v)| v != 0) {
                 found = Some(s);
                 break 'asleep;
             }
@@ -210,4 +212,5 @@ fn a_wheel_stands_on_a_woken_truck() {
     let s = found.expect("some spot over the sleeping truck where a wheel stands on its path mesh");
     assert!(words(&s.rider).iter().all(|&(o, _)| o == 0), "asleep, no wheel has an owner: {:x?}", words(&s.rider));
     assert!(s.rider.ride.props.is_none() && s.traffic.physics[0].is_some(), "the physics objects stay in the traffic");
+    assert!(truck(&s).physical, "the wheel's strike on the path mesh woke the truck");
 }

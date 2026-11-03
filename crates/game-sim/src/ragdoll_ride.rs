@@ -610,6 +610,14 @@ impl Down {
                 set.struck(p.pushed.collection, p.pushed.object);
             }
         }
+        // And the cars a sphere's record took hear it on their meshes (S252), for the traffic to wake.
+        if let (Some(b), Some(props)) = (&bike_scene, world.moving()) {
+            for c in b.cars.iter().filter(|c| c.struck) {
+                if let Some(p) = props.props.get(c.prop) {
+                    p.strike_heard();
+                }
+            }
+        }
         // Where the first sphere stood, if it stood: its collision on and its bone enabled.
         if let (Some(b), Some(s), Some(c)) = (&bike_scene, kit.spheres.first(), self.ragdoll.collisions.first())
             && c.enabled
