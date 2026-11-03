@@ -181,9 +181,10 @@ pub fn rsqrt(a: f32, b: f32) -> f32 {
 ///
 /// The magnitude is taken as `b << 1` (twice the pattern, sign gone) rather than `b & 0x7fff_ffff`.
 /// LLVM reads the mask as an `fabs`, and once these ops are inlined into a caller that sets the sign
-/// bit (a `sub` of a value it knows is positive), its x86 backend dropped the `min`: rustc 1.99.1 gave
+/// bit (a `sub` of a value it knows is positive), its code generator dropped the `min`: rustc 1.99.1 gave
 /// `2 − 1.5·2^-22 = −max` in release and the right answer in debug (F17 journal). The shift has no
-/// float reading, so that does not happen.
+/// float reading, so that does not happen. The bug is LLVM 23's known bits for `fabs` (on every
+/// target), fixed upstream by llvm-project 6bb86c2af2ba; R21's journal has the reduction.
 #[inline(always)]
 pub(crate) fn vu_bits(b: u32) -> u32 {
     let mag2 = (b << 1).min(0x7f7f_ffff << 1);
