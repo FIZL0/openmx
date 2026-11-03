@@ -1,0 +1,25 @@
+# MD92 ride from Untamed's state 8 (Rocksbury Free Ride, at rest at the gate): openmx-mods' drive.pad
+# (gas 9 s, which flew the first lip and wrecked on a later landing), then wait out the put-back, then
+# steer left and right, brake, gas, coast.
+down cross
+sleep 270t
+release
+sleep 180t
+down cross
+sleep 30t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 20t
+stick l 1 0
+sleep 30t
+stick l 0 0
+sleep 20t
+up cross
+down square
+sleep 30t
+up square
+down cross
+sleep 30t
+release
+sleep 30t
