@@ -7862,3 +7862,21 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 #   in order at the port's distances bit for bit; 20,000 spheres through collide_against_search with lists of a
 #   sleeping prop alone / twice / after the nearest scene mesh / before the nearest sleeping prop match the port's
 #   walk (count, with, held, point, normal); 13 strikes wake as PropSet::struck.
+
+# --- S248: a driven car's particles (crates/openmx/src/particles.rs PlaneFrame::car / TireFrame::car /
+#   car_list, main.rs load_car_fx; tests/car_particles.rs; journal 2026-11-02-s248-car-particles)
+# The car's particle loader (buggy and baja 0x0039e230, the monster truck's 0x003dfd90, called from the car
+#   setup 0x0020a640) reads tracks\buggyparticles.dat / monsterparticles.dat / bajaparticles.dat (a
+#   freeride track's second archive) into the same manager the bike and plane run, and points its four tire
+#   records at the car's tire objects (car +0x548..+0x554, FL FR RL RR = AttachedToTire 0..3):
+#   record +0 <- tire +0x140 contact, +4 <- +0x120 normal, +8 <- +0xb4 solid ground (the ground-contact
+#   flag), +0xc <- +0xb8 sorted (object contact), +0x10 <- +0xdc compression, +0x14 <- +0x1e4 slipping (the
+#   spray's "spinning"), +0x1c <- +0x1ec locked, +0x20 <- +0x2b0 side ratio (the spray's side force),
+#   +0x24 <- +0x100 surface (zone byte).
+# Its car words: throttle +0x3ec (the rate-limited throttle), clutch +0x3f0 (engaged clutch), speed +0x55c
+#   (ground speed), wreck +0x754. The port reads the wreck as Machine::wrecked (+0x2c4); +0x754 is not
+#   identified.
+# The particle nodes (FrontLeft_TireParticles, buggy_FtireL_particles, baja_exhaust_particles, ...) are all
+#   children of the model's root.
+# The DirtSpray and Chunks zone descriptors say none to Zone1 (surface 0): a car on surface 0 dusts but
+#   throws no dirt or chunks.

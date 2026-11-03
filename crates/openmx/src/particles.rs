@@ -100,6 +100,11 @@
 //! have started, raised by its emit point's extent's height — the prop wash's dust starts one to
 //! three feet off the ground, wherever the plane is.
 //!
+//! **The cars** (S248) run the same manager off their own lists ([`car_list`]), with four tires where
+//! the bike has two: the car's loader points the manager's tire records into the four tire objects
+//! and its throttle, clutch, speed and wreck into the car ([`PlaneFrame::car`], [`TireFrame::car`]).
+//! Their nodes hang off the model's root, so each is the car's matrix times the node's bind place.
+//!
 //! **Its own random numbers.** A particle is presentation: nothing here reads or draws from the
 //! simulation's `rand`, and nothing the simulation reads is written ([`Rng`]).
 //!
@@ -1174,6 +1179,60 @@ impl PlaneFrame {
             self.object_contacts = if record.on_ground { points.into_iter().take(1).collect() } else { points };
         }
         self.contact_vel = Some(v3(relative.x(), relative.y(), relative.z()));
+    }
+
+    /// What a driven car's particles read off it this frame (S248), as the original's car manager is
+    /// wired (`research/oracle.txt` S248): `nodes` where the car is, the throttle after its rate limit
+    /// and the clutch as the engine reads it, the body's ground speed, the wreck, its four tires
+    /// ([`TireFrame::car`], front left, front right, rear left, rear right: `AttachedToTire`'s 0 to
+    /// 3) and, with its collision object out, that object's contacts ([`PlaneFrame::touch`]).
+    pub fn car(m: &game_sim::car::Machine, nodes: Vec<(String, M4)>, struck: Option<&game_sim::car::Collision>) -> PlaneFrame {
+        let v = m.body.velocity;
+        let mut frame = PlaneFrame {
+            nodes,
+            throttle: m.controls.throttle.0,
+            airspeed: m.ground_speed.0,
+            clutch: m.controls.engaged_clutch.0,
+            wrecked: m.wrecked,
+            vel: v3(v.x(), v.y(), v.z()),
+            tires: m.wheels.iter().map(TireFrame::car).collect(),
+            ..Default::default()
+        };
+        if let Some(c) = struck {
+            frame.touch(&c.record, c.collider.relative);
+        }
+        frame
+    }
+}
+
+/// A car's emitter list (S248), `tracks\<list>` in a freeride track's second archive, by the car's
+/// directory in `machine.res`: `buggyparticles.dat`, `monsterparticles.dat`, `bajaparticles.dat`.
+/// Each is the bike's kind of list on four tires: a dust, a dirt spray and chunks a tire (the truck's
+/// fronts throw no dirt, its rears add a `Generic` dust spray), collision chunks off the rears, the
+/// exhaust and the wreck's dust and chunks. `None` for a directory that is no car.
+pub fn car_list(dir: &str) -> Option<&'static str> {
+    match dir.to_ascii_lowercase().as_str() {
+        "buggy" => Some("buggyparticles.dat"),
+        "monstertruck" => Some("monsterparticles.dat"),
+        "baja" => Some("bajaparticles.dat"),
+        _ => None,
+    }
+}
+
+impl TireFrame {
+    /// One of a car's tires as its manager's record points into it (S248): ground contact the tire's
+    /// solid ground (`+0xb4`), object contact its sorted contact (`+0xb8`), the compression
+    /// (`+0xdc`), the surface's low byte (`+0x100`), spinning its `slipping` (`+0x1e4`, the slip
+    /// ratio past 0.2) and the side force its side ratio (`+0x2b0`).
+    pub fn car(w: &game_sim::car::Wheel) -> TireFrame {
+        TireFrame {
+            ground: w.solid,
+            object: w.sorted,
+            compression: w.s.compression.0,
+            zone: w.s.surface as u8,
+            spinning: w.s.slipping,
+            side: w.s.side_ratio.0,
+        }
     }
 }
 
