@@ -1792,6 +1792,18 @@ impl Collision {
     /// ([`ROTOR_CATEGORY`], [`ROTOR_SPARED`]). Whether its first contact struck an object whose
     /// category is not in [`STRUCK_MASK`].
     pub fn rotor_struck(&mut self, rotor: &[[Vf; 2]], matrix: &Mat4, world: &mut dyn crate::world::World) -> bool {
+        let first = self.rotor_first_hit(rotor, matrix, world);
+        first.is_some_and(|h| crate::flight_search::category(h.struck.object) & STRUCK_MASK == 0)
+    }
+
+    /// The rotor probe's first hit (C19), as [`Collision::rotor_struck`] searches it: what the
+    /// original's ray record at `rotor probe + 0x6c` holds as its first point and `objects[0]`.
+    pub fn rotor_first_hit(
+        &mut self,
+        rotor: &[[Vf; 2]],
+        matrix: &Mat4,
+        world: &mut dyn crate::world::World,
+    ) -> Option<crate::contact_search::Hit> {
         use crate::contact_search::Search;
         use crate::flight_search::{self, Scene};
         let segments: Vec<_> = rotor.iter().map(|&[from, to]| crate::ray_probe::Segment { from, to }).collect();
@@ -1801,8 +1813,7 @@ impl Collision {
         let (field, props, trees) = world.wooded_near(at);
         let bounds = field.as_deref().map(field_box);
         let mut scene = Scene::flown(props, trees, None, bounds, &rays, &node, &mut self.nearby).ray_of(ROTOR_CATEGORY, &ROTOR_SPARED);
-        let hits = scene.rays(true);
-        hits.first().is_some_and(|h| flight_search::category(h.struck.object) & STRUCK_MASK == 0)
+        scene.rays(true).first().copied()
     }
 
     /// The record's entries as the touchdown reads them.
