@@ -6,19 +6,22 @@
 //!   and [`head_tail`] (the centre of mass moved with the stick, the brake and the clutch ramp).
 //! - The Force body's [`gravity`], [`engine_update`] (two driven wheels), [`air_drag`],
 //!   [`wheel_clear`], [`rev_limit`] and [`peak_rates`].
+//! - Part 3 (MD75b1): the Force body's [`spin_air`] (the 360, off the scene node's heading), and the
+//!   PostProcess's [`vehicle_post`] (the quad's node placed at the body, if it is in the world) and the
+//!   node's position ([`Scene::position`]), on a small scene graph of the node's own ([`Scene`]).
 //!
 //! Each is MX Unleashed's step of the same name where SLUS-21104 kept it (`crate::r#move`), with the
 //! differences written out where they fall: the engine drives one wheel *or two*, halving the torque
 //! between them, and reads the road's revs off the first one's spin alone; the head and tail picks
 //! one of three poses; the gravity lives on the vehicle, not the body, and it pokes the collision
-//! record. The field map is research/oracle.txt's (`# MD75b`). Proof: `tests/atv_quad.rs`, each call
+//! record. The field map is research/oracle.txt's (`# MD75b`, `# MD75b1`). Proof: `tests/atv_quad.rs`, each call
 //! unhooked against SLUS-21104's own code.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::r#move::{Curve, Engine, MAX_RPM_POINTS, Params, set_gear};
-use crate::quad::{Body, Quad};
-use ps2_float::vu::Dest;
+use crate::quad::{Bike, Body, Call, Quad};
+use ps2_float::vu::{self, Dest, Field};
 use ps2_float::{F, Vf, fpu, fpu::Acc};
 
 /// Radians a second to RPM and back, as the engine loads them.
@@ -55,6 +58,11 @@ pub struct Parts {
     pub body_on: bool,
     pub flags: u8,
     pub record: bool,
+    /// MD75b1's: the 360's words ([`Spin`]), the scene graph the quad's node is in ([`Scene`], the
+    /// quad's node first) and the world's bounds the vehicle post holds the quad in ([`Bounds`]).
+    pub spin: Spin,
+    pub scene: Scene,
+    pub bounds: Bounds,
 }
 
 impl Default for Parts {
@@ -67,6 +75,9 @@ impl Default for Parts {
             body_on: false,
             flags: 0,
             record: false,
+            spin: Spin::default(),
+            scene: Scene::default(),
+            bounds: Bounds::default(),
         }
     }
 }
@@ -292,4 +303,409 @@ pub fn wheel_clear(w: &mut crate::wheel::Wheel, more: &mut crate::atv_wheel::Mor
     more.ground_velocity = NOTHING;
     more.ground_point_velocity = NOTHING;
     *ground = crate::atv_wheel::Ground::Still;
+}
+
+// --- MD75b1: the air spin, the vehicle's post step and the scene node's position ----------------------
+
+/// π and 2π as the 360's heading test loads them, and the 35° its clip changes at.
+const PI: u32 = 0x4049_0fdb;
+const TWO_PI: u32 = 0x40c9_0fdb;
+const SPIN_CLIP_ANGLE: u32 = 0x3f1c_61a9; // 0.6108652
+/// How far the stick goes over to arm the 360 or fire it, and the grace it is given on landing.
+const SPIN_STICK: u32 = 0x3f33_3333; // 0.7
+const SPIN_GRACE: u32 = 0x3f66_6666; // 0.9
+/// The lip: rising faster than this, and faster than this forward.
+const LIP_RISE: f32 = 5.0;
+const LIP_SPEED: f32 = 30.0;
+/// The low nibble of the trick buttons that arms it: R1 alone.
+const SPIN_BUTTONS: u8 = 4;
+
+/// The 360's words on the quad (`+0x11dc..+0x1224`, `+0x12b4`, `+0x13bc`/`+0x13c0`, `+0x1758`):
+/// armed, the stick flick's time range its torques are mapped over and the torques (pitch `x`, yaw
+/// `y`) at either end, the grace after landing, the yaw's decay rate under an opposite stick, the
+/// moment it pushes (`x` pitch, `y` yaw; `z` and `w` are not written), the heading it took off on,
+/// its direction (`1` left, `-1` right), the stick's flick, the stunt ids for the two directions and
+/// the 360's clip (0 none, 1 started, 2 past 35°). Its applied and active words are
+/// [`Bike::spin_applied`] and [`Bike::spin_active`], its ramp [`Quad::spinning`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spin {
+    pub armed: bool,
+    pub min_time: F,
+    pub max_time: F,
+    pub grace: F,
+    pub min_pitch: F,
+    pub max_pitch: F,
+    pub min_yaw: F,
+    pub max_yaw: F,
+    pub rate: F,
+    pub moment: Vf,
+    pub heading: F,
+    pub dir: i32,
+    pub flick: F,
+    pub stunt_right: u32,
+    pub stunt_left: u32,
+    pub clip: i32,
+}
+
+/// How many scene nodes [`Scene`] holds: the quad's and enough around it for a parent, a child and
+/// a sibling.
+pub const NODES: usize = 4;
+
+/// A scene node's frame words (`+0x30..+0xac`, `+0xf0..+0xf8`, `+0x100`): its frame in its parent's
+/// and in the world (rows `x`, `y`, `z`, then the position), its parent, first child and next
+/// sibling (indices into [`Scene::nodes`]), and its flag byte — bit 0 the world frame is current,
+/// bit 7 the bounds are stale.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Node {
+    pub local: [Vf; 4],
+    pub world: [Vf; 4],
+    pub parent: Option<usize>,
+    pub child: Option<usize>,
+    pub sibling: Option<usize>,
+    pub flags: u8,
+}
+
+/// The scene graph around the quad: node 0 is the quad's (`+0xe4`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scene {
+    pub nodes: [Node; NODES],
+}
+
+/// The world's bounds (quad `+0xe8`): its floor (`+0x98`) and the box (`+0xa8`, `None` for none; its
+/// `+0x30` low corner and `+0x40` high, of which `x` and `z` are read).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bounds {
+    pub floor: F,
+    pub area: Option<(Vf, Vf)>,
+}
+
+const CLEAN: u8 = 0x01;
+const STALE_BOUNDS: u8 = 0x80;
+
+/// `a · b` as the scene graph multiplies frames (`vmulax`, `vmadday`, `vmaddz` a row; the position
+/// row starts from `b`'s with `vaddax` of 0): `a`'s rows in `b`'s space.
+fn frame_mul(a: &[Vf; 4], b: &[Vf; 4]) -> [Vf; 4] {
+    let row = |r: Vf, acc: Vf| Vf::madd(Vf::madd(Vf::madd(acc, b[0], r.bc(Field::X)), b[1], r.bc(Field::Y)), b[2], r.bc(Field::Z));
+    let first = |r: Vf| Vf::madd(Vf::madd(b[0].mul(r.bc(Field::X)), b[1], r.bc(Field::Y)), b[2], r.bc(Field::Z));
+    [first(a[0]), first(a[1]), first(a[2]), row(a[3], b[3].add(Vf::ZERO))]
+}
+
+/// A rigid frame's inverse, as the frame set takes it of the parent's: the 3×3 transposed (each
+/// moved lane `0 + x`, the `w`s left), the position `0 - x·rx - y·ry - z·rz` over the transposed rows.
+fn frame_inverse(m: &[Vf; 4]) -> [Vf; 4] {
+    let lane = |v: Vf, d: Dest, x: f32| v.merge(d, Vf::splat(vu::add(0.0, x)));
+    let r0 = lane(lane(m[0], Dest::Z, m[2].x()), Dest::Y, m[1].x());
+    let r1 = lane(lane(m[1], Dest::Z, m[2].y()), Dest::X, m[0].y());
+    let r2 = lane(lane(m[2], Dest::Y, m[1].z()), Dest::X, m[0].z());
+    let p = m[3];
+    let acc = Vf::msub(Vf::msub(Vf::ZERO, r0, p.bc(Field::X)), r1, p.bc(Field::Y));
+    [r0, r1, r2, p.merge(Dest::XYZ, Vf::msub(acc, r2, p.bc(Field::Z)))]
+}
+
+/// The quaternion's frame at `pos` (`atv_quat_frame`): `q2 = q + q`, the rows `q·q2.x`, `q·q2.y`,
+/// `q·q2.z` with `w` 0, the off-diagonals `±` `q·q2.w`'s lanes, the diagonal `0 - ((a + b) - 1)`;
+/// the position row `pos` with `w` 1.
+pub fn quat_frame(q: Vf, pos: Vf) -> [Vf; 4] {
+    let q2 = q.add(q);
+    let w3 = q.mul(q2.bc(Field::W));
+    let row = |f: Field| q.mul(q2.bc(f)).merge(Dest::W, Vf::ZERO);
+    let (mut r0, mut r1, mut r2) = (row(Field::X), row(Field::Y), row(Field::Z));
+    let d = Vf::new(vu::add(r0.x(), r2.z()), vu::add(r1.y(), r0.x()), vu::add(r2.z(), r1.y()), 0.0);
+    let d = Vf::new(vu::sub(d.x(), 1.0), vu::sub(d.y(), 1.0), vu::sub(d.z(), 1.0), 0.0);
+    r0.0[1] = vu::add(r0.y(), w3.z());
+    r1.0[0] = vu::sub(r1.x(), w3.z());
+    r2.0[0] = vu::add(r2.x(), w3.y());
+    r0.0[2] = vu::sub(r0.z(), w3.y());
+    r1.0[2] = vu::add(r1.z(), w3.x());
+    r2.0[1] = vu::sub(r2.y(), w3.x());
+    r0.0[0] = vu::sub(0.0, d.z());
+    r1.0[1] = vu::sub(0.0, d.x());
+    r2.0[2] = vu::sub(0.0, d.y());
+    [r0, r1, r2, pos.merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0))]
+}
+
+impl Scene {
+    /// **The node's world frame brought up to date** (`atv_node_world_update`): unless it is current, the
+    /// parents up to the first current one (or the root), then each from the top down, its frame
+    /// times its parent's world frame (the root's own frame as it is), marked current.
+    pub fn update(&mut self, n: usize) {
+        if self.nodes[n].flags & CLEAN != 0 {
+            return;
+        }
+        let mut chain = vec![n];
+        let mut up = self.nodes[n].parent;
+        while let Some(p) = up {
+            if self.nodes[p].flags & CLEAN != 0 {
+                break;
+            }
+            chain.push(p);
+            up = self.nodes[p].parent;
+        }
+        for &i in chain.iter().rev() {
+            let node = self.nodes[i];
+            self.nodes[i].world = match node.parent {
+                Some(p) => frame_mul(&node.local, &self.nodes[p].world),
+                None => node.local,
+            };
+            self.nodes[i].flags |= CLEAN;
+        }
+    }
+
+    /// **A frame changed** (`atv_node_moved`): if the node was current, it and every parent get their
+    /// bounds marked stale (`atv_node_stale_bounds`), it is marked out of date, and so is each current node
+    /// under it (`atv_node_out_of_date`: down a sibling list, into a node's children only if it was current).
+    fn moved(&mut self, n: usize) {
+        if self.nodes[n].flags & CLEAN == 0 {
+            return;
+        }
+        let mut up = Some(n);
+        while let Some(p) = up {
+            self.nodes[p].flags |= STALE_BOUNDS;
+            up = self.nodes[p].parent;
+        }
+        self.nodes[n].flags &= !CLEAN;
+        if let Some(c) = self.nodes[n].child {
+            self.out_of_date(c);
+        }
+    }
+
+    fn out_of_date(&mut self, first: usize) {
+        let mut at = Some(first);
+        while let Some(n) = at {
+            if self.nodes[n].flags & CLEAN != 0 {
+                self.nodes[n].flags &= !CLEAN;
+                if let Some(c) = self.nodes[n].child {
+                    self.out_of_date(c);
+                }
+            }
+            at = self.nodes[n].sibling;
+        }
+    }
+
+    /// **The node placed in the world** (`atv_node_orientation` with an orientation and a position): the
+    /// quaternion's frame ([`quat_frame`]), taken into the parent's (its world frame brought up to
+    /// date first, then inverted) if there is one, as the node's own; then [`Scene::moved`].
+    pub fn place(&mut self, n: usize, q: Vf, pos: Vf) {
+        let m = quat_frame(q, pos);
+        self.nodes[n].local = match self.nodes[n].parent {
+            Some(p) => {
+                self.update(p);
+                frame_mul(&m, &frame_inverse(&self.nodes[p].world))
+            }
+            None => m,
+        };
+        self.moved(n);
+    }
+
+    /// **Where the node is** (`atv_node_position` in the world): its world frame brought up to date, the
+    /// position row with `w` 1.
+    pub fn position(&mut self, n: usize) -> Vf {
+        self.update(n);
+        self.nodes[n].world[3].merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0))
+    }
+
+    /// **The node's forward and up axes** (`atv_node_axes` in the world): the world frame brought up to
+    /// date, rows `z` and `y` with `w` 0.
+    pub fn axes(&mut self, n: usize) -> (Vf, Vf) {
+        self.update(n);
+        let w = self.nodes[n].world;
+        (w[2].merge(Dest::W, Vf::ZERO), w[1].merge(Dest::W, Vf::ZERO))
+    }
+}
+
+/// `[-1, 1]` as two compares and two moves: anything unordered comes back as `1.0`.
+fn clamp_unit(c: F) -> F {
+    if c <= F::ONE {
+        if c < F(-1.0) { F(-1.0) } else { c }
+    } else {
+        F::ONE
+    }
+}
+
+/// The heading of the forward axis flattened (`y` 0, normalised through `vrsqrt`), off the arc
+/// cosine table: `acos(z)` (clamped twice; `mula(frac, hi)`, `madd(1 - frac, lo)`), and `(π - a) + π`
+/// for an `x` below 0.
+fn spin_heading(forward: Vf) -> F {
+    let v = crate::air::normalize(forward.merge(Dest::Y, Vf::ZERO));
+    let z = clamp_unit(clamp_unit(F(v.z())));
+    let t = acos_table().entries();
+    let s = (F::ONE + z) * F(ACOS_SCALE);
+    let i = s.to_i32();
+    let frac = s - F(fpu::from_i32(i));
+    let a = F(fpu::madd(fpu::mula(frac.0, t[i as usize + 1]), (F::ONE - frac).0, t[i as usize]));
+    if F(v.x()) < F::ZERO { (F::from_bits(PI) - a) + F::from_bits(PI) } else { a }
+}
+
+const ACOS_SCALE: f32 = 14999.5;
+
+fn acos_table() -> &'static crate::air::AcosTable {
+    static TABLE: std::sync::OnceLock<crate::air::AcosTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(crate::air::AcosTable::build)
+}
+
+/// The fired 360's torque off the flick: the low end with no time range, else the flick mapped
+/// from the time range onto the two torques and clamped between them.
+fn spin_torque(s: &Spin, lo: F, hi: F) -> F {
+    if s.min_time == s.max_time { lo } else { crate::air::map_clamp(s.flick.abs(), s.min_time, s.max_time, lo, hi) }
+}
+
+/// **The air spin**, the Force body's third bike step (`atv_bike_spin_air`): the 360. Its applied word is
+/// cleared first.
+///
+/// Not on: on a lip (on the ground, no backflip applied or on, rising faster than 5 and faster than
+/// 30 forward, the brake off) an armed 360 whose stick is over past 0.7 its own way fires — the yaw
+/// torque its direction times [`spin_torque`] of the yaw pair, the pitch minus that of the pitch pair,
+/// on, the grace 0.9 — and otherwise R1 alone with the stick past 0.7 arms it, to the left for a stick
+/// left. Off a lip it is disarmed.
+///
+/// On: the node's forward axis is read ([`Scene::axes`]). Not yet armed, on the ground the grace runs
+/// down and ends it at 0; in the air it arms with the heading it took off on ([`spin_heading`]). Armed,
+/// it ends on the ground, touching something or with the yaw under the low torque — a stunt id past
+/// 40 cleared to 255 and, mid-clip, the clip stopped and the quad wrecked (15 if `steep`, else 11).
+/// Otherwise, with no trick button the stick held the other way decays the yaw by `rate·dir·|x|` and
+/// the pitch by `x·rate` over `dt`, the moment goes into the body, applied and the ramp go on, and
+/// the clip starts past 35° from the take-off heading (the stunt start answers yes), stops back
+/// under it, and is marked past it.
+///
+/// Last, a ramp on the ground is let go and the authority restarts. Returns the stunt or wreck call.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn spin_air(b: &mut Bike, q: &mut Quad, body: &mut Body, dt: F, steep: bool) -> Option<Call> {
+    let x = b.stick.x;
+    let side = if x < F::ZERO { -1 } else { 1 };
+    let buttons = b.buttons & 0xf;
+    let s = &mut b.parts.spin;
+    let mut call = None;
+    b.spin_applied = false;
+    if !b.spin_active {
+        let lip = q.on_ground
+            && !b.air.flip_torque_applied
+            && !b.air.flip_active
+            && !(F(body.velocity.y()) <= F(LIP_RISE))
+            && !(F(q.contact_vel.z()) <= F(LIP_SPEED))
+            && q.brake == F::ZERO;
+        if !lip {
+            b.spin_active = false;
+            s.armed = false;
+        } else if s.armed && !(x.abs() <= F::from_bits(SPIN_STICK)) && s.dir == side {
+            let yaw = spin_torque(s, s.min_yaw, s.max_yaw);
+            let pitch = spin_torque(s, s.min_pitch, s.max_pitch);
+            s.moment.0[1] = (F(fpu::from_i32(s.dir)) * yaw).0;
+            s.moment.0[0] = (-pitch).0;
+            s.armed = false;
+            b.spin_active = true;
+            s.grace = F::from_bits(SPIN_GRACE);
+        } else if buttons == SPIN_BUTTONS {
+            if x < -F::from_bits(SPIN_STICK) {
+                (s.armed, s.dir) = (true, 1);
+            } else if !(x <= F::from_bits(SPIN_STICK)) {
+                (s.armed, s.dir) = (true, -1);
+            }
+        }
+    } else {
+        let (forward, _) = b.parts.scene.axes(0);
+        if !s.armed {
+            if q.on_ground {
+                s.grace = s.grace - dt;
+                if s.grace <= F::ZERO {
+                    b.spin_active = false;
+                    s.armed = false;
+                }
+            } else {
+                s.armed = true;
+                s.heading = spin_heading(forward);
+            }
+        } else {
+            let now = spin_heading(forward);
+            let off = (s.heading - now).abs().min(((F::from_bits(TWO_PI) + s.heading) - now).abs());
+            if q.on_ground || b.touching || F(s.moment.y()).abs() < s.min_yaw {
+                b.spin_active = false;
+                s.armed = false;
+                if b.stunt_id >= 41 {
+                    b.stunt_id = 255;
+                }
+                if s.clip != 0 {
+                    s.clip = 0;
+                    call = Some(Call::Wreck(if steep { 15 } else { 11 }));
+                }
+            } else {
+                if buttons == 0 && s.dir != side {
+                    let by = s.rate * (F(fpu::from_i32(s.dir)) * x.abs());
+                    s.moment.0[1] = Acc::adda(F::ZERO, F(s.moment.y())).msub(dt, by).0;
+                    let by = x * s.rate;
+                    s.moment.0[0] = Acc::adda(F::ZERO, F(s.moment.x())).msub(dt, by).0;
+                }
+                body.add_moment(s.moment);
+                b.spin_applied = true;
+                q.spinning = true;
+                let past = F::from_bits(SPIN_CLIP_ANGLE);
+                if s.clip == 0 {
+                    if !(off <= past) {
+                        call = Some(Call::StartStunt(if s.dir > 0 { s.stunt_left } else { s.stunt_right }));
+                        s.clip = 1;
+                    }
+                } else if off < past {
+                    if s.clip == 2 {
+                        call = Some(Call::EndStunt);
+                        s.clip = 0;
+                    }
+                } else if s.clip == 1 {
+                    s.clip = 2;
+                }
+            }
+        }
+    }
+    if q.spinning && q.on_ground {
+        q.spinning = false;
+        q.authority = q.authority_time;
+    }
+    call
+}
+
+/// The quad's origin as the vehicle post sets the node to it: the body's position less its centre of
+/// mass turned into the world (`q c q*` as two `vopmula`/`vmadd*`/`vopmsub` rounds), `w` the position's.
+fn origin(body: &Body, cofg: Vf) -> Vf {
+    let q = body.orientation;
+    let acc = Vf::madd(Vf::opmula(q, cofg), cofg, q.bc(Field::W));
+    let t = Vf::opmsub(acc, cofg, q);
+    let p = q.mul(cofg);
+    let acc = Vf::madd(Vf::madd(Vf::madd(Vf::opmula(q, t), q, p.bc(Field::X)), q, p.bc(Field::Y)), q, p.bc(Field::Z));
+    let acc = Vf::madd(acc, t, q.bc(Field::W));
+    let turned = Vf::opmsub(acc, t, q);
+    body.position.merge(Dest::XYZ, body.position.sub(turned))
+}
+
+/// The vehicle's in-world test (quad vt `+0x120`, `atv_vehicle_in_world`): with bit 0 of the flag byte, inside
+/// the box in `x` and `z` (no box, inside); else with bit 6, not under the floor; else inside.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn in_world(flags: u8, bounds: &Bounds, at: Vf) -> bool {
+    let (x, y, z) = (F(at.x()), F(at.y()), F(at.z()));
+    if flags & 0x01 != 0 {
+        match bounds.area {
+            None => true,
+            Some((lo, hi)) => x < F(hi.x()) && !(x <= F(lo.x())) && z < F(hi.z()) && !(z <= F(lo.z())),
+        }
+    } else if flags & 0x40 != 0 {
+        !(y < bounds.floor)
+    } else {
+        true
+    }
+}
+
+/// **The vehicle's post step**, the PostProcess's first call (`atv_vehicle_post`), up to its calls: with the
+/// body on, the quad's origin ([`origin`]) is tested against the world ([`in_world`]); inside, the
+/// quad's node is placed there with the body's orientation ([`Scene::place`]). Returns `None` with the
+/// body off (the step does nothing), else whether it was inside; the caller makes the calls that
+/// follow — outside, the body's reset and the respawn (vt `+0x13c`, `+0xe8`); then the spatial
+/// update (vt `+0xe4`), the node's bounds if bit 1 of the flag byte is set (`atv_node_bounds`), the
+/// collision sync (vt `+0x124`) — and clears bit 2 of the flag byte.
+pub fn vehicle_post(parts: &mut Parts, body: &Body, cofg: Vf) -> Option<bool> {
+    if !parts.body_on {
+        return None;
+    }
+    let at = origin(body, cofg);
+    let inside = in_world(parts.flags, &parts.bounds, at);
+    if inside {
+        parts.scene.place(0, body.orientation, at);
+    }
+    Some(inside)
 }

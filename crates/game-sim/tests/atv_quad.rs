@@ -3048,13 +3048,26 @@ const SURFACE_DRAG: u32 = 0x004a_1ec0;
 const SPIN_INTEGRATE: u32 = 0x004a_2040;
 /// The words the steps write past [`REGIONS`]: the engine's clutch multiplier (`+0x7c`), and each
 /// wheel's steering rate (`+0x8b0`) and axis (`+0x8c0`).
-const MORE_REGIONS: [(&str, u32, u32); 5] = [
+const MORE_REGIONS: [(&str, u32, u32); 6] = [
     ("engine", ENGINE, 0x1c0),
     ("left front's steering", 0x01c0_88b0, 0x20),
     ("right front's steering", 0x01c0_98b0, 0x20),
     ("left rear's steering", 0x01c0_a8b0, 0x20),
     ("right rear's steering", 0x01c0_b8b0, 0x20),
+    ("scene", SCENE, 0x200 * SCENE_NODES as u32),
 ];
+/// MD75b1: the scene graph a ride's quad node can be in (node `i` at `SCENE + 0x200·i`), and the
+/// world's box the vehicle post reads (`WORLD + 0xa8`).
+const SCENE: u32 = 0x01c2_0000;
+const BOX: u32 = 0x01c2_1000;
+const SCENE_NODES: usize = game_sim::atv_moto::NODES;
+/// What the vehicle post calls: through the quad's vtable (`+0x13c`, `+0xe8`, `+0xe4`, `+0x124`), and the
+/// node's bounds.
+const BODY_RESET: u32 = 0x0049_4ae0;
+const RESPAWN: u32 = 0x004a_4c60;
+const SPATIAL_UPDATE: u32 = 0x0049_2c40;
+const NODE_BOUNDS: u32 = 0x0019_6e80;
+const COLLISION_SYNC: u32 = 0x0049_42c0;
 
 fn all_regions() -> impl Iterator<Item = (&'static str, u32, u32)> {
     REGIONS.into_iter().chain(MORE_REGIONS)
@@ -3112,6 +3125,9 @@ struct Ride {
     /// point back as it was given.
     answers: Vec<(Vf, Vf, Option<u8>)>,
     echo: bool,
+    /// MD75b1: the quad's node in [`SCENE`] (with the 360's words and the world's bounds), not
+    /// [`NODE`].
+    scene: bool,
 }
 
 /// Every air key zero: the generator sets the ones the steps read.
@@ -3377,7 +3393,7 @@ impl Gen {
             parts: game_sim::atv_moto::Parts::default(),
         };
         let _: &[wheel::Wheel; 4] = &bike.wheels;
-        let mut r = Ride { s, bike, gate, class, high: (self.bits() & 0xf) as u8, tag: self.bits(), answers, echo: self.one_in(8) };
+        let mut r = Ride { s, bike, gate, class, high: (self.bits() & 0xf) as u8, tag: self.bits(), answers, echo: self.one_in(8), scene: false };
         self.md75b(&mut r);
         r
     }
@@ -3729,6 +3745,56 @@ fn poke_ride(ee: &mut Ee, r: &Ride) {
     } else {
         ee.set_u32(OBJ + 0xc8, 0);
     }
+    if r.scene {
+        lay_scene(ee, &b.parts);
+    }
+}
+
+fn node_at(i: usize) -> u32 {
+    SCENE + 0x200 * i as u32
+}
+
+/// MD75b1's words: the quad's node in [`SCENE`] (each node's frames, links and flag byte), the 360's
+/// words, and the world's floor and box.
+fn lay_scene(ee: &mut Ee, x: &game_sim::atv_moto::Parts) {
+    ee.set_u32(OBJ + 0xe4, node_at(0));
+    for (i, n) in x.scene.nodes.iter().enumerate() {
+        let at = node_at(i);
+        for k in 0..4 {
+            put_v(ee, at + 0x30 + 0x10 * k as u32, n.local[k]);
+            put_v(ee, at + 0x70 + 0x10 * k as u32, n.world[k]);
+        }
+        ee.set_u32(at + 0xf0, n.parent.map_or(0, node_at));
+        ee.set_u32(at + 0xf4, n.child.map_or(0, node_at));
+        ee.set_u32(at + 0xf8, n.sibling.map_or(0, node_at));
+        tire_set_byte(ee, at + 0x100, n.flags);
+    }
+    let s = &x.spin;
+    put_b(ee, OBJ + 0x11dc, s.armed);
+    put_f(ee, OBJ + 0x11e0, s.min_time);
+    put_f(ee, OBJ + 0x11e4, s.max_time);
+    put_f(ee, OBJ + 0x11e8, s.grace);
+    put_f(ee, OBJ + 0x11ec, s.min_pitch);
+    put_f(ee, OBJ + 0x11f0, s.max_pitch);
+    put_f(ee, OBJ + 0x11f4, s.min_yaw);
+    put_f(ee, OBJ + 0x11f8, s.max_yaw);
+    put_f(ee, OBJ + 0x1200, s.rate);
+    put_v(ee, OBJ + 0x1210, s.moment);
+    put_f(ee, OBJ + 0x1220, s.heading);
+    ee.set_u32(OBJ + 0x1224, s.dir as u32);
+    put_f(ee, OBJ + 0x12b4, s.flick);
+    ee.set_u32(OBJ + 0x13bc, s.stunt_right);
+    ee.set_u32(OBJ + 0x13c0, s.stunt_left);
+    ee.set_u32(OBJ + 0x1758, s.clip as u32);
+    put_f(ee, WORLD + 0x98, x.bounds.floor);
+    match x.bounds.area {
+        Some((lo, hi)) => {
+            ee.set_u32(WORLD + 0xa8, BOX);
+            put_v(ee, BOX + 0x30, lo);
+            put_v(ee, BOX + 0x40, hi);
+        }
+        None => ee.set_u32(WORLD + 0xa8, 0),
+    }
 }
 
 /// The quad's call to the original's address it goes to.
@@ -3750,6 +3816,9 @@ fn address_of(c: &Call) -> u32 {
         Call::WheelClear(_) => WHEEL_CLEAR,
         Call::RevLimit => REV_LIMIT,
         Call::PeakRates => PEAK_RATES,
+        Call::SpinAir(_) => SPIN_AIR,
+        Call::VehiclePost(_) => VEHICLE_POST,
+        Call::NodePosition => NODE_POSITION,
         _ => 0,
     }
 }
@@ -3847,6 +3916,33 @@ fn hook_steps(ee: &mut Ee, picks: &[u32], answers: &Answers, echo: &Rc<Cell<bool
     log
 }
 
+/// MD75b1: the PostProcess's two calls, and what the vehicle post calls, hooked to log into `log` as
+/// [`hook_steps`]'s do (the node position writes nothing); then the hooks at `picks` taken off.
+fn hook_post(ee: &mut Ee, log: &Log<Call>, picks: &[u32]) {
+    let table: [(u32, fn(&Ee) -> Call); 7] = [
+        (VEHICLE_POST, |ee| on_quad(ee, Call::VehiclePost(F(ee.f(12))))),
+        (NODE_POSITION, |ee| {
+            assert_eq!((ee.r(4) as u32, ee.r(5), ee.r(6) as u32), (node_at(0), 0, OBJ + 0xbd0), "the node's arguments");
+            Call::NodePosition
+        }),
+        (BODY_RESET, |ee| on_quad(ee, Call::BodyReset)),
+        (RESPAWN, |ee| on_quad(ee, Call::Respawn)),
+        (SPATIAL_UPDATE, |ee| on_quad(ee, Call::SpatialUpdate)),
+        (NODE_BOUNDS, |ee| {
+            assert_eq!(ee.r(4) as u32, node_at(0), "the node bounds' node");
+            Call::NodeBounds
+        }),
+        (COLLISION_SYNC, |ee| on_quad(ee, Call::CollisionSync)),
+    ];
+    for (at, f) in table {
+        let l = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee| l.borrow_mut().push(f(ee))));
+    }
+    for at in picks {
+        assert!(ee.hooks.remove(at).is_some(), "{at:#x} was not hooked");
+    }
+}
+
 /// `n` generated rides through the PreProcess (`head`) or the Force body with the calls at `picks`
 /// unhooked, the original's own code answering them, and [`quad::Steps`] answering them in the port:
 /// every region equal, and the calls left over equal. `tweak` shapes each state, `paths` names the
@@ -3862,12 +3958,44 @@ fn each_unhooked(
     want: &[&str],
     at_least: u32,
 ) {
+    let run = if head { Listener::Head } else { Listener::Force };
+    each_unhooked_in(seed, n, run, picks, tweak, paths, want, at_least);
+}
+
+/// Which of the quad's listeners [`each_unhooked_in`] runs: the PreProcess, the Force body, or (MD75b1)
+/// the PostProcess, whose two calls are hooked too.
+#[derive(Clone, Copy, PartialEq)]
+enum Listener {
+    Head,
+    Force,
+    Post,
+}
+
+/// [`each_unhooked`] on any of the three listeners.
+#[allow(clippy::too_many_arguments)]
+fn each_unhooked_in(
+    seed: u64,
+    n: usize,
+    run: Listener,
+    picks: &[u32],
+    tweak: impl Fn(&mut Gen, &mut Ride),
+    paths: impl Fn(&Ride) -> Vec<&'static str>,
+    want: &[&str],
+    at_least: u32,
+) {
     let Some(mut ee) = image() else { return };
     let mask = ee.u32_at(STRUCK_MASK);
     assert_ne!(mask, 0, "the struck class mask is 0 in the image");
     let answers: Answers = Rc::default();
     let echo = Rc::new(Cell::new(false));
-    let log = hook_steps(&mut ee, picks, &answers, &echo);
+    let log = if run == Listener::Post {
+        let log = hook_steps(&mut ee, &[], &answers, &echo);
+        hook_post(&mut ee, &log, picks);
+        log
+    } else {
+        hook_steps(&mut ee, picks, &answers, &echo)
+    };
+    let table = AcosTable::build();
     let mut g = Gen(seed);
     let mut t = BTreeMap::new();
     for k in 0..n {
@@ -3881,10 +4009,10 @@ fn each_unhooked(
         echo.set(r.echo);
         reset_all(&mut ee);
         poke_ride(&mut ee, &r);
-        if head {
-            ee.call(GROUND_HEAD, &[u64::from(OBJ)], &[r.s.dt.0], 200_000);
-        } else {
-            ee.call(GROUND_STEP, &[u64::from(OBJ)], &[r.s.dt.0], 2_000_000);
+        match run {
+            Listener::Head => ee.call(GROUND_HEAD, &[u64::from(OBJ)], &[r.s.dt.0], 200_000),
+            Listener::Force => ee.call(GROUND_STEP, &[u64::from(OBJ)], &[r.s.dt.0], 2_000_000),
+            Listener::Post => ee.call(AIR_STATE, &[u64::from(OBJ)], &[r.s.dt.0], 200_000),
         }
         only_touched_all(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{r:#?}"));
         let was = snap_all(&ee);
@@ -3900,10 +4028,10 @@ fn each_unhooked(
             (if echo_now { q } else { p }, n)
         };
         let mut m = Only { picks, steps: quad::Steps { bike: u.bike.clone(), rest: Vec::new(), ground } };
-        if head {
-            quad::ground_head(&u.s.p, &mut u.s.q, &mut u.s.body, u.s.dt, &mut m);
-        } else {
-            quad::ground_step(&u.s.p, &mut u.s.q, &mut u.s.body, u.s.dt, &mut m);
+        match run {
+            Listener::Head => quad::ground_head(&u.s.p, &mut u.s.q, &mut u.s.body, u.s.dt, &mut m),
+            Listener::Force => quad::ground_step(&u.s.p, &mut u.s.q, &mut u.s.body, u.s.dt, &mut m),
+            Listener::Post => quad::air_state(&mut u.s.q, &mut u.s.body, u.s.dt, &table, &mut m),
         }
         u.bike = m.steps.bike;
         // The backflip's stunt id and the rider's stunt word are the bike's; the quad's poke writes
@@ -3927,7 +4055,14 @@ fn each_unhooked(
                 Call::PreloadCue => tally(&mut t, "cue posted"),
                 Call::StartStunt(_) => tally(&mut t, "stunt started"),
                 Call::EndStunt => tally(&mut t, "stunt ended"),
-                Call::Wreck(_) => tally(&mut t, "wrecked"),
+                Call::BodyReset => tally(&mut t, "reset"),
+                Call::NodeBounds => tally(&mut t, "bounds"),
+                Call::Wreck(r) => {
+                    tally(&mut t, "wrecked");
+                    if *r == 15 {
+                        tally(&mut t, "wrecked steep");
+                    }
+                }
                 _ => {}
             }
         }
@@ -4440,6 +4575,286 @@ fn the_quads_force_body_runs_every_ported_step() {
 fn the_quads_ground_head_runs_every_ported_step() {
     let picks = [INPUT_LIMITER, AUTO_SHIFT, CLUTCH, HEAD_TAIL];
     each_unhooked(0x0075_b00a, 5_000, true, &picks, |_, _| {}, |r| vec![limiter_path(r)], &LIMITER_PATHS, 15);
+}
+
+// --- MD75b1: the air spin, the vehicle post and the node's position --------------------------------------
+
+impl Gen {
+    /// A frame: three rows anywhere in the unit cube, the position anywhere within 50.
+    fn frame(&mut self) -> [Vf; 4] {
+        [self.vec(-1.0, 1.0), self.vec(-1.0, 1.0), self.vec(-1.0, 1.0), self.vec(-50.0, 50.0)]
+    }
+
+    /// MD75b1's fields over a ride: the quad's node in a scene graph (alone, under a parent or two, with
+    /// children and their siblings; each node current or not), the 360's words (mostly in the ranges
+    /// that let it end, fire or arm, its take-off heading half the time within a few degrees of the
+    /// clip's 35° of where the node faces), the lip a third of the time, and the world's floor and box.
+    fn md75b1(&mut self, r: &mut Ride) {
+        use game_sim::atv_moto::{Node, Spin};
+        r.scene = true;
+        let (q, b) = (&mut r.s.q, &mut r.bike);
+        let mut nodes = [Node::default(); SCENE_NODES];
+        for n in &mut nodes {
+            *n = Node { local: self.frame(), world: self.frame(), flags: self.bits() as u8, ..Node::default() };
+        }
+        // Node 0 the quad's; 1 its parent, 2 the parent's parent; 3 its child, 2 the child's sibling
+        // or its child when it is not the grandparent.
+        if !self.one_in(3) {
+            nodes[0].parent = Some(1);
+            if self.b() {
+                nodes[1].parent = Some(2);
+            }
+        }
+        if self.b() {
+            (nodes[0].child, nodes[3].parent) = (Some(3), Some(0));
+            if nodes[1].parent.is_none() {
+                match self.bits() % 3 {
+                    0 => nodes[3].sibling = Some(2),
+                    1 => (nodes[3].child, nodes[2].parent) = (Some(2), Some(3)),
+                    _ => {}
+                }
+            }
+        }
+        // Where the node faces, current: a heading `c` round the turn.
+        let c = self.f(0.0, 6.2831855);
+        if self.b() {
+            nodes[0].flags |= 1;
+            let z = nodes[0].world[2];
+            nodes[0].world[2] = Vf::new(c.0.sin(), z.y(), c.0.cos(), z.w());
+        }
+        b.parts.scene.nodes = nodes;
+        let equal = self.one_in(4);
+        let t0 = self.f(0.0, 0.5);
+        let s = Spin {
+            armed: self.b(),
+            min_time: t0,
+            max_time: if equal { t0 } else { self.f(0.5, 1.5) },
+            grace: if self.b() { self.f(0.0, 0.05) } else { self.f(0.0, 0.9) },
+            min_pitch: self.f(-500.0, 500.0),
+            max_pitch: self.f(-500.0, 500.0),
+            min_yaw: self.f(0.0, 300.0),
+            max_yaw: self.f(0.0, 800.0),
+            rate: self.f(0.0, 50.0),
+            moment: self.vec(-600.0, 600.0),
+            heading: if self.b() {
+                let off = if self.b() { self.f(0.55, 0.67) } else { self.f(-0.67, -0.55) };
+                F((c.0 + off.0).rem_euclid(6.2831855))
+            } else {
+                self.f(0.0, 6.2831855)
+            },
+            dir: match self.bits() % 5 {
+                0 => 0,
+                1 | 2 => 1,
+                _ => -1,
+            },
+            flick: self.f(-2.0, 2.0),
+            stunt_right: self.bits(),
+            stunt_left: self.bits(),
+            clip: (self.bits() % 3) as i32,
+        };
+        b.parts.spin = s;
+        b.spin_active = self.b();
+        b.stick.x = match self.bits() % 5 {
+            0 => if self.b() { F(0.7) } else { F(-0.7) },
+            _ => self.f(-1.0, 1.0),
+        };
+        b.buttons = match self.bits() % 3 {
+            0 => 4,
+            1 => 0,
+            _ => (self.bits() & 0xf) as u8,
+        };
+        // More touching: the struck class's test reads the same word, so a new touch is on nothing of
+        // the class.
+        if !b.touching && self.one_in(6) {
+            (b.touching, b.struck_class, r.class) = (true, false, 0);
+        }
+        q.on_ground = self.b();
+        q.spinning = self.b();
+        if self.one_in(3) {
+            // A lip.
+            (q.on_ground, b.air.flip_torque_applied, b.air.flip_active, q.brake) = (true, false, false, F::ZERO);
+            r.s.body.velocity = Vf::new(r.s.body.velocity.x(), self.near(5.0, 5.0, 15.0).0, r.s.body.velocity.z(), 0.0);
+            q.contact_vel = with_z(q.contact_vel, self.near(30.0, 30.0, 60.0));
+            if self.one_in(3) {
+                // Armed, the stick flicked back over to fire.
+                let s = &mut b.parts.spin;
+                (b.spin_active, s.armed, s.dir) = (false, true, if self.b() { 1 } else { -1 });
+                b.stick.x = F(s.dir as f32 * self.f(0.71, 1.0).0);
+            }
+        }
+        let x = &mut b.parts;
+        x.bounds.floor = self.f(-60.0, 60.0);
+        x.bounds.area = if self.one_in(4) { None } else { Some((self.vec(-60.0, 10.0), self.vec(-10.0, 60.0))) };
+    }
+}
+
+/// Which way the air spin went, from the decompile's branches (`atv_bike_spin_air`).
+fn spin_paths(r: &Ride) -> Vec<&'static str> {
+    let (q, b, s) = (&r.s.q, &r.bike, &r.bike.parts.spin);
+    if !q.active || q.control_off {
+        return vec!["off"];
+    }
+    let x = b.stick.x;
+    let side = if x < F::ZERO { -1 } else { 1 };
+    let mut p = vec![if !b.spin_active {
+        let lip = q.on_ground
+            && !b.air.flip_torque_applied
+            && !b.air.flip_active
+            && r.s.body.velocity.y() > 5.0
+            && q.contact_vel.z() > 30.0
+            && q.brake == F::ZERO;
+        if !lip {
+            "off the lip"
+        } else if s.armed && x.abs() > F(0.7) && s.dir == side {
+            if s.min_time == s.max_time { "fired at the low torque" } else { "fired" }
+        } else if b.buttons & 0xf == 4 && x < F(-0.7) {
+            "armed left"
+        } else if b.buttons & 0xf == 4 && x > F(0.7) {
+            "armed right"
+        } else {
+            "waiting"
+        }
+    } else if !s.armed {
+        if !q.on_ground {
+            "took off"
+        } else if s.grace - r.s.dt <= F::ZERO {
+            "grace out"
+        } else {
+            "in the grace"
+        }
+    } else if q.on_ground || b.touching || F(s.moment.y()).abs() < s.min_yaw {
+        if s.clip != 0 { "ended mid-clip" } else { "ended" }
+    } else if b.buttons & 0xf == 0 && s.dir != side {
+        "spinning, slowed"
+    } else {
+        "spinning"
+    }];
+    if b.spin_active && s.armed && b.stunt_id >= 41 && (q.on_ground || b.touching) {
+        p.push("stunt id cleared");
+    }
+    p
+}
+
+const SPIN_PATHS: [&str; 18] = [
+    "off",
+    "off the lip",
+    "fired",
+    "fired at the low torque",
+    "armed left",
+    "armed right",
+    "waiting",
+    "took off",
+    "grace out",
+    "in the grace",
+    "ended",
+    "ended mid-clip",
+    "spinning, slowed",
+    "spinning",
+    "stunt id cleared",
+    "stunt started",
+    "stunt ended",
+    "wrecked",
+];
+
+#[test]
+fn the_quads_air_spin_is_the_originals() {
+    let tweak = |g: &mut Gen, r: &mut Ride| g.md75b1(r);
+    each_unhooked(0x0075_b101, 20_000, false, &[SPIN_AIR], tweak, spin_paths, &SPIN_PATHS, 30);
+}
+
+/// Which way the vehicle post goes into the world test (`atv_vehicle_in_world`), from the flag byte; the reset
+/// and the bounds are tallied off the calls.
+fn post_paths(r: &Ride) -> Vec<&'static str> {
+    let x = &r.bike.parts;
+    if !r.s.q.active {
+        return vec!["off"];
+    }
+    if !x.body_on {
+        return vec!["body off"];
+    }
+    let n = &x.scene.nodes[0];
+    vec![
+        if x.flags & 1 != 0 {
+            if x.bounds.area.is_some() { "boxed" } else { "no box" }
+        } else if x.flags & 0x40 != 0 {
+            "floored"
+        } else {
+            "anywhere"
+        },
+        if n.parent.is_some() { "placed under a parent" } else { "placed alone" },
+        if n.flags & 1 != 0 { "was current" } else { "was out of date" },
+        match n.child.map(|c| &x.scene.nodes[c]) {
+            None => "no children",
+            Some(c) if c.child.is_some() => "a child's child",
+            Some(c) if c.sibling.is_some() => "two children",
+            Some(_) => "a child",
+        },
+    ]
+}
+
+#[test]
+fn the_quads_vehicle_post_is_the_originals() {
+    let want = [
+        "off",
+        "body off",
+        "boxed",
+        "no box",
+        "floored",
+        "anywhere",
+        "placed under a parent",
+        "placed alone",
+        "was current",
+        "was out of date",
+        "no children",
+        "a child",
+        "two children",
+        "a child's child",
+        "reset",
+        "bounds",
+    ];
+    let tweak = |g: &mut Gen, r: &mut Ride| g.md75b1(r);
+    each_unhooked_in(0x0075_b102, 10_000, Listener::Post, &[VEHICLE_POST], tweak, post_paths, &want, 30);
+}
+
+/// Where the node's world frame comes from when it is asked where it is (`atv_node_world_update`).
+fn position_paths(r: &Ride) -> Vec<&'static str> {
+    if !r.s.q.active {
+        return vec!["off"];
+    }
+    let n = &r.bike.parts.scene.nodes;
+    vec![if n[0].flags & 1 != 0 {
+        "current"
+    } else {
+        match n[0].parent {
+            None => "its own frame",
+            Some(p) if n[p].flags & 1 != 0 => "under a current parent",
+            Some(p) => match n[p].parent {
+                None => "under a root",
+                Some(g) if n[g].flags & 1 != 0 => "under a current grandparent",
+                Some(_) => "under two",
+            },
+        }
+    }]
+}
+
+#[test]
+fn the_quads_node_position_is_the_originals() {
+    let want = ["off", "current", "its own frame", "under a current parent", "under a root", "under a current grandparent", "under two"];
+    let tweak = |g: &mut Gen, r: &mut Ride| g.md75b1(r);
+    each_unhooked_in(0x0075_b103, 10_000, Listener::Post, &[NODE_POSITION], tweak, position_paths, &want, 30);
+}
+
+/// The PostProcess with both its calls ported: the node placed, then asked where it is.
+#[test]
+fn the_quads_post_process_runs_every_ported_step() {
+    let paths = |r: &Ride| {
+        let mut p = post_paths(r);
+        p.extend(position_paths(r));
+        p
+    };
+    let want = ["body off", "boxed", "floored", "placed under a parent", "placed alone", "reset", "bounds", "current", "under two"];
+    let tweak = |g: &mut Gen, r: &mut Ride| g.md75b1(r);
+    each_unhooked_in(0x0075_b104, 5_000, Listener::Post, &[VEHICLE_POST, NODE_POSITION], tweak, paths, &want, 15);
 }
 
 // --- MD65a: the wreck body -----------------------------------------------------------------------------

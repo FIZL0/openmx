@@ -6734,6 +6734,39 @@ atv_engine_curve_value      atv 0x00134530 = the curve at the cursor: adda(0, hi
 atv_engine_set_gear         atv 0x0049fb50 = gear, ratio = final * ratios[gear-1], inv ratio (MXU's set_gear, same)
 atv_wheel_add_drive         atv 0x004a1eb0 = wheel +0x210 += f12 (the engine's wheel torque, halved for two wheels)
 atv_body_set_cofg           atv 0x00493b40 = body vt +0x5c: d = new - cofg (+0x1a0), +0x70 and +0x60 += to_world(d), cofg = new
+# MD75b1 — the three listener calls MD75b left (atv_moto.rs spin_air, vehicle_post, Scene::position; tests/
+# atv_quad.rs unhooks each under the ground step or the post-process with the quad's node in a laid-out graph).
+# 360 (atv_bike_spin_air, quad-relative): +0x11d0 applied (cleared first), +0x11d4 the ramp, +0x11d8 active,
+# +0x11dc armed, +0x11e0/+0x11e4 flick time range, +0x11e8 grace (0.9 at fire), +0x11ec/+0x11f0 pitch torques,
+# +0x11f4/+0x11f8 yaw torques (+0x11f4 also the end's floor on |moment y|), +0x1200 decay rate, +0x1210 moment
+# (x pitch = -torque, y yaw = dir * torque; into the body by vt +0x78), +0x1220 take-off heading, +0x1224 dir
+# (1 armed with stick < -0.7, -1 with > 0.7; fires with the stick back past 0.7 on dir's own side), +0x12b4
+# flick, +0x13bc/+0x13c0 stunt ids (dir <= 0 / > 0), +0x1758 clip (0, 1 started, 2 past 35° = 0x3f1c61a9).
+# Heading: node row z with y 0, vrsqrt-normalised, z clamped twice, acos table mula(frac, hi) madd(1-frac, lo),
+# (pi - a) + pi for x < 0; off = min(|h - now|, |(2pi + h) - now|). Ends: on the ground, record +0x34, or
+# |moment y| < +0x11f4; stunt id >= 41 -> 255; mid-clip: clip 0 then vt +0x368 with 15 if
+# atv_bike_flip_wreck_steep else 11. Tail: ramp and on the ground -> ramp 0, +0x1188 = +0x118c.
+# Vehicle post (atv_vehicle_post): body +0 off -> nothing. origin = body +0x70 - (q c q*) of body +0x1a0 by
+# +0x190; vt +0x120 in the world -> atv_node_orientation(node, 0, body +0x190, origin), else vt +0x13c then
+# vt +0xe8; then vt +0xe4, atv_node_bounds(node) if quad +0x45 bit 1, vt +0x124; +0x45 bit 2 cleared.
+# In-world: +0x45 bit 0 -> world (quad +0xe8) +0xa8 box (null = in; x in (+0x30, +0x40), z in (+0x38, +0x48));
+# else bit 6 -> y not under world +0x98; else in. Scene node: +0x30 frame in the parent's, +0x70 world frame
+# (rows x, y, z, position), +0xf0 parent, +0xf4 first child, +0xf8 next sibling, +0x100 flags (bit 0 world
+# current, bit 7 bounds stale). atv_node_orientation's a3 is the position; with a parent the frame is
+# M * inverse(parent world), the inverse a transpose (moved lanes 0 + x) and -p over its rows.
+atv_vehicle_in_world        atv 0x00494200 = quad vt +0x120 (a0 quad, a1 point; v0 inside the world's box or over its floor)
+atv_vehicle_body_reset      atv 0x00494ae0 = quad vt +0x13c, the vehicle post's when outside the world (a0 quad)
+atv_vehicle_respawn         atv 0x004a4c60 = quad vt +0xe8, after the body reset (a0 quad)
+atv_vehicle_spatial_update  atv 0x00492c40 = quad vt +0xe4 (a0 quad)
+atv_vehicle_collision_sync  atv 0x004942c0 = quad vt +0x124 (a0 quad)
+atv_node_bounds             atv 0x00196e80 = a scene node's bounds brought up to date (a0 node)
+atv_node_axes               atv 0x00194960 = a scene node's world rows z and y (a0 node, a1 0, a2 z out, a3 y out; w 0)
+atv_node_world_update       atv 0x00193b30 = a scene node's world frame brought up to date (up the stale parents, down again)
+atv_node_moved              atv 0x00193d10 = a current node marked out of date, its parents' bounds stale, its subtree too
+atv_node_out_of_date        atv 0x00193d70 = a sibling list's current nodes (and their children) marked out of date
+atv_node_stale_bounds       atv 0x00195a40 = flag bit 7 on a node and every parent
+atv_quat_frame              atv 0x00134940 = a quaternion and a position into a frame (a0 out, a1 q, a2 position)
+atv_bike_set_spin_clip      atv 0x004e7a40 = vt +0x540 (sw a1, +0x1758)
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the
