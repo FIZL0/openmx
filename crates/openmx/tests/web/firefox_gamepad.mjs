@@ -95,9 +95,8 @@ const prefs = {
   'browser.startup.homepage_override.mstone': 'ignore',
   'browser.newtabpage.enabled': false,
   'browser.shell.checkDefaultBrowser': false,
-  // index.html's `navigator.storage.persist()` is a prompt in Firefox, which headless nobody answers: granted (B14)
-  'dom.storageManager.prompt.testing': true,
-  'dom.storageManager.prompt.testing.allow': true,
+  // No dom.storageManager.prompt.testing: index.html's `navigator.storage.persist()` stays an unanswered prompt,
+  // and the ride must start anyway (B14).
   // the headless window's size, as gamepad.mjs's chromium (the speedometer crop is a share of it)
   'privacy.window.maxInnerWidth': 1280,
   'privacy.window.maxInnerHeight': 720,

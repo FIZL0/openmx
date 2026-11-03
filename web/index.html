@@ -1049,8 +1049,9 @@ footer a { color: var(--bone); }
     try {
       await navigator.storage.getDirectory();
       opfs = true;
-      await navigator.storage.persist?.();
     } catch {}
+    // Asked, not awaited (B14): Firefox shows persist() as a permission prompt, and the game must not wait on its answer.
+    if (opfs) navigator.storage.persist?.().catch(() => {});
     const { msg = {}, move = [] } = canvas();
     playing();
     worker.postMessage(opfs ? { import: file, ...msg } : { start: { file, ...msg } }, move);
