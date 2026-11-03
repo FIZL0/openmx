@@ -8143,6 +8143,10 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 #   without advancing. In s195 knock that put ball 2's settle ahead of its object's listener once ball 1's
 #   settle came off at 3010, so ball 2's collection sleeps a tick after its body at 3274-3275.
 node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count -= 1
+# F20 (crates/game-sim/src/prop_set.rs PropSet::listeners / walk_listeners; tests/prop_knock.rs; journal
+#   2026-11-03-f20-node-listeners): the port keeps the node's one list, walked after every collection's
+#   step. knock-2884's node list: [0x00e1e2b0 (no prop's), ball 1 object, ball 1 settle, ball 2 object,
+#   ball 2 settle]. Proved: ball 2 bit for bit 2885..5538, collection asleep 3275, put back 5075.
 # Proved (tests/prop_props.rs): drop2-2868..2872 each tick from its state, the port's search + step: the
 #   node's ball order, both balls' lists (kind, from, on_body, normal, point, surface, the ball named) and
 #   flags, and both bodies bit for bit; the run from 2868 alone to 2873 keeps both bodies bit for bit.

@@ -528,18 +528,35 @@ impl Collection {
     /// contact on a body's list names (its other side, by index into `others`), which the force
     /// listener's resolve reads.
     pub fn step_among(&mut self, dt: F, tables: &Tables, movers: &[Mover], others: &mut [Other<'_>]) {
+        self.step_world_among(dt, tables, movers, others);
+        self.walk_listeners(dt);
+    }
+
+    /// [`Collection::step_among`]'s world step alone, without the listeners on the node: what a
+    /// collection on a node shared with others does, the node walking every collection's listeners
+    /// on one list after every step ([`crate::prop_set::PropSet::walk_listeners`], F20).
+    pub fn step_world_among(&mut self, dt: F, tables: &Tables, movers: &[Mover], others: &mut [Other<'_>]) {
         if self.active {
             let world = self.world;
             world.step(dt, &mut Lists { c: self, tables, movers, others });
         }
+    }
+
+    /// One listener on the node heard: says whether it is done.
+    pub fn hear(&mut self, l: Listener, dt: F) -> bool {
+        match l {
+            Listener::Settle => self.settle(dt),
+            Listener::Object(k) => self.listen_object(k, dt),
+        }
+    }
+
+    /// The collection's listeners on a node of its own, each in turn, a finished one taken off as the
+    /// node's remove takes it: the list's last moved into its slot, which is read again.
+    fn walk_listeners(&mut self, dt: F) {
         let mut i = 0;
         while i < self.listeners.len() {
-            let done = match self.listeners[i] {
-                Listener::Settle => self.settle(dt),
-                Listener::Object(k) => self.listen_object(k, dt),
-            };
-            if done {
-                self.listeners.remove(i);
+            if self.hear(self.listeners[i], dt) {
+                self.listeners.swap_remove(i);
             } else {
                 i += 1;
             }
@@ -582,18 +599,7 @@ impl Collection {
                 i += 1;
             }
         }
-        let mut i = 0;
-        while i < self.listeners.len() {
-            let done = match self.listeners[i] {
-                Listener::Settle => self.settle(dt),
-                Listener::Object(k) => self.listen_object(k, dt),
-            };
-            if done {
-                self.listeners.remove(i);
-            } else {
-                i += 1;
-            }
-        }
+        self.walk_listeners(dt);
     }
 
     /// **One object off the world node** (a wreck part's stop, S220a1a): asleep

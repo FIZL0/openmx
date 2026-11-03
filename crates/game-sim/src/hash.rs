@@ -520,6 +520,18 @@ impl State for Sim {
         // The track's knockable props (S131), on a track with any.
         if !self.traffic.props.is_empty() {
             w.list("props", &self.traffic.props.collections);
+            // The node's one listener list (F20): its order is what a sleep tick reads.
+            w.u32("prop_listeners", self.traffic.props.listeners.len() as u32);
+            for &(c, l) in &self.traffic.props.listeners {
+                w.u32("collection", c as u32);
+                w.u32(
+                    "listener",
+                    match l {
+                        crate::prop_world::Listener::Settle => u32::MAX,
+                        crate::prop_world::Listener::Object(k) => k as u32,
+                    },
+                );
+            }
         }
         // The `HasPhysics` cars' physics objects (S186), on a track with any.
         if !self.traffic.physics.is_empty() {

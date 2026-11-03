@@ -65,6 +65,11 @@ pub struct PropSet {
     /// not parse), collection by collection in object order: what the bike's body rays strike (S197,
     /// [`crate::prop_contact`]). A constant of the track.
     pub shapes: Arc<Vec<Vec<Option<Mesh>>>>,
+    /// The world node's listeners (F20): one list for every collection's, each by its collection, in
+    /// the node's order — put on at the end ([`PropSet::file_listeners`]), and a finished one's slot
+    /// taking the list's last ([`PropSet::walk_listeners`]). Each collection's own
+    /// [`Collection::listeners`] says which of its are on.
+    pub listeners: Vec<(usize, Listener)>,
 }
 
 impl PropSet {
@@ -173,7 +178,14 @@ impl PropSet {
             shapes.push(meshes);
             collections.push(world);
         }
-        let set = PropSet { collections, models: Arc::new(on), tables: Some(tables), rays: Arc::new(trees), shapes: Arc::new(shapes) };
+        let set = PropSet {
+            collections,
+            models: Arc::new(on),
+            tables: Some(tables),
+            rays: Arc::new(trees),
+            shapes: Arc::new(shapes),
+            listeners: Vec::new(),
+        };
         (set, said)
     }
 
@@ -204,8 +216,9 @@ impl PropSet {
             return Vec::new();
         }
         self.stamp_filed();
-        for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
-            c.search(dt, rays, field, props, trees);
+        for c in 0..self.collections.len() {
+            self.collections[c].search(dt, &self.rays[c], field, props, trees);
+            self.file_listeners();
         }
         crate::prop_props::strike_props(self, &mut |set, c, k| {
             let rays = Arc::clone(&set.rays);
@@ -229,8 +242,9 @@ impl PropSet {
             return (Vec::new(), strikes);
         }
         self.stamp_filed();
-        for (k, (c, rays)) in self.collections.iter_mut().zip(self.rays.iter()).enumerate() {
-            c.search_wrecked(k, dt, rays, field, props, trees, wrecks, &mut strikes);
+        for k in 0..self.collections.len() {
+            self.collections[k].search_wrecked(k, dt, &self.rays[k], field, props, trees, wrecks, &mut strikes);
+            self.file_listeners();
         }
         crate::prop_props::strike_props(self, &mut |set, c, k| {
             let rays = Arc::clone(&set.rays);
@@ -268,6 +282,8 @@ impl PropSet {
         }
         self.stamp_filed();
         let mut keys: Vec<Option<[i32; 2]>> = Vec::new();
+        // The collections that searched, in order: each puts its listeners on after its search.
+        let mut filed = Vec::new();
         for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
             let Some(at) = filed_middle(c) else {
                 out.of.push(None);
@@ -284,6 +300,7 @@ impl PropSet {
             }
             let (field, props, trees) = if key.is_some() { world.wooded_near(at) } else { world.wooded() };
             c.search_wrecked(out.of.len(), dt, rays, field.as_deref(), props, trees, wrecks, &mut strikes);
+            filed.push(out.of.len());
             let set = match keys.iter().position(|k| *k == key) {
                 Some(i) => i,
                 None => {
@@ -294,6 +311,9 @@ impl PropSet {
                 }
             };
             out.of.push(Some(set));
+        }
+        for c in filed {
+            self.file_on(c);
         }
         // A prop the props' rays file searches against its collection's set, or one near it (S242).
         crate::prop_props::strike_props(self, &mut |set, c, k| {
@@ -330,6 +350,7 @@ impl PropSet {
         for k in 0..self.collections.len() {
             crate::prop_props::step_named(self, k, dt, &tables, movers.of(k), strikers);
         }
+        self.walk_listeners(dt);
     }
 
     /// The second half of [`PropSet::frame_among`]: every collection's step and listeners, the
@@ -341,6 +362,7 @@ impl PropSet {
         for k in 0..self.collections.len() {
             crate::prop_props::step_named(self, k, dt, &tables, movers, strikers);
         }
+        self.walk_listeners(dt);
     }
 
     /// Wake one body: its collection activated and the body enabled.
@@ -348,6 +370,7 @@ impl PropSet {
         let c = &mut self.collections[collection];
         c.activate();
         c.enable(object);
+        self.file_on(collection);
     }
 
     /// Wake one body as a strike does (S195, S197): the body enabled first, then its collection
@@ -357,6 +380,47 @@ impl PropSet {
         let c = &mut self.collections[collection];
         c.enable(object);
         c.activate();
+        self.file_on(collection);
+    }
+
+    /// Every collection's listeners not yet on the world node put on at its end, collection by
+    /// collection, each in the order it put them on: called after anything that may wake one, before
+    /// another collection wakes.
+    pub fn file_listeners(&mut self) {
+        for c in 0..self.collections.len() {
+            self.file_on(c);
+        }
+    }
+
+    /// [`PropSet::file_listeners`] for collection `c` alone.
+    pub fn file_on(&mut self, c: usize) {
+        for &l in &self.collections[c].listeners {
+            if !self.listeners.contains(&(c, l)) {
+                self.listeners.push((c, l));
+            }
+        }
+    }
+
+    /// **The world node's listener walk** (F20), after every collection's step: each listener on the
+    /// one list in turn, a finished one taken off by moving the list's last into its slot and the
+    /// slot read again (the node's remove), so one collection's listener coming off reorders
+    /// another's: in s195 knock ball 1's settle coming off at 3010 put ball 2's settle ahead of its
+    /// object's listener, and ball 2's collection sleeps a tick after its body.
+    pub fn walk_listeners(&mut self, dt: F) {
+        self.file_listeners();
+        let mut i = 0;
+        while i < self.listeners.len() {
+            let (c, l) = self.listeners[i];
+            if self.collections[c].hear(l, dt) {
+                self.listeners.swap_remove(i);
+                let own = &mut self.collections[c].listeners;
+                if let Some(j) = own.iter().position(|&x| x == l) {
+                    own.remove(j);
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// What a wheel standing on a prop's `f.col` reads (S169, [`Collection::under`]): the body's

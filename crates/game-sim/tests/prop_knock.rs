@@ -241,11 +241,15 @@ fn node_origin(n: &Node) -> Vf {
 /// The knocked collections as the state left them, read into the port's: every collection whose
 /// active bit is set is woken the port's way (its settle listener and its body's object listener on,
 /// the collision object filed), then the body, the node, the countdowns, the fresh flag and the
-/// collision record's moving parts are the state's. Answers the woken collections' indices.
+/// collision record's moving parts are the state's, and the world node's one listener list is the
+/// state's, in its order (F20). Answers the woken collections' indices.
 fn seed(ee: &Ee, set: &mut PropSet) -> Vec<usize> {
     let game = collections(ee);
     assert_eq!(game.len(), set.collections.len(), "the state's collections");
     let mut woken = Vec::new();
+    // Each listener's address on the node, as the port names it.
+    let mut named: Vec<(u32, (usize, Listener))> = Vec::new();
+    let mut node_list = None;
     for (ci, &c) in game.iter().enumerate() {
         if ee.u32_at(c + coll::FLAGS) & coll::ACTIVE == 0 {
             continue;
@@ -261,6 +265,9 @@ fn seed(ee: &Ee, set: &mut PropSet) -> Vec<usize> {
         let n = ee.u32_at(world_node + 0x48);
         let at = ee.u32_at(world_node + 0x48 + 8);
         let on: Vec<u32> = (0..n).map(|k| ee.u32_at(at + 4 * k)).collect();
+        assert!(node_list.as_ref().is_none_or(|l| *l == on), "{name}: one listener list on the node");
+        node_list = Some(on.clone());
+        named.extend([(c + coll::LISTENER, (ci, Listener::Settle)), (o + obj::LISTENER, (ci, Listener::Object(0)))]);
         port.listeners = on
             .iter()
             .filter_map(|&l| {
@@ -298,6 +305,12 @@ fn seed(ee: &Ee, set: &mut PropSet) -> Vec<usize> {
         rc.swept_to = quad(ee, r + rec::SWEPT_TO);
         woken.push(ci);
     }
+    let on = node_list.unwrap_or_default();
+    set.listeners = on.iter().filter_map(|l| named.iter().find(|(a, _)| a == l).map(|&(_, x)| x)).collect();
+    // The node's list has one listener no prop collection put on (knock-2881's 0xe1e2b0), which the
+    // port's set does not hold.
+    let others: Vec<u32> = on.iter().copied().filter(|l| !named.iter().any(|(a, _)| a == l)).collect();
+    eprintln!("the node's listeners {:?}, and {others:x?} no prop's", set.listeners);
     woken
 }
 
@@ -383,6 +396,9 @@ fn resync(rows: &Rows, r: usize, k: usize, set: &mut PropSet) {
     c.active = rows.u32(r, &p("active")) & 2 != 0;
     // Still active on the row it slept on, the collection's settle ran before the object's listener.
     c.listeners = if c.active { vec![Listener::Settle, Listener::Object(0)] } else { vec![Listener::Object(0)] };
+    let on: Vec<(usize, Listener)> = c.listeners.iter().map(|&l| (k, l)).collect();
+    set.listeners.retain(|&(x, _)| x != k);
+    set.listeners.extend(on);
     let rc = &mut c.objects[0].collision.as_mut().unwrap().record;
     [rc.touching, rc.touching_other, rc.on_ground, rc.on_object] = rows.flags(r, &p("touch"));
 }
@@ -567,11 +583,12 @@ fn the_strike_puts_the_objects_listener_on_first() {
 
 /// Ball 2, struck at frame 2882, from the state two ticks after: its flight, the landing, the bounces
 /// and the roll down the slope, bit for bit; at frame 3093 ball 4 (knocked by the bike at 3066, and
-/// standing where the game's stands) strikes it and it strikes ball 4 (S242), and it rolls on and goes
-/// to sleep at 3274, bit for bit, where the port puts its collection to sleep a tick early: on the
-/// game's one listener list, shared by every free09 prop, ball 1's settle coming off at 3010 moved
-/// ball 2's settle ahead of its object's listener (a finished listener's slot takes the list's last,
-/// oracle S242), and the port keeps a list per collection. Ball 1,
+/// standing where the game's stands) strikes it and it strikes ball 4 (S242), and it rolls on, its
+/// body goes to sleep at 3274 and its collection at 3275 (F20: on the node's one listener list,
+/// shared by every free09 prop, ball 1's settle coming off at 3010 took ball 2's settle into its
+/// slot, ahead of ball 2's object's listener, so the settle reads the body awake on 3274), the sixty
+/// seconds' countdown, the put-back at 5075, and asleep at its place to the capture's end, all bit
+/// for bit. Ball 1,
 /// nudged by the bike passing at frame 2865: its roll and its sleep at frame 3010 (the countdown
 /// started, the collection put to sleep on the same tick), until the bike wakes it again at 3322; then,
 /// set from the game's row where it sleeps again (frame 3380), the sixty seconds' countdown and the
@@ -581,10 +598,11 @@ fn the_knocked_balls_fly_land_sleep_and_go_back() {
     let Some((rows, runs)) = replay("knock", 2884, &[2, 1], &[(1, 3381)]) else { return };
     let (two, one) = (&runs[0], &runs[1]);
     assert_eq!(two.landed, Some(row_of(&rows, 2912)), "{two:#?}");
-    assert_eq!(two.agreed, row_of(&rows, 3273), "{two:#?}");
-    let parted = two.parted.as_deref().unwrap_or_else(|| panic!("the run never parts: {two:#?}"));
-    assert!(parted.starts_with(&format!("row {} (frame 3274)", row_of(&rows, 3274))), "{two:#?}");
-    assert!(parted.contains("active: the game 2, the port false"), "the collection's sleep: {parted}");
+    assert_eq!(two.slept, Some(row_of(&rows, 3274)), "{two:#?}");
+    assert_eq!((rows.u32(row_of(&rows, 3274), "b2_active"), rows.u32(row_of(&rows, 3275), "b2_active")), (2, 0), "the game's collection sleeps on 3275");
+    assert_eq!(two.put_back, Some(row_of(&rows, 5075)), "{two:#?}");
+    assert!(two.parted.is_none(), "{two:#?}");
+    assert_eq!(two.agreed, rows.rows.len() - 1);
 
     let first = one.before.as_deref().expect("ball 1 set again");
     assert_eq!(first.slept, Some(row_of(&rows, 3010)), "{first:#?}");

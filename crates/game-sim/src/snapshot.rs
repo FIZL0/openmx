@@ -117,6 +117,7 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
     if !traffic.props.is_empty() {
         PROPS.put(&mut out);
         traffic.props.collections.put(&mut out);
+        traffic.props.listeners.put(&mut out);
     }
     // The `HasPhysics` cars' physics objects (S186) the same way, behind theirs.
     if !traffic.physics.is_empty() {
@@ -226,6 +227,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     if r.bytes.get(r.at..r.at + 8) == Some(&PROPS.to_le_bytes()[..]) {
         r.at += 8;
         let collections: Vec<crate::prop_world::Collection> = Wire::take(&mut r)?;
+        let listeners: Vec<(usize, crate::prop_world::Listener)> = Wire::take(&mut r)?;
         let here = &traffic.props.collections;
         let shape = |c: &crate::prop_world::Collection| {
             (c.objects.len(), c.joints.len(), c.objects.iter().map(|o| o.collision.is_some()).collect::<Vec<_>>())
@@ -247,6 +249,12 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
                 return Err("a prop collection names a body it does not have".into());
             }
         }
+        // The node's list holds what each collection says is on, once.
+        let on = |c: usize, l: crate::prop_world::Listener| collections.get(c).is_some_and(|x| x.listeners.contains(&l));
+        let heard: usize = collections.iter().map(|c| c.listeners.len()).sum();
+        if listeners.len() != heard || listeners.iter().any(|&(c, l)| !on(c, l)) || (1..listeners.len()).any(|i| listeners[..i].contains(&listeners[i])) {
+            return Err("the props' node listeners are not their collections'".into());
+        }
         let mut collections = collections;
         for (c, h) in collections.iter_mut().zip(here) {
             // The torsion springs are the track's, as read here.
@@ -258,6 +266,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
             }
         }
         traffic.props.collections = collections;
+        traffic.props.listeners = listeners;
     } else if !traffic.props.is_empty() {
         return Err(format!("no props in the state, {} here", traffic.props.collections.len()));
     }

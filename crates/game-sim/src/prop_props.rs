@@ -281,6 +281,7 @@ pub fn strike_props(set: &mut PropSet, own: &mut dyn FnMut(&mut PropSet, usize, 
                 coll.enable(k);
             }
             coll.activate();
+            set.file_on(c);
             let mirrors: Vec<Contact> = hits
                 .iter()
                 .map(|h| Contact {
@@ -337,10 +338,11 @@ fn names_a_prop(c: &Collection) -> bool {
 
 /// **Collection `c`'s step** with the props its lists name ([`strike_props`]) handed after
 /// `strikers`, as the step finds them, each written back after: what its impulse did to the body and
-/// the centre its object's resolve wrote. A list naming no prop steps as before.
+/// the centre its object's resolve wrote. A list naming no prop steps as before. The listeners on the
+/// node are not run: the set walks them after every collection's step ([`PropSet::walk_listeners`]).
 pub fn step_named(set: &mut PropSet, c: usize, dt: F, tables: &Tables, movers: &[crate::contact::Mover], strikers: &mut [Other<'_>]) {
     if !names_a_prop(&set.collections[c]) {
-        set.collections[c].step_among(dt, tables, movers, strikers);
+        set.collections[c].step_world_among(dt, tables, movers, strikers);
         return;
     }
     // The named props, in the order the lists first name them, and each named entry's place.
@@ -391,7 +393,7 @@ pub fn step_named(set: &mut PropSet, c: usize, dt: F, tables: &Tables, movers: &
             })
             .chain(bodies.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
             .collect();
-        set.collections[c].step_among(dt, tables, movers, &mut others);
+        set.collections[c].step_world_among(dt, tables, movers, &mut others);
     }
     // The step may have emptied a list (a body put back); name back only what is still there.
     for (o, marks) in set.collections[c].objects.iter_mut().zip(&marked) {

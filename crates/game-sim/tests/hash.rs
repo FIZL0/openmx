@@ -572,7 +572,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // spent within a tick like the rest of `WreckBike::struck`, so not walked and not on the wire.
     // 12120 since S249: a seat's car online (`Sim::car`, `car::Lane`), walked as `car` only while a
     // car is out, so the leaves do not move.
+    // 12144 since F20: the props' world node's one listener list (`PropSet::listeners`), walked as
+    // `prop_listeners` only on a track with props, so the leaves do not move.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12120, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12144, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
