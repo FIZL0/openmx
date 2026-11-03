@@ -539,7 +539,28 @@ impl WorldMod {
             }
             (0.0, 0)
         };
-        let joins = generate::seam_joins(whole, wrap, spacing, &ground)?;
+        // P283: the joins ask for a far edge's ground and the near edge's in turn, sample by sample,
+        // 35,000 feet apart on world_ultra, and the open world's reach dropped and re-read the tiles
+        // under each for every sample: 24 s of its 28 s load. Each edge is walked once here, in
+        // order, so a tile is read once, and the joins read their heights from the table.
+        let mut seen: HashMap<(u64, u64), (f64, u8)> = HashMap::new();
+        for axis in 0..2 {
+            if !wrap[axis] {
+                continue;
+            }
+            // The edges across `axis` (0 and the extent), walked along the other axis.
+            let other = 1 - axis;
+            for edge in [0.0, f64::from(whole[axis])] {
+                for k in 0..=whole[other] / spacing {
+                    let along = f64::from(k * spacing);
+                    let (x, z) = if axis == 0 { (edge, along) } else { (along, edge) };
+                    seen.entry((x.to_bits(), z.to_bits())).or_insert_with(|| ground(x, z));
+                }
+            }
+        }
+        let seen = std::cell::RefCell::new(seen);
+        let remembered = |x: f64, z: f64| *seen.borrow_mut().entry((x.to_bits(), z.to_bits())).or_insert_with(|| ground(x, z));
+        let joins = generate::seam_joins(whole, wrap, spacing, &remembered)?;
         let first_owner = self.pieces.iter().map(|p| p.tile.first_owner).max().unwrap_or(0);
         for (mut tile, bytes) in joins {
             tile.first_owner = first_owner;
@@ -1026,25 +1047,51 @@ impl GroundStream {
     /// or with `all` every one (the whole world before the first frame, as before MD17). The
     /// pieces are built on every core.
     pub fn start(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool) -> (GroundStream, Vec<(usize, GroundPiece)>) {
+        let mut out = Vec::new();
+        let stream = GroundStream::start_into(w, cells, reach, near, all, &mut |i, piece| out.push((i, piece)));
+        (stream, out)
+    }
+
+    /// [`GroundStream::start`], each piece built before the ride handed to `take` as it is built, in
+    /// the pieces' order (P283: world_ultra's 88 first pieces held at once were 830 MB).
+    pub fn start_into(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool, take: &mut dyn FnMut(usize, GroundPiece)) -> GroundStream {
         let tiles: Vec<Tile> = w.pieces.iter().map(|p| p.tile.clone()).collect();
         let first: Vec<usize> = (0..tiles.len()).filter(|&i| all || nearest(&tiles[i], near) <= reach.load.0).collect();
         let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
-        let mut ready: Vec<(usize, Result<GroundPiece, String>)> = crate::thread::scope(|scope| {
-            let jobs: Vec<_> = (0..threads)
-                .map(|t| {
-                    let (first, pieces) = (&first, &w.pieces);
-                    scope.spawn(move || {
-                        let mut b = Builder::new(pieces.clone(), reach, cells);
-                        first.iter().skip(t).step_by(threads).map(|&i| (i, b.build(i))).collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            jobs.into_iter().flat_map(|j| j.join().expect("a ground builder")).collect()
-        });
-        ready.sort_by_key(|(i, _)| *i);
         let work = Arc::new((Mutex::new((Vec::new(), false)), Condvar::new()));
         let (send, built) = channel();
-        let (pieces, theirs) = (w.pieces.clone(), work.clone());
+        let mut stream = GroundStream { held: vec![Held::Out; tiles.len()], tiles, reach, work, built, pending: VecDeque::new(), chunks_a_frame: CHUNKS_A_FRAME, log: Vec::new(), heading: Vec::new() };
+        crate::thread::scope(|scope| {
+            let (done, ready) = channel();
+            for t in 0..threads {
+                let (first, pieces, done) = (&first, &w.pieces, done.clone());
+                scope.spawn(move || {
+                    let mut b = Builder::new(pieces.clone(), reach, cells);
+                    for &i in first.iter().skip(t).step_by(threads) {
+                        if done.send((i, b.build(i))).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+            drop(done);
+            // Each handed over once every piece before it is: the builders work through the pieces
+            // in turn, so few wait.
+            let mut waiting = std::collections::BTreeMap::new();
+            let mut next = 0;
+            for (i, r) in ready {
+                waiting.insert(i, r);
+                while next < first.len()
+                    && let Some(r) = waiting.remove(&first[next])
+                {
+                    if let Some(chunks) = stream.arrived(first[next], r) {
+                        take(first[next], chunks);
+                    }
+                    next += 1;
+                }
+            }
+        });
+        let (pieces, theirs) = (w.pieces.clone(), stream.work.clone());
         std::thread::spawn(move || {
             let mut b = Builder::new(pieces, reach, cells);
             loop {
@@ -1064,14 +1111,7 @@ impl GroundStream {
                 }
             }
         });
-        let mut stream = GroundStream { held: vec![Held::Out; tiles.len()], tiles, reach, work, built, pending: VecDeque::new(), chunks_a_frame: CHUNKS_A_FRAME, log: Vec::new(), heading: Vec::new() };
-        let mut out = Vec::new();
-        for (i, r) in ready {
-            if let Some(chunks) = stream.arrived(i, r) {
-                out.push((i, chunks));
-            }
-        }
-        (stream, out)
+        stream
     }
 
     /// A piece the builder finished: held, with its line, or `None` with the line why not.
@@ -1458,43 +1498,34 @@ impl WorldMod {
     /// ([`crate::world_dress::bake_splat`], MD15), or is dirt without them; one that does not read is
     /// dirt and the home tile's light. The tiles are read on every core.
     pub fn look(&self, fallback: &[Res], dirt: [f32; 3], home: game_render::world::Lighting) -> WorldLook {
+        self.look_near(fallback, dirt, home, None)
+    }
+
+    /// [`WorldMod::look`], and with `near` (P283) the world's paint held near the riders only: every
+    /// map's far pages kept, and the pages of a map `near` does not keep let go as soon as it is
+    /// read ([`game_render::terrain::Pages::hollow`]), its far pages made, so the load never holds
+    /// more than a core's map at a time besides; `reach` is how near a map stays held
+    /// ([`game_render::terrain::FarPaint::reach`]).
+    pub fn look_near(&self, fallback: &[Res], dirt: [f32; 3], home: game_render::world::Lighting, near: Option<(&(dyn Fn(usize) -> bool + Sync), f32)>) -> WorldLook {
         let regions = self.regions();
-        let (mut tiles, mut lights, mut skies, mut names) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut tiles, mut lights, mut skies, mut names, mut far) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         // Each map read on a core of its own (MD15: a disc map's paint is baked, which takes a while).
-        let read_one = |p: &WorldPiece| {
+        let read_one = |(i, p): (usize, &WorldPiece)| {
             let read = || -> Result<_, String> {
-                let res = p.res()?;
-                let (_, stem, scn) = scene_of(&res)?;
-                let text = game_render::ini::text(&scn);
-                let scene = p.scene.as_ref().ok_or("a join has no scene")?;
-                let bytes = track_mods::terrain_bytes(&res, &scene.terrain_file)?;
-                let terrain = Terrain::parse(&bytes)?;
-                let [sx, sz] = p.tile.samples();
-                // Sixteen samples a leaf, as `Ground::paged` counts them.
-                let leaves = (sx / 16, sz / 16);
-                let detail = game_render::terrain::Pages::load_detail(std::slice::from_ref(&res), &stem);
-                let pages = game_render::terrain::Pages::of(&terrain, p.tile.spacing.0, leaves)
-                    .map(|pg| pg.with_detail(detail, game_render::terrain::detail_multiplier(&text)));
-                let mut look = game_render::scene::Scene::parse(&text);
-                // A disc map has no pages: its splat and baked light, baked into some (MD15), and
-                // the splat kept to be drawn per pixel over them on the GPU (MD35).
-                let mut sharp = None;
-                let pages = pages.or_else(|| {
-                    let [sx, sz] = p.tile.samples();
-                    let extent = ((sx - 1) as f32 * p.tile.spacing.0, (sz - 1) as f32 * p.tile.spacing.0);
-                    let splat = game_render::splat::Splat::load(std::slice::from_ref(&res), &stem, extent)?;
-                    let light = game_render::world::Lighting::of(&look);
-                    let (pages, modulate) = crate::world_dress::bake_splat_sharp(&splat, &terrain, p.tile.spacing.0, leaves, &light)?;
-                    sharp = Some(game_render::terrain::SharpSplat { splat: std::sync::Arc::new(splat), modulate });
-                    Some(pages)
-                });
-                move_look(&mut look, p.tile.at);
+                let (mut pages, mut sharp, look, text, res) = map_paint(p)?;
                 let sky = game_render::sky::Sky::load(std::slice::from_ref(&res), &text).or_else(|| game_render::sky::Sky::load(fallback, &text));
-                Ok((pages, sharp, game_render::world::Lighting::of(&look), sky))
+                let mut far = Vec::new();
+                if let (Some((keep, _)), Some(pg)) = (near, &mut pages) {
+                    far = pg.pages.iter().map(game_render::terrain::far_page).collect();
+                    if !keep(i) {
+                        hollow(pg, &mut sharp);
+                    }
+                }
+                Ok((pages, sharp, game_render::world::Lighting::of(&look), sky, far))
             };
             read().unwrap_or_else(|e| {
                 println!("world: {} looks like dirt: {e}", p.tile.name);
-                (None, None, home, None)
+                (None, None, home, None, Vec::new())
             })
         };
         let maps = &self.pieces[..self.tile_count];
@@ -1503,26 +1534,76 @@ impl WorldMod {
             let jobs: Vec<_> = (0..threads)
                 .map(|t| {
                     let read_one = &read_one;
-                    scope.spawn(move || maps.iter().enumerate().skip(t).step_by(threads).map(|(i, p)| (i, read_one(p))).collect::<Vec<_>>())
+                    scope.spawn(move || maps.iter().enumerate().skip(t).step_by(threads).map(|(i, p)| (i, read_one((i, p)))).collect::<Vec<_>>())
                 })
                 .collect();
             jobs.into_iter().flat_map(|j| j.join().expect("a map's look")).collect()
         });
         read.sort_by_key(|(i, _)| *i);
-        for (p, (_, (pages, sharp, light, sky))) in maps.iter().zip(read) {
+        for (p, (_, (pages, sharp, light, sky, far_pages))) in maps.iter().zip(read) {
             let at = p.tile.at.map(|a| a.0);
             tiles.push(game_render::terrain::PaintTile { at, pages, sharp });
+            far.push(far_pages);
             lights.push(light);
             skies.push(sky);
             names.push(p.tile.name.clone());
         }
         WorldLook {
-            paint: game_render::terrain::WorldPaint { regions: regions.clone(), tiles, dirt },
+            paint: game_render::terrain::WorldPaint {
+                regions: regions.clone(),
+                tiles,
+                dirt,
+                far: game_render::terrain::FarPaint { pages: if near.is_some() { far } else { Vec::new() }, reach: near.map(|n| n.1) },
+            },
             looks: game_render::scene::Looks { regions, lights },
             skies,
             names,
         }
     }
+}
+
+/// A map's pages and its sharp splat's modulate pages let go (P283, [`game_render::terrain::Pages::hollow`]).
+pub fn hollow(pages: &mut game_render::terrain::Pages, sharp: &mut Option<game_render::terrain::SharpSplat>) {
+    pages.hollow();
+    for m in sharp.iter_mut().flat_map(|s| s.modulate.iter_mut()) {
+        m.rgba = Vec::new();
+    }
+}
+
+/// A world map's ground paint read from its folder ([`WorldMod::look`]): its terrain's pages with
+/// its own detail map (MD4), or a disc map's baked from its splat and light (MD15) with the splat
+/// kept to draw per pixel (MD35); and its scene as moved into the world, the scene's text and its
+/// archive, for the light and sky. A world's paint stream reads a map's pages again with it (P283).
+pub fn map_paint(
+    p: &WorldPiece,
+) -> Result<(Option<game_render::terrain::Pages>, Option<game_render::terrain::SharpSplat>, game_render::scene::Scene, String, Res), String> {
+    let res = p.res()?;
+    let (_, stem, scn) = scene_of(&res)?;
+    let text = game_render::ini::text(&scn);
+    let scene = p.scene.as_ref().ok_or("a join has no scene")?;
+    let bytes = track_mods::terrain_bytes(&res, &scene.terrain_file)?;
+    let terrain = Terrain::parse(&bytes)?;
+    let [sx, sz] = p.tile.samples();
+    // Sixteen samples a leaf, as `Ground::paged` counts them.
+    let leaves = (sx / 16, sz / 16);
+    let detail = game_render::terrain::Pages::load_detail(std::slice::from_ref(&res), &stem);
+    let pages = game_render::terrain::Pages::of(&terrain, p.tile.spacing.0, leaves)
+        .map(|pg| pg.with_detail(detail, game_render::terrain::detail_multiplier(&text)));
+    let mut look = game_render::scene::Scene::parse(&text);
+    // A disc map has no pages: its splat and baked light, baked into some (MD15), and
+    // the splat kept to be drawn per pixel over them on the GPU (MD35).
+    let mut sharp = None;
+    let pages = pages.or_else(|| {
+        let [sx, sz] = p.tile.samples();
+        let extent = ((sx - 1) as f32 * p.tile.spacing.0, (sz - 1) as f32 * p.tile.spacing.0);
+        let splat = game_render::splat::Splat::load(std::slice::from_ref(&res), &stem, extent)?;
+        let light = game_render::world::Lighting::of(&look);
+        let (pages, modulate) = crate::world_dress::bake_splat_sharp(&splat, &terrain, p.tile.spacing.0, leaves, &light)?;
+        sharp = Some(game_render::terrain::SharpSplat { splat: std::sync::Arc::new(splat), modulate });
+        Some(pages)
+    });
+    move_look(&mut look, p.tile.at);
+    Ok((pages, sharp, look, text, res))
 }
 
 /// MX Unleashed's National (outdoor motocross) tracks by the names the disc gives them: the

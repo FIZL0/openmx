@@ -252,6 +252,7 @@ mod machine_packs;
 mod music_packs;
 mod worlds;
 mod world_dress;
+mod paint_stream;
 // The garage (P37). Its screen hangs off the front end (P36), which is not in this tree yet; until it
 // is, the `.phy` lookup is the only part of it the shell calls.
 #[allow(dead_code)]
@@ -393,6 +394,7 @@ const STUNT_TABLE: &str = "stunts.ini";
 
 #[cfg_attr(target_os = "ios", allow(unreachable_code))]
 fn main() {
+    launched();
     // The iPhone runs UIKit on this thread and the shell on another (P200).
     #[cfg(target_os = "ios")]
     return ios::main();
@@ -1452,6 +1454,23 @@ fn seam_carry(by: [f32; 3], flying: bool, before: Option<&mut Shown>, plane: Opt
 /// A world that wraps (MD29) as its draw takes it (MD43): which axes, and its sides.
 fn drawn_wrap(t: &game_sim::tiles::Tiled) -> Option<game_render::wrap::Wrap> {
     game_render::wrap::Wrap::of(t.wraps(), t.extent().map(|v| v.0))
+}
+
+/// When the shell started (P283): the first call's moment, which `main` makes.
+fn launched() -> Instant {
+    static AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *AT.get_or_init(Instant::now)
+}
+
+/// The most memory the shell has held so far and holds now (P283), as Linux counts it
+/// (`/proc/self/status`'s VmHWM and VmRSS): what a Steam Deck's log shows of a world's load.
+fn peak_memory() -> String {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |key: &str| status.lines().find_map(|l| l.strip_prefix(key)?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok());
+    match (kb("VmHWM:"), kb("VmRSS:")) {
+        (Some(peak), Some(now)) => format!("peak {} MB, now {} MB", peak / 1024, now / 1024),
+        _ => "not known here".to_string(),
+    }
 }
 
 /// The points a world's pieces are streamed in around (MD17), with each point's copies one width
@@ -5796,6 +5815,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     // A world's ground on the GPU (MD17): the pieces near the start now, the rest as the riders come.
     let mut ground_stream: Option<worlds::GroundStream> = None;
+    // And its maps' pages, near the riders (P283).
+    let mut paint_stream: Option<paint_stream::PaintStream> = None;
     // The most ground chunks a frame of the ride handed the GPU, how many in all, and in how many
     // frames (MD28).
     let mut ground_written = (0usize, 0usize, 0usize);
@@ -5804,8 +5825,26 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The picture time a world's ground fades were last moved to (V92), in seconds.
     let mut ground_shown = 0.0f32;
     // A world's look by map (MD9): every tile's ground paint, light and sky, read from its folder.
-    let world_look = world_mod.as_ref().map(|w| {
-        let l = w.look(&archives[1..], ground::DIRT, Lighting::of(&look));
+    // On the GPU only the maps near the start keep their pages, the rest their far pages, and the
+    // ride streams them (P283: world_ultra's 77 maps' pages were 1.3 GB read and as much uploaded).
+    // `--seams` reads every map's paint, and `--world-ground all` draws the whole world.
+    let paint_near = match (gpu_on && !args.seams && !args.world_ground_all, world_reach) {
+        (true, Some(reach)) => {
+            let starts: Vec<[f32; 2]> = std::iter::once(at).chain(garage.plane_flown().map(|p| p.at)).map(|p| [p.x(), p.z()]).collect();
+            Some((wrapped_near(wrap, &starts), reach))
+        }
+        _ => None,
+    };
+    let mut world_look = world_mod.as_ref().map(|w| {
+        let owned = w.regions().owned;
+        let keep = |i: usize| {
+            paint_near.as_ref().is_some_and(|(starts, reach)| {
+                let o = owned[i];
+                starts.iter().any(|p| (o[0] - p[0]).max(p[0] - o[2]).max(0.0).hypot((o[1] - p[1]).max(p[1] - o[3]).max(0.0)) <= reach.load.0)
+            })
+        };
+        let near = paint_near.as_ref().map(|(_, reach)| (&keep as &(dyn Fn(usize) -> bool + Sync), reach.drop.0));
+        let l = w.look_near(&archives[1..], ground::DIRT, Lighting::of(&look), near);
         let paged = l.paint.tiles.iter().filter(|t| t.pages.is_some()).count();
         let skies = l.skies.iter().filter(|s| s.is_some()).count();
         println!("world look: {paged} of {} tiles painted from their pages, {skies} with a sky of their own", l.paint.tiles.len());
@@ -5870,14 +5909,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let ground_at = Instant::now();
             // A wrapped world's copies' ground is built with the world's own (MD43).
             let starts = wrapped_near(drawn_wrap(t), &starts);
-            let (mut stream, first) = worlds::GroundStream::start(w, cells, reach, &starts, args.world_ground_all);
             r.set_ground_streamed(cells, paint, ground::DIRT, t.area.width.0.hypot(t.area.depth.0))?;
             // And drawn again one width off across each seam.
             r.set_wrap(drawn_wrap(t));
             // Which maps' pages went up, and at what size (MD31): a map past the device's layers is dirt.
             if let Some(l) = &world_look {
                 let limits = r.device.limits();
-                let packed = l.paint.pack(limits.max_texture_array_layers, limits.max_texture_dimension_2d);
+                let packed = l.paint.pack_for(limits.max_texture_array_layers, limits.max_texture_dimension_2d);
                 let (arrays, detail) = game_render::gpu::world_paint_arrays(&l.paint, &packed);
                 let arrays: Vec<String> = arrays.iter().map(|a| format!("{}x{} x {}", a.width, a.height, a.layers)).collect();
                 // And the disc maps' splats drawn per pixel (MD35).
@@ -5915,11 +5953,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     Err(e) => println!("world stand-in: none: {e}"),
                 }
             }
-            let built = first.len();
-            for (i, made) in first {
-                r.add_ground_piece_of(i as u32, made)?;
-                r.show_ground_piece(i as u32, 0.0);
-            }
+            // Each piece up as it is built, not all held till the last is (P283).
+            let (mut built, mut failed) = (0, Ok(()));
+            let mut stream = worlds::GroundStream::start_into(w, cells, reach, &starts, args.world_ground_all, &mut |i, made| {
+                if failed.is_ok() {
+                    failed = r.add_ground_piece_of(i as u32, made);
+                    r.show_ground_piece(i as u32, 0.0);
+                    built += 1;
+                }
+            });
+            failed?;
             for line in stream.take_log() {
                 println!("{line}");
             }
@@ -5936,6 +5979,31 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 stream.chunks_a_frame = n;
             }
             ground_stream = Some(stream);
+            // The maps' pages are the GPU's now: the CPU's let go, and the far maps' streamed (P283).
+            if let (Some(l), true) = (&mut world_look, paint_near.is_some()) {
+                for tile in &mut l.paint.tiles {
+                    if let Some(pages) = &mut tile.pages {
+                        worlds::hollow(pages, &mut tile.sharp);
+                    }
+                    // And a disc map's splat textures and light map, on the GPU or baked in now: its
+                    // passes and roads stay, which say how it is drawn.
+                    if let Some(splat) = tile.sharp.as_mut().and_then(|s| std::sync::Arc::get_mut(&mut s.splat)) {
+                        splat.textures = Vec::new();
+                        splat.shadow = None;
+                    }
+                }
+                let stream = paint_stream::PaintStream::start(w, reach, r);
+                if let Some((used, shown)) = r.world_paint_pool() {
+                    let used: Vec<String> = used.iter().map(|(u, c)| format!("{u} of {c}")).collect();
+                    println!(
+                        "world paint: {shown} maps on their own pages at the start, the rest on far pages; layers held {} (load {:.0} ft, drop {:.0} ft)",
+                        used.join(", "),
+                        reach.load.0,
+                        reach.drop.0
+                    );
+                }
+                paint_stream = Some(stream);
+            }
         }
         // `upload_all`'s order, a slice at a time.
         let mut names: Vec<&String> = assets.models.keys().collect();
@@ -6731,6 +6799,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut simulated = false;
     // Whether the ride's first picture has been drawn behind the loading screen (P150).
     let mut warmed = !args.warm;
+    // The load's time and memory said once, with the ride's first picture (P283).
+    let mut load_said = false;
     let mut ridden: Vec<Ridden> = Vec::with_capacity(args.players);
     let mut top = Instant::now();
     let mut limiter = pace::Limiter::default();
@@ -8171,6 +8241,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     }
                     let (held, room) = r.ground_chunks();
                     ground_most = (ground_most.0.max(held), ground_most.1.max(room));
+                    if let Some(paint) = &mut paint_stream {
+                        paint.update(&near, r);
+                        for line in paint.take_log() {
+                            println!("{line} at tick {}", pacer.ticks());
+                        }
+                    }
                 }
                 for line in stream.take_log() {
                     println!("{line} at tick {}", pacer.ticks());
@@ -9435,6 +9511,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("warm frame: {:.2} ms behind the loading screen", took.as_secs_f64() * 1000.0);
                 }
             }
+            if !load_said {
+                load_said = true;
+                println!("load: the ride's first frame {:.2} s after launch, memory {}", launched().elapsed().as_secs_f32(), peak_memory());
+            }
             // The Tricks page's rider over the pause (P259), after the frame and before it is read.
             let trick_draw = |r: &mut Renderer, t: &Target| {
                 if let (Some(Some(stage)), Some(rig)) = (&trick_stage, rigs.first()) {
@@ -10075,6 +10155,21 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             );
             println!("world ground: held at most {} chunks at once in the ride, room for {}", ground_most.0, ground_most.1);
         }
+        // And the maps' pages it wrote (P283).
+        if let Some(paint) = &paint_stream {
+            println!(
+                "world paint: {} maps shown and {} let go in the ride, at most {:.1} MB written in a frame ({:.1} MB in all), slowest update {:.2} ms",
+                paint.shown,
+                paint.let_go,
+                paint.most_bytes as f32 / 1048576.0,
+                paint.bytes as f32 / 1048576.0,
+                paint.slowest * 1000.0
+            );
+            if let Some((used, shown)) = renderer_of(&mut offscreen, window).and_then(|r| r.world_paint_pool()) {
+                let used: Vec<String> = used.iter().map(|(u, c)| format!("{u} of {c}")).collect();
+                println!("world paint: {shown} maps on their own pages at the end, layers held {}", used.join(", "));
+            }
+        }
         // And where each dressed tile's props stand as the GPU draws them, so a tile's props can be
         // seen moved by its offset (MD15).
         if let Some(w) = &world_mod
@@ -10163,6 +10258,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             "after the first frame: {} disc reads, {} archive reads, {} texture decodes, {bytes}",
             after.reads, after.inflates, after.decodes
         );
+        // And the memory the ride ended holding, read after the bytes above are counted (P283).
+        println!("memory: {}", peak_memory());
     }
     let at = world.seats[0].sim.rider.ride.position();
     println!(

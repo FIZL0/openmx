@@ -499,6 +499,121 @@ struct GpuGround {
     cover: Option<Cover>,
     /// The shader the pipelines are made of, kept for the stand-in's.
     module: wgpu::ShaderModule,
+    /// A world's paint held near the riders (P283): its page arrays' pools and leaf image.
+    paged: Option<PagedPaint>,
+}
+
+/// A world's page arrays as pools (P283, [`crate::terrain::FarPaint`]): each map held takes a run
+/// of layers in its page size's array, its baked pages then its modulate pages, and its leaves in
+/// the leaf image say which; a map not held reads its far pages from the far atlas.
+struct PagedPaint {
+    /// Each page array and its layers' size and mip levels, by [`Packed::array`].
+    arrays: Vec<(wgpu::Texture, (u32, u32), u32)>,
+    /// Each array's free runs of layers, `(first, count)`, in order.
+    free: Vec<Vec<(u32, u32)>>,
+    /// Each array's layers.
+    capacity: Vec<u32>,
+    leaves: wgpu::Texture,
+    /// Each map of the world, by its index.
+    tiles: Vec<Option<PagedTile>>,
+}
+
+struct PagedTile {
+    array: u32,
+    /// Its layers: pages, and modulate pages after them.
+    layers: u32,
+    /// Its leaves: across, along, the leaf image row they start on, and each leaf's page.
+    across: u32,
+    along: u32,
+    row: u32,
+    page_of: Vec<Option<u16>>,
+    /// Its first far page in the far atlas, if it has far pages.
+    far: Option<u32>,
+    /// The first of the layers it holds, and whether its leaves read them yet.
+    held: Option<u32>,
+    shown: bool,
+}
+
+impl PagedPaint {
+    /// Room for map `tile`'s layers: the first free run that fits, its first layer.
+    fn take(&mut self, tile: usize) -> Option<u32> {
+        let t = self.tiles.get(tile)?.as_ref()?;
+        if let Some(at) = t.held {
+            return Some(at);
+        }
+        let (array, n) = (t.array as usize, t.layers);
+        let runs = &mut self.free[array];
+        let k = runs.iter().position(|&(_, len)| len >= n)?;
+        let at = runs[k].0;
+        runs[k] = (at + n, runs[k].1 - n);
+        if runs[k].1 == 0 {
+            runs.remove(k);
+        }
+        self.tiles[tile].as_mut().expect("checked").held = Some(at);
+        Some(at)
+    }
+
+    /// Map `tile`'s layers given back, its leaves on its far pages.
+    fn give_back(&mut self, tile: usize) -> bool {
+        let Some(t) = self.tiles.get_mut(tile).and_then(Option::as_mut) else { return false };
+        let Some(at) = t.held.take() else { return false };
+        t.shown = false;
+        let (array, n) = (t.array as usize, t.layers);
+        let runs = &mut self.free[array];
+        let k = runs.partition_point(|&(first, _)| first < at);
+        runs.insert(k, (at, n));
+        // Joined to the runs either side.
+        if k + 1 < runs.len() && runs[k].0 + runs[k].1 == runs[k + 1].0 {
+            runs[k].1 += runs[k + 1].1;
+            runs.remove(k + 1);
+        }
+        if k > 0 && runs[k - 1].0 + runs[k - 1].1 == runs[k].0 {
+            runs[k - 1].1 += runs[k].1;
+            runs.remove(k);
+        }
+        true
+    }
+
+    /// Map `tile`'s leaves as the leaf image holds them: a leaf's red and green its page's layer + 1
+    /// where the map is shown, its blue and alpha its far page + 1; 0 for none.
+    fn leaf_texels(t: &PagedTile) -> Vec<u8> {
+        let mut rgba = vec![0u8; (t.across * t.along * 4) as usize];
+        for (i, page) in t.page_of.iter().enumerate() {
+            let Some(n) = *page else { continue };
+            let near = t.held.filter(|_| t.shown).map_or(0, |at| at + u32::from(n) + 1);
+            let far = t.far.map_or(0, |f| f + u32::from(n) + 1);
+            rgba[i * 4..i * 4 + 4].copy_from_slice(&[(near & 0xff) as u8, (near >> 8) as u8, (far & 0xff) as u8, (far >> 8) as u8]);
+        }
+        rgba
+    }
+
+    fn write_leaves(&self, queue: &wgpu::Queue, tile: usize) {
+        let Some(Some(t)) = self.tiles.get(tile) else { return };
+        if t.across == 0 || t.along == 0 {
+            return;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &self.leaves, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: t.row, z: 0 }, aspect: wgpu::TextureAspect::All },
+            &Self::leaf_texels(t),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(t.across * 4), rows_per_image: Some(t.along) },
+            wgpu::Extent3d { width: t.across, height: t.along, depth_or_array_layers: 1 },
+        );
+    }
+}
+
+/// One page as a world's page array holds it (P283): resampled to the array's layer size where it
+/// is not that size, as [`upload_array`] does, and its mip levels. For a stream's worker to make
+/// off the frame, and [`Renderer::world_paint_write`] to write.
+pub fn page_layer_mips(t: &Texture, (w, h): (u32, u32)) -> Vec<(u32, u32, Vec<u8>)> {
+    if (t.width as u32, t.height as u32) == (w, h) && t.rgba.len() == (w * h * 4) as usize {
+        return mips(t);
+    }
+    let t = Texture {
+        width: w as usize,
+        height: h as usize,
+        rgba: (0..(w * h) as usize).flat_map(|i| t.sample_smooth(((i % w as usize) as f32 + 0.5) / w as f32, ((i / w as usize) as f32 + 0.5) / h as f32)).collect(),
+    };
+    mips(&t)
 }
 
 /// The piece number the world's stand-in is held as (V92, [`Renderer::set_ground_stand_in`]).
@@ -1704,7 +1819,7 @@ pub fn world_paint_arrays(w: &WorldPaint, packed: &[Option<Packed>]) -> (Vec<Arr
     (pages, array_shape(&details))
 }
 
-/// The pages of a world's maps (MD31) as [`upload_world_pages`] lays them out: the layers of each
+/// The pages of a world's maps (MD31) as [`upload_world_paged`] lays them out: the layers of each
 /// page array ([`Packed::array`]), in order, a map's pages from its [`Packed::first_page`] on.
 fn world_page_layers<'a>(w: &'a WorldPaint, packed: &[Option<Packed>]) -> Vec<Vec<&'a Texture>> {
     let mut arrays: Vec<Vec<&Texture>> = vec![Vec::new(); w.array_sizes(packed).len().max(1)];
@@ -1762,7 +1877,19 @@ pub fn world_meshes(w: &WorldPaint, packed: &[Option<Packed>]) -> Option<crate::
 /// How many textures a world's ground binds in its group 1: the light map, the first page array, the
 /// leaves, the details, the other page arrays and the splat layers.
 fn world_textures(w: &WorldPaint, packed: &[Option<Packed>]) -> usize {
-    3 + w.array_sizes(packed).len().max(1) + usize::from(world_splat_array(w, packed).is_some())
+    3 + w.array_sizes(packed).len().max(1) + usize::from(world_splat_array(w, packed).is_some()) + 1
+}
+
+/// The binding of a world's far atlas (P283): after its splat layers, or its last page array.
+fn far_binding(w: &WorldPaint, packed: &[Option<Packed>]) -> u32 {
+    splat_binding(w, packed) + u32::from(world_splat_array(w, packed).is_some())
+}
+
+/// Every map's far pages ([`crate::terrain::FarPaint`]) as one picture, [`crate::terrain::FAR_PAGE`]
+/// pixels a page, this many pages across (and as many down at most).
+fn far_atlas_cols(w: &WorldPaint) -> u32 {
+    let n: usize = w.far.pages.iter().map(Vec::len).sum();
+    ((n as f64).sqrt().ceil() as u32).max(1)
 }
 
 /// The array of a world's disc maps' splat layers as [`Renderer::set_ground_streamed`] uploads it
@@ -1772,29 +1899,98 @@ pub fn world_splat_array(w: &WorldPaint, packed: &[Option<Packed>]) -> Option<Ar
     (!layers.is_empty()).then(|| array_shape(&layers))
 }
 
-/// A world's paint (MD9) for its shader: the packed maps' pages in one array a page size (MD31),
-/// their leaf images stacked in one picture (a leaf's red and green are its page's layer + 1 in its
-/// map's array, low byte first; 0 for none), and their detail maps in a second array. The views in
-/// binding order: the first page array, the leaves, the details, and then the other page arrays.
-fn upload_world_pages(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint, packed: &[Option<Packed>]) -> Vec<wgpu::TextureView> {
-    let placed: Vec<(&Pages, Packed)> = w.tiles.iter().zip(packed).filter_map(|(t, p)| Some((t.pages.as_ref()?, (*p)?))).collect();
-    let mut arrays: Vec<wgpu::TextureView> = world_page_layers(w, packed).iter().map(|layers| upload_array(device, queue, "world ground pages", layers)).collect();
-    let pages = arrays.remove(0);
-    let width = placed.iter().map(|(p, _)| p.across).max().unwrap_or(1).max(1) as usize;
-    let height = placed.iter().map(|(p, at)| at.row + p.along).max().unwrap_or(1).max(1) as usize;
-    let mut rgba = vec![0u8; width * height * 4];
-    for (p, at) in &placed {
-        for lz in 0..p.along as usize {
-            for lx in 0..p.across as usize {
-                let entry = p.page_of[lz * p.across as usize + lx].map_or(0, |n| at.first_page + u32::from(n) + 1);
-                let i = ((at.row as usize + lz) * width + lx) * 4;
-                rgba[i..i + 4].copy_from_slice(&[(entry & 0xff) as u8, (entry >> 8) as u8, 0, 255]);
+/// A world's paint (MD9) for its shader, each page array a pool of `pool` layers (P283,
+/// [`WorldPaint::pool`]): the maps whose pages are here take a run each, in the world's order, as
+/// long as there is room; the rest, and maps whose pages are [`Pages::hollow`], read their far
+/// pages from the far atlas. A leaf image stacks the maps' leaves (a leaf's red and green its page's
+/// layer + 1, blue and alpha its far page + 1, low byte first; 0 for none), and their detail maps
+/// are a second array. The views in binding order: the first page array, the leaves, the details,
+/// the other page arrays, the splat layers and the far atlas.
+fn upload_world_paged(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint, packed: &[Option<Packed>], pool: &[u32]) -> (Vec<wgpu::TextureView>, PagedPaint) {
+    let sizes = w.array_sizes(packed);
+    let mut paged = PagedPaint {
+        arrays: Vec::new(),
+        free: pool.iter().map(|&n| vec![(0, n)]).collect(),
+        capacity: pool.to_vec(),
+        leaves: device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("world ground page of each leaf"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        }),
+        tiles: Vec::new(),
+    };
+    // The far atlas's runs, in the world's order.
+    let mut far_next = 0u32;
+    for (i, (t, at)) in w.tiles.iter().zip(packed).enumerate() {
+        let far_pages = w.far.pages.get(i).map_or(0, Vec::len) as u32;
+        let far = (far_pages > 0).then_some(far_next);
+        far_next += far_pages;
+        let tile = match (&t.pages, at) {
+            (Some(p), Some(at)) => Some(PagedTile {
+                array: at.array,
+                layers: w.layers_of(i),
+                across: p.across,
+                along: p.along,
+                row: at.row,
+                page_of: p.page_of.clone(),
+                far,
+                held: None,
+                shown: false,
+            }),
+            _ => None,
+        };
+        paged.tiles.push(tile);
+    }
+    // Each array, its layers the size of its pages.
+    let mut arrays = Vec::new();
+    for (k, &(pw, ph)) in sizes.iter().enumerate() {
+        let layers = array_layers(pool.get(k).copied().unwrap_or(1).max(1), pw, ph);
+        let mips = 32 - pw.max(ph).leading_zeros();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("world ground pages"),
+            size: wgpu::Extent3d { width: pw, height: ph, depth_or_array_layers: layers },
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        arrays.push(texture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() }));
+        paged.arrays.push((texture, (pw, ph), mips));
+    }
+    if arrays.is_empty() {
+        arrays.push(upload_array(device, queue, "world ground pages", &[]));
+    }
+    // The maps here, written in.
+    for (i, t) in w.tiles.iter().enumerate() {
+        let Some(p) = t.pages.as_ref().filter(|p| p.here()) else { continue };
+        if t.sharp().is_some_and(|s| s.modulate.iter().any(|m| m.rgba.is_empty())) {
+            continue;
+        }
+        let Some(first) = paged.take(i) else { continue };
+        let Some(Some(slot)) = paged.tiles.get(i) else { continue };
+        let (texture, size, mips_n) = &paged.arrays[slot.array as usize];
+        let layers = p.pages.iter().chain(t.sharp().map_or(&[][..], |s| &s.modulate[..]));
+        for (k, page) in layers.enumerate() {
+            for (level, (lw, lh, px)) in page_layer_mips(page, *size).iter().enumerate().take(*mips_n as usize) {
+                write_layer(queue, texture, level as u32, first + k as u32, (*lw, *lh), 4, px);
             }
         }
+        paged.tiles[i].as_mut().expect("checked").shown = true;
     }
-    let leaves = device.create_texture(&wgpu::TextureDescriptor {
+    // The leaf image.
+    let placed: Vec<&PagedTile> = paged.tiles.iter().flatten().collect();
+    let width = placed.iter().map(|t| t.across).max().unwrap_or(1).max(1);
+    let height = placed.iter().map(|t| t.row + t.along).max().unwrap_or(1).max(1);
+    paged.leaves = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("world ground page of each leaf"),
-        size: wgpu::Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1802,12 +1998,46 @@ fn upload_world_pages(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    write_layer(queue, &leaves, 0, 0, (width as u32, height as u32), 4, &rgba);
+    for i in 0..paged.tiles.len() {
+        paged.write_leaves(queue, i);
+    }
+    let leaves = paged.leaves.create_view(&Default::default());
+    // The details, every packed map's, and the splat layers, as before.
+    let placed: Vec<(&Pages, Packed)> = w.tiles.iter().zip(packed).filter_map(|(t, p)| Some((t.pages.as_ref()?, (*p)?))).collect();
     let details: Vec<&Texture> = placed.iter().filter_map(|(p, _)| p.detail.as_ref()).collect();
     let details = upload_array(device, queue, "world ground detail", &details);
     let (splats, _) = world_splat_layers(w, packed);
     let splats = (!splats.is_empty()).then(|| upload_array(device, queue, "world splat layers", &splats));
-    [pages, leaves.create_view(&Default::default()), details].into_iter().chain(arrays).chain(splats).collect()
+    // The far atlas.
+    let cols = far_atlas_cols(w) as usize;
+    let side = cols * crate::terrain::FAR_PAGE;
+    let mut rgba = vec![0u8; side * side * 4];
+    for (n, page) in w.far.pages.iter().flatten().enumerate() {
+        let (ox, oy) = ((n % cols) * crate::terrain::FAR_PAGE, (n / cols) * crate::terrain::FAR_PAGE);
+        for y in 0..page.height.min(crate::terrain::FAR_PAGE) {
+            let from = y * page.width * 4;
+            let to = ((oy + y) * side + ox) * 4;
+            let len = page.width.min(crate::terrain::FAR_PAGE) * 4;
+            if from + len <= page.rgba.len() {
+                rgba[to..to + len].copy_from_slice(&page.rgba[from..from + len]);
+            }
+        }
+    }
+    let far = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("world far pages"),
+        size: wgpu::Extent3d { width: side as u32, height: side as u32, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_layer(queue, &far, 0, 0, (side as u32, side as u32), 4, &rgba);
+    let mut arrays = arrays.into_iter();
+    let first = arrays.next().expect("one at least");
+    let views = [first, leaves, details].into_iter().chain(arrays).chain(splats).chain(std::iter::once(far.create_view(&Default::default()))).collect();
+    (views, paged)
 }
 
 /// The baked light map's tiles as one grey image, for the ground's shader.
@@ -2713,7 +2943,7 @@ impl Renderer {
         let world = match paint {
             GroundPaint::World(w) => {
                 let limits = self.device.limits();
-                Some((w, w.pack(limits.max_texture_array_layers, limits.max_texture_dimension_2d)))
+                Some((w, w.pack_for(limits.max_texture_array_layers, limits.max_texture_dimension_2d)))
             }
             _ => None,
         };
@@ -2792,6 +3022,8 @@ impl Renderer {
             if world_splat_array(w, packed).is_some() {
                 entries.push(texture_entry(splat_binding(w, packed), true, wgpu::TextureViewDimension::D2Array));
             }
+            // The far atlas (P283).
+            entries.push(texture_entry(far_binding(w, packed), true, wgpu::TextureViewDimension::D2));
         }
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ground"),
@@ -2805,8 +3037,12 @@ impl Renderer {
         if let Some(p) = pages {
             views.extend(upload_pages(&self.device, &self.queue, p));
         }
+        let mut paged = None;
         if let Some((w, packed)) = &world {
-            views.extend(upload_world_pages(&self.device, &self.queue, w, packed));
+            let pool = w.pool(packed, self.device.limits().max_texture_array_layers);
+            let (v, p) = upload_world_paged(&self.device, &self.queue, w, packed, &pool);
+            views.extend(v);
+            paged = Some(p);
         }
         let bind = self.ground_bind(&layout, &shadow, &views);
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2842,8 +3078,67 @@ impl Renderer {
             textures: views,
             anisotropy: self.anisotropy,
             meshes,
+            paged,
         });
         Ok(())
+    }
+
+    /// A world's paint pools (P283): each page array's layers in use and its layers, and how many
+    /// maps are held and shown; `None` for a ground that is not a world's.
+    pub fn world_paint_pool(&self) -> Option<(Vec<(u32, u32)>, usize)> {
+        let p = self.ground.as_ref()?.paged.as_ref()?;
+        let used = p.capacity.iter().zip(&p.free).map(|(&c, free)| (c - free.iter().map(|r| r.1).sum::<u32>(), c)).collect();
+        Some((used, p.tiles.iter().flatten().filter(|t| t.shown).count()))
+    }
+
+    /// Whether world map `tile`'s own pages are drawn (P283): held and shown.
+    pub fn world_paint_shown(&self, tile: usize) -> bool {
+        self.ground.as_ref().and_then(|g| g.paged.as_ref()).and_then(|p| p.tiles.get(tile)?.as_ref()).is_some_and(|t| t.shown)
+    }
+
+    /// The layer size map `tile`'s pages are written at (P283, [`page_layer_mips`]), `None` for a map
+    /// the GPU does not paint.
+    pub fn world_paint_layer_size(&self, tile: usize) -> Option<(u32, u32)> {
+        let p = self.ground.as_ref()?.paged.as_ref()?;
+        let t = p.tiles.get(tile)?.as_ref()?;
+        Some(p.arrays[t.array as usize].1)
+    }
+
+    /// Room for world map `tile`'s pages in its page array (P283), taken: `false` when it has none
+    /// there now, or the GPU does not paint it. Its leaves read its far pages until
+    /// [`Renderer::world_paint_show`].
+    pub fn world_paint_take(&mut self, tile: usize) -> bool {
+        self.ground.as_mut().and_then(|g| g.paged.as_mut()).is_some_and(|p| p.take(tile).is_some())
+    }
+
+    /// Layer `k` of world map `tile`'s run ([`Renderer::world_paint_take`]): its `k`th page, and past
+    /// its pages its modulate pages, as [`page_layer_mips`] made it.
+    pub fn world_paint_write(&mut self, tile: usize, k: u32, levels: &[(u32, u32, Vec<u8>)]) {
+        let Some(p) = self.ground.as_ref().and_then(|g| g.paged.as_ref()) else { return };
+        let Some(Some(t)) = p.tiles.get(tile) else { return };
+        let (Some(at), true) = (t.held, k < t.layers) else { return };
+        let (texture, _, mips) = &p.arrays[t.array as usize];
+        for (level, (lw, lh, px)) in levels.iter().enumerate().take(*mips as usize) {
+            write_layer(&self.queue, texture, level as u32, at + k, (*lw, *lh), 4, px);
+        }
+    }
+
+    /// World map `tile`'s leaves on its own pages, once they are written (P283).
+    pub fn world_paint_show(&mut self, tile: usize) {
+        let Some(p) = self.ground.as_mut().and_then(|g| g.paged.as_mut()) else { return };
+        let Some(Some(t)) = p.tiles.get_mut(tile) else { return };
+        if t.held.is_some() {
+            t.shown = true;
+            p.write_leaves(&self.queue, tile);
+        }
+    }
+
+    /// World map `tile`'s pages let go (P283): its leaves back on its far pages and its layers free.
+    pub fn world_paint_let_go(&mut self, tile: usize) {
+        let Some(p) = self.ground.as_mut().and_then(|g| g.paged.as_mut()) else { return };
+        if p.give_back(tile) {
+            p.write_leaves(&self.queue, tile);
+        }
     }
 
     /// Whether the ground draws roads and ruts round each eye (V67, and a world's disc maps' V115).
@@ -5074,6 +5369,22 @@ fn ground_world_meshed_wgsl(w: &WorldPaint, packed: &[Option<Packed>], meshed: b
     if splat_first.iter().any(Option::is_some) {
         s.push_str(&format!("@group(1) @binding({}) var splat_layers: texture_2d_array<f32>;\n", splat_binding(w, packed)));
     }
+    // Every map's far pages (P283), read where a map's own are not held.
+    let far_cols = far_atlas_cols(w);
+    s.push_str(&format!(
+        "@group(1) @binding({}) var far_pages: texture_2d<f32>;
+fn far_paint(cell: i32, local: vec2f) -> vec3f {{
+  let at = vec2f(f32(cell % {far_cols}), f32(cell / {far_cols})) * {page};
+  let p = clamp(({border} + {inner} * local) * {page}, vec2f(0.5), vec2f({page} - 0.5));
+  return textureSampleLevel(far_pages, clamped, (at + p) / {side}, 0.0).rgb * 255.0;
+}}
+",
+        far_binding(w, packed),
+        page = f(crate::terrain::FAR_PAGE as f32),
+        side = f((far_cols as usize * crate::terrain::FAR_PAGE) as f32),
+        border = f(1.0 / 32.0),
+        inner = f(15.0 / 16.0),
+    ));
     if meshed {
         s.push_str(ground_mesh::WGSL_BINDINGS);
     }
@@ -5169,6 +5480,8 @@ fn mirror(xz: vec2f, r: vec4f) -> vec2f {{ let p = near(xz, r); return vec2f(mir
   let entry = i32(round(e.r * 255.0)) + 256 * i32(round(e.g * 255.0));
   let page = select(0, entry - 1, on && entry > 0);
   let local = (vec2f(leaf & vec2i(3)) * 16.0 + samples - vec2f(leaf) * 16.0) / 64.0;
+  let far = i32(round(e.b * 255.0)) + 256 * i32(round(e.a * 255.0));
+  if on && entry == 0 && far > 0 {{ return far_paint(far - 1, local); }}
   let k = {inner} / (64.0 * {spacing});
   let t = textureSampleGrad({array}, tiled, {border} + {inner} * local, page, gx * k, gy * k).rgb * 255.0;
   {detail}
@@ -6687,6 +7000,7 @@ mod tests {
                         crate::terrain::PaintTile { at: [40.0, 0.0], pages: None, sharp: None },
                     ],
                     dirt: [200.0, 180.0, 150.0],
+                    far: Default::default(),
                 };
                 faded_ground(ground_world_wgsl(&world, &world.pack(256, 2048)))
             }),
@@ -6700,6 +7014,7 @@ mod tests {
                         crate::terrain::PaintTile { at: [40.0, 0.0], pages: Some(pages.clone()), sharp: None },
                     ],
                     dirt: [200.0, 180.0, 150.0],
+                    far: Default::default(),
                 };
                 let packed = world.pack(256, 2048);
                 assert_eq!(world.array_sizes(&packed).len(), 2, "{packed:?}");
@@ -6723,6 +7038,7 @@ mod tests {
                         crate::terrain::PaintTile { at: [40.0, 0.0], pages: Some(pages.clone()), sharp: Some(sharp) },
                     ],
                     dirt: [200.0, 180.0, 150.0],
+                    far: Default::default(),
                 };
                 let packed = world.pack(256, 2048);
                 assert_eq!(world_mesh_tiles(&world, &packed), vec![0, 1]);

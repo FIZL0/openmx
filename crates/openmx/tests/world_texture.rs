@@ -65,6 +65,7 @@ fn world(pages: Pages) -> WorldPaint {
         regions: Regions { owned: vec![[0.0, 0.0, SIDE, SIDE], [AT[0], AT[1], AT[0] + SIDE, AT[1] + SIDE]], period: [0.0; 2] },
         tiles: vec![PaintTile { at: [0.0, 0.0], pages: Some(baked_pages()), sharp: None }, PaintTile { at: AT, pages: Some(pages), sharp: None }],
         dirt: DIRT,
+        far: Default::default(),
     }
 }
 
@@ -214,6 +215,7 @@ fn disc_world(sharp: bool) -> WorldPaint {
         regions: Regions { owned: vec![[0.0, 0.0, SIDE, SIDE], [AT[0], AT[1], AT[0] + SIDE, AT[1] + SIDE]], period: [0.0; 2] },
         tiles: vec![PaintTile { at: [0.0, 0.0], pages: Some(baked_pages()), sharp: None }, PaintTile { at: AT, pages: Some(pages), sharp }],
         dirt: DIRT,
+        far: Default::default(),
     }
 }
 
