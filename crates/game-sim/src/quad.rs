@@ -40,6 +40,10 @@
 //! [`strut_travel`] answers, the [`trigger_segments`] the trigger probe is shaped to, and the
 //! [`settle_wheels`] onto the ground.
 //!
+//! The quad's once-a-frame animation driver, [`animate`] (MD65c): the clip fade, the stunt it plays
+//! (the stand-upright's guard word) and the riding pose's blends (put-back's settle word), with the
+//! clips, node pose and hung nodes as [`Call`]s.
+//!
 //! And the quad's tire reader, [`tire_phy`] (MD64b): `[Front Tire]` and `[Rear Tire]` into the four
 //! wheels ([`TireSetup`]), with the original's left-to-right copies and their quirks.
 //!
@@ -643,6 +647,17 @@ pub enum Call {
     /// The quad's level setup's ([`remap_surfaces`], MD65b): a global flag set, then the bike's shared
     /// level setup, handed the level.
     LevelSetup,
+    /// The animation driver's ([`animate`], MD65c), in its order: the biplane's own driver (first,
+    /// handed `dt`); the rider's animation stopped; one clip played or two blended (`clip`s are places
+    /// in [`Anim`]'s clip table, `weight` and `mix` clamped to `0..1`, `fade` [`Anim::fade`]); the
+    /// model's nodes posed; then [`Call::ReadFrame`] and [`Call::SetFrame`] as the put-back's, and the
+    /// attachment's box moved in the spatial database.
+    BaseAnimate(F),
+    AnimStop,
+    PlayClip { clip: i32, weight: F, fade: F },
+    BlendClips { clips: [i32; 2], weight: F, mix: F, fade: F },
+    PoseNodes,
+    AttachmentMoved,
 }
 
 /// Whoever runs the calls the quad's listeners make. A `Vec<Call>` just lists them.
@@ -2479,4 +2494,129 @@ pub fn settle_wheels(wheels: &mut [WheelGround; 4], body: &Body, node_pos: Vf, m
     for w in wheels.iter_mut() {
         w.kept = w.point;
     }
+}
+
+// --- MD65c: the animation driver ------------------------------------------------------------------
+
+/// The stunt id the riding pose is played for: ids below it are tricks with a clip of their own each;
+/// this one blends the riding pose's three clips ([`POSE_CLIPS`]); any other plays the middle one.
+pub const RIDING_POSE: i32 = 46;
+/// The riding pose's three clips, in [`Anim`]'s clip table after the 46 stunts': the blend's weight
+/// is the crossup's, and the stick fore and aft mixes the first two (its forward half) or the last two.
+pub const POSE_CLIPS: [i32; 3] = [46, 47, 48];
+
+/// What the animation driver reads and writes beyond [`Quad`] and [`PutBack`]. The field map is
+/// research/oracle.txt's `# MD65b`/`# MD65c`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Anim {
+    /// The vehicle state's word: in 3 and 4 the two pose blends are left as they were.
+    pub vehicle_state: u32,
+    /// The clips' fade-in, run down by `fade_rate` a second and held in `0..1`; one when the rider's
+    /// animation is stopped.
+    pub fade: F,
+    pub fade_rate: F,
+    /// The rider's stunt id as this frame plays it ([`Quad::balancing`]'s word) and as the stunt
+    /// steps last set it; and the balance stunt's id.
+    pub stunt: i32,
+    pub next_stunt: i32,
+    pub balance_stunt: i32,
+    /// A word the unwreck clears; set, the rider's animation is stopped (what sets it was not traced).
+    pub restart: u32,
+    /// How far into its clip the stunt is (the stunt clip's weight is this over the clip's length).
+    pub stunt_time: F,
+    /// The crossup either way that the riding pose's blend spans, and the two blends the pose is
+    /// played at: the crossup's and the stick fore and aft's.
+    pub crossup_range: F,
+    pub crossup_blend: F,
+    pub fore_aft_blend: F,
+}
+
+/// What the animation driver asks of the rider's stunt clips: whether the rider's animation set has a
+/// stunt's clip ready (asked for ids below [`RIDING_POSE`]), and that clip's length (asked only when
+/// it is ready and the animation was not stopped this frame).
+pub trait StuntClips {
+    fn ready(&mut self, stunt: i32) -> bool;
+    fn length(&mut self, stunt: i32) -> F;
+}
+
+fn unit(x: F) -> F {
+    x.max(F::ZERO).min(F::ONE)
+}
+
+/// **The quad's animation driver**, once a frame: the biplane's own driver first, then the rider's
+/// clip, the model's nodes and the hung nodes.
+///
+/// What the simulation reads of it:
+///
+/// - [`Anim::fade`] run down by `dt` (`0 + fade − rate·dt` through the accumulator) into `0..1`.
+/// - With no put-back this frame ([`PutBack::request`] zero) and the stunt changed or
+///   [`Anim::restart`] set, the rider's animation is stopped and the fade put back to one.
+/// - The stunt played this frame is the stunt steps' ([`Anim::stunt`]), so [`Quad::balancing`] is
+///   whether it is the balance stunt.
+/// - A stunt below [`RIDING_POSE`] with its clip ready ([`StuntClips`]) plays it, at its time over the
+///   clip's length (none when the animation was stopped).
+/// - Otherwise, outside vehicle states 3 and 4, the fore-and-aft blend is `(1 + stick) · ½`; for the
+///   riding pose the crossup blend is the crossup's place in `±range` (none when the two ends are
+///   equal), mapped through `0 + t·1` and clamped, and [`PutBack::settle`] is it; for any other stunt
+///   it is `½ + ½ · lean` and the middle pose is played at a half.
+///
+/// The clips, the node pose, the frame reads and the attachment are [`Call`]s.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn animate(
+    a: &mut Anim,
+    pb: &mut PutBack,
+    q: &mut Quad,
+    body: &mut Body,
+    dt: F,
+    clips: &mut impl StuntClips,
+    m: &mut impl Moto,
+) {
+    m.call(Call::BaseAnimate(dt), q, body);
+    a.fade = unit(Acc::adda(F::ZERO, a.fade).msub(a.fade_rate, dt));
+    let stopped = pb.request == 0 && (a.next_stunt != a.stunt || a.restart != 0);
+    if stopped {
+        m.call(Call::AnimStop, q, body);
+        a.fade = F::ONE;
+    }
+    a.stunt = a.next_stunt;
+    q.balancing = a.stunt == a.balance_stunt;
+    let held = a.vehicle_state == 3 || a.vehicle_state == 4;
+    let call = if a.stunt < RIDING_POSE && clips.ready(a.stunt) {
+        let weight = if stopped { F::ZERO } else { a.stunt_time / clips.length(a.stunt) };
+        Call::PlayClip { clip: a.stunt, weight: unit(weight), fade: a.fade }
+    } else if a.stunt == RIDING_POSE {
+        if !held {
+            a.fore_aft_blend = F(0.5) * (F::ONE + q.lean_fore_aft);
+            let lo = F(fpu::neg(a.crossup_range.0));
+            a.crossup_blend = if lo == a.crossup_range {
+                F::ZERO
+            } else {
+                let t = (q.crossup - lo) / (a.crossup_range - lo);
+                unit(Acc::adda(F::ZERO, F::ZERO).madd(t, F::ONE - F::ZERO))
+            };
+        }
+        pb.settle = a.crossup_blend;
+        let (clips, mix) = if a.fore_aft_blend < F(0.5) {
+            ([POSE_CLIPS[1], POSE_CLIPS[0]], F(2.0) * a.fore_aft_blend)
+        } else {
+            ([POSE_CLIPS[2], POSE_CLIPS[1]], F(2.0) * (a.fore_aft_blend - F(0.5)))
+        };
+        Call::BlendClips { clips, weight: unit(a.crossup_blend), mix: unit(mix), fade: a.fade }
+    } else {
+        if !held {
+            a.fore_aft_blend = F(0.5) * (F::ONE + q.lean_fore_aft);
+            a.crossup_blend = Acc::adda(F::ZERO, F(0.5)).madd(F(0.5), q.lean);
+        }
+        Call::PlayClip { clip: POSE_CLIPS[1], weight: F(0.5), fade: a.fade }
+    };
+    m.call(call, q, body);
+    m.call(Call::PoseNodes, q, body);
+    m.call(Call::ReadFrame(0), q, body);
+    m.call(Call::ReadFrame(1), q, body);
+    for (i, &kind) in pb.hung.iter().enumerate() {
+        if kind == 0 || kind == 1 {
+            m.call(Call::SetFrame { hung: i, frame: kind as usize }, q, body);
+        }
+    }
+    m.call(Call::AttachmentMoved, q, body);
 }

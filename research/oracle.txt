@@ -6621,12 +6621,7 @@ atv_swap_to_riding_rays     atv 0x004e2eb0 = the bike's (and quad's) vt +0x490: 
 # nodes; render only. The listeners (vt +0x348): sound, particle and effect listeners wired; not
 # simulation. vt +0x354: the four wheels' field pointers and +0x314/+0x12d4/+0x32c/+0xc80 into the block
 # at +0xb94 (PC +0x788); not simulation.
-# The animation driver (vt +0x3e4) is not ported (MD65c): the biplane's base thunk 0x004a8350 (pc
-# MXVehicleBiplane::vf67), +0x14bc decayed 0..1, the reset 0x0013e650(+0x1428) on +0x31c == 0 with
-# +0x1528 != +0x1524 or +0x1650; +0x1524 = +0x1528 (stand_upright's guard word); the stunt id's blend
-# (< 0x2e by 0x00268c90(+0x14f0), == 0x2e off +0x12ec/+0x14b0/+0x330, else +0x12e8), +0x141c = the blend
-# (put-back's settle word); one of 0x00140720 / 0x0013f5e0 / 0x0013eec0 / vt +0x88; vt +0x554; two
-# atv_node_frame reads; the hung-node loop (+0x1470/+0x1474/+0x1478, as the put-back's); 0x00266d30(+0x1480).
+# The animation driver (vt +0x3e4): ported in MD65c, see # MD65c below.
 pc_quad_destructor          pc 0x005d7550 = MXVehicleAtv::vf0 (table: the scalar deleting destructor's place)
 pc_quad_remap_surfaces      pc 0x005d61d0 = MXVehicleAtv::vf33 (callees: the level setup, then 0x0046fa30 per surface on four wheels)
 pc_quad_listeners           pc 0x005d9020 = MXVehicleAtv::vf35 (callees: the sound/particle/effect listener setup)
@@ -6653,6 +6648,36 @@ atv_quad_pose_nodes         atv 0x004be8d0 = pc_quad_pose_nodes (vt +0x554; call
 atv_quad_reload_model       atv 0x004bb370 = pc_quad_reload_model (vt +0x558; callees, call order)
 atv_moto_level_setup        atv 0x004de920 = MotoShared's level setup (a0 vehicle, a1 level)
 atv_wheel_surface_copy      atv 0x004a0780 = a wheel's surface tables copied, all but the donut scale (a0 wheel, a1 dst, a2 src)
+# MD65c — the quad's animation driver (quad::animate, quad::Anim, quad::StuntClips; tests/atv_quad/animate.rs
+# the_quads_animation_driver_is_the_originals, 20,000 generated cases, and the_spawned_quads_animation_
+# driver_is_the_ports off MD37a's atv-r-spawn.ee.bin). Journal: research/journal/2026-11-03-md65c-atv-animate.
+# atv_quad_animate (a0 quad, f12 dt): atv_biplane_animate first (through the thunk 0x004e7bb0); body
+# +0x190..+0x19c and +0x80 (lq/sq) copied onto themselves; +0x14bc fade = adda(0, +0x14bc) msub(+0x14c0,
+# dt), max.s 0, min.s 1; with +0x31c (put-back's request) 0 and (+0x1528 != +0x1524 or +0x1650):
+# atv_anim_stop(+0x1428, 0, 0, 0, 0), +0x14bc = 1, the stunt weight left 0. +0x1524 = +0x1528. Then
+# (slti, signed) id < 46 with atv_stunt_table_entry(+0x14f0, id) != 0 and its word's byte +0x59: mode 1,
+# clip +0x1534[id], weight +0x14d8 / *(clip +4) +0x44 (not read when stopped). Else id == 46: outside
+# vehicle states 3/4 (+0xbc4 +0x28), +0x14b8 = 0.5 * (1 + +0x12ec), and +0x14b4 = 0 if -(+0x14b0) == +0x14b0
+# (c.eq) else adda(0, 0) madd((+0x330 - lo) / (hi - lo), 1 - 0) clamped 0..1; +0x141c = +0x14b4; +0x14b8 <
+# 0.5 (c.olt): clips (+0x15f0, +0x15ec), mix 2 * +0x14b8, else (+0x15f4, +0x15f0), mix 2 * (+0x14b8 - 0.5);
+# weight +0x14b4; mode 2. Else: outside 3/4, +0x14b8 = 0.5 * (1 + +0x12ec), +0x14b4 = adda(0, 0.5)
+# madd(0.5, +0x12e8); clip +0x15f0 at 0.5; mode 1. +0x15ec/+0x15f0/+0x15f4 are the clip table's 46/47/48.
+# Weight and mix max.s 0, min.s 1. Mode 1: atv_anim_play(+0x1428, clip, 0 ..; f12 weight, f13 +0x14bc);
+# mode 2: atv_anim_blend(+0x1428, clip a, clip b, 0 ..; f12 weight, f13 mix, f14 +0x14bc). Modes 0
+# (controller vt +0x88, dt) and 4 (atv_anim_blend4) are not reachable. Then vt +0x554 (pose nodes), the two
+# atv_node_frame reads and the hung-node loop (as the put-back's), atv_attachment_moved(+0x1480).
+# The base (atv_biplane_animate, a0 quad, f12 dt): in vehicle states 3/4, +0x340 (world angular velocity)
+# = (0,0,0,1), then vt +0x3e8 and, when it answers non-zero, vt +0x3f0 (atv_quad_net_unpack) with dt.
+# Not ported (quad::Call::BaseAnimate). Spawn image: +0x1524 = +0x1528 = 255, +0x152c = 4, +0x14bc = 0,
+# +0x14c0 = 3, +0x14b0 = 0.785398, +0x14b4 = +0x14b8 = 0.5, vehicle state 1; the set (+0x14f0) has stunts
+# ready that +0x1534 holds no clip for (playing one faults the original: never asked for).
+atv_biplane_animate         atv 0x004a8350 = MXVehicleBiplane::vf67's twin (a0 vehicle, f12 dt; the held states' net unpack)
+atv_anim_stop               atv 0x0013e650 = an animation controller set to no clip (a0 controller, a1..a4 0)
+atv_anim_play               atv 0x0013eec0 = an animation controller playing one clip (a0 controller, a1 clip, f12 weight, f13 fade)
+atv_anim_blend              atv 0x0013f5e0 = an animation controller blending two clips (a1/a2 clips, f12 weight, f13 mix, f14 fade)
+atv_anim_blend4             atv 0x00140720 = the controller's other blend (not reached from atv_quad_animate)
+atv_stunt_table_entry       atv 0x00268c90 = a rider animation set's entry for a stunt id (a0 set, a1 id; set + 0x18 + 12 id, 0 for id >= 46)
+atv_attachment_moved        atv 0x00266d30 = an attachment's box moved in the spatial database (a0 attachment; only when its +8 is set)
 # MD37b (wheels) — atv_wheel_suspension and atv_wheel_tire_forces ported (crates/game-sim/src/
 # atv_wheel.rs; tests/atv_wheel.rs runs both off MD37a's atv-r-spawn.ee.bin). Journal:
 # research/journal/2026-10-29-md37b-atv-step. The wheel against MX Unleashed's: steered +0x2c, balancing

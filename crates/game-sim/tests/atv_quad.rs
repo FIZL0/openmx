@@ -30,6 +30,10 @@ mod image;
 #[path = "atv_quad/oasis.rs"]
 mod oasis;
 
+/// MD65c: the animation driver's simulation words.
+#[path = "atv_quad/animate.rs"]
+mod animate;
+
 const OBJ: u32 = 0x01c0_0000;
 const BODY: u32 = 0x01c0_2000;
 const WORLD: u32 = 0x01c0_2400;
