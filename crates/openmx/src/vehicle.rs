@@ -1099,21 +1099,21 @@ impl PilotLean {
     }
 
     /// [`PilotLean::step`] for a seat flying the helicopter (P216b), whose pilot is posed by the
-    /// plane's two clips too (the original loads them for both kinds): its stick's forward and back
-    /// stand in for the elevator and its left and right for the aileron, both signed as the plane's
-    /// are. Which of the helicopter's numbers the original's pilot reads was not traced.
-    pub fn step_heli(&mut self, dt: F, heli: &KiowaRide, put_back: bool) {
+    /// plane's two clips too (the original loads them for both kinds). The helicopter's pilot request
+    /// (P216b1) writes the plane's two targets from its own pad: `0.5 * (1 - lateral)` on the phase
+    /// axis and `0.5 * (1 + longitudinal)` on the mix axis, so the lateral stick stands in for the
+    /// aileron and the longitudinal for the elevator, as the pad's figures are. It runs in the
+    /// helicopter's measure, which reads the pad the last input step left, a tick behind. It never
+    /// raises the request's holding flag, so neither a swap nor a put-back snaps the lean: both axes
+    /// only ease.
+    pub fn step_heli(&mut self, dt: F, heli: &KiowaRide) {
         let Some(h) = &heli.flown else {
             *self = PilotLean::default();
             return;
         };
-        if self.stick.is_none() || put_back {
-            self.reset.reset();
-        }
         let (elevator, aileron) = self.stick.unwrap_or((F::ZERO, F::ZERO));
-        let pilot = biplane_anim::Pilot { elevator, aileron, held: self.reset.just, ..Default::default() };
+        let pilot = biplane_anim::Pilot { elevator, aileron, held: false, ..Default::default() };
         self.lean.step(dt, &pilot);
-        self.reset.frame();
         self.stick = Some((h.kiowa.pad.longitudinal, h.kiowa.pad.lateral));
     }
 
