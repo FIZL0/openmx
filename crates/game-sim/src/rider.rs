@@ -769,8 +769,9 @@ impl Rider {
         // A cannonball's record update, when this tick's has one: the wreck part's point, and the
         // wreck bike's translation and forward row (S77).
         let mut thrown_keep = None;
-        // What of the record's list the body rays found on the cars (S137), for the wreck test.
-        let cars = bump.as_deref().map_or_else(Vec::new, |b| crate::mover_contact::wreck_contacts(&b.contacts));
+        // What of the record's list the body rays found on the cars (S137), for the wreck test, and
+        // on a flown plane's hull (S272).
+        let cars = bump.as_deref().map_or_else(Vec::new, crate::rider_contact::wreck_contacts);
         // What the body rays found in the ground (P147), which the wreck test reads too.
         let mut in_ground = Vec::new();
         // And what they found on the scenery (S157): a 50cc bike's shoulder rays reach the hit clause.
