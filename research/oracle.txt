@@ -8880,3 +8880,44 @@ atv_kiowa_blade_spin        atv 0x004d3510 = kiowa_blade_spin's twin (0.95)
 #   *(+0x11c0) 0x150 bytes, aero *(+0x11c4). Rotor +0xc0 blade pitch (0.2618 = 15 deg climbing), +0xd0/+0xd8
 #   tilt, +0xf4 thrust, +0x100..+0x108 thrust along the tilted axis (value: +0x104 = +0xf4 hovering).
 #   Aero +0x128 a 0..1 fade with speed, +0x134/+0x140 on the ground -0.5236/0.0785 (-30 deg / 4.5 deg).
+# MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
+# dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:
+# tests/atv_spatial.rs (generated trees laid at 0x01f80000 in atv-r-spawn.ee.bin; the image's own tree 0x006547c0).
+# Tree (vtable 0x003b6700): +8 kind, +0xc flags (bit 0 a query open), +0x28/+0x30 origin x/z, +0x40/+0x44 extent,
+# +0x4c deepest level, +0x54 cells per unit, +0x58 + 4 level the node side (0x4000 >> level), +0x8c root, +0x90
+# chunk pool, +0x94 query pool, +0x98 bit 0 the node free keeps chunks, +0x9c/+0xa0/+0xa4/+0xac query walk,
+# +0x880 nodes made less freed, +0x888 entries put less taken out, +0x8a0..+0x8ac query cells (0x80000000 closed).
+# 0x0040c198 the tree being changed (in and out set it; the node new/free count in its +0x880).
+# Node (vtable 0x003b66e0 at +0x10): +0 children (0, or node +0x14 once grown to 36 bytes by realloc), +4 chunk
+# chain (pool links: +0 next, +4..+0x10 four entries), +8 mid y, +0xc half y (new: 0, -FLT_MAX).
+# Pick (vt +0x20, ignores the current key): x0 = (cx-hx)-ox, x1 = (cx+hx)-ox, z the same; 0 if x1 < 0, !(x0 <= ex),
+# z1 < 0, !(z0 <= ez), !(x1 <= ex), x0 < 0, !(z1 <= ez), z0 < 0. Cells cvt.w(x0 s), cvt.w(x1 s)+1, z the same; the
+# first level whose side exceeds both width and depth (or the deepest), corners masked to the side, one level up
+# (twice the side) if they span more than one node and level != 0; corners 0x10, 0x20 z, 0x40 x, 0x80 both; x0/z0
+# >= 0x8000 -> 0x7fff. Key = level | corners | z0 << 5 | x0 << 17 (unpacked: key & 0xf, (key & 0xfff00000) >> 17,
+# (key & 0xfff00) >> 5). Walk: child 2 (x & bit != 0) + (z & bit != 0), bit 0x4000 down, levels 0..=level.
+# Widen (lo = cy-hy, hi = cy+hy; nothing unless lo <= hi): a = min(lo, mid-half), b = hi if !(hi <= mid+half),
+# mid = (a+b)/2, half = (b-a)/2.
+# In (vt +0x24): key 0 nothing; close an open query; stamp++; the entry's first halfword = 0; per corner the root
+# and each node down widened, children grown and nodes made on the way; filed in the first empty slot, else a
+# pool link zeroed and chained last. Move (vt +0x28): key 0 or !(lo <= hi) nothing; per corner widen the root and
+# each node down, stopping at one without children. Out (vt +0x2c): key 0 nothing; close an open query; stamp--;
+# per corner walk down (skip the corner at a missing node), unfile; a node left with no chunks and no children
+# is freed and its parent's child cleared. Unfile: each chunk in turn, every slot holding the entry cleared, the
+# chunk freed if left empty, stop after the one that held it. Close: pool reset, walk words 0, cells 0x80000000,
+# flags &= ~1. Pool reset: chunks prepended to those set aside, chunk chain 0, used = capacity, free chain 0.
+# Callers: the overlaps skip a newly reached cell whose pick is 0 (no in, no link), the carried kind still taken;
+# a walk to a new cell puts unconditionally (in returns on key 0).
+atv_quadtree_pick           atv 0x00180060 = the quadtree's vt +0x20 (the key of a box, 0 if not wholly inside)
+atv_quadtree_move           atv 0x00180620 = the quadtree's vt +0x28 (the nodes down a key widened to a box's height)
+atv_quadtree_out            atv 0x001807f0 = the quadtree's vt +0x2c (an entry taken out from under a key)
+atv_quadtree_file           atv 0x00180b60 = an entry into a node's first empty slot, else a new chunk
+atv_quadtree_unfile         atv 0x00180c80 = an entry out of a node's chunks; whether the node still holds anything
+atv_quadtree_node_new       atv 0x001809f0 = a quadtree node constructed (the current tree's count +1)
+atv_quadtree_node_free      atv 0x00180a30 = a quadtree node's children and chunks freed (the current tree's count -1)
+atv_quadtree_node_grow      atv 0x00182670 = a quadtree node reallocated with its four children after it
+atv_quadtree_make_node      atv 0x001aea20 = the quadtree's vt +0x4c (a new node)
+atv_quadtree_close          atv 0x00181d90 = the quadtree's vt +0x40 (the open query closed)
+atv_pool_reset              atv 0x00106130 = every link of a pool handed back (chunks set aside)
+atv_heap_new                atv 0x001b7620 = allocate with a file and line (a0 bytes)
+atv_heap_free               atv 0x001b76d0 = free
