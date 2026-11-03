@@ -7508,6 +7508,13 @@ car_preload                 boot 0x00397c60 (dt, car): the held jump; reads |+0x
 # clears bit 0x40000 of *(+0x680)+8; a new wreck counts +0x6c4. +0xbc0 is written once, at 0x004a616c
 # from the spawn record +0x128 (2 in state04's 250 Free Ride); 0 read as the small bike (inferred).
 # The wreck entry 0x004e2260 -> 0x004a83d0: +0xc80 reason, +0xc84 0, +0xc8c 0, post (8, 11).
+# MD71 — the clock and put-back above, ported as handling::step::machine (tests/mxvatv_step.rs
+# mxvatv_wreck_clock_is_the_originals). Tail 0x004e2c68..0x004e2db8; unwreck 0x004e2380 (vt +0x36c): vt
+# +0x4a8, +0x1250 and body +0xc0 zeroed, vt +0x4b0 (-1), +0x1524/+0x1528 = 255, +0x13e4 = 1, +0x1650/+0x119c/
+# +0x11a0/+0x1194 = 0, vt +0x490, vt +0x3a8 (bike, 0, kind), 0x0049f7f0 (+0x142c), sets bit 0x40000 of
+# *(+0x680)+8, +0x1784 = 0, then 0x004a8500 (bike, kind): reason 13 divides *(+0xe8)+4 by *0x00526598,
+# +0xc80 = 0, +0xc84 = 0 (latch kept), +0xbbc not 0/1 resets the body, post (8, 13, t0 +0xd20).
+# Journal: research/journal/2026-11-02-md71-wreck-clock-and-put-back.
 # MD63d — MX vs. ATV's GravityScale and FrictionZones, under Handling::MxVsAtv (handling.rs MassPart, read by
 # mxvatv_phy; tests/mxvatv_mass.rs runs the reader off state04.ee.bin with the ini lookups hooked). Journal:
 # research/journal/2026-11-02-md63d-gravity-and-friction-zones.

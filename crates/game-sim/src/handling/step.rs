@@ -20,6 +20,9 @@
 //! - The wreck test ([`wreck_test`], [`hit_wreck`], MD63c): reason 15 first, the 360's torque beside the
 //!   backflip's, no no-hander term in the trick endings' gate, and the hits' own reach (2.9 / 4.5),
 //!   rider-only throws and a scenery hit that needs the g loads past their limits.
+//! - The ride machine's clock and put-back ([`machine`], MD71): the clock adds before the settle window
+//!   is asked, one limit for every reason, and the put-back is the bike's own unwreck — no page, and
+//!   the clock back to zero.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::{Air, Chassis, Contact, Loads, Other, Params as AirParams, Step as AirStep, Wreck};
@@ -529,4 +532,75 @@ pub fn hit_wreck(p: &AirParams, air: &mut Air, touched: bool, small: bool, heigh
         Other::Scenery if !loads_within(p, loads) => Some(Wreck::Scenery),
         _ => None,
     }
+}
+
+// --- the wreck clock and put-back (MD71) ----------------------------------------------------------------
+
+/// **MX vs. ATV's ride machine** (the tail of SLUS-21104's wreck test, after [`wreck_test`] and
+/// [`hit_wreck`]): [`crate::state::Ride::step`] with its clock and put-back as SLUS-21104 has them.
+/// `test` and the no-driver branch are that machine's; what differs:
+///
+/// - **The clock adds first.** Every frame a reason is set, `dt` goes on the clock before anything
+///   asks it. Then, not yet counting and with [`crate::state::Sense::settles`] up, a clock past the
+///   window ([`crate::state::SETTLE`], [`crate::state::SETTLE_CANNONBALL`] for a cannonball) arms
+///   the count and goes back to zero; the frame's `dt` is spent. The second value returned is that
+///   arming frame: the bike posts its event there (category 8, id 12), which nothing in the port
+///   listens to yet.
+/// - **One limit.** The count puts the rider back on the first frame its clock is past
+///   `max_wreck_time` (`MaxWreckTime`), whatever the reason — there is no `CannonballWreckTime`.
+/// - **The bike's unwreck, at once.** No reset request: no page, no owner check (a rider no player
+///   owns is put back too), [`crate::state::Reset::Now`] every time, with the kind the wrecked one.
+///   Its base half clears the reason and the clock; the latch is left as it was, as MX Unleashed's
+///   respawn leaves it. The stored kind is not written.
+pub fn machine(
+    ride: &mut crate::state::Ride,
+    dt: F,
+    sense: crate::state::Sense,
+    max_wreck_time: F,
+    test: impl FnOnce(crate::state::Allowed) -> Option<crate::trick::Wreck>,
+) -> (crate::state::Step, bool) {
+    use crate::state::{Allowed, Reset, SETTLE, SETTLE_CANNONBALL, Step as Machine};
+    use crate::trick::Wreck as Reason;
+    let prior = ride.wreck;
+    let mut out = Machine::default();
+    let mut armed = false;
+    let driven = sense.ai_route || sense.owner.is_some_and(|o| o.human);
+    if driven {
+        let allowed = Allowed { wrecks: sense.wrecks_enabled, landing: ride.wreck.is_none(), air: sense.air_wrecks, backwards: sense.backwards_bail };
+        if let Some(reason) = test(allowed) {
+            ride.enter(reason);
+            out.wreck = Some(reason);
+        }
+        if let Some(reason) = ride.wreck {
+            ride.elapsed = ride.elapsed + dt;
+            if !ride.counting && sense.settles {
+                let window = if reason == Reason::CANNONBALL { SETTLE_CANNONBALL } else { SETTLE };
+                // "clock less or equal window" skips, so a NaN clock arms.
+                if !(ride.elapsed <= window) {
+                    ride.counting = true;
+                    ride.elapsed = F::ZERO;
+                    armed = true;
+                }
+            }
+            if ride.counting && !(ride.elapsed <= max_wreck_time) {
+                ride.respawn();
+                ride.elapsed = F::ZERO;
+                out.reset = Some(Reset::Now);
+                out.riding_bit = Some(true);
+            }
+        }
+    } else if prior.is_none() {
+        ride.enter(Reason::NO_CONTROL);
+        out.wreck = Some(Reason::NO_CONTROL);
+        ride.elapsed = max_wreck_time;
+        ride.counting = true;
+    }
+    // Read after the put-back, which cleared it.
+    if ride.wreck.is_some() {
+        out.riding_bit = Some(false);
+    }
+    if prior.is_none() && ride.wreck.is_some() {
+        ride.wrecks += 1;
+    }
+    (out, armed)
 }

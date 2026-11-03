@@ -120,3 +120,34 @@ fn the_backflips_stunt_and_its_mid_clip_reason() {
         }
     }
 }
+
+/// MD71's wiring: a rider nobody owns, put down for no control on its first frame, is put back on the
+/// first frame it is driven again on MX vs. ATV — the bike's own unwreck, which asks for no owner, and
+/// the clock back to zero — and stays down on the original's handling, whose reset request has no
+/// owner to go to. The machine itself is proved in `tests/mxvatv_step.rs`.
+#[test]
+fn an_unowned_mxvatv_rider_is_put_back_and_the_originals_is_not() {
+    use game_sim::rider::{self, Rider};
+    use game_sim::trick::{Set, Wreck};
+    let tables = rider::Tables::build();
+    let ride = |handling: Handling| {
+        let p = bike(&tables.ride, handling, Gyro::default());
+        let mut r = Rider::new(&p, game_sim::stock::MOUNTS, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+        r.edge_armed = false;
+        r.sense.owner = None;
+        r.sense.ai_route = false;
+        let mut floor = Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+        let first = r.frame(&p, &tables, &Controls::default(), DT, &mut floor);
+        assert_eq!(first.wreck, Some(Wreck::NO_CONTROL), "{handling:?}");
+        assert_eq!(r.state.elapsed, p.wreck_times.max_wreck_time, "{handling:?}: the clock preloaded");
+        r.sense.ai_route = true;
+        let second = r.frame(&p, &tables, &Controls::default(), DT, &mut floor);
+        (second.respawned, r.state)
+    };
+    let (back, state) = ride(Handling::MxVsAtv);
+    assert!(back, "MX vs. ATV puts the rider back");
+    assert_eq!((state.wreck, state.elapsed, state.counting), (None, F::ZERO, true));
+    let (back, state) = ride(Handling::Original);
+    assert!(!back, "the original's machine has no owner to put the rider back for");
+    assert_eq!(state.wreck, Some(Wreck::NO_CONTROL));
+}

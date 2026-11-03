@@ -1811,3 +1811,256 @@ fn mxvatv_no_control_is_the_machines() {
     }
     assert!(entered >= 500, "only {entered} states entered reason 14");
 }
+
+// --- MD71: the wreck clock and put-back ----------------------------------------------------------------
+
+/// The unwreck's calls out (vtable `+0x4a8`, `+0x4b0`, `+0x490`, the placement `+0x3a8`, and the
+/// engine's reset), the out-of-bounds ask (`+0x16c`), the race record whose riding bit it sets, and
+/// the word a cannonball's put-back divides its gravity in.
+const UNWRECK: u32 = 0x004e_2380;
+const UNWRECK_CALLS: [u32; 3] = [0x004e_4cd0, 0x004e_4e50, 0x004e_2eb0];
+const PLACE: u32 = 0x004d_8940;
+const ENGINE_RESET: u32 = 0x0049_f7f0;
+const OUT_OF_BOUNDS: u32 = 0x004a_4f20;
+const RACE: u32 = 0x01c0_7800;
+const GRAVITY: u32 = 0x01c0_7900;
+const RIDING_BIT: u64 = 0x40000;
+
+/// What one frame of the harness hands the machine.
+#[derive(Clone, Copy, Debug)]
+struct ClockFrame {
+    dt: F,
+    driven: bool,
+    /// The global and the bike's own wrecks-on words.
+    wrecks: (bool, bool),
+    settles: bool,
+    /// The bike is past the edge (`+0x308` on and `+0x16c` answering 1): reason 13.
+    out: bool,
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn clock_frame(&mut self) -> ClockFrame {
+        let dt = match self.bits() % 4 {
+            0 => F(1.0 / 60.0),
+            1 => F(1.0 / 30.0),
+            _ => self.f(0.0, 0.1),
+        };
+        ClockFrame {
+            dt,
+            driven: !self.one_in(12),
+            wrecks: (!self.one_in(10), !self.one_in(10)),
+            settles: !self.one_in(3),
+            out: self.one_in(25),
+        }
+    }
+}
+
+fn clock_poke(ee: &mut Ee, f: &ClockFrame) {
+    ee.set_u32(OBJ + 0x48c, if f.driven { DRIVER } else { 0 });
+    ee.set_u32(DRIVER + 0xe4, 1);
+    ee.set_u32(OBJ + 0xbc4, 0);
+    ee.set_u32(WRECKS_ON, u32::from(f.wrecks.0));
+    ee.set_u32(OBJ + 0xc1c, u32::from(f.wrecks.1));
+    ee.set_u32(OBJ + 0x308, u32::from(f.out));
+    put_b(ee, OBJ + 0x920, f.settles);
+}
+
+/// SLUS-21104's ride machine, frame by frame: the wreck test's tail (`+0xc84` clock, `+0xc8c` latch,
+/// `+0xc88` MaxWreckTime, `+0x920` settled) over the real unwreck (`vt +0x36c`, its base half
+/// included; only its calls out are stubbed and logged), against [`step::machine`]. 3,000 runs of 1 to
+/// 120 frames from a generated reason, clock, latch and limit; each frame a generated `dt`, driver,
+/// wrecks-on words, settle flag and out-of-bounds answer (the one clause the harness lets wreck, 13,
+/// so the chain is never asked on a zeroed bike). Every frame the reason, clock, latch, wreck count,
+/// riding bit, the entries, the put-backs and their kind, and the events posted must be the port's.
+#[test]
+fn mxvatv_wreck_clock_is_the_originals() {
+    use game_sim::state;
+    use game_sim::trick::Wreck as Reason;
+    let Some(mut ee) = image() else { return };
+    #[derive(Debug, PartialEq)]
+    enum Call {
+        Entry(u32),
+        Unwreck(u32),
+        Place(u32),
+        Post(u32, u32),
+    }
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let out_of_bounds = Rc::new(RefCell::new(false));
+    {
+        let log = log.clone();
+        ee.hooks.insert(WRECK_ENTRY, Box::new(move |ee| {
+            let reason = ee.r(5) as u32;
+            log.borrow_mut().push(Call::Entry(reason));
+            ee.set_u32(OBJ + 0xc80, reason);
+            ee.set_u32(OBJ + 0xc84, 0);
+            ee.set_u32(OBJ + 0xc8c, 0);
+        }));
+    }
+    {
+        let log = log.clone();
+        let seen = log.clone();
+        ee.hooks.insert(PLACE, Box::new(move |ee| {
+            assert_eq!(ee.r(5), 0, "the placement's first argument");
+            seen.borrow_mut().push(Call::Place(ee.r(6) as u32));
+        }));
+        ee.hooks.insert(POST_EVENT, Box::new(move |ee| {
+            assert_eq!(ee.r(5) as u32, OBJ + 0x674, "the bike's event source");
+            log.borrow_mut().push(Call::Post(ee.r(6) as u32, ee.r(7) as u32));
+        }));
+    }
+    for a in UNWRECK_CALLS.into_iter().chain([ENGINE_RESET]) {
+        ee.hooks.insert(a, Box::new(|_| {}));
+    }
+    {
+        let out_of_bounds = out_of_bounds.clone();
+        ee.hooks.insert(OUT_OF_BOUNDS, Box::new(move |ee| ee.set(2, u64::from(*out_of_bounds.borrow()))));
+    }
+    // The unwreck is reached through the vtable and runs; its first call out (`+0x4a8`, which only it
+    // makes here) logs that it was reached.
+    {
+        let log = log.clone();
+        ee.hooks.insert(UNWRECK_CALLS[0], Box::new(move |ee| log.borrow_mut().push(Call::Unwreck(ee.r(4) as u32))));
+    }
+    assert_eq!(ee.u32_at(BIKE_VTABLE + 0x36c), UNWRECK);
+    assert_eq!(ee.u32_at(BIKE_VTABLE + 0x16c), OUT_OF_BOUNDS);
+    assert_eq!(ee.u32_at(BIKE_VTABLE + 0x3a8), PLACE);
+
+    let mut g = Gen(0x0d71_0001);
+    let mut tally: BTreeMap<&'static str, u32> = BTreeMap::new();
+    let mut mxu_differs = 0u32;
+    for run in 0..3_000 {
+        reset(&mut ee);
+        for o in (0..0x100).step_by(4) {
+            ee.set_u32(DRIVER + o, 0);
+        }
+        for o in (0..0x200).step_by(4) {
+            ee.set_u32(RACE + o, 0);
+        }
+        let prior = match g.bits() % 5 {
+            0 => 0,
+            1 => 13,
+            2 => 14,
+            _ => 1 + g.bits() % 15,
+        };
+        let max = match g.bits() % 8 {
+            0 => F(-0.1),
+            1 => F::ZERO,
+            _ => g.f(0.2, 4.0),
+        };
+        let counting = g.b();
+        let elapsed = match g.bits() % 5 {
+            0 => F(0.5),
+            1 => F(2.5),
+            2 => max,
+            _ => g.f(0.0, 4.0),
+        };
+        let wrecks = (g.bits() % 100) as i32;
+        let race = u64::from(g.bits()) << 32 | u64::from(g.bits());
+        ee.set_u32(OBJ + 0xc80, prior);
+        put_f(&mut ee, OBJ + 0xc84, elapsed);
+        put_b(&mut ee, OBJ + 0xc8c, counting);
+        put_f(&mut ee, OBJ + 0xc88, max);
+        ee.set_u32(OBJ + 0x6c4, wrecks as u32);
+        ee.set_u32(OBJ + 0x680, RACE);
+        ee.write(RACE + 8, 8, u128::from(race));
+        ee.set_u32(OBJ + 0xe8, GRAVITY);
+        put_f(&mut ee, GRAVITY + 4, F(1.0));
+        let mut ride = state::Ride {
+            wreck: (prior != 0).then_some(Reason(prior as u8)),
+            elapsed,
+            counting,
+            wrecks,
+            ..Default::default()
+        };
+        let mut bit = race & RIDING_BIT != 0;
+        let frames = if g.b() { 1 } else { 1 + g.bits() % 120 };
+        for frame in 0..frames {
+            let f = g.clock_frame();
+            clock_poke(&mut ee, &f);
+            let was = ride.wreck;
+            // The original asks the edge only when its clause is reached (prior reason not 13).
+            *out_of_bounds.borrow_mut() = f.out;
+            log.borrow_mut().clear();
+            ee.call(WRECK_TEST, &[u64::from(OBJ), 0], &[f.dt.0], 50_000);
+            let frame_at = (ee.stack - 0x2000, ee.stack + 0x40);
+            for (a, b) in ee.written_ranges() {
+                let ok = REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len)
+                    || (a >= frame_at.0 && b <= frame_at.1)
+                    || (a >= RACE && b <= RACE + 0x200);
+                assert!(ok, "run {run} frame {frame}: the original wrote {a:#010x}..{b:#010x}");
+            }
+
+            let sense = state::Sense {
+                ai_route: f.driven,
+                wrecks_enabled: f.wrecks.0 && f.wrecks.1,
+                settles: f.settles,
+                ..Default::default()
+            };
+            let before = ride;
+            let (out, armed) = step::machine(&mut ride, f.dt, sense, max, |allowed| {
+                (allowed.wrecks && f.out && was != Some(Reason::CANNONBALL)).then_some(Reason::CANNONBALL)
+            });
+            let mut want = Vec::new();
+            if let Some(w) = out.wreck {
+                want.push(Call::Entry(u32::from(w.0)));
+            }
+            if armed {
+                want.push(Call::Post(8, 12));
+            }
+            if out.reset.is_some() {
+                assert_eq!(out.reset, Some(state::Reset::Now));
+                want.extend([Call::Unwreck(OBJ), Call::Place(state::Kind::Wrecked as u32), Call::Post(8, 13)]);
+            }
+            let here = format!("run {run} frame {frame}: {f:?} from {before:?}");
+            assert_eq!(*log.borrow(), want, "{here}: the calls");
+            assert_eq!(ee.u32_at(OBJ + 0xc80), ride.wreck.map_or(0, |w| u32::from(w.0)), "{here}: the reason");
+            assert_eq!(ee.u32_at(OBJ + 0xc84), ride.elapsed.0.to_bits(), "{here}: the clock {} vs {}", ee.f32_at(OBJ + 0xc84), ride.elapsed.0);
+            assert_eq!(ee.u32_at(OBJ + 0xc8c), u32::from(ride.counting), "{here}: the latch");
+            assert_eq!(ee.u32_at(OBJ + 0x6c4) as i32, ride.wrecks, "{here}: the wreck count");
+            if let Some(b) = out.riding_bit {
+                bit = b;
+            }
+            let now = ee.read(RACE + 8, 8) as u64;
+            assert_eq!(now & RIDING_BIT != 0, bit, "{here}: the riding bit");
+            assert_eq!(now & !RIDING_BIT, race & !RIDING_BIT, "{here}: the rest of the race record");
+
+            // MX Unleashed's machine on the same frame, its cannonball time the same limit.
+            let mut mxu = before;
+            let p = state::Params { max_wreck_time: max, cannonball_wreck_time: max };
+            let o = mxu.step(f.dt, sense, p, |allowed| {
+                (allowed.wrecks && f.out && was != Some(Reason::CANNONBALL)).then_some(Reason::CANNONBALL)
+            }, || false);
+            if (mxu.wreck, mxu.elapsed.0.to_bits(), mxu.counting, o.reset.is_some()) != (ride.wreck, ride.elapsed.0.to_bits(), ride.counting, out.reset.is_some()) {
+                mxu_differs += 1;
+            }
+
+            let path = match (out.wreck, armed, out.reset) {
+                (Some(Reason::NO_CONTROL), ..) => "no control",
+                (Some(_), ..) if was.is_some() => "re-wrecked while down",
+                (Some(_), ..) => "wrecked",
+                (None, true, Some(_)) => "armed and put back",
+                (None, true, None) if was == Some(Reason::CANNONBALL) => "armed, cannonball",
+                (None, true, None) => "armed",
+                (None, false, Some(_)) if was == Some(Reason::CANNONBALL) => "put back, cannonball",
+                (None, false, Some(_)) if was == Some(Reason::NO_CONTROL) => "put back, no control",
+                (None, false, Some(_)) => "put back",
+                (None, false, None) if was.is_some() && ride.counting => "counting",
+                (None, false, None) if was.is_some() && !f.settles => "down, not settled",
+                (None, false, None) if was.is_some() => "settling",
+                (None, false, None) => "riding",
+            };
+            *tally.entry(path).or_insert(0) += 1;
+        }
+    }
+    eprintln!("{tally:?}\nMX Unleashed's machine answers otherwise on {mxu_differs} frames");
+    enough(
+        &tally,
+        &[
+            "no control", "re-wrecked while down", "wrecked", "armed and put back", "armed", "armed, cannonball",
+            "put back", "put back, cannonball", "put back, no control", "counting", "down, not settled", "settling", "riding",
+        ],
+        50,
+    );
+    assert!(mxu_differs >= 1_000, "only {mxu_differs} frames tell MX Unleashed's machine from MX vs. ATV's");
+}

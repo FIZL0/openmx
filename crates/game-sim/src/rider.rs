@@ -848,7 +848,11 @@ impl Rider {
                         cannonball_wreck_time: p.wreck_times.cannonball_wreck_time,
                     };
                     let mut machine = *state;
-                    machine.step(dt, s, params, |_| None, || page.up()).reset == Some(state::Reset::Now)
+                    if ride.mxvatv.is_some() {
+                        crate::handling::step::machine(&mut machine, dt, s, params.max_wreck_time, |_| None).0.reset == Some(state::Reset::Now)
+                    } else {
+                        machine.step(dt, s, params, |_| None, || page.up()).reset == Some(state::Reset::Now)
+                    }
                 };
                 // The bones strike the knockable props lent for the frame too (S240).
                 let knockable = ride.props.as_deref_mut().map(|l| &mut l.0);
@@ -1053,52 +1057,58 @@ impl Rider {
         let origin = &mut ride.origin;
         let air = &mut ride.air;
         let drag_halved = &mut ride.drag_halved;
-        let verdict = state.step(
-            dt,
-            sense,
-            state::Params {
-                max_wreck_time: p.wreck_times.max_wreck_time,
-                cannonball_wreck_time: p.wreck_times.cannonball_wreck_time,
-            },
-            |allowed| {
-                if !allowed.wrecks {
-                    return None;
-                }
-                // The first clause, and the only one that runs for a rider already down: off the
-                // map, the bike is thrown back and nothing else is asked.
-                if let Some(area) = edge.filter(|a| holed || off_map::outside_wrapped(a, wrap, bone, thrown.cofg_world)) {
-                    off_map::throw(&area, thrown, origin, ragdoll_ride::generator(idles));
-                    *drag_halved = true;
-                    return Some(Wreck::CANNONBALL);
-                }
-                if !allowed.landing {
-                    return None;
-                }
-                // The hit is asked second, and only when no landing clause entered a wreck: the
-                // entry takes the riding bike's collision record out of the world, and clears it as
-                // it does, so the hit loop's "anything touched" gate is shut (S191a).
-                let landed = match &mxvatv {
-                    Some(w) => crate::handling::step::wreck_test(&p.air, air, &chassis, &step, &loads, w, allowed.air),
-                    None => air::wreck_test_in(&p.air, air, &chassis, &step, &loads, allowed.air),
-                };
-                // Not the original's (S161), and asked only when the original's own test let the
-                // landing go: a bike landed facing back against its way bails.
-                let landed = landed.or_else(|| allowed.backwards.then(|| air::backwards_landing(&p.air, air, &chassis, forward)).flatten());
-                // A 50cc bike's lower limit when the shell said the file was one (S157): its body
-                // rays' own scenery entries carry the rays that reach above it.
-                let hit = if landed.is_some() {
-                    None
-                } else if mxvatv.is_some() {
-                    crate::handling::step::hit_wreck(&p.air, air, touched, *fifty, height, &loads, &hits)
-                } else {
-                    air::hit_wreck(&p.air, air, touched, *fifty, mass, height, &hits)
-                };
-                let spun = spun.filter(|_| allowed.air || !spun_aloft);
-                landed.or(hit).or(spun).map(Wreck::from)
-            },
-            // The screen's page is up from the request until its fade back in is over.
-            || page.up(),
-        );
+        let test = |allowed: state::Allowed| {
+            if !allowed.wrecks {
+                return None;
+            }
+            // The first clause, and the only one that runs for a rider already down: off the
+            // map, the bike is thrown back and nothing else is asked.
+            if let Some(area) = edge.filter(|a| holed || off_map::outside_wrapped(a, wrap, bone, thrown.cofg_world)) {
+                off_map::throw(&area, thrown, origin, ragdoll_ride::generator(idles));
+                *drag_halved = true;
+                return Some(Wreck::CANNONBALL);
+            }
+            if !allowed.landing {
+                return None;
+            }
+            // The hit is asked second, and only when no landing clause entered a wreck: the
+            // entry takes the riding bike's collision record out of the world, and clears it as
+            // it does, so the hit loop's "anything touched" gate is shut (S191a).
+            let landed = match &mxvatv {
+                Some(w) => crate::handling::step::wreck_test(&p.air, air, &chassis, &step, &loads, w, allowed.air),
+                None => air::wreck_test_in(&p.air, air, &chassis, &step, &loads, allowed.air),
+            };
+            // Not the original's (S161), and asked only when the original's own test let the
+            // landing go: a bike landed facing back against its way bails.
+            let landed = landed.or_else(|| allowed.backwards.then(|| air::backwards_landing(&p.air, air, &chassis, forward)).flatten());
+            // A 50cc bike's lower limit when the shell said the file was one (S157): its body
+            // rays' own scenery entries carry the rays that reach above it.
+            let hit = if landed.is_some() {
+                None
+            } else if mxvatv.is_some() {
+                crate::handling::step::hit_wreck(&p.air, air, touched, *fifty, height, &loads, &hits)
+            } else {
+                air::hit_wreck(&p.air, air, touched, *fifty, mass, height, &hits)
+            };
+            let spun = spun.filter(|_| allowed.air || !spun_aloft);
+            landed.or(hit).or(spun).map(Wreck::from)
+        };
+        let verdict = if mxvatv.is_some() {
+            // MX vs. ATV's clock and put-back (MD71): one limit, the bike's own unwreck, no page.
+            crate::handling::step::machine(state, dt, sense, p.wreck_times.max_wreck_time, test).0
+        } else {
+            state.step(
+                dt,
+                sense,
+                state::Params {
+                    max_wreck_time: p.wreck_times.max_wreck_time,
+                    cannonball_wreck_time: p.wreck_times.cannonball_wreck_time,
+                },
+                test,
+                // The screen's page is up from the request until its fade back in is over.
+                || page.up(),
+            )
+        };
         if let Some(reason) = verdict.wreck {
             out.wreck = Some(reason);
             // The wreck entered on the bike's side: `Wreckbike.phy`'s body takes the bike's place,
