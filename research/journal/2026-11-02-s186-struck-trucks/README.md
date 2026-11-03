@@ -15,3 +15,9 @@ S186a (file 2): a riding bike's body rays now strike a truck (`Traffic::strike` 
 both, S207's ctruck and S219's rear captures meet the truck on the original's tick, and rear wrecks
 as the original does. The strike tick's push still parts. The f.col's two-way contact is S251, and
 the other searches' strikes are S252.
+
+S251 (file 3, PART, blocked): the original's strike-tick list holds the truck's path mesh as a mover,
+not its `f.col` as a body, and the port already builds those two contacts bit for bit. The rows part
+on the mover's velocity. The original reads the car's motion after the wake moved its node, and the
+port's wake puts the node about 0.5 ft from the original's. The f.col code is parked on
+`wip/S251-fcol`.
