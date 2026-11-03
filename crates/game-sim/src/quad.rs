@@ -661,6 +661,10 @@ pub enum Call {
     /// attachment's box moved in the spatial database.
     NetInterpolate { older: usize, newer: usize, t: F },
     NetUnpack(F),
+    /// The net interpolation's ([`net_interpolate`], MD65c2): with the snapshot more than 16 ft from
+    /// where the quad was put, the quad's put-back (vt `+0x3a8`, handed place and keep clear:
+    /// [`put_back`] is its port).
+    NetPutBack,
     AnimStop,
     PlayClip { clip: i32, weight: F, fade: F },
     BlendClips { clips: [i32; 2], weight: F, mix: F, fade: F },
@@ -2594,7 +2598,8 @@ const NET_T_MAX: f32 = 1.9;
 /// `now − delay − 0.1` and walks the snapshots from the newest while that is before the older one's
 /// time, at most four steps; the original's walk reads the second slot twice, so a stop on its second
 /// step never happens and the pair is (1, 0), (2, 1), (3, 2) or (4, 3). It hands the pair and `t` =
-/// `(want − older) / (newer − older)`, clamped to `-0.9..1.9`, to [`Call::NetInterpolate`].
+/// `(want − older) / (newer − older)`, clamped to `-0.9..1.9`, to [`Call::NetInterpolate`]
+/// ([`net_interpolate`] is its port).
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
 pub fn base_animate(vehicle_state: u32, net: &NetClock, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Moto) {
     if vehicle_state.wrapping_sub(3) >= 2 {
@@ -2615,6 +2620,162 @@ pub fn base_animate(vehicle_state: u32, net: &NetClock, q: &mut Quad, body: &mut
         m.call(Call::NetInterpolate { older, newer, t: t.max(F(NET_T_MIN)).min(F(NET_T_MAX)) }, q, body);
     }
     m.call(Call::NetUnpack(dt), q, body);
+}
+
+/// A network snapshot as [`net_interpolate`] reads one: its time (word 0), where the quad was, its
+/// velocity and orientation (`+0x10`, `+0x20`, `+0x30`), the two pose blends (`+0x40` crossup,
+/// `+0x44` fore and aft), the wreck word (`+0x48`), the stunt id (`+0x4c`) and a word that goes to the
+/// quad's `+0x940` (`+0x50`, not traced).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    pub time: F,
+    pub position: Vf,
+    pub velocity: Vf,
+    pub orientation: Vf,
+    pub crossup_blend: F,
+    pub fore_aft_blend: F,
+    pub wreck: u32,
+    pub stunt: i32,
+    pub word: u32,
+}
+
+/// A lag filter as the net code keeps them: its value, its time constant and the fraction it last
+/// moved by.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Lag {
+    pub value: F,
+    pub time: F,
+    pub fraction: F,
+}
+
+impl Lag {
+    /// The value moved `min(dt, time) / time` of the way to `target` (`adda(0, value)`, `madd`).
+    pub fn run(&mut self, dt: F, target: F) -> F {
+        self.fraction = dt.min(self.time) / self.time;
+        self.value = Acc::adda(F::ZERO, self.value).madd(self.fraction, target - self.value);
+        self.value
+    }
+}
+
+/// What the net interpolation keeps beyond [`Remote`] and [`Anim`]. The field map is
+/// research/oracle.txt's `# MD65c2`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NetSmooth {
+    /// The position's three lags (`*(+0xd14)`) and the velocity's (`*(+0xd18)`, only ever set, never
+    /// run).
+    pub position: [Lag; 3],
+    pub velocity: [Lag; 3],
+    /// The two pose blends' lags (`*(+0x1790)` crossup, `*(+0x178c)` fore and aft).
+    pub crossup: Lag,
+    pub fore_aft: Lag,
+    /// Where a far snapshot puts the quad back (`+0xd40`).
+    pub put_back_at: Vf,
+    /// What the snapshot's velocity changed by (its fourth quadword; `w` the newer's velocity's).
+    pub velocity_change: Vf,
+    /// The newer snapshot's wreck word and its untraced word (snapshot pointers 6 and 8: `+0xc80` and
+    /// `+0x940` on the spawned quad).
+    pub wreck: u32,
+    pub word: u32,
+}
+
+/// How far inside the world's area the interpolation holds the quad.
+const NET_EDGE: f32 = 25.0;
+/// Past this the lags are set to the snapshot, past [`NET_FAR`] the quad is put back there too.
+const NET_NEAR: f32 = 8.0;
+const NET_FAR: f32 = 16.0;
+
+/// The quad's lerp: the older's at or before `t` 0, the newer's from 1, else `adda(0, a) madd(t, b − a)`.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn net_lerp(a: F, b: F, t: F) -> F {
+    if t <= F::ZERO {
+        a
+    } else if !(t < F::ONE) {
+        b
+    } else {
+        Acc::adda(F::ZERO, a).madd(t, b - a)
+    }
+}
+
+/// `a + t (b − a)` over `xyz` on VU0 (`vsub`, `vmulx`, `vadd`), `w` the newer's.
+fn net_lerp_xyz(a: Vf, b: Vf, t: F) -> Vf {
+    let d = sub_xyz(b, a);
+    let d = d.merge(Dest::XYZ, d.mul(Vf::splat(t.0)));
+    d.merge(Dest::XYZ, d.add(a))
+}
+
+/// **The quad's net interpolation** (vt `+0x3ec`, `atv_quad_net_interpolate`): a remote quad put
+/// between two network snapshots, `t` of the way from the older to the newer (`t` in `-0.9..1.9`, as
+/// [`base_animate`] hands it; `dt` the frame's, which the original carries through in `f12`).
+///
+/// The quad's own part: the two pose blends, each the older's at `t ≤ 0`, the newer's at `t ≥ 1`,
+/// else lerped, run through their lags into [`Anim::crossup_blend`] and [`Anim::fore_aft_blend`]; the
+/// newer's stunt id into [`Anim::next_stunt`], its wreck word and untraced word into [`NetSmooth`].
+///
+/// Then the biplane's (`atv_biplane_net_interpolate`, which the quad's calls last): position and
+/// velocity lerped unclamped in `t`, the orientation slerped the short way ([`crate::math::slerp`]),
+/// and the position's `x` and `z` held 25 ft inside the world's `area` (`[x min, x max, z min, z
+/// max]`, the world's `+0x550..+0x55c`). More than 8 ft from where the snapshot last put the quad
+/// ([`Remote::position`]), the position and velocity lags are set to it (each lane but `FLT_MAX`);
+/// more than 16 ft, it is also kept in [`NetSmooth::put_back_at`] and the quad put back
+/// ([`Call::NetPutBack`]). The position then goes through its lags into [`Remote::position`] (`w`
+/// one); the velocity's change is kept, the velocity (`w` zero) goes to [`Remote::velocity`] unlagged
+/// and its length to [`Quad::speed_len`]; the orientation to [`Remote::orientation`].
+#[allow(clippy::too_many_arguments)] // the original's inputs, each one a word it reads
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn net_interpolate(
+    older: &Snapshot,
+    newer: &Snapshot,
+    t: F,
+    dt: F,
+    area: [F; 4],
+    s: &mut NetSmooth,
+    r: &mut Remote,
+    a: &mut Anim,
+    q: &mut Quad,
+    body: &mut Body,
+    table: &crate::air::AcosTable,
+    m: &mut impl Moto,
+) {
+    a.crossup_blend = s.crossup.run(dt, net_lerp(older.crossup_blend, newer.crossup_blend, t));
+    a.fore_aft_blend = s.fore_aft.run(dt, net_lerp(older.fore_aft_blend, newer.fore_aft_blend, t));
+    a.next_stunt = newer.stunt;
+    s.word = newer.word;
+    s.wreck = newer.wreck;
+
+    let mut p = net_lerp_xyz(older.position, newer.position, t);
+    let v = net_lerp_xyz(older.velocity, newer.velocity, t);
+    let o = crate::math::slerp(older.orientation, newer.orientation, t, true, table);
+    let edge = F(NET_EDGE);
+    for (lane, lo, hi) in [(0, area[0], area[1]), (2, area[2], area[3])] {
+        let x = F(p.0[lane]);
+        if x < edge + lo || !(x <= hi - edge) {
+            p.0[lane] = x.max(edge + lo).min(hi - edge).0;
+        }
+    }
+    let d = sub_xyz(r.position, p);
+    let far = F(fpu::sqrt(dot3(d, d).0));
+    if !(far <= F(NET_NEAR)) {
+        for k in 0..3 {
+            if F(p.0[k]) != F(f32::MAX) {
+                s.position[k].value = F(p.0[k]);
+            }
+        }
+        for k in 0..3 {
+            if F(v.0[k]) != F(f32::MAX) {
+                s.velocity[k].value = F(v.0[k]);
+            }
+        }
+        if !(far <= F(NET_FAR)) {
+            s.put_back_at = p;
+            m.call(Call::NetPutBack, q, body);
+        }
+    }
+    let lagged = [0, 1, 2].map(|k| s.position[k].run(dt, F(p.0[k])).0);
+    r.position = Vf::new(lagged[0], lagged[1], lagged[2], 1.0);
+    s.velocity_change = sub_xyz(v, r.velocity);
+    r.velocity = Vf::new(v.x(), v.y(), v.z(), 0.0);
+    q.speed_len = F(fpu::sqrt(dot3(v, v).0));
+    r.orientation = o;
 }
 
 /// What the animation driver asks of the rider's stunt clips: whether the rider's animation set has a
