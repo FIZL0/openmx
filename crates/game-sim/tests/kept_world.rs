@@ -231,6 +231,57 @@ fn the_kept_world_searches_as_the_fresh_one() {
     }
 }
 
+/// **The riding bike's refresh in the kept world** (S254): each tick's [`flight_search::refresh_ridden`]
+/// gathers the nearby list a fresh plane's world gives with the ray probe's category list the ignore
+/// list, a ghost's ([`flight_search::GHOST`]) every third tick; and the ignore list does not stay on
+/// the collidables handed back, so the plane's gather and scene after it in the same kept world find
+/// what they find in a world built afresh (on a thread of its own, which keeps none).
+#[test]
+fn the_ridden_refresh_gathers_as_the_fresh_one() {
+    use game_sim::world_search::Categories;
+    let woods = trees();
+    let rays = rays();
+    for field in fields() {
+        for trees in [None, Some(&woods)] {
+            flight_search::forget_worlds();
+            let (mut kept, mut fresh) = (flight_search::search(), flight_search::search());
+            let (mut ghosted, mut solid) = (0, 0);
+            for t in 0..TICKS {
+                let props = props(t);
+                let n = node(t);
+                let ignore: &[u32] = if t % 3 == 2 { &[flight_search::GHOST] } else { &[] };
+                flight_search::refresh_ridden(Some(&props), trees, field, &rays, &n, &mut kept, ignore);
+                let (centre, radius) = flight_search::reach(&rays, &[n.rows[0], n.rows[1], n.rows[2], n.origin]);
+                let (mut broad, mut objects) = flight_search::world_flown(&props.props, trees, None, field, centre, radius);
+                objects[flight_search::RAY].categories = Categories { mode: 1, list: ignore.to_vec() };
+                if fresh.nearby.found.iter().any(|c| objects.len() <= c.object) {
+                    fresh.built = false;
+                    fresh.nearby.found.clear();
+                }
+                broad_phase::gather(&mut objects, &mut broad, &mut fresh, flight_search::RAY, 3);
+                assert_eq!(kept, fresh, "tick {t}, field {field:?}, ignore {ignore:x?}: the nearby list");
+                if ignore.is_empty() { solid += kept.nearby.found.len() } else { ghosted += kept.nearby.found.len() }
+
+                let search = |kept: &broad_phase::Search| {
+                    let mut s = kept.clone();
+                    flight_search::Scene::flown(Some(&props), trees, None, field, &rays, &n, &mut s).rays(true)
+                };
+                let gathered = || {
+                    let mut s = flight_search::search();
+                    flight_search::refresh_flown(Some(&props), trees, None, field, &rays, &n, &mut s);
+                    s
+                };
+                // A new thread keeps no world: its search builds one afresh.
+                let theirs = std::thread::scope(|s| s.spawn(|| (gathered(), search(&kept))).join().unwrap());
+                assert_eq!(gathered(), theirs.0, "tick {t}, field {field:?}: the plane's gather after the ridden refresh");
+                assert_eq!(search(&kept), theirs.1, "tick {t}, field {field:?}: the plane's hits after the ridden refresh");
+            }
+            // Twenty solid ticks and ten ghosted: the ghost's list leaves the cars out.
+            assert!(ghosted > 0 && 4 * ghosted < solid, "field {field:?}: {solid} gathered solid, {ghosted} ghosted");
+        }
+    }
+}
+
 /// **No build a steady tick**: a tick of the ride's searches — the wheels' and the sweep's against the
 /// ride's world, the plane's two against its own — builds no world once the first tick has; with the
 /// cars standing it updates none, and with them driving one a tick for each world.

@@ -1233,7 +1233,9 @@ pub const GHOST: u32 = 0x40;
 /// at `node`, with no bikes in the world (the riders meet each other through their own lists), the
 /// path cars toys in it, and the rays' category list `ignore` (exclude mode) in the gather's pair
 /// filter: a ghost's ([`GHOST`]) drops every car and toy, and the list keeps none of them until the
-/// bike next gathers it afresh.
+/// bike next gathers it afresh. The world is kept between searches ([`kept_world`], S254), as
+/// [`refresh_flown`]'s is: `ignore` goes on the lent list's ray probe only, and comes off it again
+/// before the list is handed back ([`lend`] does not put the categories back).
 pub fn refresh_ridden(
     props: Option<&Props>,
     trees: Option<&Trees>,
@@ -1245,9 +1247,13 @@ pub fn refresh_ridden(
 ) {
     let props = props.map_or(&[][..], |p| &p.props[..]);
     let (centre, radius) = reach(rays, &matrix(node));
-    let (mut broad, mut objects) = world_flown(props, trees, None, field, centre, radius);
-    objects[RAY].categories = Categories { mode: 1, list: ignore.to_vec() };
-    refill(&mut objects, &mut broad, search);
+    kept_world(props, trees, None, &[], field, centre, radius, true, |broad, built, generation| {
+        let mut objects = lend(generation, built);
+        let own = std::mem::replace(&mut objects[RAY].categories, Categories { mode: 1, list: ignore.to_vec() });
+        refill(&mut objects, broad, search);
+        objects[RAY].categories = own;
+        give_back(generation, objects);
+    });
 }
 
 /// **The world the plane's search takes at `node`** (V96): [`World::wooded_near`] around the ray
