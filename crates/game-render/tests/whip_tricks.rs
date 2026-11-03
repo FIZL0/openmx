@@ -226,7 +226,7 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
         kit.body.ride(FRAME, &mut r, &c, rider::Gate::default());
         let want = kit.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
         let request = kit.chassis.riding_under(&r, want);
-        kit.chassis.frame(FRAME, want, &request, Drive::of(&r.ride));
+        kit.chassis.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let world = kit.body.rig.world();
         let g = grips(&kit.chassis);
@@ -282,10 +282,13 @@ const APART: f32 = 0.125;
 /// of the original): 20 frames and one.
 const FADE: usize = 21;
 
-/// How much the gap between the two riders may grow in one frame while the fade closes it: none
-/// beyond rounding. Before the fix the clipless extra's bike snapped square on the trick's first
-/// frame and the gap jumped by 0.55 ft.
-const STEP: f32 = 0.01;
+/// How much the gap between the two riders may grow in one frame while the fade closes it: next to
+/// none. Before the fix the clipless extra's bike snapped square on the trick's first frame and the
+/// gap jumped by 0.55 ft. Since S253a the whipped bike is drawn off the motion driver, which plays
+/// the crossup with no lag, while the body's machine lags it. A pack extra's fade starts from that
+/// bike and runs at 3 a second, against the body's 4. So the 9oclockindianair's gap grows 0.011 ft
+/// in one frame, seven frames in (0.548 to 0.559): hence 0.015.
+const STEP: f32 = 0.015;
 
 /// How far a drawn hand may be off its grip through a 360 and its exit, any frame: a hundredth of
 /// a foot, which is the hold's own rounding. Measured (V69): 0.000 ft on every frame, where the
@@ -426,7 +429,15 @@ const LANDING: usize = 3;
 /// machine's 4, both read off the original (S217), so for a while the body is further out of the
 /// whip than the bike it sits on. Since MD77 every extra of the pack has a gesture, and the Ninjanac,
 /// with none before, comes 0.077 past the whip, seven frames in: hence 0.08.
+///
+/// Since S253a the whip is the motion driver's on the bike (unlagged) and stays lagged on the body.
+/// The gap before the trick is 0.567 ft, not 0.432. The Ninjanac comes under 0.03 past it and the
+/// Flatliner 0.180, eleven frames in ([`FLATLINER_OVER`]).
 const OVER: f32 = 0.08;
+
+/// [`OVER`] for the Flatliner: its bike clip fades in at the bike object's 3 a second from the
+/// unlagged whip, and its body at 4 from the lagged one. Measured (S253a): 0.180 at 226.
+const FLATLINER_OVER: f32 = 0.2;
 
 /// How much further off its grip a hand of a trick the bike has no clip for may be drawn whipped
 /// than square: the hold's rounding.
@@ -458,7 +469,8 @@ fn a_no_footer_started_whipped_keeps_the_rider_on_the_bike() {
 /// [`Whipped`]'s bounds: through the fade the gap is never more than the whip's own, past it and
 /// past the trick within [`APART`], and the hands drawn on the grips as square.
 fn assert_whipped(w: &Whipped) {
-    assert!(w.fading.0 <= w.whip + OVER, "{}: the whipped rider came {:.3} ft off the square one's place in the fade, at {}, from {:.3} before it",
+    let over = if w.name == "flatliner" { FLATLINER_OVER } else { OVER };
+    assert!(w.fading.0 <= w.whip + over, "{}: the whipped rider came {:.3} ft off the square one's place in the fade, at {}, from {:.3} before it",
             w.name, w.fading.0, w.fading.1, w.whip);
     assert!(w.past.0 <= APART, "{}: the whipped rider came {:.3} ft off the square one's place, at {}", w.name, w.past.0, w.past.1);
     assert!(w.after.0 == 0, "{}: past the trick the bike and the body ran {} frames on different axes, from {}", w.name, w.after.0, w.after.1);
@@ -676,7 +688,7 @@ fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
         r.skeleton = Some(std::sync::Arc::new(kit.body.ragdoll_posed(&doll)));
         let want = kit.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
         let request = kit.chassis.riding_under(&r, want);
-        kit.chassis.frame(FRAME, want, &request, Drive::of(&r.ride));
+        kit.chassis.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let g = grips(&kit.chassis);
         let (drawn, _) = kit.body.palette(Some(&g));
@@ -763,7 +775,9 @@ fn a_full_whip_keeps_the_hands_on_the_bars() {
     println!("the full whip {}..={last}, landing at {down}: the clips take a hand {:.3} ft off its grip at {}, drawn {:.4} at {}, the body moved {:.3} at {}; \
               at {last} the ragdoll's pelvis is {:.3} ft off the clips' (ours {:.3}, cosine {cos:.3}), its hands {:.3} {:.3} off the grips",
              full[0], clips.0, clips.1, drawn.0, drawn.1, moved.0, moved.1, doll.len(), ours.len(), d.doll_off[0], d.doll_off[1]);
-    assert!(clips.0 > 0.3 && full.contains(&clips.1), "the clips' worst is no longer the full whip: {:.3} ft at {}", clips.0, clips.1);
+    // Since S253a the bike's crossup is the motion driver's, which has no lag, while the body's machine
+    // lags it. So the clips part most while the whip comes in (0.660 ft at 224), before the full whip.
+    assert!(clips.0 > 0.3, "the clips no longer take a hand off its grip in the whip: {:.3} ft at {}", clips.0, clips.1);
     assert!(drawn.0 <= SPIN_HELD, "the full whip drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
     // Placed by the ride it was stepped under (S90), the ragdoll's hands are on the grips and its pelvis
     // moves further than the stand-in's. Since S253 its target skeleton hangs under the bike's
@@ -814,7 +828,7 @@ fn a_360_throws_the_rider_off_the_pegs() {
         kit.body.ride(FRAME, &mut r, &c, rider::Gate::default());
         let want = kit.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
         let request = kit.chassis.riding_under(&r, want);
-        kit.chassis.frame(FRAME, want, &request, Drive::of(&r.ride));
+        kit.chassis.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let g = grips(&kit.chassis);
         let (drawn, _) = kit.body.palette(Some(&g));

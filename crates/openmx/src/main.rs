@@ -8263,7 +8263,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // under a trick the bike has no clip for, so the whip comes out with the rider's (V98).
                     let request = chassis.riding_under(&seat.sim.rider, want);
                     chassis.original_wheels = args.original_wheels;
-                    perf.time(Stage::Animation, || chassis.frame(dt, want, &request, Drive::of(ride)));
+                    // Posed off the rider's motion driver, as the original's bike is (S253a).
+                    perf.time(Stage::Animation, || chassis.ride(dt, want, &request, &seat.sim.rider, Drive::of(ride)));
                     // A trick the bike has no clip for: the drawn hands stay on the bars (MD41).
                     if let Some(body) = &mut rig.body {
                         body.bare = chassis.bare_under(&seat.sim.rider.body.veh);

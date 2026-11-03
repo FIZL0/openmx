@@ -208,7 +208,7 @@ fn ride(kit: &mut Kit, script: &[(usize, Controls)], frames: usize) -> Vec<Seen>
         kit.body.ride(FRAME, &mut r, &c, rider::Gate::default());
         let want = kit.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
         let request = kit.chassis.riding_under(&r, want);
-        kit.chassis.frame(FRAME, want, &request, Drive::of(&r.ride));
+        kit.chassis.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let g = grips(&kit.chassis);
         let (drawn, _) = kit.body.palette(Some(&g));

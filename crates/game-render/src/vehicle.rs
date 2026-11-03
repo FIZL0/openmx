@@ -15,8 +15,9 @@
 //! **Whose machine that is, is not the bike's.** V12 proved the sixty-state machine is the *rider's
 //! body*: 22 joints, clips out of `Rider\Anim\`, all sixty slots bound. The 12 `bike_*` clips a
 //! bike archive ships are the other machine's ([`crate::anim::Rig`]). V13 pointed the sixty-state
-//! machine at the set it belongs to and left the bike stepping a stance of its own; what is left of
-//! the re-pairing is in [`Chassis`]' own docs and in V13's journal.
+//! machine at the set it belongs to and left the bike stepping a stance of its own; S253a poses a
+//! ridden bike off the motion driver's frame ([`Chassis::ride`]), and what is left of the re-pairing
+//! is in [`Chassis`]' own docs and in V13's journal.
 //!
 //! ## Two halves, because the original has two
 //!
@@ -61,7 +62,7 @@
 //! move them away from. A different bike with a different rake gets different numbers from the same
 //! code, which is the point.
 
-use crate::anim::{Set, Stance};
+use crate::anim::{Rig, Set, Stance};
 use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
 use crate::psg::Model;
@@ -334,6 +335,13 @@ impl Drive {
 /// is still stepped by a stance of its own, because moving it onto the simulation's own
 /// [`game_sim::motion`] frame moves what poses the body with it. See the journal's **Not verified**
 /// list.
+///
+/// **S253a** moves a ridden bike's pose onto that frame. [`Chassis::ride`] plays the rider's
+/// `animation` (the motion driver's selection, [`Rider::animation`]) through [`Chassis::motion`], a
+/// [`Rig`] over the bike's own clips. The stance still runs beside it. It decides
+/// what the rider is told ([`Chassis::bare_under`]), and it poses the states the motion driver has no
+/// arm for: a trick pack's extras and 360s (MD21, V64), the backflip's pack clip (MD41), and a trick
+/// the bike has no clip for (V98) ([`Chassis::stance_owns`]).
 pub struct Chassis {
     /// The bike's clips, the chassis skeleton, the live pose and the machine stepping them.
     pub stance: Stance,
@@ -376,6 +384,17 @@ pub struct Chassis {
     /// between them. A restart snapshots this rather than the pose buffer, which on the ground still
     /// holds the last airborne clip.
     pub shown: crate::skin::Pose,
+    /// **S253a:** the motion driver's half: the bike's clips played off the rider's
+    /// [`Rider::animation`], the frame the original's bike motion object is driven by. Its set is a
+    /// copy of the stance's clips, with the same handles ([`Chassis::sync_motion`]).
+    pub motion: Rig,
+    /// The last frame was posed by [`Chassis::motion`] and not by the stance ([`Chassis::ride`]).
+    pub driven: bool,
+    /// How much of [`Chassis::handed_from`] still shows over the motion's pose: 1 on the frame the
+    /// stance hands the bike back, falling at the motion library's blend rate.
+    pub handover: f32,
+    /// The pose drawn on the stance's last frame, which a handover fades out of.
+    pub handed_from: crate::skin::Pose,
 }
 
 /// The cross-fade's weight on a frame: how much of the snapshot is still showing. Mode 0 carries
@@ -406,6 +425,40 @@ fn fade_rest(skeleton: &Skeleton, under: &crate::skin::Pose, fade: f32) -> crate
         ];
     }
     out
+}
+
+/// `to` faded back towards `under` by `fade`, as [`fade_rest`] fades the rest shape: both read as
+/// node trees, 1 being all of `under`.
+fn fade_into(skeleton: &Skeleton, to: &crate::skin::Pose, under: &crate::skin::Pose, fade: f32) -> crate::skin::Pose {
+    let mut out = skeleton.nodes(to);
+    let under = skeleton.nodes(under);
+    for j in 0..out.rot.len().min(under.rot.len()) {
+        out.rot[j] = crate::skin::slerp(fade, out.rot[j], under.rot[j], true);
+        let (p, was) = (out.pos[j], under.pos[j]);
+        out.pos[j] = [
+            p[0] + (was[0] - p[0]) * fade,
+            p[1] + (was[1] - p[1]) * fade,
+            p[2] + (was[2] - p[2]) * fade,
+            1.0,
+        ];
+    }
+    out
+}
+
+/// **S253a:** a motion rig over a copy of the stance's set: the same clips at the same handles, and
+/// the motion driver's table read off the stance's ([`game_sim::motion::Library`]: the gesture slots
+/// are the stance's first [`SLOTS`] states, the three airborne poses are found by name).
+fn motion_rig(stance: &Stance) -> Rig {
+    let from = &stance.set;
+    let mut set = Set::new(from.set.clone(), from.skeleton.clone(), Vec::new());
+    set.claimed = from.claimed.clone();
+    set.clips = from.clips.clone();
+    let mut lib = game_sim::motion::Library::default();
+    lib.stunt.copy_from_slice(&stance.lib.clip[..SLOTS]);
+    lib.air_fwd = set.id("bike_air_Fwd");
+    lib.air_mid = set.id("bike_air_Mid");
+    lib.air_bck = set.id("bike_air_Bck");
+    Rig::bound(set, lib, game_sim::motion::Params::default())
 }
 
 impl Chassis {
@@ -443,6 +496,7 @@ impl Chassis {
         let nodes = Nodes::of(&stance.set.skeleton);
         let shape = Geometry::of(&stance.set.skeleton, nodes);
         let wheels = wheels_of(&stance.set.skeleton, nodes);
+        let motion = motion_rig(&stance);
         Ok(Chassis {
             stance,
             geometry,
@@ -459,7 +513,17 @@ impl Chassis {
             posing: false,
             fading: 0.0,
             shown: crate::skin::Pose::new(0),
+            motion,
+            driven: false,
+            handover: 0.0,
+            handed_from: crate::skin::Pose::new(0),
         })
+    }
+
+    /// **S253a:** [`Chassis::motion`]'s clips and table made the stance's again, after the stance's
+    /// were filled from outside ([`Chassis::add_pack`]). The motion's clock and driving start over.
+    pub fn sync_motion(&mut self) {
+        self.motion = motion_rig(&self.stance);
     }
 
     /// **MD21:** a trick pack's bike clips in the stance's states past the sixty — its extras and the
@@ -471,7 +535,9 @@ impl Chassis {
     pub fn add_pack(&mut self, pack: &crate::anim::PackClips, stunts: &[Stunt]) -> Vec<String> {
         let Stance { set, lib, .. } = &mut self.stance;
         pack.fill_empty(set, lib, stunts, crate::anim::PackClips::bike_members);
-        pack.fill(set, lib, stunts, crate::anim::PackClips::bike_members)
+        let missed = pack.fill(set, lib, stunts, crate::anim::PackClips::bike_members);
+        self.sync_motion();
+        missed
     }
 
     /// **MD41:** the gesture slots of `stunts` this chassis has no clip for, by name — with a pack
@@ -584,6 +650,62 @@ impl Chassis {
     /// the request is run as a self-placing actor and [`game_sim::vehicle_anim::Frame::place`] comes
     /// back `None`.
     pub fn frame(&mut self, dt: F, want: i32, r: &Request, drive: Drive) -> va::Frame {
+        self.driven = false;
+        let frame = self.step_stance(dt, want, r);
+        self.drive(dt.0, drive);
+        frame
+    }
+
+    /// **S253a:** a frame of a ridden bike: [`Chassis::frame`], with the pose the original's
+    /// bike is drawn in, which comes off the motion driver. The rider's [`Rider::animation`], the
+    /// selection the simulation made for this tick, is played through [`Chassis::motion`]
+    /// ([`Rig::driven`]). Then the five drives go over it. In a hard turn the drawn root
+    /// rolls with the original's root instead of 0.89 of it, and keeps its 1.49° roll at rest:
+    /// `bike_air_Mid` at its midpoint, where the grounded rows of the stance named no clip (S253's
+    /// table).
+    ///
+    /// The stance runs too, at `want` and `r` ([`Chassis::want_under`], [`Chassis::riding_under`]),
+    /// and poses the frames [`Chassis::stance_owns`] gives it. Each half's next restart fades out of
+    /// what was drawn, whichever half drew it. When the stance hands the bike back, the motion's pose
+    /// is faded in from the stance's last at the motion library's rate.
+    pub fn ride(&mut self, dt: F, want: i32, r: &Request, rider: &Rider, drive: Drive) -> va::Frame {
+        let drawn = self.shown.rot.len() == self.stance.set.pose.rot.len();
+        let was = self.driven;
+        if drawn {
+            self.motion.set.pose = self.shown.clone();
+            if was {
+                self.stance.set.pose = self.shown.clone();
+            }
+        }
+        let frame = self.step_stance(dt, want, r);
+        self.motion.driven(dt, rider.animation);
+        self.driven = !self.stance_owns(&rider.body.veh);
+        let rate = game_sim::motion::Params::default().blend_rate.0;
+        self.handover = match (self.driven, was) {
+            (true, false) if drawn => {
+                self.handed_from = self.shown.clone();
+                1.0
+            }
+            (true, _) => (self.handover - rate * dt.0).max(0.0),
+            (false, _) => 0.0,
+        };
+        self.drive(dt.0, drive);
+        frame
+    }
+
+    /// **S253a:** the stance poses this frame and not the motion driver: a trick pack's state or the
+    /// backflip's clip (states the motion driver's switch has no arm for), or the body (`body`) in a
+    /// trick this chassis has no clip for ([`Chassis::bare_under`], which [`Chassis::riding_under`]
+    /// squares the airborne row under), or either one still fading out.
+    pub fn stance_owns(&self, body: &va::Driver) -> bool {
+        let own = |s: i32| s == va::BACKFLIP || s >= va::PACK_EXTRA;
+        let d = &self.stance.driver;
+        own(d.state) || (d.ramp > F::ZERO && own(d.prev)) || self.bare_under(body)
+    }
+
+    /// The stance's half of [`Chassis::frame`]: the selection, the clock and the clip's pose, with
+    /// no drives.
+    fn step_stance(&mut self, dt: F, want: i32, r: &Request) -> va::Frame {
         // What a restart snapshots is the buffer, so put what was last *drawn* in it: after a frame
         // with no clip that is the rest shape (or the fade towards it), not the airborne clip the
         // buffer still holds. Otherwise a landing fades out of nothing and a take-off fades out of
@@ -605,7 +727,6 @@ impl Chassis {
             }
             (false, blend) => ramp_of(blend),
         };
-        self.drive(dt.0, drive);
         frame
     }
 
@@ -630,13 +751,21 @@ impl Chassis {
         // the rest shape is faded from the snapshot by it, the way a clip is (`Clip::pose_faded`).
         let rest = crate::skin::Pose::new(self.stance.set.skeleton.len());
         let faded;
-        let live = match (self.posing, self.fading > 0.0) {
-            (true, _) => &self.stance.set.pose,
-            (false, true) => {
+        let live = match (self.driven, self.posing, self.fading > 0.0) {
+            // S253a: the motion driver's pose ([`Chassis::ride`]), faded in from the stance's last
+            // after a handover.
+            (true, ..) if self.handover > 0.0 => {
+                let skeleton = &self.stance.set.skeleton;
+                faded = fade_into(skeleton, &self.motion.set.pose, &self.handed_from, self.handover);
+                &faded
+            }
+            (true, ..) => &self.motion.set.pose,
+            (false, true, _) => &self.stance.set.pose,
+            (false, false, true) => {
                 faded = fade_rest(&self.stance.set.skeleton, &self.stance.set.under, self.fading);
                 &faded
             }
-            (false, false) => &rest,
+            (false, false, false) => &rest,
         };
         self.shown = live.clone();
         let mut local = self.stance.set.skeleton.locals(live);

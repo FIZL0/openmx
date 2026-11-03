@@ -1229,3 +1229,41 @@ fn at_full_droop_the_tyres_stay_on_their_axles_and_clear_of_the_fender() {
         least.0, least.1
     );
 }
+
+/// **S253a.** A ridden bike on the ground is drawn the way the original's is: in the motion driver's
+/// grounded idle, `bike_air_Mid` at its exact midpoint, played off the rider's own `animation` by
+/// [`Chassis::ride`]. That clip's root carries a little roll. S8 read the original's root up as
+/// (0.026, 1.000, −0.008), 1.49° to a side. The stance alone ([`Chassis::frame`]) names no clip on
+/// the ground and draws the rest shape, so the bike sat dead square under its rider.
+#[test]
+fn a_ridden_bike_on_the_ground_keeps_the_middle_clips_roll() {
+    let Some(mut disc) = disc() else { return };
+    let set = stunts(&mut disc);
+    let tables = rider::Tables::build();
+    let p = phy(&mut disc, &tables);
+    let build = sub(&mut disc);
+    let (mut stance, mut ridden) = (chassis(&mut disc, &set, &build.mcf), chassis(&mut disc, &set, &build.mcf));
+    let root = ridden.nodes.root.expect("the chassis has a Bike node");
+    let mut r = ride(&p, &ridden, &set);
+    let mut world = Flat::default();
+    let hands = Controls { gas: F::ONE, ..Controls::default() };
+    let mut grounded = 0;
+    for _ in 0..4 * 60 {
+        r.frame(&p, &tables, &hands, FRAME, &mut world);
+        let _ = frame(&mut stance, &r);
+        let want = ridden.want_under(&r.ride, &r.tricks, r.body.veh.want);
+        let request = ridden.riding_under(&r, want);
+        ridden.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
+        grounded = if r.ride.air.on_ground { grounded + 1 } else { 0 };
+    }
+    assert!(grounded > 60, "the bike is not a second on the ground at the end ({grounded} frames)");
+    assert!(ridden.driven, "the motion driver does not pose the ridden bike");
+    let idle = matches!(r.animation.blend, game_sim::motion::Blend::One { clip: game_sim::motion::Slot::AirMid, phase, ramp, .. } if phase.0 == 0.5 && ramp.0 == 0.0);
+    assert!(idle, "the rider's motion is not the grounded idle: {:?}", r.animation.blend);
+    // The ridden root's up in the square one's frame: the stance draws the rest shape here.
+    let (square, drawn) = (stance.world[root], ridden.world[root]);
+    let up = [0, 1, 2].map(|a| (0..3).map(|k| drawn.0[1][k] * square.0[a][k]).sum::<f32>());
+    let roll = up[0].asin().to_degrees();
+    println!("the ridden root's up in the square root's frame: {up:?}, {roll:.2}° to a side");
+    assert!((1.2..=1.8).contains(&roll.abs()), "the ridden bike rolls {roll:.2}° at rest, not the middle clip's 1.49°");
+}
