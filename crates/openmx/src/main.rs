@@ -5252,6 +5252,27 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         _ => (None, soft_sheet),
     };
     let mut heli_fx: Vec<particles::PlaneFx> = Vec::new();
+    // The cars' (S248): each car the garage can switch to, its list out of the track's archives
+    // (`buggyparticles.dat`, …) on its first livery's nodes. A seat keeps one manager a car, the one
+    // it drives stepped off the car, the rest off, so what they threw runs out.
+    let mut car_fx_lists: Vec<(Machine, particles::PlaneFx, Vec<(String, M4)>)> = Vec::new();
+    let mut soft_sheet = soft_sheet;
+    for car in &garage.cars {
+        if car_fx_lists.iter().any(|(m, _, _)| *m == car.machine) {
+            continue;
+        }
+        match load_car_fx(&archives, &stem, car.machine, car_draw::find(&car_models, car.machine, 0), &assets) {
+            Ok((fx, binds, sheet)) => {
+                if fx_sheet.is_none() {
+                    fx_sheet = Some(sheet.clone());
+                }
+                soft_sheet = soft_sheet.or(Some(sheet));
+                car_fx_lists.push((car.machine, fx, binds));
+            }
+            Err(why) => println!("car: {}: no particles: {why}", car.machine.dir()),
+        }
+    }
+    let mut car_fx: Vec<Vec<particles::PlaneFx>> = Vec::new();
     // nat01's rain (V73): the `.toy`'s weather box and the triggers that turn it up and down, drawn as
     // glows of the box's texture. A world's tiles have none.
     let (mut rain, rain_art) = match world_mod {
@@ -8470,6 +8491,21 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
             }
         }
+        // The cars' (S248): each seat's manager for the car it drives off the car after the tick.
+        if simulated && !args.overview && !car_fx_lists.is_empty() {
+            car_fx.resize_with(world.seats.len(), || car_fx_lists.iter().map(|(_, fx, _)| fx.clone()).collect());
+            let place = &mut world.place;
+            for (seat, fxs) in world.seats.iter().zip(&mut car_fx) {
+                let up = seat.garage.car_up();
+                for ((machine, _, binds), fx) in car_fx_lists.iter().zip(fxs) {
+                    let frame = up.filter(|c| c.machine == *machine).and_then(|c| Some((c, c.driven.as_ref()?))).map_or_else(particles::PlaneFrame::default, |(c, m)| {
+                        let at = car_draw::placed(m);
+                        particles::PlaneFrame::car(m, binds.iter().map(|(n, b)| (n.clone(), b.mul(at))).collect(), c.struck.as_ref())
+                    });
+                    fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
+                }
+            }
+        }
         perf.lap(Stage::Scene, scene_at, spent);
 
         // The frame's sound (P42), off what the ride just did, heard from every view's camera. A
@@ -9104,6 +9140,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             sprites.extend(bike_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
             sprites.extend(track_fx.iter().flat_map(|t| plane_sprites(&t.fx, blend.0)));
             sprites.extend(heli_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
+            sprites.extend(car_fx.iter().enumerate().flat_map(|(p, fxs)| {
+                let b = fx_blend(blend.0, &cut, p);
+                fxs.iter().flat_map(move |fx| plane_sprites(fx, b))
+            }));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -9503,6 +9543,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 for (p, fx) in heli_fx.iter().enumerate() {
                     tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, fx_blend(blend.0, &cut, p)), &light);
                 }
+                for (p, fxs) in car_fx.iter().enumerate() {
+                    for fx in fxs {
+                        tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, fx_blend(blend.0, &cut, p)), &light);
+                    }
+                }
             }
             // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
             if let Some(glows) = glows.get(v) {
@@ -9752,6 +9797,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And the first player's car, if they end the ride in one (S149e).
         if let Some(said) = world.seats[0].garage.car_up().and_then(vehicle::CarRide::report) {
             println!("{said}");
+            // And its particles in the air (S248).
+            let up = world.seats[0].garage.car_up().map(|c| c.machine);
+            if let Some(fx) = car_fx.first().and_then(|fxs| car_fx_lists.iter().zip(fxs).find(|((m, _, _), _)| Some(*m) == up)).map(|(_, fx)| fx) {
+                let counts: Vec<String> = fx.counts().iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect();
+                println!("car: particles: {}", counts.join(", "));
+            }
         }
         // Or the helicopter (P216), and its particles in the air (V114).
         if let Some(said) = world.seats[0].garage.heli_up().and_then(vehicle::KiowaRide::report) {
@@ -10939,6 +10990,43 @@ fn load_heli_fx(
     for (name, why) in &fx.skipped {
         println!("kiowa: particles: {name} ({why}) not ported");
     }
+    Ok((fx, binds, texture))
+}
+
+/// A car's particles (S248): its list ([`particles::car_list`]) out of the track's archives (a
+/// freeride track's second one) and each `.emt` it names, the track's particle sheet, and where each
+/// entry's node is on the car's model (`drawn`), all on its root. Says what it found, and what it
+/// skips: the tire tracks, which are not particles.
+fn load_car_fx(
+    archives: &[Res],
+    track: &str,
+    machine: Machine,
+    drawn: Option<&game_render::car::Car>,
+    assets: &Assets,
+) -> Result<(particles::PlaneFx, Vec<(String, M4)>, game_render::pst::Texture), String> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let name = particles::car_list(machine.dir()).ok_or("no list for it")?;
+    let list = read(name).ok_or(format!("no {name}"))?;
+    let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
+    let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
+    let texture = game_render::pst::Texture::parse(&texture)?;
+    let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
+    let fx = particles::PlaneFx::new(&biplane::emitters(&ini::text(&list)), atlas, read);
+    let model = drawn.and_then(|d| assets.models.get(&d.model)).map(|l| &l.model);
+    let dir = machine.dir();
+    let mut binds: Vec<(String, M4)> = Vec::new();
+    for e in &fx.entries {
+        if let Some(name) = e.node.as_deref() {
+            let at = model.and_then(|m| m.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name)).map(|i| m.world(i)));
+            match at {
+                Some(m) if !binds.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) => binds.push((name.to_string(), m)),
+                Some(_) => {}
+                None => println!("car: {dir}: particles: {} rides {name}, which the model does not have", e.name),
+            }
+        }
+    }
+    let skipped: Vec<&str> = fx.skipped.iter().map(|(n, _)| n.as_str()).collect();
+    println!("car: {dir}: particles: {} entries off {name}; {} not run ({})", fx.entries.len(), skipped.len(), skipped.join(", "));
     Ok((fx, binds, texture))
 }
 
