@@ -594,6 +594,36 @@ pub struct Wheel {
 }
 
 impl Wheel {
+    /// **A wheel put back** (S228b2): the words the original's put-back (vt+0x138) stores in each
+    /// wheel — the contact found and its normal straight up, the load point, the three velocities and
+    /// the tire's two in its own frame, the compression and its spring, the spin and the drive
+    /// torque — all to nothing, the quadwords to the `w = 1` clear. `last_compression` and the
+    /// contact flag (`+0xf4`, `+0xdc`) are not among them.
+    pub fn put_back(&mut self) {
+        let (w, m) = (&mut self.w, &mut self.mv);
+        w.ray_hit = 0;
+        w.swept_contact = 0;
+        w.compression = F::ZERO;
+        w.spring_force = F::ZERO;
+        w.contact_normal = UP;
+        w.ground_normal = UP;
+        w.load_point = chassis::CLEAR;
+        w.contact_velocity = chassis::CLEAR;
+        w.chassis_velocity = chassis::CLEAR;
+        self.chassis_local_velocity = chassis::CLEAR;
+        self.local_velocity = chassis::CLEAR;
+        self.local_force = chassis::CLEAR;
+        m.spin = F::ZERO;
+        m.drive_torque = F::ZERO;
+        m.contact_normal = UP;
+        for k in [0, 1, 4, 5] {
+            m.fresh.scalars[k] = 0;
+        }
+        m.fresh.vectors[0] = chassis::CLEAR;
+    }
+}
+
+impl Wheel {
     /// A wheel built from one half of a `.phy`.
     pub fn of(t: &phy::Tire, mass: F, mount: Vf, steered: bool) -> Wheel {
         let radius = t.tire_radius;
@@ -1017,9 +1047,39 @@ impl Ride {
 
     /// **The put-back** (S66): the bike set down on [`Ride::back`] — its point, its heading, and the
     /// ground's normal as the up, which the look-at keeps while the heading is turned square to it.
+    ///
+    /// What the original's put-back (`bike_unwreck` → vt+0x138 → `ghost_start`) stores is less than
+    /// [`Ride::place_on`] resets, and some of it is not a zero (S228b2, measured in the oracle off
+    /// fly_and_collide's images and held bit for bit through its three put-backs):
+    /// - The ground step's own words ([`mv::Ride`]: the clutch's ramp, the balance, the pitch
+    ///   integral) are left as they were. Only the bike's constructor and the clutch itself write the
+    ///   ramp's timer (P154). Reset, the ramp re-armed from a standstill on the put-back's own tick
+    ///   and moved the centre of mass back by the launch's travel, 1.484 ft.
+    /// - The air state is left but for three words: on the ground (`+0x574` = 1), not airborne
+    ///   (`+0x57c`), no crossup (`+0x600`). With all of it reset, the next tick's air control saw a
+    ///   bike off the ground and put an unroll torque on it.
+    /// - Of the chassis, the quaternion, the centre of mass, the angles and the world angular velocity
+    ///   (`+0x1a0`, `+0x60`, `+0x90`, `+0x280`) are not written: the next integrate folds the node's
+    ///   new rotation onto the old quaternion. The orientation's integrator history (`+0x2f0`,
+    ///   `+0x300`) is set to (0, 0, 0, 1), not zeroes, so the put-back tick's Adams step takes
+    ///   `dt / 2` off `w` and the normalise turns the bike on a little further, about 0.011 rad.
+    /// - Each wheel's contact words go too ([`Wheel::put_back`]).
     pub fn place_back(&mut self) {
         let Back { at, facing, up } = self.back;
+        let ch = &self.chassis;
+        let (mv, air, quat, cofg_world, euler, world_ang_vel) = (self.mv, self.air, ch.quat, ch.cofg_world, ch.euler, ch.world_ang_vel);
         self.place_on(at, facing, up);
+        self.mv = mv;
+        self.air = air::Air { on_ground: true, airborne: false, crossup: F::ZERO, ..air };
+        self.chassis.quat = quat;
+        self.chassis.cofg_world = cofg_world;
+        self.chassis.euler = euler;
+        self.chassis.world_ang_vel = world_ang_vel;
+        let one = [F(0.0), F(0.0), F(0.0), F(1.0)];
+        self.chassis.quat_hist = chassis::Deriv { dx: one, prev: one };
+        for wh in [&mut self.front, &mut self.rear] {
+            wh.put_back();
+        }
     }
 
     /// [`Ride::place`] with an up axis: the look-at orthogonalises and keeps the up, the original's

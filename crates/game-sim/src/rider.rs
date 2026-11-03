@@ -375,7 +375,11 @@ impl Rider {
     pub fn wrap_round(&mut self, world: &dyn World) -> [i8; 2] {
         let wrap = world.wrap();
         let Some(area) = world.area().filter(|_| wrap != [false, false]) else { return [0, 0] };
-        let at = self.crash.as_ref().map_or(self.ride.chassis.cofg_world, |c| c.bike.body.position);
+        // A riding chassis is asked where its transform puts the mass, not its centre word: a
+        // put-back leaves that word the one before until the next integrate (S228b2), and after a
+        // wreck carried over a seam the one before is on the far side of it.
+        let riding = || crate::math::transform_point(&self.ride.transform(), self.ride.chassis.cofg);
+        let at = self.crash.as_ref().map_or_else(riding, |c| c.bike.body.position);
         let laps = [crate::seam::lap(wrap[0], at.x(), area.width), crate::seam::lap(wrap[1], at.z(), area.depth)];
         if laps == [0, 0] {
             return laps;

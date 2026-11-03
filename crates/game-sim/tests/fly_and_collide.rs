@@ -297,6 +297,7 @@ impl Image<'_> {
         h.brake = h.front_brake;
         h.rear_brake = self.float(r + 0x654);
         h.lean = (self.float(r + 0x670), self.float(r + 0x674));
+        ride.back = game_sim::ride::Back { at: self.vf(r + 0x3b0), facing: self.vf(r + 0x3c0), up: self.vf(r + 0x3d0) };
     }
 }
 
@@ -390,7 +391,8 @@ fn ride(from: u32, to: u32) -> Option<([[u32; 3]; 2], Vec<Tick>)> {
         let mut out = Vec::new();
         for t in from..to {
             let dt = dt_of(t);
-            let controls = sim.poll(dt, &[tape_pad(&tape, t), Report::missing()]);
+            let mut controls = sim.poll(dt, &[tape_pad(&tape, t), Report::missing()]);
+            controls.respawn = chord(&tape, t + 1);
             let frame = sim.step(dt, &controls, world);
             let ch = &sim.rider.ride.chassis;
             out.push(Tick {
@@ -447,8 +449,12 @@ fn held(cap: &Rows, seed: [[u32; 3]; 2], ticks: &[Tick]) -> usize {
             let near = (0..3).all(|a| (f32::from_bits(row[1][a]) - f32::from_bits(pair[0][1][a])).abs() < 0.05);
             near && (0..3).all(|a| pair.iter().any(|s| s[0][a] == row[0][a]))
         };
+        // A row read between a put-back's placing and the tick's integrate: the velocity the put-back
+        // zeroed, the centre still the one before (S228b2: 138686, 139142, 139747).
+        let placed = |j: usize| j > 0 && row[0] == [0; 3] && row[1] == states[j - 1][1];
         let window = at..(at + 3).min(states.len());
-        match window.clone().find(|&j| reads(j)).or_else(|| window.clone().find(|&j| rebuilt(j))).or_else(|| window.clone().find(|&j| torn(j))) {
+        let found = window.clone().find(|&j| reads(j)).or_else(|| window.clone().find(|&j| rebuilt(j)));
+        match found.or_else(|| window.clone().find(|&j| torn(j))).or_else(|| window.clone().find(|&j| placed(j))) {
             Some(j) => at = j,
             None if r <= from + 1 && at == 0 => {} // a row before the image's state reached it
             None => break,
@@ -525,8 +531,6 @@ fn p1_rides_each_event_as_the_original() {
 /// (research/s228/index.md, "Where the port parts"):
 /// - **a wreck under way** (137310, 138510, 139510, 139910): the seeder makes a riding rider, and
 ///   the original's is a ragdoll; not a parting.
-/// - **the rider's own put-back** (138610 at 138684, 139110 at 139141, 139710 at 139746): Select's put-back
-///   off a respawn spot the port does not place the same.
 /// - **a preload's force** (138810 at 138907): the stick thrown forward on a lip; the force is the
 ///   flick's speed, whose sampling is the port's own (`ride::Flick`).
 /// The ground step's donut read its own angle off the stick until S228b, not the trick decoder's
@@ -534,13 +538,18 @@ fn p1_rides_each_event_as_the_original() {
 /// there and hold now. 137410 and 137610 held to 137462 and 137637 until S228b1. That was not a contact: those
 /// two rows (137464, 137638) were read inside integrate with the velocity torn as well as the centre
 /// rebuilt ([`held`]). From the images at 137462 and 137637 the original's own `bike_ground_step` gives
-/// the port's tick bit for bit, and the rows after confirm it.
+/// the port's tick bit for bit, and the rows after confirm it. 138610, 139110 and 139710 parted at
+/// the rider's own put-back (138684, 139141, 139746) until S228b2. The spot was the original's all
+/// along; the port's put-back reset more than the original's does (the air state, the ground step's
+/// words, the stale world angular velocity), left out the wheels it clears, and zeroed the
+/// orientation's integrator history where the original leaves (0, 0, 0, 1) ([`Ride::place_back`]).
+/// The put-back row read mid-tick is [`held`]'s `placed`. 139510, a wreck under way, holds its first row now.
 const HELD: [(u32, usize); 35] = [
     (136510, 100), (136610, 100), (136710, 100), (136810, 100), (136910, 100), (137010, 100), (137110, 100),
     (137210, 100), (137310, 0), (137410, 100), (137510, 100), (137610, 100), (137710, 100), (137810, 100),
     (137910, 100), (138010, 100), (138110, 100), (138210, 100), (138310, 100), (138410, 100), (138510, 0),
-    (138610, 74), (138710, 100), (138810, 97), (138910, 100), (139010, 100), (139110, 31), (139210, 100),
-    (139310, 100), (139410, 100), (139510, 0), (139610, 100), (139710, 36), (139810, 100), (139910, 0),
+    (138610, 100), (138710, 100), (138810, 97), (138910, 100), (139010, 100), (139110, 100), (139210, 100),
+    (139310, 100), (139410, 100), (139510, 1), (139610, 100), (139710, 100), (139810, 100), (139910, 0),
 ];
 
 /// **P1 rides the whole tape as the original, 100 frames at a time**, as far as [`HELD`] says: each
@@ -696,7 +705,7 @@ const SETTLE: u32 = 30;
 
 /// The riding ticks [`the_drawn_rider_leans_as_the_original_through_the_turns`] compares, and of
 /// those the hard-turn ones (the original's head 0.5 ft or more to a side of its pelvis).
-const DRAWN_TICKS: (usize, usize) = (1793, 274);
+const DRAWN_TICKS: (usize, usize) = (1952, 274);
 
 /// **S228a — the drawn rider's lean through the tape's turns, as drawn.** Every stretch of [`HELD`]
 /// that holds past [`SETTLE`] is ridden by [`ride_drawn`], the drawn rider beside it as the shell
@@ -818,4 +827,15 @@ fn bones() -> Option<Bones> {
         })
         .collect();
     Some(Bones { first: cap.frames[0] as u32, rows, bikes, modes })
+}
+
+/// The L1+R1 put-back chord on the tape's field `t`: one of the two pressed that field with the
+/// other held. [`ride`] asks it of field `t + 1`, a field ahead of the rest of the pad: the
+/// original takes the chord in its input phase, before the update (S66), and only from there does
+/// the put-back tick's centre come out as the original's (S228b2: 138684, 139141, 139746).
+fn chord(tape: &P2m2, t: u32) -> bool {
+    let (now, was) = (tape_pad(tape, t).buttons(), tape_pad(tape, t - 1).buttons());
+    let (l, r) = (0x4u16, 0x8u16);
+    let pressed = |b: u16| now & b != 0 && was & b == 0;
+    (pressed(l) && now & r != 0) || (pressed(r) && now & l != 0)
 }

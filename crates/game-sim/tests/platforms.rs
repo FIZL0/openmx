@@ -111,67 +111,67 @@ fn canonical_trace() -> Vec<u64> {
 
 /// `(tick, Sim::hash at that tick)`, every sixteenth tick of the canonical run.
 const HASHES: &[(u64, u64)] = &[
-    (16, 0x249647bccda18831),
-    (32, 0x7b5c66f82ae3ff60),
-    (48, 0x7d0d32074e169af2),
-    (64, 0x14ccc36696dc649d),
-    (80, 0x0a0f26dc947535fd),
-    (96, 0xca755a1d7df60bdf),
-    (112, 0x6361a9a8c63b74d3),
-    (128, 0xd774a108fdf73690),
-    (144, 0x3ef8dee643ce1ced),
-    (160, 0x48b77a6c4fc30a4f),
-    (176, 0x0a45d1804a8b838e),
-    (192, 0x5a52957dfffa7340),
-    (208, 0x35d6db7a52cac9b8),
-    (224, 0x670ca6df02e88a57),
-    (240, 0xd7a42ee0aba3a55f),
-    (256, 0x4f856dcf6aa28b36),
+    (16, 0xe0551e8843119a34),
+    (32, 0x0b4cde2d67894ee9),
+    (48, 0xf27d8d8b5c350090),
+    (64, 0x8ae8430e32561879),
+    (80, 0x04541854e9f50677),
+    (96, 0xaca548db2fc9265b),
+    (112, 0xe787fa1827b2641c),
+    (128, 0x55ff95d460b79fdb),
+    (144, 0xac314aa862f16acb),
+    (160, 0x9cb8d8ad55aa99b4),
+    (176, 0x91a11196c28e5666),
+    (192, 0x09744553d9da1756),
+    (208, 0xd50e1de8ec338a75),
+    (224, 0x9b072bf4c1e312a5),
+    (240, 0x159a82c5a75b4417),
+    (256, 0x639736a6787caec9),
 ];
 
 /// FNV-1a over all 256 of the run's hashes, little-endian: the one number that covers every tick.
-const TRACE_DIGEST: u64 = 0xb79e3f6d08c43953;
+const TRACE_DIGEST: u64 = 0x26e01add43465807;
 
 /// `(tick, bike.pos[1] as a bit pattern)` on the same ticks — a watched field rather than a whole-state
 /// hash, which is the shape an acceptance fixture of the original has.
 const POS_Y: &[(u64, u32)] = &[
-    (16, 0xbdfa74c0),
-    (32, 0xbda3b730),
-    (48, 0xbda3b060),
-    (64, 0xbe6de218),
-    (80, 0xbe71df80),
-    (96, 0xbe6d2b50),
-    (112, 0xbe3d61c0),
-    (128, 0xbe3e5410),
-    (144, 0xbda32860),
-    (160, 0xbda5bd50),
-    (176, 0xbda40eb0),
-    (192, 0xbda5f8f0),
-    (208, 0xbda368e0),
-    (224, 0xbd186fc0),
-    (240, 0xbda458a0),
-    (256, 0xbe54af18),
+    (16, 0xbdfa5790),
+    (32, 0xbda15170),
+    (48, 0xbda282b0),
+    (64, 0xbe6cffe8),
+    (80, 0xbe711f10),
+    (96, 0xbe6b22d8),
+    (112, 0xbe3d88b8),
+    (128, 0xbe3ed9b0),
+    (144, 0xbda574a0),
+    (160, 0xbda32140),
+    (176, 0xbda5b370),
+    (192, 0xbda6aab0),
+    (208, 0xbda5a260),
+    (224, 0xbd1b6240),
+    (240, 0xbda449c0),
+    (256, 0xbe543700),
 ];
 
 /// `(tick, bike.vel[1] as a bit pattern)`: the lane the suspension and gravity fight over, which is
 /// where a rounding difference shows up first.
 const VEL_Y: &[(u64, u32)] = &[
-    (16, 0xbfa2bd07),
-    (32, 0xbfa19025),
-    (48, 0xbf9f166c),
-    (64, 0xbdebee98),
-    (80, 0xbd6d8e47),
-    (96, 0xbe207b5c),
-    (112, 0xbf56fe04),
-    (128, 0xbf590e2d),
-    (144, 0xbf9e3cc0),
-    (160, 0xbfa436d0),
-    (176, 0xbfa014d5),
-    (192, 0xbfa4dea2),
-    (208, 0xbfa0da5f),
-    (224, 0xbf79cd22),
-    (240, 0xbfa0bb23),
-    (256, 0xbf13489d),
+    (16, 0xbfa2be06),
+    (32, 0xbfa0f2a9),
+    (48, 0xbf9fb535),
+    (64, 0xbde09d7f),
+    (80, 0xbd8837ae),
+    (96, 0xbdd4be1f),
+    (112, 0xbf518c4a),
+    (128, 0xbf5aeba1),
+    (144, 0xbfa0064e),
+    (160, 0xbfa0d5a0),
+    (176, 0xbfa03f5c),
+    (192, 0xbfa2a7a1),
+    (208, 0xbfa18969),
+    (224, 0xbf7c9c60),
+    (240, 0xbfa0b971),
+    (256, 0xbf171b59),
 ];
 
 /// The head of the state at the last tick, as [`hash::Dump`] prints it: the two counters and the
@@ -185,22 +185,22 @@ const VEL_Y: &[(u64, u32)] = &[
 const FINAL_DUMP_HEAD: &str = "\
 ticks = 256\n\
 rng = 1297634638\n\
-bike.pos[0] = -0.06456906 (0xbd843cc9)\n\
-bike.pos[1] = -0.20769918 (0xbe54af18)\n\
-bike.pos[2] = -8.165065 (0xc102a41b)\n\
+bike.pos[0] = -0.017785594 (0xbc91b318)\n\
+bike.pos[1] = -0.20724106 (0xbe543700)\n\
+bike.pos[2] = -7.463614 (0xc0eed5ed)\n\
 bike.pos[3] = 1 (0x3f800000)\n\
-bike.vel[0] = 0.000015469726 (0x3781c4fc)\n\
-bike.vel[1] = -0.57532674 (0xbf13489d)\n\
-bike.vel[2] = -1.8096685 (0xbfe7a338)\n\
+bike.vel[0] = 0.00003441187 (0x38105577)\n\
+bike.vel[1] = -0.59026104 (0xbf171b59)\n\
+bike.vel[2] = -1.8107086 (0xbfe7c54d)\n\
 bike.vel[3] = 0 (0x00000000)";
 
 /// How many leaves the walk of the state has, and FNV-1a over the whole of its printed form.
 const FINAL_DUMP_LEAVES: usize = 969;
-const FINAL_DUMP_DIGEST: u64 = 0x17218e7afbf6ab56;
+const FINAL_DUMP_DIGEST: u64 = 0x1702b314492db5f6;
 
 /// FNV-1a over the bytes of the fixture's text form: a fixture file written on one machine must be the
 /// same bytes on another, or a recording cannot be shared.
-const FIXTURE_TEXT_DIGEST: u64 = 0xa8e6bb0d20f69f63;
+const FIXTURE_TEXT_DIGEST: u64 = 0xce0b46a728932c6e;
 
 /// The hash of [`Every`], the state below that holds one of every leaf kind the walker can emit.
 const EVERY_LEAF_HASH: u64 = 0xa228ffa8409c01f8;
@@ -422,17 +422,17 @@ fn the_canonical_run_hashes_to_its_pinned_vectors() {
 
 /// `(tick, Sim::hash)` every 32 ticks of the riders' run.
 const RIDERS_HASHES: &[(u64, u64)] = &[
-    (32, 0x8dc24cc847ab02ff),
-    (64, 0xcdf5b4f9aa672e90),
-    (96, 0x0e39646d981a366a),
-    (128, 0x82f3e24dfbff68c0),
-    (160, 0xf7fdfb7228e65679),
-    (192, 0x5f042c94a273bd46),
-    (224, 0xec862574944b6a25),
-    (256, 0x31f971cb8c43301d),
+    (32, 0x580f512e5199fca0),
+    (64, 0x99f78b8f3199d1bf),
+    (96, 0xced8a4d90868ef47),
+    (128, 0x34fc2b539bfa092e),
+    (160, 0x38fd80b7c836b6e9),
+    (192, 0xe627d8f235cad109),
+    (224, 0x08a56a2f0ac5afd8),
+    (256, 0xff1255a1fee1e761),
 ];
 /// FNV-1a over every tick's hash of the run.
-const RIDERS_DIGEST: u64 = 0x36369ee3e695dde3;
+const RIDERS_DIGEST: u64 = 0x74bcb1ae285c25dc;
 /// FNV-1a over the session's `snapshot::encode` bytes at the end, and how many bytes they were.
 /// 13367 since S92: each rider's score card carries the event's two gates (two bytes, four riders).
 /// 13371 since S83: each ride's put-back search list, `None` until a world with props is asked (a
@@ -459,7 +459,7 @@ const RIDERS_DIGEST: u64 = 0x36369ee3e695dde3;
 /// 13607 again since S250: S234's three bytes taken out (flips score as the original does).
 /// 13611 since F13: each rider's put-back record carries last tick's reverse command (a byte, four
 /// riders).
-const RIDERS_WIRE_DIGEST: u64 = 0x16a829708d3aa4cc;
+const RIDERS_WIRE_DIGEST: u64 = 0xeca74fbe28cdf668;
 const RIDERS_WIRE_LEN: usize = 13611;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,

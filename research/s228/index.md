@@ -66,13 +66,11 @@ events above. Every tick matches the capture's chassis velocity and centre bit f
 fore-aft request axes match on every riding tick. All four wrecks match, with the original's reason
 in the original's frame. The 139063 nose-first landing rides out as the original's does.
 
-`p1_rides_the_tape_as_the_original` rides each 100-frame stretch from its image. Twenty-seven of the 35
+`p1_rides_the_tape_as_the_original` rides each 100-frame stretch from its image. Thirty of the 35
 stretches hold to their end. The rest are pinned in `HELD`:
 
 - **A wreck under way at the image** (137310, 138510, 139510, 139910). The seeder builds a riding
   rider, but the original's rider is a ragdoll at that point. These are not partings.
-- **The rider's own put-back** (138610 at 138684, 139110 at 139141, 139710 at 139746). Select puts the
-  bike back on a respawn spot, and the port does not place it the same. Not looked at in S228b.
 - **A preload's force** (138810 at 138907). The stick is thrown forward on a lip. The force is the
   flick's speed, and the port samples the flick its own way (`ride::Flick`), because the original
   samples it from DMA waits on a hardware timer. Not reproducible tick for tick.
@@ -86,6 +84,31 @@ after these matches one of the port's ticks. The non-zero `p1_ch_force`/`p1_ch_m
 come from the same mid-tick read, and rows the port already held show them too (137630..137634).
 `held` now also takes a velocity torn between two states when the centre is within 0.05 ft of the
 earlier state. Both stretches hold to 100.
+
+**Fixed in S228b2: the rider's own put-back** (138610 at 138684, 139110 at 139141, 139710 at
+139746). The spot was the original's all along: the put-back record's point, heading and up, seeded
+from the image (`+0x3b0`, `+0x3c0`, `+0x3d0`), place the transform exactly. What parted was what
+else the put-back resets. In the oracle, `bike_unwreck`'s vt+0x138 (0x0027b650) was run from the
+images and every word it writes was listed, in the chassis, both wheels and the rider:
+- The chassis' quaternion, centre (`+0x60`), angles (`+0x90`) and world angular velocity (`+0x280`)
+  are left as they were. The next integrate folds the node's new rotation onto the old quaternion.
+- The velocities, forces and accelerations are cleared to the quadword (0, 0, 0, 1), and so is the
+  orientation's integrator history (`+0x2f0`, `+0x300`). The port zeroed that history. With `w = 1`
+  the put-back tick's Adams step takes `dt / 2` off the quaternion's `w`, and the normalise turns the
+  bike about 0.011 rad further round. This was the remaining yaw after the centre matched.
+- The air state keeps everything but on_ground = 1, airborne = 0 and crossup = 0 (`+0x574`,
+  `+0x57c`, `+0x600`). The port reset it all, so its air control saw a bike off the ground and put an
+  unroll torque on it.
+- The ground step's own words (`mv::Ride`: the clutch's ramp and so on) are not written.
+- Each wheel's contact words are cleared: ray and swept flags, compression, spring force, contact and
+  ground normals to straight up, load point, contact and chassis velocities, the tire's two local
+  vectors, spin and drive torque. `last_compression` and the contact flag are not.
+
+The chord is taken from the tape a field ahead of the pad (`chord(&tape, t + 1)`), the input phase
+before the update. `held` takes the row read mid-put-back (velocity zero, centre still the tick
+before's) as `placed`. All three stretches hold to 100, and the put-back tick's end equals the capture
+bit for bit. `Rider::wrap_round` now asks a riding chassis where its transform puts the mass: after a
+wreck carried over a seam, the stale centre is on the far side.
 
 **Fixed in S228b: the ground step's donut.** Nine of the old "unexplained" partings (136610, 137910,
 138010, 138110, 138210, 138310, 138710, and the 139310 one blamed on the preload) were one cause. The
