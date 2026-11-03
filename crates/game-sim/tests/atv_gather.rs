@@ -14,8 +14,9 @@
 //!   239 scene nodes of class 7 are left out, which are not collidables;
 //! - **the moving list** the image holds, slot for slot: the quad's frame mesh, riding probe and
 //!   sweep, the six riders' parts and the two category-0 sweeps, their object lists naming the
-//!   same collidables. What the image says of the parts' places, the rider spheres' radii and the
-//!   player's vehicle sphere's position is taken as input: it is the ride's, not the world's;
+//!   same collidables, the rider spheres' radii read from the rider file (`Rider\Anim\mrider.phy`
+//!   out of `MXVSATV.PSR`, copied into the same folder). What the image says of the parts' places
+//!   and the player's vehicle sphere's position is taken as input: it is the ride's, not the world's;
 //! - **the list** the original's gather (`atv_gather_nearby`) fills, run on the image with the probe moved:
 //!   every candidate, in order, with its distance, and the bound, bit for bit. The points are every
 //!   row of MD37a's fifteen captures (the quad's position), among them the rows where the quad
@@ -100,10 +101,12 @@ fn data() -> Option<Data> {
     let image = dir.join(format!("atv-r-spawn.ee{}", ".bin"));
     let res = dir.join("mc02.res");
     let esb = dir.join("MC02.esb");
+    let rider = dir.join("mrider.phy");
     for (p, what) in [
         (&image, "MD37a's eeMemory.bin of atv-r-spawn.p2s (memory: md37a ATV states live in s2)"),
         (&res, "Desert Oasis's mc02.res off MX vs. ATV's disc (Env/MC02)"),
         (&esb, "Env\\MC02\\MC02.esb out of MXVSATV.PSR on MX vs. ATV's disc"),
+        (&rider, "Rider\\Anim\\mrider.phy out of MXVSATV.PSR on MX vs. ATV's disc"),
     ] {
         if !p.exists() {
             skip(&format!("{} is not there: {what}", p.display()));
@@ -159,9 +162,12 @@ fn data() -> Option<Data> {
             world.put_moving(o, slot);
         }
     }
+    // Six riders of nine pairs, each sphere's radius the rider file's.
+    let radii = atv_world::rider_radii(&Ini::parse_bytes(&std::fs::read(&rider).unwrap()));
+    assert_eq!(radii.len(), 9, "the rider file's collision spheres");
     for slot in 18..126u32 {
         let c = image_at(slot);
-        let part = if slot % 2 == 0 { atv_world::rider_sphere(F(ee.f32_at(c + at::RADIUS))) } else { atv_world::rider_sweep() };
+        let part = if slot % 2 == 0 { atv_world::rider_sphere(radii[(slot as usize - 18) / 2 % 9]) } else { atv_world::rider_sweep() };
         let o = world.add(part, centre(&ee, c));
         world.put_moving(o, slot as usize);
         port.insert(c, o);

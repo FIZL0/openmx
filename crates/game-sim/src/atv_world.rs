@@ -30,6 +30,7 @@
 //! - **the moving list** ([`World::put_moving`]): one block of [`MOVING_SLOTS`] slots the space's
 //!   moving table walks after the tree — the quad's frame mesh, its riding probe and its sweep, the
 //!   riders' parts ([`rider_sphere`], [`rider_sweep`]) and two category-0 sweeps ([`owned_sweep`]).
+//!   A rider's nine spheres' radii are the rider file's ([`rider_radii`], MD83a).
 //!
 //! The tree's 239 entries of class 7 are scene nodes, not collidables: the gather passes over them.
 
@@ -42,6 +43,7 @@ use crate::broad_phase::more_flags::ACTIVE;
 use crate::flight_search;
 use crate::math::{self, Mat4};
 use crate::phy::Ini;
+use crate::ragdoll_contact::Sphere;
 use crate::track::{Scene, TerrainLayout};
 use crate::world::Prop;
 use crate::world_search::{Candidate, Categories, Class, Collidable, accepts, flags};
@@ -289,6 +291,14 @@ pub fn rider_sphere(radius: F) -> Collidable {
         categories: Categories { mode: 1, list: Vec::new() },
         ..Collidable::default()
     }
+}
+
+/// A rider's sphere radii, in the moving list's order, out of the rider file (`MXVSATV.PSR`'s
+/// `Rider\Anim\mrider.phy`): one per `Type = Collision` constraint in file order, the `Radius` of
+/// the `[PartN]` its `Part` names. MX Unleashed's rider spheres ([`Sphere::read`]), read the same way:
+/// MC02's nine are parts 15, 18 (the feet), 1, 3, 4, 7, 11, 14 and 17.
+pub fn rider_radii(rider: &Ini) -> Vec<F> {
+    Sphere::read(rider).iter().map(|s| s.radius).collect()
 }
 
 pub fn rider_sweep() -> Collidable {

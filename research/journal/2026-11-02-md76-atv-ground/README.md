@@ -16,6 +16,9 @@ start zone's mesh filed again, the six vehicles' spheres, and the moving list (t
 108 rider parts, two category-0 sweeps). Every tree entry and moving slot equals the image's, and the
 9,930 gathers now leave nothing out.
 
+MD83a (`7-rider-radii-MD83a.md`): the rider spheres' nine radii are read from `Rider\Anim\mrider.phy`
+in `MXVSATV.PSR` (its `Type = Collision` constraints' parts), not from the image.
+
 MD86 (`5-contacts-MD86.md`): `quad::Steps` answers `Call::Contacts` over Desert Oasis (`atv_search::Oasis`).
 The original's distributor and search run unhooked, and the quad, the body and the wheels equal the port's on
 763 frames.

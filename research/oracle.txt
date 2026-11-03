@@ -8577,6 +8577,10 @@ atv_quadtree_new            atv 0x0017fc40 = the quadtree constructor (least 96)
 # nearby, categories mode 0 [0x20, 0x400]. The quad's trigger probe 0x0162cd30 and wreck rays 0x0162cef0 are in
 # no structure. Space tables 0x00654680: +0x28 the tree, +0x2c the moving list, +0x3c no sub-tables. The tree's 239
 # class-7 entries are scene nodes (vtable 0x003b4ed0, and 0x003cbcf0); the gather passes over them.
+# MD83a: the rider radii are MXVSATV.PSR's Rider\Anim\mrider.phy (also in Rider\RiderPool.res, same bytes; ELF
+# strings "Rider\Anim\" and "mrider.phy"): its Type = Collision constraints in file order, parts 15 18 1 3 4 7 11 14
+# 17, each [PartN] Radius (atv_world::rider_radii through ragdoll_contact::Sphere::read). mrider50.phy differs
+# only in HitBottom*. Journal: research/journal/2026-11-02-md76-atv-ground/7-rider-radii-MD83a.md.
 atv_vehicle_sphere_place    atv 0x004aa7d0 = a vehicle's +0xd80 sphere put at a point (radius 40 or 5; spatial move when stale)
 atv_vehicle_sphere_gather   atv 0x004aa980 = a vehicle's +0xd84 list gathered round its sphere once it moved 10 ft
 atv_sweep_box               atv 0x001bad00 = the sweep-class collidable's box (vt +0xc4) over its segments
