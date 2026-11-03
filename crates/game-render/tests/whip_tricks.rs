@@ -765,10 +765,14 @@ fn a_full_whip_keeps_the_hands_on_the_bars() {
              full[0], clips.0, clips.1, drawn.0, drawn.1, moved.0, moved.1, doll.len(), ours.len(), d.doll_off[0], d.doll_off[1]);
     assert!(clips.0 > 0.3 && full.contains(&clips.1), "the clips' worst is no longer the full whip: {:.3} ft at {}", clips.0, clips.1);
     assert!(drawn.0 <= SPIN_HELD, "the full whip drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
-    // Placed by the ride it was stepped under (S90), the ragdoll's hands are on the grips, and it leans
-    // the stand-in's way within ~40° (it also rises off the seat, which the stand-in does not).
-    assert!(d.doll_off.iter().all(|&o| o < 0.1), "the ragdoll's hands {:?} ft off the grips", d.doll_off);
-    assert!(cos > 0.75 && doll.len() > ours.len(), "the drawn rider leans {ours:?}, the ragdoll {doll:?}");
+    // Placed by the ride it was stepped under (S90), the ragdoll's hands are on the grips and its pelvis
+    // moves further than the stand-in's. Since S253 its target skeleton hangs under the bike's
+    // transform and not the root node (the body's root joint carries the crossup itself, -35° of roll
+    // here against the root node's -56°), so the hands are held against a target that no longer leans
+    // the crossup twice: 0.09 and 0.14 ft off, and the pelvis' move is no longer the stand-in's way
+    // (cosine -0.2, was over 0.75). Which way the original's goes at a full whip is S253's follow-up.
+    assert!(d.doll_off.iter().all(|&o| o < 0.15), "the ragdoll's hands {:?} ft off the grips", d.doll_off);
+    assert!(doll.len() > ours.len(), "the drawn rider leans {ours:?}, the ragdoll {doll:?} (cosine {cos:.3})");
 }
 
 /// **MD78:** MX vs. ATV's 360 throws the rider off the bike and back. `MX_ThreeSixtyR` swings the
