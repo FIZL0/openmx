@@ -413,6 +413,7 @@ const STEP_MB: u64 = 16;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn package_telling(mods: &Path, l: &Local, author: &str, tell: &dyn Fn(String)) -> Result<Packed, String> {
     use std::io::{Read, Seek, SeekFrom};
+    bake_picture(mods, l, tell);
     let files = files_of(&l.dir)?;
     let to = mods.join(format!(".upload-{}.zip", safe(&l.id)));
     let got = pack_telling(&files, &to, &|(got, all)| tell(format!("Packing {}: {got} / {all} MB", l.name)));
@@ -445,6 +446,26 @@ pub fn package_telling(mods: &Path, l: &Local, author: &str, tell: &dyn Fn(Strin
     p.meta = meta;
     p.preview = preview_of(mods, l);
     Ok(p)
+}
+
+/// P282: a track or world going up carries its own `previews/track.png`, so whoever downloads it has
+/// its picture and never shoots one: one with none has the still the shell kept of it baked into its
+/// folder, or one shot now (the uploader's machine shoots it once; tests shoot none). One that cannot
+/// be had goes up with none, as before.
+#[cfg(not(target_arch = "wasm32"))]
+fn bake_picture(mods: &Path, l: &Local, tell: &dyn Fn(String)) {
+    if !matches!(l.kind, Kind::Track | Kind::World) || l.dir != mods.join("tracks").join(&l.id) {
+        return;
+    }
+    let exe = if cfg!(test) { None } else { std::env::current_exe().ok() };
+    if exe.is_some() && crate::track_previews::kept(mods, &l.id).is_none() && !crate::track_previews::own(mods, &l.id).is_file() {
+        tell(format!("Taking a picture of {}", l.name));
+    }
+    match crate::track_previews::bake(mods, &l.id, exe.as_deref()) {
+        Ok(true) => println!("store: {}'s picture baked into {}", l.id, crate::track_previews::OWN),
+        Ok(false) => {}
+        Err(why) => println!("store: {} goes up with no picture: {why}", l.id),
+    }
 }
 
 /// The browser has no mods of the player's own to upload.

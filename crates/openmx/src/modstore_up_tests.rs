@@ -734,6 +734,38 @@ fn a_made_world_goes_up_and_comes_back_a_world() {
     let _ = std::fs::remove_dir_all(&dir2);
 }
 
+/// P282: a world going up with no picture of its own has the still the shell kept of it baked into its
+/// folder as `previews/track.png`, so the zip carries it and whoever downloads it shoots none; one
+/// with its own keeps it.
+#[test]
+fn an_upload_with_no_picture_carries_one() {
+    let (dir, mods) = scratch("bake");
+    let l = world(&mods, "pic_world", "pic_tile");
+    let still = crate::track_previews::still(&mods, "pic_world");
+    std::fs::create_dir_all(still.parent().unwrap()).unwrap();
+    let png = game_render::png::encode_rgb(16, 9, &[90; 16 * 9 * 3]);
+    std::fs::write(&still, &png).unwrap();
+    let own = crate::track_previews::own(&mods, "pic_world");
+    assert!(!own.exists());
+    let p = package(&mods, &l, "tester").expect("packs");
+    assert_eq!(std::fs::read(&own).unwrap(), png, "baked into the mod's folder");
+    let zip = std::fs::read(mods.join(".upload-pic_world.zip")).unwrap();
+    assert!(zip.windows(crate::track_previews::OWN.len()).any(|w| w == crate::track_previews::OWN.as_bytes()), "and in its zip");
+    assert!(p.preview.is_some());
+    drop(p);
+    // its own is kept as it is, the still not put over it
+    let mine = game_render::png::encode_rgb(4, 4, &[7; 48]);
+    std::fs::write(&own, &mine).unwrap();
+    assert_eq!(crate::track_previews::bake(&mods, "pic_world", None), Ok(false));
+    assert_eq!(std::fs::read(&own).unwrap(), mine);
+    // with no still and none to shoot, none, and nothing half-made left
+    std::fs::remove_file(&own).unwrap();
+    std::fs::remove_file(&still).unwrap();
+    assert!(crate::track_previews::bake(&mods, "pic_world", None).is_err());
+    assert!(!own.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// P241: MX Unleashed's worlds are built off each player's own disc: a copy of one in `tracks/` is
 /// not offered for upload, and nor is the stitcher's `cache/`.
 #[test]

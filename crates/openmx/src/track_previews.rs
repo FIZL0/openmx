@@ -5,8 +5,15 @@
 //! folder, optional), and where it has none the shell takes one: a still of the mod's map with no
 //! HUD, shot by the shell's own binary run headless in the background
 //! ([`still_job`]) and kept in the mods folder's `previews/<id>.v<N>.png`, beside `tracks/`, which the
-//! scan never reads. A still older than the mod's `mod.json` is taken again, and so is one of another
-//! [`STILL_VERSION`].
+//! scan never reads.
+//!
+//! P282: a picture is taken once and kept. A still is never taken again because `mod.json` is newer or
+//! its framing is an older [`STILL_VERSION`]'s ([`kept`]); a world is never shot on the player's
+//! machine (its still is a second whole world loaded beside the ride: on the Deck, world_ultra's took
+//! both down), so a world with no picture of its own is a card with none; no still is shot while a
+//! ride loads or runs ([`Ride`]), and one being shot when a ride starts is stopped and shot again
+//! after it; and one still at a time is shot ([`shoot`]). A mod is meant to arrive with its own
+//! [`OWN`]: the store's upload bakes one into the mod's folder first ([`bake`]).
 //!
 //! Since P166 the still is of the map, not of the rider: the shell's `--overview` draws no bike, rider
 //! or plane, and looks from [`overview`]'s framing, raised and pulled back from the spawn over the
@@ -21,7 +28,10 @@ use game_render::pst::Texture;
 use game_sim::archive::inflate;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Mutex;
+use std::time::Duration;
 
 /// A mod's own picture, inside its folder.
 pub const OWN: &str = "previews/track.png";
@@ -108,14 +118,41 @@ pub fn overview_line(f: &Framing) -> String {
     format!("overview: {}, {}, {}, {}, {}, {}", f.eye[0], f.eye[1], f.eye[2], f.yaw, f.pitch, f.fov)
 }
 
-/// Whether the still of `id` is there and no older than its `mod.json`.
-pub fn still_fresh(mods: &Path, id: &str) -> bool {
-    let made = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    match (made(&still(mods, id)), made(&mods.join("tracks").join(id).join("mod.json"))) {
-        (Some(s), Some(j)) => s >= j,
-        (Some(_), None) => true,
-        _ => false,
+/// The still the shell took of `id` before, of this framing or an older one (P282: kept whatever
+/// `mod.json`'s age or the framing's version, never taken again), the newest framing's first.
+pub fn kept(mods: &Path, id: &str) -> Option<PathBuf> {
+    (1..=STILL_VERSION).rev().map(|v| still_of(mods, id, v)).find(|p| p.is_file())
+}
+
+/// Whether `mods/tracks/<id>` is a world: its `mod.json` says `"kind": "world"`.
+fn is_world(mods: &Path, id: &str) -> bool {
+    let Ok(text) = crate::files::read(mods.join("tracks").join(id).join("mod.json")) else { return false };
+    let json = std::str::from_utf8(&text).ok().and_then(|t| crate::track_mods::Json::parse(t).ok());
+    json.and_then(|j| j.get("kind").and_then(crate::track_mods::Json::str).map(|k| k == "world")).unwrap_or(false)
+}
+
+/// How many rides are loading or running now (P282), which no still is shot beside.
+static RIDES: AtomicUsize = AtomicUsize::new(0);
+
+/// A ride loading or running, from [`Ride::on`] until it is dropped: no still is shot meanwhile.
+pub struct Ride(());
+
+impl Ride {
+    pub fn on() -> Ride {
+        RIDES.fetch_add(1, Ordering::SeqCst);
+        Ride(())
     }
+}
+
+impl Drop for Ride {
+    fn drop(&mut self) {
+        RIDES.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a ride is loading or running.
+pub fn riding() -> bool {
+    RIDES.load(Ordering::SeqCst) > 0
 }
 
 /// The picture `id` brings, read through [`crate::files`] (P261: the browser's OPFS `mods/` too): its
@@ -141,7 +178,7 @@ pub fn own_picture(mods: &Path, id: &str) -> Option<PathBuf> {
 
 /// What the pick has for each of `ids` now, `(id, picture)`, and the ids that need a still taken.
 /// A picture that does not read is a line in `log` and no picture. The browser takes no still: a mod
-/// with no picture of its own is a card with none.
+/// with no picture of its own is a card with none; nor is a world shot anywhere (P282).
 pub fn gather(mods: &Path, ids: &[String], log: &mut Vec<String>) -> (Vec<(String, Texture)>, Vec<String>) {
     let (mut have, mut take) = (Vec::new(), Vec::new());
     for id in ids {
@@ -149,8 +186,11 @@ pub fn gather(mods: &Path, ids: &[String], log: &mut Vec<String>) -> (Vec<(Strin
             own
         } else if cfg!(target_arch = "wasm32") {
             continue;
-        } else if still_fresh(mods, id) {
-            still(mods, id)
+        } else if let Some(still) = kept(mods, id) {
+            still
+        } else if is_world(mods, id) {
+            log.push(format!("mods: tracks/{id} has no picture, and a world is not shot here"));
+            continue;
         } else {
             take.push(id.clone());
             continue;
@@ -178,12 +218,22 @@ pub fn still_command(exe: &Path, mods: &Path, id: &str, out: &Path) -> Command {
 }
 
 /// Take a still of each of `ids` in turn, off the menu's thread; each that is taken comes back as
-/// `(id, picture)`, and each that fails as `(id, why)`.
+/// `(id, picture)`, and each that fails as `(id, why)`. None is shot while a ride loads or runs: the
+/// job waits for it, and one a ride stops is shot again after it (P282).
 pub fn still_job(exe: PathBuf, mods: PathBuf, ids: Vec<String>) -> Receiver<(String, Result<Texture, String>)> {
     let (send, hear) = mpsc::channel();
     std::thread::spawn(move || {
         for id in ids {
-            let got = take_still(&exe, &mods, &id);
+            let got = loop {
+                while riding() {
+                    std::thread::sleep(WATCH);
+                }
+                match take_still(&exe, &mods, &id) {
+                    Err(Shot::Ride) => continue,
+                    Err(Shot::Failed(why)) => break Err(why),
+                    Ok(t) => break Ok(t),
+                }
+            };
             if send.send((id, got)).is_err() {
                 return;
             }
@@ -192,23 +242,104 @@ pub fn still_job(exe: PathBuf, mods: PathBuf, ids: Vec<String>) -> Receiver<(Str
     hear
 }
 
-fn take_still(exe: &Path, mods: &Path, id: &str) -> Result<Texture, String> {
+/// How often a still being shot looks for a ride starting.
+const WATCH: Duration = Duration::from_millis(100);
+
+/// One still at a time, the menu's and an upload's alike (P282).
+static SHOOTING: Mutex<()> = Mutex::new(());
+
+/// Why a still was not shot.
+#[derive(Debug, PartialEq)]
+pub enum Shot {
+    /// A ride was loading or started: the still was not shot, or was stopped.
+    Ride,
+    Failed(String),
+}
+
+/// `command` run as one still's shell, alone and never beside a ride: it does not start while a ride
+/// loads or runs, and is killed if one starts.
+pub fn shoot(mut command: Command) -> Result<(), Shot> {
+    let _one = SHOOTING.lock().unwrap_or_else(|e| e.into_inner());
+    if riding() {
+        return Err(Shot::Ride);
+    }
+    let mut child = command.spawn().map_err(|e| Shot::Failed(format!("the shell: {e}")))?;
+    loop {
+        if riding() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Shot::Ride);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(Shot::Failed(format!("the ride over the map did not start ({status})"))),
+            Ok(None) => std::thread::sleep(WATCH),
+            Err(e) => {
+                let _ = child.kill();
+                return Err(Shot::Failed(format!("the shell: {e}")));
+            }
+        }
+    }
+}
+
+fn take_still(exe: &Path, mods: &Path, id: &str) -> Result<Texture, Shot> {
     let dir = mods.join(STILLS_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| Shot::Failed(format!("{}: {e}", dir.display())))?;
     let out = still(mods, id);
     // Shot under another name and moved over, so a half-written still is never read.
     let part = dir.join(format!("{id}.part.png"));
-    let status = still_command(exe, mods, id, &part).status().map_err(|e| format!("the shell: {e}"))?;
-    if !status.success() || !part.is_file() {
+    let shot = shoot(still_command(exe, mods, id, &part));
+    if shot.is_err() || !part.is_file() {
         let _ = std::fs::remove_file(&part);
-        return Err(format!("the ride over the map did not start ({status})"));
+        shot?;
+        return Err(Shot::Failed("the ride over the map wrote no still".into()));
     }
-    std::fs::rename(&part, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+    std::fs::rename(&part, &out).map_err(|e| Shot::Failed(format!("{}: {e}", out.display())))?;
     // The stills of the framings before this one are not read again.
     for v in 1..STILL_VERSION {
         let _ = std::fs::remove_file(still_of(mods, id, v));
     }
-    load(&out)
+    load(&out).map_err(Shot::Failed)
+}
+
+/// P282: `id`'s own [`OWN`] put in its folder if it has none, so the mod carries its picture wherever
+/// it goes (the store's upload, before it packs): the still the shell kept of it, else, where `exe` is
+/// given, one shot now (a track's or a world's: an upload is its maker's own machine; it is not shot
+/// beside a ride, and a ride starting stops it). `Ok(true)` when one was put there, `Ok(false)` when it
+/// had one already.
+pub fn bake(mods: &Path, id: &str, exe: Option<&Path>) -> Result<bool, String> {
+    let own = own(mods, id);
+    if own.is_file() {
+        return Ok(false);
+    }
+    let dir = own.parent().ok_or("no previews folder")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let from = match kept(mods, id) {
+        Some(still) => still,
+        None => {
+            let exe = exe.ok_or("no still of it to bake")?;
+            let part = dir.join("track.part.png");
+            let shot = shoot(still_command(exe, mods, id, &part));
+            if shot.is_err() || !part.is_file() {
+                let _ = std::fs::remove_file(&part);
+                return Err(match shot {
+                    Err(Shot::Ride) => "a ride started, so no still was shot".into(),
+                    Err(Shot::Failed(why)) => why,
+                    Ok(()) => "the ride over the map wrote no still".into(),
+                });
+            }
+            part
+        }
+    };
+    // Checked first: a picture the pick cannot read is not one to carry.
+    load(&from)?;
+    if from.parent() == Some(dir) {
+        std::fs::rename(&from, &own)
+    } else {
+        std::fs::copy(&from, &own).map(|_| ())
+    }
+    .map_err(|e| format!("{}: {e}", own.display()))?;
+    Ok(true)
 }
 
 /// A PNG file as a texture, read through [`crate::files`].
@@ -355,6 +486,95 @@ mod tests {
         assert_eq!(still_of(mods, "a", 1), mods.join("previews/a.png"));
         assert_eq!(still(mods, "a"), mods.join(format!("previews/a.v{STILL_VERSION}.png")));
         assert!(STILL_VERSION > 1);
+    }
+
+    /// A scratch mods folder with `tracks/<id>/mod.json` of `kind` for each of `mods`.
+    fn scratch(name: &str, mods: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("openmx-previews-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (id, kind) in mods {
+            let at = dir.join("tracks").join(id);
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(at.join("mod.json"), format!(r#"{{"standard": 1, "kind": "{kind}", "id": "{id}", "name": "{id}"}}"#)).unwrap();
+        }
+        dir
+    }
+
+    fn picture(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, game_render::png::encode_rgb(4, 4, &[50; 48])).unwrap();
+    }
+
+    /// P282: a picture is taken once and kept. A mod's own and a kept still (of this framing or an
+    /// older one) are shown however much newer its `mod.json` is, and no still is taken of them; a
+    /// world with no picture is shot by no one; only a track with none is.
+    #[test]
+    fn a_picture_is_kept_and_a_world_never_shot() {
+        let mods = scratch("kept", &[("own", "track"), ("shot", "track"), ("old", "track"), ("bare", "track"), ("big", "world"), ("big_shot", "world")]);
+        picture(&own(&mods, "own"));
+        picture(&still(&mods, "shot"));
+        picture(&still_of(&mods, "old", 1));
+        picture(&still(&mods, "big_shot"));
+        // every mod.json written after its picture
+        std::thread::sleep(Duration::from_millis(20));
+        for id in ["own", "shot", "old", "bare", "big", "big_shot"] {
+            let json = mods.join("tracks").join(id).join("mod.json");
+            std::fs::write(&json, std::fs::read(&json).unwrap()).unwrap();
+        }
+        let ids: Vec<String> = ["own", "shot", "old", "bare", "big", "big_shot"].map(String::from).to_vec();
+        let mut log = Vec::new();
+        let (have, take) = gather(&mods, &ids, &mut log);
+        assert_eq!(have.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["own", "shot", "old", "big_shot"], "{log:?}");
+        assert_eq!(take, ["bare"], "only the track with no picture: {log:?}");
+        assert!(log.iter().any(|l| l.contains("tracks/big") && l.contains("world")), "{log:?}");
+        assert_eq!(kept(&mods, "old"), Some(still_of(&mods, "old", 1)));
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    /// P282: no still is shot beside a ride. Picked while a still waits, the ride starts no child, and
+    /// the still is shot after it; a ride starting while one is shot stops that child at once.
+    #[cfg(unix)]
+    #[test]
+    fn no_still_is_shot_beside_a_ride() {
+        use std::os::unix::fs::PermissionsExt;
+        let mods = scratch("ride", &[("t", "track")]);
+        // a stand-in shell: each run leaves a mark, then takes as long as its first word says
+        let (exe, marks) = (mods.join("shell.sh"), mods.join("marks"));
+        std::fs::write(&exe, format!("#!/bin/sh\necho run >> '{}'\nsleep \"$(cat '{}' 2>/dev/null || echo 0)\"\n", marks.display(), mods.join("wait").display())).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runs = || std::fs::read_to_string(&marks).map_or(0, |t| t.lines().count());
+
+        let ride = Ride::on();
+        let job = still_job(exe.clone(), mods.clone(), vec!["t".into()]);
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(runs(), 0, "no child while the ride is on");
+        assert!(job.try_recv().is_err(), "and the still waits for it");
+        drop(ride);
+        let (id, got) = job.recv_timeout(Duration::from_secs(20)).expect("shot after the ride");
+        assert_eq!((id.as_str(), runs()), ("t", 1));
+        assert!(got.is_err(), "the stand-in writes no picture");
+
+        // a ride starting mid-shot kills the child and the still is shot again after the ride
+        std::fs::write(mods.join("wait"), "60").unwrap();
+        let job = still_job(exe.clone(), mods.clone(), vec!["t".into()]);
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        while runs() < 2 {
+            assert!(std::time::Instant::now() < end, "the shot started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ride = Ride::on();
+        let stopped = std::time::Instant::now();
+        let _one = SHOOTING.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(stopped.elapsed() < Duration::from_secs(10), "the child killed, not waited out: {:?}", stopped.elapsed());
+        drop(_one);
+        std::fs::write(mods.join("wait"), "0").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(runs(), 2, "not shot again while the ride is on");
+        drop(ride);
+        let (_, got) = job.recv_timeout(Duration::from_secs(20)).expect("shot after the ride");
+        assert!(got.is_err());
+        assert_eq!(runs(), 3);
+        let _ = std::fs::remove_dir_all(&mods);
     }
 
     #[test]

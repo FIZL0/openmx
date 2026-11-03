@@ -479,8 +479,8 @@ fn a_one_level_terrain_is_256_samples_a_side() {
 
 /// P70: a custom track's card picture. A mod's own `previews/track.png` is its picture; one without
 /// gets a still of its map, which the shell's own binary takes headless — from over the scene's
-/// start since P166 — and keeps beside `tracks/` for the next time, taken again once the mod
-/// changes; a picture that does not read is one line and no picture.
+/// start since P166 — and keeps beside `tracks/` for good: since P282 a change of the mod does not
+/// take it again; a picture that does not read is one line and no picture.
 #[test]
 fn a_custom_track_shows_its_own_picture_or_a_still_from_its_spawn() {
     if let Err(e) = game_render::disc::Disc::open_configured() {
@@ -525,21 +525,21 @@ fn a_custom_track_shows_its_own_picture_or_a_still_from_its_spawn() {
     let (have, take) = track_previews::gather(&mods, &ids, &mut Vec::new());
     assert!(take.is_empty());
     assert_eq!(have.iter().find(|(i, _)| i == "p70_spawn").map(|(_, t)| t.rgba == still.rgba), Some(true));
-    // Until the mod changes.
+    // Even once the mod changes (P282: a picture is kept, never taken again).
     std::thread::sleep(std::time::Duration::from_millis(20));
     write(&tracks.join("p70_spawn"), "mod.json", mod_json("p70_spawn"));
-    let (_, take) = track_previews::gather(&mods, &ids, &mut Vec::new());
-    assert_eq!(take, ["p70_spawn"]);
+    let (have, take) = track_previews::gather(&mods, &ids, &mut Vec::new());
+    assert!(take.is_empty() && have.iter().any(|(i, _)| i == "p70_spawn"), "{take:?}");
     // And a mod whose ride does not start is no still, not a crash.
     std::fs::remove_file(tracks.join("p70_spawn/Env/MDFLAT/MDFLAT.ps2.trn")).unwrap();
-    let hear = track_previews::still_job(env!("CARGO_BIN_EXE_openmx").into(), mods.clone(), take);
+    let hear = track_previews::still_job(env!("CARGO_BIN_EXE_openmx").into(), mods.clone(), vec!["p70_spawn".into()]);
     let (_, got) = hear.recv_timeout(std::time::Duration::from_secs(120)).expect("the still job answers");
     assert!(got.is_err());
 }
 
-/// P166: the still of a mod map is of the map. A still from the P70 days (`<id>.png`, newer than
-/// its `mod.json`) is of another framing and is taken again, under the new version's name, and the
-/// old one goes. The shell's `--overview` looks from [`track_previews::overview`]'s framing of the
+/// P166: the still of a mod map is of the map. A still from the P70 days (`<id>.png`) is of another
+/// framing and, since P282, is kept as the card's picture rather than taken again; one that is taken
+/// is under the new version's name, and the old one goes. The shell's `--overview` looks from [`track_previews::overview`]'s framing of the
 /// map's spawn and ground, and draws no bike and no rider: from one pose, the picture over the
 /// spawn with `--overview` is the picture of the same ground with the bike started far behind the
 /// camera, pixel for pixel, and the picture without `--overview` is not.
@@ -560,8 +560,8 @@ fn a_mod_maps_still_is_of_the_map_with_no_rider() {
     assert_ne!(track_previews::still(&mods, "p166_flat"), old, "the new framing's still has a name of its own");
     let ids = vec!["p166_flat".to_string()];
     let (have, take) = track_previews::gather(&mods, &ids, &mut Vec::new());
-    assert!(have.is_empty() && take == ids, "an old framing's still is taken again, fresh as it is");
-    let hear = track_previews::still_job(env!("CARGO_BIN_EXE_openmx").into(), mods.clone(), take);
+    assert!(have.len() == 1 && take.is_empty(), "an old framing's still is kept (P282)");
+    let hear = track_previews::still_job(env!("CARGO_BIN_EXE_openmx").into(), mods.clone(), ids.clone());
     let (_, got) = hear.recv_timeout(std::time::Duration::from_secs(120)).expect("the still job answers");
     let still = got.expect("a still over the map");
     assert_eq!((still.width, still.height), track_previews::STILL_SIZE);

@@ -2965,7 +2965,10 @@ async fn front_end(args: Args) -> Result<(), String> {
                     apply_picks(&mut a, &picks);
                 }
                 shell.front.note_clear();
+                // No still of a mod's map is shot beside the ride, loading or running (P282).
+                let ride_on = track_previews::Ride::on();
                 let left = ride(a, Some(&mut shell)).await;
+                drop(ride_on);
                 shell.front.menu.loading = None;
                 match left {
                     Ok(Leave::Restart) => continue,
@@ -3048,7 +3051,10 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.shot = None;
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
                 shell.front.note_clear();
+                // No still of a mod's map is shot beside the ride, loading or running (P282).
+                let ride_on = track_previews::Ride::on();
                 let left = ride(a, Some(&mut shell)).await;
+                drop(ride_on);
                 shell.front.menu.loading = None;
                 match left {
                     Ok(Leave::Quit) => return Ok(()),
