@@ -16,7 +16,7 @@
 //! rather than the cases play produces: `±0`, both ends of the denormal range, the smallest normal,
 //! `±MAX`, the Inf and NaN bit patterns the EE does not have, powers of two, uniformly random 32-bit
 //! patterns — and, for the adder, *pairs* with a chosen exponent difference, because the EE's one guard
-//! bit makes a difference of 0, 24, 25 and 26 four different instructions (see [`ps2_float::fpu::align`]).
+//! bit makes a difference of 0, 24, 25 and 26 four different instructions (see [`ps2_float::fpu::align_keep`]).
 //! Ordinary gameplay values exercise none of that, which is exactly why a port can drift for a day of
 //! play before anyone notices.
 //!

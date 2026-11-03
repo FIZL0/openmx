@@ -361,8 +361,58 @@ fn the_q_register_is_written_by_the_divider_and_read_by_the_dot_q_forms() {
     assert!(vu.status.div_by_zero());
 }
 
+/// F17: the VU lane functions as they were written before F17, branches and all — the reference the
+/// branch-free ones (the scalar `vu::add`, `mul`, … and [`Vf`]'s four-lane forms, which share one lane
+/// kernel since F17) are checked against. The original's own `vadd`/`vmul` carriers check the same
+/// functions in `tests/oracle.rs`.
+#[cfg(not(feature = "native"))]
+#[allow(clippy::float_arithmetic)]
+mod reference {
+    fn daz(x: f32) -> f32 {
+        if x.is_subnormal() { if x.is_sign_negative() { -0.0 } else { 0.0 } } else { x }
+    }
+    fn vu(x: f32) -> f32 {
+        if x.is_finite() { daz(x) } else { ps2_float::vu::operand(x.to_bits()) }
+    }
+    fn chop(x: f64) -> f32 {
+        if !x.is_finite() {
+            return if x.is_sign_negative() { -ps2_float::vu::MAX } else { ps2_float::vu::MAX };
+        }
+        let r = x as f32;
+        daz(if (r as f64).abs() > x.abs() { f32::from_bits(r.to_bits().wrapping_sub(1)) } else { r })
+    }
+    pub fn add(a: f32, b: f32) -> f32 {
+        let (a, b) = (vu(a) as f64, vu(b) as f64);
+        let s = a + b;
+        if !s.is_finite() {
+            return if s.is_sign_negative() { -ps2_float::vu::MAX } else { ps2_float::vu::MAX };
+        }
+        let bb = s - a;
+        let e = (a - (s - bb)) + (b - bb);
+        let r = s as f32;
+        let over = (r as f64 - s) - e;
+        if over != 0.0 && r != 0.0 && (over > 0.0) == (r > 0.0) {
+            daz(f32::from_bits(r.to_bits().wrapping_sub(1)))
+        } else {
+            daz(r)
+        }
+    }
+    pub fn sub(a: f32, b: f32) -> f32 {
+        add(a, f32::from_bits(b.to_bits() ^ 0x8000_0000))
+    }
+    pub fn mul(a: f32, b: f32) -> f32 {
+        chop(vu(a) as f64 * vu(b) as f64)
+    }
+    pub fn madd(acc: f32, a: f32, b: f32) -> f32 {
+        add(acc, mul(a, b))
+    }
+    pub fn msub(acc: f32, a: f32, b: f32) -> f32 {
+        sub(acc, mul(a, b))
+    }
+}
+
 /// F15a: [`Vf`]'s four-lane add, sub, mul, madd and msub (and the `Q` and cross-product forms built on
-/// them) give the scalar lane functions' bits, every lane, on every class of input: random patterns
+/// them) give the lane functions' bits ([`reference`]'s since F17), every lane, on every class of input: random patterns
 /// (NaN, infinity and denormal ones too), near cancellations, exponents far apart, and the ends of the
 /// range. The lanes are drawn independently, so a lane mask that leaked into its neighbour would show.
 #[test]
@@ -417,18 +467,48 @@ fn the_four_lane_ops_are_the_lane_functions_bit_for_bit() {
         let b = rng.vf(a);
         let c = rng.vf(vu::mul4(a.0, b.0).into());
         let q = rng.lane(a.x());
-        assert_eq!(bits(a.add(b)), bits(lanes2(a, b, vu::add)), "add {a:?} {b:?}");
-        assert_eq!(bits(a.sub(b)), bits(lanes2(a, b, vu::sub)), "sub {a:?} {b:?}");
-        assert_eq!(bits(a.mul(b)), bits(lanes2(a, b, vu::mul)), "mul {a:?} {b:?}");
-        assert_eq!(bits(Vf::madd(c, a, b)), bits(lanes3(c, a, b, vu::madd)), "madd {c:?} {a:?} {b:?}");
-        assert_eq!(bits(Vf::msub(c, a, b)), bits(lanes3(c, a, b, vu::msub)), "msub {c:?} {a:?} {b:?}");
-        assert_eq!(bits(a.mul_q(q)), bits(lanes2(a, Vf::splat(q), vu::mul)), "mul_q {a:?} {q:?}");
-        assert_eq!(bits(a.add_q(q)), bits(lanes2(a, Vf::splat(q), vu::add)), "add_q {a:?} {q:?}");
+        assert_eq!(bits(a.add(b)), bits(lanes2(a, b, reference::add)), "add {a:?} {b:?}");
+        assert_eq!(bits(a.sub(b)), bits(lanes2(a, b, reference::sub)), "sub {a:?} {b:?}");
+        assert_eq!(bits(a.mul(b)), bits(lanes2(a, b, reference::mul)), "mul {a:?} {b:?}");
+        assert_eq!(bits(Vf::madd(c, a, b)), bits(lanes3(c, a, b, reference::madd)), "madd {c:?} {a:?} {b:?}");
+        assert_eq!(bits(Vf::msub(c, a, b)), bits(lanes3(c, a, b, reference::msub)), "msub {c:?} {a:?} {b:?}");
+        assert_eq!(bits(a.mul_q(q)), bits(lanes2(a, Vf::splat(q), reference::mul)), "mul_q {a:?} {q:?}");
+        assert_eq!(bits(a.add_q(q)), bits(lanes2(a, Vf::splat(q), reference::add)), "add_q {a:?} {q:?}");
         let (x, y) = (a.0, b.0);
-        let op = [vu::mul(x[1], y[2]), vu::mul(x[2], y[0]), vu::mul(x[0], y[1]), 0.0];
+        let op = [reference::mul(x[1], y[2]), reference::mul(x[2], y[0]), reference::mul(x[0], y[1]), 0.0];
         assert_eq!(bits(Vf::opmula(a, b)), op.map(f32::to_bits), "opmula {a:?} {b:?}");
         let c = c.0;
-        let om = [vu::msub(c[0], x[1], y[2]), vu::msub(c[1], x[2], y[0]), vu::msub(c[2], x[0], y[1]), c[3]];
+        let om = [reference::msub(c[0], x[1], y[2]), reference::msub(c[1], x[2], y[0]), reference::msub(c[2], x[0], y[1]), c[3]];
         assert_eq!(bits(Vf::opmsub(Vf(c), a, b)), om.map(f32::to_bits), "opmsub {c:?} {a:?} {b:?}");
+
+        // F17: the scalar functions and `Lane` are the same lane kernel, one lane at a time
+        for i in 0..4 {
+            let (x, y, z) = (a.0[i], b.0[i], c[i]);
+            let pairs = [
+                ("add", vu::add(x, y), reference::add(x, y)),
+                ("sub", vu::sub(x, y), reference::sub(x, y)),
+                ("mul", vu::mul(x, y), reference::mul(x, y)),
+                ("madd", vu::madd(z, x, y), reference::madd(z, x, y)),
+                ("msub", vu::msub(z, x, y), reference::msub(z, x, y)),
+                ("Lane +", (Lane(x) + y).0, reference::add(x, y)),
+                ("Lane -", (Lane(x) - y).0, reference::sub(x, y)),
+                ("Lane *", (Lane(x) * y).0, reference::mul(x, y)),
+                ("Lane madd", Lane(z).madd(x, y).0, reference::madd(z, x, y)),
+                ("Lane msub", Lane(z).msub(x, y).0, reference::msub(z, x, y)),
+            ];
+            for (name, got, want) in pairs {
+                assert_eq!(got.to_bits(), want.to_bits(), "{name} {z:?} {x:?} {y:?}");
+            }
+        }
+        // F17: an operand whose sign the compiler knows. Before `vu_bits` took its magnitude by a shift,
+        // inlining a `sub` of one into a caller let LLVM's x86 backend drop the clamp (vu.rs, `vu_bits`).
+        let (pos, neg) = (b.abs(), Vf(b.0.map(|y| f32::from_bits(y.to_bits() | 0x8000_0000))));
+        assert_eq!(bits(a.sub(pos)), bits(lanes2(a, pos, reference::sub)), "sub of |b| {a:?} {b:?}");
+        assert_eq!(bits(a.add(neg)), bits(lanes2(a, neg, reference::add)), "add of -|b| {a:?} {b:?}");
+        for i in 0..4 {
+            let (x, p, n) = (a.0[i], pos.0[i], neg.0[i]);
+            assert_eq!(vu::sub(x, p).to_bits(), reference::sub(x, p).to_bits(), "sub of |y| {x:?} {p:?}");
+            assert_eq!(vu::add(x, n).to_bits(), reference::add(x, n).to_bits(), "add of -|y| {x:?} {n:?}");
+        }
     }
 }
