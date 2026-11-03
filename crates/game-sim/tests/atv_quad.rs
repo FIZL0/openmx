@@ -3047,13 +3047,13 @@ const GROUND_QUERY: u32 = 0x0048_33c0;
 const SURFACE_DRAG: u32 = 0x004a_1ec0;
 const SPIN_INTEGRATE: u32 = 0x004a_2040;
 /// The words the steps write past [`REGIONS`]: the engine's clutch multiplier (`+0x7c`), and each
-/// wheel's steering rate (`+0x8b0`) and axis (`+0x8c0`).
+/// wheel's steering rate (`+0x8b0`) and axis (`+0x8c0`), and (MD75) its contact frame (`+0x8d0`).
 const MORE_REGIONS: [(&str, u32, u32); 6] = [
     ("engine", ENGINE, 0x1c0),
-    ("left front's steering", 0x01c0_88b0, 0x20),
-    ("right front's steering", 0x01c0_98b0, 0x20),
-    ("left rear's steering", 0x01c0_a8b0, 0x20),
-    ("right rear's steering", 0x01c0_b8b0, 0x20),
+    ("left front's steering", 0x01c0_88b0, 0x60),
+    ("right front's steering", 0x01c0_98b0, 0x60),
+    ("left rear's steering", 0x01c0_a8b0, 0x60),
+    ("right rear's steering", 0x01c0_b8b0, 0x60),
     ("scene", SCENE, 0x200 * SCENE_NODES as u32),
 ];
 /// MD75b1: the scene graph a ride's quad node can be in (node `i` at `SCENE + 0x200·i`), and the
@@ -3391,10 +3391,12 @@ impl Gen {
             ground: [game_sim::atv_wheel::Ground::Still; 4],
             cofg: self.vec(-0.5, 0.5),
             parts: game_sim::atv_moto::Parts::default(),
+            spins: Default::default(),
         };
         let _: &[wheel::Wheel; 4] = &bike.wheels;
         let mut r = Ride { s, bike, gate, class, high: (self.bits() & 0xf) as u8, tag: self.bits(), answers, echo: self.one_in(8), scene: false };
         self.md75b(&mut r);
+        self.md75(&mut r);
         r
     }
 
@@ -3533,6 +3535,7 @@ impl Gen {
 /// The quad state, then the bike's own words over it (the words the quad keeps too are the quad's,
 /// written by [`poke`]).
 fn poke_ride(ee: &mut Ee, r: &Ride) {
+    poke_spins(ee, &r.bike);
     poke(ee, &r.s);
     let b = &r.bike;
     let (h, j) = (&b.held, &b.joystick);
@@ -3819,6 +3822,8 @@ fn address_of(c: &Call) -> u32 {
         Call::SpinAir(_) => SPIN_AIR,
         Call::VehiclePost(_) => VEHICLE_POST,
         Call::NodePosition => NODE_POSITION,
+        Call::SurfaceDrag(..) => SURFACE_DRAG,
+        Call::SpinIntegrate(..) => SPIN_INTEGRATE,
         _ => 0,
     }
 }
@@ -4328,14 +4333,14 @@ fn the_quads_wheel_integrate_is_the_wheels() {
         }
         r.s.q.wheels.iter().map(|w| if !w.steered { "not steered" } else if !w.balancing { "held" } else { "free" }).collect()
     };
-    each_unhooked(0x0075_a009, 5_000, false, &[WHEEL_INTEGRATE], |_, _| {}, paths, &["off", "not steered", "held", "free"], 30);
+    each_unhooked(0x0075_a009, 5_000, false, &[WHEEL_INTEGRATE, SURFACE_DRAG, SPIN_INTEGRATE], |_, _| {}, paths, &["off", "not steered", "held", "free"], 30);
 }
 
 /// All six of the Force body's ported calls at once: the original's own code for each, the port's
 /// [`quad::Steps`] for each, one after the other on the same quad.
 #[test]
 fn the_quads_force_body_runs_the_bikes_steps() {
-    let picks = [PRELOAD, BACKFLIP, AIRBORNE_CONTROL, SUSPENSION, TIRE_FORCES, WHEEL_INTEGRATE];
+    let picks = [PRELOAD, BACKFLIP, AIRBORNE_CONTROL, SUSPENSION, TIRE_FORCES, WHEEL_INTEGRATE, SURFACE_DRAG, SPIN_INTEGRATE];
     let paths = |r: &Ride| vec![preload_path(r), backflip_path(r)];
     let want = ["off", "firing", "armed", "fired", "arming", "triggered", "turning", "ended", "cue posted", "stunt started"];
     each_unhooked(0x0075_a00a, 5_000, false, &picks, turning_flip, paths, &want, 15);
@@ -4565,7 +4570,7 @@ fn the_quads_head_and_tail_are_the_originals() {
 /// The Force body with every ported call at once: MD75a's and MD75b's.
 #[test]
 fn the_quads_force_body_runs_every_ported_step() {
-    let picks = [GRAVITY, PRELOAD, BACKFLIP, ENGINE_UPDATE, AIR_DRAG, AIRBORNE_CONTROL, WHEEL_CLEAR, SUSPENSION, TIRE_FORCES, WHEEL_INTEGRATE, REV_LIMIT, PEAK_RATES];
+    let picks = [GRAVITY, PRELOAD, BACKFLIP, ENGINE_UPDATE, AIR_DRAG, AIRBORNE_CONTROL, WHEEL_CLEAR, SUSPENSION, TIRE_FORCES, WHEEL_INTEGRATE, SURFACE_DRAG, SPIN_INTEGRATE, REV_LIMIT, PEAK_RATES];
     let want = ["off", "stays locked", "unlocks", "locks up", "slips", "cue posted", "stunt started"];
     each_unhooked(0x0075_b009, 5_000, false, &picks, turning_flip, engine_paths, &want, 15);
 }
@@ -5630,3 +5635,130 @@ fn the_quads_ground_settle_is_the_originals() {
     }
     each_path_seen(&t, &["all four hit", "a wheel missed"], 1000);
 }
+
+// MD75: the wheel integrate's two steps, the surface drag and the spin, ported in atv_wheel.rs and
+// answered in quad::Steps.
+
+/// Each wheel's partner (its `+0xbc`), as the image's quad has them: front with rear on each side.
+const PARTNER: [usize; 4] = [2, 3, 0, 1];
+
+impl Gen {
+    fn tire_surface(&mut self) -> quad::TireSurface {
+        let mut drive = [F::ZERO; 8];
+        for (k, d) in drive.iter_mut().enumerate() {
+            *d = match k {
+                2 if self.one_in(10) => self.f(-1.0, 0.0),
+                0 | 1 => self.f(0.1, 3.0),
+                _ => self.f(0.05, 2.0),
+            };
+        }
+        let mut side = [F::ZERO; 13];
+        for (k, v) in side.iter_mut().enumerate() {
+            *v = match k % 4 {
+                0 if k < 12 => self.f(0.01, 1.0),
+                1 if k < 12 => self.f(0.3, 3.0),
+                _ => self.f(0.1, 3.0),
+            };
+        }
+        quad::TireSurface { drive, side, drag: [self.f(0.0, 3000.0), self.f(0.0, 300.0), self.f(0.0, 2.0)] }
+    }
+
+    /// The spin step's words of each wheel that are its own (the rest are the drive's and the quad's
+    /// wheel's, which [`poke_ride`] writes after), and a surface record the tables have.
+    fn md75(&mut self, r: &mut Ride) {
+        // The record a ground query hands back is the surface the tables are read at.
+        for (_, _, record) in &mut r.answers {
+            if let Some(v) = record {
+                *v %= 16;
+            }
+        }
+        for (s, x) in r.bike.spins.iter_mut().zip(&mut r.bike.more) {
+            x.record %= 16;
+            let mut surfaces = [quad::TireSurface::default(); 16];
+            for t in &mut surfaces {
+                *t = self.tire_surface();
+            }
+            *s = game_sim::atv_wheel::Spin {
+                brake: Some(F::ZERO),
+                parametric: if self.b() { 0 } else { 1 + (self.bits() % 3) as i32 },
+                inv_inertia: self.f(0.1, 2.0),
+                tire_inertia: self.f(0.1, 5.0),
+                arm: self.vec(-2.0, 2.0),
+                no_moment: i32::from(self.one_in(4)),
+                other_load_scale: self.f(0.5, 1.5),
+                slip: game_sim::tire::Slip { spinning: false, locked: self.one_in(3), sliding: self.b() },
+                angle: self.f(-3.2, 3.2),
+                cleared: [self.f(-1.0, 1.0), self.f(-1.0, 1.0)],
+                side_per_load: self.f(-1.0, 1.0),
+                surfaces,
+                local_velocity: self.vec(-5.0, 5.0),
+                local_force: self.vec(-500.0, 500.0),
+                frame: [self.normal(), self.normal(), self.normal(), self.vec(-1.0, 1.0)],
+                ..Default::default()
+            };
+        }
+    }
+}
+
+/// [`Gen::md75`]'s words, and each wheel's brake lever (the quad's front or rear brake) and partner.
+fn poke_spins(ee: &mut Ee, b: &quad::Bike) {
+    for (i, (s, &at)) in b.spins.iter().zip(&WHEEL).enumerate() {
+        ee.set_u32(at + 0x24, OBJ + if i < 2 { 0x12cc } else { 0x12d0 });
+        ee.set_u32(at + 0xbc, WHEEL[PARTNER[i]]);
+        ee.set_u32(at + 0x34, s.parametric as u32);
+        put_f(ee, at + 0x58, s.inv_inertia);
+        put_f(ee, at + 0x5c, s.tire_inertia);
+        put_v(ee, at + 0xa0, s.arm);
+        ee.set_u32(at + 0xb0, s.no_moment as u32);
+        put_f(ee, at + 0xb8, s.other_load_scale);
+        put_b(ee, at + 0xe4, s.slip.locked);
+        put_b(ee, at + 0xe8, s.slip.sliding);
+        put_f(ee, at + 0x1d0, s.angle);
+        put_f(ee, at + 0x224, s.cleared[0]);
+        put_f(ee, at + 0x228, s.cleared[1]);
+        put_f(ee, at + 0x234, s.side_per_load);
+        for (k, t) in s.surfaces.iter().enumerate() {
+            for (j, &v) in t.drive.iter().chain(&t.side).chain(&t.drag).enumerate() {
+                put_f(ee, at + 0x238 + 0x40 * j as u32 + 4 * k as u32, v);
+            }
+        }
+        put_v(ee, at + 0x840, s.local_velocity);
+        put_v(ee, at + 0x850, s.local_force);
+        for (k, &v) in s.frame.iter().enumerate() {
+            put_v(ee, at + 0x8d0 + 0x10 * k as u32, v);
+        }
+    }
+}
+
+/// Each wheel's way through the spin step, read off the ride as the Force body is entered.
+fn wheel_spin_paths(r: &Ride) -> Vec<&'static str> {
+    if !on(r) {
+        return vec!["off"];
+    }
+    let q = &r.s.q;
+    (0..4)
+        .map(|i| {
+            let (w, o) = (&q.wheels[i], &q.wheels[PARTNER[i]]);
+            if !w.touching && !o.touching {
+                "neither down"
+            } else if !w.touching && w.rear_pair {
+                "borrows the partner's load"
+            } else if w.steered && w.balancing {
+                "into the hinge"
+            } else {
+                "into the body"
+            }
+        })
+        .collect()
+}
+
+/// The wheel integrate with its surface drag and spin unhooked: the original's three, the port's
+/// [`quad::Steps`] for each. (The steps run the two inline under the wheel integrate, so they are
+/// unhooked wherever it is.)
+#[test]
+fn the_quads_wheel_spin_is_the_originals() {
+    let picks = [WHEEL_INTEGRATE, SURFACE_DRAG, SPIN_INTEGRATE];
+    let want = ["off", "neither down", "borrows the partner's load", "into the hinge", "into the body"];
+    each_unhooked(0x0075_0001, 10_000, false, &picks, |_, _| {}, wheel_spin_paths, &want, 100);
+}
+

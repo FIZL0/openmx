@@ -1787,6 +1787,11 @@ pub struct Bike {
     pub more: [crate::atv_wheel::More; 4],
     pub ground: [crate::atv_wheel::Ground; 4],
     pub cofg: Vf,
+    /// MD75's: the words of each wheel the wheel integrate's surface drag and spin read and keep
+    /// ([`crate::atv_wheel::Spin`]). Its spin, torque, spinning flag and forward force are
+    /// [`crate::atv_moto::Parts::drive`]'s and its rear-pair flag, donut and `1/r` [`Wheel`]'s, which
+    /// the steps copy in and back; its brake is [`Quad::front_brake`] or [`Quad::rear_brake`].
+    pub spins: [crate::atv_wheel::Spin; 4],
     /// MD75b's ([`crate::atv_moto`]): the engine's wheels, the control-off pose, the body's last
     /// position and enabled word, the quad's flag byte and record. The gearbox's shift points, the
     /// head and tail's poses and travels and the drag are [`Bike::clutch_keys`]', the engine's state
@@ -1794,14 +1799,26 @@ pub struct Bike {
     pub parts: crate::atv_moto::Parts,
 }
 
+/// The other wheel of each wheel's pair (its `+0xbc`): the left front and left rear, the right front
+/// and right rear.
+const PARTNER: [usize; 4] = [2, 3, 0, 1];
+
+/// The engine's sine and cosine table, which the spin step's contact frame turns the steering by:
+/// built once, as the startup code builds it.
+fn curve() -> &'static crate::camera::CurveTable {
+    static CURVE: std::sync::OnceLock<crate::camera::CurveTable> = std::sync::OnceLock::new();
+    CURVE.get_or_init(crate::camera::CurveTable::build)
+}
+
 /// **The quad's [`Moto`] with SLUS-21104's bike steps ported**: the input limiter and clutch
 /// ([`crate::handling::step`]), the preload, backflip and airborne control ([`crate::handling`]),
 /// each wheel's suspension and tire forces ([`crate::atv_wheel`], whose contact velocity and hinge
-/// force [`crate::atv_wheel::run`] answers) and its integrate's steering hinge, run on the quad's
-/// fields through [`Bike`].
+/// force [`crate::atv_wheel::run`] answers) and its integrate: the surface drag, the spin (MD75,
+/// [`crate::atv_wheel::spin_integrate`]) and the steering hinge, run on the quad's fields through
+/// [`Bike`].
 ///
 /// Every other call, and what those steps call in turn and is not ported (the stunt's start and end,
-/// the wreck, the preload's cue, the wheels' surface drag and spin), goes to `rest` in the original's
+/// the wreck, the preload's cue), goes to `rest` in the original's
 /// order. `ground` is the world's ground query the suspension asks (the probe's end and the wheel's
 /// contact record in, the point on the ground and its normal out; on Desert Oasis,
 /// [`crate::atv_ground::Terrain::ground`]). The stunt start always answers yes, as SLUS-21104's does.
@@ -1853,12 +1870,38 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
                 self.wheel_out(q, body, &mut wb, i);
             }
             Call::WheelIntegrate(i, dt) => {
-                self.rest.call(Call::SurfaceDrag(i, dt), q, body);
-                self.rest.call(Call::SpinIntegrate(i, dt), q, body);
+                self.call(Call::SurfaceDrag(i, dt), q, body);
+                self.call(Call::SpinIntegrate(i, dt), q, body);
                 self.wheel_in(q, i);
                 let calls = crate::handling::step::wheel_integrate(&mut self.bike.wheels[i], dt);
                 debug_assert_eq!(calls, [crate::wheel::Call::SurfaceDrag(dt), crate::wheel::Call::SpinIntegrate(dt)]);
                 let mut wb = self.wheel_body(body);
+                self.wheel_out(q, body, &mut wb, i);
+            }
+            Call::SurfaceDrag(i, _) => {
+                self.wheel_in(q, i);
+                self.spin_in(q, i);
+                let mut wb = self.wheel_body(body);
+                let b = &mut self.bike;
+                crate::atv_wheel::surface_drag(&b.wheels[i], &b.more[i], &mut b.spins[i], &mut wb);
+                self.spin_out(q, i);
+                self.wheel_out(q, body, &mut wb, i);
+            }
+            Call::SpinIntegrate(i, dt) => {
+                self.wheel_in(q, i);
+                self.spin_in(q, i);
+                let mut wb = self.wheel_body(body);
+                let b = &mut self.bike;
+                let j = PARTNER[i];
+                let other = crate::atv_wheel::Other {
+                    contact: q.wheels[j].touching,
+                    spring_force: b.wheels[j].spring_force,
+                    ground: b.ground[j],
+                };
+                let Bike { wheels, more, spins, ground, .. } = b;
+                crate::atv_wheel::spin_integrate(&mut wheels[i], &mut more[i], &mut spins[i], &mut wb, dt, &other,
+                    &mut ground[i], curve());
+                self.spin_out(q, i);
                 self.wheel_out(q, body, &mut wb, i);
             }
             Call::AutoShift { inv_radius, .. } => {
@@ -2020,6 +2063,22 @@ impl<R: Moto, G> Steps<R, G> {
         (w.steered, w.balancing, w.contact, w.contact_normal) = (qw.steered, qw.balancing, qw.touching, qw.normal);
         (w.max_steer_angle, w.steer_angle, w.spring_rate) = (qw.max_steer_angle, qw.steer_command, qw.spring);
         x.chassis_velocity_local = qw.contact_vel;
+    }
+
+    /// The wheel integrate's words [`Bike::spins`] shares with the drive and the quad's wheel, and
+    /// its brake lever.
+    fn spin_in(&mut self, q: &Quad, i: usize) {
+        let (s, d, qw) = (&mut self.bike.spins[i], &self.bike.parts.drive[i], &q.wheels[i]);
+        (s.spin, s.torque, s.slip.spinning) = (d.spin, d.torque, d.from_torque);
+        s.local_force.0[2] = d.forward.0;
+        (s.rear_pair, s.donut, s.inv_radius) = (i32::from(qw.rear_pair), qw.donut, qw.inv_radius);
+        s.brake = Some(if i < 2 { q.front_brake } else { q.rear_brake });
+    }
+
+    fn spin_out(&mut self, q: &mut Quad, i: usize) {
+        let (s, d, qw) = (&self.bike.spins[i], &mut self.bike.parts.drive[i], &mut q.wheels[i]);
+        (d.spin, d.torque, d.from_torque, d.forward) = (s.spin, s.torque, s.slip.spinning, F(s.local_force.z()));
+        (qw.rear_pair, qw.donut, qw.inv_radius) = (s.rear_pair != 0, s.donut, s.inv_radius);
     }
 
     fn wheel_body(&self, body: &Body) -> crate::atv_wheel::Body {
