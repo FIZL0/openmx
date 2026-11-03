@@ -194,7 +194,7 @@ fn a_car_on_the_gas_dusts() {
 
 /// The shell, headless as a user would ride it, on a hand-written tape of full throttle that switches
 /// into free09's monster truck at tick 30 and stays in it: each car's list loads with only its tire
-/// tracks left out, and the truck ends the ride with its four tires' dust in the air.
+/// tracks left to the tire tracks, and the truck ends the ride with its four tires' dust in the air.
 #[test]
 fn the_shell_dusts_a_driven_car() {
     if game_render::Disc::open_configured().is_err() {
@@ -224,7 +224,7 @@ fn the_shell_dusts_a_driven_car() {
 
     for (dir, list) in [("buggy", "buggyparticles.dat"), ("monstertruck", "monsterparticles.dat"), ("baja", "bajaparticles.dat")] {
         let line = said.lines().find(|l| l.starts_with(&format!("car: {dir}: particles: "))).unwrap_or_else(|| panic!("no {dir} particles:\n{said}"));
-        assert!(line.contains(list) && line.contains("4 not run (Front Left Tire Track, Front Right Tire Track, Rear Left Tire Track, Rear Right Tire Track)"), "{line}");
+        assert!(line.contains(list) && line.contains("4 laid by the tire tracks (Front Left Tire Track, Front Right Tire Track, Rear Left Tire Track, Rear Right Tire Track); 0 not run"), "{line}");
     }
     let left = said.lines().rev().find(|l| l.starts_with("car: particles: ")).unwrap_or_else(|| panic!("no particles at the end:\n{said}"));
     println!("{left}");

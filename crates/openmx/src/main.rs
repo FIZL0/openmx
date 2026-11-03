@@ -6172,6 +6172,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The bike's tire tracks (V40): the track's `TireTrack` entries and their tread, drawn as glows
     // after the portals' pictures, one set of strips a seat.
     let tread = load_tire_tracks(&archives);
+    // The cars' (S269): each car's list's four, on the same tread. A seat keeps one set a car, so the
+    // marks a car left stay when the seat changes machine.
+    let car_tread: Vec<(Machine, Vec<tire_tracks::Params>)> = load_car_tire_tracks(&archives, &garage.cars);
+    let mut car_marks: Vec<Vec<tire_tracks::Tracks>> = Vec::new();
     let mut glow_list: Vec<game_render::pst::Texture> = portal_art
         .as_ref()
         .map(|a| a.textures.clone())
@@ -8054,6 +8058,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // the ride and write nothing back. None under `--overview` (P166).
         if simulated && !args.overview && let Some((list, _)) = &tread {
             step_tire_marks(&mut tire_marks, list, &world.seats);
+            step_car_tire_marks(&mut car_marks, &car_tread, &world.seats);
         }
         if simulated {
             traffic_time += f64::from(dt.0);
@@ -8995,7 +9000,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         };
         // The tire tracks (V40), every seat's in every view, laid under the portals.
         if let Some(texture) = tread_texture {
-            let marks = tire_mark_glow(&tire_marks, texture);
+            let mut marks = tire_mark_glow(&tire_marks, texture);
+            marks.tris.extend(car_marks.iter().flat_map(|m| tire_mark_glow(m, texture).tris));
             glows.resize_with(world.seats.len(), Vec::new);
             for view in &mut glows {
                 view.insert(0, marks.clone());
@@ -10043,6 +10049,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if let Some(fx) = car_fx.first().and_then(|fxs| car_fx_lists.iter().zip(fxs).find(|((m, _, _), _)| Some(*m) == up)).map(|(_, fx)| fx) {
                 let counts: Vec<String> = fx.counts().iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect();
                 println!("car: particles: {}", counts.join(", "));
+            }
+            // And the triangles each of its tire tracks has laid (S269).
+            if let Some(tracks) = car_marks.first().and_then(|m| car_tread.iter().zip(m).find(|((m, _), _)| Some(*m) == up)).map(|(_, t)| t) {
+                let laid: Vec<String> = tracks.tracks.iter().map(|t| format!("{} {}", t.params.name, t.strip.ring.triangles().len())).collect();
+                println!("car: tire tracks: {}", laid.join(", "));
             }
         }
         // Or the helicopter (P216), and its particles in the air (V114).
@@ -11360,8 +11371,17 @@ fn load_car_fx(
             }
         }
     }
-    let skipped: Vec<&str> = fx.skipped.iter().map(|(n, _)| n.as_str()).collect();
-    println!("car: {dir}: particles: {} entries off {name}; {} not run ({})", fx.entries.len(), skipped.len(), skipped.join(", "));
+    // The `TireTrack` entries are not emitters: the tire tracks lay them (S269).
+    let (laid, skipped): (Vec<_>, Vec<_>) = fx.skipped.iter().partition(|(_, why)| why.eq_ignore_ascii_case("TireTrack"));
+    let names = |l: &[&(String, String)]| l.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ");
+    println!(
+        "car: {dir}: particles: {} entries off {name}; {} laid by the tire tracks ({}); {} not run ({})",
+        fx.entries.len(),
+        laid.len(),
+        names(&laid),
+        skipped.len(),
+        names(&skipped)
+    );
     Ok((fx, binds, texture))
 }
 
@@ -11674,6 +11694,46 @@ fn step_tire_marks(marks: &mut Vec<tire_tracks::Tracks>, list: &[tire_tracks::Pa
     for (seat, m) in seats.iter().zip(marks.iter_mut()) {
         if seat.riding && !seat.paused && !seat.waiting && seat.garage.up == Kind::Bike {
             m.step(&tire_bike(seat));
+        }
+    }
+}
+
+/// The cars' tire tracks off the archives (S269): the `TireTrack` entries of each car's list
+/// ([`particles::car_list`]), four a car, one an `AttachedToTire` of 0 to 3, with `mxparticlezones.dat`'s
+/// zones. They are the bike's `ttrack`, drawn with its tread. Says what it found.
+fn load_car_tire_tracks(archives: &[Res], cars: &[vehicle::CarRide]) -> Vec<(Machine, Vec<tire_tracks::Params>)> {
+    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let zones = read(tire_tracks::ZONES).map(|z| ini::text(&z));
+    let mut out: Vec<(Machine, Vec<tire_tracks::Params>)> = Vec::new();
+    for car in cars {
+        if out.iter().any(|(m, _)| *m == car.machine) {
+            continue;
+        }
+        let Some(list) = particles::car_list(car.machine.dir()).and_then(|name| read(name)) else { continue };
+        let list = tire_tracks::list(&ini::text(&list), zones.as_deref());
+        let tires: Vec<String> = list.iter().map(|p| p.tire.to_string()).collect();
+        println!("car: {}: tire tracks: {} on tires {}", car.machine.dir(), list.len(), tires.join(", "));
+        out.push((car.machine, list));
+    }
+    out
+}
+
+/// A tick of the tracks of the car each seat drives (S269), as [`step_tire_marks`] steps the bike's:
+/// riding, not paused or waiting. A seat's other cars' marks stay where they were left.
+fn step_car_tire_marks(marks: &mut Vec<Vec<tire_tracks::Tracks>>, lists: &[(Machine, Vec<tire_tracks::Params>)], seats: &[Seat]) {
+    while marks.len() < seats.len() {
+        // Seeded past the bikes' (a seat's number), so no car's noise is a bike's.
+        let p = marks.len() as u32;
+        marks.push(lists.iter().enumerate().map(|(k, (_, list))| tire_tracks::Tracks::new(list, 0x100 + p * 8 + k as u32)).collect());
+    }
+    for (seat, m) in seats.iter().zip(marks.iter_mut()) {
+        if !seat.riding || seat.paused || seat.waiting {
+            continue;
+        }
+        let Some(car) = seat.garage.car_up() else { continue };
+        let Some(driven) = car.driven.as_ref() else { continue };
+        if let Some(k) = lists.iter().position(|(machine, _)| *machine == car.machine) {
+            m[k].step(&tire_tracks::Bike::car(driven));
         }
     }
 }
