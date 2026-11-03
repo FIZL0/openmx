@@ -369,10 +369,24 @@ impl Sim {
         }
         // The bike's body rays against the cars (S137), gathered as the rider-against-rider contacts
         // are, before the bike is stepped.
-        let cars = self.car_contacts(0, world, dt);
+        // A woken truck's path mesh is stood down for the riders' part of the tick (S251).
+        let mut down = truck_contact::StoodDown::default();
+        let hv = std::env::var("S251_V").unwrap_or_default().contains('H');
+        if !hv { down.down(&self.traffic, world); }
+        let was: Vec<bool> = self.traffic.physics.iter().map(|p| p.as_ref().is_some_and(|p| p.physical)).collect();
+        let mut cars = self.car_contacts(0, world, dt);
+        let woke = self.traffic.physics.iter().zip(&was).any(|(p, w)| !w && p.as_ref().is_some_and(|p| p.physical));
+        let v = std::env::var("S251_V").unwrap_or_default();
+        if woke && v.contains('B') {
+            for c in &mut cars { c.mover = None; }
+        }
+        if !hv { down.down(&self.traffic, world); }
         // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
         let strike = self.prop_strike(0, dt);
-        let said = if cars.is_empty() && strike.contacts.is_empty() {
+        // And the woken trucks' bodies (S251).
+        let mut trucks = self.truck_strike(0, 0, dt);
+        if (woke && v.contains('N')) || hv { trucks = Default::default(); }
+        let said = if cars.is_empty() && strike.contacts.is_empty() && trucks.contacts.is_empty() {
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(0);
             let said = self.rider.frame(&self.phy, &self.tables, controls, dt, world);
@@ -382,12 +396,32 @@ impl Sim {
             let props = self.traffic.props.strike(&strike);
             let mut bump = self.bump(0, mover_contact::merged(cars, strike.contacts));
             bump.props = props;
+            if v.contains('A') {
+                let first = bump.vehicles.len() + bump.planes.len() + bump.props.len();
+                for e in &mut trucks.contacts { e.other = e.other.map(|o| first + o); }
+                bump.trucks = self.traffic.truck_strike(&trucks);
+                bump.contacts = mover_contact::merged(std::mem::take(&mut bump.contacts), trucks.contacts);
+            } else {
+                self.truck_strike_into(&mut bump, trucks);
+            }
+            if std::env::var_os("S251_DEBUG").is_some() {
+                eprintln!("S251 tick {} contacts {}", self.ticks, bump.contacts.len());
+                for c in &bump.contacts {
+                    eprintln!("  kind {} other {:?} mover {:?} point {:?} normal {:?}", c.kind, c.other, c.mover, c.point, c.normal);
+                }
+                for c in &bump.contacts { if let Some(m) = c.mover { if let Some(ps) = world.moving() { let mv = ps.props.get(m).and_then(|p| p.moving); eprintln!("  mover {:?}", mv.map(|m| (m.velocity, m.spin, m.pose.0[3]))); } } }
+                for t in &bump.trucks {
+                    eprintln!("  truck {} vel {:?} rates {:?} mass {:?} enabled {}", t.collection, t.body.velocity, t.body.rates, t.mass, t.body.enabled);
+                }
+            }
             self.lend_props(0);
             let said = self.rider.frame_bumped(&self.phy, &self.tables, controls, dt, world, &[], Some(&mut bump));
             self.props_back(0);
             self.traffic.props.pushed(&bump.props);
+            self.traffic.trucks_pushed(&bump.trucks);
             said
         };
+        down.up(world);
         // What the wreck bike's rays pushed in its frame (S244).
         self.wreck_pushed_back(0);
         self.props_step(dt, &prop_movers);
@@ -1034,6 +1068,7 @@ pub mod prop_seats;
 /// The riding bike's wheels on a woken `HasPhysics` truck (S208): its `f.col` in the wheel probe's
 /// search while it is physical, and a wheel on it rides the truck's body.
 pub mod truck_wheel;
+pub mod truck_contact;
 
 /// The bike's ghost after a put-back: the fade back in to solid, and the other riders passing
 /// through it until it has.

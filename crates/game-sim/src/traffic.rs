@@ -608,12 +608,34 @@ impl Traffic {
         let (Some(Some(p)), Some(car)) = (self.physics.get_mut(k), self.cars.get_mut(k)) else {
             return false;
         };
+        if std::env::var_os("S251_B").is_some() && !p.physical {
+            p.last = car.pose;
+            let spec = Arc::clone(&self.specs);
+            spec[k].step(car, dt, world);
+        }
         let last = p.last;
         let woke = p.wake(car, &last, inv_dt);
         if woke {
             self.place(world);
+            // The wake rewrote the car's node, and the car's velocity and spin virtuals read that
+            // node against `+0x2e0`: what the striker resolves against in the same frame is the
+            // motion the body was woken with, not the path's (S251).
+            let moving = Moving::of(&last, &self.cars[k].pose, inv_dt);
+            if let (Some(slot), Some(props)) = (self.prop_of(k), world.moving()) {
+                if let Some(prop) = props.props.get_mut(slot) {
+                    prop.moving = Some(moving);
+                }
+            }
         }
         woke
+    }
+
+    /// The world's prop that is car `k`'s mesh, the inverse of [`Traffic::car_at`] (S251). `None`
+    /// for a car with no mesh.
+    pub fn prop_of(&self, k: usize) -> Option<usize> {
+        let first = self.first?;
+        self.specs.get(k)?.mesh.as_ref()?;
+        Some(first + self.specs[..k].iter().filter(|s| s.mesh.is_some()).count())
     }
 
     /// The physics world node's update for every physical car (S186): its collision object's search

@@ -458,7 +458,7 @@ fn the_port_finds_the_world_contacts_the_original_does() {
 /// The port's resolve of the rider's world contact, alone on its list as the rider builds it
 /// ([`rider_contact::alone`]): the original's list, the bike's chassis off RAM.
 fn port_resolve(ee: &Ee, rec: u32, collider: Collider) -> (Bump, Ridden) {
-    let mut bump = Bump { me: 0, contacts: list_at(ee, rec), colliders: vec![collider], vehicles: vec![vehicle_at(ee, rec)], movers: Vec::new(), planes: Vec::new(), props: Vec::new() };
+    let mut bump = Bump { me: 0, contacts: list_at(ee, rec), colliders: vec![collider], vehicles: vec![vehicle_at(ee, rec)], movers: Vec::new(), planes: Vec::new(), props: Vec::new(), trucks: Vec::new() };
     let mut own = ridden_at(ee, rec);
     bump.resolve(&mut own, true);
     (bump, own)

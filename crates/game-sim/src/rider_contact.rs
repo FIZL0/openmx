@@ -446,6 +446,11 @@ pub struct Bump {
     /// pushed by the resolve, and written back to the planes after the frame
     /// ([`crate::flight::Flight::pushed`]).
     pub planes: Vec<Flown>,
+    /// The woken trucks' bodies the list's entries strike (S251, [`crate::truck_contact`]), the other
+    /// sides after the props' (an entry's other `players + planes + props + k` is `trucks[k]`): pushed
+    /// by the resolve, and written back to the traffic after the frame
+    /// ([`crate::traffic::Traffic::trucks_pushed`]).
+    pub trucks: Vec<crate::prop_contact::Pushed>,
 }
 
 /// **A flown plane's body as a bike's resolve pushes it** (N22a): a copy of its collision object's
@@ -472,7 +477,7 @@ impl Bump {
             .iter_mut()
             .map(|p| (&mut p.collider, contact::Weighed { body: &mut p.body, mass: p.mass }))
             .collect();
-        let mut bodies: Vec<_> = self.props.iter_mut().map(crate::prop_contact::Pushed::weighed).collect();
+        let mut bodies: Vec<_> = self.props.iter_mut().chain(self.trucks.iter_mut()).map(crate::prop_contact::Pushed::weighed).collect();
         let mut others: Vec<Other<'_>> = self
             .colliders
             .iter_mut()
@@ -616,7 +621,7 @@ pub fn ground_hits(contacts: &[Contact]) -> Vec<crate::air::Contact> {
 
 /// A bike alone in its list: `contacts` against its own object and chassis, the one seat there is.
 pub fn alone(ride: &crate::ride::Ride, p: &Phy, contacts: Vec<Contact>) -> Bump {
-    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)], movers: Vec::new(), props: Vec::new(), planes: Vec::new() }
+    Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)], movers: Vec::new(), props: Vec::new(), planes: Vec::new(), trucks: Vec::new() }
 }
 
 /// `riders`' contacts, or `None` when none of them carries its collision files.
@@ -644,7 +649,7 @@ fn bump_of(riders: &[(&Rider, &Phy)], me: usize, contacts: Vec<Contact>, near: N
             v
         })
         .collect();
-    Bump { me, contacts, colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(), vehicles, movers: Vec::new(), props: Vec::new(), planes: Vec::new() }
+    Bump { me, contacts, colliders: riders.iter().map(|(_, p)| collider(&p.collisions, p.mass.mass)).collect(), vehicles, movers: Vec::new(), props: Vec::new(), planes: Vec::new(), trucks: Vec::new() }
 }
 
 /// `at` as it is: the copy of a point on a world that does not wrap.
