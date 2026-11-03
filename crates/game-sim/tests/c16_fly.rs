@@ -662,6 +662,15 @@ fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tic
         Sim::with_rider(0x5272, Arc::clone(&tables), phy.clone(), seeded_rider(&ee, p1(&ee), &phy, &col)),
         Sim::with_rider(0x5273, Arc::clone(&tables), phy.clone(), seeded_rider(&ee, p2(&ee), &phy, &col)),
     ];
+    if let Some((part, wrecks)) = wreck_files(&mut disc) {
+        for s in &mut seats {
+            s.rider.carries_wreck(part.clone(), wrecks.clone(), game_sim::ride::WRECK_INERTIA);
+        }
+    }
+    let reason = cap.u(from, "p2_wreck_reason");
+    if reason != 0 {
+        wrecked_p2(&ee, p2(&ee), reason, &mut seats[1].rider);
+    }
     in_free09_ss(&mut disc, |world, area| {
         seats[0].plane = Some(seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables));
         let dt_of = |t: u32| F(cap.f((t + 1).max(cap.first as u32), "dt"));
@@ -683,11 +692,19 @@ fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tic
                 Some((l, m)) => (Some(l), m),
                 None => (None, Vec::new()),
             };
+            // P2's wreck bike's search, plane 0's hull in its world (S274): its mirrors go on the plane's list.
+            let searched = wreck_searches(&mut seats, dt, &mut *world);
+            let mut ticked = None;
             // The flying seat: its plane among the bikes.
             let mut struck = {
                 let m = mirrors.get_mut(0).map(std::mem::take).unwrap_or_default();
                 let at = seats[0].plane.as_ref().unwrap().body.position;
                 let mut met = rider_contact::met_plane_among(&seats, 0, 2, m, at, &*world);
+                if let (Some((_, mirrors)), Some(c)) = (&searched, seats[1].rider.crash.as_ref()) {
+                    met.mirrors.extend(mirrors[0].iter().map(|e| game_sim::contact::Contact { other: Some(flight::WRECK_FROM), ..*e }));
+                    let b = &c.bike;
+                    met.wrecks.push(game_sim::prop_contact::Pushed { collection: 0, object: 1, collider: b.collider, body: b.body, mass: b.mass });
+                }
                 let on: Vec<(&Rider, bool)> = seats.iter().map(|s| (&s.rider, s.plane.is_none())).collect();
                 let bikes = rider_contact::plane_bikes(&on, 0, at, &*world);
                 drop(on);
@@ -699,8 +716,15 @@ fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tic
                 f.reset_chord(controls.respawn, &tables.ride.acos);
                 f.frame_met(dt, pad, world, &tables.ride, &bikes, Some(&mut met));
                 rider_contact::pushed_among(&mut seats, &met);
+                if let (Some(w), Some(c)) = (met.wrecks.first(), seats[1].rider.crash.as_mut()) {
+                    (c.bike.collider, c.bike.body) = (w.collider, w.body);
+                }
                 met.struck
             };
+            // Its step, the plane's body on its resolve.
+            if let Some((movers, _)) = &searched {
+                ticked = wreck_steps(&mut seats, dt, &*world, movers);
+            }
             // P2's seat: its rider among the plane.
             let at = seats[1].rider.ride.transform().0[3];
             let firsts = vec![struck.get_mut(1).map(std::mem::take).unwrap_or_default()];
@@ -716,6 +740,10 @@ fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tic
             drop(on);
             let controls = seats[1].poll(dt, &p2_pads(t));
             let said = seats[1].step_among(dt, &controls, world, bump.as_mut(), &rivals);
+            // The rider's step ticks the wreck bike again on its own: it keeps the tick above.
+            if let (Some(c), Some(b)) = (seats[1].rider.crash.as_mut(), ticked.take()) {
+                c.bike = b;
+            }
             if let Some(b) = &bump {
                 rider_contact::bumped_among(&mut seats, b);
                 for f in &b.planes {
@@ -736,6 +764,94 @@ fn fly_two(from: u32, to: u32, zero: u32) -> Option<([[[u32; 3]; 2]; 2], Vec<Tic
         }
         Some((seed, out))
     })
+}
+
+/// The wreck bike's part and the rider's wreck set off the disc (`tests/replay.rs`'s `the_ragdoll_kit`).
+fn wreck_files(disc: &mut Disc) -> Option<(phy::Part, phy::Wrecks)> {
+    let names: Vec<String> =
+        disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let rider = names.iter().filter(|n| n.to_ascii_lowercase().ends_with("thq1.res")).min_by_key(|n| n.len())?.clone();
+    let rider_file = disc.res(&rider).ok()?.read_suffix("mrider.phy").ok()?;
+    let wreck_bike = names.iter().find_map(|n| disc.res(n).ok().and_then(|r| r.read_suffix("wreckbike.phy").ok()))?;
+    Some((phy::Part::read_bytes(&wreck_bike, "PhysicsPart1"), phy::Wrecks::read_bytes(&rider_file)))
+}
+
+/// **A rider down as the image has them** (S274): the wreck entered with `reason` ([`Crash::begin`]),
+/// then the wreck bike's body and collision object as the vehicle's wreck part holds them
+/// (`*(rider + 0x7a8)`: `+0x110` the body, `+0x120` the collision object, research/s274), the hands
+/// off the bars and the rider down. Needs the rider's wreck files ([`Rider::carries_wreck`]).
+fn wrecked_p2(ee: &Ee, rider: u32, reason: u32, r: &mut Rider) {
+    use game_sim::ride::Crash;
+    let part = ee.u32_at(rider + 0x7a8);
+    let (b, c) = (ee.u32_at(part + 0x110), ee.u32_at(part + 0x120));
+    let w = r.wreckage.as_ref().expect("the rider's wreck files");
+    let wreck = game_sim::trick::Wreck(reason as u8);
+    let mut crash = Crash::begin(&r.ride, wreck, &w.part, w.inertia, &w.wrecks, None);
+    let bike = &mut crash.bike;
+    let body = &mut bike.body;
+    body.enabled = ee.u32_at(b) != 0;
+    body.inv_mass = F(ee.f32_at(b + 0x10));
+    for (v, o) in [
+        (&mut body.damping, 0x20),
+        (&mut body.last_position, 0x50),
+        (&mut body.position, 0x60),
+        (&mut body.velocity, 0x70),
+        (&mut body.last_force, 0x80),
+        (&mut body.force, 0x90),
+        (&mut body.accel, 0xa0),
+        (&mut body.shock_peak, 0xb0),
+        (&mut body.shock, 0xc0),
+        (&mut body.step, 0xf0),
+        (&mut body.inv_inertia, 0x120),
+        (&mut body.ang_damping, 0x130),
+        (&mut body.last_quat, 0x150),
+        (&mut body.quat, 0x170),
+        (&mut body.cofg, 0x180),
+        (&mut body.moment, 0x190),
+        (&mut body.last_moment, 0x1a0),
+        (&mut body.rates, 0x1b0),
+        (&mut body.ang_accel, 0x1c0),
+        (&mut body.twist_peak, 0x1d0),
+        (&mut body.twist, 0x1e0),
+    ] {
+        *v = quad(ee, b + o);
+    }
+    bike.collider.cofg_world = quad(ee, c + 0xa0);
+    bike.collider.normal_speed = F(ee.f32_at(c + 0x1d8));
+    bike.collider.relative = quad(ee, c + 0x1e0);
+    let rec = &mut bike.record;
+    let flag = |o: u32| ee.u32_at(c + o) != 0;
+    (rec.touching, rec.touching_other, rec.on_ground, rec.on_object) = (flag(0x40), flag(0x44), flag(0x48), flag(0x4c));
+    (rec.swept_from, rec.swept_to) = (quad(ee, c + 0xd0), quad(ee, c + 0xe0));
+    let n = ee.u32_at(c + 0xf8);
+    rec.node = game_sim::contact::Node { rows: [0, 1, 2].map(|k| quad(ee, n + 0x80 + 16 * k)), origin: quad(ee, n + 0xb0) };
+    crash.origin = crash.bike.origin();
+    (crash.holding, crash.landed) = (false, true);
+    crash.clock = crash.throw.hand_hold_time;
+    r.state.wreck = Some(wreck);
+    r.crash = Some(crash);
+}
+
+/// P2's wreck bike's search with plane 0's hull in its world: its movers and the mirrors for the plane.
+fn wreck_searches(seats: &mut [Sim], dt: F, world: &mut dyn game_sim::world::World) -> Option<(Vec<game_sim::contact::Mover>, game_sim::wreck_plane::Mirrors)> {
+    let at = seats[1].rider.crash.as_ref()?.bike.origin();
+    let f = seats[0].plane.as_ref()?;
+    let h = f.hull(0)?;
+    let planes = [flight_search::Plane { mesh: h.mesh, at: h.at, velocity: f.body.velocity }];
+    let (ground, props, trees) = world.wooded_near(at);
+    let c = seats[1].rider.crash.as_mut()?;
+    Some(c.bike.search_flown(dt, ground.as_deref(), props, trees, &planes, h.capacity))
+}
+
+/// P2's wreck bike's world stepped with plane 0's body, which is written back; the wreck bike as it left it.
+fn wreck_steps(seats: &mut [Sim], dt: F, world: &dyn game_sim::world::World, movers: &[game_sim::contact::Mover]) -> Option<game_sim::wreck_bike::WreckBike> {
+    let at = seats[1].rider.crash.as_ref()?.bike.origin();
+    let mut flown = [seats[0].plane.as_ref()?.flown(0, at, world)];
+    let c = seats[1].rider.crash.as_mut()?;
+    c.bike.step_flown(dt, movers, &mut flown);
+    let bike = c.bike.clone();
+    seats[0].plane.as_mut()?.pushed(&flown[0]);
+    Some(bike)
 }
 
 /// How many of the port's ticks the capture confirms, bit for bit (tests/fly_and_collide.rs's rule):
@@ -873,16 +989,20 @@ fn the_plane_jousts_p2_as_the_original() {
             let f = |b: [u32; 3]| b.map(f32::from_bits);
             println!("    {} plane vel {:?} p2 vel {:?} wreck {:?}", k.t + 1, f(k.state[0]), f(k.p2[0]), k.p2_wreck);
         }
-        assert_eq!(theirs, Some((137857, 7)), "the original's wreck");
-        assert_eq!(port.map(|(f, w)| (f + 1, u32::from(w))), theirs, "from {from}: P2's wreck, a row late");
+        if from < 137857 {
+            assert_eq!(theirs, Some((137857, 7)), "the original's wreck");
+            assert_eq!(port.map(|(f, w)| (f + 1, u32::from(w))), theirs, "from {from}: P2's wreck, a row late");
+        }
         got.push((n, m));
     }
     let want: Vec<(usize, usize)> = JOUSTS.iter().map(|j| (j.2, j.3)).collect();
     assert_eq!(got, want, "the ticks the plane and P2 hold");
 }
 
-/// The joust's runs: from, to, and the ticks the plane and P2 hold.
-const JOUSTS: [(u32, u32, usize, usize); 2] = [(137810, 137900, 46, 17), (137845, 137900, 11, 55)];
+/// The joust's runs: from, to, and the ticks the plane and P2 hold. 137910's seeds P2 down
+/// ([`wrecked_p2`]); its wreck bike holds, the plane parts on its first tick, the wreck bike's mirror
+/// on its list (S274) pushing it short of the original's (research/s274).
+const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 46, 17), (137845, 137900, 11, 55), (137910, 138010, 0, 100)];
 
 /// The whole tape as images every 100 frames cut it: each stretch from its image to the next, and
 /// how many of its ticks hold (S272's pins). Two part: 137810's on the joust's hit (137853's step), the
