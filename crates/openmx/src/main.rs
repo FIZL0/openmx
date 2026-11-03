@@ -1677,12 +1677,20 @@ impl<P: sim_world::World> Game for World<P> {
         // A flown plane is in the riders' world too (N22a): its hull struck by their bikes, and the
         // planes stepped before the bikes, as the original's dynamics world steps before its riders.
         let flying: Vec<bool> = self.seats.iter().map(|s| !s.waiting && s.riding && s.garage.flight_flown().is_some()).collect();
-        let hulls: Vec<game_sim::rider_contact::Hull<'_>> = (self.seats.iter().enumerate())
+        let mut hulls: Vec<game_sim::rider_contact::Hull<'_>> = (self.seats.iter().enumerate())
             .filter(|&(i, _)| flying[i])
             .filter_map(|(i, s)| s.garage.flight_flown()?.hull(i))
             .collect();
-        let met = game_sim::rider_contact::contacts_met(&riders(&self.seats, &on), &hulls, dt, &self.place);
         let flown: Vec<usize> = hulls.iter().map(|h| h.seat).collect();
+        // And a driven car's (F26), after the planes': its `f.col` struck by the bikes' body rays,
+        // its body pushed by their resolve, and the mirrors on its record after its own search.
+        hulls.extend(
+            (self.seats.iter().enumerate())
+                .filter(|&(_, s)| !s.waiting && s.riding)
+                .filter_map(|(i, s)| s.garage.car_up()?.hull(i)),
+        );
+        let driven: Vec<usize> = hulls[flown.len()..].iter().map(|h| h.seat).collect();
+        let met = game_sim::rider_contact::contacts_met(&riders(&self.seats, &on), &hulls, dt, &self.place);
         drop(hulls);
         let (mut lists, mut mirrors) = match met {
             Some((l, m)) => (Some(l), m),
@@ -1712,6 +1720,7 @@ impl<P: sim_world::World> Game for World<P> {
                 b.planes = flown
                     .iter()
                     .filter_map(|&j| Some(self.seats[j].garage.flight_flown()?.flown(j, from, &self.place)))
+                    .chain(driven.iter().filter_map(|&j| self.seats[j].garage.car_up()?.flown(j, from, &self.place)))
                     .collect();
                 b
             });
@@ -1724,6 +1733,13 @@ impl<P: sim_world::World> Game for World<P> {
                 let at = self.seats[me].garage.flight_flown()?.body.position;
                 Some(game_sim::rider_contact::met_plane(&phys, me, n + k, m, at, &self.place))
             });
+            // A driven car meets them by the mirrors of their strikes on its hull (F26).
+            if let Some(j) = driven.iter().position(|&j| j == me) {
+                let m = mirrors.get_mut(flown.len() + j).map(std::mem::take).unwrap_or_default();
+                let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
+                met = (self.seats[me].garage.car_up().and_then(|c| c.driven.as_ref()))
+                    .map(|c| game_sim::rider_contact::met_riders(&phys, m, c.body.position, &self.place));
+            }
             let near = riders(&self.seats, &on);
             let rivals = game_sim::rider_contact::rivals_among(&near, me, &self.place);
             let bikes = self.seats[me]
@@ -1791,7 +1807,7 @@ impl<P: sim_world::World> World<P> {
             let mut all: Vec<&mut rider::Rider> = self.seats.iter_mut().map(|s| &mut s.sim.rider).collect();
             game_sim::rider_contact::bumped_riders(&mut all, b);
             for f in &b.planes {
-                self.seats[f.seat].garage.plane_pushed(f);
+                self.seats[f.seat].garage.hull_pushed(f);
             }
         }
     }
@@ -2013,6 +2029,83 @@ mod split_contact {
         let (away, struck) = fly(false);
         assert_eq!(struck[0], None, "nothing was struck");
         assert!(away[0] > z[0] + 30.0, "seat 1's plane stopped at z {} with no plane in its way (held at {})", away[0], z[0]);
+    }
+
+    /// F26: a split-screen bike meets the other seat's car as it meets a flown plane (N22a). Seat 1
+    /// takes the buggy where its bike stands, 25 ft up seat 0's way and facing along it, and leaves
+    /// it parked; seat 0's bike rolls into its tail at 30 ft/s. Its body rays strike the car's hull (`buggyf.col`):
+    /// the bike is stopped short of where it rolls on to through a car with no hull, and its
+    /// resolve pushes the car along its way, where the car with no hull stands still.
+    #[test]
+    fn a_split_bike_is_stopped_by_the_other_seats_car() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let bikes: Vec<String> =
+            disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+        let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+        let machines = disc.res(&name).expect("machine.res");
+        let buggy = crate::vehicle::CarRide::new(crate::vehicle::Machine::Buggy, 0, None, &mut |n| machines.read_suffix(n).ok())
+            .expect("the buggy's files");
+        assert!(buggy.hull.is_some(), "machine.res has no buggyf.col");
+        let ride = |hull: bool| {
+            let sims: Vec<Sim> = [(0.0, game_sim::stock::FACING), (25.0, game_sim::stock::FACING)]
+                .into_iter()
+                .map(|(z, facing)| {
+                    let mut sim = Sim::new(0xf26);
+                    std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+                    let mounts = game_sim::stock::mounts(&sim.phy);
+                    sim.rider = Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, z, 1.0), facing, Default::default());
+                    sim.rider.sense.wrecks_enabled = false;
+                    sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+                    sim
+                })
+                .collect();
+            let mut world = split(sims);
+            let mut car = buggy.clone();
+            if !hull {
+                car.hull = None;
+            }
+            let seat = &mut world.seats[1];
+            seat.garage.cars.push(car);
+            seat.garage.switch(Kind::Buggy, &mut seat.sim, &mut world.place).expect("the buggy is taken");
+            // Settled on its springs before the bike sets off.
+            for _ in 0..30 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+            }
+            let parked = world.seats[1].garage.car_up().and_then(|c| c.driven.as_ref()).expect("the buggy is out").body.position;
+            world.seats[0].sim.rider.ride.chassis.vel = Vf::new(0.0, 0.0, 30.0, 0.0);
+            let mut fastest = 0.0f32;
+            for _ in 0..45 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+                let car = world.seats[1].garage.car_up().and_then(|c| c.driven.as_ref()).expect("the buggy is out");
+                fastest = fastest.max(car.body.velocity.z());
+            }
+            let bike = world.seats[0].sim.rider.ride.position().z();
+            let car = world.seats[1].garage.car_up().and_then(|c| c.driven.as_ref()).expect("the buggy is out").body.position;
+            (bike, car.z() - parked.z(), fastest)
+        };
+        let ((bike, pushed, fastest), (through, still, idle)) = (ride(true), ride(false));
+        println!(
+            "bike at z {bike}, the car pushed {pushed} ft, at most {fastest} ft/s; with no hull the bike at z {through}, the car moved {still} ft, at most {idle} ft/s"
+        );
+        assert!(through > 30.0, "with no hull the bike stopped at z {through}, short of the car's far side");
+        assert!(bike < 25.0, "the bike went on to z {bike}, through the car at z 25");
+        // Parked on an idle pad the buggy creeps on along its nose a little either way.
+        assert!(fastest > idle + 1.0, "the car was pushed to {fastest} ft/s along the bike's way (with no hull {idle})");
+        assert!(pushed > still + 0.5, "the car moved {pushed} ft along the bike's way (with no hull {still})");
     }
 }
 

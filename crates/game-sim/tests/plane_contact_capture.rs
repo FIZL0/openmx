@@ -501,7 +501,7 @@ fn the_port_finds_the_originals_contacts_with_the_plane() {
         let seats: Vec<Seat<'_>> =
             recs[..2].iter().map(|&r| Seat { col: Some(&kit.col), at: mat_at(&ee, ee.u32_at(r + 0xf8)), ghost: false, riding: true }).collect();
         let hulls: Vec<Hull<'_>> = (0..2)
-            .map(|k| Hull { seat: k, mesh: &kit.hull, at: mat_at(&ee, ee.u32_at(recs[2 + k] + 0xf8)), capacity: kit.plane.record.capacity })
+            .map(|k| Hull { seat: k, mesh: &kit.hull, at: mat_at(&ee, ee.u32_at(recs[2 + k] + 0xf8)), capacity: kit.plane.record.capacity, category: game_sim::flight::COLLIDABLE })
             .collect();
         let (bikes, mirrors) = rider_contact::gather_met(&seats, &hulls, F(dt), &|_, at| at);
 
@@ -757,7 +757,7 @@ fn the_planes_own_rays_strike_the_bike_as_the_originals() {
     let seats: Vec<Seat<'_>> =
         recs[..2].iter().map(|&r| Seat { col: Some(&kit.col), at: mat_at(&ee, ee.u32_at(r + 0xf8)), ghost: false, riding: true }).collect();
     let hulls: Vec<Hull<'_>> = (0..2)
-        .map(|k| Hull { seat: k, mesh: &kit.hull, at: mat_at(&ee, ee.u32_at(recs[2 + k] + 0xf8)), capacity: kit.plane.record.capacity })
+        .map(|k| Hull { seat: k, mesh: &kit.hull, at: mat_at(&ee, ee.u32_at(recs[2 + k] + 0xf8)), capacity: kit.plane.record.capacity, category: game_sim::flight::COLLIDABLE })
         .collect();
     let (own, _) = rider_contact::gather_met(&seats, &hulls, F(dt), &|_, at| at);
 

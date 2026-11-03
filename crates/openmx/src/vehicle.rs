@@ -1592,7 +1592,7 @@ impl Garage {
     /// [`Garage::step`] exactly.
     pub fn step_among(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World, among: Among<'_>) -> rider::Frame {
         if detour(self.up) {
-            return self.drive(sim, dt, world);
+            return self.drive_met(sim, dt, world, among.met);
         }
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
@@ -2082,6 +2082,9 @@ pub struct CarRide {
     /// object itself while the car is out (S229). A disc without the file leaves the car to its tires.
     pub rays: Option<game_sim::flight_search::Rays>,
     pub struck: Option<game_sim::car::Collision>,
+    /// Its collidable mesh, the car's `f.col` ([`game_sim::car::Kind::hull`]): what the riders' bikes
+    /// strike while it is out (F26). A disc without the file leaves the car out of their world.
+    pub hull: Option<std::sync::Arc<game_sim::track::Mesh>>,
     /// The engine's shared smooth noise under the sound's pitch (S247), built off [`CarRide::rng`] on
     /// its first sample, as the original builds it off `rand()` wherever the session's generator
     /// stands then; kept from one take to the next, as the original's is for the session.
@@ -2115,7 +2118,27 @@ impl CarRide {
                 None
             }
         });
-        Ok(CarRide { machine, livery: livery(copy), car: game_sim::car::Car::read_bytes(&phy, kind), model, bay, driven: None, taken_at: Vf::default(), rays, struck: None, noise: None, rng: game_sim::rng::Rng::from_seed(CAR_NOISE_SEED) })
+        let hull = read(kind.hull()).and_then(|col| match game_sim::track::Mesh::parse(&col) {
+            Ok(m) => Some(std::sync::Arc::new(m)),
+            Err(e) => {
+                eprintln!("car: {}: {e}", kind.hull());
+                None
+            }
+        });
+        Ok(CarRide {
+            machine,
+            livery: livery(copy),
+            car: game_sim::car::Car::read_bytes(&phy, kind),
+            model,
+            bay,
+            driven: None,
+            taken_at: Vf::default(),
+            rays,
+            struck: None,
+            hull,
+            noise: None,
+            rng: game_sim::rng::Rng::from_seed(CAR_NOISE_SEED),
+        })
     }
 
     /// How high the car's origin stands over the ground with its tires' bottoms on it and its springs
@@ -2148,6 +2171,28 @@ impl CarRide {
         self.driven = Some(m);
         self.taken_at = at;
         Some(())
+    }
+
+    /// Its hull as the riders' bikes meet it while it is out (F26,
+    /// [`game_sim::car::Machine::hull`]), for seat `seat`: `None` for a car not out, or with no
+    /// collision object or no hull mesh.
+    pub fn hull(&self, seat: usize) -> Option<game_sim::rider_contact::Hull<'_>> {
+        let (m, c, mesh) = (self.driven.as_ref()?, self.struck.as_ref()?, self.hull.as_deref()?);
+        Some(m.hull(seat, mesh, c))
+    }
+
+    /// Its body as a bike's resolve pushes it (F26, [`game_sim::car::Machine::flown`]), the copy
+    /// nearest `from`.
+    pub fn flown(&self, seat: usize, from: Vf, world: &dyn World) -> Option<game_sim::rider_contact::Flown> {
+        let (m, c) = (self.driven.as_ref()?, self.struck.as_ref()?);
+        Some(m.flown(seat, c, from, world))
+    }
+
+    /// The body a bike's resolve pushed, written back (F26, [`game_sim::car::Machine::pushed`]).
+    pub fn pushed(&mut self, by: &game_sim::rider_contact::Flown) {
+        if let (Some(m), Some(c)) = (self.driven.as_mut(), self.struck.as_mut()) {
+            m.pushed(c, by);
+        }
     }
 
     /// Where the car's origin is and which way it points: its frame's, once it has stepped.
@@ -2229,6 +2274,21 @@ impl CarRide {
     /// ([`game_sim::car::Machine::step_struck`]). The engine's sound pitch samples the shared smooth
     /// noise ([`CarRide::noise`]). Nothing for a car not out.
     pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
+        self.step_met(pad, table, tables, dt, world, None);
+    }
+
+    /// [`CarRide::step`] among the riders' bikes (F26): the mirrors of their strikes on its hull
+    /// filed after its own search, and resolved against their chassis
+    /// ([`game_sim::car::Machine::step_met`]). A car with no collision object meets nothing.
+    pub fn step_met(
+        &mut self,
+        pad: &game_sim::input::Pad,
+        table: &game_sim::bindings::Table,
+        tables: &game_sim::ride::Tables,
+        dt: F,
+        world: &mut dyn World,
+        met: Option<&mut flight::Met>,
+    ) {
         use game_sim::input::{Axis, AxisRange};
         let Some(m) = self.driven.as_mut() else { return };
         let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
@@ -2236,7 +2296,7 @@ impl CarRide {
         let (noise, rng) = (&mut self.noise, &mut self.rng);
         let mut sample = |t: F| noise.get_or_insert_with(|| game_sim::noise::SmoothNoise::build(rng)).at(t);
         match self.struck.as_mut() {
-            Some(c) => m.step_struck(&self.car, &mut Through(world), c, dt, &tables.acos, &tables.curve, &mut sample),
+            Some(c) => m.step_met(&self.car, &mut Through(world), c, met, dt, &tables.acos, &tables.curve, &mut sample),
             None => m.step(&self.car, &mut Through(world), dt, &tables.acos, &tables.curve, &mut sample),
         }
     }
@@ -2365,6 +2425,16 @@ impl Garage {
         self.cars.iter().find(|c| c.machine == m)
     }
 
+    /// The body a bike's resolve pushed (F26), written back to the machine it is: the car up, or
+    /// else the plane ([`Garage::plane_pushed`]).
+    pub fn hull_pushed(&mut self, by: &game_sim::rider_contact::Flown) {
+        let m = self.up.car();
+        match self.cars.iter_mut().find(|c| Some(c.machine) == m) {
+            Some(car) => car.pushed(by),
+            None => self.plane_pushed(by),
+        }
+    }
+
     /// [`Garage::switch`] onto or off a car (S149e): the machine taken spawned where the player is
     /// ([`Garage::spot`]), the car left gone. Onto the bike from a car, the bike stands on the ground
     /// under it; onto the plane, the plane is landed there.
@@ -2402,11 +2472,13 @@ impl Garage {
 
     /// One pass of the car up: the track's path cars, then the car on the seat's pad. The bike is
     /// not stepped, and the frame the rider reports is empty.
-    fn drive(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) -> rider::Frame {
+    /// With a car up, `met` is the riders' bikes that struck its hull this tick (F26,
+    /// [`CarRide::step_met`]).
+    fn drive_met(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World, met: Option<&mut flight::Met>) -> rider::Frame {
         sim.traffic.frame(dt, world);
         let m = self.up.car();
         if let Some(car) = self.cars.iter_mut().find(|c| Some(c.machine) == m) {
-            car.step(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world);
+            car.step_met(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world, met);
         }
         if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
             heli.step(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world);

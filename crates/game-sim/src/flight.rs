@@ -480,7 +480,7 @@ impl Flight {
         let mesh = self.hull.as_deref().filter(|_| self.rays.is_some())?;
         let node = node_of(&self.body);
         let at = crate::math::Mat4([node.rows[0], node.rows[1], node.rows[2], node.origin]);
-        Some(crate::rider_contact::Hull { seat, mesh, at, capacity: self.record.capacity })
+        Some(crate::rider_contact::Hull { seat, mesh, at, capacity: self.record.capacity, category: COLLIDABLE })
     }
 
     /// Its body as a bike's resolve pushes it (N22a, [`crate::rider_contact::Bump::planes`]): the copy
