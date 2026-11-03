@@ -1,0 +1,90 @@
+# MD39a: MX vs. ATV Unleashed's (SLUS-21104) player car in Desert Oasis Free Ride, every tick. CAR is
+# replaced by the car object's address (vptr at +4: buggy/baja/sandrail 0x003cec60, golf cart 0x003cf600,
+# truck 0x003cff80; research/oracle.txt # MD39), VPTR by that vptr; play.sh does both and adds the start
+# trigger. Decoded columns first (MD39's field map: body +0xb8, engine +0x1250, tires +0x1254..+0x1260,
+# a tire's fields MX Unleashed's - 0x10), then the raw blocks.
+[watch]
+name        = "md39a-car"
+description = "MX vs. ATV (SLUS-21104) Free Ride car played from a generated tape: the car, body, engine and four tires per tick"
+every       = 1
+frames      = 900
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x3fa6d8, +2 a tick
+addr = "0x3fa6d8"
+type = "u32"
+
+[[field]]
+name = "vptr"           # the car's vtable word (+4)
+addr = "CAR + 0x4"
+type = "u32"
+
+[[field]]
+name = "ctl"            # +0x308..+0x314: two ints (1, 4), then brake +0x310 and gas +0x314 (read off the drives)
+addr = "CAR + 0x308"
+type = "f32x4"
+
+[[field]]
+name = "pos"            # body +0x60
+addr = "CAR + 0xb8 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "vel"            # body +0x80
+addr = "CAR + 0xb8 -> 0x80"
+type = "f32x4"
+
+[[field]]
+name = "quat"           # body +0x170
+addr = "CAR + 0xb8 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "angvel"         # body +0x1c0
+addr = "CAR + 0xb8 -> 0x1c0"
+type = "f32x4"
+
+[[field]]
+name = "obj0"           # the car object, raw, +0x0..+0xc00
+addr = "CAR"
+type = "bytes:3072"
+
+[[field]]
+name = "obj1"           # +0xc00..+0x1800 (the truck's loader writes up to +0x14d0)
+addr = "CAR + 0xc00"
+type = "bytes:3072"
+
+[[field]]
+name = "body"           # the rigid body, raw
+addr = "CAR + 0xb8 -> 0x0"
+type = "bytes:640"
+
+[[field]]
+name = "engine"         # *(+0x1250), raw
+addr = "CAR + 0x1250 -> 0x0"
+type = "bytes:512"
+
+[[array]]
+name   = "tire"         # *(+0x1254..+0x1260): fronts (radius 1.1 on the buggy) then rears (1.3)
+addr   = "CAR + 0x1254"
+count  = 4
+stride = 4
+deref  = true
+
+[[array.field]]
+name = "touch"          # +0xa4 (MX Unleashed's +0xb4)
+off  = 0xa4
+type = "u32"
+
+[[array.field]]
+name = "compress"       # +0xcc (MX Unleashed's +0xdc), ft
+off  = 0xcc
+type = "f32"
+
+[[array.field]]
+name = "raw"            # +0x0..+0x300 (the per-surface tables past it are static; the RAM image has them)
+off  = 0x0
+type = "bytes:768"

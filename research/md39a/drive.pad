@@ -1,0 +1,32 @@
+# MD39a: one drive for every car, from its Desert Oasis Free Ride spawn (at rest). Cross gas, Square brake,
+# Circle hand brake, left stick steer (MX Unleashed's car card; MX vs. ATV's not shown). The first right
+# turn misses the palm ahead of the spawn and lines the car up with the dune jump (the buggy is in the air
+# from about tick 190 to 280); then left and right steer, a brake to slow, gas, and a hand-brake turn.
+sleep 15t
+down cross
+stick l 1 0
+sleep 45t
+stick l 0 0
+sleep 240t
+stick l -1 0
+sleep 40t
+stick l 0 0
+sleep 20t
+stick l 1 0
+sleep 40t
+stick l 0 0
+sleep 20t
+up cross
+down square
+sleep 90t
+up square
+down cross
+sleep 60t
+stick l -1 0
+down circle
+sleep 30t
+up circle
+stick l 0 0
+sleep 90t
+release
+sleep 45t
