@@ -2737,6 +2737,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     let mut sound = start_sound(&args, &mut disc, &dir, &settings, true);
     let camera_names = camera_names(&mut disc);
     let heli_camera_names = heli_camera_names(&mut disc);
+    let car_camera_names = car_camera_names(&mut disc);
     // The rider's own 24 (MD77), which the Ride tab's trick pack rows count each pack's extras past.
     let rider_stunts = front_rider_stunts(&mut disc);
     drop(disc);
@@ -2777,6 +2778,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     front.menu.music_choices = front.sound.choices();
     front.menu.camera_names = camera_names;
     front.menu.heli_camera_names = heli_camera_names;
+    front.menu.car_camera_names = car_camera_names;
     // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
     let mut mods_on = front.menu.settings.mods;
     let listed = mod_tracks(&args, &front.dir, mods_on);
@@ -8376,6 +8378,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 {
                     println!("{who}camera: the helicopter's starts on {}, where it was left", cam.cam.preset().name);
                 }
+                // Each car's on its own (P264).
+                for (kind, cam) in &mut rig.car_cameras {
+                    let start = seat_sets.zip(menu::Machine::from_word(kind.name())).map(|(s, car)| s.car_start(car)).unwrap_or_default();
+                    if chase::start_on(cam, start, mine_only) {
+                        println!("{who}camera: the {}'s starts on {}, where it was left", kind.name(), cam.cam.preset().name);
+                    }
+                }
             }
             rig.wreck_camera.frame(rig.framing.0);
 
@@ -8471,14 +8480,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("{who}camera: {}", follow.cam.preset().name);
                     rig.ride_hud.note_camera(Instant::now(), &follow.cam.preset().name);
                     // The seat's next ride on this machine starts on it (P163).
+                    // A car's preset is its own file's (S246), kept as the car's start (P264).
                     let machine = match seat.garage.up {
                         Kind::Kiowa => menu::Machine::Helicopter,
                         _ if flying => menu::Machine::Biplane,
-                        _ => menu::Machine::Bike,
+                        up => menu::Machine::from_word(up.name()).filter(|_| up.car().is_some()).unwrap_or(menu::Machine::Bike),
                     };
-                    // A car's preset is its own file's (S246), which the seat's settings keep no
-                    // start for: it is not the bike's.
-                    if let Some(f) = front.as_deref_mut().filter(|_| seat.garage.up.car().is_none())
+                    if let Some(f) = front.as_deref_mut()
                         && f.menu.camera_left_on(i.min(menu::SEATS_MAX - 1), machine, &follow.cam.preset().name)
                     {
                         f.save();
@@ -10302,6 +10310,24 @@ fn heli_camera_names(disc: &mut Disc) -> Vec<String> {
     out
 }
 
+/// Each car's presets the camera button cycles through (P264), by name, for the Camera page: free06's
+/// copy of the car's own file ([`chase::car_presets`]), as [`heli_camera_names`] reads the
+/// helicopter's. A car whose file cannot be read is left out.
+fn car_camera_names(disc: &mut Disc) -> Vec<(menu::Machine, Vec<String>)> {
+    let Some(kit) = member_ending(disc, PLANE_KIT_ARCHIVE).ok().and_then(|name| disc.res(&name).ok()) else { return Vec::new() };
+    let mut out = Vec::new();
+    for car in [menu::Machine::Buggy, menu::Machine::Monster, menu::Machine::Baja] {
+        let Some(kind) = vehicle::Machine::ALL.into_iter().find(|m| m.kind().is_some_and(|k| k.name() == car.word())).and_then(vehicle::Machine::car_physics) else { continue };
+        let presets = kit.read_suffix(chase::car_presets(kind)).map(|b| Preset::read_bytes(&b, "")).unwrap_or_default();
+        let names: Vec<String> = presets.into_iter().filter(|p| p.cycle_thru_this_preset).map(|p| p.name).collect();
+        if !names.is_empty() {
+            out.push((car, names));
+        }
+    }
+    println!("camera: the Camera page lists the cars' {out:?}");
+    out
+}
+
 /// Every player's cameras onto `display`'s copy of their presets (V24): the file read again for it,
 /// and the preset each camera is on re-set from the new copy — the original's own reload when a
 /// camera's split changes, which keeps the preset and clears the player's nudges.
@@ -10365,14 +10391,22 @@ fn cars_for_display(layout: Layout, display: Display, cars: &[(Kind, Vec<u8>)]) 
     cars.iter().map(|(kind, bytes)| (*kind, layout_presets(bytes, layout, display, car_presets_file(*kind)))).collect()
 }
 
-/// [`frame_rig`] for the cars' cameras (S246): each onto `cars`' presets for its kind, framed by the
-/// Camera page's one set as the bike's camera is, easing over on the bike's slot as its follow does.
-/// The seat's own presets are the bike's file's and are not laid over a car's.
+/// [`frame_rig`] for the cars' cameras (S246): each onto `cars`' presets for its kind, with the seat's
+/// own on that car laid over them (P264), framed by the Camera page's one set as the bike's camera is,
+/// easing over on the bike's slot as its follow does.
 fn frame_cars(rig: &mut Rig, cars: &[(Kind, Vec<Preset>)]) {
+    let (own, cycle) = (&rig.camera_presets.0, rig.camera_presets.1);
+    let mine_only = cycle == menu::cameras::Cycle::Mine;
     for (kind, cam) in &mut rig.car_cameras {
-        if let Some((_, presets)) = cars.iter().find(|(k, _)| k == kind) {
-            chase::reframe(cam, &chase::seat_presets(presets, rig.framing.0, &[], false), &mut rig.fov_ease.0);
-        }
+        let Some((_, presets)) = cars.iter().find(|(k, _)| k == kind) else { continue };
+        let car = menu::Machine::from_word(kind.name()).unwrap_or_default();
+        let laid: Vec<chase::Own> = menu::cameras::laid(own, cycle, car)
+            .map(|o| {
+                let (fov, distance, height) = o.look.framing();
+                chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
+            })
+            .collect();
+        chase::reframe(cam, &chase::seat_presets(presets, rig.framing.0, &laid, mine_only), &mut rig.fov_ease.0);
     }
 }
 

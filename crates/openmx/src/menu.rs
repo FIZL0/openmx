@@ -1614,7 +1614,7 @@ impl Settings {
                 "shadow_casters" => {}
                 "model_detail" => s.detail = video::Detail::from_word(v).unwrap_or(s.detail),
                 "camera" => s.cameras = CameraView::parse_seats(v).unwrap_or(s.cameras),
-                "camera_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
+                "camera_start" | "camera_car_start" | "camera_cycle" | "camera_preset" => cameras::parse(&mut s.camera_sets, k, v),
                 "markers" => s.markers = markers_seats(v).unwrap_or(s.markers),
                 "lobby_seats" => s.lobby_seats = v.parse::<usize>().map_or(s.lobby_seats, |n| n.clamp(2, openmx_net::SEATS)),
                 // A line it cannot read leaves the original game rather than half a set (P55).
@@ -3034,6 +3034,9 @@ pub struct Menu {
     pub camera_names: [Vec<String>; 2],
     /// The helicopter's, the same off `HeloCPresets.ini` (P216b), after them on the row.
     pub heli_camera_names: Vec<String>,
+    /// Each car's, the same off its own file (P264: the buggy's `BuggyCPresets.ini`), after the
+    /// helicopter's on the row; a car not here has none listed.
+    pub car_camera_names: Vec<(Machine, Vec<String>)>,
     /// The Camera page's Preset row: 0 for every preset, then [`Menu::camera_choices`]' order.
     camera_pick: usize,
     /// The Camera page's Save Over row (P229): its place in [`Menu::camera_over_choices`].
@@ -3363,6 +3366,7 @@ impl Menu {
             key: (0, 0),
             camera_names: Default::default(),
             heli_camera_names: Vec::new(),
+            car_camera_names: Vec::new(),
             camera_pick: 0,
             camera_over: 0,
             over: None,

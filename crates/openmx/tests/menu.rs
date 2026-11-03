@@ -8183,3 +8183,101 @@ fn the_helicopter_camera_is_kept_and_framed_per_seat() {
     assert!(walk(&mut cam).contains(&kept), "{kept}");
     assert!(menu::cameras::laid(&set.own, set.cycle, Machine::Bike).next().is_none());
 }
+
+/// P264: each car's camera is the seat's like the helicopter's. The preset its camera button last
+/// left a car on (its own file's: the buggy's `BuggyCPresets.ini`) is kept for that car's next ride,
+/// one `camera_car_start` line a car, and only when there is one, so a file without it is written as
+/// before; the other cars, the bike and the helicopter keep their own starts, and the next ride's car
+/// camera starts on it.
+#[test]
+fn a_cars_camera_preset_is_kept_across_rides() {
+    let (mut m, _) = fresh();
+    let buggy = camera_file("buggycpresets.ini");
+    let names = cycling(&buggy);
+    let (first, second) = (names[0].clone(), names[1].clone());
+    let before = menu::cameras::text(&m.settings.camera_sets);
+
+    // Left on its second preset: one change to save, then nothing; nobody else's start moves.
+    assert!(m.camera_left_on(1, Machine::Buggy, &second));
+    assert!(m.take_changed());
+    assert!(!m.camera_left_on(1, Machine::Buggy, &second));
+    assert_eq!(m.settings.camera_sets[1].car_start(Machine::Buggy), second);
+    assert_eq!(m.settings.camera_sets[1].car_start(Machine::Baja), "");
+    assert_eq!(m.settings.camera_sets[1].start, [String::new(), String::new()]);
+    assert_eq!(m.settings.camera_sets[1].heli_start, "");
+    assert_eq!(m.settings.camera_sets[0], Default::default());
+    assert_eq!(before, "", "no seat had a line before");
+
+    // Through settings.txt and back, beside the bike's and the truck's.
+    m.camera_left_on(1, Machine::Bike, "Freestyle Cam");
+    m.camera_left_on(1, Machine::Monster, "Race Cam 2");
+    let dir = scratch("camera-start-car");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let text = std::fs::read_to_string(dir.join("settings.txt")).unwrap();
+    assert!(text.contains(&format!("camera_car_start = 2 | buggy | {second}\n")), "{text}");
+    assert!(text.contains("camera_car_start = 2 | monster | Race Cam 2\n"), "{text}");
+    assert!(text.contains("camera_start = 2 | Freestyle Cam | \n"), "{text}");
+    let back = menu::load(&dir).0;
+    assert_eq!(back.camera_sets, m.settings.camera_sets);
+    std::fs::remove_dir_all(dir).ok();
+    // A line the file cannot hold to a car changes nothing.
+    let odd = Settings::parse("camera_car_start = 2 | bike | Race Cam 2\ncamera_car_start = 9 | baja | Race Cam 2\n");
+    assert_eq!(odd.camera_sets, Settings::default().camera_sets);
+
+    // The next ride's buggy camera starts on it; the baja's, with none kept, stays on its own.
+    let mut driven = follow_on(buggy.clone(), &first);
+    assert!(chase::start_on(&mut driven, back.camera_sets[1].car_start(Machine::Buggy), false));
+    assert_eq!(driven.cam.preset().name, second);
+    let mut baja = follow_on(camera_file("fourwheelcpresets.ini"), &first);
+    assert!(!chase::start_on(&mut baja, back.camera_sets[1].car_start(Machine::Baja), false));
+    assert_eq!(baja.cam.preset().name, first);
+}
+
+/// P264: the cars on the Camera page. Each car's disc presets come after the helicopter's on the
+/// Preset row, named for the car; a slider on one makes that preset's numbers the car's own and no
+/// other machine's, and a preset of the seat's own saved from it joins that car's camera button and
+/// not the bike's — laid as the shell's `frame_cars` lays it.
+#[test]
+fn the_cars_presets_are_on_the_camera_page() {
+    use menu::cameras::Look;
+    let (mut m, _) = fresh();
+    let buggy = camera_file("buggycpresets.ini");
+    m.heli_camera_names = cycling(&camera_file("helocpresets.ini"));
+    m.car_camera_names = vec![(Machine::Buggy, cycling(&buggy)), (Machine::Baja, cycling(&camera_file("fourwheelcpresets.ini")))];
+    let first = m.car_camera_names[0].1[0].clone();
+    let labels: Vec<String> = m.camera_choices().iter().map(|p| p.label()).collect();
+    let heli_last = labels.iter().rposition(|l| l.starts_with("Helicopter: ")).unwrap();
+    let buggy_first = labels.iter().position(|l| *l == format!("Buggy: {first}")).unwrap_or_else(|| panic!("{labels:?}"));
+    assert_eq!(buggy_first, heli_last + 1, "{labels:?}");
+    assert!(labels.last().unwrap().starts_with("Baja: "), "{labels:?}");
+
+    // A slider on the buggy's first preset is the buggy's alone.
+    let pick = m.camera_choices().into_iter().find(|p| p.machine == Machine::Buggy && p.name == first).unwrap();
+    let seat = 0;
+    let before = m.camera_look(&pick);
+    let mut after = before;
+    after.step(1, false, true);
+    m.settings.camera_sets[seat].set_look(pick.machine, &pick.name, after);
+    assert_eq!(m.camera_look(&pick), after);
+    assert_eq!(after.distance, before.distance + menu::CAMERA_STEP);
+    let set = &m.settings.camera_sets[seat];
+    assert_eq!(set.own_of(Machine::Buggy, &first).map(|o| o.look), Some(after));
+    assert!(set.own_of(Machine::Baja, &first).is_none() && set.own_of(Machine::Bike, &first).is_none());
+
+    // Saved as the seat's own, it joins the buggy's cycle and no one else's.
+    let kept = m.settings.camera_sets[seat].save_custom(Machine::Buggy, &first, "Far", Look { fov: 0, distance: 180, height: 120 }, &m.car_camera_names[0].1.clone());
+    let set = &m.settings.camera_sets[seat];
+    assert!(menu::cameras::laid(&set.own, set.cycle, Machine::Bike).next().is_none());
+    assert!(menu::cameras::laid(&set.own, set.cycle, Machine::Baja).next().is_none());
+    let own: Vec<chase::Own> = menu::cameras::laid(&set.own, set.cycle, Machine::Buggy)
+        .map(|o| {
+            let (fov, distance, height) = o.look.framing();
+            chase::Own { base: &o.base, name: &o.name, framing: chase::Framing { fov, distance, height } }
+        })
+        .collect();
+    let (fov, distance, height) = m.settings.cameras[seat].bike();
+    let mut cam = follow_on(chase::seat_presets(&buggy, chase::Framing { fov, distance, height }, &own, false), &first);
+    assert!(walk(&mut cam).contains(&kept), "{kept}");
+    let labels: Vec<String> = m.camera_choices().iter().map(|p| p.label()).collect();
+    assert_eq!(labels.last(), Some(&format!("Buggy: {kept} (Mine)")), "{labels:?}");
+}
