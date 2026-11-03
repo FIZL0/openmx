@@ -1691,3 +1691,308 @@ impl Surroundings for Grounded<'_> {
         self.asked.push(*asked);
     }
 }
+
+// --- the wreck and the put-back ----------------------------------------------------------------------
+
+/// What every accumulator and a body's start velocity and rates are reset to: the constant
+/// `(0, 0, 0, 1)` the place hands the body's two start setters.
+const STILL: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
+/// The unwreck's damping, both of them: the constant `(1, 1, 1, 1)`.
+const UNDAMPED: Vf = Vf::new(1.0, 1.0, 1.0, 1.0);
+/// The wreck's scale on the rates (the plane's is 4).
+const WRECK_SPIN: f32 = 1.0;
+/// A thrown blade's random spin: up to this many radians a second on each axis, and a lift on `y`.
+const BLADE_SPIN: f32 = 5.0;
+const BLADE_LIFT: f32 = 7.0;
+
+/// Which of the MX helicopter's model nodes are hidden (bit 6 of a node's byte 3): the ones the wreck,
+/// the blade throw and the unwreck hide and show. The main rotor's node (`+0xd1c`, the one the rotor's
+/// spin is skipped for) is [`Ride::rotor_hidden`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Nodes {
+    /// The rotor's three other nodes (`+0xd20`, `+0xd24`, `+0xd28`), hidden with it.
+    pub rotor: [bool; 3],
+    /// `+0xd3c`, which the wreck hides and the unwreck shows.
+    pub intact: bool,
+    /// The wrecked blades' node (`+0xd40`), which the wreck shows and the unwreck hides.
+    pub wrecked: bool,
+}
+
+/// One of the MX helicopter's four thrown blades (`+0xe48..+0xe54`, each a body wrapper built off
+/// `helicopter\wreckblade.phy`, [`wreck_blade`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Blade {
+    pub body: Body,
+    /// The throw switched the blade on (the wrapper's slot `+0x11c`, `wreck_part_start`); the unwreck
+    /// switches it off again (slot `+0x120` with 1, `wreck_part_stop`). What those do inside the
+    /// wrapper is not ported.
+    pub out: bool,
+}
+
+/// Where the blades are thrown from, as the scene graph has it the frame they go: each blade's node's
+/// world transform (`+0xd08..+0xd14`), and the helicopter model's (`+0x18c`). Rows 0..2 the axes, row
+/// 3 the origin, as the nodes keep them after their lazy rebuild.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Throw {
+    pub blades: [Mat4; 4],
+    pub model: Mat4,
+}
+
+/// What the wreck, the unwreck and the put-back read and write besides [`Ride`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Wreckage {
+    /// `[Wrecks]`' three the body takes: `WreckGravity` (the scale on gravity while wrecked),
+    /// `WreckDamping` (both of the body's dampings) and `WreckInertia` (a scale on its inertia).
+    pub wreck_gravity: F,
+    pub wreck_damping: Vf,
+    pub wreck_inertia: Vf,
+    /// The body's inertia as the part was built (`+0x410`): what the wreck scales and the unwreck
+    /// gives back. The unwreck's setter writes 1 into its `w`.
+    pub inertia: Vf,
+    /// The body's mass, which both gravities are weighed by.
+    pub mass: F,
+    /// The inertia the body was last given (the body's `+0x110`; `w` 1). The body steps only on its
+    /// inverse ([`Body::inv_inertia`]).
+    pub body_inertia: Vf,
+    /// Set by the wreck and cleared by the unwreck (`+0x3d8`).
+    pub wrecked: bool,
+    /// Where the put-back stands the body, and its nose and up: the body wrapper's place
+    /// (`+0xe0`, `+0xf0`, `+0x100`). The put-back squares the nose and up in place and sets the
+    /// place's `w` to 1.
+    pub place: [Vf; 3],
+    /// The MX helicopter's spawn (`+0xcd0`, three quads), which its put-back copies over the place
+    /// unless the helicopter's owner keeps it.
+    pub spawn: [Vf; 3],
+    pub nodes: Nodes,
+    /// [`Wreckage::new`] leaves the blades' bodies empty: building one off [`wreck_blade`]'s part is
+    /// the caller's.
+    pub blades: [Blade; 4],
+}
+
+/// `body_set_inertia`: the tensor's `w` set to 1 (in the caller's copy too), kept, and each of its
+/// three lanes' reciprocal into the inverse, or 0 for a lane not above 0. The inverse's `w` stays.
+fn set_inertia(body: &mut Body, v: &mut Vf) -> Vf {
+    v[3] = 1.0;
+    for k in 0..3 {
+        body.inv_inertia[k] = if F(v[k]) <= F::ZERO { 0.0 } else { (F::ONE / F(v[k])).to_f32() };
+    }
+    *v
+}
+
+/// The physics object's place, on a body: the nose and up squared (the plane's [`crate::flight::spawn_axes`]),
+/// the position's `w` set to 1, and the body reset standing still there, turned to them. Hands the
+/// squared nose and up back, as the original writes them over its arguments.
+fn place(body: &mut Body, position: &mut Vf, facing: Vf, up: Vf) -> (Vf, Vf) {
+    let turn = crate::flight::spawn_turn(facing, up);
+    position[3] = 1.0;
+    let mut start = crate::ragdoll_pose::Start::default();
+    start.place(*position, STILL);
+    start.turn(turn, STILL);
+    start.reset(body);
+    crate::flight::spawn_axes(facing, up)
+}
+
+/// `orientation_transform_point`: `p` through the transform, row 3 first (`+ vf0.x`), then `x`,
+/// `y` and `z`; `w` is `p`'s.
+fn node_point(m: &Mat4, p: Vf) -> Vf {
+    let m = &m.0;
+    let acc = m[3].add(Vf::VF0.bc(Field::X));
+    let acc = Vf::madd(acc, m[0], p.bc(Field::X));
+    let acc = Vf::madd(acc, m[1], p.bc(Field::Y));
+    p.merge(Dest::XYZ, Vf::madd(acc, m[2], p.bc(Field::Z)))
+}
+
+/// `transform_rotate`: `v` through the transform's three axis rows; `w` is `v`'s.
+fn node_rotate(m: &Mat4, v: Vf) -> Vf {
+    let m = &m.0;
+    let acc = m[0].mul(v.bc(Field::X));
+    let acc = Vf::madd(acc, m[1], v.bc(Field::Y));
+    v.merge(Dest::XYZ, Vf::madd(acc, m[2], v.bc(Field::Z)))
+}
+
+/// `transform_unpoint`: `p` less the origin, through the transpose of the axes, which the original
+/// builds with the multimedia word shuffles (its third column keeps row 2's upper half: a 64-bit `or`
+/// copies only the lower one). `w` is `p`'s.
+fn node_unpoint(m: &Mat4, p: Vf) -> Vf {
+    let [r0, r1, r2, origin] = m.0;
+    let c0 = Vf::new(r0.x(), r1.x(), r2.x(), r2.y());
+    let c1 = Vf::new(r0.y(), r1.y(), r2.y(), r2.w());
+    let c2 = Vf::new(r0.z(), r1.z(), r2.z(), r2.w());
+    let d = p.merge(Dest::XYZ, p.sub(origin));
+    let acc = c0.mul(d.bc(Field::X));
+    let acc = Vf::madd(acc, c1, d.bc(Field::Y));
+    d.merge(Dest::XYZ, Vf::madd(acc, c2, d.bc(Field::Z)))
+}
+
+impl Wreckage {
+    /// The figures off the `.phy` ([`Phy::wrecks`]) and the body as it was built: its inertia (the
+    /// tensor before any wreck) and its mass. Standing, not wrecked, no blades out, and the nodes as
+    /// S148's flown helicopter has them (and the unwreck leaves them): only the wrecked blades hidden.
+    pub fn new(phy: &Phy, inertia: Vf, mass: F) -> Wreckage {
+        Wreckage {
+            wreck_gravity: phy.wrecks.wreck_gravity,
+            wreck_damping: phy.wrecks.wreck_damping,
+            wreck_inertia: phy.wrecks.wreck_inertia,
+            inertia,
+            mass,
+            body_inertia: Vf::new(inertia.x(), inertia.y(), inertia.z(), 1.0),
+            nodes: Nodes { wrecked: true, ..Nodes::default() },
+            ..Wreckage::default()
+        }
+    }
+
+    /// **The wreck**, the base slot `+0x1b8`: the reason, not down, the wrecked flag, the rates
+    /// scaled by 1 (`xyz`; the oracle finds no lane it changes), both dampings `WreckDamping`, the
+    /// inertia `WreckInertia` times the built one, and the body wrapper's gravity `WreckGravity` times
+    /// the mass's weight. The wreck's sound is the original's too, and not simulation. The clock is not
+    /// touched: the unwreck zeroed it.
+    pub fn wreck(&mut self, ride: &mut Ride, reason: u32) {
+        let mut inertia = self.wreck_inertia.merge(Dest::XYZ, self.wreck_inertia.mul(self.inertia));
+        ride.crash.reason = reason;
+        ride.crash.down = false;
+        self.wrecked = true;
+        let b = &mut ride.body;
+        b.rates = b.rates.merge(Dest::XYZ, b.rates.mul(Vf::splat(WRECK_SPIN)));
+        b.damping = self.wreck_damping;
+        b.ang_damping = self.wreck_damping;
+        self.body_inertia = set_inertia(b, &mut inertia);
+        ride.gravity = crate::biplane::gravity_force(self.wreck_gravity, self.mass);
+    }
+
+    /// **The MX helicopter's wreck** (its slot `+0x1b8`): [`Wreckage::wreck`], then the blades thrown
+    /// ([`Wreckage::throw_blades`]) unless it is the edge's [`THROWN`] wreck (a thrown helicopter
+    /// throws them when it comes down), then `+0xd3c` hidden and the wrecked blades shown. (A
+    /// player's pad rumbles too.)
+    pub fn wreck_mx(&mut self, ride: &mut Ride, reason: u32, throw: &Throw, rng: &mut Rng) {
+        self.wreck(ride, reason);
+        if reason != THROWN {
+            self.throw_blades(ride, throw, rng);
+        }
+        self.nodes.intact = true;
+        self.nodes.wrecked = false;
+    }
+
+    /// **The blade throw**, the MX helicopter's slot `+0x1b0`. Each of the four blades, in order:
+    ///
+    /// * stands where its node puts its centre of gravity, turned to the node's `z` and `y` rows
+    ///   (the body wrapper's place: squared, reset standing still);
+    /// * is given a spin of the helicopter's rates plus `5 * unit()` on each axis (three `rand()`s,
+    ///   `x` first), with 7 more on `y`, and flies off at the helicopter's velocity plus that spin
+    ///   crossed with the blade's lever from the helicopter's centre of gravity (the blade's point in
+    ///   the model's frame, less the body's `CofG`), turned back by the model's axes;
+    /// * keeps the helicopter's rates, not that spin.
+    ///
+    /// Then the rotor's four nodes and `+0xd3c` are hidden and the wrecked blades shown.
+    pub fn throw_blades(&mut self, ride: &mut Ride, throw: &Throw, rng: &mut Rng) {
+        let heli = ride.body;
+        for (blade, node) in self.blades.iter_mut().zip(&throw.blades) {
+            let mut at = node_point(node, blade.body.cofg);
+            let facing = node.0[2].merge(Dest::W, Vf::ZERO);
+            let up = node.0[1].merge(Dest::W, Vf::ZERO);
+            let mut draw = [F::ZERO; 3];
+            for d in &mut draw {
+                *d = F(BLADE_SPIN) * rng.unit();
+            }
+            // The draws' quad's `w` is whatever the stack held; nothing reads it.
+            let spin = Vf::new(draw[0].to_f32(), draw[1].to_f32(), draw[2].to_f32(), 0.0);
+            let mut spin = spin.merge(Dest::XYZ, spin.add(heli.rates));
+            spin[1] = (F(spin.y()) + BLADE_LIFT).to_f32();
+            let lever = node_unpoint(&throw.model, at);
+            let lever = lever.merge(Dest::XYZ, lever.sub(heli.cofg));
+            let swing = spin.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(spin, lever), lever, spin));
+            let swing = node_rotate(&throw.model, swing);
+            let velocity = heli.velocity.merge(Dest::XYZ, heli.velocity.add(swing));
+            blade.out = true;
+            place(&mut blade.body, &mut at, facing, up);
+            blade.body.velocity = velocity;
+            blade.body.rates = heli.rates;
+        }
+        ride.rotor_hidden = true;
+        self.nodes = Nodes { rotor: [true; 3], intact: true, wrecked: false };
+    }
+
+    /// **The unwreck**, the base slot `+0x1bc`: an edge-thrown helicopter's throw scale doubled back
+    /// (divided by 0.5), the reason, the clock and the wrecked flag zeroed (not down), both dampings
+    /// 1, the built inertia given back, and the body wrapper's gravity the gravity scale's again. The
+    /// sound's stop is the original's too. The pad, the altitude fraction and the held height it
+    /// zeroes are [`Kiowa::unwreck_controls`].
+    pub fn unwreck(&mut self, ride: &mut Ride) {
+        if ride.crash.reason == THROWN {
+            ride.throw_scale = ride.throw_scale / F(0.5);
+        }
+        ride.crash.reason = 0;
+        ride.crash.clock = F::ZERO;
+        self.wrecked = false;
+        let b = &mut ride.body;
+        b.damping = UNDAMPED;
+        b.ang_damping = UNDAMPED;
+        self.body_inertia = set_inertia(b, &mut self.inertia);
+        ride.gravity = crate::biplane::gravity_force(ride.gravity_scale, self.mass);
+    }
+
+    /// **The MX helicopter's unwreck** (its slot `+0x1bc`): [`Wreckage::unwreck`], then the rotor's
+    /// nodes and `+0xd3c` shown, the wrecked blades hidden, and the four blades switched off. (The
+    /// original asks for the rotor's node and the first blade first; the MX helicopter's constructor
+    /// always builds both.)
+    pub fn unwreck_mx(&mut self, ride: &mut Ride) {
+        self.unwreck(ride);
+        ride.rotor_hidden = false;
+        self.nodes = Nodes { rotor: [false; 3], intact: false, wrecked: true };
+        for blade in &mut self.blades {
+            blade.out = false;
+        }
+    }
+
+    /// **The MX helicopter's put-back**, its slot `+0x198`: the body wrapper's reset — the body stood
+    /// still at the place, turned to its (squared) nose and up — then the unwreck
+    /// ([`Wreckage::unwreck_mx`]), then, unless the helicopter's owner keeps its place (`owned`: the
+    /// owner's flag bit 0), the spawn copied over the place. Returns the altitude fraction the
+    /// put-back leaves: 0, or 0.5 when owned ([`Kiowa::put_back_controls`]).
+    ///
+    /// Not here: the reset's taking out and putting back of the wrapper's collision probes, the
+    /// player's camera snapped to it, and the presentation copy (`kiowa_mx_present_a`).
+    pub fn put_back(&mut self, ride: &mut Ride, owned: bool) -> F {
+        let [mut at, facing, up] = self.place;
+        let (facing, up) = place(&mut ride.body, &mut at, facing, up);
+        self.place = [at, facing, up];
+        self.unwreck_mx(ride);
+        if owned {
+            F(0.5)
+        } else {
+            self.place = self.spawn;
+            F::ZERO
+        }
+    }
+
+    /// **What a crash test asked for, done**, in the original's order (the MX helicopter's slots):
+    /// the wreck, the blade throw, the put-back. `throw` is where the blades go from, should either
+    /// throw them. Returns the put-back's altitude fraction if it put the helicopter back: the frame
+    /// cannot reach the [`Kiowa`], so the caller hands it to [`Kiowa::put_back_controls`] after the
+    /// tick (nothing between reads what it zeroes).
+    pub fn act(&mut self, asked: &Crashed, ride: &mut Ride, throw: &Throw, owned: bool, rng: &mut Rng) -> Option<F> {
+        if let Some(reason) = asked.wreck {
+            self.wreck_mx(ride, reason, throw, rng);
+        }
+        if asked.debris {
+            self.throw_blades(ride, throw, rng);
+        }
+        asked.recover.then(|| self.put_back(ride, owned))
+    }
+}
+
+impl Kiowa {
+    /// The unwreck's share on the controls: the pad, the altitude fraction and the held height
+    /// zeroed.
+    pub fn unwreck_controls(&mut self) {
+        self.commands.altitude_fraction = F::ZERO;
+        self.pad = Pad::default();
+        self.control.hold_altitude = F::ZERO;
+    }
+
+    /// The put-back's: [`Kiowa::unwreck_controls`], then the altitude fraction
+    /// [`Wreckage::put_back`] hands back.
+    pub fn put_back_controls(&mut self, altitude_fraction: F) {
+        self.unwreck_controls();
+        self.commands.altitude_fraction = altitude_fraction;
+    }
+}

@@ -7249,6 +7249,32 @@ kiowa_input boot 0x0038d8e0 (heli a0, control table a1, pad a2, stick x f12, y f
 kiowa_mx_present_a boot 0x00391d50 (heli): the first of kiowa_measure_mx's presentation copies (S220a)
 kiowa_mx_present_b boot 0x00392010 (heli): the second
 kiowa_mx_present_c boot 0x00391f10 (heli): the third
+# S220a1 — the Kiowa's wreck, unwreck, blade throw and put-back, research/journal/*-s220a1-kiowa-wreck.
+# Ported as game_sim::kiowa::{Wreckage, Nodes, Blade, Throw}; tests/kiowa.rs proves each on S148's state.
+#   Base helicopter table (vt at +0x48): +0x198 put-back, +0x1b8 wreck, +0x1bc unwreck; the MX table
+#   has its own three and +0x1b0 the blade throw. +0x3d8 is a wrecked flag (wreck 1, unwreck 0);
+#   +0x400 WreckInertia, +0x410 the built inertia (the unwreck's body_set_inertia writes 1 into its w);
+#   +0x3f0 WreckDamping, +0x3ec WreckGravity; +0x544's vt +0x8c / +0x88 the wreck sound's start / stop.
+#   MX: +0xd08..+0xd14 the four blades' nodes, +0xe48..+0xe54 their body wrappers (wreckblade.phy);
+#   +0xd1c/+0xd20/+0xd24/+0xd28 the rotor's nodes, +0xd3c hidden by the wreck, +0xd40 the wrecked
+#   blades; +0xcd0 three quads of spawn the put-back copies over the wrapper's place (+0xe0) unless
+#   the owner (+0xb94) has bit 0 of its +0x5c set, which leaves +0x33c 0.5. The put-back zeroes
+#   +0xd00 (not known; not ported). A blade wrapper's vt (+0x38) +0x11c switches it on, +0x120(1) off.
+kiowa_put_back boot 0x0038cb30 (heli): physics_object_reset(heli+0x50), then vt +0x1bc
+kiowa_wreck boot 0x0038eeb0 (heli, reason): reason, down 0, +0x3d8 1, rates x1 (.xyz), both dampings
+#                          WreckDamping, inertia WreckInertia*+0x410, gravity +0x140, the sound
+kiowa_unwreck boot 0x0038efc0 (heli): throw scale /0.5 if reason 13, reason/clock/+0x3d8 0, dampings 1,
+#                            inertia +0x410, gravity, the sound stopped, +0x334..+0x348/+0x33c/+0x378 0
+kiowa_put_back_mx boot 0x00392230 (heli): kiowa_put_back, the spawn or +0x33c 0.5, camera_snap_player,
+#                                kiowa_mx_present_a, +0xd00 = 0
+kiowa_throw_blades boot 0x00392340 (heli): per blade a point, axes, 3 rand()s, unpoint, cross, rotate,
+#                                 place; then the rotor nodes and +0xd3c hidden, +0xd40 shown
+kiowa_wreck_mx boot 0x00392b60 (heli, reason): kiowa_wreck, vt +0x1b0 unless 13, rumble, +0xd3c hidden,
+#                             +0xd40 shown
+kiowa_unwreck_mx boot 0x00392c10 (heli): kiowa_unwreck; if +0xd1c and +0xe48: rotor nodes and +0xd3c
+#                               shown, +0xd40 hidden, each blade's vt +0x120(1)
+physics_object_reset boot 0x0015a030 (wrapper): the probes out (broad_phase_leave) and back (0x00119c60),
+#                                   around physics_object_place on +0x90/+0xa0/+0xb0
 # S221 — the Kiowa's .phy reader and its wreck, research/journal/*-s221-kiowa-phy. Ported as
 # game_sim::kiowa::{Phy, WreckRotor, wing_chord, wreck_blade}; tests/kiowa_phy.rs proves every word
 # against S148's live helicopter. Every float getter is ini_float_default with 0 (WreckRotorRadius 1),
