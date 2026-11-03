@@ -1394,6 +1394,21 @@ struct Listeners<'a> {
     props: &'a mut [crate::prop_contact::Pushed],
 }
 
+thread_local! {
+    static SUBSTEPS: std::cell::RefCell<Option<Vec<Body>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// **A lone plane's body at the end of each substep** of whatever `run` flies on this thread (S274),
+/// in order, with `run`'s answer: where a capture row the original's PINE read inside a frame's step
+/// stands (C16's row 137911 holds the plane after the first of 137910's two). Play never asks, and
+/// keeps nothing. Planes flown together ([`frames_together`]) are not kept.
+pub fn substeps<R>(run: impl FnOnce() -> R) -> (R, Vec<Body>) {
+    let was = SUBSTEPS.replace(Some(Vec::new()));
+    let r = run();
+    let kept = SUBSTEPS.replace(was).unwrap_or_default();
+    (r, kept)
+}
+
 impl Dynamics for Listeners<'_> {
     fn count(&self, list: List) -> i32 {
         match list {
@@ -1426,6 +1441,11 @@ impl Dynamics for Listeners<'_> {
     }
     fn end_substep(&mut self, _: i32) {
         self.plane.body.end_substep();
+        SUBSTEPS.with_borrow_mut(|kept| {
+            if let Some(kept) = kept {
+                kept.push(self.plane.body);
+            }
+        });
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {

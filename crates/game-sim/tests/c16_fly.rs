@@ -1048,6 +1048,37 @@ fn cross_held(t: u32) -> Report {
     Report::from_buttons(0x0040)
 }
 
+/// **The tape's pads without the tape** (S274): research/c16's segment list for fly.p2m2,
+/// `30 60:cross+l1 262:l1 120 150:cross 980 110:-:127,0 420 90:cross+r1 400:r1 200`, each segment
+/// (fields, buttons, the left stick) written into a field as research/c16/make_tape.py writes it, and
+/// read as [`P2m2`] reads one ([`game_sim::replay::report_of_p2m2`]). Tick `t` polls field
+/// `t - `[`FIELD_ZERO`], the first field before it; port 2 is idle on every field.
+fn segment_pad(t: u32) -> Report {
+    const CROSS: u8 = 0x40;
+    const L1: u8 = 0x04;
+    const R1: u8 = 0x08;
+    const SEGMENTS: [(u32, u8, u8); 11] =
+        [(30, 0, 127), (60, CROSS | L1, 127), (262, L1, 127), (120, 0, 127), (150, CROSS, 127), (980, 0, 127), (110, 0, 0), (420, 0, 127), (90, CROSS | R1, 127), (400, R1, 127), (200, 0, 127)];
+    let mut n = t.saturating_sub(FIELD_ZERO);
+    let &(_, buttons, ly) = SEGMENTS
+        .iter()
+        .find(|&&(fields, _, _)| n < fields || {
+            n -= fields;
+            false
+        })
+        .unwrap_or_else(|| panic!("tick {t} is past the tape's 2822 fields"));
+    // make_tape.py's field: the two button bytes active low, the sticks (right x y, left x y), then
+    // the twelve pressures, Cross's at 6, L1's at 8, R1's at 9.
+    let mut field = [0u8; game_sim::replay::P2M2_PAD_BYTES];
+    field[..6].copy_from_slice(&[0xff, !buttons, 127, 127, 127, ly]);
+    for (bit, at) in [(CROSS, 6), (L1, 8), (R1, 9)] {
+        if buttons & bit != 0 {
+            field[6 + at] = 0xff;
+        }
+    }
+    game_sim::replay::report_of_p2m2(&field)
+}
+
 /// [`cross_held`] to its segment's end, then the 980 idle fields after it.
 fn cross_then_idle(t: u32) -> Report {
     assert!((FIELD_ZERO + 472..FIELD_ZERO + 1602).contains(&t), "tick {t} is outside the tape's Cross and idle segments");
@@ -1090,4 +1121,38 @@ fn the_sim_lane_meets_p2s_wreck_bike() {
     let planes = |ks: &[Tick]| ks.iter().map(|k| k.state).collect::<Vec<_>>();
     assert_eq!(planes(&down), planes(&two), "the plane in the Sim's lane, as fly_two's");
     assert!(down.windows(2).all(|w| w[0].p2[1] != w[1].p2[1]), "the wreck bike steps in the plane's lane");
+}
+
+/// **Row 137911 is read inside 137910's frame** (S274): from 137910's image, P2 down with wreck 7,
+/// the plane meeting P2's wreck bike's mirror on its list, the port's plane at the end of the tick's
+/// first substep ([`game_sim::flight::substeps`]) is the original's row 137911 to the capture's printed
+/// digits, at the image's `frame_dt` (0x3c888882; 0x3c88ce6a and 1/60 land there too), and the tick's end is not: the row is torn, PINE reading between the frame's two steps
+/// (S196's three phases). With P2 standing the substep is not on it, so the mirror's push is the
+/// original's. Why JOUSTS' 137910 stretch "parts on its first tick": [`held`] wants the tick's end.
+#[test]
+fn row_137911_is_the_wreck_bikes_first_substep() {
+    let dt = |_| F(f32::from_bits(0x3c888882));
+    let row = ["-24.94349", "8.60006", "2.21980"];
+    let digits = |v: Vf| [0, 1, 2].map(|k| format!("{:.5}", v.0[k]));
+    let first = |reason| {
+        let (flown, kept) = game_sim::flight::substeps(|| fly_by(137910, 137911, &dt, &segment_pad, &|_| false, reason));
+        flown.map(|(_, ticks)| (kept, ticks[0]))
+    };
+    let Some((kept, tick)) = first(7) else { return };
+    assert_eq!(kept.len(), 2, "two substeps a tick");
+    assert_eq!(digits(kept[0].velocity), row, "the first substep, P2 down");
+    assert_ne!(tick.state[0].map(f32::from_bits).map(|v| format!("{v:.5}")), row, "the tick's end is past the row");
+    let Some((standing, _)) = first(0) else { return };
+    assert_ne!(digits(standing[0].velocity), row, "the first substep, P2 standing");
+}
+
+/// **P2's wreck 7 by the tape's pads** (S274): from 137845's image, P1's pads the tape's segments
+/// ([`segment_pad`]) and P2 idle, [`fly_two_by`]'s P2, struck by the plane on tick 137853, wrecks with
+/// the capture's reason 7 on tick 137855, and nowhere else up to 137858.
+#[test]
+fn p2_wrecks_7_on_the_tapes_pads() {
+    let dt = |_| F(1.0 / 60.0);
+    let Some((_, two)) = fly_two_by(137845, 137858, &dt, &segment_pad, &|_| Report::idle(), &|_| false, 0) else { return };
+    let wrecked: Vec<_> = two.iter().filter_map(|k| k.p2_wreck.map(|w| (k.t, w))).collect();
+    assert_eq!(wrecked, [(137855, 7)], "P2's wreck, by tick");
 }

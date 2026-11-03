@@ -73,7 +73,10 @@ Run in 100-frame stretches from each image, the whole tape holds except two stre
   at −31.82 ft/s, does not. The 137910 stretch is the same thing: the plane bounces on P2's wreck, and
   P2 is seeded standing, with no wreck state.
   S274 (research/s274): the wreck bike's rays strike the hull, and their mirror on the plane's list
-  is what moves it. Ported in `game_sim::wreck_plane`; closer, not yet bit-exact.
+  is what moves it. Ported in `game_sim::wreck_plane`. From 137910 the port's plane after the first
+  substep is row 137911 to its digits: that row is torn (read mid-frame), and `held()` wants the tick's
+  end, so the stretch "parts" on a row it matches. The first tick after the wreck (137856, row 137858)
+  still matches no state of the port's; the wreck bike's seed is the suspect (follow-ups filed).
 - **P2 standing from 137810 parts at 137827**, 17 ticks before the plane reaches it. P2 is seeded from
   its chassis only (standing_p2, the way fly_and_collide seeds P1). Its rider and suspension state is
   not read.
