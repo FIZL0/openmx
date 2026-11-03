@@ -891,6 +891,13 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
     Ok((rig, made))
 }
 
+/// Park the lot's machines for `players` (P87): a copy of each per player, every staying copy where it
+/// was, and the cars stood on the ground under their bays.
+fn park_lot(lot: &mut vehicle::Lot, place: &mut impl sim_world::World, players: usize) {
+    lot.resize(players, &mut |at: Vf| sim_world::World::ground(place, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y());
+    lot.stand_cars(&mut |from: Vf| sim_world::World::ground(place, from));
+}
+
 /// What the original's HUD shows of a player's own ride (V26, V28): their odometer, which machine is
 /// up, how hard a preload is shoving the bike, and the score — the rider's banked total (S79, P68).
 fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Gauges {
@@ -6078,7 +6085,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut aspect = args.aspect;
     let frame_size = |window: &Option<Screen>, aspect: Aspect| match (args.size, window) {
         (Some(size), _) => size,
-        (None, Some(window)) => aspect.frame((window.width, window.height), window.scale),
+        // Never narrower than a split's views (P271): a window that reports no size (one minimised,
+        // or `--headless` with no display) made a 1x1 frame, and a player joining split it into
+        // views no pixel wide, which the sky and the rasteriser cannot draw.
+        (None, Some(window)) => {
+            let (w, h) = aspect.frame((window.width, window.height), window.scale);
+            (w.max(split::SMALLEST_FRAME), h.max(split::SMALLEST_FRAME))
+        }
         (None, None) => PS2_FRAME,
     };
     let (width, height) = frame_size(&window, aspect);
@@ -6769,6 +6782,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // its first half run before it went: only the simulation and what comes after it are left.
         if flight.is_some() || pacer.owed(moment) {
         let landing = flight.take();
+        // Whether a player joined or left the ride this tick (P76), which keeps the tick off the sim
+        // thread: its second half lays out the views' riders and cameras for the new count, and a
+        // picture drawn beside it would draw the new views from the old tick's (P271).
+        let mut reseated = false;
         if landing.is_none() {
         if let Some(window) = &mut *window {
             window.poll();
@@ -7361,19 +7378,19 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 _ => None,
             };
             if let Some(change) = change {
-                let devices: Vec<usize> = (0..world.seats.len()).map(|i| args.pad_seat(i)).collect();
                 let n = match change {
                     join::Change::Join(_) => world.seats.len() + 1,
                     join::Change::Leave(_) => world.seats.len() - 1,
                 };
                 // The lot parks a machine for each player now (P87), every staying copy where it was.
-                {
-                    let place = &mut world.place;
-                    lot.resize(n, &mut |at: Vf| sim_world::World::ground(place, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y());
-                    lot.stand_cars(&mut |from: Vf| sim_world::World::ground(place, from));
-                }
-                let joined = match change {
-                    join::Change::Join(_) => {
+                park_lot(&mut lot, &mut world.place, n);
+            }
+            // A joiner's seat and rig, made before anything is reseated: one that cannot be made
+            // (a disc read failing under it) is said, and the ride goes on with the players it had
+            // rather than ending (P271).
+            let joined = match change {
+                Some(join::Change::Join(_)) => {
+                    let made = (|| -> Result<_, String> {
                         let i = world.seats.len();
                         // At the track's spawn on the first player's bike, see-through until clear
                         // of whoever stands there (P57), on the markers kept under their seat's name.
@@ -7462,9 +7479,27 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             together: false,
                             shade: PageShade::default(),
                         };
-                        Some((seat, rig, kept))
+                        Ok((seat, rig, kept))
+                    })();
+                    match made {
+                        Ok(joiner) => Some(joiner),
+                        Err(why) => {
+                            park_lot(&mut lot, &mut world.place, world.seats.len());
+                            println!("players: player {} could not join: {why}", world.seats.len() + 1);
+                            front.menu.note = Some(format!("Player {} could not join: {why}", world.seats.len() + 1));
+                            None
+                        }
                     }
-                    join::Change::Leave(_) => None,
+                }
+                _ => None,
+            };
+            let change = change.filter(|c| !matches!(c, join::Change::Join(_)) || joined.is_some());
+            if let Some(change) = change {
+                reseated = true;
+                let devices: Vec<usize> = (0..world.seats.len()).map(|i| args.pad_seat(i)).collect();
+                let n = match change {
+                    join::Change::Join(_) => world.seats.len() + 1,
+                    join::Change::Leave(_) => world.seats.len() - 1,
                 };
                 let (mut seat, mut rig, mut kept) = match joined {
                     Some((seat, rig, kept)) => (Some(seat), Some(rig), Some(kept)),
@@ -7658,6 +7693,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         gauge.engaged = threaded;
         if threaded
+            && !reseated
             && landing.is_none()
             && online.is_none()
             && sim_worker.is_some()

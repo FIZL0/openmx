@@ -55,6 +55,10 @@ impl Split {
 /// The most local players the shell draws.
 pub const MOST: usize = 8;
 
+/// The fewest pixels a frame is wide and high (P271): enough that every layout's views, the
+/// eighths' four across and two down, are two pixels or more each way.
+pub const SMALLEST_FRAME: usize = 8;
+
 /// A layout of the frame into views.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {

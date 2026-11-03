@@ -246,6 +246,10 @@ struct Setup {
 
 impl Setup {
     fn of(v: &[Shade; 3], width: usize, height: usize) -> Option<Setup> {
+        // A view with no pixels (a split of a frame too narrow for it) covers nothing.
+        if width == 0 || height == 0 {
+            return None;
+        }
         let (w, h) = (width as f32, height as f32);
         // To screen, keeping 1/w and attribute/w for the perspective-correct interpolation.
         let mut p = [[0.0f32; 3]; 3];
