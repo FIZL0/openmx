@@ -1,4 +1,4 @@
-//! MD76a1 and MD83 — Desert Oasis's collidables and the quad's nearby list, proved against
+//! MD76a1, MD83 and MD83b — Desert Oasis's collidables and the quad's nearby list, proved against
 //! SLUS-21104.
 //!
 //! The oracle is MD37a's RAM image of Desert Oasis Free Ride with the atv_ quad at its spawn
@@ -21,7 +21,11 @@
 //!   every candidate, in order, with its distance, and the bound, bit for bit. The points are every
 //!   row of MD37a's fifteen captures (the quad's position), among them the rows where the quad
 //!   touches the palms ahead of the spawn (race-jump, vsync 35805 and 35851-35863), points scattered
-//!   round every mesh, and points over the whole map.
+//!   round every mesh, and points over the whole map;
+//! - **each vehicle's own sphere** (MD83b), put again and again by the original's place
+//!   (`atv_vehicle_sphere_place`, gathering through `atv_vehicle_sphere_gather`) and by the port's on
+//!   MD37a's three R-quad images (`atv-r-spawn`, `atv-r-spawn-late`, `atv-r-air`): after each call the
+//!   sphere, the vehicle's gathering point and distance, its list and the tree slots it is filed in.
 //!
 //! Without the image, the files or the captures the tests skip (and say so).
 
@@ -93,12 +97,19 @@ struct Data {
     /// The image's collidables the port built one by one, and where.
     port: BTreeMap<u32, usize>,
     zones: Vec<atv_world::Zone>,
+    /// The vehicles' spheres.
+    vehicles: std::ops::Range<usize>,
 }
 
 fn data() -> Option<Data> {
+    data_of("atv-r-spawn")
+}
+
+/// The world built and laid beside MD37a's image `name` (one of the R quad's).
+fn data_of(name: &str) -> Option<Data> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let dir = kit.ctx("mxvatv-ps2/md37a");
-    let image = dir.join(format!("atv-r-spawn.ee{}", ".bin"));
+    let image = dir.join(format!("{name}.ee{}", ".bin"));
     let res = dir.join("mc02.res");
     let esb = dir.join("MC02.esb");
     let rider = dir.join("mrider.phy");
@@ -143,10 +154,11 @@ fn data() -> Option<Data> {
     }
     let vehicles = world.add_vehicles(VEHICLES.len(), hi);
     port.extend(VEHICLES.iter().map(|v| ee.u32_at(v + SPHERE)).zip(vehicles.clone()));
-    // The player's was filed where the quad last gathered round it (quad `+0xd90`), and has moved on
+    // The player's was filed where it was put the call after the quad last gathered round it (the
+    // image keeps only the gathering point, quad `+0xd90`, whose slots are the same), and has moved on
     // since by less than the 10 ft that files it again.
     let player = vehicles.start;
-    world.move_vehicle(player, [0, 4, 8].map(|i| F(ee.f32_at(QUAD + 0xd90 + i))), F(atv_world::VEHICLE_REACH), hi);
+    world.move_vehicle(player, [0, 4, 8].map(|i| F(ee.f32_at(QUAD + 0xd90 + i))), F(atv_world::VEHICLE_REACH));
     world.broad.places[player].centre = centre(&ee, ee.u32_at(QUAD + SPHERE));
     // The moving list: the quad's three, then (after slots freed) the riders' parts in pairs and the
     // two category-0 sweeps. The quad's other two are in no structure.
@@ -186,7 +198,7 @@ fn data() -> Option<Data> {
     }
     world.broad.places[PROBE].centre = centre(&ee, PROBE_AT);
     let points = capture_points(&kit.ctx("capture/md37a"))?;
-    Some(Data { ee, world, points, port, zones })
+    Some(Data { ee, world, points, port, zones, vehicles })
 }
 
 /// A collidable's centre (`+0x50`).
@@ -227,7 +239,7 @@ fn collidable(ee: &Ee, c: u32) -> Collidable {
 fn same_fields(ee: &Ee, c: u32, w: &World, o: usize, image: &BTreeMap<usize, u32>, what: &str) {
     let p = &w.objects[o];
     assert_eq!(p.class, Class::Object, "{what}");
-    assert_eq!(ee.u8_at(c + at::FLAGS) & 0x0f, p.flags, "{what}: flags");
+    assert_eq!(ee.u8_at(c + at::FLAGS) & 0x0f, p.flags & 0x0f, "{what}: flags");
     assert_eq!(ee.u8_at(c + at::NEARBY) & 1 != 0, p.nearby, "{what}: nearby");
     assert_eq!(ee.u32_at(c + at::RADIUS), p.radius.0.to_bits(), "{what}: reach");
     assert_eq!(ee.u32_at(c + at::CATEGORY), p.category, "{what}: category");
@@ -603,4 +615,228 @@ fn the_quads_nearby_list_is_the_originals() {
         assert!(kept.contains_key(&k), "no list held {k:x?}: {kept:x?}");
     }
     assert!(meshes > 1000 && plants > 1000, "the lists hold both meshes and plants");
+}
+
+/// The vehicle's own sphere put and gathered round, the original's against the port's.
+const PLACE: u32 = 0x004a_a7d0;
+/// What the place asks of the vehicle's body before it gathers: hooked to nothing, as it is the
+/// vehicle's, not the sphere's.
+const BODY_PUT: u32 = 0x0048_33c0;
+/// The BIOS calls the heap locks with (refiling the sphere can grow a tree node, which allocates):
+/// `GetThreadId`, `SignalSema`, `WaitSema` and `PollSema`, answered as by the one thread, which
+/// always gets the semaphore. The interpreter has no BIOS.
+const BIOS: [(u32, u64); 4] = [(0x0033_edd0, 1), (0x0033_ef00, 0), (0x0033_ef20, 0), (0x0033_ef30, 0)];
+/// Vehicle fields: the sphere's list, where it last gathered, how far (squared) the last gather
+/// found it from there and how far that may be; the rider (`+0x684`, off when its `+0x58` is 2 and
+/// `+0x680`'s `+0x40` is set).
+mod vehicle {
+    pub const LIST: u32 = 0xd84;
+    pub const GATHERED: u32 = 0xd90;
+    pub const MOVED: u32 = 0xd38;
+    pub const LIMIT: u32 = 0xd3c;
+    pub const RIDER: u32 = 0x684;
+    pub const RIDING: u32 = 0x680;
+}
+
+/// The image's tree slots holding `entry`, by node path and slot (four to a chunk, in chain order,
+/// the scene nodes' slots not counted).
+fn image_holders(ee: &Ee, node: u32, path: String, entry: u32, out: &mut Vec<(String, usize)>) {
+    let (mut chunk, mut k) = (ee.u32_at(node + 4), 0);
+    while chunk != 0 {
+        for s in 0..4 {
+            let e = ee.u32_at(chunk + 4 + 4 * s);
+            if e == entry {
+                out.push((path.clone(), k));
+            }
+            // A scene node's slot is not the port's.
+            if e == 0 || ee.u8_at(e + 2) != 7 {
+                k += 1;
+            }
+        }
+        chunk = ee.u32_at(chunk);
+    }
+    let children = ee.u32_at(node);
+    if children != 0 {
+        for i in 0..4 {
+            let c = ee.u32_at(children + 4 * i);
+            if c != 0 {
+                image_holders(ee, c, format!("{path}{i}"), entry, out);
+            }
+        }
+    }
+}
+
+fn port_holders(w: &World, node: usize, path: String, o: usize, out: &mut Vec<(String, usize)>) {
+    let Structure::Tree(t) = &w.broad.structures[0] else { unreachable!() };
+    let n = &t.nodes[node];
+    out.extend(n.chunks.iter().flatten().enumerate().filter(|(_, s)| **s == Some(o)).map(|(k, _)| (path.clone(), k)));
+    for (i, c) in n.children.iter().enumerate() {
+        if let Some(c) = c {
+            port_holders(w, *c, format!("{path}{i}"), o, out);
+        }
+    }
+}
+
+/// MD83b — each vehicle's sphere put where the vehicle goes, again and again, by the original's
+/// place (`atv_vehicle_sphere_place`, which gathers through `atv_vehicle_sphere_gather`) and by
+/// [`World::place_vehicle`]: after every call the sphere's centre, reach, place and sweep top, the
+/// vehicle's last gathering point and squared distance, its list (every candidate with its distance,
+/// and the bound) and the tree slots the sphere is filed in are the same. The player's quad drives
+/// every row of the fifteen captures in turn and then a random walk over the map; the other five
+/// vehicles, from where the image has them (never placed), walk too. Some calls do not gather, some
+/// have the rider off.
+#[test]
+fn a_vehicles_sphere_is_placed_and_gathered_as_the_originals() {
+    // The R quad's three images: at the spawn, a moment later, and in the air.
+    for name in ["atv-r-spawn", "atv-r-spawn-late", "atv-r-air"] {
+        let Some(d) = data_of(name) else { return };
+        vehicle_walks(d, name);
+    }
+}
+
+fn vehicle_walks(mut d: Data, name: &str) {
+    d.ee.hooks.insert(BODY_PUT, Box::new(|_| {}));
+    for (at, answer) in BIOS {
+        d.ee.hooks.insert(at, Box::new(move |ee| ee.set(2, answer)));
+    }
+    let image: BTreeMap<usize, u32> = d.port.iter().map(|(&c, &o)| (o, c)).collect();
+    let root = d.ee.u32_at(TREE + 0x8c);
+    let Structure::Tree(t) = &d.world.broad.structures[0] else { unreachable!() };
+    let port_root = t.root.unwrap();
+    // Each vehicle's sphere as the image has it: the ride's state, taken as input.
+    let mut spheres: Vec<(u32, atv_world::VehicleSphere)> = VEHICLES
+        .iter()
+        .zip(d.vehicles.clone())
+        .map(|(&v, o)| {
+            let ee = &d.ee;
+            let s = ee.u32_at(v + SPHERE);
+            let l = ee.u32_at(v + vehicle::LIST);
+            let list = Nearby::vehicle();
+            assert_eq!(
+                [list.least.0.to_bits(), list.extra.0.to_bits(), list.capacity as u32, u32::from(list.filter), u32::from(list.flat), u32::from(list.no_groups), 0],
+                [0x24, 0x28, 0x34, 0x38, 0x3c, 0x2c, 4].map(|o| ee.u32_at(l + o)),
+                "{v:#x}'s list: least, extra, room, filter, flat, no plants, empty"
+            );
+            let four = |a: u32| [0, 4, 8, 12].map(|i| F(ee.f32_at(a + i)));
+            let top = ee.u32_at(s + 0x148);
+            let sphere = atv_world::VehicleSphere {
+                object: o,
+                at: four(s + 0x160),
+                top: [0, 4, 8].map(|i| F(ee.f32_at(top + i))),
+                reach: F(ee.f32_at(s + 0x170)),
+                list,
+                gathered: four(v + vehicle::GATHERED),
+                moved: F(ee.f32_at(v + vehicle::MOVED)),
+                limit: F(ee.f32_at(v + vehicle::LIMIT)),
+            };
+            assert_eq!(sphere.limit.0, atv_world::VEHICLE_REGATHER, "{v:#x}'s regather distance");
+            (v, sphere)
+        })
+        .collect();
+    // Each sphere starts filed where the image has it.
+    for (v, s) in &spheres {
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        image_holders(&d.ee, root, String::new(), d.ee.u32_at(v + SPHERE) + at::ENTRY, &mut a);
+        port_holders(&d.world, port_root, String::new(), s.object, &mut b);
+        assert_eq!(b, a, "{name}: vehicle {v:#x}'s sphere's slots at the start");
+    }
+    // The player's quad's rider, which the test turns off and on again.
+    let (rider, riding) = (d.ee.u32_at(QUAD + vehicle::RIDER), d.ee.u32_at(QUAD + vehicle::RIDING));
+    assert!(rider != 0 && riding != 0, "the player's quad has its rider");
+    let (rider_was, riding_was) = (d.ee.u32_at(rider + 0x58), d.ee.u32_at(riding + 0x40));
+
+    // The player drives the captures, then wanders; the others wander from the origin.
+    let mut g = Gen(0x4d44_3833_62);
+    let mut walks: Vec<Vec<[f32; 3]>> = vec![d.points.iter().map(|(_, p)| *p).collect()];
+    for k in 0..VEHICLES.len() {
+        let mut p = if k == 0 { *walks[0].last().unwrap() } else { [g.unit() * 5700.0, 120.0, g.unit() * 5700.0] };
+        let mut walk = if k == 0 { std::mem::take(&mut walks[0]) } else { Vec::new() };
+        let (mut heading, n) = (g.unit() * 6.283, if k == 0 { 3000 } else { 400 });
+        for _ in 0..n {
+            heading += (g.unit() - 0.5) * 0.6;
+            let step = g.unit() * g.unit() * 16.0;
+            p = [(p[0] + step * heading.cos()).clamp(-30.0, 5790.0), 100.0 + g.unit() * 50.0, (p[2] + step * heading.sin()).clamp(-30.0, 5790.0)];
+            walk.push(p);
+        }
+        if k == 0 {
+            walks[0] = walk;
+        } else {
+            walks.push(walk);
+        }
+    }
+
+    let (point, toward, out) = (d.ee.scratch(0), d.ee.scratch(1), d.ee.scratch(2));
+    let (mut calls, mut refiled, mut unfiled, mut gathers, mut found, mut offs, mut longest) = (0, 0, 0, 0, 0, 0, 0);
+    for ((v, s), walk) in spheres.iter_mut().zip(&walks) {
+        let (v, entry) = (*v, d.ee.u32_at(*v + SPHERE) + at::ENTRY);
+        for (n, p) in walk.iter().enumerate() {
+            let gather = n % 13 != 5;
+            let off = v == QUAD && n % 97 >= 80;
+            let ee = &mut d.ee;
+            ee.set_u32(rider + 0x58, if off { 2 } else { rider_was });
+            ee.set_u32(riding + 0x40, if off { 1 } else { riding_was });
+            for (i, x) in [p[0], p[1], p[2], 1.0].iter().enumerate() {
+                ee.set_f32(point + 4 * i as u32, *x);
+            }
+            for (i, x) in [0.3f32, -0.7, 0.2, 0.0].iter().enumerate() {
+                ee.set_f32(toward + 4 * i as u32, *x);
+            }
+            let stale = ee.f32_at(v + vehicle::MOVED) > ee.f32_at(v + vehicle::LIMIT);
+            ee.call(PLACE, &[u64::from(v), u64::from(point), u64::from(toward), u64::from(out), u64::from(gather)], &[], 50_000_000);
+
+            let w = &mut d.world;
+            w.place_vehicle(s, [p[0], p[1], p[2], 1.0].map(F), off, gather);
+            let ee = &d.ee;
+            let what = format!("{name}: vehicle {v:#x} call {n} at {p:?} (gather {gather}, off {off})");
+            let c = entry - at::ENTRY;
+            let bits4 = |a: u32| [0, 4, 8, 12].map(|i| ee.u32_at(a + i));
+            let mine4 = |f: [F; 4]| f.map(|f| f.0.to_bits());
+            assert_eq!(bits4(c + 0x160), mine4(s.at), "{what}: where it was put");
+            assert_eq!([0, 4, 8].map(|i| ee.u32_at(ee.u32_at(c + 0x148) + i)), s.top.map(|f| f.0.to_bits()), "{what}: the sweep's top");
+            assert_eq!(ee.u32_at(c + 0x170), s.reach.0.to_bits(), "{what}: its reach");
+            assert_eq!(bits4(v + vehicle::GATHERED), mine4(s.gathered), "{what}: where it last gathered");
+            assert_eq!(ee.u32_at(v + vehicle::MOVED), s.moved.0.to_bits(), "{what}: how far it had gone");
+            same_fields(ee, c, w, s.object, &image, &what);
+            let l = ee.u32_at(v + vehicle::LIST);
+            let (count, list) = (ee.u32_at(l + 4), ee.u32_at(l));
+            let want: Vec<(Id, u32)> = (0..count)
+                .map(|i| (image_id(ee, ee.u32_at(list + 8 * i)).expect("a collidable or a plant"), ee.u32_at(list + 8 * i + 4)))
+                .collect();
+            let got: Vec<(Id, u32)> = s.list.found.iter().map(|c| (port_id(w, c.object), c.distance.0.to_bits())).collect();
+            assert_eq!(got, want, "{what}: the list");
+            assert_eq!(s.list.bound.0.to_bits(), ee.u32_at(l + 0x20), "{what}: the bound");
+            assert_eq!(u32::from(s.list.flat), ee.u32_at(l + 0x3c), "{what}: flat again");
+            if stale {
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                image_holders(ee, root, String::new(), entry, &mut a);
+                port_holders(w, port_root, String::new(), s.object, &mut b);
+                assert_eq!(b, a, "{what}: the slots it is filed in");
+                refiled += 1;
+                // A box past the tree's edge is filed nowhere.
+                unfiled += usize::from(a.is_empty());
+            }
+            calls += 1;
+            gathers += usize::from(gather && s.gathered == s.at && s.moved > s.limit);
+            found += got.len();
+            longest = longest.max(got.len());
+            offs += usize::from(off);
+        }
+    }
+    d.ee.set_u32(rider + 0x58, rider_was);
+    d.ee.set_u32(riding + 0x40, riding_was);
+    println!("{name}: {calls} places ({offs} with the rider off), {refiled} filed again ({unfiled} past the edge), {gathers} gathered afresh, {found} candidates in all, longest {longest}");
+
+    // And the tree as a whole, the holes the spheres left included.
+    let (mut want, mut got, mut skipped, mut again) = (BTreeMap::new(), BTreeMap::new(), 0, 0);
+    image_nodes(&d.ee, root, String::new(), &mut want, &mut skipped, &mut again);
+    port_nodes(&d.world, port_root, String::new(), &mut got);
+    let differ = want
+        .iter()
+        .filter(|(p, ids)| {
+            let mine = got.get(*p).map(|g| if ids.contains(&None) { g.clone() } else { g.iter().copied().filter(Option::is_some).collect() });
+            mine.as_ref() != Some(*ids)
+        })
+        .count();
+    assert_eq!(differ, 0, "{name}: nodes differ after the walks");
+    assert!(refiled > 200 && gathers > 200 && found > 100 && offs > 100, "{name}: the walks filed, gathered and found enough");
 }

@@ -19,6 +19,10 @@ start zone's mesh filed again, the six vehicles' spheres, and the moving list (t
 MD83a (`7-rider-radii-MD83a.md`): the rider spheres' nine radii are read from `Rider\Anim\mrider.phy`
 in `MXVSATV.PSR` (its `Type = Collision` constraints' parts), not from the image.
 
+MD83b (`8-vehicle-sphere-gather-MD83b.md`): a vehicle's own gather round its sphere. The sphere is
+filed again only after a gather finds it 10 ft from the last one, and nowhere if its box leaves the
+tree. Equal to the original's on 8,050 places on each of three images: sphere, list and tree slots.
+
 MD86 (`5-contacts-MD86.md`): `quad::Steps` answers `Call::Contacts` over Desert Oasis (`atv_search::Oasis`).
 The original's distributor and search run unhooked, and the quad, the body and the wheels equal the port's on
 763 frames.
