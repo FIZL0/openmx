@@ -617,6 +617,16 @@ pub enum Call {
     SpatialUpdate,
     NodeBounds,
     CollisionSync,
+    /// What those three [`Steps`] runs call in turn (MD75c): the quad's node's bounds gathered again
+    /// (its vt `+0x94`) when they are stale ([`crate::atv_moto::Scene::bounds_stale`]); a box moved in
+    /// the world's spatial database (`atv_spatial_move`) — the quad's own entry (`node` false: its node's
+    /// box, reaching 0) or its node's ([`crate::atv_moto::Scene::database_box`]); and a collidable
+    /// brought up to date (`atv_part_sync`) and the nearby list gathered round the active one
+    /// ([`crate::atv_world`]'s gather, kind 3), from [`crate::atv_moto::collision_sync`].
+    NodeRebound,
+    SpatialMove { node: bool, centre: Vf, half: Vf, reach: F },
+    PartSync(Part),
+    Gather(Part),
     /// The wreck body's ([`build_wreck_body`], [`swap_rays`], MD65a): a ray-probe part made; its flag
     /// byte set from a flags word; it hung in the quad's scene tree; the wreck rays loaded from
     /// [`WRECK_FILE`] on the quad's scene node, then readied; a part shown in or hidden from the scene,
@@ -1946,12 +1956,30 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
                     self.rest.call(Call::BodyReset, q, body);
                     self.rest.call(Call::Respawn, q, body);
                 }
-                self.rest.call(Call::SpatialUpdate, q, body);
+                self.call(Call::SpatialUpdate, q, body);
                 if self.bike.parts.flags & 0x02 != 0 {
-                    self.rest.call(Call::NodeBounds, q, body);
+                    self.call(Call::NodeBounds, q, body);
                 }
-                self.rest.call(Call::CollisionSync, q, body);
+                self.call(Call::CollisionSync, q, body);
                 self.bike.parts.flags &= !0x04;
+            }
+            Call::SpatialUpdate => {
+                if self.bike.parts.spatial {
+                    let (centre, half) = self.node_box(q, body);
+                    self.rest.call(Call::SpatialMove { node: false, centre, half, reach: F::ZERO }, q, body);
+                }
+            }
+            Call::NodeBounds => {
+                if self.bike.parts.scene.nodes[0].spatial {
+                    let (centre, half) = self.node_box(q, body);
+                    let (centre, half, reach) = self.bike.parts.scene.database_box(0, centre, half);
+                    self.rest.call(Call::SpatialMove { node: true, centre, half, reach }, q, body);
+                }
+            }
+            Call::CollisionSync => {
+                for c in crate::atv_moto::collision_sync(&self.bike.parts.collidables) {
+                    self.rest.call(c, q, body);
+                }
             }
             Call::NodePosition => q.node_pos = self.bike.parts.scene.position(0),
             c => self.rest.call(c, q, body),
@@ -1960,6 +1988,16 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
 }
 
 impl<R: Moto, G> Steps<R, G> {
+    /// The quad's node's box in the world (MD75c): its frame brought up to date, its bounds gathered
+    /// again if they are stale, then [`crate::atv_moto::Scene::world_box`].
+    fn node_box(&mut self, q: &mut Quad, body: &mut Body) -> (Vf, Vf) {
+        if self.bike.parts.scene.bounds_stale(0) {
+            self.rest.call(Call::NodeRebound, q, body);
+            self.bike.parts.scene.rebounded(0);
+        }
+        self.bike.parts.scene.world_box(0)
+    }
+
     /// The input limiter on the quad's levers: the controls as the pad left them (the gas and brake
     /// levers, the clutch lever, the balance stunt as the gas's zero gate) in, the levers it leaves
     /// and the rate limiter's out.

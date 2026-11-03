@@ -3068,6 +3068,17 @@ const RESPAWN: u32 = 0x004a_4c60;
 const SPATIAL_UPDATE: u32 = 0x0049_2c40;
 const NODE_BOUNDS: u32 = 0x0019_6e80;
 const COLLISION_SYNC: u32 = 0x0049_42c0;
+/// MD75c: what those three call in turn — a box moved in the spatial database, a collidable brought up
+/// to date, the nearby list gathered — and, through [`NODE_VT`] laid as the quad's node's vtable, the
+/// node's bounds gathered again (`+0x94`, at [`REBOUND_FN`]). The database entries and the
+/// collidables are words where their pointers go; nothing reads through them.
+const SPATIAL_MOVE: u32 = 0x0018_d690;
+const PART_SYNC: u32 = 0x0011_4360;
+const GATHER: u32 = 0x001d_6a60;
+const NODE_VT: u32 = 0x01c2_2000;
+const REBOUND_FN: u32 = 0x01cf_0800;
+const ENTRY: u32 = 0x01c2_2100;
+const COLLIDABLE_AT: u32 = 0x01c2_2200;
 
 fn all_regions() -> impl Iterator<Item = (&'static str, u32, u32)> {
     REGIONS.into_iter().chain(MORE_REGIONS)
@@ -3757,6 +3768,17 @@ fn node_at(i: usize) -> u32 {
     SCENE + 0x200 * i as u32
 }
 
+const COLLIDABLES: [quad::Part; 5] = [quad::Part::Riding, quad::Part::Frame, quad::Part::Sweep, quad::Part::Trigger, quad::Part::Wreck];
+
+/// MD75c: where the harness lays a collidable the collision sync is handed, and back.
+fn collidable_at(p: quad::Part) -> u32 {
+    COLLIDABLE_AT + 0x10 * COLLIDABLES.iter().position(|&c| c == p).unwrap() as u32
+}
+
+fn collidable_of(at: u32) -> quad::Part {
+    *COLLIDABLES.iter().find(|&&c| collidable_at(c) == at).unwrap_or_else(|| panic!("no collidable at {at:#x}"))
+}
+
 /// MD75b1's words: the quad's node in [`SCENE`] (each node's frames, links and flag byte), the 360's
 /// words, and the world's floor and box.
 fn lay_scene(ee: &mut Ee, x: &game_sim::atv_moto::Parts) {
@@ -3771,6 +3793,21 @@ fn lay_scene(ee: &mut Ee, x: &game_sim::atv_moto::Parts) {
         ee.set_u32(at + 0xf4, n.child.map_or(0, node_at));
         ee.set_u32(at + 0xf8, n.sibling.map_or(0, node_at));
         tire_set_byte(ee, at + 0x100, n.flags);
+        // MD75c's: the vtable the stale bounds are gathered through, the database entry, the box, the
+        // second flag byte and the reach.
+        ee.set_u32(at + 4, NODE_VT);
+        ee.set_u32(at + 8, if n.spatial { ENTRY } else { 0 });
+        put_v(ee, at + 0xd0, n.centre);
+        put_v(ee, at + 0xe0, n.half);
+        tire_set_byte(ee, at + 0x101, n.more);
+        put_f(ee, at + 0x108, n.reach);
+    }
+    ee.set_u32(NODE_VT + 0x94, REBOUND_FN);
+    ee.set_u32(OBJ + 8, if x.spatial { ENTRY } else { 0 });
+    let c = &x.collidables;
+    tire_set_byte(ee, OBJ + 0x44, u8::from(c.sync));
+    for (at, p) in [(OBJ + 0xcc, c.riding), (OBJ + 0xd0, c.frame), (OBJ + 0xd8, c.active)] {
+        ee.set_u32(at, p.map_or(0, collidable_at));
     }
     let s = &x.spin;
     put_b(ee, OBJ + 0x11dc, s.armed);
@@ -3924,7 +3961,7 @@ fn hook_steps(ee: &mut Ee, picks: &[u32], answers: &Answers, echo: &Rc<Cell<bool
 /// MD75b1: the PostProcess's two calls, and what the vehicle post calls, hooked to log into `log` as
 /// [`hook_steps`]'s do (the node position writes nothing); then the hooks at `picks` taken off.
 fn hook_post(ee: &mut Ee, log: &Log<Call>, picks: &[u32]) {
-    let table: [(u32, fn(&Ee) -> Call); 7] = [
+    let table: [(u32, fn(&Ee) -> Call); 11] = [
         (VEHICLE_POST, |ee| on_quad(ee, Call::VehiclePost(F(ee.f(12))))),
         (NODE_POSITION, |ee| {
             assert_eq!((ee.r(4) as u32, ee.r(5), ee.r(6) as u32), (node_at(0), 0, OBJ + 0xbd0), "the node's arguments");
@@ -3938,6 +3975,24 @@ fn hook_post(ee: &mut Ee, log: &Log<Call>, picks: &[u32]) {
             Call::NodeBounds
         }),
         (COLLISION_SYNC, |ee| on_quad(ee, Call::CollisionSync)),
+        (REBOUND_FN, |ee| {
+            assert_eq!(ee.r(4) as u32, node_at(0), "the rebound's node");
+            Call::NodeRebound
+        }),
+        (SPATIAL_MOVE, |ee| {
+            let node = match ee.r(4) as u32 {
+                OBJ => false,
+                n if n == node_at(0) => true,
+                n => panic!("a spatial move of {n:#x}"),
+            };
+            let v = |a: u64| Vf::new(ee.f32_at(a as u32), ee.f32_at(a as u32 + 4), ee.f32_at(a as u32 + 8), ee.f32_at(a as u32 + 12));
+            Call::SpatialMove { node, centre: v(ee.r(5)), half: v(ee.r(6)), reach: F(ee.f(12)) }
+        }),
+        (PART_SYNC, |ee| Call::PartSync(collidable_of(ee.r(4) as u32))),
+        (GATHER, |ee| {
+            assert_eq!((ee.r(4) as u32, ee.r(6)), (ACTORS, 3), "the gather's list and kind");
+            Call::Gather(collidable_of(ee.r(5) as u32))
+        }),
     ];
     for (at, f) in table {
         let l = log.clone();
@@ -4061,7 +4116,7 @@ fn each_unhooked_in(
                 Call::StartStunt(_) => tally(&mut t, "stunt started"),
                 Call::EndStunt => tally(&mut t, "stunt ended"),
                 Call::BodyReset => tally(&mut t, "reset"),
-                Call::NodeBounds => tally(&mut t, "bounds"),
+                Call::NodeRebound => tally(&mut t, "rebound"),
                 Call::Wreck(r) => {
                     tally(&mut t, "wrecked");
                     if *r == 15 {
@@ -4778,7 +4833,7 @@ fn post_paths(r: &Ride) -> Vec<&'static str> {
         return vec!["body off"];
     }
     let n = &x.scene.nodes[0];
-    vec![
+    let mut p = vec![
         if x.flags & 1 != 0 {
             if x.bounds.area.is_some() { "boxed" } else { "no box" }
         } else if x.flags & 0x40 != 0 {
@@ -4794,7 +4849,12 @@ fn post_paths(r: &Ride) -> Vec<&'static str> {
             Some(c) if c.sibling.is_some() => "two children",
             Some(_) => "a child",
         },
-    ]
+    ];
+    // MD75c: the node's bounds are asked for on the flag byte (they ran inline since).
+    if x.flags & 2 != 0 {
+        p.push("bounds");
+    }
+    p
 }
 
 #[test]
@@ -4818,7 +4878,7 @@ fn the_quads_vehicle_post_is_the_originals() {
         "bounds",
     ];
     let tweak = |g: &mut Gen, r: &mut Ride| g.md75b1(r);
-    each_unhooked_in(0x0075_b102, 10_000, Listener::Post, &[VEHICLE_POST], tweak, post_paths, &want, 30);
+    each_unhooked_in(0x0075_b102, 10_000, Listener::Post, &POST_STEPS, tweak, post_paths, &want, 30);
 }
 
 /// Where the node's world frame comes from when it is asked where it is (`atv_node_world_update`).
@@ -4849,7 +4909,8 @@ fn the_quads_node_position_is_the_originals() {
     each_unhooked_in(0x0075_b103, 10_000, Listener::Post, &[NODE_POSITION], tweak, position_paths, &want, 30);
 }
 
-/// The PostProcess with both its calls ported: the node placed, then asked where it is.
+/// The PostProcess with both its calls ported: the node placed (and, MD75c, the vehicle post's three
+/// calls run), then asked where it is.
 #[test]
 fn the_quads_post_process_runs_every_ported_step() {
     let paths = |r: &Ride| {
@@ -4858,8 +4919,107 @@ fn the_quads_post_process_runs_every_ported_step() {
         p
     };
     let want = ["body off", "boxed", "floored", "placed under a parent", "placed alone", "reset", "bounds", "current", "under two"];
-    let tweak = |g: &mut Gen, r: &mut Ride| g.md75b1(r);
-    each_unhooked_in(0x0075_b104, 5_000, Listener::Post, &[VEHICLE_POST, NODE_POSITION], tweak, paths, &want, 15);
+    let picks = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, NODE_POSITION];
+    let tweak = |g: &mut Gen, r: &mut Ride| g.md75c(r);
+    each_unhooked_in(0x0075_b104, 5_000, Listener::Post, &picks, tweak, paths, &want, 15);
+}
+
+/// The vehicle post and the three calls it makes that [`quad::Steps`] runs inline (MD75c): a test
+/// that unhooks the post unhooks them too.
+const POST_STEPS: [u32; 4] = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC];
+
+// --- MD75c: the vehicle post's spatial update, node bounds and collision sync ----------------------------
+
+impl Gen {
+    /// MD75c's fields over MD75b1's: the quad's own database entry and each node's (half the time),
+    /// each node's box (`w`s anywhere too), second flag byte and reach, the node's bounds asked for
+    /// half the time, and the collidables: the sync on three times in four, the riding probe mostly
+    /// the active one, each there or not.
+    fn md75c(&mut self, r: &mut Ride) {
+        use quad::Part;
+        self.md75b1(r);
+        let x = &mut r.bike.parts;
+        x.spatial = self.b();
+        for n in &mut x.scene.nodes {
+            n.spatial = self.b();
+            n.centre = self.vec(-5.0, 5.0);
+            n.half = self.vec(-4.0, 4.0);
+            n.more = self.bits() as u8;
+            n.reach = self.f(0.0, 10.0);
+        }
+        if self.b() {
+            x.flags |= 0x02;
+        }
+        let pick = |g: &mut Gen| match g.bits() % 4 {
+            0 => None,
+            1 => Some(Part::Riding),
+            2 => Some(Part::Wreck),
+            _ => Some(Part::Trigger),
+        };
+        let active = pick(self);
+        let riding = if self.b() { active } else { pick(self) };
+        let frame = if self.one_in(4) { None } else { Some(Part::Frame) };
+        x.collidables = game_sim::atv_moto::Collidables { sync: !self.one_in(4), riding, frame, active };
+    }
+}
+
+/// Which way the vehicle post's three calls go, from the decompiles' branches (`atv_vehicle_spatial_update`,
+/// `atv_node_bounds`, `atv_vehicle_collision_sync`); the node's bounds gathered again are tallied off the
+/// calls.
+fn post_callee_paths(r: &Ride) -> Vec<&'static str> {
+    let x = &r.bike.parts;
+    if !r.s.q.active {
+        return vec!["off"];
+    }
+    if !x.body_on {
+        return vec!["body off"];
+    }
+    let n = &x.scene.nodes[0];
+    let c = &x.collidables;
+    let mut p = vec![if x.spatial { "the quad's entry moved" } else { "the quad has no entry" }];
+    if x.flags & 2 != 0 {
+        p.push(match (n.spatial, n.more & 4 != 0) {
+            (false, _) => "the node has no entry",
+            (true, true) => "the node's box round its origin",
+            (true, false) => "the node's box at its reach",
+        });
+    }
+    if !c.sync {
+        p.push("sync off");
+    } else {
+        p.push(match c.riding {
+            None => "no riding probe",
+            same if same == c.active => "riding is active",
+            Some(_) => "riding apart",
+        });
+        p.push(if c.frame.is_some() { "frame" } else { "no frame" });
+        p.push(if c.active.is_some() { "gathered" } else { "no active probe" });
+    }
+    p
+}
+
+#[test]
+fn the_quads_post_process_callees_are_the_originals() {
+    let want = [
+        "off",
+        "body off",
+        "the quad's entry moved",
+        "the quad has no entry",
+        "the node has no entry",
+        "the node's box round its origin",
+        "the node's box at its reach",
+        "rebound",
+        "sync off",
+        "no riding probe",
+        "riding is active",
+        "riding apart",
+        "frame",
+        "no frame",
+        "gathered",
+        "no active probe",
+    ];
+    let tweak = |g: &mut Gen, r: &mut Ride| g.md75c(r);
+    each_unhooked_in(0x0075_c001, 10_000, Listener::Post, &POST_STEPS, tweak, post_callee_paths, &want, 30);
 }
 
 // --- MD65a: the wreck body -----------------------------------------------------------------------------

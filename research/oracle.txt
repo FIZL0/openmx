@@ -6799,6 +6799,36 @@ atv_bike_flip_wreck_steep   atv 0x004e8370 = the backflip's mid-clip wreck's rea
 # stops the clip on the rider's animation objects (+0x680/+0x684). +0x1524 copies +0x1528 once a frame
 # (0x004dd9cc's function). atv_bike_flip_wreck_steep = the wreck test's reason 15 (handling::step::flip_wreck_steep).
 atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into body +0x1b0, then its +0xe8 listeners)
+# MD75c — the vehicle post's three calls (atv_moto.rs Scene::bounds_stale / world_box / database_box,
+# collision_sync; quad::Steps runs them inline from the vehicle post; tests/atv_quad.rs unhooks all four under
+# atv_quad_air_state). Journal: research/journal/2026-11-02-md75-atv-frame/6-post-callees.md.
+# Spatial update: quad +8 (its database entry; 0 in atv-r-spawn) -> atv_node_world_box(quad +0xe4), then
+# atv_spatial_move(quad, centre, half, reach 0.0). Node bounds: node +8 (0 at the spawn) -> world update; stale
+# (+0x100 bit 7, and bit 3 or not bit 6) -> node vt +0x94, bit 7 cleared; the box as the world box's; +0x101
+# bit 2 -> centre = world position (w 1.0, f20), half += |centre - position| (pand 0x7fffffff, all lanes; vadd
+# .xyz), reach = sqrt.s(mula x x, madda y y, madd z z); else the box with reach +0x108; atv_spatial_move(node,
+# centre, half, reach). The decompile hides the bit-2 path's a1: it is the position, not the centre.
+# World box: half = (|row y * e.y| + |row x * e.x|) + |row z * e.z| * 1 (vadda, vmaddw; xyz, w e's +0xec),
+# centre = ((row 3 + 0) + row x * c.x + row y * c.y) + row z * c.z (xyz, w c's +0xdc); c +0xd0, e +0xe0. Its
+# w = 1.0 stores are overwritten by the sdc2s. Node: +4 vtable (0x003b4ed0 for the spawned quad's), +0x104,
+# +0x108 reach, +0x10c/+0x144 child bounds list (read by the gather at vt +0x94 only).
+# Collision sync: quad +0x44 bit 0 (set at the spawn) -> atv_part_sync(+0xcc) unless 0 or == +0xd8, then
+# (+0xd0) if there, then (+0xd8) and atv_gather_nearby(+0xc4, +0xd8, 3) if there. atv_part_sync: part vt +0xc8
+# (atv_search_record_clear for the probe; the frame mesh's is 0x001be760), then atv_part_box_move: with part
+# +0x20 (its database, set for both at the spawn) part vt +0xc4 (the box; probe 0x001bd1d0, mesh 0x001be7b0)
+# and atv_spatial_move(part + 0x18, centre, half, reach part +0x70).
+# atv_spatial_move: a0 entry, a1/a2 centre/half, f12 reach -> atv_spatial_move_in(entry +8, entry, ...): the
+# entry's cell (+4) walked across links (+0x24 list: +0 next, +4 cell, +8 portal) the segment from the
+# entry's last centre (+0x10) to the new one crosses (0x0014d970); same cell: sub-database (+8) vt +0x20 picks a
+# slot, == +0xc -> vt +0x28 (move), else vt +0x2c (out) and +0x24 (in); new cell: out of the old and every extra
+# cell (+0 list, links freed to the pool 0x0040c460), sub-database made for the cell (0x0018ed50), vt +0x20,
+# +0x24; then the overlaps (0x00190350); +0x10 = centre.
+atv_node_world_box          atv 0x00196820 = a scene node's box in the world (a0 node, a1 centre out, a2 half out)
+atv_node_rebound            atv 0x0018ce40 = scene node vt +0x94, its bounds gathered from its own and its children's
+atv_spatial_move            atv 0x0018d690 = an entry's box moved in its spatial database (a0 entry, a1 centre, a2 half, f12 reach)
+atv_spatial_move_in         atv 0x0018ffc0 = atv_spatial_move's body (a0 database handle, a1 entry, ...)
+atv_part_sync               atv 0x00114360 = a collidable brought to its node (vt +0xc8) and its box moved (atv_part_box_move)
+atv_part_box_move           atv 0x00114480 = a collidable's box (vt +0xc4) into its database, if it has one (+0x20)
 # MD62 — atv_bike_airborne_control's fields, bike-relative (tests/mxvatv_air.rs runs it off state04 too):
 # +0x1170..+0x117c AirborneControlMoment, +0x1180 damping, +0x1184 control force, +0x1188/+0x118c
 # authority and its time, +0x1194 the backflip's torque in, +0x1198 its ramp (flipping), +0x11d0 the

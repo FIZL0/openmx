@@ -9,12 +9,15 @@
 //! - Part 3 (MD75b1): the Force body's [`spin_air`] (the 360, off the scene node's heading), and the
 //!   PostProcess's [`vehicle_post`] (the quad's node placed at the body, if it is in the world) and the
 //!   node's position ([`Scene::position`]), on a small scene graph of the node's own ([`Scene`]).
+//! - Part 4 (MD75c): the vehicle post's three calls — the spatial update and the node's bounds
+//!   ([`Scene::bounds_stale`], [`Scene::world_box`], [`Scene::database_box`]: the box the world's spatial
+//!   database is handed) and the [`collision_sync`].
 //!
 //! Each is MX Unleashed's step of the same name where SLUS-21104 kept it (`crate::r#move`), with the
 //! differences written out where they fall: the engine drives one wheel *or two*, halving the torque
 //! between them, and reads the road's revs off the first one's spin alone; the head and tail picks
 //! one of three poses; the gravity lives on the vehicle, not the body, and it pokes the collision
-//! record. The field map is research/oracle.txt's (`# MD75b`, `# MD75b1`). Proof: `tests/atv_quad.rs`, each call
+//! record. The field map is research/oracle.txt's (`# MD75b`, `# MD75b1`, `# MD75c`). Proof: `tests/atv_quad.rs`, each call
 //! unhooked against SLUS-21104's own code.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
@@ -63,6 +66,10 @@ pub struct Parts {
     pub spin: Spin,
     pub scene: Scene,
     pub bounds: Bounds,
+    /// MD75c's: whether the quad has an entry of its own in the world's spatial database (`+8`), and
+    /// the collidables the collision sync keeps up to date ([`Collidables`]).
+    pub spatial: bool,
+    pub collidables: Collidables,
 }
 
 impl Default for Parts {
@@ -78,6 +85,8 @@ impl Default for Parts {
             spin: Spin::default(),
             scene: Scene::default(),
             bounds: Bounds::default(),
+            spatial: false,
+            collidables: Collidables::default(),
         }
     }
 }
@@ -363,6 +372,14 @@ pub struct Node {
     pub child: Option<usize>,
     pub sibling: Option<usize>,
     pub flags: u8,
+    /// MD75c's: whether the node has an entry in the world's spatial database (`+8`); its box in its
+    /// own frame, the centre (`+0xd0`) and the half extent (`+0xe0`); its second flag byte (`+0x101`,
+    /// bit 2: the database is handed a box round the node's origin); and its reach (`+0x108`).
+    pub spatial: bool,
+    pub centre: Vf,
+    pub half: Vf,
+    pub more: u8,
+    pub reach: F,
 }
 
 /// The scene graph around the quad: node 0 is the quad's (`+0xe4`).
@@ -379,8 +396,24 @@ pub struct Bounds {
     pub area: Option<(Vf, Vf)>,
 }
 
+/// The quad's collidables as the collision sync sees them (MD75c): the flag that turns it on (bit 0
+/// of the byte before the flag byte, `+0x44`), the riding probe (`+0xcc`), the frame mesh (`+0xd0`)
+/// and the active probe (`+0xd8`, the one the nearby list is gathered round). The riding and the
+/// active probe are the same one but for a moment during a swap.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Collidables {
+    pub sync: bool,
+    pub riding: Option<crate::quad::Part>,
+    pub frame: Option<crate::quad::Part>,
+    pub active: Option<crate::quad::Part>,
+}
+
 const CLEAN: u8 = 0x01;
+const OWN_BOUNDS: u8 = 0x08;
+const BOUNDED: u8 = 0x40;
 const STALE_BOUNDS: u8 = 0x80;
+/// The second flag byte's bit for a database box round the node's origin.
+const ORIGIN_REACH: u8 = 0x04;
 
 /// `a · b` as the scene graph multiplies frames (`vmulax`, `vmadday`, `vmaddz` a row; the position
 /// row starts from `b`'s with `vaddax` of 0): `a`'s rows in `b`'s space.
@@ -502,6 +535,53 @@ impl Scene {
     pub fn position(&mut self, n: usize) -> Vf {
         self.update(n);
         self.nodes[n].world[3].merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0))
+    }
+
+    /// **The node's bounds are to be gathered again** (MD75c), after its world frame is brought up to
+    /// date: they are stale (bit 7), and the node has its own (bit 3) or none yet (bit 6 clear). The
+    /// caller then makes the node's gather (its vt `+0x94`) and clears bit 7 ([`Scene::rebounded`]).
+    pub fn bounds_stale(&mut self, n: usize) -> bool {
+        self.update(n);
+        let f = self.nodes[n].flags;
+        f & STALE_BOUNDS != 0 && (f & OWN_BOUNDS != 0 || f & BOUNDED == 0)
+    }
+
+    /// The node's bounds gathered: bit 7 cleared.
+    pub fn rebounded(&mut self, n: usize) {
+        self.nodes[n].flags &= !STALE_BOUNDS;
+    }
+
+    /// **The node's box in the world** (`atv_node_world_box`, after [`Scene::bounds_stale`]): the centre
+    /// carried through the world frame (`vaddax` of the position row and 0, then `vmaddax`, `vmadday`,
+    /// `vmaddz` of the rows), the half extent the sum of each row times its lane, made positive
+    /// (`|y| + |x|` into the accumulator, then `+ |z|·1`). `xyz` only: the `w`s are the box's own.
+    pub fn world_box(&self, n: usize) -> (Vf, Vf) {
+        let node = &self.nodes[n];
+        let (m, c, e) = (&node.world, node.centre, node.half);
+        let (hx, hy, hz) = (m[0].mul(e.bc(Field::X)).abs(), m[1].mul(e.bc(Field::Y)).abs(), m[2].mul(e.bc(Field::Z)).abs());
+        let acc = Vf::madd(Vf::madd(m[3].add(Vf::ZERO), m[0], c.bc(Field::X)), m[1], c.bc(Field::Y));
+        let centre = c.merge(Dest::XYZ, Vf::madd(acc, m[2], c.bc(Field::Z)));
+        let half = e.merge(Dest::XYZ, Vf::madd(hy.add(hx), hz, Vf::splat(1.0)));
+        (centre, half)
+    }
+
+    /// **The box the node's bounds hand the spatial database** (`atv_node_bounds`, after its box): with
+    /// bit 2 of the second flag byte, a box round the node's origin (its world position, `w` 1) that
+    /// still holds the node's — the half extent grown by `|centre - origin|` (the sign bits masked off
+    /// all four lanes) — reaching the length of that half extent (`mula`, `madda`, `madd`, `sqrt`);
+    /// else the box as it is, reaching the node's reach word. Returns the centre, the half extent and
+    /// the reach.
+    pub fn database_box(&mut self, n: usize, centre: Vf, half: Vf) -> (Vf, Vf, F) {
+        if self.nodes[n].more & ORIGIN_REACH == 0 {
+            return (centre, half, self.nodes[n].reach);
+        }
+        self.update(n);
+        let origin = self.nodes[n].world[3].merge(Dest::W, Vf::splat(1.0));
+        let d = sub_xyz(centre, origin);
+        let d = Vf(d.0.map(|x| f32::from_bits(x.to_bits() & 0x7fff_ffff)));
+        let half = add_xyz(half, d);
+        let reach = Acc::mula(F(half.x()), F(half.x())).madda(F(half.y()), F(half.y())).madd(F(half.z()), F(half.z())).sqrt();
+        (origin, half, reach)
     }
 
     /// **The node's forward and up axes** (`atv_node_axes` in the world): the world frame brought up to
@@ -708,4 +788,27 @@ pub fn vehicle_post(parts: &mut Parts, body: &Body, cofg: Vf) -> Option<bool> {
         parts.scene.place(0, body.orientation, at);
     }
     Some(inside)
+}
+
+/// **The collision sync** (`atv_vehicle_collision_sync`, vt `+0x124`), the vehicle post's last call: with the sync on,
+/// the riding probe brought up to date unless it is the active one, then the frame mesh, then the
+/// active probe and the nearby list gathered round it — each one there. Returns the calls in order:
+/// [`Call::PartSync`] for each collidable (`atv_part_sync`: its record cleared, then its box into the
+/// database), then [`Call::Gather`].
+pub fn collision_sync(c: &Collidables) -> Vec<Call> {
+    let mut calls = Vec::new();
+    if !c.sync {
+        return calls;
+    }
+    if let Some(p) = c.riding.filter(|&p| Some(p) != c.active) {
+        calls.push(Call::PartSync(p));
+    }
+    if let Some(p) = c.frame {
+        calls.push(Call::PartSync(p));
+    }
+    if let Some(p) = c.active {
+        calls.push(Call::PartSync(p));
+        calls.push(Call::Gather(p));
+    }
+    calls
 }
