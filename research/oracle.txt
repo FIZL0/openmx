@@ -7999,3 +7999,23 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 #   children of the model's root.
 # The DirtSpray and Chunks zone descriptors say none to Zone1 (surface 0): a car on surface 0 dusts but
 #   throws no dirt or chunks.
+# MD76 — Desert Oasis's ground for the ATV (crates/game-sim/src/atv_ground.rs; tests/atv_ground.rs runs the
+# query off MD37a's atv-r-spawn.ee.bin over 29,450 points, nothing hooked). Journal:
+# research/journal/2026-11-02-md76-atv-ground. Desert Oasis Free Ride is Env/MC02 (mc02.res, member
+# Env\mc02\MC02.ps2.trn; its heights match the image's cells). The terrain object the wheels hold (wheel
+# +0x1e0) is 0x0184c7d0 there: +0x30 box min (0,0,0,1), +0x40 box max (5760, 343.9, 5760, 1), +0x50 margin
+# 0.01, +0x90 height scale 4.5, +0x94 the cell reader's terrain (0x01840a10), +0x770 split one way (1),
+# +0x788 samples per foot 0.2222222, +0x8b8 coarse (0), +0x9e0 ring set up, +0x9e4 ring index. MX Unleashed's
+# offsets are these less 0x10 from +0x770 on (+0x760, +0x778, +0x8a8) and +0x80/+0x84 for +0x90/+0x94.
+# The query = MX Unleashed's 0x001dc960 with x and z held in the box first (max(p, min + m), min(., max - m))
+# and both height sums on the FPU accumulator (adda 0, h; madda u; madd v). The ring: 0x00541550, 0x70 bytes an
+# entry (normals +0, heights x height scale +0x40, key ix<<16|iz +0x50, surfaces +0x5c, ix/iz +0x60/+0x64),
+# count 10 at 0x005251f0, keys of 32 cleared when +0x9e0 is 0; keyed by the sample alone, shared by terrains.
+# The cell reader: heights hs * raw, or hs * (adda 0, base; madd vs, raw - base) when vs != 1; normals
+# (n0 vs/127, n1/127, n2 vs/127, 1) with 1/127 a div.s, unless the flag 0x00541518 is set (only read in the
+# ELF), when they come from a 256-direction table at 0x0039e320 by the block's byte +4. Surfaces & 0x7f. The
+# block in RAM: base +0, table index +4, surfaces +0x125, heights +0x27c (rows of 20), normals +0x550 (rows of
+# 17, 3 bytes each).
+atv_terrain_cell            atv 0x0047b300 = the terrain's cell at a sample (a0 terrain, a1 ix, a2 iz, a3 heights out, t0 normals out, t1 surfaces out, t2 step); 0 = none
+atv_ground_ring             atv 0x00541550 = the ground query's ring of read cells (0x70 bytes each, 10 used)
+atv_normal_table_flag       atv 0x00541518 = the cell reader takes normals from the 256-direction table when set

@@ -946,6 +946,10 @@ pub mod atv_wheel;
 /// integrate and end-of-substep calls.
 pub mod atv_body;
 
+/// The ATV's ground (MD76): MX vs. ATV's ground query under the quad's wheels and the terrain's
+/// cell reader, ported from its ELF.
+pub mod atv_ground;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground
