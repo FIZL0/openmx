@@ -17,21 +17,35 @@
 //! the pair filter is optional (without it a collidable is kept if it is enabled), and the distance
 //! can be measured on the ground plane. A group's distance adds `0` to the probe's point first.
 //!
-//! What SLUS-21104's world holds that this one does not: the scene's zones (five start/trigger
-//! shapes of category `0x8000` and one more), the vehicles' and riders' own collidables in the moving
-//! list, and 239 tree entries of class 7. The image's every gather near the props leaves those out
-//! (the test strips the zones and counts them; it finds none of class 7 or the moving list kept).
+//! MD83 adds the rest of what SLUS-21104 files, each after the plants and in this order:
+//!
+//! - **the zones** ([`zones`], [`World::file_zones`]): the `.toy`'s `[TriggerN]` shapes, a sphere of
+//!   `Radius` or a box of `Box` half sides turned by `LookVector`/`UpVector`, each stood at its
+//!   `Position`, category [`ZONE`], boxed the way a mesh is ([`broad_build::mesh_box`]);
+//! - **the start zone's mesh again** ([`start_zones`], [`World::file_again`]): a scene `COL=` of
+//!   `Type=StartZone` (MC02's `Zone_Platform_Machine.col`) is filed a second time, the same box;
+//! - **the vehicles' spheres** ([`World::add_vehicles`], [`World::move_vehicle`]): one per vehicle
+//!   (category 0, the vehicle's own gather probe), filed at the origin and moved by
+//!   `atv_spatial_move` with a box [`VEHICLE_HALF`] each way, which leaves its old slot empty;
+//! - **the moving list** ([`World::put_moving`]): one block of [`MOVING_SLOTS`] slots the space's
+//!   moving table walks after the tree — the quad's frame mesh, its riding probe and its sweep, the
+//!   riders' parts ([`rider_sphere`], [`rider_sweep`]) and two category-0 sweeps ([`owned_sweep`]).
+//!
+//! The tree's 239 entries of class 7 are scene nodes, not collidables: the gather passes over them.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::broad_build;
 use crate::broad_phase::{Blocks, Broad, Model, Pair, Placement, Query, Space, Structure, Tables, more_flags};
 use crate::eco::{self, Ecosystem, Group};
+use crate::broad_phase::more_flags::ACTIVE;
 use crate::flight_search;
-use crate::track::TerrainLayout;
+use crate::math::{self, Mat4};
+use crate::phy::Ini;
+use crate::track::{Scene, TerrainLayout};
 use crate::world::Prop;
 use crate::world_search::{Candidate, Categories, Class, Collidable, accepts, flags};
-use ps2_float::{Acc, F, fpu};
+use ps2_float::{Acc, F, Vf, fpu};
 
 /// A scene mesh's category (`+0x94`), and its flag byte (`+0x126`): enabled, and gathered only
 /// within the bound.
@@ -43,6 +57,24 @@ pub const TREE_LEAST: f32 = 96.0;
 const SAMPLES_PER_WIDTH: i32 = 256;
 /// The probe's collidable, first in every world.
 pub const PROBE: usize = 0;
+/// A zone's category, and its flag byte: enabled and active (a box zone's byte adds `0x40`, which
+/// the gather does not read).
+pub const ZONE: u32 = 0x8000;
+pub const ZONE_FLAGS: u8 = flags::ENABLED | ACTIVE;
+/// A vehicle's sphere (vehicle `+0xd80`): category 0, enabled and active; the half side of the box
+/// `atv_spatial_move` files it with (`0x00525270`), and its reach while riding (`+0x170`; 5 when the
+/// rider is off).
+pub const VEHICLE: u32 = 0;
+pub const VEHICLE_FLAGS: u8 = flags::ENABLED | ACTIVE;
+pub const VEHICLE_HALF: f32 = 40.0;
+pub const VEHICLE_REACH: f32 = 40.0;
+/// The moving list's one block (`+0x28`).
+pub const MOVING_SLOTS: i32 = 0x400;
+/// A rider part's category: every sphere and sweep the riders' bodies are made of.
+pub const RIDER: u32 = 0x1000;
+/// The structures [`World::new`] makes: the tree, then the moving list.
+const TREE: usize = 0;
+const MOVING: usize = 1;
 
 /// The world, as the quad's gather reads it: the broad phase, and its collidables (the probe, then
 /// the meshes, then the plants).
@@ -148,6 +180,233 @@ impl World {
     /// Put the probe at `centre` (`w` 1).
     pub fn place_probe(&mut self, centre: [F; 3]) {
         self.broad.places[PROBE].centre = [centre[0], centre[1], centre[2], F::ONE];
+    }
+
+    /// `c` added at `centre`, in no structure yet. Its number.
+    pub fn add(&mut self, c: Collidable, centre: [F; 4]) -> usize {
+        self.objects.push(c);
+        self.broad.places.push(Placement { centre, ..Placement::default() });
+        self.objects.len() - 1
+    }
+
+    fn tree(&mut self) -> &mut crate::broad_phase::Quadtree {
+        let Structure::Tree(t) = &mut self.broad.structures[TREE] else { unreachable!("the tree is first") };
+        t
+    }
+
+    /// `o` filed in the tree with the box `centre` ± `half`, the far corner the tree was laid to
+    /// being `hi`.
+    fn file(&mut self, o: usize, centre: [F; 4], half: [F; 4], hi: [F; 2]) {
+        let tree = self.tree();
+        let key = broad_build::key(tree, hi, centre, half);
+        broad_build::insert(tree, o, key);
+    }
+
+    /// The `.toy`'s zones added and filed, in its order, after everything filed so far; where they
+    /// are. `hi` is the tree's far corner ([`terrain_box`]'s).
+    pub fn file_zones(&mut self, zones: &[Zone], hi: [F; 2]) -> std::ops::Range<usize> {
+        let first = self.objects.len();
+        for z in zones {
+            let (c, h) = z.bounds();
+            let o = self.add(z.collidable(), z.centre());
+            self.file(o, c, h, hi);
+        }
+        first..self.objects.len()
+    }
+
+    /// The scene mesh `o` filed a second time, with the box it was filed with.
+    pub fn file_again(&mut self, o: usize, prop: &Prop, hi: [F; 2]) {
+        let (c, h) = flight_search::prop_box(prop);
+        self.file(o, c, h, hi);
+    }
+
+    /// `n` vehicles' spheres, each at the origin with no reach and filed there, in order.
+    pub fn add_vehicles(&mut self, n: usize, hi: [F; 2]) -> std::ops::Range<usize> {
+        let first = self.objects.len();
+        for _ in 0..n {
+            let origin = [F::ZERO, F::ZERO, F::ZERO, F::ONE];
+            let o = self.add(vehicle_sphere(), origin);
+            self.file(o, origin, vehicle_half(), hi);
+        }
+        first..self.objects.len()
+    }
+
+    /// A vehicle's sphere `o` moved to `centre` with `reach` (`atv_spatial_move`): taken out of every
+    /// slot it was in, which stay empty, and filed again with the box `centre` ± [`VEHICLE_HALF`].
+    /// The vehicle files it only where it gathers round it (vehicle `+0xd90`), once it is 10 ft from
+    /// the last place; between, its centre moves on with the vehicle and the tree is left alone.
+    pub fn move_vehicle(&mut self, o: usize, centre: [F; 3], reach: F, hi: [F; 2]) {
+        let centre = [centre[0], centre[1], centre[2], F::ONE];
+        self.broad.places[o].centre = centre;
+        self.objects[o].radius = reach;
+        for node in &mut self.tree().nodes {
+            for slot in node.chunks.iter_mut().flatten() {
+                if *slot == Some(o) {
+                    *slot = None;
+                }
+            }
+        }
+        self.file(o, centre, vehicle_half(), hi);
+    }
+
+    /// `o` in the moving list's slot `slot`: the list's one block made at its first use, and the
+    /// slots in use run to the last one taken.
+    pub fn put_moving(&mut self, o: usize, slot: usize) {
+        let Structure::List(l) = &mut self.broad.structures[MOVING] else { unreachable!("the moving list is second") };
+        l.size = MOVING_SLOTS;
+        let blocks = l.blocks.get_or_insert_with(|| vec![vec![None; MOVING_SLOTS as usize]]);
+        blocks[0][slot] = Some(o);
+        l.last = l.last.max(slot as i32 + 1);
+    }
+}
+
+fn vehicle_half() -> [F; 4] {
+    [F(VEHICLE_HALF), F(VEHICLE_HALF), F(VEHICLE_HALF), F::ONE]
+}
+
+/// A vehicle's sphere before it is placed: category [`VEHICLE`], collides with everything, an empty
+/// list of categories it never collides with.
+pub fn vehicle_sphere() -> Collidable {
+    Collidable {
+        flags: VEHICLE_FLAGS,
+        nearby: true,
+        category: VEHICLE,
+        collides_with: u32::MAX,
+        categories: Categories { mode: 1, list: Vec::new() },
+        ..Collidable::default()
+    }
+}
+
+/// One of a rider's parts, in the moving list by pairs: a sphere of `radius` (not enabled, active)
+/// and a sweep (not enabled, active, with no-groups set) that collides only with category `0x200`.
+pub fn rider_sphere(radius: F) -> Collidable {
+    Collidable {
+        flags: ACTIVE,
+        nearby: true,
+        radius,
+        category: RIDER,
+        collides_with: u32::MAX,
+        categories: Categories { mode: 1, list: Vec::new() },
+        ..Collidable::default()
+    }
+}
+
+pub fn rider_sweep() -> Collidable {
+    Collidable {
+        flags: ACTIVE | flags::NO_GROUPS,
+        nearby: true,
+        category: RIDER,
+        collides_with: u32::MAX,
+        categories: Categories { mode: 0, list: vec![0x200] },
+        ..Collidable::default()
+    }
+}
+
+/// The moving list's two category-0 sweeps (MC02's last two slots, each with an owner of its own):
+/// not enabled, not struck by a nearby search, colliding only with categories `0x20` and `0x400`.
+pub fn owned_sweep() -> Collidable {
+    Collidable {
+        flags: ACTIVE | flags::NO_GROUPS,
+        collides_with: u32::MAX,
+        categories: Categories { mode: 0, list: vec![0x20, 0x400] },
+        ..Collidable::default()
+    }
+}
+
+/// A trigger's shape: a sphere, or a box of half sides turned to face `look` with `up` up.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Shape {
+    Sphere { radius: F },
+    Box { half: [F; 3], look: Vf, up: Vf },
+}
+
+/// One of the `.toy`'s zones (`[TriggerN]`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Zone {
+    pub name: String,
+    pub position: [F; 3],
+    pub shape: Shape,
+}
+
+/// The `.toy`'s zones in its order: `[Triggers]`' `NumberOfTriggers`, then each `[TriggerN]` that
+/// says `Zone` (MC02's six all do), a box where it gives `Box`, else a sphere of `Radius`.
+pub fn zones(toy: &Ini) -> Vec<Zone> {
+    let n = toy.section("Triggers").int("NumberOfTriggers").unwrap_or(0);
+    (1..=n)
+        .filter_map(|i| {
+            let s = toy.section(&format!("Trigger{i}"));
+            if s.int("Zone").unwrap_or(0) == 0 {
+                return None;
+            }
+            let p = s.vector("Position", Vf::new(0.0, 0.0, 0.0, 1.0));
+            let shape = match s.text("Box") {
+                Some(_) => {
+                    let b = s.vector("Box", Vf::new(0.0, 0.0, 0.0, 1.0));
+                    Shape::Box {
+                        half: [F(b.x()), F(b.y()), F(b.z())],
+                        look: s.vector("LookVector", Vf::new(0.0, 0.0, 1.0, 0.0)),
+                        up: s.vector("UpVector", Vf::new(0.0, 1.0, 0.0, 0.0)),
+                    }
+                }
+                None => Shape::Sphere { radius: s.float("Radius").unwrap_or(F::ZERO) },
+            };
+            Some(Zone { name: s.text("Name").unwrap_or("").to_string(), position: [F(p.x()), F(p.y()), F(p.z())], shape })
+        })
+        .collect()
+}
+
+/// Where in the scene's collision list a zone's mesh is (`Type=StartZone`): each is filed twice.
+pub fn start_zones(scene: &Scene) -> Vec<usize> {
+    scene.collision.iter().enumerate().filter(|(_, c)| c.kind.as_deref() == Some("StartZone")).map(|(i, _)| i).collect()
+}
+
+impl Zone {
+    /// Its centre (`+0x50`), `w` 1.
+    pub fn centre(&self) -> [F; 4] {
+        [self.position[0], self.position[1], self.position[2], F::ONE]
+    }
+
+    /// A box's frame: its rows the side, `up` and `look`, normalised (no orthogonalising), and its
+    /// position.
+    pub fn frame(&self) -> Mat4 {
+        let [x, y, z] = self.position;
+        match &self.shape {
+            Shape::Box { look, up, .. } => math::basis(Vf::new(x.0, y.0, z.0, 1.0), *look, *up, false, false),
+            Shape::Sphere { .. } => Mat4::IDENTITY,
+        }
+    }
+
+    /// How far it reaches (`+0x70`): a sphere's radius, a box's corner (`mula`/`madda`/`madd`, then
+    /// the square root).
+    pub fn reach(&self) -> F {
+        match &self.shape {
+            Shape::Sphere { radius } => *radius,
+            Shape::Box { half: h, .. } => Acc::mula(h[0], h[0]).madda(h[1], h[1]).madd(h[2], h[2]).sqrt(),
+        }
+    }
+
+    /// The box it is filed with, as the class gives it ([`broad_build::mesh_box`]): a sphere's local
+    /// centre (its position) through the identity with the radius each way, a box's origin through
+    /// its frame with its half sides.
+    pub fn bounds(&self) -> ([F; 4], [F; 4]) {
+        match &self.shape {
+            Shape::Sphere { radius } => broad_build::mesh_box(&Mat4::IDENTITY, self.position, [*radius; 3]),
+            Shape::Box { half, .. } => broad_build::mesh_box(&self.frame(), [F::ZERO; 3], *half),
+        }
+    }
+
+    /// Its collidable: category [`ZONE`], enabled, struck by a nearby search, colliding with
+    /// everything.
+    pub fn collidable(&self) -> Collidable {
+        Collidable {
+            flags: ZONE_FLAGS,
+            nearby: true,
+            radius: self.reach(),
+            category: ZONE,
+            collides_with: u32::MAX,
+            categories: Categories { mode: 1, list: Vec::new() },
+            ..Collidable::default()
+        }
     }
 }
 

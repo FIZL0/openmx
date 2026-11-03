@@ -11,6 +11,11 @@ MD76a2 (`4-search-MD76a2.md`): the quad's wheel-ray search (`ContactCall::Collid
 record equal to the original's bit for bit on 6,001 frames (1,617 contacts on all 120 meshes) and on 136
 frames blended from MD37a's swept-contact rows.
 
+MD83 (`6-zones-and-moving-MD83.md`): the rest of MC02's broad phase. That is the `.toy`'s six zones, the
+start zone's mesh filed again, the six vehicles' spheres, and the moving list (the quad's three parts,
+108 rider parts, two category-0 sweeps). Every tree entry and moving slot equals the image's, and the
+9,930 gathers now leave nothing out.
+
 MD86 (`5-contacts-MD86.md`): `quad::Steps` answers `Call::Contacts` over Desert Oasis (`atv_search::Oasis`).
 The original's distributor and search run unhooked, and the quad, the body and the wheels equal the port's on
 763 frames.

@@ -8508,6 +8508,39 @@ atv_flat_distance           atv 0x001169f0 = the same on x and z
 atv_pair_accepts            atv 0x001144f0 = the pair filter (world_search::accepts)
 atv_quadtree_insert         atv 0x00180290 = the quadtree's vt +0x24 (insert)
 atv_quadtree_new            atv 0x0017fc40 = the quadtree constructor (least 96)
+# MD83 — the rest of MC02's broad phase (atv_world.rs zones / file_zones / file_again / add_vehicles / move_vehicle /
+# put_moving; tests/atv_gather.rs compares every tree entry, the moving list slot by slot, and the 9,930 gathers with
+# nothing left out). Journal: research/journal/2026-11-02-md76-atv-ground/6-zones-and-moving-MD83.md.
+# Tree order after the plants: the .toy's zones ([Triggers] NumberOfTriggers, [TriggerN] in order, all Zone = 1 on
+# MC02), then each scene COL= with Type=StartZone again (Zone_Platform_Machine.col, same box), then the six vehicle
+# spheres. Zones: sphere vtable 0x003b6ec0 (+0x130 local centre = Position, +0x140 identity frame, +0x180 r, +0x184
+# r*r, +0x188/+0x18c 1; box vt +0xc4 0x001c3460 = mesh_box(identity, Position, r)), box vtable 0x003b6a60 (+0x130
+# rows = math::basis(Position, LookVector, UpVector, false, false) bit for bit, +0x160 Position, +0x170 local centre
+# 0, +0x180 half = Box; box vt +0xc4 0x001b8a00 = mesh_box(frame, 0, half); +0x70 = sqrt.s(mula x x, madda y y,
+# madd z z) of the half). Both: +0x50 Position, category 0x8000, flags 0x06 (box 0x46), nearby, collides with all,
+# categories mode 1 empty. Trigger6 has StartEnabled TRUE then FALSE: the first wins (Ini::section().text), filed
+# enabled. Vehicles (+0xbbc kind; the player's quad 0x015e0690, a quad 0x01657090, bikes 0x019b87f0 0x01a05cf0
+# 0x01a485b0 0x01a8aed0): vehicle +0xd80 is a sweep-class sphere (vtable 0x003b6b40, its own box vt +0xc4
+# 0x001bad00 over its segments, not used for the tree), category 0, flags 0x06, +0x160 centre, +0x170 reach (40, 5
+# with the rider off), +0x148 centre + (0, 10, 0), +0x14c (-0, -1, -0); vehicle +0xd84 its own gather list (10/30,
+# kind 0xc4). Filed at the origin (node 000000, in vehicle order), then moved by atv_spatial_move with half
+# 0x00525270 = (40, 40, 40) at the place the vehicle last gathered round it (vehicle +0xd90; re-filed once
+# +0xd38, the squared distance from it, passes +0xd3c = 100): the old slot stays empty.
+# Moving list 0x006552b0 (vtable 0x003b5510, begin 0x0018dae0, next 0x0018db40): MXU's Blocks 8 bytes down:
+# +0xc flags, +0x28 size 0x400, +0x2c blocks 1, +0x30 last 0x80, +0x34 blocks array, +0x3c/+0x40 walk; a free slot
+# has bit 1 set (a free list). MC02's slots: 0 the quad's frame mesh 0x01627370 (0x3012, enabled), 1 the riding
+# probe, 2 the sweep 0x016282b0 (0x1000, categories mode 1 [0, 0x100]), 3-17 free, 18-125 six riders x nine
+# (sphere vtable 0x003b6ec0 flags 0x?2 radii 0.4 0.4 0.75 0.75 0.75 0.5 0.5 0.75 0.75 as truncated from text;
+# sweep vtable 0x003b6b40 flags 0x?3 r 0, categories mode 0 [0x200]), all category 0x1000, nearby, at the origin,
+# not enabled; 126/127 sweeps of owners 0x01e30460/0x01e2f320 at (20, 20, 20), category 0, flags 0x?3, not
+# nearby, categories mode 0 [0x20, 0x400]. The quad's trigger probe 0x0162cd30 and wreck rays 0x0162cef0 are in
+# no structure. Space tables 0x00654680: +0x28 the tree, +0x2c the moving list, +0x3c no sub-tables. The tree's 239
+# class-7 entries are scene nodes (vtable 0x003b4ed0, and 0x003cbcf0); the gather passes over them.
+atv_vehicle_sphere_place    atv 0x004aa7d0 = a vehicle's +0xd80 sphere put at a point (radius 40 or 5; spatial move when stale)
+atv_vehicle_sphere_gather   atv 0x004aa980 = a vehicle's +0xd84 list gathered round its sphere once it moved 10 ft
+atv_sweep_box               atv 0x001bad00 = the sweep-class collidable's box (vt +0xc4) over its segments
+atv_zone_sphere_box         atv 0x001c3460 = a sphere zone's box (vt +0xc4)
+atv_zone_box_box            atv 0x001b8a00 = a box zone's box (vt +0xc4)
 # MD39 — MX vs. ATV's cars (research/mxvatv-pc.md "The cars (MD39)"; tests/mxvatv_car_phy.rs reads the five
 # files through car::Car::read). Journal: research/journal/2026-11-03-md39-mxvatv-machines. PC factory: kinds
 # 4/6/8 (Buggy/Baja/SandRail.phy) one constructor, 5 MonsterTruck, 7 GolfCart. SLUS-21104 vtables (data):
