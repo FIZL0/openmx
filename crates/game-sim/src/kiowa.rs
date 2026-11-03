@@ -2514,6 +2514,7 @@ fn blade_set(bones: Vec<Bone>, objects: Vec<Object>, edge: Option<Edge>) -> Coll
         reset_time: F(-1.0),
         countdown: F(-1.0),
         edge,
+        heard: crate::material_hit::HeardBy::default(),
     }
 }
 

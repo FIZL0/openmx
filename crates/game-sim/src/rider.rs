@@ -783,6 +783,9 @@ impl Rider {
         let mut searched = false;
         // Where the frame left the bike, and whether it was a ghost then, for the gather (S189).
         let mut gather = None;
+        // The body rays' material listener hears this tick's hits afresh (F27a): a rider who is down
+        // rides the wreck bike, whose object is not filed with it.
+        ride.heard = crate::material_hit::Heard::default();
         if state.wreck.is_none() {
             // The body rays against the world's props (S138), from where the last tick left the bike,
             // as its collision object searches them before the bikes are updated: what they touch goes
@@ -794,10 +797,15 @@ impl Rider {
             ride.sweep_back(p, bike_col.as_deref().map(|col| &col.rays), world, dt);
             let ground = bike_col.as_deref().map_or_else(Vec::new, |col| crate::rider_contact::ground(col, &ride.transform(), world, dt));
             in_ground = crate::rider_contact::ground_hits(&ground);
-            let (found, movers) = match bike_col.as_deref().and_then(|col| crate::rider_contact::scenery_in(col, &ride.transform(), &mut ride.nearby, world, dt)) {
-                Some((f, m)) => (Some(f), m),
-                None => (None, Vec::new()),
+            let (found, movers, sounded) = match bike_col.as_deref().and_then(|col| crate::rider_contact::scenery_heard(col, &ride.transform(), &mut ride.nearby, world, dt)) {
+                Some((f, m, s)) => (Some(f), m, s),
+                None => (None, Vec::new(), Vec::new()),
             };
+            // What the listener heard (F27a): the riders, planes and props the list's own entries
+            // strike, then the scenery the rays' own search struck.
+            let mut heard = bump.as_deref().map_or_else(Vec::new, crate::rider_contact::heard_struck);
+            heard.extend(sounded);
+            ride.heard = crate::material_hit::Heard(heard);
             on_scenery = found.as_deref().map_or_else(Vec::new, crate::mover_contact::wreck_contacts);
             searched = found.is_some();
             let scenery = Some(found.as_ref().is_some_and(|f| !f.is_empty()) || !ground.is_empty());

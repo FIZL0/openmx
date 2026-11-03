@@ -550,6 +550,53 @@ pub fn scenery_in(
     crate::ride::nearby_scene(nearby, world, &col.rays, &at, |scene| scenery_search(at, scene, dt))
 }
 
+/// [`scenery_in`] with the material table's listener on the body rays (F27a,
+/// [`crate::flight_search::Scene::listen_material`]): also what it heard them strike, in order.
+#[allow(clippy::type_complexity)]
+pub fn scenery_heard(
+    col: &BikeCol,
+    at: &Mat4,
+    nearby: &mut Option<Box<crate::broad_phase::Search>>,
+    world: &mut dyn World,
+    dt: F,
+) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>, Vec<crate::material_hit::Struck>)> {
+    let at = node(at);
+    crate::ride::nearby_scene(nearby, world, &col.rays, &at, |scene| {
+        scene.listen_material();
+        let (contacts, movers) = scenery_search(at, scene, dt);
+        (contacts, movers, scene.sounded().to_vec())
+    })
+}
+
+/// **What the body rays' material listener heard of a bump's list** (F27a): each other side its own
+/// entries (kind 0) strike — another rider's frame by player, a flown plane's hull by its seat, a
+/// knockable prop by its collection and object — once, in the list's order. The scenery's entries
+/// name no other side: [`scenery_heard`] hears those.
+pub fn heard_struck(b: &Bump) -> Vec<crate::material_hit::Struck> {
+    use crate::material_hit::Struck;
+    let players = b.vehicles.len();
+    let mut out = Vec::new();
+    for c in b.contacts.iter().filter(|c| c.kind == 0) {
+        let Some(o) = c.other else { continue };
+        let s = if o < players {
+            if o == b.me {
+                continue;
+            }
+            Struck::Bike(o)
+        } else if let Some(f) = b.planes.get(o - players) {
+            Struck::Plane(f.seat)
+        } else if let Some(p) = b.props.get(o - players - b.planes.len()) {
+            Struck::Prop { collection: p.collection, object: p.object }
+        } else {
+            continue;
+        };
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
 fn scenery_search(at: Node, scene: &mut crate::flight_search::Scene<'_>, dt: F) -> (Vec<Contact>, Vec<crate::contact::Mover>) {
     let mut records = [Record {
         search_ground: false,

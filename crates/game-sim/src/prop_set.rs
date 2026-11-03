@@ -189,6 +189,13 @@ impl PropSet {
         (set, said)
     }
 
+    /// Every collection's material listeners hear the frame's searches afresh (F27a).
+    fn heard_afresh(&mut self) {
+        for c in &mut self.collections {
+            c.heard.0.clear();
+        }
+    }
+
     /// No props on this track.
     pub fn is_empty(&self) -> bool {
         self.collections.is_empty()
@@ -216,6 +223,7 @@ impl PropSet {
             return Vec::new();
         }
         self.stamp_filed();
+        self.heard_afresh();
         for c in 0..self.collections.len() {
             self.collections[c].search(dt, &self.rays[c], field, props, trees);
             self.file_listeners();
@@ -243,6 +251,7 @@ impl PropSet {
         }
         let rayed = crate::prop_wreck::wreck_rays_first(self, wrecks);
         self.stamp_filed();
+        self.heard_afresh();
         for k in 0..self.collections.len() {
             self.collections[k].search_wrecked(k, dt, &self.rays[k], field, props, trees, wrecks, &mut strikes);
             self.file_listeners();
@@ -284,6 +293,7 @@ impl PropSet {
         }
         let rayed = crate::prop_wreck::wreck_rays_first(self, wrecks);
         self.stamp_filed();
+        self.heard_afresh();
         let mut keys: Vec<Option<[i32; 2]>> = Vec::new();
         // The collections that searched, in order: each puts its listeners on after its search.
         let mut filed = Vec::new();

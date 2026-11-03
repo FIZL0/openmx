@@ -790,7 +790,7 @@ wire!(crate::ragdoll::Collision { bone, enabled, touching });
 wire!(crate::ragdoll::Launch { force, force_time, hand_hold, target, world_frame, other_frame });
 wire!(crate::ragdoll::Pin { first, second, anchors, target, target_velocity, lower, upper, hit, sticky, gains });
 wire!(crate::biplane::World { iterations, rate });
-wire!(crate::prop_world::Collection { world, bones, objects, joints, bodies, forces, preforce, posts, listeners, active, pin_to_body, reset_time, countdown, edge } skip { springs });
+wire!(crate::prop_world::Collection { world, bones, objects, joints, bodies, forces, preforce, posts, listeners, active, pin_to_body, reset_time, countdown, edge } skip { springs, heard });
 wire!(crate::prop_world::Object { place, look, up, gravity, collision_enabled, detect_when_disabled, reset_off_edge, reset_time, countdown, thresholds, fresh, listens, filed, filed_at, node, collision });
 
 impl Wire for crate::prop_world::Collision {
@@ -889,7 +889,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// rider's set; [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _ } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _, heard: _ } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -954,6 +954,7 @@ impl Wire for crate::flight::Flight {
             nearby: Wire::take(r)?,
             bike: None,
             hull: None,
+            heard: Default::default(),
         })
     }
 }
@@ -976,8 +977,9 @@ wire!(crate::world_search::Candidate { object, distance });
 wire!(crate::contact_search::Record { search_ground, search, sweep_back, touching, touching_other, on_ground, on_object, damp, rest_linear, rest_angular, offset, lead, push_out, facing, swept_from, swept_to, node, contacts, capacity, nearby, rays, sweeps, struck });
 wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved, riding_speed_sq, tricks, mxvatv, back_search, nearby }
     // The rear wheel's material is the drive-on sound's, set again in every substep's contacts.
-    // The props are lent only for the bike's frame (S210) and are the Sim's between frames.
-    skip { rear_material, props });
+    // The props are lent only for the bike's frame (S210) and are the Sim's between frames. What
+    // the body rays' material listener heard is the collision sound's queue (F27a).
+    skip { rear_material, heard, props });
 wire!(crate::back_search::Cache { at, moved, list, world });
 wire!(crate::handling::Flip { clip, wrecked, cut, came_round, struck, stunt, preload_cue, gas_cut, gas_cut_timer, steer_ramp_timer });
 wire!(crate::trick_pack::State { spin, flip_row, side, side_flick, front_watch });

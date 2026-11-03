@@ -3736,6 +3736,8 @@ pub struct Sound {
     pub shootoff: Shootoff,
     /// The track's `Col\template.cmt` (P145).
     pub drive_on: DriveOnTable,
+    /// The track's `Col\template.cmt` collision sounds (F27a), [`Sound::hits`] plays them.
+    pub hits: HitTable,
     /// The path cars' loops (V74), by car: [`Sound::set_toys`] reads them, [`Sound::toys_at`] plays them.
     pub toys: Vec<Vec<ToySound>>,
     started: bool,
@@ -3762,6 +3764,7 @@ impl Sound {
             plane_touchdown: MachineTouchdown::default(),
             shootoff: Shootoff::default(),
             drive_on: DriveOnTable::default(),
+            hits: HitTable::default(),
             toys: Vec::new(),
             started: false,
             world_voices: Vec::new(),
@@ -3770,6 +3773,17 @@ impl Sound {
             dice: Dice::new(0x5eed),
             last: [-1; 3],
         }
+    }
+
+    /// **A tick's collision sounds** (F27a): the material table's update over the frame's queue
+    /// ([`game_sim::material_hit::play`], which empties it), each sound played over the last.
+    pub fn hits(&mut self, queue: &mut Vec<game_sim::material_hit::Hit>) {
+        let sounds = game_sim::material_hit::play(queue, &self.hits.rule, self.hits.foliage);
+        if sounds.is_empty() {
+            return;
+        }
+        let Ok(mut m) = self.mixer.lock() else { return };
+        self.hits.sound(&mut m, &sounds);
     }
 
     /// Set the listeners: one per local view.
@@ -4640,6 +4654,7 @@ impl Sound {
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));
         sound.drive_on = read.drive_on(track_res);
+        sound.hits = read.hits(track_res);
         Ok(sound)
     }
 }
