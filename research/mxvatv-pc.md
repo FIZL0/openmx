@@ -238,3 +238,58 @@ the ground (+0x4f8), 111 the model's node pose (+0x554) and `vf3_at_1084` the mo
 The ATV's step leans on every shared MotoShared step as SLUS-21104 runs it, and on its frame driver (the
 physics world's substeps, not MX Unleashed's 55 Hz loop). Those are MD40's work for the bikes, so the ATV's
 port (MD37b) comes after MD40.
+
+## The cars (MD39)
+
+MX vs. ATV's five cars are MX Unleashed's car family, retuned. The PC factory (by `VehicleType_%d.res`)
+builds kind 4 (`Buggy.phy`), 6 (`Baja.phy`) and 8 (`SandRail.phy`) with one constructor, MXVehicleBuggy's
+(`pc 0x005e1cc0`); kind 5 is MXVehicleMonsterTruck (`MonsterTruck.phy`) and 7 MXVehicleGolfCart
+(`GolfCart.phy`). All three classes derive from MXVehicleCar. On the disc the files are `Veh\<name>.phy`
+in MXVSATV.PSR's `vehicletype_{4..8}.res` (4 buggy, 5 monstertruck, 6 baja, 7 golfcart, 8 sandrail).
+
+**Where the subclasses differ from MXVehicleCar** (PC slots; all three override 0, 12, 33, 38, 47, 65, 67,
+91, `vf0_at_12`, `vf14_at_12`, `vf5_at_1024`, `vf0_at_1084`, `vf0_at_1920`):
+
+- vf12, the loader: MXVehicleCar's, then `[Animation]` PelvisBoxPosition/Size (the truck also
+  RearTireSteerScale; the golf cart also the Head, UpperTorso and Upper R/L Shoulder boxes).
+- vf33 node names, vf47 rider/animation setup, vf91 node pose: drawing. The truck's pose scales the rear
+  wheels' steer by RearTireSteerScale — the picture only.
+- `vf14_at_12`, the update head: the same in all three but for constants — an odometer, the collision
+  turned on and off (vt +0x40/+0x4c, flag bit 8), pad rumble — then MXVehicleCar's.
+- Only the truck overrides PostProcess (`vf0_at_52`): the car's, then a body-relative point written
+  (not read by the step, as far as followed).
+
+None of them overrides the preforce, force or PostProcess listeners' bodies: SLUS-21104's buggy listener
+thunks jump to the car's own (`atv_car_listener_48` at this−48, `atv_car_postprocess` at this−52,
+`atv_car_listener_60` at this−60; which of 48/60 is the preforce is not checked). So the step is MXVehicleCar's for all five;
+the machines differ in their files.
+
+**SLUS-21104's vtables** (research/oracle.txt `# MD39`): car 0x003cf130, buggy 0x003cec60, golf cart
+0x003cf600, truck 0x003cff80. They differ at +0x8 (destructors), +0xf4 (the vf12 loaders), +0x340 (node
+finders), +0x10c (the update), +0xa0/+0x11c (only the truck's PostProcess), +0x354, +0x37c, +0x3dc, +0x3e4
+(animation) and +0x488, and in small thunks.
+
+**The car loader**, SLUS-21104's `atv_car_phy_load` against MX Unleashed's `car_phy_load`: the same keys,
+defaults and order, with three changes:
+
+1. It opens with MXVehicle's base loader (`atv_vehicle_phy_load`): `[Mass Properties]` through the part
+   reader, then `[Wrecks]` MaxWreckTime (5), WreckGravity (3), WreckDamping and WreckInertia — so
+   MaxWreckTime moves from near the end to the start, and the three wreck keys are new.
+2. CofGAI's default is copied from the body's CofG (body +0x1a0), as MX Unleashed's part CofG.
+3. It ends with vt +0x370 (`atv_vehicle_camera_phy`, shared by all four tables): `[Camera]`
+   Left/Right1stPerShoulderOffset, FPCameraOffset (its default by a camera mode word) and FCamFileName.
+
+Fields move by a fixed shift per block (MX Unleashed → SLUS-21104): the body pointer +0x160 → +0xb8,
+CofG +0x230 → +0x10f0, the joystick/handbrake/clutch block +0xd3c, preload +0x810, aero +0xd0c, the rest
+(airborne control to the tire pointers) +0xd10; inside the engine −0xc and the tire −0x10.
+
+**The files** have MX Unleashed's format with retuned numbers (the buggy weighs 2000 not 2500, compresses
+1.6 not 2.0, rides 1.1 ft tires not 1.2; the truck's MaxAnalogThrottle is 0.8; the baja's CofG and springs
+move), and all five carry the three wreck keys. Against the buggy: the baja has TireWidth and no
+GearRatio5; the golf cart the rider boxes; the truck RearTireSteerScale, MaxTireAngleRate, TireWidth,
+RearSteer*, CofGAI and CofGTravel*; the sandrail CofGTravelBack. `game_sim::car::Car::read` takes all five
+as they are (tests/mxvatv_car_phy.rs); it does not yet read the wreck or `[Camera]` keys.
+
+Not done: there is no SLUS-21104 car capture and no RAM image with a car in it, and SLUS-21104's frame
+driver (MD75) is not ported, so nothing here is proved against a drive. MD39a captures each car, MD39b
+ports the step on them, MD39c puts them in the game off by default.

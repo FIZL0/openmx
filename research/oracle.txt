@@ -8242,3 +8242,28 @@ atv_search_narrow           atv 0x001bbe60 = the quad search's vt +0xb4 (a thunk
 atv_ray_probe_pair          atv 0x001bc880 = the ray probe against a collidable (MX Unleashed's ray_probe::pair, not compared)
 atv_search_record_clear     atv 0x001bd180 = the quad search's vt +0xc8 (the record cleared)
 atv_search_prepare          atv 0x001bc6e0 = the quad search's vt +0xd0 (prepare)
+# MD39 — MX vs. ATV's cars (research/mxvatv-pc.md "The cars (MD39)"; tests/mxvatv_car_phy.rs reads the five
+# files through car::Car::read). Journal: research/journal/2026-11-03-md39-mxvatv-machines. PC factory: kinds
+# 4/6/8 (Buggy/Baja/SandRail.phy) one constructor, 5 MonsterTruck, 7 GolfCart. SLUS-21104 vtables (data):
+# car 0x003cf130, buggy 0x003cec60, golf cart 0x003cf600, truck 0x003cff80.
+# Loader fields, MXU -> SLUS-21104: body ptr +0x160 -> +0xb8, CofG +0x230 -> +0x10f0 (CofGAI +0x1100, its
+# default body +0x1a0), CofGTravel +0x260/+0x264 -> +0x1110/+0x1114, joystick/handbrake/clutch +0x408.. ->
+# +0x1144.. (+0xd3c), preload +0x44c.. -> +0xc5c.. (+0x810), aero +0x470.. -> +0x117c.. (+0xd0c),
+# +0x490..+0x52c -> +0x11a0..+0x123c (+0xd10; wings ptr +0x11b8), YawRateLimit/HandBrakeYawRateLimit
+# +0x1244/+0x1248, engine ptr +0x1250, tire ptrs +0x1254..+0x1260; engine fields -0xc, tire -0x10.
+# Truck's loader: RearTireSteerScale +0x1494, PelvisBox +0x14c0/+0x14d0; its PostProcess writes +0x14a0.
+# PC: the buggy keeps PelvisBox at +0x1420, the truck at +0x14e0 (RearTireSteerScale +0x14b4), the golf
+# cart's rider boxes +0x1660..+0x16f0.
+pc_buggy_construct          pc 0x005e1cc0 = MXVehicleBuggy's constructor (the factory's kinds 4, 6 and 8)
+atv_car_phy_load            atv 0x004c7fd0 = MXVehicleCar's loader (car vt +0xf4): MXU car_phy_load's keys, defaults and order, after atv_vehicle_phy_load and before vt +0x370
+atv_vehicle_phy_load        atv 0x004a7e70 = MXVehicle's base loader: [Mass Properties] through atv_part_read, then [Wrecks] (MaxWreckTime 5, WreckGravity 3, WreckDamping, WreckInertia), body +0x130 copied
+atv_vehicle_camera_phy      atv 0x004a7f50 = vt +0x370 of all four car tables: [Camera] Left/Right1stPerShoulderOffset, FPCameraOffset, FCamFileName
+atv_buggy_phy_load          atv 0x004c52f0 = the buggy's vt +0xf4: atv_car_phy_load, then [Animation] PelvisBoxPosition/Size
+atv_golfcart_phy_load       atv 0x004cf690 = the golf cart's vt +0xf4: atv_car_phy_load, PelvisBox and the Head/UpperTorso/Upper shoulder boxes
+atv_truck_phy_load          atv 0x004d6ce0 = the truck's vt +0xf4: atv_car_phy_load, RearTireSteerScale, PelvisBox
+atv_car_destructor          atv 0x004c7550 = the car's vt +0x8 (buggy 0x004c49f0, golf cart 0x004cec90, truck 0x004d63c0)
+atv_car_node_finder         atv 0x004c76f0 = the car's vt +0x340, node names (buggy 0x004c4b00, golf cart 0x004ceda0, truck 0x004d64d0)
+atv_car_update              atv 0x004cc4e0 = the car's vt +0x10c, the update (buggy 0x004c6ce0, golf cart 0x004d0250, truck 0x004d7f40: odometer, collision on/off, rumble, then this)
+atv_car_listener_48         atv 0x004cb0c0 = a car listener at this-48 (the buggy's thunk too; preforce or force, not checked)
+atv_car_postprocess         atv 0x004cbd80 = the car's PostProcess (vt +0x11c, listener at this-52; the truck's 0x004d7ea0 calls it)
+atv_car_listener_60         atv 0x004cbb60 = a car listener at this-60 (the buggy's thunk too)
