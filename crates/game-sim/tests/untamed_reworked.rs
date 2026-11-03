@@ -1,7 +1,7 @@
 //! MD93 — MX vs. ATV Untamed's (SLUS-21701) reworked bike functions, proved against Untamed's own code.
 //!
 //! MD81a found six of the bike step's functions rewritten from SLUS-21104's (research/untamed-machines.md).
-//! These are the three [`handling::untamed`] ports so far: the preload, the wreck entry and the put-back,
+//! These are the [`handling::untamed`] ports so far: the preload, the wreck entry, the put-back and the backflip (MD93a),
 //! each run on an Untamed Free Ride image (`context/untamed/ram/nat_or.bin`, as `tests/untamed_step.rs`) on
 //! the bike laid out at Untamed's offsets. Every call they make out is hooked and logged; the port's calls
 //! must be the same, in the same order, and every word of the bike and its body the same after.
@@ -656,4 +656,413 @@ fn untamed_put_back_is_the_originals() {
         }
     }
     enough(&tally, &["snapped, respawn handed", "snapped", "saved, respawn handed", "saved", "kept", "not kept", "attachment", "none"], 500);
+}
+
+// --- the backflip (MD93a) -----------------------------------------------------------------------------
+
+/// The backflip's pieces beyond the bike and its body: the bike's frame node (`+0x114`), its collision
+/// record (`+0xf8`) and the controls' binding table (`+0x1510`).
+const FRAME: u32 = 0x01c0_2400;
+const COLL: u32 = 0x01c0_2600;
+const BINDING: u32 = 0x01c0_2700;
+const FLIP_REGIONS: [(&str, u32, u32); 5] =
+    [("bike", OBJ, 0x1800), ("body", BODY, 0x200), ("frame", FRAME, 0x100), ("collision", COLL, 0x40), ("binding", BINDING, 0x40)];
+
+/// The backflip and its callees: the rider's stunt start and end (vt +0x4b0, +0x4a4), the wreck's
+/// steep test, and the binding's "is it pressed" (its table read and the clip store run as they are).
+const BACKFLIP: u32 = 0x004f_d0d0;
+const START_STUNT: u32 = 0x004f_e710;
+const END_STUNT: u32 = 0x004f_cf60;
+const STEEP: u32 = 0x0050_0880;
+const BINDING_PRESSED: u32 = 0x0025_2640;
+
+#[derive(Clone, Debug)]
+struct FlipState {
+    p: Params,
+    air: Air,
+    ch: Chassis,
+    st: air::Step,
+    inp: untamed::FlipIn,
+    clip: game_sim::handling::FlipClip,
+    /// The four trick buttons as the reader keeps them (bytes +18, +20, +22, +24 of the pad record).
+    buttons: [u8; 4],
+    /// The pad record's device word and the binding table's byte for it (non-zero: the backflip is a
+    /// bound control on this device).
+    device: u32,
+    bound: u8,
+    flip_stunt: u32,
+    rate_increase: F,
+    start_answer: bool,
+    steep_answer: bool,
+}
+
+#[derive(Default, Debug)]
+struct FlipCalls {
+    start_answer: bool,
+    steep_answer: bool,
+    pressed_answer: bool,
+    started: Vec<(u32, u32)>,
+    ended: Vec<u32>,
+    steep: u32,
+    pressed: u32,
+    wrecks: Vec<u32>,
+}
+
+impl Gen {
+    fn flip(&mut self) -> FlipState {
+        let mut s = FlipState {
+            p: zero_params(),
+            air: Air::default(),
+            ch: Chassis::default(),
+            st: air::Step::default(),
+            inp: untamed::FlipIn::default(),
+            clip: game_sim::handling::FlipClip::default(),
+            buttons: [0; 4],
+            device: 0,
+            bound: 0,
+            flip_stunt: self.bits() % 64,
+            rate_increase: self.f(0.0, 1000.0),
+            start_answer: self.b(),
+            steep_answer: self.b(),
+        };
+        let p = &mut s.p;
+        p.min_backflip_time = if self.one_in(4) { F::ZERO } else { self.f(0.0, 30.0) };
+        p.max_backflip_time = if self.one_in(8) { p.min_backflip_time } else { self.f(10.0, 80.0) };
+        p.min_backflip_torque = self.f(300.0, 1200.0);
+        p.max_backflip_torque = self.f(600.0, 1800.0);
+        p.backflip_torque_rate_decrease = self.f(0.0, 3000.0);
+        p.control_authority_time = self.f(0.0, 2.0);
+        p.airborne_pitch_down_wreck_angle = self.f(0.8, 1.6);
+        p.airborne_pitch_up_wreck_angle = self.f(0.8, 1.6);
+
+        let a = &mut s.air;
+        a.on_ground = self.b();
+        a.flip_active = self.bits() % 3 != 0;
+        a.flip_armed = self.b();
+        a.flipping = self.b();
+        a.flip_torque_applied = self.b();
+        a.flip_grace = self.near(0.0, -0.1, 0.7);
+        a.authority = self.f(-0.5, 2.0);
+        a.contact_vel = Vf::new(self.f(-5.0, 5.0).0, self.f(-5.0, 5.0).0, self.near(30.0, 20.0, 60.0).0, 0.0);
+        let mag = self.f(0.0, 1800.0);
+        let t = if self.one_in(6) { s.p.min_backflip_torque } else { mag };
+        a.flip_torque = Vf::new((if self.b() { -t } else { t }).0, self.f(-50.0, 50.0).0, self.f(-50.0, 50.0).0, self.f(-2.0, 2.0).0);
+
+        let c = &mut s.ch;
+        c.vel = Vf::new(self.f(-10.0, 10.0).0, self.near(5.0, -5.0, 15.0).0, self.f(-40.0, 40.0).0, 0.0);
+        c.moment = self.v(-500.0, 500.0);
+        c.pitch = if self.one_in(8) { -s.p.airborne_pitch_down_wreck_angle } else { self.f(-2.0, 2.0) };
+        c.roll = if self.one_in(6) { F(1.5707964) } else { self.f(-3.2, 3.2) };
+
+        let st = &mut s.st;
+        st.dt = self.f(0.005, 0.04);
+        st.brake = if self.one_in(4) { self.f(0.0, 1.0) } else { F::ZERO };
+        st.stick = (F::ZERO, if self.one_in(8) { F::ZERO } else { self.f(-1.2, 1.2) });
+        st.spinning = self.one_in(8);
+        st.spin_active = self.one_in(8);
+        st.touching = self.one_in(6);
+
+        // A third of the states are on a lip that takes a flip, the branches that arm and trigger it.
+        if !s.air.flip_active && self.one_in(2) {
+            s.air.on_ground = true;
+            s.st.spinning = false;
+            s.st.spin_active = false;
+            s.st.brake = F::ZERO;
+            s.ch.vel = Vf::new(s.ch.vel.x(), self.f(5.5, 15.0).0, s.ch.vel.z(), 0.0);
+            s.air.contact_vel = Vf::new(s.air.contact_vel.x(), s.air.contact_vel.y(), self.f(30.5, 60.0).0, 0.0);
+        }
+        // Each button held a third of the time, with any non-zero byte for held.
+        for b in s.buttons.iter_mut() {
+            *b = if self.one_in(3) { 1 + (self.bits() % 255) as u8 } else { 0 };
+        }
+        s.clip = game_sim::handling::FlipClip((self.bits() % 3) as i32);
+        s.device = self.bits() % 4;
+        s.bound = if self.one_in(4) { 1 + (self.bits() % 255) as u8 } else { 0 };
+        s.inp = untamed::FlipIn {
+            arm_button: s.buttons[3] != 0,
+            trick_held: s.buttons.iter().any(|&b| b != 0),
+            lip_y: match self.bits() % 5 {
+                0 => F(if self.b() { 0.8 } else { -0.8 }),
+                1 => F(if self.b() { 0.81 } else { -0.81 }),
+                _ => self.f(-1.2, 1.2),
+            },
+            hold: self.f(-70.0, 70.0),
+            button: if s.bound != 0 { Some(self.b()) } else { None },
+            right_y: if self.one_in(8) { F::ZERO } else { self.f(-1.0, 1.0) },
+            up_y: if self.one_in(8) { F::ZERO } else if self.one_in(6) { F(-0.79) } else { self.f(-1.0, 1.0) },
+            stunt_id: match self.bits() % 4 {
+                0 => 48,
+                1 => 49,
+                _ => (self.bits() % 80) as i32,
+            },
+        };
+        s
+    }
+}
+
+fn poke_flip(ee: &mut Ee, s: &FlipState) {
+    ee.set_u32(OBJ + 0xf8, COLL);
+    ee.set_u32(OBJ + 0x114, FRAME);
+    ee.set_u32(OBJ + 0x1510, BINDING);
+
+    let (p, a, c, st, inp) = (&s.p, &s.air, &s.ch, &s.st, &s.inp);
+    put_f(ee, OBJ + 0x1194, p.min_backflip_time);
+    put_f(ee, OBJ + 0x1198, p.max_backflip_time);
+    put_f(ee, OBJ + 0x11a0, p.min_backflip_torque);
+    put_f(ee, OBJ + 0x11a4, p.max_backflip_torque);
+    put_f(ee, OBJ + 0x11a8, s.rate_increase);
+    put_f(ee, OBJ + 0x11ac, p.backflip_torque_rate_decrease);
+    put_f(ee, OBJ + 0x117c, p.control_authority_time);
+    put_f(ee, OBJ + 0x1414, p.airborne_pitch_down_wreck_angle);
+    put_f(ee, OBJ + 0x1418, p.airborne_pitch_up_wreck_angle);
+
+    put_b(ee, OBJ + 0x354, a.on_ground);
+    put_v(ee, OBJ + 0xc20, a.contact_vel);
+    put_f(ee, OBJ + 0x1178, a.authority);
+    put_b(ee, OBJ + 0x1184, a.flip_torque_applied);
+    put_b(ee, OBJ + 0x1188, a.flipping);
+    put_b(ee, OBJ + 0x118c, a.flip_active);
+    put_b(ee, OBJ + 0x1190, a.flip_armed);
+    put_f(ee, OBJ + 0x119c, a.flip_grace);
+    put_v(ee, OBJ + 0x11b0, a.flip_torque);
+
+    put_v(ee, BODY + 0x80, c.vel);
+    put_v(ee, BODY + 0x1b0, c.moment);
+    put_f(ee, OBJ + 0x390, c.pitch);
+    put_f(ee, OBJ + 0x398, c.roll);
+
+    put_f(ee, OBJ + 0x340, st.brake);
+    put_f(ee, OBJ + 0x129c, st.stick.1);
+    put_b(ee, OBJ + 0x11c0, st.spinning);
+    put_b(ee, OBJ + 0x11c8, st.spin_active);
+    put_b(ee, COLL + 0x34, st.touching);
+
+    put_f(ee, OBJ + 0x12c4, inp.lip_y);
+    put_f(ee, OBJ + 0x12c0, inp.hold);
+    ee.set_u32(OBJ + 0x14f4, s.device);
+    for (k, &b) in s.buttons.iter().enumerate() {
+        ee.write(OBJ + 0x14f4 + 18 + 2 * k as u32, 1, u128::from(b));
+    }
+    ee.write(BINDING + 36 + s.device, 1, u128::from(s.bound));
+    put_f(ee, FRAME + 0xb4, inp.right_y);
+    put_f(ee, FRAME + 0xc4, inp.up_y);
+    ee.set_u32(OBJ + 0x1548, inp.stunt_id as u32);
+    ee.set_u32(OBJ + 0x1794, s.clip.0 as u32);
+    ee.set_u32(OBJ + 0x13c8, s.flip_stunt);
+}
+
+fn flip_reset(ee: &mut Ee) {
+    for (_, base, len) in FLIP_REGIONS {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, 0);
+        }
+    }
+    reset(ee);
+}
+
+fn flip_snap(ee: &Ee) -> Vec<u32> {
+    FLIP_REGIONS.iter().flat_map(|&(_, base, len)| (0..len).step_by(4).map(move |o| base + o)).map(|a| ee.u32_at(a)).collect()
+}
+
+fn flip_where(i: usize) -> String {
+    let mut i = i as u32 * 4;
+    for (name, _, len) in FLIP_REGIONS {
+        if i < len {
+            return format!("{name} + {i:#x}");
+        }
+        i -= len;
+    }
+    "past the end".into()
+}
+
+/// Which way a state went, from the disassembly's branches and not the port's.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn flip_path(s: &FlipState) -> &'static str {
+    let (a, st, inp) = (&s.air, &s.st, &s.inp);
+    if !a.flip_active {
+        let lip = a.on_ground && !st.spinning && !st.spin_active && !(s.ch.vel.y() <= 5.0) && !(a.contact_vel.z() <= 30.0) && st.brake == 0.0;
+        if !lip {
+            "off the lip"
+        } else if s.bound != 0 {
+            if inp.button == Some(true) { "bound, pressed" } else { "bound, not pressed" }
+        } else if inp.lip_y < F(-0.8) && s.buttons[3] != 0 {
+            "arming"
+        } else if !(inp.lip_y <= F(0.8)) && a.flip_armed {
+            "triggered"
+        } else {
+            "waiting"
+        }
+    } else if !a.flip_armed {
+        if a.on_ground { "in the grace" } else { "off the lip in time" }
+    } else if a.on_ground || st.touching || F(a.flip_torque.x()).abs() < s.p.min_backflip_torque {
+        if s.clip.0 != 0 { "ended mid-clip" } else { "ended" }
+    } else if s.buttons.iter().all(|&b| b == 0) && st.stick.1 <= 0.0 {
+        "turning, decaying"
+    } else if inp.right_y <= 0.0 {
+        "turning, right side down"
+    } else {
+        "turning, right side up"
+    }
+}
+
+#[test]
+fn untamed_backflip_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let calls = Rc::new(RefCell::new(FlipCalls::default()));
+    let c = calls.clone();
+    ee.hooks.insert(START_STUNT, Box::new(move |ee| {
+        assert_eq!(ee.r(4) as u32, OBJ);
+        let mut c = c.borrow_mut();
+        c.started.push((ee.r(5) as u32, ee.r(6) as u32));
+        ee.set(2, u64::from(c.start_answer));
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(END_STUNT, Box::new(move |ee| c.borrow_mut().ended.push(ee.r(5) as u32)));
+    let c = calls.clone();
+    ee.hooks.insert(WRECK_ENTRY, Box::new(move |ee| c.borrow_mut().wrecks.push(ee.r(5) as u32)));
+    let c = calls.clone();
+    ee.hooks.insert(STEEP, Box::new(move |ee| {
+        let mut c = c.borrow_mut();
+        c.steep += 1;
+        ee.set(2, u64::from(c.steep_answer));
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(BINDING_PRESSED, Box::new(move |ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5) as u32), (BINDING, OBJ + 0x14f4), "the binding's arguments");
+        let mut c = c.borrow_mut();
+        c.pressed += 1;
+        ee.set(2, u64::from(c.pressed_answer));
+    }));
+
+    let mut g = Gen(0x0d93_a001);
+    let mut tally = BTreeMap::new();
+    for k in 0..20_000 {
+        let s = g.flip();
+        let path = flip_path(&s);
+        *tally.entry(path).or_insert(0u32) += 1;
+        flip_reset(&mut ee);
+        poke_flip(&mut ee, &s);
+        *calls.borrow_mut() = FlipCalls {
+            start_answer: s.start_answer,
+            steep_answer: s.steep_answer,
+            pressed_answer: s.inp.button == Some(true),
+            ..FlipCalls::default()
+        };
+        ee.call(BACKFLIP, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
+        let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+        for (a, b) in ee.written_ranges() {
+            let inside = FLIP_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
+            assert!(inside, "state {k}: the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack\n{s:#?}");
+        }
+        let was = flip_snap(&ee);
+        let orig = std::mem::take(&mut *calls.borrow_mut());
+
+        let mut t = s.clone();
+        let (mut started, mut steeped) = (false, false);
+        let out = untamed::backflip(&t.p, &mut t.air, &mut t.ch, &t.st, &t.inp, &mut t.clip, || {
+            started = true;
+            s.start_answer
+        }, || {
+            steeped = true;
+            s.steep_answer
+        });
+        if out.stunt_cleared {
+            t.inp.stunt_id = 255;
+        }
+        flip_reset(&mut ee);
+        poke_flip(&mut ee, &t);
+        let now = flip_snap(&ee);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            panic!(
+                "state {k} ({path}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+                flip_where(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+        let want_started: Vec<(u32, u32)> = if started { vec![(s.flip_stunt, 1)] } else { vec![] };
+        assert_eq!(orig.started, want_started, "state {k} ({path}): the stunt start");
+        assert_eq!(out.stunt_started, started && s.start_answer, "state {k}");
+        let want_ended: Vec<u32> = if out.stunt_ended { vec![s.flip_stunt] } else { vec![] };
+        assert_eq!(orig.ended, want_ended, "state {k} ({path}): the stunt end");
+        assert_eq!(orig.steep, u32::from(steeped), "state {k} ({path}): the steep test");
+        assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k} ({path}): the wreck");
+        // The binding is asked only on a lip with the backflip bound.
+        assert_eq!(orig.pressed, u32::from(path.starts_with("bound")), "state {k} ({path}): the binding asked");
+    }
+    enough(
+        &tally,
+        &[
+            "off the lip",
+            "bound, pressed",
+            "bound, not pressed",
+            "arming",
+            "triggered",
+            "waiting",
+            "in the grace",
+            "off the lip in time",
+            "ended",
+            "ended mid-clip",
+            "turning, decaying",
+            "turning, right side down",
+            "turning, right side up",
+        ],
+        100,
+    );
+}
+
+/// MD93a's wiring: [`untamed::ride_backflip`] reads the ride's trick buttons as Untamed's reader keeps
+/// them. R1 with another trick button arms the flip on a lip, where SLUS-21104's wants R1 alone. The
+/// rider's side (the clip, the stunt id, the mid-clip wreck) is as [`game_sim::handling::ride_backflip`]'s.
+#[test]
+fn untamed_ride_backflip_arms_on_r1_with_another_button() {
+    use game_sim::chassis::Mat3;
+    use game_sim::handling::{Flip, ride_backflip};
+    let mut p = zero_params();
+    p.min_backflip_torque = F(500.0);
+    p.max_backflip_torque = F(1500.0);
+    p.max_backflip_time = F(30.0);
+    let lip = || {
+        let mut air = Air::default();
+        air.on_ground = true;
+        air.contact_vel = Vf::new(0.0, 0.0, 40.0, 0.0);
+        let ch = Chassis { vel: Vf::new(0.0, 8.0, 30.0, 0.0), ..Chassis::default() };
+        (air, ch)
+    };
+    let st = air::Step { stick: (F::ZERO, F(-1.0)), ..air::Step::default() };
+    let level = Mat3::new(Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::ZERO);
+    let both = [true, false, true];
+    let (mut air, mut ch) = lip();
+    untamed::ride_backflip(&p, &mut air, &mut ch, &st, both, &level, &mut Flip::default(), || panic!("steep"));
+    assert!(air.flip_armed, "Untamed arms on R1 with another button");
+    let (mut air, mut ch) = lip();
+    ride_backflip(&p, &mut air, &mut ch, &st, both, &level, &mut Flip::default(), || panic!("steep"));
+    assert!(!air.flip_armed, "SLUS-21104 does not");
+
+    // Over on its back with the torque in: the clip starts, and the stunt is the flip's with no trick held.
+    let over = Mat3::new(Vf::new(1.0, -0.1, 0.0, 0.0), Vf::new(0.0, 0.5, 0.0, 0.0), Vf::ZERO);
+    for trick_held in [false, true] {
+        let mut air = Air::default();
+        air.flip_active = true;
+        air.flip_armed = true;
+        air.flip_torque = Vf::new(-1000.0, 0.0, 0.0, 0.0);
+        let (mut ch, mut f) = (Chassis::default(), Flip::default());
+        let st = air::Step { stunt: trick_held, ..air::Step::default() };
+        untamed::ride_backflip(&p, &mut air, &mut ch, &st, [false; 3], &over, &mut f, || panic!("steep"));
+        assert_eq!(f.clip, 1, "the clip starts, trick held {trick_held}");
+        assert_eq!(f.stunt, !trick_held, "the stunt id is the flip's only with no trick held");
+        for steep in [false, true] {
+            let (mut air, mut ch, mut f) = (air, ch, f);
+            air.on_ground = true;
+            untamed::ride_backflip(&p, &mut air, &mut ch, &air::Step::default(), [false; 3], &over, &mut f, || steep);
+            assert!(f.wrecked && f.struck == steep && f.clip == 0 && !f.stunt, "{f:?}");
+        }
+    }
+    assert_eq!(untamed::stunt_stand_in(false, true, false, false), 49);
+    assert_eq!(untamed::stunt_stand_in(false, false, false, false), 54);
+    assert_eq!(untamed::stunt_stand_in(false, false, false, true), 0xff);
+    assert_eq!(untamed::stunt_stand_in(true, true, false, false), 0);
 }
