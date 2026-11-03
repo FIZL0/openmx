@@ -18,6 +18,11 @@
 //!       u32 mesh index (counts across all groups), u32 stream mask, u32 lod count, char name[] (always
 //!       empty on this disc)
 //!       lod[count]: f32 distance, u16 vertices, u16 (unexplained), u32 stream bytes, then the stream
+//!     and, in most files, the node lists (S245):
+//!     u32 list count in the low 24 bits, a flag in the top byte: 0x40 one list for every mesh, 0x80
+//!       a list per mesh as the map below says
+//!     list[count]: u32 length, then that many u8 node indices
+//!     with 0x80, u8 list[mesh count]: which list each mesh's vertices name their nodes from
 //! ```
 //!
 //! A **LOD group** is a whole copy of the model at one level of detail — group 0 is the finest, and the
@@ -36,6 +41,11 @@
 //!   vertices of every batch have it set. Bits 4..15 are the vertex's **node**, as the VU1 address of
 //!   that node's matrix: node index = `(w >> 4) - 1`. That is what holds a bike together, and it was
 //!   confirmed by matching each node's stored bounds against the bounds of the vertices that name it.
+//!   Strictly that number is a **slot** in the mesh's node list, the matrices the original uploads for
+//!   it: for nearly every model on the disc the list is every node in order, so slot and node are one,
+//!   but the cars' and free10's shovel's lists hold only the nodes each mesh hangs off (S245: the
+//!   truck's tire mesh slots 0..18 are nodes 0, 5, 8, … 46), and [`Model::parse`] reads the node
+//!   through them.
 //! * Positions are 16-bit integers scaled by `scales[0]`, which is chosen per file so the model fills the
 //!   range — a bale's scale is 8.24e-5, a whole bike's 1.23e-4.
 
@@ -205,6 +215,17 @@ impl Model {
                     strips,
                 });
                 next_index += 1;
+            }
+        }
+        // The node lists (S245): each vertex's slot read as the node its mesh's list puts there.
+        if let Some(lists) = node_lists(d, at, next_index) {
+            for (k, mesh) in meshes.iter_mut().enumerate() {
+                let Some(list) = lists.get(k) else { continue };
+                for v in mesh.strips.iter_mut().flat_map(|s| s.verts.iter_mut()) {
+                    if let Some(&node) = list.get(v.node) {
+                        v.node = node;
+                    }
+                }
             }
         }
         Ok(Model {
@@ -498,6 +519,26 @@ fn strip_from(
 fn cstr(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     String::from_utf8_lossy(&b[..end]).into_owned()
+}
+
+/// Each of the `meshes` meshes' node list, read off the section at `at` after the last stream, or
+/// `None` where the file has none or it does not read whole. A file whose lists are every node in
+/// order (nearly every one) needs none, and the slots stand as they are.
+fn node_lists(d: &[u8], mut at: usize, meshes: usize) -> Option<Vec<Vec<usize>>> {
+    let head = le32(d, at).ok()?;
+    at += 4;
+    let mut lists = Vec::new();
+    for _ in 0..head & 0x00ff_ffff {
+        let n = le32(d, at).ok()? as usize;
+        lists.push(d.get(at + 4..at + 4 + n)?.iter().map(|&b| usize::from(b)).collect::<Vec<usize>>());
+        at += 4 + n;
+    }
+    match head >> 24 {
+        0x40 if lists.len() == 1 => Some(vec![lists[0].clone(); meshes]),
+        // The map can come twice (monstertruck2.psg); the first copy is read.
+        0x80 => d.get(at..at + meshes)?.iter().map(|&l| lists.get(usize::from(l)).cloned()).collect(),
+        _ => None,
+    }
 }
 
 fn need(d: &[u8], at: usize, len: usize) -> Result<(), String> {

@@ -6702,6 +6702,17 @@ atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into 
 #   back through the inverse (0x001b3180); tire init 0x0039ac10, width setter 0x0039ae00 adds (width,0,0).
 #   Parked cars read: truck first_recording @0x00e1e210, baja s149a-free07 @0x00605270, buggy
 #   s149a-free11 @0x00611ba0; launch timer full, cofg = CofGAI, undriven tires at the undriven top speed.
+# S245 — the cars drawn (crates/game-render/src/car.rs, psg.rs node lists; tests game-render/tests/car.rs,
+#   openmx/tests/car_picture.rs; journal research/journal/2026-11-02-s245-cars-drawn). The pose steps:
+#   baja/buggy 0x0039edb0 (ctor 0x0039dcf0 looks up its node table at +0xe04..+0xe88), truck 0x003e07b0
+#   (ctor 0x003df770, .phy read 0x003e0200). Node writers they call: rotation set 0x001b2e50, post-rotate
+#   0x001b2c20, aim 0x001b1d70 / 0x001b1e20 (a frame built from an up vector and the target), translation
+#   set 0x001b2640. The baja/buggy upper arm's swing factor 1.25 is the float at 0x4218e0.
+# The .psg node lists (a trailing section after the last stream): u32 count | flag<<24 (0x40 one list for
+#   every mesh, 0x80 a list a mesh through a u8 map a mesh), then per list u32 n and n u8 node indices. A
+#   vertex's (w>>4)-1 is a slot in its mesh's list. Disc survey: 4013 files without the section, 2119 with
+#   0x40 and an identity list, 44 with 0x80 (the three cars and their liveries in every archive, and
+#   free10's shovel.psg); monstertruck2.psg writes its map twice.
 # S133 — the hierarchy toys' parts (crates/game-render/tests/toy_parts.rs, states s133-free10/-nat11
 #   from R7's scripted boot). The parts list is the motion object's +0x300 (count +0x304); a part's
 #   +0x230 is by then a node of the toy's skeleton (one of its joints' +0x34; a mesh .col's single part

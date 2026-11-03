@@ -223,6 +223,7 @@ mod player;
 mod particles;
 mod plane_draw;
 mod kiowa_draw;
+mod car_draw;
 mod perf;
 mod portal;
 mod ride_hud;
@@ -1545,6 +1546,38 @@ fn heli_pilots(seats: &[Seat], rigs: &mut [Rig], kiowa_drawn: &[Kiowa], assets: 
             let pelvis = game_render::kiowa::PILOT_SEAT;
             let loaded = &assets.models.get(&drawn.model)?.model;
             let anchors = game_render::kiowa::SEAT.map(|n| game_render::kiowa::node_at(loaded, n).map(|v| v.sub(pelvis)));
+            let body = rig.body.as_mut()?;
+            let palette = biplane::pilot_palette(body, &anchors, rig.pilot_lean.weights())?;
+            let mut root = M4::IDENTITY;
+            root.0[3] = [pelvis.x, pelvis.y, pelvis.z, 1.0];
+            Some(Pilot { plane: at, at: root.mul(at), palette })
+        })
+        .collect()
+}
+
+/// Where a seat's driven car is drawn this frame (S245): its matrix, slid from the tick before's
+/// (`before`) as the helicopter is.
+fn car_drawn(car: &vehicle::CarRide, before: Option<M4>, blend: &pace::Blend) -> Option<M4> {
+    let now = car_draw::placed(car.driven.as_ref()?);
+    Some(before.map_or(now, |b| blend.slide(b, now)))
+}
+
+/// Every seat's car driver (S245), as [`heli_pilots`] the helicopter's: the rider's own body posed
+/// by the plane's clips, its root in the car's seat ([`game_render::car::seat`]) and its limbs held
+/// to the model's seat nodes. `None` for a seat not driving one.
+fn car_drivers(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, before: &[Option<M4>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
+    seats
+        .iter()
+        .zip(rigs.iter_mut())
+        .enumerate()
+        .map(|(p, (seat, rig))| {
+            let car = seat.garage.car_up()?;
+            let drawn = game_render::car::Car::found(assets, car_draw::model_name(car.machine, car.livery))?;
+            let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
+            let at = car_drawn(car, was, blend)?;
+            let loaded = &assets.models.get(&drawn.model)?.model;
+            let pelvis = game_render::car::seat(loaded)?;
+            let anchors = game_render::car::SEAT.map(|n| game_render::car::node_at(loaded, n).map(|v| v.sub(pelvis)));
             let body = rig.body.as_mut()?;
             let palette = biplane::pilot_palette(body, &anchors, rig.pilot_lean.weights())?;
             let mut root = M4::IDENTITY;
@@ -4282,14 +4315,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         mods.plane(0, &mut plane);
         vehicle::wheels_height(&Flight::new(&plane))
     });
-    let lot_spots = |b: &[u8], ground: &mut dyn FnMut(Vf) -> f32| match &world_mod {
-        Some(w) => vehicle::world_spots(b, w.home_at().map(|a| a.0), line_start, spot_rest, ground),
-        None => Machine::ALL.iter().map(|&m| vehicle::spots(b, m)).collect(),
+    // A car parks only by its own track's file (S245), a world's by its home tile's.
+    let lot_spots = |name: &str, b: &[u8], ground: &mut dyn FnMut(Vf) -> f32| {
+        vehicle::parked_by(
+            name,
+            match &world_mod {
+                Some(w) => vehicle::world_spots(b, w.home_at().map(|a| a.0), line_start, spot_rest, ground),
+                None => Machine::ALL.iter().map(|&m| vehicle::spots(b, m)).collect(),
+            },
+        )
     };
     let lot = {
         let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
         let mut ground = |at: Vf| lot_ground(tiled.as_deref_mut(), &mut probe, at);
-        machines.as_ref().map_or_else(Lot::default, |(_, b)| Lot::around(lot_spots(b, &mut ground), args.players.max(1), &mut ground))
+        machines.as_ref().map_or_else(Lot::default, |(n, b)| Lot::around(lot_spots(n, b, &mut ground), args.players.max(1), &mut ground))
     };
     // And how high the original stands the plane's body over a file bay's ground (S164): the
     // model's bounds, off its own `.psg`.
@@ -4312,6 +4351,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         names.into_iter().filter_map(|n| Some((n.clone(), res.read(&res.find_suffix(&n)?.name).ok()?))).collect()
     });
     lot.cars = vehicle::car_kit(&mut |name: &str| car_files.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()));
+    // And each car's bay on the ground under it (S245): free07's file parks its bajas at 0.
+    {
+        let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
+        lot.stand_cars(&mut |from: Vf| lot_ground_normal(tiled.as_deref_mut(), &mut probe, from));
+    }
     // And the helicopter's (P216): `kiowa.phy`, which every player's garage flies a copy of.
     lot.kiowa = machine_res.as_ref().and_then(|res| {
         let bytes = res.read(&res.find_suffix(game_sim::kiowa::KIOWA_PHY)?.name).ok()?;
@@ -4358,11 +4402,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Each file bay's with the body's spot and up the original stands an offline plane at there
     // (B6): the model's lift, the bay's SetGroundHeight and the ground's normal.
     let (mut online_bays, online_bodies): (Vec<vehicle::Spawn>, Vec<Option<(Vf, Vf)>>) = match &machines {
-        Some((_, b)) => {
+        Some((n, b)) => {
             let mut probe = sim_world::Ground::new(&sim_terrain, &place.terrain);
             let mut seats = {
                 let mut ground = |at: Vf| lot_ground(tiled.as_deref_mut(), &mut probe, at);
-                Lot::around(lot_spots(b, &mut ground), net::SEATS, &mut ground)
+                Lot::around(lot_spots(n, b, &mut ground), net::SEATS, &mut ground)
             };
             (seats.lift, seats.ground_heights) = (lot.lift, lot.ground_heights.clone());
             let mut ground = |from: Vf| lot_ground_normal(tiled.as_deref_mut(), &mut probe, from);
@@ -4404,7 +4448,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     garage.heli = lot.heli_for(0);
     if !garage.cars.is_empty() {
         let names: Vec<&str> = garage.cars.iter().map(|c| c.machine.section()).collect();
-        println!("cars: {} (switch from the pause; not drawn yet)", names.join(", ").to_ascii_lowercase());
+        let parked: Vec<&str> = garage.cars.iter().filter(|c| c.bay.is_some()).map(|c| c.machine.section()).collect();
+        let parked = if parked.is_empty() { "none parked here".to_string() } else { format!("{} parked here", parked.join(", ")) };
+        println!("cars: {} (switch from the pause); {}", names.join(", ").to_ascii_lowercase(), parked.to_ascii_lowercase());
     }
     // The plane's own camera, which the swap hands the player with it: one camera-preset object per
     // machine kind, and the plane's reads `AppStart\BiplaneCPresets.ini` rather than the track's
@@ -4449,6 +4495,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let cameras = presets.map_or(0, |b| Preset::read_bytes(&b, "").len());
         let flown = if garage.heli.is_some() { "flown from the pause or its bay" } else { "parked, no kiowa.phy to fly" };
         println!("kiowa: {loaded} of {liveries} skins loaded, {flown}; {cameras} camera presets in {}", game_render::kiowa::PRESETS);
+    }
+    // The cars' models (S245), one a livery in play, out of the machines' archive: every car the
+    // garage can switch to, parked here or not. The frame finds them in `assets` ([`Car::found`]).
+    if let (Some(res), false) = (machine_res.as_ref(), garage.cars.is_empty()) {
+        let liveries = args.players.clamp(1, vehicle::LIVERIES);
+        let mut loaded = 0;
+        for car in &garage.cars {
+            for l in 0..liveries {
+                loaded += usize::from(game_render::car::Car::load(&mut assets, std::slice::from_ref(res), car_draw::model_name(car.machine, l)).is_some());
+            }
+        }
+        println!("cars: {loaded} of {} models loaded", garage.cars.len() * liveries);
     }
     // Its model and both prop cones, out of the machines' archive, where its textures are too (V21):
     // one model a livery the lot parks (P87), the first copy's plain and the second's the disc's
@@ -5032,6 +5090,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     // The Kiowa's skins the load put in `assets` (V113), one a livery.
     let kiowa_drawn: Vec<Kiowa> = (0..vehicle::LIVERIES).map_while(|l| Kiowa::found(&assets, l)).collect();
+    // And the cars' models (S245), each car in each livery the load put there.
+    let car_models: Vec<game_render::car::Car> = Machine::ALL
+        .iter()
+        .flat_map(|&m| (0..vehicle::LIVERIES).map(move |l| car_draw::model_name(m, l)))
+        .filter_map(|name| game_render::car::Car::found(&assets, name))
+        .collect();
     // The helicopter's own camera (P216), built as the plane's is, on `HeloCPresets.ini` (in a
     // freeride track's second archive, or free06's) and starting on its first preset.
     // The file's bytes are kept, as the plane's are, for a split's copy of its presets and the
@@ -6477,6 +6541,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut before_planes: Vec<Option<M4>> = Vec::new();
     // And each seat's flown helicopter, with its rotor (P216b).
     let mut before_helis: Vec<Option<(M4, Rotor)>> = Vec::new();
+    // And each seat's driven car's (S245).
+    let mut before_cars: Vec<Option<M4>> = Vec::new();
     // Each plane's moving parts before the tick, which the picture blends them from (V79).
     let mut before_surfaces: Vec<Option<game_sim::biplane_anim::Surfaces>> = Vec::new();
     // Each seat's cut test (P120): whether the last tick's picture is a jump from the one before.
@@ -7125,6 +7191,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 {
                     let place = &mut world.place;
                     lot.resize(n, &mut |at: Vf| sim_world::World::ground(place, Vf::new(at.x(), 1.0e4, at.z(), 1.0)).0.y());
+                    lot.stand_cars(&mut |from: Vf| sim_world::World::ground(place, from));
                 }
                 let joined = match change {
                     join::Change::Join(_) => {
@@ -7384,6 +7451,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         before_cameras.clone_from(&cameras);
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
         before_helis = world.seats.iter().map(|seat| seat.garage.heli_up().and_then(|h| Some((heli_at(h)?, heli_rotor(h))))).collect();
+        before_cars = world.seats.iter().map(|seat| Some(car_draw::placed(seat.garage.car_up()?.driven.as_ref()?))).collect();
         before_surfaces = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(Plane::surfaces)).collect();
         cuts.resize_with(world.seats.len(), pace::Cut::default);
         pause_holds.resize_with(world.seats.len(), chase::PauseHold::default);
@@ -8694,6 +8762,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let pilots = pilots(&world.seats, &mut rigs, &plane_drawn, &before_planes, &cut, &blend);
         // And each flying the helicopter's (P216b).
         let heli_pilots = heli_pilots(&world.seats, &mut rigs, &kiowa_drawn, &assets, &before_helis, &cut, &blend);
+        let car_drivers = car_drivers(&world.seats, &mut rigs, &assets, &before_cars, &cut, &blend);
         if gpu_on {
             // The overlay first: each view's HUD, and the pause over the whole frame.
             let draw_at = Instant::now();
@@ -8852,6 +8921,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let at = M4::placement(vector(bay.spawn.at), vector(bay.spawn.facing), v3(0.0, 1.0, 0.0));
                 actors.extend(kiowa_draw::actors(drawn, &assets, &Rotor::WHOLE, at, vehicle::BAY_ALPHA, &mut gpu_poses));
             }
+            // And every car's bay (S245), at rest, where the port parks it: on its own track.
+            for bay in bays.iter().filter(|b| !args.overview && b.machine.car_kind().is_some()) {
+                let Some(drawn) = car_draw::find(&car_models, bay.machine, bay.livery) else { continue };
+                actors.extend(car_draw::actors(drawn, &assets, &[game_render::car::Tire::REST; 4], car_draw::bay_at(bay), vehicle::BAY_ALPHA, &mut gpu_poses));
+                if args.trace_picture {
+                    car_draw::trace_bay(drawn, car_draw::bay_at(bay));
+                }
+            }
             // And every player's helicopter while it is flown (P216), solid, in its own livery, at
             // the measure's matrix (where the original draws it), its rotor at the flight's angle;
             // slid between the last two ticks as the plane is unless the seat cuts (P216b).
@@ -8864,6 +8941,27 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 actors.extend(kiowa_draw::actors(drawn, &assets, &rotor, at, alpha, &mut gpu_poses));
                 // And its pilot in the seat, as the plane's (P216b).
                 if let (Some(Some(pilot)), Some(model)) = (heli_pilots.get(p), &rigs[p].body_model) {
+                    gpu_poses.push(pilot.palette.clone());
+                    actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha, casts: false });
+                    if args.trace_picture {
+                        let nodes: Vec<V3> = pilot.palette.iter().map(|m| m.mul(pilot.at)).map(|m| V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] }).collect();
+                        trace_pilot(p, "gpu", model, pilot, &nodes);
+                    }
+                }
+            }
+            // And every player's car while it is driven (S245), solid, at its matrix, posed by its
+            // tires, slid as the helicopter is; with its driver in the seat.
+            for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
+                let Some(car) = seat.garage.car_up() else { continue };
+                let Some(drawn) = car_draw::find(&car_models, car.machine, car.livery) else { continue };
+                let before = before_cars.get(p).copied().flatten().filter(|_| !cut[p]);
+                let Some(at) = car_drawn(car, before, &blend) else { continue };
+                let alpha = vehicle::shown_alpha(1.0, seat.paused);
+                actors.extend(car_draw::actors(drawn, &assets, &car_draw::tires(car), at, alpha, &mut gpu_poses));
+                if args.trace_picture {
+                    car_draw::trace(p, "gpu", drawn, at, &car_draw::tires(car));
+                }
+                if let (Some(Some(pilot)), Some(model)) = (car_drivers.get(p), &rigs[p].body_model) {
                     gpu_poses.push(pilot.palette.clone());
                     actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha, casts: false });
                     if args.trace_picture {
@@ -9110,6 +9208,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // Each seat's own copy of its flown helicopter's model, which its rotor's pose is skinned
             // into (P216b).
             let heli_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("kiowa@seat{p}")).collect();
+            // And of its driven car's, which its tires' pose is skinned into (S245).
+            let car_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("car@seat{p}")).collect();
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
@@ -9225,6 +9325,28 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let Some((at, rotor)) = heli_drawn(heli, before, &blend) else { continue };
                 actor.extend(kiowa_draw::skinned(drawn, &heli_copies[p], &mut assets, &rotor, at));
                 if let (Some(Some(pilot)), Some(model)) = (heli_pilots.get(p), &rigs[p].body_model) {
+                    if let Some(loaded) = assets.models.get_mut(model.as_str()) {
+                        loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
+                        skinned[p] = None;
+                        if args.trace_picture {
+                            let corners: Vec<V3> = loaded.tris.iter().flat_map(|t| t.v.iter().map(|v| pilot.at.point(v.pos))).collect();
+                            trace_pilot(p, "software", model, pilot, &corners);
+                        }
+                    }
+                    actor.push((model.as_str(), pilot.at));
+                }
+            }
+            // And the driven car (S245), solid, slid as the GPU's is, with its driver.
+            for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
+                let Some(car) = seat.garage.car_up() else { continue };
+                let Some(drawn) = car_draw::find(&car_models, car.machine, car.livery) else { continue };
+                let before = before_cars.get(p).copied().flatten().filter(|_| !cut[p]);
+                let Some(at) = car_drawn(car, before, &blend) else { continue };
+                actor.push(car_draw::skinned(drawn, &car_copies[p], &mut assets, &car_draw::tires(car), at));
+                if args.trace_picture {
+                    car_draw::trace(p, "software", drawn, at, &car_draw::tires(car));
+                }
+                if let (Some(Some(pilot)), Some(model)) = (car_drivers.get(p), &rigs[p].body_model) {
                     if let Some(loaded) = assets.models.get_mut(model.as_str()) {
                         loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
                         skinned[p] = None;

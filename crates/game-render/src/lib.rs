@@ -41,6 +41,7 @@
 pub mod anim;
 pub mod animated_toy;
 pub mod biplane;
+pub mod car;
 pub mod chassis;
 pub mod creature;
 pub mod disc;
