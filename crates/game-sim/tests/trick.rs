@@ -1757,3 +1757,46 @@ fn the_humans_tricks() {
     }
     assert!(cannot.is_empty(), "gestures the keyboard cannot make: {cannot:?}");
 }
+
+/// **MD87:** a combination of the extras only overrides when a pack put a trick in its slot. With R1
+/// held, Cross and Square at each stick direction start the Cross or Square trick while the R1
+/// combo's slot is empty, and the combo's own once a stunt fills it; with both extras up the
+/// original's groups ask for what they always did.
+#[test]
+fn r1_over_an_extra_falls_back_to_the_extra_alone() {
+    use game_sim::trick::{EXTRA_SLOTS, Gesture, extra_of, group_with};
+    let named = |n: String| Stunt { name: n.to_lowercase(), display_name: n, duration: F(1.0), ..Stunt::default() };
+    let original: Vec<Stunt> = (0..SLOTS).map(|i| named(format!("Trick{i}"))).collect();
+    // The first stunt of each extra slot through Cross + Square (groups 7..=9), so every R1 combo
+    // (16, 23, 30) is empty; then the same with every slot filled.
+    let short = Set::new(original.clone()).with_extras((0..12).map(|k| named(format!("Extra{k}"))).collect());
+    let full = Set::new(original).with_extras((0..EXTRA_SLOTS).map(|k| named(format!("Extra{k}"))).collect());
+    let ask = |set: &Set, trick: [bool; 3], extra: [bool; 2], dir: Dir| {
+        let mut t = Tricks::default();
+        t.gesture = Gesture { group: group_with(trick, extra), dir, armed: true, ..Gesture::default() };
+        let asked = t.request(set, Bike::default(), Params::default());
+        asked.then_some(t.requested)
+    };
+    let extra_trick = |group: u8, dir: Dir| Some(Trick(Trick::EXTRA + extra_of(group, dir).unwrap() as u8));
+    let r1 = [false, false, true];
+    for dir in [Dir::Up, Dir::Down, Dir::Left, Dir::Right] {
+        for (extra, alone, combo) in [([true, false], 7, 16), ([false, true], 8, 23)] {
+            assert_eq!(ask(&short, r1, extra, dir), extra_trick(alone, dir), "{extra:?} + R1 {dir:?}, empty combo");
+            assert_eq!(ask(&full, r1, extra, dir), extra_trick(combo, dir), "{extra:?} + R1 {dir:?}, filled combo");
+        }
+        // Both extras with R1: both together, as the pack has them.
+        assert_eq!(ask(&short, r1, [true, true], dir), extra_trick(9, dir));
+        // Cross + Circle, empty: Circle's own, the original's trick for the original's button.
+        assert_eq!(ask(&short, [true, false, false], [true, false], dir), Some(Trick(slot_of(1, dir).unwrap() as u8)));
+        // Extras up: the original's groups, unchanged, and R1 alone none of them.
+        for group in 1..=6u8 {
+            let trick = buttons_for(group);
+            assert_eq!(ask(&short, trick, [false, false], dir), Some(Trick(slot_of(group, dir).unwrap() as u8)));
+        }
+        assert_eq!(ask(&short, r1, [false, false], dir), None, "R1 alone is the original's modifier");
+    }
+    // Nothing on the extras: Cross + R1 asks for nothing still.
+    let none = Set::new((0..SLOTS).map(|i| named(format!("Trick{i}"))).collect()).with_extras(vec![named("Only".into())]);
+    assert_eq!(ask(&none, r1, [true, false], Dir::Down), None);
+    assert_eq!(ask(&none, r1, [true, false], Dir::Up), extra_trick(7, Dir::Up));
+}
