@@ -29,10 +29,20 @@ game and 4.1125774 in the port.
 
 See `1-blades-on-the-hull-FINAL.md`.
 
+## C24 — the heli's rays on its blades
+
+See `2-c24-the-hulls-rays-on-the-blades-FINAL.md`. In eight captured wrecks the original's heli never
+files a kind-0 entry on a blade, and no blade files one on another. The heli's kept nearby list is
+gathered afresh only when its probe leaves the list's bound, so a wreck that stays put never holds its
+blades. The port now offers the blades to the heli's rays only while that list holds them
+(`Blades::gather_round`, `Collision::search_knocking`). Three new replays (a roll, a tip, a fast
+slide) are bit-exact to their captures' ends.
+
 ## Not verified / not 1:1
 
 See the list at the end of `1-blades-on-the-hull-FINAL.md`. In short:
 
-- the heli's own rays on the blades and blade-against-blade contacts are not ported;
+- the heli's own rays on the blades are ported (C24) but never seen meeting one; blade-against-blade
+  contacts are not ported;
 - the 34 part-way rows' accumulators are not compared;
 - the reading of the 25 in-post rows is inferred.

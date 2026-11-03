@@ -169,6 +169,13 @@ fn length(v: Vf) -> F {
     F(vu::dot3(v.0, v.0)).sqrt()
 }
 
+/// A knock's distance in a nearby list gathered round `rays` standing at `node` (C24): from the
+/// probe's centre to the knock's, less its radius, at least 0, as the gather reckons a collidable's.
+pub fn knock_distance(rays: &Rays, node: &Frame, knock: &Knock<'_>) -> F {
+    let (centre, _) = reach(rays, &matrix(node));
+    F::ZERO.max(length(centre.sub(knock.centre)) - knock.radius)
+}
+
 /// Every category allowed: a category list of mode 1 (the ones it never collides with) and empty.
 fn any_category() -> Categories {
     Categories { mode: 1, list: Vec::new() }
@@ -1476,6 +1483,14 @@ impl<'a> Scene<'a> {
         Struck::Mesh { id: self.id(other) as u32, material, foliage }
     }
 
+    /// The scene with its sweep probe's category list `categories` (C24): the Kiowa's, which never
+    /// sweeps against a probe's category or 0x800 ([`crate::prop_world::sweep_categories`]), so not
+    /// against a thrown blade.
+    pub fn sweep_of(mut self, categories: Categories) -> Scene<'a> {
+        self.objects.objects[SWEEP].categories = categories;
+        self
+    }
+
     /// What a prop's ray probe's listeners heard in the searches so far ([`Scene::probed`]).
     pub fn heard(&self) -> Heard {
         self.heard
@@ -1622,6 +1637,19 @@ impl<'a> Scene<'a> {
             self.nearby.found.push(world_search::Candidate { object: self.knocks_at + k, distance });
         }
         self
+    }
+
+    /// [`Scene::knocking`] with each candidate's distance as the nearby list's gather left it
+    /// (`distances`, in `knocks`' order, each [`knock_distance`] where the probe and the knock stood
+    /// then), not where they stand now (C24: the Kiowa's list is gathered in its post, before the
+    /// thrown blades' posts move them).
+    pub fn knocking_gathered(self, knocks: &'a [Knock<'a>], first: usize, distances: &[F]) -> Scene<'a> {
+        let mut scene = self.knocking(knocks, first);
+        let n = scene.nearby.found.len();
+        for (c, &d) in scene.nearby.found[n - knocks.len()..].iter_mut().zip(distances) {
+            c.distance = d;
+        }
+        scene
     }
 
     /// The knockable prop `k`, when `other` is one of [`Scene::knocking`]'s collidables.
