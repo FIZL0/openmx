@@ -2459,8 +2459,8 @@ struct KiowaAround<'a> {
 
 /// Where the blades are thrown from: the blade nodes' rows as the original's nodes have them on the
 /// wreck frame ([`game_sim::kiowa::Throw::of`], S270). With no model read, every row is the
-/// measure's matrix (the model's, as the helicopter is drawn). While the shell builds no blade bodies
-/// (P265) the rows move nothing, and the throw's `rand()`s are drawn all the same.
+/// measure's matrix (the model's, as the helicopter is drawn). Where the shell built no blade bodies
+/// ([`KiowaRide::with_blades`]) the rows move nothing, and the throw's `rand()`s are drawn all the same.
 fn kiowa_throw(ride: &game_sim::kiowa::Ride, tree: Option<&game_sim::kiowa::RotorTree>, curve: &game_sim::camera::CurveTable) -> game_sim::kiowa::Throw {
     match tree {
         Some(t) => game_sim::kiowa::Throw::of(t, &ride.body, ride.rotor_angle, curve),
@@ -2553,13 +2553,16 @@ pub struct KiowaRide {
     pub wrecks: u32,
     /// The model's nodes its wreck throws the blades from ([`KiowaRide::with_model`]).
     pub tree: Option<game_sim::kiowa::RotorTree>,
+    /// The four blades its wreck throws, as built ([`KiowaRide::with_blades`]): each helicopter
+    /// taken gets a copy, with the world's edge ([`KiowaRide::built`]).
+    pub blades: Option<game_sim::kiowa::Blades>,
 }
 
 impl KiowaRide {
     /// The helicopter off `kiowa.phy`'s bytes, in `livery`, parked at `bay`.
     pub fn new(phy: &[u8], livery: usize, bay: Option<Spawn>) -> KiowaRide {
         let rays = game_sim::flight_search::Rays::default();
-        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0, tree: None }
+        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0, tree: None, blades: None }
     }
 
     /// It with its collision object's ray probe off `kiowam.col`'s bytes
@@ -2578,6 +2581,17 @@ impl KiowaRide {
         match game_sim::kiowa::RotorTree::read(psg) {
             Ok(t) => self.tree = Some(t),
             Err(e) => eprintln!("kiowa: {}: {e}", game_sim::kiowa::KIOWA_MODEL),
+        }
+        self
+    }
+
+    /// It with the four blades its wreck throws (P265), off `wreckblade.phy`'s, `bladebent.psg`'s
+    /// and `bladebentm.col`'s bytes ([`game_sim::kiowa::Blades::new`]); with no `.col`, blades that
+    /// meet nothing. As it was where they do not read.
+    pub fn with_blades(mut self, phy: &[u8], psg: &[u8], rays: Option<&[u8]>) -> KiowaRide {
+        match game_sim::kiowa::Blades::new(phy, psg, rays, None) {
+            Ok(b) => self.blades = Some(b),
+            Err(e) => eprintln!("kiowa: {}: {e}", game_sim::kiowa::WRECK_BLADE_PHY),
         }
         self
     }
@@ -2666,6 +2680,11 @@ impl KiowaRide {
         let mut wreckage = game_sim::kiowa::Wreckage::new(p, KIOWA_INERTIA, part.mass);
         wreckage.place = [position, facing, up];
         wreckage.spawn = wreckage.place;
+        // Its blades (P265), the world's edge the terrain's, as the MX constructor gives them.
+        if let Some(mut blades) = self.blades.clone() {
+            blades.set.edge = world.area().map(|a| game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [a.width, a.depth] });
+            wreckage.blades = blades;
+        }
         Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), wreckage }
     }
 
@@ -2677,20 +2696,46 @@ impl KiowaRide {
     /// ([`KiowaAround`]); after it, a put-back's share on the controls, and its collision object's
     /// nearby list gathered again where it was put (the reset's probes put back in). Nothing for a
     /// helicopter not out.
+    ///
+    /// Its thrown blades (P265) share its world: their collide pass and their step
+    /// ([`game_sim::kiowa::Blades::search`], [`game_sim::kiowa::Blades::step`]) beside the tick,
+    /// before the crash test's answer is acted on in it, then their posts
+    /// ([`game_sim::kiowa::Blades::post`]), so a blade thrown this frame is posted where it was
+    /// thrown and steps from the next. While none is out none of it runs: none is in the world's
+    /// lists.
     pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
         use game_sim::input::{Axis, AxisRange};
         let Some(h) = self.flown.as_mut() else { return };
         let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
         let input = game_sim::kiowa::Pad::from_sticks(stick, |c| table.value(pad, c));
         let movers = h.collision.search(&mut h.ride.body, world, dt);
+        let blades_out = h.wreckage.blades.started.iter().any(|s| s.out);
+        if blades_out {
+            let (field, props, trees) = world.wooded();
+            h.wreckage.blades.search(dt, field.as_deref(), props, trees);
+            let movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
+            h.wreckage.blades.step(dt, blade_tables(), &movers);
+        }
         let ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
         let mut around = KiowaAround { ground, wreckage: &mut h.wreckage, put_back: None, tree: self.tree.as_ref(), curve: &tables.curve };
         let asked = h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
         self.wrecks += u32::from(asked.wreck.is_some());
-        if let Some(fraction) = around.put_back {
+        let put_back = around.put_back;
+        if blades_out || h.wreckage.blades.started.iter().any(|s| s.out) {
+            h.wreckage.blades.post(dt);
+        }
+        if let Some(fraction) = put_back {
             h.kiowa.put_back_controls(fraction);
             h.collision.refresh(&h.ride.body, world);
         }
+    }
+
+    /// Each thrown blade shown (P265): its node's rows (`x`, `y`, `z` and the origin), where its
+    /// `bladebent` is drawn. None while the helicopter is whole.
+    pub fn blades(&self) -> Vec<game_sim::math::Mat4> {
+        let Some(h) = &self.flown else { return Vec::new() };
+        let b = &h.wreckage.blades;
+        b.set.objects.iter().zip(&b.started).filter(|(_, s)| s.shown).map(|(o, _)| game_sim::math::Mat4([o.node.rows[0], o.node.rows[1], o.node.rows[2], o.node.origin])).collect()
     }
 
     /// Where the helicopter's model's origin is and which way its nose points: the measure's matrix,
@@ -2747,6 +2792,21 @@ impl KiowaRide {
         ))
     }
 
+    /// What the shell says of its thrown blades (P265) while any is shown: how many, how many are
+    /// still moving (their bodies awake), and how high the lowest and highest stand over the ground
+    /// under each, feet.
+    pub fn blades_report(&self, world: &mut dyn World) -> Option<String> {
+        let b = &self.flown.as_ref()?.wreckage.blades;
+        let shown: Vec<usize> = (0..b.started.len()).filter(|&k| b.started[k].shown).collect();
+        if shown.is_empty() {
+            return None;
+        }
+        let awake = shown.iter().filter(|&&k| b.set.bones[k].body.enabled).count();
+        let over: Vec<f32> = shown.iter().map(|&k| b.set.bones[k].body.position).map(|p| p.y() - ground_under(world, p).unwrap_or(f32::NAN)).collect();
+        let (low, high) = over.iter().fold((f32::MAX, f32::MIN), |(l, h), &o| (l.min(o), h.max(o)));
+        Some(format!("kiowa: blades: {} shown, {awake} moving, {low:.1} to {high:.1} ft over the ground", shown.len()))
+    }
+
     /// The player in it, for whatever is put where they are: on the ground under the helicopter,
     /// upright, along its heading flattened, stopped; its own place with no ground under it.
     pub fn spot(&self, world: &mut dyn World) -> Spot {
@@ -2761,6 +2821,12 @@ impl KiowaRide {
             None => Spot::still(at, forward, up),
         }
     }
+}
+
+/// The thrown blades' tables ([`game_sim::ragdoll::Tables`]), built the first time a blade steps.
+fn blade_tables() -> &'static game_sim::ragdoll::Tables {
+    static TABLES: std::sync::OnceLock<game_sim::ragdoll::Tables> = std::sync::OnceLock::new();
+    TABLES.get_or_init(game_sim::ragdoll::Tables::build)
 }
 
 /// A machine the switch spawns on the player and takes away again: a car or the helicopter.

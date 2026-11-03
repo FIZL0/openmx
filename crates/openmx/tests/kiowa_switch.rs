@@ -9,6 +9,9 @@
 //!
 //! P216a1: the wreck and put-back are the original's (S220a1's `kiowa::Wreckage`): a player's
 //! helicopter has no owner, so the put-back stands it at its spawn, where it was taken.
+//!
+//! P265: the wreck throws the four blades (S220a1a's `kiowa::Blades`), which fly in the
+//! helicopter's world and come down on the ground until the put-back stops and hides them.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -133,15 +136,21 @@ fn wrecks(said: &str) -> (u32, &str) {
 const REST: Phase = Phase { frames: 30, buttons: 0xff, cross: 0, square: 0, stick_y: 0x7f };
 const CLIMB: Phase = Phase { frames: 60, buttons: 0xbf, cross: 0xff, square: 0, stick_y: 0x7f };
 
-#[test]
-fn a_landing_at_speed_wrecks() {
-    // Up 110 ft, 200 ticks nose down to ~128 ft/s, then down on Square with the stick still
-    // forward: it meets the ground going fast, wrecks, and is put back on its skids where it was
-    // taken (its spawn).
-    let tape = scratch("fast-landing.tape");
+/// Up 110 ft, 200 ticks nose down to ~128 ft/s, then down on Square with the stick still forward:
+/// it meets the ground going fast (about tick 410) and wrecks.
+fn fast_landing(name: &str) -> PathBuf {
+    let tape = scratch(name);
     let forward = Phase { frames: 200, stick_y: 0x00, ..REST };
     let down = Phase { frames: 300, buttons: 0x7f, square: 0xff, stick_y: 0x00, ..REST };
     std::fs::write(&tape, flight(&[REST, CLIMB, forward, down])).expect("the tape is written");
+    tape
+}
+
+#[test]
+fn a_landing_at_speed_wrecks() {
+    // The fast landing wrecks it, and it is put back on its skids where it was taken (its spawn),
+    // its thrown blades stopped and hidden (P265).
+    let tape = fast_landing("fast-landing.tape");
     let Some(said) = ride("free09", 600, tape.to_str().expect("a path")) else { return };
     println!("{said}");
     let (n, line) = wrecks(&said);
@@ -149,6 +158,32 @@ fn a_landing_at_speed_wrecks() {
     assert!(line.contains("on its skids"), "it was not put back: {line}");
     let gone: f32 = line.split_whitespace().nth(1).and_then(|w| w.parse().ok()).unwrap_or_else(|| panic!("no distance in `{line}`"));
     assert!(gone < 5.0, "it was put back {gone} ft from its spawn: {line}");
+    assert!(!said.contains("kiowa: blades:"), "the put-back left blades shown:\n{said}");
+}
+
+/// The `kiowa: blades:` line the shell says at the ride's end: how many blades are shown, and the
+/// lowest and highest of them over the ground.
+fn blades(said: &str) -> (u32, f32, f32) {
+    let line = said.lines().find(|l| l.starts_with("kiowa: blades: ")).unwrap_or_else(|| panic!("no blades line:\n{said}"));
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let number = |i: usize| words[i].trim_end_matches(',').parse::<f32>().unwrap_or_else(|_| panic!("no number at {i} in `{line}`"));
+    (number(2) as u32, number(6), number(8))
+}
+
+#[test]
+fn a_wreck_throws_the_blades() {
+    // P265: the fast landing's wreck throws the four blades; 120 ticks on, before the put-back,
+    // they are all out, spread over the ground and the air, and none has gone through the ground.
+    let tape = fast_landing("thrown-blades.tape");
+    let Some(said) = ride("free09", 530, tape.to_str().expect("a path")) else { return };
+    println!("{said}");
+    let (n, line) = wrecks(&said);
+    assert_eq!(n, 1, "the fast landing wrecked it {n} times: {line}");
+    assert!(line.contains("wrecked, wrecked"), "it is not wrecked at the ride's end: {line}");
+    let (shown, low, high) = blades(&said);
+    assert_eq!(shown, 4, "{shown} blades are shown:\n{said}");
+    assert!(low > -2.0, "a blade is {low} ft under the ground:\n{said}");
+    assert!(high > 10.0, "no blade flew: the highest is {high} ft over the ground:\n{said}");
 }
 
 #[test]
@@ -161,6 +196,7 @@ fn a_soft_landing_stands() {
     println!("{said}");
     let (n, line) = wrecks(&said);
     assert_eq!(n, 0, "a soft landing wrecked it: {line}\n{said}");
+    assert!(!said.contains("kiowa: blades:"), "a soft landing threw blades:\n{said}");
     assert!(line.contains("on its skids"), "it is not down: {line}");
     let (_, over) = left(&said);
     assert!(over.abs() < 1.0, "it stands {over} ft over where it was taken: {line}");
