@@ -8272,3 +8272,14 @@ atv_car_update              atv 0x004cc4e0 = the car's vt +0x10c, the update (bu
 atv_car_listener_48         atv 0x004cb0c0 = a car listener at this-48 (the buggy's thunk too; preforce or force, not checked)
 atv_car_postprocess         atv 0x004cbd80 = the car's PostProcess (vt +0x11c, listener at this-52; the truck's 0x004d7ea0 calls it)
 atv_car_listener_60         atv 0x004cbb60 = a car listener at this-60 (the buggy's thunk too)
+# MD39a — MX vs. ATV's five cars driven in PCSX2 (Desert Oasis Free Ride, one generated tape), read every
+# tick: context/capture/md39a/<car>.csv, states and RAM context/mxvatv-ps2/md39a/<car>.p2s/.ee.bin,
+# tests/mxvatv_car_captures.rs. Journal: research/journal/2026-11-03-md39a-mxvatv-car-captures.
+# Checked on the RAM images: each car vtable keeps 135..137 of the car's first 144 slots; the object's
+# +0x10f0 is the file's CofG (not CofGAI: the truck's differ). Player objects: buggy/baja/truck 0x01598e10,
+# sandrail 0x01b158a0, golf cart 0x01b0dac0; each class has a second, idle object.
+# Input words, read off the drives against the tape (not off the code): MXVehicle +0x310 brake (1 also at
+# rest), +0x314 gas, +0x318 gas slewed (0, 0.4, 1); the car's +0x1130 brake, +0x1134 brake force (5 under
+# the hand brake), +0x1138 hand brake, +0x113c/+0x1140 steer scaled by speed, +0x11c8 stick steer,
+# +0x11d0 it slewed, +0x8d0 (stick + 1) / 2 slewed. The gas does not reach the car block. +0x308/+0x30c
+# are ints 1 and 4.
