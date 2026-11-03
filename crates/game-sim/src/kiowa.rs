@@ -1059,6 +1059,85 @@ pub trait Surroundings {
     /// thrown, the put-back): inside the measure, after the crash test and before the touchdown, so
     /// any `rand()` it draws comes before the touchdown sound's.
     fn crashed(&mut self, asked: &Crashed, ride: &mut Ride, rng: &mut Rng);
+    /// The bodies that share the helicopter's world (C21): the MX helicopter's thrown blades, which
+    /// step with it, after it on every list. None by default: the helicopter alone in its world.
+    fn among(&mut self) -> Option<Among<'_>> {
+        None
+    }
+    /// How many of [`Surroundings::among`]'s are on `list`, as the world's step counts them.
+    fn among_listed(&self, list: crate::biplane::List) -> i32 {
+        let _ = list;
+        0
+    }
+}
+
+/// **The thrown blades in the helicopter's world** (C21), as its step reaches them: their
+/// collection's lists, the tables their springs read and the movers their contacts name, and the
+/// helicopter's own collision object and mass for the blades' contacts on its hull.
+pub struct Among<'a> {
+    pub blades: &'a mut Collection,
+    pub tables: &'a Tables,
+    pub movers: &'a [Mover],
+    pub hull: &'a mut crate::contact::Collider,
+    pub mass: F,
+}
+
+/// **The helicopter's lists with the blades after it** (C21): the original's world holds the
+/// helicopter's body and listeners first in every list and the blades' after them, so each substep
+/// pushes the helicopter, then the blades, then integrates the helicopter, then the blades. The
+/// blades' posts are not on it: they run after the crash test's answer is acted on
+/// ([`Blades::post`]).
+struct Shared<'a, S: Surroundings> {
+    lists: Lists<'a, S>,
+}
+
+impl<S: Surroundings> Shared<'_, S> {
+    /// The blades' turn at `list`'s `i`th place (counted after the helicopter's), with the
+    /// helicopter as the only other side their contacts name.
+    fn blades(&mut self, f: impl FnOnce(&mut dyn crate::biplane::Dynamics)) {
+        let Lists { ride, around, .. } = &mut self.lists;
+        let Some(a) = around.among() else { return };
+        let mut heli = crate::contact::Weighed { body: &mut ride.body, mass: a.mass };
+        let mut others = [crate::contact::Other { collider: a.hull, side: crate::contact::Side::Body(&mut heli) }];
+        let mut lists = a.blades.lists(a.tables, a.movers, &mut others);
+        f(&mut lists);
+    }
+}
+
+impl<S: Surroundings> crate::biplane::Dynamics for Shared<'_, S> {
+    fn count(&self, list: crate::biplane::List) -> i32 {
+        let blades = match list {
+            crate::biplane::List::Post => 0,
+            _ => self.lists.around.among_listed(list),
+        };
+        self.lists.count(list) + blades
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        if i == 0 { self.lists.preforce(0, dt) } else { self.blades(|d| d.preforce(i - 1, dt)) }
+    }
+    fn force(&mut self, i: i32, h: F) {
+        if i == 0 { self.lists.force(0, h) } else { self.blades(|d| d.force(i - 1, h)) }
+    }
+    fn enabled(&self, i: i32) -> bool {
+        if i == 0 {
+            return self.lists.enabled(0);
+        }
+        // `among` needs the surroundings mutably: a blade's own flag is read in `integrate` and
+        // `end_substep` instead, which then do nothing for an asleep body, as the world's loop would.
+        true
+    }
+    fn integrate(&mut self, i: i32, h: F) {
+        if i == 0 { self.lists.integrate(0, h) } else { self.blades(|d| if d.enabled(i - 1) { d.integrate(i - 1, h) }) }
+    }
+    fn end_substep(&mut self, i: i32) {
+        if i == 0 { self.lists.end_substep(0) } else { self.blades(|d| if d.enabled(i - 1) { d.end_substep(i - 1) }) }
+    }
+    fn constrain(&mut self, i: i32, first: bool) {
+        self.blades(|d| d.constrain(i, first));
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        self.lists.post(i, dt);
+    }
 }
 
 /// The helicopter's lists in the dynamics world: one body, one listener of each kind, no constraints.
@@ -1135,6 +1214,9 @@ impl Kiowa {
     ///    what it asks for ([`Surroundings::crashed`]), the touchdown ([`Measure::touchdown`]; its sound's
     ///    pick draws one `rand()`), then the rotor's spin ([`spin_blades`]).
     ///
+    /// Whatever shares the world ([`Surroundings::among`], the thrown blades) is after the helicopter
+    /// on each of the lists but the posts.
+    ///
     /// Returns what the crash test asked for.
     ///
     /// Against the original's frames (C14's capture), the world step flies the pad the last input
@@ -1154,9 +1236,10 @@ impl Kiowa {
         if let Some(pad) = pad {
             self.pad = pad;
         }
-        let mut lists = Lists { kiowa: self, ride, around, curve, acos, rng, asked: Crashed::default() };
-        world.step(dt, &mut lists);
-        lists.asked
+        let lists = Lists { kiowa: self, ride, around, curve, acos, rng, asked: Crashed::default() };
+        let mut shared = Shared { lists };
+        world.step(dt, &mut shared);
+        shared.lists.asked
     }
 }
 
@@ -1707,6 +1790,9 @@ pub fn wreck_blade(bytes: &[u8]) -> Part {
 
 /// The helicopter's ray probe: the rigid-body part's `%sm.col` for the skin, the Kiowa's here.
 pub const KIOWA_RAYS: &str = "helicopter\\col\\kiowam.col";
+/// The helicopter's collidable mesh, beside it (the `%sf.col`): what another object's rays meet the
+/// hull on — the thrown blades' (C21).
+pub const KIOWA_HULL: &str = "helicopter\\col\\kiowaf.col";
 
 /// The helicopter's collidable's categories (the collision object's `+0x1f8`, its `+0x84`) and the
 /// object's actor and collides-with masks (`+0x110`, `+0x114`), off C14's save state: not keys of the
@@ -1816,6 +1902,19 @@ impl Collision {
         scene.rays(true).first().copied()
     }
 
+    /// **What the thrown blades' rays put on the hull** (C21), after this frame's
+    /// [`Collision::search`]: the mirrors after the record's own entries, as many as its capacity
+    /// leaves room for, each naming its blade; the record touching another object.
+    pub fn file_mirrors(&mut self, mirrors: &[crate::contact::Contact]) {
+        if mirrors.is_empty() {
+            return;
+        }
+        let r = &mut self.record;
+        (r.touching, r.on_object, r.touching_other) = (true, true, true);
+        let room = r.capacity.saturating_sub(r.contacts.len());
+        r.contacts.extend(mirrors.iter().copied().take(room));
+    }
+
     /// The record's entries as the touchdown reads them.
     pub fn entries(&self) -> Vec<Touch> {
         self.record.contacts.iter().map(|c| Touch { kind: c.kind, t: F(c.on_body.y()) }).collect()
@@ -1850,6 +1949,16 @@ pub struct Grounded<'a> {
     pub movers: &'a [crate::contact::Mover],
     pub rotor: &'a [[Vf; 2]],
     pub asked: Vec<Crashed>,
+}
+
+impl Grounded<'_> {
+    /// [`Surroundings::resolve`] with the other sides the record's contacts name (C21): the thrown
+    /// blades whose rays struck the hull, by blade ([`Blades::with_others`]).
+    pub fn resolve_among(&mut self, body: &mut Body, others: &mut [crate::contact::Other<'_>]) {
+        let c = &mut *self.collision;
+        let mut weighed = crate::contact::Weighed { body, mass: c.mass };
+        crate::contact::resolve(&mut c.collider, &mut weighed, &mut c.record.contacts, others, self.movers, true);
+    }
 }
 
 impl Surroundings for Grounded<'_> {
@@ -2376,12 +2485,15 @@ pub struct Blades {
     pub rays: Arc<Vec<Option<Rays>>>,
     /// The four blades' collidable mesh, `bladebentf.col`, when it was given.
     pub shape: Option<Arc<Mesh>>,
+    /// The helicopter's collidable mesh, [`KIOWA_HULL`], when it was given ([`Blades::with_hull`]):
+    /// what the blades' rays meet the hull on (C21).
+    pub hull: Option<Arc<Mesh>>,
 }
 
 impl Default for Blades {
     /// No blades: what [`Wreckage::new`] leaves before [`Blades::new`]'s are put in.
     fn default() -> Blades {
-        Blades { set: blade_set(Vec::new(), Vec::new(), None), started: [Started::default(); 4], rays: Arc::default(), shape: None }
+        Blades { set: blade_set(Vec::new(), Vec::new(), None), started: [Started::default(); 4], rays: Arc::default(), shape: None, hull: None }
     }
 }
 
@@ -2427,7 +2539,7 @@ impl Blades {
         for k in 0..4 {
             set.place(k);
         }
-        Ok(Blades { set, started: [Started::default(); 4], rays: Arc::new(vec![rays; 4]), shape })
+        Ok(Blades { set, started: [Started::default(); 4], rays: Arc::new(vec![rays; 4]), shape, hull: None })
     }
 
     /// **`wreck_part_start`** on blade `k` (its wrapper's slot `+0x11c`): started, the node shown and
@@ -2481,6 +2593,65 @@ impl Blades {
         self.set.search(dt, &rays, field, props, trees);
     }
 
+    /// The blades with the helicopter's collidable mesh (`hull`, [`KIOWA_HULL`]) for their rays to
+    /// meet ([`Blades::search_on`]).
+    pub fn with_hull(mut self, hull: &[u8]) -> Result<Blades, String> {
+        self.hull = Some(Arc::new(Mesh::parse(hull)?));
+        Ok(self)
+    }
+
+    /// **[`Blades::search`] with the helicopter's hull in the blades' world** (C21): its
+    /// [`Blades::hull`] where its collision record's node stands it (as [`Collision::search`] left
+    /// it this frame) and moving with `body`, its collidable the helicopter's ([`COLLIDABLE`],
+    /// [`COLLIDES_WITH`]). A blade's entry on the hull names the helicopter as its other side `0`;
+    /// the mirrors go on the hull's record after its own entries ([`Collision::file_mirrors`]),
+    /// each naming its blade. Without the hull mesh, [`Blades::search`].
+    pub fn search_on(
+        &mut self,
+        dt: F,
+        field: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        collision: &mut Collision,
+        body: &Body,
+    ) {
+        let Some(mesh) = self.hull.clone() else { return self.search(dt, field, props, trees) };
+        let n = &collision.record.node;
+        let at = Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin]);
+        let wrecks = [prop_world::Wreck { hull: crate::flight_search::Plane { mesh: &mesh, at, velocity: body.velocity }, side: 0 }];
+        let mut strikes = [crate::prop_wreck::WreckStrike::default()];
+        let rays = Arc::clone(&self.rays);
+        self.set.search_among_hulled(dt, &rays, field, props, trees, &wrecks, (COLLIDABLE, COLLIDES_WITH), &mut strikes);
+        let [strike] = strikes;
+        let mirrors: Vec<_> = strike
+            .mirrors
+            .iter()
+            .map(|m| crate::contact::Contact { other: m.other.map(|i| strike.struck[i].object), ..*m })
+            .collect();
+        collision.file_mirrors(&mirrors);
+    }
+
+    /// The blades as the other sides of the hull's mirrors (C21), by blade: each one's collision
+    /// object and body, for `f`'s resolve ([`Grounded::resolve_among`]).
+    pub fn with_others<R>(&mut self, f: impl FnOnce(&mut [crate::contact::Other<'_>]) -> R) -> R {
+        let set = &mut self.set;
+        let mut weighed: Vec<crate::contact::Weighed<'_>> =
+            set.bones.iter_mut().map(|b| crate::contact::Weighed { body: &mut b.body, mass: b.mass }).collect();
+        let mut others: Vec<crate::contact::Other<'_>> = set
+            .objects
+            .iter_mut()
+            .zip(weighed.iter_mut())
+            .filter_map(|(o, w)| Some(crate::contact::Other { collider: &mut o.collision.as_mut()?.collider, side: crate::contact::Side::Body(w) }))
+            .collect();
+        f(&mut others)
+    }
+
+    /// The blades as [`Surroundings::among`] hands them to the helicopter's step, the hull being
+    /// `collision`'s.
+    pub fn among<'a>(&'a mut self, tables: &'a Tables, movers: &'a [Mover], collision: &'a mut Collision) -> Among<'a> {
+        Among { blades: &mut self.set, tables, movers, hull: &mut collision.collider, mass: collision.mass }
+    }
+
     /// **The blades' collidables as another's rays meet them**: each blade whose probes and mesh are
     /// in the broad phase ([`Started::probes`]), as `(blade, its mesh where its node stands it)`, in
     /// blade order, posed as a knocked prop's is ([`crate::world::Prop::posed`]) — for a search's
@@ -2498,9 +2669,10 @@ impl Blades {
     }
 
     /// **The blades' share of the helicopter's world step**, but for the posts
-    /// ([`Collection::step_to_posts`]): run beside [`Kiowa::tick`]'s, before the crash test's answer
-    /// is acted on. `movers` are what the collide pass's hits name
-    /// ([`crate::flight_search::movers`]).
+    /// ([`Collection::step_to_posts`]), stepped apart from it: run beside [`Kiowa::tick`]'s, before
+    /// the crash test's answer is acted on. `movers` are what the collide pass's hits name
+    /// ([`crate::flight_search::movers`]). Where the blades meet the hull, they step in the
+    /// helicopter's own step instead ([`Surroundings::among`], C21).
     pub fn step(&mut self, dt: F, tables: &Tables, movers: &[Mover]) {
         self.set.step_to_posts(dt, tables, movers);
     }
