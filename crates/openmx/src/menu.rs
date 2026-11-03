@@ -842,7 +842,7 @@ impl Departure {
         match self {
             Departure::Controls => ["New", "Original"],
             Departure::Cameras => ["Further Out", "Original"],
-            Departure::Fog => ["Whole Map", "Original Fog"],
+            Departure::Fog => ["Farther Fog", "Original Fog"],
             Departure::Foliage => ["Crisp", "Original"],
             Departure::Picture => ["Auto", "4:3"],
             Departure::Filtering => ["16x", "Off"],
@@ -857,7 +857,7 @@ impl Departure {
         match self {
             Departure::Controls => "Every player's bike buttons and plane stick. Original is the disc's own layout, on each player's controller preset.",
             Departure::Cameras => "Every player's follow cameras. Further Out sits a little back and higher; Original is the disc's.",
-            Departure::Fog => "Original Fog is the game's haze and far clip. Whole Map draws everything, with only a light haze far off.",
+            Departure::Fog => "Original Fog is the game's haze and far clip. Farther Fog is the same haze eight times as far out; Draw Distance has Whole Map too.",
             Departure::Foliage => "How leaves lie over what is behind them. Crisp cuts each leaf out, so trees show through each other's gaps; Original blends them as the game did, and a near tree's soft edges can hide the trees behind it.",
             Departure::Picture => ASPECT_HELP,
             Departure::Filtering => FILTERING_HELP,
@@ -920,7 +920,7 @@ impl Menu {
                     set.cycle = if original { cameras::Cycle::Disc } else { cameras::Cycle::Both };
                 }
             }
-            Departure::Fog => s.graphics = if original { Graphics::Original } else { Graphics::Full },
+            Departure::Fog => s.graphics = if original { Graphics::Original } else { Settings::default().graphics },
             Departure::Foliage => s.foliage = if original { Foliage::Original } else { Foliage::Cutout },
             Departure::Picture => s.picture = if original { Picture::Television } else { Picture::Fill },
             Departure::Filtering => s.filtering = if original { Filtering::Off } else { Filtering::X16 },
@@ -1354,7 +1354,8 @@ impl Default for Settings {
             menu_volume: 100,
             mix: Mix::Game,
             custom: [70, 70, 80, 45, 60, 100],
-            graphics: Graphics::default(),
+            // High's far fog (P268): the rows Auto picks on the desktop.
+            graphics: Graphics::Farther,
             render_scale: RenderScale::default(),
             vsync: true,
             frame_limit: FrameLimit::default(),
@@ -1638,10 +1639,18 @@ impl Settings {
         // No file, or one from before P223: Auto where its graphics rows were never changed, and
         // then the rows this device's pick (on the desktop, the same rows).
         if !pairs(text).any(|(k, _)| k == "video") {
-            s.video_auto = video::Look::of(&s) == video::Look::of(&Settings::default());
+            // The whole map was the default before P268.
+            let look = video::Look::of(&s);
+            s.video_auto = look == video::Look::of(&Settings::default())
+                || look == video::Look { draw: Graphics::Full, ..video::Look::of(&Settings::default()) };
             if s.video_auto {
                 video::pick(&video::Device::here()).apply(&mut s);
             }
+        }
+        // A file that chose High before P268 has its whole-map rows: High's now (its far fog). Those
+        // rows chosen since are written `custom_whole_map` ([`Settings::video_text`]) and kept.
+        if !s.video_auto && !pairs(text).any(|(k, v)| k == "video" && v == "custom_whole_map") {
+            video::Look::of(&s).renewed().apply(&mut s);
         }
         s
     }
@@ -1804,6 +1813,8 @@ impl Settings {
         // the defaults, so a file from before P223 is written as it was.
         let implied = video::Look::of(self) == video::Look::of(&Settings::default());
         let auto = match (self.video_auto, implied) {
+            // High with Whole Map by hand, which a file from before P268 has for High (P268).
+            (false, _) if video::Look::of(self) == video::Preset::old_high() => "video = custom_whole_map\n".into(),
             (true, false) => "video = auto\n".into(),
             (false, true) => "video = custom\n".into(),
             _ => String::new(),

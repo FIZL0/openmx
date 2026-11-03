@@ -556,9 +556,13 @@ fn the_settings_offer_the_hud_and_none_alone() {
 #[test]
 fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     let (mut m, mut r) = fresh();
-    assert_eq!(m.settings.graphics, Graphics::Full, "the whole map unless asked");
+    // Auto's High on the desktop: its far fog (P268), the whole map a step away.
+    assert_eq!(m.settings.graphics, Graphics::Farther, "High's far fog unless asked");
     settings_at(&mut m, &mut r, "Graphics");
     down_to(&mut m, &mut r, menu::Key::DrawDistance);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Farther Fog");
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.settings.graphics, Graphics::Full);
     assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Whole Map");
     // V95's Farther Fog sits between the whole map and Far Fog.
     tap(&mut m, &mut r, Control::Right);
@@ -586,8 +590,10 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Original);
     assert_eq!(Settings::parse("graphics = far\n").graphics, Graphics::Far);
     assert_eq!(Settings::parse("graphics = farther\n").graphics, Graphics::Farther);
-    assert_eq!(Settings::parse("graphics = full\n").graphics, Graphics::Full);
-    assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Full);
+    assert_eq!(Settings::parse("graphics = full\nvideo = custom_whole_map\n").graphics, Graphics::Full);
+    // The whole map with the other rows as they come is a file on Auto from before P268: Auto's pick.
+    assert_eq!(Settings::parse("graphics = full\n").graphics, Graphics::Farther);
+    assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Farther);
 }
 
 /// V42: the readout unless asked, and the Display tab's row switches it to the dial and back by
@@ -709,7 +715,7 @@ fn the_render_scale_row_cycles_and_is_saved() {
         seen.push(m.settings.render_scale);
     }
     assert_eq!(seen, [RenderScale::Full, RenderScale::ThreeQuarters, RenderScale::Half, RenderScale::Forty, RenderScale::Auto]);
-    assert_eq!(m.settings.graphics, Graphics::Full, "the graphics row is untouched");
+    assert_eq!(m.settings.graphics, Graphics::Farther, "the graphics row is untouched");
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.render_scale, RenderScale::Forty);
     tap(&mut m, &mut r, Control::Cross);
@@ -4325,14 +4331,14 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
         tap(&mut m, &mut r, Control::Up);
     }
     // Draw Distance changed by the pad is the setting, and is saved.
-    assert_eq!(m.settings.graphics, Graphics::Full);
+    assert_eq!(m.settings.graphics, Graphics::Farther);
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
-    // V95's Farther Fog is next after the Whole Map
-    assert_eq!(m.settings.graphics, Graphics::Farther);
+    // V95's Far Fog is next after the Farther
+    assert_eq!(m.settings.graphics, Graphics::Far);
     let dir = scratch("graphics-tab");
     menu::save(&dir, &m.settings, &Controls::default()).unwrap();
-    assert_eq!(menu::load(&dir).0.graphics, Graphics::Farther);
+    assert_eq!(menu::load(&dir).0.graphics, Graphics::Far);
     std::fs::remove_dir_all(&dir).ok();
     // `--screen graphics` opens the same tab.
     assert_eq!(Screen::from_word("graphics"), Some(Screen::Graphics));
@@ -5369,7 +5375,7 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
         assert_eq!(m.original(), Original::On, "{d:?}");
         tap(&mut m, &mut r, Control::Cross);
         assert_eq!(m.original(), Original::Off, "{d:?}");
-        assert_eq!(m.settings.graphics, Graphics::Full);
+        assert_eq!(m.settings.graphics, Graphics::Farther);
         assert_eq!(m.controls.layouts, [Layout::New; menu::SEATS]);
         assert_eq!(m.settings.cameras, [menu::CameraView::DEFAULT; menu::SEATS_MAX]);
         // Off leaves the HUD as it was too: the user's own, still.
@@ -7727,6 +7733,28 @@ fn the_preset_row_sets_the_graphics_rows() {
     assert!(m.settings.video_auto);
     assert_eq!(row(&m).value, "Auto");
     assert_eq!(Look::of(&m.settings), menu::video::pick(&menu::video::Device::here()));
+}
+
+/// P268: High keeps a far fog. A settings.txt that chose High before it (its whole-map rows,
+/// `video = custom`) reads as High's new look, not Custom; Whole Map with High's other rows chosen
+/// since is kept through a save and a load.
+#[test]
+fn an_old_high_file_reads_as_high() {
+    use menu::video::{Look, Preset};
+    let old = Settings { video_auto: false, ..Settings::default() };
+    let mut chosen = old.clone();
+    Preset::old_high().apply(&mut chosen);
+    let text = chosen.text();
+    assert!(text.contains("video = custom_whole_map"), "{text}");
+    // Before P268 the same rows were written as plain Custom.
+    let before = Settings::parse(&text.replace("video = custom_whole_map", "video = custom"));
+    assert!(!before.video_auto);
+    assert_eq!(Look::of(&before), Preset::High.look());
+    assert_eq!(menu::video::row_at(&before), 1);
+    let back = Settings::parse(&text);
+    assert!(!back.video_auto);
+    assert_eq!(Look::of(&back), Preset::old_high());
+    assert_eq!(Look::of(&Settings::parse(&back.text())), Preset::old_high());
 }
 
 #[test]
