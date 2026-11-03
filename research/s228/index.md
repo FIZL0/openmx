@@ -66,7 +66,7 @@ events above. Every tick matches the capture's chassis velocity and centre bit f
 fore-aft request axes match on every riding tick. All four wrecks match, with the original's reason
 in the original's frame. The 139063 nose-first landing rides out as the original's does.
 
-`p1_rides_the_tape_as_the_original` rides each 100-frame stretch from its image. Twenty-five of the 35
+`p1_rides_the_tape_as_the_original` rides each 100-frame stretch from its image. Twenty-seven of the 35
 stretches hold to their end. The rest are pinned in `HELD`:
 
 - **A wreck under way at the image** (137310, 138510, 139510, 139910). The seeder builds a riding
@@ -76,11 +76,16 @@ stretches hold to their end. The rest are pinned in `HELD`:
 - **A preload's force** (138810 at 138907). The stick is thrown forward on a lip. The force is the
   flick's speed, and the port samples the flick its own way (`ride::Flick`), because the original
   samples it from DMA waits on a hardware timer. Not reproducible tick for tick.
-- **A chassis contact the port does not make** (137410 at 137462, the stick full left with no gas;
-  137610 at 137637, gas on and the stick just coming off centre). On the row after the last held
-  tick the capture's `p1_ch_force`/`p1_ch_moment` go non-zero while the bike is on the ground, and
-  the port's stay zero. Something the original touches (a body ray, or a contact the port does not
-  find) pushes the chassis there. Not chased; follow-up filed.
+
+**Not a parting, S228b1: two torn rows** (137410 at 137462, 137610 at 137637). Each was one capture
+row read inside integrate: rows 137464 and 137638 carry the next tick's velocity x, the tick before's
+y and z, and a rebuilt centre. `held` took a rebuilt centre only beside a whole velocity, so it
+stopped there. From the images at 137462 and 137637 (made for this), the original's own
+`bike_ground_step`, with the port's levers written in, gives the port's tick bit for bit. Every row
+after these matches one of the port's ticks. The non-zero `p1_ch_force`/`p1_ch_moment` on those rows
+come from the same mid-tick read, and rows the port already held show them too (137630..137634).
+`held` now also takes a velocity torn between two states when the centre is within 0.05 ft of the
+earlier state. Both stretches hold to 100.
 
 **Fixed in S228b: the ground step's donut.** Nine of the old "unexplained" partings (136610, 137910,
 138010, 138110, 138210, 138310, 138710, and the 139310 one blamed on the preload) were one cause. The
@@ -94,8 +99,8 @@ image with the port's levers written in, gives the capture row's velocity and ce
 at 138010, 138210 and 138310. `ride::frame_searched` now takes the look (`trick::look`, on
 `Tables::angles`).
 
-No new images were made at the parting ticks (research/s228/parting_ticks.txt); the 100-frame ones
-were enough for the donut.
+S228b1 made images at 137459..137462, 137634, 137635 and 137637 (research/c10/play_at.sh, then
+research/s228/rams.py, on copy 3 at NominalScalar 0.05).
 
 The original's whole frame (S176's `judge_whole` in ragdoll_wrecks.rs), run from these images, stalls
 in a hardware wait (call 0x133500 at pc 0x198bf0). C10's images do not. So the wrecks here are judged
