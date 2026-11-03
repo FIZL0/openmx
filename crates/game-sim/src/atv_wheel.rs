@@ -433,3 +433,257 @@ pub fn hinge_force(w: &mut Wheel, x: &More, b: &mut Body, force: Vf, point: Vf, 
     let moment = rotations(b).to_local(cross(sub_xyz(point, w.mount_world), force));
     w.steer_torque = Acc::adda(F::ZERO, w.steer_torque).madd(scale, dot3(moment, x.steer_axis));
 }
+
+// --- the wheel integrate's two steps (MD75) -------------------------------------------------------
+
+/// The spin step hands its tire force to the hinge with this scale, the word at `0x525230`.
+const HINGE_SCALE: f32 = 0.25;
+/// The surface drag's fade: the body's own speed along itself, one unit per this many feet a second.
+const DRAG_FADE: f32 = 0.3;
+/// The forward the contact frame takes off the body when the wheel is not a steered one on the
+/// ground, `0x397010`.
+const FORWARD: Vf = Vf::new(0.0, 0.0, 1.0, 1.0);
+const PI: f32 = 3.1415927;
+const TWO_PI: f32 = 6.2831855;
+const INV_TWO_PI: f32 = 0.15915494;
+
+/// The words of SLUS-21104's wheel that the wheel integrate's two steps ([`surface_drag`] and
+/// [`spin_integrate`]) read and write and that neither [`Wheel`] nor [`More`] has. The tire's radius
+/// is [`Wheel::probe_length`] (`+0x214`, the same word).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spin {
+    /// `+0x24`: the brake lever the wheel is wired to (a pointer to it; `None` is a null one, which
+    /// only the surface drag looks for: the force law reads through it whatever it is).
+    pub brake: Option<F>,
+    /// `+0x34`: `UseParametricCurve`, as the tire reader leaves it (any integer).
+    pub parametric: i32,
+    /// `+0x38`: how far into a donut the rider is.
+    pub donut: F,
+    /// `+0x58` and `+0x5c`: one over the spin's inertia, and `TireInertia` (the gyroscopic torque's).
+    pub inv_inertia: F,
+    pub tire_inertia: F,
+    /// `+0xa0`: `BodyTireForcePosition`, the arm the tire's force turns the body on.
+    pub arm: Vf,
+    /// `+0xb0`: set, the tire's force goes in without a moment.
+    pub no_moment: i32,
+    /// `+0xb4` and `+0xb8`: the wheel borrows the other wheel of its pair's load (scaled by
+    /// `OtherTireNormalLoadScale`) while it is off the ground and that one is not.
+    pub rear_pair: i32,
+    pub other_load_scale: F,
+    /// `+0xe0`, `+0xe4`, `+0xe8`: the force law's spinning, locked and sliding flags.
+    pub slip: crate::tire::Slip,
+    /// `+0x1d0` and `+0x1d4`: the wheel's angle, wrapped to ±π, and its spin.
+    pub angle: F,
+    pub spin: F,
+    /// `+0x210`: the drive and brake torque on the wheel this substep. The spin step spends it.
+    pub torque: F,
+    /// `+0x224` and `+0x228`: zeroed with both wheels of the pair in the air; nothing ported reads
+    /// them.
+    pub cleared: [F; 2],
+    /// `+0x234`: the side force per pound of load.
+    pub side_per_load: F,
+    /// `+0x238` .. `+0x838`: the tire's twenty-four tables, one row per surface, indexed by
+    /// [`More::record`] (which must be under sixteen).
+    pub surfaces: [crate::quad::TireSurface; crate::phy::MAX_SURFACES],
+    /// `+0x838`: one over the tire's radius.
+    pub inv_radius: F,
+    /// `+0x840` and `+0x850`: the contact's velocity and the tire's force, in the contact frame.
+    pub local_velocity: Vf,
+    pub local_force: Vf,
+    /// `+0x8d0`: the contact frame (across, the ground's normal, along; then the origin).
+    pub frame: [Vf; 4],
+}
+
+/// The other wheel of the pair (the wheel's `+0xbc`), as far as the spin step reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Other {
+    /// `+0xdc` and `+0xf8`.
+    pub contact: bool,
+    pub spring_force: F,
+    /// `+0x1f0` and `+0x1f4`, which a wheel borrowing its load copies.
+    pub ground: Ground,
+}
+
+/// A wheel's row of tables as the MX Unleashed force law ([`crate::tire::force`]) takes it.
+fn surface(t: &crate::quad::TireSurface) -> crate::phy::Surface {
+    let (d, s, g) = (t.drive, t.side, t.drag);
+    crate::phy::Surface {
+        side_force: d[0],
+        slipping_side_force: d[1],
+        max_drive_force: d[2],
+        max_side_force: d[3],
+        max_slipping_side_force: d[4],
+        skid_drive_force: d[5],
+        skid_side_force: d[6],
+        skid_slipping_side_force: d[7],
+        slipping_side_force_round_off: s[0],
+        slipping_side_force_drop_off: s[1],
+        slipping_side_force_scale: s[2],
+        slipping_side_force_speed_scale: s[3],
+        braking_side_force_round_off: s[4],
+        braking_side_force_drop_off: s[5],
+        braking_side_force_scale: s[6],
+        braking_side_force_speed_scale: s[7],
+        side_force_round_off: s[8],
+        side_force_drop_off: s[9],
+        side_force_scale: s[10],
+        side_force_speed_scale: s[11],
+        donuts_side_force_speed_scale: s[12],
+        max_braking_torque: g[0],
+        wheel_friction: g[1],
+        wheel_drag: g[2],
+        mud_time: F::ZERO,
+        mud_amount: F::ZERO,
+    }
+}
+
+/// `atv_wheel_surface_drag`: what the surface under the wheel takes out of it. MX Unleashed's
+/// [`crate::tire::surface_drag`] at SLUS-21104's offsets, with the drag put in through the body's
+/// local force (its vtable's `+0x74`: turned into the world by the orientation, no moment) and both
+/// torque terms on the FPU's accumulator.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn surface_drag(w: &Wheel, x: &More, s: &mut Spin, b: &mut Body) {
+    let row = &s.surfaces[usize::from(x.record)];
+    let fade = if w.contact {
+        let vz = x.chassis_velocity_local.z();
+        let fade = (F(DRAG_FADE) * vz).max(F(-1.0)).min(F::ONE);
+        let sign = F::from(-(if vz < F::ZERO { -1 } else { 1 }));
+        let drag = row.drag[2] * (vz * (vz * sign));
+        let world = rotations(b).to_world(Vf::new(0.0, 0.0, drag.0, 1.0));
+        b.force = add_xyz(b.force, world);
+        fade
+    } else {
+        s.spin.max(F(-1.0)).min(F::ONE)
+    };
+    s.torque = Acc::adda(F::ZERO, s.torque).madd(-fade, row.drag[1]);
+    if let Some(brake) = s.brake
+        && !(brake <= F::ZERO)
+    {
+        let b = -brake.max(F::ZERO);
+        s.torque = Acc::adda(F::ZERO, s.torque).madd(row.drag[0], fade * b);
+    }
+}
+
+/// `atv_wheel_contact_frame`: [`crate::tire::contact_frame`] on the body's quaternion. The forward is
+/// the body's (`0x397010` turned into the world), or for a steered wheel on the ground the axis
+/// rotation's third row by the steer angle (`+0x8ac`) about the hinge's axis, turned the same way;
+/// the frame squares it to the ground's normal and the contact velocity goes back through it.
+pub fn contact_frame(w: &Wheel, x: &More, s: &mut Spin, b: &Body, curve: &crate::camera::CurveTable) {
+    let forward = if w.contact && w.steered {
+        let r = crate::tire::axis_rotation(w.steer_angle, x.steer_axis, curve)[2];
+        Vf::new(r.x(), r.y(), r.z(), 1.0)
+    } else {
+        FORWARD
+    };
+    let forward = rotations(b).to_world(forward);
+    let frame = crate::math::basis(NO_CONTACT_VELOCITY, forward, w.contact_normal, true, false);
+    s.frame = frame.0;
+    let rows = crate::chassis::Mat3::new(frame.0[0], frame.0[1], frame.0[2]);
+    s.local_velocity = crate::chassis::unrotate(&rows, w.contact_velocity);
+}
+
+/// `atv_wheel_force_law`: MX Unleashed's tire force law ([`crate::tire::force`]) on the wheel's row
+/// of tables, into [`Spin::local_force`] (`(side, 0, forward)`, its `w` kept).
+pub fn force_law(w: &Wheel, x: &More, s: &mut Spin) {
+    let row = surface(&s.surfaces[usize::from(x.record)]);
+    let contact = crate::tire::Contact {
+        load: w.spring_force,
+        drive_torque: s.torque,
+        inv_radius: s.inv_radius,
+        donut: s.donut,
+        brake: s.brake.expect("the force law reads the brake through a null pointer"),
+        parametric: s.parametric != 0,
+        velocity: s.local_velocity,
+    };
+    let (side, forward) = crate::tire::force(&row, &contact, &mut s.slip);
+    s.local_force = Vf::new(side.0, 0.0, forward.0, s.local_force.w());
+}
+
+/// `atv_wheel_spin_integrate`: the tire's force through the contact patch, and the wheel's own spin.
+/// MX Unleashed's [`crate::tire::spin_integrate`] for SLUS-21104's wheel and rigid body:
+///
+/// - with neither wheel of the pair down, the local velocity and force are `(0, 0, 0, 1)` and the
+///   frame is the last one; a wheel borrowing its partner's load ([`Spin::rear_pair`], off the ground)
+///   takes the probe's end for its load point, the scaled load and the partner's ground, and runs the
+///   contact velocity on them;
+/// - the force goes out through the frame into the hinge (a steered wheel being balanced on, at a
+///   quarter) or into the body, with the moment of [`Spin::arm`] about the body's frame unless
+///   [`Spin::no_moment`];
+/// - the spin is integrated on the accumulator, the angle wrapped, the torque spent, and a wheel being
+///   balanced on hands the body its gyroscopic torque (through [`gyro_torque`] when steered).
+///
+/// Returns the calls the original makes to the two steps `tests/atv_wheel.rs` hooks.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn spin_integrate(w: &mut Wheel, x: &mut More, s: &mut Spin, b: &mut Body, dt: F, other: &Other,
+    ground: &mut Ground, curve: &crate::camera::CurveTable) -> Vec<Call> {
+    let mut calls = Vec::new();
+    if !w.contact && !other.contact {
+        s.cleared = [F::ZERO; 2];
+        s.local_velocity = NO_CONTACT_VELOCITY;
+        s.local_force = NO_CONTACT_VELOCITY;
+    } else {
+        if s.rear_pair != 0 && !w.contact {
+            w.load_point = w.probe_end_world;
+            w.spring_force = s.other_load_scale * other.spring_force;
+            *ground = other.ground;
+            calls.push(Call::ContactVelocity);
+            contact_velocity(w, x, b, ground);
+        }
+        contact_frame(w, x, s, b, curve);
+        force_law(w, x, s);
+    }
+
+    let lf = s.local_force;
+    let acc = s.frame[0].mul(lf.bc(Field::X));
+    let acc = Vf::madd(acc, s.frame[1], lf.bc(Field::Y));
+    let world = lf.merge(Dest::XYZ, Vf::madd(acc, s.frame[2], lf.bc(Field::Z)));
+    if w.balancing && w.steered {
+        let at = w.load_point;
+        calls.push(Call::HingeForce(world, at));
+        hinge_force(w, x, b, world, at, F(HINGE_SCALE));
+    } else {
+        b.force = add_xyz(b.force, world);
+        if s.no_moment == 0 {
+            let local = rotations(b).to_local(world);
+            b.moment = add_xyz(b.moment, cross(s.arm, local));
+        }
+    }
+
+    s.spin = if s.slip.locked {
+        F::ZERO
+    } else if !s.slip.spinning && w.contact {
+        s.local_velocity.z() * s.inv_radius
+    } else {
+        let net = s.torque - s.local_force.z() * w.probe_length;
+        Acc::adda(F::ZERO, s.spin).madd(dt, net * s.inv_inertia)
+    };
+    let a = Acc::adda(F::ZERO, s.angle).madd(s.spin, dt);
+    let r = a - F(TWO_PI) * F::from((F(INV_TWO_PI) * a).to_i32());
+    s.angle = if !(r <= F(PI)) {
+        r - F(TWO_PI)
+    } else if r < F(-PI) {
+        F(TWO_PI) + r
+    } else {
+        r
+    };
+    s.torque = F::ZERO;
+
+    if w.balancing {
+        let g = Vf::new(((-s.tire_inertia) * s.spin).0, 0.0, 0.0, 0.0);
+        if w.steered {
+            let at = add_xyz(b.spin, scale(x.steer_axis, w.steer_rate));
+            gyro_torque(w, x, b, F::ONE, cross(at, g));
+        } else {
+            b.moment = add_xyz(b.moment, cross(b.spin, g));
+        }
+    }
+    s.side_per_load = if w.spring_force <= F::ZERO { F::ZERO } else { s.local_force.x() / w.spring_force };
+    calls
+}
+
+/// `atv_wheel_gyro_torque`: a moment already in the body's frame, into the body whole and `scale`
+/// times its part about the hinge's axis into [`Wheel::steer_torque`].
+pub fn gyro_torque(w: &mut Wheel, x: &More, b: &mut Body, scale: F, t: Vf) {
+    b.moment = add_xyz(b.moment, t);
+    w.steer_torque = Acc::adda(F::ZERO, w.steer_torque).madd(scale, dot3(t, x.steer_axis));
+}
