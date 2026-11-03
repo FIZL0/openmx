@@ -210,9 +210,26 @@ impl PartialEq for Heard {
     }
 }
 
-/// [`Heard`] for a set of owners (a collection's objects), each entry by its owner's index.
+/// [`Heard`] for a set of owners (a collection's objects), each entry by its owner's index; and the
+/// ridden bikes its probes hear this frame ([`Ridden`], F27a2).
 #[derive(Clone, Debug, Default)]
-pub struct HeardBy(pub Vec<(usize, Struck)>);
+pub struct HeardBy(pub Vec<(usize, Struck)>, pub Ridden);
+
+/// **The ridden bikes as the props' probes hear them** (F27a2): the bikes' frame collidable mesh
+/// ([`crate::flight_search::BIKE_COLLISION`]) and each player's chassis where the props' collide pass
+/// finds it, by player. Sound only, like [`HeardBy`]: a prop's probe that strikes one is heard
+/// striking [`Struck::Bike`], and nothing else comes of it ([`crate::flight_search::bikes_struck`]).
+#[derive(Clone, Default)]
+pub struct Ridden {
+    pub mesh: Option<std::sync::Arc<crate::track::Mesh>>,
+    pub bikes: Vec<crate::flight_search::Bike>,
+}
+
+impl std::fmt::Debug for Ridden {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ridden").field("mesh", &self.mesh.is_some()).field("bikes", &self.bikes).finish()
+    }
+}
 
 impl PartialEq for HeardBy {
     fn eq(&self, _: &HeardBy) -> bool {

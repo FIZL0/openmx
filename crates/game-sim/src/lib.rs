@@ -322,7 +322,10 @@ impl Sim {
         // rider's wreck bike is on the props' node, struck by their rays in their pass (S243,
         // [`prop_wreck`]); a plane ride has none.
         let prop_movers = match self.plane {
-            Some(_) => self.traffic.frame_held(dt, world),
+            Some(_) => {
+                self.hear_ridden();
+                self.traffic.frame_held(dt, world)
+            }
             None => self.frame_held_wrecked(dt, world, &[(0, self.players())]),
         };
         self.lend_cars();

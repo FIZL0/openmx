@@ -543,6 +543,7 @@ impl crate::Sim {
     /// and what the props' rays struck on it kept on the bike for its frame ([`WreckBike::struck`]),
     /// in place of [`crate::Sim::wreck_strike`]'s search after the pass.
     pub(crate) fn frame_held_wrecked(&mut self, dt: F, world: &mut dyn crate::world::World, players: &[(usize, usize)]) -> crate::prop_set::PropMovers {
+        self.hear_ridden();
         let mut kept = Vec::new();
         if !self.traffic.props.is_empty() {
             for &(i, side) in players {
@@ -563,6 +564,19 @@ impl crate::Sim {
             }
         }
         movers
+    }
+
+    /// **The ridden bikes the props' probes hear this tick** (F27a2, [`PropSet::hear_ridden`]): each
+    /// player's chassis where the last tick left it, in the world while its rider is up and no ghost,
+    /// and player 1's not while the plane flies (its bike is out of the world then, S95).
+    pub(crate) fn hear_ridden(&mut self) {
+        let flying = self.plane.is_some();
+        let bikes: Vec<flight_search::Bike> = std::iter::once(&self.rider)
+            .chain(self.others.iter().map(|p| &p.rider))
+            .enumerate()
+            .map(|(i, r)| flight_search::Bike { transform: r.ride.transform(), in_world: !(i == 0 && flying) && r.state.wreck.is_none() && !r.ghost.on })
+            .collect();
+        self.traffic.props.hear_ridden(&bikes);
     }
 
     /// **Player `i`'s wreck bike as a hull on the props' node** (S243): its mesh, where its record's

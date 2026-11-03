@@ -70,9 +70,24 @@ pub struct PropSet {
     /// taking the list's last ([`PropSet::walk_listeners`]). Each collection's own
     /// [`Collection::listeners`] says which of its are on.
     pub listeners: Vec<(usize, Listener)>,
+    /// The ridden bikes' frame collidable mesh ([`flight_search::BIKE_COLLISION`]), which the props'
+    /// probes are heard striking (F27a2, [`PropSet::hear_ridden`]); `None`, and they hear no bike. A
+    /// constant of the ride, for the sound alone.
+    pub bike_frame: Option<Arc<Mesh>>,
 }
 
 impl PropSet {
+    /// **The ridden bikes the props' probes hear in the next collide pass** (F27a2): each player's
+    /// chassis, by player, where the pass finds it ([`crate::material_hit::Ridden`]). Sound only.
+    pub fn hear_ridden(&mut self, bikes: &[flight_search::Bike]) {
+        for c in &mut self.collections {
+            let r = &mut c.heard.1;
+            r.mesh.clone_from(&self.bike_frame);
+            r.bikes.clear();
+            r.bikes.extend_from_slice(bikes);
+        }
+    }
+
     /// The props of a track: `toy` its `.toy`, `track_dir` its directory as the `.pco` paths are made
     /// (`Tracks\Free09\`), `models` the scene's models. `pco` hands back a file by that path, `psg` a
     /// model's `.psg` by its file name (`sign_speedlmt.psg`); `area` is the terrain's extent, the
@@ -185,6 +200,7 @@ impl PropSet {
             rays: Arc::new(trees),
             shapes: Arc::new(shapes),
             listeners: Vec::new(),
+            bike_frame: None,
         };
         (set, said)
     }
