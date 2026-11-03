@@ -56,7 +56,13 @@ impl Shared {
         if sims.len() < 2 || sims[0].traffic.props.is_empty() {
             return None;
         }
-        let set = std::mem::take(&mut sims[0].traffic.props);
+        let mut set = std::mem::take(&mut sims[0].traffic.props);
+        // Every seat's bike, by seat, as the props' probes hear it (F27a2, `Sim::hear_ridden`).
+        let ridden: Vec<crate::flight_search::Bike> = sims
+            .iter()
+            .map(|s| crate::flight_search::Bike { transform: s.rider.ride.transform(), in_world: s.plane.is_none() && s.rider.state.wreck.is_none() && !s.rider.ghost.on })
+            .collect();
+        set.hear_ridden(&ridden);
         for s in sims.iter_mut().skip(1) {
             s.traffic.props = PropSet::default();
         }

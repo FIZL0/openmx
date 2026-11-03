@@ -4892,6 +4892,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 said.iter().for_each(|why| println!("  {why}"));
             }
             cars.props = props;
+            // The bikes' frame box, which the props' probes are heard striking (F27a2).
+            cars.props.bike_frame = bike_box.clone().map(Arc::new);
             // The struck `HasPhysics` cars' rigid bodies (S186), put back past the terrain's edge.
             cars.physics = traffic.physics(&archives, Some(game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [area.width, area.depth] }));
         }

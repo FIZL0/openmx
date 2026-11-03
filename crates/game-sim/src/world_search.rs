@@ -86,7 +86,7 @@ pub struct Categories {
 }
 
 impl Categories {
-    fn allows(&self, category: u32) -> bool {
+    pub(crate) fn allows(&self, category: u32) -> bool {
         let any = self.list.iter().any(|&m| category & m != 0);
         if self.mode == 1 { !any } else { any }
     }

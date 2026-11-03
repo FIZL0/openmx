@@ -739,6 +739,8 @@ impl Collection {
             let (true, Some(c)) = (o.filed, o.collision.as_mut()) else { return };
             let body = &mut self.bones[k].body;
             let asleep = !body.enabled;
+            // Where the probe searches and with what list, for the ridden bikes it is heard striking.
+            let searched = (o.node, c.categories.clone());
             c.record.node = o.node;
             contact_search::clear(&mut c.record, Some(body));
             let mut none = NoObjects;
@@ -783,6 +785,13 @@ impl Collection {
             o.node = std::mem::take(&mut c.record.node);
             if let Some(s) = &scene {
                 self.heard.0.extend(s.sounded().iter().map(|&struck| (k, struck)));
+                // The ridden bikes' frame collidables are on the original's node too, which the
+                // material listener hears struck (F27a2); here they are heard and nothing more.
+                if let (Some(tree), Some(mesh)) = (rays.get(k).and_then(Option::as_ref), self.heard.1.mesh.as_deref()) {
+                    let bikes = flight_search::Bikes { mesh, bikes: &self.heard.1.bikes };
+                    let struck = flight_search::bikes_struck(tree, &searched.0, &searched.1, bikes);
+                    self.heard.0.extend(struck.into_iter().map(|j| (k, crate::material_hit::Struck::Bike(j))));
+                }
             }
             let heard = scene.map(|s| s.heard()).unwrap_or_default();
             if heard.woke {

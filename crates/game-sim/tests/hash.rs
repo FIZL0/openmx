@@ -578,7 +578,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // sound only, cleared each tick, so not walked and not on the wire.
     // 12200 since S276: the wreck bike's mark that a flown plane's lane ticked it (`WreckBike::flown`),
     // made and spent within a tick, so not walked and not on the wire.
+    // 12208 since F27a2: the bikes' frame mesh the props' probes are heard striking
+    // (`PropSet::bike_frame`), the disc's, for the sound alone, so not walked and not on the wire.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12200, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12208, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

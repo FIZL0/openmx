@@ -1287,7 +1287,8 @@ fn queued(ee: &mut Ee) -> Vec<(u32, u8)> {
 /// bike's body rays on ball 2. The port's queue is what its listener hears of the bump
 /// ([`rider_contact::heard_struck`]) with the ball's mesh material; the original's, its props node's
 /// tick on the same image. One entry each, the bike's record striking material 21 (the ball), and the
-/// port's plays it — and the props' own searches, the ball's probe, hear nothing in either.
+/// port's plays it — and the props' own searches, the ball's probe, hear nothing in either, the
+/// bike's frame heard too (F27a2).
 #[test]
 fn the_strike_is_queued_as_the_original_queues_it() {
     use game_sim::material_hit::{self, Owner, Struck};
@@ -1310,6 +1311,10 @@ fn the_strike_is_queued_as_the_original_queues_it() {
         Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin])
     };
     let dt = F(before.f32_at(addr("frame_dt").unwrap()));
+    // The bike's frame heard as well (F27a2): the ball's probe misses it on this tick.
+    let Some(frame) = bike_frame() else { return };
+    free.set.bike_frame = Some(std::sync::Arc::new(frame));
+    free.set.hear_ridden(&[game_sim::flight_search::Bike { transform: at, in_world: true }]);
     free.set.search(dt, Some(&field), Some(&free.props), None);
     let strike = prop_contact::strike(&col, &at, &free.set, 0, 1, dt);
     let pushed = free.set.strike(&strike);
@@ -1341,4 +1346,102 @@ fn the_strike_is_queued_as_the_original_queues_it() {
     let played = material_hit::play(&mut queue, &rule, 22);
     eprintln!("bike speed {speed:?}: {played:?}");
     assert_eq!(played.len(), usize::from(speed >= F(5.0)));
+}
+
+/// `bikef.col`, the ridden bikes' frame collidable, out of the first archive on the disc that has it.
+fn bike_frame() -> Option<game_sim::track::Mesh> {
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let names: Vec<String> = disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let bytes = names.iter().find_map(|n| disc.res(n).ok()?.read(game_sim::flight_search::BIKE_COLLISION).ok())?;
+    Some(game_sim::track::Mesh::parse(&bytes).expect("bikef.col parses"))
+}
+
+/// **The ball's probe is heard striking the bike** (F27a2): knock-2881 one tick on. The original's
+/// props node queues two entries, the bike's body rays on ball 2 (material 21) and ball 2's probe on
+/// the bike's frame collidable (category 0x9a048, material 16). The port's props search, with the
+/// bike's frame on its chassis' node heard ([`PropSet::hear_ridden`]), hears the second, and the
+/// strike the first: the same queue, owner by owner and material by material. Of the pair the table
+/// keeps the faster; the ball heard nothing of the bike before (F27a), so the bike's always stayed.
+#[test]
+fn the_balls_probe_is_heard_striking_the_bike() {
+    use game_sim::material_hit::{self, Owner, Struck};
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some(mut ee) = knock_state(&kit, "knock-2881") else { return };
+    let rec = ee.u32_at(the_bike(&ee) + 0x7d0);
+    let ball = ee.u32_at(ee.u32_at(collections(&ee)[2] + coll::BODIES + 8));
+    let ball_rec = ee.u32_at(ball + obj::COLLISION);
+    let want = queued(&mut ee);
+    assert_eq!(want, vec![(rec, 21), (ball_rec, 16)], "the original's queue: the bike on ball 2, ball 2 on the bike");
+    // The ball's entry is on the bike's frame collidable, the record's own.
+    let t = MATERIAL_TABLE;
+    let struck = ee.u32_at(ee.u32_at(t + 0xa0) + 4);
+    assert_eq!((ee.u32_at(struck + 0x80), ee.u32_at(struck + 0x84)), (rec, game_sim::flight_search::BIKE));
+
+    let Some(before) = knock_state(&kit, "knock-2881") else { return };
+    let tables = Tables::build();
+    let Some((phy, col)) = bike_files(&tables) else { return };
+    let Some(frame) = bike_frame() else { return };
+    let Some(mut free) = free09() else { return };
+    let terrain = Terrain::parse(&free.terrain).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &free.scene.terrain);
+    let field = ground.field();
+    seed(&before, &mut free.set);
+    let at = {
+        let n = node_at(&before, before.u32_at(rec + 0xf8));
+        Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin])
+    };
+    let dt = F(before.f32_at(addr("frame_dt").unwrap()));
+    // Unheard, as before F27a2: the ball's probe hears nothing.
+    let mut unheard = free.set.clone();
+    unheard.search(dt, Some(&field), Some(&free.props), None);
+    assert!(unheard.collections.iter().all(|c| c.heard.0.is_empty()));
+
+    free.set.bike_frame = Some(std::sync::Arc::new(frame));
+    free.set.hear_ridden(&[game_sim::flight_search::Bike { transform: at, in_world: true }]);
+    free.set.search(dt, Some(&field), Some(&free.props), None);
+    // Hearing is all it does: the props' search is the unheard one's.
+    assert!(free.set.collections == unheard.collections, "the search moved");
+    let strike = prop_contact::strike(&col, &at, &free.set, 0, 1, dt);
+    let pushed = free.set.strike(&strike);
+    let collider = rider_contact::collider(&phy.collisions, phy.mass.mass);
+    let bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), planes: Vec::new(), props: pushed };
+    let mut heard: Vec<(Owner, Struck)> = rider_contact::heard_struck(&bump).into_iter().map(|s| (Owner::Bike(0), s)).collect();
+    for (c, col) in free.set.collections.iter().enumerate() {
+        heard.extend(col.heard.0.iter().map(|&(k, s)| (Owner::Prop { collection: c, object: k }, s)));
+    }
+    assert_eq!(heard, vec![(Owner::Bike(0), Struck::Prop { collection: 2, object: 0 }), (Owner::Prop { collection: 2, object: 0 }, Struck::Bike(0))]);
+
+    struct Knock<'a>(&'a PropSet, Vf, Vf);
+    impl material_hit::Ride for Knock<'_> {
+        fn owner(&self, o: Owner) -> Option<(u8, Vf, Vf)> {
+            match o {
+                Owner::Bike(0) => Some((material_hit::BIKE, self.1, self.2)),
+                Owner::Prop { collection, object } => {
+                    let material = self.0.shapes[collection][object].as_ref().map_or(0, material_hit::material_of);
+                    let body = &self.0.collections[collection].bones[object].body;
+                    Some((material, body.velocity, body.position))
+                }
+                _ => None,
+            }
+        }
+        fn struck(&self, s: Struck) -> (u8, bool) {
+            let Struck::Prop { collection, object } = s else { return (0, false) };
+            (self.0.shapes[collection][object].as_ref().map_or(0, material_hit::material_of), false)
+        }
+    }
+    let (velocity, position) = (vehicle_at(&before, rec).velocity, quad(&before, before.u32_at(rec + 0xf0) + 0x60));
+    let mut queue = material_hit::queue(&heard, &Knock(&free.set, velocity, position));
+    let got: Vec<(u8, u8)> = queue.iter().map(|h| (h.owner_material, h.struck_material)).collect();
+    assert_eq!(got, vec![(16, want[0].1), (21, want[1].1)], "owner and struck materials, entry by entry");
+    assert_eq!(queue[0].owner, Some(queue[1].struck), "the pair: each entry's struck the other's owner");
+    assert_eq!(queue[1].owner, Some(queue[0].struck));
+    let speeds = [material_hit::speed(queue[0].velocity), material_hit::speed(queue[1].velocity)];
+    let rule = [material_hit::Material { id: 21, min_impulse: F(5.0), max_impulse: F(25.0) }];
+    let faster = queue[usize::from(speeds[0] < speeds[1])].at;
+    let played = material_hit::play(&mut queue, &rule, 22);
+    eprintln!("bike speed {:?}, ball speed {:?}: {played:?}", speeds[0], speeds[1]);
+    assert!(played.len() <= 1, "one of the pair plays");
+    if let Some(p) = played.first() {
+        assert_eq!(p.at.to_bits(), faster.to_bits(), "at the faster owner's place");
+    }
 }
