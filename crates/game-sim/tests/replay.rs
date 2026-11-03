@@ -6635,6 +6635,10 @@ mod plane_at {
     pub const SPAWN: u32 = 0xe10;
     /// The world a tire asks its ground query of.
     pub const TIRE_WORLD: u32 = 0x134;
+    /// The input gate: a player flies it (research/oracle.txt R8, biplane_controls).
+    pub const FLOWN: u32 = 0x334;
+    /// The autopilot's pitch-rate integrator.
+    pub const PITCH_INTEGRAL: u32 = 0x584;
 }
 
 /// [`BIPLANE_STATE`]'s RAM: this worktree's `context/` first, then the one `kit.toml` names. `None`,
@@ -6845,6 +6849,23 @@ fn off_the_save_state(f: &mut game_sim::flight::Flight, ee: &ps2_oracle::Ee) -> 
         &std::array::from_fn(|k| F(ee.f32_at(g1 + 4 * k as u32))),
     ));
     Ok(())
+}
+
+/// **The plane's controls off a save state** (S252b), for a run with no capture row to take them from
+/// ([`off_the_save_state`] leaves them at [`game_sim::flight::Flight::new`]'s): whether a player flies
+/// it (the input gate), the pad its input step stored, and the surfaces its controls and autopilot
+/// left (research/oracle.txt R8, biplane_input, biplane_controls, biplane_autopilot). A plane the state
+/// has flown but the port does not is held by the unflown controls' full brake; S252's parked plane
+/// crept 0.05 ft a tick on it where the original's, brake off, crept 0.06. Before
+/// [`game_sim::flight::Flight::remeasure`], which keeps the flown flag.
+fn controls_off_the_save_state(f: &mut game_sim::flight::Flight, ee: &ps2_oracle::Ee) {
+    let word = |o: u32| F(ee.f32_at(BIPLANE_PLANE + o));
+    f.attitude.flown = ee.u32_at(BIPLANE_PLANE + plane_at::FLOWN) != 0;
+    let p = &mut f.pad;
+    (p.forward, p.back, p.elevator, p.aileron, p.rudder) = (word(0x338), word(0x33c), word(0x340), word(0x344), word(0x348));
+    let s = &mut f.surfaces;
+    (s.throttle, s.brake, s.elevator, s.elevator_command) = (word(0x34c), word(0x350), word(0x354), word(0x358));
+    (s.aileron, s.rudder, s.steer, s.pitch_integral) = (word(0x35c), word(0x360), word(0x364), word(plane_at::PITCH_INTEGRAL));
 }
 
 /// **The second row's lanes over the save state stepped to it** (S41): what the capture records of the
@@ -12094,7 +12115,8 @@ fn s252_traffic(ram: Vec<u8>, disc: &mut Disc, area: &Area, ground: &Ground) -> 
 }
 
 /// **S252: a parked plane wakes the truck that drives into it, as the original's does**: the port's
-/// plane, its body, tires and engine the state's ([`off_the_save_state`]), parked in free06 among the
+/// plane, its body, tires and engine the state's ([`off_the_save_state`]) and its controls too
+/// ([`controls_off_the_save_state`]: flown, the brake off), parked in free06 among the
 /// state's cars, ticked with no pad. The truck reaches it and the plane's search strikes the truck's
 /// mesh ([`game_sim::world::Prop::strike_heard`] from [`game_sim::flight_search`]'s prop pair), and the
 /// traffic wakes it ([`game_sim::traffic::Traffic::heard`]) on the original's tick. Without the
@@ -12142,6 +12164,7 @@ fn a_parked_plane_wakes_the_truck_driving_into_it_as_the_original_does() {
     (f.body.position, f.body.velocity, f.body.quat, f.body.rates) = (quad(b + 0x60), quad(b + 0x70), quad(b + 0x170), quad(b + 0x1b0));
     f.engine.prop_angle = F(ee.f32_at(ee.u32_at(BIPLANE_PLANE + plane_at::ENGINE) + plane_at::ENGINE_PROP_ANGLE));
     off_the_save_state(&mut f, &ee).unwrap_or_else(|e| panic!("{S252_STATE}: {e}"));
+    controls_off_the_save_state(&mut f, &ee);
     let mut sim = Sim::new(0x5252);
     f.remeasure(&sim.tables.ride.acos);
     sim.plane = Some(f);
@@ -12160,8 +12183,7 @@ fn a_parked_plane_wakes_the_truck_driving_into_it_as_the_original_does() {
     let ctruck = sim.traffic.physics.iter().position(Option::is_some).expect("a HasPhysics car");
     let truck = |r: usize| ["x", "z"].map(|c| cell(&cap, r, col(&format!("truck_pos.{c}"))).parse::<f32>().unwrap());
     // Each tick up to the wake, the plane's body (position and velocity) put on the capture's row
-    // before it, where `pin`: the port's parked plane creeps on its tires a little short of the
-    // original's (0.25 ft by 11091), which is the plane's ground roll and not this lane.
+    // before it, where `pin`; else the port's own plane, held to the rows.
     let run = |pin: bool, world: &mut Place| {
         let mut sim = sim.clone();
         let mut woke = None;
@@ -12174,6 +12196,14 @@ fn a_parked_plane_wakes_the_truck_driving_into_it_as_the_original_does() {
             }
             sim.tick_in(Input::default(), world);
             let r = cap.frames.iter().position(|&v| v == cap.frames[row] + t).expect("a row a tick");
+            if !pin && t < want {
+                // The port's own plane, flown and its brake off as the state's is (S252b), creeps on
+                // its tires as the original's does, word for word, until the truck meets it.
+                let n = |c: &str| cell(&cap, r, col(c)).parse::<f32>().unwrap();
+                let b = &sim.plane.as_ref().unwrap().body;
+                let theirs = Vf::new(n("body_pos.x"), n("body_pos.y"), n("body_pos.z"), 1.0);
+                assert_eq!(b.position.to_bits(), theirs.to_bits(), "tick {t}: the port's plane at {:?}, the original's {:?}", b.position.0, theirs.0);
+            }
             let point = sim.traffic.cars[ctruck].point;
             if pin && t <= want {
                 // The truck's path is the original's to the capture's digits up to the wake, and
@@ -12196,8 +12226,9 @@ fn a_parked_plane_wakes_the_truck_driving_into_it_as_the_original_does() {
     let (t, k, at) = pinned.expect("the plane's search wakes the truck");
     assert_eq!((t, k), (want, ctruck), "the company truck wakes on the original's tick, {S252_WAKE}");
     assert!((at.x() - x).abs() < 1e-3 && (at.z() - z).abs() < 1e-3, "it stops at the original's point: {:?}, ({x}, {z})", at.0);
-    // The port's own plane, a quarter foot short, is met two path steps later, and wakes it still.
-    assert_eq!(free.map(|w| (w.0, w.1)), Some((want + 2, ctruck)), "the port's own plane wakes the truck");
+    // The port's own plane is where the original's is, and is met on the same tick (S252b: two path
+    // steps later while its controls were left unflown, the brake on).
+    assert_eq!(free.map(|w| (w.0, w.1)), Some((want, ctruck)), "the port's own plane wakes the truck on the original's tick");
 }
 
 // --- S252a: a downed bike's wreck wakes the company truck, in the original ----------------------------

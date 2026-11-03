@@ -34,3 +34,9 @@ and at its point in both runs, with the wreck pinned to the capture's rows and w
 wreck. In the original the strike stands the path mesh down mid-search: the wreck keeps no entry
 for the mesh, and the woken truck's own search later that tick meets the wreck. The ragdoll's
 strike was captured but has no test yet (S272).
+
+S252b (file 5, FINAL): the port's plane crept short of the original's after the put-back because
+the test left it unflown, and an unflown plane's controls hold the brake on. The original's state
+has it flown with the brake off. `controls_off_the_save_state` reads the gate, the pad and the
+surfaces from the image. The port's own plane now matches the capture's rows bit for bit and wakes
+ctruck on 11092.
