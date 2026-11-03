@@ -2312,7 +2312,8 @@ impl Wreckage {
 use crate::contact::Mover;
 use crate::contact_search::Heightfield;
 use crate::eco::Trees;
-use crate::flight_search::Rays;
+use crate::flight_search::{Knock, Rays};
+use crate::track::Mesh;
 use crate::prop_world::{self, Collection, Edge, Object};
 use crate::props::NodeBox;
 use crate::ragdoll::{Bone, Tables};
@@ -2352,18 +2353,24 @@ pub struct Started {
 /// share the helicopter's world (the wreck bike's, [`wreck_bike::WORLD`]) and its world node; one
 /// [`Collection`] holds them, always active, with no settle listener and the props' put-back off
 /// (`ResetTime -1`: a blade come to rest sleeps where it lies until the unwreck stops it).
+///
+/// Each blade's collidable (the wrapper's `+0x128`, in the broad phase with its probes) is
+/// `bladebentf.col` where the blade's node stands it ([`Blades::knocks`]), the props' kind
+/// ([`prop_world::COLLIDABLE`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Blades {
     pub set: Collection,
     pub started: [Started; 4],
     /// Each blade's ray probe tree, in blade order, for the collide pass.
     pub rays: Arc<Vec<Option<Rays>>>,
+    /// The four blades' collidable mesh, `bladebentf.col`, when it was given.
+    pub shape: Option<Arc<Mesh>>,
 }
 
 impl Default for Blades {
     /// No blades: what [`Wreckage::new`] leaves before [`Blades::new`]'s are put in.
     fn default() -> Blades {
-        Blades { set: blade_set(Vec::new(), Vec::new(), None), started: [Started::default(); 4], rays: Arc::default() }
+        Blades { set: blade_set(Vec::new(), Vec::new(), None), started: [Started::default(); 4], rays: Arc::default(), shape: None }
     }
 }
 
@@ -2390,13 +2397,15 @@ fn blade_set(bones: Vec<Bone>, objects: Vec<Object>, edge: Option<Edge>) -> Coll
 impl Blades {
     /// **The four blades as the MX constructor builds them**: `wreckblade.phy`'s part (`phy`), each
     /// body's inertia off the model's box ([`NodeBox::from_model`] of `psg`, [`crate::props::box_size`],
-    /// [`Part::inertia`]), the collision object with the `.col`'s rays (`rays`), and the world's
-    /// bounds a body past which is put back (`edge`, the terrain's). Each placed at the origin in the
-    /// model's frame, asleep, in no list, unfiled, its node hidden and out of the scene.
-    pub fn new(phy: &[u8], psg: &[u8], rays: Option<&[u8]>, edge: Option<Edge>) -> Result<Blades, String> {
+    /// [`Part::inertia`]), the collision object with the `.col`'s rays (`rays`, [`BLADE_RAYS`]), the
+    /// collidable mesh (`shape`, [`BLADE_SHAPE`]), and the world's bounds a body past which is put
+    /// back (`edge`, the terrain's). Each placed at the origin in the model's frame, asleep, in no
+    /// list, unfiled, its node hidden and out of the scene.
+    pub fn new(phy: &[u8], psg: &[u8], rays: Option<&[u8]>, shape: Option<&[u8]>, edge: Option<Edge>) -> Result<Blades, String> {
         let part = wreck_blade(phy);
         let inertia = part.inertia(crate::props::box_size(Some(NodeBox::from_model(psg)?)));
         let rays = rays.map(crate::track::Rays::parse).transpose()?.map(|r| Rays::of(&r));
+        let shape = shape.map(Mesh::parse).transpose()?.map(Arc::new);
         let made = WreckBike::new(&part, inertia, Vf::VF0, Vf::VF0);
         let mut body = made.body;
         body.enabled = false;
@@ -2407,7 +2416,7 @@ impl Blades {
         for k in 0..4 {
             set.place(k);
         }
-        Ok(Blades { set, started: [Started::default(); 4], rays: Arc::new(vec![rays; 4]) })
+        Ok(Blades { set, started: [Started::default(); 4], rays: Arc::new(vec![rays; 4]), shape })
     }
 
     /// **`wreck_part_start`** on blade `k` (its wrapper's slot `+0x11c`): started, the node shown and
@@ -2459,6 +2468,22 @@ impl Blades {
     pub fn search(&mut self, dt: F, field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
         let rays = Arc::clone(&self.rays);
         self.set.search(dt, &rays, field, props, trees);
+    }
+
+    /// **The blades' collidables as another's rays meet them**: each blade whose probes and mesh are
+    /// in the broad phase ([`Started::probes`]), as `(blade, its mesh where its node stands it)`, in
+    /// blade order, posed as a knocked prop's is ([`crate::world::Prop::posed`]) — for a search's
+    /// [`crate::flight_search::Scene::knocking`]. None without the [`Blades::shape`].
+    pub fn knocks(&self) -> Vec<(usize, Knock<'_>)> {
+        let Some(mesh) = self.shape.as_deref() else { return Vec::new() };
+        let mut out = Vec::new();
+        for (k, (o, s)) in self.set.objects.iter().zip(&self.started).enumerate() {
+            let (true, Some(col)) = (s.probes, o.collision.as_ref()) else { continue };
+            let (to_world, centre, radius) = crate::world::Prop::posed(mesh, &crate::prop_set::PropSet::matrix(&o.node));
+            let velocity = self.set.bones[k].body.velocity;
+            out.push((k, Knock { mesh, to_world, centre, radius, velocity, capacity: col.record.capacity }));
+        }
+        out
     }
 
     /// **The blades' share of the helicopter's world step**, but for the posts

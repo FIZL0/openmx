@@ -1966,15 +1966,15 @@ fn list_at(ee: &Ee, a: u32) -> Vec<u32> {
 
 /// The port's four blades off the disc's files, with the first wrapper's edge (the terrain's).
 fn blades_for(ee: &Ee) -> Option<game_sim::kiowa::Blades> {
-    use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, Blades, WRECK_BLADE_PHY};
+    use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, Blades, WRECK_BLADE_PHY};
     use game_sim::prop_world::Edge;
     let kit = Kit::load().map_err(|why| skip(&why)).ok()?;
-    let [phy, psg, rays] = [WRECK_BLADE_PHY, BLADE_MODEL, BLADE_RAYS].map(|n| machine_file(&kit, n));
+    let [phy, psg, rays, shape] = [WRECK_BLADE_PHY, BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE].map(|n| machine_file(&kit, n));
     let edge = ee.u32_at(blade_wrapper(ee, 0) + blade_at::EDGE);
     assert_ne!(edge, 0, "the blade has no edge");
     let lane = |a: u32, k: u32| F(ee.f32_at(edge + a + 4 * k));
     let edge = Edge { min: [lane(blade_at::EDGE_MIN, 0), lane(blade_at::EDGE_MIN, 2)], max: [lane(blade_at::EDGE_MAX, 0), lane(blade_at::EDGE_MAX, 2)] };
-    Some(Blades::new(&phy?, &psg?, Some(&rays?), Some(edge)).unwrap_or_else(|e| panic!("the blades: {e}")))
+    Some(Blades::new(&phy?, &psg?, Some(&rays?), Some(&shape?), Some(edge)).unwrap_or_else(|e| panic!("the blades: {e}")))
 }
 
 /// The state's blade bodies into the port's, all but the enabled flag (the port's own: [`same_blades`]
@@ -2386,7 +2386,8 @@ fn the_blades_are_built_as_the_originals() {
 /// already when thrown, some are stopped, and many land past the world's edge and are put back.
 ///
 /// The world holds the helicopter's body (so it steps with no blade awake, as the game's does) and
-/// the blades' elements; the collide pass is not run on either side, so no blade has a contact.
+/// the blades' elements; the collide pass is not run on either side, so no blade has a contact
+/// ([`thrown_blades_land_and_sleep_as_the_originals`] runs it).
 #[test]
 fn thrown_blades_fly_as_the_originals() {
     use game_sim::ragdoll::Tables;
@@ -2511,6 +2512,278 @@ fn thrown_blades_fly_as_the_originals() {
             "{flown} blades flying at the end, {put_back} put back off the edge, {rethrown} thrown while out: the cases miss a branch");
     println!("thrown blades: {cases} throws of {frames} frames, bit-exact ({flown} flying at the end, {put_back} put back \
               off the edge, {rethrown} thrown while out)");
+}
+
+/// A blade collision object's record fields (tests/prop_collision.rs) and its ray probe's category
+/// list (tests/prop_wake.rs).
+mod blade_rec {
+    pub const VTABLE: u32 = 0x08;
+    pub const TOUCHING: u32 = 0x40;
+    pub const TOUCHING_OTHER: u32 = 0x44;
+    pub const ON_GROUND: u32 = 0x48;
+    pub const ON_OBJECT: u32 = 0x4c;
+    pub const COFG_WORLD: u32 = 0xa0;
+    pub const SWEPT_FROM: u32 = 0xd0;
+    pub const SWEPT_TO: u32 = 0xe0;
+    pub const NORMAL_SPEED: u32 = 0x1d8;
+    pub const RELATIVE: u32 = 0x1e0;
+    /// The collision object's clear and collide, by vtable slot.
+    pub const CLEAR: u32 = 0x74;
+    pub const COLLIDE: u32 = 0x7c;
+    pub const MODE: u32 = 0xe8;
+    pub const LIST: u32 = 0xec;
+    pub const COUNT: u32 = 0xf0;
+}
+
+/// free09 off the disc as a blade's collide pass meets it: the terrain, the scene's meshes, the
+/// ecosystem's plants, and the knockable props' bodies (only to throw clear of them: their `f.col`s
+/// are in the original's broad phase, not in [`game_sim::kiowa::Blades::search`]'s).
+struct Free09 {
+    terrain: Vec<u8>,
+    scene: game_sim::track::Scene,
+    props: game_sim::world::Props,
+    trees: game_sim::eco::Trees,
+    knockable: Vec<Vf>,
+}
+
+fn free09() -> Option<Free09> {
+    use game_render::disc::{Disc, Res};
+    use game_sim::biplane::Area;
+    use game_sim::camera::CurveTable;
+    use game_sim::eco::{self, Ecosystem, Trees};
+    use game_sim::phy::Ini;
+    use game_sim::prop_set::PropSet;
+    use game_sim::track::Scene;
+    use game_sim::world::Props;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let names: Vec<String> = ["Tracks\\free09.res", "Tracks\\free09_2.res"]
+        .iter()
+        .filter_map(|want| disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case(want)).map(|e| e.name.clone()))
+        .collect();
+    let archives: Vec<Res> = names.iter().map(|n| disc.res(n).expect("a free09 archive")).collect();
+    let res = &archives[0];
+    let scene = Scene::parse(&res.read_suffix("free09.scn").expect("free09.scn")).expect("free09.scn parses");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain = res.read_suffix(&leaf).expect("free09's terrain");
+    let (props, _) =
+        Props::load(&scene, |want| archives.iter().find_map(|r| r.read_suffix(want).ok()).ok_or_else(|| "no archive of this track has it".to_string()));
+    let esb = Ecosystem::parse(&res.read_suffix("free09.esb").expect("free09.esb")).expect("free09.esb parses");
+    let trees = Trees::new(&esb, eco::cell_size(F(6912.0)), &CurveTable::build()).0;
+    let toy = Ini::parse_bytes(&res.read_suffix("free09.toy").expect("free09.toy"));
+    // free09's terrain: three root cells by three, nine feet a sample (tests/prop_collision.rs).
+    let (set, _) = PropSet::load(
+        &toy,
+        "Tracks\\Free09\\",
+        &scene.models,
+        &mut |p| res.read(p).ok(),
+        &mut |p| res.read_suffix(p).ok(),
+        Some(Area::new(F(3.0), F(3.0), F(9.0), F(9.0))),
+    );
+    let knockable = set.collections.iter().flat_map(|c| c.bones.iter().map(|b| b.body.position)).collect();
+    Some(Free09 { terrain, scene, props, trees, knockable })
+}
+
+/// S271: the blades thrown low over free09's terrain and flown with the collide pass until they
+/// land and sleep (`ResetTime -1`: they stay where they lie). Each frame, before the world step, the
+/// original's clear and collide on every blade's collision object filed on the world node (the
+/// node's update), against [`Blades::search`] over the disc's terrain, the scene's meshes and the
+/// plants; then the world step and the listeners as [`thrown_blades_fly_as_the_originals`] runs
+/// them. Every frame [`same_blades`], each node's rows, and each collision object's record — the
+/// four touching flags, the swept segment, the contact's relative velocity, normal speed and centre
+/// of mass — and its ray probe's category list, the game's against the port's.
+///
+/// The throws are aimed clear of what the port's search does not hold: the knockable props'
+/// `f.col`s, the toys' meshes and the helicopter's own hull.
+#[test]
+fn thrown_blades_land_and_sleep_as_the_originals() {
+    use game_sim::ragdoll::Tables;
+    use game_sim::rng::Rng;
+    use game_sim::world::Ground;
+    use game_sim::world_search::Categories;
+    let Some(mut ee) = wreck_heli() else { return };
+    ee.hooks.remove(&addr("transform_rebuild").unwrap());
+    let Some(mut blades) = blades_for(&ee) else { return };
+    let Some(free) = free09() else { return };
+    let terrain = game_sim::track::Terrain::parse(&free.terrain).expect("free09's terrain parses");
+    let ground = Ground::new(&terrain, &free.scene.terrain);
+    let field = ground.field();
+    let throw_fn = addr("kiowa_throw_blades").unwrap();
+    let (step, post, listen) = (addr("dynamics_world_step").unwrap(), addr("body_wrapper_post").unwrap(), addr("physics_object_listen").unwrap());
+    let state = addr("rand_state").unwrap();
+    let tables = Tables::build();
+    let wrappers: [u32; 4] = std::array::from_fn(|k| blade_wrapper(&ee, k));
+    let records: [u32; 4] = wrappers.map(|w| ee.u32_at(w + blade_at::COLLISION));
+    let probes: [u32; 4] = wrappers.map(|w| ee.u32_at(w + blade_at::PROBES[0]));
+    let vt = ee.u32_at(records[0] + blade_rec::VTABLE);
+    let (clear, collide) = (ee.u32_at(vt + blade_rec::CLEAR), ee.u32_at(vt + blade_rec::COLLIDE));
+    let world = ee.u32_at(wrappers[0] + blade_at::WORLD);
+    let node = ee.u32_at(wrappers[0] + blade_at::WORLD_NODE);
+    let heli_body = ee.u32_at(HELI + at::BODY);
+    let heli_at = quad(&ee, heli_body + BODY_POS);
+    for (l, off) in world_at::LISTS.iter().enumerate() {
+        ee.set_u32(world + off, u32::from(l == 0));
+    }
+    ee.set_u32(ee.u32_at(world + world_at::LISTS[0] + 8), heli_body);
+    ee.set_u32(node + blade_at::NODE_LISTENERS, 0);
+    let kept: Vec<Vec<(u32, [u32; 4])>> = wrappers.iter().map(|&w| {
+        let b = ee.u32_at(w + wreck_at::WRAPPER_BODY);
+        [0x20, 0xf0, 0x120, 0x130, 0x180].iter().map(|&o| (b + o, quad(&ee, b + o).to_bits())).collect()
+    }).collect();
+    // The records as the state leaves them, never searched: what no search has written yet.
+    for (o, &r) in blades.set.objects.iter_mut().zip(&records) {
+        use blade_rec::*;
+        let col = o.collision.as_mut().expect("a blade's collision object");
+        col.collider.cofg_world = quad(&ee, r + COFG_WORLD);
+        col.collider.normal_speed = F(ee.f32_at(r + NORMAL_SPEED));
+        col.collider.relative = quad(&ee, r + RELATIVE);
+        let rc = &mut col.record;
+        rc.swept_from = quad(&ee, r + SWEPT_FROM);
+        rc.swept_to = quad(&ee, r + SWEPT_TO);
+        [rc.touching, rc.touching_other, rc.on_ground, rc.on_object] =
+            [TOUCHING, TOUCHING_OTHER, ON_GROUND, ON_OBJECT].map(|a| ee.u32_at(r + a) != 0);
+    }
+    // A site with nothing the port's search lacks within reach of a blade.
+    let clear_of = |x: f32, z: f32| {
+        let far = |p: Vf, r: f32| (p.x() - x).powi(2) + (p.z() - z).powi(2) > r * r;
+        far(heli_at, 200.0)
+            && free.knockable.iter().all(|&p| far(p, 120.0))
+            && free.props.props.iter().all(|p| far(p.centre, p.radius.to_f32() + 80.0))
+    };
+
+    let dt = 1.0f32 / 30.0;
+    let (cases, frames) = (24, 1200);
+    let mut pick = Pick(0x5271_b1ad_e5c0_111d);
+    let (mut landed, mut slept, mut contacts, mut asleep_lists, mut on_object) = (0, 0, 0, 0, 0);
+    for case in 0..cases {
+        scramble(&mut ee, &mut pick);
+        let body = ee.u32_at(HELI + at::BODY);
+        let v = vector(&mut pick, 15.0);
+        set_quad(&mut ee, body + BODY_VEL, [v.x(), v.y(), v.z(), 1.0]);
+        let r = vector(&mut pick, 1.0);
+        set_quad(&mut ee, body + BODY_RATES, [r.x(), r.y(), r.z(), 0.0]);
+        let (x, z) = loop {
+            let (x, z) = (pick.range(800.0, 6100.0), pick.range(800.0, 6100.0));
+            if clear_of(x, z) {
+                break (x, z);
+            }
+        };
+        let floor = game_sim::contact_search::ground(&field, Vf::new(x, 0.0, z, 1.0)).point.y();
+        let low = pick.range(4.0, 25.0);
+        let model = ee.u32_at(HELI + wreck_at::MODEL);
+        let mut nodes: Vec<u32> = (0..4).map(|k| ee.u32_at(HELI + wreck_at::BLADE_NODES + 4 * k)).collect();
+        nodes.push(model);
+        for (k, node) in nodes.into_iter().enumerate() {
+            // Each blade a corner of its own, far enough from the others that none meets another's mesh.
+            let (cx, cz) = [(-40.0, -40.0), (40.0, -40.0), (-40.0, 40.0), (40.0, 40.0), (0.0, 0.0)][k];
+            let d = vector(&mut pick, 4.0);
+            set_quad(&mut ee, node + wreck_at::ROWS + 48, [x + cx + d.x(), floor + low + d.y(), z + cz + d.z(), 1.0]);
+        }
+        for quads in &kept {
+            for &(a, q) in quads {
+                for (i, w) in q.iter().enumerate() {
+                    ee.set_u32(a + 4 * i as u32, *w);
+                }
+            }
+        }
+        blades_from(&ee, &mut blades);
+        let seed = pick.next();
+        ee.set_u32(state, seed as u32);
+        ee.set_u32(state + 4, (seed >> 32) as u32);
+        let mut ride = ride_of(&ee);
+        let mut w = wreckage_of(&ee, blades.clone());
+        w.throw_blades(&mut ride, &throw_of(&ee), &mut Rng::from_state(seed));
+        ee.call(throw_fn, &[u64::from(HELI)], &[], 4 * BUDGET);
+        blades = w.blades;
+        same_blades(case, &ee, &blades);
+
+        let mut down = [false; 4];
+        let mut frame = 0;
+        while frame <= frames {
+            if frame > 0 {
+                for &r in &list_at(&ee, node + blade_at::NODE_FILED) {
+                    if records.contains(&r) {
+                        ee.call(clear, &[u64::from(r)], &[], BUDGET);
+                        ee.call(collide, &[u64::from(r)], &[dt], 20 * BUDGET);
+                    }
+                }
+                blades.search(F(dt), Some(&field), Some(&free.props), Some(&free.trees));
+                ee.call(step, &[u64::from(world)], &[dt], 50 * BUDGET);
+                blades.step(F(dt), &tables, &[]);
+            } else {
+                let mut i = 0;
+                while i < ee.u32_at(world + world_at::LISTS[4]) {
+                    let e = ee.u32_at(ee.u32_at(world + world_at::LISTS[4] + 8) + 4 * i);
+                    ee.call(post, &[u64::from(e - blade_at::POST)], &[dt], BUDGET);
+                    i += 1;
+                }
+            }
+            let mut i = 0;
+            while i < ee.u32_at(node + blade_at::NODE_LISTENERS) {
+                let arr = ee.u32_at(node + blade_at::NODE_LISTENERS + 8);
+                let l = ee.u32_at(arr + 4 * i);
+                ee.call(listen, &[u64::from(l - blade_at::LISTENER)], &[dt], BUDGET);
+                if ee.v0() as u32 != 0 {
+                    let n = ee.u32_at(node + blade_at::NODE_LISTENERS);
+                    for j in i..n - 1 {
+                        ee.set_u32(arr + 4 * j, ee.u32_at(arr + 4 * (j + 1)));
+                    }
+                    ee.set_u32(node + blade_at::NODE_LISTENERS, n - 1);
+                } else {
+                    i += 1;
+                }
+            }
+            blades.post(F(dt));
+            let id = case * 10_000 + frame;
+            same_blades(id, &ee, &blades);
+            for k in 0..4 {
+                let at = |what: &str| format!("case {id}: blade {k}'s {what}");
+                let n = &blades.set.objects[k].node;
+                let rows = [n.rows[0], n.rows[1], n.rows[2], n.origin].map(|r| r.to_bits());
+                let game = quads::<4>(&ee, ee.u32_at(wrappers[k] + blade_at::NODE) + wreck_at::ROWS).map(|r| r.to_bits());
+                assert_eq!(rows, game, "{}", at("node"));
+                let r = records[k];
+                let col = blades.set.objects[k].collision.as_ref().expect("a blade's collision object");
+                let rc = &col.record;
+                let flag = |a: u32| ee.u32_at(r + a) != 0;
+                use blade_rec::*;
+                assert_eq!([rc.touching, rc.touching_other, rc.on_ground, rc.on_object],
+                           [flag(TOUCHING), flag(TOUCHING_OTHER), flag(ON_GROUND), flag(ON_OBJECT)],
+                           "{}", at("touching, touching another, on the ground, on an object"));
+                for (name, got, off) in [("swept from", rc.swept_from, SWEPT_FROM), ("swept to", rc.swept_to, SWEPT_TO),
+                                         ("contact's relative velocity", col.collider.relative, RELATIVE),
+                                         ("centre of mass", col.collider.cofg_world, COFG_WORLD)] {
+                    assert_eq!(got.to_bits(), quad(&ee, r + off).to_bits(), "{}", at(name));
+                }
+                assert_eq!(col.collider.normal_speed.to_bits(), ee.u32_at(r + NORMAL_SPEED), "{}", at("normal speed"));
+                let p = probes[k];
+                let (list, count) = (ee.u32_at(p + LIST), ee.u32_at(p + COUNT));
+                let game = Categories { mode: ee.u32_at(p + MODE), list: (0..count).map(|i| ee.u32_at(list + 4 * i)).collect() };
+                assert_eq!(col.categories, game, "{}", at("ray probe's category list"));
+                contacts += rc.contacts.len();
+                on_object += usize::from(rc.on_object);
+                if rc.on_ground && !down[k] {
+                    down[k] = true;
+                    landed += 1;
+                }
+            }
+            // A blade's mesh is posed for another's rays while it is in the broad phase.
+            let posed: Vec<usize> = blades.knocks().iter().map(|&(k, _)| k).collect();
+            let listed: Vec<usize> = (0..4).filter(|&k| blades.started[k].probes).collect();
+            assert_eq!(posed, listed, "case {id}: the blades' meshes posed");
+            frame += 1;
+            if frame > 1 && blades.set.bones.iter().all(|b| !b.body.enabled) {
+                break;
+            }
+        }
+        let asleep = blades.set.bones.iter().filter(|b| !b.body.enabled).count();
+        slept += asleep;
+        asleep_lists += blades.set.objects.iter().filter(|o| o.filed && o.collision.as_ref().is_some_and(|c| c.categories.mode == 0)).count();
+        println!("case {case}: {} of 4 down, {asleep} asleep after {frame} frames", down.iter().filter(|&&d| d).count());
+    }
+    assert!(landed >= 3 * cases && slept >= 3 * cases && contacts > 0,
+            "{landed} blades landed, {slept} asleep, {contacts} contacts: the throws miss the ground");
+    println!("blades on free09: {cases} throws, bit-exact ({landed} landed, {slept} asleep, {asleep_lists} searching asleep, \
+              {contacts} contacts, {on_object} blade-frames on a scene mesh)");
 }
 
 const ROTOR_PROBE: u32 = 0x458;
