@@ -230,33 +230,36 @@ fn neg4(v: [u32; 4]) -> [u32; 4] {
     v.map(|b| b ^ 0x8000_0000)
 }
 
+// The five entries below are `#[inline(always)]` (S255): under plain `#[inline]` LLVM kept them as calls,
+// and the riding ragdoll's solve, which is almost nothing but these, ran a fifth slower for it.
+
 /// [`add`] on four lanes.
-#[inline]
+#[inline(always)]
 pub fn add4(a: V4, b: V4) -> V4 {
     add4_bits(vu_bits4(a), vu_bits4(b))
 }
 
 /// [`sub`] on four lanes.
-#[inline]
+#[inline(always)]
 pub fn sub4(a: V4, b: V4) -> V4 {
     add4_bits(vu_bits4(a), neg4(vu_bits4(b)))
 }
 
 /// [`mul`] on four lanes.
-#[inline]
+#[inline(always)]
 pub fn mul4(a: V4, b: V4) -> V4 {
     mul4_bits(vu_bits4(a), vu_bits4(b)).map(f32::from_bits)
 }
 
 /// [`madd`] on four lanes. The product is finite and normal or zero already, so it goes into the adder
 /// as it is.
-#[inline]
+#[inline(always)]
 pub fn madd4(acc: V4, a: V4, b: V4) -> V4 {
     add4_bits(vu_bits4(acc), mul4_bits(vu_bits4(a), vu_bits4(b)))
 }
 
 /// [`msub`] on four lanes.
-#[inline]
+#[inline(always)]
 pub fn msub4(acc: V4, a: V4, b: V4) -> V4 {
     add4_bits(vu_bits4(acc), neg4(mul4_bits(vu_bits4(a), vu_bits4(b))))
 }

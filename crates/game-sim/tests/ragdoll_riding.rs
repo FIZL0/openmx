@@ -1874,3 +1874,42 @@ fn the_riding_feet_raise_the_originals_foot_dust() {
     assert!(touched >= 70 && theirs >= 70, "the port's feet on {touched} ticks, the original's feeds {theirs}");
     assert!(wrong.is_empty(), "{} disagree:\n{}", wrong.len(), wrong.join("\n"));
 }
+
+/// S255's timing: the riding step (`Ragdoll::step`: the forces, the integrate, the holds and the joints)
+/// from the actor in the state, 2000 times a round, the best of `BENCH_ROUNDS` rounds (7). Run it with
+/// `cargo test --release -p game-sim --test ragdoll_riding bench_riding_step -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing"]
+fn bench_riding_step() {
+    let Some(ee) = state() else { return };
+    let actor = actor_of(&ee);
+    let r = request_of(&ee);
+    let tables = tables_of(&ee);
+    let drive = game_sim::ragdoll::Drive {
+        bike: game_sim::ragdoll::Carrier { rows: r.rows, spin: F(r.rates.z()), velocity: r.velocity, centre: r.centre, quat: r.quat },
+        points: std::array::from_fn(|i| actor.ragdoll.bones[i].body.position),
+        rests: std::array::from_fn(|i| quad(&ee, rest_at(&ee, i))),
+        hold_targets: actor.hold_targets,
+        hold_velocity: actor.hold_velocity,
+        gravity_scale: actor.gravity_scale,
+        pose_spring: actor.pose_spring,
+        pose_damping: actor.pose_damping,
+        torques: actor.torques,
+        mode: actor.mode as i32,
+        fade_length: actor.fade.length,
+        fade_left: actor.fade.left,
+    };
+    let mut best = f64::MAX;
+    let mut sink = 0u32;
+    let rounds: usize = std::env::var("BENCH_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+    for _ in 0..rounds {
+        let t = std::time::Instant::now();
+        for _ in 0..2000 {
+            let mut doll = actor.ragdoll.clone();
+            doll.step(F(1.0 / 30.0), &drive, &tables);
+            sink ^= doll.bones[3].body.position.x().to_bits();
+        }
+        best = best.min(t.elapsed().as_secs_f64() / 2000.0);
+    }
+    eprintln!("BENCH riding step {:.4} ms (sink {sink:x})", best * 1e3);
+}
