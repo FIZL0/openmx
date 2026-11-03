@@ -8083,6 +8083,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if let (Some(doll), true) = (&ragdolled, seat.sim.rider.ragdoll_kit.is_some()) {
                         seat.sim.rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
                     }
+                    // And the nodes as this tick draws them, which the next restart fades from (F12).
+                    body.drawn = riding_bones(seat, ragdolled.as_ref())
+                        .map(|(bones, rigged)| body.ragdoll_palette(rigged, &bones, chassis_at(&seat.sim.rider.ride)));
                 }
             }
 

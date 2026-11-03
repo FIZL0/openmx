@@ -1926,8 +1926,9 @@ mod two_p_poses {
         pub eased: bool,
         /// The clip time the blend samples at: the motion object's last sample time of this row.
         pub time: bool,
-        /// The snapshot a restart takes, read out of the original's transform nodes as the tick before
-        /// left them ([`node_trees`]), by rider and frame, in place of the port's own rewind.
+        /// The original's transform nodes as the tick before left them ([`node_trees`]), by rider and
+        /// frame, as the body's drawn tree: a restart snapshots them through the port's
+        /// `Set::rewind_drawn` (F12), which is what the shell does with the riding ragdoll's nodes.
         pub nodes: Option<&'static std::collections::HashMap<(usize, u32), game_render::skin::Pose>>,
     }
 
@@ -2071,15 +2072,11 @@ mod two_p_poses {
                 if seeds.time {
                     body.player.prev = F(f32::from_bits(c.word(row, &n("m_clock"), 0xc)));
                 }
-                let mut frame = frame;
-                let mut clocked = clocked;
                 let tree = seeds.nodes.and_then(|t| t.get(&(rider.lag(), c.u(row - 1, "frame_counter") as u32)));
-                if let (true, Some(tree)) = (frame.restart || clocked.snapshot, tree) {
-                    // the restart's snapshot, taken here off the original's nodes rather than by posed_by
-                    drawn.rig.set.under = tree.clone();
-                    frame.restart = false;
-                    clocked.snapshot = false;
-                }
+                // The original's nodes of the row before, handed to the body as the shell hands it the
+                // riding ragdoll's drawn tree (F12), so posed_by's restart snapshots them
+                // (Set::rewind_drawn) rather than the clip pose.
+                drawn.drawn = tree.map(|tree| drawn.rig.set.skeleton.world(tree));
                 let joints = posed.then(|| {
                     drawn.posed_by(frame, &body.player, clocked);
                     let pose = &drawn.rig.set.pose;

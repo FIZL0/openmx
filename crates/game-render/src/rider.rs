@@ -767,6 +767,13 @@ pub struct Body {
     /// with the trick. The shell sets it after the chassis' frame; while it is up the draw holds each hand the
     /// clip leaves near its grip on the grip ([`bare_reach`]), whatever [`Body::hold`] says.
     pub bare: bool,
+    /// **F12:** the body's node tree as the shell last drew it from the riding ragdoll
+    /// ([`Body::ragdoll_palette`]), which a restart's snapshot is taken from ([`Body::posed_by`],
+    /// [`crate::anim::Set::rewind_drawn`]): the original's snapshot copies the nodes the riding
+    /// ragdoll wrote over the blend (V109). `None` while the body is drawn from its clips, and then
+    /// the snapshot is the clip pose's own ([`crate::anim::Set::rewind`]). The shell writes it after
+    /// each tick's pose, for the next.
+    pub drawn: Option<Vec<M4>>,
 }
 
 /// **The port's own (MD41):** within this far of its grip, in feet, a hand of a trick clip the bike
@@ -849,6 +856,7 @@ impl Body {
             hold: 1.0,
             feet: Default::default(),
             bare: false,
+            drawn: None,
         })
     }
 
@@ -948,8 +956,11 @@ impl Body {
         clocked: game_sim::rider_anim::Clocked,
     ) -> bool {
         if frame.restart || clocked.snapshot {
-            let Body { rig, .. } = self;
-            rig.set.rewind(&mut rig.snapshot);
+            let Body { rig, drawn, .. } = self;
+            match drawn {
+                Some(drawn) => rig.set.rewind_drawn(&mut rig.snapshot, drawn),
+                None => rig.set.rewind(&mut rig.snapshot),
+            }
         }
         let drawn = self.rig.set.apply_vehicle_crossed(frame.blend, player, clocked.played.fade);
         self.posed |= drawn;

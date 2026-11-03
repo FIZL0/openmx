@@ -298,6 +298,50 @@ impl Set {
         snapshot.take(&self.under, None, 0);
     }
 
+    /// [`Set::rewind`] off the node tree **as it was last drawn** (F12): `drawn` is every joint's
+    /// matrix in the model's frame, one per joint, the way the riding ragdoll left them
+    /// ([`crate::rider::Body::ragdoll_palette`]).
+    ///
+    /// The original's restart snapshot reads each joint's transform node, and while riding the riding
+    /// ragdoll has written its bones over those nodes after the blend: V109's capture has the new
+    /// snapshot equal to the nodes the tick before left, 0.15-0.85 rad off the blend buffer, at all
+    /// eight of its restarts. So each joint is its drawn matrix under its parent's, and a joint the
+    /// ragdoll does not drive comes out at the clip's own, as [`Set::rewind`] has it.
+    ///
+    /// The translations are the drawn tree's as well. V109 saw the original's translation buffer
+    /// left alone at a riding restart, but the port's fade reads [`Set::under`]'s, and the 2p replay
+    /// only poses within 1e-4 with the nodes' (P1's 33 entry is 0.126 out with the clip's).
+    /// A `drawn` that is not this skeleton's is [`Set::rewind`].
+    pub fn rewind_drawn(&mut self, snapshot: &mut Snapshot, drawn: &[M4]) {
+        self.under = self.skeleton.nodes(&self.pose);
+        if drawn.len() == self.skeleton.len() {
+            for (j, bone) in self.skeleton.bones.iter().enumerate() {
+                let m = drawn[j].0;
+                // The node under its parent, `M_j · M_p⁻¹`, in rows: the parent's matrix is a rotation
+                // and a translation, so its inverse turns by the transpose.
+                let (r, t) = match bone.parent {
+                    Some(p) if p != j && p < drawn.len() => {
+                        let pm = drawn[p].0;
+                        let under = |v: [f32; 3]| [0, 1, 2].map(|k| (0..3).map(|n| v[n] * pm[k][n]).sum::<f32>());
+                        let r = [0, 1, 2].map(|i| under([m[i][0], m[i][1], m[i][2]]));
+                        (r, under([0, 1, 2].map(|n| m[3][n] - pm[3][n])))
+                    }
+                    _ => ([0, 1, 2].map(|i| [m[i][0], m[i][1], m[i][2]]), [m[3][0], m[3][1], m[3][2]]),
+                };
+                let row = |i: usize| ps2_float::Vf::new(r[i][0], r[i][1], r[i][2], 0.0);
+                let rows = [row(0), row(1), row(2), ps2_float::Vf::new(0.0, 0.0, 0.0, 1.0)];
+                let q = game_sim::math::mat4_to_quat(&game_sim::math::Mat4(rows));
+                // A tree composed and taken apart again in floats is not quite orthonormal, and the
+                // quaternion comes out up to 5e-4 short of unit on the deepest joints.
+                let q = [q.x(), q.y(), q.z(), q.w()];
+                let len = q.iter().map(|x| x * x).sum::<f32>().sqrt();
+                self.under.rot[j] = if len > 0.0 { q.map(|x| x / len) } else { q };
+                self.under.pos[j] = [t[0], t[1], t[2], 1.0];
+            }
+        }
+        snapshot.take(&self.under, None, 0);
+    }
+
     /// Load and bind every motion the `.mcf` itself lists, in its own order.
     ///
     /// This is the set loader's half of the job and it comes first: a bike's `.mcf` lists the three

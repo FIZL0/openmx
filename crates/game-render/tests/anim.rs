@@ -466,6 +466,50 @@ fn a_rewind_takes_the_same_pose_both_sides_read() {
     assert_eq!(from.rot[1], set.pose.rot[1]);
 }
 
+/// **F12:** a restart taken off the tree as it was drawn — the riding ragdoll's nodes — fades from
+/// each drawn joint under its drawn parent, not from the clip pose; and a tree of the wrong size is
+/// the clip pose's own rewind.
+#[test]
+fn a_drawn_rewind_takes_the_drawn_nodes() {
+    let mut skel = bones(&["a", "b", "c"]);
+    skel.bones[1].parent = Some(0);
+    skel.bones[2].parent = Some(1);
+    skel.bones[2].local.0[3] = [0.0, 1.5, 0.0, 1.0];
+    let mut set = Set::new(MotionSet::default(), skel.clone(), Vec::new());
+    set.pose.rot[1] = [0.0, 0.0, 0.707_106_77, 0.707_106_77];
+    set.pose.turned[1] = true;
+
+    // What the ragdoll drew: every joint turned and moved somewhere the clip has not got it.
+    let mut doll = Pose::new(3);
+    let turn = |x: f32, y: f32, z: f32| {
+        let n = (x * x + y * y + z * z + 1.0).sqrt();
+        [x / n, y / n, z / n, 1.0 / n]
+    };
+    doll.rot = vec![turn(0.1, 0.2, 0.0), turn(-0.3, 0.0, 0.4), turn(0.0, 0.5, 0.2)];
+    doll.pos = vec![[1.0, 2.0, 3.0, 1.0], [0.0, 0.5, 0.0, 1.0], [0.2, 1.4, -0.1, 1.0]];
+    doll.turned.fill(true);
+    doll.moved.fill(true);
+    let drawn = skel.world(&doll);
+
+    let mut snapshot = Snapshot::default();
+    set.rewind_drawn(&mut snapshot, &drawn);
+    for j in 0..3 {
+        let dot: f32 = (0..4).map(|a| set.under.rot[j][a] * doll.rot[j][a]).sum();
+        assert!(dot.abs() > 1.0 - 1e-6, "joint {j}: {:?} against the drawn {:?}", set.under.rot[j], doll.rot[j]);
+        for a in 0..3 {
+            assert!((set.under.pos[j][a] - doll.pos[j][a]).abs() < 1e-5, "joint {j}: {:?}", set.under.pos[j]);
+        }
+        assert_eq!(snapshot.rotation[j].map(|v| v.0), set.under.rot[j], "the simulation's half is the same");
+    }
+
+    let mut own = Snapshot::default();
+    set.rewind(&mut own);
+    let clip = set.under.clone();
+    set.rewind_drawn(&mut snapshot, &drawn[..2]);
+    assert_eq!((&set.under.rot, &set.under.pos), (&clip.rot, &clip.pos), "a wrong-sized tree is the clip pose's rewind");
+    assert_eq!(snapshot, own);
+}
+
 /// A `.mcf` that names geometry no archive holds is an error, not a panic.
 #[test]
 fn a_set_whose_geometry_is_missing_says_so() {
