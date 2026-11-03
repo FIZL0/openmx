@@ -27,3 +27,10 @@ world's `Prop` (`strike_heard`), and `Traffic::heard` takes the marks at `frame_
 copied cars carry their prop. A PCSX2 capture of the biplane parked in ctruck's way wakes the truck
 on 11092, and so does the port, with the plane on the capture's rows (two ticks later on the port's
 own creeping plane).
+
+S252a (file 4, FINAL): PCSX2 captures of free06's ctruck waking on a downed bike's wreck. In one run
+the wreck lies still and in the other it rolls in. The port wakes the truck on the original's tick
+and at its point in both runs, with the wreck pinned to the capture's rows and with the port's own
+wreck. In the original the strike stands the path mesh down mid-search: the wreck keeps no entry
+for the mesh, and the woken truck's own search later that tick meets the wreck. The ragdoll's
+strike was captured but has no test yet (S272).
