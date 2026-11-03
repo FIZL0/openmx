@@ -46,6 +46,13 @@ the next frame's substeps, and from the put-back on a whole frame late. So its r
 1450's state. The C21 replay now compares those rows after the next frame. The shell's second step
 is gone.
 
+## B23 — try5 reads a row late
+
+See `4-b23-try5-reads-a-row-late-FINAL.md`. C24's try5 parted on 1304 because its row for 1304 was
+read a frame late: it holds frame 1305's body. Compared there, try5 replays bit-exact to 1488. The
+contact counts it showed short over 1297..1302 are rows read while the collide pass was refilling the
+record. The body is bit-exact on every one of them.
+
 ## Not verified / not 1:1
 
 See the list at the end of `1-blades-on-the-hull-FINAL.md`. In short:

@@ -1399,6 +1399,9 @@ const FAST: &str = "capture/c24/fast1.csv";
 /// the ground and rest (fields `40 300:-:0,0 250`). The helicopter tips over its nose and left side;
 /// blade 1 comes down within the hull's rays, a few feet from the probe.
 const TIP: &str = "capture/c24/try4.csv";
+/// C24's right tip tape: as [`TIP`] but the stick hard forward and right (fields
+/// `40 300:-:255,0 250`). Its row for 1304 was read a frame late (B23).
+const TIP_RIGHT: &str = "capture/c24/try5.csv";
 
 /// What [`replay_wreck`] saw.
 struct Replayed {
@@ -1409,6 +1412,8 @@ struct Replayed {
     nearest: Option<F>,
     /// Frames whose helicopter rays met a blade.
     struck: Vec<u32>,
+    /// Rows read a frame late: each holds the body after the next frame (B23).
+    late: Vec<u32>,
     last: u32,
 }
 
@@ -1419,6 +1424,9 @@ struct Replayed {
 /// ([`compare_torn`]). The wreck's 12 draws are the original's: the generator is reseeded from the
 /// row before the wreck, the tapes' draws having parted from the port's by then (the original draws
 /// on input). The put-back steps once, as the strike's does (R26).
+///
+/// A row whose body equals the next row's was read a frame late, after the next frame (R26 has
+/// the same in C21's capture from its put-back on), and is compared there.
 fn replay_wreck(capture: &str) -> Option<Replayed> {
     use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, Blades, KIOWA_HULL, KIOWA_MODEL, RotorTree, WRECK_BLADE_PHY, Wreckage};
     let (cap_path, image) = (ctx(capture)?, ctx(STATE)?);
@@ -1460,8 +1468,11 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
         .expect("a wreck in the capture")
         .0;
     let rng_of = |row: usize| -> u64 { cap.text(row, "rng_state").parse().expect("rng_state") };
-    let mut seen = Replayed { wrecks: Vec::new(), put_backs: Vec::new(), offered: 0, nearest: None, struck: Vec::new(), last: 0 };
+    let mut seen = Replayed { wrecks: Vec::new(), put_backs: Vec::new(), offered: 0, nearest: None, struck: Vec::new(), late: Vec::new(), last: 0 };
     let mut torn: Option<(usize, Kiowa, Ride, Measure)> = None;
+    // A row read a frame late, waiting for the end of the next frame (B23).
+    let mut late: Option<usize> = None;
+    let read_late = |row: usize| row + 1 < cap.rows.len() && cap.text(row, "body_raw") == cap.text(row + 1, "body_raw");
     for row in 1..cap.rows.len() {
         let frame = cap.u32(row, "frame_counter");
         let dt = F(cap.f32(row, "dt"));
@@ -1526,7 +1537,13 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
         if frame != wrecked_on {
             assert_eq!(rng.state(), drawn_from, "tick {frame}: the port's frame drew from the generator");
         }
-        if frame <= wrecked_on {
+        if let Some(at) = late.take() {
+            compare_torn(&cap, at, &s.kiowa, &s.ride, &measured_before, s.filter, &[]);
+        }
+        if read_late(row) {
+            late = Some(row);
+            seen.late.push(frame);
+        } else if frame <= wrecked_on {
             compare(&cap, row, &s.kiowa, &s.ride, s.filter);
         } else {
             torn = Some((row, s.kiowa, s.ride, measured_before));
@@ -1536,6 +1553,7 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
     if let Some((at, kiowa, ride, before)) = torn.take() {
         compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &[]);
     }
+    assert!(late.is_none(), "the last row was read a frame late");
     Some(seen)
 }
 
@@ -1547,6 +1565,7 @@ fn a_rolled_wreck_replays_bit_exact() {
     let Some(seen) = replay_wreck(ROLL) else { return };
     assert_eq!(seen.wrecks, vec![(1257, game_sim::biplane::CRASHED)], "the wrecks");
     assert_eq!(seen.put_backs, vec![1408], "the put-backs");
+    assert_eq!(seen.late, Vec::<u32>::new(), "the rows read a frame late");
     assert_eq!(seen.offered, 0, "frames whose helicopter search was offered a blade");
     println!("the roll: 1205..={} bit-exact, wrecked on 1257, put back on 1408, no blade offered", seen.last);
 }
@@ -1560,6 +1579,7 @@ fn a_tipped_wreck_never_meets_its_blades() {
     let Some(seen) = replay_wreck(TIP) else { return };
     assert_eq!(seen.wrecks, vec![(1267, game_sim::biplane::CRASHED)], "the wrecks");
     assert_eq!(seen.put_backs, vec![1418], "the put-backs");
+    assert_eq!(seen.late, Vec::<u32>::new(), "the rows read a frame late");
     assert_eq!(seen.offered, 0, "frames whose helicopter search was offered a blade");
     println!("the tip: 1205..={} bit-exact, wrecked on 1267, put back on 1418, no blade offered", seen.last);
 }
@@ -1572,10 +1592,28 @@ fn a_fast_wreck_offers_its_blades_bit_exact() {
     let Some(seen) = replay_wreck(FAST) else { return };
     assert_eq!(seen.wrecks, vec![(1451, game_sim::biplane::CRASHED)], "the wrecks");
     assert_eq!(seen.put_backs, vec![1602], "the put-backs");
+    assert_eq!(seen.late, Vec::<u32>::new(), "the rows read a frame late");
     assert!(seen.offered > 0, "the slide never gathered the blades");
     assert_eq!(seen.struck, Vec::<u32>::new(), "frames whose helicopter rays met a blade");
     println!(
         "the fast wreck: 1205..={} bit-exact, wrecked on 1451, put back on 1602; blades offered on {} frames, the nearest {:?} ft off, none met",
         seen.last, seen.offered, seen.nearest
     );
+}
+
+
+/// The right tip (C24's try5, B23): bit-exact to the capture's end. Its row for 1304 holds the same
+/// body as 1305's, two frames' motion past 1303's: PINE read it a frame late, and it equals the
+/// port after 1305. (Compared after its own frame, it parts on 1304's speed, 2.388822 in the game
+/// and 2.5328536 in the port.) The heli's captured contact counts are short of the port's on 11
+/// rows from 1275 to 1319, its body bit-exact on each: the record read part-way through the collide
+/// pass that clears and refills it.
+#[test]
+fn a_right_tipped_wreck_read_a_frame_late_replays_bit_exact() {
+    let Some(seen) = replay_wreck(TIP_RIGHT) else { return };
+    assert_eq!(seen.wrecks, vec![(1268, game_sim::biplane::CRASHED)], "the wrecks");
+    assert_eq!(seen.put_backs, vec![1419], "the put-backs");
+    assert_eq!(seen.late, vec![1304], "the rows read a frame late");
+    assert_eq!(seen.offered, 0, "frames whose helicopter search was offered a blade");
+    println!("the right tip: 1205..={} bit-exact, wrecked on 1268, put back on 1419, 1304 read a frame late, no blade offered", seen.last);
 }
