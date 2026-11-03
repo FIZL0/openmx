@@ -304,6 +304,52 @@ impl Machine {
     }
 }
 
+/// MX vs. ATV Unleashed's fliers (MD80d): the same two machines, four skins each over two models.
+/// Nothing picks a skin yet (MD80e), so only the tests read these.
+#[allow(dead_code)]
+impl Machine {
+    /// Its four MX vs. ATV skins, `Veh\Anim\<name>.psg` in openmx-mods' `mxvatv_fliers` pack (its
+    /// `skins[].skin`), in the garage's order (`UI\Res\Veh_BiPlane1-4.res`, `Veh_Helicopter1-4.res`).
+    /// MX vs. ATV has no `_ss` skins: its 3 and 4 are a second model. `None` for the cars, which
+    /// MD39 brings.
+    pub fn mxvatv_skins(self) -> Option<[&'static str; 4]> {
+        match self {
+            Machine::Biplane => Some(["biplane", "biplane2", "biplane3", "biplane4"]),
+            Machine::Helicopter => Some(["kiowa", "kiowa2", "kiowa3", "kiowa4"]),
+            Machine::Buggy | Machine::Monster | Machine::Baja => None,
+        }
+    }
+
+    /// The model MX vs. ATV's skin `skin` (an index into [`Machine::mxvatv_skins`]) is: 1, MX
+    /// Unleashed's machine, for the first two; 2 for the others. The `.phy` keys it reads are
+    /// `ModelOne<Key>` or `ModelTwo<Key>` by it (`research/mxvatv-pc.md`, "The biplane and the Kiowa").
+    pub fn mxvatv_model(skin: usize) -> u32 {
+        if skin < 2 { 1 } else { 2 }
+    }
+
+    /// The `.phy` key the skin's model reads for `key`: `ModelOneChord`, `ModelTwoPelvisBoxSize`.
+    pub fn mxvatv_key(skin: usize, key: &str) -> String {
+        match Machine::mxvatv_model(skin) {
+            1 => format!("ModelOne{key}"),
+            _ => format!("ModelTwo{key}"),
+        }
+    }
+
+    /// Skin `skin`'s collision pair stem, `Veh\Col\<stem>F.col` (the hull) and `<stem>M.col` (the
+    /// ray probe): `Biplane`, `Biplane2`, … `Kiowa4`.
+    pub fn mxvatv_col(self, skin: usize) -> Option<String> {
+        let stem = match self {
+            Machine::Biplane => "Biplane",
+            Machine::Helicopter => "Kiowa",
+            Machine::Buggy | Machine::Monster | Machine::Baja => return None,
+        };
+        Some(match skin {
+            0 => stem.to_string(),
+            n => format!("{stem}{}", n + 1),
+        })
+    }
+}
+
 /// How many liveries the disc has of each machine: the factory's skins 0 and 1. Its 2 and 3 are the
 /// same two in split-screen textures, which the port does not need.
 pub const LIVERIES: usize = 2;
@@ -3011,6 +3057,19 @@ mod tests {
         assert_eq!((s.facing.x(), s.facing.y(), s.facing.z()), (0.0, 0.0, -1.0));
         assert_eq!(Spawn::biplane(MACHINES.as_bytes(), 1), None, "there is no second player's plane");
         assert_eq!(Spawn::biplane(b"[Machines]\n", 0), None);
+    }
+
+    #[test]
+    fn mx_vs_atvs_fliers_have_four_skins_over_two_models() {
+        // Skins 1 and 2 are model one, MX Unleashed's own names; 3 and 4 model two.
+        assert_eq!(Machine::Biplane.mxvatv_skins().unwrap()[..2], Machine::Biplane.models()[..2]);
+        assert_eq!(Machine::Helicopter.mxvatv_skins().unwrap()[..2], Machine::Helicopter.models()[..2]);
+        assert_eq!((0..4).map(Machine::mxvatv_model).collect::<Vec<_>>(), [1, 1, 2, 2]);
+        assert_eq!(Machine::mxvatv_key(3, "PelvisBoxPosition"), "ModelTwoPelvisBoxPosition");
+        assert_eq!(Machine::mxvatv_key(1, "Chord"), "ModelOneChord");
+        assert_eq!(Machine::Biplane.mxvatv_col(0).as_deref(), Some("Biplane"));
+        assert_eq!(Machine::Helicopter.mxvatv_col(3).as_deref(), Some("Kiowa4"));
+        assert_eq!(Machine::Buggy.mxvatv_skins(), None);
     }
 
     #[test]
