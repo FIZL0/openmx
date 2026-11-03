@@ -318,8 +318,8 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Restart), "{acts:?}");
     tap(&mut m, &mut r, Control::Start);
-    // under Game Modifiers since P134, and Controllers since P210
-    for _ in 0..6 {
+    // under Game Modifiers since P134, Controllers since P210 and Tricks since P259
+    for _ in 0..7 {
         tap(&mut m, &mut r, Control::Down);
     }
     // Main Menu asks first, on Stay (P110): Up onto the leaving row, then Cross.
@@ -333,6 +333,69 @@ fn the_walk_a_rider_takes_rides_pauses_and_comes_back() {
     let acts = tap(&mut m, &mut r, Control::Circle);
     assert!(acts.contains(&Act::Resume), "{acts:?}");
     assert!(m.riding());
+}
+
+/// The pause's Tricks page (P259): its row opens the list on the first trick, Down lights the next,
+/// Circle goes back to the pause on the row it left and Start resumes from the page.
+#[test]
+fn the_pause_lists_the_tricks() {
+    use game_sim::trick::{SLOTS, Set, Stunt};
+    use ps2_float::F;
+    let (mut m, mut r) = fresh();
+    let stunts: Vec<Stunt> =
+        (0..SLOTS).map(|i| Stunt { display_name: format!("Trick{i}"), duration: F(1.0), ..Stunt::default() }).collect();
+    m.trick_rows = menu::trick_list::rows(&Set::new(stunts), None);
+    m.pause();
+    let tricks = m.pause_rows().iter().position(|row| row == "Tricks").expect("a Tricks row");
+    for _ in 0..tricks {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tricks));
+    assert_eq!(m.trick_lit().map(|t| t.name.as_str()), Some("Trick0"));
+    assert!(m.trick_stage((1280, 720)).is_some());
+    tap(&mut m, &mut r, Control::Down);
+    assert_eq!(m.trick_lit().map(|t| t.name.as_str()), Some("Trick1"));
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    assert_eq!(m.cursor(Screen::Pause), tricks);
+    assert!(m.trick_lit().is_none() && m.trick_stage((1280, 720)).is_none());
+    tap(&mut m, &mut r, Control::Cross);
+    let acts = tap(&mut m, &mut r, Control::Start);
+    assert!(acts.contains(&Act::Resume), "{acts:?}");
+    assert!(m.riding());
+}
+
+/// Over a split the Tricks page is the pauser's (P259): 2P's opens in 2P's view and hears 2P's pad
+/// alone, 1P riding on; its stage is in that view's own frame.
+#[test]
+fn over_a_split_the_tricks_page_is_the_pausers() {
+    use game_sim::trick::{SLOTS, Set, Stunt};
+    use ps2_float::F;
+    let (mut m, mut r) = fresh();
+    m.riders = 2;
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let stunts: Vec<Stunt> =
+        (0..SLOTS).map(|i| Stunt { display_name: format!("Trick{i}"), duration: F(1.0), ..Stunt::default() }).collect();
+    m.trick_rows = menu::trick_list::rows(&Set::new(stunts), None);
+    let idle = Press::default();
+    let (cross, down) = (press(|p| p.ok = true), press(|p| p.down = true));
+    m.pause_for(1);
+    while m.view(1).pause_rows()[m.view(1).cursor(Screen::Pause)] != "Tricks" {
+        m.step_seats(&[idle, down]);
+    }
+    m.step_seats(&[idle, cross]);
+    assert_eq!(m.view(1).screen(), Some(Screen::Tricks));
+    assert!(m.screen().is_none() && m.trick_lit().is_none(), "1P rides on");
+    // 1P's Down moves nothing; 2P's lights the next trick.
+    m.step_seats(&[down, idle]);
+    assert_eq!(m.view(1).trick_lit().map(|t| t.name.as_str()), Some("Trick0"));
+    m.step_seats(&[idle, idle]);
+    m.step_seats(&[idle, down]);
+    assert_eq!(m.view(1).trick_lit().map(|t| t.name.as_str()), Some("Trick1"));
+    assert!(m.view(1).trick_stage((640, 720)).is_some());
 }
 
 #[test]
@@ -4463,7 +4526,7 @@ fn the_pauses_rows_are_trimmed_and_main_menu_sits_above_quit() {
     let rows = m.pause_rows();
     assert_eq!(rows[0..2], ["Resume", "Restart"]);
     assert!(rows[2].starts_with("Switch To Machine"), "{rows:?}");
-    assert_eq!(rows[3..], ["Settings", "Controllers", "Game Modifiers", "Open to Online", "Main Menu", "Quit"]);
+    assert_eq!(rows[3..], ["Settings", "Controllers", "Game Modifiers", "Tricks", "Open to Online", "Main Menu", "Quit"]);
     // The cursor walks exactly those rows: Up from Resume is Quit.
     tap(&mut m, &mut r, Control::Up);
     assert_eq!(m.cursor(Screen::Pause), rows.len() - 1);
@@ -4471,7 +4534,7 @@ fn the_pauses_rows_are_trimmed_and_main_menu_sits_above_quit() {
     // Opened, Seats sits under the online row, and Main Menu and Quit stay last.
     m.opening = menu::Opening::Open;
     let rows = m.pause_rows();
-    assert_eq!(rows[6..], ["Online: opening...", &format!("Seats: {}", m.settings.lobby_seats), "Main Menu", "Quit"]);
+    assert_eq!(rows[7..], ["Online: opening...", &format!("Seats: {}", m.settings.lobby_seats), "Main Menu", "Quit"]);
     // Main Menu from its new place still asks first, and Quit under it too.
     tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Main Menu");
     tap(&mut m, &mut r, Control::Cross);
