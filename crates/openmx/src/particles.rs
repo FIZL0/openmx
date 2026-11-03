@@ -93,8 +93,8 @@
 //! **Zones.** `ZoneDescriptor` names a section of `mxparticlezones.dat` ([`ZONES`]): `Zone1` to
 //! `Zone16` a group of the sheet for each surface under the tire (or the prop), `none` for nothing,
 //! the `.emt`'s own group where a zone is not named. The disc's file names none, so every zone is the
-//! `.emt`'s group. A `none` turns the prop wash off; the tire dust's own frame turns its emitter back
-//! on regardless, as the original's does.
+//! `.emt`'s group. A `none` turns the prop wash off, and the tire dust too (C18: the original's car
+//! tire dusts never emit zone-off).
 //!
 //! **MatchTerrainContour**: a particle of such an `.emt` is put on the ground under where it would
 //! have started, raised by its emit point's extent's height — the prop wash's dust starts one to
@@ -103,6 +103,7 @@
 //! **The cars** (S248) run the same manager off their own lists ([`car_list`]), with four tires where
 //! the bike has two: the car's loader points the manager's tire records into the four tire objects
 //! and its throttle, clutch, speed and wreck into the car ([`PlaneFrame::car`], [`TireFrame::car`]).
+//! That wreck word is never set (C18), so a car's entries never see a wreck.
 //! Their nodes hang off the model's root, so each is the car's matrix times the node's bind place.
 //!
 //! **Its own random numbers.** A particle is presentation: nothing here reads or draws from the
@@ -1183,9 +1184,14 @@ impl PlaneFrame {
 
     /// What a driven car's particles read off it this frame (S248), as the original's car manager is
     /// wired (`research/oracle.txt` S248): `nodes` where the car is, the throttle after its rate limit
-    /// and the clutch as the engine reads it, the body's ground speed, the wreck, its four tires
+    /// and the clutch as the engine reads it, the body's ground speed, never a wreck, its four tires
     /// ([`TireFrame::car`], front left, front right, rear left, rear right: `AttachedToTire`'s 0 to
     /// 3) and, with its collision object out, that object's contacts ([`PlaneFrame::touch`]).
+    ///
+    /// The loader hands the manager a wreck word that nothing in the car ever sets (C18): the car's
+    /// wreck reason is a different word, and a thrown car's word stays 0 through the whole wreck
+    /// (`research/oracle.txt` C18). So the original's car manager always reads `NotWrecking`, and a
+    /// wrecked car's exhausts and tire entries stay live; `m.wrecked` is not fed.
     pub fn car(m: &game_sim::car::Machine, nodes: Vec<(String, M4)>, struck: Option<&game_sim::car::Collision>) -> PlaneFrame {
         let v = m.body.velocity;
         let mut frame = PlaneFrame {
@@ -1193,7 +1199,7 @@ impl PlaneFrame {
             throttle: m.controls.throttle.0,
             airspeed: m.ground_speed.0,
             clutch: m.controls.engaged_clutch.0,
-            wrecked: m.wrecked,
+            wrecked: false,
             vel: v3(v.x(), v.y(), v.z()),
             tires: m.wheels.iter().map(TireFrame::car).collect(),
             ..Default::default()
@@ -1383,7 +1389,9 @@ impl PlaneFx {
                 Kind::Dust(keys) => {
                     let node = entry.node.as_ref().and_then(|n| plane.nodes.iter().find(|(name, _)| name.eq_ignore_ascii_case(n)));
                     entry.sources.resize_with(1, Source::default);
-                    let (Some(t), Some((_, m)), false) = (tire, node, tire_off || entry.disable & global != 0) else {
+                    // Zone-off is off too (C18: a car's tire dust on a surface its zones say `none`
+                    // to raises nothing, the zone change switching its emitter off).
+                    let (Some(t), Some((_, m)), false) = (tire, node, tire_off || entry.disable & global != 0 || entry.flag != Entry::LIVE) else {
                         entry.latched = false;
                         entry.sources[0].off();
                         continue;

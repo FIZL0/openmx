@@ -8245,12 +8245,43 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 #   spray's "spinning"), +0x1c <- +0x1ec locked, +0x20 <- +0x2b0 side ratio (the spray's side force),
 #   +0x24 <- +0x100 surface (zone byte).
 # Its car words: throttle +0x3ec (the rate-limited throttle), clutch +0x3f0 (engaged clutch), speed +0x55c
-#   (ground speed), wreck +0x754. The port reads the wreck as Machine::wrecked (+0x2c4); +0x754 is not
-#   identified.
+#   (ground speed), wreck +0x754. +0x754 is never set (C18 below): the port feeds no wreck.
 # The particle nodes (FrontLeft_TireParticles, buggy_FtireL_particles, baja_exhaust_particles, ...) are all
 #   children of the model's root.
 # The DirtSpray and Chunks zone descriptors say none to Zone1 (surface 0): a car on surface 0 dusts but
 #   throws no dirt or chunks.
+# --- C18: the car's particle manager against PINE captures (tests/car_particles.rs
+#   the_cars_emitters_follow_the_original; journal 2026-11-03-c18-car-particles-capture)
+# The loader's wreck word +0x754 is never set: its only stores are zeros in the car ctors (0x0039d3e8 in
+#   0x0039d310, buggy/baja; 0x003ded7c in 0x003deca0, the truck), no sq/sd covers it. Readers: 0x003a0340
+#   (rumble only while 0), 0x0039e9c0 (== 0), 0x003a1a00 (== 0xd with +0x530), the truck's 0x003e0554 /
+#   0x003e1a3c / 0x003e2f50 / 0x003e3078; its address is also kept in car +0xad0 (block at 0x0039ed00)
+#   and the feed's +0xa94. It looks copied from the bike's wreck reason (+0x748). The car's own wreck is
+#   +0x2c4: vt +0x1d0 (0x00398bd0) writes the reason there and zeroes +0x2c8 (lifted), vt +0x1d4
+#   (0x00398be0) undoes it; the wreck step 0x00398820 (the edge throw) calls vt +0x1d0 with 13, the
+#   car's only wreck. Live: +0x754 stays 0 through a reason-13 throw (truck-edge, frames 460..670), so the
+#   car's manager always reads NotWrecking: its exhausts (Disable Wrecking only) stay live all wreck.
+# The feed block, car +0xa70 (written by the loaders 0x0039e230 / 0x003dfd90): [0] tire count 4, +0xa74
+#   the tire records (stride 0x2c; +0x28 flags byte 0x10|NoContact 1|Ground 2|Object 4, +0x29 zone),
+#   +0xa7c car +0x170, +0xa88 &throttle (+0x3ec), +0xa8c &clutch (+0x3f0), +0xa90 &speed (+0x55c),
+#   +0xa94 &wreck (+0x754). The manager reads it at manager +0x30 (feed +0x24 the wreck pointer); its
+#   entries: count manager +0x34, list manager +0x3c. The manager is car +0xf00 (buggy, baja) / +0xff0
+#   (truck); the car is 0x00605270 in every S149a free07 state.
+# An entry: +4 tire record, +8 flag byte (1 live, 2 zone-off), +0xc Disable, +0x10 vtable, +0x14 emitter
+#   (+0x240 switch byte, bit 2 on; +0x3b0 carry; +0x340 rate; +0x40 point; +0x80 velocity x), +0x28 a
+#   spray's fade clock. Vtables: 0x45e690 CollisionModel, 0x45e780 Exhaust, 0x45e750 Dust, 0x45e720
+#   Spray (dirt and chunks), 0x45e6f0 Generic (the truck's rear dust sprays), 0x45e630 TireTrack (last
+#   four). Entry counts: buggy 22, truck 22, baja 21 (the port's 18/18/17, tracks left out, same order).
+# Phase: a row's manager state is after it read that same row's words (not the row before's, as P74's
+#   bike capture). A record's zone byte equals the tire's +0x100 on every grounded row; in the air it
+#   differed on 7 tire-rows of 2600.
+# A zone-off (flag 3) tire dust never emits: 0 of 228 captured frames grounded, compressed past 0.35 and
+#   over 20 ft/s, against ~90% of live ones (P60's reading that the dust's update switches the emitter
+#   back on does not hold).
+# Edge-state recipe: shorten the map's depth in a copy of the tape's save state (edge_state.py rewrites
+#   area +0x534, area = *(*(car +0x2b4) +0x3b4); the edge test is within 150 ft of (+0x530 x 256 x
+#   +0x538) by (+0x534 x 256 x +0x53c); free07 3,3,9,9 = 6912 ft); depth 2400 throws S149a's parked truck
+#   at frame 460.
 # MD76 — Desert Oasis's ground for the ATV (crates/game-sim/src/atv_ground.rs; tests/atv_ground.rs runs the
 # query off MD37a's atv-r-spawn.ee.bin over 29,450 points, nothing hooked). Journal:
 # research/journal/2026-11-02-md76-atv-ground. Desert Oasis Free Ride is Env/MC02 (mc02.res, member
