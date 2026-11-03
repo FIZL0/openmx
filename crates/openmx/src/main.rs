@@ -9820,6 +9820,15 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
         crash,
         // The Kiowa's loop and clank (V114), while it is up and out.
         heli: seat.garage.heli_up().and_then(|k| k.flown.as_ref()).map(|h| audio::HeliFrame::of(&h.kiowa, &h.ride, h.touching())),
+        // A driven car's engine voice (S247): its sound pitch, its top revs and the gas.
+        car: seat.garage.car_up().and_then(vehicle::CarRide::engine_sound).map(|e| audio::CarFrame {
+            profile: e.profile,
+            pitch: e.pitch,
+            top: e.top,
+            throttle: e.throttle,
+            at: e.at,
+            vel: e.vel,
+        }),
         bike: audio::BikeCrash::of(&seat.sim.rider),
         touchdown,
         edge,

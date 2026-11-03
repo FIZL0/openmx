@@ -1892,7 +1892,17 @@ pub struct CarRide {
     /// object itself while the car is out (S229). A disc without the file leaves the car to its tires.
     pub rays: Option<game_sim::flight_search::Rays>,
     pub struck: Option<game_sim::car::Collision>,
+    /// The engine's shared smooth noise under the sound's pitch (S247), built off [`CarRide::rng`] on
+    /// its first sample, as the original builds it off `rand()` wherever the session's generator
+    /// stands then; kept from one take to the next, as the original's is for the session.
+    pub noise: Option<game_sim::noise::SmoothNoise>,
+    /// The generator the noise's tables are drawn from: the port's own seed, the session's `rand()`
+    /// being the wall clock's.
+    pub rng: game_sim::rng::Rng,
 }
+
+/// The seed of a car's [`CarRide::rng`]. The port's own number.
+const CAR_NOISE_SEED: u32 = 0x0247_6361;
 
 /// How far over the ground a car taken is stood, past where its tires' bottoms hang, feet: it drops
 /// onto its springs from there. The port's own number.
@@ -1915,7 +1925,7 @@ impl CarRide {
                 None
             }
         });
-        Ok(CarRide { machine, livery: livery(copy), car: game_sim::car::Car::read_bytes(&phy, kind), model, bay, driven: None, taken_at: Vf::default(), rays, struck: None })
+        Ok(CarRide { machine, livery: livery(copy), car: game_sim::car::Car::read_bytes(&phy, kind), model, bay, driven: None, taken_at: Vf::default(), rays, struck: None, noise: None, rng: game_sim::rng::Rng::from_seed(CAR_NOISE_SEED) })
     }
 
     /// How high the car's origin stands over the ground with its tires' bottoms on it and its springs
@@ -1958,6 +1968,23 @@ impl CarRide {
         Some((Vf::new(at.x(), at.y(), at.z(), 1.0), Vf::new(forward.x(), forward.y(), forward.z(), 0.0)))
     }
 
+    /// What its engine voice reads while it is out (S247): the drivetrain's sound pitch and top revs,
+    /// the gas after its rate limit, and where the body is and how fast it goes. Nothing for a car not
+    /// out.
+    pub fn engine_sound(&self) -> Option<EngineSound> {
+        let m = self.driven.as_ref()?;
+        let (at, _) = self.place()?;
+        let v = m.body.velocity;
+        Some(EngineSound {
+            profile: self.machine.dir(),
+            pitch: m.drivetrain.pitch.0,
+            top: m.drivetrain.redline.0,
+            throttle: m.controls.throttle.0,
+            at: [at.x(), at.y(), at.z()],
+            vel: [v.x(), v.y(), v.z()],
+        })
+    }
+
     /// What the shell says of it while it is out: how far it has gone from where it was taken, how
     /// fast, whether a tire is down and how upright it is.
     pub fn report(&self) -> Option<String> {
@@ -1994,17 +2021,32 @@ impl CarRide {
     /// One frame of the car on `pad` through `table` (the ride's bindings): the stick steers and
     /// leans, the commands are the pedals ([`game_sim::car::Controls::input`]), then the car's step
     /// over `world`, against the world's objects through its collision object where it has one
-    /// ([`game_sim::car::Machine::step_struck`]). The engine's noise is off. Nothing for a car not out.
+    /// ([`game_sim::car::Machine::step_struck`]). The engine's sound pitch samples the shared smooth
+    /// noise ([`CarRide::noise`]). Nothing for a car not out.
     pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
         use game_sim::input::{Axis, AxisRange};
         let Some(m) = self.driven.as_mut() else { return };
         let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
         m.controls.input(&self.car, stick, F::ZERO, m.ground_speed, m.side_slip, |c| table.value(pad, c));
+        let (noise, rng) = (&mut self.noise, &mut self.rng);
+        let mut sample = |t: F| noise.get_or_insert_with(|| game_sim::noise::SmoothNoise::build(rng)).at(t);
         match self.struck.as_mut() {
-            Some(c) => m.step_struck(&self.car, &mut Through(world), c, dt, &tables.acos, &tables.curve, &mut |_| F::ZERO),
-            None => m.step(&self.car, &mut Through(world), dt, &tables.acos, &tables.curve, &mut |_| F::ZERO),
+            Some(c) => m.step_struck(&self.car, &mut Through(world), c, dt, &tables.acos, &tables.curve, &mut sample),
+            None => m.step(&self.car, &mut Through(world), dt, &tables.acos, &tables.curve, &mut sample),
         }
     }
+}
+
+/// What a driven car's engine voice reads ([`CarRide::engine_sound`]).
+#[derive(Clone, Copy, Debug)]
+pub struct EngineSound {
+    /// The machine's directory name, its `carengine.aud` profile.
+    pub profile: &'static str,
+    pub pitch: f32,
+    pub top: f32,
+    pub throttle: f32,
+    pub at: [f32; 3],
+    pub vel: [f32; 3],
 }
 
 /// A `dyn World` for the car's step, which takes its world by type: every query passed through.

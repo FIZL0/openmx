@@ -7380,6 +7380,30 @@ car_tire_add_drive          boot 0x0039b660 (tire, torque in f12): tire +0x1f0 +
 #   the cursor's index and weight.)
 car_shift_sound             boot 0x003a6070 (sound, 0): what the shift calls with the engine's +0x13c on a shift
 
+# S247 — the cars' keyed-loop engine voice (carengine.aud), research/journal/*-s247-car-engine-sound.
+# Ported as openmx audio::CarEngine / CarGas / CarNote (presentation: matched in its keys and ramps, not
+# bit-exact). The car's sound setup (called from the car's loader) builds it with the engine's +0x130
+# (its torque table's last rpm, the top revs), pointers to the engine's +0x138 (the sound pitch) and the
+# car's +0x3ec (the throttle), and the body's place/velocity; the profile is the machine's directory name.
+car_sound_setup             boot 0x003990f0 (car, ..., archive, profile): the voice, the tire params and more
+car_voice_ctor              boot 0x003a5230 (voice): vtable 0x0045d420, +0x218 = 44100, +0x220 = 1 (first frame)
+car_voice_init              boot 0x003a53d0 (top revs, voice, archive, profile, pitch*, at*, vel*, throttle*)
+car_voice_settings          boot 0x003a5930 (voice, ini, profile): the attenuation, throttle and Doppler keys
+car_voice_loops             boot 0x003a5ab0 (voice, ini, profile, reload): MinRPM, MaxRPM, the loops and keys
+car_voice_frame             boot 0x003a54c0 (dt in f12, voice): the vtable's frame; the ramps, revs and keys
+# Voice words: +0x200 MinRPM, +0x204 MaxRPM (ints), +0x208 pitch pointer, +0x20c the revs last keyed,
+#   +0x210 loop count, +0x214 loop records {base rpm, key count, base key index, keys*}, keys 12 bytes
+#   {rpm, volume, pitch word = (OriginalSampleRatePS2 + rate) * 4096 / 48000} (ints), +0x218
+#   OriginalSampleRatePS2, +0x21c ThrottleThreshold (0.9), +0x224 the top revs, +0x228 throttle pointer,
+#   +0x22c 1 - OffThrottleVolume (1), +0x230 OnThrottleVolumeRampTime, +0x234 OffThrottleVolumeRampTime
+#   (both 0), +0x238 ramp left, +0x23c on the gas last frame, +0x240 the loops' sound objects (vt +0x30
+#   volume, +0x40 pitch word), +0x9c DopplerFactor (0.25), +0x98 RolloffFactor (1), +0x88/+0x8c
+#   AttenuationMin/MaxDistance. The frame: on = throttle >= threshold; the ramp restarts on a change
+#   (on ramp coming on, off ramp going off); gain on = 1 - cut*left/onramp, off = 1 - cut + cut*left/
+#   onramp (both over the on ramp); revs = MaxRPM * pitch / top held to [MinRPM, MaxRPM]; each loop
+#   silent outside its keys, a key's own on a key, else between the last key under and the first over,
+#   volume (int)((lo + (int)(t*dv)) * gain), pitch lo + (int)(t*dp); then the ramp less dt, at least 0.
+
 # S149d — the car's controls and its once-a-frame steps (MXCar.cpp), research/journal/*-s149d-car-step.
 # Ported as game_sim::car::{Controls, travel_cofg, hold_yaw_rate}; tests/car_step.rs runs each against the
 # original on the S149a switched images (car 0x00605270) over every captured row and generated inputs.

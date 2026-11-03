@@ -2173,6 +2173,207 @@ impl PlaneNote {
     }
 }
 
+// --- the cars' engine (S247) ------------------------------------------------------------------------
+
+/// The cars' `carengine.aud` profiles: each car machine's directory name.
+pub const CAR_PROFILES: [&str; 3] = ["buggy", "baja", "monstertruck"];
+
+/// One of a car's `carengine.aud` loops as the original's keyed-loop voice holds it: the sample, and
+/// its keys `(rpm, volume percent, rate)` read as integers, each rate turned to the sound chip's pitch
+/// word as it is read: `(OriginalSampleRatePS2 + rate) × 4096 / 48000`, truncated (4096 plays at
+/// 48 kHz).
+#[derive(Clone, Debug)]
+pub struct CarLoop {
+    pub clip: Arc<Clip>,
+    pub keys: Vec<(i32, i32, i32)>,
+}
+
+/// **A car's engine voice**, `carengine.aud`'s `[buggy]`, `[baja]` or `[monstertruck]` (the machine's
+/// directory name, any case) and its `<name>Loop1..n`, as the original's keyed-loop voice reads them.
+/// The defaults are the reader's own: `ThrottleThreshold` 0.9, `OffThrottleVolume` 1, both ramp times
+/// 0, `DopplerFactor` 0.25, `OriginalSampleRatePS2` 44100, `MinRPM` and `MaxRPM` 0.
+#[derive(Clone, Debug, Default)]
+pub struct CarEngine {
+    pub name: String,
+    pub loops: Vec<CarLoop>,
+    pub min_rpm: i32,
+    pub max_rpm: i32,
+    /// `AttenuationMinDistance`, `AttenuationMaxDistance`, feet.
+    pub near: f32,
+    pub far: f32,
+    /// `ThrottleThreshold`: the throttle at and over which the voice is on the gas.
+    pub threshold: f32,
+    /// `1 − OffThrottleVolume`: how much of the volume the gas's ramps move.
+    pub off_cut: f32,
+    /// `OnThrottleVolumeRampTime`, `OffThrottleVolumeRampTime`, seconds.
+    pub on_ramp: f32,
+    pub off_ramp: f32,
+    pub doppler: f32,
+}
+
+impl CarEngine {
+    pub fn read(text: &str, name: &str, lib: &mut impl FnMut(&str) -> Option<Arc<Clip>>) -> CarEngine {
+        let s = ini::parse(text);
+        let Some(p) = section(&s, name) else { return CarEngine::default() };
+        let int = |sec: &Section, key: &str| sec.number(key).unwrap_or(0.0) as i32;
+        let base = p.number("OriginalSampleRatePS2").map_or(44100, |r| r as i32);
+        let mut loops = Vec::new();
+        for i in 1..=int(p, "NumberOfEngineLoops") {
+            let Some(l) = section(&s, &format!("{name}Loop{i}")) else { continue };
+            let Some(clip) = l.get("Filename").and_then(&mut *lib) else { continue };
+            let keys = (1..=int(l, "NumberOfKeys"))
+                .map(|k| {
+                    let rate = (base + int(l, &format!("Key{k}Rate"))) as i64 * 4096 / 48000;
+                    (int(l, &format!("Key{k}RPM")), int(l, &format!("Key{k}Vol")), rate as i32)
+                })
+                .collect();
+            loops.push(CarLoop { clip, keys });
+        }
+        CarEngine {
+            name: name.to_string(),
+            loops,
+            min_rpm: int(p, "MinRPM"),
+            max_rpm: int(p, "MaxRPM"),
+            near: p.number("AttenuationMinDistance").unwrap_or(80.0),
+            far: p.number("AttenuationMaxDistance").unwrap_or(700.0),
+            threshold: p.number("ThrottleThreshold").unwrap_or(0.9),
+            off_cut: 1.0 - p.number("OffThrottleVolume").unwrap_or(1.0),
+            on_ramp: p.number("OnThrottleVolumeRampTime").unwrap_or(0.0),
+            off_ramp: p.number("OffThrottleVolumeRampTime").unwrap_or(0.0),
+            doppler: p.number("DopplerFactor").unwrap_or(0.25),
+        }
+    }
+
+    /// The revs the loops are keyed on: the drivetrain's sound pitch (`pitch`, in revs) over the
+    /// engine's top revs (`top`, its torque table's last), times `MaxRPM`, held to `MinRPM..MaxRPM`.
+    pub fn revs(&self, pitch: f32, top: f32) -> f32 {
+        let (lo, hi) = (self.min_rpm as f32, self.max_rpm as f32);
+        let r = hi * (pitch / top);
+        let r = if lo < r { r } else { lo };
+        if r < hi { r } else { hi }
+    }
+
+    /// One loop's `(volume percent, pitch word)` at `rpm`, its volume scaled by `gain`: silent below
+    /// its first key or over its last; a key's own on a key; otherwise between the last key under the
+    /// revs and the first over them, the steps truncated as the original's integers are.
+    pub fn key(l: &CarLoop, rpm: f32, gain: f32) -> (i32, Option<i32>) {
+        let k = &l.keys;
+        let (Some(first), Some(last)) = (k.first(), k.last()) else { return (0, None) };
+        if rpm < first.0 as f32 || (last.0 as f32) < rpm {
+            return (0, None);
+        }
+        if let Some(on) = k.iter().find(|key| key.0 as f32 == rpm) {
+            return (((on.1 as f32) * gain) as i32, Some(on.2));
+        }
+        let lo = k[..k.len().saturating_sub(1)].iter().rev().find(|key| (key.0 as f32) < rpm).unwrap_or(first);
+        let hi = k[1..].iter().find(|key| rpm < key.0 as f32).unwrap_or(last);
+        let t = (rpm - lo.0 as f32) / (hi.0 - lo.0) as f32;
+        let vol = (lo.1 + (t * (hi.1 - lo.1) as f32) as i32) as f32 * gain;
+        (vol as i32, Some(lo.2 + (t * (hi.2 - lo.2) as f32) as i32))
+    }
+}
+
+/// The gas's hold on a car's engine volume, the voice's own state: whether it was on the gas at the
+/// last frame, and what is left of the ramp it started then.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CarGas {
+    pub on: bool,
+    pub left: f32,
+}
+
+impl CarGas {
+    /// One frame on `throttle` (the car's gas after its rate limit, the engine's throttle): the gain
+    /// the loops play at this frame, and the ramp run down by `dt` after.
+    ///
+    /// On the gas (`throttle ≥ ThrottleThreshold`) the gain is `1 − cut × left / on_ramp`, the ramp
+    /// restarted at `OnThrottleVolumeRampTime` on the frame the gas comes on; off it, `1 − cut + cut ×
+    /// left / on_ramp`, restarted at `OffThrottleVolumeRampTime` on the frame it goes off. Both divide
+    /// by the *on* ramp, as the original's do. A zero on ramp (none on the disc) reads as no ramp left.
+    pub fn frame(&mut self, e: &CarEngine, throttle: f32, dt: f32) -> f32 {
+        let on = e.threshold <= throttle;
+        if on && !self.on {
+            self.left = e.on_ramp;
+        } else if !on && self.on {
+            self.left = e.off_ramp;
+        }
+        let share = if e.on_ramp > 0.0 { self.left / e.on_ramp } else { 0.0 };
+        let gain = if on { 1.0 - e.off_cut * share } else { (1.0 - e.off_cut) + e.off_cut * share };
+        self.on = on;
+        if 0.0 < self.left {
+            self.left = (self.left - dt).max(0.0);
+        }
+        gain
+    }
+}
+
+/// What a driven car's engine voice reads in a tick, after the tick (S247).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CarFrame {
+    /// The machine's directory name, its `carengine.aud` profile: `buggy`, `baja`, `monstertruck`.
+    pub profile: &'static str,
+    /// The drivetrain's sound pitch, in revs (`game_sim::car::Drivetrain::pitch`).
+    pub pitch: f32,
+    /// The engine's top revs, its torque table's last (`Drivetrain::redline`).
+    pub top: f32,
+    /// The gas after its rate limit (`game_sim::car::Controls::throttle`): the voice's load.
+    pub throttle: f32,
+    pub at: [f32; 3],
+    pub vel: [f32; 3],
+}
+
+/// A driven car's engine playing: one looped voice per loop, started the first frame and stopped by
+/// [`CarNote::silence`] (the switch off the car).
+#[derive(Default)]
+pub struct CarNote {
+    voices: Vec<VoiceId>,
+    gas: CarGas,
+    ear: Option<[f32; 3]>,
+    /// The revs the loops were last keyed on.
+    pub revs: f32,
+}
+
+impl CarNote {
+    pub fn update(&mut self, mixer: &mut Mixer, e: &CarEngine, f: &CarFrame, dt: f32) {
+        if self.voices.is_empty() {
+            for l in &e.loops {
+                let play = Play { gain: 0.0, looping: true, at: Some(f.at), near: e.near, far: e.far, bus: Bus::Engine, ..Play::default() };
+                self.voices.push(mixer.play(l.clip.clone(), play));
+            }
+        }
+        let ear = mixer.nearest(f.at);
+        let ear_vel = match (ear, self.ear) {
+            (Some(n), Some(was)) if dt > 0.0 => [(n[0] - was[0]) / dt, (n[1] - was[1]) / dt, (n[2] - was[2]) / dt],
+            _ => [0.0; 3],
+        };
+        self.ear = ear;
+        let shift = ear.map_or(1.0, |n| doppler(e.doppler, f.at, f.vel, n, ear_vel));
+        let gain = self.gas.frame(e, f.throttle, dt);
+        self.revs = e.revs(f.pitch, f.top);
+        for (v, l) in self.voices.iter().zip(&e.loops) {
+            let (vol, word) = CarEngine::key(l, self.revs, gain);
+            // The pitch word's rate against the sample's own: the word plays at `word × 48000 / 4096` Hz.
+            // A silenced loop keeps the pitch it had, as the original sets only its volume.
+            let pitch = match word {
+                Some(w) => (w as f32 * 48000.0 / 4096.0 / l.clip.rate.max(1) as f32).max(0.05),
+                None => mixer.pitch_of(*v).unwrap_or(1.0) / shift,
+            };
+            mixer.set(*v, ENGINE_GAIN * vol.max(0) as f32 / 100.0, pitch * shift, Some(f.at));
+        }
+    }
+
+    pub fn silence(&mut self, mixer: &mut Mixer) {
+        for v in self.voices.drain(..) {
+            mixer.stop(v);
+        }
+        self.gas = CarGas::default();
+        self.ear = None;
+    }
+
+    pub fn voices(&self) -> &[VoiceId] {
+        &self.voices
+    }
+}
+
 // --- the helicopter's engine (V114) -----------------------------------------------------------------
 
 /// **The Kiowa's engine**, `otherengine.aud`'s `[Helicopter]`: one looped sample (`EngineLoop`), not
@@ -3341,6 +3542,8 @@ pub struct SeatFrame {
     pub crash: PlaneCrash,
     /// In the Kiowa (V114): what its engine loop and its wreck clank read.
     pub heli: Option<HeliFrame>,
+    /// In a car (S247): what its engine voice reads.
+    pub car: Option<CarFrame>,
     /// What the bike's wreck clank reads (P144).
     pub bike: BikeCrash,
     /// The plane's wheels touched down this tick (P146): the body's speed then.
@@ -3366,6 +3569,8 @@ pub struct SeatSound {
     plane: PlaneNote,
     /// The Kiowa's engine loop (V114).
     heli: HeliNote,
+    /// A driven car's engine voice (S247).
+    pub car: CarNote,
     pub clank: WreckClank,
     /// The bike's `[Wreck]` clank (P144), an emitter of its own.
     pub bike_clank: WreckClank,
@@ -3395,6 +3600,7 @@ impl SeatSound {
             engine: Engine::new(seed),
             plane: PlaneNote::default(),
             heli: HeliNote::default(),
+            car: CarNote::default(),
             clank: WreckClank::default(),
             bike_clank: WreckClank::default(),
             tires: TireTouchdown::default(),
@@ -3416,6 +3622,7 @@ impl SeatSound {
         let mut out: Vec<VoiceId> = self.engine.voices().collect();
         out.extend(&self.plane.voices);
         out.extend(self.heli.voice());
+        out.extend(self.car.voices());
         out.extend(self.tires.voice());
         out.extend(self.edge.voices());
         out.extend(self.drive_on.voice());
@@ -3445,6 +3652,8 @@ pub struct Sound {
     pub heli: HeliEngine,
     /// `machine.aud`'s `[helicopterWreck]` (V114).
     pub heli_wreck: MachineWreck,
+    /// `carengine.aud`'s cars (S247), by profile ([`CarEngine::name`]).
+    pub cars: Vec<CarEngine>,
     /// `machine.aud`'s `[biplaneWreck]` (P164).
     pub plane_wreck: MachineWreck,
     /// `machine.aud`'s `[biplaneTireTouchdown]` (P146).
@@ -3473,6 +3682,7 @@ impl Sound {
             plane: LoopEngine::default(),
             heli: HeliEngine::default(),
             heli_wreck: MachineWreck::default(),
+            cars: Vec::new(),
             plane_wreck: MachineWreck::default(),
             plane_touchdown: MachineTouchdown::default(),
             shootoff: Shootoff::default(),
@@ -3531,6 +3741,21 @@ impl Sound {
                 s.emitters = Some(now);
                 picks
             });
+            // A car (S247): its keyed loops on the drivetrain's sound pitch and the gas, and nothing else
+            // of the seat's.
+            if let Some(car) = &f.car {
+                s.engine.silence(m);
+                s.edge.stop_rumble(m);
+                s.drive_on.stop(m);
+                s.plane.silence(m);
+                s.heli.silence(m);
+                match self.cars.iter().find(|e| e.name.eq_ignore_ascii_case(car.profile)) {
+                    Some(e) => s.car.update(m, e, car, dt),
+                    None => s.car.silence(m),
+                }
+                continue;
+            }
+            s.car.silence(m);
             // The Kiowa (V114): its one loop on the filtered collective, stopped while wrecked, and
             // its wreck clank on the plane's emitter with the helicopter's list. It has no touchdown.
             if let Some(heli) = &f.heli {
@@ -3692,6 +3917,7 @@ impl Sound {
             s.engine.silence(&mut m);
             s.plane.silence(&mut m);
             s.heli.silence(&mut m);
+            s.car.silence(&mut m);
             for id in s.clank.voice().into_iter().chain(s.bike_clank.voice()) {
                 m.stop(id);
             }
@@ -3718,6 +3944,7 @@ impl Sound {
             s.engine = Engine::new(s.dice.below(u32::MAX) as u64);
             s.plane = PlaneNote::default();
             s.heli = HeliNote::default();
+            s.car = CarNote::default();
             s.shots.clear();
             s.held = false;
             s.clank.hushed();
@@ -3814,6 +4041,13 @@ impl Reading<'_> {
         let cars = self.text(res, "aud\\carengine.aud");
         let lib = &mut *self.lib;
         LoopEngine::read(&cars, "biplane", &mut |n| lib.clip(n))
+    }
+
+    /// The cars' engine voices (S247): `carengine.aud`'s `[buggy]`, `[baja]` and `[monstertruck]`.
+    pub fn cars(&mut self, res: &str) -> Vec<CarEngine> {
+        let text = self.text(res, "aud\\carengine.aud");
+        let lib = &mut *self.lib;
+        CAR_PROFILES.iter().map(|n| CarEngine::read(&text, n, &mut |c| lib.clip(c))).collect()
     }
 
     /// The plane's wreck clank (P164): `machine.aud`'s `[biplaneWreck]` in the machines' archive.
@@ -4319,6 +4553,7 @@ impl Sound {
         sound.plane_wreck = read.plane_wreck(machines);
         sound.heli = read.helicopter(machines);
         sound.heli_wreck = read.helicopter_wreck(machines);
+        sound.cars = read.cars(machines);
         sound.plane_touchdown = read.plane_touchdown(machines);
         sound.world = read.world(track_res, events_res.unwrap_or(track_res), track);
         sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));
