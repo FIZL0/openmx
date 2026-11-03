@@ -517,6 +517,24 @@ fn the_wreck_bikes_rays_strike_the_ball() {
     eprintln!("hit3-2832 without the wreck bike's rays: {:#?}", t.bad);
 }
 
+/// S260a: hit3 with the wreck bike on the props' node (S243's way, [`PropSet::search_among`]): its own
+/// rays on the ball run there, first, as the original's node lists its object ahead of the balls' —
+/// its entries naming the ball, their mirrors at the head of the ball's list. Every tick from 2829 to
+/// 2835 is the original's bit for bit, the wreck bike's rays striking first from 2832.
+#[test]
+fn the_wreck_bikes_rays_strike_the_ball_on_the_node() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let mut struck = Vec::new();
+    for frame in 2829..2836 {
+        let Some(t) = tick(&kit, HIT3, frame, Way::Node) else { return };
+        assert!(t.bad.is_empty(), "hit3-{frame} -> {} on the node: {:#?}", frame + 1, t.bad);
+        if t.entries {
+            struck.push(frame);
+        }
+    }
+    assert!(struck.starts_with(&[2832]), "the wreck bike's rays struck the ball in ticks {struck:?}, not first from 2832");
+}
+
 /// S244: hit5 (research/s244/throw_ball.py from hit3's put state, run on to frame 2848: ball 4 put
 /// 14 ft behind the wreck bike, 2.5 ft up, thrown along its way at 55 ft/s; then research/s244/strike.py)
 /// — ball 4 catches the wreck bike up at some 35 ft/s, far past a hard contact's 10, on 2855 -> 2856:
@@ -736,12 +754,12 @@ fn seats_tick(kit: &Kit, run: Run, frame: u32) -> Option<(Vec<String>, bool)> {
 /// the props' own world, as [`Sim::step`]'s one Sim has it (S243,
 /// `the_wreck_bike_is_in_the_balls_world`), and hit5-2851 to 2857, ball 4's impulse throwing the
 /// wreck bike in the set's step at 2855 — the ball's list in both seats, the ball and the wreck bike
-/// are the original's bit for bit. hit3 is not here: from 2832 it needs the wreck bike's own rays on
-/// the ball, which the node does not run (S244's [`prop_wreck::wreck_rays_on_props`]).
+/// are the original's bit for bit. And hit3-2829 to 2835 (S260a): from 2832 the wreck bike's own rays
+/// strike the ball on the node (S244's [`prop_wreck::wreck_rays_on_props`]).
 #[test]
 fn the_seats_wreck_bikes_are_on_the_node() {
     let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
-    for (run, frames) in [(HIT2, 2828..2831), (HIT5, 2851..2858)] {
+    for (run, frames) in [(HIT2, 2828..2831), (HIT5, 2851..2858), (HIT3, 2829..2836)] {
         let mut struck = Vec::new();
         for frame in frames {
             let Some((bad, s)) = seats_tick(&kit, run, frame) else { return };
@@ -749,6 +767,9 @@ fn the_seats_wreck_bikes_are_on_the_node() {
             if s {
                 struck.push(frame);
             }
+        }
+        if run.name == HIT3.name {
+            continue;
         }
         let first = if run.name == HIT2.name { 2828 } else { 2855 };
         assert!(struck.first() == Some(&first), "{}: the props' rays struck seat 2's wreck bike in ticks {struck:?}", run.name);

@@ -241,6 +241,7 @@ impl PropSet {
         if self.tables.is_none() {
             return (Vec::new(), strikes);
         }
+        let rayed = crate::prop_wreck::wreck_rays_first(self, wrecks);
         self.stamp_filed();
         for k in 0..self.collections.len() {
             self.collections[k].search_wrecked(k, dt, &self.rays[k], field, props, trees, wrecks, &mut strikes);
@@ -250,6 +251,7 @@ impl PropSet {
             let rays = Arc::clone(&set.rays);
             set.collections[c].search_object_wrecked(c, k, dt, &rays[c], field, props, trees, wrecks, &mut strikes);
         });
+        let strikes = crate::prop_wreck::wreck_rays_filed(self, rayed, strikes);
         (props.map(|p| flight_search::movers(&p.props)).unwrap_or_default(), strikes)
     }
 
@@ -280,6 +282,7 @@ impl PropSet {
         if self.tables.is_none() {
             return (out, strikes);
         }
+        let rayed = crate::prop_wreck::wreck_rays_first(self, wrecks);
         self.stamp_filed();
         let mut keys: Vec<Option<[i32; 2]>> = Vec::new();
         // The collections that searched, in order: each puts its listeners on after its search.
@@ -340,6 +343,7 @@ impl PropSet {
             let rays = Arc::clone(&set.rays);
             set.collections[c].search_object_wrecked(c, k, dt, &rays[c], field.as_deref(), props, trees, wrecks, &mut strikes);
         });
+        let strikes = crate::prop_wreck::wreck_rays_filed(self, rayed, strikes);
         (out, strikes)
     }
 

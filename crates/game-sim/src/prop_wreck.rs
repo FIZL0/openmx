@@ -46,8 +46,13 @@
 //! The sweep probes meet neither way: the wreck bike's and a prop's sweep both exclude 0x8 (and
 //! 0x800), which both meshes carry ([`crate::prop_world::sweep_categories`]).
 //!
-//! What is not here: the wreck bike's rays on the props through the node ([`crate::Sim::frame_held_wrecked`]
-//! does not run [`wreck_rays_on_props`]), and the wreck bike's entries put after its scene's, where the
+//! On the node the wreck bike's own rays run too (S260a, [`wreck_rays_first`] and [`wreck_rays_filed`]
+//! in [`PropSet::search_in_among`]): first, as its object is listed ahead of the balls', each struck
+//! prop woken before its search, the mirrors at the head of its list after it; so one Sim
+//! ([`crate::Sim::frame_held_wrecked`]) and the seats' shared props ([`crate::prop_seats`]) both have
+//! them. The hit3 states are the proof.
+//!
+//! What is not here: the wreck bike's entries put after its scene's, where the
 //! original's one narrow pass keeps one contact per ray between them; the rider's ragdoll and the plane
 //! against a prop; a prop's rays on a riding bike's mesh (on another prop's: S242,
 //! [`crate::prop_props`]).
@@ -347,6 +352,12 @@ impl Narrow for OnTheProps<'_> {
 /// entries (kind 0, at most its record's capacity, one per ray), each naming its prop by its place in
 /// [`Strike::struck`] (`first` 0), and each struck prop's mirrors, for [`PropSet::strike`].
 pub fn wreck_rays_on_props(set: &PropSet, bike: &WreckBike, me: usize) -> Strike {
+    wreck_rays_at(set, frame(&bike.record.node), bike.record.capacity, me)
+}
+
+/// [`wreck_rays_on_props`] with the wreck bike's probe standing at `at` (its record's node's rows and
+/// origin) and its record holding at most `capacity`.
+fn wreck_rays_at(set: &PropSet, at: [Vf; 4], capacity: usize, me: usize) -> Strike {
     let posed: Vec<Posed<'_>> = set
         .collections
         .iter()
@@ -364,7 +375,6 @@ pub fn wreck_rays_on_props(set: &PropSet, bike: &WreckBike, me: usize) -> Strike
         return Strike::default();
     }
     let rays = wreck_bike::ray_tree();
-    let at = frame(&bike.record.node);
     let (centre, reach) = flight_search::reach(&rays, &at);
     let mut objects = vec![Collidable {
         class: Class::Object,
@@ -386,7 +396,7 @@ pub fn wreck_rays_on_props(set: &PropSet, bike: &WreckBike, me: usize) -> Strike
         categories: Categories { mode: 1, list: Vec::new() },
         ..Collidable::default()
     }));
-    let ray = ray_probe::Record { listed: true, capacity: bike.record.capacity, one_per_ray: true, ..ray_probe::Record::default() };
+    let ray = ray_probe::Record { listed: true, capacity, one_per_ray: true, ..ray_probe::Record::default() };
     let mut narrow = OnTheProps { rays: &rays, at, posed: &posed, facets: (0..posed.len()).map(|_| None).collect(), ray };
     let found = posed
         .iter()
@@ -404,7 +414,7 @@ pub fn wreck_rays_on_props(set: &PropSet, bike: &WreckBike, me: usize) -> Strike
             out.struck.push((p.collection, p.object, Vec::new()));
             hit.len() - 1
         });
-        let mut entries = Record { capacity: bike.record.capacity, contacts: std::mem::take(&mut out.contacts), ..Record::default() };
+        let mut entries = Record { capacity, contacts: std::mem::take(&mut out.contacts), ..Record::default() };
         contact_search::add(&mut entries, 0, h.from, h.to, h.point, h.normal, NO_SURFACE, Some(index), None);
         out.contacts = entries.contacts;
         let p = &posed[k];
@@ -425,6 +435,31 @@ pub fn strikes(set: &mut PropSet, mesh: &Mesh, bike: &WreckBike, me: usize) -> W
     let strike = wreck_rays_on_props(set, bike, me);
     let pushed = set.strike(&strike);
     joined(strike.contacts, pushed, struck_by_props(set, mesh, bike, me))
+}
+
+/// **The wreck bikes' own rays on the props' node** (S260a), the first half: the original's node lists
+/// the wreck bikes' objects ahead of the props', so each wreck bike searches first. Its rays on the
+/// props' meshes ([`wreck_rays_on_props`], where its hull stands, its record's capacity one a ray),
+/// each struck prop woken as a strike wakes it ([`PropSet::struck`]) before the props search, so a
+/// woken one searches in the same pass. Called by [`PropSet::search_among`] and
+/// [`PropSet::search_in_among`] before their searches; [`wreck_rays_filed`] after.
+pub(crate) fn wreck_rays_first(set: &mut PropSet, wrecks: &[Wreck<'_>]) -> Vec<Strike> {
+    let capacity = wreck_bike::rays().len();
+    let rayed: Vec<Strike> = wrecks.iter().map(|w| wreck_rays_at(set, w.hull.at.0, capacity, w.side)).collect();
+    for (c, o, _) in rayed.iter().flat_map(|s| &s.struck) {
+        set.struck(*c, *o);
+    }
+    rayed
+}
+
+/// The second half of [`wreck_rays_first`], after the props' searches: each wreck bike's mirrors at
+/// the head of the props' lists, ahead of their own searches' entries (the first wreck bike's first,
+/// so put on last), and each `by_props` (what the props' rays struck on it) joined with its own
+/// entries and the bodies they struck, as [`strikes`] joins them.
+pub(crate) fn wreck_rays_filed(set: &mut PropSet, rayed: Vec<Strike>, by_props: Vec<WreckStrike>) -> Vec<WreckStrike> {
+    let mut pushed: Vec<Vec<Pushed>> = rayed.iter().rev().map(|s| set.strike(s)).collect();
+    pushed.reverse();
+    rayed.into_iter().zip(pushed).zip(by_props).map(|((s, pushed), by)| joined(s.contacts, pushed, by)).collect()
 }
 
 /// The wreck bike's strike on the props ([`wreck_rays_on_props`], put on the props by
