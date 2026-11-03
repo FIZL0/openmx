@@ -963,6 +963,10 @@ pub mod atv_search;
 /// wheel clear, rev limiter and peak rates, answered in [`quad::Steps`].
 pub mod atv_moto;
 
+/// The world's spatial database (MD75c1): SLUS-21104's move of an entry's box through its cells, portals,
+/// moving-entry lists and link pool, answered for the quad in [`quad::Steps`].
+pub mod atv_spatial;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground

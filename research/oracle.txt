@@ -6829,6 +6829,47 @@ atv_spatial_move            atv 0x0018d690 = an entry's box moved in its spatial
 atv_spatial_move_in         atv 0x0018ffc0 = atv_spatial_move's body (a0 database handle, a1 entry, ...)
 atv_part_sync               atv 0x00114360 = a collidable brought to its node (vt +0xc8) and its box moved (atv_part_box_move)
 atv_part_box_move           atv 0x00114480 = a collidable's box (vt +0xc4) into its database, if it has one (+0x20)
+# MD75c1 — atv_spatial_move ported (game-sim atv_spatial.rs spatial_move; atv_spatial::Answers answers
+# quad::Call::SpatialMove). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md. Proof:
+# tests/atv_spatial.rs, 12,000 generated databases laid at 0x01f80000 in atv-r-spawn.ee.bin (zero RAM up to
+# 0x01fec000) and the image's own.
+# Record (entry +8): +0 extras (pool links: +0 next, +4 cell, +8 sub-database, +0xc slot), +4 cell, +8
+# sub-database, +0xc slot, +0x10 last centre (lq/sq, all four lanes). Cell (vtable 0x003b55b0): +0x24 links,
+# +0x28 first sub-database (picked by kind bit 0), +0x2c second (bit 1, else none). Portal: +0x30..+0x60
+# corners, +0x70 normal, +0x80..+0xb0 edge normals, +0xc4 plane. The walk skips only the link straight back.
+# Segment test: na = n.a, nb = n.b (mula/madda/madd, n first); fails unless sign(na-d) != sign(nb-d) (xor < 0);
+# t = (d-na)/(nb-na), fails if t < 0 or !(t <= 1); p = a*(1-t) + b*t (xyz, w a's); each edge i: e = c[i+1]-c[i],
+# v = p-c[i], x = opmula(e,v)/opmsub(v,e); fails if n.x's sign bit is set (bltz: -0 fails).
+# Sphere test: s = (c-c0).n (c-c0 first); fails if !(s <= r) or s < -r; then each edge !((c-c[i]).e[i] <= r).
+# Reach: from the record's cell, each link's cell not the home and not gathered already that the sphere
+# touches, then recursively from it; 35 slots on the stack, unchecked. Overlaps: each extra in list order,
+# gathered -> sub-database vt +0x20 with its slot (then +0x28 or +0x2c/+0x24), the gathered entry zeroed, and the
+# kind for new cells is that sub-database's; else vt +0x2c, unlinked, freed. Each remaining gathered cell:
+# sub-database of the carried kind (that sub-database becomes the carried one), vt +0x20 with 0, +0x24 if nonzero,
+# a pool link pushed at the front.
+# List sub-database (vtable 0x003b5510): +8 kind, +0x28 block size, +0x2c block count, +0x30 used in the last,
+# +0x34 blocks, +0x38 free (slot words: entry, or next free | 2). Pick: the slot given, else free, else (last ==
+# size: blocks reallocated to count+1, a block allocated, last 0) blocks[count-1] + last; in: slot == free ->
+# free = *slot & ~3, else last++; then *slot = entry; out: *slot = free | 2, free = slot; move: nothing.
+# Pool (0x0040c460 holds it): +8 links a chunk, +0xc/+0x10 chunk chain first/last (+0 next), +0x14 chunks set
+# aside, +0x18 used in the last, +0x1c stride, +0x20 chunk bytes, +0x24 free chain, +0x28 next link, +0x2c
+# per-link constructor, +0x30 heap (0: atv_heap_alloc), +0x38 chunk header (4). Taking: +0x18 < +8 -> +0x28 (and
+# +0x28 += stride, +0x18++); else the free chain's head; else atv_pool_chunk. Free: pushed only if stride > 4.
+atv_portal_crosses          atv 0x0014d970 = whether a segment passes through a portal (a0 portal, a1/a2 ends, a3 out or 0)
+atv_portal_touches          atv 0x0014dca0 = whether a sphere touches a portal (a0 portal, a1 centre, a2 out or 0, f12 r)
+atv_spatial_reach           atv 0x00190210 = the cells a sphere reaches through portals (a0 count, a1 cells, a2 home, a3 cell)
+atv_spatial_overlaps        atv 0x00190350 = an entry's extra cells brought up to date with those its sphere reaches
+atv_cell_sub_of             atv 0x0018ed50 = a cell's sub-database for a kind (bit 0 +0x28, bit 1 +0x2c)
+atv_list_pick               atv 0x0018d980 = list sub-database vt +0x20 (a slot), jumps to atv_list_pick_body
+atv_list_pick_body          atv 0x0018d990 = the slot given, else the free chain's, else the last block's next
+atv_list_in                 atv 0x0018da70 = list sub-database vt +0x24 (an entry put in a slot)
+atv_list_out                atv 0x0018dac0 = list sub-database vt +0x2c (a slot freed)
+atv_list_move               atv 0x0018dea0 = list sub-database vt +0x28 (does nothing)
+atv_pool_free               atv 0x00105f40 = a link back to its pool's free chain
+atv_pool_chunk              atv 0x00105e70 = a pool's new chunk (one set aside, else atv_pool_heap_chunk), its first link
+atv_pool_heap_chunk         atv 0x00105f70 = a pool chunk off the heap, each link constructed, chained last
+atv_heap_alloc              atv 0x001b7340 = allocate (a0 bytes, a1 file, a2 line)
+atv_heap_realloc            atv 0x001b7470 = reallocate (a0 block or 0, a1 bytes, a2 file, a3 line)
 # MD75d — the spawned quad read as a tests/atv_quad.rs Ride (tests/atv_quad/image.rs read_ride; the check
 # pokes it back at the harness's layout and compares 2,654 words with the image). Where atv-r-spawn.ee.bin keeps
 # the quad 0x015e0690's parts: body 0x0159c7f0, world 0x0159be10, vehicle state 0x01ce6410 (+0x28 = 1), record
