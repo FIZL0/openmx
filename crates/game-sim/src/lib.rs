@@ -942,6 +942,10 @@ pub mod quad;
 /// The ATV's wheels (MD37b): MX vs. ATV's wheel suspension and tire forces on its rigid body.
 pub mod atv_wheel;
 
+/// The ATV's rigid body (MD75): MX vs. ATV's build of the dynamics body the quad rides on, its
+/// integrate and end-of-substep calls.
+pub mod atv_body;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground

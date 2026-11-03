@@ -1610,3 +1610,72 @@ pub fn net_unpack(r: &mut Remote, q: &mut Quad, body: &mut Body, dt: F, m: &mut 
     q.airborne = !q.on_ground;
     m.call(Call::NetPost(dt), q, body);
 }
+
+// --- the physics frame (MD75) ---------------------------------------------------------------------
+
+/// SLUS-21104's physics world as the quad's frame sees it: one rigid body, the quad's three
+/// listeners, no constraints.
+struct Frame<'a, M> {
+    p: &'a Params,
+    q: &'a mut Quad,
+    body: &'a mut crate::atv_body::Body,
+    table: &'a crate::air::AcosTable,
+    m: &'a mut M,
+}
+
+impl<M: Moto> Frame<'_, M> {
+    /// A listener on what it reads of the body, written back after.
+    fn listen(&mut self, f: impl FnOnce(&Params, &mut Quad, &mut Body, &crate::air::AcosTable, &mut M)) {
+        let mut b = self.body.view();
+        f(self.p, self.q, &mut b, self.table, self.m);
+        self.body.set_view(&b);
+    }
+}
+
+impl<M: Moto> crate::biplane::Dynamics for Frame<'_, M> {
+    fn count(&self, list: crate::biplane::List) -> i32 {
+        i32::from(list != crate::biplane::List::Constraints)
+    }
+    fn preforce(&mut self, _: i32, dt: F) {
+        self.listen(|p, q, b, _, m| ground_head(p, q, b, dt, m));
+    }
+    fn force(&mut self, _: i32, h: F) {
+        self.listen(|p, q, b, _, m| ground_step(p, q, b, h, m));
+    }
+    fn enabled(&self, _: i32) -> bool {
+        self.body.enabled
+    }
+    fn integrate(&mut self, _: i32, h: F) {
+        self.body.integrate(h);
+    }
+    fn end_substep(&mut self, _: i32) {
+        self.body.end_substep();
+    }
+    fn constrain(&mut self, _: i32, _: bool) {}
+    fn post(&mut self, _: i32, dt: F) {
+        self.listen(|_, q, b, table, m| air_state(q, b, dt, table, m));
+    }
+}
+
+/// **The quad's physics frame**: SLUS-21104's world step over the quad alone. The world is
+/// MX Unleashed's ([`crate::biplane::World::step`]; the game's has 1 iteration at 115 a second, so
+/// four substeps at 30 frames a second): [`ground_head`] once with the frame's `dt`, then each
+/// substep [`ground_step`], the body's [`crate::atv_body::Body::integrate`] and
+/// [`crate::atv_body::Body::end_substep`] (while the body is enabled); then [`air_state`] with the
+/// frame's `dt`.
+///
+/// In the game the world's lists hold the other riders' listeners too (the second quad's PreProcess
+/// and four more), run between the quad's own; they are not part of this. SLUS-21104's world hands
+/// the constraints the substep's `h` as well, which MX Unleashed's does not: the quad's world has
+/// none.
+pub fn frame(
+    world: &crate::biplane::World,
+    p: &Params,
+    q: &mut Quad,
+    body: &mut crate::atv_body::Body,
+    dt: F,
+    table: &crate::air::AcosTable,
+    m: &mut impl Moto,
+) {
+    world.step(dt, &mut Frame { p, q, body, table, m });
+}

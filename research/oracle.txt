@@ -6534,6 +6534,33 @@ atv_node_rotate             atv 0x00195230 = a direction out of a scene node's f
 atv_node_unplace            atv 0x001953c0 = a world point into a scene node's frame (a0 out, a1 node, a2 in; updates the node first)
 atv_wheel_hinge_moment      atv 0x004a2b90 = the hinge's moment of a force about the wheel's mount (a0 wheel, a1 force, a2 point, f12 scale)
 atv_wheel_steer_torque_add  atv 0x004a2bf0 = a world moment onto the wheel's steer torque along its hinge axis (a0 wheel, a1 moment, f12 scale)
+# MD75 — the quad's rigid body and physics frame (atv_body.rs, quad::frame; tests/atv_quad.rs runs the body's
+# integrate + end of substep over 10,000 bodies and the world step over a world of the quad alone over 3,000
+# states, every Moto call hooked). Journal: research/journal/2026-11-02-md75-atv-frame.
+# Body (vtable 0x003cd200; +0x3c reset, +0x40 end of substep, +0x54 integrate): +0 enabled, +4/+8/+c linear
+# axes (0 = locked), +0x18 mass, +0x1c inv mass, +0x30 damping, +0x60 last position, +0x70 position, +0x80
+# velocity, +0x90 last force, +0xa0 force, +0xb0 accel, +0xc0 correction peak, +0xd0 correction, +0xe0 max
+# speed, +0xe4 max accel (FLT_MAX = none), +0x110 vtable, +0x120/124/128 angular axes, +0x140 inv inertia
+# ((0,0,0,1) bitwise = pinned), +0x150 angular damping, +0x170 last quat, +0x190 quat, +0x1b0 moment, +0x1c0
+# last moment, +0x1d0 rates, +0x1e0 angular accel, +0x1f0 twist peak, +0x200 twist, +0x210/214/218 max rates,
+# +0x220 max angular accel. The spawn image's quad body 0x0159c7f0: mass 13.0435, inv inertia (0.0446,
+# 0.0543, 0.0917), max rates (20, 3, 20), both accel limits FLT_MAX.
+# World (MX Unleashed's layout): +0 iterations, +4 rate, lists {count, _, array} at +0x50 bodies, +0x68
+# force (elt vt at elt +8, slot +0xc), +0x80 constraints (elt vt at +0x10, slot +0x18, handed h too),
+# +0x98 preforce, +0xb0 post (elt vt at +0, slot +8). The quad's interfaces: +0x30 PreProcess (vt 0x003ce2dc),
+# +0x34 PostProcess (0x003ce2e8), +0x3c Force (0x003ce304), reached from the force list through the wrapper
+# at quad +0xbc (vt 0x003cd150; +0xc = quad +0x3c).
+atv_world_step              atv 0x00496b70 = the physics world's frame (f12 dt, a0 world): preforce, n = (int)(dt*rate)+1 substeps of force/integrate+end/constraints, post
+atv_world                   atv 0x0065bc0c = the game's physics world (1 iteration, 115/s; bodies: the quad's alone; preforce: the quad, the second ATV and four more)
+atv_body_integrate          atv 0x00496240 = rigid body vt +0x54 (f12 h, a0 body): the linear half, then the quaternion's second-order step and the rates
+atv_body_integrate_linear   atv 0x00495d30 = the linear half (a0 body, f12 h): accel, axis locks, clamps, x += v h + ((a/2) h) h, v = damping v + a h
+atv_body_end_substep        atv 0x0049bde0 = rigid body vt +0x40: correction/twist peaks by magnitude, force/moment remembered, four accumulators cleared
+atv_quat_spin               atv 0x001349c0 = q (x) (w, 0) scaled by (1/2, 1/2, 1/2, -1/2) (a0 out, a1 q, a2 w)
+atv_quat_spin_rate          atv 0x00134e60 = q'' = spin(q, alpha) - q |q'|^2 (a0 out, a1 q, a2 q', a3 alpha; |q'|^2 on the FPU x, y, z, w)
+atv_world_force_wrapper     atv 0x0049bd50 = the force list's wrapper slot: its +0xc listener's vt +8, if set
+atv_quad_pre_process_thunk  atv 0x004bf9e0 = quad +0x30 vt +8: atv_quad_ground_head on quad
+atv_quad_post_process_thunk atv 0x004bf9f0 = quad +0x34 vt +8: atv_quad_air_state on quad
+atv_quad_force_thunk        atv 0x004bfa10 = quad +0x3c vt +8: atv_quad_ground_step on quad
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the

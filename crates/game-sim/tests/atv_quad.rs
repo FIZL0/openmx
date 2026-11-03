@@ -11,6 +11,8 @@
 //! Without the image every test here skips (and says so).
 
 use game_sim::air::AcosTable;
+use game_sim::atv_body;
+use game_sim::biplane::World;
 use game_sim::chassis::{ContactCall, WheelContact};
 use game_sim::phy::Ini;
 use game_sim::quad::{self, Body, Call, Contact, Params, Player, Quad, Race, Surface, Tail, Wheel};
@@ -32,7 +34,7 @@ const RECORD: u32 = 0x01c0_7100;
 const PLAYER: u32 = 0x01c0_7400;
 const REGIONS: [(&str, u32, u32); 10] = [
     ("quad", OBJ, 0x1800),
-    ("body", BODY, 0x200),
+    ("body", BODY, 0x230),
     ("world", WORLD, 0x50),
     ("state", STATE_OBJ, 0x40),
     ("record", RECORD, 0x40),
@@ -2661,5 +2663,361 @@ fn the_quads_net_unpack_is_the_originals() {
             "some down",
         ],
         100,
+    );
+}
+
+// --- MD75: the rigid body and the physics frame ----------------------------------------------------
+
+/// The body's integrate and end-of-substep, as its vtable has them.
+const BODY_INTEGRATE: u32 = 0x0049_6240;
+const BODY_END_SUBSTEP: u32 = 0x0049_bde0;
+/// The world step, and a world of the quad alone laid out for it: its five lists' counts and arrays,
+/// the arrays, and the wrapper the Force list holds (with the image's wrapper vtable), which hands
+/// the substep on to the quad's own Force interface.
+const WORLD_STEP: u32 = 0x0049_6b70;
+const DWORLD: u32 = 0x01c1_0000;
+const WRAP: u32 = 0x01c1_0200;
+const WRAP_VTABLE: u32 = 0x003c_d150;
+/// The quad's three listener interfaces (PreProcess, PostProcess, Force) and their vtables.
+const QUAD_LISTENERS: [(u32, u32); 3] = [(0x30, 0x003c_e2dc), (0x34, 0x003c_e2e8), (0x3c, 0x003c_e304)];
+const GAME_WORLD: World = World { iterations: 1, rate: F(115.0) };
+
+/// The whole body: its word layout (`# MD75`).
+fn put_body(ee: &mut Ee, b: &atv_body::Body) {
+    put_b(ee, BODY, b.enabled);
+    for k in 0..3 {
+        put_b(ee, BODY + 0x4 + 4 * k as u32, b.linear_axes[k]);
+        put_b(ee, BODY + 0x120 + 4 * k as u32, b.angular_axes[k]);
+        put_f(ee, BODY + 0x210 + 4 * k as u32, b.max_rates[k]);
+    }
+    put_f(ee, BODY + 0x1c, b.inv_mass);
+    for (o, v) in [
+        (0x30, b.damping),
+        (0x60, b.last_position),
+        (0x70, b.position),
+        (0x80, b.velocity),
+        (0x90, b.last_force),
+        (0xa0, b.force),
+        (0xb0, b.accel),
+        (0xc0, b.correction_peak),
+        (0xd0, b.correction),
+        (0x140, b.inv_inertia),
+        (0x150, b.ang_damping),
+        (0x170, b.last_quat),
+        (0x190, b.quat),
+        (0x1b0, b.moment),
+        (0x1c0, b.last_moment),
+        (0x1d0, b.rates),
+        (0x1e0, b.ang_accel),
+        (0x1f0, b.twist_peak),
+        (0x200, b.twist),
+    ] {
+        put_v(ee, BODY + o, v);
+    }
+    put_f(ee, BODY + 0xe0, b.max_speed);
+    put_f(ee, BODY + 0xe4, b.max_accel);
+    put_f(ee, BODY + 0x220, b.max_ang_accel);
+    ee.set_u32(BODY + 0x110, BODY_VTABLE);
+}
+
+const NO_LIMIT: F = F(f32::MAX);
+const PIN: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
+
+impl Gen {
+    fn body(&mut self) -> atv_body::Body {
+        let limit = |g: &mut Gen, lo: f32, hi: f32| if g.b() { NO_LIMIT } else { g.f(lo, hi) };
+        let peak = |g: &mut Gen, v: Vf| {
+            let mut p = g.vec(-10.0, 10.0);
+            // The same magnitude either way now and then: the peak is kept.
+            for k in 0..3 {
+                if g.one_in(8) {
+                    p[k] = if g.b() { v[k] } else { (-F(v[k])).0 };
+                }
+            }
+            p
+        };
+        let correction = self.vec(-10.0, 10.0);
+        let twist = self.vec(-10.0, 10.0);
+        atv_body::Body {
+            enabled: !self.one_in(10),
+            linear_axes: [!self.one_in(6), !self.one_in(6), !self.one_in(6)],
+            inv_mass: match self.bits() % 40 {
+                0..=3 => F::ZERO,
+                4 => F(-0.0),
+                _ => self.f(0.01, 0.2),
+            },
+            damping: if self.b() { Vf::splat(1.0) } else { self.vec(0.9, 1.0) },
+            last_position: self.vec(-1000.0, 1000.0),
+            position: self.vec(-1000.0, 1000.0),
+            velocity: self.vec(-80.0, 80.0),
+            last_force: self.vec(-2000.0, 2000.0),
+            force: self.vec(-2000.0, 2000.0),
+            accel: self.vec(-100.0, 100.0),
+            correction_peak: peak(self, correction),
+            correction,
+            max_speed: limit(self, 20.0, 120.0),
+            max_accel: limit(self, 50.0, 300.0),
+            angular_axes: [!self.one_in(6), !self.one_in(6), !self.one_in(6)],
+            inv_inertia: match self.bits() % 40 {
+                0..=3 => PIN,
+                4 => Vf::new(-0.0, 0.0, 0.0, 1.0),
+                _ => Vf::new(self.f(0.01, 0.2).0, self.f(0.01, 0.2).0, self.f(0.01, 0.2).0, self.near(1.0, 0.0, 2.0).0),
+            },
+            ang_damping: if self.b() { Vf::splat(1.0) } else { self.vec(0.9, 1.0) },
+            last_quat: self.quaternion(),
+            quat: self.quaternion(),
+            moment: self.vec(-500.0, 500.0),
+            last_moment: self.vec(-500.0, 500.0),
+            rates: self.vec(-25.0, 25.0),
+            ang_accel: self.vec(-50.0, 50.0),
+            twist_peak: peak(self, twist),
+            twist,
+            max_rates: [self.f(1.0, 20.0), self.f(1.0, 20.0), self.f(1.0, 20.0)],
+            max_ang_accel: limit(self, 5.0, 60.0),
+        }
+    }
+}
+
+/// Which of the body step's paths `b` goes down, by the port's own sums (the comparison proves them).
+#[allow(clippy::float_arithmetic)]
+fn body_paths(b: &atv_body::Body, h: F) -> Vec<&'static str> {
+    let mut paths = Vec::new();
+    let len = |v: Vf| (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    if b.inv_mass == 0.0 {
+        paths.push("pinned");
+    } else {
+        if b.linear_axes.contains(&false) {
+            paths.push("linear axis locked");
+        }
+        let mut a = b.force.mul(Vf::splat(b.inv_mass.0));
+        (0..3).filter(|&k| !b.linear_axes[k]).for_each(|k| a[k] = 0.0);
+        if b.max_accel != NO_LIMIT && len(a) > b.max_accel.0 {
+            paths.push("accel clamped");
+        }
+        let (mut t, mut u) = (*b, *b);
+        t.advance(h);
+        u.max_speed = NO_LIMIT;
+        u.advance(h);
+        if u.velocity != t.velocity {
+            paths.push("speed clamped");
+        }
+    }
+    if b.inv_inertia.to_bits() == PIN.to_bits() {
+        paths.push("angular pinned");
+        return paths;
+    }
+    if b.inv_inertia.x().to_bits() != 0 && b.inv_inertia.x() == 0.0 {
+        paths.push("angular -0 not pinned");
+    }
+    if b.angular_axes.contains(&false) {
+        paths.push("angular axis locked");
+    }
+    let mut alpha = b.inv_inertia.mul(b.moment);
+    (0..3).filter(|&k| !b.angular_axes[k]).for_each(|k| alpha[k] = 0.0);
+    if b.max_ang_accel != NO_LIMIT && len(alpha) > b.max_ang_accel.0 {
+        paths.push("angular accel clamped");
+    }
+    let mut t = *b;
+    t.integrate(h);
+    for k in 0..3 {
+        if t.rates[k] == b.max_rates[k].0 {
+            paths.push("rate held at the top");
+        } else if t.rates[k] == -b.max_rates[k].0 {
+            paths.push("rate held at the bottom");
+        }
+    }
+    paths
+}
+
+#[test]
+fn the_quads_rigid_body_step_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    assert_eq!(ee.u32_at(BODY_VTABLE + 0x54), BODY_INTEGRATE, "the body's integrate slot");
+    assert_eq!(ee.u32_at(BODY_VTABLE + 0x40), BODY_END_SUBSTEP, "the body's end-of-substep slot");
+    let mut g = Gen(0x0075_0001);
+    let mut t = BTreeMap::new();
+    let snap_body = |ee: &Ee| (0..0x230).step_by(4).map(|o| ee.u32_at(BODY + o)).collect::<Vec<u32>>();
+    for k in 0..10_000 {
+        let b = g.body();
+        let h = if g.one_in(4) { F(1.0 / 120.0) } else { g.f(0.002, 0.03) };
+        // What the two calls do not read: arbitrary, and the same both times.
+        let filler: Vec<u32> = (0..0x230 / 4).map(|_| g.bits()).collect();
+        let lay = |ee: &mut Ee, b: &atv_body::Body| {
+            for (i, &w) in filler.iter().enumerate() {
+                ee.set_u32(BODY + 4 * i as u32, w);
+            }
+            put_body(ee, b);
+        };
+        for p in body_paths(&b, h) {
+            tally(&mut t, p);
+        }
+        lay(&mut ee, &b);
+        let mark = ee.written_ranges().len();
+        ee.call(BODY_INTEGRATE, &[u64::from(BODY)], &[h.0], 20_000);
+        ee.call(BODY_END_SUBSTEP, &[u64::from(BODY)], &[], 20_000);
+        for (a, e) in ee.written_ranges().into_iter().skip(mark) {
+            let inside = (a >= BODY && e <= BODY + 0x230) || (a >= ee.stack - 0x2000 && e <= ee.stack + 0x40);
+            assert!(inside, "state {k}: the original wrote {a:#010x}..{e:#010x}");
+        }
+        let was = snap_body(&ee);
+        let mut port = b;
+        port.integrate(h);
+        port.end_substep();
+        lay(&mut ee, &port);
+        let now = snap_body(&ee);
+        if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
+            panic!(
+                "state {k}: body + {:#x} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\nh {h:?}\n{b:#?}",
+                4 * i,
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+    }
+    each_path_seen(
+        &t,
+        &[
+            "pinned",
+            "linear axis locked",
+            "accel clamped",
+            "speed clamped",
+            "angular pinned",
+            "angular -0 not pinned",
+            "angular axis locked",
+            "angular accel clamped",
+            "rate held at the top",
+            "rate held at the bottom",
+        ],
+        30,
+    );
+}
+
+/// The world of the quad alone, as [`GAME_WORLD`]: one iteration at 115 a second, the body, the
+/// quad's PreProcess, Force and PostProcess, no constraints.
+fn lay_out_world(ee: &mut Ee) {
+    ee.set_u32(DWORLD, 1);
+    ee.set_f32(DWORLD + 4, 115.0);
+    let lists = [(0x50, Some(BODY)), (0x68, Some(WRAP)), (0x80, None), (0x98, Some(OBJ + 0x30)), (0xb0, Some(OBJ + 0x34))];
+    for (i, (at, elt)) in lists.into_iter().enumerate() {
+        let array = DWORLD + 0x100 + 0x10 * i as u32;
+        ee.set_u32(DWORLD + at, u32::from(elt.is_some()));
+        ee.set_u32(DWORLD + at + 8, array);
+        ee.set_u32(array, elt.unwrap_or(0));
+    }
+    ee.set_u32(WRAP + 8, WRAP_VTABLE);
+    ee.set_u32(WRAP + 0xc, OBJ + 0x3c);
+}
+
+/// The quad's listener interfaces, in the quad (whose region every state empties).
+fn put_listeners(ee: &mut Ee) {
+    for (o, vt) in QUAD_LISTENERS {
+        ee.set_u32(OBJ + o, vt);
+    }
+}
+
+#[test]
+fn the_quads_physics_frame_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    // The world the game runs the quad in is the one laid out here, but for the other riders.
+    assert_eq!((ee.u32_at(0x0065_bc0c), ee.f32_at(0x0065_bc10)), (1, 115.0), "the game world's iterations and rate");
+    assert_eq!(ee.u32_at(0x015e_0690 + 0xbc), 0x0159_bee0, "the quad's Force wrapper");
+    assert_eq!((ee.u32_at(0x0159_bee8), ee.u32_at(0x0159_beec)), (WRAP_VTABLE, 0x015e_0690 + 0x3c), "the wrapper's vtable and listener");
+    for (o, vt) in QUAD_LISTENERS {
+        assert_eq!(ee.u32_at(0x015e_0690 + o), vt, "the quad's listener at +{o:#x}");
+    }
+    let table = AcosTable::build();
+    let log = hook_calls(
+        &mut ee,
+        &[
+            (INPUT_LIMITER, |ee| on_quad(ee, Call::InputLimiter)),
+            (AUTO_SHIFT, |ee| on_quad(ee, Call::AutoShift { dt: F(ee.f(12)), inv_radius: F(ee.f(13)) })),
+            (CLUTCH, |ee| on_quad(ee, Call::Clutch(F(ee.f(12))))),
+            (HEAD_TAIL, |ee| on_quad(ee, Call::HeadTail)),
+            (GRAVITY, |ee| on_quad(ee, Call::Gravity)),
+            (PRELOAD, |ee| on_quad(ee, Call::Preload(F(ee.f(12))))),
+            (BACKFLIP, |ee| on_quad(ee, Call::Backflip(F(ee.f(12))))),
+            (SPIN_AIR, |ee| on_quad(ee, Call::SpinAir(F(ee.f(12))))),
+            (ENGINE_UPDATE, |ee| {
+                assert_eq!(ee.r(4) as u32, ENGINE, "the engine update's engine");
+                Call::EngineUpdate(F(ee.f(12)))
+            }),
+            (AIR_DRAG, |ee| on_quad(ee, Call::AirDrag(F(ee.f(12))))),
+            (AIRBORNE_CONTROL, |ee| on_quad(ee, Call::AirborneControl(F(ee.f(12))))),
+            (WHEEL_CLEAR, |ee| Call::WheelClear(wheel_of(ee))),
+            (WHEEL_CONTACTS, |ee| on_quad(ee, Call::Contacts)),
+            (SUSPENSION, |ee| Call::Suspension(wheel_of(ee), F(ee.f(12)))),
+            (TIRE_FORCES, |ee| Call::TireForces(wheel_of(ee), F(ee.f(12)))),
+            (WHEEL_INTEGRATE, |ee| Call::WheelIntegrate(wheel_of(ee), F(ee.f(12)))),
+            (REV_LIMIT, |ee| {
+                assert_eq!(ee.r(4) as u32, ENGINE, "the rev limiter's engine");
+                Call::RevLimit
+            }),
+            (PEAK_RATES, |ee| on_quad(ee, Call::PeakRates)),
+            (VEHICLE_POST, |ee| on_quad(ee, Call::VehiclePost(F(ee.f(12))))),
+            (NODE_POSITION, |_| Call::NodePosition),
+        ],
+    );
+    let write = ee.hooks.remove(&NODE_POSITION).unwrap();
+    let mut write = Some(write);
+    ee.hooks.insert(
+        NODE_POSITION,
+        Box::new(move |ee| {
+            write.as_mut().unwrap()(ee);
+            put_v(ee, OBJ + 0xbd0, NODE_SAYS);
+        }),
+    );
+    lay_out_world(&mut ee);
+    let mut g = Gen(0x0075_0002);
+    let mut t = BTreeMap::new();
+    for k in 0..3_000 {
+        let mut s = g.state();
+        if g.one_in(3) {
+            s.dt = F(1.0 / 30.0);
+        }
+        let mut b = g.body();
+        b.set_view(&s.body);
+        let (n, _) = GAME_WORLD.substeps(s.dt);
+        tally(&mut t, ["1 substep", "2 substeps", "3 substeps", "4 substeps", "5 substeps"][(n - 1).clamp(0, 4) as usize]);
+        tally(&mut t, match (s.q.active, b.enabled) {
+            (false, _) => "quad off",
+            (true, false) => "body off",
+            (true, true) => "both on",
+        });
+        let lay = |ee: &mut Ee, s: &State, b: &atv_body::Body| {
+            reset(ee);
+            poke(ee, s);
+            put_body(ee, b);
+            put_listeners(ee);
+        };
+        log.borrow_mut().clear();
+        lay(&mut ee, &s, &b);
+        ee.call(WORLD_STEP, &[u64::from(DWORLD)], &[s.dt.0], 2_000_000);
+        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
+        let was = snap(&ee);
+        let mut ts = s.clone();
+        let mut tb = b;
+        let mut post = Post(Vec::new());
+        quad::frame(&GAME_WORLD, &ts.p, &mut ts.q, &mut tb, ts.dt, &table, &mut post);
+        ts.body = tb.view();
+        lay(&mut ee, &ts, &tb);
+        let now = snap(&ee);
+        if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
+            panic!(
+                "state {k}: {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}\n{b:#?}",
+                where_is(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+        assert_eq!(*log.borrow(), post.0, "state {k}: the calls\n{s:#?}");
+    }
+    each_path_seen(
+        &t,
+        &["1 substep", "2 substeps", "3 substeps", "4 substeps", "5 substeps", "quad off", "body off", "both on"],
+        30,
     );
 }
