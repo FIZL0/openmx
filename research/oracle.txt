@@ -7700,6 +7700,28 @@ kiowa_rotor_altitudes boot 0x003900f0 (rotor, MinAltitude f12, MaxAltitude f13) 
 kiowa_wing_geometry boot 0x0038f960 (aero, chord, span, area, ratio, aoa in f12..f16) -> +0x34..+0x44;
 #                                 a zero chord with a positive ratio becomes span / ratio
 kiowa_turbulence_set boot 0x0038f9d0 (aero, magnitude f12, time scale f13, offset a1, wind a2)
+# C21 — the thrown blades against the Kiowa's hull (research/journal/2026-11-03-c21-kiowa-blades-on-the-hull).
+# Ported as game_sim::kiowa::{Blades::search_on, Collision::file_mirrors, Surroundings::among} and
+# prop_world::Collection::{search_among_hulled, lists}; proved by tests/kiowa_capture.rs on C17's
+# strike capture (every row 1299..1448). Save states c21-5/6/7 (counters 1297/1298/1299 = capture
+# rows 1298/1299/1300) off the c17 strike tape, s3 only.
+# A collision record (contact_search::Record): +0x40 touching, +0x44 touching another, +0x48 on the
+#   ground, +0x4c on an object; +0x100 the count, +0x104 the capacity, +0x108 the entries' array
+#   (0x80 each: +0x0 kind, +0x10 from, +0x20 on_body, +0x30 normal, +0x40 point, +0x70 surface, +0x74
+#   the other side's record, +0x78 the mover); +0x1f0 ray probe, +0x1f4 sweep, +0x1f8 collidable
+#   (category +0x84), +0x1fc what the rays last struck. watch/c19-kiowa-strike.toml had +0x100/+0x108
+#   the wrong way round (fixed).
+# Heli 0x007ccae0: *(+0x170) the record (0x01490870 in c21-6), its collidable 0x0148f830 (category
+#   0x202058); the four blade wrappers at heli +0xe48.. (0x007ce1c0, 0x0061e960, 0x01448c50,
+#   0x0144a4a0), each body *(+0x110), record *(+0x120) (blade 0's 0x0061e320), collidable category
+#   0x18. All five bodies in the dynamics world 0x007d0678, the heli first on every list.
+# c21-6 (row 1299, the push): heli record flags [1,1,0,1], 1 entry, kind 1, +0x74 = blade 0's record;
+#   blade 0's record 1 entry, kind 0, +0x74 = the heli's record, +0x78 0, +0x1fc = the heli's
+#   collidable: from (0.03222, 0.005365, 8.977), on_body (-0.8288, -0.4601, 18.6), normal
+#   (-0.06273, 0.998, -0.009454) (negated on the mirror), point (3039, 143.9, 4053). c21-7 (row
+#   1300): heli 2 entries, both kind 1, blade 2's two. The heli's own rays struck no blade; no
+#   blade-blade entry in either. The hull's mesh is machine.res helicopter\col\kiowaf.col (900
+#   bytes, beside kiowam.col; liveries kiowa2f, kiowa_ssf, kiowa2_ssf not checked).
 # S149 — the car machines' .phy loader (MXCar.cpp), research/journal/*-s149-car-machines. All boot.
 # Ported as game_sim::car::Car::read; tests/car_phy.rs proves it word for word against the monster
 # truck parked in first_recording's RAM image (object 0x00e1e210, vtable word at +0x48 = 0x0045ed50,

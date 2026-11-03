@@ -1006,6 +1006,9 @@ const PROBE: &str = "capture/c19/probe.csv";
 const STRUCK_ON: u32 = 1298;
 /// The row the wrecked helicopter is put back on: its clock past `WreckTime`.
 const PUT_BACK_ON: u32 = 1449;
+/// The rows the thrown blades push the hull on (C21): their rays on `kiowaf.col` the only contacts on
+/// the hull's record (its mirrors), the original's body read after each of these frames.
+const PUSHED: std::ops::RangeInclusive<u32> = 1299..=1302;
 
 /// More of the helicopter's fields the wreck reads (research/oracle.txt, S220a1).
 mod wreck_at {
@@ -1043,6 +1046,12 @@ struct Struck<'a> {
     put_back: Option<F>,
     /// The rotor probe's first hit, the frame's strike searched it.
     first_hit: Option<game_sim::contact_search::Hit>,
+    /// What the blades' springs read and their contacts' movers, for their share of the world's step.
+    tables: &'a game_sim::ragdoll::Tables,
+    blade_movers: &'a [game_sim::contact::Mover],
+    /// The body as each substep's response found it and left it, in order: where a row the capture
+    /// read inside the next frame's step stands ([`compare_torn`]).
+    substeps: Vec<Body>,
 }
 
 impl Surroundings for Struck<'_> {
@@ -1050,7 +1059,16 @@ impl Surroundings for Struck<'_> {
         self.ground.post(body);
     }
     fn resolve(&mut self, body: &mut Body) {
-        self.ground.resolve(body);
+        let ground = &mut self.ground;
+        self.substeps.push(*body);
+        self.wreckage.blades.with_others(|others| ground.resolve_among(body, &mut *others));
+        self.substeps.push(*body);
+    }
+    fn among(&mut self) -> Option<game_sim::kiowa::Among<'_>> {
+        Some(self.wreckage.blades.among(self.tables, self.blade_movers, &mut *self.ground.collision))
+    }
+    fn among_listed(&self, list: game_sim::biplane::List) -> i32 {
+        self.wreckage.blades.set.listed(list)
     }
     fn touching(&self) -> bool {
         self.ground.touching()
@@ -1076,16 +1094,78 @@ impl Surroundings for Struck<'_> {
     }
 }
 
-/// The put-back's row: the original stands the body at the place and steps it once more that frame
-/// (the slide's contacts push it), the port leaves it standing. Where it stands, then, to within that
-/// step: a hundredth of a foot, and the quaternion's lanes to 2e-4.
-fn the_put_back(cap: &Capture, row: usize, body: &Body) {
-    let frame = cap.u32(row, "frame_counter");
+/// **A row of the wrecked fall** (C21): every word as [`compare`] has it, but the body may be the one
+/// the capture read inside the next frame's world step, the original's frame having gone on by the
+/// time PINE read the row: the port's body after the row's frame, or as one of the next frame's
+/// substep responses found it or left it (`next`, in order), whichever equals the row's every
+/// quadword bit for bit. A row read part-way through a response (between two contacts) has its
+/// four accumulators — the force and the moment, and their last — part-summed: when no candidate
+/// equals the row whole, the first whose every other quadword does is taken, and those four are
+/// not compared. With none, the row is compared after its frame (and fails).
+///
+/// A row read after its frame's step but before or part-way through its post (from 1474) has the
+/// body after the frame and the measure's figures as [`Measure::flight`] was leaving them: its first
+/// few groups, in the order it writes them ([`measure_cut`]), the frame's, the rest still `before`'s
+/// (the measure the frame started with). The cut is the most of them that equals the row; the body
+/// must then be the one after the frame.
+///
+/// Gives where the row was read — `0` after its frame, `1 + i` at `next[i]` — whether its
+/// accumulators were left out, and how many of the measure's groups were written.
+fn compare_torn(cap: &Capture, row: usize, kiowa: &Kiowa, ride: &Ride, before: &Measure, filter: Filter, next: &[Body]) -> (usize, bool, usize) {
+    const ACCUMULATORS: [u32; 4] = [0x80, 0x90, 0x190, 0x1a0];
     let want = body_of(&cap.block(row, "body_raw", 0));
-    let off = |a: Vf, b: Vf| (0..4).map(|k| (a.0[k] - b.0[k]).abs()).fold(0.0f32, f32::max);
-    let (at, turn) = (off(body.position, want.position), off(body.quat, want.quat));
-    assert!(at < 0.01, "tick {frame}: put back {at} ft from the original's place");
-    assert!(turn < 2e-4, "tick {frame}: put back turned {turn} off the original's");
+    let equal = |b: &Body, all: bool| {
+        QUADS.iter().zip(body_quads(b).into_iter().zip(body_quads(&want))).all(|((_, at, lanes), (got, want))| {
+            (!all && ACCUMULATORS.contains(at)) || (0..*lanes).all(|k| got.0[k].to_bits() == want.0[k].to_bits())
+        })
+    };
+    let candidates: Vec<Body> = std::iter::once(ride.body).chain(next.iter().copied()).collect();
+    let (phase, part) = match candidates.iter().position(|b| equal(b, true)) {
+        Some(i) => (i, false),
+        None => match candidates.iter().position(|b| equal(b, false)) {
+            Some(i) => (i, true),
+            None => (0, false),
+        },
+    };
+    let wb = cap.block(row, "heli_b", at::BLOCK_B);
+    let measured = |m: &Measure| measure_words(m).into_iter().zip(captured_measure(&wb)).all(|((_, got), want)| got.to_bits() == want.to_bits());
+    let cut = (0..=MEASURE_GROUPS).rev().find(|&cut| measured(&measure_cut(&ride.measure, before, cut))).unwrap_or(MEASURE_GROUPS);
+    let frame = cap.u32(row, "frame_counter");
+    assert!(cut == MEASURE_GROUPS || (phase, part) == (0, false), "tick {frame}: a row read in its post has its body other than after the frame");
+    let mut ride = *ride;
+    ride.body = candidates[phase];
+    ride.measure = measure_cut(&ride.measure, before, cut);
+    if part {
+        let b = &mut ride.body;
+        (b.last_force, b.force, b.moment, b.last_moment) = (want.last_force, want.force, want.moment, want.last_moment);
+    }
+    compare(cap, row, kiowa, &ride, filter);
+    (phase, part, cut)
+}
+
+/// [`Measure::flight`]'s groups, in the order it writes them: the speed, the body velocity, the world
+/// rates, alpha, beta, the Euler angles one lane at a time as [`game_sim::math::quat_to_euler`] works
+/// them out (`y`, `z`, `x`: 1474 has `y` and `z` written and not `x`), the matrix with its forward
+/// and up rows.
+const MEASURE_GROUPS: usize = 9;
+
+/// The measure part-way through [`Measure::flight`]: `after`'s first `cut` groups
+/// ([`MEASURE_GROUPS`]), `before`'s rest.
+fn measure_cut(after: &Measure, before: &Measure, cut: usize) -> Measure {
+    let mut m = *before;
+    let groups: [&dyn Fn(&mut Measure); MEASURE_GROUPS] = [
+        &|m| m.speed = after.speed,
+        &|m| m.velocity = after.velocity,
+        &|m| m.world_rates = after.world_rates,
+        &|m| m.alpha = after.alpha,
+        &|m| m.beta = after.beta,
+        &|m| m.euler.0[1] = after.euler.0[1],
+        &|m| m.euler.0[2] = after.euler.0[2],
+        &|m| m.euler.0[0] = after.euler.0[0],
+        &|m| (m.matrix, m.forward, m.up) = (after.matrix, after.forward, after.up),
+    ];
+    groups.iter().take(cut).for_each(|g| g(&mut m));
+    m
 }
 
 /// What the original's rotor probe recorded on the strike (`rotor probe + 0x6c`), against the port's
@@ -1119,22 +1199,30 @@ fn the_probe_record(probe: &Capture, frame: u32, first: Option<game_sim::contact
 ///   `kiowa.psg`'s nodes stand them. Their twelve `rand()`s are the twelve the original's generator
 ///   moved on that row. The port's generator is seeded from the row before's `rng_state` and must
 ///   end on the row's;
-/// * the wrecked fall, with the thrown blades in the helicopter's world, as the shell runs them. It
-///   is not compared: from 1299 the original's helicopter takes a sideways push the port's does not
-///   (its touching flag off, so likely the thrown blades against the hull; see the C19 journal). What
-///   is checked: the crash test asks nothing more while the clock runs;
-/// * on [`PUT_BACK_ON`], the put-back by the clock ([`game_sim::kiowa::Wreckage::put_back`]). The
-///   original steps the body once more after it, so only where it stands is compared
-///   ([`the_put_back`]).
+/// * the wrecked fall, with the thrown blades in the helicopter's world, as the shell runs them, every
+///   row up to the put-back bit for bit (C21). On [`PUSHED`] the blades' rays meet the hull's
+///   `kiowaf.col` ([`game_sim::kiowa::Blades::search_on`]) and the hull's record holds only their
+///   mirrors; the blades step after the helicopter in its world's step ([`Surroundings::among`]),
+///   each blade's contact on the hull naming the helicopter and each mirror its blade. From 1373 the
+///   capture reads many rows inside the next frame's step: those are compared against the port's
+///   substeps ([`compare_torn`]). The crash test asks nothing more while the clock runs;
+/// * on [`PUT_BACK_ON`], the put-back by the clock ([`game_sim::kiowa::Wreckage::put_back`]), then
+///   the frame stepped once more on the placed body, as the original does, flying the pad that
+///   frame's input step read (C21). Every row from it on is compared too; from 1474 many were read
+///   inside their frame's post, part-way through the measure ([`compare_torn`]).
 ///
 /// Off the strike row the port's frame draws nothing (the original's generator moves on other
 /// rows: see the C19 journal entry).
 #[test]
 fn a_captured_rotor_strike_replays_bit_exact() {
-    use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, Blades, KIOWA_MODEL, RotorTree, WRECK_BLADE_PHY, Wreckage, rotor_in_ground};
+    use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, Blades, KIOWA_HULL, KIOWA_MODEL, RotorTree, WRECK_BLADE_PHY, Wreckage, rotor_in_ground};
     let (Some(cap_path), Some(image)) = (ctx(STRIKE), ctx(STATE)) else { return };
     let Some(mut disc) = the_disc() else { return };
-    let Some([blade_phy, blade_psg, blade_rays, blade_shape, kiowa_psg]) = machine_files([WRECK_BLADE_PHY, BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, KIOWA_MODEL]) else { return };
+    let Some([blade_phy, blade_psg, blade_rays, blade_shape, kiowa_psg, hull]) =
+        machine_files([WRECK_BLADE_PHY, BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, KIOWA_MODEL, KIOWA_HULL])
+    else {
+        return;
+    };
     let cap = Capture::load(&cap_path);
     let probe = ctx(PROBE).map(|p| Capture::load(&p));
     let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
@@ -1154,7 +1242,7 @@ fn a_captured_rotor_strike_replays_bit_exact() {
         min: [lane(wreck_at::EDGE_MIN), lane(wreck_at::EDGE_MIN + 8)],
         max: [lane(wreck_at::EDGE_MAX), lane(wreck_at::EDGE_MAX + 8)],
     };
-    let blades = Blades::new(&blade_phy, &blade_psg, Some(&blade_rays), Some(&blade_shape), Some(edge)).expect("the blades");
+    let blades = Blades::new(&blade_phy, &blade_psg, Some(&blade_rays), Some(&blade_shape), Some(edge)).and_then(|b| b.with_hull(&hull)).expect("the blades");
     let mut wreckage = Wreckage::new(&disc.phy, quad(&ee, HELI + wreck_at::INERTIA), disc.phy.mass_properties.mass);
     let three = |a: u32| [quad(&ee, a), quad(&ee, a + 16), quad(&ee, a + 32)];
     wreckage.place = three(HELI + wreck_at::PLACE);
@@ -1171,6 +1259,11 @@ fn a_captured_rotor_strike_replays_bit_exact() {
     let mut rng = Rng::from_state(0x0c17_0c17_0c17_0c17);
     let mut moved = [false; 5];
     let (mut wrecks, mut put_backs, mut thrown) = (Vec::new(), Vec::new(), 0);
+    // A row of the fall, waiting on the next frame's substeps for its body, and how many rows stood
+    // at each place in that frame.
+    let mut torn: Option<(usize, Kiowa, Ride, Measure)> = None;
+    let mut phases = std::collections::BTreeMap::new();
+    let (mut parts, mut in_post) = (0, 0);
     let rng_of = |row: usize| -> u64 { cap.text(row, "rng_state").parse().expect("rng_state") };
     for row in 1..cap.rows.len() {
         let frame = cap.u32(row, "frame_counter");
@@ -1179,21 +1272,44 @@ fn a_captured_rotor_strike_replays_bit_exact() {
             rng = Rng::from_state(rng_of(row - 1));
         }
         let drawn_from = rng.state();
+        let measured_before = s.ride.measure;
         let movers = s.collision.search(&mut s.ride.body, &mut s.place, dt);
-        // The blades share the helicopter's world, as the shell's `KiowaRide::step` runs them.
+        // The blades share the helicopter's world, as the shell's `KiowaRide::step` runs them: they
+        // search after it, their rays meeting its hull, and step after it in its world's step.
         let blades_out = wreckage.blades.started.iter().any(|b| b.out);
+        let mut blade_movers = Vec::new();
         if blades_out {
             let (field, props, trees) = game_sim::world::World::wooded(&mut s.place);
-            wreckage.blades.search(dt, field.as_deref(), props, trees);
-            let movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
-            wreckage.blades.step(dt, &tables, &movers);
+            wreckage.blades.search_on(dt, field.as_deref(), props, trees, &mut s.collision, &s.ride.body);
+            blade_movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
         }
         let ground = Grounded { collision: &mut s.collision, world: &mut s.place, movers: &movers, rotor: &s.rotor, asked: Vec::new() };
-        let mut around = Struck { ground, wreckage: &mut wreckage, tree: &tree, curve: &s.curve, put_back: None, first_hit: None };
+        let mut around = Struck {
+            ground,
+            wreckage: &mut wreckage,
+            tree: &tree,
+            curve: &s.curve,
+            put_back: None,
+            first_hit: None,
+            tables: &tables,
+            blade_movers: &blade_movers,
+            substeps: Vec::new(),
+        };
         let out = s.kiowa.tick(&mut s.ride, &world_step, None, &s.curve, &acos, &mut rng, dt, &mut around);
         let asked = std::mem::take(&mut around.ground.asked);
         let put_back = around.put_back;
         let first_hit = around.first_hit;
+        let substeps = std::mem::take(&mut around.substeps);
+        if let Some((at, kiowa, ride, before)) = torn.take() {
+            let (phase, part, cut) = compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &substeps);
+            let read = cap.u32(at, "frame_counter");
+            if PUSHED.contains(&read) {
+                assert_eq!((phase, part), (0, false), "tick {read}: the blades' push was not read after its frame");
+            }
+            *phases.entry(phase).or_insert(0) += 1;
+            parts += part as usize;
+            in_post += usize::from(cut < MEASURE_GROUPS);
+        }
         if blades_out || wreckage.blades.started.iter().any(|b| b.out) {
             wreckage.blades.post(dt);
         }
@@ -1205,6 +1321,30 @@ fn a_captured_rotor_strike_replays_bit_exact() {
         events.clear();
         pad.poll(dt, &report_of(&cap, row - 1), &mut events);
         s.kiowa.pad = Pad::from_pad(&pad);
+        // The original steps the placed body once more that frame, on the pad its input step read
+        // (the row's last longitudinal is that pad's -0, not the put-back's 0): the collide pass and
+        // the world step again, the blades all stopped by the put-back.
+        let mut measured_before = measured_before;
+        if put_back.is_some() {
+            measured_before = s.ride.measure;
+            let movers = s.collision.search(&mut s.ride.body, &mut s.place, dt);
+            let ground = Grounded { collision: &mut s.collision, world: &mut s.place, movers: &movers, rotor: &s.rotor, asked: Vec::new() };
+            let mut around = Struck {
+                ground,
+                wreckage: &mut wreckage,
+                tree: &tree,
+                curve: &s.curve,
+                put_back: None,
+                first_hit: None,
+                tables: &tables,
+                blade_movers: &[],
+                substeps: Vec::new(),
+            };
+            let again = s.kiowa.tick(&mut s.ride, &world_step, None, &s.curve, &acos, &mut rng, dt, &mut around);
+            assert_eq!(around.ground.asked, vec![again], "tick {frame}: the second step's crash test ran other than once");
+            assert_eq!((again, around.put_back), (Crashed::default(), None), "tick {frame}: the second step's crash test asked");
+            assert!(!wreckage.blades.started.iter().any(|b| b.out), "tick {frame}: a blade is out after the put-back");
+        }
         assert_eq!(asked, vec![out], "tick {frame}: the crash test ran other than once");
         if let Some(reason) = out.wreck {
             wrecks.push((frame, reason));
@@ -1229,9 +1369,8 @@ fn a_captured_rotor_strike_replays_bit_exact() {
         moved_by(&mut moved, &pad_of(&cap.block(row, "heli_a", at::BLOCK_A)));
         if frame <= STRUCK_ON {
             compare(&cap, row, &s.kiowa, &s.ride, s.filter);
-        }
-        if frame == PUT_BACK_ON {
-            the_put_back(&cap, row, &s.ride.body);
+        } else {
+            torn = Some((row, s.kiowa, s.ride, measured_before));
         }
         if frame == STRUCK_ON
             && let Some(probe) = &probe
@@ -1239,9 +1378,16 @@ fn a_captured_rotor_strike_replays_bit_exact() {
             the_probe_record(probe, frame, first_hit);
         }
     }
+    // The last row has no next frame: it is compared after its own, or in its post.
+    if let Some((at, kiowa, ride, before)) = torn.take() {
+        let (phase, _, cut) = compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &[]);
+        *phases.entry(phase).or_insert(0) += 1;
+        in_post += usize::from(cut < MEASURE_GROUPS);
+    }
     assert_eq!(wrecks, vec![(STRUCK_ON, game_sim::biplane::CRASHED)], "the wrecks asked");
     assert_eq!(put_backs, vec![PUT_BACK_ON], "the put-backs");
     assert_eq!(thrown, 4, "the blades thrown");
+    println!("the fall's rows by where they were read (0 after the frame, 1 + i at the next frame's next[i]): {phases:?}, {parts} part-way through a response, {in_post} in their frame's post");
     assert!(moved[0] && moved[4], "the tape's climb and pedal are not in the capture: {moved:?}");
     let last = cap.u32(cap.rows.len() - 1, "frame_counter");
     println!("the rotor strike: 1205..={STRUCK_ON} bit-exact, run on to {last}; wrecked on {STRUCK_ON} by the rotor's contact search, 4 blades thrown on the original's 12 draws, put back on {PUT_BACK_ON}");

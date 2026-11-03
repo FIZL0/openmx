@@ -203,11 +203,12 @@ name = "struck_at"             # objects[0] +0x1d0: where a species' trunk was l
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x458 -> 0x6c -> 0x9c -> 0x0 -> 0x1d0"
 type = "f32x4"
 
-# --- the helicopter's collision object (+0x170): flags +0x40..+0x4c, contacts +0x100 (array, capacity,
-# count), the first four contacts (0x80 each; +0x74 the other object, +0x78 the mover) -----------------
-# WRONG (C19's capture): the "count" words these and the blades' fields read are pointers and the flags
-# stay 0, so +0x170 (and a blade wrapper's +0x120) is not the collision object these offsets assume. The
-# columns are kept as captured; find the collision object before reading the contacts.
+# --- the helicopter's collision object (+0x170): flags +0x40..+0x4c, contacts +0x100 (count, capacity,
+# array), the first four contacts (0x80 each; +0x74 the other object, +0x78 the mover) -----------------
+# C21: +0x170 (and a blade wrapper's +0x120) is the collision object, but C19's capture read +0x108 as
+# the count and +0x100 as the array: the count is +0x100, the array's pointer +0x108 (fixed below; the
+# C19 columns are as captured, so the wrong way round). The touch flags read 0 on every C19 row through
+# the fall, where the push frame's save state has them set: do not take the flags' columns as the frame's.
 [[field]]
 name = "heli_touch"
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x40"
@@ -215,12 +216,12 @@ type = "bytes:16"
 
 [[field]]
 name = "heli_contacts_n"
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x108"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x100"
 type = "u32"
 
 [[field]]
 name = "heli_contacts"
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x100 -> 0x0"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0x170 -> 0x108 -> 0x0"
 type = "bytes:512"
 
 # --- thrown blade 0 (wrapper heli +0xe48; body +0x110, collision object +0x120) ---------------------------
@@ -236,12 +237,12 @@ type = "bytes:16"
 
 [[field]]
 name = "blade0_contacts_n"
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe48 -> 0x120 -> 0x108"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe48 -> 0x120 -> 0x100"
 type = "u32"
 
 [[field]]
 name = "blade0_contacts"    # the first four contacts
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe48 -> 0x120 -> 0x100 -> 0x0"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe48 -> 0x120 -> 0x108 -> 0x0"
 type = "bytes:512"
 
 # --- thrown blade 1 (wrapper heli +0xe4c; body +0x110, collision object +0x120) ---------------------------
@@ -257,12 +258,12 @@ type = "bytes:16"
 
 [[field]]
 name = "blade1_contacts_n"
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe4c -> 0x120 -> 0x108"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe4c -> 0x120 -> 0x100"
 type = "u32"
 
 [[field]]
 name = "blade1_contacts"    # the first four contacts
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe4c -> 0x120 -> 0x100 -> 0x0"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe4c -> 0x120 -> 0x108 -> 0x0"
 type = "bytes:512"
 
 # --- thrown blade 2 (wrapper heli +0xe50; body +0x110, collision object +0x120) ---------------------------
@@ -278,12 +279,12 @@ type = "bytes:16"
 
 [[field]]
 name = "blade2_contacts_n"
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe50 -> 0x120 -> 0x108"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe50 -> 0x120 -> 0x100"
 type = "u32"
 
 [[field]]
 name = "blade2_contacts"    # the first four contacts
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe50 -> 0x120 -> 0x100 -> 0x0"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe50 -> 0x120 -> 0x108 -> 0x0"
 type = "bytes:512"
 
 # --- thrown blade 3 (wrapper heli +0xe54; body +0x110, collision object +0x120) ---------------------------
@@ -299,10 +300,10 @@ type = "bytes:16"
 
 [[field]]
 name = "blade3_contacts_n"
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe54 -> 0x120 -> 0x108"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe54 -> 0x120 -> 0x100"
 type = "u32"
 
 [[field]]
 name = "blade3_contacts"    # the first four contacts
-addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe54 -> 0x120 -> 0x100 -> 0x0"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x0 -> 0xe54 -> 0x120 -> 0x108 -> 0x0"
 type = "bytes:512"

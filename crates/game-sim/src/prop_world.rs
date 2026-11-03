@@ -689,6 +689,44 @@ impl Collection {
         wrecks: &[Wreck<'_>],
         strikes: &mut [crate::prop_wreck::WreckStrike],
     ) {
+        let hull = (wreck_bike::COLLIDABLE, wreck_bike::COLLIDES_WITH);
+        self.search_object_hulled(collection, k, dt, rays, field, props, trees, wrecks, hull, strikes);
+    }
+
+    /// **[`Collection::search_among`] with hulls of another kind** (C21): the hulls' collidables
+    /// are `hull`'s category and collides-with in place of a wreck bike's — the Kiowa's hull
+    /// (`kiowaf.col`, [`crate::kiowa::COLLIDABLE`]) as its thrown blades meet it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_among_hulled(
+        &mut self,
+        dt: F,
+        rays: &[Option<Rays>],
+        field: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        wrecks: &[Wreck<'_>],
+        hull: (u32, u32),
+        strikes: &mut [crate::prop_wreck::WreckStrike],
+    ) {
+        for k in 0..self.objects.len() {
+            self.search_object_hulled(usize::MAX, k, dt, rays, field, props, trees, wrecks, hull, strikes);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_object_hulled(
+        &mut self,
+        collection: usize,
+        k: usize,
+        dt: F,
+        rays: &[Option<Rays>],
+        field: Option<&dyn Heightfield>,
+        props: Option<&Props>,
+        trees: Option<&Trees>,
+        wrecks: &[Wreck<'_>],
+        hull: (u32, u32),
+        strikes: &mut [crate::prop_wreck::WreckStrike],
+    ) {
         let hulls: Vec<flight_search::Plane<'_>> = wrecks.iter().map(|w| w.hull).collect();
         {
             let o = &mut self.objects[k];
@@ -712,7 +750,7 @@ impl Collection {
                 let probe = flight_search::Probe {
                     categories: c.categories.clone(),
                     sweep: Some(sweep_categories()),
-                    hull: Some((wreck_bike::COLLIDABLE, wreck_bike::COLLIDES_WITH)),
+                    hull: Some(hull),
                     regather: c.regather.take(),
                 };
                 scene = Some(Scene::probed_among(props, trees, &hulls, bounds, tree, &c.record.node, &mut c.nearby, &probe, asleep));
@@ -1004,6 +1042,26 @@ fn unlist(list: &mut Vec<usize>, k: usize) {
 fn listen(list: &mut Vec<Listener>, l: Listener) {
     if !list.contains(&l) {
         list.push(l);
+    }
+}
+
+impl Collection {
+    /// How many are on one of the world's lists for this collection, as its step counts them.
+    pub fn listed(&self, list: List) -> i32 {
+        (match list {
+            List::Bodies => self.bodies.len(),
+            List::Force => self.springs.len() + self.forces.len(),
+            List::Constraints => self.joints.len(),
+            List::Preforce => self.preforce.len(),
+            List::Post => self.posts.len(),
+        }) as i32
+    }
+
+    /// **The collection's share of a world it steps in with another's bodies** (C21, the Kiowa's
+    /// blades in the helicopter's): its lists as the step walks them, the force listeners' resolve
+    /// reading `others` for what a contact names.
+    pub fn lists<'a, 'o>(&'a mut self, tables: &'a Tables, movers: &'a [Mover], others: &'a mut [Other<'o>]) -> impl Dynamics + 'a {
+        Lists { c: self, tables, movers, others }
     }
 }
 
