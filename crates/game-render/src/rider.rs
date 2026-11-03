@@ -364,6 +364,12 @@ pub fn hold_limbs(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength
 ///
 /// Against the target as faded by the hand's strength, as [`aim`] aims, so a hold fading out asks
 /// for less, and a hand let go of (a no-hander) never moves the body.
+///
+/// **Not the original's way at a full whip (B21).** There the original's body rises about 0.34 ft
+/// along the bike's up (C20), and this moves it across towards the grips. That rise is the riding
+/// ragdoll's dynamics, not reach: its shoulders end above the grips and its feet come off the pegs, and
+/// along the bike's up each grip is level with its shoulder, so no lift brings one into reach. Only
+/// drawing the ragdoll here takes that rise over (P133, V63). Journal 2026-11-03-b21-lean-in-whip-direction.
 pub fn lean_in(skel: &Skeleton, world: &mut [M4], targets: &Anchors, strength: [f32; 4]) -> V3 {
     let at = |j: usize| world[j].point(v3(0.0, 0.0, 0.0));
     let mut arms = Vec::new();
