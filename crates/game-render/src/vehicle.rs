@@ -432,7 +432,14 @@ impl Chassis {
         // that binds the 9 gesture clips the archive ships and the three `bike_air_*` poses, and
         // leaves the grid's 36 `turn_*`, `hold_*`, `get_ready_*` slots empty — they are the rider's
         // clips and no bike archive has one.
-        let stance = Stance::new(set, prefix, stunts, params);
+        //
+        // B10: the bike's own motion object in the original is not the body's machine. A trick
+        // fades in from the snapshot at the motion library's default rate (3 a second, 10 ticks),
+        // not the body's measured 4, and a trick out of another restarts its clip rather than
+        // crossing (S217's capture).
+        let params = Params { rate_stunt: game_sim::motion::Params::default().blend_rate, ..params };
+        let mut stance = Stance::new(set, prefix, stunts, params);
+        stance.restart_tricks = true;
         let nodes = Nodes::of(&stance.set.skeleton);
         let shape = Geometry::of(&stance.set.skeleton, nodes);
         let wheels = wheels_of(&stance.set.skeleton, nodes);

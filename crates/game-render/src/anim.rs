@@ -726,6 +726,12 @@ pub struct Stance {
     /// that comes back false is a row of the table the set does not have — which is how a set
     /// paired with the wrong machine shows up.
     pub drawn: bool,
+    /// **B10.** A trick out of another trick restarts the new one's clip and fades from the snapshot
+    /// over the ramp, instead of the body's stunt cross ([`vehicle_anim::Blend::Pair`]), and every
+    /// trick is drawn at the ramp a tick behind. The bike's own motion object does this in the
+    /// original (S217's capture); the body's sixty-state machine does not, so only
+    /// [`crate::vehicle::Chassis`] sets it.
+    pub restart_tricks: bool,
 }
 
 impl Stance {
@@ -758,6 +764,7 @@ impl Stance {
             params,
             posed: false,
             drawn: false,
+            restart_tricks: false,
         }
     }
 
@@ -823,10 +830,31 @@ impl Stance {
         // step runs.
         let mut driver = self.driver;
         driver.want = want;
-        let frame = {
+        let ramp = driver.ramp;
+        let mut frame = {
             let set = &self.set;
             driver.frame(dt, &self.params, r, &self.lib, true, |id| set.timing(Some(id)).duration)
         };
+        if self.restart_tricks && driver.from_table {
+            let clamp = |x: F| if x < F::ZERO { F::ZERO } else if x > F::ONE { F::ONE } else { x };
+            // The bike's object draws a trick at the weight the fade had *before* this tick's step:
+            // all of the snapshot on the restart tick, then 0.9 down to 0.1, and the clip alone on
+            // the tenth tick after (S217: TireRear 123.6° on the switch tick, 12.36° less a tick).
+            let from = if frame.restart { F::ONE } else { clamp(ramp) };
+            let drawn = if r.held { F::ZERO } else { from };
+            match frame.blend {
+                // The stunt cross zeroed the ramp; run it the way every other arm does, and play the
+                // new clip alone at the trick's progress.
+                vehicle_anim::Blend::Pair { a, .. } => {
+                    driver.ramp = clamp(if r.held { F::ZERO } else { from - driver.rate * dt });
+                    frame.blend = vehicle_anim::Blend::One { phase: clamp(r.progress), ramp: drawn, clip: a };
+                }
+                vehicle_anim::Blend::One { phase, clip, .. } => {
+                    frame.blend = vehicle_anim::Blend::One { phase, ramp: drawn, clip };
+                }
+                _ => {}
+            }
+        }
         self.driver = driver;
         // **S214.** The update's latch ([`vehicle_anim::Update::serviced`]), which the body has in
         // [`game_sim::rider_anim::Body::latch`] and the chassis went without: with the count never

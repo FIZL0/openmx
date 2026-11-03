@@ -275,8 +275,6 @@ const JOINT_DEG: f32 = 2.0;
 /// bike's 10 in the original.
 const BODY_IN: usize = 7;
 const BIKE_IN: usize = 10;
-/// The body's stunt cross after the switch, in ticks. By its end the bike is back on the original's.
-const BODY_CROSS: usize = 24;
 
 /// **S217:** the same switch, filmed in the original: flatliner, and the Taunt queued while it runs.
 ///
@@ -290,12 +288,12 @@ const BODY_CROSS: usize = 24;
 /// Held to the original: the state and the trick's elapsed on every tick (the switch comes on the same
 /// tick, with flatliner at the same point); the rider's 22 joints within [`JOINT_DEG`] from the end of
 /// the fade-in to the landing, across the switch; the bike's within it from the end of its fade-in to
-/// the switch, and again from the end of the body's cross on. Not held: the bike over the 24 ticks
-/// after the switch. There the original restarts the bike's clip and fades from where the bike was
-/// over 10 ticks, and the port crosses it with the body's stunt cross over 24 (B10). The test asserts
-/// that the gap is still there, so whoever closes it tightens the window here. The first ticks of
-/// flatliner are not held either: the port's rider falls from 400 ft with no jump behind it, so the
-/// pose a fade-in starts from is not the original's.
+/// the landing, across the switch too. There the original's bike restarts its clip and fades from
+/// where it was over 10 ticks, and so does the port's since B10. The bike's two wheel joints are not
+/// compared: the original's snapshot holds their rolled angle and the port's does not, and the
+/// chassis' wheel drive replaces both rotations before anything is drawn. The first ticks of
+/// flatliner are not held: the port's rider falls from 400 ft with no jump behind it, so the pose a
+/// fade-in starts from is not the original's.
 #[test]
 fn a_queued_pair_matches_the_original_across_the_switch() {
     let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/capture/s217/run1.csv");
@@ -359,8 +357,11 @@ fn a_queued_pair_matches_the_original_across_the_switch() {
         if (r.tricks.elapsed.0 - num(row, "trick_elapsed")).abs() > 1e-4 {
             failed.push(format!("tick {t}: elapsed {:?} against the original's {}", r.tricks.elapsed, num(row, "trick_elapsed")));
         }
-        let off = |joints: &str, mine: &[[f32; 4]]| (0..22).map(|j| degrees(quat(row, joints, j), mine[j])).fold(0.0, f32::max);
-        worst.push((off("j", &body.rig.set.pose.rot), off("bj", &bike.stance.set.pose.rot)));
+        let wheels = [bike.nodes.front, bike.nodes.rear];
+        let off = |joints: &str, mine: &[[f32; 4]], skip: &[Option<usize>]| {
+            (0..22).filter(|j| !skip.contains(&Some(*j))).map(|j| degrees(quat(row, joints, j), mine[j])).fold(0.0, f32::max)
+        };
+        worst.push((off("j", &body.rig.set.pose.rot, &[]), off("bj", &bike.stance.set.pose.rot, &wheels)));
     }
     let (s, l) = (switch - start, land - start);
     let mut held = |from: usize, to: usize, bike: bool| {
@@ -372,15 +373,13 @@ fn a_queued_pair_matches_the_original_across_the_switch() {
         }
     };
     held(BODY_IN, l, false);
-    held(BIKE_IN, s, true);
-    held(s + BODY_CROSS, l, true);
+    held(BIKE_IN, l, true);
     let rider_worst = worst[BODY_IN..l].iter().map(|w| w.0).fold(0.0, f32::max);
-    let gap = worst[s..s + BODY_CROSS].iter().map(|w| w.1).fold(0.0, f32::max);
-    println!("switch {s} ticks in, landing {l}: the rider within {rider_worst:.2}°, the bike {gap:.1}° off after the switch (B10)");
-    assert!(failed.is_empty(), "{} misses against the original:\n{}", failed.len(), failed.join("\n"));
-    assert!(
-        gap > 20.0,
-        "the bike after the switch is within {gap:.1}° of the original's: B10's gap is closed, so hold the \
-         bike from the switch on"
+    let bike_worst = worst[BIKE_IN..l].iter().map(|w| w.1).fold(0.0, f32::max);
+    let fade = worst[s..s + BIKE_IN].iter().map(|w| w.1).fold(0.0, f32::max);
+    println!(
+        "switch {s} ticks in, landing {l}: the rider within {rider_worst:.2}°, the bike within {bike_worst:.2}° \
+         ({fade:.2}° over the switch's fade)"
     );
+    assert!(failed.is_empty(), "{} misses against the original:\n{}", failed.len(), failed.join("\n"));
 }

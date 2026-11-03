@@ -275,9 +275,12 @@ const FRAMES: usize = 320;
 /// apart.
 const APART: f32 = 0.125;
 
-/// How many frames a trick's fade in takes to have the whip out of the pose: a quarter second.
-/// Measured (V64): the gesture slot's gap closes from 0.43 ft to 0 by its fourteenth frame.
-const FADE: usize = 15;
+/// How many frames a trick's fade in takes to have the whip out of the pose: the bike's, which is
+/// the longer. Measured (V64): the gesture slot's gap closes from 0.43 ft to 0 by its fourteenth
+/// frame, at the body's rate of 4 a second. Since B10 the bike fades in at its own object's rate of
+/// 3, a third of a second, and draws each frame at the weight the frame before left (S217's capture
+/// of the original): 20 frames and one.
+const FADE: usize = 21;
 
 /// How much the gap between the two riders may grow in one frame while the fade closes it: none
 /// beyond rounding. Before the fix the clipless extra's bike snapped square on the trick's first
@@ -423,8 +426,11 @@ const LANDING: usize = 3;
 
 /// How much further apart than the whip itself a whipped trick's rider may come in the trick's
 /// fade in, in feet. Measured (V98): 0.015 at worst, the Superman's, where the two riders' clips
-/// cross over; the Flatliner, with a bike clip of its own, 0.005.
-const OVER: f32 = 0.025;
+/// cross over; the Flatliner, with a bike clip of its own, 0.005. Since B10 the Flatliner's is
+/// 0.062, ten frames in: the bike fades in at its own object's rate of 3 and the body at its
+/// machine's 4, both read off the original (S217), so for a while the body is further out of the
+/// whip than the bike it sits on.
+const OVER: f32 = 0.075;
 
 /// How much further off its grip a hand of a trick the bike has no clip for may be drawn whipped
 /// than square: the hold's rounding.
