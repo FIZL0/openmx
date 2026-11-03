@@ -8724,3 +8724,25 @@ material_hit_play boot 0x003ea900 run by the update 0x3ead10 when queued: speed 
 #                          SolidFoliageID); speed >= MinImpulse (+0x114): level clamp(speed/MaxImpulse(+0x118)
 #                          *100, 0, 100), vt+0x30, vt+0x5c position (+0x60), sound_3d 0x00104480 with
 #                          +0x10c/+0x110 distances, vt+0x1c play(4)
+
+# --- F27: the material table's collision sounds (crates/game-sim/src/material_hit.rs, openmx audio.rs HitTable;
+#   tests/material_hit.rs; journal 2026-11-03-f27-material-hit-sounds)
+# Table = game_manager +0x40 (ctor 0x003e9f00); s195-knock-2881 has it at 0x00e17d90. Interface +0x30
+#   (vtable 0x0045f684) registered on the collision node by 0x0026f7f0; the node's file 0x0026f680 calls
+#   every interface's vt +8 (attach 0x003eada0: listener +0x34, vtable 0x0045f694, onto record +0x1f0's
+#   probe list), unfile 0x0026f720 its vt +0xc (detach). So plane_probe_sound_listener is this listener,
+#   on every filed object's probe: in knock-2881 the four bikes' 11-ray body probes (record +0x1f0,
+#   category 0x18008; human bike 0x00dad810 probe 0x00da2ff0, not the wheel probe +0x7c8), the parked
+#   plane's 41-ray probe (wrapper 0x00e1e260), and the two once-woken beach balls (filed asleep through
+#   DetectCollisionsWhenDisabled: three listeners, object / collection / material; never-woken balls two).
+# Queue: owners +0x80 (count, ?, ptr +0x88, cap +0x10 growth), struck +0x98 (ptr +0xa0), speeds +0xb0
+#   (ptr +0xb8). Pair drop: f(x) = x +0x80 record -> +0x1f8 collidable; entry j with struck == f(owner i)
+#   and f(owner j) == struck i: i goes if speed i < speed j (swap-remove, i looked at again), else j
+#   (search goes on from j). Struck +0x89 == 16 takes f(owner) +0x89; with f(owner) 0 the register $s7
+#   keeps the last entry's material (0 at entry assumed). Lookup: first of list +0x4c (count +0x44)
+#   with the ID; material 0 plays nothing; speed < +0x114 skips; level cvt.w.s(100 * (speed / +0x118)).
+# Loader 0x003ea350 keeps only IDs in table +0x40's in-use list (free09: 1-7, 9-11, 14, 16, 19, 21, 22).
+#   Key strings 0x00448e20..0x00448f00: CollisionSoundFile, CollisionMaxDistance (+0x110),
+#   CollisionMinDistance (+0x10c), CollisionMinImpulse (+0x114, default 0), CollisionMaxImpulse (+0x118,
+#   default 1). [Settings] TerrainMask +0x64, SolidFoliageID +0x65 (22). Every free09 entry 30/125 ft
+#   and 5/25 but 16 (Impact\bikehit1.vag) 2/9; 21 Impact\ball.vag, 22 Impact\treehit.vag.

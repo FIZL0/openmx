@@ -1017,6 +1017,9 @@ pub mod noise;
 /// generator it costs.
 pub mod wreck_sound;
 
+/// The material table's collision sounds (F27): which of a frame's probe hits play, and how loud.
+pub mod material_hit;
+
 /// The wreck bike (S69): `Wreckbike.phy`'s body and collision object, and the world node's tick that
 /// moves them.
 pub mod wreck_bike;
