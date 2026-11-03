@@ -17,10 +17,10 @@ it stopped at 1298.
 - From 1373 on, many rows were read by PINE inside the next frame's world step. The test accepts
   such a row only if it equals one of the port's substeps of that next frame, bit for bit (see
   `1-blades-on-the-hull-FINAL.md`).
-- On the put-back (1449) the port runs the frame once more on the placed body, with the pad that
-  frame's input step read, as the original does. From 1474 some rows were read inside their frame's
-  post, part-way through the measure. The test checks those against a cut of `Measure::flight`'s
-  writes.
+- On the put-back (1449) the port ran the frame once more on the placed body. R26 (below) found
+  that was the capture reading a frame late, and removed it. From 1474 some rows were read inside a
+  frame's post, part-way through the measure. The test checks those against a cut of
+  `Measure::flight`'s writes.
 - The shell (`KiowaRide::step`, `crates/openmx/src/vehicle.rs`) runs the blades the same way and
   loads `kiowaf.col` (`crates/openmx/src/main.rs`).
 
@@ -37,6 +37,14 @@ gathered afresh only when its probe leaves the list's bound, so a wreck that sta
 blades. The port now offers the blades to the heli's rays only while that list holds them
 (`Blades::gather_round`, `Collision::search_knocking`). Three new replays (a roll, a tip, a fast
 slide) are bit-exact to their captures' ends.
+
+## R26 — the put-back steps once
+
+See `3-r26-the-put-back-steps-once-FINAL.md`. The original steps the placed body once, from the next
+frame, as in C24's eight wrecks. C21's capture reads later and later through the fall: from 1373 into
+the next frame's substeps, and from the put-back on a whole frame late. So its row 1449 holds frame
+1450's state. The C21 replay now compares those rows after the next frame. The shell's second step
+is gone.
 
 ## Not verified / not 1:1
 

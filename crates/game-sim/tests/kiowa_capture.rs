@@ -1207,10 +1207,12 @@ fn the_probe_record(probe: &Capture, frame: u32, first: Option<game_sim::contact
 ///   each blade's contact on the hull naming the helicopter and each mirror its blade. From 1373 the
 ///   capture reads many rows inside the next frame's step: those are compared against the port's
 ///   substeps ([`compare_torn`]). The crash test asks nothing more while the clock runs;
-/// * on [`PUT_BACK_ON`], the put-back by the clock ([`game_sim::kiowa::Wreckage::put_back`]), then
-///   the frame stepped once more on the placed body, as the original does, flying the pad that
-///   frame's input step read (C21). Every row from it on is compared too; from 1474 many were read
-///   inside their frame's post, part-way through the measure ([`compare_torn`]).
+/// * on [`PUT_BACK_ON`], the put-back by the clock ([`game_sim::kiowa::Wreckage::put_back`]), the
+///   placed body stepped once from the next frame, as in C24's eight wrecks. The capture's reads
+///   have drifted a frame late by then (R26): through the fall they move deeper into the next
+///   frame's substeps, and from [`PUT_BACK_ON`] on each row holds the frame after it, so each is
+///   compared after the next frame, and from 1474 many inside that frame's post, part-way through
+///   the measure ([`compare_torn`]). The last row's next frame is not in the capture.
 ///
 /// Off the strike row the port's frame draws nothing (the original's generator moves on other
 /// rows: see the C19 journal entry).
@@ -1263,6 +1265,8 @@ fn a_captured_rotor_strike_replays_bit_exact() {
     // A row of the fall, waiting on the next frame's substeps for its body, and how many rows stood
     // at each place in that frame.
     let mut torn: Option<(usize, Kiowa, Ride, Measure)> = None;
+    // A row read a frame late (from the put-back on), waiting for the end of the next frame.
+    let mut late: Option<usize> = None;
     let mut phases = std::collections::BTreeMap::new();
     let (mut parts, mut in_post, mut struck_blades) = (0, 0, 0);
     let rng_of = |row: usize| -> u64 { cap.text(row, "rng_state").parse().expect("rng_state") };
@@ -1327,30 +1331,6 @@ fn a_captured_rotor_strike_replays_bit_exact() {
         events.clear();
         pad.poll(dt, &report_of(&cap, row - 1), &mut events);
         s.kiowa.pad = Pad::from_pad(&pad);
-        // The original steps the placed body once more that frame, on the pad its input step read
-        // (the row's last longitudinal is that pad's -0, not the put-back's 0): the collide pass and
-        // the world step again, the blades all stopped by the put-back.
-        let mut measured_before = measured_before;
-        if put_back.is_some() {
-            measured_before = s.ride.measure;
-            let movers = s.collision.search(&mut s.ride.body, &mut s.place, dt);
-            let ground = Grounded { collision: &mut s.collision, world: &mut s.place, movers: &movers, rotor: &s.rotor, asked: Vec::new() };
-            let mut around = Struck {
-                ground,
-                wreckage: &mut wreckage,
-                tree: &tree,
-                curve: &s.curve,
-                put_back: None,
-                first_hit: None,
-                tables: &tables,
-                blade_movers: &[],
-                substeps: Vec::new(),
-            };
-            let again = s.kiowa.tick(&mut s.ride, &world_step, None, &s.curve, &acos, &mut rng, dt, &mut around);
-            assert_eq!(around.ground.asked, vec![again], "tick {frame}: the second step's crash test ran other than once");
-            assert_eq!((again, around.put_back), (Crashed::default(), None), "tick {frame}: the second step's crash test asked");
-            assert!(!wreckage.blades.started.iter().any(|b| b.out), "tick {frame}: a blade is out after the put-back");
-        }
         assert_eq!(asked, vec![out], "tick {frame}: the crash test ran other than once");
         if let Some(reason) = out.wreck {
             wrecks.push((frame, reason));
@@ -1373,10 +1353,17 @@ fn a_captured_rotor_strike_replays_bit_exact() {
             assert_eq!(rng.state(), drawn_from, "tick {frame}: the port's frame drew from the generator");
         }
         moved_by(&mut moved, &pad_of(&cap.block(row, "heli_a", at::BLOCK_A)));
+        if let Some(at) = late.take() {
+            let (phase, _, cut) = compare_torn(&cap, at, &s.kiowa, &s.ride, &measured_before, s.filter, &[]);
+            *phases.entry(phase).or_insert(0) += 1;
+            in_post += usize::from(cut < MEASURE_GROUPS);
+        }
         if frame <= STRUCK_ON {
             compare(&cap, row, &s.kiowa, &s.ride, s.filter);
-        } else {
+        } else if frame < PUT_BACK_ON {
             torn = Some((row, s.kiowa, s.ride, measured_before));
+        } else {
+            late = Some(row);
         }
         if frame == STRUCK_ON
             && let Some(probe) = &probe
@@ -1384,16 +1371,13 @@ fn a_captured_rotor_strike_replays_bit_exact() {
             the_probe_record(probe, frame, first_hit);
         }
     }
-    // The last row has no next frame: it is compared after its own, or in its post.
-    if let Some((at, kiowa, ride, before)) = torn.take() {
-        let (phase, _, cut) = compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &[]);
-        *phases.entry(phase).or_insert(0) += 1;
-        in_post += usize::from(cut < MEASURE_GROUPS);
-    }
+    // The last row was read in the frame after it, which the capture does not reach.
+    assert!(torn.is_none(), "the fall's last row is before the put-back");
+    assert_eq!(late, Some(cap.rows.len() - 1), "the last row is not one read a frame late");
     assert_eq!(wrecks, vec![(STRUCK_ON, game_sim::biplane::CRASHED)], "the wrecks asked");
     assert_eq!(put_backs, vec![PUT_BACK_ON], "the put-backs");
     assert_eq!(thrown, 4, "the blades thrown");
-    println!("the fall's rows by where they were read (0 after the frame, 1 + i at the next frame's next[i]): {phases:?}, {parts} part-way through a response, {in_post} in their frame's post");
+    println!("the fall's rows by where they were read (0 after the frame, 1 + i at the next frame's next[i]): {phases:?}, {parts} part-way through a response, {in_post} inside a post");
     // The blades fly off outward from the hub: the helicopter's rays never meet one (C24).
     assert_eq!(struck_blades, 0, "frames whose helicopter rays met a gathered blade");
     assert!(moved[0] && moved[4], "the tape's climb and pedal are not in the capture: {moved:?}");
@@ -1434,7 +1418,7 @@ struct Replayed {
 /// every row compared: before the wreck after its frame, after it where it was read
 /// ([`compare_torn`]). The wreck's 12 draws are the original's: the generator is reseeded from the
 /// row before the wreck, the tapes' draws having parted from the port's by then (the original draws
-/// on input). The put-back steps once, not twice as the strike's does (below).
+/// on input). The put-back steps once, as the strike's does (R26).
 fn replay_wreck(capture: &str) -> Option<Replayed> {
     use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, Blades, KIOWA_HULL, KIOWA_MODEL, RotorTree, WRECK_BLADE_PHY, Wreckage};
     let (cap_path, image) = (ctx(capture)?, ctx(STATE)?);
@@ -1531,8 +1515,8 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
             wreckage.blades.gather_round(&s.collision, &s.ride.body);
             seen.put_backs.push(frame);
         }
-        // No second step after the put-back: every one of these captures has the placed body on its
-        // put-back's row and the first step on the next.
+        // The placed body steps once, from the next frame: every one of these captures has it on its
+        // put-back's row, read after the frame, and the first step on the next.
         events.clear();
         pad.poll(dt, &report_of(&cap, row - 1), &mut events);
         s.kiowa.pad = Pad::from_pad(&pad);

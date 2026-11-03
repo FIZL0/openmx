@@ -2867,8 +2867,8 @@ impl KiowaRide {
     /// searched first ([`game_sim::kiowa::Collision::search`]), as the level's collision node searches
     /// every object before any dynamics world runs. What the crash test asks for is done in the tick
     /// ([`KiowaAround`]); after it, a put-back's share on the controls, and its collision object's
-    /// nearby list gathered again where it was put (the reset's probes put back in), then the frame
-    /// once more on the placed body, as the original steps it (C21). Nothing for a helicopter not out.
+    /// nearby list gathered again where it was put (the reset's probes put back in). The placed body
+    /// steps from the next frame, once, as in the original (R26). Nothing for a helicopter not out.
     ///
     /// Its thrown blades (P265) share its world: its rays offered the ones its nearby list holds
     /// ([`game_sim::kiowa::Collision::search_knocking`], [`game_sim::kiowa::Blades::gather_round`],
@@ -2907,17 +2907,6 @@ impl KiowaRide {
             h.kiowa.put_back_controls(fraction);
             h.collision.refresh(&h.ride.body, world);
             h.wreckage.blades.gather_round(&h.collision, &h.ride.body);
-            // The original steps the placed body once more that frame, on this frame's input (C21);
-            // the put-back stopped every blade.
-            let movers = h.collision.search(&mut h.ride.body, world, dt);
-            let ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
-            let mut around = KiowaAround { ground, wreckage: &mut h.wreckage, put_back: None, tree: self.tree.as_ref(), curve: &tables.curve, blade_movers: &[] };
-            let asked = h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
-            self.wrecks += u32::from(asked.wreck.is_some());
-            if let Some(fraction) = around.put_back {
-                h.kiowa.put_back_controls(fraction);
-                h.collision.refresh(&h.ride.body, world);
-            }
         }
     }
 
