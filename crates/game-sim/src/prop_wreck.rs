@@ -160,9 +160,10 @@ fn sphere(mesh: &Mesh, t: &[Vf; 4]) -> (Vf, F) {
 }
 
 /// **The props' rays on the wreck bike** standing as its record's node has it (`mesh` its
-/// `wreckbikef.col`): every filed prop object with a ray probe, in collection and object order, its
+/// `wreckbikef.col`): every filed prop object with a ray probe, in the node's list order, its
 /// probe where its node stands, its category list as its search left it. A prop that struck gets an
-/// entry for each struck ray after its own list (at most its capacity), naming the wreck bike as its
+/// entry for each struck ray after its own entries and ahead of the mirrors props filed after it put
+/// on its list ([`own_end`]; at most its capacity), naming the wreck bike as its
 /// other side `me` (the index its step's other sides give the bike), and its flags set as a hit sets
 /// them; its listeners hear the hit as its search's do (an asleep body woken by a category of the wake
 /// mask, the collection activated). Answers the mirrors and the struck bodies for the bike's frame.
@@ -181,76 +182,99 @@ pub fn struck_on(set: &mut PropSet, mesh: &Mesh, bike_at: [Vf; 4], category: u32
     let (bike_centre, bike_radius) = sphere(mesh, &bike_at);
     let facets = flight_search::facets(mesh);
     let rays = std::sync::Arc::clone(&set.rays);
-    for (c, coll_rays) in rays.iter().enumerate() {
-        for (k, tree) in coll_rays.iter().enumerate() {
-            let Some(tree) = tree else { continue };
-            let coll = &mut set.collections[c];
-            let o = &coll.objects[k];
-            let (true, Some(col)) = (o.filed, o.collision.as_ref()) else { continue };
-            let at = frame(&o.node);
-            let (centre, radius) = flight_search::reach(tree, &at);
-            let mut objects = vec![
-                Collidable {
-                    class: Class::Object,
-                    flags: flags::ENABLED,
-                    nearby: true,
-                    radius,
-                    category: flight_search::PROBE,
-                    collides_with: flight_search::PROBE_COLLIDES_WITH,
-                    categories: col.categories.clone(),
-                    ..Collidable::default()
-                },
-                Collidable {
-                    class: Class::Object,
-                    flags: flags::ENABLED,
-                    nearby: true,
-                    radius: bike_radius,
-                    category,
-                    collides_with,
-                    categories: Categories { mode: 1, list: Vec::new() },
-                    ..Collidable::default()
-                },
-            ];
-            let ray = ray_probe::Record { listed: true, capacity: tree.segments.len(), one_per_ray: true, ..ray_probe::Record::default() };
-            let mut narrow = OnTheBike { rays: tree, at, mesh, bike_at, facets: &facets, ray };
-            let found = vec![Candidate { object: BIKE, distance: distance(centre, bike_centre) - bike_radius }];
-            world_search::search_nearby(&mut objects, PROBE, &Nearby { found, prepare: false }, &mut narrow);
-            if narrow.ray.contacts.is_empty() {
-                continue;
-            }
-            let asleep = !coll.bones[k].body.enabled;
-            let index = out.struck.len();
-            let col = coll.objects[k].collision.as_mut().expect("checked above");
-            let r = &mut col.record;
-            for h in &narrow.ray.contacts {
-                r.touching = true;
-                r.on_object = true;
-                r.touching_other = true;
-                contact_search::add(r, 0, h.from, h.to, h.point, h.normal, NO_SURFACE, Some(me), None);
-                out.mirrors.push(Contact {
-                    kind: 1,
-                    from: h.from,
-                    on_body: h.to,
-                    normal: crate::contact::negated(h.normal),
-                    point: h.point,
-                    arm: Vf::VF0,
-                    other_arm: Vf::VF0,
-                    surface: NO_SURFACE,
-                    other: Some(index),
-                    mover: None,
-                });
-            }
-            let collider = col.collider;
-            // The probe's two listeners, the body's then the collection's.
-            if asleep && category & flight_search::WAKE_MASK != 0 {
-                coll.enable(k);
-            }
-            coll.activate();
-            let bone = &coll.bones[k];
-            out.struck.push(Pushed { collection: c, object: k, collider, body: bone.body, mass: bone.mass });
+    // In the node's list order, as its search pass walks them (S258).
+    set.stamp_filed();
+    for (c, k) in set.node_order() {
+        let Some(Some(tree)) = rays[c].get(k) else { continue };
+        let own_end = own_end(set, c, k);
+        let coll = &mut set.collections[c];
+        let o = &coll.objects[k];
+        let (true, Some(col)) = (o.filed, o.collision.as_ref()) else { continue };
+        let at = frame(&o.node);
+        let (centre, radius) = flight_search::reach(tree, &at);
+        let mut objects = vec![
+            Collidable {
+                class: Class::Object,
+                flags: flags::ENABLED,
+                nearby: true,
+                radius,
+                category: flight_search::PROBE,
+                collides_with: flight_search::PROBE_COLLIDES_WITH,
+                categories: col.categories.clone(),
+                ..Collidable::default()
+            },
+            Collidable {
+                class: Class::Object,
+                flags: flags::ENABLED,
+                nearby: true,
+                radius: bike_radius,
+                category,
+                collides_with,
+                categories: Categories { mode: 1, list: Vec::new() },
+                ..Collidable::default()
+            },
+        ];
+        let ray = ray_probe::Record { listed: true, capacity: tree.segments.len(), one_per_ray: true, ..ray_probe::Record::default() };
+        let mut narrow = OnTheBike { rays: tree, at, mesh, bike_at, facets: &facets, ray };
+        let found = vec![Candidate { object: BIKE, distance: distance(centre, bike_centre) - bike_radius }];
+        world_search::search_nearby(&mut objects, PROBE, &Nearby { found, prepare: false }, &mut narrow);
+        if narrow.ray.contacts.is_empty() {
+            continue;
         }
+        let asleep = !coll.bones[k].body.enabled;
+        let index = out.struck.len();
+        let col = coll.objects[k].collision.as_mut().expect("checked above");
+        let r = &mut col.record;
+        let mut at = own_end;
+        for h in &narrow.ray.contacts {
+            r.touching = true;
+            r.on_object = true;
+            r.touching_other = true;
+            // The prop's own search's entries: ahead of the mirrors the props filed after it put
+            // on its list (S258, [`own_end`]).
+            if r.contacts.len() < r.capacity {
+                let tail = r.contacts.split_off(at.min(r.contacts.len()));
+                contact_search::add(r, 0, h.from, h.to, h.point, h.normal, NO_SURFACE, Some(me), None);
+                r.contacts.extend(tail);
+                at += 1;
+            }
+            out.mirrors.push(Contact {
+                kind: 1,
+                from: h.from,
+                on_body: h.to,
+                normal: crate::contact::negated(h.normal),
+                point: h.point,
+                arm: Vf::VF0,
+                other_arm: Vf::VF0,
+                surface: NO_SURFACE,
+                other: Some(index),
+                mover: None,
+            });
+        }
+        let collider = col.collider;
+        // The probe's two listeners, the body's then the collection's.
+        if asleep && category & flight_search::WAKE_MASK != 0 {
+            coll.enable(k);
+        }
+        coll.activate();
+        let bone = &coll.bones[k];
+        out.struck.push(Pushed { collection: c, object: k, collider, body: bone.body, mass: bone.mass });
     }
     out
+}
+
+/// Where prop `(c, k)`'s own search's entries end on its list: before the mirrors at its end that
+/// props filed after it put there, their rays striking it in their own searches, later in the node's
+/// pass ([`crate::prop_props::strike_props`]). In hit0-11061 ball 2 (filed after ball 0) strikes
+/// ball 0 and the plane's hull is struck by ball 0: ball 0's hull entry comes before ball 2's mirror.
+fn own_end(set: &PropSet, c: usize, k: usize) -> usize {
+    let mine = set.collections[c].objects[k].filed_at;
+    let Some(r) = set.collections[c].objects[k].collision.as_ref().map(|col| &col.record) else { return 0 };
+    let later = |e: &Contact| {
+        let named = e.other.and_then(|o| o.checked_sub(crate::prop_props::PROP_OTHER)).and_then(|f| crate::prop_props::unflat(set, f));
+        e.kind == 1 && named.is_some_and(|(sc, so)| set.collections[sc].objects[so].filed_at > mine)
+    };
+    r.contacts.len() - r.contacts.iter().rev().take_while(|e| later(e)).count()
 }
 
 /// One prop's collidable mesh, where its node stands it.

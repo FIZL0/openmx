@@ -8119,6 +8119,22 @@ car_sort_rays_build         boot 0x003942d0 (car): the sort probe's four tire ra
 #   -11048), the plane's and ball 0's first-substep resolves on hit0-11046 (both bodies, the arms), the
 #   balls' hull entries and the plane's mirrors on hit0-11061.
 
+# --- S258: balls strike balls among the plane (crates/game-sim/src/prop_wreck.rs struck_on/own_end;
+#   tests/prop_plane.rs lane_11061, the_balls_rays_strike_each_other_as_the_originals,
+#   the_balls_push_each_other_as_the_originals; journal 2026-11-03-s258-balls-strike-balls-among-the-plane)
+# hit0-11061 (s2's context; s1 holds copies): the node's filed list is [plane, four other objects, ball 5,
+#   ball 0, ball 2, ball 4, ball 1, ball 3] (places 0..10). Re-searched: ball 0 [k0 terrain x3, k0 plane's
+#   hull, k1 ball 2], ball 2 [k0 terrain x2, k0 ball 0], ball 4 [k0 hull], balls 1 and 5 [k0 terrain],
+#   ball 3 none. A prop's hull entry is its own search's: it goes before the mirror ball 2 (filed after it)
+#   puts on it. The plane's rays strike no ball.
+# Node update on hit0-11061: the plane's world first, then each ball's resolves (two calls each, both with first set) in the
+#   collection list order (balls 0..5), which is the port's collection order (in hit0-11042 every ball's
+#   node stands nearest its own spawn; a knocked ball can stand nearer another's).
+# Bit-exact in the port: every ball's whole list and flags (the props' search with strikes on each other,
+#   then the hull pass), and after the node's tick every ball's position, velocity, quat, rates, shock and
+#   twist and the plane's velocity and rates (the props' step with the plane as striker 0, its body as the
+#   balls' first resolve finds it).
+
 # --- S242: a knockable prop's rays strike another prop's f.col, ball on ball (crates/game-sim/src/prop_props.rs
 #   strike_props, step_named, PropSet::stamp_filed/node_order, prop_world Object::filed_at; tests/prop_props.rs,
 #   tests/prop_knock.rs; journal 2026-11-02-s242-ball-on-ball)

@@ -21,6 +21,12 @@
 //!   original's search against the port's hull pass ([`prop_wreck::struck_on`] on the plane's hull where
 //!   its node stands): each ball's entries on the hull and the mirrors on the plane's list.
 //!
+//! - [`the_balls_rays_strike_each_other_as_the_originals`] (S258): 11061 searched the plane lane's way
+//!   ([`lane_11061`]: the props' own searches and strikes on each other, the plane's rays, the balls'
+//!   rays on the hull) against the original's node re-searched: every ball's whole list;
+//! - [`the_balls_push_each_other_as_the_originals`] (S258): 11061's node ticked by the original
+//!   against the port's props step with the plane its striker: every ball's body and the plane's.
+//!
 //! Skipped with a line where the disc, the kit, MX.PSR or the states are not there (s2's context only).
 
 use std::cell::RefCell;
@@ -36,6 +42,7 @@ use game_sim::contact::{self, Collider, Contact, Other, Side, Weighed};
 use game_sim::flight::{self, Flight};
 use game_sim::flight_search::{self, Rays};
 use game_sim::phy::{self, Ini, Plane};
+use game_sim::prop_props;
 use game_sim::prop_set::PropSet;
 use game_sim::prop_wreck;
 use game_sim::track::{self, Scene, Terrain};
@@ -209,33 +216,44 @@ fn free06() -> Option<(PropSet, Ground<'static>)> {
     Some((set, ground))
 }
 
-/// The state's six balls in the port's set: each RAM ball's (collection, object), the one whose node
-/// stands nearest the ball's node in RAM, with its body and node the state's.
+/// The state's six balls in the port's set: each RAM ball's (collection, object), with its body and
+/// node the state's. The port's props with a collision object are free06's six balls, made in the
+/// original's collection list order (`BALLS`'s): in hit0-11042, every ball still where it was made,
+/// each RAM ball's node is nearest its own (asserted). A knocked ball can stand nearer another's
+/// spawn, so the match is by order, not place (11061 has ball 0 nearest ball 2's).
 fn seed(ee: &Ee, set: &mut PropSet) -> Vec<(usize, usize)> {
+    let props: Vec<(usize, usize)> = set
+        .collections
+        .iter()
+        .enumerate()
+        .flat_map(|(c, coll)| coll.objects.iter().enumerate().filter(|(_, ob)| ob.collision.is_some()).map(move |(k, _)| (c, k)))
+        .collect();
+    assert_eq!(props.len(), BALLS.len(), "free06's props with a collision object are its six balls");
     BALLS
         .iter()
-        .map(|&o| {
+        .zip(props)
+        .map(|(&o, (c, k))| {
             let node = ee.u32_at(o + 0x13c);
-            let origin = quad(ee, node + 0xb0);
-            let mut best = None;
-            for (c, coll) in set.collections.iter().enumerate() {
-                for (k, ob) in coll.objects.iter().enumerate() {
-                    let d = (ob.node.origin - origin).0[..3].iter().map(|v| v * v).sum::<f32>();
-                    if ob.collision.is_some() && best.is_none_or(|(_, _, b)| d < b) {
-                        best = Some((c, k, d));
-                    }
-                }
-            }
-            let (c, k, d) = best.expect("a prop with a collision object");
-            assert!(d < 2500.0, "the ball at {:?} is {d:?} from the nearest prop", origin.0);
             let coll = &mut set.collections[c];
             coll.bones[k].body = body_of(ee, ee.u32_at(o + 0x110));
             let ob = &mut coll.objects[k];
             ob.node.rows = [0, 1, 2].map(|r| quad(ee, node + 0x80 + 16 * r));
-            ob.node.origin = origin;
+            ob.node.origin = quad(ee, node + 0xb0);
             (c, k)
         })
         .collect()
+}
+
+/// [`seed`]'s order is the original's: in a state before the strike (every ball where it was made),
+/// each RAM ball's node stands nearest its own prop's.
+fn seed_by_place(ee: &Ee, set: &PropSet) {
+    for (b, &o) in BALLS.iter().enumerate() {
+        let origin = quad(ee, ee.u32_at(o + 0x13c) + 0xb0);
+        let d = |ob: &game_sim::prop_world::Object| (ob.node.origin - origin).0[..3].iter().map(|v| v * v).sum::<f32>();
+        let objects: Vec<&game_sim::prop_world::Object> = set.collections.iter().flat_map(|c| c.objects.iter()).filter(|ob| ob.collision.is_some()).collect();
+        let nearest = (0..objects.len()).min_by(|&x, &y| d(objects[x]).total_cmp(&d(objects[y]))).expect("props");
+        assert_eq!(nearest, b, "ball {b} stands nearest prop {nearest}");
+    }
 }
 
 fn the_record(ee: &Ee) -> u32 {
@@ -456,6 +474,7 @@ fn the_rides_plane_knocks_the_ball() {
     let Some((plane, hull)) = the_plane(&kit) else { return };
     let Some((mut set, mut ground)) = free06() else { return };
     let Some(ee) = image(&kit, "hit0-11042") else { return };
+    seed_by_place(&ee, &set);
     let balls = seed(&ee, &mut set);
     let (c, o) = balls[0];
     assert!(!set.collections[c].bones[o].body.enabled, "ball 0 is asleep in 11042");
@@ -479,4 +498,183 @@ fn the_rides_plane_knocks_the_ball() {
     assert_eq!(woke, Some(3), "ball 0 wakes on the original's tick, 11046");
     let along = |v: Vf| v.0[0] * before.0[0] + v.0[2] * before.0[2];
     assert!(along(ball.velocity) > 0.0, "ball 0 is thrown along the plane's way");
+}
+
+/// hit0-11061 searched the plane lane's way in the port (S258): free06's props with the six balls
+/// where the state has them (woken as a strike wakes them, filed in the node's order), the props' own
+/// searches and their strikes on each other ([`PropSet::search`], S242), the plane's rays on them
+/// ([`Flight::search_props`]: none here) and their rays on the hull ([`prop_wreck::struck_on`]).
+struct Lane {
+    ee: Ee,
+    set: PropSet,
+    balls: Vec<(usize, usize)>,
+    records: Vec<u32>,
+    plane: Flight,
+    plane_rec: u32,
+    filed: Vec<u32>,
+    dt: f32,
+}
+
+fn lane_11061() -> Option<Lane> {
+    let kit = Kit::load().map_err(|why| skip(&why)).ok()?;
+    let (base, hull) = the_plane(&kit)?;
+    let (mut set, ground) = free06()?;
+    let ee = image(&kit, "hit0-11061")?;
+    let dt = ee.f32_at(addr("frame_dt").unwrap());
+    let records: Vec<u32> = BALLS.iter().map(|&o| ee.u32_at(o + 0x120)).collect();
+    let plane_rec = the_record(&ee);
+    let filed: Vec<u32> = (0..ee.u32_at(NODE + 0x30)).map(|k| ee.u32_at(ee.u32_at(NODE + 0x38) + 4 * k)).collect();
+    let balls = seed(&ee, &mut set);
+    for (b, &(c, o)) in balls.iter().enumerate() {
+        let body = set.collections[c].bones[o].body;
+        if body.enabled {
+            set.collections[c].bones[o].body.enabled = false;
+            set.struck(c, o);
+            set.collections[c].bones[o].body = body;
+        }
+        let at = filed.iter().position(|&f| f == records[b]);
+        let ob = &mut set.collections[c].objects[o];
+        ob.filed = at.is_some();
+        ob.filed_at = at.map_or(0, |k| k as u32 + 1);
+        ob.countdown = F(ee.f32_at(BALLS[b] + 0x1bc));
+        ob.fresh = ee.u32_at(BALLS[b] + 0x1b0) != 0;
+        let col = ob.collision.as_mut().expect("a ball has a collision object");
+        col.collider.cofg_world = quad(&ee, records[b] + 0xa0);
+        col.collider.normal_speed = F(ee.f32_at(records[b] + 0x1d8));
+        col.collider.relative = quad(&ee, records[b] + 0x1e0);
+        col.record.swept_from = quad(&ee, records[b] + 0xd0);
+        col.record.swept_to = quad(&ee, records[b] + 0xe0);
+    }
+    let field = ground.field();
+    let _ = set.search(F(dt), Some(&field), None, None);
+    let mut plane = base.with_hull(hull.clone());
+    plane.body = body_of(&ee, ee.u32_at(PLANE + 0x160));
+    let mut flat = Flat { y: F(-1.0e6), ..Default::default() };
+    let knocked = plane.search_props(F(dt), &mut flat, &set);
+    assert!(knocked.iter().all(|(_, _, m)| m.is_empty()), "the plane's rays strike no ball in 11061");
+    let node = ee.u32_at(plane_rec + 0xf8);
+    let at = [0, 1, 2].map(|r| quad(&ee, node + 0x80 + 16 * r));
+    let at = [at[0], at[1], at[2], quad(&ee, node + 0xb0)];
+    let _ = prop_wreck::struck_on(&mut set, &hull, at, flight::COLLIDABLE, flight::COLLIDES_WITH, 0);
+    Some(Lane { ee, set, balls, records, plane, plane_rec, filed, dt })
+}
+
+/// **The balls' rays strike each other as the original's, among the plane** (S258): in 11061 the
+/// knocked balls are filed on the node after the plane, and besides their entries on its hull they
+/// strike each other (ball 2 on ball 0: kind 0 on the striker naming the struck ball's record, the
+/// mirror on the struck ball's, after its own entries — its hull entry too — as ball 0 is filed
+/// first). The original's node re-searched from the state (every filed list emptied, then every
+/// object's search) against [`lane_11061`]: every ball's whole list, in order — kind, the side it
+/// names (the terrain, a ball, the plane) and every field the search writes — and the flags.
+#[test]
+fn the_balls_rays_strike_each_other_as_the_originals() {
+    let Some(Lane { mut ee, set, balls, records, plane_rec, filed, dt, .. }) = lane_11061() else { return };
+    for &o in &filed {
+        ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x74), &[u64::from(o)], &[], 50_000_000);
+    }
+    for &o in &filed {
+        ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x7c), &[u64::from(o)], &[dt], 50_000_000);
+    }
+    let flats: Vec<usize> = balls.iter().map(|&(c, o)| prop_props::flat(&set, c, o)).collect();
+    let name_orig = |e: &Contact| match e.other.map(|o| o as u32) {
+        None => "-".to_string(),
+        Some(r) if r == plane_rec => "plane".to_string(),
+        Some(r) => records.iter().position(|&b| b == r).map_or(format!("{r:#x}"), |b| format!("ball{b}")),
+    };
+    let name_port = |e: &Contact| match e.other {
+        None => "-".to_string(),
+        Some(o) if o >= prop_props::PROP_OTHER => {
+            let f = o - prop_props::PROP_OTHER;
+            flats.iter().position(|&b| b == f).map_or(format!("prop{f}"), |b| format!("ball{b}"))
+        }
+        Some(0) => "plane".to_string(),
+        Some(o) => format!("?{o}"),
+    };
+    let show = |l: &[Contact], n: &dyn Fn(&Contact) -> String| l.iter().map(|e| format!("k{} {}", e.kind, n(e))).collect::<Vec<_>>();
+    let mut bad = Vec::new();
+    let mut between = 0;
+    for (b, &(c, o)) in balls.iter().enumerate() {
+        let orig = list_at(&ee, records[b]);
+        let col = set.collections[c].objects[o].collision.as_ref().unwrap();
+        let port = &col.record.contacts;
+        eprintln!("ball {b}: port {:?}\n        original {:?}", show(port, &name_port), show(&orig, &name_orig));
+        between += orig.iter().filter(|e| name_orig(e).starts_with("ball")).count();
+        if port.len() != orig.len() {
+            bad.push(format!("ball {b}: port {} entries, original {}", port.len(), orig.len()));
+        }
+        for (k, (p, e)) in port.iter().zip(&orig).enumerate() {
+            let d = searched_differ(p, e);
+            if !d.is_empty() || name_port(p) != name_orig(e) {
+                bad.push(format!("ball {b}'s entry {k}: {d:?}, port names {} original {}", name_port(p), name_orig(e)));
+            }
+        }
+        let r = &col.record;
+        let flags = [r.touching, r.touching_other, r.on_ground, r.on_object];
+        let want = [0x40, 0x44, 0x48, 0x4c].map(|a| ee.u32_at(records[b] + a) != 0);
+        if flags != want {
+            bad.push(format!("ball {b}'s flags: port {flags:?} original {want:?}"));
+        }
+    }
+    assert!(between > 0, "no ball's rays strike another in 11061");
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// **And push each other as the original's** (S258): 11061's node ticked by the original (the plane's
+/// world first, then each filed object's) against the plane lane's props step in the port
+/// ([`PropSet::step`] after [`lane_11061`], the plane its striker 0 as the original's balls find it:
+/// its body when the first ball's resolve runs). Ball 2's entry on ball 0 pushes both, ball 0's
+/// mirror pushes ball 0, balls 0's and 4's hull entries push the plane: every ball's body after the
+/// tick, and the plane's velocity and rates.
+#[test]
+fn the_balls_push_each_other_as_the_originals() {
+    let Some(Lane { mut ee, mut set, balls, records, plane, plane_rec, dt, .. }) = lane_11061() else { return };
+    let plane_body = ee.u32_at(PLANE + 0x160);
+    let met: Rc<RefCell<Option<(Body, Vf, F, Vf)>>> = Rc::default();
+    let seen = Rc::clone(&met);
+    let recs = records.clone();
+    ee.hooks.insert(
+        RESOLVE,
+        Box::new(move |ee: &mut Ee| {
+            let r = ee.r(4) as u32;
+            if recs.contains(&r) && seen.borrow().is_none() {
+                let rest = (quad(ee, plane_rec + 0xa0), F(ee.f32_at(plane_rec + 0x1d8)), quad(ee, plane_rec + 0x1e0));
+                *seen.borrow_mut() = Some((body_of(ee, plane_body), rest.0, rest.1, rest.2));
+            }
+            run_original(ee, r, ee.r(5) as u32);
+        }),
+    );
+    ee.call(NODE_UPDATE, &[u64::from(NODE)], &[dt], 2_000_000_000);
+    let (mut body, cofg_world, normal_speed, relative) = met.borrow().expect("a ball's resolve ran in the node's tick");
+    let mut collider = plane.collider;
+    (collider.cofg_world, collider.normal_speed, collider.relative) = (cofg_world, normal_speed, relative);
+    {
+        let mut weighed = Weighed { body: &mut body, mass: plane.mass };
+        let mut strikers = [Other { collider: &mut collider, side: Side::Body(&mut weighed) }];
+        set.step(F(dt), &[], &mut strikers);
+    }
+    let mut bad = Vec::new();
+    for (b, &(c, o)) in balls.iter().enumerate() {
+        let got = &set.collections[c].bones[o].body;
+        let want = body_of(&ee, ee.u32_at(BALLS[b] + 0x110));
+        for (lane, p, w) in [
+            ("position", got.position, want.position),
+            ("velocity", got.velocity, want.velocity),
+            ("quat", got.quat, want.quat),
+            ("rates", got.rates, want.rates),
+            ("shock", got.shock, want.shock),
+            ("twist", got.twist, want.twist),
+        ] {
+            if p.to_bits() != w.to_bits() {
+                bad.push(format!("ball {b} {lane}: port {:?} original {:?}", p.0, w.0));
+            }
+        }
+    }
+    let after = body_of(&ee, plane_body);
+    for (lane, p, w) in [("velocity", body.velocity, after.velocity), ("rates", body.rates, after.rates)] {
+        if p.to_bits() != w.to_bits() {
+            bad.push(format!("the plane's {lane}: port {:?} original {:?}", p.0, w.0));
+        }
+    }
+    eprintln!("{bad:#?}");
+    assert!(bad.is_empty(), "{bad:#?}");
 }
