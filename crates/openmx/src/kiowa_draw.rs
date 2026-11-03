@@ -30,6 +30,18 @@ pub fn actors<'a>(drawn: &'a Kiowa, assets: &Assets, rotor: &Rotor, at: M4, alph
     out
 }
 
+/// Where the flown helicopter's thrown blades are drawn (P265): each started, shown blade's node,
+/// as the tick left it (not slid between ticks), which both paths hang `bladebent` on.
+pub fn blades(heli: &crate::vehicle::KiowaRide) -> Vec<M4> {
+    heli.blades()
+        .iter()
+        .map(|m| {
+            let [x, y, z, o] = m.0;
+            M4([[x.x(), x.y(), x.z(), 0.0], [y.x(), y.y(), y.z(), 0.0], [z.x(), z.y(), z.z(), 0.0], [o.x(), o.y(), o.z(), 1.0]])
+        })
+        .collect()
+}
+
 /// The flown helicopter as the software path draws it (P216b), as `plane_draw::skinned_with` the
 /// plane: the model skinned by the rotor's pose into `copy`, the seat's own copy of it (made here the
 /// first time), then each of the rotor's parts up at its posed node.

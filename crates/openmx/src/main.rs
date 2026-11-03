@@ -4430,9 +4430,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             None => heli,
         };
         // And its model's nodes (S270), where its wreck throws the blades from.
-        Some(match res.find_suffix(game_sim::kiowa::KIOWA_MODEL).and_then(|e| res.read(&e.name).ok()) {
+        let heli = match res.find_suffix(game_sim::kiowa::KIOWA_MODEL).and_then(|e| res.read(&e.name).ok()) {
             Some(psg) => heli.with_model(&psg),
             None => heli,
+        };
+        // And the blades it throws (P265), bodies of their own.
+        let read = |name: &str| res.find_suffix(name).and_then(|e| res.read(&e.name).ok());
+        Some(match (read(game_sim::kiowa::WRECK_BLADE_PHY), read(game_sim::kiowa::BLADE_MODEL)) {
+            (Some(phy), Some(psg)) => heli.with_blades(&phy, &psg, read(game_sim::kiowa::BLADE_RAYS).as_deref()),
+            _ => heli,
         })
     });
     // What it reads its own (P127): it outlives the load's thread.
@@ -9249,6 +9255,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let Some((at, rotor)) = heli_drawn(heli, before, &blend) else { continue };
                 let alpha = vehicle::shown_alpha(1.0, seat.paused);
                 actors.extend(kiowa_draw::actors(drawn, &assets, &rotor, at, alpha, &mut gpu_poses));
+                // And its thrown blades (P265), each at its own node, as the tick left it.
+                actors.extend(kiowa_draw::blades(heli).into_iter().map(|at| Actor { model: game_render::kiowa::BLADE_BENT, at, pose: None, lod_from: None, alpha, casts: false }));
                 // And its pilot in the seat, as the plane's (P216b).
                 if let (Some(Some(pilot)), Some(model)) = (heli_pilots.get(p), &rigs[p].body_model) {
                     gpu_poses.push(pilot.palette.clone());
@@ -9651,6 +9659,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let before = before_helis.get(p).copied().flatten().filter(|_| !cut[p]);
                 let Some((at, rotor)) = heli_drawn(heli, before, &blend) else { continue };
                 actor.extend(kiowa_draw::skinned(drawn, &heli_copies[p], &mut assets, &rotor, at));
+                actor.extend(kiowa_draw::blades(heli).into_iter().map(|at| (game_render::kiowa::BLADE_BENT, at)));
                 if let (Some(Some(pilot)), Some(model)) = (heli_pilots.get(p), &rigs[p].body_model) {
                     if let Some(loaded) = assets.models.get_mut(model.as_str()) {
                         loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
@@ -10067,6 +10076,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if let Some(fx) = heli_fx.first() {
                 let counts: Vec<String> = fx.counts().iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect();
                 println!("kiowa: particles: {}", counts.join(", "));
+            }
+            // And its thrown blades (P265).
+            let place = &mut world.place;
+            if let Some(said) = world.seats[0].garage.heli_up().and_then(|h| h.blades_report(place)) {
+                println!("{said}");
             }
         }
     }
