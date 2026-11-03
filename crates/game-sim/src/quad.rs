@@ -608,6 +608,15 @@ pub enum Call {
     SpinIntegrate(usize, F),
     /// What the gravity [`Steps`] runs calls in turn (MD75b): the collision record's virtual, handed 1.
     GravityRecord,
+    /// What the vehicle post [`Steps`] runs calls in turn (MD75b1, [`crate::atv_moto::vehicle_post`]):
+    /// with the quad's origin outside the world, the body's reset (vt `+0x13c`) and the respawn (vt
+    /// `+0xe8`); then the spatial update (vt `+0xe4`), the node's bounds when bit 1 of the flag byte is
+    /// set (`atv_node_bounds`), and the collision sync (vt `+0x124`).
+    BodyReset,
+    Respawn,
+    SpatialUpdate,
+    NodeBounds,
+    CollisionSync,
     /// The wreck body's ([`build_wreck_body`], [`swap_rays`], MD65a): a ray-probe part made; its flag
     /// byte set from a flags word; it hung in the quad's scene tree; the wreck rays loaded from
     /// [`WRECK_FILE`] on the quad's scene node, then readied; a part shown in or hidden from the scene,
@@ -1878,6 +1887,30 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
             }
             Call::RevLimit => crate::atv_moto::rev_limit(&self.bike.engine, &mut self.bike.parts.drive, self.bike.parts.driven),
             Call::PeakRates => crate::atv_moto::peak_rates(q, body),
+            Call::SpinAir(dt) => {
+                let (keys, ..) = self.air_in(q, body, dt);
+                let b = &mut self.bike;
+                let loads = crate::air::Loads { side: F(q.attitude.x()), fore_aft: F(q.attitude.z()), ..Default::default() };
+                let steep = crate::handling::step::flip_wreck_steep(&keys, b.struck_class, q.airborne, &loads);
+                if let Some(c) = crate::atv_moto::spin_air(b, q, body, dt, steep) {
+                    self.rest.call(c, q, body);
+                }
+            }
+            Call::VehiclePost(_) => {
+                let b = &mut self.bike;
+                let Some(inside) = crate::atv_moto::vehicle_post(&mut b.parts, body, b.cofg) else { return };
+                if !inside {
+                    self.rest.call(Call::BodyReset, q, body);
+                    self.rest.call(Call::Respawn, q, body);
+                }
+                self.rest.call(Call::SpatialUpdate, q, body);
+                if self.bike.parts.flags & 0x02 != 0 {
+                    self.rest.call(Call::NodeBounds, q, body);
+                }
+                self.rest.call(Call::CollisionSync, q, body);
+                self.bike.parts.flags &= !0x04;
+            }
+            Call::NodePosition => q.node_pos = self.bike.parts.scene.position(0),
             c => self.rest.call(c, q, body),
         }
     }

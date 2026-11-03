@@ -21,3 +21,8 @@ MD75b (`3-moto-own-calls.md`): the quad's own calls (engine update, rev limit, a
 gravity, air drag, peak rates and wheel clear) are ported in `atv_moto.rs` and answered in `quad::Steps`.
 Each is unhooked in its own oracle, plus two combined oracles, and every region is equal. Spin air,
 vehicle post and node position are filed as MD75b1.
+
+MD75b1 (`4-moto-spin-post-node.md`): spin air (the 360), vehicle post (origin, world test, node orientation
+and the post's callees) and node position (the world update over a four-node scene graph) are ported in
+`atv_moto.rs` and answered in `quad::Steps`. Each is unhooked in its own oracle, plus one with both
+PostProcess calls, and every region, the scene included, is equal.
