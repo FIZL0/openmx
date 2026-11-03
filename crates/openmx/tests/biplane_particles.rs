@@ -842,7 +842,10 @@ fn a_plane_flown_into_the_ground_puffs_where_it_hits() {
     f.attitude.flown = true;
     f.place(Vf::new(0.0, 30.0, 0.0, 1.0), Vf::new(0.0, -1.0, 1.0, 0.0), &tables.acos);
     f.body.velocity = Vf::new(0.0, -80.0, 80.0, 1.0);
-    let (mut touched, mut crashed, mut puffed) = (None, None, None);
+    let (mut touched, mut crashed, mut puffed, mut first_contacts) = (None, None, None, 0);
+    // What each entry made over the run: the hull stops touching a few ticks in, and its puffs live
+    // only a second or two.
+    let (mut dust, mut chunks) = (0, 0);
     for tick in 0..90 {
         f.frame(F(DT), Pad::default(), &mut ground, &tables);
         let mut frame = PlaneFrame { wrecked: f.crash.reason != 0, vel: v3(f.body.velocity.x(), f.body.velocity.y(), f.body.velocity.z()), ..PlaneFrame::default() };
@@ -852,6 +855,7 @@ fn a_plane_flown_into_the_ground_puffs_where_it_hits() {
         fx.step(&frame, DT);
         if f.record.on_ground && touched.is_none() {
             touched = Some(tick);
+            first_contacts = frame.ground_contacts.len();
         }
         if f.crash.reason == CRASHED && crashed.is_none() {
             crashed = Some(tick);
@@ -862,6 +866,7 @@ fn a_plane_flown_into_the_ground_puffs_where_it_hits() {
             // a frame's path back along the contact's velocity.
             let reach = frame.contact_vel.unwrap().len() * DT + 2.0;
             for p in &fx.particles[before..] {
+                *if p.emitter == 0 { &mut dust } else { &mut chunks } += 1;
                 let near = frame.ground_contacts.iter().map(|c| c.sub(p.at).len()).fold(f32::MAX, f32::min);
                 assert!(near <= reach, "tick {tick}: a puff {near} ft from every contact (reach {reach})");
             }
@@ -870,12 +875,14 @@ fn a_plane_flown_into_the_ground_puffs_where_it_hits() {
             assert!(fx.particles.is_empty(), "tick {tick}: dust before the hull touched");
         }
     }
-    eprintln!("touched {touched:?}, crashed {crashed:?}, first puff {puffed:?}, {} in the air", fx.particles.len());
+    eprintln!("touched {touched:?} at {first_contacts} contacts, crashed {crashed:?}, first puff {puffed:?}, {} in the air", fx.particles.len());
     let touched = touched.expect("the collision object never found the ground");
     assert_eq!(crashed.map(|c| c >= touched), Some(true), "the plane did not crash on touching");
-    // The tick it touches switches the entries on, and their first run only takes the point (P153).
-    assert_eq!(puffed, Some(touched + 1), "the dust is the tick after the contact's");
-    let dust = fx.particles.iter().filter(|p| p.emitter == 0).count();
-    let chunks = fx.particles.iter().filter(|p| p.emitter == 1).count();
+    // The tick it touches switches the entries on, and their first run only takes the point (P153):
+    // one run a contact, so a first touch on one contact puffs the tick after, and on more the second
+    // contact's run already emits. Which it is hangs on the dive's attitude: since S205's place the
+    // hull meets the ground a tick sooner, on two contacts (F9).
+    let want = if first_contacts > 1 { touched } else { touched + 1 };
+    assert_eq!(puffed, Some(want), "the dust after a first touch on {first_contacts} contacts");
     assert!(dust > 0 && chunks > 0, "dust {dust}, chunks {chunks}");
 }
