@@ -247,6 +247,7 @@ mod textures;
 mod track_mods;
 mod track_previews;
 mod trick_packs;
+mod trick_view;
 mod machine_packs;
 mod music_packs;
 mod worlds;
@@ -2822,9 +2823,10 @@ async fn front_end(args: Args) -> Result<(), String> {
     };
     let (width, height) = frame_size(shell.window.as_ref().expect("the front end has a window"));
     let mut frame = Frame::new(width, height, [0, 0, 0]);
-    // A pause asked for by `--screen` is over a ride, so it starts one on the last track.
+    // A pause asked for by `--screen` is over a ride, so it starts one on the last track; so is its
+    // Tricks page (P259).
     let mut act = match shell.front.menu.screen() {
-        Some(menu::Screen::Pause) => Act::Ride(shell.front.menu.settings.track.clone()),
+        Some(menu::Screen::Pause | menu::Screen::Tricks) => Act::Ride(shell.front.menu.settings.track.clone()),
         _ => Act::Stay,
     };
     let mut shot = args.shot.clone();
@@ -2892,7 +2894,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 }
                 a.wiring = shell.front.wiring();
                 // The shot is the menu's unless it is of the pause, which is drawn over the ride.
-                a.shot = shot.take_if(|_| shell.front.menu.screen() == Some(menu::Screen::Pause));
+                a.shot = shot.take_if(|_| matches!(shell.front.menu.screen(), Some(menu::Screen::Pause | menu::Screen::Tricks)));
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
                 // A local game (P43): one player a seat its join screen has in play, each on that seat's
                 // controller, drawn in the split layout it picked.
@@ -5133,6 +5135,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
+    // The pause's Tricks page (P259) lists what this ride can do: the 24, the packs' and their moves.
+    if let Some(s) = shell.as_deref_mut() {
+        s.front.menu.trick_rows = menu::trick_list::rows(&stunts, phy.tricks.as_ref());
+        println!("tricks page: {} tricks", s.front.menu.trick_rows.len());
+    }
+    // And its rider, loaded the first time a view shows the page: `Some(None)` when it could not be.
+    let mut trick_stage: Option<Option<trick_view::TrickView>> = None;
     // What a picture drawn while a tick runs on the sim thread asks of the place (N23a): the same
     // ground, and none of the props, which the tick has. A tiled world's ticks stay on the loop.
     let mut drawn_land = match (&sim, keep_terrain.get()) {
@@ -9002,6 +9011,21 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // own shape and put into the window's frame; a full screen's one view is the frame itself.
         // Each player's body is skinned at the level of detail the camera drawing it has earned, so
         // a rider is re-skinned for a view only where that differs from the view before.
+        // The Tricks page's rider (P259), posed once a frame for each paused view showing the page.
+        let trick_shown = front.as_deref_mut().map_or(Vec::new(), |f| trick_view::shown(&mut f.menu, &rects, world.seats.len()));
+        if trick_stage.is_none() && !trick_shown.is_empty() {
+            let rider = rider_member.as_deref().map(|m| (m, args.rider.as_str()));
+            let bike = Some((bike_member.as_str(), vehicle.mcf.as_str()));
+            let bike_model = rigs.first().map_or(CHASSIS, |r| r.bike_model.as_str());
+            trick_stage = Some(trick_view::load(&mut disc, rider, bike, BIKE_PREFIX, &table.stunts, phy.motion(), pack_clips.as_ref(), &stunts, &assets, bike_model));
+        }
+        let trick_posed: Vec<([usize; 4], trick_view::Posed)> = match trick_stage.as_mut().and_then(Option::as_mut) {
+            Some(stage) => {
+                let rows: Vec<&menu::trick_list::TrickRow> = trick_shown.iter().map(|(_, row)| row).collect();
+                trick_shown.iter().map(|(rect, _)| *rect).zip(stage.poses(&rows, Instant::now())).collect()
+            }
+            None => Vec::new(),
+        };
         let mut skinned: Vec<Option<usize>> = vec![None; rigs.len()];
         let mut drawn = 0;
         // Each flying player's pilot (V39), posed once for every view and both renderers.
@@ -9327,6 +9351,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("warm frame: {:.2} ms behind the loading screen", took.as_secs_f64() * 1000.0);
                 }
             }
+            // The Tricks page's rider over the pause (P259), after the frame and before it is read.
+            let trick_draw = |r: &mut Renderer, t: &Target| {
+                if let (Some(Some(stage)), Some(rig)) = (&trick_stage, rigs.first()) {
+                    let models = trick_view::Models { bike: &rig.bike_model, parts: &rig.parts, body: rig.body_model.as_deref() };
+                    stage.draw_gpu_each(r, t, &assets, &models, &trick_posed);
+                }
+            };
             let mut waited = Duration::ZERO;
             let out = match (&mut offscreen, window.as_mut().and_then(|w| w.gpu())) {
                 (Some((r, texture)), _) => {
@@ -9336,6 +9367,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     set_plane_sprites(r, &mut fx_sheet, &sprites);
                     set_glows(r, &mut glow_textures, &glows);
                     let d = r.render(&offscreen_target(&view, fw, fh), &assets, &scene);
+                    trick_draw(r, &offscreen_target(&view, fw, fh));
                     // Nothing else waits on a frame nobody sees: without this the queue runs ahead,
                     // and the times would be the CPU's alone.
                     let wait_at = Instant::now();
@@ -9352,7 +9384,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     set_plane_sprites(&mut w.renderer, &mut fx_sheet, &sprites);
                     set_glows(&mut w.renderer, &mut glow_textures, &glows);
                     let spent = Instant::now();
-                    let d = w.draw(frame.width, frame.height, |r, t| r.render(t, &assets, &scene))?;
+                    let d = w.draw(frame.width, frame.height, |r, t| {
+                        let d = r.render(t, &assets, &scene);
+                        trick_draw(r, t);
+                        d
+                    })?;
                     waited = w.waited;
                     // Judged on the GPU's own time where it has timestamps (V122); without, on the
                     // draw's wall time, leaving out frames the CPU made late.
@@ -9373,6 +9409,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         let t = w.renderer.offscreen(fw, fh);
                         let view = t.create_view(&Default::default());
                         w.renderer.render(&offscreen_target(&view, fw, fh), &assets, &scene);
+                        trick_draw(&mut w.renderer, &offscreen_target(&view, fw, fh));
                         frame.color = w.renderer.read(&t);
                     }
                     d
@@ -9745,6 +9782,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         fps_meter.frame(Instant::now());
         if let Some(front) = front.as_ref().filter(|_| !gpu_on && view_frames.is_empty()) {
             perf.time(Stage::Draw, || front.art.draw(&front.menu, &mut frame));
+        }
+        // The Tricks page's rider over the software pause (P259), each view's already put in the frame.
+        if let (false, Some(Some(stage)), Some(rig)) = (gpu_on, &mut trick_stage, rigs.first()) {
+            let models = trick_view::Models { bike: &rig.bike_model, parts: &rig.parts, body: rig.body_model.as_deref() };
+            for (rect, posed) in &trick_posed {
+                stage.draw_soft(&mut frame, &assets, *rect, &models, posed);
+            }
         }
         stages.mark(stages::Stage::Hud);
         if let Some(window) = window.as_mut().filter(|_| !gpu_on) {

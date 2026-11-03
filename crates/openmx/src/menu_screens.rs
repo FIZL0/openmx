@@ -54,6 +54,9 @@ const BAND: f32 = 4.6;
 /// Where the Garage stands its bike and rider (P213): right of the plate, over the side panel, in
 /// the stage's top right as the original's model stands in its screen's — x, y, width, height.
 const GARAGE_STAGE: [f32; 4] = [59.0, 1.6, 20.6, 23.2];
+/// Where the pause's Tricks page shows its lit trick performed (P259): its glass box right of the
+/// list, x, y, width, height.
+const TRICK_STAGE: [f32; 4] = [49.5, 2.5, 28.0, 18.5];
 /// The main list's type, and how far a pill reaches past its label either side, in ems of the
 /// stage ([`PILL_PAD`] in the stage's ems).
 const ITEM: f32 = 1.7;
@@ -74,6 +77,13 @@ enum Btn {
     L1R1,
     /// The d-pad's left and right.
     LeftRight,
+    /// R1 alone, the original's trick modifier (P259).
+    R1,
+    /// One way of the stick or the d-pad (P259), as a trick's gesture is drawn.
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,6 +117,13 @@ pub(super) fn fit(size: (usize, usize)) -> (f32, [f32; 2]) {
 pub(super) fn garage_stage(size: (usize, usize)) -> [f32; 4] {
     let (em, o) = fit(size);
     let [x, y, w, h] = GARAGE_STAGE;
+    [o[0] + x * em, o[1] + y * em, w * em, h * em]
+}
+
+/// [`TRICK_STAGE`] in a `size` frame's pixels: x, y, width, height.
+pub(super) fn trick_stage(size: (usize, usize)) -> [f32; 4] {
+    let (em, o) = fit(size);
+    let [x, y, w, h] = TRICK_STAGE;
     [o[0] + x * em, o[1] + y * em, w * em, h * em]
 }
 
@@ -402,6 +419,25 @@ impl<'a> Pen<'a> {
                 }
                 return;
             }
+            Btn::R1 => {
+                let size = d * 0.5;
+                let w = self.wide(Weight::Heavy, "R1", size) + d * 0.6;
+                self.round([x - w / 2.0, y - r * 0.8, w, d * 0.8], d * 0.25, SHOULDER, SHOULDER);
+                self.text(Weight::Heavy, "R1", x, Pen::mid(y, size), size, 0.0, CHALK, Align::Centre);
+                return;
+            }
+            Btn::Up | Btn::Down | Btn::Left | Btn::Right => {
+                let dir = match b {
+                    Btn::Up => [0.0, -1.0],
+                    Btn::Down => [0.0, 1.0],
+                    Btn::Left => [-1.0, 0.0],
+                    _ => [1.0, 0.0],
+                };
+                let w = d * 0.9;
+                self.round([x - w / 2.0, y - w / 2.0, w, w], d * 0.2, SHOULDER, SHOULDER);
+                self.arrow(x, y, dir, d * 0.45, CHALK);
+                return;
+            }
             Btn::LeftRight => {
                 let w = d * 0.8;
                 for (i, dir) in [-1.0f32, 1.0].into_iter().enumerate() {
@@ -437,6 +473,8 @@ impl<'a> Pen<'a> {
             Btn::Select => self.wide(Weight::Heavy, "SELECT", d * 0.5) + d * 0.6,
             Btn::L1R1 => 2.0 * (self.wide(Weight::Heavy, "L1", d * 0.5) + d * 0.6) + d * 0.15,
             Btn::LeftRight => 2.0 * d * 0.8 + d * 0.15,
+            Btn::R1 => self.wide(Weight::Heavy, "R1", d * 0.5) + d * 0.6,
+            Btn::Up | Btn::Down | Btn::Left | Btn::Right => d * 0.9,
             _ => d,
         }
     }
@@ -941,6 +979,7 @@ fn pause_panel(row: &str) -> (String, &'static str) {
         "Settings" => "Every setting takes effect when the pause closes.",
         "Controllers" => "Which pad, keyboard or touch pad drives which seat. The riders swap when their pads do.",
         "Main Menu" => "Ends the ride.",
+        "Tricks" => "Every trick this ride has, how to do it and what it scores, each shown done.",
         "Leave Session" => "Gives up your seat: your bike goes and the others ride on. The last one out ends the ride.",
         QUIT if cfg!(target_arch = "wasm32") => "Ends the ride and goes back to the launcher page.",
         QUIT => "Ends the ride and closes the game.",
@@ -950,6 +989,22 @@ fn pause_panel(row: &str) -> (String, &'static str) {
         _ => "Lets online players drop into this ride with the seats the lobby last chose. Your seat stays yours; the code appears here, and Seats under it.",
     };
     (pause_label(row).0, about)
+}
+
+/// The pad glyph a trick's gesture step is drawn as (P259).
+fn glyph_button(g: super::trick_list::Glyph) -> Btn {
+    use super::trick_list::Glyph;
+    match g {
+        Glyph::Circle => Btn::Circle,
+        Glyph::Triangle => Btn::Triangle,
+        Glyph::R1 => Btn::R1,
+        Glyph::Cross => Btn::Cross,
+        Glyph::Square => Btn::Square,
+        Glyph::Up => Btn::Up,
+        Glyph::Down => Btn::Down,
+        Glyph::Left => Btn::Left,
+        Glyph::Right | Glyph::Then => Btn::Right,
+    }
 }
 
 /// A pause row as the list says it: the switch row as "Switch to Biplane", dim with nowhere to go.
@@ -1035,7 +1090,7 @@ impl Pen<'_> {
         }
         let Some(screen) = menu.screen() else { return };
         match screen {
-            Screen::Pause => {
+            Screen::Pause | Screen::Tricks => {
                 let whole = self.whole();
                 self.fill(whole, PAUSE_DIM);
             }
@@ -1045,6 +1100,7 @@ impl Pen<'_> {
         match screen {
             Screen::Main => self.main(menu),
             Screen::Pause => self.pause(menu),
+            Screen::Tricks => self.tricks(menu),
             Screen::Online => self.online(menu),
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page(menu, screen),
             Screen::Tracks => self.tracks(menu),
@@ -1212,6 +1268,98 @@ impl Pen<'_> {
         } else {
             self.hints(&[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);
         }
+    }
+
+    /// The pause's Tricks page (P259): the ride's tricks down the left, each its name, its gesture
+    /// in pad glyphs and its points, scrolled so the lit one shows; right of them the lit trick's
+    /// box, which the shell draws it performed in ([`Menu::trick_stage`]), and under it its words.
+    fn tricks(&mut self, menu: &Menu) {
+        use super::trick_list::{Glyph, how_words, is_button};
+        let rows = &menu.trick_rows;
+        let at = menu.cursor(Screen::Tricks).min(rows.len().saturating_sub(1));
+        let (x, w, top) = (2.5, 45.0, 2.5);
+        let bottom = STAGE.1 - BAND - 4.4;
+        self.round([x, top, w, bottom - top], 0.9, GLASS, GLASS);
+        let (name_x, how_x, points_x) = (x + 1.2, x + 19.0, x + w - 1.2);
+        let head = top + 1.0 + CAP;
+        for (word, at_x, align) in [("TRICK", name_x, Align::Left), ("BUTTONS", how_x, Align::Left), ("POINTS", points_x, Align::Right)] {
+            self.text(Weight::Bold, word, at_x, head, 0.9, 0.0, HEADING, align);
+        }
+        let (row_h, gap) = (1.95, 0.2);
+        let first_y = top + 2.6;
+        let shown = (((bottom - 0.6 - first_y) / (row_h + gap)) as usize).max(1);
+        let first = at.saturating_sub(shown / 2).min(rows.len().saturating_sub(shown));
+        if first > 0 {
+            self.arrow(x + w / 2.0, first_y - 0.45, [0.0, -1.0], 0.6, BONE);
+        }
+        if rows.is_empty() {
+            self.text(Weight::Bold, "No ride, no tricks.", name_x, Pen::mid(first_y + row_h / 2.0, 1.15), 1.15, 0.0, DUST, Align::Left);
+        }
+        let mut y = first_y;
+        let mut last_from = rows.get(first.wrapping_sub(1)).map(|r| r.from);
+        for (i, r) in rows.iter().enumerate().skip(first).take(shown) {
+            let lit = i == at;
+            let b = [x + 0.4, y, w - 0.8, row_h];
+            let mid = y + row_h / 2.0;
+            // A rule where the list moves on to the packs' or R1's.
+            if last_from.is_some_and(|f| f != r.from) {
+                self.fill([x + 1.2, y - gap / 2.0 - 0.03, w - 2.4, 0.06], RIM);
+            }
+            last_from = Some(r.from);
+            if lit {
+                self.pill(b, 0.22, 0.08);
+            }
+            let k = 1.15;
+            let (kw, kc, ks) = if lit { (Weight::Heavy, CHALK, SLANT) } else { (Weight::Bold, BONE, 0.0) };
+            let name = self.fit(kw, &r.name, k, how_x - name_x - 0.8);
+            let lb = self.text(kw, &name, name_x, Pen::mid(mid, k), k, ks, kc, Align::Left);
+            if lit {
+                self.parts.push(Part::Pill { pill: self.b(b), label: lb });
+            } else {
+                self.parts.push(Part::Item(lb));
+            }
+            let d = 1.3;
+            let mut gx = how_x;
+            for g in &r.how {
+                if *g == Glyph::Then {
+                    let tw = self.wide(Weight::Bold, "then", 0.8);
+                    self.text(Weight::Bold, "then", gx, Pen::mid(mid, 0.8), 0.8, 0.0, if lit { CHALK } else { DUST }, Align::Left);
+                    gx += tw + 0.35;
+                    continue;
+                }
+                let btn = glyph_button(*g);
+                let bw = self.button_wide(btn, d);
+                self.button(btn, gx + bw / 2.0, mid, d);
+                gx += bw + if is_button(*g) { 0.3 } else { 0.25 };
+            }
+            let pc = if lit { CHALK } else { PEACH };
+            self.text(Weight::Heavy, &r.points, points_x, Pen::mid(mid, 1.05), 1.05, 0.0, pc, Align::Right);
+            y += row_h + gap;
+        }
+        if first + shown < rows.len() {
+            self.arrow(x + w / 2.0, y + 0.05, [0.0, 1.0], 0.6, BONE);
+        }
+        // The lit trick's box, which the shell draws it into, and its words under it.
+        let [sx, sy, sw, sh] = TRICK_STAGE;
+        self.round([sx + 0.3, sy + 0.35, sw, sh], 0.9, SHADOW, SHADOW);
+        self.round([sx, sy, sw, sh], 0.9, [0x2a, 0x22, 0x1e, 235], [0x12, 0x0d, 0x0a, 235]);
+        self.ring([sx, sy, sw, sh], 0.9, 0.08, RIM);
+        if let Some(r) = rows.get(at) {
+            let eyebrow = format!("{} · {}", r.from, r.when);
+            let y = self.heading(&eyebrow, &r.name, "", sx, sy + sh + 1.2, sw, 2.4);
+            let how = how_words(&r.how);
+            let y = self.para(&format!("{how}."), sx, y + 0.5, sw, 1.2, 1.4, PAPER);
+            let points = match r.points.as_str() {
+                "—" => "No points: it straightens the bike in the air.".to_string(),
+                p if p.ends_with("/s") => format!("*{p}* on one wheel past a second"),
+                p if p.ends_with('+') => format!("*{}* done through, more held", p.trim_end_matches('+')),
+                p => format!("*{p}* points"),
+            };
+            self.chips(&[points], sx, y + 0.6, sw);
+        }
+        let title = if menu.riders > 1 { format!("{}P Tricks", menu.pauser + 1) } else { "Tricks".into() };
+        self.title(&title);
+        self.hints(&[(Btn::Circle, "Back"), (Btn::Start, "Resume")]);
     }
 
     /// The pause's music player (P174): a glass box with the song playing and its three controls,

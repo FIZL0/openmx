@@ -70,7 +70,8 @@ Tricks are the original's: in the air, hold one, two or three of **Circle**, **T
 and push the **d-pad** — that names one of the 24 stunts. With trick packs on (Settings → Ride, one
 On/Off row a pack; packs on stack), **Cross**, **Square** or both, alone or over those three, give
 96 more. **L1 + R1** puts the bike back. **M**
-switches between the bike and the biplane. **Start** pauses.
+switches between the bike and the biplane. **Start** pauses; the pause's **Tricks** page lists every
+trick the ride has, with its buttons, stick and points, and your rider performing the one lit.
 
 A keyboard works too — X/Space, Z, the arrow keys, C/V/D for the trick buttons, A+D for the reset
 (also WASD/HJKL layouts). `--throttle r2` and `--pad-pressure` arrange analogue gas on pads that do not

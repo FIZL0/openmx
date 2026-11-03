@@ -61,6 +61,9 @@ pub mod cameras;
 mod screens;
 #[path = "menu_store.rs"]
 mod store;
+// The pause's Tricks page (P259): the ride's tricks, their gestures and points.
+#[path = "menu_tricks.rs"]
+pub mod trick_list;
 pub use store::{Card, Got, Listed, PACKS_ONLINE, PACKS_TAB, PackRow, Phase, Posted, STORE_COLUMNS, STORE_PAGES, STORE_RULES, STORE_TABS, Shop, StoreAsk, TEXTURES_TAB, UPLOAD_TAB, UpRow, Upload, size_words};
 #[path = "menu_player.rs"]
 mod player;
@@ -2542,10 +2545,13 @@ pub enum Screen {
     Assign,
     /// The mod store (P198), Mods' Browse the Store: its mods as a picture grid, a tab a kind.
     Store,
+    /// The pause's Tricks page (P259): every trick the ride has, how it is done and what it scores,
+    /// the lit one performed in a small view.
+    Tricks,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 21] = [
+    pub const ALL: [Screen; 22] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2567,6 +2573,7 @@ impl Screen {
         Screen::Original,
         Screen::Assign,
         Screen::Store,
+        Screen::Tricks,
     ];
 
     fn index(self) -> usize {
@@ -2597,6 +2604,7 @@ impl Screen {
             Screen::Original => "original",
             Screen::Assign => "controllers",
             Screen::Store => "store",
+            Screen::Tricks => "tricks",
         }
     }
 
@@ -2627,6 +2635,7 @@ impl Screen {
             Screen::Original => "Original Game",
             Screen::Assign => "Controllers",
             Screen::Store => "Mod Store",
+            Screen::Tricks => "Tricks",
         }
     }
 }
@@ -2676,17 +2685,18 @@ const MAIN_CONTROLLERS: usize = 6;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
 /// machine a switch would go to. "Game Modifiers" (P134) is the old front end's way in from the
 /// pause, put back: the host's page of every seat's, or the pausing player's own. "Controllers" is
-/// P210's screen, over the ride. Audio is only
+/// P210's screen, over the ride. "Tricks" is P259's page of the ride's tricks. Audio is only
 /// Settings' tab and the port's Clear Markers is gone (P211); a ride's markers clear from the
 /// spawn's Down (P135). The online rows go in above Main Menu, which stays right above Quit
 /// ([`Menu::pause_layout`]).
-pub const PAUSE: [&str; 8] =
-    ["Resume", "Restart", "Switch To Machine", "Settings", "Controllers", "Game Modifiers", "Main Menu", QUIT];
+pub const PAUSE: [&str; 9] =
+    ["Resume", "Restart", "Switch To Machine", "Settings", "Controllers", "Game Modifiers", "Tricks", "Main Menu", QUIT];
 const PAUSE_SWITCH: usize = 2;
 const PAUSE_SETTINGS: usize = 3;
 const PAUSE_CONTROLLERS: usize = 4;
 const PAUSE_MODIFIERS: usize = 5;
-const PAUSE_MAIN: usize = 6;
+const PAUSE_TRICKS: usize = 6;
+const PAUSE_MAIN: usize = 7;
 /// The pause's "Open to Online" row (N10), on a ride that can be opened ([`Menu::opening`]); opened,
 /// the room code.
 const PAUSE_OPEN_ROW: &str = "Open to Online";
@@ -3007,6 +3017,9 @@ pub struct Menu {
     /// The track pick's lists made from the three above and the filters (P254), kept until they
     /// change: [`Menu::lists`].
     lists: ListCache,
+    /// The ride's tricks as the pause's Tricks page lists them (P259), set by the shell at the ride's
+    /// start ([`trick_list::rows`]); empty in the front end.
+    pub trick_rows: Vec<trick_list::TrickRow>,
     /// Open screens, the one shown last. Empty is a ride with nothing over it.
     stack: Vec<Screen>,
     /// Each screen's row, in [`Screen::ALL`]'s order.
@@ -3342,6 +3355,7 @@ impl Menu {
             mod_tracks: Vec::new(),
             mod_games: Vec::new(),
             mod_categories: Vec::new(),
+            trick_rows: Vec::new(),
             stack: vec![Screen::Main],
             cursor,
             typing: String::new(),
@@ -4012,6 +4026,23 @@ impl Menu {
         });
     }
 
+    /// The pause's Tricks page (P259), on its first trick.
+    fn open_tricks(&mut self) {
+        self.push(Screen::Tricks);
+        self.cursor[Screen::Tricks.index()] = 0;
+    }
+
+    /// The trick the Tricks page has lit, while it is up.
+    pub fn trick_lit(&self) -> Option<&trick_list::TrickRow> {
+        (self.screen() == Some(Screen::Tricks)).then(|| self.trick_rows.get(self.cursor(Screen::Tricks)))?
+    }
+
+    /// Where the Tricks page shows its lit trick performed in a `size` frame (P259), in pixels: x,
+    /// y, width, height. None off the page.
+    pub fn trick_stage(&self, size: (usize, usize)) -> Option<[f32; 4]> {
+        (self.screen() == Some(Screen::Tricks)).then(|| screens::trick_stage(size))
+    }
+
     /// The pause opened over the ride in the menu's own fields, for [`Menu::pauser`]'s seat.
     fn open_pause(&mut self) {
         self.stack = vec![Screen::Pause];
@@ -4314,6 +4345,10 @@ impl Menu {
             Screen::Splash => self.splash(),
             Screen::Main => self.main(),
             Screen::Pause => self.pause(),
+            Screen::Tricks => {
+                self.pause();
+                self.open_tricks();
+            }
             // Settings' tabs (P118), which were screens of their own: Audio over the pause, as
             // Settings there opens on it.
             Screen::Audio => {
@@ -4405,6 +4440,7 @@ impl Menu {
             Screen::Join => join::ON_SCREEN,
             Screen::Assign => join::MOST + 1,
             Screen::Store => self.store.shown().len().max(1),
+            Screen::Tricks => self.trick_rows.len().max(1),
             Screen::Split => layouts(self.riders).len(),
         }
     }
@@ -4778,6 +4814,7 @@ impl Menu {
                         Some(PauseRow::Fixed(PAUSE_CONTROLLERS)) if self.focus == 0 => self.open_assign(),
                         Some(PauseRow::Fixed(PAUSE_CONTROLLERS)) => self.note = Some("1P's pause has the Controllers screen.".into()),
                         Some(PauseRow::Fixed(PAUSE_MODIFIERS)) => self.open_modifiers(),
+                        Some(PauseRow::Fixed(PAUSE_TRICKS)) => self.open_tricks(),
                         // Leaving asks first, on Stay (P110).
                         Some(PauseRow::Fixed(PAUSE_MAIN)) => self.leaving = Some((Leaving::Main, 1)),
                         Some(PauseRow::Online) if self.opening == Opening::Can => {
@@ -4789,6 +4826,13 @@ impl Menu {
                     }
                 }
             }
+            // The Tricks page (P259): up and down walk it above; Back is the pause again, Start the ride.
+            Screen::Tricks if p.start => {
+                self.stack.clear();
+                return Act::Resume;
+            }
+            Screen::Tricks if p.back => self.pop(),
+            Screen::Tricks => {}
             // Settings' tabs now; never on the stack.
             Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics => self.pop(),
             Screen::Online => self.online(p, at),
