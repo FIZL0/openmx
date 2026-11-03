@@ -206,7 +206,8 @@ pub fn input_limiter(held: &mut Held, cut: &mut GasCut, c: &Controls, stick: Sti
 
     held.brake = rise(held.brake, c.brake, j.brake_rate_limit, dt);
     held.front_brake = rise(held.front_brake, c.front_brake.max(c.brake), j.brake_rate_limit, dt);
-    held.rear_brake = rise(held.rear_brake, c.rear_brake.max(c.brake), j.brake_rate_limit, dt);
+    // SLUS-21104 walks the front lever alone and copies it into the rear (`+0x12d0 = +0x12cc`).
+    held.rear_brake = held.front_brake;
     held.gas = if held.lock.throttle || c.hands_off {
         F::ZERO
     } else if held.reverse == F::ZERO || inp.airborne {

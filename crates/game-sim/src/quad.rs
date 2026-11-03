@@ -1890,10 +1890,7 @@ impl<R: Moto, G> Steps<R, G> {
     fn input_limiter(&mut self, q: &mut Quad, dt: F) {
         let b = &mut self.bike;
         let h = &mut b.held;
-        // SLUS-21104 walks the front brake alone and copies it into the rear (`+0x12d0 = +0x12cc`);
-        // the ported limiter walks the rear from its own word, which on the same lever and rate is
-        // the copy only if the rear starts where the front does.
-        (h.gas, h.front_brake, h.rear_brake, h.clutch) = (q.gas_limited, q.front_brake, q.front_brake, q.clutch_in);
+        (h.gas, h.front_brake, h.rear_brake, h.clutch) = (q.gas_limited, q.front_brake, q.rear_brake, q.clutch_in);
         (h.lean, h.reverse) = ((q.lean, q.lean_fore_aft), q.push_gate);
         let c = crate::ride::Controls {
             gas: q.gas,

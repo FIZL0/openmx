@@ -516,7 +516,8 @@ impl Gen {
         held.lean = (self.f(-1.0, 1.0), self.f(-1.0, 1.0));
         held.gas = self.lever();
         held.front_brake = self.lever();
-        held.rear_brake = held.front_brake;
+        // The rear off the front half the time: the original copies the front over it (B17).
+        held.rear_brake = if self.b() { held.front_brake } else { self.lever() };
         held.clutch = self.lever();
         held.reverse = if self.one_in(4) { F::ONE } else { F::ZERO };
         held.lock.steer = self.one_in(4);
@@ -633,6 +634,8 @@ fn mxvatv_input_limiter_is_the_originals() {
         let l = &s.held.lock;
         let latch = if l.latch || (l.steer && !l.steer_was) { "start latch" } else { "no start latch" };
         *tally.entry(latch).or_insert(0u32) += 1;
+        let rear = if s.held.rear_brake == s.held.front_brake { "rear on the front" } else { "rear off the front" };
+        *tally.entry(rear).or_insert(0u32) += 1;
         reset(&mut ee);
         poke_limiter(&mut ee, &s);
         ee.call(INPUT_LIMITER, &[u64::from(OBJ)], &[s.dt.0], 10_000);
@@ -661,6 +664,8 @@ fn mxvatv_input_limiter_is_the_originals() {
             "gas walks",
             "start latch",
             "no start latch",
+            "rear on the front",
+            "rear off the front",
         ],
         100,
     );
