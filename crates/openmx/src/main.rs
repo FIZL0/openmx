@@ -723,6 +723,9 @@ struct PeerDress<'a> {
     body_model: Option<&'a str>,
     gpu_on: bool,
     cameras: &'a (game_sim::camera::Follow, Option<game_sim::camera::Follow>),
+    /// The cars' own cameras as the ride loaded them (S246), each kind's on its presets file: a peer
+    /// seat a player on this machine sits in (N20) is looked through, in a car too (S268).
+    car_cameras: &'a [(Kind, Race)],
 }
 
 /// An online peer's rig in `pick`'s look (N16), as the ride's load dresses a split screen's other
@@ -866,9 +869,9 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
         chassis,
         camera: Race { cam: p.cameras.0.clone() },
         plane_camera: p.cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
-        // Online rides no helicopter (P216), and its cars are followed by the bike's camera (S246).
+        // Online rides no helicopter (P216); its cars have their own cameras (S268).
         heli_camera: None,
-        car_cameras: Vec::new(),
+        car_cameras: p.car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
         wreck_camera: chase::WreckCamera::new(false),
         framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
         camera_presets: Default::default(),
@@ -7768,6 +7771,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     body_model: join_body_model.as_deref(),
                     gpu_on,
                     cameras: &join_cameras,
+                    car_cameras: &car_cameras,
                 };
                 let (rig, made) = dress_peer(&mut dress, peers_dressed, &own)?;
                 if let (true, Some(r)) = (gpu_on, renderer_of(&mut offscreen, window)) {
@@ -7800,6 +7804,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     body_model: join_body_model.as_deref(),
                     gpu_on,
                     cameras: &join_cameras,
+                    car_cameras: &car_cameras,
                 };
                 match dress_peer(&mut dress, peers_dressed, &pick) {
                     Ok((rig, made)) => {
