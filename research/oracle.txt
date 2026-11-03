@@ -6668,7 +6668,7 @@ atv_wheel_surface_copy      atv 0x004a0780 = a wheel's surface tables copied, al
 # atv_node_frame reads and the hung-node loop (as the put-back's), atv_attachment_moved(+0x1480).
 # The base (atv_biplane_animate, a0 quad, f12 dt): in vehicle states 3/4, +0x340 (world angular velocity)
 # = (0,0,0,1), then vt +0x3e8 and, when it answers non-zero, vt +0x3f0 (atv_quad_net_unpack) with dt.
-# Not ported (quad::Call::BaseAnimate). Spawn image: +0x1524 = +0x1528 = 255, +0x152c = 4, +0x14bc = 0,
+# Ported in MD65c1 (quad::base_animate, quad::NetClock), see # MD65c1 below. Spawn image: +0x1524 = +0x1528 = 255, +0x152c = 4, +0x14bc = 0,
 # +0x14c0 = 3, +0x14b0 = 0.785398, +0x14b4 = +0x14b8 = 0.5, vehicle state 1; the set (+0x14f0) has stunts
 # ready that +0x1534 holds no clip for (playing one faults the original: never asked for).
 atv_biplane_animate         atv 0x004a8350 = MXVehicleBiplane::vf67's twin (a0 vehicle, f12 dt; the held states' net unpack)
@@ -6678,6 +6678,24 @@ atv_anim_blend              atv 0x0013f5e0 = an animation controller blending tw
 atv_anim_blend4             atv 0x00140720 = the controller's other blend (not reached from atv_quad_animate)
 atv_stunt_table_entry       atv 0x00268c90 = a rider animation set's entry for a stunt id (a0 set, a1 id; set + 0x18 + 12 id, 0 for id >= 46)
 atv_attachment_moved        atv 0x00266d30 = an attachment's box moved in the spatial database (a0 attachment; only when its +8 is set)
+# MD65c1 — the biplane's base driver as the quad runs it (quad::base_animate, quad::NetClock; Call::NetInterpolate,
+# Call::NetUnpack; tests/atv_quad/animate.rs runs atv_biplane_animate and atv_biplane_net_check unhooked in both
+# animate tests, 20,000 generated cases with the net clock laid). Journal: research/journal/2026-11-03-md65c1-base-animate.
+# vt +0x3e8 is not "is remote": it is atv_biplane_net_check, the remote's snapshot interpolation, and it answers 1
+# on every path, so the net unpack (vt +0x3f0) always follows it. PC: MXVehicleBiplane::vf67 calls vt +0x110 then
+# +0x118 (dt handed to both). With +0xd04 (snapshots come, sltiu) < 5 it does nothing else. Otherwise want =
+# (*(atv_net_clock) +0x4cc - +0xd10) - 0.1 (the literal 0x3dcccccd at 0x00525258; sub.s twice in that order). The
+# snapshot slots are +0xcd4, +0xcdc, +0xce4, +0xcec, +0xcf4 (8 apart), each a pointer to a record whose word 0 is
+# its time (newest first); records +0x10 position, +0x20 velocity, +0x30 orientation (read by vt +0x3ec). Walk:
+# older = slot 1, newer = slot 0; four times (i = 0..3): stop unless want < older's time (c.olt), else newer =
+# older, older = slot i + 1. Slot 1 is read twice (i = 0 reloads it), so the pairs are (1,0), (2,1), (3,2) or
+# (4,3) and slot 4's time is never compared. t = (want - older) / (newer - older), max.s -0.9 (0xbf666666), min.s
+# 1.9 (0x3ff33333); vt +0x3ec (a0 quad, a1 older, a2 newer, f13 t). The quad's vt +0x3ec is its own
+# (atv_quad_net_interpolate, not the biplane's 0x004a87c0): not ported (Call::NetInterpolate).
+atv_biplane_net_check       atv 0x004a86f0 = vt +0x3e8 (a0 vehicle): with five snapshots, the pair round the lagged clock and vt +0x3ec; answers 1
+atv_biplane_net_interpolate atv 0x004a87c0 = the biplane's vt +0x3ec (a0 vehicle, a1 older, a2 newer, f13 t; position and velocity lerped, 0x00134b90 on the orientations, clamped to the world's box less 25)
+atv_quad_net_interpolate    atv 0x004e7bc0 = the quad's vt +0x3ec (a0 quad, a1 older, a2 newer, f13 t; reads a2 +0x40 first)
+atv_net_clock               atv 0x0038f768 = the network clock's pointer (its +0x4cc the time atv_biplane_net_check lags)
 # MD37b (wheels) — atv_wheel_suspension and atv_wheel_tire_forces ported (crates/game-sim/src/
 # atv_wheel.rs; tests/atv_wheel.rs runs both off MD37a's atv-r-spawn.ee.bin). Journal:
 # research/journal/2026-10-29-md37b-atv-step. The wheel against MX Unleashed's: steered +0x2c, balancing
