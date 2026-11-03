@@ -8251,6 +8251,10 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 #   children of the model's root.
 # The DirtSpray and Chunks zone descriptors say none to Zone1 (surface 0): a car on surface 0 dusts but
 #   throws no dirt or chunks.
+# S269 — the cars' TireTrack entries (crates/openmx/src/tire_tracks.rs Bike::car, main.rs step_car_tire_marks;
+#   tests/car_tire_tracks.rs; journal 2026-11-03-s269-car-tire-tracks): the car loaders read their list through
+#   vehicle_fx_read, so the four tracks run on the same records (contact +0x140, normal +0x120). Every list is
+#   Material ttrack; widths buggy 0.25/0.5, truck 2.0, baja 0.5; MinC/MaxC 0.75/1 (truck 1.5/2.5).
 # MD76 — Desert Oasis's ground for the ATV (crates/game-sim/src/atv_ground.rs; tests/atv_ground.rs runs the
 # query off MD37a's atv-r-spawn.ee.bin over 29,450 points, nothing hooked). Journal:
 # research/journal/2026-11-02-md76-atv-ground. Desert Oasis Free Ride is Env/MC02 (mc02.res, member
