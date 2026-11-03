@@ -600,7 +600,7 @@ impl Rider {
     /// and [`Rider::holds`], its skeleton [`Rider::skeleton`] as the shell last drew it, hung under the
     /// bike as it stood at the top of the tick (`before`), and the vehicle animation's clip-table words
     /// (`table`: `from_table`, `holding`) and clip as they were then. Only while the rider is up and has a kit and holds; started afresh
-    /// when there is none yet or the bike has gone where the bones did not ([`Riding::strayed`]).
+    /// when there is none yet or the bike has gone, between ticks, where the bones did not ([`Riding::strayed`]).
     fn riding_tick(&mut self, before: &crate::math::Mat4, table: (bool, bool), clip: i32, dt: F, world: &mut dyn World) {
         // The verdict's tick is still ridden by a body whose entry waits (B19).
         let up = (self.state.wreck.is_none() && self.crash.is_none() || Self::entry_waits(&self.state, self.crash.as_ref(), None, self.riding.as_deref(), false))
@@ -609,7 +609,11 @@ impl Rider {
             self.riding = None;
             return;
         };
-        let at = self.ride.position();
+        // Strayed from the bike as it stood at the top of the tick, where the last tick left the
+        // bones: a teleport or a reset between ticks, not this tick's own travel (B22: a windmill's
+        // throw carries the bike 10.8 ft off the bones in its one tick, and a fresh body has no
+        // history for the wreck entry to measure the bones' move from).
+        let at = before.0[3];
         let mut riding = self.riding.take().filter(|r| !r.strayed(at)).unwrap_or_else(|| Box::new(Riding::new(&kit)));
         riding.ride(&kit, self, &holds, before, table, clip, dt, world);
         self.riding = Some(riding);

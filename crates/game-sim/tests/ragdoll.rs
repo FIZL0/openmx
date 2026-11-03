@@ -1854,6 +1854,59 @@ fn the_riding_ragdoll_is_ride_state() {
     assert_ne!(moved.hash(), back.hash(), "the checksum reads the riding bodies");
 }
 
+/// **A bike's own travel does not start the riding body afresh** (B22): the riding ragdoll is
+/// started again only when the bike has gone where the bones did not between ticks (a teleport, a
+/// reset), measured from the bike as it stood at the top of the tick. Thrown in one tick (here at
+/// 600 ft/s, under a raised speed limit as a speed modifier raises it) the bike moves 20 ft, past the
+/// 10 ft [`game_sim::ragdoll_riding::STRAY`] from where the bones were left, and the body keeps its
+/// history: the history a wreck entry measures the bones' velocity from. Measured from the bike after
+/// its move, a windmill's 10.8 ft throw (B15's south3 image) had started the body afresh on the
+/// verdict's tick, and the bones entered the wreck at the bike's velocity.
+#[test]
+fn a_thrown_bike_keeps_its_riding_body() {
+    use game_sim::ragdoll_riding::Holds;
+    use game_sim::rider::Rider;
+    let Some((kit, _, _)) = ride_kit() else { return };
+    let kit = std::sync::Arc::new(kit);
+    let tables = game_sim::rider::Tables::build();
+    let p = game_sim::phy::Phy::read_bytes(include_str!("freeride-bike.phy.txt").as_bytes(), &tables.ride.curve);
+    let mut world = game_sim::world::Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) };
+    let dt = F(game_sim::tick::DeltaTime::CAP_30);
+    let idle = game_sim::ride::Controls::default();
+    let mut r = Rider::new(&p, game_sim::stock::MOUNTS, Vf::new(0.0, 1.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), game_sim::trick::Set::default());
+    r.ragdoll_kit = Some(kit.clone());
+    r.sense.wrecks_enabled = false;
+    r.holds = Some(std::sync::Arc::new(Holds {
+        root: game_sim::math::Mat4::IDENTITY,
+        hands: [Vf::new(-0.9, 3.6, 1.4, 1.0), Vf::new(0.9, 3.6, 1.4, 1.0)],
+        feet: [Vf::new(-0.6, 1.3, -0.2, 1.0), Vf::new(0.6, 1.3, -0.2, 1.0)],
+    }));
+    r.ride.place_on(Vf::new(0.0, 200.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0));
+    r.ride.chassis.vel = Vf::new(0.0, 0.0, 30.0, 0.0);
+    let history = |r: &Rider| r.riding.as_deref().and_then(|b| b.hand_over(&kit)).is_some_and(|(_, was)| was.is_some());
+    for _ in 0..2 {
+        r.frame(&p, &tables, &idle, dt, &mut world);
+    }
+    assert!(history(&r), "the riding body placed and stepped");
+    // The throw: one tick's travel.
+    r.ride.chassis.max_speed_sq = F(1000.0 * 1000.0);
+    r.ride.chassis.vel = Vf::new(0.0, 0.0, 600.0, 0.0);
+    let at = r.ride.position();
+    r.frame(&p, &tables, &idle, dt, &mut world);
+    let travel = r.ride.position().sub(at);
+    let travel = (0..3).map(|l| travel[l] * travel[l]).sum::<f32>().sqrt();
+    assert!(travel > 15.0, "the bike thrown only {travel} ft");
+    assert!(history(&r), "the thrown bike's riding body is the one it had ({travel} ft)");
+    // A teleport between ticks: the body is started again where the bike now is.
+    r.ride.chassis.vel = Vf::new(0.0, 0.0, 30.0, 0.0);
+    let far = r.ride.position().add(Vf::new(500.0, 0.0, 0.0, 0.0));
+    r.ride.place_on(far, Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0));
+    r.frame(&p, &tables, &idle, dt, &mut world);
+    assert!(!history(&r), "a teleport starts the riding body afresh");
+    let main = r.riding.as_deref().expect("riding").main().sub(r.ride.position());
+    assert!((0..3).all(|l| main[l].abs() < 6.0), "the fresh body is on the bike: {main:?}");
+}
+
 /// **A wreck thrown from the shell's skeleton** (S65): handed the kit's own riding pose as the live
 /// one, the posed entry and step are the fixed pose's to the bit; handed another pose, the bones
 /// start where it has them and pull towards its rests.

@@ -10991,9 +10991,12 @@ fn b15_ride(ticks: usize, still_after: Option<usize>) -> Option<(Vec<S211Tick>, 
 /// riding body (B19's stand-in). Since B19, with the original's riding body seeded ([`b19_ride`]),
 /// the port's actor rides the throw's tick out and enters on the next row as the original's: its
 /// bones never come near the windmill's face, go no faster than ~140 ft/s, and nothing is put back in
-/// 40 ticks. They are the original's to 1.7 ft while riding and 3.4 ft on the entry's row, then part
-/// at ~2.2 ft a tick: the original's main bone leaves the entry at (41, −39, 122) ft/s, the port's
-/// at the bike's (8, 16, 133) (B22).
+/// 40 ticks. Since B22 its riding body is not started afresh by the throw's own 10.8 ft (it had no
+/// history then, and the entry handed every bone the bike's velocity, (8, 16, 133) ft/s), and the
+/// seeded actor keeps its clip (35, the port's default 30 dropped a foot hold): the main bone leaves
+/// the entry at (40.4, −37.3, 121.9) ft/s against the original's (41.4, −38.6, 121.6), and the bones
+/// are the original's to 0.87 ft riding and on the entry's row, and 1.61 ft by tick 11, where they
+/// touch down.
 #[test]
 fn the_windmill_strikes_the_ports_bones_left_at_its_face() {
     let Some(rows) = columns_capture("b15", "south3-bones") else { return };
@@ -11074,12 +11077,18 @@ fn the_windmill_strikes_the_ports_bones_left_at_its_face() {
         seen.push(format!("tick {t}: down {}, worst {worst:.2} ft off, fastest {fast:.1} ft/s", b.down));
         assert_eq!(b.down, rows[t + 1]["riding"] == 0.0, "tick {t}: the port's bones down against the original's riding word:\n{}", seen.join("\n"));
         assert!(fast < 200.0, "tick {t}: the riding body's bones flung:\n{}", seen.join("\n"));
-        // Riding, and the entry's row: the original's bones (B19). Past it they part (B22).
-        if t <= 4 {
-            assert!(worst < [1.5, 2.0, 2.0, 4.0][t - 1], "tick {t}: the bones apart:\n{}", seen.join("\n"));
+        // Riding, the entry's row and the flight after it, to the touch-down (B19, B22): the original's
+        // bones. Measured: 0.25, 0.56, 0.87 ft riding, 0.87 on the entry's row, 1.61 on tick 11.
+        if t <= 11 {
+            assert!(worst < if t <= 3 { 1.0 } else { 2.0 }, "tick {t}: the bones apart:\n{}", seen.join("\n"));
         }
     }
     println!("{}", seen.join("\n"));
+    // B22: the entry's main bone leaves as the original's, not at the bike's velocity.
+    let (got, want) = (bones[3].bones[0].1, bone_vel(&rows[5], 0));
+    let off = speed([got.x() - want[0], got.y() - want[1], got.z() - want[2]]);
+    println!("the entry's main bone at ({:.1}, {:.1}, {:.1}) ft/s, the original's {want:?}: {off:.2} off", got.x(), got.y(), got.z());
+    assert!(off < 2.5, "the entry's main bone at {got:?}, the original's {want:?}");
     assert_eq!(s211_cannonball(port.iter().map(|p| [p.vel.x(), p.vel.y(), p.vel.z()])), None, "no put-back in 40 ticks");
 }
 
@@ -11224,6 +11233,9 @@ fn b19_ride(dir: &str, name: &str, ticks: usize) -> Option<(Vec<S211Tick>, Vec<B
             let kit = sim.rider.ragdoll_kit.clone().expect("the kit");
             let (riding, holds) = b19_riding(st, &kit, &sim.rider.ride.transform());
             seeded = riding.actor.ragdoll.bones.iter().map(|b| b.body.position).collect();
+            // The vehicle animation's clip as the actor last read it (B22): no shell runs the
+            // animation here, so the clip stands, and the port's default would switch the feet.
+            sim.rider.body.veh.state = riding.actor.clip;
             sim.rider.riding = Some(Box::new(riding));
             sim.rider.holds = Some(Arc::new(holds));
         },
