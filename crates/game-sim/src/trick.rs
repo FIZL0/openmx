@@ -663,6 +663,53 @@ pub fn trick_of(group: u8, dir: Dir) -> Option<Trick> {
     slot_of(group, dir).map(|s| Trick(s as u8)).or_else(|| extra_of(group, dir).map(|k| Trick(Trick::EXTRA + k as u8)))
 }
 
+/// The groups a gesture of `group` tries in turn (MD87), the first whose slot at the stick's
+/// direction holds a trick being the one it starts ([`pick`]); zeros pad the end. **The port's own:**
+/// the original has no empty slots, so it never falls back.
+///
+/// A combination of the extras only overrides when a pack put a trick there; otherwise the held
+/// modifier is dropped, R1 first (the original's own modifier): Cross + R1 is Cross alone, Cross +
+/// Circle + R1 is Cross + Circle. Then the extras go, leaving the original's gesture for the
+/// original's buttons as held (Cross + Circle is Circle, Cross + Circle + R1 is Circle + R1), whose
+/// slot is always filled. With none of the original's groups under them, both extras fall to Cross
+/// alone, then Square alone. Groups 0..=6 are the original's and try only themselves.
+pub fn fallback_groups(group: u8) -> [u8; 4] {
+    let mut out = [group, 0, 0, 0];
+    if !(7..=LAST_GROUP).contains(&group) {
+        return out;
+    }
+    let (e, under) = if group < 10 { (group - 7, 0) } else { ((group - 10) / 7, (group - 10) % 7 + 1) };
+    let over = |under: u8| if under == 0 { 7 + e } else { 10 + e * 7 + (under - 1) };
+    let mut n = 1;
+    // [`under_extras`]' 4..=6 are 1..=3 with R1, and its 7 is R1 alone.
+    let without_r1 = match under {
+        4..=6 => Some(under - 3),
+        7 => Some(0),
+        _ => None,
+    };
+    if let Some(u) = without_r1 {
+        out[n] = over(u);
+        n += 1;
+    }
+    if (1..=6).contains(&under) {
+        out[n] = under;
+    } else if e == 2 {
+        out[n] = 7;
+        out[n + 1] = 8;
+    }
+    out
+}
+
+/// The trick a gesture starts on `set` (MD87): the first of [`fallback_groups`] whose slot at `dir`
+/// holds one. The 24 are always filled; an extra slot is when the packs put a stunt in it.
+pub fn pick(set: &Set, group: u8, dir: Dir) -> Option<Trick> {
+    fallback_groups(group)
+        .into_iter()
+        .filter(|&g| g != 0)
+        .filter_map(|g| trick_of(g, dir))
+        .find(|t| t.extra().is_none() || set.stunt(*t).is_some())
+}
+
 /// Which of the six button groups is held, or zero for none.
 ///
 /// The combinations are tested in this order and the first match wins, so holding all three is group 6
@@ -896,9 +943,9 @@ impl Tricks {
             && self.gesture.group != 0
             && self.gesture.dir != Dir::None
             && !bike.fresh;
-        // An extra slot the pack left empty (MD16) asks for nothing; the 24 are always the original's.
-        let filled = |t: &Trick| t.extra().is_none() || set.stunt(*t).is_some();
-        if let Some(id) = ready.then(|| trick_of(self.gesture.group, self.gesture.dir)).flatten().filter(filled) {
+        // An extra slot the pack left empty (MD16) falls back to the gesture without its modifier
+        // (MD87); the 24 are always the original's.
+        if let Some(id) = ready.then(|| pick(set, self.gesture.group, self.gesture.dir)).flatten() {
             if self.in_progress {
                 self.queue.push_back(id);
             } else {
@@ -1162,6 +1209,28 @@ mod tests {
     }
 
     /// Six groups by four directions, in the order the table lists its first 24 stunts.
+    /// MD87: the groups a gesture falls back through, R1 dropped first, then the extras.
+    #[test]
+    fn combos_fall_back_without_their_modifier() {
+        let g = |trick, extra| group_with(trick, extra);
+        let (c, t, r) = ([true, false, false], [false, true, false], [false, false, true]);
+        let cross = [true, false];
+        assert_eq!(fallback_groups(g(r, cross)), [16, 7, 0, 0], "Cross + R1, then Cross");
+        assert_eq!(fallback_groups(g(r, [false, true])), [23, 8, 0, 0], "Square + R1, then Square");
+        assert_eq!(fallback_groups(g(r, [true, true])), [30, 9, 7, 8], "both + R1, both, Cross, Square");
+        assert_eq!(fallback_groups(g([true, false, true], cross)), [13, 10, 4, 0], "Cross + Circle + R1, Cross + Circle, Circle + R1");
+        assert_eq!(fallback_groups(g(c, cross)), [10, 1, 0, 0], "Cross + Circle, then Circle");
+        assert_eq!(fallback_groups(g(t, [true, true])), [25, 2, 0, 0]);
+        assert_eq!(fallback_groups(g([false; 3], cross)), [7, 0, 0, 0]);
+        for group in 0..=6 {
+            assert_eq!(fallback_groups(group), [group, 0, 0, 0], "the original's groups try only themselves");
+        }
+        for group in 7..=LAST_GROUP {
+            let chain = fallback_groups(group);
+            assert!(chain[1..].iter().all(|&f| f < group), "group {group} falls to smaller groups: {chain:?}");
+        }
+    }
+
     #[test]
     fn every_gesture_names_one_slot() {
         let dirs = [Dir::Up, Dir::Down, Dir::Left, Dir::Right];

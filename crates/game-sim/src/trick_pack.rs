@@ -5,7 +5,8 @@
 //! - **the extra stunts**: up to [`EXTRA_SLOTS`] rows of the pack's table that the rider's own 24 do
 //!   not have, started on Cross and Square and their combinations ([`crate::trick::group_with`]) —
 //!   rows MX vs. ATV maps to a gesture first (`DefaultKeyMapping`), then the rest in file order; with
-//!   several packs on, their rows one pack after another ([`stacked`], MD77);
+//!   several packs on, their rows one pack after another ([`stacked`], MD77); a combination whose
+//!   slot the packs leave empty starts the gesture without its modifier ([`crate::trick::pick`], MD87);
 //! - **the 360** (`[Three Sixty]`, [`crate::air::three_sixty`]) and the port's own front flip
 //!   ([`crate::air::FRONT_FLIP`]), with what each scores;
 //! - **the whip**: MX vs. ATV's `UnrollGain` and `UnyawGain`, the air-control auto-level, laid over the
