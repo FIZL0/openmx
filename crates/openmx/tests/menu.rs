@@ -5413,10 +5413,12 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
         tap(&mut m, &mut r, Control::Right);
         assert!(!m.some_original(d), "{d:?} back to ours");
         // Aspect Ratio's six (P176) step on from 4:3 to 16:9, another of ours, and Shadow Quality
-        // (V108, user 2026-10-30) from Original to Low.
+        // (V108, user 2026-10-30) from Original to Low. Draw Distance's four wrap from Original Fog
+        // to Whole Map, not the switch's Farther Fog (P268).
         let ours = match d {
             Departure::Picture => "16:9",
             Departure::Shadows => "Low",
+            Departure::Fog => "Whole Map",
             _ => d.choices()[0],
         };
         assert_eq!(value(&m, d.key()), ours, "{d:?}");
