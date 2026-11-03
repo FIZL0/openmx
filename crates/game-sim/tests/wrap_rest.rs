@@ -337,7 +337,9 @@ fn a_wreck_thrown_over_the_seam_is_moved_whole_and_put_back_inside() {
         k += 1;
         assert!(k < 3000, "no put-back in 100 s");
     }
-    let at = a.rider.ride.chassis.cofg_world;
+    // The transform's origin: the centre of mass is the one before until the next integrate, as the
+    // original's put-back leaves it (S228b2).
+    let at = a.rider.ride.origin;
     assert!((0.0..300.0).contains(&at.x()), "put back at {at:?}, not past the seam inside the world");
 }
 
