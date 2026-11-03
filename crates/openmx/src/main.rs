@@ -2244,6 +2244,9 @@ struct Args {
     /// `--world-reach LOAD,DROP`: how near a world's pieces are loaded and how far they are let go,
     /// in feet, instead of the desktop's ([`game_sim::tiles::Reach::DESKTOP`]).
     world_reach: Option<game_sim::tiles::Reach>,
+    /// `--world-fine LOAD,DROP|off`: how near a world's GPU ground is built at full detail, the rest
+    /// in reach coarse (P286), instead of [`worlds::FINE_REACH`]; `off` builds it all at full detail.
+    world_fine: Option<game_sim::tiles::Reach>,
     /// `--world-chunks N`: the most ground chunks a frame of a world ride hands the GPU instead of
     /// [`worlds::CHUNKS_A_FRAME`] (MD28).
     world_chunks: Option<usize>,
@@ -6064,7 +6067,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             // Each piece up as it is built, not all held till the last is (P283).
             let (mut built, mut failed) = (0, Ok(()));
-            let mut stream = worlds::GroundStream::start_into(w, cells, reach, &starts, args.world_ground_all, &mut |i, made| {
+            let mut stream = worlds::GroundStream::start_into(w, cells, reach, args.world_fine, &starts, args.world_ground_all, &mut |i, made| {
                 if failed.is_ok() {
                     failed = r.add_ground_piece_of(i as u32, made);
                     r.show_ground_piece(i as u32, 0.0);
@@ -6076,13 +6079,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("{line}");
             }
             println!(
-                "world ground: {} of {} pieces built before the ride in {:.2} s ({}; load {:.0} ft, drop {:.0} ft)",
+                "world ground: {} of {} pieces built before the ride in {:.2} s ({}; load {:.0} ft, drop {:.0} ft; {})",
                 built,
                 w.pieces.len(),
                 ground_at.elapsed().as_secs_f32(),
                 if args.world_ground_all { "all" } else { "near the start" },
                 reach.load.0,
-                reach.drop.0
+                reach.drop.0,
+                match args.world_fine.filter(|_| !args.world_ground_all) {
+                    Some(f) => format!("{} coarse past {:.0} ft", stream.held_coarse(), f.load.0),
+                    None => "all at full detail".to_string(),
+                }
             );
             if let Some(n) = args.world_chunks {
                 stream.chunks_a_frame = n;
@@ -12092,6 +12099,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         fly_at: None,
         world_ground_all: false,
         world_reach: None,
+        world_fine: Some(worlds::FINE_REACH),
         world_chunks: None,
         world_stand_in: true,
         warm: true,
@@ -12546,6 +12554,19 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
                 args.world_reach = Some(game_sim::tiles::Reach { load: F(load), drop: F(drop) });
             }
+            "--world-fine" => {
+                let w = next("load,drop or off")?;
+                args.world_fine = if w == "off" {
+                    None
+                } else {
+                    let v: Vec<f32> = w.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>().map_err(|_| "--world-fine: load,drop in feet, or off")?;
+                    let [load, drop] = v[..] else { return Err("--world-fine: load,drop in feet, or off".into()) };
+                    if !(load > 0.0 && drop >= load) {
+                        return Err("--world-fine: 0 < load <= drop".into());
+                    }
+                    Some(game_sim::tiles::Reach { load: F(load), drop: F(drop) })
+                };
+            }
             "--trace-picture" => args.trace_picture = true,
             "--trace-hash" => args.trace_hash = true,
             "--frames" => {
@@ -12654,7 +12675,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--overview] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
-                            [--world-ground all|near] [--world-reach LOAD,DROP] [--world-chunks N]\n\
+                            [--world-ground all|near] [--world-reach LOAD,DROP] [--world-fine LOAD,DROP|off] [--world-chunks N]\n\
                             [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off] [--warm on|off]\n\
                             [--draw-fps N] [--steady-clock] [--sim-thread auto|on|off] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\

@@ -16,6 +16,7 @@ use game_render::disc::Res;
 use game_sim::tiles::{Piece, Reach, Source, Tile, Tiled};
 use game_sim::track::{self, Placement, Terrain, TerrainHead, TerrainLayout, TerrainNode};
 use game_render::gpu::{GroundChunk, GroundPiece};
+use game_render::mat::v3;
 use ps2_float::F;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -952,6 +953,111 @@ pub fn piece_chunks(tile: &Tile, index: usize, bytes: &[u8], tiled: &Tiled, cell
     Ok(out)
 }
 
+/// How many of a piece's samples a far piece's cell spans each way (P286): its chunks are a
+/// sixteenth of the near ones'.
+pub const COARSE_BY: u32 = 4;
+
+/// How near the riders a world's GPU ground is built at full detail (P286); the rest within
+/// [`Reach::load`] is built at [`COARSE_BY`]. A piece goes fine within `load` and back to coarse
+/// past `drop`. world_ultra's 15,423 chunks out to 6000 ft were 600-750 MB.
+pub const FINE_REACH: Reach = Reach { load: F(2500.0), drop: F(3500.0) };
+
+/// A piece's chunks ([`piece_chunks`]) at a `by`th of its samples each way (P286): chunks of as many
+/// cells, each `by` times as wide. A corner every `by` samples, taken from a chunk that has a drawn
+/// cell beside it if one does; a cell left out only when every sample cell under it is, so a cut
+/// between two pieces overlaps rather than gaps. `at` and `spacing` are the piece's own, and `last`
+/// its last sample each way, which the chunks' corners past the field's edge stop at. Chunks of
+/// fewer cells than `by`, or not a multiple of it, are as they were.
+pub fn coarse(chunks: Vec<GroundChunk>, by: u32, at: [f32; 2], spacing: f32, last: [u32; 2]) -> Vec<GroundChunk> {
+    let Some(cells) = chunks.first().map(|c| c.cells) else { return chunks };
+    if by <= 1 || cells < by || cells % by != 0 {
+        return chunks;
+    }
+    let row = cells + 1;
+    let index: HashMap<(u32, u32), usize> = chunks.iter().enumerate().map(|(n, c)| (c.at, n)).collect();
+    let gone = |c: &GroundChunk, i: u32, j: u32| !c.missing.is_empty() && c.missing[(j * cells + i) as usize];
+    // A corner of the piece's sample grid, from a chunk with a drawn cell beside it before one without.
+    let corner = |gx: u32, gz: u32| -> Option<game_render::gpu::GroundVertex> {
+        let mut any = None;
+        for cz in [gz / cells, (gz / cells).wrapping_sub(1)] {
+            for cx in [gx / cells, (gx / cells).wrapping_sub(1)] {
+                let Some(&n) = index.get(&(cx, cz)) else { continue };
+                let (lx, lz) = (gx - cx * cells, gz - cz * cells);
+                if lx > cells || lz > cells {
+                    continue;
+                }
+                let c = &chunks[n];
+                let v = c.vertices[(lz * row + lx) as usize];
+                let beside = [(lx.wrapping_sub(1), lz.wrapping_sub(1)), (lx, lz.wrapping_sub(1)), (lx.wrapping_sub(1), lz), (lx, lz)];
+                if beside.iter().any(|&(i, j)| i < cells && j < cells && !gone(c, i, j)) {
+                    return Some(v);
+                }
+                any.get_or_insert(v);
+            }
+        }
+        any
+    };
+    let mut blocks: Vec<(u32, u32)> = chunks.iter().map(|c| (c.at.0 / by, c.at.1 / by)).collect();
+    blocks.sort_unstable_by_key(|&(x, z)| (z, x));
+    blocks.dedup();
+    let mut out = Vec::with_capacity(blocks.len());
+    for (bx, bz) in blocks {
+        let span = by * cells;
+        let mut vertices = vec![game_render::gpu::GroundVertex::default(); (row * row) as usize];
+        let mut found = vec![false; vertices.len()];
+        for j in 0..row {
+            for i in 0..row {
+                let (gx, gz) = (bx * span + i * by, bz * span + j * by);
+                let k = (j * row + i) as usize;
+                match corner(gx, gz) {
+                    Some(v) => (vertices[k], found[k]) = (v, true),
+                    None => {
+                        let (x, z) = (gx.min(last[0]), gz.min(last[1]));
+                        vertices[k] = game_render::gpu::GroundVertex { pos: [at[0] + x as f32 * spacing, 0.0, at[1] + z as f32 * spacing], normal: [0.0, 1.0, 0.0] };
+                    }
+                }
+            }
+        }
+        // Each cell lies in one sample chunk: left out when that chunk is, or every cell of it under this one is.
+        let mut missing = vec![false; (cells * cells) as usize];
+        for j in 0..cells {
+            for i in 0..cells {
+                let (gx, gz) = (bx * span + i * by, bz * span + j * by);
+                missing[(j * cells + i) as usize] = match index.get(&(gx / cells, gz / cells)) {
+                    None => true,
+                    Some(&n) => {
+                        let (lx, lz) = (gx % cells, gz % cells);
+                        (0..by).all(|dz| (0..by).all(|dx| gone(&chunks[n], lx + dx, lz + dz)))
+                    }
+                };
+            }
+        }
+        if missing.iter().all(|&m| m) {
+            continue;
+        }
+        let (mut lo, mut hi) = (v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN));
+        for (v, _) in vertices.iter().zip(&found).filter(|(_, f)| **f) {
+            let p = v3(v.pos[0], v.pos[1], v.pos[2]);
+            lo = v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+            hi = v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+        }
+        // As a sample chunk's: a corner nothing has is only a left-out cell's, on the chunk's floor.
+        for (v, _) in vertices.iter_mut().zip(&found).filter(|(_, f)| !**f) {
+            v.pos[1] = lo.y;
+        }
+        let centre = lo.add(hi).scale(0.5);
+        out.push(GroundChunk {
+            vertices,
+            cells,
+            at: (bx, bz),
+            missing: if missing.iter().any(|&m| m) { missing } else { Vec::new() },
+            centre,
+            radius: hi.sub(centre).len(),
+        });
+    }
+    out
+}
+
 /// Whether piece `index` draws its cell `(sx, sz)` (its own samples, its offset `at`): the piece
 /// that owns the cell's middle does, as the ride's ground asks it ([`Tiled::owner`]), and across a
 /// seam between two grids that do not line up (a 4.5-foot map beside a 9-foot join, MD15) so does
@@ -985,14 +1091,23 @@ fn gap(t: &Tile, x: f32, z: f32) -> f32 {
 /// [`Reach::drop`] of every rider is let go. The gap between the two is the margin that keeps a
 /// piece at the edge from being built again every frame.
 ///
-/// A piece is built from its folder by [`piece_chunks`], the same chunks whenever it is built.
+/// A piece is built from its folder by [`piece_chunks`], the same chunks whenever it is built. With a
+/// `fine` reach (P286) only the pieces within it are, and the rest [`coarse`]: a piece is built again
+/// when it crosses `fine.load` coming in or `fine.drop` going out.
 pub struct GroundStream {
     tiles: Vec<Tile>,
     reach: Reach,
-    held: Vec<Held>,
-    /// What the builder has to do, nearest last, and whether it should stop.
-    work: Arc<(Mutex<(Vec<usize>, bool)>, Condvar)>,
-    built: Receiver<(usize, Result<GroundPiece, String>)>,
+    fine: Option<Reach>,
+    /// Each piece's ground on the GPU, and whether at full detail.
+    held: Vec<Option<bool>>,
+    /// Each piece asked of the builder or being built, and whether at full detail.
+    asked: Vec<Option<bool>>,
+    /// The pieces whose files would not build: not asked again, as they do not change under a ride.
+    failed: Vec<bool>,
+    /// What the builder has to do, nearest last (each piece at full detail or not), and whether it
+    /// should stop.
+    work: Arc<(Mutex<(Vec<(usize, bool)>, bool)>, Condvar)>,
+    built: Receiver<(usize, bool, Result<GroundPiece, String>)>,
     /// Built pieces' parts not handed over yet, each piece's first part marked: a frame hands over
     /// `chunks_a_frame` at most.
     pending: VecDeque<(usize, GroundPiece, bool)>,
@@ -1003,14 +1118,6 @@ pub struct GroundStream {
     log: Vec<String>,
     /// Each rider's place when its heading was last taken, and the heading (V92).
     heading: Vec<([f32; 2], [f32; 2])>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Held {
-    Out,
-    /// Asked of the builder, or being built.
-    Asked,
-    In,
 }
 
 /// The most ground chunks a [`GroundStream::update`] hands over, but for a piece a rider is on
@@ -1045,30 +1152,51 @@ const TELEPORT_FEET: f32 = 2000.0;
 impl GroundStream {
     /// The stream, and the pieces it built before the ride: those within `reach.load` of `near`,
     /// or with `all` every one (the whole world before the first frame, as before MD17). The
-    /// pieces are built on every core.
+    /// pieces are built on every core, all at full detail.
     pub fn start(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool) -> (GroundStream, Vec<(usize, GroundPiece)>) {
         let mut out = Vec::new();
-        let stream = GroundStream::start_into(w, cells, reach, near, all, &mut |i, piece| out.push((i, piece)));
+        let stream = GroundStream::start_into(w, cells, reach, None, near, all, &mut |i, piece| out.push((i, piece)));
         (stream, out)
     }
 
     /// [`GroundStream::start`], each piece built before the ride handed to `take` as it is built, in
-    /// the pieces' order (P283: world_ultra's 88 first pieces held at once were 830 MB).
-    pub fn start_into(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool, take: &mut dyn FnMut(usize, GroundPiece)) -> GroundStream {
+    /// the pieces' order (P283: world_ultra's 88 first pieces held at once were 830 MB), and those
+    /// past `fine`'s load [`coarse`] (P286). `all` builds every piece at full detail.
+    pub fn start_into(w: &WorldMod, cells: u32, reach: Reach, fine: Option<Reach>, near: &[[f32; 2]], all: bool, take: &mut dyn FnMut(usize, GroundPiece)) -> GroundStream {
         let tiles: Vec<Tile> = w.pieces.iter().map(|p| p.tile.clone()).collect();
-        let first: Vec<usize> = (0..tiles.len()).filter(|&i| all || nearest(&tiles[i], near) <= reach.load.0).collect();
+        let fine = fine.filter(|_| !all);
+        let first: Vec<(usize, bool)> = (0..tiles.len())
+            .filter_map(|i| {
+                let gap = nearest(&tiles[i], near);
+                (all || gap <= reach.load.0).then(|| (i, fine.is_none_or(|f| gap <= f.load.0)))
+            })
+            .collect();
         let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
         let work = Arc::new((Mutex::new((Vec::new(), false)), Condvar::new()));
         let (send, built) = channel();
-        let mut stream = GroundStream { held: vec![Held::Out; tiles.len()], tiles, reach, work, built, pending: VecDeque::new(), chunks_a_frame: CHUNKS_A_FRAME, log: Vec::new(), heading: Vec::new() };
+        let n = tiles.len();
+        let mut stream = GroundStream {
+            held: vec![None; n],
+            asked: vec![None; n],
+            failed: vec![false; n],
+            tiles,
+            reach,
+            fine,
+            work,
+            built,
+            pending: VecDeque::new(),
+            chunks_a_frame: CHUNKS_A_FRAME,
+            log: Vec::new(),
+            heading: Vec::new(),
+        };
         crate::thread::scope(|scope| {
             let (done, ready) = channel();
             for t in 0..threads {
                 let (first, pieces, done) = (&first, &w.pieces, done.clone());
                 scope.spawn(move || {
                     let mut b = Builder::new(pieces.clone(), reach, cells);
-                    for &i in first.iter().skip(t).step_by(threads) {
-                        if done.send((i, b.build(i))).is_err() {
+                    for &(i, full) in first.iter().skip(t).step_by(threads) {
+                        if done.send((i, b.build(i, full))).is_err() {
                             return;
                         }
                     }
@@ -1082,10 +1210,11 @@ impl GroundStream {
             for (i, r) in ready {
                 waiting.insert(i, r);
                 while next < first.len()
-                    && let Some(r) = waiting.remove(&first[next])
+                    && let Some(r) = waiting.remove(&first[next].0)
                 {
-                    if let Some(chunks) = stream.arrived(first[next], r) {
-                        take(first[next], chunks);
+                    let (i, full) = first[next];
+                    if let Some(chunks) = stream.arrived(i, full, r) {
+                        take(i, chunks);
                     }
                     next += 1;
                 }
@@ -1106,7 +1235,7 @@ impl GroundStream {
                     }
                     todo.0.pop().expect("work")
                 };
-                if send.send((next, b.build(next))).is_err() {
+                if send.send((next.0, next.1, b.build(next.0, next.1))).is_err() {
                     return;
                 }
             }
@@ -1115,21 +1244,30 @@ impl GroundStream {
     }
 
     /// A piece the builder finished: held, with its line, or `None` with the line why not.
-    fn arrived(&mut self, i: usize, built: Result<GroundPiece, String>) -> Option<GroundPiece> {
+    fn arrived(&mut self, i: usize, full: bool, built: Result<GroundPiece, String>) -> Option<GroundPiece> {
         let name = &self.tiles[i].name;
         match built {
             Ok(piece) => {
-                self.log.push(format!("world ground: {name} built, {} chunks", piece.chunks.len()));
-                self.held[i] = Held::In;
+                let coarse = if full { "" } else { " coarse" };
+                self.log.push(format!("world ground: {name} built{coarse}, {} chunks", piece.chunks.len()));
+                self.held[i] = Some(full);
                 Some(piece)
             }
             Err(e) => {
-                // Not asked again: its files do not change under a ride.
                 self.log.push(format!("world ground: {name} not drawn: {e}"));
-                self.held[i] = Held::In;
+                self.failed[i] = true;
                 None
             }
         }
+    }
+
+    /// How piece `i`, `gap` from the riders, should be held: not, coarse or at full detail.
+    fn wanted(&self, i: usize, gap: f32) -> Option<bool> {
+        let held = self.held[i];
+        if self.failed[i] || gap > self.reach.drop.0 || (held.is_none() && gap > self.reach.load.0) {
+            return None;
+        }
+        Some(self.fine.is_none_or(|f| gap <= if held == Some(true) { f.drop.0 } else { f.load.0 }))
     }
 
     /// Ask for the pieces within reach of `near` nearest first, take what the builder finished, and
@@ -1142,28 +1280,35 @@ impl GroundStream {
         {
             let (lock, wake) = &*self.work;
             let mut todo = lock.lock().expect("the ground's work");
-            for &i in &todo.0 {
-                self.held[i] = Held::Out;
+            for &(i, _) in &todo.0 {
+                self.asked[i] = None;
             }
-            let mut want: Vec<usize> = (0..self.tiles.len()).filter(|&i| self.held[i] == Held::Out && gaps[i] <= self.reach.load.0).collect();
-            want.sort_by(|a, b| order[*b].total_cmp(&order[*a]));
-            for &i in &want {
-                self.held[i] = Held::Asked;
+            let mut want: Vec<(usize, bool)> = (0..self.tiles.len())
+                .filter(|&i| self.asked[i].is_none())
+                .filter_map(|i| self.wanted(i, gaps[i]).filter(|&full| self.held[i] != Some(full)).map(|full| (i, full)))
+                .collect();
+            want.sort_by(|a, b| order[b.0].total_cmp(&order[a.0]));
+            for &(i, full) in &want {
+                self.asked[i] = Some(full);
             }
             todo.0 = want;
             wake.notify_one();
         }
-        let take = |s: &mut GroundStream, (i, r): (usize, Result<GroundPiece, String>)| {
+        let take = |s: &mut GroundStream, (i, full, r): (usize, bool, Result<GroundPiece, String>)| {
+            s.asked[i] = None;
             if gaps[i] > s.reach.drop.0 {
-                s.held[i] = Held::Out;
-            } else if let Some(piece) = s.arrived(i, r) {
+                // Gone past reach while it was built: what the GPU has of it is let go below.
+            } else if let Some(piece) = s.arrived(i, full, r) {
+                // In place of the parts of it at the other detail not handed over yet.
+                s.pending.retain(|p| p.0 != i);
                 s.pending.extend(piece.split(s.chunks_a_frame).into_iter().enumerate().map(|(n, part)| (i, part, n == 0)));
             }
         };
         while let Ok(done) = self.built.try_recv() {
             take(self, done);
         }
-        while let Some(i) = (0..self.tiles.len()).find(|&i| gaps[i] == 0.0 && self.held[i] == Held::Asked) {
+        // Coarse ground underfoot is waited for too (a teleport into the far ring).
+        while let Some(i) = (0..self.tiles.len()).find(|&i| gaps[i] == 0.0 && self.asked[i].is_some() && self.held[i] != Some(true)) {
             let at = Instant::now();
             let Ok(done) = self.built.recv() else { break };
             self.log.push(format!("world ground: waited {:.0} ms for {}", at.elapsed().as_secs_f32() * 1000.0, self.tiles[i].name));
@@ -1188,9 +1333,9 @@ impl GroundStream {
         whole.retain(|i| !self.pending.iter().any(|p| p.0 == *i));
         out.extend(whole.into_iter().map(Change::Show));
         for i in 0..self.tiles.len() {
-            if self.held[i] == Held::In && gaps[i] > self.reach.drop.0 {
+            if self.held[i].is_some() && gaps[i] > self.reach.drop.0 {
                 self.pending.retain(|p| p.0 != i);
-                self.held[i] = Held::Out;
+                self.held[i] = None;
                 self.log.push(format!("world ground: {} dropped", self.tiles[i].name));
                 out.push(Change::Drop(i));
             }
@@ -1232,7 +1377,12 @@ impl GroundStream {
 
     /// How many pieces are held now.
     pub fn held(&self) -> usize {
-        self.held.iter().filter(|&&h| h == Held::In).count()
+        self.held.iter().filter(|h| h.is_some()).count()
+    }
+
+    /// How many pieces are held [`coarse`] now (P286).
+    pub fn held_coarse(&self) -> usize {
+        self.held.iter().filter(|&&h| h == Some(false)).count()
     }
 
     /// The lines building and dropping wrote since the last call.
@@ -1270,11 +1420,20 @@ impl Builder {
         Builder { files: Files { pieces }, tiled, cells }
     }
 
-    fn build(&mut self, i: usize) -> Result<GroundPiece, String> {
+    /// Piece `i`'s chunks, at full detail or [`coarse`].
+    fn build(&mut self, i: usize, full: bool) -> Result<GroundPiece, String> {
         let bytes = self.files.load_terrain(i)?;
         let tiled = self.tiled.as_ref().ok_or("the world does not read")?;
+        let tile = &self.files.pieces[i].tile;
+        let chunks = piece_chunks(tile, i, &bytes, tiled, self.cells)?;
+        let chunks = if full {
+            chunks
+        } else {
+            let [sx, sz] = tile.samples();
+            coarse(chunks, COARSE_BY, tile.at.map(|a| a.0), tile.spacing.0, [sx.saturating_sub(1), sz.saturating_sub(1)])
+        };
         // Its errors and hash here, off the drawing thread (MD28).
-        piece_chunks(&self.files.pieces[i].tile, i, &bytes, tiled, self.cells).map(GroundPiece::of)
+        Ok(GroundPiece::of(chunks))
     }
 }
 
@@ -2073,9 +2232,12 @@ mod heading_order {
             .collect();
         let reach = Reach { load: F(1500.0), drop: F(2000.0) };
         GroundStream {
-            held: vec![Held::Out; tiles.len()],
+            held: vec![None; tiles.len()],
+            asked: vec![None; tiles.len()],
+            failed: vec![false; tiles.len()],
             tiles,
             reach,
+            fine: None,
             work: Arc::new((Mutex::new((Vec::new(), false)), Condvar::new())),
             built: channel().1,
             pending: VecDeque::new(),
@@ -2117,5 +2279,122 @@ mod heading_order {
         // A teleport has no heading: the gaps alone again.
         let order = s.ahead_first(&[[600.0, 600.0]]);
         assert_eq!(order[at(&s, "p10")], order[at(&s, "p01")], "no heading over a teleport");
+    }
+}
+
+/// P286: the far ring's ground, a [`COARSE_BY`]th of a piece's samples each way, and when a piece
+/// goes from one to the other.
+#[cfg(test)]
+mod far_ring {
+    use super::*;
+    use game_render::gpu::GroundVertex;
+
+    const CELLS: u32 = 8;
+    const SPACING: f32 = 4.5;
+    const AT: [f32; 2] = [1000.0, -500.0];
+
+    fn height(gx: u32, gz: u32) -> f32 {
+        (gx * 7 + gz * 13) as f32 * 0.25
+    }
+
+    /// A piece of `side` x `side` chunks of [`CELLS`] cells, as [`piece_chunks`] gives them, less the
+    /// chunks `absent`, and each chunk's cells `gone` says left out.
+    fn piece(side: u32, absent: &[(u32, u32)], gone: impl Fn(u32, u32) -> bool) -> Vec<GroundChunk> {
+        let row = CELLS + 1;
+        let mut out = Vec::new();
+        for cz in 0..side {
+            for cx in 0..side {
+                if absent.contains(&(cx, cz)) {
+                    continue;
+                }
+                let vertices = (0..row * row)
+                    .map(|k| {
+                        let (gx, gz) = (cx * CELLS + k % row, cz * CELLS + k / row);
+                        GroundVertex { pos: [AT[0] + gx as f32 * SPACING, height(gx, gz), AT[1] + gz as f32 * SPACING], normal: [0.0, 1.0, 0.0] }
+                    })
+                    .collect();
+                let missing: Vec<bool> = (0..CELLS * CELLS).map(|k| gone(cx * CELLS + k % CELLS, cz * CELLS + k / CELLS)).collect();
+                let missing = if missing.contains(&true) { missing } else { Vec::new() };
+                out.push(GroundChunk { vertices, cells: CELLS, at: (cx, cz), missing, centre: v3(0.0, 0.0, 0.0), radius: 1.0 });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_far_piece_has_every_fourth_sample_in_a_sixteenth_of_the_chunks() {
+        let last = 8 * CELLS;
+        let far = coarse(piece(8, &[], |_, _| false), COARSE_BY, AT, SPACING, [last, last]);
+        assert_eq!(far.len(), 4, "8 x 8 chunks to 2 x 2");
+        for c in &far {
+            assert_eq!((c.cells, c.vertices.len()), (CELLS, ((CELLS + 1) * (CELLS + 1)) as usize));
+            assert!(c.missing.is_empty(), "{:?}", c.at);
+            for (k, v) in c.vertices.iter().enumerate() {
+                let (i, j) = (k as u32 % (CELLS + 1), k as u32 / (CELLS + 1));
+                let (gx, gz) = ((c.at.0 * CELLS + i) * COARSE_BY, (c.at.1 * CELLS + j) * COARSE_BY);
+                assert_eq!(v.pos, [AT[0] + gx as f32 * SPACING, height(gx, gz), AT[1] + gz as f32 * SPACING], "{:?} corner {i},{j}", c.at);
+            }
+        }
+        // Chunks of fewer cells than it takes are left as they were.
+        let small: Vec<GroundChunk> = piece(2, &[], |_, _| false).into_iter().map(|mut c| {
+            c.cells = 2;
+            c
+        }).collect();
+        assert_eq!(coarse(small, COARSE_BY, AT, SPACING, [last, last]).len(), 4);
+    }
+
+    #[test]
+    fn a_far_cell_is_left_out_only_when_every_cell_under_it_is() {
+        let last = 8 * CELLS;
+        // Chunk (0, 0) gone; in chunk (1, 0) every cell left out but sample cell (11, 2); the cells
+        // past sample row 40 owned by another piece.
+        let gone = |gx: u32, gz: u32| (gx >= CELLS && gx < 2 * CELLS && gz < CELLS && (gx, gz) != (11, 2)) || gz >= 40;
+        let far = coarse(piece(8, &[(0, 0)], gone), COARSE_BY, AT, SPACING, [last, last]);
+        let first = far.iter().find(|c| c.at == (0, 0)).expect("the first far chunk");
+        let missing = |i: u32, j: u32| first.missing[(j * CELLS + i) as usize];
+        // Far cells (0..2, 0..2) are over chunk (0, 0); (2..4, 0..2) over (1, 0), of which only
+        // (2, 0) has sample cell (11, 2) under it.
+        assert!(missing(0, 0) && missing(1, 1) && missing(3, 0) && missing(3, 1) && missing(2, 1));
+        assert!(!missing(2, 0), "the one sample cell keeps its far cell");
+        assert!(!missing(4, 0) && !missing(0, 2));
+        // Its corners are the samples', from the chunk that draws them.
+        let v = first.vertices[(0 * (CELLS + 1) + 3) as usize];
+        assert_eq!(v.pos[1], height(12, 0));
+        // Sample row 40 is far row 10, the second far chunk's row 2: left out from there on, the
+        // cut's own row kept.
+        let second = far.iter().find(|c| c.at == (0, 1)).expect("the second far row");
+        assert!(!second.missing[(1 * CELLS) as usize] && second.missing[(2 * CELLS) as usize]);
+    }
+
+    #[test]
+    fn a_piece_goes_fine_coming_in_and_coarse_going_out() {
+        let tile = Tile { name: "p".into(), at: [F(0.0), F(0.0)], layout: TerrainLayout::default(), spacing: F(62.5), levels: 1, keep: [0, 0, 16, 16], first_owner: 0 };
+        let mut s = GroundStream {
+            held: vec![None],
+            asked: vec![None],
+            failed: vec![false],
+            tiles: vec![tile],
+            reach: Reach { load: F(6000.0), drop: F(9000.0) },
+            fine: Some(Reach { load: F(2500.0), drop: F(3500.0) }),
+            work: Arc::new((Mutex::new((Vec::new(), false)), Condvar::new())),
+            built: channel().1,
+            pending: VecDeque::new(),
+            chunks_a_frame: CHUNKS_A_FRAME,
+            log: Vec::new(),
+            heading: Vec::new(),
+        };
+        // Not held: past load nothing, in the far ring coarse, in the near one fine.
+        assert_eq!([7000.0, 3000.0, 2000.0].map(|g| s.wanted(0, g)), [None, Some(false), Some(true)]);
+        // Held coarse: fine only within the near ring's load, and kept out to the drop.
+        s.held[0] = Some(false);
+        assert_eq!([8000.0, 3000.0, 2500.0, 9500.0].map(|g| s.wanted(0, g)), [Some(false), Some(false), Some(true), None]);
+        // Held fine: coarse again only past the near ring's drop.
+        s.held[0] = Some(true);
+        assert_eq!([3500.0, 3600.0].map(|g| s.wanted(0, g)), [Some(true), Some(false)]);
+        // Without a near ring, everything in reach at full detail; a piece that would not build, not at all.
+        s.fine = None;
+        assert_eq!(s.wanted(0, 8000.0), Some(true));
+        s.failed[0] = true;
+        assert_eq!(s.wanted(0, 0.0), None);
     }
 }

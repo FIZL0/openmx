@@ -96,6 +96,17 @@ fn world_ultras_first_frame_is_quick_and_small_with_the_far_maps_not_built() {
     let ground = numbers(ground);
     let (built, pieces) = (ground[0] as usize, ground[1] as usize);
     assert!(built * 10 < pieces, "{built} of {pieces} ground pieces built before the ride");
+    // And past 2500 ft the ground built coarse (P286): 15,423 chunks at full detail, ~3100 so.
+    let line = said.lines().find(|l| l.contains("pieces built before the ride")).unwrap();
+    let coarse = line.split("; ").last().and_then(|w| numbers(w).first().copied()).unwrap_or(0.0) as usize;
+    assert!(line.contains("coarse past") && coarse * 2 > built, "{line}");
+    let chunks = numbers(line_with(&said, "held at most"))[0] as usize;
+    assert!(chunks < 6000, "{chunks} ground chunks held at the start");
+}
+
+/// The line that has `what` in it.
+fn line_with<'a>(said: &'a str, what: &str) -> &'a str {
+    said.lines().find(|l| l.contains(what)).unwrap_or_else(|| panic!("no '{what}':\n{said}"))
 }
 
 #[test]
@@ -118,4 +129,7 @@ fn riding_across_world_ultra_streams_its_maps_in_within_a_frames_budget() {
     // Never more maps held than the start's few and their neighbours.
     let end = numbers(said.lines().find(|l| l.contains("maps on their own pages at the end")).unwrap())[0] as usize;
     assert!(end * 4 < 77, "{end} maps held their pages at the end");
+    // The ground behind let go to coarse and then out (P286): 20,521 chunks at most at full detail.
+    let chunks = numbers(line_with(&said, "held at most"))[0] as usize;
+    assert!(chunks < 12_000, "{chunks} ground chunks held at once in the sweep");
 }
