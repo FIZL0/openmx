@@ -195,7 +195,8 @@ impl Riding {
     /// and `holding` (`table`, [`Riding::off_the_table`]) and the clip `clip` as they stood before this
     /// tick (the original's animation runs
     /// after the body reads them), then the step with the skeleton the shell last posed, hung under
-    /// `before` — the bike's transform before this tick moved it — for the spring to pull to, and
+    /// `before` — the bike's transform before this tick moved it, not the root node the request is
+    /// framed by (S253) — for the spring to pull to, and
     /// under the moved bike for a held body's repose (S201). The spring's target trails the moved bike
     /// by the tick's travel, as the original's does: that trail is most of how far the riding body hangs
     /// back off the clip at speed.
@@ -204,7 +205,9 @@ impl Riding {
         let m = rider.ride.transform();
         let world_of = |p: Vf| math::transform_point(&m, p);
         let frame = math::mul(&holds.root, &m);
-        let under = math::mul(&holds.root, before);
+        // The skeleton is the body's own, its root joint carrying the clip's lean: it hangs under
+        // the bike's transform and not its root node, or the root's roll is counted twice (S253).
+        let under = *before;
         let r = request(&rider.ride, rider.packed_pose, frame, holds.hands.map(world_of), holds.feet.map(world_of), kit.bike);
         self.off_the_table(table.0, table.1);
         let skeleton = rider.skeleton.as_deref();
