@@ -53,6 +53,14 @@ read a frame late: it holds frame 1305's body. Compared there, try5 replays bit-
 contact counts it showed short over 1297..1302 are rows read while the collide pass was refilling the
 record. The body is bit-exact on every one of them.
 
+## B24 — fast2 reads ever later
+
+See `5-b24-fast2-reads-ever-later-FINAL.md`. C24's fast2 parted on 1416, in flight, because that row
+was read inside frame 1417's first force listener. Its commands are the port's from that listener.
+The replay now compares each row where it was read: part-way through the next frame's controller and
+rotor, or after the next frame. Read that way, fast2 is bit-exact from 1205 to 1671, through its
+wreck (1442) and put-back (1593).
+
 ## Not verified / not 1:1
 
 See the list at the end of `1-blades-on-the-hull-FINAL.md`. In short:
