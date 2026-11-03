@@ -230,13 +230,19 @@ impl Pack {
     /// The bike read from `member` (`race125p.phy`) on MX vs. ATV's handling (MD40): the pack's own
     /// file for it, `mx_` + its name, read through [`game_sim::handling::mxvatv_phy`]. A bike the
     /// pack has no file for is `Err` with the line that says so, and rides the original's.
+    ///
+    /// Untamed's pack (MD81a) has the files compiled, `mx_<name>.phy.bpb`: that is taken first, as
+    /// SLUS-21701's loader opens `%s.bpb` first, and read through [`game_sim::bpb::ini`].
     pub fn handling(&self, member: &str, curve: &game_sim::camera::CurveTable) -> Result<(Phy, String), String> {
         let want = trick_pack::phy_name_for(member);
-        let Some((_, path)) = self.phys.iter().find(|(n, _)| *n == want) else {
+        let bpb = format!("{want}.bpb");
+        let found = self.phys.iter().find(|(n, _)| *n == bpb).or_else(|| self.phys.iter().find(|(n, _)| *n == want));
+        let Some((name, path)) = found else {
             return Err(format!("handling: {} has no {want}, so this bike handles as the original's", self.id));
         };
         let bytes = crate::files::read(path).map_err(|e| format!("handling: {}: {e}; the original's", path.display()))?;
-        Ok((game_sim::handling::mxvatv_phy(&bytes, curve), format!("handling: MX vs. ATV's, {want} from {}", self.id)))
+        let ini = game_sim::bpb::ini(&bytes).map_err(|e| format!("handling: {}: {e}; the original's", path.display()))?;
+        Ok((game_sim::handling::mxvatv_phy_ini(&ini, curve), format!("handling: MX vs. ATV's, {name} from {}", self.id)))
     }
 
     /// Lay the pack's moves over a bike read from `member` (`race125p.phy`): the pack's own file for
@@ -340,6 +346,43 @@ mod tests {
         assert_ne!(by_id(&c, "mxvatv").unwrap().hash().unwrap(), same, "a changed .phy");
         for m in [a, b, c] {
             let _ = std::fs::remove_dir_all(m);
+        }
+    }
+
+    /// MD81a: Untamed's pack (`import-tricks untamed`, installed in this checkout's `mods/tricks`) gives
+    /// the MX P bikes on MX vs. ATV's handling its compiled `mx_*.phy.bpb`, decoded, with the `[Wrecks]`
+    /// limits SLUS-21701 raised (front 14, back 17, side 14.5 mph, both downs 54); its A bikes keep
+    /// Unleashed's. Skips without the pack.
+    #[test]
+    fn untamed_s_compiled_bikes_ride_with_their_wreck_limits() {
+        let mods = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods");
+        let Ok(pack) = by_id(&mods, "untamed_tricks") else {
+            eprintln!("skipped: no untamed_tricks pack in {} (openmx-mods: import-tricks untamed)", mods.display());
+            return;
+        };
+        let curve = game_sim::camera::CurveTable::build();
+        let mph = |v: f32| (ps2_float::F(v) * game_sim::phy::MPH).0;
+        for set in ["race50p", "race125p", "race250p", "race500p", "pro50p", "pro125p", "pro250p", "pro500p"] {
+            let (phy, line) = pack.handling(&format!("{set}.phy"), &curve).unwrap();
+            assert!(line.contains(&format!("mx_{set}.phy.bpb from untamed_tricks")), "{line}");
+            assert_eq!(phy.handling, game_sim::handling::Handling::MxVsAtv);
+            let a = &phy.air;
+            let got = [a.front_wreck_speed_limit.0, a.back_wreck_speed_limit.0, a.side_wreck_speed_limit.0,
+                       a.racing_down_wreck_speed_limit.0, a.freestyle_down_wreck_speed_limit.0];
+            assert_eq!(got, [mph(14.0), mph(17.0), mph(14.5), mph(54.0), mph(54.0)], "{set}");
+        }
+        // The A bikes are Unleashed's files: the same limits as the Unleashed pack's, when it is there.
+        if let Ok(unleashed) = by_id(&mods, "mxvatv_tricks") {
+            for set in ["race125a", "pro500a"] {
+                let limits = |p: &Pack| {
+                    let a = p.handling(&format!("{set}.phy"), &curve).unwrap().0.air;
+                    [a.front_wreck_speed_limit, a.back_wreck_speed_limit, a.side_wreck_speed_limit,
+                     a.racing_down_wreck_speed_limit, a.freestyle_down_wreck_speed_limit]
+                };
+                assert_eq!(limits(&pack), limits(&unleashed), "{set} keeps Unleashed's limits");
+            }
+            let (phy, _) = unleashed.handling("race125p.phy", &curve).unwrap();
+            assert_eq!(phy.air.front_wreck_speed_limit.0, mph(12.5), "Unleashed's race125p");
         }
     }
 }

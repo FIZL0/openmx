@@ -162,9 +162,50 @@ state 5 is Custom Event > Free Ride's track list, per openmx-mods `notes/accurac
 No task was filed for the buggy, the kiowa or the stock ATV: Untamed does not load them, and their files
 are Unleashed's unchanged. The biplane and helicopter are Unleashed's alone, and MD80 already covers them.
 
+## SLUS-21701's bike step against SLUS-21104's (MD81a)
+
+Done statically, function by function, over the folded ELF (`GAME_REL.BIN` at 0x48ea80). The twins were
+found by layout order, since the classes keep the same order shifted by about 0x18000, and by masked code
+(`research/md81a/`: `align.py`, `near.py`, `twins.py`, `vtable.py`, `sdiff.py`, run through
+`run_align.sh`). Then each pair was diffed with branch targets, `lui` values and field offsets set aside.
+Addresses are in `research/oracle.txt # MD81a`. The bike object grew, so nearly every field moved:
+`+0x10` from the wreck limits up, `-0x10` across the `0xb..0xd` block, `+0x30` at the chassis angles. The
+wreck test's full map is in `crates/game-sim/tests/untamed_step.rs`'s `poke_wreck`.
+
+| verdict | functions |
+|---|---|
+| the same code, fields moved | ground step, ground pitch torque, auto shift, air drag, unwreck, clutch |
+| scheduling only (branch-likely, registers, moved fields) | ground head, balance, roll/pitch, stand upright, head/tail, end stunt, input limiter, peak rates, flip-wreck-steep (reason 15), wheel contacts (counts read `lhu`) |
+| the wreck test | one change: a trick is a stunt id ≤ 48 (SLUS-21104: ≤ 40). A contact's flag is read as a halfword |
+| the stunt-id bound only | start stunt (41 → 49), airborne control (41 → 49 and 46 → 54, three times) |
+| reworked: new calls, constants, compares | backflip (1148 → 1292 B), spin in the air (2048 → 2104 B), preload (584 → 820 B), vehicle update (428 → 668 B), put back (320 → 424 B), wreck entry (288 → 308 B) |
+| not classified | air state (171 differing lines, no changed constant seen), no-hander (register allocation) |
+
+**Stunt ids shift by 8.** Every bound on the rider's stunt id moved by +8 (40 → 48, 46 → 54). That is
+the eight stunts Untamed's table has beyond Unleashed's (`untamed_tricks`, 54 stunts). The port does not
+compare ids with 40: `air::Step::stunt` comes from the rider's trick state (`rider.rs`), so nothing
+changes there. Only `handling.rs`'s backflip `stunt_id > 40` has the number, and the backflip is reworked
+anyway.
+
+**The wreck test is proven.** `tests/untamed_step.rs` runs SLUS-21701's wreck test off an Untamed Free
+Ride image (`context/untamed/ram/nat_or.bin`) on 10,000 generated states with Untamed's P limits, and
+compares the reasons and throw with the port's `step::wreck_test` + `step::hit_wreck`. Every path is
+covered (≥ 30 each), including 372 states with ids 41-48 mid trick. A second test shows that SLUS-21104's
+bound answers otherwise on those ids. So the raised `[Wrecks]` limits are the whole of what Untamed changes
+in the wreck test for a ride.
+
+**The pack.** Untamed's sixteen `mx_*.phy.bpb` already ship in openmx-mods' `untamed_tricks` trick pack
+(`import-tricks untamed`). A second copy in a machine pack would only duplicate them. So
+`--handling mxvatv --handling-pack untamed_tricks` (or the Handling row with that pack) now rides them:
+`trick_packs::Pack::handling` takes `mx_<bike>.phy.bpb` first, as SLUS-21701's loader does, and reads it
+through `game_sim::bpb::ini`. Off by default, like all of MD40's handling.
+
+**So an Untamed ride today** is SLUS-21104's step (MD40's blend) on Untamed's files. The wreck test is
+bit-exact. The six reworked functions are not ported yet.
+
 ## Not checked
 
-- **Code.** No function of SLUS-21701 was compared with SLUS-21104's. "Same classes" means the same
+- **Code** (MD81a compared the bike step, above; the other machines' steps are still unchecked). No function of SLUS-21701 was compared with SLUS-21104's. "Same classes" means the same
   `MXVehicle*.cpp` names and file formats, not the same step. The MD81 tasks capture first, for this
   reason.
 - Whether the A/P `.phy` choice (A = arcade?) and the Race/Pro default are the same in Untamed's menus.

@@ -8880,3 +8880,37 @@ atv_kiowa_blade_spin        atv 0x004d3510 = kiowa_blade_spin's twin (0.95)
 #   *(+0x11c0) 0x150 bytes, aero *(+0x11c4). Rotor +0xc0 blade pitch (0.2618 = 15 deg climbing), +0xd0/+0xd8
 #   tilt, +0xf4 thrust, +0x100..+0x108 thrust along the tilted axis (value: +0x104 = +0xf4 hovering).
 #   Aero +0x128 a 0..1 fade with speed, +0x134/+0x140 on the ground -0.5236/0.0785 (-30 deg / 4.5 deg).
+
+# MD81a — MX vs. ATV Untamed's (SLUS-21701) bike step against SLUS-21104's. Static, over the folded ELF
+# (GAME_REL.BIN at 0x48ea80); research/untamed-machines.md has the verdicts, tests/untamed_step.rs proves the
+# wreck test off an Untamed Free Ride image. Journal: research/journal/2026-11-03-md81a-untamed-bikes.
+# Comment rows only (SLUS-21701 addresses are not names here). Twins, SLUS-21104 -> SLUS-21701:
+#   ground step 0x004d90f0 -> 0x004f10d0, ground pitch torque 0x004dcc80 -> 0x004f4be0, auto shift 0x004e5fe0 ->
+#   0x004fe270, air drag 0x004e6c00 -> 0x004fefb0, unwreck 0x004e2380 -> 0x004fa4d0 (vt +0x36c): the same code.
+#   ground head 0x004d8b20 -> 0x004f0b00, balance 0x004dc240 -> 0x004f41b0, roll/pitch 0x004dc4f0 -> 0x004f4450,
+#   stand upright 0x004dc970 -> 0x004f48d0, head/tail 0x004e4190 -> 0x004fc1b0, end stunt 0x004e4db0 ->
+#   0x004fcf60, input limiter 0x004e3ea0 -> 0x004fbee0 (vt +0x34c), clutch 0x004e6a60 -> 0x004fee10, peak rates
+#   0x004e6c90 -> 0x004ff040, flip-wreck-steep 0x004e8370 -> 0x00500880, wheel contacts 0x004dccd0 ->
+#   0x004f4c30: scheduling and moved fields only.
+#   wreck test 0x004e24a0 -> 0x004fa5f0 (vt +0x49c -> +0x494): slti 41 -> slti 49 (a trick is id <= 48), the
+#   contact flag lw -> lh; nothing else. start stunt 0x004e6370 -> 0x004fe710 (vt +0x4b8 -> +0x4b0): 41 -> 49.
+#   airborne control 0x004e65d0 -> 0x004fe970: 41 -> 49, 46 -> 54 (x3).
+#   Reworked: backflip 0x004e4f20 -> 0x004fd0d0, spin in the air 0x004e53d0 -> 0x004fd630, preload 0x004e60d0
+#   -> 0x004fe360, vehicle update 0x004e1b90 -> 0x004f9bd0, put back 0x004a6f70 -> 0x004ca900, wreck entry
+#   0x004e2260 -> 0x004fa390 (vt +0x368). Not classified: air state 0x004d9290 -> 0x004f1270, no-hander
+#   0x004dbd10 -> 0x004f3c70. Out of bounds (vt +0x16c) 0x004a4f20 -> 0x004c8b40 differs (ratio 0.71), runs
+#   unhooked in the test and answers "inside" on the harness.
+# Globals: bike vtable 0x003d0450 -> 0x003f1d10; wrecks on 0x00525350 -> 0x0053d3c8; reason 15's class mask
+#   0x00542db0 -> 0x00545978; the 16-byte compare at 0x00396fc0 -> 0x003b5f60; the clock's event post
+#   0x00272300 -> 0x0025e740 (its receiver word 0x00442eb0 -> 0x00475bd0).
+# Wreck-test fields, bike-relative, SLUS-21104 -> SLUS-21701: driver +0x48c -> +0x4b0 (its +0xe4 the same);
+#   reason/clock/max/count +0xc80/c84/c88/c8c -> +0xc70/c74/c78/c7c; +0xc1c -> +0xc0c; +0x308 -> +0x338;
+#   vehicle state +0xbc4 -> +0xbb4; size word +0xbc0 -> +0xbb0; up +0xbf0 -> +0xbe0; limits +0x13e8..+0x1424 ->
+#   +0x13f8..+0x1434; loads +0x1250/54/58 -> +0x1240/44/48; pose blend +0x14e4 -> +0x14ec; pitch +0x360 -> +0x390;
+#   roll +0x368 -> +0x398; hang time +0x1190 -> +0x1180; flip torque +0x1194 -> +0x1184; spin applied +0x11d0 ->
+#   +0x11c0; trick wrecked +0x14cc -> +0x14d4; racing +0x146c -> +0x147c; on ground +0x324 -> +0x354; airborne
+#   +0xde0/+0xde4 -> +0xdd0/+0xdd4; stunt id/balance/wanted +0x1524/152c/1530 -> +0x1544/154c/1550; throw +0x1260
+#   -> +0x1250; body +0xb8 -> +0xe8; record +0xc8 -> +0xf8; +0x920 -> +0x940; +0x6c4 -> +0x6e8; +0x680 -> +0x6a4;
+#   struck mask word +0x1110 -> +0x1100; struck object +0x1440 -> +0x1450, its class +0x94 -> +0xc0.
+#   Contacts: stride 0x90, flag +0 (halfword), reach +0x24, other bike +0x84 -> +0x80 (its body +0xe4, height
+#   +0x74, velocity +0x80 unchanged); record +0x34 touching, +0xf0 count, +0xf8 list, +0x20c object unchanged.
