@@ -293,3 +293,57 @@ as they are (tests/mxvatv_car_phy.rs); it does not yet read the wreck or `[Camer
 Not done: there is no SLUS-21104 car capture and no RAM image with a car in it, and SLUS-21104's frame
 driver (MD75) is not ported, so nothing here is proved against a drive. MD39a captures each car, MD39b
 ports the step on them, MD39c puts them in the game off by default.
+
+## The biplane and the Kiowa (MD80)
+
+MX vs. ATV keeps MX Unleashed's two fliers, with two models each where MX Unleashed has one. The files are
+loose in MXVSATV.PSR (`Veh\biplane.phy`, `Veh\kiowa.phy`, `Veh\WreckBlade.phy`, `Veh\Col\{Biplane,Kiowa}{,2,3,4}{F,M}.col`,
+`Veh\Anim\{biplane,kiowa}{,2,3,4}{,_ui}.psg`), and the biplane's are in `Veh\vehicletype_2.res` too; the garage's
+are `UI\Res\Veh_BiPlane1-4.res` and `Veh_Helicopter1-4.res`. MX Unleashed's are in `machine.res`
+(`biplane\biplane.phy`, `helicopter\kiowa.phy`, `helicopter\wreckblade.phy`), the same bytes as the free-ride
+tracks' `_ss_2.res` copies. `python3 -I research/md81_phy_diff.py MXU.phy MXVATV.phy` diffs them.
+
+**Two models.** The init switches on the skin's name form (the spawn record's +0x10c): the plain name, `%s_ss`
+and two of the numbered forms pick model one (biplane, biplane2, kiowa, kiowa2), the rest model two (biplane3/4,
+kiowa3/4). The readers take every model-dependent key twice, as `ModelOne<Key>` and `ModelTwo<Key>`, and read
+the one the switch picked. Model one is MX Unleashed's machine:
+
+- **biplane.phy**: every key MX Unleashed's has, with the same values, except as follows. Model-dependent keys
+  are the wing (Chord, Span, SurfaceArea, AspectRatio, DefaultAngleOfAttack), the surfaces' limits
+  (MaxElevator/Aileron/Rudder), each gear's TireRadius and BodyTireCenter, and the pelvis box. Model one's
+  values are MX Unleashed's, except the pelvis box, which moves from (0, 0, -0.5) to (0, 3.2, -3.0). Model
+  two has a 695 ft² wing (AR 7.34), surfaces of 35/40.5/22°, mains of 0.81 ft at y 2.0, a 0.15 ft tail wheel
+  at y 4.0, and its pelvis box at (0, 4.4, 0.7). For both, `[Engine] MaxAltitude` is 1200, not 600.
+  `[Wrecks] WreckTime` becomes MaxWreckTime (5), and a `[Camera]` section gives
+  ModelOne/ModelTwoFPCameraOffset (0, 7.3, 0.3) / (0, 7.9, 4.3).
+- **kiowa.phy**: rotors, aerodynamics, controller and wrecks have MX Unleashed's values. Only the pelvis box
+  (model one (1, 3, 5), model two (-1, 5.1, 1.5); MX Unleashed (1.25, -2, 3)), WreckTime → MaxWreckTime, and
+  `[Camera]` (ModelOne/TwoFPCameraOffset) change. **WreckBlade.phy** is byte-identical.
+- **Collision**: KiowaF/Kiowa2F and KiowaM/Kiowa2M are MX Unleashed's bytes; Kiowa3/4 are new (M 1408 bytes,
+  not 1296). BiplaneF/2F have MX Unleashed's shape, re-exported: 98 of 435 words differ, by one ulp in the
+  normals and in a rebuilt tree. BiplaneM/2M grow to 2528 bytes, against MX Unleashed's 2080; Biplane3/4 are
+  new (F 2880, M 2080).
+
+**The steps** (research/oracle.txt `# MD80`, paired by mnemonic shape, not run). SLUS-21104 is the PC's code
+for the EE here as for the bikes, so the vtable layout is the PC's. Its fused `madd.s`/`madda.s`/`mula.s`
+round differently from MX Unleashed's `mul.s` then `add.s`, so no float step can be reused as it is:
+
+| | pair score | what differs |
+|---|---|---|
+| biplane tire probe and frame, gear tire and contact, wing geometry | 0.95–1.00 | nothing seen (fields 0xc lower) |
+| biplane gear springs | 0.80 | nothing seen: its two `sqrt.s` take their operand in ft (0x46020084, `sqrt.s $f2, $f2`), which `kit dis` leaves as `.word` |
+| biplane tire strut, friction | 0.95–0.96 | fused multiply-adds; the strut drops a virtual call and does one sum in VU0 |
+| biplane engine, controls, autopilot | 0.87–0.93 | fused multiply-adds only; the same constants |
+| biplane aero step | 0.72 | the same constants; 21 multiplies and adds fused; two `abs.s` fewer and one more branch (not read line by line) |
+| biplane input, preforce, forces, measure | 0.90–0.97 | measure makes two more virtual calls |
+| biplane wreck check | 0.70 | now MXVehicle's (a base slot, shorter); the 2.5 and 0.3 constants are gone |
+| Kiowa rotor step | 0.99 | nothing seen |
+| Kiowa flight controller | 0.87 | fused; a −30 constant MX Unleashed lacks |
+| Kiowa aero step | 0.69 | rewritten: VU0 cross products done in scalar code, `min.s`/`max.s` clamps added, 0.5 and ±0.3 gone |
+| Kiowa input, preforce, forces, measure | 0.82–0.94 | measure makes two more virtual calls |
+| Kiowa wreck check | — | not paired (best 0.30) |
+
+So of MX Unleashed's ported flight code, only the biplane's tire probe and frame, gear tire and contact, the
+wing geometry, the gear springs and the Kiowa's rotor may carry over as they are. The rest needs SLUS-21104's own rounding, and the Kiowa's aero, the controller's −30 and the
+wreck checks need their changes read and ported. All of it is unproved until a SLUS-21104 flight is captured
+(MD80a).

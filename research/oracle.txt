@@ -8781,3 +8781,56 @@ material_hit_play boot 0x003ea900 run by the update 0x3ead10 when queued: speed 
 #   CollisionMinDistance (+0x10c), CollisionMinImpulse (+0x114, default 0), CollisionMaxImpulse (+0x118,
 #   default 1). [Settings] TerrainMask +0x64, SolidFoliageID +0x65 (22). Every free09 entry 30/125 ft
 #   and 5/25 but 16 (Impact\bikehit1.vag) 2/9; 21 Impact\ball.vag, 22 Impact\treehit.vag.
+
+# ---------------------------------------------------------------------------------------------------
+# MD80 — MX vs. ATV's biplane and Kiowa against MX Unleashed's (research/mxvatv-pc.md "The biplane and the
+# Kiowa (MD80)"; journal research/journal/2026-11-03-md80-mxvatv-fliers). Paired by mnemonic shape (difflib
+# over the non-nop mnemonics, lui high halves as a tie-break), each pair's score in its note: not run.
+# Found from the strings: "%sbiplane.phy" (0x00527add, read by atv_biplane_init), ModelOneSpan (0x00527b8f,
+# atv_biplane_read_phy), "%sWreckBlade.phy" (0x0052909a), "%skiowa.phy" (0x00529186, atv_kiowa_init), and
+# the Kiowa's CLRoundOff (0x005292eb, atv_kiowa_read_phy). Biplane vtable entries: init at 0x003ceaf0, the
+# .phy reader at 0x003ce8a4; the Kiowa's reader at 0x003cfbc4, its init's caller at 0x003cfe10.
+# Model one / model two: the init's switch on the spawn record's +0x10c (the skin's name form, +0x110 its
+# name or number): 1 "%s%s", 2 and 7 "%s%d", 6 "%s_ss" -> the vehicle's word +0x1320 (Kiowa +0x1340) = 1,
+# model one; 3/4/5 "%s%d" and 8/9/10 "%s%d_ss" -> 0, model two. The readers take the ModelOne* keys when the
+# word is set, else ModelTwo*. The PSGs say biplane/biplane2 and kiowa/kiowa2 are model one, 3/4 model two.
+# The aero, engine and tire objects' fields sit 0xc lower than MX Unleashed's (aero +0xe8 -> +0xdc).
+atv_biplane_init            atv 0x004c0150 = biplane_init's twin (0.53: model switch, MXVehicle base calls)
+atv_biplane_read_phy        atv 0x004c14b0 = biplane_read_phy's twin (0.89; ModelOne/ModelTwo keys by +0x1320)
+atv_biplane_input           atv 0x004c2d50 = biplane_input's twin (0.90)
+atv_biplane_controls        atv 0x004c30b0 = biplane_controls's twin (0.93; madd/msub fused, same constants)
+atv_biplane_autopilot       atv 0x004c33b0 = biplane_autopilot's twin (0.87; fused, same constants)
+atv_biplane_preforce        atv 0x004c3760 = biplane_preforce's twin (0.94)
+atv_biplane_forces          atv 0x004c37c0 = biplane_forces's twin (0.97)
+atv_biplane_measure         atv 0x004c3870 = biplane_measure's twin (0.90; two more vtable calls, no float change)
+atv_biplane_find_bones      atv 0x004c3d60 = biplane_find_bones's twin (1.00)
+atv_biplane_pose_flaps      atv 0x004c3f30 = biplane_animate's twin (0.84)
+atv_biplane_audio           atv 0x004c23c0 = biplane_audio's twin (0.79)
+atv_biplane_pilot_request   atv 0x004c1340 = biplane_pilot_request's twin (0.98)
+atv_biplane_camera_target   atv 0x004c1150 = plane_camera_target's twin (0.90)
+atv_vehicle_wreck_check     atv 0x004a4f20 = biplane_wreck_check's nearest (0.70, 157 against 245 instructions; in the biplane's vtable at 0x003ce91c, an MXVehicle slot: the 2.5 and 0.3 constants are gone)
+atv_biplane_gear_springs    atv 0x0049d3a0 = biplane_gear_springs's twin (0.80)
+atv_biplane_gear_tire       atv 0x0049d420 = biplane_gear_tire's twin (1.00)
+atv_biplane_gear_contact    atv 0x0049d470 = biplane_gear_contact's twin (1.00)
+atv_biplane_tire_probe      atv 0x0049d520 = biplane_tire_probe's twin (0.95)
+atv_biplane_tire_force      atv 0x0049d6e0 = biplane_tire_force's twin (1.00)
+atv_biplane_tire_strut      atv 0x0049d720 = biplane_tire_strut's twin (0.95)
+atv_biplane_tire_friction   atv 0x0049dd40 = biplane_tire_friction's twin (0.96)
+atv_biplane_tire_frame      atv 0x0049df40 = biplane_tire_frame's twin (1.00)
+atv_biplane_wing_geometry   atv 0x0049e1b0 = biplane_wing_geometry's twin (1.00)
+atv_biplane_aero_step       atv 0x0049e220 = biplane_aero_step's twin (0.72: same constants, 14 mul.s/3 add.s/4 adda.s become madda.s/mula.s; two abs.s fewer, one more branch: not read line by line)
+atv_biplane_engine_ctor     atv 0x0049e600 = biplane_engine_ctor's twin (1.00)
+atv_biplane_engine_step     atv 0x0049e710 = biplane_engine_step's twin (0.92; fused, same constants)
+atv_kiowa_init              atv 0x004d1590 = the Kiowa's base init's nearest (0.65; model switch into +0x1340, "%skiowa.phy")
+atv_kiowa_mx_init           atv 0x004d0b20 = the MX helicopter init's nearest (0.51; "%sWreckBlade.phy")
+atv_kiowa_read_phy          atv 0x004d2290 = the Kiowa's .phy reader's twin (0.91; ModelOne/ModelTwo [Animation] and [Camera])
+atv_kiowa_input             atv 0x004d1fa0 = kiowa_input's twin (0.94)
+atv_kiowa_flight_controller atv 0x004d45f0 = kiowa_flight_controller's twin (0.87: fused; a -30 constant MX Unleashed lacks)
+atv_kiowa_preforce          atv 0x004d4d60 = kiowa_preforce's twin (0.91)
+atv_kiowa_forces            atv 0x004d4db0 = kiowa_forces's twin (0.82)
+atv_kiowa_measure           atv 0x004d4e40 = kiowa_measure's twin (0.89; two more vtable calls, no float change)
+atv_kiowa_rotor_step        atv 0x0049f500 = kiowa_rotor_step's twin (0.99; the same floats, 3 sq fewer)
+atv_kiowa_aero_step         atv 0x0049ee30 = kiowa_aero_step's twin (0.69: rewritten: VU0 cross products as scalar code, min.s/max.s clamps added, the 0.5 and +-0.3 constants gone)
+atv_kiowa_mx_present_a      atv 0x004d3230 = kiowa_mx_present_a's twin (0.93)
+atv_kiowa_blade_spin        atv 0x004d3510 = kiowa_blade_spin's twin (0.95)
+# Not paired: kiowa_wreck_check (best 0.30, 0x0049fbb0); kiowa_rotor_ctor/bind; the MX helicopter's measure.
