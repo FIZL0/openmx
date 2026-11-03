@@ -433,30 +433,9 @@ fn compare(cap: &Capture, row: usize, kiowa: &Kiowa, ride: &Ride, filter: Filter
     ] {
         same(name, frame, got, want);
     }
-    let want = commands_of(&wa);
-    for (name, got, want) in [
-        ("the collective", kiowa.commands.collective, want.collective),
-        ("the lateral cyclic", kiowa.commands.lateral, want.lateral),
-        ("the longitudinal cyclic", kiowa.commands.longitudinal, want.longitudinal),
-        ("the pedal command", kiowa.commands.pedal, want.pedal),
-        ("the filtered collective", kiowa.commands.filtered, want.filtered),
-        ("the altitude fraction", kiowa.commands.altitude_fraction, want.altitude_fraction),
-    ] {
-        same(name, frame, got, want);
+    if let Some(differs) = flight_mismatch(cap, row, kiowa, filter) {
+        panic!("tick {frame}: {differs}");
     }
-    let want = loop_of(&wa, filter);
-    for (name, got, want) in [
-        ("the speed command", kiowa.control.speed_command, want.speed_command),
-        ("the last longitudinal", kiowa.control.last_longitudinal, want.last_longitudinal),
-        ("the hold altitude", kiowa.control.hold_altitude, want.hold_altitude),
-        ("the hold timer", kiowa.control.hold_timer, want.hold_timer),
-        ("the integral", kiowa.control.integral, want.integral),
-        ("the filter's value", kiowa.control.filter.value, want.filter.value),
-    ] {
-        same(name, frame, got, want);
-    }
-    assert_eq!(kiowa.rotor_state, rotor_state_of(&cap.block(row, "rotor_state", ROTOR_STATE)), "tick {frame}: the rotor's state");
-    assert_eq!(kiowa.aero_state, aero_state_of(&cap.block(row, "aero_state", AERO_OUT)), "tick {frame}: the aerodynamics' state");
     for ((name, got), want) in measure_words(&ride.measure).into_iter().zip(captured_measure(&wb)) {
         same(name, frame, got, want);
     }
@@ -468,6 +447,45 @@ fn compare(cap: &Capture, row: usize, kiowa: &Kiowa, ride: &Ride, filter: Filter
             same(&format!("{name}[{k}]"), frame, F(got[k]), F(want[k]));
         }
     }
+}
+
+/// The first word of the controller's, the rotor's and the aerodynamics' states (in [`compare`]'s
+/// order) that differs from the row bit for bit, said as [`compare`] says it.
+fn flight_mismatch(cap: &Capture, row: usize, kiowa: &Kiowa, filter: Filter) -> Option<String> {
+    let wa = cap.block(row, "heli_a", at::BLOCK_A);
+    let differs = |what: &str, got: F, want: F| {
+        (got.to_bits() != want.to_bits()).then(|| format!("{what} is {:e} in the game, {:e} in the port", want.to_f32(), got.to_f32()))
+    };
+    let want = commands_of(&wa);
+    let commands = [
+        ("the collective", kiowa.commands.collective, want.collective),
+        ("the lateral cyclic", kiowa.commands.lateral, want.lateral),
+        ("the longitudinal cyclic", kiowa.commands.longitudinal, want.longitudinal),
+        ("the pedal command", kiowa.commands.pedal, want.pedal),
+        ("the filtered collective", kiowa.commands.filtered, want.filtered),
+        ("the altitude fraction", kiowa.commands.altitude_fraction, want.altitude_fraction),
+    ];
+    let want = loop_of(&wa, filter);
+    let control = [
+        ("the speed command", kiowa.control.speed_command, want.speed_command),
+        ("the last longitudinal", kiowa.control.last_longitudinal, want.last_longitudinal),
+        ("the hold altitude", kiowa.control.hold_altitude, want.hold_altitude),
+        ("the hold timer", kiowa.control.hold_timer, want.hold_timer),
+        ("the integral", kiowa.control.integral, want.integral),
+        ("the filter's value", kiowa.control.filter.value, want.filter.value),
+    ];
+    if let Some(d) = commands.into_iter().chain(control).find_map(|(name, got, want)| differs(name, got, want)) {
+        return Some(d);
+    }
+    let want = rotor_state_of(&cap.block(row, "rotor_state", ROTOR_STATE));
+    if kiowa.rotor_state != want {
+        return Some(format!("the rotor's state is {want:?} in the game, {:?} in the port", kiowa.rotor_state));
+    }
+    let want = aero_state_of(&cap.block(row, "aero_state", AERO_OUT));
+    if kiowa.aero_state != want {
+        return Some(format!("the aerodynamics' state is {want:?} in the game, {:?} in the port", kiowa.aero_state));
+    }
+    None
 }
 
 /// **The capture's flight, tick by tick through the port's frame**: see the module's docs.
@@ -1052,10 +1070,13 @@ struct Struck<'a> {
     /// The body as each substep's response found it and left it, in order: where a row the capture
     /// read inside the next frame's step stands ([`compare_torn`]).
     substeps: Vec<Body>,
+    /// The body as the frame's post found it, before a put-back moved it (B24).
+    posted: Option<Body>,
 }
 
 impl Surroundings for Struck<'_> {
     fn post(&mut self, body: &Body) {
+        self.posted = Some(*body);
         self.ground.post(body);
         self.wreckage.blades.gather_round(self.ground.collision, body);
     }
@@ -1113,21 +1134,9 @@ impl Surroundings for Struck<'_> {
 /// Gives where the row was read — `0` after its frame, `1 + i` at `next[i]` — whether its
 /// accumulators were left out, and how many of the measure's groups were written.
 fn compare_torn(cap: &Capture, row: usize, kiowa: &Kiowa, ride: &Ride, before: &Measure, filter: Filter, next: &[Body]) -> (usize, bool, usize) {
-    const ACCUMULATORS: [u32; 4] = [0x80, 0x90, 0x190, 0x1a0];
     let want = body_of(&cap.block(row, "body_raw", 0));
-    let equal = |b: &Body, all: bool| {
-        QUADS.iter().zip(body_quads(b).into_iter().zip(body_quads(&want))).all(|((_, at, lanes), (got, want))| {
-            (!all && ACCUMULATORS.contains(at)) || (0..*lanes).all(|k| got.0[k].to_bits() == want.0[k].to_bits())
-        })
-    };
     let candidates: Vec<Body> = std::iter::once(ride.body).chain(next.iter().copied()).collect();
-    let (phase, part) = match candidates.iter().position(|b| equal(b, true)) {
-        Some(i) => (i, false),
-        None => match candidates.iter().position(|b| equal(b, false)) {
-            Some(i) => (i, true),
-            None => (0, false),
-        },
-    };
+    let (phase, part) = body_read(cap, row, &candidates).unwrap_or((0, false));
     let wb = cap.block(row, "heli_b", at::BLOCK_B);
     let measured = |m: &Measure| measure_words(m).into_iter().zip(captured_measure(&wb)).all(|((_, got), want)| got.to_bits() == want.to_bits());
     let cut = (0..=MEASURE_GROUPS).rev().find(|&cut| measured(&measure_cut(&ride.measure, before, cut))).unwrap_or(MEASURE_GROUPS);
@@ -1142,6 +1151,23 @@ fn compare_torn(cap: &Capture, row: usize, kiowa: &Kiowa, ride: &Ride, before: &
     }
     compare(cap, row, kiowa, &ride, filter);
     (phase, part, cut)
+}
+
+/// The force and the moment, and their last: the body's quadwords a row read part-way through a
+/// substep's response has part-summed ([`compare_torn`]).
+const ACCUMULATORS: [u32; 4] = [0x80, 0x90, 0x190, 0x1a0];
+
+/// Which of `candidates` the row's body is ([`compare_torn`]): the first equal to its every quadword
+/// bit for bit, else the first equal to all but its [`ACCUMULATORS`] (`true`: read part-way).
+fn body_read(cap: &Capture, row: usize, candidates: &[Body]) -> Option<(usize, bool)> {
+    let want = body_of(&cap.block(row, "body_raw", 0));
+    let equal = |b: &Body, all: bool| {
+        QUADS.iter().zip(body_quads(b).into_iter().zip(body_quads(&want))).all(|((_, at, lanes), (got, want))| {
+            (!all && ACCUMULATORS.contains(at)) || (0..*lanes).all(|k| got.0[k].to_bits() == want.0[k].to_bits())
+        })
+    };
+    let at = |all: bool| candidates.iter().position(|b| equal(b, all)).map(|i| (i, !all));
+    at(true).or_else(|| at(false))
 }
 
 /// [`Measure::flight`]'s groups, in the order it writes them: the speed, the body velocity, the world
@@ -1303,6 +1329,7 @@ fn a_captured_rotor_strike_replays_bit_exact() {
             tables: &tables,
             blade_movers: &blade_movers,
             substeps: Vec::new(),
+            posted: None,
         };
         let out = s.kiowa.tick(&mut s.ride, &world_step, None, &s.curve, &acos, &mut rng, dt, &mut around);
         let asked = std::mem::take(&mut around.ground.asked);
@@ -1385,6 +1412,75 @@ fn a_captured_rotor_strike_replays_bit_exact() {
     println!("the rotor strike: 1205..={STRUCK_ON} bit-exact, run on to {last}; wrecked on {STRUCK_ON} by the rotor's contact search, 4 blades thrown on the original's 12 draws, put back on {PUT_BACK_ON}");
 }
 
+/// Whether the row's flight block — the wreck word, the pad's words and the flight state — is
+/// `kiowa`'s with the wreck word `reason`, bit for bit.
+fn flight_block_is(cap: &Capture, row: usize, kiowa: &Kiowa, reason: u32, filter: Filter) -> bool {
+    let wa = cap.block(row, "heli_a", at::BLOCK_A);
+    let (want, got) = (pad_of(&wa), kiowa.pad);
+    let pad = [(got.climb, want.climb), (got.descend, want.descend), (got.lateral, want.lateral), (got.longitudinal, want.longitudinal), (got.pedal, want.pedal)];
+    wa.u32(at::WRECKED) == reason && pad.iter().all(|(g, w)| g.to_bits() == w.to_bits()) && flight_mismatch(cap, row, kiowa, filter).is_none()
+}
+
+/// The helicopter's flight state as each of the next frame's force listeners leaves it (B24): its
+/// controller's commands and loop, the rotor's state and the aerodynamics', from the next frame's
+/// readings and pad. They read the substep's body (`body` for the first, then `next`'s bodies as each
+/// substep's response found them, every other one), the frame's measure and record.
+fn next_forces(kiowa: &Kiowa, ride: &Ride, touching: bool, curve: &CurveTable, h: F, next: &[Body]) -> Vec<Kiowa> {
+    let r = ride.measure.readings(ride.flown, touching, ride.gravity_scale);
+    let mut kiowa = *kiowa;
+    kiowa.wrecked = ride.crash.reason != 0;
+    let bodies = std::iter::once(ride.body).chain(next.iter().skip(2).step_by(2).copied());
+    bodies
+        .enumerate()
+        .map(|(i, mut body)| {
+            if i == 0 {
+                kiowa.preforce(&mut body);
+            }
+            kiowa.force(&r, &mut body, curve, h, |_| {});
+            kiowa
+        })
+        .collect()
+}
+
+/// The flight state's groups, in the order the force listener writes them: the controller's commands
+/// and loop; the rotor's step's tilt and blade pitches ([`game_sim::kiowa::Rotor::step`] writes those
+/// first), its thrust, its force; the aerodynamics' state. 1422 of C24's fast2 was read with the
+/// rotor's pitches written and its thrust not.
+const FLIGHT_GROUPS: usize = 5;
+
+/// The flight state part-way through one of the next frame's force listeners: `early`'s (the
+/// listener's) first `cut` groups ([`FLIGHT_GROUPS`]), `after`'s (the state it started on) rest.
+fn flight_cut(after: &Kiowa, early: &Kiowa, cut: usize) -> Kiowa {
+    let mut k = *after;
+    let groups: [&dyn Fn(&mut Kiowa); FLIGHT_GROUPS] = [
+        &|k| (k.commands, k.control) = (early.commands, early.control),
+        &|k| {
+            let (r, e) = (&mut k.rotor_state, &early.rotor_state);
+            (r.tilt, r.collective_pitch, r.tail_pitch) = (e.tilt, e.collective_pitch, e.tail_pitch);
+        },
+        &|k| k.rotor_state.thrust = early.rotor_state.thrust,
+        &|k| k.rotor_state.force = early.rotor_state.force,
+        &|k| k.aero_state = early.aero_state,
+    ];
+    groups.iter().take(cut).for_each(|g| g(&mut k));
+    k
+}
+
+/// **Where a flight row's flight state was read** (B24): the earliest point in the next frame's
+/// force listeners ([`next_forces`], each written group by group, [`flight_cut`]) at which the row's
+/// every word equals the port's. Gives the flight state and the point, `0` after the frame and
+/// `k * FLIGHT_GROUPS + c` with `c` of substep `k`'s groups written. With none, the frame's own,
+/// which [`compare`] then fails on.
+fn flight_read(cap: &Capture, row: usize, after: &Kiowa, next: &[Kiowa], filter: Filter) -> (Kiowa, usize) {
+    let bases = std::iter::once(after).chain(next.iter());
+    let points = bases.zip(next).flat_map(|(base, early)| (1..=FLIGHT_GROUPS).map(move |cut| flight_cut(base, early, cut)));
+    std::iter::once(*after)
+        .chain(points)
+        .enumerate()
+        .find(|(_, k)| flight_mismatch(cap, row, k, filter).is_none())
+        .map_or((*after, 0), |(at, k)| (k, at))
+}
+
 /// C24's roll tape: C14's state, 11 ticks' rest, then the stick hard right for 150 ticks on the ground
 /// and rest (`research/c14/make_tape.py` fields `22 300:-:255,127 250`). The helicopter rolls onto its
 /// right side, the rotor goes into the ground, and blade 3 comes down under the hull; the wreck stays
@@ -1414,19 +1510,29 @@ struct Replayed {
     struck: Vec<u32>,
     /// Rows read a frame late: each holds the body after the next frame (B23).
     late: Vec<u32>,
+    /// Rows before the wreck read inside the next frame's step, after its controller had run (B24).
+    torn: Vec<u32>,
+    /// The last row, when it was read after a frame the capture does not hold (B24).
+    unread: Option<u32>,
     last: u32,
 }
 
 /// **A wreck replayed from C14's image** (C24), as [`a_captured_rotor_strike_replays_bit_exact`]
 /// replays the strike, the helicopter's search offered the blades in its nearby list
 /// ([`game_sim::kiowa::Blades::gather_round`], [`game_sim::kiowa::Collision::search_knocking`]),
-/// every row compared: before the wreck after its frame, after it where it was read
-/// ([`compare_torn`]). The wreck's 12 draws are the original's: the generator is reseeded from the
+/// every row compared where it was read ([`compare_torn`]). The wreck's 12 draws are the original's: the generator is reseeded from the
 /// row before the wreck, the tapes' draws having parted from the port's by then (the original draws
 /// on input). The put-back steps once, as the strike's does (R26).
 ///
 /// A row whose body equals the next row's was read a frame late, after the next frame (R26 has
 /// the same in C21's capture from its put-back on), and is compared there.
+///
+/// Where a row was read drifts (B24, C24's fast2). A flying row read inside the next frame's step
+/// has the flight state of one of its force listeners, as far as that listener had written it
+/// ([`flight_read`]). A row whose body is neither the frame's nor one of the next frame's substeps'
+/// was read after the next frame and is compared there: with the pad that frame ran on, its flight
+/// block read before the next poll; and on a put-back with the wreck word, the flight state and the
+/// body from before its post, when the row's flight block shows the put-back not yet done.
 fn replay_wreck(capture: &str) -> Option<Replayed> {
     use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, Blades, KIOWA_HULL, KIOWA_MODEL, RotorTree, WRECK_BLADE_PHY, Wreckage};
     let (cap_path, image) = (ctx(capture)?, ctx(STATE)?);
@@ -1468,7 +1574,7 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
         .expect("a wreck in the capture")
         .0;
     let rng_of = |row: usize| -> u64 { cap.text(row, "rng_state").parse().expect("rng_state") };
-    let mut seen = Replayed { wrecks: Vec::new(), put_backs: Vec::new(), offered: 0, nearest: None, struck: Vec::new(), late: Vec::new(), last: 0 };
+    let mut seen = Replayed { wrecks: Vec::new(), put_backs: Vec::new(), offered: 0, nearest: None, struck: Vec::new(), late: Vec::new(), torn: Vec::new(), unread: None, last: 0 };
     let mut torn: Option<(usize, Kiowa, Ride, Measure)> = None;
     // A row read a frame late, waiting for the end of the next frame (B23).
     let mut late: Option<usize> = None;
@@ -1480,7 +1586,10 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
             rng = Rng::from_state(rng_of(row - 1));
         }
         let drawn_from = rng.state();
+        // The flight state, the pad and the wreck word the frame starts on (B24).
+        let (kiowa_before, reason_before) = (s.kiowa, s.ride.crash.reason);
         let measured_before = s.ride.measure;
+        let touching = s.collision.record.touching;
         let offered = wreckage.blades.gathered();
         if !offered.is_empty() {
             seen.offered += 1;
@@ -1510,12 +1619,37 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
             tables: &tables,
             blade_movers: &blade_movers,
             substeps: Vec::new(),
+            posted: None,
         };
         let out = s.kiowa.tick(&mut s.ride, &world_step, None, &s.curve, &acos, &mut rng, dt, &mut around);
-        let put_back = around.put_back;
+        let (put_back, posted) = (around.put_back, around.posted);
         let substeps = std::mem::take(&mut around.substeps);
-        if let Some((at, kiowa, ride, before)) = torn.take() {
-            compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &substeps);
+        let pending = torn.take().filter(|(at, _, ride, _)| {
+            // A row whose body is not the frame's, nor one of the next frame's substeps', was read
+            // after the next frame (as C21's are from its put-back on, R26): compared there.
+            let candidates: Vec<Body> = std::iter::once(ride.body).chain(substeps.iter().copied()).collect();
+            let within = body_read(&cap, *at, &candidates).is_some();
+            if !within {
+                late = Some(*at);
+                seen.late.push(cap.u32(*at, "frame_counter"));
+            }
+            within
+        });
+        if let Some((at, kiowa, ride, before)) = pending {
+            let next = next_forces(&kiowa, &ride, touching, &s.curve, world_step.substeps(dt).1, &substeps);
+            let (kiowa, cut) = flight_read(&cap, at, &kiowa, &next, s.filter);
+            let read = compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &substeps);
+            let at_frame = cap.u32(at, "frame_counter");
+            // The row reads the flight state's blocks before the body's: the body cannot stand earlier
+            // in the next frame than they do. Until the first substep's gravity the body is the frame's.
+            // A body read part-way through its accumulators stands anywhere up to its substep's
+            // integrate, so only a whole one is held to it.
+            let (body_substep, flight_substep) = (read.0.saturating_sub(1) / 2, cut.saturating_sub(1) / FLIGHT_GROUPS);
+            let (phase, part, _) = read;
+            assert!(part || (flight_substep <= body_substep && (phase > 0 || cut <= 1)), "tick {at_frame}: the flight state read at {cut}, after the body ({phase})");
+            if at_frame <= wrecked_on && (cut, read) != (0, (0, false, MEASURE_GROUPS)) {
+                seen.torn.push(at_frame);
+            }
         }
         if blades_out || wreckage.blades.started.iter().any(|b| b.out) {
             wreckage.blades.post(dt);
@@ -1538,20 +1672,33 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
             assert_eq!(rng.state(), drawn_from, "tick {frame}: the port's frame drew from the generator");
         }
         if let Some(at) = late.take() {
-            compare_torn(&cap, at, &s.kiowa, &s.ride, &measured_before, s.filter, &[]);
+            // It was read before the next pad poll, so its pad is the one the frame ran on; and on a
+            // put-back it may be before the frame's post put it back (1592 of C24's fast2): the
+            // wreck word, the flight state and the body as they were.
+            let after = Kiowa { pad: kiowa_before.pad, ..s.kiowa };
+            let (kiowa, ride) = if put_back.is_some() && !flight_block_is(&cap, at, &after, s.ride.crash.reason, s.filter) {
+                let body = posted.expect("a put-back in the frame's post");
+                (kiowa_before, Ride { crash: game_sim::kiowa::Crash { reason: reason_before, ..s.ride.crash }, body, ..s.ride })
+            } else {
+                (after, s.ride)
+            };
+            compare_torn(&cap, at, &kiowa, &ride, &measured_before, s.filter, &[]);
         }
         if read_late(row) {
             late = Some(row);
             seen.late.push(frame);
-        } else if frame <= wrecked_on {
-            compare(&cap, row, &s.kiowa, &s.ride, s.filter);
         } else {
             torn = Some((row, s.kiowa, s.ride, measured_before));
         }
         seen.last = frame;
     }
     if let Some((at, kiowa, ride, before)) = torn.take() {
-        compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &[]);
+        // The last row, read after a frame the capture does not hold, cannot be compared.
+        if body_read(&cap, at, &[ride.body]).is_some() {
+            compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &[]);
+        } else {
+            seen.unread = Some(cap.u32(at, "frame_counter"));
+        }
     }
     assert!(late.is_none(), "the last row was read a frame late");
     Some(seen)
@@ -1566,6 +1713,7 @@ fn a_rolled_wreck_replays_bit_exact() {
     assert_eq!(seen.wrecks, vec![(1257, game_sim::biplane::CRASHED)], "the wrecks");
     assert_eq!(seen.put_backs, vec![1408], "the put-backs");
     assert_eq!(seen.late, Vec::<u32>::new(), "the rows read a frame late");
+    assert_eq!((seen.torn, seen.unread), (Vec::<u32>::new(), None), "the flying rows read in the next frame, the last row unread");
     assert_eq!(seen.offered, 0, "frames whose helicopter search was offered a blade");
     println!("the roll: 1205..={} bit-exact, wrecked on 1257, put back on 1408, no blade offered", seen.last);
 }
@@ -1580,6 +1728,7 @@ fn a_tipped_wreck_never_meets_its_blades() {
     assert_eq!(seen.wrecks, vec![(1267, game_sim::biplane::CRASHED)], "the wrecks");
     assert_eq!(seen.put_backs, vec![1418], "the put-backs");
     assert_eq!(seen.late, Vec::<u32>::new(), "the rows read a frame late");
+    assert_eq!((seen.torn, seen.unread), (Vec::<u32>::new(), None), "the flying rows read in the next frame, the last row unread");
     assert_eq!(seen.offered, 0, "frames whose helicopter search was offered a blade");
     println!("the tip: 1205..={} bit-exact, wrecked on 1267, put back on 1418, no blade offered", seen.last);
 }
@@ -1593,6 +1742,7 @@ fn a_fast_wreck_offers_its_blades_bit_exact() {
     assert_eq!(seen.wrecks, vec![(1451, game_sim::biplane::CRASHED)], "the wrecks");
     assert_eq!(seen.put_backs, vec![1602], "the put-backs");
     assert_eq!(seen.late, Vec::<u32>::new(), "the rows read a frame late");
+    assert_eq!((seen.torn, seen.unread), (Vec::<u32>::new(), None), "the flying rows read in the next frame, the last row unread");
     assert!(seen.offered > 0, "the slide never gathered the blades");
     assert_eq!(seen.struck, Vec::<u32>::new(), "frames whose helicopter rays met a blade");
     println!(
@@ -1614,6 +1764,40 @@ fn a_right_tipped_wreck_read_a_frame_late_replays_bit_exact() {
     assert_eq!(seen.wrecks, vec![(1268, game_sim::biplane::CRASHED)], "the wrecks");
     assert_eq!(seen.put_backs, vec![1419], "the put-backs");
     assert_eq!(seen.late, vec![1304], "the rows read a frame late");
+    assert_eq!((seen.torn, seen.unread), (Vec::<u32>::new(), None), "the flying rows read in the next frame, the last row unread");
     assert_eq!(seen.offered, 0, "frames whose helicopter search was offered a blade");
     println!("the right tip: 1205..={} bit-exact, wrecked on 1268, put back on 1419, 1304 read a frame late, no blade offered", seen.last);
+}
+
+/// C24's second fast tape: as [`FAST`] but the stick forward and left with Square held (fields
+/// `60 80:cross 200:-:127,0 200:square:0,0 400`). The helicopter descends banked left at speed and
+/// wrecks on 1442.
+const FAST_LEFT: &str = "capture/c24/fast2.csv";
+
+/// The fast left descent (C24's fast2, B24): bit-exact to the capture's end, its rows read ever
+/// later. Seven flying rows from 1416 were read inside the next frame's step, the controller and
+/// part of the rotor's and aerodynamics' states already the next frame's first force listener's:
+/// 1416's lateral cyclic is -0.08864668, the port's after 1417's first controller, -0.08283156 after
+/// 1416. From 1468 the rows are read after the next frame, as C21's are from its put-back (R26),
+/// but for 1576, 1584 and 1585, read inside it. 1592's flight block was read before 1593's put-back
+/// and the last row, 1672, after a frame the capture does not hold. The slide gathers the blades
+/// and its rays meet none.
+#[test]
+fn a_fast_left_descent_read_ever_later_replays_bit_exact() {
+    let Some(seen) = replay_wreck(FAST_LEFT) else { return };
+    assert_eq!(seen.wrecks, vec![(1442, game_sim::biplane::CRASHED)], "the wrecks");
+    assert_eq!(seen.put_backs, vec![1593], "the put-backs");
+    assert_eq!(seen.torn, vec![1416, 1420, 1422, 1436, 1437, 1438, 1439], "the flying rows read in the next frame");
+    let late: Vec<u32> = (1468..=1671).filter(|f| ![1576, 1584, 1585].contains(f)).collect();
+    assert_eq!(seen.late, late, "the rows read a frame late");
+    assert_eq!(seen.unread, Some(1672), "the last row, read after a frame the capture does not hold");
+    assert!(seen.offered > 0, "the slide never gathered the blades");
+    assert_eq!(seen.struck, Vec::<u32>::new(), "frames whose helicopter rays met a blade");
+    println!(
+        "the fast left descent: 1205..=1671 bit-exact, {} unread, wrecked on 1442, put back on 1593; {} flying rows read in the next frame, {} rows a frame late; blades offered on {} frames, none met",
+        seen.last,
+        seen.torn.len(),
+        seen.late.len(),
+        seen.offered
+    );
 }
