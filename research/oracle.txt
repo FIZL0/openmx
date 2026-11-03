@@ -8373,3 +8373,14 @@ atv_car_listener_60         atv 0x004cbb60 = a car listener at this-60 (the bugg
 # the hand brake), +0x1138 hand brake, +0x113c/+0x1140 steer scaled by speed, +0x11c8 stick steer,
 # +0x11d0 it slewed, +0x8d0 (stick + 1) / 2 slewed. The gas does not reach the car block. +0x308/+0x30c
 # are ints 1 and 4.
+# S271 — the Kiowa's thrown blades collide, research/journal/2026-11-03-s271-kiowa-blades-collide.
+# game_sim::kiowa::{Blades::shape, Blades::knocks, Blades::search}; tests/kiowa.rs
+# thrown_blades_land_and_sleep_as_the_originals.
+#   A blade wrapper's collision object (+0x120) is the props' class: clear vt +0x74, collide vt +0x7c
+#   (record, dt), record fields as tests/prop_collision.rs reads them (+0x40..+0x4c touching flags,
+#   +0xa0 world CofG, +0xd0/+0xe0 swept segment, +0x1d8 normal speed, +0x1e0 relative velocity). Its
+#   ray probe (+0x124) keeps the category list at +0xe8 mode, +0xec list, +0xf0 count, as a prop's.
+#   In s148 the four records were never searched: swept from/to (0,0,0,1). A blade put to sleep
+#   (DetectCollisionsWhenDisabled, ResetTime -1) stays filed on the heli's world node +0x30 and its
+#   list goes to mode 0 [0x40], the props' wake mask. +0x128 is bladebentf.col's mesh (Mesh, not a
+#   Hierarchy file): Mesh::parse reads it.
