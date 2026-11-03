@@ -145,6 +145,10 @@ fn ride(tables: &Arc<Tables>, p: &Parts, mesh: Mesh, at: (f32, f32), dir: (f32, 
         sim.step(DT, &braked, &mut yard);
     }
     assert!(sim.rider.state.wreck.is_none(), "the bike went down settling");
+    // The bike's nearby list was gathered with the car 1000 ft off, and the bike will not leave its
+    // bound: the body rays meet only the cars it holds (S256), so it is gathered afresh where the car
+    // now comes, as a bike that rode up to it would have it.
+    sim.rider.ride.nearby = None;
     sim.rider.ride.chassis.vel = Vf::new(0.0, 0.0, speed, 0.0);
     let head = p.col.rays.segments.iter().map(|s| s.to).max_by(|a, b| a.y().total_cmp(&b.y())).unwrap();
     let (mut wreck, mut in_box, mut struck) = (None, 0, 0);
