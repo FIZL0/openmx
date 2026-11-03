@@ -9,10 +9,16 @@
 //! kind of file, and says what it could not read. Nothing rides it yet: the quad's step is MD37b and
 //! picking it is MD37d, so with no pack, or a pack and no quad picked, every ride is as it was.
 
-use crate::audio::{BikeSounds, Clip as Sound};
+use crate::audio::{BikeSounds, Clip as Sound, HeliEngine, LoopEngine, MachineTouchdown, MachineWreck};
 use crate::particles::Emt;
 use crate::track_mods::Json;
 use game_render::biplane::{self, Emitter};
+use game_render::kiowa;
+use game_render::Texture;
+use game_render::scene::Material;
+use game_render::world::texture_files;
+use game_sim::phy::Ini as PhyIni;
+use game_sim::track::{Mesh, Rays};
 use game_render::disc::Res;
 use game_render::psg::Model;
 use game_render::quad;
@@ -49,6 +55,58 @@ pub struct Pack {
     particles: String,
     /// What the importer could not bring (`todo`).
     pub todo: Vec<String>,
+    /// `skins` (MD80d): a flier pack's skins, each with its models and its collision pair. Empty
+    /// for a pack of builds.
+    pub skins: Vec<Skin>,
+    /// `fliers`: each flier's own files.
+    pub fliers: Vec<Flier>,
+    helicopter_engine: String,
+    machine_sounds: String,
+}
+
+/// One skin of a flier, as `mod.json`'s `skins` lists it (openmx-mods' `import-atv fliers`).
+#[derive(Clone, Debug)]
+pub struct Skin {
+    /// `biplane` or `kiowa`.
+    pub machine: String,
+    /// The skin's model name: `biplane`, `biplane2`, … `kiowa4`.
+    pub skin: String,
+    /// 1 or 2: which of the `.phy`'s `ModelOne`/`ModelTwo` keys it flies on.
+    pub model: u32,
+    pub psg: String,
+    /// The garage's model of it, `<skin>_ui.psg`.
+    pub ui: String,
+    /// `<stem>F.col`, the hull the world meets, and `<stem>M.col`, the ray probe.
+    pub hull: String,
+    pub rays: String,
+    /// The garage set its `_ui` model and textures came out of (`UI/Res/Veh_BiPlane1.res`): where
+    /// they came from, not a file in the pack.
+    pub garage: String,
+}
+
+/// One flier's files, `mod.json`'s `fliers.<machine>`.
+#[derive(Clone, Debug)]
+pub struct Flier {
+    pub machine: String,
+    pub phy: String,
+    /// The follow cameras (`FC_*Default.pb`) and the replay's (`RC_*Default.pb`).
+    pub cameras: String,
+    pub replay_cameras: String,
+    pub particles: String,
+    /// The prefix of its sections in the `.aud` tables: `biplane`, `helicopter`.
+    pub sounds: String,
+}
+
+/// A flier's sounds, each through the reader openmx plays MX Unleashed's with (V114, P146, P164).
+pub struct FlierSounds {
+    /// The plane's keyed loops, `carengine.aud`'s `[<prefix>]` (empty for the helicopter).
+    pub loops: LoopEngine,
+    /// The helicopter's one loop, `otherengine.aud`'s `[Helicopter]` (none for the plane).
+    pub rotor: HeliEngine,
+    /// `machine.aud`'s `[<prefix>Wreck]`.
+    pub wreck: MachineWreck,
+    /// `machine.aud`'s `[<prefix>TireTouchdown]` (the helicopter has none).
+    pub touchdown: MachineTouchdown,
 }
 
 /// One build of the machine, as `mod.json` lists it.
@@ -94,8 +152,40 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
             builds.push(Build { sub: s(b.get("sub")), mcf: s(b.get("mcf")), chassis: s(b.get("chassis")) });
         }
     }
-    if builds.is_empty() {
-        return Err("mod.json lists no builds".into());
+    let mut skins = Vec::new();
+    if let Some(Json::Arr(list)) = json.get("skins") {
+        for k in list {
+            let model = match k.get("model") {
+                Some(Json::Num(n)) => n.parse().unwrap_or(1),
+                _ => 1,
+            };
+            skins.push(Skin {
+                machine: s(k.get("machine")),
+                skin: s(k.get("skin")),
+                model,
+                psg: s(k.get("psg")),
+                ui: s(k.get("ui")),
+                hull: s(k.get("hull")),
+                rays: s(k.get("rays")),
+                garage: s(k.get("garage")),
+            });
+        }
+    }
+    let mut fliers = Vec::new();
+    if let Some(Json::Obj(list)) = json.get("fliers") {
+        for (machine, f) in list {
+            fliers.push(Flier {
+                machine: machine.clone(),
+                phy: s(f.get("phy")),
+                cameras: s(f.get("cameras")),
+                replay_cameras: s(f.get("replay_cameras")),
+                particles: s(f.get("particles")),
+                sounds: s(f.get("sounds")),
+            });
+        }
+    }
+    if builds.is_empty() && skins.is_empty() {
+        return Err("mod.json lists neither builds nor skins".into());
     }
     let rider = json.get("rider");
     let todo = match json.get("todo") {
@@ -115,7 +205,11 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
         cameras: s(json.get("cameras")),
         engine: s(json.get("sounds").and_then(|j| j.get("engine"))),
         particles: s(json.get("particles").and_then(|j| j.get("list"))),
+        helicopter_engine: s(json.get("sounds").and_then(|j| j.get("helicopter"))),
+        machine_sounds: s(json.get("sounds").and_then(|j| j.get("machine"))),
         todo,
+        skins,
+        fliers,
         id,
     }))
 }
@@ -232,6 +326,205 @@ impl Pack {
             .collect())
     }
 
+    /// A flier skin's model and its garage `_ui` model.
+    pub fn skin_models(&self, skin: &Skin) -> Result<(Model, Model), String> {
+        let read = |name: &str| self.files.read(&member(name)).and_then(|b| Model::parse(&b).map_err(|e| format!("{name}: {e}")));
+        Ok((read(&skin.psg)?, read(&skin.ui)?))
+    }
+
+    /// The nodes openmx moves or seats the pilot on in a flier (`biplane::PROP_NODE`, the Kiowa's
+    /// rotor nodes, and the four seat dummies), each with the name the skin's model spells it with:
+    /// `kiowa3`/`kiowa4` spell three of the seat's with a `01` on the end (`Dummy_Foot_R_pos01`).
+    pub fn skin_nodes(&self, skin: &Skin) -> Result<Vec<(&'static str, Option<String>)>, String> {
+        let (model, _) = self.skin_models(skin)?;
+        let mut wanted = match skin.machine.as_str() {
+            "kiowa" => {
+                let mut v = vec![kiowa::SPINDLE, kiowa::TAIL];
+                v.extend(kiowa::BLADES);
+                v.extend(kiowa::SEAT);
+                v
+            }
+            _ => {
+                let mut v = vec![biplane::PROP_NODE];
+                v.extend(biplane::SEAT);
+                v
+            }
+        };
+        wanted.dedup();
+        let spelt = |name: &str| model.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(name)).map(|n| n.name.clone());
+        Ok(wanted.into_iter().map(|w| (w, spelt(w).or_else(|| spelt(&format!("{w}01"))))).collect())
+    }
+
+    /// A flier skin's collision pair: the hull the world meets and the ray probe, through the readers
+    /// the biplane's and the Kiowa's own are read with.
+    pub fn skin_collision(&self, skin: &Skin) -> Result<(Mesh, Rays), String> {
+        let hull = self.files.read(&member(&skin.hull)).and_then(|b| Mesh::parse(&b)).map_err(|e| format!("{}: {e}", skin.hull))?;
+        let rays = self.files.read(&member(&skin.rays)).and_then(|b| Rays::parse(&b)).map_err(|e| format!("{}: {e}", skin.rays))?;
+        Ok((hull, rays))
+    }
+
+    /// Every material a skin's two models name, and each one's own texture, read: how many textures
+    /// read, and a line for each material or texture the pack lacks or openmx refuses.
+    pub fn skin_textures(&self, skin: &Skin) -> Result<(usize, Vec<String>), String> {
+        let (model, ui) = self.skin_models(skin)?;
+        let mut names: Vec<String> = model.materials.iter().chain(&ui.materials).map(|m| m.to_ascii_lowercase()).collect();
+        names.sort();
+        names.dedup();
+        let (mut read, mut why) = (0, Vec::new());
+        for m in &names {
+            let text = match self.files.read_suffix(&format!("\\{m}.psm")) {
+                Ok(b) => ini::text(&b),
+                Err(e) => {
+                    why.push(format!("{m}.psm: {e}"));
+                    continue;
+                }
+            };
+            let files = texture_files(m, &Material::parse(&text));
+            if files.is_empty() {
+                continue;
+            }
+            match files.iter().find_map(|f| self.files.read_suffix(&format!("\\{f}")).ok().map(|b| (f, b))) {
+                Some((f, b)) => match Texture::parse(&b) {
+                    Ok(_) => read += 1,
+                    Err(e) => why.push(format!("{m}.psm: {f}: {e}")),
+                },
+                None => why.push(format!("{m}.psm: none of {}", files.join(", "))),
+            }
+        }
+        Ok((read, why))
+    }
+
+    /// A flier's `.phy`, and how many keys it gives each of its two models (`ModelOne<Key>`,
+    /// `ModelTwo<Key>`): skins 1 and 2 fly on the first, 3 and 4 on the second.
+    pub fn flier_phy(&self, flier: &Flier) -> Result<(PhyIni, [usize; 2]), String> {
+        let ini = PhyIni::parse_bytes(&self.files.read(&member(&flier.phy))?);
+        let mut keys = [0, 0];
+        for (_, k, _) in ini.entries() {
+            if k.starts_with("ModelOne") {
+                keys[0] += 1;
+            } else if k.starts_with("ModelTwo") {
+                keys[1] += 1;
+            }
+        }
+        Ok((ini, keys))
+    }
+
+    /// A flier's follow and replay cameras of one screen layout.
+    pub fn flier_cameras(&self, flier: &Flier, view: &str) -> Result<(Vec<Preset>, Vec<Preset>), String> {
+        Ok((Preset::parse_follow(&self.text(&flier.cameras)?, view), Preset::parse_follow(&self.text(&flier.replay_cameras)?, view)))
+    }
+
+    /// A flier's sounds, with each `.vag` read from the pack's `Aud\` as [`Pack::engine_sounds`] does.
+    pub fn flier_sounds(&self, flier: &Flier) -> Result<(FlierSounds, Vec<String>), String> {
+        let engine = self.text(&self.engine)?;
+        let helicopter = self.text(&self.helicopter_engine)?;
+        let machine = self.text(&self.machine_sounds)?;
+        let mut loaded: HashMap<String, Option<Arc<Sound>>> = HashMap::new();
+        let mut why = Vec::new();
+        let mut lib = |name: &str| -> Option<Arc<Sound>> {
+            let mut path = format!("Aud\\{}", name.trim().trim_matches('"'));
+            if !path.rsplit('\\').next().unwrap_or("").contains('.') {
+                path = [".VAG", ".vig"].iter().map(|x| format!("{path}{x}")).find(|p| self.files.find_suffix(p).is_some()).unwrap_or(path);
+            }
+            loaded
+                .entry(path.to_ascii_lowercase())
+                .or_insert_with(|| match self.files.read_suffix(&path).and_then(|b| Sound::read(&path, &b)) {
+                    Ok(c) => Some(Arc::new(c)),
+                    Err(e) => {
+                        why.push(format!("{path}: {e}"));
+                        None
+                    }
+                })
+                .clone()
+        };
+        let (loops, rotor) = match flier.machine.as_str() {
+            "kiowa" => (LoopEngine::default(), HeliEngine::read(&helicopter, &mut lib)),
+            _ => (LoopEngine::read(&engine, &flier.sounds, &mut lib), HeliEngine::default()),
+        };
+        let wreck = MachineWreck::read(&machine, &flier.sounds, &mut lib);
+        let touchdown = MachineTouchdown::read(&machine, &flier.sounds, &mut lib);
+        Ok((FlierSounds { loops, rotor, wreck, touchdown }, why))
+    }
+
+    /// A flier's particle list's emitters, each with its `.emt` read (`None` for one the pack lacks).
+    pub fn flier_emitters(&self, flier: &Flier) -> Result<Vec<(Emitter, Option<Emt>)>, String> {
+        let list = biplane::emitters(&self.text(&flier.particles)?);
+        Ok(list
+            .into_iter()
+            .map(|e| {
+                let emt = self.files.read_suffix(&e.emitter).ok().map(|b| Emt::parse(&ini::text(&b)));
+                (e, emt)
+            })
+            .collect())
+    }
+
+    /// The flier half of [`Pack::report`]: a line a skin and a few a flier.
+    fn flier_report(&self, lines: &mut Vec<String>) {
+        for k in &self.skins {
+            let nodes = match self.skin_nodes(k) {
+                Ok(n) => {
+                    let lacking: Vec<&str> = n.iter().filter(|(_, s)| s.is_none()).map(|(w, _)| *w).collect();
+                    let other: Vec<String> = n.iter().filter_map(|(w, s)| s.as_ref().filter(|s| *s != w).map(|s| format!("{w} as {s}"))).collect();
+                    match (lacking.is_empty(), other.is_empty()) {
+                        (true, true) => "every node".to_owned(),
+                        (true, false) => format!("every node, {}", other.join(", ")),
+                        _ => format!("lacks {}", lacking.join(", ")),
+                    }
+                }
+                Err(e) => e,
+            };
+            let col = match self.skin_collision(k) {
+                Ok((hull, rays)) => format!("{} hull triangles, {} rays", hull.triangles.len(), rays.segments.len()),
+                Err(e) => e,
+            };
+            let tex = match self.skin_textures(k) {
+                Ok((n, why)) => {
+                    let mut t = format!("{n} textures");
+                    if !why.is_empty() {
+                        t += &format!(", {} not: {}", why.len(), why.join("; "));
+                    }
+                    t
+                }
+                Err(e) => e,
+            };
+            lines.push(format!("  {} (model {}, {}, garage {}): {nodes}; {col}; {tex}", k.skin, k.model, k.machine, k.garage));
+        }
+        for f in &self.fliers {
+            match self.flier_phy(f) {
+                Ok((_, [one, two])) => lines.push(format!("  {} {}: {one} ModelOne keys, {two} ModelTwo", f.machine, f.phy)),
+                Err(e) => lines.push(format!("  {} phy: {e}", f.machine)),
+            }
+            match self.flier_cameras(f, "4x3/1p") {
+                Ok((c, r)) => lines.push(format!("  {} cameras: {} follow, {} replay (4x3/1p)", f.machine, c.len(), r.len())),
+                Err(e) => lines.push(format!("  {} cameras: {e}", f.machine)),
+            }
+            match self.flier_sounds(f) {
+                Ok((s, why)) => {
+                    lines.push(format!(
+                        "  {} sounds: {} loops, rotor {}, {} wreck, {} touchdown, {} not read",
+                        f.machine,
+                        s.loops.loops.len(),
+                        if s.rotor.clip.is_some() { "read" } else { "none" },
+                        s.wreck.list.sounds.len(),
+                        s.touchdown.list.sounds.len(),
+                        why.len()
+                    ));
+                    lines.extend(why.iter().map(|w| format!("    {w}")));
+                }
+                Err(e) => lines.push(format!("  {} sounds: {e}", f.machine)),
+            }
+            match self.flier_emitters(f) {
+                Ok(list) => {
+                    let lacking: Vec<&str> = list.iter().filter(|(_, emt)| emt.is_none()).map(|(e, _)| e.emitter.as_str()).collect();
+                    lines.push(format!("  {} particles: {} emitters, {} without their .emt {}", f.machine, list.len(), lacking.len(), lacking.join(", ")));
+                }
+                Err(e) => lines.push(format!("  {} particles: {e}", f.machine)),
+            }
+        }
+        lines.extend(self.todo.iter().map(|t| format!("  todo: {t}")));
+        lines.push("  flown: not yet (the fliers' MX vs. ATV steps are MD80b/MD80c, their pick MD80e)".into());
+    }
+
     /// Everything above read once: what each reader made of the pack, a line a part, and every file it
     /// could not use.
     pub fn report(&self) -> Vec<String> {
@@ -244,6 +537,11 @@ impl Pack {
             self.files.entries().len(),
             self.builds.len()
         )];
+        if self.builds.is_empty() {
+            lines[0] += &format!(", {} skins", self.skins.len());
+            self.flier_report(&mut lines);
+            return lines;
+        }
         let mut chassis: Vec<(&str, &str)> = self.builds.iter().map(|b| (b.chassis.as_str(), b.mcf.as_str())).collect();
         chassis.sort_by_key(|(c, _)| c.to_ascii_lowercase());
         chassis.dedup_by_key(|(c, _)| c.to_ascii_lowercase());
