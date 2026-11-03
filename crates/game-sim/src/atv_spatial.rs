@@ -397,18 +397,24 @@ pub fn spatial_move(db: &mut Database, rec: &mut Record, item: Item, centre: Vf,
 /// The quad's entry and its node's, as a [`Space`]'s sub-databases hold them.
 pub const QUAD: Item = 0;
 pub const NODE: Item = 1;
+/// MD75c2: the first of the quad's collidables' entries, each at `PARTS +` its
+/// [`crate::atv_sync::slot`].
+pub const PARTS: Item = 2;
 
 /// The database and the two records [`crate::quad::Call::SpatialMove`] moves: the quad's own entry
-/// (`+8` of the quad) and its node's.
+/// (`+8` of the quad) and its node's. MD75c2's: the records [`crate::quad::Call::PartMove`] moves, each
+/// collidable's (its `+0x20`), by [`crate::atv_sync::slot`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Space {
     pub db: Database,
     pub quad: Record,
     pub node: Record,
+    pub parts: [Record; 5],
 }
 
 /// Whoever runs the quad's calls with [`crate::quad::Call::SpatialMove`] answered here, in `space`
-/// (the quad as [`QUAD`], its node as [`NODE`]); every other call goes on to `rest`.
+/// (the quad as [`QUAD`], its node as [`NODE`]), and [`crate::quad::Call::PartMove`] (MD75c2, from
+/// [`PARTS`] on); every other call goes on to `rest`.
 #[derive(Clone, Debug, Default)]
 pub struct Answers<R> {
     pub space: Space,
@@ -422,6 +428,11 @@ impl<R: crate::quad::Moto> crate::quad::Moto for Answers<R> {
                 let s = &mut self.space;
                 let (rec, item) = if node { (&mut s.node, NODE) } else { (&mut s.quad, QUAD) };
                 spatial_move(&mut s.db, rec, item, centre, half, reach);
+            }
+            crate::quad::Call::PartMove { part, centre, half, reach } => {
+                let s = &mut self.space;
+                let k = crate::atv_sync::slot(part);
+                spatial_move(&mut s.db, &mut s.parts[k], PARTS + k, centre, half, reach);
             }
             c => self.rest.call(c, q, body),
         }

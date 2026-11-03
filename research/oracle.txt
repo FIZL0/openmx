@@ -6895,6 +6895,28 @@ atv_pool_chunk              atv 0x00105e70 = a pool's new chunk (one set aside, 
 atv_pool_heap_chunk         atv 0x00105f70 = a pool chunk off the heap, each link constructed, chained last
 atv_heap_alloc              atv 0x001b7340 = allocate (a0 bytes, a1 file, a2 line)
 atv_heap_realloc            atv 0x001b7470 = reallocate (a0 block or 0, a1 bytes, a2 file, a3 line)
+# MD75c2 — atv_part_sync ported (game-sim atv_sync.rs part_sync; quad::Steps answers quad::Call::PartSync, the
+# box move goes on as quad::Call::PartMove, which atv_spatial::Answers moves; quad::Call::Gather is answered by
+# quad::Sweep::gather, atv_search::Oasis's). Journal: research/journal/2026-11-02-md75-atv-frame/9-part-sync.md.
+# Proof: tests/atv_quad.rs the_quads_part_sync_is_the_originals (10,000 generated parts laid whole at the
+# harness's 0x01c22200 + 0x400 a part) and tests/atv_quad/oasis.rs on the image's probe 0x0159c500 and frame
+# mesh 0x01627370 (the gather into 0x01627a40 round the probe, on Desert Oasis's world).
+# Both kinds' vt +0xc8: atv_node_frame(node, 0, sp) (probe +0x174, mesh +0x240), then vt +0xcc(part, sp).
+# Ray probe stand (vtable 0x003b6c20, +0xcc): +0x130..+0x170 = a1. Tree (+0x17c): +0x50 xyz = tree +0xc (w kept),
+# half = tree +0x18. No tree: bound = *(+0x180) (lo +0, hi +0x10); +0x50 (all lanes) = vmulx.xyz(vadd.xyz(hi,
+# lo), 0.5) with w hi's; half = the same of vsub. +0x70 = sqrt.s(madd(madda(mula(hx,hx),hy,hy),hz,hz)). Then
+# +0x50 xyz = ((row3 + 0) + row0*c.x + row1*c.y) + row2*c.z through +0x130 (w kept).
+# Mesh stand (vtable 0x003b6d00, +0xcc): +0x1f0 = +0x1b0, +0x1b0 = a1, +0x130 = +0x170 * a1 (row i =
+# a1[0]*l.x + a1[1]*l.y + a1[2]*l.z, row 3 (a1[3] + 0) + ...; xyzw), +0x50 xyz = mesh(+0x244) +0xc, +0x70 from
+# mesh +0x18 as the probe's; then +0x50 through a1 (not +0x130: a mesh's own frame on the node moves its box
+# but not its centre).
+# Both boxes (vt +0xc4; a1 centre out, a2 half out): c and e the own box (w 1.0 on the stack); centre = c through
+# +0x130 (w 1); half = (|row1*e.y| + |row0*e.x|) + |row2*e.z|*1 (vadda, vmaddw; w 1).
+# The gather queries the probe's database (+0x20): a gather probe out of the database reads RAM 0 as one.
+atv_mesh_node_stand         atv 0x001be760 = the mesh's vt +0xc8: atv_node_frame of +0x240's node, then vt +0xcc
+atv_mesh_stand              atv 0x001be630 = the mesh stood at a matrix (a0 mesh, a1 matrix): its frames, centre and reach (vt +0xcc)
+atv_mesh_box                atv 0x001be7b0 = the mesh's box in the world (vt +0xc4; a1 centre out, a2 half out)
+atv_ray_probe_box           atv 0x001bd1d0 = the ray probe's box in the world (vt +0xc4; a1 centre out, a2 half out)
 # MD75d — the spawned quad read as a tests/atv_quad.rs Ride (tests/atv_quad/image.rs read_ride; the check
 # pokes it back at the harness's layout and compares 2,654 words with the image). Where atv-r-spawn.ee.bin keeps
 # the quad 0x015e0690's parts: body 0x0159c7f0, world 0x0159be10, vehicle state 0x01ce6410 (+0x28 = 1), record

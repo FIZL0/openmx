@@ -238,7 +238,9 @@ pub fn collide(objects: &mut [Collidable], probe: usize, found: &[Candidate], wh
 /// and the quad's list (`list`) gathered round it ([`crate::atv_world::gather`]), then [`collide`]
 /// over the list into `record`. The original gathers in the PostProcess's collision sync, round the
 /// node as that PostProcess left it, and nothing moves the node or the world between that and the
-/// next frame's sweeps; until the collision sync's gather is answered (MD75c2), the sweep makes it.
+/// next frame's sweeps. MD75c2: that gather is answered here ([`crate::quad::Sweep::gather`], round the
+/// active probe as its sync stood it); once it has been, the sweep searches the list it left, and
+/// until then (no PostProcess has run) the sweep makes it.
 pub struct Oasis<'a> {
     pub world: World,
     pub props: &'a [Prop],
@@ -249,25 +251,40 @@ pub struct Oasis<'a> {
     pub first_part: usize,
     pub list: crate::atv_world::Nearby,
     pub record: Record,
+    /// Whether the collision sync has gathered the list.
+    pub gathered: bool,
 }
 
 impl<'a> Oasis<'a> {
     pub fn new(world: World, props: &'a [Prop], eco: &'a Ecosystem, trees: &'a Trees, rays: Rays, probe: usize, first_part: usize) -> Oasis<'a> {
         let record = record(rays.segments.len());
-        Oasis { world, props, eco, trees, rays, probe, first_part, list: crate::atv_world::Nearby::quad(), record }
+        Oasis { world, props, eco, trees, rays, probe, first_part, list: crate::atv_world::Nearby::quad(), record, gathered: false }
     }
 }
 
 impl crate::quad::Sweep for Oasis<'_> {
     fn sweep(&mut self, frame: &Matrix) -> Option<(bool, Vec<crate::quad::Contact>)> {
-        let t = frame[3];
-        self.world.place_probe([t.x(), t.y(), t.z()].map(F));
-        crate::atv_world::gather(&mut self.world.objects, &mut self.world.broad, &mut self.list, crate::atv_world::PROBE, 3);
+        if !self.gathered {
+            let t = frame[3];
+            self.world.place_probe([t.x(), t.y(), t.z()].map(F));
+            crate::atv_world::gather(&mut self.world.objects, &mut self.world.broad, &mut self.list, crate::atv_world::PROBE, 3);
+        }
         let plants = Plants::new(self.trees, self.eco, &self.world, self.first_part);
         let mut wheels = Wheels::new(&self.rays, *frame, self.props, self.world.meshes.start, plants);
         wheels.record = std::mem::take(&mut self.record);
         let hit = collide(&mut self.world.objects, self.probe, &self.list.found, &mut wheels);
         self.record = wheels.record;
         Some((hit, contacts(&self.record)))
+    }
+
+    /// The collision sync's gather: the gather probe ([`crate::atv_world::PROBE`]) at the active
+    /// probe's centre (every lane) with its reach, and the list refilled round it.
+    fn gather(&mut self, centre: Vf, reach: F) -> bool {
+        let w = &mut self.world;
+        w.broad.places[crate::atv_world::PROBE].centre = centre.0.map(F);
+        w.objects[crate::atv_world::PROBE].radius = reach;
+        crate::atv_world::gather(&mut w.objects, &mut w.broad, &mut self.list, crate::atv_world::PROBE, 3);
+        self.gathered = true;
+        true
     }
 }

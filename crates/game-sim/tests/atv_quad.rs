@@ -3060,13 +3060,14 @@ const SURFACE_DRAG: u32 = 0x004a_1ec0;
 const SPIN_INTEGRATE: u32 = 0x004a_2040;
 /// The words the steps write past [`REGIONS`]: the engine's clutch multiplier (`+0x7c`), and each
 /// wheel's steering rate (`+0x8b0`) and axis (`+0x8c0`), and (MD75) its contact frame (`+0x8d0`).
-const MORE_REGIONS: [(&str, u32, u32); 6] = [
+const MORE_REGIONS: [(&str, u32, u32); 7] = [
     ("engine", ENGINE, 0x1c0),
     ("left front's steering", 0x01c0_88b0, 0x60),
     ("right front's steering", 0x01c0_98b0, 0x60),
     ("left rear's steering", 0x01c0_a8b0, 0x60),
     ("right rear's steering", 0x01c0_b8b0, 0x60),
     ("scene", SCENE, 0x200 * SCENE_NODES as u32),
+    ("collidables", COLLIDABLE_AT, COLLIDABLE_SIZE * COLLIDABLES.len() as u32),
 ];
 /// MD75b1: the scene graph a ride's quad node can be in (node `i` at `SCENE + 0x200·i`), and the
 /// world's box the vehicle post reads (`WORLD + 0xa8`).
@@ -3082,8 +3083,9 @@ const NODE_BOUNDS: u32 = 0x0019_6e80;
 const COLLISION_SYNC: u32 = 0x0049_42c0;
 /// MD75c: what those three call in turn — a box moved in the spatial database, a collidable brought up
 /// to date, the nearby list gathered — and, through [`NODE_VT`] laid as the quad's node's vtable, the
-/// node's bounds gathered again (`+0x94`, at [`REBOUND_FN`]). The database entries and the
-/// collidables are words where their pointers go; nothing reads through them.
+/// node's bounds gathered again (`+0x94`, at [`REBOUND_FN`]). The database entries are words where
+/// their pointers go; nothing reads through them. MD75c2: each collidable is a whole part
+/// ([`COLLIDABLE_SIZE`] apart, [`lay_collidable`]), since the sync runs on it.
 const SPATIAL_MOVE: u32 = 0x0018_d690;
 const PART_SYNC: u32 = 0x0011_4360;
 const GATHER: u32 = 0x001d_6a60;
@@ -3091,6 +3093,9 @@ const NODE_VT: u32 = 0x01c2_2000;
 const REBOUND_FN: u32 = 0x01cf_0800;
 const ENTRY: u32 = 0x01c2_2100;
 const COLLIDABLE_AT: u32 = 0x01c2_2200;
+const COLLIDABLE_SIZE: u32 = 0x400;
+/// The frame mesh's vtable (the ray probe's is [`PART_VTABLE`]).
+const MESH_VTABLE: u32 = 0x003b_6d00;
 
 fn all_regions() -> impl Iterator<Item = (&'static str, u32, u32)> {
     REGIONS.into_iter().chain(MORE_REGIONS)
@@ -3784,7 +3789,53 @@ const COLLIDABLES: [quad::Part; 5] = [quad::Part::Riding, quad::Part::Frame, qua
 
 /// MD75c: where the harness lays a collidable the collision sync is handed, and back.
 fn collidable_at(p: quad::Part) -> u32 {
-    COLLIDABLE_AT + 0x10 * COLLIDABLES.iter().position(|&c| c == p).unwrap() as u32
+    COLLIDABLE_AT + COLLIDABLE_SIZE * COLLIDABLES.iter().position(|&c| c == p).unwrap() as u32
+}
+
+/// MD75c2: a collidable as the sync reads it, at [`collidable_at`]: its vtable, database (`+0x20`),
+/// centre, reach and frame; a ray probe's node, tree (at `+0x300`, or none) and bound (at `+0x340`); a
+/// mesh's node, frames and mesh (at `+0x380`). The node is the quad's.
+fn lay_collidable(ee: &mut Ee, p: quad::Part, c: &game_sim::atv_sync::Collidable) {
+    use game_sim::atv_sync::Kind;
+    let at = collidable_at(p);
+    let xyz = |ee: &mut Ee, a: u32, v: Vf| {
+        for (i, f) in [v.x(), v.y(), v.z()].into_iter().enumerate() {
+            put_f(ee, a + 4 * i as u32, F(f));
+        }
+    };
+    let rows = |ee: &mut Ee, a: u32, m: &[Vf; 4]| {
+        for (k, r) in m.iter().enumerate() {
+            put_v(ee, a + 0x10 * k as u32, *r);
+        }
+    };
+    ee.set_u32(at + 0x20, if c.spatial { ENTRY } else { 0 });
+    put_v(ee, at + 0x50, c.centre);
+    put_f(ee, at + 0x70, c.reach);
+    rows(ee, at + 0x130, &c.frame);
+    match c.kind {
+        Kind::Rays { tree, bound: (lo, hi) } => {
+            ee.set_u32(at + 0xc, PART_VTABLE);
+            ee.set_u32(at + 0x174, node_at(0));
+            ee.set_u32(at + 0x17c, if tree.is_some() { at + 0x300 } else { 0 });
+            if let Some((centre, half)) = tree {
+                xyz(ee, at + 0x30c, centre);
+                xyz(ee, at + 0x318, half);
+            }
+            ee.set_u32(at + 0x180, at + 0x340);
+            put_v(ee, at + 0x340, lo);
+            put_v(ee, at + 0x350, hi);
+        }
+        Kind::Mesh { local, centre, half, stood, before } => {
+            ee.set_u32(at + 0xc, MESH_VTABLE);
+            rows(ee, at + 0x170, &local);
+            rows(ee, at + 0x1b0, &stood);
+            rows(ee, at + 0x1f0, &before);
+            ee.set_u32(at + 0x240, node_at(0));
+            ee.set_u32(at + 0x244, at + 0x380);
+            xyz(ee, at + 0x38c, centre);
+            xyz(ee, at + 0x398, half);
+        }
+    }
 }
 
 fn collidable_of(at: u32) -> quad::Part {
@@ -3820,6 +3871,9 @@ fn lay_scene(ee: &mut Ee, x: &game_sim::atv_moto::Parts) {
     tire_set_byte(ee, OBJ + 0x44, u8::from(c.sync));
     for (at, p) in [(OBJ + 0xcc, c.riding), (OBJ + 0xd0, c.frame), (OBJ + 0xd8, c.active)] {
         ee.set_u32(at, p.map_or(0, collidable_at));
+    }
+    for p in COLLIDABLES {
+        lay_collidable(ee, p, &c.states[game_sim::atv_sync::slot(p)]);
     }
     let s = &x.spin;
     put_b(ee, OBJ + 0x11dc, s.armed);
@@ -3874,6 +3928,8 @@ fn address_of(c: &Call) -> u32 {
         Call::SurfaceDrag(..) => SURFACE_DRAG,
         Call::SpinIntegrate(..) => SPIN_INTEGRATE,
         Call::Contacts => WHEEL_CONTACTS,
+        Call::PartSync(_) => PART_SYNC,
+        Call::Gather(_) => GATHER,
         _ => 0,
     }
 }
@@ -3993,13 +4049,18 @@ fn hook_post(ee: &mut Ee, log: &Log<Call>, picks: &[u32]) {
             Call::NodeRebound
         }),
         (SPATIAL_MOVE, |ee| {
+            let v = |a: u64| Vf::new(ee.f32_at(a as u32), ee.f32_at(a as u32 + 4), ee.f32_at(a as u32 + 8), ee.f32_at(a as u32 + 12));
+            let (centre, half, reach) = (v(ee.r(5)), v(ee.r(6)), F(ee.f(12)));
             let node = match ee.r(4) as u32 {
                 OBJ => false,
                 n if n == node_at(0) => true,
-                n => panic!("a spatial move of {n:#x}"),
+                // MD75c2: a collidable's entry (`+0x18`), from its sync.
+                n => match COLLIDABLES.into_iter().find(|&p| collidable_at(p) + 0x18 == n) {
+                    Some(part) => return Call::PartMove { part, centre, half, reach },
+                    None => panic!("a spatial move of {n:#x}"),
+                },
             };
-            let v = |a: u64| Vf::new(ee.f32_at(a as u32), ee.f32_at(a as u32 + 4), ee.f32_at(a as u32 + 8), ee.f32_at(a as u32 + 12));
-            Call::SpatialMove { node, centre: v(ee.r(5)), half: v(ee.r(6)), reach: F(ee.f(12)) }
+            Call::SpatialMove { node, centre, half, reach }
         }),
         (PART_SYNC, |ee| Call::PartSync(collidable_of(ee.r(4) as u32))),
         (GATHER, |ee| {
@@ -4130,6 +4191,7 @@ fn each_unhooked_in(
                 Call::EndStunt => tally(&mut t, "stunt ended"),
                 Call::BodyReset => tally(&mut t, "reset"),
                 Call::NodeRebound => tally(&mut t, "rebound"),
+                Call::PartMove { .. } => tally(&mut t, "a part's box moved"),
                 Call::Wreck(r) => {
                     tally(&mut t, "wrecked");
                     if *r == 15 {
@@ -4932,14 +4994,15 @@ fn the_quads_post_process_runs_every_ported_step() {
         p
     };
     let want = ["body off", "boxed", "floored", "placed under a parent", "placed alone", "reset", "bounds", "current", "under two"];
-    let picks = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, NODE_POSITION];
+    let picks = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, PART_SYNC, NODE_POSITION];
     let tweak = |g: &mut Gen, r: &mut Ride| g.md75c(r);
     each_unhooked_in(0x0075_b104, 5_000, Listener::Post, &picks, tweak, paths, &want, 15);
 }
 
-/// The vehicle post and the three calls it makes that [`quad::Steps`] runs inline (MD75c): a test
-/// that unhooks the post unhooks them too.
-const POST_STEPS: [u32; 4] = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC];
+/// The vehicle post and the three calls it makes that [`quad::Steps`] runs inline (MD75c), and the
+/// collision sync's part sync (MD75c2): a test that unhooks the post unhooks them too. The gather goes
+/// on to the log with no world to gather in.
+const POST_STEPS: [u32; 5] = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, PART_SYNC];
 
 // --- MD75c: the vehicle post's spatial update, node bounds and collision sync ----------------------------
 
@@ -4947,7 +5010,7 @@ impl Gen {
     /// MD75c's fields over MD75b1's: the quad's own database entry and each node's (half the time),
     /// each node's box (`w`s anywhere too), second flag byte and reach, the node's bounds asked for
     /// half the time, and the collidables: the sync on three times in four, the riding probe mostly
-    /// the active one, each there or not.
+    /// the active one, each there or not; and (MD75c2) each collidable's state ([`Gen::collidable`]).
     fn md75c(&mut self, r: &mut Ride) {
         use quad::Part;
         self.md75b1(r);
@@ -4972,7 +5035,28 @@ impl Gen {
         let active = pick(self);
         let riding = if self.b() { active } else { pick(self) };
         let frame = if self.one_in(4) { None } else { Some(Part::Frame) };
-        x.collidables = game_sim::atv_moto::Collidables { sync: !self.one_in(4), riding, frame, active };
+        let states = std::array::from_fn(|i| self.collidable(COLLIDABLES[i] == Part::Frame));
+        x.collidables = game_sim::atv_moto::Collidables { sync: !self.one_in(4), riding, frame, active, states };
+    }
+
+    /// MD75c2: a collidable — a mesh, or a ray probe on a tree half the time — anywhere (frames with
+    /// rows anywhere, `w`s too), with a database entry half the time.
+    fn collidable(&mut self, mesh: bool) -> game_sim::atv_sync::Collidable {
+        use game_sim::atv_sync::{Collidable, Kind};
+        let frame = |g: &mut Gen| [g.vec(-2.0, 2.0), g.vec(-2.0, 2.0), g.vec(-2.0, 2.0), g.vec(-50.0, 50.0)];
+        let kind = if mesh {
+            Kind::Mesh {
+                local: frame(self),
+                centre: self.vec(-5.0, 5.0),
+                half: self.vec(-4.0, 4.0),
+                stood: frame(self),
+                before: frame(self),
+            }
+        } else {
+            let tree = if self.b() { Some((self.vec(-5.0, 5.0), self.vec(-4.0, 4.0))) } else { None };
+            Kind::Rays { tree, bound: (self.vec(-5.0, 5.0), self.vec(-5.0, 5.0)) }
+        };
+        Collidable { kind, frame: frame(self), centre: self.vec(-50.0, 50.0), reach: self.f(0.0, 10.0), spatial: self.b() }
     }
 }
 
@@ -5033,6 +5117,36 @@ fn the_quads_post_process_callees_are_the_originals() {
     ];
     let tweak = |g: &mut Gen, r: &mut Ride| g.md75c(r);
     each_unhooked_in(0x0075_c001, 10_000, Listener::Post, &POST_STEPS, tweak, post_callee_paths, &want, 30);
+}
+
+/// MD75c2: each collidable the collision sync brings up to date — a ray probe on its tree or on its
+/// bound, the frame mesh — and whether its box is moved in the database.
+fn part_sync_paths(r: &Ride) -> Vec<&'static str> {
+    use game_sim::atv_sync::Kind;
+    let x = &r.bike.parts;
+    let c = &x.collidables;
+    if !r.s.q.active || !x.body_on || !c.sync {
+        return vec!["no sync"];
+    }
+    let synced = [c.riding.filter(|_| c.riding != c.active), c.frame, c.active];
+    let mut p = Vec::new();
+    for part in synced.into_iter().flatten() {
+        let s = &c.states[game_sim::atv_sync::slot(part)];
+        p.push(match s.kind {
+            Kind::Rays { tree: Some(_), .. } => "a probe on its tree",
+            Kind::Rays { tree: None, .. } => "a probe on its bound",
+            Kind::Mesh { .. } => "the mesh",
+        });
+        p.push(if s.spatial { "its box moved" } else { "no entry" });
+    }
+    p
+}
+
+#[test]
+fn the_quads_part_sync_is_the_originals() {
+    let want = ["no sync", "a probe on its tree", "a probe on its bound", "the mesh", "its box moved", "no entry", "a part's box moved"];
+    let tweak = |g: &mut Gen, r: &mut Ride| g.md75c(r);
+    each_unhooked_in(0x0075_c201, 10_000, Listener::Post, &POST_STEPS, tweak, part_sync_paths, &want, 300);
 }
 
 // --- MD65a: the wreck body -----------------------------------------------------------------------------

@@ -967,6 +967,10 @@ pub mod atv_moto;
 /// moving-entry lists and link pool, answered for the quad in [`quad::Steps`].
 pub mod atv_spatial;
 
+/// A collidable brought up to date (MD75c2): SLUS-21104's part sync — the ray probe or mesh stood at its
+/// node's frame, and its box handed to the world's spatial database — answered in [`quad::Steps`].
+pub mod atv_sync;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground
