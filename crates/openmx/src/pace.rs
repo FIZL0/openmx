@@ -188,6 +188,17 @@ impl Pacer {
         self.start += d;
     }
 
+    /// Whether the tick after the one owed at `now` is owed then too: a backlog, which the loop runs
+    /// through before it draws (N23a). Read after [`Pacer::owed`], with the catch-up it left.
+    pub fn backlog(&self, now: Instant) -> bool {
+        let next = self.done + 1;
+        if self.most.is_some_and(|most| next >= most) {
+            return false;
+        }
+        let due = self.due(next);
+        !self.until.is_some_and(|until| due >= until) && now.saturating_duration_since(self.start) >= due
+    }
+
     /// A tick has run.
     pub fn ran(&mut self) {
         self.done += 1;
@@ -558,6 +569,26 @@ mod tests {
         assert_eq!(n, 1, "a ten-second stall runs one tick, not three hundred");
         assert!(!p.owed(start + Duration::from_secs(10)));
         assert!(p.owed(start + Duration::from_secs(10) + TICK));
+    }
+
+    /// N23a: a backlog is the ticks owed after the one owed now, which the loop runs before it
+    /// draws; the last of them, and a tick on time, have none behind them.
+    #[test]
+    fn a_backlog_is_a_tick_owed_behind_the_next() {
+        let start = Instant::now();
+        let mut p = Pacer::new(TICK, start);
+        let late = start + TICK * 3 + TICK / 2;
+        let mut behind = Vec::new();
+        while p.owed(late) {
+            behind.push(p.backlog(late));
+            p.ran();
+        }
+        assert_eq!(behind, [true, true, true, false], "ticks 0 to 3 are owed, the last with none behind it");
+        assert!(!p.backlog(late));
+        let mut p = Pacer::new(TICK, start).most(Some(2));
+        assert!(p.owed(late) && p.backlog(late), "tick 1 is the last --frames lets run");
+        p.ran();
+        assert!(p.owed(late) && !p.backlog(late), "and none after it");
     }
 
     /// `--steady-clock`: the pictures alone move it, by their floor, however long they really take,
