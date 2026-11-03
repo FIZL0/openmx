@@ -224,6 +224,8 @@ impl Body {
             ang_vel: self.rates,
             velocity: self.velocity,
             reset_each_frame: self.correction_peak,
+            position: self.position,
+            correction: self.correction,
         }
     }
 
@@ -235,5 +237,7 @@ impl Body {
         self.rates = b.ang_vel;
         self.velocity = b.velocity;
         self.correction_peak = b.reset_each_frame;
+        self.position = b.position;
+        self.correction = b.correction;
     }
 }
