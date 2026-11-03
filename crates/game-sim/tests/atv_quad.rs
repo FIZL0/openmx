@@ -235,6 +235,8 @@ fn poke(ee: &mut Ee, s: &State) {
     put_v(ee, BODY + 0x1d0, b.ang_vel);
     put_v(ee, BODY + 0x80, b.velocity);
     put_v(ee, BODY + 0xc0, b.reset_each_frame);
+    put_v(ee, BODY + 0x70, b.position);
+    put_v(ee, BODY + 0xd0, b.correction);
 }
 
 fn snap(ee: &Ee) -> Vec<u32> {
@@ -425,6 +427,7 @@ impl Gen {
             ang_vel: self.vec(-3.0, 3.0),
             velocity: self.vec(-60.0, 60.0),
             reset_each_frame: self.vec(-1.0, 1.0),
+            ..Body::default()
         };
         // Slow enough to stand up, now and then.
         if self.one_in(3) {
@@ -719,7 +722,7 @@ fn the_quads_pre_process_is_the_originals() {
     let log = hook_calls(
         &mut ee,
         &[
-            (INPUT_LIMITER, |ee| on_quad(ee, Call::InputLimiter)),
+            (INPUT_LIMITER, |ee| on_quad(ee, Call::InputLimiter(F(ee.f(12))))),
             (AUTO_SHIFT, |ee| on_quad(ee, Call::AutoShift { dt: F(ee.f(12)), inv_radius: F(ee.f(13)) })),
             (CLUTCH, |ee| on_quad(ee, Call::Clutch(F(ee.f(12))))),
             (HEAD_TAIL, |ee| on_quad(ee, Call::HeadTail)),
@@ -2931,7 +2934,7 @@ fn the_quads_physics_frame_is_the_originals() {
     let log = hook_calls(
         &mut ee,
         &[
-            (INPUT_LIMITER, |ee| on_quad(ee, Call::InputLimiter)),
+            (INPUT_LIMITER, |ee| on_quad(ee, Call::InputLimiter(F(ee.f(12))))),
             (AUTO_SHIFT, |ee| on_quad(ee, Call::AutoShift { dt: F(ee.f(12)), inv_radius: F(ee.f(13)) })),
             (CLUTCH, |ee| on_quad(ee, Call::Clutch(F(ee.f(12))))),
             (HEAD_TAIL, |ee| on_quad(ee, Call::HeadTail)),
@@ -3020,4 +3023,1003 @@ fn the_quads_physics_frame_is_the_originals() {
         &["1 substep", "2 substeps", "3 substeps", "4 substeps", "5 substeps", "quad off", "body off", "both on"],
         30,
     );
+}
+
+// --- MD75a: the bike's steps on the quad, each run as the original's own code --------------------------
+
+/// What the input limiter's first call reads through the quad's `+0x680` (its `+0x1d0` above zero
+/// cuts the gas), and the thing the collision record's `+0x20c` points at, whose `+0x94` class the
+/// backflip's steep test holds against the game's mask.
+const GATE: u32 = 0x01c0_5000;
+const THING: u32 = 0x01c0_6000;
+const STRUCK_MASK: u32 = 0x0054_2db0;
+/// What the bike steps call in turn: the wreck, the wheels' ground query, surface drag and spin.
+const WRECK_ENTRY: u32 = 0x004e_2260;
+const GROUND_QUERY: u32 = 0x0048_33c0;
+const SURFACE_DRAG: u32 = 0x004a_1ec0;
+const SPIN_INTEGRATE: u32 = 0x004a_2040;
+/// The words the steps write past [`REGIONS`]: the engine's clutch multiplier (`+0x7c`), and each
+/// wheel's steering rate (`+0x8b0`) and axis (`+0x8c0`).
+const MORE_REGIONS: [(&str, u32, u32); 5] = [
+    ("engine", ENGINE + 0x70, 0x10),
+    ("left front's steering", 0x01c0_88b0, 0x20),
+    ("right front's steering", 0x01c0_98b0, 0x20),
+    ("left rear's steering", 0x01c0_a8b0, 0x20),
+    ("right rear's steering", 0x01c0_b8b0, 0x20),
+];
+
+fn all_regions() -> impl Iterator<Item = (&'static str, u32, u32)> {
+    REGIONS.into_iter().chain(MORE_REGIONS)
+}
+
+fn reset_all(ee: &mut Ee) {
+    for (_, base, len) in all_regions() {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, 0);
+        }
+    }
+}
+
+fn snap_all(ee: &Ee) -> Vec<u32> {
+    all_regions().flat_map(|(_, base, len)| (0..len).step_by(4).map(move |o| base + o)).map(|a| ee.u32_at(a)).collect()
+}
+
+fn where_in_all(i: usize) -> String {
+    let mut i = i as u32 * 4;
+    for (name, _, len) in all_regions() {
+        if i < len {
+            return format!("{name} + {i:#x}");
+        }
+        i -= len;
+    }
+    "past the end".into()
+}
+
+fn only_touched_all(ee: &Ee) -> Result<(), String> {
+    let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+    for (a, b) in ee.written_ranges() {
+        // Word by word: a wheel's steering words run on from its region into the next.
+        let inside = (a >= frame.0 && b <= frame.1)
+            || (a..b).step_by(4).all(|w| all_regions().any(|(_, base, len)| w >= base && w < base + len));
+        if !inside {
+            return Err(format!("the original wrote {a:#010x}..{b:#010x}, which is not the quad or the stack"));
+        }
+    }
+    Ok(())
+}
+
+/// A quad state with the bike steps' own fields ([`quad::Bike`]) and what their callees answer.
+#[derive(Clone, Debug)]
+struct Ride {
+    s: State,
+    bike: quad::Bike,
+    /// The `+0x680` object's `+0x1d0`, or no object.
+    gate: Option<F>,
+    /// The struck thing's class word, the bits of the trick-button byte above the step's nibble, and
+    /// the bike's `+0xd20` the preload's cue hands on.
+    class: u32,
+    high: u8,
+    tag: u32,
+    /// The ground query's answers in the order the four suspensions ask, and whether it hands the
+    /// point back as it was given.
+    answers: Vec<(Vf, Vf)>,
+    echo: bool,
+}
+
+/// Every air key zero: the generator sets the ones the steps read.
+fn air_keys_zero() -> game_sim::air::Params {
+    game_sim::air::Params {
+        airborne_control_moment: Vf::ZERO,
+        airborne_damping: F::ZERO,
+        airborne_control_force: F::ZERO,
+        brake_gyro_torque: F::ZERO,
+        unroll_gain: F::ZERO,
+        unroll_torque: F::ZERO,
+        unyaw_gain: F::ZERO,
+        unyaw_torque: F::ZERO,
+        control_authority_time: F::ZERO,
+        preload_time: F::ZERO,
+        max_preload: F::ZERO,
+        min_preload_time: F::ZERO,
+        max_preload_time: F::ZERO,
+        min_dpad_preload_time: F::ZERO,
+        max_dpad_preload_time: F::ZERO,
+        min_backflip_time: F::ZERO,
+        max_backflip_time: F::ZERO,
+        min_backflip_torque: F::ZERO,
+        max_backflip_torque: F::ZERO,
+        backflip_torque_rate_increase: F::ZERO,
+        backflip_torque_rate_decrease: F::ZERO,
+        front_wreck_speed_limit: F::ZERO,
+        back_wreck_speed_limit: F::ZERO,
+        side_wreck_speed_limit: F::ZERO,
+        racing_down_wreck_speed_limit: F::ZERO,
+        freestyle_down_wreck_speed_limit: F::ZERO,
+        ground_pitch_down_wreck_angle: F::ZERO,
+        ground_pitch_up_wreck_angle: F::ZERO,
+        airborne_pitch_down_wreck_angle: F::ZERO,
+        airborne_pitch_up_wreck_angle: F::ZERO,
+        airborne_roll_wreck_angle: F::ZERO,
+        no_hander_wreck_speed_limit: F::ZERO,
+        no_hander_max_roll_angle: F::ZERO,
+        joust_wreck_height: F::ZERO,
+        crossup_wreck: F::ZERO,
+        crossup_wreck_time: F::ZERO,
+        rotation_speed: None,
+    }
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn lever(&mut self) -> F {
+        match self.bits() % 4 {
+            0 => F::ZERO,
+            1 => F::ONE,
+            _ => self.f(0.0, 1.0),
+        }
+    }
+
+    /// A quad state as [`Gen::state`] leaves it, with the bike's own fields over it: mostly
+    /// switched on with control, the rider's stunt word one the airborne control tells apart, the
+    /// body somewhere, and the four wheels as `tests/atv_wheel.rs` makes them, standing on still
+    /// ground.
+    fn ride(&mut self, mask: u32) -> Ride {
+        use game_sim::{handling, r#move as mv, wheel};
+        let mut s = self.state();
+        if !self.one_in(8) {
+            s.vstate = Some(self.bits() % 3);
+            s.q.active = true;
+            s.q.control_off = self.one_in(10);
+        }
+        let stunt = match self.bits() % 6 {
+            0 => self.bits() % 41,
+            1 => 41 + self.bits() % 5,
+            2 => 0x2e,
+            3 => 0xff,
+            4 => if self.b() { 40 } else { 45 },
+            _ => 46 + self.bits() % 250,
+        };
+        s.bal = if self.one_in(5) { (stunt, stunt) } else { (stunt, stunt ^ 1) };
+        s.q.balancing = s.bal.0 == s.bal.1;
+        s.body.position = self.vec(-50.0, 50.0);
+        s.body.correction = self.vec(-5.0, 5.0);
+        if self.b() {
+            // Mostly upright, so that the suspension points down.
+            let v = [self.f(-0.3, 0.3).0, self.f(-1.0, 1.0).0, self.f(-0.3, 0.3).0, self.f(0.5, 1.0).0];
+            let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]).sqrt();
+            s.body.orientation = Vf::new(v[0] / n, v[1] / n, v[2] / n, v[3] / n);
+        }
+
+        let gate = match self.bits() % 4 {
+            0 => None,
+            1 => Some(if self.b() { F::ZERO } else { self.f(-2.0, 0.0) }),
+            2 => Some(self.f(0.01, 2.0)),
+            _ => Some(F::ZERO),
+        };
+        let mut held = game_sim::ride::Held::default();
+        held.lock.steer = self.one_in(4);
+        held.lock.throttle = self.one_in(4);
+        held.lock.steer_was = self.one_in(4);
+        held.lock.latch = self.one_in(3);
+        let rate = |g: &mut Gen| g.f(0.5, 20.0);
+        let joystick = game_sim::phy::Joystick {
+            x_axis_rate_limit: if self.one_in(10) { F::ZERO } else { rate(self) },
+            y_axis_rate_limit: rate(self),
+            x_dpad_rate_limit: rate(self),
+            y_dpad_rate_limit: if self.one_in(10) { F::ZERO } else { rate(self) },
+            gas_rate_limit: rate(self),
+            brake_rate_limit: rate(self),
+            clutch_in_rate_limit: rate(self),
+            clutch_out_rate_limit: rate(self),
+        };
+        let stick = game_sim::trick::Stick {
+            x: if self.one_in(4) { F(if self.b() { 1.0 } else { -1.0 }) } else { self.f(-1.0, 1.0) },
+            y: match self.bits() % 4 {
+                0 => F(if self.b() { 0.8 } else { -0.8 }),
+                1 => if self.b() { self.f(0.81, 1.0) } else { self.f(-1.0, -0.81) },
+                _ => self.f(-1.0, 1.0),
+            },
+            digital: [self.one_in(3), self.one_in(3)],
+        };
+
+        let mut clutch_keys = mv::Params::default();
+        clutch_keys.clutch_torque_scale_time = if self.one_in(5) { F::ZERO } else { self.f(0.1, 2.0) };
+        clutch_keys.max_clutch_torque_scale_speed = if self.one_in(5) { F::ZERO } else { self.f(5.0, 40.0) };
+        clutch_keys.max_clutch_torque_scale = self.f(0.5, 4.0);
+        let mut ride = mv::Ride::default();
+        ride.clutch_timer = match self.bits() % 5 {
+            0 => F::ZERO,
+            1 => clutch_keys.clutch_torque_scale_time,
+            2 => self.f(-1.0, 0.0),
+            _ => self.f(0.0, 2.5),
+        };
+        ride.clutch_scale_start = self.f(-1.0, 4.0);
+        ride.clutch_cofg_weight = self.f(-1.0, 2.0);
+        let engine = mv::Engine { clutch_torque_scale: self.f(-1.0, 4.0), ..mv::Engine::default() };
+
+        let mut k = air_keys_zero();
+        k.preload_time = self.f(0.0, 0.5);
+        k.min_preload_time = self.f(0.0, 30.0);
+        k.max_preload_time = if self.one_in(6) { k.min_preload_time } else { self.f(10.0, 80.0) };
+        k.min_dpad_preload_time = self.f(0.0, 30.0);
+        k.max_dpad_preload_time = if self.one_in(6) { k.min_dpad_preload_time } else { self.f(10.0, 80.0) };
+        k.max_preload = self.f(0.0, 3000.0);
+        k.min_backflip_time = if self.one_in(4) { F::ZERO } else { self.f(0.0, 30.0) };
+        k.max_backflip_time = if self.one_in(8) { k.min_backflip_time } else { self.f(10.0, 80.0) };
+        k.min_backflip_torque = self.f(300.0, 1200.0);
+        k.max_backflip_torque = self.f(600.0, 1800.0);
+        k.backflip_torque_rate_increase = self.f(0.0, 1000.0);
+        k.backflip_torque_rate_decrease = self.f(0.0, 3000.0);
+        k.airborne_pitch_down_wreck_angle = self.f(0.8, 1.6);
+        k.airborne_pitch_up_wreck_angle = self.f(0.8, 1.6);
+        k.front_wreck_speed_limit = self.f(0.5, 8.0);
+        k.back_wreck_speed_limit = self.f(0.5, 8.0);
+        k.side_wreck_speed_limit = self.f(0.5, 8.0);
+        k.airborne_control_moment = Vf::new(self.f(-600.0, 0.0).0, self.f(0.0, 800.0).0, self.f(-300.0, 0.0).0, self.f(0.0, 2.0).0);
+        k.airborne_damping = self.f(0.0, 600.0);
+        k.airborne_control_force = self.f(0.0, 300.0);
+        k.brake_gyro_torque = self.f(0.0, 600.0);
+        k.unroll_gain = self.f(0.0, 6.0);
+        k.unroll_torque = self.f(0.0, 100.0);
+        k.unyaw_gain = self.f(0.0, 6.0);
+        k.unyaw_torque = self.f(0.0, 800.0);
+
+        let mut air = game_sim::air::Air::default();
+        air.preload_firing = self.one_in(3);
+        air.preload_ready = self.b();
+        air.preload_armed = self.b();
+        air.preload_timer = if self.one_in(5) { F::ZERO } else { self.f(-0.2, 0.6) };
+        air.preload_force = Vf::new(self.f(-5.0, 5.0).0, self.f(0.0, 3000.0).0, self.f(-5.0, 5.0).0, self.f(-2.0, 2.0).0);
+        air.flip_active = self.bits() % 3 != 0;
+        air.flip_armed = self.b();
+        air.flip_torque_applied = self.b();
+        air.flip_grace = self.near(0.0, -0.1, 0.7);
+        let t = if self.one_in(6) { k.min_backflip_torque } else { self.f(0.0, 1800.0) };
+        air.flip_torque = Vf::new((if self.b() { -t } else { t }).0, self.f(-50.0, 50.0).0, self.f(-50.0, 50.0).0, self.f(-2.0, 2.0).0);
+
+        // A lip, a third of the time: on the ground, rising, fast and off the brake.
+        if self.one_in(3) {
+            s.q.on_ground = true;
+            s.q.brake = F::ZERO;
+            s.body.velocity = Vf::new(s.body.velocity.x(), self.f(5.5, 15.0).0, s.body.velocity.z(), 0.0);
+            s.q.contact_vel = with_z(s.q.contact_vel, self.f(30.5, 60.0));
+        }
+        if self.one_in(6) {
+            s.body.velocity = Vf::new(s.body.velocity.x(), 5.0, s.body.velocity.z(), s.body.velocity.w());
+        }
+        if self.one_in(6) {
+            s.q.contact_vel = with_z(s.q.contact_vel, F(30.0));
+        }
+        // Level enough to auto-level, half the time.
+        let hy = if self.one_in(8) { F(0.9396926) } else { self.f(-0.9, 0.9) };
+        if self.b() {
+            s.q.heading = Vf::new(s.q.heading.x(), hy.0, s.q.heading.z(), s.q.heading.w());
+        }
+        if self.b() {
+            s.q.lean = self.near(0.1, -0.1, 0.1);
+        }
+
+        let touching = self.one_in(4);
+        let class = if self.b() { mask } else if self.b() { !mask } else { self.bits() };
+        let bike_wheels = self.wheels(&s);
+        let mut more = [game_sim::atv_wheel::More::default(); 4];
+        for (x, w) in more.iter_mut().zip(&s.q.wheels) {
+            *x = game_sim::atv_wheel::More {
+                record: self.bits() as u8,
+                kept: if self.one_in(10) { Vf::ZERO } else { self.vec(-3.0, 3.0) },
+                chassis_velocity_local: w.contact_vel,
+                ground_known: if self.one_in(5) { 1 } else { 0 },
+                ground_velocity: self.vec(-5.0, 5.0),
+                ground_point_velocity: self.vec(-5.0, 5.0),
+                steer_axis: self.normal(),
+            };
+        }
+        for (c, w) in s.contacts.iter_mut().zip(&bike_wheels) {
+            (c.owner, c.vehicle, c.point, c.touching) = (0, 0, w.contact_point, w.swept_contact);
+        }
+        let p = s.body.position;
+        let mut answers = Vec::new();
+        for w in &bike_wheels {
+            let point = Vf::new(p.x() + self.f(-3.0, 3.0).0, p.y() + self.f(-4.0, 1.0).0, p.z() + self.f(-3.0, 3.0).0, self.f(0.0, 1.0).0);
+            let n = self.normal();
+            for _ in 0..5 {
+                answers.push((point, if self.b() { n } else if self.one_in(3) { w.ground_normal } else { self.normal() }));
+            }
+        }
+        let bike = quad::Bike {
+            held,
+            gas_cut: handling::step::GasCut {
+                latched: self.b(),
+                timer: match self.bits() % 4 {
+                    0 => F::ZERO,
+                    1 => self.f(-0.05, 0.0),
+                    _ => self.f(0.0, 0.2),
+                },
+            },
+            cut_time: if self.b() { F::ZERO } else { self.f(-0.05, 0.2) },
+            joystick,
+            stick,
+            clutch: self.lever(),
+            gate_cut: gate.is_some_and(|v| F::ZERO < v),
+            clutch_keys,
+            ride,
+            engine,
+            air_keys: k,
+            air,
+            stick_hold: self.f(-70.0, 70.0),
+            preload_cue: self.b(),
+            spin_applied: self.one_in(8),
+            spin_active: self.one_in(8),
+            touching,
+            struck_class: touching && class & mask != 0,
+            buttons: if self.b() { handling::R1_ALONE } else if self.b() { 0 } else { (self.bits() & 0xf) as u8 },
+            right_y: if self.one_in(8) { F::ZERO } else { self.f(-1.0, 1.0) },
+            up_y: if self.one_in(8) { F::ZERO } else if self.one_in(6) { F(-0.79) } else { self.f(-1.0, 1.0) },
+            stunt_id: (self.bits() % 80) as i32,
+            rider_stunt: stunt as i32,
+            flip_clip: handling::FlipClip((self.bits() % 3) as i32),
+            flip_stunt: self.bits() % 64,
+            gas_gyro_torque: self.f(0.0, 400.0),
+            gyro: handling::Gyro { brake: self.bits() % 4 != 0, gas: self.bits() % 4 != 0 },
+            wheels: bike_wheels,
+            more,
+            ground: [game_sim::atv_wheel::Ground::Still; 4],
+            cofg: self.vec(-0.5, 0.5),
+        };
+        let _: &[wheel::Wheel; 4] = &bike.wheels;
+        Ride { s, bike, gate, class, high: (self.bits() & 0xf) as u8, tag: self.bits(), answers, echo: self.one_in(8) }
+    }
+
+    /// The four wheels' step fields, `tests/atv_wheel.rs`'s ranges, with what the quad keeps of
+    /// them from the quad's.
+    fn wheels(&mut self, s: &State) -> [game_sim::wheel::Wheel; 4] {
+        let p = s.body.position;
+        let mut out = [game_sim::wheel::Wheel::default(); 4];
+        for (w, qw) in out.iter_mut().zip(&s.q.wheels) {
+            *w = game_sim::wheel::Wheel {
+                has_ground: !self.one_in(20),
+                steered: qw.steered,
+                balancing: qw.balancing,
+                contact: qw.touching,
+                contact_normal: qw.normal,
+                max_steer_angle: qw.max_steer_angle,
+                steer_angle: qw.steer_command,
+                spring_rate: qw.spring,
+                max_compression: if self.one_in(10) { F::ZERO } else { self.f(0.2, 3.0) },
+                max_damper_speed: self.f(2.0, 30.0),
+                extension_rate: self.f(1.0, 20.0),
+                damping_out: self.f(10.0, 300.0),
+                damping_in: self.f(10.0, 300.0),
+                probe: if self.one_in(6) {
+                    self.vec(-2.0, 2.0)
+                } else {
+                    Vf::new(self.f(-0.3, 0.3).0, self.f(-2.5, -0.3).0, self.f(-0.3, 0.3).0, self.f(0.0, 1.0).0)
+                },
+                mount: Vf::new(self.f(-2.0, 2.0).0, self.f(-1.0, 0.5).0, self.f(-2.5, 2.5).0, self.f(0.0, 1.0).0),
+                ray_hit: if self.one_in(3) { 0 } else { 1 },
+                swept_contact: if self.b() { 1 } else { 0 },
+                terrain_wins: if self.b() { 1 } else { 0 },
+                ray_steps: self.bits() as i32 % 7,
+                compression: self.f(-1.0, 1.0),
+                last_compression: if self.one_in(4) { F::ZERO } else { self.f(0.0, 1.5) },
+                spring_force: self.f(-100.0, 100.0),
+                probe_end: self.vec(-5.0, 5.0),
+                contact_point: Vf::new(p.x() + self.f(-3.0, 3.0).0, p.y() + self.f(-4.0, 1.0).0, p.z() + self.f(-3.0, 3.0).0, self.f(0.0, 1.0).0),
+                load_point: self.vec(-5.0, 5.0),
+                mount_world: self.vec(-5.0, 5.0),
+                probe_end_world: self.vec(-5.0, 5.0),
+                contact_velocity: self.vec(-5.0, 5.0),
+                chassis_velocity: self.vec(-5.0, 5.0),
+                ground_normal: self.normal(),
+                probe_length: self.f(0.5, 2.5),
+                steer_torque: if self.one_in(4) { F::ZERO } else { self.f(-60.0, 60.0) },
+                steer_damping: if self.one_in(4) { F::ZERO } else { self.f(0.0, 12.0) },
+                steer_inv_inertia: if self.one_in(4) { F::ZERO } else { self.f(0.0, 6.0) },
+                min_steer_angle: -self.f(0.2, 0.7),
+                steer_rate: if self.one_in(4) { F::ZERO } else { self.f(-12.0, 12.0) },
+                ..Default::default()
+            };
+        }
+        out
+    }
+}
+
+/// The quad state, then the bike's own words over it (the words the quad keeps too are the quad's,
+/// written by [`poke`]).
+fn poke_ride(ee: &mut Ee, r: &Ride) {
+    poke(ee, &r.s);
+    let b = &r.bike;
+    let (h, j) = (&b.held, &b.joystick);
+    // The input limiter's.
+    put_f(ee, OBJ + 0x12c0, b.clutch);
+    put_f(ee, OBJ + 0x12a8, b.stick.x);
+    put_f(ee, OBJ + 0x12ac, b.stick.y);
+    put_b(ee, OBJ + 0x12a0, b.stick.digital[0]);
+    put_b(ee, OBJ + 0x12a4, b.stick.digital[1]);
+    put_b(ee, OBJ + 0xdd0, !h.lock.steer);
+    put_b(ee, OBJ + 0xdd4, !h.lock.throttle);
+    put_b(ee, OBJ + 0x1298, !h.lock.steer_was);
+    put_b(ee, OBJ + 0x129c, h.lock.latch);
+    put_b(ee, OBJ + 0x1764, b.gas_cut.latched);
+    put_f(ee, OBJ + 0x1768, b.gas_cut.timer);
+    put_f(ee, OBJ + 0x176c, b.cut_time);
+    put_f(ee, OBJ + 0x12d8, j.x_axis_rate_limit);
+    put_f(ee, OBJ + 0x12dc, j.y_axis_rate_limit);
+    put_f(ee, OBJ + 0x12e0, j.x_dpad_rate_limit);
+    put_f(ee, OBJ + 0x12e4, j.y_dpad_rate_limit);
+    put_f(ee, OBJ + 0x1310, j.gas_rate_limit);
+    put_f(ee, OBJ + 0x1314, j.brake_rate_limit);
+    put_f(ee, OBJ + 0x1318, j.clutch_in_rate_limit);
+    put_f(ee, OBJ + 0x131c, j.clutch_out_rate_limit);
+    match r.gate {
+        Some(v) => {
+            ee.set_u32(OBJ + 0x680, GATE);
+            put_f(ee, GATE + 0x1d0, v);
+        }
+        None => ee.set_u32(OBJ + 0x680, 0),
+    }
+    // The clutch ramp's.
+    put_f(ee, OBJ + 0x1348, b.ride.clutch_timer);
+    put_f(ee, OBJ + 0x134c, b.ride.clutch_scale_start);
+    put_f(ee, OBJ + 0x1350, b.clutch_keys.clutch_torque_scale_time);
+    put_f(ee, OBJ + 0x1354, b.ride.clutch_cofg_weight);
+    put_f(ee, OBJ + 0x1358, b.clutch_keys.max_clutch_torque_scale_speed);
+    put_f(ee, OBJ + 0x135c, b.clutch_keys.max_clutch_torque_scale);
+    put_f(ee, ENGINE + 0x7c, b.engine.clutch_torque_scale);
+    // The preload's.
+    let (k, a) = (&b.air_keys, &b.air);
+    put_f(ee, OBJ + 0xc5c, k.preload_time);
+    put_f(ee, OBJ + 0xc64, k.min_preload_time);
+    put_f(ee, OBJ + 0xc68, k.max_preload_time);
+    put_f(ee, OBJ + 0xc6c, k.max_preload);
+    put_f(ee, OBJ + 0x1160, k.min_dpad_preload_time);
+    put_f(ee, OBJ + 0x1164, k.max_dpad_preload_time);
+    put_b(ee, OBJ + 0xc50, a.preload_ready);
+    put_b(ee, OBJ + 0xc54, a.preload_firing);
+    put_b(ee, OBJ + 0xc58, a.preload_armed);
+    put_f(ee, OBJ + 0xc60, a.preload_timer);
+    put_v(ee, OBJ + 0xc70, a.preload_force);
+    put_b(ee, OBJ + 0x700, b.preload_cue);
+    ee.set_u32(OBJ + 0xd20, r.tag);
+    put_f(ee, OBJ + 0x12b0, b.stick_hold);
+    // The backflip's, and its steep test's.
+    put_f(ee, OBJ + 0x11a4, k.min_backflip_time);
+    put_f(ee, OBJ + 0x11a8, k.max_backflip_time);
+    put_f(ee, OBJ + 0x11b0, k.min_backflip_torque);
+    put_f(ee, OBJ + 0x11b4, k.max_backflip_torque);
+    put_f(ee, OBJ + 0x11b8, k.backflip_torque_rate_increase);
+    put_f(ee, OBJ + 0x11bc, k.backflip_torque_rate_decrease);
+    put_f(ee, OBJ + 0x1404, k.airborne_pitch_down_wreck_angle);
+    put_f(ee, OBJ + 0x1408, k.airborne_pitch_up_wreck_angle);
+    put_f(ee, OBJ + 0x13e8, k.front_wreck_speed_limit);
+    put_f(ee, OBJ + 0x13ec, k.back_wreck_speed_limit);
+    put_f(ee, OBJ + 0x13f0, k.side_wreck_speed_limit);
+    put_b(ee, OBJ + 0x1194, a.flip_torque_applied);
+    put_b(ee, OBJ + 0x119c, a.flip_active);
+    put_b(ee, OBJ + 0x11a0, a.flip_armed);
+    put_f(ee, OBJ + 0x11ac, a.flip_grace);
+    put_v(ee, OBJ + 0x11c0, a.flip_torque);
+    put_b(ee, OBJ + 0x11d0, b.spin_applied);
+    put_b(ee, OBJ + 0x11d8, b.spin_active);
+    put_b(ee, RECORD + 0x34, b.touching);
+    ee.set_u32(RECORD + 0x20c, THING);
+    ee.set_u32(THING + 0x94, r.class);
+    ee.set_u32(OBJ + 0x14ec, u32::from(b.buttons | r.high << 4));
+    put_f(ee, NODE + 0x84, b.right_y);
+    put_f(ee, NODE + 0x94, b.up_y);
+    ee.set_u32(OBJ + 0x1528, b.stunt_id as u32);
+    ee.set_u32(OBJ + 0x1754, b.flip_clip.0 as u32);
+    ee.set_u32(OBJ + 0x13b8, b.flip_stunt);
+    // The airborne control's (its stunt word, `+0x1524`, is the first balance word).
+    assert_eq!(b.rider_stunt as u32, r.s.bal.0, "the rider's stunt is the first balance word");
+    put_v(ee, OBJ + 0x1170, k.airborne_control_moment);
+    put_f(ee, OBJ + 0x1180, k.airborne_damping);
+    put_f(ee, OBJ + 0x1184, k.airborne_control_force);
+    put_f(ee, OBJ + 0x1330, k.brake_gyro_torque);
+    put_f(ee, OBJ + 0x1334, b.gas_gyro_torque);
+    put_f(ee, OBJ + 0x1338, k.unroll_gain);
+    put_f(ee, OBJ + 0x133c, k.unroll_torque);
+    put_f(ee, OBJ + 0x1340, k.unyaw_gain);
+    put_f(ee, OBJ + 0x1344, k.unyaw_torque);
+    put_b(ee, OBJ + 0x1290, b.gyro.brake);
+    put_b(ee, OBJ + 0x1294, b.gyro.gas);
+    // The wheels', at `tests/atv_wheel.rs`'s offsets, on still ground.
+    put_v(ee, BODY + 0x1a0, b.cofg);
+    for ((w, x), &at) in b.wheels.iter().zip(&b.more).zip(&WHEEL) {
+        ee.set_u32(at + 0x1e0, if w.has_ground { WORLD } else { 0 });
+        ee.set_u32(at + 0x1e4, BODY);
+        put_f(ee, at + 0x3c, w.max_compression);
+        put_f(ee, at + 0x40, w.max_damper_speed);
+        put_f(ee, at + 0x44, w.extension_rate);
+        put_f(ee, at + 0x4c, w.damping_out);
+        put_f(ee, at + 0x50, w.damping_in);
+        put_v(ee, at + 0x80, w.probe);
+        put_v(ee, at + 0x90, w.mount);
+        put_v(ee, at + 0xc0, x.kept);
+        ee.set_u32(at + 0xd0, w.ray_hit as u32);
+        ee.set_u32(at + 0xd4, w.swept_contact as u32);
+        ee.set_u32(at + 0xd8, w.terrain_wins as u32);
+        ee.set_u32(at + 0xec, w.ray_steps as u32);
+        put_f(ee, at + 0xf0, w.compression);
+        put_f(ee, at + 0xf4, w.last_compression);
+        put_f(ee, at + 0xf8, w.spring_force);
+        put_v(ee, at + 0x100, w.probe_end);
+        ee.set_u32(at + 0x110, u32::from(x.record) | 0x5a5a_5a00);
+        put_v(ee, at + 0x120, w.contact_point);
+        put_v(ee, at + 0x140, w.load_point);
+        put_v(ee, at + 0x150, w.mount_world);
+        put_v(ee, at + 0x160, w.probe_end_world);
+        put_v(ee, at + 0x170, w.contact_velocity);
+        put_v(ee, at + 0x180, w.chassis_velocity);
+        ee.set_u32(at + 0x1a0, x.ground_known as u32);
+        put_v(ee, at + 0x1b0, x.ground_velocity);
+        put_v(ee, at + 0x1c0, x.ground_point_velocity);
+        ee.set_u32(at + 0x1f0, 0);
+        ee.set_u32(at + 0x1f4, 0);
+        put_v(ee, at + 0x200, w.ground_normal);
+        put_f(ee, at + 0x214, w.probe_length);
+        put_f(ee, at + 0x60, w.steer_torque);
+        put_f(ee, at + 0x64, w.steer_damping);
+        put_f(ee, at + 0x6c, w.steer_inv_inertia);
+        put_f(ee, at + 0x74, w.min_steer_angle);
+        put_f(ee, at + 0x8b0, w.steer_rate);
+        put_v(ee, at + 0x8c0, x.steer_axis);
+    }
+}
+
+/// The quad's call to the original's address it goes to.
+fn address_of(c: &Call) -> u32 {
+    match c {
+        Call::InputLimiter(_) => INPUT_LIMITER,
+        Call::Clutch(_) => CLUTCH,
+        Call::Preload(_) => PRELOAD,
+        Call::Backflip(_) => BACKFLIP,
+        Call::AirborneControl(_) => AIRBORNE_CONTROL,
+        Call::Suspension(..) => SUSPENSION,
+        Call::TireForces(..) => TIRE_FORCES,
+        Call::WheelIntegrate(..) => WHEEL_INTEGRATE,
+        _ => 0,
+    }
+}
+
+/// The port's side: the calls whose addresses are `picks` go to [`quad::Steps`], the rest are listed
+/// where the steps list what they call in turn.
+struct Only<'a, G> {
+    picks: &'a [u32],
+    steps: quad::Steps<Vec<Call>, G>,
+}
+
+impl<G: FnMut(Vf) -> (Vf, Vf)> quad::Moto for Only<'_, G> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        if self.picks.contains(&address_of(&c)) {
+            self.steps.call(c, q, body);
+        } else {
+            self.steps.rest.push(c);
+        }
+    }
+}
+
+type Answers = Rc<RefCell<std::collections::VecDeque<(Vf, Vf)>>>;
+
+/// Every callee of the PreProcess and the Force body hooked to log its call (as the two listeners'
+/// tests do), and what the bike steps call in turn: the stunt start (answering yes), its end, the
+/// wreck, the preload's cue, each wheel's surface drag and spin, and the ground query (serving
+/// `answers`, the point too unless `echo`). Then the hooks at `picks` are taken off, so that the
+/// original's own code runs there.
+fn hook_steps(ee: &mut Ee, picks: &[u32], answers: &Answers, echo: &Rc<Cell<bool>>) -> Log<Call> {
+    let log = hook_calls(
+        ee,
+        &[
+            (INPUT_LIMITER, |ee| on_quad(ee, Call::InputLimiter(F(ee.f(12))))),
+            (AUTO_SHIFT, |ee| on_quad(ee, Call::AutoShift { dt: F(ee.f(12)), inv_radius: F(ee.f(13)) })),
+            (CLUTCH, |ee| on_quad(ee, Call::Clutch(F(ee.f(12))))),
+            (HEAD_TAIL, |ee| on_quad(ee, Call::HeadTail)),
+            (GRAVITY, |ee| on_quad(ee, Call::Gravity)),
+            (PRELOAD, |ee| on_quad(ee, Call::Preload(F(ee.f(12))))),
+            (BACKFLIP, |ee| on_quad(ee, Call::Backflip(F(ee.f(12))))),
+            (SPIN_AIR, |ee| on_quad(ee, Call::SpinAir(F(ee.f(12))))),
+            (ENGINE_UPDATE, |ee| {
+                assert_eq!(ee.r(4) as u32, ENGINE, "the engine update's engine");
+                Call::EngineUpdate(F(ee.f(12)))
+            }),
+            (AIR_DRAG, |ee| on_quad(ee, Call::AirDrag(F(ee.f(12))))),
+            (AIRBORNE_CONTROL, |ee| on_quad(ee, Call::AirborneControl(F(ee.f(12))))),
+            (WHEEL_CLEAR, |ee| Call::WheelClear(wheel_of(ee))),
+            (WHEEL_CONTACTS, |ee| on_quad(ee, Call::Contacts)),
+            (SUSPENSION, |ee| Call::Suspension(wheel_of(ee), F(ee.f(12)))),
+            (TIRE_FORCES, |ee| Call::TireForces(wheel_of(ee), F(ee.f(12)))),
+            (WHEEL_INTEGRATE, |ee| Call::WheelIntegrate(wheel_of(ee), F(ee.f(12)))),
+            (REV_LIMIT, |ee| {
+                assert_eq!(ee.r(4) as u32, ENGINE, "the rev limiter's engine");
+                Call::RevLimit
+            }),
+            (PEAK_RATES, |ee| on_quad(ee, Call::PeakRates)),
+            (END_STUNT, |ee| on_quad(ee, Call::EndStunt)),
+            (WRECK_ENTRY, |ee| on_quad(ee, Call::Wreck(ee.r(5) as u8))),
+            (POST, |ee| {
+                assert_eq!([ee.r(5) as u32, ee.r(6) as u32, ee.r(7) as u32, ee.r(9) as u32], [OBJ + 0x674, 8, 14, 0], "the preload cue's post");
+                Call::PreloadCue
+            }),
+            (SURFACE_DRAG, |ee| Call::SurfaceDrag(wheel_of(ee), F(ee.f(12)))),
+            (SPIN_INTEGRATE, |ee| Call::SpinIntegrate(wheel_of(ee), F(ee.f(12)))),
+        ],
+    );
+    let l = log.clone();
+    ee.hooks.insert(START_STUNT, Box::new(move |ee| {
+        assert_eq!(ee.r(4) as u32, OBJ, "the stunt start's quad");
+        l.borrow_mut().push(Call::StartStunt(ee.r(5) as u32));
+        ee.set(2, 1);
+    }));
+    let (a, e) = (answers.clone(), echo.clone());
+    ee.hooks.insert(GROUND_QUERY, Box::new(move |ee| {
+        assert_eq!(ee.r(4) as u32, WORLD, "the ground query's world");
+        let (p, n) = (ee.r(5) as u32, ee.r(6) as u32);
+        let wheel = ee.r(8) as u32 - 0x110;
+        assert!(WHEEL.contains(&wheel) && ee.r(7) == 0, "the ground query's last two arguments");
+        let (point, normal) = a.borrow_mut().pop_front().expect("more ground queries than answers");
+        if !e.get() {
+            put_v(ee, p, point);
+        }
+        put_v(ee, n, normal);
+    }));
+    for at in picks {
+        assert!(ee.hooks.remove(at).is_some(), "{at:#x} was not hooked");
+    }
+    log
+}
+
+/// `n` generated rides through the PreProcess (`head`) or the Force body with the calls at `picks`
+/// unhooked, the original's own code answering them, and [`quad::Steps`] answering them in the port:
+/// every region equal, and the calls left over equal. `tweak` shapes each state, `paths` names the
+/// ways it goes (from the decompile's branches, not the port's), each of `want` seen `at_least` times.
+#[allow(clippy::too_many_arguments)]
+fn each_unhooked(
+    seed: u64,
+    n: usize,
+    head: bool,
+    picks: &[u32],
+    tweak: impl Fn(&mut Gen, &mut Ride),
+    paths: impl Fn(&Ride) -> Vec<&'static str>,
+    want: &[&str],
+    at_least: u32,
+) {
+    let Some(mut ee) = image() else { return };
+    let mask = ee.u32_at(STRUCK_MASK);
+    assert_ne!(mask, 0, "the struck class mask is 0 in the image");
+    let answers: Answers = Rc::default();
+    let echo = Rc::new(Cell::new(false));
+    let log = hook_steps(&mut ee, picks, &answers, &echo);
+    let mut g = Gen(seed);
+    let mut t = BTreeMap::new();
+    for k in 0..n {
+        let mut r = g.ride(mask);
+        tweak(&mut g, &mut r);
+        for p in paths(&r) {
+            tally(&mut t, p);
+        }
+        log.borrow_mut().clear();
+        *answers.borrow_mut() = r.answers.iter().copied().collect();
+        echo.set(r.echo);
+        reset_all(&mut ee);
+        poke_ride(&mut ee, &r);
+        if head {
+            ee.call(GROUND_HEAD, &[u64::from(OBJ)], &[r.s.dt.0], 200_000);
+        } else {
+            ee.call(GROUND_STEP, &[u64::from(OBJ)], &[r.s.dt.0], 2_000_000);
+        }
+        only_touched_all(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{r:#?}"));
+        let was = snap_all(&ee);
+
+        let mut u = r.clone();
+        let mut queue: std::collections::VecDeque<(Vf, Vf)> = r.answers.iter().copied().collect();
+        let echo_now = r.echo;
+        let ground = move |q: Vf| {
+            let (p, n) = queue.pop_front().expect("more ground queries than answers");
+            (if echo_now { q } else { p }, n)
+        };
+        let mut m = Only { picks, steps: quad::Steps { bike: u.bike.clone(), rest: Vec::new(), ground } };
+        if head {
+            quad::ground_head(&u.s.p, &mut u.s.q, &mut u.s.body, u.s.dt, &mut m);
+        } else {
+            quad::ground_step(&u.s.p, &mut u.s.q, &mut u.s.body, u.s.dt, &mut m);
+        }
+        u.bike = m.steps.bike;
+        // The backflip's stunt id and the rider's stunt word are the bike's; the quad's poke writes
+        // the balance word, which the port's quad does not change.
+        reset_all(&mut ee);
+        poke_ride(&mut ee, &u);
+        let now = snap_all(&ee);
+        if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
+            panic!(
+                "state {k}: {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{r:#?}",
+                where_in_all(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+        assert_eq!(*log.borrow(), m.steps.rest, "state {k}: the calls\n{r:#?}");
+        for c in &m.steps.rest {
+            match c {
+                Call::PreloadCue => tally(&mut t, "cue posted"),
+                Call::StartStunt(_) => tally(&mut t, "stunt started"),
+                Call::EndStunt => tally(&mut t, "stunt ended"),
+                Call::Wreck(_) => tally(&mut t, "wrecked"),
+                _ => {}
+            }
+        }
+    }
+    each_path_seen(&t, want, at_least);
+}
+
+/// Which way the input limiter's gas went, from the decompile's branches (`tests/mxvatv_step.rs`'s).
+fn limiter_path(r: &Ride) -> &'static str {
+    let (q, b) = (&r.s.q, &r.bike);
+    let gas = if b.gate_cut { F::ZERO } else { q.gas };
+    if !q.active {
+        "off"
+    } else if b.held.lock.throttle {
+        "throttle off, cut armed"
+    } else if b.gas_cut.latched {
+        if gas == F::ZERO {
+            "cut let go, no gas"
+        } else if b.cut_time < b.gas_cut.timer {
+            "cut let go, timed out"
+        } else {
+            "cut holding"
+        }
+    } else if q.balancing {
+        "balance stunt"
+    } else if q.push_gate != F::ZERO && !q.airborne {
+        "reverse on the ground"
+    } else if b.gate_cut {
+        "gate cut"
+    } else {
+        "gas walks"
+    }
+}
+
+const LIMITER_PATHS: [&str; 9] = [
+    "off",
+    "throttle off, cut armed",
+    "cut let go, no gas",
+    "cut let go, timed out",
+    "cut holding",
+    "balance stunt",
+    "reverse on the ground",
+    "gate cut",
+    "gas walks",
+];
+
+/// Which way the clutch ramp went, on the levers as they were poked.
+fn clutch_path(r: &Ride) -> &'static str {
+    let (q, b) = (&r.s.q, &r.bike);
+    let (k, ride) = (&b.clutch_keys, &b.ride);
+    if !q.active {
+        "off"
+    } else if b.clutch == F::ONE && q.gas == F::ONE {
+        "rearmed"
+    } else if b.clutch != F::ZERO || ride.clutch_timer > k.clutch_torque_scale_time {
+        "left alone"
+    } else if ride.clutch_timer == F::ZERO {
+        "started"
+    } else {
+        "running"
+    }
+}
+
+/// With control on: the preload's way, from the decompile's branches (`tests/mxvatv_step.rs`'s).
+fn preload_path(r: &Ride) -> &'static str {
+    let (q, b, a) = (&r.s.q, &r.bike, &r.bike.air);
+    let y = b.stick.y;
+    if !q.active || q.control_off {
+        "off"
+    } else if a.preload_firing {
+        if a.preload_timer - r.s.dt > F::ZERO { "firing" } else { "fired out" }
+    } else if !q.on_ground || r.s.body.velocity.y() <= 5.0 || q.contact_vel.z() <= 30.0 || q.brake != F::ZERO {
+        "off the lip"
+    } else if y > F(0.8) {
+        "armed"
+    } else if y < F(-0.8) && a.preload_armed {
+        "fired"
+    } else {
+        "waiting"
+    }
+}
+
+/// With control on: the backflip's way (`tests/mxvatv_air.rs`'s).
+fn backflip_path(r: &Ride) -> &'static str {
+    let (q, b, a) = (&r.s.q, &r.bike, &r.bike.air);
+    if !q.active || q.control_off {
+        return "off";
+    }
+    if !a.flip_active {
+        let lip = q.on_ground && !b.spin_applied && !b.spin_active && r.s.body.velocity.y() > 5.0 && q.contact_vel.z() > 30.0 && q.brake == F::ZERO;
+        if !lip {
+            "off the lip"
+        } else if b.stick.y < F(-0.8) && b.buttons == game_sim::handling::R1_ALONE {
+            "arming"
+        } else if b.stick.y > F(0.8) && a.flip_armed {
+            "triggered"
+        } else {
+            "waiting"
+        }
+    } else if !a.flip_armed {
+        if q.on_ground { "in the grace" } else { "off the lip in time" }
+    } else if q.on_ground || b.touching || F(a.flip_torque.x()).abs() < b.air_keys.min_backflip_torque {
+        if b.flip_clip.0 != 0 { "ended mid-clip" } else { "ended" }
+    } else {
+        "turning"
+    }
+}
+
+/// With control on and in the air: the airborne control's ways (`tests/mxvatv_air.rs`'s).
+fn airborne_paths(r: &Ride) -> Vec<&'static str> {
+    let (q, b) = (&r.s.q, &r.bike);
+    if !q.active || q.control_off {
+        return vec!["off"];
+    }
+    if q.on_ground {
+        return vec!["on the ground"];
+    }
+    let mut v = vec![if b.air.flip_torque_applied && b.spin_applied {
+        "stick left out"
+    } else if b.rider_stunt < 41 {
+        "stick scaled"
+    } else {
+        "stick whole"
+    }];
+    let idle = b.rider_stunt >= 46;
+    let brake = q.front_brake != F::ZERO || q.rear_brake != F::ZERO;
+    v.push(if idle && b.gyro.brake && brake {
+        "brake gyro"
+    } else if idle && b.gyro.gas && q.gas_limited != F::ZERO {
+        "gas gyro"
+    } else {
+        "no gyro"
+    });
+    v.push(if idle && !b.air.flip_torque_applied && !b.spin_applied && q.speed_len > F(10.0) { "lean force" } else { "no lean force" });
+    v
+}
+
+fn on(r: &Ride) -> bool {
+    r.s.q.active
+}
+
+#[test]
+fn the_quads_input_limiter_is_the_bikes() {
+    each_unhooked(0x0075_a001, 10_000, true, &[INPUT_LIMITER], |_, _| {}, |r| vec![limiter_path(r)], &LIMITER_PATHS, 30);
+}
+
+#[test]
+fn the_quads_clutch_is_the_bikes() {
+    let want = ["off", "rearmed", "left alone", "started", "running"];
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        if g.one_in(4) {
+            (r.bike.clutch, r.s.q.gas) = (F::ONE, F::ONE);
+        } else if g.one_in(3) {
+            r.bike.clutch = F::ZERO;
+        }
+    };
+    each_unhooked(0x0075_a002, 10_000, true, &[CLUTCH], tweak, |r| vec![clutch_path(r)], &want, 30);
+}
+
+#[test]
+fn the_quads_pre_process_runs_the_bikes_steps() {
+    each_unhooked(0x0075_a003, 5_000, true, &[INPUT_LIMITER, CLUTCH], |_, _| {}, |r| vec![limiter_path(r)], &LIMITER_PATHS, 15);
+}
+
+#[test]
+fn the_quads_preload_is_the_bikes() {
+    let want = ["off", "firing", "fired out", "off the lip", "armed", "fired", "waiting", "cue posted"];
+    each_unhooked(0x0075_a004, 10_000, false, &[PRELOAD], |_, _| {}, |r| vec![preload_path(r)], &want, 30);
+}
+
+/// A quarter of the time, a flip turning in the air (where its stunt starts, its clip turns over and
+/// its stunt ends); a quarter, on a lip with the stick past the line (where it arms and triggers).
+fn turning_flip(g: &mut Gen, r: &mut Ride) {
+    let (q, b) = (&mut r.s.q, &mut r.bike);
+    match g.bits() % 4 {
+        0 => {
+            (b.air.flip_active, b.air.flip_armed, q.on_ground, b.touching) = (true, true, false, false);
+            let t = b.air_keys.min_backflip_torque.0 + g.f(0.0, 500.0).0;
+            b.air.flip_torque = Vf::new(-t, b.air.flip_torque.y(), b.air.flip_torque.z(), b.air.flip_torque.w());
+            (b.right_y, b.up_y, b.flip_clip.0) = match g.bits() % 3 {
+                0 => (g.f(-1.0, 0.0), g.f(0.01, 1.0), 0),
+                1 => (g.f(-1.0, 0.0), g.f(-1.0, -0.01), 1),
+                _ => (g.f(0.01, 1.0), g.f(-0.78, 1.0), 2),
+            };
+        }
+        1 => {
+            (b.air.flip_active, q.on_ground, b.spin_applied, b.spin_active, q.brake) = (false, true, false, false, F::ZERO);
+            r.s.body.velocity = Vf::new(r.s.body.velocity.x(), g.f(5.5, 15.0).0, r.s.body.velocity.z(), 0.0);
+            q.contact_vel = with_z(q.contact_vel, g.f(30.5, 60.0));
+            if g.b() {
+                (b.stick.y, b.buttons) = (g.f(-1.0, -0.81), game_sim::handling::R1_ALONE);
+            } else {
+                (b.stick.y, b.air.flip_armed) = (g.f(0.81, 1.0), true);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn the_quads_backflip_is_the_bikes() {
+    let want = [
+        "off",
+        "off the lip",
+        "arming",
+        "triggered",
+        "waiting",
+        "in the grace",
+        "off the lip in time",
+        "ended",
+        "ended mid-clip",
+        "turning",
+        "stunt started",
+        "stunt ended",
+        "wrecked",
+    ];
+    each_unhooked(0x0075_a005, 10_000, false, &[BACKFLIP], turning_flip, |r| vec![backflip_path(r)], &want, 30);
+}
+
+#[test]
+fn the_quads_airborne_control_is_the_bikes() {
+    let want = ["off", "on the ground", "stick left out", "stick scaled", "stick whole", "brake gyro", "gas gyro", "no gyro", "lean force", "no lean force"];
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        if g.b() {
+            r.s.q.on_ground = false;
+        }
+    };
+    each_unhooked(0x0075_a006, 10_000, false, &[AIRBORNE_CONTROL], tweak, airborne_paths, &want, 30);
+}
+
+#[test]
+fn the_quads_suspension_is_the_wheels() {
+    let paths = |r: &Ride| {
+        if !on(r) {
+            return vec!["off"];
+        }
+        r.bike.wheels.iter().map(|w| if w.has_ground { "asks the ground" } else { "no world" }).collect()
+    };
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        if g.one_in(8) {
+            r.echo = true;
+        }
+    };
+    each_unhooked(0x0075_a007, 5_000, false, &[SUSPENSION], tweak, paths, &["off", "asks the ground", "no world"], 30);
+}
+
+#[test]
+fn the_quads_tire_forces_are_the_wheels() {
+    let paths = |r: &Ride| {
+        if !on(r) {
+            return vec!["off"];
+        }
+        r.bike.wheels.iter().map(|w| if w.ray_hit != 0 || w.swept_contact != 0 { "in contact" } else { "clear" }).collect()
+    };
+    each_unhooked(0x0075_a008, 5_000, false, &[TIRE_FORCES], |_, _| {}, paths, &["off", "in contact", "clear"], 30);
+}
+
+#[test]
+fn the_quads_wheel_integrate_is_the_wheels() {
+    let paths = |r: &Ride| {
+        if !on(r) {
+            return vec!["off"];
+        }
+        r.s.q.wheels.iter().map(|w| if !w.steered { "not steered" } else if !w.balancing { "held" } else { "free" }).collect()
+    };
+    each_unhooked(0x0075_a009, 5_000, false, &[WHEEL_INTEGRATE], |_, _| {}, paths, &["off", "not steered", "held", "free"], 30);
+}
+
+/// All six of the Force body's ported calls at once: the original's own code for each, the port's
+/// [`quad::Steps`] for each, one after the other on the same quad.
+#[test]
+fn the_quads_force_body_runs_the_bikes_steps() {
+    let picks = [PRELOAD, BACKFLIP, AIRBORNE_CONTROL, SUSPENSION, TIRE_FORCES, WHEEL_INTEGRATE];
+    let paths = |r: &Ride| vec![preload_path(r), backflip_path(r)];
+    let want = ["off", "firing", "armed", "fired", "arming", "triggered", "turning", "ended", "cue posted", "stunt started"];
+    each_unhooked(0x0075_a00a, 5_000, false, &picks, turning_flip, paths, &want, 15);
 }

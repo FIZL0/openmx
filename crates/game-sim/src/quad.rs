@@ -227,6 +227,10 @@ pub struct Body {
     /// A quadword of the body's the PreProcess resets to (0, 0, 0, 1) every frame; what reads it is
     /// not traced.
     pub reset_each_frame: Vf,
+    /// The centre of mass in the world, and the correction a bottomed-out wheel takes its closing
+    /// speed out of (MD75a: only the wheels' steps, run by [`Steps`], read and write them).
+    pub position: Vf,
+    pub correction: Vf,
 }
 
 fn scale(v: Vf, s: F) -> Vf {
@@ -524,7 +528,7 @@ const TIPPED_UP: f32 = 0.25;
 pub enum Call {
     /// The PreProcess's: the bike's input limiter (first), its automatic gearbox (handed the left
     /// rear's one-over-radius), its clutch, and the virtual it ends on.
-    InputLimiter,
+    InputLimiter(F),
     AutoShift { dt: F, inv_radius: F },
     Clutch(F),
     HeadTail,
@@ -587,6 +591,14 @@ pub enum Call {
     NodeOrientation,
     NodeLocal,
     NetPost(F),
+    /// What the bike steps [`Steps`] runs call in turn (MD75a): the preload's cue posted (category 8,
+    /// id 14, the bike's `+0xd20` handed on); the bike's wreck entered (the reason) when a backflip
+    /// lands mid-clip — the stunt's start and end are [`Call::StartStunt`] and [`Call::EndStunt`];
+    /// and a wheel's surface drag and spin, which its integrate runs before the steering hinge.
+    PreloadCue,
+    Wreck(u8),
+    SurfaceDrag(usize, F),
+    SpinIntegrate(usize, F),
 }
 
 /// Whoever runs the calls the quad's listeners make. A `Vec<Call>` just lists them.
@@ -624,7 +636,7 @@ pub fn ground_head(p: &Params, q: &mut Quad, body: &mut Body, dt: F, m: &mut imp
     if !q.active {
         return;
     }
-    m.call(Call::InputLimiter, q, body);
+    m.call(Call::InputLimiter(dt), q, body);
     if !q.on_ground {
         q.front_brake = F::ZERO;
     }
@@ -1678,4 +1690,269 @@ pub fn frame(
     m: &mut impl Moto,
 ) {
     world.step(dt, &mut Frame { p, q, body, table, m });
+}
+
+// --- the bike's steps on the quad (MD75a) -----------------------------------------------------------
+
+/// What SLUS-21104's bike steps keep on the quad beyond [`Quad`] and [`Body`], in the steps' own
+/// types: the quad is the bike with four wheels, and its words sit where the bike's do.
+///
+/// Where a word is in both, [`Quad`]'s (or [`Body`]'s) is the one that counts: [`Steps`] copies it
+/// into the step's types before each step and back out after. The pairs are the levers and the
+/// stick's lean ([`crate::ride::Held`]'s gas, brakes, clutch, lean and reverse are
+/// [`Quad::gas_limited`], [`Quad::front_brake`], [`Quad::rear_brake`], [`Quad::clutch_in`],
+/// [`Quad::lean`]/[`Quad::lean_fore_aft`] and [`Quad::push_gate`]), the air state's `on_ground`,
+/// `contact_vel`, `crossup`, `authority` and `flipping`, and each wheel's steering, contact, normal,
+/// steering lock and angle ([`Wheel::steer_command`]), spring rate and contact velocity.
+#[derive(Clone, Debug)]
+pub struct Bike {
+    /// The input limiter's: the rate limiter, the gas cut and how long it holds, the `[Joystick]`
+    /// rates, the stick as the pad left it (the limiter leaves it as it is), the clutch lever as
+    /// pressed (the clutch ramp reads it) and the start gate's penalty ([`crate::ride::Controls::gate_cut`]).
+    pub held: crate::ride::Held,
+    pub gas_cut: crate::handling::step::GasCut,
+    pub cut_time: F,
+    pub joystick: crate::phy::Joystick,
+    pub stick: crate::trick::Stick,
+    pub clutch: F,
+    pub gate_cut: bool,
+    /// The clutch ramp's keys, clock and the engine's multiplier it writes.
+    pub clutch_keys: crate::r#move::Params,
+    pub ride: crate::r#move::Ride,
+    pub engine: crate::r#move::Engine,
+    /// The air steps' keys (its `control_authority_time` is [`Quad::authority_time`]'s) and the
+    /// preload's and backflip's state ([`crate::air::Air`]).
+    pub air_keys: crate::air::Params,
+    pub air: crate::air::Air,
+    /// How long the stick has been held, and the preload cue's latch.
+    pub stick_hold: F,
+    pub preload_cue: bool,
+    /// The 360's torque went in, and the 360 is on: the backflip's lip refuses either.
+    pub spin_applied: bool,
+    pub spin_active: bool,
+    /// The collision record's: the quad touches something, and what it struck is of the class the
+    /// mid-clip wreck's reason asks about.
+    pub touching: bool,
+    pub struck_class: bool,
+    /// The trick buttons' byte ([`crate::handling::trick_nibble`] in its low nibble), the scene
+    /// node's right and up axes' heights, the rider's stunt id and current stunt (the backflip reads
+    /// `+0x1528`, the airborne control `+0x1524`), the backflip's clip and its stunt's id.
+    pub buttons: u8,
+    pub right_y: F,
+    pub up_y: F,
+    pub stunt_id: i32,
+    pub rider_stunt: i32,
+    pub flip_clip: crate::handling::FlipClip,
+    pub flip_stunt: u32,
+    /// `[Airborne Control] GasGyroTorque` and the gyro options.
+    pub gas_gyro_torque: F,
+    pub gyro: crate::handling::Gyro,
+    /// The four wheels as SLUS-21104's wheel steps see them ([`crate::atv_wheel`]), what stands under
+    /// each, and the body's centre of mass in its own frame.
+    pub wheels: [crate::wheel::Wheel; 4],
+    pub more: [crate::atv_wheel::More; 4],
+    pub ground: [crate::atv_wheel::Ground; 4],
+    pub cofg: Vf,
+}
+
+/// **The quad's [`Moto`] with SLUS-21104's bike steps ported**: the input limiter and clutch
+/// ([`crate::handling::step`]), the preload, backflip and airborne control ([`crate::handling`]),
+/// each wheel's suspension and tire forces ([`crate::atv_wheel`], whose contact velocity and hinge
+/// force [`crate::atv_wheel::run`] answers) and its integrate's steering hinge, run on the quad's
+/// fields through [`Bike`].
+///
+/// Every other call, and what those steps call in turn and is not ported (the stunt's start and end,
+/// the wreck, the preload's cue, the wheels' surface drag and spin), goes to `rest` in the original's
+/// order. `ground` is the world's ground query the suspension asks (the probe's end in, the point on
+/// the ground and its normal out). The stunt start always answers yes, as SLUS-21104's does.
+pub struct Steps<R, G> {
+    pub bike: Bike,
+    pub rest: R,
+    pub ground: G,
+}
+
+impl<R: Moto, G: FnMut(Vf) -> (Vf, Vf)> Moto for Steps<R, G> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        match c {
+            Call::InputLimiter(dt) => self.input_limiter(q, dt),
+            Call::Clutch(dt) => {
+                let b = &mut self.bike;
+                let s = crate::r#move::Step { dt, gas: q.gas, clutch: b.clutch, speed: F(q.contact_vel.z()), ..Default::default() };
+                crate::handling::step::clutch(&b.clutch_keys, &mut b.ride, &mut b.engine, &s);
+            }
+            Call::Preload(dt) => {
+                let (keys, mut air, mut ch, st) = self.air_in(q, body, dt);
+                let posted = crate::handling::step::preload(&keys, &mut air, &mut ch, &st, &mut self.bike.preload_cue);
+                self.air_out(q, body, air, ch);
+                if posted {
+                    self.rest.call(Call::PreloadCue, q, body);
+                }
+            }
+            Call::Backflip(dt) => self.backflip(q, body, dt),
+            Call::AirborneControl(dt) => {
+                let (keys, mut air, mut ch, st) = self.air_in(q, body, dt);
+                let b = &self.bike;
+                let inp = crate::handling::AirIn { stunt_id: b.rider_stunt, gas: q.gas_limited, gyro: b.gyro };
+                crate::handling::airborne_control(&keys, b.gas_gyro_torque, &mut air, &mut ch, &st, &inp);
+                self.air_out(q, body, air, ch);
+            }
+            Call::Suspension(i, _) => {
+                self.wheel_in(q, i);
+                let mut wb = self.wheel_body(body);
+                let Steps { bike, ground, .. } = self;
+                crate::atv_wheel::suspension(&mut bike.wheels[i], &mut bike.more[i], &wb, ground);
+                self.wheel_out(q, body, &mut wb, i);
+            }
+            Call::TireForces(i, dt) => {
+                self.wheel_in(q, i);
+                let mut wb = self.wheel_body(body);
+                let Bike { wheels, more, ground, .. } = &mut self.bike;
+                let under = &mut ground[i];
+                crate::atv_wheel::tire_forces(&mut wheels[i], &mut wb, dt,
+                    &mut |c, w, b, x| crate::atv_wheel::run(c, w, b, x, under), &mut more[i]);
+                self.wheel_out(q, body, &mut wb, i);
+            }
+            Call::WheelIntegrate(i, dt) => {
+                self.rest.call(Call::SurfaceDrag(i, dt), q, body);
+                self.rest.call(Call::SpinIntegrate(i, dt), q, body);
+                self.wheel_in(q, i);
+                let calls = crate::handling::step::wheel_integrate(&mut self.bike.wheels[i], dt);
+                debug_assert_eq!(calls, [crate::wheel::Call::SurfaceDrag(dt), crate::wheel::Call::SpinIntegrate(dt)]);
+                let mut wb = self.wheel_body(body);
+                self.wheel_out(q, body, &mut wb, i);
+            }
+            c => self.rest.call(c, q, body),
+        }
+    }
+}
+
+impl<R: Moto, G> Steps<R, G> {
+    /// The input limiter on the quad's levers: the controls as the pad left them (the gas and brake
+    /// levers, the clutch lever, the balance stunt as the gas's zero gate) in, the levers it leaves
+    /// and the rate limiter's out.
+    fn input_limiter(&mut self, q: &mut Quad, dt: F) {
+        let b = &mut self.bike;
+        let h = &mut b.held;
+        // SLUS-21104 walks the front brake alone and copies it into the rear (`+0x12d0 = +0x12cc`);
+        // the ported limiter walks the rear from its own word, which on the same lever and rate is
+        // the copy only if the rear starts where the front does.
+        (h.gas, h.front_brake, h.rear_brake, h.clutch) = (q.gas_limited, q.front_brake, q.front_brake, q.clutch_in);
+        (h.lean, h.reverse) = ((q.lean, q.lean_fore_aft), q.push_gate);
+        let c = crate::ride::Controls {
+            gas: q.gas,
+            brake: q.brake,
+            clutch: b.clutch,
+            hands_off: q.balancing,
+            gas_cut: b.gate_cut,
+            ..Default::default()
+        };
+        let inp = crate::handling::step::LimiterIn { airborne: q.airborne, cut_time: b.cut_time };
+        let c = crate::handling::step::input_limiter(h, &mut b.gas_cut, &c, b.stick, &b.joystick, dt, &inp);
+        (q.gas, q.brake, b.clutch) = (c.gas, c.brake, c.clutch);
+        (q.gas_limited, q.front_brake, q.rear_brake, q.clutch_in) = (h.gas, h.front_brake, h.rear_brake, h.clutch);
+        (q.lean, q.lean_fore_aft, q.push_gate) = (h.lean.0, h.lean.1, h.reverse);
+    }
+
+    /// The air steps' keys, state, chassis and step off the quad.
+    fn air_in(&self, q: &Quad, body: &Body, dt: F) -> (crate::air::Params, crate::air::Air, crate::air::Chassis, crate::air::Step) {
+        let b = &self.bike;
+        let mut keys = b.air_keys;
+        keys.control_authority_time = q.authority_time;
+        let mut air = b.air;
+        (air.on_ground, air.contact_vel, air.crossup, air.authority, air.flipping) =
+            (q.on_ground, q.contact_vel, q.crossup, q.authority, q.flipping);
+        let ch = crate::air::Chassis {
+            speed: q.speed_len,
+            pitch: F(q.euler.x()),
+            roll: F(q.euler.z()),
+            force: body.force,
+            moment: body.moment,
+            vel: body.velocity,
+            local_vel: q.local_vel,
+            ang_vel: body.ang_vel,
+        };
+        let st = crate::air::Step {
+            dt,
+            heading: q.heading,
+            up: q.up,
+            stick: (b.stick.x, b.stick.y),
+            stick_hold: b.stick_hold,
+            dpad_y: b.stick.digital[1],
+            brake: q.brake,
+            front_brake: q.front_brake,
+            rear_brake: q.rear_brake,
+            lean: q.lean,
+            touching: b.touching,
+            spinning: b.spin_applied,
+            spin_active: b.spin_active,
+            spin_ramp: q.spinning,
+            ..Default::default()
+        };
+        (keys, air, ch, st)
+    }
+
+    fn air_out(&mut self, q: &mut Quad, body: &mut Body, air: crate::air::Air, ch: crate::air::Chassis) {
+        (q.on_ground, q.contact_vel, q.crossup, q.authority, q.flipping) =
+            (air.on_ground, air.contact_vel, air.crossup, air.authority, air.flipping);
+        self.bike.air = air;
+        (body.force, body.moment) = (ch.force, ch.moment);
+    }
+
+    /// The backflip, its mid-clip wreck's reason asked of the ported test on the peak-rates vector
+    /// ([`Quad::attitude`], the g loads it reads: `x` sideways, `z` fore and aft).
+    fn backflip(&mut self, q: &mut Quad, body: &mut Body, dt: F) {
+        let (keys, mut air, mut ch, st) = self.air_in(q, body, dt);
+        let b = &mut self.bike;
+        let inp = crate::handling::FlipIn { buttons: b.buttons, right_y: b.right_y, up_y: b.up_y, stunt_id: b.stunt_id };
+        let loads = crate::air::Loads { side: F(q.attitude.x()), fore_aft: F(q.attitude.z()), ..Default::default() };
+        let steep = crate::handling::step::flip_wreck_steep(&keys, b.struck_class, q.airborne, &loads);
+        let mut started = false;
+        let out = crate::handling::backflip(&keys, &mut air, &mut ch, &st, &inp, &mut b.flip_clip, || {
+            started = true;
+            true
+        }, || steep);
+        if out.stunt_cleared {
+            b.stunt_id = 255;
+        }
+        let stunt = b.flip_stunt;
+        self.air_out(q, body, air, ch);
+        if started {
+            self.rest.call(Call::StartStunt(stunt), q, body);
+        }
+        if out.stunt_ended {
+            self.rest.call(Call::EndStunt, q, body);
+        }
+        if let Some(reason) = out.wreck {
+            self.rest.call(Call::Wreck(reason), q, body);
+        }
+    }
+
+    /// Wheel `i`'s fields the quad keeps, into the wheel step's wheel.
+    fn wheel_in(&mut self, q: &Quad, i: usize) {
+        let (w, x, qw) = (&mut self.bike.wheels[i], &mut self.bike.more[i], &q.wheels[i]);
+        (w.steered, w.balancing, w.contact, w.contact_normal) = (qw.steered, qw.balancing, qw.touching, qw.normal);
+        (w.max_steer_angle, w.steer_angle, w.spring_rate) = (qw.max_steer_angle, qw.steer_command, qw.spring);
+        x.chassis_velocity_local = qw.contact_vel;
+    }
+
+    fn wheel_body(&self, body: &Body) -> crate::atv_wheel::Body {
+        crate::atv_wheel::Body {
+            position: body.position,
+            velocity: body.velocity,
+            force: body.force,
+            moment: body.moment,
+            correction: body.correction,
+            orientation: body.orientation,
+            cofg: self.bike.cofg,
+            spin: body.ang_vel,
+        }
+    }
+
+    fn wheel_out(&mut self, q: &mut Quad, body: &mut Body, wb: &mut crate::atv_wheel::Body, i: usize) {
+        let (w, x, qw) = (&self.bike.wheels[i], &self.bike.more[i], &mut q.wheels[i]);
+        (qw.steered, qw.balancing, qw.touching, qw.normal) = (w.steered, w.balancing, w.contact, w.contact_normal);
+        (qw.max_steer_angle, qw.steer_command, qw.spring) = (w.max_steer_angle, w.steer_angle, w.spring_rate);
+        qw.contact_vel = x.chassis_velocity_local;
+        (body.position, body.force, body.moment, body.correction) = (wb.position, wb.force, wb.moment, wb.correction);
+    }
 }
