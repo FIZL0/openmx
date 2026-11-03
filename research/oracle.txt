@@ -8337,6 +8337,36 @@ atv_search_narrow           atv 0x001bbe60 = the quad search's vt +0xb4 (a thunk
 atv_ray_probe_pair          atv 0x001bc880 = the ray probe against a collidable (MX Unleashed's ray_probe::pair, not compared)
 atv_search_record_clear     atv 0x001bd180 = the quad search's vt +0xc8 (the record cleared)
 atv_search_prepare          atv 0x001bc6e0 = the quad search's vt +0xd0 (prepare)
+# MD76a1 — MC02's static collision and the quad's gather (crates/game-sim/src/atv_world.rs; tests/atv_gather.rs
+# runs the original's gather off MD37a's atv-r-spawn.ee.bin, gp 0x003dbaf0). Journal:
+# research/journal/2026-11-02-md76-atv-ground/3-collidables-and-gather-MD76a1.md. The gather (a0 list, a1 probe,
+# a2 kind 3; called from 0x004942c0) always refills the list. List fields: +0 entries (8 bytes: collidable,
+# distance), +4 count, +0x10 centre, +0x20 bound, +0x24 least (10), +0x28 extra (30), +0x2c no groups, +0x30
+# built, +0x34 capacity (0x100), +0x38 filter, +0x3c flat; +0x40 prepare is not touched. The bound is
+# min(c - lo x, c - lo z, hi x - c, hi z - c), min'd with max(radius, extra), max'd with least, every min/max a
+# compare-and-pick. Distances: 3D 0x001169a0, flat 0x001169f0 (dz first into the accumulator). A plant group's
+# distance: adda 0, p; msub cell x cell size (z first), reach = near + blend x (far - near)/128, then 0 + reach;
+# d <= 0 -> 0. Group record: cell x +0xc, cell z +0x10, model +0x12, blend (i8) +0x15. The eco object
+# 0x0052cd88: +0x84 models (+0x10c near, +0x114 far), +0xc4 cell size. Models are the species in loaded order
+# with empty slots skipped (MC02's slot 0 is empty; slots 1-11 are models 0-10). The pair filter is
+# world_search::accepts at other offsets: +0x126 flags, +0x45 bit 0 nearby, +0x94 category, +0xdc collides
+# with, +0xe0/+0xe4/+0xe8 objects (mode, list, count), +0xec more objects, +0xf0/+0xf4 the second loop's
+# list, +0xf8/+0xfc/+0x100 categories. Queries 0x0019d260/0x0019d2b0/0x0019d360/0x0019d760. The tree 0x006547c0
+# is a quadtree (vtable 0x003b6700: begin 0x00180dd0, collect 0x001810b0, insert vt +0x24 = 0x00180290) built
+# by 0x0017fc40 (via 0x001ae990 from 0x0031a750) as broad_build::tree_over with least 96; box (-0, 5760), the
+# cell-size global 0x0040c1a0, stamp 0x003d3b88; fields origin +0x28/+0x30, extent +0x40/+0x44, cell +0x50,
+# scale +0x54, root +0x8c. Scene meshes: vtable 0x003b6d00, category 0x600, flags 0x0c, collides with all,
+# categories mode 1 empty, nearby. Zones: vtables 0x003b6ec0 and 0x003b6a60, category 0x8000, enabled, not
+# within bound (not built). Zone_Platform_Machine.col's mesh 0x006933d8 is filed twice in nodes 023102 and
+# 023103 (scene order, then after the plants behind a zone 0x013efe88 at the same place). The moving list
+# 0x006552b0: the quad's body (0x3012) and probe, rider parts (0x1000, off), category-0 objects. The quad's
+# list is quad +0xc4 = 0x01627a40, its probe 0x0159c500.
+atv_gather_nearby           atv 0x001d6a60 = the quad's nearby list refilled from the broad phase (a0 list, a1 probe, a2 kind)
+atv_distance                atv 0x001169a0 = the distance from a point to a collidable's sphere
+atv_flat_distance           atv 0x001169f0 = the same on x and z
+atv_pair_accepts            atv 0x001144f0 = the pair filter (world_search::accepts)
+atv_quadtree_insert         atv 0x00180290 = the quadtree's vt +0x24 (insert)
+atv_quadtree_new            atv 0x0017fc40 = the quadtree constructor (least 96)
 # MD39 — MX vs. ATV's cars (research/mxvatv-pc.md "The cars (MD39)"; tests/mxvatv_car_phy.rs reads the five
 # files through car::Car::read). Journal: research/journal/2026-11-03-md39-mxvatv-machines. PC factory: kinds
 # 4/6/8 (Buggy/Baja/SandRail.phy) one constructor, 5 MonsterTruck, 7 GolfCart. SLUS-21104 vtables (data):

@@ -950,6 +950,11 @@ pub mod atv_body;
 /// cell reader, ported from its ELF.
 pub mod atv_ground;
 
+/// Desert Oasis's collidables (MD76a1): SLUS-21104's static collision world for MC02 (the scene's
+/// meshes, then the ecosystem's plants, in its quadtree) and the gather that fills the quad's
+/// nearby list from it.
+pub mod atv_world;
+
 /// The quad's Moto, part 2 (MD75b): SLUS-21104's gearbox, head and tail, gravity, engine, air drag,
 /// wheel clear, rev limiter and peak rates, answered in [`quad::Steps`].
 pub mod atv_moto;
