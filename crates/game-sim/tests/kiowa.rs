@@ -1841,9 +1841,8 @@ fn rows(pick: &mut Pick, size: f32) -> [[f32; 4]; 4] {
 
 /// The S148 helicopter with what the wreck and the put-back reach outside the simulation stubbed: the
 /// sound's start and stop, the player's rumble, the camera snap, the presentation copy, and the nodes'
-/// lazy rebuild (the test writes their rows). The blades' switching on and off is logged as
-/// `(blade wrapper, on)`.
-fn wreck_heli() -> Option<(Ee, Rc<RefCell<Vec<(u32, bool)>>>)> {
+/// lazy rebuild (the test writes their rows). The blades' start and stop run (S220a1a).
+fn wreck_heli() -> Option<Ee> {
     let mut ee = heli()?;
     let sound = ee.u32_at(HELI + wreck_at::SOUND);
     assert_ne!(sound, 0, "the helicopter has no wreck sound");
@@ -1858,15 +1857,7 @@ fn wreck_heli() -> Option<(Ee, Rc<RefCell<Vec<(u32, bool)>>>)> {
     for name in ["camera_snap_player", "kiowa_mx_present_a", "transform_rebuild"] {
         ee.hooks.insert(addr(name).unwrap(), Box::new(|_| {}));
     }
-    let parts = Rc::new(RefCell::new(Vec::new()));
-    let p = parts.clone();
-    ee.hooks.insert(addr("wreck_part_start").unwrap(), Box::new(move |ee| p.borrow_mut().push((ee.r(4) as u32, true))));
-    let p = parts.clone();
-    ee.hooks.insert(addr("wreck_part_stop").unwrap(), Box::new(move |ee| {
-        assert_eq!(ee.r(5), 1, "a blade stopped with {}", ee.r(5));
-        p.borrow_mut().push((ee.r(4) as u32, false))
-    }));
-    Some((ee, parts))
+    Some(ee)
 }
 
 fn ride_of(ee: &Ee) -> game_sim::kiowa::Ride {
@@ -1909,8 +1900,136 @@ fn blade_wrapper(ee: &Ee, k: usize) -> u32 {
     ee.u32_at(HELI + wreck_at::BLADES + 4 * k as u32)
 }
 
-fn wreckage_of(ee: &Ee, out: [bool; 4]) -> game_sim::kiowa::Wreckage {
-    use game_sim::kiowa::{Blade, Nodes, Wreckage};
+/// A blade wrapper's fields (the props' physics object, tests/prop_world.rs), its collision object's
+/// probe's rays, and the node's lists.
+mod blade_at {
+    pub const ACTIVE: u32 = 0x31;
+    pub const MOVING: u32 = 0x28;
+    pub const PREFORCE: u32 = 0x40;
+    pub const POST: u32 = 0x44;
+    pub const LISTENER: u32 = 0x50;
+    pub const COLLISION_ENABLED: u32 = 0x54;
+    pub const LISTENS: u32 = 0x60;
+    pub const DETECT: u32 = 0x6c;
+    pub const OFF_EDGE: u32 = 0x70;
+    pub const PLACE: u32 = 0x90;
+    pub const GRAVITY: u32 = 0xf0;
+    pub const EDGE: u32 = 0x100;
+    pub const FORCE: u32 = 0x114;
+    pub const COLLISION: u32 = 0x120;
+    /// The ray probe, the mesh and the sweep probe: in the broad phase while `+4` is set.
+    pub const PROBES: [u32; 3] = [0x124, 0x128, 0x12c];
+    pub const WORLD_NODE: u32 = 0x134;
+    pub const WORLD: u32 = 0x138;
+    pub const NODE: u32 = 0x13c;
+    pub const FRESH: u32 = 0x1b0;
+    pub const COUNTDOWN: u32 = 0x1bc;
+    pub const RESET_TIME: u32 = 0x1c0;
+    pub const THRESHOLDS: u32 = 0x1c4;
+    pub const BODY_START_TURN: u32 = 0x160;
+    pub const PROBE_COUNT: u32 = 0x168;
+    pub const PROBE_RAYS: u32 = 0x170;
+    /// The edge object's bounds.
+    pub const EDGE_MIN: u32 = 0x30;
+    pub const EDGE_MAX: u32 = 0x40;
+    /// The world node's filed collision objects and its listeners: `{count, _, array}`.
+    pub const NODE_FILED: u32 = 0x30;
+    pub const NODE_LISTENERS: u32 = 0x48;
+}
+
+/// A file out of `machine.res` in MX.PSR (as tests/kiowa_phy.rs reads it).
+fn machine_file(kit: &Kit, name: &str) -> Option<Vec<u8>> {
+    use game_sim::archive::{Psr, Res};
+    use std::io::{Read, Seek, SeekFrom};
+    let at = kit.ctx("iso").join("MX.PSR");
+    let Ok(mut f) = std::fs::File::open(&at) else {
+        skip(&format!("no {} — `./kit extract MX.PSR` writes it", at.display()));
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("machine.res").expect("machine.res is in MX.PSR");
+    f.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    f.read_exact(&mut bytes).expect("read");
+    let res = Res::parse(&bytes).expect("machine.res");
+    let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(name)).unwrap_or_else(|| panic!("machine.res has no {name}"));
+    Some(res.read(&bytes, e).expect("its bytes"))
+}
+
+/// A list `{count, _, array}` at `a`.
+fn list_at(ee: &Ee, a: u32) -> Vec<u32> {
+    let (n, arr) = (ee.u32_at(a), ee.u32_at(a + 8));
+    (0..n).map(|k| ee.u32_at(arr + 4 * k)).collect()
+}
+
+/// The port's four blades off the disc's files, with the first wrapper's edge (the terrain's).
+fn blades_for(ee: &Ee) -> Option<game_sim::kiowa::Blades> {
+    use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, Blades, WRECK_BLADE_PHY};
+    use game_sim::prop_world::Edge;
+    let kit = Kit::load().map_err(|why| skip(&why)).ok()?;
+    let [phy, psg, rays] = [WRECK_BLADE_PHY, BLADE_MODEL, BLADE_RAYS].map(|n| machine_file(&kit, n));
+    let edge = ee.u32_at(blade_wrapper(ee, 0) + blade_at::EDGE);
+    assert_ne!(edge, 0, "the blade has no edge");
+    let lane = |a: u32, k: u32| F(ee.f32_at(edge + a + 4 * k));
+    let edge = Edge { min: [lane(blade_at::EDGE_MIN, 0), lane(blade_at::EDGE_MIN, 2)], max: [lane(blade_at::EDGE_MAX, 0), lane(blade_at::EDGE_MAX, 2)] };
+    Some(Blades::new(&phy?, &psg?, Some(&rays?), Some(edge)).unwrap_or_else(|e| panic!("the blades: {e}")))
+}
+
+/// The state's blade bodies into the port's, all but the enabled flag (the port's own: [`same_blades`]
+/// checks it).
+fn blades_from(ee: &Ee, blades: &mut game_sim::kiowa::Blades) {
+    for (k, bone) in blades.set.bones.iter_mut().enumerate() {
+        let enabled = bone.body.enabled;
+        bone.body = body_of(ee, ee.u32_at(blade_wrapper(ee, k) + wreck_at::WRAPPER_BODY));
+        bone.body.enabled = enabled;
+    }
+}
+
+/// Everything of the four blades the start, the stop, the throw and the world step leave, the game's
+/// wrappers against the port's [`Blades`]: the body, the active bits, the node shown and in the
+/// scene, the probes in the broad phase, the fresh flag and `+0x28`'s awake bit, the wrapper's put-back
+/// place, and its four elements in the world's lists, its listener on the node and its collision object
+/// filed there.
+fn same_blades(case: usize, ee: &Ee, blades: &game_sim::kiowa::Blades) {
+    use game_sim::prop_world::Listener;
+    for k in 0..4 {
+        let w = blade_wrapper(ee, k);
+        let (s, o, bone) = (&blades.started[k], &blades.set.objects[k], &blades.set.bones[k]);
+        let at = |what: &str| format!("case {case}: blade {k}'s {what}");
+        same_body(&format!("blade {k}"), case, ee, ee.u32_at(w + wreck_at::WRAPPER_BODY), &bone.body);
+        let active = ee.u8_at(w + blade_at::ACTIVE) & 3;
+        assert!(active == 0 || active == 3, "{}: {active}", at("active bits"));
+        assert_eq!(active == 3, s.out, "{}", at("start"));
+        let node = ee.u32_at(w + blade_at::NODE);
+        assert_eq!(!node_hidden(ee, node), s.shown, "{}", at("node shown"));
+        assert_eq!(ee.u32_at(node + 4) != 0, s.placed, "{}", at("node in the scene"));
+        let probes = blade_at::PROBES.map(|p| ee.u32_at(ee.u32_at(w + p) + 4) != 0);
+        assert_eq!(probes, [s.probes; 3], "{}", at("probes in the broad phase"));
+        assert_eq!(ee.u32_at(w + blade_at::FRESH) != 0, o.fresh, "{}", at("fresh flag"));
+        assert_eq!(ee.u32_at(w + blade_at::MOVING) & 2 != 0, bone.body.enabled, "{}", at("+0x28 awake bit"));
+        for (q, (name, got)) in [("place", o.place), ("look", o.look), ("up", o.up)].into_iter().enumerate() {
+            assert_eq!(got.to_bits(), quad(ee, w + blade_at::PLACE + 16 * q as u32).to_bits(), "{}", at(name));
+        }
+        assert_eq!(o.countdown.to_bits(), ee.u32_at(w + blade_at::COUNTDOWN), "{}", at("countdown"));
+        let world = ee.u32_at(w + blade_at::WORLD);
+        let elements = [ee.u32_at(w + wreck_at::WRAPPER_BODY), ee.u32_at(w + blade_at::FORCE), w + blade_at::PREFORCE, w + blade_at::POST];
+        let lists = [&blades.set.bodies, &blades.set.forces, &blades.set.preforce, &blades.set.posts];
+        for ((l, e), port) in [0usize, 1, 3, 4].into_iter().zip(elements).zip(lists) {
+            assert_eq!(list_at(ee, world + world_at::LISTS[l]).contains(&e), port.contains(&k), "{} in the world's list {l}", at("element"));
+        }
+        let node = ee.u32_at(w + blade_at::WORLD_NODE);
+        assert_eq!(list_at(ee, node + blade_at::NODE_LISTENERS).contains(&(w + blade_at::LISTENER)),
+                   blades.set.listeners.contains(&Listener::Object(k)), "{}", at("listener on the node"));
+        assert_eq!(list_at(ee, node + blade_at::NODE_FILED).contains(&ee.u32_at(w + blade_at::COLLISION)), o.filed, "{}", at("collision object filed"));
+    }
+}
+
+/// The helicopter's wreckage as the state has it, with the port's `blades` (their bodies the state's:
+/// [`blades_from`]).
+fn wreckage_of(ee: &Ee, mut blades: game_sim::kiowa::Blades) -> game_sim::kiowa::Wreckage {
+    use game_sim::kiowa::{Nodes, Wreckage};
     let body = ee.u32_at(HELI + at::BODY);
     let hidden = wreck_at::NODES.map(|o| node_hidden(ee, ee.u32_at(HELI + o)));
     Wreckage {
@@ -1924,10 +2043,10 @@ fn wreckage_of(ee: &Ee, out: [bool; 4]) -> game_sim::kiowa::Wreckage {
         place: quads(ee, HELI + wreck_at::PLACE),
         spawn: quads(ee, HELI + wreck_at::SPAWN),
         nodes: Nodes { rotor: [hidden[1], hidden[2], hidden[3]], intact: hidden[4], wrecked: hidden[5] },
-        blades: std::array::from_fn(|k| Blade {
-            body: body_of(ee, ee.u32_at(blade_wrapper(ee, k) + wreck_at::WRAPPER_BODY)),
-            out: out[k],
-        }),
+        blades: {
+            blades_from(ee, &mut blades);
+            blades
+        },
     }
 }
 
@@ -2044,10 +2163,7 @@ fn same_wreckage(case: usize, ee: &Ee, ride: &game_sim::kiowa::Ride, w: &game_si
     let hidden = wreck_at::NODES.map(|o| node_hidden(ee, ee.u32_at(HELI + o)));
     let port = [ride.rotor_hidden, w.nodes.rotor[0], w.nodes.rotor[1], w.nodes.rotor[2], w.nodes.intact, w.nodes.wrecked];
     assert_eq!(hidden, port, "case {case}: the nodes hidden (rotor x4, +0xd3c, the wrecked blades)");
-    for (k, blade) in w.blades.iter().enumerate() {
-        let b = ee.u32_at(blade_wrapper(ee, k) + wreck_at::WRAPPER_BODY);
-        same_body(&format!("blade {k}"), case, ee, b, &blade.body);
-    }
+    same_blades(case, ee, &w.blades);
     let pad = pad_of(ee);
     for (name, got, want) in [("climb", kiowa.pad.climb, pad.climb), ("descend", kiowa.pad.descend, pad.descend),
                               ("lateral", kiowa.pad.lateral, pad.lateral), ("longitudinal", kiowa.pad.longitudinal, pad.longitudinal),
@@ -2073,7 +2189,9 @@ enum Wreck {
 #[test]
 fn the_wreck_and_the_put_back_are_the_originals() {
     use game_sim::rng::Rng;
-    let Some((mut ee, parts)) = wreck_heli() else { return };
+    let Some(mut ee) = wreck_heli() else { return };
+    let Some(mut blades) = blades_for(&ee) else { return };
+    let (start, stop) = (addr("wreck_part_start").unwrap(), addr("wreck_part_stop").unwrap());
     let state = addr("rand_state").unwrap();
     let funcs = [
         (Wreck::Base, "kiowa_wreck"),
@@ -2089,10 +2207,11 @@ fn the_wreck_and_the_put_back_are_the_originals() {
     assert_eq!(ee.u32_at(vt + DEBRIS_SLOT), funcs[2].1, "the MX table's blade throw");
     assert_eq!(ee.u32_at(vt + RESET_SLOT), funcs[5].1, "the MX table's put-back");
     let owner = SCRATCH + 0x400;
-    let blades: [u32; 4] = std::array::from_fn(|k| blade_wrapper(&ee, k));
+    let wrappers: [u32; 4] = std::array::from_fn(|k| blade_wrapper(&ee, k));
     let mut pick = Pick(0x5220_a100_b1ad_0001);
     let mut seen = [0usize; 6];
     let (mut thrown, mut owned_cases, mut reciprocal_zero) = (0, 0, 0);
+    let (mut started, mut stopped, mut rethrown) = (0, [0usize; 2], 0);
     for case in 0..CASES {
         scramble(&mut ee, &mut pick);
         let (kind, func) = funcs[(pick.next() % 6) as usize];
@@ -2105,10 +2224,29 @@ fn the_wreck_and_the_put_back_are_the_originals() {
         let seed = pick.next();
         ee.set_u32(state, seed as u32);
         ee.set_u32(state + 4, (seed >> 32) as u32);
-        let out: [bool; 4] = std::array::from_fn(|_| pick.one_in(2));
+        // S220a1a: each blade started, stopped (hidden or not) or left as it is, in both.
+        blades_from(&ee, &mut blades);
+        for (k, &wrapper) in wrappers.iter().enumerate() {
+            match pick.next() % 4 {
+                0 => {
+                    ee.call(start, &[u64::from(wrapper)], &[], BUDGET);
+                    blades.start(k);
+                    started += 1;
+                }
+                1 => {
+                    let hide = pick.one_in(2);
+                    ee.call(stop, &[u64::from(wrapper), u64::from(hide)], &[], BUDGET);
+                    blades.stop(k, hide);
+                    stopped[usize::from(hide)] += 1;
+                }
+                _ => {}
+            }
+        }
+        same_blades(case, &ee, &blades);
+        let out_before = blades.started.iter().filter(|s| s.out).count();
 
         let mut ride = ride_of(&ee);
-        let mut w = wreckage_of(&ee, out);
+        let mut w = wreckage_of(&ee, blades.clone());
         let throw = throw_of(&ee);
         let mut kiowa = Kiowa { pad: pad_of(&ee), commands: commands_of(&ee), control: loop_of(&ee), ..Kiowa::default() };
         let mut rng = Rng::from_state(seed);
@@ -2130,29 +2268,26 @@ fn the_wreck_and_the_put_back_are_the_originals() {
             }
         }
 
-        parts.borrow_mut().clear();
         let ints = if matches!(kind, Wreck::Base | Wreck::Mx) { vec![u64::from(HELI), u64::from(reason)] } else { vec![u64::from(HELI)] };
         ee.call(func, &ints, &[], 4 * BUDGET);
 
         same_wreckage(case, &ee, &ride, &w, &kiowa);
         let left = u64::from(ee.u32_at(state)) | u64::from(ee.u32_at(state + 4)) << 32;
         assert_eq!(rng.state(), left, "case {case}: the generator ({kind:?})");
-        let mut want = out;
-        for &(obj, on) in parts.borrow().iter() {
-            let k = blades.iter().position(|&b| b == obj).unwrap_or_else(|| panic!("case {case}: a part {obj:#x} not a blade switched"));
-            want[k] = on;
-        }
-        let got = w.blades.map(|b| b.out);
-        assert_eq!(got, want, "case {case}: the blades out ({kind:?})");
+        let threw = kind == Wreck::Throw || kind == Wreck::Mx && reason != 13;
+        blades = w.blades;
         seen[kind as usize] += 1;
-        thrown += usize::from(parts.borrow().iter().any(|p| p.1));
+        thrown += usize::from(threw);
+        rethrown += usize::from(threw && out_before > 0);
         owned_cases += usize::from(kind == Wreck::PutBack && owned);
         reciprocal_zero += usize::from(w.body_inertia.x() <= 0.0 && matches!(kind, Wreck::Base | Wreck::Mx));
     }
     assert!(seen.iter().all(|&n| n > CASES / 10) && thrown > CASES / 5 && owned_cases > CASES / 50 && reciprocal_zero > CASES / 100,
             "{seen:?} by kind, {thrown} throws, {owned_cases} owned put-backs, {reciprocal_zero} unset lanes: the cases miss a branch");
-    println!("the wreck and the put-back: {CASES} cases, bit-exact ({seen:?} by kind, {thrown} throws, \
-              {owned_cases} owned put-backs, {reciprocal_zero} lanes not above 0)");
+    assert!(started > CASES / 2 && stopped.iter().all(|&n| n > CASES / 4) && rethrown > CASES / 10,
+            "{started} starts, {stopped:?} stops (kept, hidden), {rethrown} throws of blades out: the cases miss a branch");
+    println!("the wreck and the put-back: {CASES} cases, bit-exact ({seen:?} by kind, {thrown} throws ({rethrown} of blades \
+              out), {owned_cases} owned put-backs, {reciprocal_zero} lanes not above 0; {started} starts, {stopped:?} stops)");
 }
 
 /// [`Wreckage::act`] is the MX slots in the crash test's order: the wreck, the blade throw, the
@@ -2161,7 +2296,8 @@ fn the_wreck_and_the_put_back_are_the_originals() {
 fn a_crash_test_answer_is_acted_on_in_the_originals_order() {
     use game_sim::kiowa::Crashed;
     use game_sim::rng::Rng;
-    let Some((mut ee, _)) = wreck_heli() else { return };
+    let Some(mut ee) = wreck_heli() else { return };
+    let Some(blades) = blades_for(&ee) else { return };
     let mut pick = Pick(0x5220_a100_0ac7_0001);
     for case in 0..200 {
         scramble(&mut ee, &mut pick);
@@ -2172,8 +2308,8 @@ fn a_crash_test_answer_is_acted_on_in_the_originals_order() {
         };
         let owned = pick.one_in(2);
         let seed = pick.next();
-        let (ride, w, throw) = (ride_of(&ee), wreckage_of(&ee, [false; 4]), throw_of(&ee));
-        let (mut ride_a, mut w_a, mut rng_a) = (ride, w, Rng::from_state(seed));
+        let (ride, w, throw) = (ride_of(&ee), wreckage_of(&ee, blades.clone()), throw_of(&ee));
+        let (mut ride_a, mut w_a, mut rng_a) = (ride, w.clone(), Rng::from_state(seed));
         let got = w_a.act(&asked, &mut ride_a, &throw, owned, &mut rng_a);
         let (mut ride_b, mut w_b, mut rng_b) = (ride, w, Rng::from_state(seed));
         if let Some(reason) = asked.wreck {
@@ -2183,10 +2319,196 @@ fn a_crash_test_answer_is_acted_on_in_the_originals_order() {
             w_b.throw_blades(&mut ride_b, &throw, &mut rng_b);
         }
         let want = asked.recover.then(|| w_b.put_back(&mut ride_b, owned));
-        assert_eq!((got, ride_a, w_a, rng_a.state()), (want, ride_b, w_b, rng_b.state()), "case {case}: {asked:?}");
+        assert_eq!((got, ride_a, &w_a, rng_a.state()), (want, ride_b, &w_b, rng_b.state()), "case {case}: {asked:?}");
         if asked.recover {
             assert_eq!(got, Some(if owned { F(0.5) } else { F::ZERO }), "case {case}: the altitude fraction");
             assert!(!w_a.wrecked && ride_a.crash.reason == 0, "case {case}: still wrecked after the put-back");
         }
     }
+}
+
+/// S220a1a: the four blades as the MX constructor built them in S148's state, against
+/// [`Blades::new`] off `wreckblade.phy`, `bladebent.psg` and `bladebentm.col`: every body word, the
+/// mass and inertia, the start turn, the object's gravity, switches, thresholds, put-back place and
+/// countdown, the probe's rays, and the shared world and world node.
+#[test]
+fn the_blades_are_built_as_the_originals() {
+    let Some(ee) = heli() else { return };
+    let Some(blades) = blades_for(&ee) else { return };
+    same_blades(0, &ee, &blades);
+    let heli_wrapper = HELI + 0x50;
+    for k in 0..4 {
+        let w = blade_wrapper(&ee, k);
+        let (o, bone) = (&blades.set.objects[k], &blades.set.bones[k]);
+        let b = ee.u32_at(w + wreck_at::WRAPPER_BODY);
+        let at = |what: &str| format!("blade {k}'s {what}");
+        assert_eq!(bone.mass.to_bits(), ee.u32_at(b + wreck_at::BODY_MASS), "{}", at("mass"));
+        assert_eq!(bone.inertia.to_bits(), quad(&ee, b + wreck_at::BODY_INERTIA).to_bits(), "{}", at("inertia"));
+        assert_eq!(bone.reference.to_bits(), quad(&ee, b + blade_at::BODY_START_TURN).to_bits(), "{}", at("start turn"));
+        assert_eq!(o.gravity.to_bits(), quad(&ee, w + blade_at::GRAVITY).to_bits(), "{}", at("gravity"));
+        assert_eq!(o.collision_enabled, ee.u32_at(w + blade_at::COLLISION_ENABLED) != 0, "{}", at("CollisionEnabled"));
+        assert_eq!(o.detect_when_disabled, ee.u32_at(w + blade_at::DETECT) != 0, "{}", at("DetectCollisionsWhenDisabled"));
+        assert_eq!(o.reset_off_edge, ee.u32_at(w + blade_at::OFF_EDGE) != 0, "{}", at("ResetOffEdgeOfWorld"));
+        assert_eq!(o.listens, ee.u32_at(w + blade_at::LISTENS) != 0, "{}", at("object listener"));
+        assert_eq!(o.reset_time.to_bits(), ee.u32_at(w + blade_at::RESET_TIME), "{}", at("ResetTime"));
+        for (t, got) in o.thresholds.iter().enumerate() {
+            assert_eq!(got.to_bits(), ee.u32_at(w + blade_at::THRESHOLDS + 4 * t as u32), "{}", at(&format!("threshold {t}")));
+        }
+        let probe = ee.u32_at(w + blade_at::PROBES[0]);
+        let n = ee.u32_at(probe + blade_at::PROBE_COUNT);
+        let rays = ee.u32_at(probe + blade_at::PROBE_RAYS);
+        let mut game: Vec<[u32; 8]> = (0..n).map(|r| std::array::from_fn(|i| ee.u32_at(rays + 0x20 * r + 4 * i as u32))).collect();
+        let c = o.collision.as_ref().expect("the blade's collision object");
+        let mut port: Vec<[u32; 8]> = c.record.rays.as_ref().expect("the blade's rays").iter()
+            .map(|[from, to]| {
+                let (a, b) = (from.to_bits(), to.to_bits());
+                [a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]]
+            })
+            .collect();
+        game.sort();
+        port.sort();
+        assert_eq!(port, game, "{}", at("rays"));
+        for (name, off) in [("world node", blade_at::WORLD_NODE), ("dynamics world", blade_at::WORLD)] {
+            assert_eq!(ee.u32_at(w + off), ee.u32_at(heli_wrapper + off), "{}: not the helicopter's", at(name));
+        }
+    }
+    let world = ee.u32_at(blade_wrapper(&ee, 0) + blade_at::WORLD);
+    assert_eq!((ee.i32_at(world + world_at::ITERATIONS), F(ee.f32_at(world + world_at::RATE))),
+               (blades.set.world.iterations, blades.set.world.rate), "the shared world's iterations and rate");
+    println!("the blades: four bodies, objects and ray probes as built in the state");
+}
+
+/// S220a1a: the blades thrown off a generated helicopter (the original's `kiowa_throw_blades`, its
+/// starts run), then flown for two seconds a case: each frame the original's world step and the
+/// blades' object listeners on the node, against [`Blades::step`] and [`Blades::post`], every blade
+/// compared ([`same_blades`]) and its node's pose. On the throw's frame only the posts and the
+/// listeners run, as they follow the helicopter's post in the world's list. Some blades are out
+/// already when thrown, some are stopped, and many land past the world's edge and are put back.
+///
+/// The world holds the helicopter's body (so it steps with no blade awake, as the game's does) and
+/// the blades' elements; the collide pass is not run on either side, so no blade has a contact.
+#[test]
+fn thrown_blades_fly_as_the_originals() {
+    use game_sim::ragdoll::Tables;
+    use game_sim::rng::Rng;
+    let Some(mut ee) = wreck_heli() else { return };
+    // The blades' posts write their nodes' world rows through the rebuild the wreck tests stub.
+    ee.hooks.remove(&addr("transform_rebuild").unwrap());
+    let Some(mut blades) = blades_for(&ee) else { return };
+    let throw_fn = addr("kiowa_throw_blades").unwrap();
+    let (start, stop) = (addr("wreck_part_start").unwrap(), addr("wreck_part_stop").unwrap());
+    let (step, post, listen) = (addr("dynamics_world_step").unwrap(), addr("body_wrapper_post").unwrap(), addr("physics_object_listen").unwrap());
+    let state = addr("rand_state").unwrap();
+    let tables = Tables::build();
+    let wrappers: [u32; 4] = std::array::from_fn(|k| blade_wrapper(&ee, k));
+    let world = ee.u32_at(wrappers[0] + blade_at::WORLD);
+    let node = ee.u32_at(wrappers[0] + blade_at::WORLD_NODE);
+    // The world down to the helicopter's body; the node's listeners to none (the blades' go on).
+    let heli_body = ee.u32_at(HELI + at::BODY);
+    for (l, off) in world_at::LISTS.iter().enumerate() {
+        ee.set_u32(world + off, u32::from(l == 0));
+    }
+    ee.set_u32(ee.u32_at(world + world_at::LISTS[0] + 8), heli_body);
+    ee.set_u32(node + blade_at::NODE_LISTENERS, 0);
+    // The blades' bodies as built: the generated ones keep these.
+    let kept: Vec<Vec<(u32, [u32; 4])>> = wrappers.iter().map(|&w| {
+        let b = ee.u32_at(w + wreck_at::WRAPPER_BODY);
+        [0x20, 0xf0, 0x120, 0x130, 0x180].iter().map(|&o| (b + o, quad(&ee, b + o).to_bits())).collect()
+    }).collect();
+
+    let dt = 1.0f32 / 30.0;
+    let (cases, frames) = (40, 60);
+    let mut pick = Pick(0x5220_a1a0_f1e5_0001);
+    let (mut flown, mut put_back, mut rethrown) = (0, 0, 0);
+    for case in 0..cases {
+        scramble(&mut ee, &mut pick);
+        if !pick.one_in(4) {
+            // A calm helicopter in the middle of the map: the blades thrown near it at its own speed.
+            let body = ee.u32_at(HELI + at::BODY);
+            let v = vector(&mut pick, 10.0);
+            set_quad(&mut ee, body + BODY_VEL, [v.x(), v.y(), v.z(), 1.0]);
+            let r = vector(&mut pick, 1.0);
+            set_quad(&mut ee, body + BODY_RATES, [r.x(), r.y(), r.z(), 0.0]);
+            let mid = [pick.range(1500.0, 5400.0), pick.range(0.0, 800.0), pick.range(1500.0, 5400.0)];
+            let model = ee.u32_at(HELI + wreck_at::MODEL);
+            let mut nodes: Vec<u32> = (0..4).map(|k| ee.u32_at(HELI + wreck_at::BLADE_NODES + 4 * k)).collect();
+            nodes.push(model);
+            for node in nodes {
+                let d = vector(&mut pick, 20.0);
+                set_quad(&mut ee, node + wreck_at::ROWS + 48, [mid[0] + d.x(), mid[1] + d.y(), mid[2] + d.z(), 1.0]);
+            }
+        }
+        for quads in &kept {
+            for &(a, q) in quads {
+                for (i, w) in q.iter().enumerate() {
+                    ee.set_u32(a + 4 * i as u32, *w);
+                }
+            }
+        }
+        blades_from(&ee, &mut blades);
+        for (k, &w) in wrappers.iter().enumerate() {
+            if pick.one_in(4) {
+                ee.call(start, &[u64::from(w)], &[], BUDGET);
+                blades.start(k);
+            } else if pick.one_in(4) {
+                ee.call(stop, &[u64::from(w), 1], &[], BUDGET);
+                blades.stop(k, true);
+            }
+        }
+        rethrown += blades.started.iter().filter(|s| s.out).count();
+        let seed = pick.next();
+        ee.set_u32(state, seed as u32);
+        ee.set_u32(state + 4, (seed >> 32) as u32);
+        let mut ride = ride_of(&ee);
+        let mut w = wreckage_of(&ee, blades.clone());
+        w.throw_blades(&mut ride, &throw_of(&ee), &mut Rng::from_state(seed));
+        ee.call(throw_fn, &[u64::from(HELI)], &[], 4 * BUDGET);
+        blades = w.blades;
+        same_blades(case, &ee, &blades);
+
+        for frame in 0..=frames {
+            if frame > 0 {
+                ee.call(step, &[u64::from(world)], &[dt], 50 * BUDGET);
+                blades.step(F(dt), &tables, &[]);
+            } else {
+                // The throw's frame: the posts after the helicopter's, the list read as the world reads it.
+                let mut i = 0;
+                while i < ee.u32_at(world + world_at::LISTS[4]) {
+                    let e = ee.u32_at(ee.u32_at(world + world_at::LISTS[4] + 8) + 4 * i);
+                    ee.call(post, &[u64::from(e - blade_at::POST)], &[dt], BUDGET);
+                    i += 1;
+                }
+            }
+            let mut i = 0;
+            while i < ee.u32_at(node + blade_at::NODE_LISTENERS) {
+                let arr = ee.u32_at(node + blade_at::NODE_LISTENERS + 8);
+                let l = ee.u32_at(arr + 4 * i);
+                ee.call(listen, &[u64::from(l - blade_at::LISTENER)], &[dt], BUDGET);
+                if ee.v0() as u32 != 0 {
+                    let n = ee.u32_at(node + blade_at::NODE_LISTENERS);
+                    for j in i..n - 1 {
+                        ee.set_u32(arr + 4 * j, ee.u32_at(arr + 4 * (j + 1)));
+                    }
+                    ee.set_u32(node + blade_at::NODE_LISTENERS, n - 1);
+                } else {
+                    i += 1;
+                }
+            }
+            blades.post(F(dt));
+            let case = case * 1000 + frame;
+            same_blades(case, &ee, &blades);
+            for (k, &wr) in wrappers.iter().enumerate() {
+                let n = &blades.set.objects[k].node;
+                let rows = [n.rows[0], n.rows[1], n.rows[2], n.origin].map(|r| r.to_bits());
+                let game = quads::<4>(&ee, ee.u32_at(wr + blade_at::NODE) + wreck_at::ROWS).map(|r| r.to_bits());
+                assert_eq!(rows, game, "case {case}: blade {k}'s node");
+            }
+        }
+        flown += blades.set.bones.iter().filter(|b| b.body.enabled).count();
+        put_back += blades.set.objects.iter().zip(&blades.set.bones).filter(|(o, b)| !b.body.enabled && o.place.to_bits() == b.body.position.to_bits()).count();
+    }
+    assert!(flown > cases / 2 && put_back > cases / 2 && rethrown > cases / 4,
+            "{flown} blades flying at the end, {put_back} put back off the edge, {rethrown} thrown while out: the cases miss a branch");
+    println!("thrown blades: {cases} throws of {frames} frames, bit-exact ({flown} flying at the end, {put_back} put back \
+              off the edge, {rethrown} thrown while out)");
 }

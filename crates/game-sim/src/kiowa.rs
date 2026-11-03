@@ -1718,17 +1718,6 @@ pub struct Nodes {
     pub wrecked: bool,
 }
 
-/// One of the MX helicopter's four thrown blades (`+0xe48..+0xe54`, each a body wrapper built off
-/// `helicopter\wreckblade.phy`, [`wreck_blade`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Blade {
-    pub body: Body,
-    /// The throw switched the blade on (the wrapper's slot `+0x11c`, `wreck_part_start`); the unwreck
-    /// switches it off again (slot `+0x120` with 1, `wreck_part_stop`). What those do inside the
-    /// wrapper is not ported.
-    pub out: bool,
-}
-
 /// Where the blades are thrown from, as the scene graph has it the frame they go: each blade's node's
 /// world transform (`+0xd08..+0xd14`), and the helicopter model's (`+0x18c`). Rows 0..2 the axes, row
 /// 3 the origin, as the nodes keep them after their lazy rebuild.
@@ -1739,7 +1728,7 @@ pub struct Throw {
 }
 
 /// What the wreck, the unwreck and the put-back read and write besides [`Ride`].
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wreckage {
     /// `[Wrecks]`' three the body takes: `WreckGravity` (the scale on gravity while wrecked),
     /// `WreckDamping` (both of the body's dampings) and `WreckInertia` (a scale on its inertia).
@@ -1764,9 +1753,9 @@ pub struct Wreckage {
     /// unless the helicopter's owner keeps it.
     pub spawn: [Vf; 3],
     pub nodes: Nodes,
-    /// [`Wreckage::new`] leaves the blades' bodies empty: building one off [`wreck_blade`]'s part is
-    /// the caller's.
-    pub blades: [Blade; 4],
+    /// The four thrown blades. [`Wreckage::new`] leaves none: building them off the disc's files is
+    /// [`Blades::new`]'s, and the caller's to put here.
+    pub blades: Blades,
 }
 
 /// `body_set_inertia`: the tensor's `w` set to 1 (in the caller's copy too), kept, and each of its
@@ -1882,11 +1871,16 @@ impl Wreckage {
     ///   the model's frame, less the body's `CofG`), turned back by the model's axes;
     /// * keeps the helicopter's rates, not that spin.
     ///
+    /// Each is started first ([`Blades::start`]) and placed with the throw's place and axes, not its
+    /// own ([`Blades::throw`]).
+    ///
     /// Then the rotor's four nodes and `+0xd3c` are hidden and the wrecked blades shown.
     pub fn throw_blades(&mut self, ride: &mut Ride, throw: &Throw, rng: &mut Rng) {
         let heli = ride.body;
-        for (blade, node) in self.blades.iter_mut().zip(&throw.blades) {
-            let mut at = node_point(node, blade.body.cofg);
+        for (k, node) in throw.blades.iter().enumerate() {
+            // With no blades built the generator is still drawn on, as the original's four are.
+            let cofg = self.blades.set.bones.get(k).map_or(Vf::ZERO, |b| b.body.cofg);
+            let at = node_point(node, cofg);
             let facing = node.0[2].merge(Dest::W, Vf::ZERO);
             let up = node.0[1].merge(Dest::W, Vf::ZERO);
             let mut draw = [F::ZERO; 3];
@@ -1902,10 +1896,9 @@ impl Wreckage {
             let swing = spin.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(spin, lever), lever, spin));
             let swing = node_rotate(&throw.model, swing);
             let velocity = heli.velocity.merge(Dest::XYZ, heli.velocity.add(swing));
-            blade.out = true;
-            place(&mut blade.body, &mut at, facing, up);
-            blade.body.velocity = velocity;
-            blade.body.rates = heli.rates;
+            if k < self.blades.set.bones.len() {
+                self.blades.throw(k, at, facing, up, velocity, heli.rates);
+            }
         }
         ride.rotor_hidden = true;
         self.nodes = Nodes { rotor: [true; 3], intact: true, wrecked: false };
@@ -1931,15 +1924,16 @@ impl Wreckage {
     }
 
     /// **The MX helicopter's unwreck** (its slot `+0x1bc`): [`Wreckage::unwreck`], then the rotor's
-    /// nodes and `+0xd3c` shown, the wrecked blades hidden, and the four blades switched off. (The
+    /// nodes and `+0xd3c` shown, the wrecked blades hidden, and the four blades stopped and hidden
+    /// ([`Blades::stop`]). (The
     /// original asks for the rotor's node and the first blade first; the MX helicopter's constructor
     /// always builds both.)
     pub fn unwreck_mx(&mut self, ride: &mut Ride) {
         self.unwreck(ride);
         ride.rotor_hidden = false;
         self.nodes = Nodes { rotor: [false; 3], intact: false, wrecked: true };
-        for blade in &mut self.blades {
-            blade.out = false;
+        for k in 0..self.blades.set.objects.len() {
+            self.blades.stop(k, true);
         }
     }
 
@@ -1977,6 +1971,177 @@ impl Wreckage {
             self.throw_blades(ride, throw, rng);
         }
         asked.recover.then(|| self.put_back(ride, owned))
+    }
+}
+
+// --- the thrown blades ------------------------------------------------------------------------------
+
+use crate::contact::Mover;
+use crate::contact_search::Heightfield;
+use crate::eco::Trees;
+use crate::flight_search::Rays;
+use crate::prop_world::{self, Collection, Edge, Object};
+use crate::props::NodeBox;
+use crate::ragdoll::{Bone, Tables};
+use crate::world::Props;
+use crate::wreck_bike::{self, WreckBike};
+use std::sync::Arc;
+
+/// The thrown blade's model (the wrapper's node, `BladeBent`), its rays and its collidable mesh, in
+/// `machine.res`. The two `.col`s are under `helicopter\col`, not beside the model.
+pub const BLADE_MODEL: &str = "helicopter\\anim\\bladebent.psg";
+pub const BLADE_RAYS: &str = "helicopter\\col\\bladebentm.col";
+pub const BLADE_SHAPE: &str = "helicopter\\col\\bladebentf.col";
+
+/// Where a blade's wrapper is put back to, and its look and up, as the MX constructor's init leaves
+/// them: the origin, and the model's own frame.
+const BLADE_PLACE: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
+const BLADE_LOOK: Vf = Vf::new(0.0, 0.0, 1.0, 0.0);
+const BLADE_UP: Vf = Vf::new(0.0, 1.0, 0.0, 0.0);
+
+/// What a blade's start and stop switch on its wrapper besides the collection's object.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Started {
+    /// Started: the wrapper's two active bits (`+0x31` bits 0 and 1), which its child components
+    /// follow.
+    pub out: bool,
+    /// The blade's node shown (bit 6 of its byte 3 clear).
+    pub shown: bool,
+    /// The node in the scene, under the helicopter's parent node.
+    pub placed: bool,
+    /// The collision object's two probes and its mesh in the broad phase.
+    pub probes: bool,
+}
+
+/// **The MX helicopter's four thrown blades** (`+0xe48..+0xe54`): one body wrapper each, the generic
+/// physics object a prop's is ([`crate::prop_world`]), built off `helicopter\wreckblade.phy`
+/// ([`wreck_blade`]) with its inertia off `bladebent.psg`'s box and the `bladebentm.col` rays. They
+/// share the helicopter's world (the wreck bike's, [`wreck_bike::WORLD`]) and its world node; one
+/// [`Collection`] holds them, always active, with no settle listener and the props' put-back off
+/// (`ResetTime -1`: a blade come to rest sleeps where it lies until the unwreck stops it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blades {
+    pub set: Collection,
+    pub started: [Started; 4],
+    /// Each blade's ray probe tree, in blade order, for the collide pass.
+    pub rays: Arc<Vec<Option<Rays>>>,
+}
+
+impl Default for Blades {
+    /// No blades: what [`Wreckage::new`] leaves before [`Blades::new`]'s are put in.
+    fn default() -> Blades {
+        Blades { set: blade_set(Vec::new(), Vec::new(), None), started: [Started::default(); 4], rays: Arc::default() }
+    }
+}
+
+fn blade_set(bones: Vec<Bone>, objects: Vec<Object>, edge: Option<Edge>) -> Collection {
+    Collection {
+        world: wreck_bike::WORLD,
+        bones,
+        objects,
+        joints: Vec::new(),
+        springs: Vec::new(),
+        bodies: Vec::new(),
+        forces: Vec::new(),
+        preforce: Vec::new(),
+        posts: Vec::new(),
+        listeners: Vec::new(),
+        active: true,
+        pin_to_body: false,
+        reset_time: F(-1.0),
+        countdown: F(-1.0),
+        edge,
+    }
+}
+
+impl Blades {
+    /// **The four blades as the MX constructor builds them**: `wreckblade.phy`'s part (`phy`), each
+    /// body's inertia off the model's box ([`NodeBox::from_model`] of `psg`, [`crate::props::box_size`],
+    /// [`Part::inertia`]), the collision object with the `.col`'s rays (`rays`), and the world's
+    /// bounds a body past which is put back (`edge`, the terrain's). Each placed at the origin in the
+    /// model's frame, asleep, in no list, unfiled, its node hidden and out of the scene.
+    pub fn new(phy: &[u8], psg: &[u8], rays: Option<&[u8]>, edge: Option<Edge>) -> Result<Blades, String> {
+        let part = wreck_blade(phy);
+        let inertia = part.inertia(crate::props::box_size(Some(NodeBox::from_model(psg)?)));
+        let rays = rays.map(crate::track::Rays::parse).transpose()?.map(|r| Rays::of(&r));
+        let made = WreckBike::new(&part, inertia, Vf::VF0, Vf::VF0);
+        let mut body = made.body;
+        body.enabled = false;
+        let mut object = Object::new(&part, BLADE_PLACE, BLADE_LOOK, BLADE_UP);
+        object.collision = Some(prop_world::Collision::new(&part, made.collider, rays.as_ref().map(Rays::pairs)));
+        let bone = Bone { body, mass: part.mass, inertia, reference: Vf::VF0 };
+        let mut set = blade_set(vec![bone; 4], vec![object; 4], edge);
+        for k in 0..4 {
+            set.place(k);
+        }
+        Ok(Blades { set, started: [Started::default(); 4], rays: Arc::new(vec![rays; 4]) })
+    }
+
+    /// **`wreck_part_start`** on blade `k` (its wrapper's slot `+0x11c`): started, the node shown and
+    /// put in the scene, the probes and the mesh into the broad phase (the part collides), then the
+    /// wake ([`Collection::enable`]: into the world's lists, the listener on the node, the collision
+    /// object filed).
+    pub fn start(&mut self, k: usize) {
+        let s = &mut self.started[k];
+        s.out = true;
+        s.shown = true;
+        s.placed = true;
+        s.probes |= self.set.objects[k].collision_enabled;
+        self.set.enable(k);
+    }
+
+    /// **`wreck_part_stop`** on blade `k` (slot `+0x120`): stopped, put to sleep and taken off the
+    /// world node ([`Collection::take_off`]), the node hidden and out of the scene when `hide` (the
+    /// unwreck always asks it), and the probes and the mesh out of the broad phase.
+    pub fn stop(&mut self, k: usize, hide: bool) {
+        self.started[k].out = false;
+        self.set.take_off(k);
+        let s = &mut self.started[k];
+        if hide {
+            s.shown = false;
+            s.placed = false;
+        }
+        s.probes = false;
+    }
+
+    /// One blade thrown: started, then placed at `at` turned to `facing` and `up` (the wrapper's
+    /// place, which squares them; its own put-back place is kept), and given the throw's `velocity`
+    /// and `rates`.
+    pub fn throw(&mut self, k: usize, at: Vf, facing: Vf, up: Vf, velocity: Vf, rates: Vf) {
+        self.start(k);
+        let o = &mut self.set.objects[k];
+        let kept = (o.place, o.look, o.up);
+        (o.place, o.look, o.up) = (at, facing, up);
+        self.set.place(k);
+        let o = &mut self.set.objects[k];
+        (o.place, o.look, o.up) = kept;
+        let b = &mut self.set.bones[k].body;
+        b.velocity = velocity;
+        b.rates = rates;
+    }
+
+    /// **The world node's collide pass, for the blades** (before any world steps): each filed
+    /// blade's collision object searches the terrain `field`, the scene's `props` and the
+    /// ecosystem's `trees` ([`Collection::search`]).
+    pub fn search(&mut self, dt: F, field: Option<&dyn Heightfield>, props: Option<&Props>, trees: Option<&Trees>) {
+        let rays = Arc::clone(&self.rays);
+        self.set.search(dt, &rays, field, props, trees);
+    }
+
+    /// **The blades' share of the helicopter's world step**, but for the posts
+    /// ([`Collection::step_to_posts`]): run beside [`Kiowa::tick`]'s, before the crash test's answer
+    /// is acted on. `movers` are what the collide pass's hits name
+    /// ([`crate::flight_search::movers`]).
+    pub fn step(&mut self, dt: F, tables: &Tables, movers: &[Mover]) {
+        self.set.step_to_posts(dt, tables, movers);
+    }
+
+    /// **The frame's end, for the blades**: after [`Wreckage::act`], their post listeners (which
+    /// follow the helicopter's in the world's list, so a blade the crash test threw this frame is
+    /// posted where it was thrown and steps from the next), then their listeners on the node
+    /// ([`Collection::step_posts`]).
+    pub fn post(&mut self, dt: F) {
+        self.set.step_posts(dt);
     }
 }
 
