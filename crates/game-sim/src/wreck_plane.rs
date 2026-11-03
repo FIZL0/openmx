@@ -26,8 +26,10 @@
 //! split screen and online seats for a lone flown plane, where the downed rider's own step later in
 //! the walk skips the wreck bike's tick ([`WreckBike::flown`]).
 //!
-//! Not yet 1:1: from 137910's image (P2 down) the plane's first tick with the mirror lands nearer the
-//! original's than without it, but not on it (research/s274).
+//! From 137910's image (P2 down), the plane after the first of the tick's two substeps, with the
+//! mirror, is the original's row 137911 to its printed digits (`tests/c16_fly.rs`
+//! `row_137911_is_the_wreck_bikes_first_substep`). The row is read in the middle of the frame, so the
+//! tick's end is past it (research/s274).
 
 #![deny(clippy::float_arithmetic)]
 

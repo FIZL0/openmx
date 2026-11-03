@@ -18,3 +18,15 @@ Journal: `research/journal/2026-11-03-s274-wreck-bike-meets-the-plane`. This is 
   0.009285104).
 - **P2's wreck state:** wrecked (reason 7) from row 137857 to 138012, settled from 137913, wrecked
   again (state 1) at 138191.
+- **Row 137911 is torn.** It equals the plane after the first of 137910's two substeps, with the wreck
+  bike's mirror on its list, to all printed digits. This holds at `frame_dt` 0x3c888882 (the image's
+  `0x479cd4`), at 0x3c88ce6a and at 1/60. The tick's end is past it. With P2 standing, the substep
+  misses the row. `tests/c16_fly.rs` `row_137911_is_the_wreck_bikes_first_substep`. The image's plane
+  body `last_force` (+0x80) agrees with the port's resolve force.
+- **`frame_dt`** is at 0x479cd4 (app + 0x344). `dt_ring` is 30 floats at 0x0046a830, its index at
+  0x0046a8a8. The frames alternate 0x3c888882 (0.016666654) and 0x3c88ce6a (0.016699988).
+- **C16's capture and tape are gone.** `context/capture/c16/fly.csv` and
+  `context/recordings/c16/fly.p2m2` are in no slot and not in the main checkout. Every test that reads
+  them skips. The s272 images remain. `segment_pad` in `tests/c16_fly.rs` rebuilds the tape's P1 pads
+  from research/c16's segment list. With them, `fly_two_by` from 137845 wrecks P2 with 7 on tick
+  137855, as the capture does.
