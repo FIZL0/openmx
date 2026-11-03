@@ -5585,7 +5585,23 @@ physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: b
 #   before. With the trucks stepped before the bike the port met them a tick early in both (S219 rear:
 #   port wreck (41,4), original (42,4), the truck frozen at its tick-41 point; S207 ctruck: 35 vs 36);
 #   with them stepped after, both strike on the original's tick and rear wrecks (42,4).
-toy_cars_read         boot 0x00289710 the .toy's [Cars] reader (above)
+# S251 — what the bike meets on the strike tick (journal 2026-11-02-s186-struck-trucks/3; capture
+#   context/capture/s251/rear-list.csv, watch/s251-truck-list.toml, S219 rear from copy 2's slot 25,
+#   frames 18482..18541, every lane equal to S219's rear.csv). The record's count (+0x100) reads 0 after
+#   the frame, but the entries stay: on tick 42 (frame 18524) the last list built has 2 entries, both
+#   kind 0, other (+0x74) 0, mover (+0x78) the truck car 0x01cc4440, surface -1, normal (0.70539,
+#   0.21341, 0.67592), points (3781.093, 249.4569, 3236.819) and (3780.851, 251.1462, 3236.539): the
+#   port's two path-mesh mover contacts (Sim::car_contacts) bit for bit. No f.col body entry. Record
+#   +0x1e0 (10.4047, 5.3080, 13.3775), +0x1d8 17.5143.
+#   The truck car's +0x260/+0x290 (vt+0xb8/+0xbc's caches) are 0 to tick 41, then on tick 42 and after
+#   (26.530971, 14.010800, 31.218940) and (-3.515880, 1.0954884, -3.653163). That velocity is
+#   (node row 3 on tick 42 - node row 3 on tick 40) x 30.003 on all three lanes. +0x2e0's row 3 on the
+#   tick-42 row is tick 41's node. The port's mover there is (20.714962, 4.9191623, 18.817799), the
+#   path's; its wake's (16.715538, 4.5927444, 15.133348), node at (3774.7458, 246.65788, 3232.182)
+#   against the original's tick-42 node (3775.0729, 246.97178, 3232.7180). The truck does not stop
+#   dead: its node goes on 0.5..0.8 ft a tick and climbs (S219's "stops dead" read the path car's
+#   own position, frozen while physical).
+toy_cars_read        boot 0x00289710 the .toy's [Cars] reader (above)
 # S169 — the .toy's HasPhysics things, and what their collidables name (journal 2026-10-28-s169-physics-props;
 #   tests crates/game-sim/tests/prop_under.rs). On the disc only [CarN] sections carry HasPhysics (free06,
 #   free07, free09 Car7, free10, free11 and their _ss twins); the other rigid-body props are the

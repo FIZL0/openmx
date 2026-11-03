@@ -1,0 +1,162 @@
+# s251-truck-list.toml — S219's rear ride (the bike standing on the HasPhysics company truck's line) with
+# the bike's collision record and the truck car's cached motion (S251): b7-truck-strike.toml's record
+# lanes on the S89 rider chain, plus the truck car's node matrix, its +0x2e0 copy and what its velocity
+# and spin virtuals last answered (+0x260, +0x290). The record's count is cleared before the frame
+# ends, so rec_count reads 0; the entries stay in memory, and the strike tick's are the last list built.
+#
+#   ./kit pcsx2 with -- research/s219/record.sh PID 25 60 context/capture/s251/rear-list.csv \
+#       watch/s251-truck-list.toml          (copy 2, started with the two Qt accessibility variables)
+#
+[watch]
+name        = "s251-truck-list"
+description = "S219 rear: the bike's contact record and the company truck's cached motion"
+every       = 1
+frames      = 900
+
+[setup]
+state   = 25
+warmup  = 0
+settle_ms = 240
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "rider_type"      # +0x00: 2 = a rider
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x0"
+type = "u32"
+required = true
+
+[[field]]
+name = "wreck_reason"    # +0x748
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
+type = "u32"
+
+[[field]]
+name = "g_peak"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x550"
+type = "f32x4"
+
+[[field]]
+name = "ch_cofg"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "ch_vel"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x260"
+type = "f32x4"
+
+[[field]]
+name = "ch_rates"        # +0x290: the rates in the chassis' frame
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x290"
+type = "f32x4"
+
+[[field]]
+name = "ch_impact"       # +0x170: the frame's shock
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "ch_ang_impact"   # +0x180: the frame's twist
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x180"
+type = "f32x4"
+
+[[field]]
+name = "ch_xform"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7a4 -> 0x254 -> 0x40"
+type = "mat4"
+
+# --- the bike's collision record (rider +0x7d0) -----------------------------------------------------
+[[field]]
+name = "rec_count"       # +0x100: contacts in the list
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x100"
+type = "u32"
+
+[[field]]
+name = "rec_relative"    # +0x1e0: the last entry's relative velocity, +0x1d8 its normal speed
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x1e0"
+type = "f32x4"
+
+[[field]]
+name = "rec_normal_speed"
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x1d8"
+type = "f32"
+
+[[array]]
+name   = "c"             # the record's contact list: *(record+0x108), 0x80-byte entries
+addr   = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x7d0 -> 0x108 -> 0x0"
+count  = 12
+stride = 0x80
+
+[[array.field]]
+name = "kind"
+off  = 0
+type = "u32"
+
+[[array.field]]
+name = "from"            # +0x10: where the ray starts, model space
+off  = 0x10
+type = "f32x3"
+
+[[array.field]]
+name = "end"             # +0x20: the contact on the bike, model space
+off  = 0x20
+type = "f32x3"
+
+[[array.field]]
+name = "normal"          # +0x30
+off  = 0x30
+type = "f32x3"
+
+[[array.field]]
+name = "point"           # +0x40
+off  = 0x40
+type = "f32x3"
+
+[[array.field]]
+name = "arm"             # +0x50
+off  = 0x50
+type = "f32x3"
+
+[[array.field]]
+name = "other_arm"       # +0x60
+off  = 0x60
+type = "f32x3"
+
+[[array.field]]
+name = "surface"         # +0x70
+off  = 0x70
+type = "u32"
+
+[[array.field]]
+name = "other"           # +0x74
+off  = 0x74
+type = "u32"
+
+[[array.field]]
+name = "mover"           # +0x78
+off  = 0x78
+type = "u32"
+
+
+[[field]]
+name = "tr_pose"
+addr = "0x01cc4440 + 0x254 -> 0x80"
+type = "mat4"
+
+[[field]]
+name = "tr_before"
+addr = "0x01cc4440 + 0x2e0"
+type = "mat4"
+
+[[field]]
+name = "tr_vel"
+addr = "0x01cc4440 + 0x260"
+type = "f32x4"
+
+[[field]]
+name = "tr_spin"
+addr = "0x01cc4440 + 0x290"
+type = "f32x4"
