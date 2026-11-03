@@ -147,9 +147,13 @@ def pcsx2_config_dir(instance_n: str = '') -> Path:
 
 
 def copies_root() -> Path:
-    """Where kit-managed PCSX2 copies live: a sibling of the repo, never inside it."""
+    """Where kit-managed PCSX2 copies live: beside the runner's worktrees (`agent-runner home slots`, from
+    runner settings), never inside the repo."""
     from ps2kit.config import ROOT
-    return ROOT.parent / f'{ROOT.name}-slots' / 'pcsx2'
+    out = subprocess.run(['agent-runner', 'home', 'slots'], cwd=ROOT, capture_output=True, text=True)
+    if out.returncode:
+        raise RuntimeError(f'`agent-runner home slots` failed (agent-runner 0.13.1+ needed): {out.stderr.strip()}')
+    return Path(out.stdout.strip()) / 'pcsx2'
 
 
 def pcsx2_cmd(cmd: str) -> list[str]:
