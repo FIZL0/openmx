@@ -356,6 +356,23 @@ struct Run {
     stepped: usize,
 }
 
+/// **One tick of the port's riding body on the original's**: `row`'s request, step and animated
+/// skeleton, and the two table words as `before` left them.
+fn step_row(riding: &mut Riding, ground: &mut dyn game_sim::world::World, kit: &Kit, nodes: &[usize], skel: &Skeleton, row: &Row, before: &Row) {
+    let r = row.request();
+    let animated = skel.world_under(row, &before.bike());
+    let posed = Posed {
+        bones: nodes.iter().map(|&j| under(&animated[j], &r.frame)).collect(),
+        rests: nodes.iter().map(|&j| rest(row.joint(j).1)).collect(),
+    };
+    // The mode chain reads the vehicle animation's two words as last tick's animation left them.
+    riding.actor.posed = before.from_table();
+    riding.actor.latched = before.holding();
+    let after = skel.world(row);
+    let moved = Posed { bones: nodes.iter().map(|&j| under(&after[j], &r.frame)).collect(), rests: posed.rests.clone() };
+    riding.step_moved(kit, Some(&posed), Some(&moved), &r, before.state(), F(row.float("dt", 0)), ground);
+}
+
 /// **One stretch**: a fresh riding body stepped from `rows[from]` while the original's body is held,
 /// riding or posed, each tick on the original's request, step, animated skeleton and last tick's
 /// two table words, as S135's `ride_watched` steps it. Every tick the port's mode and placement are
@@ -379,18 +396,7 @@ fn stretch(ground: &mut dyn game_sim::world::World, kit: &Kit, nodes: &[usize], 
         {
             break;
         }
-        let r = row.request();
-        let animated = skel.world_under(row, &before.bike());
-        let posed = Posed {
-            bones: nodes.iter().map(|&j| under(&animated[j], &r.frame)).collect(),
-            rests: nodes.iter().map(|&j| rest(row.joint(j).1)).collect(),
-        };
-        // The mode chain reads the vehicle animation's two words as last tick's animation left them.
-        riding.actor.posed = before.from_table();
-        riding.actor.latched = before.holding();
-        let after = skel.world(row);
-        let moved = Posed { bones: nodes.iter().map(|&j| under(&after[j], &r.frame)).collect(), rests: posed.rests.clone() };
-        riding.step_moved(kit, Some(&posed), Some(&moved), &r, before.state(), F(row.float("dt", 0)), ground);
+        step_row(&mut riding, ground, kit, nodes, skel, row, before);
         stepped += 1;
         run.stepped += 1;
         let mode = match riding.actor.mode {
@@ -500,4 +506,99 @@ fn a_trick_lets_the_riding_ragdoll_go_and_takes_it_back_as_the_originals() {
     assert!(exits.ticks == 5 * EXIT && exits.worst_at.0 < 0.05 && exits.worst_turn.0 < 0.08, "exits: {}", exits.line());
     let r = &run.riding;
     assert!(r.ticks > 1000 && r.worst_at.0 < 0.3 && r.worst_turn.0 < 0.5 && r.mean_at() < 0.04, "riding: {}", r.line());
+}
+
+
+/// The original's wreck mode (`+0x47c`).
+const WRECKED: u32 = 2;
+
+/// **A trick bailed into a wreck enters it from the clip** (S262). recording2's trick at 3522 never
+/// comes back: at 3563 the body goes from posed straight to wrecked, the riding ragdoll never
+/// placed between. The port's riding body, stepped through the trick on the original's ticks, is
+/// posed and unplaced on the tick before, so [`Riding::hand_over`] gives nothing and the rider's
+/// wreck entry poses the bones from the skeleton ([`ragdoll_ride::nodes`]) against the nodes it drew
+/// the tick before ([`ragdoll_ride::drawn`]), moving ([`Down::entry_starts`]).
+///
+/// The original's entry is that: each body's start (`+0x30`, position and velocity, in
+/// `recording2-parts.txt`) is the moving pose of the node as the last posed tick left it, against
+/// the node of the tick before as its drawn matrix, over the entry tick's frame time. From the
+/// original's own nodes the port's starts are its bit for bit. From the skeleton composed off the
+/// captured joints (the port's skeleton, under the bike) they are within the composition's ulps.
+///
+/// [`Down::entry_starts`]: game_sim::ragdoll_ride::Down::entry_starts
+#[test]
+fn a_bailed_trick_enters_the_wreck_from_the_clip_as_the_originals() {
+    use game_sim::ragdoll_ride::{self, Down};
+    let Some((kit, nodes)) = ride_kit() else { return };
+    let Some(rows) = capture_in("s257", "recording2-parts") else { return };
+    let Some((scene, terrain)) = terrain_bytes("free09") else { return };
+    let terrain = game_sim::track::Terrain::parse(&terrain).expect("free09's terrain parses");
+    let mut ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
+    let skel = Skeleton::read(rows.iter().find(|r| r.mode() == HELD).expect("a held tick"));
+
+    let e = (1..rows.len()).find(|&k| rows[k].mode() == WRECKED && rows[k - 1].mode() == POSED).expect("a posed body wrecked");
+    let (row, last, prev) = (&rows[e], &rows[e - 1], &rows[e - 2]);
+    assert_eq!(row.frame, 3563, "the bailed trick's wreck");
+    assert!(!last.placed() && row.placed(), "the original's body is unplaced before the wreck and placed by its entry");
+    // The trick's run back to its riding entry tick (the table goes up), and a settle before it.
+    let up = (1..e).rev().find(|&k| rows[k].mode() == RIDING && rows[k].from_table() && !rows[k - 1].from_table()).expect("the trick's start");
+    assert_eq!(rows[up].frame, 3522, "the bailed trick starts at 3522");
+    let from = up - SETTLE as usize;
+    assert!((from..e).all(|k| rows[k].frame == rows[k - 1].frame + 1 && matches!(rows[k].mode(), RIDING | POSED)), "no gap or put-back");
+
+    let mut riding = Riding::new(&kit);
+    for k in from..e {
+        step_row(&mut riding, &mut ground, &kit, &nodes, &skel, &rows[k], &rows[k - 1]);
+        let mode = match riding.actor.mode {
+            Mode::Riding => RIDING,
+            Mode::Posed => POSED,
+            m => panic!("frame {}: the port's body is {m:?}", rows[k].frame),
+        };
+        assert_eq!(mode, rows[k].mode(), "frame {}: the body's mode", rows[k].frame);
+        assert_eq!(riding.placed(), rows[k].placed(), "frame {}: the body's placement", rows[k].frame);
+    }
+    assert!(riding.hand_over(&kit).is_none(), "the posed body hands nothing over: the wreck enters from the skeleton");
+
+    let dt = F(row.float("dt", 0));
+    let theirs: Vec<(Vf, Vf)> = (0..nodes.len()).map(|i| (row.quad(&format!("start{i}"), 0), row.quad(&format!("start{i}"), 0x10))).collect();
+    // The rider's fallback: the skeleton's nodes as last tick posed them, on the bike as it left it,
+    // and the drawn matrices of the tick before's.
+    let entry = |skeleton: &dyn Fn(&Row) -> Posed, frame: &dyn Fn(&Row) -> Mat4| {
+        let now = ragdoll_ride::nodes(&kit, Some(&skeleton(last)), &frame(last));
+        let before = ragdoll_ride::drawn(&ragdoll_ride::nodes(&kit, Some(&skeleton(prev)), &frame(prev)));
+        Down::entry_starts(&kit, &now, Some(&before), dt)
+    };
+    let gap = |ours: &[game_sim::ragdoll_pose::Start]| {
+        let (mut at, mut moving) = (0f32, 0f32);
+        for (o, (p, v)) in ours.iter().zip(&theirs) {
+            for l in 0..3 {
+                at = at.max((o.position[l] - p[l]).abs());
+                moving = moving.max((o.velocity[l] - v[l]).abs());
+            }
+        }
+        (at, moving)
+    };
+
+    // From the original's own nodes, in the world.
+    let drawn_nodes = |r: &Row| Posed {
+        bones: nodes.iter().map(|&j| { let m = r.world(j); Bone { at: m.0[3], forward: m.0[2], up: m.0[1] } }).collect(),
+        rests: Vec::new(),
+    };
+    let ours = entry(&drawn_nodes, &|_| Mat4::IDENTITY);
+    for (i, (o, (p, v))) in ours.iter().zip(&theirs).enumerate() {
+        assert_eq!(o.position.0.map(f32::to_bits)[..3], p.0.map(f32::to_bits)[..3], "part {i}'s start position");
+        assert_eq!(o.velocity.0.map(f32::to_bits)[..3], v.0.map(f32::to_bits)[..3], "part {i}'s start velocity");
+    }
+
+    // From the skeleton composed off the captured joints, under the bike's node.
+    let composed = |r: &Row| {
+        let world = skel.world(r);
+        Posed { bones: nodes.iter().map(|&j| under(&world[j], &r.bike())).collect(), rests: Vec::new() }
+    };
+    let (at, moving) = gap(&entry(&composed, &|r| r.bike()));
+    println!("bailed-trick wreck {}: from the original's nodes bit for bit; from the composed skeleton {at} ft, {moving} ft/s off", row.frame);
+    assert!(at < 2e-3 && moving < 0.1, "from the composed skeleton the starts are {at} ft, {moving} ft/s off the original's");
+    // Against the nodes of the entry tick itself, or the tick before's as the drawn ones, they are not.
+    let (at, moving) = gap(&entry(&|r: &Row| drawn_nodes(if r.frame == last.frame { row } else { last }), &|_| Mat4::IDENTITY));
+    assert!(at > 0.5 && moving > 10.0, "a tick late the starts would be {at} ft, {moving} ft/s off");
 }

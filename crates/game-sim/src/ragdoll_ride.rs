@@ -378,6 +378,29 @@ impl Down {
         Down::enter_from(kit, &nodes(kit, posed, m), None, F::ZERO, crash, throw, reason, wrecks, rng, world)
     }
 
+    /// **Where the wreck entry starts each bone** (S262): [`Down::enter_from`]'s pose of `now`
+    /// against `before`, the bodies' starts before the reason's entry acts on them. From a posed
+    /// body (a trick bailed into a wreck) `now` is the clip's nodes as the last tick left them and
+    /// `before` the tick before's, as the original's.
+    pub fn entry_starts(kit: &Kit, now: &[Bone], before: Option<&[Mat4]>, dt: F) -> [Start; PARTS] {
+        let t = &kit.tables;
+        let mut starts = [Start::default(); PARTS];
+        let mut drawn = [Mat4([Vf::ZERO; 4]); PARTS];
+        if let Some(before) = before {
+            for (d, b) in drawn.iter_mut().zip(before) {
+                *d = *b;
+            }
+        }
+        ragdoll_pose::pose_all(
+            now.iter().zip(&kit.rig.parts).zip(drawn.iter_mut().zip(starts.iter_mut())).map(|((b, p), (d, s))| (b, p.cofg, d, s)),
+            before.is_none(),
+            dt,
+            &t.acos,
+            &t.curve,
+        );
+        starts
+    }
+
     /// **The wreck entered from the riding skeleton** (S70): the original's wreck entry, which
     /// poses every bone where the skeleton's node is now (`now`, in the world) and takes its
     /// velocity and rates from how far the node moved and turned since the node's matrix was last
@@ -401,21 +424,7 @@ impl Down {
         world: &mut dyn World,
     ) -> Down {
         let mut ragdoll = kit.ragdoll.clone();
-        let t = &kit.tables;
-        let mut starts = [Start::default(); PARTS];
-        let mut drawn = [Mat4([Vf::ZERO; 4]); PARTS];
-        if let Some(before) = before {
-            for (d, b) in drawn.iter_mut().zip(before) {
-                *d = *b;
-            }
-        }
-        ragdoll_pose::pose_all(
-            now.iter().zip(&kit.rig.parts).zip(drawn.iter_mut().zip(starts.iter_mut())).map(|((b, p), (d, s))| (b, p.cofg, d, s)),
-            before.is_none(),
-            dt,
-            &t.acos,
-            &t.curve,
-        );
+        let starts = Down::entry_starts(kit, now, before, dt);
         ragdoll_pose::reset(ragdoll.bones.iter_mut().map(|b| &mut b.body).zip(starts.iter()));
         if before.is_none() {
             for b in &mut ragdoll.bones {
