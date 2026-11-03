@@ -103,6 +103,50 @@ pub fn car_presets(kind: game_sim::car::Kind) -> &'static str {
     }
 }
 
+/// An MX vs. ATV Unleashed machine, as its camera tells them apart (MD82): SLUS-21104 picks each
+/// machine's follow-camera file by the kind the machine's class gives it, not by anything in its
+/// `.phy` — the `.phy`'s `[Camera]` holds only first-person offsets, and no `.phy` on the disc sets
+/// the `FCamFileName` that would override the pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModMachine {
+    /// The bikes, and anything the game does not name otherwise.
+    Motocross,
+    Atv,
+    Biplane,
+    Helicopter,
+    Buggy,
+    MonsterTruck,
+    Baja,
+    GolfCart,
+    Sandrail,
+}
+
+/// The archive on MX vs. ATV's disc that holds every machine's camera file.
+pub const MOD_CAMERA_ARCHIVE: &str = "Cam\\CameraPresets.res";
+
+/// The follow-camera file `m` reads, inside [`MOD_CAMERA_ARCHIVE`]. Read it with
+/// `game_sim::camera::Preset::read_layout`.
+pub fn mod_presets(m: ModMachine) -> &'static str {
+    match m {
+        ModMachine::Motocross => "Cam\\FC_MXDefault.pb",
+        ModMachine::Atv => "Cam\\FC_ATVDefault.pb",
+        ModMachine::Biplane => "Cam\\FC_BiplaneDefault.pb",
+        ModMachine::Helicopter => "Cam\\FC_HeliDefault.pb",
+        ModMachine::Buggy => "Cam\\FC_BuggyDefault.pb",
+        ModMachine::MonsterTruck => "Cam\\FC_MonsterDefault.pb",
+        ModMachine::Baja => "Cam\\FC_BajaDefault.pb",
+        ModMachine::GolfCart => "Cam\\FC_GolfCartDefault.pb",
+        ModMachine::Sandrail => "Cam\\FC_SandrailDefault.pb",
+    }
+}
+
+/// The file `m` reads when the game's current camera is its race camera rather than the follow
+/// camera: the same name with `RC_` for `FC_`, which is how SLUS-21104 builds it. These files carry
+/// the race camera's airborne filters ahead of the presets.
+pub fn mod_race_presets(m: ModMachine) -> String {
+    mod_presets(m).replacen("FC_", "RC_", 1)
+}
+
 /// A car's target block (S149e, S246), as the original's car fills it once a frame in its post
 /// listener after the measure (`research/oracle.txt`, S246): the rows are the measure's, the velocity
 /// the body's, the lean word the measure's world rates (the camera reads the yaw), the flag "no tire
