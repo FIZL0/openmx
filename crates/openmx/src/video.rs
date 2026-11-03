@@ -95,13 +95,13 @@ impl Look {
 /// The presets, best looking first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
-    /// Everything as openmx draws it at its best: the whole map, every shadow (Shadows All, the
-    /// baked world's too, at High quality: free09 at 1920x1080, 0.5 ms a frame over On, the frame
-    /// rate held, 2026-10-30), 16x filtering, the resolution only dropped when frames
-    /// run long (Render Scale Auto). What a desktop GPU gets.
+    /// Everything as openmx draws it at its best: every shadow (Shadows All, the baked world's too,
+    /// at High quality: free09 at 1920x1080, 0.5 ms a frame over On, the frame rate held,
+    /// 2026-10-30), 16x filtering, the resolution only dropped when frames run long (Render Scale
+    /// Auto), and the fog eight times the original's (Farther), so the distance still hazes out
+    /// (user 2026-11-03: Whole Map is a Draw Distance choice, no preset's). What a desktop GPU gets.
     High,
-    /// High's look with the speed-ups on (the movers' shadows alone, Shadows On) and the fog eight
-    /// times the original's.
+    /// High's look with the speed-ups on: the movers' shadows alone, Shadows On.
     Medium,
     /// The cheapest that still looks like the game: Far fog (four times the original's) and the
     /// movers' shadows at Low quality, at half scale, 2x filtering and coarser models. Not the
@@ -132,7 +132,7 @@ impl Preset {
 
     pub fn look(self) -> Look {
         let high = Look {
-            draw: Graphics::Full,
+            draw: Graphics::Farther,
             filtering: Filtering::X16,
             shadows: Shadows::All,
             shadow_quality: ShadowQuality::High,
@@ -142,7 +142,7 @@ impl Preset {
         };
         match self {
             Preset::High => high,
-            Preset::Medium => Look { draw: Graphics::Farther, shadows: Shadows::On, ..high },
+            Preset::Medium => Look { shadows: Shadows::On, ..high },
             Preset::Low => Look {
                 draw: Graphics::Far,
                 filtering: Filtering::X2,
@@ -168,6 +168,20 @@ impl Preset {
     /// The preset whose rows `look` are, if any.
     pub fn of(look: Look) -> Option<Preset> {
         Preset::ALL.into_iter().find(|p| p.look() == look)
+    }
+
+    /// High's rows before P268, the whole map drawn: what a settings.txt that chose High then has,
+    /// which [`Look::renewed`] reads as High's now.
+    pub fn old_high() -> Look {
+        Look { draw: Graphics::Full, ..Preset::High.look() }
+    }
+}
+
+impl Look {
+    /// `self` as a settings.txt read it: High's old rows ([`Preset::old_high`]) are High's now, so a
+    /// player who chose High before P268 is not left on Custom; any other look as it is.
+    pub fn renewed(self) -> Look {
+        if self == Preset::old_high() { Preset::High.look() } else { self }
     }
 }
 
@@ -586,6 +600,16 @@ mod tests {
         for p in Preset::ALL {
             assert_eq!(Preset::of(p.look()), Some(p));
         }
+        // High keeps a far fog (P268, user 2026-11-03), Whole Map is no preset's, and Medium is
+        // High but for its shadows.
+        assert_eq!(Preset::High.look().draw, Graphics::Farther);
+        assert!(Preset::ALL.iter().all(|p| p.look().draw != Graphics::Full));
+        assert_eq!(Preset::Medium.look(), Look { shadows: Shadows::On, ..Preset::High.look() });
+        // High's old rows read as High's now; any other look is left be.
+        assert_eq!(Preset::of(Preset::old_high()), None);
+        assert_eq!(Preset::old_high().renewed(), Preset::High.look());
+        let whole = Look { draw: Graphics::Full, ..Preset::Low.look() };
+        assert_eq!(whole.renewed(), whole);
     }
 
     /// The Preset row: a preset sets every row and turns Auto off, a row changed by hand is Custom,

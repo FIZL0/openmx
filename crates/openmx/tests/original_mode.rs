@@ -89,7 +89,7 @@ fn the_original_switch_rides_the_originals_fog_layout_plants_and_picture() {
     let off = Menu::new(Settings::default(), Controls::default());
     let dir_off = store("off", &off).unwrap();
     let said = ride(&dir_off);
-    assert!(line(&said, "graphics:").starts_with("graphics: full (fog"), "{said}");
+    assert!(line(&said, "graphics:").starts_with("graphics: farther (fog"), "{said}");
     assert_eq!(line(&said, "plants:"), "plants: smooth");
     assert_eq!(line(&said, "foliage:"), "foliage: cutout");
     // 16x, or whatever less this device does.
