@@ -1,0 +1,101 @@
+# MD80a: MX vs. ATV Unleashed's (SLUS-21104) player biplane in Desert Oasis Free Ride, every tick. OBJ is
+# replaced by the plane object's address (vptr at +4 = 0x003ce7b0, research/md80a/ram.py); play.sh does it
+# and adds the start trigger. Decoded columns first, then the raw blocks. Offsets from SLUS-21104's own
+# steps (research/oracle.txt # MD80a): body +0xb8; input step 0x004c2d50 writes +0x310/+0x314 (commands
+# 0x15/0x14), +0x10f4 elevator, +0x10f8 aileron, +0x10fc rudder; forces 0x004c37c0 runs the engine
+# (+0x1164) and aero (+0x1168) unless +0xc80, then the three tires (+0x116c..+0x1174).
+[watch]
+name        = "md80a-biplane"
+description = "MX vs. ATV (SLUS-21104) Free Ride biplane flown from a generated tape: plane, body, engine, aero and three tires per tick"
+every       = 1
+frames      = 2000
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x3fa6d8, +2 a tick
+addr = "0x3fa6d8"
+type = "u32"
+
+[[field]]
+name = "vptr"           # the plane's vtable word (+4)
+addr = "OBJ + 0x4"
+type = "u32"
+
+[[field]]
+name = "ctl"            # +0x308..+0x314: +0x310 = command 0x15, +0x314 = command 0x14
+addr = "OBJ + 0x308"
+type = "f32x4"
+
+[[field]]
+name = "inp"            # +0x10f0..+0x10fc: +0x10f4 elevator, +0x10f8 aileron, +0x10fc rudder
+addr = "OBJ + 0x10f0"
+type = "f32x4"
+
+[[field]]
+name = "wreck"          # +0xc80: forces skip the engine and aero while set
+addr = "OBJ + 0xc80"
+type = "u32"
+
+[[field]]
+name = "pos"            # body +0x60
+addr = "OBJ + 0xb8 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "vel"            # body +0x80
+addr = "OBJ + 0xb8 -> 0x80"
+type = "f32x4"
+
+[[field]]
+name = "quat"           # body +0x170
+addr = "OBJ + 0xb8 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "body_1c0"       # body +0x1c0: not decoded (big; world frame, an angular momentum by its size?)
+addr = "OBJ + 0xb8 -> 0x1c0"
+type = "f32x4"
+
+[[field]]
+name = "rate"           # body +0x1d0: angular velocity, body frame, rad/s (the quaternion's derivative)
+addr = "OBJ + 0xb8 -> 0x1d0"
+type = "f32x4"
+
+[[field]]
+name = "obj0"           # the plane object, raw, +0x0..+0xc00
+addr = "OBJ"
+type = "bytes:3072"
+
+[[field]]
+name = "obj1"           # +0xc00..+0x1800 (the model word is +0x1320)
+addr = "OBJ + 0xc00"
+type = "bytes:3072"
+
+[[field]]
+name = "body"           # the rigid body, raw
+addr = "OBJ + 0xb8 -> 0x0"
+type = "bytes:640"
+
+[[field]]
+name = "engine"         # *(+0x1164), raw (atv_biplane_engine_step's object)
+addr = "OBJ + 0x1164 -> 0x0"
+type = "bytes:512"
+
+[[field]]
+name = "aero"           # *(+0x1168), raw (atv_biplane_aero_step's object)
+addr = "OBJ + 0x1168 -> 0x0"
+type = "bytes:512"
+
+[[array]]
+name   = "tire"         # *(+0x116c..+0x1174): the three gear tires (atv_biplane_tire_probe/force)
+addr   = "OBJ + 0x116c"
+count  = 3
+stride = 4
+deref  = true
+
+[[array.field]]
+name = "raw"
+off  = 0x0
+type = "bytes:512"

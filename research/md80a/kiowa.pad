@@ -1,0 +1,50 @@
+sleep 15t
+down cross
+sleep 150t
+stick l 0 -1
+sleep 60t
+up cross
+sleep 90t
+stick l 0 0
+sleep 30t
+stick l 1 0
+sleep 30t
+stick l 0 0
+sleep 40t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 40t
+down l1
+sleep 40t
+up l1
+sleep 20t
+down r1
+sleep 40t
+up r1
+sleep 20t
+stick l 0 -1
+down square
+sleep 60t
+stick l 0 0
+sleep 55t
+up square
+sleep 90t
+down square
+sleep 45t
+up square
+sleep 60t
+down square
+sleep 25t
+up square
+sleep 30t
+stick l 0 1
+sleep 40t
+stick l 0 0
+sleep 60t
+down square
+sleep 40t
+up square
+sleep 150t
+release
+sleep 10t
