@@ -21,3 +21,9 @@ not its `f.col` as a body, and the port already builds those two contacts bit fo
 on the mover's velocity. The original reads the car's motion after the wake moved its node, and the
 port's wake puts the node about 0.5 ft from the original's. The f.col code is parked on
 `wip/S251-fcol`.
+
+S252 (file 3, FINAL): every search that strikes a truck's path mesh now wakes it. A search marks the
+world's `Prop` (`strike_heard`), and `Traffic::heard` takes the marks at `frame_late`. The ragdoll's
+copied cars carry their prop. A PCSX2 capture of the biplane parked in ctruck's way wakes the truck
+on 11092, and so does the port, with the plane on the capture's rows (two ticks later on the port's
+own creeping plane).

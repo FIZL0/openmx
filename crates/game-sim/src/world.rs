@@ -41,6 +41,7 @@ use crate::contact_search::{Cell, Heightfield, TerrainField};
 use crate::math::{self, Mat4};
 use crate::track::{self, Mesh, Placement, Terrain, TerrainLayout};
 use ps2_float::{Acc, Dest, F, Field, Vf, vu};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How many terrain samples one unit of the scene's `TerrainWidth` (or `TerrainBreadth`) is: the game's
 /// map edge is width × 256 × scale whatever the tree's depth. On a two-level tree that is one root cell;
@@ -487,6 +488,11 @@ pub struct Prop {
     /// ([`crate::traffic::Moving`], S136), which a wheel standing on it rides with. `None` for
     /// everything that stands still.
     pub moving: Option<crate::traffic::Moving>,
+    /// Its struck listener heard a search strike it this tick (S252): a car's mesh, which every
+    /// search that hits it tells ([`Prop::strike_heard`]), and which the traffic answers once the
+    /// tick's searches are done ([`crate::traffic::Traffic::frame_late`]). A flag the searches can
+    /// raise through the shared props they are lent; never set outside a tick, nor left set after one.
+    pub heard: AtomicBool,
 }
 
 impl Prop {
@@ -505,7 +511,7 @@ impl Prop {
             true,
         );
         let (to_world, centre, radius) = stood(&mesh, &place);
-        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None }
+        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None, heard: AtomicBool::new(false) }
     }
 
     /// A parsed mesh stood at a world matrix: a moving car's (S81, [`crate::traffic`]). The mesh's
@@ -513,7 +519,7 @@ impl Prop {
     pub fn on(mesh: Mesh, place: &Mat4) -> Prop {
         let (to_world, _, _) = stood(&mesh, place);
         let (centre, radius) = moved(&mesh, place);
-        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None }
+        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None, heard: AtomicBool::new(false) }
     }
 
     /// Where [`Prop::on`] would stand `mesh` at `place`, without making the prop: its mesh's world
@@ -530,6 +536,21 @@ impl Prop {
         self.from_world = invert_rigid(&to_world);
         self.to_world = to_world;
         (self.centre, self.radius) = moved(&self.mesh, place);
+    }
+
+    /// **The struck listener** (S252): a search's narrow phase struck this mesh, and the original's
+    /// search tells the struck one's listeners on every hit. A car's mesh
+    /// ([`Prop::moving`]) has one, which wakes a `HasPhysics` car ([`crate::traffic::Traffic::strike`]);
+    /// nothing else that stands in the props listens.
+    pub fn strike_heard(&self) {
+        if self.moving.is_some() {
+            self.heard.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether the struck listener heard a hit since last asked, and forget it.
+    pub fn take_heard(&self) -> bool {
+        self.heard.swap(false, Ordering::Relaxed)
     }
 }
 

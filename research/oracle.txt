@@ -5601,6 +5601,16 @@ physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: b
 #   against the original's tick-42 node (3775.0729, 246.97178, 3232.7180). The truck does not stop
 #   dead: its node goes on 0.5..0.8 ft a tick and climbs (S219's "stops dead" read the path car's
 #   own position, frozen while physical).
+# S252 — every search's strike on a HasPhysics car's path mesh (crates/game-sim/src/world.rs Prop::strike_heard,
+#   flight_search::Scene's prop pair, ragdoll_scene::PathCar::struck, Traffic::heard from frame_late; test
+#   tests/replay.rs a_parked_plane_wakes_the_truck_driving_into_it_as_the_original_does; journal
+#   2026-11-02-s186-struck-trucks/3). Captured (copy 3, context/capture/s252/plane.csv): biplane.p2m2's plane
+#   (MXBiplane 0x00c44a40) parked on free06's company-truck road at (3933.0, 201.6, 2609.2) via its spawn and
+#   placement (+0xe10/+0xe0) and crash word (+0x3b0 = 1, clock +0x3bc = WreckTime +0x3c0); ctruck (0x01cc4440)
+#   drives into it with no pad. +0x588 turns 1 on 11092, the tick the plane's contacts (record +0x100) come on
+#   (8); +0x58c follows on the same row; +0x470 holds its 11091 point from then on, so the plane's search
+#   struck the mesh before that tick's car update, as S186a's body rays did. The plane is thrown off at
+#   ~1 ft/tick (+x). Not seen: a downed bike's or a ragdoll's strike, and the order of two strikes in a tick.
 toy_cars_read        boot 0x00289710 the .toy's [Cars] reader (above)
 # S169 — the .toy's HasPhysics things, and what their collidables name (journal 2026-10-28-s169-physics-props;
 #   tests crates/game-sim/tests/prop_under.rs). On the disc only [CarN] sections carry HasPhysics (free06,

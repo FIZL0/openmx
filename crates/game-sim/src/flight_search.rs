@@ -1786,7 +1786,7 @@ impl Narrow for Scene<'_> {
         let i = other - FIRST;
         let props = self.props;
         let p = &props[i];
-        if probe == RAY {
+        let hit = if probe == RAY {
             let rays = self.rays;
             let transform = self.transform;
             // Prop `i`'s triangles in the ray probe's form, packed once a frame.
@@ -1809,7 +1809,13 @@ impl Narrow for Scene<'_> {
                 shape: sweep_probe::Shape::Mesh(sweep_probe::Placed { transform: placed(p), mesh: MeshRef::of(&p.mesh), object: other }),
             };
             sweep_probe::pair(&mut self.sweep, Some(&target))
+        };
+        // The hit tells the struck one's listeners ([`world_search`]'s test): a car's mesh hears
+        // it, whichever search it is (S252).
+        if hit {
+            p.strike_heard();
         }
+        hit
     }
 
     /// A plant's parts: one per solid of its species, as the original's part count reads them.

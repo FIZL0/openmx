@@ -642,6 +642,11 @@ pub struct PathCar {
     /// The collidable's sphere (`+0x40`, `+0x60`), which the segment probe's pair test rejects on.
     pub centre: Vf,
     pub radius: F,
+    /// Its mesh's index among the world's props.
+    pub prop: usize,
+    /// A sphere's record took it this frame: its struck listener runs (S252, as
+    /// [`KnockedProp::struck`]'s), which the caller tells the world's prop ([`crate::world::Prop::strike_heard`]).
+    pub struck: bool,
 }
 
 impl PathCar {
@@ -656,6 +661,8 @@ impl PathCar {
             distance: reach_distance((prop.centre, prop.radius), probe),
             centre: prop.centre,
             radius: prop.radius,
+            prop: 0,
+            struck: false,
         })
     }
 
@@ -666,8 +673,9 @@ impl PathCar {
     pub fn near(props: &[crate::world::Prop], probe: Vf, reach: F) -> Vec<PathCar> {
         props
             .iter()
-            .filter(|p| p.moving.is_some() && reach_distance((p.centre, p.radius), probe) <= reach)
-            .filter_map(|p| PathCar::of(p, probe))
+            .enumerate()
+            .filter(|(_, p)| p.moving.is_some() && reach_distance((p.centre, p.radius), probe) <= reach)
+            .filter_map(|(i, p)| Some(PathCar { prop: i, ..PathCar::of(p, probe)? }))
             .collect()
     }
 
@@ -1029,13 +1037,14 @@ impl Scene for WreckBikeScene<'_> {
                     prop.struck = true;
                 }
             }
-            for (k, car) in self.cars.iter().enumerate() {
+            for (k, car) in self.cars.iter_mut().enumerate() {
                 if !(car.distance <= radius) {
                     continue;
                 }
                 if let Some(t) = car.touch(centre, radius, best.map(|b| b.distance)) {
                     best = Some(t);
                     self.with = Some(k + 1);
+                    car.struck = true;
                 }
             }
         }

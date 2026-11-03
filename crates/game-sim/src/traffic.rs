@@ -561,7 +561,10 @@ impl Traffic {
     /// port that stepped the truck before the bike. The physics world node's update stays before the
     /// bikes ([`Traffic::physics_frame`]), where the trace has the dynamics world's step (S96).
     /// Nothing for traffic with no physics objects.
+    ///
+    /// First, every car whose mesh a search struck this tick wakes ([`Traffic::heard`]).
     pub fn frame_late(&mut self, dt: F, world: &mut dyn World) {
+        self.heard(dt, world);
         if self.physics.iter().all(Option::is_none) {
             return;
         }
@@ -601,8 +604,9 @@ impl Traffic {
     /// stands it, at the frame's `1/dt`, and its mesh is stood there. Says whether it woke.
     ///
     /// The original wakes the car from every search that hits its path mesh. The port's riding
-    /// bikes' body rays call this ([`crate::Sim::car_contacts`], S186a); the other searches do not
-    /// yet (S252).
+    /// bikes' body rays call this ([`crate::Sim::car_contacts`], S186a); every other search raises
+    /// the mesh's struck listener ([`crate::world::Prop::strike_heard`]), answered by
+    /// [`Traffic::heard`] (S252).
     pub fn strike(&mut self, k: usize, dt: F, world: &mut dyn World) -> bool {
         let inv_dt = if dt > F::ZERO { F::ONE / dt } else { F::ZERO };
         let (Some(Some(p)), Some(car)) = (self.physics.get_mut(k), self.cars.get_mut(k)) else {
@@ -614,6 +618,23 @@ impl Traffic {
             self.place(world);
         }
         woke
+    }
+
+    /// **The struck listeners heard** (S252): every car whose mesh a search struck this tick
+    /// ([`crate::world::Prop::strike_heard`]) — the bikes' scenery searches and sweeps, their wheels,
+    /// the wreck bikes and the ragdolls, a plane's two probes, the knockable props' search and the
+    /// woken cars' own — is struck ([`Traffic::strike`]), in the cars' order, and every mark is
+    /// cleared. Runs before the `HasPhysics` cars' updates ([`Traffic::frame_late`]), after the tick's
+    /// searches, as the original's listener wakes the car inside the search, ahead of its update.
+    pub fn heard(&mut self, dt: F, world: &mut dyn World) {
+        let Some([first, end]) = self.span() else { return };
+        let Some(props) = world.moving() else { return };
+        let struck: Vec<usize> = (first..end).filter(|&i| props.props.get(i).is_some_and(|p| p.take_heard())).collect();
+        for i in struck {
+            if let Some(k) = self.car_at(i) {
+                self.strike(k, dt, world);
+            }
+        }
     }
 
     /// The physics world node's update for every physical car (S186): its collision object's search
