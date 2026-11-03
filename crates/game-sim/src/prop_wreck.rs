@@ -40,8 +40,8 @@
 //! struck bodies go to the wreck bike's frame. The hit3 and hit5 states are the proof.
 //!
 //! [`struck_by_props`] is S197b's stand-in, a search of the wreck bike after the pass with the entries
-//! put after everything the prop's own search found; the seats' shared props still take it
-//! ([`crate::prop_seats`]).
+//! put after everything the prop's own search found; the seats' shared props took it until S260, which
+//! puts every seat's wreck bike on the node ([`crate::prop_seats`]).
 //!
 //! The sweep probes meet neither way: the wreck bike's and a prop's sweep both exclude 0x8 (and
 //! 0x800), which both meshes carry ([`crate::prop_world::sweep_categories`]).
@@ -487,14 +487,8 @@ impl crate::Sim {
         let mut kept = Vec::new();
         if !self.traffic.props.is_empty() {
             for &(i, side) in players {
-                let rider = self.rider_of(i);
-                if !rider.wreckage.as_ref().is_some_and(|w| w.part.collision_enabled) {
-                    continue;
-                }
-                let (Some(crash), Some(kit)) = (rider.crash.as_ref(), rider.ragdoll_kit.as_ref()) else { continue };
-                let Some(mesh) = kit.bike_mesh.clone() else { continue };
-                let at = crate::math::Mat4(frame(&crash.bike.record.node));
-                kept.push((i, side, mesh, at, crash.bike.body.velocity));
+                let Some((mesh, at, velocity)) = self.wreck_hull(i) else { continue };
+                kept.push((i, side, mesh, at, velocity));
             }
         }
         let wrecks: Vec<Wreck<'_>> = kept
@@ -510,6 +504,19 @@ impl crate::Sim {
             }
         }
         movers
+    }
+
+    /// **Player `i`'s wreck bike as a hull on the props' node** (S243): its mesh, where its record's
+    /// node stands it, and its body's velocity. Nothing for a rider who is up, a part whose collision
+    /// is off, or a ride with no ragdoll kit's mesh.
+    pub(crate) fn wreck_hull(&self, i: usize) -> Option<(std::sync::Arc<crate::ragdoll_scene::Bike>, Mat4, Vf)> {
+        let rider = self.rider_of(i);
+        if !rider.wreckage.as_ref().is_some_and(|w| w.part.collision_enabled) {
+            return None;
+        }
+        let (crash, kit) = (rider.crash.as_ref()?, rider.ragdoll_kit.as_ref()?);
+        let mesh = kit.bike_mesh.clone()?;
+        Some((mesh, Mat4(frame(&crash.bike.record.node)), crash.bike.body.velocity))
     }
 
     /// Every player's wreck bike as the props' step reads it, in player order (`None` for a rider

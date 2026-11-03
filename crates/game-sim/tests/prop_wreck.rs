@@ -641,3 +641,116 @@ fn the_sim_wires_the_wreck_bikes_strikes() {
         assert!(bad.is_empty(), "{}-{frame} -> {} through the Sim: {bad:#?}", run.name, frame + 1);
     }
 }
+
+// --- the seats' shared props -------------------------------------------------------------------------
+
+/// One tick of `run` from `frame` through two seats sharing the props (S260,
+/// [`game_sim::prop_seats::Shared`]): seat 1 up where [`Sim::new`] puts it, seat 2 down with the
+/// state's wreck bike, both carrying free09's props as the state has them. In the order a seat's step
+/// runs them — [`Shared::take`] (the wreck bike's hull kept), seat 1's held pass (the props' collide
+/// pass, the wreck bike in every prop's world, [`Shared::lend`]), seat 2's ([`Shared::lend`], what the
+/// props struck handed to its wreck bike by [`Shared::wreck_struck`], its frame,
+/// [`Sim::wreck_pushed_back`], [`Shared::back`]), then [`Shared::finish`] — against `frame + 1`: the
+/// ball's list in both seats, the wreck bike named `seats + 1`, the hull in the ball's kept nearby list
+/// at the state's distance, and both bodies. Answers what differs
+/// and whether the props' rays struck the wreck bike.
+///
+/// [`Shared::take`]: game_sim::prop_seats::Shared::take
+/// [`Shared::lend`]: game_sim::prop_seats::Shared::lend
+/// [`Shared::wreck_struck`]: game_sim::prop_seats::Shared::wreck_struck
+/// [`Shared::back`]: game_sim::prop_seats::Shared::back
+/// [`Shared::finish`]: game_sim::prop_seats::Shared::finish
+fn seats_tick(kit: &Kit, run: Run, frame: u32) -> Option<(Vec<String>, bool)> {
+    let (before, after) = (load(kit, run, frame)?, load(kit, run, frame + 1)?);
+    let mut free = free09()?;
+    let doll = ride_kit(&free.mesh)?;
+    let terrain = Terrain::parse(&free.terrain).expect("free09's terrain");
+    seed(&before, &mut free.set);
+    let dt = F(after.f32_at(addr("frame_dt").unwrap()));
+    let mut world = game_sim::world::Place { ground: Ground::new(&terrain, &free.scene.terrain), props: std::mem::take(&mut free.props) };
+
+    let mut up = Sim::new(0x5260);
+    up.traffic.props = free.set.clone();
+    let mut down = up.clone();
+    down.rider.carries_wreck(free.part, Wrecks::default(), WRECK_INERTIA);
+    down.rider.carries_ragdoll(Arc::new(doll));
+    let mut crash = Crash::begin(&down.rider.ride, Wreck(5), &free.part, WRECK_INERTIA, &Wrecks::default(), None);
+    crash.bike = wreck_at(&before, &free.part);
+    down.rider.crash = Some(crash);
+
+    let mut shared = game_sim::prop_seats::Shared::take(&mut [&mut up, &mut down]).expect("two seats on a track with props");
+    let me = shared.seats() + 1;
+    shared.lend(&mut up, dt, &mut world);
+    shared.back(&mut up);
+    shared.lend(&mut down, dt, &mut world);
+    shared.wreck_struck(&mut down, 1);
+    let mut bad = Vec::new();
+    let bike = &mut down.rider.crash.as_mut().unwrap().bike;
+    let struck = !bike.struck.mirrors.is_empty();
+    if bike.struck.mirrors.iter().chain(&bike.struck.entries).any(|c| c.other.is_some_and(|o| o >= bike.struck.struck.len())) {
+        bad.push(format!("the wreck bike's strike names a body it does not carry: {:?}", bike.struck));
+    }
+    {
+        let field = world.ground.field();
+        bike.tick_among(dt, Some(&field), Some(&world.props), None);
+    }
+    down.wreck_pushed_back(0);
+    shared.back(&mut down);
+    if down.rider.crash.as_ref().unwrap().bike.struck != prop_wreck::WreckStrike::default() {
+        bad.push("the wreck bike's strike not spent".to_string());
+    }
+    shared.finish(&mut [&mut up, &mut down], dt, &mut world);
+
+    // The ball's kept list holds the wreck bike's hull at the state's distance (S243's check): it was
+    // in the ball's own world, not met by a search after the pass.
+    let search = before.u32_at(before.u32_at(object(&before, run.ball) + obj::COLLISION) + 0x10c);
+    let (list, n) = (before.u32_at(search), before.u32_at(search + 4));
+    let want = (0..n).map(|i| list + 8 * i).find(|&e| before.u32_at(before.u32_at(e) + 0x80) == WRECK_OBJECT).map(|e| before.f32_at(e + 4));
+    let kept = &up.traffic.props.collections[run.ball].objects[0].collision.as_ref().unwrap().nearby.nearby.found;
+    let got = kept.iter().find(|c| c.object == flight_search::FIRST + world.props.props.len()).map(|c| c.distance.0);
+    if want.is_none() || got.map(f32::to_bits) != want.map(f32::to_bits) {
+        bad.push(format!("the wreck bike in the ball's kept list at {got:?}, state {want:?}"));
+    }
+
+    let state: Vec<(Contact, u32)> = list_at(&after, after.u32_at(object(&after, run.ball) + obj::COLLISION));
+    for (seat, sim) in [&up, &down].into_iter().enumerate() {
+        let got = &sim.traffic.props.collections[run.ball].objects[0].collision.as_ref().unwrap().record.contacts;
+        if got.len() != state.len() {
+            bad.push(format!("seat {}: the ball's list {} entries, state {}", seat + 1, got.len(), state.len()));
+        }
+        for (k, (p, (o, other))) in got.iter().zip(&state).enumerate() {
+            let d = searched_differ(p, o);
+            if !d.is_empty() || (p.other == Some(me)) != (*other == WRECK_OBJECT) {
+                bad.push(format!("seat {}: the ball's entry {k}: {d:?}, names {:?}, state's other {other:#x}", seat + 1, p.other));
+            }
+        }
+        let ball = &sim.traffic.props.collections[run.ball].bones[0].body;
+        bad.extend(bodies_differ(&format!("seat {}'s ball", seat + 1), ball, &ee_body(&after, after.u32_at(object(&after, run.ball) + obj::BODY))));
+    }
+    bad.extend(bodies_differ("the wreck bike", &down.rider.crash.as_ref().unwrap().bike.body, &ee_body(&after, WRECK_BODY)));
+    Some((bad, struck))
+}
+
+/// **The seats' wreck bikes on the props' node** (S260): two seats sharing the props, seat 2's wreck
+/// bike the state's, tick by tick — hit2-2828 to 2831, the ball's rays striking the wreck bike through
+/// the props' own world, as [`Sim::step`]'s one Sim has it (S243,
+/// `the_wreck_bike_is_in_the_balls_world`), and hit5-2851 to 2857, ball 4's impulse throwing the
+/// wreck bike in the set's step at 2855 — the ball's list in both seats, the ball and the wreck bike
+/// are the original's bit for bit. hit3 is not here: from 2832 it needs the wreck bike's own rays on
+/// the ball, which the node does not run (S244's [`prop_wreck::wreck_rays_on_props`]).
+#[test]
+fn the_seats_wreck_bikes_are_on_the_node() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    for (run, frames) in [(HIT2, 2828..2831), (HIT5, 2851..2858)] {
+        let mut struck = Vec::new();
+        for frame in frames {
+            let Some((bad, s)) = seats_tick(&kit, run, frame) else { return };
+            assert!(bad.is_empty(), "{}-{frame} -> {} through the shared seats: {bad:#?}", run.name, frame + 1);
+            if s {
+                struck.push(frame);
+            }
+        }
+        let first = if run.name == HIT2.name { 2828 } else { 2855 };
+        assert!(struck.first() == Some(&first), "{}: the props' rays struck seat 2's wreck bike in ticks {struck:?}", run.name);
+    }
+}

@@ -13,6 +13,10 @@
 //! ([`Shared::lend`], [`Shared::back`]): its plane's rays strike the set and the set's its hull
 //! ([`crate::flight::Flight::frame_props`] naming the plane by its seat), and in the set's step the
 //! plane, not the bike it left, is that seat's striker, as [`crate::Sim::step`]'s plane lane has it.
+//! Every seat's wreck bike is on the props' node (S260), as a Sim's riders' are (S243,
+//! [`crate::Sim::frame_held_wrecked`]): [`Shared::take`] keeps each downed seat's hull where it stands
+//! before any seat steps, the set's collide pass has them all in every prop's world, and each seat's
+//! step hands its wreck bike what the props' rays struck on it ([`Shared::wreck_struck`]).
 //! Between ticks every seat holds the same set, so the hash, the snapshot and
 //! a rollback's copy carry it as they did, and seat 0's is the one the shell draws.
 
@@ -21,10 +25,15 @@ use crate::biplane::Body;
 use crate::flight::Flight;
 use crate::contact::{Collider, Other, Side, Weighed};
 use crate::phy::Phy;
+use crate::math::Mat4;
 use crate::prop_set::{PropMovers, PropSet};
+use crate::prop_world::Wreck;
+use crate::prop_wreck::WreckStrike;
+use crate::ragdoll_scene::Bike;
 use crate::rider::Rider;
 use crate::world::World;
-use ps2_float::F;
+use ps2_float::{F, Vf};
+use std::sync::Arc;
 
 /// The seats' one prop set, for a tick: [`Shared::take`], each seat's [`crate::Sim::step_shared`],
 /// then [`Shared::finish`].
@@ -33,6 +42,11 @@ pub struct Shared {
     /// The collide pass's movers, once the first seat stepped has run it.
     movers: Option<PropMovers>,
     seats: usize,
+    /// Each downed seat's wreck bike as a hull on the props' node, as the tick found it
+    /// ([`crate::Sim::wreck_hull`]): its seat, mesh, pose and velocity.
+    wrecks: Vec<(usize, Arc<Bike>, Mat4, Vf)>,
+    /// What the collide pass's props struck on each seat's wreck bike, by seat, until its step takes it.
+    struck: Vec<Option<WreckStrike>>,
 }
 
 impl Shared {
@@ -46,8 +60,16 @@ impl Shared {
         for s in sims.iter_mut().skip(1) {
             s.traffic.props = PropSet::default();
         }
-        Some(Shared { set, movers: None, seats: sims.len() })
+        let wrecks = sims
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.plane.is_none())
+            .filter_map(|(seat, s)| s.wreck_hull(0).map(|(mesh, at, velocity)| (seat, mesh, at, velocity)))
+            .collect();
+        Some(Shared { set, movers: None, seats: sims.len(), wrecks, struck: vec![None; sims.len()] })
     }
+
+
 
     /// How many seats share the set.
     pub fn seats(&self) -> usize {
@@ -55,13 +77,21 @@ impl Shared {
     }
 
     /// A seat's held traffic frame ([`crate::traffic::Traffic::frame_held`]) with the set lent to it:
-    /// the first seat's runs the set's collide pass, kept for [`Shared::finish`]; a later seat's runs
-    /// on its own empty set and is lent the set after. Answers the movers of the seat's own props,
-    /// which have none.
+    /// the first seat's runs the set's collide pass with every seat's wreck bike on the node
+    /// ([`crate::traffic::Traffic::frame_held_among`]), its movers kept for [`Shared::finish`] and
+    /// its strikes for each seat's wreck bike ([`Shared::wreck_struck`]); a later seat's runs on its
+    /// own empty set and is lent the set after. Answers the movers of the seat's own props, which have
+    /// none.
     pub(crate) fn held(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) -> PropMovers {
         if self.movers.is_none() {
             std::mem::swap(&mut sim.traffic.props, &mut self.set);
-            self.movers = Some(sim.traffic.frame_held(dt, world));
+            let wrecks = on_node(&self.wrecks, self.seats);
+            let (movers, strikes) = sim.traffic.frame_held_among(dt, world, &wrecks);
+            drop(wrecks);
+            for ((seat, ..), strike) in self.wrecks.iter().zip(strikes) {
+                self.struck[*seat] = Some(strike);
+            }
+            self.movers = Some(movers);
             return PropMovers::default();
         }
         let movers = sim.traffic.frame_held(dt, world);
@@ -91,6 +121,16 @@ impl Shared {
         sim.traffic.frame_late(dt, world);
     }
 
+    /// **What the props' rays struck on seat `seat`'s wreck bike** in the collide pass, kept on the
+    /// bike for its frame ([`crate::wreck_bike::WreckBike::struck`]), as
+    /// [`crate::Sim::frame_held_wrecked`] keeps it. Nothing for a seat whose rider is up.
+    pub fn wreck_struck(&mut self, sim: &mut Sim, seat: usize) {
+        let Some(strike) = self.struck.get_mut(seat).and_then(Option::take) else { return };
+        if let Some(crash) = sim.rider.crash.as_mut() {
+            crash.bike.struck = strike;
+        }
+    }
+
     /// The set back from the seat [`Shared::held`] or [`Shared::lend`] lent it to.
     pub fn back(&mut self, sim: &mut Sim) {
         std::mem::swap(&mut sim.traffic.props, &mut self.set);
@@ -116,7 +156,14 @@ impl Shared {
     pub fn finish_flying(mut self, sims: &mut [&mut Sim], mut flights: Vec<Option<&mut Flight>>, dt: F, world: &mut dyn World) {
         let movers = match self.movers.take() {
             Some(m) => m,
-            None => self.set.search_in(dt, world),
+            None => {
+                // No seat's frame is left to take the wreck bikes' strikes; the props' entries on
+                // them are still the pass's.
+                let wrecks = on_node(&self.wrecks, self.seats);
+                let (movers, _) = self.set.search_in_among(dt, world, &wrecks);
+                drop(wrecks);
+                movers
+            }
         };
         let riders: Vec<(&Rider, &Phy)> = sims.iter().map(|s| (&s.rider, &*s.phy)).collect();
         let mut bump = crate::rider_contact::bump_here(&riders, 0, Vec::new());
@@ -152,4 +199,16 @@ impl Shared {
         }
         sims[0].traffic.props = self.set;
     }
+}
+
+/// The kept wreck bikes ([`Shared::take`]) as the props' world holds them, each named `seats + seat`
+/// on the props' entries, as [`Shared::finish`]'s step reads it.
+fn on_node(wrecks: &[(usize, Arc<Bike>, Mat4, Vf)], seats: usize) -> Vec<Wreck<'_>> {
+    wrecks
+        .iter()
+        .map(|(seat, mesh, at, velocity)| Wreck {
+            hull: crate::flight_search::Plane { mesh: &mesh.mesh, at: *at, velocity: *velocity },
+            side: seats + seat,
+        })
+        .collect()
 }

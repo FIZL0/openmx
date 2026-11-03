@@ -1021,10 +1021,10 @@ impl Sim {
         if let Some(b) = bump.as_deref_mut() {
             self.strike_into(b, strike);
         }
-        // Shared, the seats' wreck bikes still meet the props' rays after their pass (S197c's
-        // stand-in); alone, the wreck bike was on the props' node (S243).
-        if let Some((s, seat)) = shared.as_ref() {
-            self.wreck_strike_as(0, s.seats() + seat);
+        // Shared, the seat's wreck bike was on the props' node with every seat's (S260): what their
+        // rays struck on it goes to its frame; alone, it was on the node too (S243).
+        if let Some((s, seat)) = shared.as_mut() {
+            s.wreck_struck(self, *seat);
         }
         // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
         self.lend_props(0);
