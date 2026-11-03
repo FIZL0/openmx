@@ -2512,3 +2512,102 @@ fn thrown_blades_fly_as_the_originals() {
     println!("thrown blades: {cases} throws of {frames} frames, bit-exact ({flown} flying at the end, {put_back} put back \
               off the edge, {rethrown} thrown while out)");
 }
+
+const ROTOR_PROBE: u32 = 0x458;
+const PROBE_ROOT: u32 = 0x160;
+const PROBE_COUNT: u32 = 0x168;
+const PROBE_NODES: u32 = 0x16c;
+const PROBE_SEGMENTS: u32 = 0x170;
+/// Where the build's blocks are put: RAM the state leaves to nothing the build reads.
+const HEAP: u32 = 0x01c0_0000;
+
+/// **C17: the ray tree build is the original's.** The original's build (`ray_probe_build`) rebuilt on
+/// the rotor's own probe over random lists of 1 to 12 rays — rays out of one hub as the rotor's are,
+/// and rays with both ends loose, some on a lattice so that centres and ends tie — against
+/// [`game_sim::kiowa::ray_tree`]: the root, every node's volume, centre, half extent and child words,
+/// and the segments in the tree's order, word for word.
+#[test]
+fn the_ray_tree_build_is_the_originals() {
+    use game_sim::kiowa::try_ray_tree;
+    use game_sim::ray_probe::Segment;
+    let Some(mut ee) = heli() else { return };
+    let func = addr("ray_probe_build").unwrap();
+    let probe = ee.u32_at(HELI + ROTOR_PROBE);
+    let rays = ee.scratch(0);
+    // The heap's lock spins in the interpreter: the build's blocks come off a bump heap, and its frees
+    // (the probe's old tree, the build's lists) do nothing.
+    let next = Rc::new(RefCell::new(HEAP));
+    for name in ["mem_alloc", "operator_new", "operator_new_array"] {
+        let next = next.clone();
+        ee.hooks.insert(
+            addr(name).unwrap(),
+            Box::new(move |ee: &mut Ee| {
+                let size = (ee.r(4) as u32 + 15) & !15;
+                let mut at = next.borrow_mut();
+                ee.set(2, u64::from(*at));
+                *at += size;
+            }),
+        );
+    }
+    for name in ["free", "operator_delete", "operator_delete_array"] {
+        ee.hooks.insert(addr(name).unwrap(), Box::new(|_: &mut Ee| {}));
+    }
+    let mut pick = Pick(0x00c1_7c17);
+    let cases = 2000;
+    let (mut deepest, mut unparted) = (0, 0);
+    for case in 0..cases {
+        let n = 1 + (pick.next() % 12) as usize;
+        let lattice = pick.one_in(3);
+        let hub = pick.one_in(2);
+        let point = |pick: &mut Pick| {
+            let mut c = || if lattice { (pick.next() % 5) as f32 * 2.5 - 5.0 } else { pick.range(-30.0, 30.0) };
+            Vf::new(c(), c(), c(), 1.0)
+        };
+        let centre = point(&mut pick);
+        let mut segments = Vec::new();
+        while segments.len() < n {
+            let from = if hub { centre } else { point(&mut pick) };
+            let s = Segment { from, to: point(&mut pick) };
+            // Two rays whose centres tie on every axis are a split the original leaves to lists it
+            // never wrote; keep them apart.
+            let mid = |s: &Segment| s.from.add(s.to).mul(Vf([0.5; 4])).0.map(f32::to_bits);
+            if segments.iter().any(|t: &Segment| mid(t)[..3] == mid(&s)[..3]) {
+                continue;
+            }
+            segments.push(s);
+        }
+        for (k, s) in segments.iter().enumerate() {
+            for (j, v) in [s.from, s.to].into_iter().enumerate() {
+                for (l, x) in v.0.into_iter().enumerate() {
+                    ee.set_f32(rays + 0x20 * k as u32 + 0x10 * j as u32 + 4 * l as u32, x);
+                }
+            }
+        }
+        // A list no cut parts the original builds out of lists it never wrote: not a case.
+        let Some(want) = try_ray_tree(&segments) else {
+            unparted += 1;
+            continue;
+        };
+        *next.borrow_mut() = HEAP;
+        ee.call(func, &[u64::from(probe), n as u64, u64::from(rays), 0, 0], &[], 2_000_000);
+        let what = format!("case {case}: {n} rays {segments:?}");
+        assert_eq!(ee.u32_at(probe + PROBE_COUNT) as usize, n, "{what}");
+        assert_eq!(ee.u16_at(probe + PROBE_ROOT), want.root, "the root, {what}");
+        let nodes = ee.u32_at(probe + PROBE_NODES);
+        for (k, node) in want.nodes.iter().enumerate() {
+            let a = nodes + 0x24 * k as u32;
+            let words: Vec<u32> = [0, 12, 16, 20, 24, 28, 32].iter().map(|&o| ee.u32_at(a + o)).collect();
+            let mine: Vec<u32> = [node.volume].iter().chain(&node.centre).chain(&node.half_extent).map(|v| v.to_bits()).collect();
+            assert_eq!(words, mine, "node {k}'s volume, centre and half extent, {what}");
+            assert_eq!([ee.u16_at(a + 8), ee.u16_at(a + 10)], node.children, "node {k}'s children, {what}");
+        }
+        let at = ee.u32_at(probe + PROBE_SEGMENTS);
+        for (k, s) in want.segments.iter().enumerate() {
+            let got = |o: u32| (0..4).map(|l| ee.u32_at(at + 0x20 * k as u32 + o + 4 * l)).collect::<Vec<_>>();
+            assert_eq!((got(0), got(0x10)), (s.from.0.map(f32::to_bits).to_vec(), s.to.0.map(f32::to_bits).to_vec()), "segment {k}, {what}");
+        }
+        deepest = deepest.max(want.nodes.len());
+    }
+    assert!(unparted < cases / 10, "{unparted} of {cases} lists no cut parts");
+    println!("ray trees: {} lists of 1 to 12 rays built as the original builds them, up to {deepest} nodes ({unparted} no cut parts left out)", cases - unparted);
+}
