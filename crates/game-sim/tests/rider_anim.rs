@@ -2291,7 +2291,7 @@ fn the_2p_riders_joints() {
 
 /// The ticks of each rider where the port played the original's state and mode, and of those the
 /// ones whose drawn joints are the original's within V12's 1e-4 (this row or either side of it).
-const TWO_P_DRAWN: [(usize, usize); 2] = [(12248, 9971), (12549, 6502)];
+const TWO_P_DRAWN: [(usize, usize); 2] = [(12248, 10481), (12549, 6927)];
 
 /// **V90 — the 2p riders' drawn joints, tick by tick.** The same replay as
 /// [`the_2p_riders_poses`], with the drawn rider posed off each tick's frame
@@ -2422,7 +2422,7 @@ fn the_2p_eased_axes_step_as_the_ports_lag() {
 /// eased mix and phase the port's own run left bit for bit, and the ones whose drawn joints are within
 /// 1e-4 posed off the port's eased axes and off the original's (seeded).
 const TWO_P_EASED_POSES: [(usize, usize, usize, usize, usize); 2] =
-    [(12238, 11526, 11413, 9968, 10158), (12538, 6532, 3866, 6316, 7812)];
+    [(12238, 11526, 11413, 10496, 10689), (12538, 6532, 3866, 6788, 8365)];
 
 /// **C11 — V90's blended arms against the original's eased axes.** V90's replay of both riders'
 /// bodies, on C11's capture: each tick the port's eased mix and phase are held against the original's
@@ -2639,16 +2639,21 @@ const FLY: &str = "capture/s228/fly.csv";
 
 /// P1's leaning ticks on [`FLY`] (riding, on the original's state, the eased lean axis a sixth or more
 /// off its middle), and of those the ones whose drawn head-over-pelvis is the original's within 0.01 ft.
-const FLY_LEANING: (usize, usize) = (1153, 937);
+const FLY_LEANING: (usize, usize) = (1153, 1056);
 
 /// **S228a — the drawn rider's lean through fly_and_collide's turns, the clip layer.** V90's replay of
 /// P1's body off [`FLY`]'s request words, posed each tick ([`posed_by`](game_render::rider::Body::posed_by)),
 /// and on every leaning tick the head's place over the pelvis (model space, FK of the 22 joints) held
 /// against the original's posed joints of this row or either side. The eased axes are the original's
 /// bit for bit on all of them; the median is exact, and the ticks within 0.01 ft are pinned and may only go
-/// up. What parts (216 ticks, up to 0.77 ft, in seventeen spans — 138164..138232 and 139630..139655 the
-/// worst) parts on the whole body with the ramp at 0 and the eased axes and clip time the original's,
-/// so it is not the lean request (V121).
+/// up.
+///
+/// V121: the stop and still rows of the grid parted (up to 0.77 ft, 138164..138232 and 139630..139655
+/// the worst) wherever the fore-aft axis left its middle, because the body bound the AI `.mcf`'s three
+/// aliases. With no AI rider in the session the player's own `.mcf` claims them
+/// ([`Set::alone`](game_render::anim::Set::alone)), and those spans pose exactly. What is still off
+/// past 0.02 ft is a fade (the original's ramp above 0): a restart crossing out of the snapshot, which
+/// the original takes off the riding ragdoll's nodes (V109, F12) and this capture does not carry.
 #[test]
 fn the_fly_riders_drawn_lean_is_the_originals() {
     use game_render::skin::Pose;
@@ -2670,6 +2675,7 @@ fn the_fly_riders_drawn_lean_is_the_originals() {
     let (pelvis, head) = (skel.find("Pelvis").expect("a pelvis"), skel.find("Head").expect("a head"));
     let lean = |w: &[game_render::mat::M4]| [0, 1, 2].map(|k| w[head].0[3][k] - w[pelvis].0[3][k]);
     let mut misses = Vec::new();
+    let mut unfaded = (0u32, 0f32);
     for (i, t) in riders[0].iter().enumerate() {
         let row = i + 1;
         if t.theirs != t.ours || t.theirs.1 != 1 || (c.f(row, "p1_lag_phase.x") - 0.5).abs() < 0.15 {
@@ -2684,6 +2690,10 @@ fn the_fly_riders_drawn_lean_is_the_originals() {
             })
             .fold(f32::INFINITY, f32::min);
         misses.push((t.frame, miss));
+        // Off a fade (the original's ramp at 0) the grid's own pose.
+        if t.ramp.0 == 0 && miss > unfaded.1 {
+            unfaded = (t.frame, miss);
+        }
     }
     let mut spans: Vec<(u32, u32, f32)> = Vec::new();
     for &(f, m) in misses.iter().filter(|m| m.1 > 0.01) {
@@ -2698,9 +2708,11 @@ fn the_fly_riders_drawn_lean_is_the_originals() {
     let within = by.iter().filter(|&&m| m <= 0.01).count();
     println!("{n} leaning ticks, {within} within 0.01 ft; median {:.5} p90 {:.4} worst {:.4}", by[n / 2], by[n * 9 / 10], by[n - 1]);
     println!("parting spans (first, last, worst): {spans:?}");
+    println!("worst off a fade: {unfaded:?}");
     assert_eq!(n, FLY_LEANING.0, "P1's leaning ticks on the original's state");
     assert!(within >= FLY_LEANING.1, "{within} leaning ticks within 0.01 ft, down from {}", FLY_LEANING.1);
     assert!(by[n / 2] <= 1e-3, "the median leaning tick is {} off the original's", by[n / 2]);
-    assert!(by[n - 1] <= 0.8, "a leaning tick {} off the original's", by[n - 1]);
+    assert!(by[n - 1] <= 0.4, "a leaning tick {} off the original's", by[n - 1]);
+    assert!(unfaded.1 <= 0.02, "{}: {} ft off with the ramp at 0", unfaded.0, unfaded.1);
 }
 
