@@ -105,47 +105,61 @@ pub fn chop(x: f64) -> f32 {
     daz(r)
 }
 
-/// The EE adder's alignment step: mask the mantissa bits the smaller operand loses, keeping one guard bit.
-///
-/// With an exponent difference of `d`, the smaller operand keeps all but its low `d - 1` mantissa bits,
-/// and at `d >= 25` nothing but its sign is left. The two results add exactly in `f64`.
-fn align(a: f32, b: f32) -> (f32, f32) {
-    let (ba, bb) = (a.to_bits(), b.to_bits());
-    let (ea, eb) = (((ba >> 23) & 0xff) as i32, ((bb >> 23) & 0xff) as i32);
-    let mask = |bits: u32, d: i32| if d >= 25 { bits & 0x8000_0000 } else { bits & !((1u32 << (d - 1)) - 1) };
-    match ea - eb {
-        d if d > 0 => (a, f32::from_bits(mask(bb, d))),
-        d if d < 0 => (f32::from_bits(mask(ba, -d)), b),
-        _ => (a, b),
-    }
+/// The EE adder's alignment step, as the mask for an operand `d` exponents below the other: it keeps one
+/// guard bit, so it loses its low `d - 1` mantissa bits, and at `d >= 25` nothing but its sign is left.
+/// At `d <= 1` it keeps everything. Without a branch (F17), so the larger operand can take it too.
+#[inline(always)]
+fn align_keep(d: i32) -> u32 {
+    let lost = (1u32 << (d - 1).clamp(0, 31)).wrapping_sub(1);
+    let gone = ((d >= 25) as u32).wrapping_neg() & 0x7fff_ffff;
+    !(lost | gone)
+}
+
+/// The adder on two operands already as the FPU reads them ([`ee`]): align, add, [`chop`], with no
+/// branch. Both operands take [`align_keep`]'s mask (the larger one's keeps everything), and the
+/// aligned sum, at most `2·max` and exact in `f64`, is chopped by the VU's lane [`crate::vu::chop_bits`].
+/// `chop`'s non-finite test is never taken for that sum; a convert that rounds it past `max` gives an
+/// infinity, which the step back turns into `max`, the clamp.
+#[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
+#[inline(always)]
+fn add_ee(a: u32, b: u32) -> f32 {
+    let d = ((a >> 23) & 0xff) as i32 - ((b >> 23) & 0xff) as i32;
+    let (a, b) = (f32::from_bits(a & align_keep(-d)), f32::from_bits(b & align_keep(d)));
+    f32::from_bits(crate::vu::chop_bits(a as f64 + b as f64))
+}
+
+/// An operand's pattern as the FPU reads it ([`ee`]), without a branch. The VU reads one the same way.
+#[inline(always)]
+fn ee_bits(x: f32) -> u32 {
+    crate::vu::vu_bits(x.to_bits())
 }
 
 /// `add.s`: align, add exactly, chop.
 #[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn add(a: f32, b: f32) -> f32 {
     if crate::NATIVE {
         return a + b; // F15: the host's add (lib.rs, "The `native` feature")
     }
-    let (a, b) = align(ee(a), ee(b));
-    chop(a as f64 + b as f64)
+    add_ee(ee_bits(a), ee_bits(b))
 }
 
 /// `sub.s`: the adder with the second operand's sign flipped (a sign flip is exact, so this is the
 /// instruction, not an approximation of it).
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn sub(a: f32, b: f32) -> f32 {
     add(a, neg(b))
 }
 
-/// `mul.s`: the 24×24-bit product is exact in `f64`, so the only rounding is the chop.
+/// `mul.s`: the 24×24-bit product is exact in `f64`, so the only rounding is the chop. The same
+/// operation as the VU's `vmul` lane, so it is that lane's code ([`crate::vu::mul_bits`]).
 #[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn mul(a: f32, b: f32) -> f32 {
     if crate::NATIVE {
         return a * b;
     }
-    chop(ee(a) as f64 * ee(b) as f64)
+    f32::from_bits(crate::vu::mul_bits(ee_bits(a), ee_bits(b)))
 }
 
 /// `div.s`: round to nearest (the divider's own mode), `x / 0` gives `±max`.
@@ -245,39 +259,48 @@ pub fn rsqrt(a: f32, b: f32) -> f32 {
 /// assert_eq!(fpu::madd(1.0, p, 1.0), 1.0);
 /// assert_eq!(p.mul_add(1.0, 1.0).to_bits(), 1.0f32.to_bits() + 1);   // an FMA rounds once, and up
 /// ```
-#[cfg_attr(feature = "native", inline)]
+///
+/// The chopped product is finite and normal or zero, which [`ee`] leaves as it is, so it goes into the
+/// adder without a second read.
+#[inline]
 pub fn madd(acc: f32, a: f32, b: f32) -> f32 {
-    add(acc, mul(a, b))
+    if crate::NATIVE {
+        return add(acc, mul(a, b));
+    }
+    add_ee(ee_bits(acc), crate::vu::mul_bits(ee_bits(a), ee_bits(b)))
 }
 
 /// `msub.s`: `acc − a·b`, same two roundings as [`madd`].
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn msub(acc: f32, a: f32, b: f32) -> f32 {
-    sub(acc, mul(a, b))
+    if crate::NATIVE {
+        return sub(acc, mul(a, b));
+    }
+    add_ee(ee_bits(acc), crate::vu::mul_bits(ee_bits(a), ee_bits(b)) ^ 0x8000_0000)
 }
 
 /// `madda.s`: the value `madd.s` would produce, destined for the accumulator register rather than an
 /// `f`-register. The arithmetic is identical; the instructions differ only in where they write.
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn madda(acc: f32, a: f32, b: f32) -> f32 {
     madd(acc, a, b)
 }
 
 /// `msuba.s`: [`msub`] into the accumulator.
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn msuba(acc: f32, a: f32, b: f32) -> f32 {
     msub(acc, a, b)
 }
 
 /// `adda.s`: [`add`] into the accumulator. A very common idiom is `adda.s $f0, x` (accumulator = 0 + x)
 /// followed by `madd.s`, which is why [`lerp`] below reads the way it does.
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn adda(a: f32, b: f32) -> f32 {
     add(a, b)
 }
 
 /// `suba.s`: [`sub`] into the accumulator.
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn suba(a: f32, b: f32) -> f32 {
     sub(a, b)
 }
@@ -287,17 +310,19 @@ pub fn suba(a: f32, b: f32) -> f32 {
 /// the first term with `madd.s`: `mula.s` of `-1` by `0` leaves `-0`, where going through the adder
 /// (`0 + (-0)`) gives `+0`. A sign of zero reaches a port's `copysign`, its `min`/`max` and its
 /// divisions, so [`dot`] opens with this one, as the compiler does.
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn mula(a: f32, b: f32) -> f32 {
     mul(a, b)
 }
 
 /// `abs.s`: clears the sign bit, nothing rounds.
+#[inline]
 pub fn abs(x: f32) -> f32 {
     f32::from_bits(x.to_bits() & 0x7fff_ffff)
 }
 
 /// `neg.s`: flips the sign bit, nothing rounds.
+#[inline]
 pub fn neg(x: f32) -> f32 {
     f32::from_bits(x.to_bits() ^ 0x8000_0000)
 }
@@ -431,7 +456,7 @@ impl F {
         F(msub(self.0, a.into().0, b.into().0))
     }
     /// `sqrt.s` of `|self|`.
-    #[cfg_attr(feature = "native", inline)]
+    #[inline]
     pub fn sqrt(self) -> F {
         F(sqrt(self.0))
     }
@@ -496,27 +521,27 @@ impl Acc {
     pub const ZERO: Acc = Acc(F::ZERO);
 
     /// `mula.s`: `ACC = a·b`. What opens a dot product (see [`mula`] for why not `adda.s $f0`).
-    #[cfg_attr(feature = "native", inline)]
+    #[inline]
     pub fn mula(a: impl Into<F>, b: impl Into<F>) -> Acc {
         Acc(F(mula(a.into().0, b.into().0)))
     }
     /// `adda.s`: `ACC = a + b`. `Acc::adda(0.0, x)` is the "load the accumulator" idiom.
-    #[cfg_attr(feature = "native", inline)]
+    #[inline]
     pub fn adda(a: impl Into<F>, b: impl Into<F>) -> Acc {
         Acc(F(adda(a.into().0, b.into().0)))
     }
     /// `suba.s`: `ACC = a − b`.
-    #[cfg_attr(feature = "native", inline)]
+    #[inline]
     pub fn suba(a: impl Into<F>, b: impl Into<F>) -> Acc {
         Acc(F(suba(a.into().0, b.into().0)))
     }
     /// `madda.s`: `ACC = ACC + a·b`, the chopped product through the aligning adder ([`madd`]).
-    #[cfg_attr(feature = "native", inline)]
+    #[inline]
     pub fn madda(self, a: impl Into<F>, b: impl Into<F>) -> Acc {
         Acc(F(madda(self.0.0, a.into().0, b.into().0)))
     }
     /// `msuba.s`: `ACC = ACC − a·b`.
-    #[cfg_attr(feature = "native", inline)]
+    #[inline]
     pub fn msuba(self, a: impl Into<F>, b: impl Into<F>) -> Acc {
         Acc(F(msuba(self.0.0, a.into().0, b.into().0)))
     }
@@ -617,27 +642,27 @@ macro_rules! fpu_op {
     ($tr:ident $m:ident $as_tr:ident $as_m:ident $op:ident) => {
         impl core::ops::$tr<F> for F {
             type Output = F;
-            #[cfg_attr(feature = "native", inline)]
+            #[inline]
             fn $m(self, o: F) -> F {
                 F($op(self.0, o.0))
             }
         }
         impl core::ops::$tr<f32> for F {
             type Output = F;
-            #[cfg_attr(feature = "native", inline)]
+            #[inline]
             fn $m(self, o: f32) -> F {
                 F($op(self.0, o))
             }
         }
         impl core::ops::$tr<F> for f32 {
             type Output = F;
-            #[cfg_attr(feature = "native", inline)]
+            #[inline]
             fn $m(self, o: F) -> F {
                 F($op(self, o.0))
             }
         }
         impl<T: Into<F>> core::ops::$as_tr<T> for F {
-            #[cfg_attr(feature = "native", inline)]
+            #[inline]
             fn $as_m(&mut self, o: T) {
                 *self = F($op(self.0, o.into().0));
             }

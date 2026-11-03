@@ -328,6 +328,12 @@ fn add_sub_and_mul_match_an_integer_model() {
             ("add", fpu::add(x, y).to_bits(), int_model::add(a, b)),
             ("sub", fpu::sub(x, y).to_bits(), int_model::sub(a, b)),
             ("mul", fpu::mul(x, y).to_bits(), int_model::mul(a, b)),
+            ("F +", (F(x) + y).to_bits(), int_model::add(a, b)),
+            ("F -", (F(x) - y).to_bits(), int_model::sub(a, b)),
+            ("F *", (F(x) * y).to_bits(), int_model::mul(a, b)),
+            // F17: an operand whose sign the compiler knows (ps2-float's vu.rs, `vu_bits`, says why)
+            ("sub of |b|", fpu::sub(x, fpu::abs(y)).to_bits(), int_model::sub(a, b & 0x7fff_ffff)),
+            ("add of -|b|", fpu::add(x, fpu::neg(fpu::abs(y))).to_bits(), int_model::add(a, b | 0x8000_0000)),
         ] {
             assert_eq!(got, want, "{name}({a:#010x}, {b:#010x}): {got:#010x} vs {want:#010x}");
         }

@@ -29,7 +29,7 @@
 //! 2. **A short adder.** Before an add or subtract the smaller operand is shifted right to line the
 //!    exponents up, but the hardware keeps **one** guard bit, not the full width. At an exponent
 //!    difference of 25 or more the smaller operand contributes nothing at all: `1.0 + 1e-8 == 1.0`
-//!    exactly. See [`fpu::align`].
+//!    exactly. See [`fpu::align_keep`].
 //! 3. **No infinities and no NaNs.** The largest exponent is just another number. An overflow saturates
 //!    to `±1.7014118e38` ([`fpu::MAX`]), `1.0/0.0` is `+MAX`, and `0.0/0.0` is `+MAX` too (the divider
 //!    takes the sign of the operands and nothing else). Code that leans on `f32::NAN` or `is_infinite`

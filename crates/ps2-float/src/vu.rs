@@ -80,54 +80,51 @@ fn chop(x: f64) -> f32 {
 /// `f64` sum alone would round a far smaller addend away and lose the *direction* of the truncation.
 /// The exact rounding error (a TwoSum) decides it: `x` plus a tiny value of the opposite sign truncates
 /// to the next `f32` toward zero, not to `x`.
-#[allow(clippy::float_arithmetic)] // the model itself, in host arithmetic
-#[cfg_attr(feature = "native", inline)]
+///
+/// F17: this is [`add_bits`], the four-lane adder's own lane, so it has no branch either.
+#[allow(clippy::float_arithmetic)] // the native path's host op
+#[inline]
 pub fn add(a: f32, b: f32) -> f32 {
     if crate::NATIVE {
         return a + b; // F15: the host's add (lib.rs, "The `native` feature")
     }
-    let (a, b) = (vu(a) as f64, vu(b) as f64);
-    let s = a + b;
-    if !s.is_finite() {
-        return if s.is_sign_negative() { crate::fpu::NEG_MAX } else { MAX };
-    }
-    let bb = s - a;
-    let e = (a - (s - bb)) + (b - bb); // exact: s + e is the true sum
-    let r = s as f32;
-    let over = (r as f64 - s) - e; // r minus the true sum
-    if over != 0.0 && r != 0.0 && (over > 0.0) == (r > 0.0) {
-        daz(f32::from_bits(r.to_bits().wrapping_sub(1)))
-    } else {
-        daz(r)
-    }
+    add_bits(vu_bits(a.to_bits()), vu_bits(b.to_bits()))
 }
 
 /// `vsub` (one lane).
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn sub(a: f32, b: f32) -> f32 {
     add(a, f32::from_bits(b.to_bits() ^ 0x8000_0000))
 }
 
 /// `vmul` (one lane): the 24×24-bit product is exact in `f64`, so the only rounding is the chop.
-#[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
-#[cfg_attr(feature = "native", inline)]
+/// F17: [`mul_bits`], branch-free.
+#[allow(clippy::float_arithmetic)] // the native path's host op
+#[inline]
 pub fn mul(a: f32, b: f32) -> f32 {
     if crate::NATIVE {
         return a * b;
     }
-    chop(vu(a) as f64 * vu(b) as f64)
+    f32::from_bits(mul_bits(vu_bits(a.to_bits()), vu_bits(b.to_bits())))
 }
 
-/// `vmadd` (one lane): `acc + a·b`, product chopped first, then the add chopped.
-#[cfg_attr(feature = "native", inline)]
+/// `vmadd` (one lane): `acc + a·b`, product chopped first, then the add chopped. The chopped product is
+/// finite and normal or zero, so it goes into the adder as it is, as in [`madd4`].
+#[inline]
 pub fn madd(acc: f32, a: f32, b: f32) -> f32 {
-    add(acc, mul(a, b))
+    if crate::NATIVE {
+        return add(acc, mul(a, b));
+    }
+    add_bits(vu_bits(acc.to_bits()), mul_bits(vu_bits(a.to_bits()), vu_bits(b.to_bits())))
 }
 
 /// `vmsub` (one lane): `acc − a·b`.
-#[cfg_attr(feature = "native", inline)]
+#[inline]
 pub fn msub(acc: f32, a: f32, b: f32) -> f32 {
-    sub(acc, mul(a, b))
+    if crate::NATIVE {
+        return sub(acc, mul(a, b));
+    }
+    add_bits(vu_bits(acc.to_bits()), mul_bits(vu_bits(a.to_bits()), vu_bits(b.to_bits())) ^ 0x8000_0000)
 }
 
 /// `vdiv` into `Q`, chopped; `x / 0` gives `±max`.
@@ -166,8 +163,9 @@ pub fn rsqrt(a: f32, b: f32) -> f32 {
 
 // --- four lanes at once (F15a) ---------------------------------------------------------------------
 //
-// [`Vf`]'s add, sub, mul, madd and msub are the functions above, lane by lane, rewritten without a
-// branch so the compiler can run the four lanes as vector ops: f64 two-sum and product, a narrowing
+// [`Vf`]'s add, sub, mul, madd and msub are the lane functions rewritten without a branch so the
+// compiler can run the four lanes as vector ops (since F17 the scalar `add`, `mul`, … above are these
+// same lanes, one at a time, and the FPU's `mul.s` and adder share them too): f64 two-sum and product, a narrowing
 // convert, and the chop's step back as a lane mask subtracted from the bits. Every step is the same
 // IEEE operation the scalar function does, so the result is the same bit for bit (the tests check
 // that, lane against lane, over every class of input). What the branches did:
@@ -179,15 +177,24 @@ pub fn rsqrt(a: f32, b: f32) -> f32 {
 //   `max`'s, and that is the clamp.
 // * `chop`'s non-finite test: never taken for a product, because `max²` is finite in f64.
 
-/// [`operand`]'s bits, per lane: exponent 255 clamps to `±max`, a denormal is `±0`.
+/// [`operand`] on a pattern, without a branch: exponent 255 clamps to `±max`, a denormal is `±0`.
+///
+/// The magnitude is taken as `b << 1` (twice the pattern, sign gone) rather than `b & 0x7fff_ffff`.
+/// LLVM reads the mask as an `fabs`, and once these ops are inlined into a caller that sets the sign
+/// bit (a `sub` of a value it knows is positive), its x86 backend dropped the `min`: rustc 1.99.1 gave
+/// `2 − 1.5·2^-22 = −max` in release and the right answer in debug (F17 journal). The shift has no
+/// float reading, so that does not happen.
+#[inline(always)]
+pub(crate) fn vu_bits(b: u32) -> u32 {
+    let mag2 = (b << 1).min(0x7f7f_ffff << 1);
+    let mag2 = mag2 & (((mag2 >= 0x0080_0000 << 1) as u32).wrapping_neg());
+    (b & 0x8000_0000) | (mag2 >> 1)
+}
+
+/// [`operand`]'s bits, per lane.
 #[inline(always)]
 fn vu_bits4(v: V4) -> [u32; 4] {
-    core::array::from_fn(|i| {
-        let b = v[i].to_bits();
-        let mag = (b & 0x7fff_ffff).min(0x7f7f_ffff);
-        let mag = mag & (((mag >= 0x0080_0000) as u32).wrapping_neg());
-        (b & 0x8000_0000) | mag
-    })
+    core::array::from_fn(|i| vu_bits(v[i].to_bits()))
 }
 
 /// `daz` on a result's bits: no exponent means `±0`.
@@ -197,32 +204,49 @@ fn daz_bits(b: u32) -> u32 {
     b & (keep | 0x8000_0000)
 }
 
-/// [`add`] on four lanes whose operands are already as a VU reads them.
-#[allow(clippy::float_arithmetic)] // the model itself, in host arithmetic
-#[inline(always)]
-fn add4_bits(a: [u32; 4], b: [u32; 4]) -> V4 {
-    core::array::from_fn(|i| {
-        let (a, b) = (f32::from_bits(a[i]) as f64, f32::from_bits(b[i]) as f64);
-        let s = a + b;
-        let bb = s - a;
-        let e = (a - (s - bb)) + (b - bb); // exact: s + e is the true sum
-        let r = s as f32;
-        let over = (r as f64 - s) - e; // r minus the true sum
-        let back = (over != 0.0) & (r != 0.0) & ((over > 0.0) == (r > 0.0));
-        f32::from_bits(daz_bits(r.to_bits().wrapping_sub(back as u32)))
-    })
-}
-
-/// [`mul`] on four lanes whose operands are already as a VU reads them, as bits ready for an adder.
+/// [`chop`] of an exact `f64` result no bigger than `2·max`, as bits and without a branch: the
+/// nearest `f32`, one step back toward zero when that rounded away (which also takes an infinity back
+/// to `max`), then `daz`.
 #[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
 #[inline(always)]
+pub(crate) fn chop_bits(x: f64) -> u32 {
+    let r = x as f32;
+    let back = (r as f64).abs() > x.abs();
+    daz_bits(r.to_bits().wrapping_sub(back as u32))
+}
+
+/// [`add`] on one lane whose operands are already as a VU reads them.
+#[allow(clippy::float_arithmetic)] // the model itself, in host arithmetic
+#[inline(always)]
+fn add_bits(a: u32, b: u32) -> f32 {
+    let (a, b) = (f32::from_bits(a) as f64, f32::from_bits(b) as f64);
+    let s = a + b;
+    let bb = s - a;
+    let e = (a - (s - bb)) + (b - bb); // exact: s + e is the true sum
+    let r = s as f32;
+    let over = (r as f64 - s) - e; // r minus the true sum
+    let back = (over != 0.0) & (r != 0.0) & ((over > 0.0) == (r > 0.0));
+    f32::from_bits(daz_bits(r.to_bits().wrapping_sub(back as u32)))
+}
+
+/// [`add`] on four lanes whose operands are already as a VU reads them.
+#[inline(always)]
+fn add4_bits(a: [u32; 4], b: [u32; 4]) -> V4 {
+    core::array::from_fn(|i| add_bits(a[i], b[i]))
+}
+
+/// [`mul`] on one lane whose operands are already as a VU reads them, as bits ready for an adder.
+/// The FPU's `mul.s` is the same operation ([`crate::fpu::mul`]).
+#[allow(clippy::float_arithmetic)] // the model itself, in exact host arithmetic
+#[inline(always)]
+pub(crate) fn mul_bits(a: u32, b: u32) -> u32 {
+    chop_bits(f32::from_bits(a) as f64 * f32::from_bits(b) as f64)
+}
+
+/// [`mul`] on four lanes whose operands are already as a VU reads them.
+#[inline(always)]
 fn mul4_bits(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
-    core::array::from_fn(|i| {
-        let x = f32::from_bits(a[i]) as f64 * f32::from_bits(b[i]) as f64;
-        let r = x as f32;
-        let back = (r as f64).abs() > x.abs();
-        daz_bits(r.to_bits().wrapping_sub(back as u32))
-    })
+    core::array::from_fn(|i| mul_bits(a[i], b[i]))
 }
 
 #[inline(always)]
@@ -549,12 +573,12 @@ impl Lane {
         self.0
     }
     /// `vmadd`: `self + a·b`.
-    #[cfg_attr(feature = "native", inline)]
+    #[inline]
     pub fn madd(self, a: impl Into<Lane>, b: impl Into<Lane>) -> Lane {
         Lane(madd(self.0, a.into().0, b.into().0))
     }
     /// `vmsub`: `self − a·b`.
-    #[cfg_attr(feature = "native", inline)]
+    #[inline]
     pub fn msub(self, a: impl Into<Lane>, b: impl Into<Lane>) -> Lane {
         Lane(msub(self.0, a.into().0, b.into().0))
     }
@@ -596,27 +620,27 @@ macro_rules! vu_op {
     ($tr:ident $m:ident $as_tr:ident $as_m:ident $op:ident) => {
         impl core::ops::$tr<Lane> for Lane {
             type Output = Lane;
-            #[cfg_attr(feature = "native", inline)]
+            #[inline]
             fn $m(self, o: Lane) -> Lane {
                 Lane($op(self.0, o.0))
             }
         }
         impl core::ops::$tr<f32> for Lane {
             type Output = Lane;
-            #[cfg_attr(feature = "native", inline)]
+            #[inline]
             fn $m(self, o: f32) -> Lane {
                 Lane($op(self.0, o))
             }
         }
         impl core::ops::$tr<Lane> for f32 {
             type Output = Lane;
-            #[cfg_attr(feature = "native", inline)]
+            #[inline]
             fn $m(self, o: Lane) -> Lane {
                 Lane($op(self, o.0))
             }
         }
         impl<T: Into<Lane>> core::ops::$as_tr<T> for Lane {
-            #[cfg_attr(feature = "native", inline)]
+            #[inline]
             fn $as_m(&mut self, o: T) {
                 *self = Lane($op(self.0, o.into().0));
             }
