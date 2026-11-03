@@ -8282,6 +8282,10 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 #   area +0x534, area = *(*(car +0x2b4) +0x3b4); the edge test is within 150 ft of (+0x530 x 256 x
 #   +0x538) by (+0x534 x 256 x +0x53c); free07 3,3,9,9 = 6912 ft); depth 2400 throws S149a's parked truck
 #   at frame 460.
+# S269 — the cars' TireTrack entries (crates/openmx/src/tire_tracks.rs Bike::car, main.rs step_car_tire_marks;
+#   tests/car_tire_tracks.rs; journal 2026-11-03-s269-car-tire-tracks): the car loaders read their list through
+#   vehicle_fx_read, so the four tracks run on the same records (contact +0x140, normal +0x120). Every list is
+#   Material ttrack; widths buggy 0.25/0.5, truck 2.0, baja 0.5; MinC/MaxC 0.75/1 (truck 1.5/2.5).
 # MD76 — Desert Oasis's ground for the ATV (crates/game-sim/src/atv_ground.rs; tests/atv_ground.rs runs the
 # query off MD37a's atv-r-spawn.ee.bin over 29,450 points, nothing hooked). Journal:
 # research/journal/2026-11-02-md76-atv-ground. Desert Oasis Free Ride is Env/MC02 (mc02.res, member

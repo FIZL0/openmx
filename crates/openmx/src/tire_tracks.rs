@@ -241,6 +241,27 @@ pub struct Bike {
     pub wrecking: bool,
 }
 
+impl Bike {
+    /// A driven car as its tracks read it (S269): its four tires (front left, front right, rear left,
+    /// rear right: `AttachedToTire`'s 0 to 3) on the records the original's car loader points the
+    /// manager at (`research/oracle.txt` S248) — the contact (`+0x140`), the ground's normal
+    /// (`+0x120`), solid ground and a sorted contact for the two contacts, the compression, slipping
+    /// as the spin and the surface's low byte — its ground speed and its wreck.
+    pub fn car(m: &game_sim::car::Machine) -> Bike {
+        let v = |v: ps2_float::Vf| V3 { x: v.x(), y: v.y(), z: v.z() };
+        let tire = |w: &game_sim::car::Wheel| Tire {
+            at: v(w.s.contact),
+            normal: v(w.ground_normal),
+            ground: w.solid,
+            object: w.sorted,
+            compression: w.s.compression.0,
+            spinning: w.s.slipping,
+            zone: w.s.surface as u8,
+        };
+        Bike { tires: m.wheels.iter().map(tire).collect(), speed: m.ground_speed.0, wrecking: m.wrecked }
+    }
+}
+
 /// One point of the ring.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
