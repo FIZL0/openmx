@@ -12620,6 +12620,213 @@ fn a_downed_bikes_wreck_wakes_the_truck_driving_into_it_as_the_original_does() {
     }
 }
 
+// --- S273: the ragdoll in the way wakes the company truck, in the original ---------------------------
+//
+// S252a's third run: research/s252a/drop.py's wreck with the rider's ragdoll on the truck's line and the
+// wreck bike 29 ft off (`doll`, recorded and saved as `bike` and `roll` were). The truck is physical on
+// 11962, and that tick's new path-mesh references sit in the ragdoll's records: a bone struck it
+// (oracle.txt S252a). doll.csv's wreck columns read the wrong body (0x0195c6a0, recorded before S252a's
+// fix): the wreck bike is taken from the state alone, which reads the right one, and is not pinned.
+
+/// The doll run's state (asked for on 11957, so the capture's row a tick on) and the frame the original's
+/// truck is physical.
+const S273_RUN: (&str, &str, u64) = ("doll", "s252a-doll-11957.eeMemory.bin", 11962);
+
+/// The rider's body actor in every s89-along state (oracle.txt S252a; the vehicle 0x00a00050 less 0x400).
+const S273_ACTOR: u32 = 0x009f_fc50;
+
+/// The ragdoll as the state holds it (tests/ragdoll_wrecks.rs's `ragdoll_of`, the records left the
+/// kit's): every bone's body, mass and inertia, the joints' and pins' settings, the bone collisions'
+/// switches, the holds and the wreck flags, into the port's `doll` entered on the same wreck.
+fn s273_doll(ee: &ps2_oracle::Ee, doll: &mut game_sim::ragdoll_ride::Down) {
+    let a = S273_ACTOR;
+    let f = |at: u32| F(ee.f32_at(at));
+    let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(at + k)));
+    let parts = ee.u32_at(a + 0x2f4);
+    let n = doll.ragdoll.bones.len();
+    let body = |i: usize| ee.u32_at(parts + 0xb0 * i as u32 + 0xa4);
+    let bone_of = |b: u32| (0..n).find(|&i| body(i) == b).expect("a bone's body");
+    let r = &mut doll.ragdoll;
+    for (i, bone) in r.bones.iter_mut().enumerate() {
+        let b = body(i);
+        bone.body = s252a_body(ee, b);
+        bone.mass = f(b + 0x0c);
+        bone.inertia = quad(b + 0x110);
+        bone.reference = quad(b + 0x160);
+    }
+    let joint_pin = |i: usize| ee.u32_at(ee.u32_at(a + 0x4c0) + 0x50 * i as u32 + 8);
+    for (i, j) in r.joints.iter_mut().enumerate() {
+        let pin = joint_pin(i);
+        j.wrecked = ee.u32_at(pin + 0x70) != 0;
+        j.max_angle = f(pin + 0xc4);
+        j.spring = quad(pin + 0xd0);
+        j.damping = quad(pin + 0xe0);
+        j.critical = quad(pin + 0xf0);
+    }
+    let holds = [0x5d0, 0x5d4, 0x5d8, 0x5dc];
+    let pins: Vec<u32> = holds.iter().map(|&h| ee.u32_at(a + h)).chain((0..r.joints.len()).map(joint_pin)).collect();
+    assert_eq!(pins.len(), r.pins.len(), "the holds' and joints' pins");
+    for (p, &at) in r.pins.iter_mut().zip(&pins) {
+        let second = ee.u32_at(at + 0x6c);
+        *p = game_sim::ragdoll::Pin {
+            first: bone_of(ee.u32_at(at + 0x68)),
+            second: (second != 0).then(|| bone_of(second)),
+            anchors: [quad(at + 0x20), quad(at + 0x30)],
+            target: quad(at + 0x40),
+            target_velocity: quad(at + 0x50),
+            lower: quad(at + 0x80),
+            upper: quad(at + 0x90),
+            hit: quad(at + 0xa0),
+            sticky: quad(at + 0xb0),
+            gains: quad(at + 0x100),
+        };
+    }
+    for (i, c) in r.collisions.iter_mut().enumerate() {
+        let k = ee.u32_at(ee.u32_at(a + 0x624) + 4 * i as u32);
+        assert_eq!(c.bone, bone_of(ee.u32_at(k + 0x7c)), "collision {i}'s bone");
+        c.enabled = ee.u32_at(k + 0x04) != 0;
+        c.touching = ee.u32_at(k + 0x14) != 0;
+    }
+    r.holds = holds.map(|h| ee.u32_at(ee.u32_at(a + h) + 0x04) != 0);
+    r.throwing = ee.u32_at(ee.u32_at(a + 0x62c)) != 0;
+    r.entered = ee.u32_at(a + 0x49c) != 0;
+    r.stiff = ee.u32_at(a + 0x2b4) != 0;
+    r.riding = ee.u32_at(a + 0x2a4) != 0;
+    r.off_bike = ee.u32_at(a + 0x6b0) != 0;
+    r.flung = ee.u32_at(a + 0x6b8) != 0;
+    r.settled = ee.u32_at(a + 0x6b4) != 0;
+    r.roll = f(a + 0x490);
+    r.pull = quad(a + 0x6e0);
+}
+
+/// **S273: the ragdoll in the truck's way wakes it, as the original's does**: S252a's down rider, its
+/// bones the `doll` state's ([`s273_doll`]) and its wreck bike the state's body, among the state's cars
+/// in free06, ticked with no pad. A bone's sphere takes the truck's path mesh
+/// ([`game_sim::ragdoll_scene::PathCar::struck`]), the mesh's listener hears it, and the traffic wakes
+/// the truck on the original's tick, stopped at the original's point. Each bone's position and velocity
+/// are put on the capture's row before each tick up to the wake: what is held is the strike, not the
+/// tumble. With the bones 100 ft up the truck drives on. Skipped with a line where the capture, the
+/// state or the disc is not here.
+#[test]
+fn a_ragdoll_in_the_way_wakes_the_truck_driving_into_it_as_the_original_does() {
+    let Some(mut disc) = Disc::open() else { return };
+    let Some((kit, part, wrecks)) = the_ragdoll_kit() else { return };
+    let (name, state, wake) = S273_RUN;
+    let path = private_dir("capture").join("s252a").join(format!("{name}.csv"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("no {} — S252a's comment above says how it is recorded", path.display());
+        return;
+    };
+    let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let image = private_dir("states").join(state);
+    let (Ok(ram), Ok(ee)) = (std::fs::read(&image), ps2_oracle::Ee::from_ram(&image)) else {
+        println!("no {} — research/s252a/ram.py doll-11957 writes it", image.display());
+        return;
+    };
+    let mut areas = Area::all_of(&mut disc, BIPLANE_TRACK);
+    assert_eq!(areas.len(), 1, "{BIPLANE_TRACK} is one area");
+    let area = areas.pop().unwrap();
+    let terrain = Terrain::parse(&area.terrain).expect("free06's terrain");
+    // Three worlds, one a run: the props hold the cars' meshes and the marks a search leaves on them.
+    let mut worlds: Vec<_> = (0..3)
+        .map(|_| {
+            let ground = Ground::new(&terrain, &area.scene.terrain);
+            let (mut props, _) = area.props(&mut disc);
+            let mut t = s252_traffic(ram.clone(), &mut disc, &area, &ground);
+            t.attach(&mut props);
+            Some((Place { ground, props }, t))
+        })
+        .collect();
+
+    let kit = Arc::new(kit);
+    let body = s252a_body(&ee, S252A_WRECK);
+    let mut sim = Sim::new(0x273);
+    sim.rider.carries_wreck(part.clone(), wrecks.clone(), game_sim::ride::WRECK_INERTIA);
+    sim.rider.carries_ragdoll(kit.clone());
+    let reason = game_sim::trick::Wreck(5);
+    let mut crash = game_sim::ride::Crash::begin(&sim.rider.ride, reason, &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+    crash.bike = game_sim::wreck_bike::WreckBike::new(&part, game_sim::ride::WRECK_INERTIA, body.position, body.quat);
+    crash.bike.body = body;
+    // The rider has long let go of the bike: the bones are the state's own.
+    crash.holding = false;
+    let mut doll = {
+        let (place, _) = worlds[0].as_mut().unwrap();
+        game_sim::ragdoll_ride::Down::enter(&kit, &sim.rider.ride.transform(), &crash, crash.throw, 5, &wrecks, &mut game_sim::rng::Rng::default(), place)
+    };
+    s273_doll(&ee, &mut doll);
+    sim.rider.state.wreck = Some(reason);
+    sim.rider.crash = Some(crash);
+    sim.rider.ragdoll = Some(doll);
+
+    let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+    let bones = sim.rider.ragdoll.as_ref().unwrap().ragdoll.bones.len();
+    let held = ["x", "y", "z"].map(|c| col(&format!("bone0_pos.{c}")));
+    let pos = sim.rider.ragdoll.as_ref().unwrap().ragdoll.bones[0].body.position.to_bits();
+    let row = (0..cap.rows.len())
+        .find(|&r| held.iter().zip(pos).all(|(&at, w)| cell(&cap, r, at).parse::<f32>().map(f32::to_bits) == Ok(w)))
+        .expect("the state's bones are on a capture row");
+    let want = wake - cap.frames[row];
+    println!("{name}: {state} is the capture's {} row; the original's truck wakes {want} ticks on", cap.frames[row]);
+    let truck = |r: usize| ["x", "z"].map(|c| cell(&cap, r, col(&format!("truck_pos.{c}"))).parse::<f32>().unwrap());
+    let mut run = |k: usize, lift: f32, pin: bool| {
+        let (mut place, traffic) = worlds[k].take().expect("a world a run");
+        let mut sim = sim.clone();
+        sim.traffic = traffic;
+        let woken = |sim: &Sim| sim.traffic.physics.iter().position(|p| p.as_ref().is_some_and(|p| p.physical));
+        assert_eq!(woken(&sim), None, "{name}: no truck is physical in the state");
+        // Free06's other HasPhysics truck is on another road: the one the capture follows is the one
+        // at its point.
+        let [x0, z0] = truck(row);
+        let off = |k: usize| {
+            let p = sim.traffic.cars[k].point;
+            (p.x() - x0).abs() + (p.z() - z0).abs()
+        };
+        let ctruck = (0..sim.traffic.physics.len())
+            .filter(|&k| sim.traffic.physics[k].is_some())
+            .min_by(|&a, &b| off(a).total_cmp(&off(b)))
+            .expect("a HasPhysics car");
+        let mut woke = None;
+        for t in 1..=want + 20 {
+            if let Some(r) = cap.frames.iter().position(|&v| v == cap.frames[row] + t - 1).filter(|_| pin && t <= want) {
+                let doll = sim.rider.ragdoll.as_mut().expect("the rider's bones");
+                for (i, bone) in doll.ragdoll.bones.iter_mut().enumerate() {
+                    let n = |c: &str| cell(&cap, r, col(&format!("bone{i}_{c}"))).parse::<f32>().unwrap();
+                    let b = &mut bone.body;
+                    b.position = Vf::new(n("pos.x"), n("pos.y") + lift, n("pos.z"), n("pos.w"));
+                    b.velocity = Vf::new(n("vel.x"), n("vel.y"), n("vel.z"), n("vel.w"));
+                }
+            }
+            sim.tick_in(Input::default(), &mut place);
+            if sim.rider.crash.is_none() || sim.rider.ragdoll.is_none() {
+                assert!(t > want, "{name} tick {t}: the rider is put back before the wake");
+                break;
+            }
+            let r = cap.frames.iter().position(|&v| v == cap.frames[row] + t).expect("a row a tick");
+            let point = sim.traffic.cars[ctruck].point;
+            if pin && t < want {
+                let [x, z] = truck(r);
+                assert!((point.x() - x).abs() < 1e-3 && (point.z() - z).abs() < 1e-3, "{name} tick {t}: the truck at {:?}, the original's ({x}, {z})", point.0);
+            }
+            if woke.is_none() && let Some(k) = woken(&sim) {
+                woke = Some((t, k == ctruck, point));
+            }
+        }
+        woke
+    };
+    let pinned = run(0, 0.0, true);
+    let free = run(1, 0.0, false);
+    let lifted = run(2, 100.0, true);
+    println!("{name}: {bones} bones; the port's truck wakes {pinned:?} with the bones on the capture's rows, {free:?} with the port's own, {lifted:?} with them 100 ft up");
+    let wake_row = cap.frames.iter().position(|&v| v == wake).expect("the wake's row");
+    let [x, z] = truck(wake_row);
+    let (t, company, at) = pinned.unwrap_or_else(|| panic!("{name}: a bone wakes the truck"));
+    assert_eq!((t, company), (want, true), "{name}: the company truck wakes on the original's tick, {wake}");
+    assert!((at.x() - x).abs() < 1e-3 && (at.z() - z).abs() < 1e-3, "{name}: it stops at the original's point: {:?}, ({x}, {z})", at.0);
+    assert_eq!(lifted.map(|w| w.0), None, "{name}: with the bones 100 ft up the truck drives on");
+    // The port's own bones, from the state's, meet the truck on the same tick.
+    assert_eq!(free.map(|w| (w.0, w.1)), Some((want, true)), "{name}: the port's own bones wake the truck on the original's tick");
+}
+
 // ---------------------------------------------------------------------------------------------------
 // F18: the native build's tolerance suite
 // ---------------------------------------------------------------------------------------------------
