@@ -46,10 +46,18 @@ const REGIONS: [(&str, u32, u32); 10] = [
 ];
 /// What the quad points at and the steps only hand on: its engine, its scene node, its collision
 /// search and the actor list the sweep is given.
-const ENGINE: u32 = 0x01c0_7300;
+const ENGINE: u32 = 0x01c0_3000;
 const NODE: u32 = 0x01c0_7340;
 const ACTORS: u32 = 0x01c0_7380;
 const SEARCH: u32 = 0x01c0_c000;
+/// MD75b: the engine's gear ratios and power curve, which it reads through pointers, and the
+/// collision record's vtable, whose `+0x88` the gravity calls (hooked at `RECORD_TOLD`).
+const RATIOS: u32 = ENGINE + 0x100;
+const CURVE_TORQUE: u32 = ENGINE + 0x140;
+const CURVE_RPM: u32 = ENGINE + 0x180;
+const RECORD_VT: u32 = 0x01c0_3200;
+const RECORD_TOLD: u32 = 0x01cf_0200;
+const STOOD_ON: u32 = 0x01cf_0300;
 
 /// The quad's and its rigid body's vtables in the image.
 const QUAD_VTABLE: u32 = 0x003c_e250;
@@ -3041,7 +3049,7 @@ const SPIN_INTEGRATE: u32 = 0x004a_2040;
 /// The words the steps write past [`REGIONS`]: the engine's clutch multiplier (`+0x7c`), and each
 /// wheel's steering rate (`+0x8b0`) and axis (`+0x8c0`).
 const MORE_REGIONS: [(&str, u32, u32); 5] = [
-    ("engine", ENGINE + 0x70, 0x10),
+    ("engine", ENGINE, 0x1c0),
     ("left front's steering", 0x01c0_88b0, 0x20),
     ("right front's steering", 0x01c0_98b0, 0x20),
     ("left rear's steering", 0x01c0_a8b0, 0x20),
@@ -3365,9 +3373,90 @@ impl Gen {
             more,
             ground: [game_sim::atv_wheel::Ground::Still; 4],
             cofg: self.vec(-0.5, 0.5),
+            parts: game_sim::atv_moto::Parts::default(),
         };
         let _: &[wheel::Wheel; 4] = &bike.wheels;
-        Ride { s, bike, gate, class, high: (self.bits() & 0xf) as u8, tag: self.bits(), answers, echo: self.one_in(8) }
+        let mut r = Ride { s, bike, gate, class, high: (self.bits() & 0xf) as u8, tag: self.bits(), answers, echo: self.one_in(8) };
+        self.md75b(&mut r);
+        r
+    }
+
+    /// MD75b's fields over a ride: an engine with a gearbox and a power curve, its wheels' drive
+    /// words (two driven wheels two times in three), the shift points, the head and tail's poses
+    /// and travels, the drag, the body mostly enabled, the flag byte.
+    fn md75b(&mut self, r: &mut Ride) {
+        use game_sim::atv_moto::Drive;
+        let b = &mut r.bike;
+        let e = &mut b.engine;
+        e.gears = 1 + (self.bits() % 6) as i32;
+        e.gear = match self.bits() % 4 {
+            0 => 1,
+            1 => e.gears,
+            _ => 1 + (self.bits() % e.gears as u32) as i32,
+        };
+        e.final_drive = self.f(2.0, 5.0);
+        for g in &mut e.gear_ratios {
+            *g = self.f(0.5, 4.0);
+        }
+        e.ratio = e.final_drive * e.gear_ratios[(e.gear - 1) as usize];
+        e.inv_ratio = F::ONE / e.ratio;
+        let points = 2 + self.bits() % 15;
+        let mut x = self.f(500.0, 1500.0);
+        for (rpm, torque) in e.curve_rpm.iter_mut().zip(&mut e.curve_torque) {
+            (*rpm, *torque) = (x, self.f(0.0, 120.0));
+            x = x + self.f(200.0, 1200.0);
+        }
+        e.curve = game_sim::r#move::Curve::at(points, self.bits() % (points + 1), self.f(0.0, 1.0));
+        e.rev_limit = e.curve_rpm[points as usize - 1];
+        e.min_rpm = self.f(600.0, 1200.0);
+        e.rpm = match self.bits() % 6 {
+            0 => e.min_rpm,
+            1 => e.rev_limit,
+            2 => self.f(0.0, 600.0),
+            3 => e.rev_limit + self.f(0.0, 500.0),
+            _ => self.f(e.min_rpm.0, e.rev_limit.0),
+        };
+        e.idle_throttle = self.f(0.0, 0.2);
+        e.engine_braking = self.f(0.0, 2e-7);
+        e.inv_inertia = self.f(0.5, 30.0);
+        e.clutch_static = self.f(20.0, 400.0);
+        e.clutch_kinetic = self.f(20.0, 300.0);
+        e.clutch_locked = self.b();
+        e.torque = self.f(-200.0, 200.0);
+        e.wheel_torque = self.f(-500.0, 500.0);
+        e.road_rpm = self.f(0.0, 12000.0);
+        e.torque_scale = if self.b() { F::ONE } else { self.f(0.5, 1.5) };
+        e.clutch_torque_scale = if self.b() { F::ONE } else { self.f(0.5, 1.5) };
+        let x = &mut b.parts;
+        x.driven = (LR, if self.one_in(3) { None } else { Some(RR) });
+        for d in &mut x.drive {
+            *d = Drive { spin: self.f(-20.0, 120.0), torque: self.f(-100.0, 100.0), from_torque: self.b(), forward: self.f(-600.0, 600.0) };
+        }
+        // A third of the time, revs about to cross the road's: between the road's last and this
+        // substep's (the first driven wheel's spin through the gear, near enough).
+        if self.one_in(3) {
+            let road = 9.549296 * x.drive[LR].spin.0 * e.ratio.0;
+            if self.b() {
+                (e.road_rpm, e.rpm) = (F(road * 0.98), F(road * 0.99));
+            } else {
+                (e.road_rpm, e.rpm) = (F(road * 1.02), F(road * 1.01));
+            }
+        }
+        let k = &mut b.clutch_keys;
+        k.up_shift_rpm = self.f(3000.0, 9000.0);
+        k.down_shift_rpm = self.f(1000.0, 4000.0);
+        k.cofg = self.vec(-1.0, 1.0);
+        k.balance_cofg = self.vec(-1.0, 1.0);
+        x.cofg_off = self.vec(-1.0, 1.0);
+        k.cofg_travel_forward = self.f(0.0, 0.5);
+        k.cofg_travel_back = self.f(0.0, 0.5);
+        k.brake_cofg_travel_forward = self.f(0.0, 0.5);
+        k.clutch_cofg_travel_back = self.f(0.0, 0.5);
+        k.drag = if self.b() { F(0.025) } else { self.f(0.0, 0.1) };
+        x.last_position = self.vec(-50.0, 50.0);
+        x.body_on = !self.one_in(4);
+        x.flags = self.bits() as u8;
+        x.record = true;
     }
 
     /// The four wheels' step fields, `tests/atv_wheel.rs`'s ranges, with what the quad keeps of
@@ -3565,6 +3654,80 @@ fn poke_ride(ee: &mut Ee, r: &Ride) {
         put_f(ee, at + 0x8b0, w.steer_rate);
         put_v(ee, at + 0x8c0, x.steer_axis);
     }
+    // MD75b's: the engine and its gearbox and curve, its wheels' drive words, the shift points, the
+    // head and tail's poses and travels, the drag, the body's enabled word and last position, the
+    // quad's flag byte and the record's vtable.
+    let (e, k, x) = (&b.engine, &b.clutch_keys, &b.parts);
+    ee.set_u32(ENGINE + 0x24, OBJ + 0x318);
+    ee.set_u32(ENGINE + 0x28, OBJ + 0x12d4);
+    put_f(ee, ENGINE + 0x2c, e.idle_throttle);
+    put_f(ee, ENGINE + 0x30, e.engine_braking);
+    put_f(ee, ENGINE + 0x34, e.final_drive);
+    put_f(ee, ENGINE + 0x3c, e.inv_inertia);
+    put_f(ee, ENGINE + 0x44, e.clutch_static);
+    put_f(ee, ENGINE + 0x48, e.clutch_kinetic);
+    put_f(ee, ENGINE + 0x54, e.min_rpm);
+    put_b(ee, ENGINE + 0x58, e.clutch_locked);
+    ee.set_u32(ENGINE + 0x5c, e.gear as u32);
+    ee.set_u32(ENGINE + 0x68, CURVE_TORQUE);
+    ee.set_u32(ENGINE + 0x6c, e.gears as u32);
+    ee.set_u32(ENGINE + 0x70, RATIOS);
+    put_f(ee, ENGINE + 0x74, e.ratio);
+    put_f(ee, ENGINE + 0x78, e.inv_ratio);
+    put_f(ee, ENGINE + 0x7c, e.clutch_torque_scale);
+    ee.set_u32(ENGINE + 0x80, e.curve.points);
+    ee.set_u32(ENGINE + 0x84, e.curve.index);
+    put_f(ee, ENGINE + 0x88, e.curve.frac());
+    ee.set_u32(ENGINE + 0x8c, CURVE_RPM);
+    ee.set_u32(ENGINE + 0x90, WHEEL[x.driven.0]);
+    ee.set_u32(ENGINE + 0x94, x.driven.1.map_or(0, |i| WHEEL[i]));
+    put_f(ee, ENGINE + 0x98, e.torque);
+    put_f(ee, ENGINE + 0x9c, e.wheel_torque);
+    put_f(ee, ENGINE + 0xa0, e.rpm);
+    put_f(ee, ENGINE + 0xa4, e.road_rpm);
+    put_f(ee, ENGINE + 0xac, e.rev_limit);
+    put_f(ee, ENGINE + 0xb4, e.torque_scale);
+    for (i, &r) in e.gear_ratios.iter().enumerate() {
+        put_f(ee, RATIOS + 4 * i as u32, r);
+    }
+    for (i, (&x, &y)) in e.curve_rpm.iter().zip(&e.curve_torque).enumerate() {
+        put_f(ee, CURVE_RPM + 4 * i as u32, x);
+        put_f(ee, CURVE_TORQUE + 4 * i as u32, y);
+    }
+    for (d, &at) in x.drive.iter().zip(&WHEEL) {
+        put_f(ee, at + 0x1d4, d.spin);
+        put_f(ee, at + 0x210, d.torque);
+        put_b(ee, at + 0xe0, d.from_torque);
+        put_f(ee, at + 0x858, d.forward);
+    }
+    put_f(ee, OBJ + 0x13dc, k.up_shift_rpm);
+    put_f(ee, OBJ + 0x13e0, k.down_shift_rpm);
+    put_v(ee, OBJ + 0x1130, k.cofg);
+    put_v(ee, OBJ + 0x1140, x.cofg_off);
+    put_v(ee, OBJ + 0x1150, k.balance_cofg);
+    put_f(ee, OBJ + 0x1320, k.cofg_travel_forward);
+    put_f(ee, OBJ + 0x1324, k.cofg_travel_back);
+    put_f(ee, OBJ + 0x1328, k.clutch_cofg_travel_back);
+    put_f(ee, OBJ + 0x132c, k.brake_cofg_travel_forward);
+    put_f(ee, WORLD + 4, k.drag);
+    put_b(ee, BODY, x.body_on);
+    put_v(ee, BODY + 0x60, x.last_position);
+    tire_set_byte(ee, OBJ + 0x45, x.flags);
+    // A wheel standing on something, as the wheel clear's test sets it: a word where its pointer
+    // goes. Nothing in that test reads through it; the clear zeroes it.
+    for (g, &at) in b.ground.iter().zip(&WHEEL) {
+        match g {
+            game_sim::atv_wheel::Ground::Still => {}
+            game_sim::atv_wheel::Ground::Object { .. } => ee.set_u32(at + 0x1f0, STOOD_ON),
+            game_sim::atv_wheel::Ground::Mover(_) => ee.set_u32(at + 0x1f4, STOOD_ON),
+        }
+    }
+    if x.record {
+        ee.set_u32(RECORD + 4, RECORD_VT);
+        ee.set_u32(RECORD_VT + 0x88, RECORD_TOLD);
+    } else {
+        ee.set_u32(OBJ + 0xc8, 0);
+    }
 }
 
 /// The quad's call to the original's address it goes to.
@@ -3578,6 +3741,14 @@ fn address_of(c: &Call) -> u32 {
         Call::Suspension(..) => SUSPENSION,
         Call::TireForces(..) => TIRE_FORCES,
         Call::WheelIntegrate(..) => WHEEL_INTEGRATE,
+        Call::AutoShift { .. } => AUTO_SHIFT,
+        Call::HeadTail => HEAD_TAIL,
+        Call::Gravity => GRAVITY,
+        Call::EngineUpdate(_) => ENGINE_UPDATE,
+        Call::AirDrag(_) => AIR_DRAG,
+        Call::WheelClear(_) => WHEEL_CLEAR,
+        Call::RevLimit => REV_LIMIT,
+        Call::PeakRates => PEAK_RATES,
         _ => 0,
     }
 }
@@ -3642,6 +3813,10 @@ fn hook_steps(ee: &mut Ee, picks: &[u32], answers: &Answers, echo: &Rc<Cell<bool
             }),
             (SURFACE_DRAG, |ee| Call::SurfaceDrag(wheel_of(ee), F(ee.f(12)))),
             (SPIN_INTEGRATE, |ee| Call::SpinIntegrate(wheel_of(ee), F(ee.f(12)))),
+            (RECORD_TOLD, |ee| {
+                assert_eq!([ee.r(4) as u32, ee.r(5) as u32], [RECORD, 1], "the gravity's record call");
+                Call::GravityRecord
+            }),
         ],
     );
     let l = log.clone();
@@ -4022,4 +4197,240 @@ fn the_quads_force_body_runs_the_bikes_steps() {
     let paths = |r: &Ride| vec![preload_path(r), backflip_path(r)];
     let want = ["off", "firing", "armed", "fired", "arming", "triggered", "turning", "ended", "cue posted", "stunt started"];
     each_unhooked(0x0075_a00a, 5_000, false, &picks, turning_flip, paths, &want, 15);
+}
+
+// MD75b: the calls with no port before, each the original's own code against atv_moto's.
+
+/// The engine's way through one update, read off the port's own run on a copy.
+fn engine_paths(r: &Ride) -> Vec<&'static str> {
+    let (q, b) = (&r.s.q, &r.bike);
+    if !on(r) || q.control_off {
+        return vec!["off"];
+    }
+    let (mut e, mut w) = (b.engine.clone(), b.parts.drive);
+    let radius = b.wheels.map(|w| w.probe_length);
+    game_sim::atv_moto::engine_update(&mut e, &mut w, radius, b.parts.driven, q.gas_limited, q.clutch_in, r.s.dt);
+    let mut v = vec![if b.parts.driven.1.is_some() { "two wheels" } else { "one wheel" }];
+    v.push(match (b.engine.clutch_locked, e.clutch_locked) {
+        (true, true) => "stays locked",
+        (true, false) => "unlocks",
+        (false, true) => "locks up",
+        (false, false) => "slips",
+    });
+    if !e.clutch_locked {
+        let (x, y) = (b.parts.drive[LR].from_torque, b.parts.drive[RR].from_torque);
+        v.push(match b.parts.driven.1 {
+            Some(_) if x && y => "load off both tires",
+            None if x => "load off the tire",
+            _ => "load is the clutch's",
+        });
+    }
+    if e.rpm == e.min_rpm {
+        v.push("held at the bottom");
+    } else if e.rpm == e.rev_limit {
+        v.push("held at the limit");
+    }
+    if b.engine.curve.index == 0 || e.curve.index == 0 {
+        v.push("curve's bottom point");
+    }
+    v
+}
+
+#[test]
+fn the_quads_engine_is_the_originals() {
+    let want = [
+        "off",
+        "one wheel",
+        "two wheels",
+        "stays locked",
+        "unlocks",
+        "locks up",
+        "slips",
+        "load off both tires",
+        "load off the tire",
+        "load is the clutch's",
+        "held at the bottom",
+        "held at the limit",
+        "curve's bottom point",
+    ];
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        if g.one_in(4) {
+            r.s.q.clutch_in = F::ONE;
+        }
+        if g.b() {
+            r.s.q.control_off = false;
+        }
+    };
+    each_unhooked(0x0075_b001, 10_000, false, &[ENGINE_UPDATE], tweak, engine_paths, &want, 30);
+}
+
+#[test]
+fn the_quads_rev_limit_is_the_originals() {
+    let paths = |r: &Ride| {
+        let (e, x) = (&r.bike.engine, &r.bike.parts);
+        let mut w = x.drive;
+        game_sim::atv_moto::rev_limit(e, &mut w, x.driven);
+        vec![if !on(r) {
+            "off"
+        } else if w != x.drive {
+            if x.driven.1.is_some() { "limits two" } else { "limits one" }
+        } else if e.clutch_locked {
+            "under the limit"
+        } else {
+            "slipping"
+        }]
+    };
+    // Half the time the road's revs past the limit, by the first driven wheel's spin.
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        if g.b() {
+            let e = &mut r.bike.engine;
+            e.clutch_locked = true;
+            let spin = (e.rev_limit.0 * g.f(0.9, 1.2).0) / (9.549296 * e.ratio.0);
+            r.bike.parts.drive[LR].spin = F(spin);
+        }
+    };
+    each_unhooked(0x0075_b002, 10_000, false, &[REV_LIMIT], tweak, paths, &["off", "limits two", "limits one", "under the limit", "slipping"], 30);
+}
+
+#[test]
+fn the_quads_gravity_is_the_originals() {
+    let paths = |r: &Ride| vec![if !on(r) { "off" } else if r.bike.parts.body_on { "pulled" } else { "body off" }];
+    each_unhooked(0x0075_b003, 10_000, false, &[GRAVITY], |_, _| {}, paths, &["off", "pulled", "body off"], 30);
+}
+
+#[test]
+fn the_quads_air_drag_is_the_originals() {
+    let paths = |r: &Ride| {
+        vec![if !on(r) || r.s.q.control_off {
+            "off"
+        } else if r.s.q.speed_len == F::ZERO {
+            "still"
+        } else {
+            "dragged"
+        }]
+    };
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        if g.one_in(10) {
+            r.s.q.speed_len = F::ZERO;
+        }
+        if g.b() {
+            r.s.q.control_off = false;
+        }
+    };
+    each_unhooked(0x0075_b004, 10_000, false, &[AIR_DRAG], tweak, paths, &["off", "still", "dragged"], 30);
+}
+
+#[test]
+fn the_quads_peak_rates_are_the_originals() {
+    let paths = |r: &Ride| {
+        if !on(r) {
+            return vec!["off"];
+        }
+        vec!["kept"]
+    };
+    each_unhooked(0x0075_b005, 10_000, false, &[PEAK_RATES], |_, _| {}, paths, &["off", "kept"], 30);
+}
+
+#[test]
+fn the_quads_wheel_clear_is_the_originals() {
+    use game_sim::atv_wheel::{Chassis, Ground, Holder, Mover};
+    let paths = |r: &Ride| {
+        if !on(r) {
+            return vec!["off"];
+        }
+        r.bike.ground.iter().map(|g| match g {
+            Ground::Still => "still ground",
+            Ground::Object { .. } => "on an object",
+            Ground::Mover(_) => "on a mover",
+        }).collect()
+    };
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        for w in &mut r.bike.ground {
+            *w = match g.bits() % 3 {
+                0 => Ground::Still,
+                1 => Ground::Object { cofg: Vf::default(), cofg_world: Vf::default(), on: Holder::Chassis(Chassis::default()) },
+                _ => Ground::Mover(Mover::default()),
+            };
+        }
+    };
+    each_unhooked(0x0075_b006, 5_000, false, &[WHEEL_CLEAR], tweak, paths, &["off", "still ground", "on an object", "on a mover"], 30);
+}
+
+#[test]
+fn the_quads_auto_shift_is_the_originals() {
+    let paths = |r: &Ride| {
+        if !on(r) {
+            return vec!["off"];
+        }
+        let (q, e) = (&r.s.q, &r.bike.engine);
+        let mut v = vec![];
+        if F(q.contact_vel.z()) < F::from_bits(0x40ea_aa65) && q.gas_limited == F::ZERO {
+            v.push("crawl, clutch in");
+        }
+        let mut e2 = e.clone();
+        let mut q2 = q.clone();
+        game_sim::atv_moto::auto_shift(&r.bike.clutch_keys, &mut e2, &mut q2, q.wheels[LR].inv_radius);
+        v.push(match e2.gear - e.gear {
+            1 => "up",
+            -1 => "down",
+            _ if e.gear == e.gears => "held at the top",
+            _ if e.gear == 1 => "held at the bottom",
+            _ => "held",
+        });
+        v
+    };
+    // Revs near the shift points: a speed that puts them a little either side.
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        if g.b() {
+            let (q, e, k) = (&mut r.s.q, &r.bike.engine, &r.bike.clutch_keys);
+            let at = if g.b() { k.up_shift_rpm } else { k.down_shift_rpm };
+            let rpm = at.0 * g.f(0.95, 1.05).0;
+            let v = q.contact_vel;
+            q.contact_vel = Vf::new(v.x(), v.y(), rpm / (9.549296 * e.ratio.0 * q.wheels[LR].inv_radius.0), v.w());
+        }
+        if g.one_in(4) {
+            r.s.q.gas_limited = F::ZERO;
+        }
+    };
+    let want = ["off", "crawl, clutch in", "up", "down", "held at the top", "held at the bottom", "held"];
+    each_unhooked(0x0075_b007, 10_000, true, &[AUTO_SHIFT], tweak, paths, &want, 30);
+}
+
+#[test]
+fn the_quads_head_and_tail_are_the_originals() {
+    let paths = |r: &Ride| {
+        if !on(r) {
+            return vec!["off"];
+        }
+        let (q, b) = (&r.s.q, &r.bike);
+        let mut v = vec![if q.control_off { "control off" } else if q.balancing { "balancing" } else { "riding" }];
+        v.push(if b.stick.y < F::ZERO { "stick forward" } else { "stick back" });
+        if q.rear_brake != F::ZERO {
+            v.push("braking");
+        }
+        v.push(if b.clutch_keys.clutch_torque_scale_time == F::ZERO { "no clutch ramp" } else { "clutch ramp" });
+        v
+    };
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        if g.one_in(4) {
+            r.bike.clutch_keys.clutch_torque_scale_time = F::ZERO;
+        }
+    };
+    let want = ["off", "control off", "balancing", "riding", "stick forward", "stick back", "braking", "no clutch ramp", "clutch ramp"];
+    each_unhooked(0x0075_b008, 10_000, true, &[HEAD_TAIL], tweak, paths, &want, 30);
+}
+
+/// The Force body with every ported call at once: MD75a's and MD75b's.
+#[test]
+fn the_quads_force_body_runs_every_ported_step() {
+    let picks = [GRAVITY, PRELOAD, BACKFLIP, ENGINE_UPDATE, AIR_DRAG, AIRBORNE_CONTROL, WHEEL_CLEAR, SUSPENSION, TIRE_FORCES, WHEEL_INTEGRATE, REV_LIMIT, PEAK_RATES];
+    let want = ["off", "stays locked", "unlocks", "locks up", "slips", "cue posted", "stunt started"];
+    each_unhooked(0x0075_b009, 5_000, false, &picks, turning_flip, engine_paths, &want, 15);
+}
+
+/// The PreProcess with every ported call at once.
+#[test]
+fn the_quads_ground_head_runs_every_ported_step() {
+    let picks = [INPUT_LIMITER, AUTO_SHIFT, CLUTCH, HEAD_TAIL];
+    each_unhooked(0x0075_b00a, 5_000, true, &picks, |_, _| {}, |r| vec![limiter_path(r)], &LIMITER_PATHS, 15);
 }

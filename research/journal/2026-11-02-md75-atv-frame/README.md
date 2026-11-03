@@ -16,3 +16,8 @@ MD75a (`2-moto-steps.md`): `quad::Steps` runs the ported bike steps (input limit
 backflip, airborne control, and atv_wheel's suspension/tire forces/wheel integrate) on the quad. Ten
 oracles prove it, each with that call unhooked so the original's own code runs, every region equal.
 The rear-brake gap in `step::input_limiter` is filed as B17.
+
+MD75b (`3-moto-own-calls.md`): the quad's own calls (engine update, rev limit, auto shift, head and tail,
+gravity, air drag, peak rates and wheel clear) are ported in `atv_moto.rs` and answered in `quad::Steps`.
+Each is unhooked in its own oracle, plus two combined oracles, and every region is equal. Spin air,
+vehicle post and node position are filed as MD75b1.
