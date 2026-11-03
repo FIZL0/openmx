@@ -201,7 +201,9 @@ bike, and MX Unleashed has no ATV, so the proof can only be against SLUS-21104.
   differ (gears 2.25/1.9/1.52/1.32/1.14, CofG y 1.0 against 2.0, the clutch scale, the tires). The `atv_s_`
   set changes the gearing (final 10.538 against 4.558) and the brakes (front 325 against 150). The path
   builder (PC 0x00566480) takes machine kind 0 → `mx_`, kind 1 → `atv_`, or `atv_s_` when the machine's
-  model name holds `ATV_S_`. Wreck body: `WreckATVm.col`. Nodes: `WheelLeftFront`, `WheelRightFront`,
+  model name holds `ATV_S_`. Wreck body: `WreckATVm.col`, a ray probe `pc_quad_init` makes at +0x1454 (PS2
+  +0x1434) beside a trigger probe at +0x1450 (+0x1430); the wreck entry swaps the collision onto it and the
+  unwreck back (MD65a, `quad::build_wreck_body`, `quad::swap_rays`). Nodes: `WheelLeftFront`, `WheelRightFront`,
   `WheelLeftRear`, `WheelRightRear`, `SwingArm`, `LeftHub`, `RightHub`, `Aarm{Lower,Upper}{Left,Right}`.
 - **Wheels.** Four tire models, left front and right front (steered), left rear and right rear (driven),
   where the bike has two. `pc_quad_tire_phy` (slot 110) reads `[Front Tire]` and `[Rear Tire]` into them.
