@@ -4900,3 +4900,318 @@ fn the_quads_ray_swaps_are_the_originals() {
     }
     each_path_seen(&t, &["to the wreck rays", "to the wreck rays, in a world", "to the riding rays", "to the riding rays, in a world"], 1000);
 }
+
+// --- MD65b: the quad's small slots ----------------------------------------------------------------------
+
+const REMAP: u32 = 0x004b_8ab0;
+const SURFACE_UNDER: u32 = 0x004b_b360;
+const STRUT_TRAVEL: u32 = 0x004b_e3b0;
+const TRIGGER_SEGMENTS: u32 = 0x004b_a510;
+const SETTLE: u32 = 0x004b_b400;
+const LEVEL_SETUP: u32 = 0x004d_e920;
+const SURFACE_COPY: u32 = 0x004a_0780;
+/// The global the remap sets a flag in before the level setup, pointed at a scratch block.
+const LEVEL_GLOBAL_PTR: u32 = 0x003e_ab60;
+const LEVEL_GLOBAL: u32 = 0x01d0_5000;
+const LEVEL: u32 = 0x01d0_4000;
+const TRIGGER_PROBE: u32 = 0x01d0_6000;
+const SCENE_NODE: u32 = 0x01d0_6400;
+const GROUND_WORLD: u32 = 0x01d0_6800;
+
+/// MD65b's pairings, as the quad's vtable holds them: the slot and the function in it.
+const MD65B_SLOTS: [(u32, u32); 11] = [
+    (0x008, 0x004b_89a0),
+    (0x340, REMAP),
+    (0x348, 0x004b_b710),
+    (0x354, 0x004b_8b80),
+    (0x358, SURFACE_UNDER),
+    (0x3e4, 0x004b_e3c0),
+    (0x41c, STRUT_TRAVEL),
+    (0x474, TRIGGER_SEGMENTS),
+    (0x4f8, SETTLE),
+    (0x554, 0x004b_e8d0),
+    (0x558, 0x004b_b370),
+];
+
+#[test]
+fn the_quads_md65b_slots_hold_the_paired_functions() {
+    let Some(ee) = image() else { return };
+    for (slot, f) in MD65B_SLOTS {
+        assert_eq!(ee.u32_at(QUAD_VTABLE + slot), f, "the quad's vtable +{slot:#x}");
+    }
+}
+
+/// The quad's object and its four wheels zeroed, and the wheels hung on the quad.
+fn lay_wheels(ee: &mut Ee) {
+    for (base, len) in [(OBJ, 0x1800), (WHEEL[0], 0x4000)] {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, 0);
+        }
+    }
+    ee.set_u32(OBJ + 0x4, QUAD_VTABLE);
+    for (k, w) in WHEEL.into_iter().enumerate() {
+        ee.set_u32(OBJ + QUAD_WHEELS + 4 * k as u32, w);
+    }
+}
+
+const WHEEL_REGIONS: [(u32, u32); 4] = [(WHEEL[0], 0x1000), (WHEEL[1], 0x1000), (WHEEL[2], 0x1000), (WHEEL[3], 0x1000)];
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    /// A level's surface map entry: unmapped (negative) one time in three, past the sixteen
+    /// surfaces one in ten, else a surface.
+    fn map_entry(&mut self) -> i32 {
+        match self.bits() % 30 {
+            0..10 => if self.b() { -1 } else { -(self.bits() as i32 & 0x7fff_ffff) - 1 },
+            10..13 => if self.b() { 16 + (self.bits() % 8) as i32 } else { (self.bits() & 0x7fff_ffff) as i32 },
+            _ => (self.bits() % 16) as i32,
+        }
+    }
+}
+
+/// What a remap's surface `i` does: the paths the test wants seen.
+fn remap_path(map: &[i32; 16], i: usize) -> &'static str {
+    let src = map[i];
+    if src < 0 {
+        "unmapped"
+    } else if src >= 16 {
+        "past the surfaces"
+    } else if src as usize == i {
+        "onto itself"
+    } else if (src as usize) < i && (0..16).contains(&map[src as usize]) && map[src as usize] as usize != src as usize {
+        "from a remapped surface"
+    } else {
+        "copied"
+    }
+}
+
+#[test]
+fn the_quads_surface_remap_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let log = hook_calls(&mut ee, &[(LEVEL_SETUP, |ee| {
+        assert_eq!(ee.u32_at(LEVEL_GLOBAL + 0x22c), 1, "the flag is set before the level setup");
+        assert_eq!(ee.r(5) as u32, LEVEL, "the level setup's level");
+        on_quad(ee, Call::LevelSetup)
+    })]);
+    let mut g = Gen(0x0065_b001);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        lay_wheels(&mut ee);
+        ee.set_u32(LEVEL_GLOBAL_PTR, LEVEL_GLOBAL);
+        ee.set_u32(LEVEL_GLOBAL + 0x22c, 0);
+        let map: [i32; 16] = std::array::from_fn(|_| g.map_entry());
+        for (i, &m) in map.iter().enumerate() {
+            ee.set_u32(LEVEL + 0x140 + 4 * i as u32, m as u32);
+            tally(&mut t, remap_path(&map, i));
+        }
+        for w in WHEEL {
+            for o in (0x238..0x838).step_by(4) {
+                ee.set_f32(w + o, g.f(-500.0, 500.0).0);
+            }
+        }
+        let before = read_tire(&ee, OBJ);
+        log.borrow_mut().clear();
+        ee.call(REMAP, &[u64::from(OBJ), u64::from(LEVEL)], &[], 200_000);
+        assert_eq!(ee.v0() as u32, OBJ + 0xc, "case {k}: what the remap returns");
+        let mut regions = WHEEL_REGIONS.to_vec();
+        regions.push((LEVEL_GLOBAL + 0x22c, 4));
+        only_touched(&ee, &regions).unwrap_or_else(|e| panic!("case {k}: {e}\n{map:?}"));
+        let got = read_tire(&ee, OBJ);
+        let mut port = before;
+        let mut calls = Vec::new();
+        let (mut q, mut body) = (Quad::default(), Body::default());
+        quad::remap_surfaces(&mut port, &map, &mut q, &mut body, &mut calls);
+        assert!(got == port, "case {k}: {}\n{map:?}", first_difference(&got, &port));
+        assert_eq!(*log.borrow(), calls, "case {k}: the calls\n{map:?}");
+    }
+    each_path_seen(&t, &["unmapped", "past the surfaces", "onto itself", "from a remapped surface", "copied"], 1000);
+}
+
+#[test]
+fn the_quads_surface_copy_keeps_the_donut_scale() {
+    let Some(mut ee) = image() else { return };
+    lay_wheels(&mut ee);
+    for o in (0x238..0x838).step_by(4) {
+        ee.set_f32(WHEEL[0] + o, o as f32);
+    }
+    ee.call(SURFACE_COPY, &[u64::from(WHEEL[0]), 3, 9], &[], 10_000);
+    for tb in 0..24u32 {
+        let (dst, src) = (0x238 + 0x40 * tb + 4 * 3, 0x238 + 0x40 * tb + 4 * 9);
+        let want = if tb == 20 { dst } else { src };
+        assert_eq!(ee.f32_at(WHEEL[0] + dst), want as f32, "table {tb}");
+    }
+}
+
+#[test]
+fn the_quads_surface_and_strut_answers_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut g = Gen(0x0065_b002);
+    for k in 0..10_000 {
+        lay_wheels(&mut ee);
+        let mut wheels = [quad::WheelGround::default(); 4];
+        let mut tire = quad::TireSetup::default();
+        for (i, w) in WHEEL.into_iter().enumerate() {
+            wheels[i].surface = g.bits() as u8;
+            ee.write(w + 0x110, 1, u128::from(wheels[i].surface));
+            tire.wheels[i].strut_compression = g.f(-50.0, 50.0);
+            put_f(&mut ee, w + 0x3c, tire.wheels[i].strut_compression);
+        }
+        ee.call(SURFACE_UNDER, &[u64::from(OBJ)], &[], 1_000);
+        assert_eq!(ee.v0() as u32, u32::from(quad::surface_under(&wheels)), "case {k}: the surface");
+        ee.call(STRUT_TRAVEL, &[u64::from(OBJ)], &[], 1_000);
+        assert_eq!(ee.f0().to_bits(), quad::strut_travel(&tire).0.to_bits(), "case {k}: the strut travel");
+    }
+}
+
+#[test]
+fn the_quads_trigger_segments_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let got: Rc<RefCell<Vec<[[Vf; 2]; 4]>>> = Rc::default();
+    {
+        let got = got.clone();
+        ee.hooks.insert(SWEEP_REBUILD, Box::new(move |ee| {
+            assert_eq!(
+                (ee.r(4) as u32, ee.r(5), ee.r(7), ee.r(8) as u32),
+                (TRIGGER_PROBE, 4, 0, SCENE_NODE),
+                "the shape set's probe, count, flag and node"
+            );
+            let pts = ee.r(6) as u32;
+            got.borrow_mut().push(std::array::from_fn(|w| std::array::from_fn(|e| get_v(ee, pts + 0x20 * w as u32 + 0x10 * e as u32))));
+        }));
+    }
+    let mut g = Gen(0x0065_b003);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        lay_wheels(&mut ee);
+        let has = !g.one_in(4);
+        ee.set_u32(OBJ + 0x1430, if has { TRIGGER_PROBE } else { 0 });
+        ee.set_u32(OBJ + 0xe4, SCENE_NODE);
+        let mut tire = quad::TireSetup::default();
+        for (i, w) in WHEEL.into_iter().enumerate() {
+            let tw = &mut tire.wheels[i];
+            tw.mount = g.vec(-40.0, 40.0);
+            tw.strut_compression = g.or_zero(-5.0, 15.0);
+            tw.radius = g.or_zero(-5.0, 15.0);
+            put_v(&mut ee, w + 0x90, tw.mount);
+            put_f(&mut ee, w + 0x3c, tw.strut_compression);
+            put_f(&mut ee, w + 0x214, tw.radius);
+        }
+        tally(&mut t, if has { "a trigger probe" } else { "none" });
+        got.borrow_mut().clear();
+        ee.call(TRIGGER_SEGMENTS, &[u64::from(OBJ)], &[], 10_000);
+        only_touched(&ee, &[]).unwrap_or_else(|e| panic!("case {k}: {e}"));
+        let port = quad::trigger_segments(&tire, has);
+        let bits = |s: &[[Vf; 2]; 4]| s.map(|w| w.map(|v| v.0.map(f32::to_bits)));
+        let original = got.borrow().first().map(bits);
+        assert_eq!(got.borrow().len(), usize::from(has), "case {k}: shape sets");
+        assert_eq!(original, port.as_ref().map(bits), "case {k}: the original's segments, then the port's\n{tire:?}");
+    }
+    each_path_seen(&t, &["a trigger probe", "none"], 1000);
+}
+
+/// What the ground query answers one wheel: whether it moves the point, the normal and the surface,
+/// and what to.
+#[derive(Clone, Copy, Debug)]
+struct GroundAnswer {
+    hit: bool,
+    point: Vf,
+    normal: Vf,
+    surface: u8,
+}
+
+fn answer(w: &mut quad::WheelGround, a: &GroundAnswer) {
+    if a.hit {
+        w.point = a.point;
+        w.normal = a.normal;
+        w.surface = a.surface;
+    }
+}
+
+#[test]
+fn the_quads_ground_settle_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let answers: Rc<RefCell<Vec<GroundAnswer>>> = Rc::default();
+    let asked: Log<(usize, Vf)> = Rc::default();
+    {
+        let (answers, asked) = (answers.clone(), asked.clone());
+        ee.hooks.insert(GROUND_QUERY, Box::new(move |ee| {
+            let point = ee.r(5) as u32;
+            let i = WHEEL.iter().position(|&w| w + 0x140 == point).unwrap_or_else(|| panic!("a query at {point:#x}"));
+            let w = WHEEL[i];
+            assert_eq!(
+                (ee.r(4) as u32, ee.r(6) as u32, ee.r(7), ee.r(8) as u32),
+                (GROUND_WORLD, w + 0x130, 0, w + 0x110),
+                "the query's world, normal, flag and surface"
+            );
+            asked.borrow_mut().push((i, get_v(ee, point)));
+            let a = answers.borrow()[i];
+            if a.hit {
+                put_v(ee, w + 0x140, a.point);
+                put_v(ee, w + 0x130, a.normal);
+                ee.write(w + 0x110, 1, u128::from(a.surface));
+            }
+        }));
+    }
+    let mut g = Gen(0x0065_b004);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        lay_wheels(&mut ee);
+        for o in (0..0x200).step_by(4) {
+            ee.set_u32(BODY + o, 0);
+        }
+        ee.set_u32(OBJ + 0xb8, BODY);
+        ee.set_u32(OBJ + 0x3b4, GROUND_WORLD);
+        let body = Body { orientation: if g.one_in(10) { g.vec(-2.0, 2.0) } else { g.quaternion() }, ..Body::default() };
+        put_v(&mut ee, BODY + 0x190, body.orientation);
+        let node = g.vec(-3000.0, 3000.0);
+        put_v(&mut ee, OBJ + 0xbd0, node);
+        let mut wheels = [quad::WheelGround::default(); 4];
+        for (i, w) in WHEEL.into_iter().enumerate() {
+            let wg = &mut wheels[i];
+            wg.mount = g.vec(-40.0, 40.0);
+            wg.probe = g.vec(-20.0, 20.0);
+            wg.point = g.vec(-100.0, 100.0);
+            wg.normal = g.normal();
+            wg.surface = g.bits() as u8;
+            wg.kept = g.vec(-100.0, 100.0);
+            put_v(&mut ee, w + 0x90, wg.mount);
+            put_v(&mut ee, w + 0x80, wg.probe);
+            put_v(&mut ee, w + 0x140, wg.point);
+            put_v(&mut ee, w + 0x130, wg.normal);
+            ee.write(w + 0x110, 1, u128::from(wg.surface));
+            put_v(&mut ee, w + 0x120, wg.kept);
+        }
+        let a: Vec<GroundAnswer> = (0..4)
+            .map(|_| GroundAnswer { hit: !g.one_in(4), point: g.vec(-3000.0, 3000.0), normal: g.normal(), surface: g.bits() as u8 })
+            .collect();
+        tally(&mut t, if a.iter().all(|a| a.hit) { "all four hit" } else { "a wheel missed" });
+        *answers.borrow_mut() = a.clone();
+        asked.borrow_mut().clear();
+        ee.call(SETTLE, &[u64::from(OBJ)], &[], 20_000);
+        only_touched(&ee, &WHEEL_REGIONS).unwrap_or_else(|e| panic!("case {k}: {e}"));
+        let mut port = wheels;
+        let mut port_asked = Vec::new();
+        let mut n = 0;
+        quad::settle_wheels(&mut port, &body, node, |w| {
+            port_asked.push((n, w.point));
+            answer(w, &a[n]);
+            n += 1;
+        });
+        let bits = |v: Vf| v.0.map(f32::to_bits);
+        let asked_bits = |l: &[(usize, Vf)]| l.iter().map(|&(i, v)| (i, bits(v))).collect::<Vec<_>>();
+        assert_eq!(asked_bits(&asked.borrow()), asked_bits(&port_asked), "case {k}: the points queried");
+        for (i, w) in WHEEL.into_iter().enumerate() {
+            let got = quad::WheelGround {
+                mount: get_v(&ee, w + 0x90),
+                probe: get_v(&ee, w + 0x80),
+                point: get_v(&ee, w + 0x140),
+                normal: get_v(&ee, w + 0x130),
+                surface: ee.u8_at(w + 0x110),
+                kept: get_v(&ee, w + 0x120),
+            };
+            let b = |g: &quad::WheelGround| (bits(g.mount), bits(g.probe), bits(g.point), bits(g.normal), g.surface, bits(g.kept));
+            assert_eq!(b(&got), b(&port[i]), "case {k}: wheel {i}, the original's, then the port's");
+        }
+    }
+    each_path_seen(&t, &["all four hit", "a wheel missed"], 1000);
+}
