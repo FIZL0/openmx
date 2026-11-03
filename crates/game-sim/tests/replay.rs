@@ -12200,6 +12200,180 @@ fn a_parked_plane_wakes_the_truck_driving_into_it_as_the_original_does() {
     assert_eq!(free.map(|w| (w.0, w.1)), Some((want + 2, ctruck)), "the port's own plane wakes the truck");
 }
 
+// --- S252a: a downed bike's wreck wakes the company truck, in the original ----------------------------
+//
+// S252's plane, with the human's own wreck bike instead. research/s252a/drop.py wrecks the bike on the
+// company truck's line (copy 3, from s89-along in slot 40) a couple of game seconds before the truck
+// comes, research/s252a/strike.py records watch/s252a-downed.toml (the wreck bike's body 0x0196f020, the
+// ragdoll's bones, the truck's +0x588) and saves the ticks before the wake:
+//
+//   ./kit pcsx2 with -- python3 -B research/s252a/drop.py PID 40 01cc7630 26.20 3703.0 236 3098.5 2.2 6 0 120 42
+//   ./kit pcsx2 with -- python3 -B research/s252a/strike.py bike 42
+//   ./kit pcsx2 with -- python3 -B research/s252a/drop.py PID 40 01cc7630 26.20 3672.5 236 3099 2.2 6 0 120 43
+//   ./kit pcsx2 with -- python3 -B research/s252a/strike.py roll 43
+//   python3 -B research/s252a/ram.py bike-12026 roll-11995
+//
+// In `bike` the wreck bike lies still 11 ft ahead of the truck and the truck drives into it; in `roll` it
+// rolls down into the truck at ~10 ft/s. Either way the ragdoll is 29 and 105 ft off. The truck is
+// physical on 12031 and 12000, its path point stopped at the tick before's. (context/capture/s252a/ and
+// context/s252a/, in s3's context.)
+
+/// S252a's runs: the capture, the state (asked for on its frame, the capture's row a tick after it),
+/// and the frame the original's truck is physical.
+const S252A_RUNS: [(&str, &str, u64); 2] = [("bike", "s252a-bike-12026.eeMemory.bin", 12031), ("roll", "s252a-roll-11995.eeMemory.bin", 12000)];
+
+/// The wreck bike's body in the S252a states (oracle.txt S252a).
+const S252A_WRECK: u32 = 0x0196_f020;
+
+/// A rigid body as an image holds it (tests/prop_wreck.rs's `ee_body`).
+fn s252a_body(ee: &ps2_oracle::Ee, b: u32) -> game_sim::biplane::Body {
+    let q = |a: u32| Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(b + a + k)));
+    game_sim::biplane::Body {
+        enabled: ee.u32_at(b) != 0,
+        inv_mass: F(ee.f32_at(b + 0x10)),
+        damping: q(0x20),
+        last_position: q(0x50),
+        position: q(0x60),
+        velocity: q(0x70),
+        last_force: q(0x80),
+        force: q(0x90),
+        accel: q(0xa0),
+        shock_peak: q(0xb0),
+        shock: q(0xc0),
+        step: q(0xf0),
+        inv_inertia: q(0x120),
+        ang_damping: q(0x130),
+        last_quat: q(0x150),
+        quat: q(0x170),
+        cofg: q(0x180),
+        moment: q(0x190),
+        last_moment: q(0x1a0),
+        rates: q(0x1b0),
+        ang_accel: q(0x1c0),
+        twist_peak: q(0x1d0),
+        twist: q(0x1e0),
+    }
+}
+
+/// **S252a: a downed bike's wreck wakes the truck that drives into it, as the original's does**: a
+/// [`Sim`] whose rider is down (reason 5, no ragdoll), its wreck bike the state's body, among the
+/// state's cars in free06, ticked with no pad. The wreck bike's search ([`game_sim::wreck_bike::WreckBike::tick_among`],
+/// the plane's scene) strikes the truck's path mesh and the traffic wakes it on the original's tick,
+/// stopped at the original's point. The wreck body is put on the capture's row before each tick up to
+/// the wake: what is held here is the strike, not the tumble. With the body 100 ft up the truck drives
+/// on. Skipped with a line where a capture, a state or the disc is not here.
+#[test]
+fn a_downed_bikes_wreck_wakes_the_truck_driving_into_it_as_the_original_does() {
+    let Some(mut disc) = Disc::open() else { return };
+    let Some((_, part, wrecks)) = the_ragdoll_kit() else { return };
+    let mut areas = Area::all_of(&mut disc, BIPLANE_TRACK);
+    assert_eq!(areas.len(), 1, "{BIPLANE_TRACK} is one area");
+    let area = areas.pop().unwrap();
+    let terrain = Terrain::parse(&area.terrain).expect("free06's terrain");
+    for (name, state, wake) in S252A_RUNS {
+        let path = private_dir("capture").join("s252a").join(format!("{name}.csv"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("no {} — S252a's comment above says how it is recorded", path.display());
+            return;
+        };
+        let cap = Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let image = private_dir("states").join(state);
+        let (Ok(ram), Ok(ee)) = (std::fs::read(&image), ps2_oracle::Ee::from_ram(&image)) else {
+            println!("no {} — research/s252a/ram.py writes it", image.display());
+            return;
+        };
+        // Three worlds, one a run: the props hold the cars' meshes and the marks a search leaves on them.
+        let mut worlds: Vec<_> = (0..3)
+            .map(|_| {
+                let ground = Ground::new(&terrain, &area.scene.terrain);
+                let (mut props, _) = area.props(&mut disc);
+                let mut t = s252_traffic(ram.clone(), &mut disc, &area, &ground);
+                t.attach(&mut props);
+                Some((Place { ground, props }, t))
+            })
+            .collect();
+
+        let body = s252a_body(&ee, S252A_WRECK);
+        let mut sim = Sim::new(0x252a);
+        sim.rider.carries_wreck(part.clone(), wrecks.clone(), game_sim::ride::WRECK_INERTIA);
+        let reason = game_sim::trick::Wreck(5);
+        let mut crash = game_sim::ride::Crash::begin(&sim.rider.ride, reason, &part, game_sim::ride::WRECK_INERTIA, &wrecks, None);
+        crash.bike = game_sim::wreck_bike::WreckBike::new(&part, game_sim::ride::WRECK_INERTIA, body.position, body.quat);
+        crash.bike.body = body;
+        sim.rider.state.wreck = Some(reason);
+        sim.rider.crash = Some(crash);
+
+        let col = |c: &str| column(&cap, c).unwrap_or_else(|e| panic!("{e}"));
+        let held = ["x", "y", "z"].map(|c| col(&format!("wreck_pos.{c}")));
+        let pos = body.position.to_bits();
+        let row = (0..cap.rows.len())
+            .find(|&r| held.iter().zip(pos).all(|(&at, w)| cell(&cap, r, at).parse::<f32>().map(f32::to_bits) == Ok(w)))
+            .expect("the state's wreck bike is on a capture row");
+        let want = wake - cap.frames[row];
+        println!("{name}: {state} is the capture's {} row; the original's truck wakes {want} ticks on", cap.frames[row]);
+        let truck = |r: usize| ["x", "z"].map(|c| cell(&cap, r, col(&format!("truck_pos.{c}"))).parse::<f32>().unwrap());
+        let mut run = |k: usize, lift: f32, pin: bool| {
+            let (mut place, traffic) = worlds[k].take().expect("a world a run");
+            let mut sim = sim.clone();
+            sim.traffic = traffic;
+            let woken = |sim: &Sim| sim.traffic.physics.iter().position(|p| p.as_ref().is_some_and(|p| p.physical));
+            assert_eq!(woken(&sim), None, "{name}: no truck is physical in the state");
+            // Free06's other HasPhysics truck is on another road: the one the capture follows is the
+            // one at its point.
+            let [x0, z0] = truck(row);
+            let off = |k: usize| {
+                let p = sim.traffic.cars[k].point;
+                (p.x() - x0).abs() + (p.z() - z0).abs()
+            };
+            let ctruck = (0..sim.traffic.physics.len())
+                .filter(|&k| sim.traffic.physics[k].is_some())
+                .min_by(|&a, &b| off(a).total_cmp(&off(b)))
+                .expect("a HasPhysics car");
+            let mut woke = None;
+            for t in 1..=want + 20 {
+                if let Some(r) = cap.frames.iter().position(|&v| v == cap.frames[row] + t - 1).filter(|_| pin && t <= want) {
+                    let n = |c: &str| cell(&cap, r, col(c)).parse::<f32>().unwrap();
+                    let bike = &mut sim.rider.crash.as_mut().expect("the rider is down").bike;
+                    let b = &mut bike.body;
+                    b.position = Vf::new(n("wreck_pos.x"), n("wreck_pos.y") + lift, n("wreck_pos.z"), 1.0);
+                    b.velocity = Vf::new(n("wreck_vel.x"), n("wreck_vel.y"), n("wreck_vel.z"), 0.0);
+                    b.quat = Vf::new(n("wreck_quat.x"), n("wreck_quat.y"), n("wreck_quat.z"), n("wreck_quat.w"));
+                    b.rates = Vf::new(n("wreck_rates.x"), n("wreck_rates.y"), n("wreck_rates.z"), 0.0);
+                    // The search places the probes at the record's node, which the world's post
+                    // leaves where the body is: put there too.
+                    bike.record.node = game_sim::wreck_bike::WreckBike::new(&part, game_sim::ride::WRECK_INERTIA, b.position, b.quat).record.node;
+                }
+                sim.tick_in(Input::default(), &mut place);
+                if sim.rider.crash.is_none() {
+                    // A down rider with no bones is put back once the wreck settles.
+                    assert!(t > want, "{name} tick {t}: the rider is put back before the wake");
+                    break;
+                }
+                let r = cap.frames.iter().position(|&v| v == cap.frames[row] + t).expect("a row a tick");
+                let point = sim.traffic.cars[ctruck].point;
+                if pin && t < want {
+                    let [x, z] = truck(r);
+                    assert!((point.x() - x).abs() < 1e-3 && (point.z() - z).abs() < 1e-3, "{name} tick {t}: the truck at {:?}, the original's ({x}, {z})", point.0);
+                }
+                if woke.is_none() && let Some(k) = woken(&sim) {
+                    woke = Some((t, k == ctruck, point));
+                }
+            }
+            woke
+        };
+        let pinned = run(0, 0.0, true);
+        let free = run(1, 0.0, false);
+        let lifted = run(2, 100.0, true);
+        println!("{name}: the port's truck wakes {pinned:?} with the wreck on the capture's rows, {free:?} with the port's own, {lifted:?} with it 100 ft up");
+        let wake_row = cap.frames.iter().position(|&v| v == wake).expect("the wake's row");
+        let [x, z] = truck(wake_row);
+        let (t, company, at) = pinned.unwrap_or_else(|| panic!("{name}: the wreck bike's search wakes the truck"));
+        assert_eq!((t, company), (want, true), "{name}: the company truck wakes on the original's tick, {wake}");
+        assert!((at.x() - x).abs() < 1e-3 && (at.z() - z).abs() < 1e-3, "{name}: it stops at the original's point: {:?}, ({x}, {z})", at.0);
+        assert_eq!(lifted.map(|w| w.0), None, "{name}: with the wreck 100 ft up the truck drives on");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // F18: the native build's tolerance suite
 // ---------------------------------------------------------------------------------------------------

@@ -1,0 +1,314 @@
+# s252a-downed.toml — a downed bike on free06 in a HasPhysics truck's way, one row a tick (S252a).
+#
+# research/s252a/drop.py wrecks s89-along's bike (the 250) on the line of the truck at 0x01cc7630 (S207's
+# ctruck, research/oracle.txt S186) a few seconds before the truck comes; research/s252a/strike.py records
+# this from its state and saves states around the truck's wake:
+#
+#   KIT_PCSX2=3 ./kit pcsx2 with -- python3 -B research/s252a/strike.py NAME SLOT
+#
+# Addresses as every state made from s89-along has them: the rider 0x01890cd0 (+0x748 the wreck reason),
+# the wreck bike's body 0x0196f020 (the rider's +0x7a8 -> +0x110: +0x00 enabled, +0x60 position, +0x70 velocity, +0x170 quat, +0x1b0
+# rates; 0x01971110 is the riding body, frozen at the wreck's velocity with the wreck's position), the ragdoll's body actor 0x009ffc50 (the vehicle 0x00a00050
+# - 0x400): its eighteen parts (+0x2f4, stride 0xb0, the bone's body at +0xa4) and its nine bone collisions
+# (+0x624, +0x14 touched). The truck: its physical flag (+0x588, the struck listener's wake sets it), +0x58c,
+# its path clock (+0x430 -> +0xc), its position (+0x470) and heading (+0x480).
+
+[watch]
+name        = "s252a-downed"
+description = "a downed free06 bike and its ragdoll in a HasPhysics truck's way, a row a tick"
+every       = 1
+frames      = 600
+
+[setup]
+warmup    = 0
+settle_ms = 240
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "reason"
+addr = "0x1890cd0 + 0x748"
+type = "u32"
+
+[[field]]
+name = "wreck_on"
+addr = "0x196f020"
+type = "u32"
+
+[[field]]
+name = "wreck_pos"
+addr = "0x196f020 + 0x60"
+type = "f32x4"
+
+[[field]]
+name = "wreck_vel"
+addr = "0x196f020 + 0x70"
+type = "f32x4"
+
+[[field]]
+name = "wreck_quat"
+addr = "0x196f020 + 0x170"
+type = "f32x4"
+
+[[field]]
+name = "wreck_rates"
+addr = "0x196f020 + 0x1b0"
+type = "f32x4"
+
+[[field]]
+name = "bone0_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0xa4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone0_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0xa4 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone1_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x154 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone1_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x154 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone2_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x204 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone2_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x204 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone3_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x2b4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone3_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x2b4 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone4_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x364 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone4_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x364 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone5_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x414 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone5_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x414 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone6_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x4c4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone6_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x4c4 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone7_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x574 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone7_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x574 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone8_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x624 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone8_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x624 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone9_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x6d4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone9_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x6d4 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone10_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x784 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone10_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x784 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone11_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x834 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone11_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x834 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone12_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x8e4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone12_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x8e4 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone13_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0x994 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone13_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0x994 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone14_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0xa44 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone14_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0xa44 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone15_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0xaf4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone15_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0xaf4 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone16_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0xba4 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone16_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0xba4 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "bone17_pos"
+addr = "0x9ffc50 + 0x2f4 -> 0xc54 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "bone17_vel"
+addr = "0x9ffc50 + 0x2f4 -> 0xc54 -> 0x70"
+type = "f32x4"
+
+[[field]]
+name = "touch0"
+addr = "0x9ffc50 + 0x624 -> 0x0 -> 0x14"
+type = "u32"
+
+[[field]]
+name = "touch1"
+addr = "0x9ffc50 + 0x624 -> 0x4 -> 0x14"
+type = "u32"
+
+[[field]]
+name = "touch2"
+addr = "0x9ffc50 + 0x624 -> 0x8 -> 0x14"
+type = "u32"
+
+[[field]]
+name = "touch3"
+addr = "0x9ffc50 + 0x624 -> 0xc -> 0x14"
+type = "u32"
+
+[[field]]
+name = "touch4"
+addr = "0x9ffc50 + 0x624 -> 0x10 -> 0x14"
+type = "u32"
+
+[[field]]
+name = "touch5"
+addr = "0x9ffc50 + 0x624 -> 0x14 -> 0x14"
+type = "u32"
+
+[[field]]
+name = "touch6"
+addr = "0x9ffc50 + 0x624 -> 0x18 -> 0x14"
+type = "u32"
+
+[[field]]
+name = "touch7"
+addr = "0x9ffc50 + 0x624 -> 0x1c -> 0x14"
+type = "u32"
+
+[[field]]
+name = "touch8"
+addr = "0x9ffc50 + 0x624 -> 0x20 -> 0x14"
+type = "u32"
+
+[[field]]
+name = "truck_physical"
+addr = "0x1cc7630 + 0x588"
+type = "u32"
+
+[[field]]
+name = "truck_was_physical"
+addr = "0x1cc7630 + 0x58c"
+type = "u32"
+
+[[field]]
+name = "truck_clock"
+addr = "0x1cc7630 + 0x430 -> 0xc"
+type = "f32"
+
+[[field]]
+name = "truck_pos"
+addr = "0x1cc7630 + 0x470"
+type = "f32x4"
+
+[[field]]
+name = "truck_heading"
+addr = "0x1cc7630 + 0x480"
+type = "f32x4"

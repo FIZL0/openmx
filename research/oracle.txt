@@ -5611,6 +5611,31 @@ physics_car_settle    boot 0x003e3c40 (car, f12 dt) the world node's listener: b
 #   (8); +0x58c follows on the same row; +0x470 holds its 11091 point from then on, so the plane's search
 #   struck the mesh before that tick's car update, as S186a's body rays did. The plane is thrown off at
 #   ~1 ft/tick (+x). Not seen: a downed bike's or a ragdoll's strike, and the order of two strikes in a tick.
+# S252a — a downed bike's wreck wakes ctruck (test tests/replay.rs
+#   a_downed_bikes_wreck_wakes_the_truck_driving_into_it_as_the_original_does; journal
+#   2026-11-02-s186-struck-trucks/4). Copy 3, from s89-along (slot 40) via research/s252a/drop.py, captured by
+#   research/s252a/strike.py with watch/s252a-downed.toml (context/capture/s252a/{bike,roll,doll}.csv, the
+#   states context/s252a/NAME-<frame>.p2s). The truck is 0x01cc7630 (S207's ctruck): +0x588 physical, +0x58c,
+#   +0x428 its path mesh 0x01dbdee0 (still set after the wake), +0x698 its physics object 0x01dbe170 (+0x110
+#   body 0x01dbe360, +0x124 m.col 0x01dbe5a0, +0x128 f.col 0x01dbf7f0), whose collision object is 0x01dc0420
+#   (+0x1f0 m.col, +0x1f4 sweep 0x01dbfed0, +0x1f8 f.col, +0x1fc the collidable last struck, 0 before the wake).
+#   The wreck bike: its body is the rider's +0x7a8 -> +0x110 = 0x0196f020 in every s89-along state (not
+#   0x0195c6a0, whose +0x60/+0x70 sit about a foot off the body's and whose +0x170 is heap text); its
+#   collision object 0x01970060 (S171; +0x1f0 ray probe 0x0196f220, +0x1f4 sweep 0x0196fe10, +0x1f8
+#   collidable 0x0196f7a0, +0x1fc the collidable last struck). Record entries: +0x100 count, +0x108 array,
+#   stride 0x80 (kind +0, normal +0x30, point +0x40, other +0x74, mover +0x78).
+#   bike (wreck lying still 11 ft ahead) wakes on 12031, roll (wreck rolling down at ~10 ft/s) on 12000:
+#   the 4th tick after the 12026 / 11995 states. +0x470 holds the tick before's point.
+#   Mid-tick stand-down: on the wake tick the wreck object's +0x1fc is the path mesh 0x01dbdee0, but its
+#   list holds no entry naming the mesh: the strike's listener woke the truck and stood the mesh down
+#   before an entry was kept. The truck object's list (empty the tick before) then holds its own ground
+#   entries and kind-0 entries naming 0x01970060 (3 in bike, 4 in roll), its +0x1fc = 0x0196f7a0, and the
+#   wreck's list the kind-1 mirrors (other 0x01dc0420): the woken truck's own search ran later that tick and
+#   met the wreck bike. No entry names the f.col 0x01dbf7f0 itself; the m.col/f.col pair is newly filed in
+#   collidable lists at 0x00d3a580, 0x011e49b0, 0x011e4c54 (bike).
+#   doll (the ragdoll in the way, the wreck 29 ft off): wakes on 11962; the truck's object that tick holds
+#   ground entries only, and new path-mesh references sit at 0x00a57e64 and 0x00a580f0 (the ragdoll's
+#   records): the strike came from a bone. doll.csv's wreck columns read 0x0195c6a0 (recorded before the fix).
 toy_cars_read        boot 0x00289710 the .toy's [Cars] reader (above)
 # S169 — the .toy's HasPhysics things, and what their collidables name (journal 2026-10-28-s169-physics-props;
 #   tests crates/game-sim/tests/prop_under.rs). On the disc only [CarN] sections carry HasPhysics (free06,
