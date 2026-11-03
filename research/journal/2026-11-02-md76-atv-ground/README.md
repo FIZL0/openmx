@@ -7,6 +7,10 @@ MD76a (`2-record-byte-MD76a.md`): the record byte now reaches `atv_wheel::suspen
 MD76a1 (`3-collidables-and-gather-MD76a1.md`): MC02's meshes and plants in the original's quadtree,
 and the gather that fills the quad's nearby list (quad `+0xc4`), equal to the original's on 9,930 probe centres.
 
+MD76a2 (`4-search-MD76a2.md`): the quad's wheel-ray search (`ContactCall::Collide`) over that list, its
+record equal to the original's bit for bit on 6,001 frames (1,617 contacts on all 120 meshes) and on 136
+frames blended from MD37a's swept-contact rows.
+
 `game_sim::atv_ground` ports two SLUS-21104 functions: the ground query the quad's wheel suspension
 asks under each probe end (`atv_ground_query`), and the terrain's cell reader under it
 (`atv_terrain_cell`). It runs over Desert Oasis's map as the game loads it. `tests/atv_ground.rs` runs

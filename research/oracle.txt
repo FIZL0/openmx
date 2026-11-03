@@ -8422,3 +8422,37 @@ atv_follow_presets_load     atv 0x001c5e00 = the follow camera's file loader: se
 atv_preset_array_grow       atv 0x001c6480 = grows the 0xa0-byte record array (zeroes only on growth)
 atv_follow_camera_vtable    atv 0x003cc6f0 = MXCameraFollow's vtable (at object +4): update 0x0048b490, ground probe 0x0048b3e0; preset +0x110 current, +0x118 count, +0x124 records, +0x128 file
 atv_race_camera_vtable      atv 0x003cc180 = the race camera's vtable: update 0x00485b20, probe 0x00485a70; allocated in free ride, no presets
+# MD76a2 — the quad's wheel-ray search (crates/game-sim/src/atv_search.rs; tests/atv_search.rs runs the
+# original's stand, gather and search off MD37a's atv-r-spawn.ee.bin, gp 0x003dbaf0). Journal:
+# research/journal/2026-11-02-md76-atv-ground/4-search-MD76a2.md. atv_collide_against_search is
+# world_search::search_nearby but: a class-2 collidable whose word 0 is 1 is passed over before its
+# searched bit is set; prepare (vt +0xd0) runs only if list +0x40 != 0 and a2. atv_quad_wheel_contacts sets
+# quad +0x143c = 0, calls the search's vt +0xc8 (stand at the node's matrix), then the search (a2 1); on
+# the hit bit (0x20) it walks the record: rays +0x90 (0x20 a ray, x from [0], z from [2]), normals +0x94,
+# points +0x98, objects +0x9c; owner obj +0x90, vehicle obj +0x8c (counted if its +0x1a0 == 2); the wheels
+# quad +0x17b0..+0x17bc (LF, RF, LR, RR). The trigger probe quad +0x1430 = 0x0162cd30: ray-probe vtable
+# 0x003b6c20, category 0x12, collides with all, objects mode 1 (4, the quad's), more objects mode 1 empty,
+# categories mode 1 [0x8000, 0x4] (zones left out), flags 0x12, nearby, no listeners, word 0 = 0, smooth
+# +0x184 0, filter +0x188 0; tree root u16 +0x170, ray count +0x178 (4), nodes +0x17c (0x24 each), rays
+# +0x180 (0x20 each), in the order RF, LF, RR, LR. Stand: matrix to +0x130, centre +0x50 = row 3 + rows x
+# root centre (accumulator), radius = sqrt(mula hx hx, madda hy hy, madd hz hz). The node matrix is the
+# body's rotation with position = body pos - row 1 (CofG +0x1a0 = (0,1,0)). Record: from +0, to +0x10,
+# normal +0x20, point +0x30, push +0x40, low +0x50, high +0x60, first point +0x70, first +0x80, part +0x84,
+# capacity +0x88 (3 x rays), count +0x8c, rays +0x90, normals +0x94, points +0x98, objects +0x9c, placed
+# +0xa0, fractions +0xa8, +0xac a word a contact zeroed at every pair and never written, segments u16
+# +0xb0, nearest +0xb4, flags +0xb8, one per ray +0xbc = 1. Plants (eco 0x0052cd88, models +0x84): each
+# species' parts +0x19c (count +0x194), shared by all its plants and stood at the plant at each ask
+# (skipped if group +0x16 bit 3): kind 5 sphere (category 0x80; its ray test writes no contact, only the
+# hit bit), kind 0 mesh (category 0x40; MC02's prickly pear B and weeds B, built cylinders of height 0,
+# nodes +0x244, facets +0x248, root +0x23c 0) at rows +0x1b0..+0x1dc (identity), position = cell x eco
+# +0xc4, then vt +0xcc; the turn (group +0x16 bit 2) reads eco +0x70, NULL here. Scene meshes: kind +0x78 0,
+# frame +0x130 = the prop's to_world bit for bit.
+atv_ray_probe_stand         atv 0x001bcfe0 = the ray probe stood at a matrix (a0 probe, a1 matrix): its frame, centre and reach (vt +0xcc)
+atv_eco_part_count          atv 0x0046d390 = a plant group's part count (the species' +0x194)
+atv_eco_part                atv 0x0046d3c0 = a plant group's part i, stood at the plant
+atv_ray_sphere              atv 0x001095d0 = the ray probe against a sphere (hit bit only; not ported)
+atv_ray_mesh_leaf           atv 0x00107a20 = the ray probe's leaf against a mesh's facet
+atv_ray_tree_pair           atv 0x00108820 = the ray probe's tree against a mesh's tree
+atv_listener_at             atv 0x00117460 = a collidable's listener j
+atv_record_current          atv 0x00116990 = the record's current contact
+pc_quad_collide_search      pc 0x00424350 = the PC's collide_against_search (the quad's search)
