@@ -883,6 +883,39 @@ impl Plane {
         bikes: &[game_sim::flight_search::Bike],
         met: Option<&mut flight::Met>,
     ) -> bool {
+        self.step_traffic_shared(sim, dt, world, bikes, met, None)
+    }
+
+    /// [`Plane::step_traffic`] for seat `seat` of seats that share one prop set (S259,
+    /// [`game_sim::prop_seats`]): the set is lent to the seat for the plane's frame, which strikes it
+    /// naming the plane by its seat, and the props' step is the set's, once a tick, with the plane
+    /// as the seat's striker ([`game_sim::prop_seats::Shared::finish`]).
+    pub fn step_traffic_shared(
+        &mut self,
+        sim: &mut Sim,
+        dt: F,
+        world: &mut dyn World,
+        bikes: &[game_sim::flight_search::Bike],
+        met: Option<&mut flight::Met>,
+        shared: Option<(&mut game_sim::prop_seats::Shared, usize)>,
+    ) -> bool {
+        if let Some((shared, seat)) = shared {
+            shared.lend(sim, dt, world);
+            let mut props = std::mem::take(&mut sim.traffic.props);
+            let respawned = match self.ready(sim, world) {
+                Some(ready) => {
+                    let f = self.flight.as_mut().expect("a readied plane has its flight");
+                    let _struck = f.frame_props(dt, ready.pad, world, &sim.tables.ride, bikes, met, &mut props, seat);
+                    self.settle(ready)
+                }
+                None => false,
+            };
+            sim.traffic.props = props;
+            shared.back(sim);
+            sim.traffic.frame_late(dt, world);
+            self.pose();
+            return respawned;
+        }
         if sim.traffic.props.is_empty() || self.flight.is_none() {
             sim.traffic.frame(dt, world);
             return self.step_met(sim, dt, world, bikes, met);
@@ -1486,6 +1519,20 @@ impl Garage {
         self.plane_flown().filter(|p| p.placed)?.flight.as_ref()
     }
 
+    /// The flight of the plane the player flies, to push (S259): what strikes the seats' shared
+    /// props in their step ([`game_sim::prop_seats::Shared::finish_flying`]).
+    pub fn flight_flown_mut(&mut self) -> Option<&mut Flight> {
+        let up = self.up;
+        self.plane.as_mut().filter(|p| up == Kind::Biplane && p.placed)?.flight.as_mut()
+    }
+
+    /// The plane posed again after the shared props' step pushed it (S259).
+    pub fn plane_reposed(&mut self) {
+        if let Some(p) = self.plane.as_mut() {
+            p.pose();
+        }
+    }
+
     /// Its plane's body as a rider's bike pushed it (N22a, [`Flight::pushed`]), written back.
     pub fn plane_pushed(&mut self, by: &game_sim::rider_contact::Flown) {
         if let Some(p) = self.plane.as_mut()
@@ -1550,7 +1597,7 @@ impl Garage {
         match (self.up, &mut self.plane) {
             (Kind::Biplane, Some(plane)) => {
                 // The track's path cars run on whichever machine is up (S81).
-                let respawned = plane.step_traffic(sim, dt, world, among.bikes, among.met);
+                let respawned = plane.step_traffic_shared(sim, dt, world, among.bikes, among.met, among.props);
                 rider::Frame { respawned, ..rider::Frame::default() }
             }
             // The bike's ghost ticks inside its update (`Rider::frame`), so a bike the plane has the
@@ -1854,10 +1901,24 @@ pub fn fly_lane_met(
     bikes: &[game_sim::flight_search::Bike],
     met: Option<&mut flight::Met>,
 ) -> bool {
+    fly_lane_shared(sim, dt, wanted, world, bikes, met, None)
+}
+
+/// [`fly_lane_met`] for seat `seat` of seats that share one prop set (S259,
+/// [`Plane::step_traffic_shared`]).
+pub fn fly_lane_shared(
+    sim: &mut Sim,
+    dt: F,
+    wanted: Wanted,
+    world: &mut dyn World,
+    bikes: &[game_sim::flight_search::Bike],
+    met: Option<&mut flight::Met>,
+    shared: Option<(&mut game_sim::prop_seats::Shared, usize)>,
+) -> bool {
     let Some(f) = sim.plane.take() else { return false };
     let mut plane =
         Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
-    let respawned = plane.step_traffic(sim, dt, world, bikes, met);
+    let respawned = plane.step_traffic_shared(sim, dt, world, bikes, met, shared);
     sim.plane = plane.flight.take();
     respawned
 }
