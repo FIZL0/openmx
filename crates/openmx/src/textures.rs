@@ -53,12 +53,13 @@ pub fn key_of(name: &str) -> Option<&str> {
     stem.rsplit_once('-').map(|(_, k)| k).filter(|k| is_key(k))
 }
 
-/// Every key-named PNG under `d`, walked in name order; the first file of a key wins.
+/// Every key-named PNG under `d`, walked in name order; the first file of a key wins. Through
+/// [`crate::files`], so the browser's OPFS `mods/` walks as the desktop's folder does (P261).
 fn walk(d: &Path, out: &mut HashMap<String, PathBuf>) {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    let mut entries: Vec<(PathBuf, bool)> = crate::files::list(d).into_iter().flatten().map(|l| (l.path, l.dir)).collect();
     entries.sort();
-    for p in entries {
-        if p.is_dir() {
+    for (p, dir) in entries {
+        if dir {
             walk(&p, out);
         } else if let Some(k) = p.file_name().and_then(|n| n.to_str()).and_then(key_of) {
             out.entry(k.to_string()).or_insert(p);
@@ -102,7 +103,7 @@ pub struct Pack {
 
 /// Whether `dir/mod.json` says `"kind": "textures"`.
 fn is_pack(dir: &Path) -> bool {
-    let text = std::fs::read_to_string(dir.join("mod.json")).unwrap_or_default();
+    let text = crate::files::read_to_string(dir.join("mod.json")).unwrap_or_default();
     Json::parse(&text).ok().is_some_and(|j| j.get("kind").and_then(Json::str) == Some("textures"))
 }
 
@@ -139,7 +140,8 @@ fn packs_saying(mods: &Path, order: &[String], off: &[String], say: bool) -> Vec
 /// P230: the texture pack in `dir`, named `folder`, read as [`packs`] reads one and checked as the mod
 /// store installs one (hostile input): its `mod.json` says textures, it holds a key-named file under
 /// `textures/`, and every such file is a PNG whose header reads. The pictures themselves decode when a
-/// ride first asks for them, as any pack's do.
+/// ride first asks for them, as any pack's do. Read through [`crate::files`], so the browser's store
+/// checks its OPFS stage with it as the desktop checks its folder (P261).
 pub fn pack_at(dir: &Path, folder: &str) -> Result<Pack, String> {
     if !is_pack(dir) {
         return Err("its mod.json does not say \"kind\": \"textures\"".into());
@@ -152,7 +154,7 @@ pub fn pack_at(dir: &Path, folder: &str) -> Result<Pack, String> {
     let mut files: Vec<&PathBuf> = textures.values().collect();
     files.sort();
     for f in files {
-        let read = std::fs::File::open(f).map_err(|e| e.to_string()).and_then(|r| png::Decoder::new(std::io::BufReader::new(r)).read_info().map(|_| ()).map_err(|e| e.to_string()));
+        let read = crate::files::read(f).map_err(|e| e.to_string()).and_then(|b| png::Decoder::new(std::io::Cursor::new(b)).read_info().map(|_| ()).map_err(|e| e.to_string()));
         if let Err(why) = read {
             let rel = f.strip_prefix(dir).unwrap_or(f).to_string_lossy().replace('\\', "/");
             return Err(format!("{rel} is not a PNG that reads: {why}"));

@@ -686,7 +686,7 @@ fn a_pad_without_the_standard_mapping_keeps_its_d_pad_and_triggers() {
 /// `--screen store` pointed at a fake store on the page's own loopback server, the disc picked; one
 /// Space (Cross) on the store's only card downloads its mod.zip through the redirect to the "CDN" into
 /// OPFS, checks and unpacks it, and the track is in OPFS `mods/tracks/<id>/` with its store.json,
-/// the download gone. Then (P217) the shell lists it, out of OPFS, and the page opened again with
+/// the download gone. Then (P217) the shell lists it, out of OPFS, with its picture (P261), and the page opened again with
 /// `--track` on it rides it. The module is `tools/web.sh --check`'s. Skips without the disc, node or
 /// chromium.
 #[test]
@@ -727,6 +727,8 @@ fn the_browser_installs_from_the_store() {
     assert_eq!((field("zips").as_str(), field("ranges").as_str()), ("2", "0"), "{text}");
     // P217: the install read OPFS mods/ again, so Free Ride's list has the track; and the page rides it
     assert!(field("listed").starts_with("mods: 1 tracks"), "the shell's track list did not see the install: {text}");
+    // P261: and its card has the zip's own picture, read out of OPFS (no still: the page has no binary to take one)
+    assert_eq!(field("pictured"), "mods: pictures of web_store_track", "the track's card has no picture: {text}");
     assert!(field("rode").starts_with("mods: web_store_track (Web Store Track) from"), "the ride did not load the installed track: {text}");
     assert_eq!(field("ride"), "started", "the ride on the installed track failed: {text}");
     let frames: f64 = field("frames").parse().unwrap_or(0.0);

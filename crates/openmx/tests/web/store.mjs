@@ -7,9 +7,10 @@
 //   node store.mjs <web dir> <pkg dir> <disc.iso> <scratch profile dir>
 //
 // Prints one JSON line: { state, files: [OPFS mods/ paths], stamp, left: [OPFS store/ names], zips, ranges, presses,
-// listed, rode, ride, frames } — `stamp` the installed store.json's sha256, `left` what is still in the downloads folder,
+// listed, pictured, rode, ride, frames } — `stamp` the installed store.json's sha256, `left` what is still in the downloads folder,
 // `zips` the mod.zip requests the store and its CDN saw, `ranges` how many asked a Range; `listed` the shell's `mods:`
-// line once the install made it read the mods folder again (Free Ride's list), `rode` its line for the ride's track,
+// line once the install made it read the mods folder again (Free Ride's list), `pictured` its line for the track cards'
+// pictures then (P261), `rode` its line for the ride's track,
 // `ride` the page's state through the ride and `frames` the pictures it drew in its last seconds.
 // With OPENMX_STORE_LOG set, each store request is printed to stderr; with OPENMX_STORE_SHOT a path, the page's last
 // picture is written there.
@@ -106,7 +107,29 @@ const scene = ['[SceneInfo]', 'SceneName=Web Store Track', 'DefaultStartPosition
   'TerrainBorderWidth=0.00', 'MinDivisionSize=16.00', '[Fog]', 'ColorRGB=150,151,139', '[CollisionObjects]', 'NumberOfCollisionObjects=1',
   '[Object1]', 'COL=mdwall.col', 'Position=700.00,0.00,500.00', ''].join('\r\n');
 const files = [['mod.json', Buffer.from(modJson)], ['Env/MDFLAT/MDFLAT.scn', Buffer.from(scene)], ['Env/MDFLAT/MDFLAT.ps2.trn', flatTerrain()],
-  ['Col/mdwall.col', wallCol()], ['filler.dat', filler], ['previews/0.png', Buffer.alloc(300, 7)]];
+  ['Col/mdwall.col', wallCol()], ['filler.dat', filler], ['previews/0.png', png(16, 9)]];
+// A 16x9 RGB PNG of a gradient: a store zip's picture by another name than previews/track.png, which the browser's
+// pick shows on the track's card (P261).
+function png(w, h) {
+  const chunk = (kind, body) => {
+    const len = Buffer.alloc(4), crc = Buffer.alloc(4), k = Buffer.from(kind);
+    len.writeUInt32BE(body.length);
+    crc.writeUInt32BE(zlib.crc32(Buffer.concat([k, body])));
+    return Buffer.concat([len, k, body, crc]);
+  };
+  const head = Buffer.alloc(13);
+  head.writeUInt32BE(w, 0);
+  head.writeUInt32BE(h, 4);
+  head[8] = 8;
+  head[9] = 2;
+  const rows = [];
+  for (let y = 0; y < h; y++) {
+    rows.push(0);
+    for (let x = 0; x < w; x++) rows.push(x * 16, y * 28, 128);
+  }
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', head),
+    chunk('IDAT', zlib.deflateSync(Buffer.from(rows))), chunk('IEND', Buffer.alloc(0))]);
+}
 function zip(entries) {
   const out = [];
   const dir = [];
@@ -325,6 +348,9 @@ d = await data();
 const said = prefix => logs.find(l => l.startsWith(prefix)) ?? null;
 for (const end = Date.now() + 10000; Date.now() < end && !said('mods: 1 tracks'); ) await new Promise(r => setTimeout(r, 200));
 const listed = said('mods: 1 tracks');
+// and its card's picture, the zip's previews/0.png out of OPFS (P261)
+for (const end = Date.now() + 10000; Date.now() < end && !said('mods: pictures of'); ) await new Promise(r => setTimeout(r, 200));
+const pictured = said('mods: pictures of');
 
 // And the page rides it: opened again on the installed track, which only OPFS `mods/` has. A ride that does not load
 // is the shell's error, and the page's state `failed`; one that does draws its frames.
@@ -344,7 +370,7 @@ for (let i = 0; i < 5 && ride.state === 'started'; i++) {
 }
 if (process.env.OPENMX_STORE_SHOT)
   fs.writeFileSync(process.env.OPENMX_STORE_SHOT, Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
-console.log(JSON.stringify({ state: d.state, files: got.files, stamp: got.stamp, sha, left, zips, ranges, presses, listed, rode,
+console.log(JSON.stringify({ state: d.state, files: got.files, stamp: got.stamp, sha, left, zips, ranges, presses, listed, pictured, rode,
   ride: ride.state, frames: Math.round(frames) }));
 chrome.kill();
 await new Promise(r => chrome.on('exit', r));

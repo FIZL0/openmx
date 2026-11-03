@@ -619,18 +619,14 @@ pub fn check_mod_json(b: &[u8], meta: &Meta) -> Result<(), String> {
 /// The staged copy in `stage` (its `<kind folder>/<id>/`) read the way the shell reads its kind, as
 /// hostile input: a track's mod.json and its one scene, a world's pieces, a trick pack's tables, a
 /// music pack's listing, a texture pack's key-named PNGs. The browser's build (P217) reads its OPFS
-/// stage through [`crate::files`] with the same readers, but for a texture pack, which the page has no
-/// reader of: that is checked by the zip and `mod.json` alone.
+/// stage through [`crate::files`] with the same readers, a texture pack's too since P261.
 pub fn parse_check(stage: &Path, kind: Kind, id: &str) -> Result<(), String> {
     match kind {
         Kind::Track => track_mods::find(stage, id).map(|_| ()),
         Kind::World => crate::worlds::find(stage, id).map(|_| ()),
         Kind::Tricks => crate::trick_packs::by_id(stage, id).map(|_| ()),
         Kind::Music => track_mods::music_packs(stage).iter().any(|p| p.0 == id).then_some(()).ok_or_else(|| "not a music pack the shell reads".into()),
-        #[cfg(not(target_arch = "wasm32"))]
         Kind::Textures => crate::textures::pack_at(&stage.join("textures").join(id), &format!("textures/{id}")).map(|_| ()),
-        #[cfg(target_arch = "wasm32")]
-        Kind::Textures => Ok(()),
         Kind::Other => Err("a kind this build does not know".into()),
     }
 }

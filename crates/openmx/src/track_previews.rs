@@ -118,14 +118,37 @@ pub fn still_fresh(mods: &Path, id: &str) -> bool {
     }
 }
 
+/// The picture `id` brings, read through [`crate::files`] (P261: the browser's OPFS `mods/` too): its
+/// [`OWN`]; in the browser, which cannot take a still, else the first other `previews/*.png` of its
+/// folder in name order, as a store zip may carry one.
+pub fn own_picture(mods: &Path, id: &str) -> Option<PathBuf> {
+    let own = own(mods, id);
+    if crate::files::is_file(&own) {
+        return Some(own);
+    }
+    if !cfg!(target_arch = "wasm32") {
+        return None;
+    }
+    let mut pngs: Vec<PathBuf> = crate::files::list(mods.join("tracks").join(id).join(STILLS_DIR))
+        .into_iter()
+        .flatten()
+        .filter(|l| !l.dir && l.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")))
+        .map(|l| l.path)
+        .collect();
+    pngs.sort();
+    pngs.into_iter().next()
+}
+
 /// What the pick has for each of `ids` now, `(id, picture)`, and the ids that need a still taken.
-/// A picture that does not read is a line in `log` and no picture.
+/// A picture that does not read is a line in `log` and no picture. The browser takes no still: a mod
+/// with no picture of its own is a card with none.
 pub fn gather(mods: &Path, ids: &[String], log: &mut Vec<String>) -> (Vec<(String, Texture)>, Vec<String>) {
     let (mut have, mut take) = (Vec::new(), Vec::new());
     for id in ids {
-        let own = own(mods, id);
-        let path = if own.is_file() {
+        let path = if let Some(own) = own_picture(mods, id) {
             own
+        } else if cfg!(target_arch = "wasm32") {
+            continue;
         } else if still_fresh(mods, id) {
             still(mods, id)
         } else {
@@ -188,9 +211,9 @@ fn take_still(exe: &Path, mods: &Path, id: &str) -> Result<Texture, String> {
     load(&out)
 }
 
-/// A PNG file as a texture.
+/// A PNG file as a texture, read through [`crate::files`].
 pub fn load(path: &Path) -> Result<Texture, String> {
-    decode_png(&std::fs::read(path).map_err(|e| e.to_string())?)
+    decode_png(&crate::files::read(path).map_err(|e| e.to_string())?)
 }
 
 /// A PNG as a texture: 8 bits a channel, grey, grey and alpha, RGB, RGBA or a palette (with its

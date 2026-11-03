@@ -11008,7 +11008,10 @@ fn mod_pictures(
     let mut log = Vec::new();
     let (have, take) = track_previews::gather(folder, &ids, &mut log);
     for line in log {
-        println!("{line}");
+        mods_line(line);
+    }
+    if !have.is_empty() {
+        mods_line(format!("mods: pictures of {}", have.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")));
     }
     for (id, picture) in have {
         art.set_mod_picture(&id, picture);
