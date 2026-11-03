@@ -696,7 +696,7 @@ const SETTLE: u32 = 30;
 
 /// The riding ticks [`the_drawn_rider_leans_as_the_original_through_the_turns`] compares, and of
 /// those the hard-turn ones (the original's head 0.5 ft or more to a side of its pelvis).
-const DRAWN_TICKS: (usize, usize) = (1793, 274);
+const DRAWN_TICKS: (usize, usize) = (1793, 276);
 
 /// **S228a — the drawn rider's lean through the tape's turns, as drawn.** Every stretch of [`HELD`]
 /// that holds past [`SETTLE`] is ridden by [`ride_drawn`], the drawn rider beside it as the shell
@@ -767,7 +767,7 @@ fn the_drawn_rider_leans_as_the_original_through_the_turns() {
     assert!(side[n / 2] <= 0.05 && side[n * 9 / 10] <= 0.25 && side[n - 1] <= 0.75, "the lean to a side");
     assert!(whole[n - 1] <= 0.95, "the lean as a vector: {}", whole[n - 1]);
     assert!(up[n * 9 / 10] <= 0.1 && up[n - 1] <= 0.3, "the drawn bike's root");
-    assert!(leans >= 0.79, "the hard turns' lean is {leans} of the original's, down from 0.79");
+    assert!(leans >= 0.80, "the hard turns' lean is {leans} of the original's, down from 0.80");
 }
 
 /// The original's 18 riding ragdoll part centres (`p1_bone<n>.pos`) off the capture, in the bike's

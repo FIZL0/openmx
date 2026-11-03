@@ -813,6 +813,9 @@ impl Body {
     ) -> Result<Body, String> {
         let rider = Rider::load(&archives, name, sex)?;
         let mut set = Set::load(archives, &rider.mcf)?;
+        // The port builds no AI rider's body, so nothing has claimed a clip name before this set
+        // reads its own `.mcf` (V121): the player's rider takes its own three grid aliases.
+        set.alone();
         // The set's own motions first — the airborne poses, the turns and the idles are all in the
         // `.mcf` — and then the gesture slots, which are in no `.mcf` and are found by name.
         set.load_listed();

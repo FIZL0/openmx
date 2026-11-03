@@ -238,6 +238,22 @@ impl Set {
         out
     }
 
+    /// The claims as they stand when this set's own `.mcf` is the only one the session builds: no AI
+    /// rider on the track, so nothing has claimed a name before the player's set reads its own `VUE=`
+    /// lines (V121). On this disc that turns [`Set::claims`]'s three rows round: `turn_stop_Fwd` and
+    /// `turn_stop_Bck` are their own clips, and `turn_still_Bck` is `turn_still_Mid.MOT`.
+    ///
+    /// S228's capture of the fly_and_collide tape (two players, no AI) agrees with this column and
+    /// not the AI one: on its stop and still rows with the fore-aft axis off its middle, the AI
+    /// claims pose the head up to 0.77 ft off the original's, and these pose it exactly. V12's
+    /// capture, with AI riders out, is the other way round, which is why [`Set::load`] keeps them.
+    ///
+    /// Call it before any clip is bound: a clip already bound keeps the file it was read from.
+    pub fn alone(&mut self) {
+        debug_assert!(self.clips.is_empty(), "the claims changed under {} bound clips", self.clips.len());
+        self.claimed.clear();
+    }
+
     /// The entry that claimed a clip name, which is what says which file it is and whether it loops:
     /// the first `.mcf` of the archives to name it, and this set's own entry when the archives have
     /// no `.mcf` at all (a set built by hand, which is every fixture in the tests).

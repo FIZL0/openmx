@@ -2480,6 +2480,11 @@ anim_mcf_motion boot 0x00142220 (set in a0, the motion-set object in a1, the ini
 #   initial byte). anim_find_or_load 0x00142430 builds "<+0x1e0><name>" and forces ".MOT" the same
 #   way, and never reads `VUE=` at all -- which is why the 36 bare pose names of vehicle_load_clips
 #   ignore aliases entirely
+# V121: which set claims first is who is on the track. With AI riders out (V12's capture) the AI
+#   body's `airider.mcf` claims the three grid aliases first; with none (S228's fly_and_collide, C11's
+#   2p tape: two humans, no AI) the player's `mrider.mcf` does, and turn_stop_Fwd/Bck are their own
+#   files, turn_still_Bck is turn_still_Mid.MOT. Proved by pose, not by reading the spawn path
+#   (research/journal/2026-11-03-v121-grid-row-claims). The port's Body::load takes Set::alone.
 
 # ---------------------------------------------------------------------------------------------------
 # V19 — the body's *mode* machine: the other slot of the rider body actor's vtable, and the only
