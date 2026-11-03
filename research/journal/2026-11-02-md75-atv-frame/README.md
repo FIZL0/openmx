@@ -35,3 +35,9 @@ open: the whole-frame proof, which is filed as follow-ups.
 MD75d (`7-image-ride.md`): `tests/atv_quad/image.rs`'s `read_ride` reads the spawned quad out of
 `atv-r-spawn.ee.bin` as a `Ride`, with the gaps it cannot carry listed (the scene past four nodes above all).
 Poked back at the harness's layout, all 2,654 words the poke writes equal the image's.
+
+MD75c1 (`8-spatial-move.md`): `atv_spatial_move` is ported in `atv_spatial.rs`. That covers the portal walk,
+the list sub-database's virtuals, the link pool and the overlaps. `atv_spatial::Answers` answers
+`quad::Call::SpatialMove`. `tests/atv_spatial.rs` checks it against the original's move in two ways: on
+12,000 generated databases laid in the image's free RAM, and on the image's own database, run once as it
+is and once with a portal laid in. Everything read back is equal. The quadtree sub-database is not ported.
