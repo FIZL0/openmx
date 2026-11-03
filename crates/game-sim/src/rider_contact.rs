@@ -614,6 +614,34 @@ pub fn ground_hits(contacts: &[Contact]) -> Vec<crate::air::Contact> {
         .collect()
 }
 
+/// **What of a bike's list the wreck test reads** (S272): [`crate::mover_contact::wreck_contacts`]'s
+/// scenery entries, and with them, in the list's order, the own entries on a flown plane's hull
+/// ([`Bump::planes`], other `players + k`) as the actor they are — a rigid body with no chassis, by
+/// the plane's mass and its body's velocity ([`crate::air::Other::Object`]), which a bike lighter
+/// than the plane wrecks on ([`crate::air::Wreck::Joust`]) when the entry's ray reaches the hit
+/// clause. C16's joust: plane 0 taxied into P2's parked Race500P (the 50cc reach, 4 ft), whose ray
+/// reaching 4.58 struck the hull, and P2 wrecked 7 on that tick. Entries on another rider's bike
+/// and on the knockable props are left out, as before (the head ray stands in for the riders,
+/// [`crate::ride::hits_among`]). The plane's velocity is its body's as the bump carries it into the
+/// frame.
+pub fn wreck_contacts(b: &Bump) -> Vec<crate::air::Contact> {
+    let players = b.vehicles.len();
+    b.contacts
+        .iter()
+        .filter(|c| c.kind == 0)
+        .filter_map(|c| {
+            let other = match c.other {
+                None => crate::air::Other::Scenery,
+                Some(o) => {
+                    let f = o.checked_sub(players).and_then(|k| b.planes.get(k))?;
+                    crate::air::Other::Object { mass: f.mass, vel: f.body.velocity }
+                }
+            };
+            Some(crate::air::Contact { mirrored: false, reach: F(c.on_body.y()), other })
+        })
+        .collect()
+}
+
 /// A bike alone in its list: `contacts` against its own object and chassis, the one seat there is.
 pub fn alone(ride: &crate::ride::Ride, p: &Phy, contacts: Vec<Contact>) -> Bump {
     Bump { me: 0, contacts, colliders: vec![collider(&p.collisions, p.mass.mass)], vehicles: vec![vehicle_on(ride, p)], movers: Vec::new(), props: Vec::new(), planes: Vec::new() }
