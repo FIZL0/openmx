@@ -561,6 +561,19 @@ impl Pages {
         Some(Pages { pages, across, along, page_of, spacing, detail: None, detail_repeat: spacing * 8.0 })
     }
 
+    /// These pages with their pixels let go (P283): each page its size and no pixels, so a world's
+    /// GPU paint still knows how much room the map takes when it is read in again.
+    pub fn hollow(&mut self) {
+        for t in &mut self.pages {
+            t.rgba = Vec::new();
+        }
+    }
+
+    /// Whether these pages hold their pixels: not [`Pages::hollow`].
+    pub fn here(&self) -> bool {
+        self.pages.iter().all(|t| !t.rgba.is_empty())
+    }
+
     /// Lay a detail map over the pages, repeating every `multiplier` samples (the scene's
     /// `DetailMapTilingMultiplier`).
     pub fn with_detail(mut self, detail: Option<Texture>, multiplier: f32) -> Pages {
@@ -589,6 +602,10 @@ impl Pages {
     /// The ground's colour at a point of the world before any light, or `None` where no page covers it.
     pub fn paint(&self, x: f32, z: f32) -> Option<[u8; 3]> {
         let (page, [u, v]) = self.page_at(x, z)?;
+        // A hollow page (P283) paints nothing.
+        if self.pages[page].rgba.is_empty() {
+            return None;
+        }
         let t = self.pages[page].sample_smooth(u, v);
         let mut c = [t[0] as f32, t[1] as f32, t[2] as f32];
         if let Some(d) = &self.detail {
@@ -827,6 +844,63 @@ pub struct WorldPaint {
     pub tiles: Vec<PaintTile>,
     /// The colour (0..255) where no map's paint reaches.
     pub dirt: [f32; 3],
+    /// Every map's pages small, for the GPU to paint the maps not held near the riders (P283).
+    pub far: FarPaint,
+}
+
+/// A world's paint held near the riders only (P283): world_ultra's 77 maps' pages were 1.5 GB in
+/// memory and as much again on the GPU. Each map's pages are kept [`FAR_PAGE`] pixels a side for
+/// the GPU to draw it far off with; its own pages are read in when a rider comes within `reach` and
+/// let go past it. A map whose pages are [`Pages::hollow`] is drawn from its far pages until then.
+#[derive(Clone, Debug, Default)]
+pub struct FarPaint {
+    /// Each map's pages at [`FAR_PAGE`] pixels a side ([`far_page`]), one for each of its own pages;
+    /// empty for a map without pages, and for every map of a world painted whole.
+    pub pages: Vec<Vec<Texture>>,
+    /// How near a map stays held, in feet: the GPU holds room for the pages of the maps this near any
+    /// one map at once. `None` holds every map's: the world painted whole, as before P283.
+    pub reach: Option<f32>,
+}
+
+/// A far page's side in pixels (P283): a 64-sample page, about 9 feet a sample on a mod map, at
+/// 36 feet a pixel; the stand-in ground under it is 124 feet a cell.
+pub const FAR_PAGE: usize = 16;
+
+/// A page at [`FAR_PAGE`] pixels a side, each pixel the mean of the page's pixels under it.
+pub fn far_page(t: &Texture) -> Texture {
+    let n = FAR_PAGE;
+    let mut rgba = vec![0u8; n * n * 4];
+    if t.width == 0 || t.height == 0 || t.rgba.len() < t.width * t.height * 4 {
+        return Texture { width: n, height: n, rgba };
+    }
+    for y in 0..n {
+        let (y0, y1) = (y * t.height / n, ((y + 1) * t.height / n).max(y * t.height / n + 1).min(t.height));
+        for x in 0..n {
+            let (x0, x1) = (x * t.width / n, ((x + 1) * t.width / n).max(x * t.width / n + 1).min(t.width));
+            let mut sum = [0u32; 4];
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    let i = (yy * t.width + xx) * 4;
+                    (0..4).for_each(|k| sum[k] += u32::from(t.rgba[i + k]));
+                }
+            }
+            let count = ((y1 - y0) * (x1 - x0)).max(1) as u32;
+            let i = (y * n + x) * 4;
+            (0..4).for_each(|k| rgba[i + k] = ((sum[k] + count / 2) / count) as u8);
+        }
+    }
+    Texture { width: n, height: n, rgba }
+}
+
+/// The gap in feet between two world rectangles `[x0, z0, x1, z1]`, the nearer way round a world
+/// that wraps every `period` feet on an axis (0 for none).
+pub fn rect_gap(a: [f32; 4], b: [f32; 4], period: [f32; 2]) -> f32 {
+    let axis = |k: usize| {
+        let gap = |shift: f32| (a[k] - (b[k + 2] + shift)).max(b[k] + shift - a[k + 2]).max(0.0);
+        let p = period[k];
+        if p > 0.0 { gap(0.0).min(gap(p)).min(gap(-p)) } else { gap(0.0) }
+    };
+    axis(0).hypot(axis(1))
 }
 
 impl WorldPaint {
@@ -893,6 +967,53 @@ impl WorldPaint {
                 Some(slot)
             })
             .collect()
+    }
+
+    /// [`WorldPaint::pack`] as the GPU packs this world (P283): a world held near the riders has each
+    /// array's layers in a pool of [`WorldPaint::pool`]'s size, so its maps are not counted against
+    /// `max_layers` all at once.
+    pub fn pack_for(&self, max_layers: u32, max_rows: u32) -> Vec<Option<Packed>> {
+        self.pack(if self.far.reach.is_some() { u32::MAX } else { max_layers }, max_rows)
+    }
+
+    /// The layers a map takes in its page array: its pages, and a sharp splat's modulate pages after
+    /// them (MD35).
+    pub fn layers_of(&self, i: usize) -> u32 {
+        let t = &self.tiles[i];
+        t.pages.as_ref().map_or(0, |p| p.pages.len() as u32 * if t.sharp().is_some() { 2 } else { 1 })
+    }
+
+    /// How many layers each page array holds (P283), by [`Packed::array`]: every packed map's for a
+    /// world painted whole; for one held near the riders, the most the maps within
+    /// [`FarPaint::reach`] of any one map take, and room for the largest map again, and never more
+    /// than `max_layers`.
+    pub fn pool(&self, packed: &[Option<Packed>], max_layers: u32) -> Vec<u32> {
+        let arrays = self.array_sizes(packed).len();
+        let mut total = vec![0u32; arrays];
+        let mut largest = vec![0u32; arrays];
+        for (i, at) in packed.iter().enumerate() {
+            if let Some(at) = at {
+                total[at.array as usize] += self.layers_of(i);
+                largest[at.array as usize] = largest[at.array as usize].max(self.layers_of(i));
+            }
+        }
+        let Some(reach) = self.far.reach else { return total };
+        let mut most = vec![0u32; arrays];
+        for (i, a) in packed.iter().enumerate() {
+            if a.is_none() {
+                continue;
+            }
+            let mut near = vec![0u32; arrays];
+            for (j, b) in packed.iter().enumerate() {
+                if let Some(b) = b
+                    && rect_gap(self.regions.owned[i], self.regions.owned[j], self.regions.period) <= reach
+                {
+                    near[b.array as usize] += self.layers_of(j);
+                }
+            }
+            (0..arrays).for_each(|k| most[k] = most[k].max(near[k]));
+        }
+        (0..arrays).map(|k| (most[k] + largest[k]).min(total[k]).min(max_layers)).collect()
     }
 
     /// The page size of each array [`WorldPaint::pack`] made, by the array's number.
@@ -1189,6 +1310,40 @@ mod tests {
         assert_eq!(lod_coarser(&levels, across, along, 2, 2), [true; 4]);
     }
 
+    /// P283: a world painted near its riders holds the layers the maps within reach of any one map
+    /// take, and the largest map's again, not every map's; a far copy across a wrap's seam is near;
+    /// and a map's pages let go paint nothing, and its far page is their average.
+    #[test]
+    fn a_world_held_near_its_riders_pools_the_near_maps_layers() {
+        let page = |shade: u8| Texture { width: 4, height: 4, rgba: [shade, shade, shade, 255].repeat(16) };
+        let pages = || Pages { pages: vec![page(10), page(20), page(30)], across: 1, along: 1, page_of: vec![Some(0)], spacing: 1.0, detail: None, detail_repeat: 1.0 };
+        let owned: Vec<[f32; 4]> = (0..5).map(|i| [1000.0 * i as f32, 0.0, 1000.0 * (i + 1) as f32, 1000.0]).collect();
+        let mut paint = WorldPaint {
+            regions: Regions { owned: owned.clone(), period: [0.0; 2] },
+            tiles: owned.iter().map(|o| PaintTile { at: [o[0], o[1]], pages: Some(pages()), sharp: None }).collect(),
+            dirt: [0.0; 3],
+            far: Default::default(),
+        };
+        let packed = paint.pack_for(2048, 8192);
+        assert_eq!(paint.pool(&packed, 2048), vec![15], "painted whole: every map's 3 pages");
+        // 500 feet: a map and the two either side touching it, 9 layers, and room for one more map.
+        paint.far.reach = Some(500.0);
+        assert_eq!(paint.pool(&packed, 2048), vec![12]);
+        assert_eq!(paint.pool(&packed, 10), vec![10], "never more than the device's layers");
+        // The first and last maps are 3000 feet apart, and touch across a seam at 5000.
+        assert_eq!(rect_gap(owned[0], owned[4], [0.0; 2]), 3000.0);
+        assert_eq!(rect_gap(owned[0], owned[4], [5000.0, 0.0]), 0.0);
+        // Let go, a map paints nothing and is not here; its far page is its pages' shade.
+        let far = far_page(&paint.tiles[0].pages.as_ref().unwrap().pages[1]);
+        assert_eq!((far.width, far.height, &far.rgba[..4]), (FAR_PAGE, FAR_PAGE, &[20, 20, 20, 255][..]));
+        let p = paint.tiles[0].pages.as_mut().unwrap();
+        assert!(p.here());
+        assert!(p.paint(0.5, 0.5).is_some());
+        p.hollow();
+        assert!(!p.here());
+        assert_eq!(p.paint(0.5, 0.5), None);
+    }
+
     /// MD51: on a world that wraps, a map is as near as its nearest copy a side over. Two maps in a
     /// row 1000 feet wide, `a` red at 100..400 and `b` green at 500..800: past `b` the ground blends
     /// back toward `a` across the seam at 1000 and reads `a`'s own edge there, so the paint runs
@@ -1197,6 +1352,7 @@ mod tests {
     #[test]
     fn a_wrapped_worlds_join_blends_across_the_seam() {
         let paint = |period: f32| WorldPaint {
+            far: Default::default(),
             regions: Regions { owned: vec![[100.0, 0.0, 400.0, 300.0], [500.0, 0.0, 800.0, 300.0]], period: [period, 0.0] },
             tiles: vec![PaintTile { at: [100.0, 0.0], pages: None, sharp: None }, PaintTile { at: [500.0, 0.0], pages: None, sharp: None }],
             dirt: [0.0; 3],
