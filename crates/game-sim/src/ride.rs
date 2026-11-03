@@ -840,7 +840,7 @@ pub struct Ride {
     /// and the hash walk leaves it out then, so their hashes do not move.
     pub tricks: Option<Box<crate::trick_pack::State>>,
     /// **The port's own (MD40):** MX vs. ATV's backflip clip, made on the first frame of a bike on
-    /// [`crate::handling::Handling::MxVsAtv`] ([`Phy::handling`]). `None` on every other ride, and
+    /// [`crate::handling::Handling::MxVsAtv`] or [`crate::handling::Handling::Untamed`] ([`Phy::handling`]). `None` on every other ride, and
     /// the hash walk leaves it out then, so their hashes do not move.
     pub mxvatv: Option<Box<crate::handling::Flip>>,
     /// The put-back's mesh query's own state on the bike (S83, [`crate::back_search::Cache`]): made
@@ -2313,7 +2313,7 @@ impl Ride {
             *tricks = Some(Box::default());
         }
         // MX vs. ATV's handling (MD40), only for a bike on it.
-        if p.handling == crate::handling::Handling::MxVsAtv && mxvatv.is_none() {
+        if p.handling != crate::handling::Handling::Original && mxvatv.is_none() {
             *mxvatv = Some(Box::default());
         }
 
@@ -2576,6 +2576,10 @@ impl Ride {
             match mxvatv.as_deref_mut() {
                 // MX vs. ATV's preload (MD63): its equal-times force and its cue. The cue's event is
                 // the presentation's, and nothing here plays it.
+                // Untamed's (MD93) has an analogue preload too, which no control binds here.
+                Some(f) if p.handling == crate::handling::Handling::Untamed => {
+                    crate::handling::untamed::preload(&p.air, air, &mut ac, &astep, None, &mut f.preload_cue);
+                }
                 Some(f) => {
                     crate::handling::step::preload(&p.air, air, &mut ac, &astep, &mut f.preload_cue);
                 }

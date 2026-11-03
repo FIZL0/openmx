@@ -236,7 +236,7 @@ pub fn name_tricks(out: &mut [openmx_net::Cmd], settings: &crate::menu::Settings
 /// `ride_handling_pack` would read — else empty, the original's.
 pub fn room_handling(handling: game_sim::handling::Handling, named: &str, tricks: &str, mods: Option<&Path>) -> String {
     match (handling, mods) {
-        (game_sim::handling::Handling::MxVsAtv, Some(mods)) => {
+        (game_sim::handling::Handling::MxVsAtv | game_sim::handling::Handling::Untamed, Some(mods)) => {
             let installed: Vec<String> = crate::trick_packs::listed(mods).0.into_iter().map(|p| p.id).collect();
             let first_trick = crate::trick_packs::ids_of_room(tricks).into_iter().next();
             Some(named.to_string()).filter(|n| installed.contains(n)).or(first_trick).or_else(|| installed.first().cloned()).unwrap_or_default()

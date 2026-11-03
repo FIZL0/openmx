@@ -2480,7 +2480,7 @@ struct Args {
     /// `--handling-pack ID` (MD77): the pack MX vs. ATV's handling reads; unset or empty, the front
     /// end's Handling From row says, else the first trick pack on, else the first in the folder.
     handling_pack: Option<String>,
-    /// `--handling original|mxvatv` (MD40): how the bikes handle. Unset, the front end's Handling row
+    /// `--handling original|mxvatv|untamed` (MD40, MD93): how the bikes handle. Unset, the front end's Handling row
     /// says, and a ride outside it has the original's. `--online` is always the original's; a ride
     /// from the lobby is its room's ([`Args::room_handling`], N21).
     handling: Option<game_sim::handling::Handling>,
@@ -4229,6 +4229,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let handling_pack = ride_handling_pack(&args, &trick_packs)?;
     let mut stock_phy = handling_phy(handling_pack.as_ref(), &phy_member, &tables.ride.curve, "")
         .unwrap_or_else(|| Phy::read_bytes(&phy_bytes, &tables.ride.curve));
+    untamed_handling(&args, &mut stock_phy);
     if !trick_packs.is_empty() {
         println!("{}", trick_packs::lay(&trick_packs, &mut stock_phy, &phy_member));
     }
@@ -4260,6 +4261,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
                 let mut phy = handling_phy(handling_pack.as_ref(), &member, &tables.ride.curve, &format!("player {}: ", i + 1))
                     .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
+                untamed_handling(&args, &mut phy);
                 if !trick_packs.is_empty() {
                     println!("player {}: {}", i + 1, trick_packs::lay(&trick_packs, &mut phy, &member));
                 }
@@ -11063,7 +11065,7 @@ fn ride_handling_pack(args: &Args, tricks: &[trick_packs::Pack]) -> Result<Optio
         println!("handling: MX vs. ATV's, from the room's {}", pack.id);
         return Ok(Some(pack));
     }
-    if args.handling != Some(game_sim::handling::Handling::MxVsAtv) {
+    if !matches!(args.handling, Some(game_sim::handling::Handling::MxVsAtv | game_sim::handling::Handling::Untamed)) {
         return Ok(None);
     }
     if args.online.is_some() {
@@ -11092,6 +11094,15 @@ fn ride_handling_pack(args: &Args, tricks: &[trick_packs::Pack]) -> Result<Optio
             println!("handling: {e}; the original's");
             Ok(None)
         }
+    }
+}
+
+/// Untamed's handling (MD93): a bike read for MX vs. ATV's rides Untamed's reworked steps with
+/// `--handling untamed` or the Handling row's Untamed. Online it stays MX vs. ATV's, as a room names
+/// only its pack.
+fn untamed_handling(args: &Args, phy: &mut Phy) {
+    if args.handling == Some(game_sim::handling::Handling::Untamed) && phy.handling == game_sim::handling::Handling::MxVsAtv {
+        phy.handling = game_sim::handling::Handling::Untamed;
     }
 }
 
@@ -12434,7 +12445,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--handling" => {
                 let word = next("original or mxvatv")?;
-                let h = game_sim::handling::Handling::from_word(&word).ok_or_else(|| format!("--handling: {word:?} is not original or mxvatv"))?;
+                let h = game_sim::handling::Handling::from_word(&word).ok_or_else(|| format!("--handling: {word:?} is not original, mxvatv or untamed"))?;
                 args.handling = Some(h);
             }
             "--tricks" => {
@@ -12822,7 +12833,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv] [--handling-pack ID] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\

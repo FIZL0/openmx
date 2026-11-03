@@ -18,8 +18,9 @@ const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. Trick Packs adds t
      backflip's pose. Online rides are always Original.";
 /// The Handling row's help (MD40).
 const HANDLING_HELP: &str = "Original is MX Unleashed's bikes. MX vs. ATV rides that game's own bike files from a trick pack in \
-     the mods folder (Handling From names which), and its backflip, which only arms with R1 held as you pull back on the lip. A lobby you host rides \
-     yours, and only players with the same trick pack can join its ride.";
+     the mods folder (Handling From names which), and its backflip, which only arms with R1 held as you pull back on the lip. Untamed rides the same files with the steps MX vs. ATV Untamed \
+     reworked, as far as they are ported. A lobby you host rides \
+     yours (Untamed's as MX vs. ATV's), and only players with the same trick pack can join its ride.";
 /// The Handling From row's first choice (MD77).
 const FIRST_TRICK_PACK: &str = "First Pack On";
 /// The Air Wrecks row's help (P138).
