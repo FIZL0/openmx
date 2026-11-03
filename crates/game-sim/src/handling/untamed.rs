@@ -14,6 +14,9 @@
 //!   keeps that normal. The driver's respawn words go over only when the first two are set. The two
 //!   SLUS-21104 restores of `+0x60`/`+0x70` are gone. An attachment, when there is one, is put back
 //!   too, and the put-back posts its own event (category 8, id 0x15).
+//! - The backflip ([`backflip`], MD93a): SLUS-21104's on Untamed's input. The fourth trick button
+//!   arms it whatever else is held, a bound backflip control fires it on the lip at once, the lip reads
+//!   the stick before the limiter, and a flip's end clears a stunt id over 48 (SLUS-21104: 40).
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::{Air, Chassis, Params as AirParams, Step as AirStep};
@@ -245,4 +248,209 @@ pub fn put_back(
         call(Call::Attachment);
     }
     call(Call::Post(PUT_BACK_EVENT));
+}
+
+/// The rider's stunt id at and past which Untamed's stunt is a flip's rather than a trick's: every trick id
+/// SLUS-21104 had ([`super::FIRST_FLIP_STUNT`]) moved up by 8, so a trick is an id up to 48.
+pub const FIRST_FLIP_STUNT: i32 = super::FIRST_FLIP_STUNT + 8;
+/// The idle id in the air, moved up by 8 as the rest ([`super::IDLE_STUNT`]).
+pub const IDLE_STUNT: i32 = super::IDLE_STUNT + 8;
+
+/// The stick hold a bound backflip button fires with: as if the stick had been flicked at 0.8.
+const BUTTON_HOLD: u32 = 0x3f4c_cccd; // 0.8
+
+/// Untamed's backflip: what it reads beyond MX Unleashed's [`AirStep`]. Where SLUS-21104 reads the trick
+/// buttons as one nibble ([`super::FlipIn`]), Untamed's input reader keeps the four trick buttons apart,
+/// and the stick the lip reads apart from the one the flight's decay reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlipIn {
+    /// The fourth trick button is held: what arms the flip on the lip. Unlike SLUS-21104's, the others
+    /// may be held with it.
+    pub arm_button: bool,
+    /// Any of the four trick buttons is held: the flight's torque then does not decay.
+    pub trick_held: bool,
+    /// The stick's fore-aft as the lip reads it: the reader's copy taken before the d-pad and the
+    /// limiter have had their say on [`AirStep::stick`] (which the flight's decay reads).
+    pub lip_y: F,
+    /// The flick the triggered torque is mapped from (a control of its own, apart from the preload's
+    /// [`AirStep::stick_hold`]).
+    pub hold: F,
+    /// The backflip as a bound control: `None` when the controls have no binding for it on this
+    /// device (the stick's down-and-up is the flip), else whether the binding is pressed. Pressed on the
+    /// lip, the flip fires at once with the torque of a 0.8 hold; armed or not, it is not disarmed.
+    pub button: Option<bool>,
+    /// The bike frame's `[0].y` and `[1].y`, as [`super::FlipIn`]'s.
+    pub right_y: F,
+    pub up_y: F,
+    /// The rider's current stunt id: a flip that ends clears one at or past [`FIRST_FLIP_STUNT`] (to 255).
+    pub stunt_id: i32,
+}
+
+/// The triggered torque's size for a hold, between the floor (1.25 × the least torque) and the most.
+fn flip_torque(p: &AirParams, hold: F) -> F {
+    let lo = p.min_backflip_torque * F(1.25);
+    if p.min_backflip_time == p.max_backflip_time {
+        // As SLUS-21104's: the branch's delay slot leaves the map's numerator, not the floor.
+        hold - p.min_backflip_time
+    } else {
+        let u = (hold - p.min_backflip_time) / (p.max_backflip_time - p.min_backflip_time);
+        let hi = p.max_backflip_torque;
+        let v = F(fpu::madd(fpu::adda(0.0, lo.0), u.0, (hi - lo).0));
+        v.max(lo.min(hi)).min(lo.max(hi))
+    }
+}
+
+/// One substep of Untamed's backflip, over MX Unleashed's backflip state on [`Air`]: SLUS-21104's
+/// ([`super::backflip`]) on Untamed's input. On the lip a bound backflip control, when there is one,
+/// takes the place of the stick (see [`FlipIn::button`]); otherwise the stick pulled back past 0.8 with
+/// the fourth trick button arms it, and pushed past 0.8 triggers it. In the air the torque decays with
+/// no trick button held and the stick at or behind centre. A flip that ends clears a stunt id over 48
+/// (SLUS-21104: 40).
+///
+/// `start_stunt` and `steep` are as [`super::backflip`]'s.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares: a NaN goes the far way
+pub fn backflip(
+    p: &AirParams,
+    air: &mut Air,
+    chassis: &mut Chassis,
+    step: &AirStep,
+    inp: &FlipIn,
+    clip: &mut super::FlipClip,
+    start_stunt: impl FnOnce() -> bool,
+    steep: impl FnOnce() -> bool,
+) -> super::FlipOut {
+    let mut out = super::FlipOut::default();
+    air.flip_torque_applied = false;
+    let fire = |air: &mut Air, hold: F| {
+        let torque = flip_torque(p, hold.abs());
+        air.flip_torque = air.flip_torque.merge(Dest::X, Vf::splat((-torque).0));
+        air.flip_active = true;
+        air.flip_grace = F::from_bits(0x3f19_999a);
+    };
+    if !air.flip_active {
+        let lip = air.on_ground
+            && !step.spinning
+            && !step.spin_active
+            && !(chassis.vel.y() <= 5.0)
+            && !(air.contact_vel.z() <= 30.0)
+            && step.brake == F::ZERO;
+        if !lip {
+            air.flip_active = false;
+            air.flip_armed = false;
+        } else if let Some(pressed) = inp.button {
+            if pressed {
+                fire(air, F::from_bits(BUTTON_HOLD));
+            }
+        } else if inp.lip_y < F(-HELD) && inp.arm_button {
+            air.flip_armed = true;
+        } else if !(inp.lip_y <= F(HELD)) && air.flip_armed {
+            fire(air, inp.hold);
+            air.flip_armed = false;
+        }
+    } else if !air.flip_armed {
+        if !air.on_ground {
+            air.flip_armed = true;
+        } else {
+            air.flip_grace = air.flip_grace - step.dt;
+            if air.flip_grace <= F::ZERO {
+                air.flip_active = false;
+                air.flip_armed = false;
+            }
+        }
+    } else if air.on_ground || step.touching || F(air.flip_torque.x()).abs() < p.min_backflip_torque {
+        air.flip_active = false;
+        air.flip_armed = false;
+        if inp.stunt_id >= FIRST_FLIP_STUNT {
+            out.stunt_cleared = true;
+        }
+        if clip.0 != 0 {
+            clip.0 = 0;
+            out.wreck = Some(if steep() { 0xf } else { 0xb });
+        }
+    } else {
+        let y = step.stick.1;
+        if !inp.trick_held && y <= F::ZERO {
+            let t = F(fpu::msub(fpu::adda(0.0, air.flip_torque.x()), step.dt.0, (y * p.backflip_torque_rate_decrease).0));
+            air.flip_torque = air.flip_torque.merge(Dest::X, Vf::splat(t.0));
+        }
+        chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(air.flip_torque));
+        air.flip_torque_applied = true;
+        air.flipping = true;
+        if inp.right_y <= F::ZERO {
+            if !(inp.up_y <= F::ZERO) && clip.0 == 0 {
+                out.stunt_started = start_stunt();
+                if out.stunt_started {
+                    clip.0 = 1;
+                }
+            } else if inp.up_y < F::ZERO && clip.0 == 1 {
+                clip.0 = 2;
+            }
+        } else if !(inp.up_y <= F(-0.79)) && clip.0 == 2 {
+            out.stunt_ended = true;
+            clip.0 = 0;
+        }
+    }
+    if air.flipping {
+        let back = air.on_ground
+            || (!air.flip_torque_applied
+                && chassis.roll.abs() < F::from_bits(0x3fc9_0fdb)
+                && !(chassis.pitch <= -p.airborne_pitch_down_wreck_angle)
+                && chassis.pitch < p.airborne_pitch_up_wreck_angle);
+        if back {
+            air.flipping = false;
+            air.authority = p.control_authority_time;
+        }
+    }
+    out
+}
+
+/// **The port's own:** the rider's stunt id by its range, as [`super::stunt_stand_in`] gives it, on
+/// Untamed's ids: the flip's and the idle one in the air moved up by 8, a trick's (0) and the ground's
+/// (`0xff`) as they were.
+pub fn stunt_stand_in(trick_held: bool, backflip: bool, spin_clip: bool, on_ground: bool) -> i32 {
+    match super::stunt_stand_in(trick_held, backflip, spin_clip, on_ground) {
+        id @ (0 | 0xff) => id,
+        id => id + 8,
+    }
+}
+
+/// [`backflip`] on a ride, as [`super::ride_backflip`] runs SLUS-21104's: the same rider's side, on
+/// Untamed's input. The port's controls have three trick buttons and no backflip binding, so the arming
+/// button is R1 (the one SLUS-21104 arms on), a trick is held when any of the three is, and the lip
+/// reads the step's stick and flick ([`FlipIn::lip_y`], [`FlipIn::hold`]) with no bound control.
+pub fn ride_backflip(p: &AirParams, air: &mut Air, chassis: &mut Chassis, step: &AirStep, trick: [bool; 3],
+                     frame: &crate::chassis::Mat3, flip: &mut super::Flip, steep: impl FnOnce() -> bool) {
+    if step.stunt {
+        flip.stunt = false;
+    }
+    let stunt_id = stunt_stand_in(step.stunt, flip.stunt, false, air.on_ground);
+    let inp = FlipIn {
+        arm_button: trick[2],
+        trick_held: trick.iter().any(|&b| b),
+        lip_y: step.stick.1,
+        hold: step.stick_hold,
+        button: None,
+        right_y: F(frame.rows[0].y()),
+        up_y: F(frame.rows[1].y()),
+        stunt_id,
+    };
+    let mut clip = super::FlipClip(flip.clip);
+    let aloft = !air.on_ground && !step.touching;
+    let mut stunt = flip.stunt;
+    let out = backflip(p, air, chassis, step, &inp, &mut clip, || {
+        if stunt_id >= FIRST_FLIP_STUNT {
+            stunt = true;
+        }
+        true
+    }, steep);
+    flip.stunt = stunt && !out.stunt_cleared;
+    flip.clip = clip.0;
+    if let Some(reason) = out.wreck {
+        flip.wrecked = true;
+        flip.struck = reason == 0xf;
+        flip.cut = aloft;
+    }
+    if out.stunt_ended {
+        flip.came_round = true;
+    }
 }

@@ -2609,7 +2609,12 @@ impl Ride {
                         let loads = air::Loads { side: F(g.x()), vertical: F(g.y()), fore_aft: F(g.z()), ..air::Loads::default() };
                         let airborne = air.airborne;
                         let steep = || crate::handling::step::flip_wreck_steep(&p.air, false, airborne, &loads);
-                        crate::handling::ride_backflip(&p.air, air, &mut ac, &astep, c.trick, &out.mat3(Frame::Chassis), f, steep)
+                        // Untamed's own (MD93a) on its handling.
+                        if p.handling == crate::handling::Handling::Untamed {
+                            crate::handling::untamed::ride_backflip(&p.air, air, &mut ac, &astep, c.trick, &out.mat3(Frame::Chassis), f, steep)
+                        } else {
+                            crate::handling::ride_backflip(&p.air, air, &mut ac, &astep, c.trick, &out.mat3(Frame::Chassis), f, steep)
+                        }
                     }
                     None => air::backflip(&p.air, air, &mut ac, &astep),
                 },

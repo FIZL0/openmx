@@ -9004,3 +9004,26 @@ atv_heap_free               atv 0x001b76d0 = free
 #   +0x90 = +0xd40, +0xa0 = the normal; else +0x90 = +0xd40, +0xa0 = +0xd50. Then 0x004c8880 (settle: 0x004b9130,
 #   +0x34c = 1); keep: +0xdd8 = +0xddc, vt +0x3a0; else +0xdd8 = 0, vt +0x39c. +0x10cc set: 0x00512e90 (a0 it).
 #   Post (8, 0x15, +0xd10, 0). SLUS-21104's 0x004a6f70 drops the normal and always restores +0x60/+0x70.
+
+# MD93a — Untamed's (SLUS-21701) backflip 0x004fd0d0 (a0 bike, f12 dt; twin of SLUS-21104's 0x004e4f20), ported as
+# handling::untamed::backflip and proved by tests/untamed_reworked.rs off context/untamed/ram/nat_or.bin. Comment
+# rows only, as # MD81a. Journal: research/journal/2026-11-03-md93a-untamed-bike-step.
+#   Fields (SLUS-21104 -> SLUS-21701): applied +0x1194 -> +0x1184, flipping +0x1198 -> +0x1188, active +0x119c ->
+#   +0x118c, armed +0x11a0 -> +0x1190, Min/MaxBackflipTime +0x11a4/a8 -> +0x1194/98, grace +0x11ac -> +0x119c,
+#   Min/MaxBackflipTorque +0x11b0/b4 -> +0x11a0/a4, rate inc/dec +0x11b8/bc -> +0x11a8/ac, torque +0x11c0 -> +0x11b0,
+#   authority/ControlAuthorityTime +0x1188/8c -> +0x1178/7c, pitch-wreck angles +0x1404/08 -> +0x1414/18, clip
+#   +0x1754 -> +0x1794 (now stored through vt +0x530, 0x004ffdd0: sw a1, +0x1794), stunt word +0x13b8 -> +0x13c8,
+#   stunt id +0x1528 -> +0x1548 (slti 41 -> 49), frame node +0xe4 -> +0x114 and its rows' y +0x84/+0x94 -> +0xb4/+0xc4,
+#   collision +0xc8 -> +0xf8 (its +0x34 touching), body +0xb8 -> +0xe8 (vt +0x78 = 0x004bda00: body +0x1b0.xyz += v,
+#   then the listeners, halfword body +0xe8). Calls: start stunt vt +0x4b0 (bike, +0x13c8, 1), end stunt vt +0x4a4
+#   (bike, +0x13c8), wreck entry vt +0x368 (0xb / 0xf), steep 0x00500880.
+#   Input, reworked. SLUS-21104 reads the trick nibble (lbu +0x14ec & 0xf: == 4 arms, == 0 lets the torque decay)
+#   and one stick (+0x12ac, hold +0x12b0). SLUS-21701 reads a pad record at +0x14f4 (filled by 0x003a25b0 from
+#   the input reader 0x004fb7d0): word +0 the device, bytes +18/+20/+22/+24 actions 0x11..0x14 held (debounced).
+#   Arm: 0x003a2e40 (lbu +24) alone, others may be held. Decay: 0x003a2c60 (any of the four) == 0 and +0x129c <= 0
+#   (the limited stick y, pad word 0xe0). Lip: stick y +0x12c4 (pad word 0xe4, the reader's copy before the
+#   limiter; the d-pad writes ±1 to both) and hold +0x12c0 (action 0x55's value).
+#   New on the lip: 0x00252630 (table *(+0x1510), device) = byte table+36+device. Non-zero: the stick path is
+#   skipped; 0x00252640 (table, +0x14f4) (-1 at table+24 -> 0, else the matcher 0x003a37d0 on table+48+88*idx)
+#   non-zero -> fires with hold 0.8 (0x3f4ccccd, abs), active 1, grace 0x3f19999a; armed untouched.
+#   The torque map, the equal-times delay-slot answer, the grace, the end and the flipping/authority tail as SLUS-21104's.
