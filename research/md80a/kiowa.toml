@@ -1,0 +1,99 @@
+# MD80a: MX vs. ATV Unleashed's (SLUS-21104) player Kiowa in Desert Oasis Free Ride, every tick. OBJ is
+# replaced by the helicopter object's address (vptr at +4 = 0x003cfad0, research/md80a/ram.py); play.sh does
+# it and adds the start trigger. Decoded columns first, then the raw blocks. Offsets from SLUS-21104's own
+# steps (research/oracle.txt # MD80a): body +0xb8; input step 0x004d1fa0 writes +0x10f0/+0x10f4 (commands
+# 0x1c/0x1d), +0x10fc = -x, +0x1100 = -y, +0x1104 pedal; forces 0x004d4db0 runs the rotor (+0x11c0) and
+# aero (+0x11c4) unless +0xc80, and only while *(+0x684)+0x50 has bit 0.
+[watch]
+name        = "md80a-kiowa"
+description = "MX vs. ATV (SLUS-21104) Free Ride Kiowa flown from a generated tape: helicopter, body, rotor and aero per tick"
+every       = 1
+frames      = 2000
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x3fa6d8, +2 a tick
+addr = "0x3fa6d8"
+type = "u32"
+
+[[field]]
+name = "vptr"           # the helicopter's vtable word (+4)
+addr = "OBJ + 0x4"
+type = "u32"
+
+[[field]]
+name = "ctl"            # +0x308..+0x314 (MXVehicle's block)
+addr = "OBJ + 0x308"
+type = "f32x4"
+
+[[field]]
+name = "inp"            # +0x10f0 command 0x1c, +0x10f4 command 0x1d, +0x10f8, +0x10fc -x
+addr = "OBJ + 0x10f0"
+type = "f32x4"
+
+[[field]]
+name = "inp2"           # +0x1100 -y, +0x1104 pedal, +0x1108, +0x110c
+addr = "OBJ + 0x1100"
+type = "f32x4"
+
+[[field]]
+name = "wreck"          # +0xc80: forces skip the rotor and aero while set
+addr = "OBJ + 0xc80"
+type = "u32"
+
+[[field]]
+name = "node_flags"     # *(+0x684)+0x50: the rotor and aero run only while bit 0 is set
+addr = "OBJ + 0x684 -> 0x50"
+type = "u32"
+
+[[field]]
+name = "pos"            # body +0x60
+addr = "OBJ + 0xb8 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "vel"            # body +0x80
+addr = "OBJ + 0xb8 -> 0x80"
+type = "f32x4"
+
+[[field]]
+name = "quat"           # body +0x170
+addr = "OBJ + 0xb8 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "body_1c0"       # body +0x1c0: not decoded (big; world frame, an angular momentum by its size?)
+addr = "OBJ + 0xb8 -> 0x1c0"
+type = "f32x4"
+
+[[field]]
+name = "rate"           # body +0x1d0: angular velocity, body frame, rad/s (the quaternion's derivative)
+addr = "OBJ + 0xb8 -> 0x1d0"
+type = "f32x4"
+
+[[field]]
+name = "obj0"           # the helicopter object, raw, +0x0..+0xc00
+addr = "OBJ"
+type = "bytes:3072"
+
+[[field]]
+name = "obj1"           # +0xc00..+0x1800 (the model word is +0x1340)
+addr = "OBJ + 0xc00"
+type = "bytes:3072"
+
+[[field]]
+name = "body"           # the rigid body, raw
+addr = "OBJ + 0xb8 -> 0x0"
+type = "bytes:640"
+
+[[field]]
+name = "rotor"          # *(+0x11c0), raw (atv_kiowa_rotor_step's object)
+addr = "OBJ + 0x11c0 -> 0x0"
+type = "bytes:512"
+
+[[field]]
+name = "aero"           # *(+0x11c4), raw (atv_kiowa_aero_step's object)
+addr = "OBJ + 0x11c4 -> 0x0"
+type = "bytes:512"

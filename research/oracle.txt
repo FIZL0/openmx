@@ -8834,3 +8834,27 @@ atv_kiowa_aero_step         atv 0x0049ee30 = kiowa_aero_step's twin (0.69: rewri
 atv_kiowa_mx_present_a      atv 0x004d3230 = kiowa_mx_present_a's twin (0.93)
 atv_kiowa_blade_spin        atv 0x004d3510 = kiowa_blade_spin's twin (0.95)
 # Not paired: kiowa_wreck_check (best 0.30, 0x0049fbb0); kiowa_rotor_ctor/bind; the MX helicopter's measure.
+# MD80a — SLUS-21104's biplane and Kiowa flown and captured (journal research/journal/2026-11-03-md80a-mxvatv-
+# flier-captures; specs research/md80a/{biplane,kiowa}.toml, captures context/capture/md80a, images
+# context/mxvatv-ps2/md80a). Desert Oasis Free Ride places both. Field names marked (value) were checked
+# against the captured numbers; (shift) are MX Unleashed's names moved down 0xc as # MD80 says, not checked.
+# Vtables (+4): biplane 0x003ce7b0, Kiowa 0x003cfad0. Model word +0x1320 / +0x1340: 1 model one. The body is
+# *(+0xb8): +0x60 position, +0x80 velocity, +0x170 quaternion (value), +0x1d0 angular velocity in the body
+# frame (value: the quaternion's derivative, 2-3% mean); +0x1c0 is not it (large, undecoded).
+# Both: +0x310/+0x314 the throttle-down/up (Square/Cross) values (value), +0x32c |velocity| (value),
+#   +0x340..+0x348 the angular velocity in the world frame (value), +0xc80 the wreck word: 1 a hard landing
+#   or tip-over, 13 a hit on a hard object; the engine/aero (rotor/aero) skip while it is set.
+# Biplane: +0x318 throttle (value: engine +0x50 = 250 x it; Square takes it to -0.0117), +0x10f4/+0x10f8/
+#   +0x10fc elevator/aileron/rudder commands (value: the stick, cubed with a dead zone; L1 -1 / R1 +1), +0x1110 nose steer and
+#   +0x1114 rudder, ramped 1/s toward the rudder command (value). Parts: engine *(+0x1164) 0x80 bytes, aero *(+0x1168) 0x110,
+#   tires *(+0x116c..+0x1174) 0x380 apart. Engine +0x3c prop angle (+-pi), +0x50 power = MaxPower x throttle
+#   (value), +0x54 rpm = 500 + 2000 x max(throttle, 0) (value), +0x60 thrust, +0x64 the sound's rpm (shift),
+#   +0x68 clock, +1/30 a tick (value). Aero +0xdc..+0xec CL..CM (shift). Tire +0xc0..+0xc8 the ground
+#   ray's hit (value: the ground under the gear), +0x8c..+0x94 nonzero only on the ground, +0xe0..+0xe8
+#   the last contact, +0xf0/+0x100 the gear point in the world (value: +0x104 - +0xc4 is the height).
+# Kiowa: +0x10f0 climb (Cross), +0x10f4 descend (Square), +0x10fc = -stick x, +0x1100 = -stick y, +0x1104
+#   pedal (L1 +1, R1 -1) (value); +0x1108 collective (1 climbing, ~0.32-0.34 holding height), +0x110c..
+#   +0x1114 cyclic and pedal outputs, +0x1138 the held height (value: the top of the climb). Parts: rotor
+#   *(+0x11c0) 0x150 bytes, aero *(+0x11c4). Rotor +0xc0 blade pitch (0.2618 = 15 deg climbing), +0xd0/+0xd8
+#   tilt, +0xf4 thrust, +0x100..+0x108 thrust along the tilted axis (value: +0x104 = +0xf4 hovering).
+#   Aero +0x128 a 0..1 fade with speed, +0x134/+0x140 on the ground -0.5236/0.0785 (-30 deg / 4.5 deg).
