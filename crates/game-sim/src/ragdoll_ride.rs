@@ -472,8 +472,9 @@ impl Down {
     }
 
     /// [`Down::step_posed_with`] among the knockable props (S240, the set the ride is lent for the
-    /// frame): the search lists the awake ones near the bones, a sphere is paired with their meshes,
-    /// and each one a sphere's record took is struck after the step ([`KnockedProp`]).
+    /// frame): the search lists the awake ones near the bones, and those at rest in the track's tree
+    /// where a regather's cells reach them (F7); a sphere is paired with their meshes, and each one a
+    /// sphere's record took is struck after the step, which wakes one at rest ([`KnockedProp`]).
     #[allow(clippy::too_many_arguments)]
     pub fn step_posed_among(
         &mut self,
@@ -503,19 +504,24 @@ impl Down {
             let cells = field.and_then(|f| Cells::of(&*f));
             let key = cells.as_ref().zip(kit.bike_mesh.as_deref()).map_or(0, |(c, mesh)| c.key(mesh, &frame));
             let props = props.map_or(&[][..], |p| &p.props[..]);
-            // The props' and the plants' keys only for a gather that queries the tree.
+            // The props' and the plants' keys only for a gather that queries the tree, and after them
+            // the knockable props at rest (F7), which the track's tree holds while they sleep.
+            let knock_from = Statics::knock_from(props, trees);
             let keys = match (&cells, self.search.stood) {
                 (Some(c), Some(probe)) if self.search.regathers(s.radius) && kit.bike_mesh.is_some() => {
                     let mut keys = Statics::keys(c, props);
                     if let Some(t) = trees {
                         keys.extend(Statics::group_keys(c, t, props.len(), probe, s.radius));
                     }
+                    if let Some(set) = knockable.as_deref() {
+                        keys.extend(Statics::knock_keys(c, set, knock_from));
+                    }
                     keys
                 }
                 _ => Vec::new(),
             };
             let offered = bike_in && !self.ragdoll.ignores_bike;
-            self.search.gather_wooded(cells.as_ref(), s.radius, b, key, offered, props, trees, &keys, &mut self.statics);
+            self.search.gather_knocking(cells.as_ref(), s.radius, b, key, offered, props, trees, &keys, knock_from, &mut self.statics);
         }
         ragdoll_body::wreck_arm(
             &mut self.ragdoll,
@@ -576,9 +582,12 @@ impl Down {
             let props = props.map_or(&[][..], |p| &p.props[..]);
             b.props = crate::ragdoll_scene::StillProp::near_wooded(props, trees, &self.statics, probe, reach);
             b.bike_at = self.statics.bike_at;
-            // And the awake knockable props (S240), every one listed, measured from the same probe.
+            // And the knockable props: those at rest the list holds (F7), at their places in it, then
+            // the awake ones (S240), every one listed; measured from the same probe.
             if let Some(set) = knockable.as_deref() {
-                b.knocked = crate::ragdoll_scene::KnockedProp::near(set, probe, reach);
+                let first = Statics::knock_from(props, trees);
+                b.knocked = crate::ragdoll_scene::KnockedProp::resting(set, &self.statics, first, probe, reach);
+                b.knocked.extend(crate::ragdoll_scene::KnockedProp::near(set, probe, reach));
             }
         }
         // The bones' segments are offered the bike through its collidable's sphere (S166).

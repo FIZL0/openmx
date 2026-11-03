@@ -26,12 +26,15 @@
 //! the props and measured on the ground plane ([`group_distance`]), and a sphere is handed a listed
 //! plant's trunks at its place in the list, unfiltered ([`StillProp::near_wooded`]). The rest of what
 //! the track's tree holds meets no bone, though the original lists it: the trigger boxes (category
-//! `0x100`, a shape the sphere's pair has no test for), the knockable props' meshes at rest (`0x18`,
-//! F7), the other riders' wreck bikes, and the hierarchy meshes the port's world lacks.
+//! `0x100`, a shape the sphere's pair has no test for), the other riders' wreck bikes, and the
+//! hierarchy meshes the port's world lacks.
 //!
 //! And the knockable props while they are awake (S240): the moving structure holds their meshes, the
 //! search lists every one, a sphere is paired with each one within its reach, the push-out measures
 //! the bone against the prop's body, and a prop a sphere's record took is woken ([`KnockedProp`]).
+//! At rest (F7) they stand in the track's tree, filed after the plants, and a regather lists each
+//! one the query's cells reach whatever its distance; met as an awake one is, the strike waking it
+//! ([`Statics::knock_keys`], [`KnockedProp::resting`]).
 //!
 //! **The sweep** (S166): each bone's collision also has a segment probe, one segment from where the
 //! bone was `1/15` s ago to where it is, run through the same search list the spheres are
@@ -367,7 +370,8 @@ pub struct Statics {
     /// The listed props, by their index in the world's set ([`crate::world::World::collision`]); on
     /// a world of tiles the near set at the search's centre (V112, [`crate::world::World::wooded_near`]), in
     /// the order the tree's walk met them. An index at or past the set's length is a plant: the
-    /// group that many past it in the world's trees ([`crate::world::World::wooded`]).
+    /// group that many past it in the world's trees ([`crate::world::World::wooded`]); and past the
+    /// plants a knockable prop at rest ([`Statics::knock_from`], F7).
     pub props: Vec<usize>,
     /// How many of them the walk met before the bike: where the bike stands in the list.
     pub bike_at: usize,
@@ -404,6 +408,54 @@ impl Statics {
             })
             .collect()
     }
+}
+
+impl Statics {
+    /// Where the knockable props at rest are filed in [`Statics::props`] (F7): past the world's props
+    /// and its plants, prop `k` of [`knock_index`] at this plus `k`.
+    pub fn knock_from(props: &[crate::world::Prop], trees: Option<&crate::eco::Trees>) -> usize {
+        props.len() + trees.map_or(0, |t| t.groups().len())
+    }
+
+    /// The keys in `cells`' tree of `set`'s knockable props at rest (F7), each by its index `first`
+    /// ([`Statics::knock_from`]) past [`knock_index`]: every asleep body with a collision object and
+    /// a collidable mesh, under the key of its mesh's root box where its node stands it. The original
+    /// files a sleeping prop's `f.col` in the track's static tree (category `0x18`, `+0x116` `0x04`);
+    /// a woken one leaves it for the moving structure ([`KnockedProp::near`]).
+    pub fn knock_keys(cells: &Cells, set: &crate::prop_set::PropSet, first: usize) -> Vec<(usize, u32)> {
+        let mut out = Vec::new();
+        for (k, (c, o)) in knock_order(set).enumerate() {
+            let Some((mesh, matrix)) = resting(set, c, o) else { continue };
+            let (to_world, _, _) = crate::world::Prop::posed(mesh, &matrix);
+            let (centre, half) = crate::flight_search::bike_box(mesh, &to_world);
+            out.push((first + k, broad_build::key(&cells.tree, cells.hi, centre, half)));
+        }
+        out
+    }
+}
+
+/// Every body of `set`, collection by collection in object order: what a knockable prop's index in
+/// [`Statics::props`] counts (F7).
+fn knock_order(set: &crate::prop_set::PropSet) -> impl Iterator<Item = (usize, usize)> + '_ {
+    set.collections.iter().enumerate().flat_map(|(c, coll)| (0..coll.objects.len()).map(move |o| (c, o)))
+}
+
+/// Body `k` of [`knock_order`]: its collection and object.
+pub fn knock_index(set: &crate::prop_set::PropSet, k: usize) -> Option<(usize, usize)> {
+    knock_order(set).nth(k)
+}
+
+/// Body `o` of collection `c` when it is a knockable prop at rest: asleep, with a collision object
+/// and a collidable mesh; its mesh and the matrix its node stands it at.
+fn resting(set: &crate::prop_set::PropSet, c: usize, o: usize) -> Option<(&track::Mesh, Mat4)> {
+    let coll = set.collections.get(c)?;
+    let object = coll.objects.get(o)?;
+    object.collision.as_ref()?;
+    if coll.bones.get(o)?.body.enabled {
+        return None;
+    }
+    let mesh = set.shapes.get(c)?.get(o)?.as_ref()?;
+    Some((mesh, crate::prop_set::PropSet::matrix(&object.node)))
 }
 
 /// **How far a plant's reach is from `p`**, as the gather measures a placed group (S206): on the ground
@@ -495,6 +547,27 @@ impl BikeSearch {
         keys: &[(usize, u32)],
         statics: &mut Statics,
     ) {
+        self.gather_knocking(cells, reach, bike, key, offered, props, trees, keys, usize::MAX, statics);
+    }
+
+    /// [`BikeSearch::gather_wooded`] with the knockable props at rest in the tree too (F7): `keys`
+    /// ends with their [`Statics::knock_keys`], each index at or past `knock_from`, and such an entry
+    /// is listed wherever the query's cells reach it, its distance not asked (its `+0x116` is `0x04`:
+    /// bit `0x08` clear, as the bike's).
+    #[allow(clippy::too_many_arguments)]
+    pub fn gather_knocking(
+        &mut self,
+        cells: Option<&Cells>,
+        reach: F,
+        bike: (Vf, F),
+        key: u32,
+        offered: bool,
+        props: &[crate::world::Prop],
+        trees: Option<&crate::eco::Trees>,
+        keys: &[(usize, u32)],
+        knock_from: usize,
+        statics: &mut Statics,
+    ) {
         let Some(probe) = self.stood else { return };
         if !self.regathers(reach) {
             self.distance = reach_distance(bike, probe);
@@ -518,7 +591,7 @@ impl BikeSearch {
             if statics.props.len() + usize::from(listed) >= SEARCH_CAPACITY {
                 break;
             }
-            if listed_distance(props, trees, i, probe).is_some_and(|d| d < self.bound) {
+            if i >= knock_from || listed_distance(props, trees, i, probe).is_some_and(|d| d < self.bound) {
                 statics.props.push(i);
             }
         }
@@ -683,9 +756,12 @@ impl StillProp {
 /// the prop took fires the prop's listeners, the struck one waking the prop as a strike does
 /// ([`crate::prop_set::PropSet::struck`]); [`KnockedProp::struck`] says the caller should.
 ///
-/// A prop at rest is in the track's static tree instead, listed only inside the bound (F7), so only an
-/// awake body (`enabled`) is listed here. The prop's own rays never meet a bone: the bones' collisions
-/// are not filed on the props' world node, so the prop's search does not find them.
+/// A prop at rest is in the track's static tree instead (F7, `+0x116` `0x04`): listed at a regather
+/// wherever the query's cells reach it, at its place in the walk among the scene props, and kept with
+/// the list ([`KnockedProp::resting`]). It is met as an awake one is: the same mesh test on the same
+/// record, the push-out against its body (asleep, so still), and its struck listener wakes it. The
+/// prop's own rays never meet a bone: the bones' collisions are not filed on the props' world node, so
+/// the prop's search does not find them.
 #[derive(Clone, Debug)]
 pub struct KnockedProp {
     pub shapes: std::sync::Arc<Vec<Vec<Option<track::Mesh>>>>,
@@ -695,6 +771,9 @@ pub struct KnockedProp {
     pub pushed: crate::prop_contact::Pushed,
     /// A sphere's record took it this frame: its struck listener runs.
     pub struck: bool,
+    /// Its place in [`Statics::props`] when it is at rest (F7), the static tree's walk offering it
+    /// there; `None` for an awake one, offered after the static tree's entries.
+    pub place: Option<usize>,
 }
 
 impl KnockedProp {
@@ -721,8 +800,37 @@ impl KnockedProp {
                     distance,
                     pushed: crate::prop_contact::Pushed { collection: c, object: o, collider: col.collider, body: bone.body, mass: bone.mass },
                     struck: false,
+                    place: None,
                 });
             }
+        }
+        out
+    }
+
+    /// **The knockable props at rest a frame's spheres can be paired with** (F7): the entries of
+    /// `statics` at or past `first` ([`Statics::knock_from`]) that are still asleep, whose distance
+    /// from `probe` is within `reach`, in the list's order, each with its place in it. One woken since
+    /// the list was gathered is the moving structure's ([`KnockedProp::near`]).
+    pub fn resting(set: &crate::prop_set::PropSet, statics: &Statics, first: usize, probe: Vf, reach: F) -> Vec<KnockedProp> {
+        let mut out = Vec::new();
+        for (n, &i) in statics.props.iter().enumerate() {
+            let Some((c, o)) = i.checked_sub(first).and_then(|k| knock_index(set, k)) else { continue };
+            let Some((mesh, matrix)) = resting(set, c, o) else { continue };
+            let (to_world, centre, radius) = crate::world::Prop::posed(mesh, &matrix);
+            let distance = reach_distance((centre, radius), probe);
+            if !(distance <= reach) {
+                continue;
+            }
+            let (Some(col), Some(bone)) = (set.collections[c].objects[o].collision.as_ref(), set.collections[c].bones.get(o)) else { continue };
+            let [x, y, z, at] = to_world.0;
+            out.push(KnockedProp {
+                shapes: set.shapes.clone(),
+                frame: Node { rows: [x, y, z], origin: at },
+                distance,
+                pushed: crate::prop_contact::Pushed { collection: c, object: o, collider: col.collider, body: bone.body, mass: bone.mass },
+                struck: false,
+                place: Some(n),
+            });
         }
         out
     }
@@ -827,9 +935,10 @@ pub struct WreckBikeScene<'a> {
     /// The bike collidable's sphere (`B+0x40`, `B+0x60`), which a segment probe's pair test rejects
     /// on (S166); `None` leaves the bike out of the sweep.
     pub sphere: Option<(Vf, F)>,
-    /// The awake knockable props the search lists near the bones this frame (S240), after the static
-    /// props and before the cars; empty before the search is built. Contact `k + 1 + cars` is with
-    /// prop `k`.
+    /// The knockable props the search lists near the bones this frame: first those at rest (F7), in
+    /// the list's order, each offered at its place among the static props; then the awake ones
+    /// (S240), after the static tree's entries and before the cars. Empty before the search is built.
+    /// Contact `k + 1 + cars` is with prop `k`.
     pub knocked: Vec<KnockedProp>,
 }
 
@@ -857,17 +966,26 @@ impl<'a> WreckBikeScene<'a> {
 
 impl Scene for WreckBikeScene<'_> {
     /// The sphere's one record, offered the static tree's candidates in the list's order (the props,
-    /// the bike where the walk met it) and then each listed car it reaches: a later candidate's hit
-    /// replaces the held one only when strictly nearer (the record's single slot).
+    /// the knockable props at rest, the bike where the walk met it) and then each listed awake prop
+    /// and car it reaches: a later candidate's hit replaces the held one only when strictly nearer
+    /// (the record's single slot).
     fn touching(&mut self, centre: Vf, radius: F) -> Option<Vec<(Vf, Vf)>> {
         self.stood.push(centre);
         self.with = None;
         let mut best: Option<Touch> = None;
         let mut bike_done = false;
         let mut props = self.props.iter().peekable();
+        let first = 1 + self.cars.len();
+        // The props at rest lead `knocked`, in the list's order (F7).
+        let mut rest = 0;
         loop {
             let prop_next = props.peek().map(|(n, _)| *n);
-            if !bike_done && prop_next.is_none_or(|n| self.bike_at <= n) {
+            let rest_next = self.knocked.get(rest).and_then(|p| p.place);
+            let next = match (prop_next, rest_next) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            if !bike_done && next.is_none_or(|n| self.bike_at <= n) {
                 bike_done = true;
                 if self.search.reaches(radius)
                     && let Some(t) = touch_mesh(&self.mesh.mesh, Normals::Packed(&self.mesh.normals), &self.frame, centre, radius, best.map(|b| b.distance))
@@ -875,6 +993,20 @@ impl Scene for WreckBikeScene<'_> {
                     best = Some(t);
                     self.with = Some(0);
                 }
+                continue;
+            }
+            if let Some(n) = rest_next
+                && prop_next.is_none_or(|p| n < p)
+            {
+                let prop = &mut self.knocked[rest];
+                if prop.distance <= radius
+                    && let Some(t) = prop.touch(centre, radius, best.map(|b| b.distance))
+                {
+                    best = Some(t);
+                    self.with = Some(first + rest);
+                    prop.struck = true;
+                }
+                rest += 1;
                 continue;
             }
             let Some((_, prop)) = props.next() else { break };
@@ -887,8 +1019,7 @@ impl Scene for WreckBikeScene<'_> {
             }
         }
         if self.search.built {
-            let first = 1 + self.cars.len();
-            for (k, prop) in self.knocked.iter_mut().enumerate() {
+            for (k, prop) in self.knocked.iter_mut().enumerate().skip(rest) {
                 if !(prop.distance <= radius) {
                     continue;
                 }

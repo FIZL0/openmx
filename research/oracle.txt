@@ -7812,3 +7812,18 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 # 0x20a, 0x52058, AI bikes 0x9a048 and gates 0x200020; no scenery within its bound. Ball 2's list has the wreck at distance 0.
 # Sweep probes (+0x1f4), the props' and the wreck's: exclude list [0x8, 0x800], from globals 0x00468f50 (0x8)
 # and 0x00468f90 (0x800); the wake mask global 0x00468f68 = 0x40.
+# --- F7: the ragdoll's bones against the knockable props at rest (crates/game-sim/src/ragdoll_scene.rs
+#   Statics::knock_keys, BikeSearch::gather_knocking, KnockedProp::resting; ragdoll_ride.rs
+#   Down::step_posed_among; tests/ragdoll_rest.rs; journal 2026-11-02-f7-bones-on-props-at-rest)
+# recording2 (free09): the static tree holds all 62 knockable props' mesh collidables (category 0x18, +0x31
+#   bit 0, +0x7c 0, +0x80 the collision object), +0x116 0x04 with 0x40/0x80 on some (0xc4) and 0x10 on one.
+#   Bit 0x08 is clear on all: collision_search_gather lists them wherever the query's cells reach them, no
+#   bound. Their place in the walk is after the scene meshes and the plants (filed after them).
+# collide_against_search on a list holding a sleeping prop, the sphere touching it: the record is the prop's
+#   collidable, the struck listener enables the body (0 -> set), position/velocity/quat/rates keep their bits,
+#   the collidable's flags become 0x14 (| its 0x40/0x80). The strike wakes and does not push.
+# The push-out's other with +0x80 set is the moving path against the body (S105/S240); a sleeping body is still.
+# Proved (tests/ragdoll_rest.rs): 6,000 gathers (fresh and kept) list the scene meshes, plants and sleeping props
+#   in order at the port's distances bit for bit; 20,000 spheres through collide_against_search with lists of a
+#   sleeping prop alone / twice / after the nearest scene mesh / before the nearest sleeping prop match the port's
+#   walk (count, with, held, point, normal); 13 strikes wake as PropSet::struck.
