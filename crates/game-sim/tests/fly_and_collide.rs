@@ -661,7 +661,7 @@ fn ride_drawn(from: u32, to: u32) -> Option<(Vec<Tick>, Vec<Leaned>)> {
             r.skeleton = Some(Arc::new(d.body.ragdoll_posed(&d.doll)));
             let want = d.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
             let request = d.chassis.riding_under(r, want);
-            d.chassis.frame(dt, want, &request, game_render::vehicle::Drive::of(&r.ride));
+            d.chassis.ride(dt, want, &request, r, game_render::vehicle::Drive::of(&r.ride));
             d.body.bare = d.chassis.bare_under(&r.body.veh);
             let drawn_root = d.chassis.world[root].mul(placed(&r.ride));
             if let Some(rd) = r.riding.as_ref().filter(|rd| rd.placed()) {
@@ -696,7 +696,7 @@ const SETTLE: u32 = 30;
 
 /// The riding ticks [`the_drawn_rider_leans_as_the_original_through_the_turns`] compares, and of
 /// those the hard-turn ones (the original's head 0.5 ft or more to a side of its pelvis).
-const DRAWN_TICKS: (usize, usize) = (1793, 276);
+const DRAWN_TICKS: (usize, usize) = (1793, 280);
 
 /// **S228a — the drawn rider's lean through the tape's turns, as drawn.** Every stretch of [`HELD`]
 /// that holds past [`SETTLE`] is ridden by [`ride_drawn`], the drawn rider beside it as the shell
@@ -705,14 +705,14 @@ const DRAWN_TICKS: (usize, usize) = (1793, 276);
 /// capture's `p1_bike_xform` is that node, not the chassis: S8), against the original's
 /// `p1_bone<n>.pos` of rows t+1..t+3, the closest. Two things are held, each to a stated tolerance:
 ///
-/// - **the lean**: to a side within 0.05 ft on the median tick, 0.15 ft on nine in ten and 0.65 ft on
+/// - **the lean**: to a side within 0.05 ft on the median tick, 0.1 ft on nine in ten and 0.5 ft on
 ///   every one; as a vector within 0.85 ft on every one.
 /// - **the drawn bike's root** (which the lean is measured in, and which the ragdoll's holds hang
-///   off): its up within 0.1 rad of the original's on nine ticks in ten and 0.3 rad on every one.
+///   off): its up within 0.05 rad of the original's on nine ticks in ten and 0.2 rad on every one,
+///   and in the hard turns its roll off the ride within 0.97 to 1.07 of the original's on the mean.
 ///
-/// Where it parts, the port leans *less*: in the hard turns its lean to a side is 0.91 of the
-/// original's on the mean (pinned; may only go up), and its drawn root rolls 0.89 of the original's
-/// off the ride.
+/// Where it parts, the port leans *less*: in the hard turns its lean to a side is 0.95 of the
+/// original's on the mean (pinned; may only go up).
 ///
 /// S253 found both. The lean was 0.79: the riding ragdoll hung its target skeleton under the drawn
 /// root node, whose roll the body's own root joint already carries, so the target leaned the
@@ -722,6 +722,13 @@ const DRAWN_TICKS: (usize, usize) = (1793, 276);
 /// posed off the motion driver's frame instead (the rider's `animation`, through `anim::Rig`) it
 /// rolls 1.02 of the original's, the lean comes to 0.96, and with the original's own body joints
 /// written over the port's, 0.999.
+///
+/// S253a landed that: the ridden chassis is posed off the motion driver's frame
+/// (`Chassis::ride`). The hard-turn lean goes from 0.920 to 0.960 and the root's roll from 0.888 to
+/// 1.019. The worst lean to a side goes from 0.609 to 0.458 ft, nine in ten from 0.135 to 0.058, and
+/// the worst root up from 0.283 to 0.170 rad (nine in ten 0.023). Four more ticks are hard turns.
+/// The worst as a vector is 0.841, on the stretch at 137910. There both riders sit square (0.01 ft
+/// apart to a side), so the part is in the other two axes; it was not chased.
 ///
 /// S228b's donut fix let eight more stretches hold, and their ticks moved the bounds: the worst lean
 /// to a side 0.650 to 0.713, the worst root up 0.195 to 0.283, the hard turns' mean 0.802 to 0.795.
@@ -773,10 +780,11 @@ fn the_drawn_rider_leans_as_the_original_through_the_turns() {
     let (leans, rolls) = (mean(3) / mean(4), mean(5) / mean(6));
     println!("{} hard-turn ticks: lean to a side ours {:.3} theirs {:.3} ({leans:.3}); root roll ours {:.3} theirs {:.3} ({rolls:.3})", hard.len(), mean(3), mean(4), mean(5), mean(6));
     assert_eq!((n, hard.len()), DRAWN_TICKS, "the ticks compared, and the hard-turn ones");
-    assert!(side[n / 2] <= 0.05 && side[n * 9 / 10] <= 0.15 && side[n - 1] <= 0.65, "the lean to a side");
+    assert!(side[n / 2] <= 0.05 && side[n * 9 / 10] <= 0.1 && side[n - 1] <= 0.5, "the lean to a side");
     assert!(whole[n - 1] <= 0.85, "the lean as a vector: {}", whole[n - 1]);
-    assert!(up[n * 9 / 10] <= 0.1 && up[n - 1] <= 0.3, "the drawn bike's root");
-    assert!(leans >= 0.91, "the hard turns' lean is {leans} of the original's, down from 0.91");
+    assert!(up[n * 9 / 10] <= 0.05 && up[n - 1] <= 0.2, "the drawn bike's root");
+    assert!((0.97..=1.07).contains(&rolls), "the hard turns' root roll is {rolls} of the original's");
+    assert!(leans >= 0.95, "the hard turns' lean is {leans} of the original's, down from 0.95");
 }
 
 /// The original's 18 riding ragdoll part centres (`p1_bone<n>.pos`) off the capture, in the bike's

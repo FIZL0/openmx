@@ -212,7 +212,7 @@ fn a_trick_out_of_another_fades_into_it() {
             body.ride(FRAME, &mut r, &pad, rider::Gate::default());
             let want = bike.want_under(&r.ride, &r.tricks, r.body.veh.want);
             let request = bike.riding_under(&r, want);
-            bike.frame(FRAME, want, &request, Drive::of(&r.ride));
+            bike.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
             body.bare = bike.bare_under(&r.body.veh);
             let rot = body.rig.set.pose.rot.clone();
             let mut drawn = body.palette(Some(&chassis::grips(&bike))).0;
@@ -344,7 +344,7 @@ fn a_queued_pair_matches_the_original_across_the_switch() {
         body.ride(dt, &mut r, &pad, rider::Gate::default());
         let want = bike.want_under(&r.ride, &r.tricks, r.body.veh.want);
         let request = bike.riding_under(&r, want);
-        bike.frame(dt, want, &request, Drive::of(&r.ride));
+        bike.ride(dt, want, &request, &r, Drive::of(&r.ride));
         body.bare = bike.bare_under(&r.body.veh);
         if k < FIRST {
             continue;
