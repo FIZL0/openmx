@@ -63,16 +63,16 @@ fn at(x: f32, y: f32, z: f32) -> Vf {
     Vf::new(x, y, z, 1.0)
 }
 
-/// The bays are the lot's machines the port has — the planes and (since P216) the helicopters, one
-/// of each a player — drawn see-through at the put-back ghost's own alpha; with the setting off there
-/// are none, so nothing is drawn there, marked or offered.
+/// The bays are the lot's machines the port has — the planes, (since P216) the helicopters and
+/// (since S245) the cars, one of each a player — drawn see-through at the put-back ghost's own alpha;
+/// with the setting off there are none, so nothing is drawn there, marked or offered.
 #[test]
 fn a_bay_is_a_see_through_plane_and_off_is_nothing() {
     for players in [1, 2, 4] {
         let lot = lot(players);
         let shown = vehicle::bays_shown(&lot, true);
-        assert_eq!(shown.len(), 2 * players, "one plane and one helicopter a player: {shown:?}");
-        assert!(shown.iter().all(|b| matches!(b.machine, Machine::Biplane | Machine::Helicopter)));
+        assert_eq!(shown.len(), 5 * players, "one of each machine a player: {shown:?}");
+        assert_eq!(shown, lot.bays);
         let planes: Vec<Bay> = shown.iter().filter(|b| b.machine == Machine::Biplane).copied().collect();
         assert_eq!(planes, lot.of(Machine::Biplane).copied().collect::<Vec<Bay>>());
         let helis: Vec<Bay> = shown.iter().filter(|b| b.machine == Machine::Helicopter).copied().collect();
@@ -150,8 +150,9 @@ fn the_pop_up_offers_as_the_originals_trigger_does() {
     assert_eq!(offer(at(0.0, 0.0, 35.0), 0.0, false), Some(Machine::Helicopter));
     assert_eq!(vehicle::offer(&bays, Kind::Kiowa, at(0.0, 0.0, 35.0), 0.0, false), None, "not to its own pilot");
     assert_eq!(Answer::default().take(true, false, Some(Machine::Helicopter)), Some(Kind::Kiowa));
-    // The other machines are not ported, so standing beside them offers nothing.
-    assert_eq!(offer(at(-30.0, 0.0, 0.0), 0.0, false), None, "between the monster trucks' bays");
+    // The cars too, since S245: between the monster trucks' bays, the nearer one is 10 ft off.
+    assert_eq!(offer(at(-30.0, 0.0, 0.0), 0.0, false), Some(Machine::Monster), "between the monster trucks' bays");
+    assert_eq!(Answer::default().take(true, false, Some(Machine::Monster)), Some(Kind::Monster));
     // And the plane is not offered to its own pilot.
     assert_eq!(vehicle::offer(&bays, Kind::Biplane, at(100.0, 0.0, 10.0), 0.0, false), None);
     assert_eq!(vehicle::offer_text(Machine::Biplane), "Would you like to switch to the Biplane?");
@@ -191,7 +192,7 @@ fn circle_takes_the_offered_plane_onto_the_player() {
     let plane = garage.plane_flown().expect("the plane is up");
     assert_eq!((plane.at.x(), plane.at.z()), (here.x(), here.z()), "spawned on the player, not at the bay");
     assert_eq!(plane.bay, bay, "the bay stays where it is, and is drawn there still");
-    assert_eq!(vehicle::bays_shown(&lot, true).len(), 2, "the plane's bay and the helicopter's");
+    assert_eq!(vehicle::bays_shown(&lot, true).len(), 5, "every bay: the plane's, the helicopter's and the three cars'");
     // In the plane the bay offers nothing.
     assert_eq!(vehicle::offer(&bays, garage.up, plane.at, 0.0, false), None);
     // Back on the bike the plane flown is drawn nowhere; the bay's is.
@@ -329,4 +330,24 @@ fn circle_is_the_reports_circle() {
     assert_ne!(report.buttons() & Control::Circle.mask(), 0);
     assert_eq!(Report::idle().buttons() & Control::Circle.mask(), 0);
     let _ = Plane::parked; // the type the bays draw
+}
+
+/// S245: each car parks only by its own track's `machine.txt` — the monster truck free09's, the baja
+/// free07's, the buggy free11's — though every freeride file parks two of each; the plane and the
+/// helicopter park by any.
+#[test]
+fn a_car_parks_only_on_its_own_track() {
+    let spots = || Machine::ALL.iter().map(|&m| vehicle::spots(LOT.as_bytes(), m)).collect::<Vec<_>>();
+    for (file, car) in [("tracks\\free09\\machine.txt", Machine::Monster), ("tracks\\free07\\machine.txt", Machine::Baja), ("tracks\\free11\\machine.txt", Machine::Buggy)] {
+        let lot = Lot::around(vehicle::parked_by(file, spots()), 2, &mut |_| 0.0);
+        for m in Machine::ALL {
+            let parked = lot.of(m).count();
+            let want = if m.home().is_none() || m == car { 2 } else { 0 };
+            assert_eq!(parked, want, "{file}: {m:?}");
+        }
+        let bays = vehicle::bays_shown(&lot, true);
+        assert!(bays.iter().any(|b| b.machine == car) && bays.iter().all(|b| b.machine.home().is_none_or(|_| b.machine == car)));
+    }
+    let lot = Lot::around(vehicle::parked_by("tracks\\free06\\machine.txt", spots()), 1, &mut |_| 0.0);
+    assert!(lot.bays.iter().all(|b| b.machine.home().is_none()), "free06 parks no car: {:?}", lot.bays);
 }

@@ -169,8 +169,8 @@ impl Spawn {
 /// collision, `.phy`), and the vehicle factory builds them by the original's kind number, 1 to 5
 /// (R8, `research/oracle.txt`'s `vehicle_factory`). Every freeride track's `machine.txt` (free06, 07,
 /// 09, 10 and 11) parks two of each, `[<section>1]` and `[<section>2]`, one per player of the
-/// original's two. Only the biplane is ported ([`Machine::kind`]); the others are each a task of
-/// their own, and until one lands the lot parks it on paper and the shell does not stand it up.
+/// original's two. Every one is ported ([`Machine::kind`]); the port parks each car only on its own
+/// track ([`Machine::home`], S245).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Machine {
     /// Kind 1, MXBiplane: `biplane\`.
@@ -237,17 +237,41 @@ impl Machine {
         }
     }
 
-    /// The shell's machine for it, where the port has one.
+    /// The shell's machine for it, where the port has one: what the bays draw and offer. Every
+    /// machine since S245, the cars too.
     pub fn kind(self) -> Option<Kind> {
         match self {
             Machine::Biplane => Some(Kind::Biplane),
             Machine::Helicopter => Some(Kind::Kiowa),
-            _ => None,
+            Machine::Buggy | Machine::Monster | Machine::Baja => self.car_kind(),
         }
     }
 
-    /// The shell's machine for a car (S149e). Apart from [`Machine::kind`], which is what the bays
-    /// draw and offer, because a car's bay has nothing to draw it with yet.
+    /// The one track the port parks a car on (S245): the monster truck on free09, the baja on
+    /// free07, the buggy on free11, the tracks whose RAM images hold that car parked (S149a's
+    /// captures). Every freeride track's `machine.txt` parks two of each car, but the port stands a
+    /// car only on its own, so each freeride has one car to ride up to. `None` for the plane and the
+    /// helicopter, which stand wherever the file parks them.
+    pub fn home(self) -> Option<&'static str> {
+        match self {
+            Machine::Monster => Some("free09"),
+            Machine::Baja => Some("free07"),
+            Machine::Buggy => Some("free11"),
+            Machine::Biplane | Machine::Helicopter => None,
+        }
+    }
+
+    /// Whether the port parks this machine by a `machine.txt` named `file` (a member name,
+    /// `tracks\free09\machine.txt`): the plane and the helicopter by any, a car by its own track's
+    /// alone ([`Machine::home`]).
+    pub fn parks_by(self, file: &str) -> bool {
+        match self.home() {
+            None => true,
+            Some(track) => file.to_ascii_lowercase().replace('/', "\\").split('\\').any(|part| part == track),
+        }
+    }
+
+    /// The shell's machine for a car (S149e).
     pub fn car_kind(self) -> Option<Kind> {
         match self {
             Machine::Buggy => Some(Kind::Buggy),
@@ -417,6 +441,13 @@ pub fn world_spots(machine_txt: &[u8], home: [f32; 2], start: Spawn, rest: f32, 
                 .collect()
         })
         .collect()
+}
+
+/// `file`'s spots, one list a machine in [`Machine::ALL`]'s order ([`spots`], [`world_spots`]), with
+/// those of a machine the port does not park by the `machine.txt` named `name` emptied
+/// ([`Machine::parks_by`]): a car's away from its own track (S245).
+pub fn parked_by(name: &str, file: Vec<Vec<Spawn>>) -> Vec<Vec<Spawn>> {
+    file.into_iter().zip(Machine::ALL).map(|(s, m)| if m.parks_by(name) { s } else { Vec::new() }).collect()
 }
 
 /// Every machine a ride parks, one of each per player, sized to the player count as players join and
@@ -1840,13 +1871,16 @@ impl Garage {
 /// model off `machine.res`, the bay `machine.txt` parks this player's copy in, and the car itself
 /// once the player has taken it ([`game_sim::car::Machine`]).
 ///
-/// The switch spawns it on the player as it spawns the plane (P102): stood on the ground where the
-/// player is, along their heading, at rest, a fresh car ([`game_sim::car::Machine::new`]). The car
-/// left goes, as the plane left does. Until it is taken a car stands in its bay only on paper: the
-/// port draws no car yet, so neither the bays nor the offer show one.
+/// The switch takes it out of its bay (S245): a fresh car ([`game_sim::car::Machine::new`]) stood on
+/// the ground where `machine.txt` parks it, at rest. Away from its own track it has no bay
+/// ([`Machine::home`]) and the switch spawns it on the player as it spawns the plane (P102). The car
+/// left goes, as the plane left does. Its bay is drawn see-through as the plane's and offered by the
+/// pop-up ([`offer`]).
 #[derive(Clone, Debug)]
 pub struct CarRide {
     pub machine: Machine,
+    /// The livery it wears, an index into [`Machine::models`] ([`livery`]).
+    pub livery: usize,
     pub car: game_sim::car::Car,
     pub model: game_sim::car::CarModel,
     pub bay: Option<Spawn>,
@@ -1881,7 +1915,7 @@ impl CarRide {
                 None
             }
         });
-        Ok(CarRide { machine, car: game_sim::car::Car::read_bytes(&phy, kind), model, bay, driven: None, taken_at: Vf::default(), rays, struck: None })
+        Ok(CarRide { machine, livery: livery(copy), car: game_sim::car::Car::read_bytes(&phy, kind), model, bay, driven: None, taken_at: Vf::default(), rays, struck: None })
     }
 
     /// How high the car's origin stands over the ground with its tires' bottoms on it and its springs
@@ -1891,13 +1925,19 @@ impl CarRide {
         CAR_DROP - lowest
     }
 
-    /// The car taken at `spot`: a fresh one, on the ground there along the spot's heading flattened
-    /// (its bay's, or +z, where that points straight up or down), driven. `None`, and nothing
-    /// changes, with no ground there.
+    /// The car taken: a fresh one, driven, standing in its bay where it has one (S245: where
+    /// `machine.txt` parks it, along the bay's heading flattened, as the original's swap resets a
+    /// machine to its spot), and otherwise at `spot`, along its heading flattened (or +z, where that
+    /// points straight up or down); on the ground there either way. `None`, and nothing changes, with
+    /// no ground there.
     pub fn take(&mut self, spot: &Spot, world: &mut dyn World) -> Option<()> {
-        let ground = ground_under(world, spot.at)?;
-        let facing = level(spot.forward).or_else(|| self.bay.and_then(|b| level(b.facing))).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
-        let at = Vf::new(spot.at.x(), ground + self.rest_height(), spot.at.z(), 1.0);
+        let (place, heading) = match self.bay {
+            Some(bay) => (bay.at, bay.facing),
+            None => (spot.at, spot.forward),
+        };
+        let ground = ground_under(world, place)?;
+        let facing = level(heading).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        let at = Vf::new(place.x(), ground + self.rest_height(), place.z(), 1.0);
         let mut m = game_sim::car::Machine::new(&self.car, &self.model, at, facing, Vf::new(0.0, 1.0, 0.0, 0.0));
         m.drive(true);
         self.struck = self.rays.clone().map(|rays| {
@@ -2043,6 +2083,22 @@ pub fn car_kit(read: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Vec<CarRide> {
 
 impl Lot {
     /// Player `copy`'s cars: one of each car [`Lot::cars`] has, in their livery, parked in their bay.
+    /// Each car's bay stood on the ground under it (S245), where the file's height is not: free07's
+    /// `machine.txt` parks its bajas at a height of 0, under the dirt. The car stands on its tires
+    /// with its springs unloaded ([`CarRide::rest_height`] less [`CAR_DROP`]) over the ground
+    /// `ground` finds asked from [`PROBE`] over the spot, which is what a take stands it on; a spot
+    /// off the map keeps the file's height. Bays without the car's files are left as they are.
+    pub fn stand_cars(&mut self, ground: &mut dyn FnMut(Vf) -> (Vf, Vf)) {
+        for bay in self.bays.iter_mut().filter(|b| b.machine.car_kind().is_some()) {
+            let Some(car) = self.cars.iter().find(|c| c.machine == bay.machine) else { continue };
+            let at = bay.spawn.at;
+            let (on, _) = ground(Vf::new(at.x(), at.y() + PROBE, at.z(), 1.0));
+            if on.y() > NO_GROUND {
+                bay.spawn.at = Vf::new(at.x(), on.y() + car.rest_height() - CAR_DROP, at.z(), 1.0);
+            }
+        }
+    }
+
     pub fn cars_for(&self, copy: usize) -> Vec<CarRide> {
         [Machine::Buggy, Machine::Monster, Machine::Baja]
             .into_iter()
