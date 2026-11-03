@@ -20,6 +20,7 @@ use game_sim::collide::{Bundle, Record};
 use game_sim::contact_search::Heightfield;
 use game_sim::eco::Trees;
 use game_sim::flight_search;
+use game_sim::material_hit::Struck;
 use game_sim::phy::Ini;
 use game_sim::prop_set::PropSet;
 use game_sim::tiles::{generate, Piece, Reach, Source, Tile, Tiled};
@@ -269,7 +270,19 @@ fn ridden(props: &PropSet, sets: &[Option<Vec<[Vf; 4]>>]) -> String {
                 col.nearby = flight_search::search();
             }
         }
-        out += &format!("{c:?} struck {struck:?}\n");
+        // What the material listener heard (F27a) names a struck shape by the same place among the
+        // search's collidables as the record does, so it is named by where it stands too.
+        let place = |id: u32| set.as_ref().expect("a set to strike in")[id as usize - flight_search::FIRST];
+        let heard: Vec<_> = std::mem::take(&mut c.heard.0)
+            .into_iter()
+            .map(|(k, s)| match s {
+                Struck::Mesh { id, material, foliage } if (flight_search::FIRST..flight_search::BIKES).contains(&(id as usize)) => {
+                    format!("({k}, Mesh at {:?}, material {material}, foliage {foliage})", place(id))
+                }
+                s => format!("({k}, {s:?})"),
+            })
+            .collect();
+        out += &format!("{c:?} struck {struck:?} heard {heard:?}\n");
     }
     out
 }
