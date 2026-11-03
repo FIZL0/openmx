@@ -2451,14 +2451,24 @@ struct KiowaAround<'a> {
     /// The put-back's altitude fraction, if the helicopter was put back: the controls' share
     /// ([`game_sim::kiowa::Kiowa::put_back_controls`]) is done after the tick.
     put_back: Option<F>,
+    /// The model's nodes the blades are thrown from ([`KiowaRide::with_model`]), and the curve table
+    /// the rotor's turn is read off.
+    tree: Option<&'a game_sim::kiowa::RotorTree>,
+    curve: &'a game_sim::camera::CurveTable,
 }
 
-/// Where the blades are thrown from: every row the measure's matrix (the model's, as the helicopter
-/// is drawn). The blade nodes' own rows are S270's; while the shell builds no blade bodies (P265)
-/// the rows move nothing, and the throw's `rand()`s are drawn all the same.
-fn kiowa_throw(ride: &game_sim::kiowa::Ride) -> game_sim::kiowa::Throw {
-    let m = ride.measure.matrix;
-    game_sim::kiowa::Throw { blades: [m; 4], model: m }
+/// Where the blades are thrown from: the blade nodes' rows as the original's nodes have them on the
+/// wreck frame ([`game_sim::kiowa::Throw::of`], S270). With no model read, every row is the
+/// measure's matrix (the model's, as the helicopter is drawn). While the shell builds no blade bodies
+/// (P265) the rows move nothing, and the throw's `rand()`s are drawn all the same.
+fn kiowa_throw(ride: &game_sim::kiowa::Ride, tree: Option<&game_sim::kiowa::RotorTree>, curve: &game_sim::camera::CurveTable) -> game_sim::kiowa::Throw {
+    match tree {
+        Some(t) => game_sim::kiowa::Throw::of(t, &ride.body, ride.rotor_angle, curve),
+        None => {
+            let m = ride.measure.matrix;
+            game_sim::kiowa::Throw { blades: [m; 4], model: m }
+        }
+    }
 }
 
 /// `v` (`xyz`) turned by the unit quaternion `q` (`x, y, z, w`), in plain arithmetic.
@@ -2494,7 +2504,7 @@ impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
         self.ground.crashed(asked, ride, rng);
         // A player's helicopter has no owner (S148's has none, +0xb94 0), so the put-back goes to
         // the spawn: where it was taken.
-        let throw = kiowa_throw(ride);
+        let throw = kiowa_throw(ride, self.tree, self.curve);
         if let Some(f) = self.wreckage.act(asked, ride, &throw, false, rng) {
             self.put_back = Some(f);
         }
@@ -2541,13 +2551,15 @@ pub struct KiowaRide {
     pub rays: game_sim::flight_search::Rays,
     /// How many times it has wrecked since it was last taken.
     pub wrecks: u32,
+    /// The model's nodes its wreck throws the blades from ([`KiowaRide::with_model`]).
+    pub tree: Option<game_sim::kiowa::RotorTree>,
 }
 
 impl KiowaRide {
     /// The helicopter off `kiowa.phy`'s bytes, in `livery`, parked at `bay`.
     pub fn new(phy: &[u8], livery: usize, bay: Option<Spawn>) -> KiowaRide {
         let rays = game_sim::flight_search::Rays::default();
-        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0 }
+        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0, tree: None }
     }
 
     /// It with its collision object's ray probe off `kiowam.col`'s bytes
@@ -2556,6 +2568,16 @@ impl KiowaRide {
         match game_sim::track::Rays::parse(col) {
             Ok(r) => self.rays = game_sim::flight_search::Rays::of(&r),
             Err(e) => eprintln!("kiowa: {}: {e}", game_sim::kiowa::KIOWA_RAYS),
+        }
+        self
+    }
+
+    /// It with the model's nodes its wreck throws the blades from, off `kiowa.psg`'s bytes
+    /// ([`game_sim::kiowa::KIOWA_MODEL`]); as it was where they do not read.
+    pub fn with_model(mut self, psg: &[u8]) -> KiowaRide {
+        match game_sim::kiowa::RotorTree::read(psg) {
+            Ok(t) => self.tree = Some(t),
+            Err(e) => eprintln!("kiowa: {}: {e}", game_sim::kiowa::KIOWA_MODEL),
         }
         self
     }
@@ -2662,7 +2684,7 @@ impl KiowaRide {
         let input = game_sim::kiowa::Pad::from_sticks(stick, |c| table.value(pad, c));
         let movers = h.collision.search(&mut h.ride.body, world, dt);
         let ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
-        let mut around = KiowaAround { ground, wreckage: &mut h.wreckage, put_back: None };
+        let mut around = KiowaAround { ground, wreckage: &mut h.wreckage, put_back: None, tree: self.tree.as_ref(), curve: &tables.curve };
         let asked = h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
         self.wrecks += u32::from(asked.wreck.is_some());
         if let Some(fraction) = around.put_back {
