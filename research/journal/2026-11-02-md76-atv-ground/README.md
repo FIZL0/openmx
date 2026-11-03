@@ -11,6 +11,10 @@ MD76a2 (`4-search-MD76a2.md`): the quad's wheel-ray search (`ContactCall::Collid
 record equal to the original's bit for bit on 6,001 frames (1,617 contacts on all 120 meshes) and on 136
 frames blended from MD37a's swept-contact rows.
 
+MD86 (`5-contacts-MD86.md`): `quad::Steps` answers `Call::Contacts` over Desert Oasis (`atv_search::Oasis`).
+The original's distributor and search run unhooked, and the quad, the body and the wheels equal the port's on
+763 frames.
+
 `game_sim::atv_ground` ports two SLUS-21104 functions: the ground query the quad's wheel suspension
 asks under each probe end (`atv_ground_query`), and the terrain's cell reader under it
 (`atv_terrain_cell`). It runs over Desert Oasis's map as the game loads it. `tests/atv_ground.rs` runs

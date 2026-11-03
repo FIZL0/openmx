@@ -1832,13 +1832,39 @@ fn curve() -> &'static crate::camera::CurveTable {
 /// order. `ground` is the world's ground query the suspension asks (the probe's end and the wheel's
 /// contact record in, the point on the ground and its normal out; on Desert Oasis,
 /// [`crate::atv_ground::Terrain::ground`]). The stunt start always answers yes, as SLUS-21104's does.
-pub struct Steps<R, G> {
+/// `sweep` (MD86) is the world the distributor's wheel rays are swept over ([`Sweep`]); with none
+/// (`()`), [`Call::Contacts`] goes to `rest`.
+pub struct Steps<R, G, S = ()> {
     pub bike: Bike,
     pub rest: R,
     pub ground: G,
+    pub sweep: S,
 }
 
-impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
+/// **What the quad's wheel rays are swept over** (MD86), for [`Call::Contacts`]: the trigger probe
+/// stood at `frame` (the quad's scene node's world frame), then searched over what is near it. The
+/// probe's hit bit and the record's contacts; `None` for no world, and the call is not answered.
+///
+/// The contacts are to have no owner and no vehicle: what a wheel stands on is
+/// [`Bike::ground`]'s ([`crate::atv_wheel::Ground`]), which a contact does not carry, and nobody is
+/// told it was touched. Desert Oasis's ([`crate::atv_search::Oasis`]) belong to neither.
+pub trait Sweep {
+    fn sweep(&mut self, frame: &crate::ray_probe::Matrix) -> Option<(bool, Vec<Contact>)>;
+}
+
+impl Sweep for () {
+    fn sweep(&mut self, _frame: &crate::ray_probe::Matrix) -> Option<(bool, Vec<Contact>)> {
+        None
+    }
+}
+
+impl<S: Sweep + ?Sized> Sweep for &mut S {
+    fn sweep(&mut self, frame: &crate::ray_probe::Matrix) -> Option<(bool, Vec<Contact>)> {
+        (**self).sweep(frame)
+    }
+}
+
+impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Moto for Steps<R, G, S> {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
         match c {
             Call::InputLimiter(dt) => self.input_limiter(q, dt),
@@ -1938,6 +1964,17 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
                 let Bike { wheels, more, ground, .. } = &mut self.bike;
                 crate::atv_moto::wheel_clear(&mut wheels[i], &mut more[i], &mut ground[i]);
             }
+            Call::Contacts => {
+                // The search's vt +0xc8: the probe's node's world frame
+                // (`atv_node_frame`, the node brought up to date first), the probe stood there.
+                let mut scene = self.bike.parts.scene;
+                scene.update(0);
+                let Some((look, cs)) = self.sweep.sweep(&scene.nodes[0].world) else {
+                    return self.rest.call(c, q, body);
+                };
+                self.bike.parts.scene = scene;
+                self.contacts(q, look, &cs);
+            }
             Call::RevLimit => crate::atv_moto::rev_limit(&self.bike.engine, &mut self.bike.parts.drive, self.bike.parts.driven),
             Call::PeakRates => crate::atv_moto::peak_rates(q, body),
             Call::SpinAir(dt) => {
@@ -1987,7 +2024,28 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
     }
 }
 
-impl<R: Moto, G> Steps<R, G> {
+impl<R: Moto, G, S> Steps<R, G, S> {
+    /// **The contacts spread onto the wheels** (MD86, [`wheel_contacts`] after the sweep): each
+    /// wheel's swept contact (`+0xd4`), point and normal in, and out again with the last rear
+    /// contact's collidable ([`crate::atv_moto::Parts::rear_node`]).
+    fn contacts(&mut self, q: &mut Quad, look: bool, cs: &[Contact]) {
+        let b = &mut self.bike;
+        let mut wc: [crate::chassis::WheelContact; 4] = std::array::from_fn(|i| crate::chassis::WheelContact {
+            point: b.wheels[i].contact_point,
+            normal: q.wheels[i].normal,
+            touching: b.wheels[i].swept_contact,
+            ..Default::default()
+        });
+        let calls = wheel_contacts(&mut wc, &mut b.parts.rear_node, look, cs);
+        debug_assert!(!calls.iter().any(|c| matches!(c, crate::chassis::ContactCall::Notify(..))), "a swept contact with an owner");
+        for (i, c) in wc.iter().enumerate() {
+            debug_assert_eq!((c.owner, c.vehicle), (0, 0), "a swept contact with an owner or a vehicle");
+            let w = &mut b.wheels[i];
+            (w.contact_point, w.contact_normal, w.swept_contact) = (c.point, c.normal, c.touching);
+            q.wheels[i].normal = c.normal;
+        }
+    }
+
     /// The quad's node's box in the world (MD75c): its frame brought up to date, its bounds gathered
     /// again if they are stale, then [`crate::atv_moto::Scene::world_box`].
     fn node_box(&mut self, q: &mut Quad, body: &mut Body) -> (Vf, Vf) {

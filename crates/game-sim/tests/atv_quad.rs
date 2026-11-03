@@ -26,6 +26,10 @@ use std::rc::Rc;
 #[path = "atv_quad/image.rs"]
 mod image;
 
+/// MD86: the contacts swept over Desert Oasis's own world.
+#[path = "atv_quad/oasis.rs"]
+mod oasis;
+
 const OBJ: u32 = 0x01c0_0000;
 const BODY: u32 = 0x01c0_2000;
 const WORLD: u32 = 0x01c0_2400;
@@ -3865,18 +3869,19 @@ fn address_of(c: &Call) -> u32 {
         Call::NodePosition => NODE_POSITION,
         Call::SurfaceDrag(..) => SURFACE_DRAG,
         Call::SpinIntegrate(..) => SPIN_INTEGRATE,
+        Call::Contacts => WHEEL_CONTACTS,
         _ => 0,
     }
 }
 
 /// The port's side: the calls whose addresses are `picks` go to [`quad::Steps`], the rest are listed
 /// where the steps list what they call in turn.
-struct Only<'a, G> {
+struct Only<'a, G, S = ()> {
     picks: &'a [u32],
-    steps: quad::Steps<Vec<Call>, G>,
+    steps: quad::Steps<Vec<Call>, G, S>,
 }
 
-impl<G: FnMut(Vf, &mut u8) -> (Vf, Vf)> quad::Moto for Only<'_, G> {
+impl<G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: quad::Sweep> quad::Moto for Only<'_, G, S> {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
         if self.picks.contains(&address_of(&c)) {
             self.steps.call(c, q, body);
@@ -4091,7 +4096,7 @@ fn each_unhooked_in(
             }
             (if echo_now { q } else { p }, n)
         };
-        let mut m = Only { picks, steps: quad::Steps { bike: u.bike.clone(), rest: Vec::new(), ground } };
+        let mut m = Only { picks, steps: quad::Steps { bike: u.bike.clone(), rest: Vec::new(), ground, sweep: () } };
         match run {
             Listener::Head => quad::ground_head(&u.s.p, &mut u.s.q, &mut u.s.body, u.s.dt, &mut m),
             Listener::Force => quad::ground_step(&u.s.p, &mut u.s.q, &mut u.s.body, u.s.dt, &mut m),

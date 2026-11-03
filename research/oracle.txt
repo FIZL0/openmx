@@ -6814,7 +6814,7 @@ atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into 
 # +0x108 reach, +0x10c/+0x144 child bounds list (read by the gather at vt +0x94 only).
 # Collision sync: quad +0x44 bit 0 (set at the spawn) -> atv_part_sync(+0xcc) unless 0 or == +0xd8, then
 # (+0xd0) if there, then (+0xd8) and atv_gather_nearby(+0xc4, +0xd8, 3) if there. atv_part_sync: part vt +0xc8
-# (atv_search_record_clear for the probe; the frame mesh's is 0x001be760), then atv_part_box_move: with part
+# (atv_search_node_stand for the probe; the frame mesh's is 0x001be760), then atv_part_box_move: with part
 # +0x20 (its database, set for both at the spawn) part vt +0xc4 (the box; probe 0x001bd1d0, mesh 0x001be7b0)
 # and atv_spatial_move(part + 0x18, centre, half, reach part +0x70).
 # atv_spatial_move: a0 entry, a1/a2 centre/half, f12 reach -> atv_spatial_move_in(entry +8, entry, ...): the
@@ -8443,8 +8443,16 @@ atv_normal_table_flag       atv 0x00541518 = the cell reader takes normals from 
 atv_search_clear            atv 0x001bbbc0 = the quad search's vt +0xb0 (clear)
 atv_search_narrow           atv 0x001bbe60 = the quad search's vt +0xb4 (a thunk into atv_ray_probe_pair)
 atv_ray_probe_pair          atv 0x001bc880 = the ray probe against a collidable (MX Unleashed's ray_probe::pair, not compared)
-atv_search_record_clear     atv 0x001bd180 = the quad search's vt +0xc8 (the record cleared)
+atv_search_node_stand       atv 0x001bd180 = the quad search's vt +0xc8: atv_node_frame (0x00194e00) of probe +0x174's node, then vt +0xcc (0x001bcfe0, stand at that frame); not a record clear (MD86)
 atv_search_prepare          atv 0x001bc6e0 = the quad search's vt +0xd0 (prepare)
+# MD86 — the quad's Moto answers ContactCall::Collide (quad::Steps's sweep, atv_search::Oasis; tests/atv_quad/oasis.rs
+# runs atv_quad_wheel_contacts 0x004bd2d0 unhooked off MD37a's atv-r-spawn.ee.bin). The distributor: quad +0x143c = 0,
+# the trigger's vt +0xc8 (atv_search_node_stand: the node brought up to date, its world copied from +0x70, the probe
+# stood there), atv_collide_against_search(trigger, quad +0xc4, 1), the hit bit (+0x126 bit 5), then the record onto
+# the wheels. The gather into +0xc4 is not the distributor's: the PostProcess's collision sync does it round the active
+# probe (+0xd8, 0x0159c500), which is why an image's trigger frame lags its node. A plant's sphere can set the hit bit
+# with no contact (the port does not test plant spheres; nothing reads the bit then). Journal:
+# research/journal/2026-11-02-md76-atv-ground/5-contacts-MD86.md.
 # MD76a1 — MC02's static collision and the quad's gather (crates/game-sim/src/atv_world.rs; tests/atv_gather.rs
 # runs the original's gather off MD37a's atv-r-spawn.ee.bin, gp 0x003dbaf0). Journal:
 # research/journal/2026-11-02-md76-atv-ground/3-collidables-and-gather-MD76a1.md. The gather (a0 list, a1 probe,
