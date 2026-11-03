@@ -152,6 +152,11 @@ fn capture_in(task: &str, name: &str) -> Option<Vec<Row>> {
 
 /// The ride kit off the disc as the shell builds it, and which skeleton node each part is.
 fn ride_kit() -> Option<(Kit, Vec<usize>)> {
+    body_kit().map(|(kit, nodes, _)| (kit, nodes))
+}
+
+/// [`ride_kit`], and the rider's body it was built from (its skeleton names the nodes).
+fn body_kit() -> Option<(Kit, Vec<usize>, game_render::rider::Body)> {
     use game_render::disc::Disc;
     let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
     let names: Vec<String> =
@@ -171,7 +176,7 @@ fn ride_kit() -> Option<(Kit, Vec<usize>)> {
     let model = game_render::psg::Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).expect("its model"))
         .expect("the model parses");
     let doll = body.ragdoll_rig(&model, &rider_file).expect("every part names a node");
-    Some((Kit::new(&rider_file, doll.rig), doll.nodes))
+    Some((Kit::new(&rider_file, doll.rig), doll.nodes, body))
 }
 
 /// A track's terrain off the disc (`Tracks\\<track>.res`): its scene's terrain file, which the
@@ -726,4 +731,130 @@ const AFTER_JOLT: usize = 30;
 fn settle(v: &[f32]) -> (usize, f32) {
     let peak = v.iter().copied().fold(0f32, f32::max);
     (v.iter().rposition(|&x| x > peak / 2.0).unwrap_or(0), peak)
+}
+
+/// Where the whip is all the way out: the body's crossup (its phase lag record's value) within a
+/// hundredth of the sweep's end, as `whip_tricks.rs` reads the port's.
+const FULL_WHIP: f32 = 0.01;
+/// How far the port's riding pelvis may be from the original's through the full whip, in feet.
+/// Measured on C20's capture: 0.002 at worst.
+const WHIP_APART: f32 = 0.01;
+/// The mean over C20's whole stretch, every part and tick, in feet. Measured 0.0137: steadier than
+/// that on the whip itself, but the crossup's sweep in after the take-off (2652..2675) leaves the
+/// pelvis up to 0.044 ft off, where steady riding sits near 0.004 ([`MEAN_AT`]).
+const WHIP_MEAN_AT: f32 = 0.02;
+
+/// `d`, a direction in the world, in `frame`'s axes (its rows are orthonormal to f32).
+fn axes_of(d: [f32; 3], frame: &Mat4) -> [f32; 3] {
+    std::array::from_fn(|r| (0..3).map(|c| d[c] * frame.0[r][c]).sum())
+}
+
+/// From `b`'s position to `a`'s, in the world.
+fn apart(a: &Mat4, b: &Mat4) -> [f32; 3] {
+    std::array::from_fn(|c| a.0[3][c] - b.0[3][c])
+}
+
+fn length(v: [f32; 3]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+/// **C20: the riding body through a full whip**, against the original's. `context/c20/whip-right.txt`
+/// is recording2 on free09 with jump 2's cancan made a full whip: the stick hard right from just
+/// after the take-off to the landing, with no trick held (C20's `make_tape.py`), logged once a tick by
+/// S201's `entry_watch.py`. The crossup is all the way out for 36 ticks before the bike lands crossed
+/// up and wrecks. The rider is S74's thq1 (its end joints' fixed offsets are S74's held tick's), so
+/// S74's skeleton rebuilds the clip's target from the capture's joints.
+///
+/// The port's riding body, carried from the opening's settle on the original's request, step and
+/// clip, keeps its pelvis within [`WHIP_APART`] of the original's on every full-whip tick, and the
+/// stretch stays inside the settled bounds. What the original does there: the clips take the hands
+/// 0.23 and 0.37 ft off the grips, and its body does not slide towards the bars but **rises**: its
+/// pelvis stands about 0.38 ft off the clip's, in the bike's frame (-0.09, +0.35, +0.13) on
+/// average, mostly up (along the bike's own up, while the world's up swings round in that frame as
+/// the bike rolls), and its hands end 0.12 and 0.13 ft off the grips.
+#[test]
+fn a_full_whip_hangs_the_riding_body_as_the_originals() {
+    let Some((kit, nodes, body)) = body_kit() else { return };
+    let Some(rows) = capture_in("c20", "whip-right") else { return };
+    let Some(s74) = capture("free09-ride") else { return };
+    let Some((scene, terrain)) = terrain_bytes("free09") else { return };
+    let terrain = game_sim::track::Terrain::parse(&terrain).expect("free09's terrain parses");
+    let mut ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
+    let skel = Skeleton::read(s74.iter().find(|r| r.mode() == 0).expect("a held tick"));
+    let names = &body.rig.set.skeleton;
+    let pelvis = names.find("Pelvis").expect("a pelvis");
+    let hands = game_render::rider::HAND_ANCHORS.map(|n| names.find(n).expect("a hand anchor"));
+    // The end joints the ragdoll never moves under their parents: S74's offsets if it is S74's rider.
+    for row in &rows {
+        for j in (0..JOINTS).filter(|&j| !nodes.contains(&j)) {
+            let o = (0..3).map(|c| (row.local(j).0[3][c] - skel.offset[j].0[c]).abs()).fold(0.0, f32::max);
+            assert!(o < 1e-3, "frame {}: node {j} hangs {o} ft off S74's: not S74's rider", row.frame);
+        }
+    }
+    let part = nodes.iter().position(|&n| n == pelvis).expect("the pelvis is a part");
+    let mut port: HashMap<u32, Mat4> = HashMap::new();
+    let (mut entry, mut settled) = (Tally::default(), Tally::default());
+    let settle = rows[0].frame + 1 + 30;
+    ride_watched("c20/whip-right", &mut ground, &kit, &nodes, &skel, &rows, 1, settle - ENTRY, &mut entry, &mut settled, &mut |row, p| {
+        port.insert(row.frame, p[part]);
+    });
+    println!("c20/whip-right ({settle}..): {}", settled.line());
+    assert!(settled.worst_at.0 <= NEAR_AT, "a node {} ft from the original's at {}", settled.worst_at.0, settled.worst_at.1);
+    assert!(settled.worst_turn.0 <= NEAR_TURN, "a node turned {} off the original's at {}", settled.worst_turn.0, settled.worst_turn.1);
+    assert!(settled.mean_at() <= WHIP_MEAN_AT, "the nodes are {} ft off the original's on average", settled.mean_at());
+    // The last unbroken run of airborne ticks with the crossup all the way out: the whip (the take-off
+    // tick also reads 0, off the human's steer to the left on the lip, then the whip sweeps it back).
+    let mut full: Vec<&Row> = Vec::new();
+    for r in &rows {
+        if !(r.word("req", 0xf8) != 0 && r.float("lag.phase", 0) < FULL_WHIP && port.contains_key(&r.frame)) {
+            continue;
+        }
+        if full.last().is_some_and(|l| l.frame + 1 != r.frame) {
+            full.clear();
+        }
+        full.push(r);
+    }
+    assert!(full.len() >= 30, "the whip was all the way out for {} ticks", full.len());
+    let (mut theirs_sum, mut ours_sum, mut worst) = ([0f32; 3], [0f32; 3], (0f32, 0u32));
+    let (mut held, mut clip) = ([0f32; 2], [0f32; 2]);
+    for row in &full {
+        let r = row.request();
+        let anim = skel.world(row);
+        let theirs = axes_of(apart(&row.world(pelvis), &anim[pelvis]), &r.frame);
+        let ours = axes_of(apart(&port[&row.frame], &anim[pelvis]), &r.frame);
+        let off = length(std::array::from_fn(|c| theirs[c] - ours[c]));
+        if off > worst.0 {
+            worst = (off, row.frame);
+        }
+        for c in 0..3 {
+            theirs_sum[c] += theirs[c] / full.len() as f32;
+            ours_sum[c] += ours[c] / full.len() as f32;
+        }
+        for i in 0..2 {
+            let to = |m: &Mat4| length(std::array::from_fn(|c| m.0[3][c] - r.hands[i].0[c]));
+            held[i] = held[i].max(to(&row.world(hands[i])));
+            clip[i] = clip[i].max(to(&anim[hands[i]]));
+        }
+    }
+    let round = |v: [f32; 3]| v.map(|x| (x * 1000.0).round() / 1000.0);
+    println!(
+        "the full whip {}..={} ({} ticks): the original's pelvis {:?} ({:.3} ft) off the clip's on average in the bike's frame, the port's {:?}, \
+         at worst {:.4} ft apart at {}; the original's hands at most {:.3} {:.3} ft off the grips, the clip's {:.3} {:.3}",
+        full[0].frame,
+        full[full.len() - 1].frame,
+        full.len(),
+        round(theirs_sum),
+        length(theirs_sum),
+        round(ours_sum),
+        worst.0,
+        worst.1,
+        held[0],
+        held[1],
+        clip[0],
+        clip[1]
+    );
+    assert!(worst.0 <= WHIP_APART, "the port's riding pelvis is {:.4} ft from the original's at {}", worst.0, worst.1);
+    // What the original's body does there, which `whip_tricks.rs` holds the port's own whip to.
+    assert!(clip.iter().any(|&c| c > 0.3), "the clips no longer take a hand off its grip: {clip:?}");
+    assert!(length(theirs_sum) > 0.3 && theirs_sum[1] > 2.0 * theirs_sum[0].abs().max(theirs_sum[2].abs()), "the original's body leans {theirs_sum:?}");
 }
